@@ -327,7 +327,21 @@ pub const ROUTES: &[RouteAccess] = &[
         "/api/v1/namespaces/{ns}/restores/{name}",
         ns(&[Action::ReadRestores]),
     ),
+    // PLAT-19.2: a governed approver's countersignature. The handler keeps
+    // its own role check (it decides by the frozen policy's mode as well).
+    route(
+        "POST",
+        "/api/v1/namespaces/{ns}/restores/{name}/approval",
+        ns(&[Action::SubmitApproval]),
+    ),
     // -------------------------------------------------------- approvals
+    // PLAT-19.2: the namespace's approval-policy binding, as the console
+    // routes a submission by it. The handler keeps its own role check.
+    route(
+        "GET",
+        "/api/v1/namespaces/{ns}/approval-policy",
+        ns(&[Action::ReadApprovals]),
+    ),
     route(
         "GET",
         "/api/v1/namespaces/{ns}/approvals",

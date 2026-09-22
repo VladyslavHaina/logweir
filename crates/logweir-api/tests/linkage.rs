@@ -131,20 +131,28 @@ fn reaches(graph: &BTreeMap<String, BTreeSet<String>>, root: &str) -> BTreeSet<S
 }
 
 #[test]
-fn the_api_links_the_crds_and_the_verifier_and_never_the_signer_or_the_engine() {
+fn the_api_links_the_crds_the_verifier_and_the_console_signer_and_never_the_engine() {
     let graph = workspace_graph();
     let reach = reaches(&graph, "logweir-api");
-    for required in ["weirkeeper", "logweir-core", "logweir-verify"] {
+    // PLAT-19.2: `logweir-evidence` is REQUIRED now — the console signs its
+    // own ConsoleConfirmation documents (D0), through the shared signer. The
+    // engine wrapper and the broker client stay forbidden.
+    for required in [
+        "weirkeeper",
+        "logweir-core",
+        "logweir-verify",
+        "logweir-evidence",
+    ] {
         assert!(
             reach.contains(required),
             "logweir-api must reach {required}; it reaches {reach:?}"
         );
     }
-    for forbidden in ["logweir-evidence", "logweir-engine-oso", "logweir-kafka"] {
+    for forbidden in ["logweir-engine-oso", "logweir-kafka"] {
         assert!(
             !reach.contains(forbidden),
-            "logweir-api must NOT reach {forbidden} (the signing half, the engine wrapper and the \
-             broker client); it reaches {reach:?}"
+            "logweir-api must NOT reach {forbidden} (the engine wrapper and the broker client); \
+             it reaches {reach:?}"
         );
     }
     // Nothing depends on this crate: it is a leaf binary.
@@ -175,9 +183,11 @@ fn the_signer_gate_lists_this_crate_where_the_graph_puts_it() {
     // it is on those two allowlists...
     assert!(value("ALLOWED_VERIFY_LINK").contains(&"logweir-api"));
     assert!(value("ALLOWED_PRIMITIVE").contains(&"logweir-api"));
-    // ...and on neither signing allowlist.
-    assert!(!value("ALLOWED_LINK").contains(&"logweir-api"));
-    assert!(!value("ALLOWED_SOURCE").contains(&"logweir-api"));
+    // ...and, since PLAT-19.2, on both signing allowlists: it signs console
+    // confirmations with its own ConsoleConfirmation key (D0), for the reason
+    // recorded above `ALLOWED_LINK` in the script.
+    assert!(value("ALLOWED_LINK").contains(&"logweir-api"));
+    assert!(value("ALLOWED_SOURCE").contains(&"logweir-api"));
 }
 
 fn sources() -> Vec<(PathBuf, String)> {
@@ -626,12 +636,15 @@ fn the_manifest_pins_the_one_new_dependency() {
         .map(str::trim)
         .filter(|l| !l.starts_with('#') && l.contains('='))
         .collect();
-    for forbidden in ["logweir-evidence", "logweir-engine-oso", "logweir-kafka"] {
+    for forbidden in ["logweir-engine-oso", "logweir-kafka"] {
         assert!(
             !entries.iter().any(|l| l.starts_with(forbidden)),
             "{forbidden} must not be a dependency of this crate"
         );
     }
+    // PLAT-19.2: the console-confirmation signer, by path, with its reason.
+    assert!(manifest.contains(r#"logweir-evidence = { path = "../logweir-evidence" }"#));
+    assert!(manifest.contains("PLAT-19.2 — THE CONSOLE CONFIRMATION SIGNER"));
 
     // THE TRANSPORT-LIMIT DEPENDENCIES ADD NO PACKAGE (review finding R4). The
     // accept loop in `src/main.rs` needs hyper's http1 builder, which

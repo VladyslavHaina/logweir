@@ -95,6 +95,10 @@ pub struct Settings {
     /// The Kubernetes identity this process writes as, recorded on every
     /// created object and in every audit line (`kubernetes.principal`).
     pub kubernetes_principal: String,
+    /// PLAT-19.2: the installation's approval policies and the console's
+    /// confirmation key. `Default` is every namespace on `legacy-governed-v1`
+    /// and no key.
+    pub approval: Arc<crate::approval::ApprovalSettings>,
 }
 
 struct Inner {
@@ -181,6 +185,12 @@ impl AppState {
     #[must_use]
     pub fn kubernetes_principal(&self) -> &str {
         &self.inner.settings.kubernetes_principal
+    }
+
+    /// PLAT-19.2: the approval policies and the confirmation key.
+    #[must_use]
+    pub fn approval(&self) -> &crate::approval::ApprovalSettings {
+        &self.inner.settings.approval
     }
 
     /// Readiness, cached for [`READINESS_CACHE`]: Kubernetes answers for this
@@ -301,6 +311,14 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/namespaces/{ns}/restores/{name}",
             get(restores::get_one),
+        )
+        .route(
+            "/api/v1/namespaces/{ns}/restores/{name}/approval",
+            axum::routing::post(restores::submit_approval),
+        )
+        .route(
+            "/api/v1/namespaces/{ns}/approval-policy",
+            get(approvals::policy),
         )
         .route("/api/v1/namespaces/{ns}/approvals", get(approvals::list))
         .route(

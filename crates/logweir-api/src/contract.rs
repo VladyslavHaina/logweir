@@ -1255,8 +1255,29 @@ pub struct Approval {
     /// The exact verified subject.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verified_subject: Option<VerifiedSubjectView>,
+    /// PLAT-19.2: the policy, mode and console-attested requester a v2
+    /// authorization was VERIFIED under. Absent for a v1 approval and for
+    /// anything not (or no longer) verified.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authorization: Option<ApprovalAuthorizationView>,
     /// The status conditions, at most 16.
     pub conditions: Vec<ConditionView>,
+}
+
+/// PLAT-19.2: `Approval.status.authorization`, as the console renders it.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalAuthorizationView {
+    /// `Governed` or `Ordinary`.
+    pub mode: String,
+    /// The policy name.
+    pub policy_name: String,
+    /// The policy snapshot digest.
+    pub policy_digest: String,
+    /// The console-attested requester, `<issuer>#<subject>`.
+    pub requester: String,
+    /// The console key that attested it.
+    pub confirmation_key_id: String,
 }
 
 /// `GET .../approvals/{name}/packet`: the raw documents, verbatim.
@@ -3262,8 +3283,157 @@ envelopes! {
     Connection => ConnectionList, ConnectionResponse;
     Schedule => ScheduleList, ScheduleResponse;
     Backup => BackupList, BackupResponse;
-    Restore => RestoreList, RestoreResponse;
     Approval => ApprovalList, ApprovalResponse;
+}
+
+/// A page of `Restore` items.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreList {
+    /// The request ID.
+    pub request_id: String,
+    /// The items on this page.
+    pub items: Vec<Restore>,
+    /// Paging.
+    pub page: Page,
+}
+
+/// One `Restore`.
+///
+/// `authorization` is PLAT-19.2's routing answer and is present exactly on a
+/// create (and its replay): what the Restore needs next under the namespace's
+/// frozen approval policy. A single read carries none — the operation view and
+/// the Approval are the durable state, and this is the answer to one request.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreResponse {
+    /// The request ID.
+    pub request_id: String,
+    /// On a durable create: whether this response replays an earlier
+    /// identical request (HTTP 200) rather than creating (HTTP 201).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replayed: Option<bool>,
+    /// The item.
+    pub item: Restore,
+    /// PLAT-19.2: on a create, where the submission goes next.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authorization: Option<RestoreAuthorizationView>,
+}
+
+// ======================================================================
+// PLAT-19.2 — approval policy
+// ======================================================================
+
+/// The two approval modes, as the API spells them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum ApprovalModeView {
+    /// A console-attested requester plus an independent approver.
+    Governed,
+    /// The console's confirmation of an authorised operator is the whole
+    /// authorization.
+    Ordinary,
+}
+
+impl From<logweir_core::approval_policy::ApprovalMode> for ApprovalModeView {
+    fn from(mode: logweir_core::approval_policy::ApprovalMode) -> Self {
+        match mode {
+            logweir_core::approval_policy::ApprovalMode::Governed => Self::Governed,
+            logweir_core::approval_policy::ApprovalMode::Ordinary => Self::Ordinary,
+        }
+    }
+}
+
+/// Where a submitted Restore goes next.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum AuthorizationState {
+    /// The console confirmed it under an Ordinary policy; the controller
+    /// admits it once it verifies the confirmation. Route to execution.
+    Confirmed,
+    /// A governed approval is required. Route to Awaiting approval.
+    AwaitingApproval,
+}
+
+/// PLAT-19.2: the frozen policy decision for one submitted Restore.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreAuthorizationView {
+    /// The mode the namespace's binding requires.
+    pub mode: ApprovalModeView,
+    /// The policy name — `legacy-governed-v1` for an unbound namespace.
+    pub policy: String,
+    /// The policy snapshot digest the console signed; absent for the legacy
+    /// synthesis, which accepts only today's v1 approval document.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_digest: Option<String>,
+    /// `true` for an unbound namespace (today's governed behaviour).
+    pub legacy: bool,
+    /// Where the submission goes next.
+    pub state: AuthorizationState,
+    /// The Approval the Restore references (`spec.approvalRef.name`).
+    pub approval_name: String,
+    /// Governed (bound): the console's confirmation object an approver
+    /// countersigns, `<approvalName>-confirmation`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confirmation_name: Option<String>,
+    /// The console-attested requester, `<issuer>#<subject>`, when the console
+    /// signed anything.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requester: Option<String>,
+    /// When the signed document stops authorising anything new.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+/// PLAT-19.2: a namespace's effective approval policy.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalPolicyView {
+    /// The namespace asked about.
+    pub namespace: String,
+    /// The policy name — `legacy-governed-v1` when the namespace is unbound.
+    pub name: String,
+    /// Its mode.
+    pub mode: ApprovalModeView,
+    /// `true` when the namespace is unbound.
+    pub legacy: bool,
+    /// The policy's `maxAgeSeconds`; absent for the legacy synthesis.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_age_seconds: Option<i64>,
+    /// Whether an approver must be a different principal from the requester.
+    pub require_distinct_principal: bool,
+    /// The snapshot digest a signed document must name; absent for legacy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
+    /// The digest of the whole installation document, which the controller
+    /// logs at startup too: equal values mean both run the same policies.
+    pub installation_digest: String,
+    /// The console's `ConsoleConfirmation` key id, when configured — the id an
+    /// administrator must put on this namespace's `TrustPolicy`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confirmation_key_id: Option<String>,
+}
+
+/// `GET .../approval-policy`.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalPolicyResponse {
+    /// The request ID.
+    pub request_id: String,
+    /// The effective policy.
+    pub item: ApprovalPolicyView,
+}
+
+/// `POST .../restores/{name}/approval` — a governed approver's countersigned
+/// sidecar over the console's confirmation document.
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SubmitApprovalRequest {
+    /// The DSSE sidecar `logweir drill countersign` wrote: the console's
+    /// signature(s) and the approver's, over the confirmation's exact
+    /// document bytes. At most 64 KiB.
+    pub sidecar_bytes: String,
 }
 
 /// `GET .../operations/{kind}/{name}`.

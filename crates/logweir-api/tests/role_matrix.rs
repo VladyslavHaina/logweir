@@ -1223,17 +1223,25 @@ async fn governed_approval_needs_an_approver_binding_and_a_different_principal()
     ));
 }
 
-/// **No route serves the approver-only submission yet, and the capability says
-/// so rather than the route returning a fake success.**
+/// **PLAT-19.2: governed approval submission HAS a route, and it is the
+/// approver's.** Before PLAT-19.2 this row pinned the route as absent; it now
+/// pins the opposite and the role gate: the route exists (it answers the
+/// approver with the route's own verdict — here `not_found`, the Restore does
+/// not exist — never 404-no-route or 405), a viewer or operator is `forbidden`
+/// by the role table before any lookup, and the approver's session advertises
+/// `approvalSubmit`. The old stub-shaped paths stay absent.
 #[tokio::test]
-async fn the_governed_approval_route_is_absent_not_stubbed() {
+async fn the_governed_approval_route_is_the_approvers_and_nothing_else_is_stubbed() {
     let app = SharedApp::new(
         seeded(),
         support::idp::MockIdp::new(ISSUER, &[]),
         SharedOptions {
             bindings: support::RoleBindings {
                 revision: "r".into(),
-                bindings: vec![support::binding(Role::Approver, NS_A, &["lw-a-approvers"])],
+                bindings: vec![
+                    support::binding(Role::Approver, NS_A, &["lw-a-approvers"]),
+                    support::binding(Role::Operator, NS_A, &["lw-a-operators"]),
+                ],
             },
             ..SharedOptions::default()
         },
@@ -1261,10 +1269,33 @@ async fn the_governed_approval_route_is_absent_not_stubbed() {
             response.status
         );
     }
+    let submit = "/api/v1/namespaces/team-a/restores/no-such-restore/approval";
+    let body = r#"{"sidecarBytes":"{\"payloadType\":\"x\",\"signatures\":[]}"}"#;
+    let approver = app.post(submit, &cookie, Some(&csrf), None, body).await;
+    assert_eq!(
+        (approver.status.as_u16(), approver.code().as_str()),
+        (404, "not_found"),
+        "the route exists and reached its own lookup: {}",
+        String::from_utf8_lossy(&approver.body)
+    );
+    let operator_cookie = app.session_cookie("u-operator", &["lw-a-operators"]);
+    let operator_csrf = app.csrf_for("u-operator");
+    let operator = app
+        .post(submit, &operator_cookie, Some(&operator_csrf), None, body)
+        .await;
+    assert_eq!(
+        (operator.status.as_u16(), operator.code().as_str()),
+        (403, "forbidden"),
+        "an operator never submits a governed approval"
+    );
     let session = app.get("/api/v1/session", &cookie).await.json();
-    assert_eq!(session["capabilities"]["approvalSubmit"], false);
     assert_eq!(
         session["namespaces"][0]["capabilities"]["approvalSubmit"],
+        true
+    );
+    let operator_session = app.get("/api/v1/session", &operator_cookie).await.json();
+    assert_eq!(
+        operator_session["namespaces"][0]["capabilities"]["approvalSubmit"],
         false
     );
 }

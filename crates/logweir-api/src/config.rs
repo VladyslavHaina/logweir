@@ -73,6 +73,14 @@ struct ConfigFile {
     cursor_key_file: Option<PathBuf>,
     #[serde(default)]
     cursor_key: Option<KeyRefFile>,
+    /// PLAT-19.2: the installation's approval-policy document — the SAME
+    /// file the controller reads (`LOGWEIR_APPROVAL_POLICY_FILE`).
+    #[serde(default)]
+    approval_policy_file: Option<PathBuf>,
+    /// PLAT-19.2: the console's `ConsoleConfirmation` private key, PKCS#8
+    /// PEM, from a mounted Secret.
+    #[serde(default)]
+    confirmation_key_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -298,6 +306,11 @@ pub struct Config {
     /// `inCluster` or `kubeconfig-context:<context>`, which name WHERE the
     /// identity comes from without claiming to know it.
     pub kubernetes_principal: String,
+    /// PLAT-19.2: the approval-policy document, when one is configured.
+    /// Absent is every namespace on `legacy-governed-v1`.
+    pub approval_policy_file: Option<PathBuf>,
+    /// PLAT-19.2: the console confirmation key file, when one is configured.
+    pub confirmation_key_file: Option<PathBuf>,
 }
 
 impl Config {
@@ -550,6 +563,8 @@ impl Config {
             kubernetes,
             cursor_key: CursorKeySource::RawFile(resolve(base, &cursor_key_file)),
             kubernetes_principal: String::new(),
+            approval_policy_file: file.approval_policy_file.map(|p| resolve(base, &p)),
+            confirmation_key_file: file.confirmation_key_file.map(|p| resolve(base, &p)),
         })
     }
 
@@ -741,6 +756,8 @@ impl Config {
                 expected_version: cursor_key.expected_version,
             }),
             kubernetes_principal: String::new(),
+            approval_policy_file: file.approval_policy_file.map(|p| resolve(base, &p)),
+            confirmation_key_file: file.confirmation_key_file.map(|p| resolve(base, &p)),
         })
     }
 }

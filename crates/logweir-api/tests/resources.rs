@@ -892,12 +892,13 @@ async fn session_and_namespaces_come_from_configuration_only() {
         "retention",
         "trustPoliciesRead",
         "operationEvents",
+        // PLAT-19.2: `POST .../restores/{name}/approval` has a route.
+        "approvalSubmit",
     ] {
         assert_eq!(caps[enabled], true, "{enabled}");
     }
     for disabled in [
         "connectionTest",
-        "approvalSubmit",
         // D3 §10 and §5.3 name these two surfaces and deliberately do not
         // serve them in v1. They are `false` for the LOCAL ADMINISTRATOR, who
         // holds every action there is, which is what makes them absent

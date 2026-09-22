@@ -477,6 +477,15 @@ pub fn approval(object: &ApprovalCr) -> Approval {
                 namespace: v.namespace.clone(),
                 uid: v.uid.clone(),
             }),
+        authorization: status.and_then(|s| s.authorization.as_ref()).map(|a| {
+            crate::contract::ApprovalAuthorizationView {
+                mode: a.mode.clone(),
+                policy_name: a.policy_name.clone(),
+                policy_digest: a.policy_digest.clone(),
+                requester: a.requester.clone(),
+                confirmation_key_id: a.confirmation_key_id.clone(),
+            }
+        }),
         conditions: status
             .and_then(|s| s.conditions.as_ref())
             .map(|cs| cs.iter().take(MAX_CONDITIONS).map(condition_view).collect())

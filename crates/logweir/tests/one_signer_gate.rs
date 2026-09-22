@@ -333,7 +333,9 @@ fn one_signer_script_detects_a_direct_primitive_dependency() {
     // failing, the probe has begun reaching the signer and this test would be
     // proving check 1 rather than check 2.
     assert!(
-        stdout.contains("ok: the crates reaching logweir-evidence are exactly {e2e,logweir}"),
+        stdout.contains(
+            "ok: the crates reaching logweir-evidence are exactly {e2e,logweir,logweir-api}"
+        ),
         "check 1 must stay green for this probe — otherwise this test no longer isolates \
          check 2; stdout was:\n{stdout}"
     );
@@ -432,11 +434,18 @@ fn primitive_dependencies_have_an_explicit_allowlist() {
 fn signing_and_verification_have_separate_allowed_consumers() {
     let src = one_signer_source();
     for (name, expected) in [
-        ("ALLOWED_LINK", vec!["e2e", "logweir"]),
-        ("ALLOWED_SOURCE", vec!["e2e", "logweir", "logweir-evidence"]),
+        // PLAT-19.2: `logweir-api` signs console confirmations (D0) with its
+        // own `ConsoleConfirmation` key through the shared signer; the reason
+        // is recorded above `ALLOWED_LINK` in scripts/check-one-signer.sh. A
+        // FOURTH name on either list is the mutant this row kills.
+        ("ALLOWED_LINK", vec!["e2e", "logweir", "logweir-api"]),
+        (
+            "ALLOWED_SOURCE",
+            vec!["e2e", "logweir", "logweir-api", "logweir-evidence"],
+        ),
         (
             // `logweir-api` links `weirkeeper`, which links the verifying
-            // crate. It is on NEITHER signing allowlist above.
+            // crate.
             "ALLOWED_VERIFY_LINK",
             vec![
                 "e2e",

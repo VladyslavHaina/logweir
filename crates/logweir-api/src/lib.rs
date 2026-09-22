@@ -45,6 +45,7 @@
 
 pub mod access;
 pub mod app;
+pub mod approval;
 pub mod assets;
 pub mod audit;
 pub mod auth;
@@ -81,6 +82,10 @@ pub struct Preflight {
     pub assets: assets::StaticAssets,
     /// Shared mode's key material.
     pub shared: Option<SharedPreflight>,
+    /// PLAT-19.2: the approval-policy document and the console confirmation
+    /// key. A served namespace bound to an explicit policy without a key is a
+    /// refusal here.
+    pub approval: approval::ApprovalSettings,
 }
 
 /// The session key and client secret of shared mode.
@@ -135,10 +140,16 @@ pub fn preflight(config: &config::Config) -> Result<Preflight, String> {
             })
         }
     };
+    let approval = approval::ApprovalSettings::load(
+        config.approval_policy_file.as_deref(),
+        config.confirmation_key_file.as_deref(),
+        &config.namespaces,
+    )?;
     Ok(Preflight {
         cursor_key,
         assets: assets::StaticAssets::load(&config.ui_directory)?,
         shared,
+        approval,
     })
 }
 
@@ -229,5 +240,6 @@ pub fn state_from_parts(
         readiness_namespace: config.namespaces[0].clone(),
         shared,
         kubernetes_principal: config.kubernetes_principal.clone(),
+        approval: Arc::new(preflight.approval),
     }))
 }

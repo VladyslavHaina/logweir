@@ -1054,6 +1054,9 @@ pub struct Options {
     pub allowed_hosts: Vec<String>,
     pub shared: Option<Arc<SharedMode>>,
     pub kubernetes_principal: String,
+    /// PLAT-19.2: the approval policies and the console key. Default: none —
+    /// every namespace on `legacy-governed-v1`.
+    pub approval: Arc<logweir_api::approval::ApprovalSettings>,
 }
 
 impl Default for Options {
@@ -1073,6 +1076,7 @@ impl Default for Options {
             ],
             shared: None,
             kubernetes_principal: KUBERNETES_PRINCIPAL.to_string(),
+            approval: Arc::default(),
         }
     }
 }
@@ -1268,6 +1272,7 @@ pub fn app_state(fake: &FakeKube, options: Options, clock: &Arc<TestClock>) -> A
         readiness_namespace: options.namespaces[0].clone(),
         shared: options.shared.clone(),
         kubernetes_principal: options.kubernetes_principal.clone(),
+        approval: options.approval.clone(),
     })
 }
 
@@ -1641,6 +1646,8 @@ pub struct SharedOptions {
     pub login_limiter: Option<RateLimiter>,
     /// `requireTrustedProxy`.
     pub require_trusted_proxy: bool,
+    /// PLAT-19.2: the approval policies and the console key.
+    pub approval: Arc<logweir_api::approval::ApprovalSettings>,
 }
 
 impl Default for SharedOptions {
@@ -1654,6 +1661,7 @@ impl Default for SharedOptions {
             trusted_proxy_cidrs: Vec::new(),
             login_limiter: None,
             require_trusted_proxy: false,
+            approval: Arc::default(),
         }
     }
 }
@@ -1755,6 +1763,7 @@ impl SharedApp {
                 public_origin: SHARED_ORIGIN.to_string(),
                 allowed_hosts: vec![SHARED_HOST.to_string()],
                 shared: Some(shared),
+                approval: options.approval.clone(),
                 ..Options::default()
             },
             clock,

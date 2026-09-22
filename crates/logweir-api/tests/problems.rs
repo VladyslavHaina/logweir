@@ -19,12 +19,13 @@ use support::{FakeKube, Fault, Options, TestApp, HOST, NS_A, ORIGIN};
 /// Codes observed end to end in this file, checked against the full list at
 /// the end so a new code cannot be added without a producing test or an
 /// explicit reservation.
-const RESERVED_FOR_LATER_STAGES: [ProblemCode; 4] = [
+const RESERVED_FOR_LATER_STAGES: [ProblemCode; 3] = [
     // PLAT-17.2 session authenticator.
     ProblemCode::SessionExpired,
-    // PLAT-19.2 approval policy.
+    // PLAT-19.2 approval policy: `policy_mismatch` is now produced
+    // (approval_policy::a_submission_outside_a_governed_binding_is_policy_mismatch);
+    // `approval_required` stays reserved.
     ProblemCode::ApprovalRequired,
-    ProblemCode::PolicyMismatch,
     // D2 §3.12 step 4: refusing a REPLACEMENT schedule whose destination's
     // locationDigest differs from the legacy one. The replacement is created
     // through `POST .../schedules`, which does not accept a destinationRef
@@ -494,6 +495,8 @@ fn every_code_is_produced_or_reserved() {
         "result_integrity_failed", // topic_discoveries::a_chunk_that_fails_its_integrity_check_refuses_the_page
         // D1 W6.
         "policy_changed", // manual_backups::an_expected_generation_that_moved_is_policy_changed
+        // PLAT-19.2.
+        "policy_mismatch", // approval_policy::a_submission_outside_a_governed_binding_is_policy_mismatch
     ]
     .into_iter()
     .collect();

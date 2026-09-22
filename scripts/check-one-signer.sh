@@ -122,9 +122,23 @@ fail=0
 
 SIGNER="logweir-evidence"
 # Crates permitted to LINK the signer (any dependency kind).
-ALLOWED_LINK="logweir e2e"
-# Crates permitted to NAME the signing API in source.
-ALLOWED_SOURCE="logweir-evidence logweir e2e"
+#
+# THE THIRD NAME IS `logweir-api`, ADDED BY PLAT-19.2, AND IT IS RECORDED HERE
+# RATHER THAN SLIPPED IN. Decision D0 ("Ordinary versus governed approval
+# contract") makes the console sign an authorization document v2 with its OWN
+# `ConsoleConfirmation` key, attesting the requester it authenticated. It signs
+# through the one signing implementation the runner uses — `sign_detached` —
+# rather than a second one hand-written over `ring`, so every verifier reads the
+# same bytes. What this does NOT grant is EVIDENCE signing: a
+# `ConsoleConfirmation` key is refused as an evidence signer by every verifier
+# (D3 §7.3, `weirkeeper::verification`), the TrustPolicy CEL rule G8 gives each
+# key exactly one usage, and the console never holds the evidence key (its
+# ServiceAccount has no Secret `get`). `crates/logweir-api/tests/linkage.rs` and
+# `crates/logweir/tests/one_signer_gate.rs` pin exactly these three names.
+ALLOWED_LINK="logweir e2e logweir-api"
+# Crates permitted to NAME the signing API in source. `logweir-api` for the
+# reason above: `src/approval.rs` is its one caller of `sign_detached`.
+ALLOWED_SOURCE="logweir-evidence logweir e2e logweir-api"
 # Crates permitted to reach a signing PRIMITIVE over normal edges only. This is
 # the same claim as ALLOWED_LINK seen from the other end of a narrower walk:
 # `e2e` is absent because its edge is a dev-dependency and `-e normal` drops it.
@@ -139,12 +153,12 @@ ALLOWED_SOURCE="logweir-evidence logweir e2e"
 # RATHER THAN SLIPPED IN. The product API links `weirkeeper` for the six CRD
 # Rust types, the cron parser and the two green-badge rules — so that the API
 # and the controller cannot disagree about what "verified" means — and through
-# that edge it reaches `logweir-verify` and therefore both primitive crates. It
-# reaches NO signing API: `ALLOWED_LINK` and `ALLOWED_SOURCE` below are
-# unchanged and name neither it nor `weirkeeper`, and
-# `crates/logweir-api/tests/linkage.rs` asserts from `cargo metadata` that the
-# crate reaches `weirkeeper`, `logweir-core` and `logweir-verify` and never
-# `logweir-evidence`, `logweir-engine-oso` or `logweir-kafka`.
+# that edge it reaches `logweir-verify` and therefore both primitive crates.
+# (PLAT-19.2 later put it on `ALLOWED_LINK`/`ALLOWED_SOURCE` too, for the
+# console confirmation signer recorded above them; `weirkeeper` is still on
+# neither.) `crates/logweir-api/tests/linkage.rs` asserts from `cargo metadata`
+# that the crate reaches `weirkeeper`, `logweir-core`, `logweir-verify` and
+# `logweir-evidence` and never `logweir-engine-oso` or `logweir-kafka`.
 # `crates/logweir/tests/one_signer_gate.rs` holds this list to exactly these
 # five names, so a sixth is the mutant that test exists to kill.
 ALLOWED_PRIMITIVE="logweir-evidence logweir logweir-verify weirkeeper logweir-api"

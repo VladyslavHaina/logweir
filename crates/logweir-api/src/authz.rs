@@ -100,7 +100,8 @@ pub enum Action {
     ReadApprovals,
     /// Read raw approval and sidecar bytes through the explicit packet route.
     ReadApprovalPacket,
-    /// Submit an approval (PLAT-19.2). Not implemented.
+    /// Submit a governed approver's countersignature (PLAT-19.2,
+    /// `POST .../restores/{name}/approval`).
     SubmitApproval,
     /// Read the normalized operation status.
     ReadOperations,
@@ -173,7 +174,7 @@ impl Action {
     /// here has NO route: no stub, no 501.
     #[must_use]
     pub const fn implemented(self) -> bool {
-        !matches!(self, Action::TestConnection | Action::SubmitApproval)
+        !matches!(self, Action::TestConnection)
     }
 }
 
@@ -784,7 +785,8 @@ pub struct Capabilities {
     pub approvals_read: bool,
     /// `GET .../approvals/{name}/packet`.
     pub approval_packet_read: bool,
-    /// Approval submission (PLAT-19.2): no route.
+    /// Governed approval submission (PLAT-19.2),
+    /// `POST .../restores/{name}/approval`.
     pub approval_submit: bool,
     /// `GET .../operations/{kind}/{name}`.
     pub operations_read: bool,
@@ -931,9 +933,9 @@ mod tests {
     #[test]
     fn the_namespace_is_checked_before_the_action() {
         let z = LocalAdminAuthorizer::new(vec!["team-a".into()]);
-        let err = authorize(&z, &actor(), "team-b", Action::SubmitApproval).unwrap_err();
+        let err = authorize(&z, &actor(), "team-b", Action::TestConnection).unwrap_err();
         assert_eq!(err.code, ProblemCode::NamespaceForbidden);
-        let err = authorize(&z, &actor(), "team-a", Action::SubmitApproval).unwrap_err();
+        let err = authorize(&z, &actor(), "team-a", Action::TestConnection).unwrap_err();
         assert_eq!(err.code, ProblemCode::Forbidden);
         assert!(authorize(&z, &actor(), "team-a", Action::CreateSchedule).is_ok());
         assert!(authorize(&z, &actor(), "team-a", Action::EditSchedulePolicy).is_ok());
@@ -953,7 +955,10 @@ mod tests {
         assert!(c.catalog_connect && c.operation_events);
         // localAdmin holds every action, so the cluster-scoped read is on too.
         assert!(c.trust_policies_read);
-        assert!(!c.approval_submit && !c.connection_test);
+        // PLAT-19.2: governed approval submission has a route now; the local
+        // administrator holds the action — and is still refused its OWN
+        // requests by the separation-of-duties check in the route.
+        assert!(c.approval_submit && !c.connection_test);
         // TWO FLAGS WITH NO ACTION BEHIND THEM, AND THEY STAY `false` FOR
         // EVERYONE — including the local administrator, who holds every action
         // there is. `trustAdministration` and `catalogWindowQuery` name

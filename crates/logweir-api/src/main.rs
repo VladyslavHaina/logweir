@@ -118,6 +118,14 @@ async fn run(config: logweir_api::config::Config, preflight: logweir_api::Prefli
         role_bindings = config.shared().map_or(0, |s| s.roles.bindings.len()),
         binding_revision = config.shared().map_or("", |s| s.roles.revision.as_str()),
         issuer = config.shared().map_or("", |s| s.oidc.issuer.as_str()),
+        // PLAT-19.2 readiness (D0: "API and controller consume the same content
+        // hash and expose it"): the controller logs the same digest at start.
+        approval_policy_digest = %state.approval().policies.digest(),
+        confirmation_key_id = state
+            .approval()
+            .confirmation
+            .as_ref()
+            .map_or("", |k| k.key_id()),
         "logweir-api started"
     );
     serve(listener, logweir_api::app::router(state)).await

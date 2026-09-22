@@ -1601,6 +1601,167 @@
         ]
       }
     },
+    "/api/v1/namespaces/{ns}/restores/{name}/approval": {
+      "post": {
+        "operationId": "submitGovernedApproval",
+        "summary": "PLAT-19.2: a governed approver submits the sidecar `logweir drill countersign` wrote over the console's confirmation of this Restore. Only in a namespace bound to a Governed policy; the submitting principal must not be the console-attested requester (403, whatever the role); the confirmation must still name this Restore's UID, plan hash and the current policy digest and must not have expired. Creates the Approval `spec.approvalRef` names from the confirmation's exact document bytes and the console's signatures plus the approver's; the controller re-verifies everything before any Job. A replay of the same submission returns 200 with the same object. Idempotency-Key is not used: the name is the Restore's own approvalRef.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "The object name.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "description": "Must equal the configured public origin exactly.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubmitApprovalRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The Approval was created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalResponse"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "An identical Approval already exists (a replay).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "forbidden",
+          "header_not_allowed",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "not_found",
+          "origin_mismatch",
+          "payload_too_large",
+          "policy_mismatch",
+          "rate_limited",
+          "session_expired",
+          "state_conflict",
+          "unauthenticated",
+          "unsupported_media_type",
+          "upstream_timeout",
+          "validation_failed"
+        ]
+      }
+    },
+    "/api/v1/namespaces/{ns}/approval-policy": {
+      "get": {
+        "operationId": "getApprovalPolicy",
+        "summary": "PLAT-19.2: the namespace's effective approval policy — its binding, mode, maxAgeSeconds, snapshot digest, the installation document's digest the controller also logs, and the console confirmation key id to put on the namespace's TrustPolicy.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "The object name.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The object.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalPolicyResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "forbidden",
+          "header_not_allowed",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "not_found",
+          "rate_limited",
+          "session_expired",
+          "unauthenticated",
+          "upstream_timeout"
+        ]
+      }
+    },
     "/api/v1/namespaces/{ns}/approvals": {
       "get": {
         "operationId": "listApprovals",
@@ -4804,6 +4965,11 @@
             "type": "string",
             "nullable": true
           },
+          "authorization": {
+            "description": "PLAT-19.2: the policy, mode and console-attested requester a v2 authorization was VERIFIED under. Absent for a v1 approval and for anything not (or no longer) verified.",
+            "$ref": "#/components/schemas/ApprovalAuthorizationView",
+            "nullable": true
+          },
           "conditions": {
             "description": "The status conditions, at most 16.",
             "type": "array",
@@ -4874,6 +5040,39 @@
           }
         }
       },
+      "ApprovalAuthorizationView": {
+        "description": "PLAT-19.2: `Approval.status.authorization`, as the console renders it.",
+        "type": "object",
+        "required": [
+          "confirmationKeyId",
+          "mode",
+          "policyDigest",
+          "policyName",
+          "requester"
+        ],
+        "properties": {
+          "confirmationKeyId": {
+            "description": "The console key that attested it.",
+            "type": "string"
+          },
+          "mode": {
+            "description": "`Governed` or `Ordinary`.",
+            "type": "string"
+          },
+          "policyDigest": {
+            "description": "The policy snapshot digest.",
+            "type": "string"
+          },
+          "policyName": {
+            "description": "The policy name.",
+            "type": "string"
+          },
+          "requester": {
+            "description": "The console-attested requester, `<issuer>#<subject>`.",
+            "type": "string"
+          }
+        }
+      },
       "ApprovalList": {
         "type": "object",
         "required": [
@@ -4898,6 +5097,25 @@
             "type": "string"
           }
         }
+      },
+      "ApprovalModeView": {
+        "description": "The two approval modes, as the API spells them.",
+        "oneOf": [
+          {
+            "description": "A console-attested requester plus an independent approver.",
+            "type": "string",
+            "enum": [
+              "governed"
+            ]
+          },
+          {
+            "description": "The console's confirmation of an authorised operator is the whole authorization.",
+            "type": "string",
+            "enum": [
+              "ordinary"
+            ]
+          }
+        ]
       },
       "ApprovalPacket": {
         "description": "`GET .../approvals/{name}/packet`: the raw documents, verbatim.",
@@ -4957,6 +5175,78 @@
           "requestId": {
             "description": "The request ID.",
             "type": "string"
+          }
+        }
+      },
+      "ApprovalPolicyResponse": {
+        "description": "`GET .../approval-policy`.",
+        "type": "object",
+        "required": [
+          "item",
+          "requestId"
+        ],
+        "properties": {
+          "item": {
+            "description": "The effective policy.",
+            "$ref": "#/components/schemas/ApprovalPolicyView"
+          },
+          "requestId": {
+            "description": "The request ID.",
+            "type": "string"
+          }
+        }
+      },
+      "ApprovalPolicyView": {
+        "description": "PLAT-19.2: a namespace's effective approval policy.",
+        "type": "object",
+        "required": [
+          "installationDigest",
+          "legacy",
+          "mode",
+          "name",
+          "namespace",
+          "requireDistinctPrincipal"
+        ],
+        "properties": {
+          "confirmationKeyId": {
+            "description": "The console's `ConsoleConfirmation` key id, when configured — the id an administrator must put on this namespace's `TrustPolicy`.",
+            "type": "string",
+            "nullable": true
+          },
+          "digest": {
+            "description": "The snapshot digest a signed document must name; absent for legacy.",
+            "type": "string",
+            "nullable": true
+          },
+          "installationDigest": {
+            "description": "The digest of the whole installation document, which the controller logs at startup too: equal values mean both run the same policies.",
+            "type": "string"
+          },
+          "legacy": {
+            "description": "`true` when the namespace is unbound.",
+            "type": "boolean"
+          },
+          "maxAgeSeconds": {
+            "description": "The policy's `maxAgeSeconds`; absent for the legacy synthesis.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "mode": {
+            "description": "Its mode.",
+            "$ref": "#/components/schemas/ApprovalModeView"
+          },
+          "name": {
+            "description": "The policy name — `legacy-governed-v1` when the namespace is unbound.",
+            "type": "string"
+          },
+          "namespace": {
+            "description": "The namespace asked about.",
+            "type": "string"
+          },
+          "requireDistinctPrincipal": {
+            "description": "Whether an approver must be a different principal from the requester.",
+            "type": "boolean"
           }
         }
       },
@@ -5089,6 +5379,25 @@
             "type": "string",
             "enum": [
               "oidc"
+            ]
+          }
+        ]
+      },
+      "AuthorizationState": {
+        "description": "Where a submitted Restore goes next.",
+        "oneOf": [
+          {
+            "description": "The console confirmed it under an Ordinary policy; the controller admits it once it verifies the confirmation. Route to execution.",
+            "type": "string",
+            "enum": [
+              "confirmed"
+            ]
+          },
+          {
+            "description": "A governed approval is required. Route to Awaiting approval.",
+            "type": "string",
+            "enum": [
+              "awaitingApproval"
             ]
           }
         ]
@@ -5790,7 +6099,7 @@
             "type": "boolean"
           },
           "approvalSubmit": {
-            "description": "Approval submission (PLAT-19.2): no route.",
+            "description": "Governed approval submission (PLAT-19.2), `POST .../restores/{name}/approval`.",
             "type": "boolean"
           },
           "approvalsRead": {
@@ -11126,7 +11435,62 @@
           }
         }
       },
+      "RestoreAuthorizationView": {
+        "description": "PLAT-19.2: the frozen policy decision for one submitted Restore.",
+        "type": "object",
+        "required": [
+          "approvalName",
+          "legacy",
+          "mode",
+          "policy",
+          "state"
+        ],
+        "properties": {
+          "approvalName": {
+            "description": "The Approval the Restore references (`spec.approvalRef.name`).",
+            "type": "string"
+          },
+          "confirmationName": {
+            "description": "Governed (bound): the console's confirmation object an approver countersigns, `<approvalName>-confirmation`.",
+            "type": "string",
+            "nullable": true
+          },
+          "expiresAt": {
+            "description": "When the signed document stops authorising anything new.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "legacy": {
+            "description": "`true` for an unbound namespace (today's governed behaviour).",
+            "type": "boolean"
+          },
+          "mode": {
+            "description": "The mode the namespace's binding requires.",
+            "$ref": "#/components/schemas/ApprovalModeView"
+          },
+          "policy": {
+            "description": "The policy name — `legacy-governed-v1` for an unbound namespace.",
+            "type": "string"
+          },
+          "policyDigest": {
+            "description": "The policy snapshot digest the console signed; absent for the legacy synthesis, which accepts only today's v1 approval document.",
+            "type": "string",
+            "nullable": true
+          },
+          "requester": {
+            "description": "The console-attested requester, `<issuer>#<subject>`, when the console signed anything.",
+            "type": "string",
+            "nullable": true
+          },
+          "state": {
+            "description": "Where the submission goes next.",
+            "$ref": "#/components/schemas/AuthorizationState"
+          }
+        }
+      },
       "RestoreList": {
+        "description": "A page of `Restore` items.",
         "type": "object",
         "required": [
           "items",
@@ -11232,12 +11596,18 @@
         "additionalProperties": false
       },
       "RestoreResponse": {
+        "description": "One `Restore`.\n\n`authorization` is PLAT-19.2's routing answer and is present exactly on a create (and its replay): what the Restore needs next under the namespace's frozen approval policy. A single read carries none — the operation view and the Approval are the durable state, and this is the answer to one request.",
         "type": "object",
         "required": [
           "item",
           "requestId"
         ],
         "properties": {
+          "authorization": {
+            "description": "PLAT-19.2: on a create, where the submission goes next.",
+            "$ref": "#/components/schemas/RestoreAuthorizationView",
+            "nullable": true
+          },
           "item": {
             "description": "The item.",
             "$ref": "#/components/schemas/Restore"
@@ -12623,6 +12993,20 @@
           }
         }
       },
+      "SubmitApprovalRequest": {
+        "description": "`POST .../restores/{name}/approval` — a governed approver's countersigned sidecar over the console's confirmation document.",
+        "type": "object",
+        "required": [
+          "sidecarBytes"
+        ],
+        "properties": {
+          "sidecarBytes": {
+            "description": "The DSSE sidecar `logweir drill countersign` wrote: the console's signature(s) and the approver's, over the confirmation's exact document bytes. At most 64 KiB.",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
       "SyncCursorView": {
         "description": "Where the last walk got to.",
         "type": "object",
@@ -13871,7 +14255,6 @@
     }
   },
   "x-logweir-reserved-problem-codes": [
-    "approval_required",
-    "policy_mismatch"
+    "approval_required"
   ]
 }

@@ -19,10 +19,12 @@ publish = false
 # cron parser and the green-badge rules (so this API and the controller cannot
 # disagree about what "verified" means), and `logweir-core` for the one
 # SHA-256 spelling. Through `weirkeeper` it reaches `logweir-verify` — the
-# verifying half — and NEVER `logweir-evidence` (the signer) or
-# `logweir-engine-oso` (the engine wrapper). `scripts/check-one-signer.sh`
-# names this crate on the verify/primitive allowlists and on neither signing
-# allowlist; `tests/linkage.rs` asserts both halves from `cargo metadata`.
+# verifying half — and NEVER `logweir-engine-oso` (the engine wrapper) or
+# `logweir-kafka`. Since PLAT-19.2 it links `logweir-evidence` for ONE caller:
+# the console signs its own `ConsoleConfirmation` documents (see the
+# dependency's own comment below). `scripts/check-one-signer.sh` names this
+# crate on every allowlist with that reason; `tests/linkage.rs` asserts it from
+# `cargo metadata`.
 
 [lib]
 name = "logweir_api"
@@ -85,6 +87,18 @@ k8s-openapi = { version = "0.24", features = ["v1_29"] }
 # A subset of weirkeeper's feature list; the resolved feature set is the union.
 kube = { version = "0.99", default-features = false, features = ["client", "rustls-tls"] }
 logweir-core = { path = "../logweir-core" }
+# PLAT-19.2 — THE CONSOLE CONFIRMATION SIGNER, AND A RECORDED DECISION (D0,
+# "Ordinary versus governed approval contract"): the console signs an
+# authorization document v2 with its OWN `ConsoleConfirmation` key to attest the
+# requester it authenticated. It reuses the one signing implementation the
+# runner and `logweir drill approve` use, rather than a second one written over
+# `ring`, so the verifier on every other side reads exactly these bytes. A
+# `ConsoleConfirmation` key can never verify evidence (D3 §7.3), and this
+# service never holds the evidence key (no Secret `get`), so it gains no
+# evidence-signing capability. `scripts/check-one-signer.sh` names this crate
+# on `ALLOWED_LINK`/`ALLOWED_SOURCE` with that reason. Adds no package: every
+# dependency of `logweir-evidence` is already resolved.
+logweir-evidence = { path = "../logweir-evidence" }
 ring = "0.17"
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 schemars.workspace = true

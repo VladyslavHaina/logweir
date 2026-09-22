@@ -98,7 +98,7 @@ const RESULT_PAGE: &[ProblemCode] = &[
 ];
 
 /// Problem codes reserved for later stages, with no producing route yet.
-const RESERVED: &[ProblemCode] = &[ProblemCode::ApprovalRequired, ProblemCode::PolicyMismatch];
+const RESERVED: &[ProblemCode] = &[ProblemCode::ApprovalRequired];
 
 fn all_codes(groups: &[&[ProblemCode]]) -> Vec<ProblemCode> {
     let mut out: Vec<ProblemCode> = Vec::new();
@@ -510,6 +510,35 @@ fn paths() -> Value {
         (
             "/api/v1/namespaces/{ns}/restores/{name}",
             vec![get_one("getRestore", "One Restore projection, planBytes included.", "RestoreResponse")],
+        ),
+        (
+            "/api/v1/namespaces/{ns}/restores/{name}/approval",
+            vec![Op {
+                method: "post",
+                operation_id: "submitGovernedApproval",
+                summary: "PLAT-19.2: a governed approver submits the sidecar `logweir drill countersign` wrote over the console's confirmation of this Restore. Only in a namespace bound to a Governed policy; the submitting principal must not be the console-attested requester (403, whatever the role); the confirmation must still name this Restore's UID, plan hash and the current policy digest and must not have expired. Creates the Approval `spec.approvalRef` names from the confirmation's exact document bytes and the console's signatures plus the approver's; the controller re-verifies everything before any Job. A replay of the same submission returns 200 with the same object. Idempotency-Key is not used: the name is the Restore's own approvalRef.",
+                parameters: vec![ns(), name(), origin()],
+                request: Some("SubmitApprovalRequest"),
+                success: vec![
+                    ("201", "The Approval was created.", "ApprovalResponse"),
+                    ("200", "An identical Approval already exists (a replay).", "ApprovalResponse"),
+                ],
+                problems: all_codes(&[
+                    COMMON,
+                    NAMESPACED,
+                    KUBE,
+                    UNSAFE,
+                    &[ProblemCode::NotFound, ProblemCode::PolicyMismatch, ProblemCode::StateConflict],
+                ]),
+            }],
+        ),
+        (
+            "/api/v1/namespaces/{ns}/approval-policy",
+            vec![get_one(
+                "getApprovalPolicy",
+                "PLAT-19.2: the namespace's effective approval policy — its binding, mode, maxAgeSeconds, snapshot digest, the installation document's digest the controller also logs, and the console confirmation key id to put on the namespace's TrustPolicy.",
+                "ApprovalPolicyResponse",
+            )],
         ),
         (
             "/api/v1/namespaces/{ns}/approvals",
@@ -1013,6 +1042,8 @@ pub fn openapi_document() -> String {
     let _ = generator.subschema_for::<c::ApprovalList>();
     let _ = generator.subschema_for::<c::ApprovalResponse>();
     let _ = generator.subschema_for::<c::ApprovalPacketResponse>();
+    let _ = generator.subschema_for::<c::ApprovalPolicyResponse>();
+    let _ = generator.subschema_for::<c::SubmitApprovalRequest>();
     // BOTH SHAPES STAY PUBLISHED, AND THAT IS NOT AN OVERSIGHT.
     // `OperationViewResponse` is what the route returns and is a strict
     // SUPERSET of `OperationResponse`: D3 §2.5's keys sit beside PLAT-17.1's
