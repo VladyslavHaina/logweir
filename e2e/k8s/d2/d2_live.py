@@ -15,8 +15,13 @@ Run phases in order, with the same `D2W14_OUT` directory:
     $LOGWEIR_PYTHON e2e/k8s/d2/d2_live.py setup
     $LOGWEIR_PYTHON e2e/k8s/d2/d2_live.py bulk
     $LOGWEIR_PYTHON e2e/k8s/d2/d2_live.py s1 s2 s3 ...
+    $LOGWEIR_PYTHON e2e/k8s/d2/d2_live.py s1b s1c evf evf4 evf6   # D2 §3.9's Job
+    $LOGWEIR_PYTHON e2e/k8s/d2/d2_live.py evf5    # CLUSTER LOCK: stops the controller
     $LOGWEIR_PYTHON e2e/k8s/d2/d2_live.py report
     $LOGWEIR_PYTHON e2e/k8s/d2/d2_live.py cleanup
+
+The evidence-fetch rows (`s1b`, `s1c`, `evf*`) and what PASS requires for
+each are tabled in `e2e/k8s/d3/README.md`, "lab-refresh-8's rows".
 
 Environment:
     D2W14_OUT        private state and key material (mode 0700); default

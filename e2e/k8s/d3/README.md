@@ -13,14 +13,20 @@ nothing and it has no fixture mode.
   issues carries `--context docker-desktop`; it names no other context.
 - The shared `logweir-scram-local` lab: it copies that namespace's
   `source-scram`, `logweir-s3`, `logweir-signing-key` and `minio-root` Secrets
-  — and, for `rehearsal`, `target-scram`, the scratch broker's own SCRAM
+  — and, for `rehearsal` and `refused-point`, `target-scram`, the scratch broker's own SCRAM
   credential — into its own namespace and dials that namespace's Kafka and
   MinIO by service DNS. **Outside its own namespace it writes exactly two
-  things**: the cluster-scoped `TrustPolicy` the trust phases and `rehearsal`
-  need (deleted only after an owner-label check), and, in `rehearsal`, topics
-  on the shared `kafka-target` broker — a witness named for this run and names
-  under this run's own rendered prefixes — which the phase deletes again after
-  an ownership check (see below). It never changes the shared release.
+  things**: the cluster-scoped `TrustPolicy` the trust phases, `rehearsal` and
+  `refused-point` need (deleted only after an owner-label check), and, in
+  `rehearsal` and `refused-point`, topics on the shared `kafka-target` broker —
+  a witness named for this run and names under this run's own rendered
+  prefixes — which the phase deletes again after an ownership check (see
+  below). No phase of THIS harness changes the shared release; D2's `evf5`
+  (lab-refresh-8's rows, below) scales its controller and restores it.
+- For `refused-point`'s two `/points` rows: a `logweir-api` binary
+  (`LOGWEIR_API_BIN`, else the newer of `target/{release,debug}/logweir-api`),
+  started in `localAdmin` mode on a loopback port against this namespace only.
+  Without one those two rows record NOT-RUN.
 - `openssl` on the host, for the phases that mint a keypair (`old-archive`,
   `multiple-namespaces`, `rehearsal`).
 - For `old-archive`: the lab roster's approver PRIVATE key, `approver.pem`,
@@ -74,6 +80,8 @@ python3 e2e/k8s/d3/d3_live.py protection-verdicts  # PLAT-14.2: PointFactsUnread
                                                #   signature, D3 §3.3's resolve column
 python3 e2e/k8s/d3/d3_live.py rehearsal       # D3 §15 L6 / PLAT-14.3: a rehearsal
                                                #   end to end. CLUSTER LOCK
+python3 e2e/k8s/d3/d3_live.py refused-point   # lab-refresh-8: a REFUSED point under a
+                                               #   stale view. CLUSTER LOCK
 python3 e2e/k8s/d3/d3_live.py control          # the negative control — it MUST fail
 python3 e2e/k8s/d3/d3_live.py report
 python3 e2e/k8s/d3/d3_live.py cleanup          # CLUSTER LOCK (deletes the TrustPolicy)
@@ -203,13 +211,73 @@ which is only meaningful while the plan's objects are still there). Run
 
 ## The cluster lock
 
-`trust`, `signed-at-probe`, `rehearsal` and `cleanup` touch one cluster-scoped
+`trust`, `signed-at-probe`, `rehearsal`, `refused-point` and `cleanup` touch one
+cluster-scoped
 object (the `TrustPolicy`, which binds only this run's namespace). Take the
 orchestration's lock around exactly those phases and release it immediately
 afterwards. Every
 other phase is namespaced and needs no lock, and **no phase changes the shared
 release** — not its image, not its env, not its CRDs. `packaging` reads the
 controller's `LOGWEIR_RUNNER_IMAGE`; it never writes it.
+
+## lab-refresh-8's rows (D2 and D3)
+
+The rows `claude/evidence-fetch`, `claude/verdict-precedence` and
+`claude/fix-standing-verify` owe live proof for, and the D2/D3 rows whose
+expectation those branches changed. Each is a named phase; each row judges a
+pure predicate that has planted-wrong twins in `e2e/k8s/d2/test_evidence_fetch_rows.py`
+or `e2e/k8s/d3/test_refused_point_rows.py` (`python3 -m pytest e2e/k8s/d2 e2e/k8s/d3`).
+
+**Images and binaries.** Everything is built from main AFTER both
+`claude/evidence-fetch` and `claude/verdict-precedence` have landed, with
+`--label org.opencontainers.image.revision=$(git rev-parse HEAD)` (WORKER-RULES):
+
+- the **controller** (`weirkeeper`) the lab release runs — the evidence-fetch
+  Job, the `Pending` verdict, the Backup-verdict joins in retention and the
+  rehearsal, and the slot-consuming skip all live there;
+- the **runner** (`logweir`, `--platform linux/amd64`) the controller names in
+  `LOGWEIR_RUNNER_IMAGE` — the evidence-fetch Job is a `check run` of it, and
+  it prints the receipt digest the fetch is anchored on;
+- **`logweir-api`** on the host, passed as `LOGWEIR_API_BIN` (else the newer
+  of `target/{release,debug}/logweir-api`), for the two `/points` rows;
+- the **`logweir` CLI** with `drill approve --standing` as `LOGWEIR_BIN`, for
+  the rehearsal arms (as `rehearsal` already needs), and for D2's approvals.
+
+D2 runs in its own namespaces (`d2_live.py setup` first; `D2W14_OUT`,
+`D2W14_STAMP`); D3 runs after `setup` in `LOGWEIR_D3_NS` as above. Use
+`LOGWEIR_PYTHON=/tmp/logweir-roadmap-run/venv/bin/python3` for both.
+
+| row | phase | command | PASS requires |
+|---|---|---|---|
+| `S1.statusVerification` (swept) | `s1b` | `d2_live.py s1 s1b` | bk-a and bk-b (SecretKeys `evidenceRead`) read **`Valid`** within 240 s: `matchedKeyId`, `observation.jobRef.name` = `lwc-ev-<sha256(uid:attempt)[:20]>`, `mode: SecretKeys`, `presence: Complete`, no `retryAfter`, `windowCovered`, `records`, `capture`, `Verified=True`, runner `receiptSha256`, and no controller-identity location allowlisted. `NotAttempted` here is EVIDENCE-FETCH-JOB-UNBUILT again |
+| `S1.notAttempted` | `s1c` | `d2_live.py s1c` | for dest-noread (no `evidenceRead`) AND dest-ci (`ControllerIdentity`, not allowlisted): `NotAttempted` with a detail, no `matchedKeyId`, no `observation`, never `Pending` on the watch, no `lwc-ev-` Job by `logweir.dev/check-owner-uid`, no `windowCovered` |
+| `EVF-1` | `evf` | `d2_live.py evf` | dest-arg (`evidenceRead: ArchiveReadGrant`, `archiveRead` = its own read-only principal): the watch sees `Pending` naming attempt 1's Job, then `Valid` and nothing else; every `S1.statusVerification` clause holds |
+| `EVF-2` | `evf` | (same run) | the Job: `logweir.dev/check-kind=evidenceFetch`; controlled by the Backup; `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` only, both from `a-archread` (never `a-writer`, never `logweir-signing-key`); no `LOGWEIR_EVIDENCE_AWS_*`, no `envFrom`; `automountServiceAccountToken: false`; `logweir-runner`; volumes exactly `check-plan` (= `<job>-plan`, immutable, controlled by the Backup) and `work`; the REAL pod controlled by the Job's UID; `ttlSecondsAfterFinished: 600` |
+| `EVF-1.ttl` | `evf` | (same run) | the Job is gone within 720 s of the verdict |
+| `EVF-4` | `evf4` | `d2_live.py evf4` | dest-evbroken's `evidenceRead` Secret lacks `secret-access-key`: attempt 1 `NotAttempted` naming `lwc-ev-…(uid:1)` and `CredentialSecretKeyMissing`, "attempt 2 starts at", `retryAfter` 45–90 s after `verifiedAt`; never `Valid`, no window; attempt 2's own Job `lwc-ev-…(uid:2)`, controlled by the Backup, and the status at attempt 2 |
+| `EVF-5` | `evf5` | `d2_live.py evf5` — **CLUSTER LOCK** (scales the shared `weirkeeper` to 0 and back; the original replica count is restored in a `finally` and recorded in `objects/evf5/controller-restored.json`) | `Pending` seen, then the controller stopped; the Job finished with none running; after the restart exactly ONE `lwc-ev-` Job for the Backup (attempt 1's, created before the stop), `Valid` naming that Job's UID and written after the new pod started. `notRun` — never `pass` — when the fetch beat the stop |
+| `EVF-6` | `evf6` | `d2_live.py evf6` (after `s1`, whose bk-a it restores) | a Restore whose evidence destination (dest-b) has a `SecretKeys` `evidenceRead`: `Pending` then `Valid`, `outcome` and `objectives` copied, `scorecardSha256`, `Verified=True` exactly when `outcome: pass`, the Job controlled by the Restore |
+| `EVF-3` (console Restore) | — | `scripts/plat10-ui-e2e.mjs` (not this harness; its NotAttempted assumption is in "Class sweep owed" of `harness-rows-10.result.md`) | the PLAT-10 journey reaches the wizard for EVF-1's point |
+| `protection-catalog-places-an-unverified-point`, `protection-unplaceable-point-is-unknown`, `protection-unknown-keeps-its-incident-open` (swept) | `protection-verdicts` | `d3_live.py protection-verdicts` | unchanged clauses, now on `dest-noread`/`dest-noread-stays` (bucket `-n`, no `evidenceRead`), the one shape still `NotAttempted` with no capture |
+| `rehearsal-7b-a-skipped-slot-is-consumed-never-fired-late` | `rehearsal` | `d3_live.py rehearsal` — CLUSTER LOCK | on the one-minute concurrency arm, kept unsuspended through the first rehearsal's end: every `ConcurrencyBlocked` skip names a due slot (a minute boundary ≤ the read), `lastScheduledSlot` ≥ it, one record per slot, no Restore for a skipped slot, the next rehearsal for a later slot. `NOT-REACHED` if step 7 saw no skip |
+| `refused-point-fixture-is-real` | `refused-point` | `d3_live.py refused-point` — CLUSTER LOCK, after `trust` and `rehearsal` | rp-1/rp-2 `Valid`; rp-4 `Valid` under the minted key; rp-3 (newest, via `dest-rp-slow`) `NotAttempted`/`CredentialSecretKeyMissing` with a retry owed; the manual-only view `rp-cat` offers all four |
+| `standing-11-replaced-receipt-is-invalid-and-projects-nothing` | `refused-point` | (same run) | after the receipt object is replaced and the grant repaired, the retry makes the controller write `Invalid` on attempt ≥ 2; `receiptSha256` still the runner's; no `windowCovered`/`records`/`capture`/`matchedKeyId`; the stale row still `Available`/`Verified`/selectable. `HARNESS-FAULT` if no attempt was left |
+| `retention-refused-newest-point-is-skipped-unreadable` | `refused-point` | (same run) | `keepLast 1, minUsablePoints 1`: control kept rp-3 and planned rp-4 `BeyondKeepLast`; now rp-3 skipped `Unreadable`, rp-4 kept and not a candidate, `planSha256` changed |
+| `catalog-points-refused-point-is-not-selectable` | `refused-point` | (same run; needs `LOGWEIR_API_BIN`, else NOT-RUN) | control listed rp-3 selectable with no `backupVerdict`; now `selectable: false`, `backupVerdict: Invalid`, row still `Available`/`Verified`, omitted from `?selectable=true`, rp-1 still selectable, no `backupVerdictsIncomplete` |
+| `protection-refused-point-under-a-stale-view-is-unprotected` | `refused-point` | (same run) | control: the catalog placed NotAttempted rp-3 (`Healthy`, basis `Catalog`); now `Unprotected`/`NoAvailablePoint`, `Staleness` Open, no point published, although the row could have placed it |
+| `rehearsal-refused-point-is-never-selected` | `refused-point` | (same run) | a one-minute `RehearsalSchedule` whose only run is rp-3, with a `Verified=True` standing Approval: a slot after unsuspend skipped `NoQualifyingPoint`, zero Restores, zero Jobs. `INCONCLUSIVE` if the premise (authorization, selectable row) did not hold; `HARNESS-FAULT` on `TargetBusy` |
+| `standing-12-revoked-signer-is-untrusted` | `refused-point` | (same run) | revoking the minted signer (`KeyCompromise`) turns rp-4 `Valid` → `Untrusted` about the same key, run still `Succeeded`, stale row still selectable |
+| `retention-revoked-point-is-skipped-unreadable`, `catalog-points-revoked-point-is-not-selectable`, `protection-revoked-point-under-a-stale-view-is-unprotected`, `rehearsal-revoked-point-is-never-selected` | `refused-point` | (same run) | the four clauses above for rp-4 (`backupVerdict: Untrusted`; retention keeps rp-2 and still skips rp-3; protection's control is the `Valid` point `Healthy`) |
+| `refused-point-minted-keys-never-outlive-the-row` | `refused-point` | (same run) | both minted private keys and the work directory are gone |
+
+**Not built, and why.** verdict-precedence's fix round adds two more rows: a
+`/points` page served `backupVerdictsIncomplete: Unavailable` after the API's
+`list` on `backups` is removed, and a Backup whose verdict field is unreadable.
+The loopback API uses the operator's kubeconfig, not the chart's ServiceAccount,
+so the first needs a chart install with an edited Role; the second has no
+product path at all (only a status patch writes a non-string verdict). Both are
+covered by the branch's own crate tests and are listed as gaps rather than
+built as fault injection.
 
 ## The enforcer's image
 
