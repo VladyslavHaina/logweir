@@ -416,6 +416,43 @@ async fn an_over_limit_preflight_performs_no_kubernetes_read() {
     logweir_api::routes::reset_check_rate_limits();
 }
 
+/// The guided schedule form's inline readiness payload must use the public
+/// `legacyArchive` spelling, while a dynamic schedule must not send the empty
+/// named-topic list that this route correctly refuses.
+#[tokio::test]
+async fn backup_preflight_accepts_an_inline_archive_and_refuses_empty_topics() {
+    let app = TestApp::new();
+    let path = format!("/api/v1/namespaces/{NS_A}/preflights");
+    let inline = json!({
+        "operation": "backup",
+        "backup": {
+            "sourceConnection": "source",
+            "legacyArchive": {"url": "s3://b/p", "credentialRef": {"name": "s3-creds"}},
+            "topics": ["orders"]
+        }
+    });
+    let response = app
+        .post(&path, Some("preflight-inline-0001"), &inline.to_string())
+        .await;
+    assert_eq!(response.status.as_u16(), 202, "{}", response.text());
+    let response_body = response.json();
+    let id = response_body["item"]["id"].as_str().unwrap();
+    let stored = app.fake.object("preflights", NS_A, id).unwrap();
+    assert_eq!(stored["spec"]["request"]["backup"]["legacyArchive"],
+        json!({"url": "s3://b/p", "secretRef": {"name": "s3-creds"}}));
+
+    let empty = json!({
+        "operation": "backup",
+        "backup": {"sourceConnection": "source", "legacyArchive": {"url": "s3://b/p"}, "topics": []}
+    });
+    let response = app
+        .post(&path, Some("preflight-inline-0002"), &empty.to_string())
+        .await;
+    response.assert_problem(422, "validation_failed");
+    assert!(field_names(&response.json()).contains(&"backup.topics".to_string()));
+    app.fake.assert_strict();
+}
+
 /// D2-SOURCECHECK: the connectivity check the console's "Test connection"
 /// creates, and the two ways of asking for it wrongly.
 ///

@@ -365,22 +365,32 @@ test("readiness_checks_what_the_form_describes_and_renders_only_what_it_recorded
     backup: { sourceConnection: "orders-prod", topics: ["orders", "payments"],
       destination: "primary" },
   });
-  // A dynamic selection names no topics: what it will cover is decided per
-  // run, by a discovery, and no check before creation can answer it.
-  assert.deepEqual(
-    readinessRequestFor(draft({ selection: "dynamic", incompleteDiscovery: "Refuse" })).backup,
-    { sourceConnection: "orders-prod", topics: [], destination: "primary" },
-  );
-  // An inline archive names no destination rather than an empty one.
+  // A dynamic schedule has no concrete topics before its per-run discovery.
+  // The route rejects `topics: []`, so the page must not start a preflight
+  // that looks applicable but is guaranteed to be refused.
   assert.equal(
-    readinessRequestFor(draft({ destination: "", archive: "s3://b/p" })).backup.destination,
-    undefined,
+    readinessRequestFor(draft({ selection: "dynamic", incompleteDiscovery: "Refuse" })),
+    null,
+  );
+  // Inline schedules carry the route's actual legacyArchive spelling; a bare
+  // destination field is not an inline archive and must not be invented.
+  assert.deepEqual(
+    readinessRequestFor(draft({ destination: "", archive: "s3://b/p", archiveSecret: "s3-creds" })).backup,
+    { sourceConnection: "orders-prod", topics: ["orders", "payments"],
+      legacyArchive: { url: "s3://b/p", credentialRef: { name: "s3-creds" } } },
   );
 
   // WITH NO CHECK STARTED THE FORM SAYS SO, and never "ready".
   const unchecked = renderScheduleForm({ draft: draft(), clusters: CLUSTERS, mayOperate: true });
   assert.match(unchecked, /data-readiness="unchecked"/);
   assert.doesNotMatch(unchecked, /badge-green">ready/);
+  const dynamic = renderScheduleForm({
+    draft: draft({ selection: "dynamic", incompleteDiscovery: "Refuse" }),
+    clusters: CLUSTERS, mayOperate: true,
+  });
+  assert.match(dynamic, /id="schedule-readiness-dynamic"/);
+  assert.doesNotMatch(dynamic, /id="schedule-check-readiness"/,
+    "a dynamic selection cannot submit an empty topic list to the backup-preflight route");
 
   // A FAILED CHECK IS THE CHECK'S OWN WORDS. The verdict, the reason and the
   // remedy all come off the `CheckOperationResponse`; nothing here decides.

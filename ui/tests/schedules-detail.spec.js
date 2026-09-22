@@ -25,6 +25,7 @@ import {
   NO_POINTS_SENTENCE,
   TWO_VERDICTS_SENTENCE,
   pointsForRun,
+  readSchedulePoints,
   renderArchivedSchedule,
   renderEarlierRuns,
   renderLatestPointAction,
@@ -238,6 +239,37 @@ test("a_catalog_that_cannot_be_read_says_so_instead_of_leaving_a_blank_column", 
     "the two-axis sentence is always there; the refusal is not");
 });
 
+test("schedule history follows catalog cursors and marks mixed reads incomplete", async () => {
+  const calls = [];
+  const result = await readSchedulePoints(null, NS, null, {
+    listCatalogs: async () => ({ items: [{ metadata: { name: "primary" } }, { metadata: { name: "broken" } }] }),
+    readPoints: async (name, query) => {
+      calls.push([name, query]);
+      if (name === "broken") {
+        throw Object.assign(new Error("catalog endpoint refused"), { reason: "Forbidden" });
+      }
+      if (query.cursor === undefined) {
+        return { items: [{ backupId: "set-healthy", availability: "Available", verification: "Verified", selectable: true }],
+          page: { nextCursor: "next-page" } };
+      }
+      return { items: [{ backupId: "set-gone", availability: "Missing", verification: "NotAttempted", selectable: false }],
+        page: { nextCursor: null } };
+    },
+  });
+  assert.deepEqual(calls.slice(0, 2), [
+    ["primary", { limit: 200 }], ["primary", { limit: 200, cursor: "next-page" }],
+  ]);
+  assert.equal(result.points.length, 2, "both pages are joined before the history renders");
+  assert.equal(result.error.reason, "Forbidden", "a failed second catalog is never hidden by a successful first one");
+  const html = renderScheduleHistory(NS, schedule(), [
+    run("known", "Succeeded", { backupId: "set-healthy" }),
+    run("not-read", "Succeeded", { backupId: "set-never-read" }),
+  ], result.points, result.error);
+  assert.match(html, /Available/);
+  assert.match(html, /catalog incomplete/);
+  assert.doesNotMatch(html, /not in the catalog/, "a partial catalog read cannot make an absence claim");
+});
+
 test("the_join_is_on_the_backup_set_id_and_takes_every_point_of_the_set", () => {
   const ok = run("nightly-ok", "Succeeded", { backupId: "set-healthy" });
   assert.deepEqual(pointsForRun(ok, POINTS).map((p) => p.pointId), ["lwp1-healthy"]);
@@ -302,17 +334,41 @@ test("a_paused_schedule_says_it_is_paused_and_still_offers_its_history", () => {
   );
 });
 
+test("a_read_only_viewer_gets_schedule_facts_without_mutation_controls", () => {
+  const complete = run("nightly-complete", "Succeeded", {
+    backupId: "set-healthy", createdAt: "2026-09-20T02:00:00Z",
+  });
+  complete.status.conditions = [{ type: "Complete", status: "True",
+    lastTransitionTime: "2026-09-20T02:30:00Z" }];
+  const html = renderScheduleDetail({
+    ns: NS, name: "nightly", object: schedule(), runs: { mine: [complete], earlier: [] },
+    points: POINTS, now: "2026-09-20T04:30:00Z",
+    extra: { cards: { nightly: {} }, destinations: [{ name: "primary", canonicalUrl: "s3://b/p" }], mayOperate: false },
+  });
+  for (const fact of ["Schedule facts", "orders-prod", "s3://b/p", "Policy revision",
+    "nightly-complete", "2026-09-20T02:30:00Z", "2 hours"]) {
+    assert.ok(html.indexOf(fact) !== -1, fact + " is available to a read-only viewer");
+  }
+  assert.doesNotMatch(html, /<form class="suspend"/);
+  assert.doesNotMatch(html, /class="run-now-form"/);
+  assert.match(html, /data-suspend-read-only="1"/);
+  // NEGATIVE CONTROL: an operator sees the mutating controls; the read-only
+  // view did not merely render a broken action panel.
+  const operator = renderScheduleDetail({
+    ns: NS, name: "nightly", object: schedule(), runs: { mine: [complete], earlier: [] },
+    points: POINTS, extra: { cards: { nightly: {} }, mayOperate: true },
+  });
+  assert.match(operator, /<form class="suspend"/);
+});
+
 // ===========================================================================
 // Archived schedule: deleted, with its history retained (PLAT-05.2)
 // ===========================================================================
 
 test("a_deleted_schedule_keeps_its_history_and_says_the_schedule_is_gone", () => {
   const runs = {
-    mine: [
-      run("nightly-ok", "Succeeded", { backupId: "set-healthy" }),
-      run("nightly-gone", "Succeeded", { backupId: "set-gone" }),
-    ],
-    earlier: [],
+    mine: [run("nightly-ok", "Succeeded", { backupId: "set-healthy", scheduleUid: "old-uid-a" })],
+    earlier: [run("nightly-gone", "Succeeded", { backupId: "set-gone", scheduleUid: "old-uid-b" })],
   };
   const html = renderScheduleDetail({
     ns: NS, name: "nightly", object: null, runs: runs, points: POINTS,
@@ -324,7 +380,12 @@ test("a_deleted_schedule_keeps_its_history_and_says_the_schedule_is_gone", () =>
   // THE HISTORY AND THE RESTORES ARE STILL THERE.
   assert.match(html, /nightly-ok/);
   assert.equal((html.match(/Restore this point/g) || []).length, 2);
-  assert.match(html, /id="schedule-restore-latest"/);
+  assert.doesNotMatch(html, /id="schedule-restore-latest"/,
+    "a deleted name has no single latest point across historical UIDs");
+  assert.match(html, /data-archived-schedule-uid="old-uid-a"/);
+  assert.match(html, /data-archived-schedule-uid="old-uid-b"/);
+  assert.equal((html.match(/Runs and recovery points/g) || []).length, 2,
+    "the two historical identities are rendered separately, never merged by name");
   // AND THE ACTIONS THAT NEED A SCHEDULE ARE NOT OFFERED: there is nothing to
   // suspend, nothing to edit and nothing to run.
   assert.doesNotMatch(html, /<form class="suspend"/);

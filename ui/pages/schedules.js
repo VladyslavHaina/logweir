@@ -1258,7 +1258,7 @@ export function renderScheduleForm(view) {
     "default rather than an unset one.</p>" +
     renderPolicyFields(CREATE_PANEL, d, errors) +
     "</details>" +
-    renderCreateReadiness(v) +
+    renderCreateReadiness(Object.assign({}, v, { draft: d })) +
     "<div class=\"actions\"><button type=\"submit\" class=\"primary\"" +
     (ready ? "" : " disabled") + ">Create</button></div>" +
     "</fieldset>" +
@@ -1298,17 +1298,23 @@ export const CREATE_PANEL = "create";
 function renderCreateReadiness(view) {
   const v = view || {};
   const result = v.readiness || null;
+  const dynamic = guidedValues(v.draft).selection === "dynamic";
   return (
     "<fieldset class=\"readiness\" id=\"schedule-readiness\"><legend>readiness</legend>" +
     "<p class=\"help\">" + esc(READINESS_SENTENCE) + "</p>" +
     (v.readinessUnavailable === true
       ? "<p class=\"note\" id=\"schedule-readiness-unavailable\">" +
         cell(v.readinessUnavailableReason) + "</p>"
-      : (v.mayOperate === false
+      : (dynamic
+        ? "<p class=\"note\" id=\"schedule-readiness-dynamic\">A backup readiness check " +
+          "needs concrete topic names. This schedule discovers all user topics at run time, so " +
+          "no truthful pre-create backup check can be started; the run's own preflight records " +
+          "the applicable result.</p>"
+        : (v.mayOperate === false
         ? "<p class=\"note\">This login may read readiness results in this namespace and not " +
           "start one.</p>"
         : "<div class=\"actions\"><button type=\"button\" id=\"schedule-check-readiness\">" +
-          "Check readiness</button></div>")) +
+          "Check readiness</button></div>"))) +
     "<div class=\"readiness-verdict\" id=\"schedule-readiness-verdict\">" +
     (result === null
       ? "<p class=\"note\" data-readiness=\"unchecked\">" + esc(READINESS_NOT_CHECKED) + "</p>"
@@ -1583,7 +1589,9 @@ export function renderScheduleCard(ns, object, backups, extra) {
   return (
     "<section class=\"schedule\" data-schedule=\"" + esc(name) + "\"><div class=\"card-head\"><h3>" +
     nameOf(object) + "</h3>" +
-    renderSuspendToggle(object, state) +
+    (e.mayOperate === false
+      ? "<p class=\"note\" data-suspend-read-only=\"1\">This login may read this schedule and not suspend or resume it.</p>"
+      : renderSuspendToggle(object, state)) +
     "</div>" +
     "<div class=\"form-status\" data-suspend-status=\"" + esc(name) + "\" tabindex=\"-1\">" +
     renderSuspendStatus(object, state) + "</div>" +
@@ -1880,7 +1888,15 @@ export async function mountSchedules(node, ns, parse, lifecycle, deps) {
     const collections = await Promise.all([
       api.list(ns, PLURAL, readOptions(lifecycle)),
       api.list(ns, BACKUPS, readOptions(lifecycle)),
-      api.list(ns, CLUSTERS, readOptions(lifecycle)),
+      // Cluster/destination reads enrich mutation panels. A read-only schedule
+      // viewer must still receive the object, run history and facts when its
+      // role cannot enumerate those auxiliary resources.
+      api.list(ns, CLUSTERS, readOptions(lifecycle)).catch((error) => {
+        if (cancelled(error, lifecycle)) {
+          throw error;
+        }
+        return { items: [] };
+      }),
     ]);
     if (!active(lifecycle)) {
       return;
@@ -2152,8 +2168,16 @@ function wireCreate(node, ns, parse, lifecycle, api, clusters, own) {
       }
       const values = readScheduleValues(form);
       keepDraft(key, values, SCHEDULE_DRAFT_FIELDS);
+      const request = readinessRequestFor(values);
+      if (request === null) {
+        held.readiness = null;
+        held.readinessUnavailable = true;
+        held.readinessUnavailableReason = "This dynamic schedule has no concrete topics before run-time discovery.";
+        repaint();
+        return;
+      }
       check.disabled = true;
-      api.startPreflight(ns, readinessRequestFor(values)).then(
+      api.startPreflight(ns, request).then(
         (answer) => {
           if (!active(lifecycle)) {
             return;
@@ -2195,25 +2219,30 @@ function wireCreate(node, ns, parse, lifecycle, api, clusters, own) {
 /** The `Preflight` a guided form's readiness button starts: operation `backup`,
  *  against the source, destination and topics ON THE FORM.
  *
- *  A DYNAMIC SELECTION NAMES NO TOPICS, and this sends none rather than
- *  inventing a list: the check then resolves the connection and the
- *  destination, which is what there is to check before the schedule exists.
- *  What a dynamic run will actually cover is decided per run, by a discovery,
- *  and no check before creation can answer it. */
+ *  A DYNAMIC SELECTION HAS NO CONCRETE TOPIC SET BEFORE ITS RUN-TIME
+ *  discovery. The preflight route correctly requires one or more named
+ *  topics, so this returns `null` rather than lying with `topics: []` or
+ *  starting an inapplicable check. The form says exactly that. */
 export function readinessRequestFor(values) {
   const v = values || {};
   const text = (key) => String(v[key] === undefined || v[key] === null ? "" : v[key]).trim();
+  if (guidedValues(v).selection === "dynamic") {
+    return null;
+  }
   const request = {
     operation: "backup",
     backup: {
       sourceConnection: String(v.source || ""),
-      topics: v.selection === "dynamic"
-        ? []
-        : text("topics").split(",").map((t) => t.trim()).filter((t) => t.length > 0),
+      topics: text("topics").split(",").map((t) => t.trim()).filter((t) => t.length > 0),
     },
   };
   if (text("destination").length > 0) {
     request.backup.destination = text("destination");
+  } else if (text("archive").length > 0) {
+    request.backup.legacyArchive = { url: text("archive") };
+    if (text("archiveSecret").length > 0) {
+      request.backup.legacyArchive.credentialRef = { name: text("archiveSecret") };
+    }
   }
   return request;
 }
@@ -3869,9 +3898,9 @@ export const NOT_IN_CATALOG = "not in the catalog";
 /** What the availability column says when this mode cannot read a catalog at
  *  all, so that an empty column is never mistaken for a verdict. */
 export const CATALOG_UNREADABLE_SENTENCE =
-  "The durable recovery catalog could not be read here, so the availability and verification " +
-  "columns below are blank rather than green: this page will not report an archive as readable " +
-  "on the strength of a run having once written to it.";
+  "The durable recovery catalog could not be read completely here, so a run not found in the " +
+  "pages this view received is marked catalog incomplete rather than healthy or absent. This " +
+  "page will not report an archive as readable on the strength of a run having once written to it.";
 
 /** What the detail says about a schedule that is not there any more. */
 export const ARCHIVED_SCHEDULE_SENTENCE =
@@ -3903,7 +3932,10 @@ export function runsOfSchedule(name, uid, backups) {
     return at < bt ? 1 : (at > bt ? -1 : 0);
   });
   if (identity.length === 0) {
-    return { mine: newestFirst, earlier: [] };
+    // A deleted schedule has no UID to select one historical identity. Name
+    // alone is expressly reusable, so returning all rows as `mine` would join
+    // two different schedules and make a latest-point Restore ambiguous.
+    return { mine: [], earlier: newestFirst };
   }
   const sameUid = (backup) =>
     String(((((backup || {}).spec) || {}).scheduleRef || {}).uid || "") === identity;
@@ -3966,9 +3998,12 @@ function distinctWords(points, field) {
  *  Availability keeps its own green: it is a different fact with a different
  *  repair, and a point whose bytes are readable but whose signer is a stranger
  *  is an evidence problem and not an outage. */
-export function verdictCells(points) {
+export function verdictCells(points, incomplete) {
   const all = Array.isArray(points) ? points : (points === null || points === undefined ? [] : [points]);
   if (all.length === 0) {
+    if (incomplete) {
+      return [badge("unverified", "catalog incomplete"), badge("unverified", "catalog incomplete")];
+    }
     return [
       badge("unverified", NOT_IN_CATALOG),
       badge("unverified", NOT_IN_CATALOG),
@@ -3993,7 +4028,7 @@ export function verdictCells(points) {
  *  and disagree with the cluster. What changes per row is what is OFFERED: a
  *  restore link only where a plan can be built, which is `isRecoveryPoint`'s
  *  question and PLAT-11.1's answer. */
-export function renderScheduleHistory(ns, object, runs, points, catalogError) {
+export function renderScheduleHistory(ns, object, runs, points, catalogError, sectionId) {
   const spec = (object || {}).spec || {};
   const maxRetries = (spec.retry || {}).maxRetries;
   const rows = runs.map((run) => {
@@ -4001,7 +4036,7 @@ export function renderScheduleHistory(ns, object, runs, points, catalogError) {
     const status = run.status || {};
     const covered = status.windowCovered || {};
     const found = pointsForRun(run, points);
-    const verdicts = verdictCells(found);
+    const verdicts = verdictCells(found, catalogError !== null && catalogError !== undefined);
     return [
       detailLink("backups", String(ns || meta.namespace || ""), String(meta.name || "")),
       triggerBadge(run.spec ? run.spec.trigger : undefined, maxRetries),
@@ -4021,7 +4056,8 @@ export function renderScheduleHistory(ns, object, runs, points, catalogError) {
     ];
   });
   return (
-    "<section class=\"history\" id=\"schedule-history\"><h3>Runs and recovery points</h3>" +
+    "<section class=\"history\" id=\"" + esc(sectionId || "schedule-history") +
+    "\"><h3>Runs and recovery points</h3>" +
     "<p class=\"note\">" + esc(TWO_VERDICTS_SENTENCE) + "</p>" +
     (catalogError === null || catalogError === undefined
       ? ""
@@ -4096,6 +4132,43 @@ export function renderLatestPointAction(ns, runs) {
   );
 }
 
+/** Read-only facts that remain useful when the viewer has no mutation grant.
+ *
+ * These are deliberately outside the action card: source, resolved
+ * destination, policy revision and the most recent successful point are facts
+ * about objects already read by this route, not permissions to change them. */
+export function renderScheduleFacts(object, runs, destinations, now) {
+  const spec = (object || {}).spec || {};
+  const status = (object || {}).status || {};
+  const latest = recoveryPoints((runs || {}).mine || [])[0] || null;
+  const latestMeta = (latest || {}).metadata || {};
+  const latestStatus = (latest || {}).status || {};
+  const complete = latestStatus.completedAt ||
+    (((latestStatus.conditions || []).find((c) => c.type === "Complete" && c.status === "True") || {})
+      .lastTransitionTime) || latestMeta.creationTimestamp || "";
+  const then = Date.parse(complete);
+  const reference = now === undefined || now === null ? Date.now() : Date.parse(now);
+  const age = isFinite(then) && isFinite(reference) && reference >= then
+    ? Math.floor((reference - then) / 1000)
+    : null;
+  const ageWords = age === null ? ABSENT
+    : (age < 60 ? String(age) + " seconds" : (age < 3600
+      ? String(Math.floor(age / 60)) + " minutes"
+      : String(Math.floor(age / 3600)) + " hours"));
+  const policy = (status.policy || {}).generation || ((object || {}).metadata || {}).generation;
+  return (
+    "<section class=\"schedule-facts\" id=\"schedule-facts\"><h3>Schedule facts</h3>" +
+    facts([
+      ["Source", cell(((spec.sourceRef || {}).name))],
+      ["Destination", destinationCell(object, destinations)],
+      ["Policy revision", policy === undefined ? ABSENT : cell("g" + String(policy))],
+      ["Latest successful point", latest === null ? ABSENT : cell(latestMeta.name)],
+      ["Latest point completed", complete.length === 0 ? ABSENT : cell(complete)],
+      ["Latest point age", ageWords],
+    ]) + "</section>"
+  );
+}
+
 /** ONE SCHEDULE, AS A PAGE. The card's own panels -- the toggle, the revision,
  *  the next runs, the manual-run panel, the policy form, retention -- plus the
  *  history and the two restore actions, under a heading that says which
@@ -4114,6 +4187,7 @@ export function renderScheduleDetail(view) {
     "\">" +
     "<p class=\"crumb\"><a href=\"#/schedules?ns=" + esc(encodeURIComponent(ns)) +
     "\">All schedules</a></p>" +
+    renderScheduleFacts(object, runs, ((v.extra || {}).destinations), v.now) +
     renderLatestPointAction(ns, runs.mine) +
     renderScheduleCard(ns, object, { items: runs.mine }, v.extra) +
     renderScheduleHistory(ns, object, runs.mine, v.points, v.catalogError) +
@@ -4129,7 +4203,27 @@ export function renderScheduleDetail(view) {
  *  the per-point restores. There is no toggle, no policy form and no "Back up
  *  now": every one of those needs a schedule to act on. */
 export function renderArchivedSchedule(ns, name, runs, points, catalogError) {
-  const mine = (runs || {}).mine || [];
+  const all = ((runs || {}).mine || []).concat((runs || {}).earlier || []);
+  const groups = [];
+  for (const run of all) {
+    const uid = String(((((run || {}).spec) || {}).scheduleRef || {}).uid || "");
+    let group = groups.find((entry) => entry.uid === uid);
+    if (group === undefined) {
+      group = { uid: uid, runs: [] };
+      groups.push(group);
+    }
+    group.runs.push(run);
+  }
+  const histories = groups.length === 0
+    ? renderScheduleHistory(ns, null, [], points, catalogError)
+    : groups.map((group, index) =>
+      "<section class=\"archived-schedule-identity\" data-archived-schedule-uid=\"" +
+      esc(group.uid || "legacy-no-uid") + "\"><h3>Schedule identity " +
+      cell(group.uid || "legacy runs without a schedule UID") + "</h3>" +
+      "<p class=\"note\">These runs share this exact historical schedule identity; they are not " +
+      "merged with another schedule that reused the name.</p>" +
+      renderScheduleHistory(ns, null, group.runs, points, catalogError,
+        "schedule-history-archived-" + String(index)) + "</section>").join("");
   return (
     "<section class=\"detail\" id=\"schedule-detail\" data-schedule-detail=\"" + esc(name) +
     "\" data-archived=\"1\">" +
@@ -4138,9 +4232,7 @@ export function renderArchivedSchedule(ns, name, runs, points, catalogError) {
     "<div class=\"card-head\"><h3>" + esc(name) + "</h3>" +
     badge("pending", "schedule deleted") + "</div>" +
     "<p class=\"note\" id=\"schedule-archived\">" + esc(ARCHIVED_SCHEDULE_SENTENCE) + "</p>" +
-    renderLatestPointAction(ns, mine) +
-    renderScheduleHistory(ns, null, mine, points, catalogError) +
-    renderEarlierRuns(ns, (runs || {}).earlier || []) +
+    histories +
     "</section>"
   );
 }
@@ -4158,10 +4250,14 @@ export function renderArchivedSchedule(ns, name, runs, points, catalogError) {
  *  point list and says so by name; a namespace with no catalog has no points
  *  and that is not an error either. In both cases the history still renders,
  *  with the two verdict columns saying what they are. */
-export async function readSchedulePoints(api, ns, lifecycle) {
+export async function readSchedulePoints(api, ns, lifecycle, readers) {
+  const source = readers || {};
+  const listCatalogs = source.listCatalogs || (() => listD3("catalog", ns, readOptions(lifecycle)));
+  const readPoints = source.readPoints || ((name, query) => readCatalogPoints(ns, name, query,
+    readOptions(lifecycle)));
   let catalogs;
   try {
-    catalogs = itemsOf(await listD3("catalog", ns, readOptions(lifecycle)));
+    catalogs = itemsOf(await listCatalogs());
   } catch (error) {
     if (cancelled(error, lifecycle)) {
       throw error;
@@ -4176,10 +4272,27 @@ export async function readSchedulePoints(api, ns, lifecycle) {
       continue;
     }
     try {
-      const page = await readCatalogPoints(ns, catalogName, { limit: DETAIL_POINT_PAGE },
-        readOptions(lifecycle));
-      for (const point of (page.items || [])) {
-        points.push(point);
+      let cursor = null;
+      let complete = false;
+      for (let read = 0; read < DETAIL_POINT_PAGE_BUDGET; read += 1) {
+        const query = { limit: DETAIL_POINT_PAGE };
+        if (cursor !== null) {
+          query.cursor = cursor;
+        }
+        const page = await readPoints(catalogName, query);
+        for (const point of (page.items || [])) {
+          points.push(point);
+        }
+        cursor = (((page || {}).page || {}).nextCursor) || null;
+        if (cursor === null) {
+          complete = true;
+          break;
+        }
+      }
+      if (!complete) {
+        const error = new Error("The recovery catalog has more point pages than this detail view may read; its history is incomplete.");
+        error.reason = "CatalogPointPageLimit";
+        failure = error;
       }
     } catch (error) {
       if (cancelled(error, lifecycle)) {
@@ -4188,13 +4301,17 @@ export async function readSchedulePoints(api, ns, lifecycle) {
       failure = error;
     }
   }
-  return { points: points, error: points.length === 0 ? failure : null };
+  return { points: points, error: failure };
 }
 
 /** How many points one catalog page contributes to a schedule's history. The
  *  catalog view is itself a window over the archive (D3 section 5.6); this is a
  *  window over that, and the history table says which runs it could not place. */
 export const DETAIL_POINT_PAGE = 200;
+
+/** The bounded number of cursor pages a detail can read before it names the
+ * incomplete history instead of presenting a prefix as a catalog answer. */
+export const DETAIL_POINT_PAGE_BUDGET = 25;
 
 /** `#/schedules?ns=<ns>&name=<name>`: one schedule, its actions and its
  *  history. */
@@ -4212,7 +4329,15 @@ export async function mountScheduleDetail(node, ns, name, parse, lifecycle, deps
         return null;
       }),
       api.list(ns, BACKUPS, readOptions(lifecycle)),
-      api.list(ns, CLUSTERS, readOptions(lifecycle)),
+      // The schedule and backup reads above are the detail's facts. Auxiliary
+      // connection enumeration only enriches writable panels; a viewer denied
+      // it still gets the read-only detail rather than an error page.
+      api.list(ns, CLUSTERS, readOptions(lifecycle)).catch((error) => {
+        if (cancelled(error, lifecycle)) {
+          throw error;
+        }
+        return { items: [] };
+      }),
     ]);
     if (!active(lifecycle)) {
       return;
