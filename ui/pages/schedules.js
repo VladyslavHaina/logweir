@@ -3207,8 +3207,18 @@ export function renderInheritedDestination(name, pin) {
     return renderDestinationRefusal(policyId(name, "destination"), p);
   }
   const d = p.item || {};
+  // TWO SHAPES, ONE FACT SET. The list this form reads is `DestinationSummary`
+  // -- `endpoint`, `addressing` and `transport` flat, no region, no CA -- and a
+  // full `Destination` nests them. Both are read; a fact the summary does not
+  // publish is SAID to be on the destination's own page, never shown as a
+  // default (the first live run showed "AWS S3" for an http endpoint here).
   const storage = d.storage || {};
-  const transport = d.transport || {};
+  const transport = typeof d.transport === "string" ? { security: d.transport } : (d.transport || {});
+  const endpoint = typeof storage.endpoint === "string" ? storage.endpoint
+    : (typeof d.endpoint === "string" ? d.endpoint : "");
+  const addressing = typeof storage.addressing === "string" ? storage.addressing : d.addressing;
+  const full = d.storage !== undefined && d.storage !== null;
+  const onItsPage = "<span class=\"note\">on the destination's own page</span>";
   const ca = transport.caBundle || {};
   return (
     "<div class=\"inherited-destination\" id=\"" + esc(policyId(name, "destination-inherited")) +
@@ -3218,12 +3228,14 @@ export function renderInheritedDestination(name, pin) {
     "</code>:</p>" +
     facts([
       ["location", "<code>" + cell(d.canonicalUrl) + "</code>"],
-      ["endpoint", storage.endpoint ? cell(storage.endpoint) : "- (AWS S3)"],
-      ["region", cell(storage.region)],
-      ["addressing", "<span data-inherited=\"addressing\">" + cell(storage.addressing) + "</span>"],
+      ["endpoint", endpoint.length > 0 ? cell(endpoint) : "- (AWS S3)"],
+      ["region", full ? cell(storage.region) : onItsPage],
+      ["addressing", "<span data-inherited=\"addressing\">" + cell(addressing) + "</span>"],
       ["transport", "<span data-inherited=\"transport\">" + transportCell(transport.security) +
         "</span>"],
-      ["private CA", ca.configMapName ? cell(ca.configMapName) : "- (the runner image's trust store)"],
+      ["private CA", full
+        ? (ca.configMapName ? cell(ca.configMapName) : "- (the runner image's trust store)")
+        : onItsPage],
       ["uid", "<code>" + cell(d.uid) + "</code>"],
     ]) +
     "<p class=\"help\">" + esc(INHERITED_DESTINATION_SENTENCE) + "</p>" +

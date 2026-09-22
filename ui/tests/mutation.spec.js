@@ -1765,9 +1765,16 @@ function savedWizardApi(ns, destinations, preflightAnswers) {
     const found = destinations.find((d) => d.name === name);
     return { item: found === undefined ? null : clone(found) };
   };
+  // THE LIST IS SUMMARIES, AS THE PRODUCT API ANSWERS IT: no bucket, prefix,
+  // region or digest. The first live run found the page treating a summary as
+  // a full destination.
   k8s.destinations = async () => {
     k8s.calls.push({ verb: "destinations" });
-    return { items: clone(destinations) };
+    return { items: destinations.map((d) => ({
+      name: d.name, uid: d.uid, generation: d.generation, canonicalUrl: d.canonicalUrl,
+      endpoint: (d.storage || {}).endpoint, transport: (d.transport || {}).security,
+      addressing: (d.storage || {}).addressing, status: d.status, default: d.default === true,
+    })) };
   };
   k8s.started = [];
   k8s.startPreflight = async (_ns, request) => {

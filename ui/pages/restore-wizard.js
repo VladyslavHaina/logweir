@@ -830,8 +830,8 @@ export function renderEvidenceDestinationField(state, errors) {
       "<option value=\"" + esc(d.uid) + "\"" +
       (!refused && d.uid === pinned.uid ? " selected" : "") + ">" +
       esc(d.name + " -- " + String(d.canonicalUrl || "") + " (" +
-        String(((d.transport || {}).security) || "?") + ", " +
-        String(((d.storage || {}).addressing) || "?") + ")" +
+        String(typeof d.transport === "string" ? d.transport : ((d.transport || {}).security) || "?") +
+        ", " + String(((d.storage || {}).addressing) || d.addressing || "?") + ")" +
         (d.name === own ? " -- this recovery point's destination" : "")) +
       "</option>").join("") +
     "</select>" +
@@ -3225,6 +3225,28 @@ export async function mountRestoreWizard(node, ns, params, parse, deps, lifecycl
         return;
       }
     }
+    // A KEPT EVIDENCE CHOICE IS READ IN FULL BEFORE THE DRAFT IS APPLIED: the
+    // list is summaries, and a summary carries no bucket to sign.
+    const kept = readDraft(formKey(ns, WIZARD_FORM));
+    const keptName = kept !== null && typeof kept.evidenceDestination === "string"
+      ? kept.evidenceDestination : "";
+    if (Array.isArray(destinations) && destination !== null && keptName.length > 0 &&
+      keptName !== destination.name) {
+      try {
+        const read = await api.destination(ns, keptName, readOptions(lifecycle));
+        const item = (read || {}).item || null;
+        if (item !== null) {
+          destinations = destinations.filter((d) => d.name !== keptName).concat([item]);
+        }
+      } catch (unread) {
+        if (cancelled(unread, lifecycle)) {
+          throw unread;
+        }
+      }
+      if (!active(lifecycle)) {
+        return;
+      }
+    }
     const state = initialState(ns, clusters, backups, selection, destination, destinations);
     if (state.pointState === "none") {
       if (completedBackups(backups).length === 0) {
@@ -3552,8 +3574,13 @@ export function evidenceStoreOf(destination) {
 }
 
 /** The saved destinations the evidence selector offers: the recovery point's
- *  own first, then every other one this page read that publishes a usable S3
- *  location, each once by uid. */
+ *  own first, then every other one this page read, each once by uid.
+ *
+ *  THE LIST IS `DestinationSummary`, which names a destination and publishes
+ *  its canonical URL, endpoint, addressing and transport but NOT its bucket,
+ *  prefix, region or location digest -- so an option is a choice to offer, and
+ *  the storage signed for it comes from the FULL destination, read when it is
+ *  chosen (`wire`, `mountRestoreWizard`) and pinned then. */
 export function evidenceDestinationOptions(state) {
   const s = state || {};
   const own = s.savedDestination || null;
@@ -3561,7 +3588,7 @@ export function evidenceDestinationOptions(state) {
   const out = [];
   for (const d of [own].concat(Array.isArray(s.evidenceDestinations) ? s.evidenceDestinations : [])) {
     if (d === null || d === undefined || typeof d.uid !== "string" || d.uid.length === 0 ||
-      seen.has(d.uid) || evidenceStoreOf(d) === null) {
+      typeof d.name !== "string" || d.name.length === 0 || seen.has(d.uid)) {
       continue;
     }
     seen.add(d.uid);
@@ -3584,10 +3611,14 @@ export function evidenceDestinationName(state) {
  *  change of uid also marks a held readiness verdict stale, for
  *  `selectTarget`'s reason -- two destinations can publish identical storage
  *  and so render identical bytes, and the verdict was about the other one. */
-export function selectEvidenceDestination(state, uid, name) {
+export function selectEvidenceDestination(state, uid, name, item) {
   const wanted = typeof uid === "string" ? uid : "";
   const before = ((state.evidenceDestination || {}).uid) || "";
-  const found = evidenceDestinationOptions(state).find((d) => d.uid === wanted) || null;
+  const option = evidenceDestinationOptions(state).find((d) => d.uid === wanted) || null;
+  // THE FULL OBJECT, WHEN THE CALLER READ IT, and only when it IS the chosen
+  // uid: a read that answered with another uid is a recreated destination.
+  const full = item !== undefined && item !== null && item.uid === wanted ? item : option;
+  const found = full !== null && evidenceStoreOf(full) !== null ? full : null;
   const held = (state.readiness || {}).preflight || null;
   if (wanted !== before && held !== null) {
     state.readiness = Object.assign({}, state.readiness, {
@@ -3603,19 +3634,25 @@ export function selectEvidenceDestination(state, uid, name) {
     });
   }
   if (found === null) {
-    state.evidenceDestination = {
-      name: typeof name === "string" ? name : "", uid: wanted, locationDigest: "",
-    };
+    const label = option !== null ? option.name
+      : (typeof name === "string" && name.length > 0 ? name : "(unnamed)");
+    state.evidenceDestination = { name: label, uid: wanted, locationDigest: "" };
     state.evidenceDestinationProblem = wanted.length === 0
       ? "choose the saved destination the evidence is written to"
-      : "saved destination " + (typeof name === "string" && name.length > 0 ? name : "(unnamed)") +
-        " (uid " + wanted + ") is not in this namespace any more, or was recreated under a " +
-        "new uid; a different destination is a different store reached with a different " +
-        "credential, so choose the evidence destination you mean";
+      : (option !== null
+        ? "saved destination " + label + " (uid " + wanted + ") could not be read in full, so " +
+          "its evidence location and transport are unknown and nothing is signed for it; " +
+          "choose it again, or another one"
+        : "saved destination " + label + " (uid " + wanted + ") is not in this namespace any " +
+          "more, or was recreated under a new uid; a different destination is a different " +
+          "store reached with a different credential, so choose the evidence destination you " +
+          "mean");
     state.fields.evidence = Object.assign({}, state.fields.evidence, { bucket: "" });
     state.evidenceBucket = "";
     return;
   }
+  state.evidenceDestinations = (Array.isArray(state.evidenceDestinations)
+    ? state.evidenceDestinations : []).map((d) => (d && d.uid === found.uid ? found : d));
   state.evidenceDestination = destinationPin(found);
   state.evidenceDestinationProblem = null;
   state.fields.evidence = evidenceStoreOf(found);
@@ -4044,7 +4081,23 @@ function wire(node, state, parse, api, lifecycle, prepared) {
       const picked = valueOf(evidenceDestination);
       if (picked !== (((state.evidenceDestination || {}).uid) || "") ||
         typeof state.evidenceDestinationProblem === "string") {
-        selectEvidenceDestination(state, picked, ((state.evidenceDestination || {}).name) || "");
+        const option = evidenceDestinationOptions(state).find((d) => d.uid === picked) || null;
+        let item = null;
+        if (option !== null && evidenceStoreOf(option) === null && typeof api.destination === "function") {
+          try {
+            item = ((await api.destination(state.ns, option.name, readOptions(lifecycle))) || {}).item || null;
+          } catch (unread) {
+            if (cancelled(unread, lifecycle)) {
+              return;
+            }
+            item = null;
+          }
+          if (!active(lifecycle)) {
+            return;
+          }
+        }
+        selectEvidenceDestination(state, picked,
+          option !== null ? option.name : (((state.evidenceDestination || {}).name) || ""), item);
       }
     }
     if (evidenceBucket !== null) {

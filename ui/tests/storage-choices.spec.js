@@ -416,3 +416,45 @@ test("a_custom_endpoint_needs_path_style_and_the_page_says_so_without_changing_e
   assert.deepEqual([localHttp.storage.addressing, localHttp.transport.security],
     ["pathStyle", "insecureHttp"]);
 });
+
+// ------------------------------------ the list is summaries (found live, run 3)
+
+const summaryOf = (d) => ({
+  name: d.name, uid: d.uid, generation: d.generation, canonicalUrl: d.canonicalUrl,
+  endpoint: (d.storage || {}).endpoint, transport: (d.transport || {}).security,
+  addressing: (d.storage || {}).addressing, status: d.status, default: d.default === true,
+});
+
+test("the_schedule_form_reads_the_inherited_endpoint_and_transport_off_a_destination_summary", () => {
+  const html = renderScheduleForm({ draft: null, clusters: { items: [] },
+    destinations: DESTINATIONS().map(summaryOf), mayOperate: true });
+  const inherited = /id="policy-create-destination-inherited"[\s\S]*?<\/div>/.exec(html)[0];
+  assert.match(inherited, /https:\/\/minio\.storage\.svc:9000/,
+    "NEGATIVE CONTROL: the first live run showed '- (AWS S3)' for a summary with an endpoint");
+  assert.doesNotMatch(inherited, /AWS S3/);
+  assert.match(inherited, /data-inherited="addressing">pathStyle/);
+  assert.match(inherited, /data-inherited="transport">[^<]*<span[^>]*>tls/);
+  assert.match(inherited, /on the destination's own page/,
+    "a fact the summary does not publish is said to be elsewhere, never defaulted");
+});
+
+test("an_evidence_destination_offered_from_a_summary_is_signed_only_from_its_full_read", async () => {
+  const state = savedState([PRIMARY(), EVIDENCE_B()].map(summaryOf));
+  assert.deepEqual(evidenceDestinationOptions(state).map((d) => d.name), ["primary", "evidence-b"],
+    "a summary is offered");
+  const before = clone(state.fields.evidence);
+  selectEvidenceDestination(state, "uid-evidence-b", "evidence-b");
+  assert.match(state.evidenceDestinationProblem, /could not be read in full/,
+    "a summary alone signs nothing");
+  assert.equal(state.fields.evidence.bucket, "");
+  selectEvidenceDestination(state, "uid-evidence-b", "evidence-b", EVIDENCE_B());
+  assert.equal(state.evidenceDestinationProblem, null);
+  assert.deepEqual(state.fields.evidence, evidenceStoreOf(EVIDENCE_B()));
+  assert.notDeepEqual(state.fields.evidence, before);
+  // A READ THAT ANSWERS WITH ANOTHER UID is a recreated destination.
+  const other = savedState([PRIMARY(), EVIDENCE_B()].map(summaryOf));
+  selectEvidenceDestination(other, "uid-evidence-b", "evidence-b",
+    Object.assign(EVIDENCE_B(), { uid: "uid-recreated" }));
+  assert.match(other.evidenceDestinationProblem, /could not be read in full/);
+  assert.equal(other.fields.evidence.bucket, "");
+});
