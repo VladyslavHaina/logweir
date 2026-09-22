@@ -57,6 +57,10 @@ use kube::runtime::controller::Action;
 use kube::runtime::reflector::ObjectRef;
 use kube::runtime::{reflector, watcher, Controller};
 use kube::{Api, Resource, ResourceExt};
+use logweir_core::approval_policy::{
+    self as policy, ApprovalMode, ApprovalPolicy, ApprovalPolicySet, AuthorizationRefusal,
+    EffectivePolicy, ExpectedSubject, RestoreAuthorization, PAYLOAD_TYPE_RESTORE_AUTHORIZATION,
+};
 use logweir_core::ids::sha256_prefixed;
 use logweir_core::trust::{KeyUsage, SigningRefusal};
 use logweir_verify::{verify_detached, Sidecar, VerifyingKey};
@@ -67,7 +71,8 @@ use tracing::{info, warn};
 use super::Context;
 use crate::conditions::{current_condition, merge_condition, StatusVersion};
 use crate::crds::approval::{
-    Approval, ApprovalStatus, ApproverKeyWindow, SubjectKind, VerifiedSubjectRef,
+    Approval, ApprovalStatus, ApproverKeyWindow, AuthorizationProvenance, SubjectKind,
+    VerifiedSubjectRef,
 };
 use crate::crds::backup::Backup;
 use crate::crds::restore::Restore;
@@ -251,6 +256,51 @@ pub enum ApprovalRefusal {
         /// The parse, format-version or document-kind mismatch.
         detail: String,
     },
+    /// PLAT-19.2: the authentic bytes are not a well-formed authorization
+    /// document v2, or name no requester.
+    AuthorizationDocumentInvalid {
+        /// The parse, format or requester failure.
+        detail: String,
+    },
+    /// PLAT-19.2: a v2 document names another object than this referent —
+    /// another namespace, name or UID.
+    AuthorizationSubjectMismatch {
+        /// The signed and observed identities.
+        detail: String,
+    },
+    /// PLAT-19.2: the document's policy, digest or mode is not the namespace's
+    /// current binding — including a v1 document under an explicit binding
+    /// and a v2 document in an unbound namespace. THE DOWNGRADE REFUSAL: an
+    /// ordinary confirmation presented in a governed namespace lands here.
+    ApprovalPolicyMismatch {
+        /// Both policies, named.
+        detail: String,
+    },
+    /// PLAT-19.2: the document's validity window is malformed, longer than the
+    /// policy allows, or issued in the future.
+    AuthorizationWindowInvalid {
+        /// The exact boundary.
+        detail: String,
+    },
+    /// PLAT-19.2: the document's `expiresAt` has passed.
+    AuthorizationExpired {
+        /// The instant and the clock.
+        detail: String,
+    },
+    /// PLAT-19.2: a `Governed` document carries the console's confirmation
+    /// and no approver countersignature yet. NOT A BAD SIGNATURE: it is the
+    /// pending state of a governed request, and the one a console-only
+    /// document written directly to the API server stays in for ever.
+    GovernedApprovalRequired {
+        /// The requester and policy the confirmation names.
+        detail: String,
+    },
+    /// PLAT-19.2: the governed approver's principal is the requester's —
+    /// self-approval, refused where the policy requires independence.
+    SelfApprovalRefused {
+        /// Both principals.
+        detail: String,
+    },
     /// There is no cluster-scoped [`TrustRoster`] named [`ROSTER_NAME`].
     ///
     /// The one variant [`evaluate`] can never return — it takes a
@@ -285,6 +335,13 @@ impl ApprovalRefusal {
             Self::WindowInvalid { .. } => "WindowInvalid",
             Self::ScopeInvalid { .. } => "ScopeInvalid",
             Self::StandingDocumentInvalid { .. } => "StandingDocumentInvalid",
+            Self::AuthorizationDocumentInvalid { .. } => "AuthorizationDocumentInvalid",
+            Self::AuthorizationSubjectMismatch { .. } => "AuthorizationSubjectMismatch",
+            Self::ApprovalPolicyMismatch { .. } => "ApprovalPolicyMismatch",
+            Self::AuthorizationWindowInvalid { .. } => "AuthorizationWindowInvalid",
+            Self::AuthorizationExpired { .. } => "AuthorizationExpired",
+            Self::GovernedApprovalRequired { .. } => "GovernedApprovalRequired",
+            Self::SelfApprovalRefused { .. } => "SelfApprovalRefused",
             Self::RosterNotFound => "RosterNotFound",
         }
     }
@@ -371,8 +428,39 @@ impl fmt::Display for ApprovalRefusal {
             Self::SubjectMismatch { detail } => write!(f, "{detail}"),
             Self::WindowInvalid { detail } => write!(f, "{detail}"),
             Self::ScopeInvalid { detail } => write!(f, "{detail}"),
-            Self::StandingDocumentInvalid { detail } => write!(f, "{detail}"),
+            Self::StandingDocumentInvalid { detail }
+            | Self::AuthorizationDocumentInvalid { detail }
+            | Self::AuthorizationSubjectMismatch { detail }
+            | Self::ApprovalPolicyMismatch { detail }
+            | Self::AuthorizationWindowInvalid { detail }
+            | Self::AuthorizationExpired { detail }
+            | Self::GovernedApprovalRequired { detail }
+            | Self::SelfApprovalRefused { detail } => write!(f, "{detail}"),
             Self::RosterNotFound => write!(f, "{ROSTER_NOT_FOUND_MESSAGE}"),
+        }
+    }
+}
+
+impl From<AuthorizationRefusal> for ApprovalRefusal {
+    /// The shared v2 refusal classes onto this controller's closed set. The
+    /// REASON strings are the same on both sides
+    /// (`AuthorizationRefusal::reason`), so a condition written here and a
+    /// Restore admission refusal written from the same check read alike.
+    fn from(refusal: AuthorizationRefusal) -> Self {
+        let detail = refusal.to_string();
+        match refusal {
+            AuthorizationRefusal::DocumentInvalid(_) => {
+                Self::AuthorizationDocumentInvalid { detail }
+            }
+            AuthorizationRefusal::SubjectMismatch(_) => {
+                Self::AuthorizationSubjectMismatch { detail }
+            }
+            AuthorizationRefusal::PlanHashMismatch { got, want } => {
+                Self::PlanHashMismatch { got, want }
+            }
+            AuthorizationRefusal::PolicyMismatch(_) => Self::ApprovalPolicyMismatch { detail },
+            AuthorizationRefusal::WindowInvalid(_) => Self::AuthorizationWindowInvalid { detail },
+            AuthorizationRefusal::Expired(_) => Self::AuthorizationExpired { detail },
         }
     }
 }
@@ -430,6 +518,9 @@ pub struct Verified {
     /// D3 §15's L10 asserts on an unmigrated cluster and what tells an operator
     /// looking at one `Approval` whether their migration is live.
     pub trust_source: String,
+    /// PLAT-19.2: the policy, mode and console-attested requester a v2
+    /// authorization was verified under; `None` for a v1 approval document.
+    pub authorization: Option<AuthorizationProvenance>,
     /// Filled by [`decide`] with the API object whose bytes were checked.
     /// Pure [`evaluate`] callers have no Kubernetes referent and leave it
     /// absent; only a reconcile outcome is written to status.
@@ -921,7 +1012,236 @@ fn evaluate_inner(
         ticket,
         self_attested_risk,
         trust_source: trust.source.name().to_string(),
+        authorization: None,
         verified_subject_ref: None,
+    })
+}
+
+/// One required signature, found and verified under a key of `usage` from
+/// the resolved trust — the v2 twin of [`evaluate_inner`]'s checks 2-6. Only
+/// keys DECLARING `usage` are offered, so a key of another usage can never
+/// satisfy it (D3 §7.3; G8 makes every policy key carry exactly one).
+fn verify_signature_under(
+    trust: &ResolvedTrust,
+    usage: KeyUsage,
+    sidecar: &Sidecar,
+    approval_bytes: &[u8],
+    now: DateTime<Utc>,
+) -> Result<String, ApprovalRefusal> {
+    if let Some(message) = trust.blocked_for(usage) {
+        return Err(ApprovalRefusal::SignatureInvalid(message.to_string()));
+    }
+    let declared: Vec<&ResolvedKey> = trust
+        .keys
+        .iter()
+        .filter(|k| k.trust.has_usage(usage))
+        .collect();
+    for entry in &declared {
+        if let Err(computed) = &entry.declared_id_matches {
+            return Err(ApprovalRefusal::KeyIdNotInRoster {
+                key_id: format!(
+                    "{} entry declares keyId {} but its own spkiPem hashes to {computed}",
+                    trust_object(trust),
+                    entry.trust.key_id
+                ),
+            });
+        }
+    }
+    let matching: Vec<&&ResolvedKey> = declared
+        .iter()
+        .filter(|k| k.is_usable() && sidecar.signatures.iter().any(|s| s.keyid == k.trust.key_id))
+        .collect();
+    if matching.is_empty() {
+        return Err(ApprovalRefusal::KeyIdNotInRoster {
+            key_id: format!(
+                "the sidecar names [{}] and {}'s {} keys are [{}]",
+                join(sidecar.signatures.iter().map(|s| s.keyid.as_str())),
+                trust_object(trust),
+                usage.as_str(),
+                join(declared.iter().map(|k| k.trust.key_id.as_str())),
+            ),
+        });
+    }
+    let mut last_error: Option<String> = None;
+    let mut hit: Option<String> = None;
+    for entry in matching {
+        let Ok(key) = VerifyingKey::from_pem_str(&entry.spki_pem) else {
+            continue;
+        };
+        match verify_detached(
+            &key,
+            PAYLOAD_TYPE_RESTORE_AUTHORIZATION,
+            approval_bytes,
+            sidecar,
+        ) {
+            Ok(matched) => {
+                hit = Some(matched);
+                break;
+            }
+            Err(e) => last_error = Some(e.to_string()),
+        }
+    }
+    let Some(key_id) = hit else {
+        return Err(ApprovalRefusal::SignatureInvalid(
+            last_error.unwrap_or_else(|| {
+                format!("no {} signature in the sidecar verified", usage.as_str())
+            }),
+        ));
+    };
+    if let Err(refusal) = trust.may_sign_new_for(&key_id, usage, now) {
+        return Err(signing_refusal(trust, &key_id, usage, refusal));
+    }
+    Ok(key_id)
+}
+
+/// **Authorization document v2** (PLAT-19.2, decision D0), as a pure function
+/// of bytes, the namespace's resolved trust, its BOUND approval policy and the
+/// referent — the ordinary and the governed mode in one order.
+///
+/// # The order
+///
+/// 0. The sidecar parses.
+/// 1. Its `payloadType` is [`PAYLOAD_TYPE_RESTORE_AUTHORIZATION`], before any
+///    key is tried.
+/// 2. A `ConsoleConfirmation` signature by a usable key of this namespace's
+///    trust verifies, and that key may sign something new. **Both modes.**
+///    Without it nothing attests who the requester was.
+/// 3. The authentic bytes parse as the v2 document.
+/// 4. [`policy::check_restore_authorization`]: format, the exact subject
+///    INCLUDING UID, the plan hash recomputed from the referent's own bytes,
+///    the policy name AND snapshot digest AND mode against the namespace's
+///    current binding, a non-blank requester, and the window at `now`.
+/// 5. `Governed` only: a second signature, by a usable `GovernedApproval` key
+///    — absent is [`ApprovalRefusal::GovernedApprovalRequired`], the pending
+///    state — and then separation of duties: that key's `principal.id` must
+///    not be the requester's `<issuer>#<subject>`.
+///
+/// # What it never does
+///
+/// Accept a `GovernedApproval` signature in place of the console's, or the
+/// console's in place of the approver's under `Governed`: the two usages are
+/// checked by name, one each.
+///
+/// # Errors
+///
+/// Every refusal is an [`ApprovalRefusal`].
+pub fn evaluate_authorization_v2(
+    approval_bytes: &[u8],
+    sidecar_bytes: &[u8],
+    trust: &ResolvedTrust,
+    now: DateTime<Utc>,
+    expected: &ExpectedSubject,
+    bound: &ApprovalPolicy,
+) -> Result<Verified, ApprovalRefusal> {
+    // ---- 0 / 1 ------------------------------------------------------------
+    let sidecar: Sidecar = serde_json::from_slice(sidecar_bytes).map_err(|e| {
+        ApprovalRefusal::SignatureInvalid(format!(
+            "spec.sidecarBytes is not a DSSE sidecar document: {e}"
+        ))
+    })?;
+    if sidecar.payload_type != PAYLOAD_TYPE_RESTORE_AUTHORIZATION {
+        return Err(ApprovalRefusal::PayloadTypeMismatch {
+            got: sidecar.payload_type,
+            want: PAYLOAD_TYPE_RESTORE_AUTHORIZATION.to_string(),
+        });
+    }
+
+    // ---- 2. the console's confirmation, in BOTH modes ----------------------
+    let confirmation_key_id = verify_signature_under(
+        trust,
+        KeyUsage::ConsoleConfirmation,
+        &sidecar,
+        approval_bytes,
+        now,
+    )?;
+
+    // ---- 3 / 4. the authentic bytes, against the referent and the policy ---
+    let doc = RestoreAuthorization::from_bytes(approval_bytes)?;
+    policy::check_restore_authorization(&doc, expected, bound, now)?;
+    let requester = doc.requester.principal_id();
+
+    // ---- 5. the governed approver, and separation of duties ----------------
+    let (matched_key_id, usage, approver) = match bound.mode {
+        ApprovalMode::Ordinary => (
+            confirmation_key_id.clone(),
+            KeyUsage::ConsoleConfirmation,
+            requester.clone(),
+        ),
+        ApprovalMode::Governed => {
+            let countersigned = sidecar
+                .signatures
+                .iter()
+                .any(|s| s.keyid != confirmation_key_id);
+            if !countersigned {
+                return Err(ApprovalRefusal::GovernedApprovalRequired {
+                    detail: format!(
+                        "the console confirmed requester {requester} under Governed policy {}, \
+                         and no approver has countersigned: a governed request needs a second \
+                         signature over the same bytes by a GovernedApproval key whose \
+                         principal is not the requester's. This Approval authorises nothing",
+                        bound.name
+                    ),
+                });
+            }
+            let approver_key_id = verify_signature_under(
+                trust,
+                KeyUsage::GovernedApproval,
+                &sidecar,
+                approval_bytes,
+                now,
+            )?;
+            let principal = trust
+                .key(&approver_key_id)
+                .map(|k| k.trust.principal_id.clone())
+                .unwrap_or_default();
+            if bound.require_distinct_principal
+                && !policy::separation_holds(&doc.requester, &principal)
+            {
+                return Err(ApprovalRefusal::SelfApprovalRefused {
+                    detail: format!(
+                        "the approver key {approver_key_id} belongs to principal {principal:?} and \
+                         the requester is {requester:?}; policy {} requires the approver to be a \
+                         different principal from the requester, and holding an administrator \
+                         role does not change that",
+                        bound.name
+                    ),
+                });
+            }
+            (approver_key_id, KeyUsage::GovernedApproval, principal)
+        }
+    };
+
+    let key_window = trust.key(&matched_key_id).map(|k| ApproverKeyWindow {
+        key_id: matched_key_id.clone(),
+        not_before: k.trust.not_before,
+        not_after: k.trust.not_after,
+    });
+    // THE VERDICT STOPS BEING TRUE at the earliest of the document's expiry
+    // and the console key's notAfter; the authorising key's notAfter is the
+    // window's own and `Verified::valid_until` takes the minimum with it.
+    let console_not_after = trust
+        .key(&confirmation_key_id)
+        .map_or(DateTime::<Utc>::MAX_UTC, |k| k.trust.not_after);
+    let self_attested_risk = trust
+        .key(&matched_key_id)
+        .is_some_and(|k| k.trust.has_usage(KeyUsage::EvidenceSigning));
+    Ok(Verified {
+        key_window,
+        authorization_usage: usage,
+        document_expires_at: Some(doc.expires_at.min(console_not_after)),
+        approver,
+        ticket: doc.ticket.clone().unwrap_or_default(),
+        self_attested_risk,
+        trust_source: trust.source.name().to_string(),
+        authorization: Some(AuthorizationProvenance {
+            mode: bound.mode.as_str().to_string(),
+            policy_name: bound.name.clone(),
+            policy_digest: bound.digest(),
+            requester,
+            confirmation_key_id,
+        }),
+        verified_subject_ref: None,
+        matched_key_id,
     })
 }
 
@@ -1200,6 +1520,21 @@ impl ApprovalOutcome {
     #[must_use]
     pub fn message(&self) -> String {
         match self {
+            Self::Verified(v) if v.authorization.is_some() => {
+                let provenance = v.authorization.as_ref();
+                format!(
+                    "authorization document v2 verified: the console's ConsoleConfirmation \
+                     signature attests requester {} and the {} key {} authorised it \
+                     (trustSource={}, approvalPolicy={} mode {}); subject, UID, plan hash, policy \
+                     digest and validity window all matched",
+                    provenance.map_or("", |p| p.requester.as_str()),
+                    v.authorization_usage.as_str(),
+                    v.matched_key_id,
+                    v.trust_source,
+                    provenance.map_or("", |p| p.policy_name.as_str()),
+                    provenance.map_or("", |p| p.mode.as_str()),
+                )
+            }
             Self::Verified(v) => {
                 let matched = if v.document_expires_at.is_some() {
                     "subject digest"
@@ -1295,6 +1630,90 @@ impl From<kube::Error> for ReconcileError {
 pub async fn decide(
     approval: &Approval,
     client: &kube::Client,
+) -> Result<ApprovalOutcome, ReconcileError> {
+    decide_with_policy(approval, client, &ApprovalPolicySet::default()).await
+}
+
+/// The v1 / v2 choice for a `Restore` referent, made on the NAMESPACE'S
+/// BINDING and never on what the document claims to be (PLAT-19.2).
+///
+/// An unbound namespace accepts exactly today's v1 approval; a bound one
+/// accepts exactly authorization document v2 naming its policy. The sidecar's
+/// payload type is read only to choose which refusal names the mismatch —
+/// every path to `Verified` still verifies a signature over those bytes.
+#[allow(clippy::too_many_arguments)]
+fn evaluate_restore_referent(
+    approval: &Approval,
+    trust: &ResolvedTrust,
+    now: DateTime<Utc>,
+    namespace: &str,
+    plan_bytes: &str,
+    referent: Option<&VerifiedSubjectRef>,
+    effective: &EffectivePolicy,
+) -> Result<Verified, ApprovalRefusal> {
+    let payload_type = serde_json::from_str::<Sidecar>(&approval.spec.sidecar_bytes)
+        .ok()
+        .map(|s| s.payload_type);
+    match effective {
+        EffectivePolicy::Legacy => {
+            if payload_type.as_deref() == Some(PAYLOAD_TYPE_RESTORE_AUTHORIZATION) {
+                return Err(policy::unbound_namespace_refusal(namespace).into());
+            }
+            evaluate(
+                approval.spec.approval_bytes.as_bytes(),
+                approval.spec.sidecar_bytes.as_bytes(),
+                trust,
+                now,
+                SubjectKind::Restore.as_str(),
+                plan_bytes.as_bytes(),
+            )
+        }
+        EffectivePolicy::Bound(bound) => {
+            if payload_type.as_deref() == Some(PAYLOAD_TYPE_APPROVAL) {
+                return Err(policy::v1_under_bound_policy_refusal(bound).into());
+            }
+            let expected = ExpectedSubject {
+                namespace: namespace.to_string(),
+                name: approval.spec.subject_ref.name.clone(),
+                uid: referent.map(|r| r.uid.clone()).unwrap_or_default(),
+                plan_hash: sha256_prefixed(plan_bytes.as_bytes()),
+            };
+            evaluate_authorization_v2(
+                approval.spec.approval_bytes.as_bytes(),
+                approval.spec.sidecar_bytes.as_bytes(),
+                trust,
+                now,
+                &expected,
+                bound,
+            )
+        }
+    }
+}
+
+/// [`decide`], under the installation's approval policies — PLAT-19.2.
+///
+/// # Errors
+///
+/// [`ReconcileError`] for anything that is not a verdict.
+pub async fn decide_with_policy(
+    approval: &Approval,
+    client: &kube::Client,
+    policies: &ApprovalPolicySet,
+) -> Result<ApprovalOutcome, ReconcileError> {
+    decide_with_policy_at(approval, client, policies, Utc::now()).await
+}
+
+/// [`decide_with_policy`] with the clock passed in, so a test can decide a
+/// fixed document inside its own validity window.
+///
+/// # Errors
+///
+/// [`ReconcileError`] for anything that is not a verdict.
+pub async fn decide_with_policy_at(
+    approval: &Approval,
+    client: &kube::Client,
+    policies: &ApprovalPolicySet,
+    now: DateTime<Utc>,
 ) -> Result<ApprovalOutcome, ReconcileError> {
     let name = approval.name_any();
     let namespace = approval
@@ -1486,7 +1905,6 @@ pub async fn decide(
 
     // `.as_bytes()`, WITH NO DECODE STEP. Interface **I18**: `approvalBytes`
     // and `sidecarBytes` are the UTF-8 document text, verbatim, never base64.
-    let now = Utc::now();
     let want = sha256_prefixed(plan_bytes.as_bytes());
     let evaluated = if subject.kind == SubjectKind::RehearsalSchedule {
         // Constructed in the schedule arm above. Keeping the option in the
@@ -1501,6 +1919,20 @@ pub async fn decide(
             now,
             referent,
             &want,
+        )
+    } else if subject.kind == SubjectKind::Restore {
+        // PLAT-19.2: THE ONE KIND AN APPROVAL POLICY GOVERNS. The standing
+        // document above keeps its own GovernedApproval-only format (its
+        // schedule-side admission is `rehearsal_schedule`'s), and a `Backup`
+        // referent was refused before this point.
+        evaluate_restore_referent(
+            approval,
+            &trust,
+            now,
+            &namespace,
+            &plan_bytes,
+            verified_subject_ref.as_ref(),
+            &policies.resolve(&namespace),
         )
     } else {
         evaluate(
@@ -1562,39 +1994,48 @@ pub fn status_for(
     now: DateTime<Utc>,
 ) -> ApprovalStatus {
     let verified = outcome.is_verified();
-    let (matched_key_id, approver, ticket, self_attested_risk, key_window, verified_subject_ref) =
-        match outcome {
-            ApprovalOutcome::Verified(v) => (
-                Some(v.matched_key_id.clone()),
-                Some(v.approver.clone()),
-                Some(v.ticket.clone()),
-                Some(v.self_attested_risk),
-                v.key_window.clone(),
-                v.verified_subject_ref.clone(),
-            ),
-            // A refused approval reports NO approver, NO key id AND NO KEY
-            // WINDOW. An approver name lifted out of bytes whose signature did
-            // not verify is an attacker-controlled string on a status field a
-            // UI renders; a window left over from a verdict that has since been
-            // withdrawn is worse, because a reader compares a deadline against
-            // it and finds it open. No key matched, so there is no window —
-            // which the preflight reads as `unknown`, never as valid.
-            //
-            // Subject provenance is different: once established it is a replay
-            // fence and must survive every later failure, including referent
-            // deletion.
-            _ => (
-                None,
-                None,
-                None,
-                None,
-                None,
-                approval
-                    .status
-                    .as_ref()
-                    .and_then(|status| status.verified_subject_ref.clone()),
-            ),
-        };
+    let (
+        matched_key_id,
+        approver,
+        ticket,
+        self_attested_risk,
+        key_window,
+        authorization,
+        verified_subject_ref,
+    ) = match outcome {
+        ApprovalOutcome::Verified(v) => (
+            Some(v.matched_key_id.clone()),
+            Some(v.approver.clone()),
+            Some(v.ticket.clone()),
+            Some(v.self_attested_risk),
+            v.key_window.clone(),
+            v.authorization.clone(),
+            v.verified_subject_ref.clone(),
+        ),
+        // A refused approval reports NO approver, NO key id AND NO KEY
+        // WINDOW. An approver name lifted out of bytes whose signature did
+        // not verify is an attacker-controlled string on a status field a
+        // UI renders; a window left over from a verdict that has since been
+        // withdrawn is worse, because a reader compares a deadline against
+        // it and finds it open. No key matched, so there is no window —
+        // which the preflight reads as `unknown`, never as valid.
+        //
+        // Subject provenance is different: once established it is a replay
+        // fence and must survive every later failure, including referent
+        // deletion.
+        _ => (
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            approval
+                .status
+                .as_ref()
+                .and_then(|status| status.verified_subject_ref.clone()),
+        ),
+    };
     ApprovalStatus {
         verified: Some(verified),
         matched_key_id,
@@ -1602,6 +2043,7 @@ pub fn status_for(
         ticket,
         self_attested_risk,
         approver_key_window: key_window,
+        authorization,
         verified_subject_ref,
         conditions: Some(vec![merge_condition(
             current_condition(
@@ -1644,12 +2086,15 @@ pub fn status_for(
 /// `verifiedSubjectRef` is DELIBERATELY NOT HERE. It is a replay fence, not a
 /// verdict: once established it must survive every later failure, and
 /// [`status_for`] carries it forward for exactly that reason.
-pub const CLEARABLE_STATUS_FIELDS: [&str; 5] = [
+pub const CLEARABLE_STATUS_FIELDS: [&str; 6] = [
     "matchedKeyId",
     "approver",
     "ticket",
     "selfAttestedRisk",
     "approverKeyWindow",
+    // PLAT-19.2: a policy and requester left behind by a withdrawn verdict is
+    // the same "absent read as valid" shape the window is.
+    "authorization",
 ];
 
 /// The `{"status": …}` merge-patch body, with an explicit `null` for every
@@ -1684,11 +2129,24 @@ pub async fn reconcile_approval(
     approval: &Approval,
     client: &kube::Client,
 ) -> Result<ApprovalOutcome, ReconcileError> {
+    reconcile_approval_with_policy(approval, client, &ApprovalPolicySet::default()).await
+}
+
+/// [`reconcile_approval`], under the installation's approval policies.
+///
+/// # Errors
+///
+/// [`ReconcileError`] for anything that is not a verdict.
+pub async fn reconcile_approval_with_policy(
+    approval: &Approval,
+    client: &kube::Client,
+    policies: &ApprovalPolicySet,
+) -> Result<ApprovalOutcome, ReconcileError> {
     let name = approval.name_any();
     let namespace = approval
         .namespace()
         .ok_or_else(|| ReconcileError::NoNamespace(name.clone()))?;
-    let outcome = decide(approval, client).await?;
+    let outcome = decide_with_policy(approval, client, policies).await?;
     let status = status_for(approval, &outcome, Utc::now());
 
     let api: Api<Approval> = Api::namespaced(client.clone(), &namespace);
@@ -1742,8 +2200,12 @@ pub async fn reconcile_approval(
 }
 
 /// The `kube::runtime` reconcile entry point.
-async fn reconcile(approval: Arc<Approval>, ctx: Arc<Context>) -> Result<Action, ReconcileError> {
-    let outcome = reconcile_approval(&approval, &ctx.client).await?;
+async fn reconcile(
+    approval: Arc<Approval>,
+    ctx: Arc<Context>,
+    policies: Arc<ApprovalPolicySet>,
+) -> Result<Action, ReconcileError> {
+    let outcome = reconcile_approval_with_policy(&approval, &ctx.client, &policies).await?;
     // NOT `Action::await_change()`. `TrustRoster` is a different kind and this
     // controller does not watch it, so a roster that arrives after the
     // approval would otherwise never be noticed: an `Approval` refused with
@@ -1811,13 +2273,21 @@ fn policy_targets(
 /// `Api::all`: this controller reconciles approvals in every namespace, which
 /// is what a cluster-scoped install means (Global Constraint 30 — one
 /// controller per cluster, no fleet).
-pub fn controller(client: kube::Client) -> impl std::future::Future<Output = ()> + Send {
+///
+/// `policies` is the installation's approval-policy document, read once by
+/// `main` (PLAT-19.2); an empty set is every namespace on `legacy-governed-v1`.
+pub fn controller(
+    client: kube::Client,
+    policies: Arc<ApprovalPolicySet>,
+) -> impl std::future::Future<Output = ()> + Send {
     // D0 STAGE 5: ONE WATCH PER WATCHED NAMESPACE. `crate::scope` is the whole
     // cluster unless `LOGWEIR_WATCH_NAMESPACES` names the execution
     // namespaces, and then this reconciler runs once per namespace with an
     // `Api::namespaced` watch — the only shape the scoped chart's RoleBindings
-    // permit.
-    crate::scope::run_everywhere(move |namespace| controller_in(client.clone(), namespace))
+    // permit. Every copy shares the one policy set (PLAT-19.2).
+    crate::scope::run_everywhere(move |namespace| {
+        controller_in(client.clone(), namespace, Arc::clone(&policies))
+    })
 }
 
 /// One watch of [`controller`], over `namespace` (`None` is the whole
@@ -1825,6 +2295,7 @@ pub fn controller(client: kube::Client) -> impl std::future::Future<Output = ()>
 fn controller_in(
     client: kube::Client,
     namespace: Option<String>,
+    policies: Arc<ApprovalPolicySet>,
 ) -> impl std::future::Future<Output = ()> + Send {
     let api: Api<Approval> = crate::scope::api(&client, namespace.as_deref());
     let policy_api: Api<crate::crds::trust_policy::TrustPolicy> = Api::all(client.clone());
@@ -1856,7 +2327,11 @@ fn controller_in(
             .watches(policy_api, watcher::Config::default(), move |policy| {
                 policy_targets(&objects, &scopes, &policy)
             })
-            .run(reconcile, error_policy, ctx)
+            .run(
+                move |approval, ctx| reconcile(approval, ctx, Arc::clone(&policies)),
+                error_policy,
+                ctx,
+            )
             // Every item is already logged by `reconcile_approval` or by
             // `error_policy`; the stream exists to be DRIVEN, and a second log
             // line per event would double every one of them.

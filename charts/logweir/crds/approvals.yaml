@@ -120,6 +120,32 @@ spec:
                 - notAfter
                 - notBefore
                 type: object
+              authorization:
+                description: 'PLAT-19.2: the policy, mode and console-attested requester a v2 authorization was verified under — see [`AuthorizationProvenance`]. Absent for a v1 approval document, and cleared by an explicit `null` on every refusal (`controllers::approval::CLEARABLE_STATUS_FIELDS`).'
+                nullable: true
+                properties:
+                  confirmationKeyId:
+                    description: The `ConsoleConfirmation` key whose signature attested the requester.
+                    type: string
+                  mode:
+                    description: '`Governed` or `Ordinary` — the signed `authorizationMode`, which the verdict required to equal the bound policy''s mode.'
+                    type: string
+                  policyDigest:
+                    description: That policy's snapshot digest, `sha256:<hex>`.
+                    type: string
+                  policyName:
+                    description: The approval policy the document names, equal to the namespace's binding at verification time.
+                    type: string
+                  requester:
+                    description: The console-attested requester, `<issuer>#<subject>`.
+                    type: string
+                required:
+                - confirmationKeyId
+                - mode
+                - policyDigest
+                - policyName
+                - requester
+                type: object
               conditions:
                 description: '`Verified`, and whatever else the controller reports.'
                 items:

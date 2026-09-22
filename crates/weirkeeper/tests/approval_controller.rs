@@ -1198,6 +1198,7 @@ async fn a_recreated_subject_uid_does_not_rebind_an_existing_approval() {
         ticket: Some("CHG-4711".to_string()),
         self_attested_risk: Some(false),
         approver_key_window: None,
+        authorization: None,
         verified_subject_ref: Some(VerifiedSubjectRef {
             api_version: "logweir.dev/v1alpha1".to_string(),
             kind: SubjectKind::Restore,
@@ -3038,7 +3039,7 @@ fn the_approval_reconcile_requeues_at_its_keys_not_after() {
     )
     .expect("the reconciler's own source");
     let start = src
-        .find("async fn reconcile(approval:")
+        .find("async fn reconcile(\n    approval:")
         .expect("the kube::runtime entry point");
     let end = src[start..]
         .find("\n/// Requeue on an error")
@@ -3463,7 +3464,7 @@ fn a_trust_policy_event_enqueues_the_approvals_it_could_govern() {
     )
     .expect("the reconciler's own source");
     let start = src
-        .find("pub fn controller(client: kube::Client)")
+        .find("pub fn controller(\n    client: kube::Client,")
         .expect("the controller constructor");
     let body = &src[start..];
     assert!(

@@ -197,6 +197,34 @@ pub struct ApproverKeyWindow {
     pub not_after: Time,
 }
 
+/// Which authorization a `Verified=True` verdict was made under — PLAT-19.2.
+///
+/// PRESENT ONLY FOR AN AUTHORIZATION DOCUMENT V2 (decision D0). A v1 approval
+/// document — the only kind a namespace with no approval-policy binding
+/// accepts — names no policy and no requester, so it publishes none, and a
+/// reader must read "absent" as "legacy governed approval", never as "any
+/// policy".
+///
+/// Restore admission compares [`Self::policy_digest`] and [`Self::mode`] with
+/// the namespace's CURRENT binding before any Job exists, so a verdict made
+/// under a policy the installation has since replaced admits nothing.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthorizationProvenance {
+    /// `Governed` or `Ordinary` — the signed `authorizationMode`, which the
+    /// verdict required to equal the bound policy's mode.
+    pub mode: String,
+    /// The approval policy the document names, equal to the namespace's
+    /// binding at verification time.
+    pub policy_name: String,
+    /// That policy's snapshot digest, `sha256:<hex>`.
+    pub policy_digest: String,
+    /// The console-attested requester, `<issuer>#<subject>`.
+    pub requester: String,
+    /// The `ConsoleConfirmation` key whose signature attested the requester.
+    pub confirmation_key_id: String,
+}
+
 /// `Approval.status`.
 #[derive(Deserialize, Serialize, Clone, Debug, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -229,6 +257,12 @@ pub struct ApprovalStatus {
     /// the one shape a reader would read as "this key is good until then".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approver_key_window: Option<ApproverKeyWindow>,
+    /// PLAT-19.2: the policy, mode and console-attested requester a v2
+    /// authorization was verified under — see [`AuthorizationProvenance`].
+    /// Absent for a v1 approval document, and cleared by an explicit `null`
+    /// on every refusal (`controllers::approval::CLEARABLE_STATUS_FIELDS`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization: Option<AuthorizationProvenance>,
     /// The exact referent identity used for the first successful verification.
     /// Once present it is retained across later failures so a same-named,
     /// recreated object can never acquire this Approval on a later reconcile.

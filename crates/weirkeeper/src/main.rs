@@ -274,6 +274,31 @@ fn run() -> ExitCode {
         "the runner pull policy every Job this controller creates will carry"
     );
 
+    // THE INSTALLATION'S APPROVAL POLICIES — PLAT-19.2, and the FOURTH thing
+    // this file reads out of the environment. Same arrangement as the three
+    // reads above: the read is here, the decision is
+    // `weirkeeper::approval_policy::configured_policy`. Absent is every
+    // namespace on `legacy-governed-v1`; a file that cannot be read or does
+    // not validate is a refusal to start, because an operator who bound a
+    // namespace Governed and got legacy would be told nothing.
+    let approval_policies = match weirkeeper::approval_policy::configured_policy(
+        std::env::var(weirkeeper::approval_policy::APPROVAL_POLICY_FILE_ENV),
+        |path| std::fs::read_to_string(path),
+    ) {
+        Ok(set) => std::sync::Arc::new(set),
+        Err(message) => {
+            error!(error = %message, "refusing to start: the approval-policy document is invalid");
+            return ExitCode::FAILURE;
+        }
+    };
+    info!(
+        approval_policy_digest = %approval_policies.digest(),
+        bound_namespaces = ?approval_policies.bound_namespaces(),
+        allow_ordinary_confirmation = approval_policies.allows_ordinary_confirmation(),
+        "the approval policies this controller enforces; an unbound namespace is \
+         legacy-governed-v1"
+    );
+
     // The pair, threaded as ONE value from here on.
     let runner = weirkeeper::job::RunnerImage {
         image: runner_image,
@@ -369,6 +394,7 @@ fn run() -> ExitCode {
         )));
         controllers.push(Box::pin(weirkeeper::controllers::approval::controller(
             client.clone(),
+            approval_policies.clone(),
         )));
         // Task 19 threads the ONE read-only archive handle through this call
         // rather than adding a fourth `controllers.push(…)` line: retention is

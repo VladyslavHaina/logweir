@@ -130,6 +130,9 @@
 //! reconciler that publishes each destination's `Valid` condition, canonical
 //! URL and two digests.
 
+/// PLAT-19.2: the installation's approval-policy document, read once at
+/// startup; the contract is `logweir_core::approval_policy`'s.
+pub mod approval_policy;
 pub mod backup_execution;
 pub mod cadence;
 pub mod catalog_view;
