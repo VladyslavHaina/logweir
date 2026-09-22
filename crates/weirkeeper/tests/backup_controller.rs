@@ -11154,10 +11154,10 @@ fn finished_routes_for_destination(
 /// # The defect
 ///
 /// `evidence_source` answers `NotAttempted` with a sentence naming exactly why
-/// there is no reader — for `SecretKeys` and `WorkloadIdentity`, that the grant
-/// is one only a pod may hold (D2 §3.9's evidence-fetch Job, which this build
-/// does not create) and that the operator can run `logweir drill verify` or
-/// move the destination to an allowlisted `ControllerIdentity`. Because
+/// there is no reader — at the time, for `SecretKeys` and `WorkloadIdentity`
+/// too, whose evidence-fetch Job did not exist yet; today for a destination
+/// with no `evidenceRead` at all — and that the operator can run
+/// `logweir drill verify`. Because
 /// nothing was fetched, `receipt_sha256` is `None` BY CONSTRUCTION — and the
 /// second patch used to be fenced on that digest, so the whole block was
 /// skipped and the operator saw **no** `status.evidence.verification` field at
@@ -12889,9 +12889,12 @@ mod evidence_fetch_job {
             .iter()
             .rposition(|b| b.method == "PATCH" && path(&b.uri).ends_with("/status"))
             .expect("status");
+        // The FIRST patch of the evidence Job, not the last: a TTL sent before
+        // the commit and again after it still lets garbage collection race
+        // the relay (mutant M12).
         let ttl_at = bodies
             .iter()
-            .rposition(|b| b.method == "PATCH" && path(&b.uri).ends_with(&ev_name(1)))
+            .position(|b| b.method == "PATCH" && path(&b.uri).ends_with(&ev_name(1)))
             .expect("the TTL patch");
         assert!(status_at < ttl_at, "the TTL only after the status commit");
         assert!(bodies[ttl_at].body.contains("ttlSecondsAfterFinished"));

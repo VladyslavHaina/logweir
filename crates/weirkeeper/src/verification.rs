@@ -1248,12 +1248,11 @@ const VERIFICATION_CLEARED_KEYS: [&str; 4] = ["matchedKeyId", "detail", "signedA
 ///
 /// # Reachability, stated rather than assumed
 ///
-/// **On the second patch there is no producer today.** `status_is_terminal`
-/// short-circuits every pass after the terminal patch, so that patch runs at
-/// most once per object and no `NotAttempted` block is ever merged over a
-/// `Valid` one. The nulls are written there anyway, because the argument that
-/// makes them unnecessary is an argument about a DIFFERENT function
-/// (`status_is_terminal`) that the next change to it would silently retire.
+/// **On the second patch a producer exists since the evidence-fetch Job**
+/// (`crate::evidence_fetch`): a terminal object's `Pending` block is replaced
+/// by the reached verdict on a LATER pass, and a failed attempt's
+/// `NotAttempted` by the next attempt's `Pending`. Those writes go through the
+/// same wrapper, so no stale key survives a verdict change.
 ///
 /// **On [`Retrust::patch`] a producer exists**, which is why finding R4 is not
 /// hypothetical: `apply_retrust` runs on TERMINAL objects, repeatedly, every

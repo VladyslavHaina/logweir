@@ -4317,8 +4317,8 @@ fn an_unread_archive_neither_withdraws_nor_presents_a_verdict() {
         (
             "a grant only a pod may hold",
             weirkeeper::verification::SigningTime::NotAttempted(
-                "BackupDestination team-a/warm reads evidence with a grant only a pod may hold \
-                 (D2 §3.9's evidence-fetch Job), and this build does not create that Job"
+                "BackupDestination team-a/warm reads evidence with a grant only a pod may hold; \
+                 the signing time is not re-read by the re-trust pass"
                     .to_string(),
             ),
             "only a pod may hold",

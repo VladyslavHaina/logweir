@@ -782,8 +782,9 @@ fn an_unreadable_newest_point_selects_the_older_one_and_opens_archive_unavailabl
 /// The shape the live run measured, as a candidate.
 ///
 /// A destination whose `evidenceRead` grant is `SecretKeys` is read through D2
-/// §3.9's evidence-fetch Job, which this build does not create, so the
-/// controller reaches NO verification verdict — it says so, as `NotAttempted`
+/// §3.9's evidence-fetch Job, which the build this was measured on did not yet
+/// create, so the controller reached NO verification verdict — it said so, as
+/// `NotAttempted`
 /// with a sentence — and therefore writes no `status.capture` and no
 /// `status.evidence.receiptSha256`. The run itself succeeded and the archive
 /// is fine. Every field here is a fact the live artifact
