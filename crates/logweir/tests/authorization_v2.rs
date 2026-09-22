@@ -310,6 +310,13 @@ fn the_snapshot_must_be_the_policy_the_document_names() {
         &k,
     );
     assert!(is_guard(&result), "{}", message(&result));
+    // Refused BY THE POLICY CHECK, not incidentally by the Governed arm's
+    // "approver key == console key" rule (review M1).
+    assert!(
+        message(&result).contains(POLICY_MISMATCH),
+        "{}",
+        message(&result)
+    );
     let spaced = String::from_utf8(policy(ApprovalMode::Ordinary).snapshot_bytes())
         .expect("utf-8")
         .replace(',', ", ");
@@ -324,6 +331,61 @@ fn the_snapshot_must_be_the_policy_the_document_names() {
         &k,
     );
     assert!(is_guard(&result), "{}", message(&result));
+}
+
+/// The runner's own policy-digest check, and nothing else (review M1).
+const POLICY_MISMATCH: &str = "a policy change requires a new confirmation";
+
+/// An EDITED policy with the same name and the same mode -- `maxAgeSeconds`
+/// 600 instead of 900 -- frozen into an otherwise valid ordinary bundle. Only
+/// the digest differs, so the ONLY check that can refuse it is the runner's
+/// comparison of the document's `policy.digest` with the mounted snapshot's;
+/// the window (6 min) fits both policies. The control is the same bundle with
+/// the unedited snapshot, which verifies.
+#[test]
+fn an_edited_snapshot_of_the_same_policy_is_refused_by_the_digest_alone() {
+    let k = keys();
+    let doc = document(ApprovalMode::Ordinary).to_bytes();
+    let side = sidecar(&doc, &k, false);
+    let unedited = policy(ApprovalMode::Ordinary);
+    let edited = logweir_core::approval_policy::ApprovalPolicy {
+        max_age_seconds: 600,
+        ..unedited.clone()
+    };
+    assert_eq!(edited.name, unedited.name);
+    assert_eq!(edited.mode, unedited.mode);
+    assert_ne!(edited.digest(), unedited.digest());
+    let run = |snapshot: &[u8]| {
+        verify(
+            PLAN,
+            &doc,
+            &side,
+            &pem(&k.console),
+            &pem(&k.console),
+            snapshot,
+            &subject(),
+            &k,
+        )
+    };
+    run(&unedited.snapshot_bytes()).expect("the control: the unedited snapshot verifies");
+    let refused = run(&edited.snapshot_bytes());
+    assert!(is_guard(&refused), "{}", message(&refused));
+    assert!(
+        message(&refused).contains(POLICY_MISMATCH),
+        "{}",
+        message(&refused)
+    );
+
+    // And the REAL runner, exit 3, before any client is constructed.
+    let m = mount(&k, ApprovalMode::Ordinary, false);
+    std::fs::write(&m.snapshot, edited.snapshot_bytes()).expect("edited snapshot");
+    let (code, transcript) = invoke(&m, &contract_env(&m), true);
+    assert_eq!(code, 3, "{transcript}");
+    assert!(transcript.contains(POLICY_MISMATCH), "{transcript}");
+    assert!(
+        !transcript.contains("19099"),
+        "no broker was dialled:\n{transcript}"
+    );
 }
 
 #[test]
