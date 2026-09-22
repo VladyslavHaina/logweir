@@ -404,7 +404,9 @@ pub struct PointCandidate {
     /// `protection::evidence_objective_met`. A view is served until
     /// `viewExpiresAt`, so a row harvested before the controller found a
     /// replaced receipt or a revoked signer would otherwise overrule the
-    /// controller's refusal. Always `false` for a catalog-only point.
+    /// controller's refusal. For a catalog-only point it is `true` when a
+    /// `Backup` the pass listed refused the same receipt
+    /// (`catalog_view::ControllerRefusals`), and `false` otherwise.
     pub verdict_refused: bool,
     /// Whether a retention run currently holds a lease over this point
     /// (D3 §6.6).

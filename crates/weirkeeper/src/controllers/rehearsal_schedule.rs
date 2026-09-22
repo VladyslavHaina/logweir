@@ -1372,15 +1372,28 @@ async fn candidates(
     now: DateTime<Utc>,
 ) -> Result<Vec<PointCandidate>, ReconcileError> {
     let mut by_id: BTreeMap<String, PointCandidate> = BTreeMap::new();
+    let mut refusals = crate::catalog_view::ControllerRefusals::default();
 
     // ---- the Backups ------------------------------------------------------
-    if let Some(refs) = schedule.spec.point.schedule_refs.as_ref() {
+    //
+    // Listed for `catalogRef` as well as for `scheduleRefs`: a catalog-only
+    // point whose `Backup` the controller refused is refused too, whichever
+    // schedule produced it (`catalog_view::ControllerRefusals`). One page of
+    // 500, the bound this reconcile already paid; the runner re-verifies the
+    // point binding before any data-plane work in any case.
+    let schedule_refs = schedule.spec.point.schedule_refs.as_ref();
+    if schedule_refs.is_some() || schedule.spec.point.catalog_ref.is_some() {
         let backups: Api<Backup> = Api::namespaced(ctx.client.clone(), namespace);
         let list = backups
             .list(&ListParams::default().limit(500))
             .await
             .map_err(ReconcileError::Api)?;
-        let wanted: Vec<&str> = refs.iter().map(|r| r.name.as_str()).collect();
+        refusals = crate::catalog_view::ControllerRefusals::from_backups(&list.items);
+        let wanted: Vec<&str> = schedule_refs
+            .into_iter()
+            .flatten()
+            .map(|r| r.name.as_str())
+            .collect();
         let mut seen = 0usize;
         for backup in list.items {
             if seen >= MAX_BACKUPS_SCANNED {
@@ -1453,7 +1466,7 @@ async fn candidates(
                 let Ok(entry) = serde_json::from_str::<crate::catalog_view::ViewEntry>(line) else {
                     continue;
                 };
-                merge_catalog_entry(&mut by_id, entry, destination.clone());
+                merge_catalog_entry(&mut by_id, entry, destination.clone(), &refusals);
             }
         }
     }
@@ -1535,11 +1548,17 @@ pub fn point_id_from_receipt_digest(digest: &str) -> Option<String> {
 }
 
 /// Fold one catalog view entry into the candidate set.
+///
+/// `refusals` are the reached refusals among the `Backup`s this pass listed.
+/// A row they name is never selectable — as a catalog-only candidate too,
+/// where no `Backup` candidate of this schedule carries the verdict.
 pub fn merge_catalog_entry(
     by_id: &mut BTreeMap<String, PointCandidate>,
     entry: crate::catalog_view::ViewEntry,
     destination: Option<String>,
+    refusals: &crate::catalog_view::ControllerRefusals,
 ) {
+    let refused_elsewhere = refusals.refusal_for(&entry).is_some();
     // An IN-RANGE capture time or none. `0` is what a row that never wrote the
     // field would carry, not a capture in 1970 (the protection join reads it
     // the same way), and a value chrono cannot represent is not a time either.
@@ -1559,7 +1578,8 @@ pub fn merge_catalog_entry(
             // before the receipt was replaced or its signer revoked still says
             // `selectable`; it supplies neither selectability nor the capture
             // facts of a point the controller refused.
-            if existing.verdict_refused {
+            if existing.verdict_refused || refused_elsewhere {
+                existing.verdict_refused = true;
                 existing.selectable = false;
                 return;
             }
@@ -1611,8 +1631,10 @@ pub fn merge_catalog_entry(
                     manifest_sha256: entry.manifest_sha256,
                     destination,
                     source_cluster_id: None,
-                    selectable: entry.selectable,
-                    verdict_refused: false,
+                    // A CATALOG-ONLY ROW IS STILL NOT THE CATALOG'S TO DECIDE
+                    // when a `Backup` for the same receipt was refused.
+                    selectable: entry.selectable && !refused_elsewhere,
+                    verdict_refused: refused_elsewhere,
                     retention_lease: false,
                 },
             );

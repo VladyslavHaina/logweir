@@ -2035,7 +2035,12 @@ fn an_unverified_backup_is_never_a_candidate() {
     let mut colliding_entry = catalog_entry.clone();
     colliding_entry.receipt_sha256 =
         "sha256:1111111111111111111111111111111122222222222222222222222222222222".to_string();
-    rs::merge_catalog_entry(&mut by_id, colliding_entry, Some(DESTINATION.to_string()));
+    rs::merge_catalog_entry(
+        &mut by_id,
+        colliding_entry,
+        Some(DESTINATION.to_string()),
+        &Default::default(),
+    );
     let unmerged = by_id.get(POINT_ID).expect("the Backup candidate remains");
     assert!(
         !unmerged.selectable && unmerged.covered.is_none(),
@@ -2043,7 +2048,12 @@ fn an_unverified_backup_is_never_a_candidate() {
          capture, window, or selectability"
     );
 
-    rs::merge_catalog_entry(&mut by_id, catalog_entry, Some(DESTINATION.to_string()));
+    rs::merge_catalog_entry(
+        &mut by_id,
+        catalog_entry,
+        Some(DESTINATION.to_string()),
+        &Default::default(),
+    );
     let merged = by_id.get(POINT_ID).expect("the matching point merged");
     assert!(
         merged.selectable,
@@ -2110,6 +2120,7 @@ fn a_catalog_row_never_overrules_a_reached_backup_refusal() {
             &mut by_id,
             matching_catalog_row(1_758_240_000_000),
             Some(DESTINATION.to_string()),
+            &Default::default(),
         );
         let merged = by_id.get(POINT_ID).expect("the Backup candidate remains");
         assert!(
@@ -2149,6 +2160,7 @@ fn a_catalog_row_never_overrules_a_reached_backup_refusal() {
         &mut by_id,
         matching_catalog_row(1_758_240_000_000),
         Some(DESTINATION.to_string()),
+        &Default::default(),
     );
     assert!(!by_id[POINT_ID].selectable);
 
@@ -2161,6 +2173,7 @@ fn a_catalog_row_never_overrules_a_reached_backup_refusal() {
         &mut by_id,
         matching_catalog_row(1_758_240_000_000),
         Some(DESTINATION.to_string()),
+        &Default::default(),
     );
     assert!(
         by_id[POINT_ID].selectable,
@@ -2182,6 +2195,7 @@ fn a_catalog_row_without_an_in_range_capture_time_makes_nothing_selectable() {
             &mut by_id,
             matching_catalog_row(ms),
             Some(DESTINATION.to_string()),
+            &Default::default(),
         );
         let merged = by_id.get(POINT_ID).expect("the Backup candidate remains");
         assert!(
@@ -2197,6 +2211,7 @@ fn a_catalog_row_without_an_in_range_capture_time_makes_nothing_selectable() {
         &mut by_id,
         matching_catalog_row(i64::MAX),
         Some(DESTINATION.to_string()),
+        &Default::default(),
     );
     assert!(by_id.is_empty());
 }
@@ -2517,4 +2532,247 @@ async fn an_unconfigured_trust_skip_names_and_consumes_the_due_slot() {
         json!({"slot": DUE_SLOT, "reason": "AuthorizationInvalid"})
     );
     assert_eq!(patch["status"]["lastScheduledSlot"], DUE_SLOT);
+}
+
+// ===========================================================================
+// Class sweep: the catalog-only arm of the rehearsal join
+// ===========================================================================
+
+/// A catalog-only candidate — no `Backup` of this schedule's `scheduleRefs`
+/// names it — is still not the catalog's to decide when a `Backup` in the
+/// namespace refused the same receipt. Before the sweep this arm set
+/// `verdict_refused: false` and took `selectable` from the (possibly stale) row.
+///
+/// MUTANT: `selectable: entry.selectable` in `merge_catalog_entry`'s
+/// catalog-only arm. The refused point is selected and this row fails.
+#[test]
+fn a_catalog_only_row_for_a_refused_backup_is_never_selectable() {
+    let topics: Vec<String> = Vec::new();
+    let rules = rehearsal::SelectionRules {
+        topics: &topics,
+        min_age_seconds: 0,
+        max_partitions: 200,
+        target_cluster_id: TARGET_CLUSTER_ID,
+    };
+    for (result, refused) in [
+        ("Invalid", true),
+        ("Untrusted", true),
+        ("SomeFutureVerdict", true),
+        ("NotAttempted", false),
+        ("Valid", false),
+    ] {
+        // A Backup of ANOTHER schedule — not a candidate of this one.
+        let mut other = backup_value("b-other", "2026-09-19T02:00:00Z", json!(["orders"]), false);
+        other["spec"]["scheduleRef"] = json!({"name": "someone-else", "uid": "x"});
+        other["status"]["evidence"]["verification"]["result"] = json!(result);
+        let other: weirkeeper::crds::backup::Backup =
+            serde_json::from_value(other).expect("the fixture parses");
+        let refusals = weirkeeper::catalog_view::ControllerRefusals::from_backups([&other]);
+
+        let mut by_id = std::collections::BTreeMap::new();
+        rs::merge_catalog_entry(
+            &mut by_id,
+            matching_catalog_row(1_758_240_000_000),
+            Some(DESTINATION.to_string()),
+            &refusals,
+        );
+        let merged = by_id.get(POINT_ID).expect("the catalog-only candidate");
+        assert_eq!(merged.verdict_refused, refused, "{result}");
+        assert_eq!(merged.selectable, !refused, "{result}");
+        let candidates: Vec<_> = by_id.into_values().collect();
+        assert_eq!(
+            rehearsal::select_point(&candidates, &rules, now()).is_ok(),
+            !refused,
+            "{result}: a refused receipt is never rehearsed from a catalog row"
+        );
+    }
+}
+
+/// A `catalogRef`-only schedule lists the namespace's `Backup`s too — without
+/// that read the refusal set above would always be empty.
+///
+/// MUTANT: list Backups only when `scheduleRefs` is set. The recorder never
+/// sees `GET …/backups` and this row fails.
+#[tokio::test]
+async fn a_catalog_only_schedule_reads_the_backup_verdicts() {
+    let mut value = schedule_value(json!({}));
+    value["spec"]["point"]
+        .as_object_mut()
+        .expect("point")
+        .remove("scheduleRefs");
+    value["spec"]["point"]["catalogRef"] = json!({"name": "primary"});
+    let schedule: RehearsalSchedule =
+        serde_json::from_value(value).expect("the catalog-only fixture parses");
+    let mut table = happy_routes();
+    // An expired view: the join stops after the Backup read, which is all this
+    // row is about.
+    table.push(Route {
+        method: "GET",
+        path_suffix: "/recoverycatalogs/primary",
+        status: 200,
+        body: json!({
+            "apiVersion": "logweir.dev/v1alpha1",
+            "kind": "RecoveryCatalog",
+            "metadata": {"name": "primary", "namespace": NS, "uid": "cat-uid", "resourceVersion": "2"},
+            "spec": {
+                "destinationRef": {"name": DESTINATION},
+                "sync": {"deepCheck": "ManifestDigest", "intervalSeconds": 3600,
+                         "maxObjectsPerRun": 100000, "mode": "Index", "viewLimit": 4}
+            },
+            "status": {"viewExpiresAt": "2026-09-01T00:00:00Z"}
+        })
+        .to_string(),
+    });
+    let (client, recorder, _) = mock_client_recording_bodies(table);
+    rs::reconcile_schedule(&schedule, &context(client), now())
+        .await
+        .expect("the reconcile answers");
+    assert!(
+        seen(&recorder)
+            .iter()
+            .any(|(m, uri)| m == "GET" && uri.split('?').next().unwrap_or("").ends_with("/backups")),
+        "a catalogRef-only schedule must read the Backup verdicts: {:?}",
+        seen(&recorder)
+    );
+    assert_eq!(posted(&recorder, RESTORES_PATH), 0);
+}
+
+/// A `catalogRef`-only, topic-agnostic schedule (PLAT-15.2's shape), with an
+/// authorization minted for ITS sealed spec.
+fn catalog_only_schedule() -> (RehearsalSchedule, Value) {
+    let mut value = schedule_value(json!({}));
+    let point = value["spec"]["point"].as_object_mut().expect("point");
+    point.remove("scheduleRefs");
+    point.insert("catalogRef".to_string(), json!({"name": "primary"}));
+    point.insert("topics".to_string(), json!([]));
+    let schedule: RehearsalSchedule =
+        serde_json::from_value(value).expect("the catalog-only fixture parses");
+    let digest = rehearsal::template_digest(&schedule.spec).expect("the spec canonicalises");
+    let mut scope = scope_value();
+    scope["templateDigest"] = json!(digest);
+    scope["topics"] = json!([]);
+    let mut envelope: Value =
+        serde_json::from_str(&envelope_with(SCHEDULE_UID, scope, "2026-11-01T00:00:00Z"))
+            .expect("the envelope is JSON");
+    envelope["plan_hash"] = json!(digest);
+    let mut approval = approval_value(&serde_json::to_string_pretty(&envelope).expect("JSON"));
+    approval["spec"]["planHash"] = json!(digest);
+    (schedule, approval)
+}
+
+fn catalog_only_routes(approval: Value, backups: Vec<Value>) -> Vec<Route> {
+    let row = serde_json::to_string(&matching_catalog_row(1_758_240_000_000)).expect("JSON");
+    let mut table = routes(
+        approval,
+        trust_policy_value("Active", None),
+        cluster_value(true, Some(TARGET_CLUSTER_ID)),
+        backup_list(backups),
+        restore_list(vec![]),
+    );
+    table.push(Route {
+        method: "GET",
+        path_suffix: "/recoverycatalogs/primary",
+        status: 200,
+        body: json!({
+            "apiVersion": "logweir.dev/v1alpha1",
+            "kind": "RecoveryCatalog",
+            "metadata": {"name": "primary", "namespace": NS, "uid": "cat-uid", "resourceVersion": "2"},
+            "spec": {
+                "destinationRef": {"name": DESTINATION},
+                "sync": {"deepCheck": "ManifestDigest", "intervalSeconds": 3600,
+                         "maxObjectsPerRun": 100000, "mode": "Index", "viewLimit": 4}
+            },
+            "status": {
+                "viewExpiresAt": "2026-09-21T00:00:00Z",
+                "pages": [{"configMapName": "primary-g1-p0", "index": 0, "count": 1}]
+            }
+        })
+        .to_string(),
+    });
+    table.push(Route {
+        method: "GET",
+        path_suffix: "/configmaps/primary-g1-p0",
+        status: 200,
+        body: json!({
+            "apiVersion": "v1", "kind": "ConfigMap",
+            "metadata": {"name": "primary-g1-p0", "namespace": NS, "resourceVersion": "1"},
+            "immutable": true,
+            "data": {(weirkeeper::catalog_view::PAGE_DATA_KEY): format!("{row}\n")}
+        })
+        .to_string(),
+    });
+    table
+}
+
+/// End to end through the reconciler: the catalog row is fresh and
+/// selectable, and the ONLY difference between the two passes is the verdict
+/// on a `Backup` of another schedule for the same receipt.
+///
+/// MUTANT: leave the pass's refusal set empty (`candidates` never fills it).
+/// The refused pass fires and this row fails.
+#[tokio::test]
+async fn the_reconciler_applies_backup_refusals_to_catalog_only_points() {
+    let (schedule, approval) = catalog_only_schedule();
+    let backup = |result: &str| {
+        let mut v = backup_value("b-other", "2026-09-19T02:00:00Z", json!(["orders"]), false);
+        v["spec"]["scheduleRef"] = json!({"name": "someone-else", "uid": "x"});
+        v["status"]["evidence"]["verification"]["result"] = json!(result);
+        v
+    };
+
+    // CONTROL: NotAttempted — the catalog decides, and the slot fires.
+    let (client, recorder, _) = mock_client_recording_bodies(catalog_only_routes(
+        approval.clone(),
+        vec![backup("NotAttempted")],
+    ));
+    let outcome = rs::reconcile_schedule(&schedule, &context(client), now())
+        .await
+        .expect("the reconcile answers");
+    assert!(
+        matches!(outcome.verdict, rs::Verdict::Fire(_)),
+        "{:?}",
+        outcome.verdict
+    );
+    assert_eq!(posted(&recorder, RESTORES_PATH), 1);
+
+    // Invalid — the same fresh row is refused, and the slot is skipped.
+    let (client, recorder, bodies) =
+        mock_client_recording_bodies(catalog_only_routes(approval, vec![backup("Invalid")]));
+    let outcome = rs::reconcile_schedule(&schedule, &context(client), now())
+        .await
+        .expect("the reconcile answers");
+    assert!(
+        matches!(&outcome.verdict, rs::Verdict::Skipped(s) if s.reason == rehearsal::SkipReason::NoQualifyingPoint),
+        "{:?}",
+        outcome.verdict
+    );
+    assert_eq!(posted(&recorder, RESTORES_PATH), 0);
+    assert_eq!(last_skip(&bodies).as_deref(), Some("NoQualifyingPoint"));
+}
+
+/// Two `Backup`s over one receipt — this schedule's reads `NotAttempted`,
+/// another's was refused — is a refused receipt: the catalog row cannot make
+/// this schedule's candidate selectable either.
+///
+/// MUTANT: consult only the candidate's own `verdict_refused` in the
+/// Backup-candidate arm of `merge_catalog_entry`. The row makes it selectable
+/// and this row fails.
+#[test]
+fn a_refusal_on_another_backup_of_the_same_receipt_is_honoured() {
+    let mine = capture_less_candidate("b-unread", "NotAttempted");
+    let mut other = backup_value("b-other", "2026-09-19T02:00:00Z", json!(["orders"]), false);
+    other["status"]["evidence"]["verification"]["result"] = json!("Untrusted");
+    let other: weirkeeper::crds::backup::Backup =
+        serde_json::from_value(other).expect("the fixture parses");
+    let refusals = weirkeeper::catalog_view::ControllerRefusals::from_backups([&other]);
+    let mut by_id = std::collections::BTreeMap::from([(mine.point_id.clone(), mine)]);
+    rs::merge_catalog_entry(
+        &mut by_id,
+        matching_catalog_row(1_758_240_000_000),
+        Some(DESTINATION.to_string()),
+        &refusals,
+    );
+    let merged = &by_id[POINT_ID];
+    assert!(merged.verdict_refused);
+    assert!(!merged.selectable);
 }

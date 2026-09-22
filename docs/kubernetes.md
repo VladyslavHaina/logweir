@@ -2113,7 +2113,11 @@ the controller could not look: when the Backup's own verification result is
 verdict the controller reached and refused — `Invalid`, `Untrusted`, or a result
 this build does not recognise — is never made selectable by a catalog row, which
 may have been harvested before the receipt was replaced or its signer revoked.
-The catalog also decides selectability only together with a representable,
+The same holds for a catalog-only candidate — a row no `Backup` of the
+schedule's `scheduleRefs` names, which is all a `catalogRef`-only schedule sees:
+the controller lists the namespace's `Backup`s (one page of 500) for either
+kind of source, and a row whose receipt any listed `Backup` refused is never
+selectable. The catalog also decides selectability only together with a representable,
 positive `recoveryPointAtMs`; a row without one leaves the candidate
 non-selectable. The protection policy applies the same rule, and reads an
 unrecognised verification result as `Untrusted`, never as `NotAttempted`. This
