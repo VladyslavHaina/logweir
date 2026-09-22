@@ -9387,7 +9387,6 @@
         "description": "One page of the materialised point view.",
         "type": "object",
         "required": [
-          "incomplete",
           "items",
           "page",
           "requestId",
@@ -9397,7 +9396,8 @@
         "properties": {
           "incomplete": {
             "description": "Whether a ConfigMap page named by this view disappeared while it was being read. Present only for the incomplete read so older clients keep their established `false` behavior when the member is absent.",
-            "type": "boolean"
+            "type": "boolean",
+            "nullable": true
           },
           "items": {
             "description": "The points, newest first, in the order the view materialised them.",

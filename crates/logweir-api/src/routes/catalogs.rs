@@ -489,8 +489,8 @@ pub struct PointPageResponse {
     /// Whether a ConfigMap page named by this view disappeared while it was
     /// being read. Present only for the incomplete read so older clients keep
     /// their established `false` behavior when the member is absent.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub incomplete: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub incomplete: Option<bool>,
     /// When the view ages out.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub view_expires_at: Option<DateTime<Utc>>,
@@ -1033,7 +1033,7 @@ pub async fn points(
             },
             truncated: projected.truncated,
             view_expired: projected.view_expired,
-            incomplete,
+            incomplete: incomplete.then_some(true),
             view_expires_at: projected.view_expires_at,
         },
     ))
