@@ -662,8 +662,8 @@ test("a_console_list_does_not_publish_a_verdict_so_an_unread_run_is_never_offere
 
 test("the_operation_words_map_to_the_verdicts_the_rule_reads", () => {
   assert.equal(ownVerdictOf({ verification: { state: "notAttempted" } }), "NotAttempted");
-  assert.equal(ownVerdictOf({ verification: { state: "pending" } }), null,
-    "pending on a finished run is the API's word for no verdict written");
+  assert.equal(ownVerdictOf({ verification: { state: "pending" } }), "Pending",
+    "the API's pending folds an evidence-fetch Pending into 'no verdict yet', so it waits");
   assert.equal(ownVerdictOf({ verification: { state: "unknown" } }), "Unknown");
   assert.equal(ownVerdictOf({ verification: { state: "invalid" } }), "Invalid");
   assert.equal(ownVerdictOf({ verification: { state: "somethingNew" } }), "Unknown");

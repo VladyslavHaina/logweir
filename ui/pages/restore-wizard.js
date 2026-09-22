@@ -739,13 +739,16 @@ export function backupOwnVerdict(backup) {
 }
 
 /** The product API's normalized verification states, in the custom
- *  resource's words. `pending` on a finished run is the API's word for "no
- *  verdict written yet" (`logweir-api` `status.rs`), which is the absence this
- *  rule defers on; `unknown` is a word this build does not know -- `Untrusted`,
- *  or an evidence-fetch `Pending` -- and is never deferred on. */
+ *  resource's words. `pending` is the API's word for BOTH "no verdict written
+ *  yet" and an evidence-fetch Job's `Pending` (`logweir-api` `status.rs` maps
+ *  `None | Some("Pending")` to it), so it cannot be read as the absence this
+ *  rule defers on: it reads as `Pending`, which waits for the controller's own
+ *  answer. `unknown` -- an `Untrusted`, or a word this build does not know --
+ *  is never deferred on either. Legacy mode reads the custom resource itself,
+ *  where an absent verdict IS an absence. */
 const OPERATION_VERDICTS = Object.freeze({
   notAttempted: "NotAttempted",
-  pending: null,
+  pending: "Pending",
   valid: "Valid",
   invalid: "Invalid",
   noEvidence: "NoEvidence",

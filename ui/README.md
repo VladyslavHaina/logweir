@@ -651,10 +651,12 @@ rather than being offered from the catalog meanwhile.
 never offered. The schedule detail reads the operation of each run a catalog row
 could answer for (a `Succeeded`, windowless run with a row of its set; at most
 25 per page) and notes the verdict and receipt digest beside the run; the
-wizard reads it again when it opens on the offer. The operation's `pending` on a
-finished run is the product API's word for "no verdict written" and defers;
-`unknown` (an `Untrusted`, or an evidence-fetch `Pending`) never does. A read
-that fails leaves the run un-offered.
+wizard reads it again when it opens on the offer. The operation's `pending`
+folds "no verdict written yet" and an evidence-fetch `Pending` into one word, so
+it waits like `Pending`; `notAttempted` defers; `unknown` (an `Untrusted`, or a
+word this build does not know) never does. Legacy mode reads the custom
+resource, where an absent verdict is an absence. A read that fails leaves the
+run un-offered.
 
 ## The topic subset, the mapping, and what a recovery does not do
 
