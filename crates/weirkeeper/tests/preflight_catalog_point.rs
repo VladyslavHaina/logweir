@@ -11,9 +11,9 @@ use k8s_openapi::api::core::v1::ConfigMap;
 use logweir_core::check_contract::{CheckCode, CheckId, CheckOutcome, CheckState};
 use serde_json::{json, Value};
 
+use weirkeeper::catalog_view::ControllerRefusals;
 use weirkeeper::controllers::preflight::{
-    backup_verdict_refuses, catalog_point_facts, catalog_point_refusal, catalog_point_row,
-    CatalogPointFacts, CatalogPointRead, PlanFacts,
+    catalog_point_facts, catalog_point_row, CatalogPointFacts, CatalogPointRead, PlanFacts,
 };
 use weirkeeper::crds::backup::Backup;
 use weirkeeper::crds::recovery_catalog::RecoveryCatalog;
@@ -189,12 +189,13 @@ impl Fixture {
     }
 
     fn facts(&self) -> CatalogPointFacts {
+        let refusals = ControllerRefusals::from_backups(&self.backups);
         catalog_point_facts(&CatalogPointRead {
             catalog_name: "archive",
             point_id: POINT,
             catalog: self.catalog.as_ref(),
             pages: &self.pages,
-            backups: &self.backups,
+            refusals: &refusals,
             backups_complete: self.complete,
             plan: self.plan.as_ref(),
             now: now(),
@@ -354,7 +355,7 @@ fn a_row_the_catalog_does_not_mark_selectable_is_not_ready() {
 
 #[test]
 fn a_reached_backup_refusal_of_the_same_receipt_outranks_a_selectable_row() {
-    for verdict in ["Invalid", "Untrusted", "Pending", "SomethingNew"] {
+    for verdict in ["Invalid", "Untrusted", "SomethingNew"] {
         let mut f = Fixture::healthy();
         f.backups = vec![backup("run-1", Some(verdict), Some(&receipt_sha()), SET)];
         let row = f.row();
@@ -368,7 +369,9 @@ fn a_reached_backup_refusal_of_the_same_receipt_outranks_a_selectable_row() {
     }
     // CONTROLS: a verdict the controller did NOT reach, or a pass, leaves the
     // catalog in charge -- and a refusal of a DIFFERENT receipt is not this one.
-    for verdict in [None, Some("NotAttempted"), Some("Valid")] {
+    // `Pending` is the evidence-fetch Job still reading: not a verdict, and the
+    // shared rule (`catalog_view::is_reached_refusal`) defers on it.
+    for verdict in [None, Some("NotAttempted"), Some("Pending"), Some("Valid")] {
         let mut f = Fixture::healthy();
         f.backups = vec![backup("run-1", verdict, Some(&receipt_sha()), SET)];
         assert_row(
@@ -506,33 +509,27 @@ fn a_plan_not_bound_to_the_row_is_a_binding_mismatch() {
 }
 
 #[test]
-fn the_verdict_rule_is_the_controllers_own() {
-    assert_eq!(backup_verdict_refuses(&backup("a", None, None, SET)), None);
-    assert_eq!(
-        backup_verdict_refuses(&backup("a", Some("NotAttempted"), None, SET)),
-        None
+fn a_refused_verdict_that_names_no_point_makes_the_join_incomplete() {
+    // A refusal with neither a receipt digest nor a set id cannot be tied to a
+    // row -- so it cannot be ruled out as THIS row's, and the answer is unknown.
+    let mut orphan = backup("orphan", Some("Invalid"), None, SET);
+    orphan.status.as_mut().expect("status").backup_id = None;
+    let mut f = Fixture::healthy();
+    f.backups = vec![orphan];
+    assert_row(
+        &f.row(),
+        CheckState::Unknown,
+        CheckCode::CatalogPointViewUnavailable,
+        "an unattributed refusal",
     );
-    assert_eq!(
-        backup_verdict_refuses(&backup("a", Some("Valid"), None, SET)),
-        None
-    );
-    assert_eq!(
-        backup_verdict_refuses(&backup("a", Some("Invalid"), None, SET)).as_deref(),
-        Some("Invalid")
-    );
-    assert_eq!(
-        backup_verdict_refuses(&backup("a", Some("Untrusted"), None, SET)).as_deref(),
-        Some("Untrusted")
-    );
-    let found = match Fixture::healthy().facts() {
-        CatalogPointFacts::Found(found) => found,
-        other => panic!("the healthy fixture finds the point: {other:?}"),
-    };
-    assert_eq!(
-        catalog_point_refusal(
-            &found.entry,
-            &[backup("r", Some("Invalid"), Some(&receipt_sha()), SET)]
-        ),
-        Some(("r".to_string(), "Invalid".to_string()))
+    // CONTROL: the same run with its set id is attributed to another set and
+    // the row is ready.
+    let mut f = Fixture::healthy();
+    f.backups = vec![backup("orphan", Some("Invalid"), None, "another-set")];
+    assert_row(
+        &f.row(),
+        CheckState::Ready,
+        CheckCode::CatalogPointSelectable,
+        "attributed",
     );
 }

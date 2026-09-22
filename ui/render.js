@@ -1648,7 +1648,9 @@ export const TWO_AXES_SENTENCE =
   "still serve this point; verification is whether its receipt verifies under a key this " +
   "installation accepts. A point is selectable for a restore only when it is Available AND " +
   "Verified or VerifiedHistorical, and that judgement is the catalog's own `selectable` field, " +
-  "not one this page recomputes.";
+  "not one this page recomputes. The product API also joins it with the controller's own " +
+  "verdict on the point's Backup: a row whose Backup the controller refused (backupVerdict) " +
+  "is never selectable, whatever its two axes say.";
 
 /** The sentence a truncated catalog view carries. The window is bounded and
  *  the durable truth is in object storage; nothing is silently hidden. */

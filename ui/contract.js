@@ -2480,6 +2480,10 @@ const D3_POINT = shapeOf(
     manifestKey: str, manifestSha256: str,
     locations: listOf(objectOf(D3_LOCATION)),
     signerKeyId: str, remedy: str, formatVersion: str,
+    // The controller's reached refusal on this point's own Backup, joined
+    // server side (`claude/verdict-precedence`). Present only for a refusal;
+    // a row that carries it is `selectable: false` whatever its two axes say.
+    backupVerdict: str,
   },
 );
 
@@ -2491,7 +2495,13 @@ const D3_POINT_PAGE = shapeOf(
     items: listOf(opaque), page: objectOf(PAGE), requestId: str,
     truncated: bool, viewExpired: bool,
   },
-  { viewExpiresAt: str, incomplete: bool },
+  {
+    viewExpiresAt: str, incomplete: bool,
+    // `Truncated` or `Unavailable` when the Backup-verdict join could not read
+    // every Backup; absent when it did. Read as a string, so a spelling a newer
+    // server adds is still "incomplete" here and never "complete".
+    backupVerdictsIncomplete: str,
+  },
 );
 
 const D3_SIGNER_PAGE = shapeOf(

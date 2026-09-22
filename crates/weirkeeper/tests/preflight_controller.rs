@@ -5758,6 +5758,15 @@ fn catalog_objects(selectable: bool) -> (Value, Value) {
 }
 
 async fn restore_over_catalog_point(bound: bool, selectable: bool, backups: Vec<Value>) -> Value {
+    restore_over_catalog_point_with(
+        bound,
+        selectable,
+        route("GET", "/backups", list_of(backups)),
+    )
+    .await
+}
+
+async fn restore_over_catalog_point_with(bound: bool, selectable: bool, backups: Route) -> Value {
     let job = job_name(CheckPlanKind::RestorePreflight);
     let mut evidence = backup_destination("evidence");
     evidence["spec"]["storage"]["bucket"] = json!("evidence-bucket");
@@ -5781,7 +5790,7 @@ async fn restore_over_catalog_point(bound: bool, selectable: bool, backups: Vec<
         route("GET", "/backupdestinations/evidence", evidence.to_string()),
         route("GET", "/recoverycatalogs/archive", catalog.to_string()),
         route("GET", "/configmaps/archive-g1-p0", page.to_string()),
-        route("GET", "/backups", list_of(backups)),
+        backups,
         route("GET", leak(job.clone()), finished_job(&job).to_string()),
         route(
             "GET",
@@ -5858,4 +5867,23 @@ async fn a_catalog_point_request_is_answered_from_the_catalog_row() {
         check_entry(&unselectable, "recoveryPoint.state")["code"],
         "CatalogPointNotSelectable"
     );
+
+    // A Backup list the API server REFUSES is not "no Backup refused this
+    // receipt": the row is `unknown`, and the check still completes.
+    let unlisted = restore_over_catalog_point_with(
+        true,
+        true,
+        Route {
+            method: "GET",
+            path_suffix: "/backups",
+            status: 403,
+            body: json!({"kind": "Status", "apiVersion": "v1", "status": "Failure",
+                "reason": "Forbidden", "code": 403, "message": "forbidden"})
+            .to_string(),
+        },
+    )
+    .await;
+    let row = check_entry(&unlisted, "recoveryPoint.state");
+    assert_eq!(row["code"], "CatalogPointViewUnavailable", "{row}");
+    assert_eq!(row["state"], "unknown");
 }

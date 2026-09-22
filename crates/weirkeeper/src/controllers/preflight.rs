@@ -1814,11 +1814,13 @@ pub struct CatalogPointFound {
     pub catalog_uid: String,
     /// The row, as the controller materialised it.
     pub entry: crate::catalog_view::ViewEntry,
-    /// A reached verdict on a `Backup` of this receipt, when one exists:
-    /// `(backup name, verdict)`.
-    pub refused_by: Option<(String, String)>,
-    /// Whether every `Backup` in the namespace was read. `false` makes the
-    /// row `unknown`: an unread `Backup` could hold the refusal.
+    /// A reached verdict on a `Backup` of this receipt, when one exists —
+    /// `catalog_view::ControllerRefusals`' answer, the join the product API's
+    /// `/points` route and retention make.
+    pub refused_by: Option<String>,
+    /// Whether every `Backup` in the namespace was read and every refusal
+    /// could be tied to a point. `false` makes the row `unknown`: an unread or
+    /// unattributed refusal could be this receipt's.
     pub backups_complete: bool,
     /// The plan's `source.point`, when the plan parsed and carries one.
     pub plan_point: Option<logweir_core::execution_contract::PointBinding>,
@@ -1826,54 +1828,6 @@ pub struct CatalogPointFound {
     pub plan_backup: Option<String>,
     /// Whether the check has a parsed plan at all.
     pub plan_parsed: bool,
-}
-
-/// Whether a `Backup`'s own evidence verdict is one the controller REACHED and
-/// that refuses: anything but absent, `NotAttempted` or `Valid`. The rule of
-/// `rehearsal_schedule::candidate_from_backup` and `protection.rs`
-/// (`dffe118`, `95c2279`): an unknown spelling is a refusal, never a deferral.
-#[must_use]
-pub fn backup_verdict_refuses(backup: &Backup) -> Option<String> {
-    let verdict = backup
-        .status
-        .as_ref()
-        .and_then(|s| s.evidence.as_ref())
-        .and_then(|e| e.verification.as_ref())
-        .and_then(|v| v.result.as_deref());
-    match verdict {
-        None | Some("NotAttempted" | "Valid") => None,
-        Some(other) => Some(other.to_string()),
-    }
-}
-
-/// The first `Backup` of this receipt whose own verdict refuses it:
-/// `(name, verdict)`. Joined on the FULL receipt digest where the `Backup`
-/// recorded one, and on the backup set id only for a `Backup` that recorded
-/// none — a digest-less run of the set cannot be told apart from this point,
-/// so its refusal is honoured rather than guessed away.
-#[must_use]
-pub fn catalog_point_refusal(
-    entry: &crate::catalog_view::ViewEntry,
-    backups: &[Backup],
-) -> Option<(String, String)> {
-    for backup in backups {
-        let Some(verdict) = backup_verdict_refuses(backup) else {
-            continue;
-        };
-        let status = backup.status.as_ref();
-        let digest = status
-            .and_then(|s| s.evidence.as_ref())
-            .and_then(|e| e.receipt_sha256.as_deref())
-            .filter(|d| !d.is_empty());
-        let same = match digest {
-            Some(d) => d == entry.receipt_sha256,
-            None => status.and_then(|s| s.backup_id.as_deref()) == Some(entry.backup_id.as_str()),
-        };
-        if same {
-            return Some((backup.name_any(), verdict));
-        }
-    }
-    None
 }
 
 /// Everything [`catalog_point_facts`] reads, gathered by the reconciler.
@@ -1887,8 +1841,9 @@ pub struct CatalogPointRead<'a> {
     /// Each page the status names, in order, with the object read for it
     /// (`None` when it is gone).
     pub pages: &'a [(String, Option<k8s_openapi::api::core::v1::ConfigMap>)],
-    /// The namespace's `Backup`s.
-    pub backups: &'a [Backup],
+    /// The reached refusals among the namespace's `Backup`s
+    /// (`catalog_view::ControllerRefusals`, read leniently).
+    pub refusals: &'a crate::catalog_view::ControllerRefusals,
     /// Whether that list is the whole namespace.
     pub backups_complete: bool,
     /// The plan, when the check has one.
@@ -1989,8 +1944,10 @@ pub fn catalog_point_facts(read: &CatalogPointRead<'_>) -> CatalogPointFacts {
     CatalogPointFacts::Found(Box::new(CatalogPointFound {
         catalog,
         catalog_uid: object.uid().unwrap_or_default(),
-        refused_by: catalog_point_refusal(&entry, read.backups),
-        backups_complete: read.backups_complete,
+        refused_by: read.refusals.refusal_for(&entry).map(str::to_string),
+        backups_complete: read.backups_complete
+            && read.refusals.is_complete()
+            && read.refusals.unattributed() == 0,
         plan_point: parsed.and_then(|p| p.source.point.clone()),
         plan_backup: parsed.map(|p| p.source.backup.clone()),
         plan_parsed: parsed.is_some(),
@@ -2054,13 +2011,13 @@ pub fn catalog_point_row(facts: &CatalogPointFacts, now: DateTime<Utc>) -> Optio
             let f = found.as_ref();
             let e = &f.entry;
             let at = scope(&f.catalog, Some(f.catalog_uid.clone()));
-            if let Some((backup, verdict)) = &f.refused_by {
+            if let Some(verdict) = &f.refused_by {
                 return Some(
                     mk(CheckState::NotReady, CheckCode::CatalogPointRefusedByController)
                         .with_scope(at)
                         .with_message(&format!(
-                            "Backup `{backup}` of this receipt carries the verdict `{verdict}`; \
-                             the controller reached it, and a catalog row never outranks it"
+                            "a Backup of this receipt carries the verdict `{verdict}`; the \
+                             controller reached it, and a catalog row never outranks it"
                         ))
                         .with_remedy("Choose another recovery point; this receipt's own evidence was refused."),
                 );
@@ -2087,8 +2044,10 @@ pub fn catalog_point_row(facts: &CatalogPointFacts, now: DateTime<Utc>) -> Optio
                     mk(CheckState::Unknown, CheckCode::CatalogPointViewUnavailable)
                         .with_scope(at)
                         .with_message(&format!(
-                            "this namespace holds more Backups than one check reads ({} x {}), \
-                             so no reached refusal of this receipt can be ruled out",
+                            "the Backup verdicts in this namespace could not all be read or tied \
+                             to a point (a list failure, more than {} x {} Backups, or a refused \
+                             verdict naming no receipt digest and no set id), so no reached \
+                             refusal of this receipt can be ruled out",
                             CATALOG_POINT_BACKUP_PAGES, CATALOG_POINT_BACKUP_PAGE
                         ))
                         .with_remedy("Prune the namespace's Backup history, or verify the receipt with `logweir catalog list`."),
@@ -4022,8 +3981,14 @@ async fn read_catalog_point(
             pages.push((page.config_map_name.clone(), map));
         }
     }
-    let api: Api<Backup> = Api::namespaced(client.clone(), namespace);
-    let mut backups: Vec<Backup> = Vec::new();
+    // THE BACKUP VERDICTS, READ LENIENTLY — the join `/points` and retention
+    // make (`catalog_view::BackupVerdictFacts`): one `Backup` this build cannot
+    // type refuses at most its own point, and a list that FAILS makes the row
+    // `unknown` rather than failing the check.
+    let resource = kube::api::ApiResource::erase::<Backup>(&());
+    let api: Api<kube::api::DynamicObject> =
+        Api::namespaced_with(client.clone(), namespace, &resource);
+    let mut facts: Vec<crate::catalog_view::BackupVerdictFacts> = Vec::new();
     let mut complete = false;
     let mut token: Option<String> = None;
     for _ in 0..CATALOG_POINT_BACKUP_PAGES {
@@ -4031,20 +3996,32 @@ async fn read_catalog_point(
         if let Some(t) = token.take() {
             params = params.continue_token(&t);
         }
-        let list = api.list(&params).await.map_err(ReconcileError::Api)?;
-        token = list.metadata.continue_.filter(|t| !t.is_empty());
-        backups.extend(list.items);
+        let list = match api.list(&params).await {
+            Ok(list) => list,
+            Err(error) => {
+                warn!(namespace = %namespace, error = %error,
+                    "the Backup verdicts could not be listed for a catalog point check");
+                break;
+            }
+        };
+        token = list.metadata.continue_.clone().filter(|t| !t.is_empty());
+        facts.extend(
+            list.items
+                .iter()
+                .map(|o| crate::catalog_view::BackupVerdictFacts::from_json(&o.data)),
+        );
         if token.is_none() {
             complete = true;
             break;
         }
     }
+    let refusals = crate::catalog_view::ControllerRefusals::from_facts(facts);
     Ok(catalog_point_facts(&CatalogPointRead {
         catalog_name: &reference.catalog_ref.name,
         point_id: &reference.point_id,
         catalog: catalog.as_ref(),
         pages: &pages,
-        backups: &backups,
+        refusals: &refusals,
         backups_complete: complete,
         plan,
         now,

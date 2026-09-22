@@ -1565,7 +1565,9 @@ against `backupId` on the catalog's view entry) and carries two columns:
 
 Both words are the catalog's, rendered verbatim. **Green comes from the
 catalog's own `selectable`** -- D3 section 5.4's conjunction, materialised by the
-controller -- and never from this page recomputing it; availability keeps a green
+controller and joined by the product API with the controller's verdict on the
+point's own `Backup` (a refused one publishes `backupVerdict` and is never
+selectable) -- and never from this page recomputing it; availability keeps a green
 of its own, because "the bytes are readable but the signer is a stranger" is an
 evidence problem and not an outage.
 
@@ -1788,7 +1790,11 @@ this version has -- no function in `render.js` can spell it.
   about a backup's own recorded result, and the page says so beside the ledger.
 * **`#/catalog`.** Availability and verification are two axes with two repairs.
   Whether a point may be restored from is the catalog's own materialised
-  `selectable` field, read and never recomputed here. Nothing is hidden --
+  `selectable` field as the product API publishes it -- joined with the
+  controller's `Backup` verdicts, whose refusal is shown beside the row as
+  `backupVerdict` -- read and never recomputed here; a page whose join is
+  incomplete (`backupVerdictsIncomplete`) says so and offers no restore.
+  Nothing is hidden --
   every state is listed with its remedy -- and the view is named as a bounded
   WINDOW over object storage, so an expired one reads as a missing VIEW and not
   as a missing archive. The point table says when it is ONE HTTP page of a
