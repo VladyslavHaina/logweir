@@ -4028,13 +4028,13 @@ async fn reconcile_backup_inner(
         .zip(observed_receipt_sha256)
         .is_some_and(|(reported, observed)| reported != observed);
     // The runner reports the digest it computed over the exact bytes it
-    // persisted. That capture claim is the fence verification must test. A
-    // controller-computed digest is only the old-runner fallback: preferring
-    // it would compare fetched bytes to their own hash and turn replacement
-    // bytes into a self-validating receipt.
-    let receipt_sha256 = reported_receipt_sha256
-        .or(observed_receipt_sha256)
-        .map(str::to_string);
+    // persisted. That immutable capture claim is the fence verification must
+    // test. A controller-computed hash of fetched bytes is never an anchor:
+    // comparing those bytes to their own hash would let replacement evidence
+    // validate itself. Old runners therefore remain explicitly unbound.
+    let receipt_sha256 = reported_receipt_sha256.map(str::to_string);
+    let legacy_unbound =
+        reported_receipt_sha256.is_none() && observed_receipt_sha256.is_some() && keys.complete();
 
     // WARNED ONLY WHERE IT IS NEWS. A refusal (exit 3), an operational failure
     // (1) or a signing failure (4) wrote no artifact BY CONTRACT (GC11), so
@@ -4164,6 +4164,13 @@ async fn reconcile_backup_inner(
             )),
             trust: None,
         })
+    } else if legacy_unbound {
+        Some(VerificationResult::not_attempted(
+            logweir_verify::PAYLOAD_TYPE_BACKUP_RECEIPT,
+            "the runner reported both evidence keys but no receipt-sha256 anchor; this \
+             pre-digest runner output is legacy-unbound, so fetched bytes cannot validate \
+             themselves and no receipt facts are projected",
+        ))
     } else {
         match (&evidence_from, reference) {
             // THE DECISION IS ALREADY MADE AND IT IS RECORDED. `evidence_source`

@@ -505,23 +505,15 @@ pub fn authorize(facts: &Facts<'_>) -> Result<Authorization, Skip> {
             ),
         )
     })?;
-    let usage = if key
-        .trust
-        .has_usage(logweir_core::trust::KeyUsage::GovernedApproval)
-    {
-        logweir_core::trust::KeyUsage::GovernedApproval
-    } else if key
-        .trust
-        .has_usage(logweir_core::trust::KeyUsage::ConsoleConfirmation)
-    {
-        logweir_core::trust::KeyUsage::ConsoleConfirmation
-    } else {
+    let usage = logweir_core::trust::KeyUsage::GovernedApproval;
+    if !key.trust.has_usage(usage) {
         return Err(Skip::new(
             SkipReason::AuthorizationInvalid,
             format!(
                 "the Approval `{wanted}` verified under key {key_id}, whose usages are [{}]; a \
-                 rehearsal is authorised by GovernedApproval or ConsoleConfirmation and never by \
-                 EvidenceSigning",
+                 rehearsal in the current format is authorised only by GovernedApproval; \
+                 ConsoleConfirmation requires PLAT-19.2's immutable policy-mode binding and \
+                 EvidenceSigning never authorises",
                 key.trust
                     .usages
                     .iter()
@@ -625,29 +617,19 @@ pub fn keyring(
     now: DateTime<Utc>,
 ) -> wire::AuthorizationKeyring {
     let mut keys: Vec<wire::AuthorizationKey> = Vec::new();
-    for usage in [
-        logweir_core::trust::KeyUsage::GovernedApproval,
-        logweir_core::trust::KeyUsage::ConsoleConfirmation,
-    ] {
-        for key in trust.keys_for(usage) {
-            if trust
-                .may_sign_new_for(&key.trust.key_id, usage, now)
-                .is_err()
-            {
-                continue;
-            }
-            if let Some(existing) = keys.iter_mut().find(|k| k.key_id == key.trust.key_id) {
-                if !existing.usages.contains(&usage) {
-                    existing.usages.push(usage);
-                }
-                continue;
-            }
-            keys.push(wire::AuthorizationKey {
-                key_id: key.trust.key_id.clone(),
-                public_key_pem: key.spki_pem.clone(),
-                usages: vec![usage],
-            });
+    let usage = logweir_core::trust::KeyUsage::GovernedApproval;
+    for key in trust.keys_for(usage) {
+        if trust
+            .may_sign_new_for(&key.trust.key_id, usage, now)
+            .is_err()
+        {
+            continue;
         }
+        keys.push(wire::AuthorizationKey {
+            key_id: key.trust.key_id.clone(),
+            public_key_pem: key.spki_pem.clone(),
+            usages: vec![usage],
+        });
     }
     wire::AuthorizationKeyring {
         format_version: KEYRING_FORMAT_VERSION.to_string(),

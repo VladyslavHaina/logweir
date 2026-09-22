@@ -396,9 +396,10 @@ pub fn verify_standing_authorization(
     if !key.may_authorize() {
         return Err(refuse(format!(
             "{}. {}: the standing authorization verifies under key {}, whose usages are [{}]. A \
-             rehearsal may be authorised only by a key carrying {} or {} — the installation's \
-             own evidence-signing identity must never be able to authorise its own rehearsals \
-             (D3 §7.3); no data operation was started.",
+             rehearsal in the current format may be authorised only by a key carrying {}; \
+             ConsoleConfirmation requires PLAT-19.2's immutable policy-mode binding, and the \
+             installation's own evidence-signing identity never authorises (D3 §7.3); no data \
+             operation was started.",
             wire::AUTHORIZATION_INVALID,
             logweir_core::trust::UntrustReason::KeyUsageMismatch.as_str(),
             key.key_id,
@@ -408,7 +409,6 @@ pub fn verify_standing_authorization(
                 .collect::<Vec<_>>()
                 .join(", "),
             logweir_core::trust::KeyUsage::GovernedApproval.as_str(),
-            logweir_core::trust::KeyUsage::ConsoleConfirmation.as_str(),
         )));
     }
 
@@ -995,19 +995,22 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
     /// never as a signature failure.
     #[test]
     fn a_signature_under_a_wrong_usage_key_is_refused_by_usage_and_not_by_signature() {
-        let signed = signed_with(
-            document("uid-1", "rehearsal-3f2a91c7-", "TARGET00000000000000000", 1),
-            vec![KeyUsage::EvidenceSigning],
-        );
-        let error = verify(&signed, Some("uid-1")).expect_err("a wrong-usage key is refused");
-        assert_eq!(error.exit_code(), crate::exit::ExitCode::GuardRefused);
-        let rendered = error.to_string();
-        assert!(rendered.contains("KeyUsageMismatch"), "{rendered}");
-        assert!(rendered.contains("EvidenceSigning"), "{rendered}");
-        assert!(
-            !rendered.contains("does not verify"),
-            "a genuinely signed document must not be reported as a bad signature: {rendered}"
-        );
+        for usage in [KeyUsage::ConsoleConfirmation, KeyUsage::EvidenceSigning] {
+            let signed = signed_with(
+                document("uid-1", "rehearsal-3f2a91c7-", "TARGET00000000000000000", 1),
+                vec![usage],
+            );
+            let error = verify(&signed, Some("uid-1"))
+                .expect_err("a usage not bound by the current format is refused");
+            assert_eq!(error.exit_code(), crate::exit::ExitCode::GuardRefused);
+            let rendered = error.to_string();
+            assert!(rendered.contains("KeyUsageMismatch"), "{rendered}");
+            assert!(rendered.contains(usage.as_str()), "{rendered}");
+            assert!(
+                !rendered.contains("does not verify"),
+                "a genuinely signed document must not be reported as a bad signature: {rendered}"
+            );
+        }
     }
 
     /// A keyring with TWO keys, where the one that signed is not the first.

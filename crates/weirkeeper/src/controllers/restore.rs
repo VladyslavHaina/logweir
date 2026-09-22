@@ -905,22 +905,14 @@ fn admit_standing(
              carry"
         ));
     };
-    let usage = if key
-        .trust
-        .has_usage(logweir_core::trust::KeyUsage::GovernedApproval)
-    {
-        logweir_core::trust::KeyUsage::GovernedApproval
-    } else if key
-        .trust
-        .has_usage(logweir_core::trust::KeyUsage::ConsoleConfirmation)
-    {
-        logweir_core::trust::KeyUsage::ConsoleConfirmation
-    } else {
+    let usage = logweir_core::trust::KeyUsage::GovernedApproval;
+    if !key.trust.has_usage(usage) {
         // D3 §7.3's key-usage separation: the installation's own evidence
         // identity must never authorise its own rehearsals.
         return refused(format!(
-            "it verified under key {key_id}, whose usages are [{}]; a rehearsal is authorised by \
-             GovernedApproval or ConsoleConfirmation and never by EvidenceSigning",
+            "it verified under key {key_id}, whose usages are [{}]; a rehearsal in the current \
+             format is authorised only by GovernedApproval; ConsoleConfirmation requires \
+             PLAT-19.2's immutable policy-mode binding and EvidenceSigning never authorises",
             key.trust
                 .usages
                 .iter()

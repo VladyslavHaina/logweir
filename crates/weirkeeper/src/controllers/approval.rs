@@ -385,9 +385,10 @@ pub struct Verified {
     /// `sidecar.signatures[0].keyid`.
     pub matched_key_id: String,
     /// The policy usage under which the matched signature was admitted.
-    /// Restore approvals require `GovernedApproval`; standing rehearsal
-    /// authorizations additionally admit ordinary-policy
-    /// `ConsoleConfirmation` signatures (D3 §4.3).
+    /// The policy usage under which this build admitted the signature.
+    /// Until PLAT-19.2 carries an immutable policy mode through the standing
+    /// document and execution bundle, every approval requires
+    /// `GovernedApproval` and `ConsoleConfirmation` fails closed.
     pub authorization_usage: KeyUsage,
     /// **The matched key's declared validity window** — `None` only when the
     /// resolved trust does not carry the matched id at all, which check 6 has
@@ -724,11 +725,12 @@ fn evaluate_inner(
     // somewhere to record which entry failed. `blocked_for` carries the
     // legacy message byte-for-byte, so the sentence an operator reads did not
     // change on the day this path replaced the roster walk.
-    let allowed_usages: &[KeyUsage] = if standing.is_some() {
-        &[KeyUsage::GovernedApproval, KeyUsage::ConsoleConfirmation]
-    } else {
-        &[KeyUsage::GovernedApproval]
-    };
+    // This build does not yet carry PLAT-19.2's immutable ordinary/governed
+    // policy mode through the signed standing document. Admitting a
+    // ConsoleConfirmation key merely because one exists would let an ordinary
+    // confirmation authorize governed work. Fail closed on the current
+    // format: both per-run and standing documents require GovernedApproval.
+    let allowed_usages: &[KeyUsage] = &[KeyUsage::GovernedApproval];
     if let Some(message) = allowed_usages
         .iter()
         .find_map(|usage| trust.blocked_for(*usage))

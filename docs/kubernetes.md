@@ -1446,13 +1446,15 @@ so `status.evidence.receiptSha256` is a captured public fact even when the
 controller cannot read the destination. `Backup.status.capture` remains
 receipt-derived and is still absent on `NotAttempted`; the digest therefore
 names a joinable point but does not age it, verify it or make it selectable by
-itself. That runner-reported digest is authoritative when present; if a fetched
-receipt hashes differently, verification is `Invalid` rather than validating
-the fetched bytes against their own hash. Older runners that omit the digest
-remain compatible and fall back to the digest of a fetched receipt (or publish
-no digest when nothing was fetched). Malformed or duplicate digest lines are
-ignored rather than promoted to evidence. Until 2026-09-21 the policy read such
-a run as *no point at all*:
+itself. That runner-reported digest is the required immutable anchor; if a
+fetched receipt hashes differently, verification is `Invalid` rather than
+validating the fetched bytes against their own hash. Older runners that omit
+the digest remain observable, but publish no receipt digest and record
+`NotAttempted` with `legacy-unbound`: fetched payload and sidecar bytes cannot
+validate themselves or project records/capture, even when their signature is
+otherwise valid. Malformed or duplicate digest lines are likewise ignored
+rather than promoted to evidence. Until 2026-09-21 the policy read such a run
+as *no point at all*:
 `health: Unprotected`, which is D3 §3.2's "nothing to recover from", and which
 **pages**, about archives whose own catalog entry for the same point read
 `Available`/`Verified`. Three changes close it and an operator sees all three:
@@ -1995,9 +1997,10 @@ positive window of at most 90 days, and a complete scratch-only scope with
 positive numeric bounds. These failures retain standing-specific reasons
 (`TemplateDigestMismatch`, `SubjectMismatch`, `WindowInvalid`, `ScopeInvalid`
 or `StandingDocumentInvalid`); they never masquerade as the Restore arm's
-`PlanHashMismatch`. Standing policy keys may carry `GovernedApproval` or
-`ConsoleConfirmation`; `EvidenceSigning` is never authorization. The ordinary
-per-run `Restore` arm remains `GovernedApproval`-only. Its
+`PlanHashMismatch`. The current format has no immutable PLAT-19.2 policy-mode
+binding, so standing and per-run authorization are both
+`GovernedApproval`-only. `ConsoleConfirmation` fails closed until that mode is
+carried end-to-end, and `EvidenceSigning` is never authorization. Its
 `spec.approvalBytes` is a signed `StandingAuthorization` document carrying the
 subject (with its **UID**), the scope and `issuedAt`/`expiresAt`, and its DSSE payload type is
 that document's own — so a genuinely signed drill approval replayed as a
@@ -2136,8 +2139,9 @@ with a signing key can produce one, while the controller links no signer at all
 *The runner.* `logweir restore run` takes `--standing-authorization` and
 `--authorization-keys` and no `--approval`. It verifies the DSSE signature over
 the envelope's exact bytes under a key the bundle pins, judges THAT key's usage
-(`GovernedApproval` or `ConsoleConfirmation`, never `EvidenceSigning` — D3
-§7.3), admits the document (kind, subject, the UID binding to this schedule,
+(`GovernedApproval` only in the current format; `ConsoleConfirmation` needs
+PLAT-19.2's immutable policy-mode binding, and `EvidenceSigning` never
+authorizes), admits the document (kind, subject, the UID binding to this schedule,
 and a validity window capped at ninety days), and proves `plan ∈ scope` — all
 before any client is constructed. Each failure is refused by name with exit 3
 and `no data operation was started`. `--approval` is REQUIRED for every other
@@ -2191,8 +2195,9 @@ ticket, so a value given for them would not be signed. The two files become the
 `Approval`'s `spec.approvalBytes` and `spec.sidecarBytes`, with
 `spec.subjectRef.kind: RehearsalSchedule` and `spec.planHash` set to the
 schedule's `templateDigest`. The signing key's PUBLIC half must be on this
-namespace's trust carrying `GovernedApproval` or `ConsoleConfirmation` — never
-`EvidenceSigning` (D3 §7.3). The command refuses before signing anything the
+namespace's trust carrying `GovernedApproval`. `ConsoleConfirmation` is not
+accepted by this pre-PLAT-19.2 format merely because such a key exists, and
+`EvidenceSigning` never authorizes (D3 §7.3). The command refuses before signing anything the
 cluster would refuse afterwards: the ninety-day cap, a blank schedule UID, a
 mode this build does not implement, and every scope bound whose absence the
 runner treats as a mismatch.
@@ -2387,8 +2392,9 @@ signature alike.
 
 A RehearsalSchedule approval shares checks 1–6, then parses the verified bytes
 as `StandingAuthorization`. The allowed usage set for this document kind is
-explicitly `GovernedApproval` or `ConsoleConfirmation`, never
-`EvidenceSigning`; the per-run table above remains `GovernedApproval`-only.
+explicitly `GovernedApproval` only. `ConsoleConfirmation` fails closed until
+PLAT-19.2 immutably binds ordinary policy mode, and `EvidenceSigning` never
+authorizes; the per-run table above remains `GovernedApproval`-only.
 Its closed standing arm checks the exact canonical template digest and unsigned
 `spec.planHash`, the full subject
 identity including UID, the live at-most-90-day window, and the complete

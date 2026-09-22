@@ -1454,6 +1454,34 @@ async fn the_installations_own_signing_key_may_not_authorise_its_own_rehearsals(
     assert_eq!(posted(&recorder, RESTORES_PATH), 0);
 }
 
+/// A console-confirmation key is not enough in the pre-PLAT-19.2 format: the
+/// schedule carries no immutable ordinary/governed policy mode, so admission
+/// fails closed before a child or bundle exists.
+#[tokio::test]
+async fn console_confirmation_alone_never_fires_a_current_format_schedule() {
+    let mut policies = trust_policy_value("Active", None);
+    policies["items"][0]["spec"]["keys"][0]["usages"] = json!(["ConsoleConfirmation"]);
+    let (client, recorder, bodies) = mock_client_recording_bodies(routes(
+        approval_value(&envelope()),
+        policies,
+        cluster_value(true, Some(TARGET_CLUSTER_ID)),
+        backup_list(vec![]),
+        restore_list(vec![]),
+    ));
+    let outcome = rs::reconcile_schedule(&schedule(), &context(client), now())
+        .await
+        .expect("the reconcile answers");
+    let rs::Verdict::Skipped(skip) = &outcome.verdict else {
+        panic!("{:?}", outcome.verdict)
+    };
+    assert_eq!(skip.reason, rehearsal::SkipReason::AuthorizationInvalid);
+    assert!(skip.detail.contains("ConsoleConfirmation"), "{skip}");
+    assert!(skip.detail.contains("PLAT-19.2"), "{skip}");
+    assert_eq!(posted(&recorder, RESTORES_PATH), 0);
+    assert_eq!(posted(&recorder, CONFIGMAPS_PATH), 0);
+    assert_eq!(last_skip(&bodies).as_deref(), Some("AuthorizationInvalid"));
+}
+
 /// A suspended schedule fires nothing, skips nothing, and reads nothing: the
 /// route table has only the status patch, so any other call panics the double.
 #[tokio::test]
@@ -1897,6 +1925,20 @@ fn a_retired_key_never_reaches_the_keyring() {
     let ring = rs::keyring(&trust, now());
     assert_eq!(ring.keys.len(), 1);
     assert_eq!(ring.keys[0].key_id, KEY_ID);
+
+    let mut console_only = trust_policy_value("Active", None);
+    console_only["items"][0]["spec"]["keys"][0]["usages"] = json!(["ConsoleConfirmation"]);
+    let policies: kube::core::ObjectList<weirkeeper::crds::trust_policy::TrustPolicy> =
+        serde_json::from_value(console_only).expect("the list parses");
+    let weirkeeper::trust::Resolution::Trust(trust) =
+        weirkeeper::trust::resolve_in(NS, &policies.items, None)
+    else {
+        panic!("the default policy governs every namespace")
+    };
+    assert!(
+        rs::keyring(&trust, now()).keys.is_empty(),
+        "the runner bundle pins no ConsoleConfirmation key until policy mode is bound"
+    );
 }
 
 /// A `Backup` whose evidence did not verify is never selectable on its own —

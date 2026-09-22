@@ -2166,15 +2166,29 @@ fn a_per_run_document_never_parses_as_standing() {
     assert_eq!(refusal.reason(), "StandingDocumentInvalid");
 }
 
-/// D3 §4.3 has two standing-policy modes: governed authorization accepts a
-/// `GovernedApproval` signature, while ordinary policy accepts a
-/// `ConsoleConfirmation` signature alone. Evidence-signing material remains
-/// outside both authorization sets.
+/// The current standing format carries no immutable ordinary/governed policy
+/// mode. It therefore admits only `GovernedApproval`; `ConsoleConfirmation`
+/// fails closed until PLAT-19.2 binds that mode, and `EvidenceSigning` never
+/// authorizes.
 #[test]
-fn standing_authorization_accepts_each_policy_usage_and_never_evidence_signing() {
+fn standing_authorization_is_governed_only_until_policy_mode_is_bound() {
     let fixture = standing_fixture();
-    for usage in [SpecUsage::GovernedApproval, SpecUsage::ConsoleConfirmation] {
-        let verified = approval::evaluate_standing(
+    let verified = approval::evaluate_standing(
+        fixture.as_bytes(),
+        standing_sidecar(STANDING_FIXTURE_SIG).as_bytes(),
+        &policy_trust(vec![standing_policy_key(SpecUsage::GovernedApproval)]),
+        at("2026-09-10T00:00:00Z"),
+        &standing_subject(),
+        "sha256:aa",
+    )
+    .expect("the current governed standing authorization is admitted");
+    assert_eq!(
+        verified.authorization_usage,
+        logweir_core::trust::KeyUsage::GovernedApproval
+    );
+
+    for usage in [SpecUsage::ConsoleConfirmation, SpecUsage::EvidenceSigning] {
+        let refusal = approval::evaluate_standing(
             fixture.as_bytes(),
             standing_sidecar(STANDING_FIXTURE_SIG).as_bytes(),
             &policy_trust(vec![standing_policy_key(usage)]),
@@ -2182,20 +2196,9 @@ fn standing_authorization_accepts_each_policy_usage_and_never_evidence_signing()
             &standing_subject(),
             "sha256:aa",
         )
-        .expect("each D3 §4.3 standing authorization usage is admitted");
-        assert_eq!(verified.authorization_usage.as_str(), format!("{usage:?}"));
+        .expect_err("the current format has no binding that could authorize this usage");
+        assert_eq!(refusal.reason(), "KeyIdNotInRoster", "{usage:?}");
     }
-
-    let refusal = approval::evaluate_standing(
-        fixture.as_bytes(),
-        standing_sidecar(STANDING_FIXTURE_SIG).as_bytes(),
-        &policy_trust(vec![standing_policy_key(SpecUsage::EvidenceSigning)]),
-        at("2026-09-10T00:00:00Z"),
-        &standing_subject(),
-        "sha256:aa",
-    )
-    .expect_err("EvidenceSigning never authorizes a standing rehearsal");
-    assert_eq!(refusal.reason(), "KeyIdNotInRoster");
 }
 
 /// A standing verdict expires at the earlier authenticated boundary: the

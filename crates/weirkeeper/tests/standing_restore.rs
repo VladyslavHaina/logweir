@@ -433,6 +433,36 @@ fn an_ordinary_restore_is_never_admitted_by_a_standing_document() {
     assert!(verdict.is_terminal(), "and it creates no Job");
 }
 
+/// The current standing Restore carries no immutable PLAT-19.2 policy mode.
+/// A `ConsoleConfirmation` key therefore cannot authorize it merely because
+/// the resolved policy contains that key.
+#[test]
+fn console_confirmation_alone_never_admits_a_current_format_standing_restore() {
+    use weirkeeper::crds::trust_policy::KeyUsage;
+    let mut key = approver_key();
+    key.usages = vec![KeyUsage::ConsoleConfirmation];
+    let trust = trust_with(key);
+    let verdict = admit(
+        &standing_restore(),
+        Some(&approval()),
+        Some(&cluster(true)),
+        Some(&StandingAdmission {
+            trust: &trust,
+            now: now(),
+        }),
+    );
+    assert!(
+        matches!(
+            verdict,
+            RestoreAdmission::StandingAuthorizationRefused { .. }
+        ),
+        "a console key fails closed before a Job exists: {verdict:?}"
+    );
+    assert!(verdict.is_terminal());
+    assert!(verdict.to_string().contains("ConsoleConfirmation"));
+    assert!(verdict.to_string().contains("PLAT-19.2"));
+}
+
 /// And a rehearsal whose `spec.authorization` names nothing is terminal, not
 /// a silent fall-through to the ordinary path.
 #[test]
@@ -644,7 +674,7 @@ fn each_standing_refusal_is_named_and_reaches_no_job() {
             approval: approval(),
             trust: evidence_only,
             expect_subject_mismatch: false,
-            detail_contains: "never by EvidenceSigning",
+            detail_contains: "EvidenceSigning never authorises",
         },
         Row {
             what: "a key the trust does not carry",

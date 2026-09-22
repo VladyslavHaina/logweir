@@ -9170,9 +9170,9 @@ fn the_record_count_is_the_sum_of_the_receipts_own_per_topic_counts() {
     );
 }
 
-/// The runner's digest is the capture claim; the controller-computed digest
-/// is only an old-runner fallback. If fetched bytes disagree, verification is
-/// `Invalid` even when the injected verifier would otherwise answer `Valid`.
+/// The runner's digest is the capture claim. If fetched bytes disagree,
+/// verification is `Invalid` even when the injected verifier would otherwise
+/// answer `Valid`.
 #[tokio::test]
 async fn a_runner_digest_disagreement_is_invalid_and_never_self_hashes_valid() {
     let observation = |_keys: EvidenceKeys| -> BoxFuture<'static, Option<ArchiveObservation>> {
@@ -9229,6 +9229,63 @@ async fn a_runner_digest_disagreement_is_invalid_and_never_self_hashes_valid() {
     );
 }
 
+/// Old-runner I7 logs bind only object keys, not receipt identity. Even a
+/// fetched, genuinely signed foreign receipt/sidecar pair must remain
+/// `NotAttempted`/legacy-unbound: hashing fetched bytes and verifying those
+/// same bytes cannot establish that they are what this run wrote.
+#[tokio::test]
+async fn old_runner_keys_cannot_self_anchor_foreign_valid_evidence() {
+    let observation = |_keys: EvidenceKeys| -> BoxFuture<'static, Option<ArchiveObservation>> {
+        Box::pin(async {
+            Some(ArchiveObservation {
+                presence: EvidencePresence {
+                    payload: true,
+                    sidecar: true,
+                },
+                covered: Some((1_758_236_400_000, 1_758_240_000_000)),
+                receipt_sha256: Some(
+                    "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+                        .to_string(),
+                ),
+                records: Some(9001),
+                capture: Some((utc(2026, 11, 9, 3, 17), utc(2026, 11, 9, 3, 19))),
+            })
+        })
+    };
+    let (client, _seen, bodies) = mock_client_recording_bodies(finished_routes(
+        &pod_list_terminated(0),
+        log_body(&i7_tail()),
+        200,
+        "Complete",
+    ));
+    reconcile_backup(
+        &frozen_backup(),
+        &client,
+        &observation,
+        // This simulates a cryptographically valid foreign receipt. The
+        // controller must not call it without the runner's immutable digest.
+        &valid_evidence,
+        utc(2026, 11, 9, 3, 20),
+    )
+    .await
+    .expect("legacy-unbound evidence is a recorded verdict");
+
+    let statuses = patched_statuses(&bodies.lock().expect("the recorder is readable"));
+    assert!(
+        statuses[0]["evidence"]["receiptSha256"].is_null(),
+        "a fetched self-hash is not published as this run's capture claim"
+    );
+    let second = statuses.last().expect("the verification patch exists");
+    assert_eq!(second["evidence"]["verification"]["result"], "NotAttempted");
+    assert!(
+        second["evidence"]["verification"]["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("legacy-unbound")),
+        "the compatibility state is explicit: {second}"
+    );
+    assert!(second["records"].is_null() && second["capture"].is_null());
+}
+
 /// **Defect STATUS-RECORDS, through the reconciler.** The count reaches the
 /// status only on a VERIFIED receipt.
 #[tokio::test]
@@ -9243,7 +9300,7 @@ async fn the_record_count_is_written_from_a_verified_receipt_and_from_nothing_el
                     sidecar: true,
                 },
                 covered: covered_from_receipt(&doc),
-                receipt_sha256: Some("sha256:deadbeef".to_string()),
+                receipt_sha256: Some(RUNNER_RECEIPT_SHA256.to_string()),
                 records: records_from_receipt(&doc),
                 capture: capture_from_receipt(&doc),
             })
@@ -9253,7 +9310,7 @@ async fn the_record_count_is_written_from_a_verified_receipt_and_from_nothing_el
     // ARM 1: `Valid`.
     let (client, _seen, bodies) = mock_client_recording_bodies(finished_routes(
         &pod_list_terminated(0),
-        log_body(&i7_tail()),
+        log_body(&i7_tail_with_digest()),
         200,
         "Complete",
     ));
@@ -9291,7 +9348,7 @@ async fn the_record_count_is_written_from_a_verified_receipt_and_from_nothing_el
     // ARM 2: the same bytes, no verification. NOTHING is written.
     let (client, _seen, bodies) = mock_client_recording_bodies(finished_routes(
         &pod_list_terminated(0),
-        log_body(&i7_tail()),
+        log_body(&i7_tail_with_digest()),
         200,
         "Complete",
     ));
@@ -9583,7 +9640,7 @@ async fn a_receipt_this_installation_refuses_never_populates_the_records_column(
                     sidecar: true,
                 },
                 covered: covered_from_receipt(&doc),
-                receipt_sha256: Some("sha256:deadbeef".to_string()),
+                receipt_sha256: Some(RUNNER_RECEIPT_SHA256.to_string()),
                 records: records_from_receipt(&doc),
                 capture: capture_from_receipt(&doc),
             })
@@ -11188,7 +11245,7 @@ async fn the_verification_patch_nulls_every_field_the_verdict_does_not_hold() {
 
     let (client, _seen, bodies) = mock_client_recording_bodies(finished_routes_for_destination(
         &pod_list_terminated(0),
-        log_body(&i7_tail()),
+        log_body(&i7_tail_with_digest()),
         "/backupdestinations/dest-b",
         value,
     ));
@@ -11317,7 +11374,7 @@ async fn the_verification_patch_nulls_every_field_the_verdict_does_not_hold() {
                     sidecar: true,
                 },
                 covered: None,
-                receipt_sha256: Some("sha256:deadbeef".to_string()),
+                receipt_sha256: Some(RUNNER_RECEIPT_SHA256.to_string()),
                 records: None,
                 capture: None,
             })
@@ -11325,7 +11382,7 @@ async fn the_verification_patch_nulls_every_field_the_verdict_does_not_hold() {
     };
     let (client, _seen, bodies) = mock_client_recording_bodies(finished_routes(
         &pod_list_terminated(0),
-        log_body(&i7_tail()),
+        log_body(&i7_tail_with_digest()),
         200,
         "Complete",
     ));
@@ -11535,7 +11592,7 @@ fn observed_archive(_keys: EvidenceKeys) -> BoxFuture<'static, Option<ArchiveObs
                 sidecar: true,
             },
             covered: None,
-            receipt_sha256: Some("sha256:deadbeef".to_string()),
+            receipt_sha256: Some(RUNNER_RECEIPT_SHA256.to_string()),
             records: None,
             capture: None,
         })
@@ -11679,7 +11736,7 @@ async fn a_later_write_of_a_pass_preconditions_on_the_earlier_writes_answer() {
     // ---- the terminal pass ---------------------------------------------
     let (client, _rec, bodies2) = mock_client_recording_bodies(bumping_version(finished_routes(
         &pod_list_terminated(0),
-        log_body(&i7_tail()),
+        log_body(&i7_tail_with_digest()),
         200,
         "Complete",
     )));

@@ -498,22 +498,14 @@ pub struct AuthorizationKey {
 impl AuthorizationKey {
     /// Whether this key may authorise a rehearsal at all.
     ///
-    /// [`crate::trust::KeyUsage::GovernedApproval`] is the governed path's
-    /// usage and [`crate::trust::KeyUsage::ConsoleConfirmation`] is the
-    /// ordinary path's (D3 §4.3: "Ordinary policy: the console confirmation
-    /// issuer signature alone"). **`EvidenceSigning` is not on the list, and
-    /// that is the point of the list existing**: the installation's own
-    /// signing identity must never be able to authorise its own rehearsals,
-    /// which is the key-usage separation D3 §7.3 requires for PLAT-19.2.
+    /// The current document/bundle format carries no immutable PLAT-19.2
+    /// policy mode, so only [`crate::trust::KeyUsage::GovernedApproval`] may
+    /// authorize. `ConsoleConfirmation` fails closed until ordinary mode is
+    /// bound end-to-end; `EvidenceSigning` never authorizes.
     #[must_use]
     pub fn may_authorize(&self) -> bool {
-        self.usages.iter().any(|u| {
-            matches!(
-                u,
-                crate::trust::KeyUsage::GovernedApproval
-                    | crate::trust::KeyUsage::ConsoleConfirmation
-            )
-        })
+        self.usages
+            .contains(&crate::trust::KeyUsage::GovernedApproval)
     }
 }
 
@@ -1377,7 +1369,10 @@ mod tests {
             usages,
         };
         assert!(key(vec![KeyUsage::GovernedApproval]).may_authorize());
-        assert!(key(vec![KeyUsage::ConsoleConfirmation]).may_authorize());
+        assert!(
+            !key(vec![KeyUsage::ConsoleConfirmation]).may_authorize(),
+            "ordinary mode is not authorized until PLAT-19.2 is immutably bound"
+        );
         assert!(
             !key(vec![KeyUsage::EvidenceSigning]).may_authorize(),
             "the evidence signing key must never be able to authorise a rehearsal"

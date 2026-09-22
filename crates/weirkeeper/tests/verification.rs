@@ -741,7 +741,7 @@ fn pod_list() -> String {
 
 fn log_body() -> String {
     format!(
-        "{{\"level\":\"INFO\"}}\nreceipt-key={RECEIPT_KEY}\nsidecar-key={RECEIPT_SIDECAR_KEY}\n"
+        "{{\"level\":\"INFO\"}}\nreceipt-sha256={RECEIPT_DIGEST}\nreceipt-key={RECEIPT_KEY}\nsidecar-key={RECEIPT_SIDECAR_KEY}\n"
     )
 }
 
