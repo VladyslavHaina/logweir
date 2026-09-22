@@ -316,9 +316,9 @@ JOURNEYS: tuple[Journey, ...] = (
     Journey(
         "stale-namespace-request", "a slow answer for namespace A never renders over B, a form left in A "
         "writes nothing, and a submit after the switch lands in B only", ("stale namespace request",),
-        (R("console", "console-slow-a-response-never-renders-over-b", (RESOURCE, TEXT), f"{CON}:337"),
-         R("console", "console-left-form-in-a-writes-nothing", (RESOURCE,), f"{CON}:379"),
-         R("console", "console-submit-after-switch-lands-in-b-only", (RESOURCE,), f"{CON}:385"))),
+        (R("console", "console-slow-a-response-never-renders-over-b", (RESOURCE, TEXT), f"{CON}:340"),
+         R("console", "console-left-form-in-a-writes-nothing", (RESOURCE,), f"{CON}:382"),
+         R("console", "console-submit-after-switch-lands-in-b-only", (RESOURCE,), f"{CON}:388"))),
     Journey(
         "duplicate-submit", "a double click, a lost response, a resubmitted restore, a duplicate create "
         "and a replayed API create each leave exactly one durable object", ("duplicate submit",),

@@ -318,7 +318,10 @@ async function staleNamespace(page, base) {
     const response = await route.fetch();
     const body = await response.body();
     timeline.aStatus = response.status();
-    await pause(4000);
+    // Held 8 s: B must be on screen well before A answers (4 s left a 56 ms
+    // margin in the first full run, 2026-09-22 20:04Z — a flake risk, not a false pass,
+    // since bRendered is measured late by the poll interval).
+    await pause(8000);
     await route.fulfill({ status: response.status(), headers: response.headers(), body: body });
     timeline.aFulfilled = Date.now();
   });
