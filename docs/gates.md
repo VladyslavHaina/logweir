@@ -9,8 +9,20 @@ pass. Release packaging adds checks for the artifacts users download.
 [ci.yml](../.github/workflows/ci.yml) runs on pull requests, pushes to `main`,
 and manual dispatch. Other workflows can call the same checks.
 
+A change that touches only `docs/to-do/` (the roadmap trackers and decision
+records) starts no run: no build, test or image reads those files. A change
+that touches only other files under `docs/` still runs `check`, because its
+contract tests read `docs/api.md`, `docs/kubernetes.md`, `docs/install.md` and
+the doc footer and link lints, but it skips `e2e` and therefore `publish`: no
+binary embeds a document and no image copies one out of its build stage.
+[scripts/ci-changes.sh](../scripts/ci-changes.sh) decides this from the diff
+and runs everything when it cannot tell (a new branch, a tag, a manual or
+release run). Root Markdown files such as `THIRD_PARTY_NOTICES.md` are not
+under `docs/` and always run everything, since images copy them.
+
 | Job | Purpose |
 |---|---|
+| `changes` | Classifies the diff as docs-only or not; `e2e` (and so `publish`) runs only when something outside `docs/` changed |
 | `check` | Runs [scripts/ci-check.sh](../scripts/ci-check.sh): formatting, Clippy, workspace tests, UI behavior, independent Python verification, dependency boundaries, licenses/advisories, generated schemas/CRDs/chart/install drift, documentation links and notices |
 | `e2e` | Runs the feature-gated integration suite against Docker Compose Kafka and MinIO, with the pinned engine and both evidence readers; retains Compose logs and tears down the stack |
 | `publish` | On a successful push to `main` only, calls [images.yml](../.github/workflows/images.yml) to publish the tested image set |

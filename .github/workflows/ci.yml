@@ -1,7 +1,9 @@
 name: ci
 on:
-  push: { branches: [main] }
-  pull_request:
+  # The tracker and decision records under docs/to-do/ feed no build, test or
+  # image; a change touching only them starts no run.
+  push: { branches: [main], paths-ignore: ['docs/to-do/**'] }
+  pull_request: { paths-ignore: ['docs/to-do/**'] }
   workflow_dispatch:
   workflow_call:
 permissions:
@@ -10,6 +12,21 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
+  # Other docs/ changes still run `check` (its contract tests read the docs),
+  # but cannot change what `e2e` measures or what `publish` ships, so those two
+  # run only when something outside docs/ changed (scripts/ci-changes.sh).
+  changes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.classify.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - id: classify
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: bash scripts/ci-changes.sh "$BASE" "$GITHUB_SHA" | tee -a "$GITHUB_OUTPUT"
   check:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -31,6 +48,8 @@ jobs:
       - run: pip install cryptography pytest
       - run: bash scripts/ci-check.sh
   e2e:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     timeout-minutes: 35
     env:
       AWS_EC2_METADATA_DISABLED: "true"

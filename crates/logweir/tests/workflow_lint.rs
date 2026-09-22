@@ -208,3 +208,115 @@ fn extended_kubernetes_checks_are_explicit() {
         .unwrap()
         .contains_key("workflow_dispatch"));
 }
+
+/// A tracker-only change starts no run; any other docs-only change runs
+/// `check` (its contract tests read the docs) but neither `e2e` nor `publish`,
+/// because no binary embeds a document and no image copies one out of its
+/// build stage. `check` itself is never conditional.
+#[test]
+fn docs_only_changes_skip_what_they_cannot_affect() {
+    let ci = workflow("ci.yml");
+    for event in ["push", "pull_request"] {
+        let ignored: Vec<&str> = ci["on"][event]["paths-ignore"]
+            .as_sequence()
+            .unwrap_or_else(|| panic!("{event} needs paths-ignore"))
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(
+            ignored,
+            ["docs/to-do/**"],
+            "{event} ignores only the tracker records"
+        );
+    }
+    let jobs = &ci["jobs"];
+    assert!(
+        jobs["check"]["if"].is_null(),
+        "check must run on every change"
+    );
+    assert!(dependencies(&jobs["check"]).is_empty());
+    assert_eq!(dependencies(&jobs["e2e"]), ["changes"]);
+    assert_eq!(
+        jobs["e2e"]["if"].as_str(),
+        Some("needs.changes.outputs.code == 'true'")
+    );
+    let classify = jobs["changes"]["steps"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == "classify")
+        .expect("the changes job classifies the diff");
+    assert!(classify["run"]
+        .as_str()
+        .unwrap()
+        .starts_with("bash scripts/ci-changes.sh "));
+}
+
+fn git(dir: &std::path::Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@example.invalid")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@example.invalid")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
+
+fn commit(dir: &std::path::Path, path: &str) -> String {
+    let file = dir.join(path);
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, format!("{path}\n")).unwrap();
+    git(dir, &["add", "-A"]);
+    git(dir, &["commit", "-q", "-m", path]);
+    git(dir, &["rev-parse", "HEAD"])
+}
+
+fn classify(dir: &std::path::Path, base: &str, head: &str) -> String {
+    let out = std::process::Command::new("bash")
+        .arg(root().join("scripts/ci-changes.sh"))
+        .args([base, head])
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
+
+/// The classifier runs everything unless every changed path is under docs/,
+/// and runs everything when it cannot tell (no base, all-zero base, a base
+/// the checkout lacks). Each `false` below has a `true` twin one path away.
+#[test]
+fn ci_changes_classifies_docs_only_diffs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    git(dir, &["init", "-q"]);
+    let base = commit(dir, "crates/a.rs");
+    let docs = commit(dir, "docs/api.md");
+    assert_eq!(classify(dir, &base, &docs), "code=false");
+    let tracker = commit(dir, "docs/to-do/tracker.md");
+    assert_eq!(classify(dir, &base, &tracker), "code=false");
+    let code = commit(dir, "crates/b.rs");
+    assert_eq!(classify(dir, &base, &code), "code=true");
+    assert_eq!(classify(dir, &tracker, &code), "code=true");
+    // A root Markdown file is not under docs/: tests and images read some.
+    let root_md = commit(dir, "THIRD_PARTY_NOTICES.md");
+    assert_eq!(classify(dir, &code, &root_md), "code=true");
+    // A path that merely starts with "docs" is not the docs directory.
+    let lookalike = commit(dir, "docs-site/x.md");
+    assert_eq!(classify(dir, &root_md, &lookalike), "code=true");
+    assert_eq!(classify(dir, "", &lookalike), "code=true");
+    assert_eq!(classify(dir, &"0".repeat(40), &lookalike), "code=true");
+    assert_eq!(classify(dir, &"f".repeat(40), &lookalike), "code=true");
+}
