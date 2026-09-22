@@ -772,10 +772,18 @@ pub enum SubjectKindArg {
     Restore,
     #[value(name = "Backup")]
     Backup,
-    /// The standing form. Accepted so an operator who reaches for it is told
-    /// what to do rather than told nothing; it REQUIRES `--standing`, because
-    /// a `RehearsalSchedule` referent whose bytes are signed under
-    /// `PAYLOAD_TYPE_APPROVAL` is refused by the `Approval` controller.
+    // The standing form. Accepted so an operator who reaches for it is told
+    // what to do rather than told nothing: it REQUIRES `--standing`, because a
+    // `RehearsalSchedule` referent whose bytes are signed under
+    // `PAYLOAD_TYPE_APPROVAL` is refused by the `Approval` controller, and
+    // `main` says exactly that when the two are not given together.
+    //
+    // A LINE COMMENT AND NOT A DOC COMMENT, DELIBERATELY. clap renders a
+    // value-enum compactly as `[possible values: …]` only while NO variant
+    // carries help text; one doc comment flips the whole list to the long
+    // per-variant form and changes every `--help` an adopter has scripted
+    // against. `cli_approve.rs::the_subject_kind_values_are_the_wire_spellings`
+    // pins the compact line.
     #[value(name = "RehearsalSchedule")]
     RehearsalSchedule,
 }

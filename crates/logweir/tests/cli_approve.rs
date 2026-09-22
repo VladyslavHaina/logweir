@@ -232,8 +232,9 @@ fn the_subject_kind_values_are_the_wire_spellings() {
     assert_eq!(out.status.code(), Some(0));
     let help = String::from_utf8(out.stdout).unwrap();
     assert!(
-        help.contains("[possible values: Restore, Backup]"),
-        "the capitalised wire spellings, in the order the enum declares them: {help}"
+        help.contains("[possible values: Restore, Backup, RehearsalSchedule]"),
+        "the capitalised wire spellings, in the order the enum declares them; \
+         `RehearsalSchedule` joined them with PLAT-14.3b's standing signer: {help}"
     );
     assert!(
         help.contains("[default: Restore]"),
@@ -254,9 +255,19 @@ fn the_subject_kind_values_are_the_wire_spellings() {
         "the CONTROLLER half — refused by check 8 when the referent is not a Restore: {help}"
     );
 
-    // And the two constants the rest of the workspace compares against.
+    // And the constants the rest of the workspace compares against.
     assert_eq!(logweir::cli::SubjectKindArg::Restore.as_str(), "Restore");
     assert_eq!(logweir::cli::SubjectKindArg::Backup.as_str(), "Backup");
+    assert_eq!(
+        logweir::cli::SubjectKindArg::RehearsalSchedule.as_str(),
+        "RehearsalSchedule",
+        "the spelling the Approval controller compares its referent's kind against"
+    );
+    assert_eq!(
+        logweir::cli::SubjectKindArg::RehearsalSchedule.as_str(),
+        logweir_core::execution_contract::REHEARSAL_SCHEDULE_KIND,
+        "the flag and the SIGNED document name the same kind"
+    );
     assert_eq!(
         logweir_core::spec::SUBJECT_KIND_RESTORE,
         logweir::cli::SubjectKindArg::Restore.as_str(),
