@@ -2169,10 +2169,10 @@ positive window of at most 90 days, and a complete scratch-only scope with
 positive numeric bounds. These failures retain standing-specific reasons
 (`TemplateDigestMismatch`, `SubjectMismatch`, `WindowInvalid`, `ScopeInvalid`
 or `StandingDocumentInvalid`); they never masquerade as the Restore arm's
-`PlanHashMismatch`. The current format has no immutable PLAT-19.2 policy-mode
-binding, so standing and per-run authorization are both
-`GovernedApproval`-only. `ConsoleConfirmation` fails closed until that mode is
-carried end-to-end, and `EvidenceSigning` is never authorization. Its
+`PlanHashMismatch`. The standing format carries no approval-policy mode and
+stays `GovernedApproval`-only whatever the namespace is bound to (§8, "Approval
+policy"); PLAT-19.2's policy mode is carried end to end for per-run Restores
+only, and `EvidenceSigning` is never authorization. Its
 `spec.approvalBytes` is a signed `StandingAuthorization` document carrying the
 subject (with its **UID**), the scope and `issuedAt`/`expiresAt`, and its DSSE payload type is
 that document's own — so a genuinely signed drill approval replayed as a
@@ -2347,9 +2347,9 @@ with a signing key can produce one, while the controller links no signer at all
 *The runner.* `logweir restore run` takes `--standing-authorization` and
 `--authorization-keys` and no `--approval`. It verifies the DSSE signature over
 the envelope's exact bytes under a key the bundle pins, judges THAT key's usage
-(`GovernedApproval` only in the current format; `ConsoleConfirmation` needs
-PLAT-19.2's immutable policy-mode binding, and `EvidenceSigning` never
-authorizes), admits the document (kind, subject, the UID binding to this schedule,
+(`GovernedApproval` only: the standing format carries no approval-policy
+mode, so a `ConsoleConfirmation` key authorises no rehearsal, and
+`EvidenceSigning` never authorizes), admits the document (kind, subject, the UID binding to this schedule,
 and a validity window capped at ninety days), and proves `plan ∈ scope` — all
 before any client is constructed. Each failure is refused by name with exit 3
 and `no data operation was started`. `--approval` is REQUIRED for every other
@@ -2404,7 +2404,7 @@ ticket, so a value given for them would not be signed. The two files become the
 `spec.subjectRef.kind: RehearsalSchedule` and `spec.planHash` set to the
 schedule's `templateDigest`. The signing key's PUBLIC half must be on this
 namespace's trust carrying `GovernedApproval`. `ConsoleConfirmation` is not
-accepted by this pre-PLAT-19.2 format merely because such a key exists, and
+accepted by the standing format merely because such a key exists, and
 `EvidenceSigning` never authorizes (D3 §7.3). The command refuses before signing anything the
 cluster would refuse afterwards: the ninety-day cap, a blank schedule UID, a
 mode this build does not implement, and every scope bound whose absence the
@@ -2600,9 +2600,10 @@ signature alike.
 
 A RehearsalSchedule approval shares checks 1–6, then parses the verified bytes
 as `StandingAuthorization`. The allowed usage set for this document kind is
-explicitly `GovernedApproval` only. `ConsoleConfirmation` fails closed until
-PLAT-19.2 immutably binds ordinary policy mode, and `EvidenceSigning` never
-authorizes; the per-run table above remains `GovernedApproval`-only.
+explicitly `GovernedApproval` only, whatever the namespace's approval policy,
+and `EvidenceSigning` never authorizes. The per-run table above is the
+`legacy-governed-v1` path; a namespace bound to an approval policy verifies
+authorization document v2 instead ("Approval policy" below).
 Its closed standing arm checks the exact canonical template digest and unsigned
 `spec.planHash`, the full subject
 identity including UID, the live at-most-90-day window, and the complete
@@ -2781,6 +2782,141 @@ claimed: the *capability* to sign is unbroken while the controller holds Job
 CRUD over the signing key's namespace, and that residual is stated rather than
 designed away. The controller reads no Secret, and its archive handle is
 read-only.
+
+### Approval policy: ordinary confirmation and governed approval (PLAT-19.2)
+
+Everything above describes **`legacy-governed-v1`**, which is what every
+namespace resolves to until the installation binds it to an approval policy:
+a v1 approval document, signed out of band by a `GovernedApproval` key, is the
+only thing that authorises a `Restore`. PLAT-19.2 (decision D0, "Ordinary
+versus governed approval contract") adds two explicit modes for **per-run
+`Restore`s**, chosen per namespace by the installation and frozen into every
+run's execution inputs.
+
+**The installation document.** One YAML document declares named policies and
+binds namespaces to them. The chart renders it from `approvalPolicy.*` into an
+immutable, content-addressed ConfigMap `<release>-approval-policy-<digest>` and
+mounts the **same** object into the controller (`LOGWEIR_APPROVAL_POLICY_FILE`)
+and into the console (`approvalPolicyFile`), so both consume the same bytes and
+log the same `approval_policy_digest` at start:
+
+```yaml
+allowOrdinaryConfirmation: true          # D0's floor; default false
+policies:
+  - name: team-ordinary
+    mode: Ordinary                       # the console's confirmation is the authorization
+    maxAgeSeconds: 900                   # 60..604800; default 900 (Ordinary), 86400 (Governed)
+  - name: prod-governed
+    mode: Governed                       # console confirmation + an independent approver
+    requireDistinctPrincipal: true       # must be true for Governed; false is refused
+namespaces:
+  team-a: team-ordinary
+  prod: prod-governed                    # an unbound namespace stays legacy-governed-v1
+```
+
+The controller and the console **refuse to start** on a document that does not
+validate — an unknown field, an `Ordinary` policy without
+`allowOrdinaryConfirmation: true`, a Governed policy with
+`requireDistinctPrincipal: false`, a binding to an undeclared policy, the
+reserved name `legacy-governed-v1` — rather than run every namespace as legacy
+and silently accept v1 approvals where the administrator bound Governed. An
+absent document is the legacy installation. Nothing ever synthesises `Ordinary`.
+
+**Why installation configuration and not a namespaced object.** D0 puts the
+binding and the `allowOrdinaryConfirmation` floor in installation
+configuration and says "selecting a different policy is an explicit
+installation-admin rollout and audit event, not a namespace operator edit". A
+policy object a namespace could create would be a namespace naming its own
+authority, which §7.1 forbids for trust. Immutability comes from the content
+address: every signed document names the policy's **snapshot digest**, so any
+edit to a policy is a different policy to every outstanding document. Changing
+the document renames the ConfigMap and rolls both Deployments.
+
+**Authorization document v2.** Both modes produce the same document,
+`application/vnd.logweir.restore-authorization+json;version=2.0.0`, signed by
+the console with its **own** `ConsoleConfirmation` key after the Restore exists:
+
+```json
+{"formatVersion":"2.0.0","kind":"RestoreAuthorization","authorizationMode":"Ordinary",
+ "subject":{"apiVersion":"logweir.dev/v1alpha1","kind":"Restore","namespace":"team-a",
+            "name":"rst-…","uid":"…"},
+ "planHash":"sha256:…","requester":{"issuer":"…","subject":"…"},
+ "policy":{"name":"team-ordinary","digest":"sha256:…"},
+ "issuedAt":"…","expiresAt":"…"}
+```
+
+The console's signature attests **which authenticated principal asked** and
+nothing else. Under `Ordinary` it is the whole authorization and the console
+stores the document as the `Approval` the Restore's `spec.approvalRef` names.
+Under `Governed` it is stored as `<approvalRef>-confirmation`, which authorises
+nothing; an approver runs `logweir drill countersign` over the same bytes on
+their own machine and submits the result (`POST
+/api/v1/namespaces/{ns}/restores/{name}/approval`, Approver role), and only
+then does the referenced `Approval` exist, carrying the console's signature
+and the approver's. Unknown fields in the document are refused.
+
+**Where it is enforced — four places, and the controller is the final gate.**
+
+| Boundary | What it checks | Refusal |
+|---|---|---|
+| `Approval` controller | by the namespace's CURRENT binding: unbound → only a v1 document; bound → only a v2 document. v2: payload type; a `ConsoleConfirmation` signature by a usable key of the namespace's `TrustPolicy` (both modes); the exact subject **including UID**; the plan hash recomputed from the Restore; the policy name, snapshot digest and mode equal to the binding; a window no longer than `maxAgeSeconds`, issued no more than 60 s ahead, not expired. Governed: a second signature by a usable `GovernedApproval` key, and that key's `principal.id` ≠ the requester's `<issuer>#<subject>` | `ApprovalPolicyMismatch`, `AuthorizationDocumentInvalid`, `AuthorizationSubjectMismatch`, `PlanHashMismatch`, `AuthorizationWindowInvalid`, `AuthorizationExpired`, `GovernedApprovalRequired` (the pending state), `SelfApprovalRefused`, and the key refusals above |
+| `Restore` admission | immediately before any ConfigMap or Job: the format matches the binding, the signed bytes still name this Restore, its plan and the current policy digest and mode, the window has not closed, and the Approval's own `status.authorization` agrees. The Approval's permanent refusals (`AuthorizationExpired`, `ApprovalPolicyMismatch`) end the Restore rather than hold it | terminal `ApprovalPolicyMismatch`, `AuthorizationExpired` |
+| The mounted bundle | two more PUBLIC members: `approval-policy.json` (the frozen snapshot) and `confirmation.pub.pem`; `approver.pub.pem` is the key that authorised the run (the console's under Ordinary, the approver's under Governed). Each key must still be able to sign something new under its own usage when the bundle is written. The Job pins both through `LOGWEIR_EXECUTION_POLICY_SNAPSHOT_SHA256` / `…_CONFIRMATION_KEY_SHA256` | `ApprovalBundleMaterializationFailed` (a hold) |
+| The runner | `--policy-snapshot`/`--confirmation-key`: re-verifies the console's signature, the snapshot's canonical bytes and digest, the subject from the execution contract, the plan hash and the window's shape; Ordinary requires the mounted authoriser to BE the console key, Governed requires a different key whose countersignature verifies | exit 3, `no data operation was started` |
+
+The runner does **not** re-check expiry against its own clock: the controller
+admitted the run inside the window, and an admitted run "continues under its
+recorded policy snapshot" (D0) even if its pod waited in `Pending`.
+
+**Separation of duties and key authority.** Three keys with three usages, one
+usage each (CEL rule G8): the runner's `EvidenceSigning` key, which never
+authorises; the console's `ConsoleConfirmation` key, which attests a requester
+and — only under an `Ordinary` binding — authorises; and each human approver's
+`GovernedApproval` key. The comparison that makes self-approval impossible is
+between **principals**, never display names or key ids: a governed approver's
+key must carry `principal.id: <issuer>#<subject>` — the approver's own OIDC
+identity, the same string the console records as the requester — and the
+console additionally refuses an approval submitted by the requester (403,
+whatever roles the actor holds). An administrator is not a bypass.
+
+**Keys to add to the namespace's `TrustPolicy`.** The console's public key with
+usage `ConsoleConfirmation` (`GET /api/v1/namespaces/{ns}/approval-policy`
+prints its key id), and, for a Governed namespace, each approver's public key
+with usage `GovernedApproval` and their `principal.id`. The legacy roster never
+yields a `ConsoleConfirmation` key (§7.3), so a namespace bound to a policy but
+still on `legacy-roster-v1` refuses every v2 document `KeyIdNotInRoster` until
+a `TrustPolicy` governs it.
+
+**A direct write.** A `Restore` and an `Approval` written straight to the API
+server in a bound namespace are kept, as they always were, and refused with the
+reasons above; a v1 approval, a console-only document under Governed, a
+document for another UID or plan, or a self-countersigned one creates **no**
+ConfigMap and **no** Job. The legacy `kubectl proxy` page cannot produce a v2
+document at all (D0: "Ordinary confirmation is unavailable through this legacy
+direct-CR UI").
+
+**What it does not cover.** A `RehearsalSchedule`'s standing authorization
+keeps its own `GovernedApproval`-only format (§7g) whatever the namespace is
+bound to; the ordinary form of a standing authorization (D3 §4.3) is not
+implemented.
+
+**Upgrade.** Existing installations keep their approval requirement: with no
+document every namespace is `legacy-governed-v1` and every existing `Approval`
+and signed archive verifies exactly as before. Binding a namespace applies to
+Restores not yet admitted: a Restore created before the binding whose v1
+Approval was not yet admitted is refused `ApprovalPolicyMismatch` and must be
+submitted again through the console; a run already admitted continues. Order:
+CRDs (the `Approval` status gains `authorization`) → controller and runner
+image → console with its confirmation key → the `TrustPolicy` keys → the
+binding.
+
+**Rollback.** Unbinding (or removing the document) returns the namespace to
+`legacy-governed-v1`; not-yet-admitted v2 approvals are then refused
+`ApprovalPolicyMismatch`, never admitted as v1. An older controller reached by
+rollback refuses every v2 document as `PayloadTypeMismatch` — its payload type
+is not the v1 approval's — and an older runner refuses the two new flags before
+dispatch: both fail closed. Nothing deletes public key material in either
+direction, and v1 documents and archives are untouched.
 
 ## 9. Schedules and retention: Logweir deletes nothing
 

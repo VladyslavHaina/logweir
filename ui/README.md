@@ -516,6 +516,42 @@ Restore, the create still names the one `Approval` that Restore's
 `spec.approvalRef` names, and an `Approval` that already exists with different
 content is a conflict that overwrites nothing.
 
+## Where a submitted Restore goes, by the namespace's approval policy (PLAT-19.2)
+
+*Create the Restore* is still one guided action (PLAT-12.1), and where it lands
+is now decided by the namespace's **frozen** approval policy rather than by the
+page. In console mode the product API answers the create with an
+`authorization` block (`docs/api.md`, *Approval policy*), which the client
+carries on the created object, and `restoreDestination` routes on it:
+
+* **`confirmed`** — the namespace is bound to an `Ordinary` policy and the
+  console's signed confirmation IS the Approval; the page opens the Restore's
+  **operation view**, where weirkeeper admits the run (or refuses it, with the
+  reason).
+* **`awaitingApproval`** — Governed, or unbound; and **legacy mode**, which gets
+  no answer at all — keep today's rule: the operation view only when an
+  Approval already authorises exactly this Restore, and its approval page
+  otherwise. A state this page does not recognise is never read as confirmed.
+
+The submit step says what the effective policy requires, read from `GET
+.../approval-policy`: ordinary confirmation, a governed countersignature by
+someone other than the requester (with the `logweir drill countersign`
+command), or — unbound, unknown, or legacy mode — today's out-of-band
+`logweir drill approve`. It is words, not a gate: routing uses the create's
+answer.
+
+**The approvals page under a Governed binding** shows the console's
+confirmation documents verbatim in read-only fields (never parsed here, the rule
+this page keeps for every approval document), the countersign command and one
+field for the countersigned sidecar, and submits it through `POST
+.../restores/{name}/approval`. The server refuses the requester (403, whatever
+the role), a stale or expired confirmation, and a sidecar that adds no second
+signature; the page renders each refusal where it arose. Under an `Ordinary`
+binding it says there is nothing to approve; the v1 paste form stays for an
+unbound namespace. Legacy (`kubectl proxy`) mode cannot know the policy, cannot
+sign a confirmation and has no countersign route (D0): it keeps today's governed
+flow unchanged.
+
 ## The restore route, and the point it names
 
 **The wizard is bound to a recovery point somebody chose, and never picks one

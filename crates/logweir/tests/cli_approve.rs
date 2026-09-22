@@ -374,14 +374,14 @@ fn the_documented_standing_command_line_mints_both_files() {
     assert_eq!(done.status.code(), Some(0), "{transcript}");
     let stdout = String::from_utf8_lossy(&done.stdout);
     assert!(
-        stdout.contains("The current/pre-PLAT-19.2 standing format accepts\nGovernedApproval only"),
-        "success guidance pins the current governed-only contract: {stdout}"
+        stdout.contains(
+            "The standing format accepts GovernedApproval only, under\nevery approval policy"
+        ),
+        "success guidance pins the governed-only standing contract: {stdout}"
     );
     assert!(
-        stdout.contains(
-            "ConsoleConfirmation will fail until policy mode is immutably\nresolved and carried end-to-end"
-        ),
-        "success guidance explains why a console key cannot authorize yet: {stdout}"
+        stdout.contains("ConsoleConfirmation authorises no rehearsal"),
+        "success guidance says a console key cannot authorize a rehearsal: {stdout}"
     );
     assert!(
         !stdout.contains("GovernedApproval or ConsoleConfirmation"),

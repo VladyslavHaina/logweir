@@ -234,9 +234,11 @@ export function apiError(response, text) {
 }
 
 /** The console mode's own writable set: the collection routes the product API
- *  has a POST for today. `backups` has none until PLAT-06 and `approvals` none
- *  until PLAT-19.2, and a page that reached for either gets a RangeError here
- *  rather than a 404 from a route that does not exist.
+ *  has a POST for today. `approvals` is not a plural here: an Approval is
+ *  created by the product API itself (an ordinary confirmation) or through the
+ *  named governed-submission action `restores:approval` (PLAT-19.2), never by a
+ *  page POSTing an Approval object, so a page that reached for it gets a
+ *  RangeError here rather than a 404 from a route that does not exist.
  *
  *  `destinations` and `preflights` joined it with D2 W12. `topic-discoveries`
  *  did NOT: a discovery is created under the connection it is about

@@ -2167,10 +2167,10 @@ fn a_per_run_document_never_parses_as_standing() {
     assert_eq!(refusal.reason(), "StandingDocumentInvalid");
 }
 
-/// The current standing format carries no immutable ordinary/governed policy
-/// mode. It therefore admits only `GovernedApproval`; `ConsoleConfirmation`
-/// fails closed until PLAT-19.2 binds that mode, and `EvidenceSigning` never
-/// authorizes.
+/// The standing format carries no ordinary/governed policy mode — PLAT-19.2
+/// binds one end to end for per-run Restores only (`tests/approval_policy.rs`).
+/// It therefore admits only `GovernedApproval` under every approval policy;
+/// `ConsoleConfirmation` fails closed, and `EvidenceSigning` never authorizes.
 #[test]
 fn standing_authorization_is_governed_only_until_policy_mode_is_bound() {
     let fixture = standing_fixture();

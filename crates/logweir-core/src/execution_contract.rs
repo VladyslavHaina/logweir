@@ -506,10 +506,12 @@ pub struct AuthorizationKey {
 impl AuthorizationKey {
     /// Whether this key may authorise a rehearsal at all.
     ///
-    /// The current document/bundle format carries no immutable PLAT-19.2
-    /// policy mode, so only [`crate::trust::KeyUsage::GovernedApproval`] may
-    /// authorize. `ConsoleConfirmation` fails closed until ordinary mode is
-    /// bound end-to-end; `EvidenceSigning` never authorizes.
+    /// The standing document/bundle format carries no approval-policy mode —
+    /// PLAT-19.2 carries one end to end for per-run Restores only
+    /// (`crate::approval_policy`) — so only
+    /// [`crate::trust::KeyUsage::GovernedApproval`] may authorize a rehearsal,
+    /// under every policy. `ConsoleConfirmation` fails closed here;
+    /// `EvidenceSigning` never authorizes.
     #[must_use]
     pub fn may_authorize(&self) -> bool {
         self.usages
@@ -1418,7 +1420,7 @@ mod tests {
         assert!(key(vec![KeyUsage::GovernedApproval]).may_authorize());
         assert!(
             !key(vec![KeyUsage::ConsoleConfirmation]).may_authorize(),
-            "ordinary mode is not authorized until PLAT-19.2 is immutably bound"
+            "a console key authorises no rehearsal: the standing format carries no policy mode"
         );
         assert!(
             !key(vec![KeyUsage::EvidenceSigning]).may_authorize(),

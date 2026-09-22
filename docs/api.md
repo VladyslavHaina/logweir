@@ -23,8 +23,10 @@ the more permissive one.
   chart renders no Service, no Ingress and no ingress NetworkPolicy rule beside
   it, the identity is the `<release>-api` ServiceAccount, readiness is not gated
   on OIDC, and `kubectl port-forward deploy/<release>-api` is the only way in.
-  It is for isolated labs and break-glass administration; it does not expose
-  Ordinary confirmation and it is not a shared console.
+  It is for isolated labs and break-glass administration, and it is not a
+  shared console. Its one actor is still a requester: with an approval policy
+  configured it signs ordinary confirmations for its own requests and is
+  refused a governed approval of them (*Approval policy* below).
 * `mode: shared` — the SSO console: OpenID Connect identity, a short-lived
   encrypted session cookie, a synchronizer CSRF token on every unsafe method,
   exact role and namespace bindings, and one audit record per request. It
@@ -67,8 +69,8 @@ installation a production shared console.
 A domain whose routes do not exist yet has **no route at all** — no stub and no
 `501`. `GET /api/v1/session` reports each one as `false` under `capabilities`,
 so a client learns what is unavailable instead of discovering it from an error.
-Today that is: connection tests and approval submission (PLAT-19.2). Manual
-backup creation and the operation event stream have routes. Saved destinations, topic discovery, preflight
+Today that is: connection tests. (Manual backup creation, operation event
+streams and — since PLAT-19.2 — governed approval submission have routes.) Saved destinations, topic discovery, preflight
 checks and write-only credential input **do** have routes now (D2 W12); their
 three capability flags are the domain's READ floor, and whether the actor may
 also start or cancel is the role table each grant publishes in `roles`.
@@ -142,7 +144,9 @@ anything not listed is `404`.
 | `POST /api/v1/namespaces/{ns}/backups` | "Back up now" from a schedule, or "Run first backup now" from a cluster. |
 | `GET /api/v1/namespaces/{ns}/restores[/{name}]` | `Restore` projections. Saved-destination restores carry the stored optional `sourceDestinationRef` and `evidenceDestinationRef`; legacy inline-archive restores omit both. |
 | `POST /api/v1/namespaces/{ns}/restores` | Create a `Restore`, preserving the plan bytes exactly. An optional `topicMapping` declares the mapping the caller previewed and is checked against the prefix this request stores — see below. |
-| `GET /api/v1/namespaces/{ns}/approvals[/{name}]` | Approval metadata and status. |
+| `GET /api/v1/namespaces/{ns}/approvals[/{name}]` | Approval metadata and status, including — for a verified authorization document v2 — `authorization {mode, policyName, policyDigest, requester, confirmationKeyId}`. |
+| `POST /api/v1/namespaces/{ns}/restores/{name}/approval` | PLAT-19.2: a governed approver submits the sidecar `logweir drill countersign` wrote over the console's confirmation. Approver role; never the requester. See *Approval policy*. |
+| `GET /api/v1/namespaces/{ns}/approval-policy` | PLAT-19.2: the namespace's effective approval policy, the installation document's digest and the console confirmation key id. |
 | `GET /api/v1/namespaces/{ns}/approvals/{name}/packet` | The raw approval document, only through this explicit route. |
 | `GET /api/v1/namespaces/{ns}/destinations` | `BackupDestination` rows: the canonical URL, the endpoint, the transport, the addressing and the controller's `Valid` verdict. |
 | `POST /api/v1/namespaces/{ns}/destinations` | Create a destination **under the name in the body**, because every schedule, backup and restore references it by that name. |
@@ -171,6 +175,52 @@ anything not listed is `404`.
 | `GET /api/v1/namespaces/{ns}/catalogs/{name}/signers` | The untrusted-signer panel: key ids, point counts, whether the bound policy accepts each one, and the out-of-band fingerprint command. |
 | `GET /api/v1/namespaces/{ns}/retention-policies[/{name}]` | Retention: what the last evaluation would remove, what is **actually** enforcing it, which guarantees are in force and by whom, where the approved-plan gate stands, and whether enforcement has degraded. |
 | `GET /api/v1/trust-policies[/{name}]` | The installation's trust policies. **Cluster-scoped** and administrator-only; `unknown` is not `valid`. |
+
+### Approval policy: routing a submission, and the governed submission (PLAT-19.2)
+
+The console reads the installation's approval-policy document —
+`approvalPolicyFile`, **the same file the controller mounts** — and its own
+`ConsoleConfirmation` private key — `confirmationKeyFile`, from a Secret. Both
+are optional; a served namespace bound to a policy without the key is a startup
+refusal (exit 2), because both modes carry the console's signature. The full
+contract, the four enforcement points and upgrade/rollback are in
+`docs/kubernetes.md` §8, *Approval policy*.
+
+**`POST .../restores` answers where the submission goes next.** After the
+Restore exists (so it has a UID) the response carries `authorization`:
+
+| namespace | what the console does | `authorization.state` | the console routes to |
+|---|---|---|---|
+| unbound (`legacy-governed-v1`) | signs nothing | `awaitingApproval`, `legacy: true` | the approval page (today's flow) |
+| bound `Ordinary` | signs authorization document v2 for this Restore's UID, plan hash, the authenticated requester and the policy digest, and stores it as the `Approval` `spec.approvalRef` names | `confirmed` | the operation view: weirkeeper admits the run once it verifies the confirmation |
+| bound `Governed` | signs the same document and stores it as `<approvalRef>-confirmation`, which authorises nothing | `awaitingApproval`, `confirmationName` | the approval page, where an approver countersigns |
+
+`authorization` also names `mode`, `policy`, `policyDigest`, `requester` and
+`expiresAt`. A replay of the same request completes an interrupted sequence by
+reading what exists, never signs twice, and never adopts an `Approval` this
+Restore did not produce (`409 state_conflict`). In a Governed-bound namespace
+`approvalRef.name` is at most 240 characters, so its confirmation name is still
+an object name.
+
+**`POST .../restores/{name}/approval`** takes `{"sidecarBytes": "…"}` — the file
+`logweir drill countersign --document <approvalBytes> --confirmation
+<sidecarBytes> --key <privkey> --out approval.sig` wrote over the confirmation's
+packet (`GET .../approvals/<approvalRef>-confirmation/packet`). No
+`Idempotency-Key`: the Approval it creates is named by the Restore's own
+immutable `approvalRef`, so a replay returns `200` with the same object.
+
+| refusal | when |
+|---|---|
+| `403 forbidden` | not an Approver in this namespace (the role table), **or the submitting actor is the requester the console attested** — whatever other roles it holds; an administrator is not a bypass |
+| `409 policy_mismatch` | the namespace is not bound to a Governed policy, or the confirmation names another UID, plan or policy digest (the policy changed since: submit the Restore again) |
+| `404 not_found` | no such Restore, or no console confirmation for it |
+| `409 state_conflict` | the request has expired, or an Approval with other contents holds the name |
+| `422 validation_failed` | not a sidecar, or it adds no signature beside the console's |
+
+The Approval it creates carries the confirmation's **exact** document bytes and
+the console's signatures plus the approver's. The controller then verifies both
+signatures, the approver key's `GovernedApproval` usage and that its
+`principal.id` is not the requester's before any Job exists.
 
 `backup` and `restore` answer an `OperationViewResponse` — a result, evidence
 references and a verification verdict. `discovery` and `preflight` answer a
@@ -1421,9 +1471,10 @@ must approve is bound as an Approver as well, and the separation-of-duties check
 then still compares `(issuer, sub)` — not display names, not email claims, not
 key ids. Administrator is not a self-approval bypass.
 
-The governed-approval **route** is PLAT-19.2 and does not exist yet;
-`capabilities.approvalSubmit` is `false` and no path serves it. The
-**decision** exists and is tested now.
+The governed-approval route is `POST .../restores/{name}/approval`
+(PLAT-19.2); `capabilities.approvalSubmit` follows this row. The route adds the
+separation-of-duties refusal the table cannot express: the console-attested
+requester is refused its own request.
 
 ### Enumeration resistance
 
@@ -1620,8 +1671,13 @@ file, and every actor of this process is the same actor. It must not bind a
 routable address, must not get an Ingress, and adding a login in front of it
 would not create per-user authorization. Shared operation uses `mode: shared`, which is a different
 listener, a different authenticator and a different authorizer — never this one
-with a login bolted in front. Ordinary confirmation is unavailable through this
-mode; it keeps the legacy governed approval behaviour.
+with a login bolted in front. An approval policy applies the same way in both
+modes (PLAT-19.2): with a namespace bound Ordinary the console signs the
+configured administrator's confirmation, which is an authorization only
+because the installation chose that policy; under Governed the administrator
+is the requester of everything it submits, so it can never approve one of its
+own requests. What stays unavailable is the legacy `kubectl proxy` page, which
+cannot sign a confirmation at all (D0) and keeps today's governed flow.
 
 Documentation is licensed [CC-BY-4.0](LICENSE-docs).
 

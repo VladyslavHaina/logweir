@@ -699,7 +699,7 @@ add a kind, and it spends exactly four Kubernetes verbs:
 | Grant | Why |
 |---|---|
 | `get`/`list` on the eight product kinds | every projection the API serves |
-| `create` on seven of them | the collection routes with a POST; `approvals` has none — a governed approval is not submitted through the API in v1 |
+| `create` on all eight | the collection routes with a POST, and `approvals` for PLAT-19.2: the console's signed ordinary confirmation, a governed request's confirmation object, and the approver's countersigned Approval (`POST .../restores/{name}/approval`) |
 | `patch` on `backupschedules`, `backupdestinations`, `topicdiscoveries`, `preflights` | suspension and policy edits, access rotation, and the two checks whose `spec.cancelRequested` may be raised |
 | `get`/`list` on `protectionpolicies`, `recoverycatalogs`, `rehearsalschedules`, `retentionpolicies` | D3's read surfaces |
 | `create` on `recoverycatalogs` | "connect existing archive", D3's one write |
@@ -937,6 +937,41 @@ every Logweir custom resource are untouched. The console creates and reads
 objects and executes nothing, so removing it stops no backup, cancels no restore
 and loses no evidence. Existing installations that never set the flag see no
 change at all.
+
+### 5f. Ordinary confirmation and governed approval (`approvalPolicy.*`, optional)
+
+Without this step every namespace keeps today's governed approval
+(`legacy-governed-v1`) and nothing below applies. To bind namespaces to an
+approval policy (PLAT-19.2; the contract, the enforcement points and
+upgrade/rollback are in `docs/kubernetes.md` §8, *Approval policy*):
+
+1. Put the keys on the `TrustPolicy` that governs each namespace you will bind
+   (`docs/keys.md`, *Key usage separation*): the console's
+   `ConsoleConfirmation` public key, and for a Governed namespace each
+   approver's `GovernedApproval` key with `principal.id` = the approver's
+   `<issuer>#<subject>`.
+2. Create the console's key Secret in the release namespace:
+
+   ```bash
+   openssl genpkey -algorithm ed25519 -out confirmation.key
+   kubectl --context <ctx> -n <release-ns> create secret generic \
+     logweir-console-confirmation --from-file=confirmation.key
+   openssl pkey -in confirmation.key -pubout -out confirmation.pub.pem
+   rm confirmation.key
+   ```
+
+3. Set `approvalPolicy.policies`, `approvalPolicy.namespaces`,
+   `approvalPolicy.confirmationKeySecret`, and — only if a policy is Ordinary —
+   `approvalPolicy.allowOrdinaryConfirmation: true`
+   (`charts/logweir/examples/approval-policy.values.yaml`), and upgrade. The
+   chart renders one immutable ConfigMap and mounts it into the controller and
+   the console; `helm lint` refuses an Ordinary policy without the floor, an
+   undeclared policy, and a console-served bound namespace without the key.
+
+Upgrade CRDs first (the `Approval` status gains `authorization`), then the
+controller and runner image, then the console, then set the binding. Changing
+a policy later is a rollout of both Deployments; Restores confirmed under the
+old policy and not yet admitted must be submitted again.
 
 ### 5a. The installation policy `ConfigMap` (optional, and what it unlocks)
 

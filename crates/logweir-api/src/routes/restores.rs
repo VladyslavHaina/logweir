@@ -549,6 +549,15 @@ fn existing_is_ours(
     ours.then_some(doc)
 }
 
+/// The audit record's policy identity: `<name>@<snapshot digest>`, or the
+/// legacy synthesis's name.
+fn policy_identity(effective: &EffectivePolicy) -> String {
+    match effective.digest() {
+        Some(digest) => format!("{}@{digest}", effective.name()),
+        None => effective.name().to_string(),
+    }
+}
+
 /// **PLAT-19.2's console half**: sign what the namespace's frozen policy
 /// requires, store it, and say where the submission goes next.
 ///
@@ -572,6 +581,7 @@ async fn authorize_submission(
 ) -> Result<RestoreRoutingView, ApiError> {
     actor.audit.note("approvalPolicy", effective.name());
     actor.audit.note("approvalMode", effective.mode().as_str());
+    actor.audit.set_policy_digest(&policy_identity(effective));
     let Some(policy) = effective.bound() else {
         return Ok(RestoreRoutingView {
             mode: effective.mode().into(),
@@ -769,6 +779,7 @@ pub async fn submit_approval(
     let effective = state.approval().policies.resolve(&ns);
     actor.audit.note("approvalPolicy", effective.name());
     actor.audit.note("approvalMode", effective.mode().as_str());
+    actor.audit.set_policy_digest(&policy_identity(&effective));
     let Some(policy) = effective
         .bound()
         .filter(|p| p.mode == ApprovalMode::Governed)
@@ -838,6 +849,7 @@ pub async fn submit_approval(
         ));
     }
     actor.audit.note("separation", "distinct");
+    actor.audit.note("expiresAt", &doc.expires_at.to_rfc3339());
     let console: logweir_evidence::Sidecar = serde_json::from_str(&confirmation.spec.sidecar_bytes)
         .map_err(|_| {
             ApiError::new(

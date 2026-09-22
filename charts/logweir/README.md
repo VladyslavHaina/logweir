@@ -280,9 +280,10 @@ itself, so its role is the union of what every route may need and the per-actor
 narrowing happens above it. Copying either argument onto the other is how a
 console ends up with a page's authority or a page ends up with a console's.
 
-What it holds: `get`/`list` on the eight product kinds; `create` on seven of
-them (`approvals` has none — a governed approval is not submitted through the
-API in this release); `patch` on `backupschedules`, `backupdestinations`,
+What it holds: `get`/`list` on the eight product kinds; `create` on all eight
+(`approvals` since PLAT-19.2 — the console's signed ordinary confirmation, a
+governed request's confirmation object and the approver's countersigned
+Approval); `patch` on `backupschedules`, `backupdestinations`,
 `topicdiscoveries` and `preflights`; `get`/`list` on `protectionpolicies`,
 `recoverycatalogs`, `rehearsalschedules` and `retentionpolicies`; `create` on
 `recoverycatalogs` for "connect existing archive"; `get`/`list` on the
@@ -612,6 +613,31 @@ RoleBinding and a controller restart), not a cluster-admin grant.
 own signing key — moving the signer out of the controller's reach is not this
 setting. Each listed namespace costs one watch per namespaced kind (twelve, plus
 their owned Jobs), which is the price of not holding a cluster-wide list.
+
+## `approvalPolicy` — ordinary confirmation and governed approval (PLAT-19.2)
+
+| value | meaning |
+|---|---|
+| `approvalPolicy.policies` | named policies: `name`, `mode: Governed\|Ordinary`, `maxAgeSeconds` (60..604800; default 900 Ordinary, 86400 Governed), `requireDistinctPrincipal` (Governed only, must be true) |
+| `approvalPolicy.namespaces` | `{<namespace>: <policy>}`; an unbound namespace keeps today's governed approval (`legacy-governed-v1`) |
+| `approvalPolicy.allowOrdinaryConfirmation` | D0's installation floor, default `false`; an Ordinary policy is refused at render and at start without it |
+| `approvalPolicy.confirmationKeySecret` | the console's `ConsoleConfirmation` private key, a Secret with key `confirmation.key`; required when a console-served namespace is bound |
+
+**Nothing renders when nothing is set**, so an existing installation sees no
+change. When set, the chart renders one **immutable, content-addressed**
+ConfigMap `<release>-approval-policy-<digest>` and mounts the same object into
+the `weirkeeper` Deployment (`LOGWEIR_APPROVAL_POLICY_FILE`) and into the
+console (`approvalPolicyFile` in its config), and mounts the key Secret into the
+console only (`confirmationKeyFile`). Both processes log the document's digest
+at start and refuse to start on a document that does not validate. Editing a
+policy renames the ConfigMap and rolls both Deployments — the installation-admin
+rollout D0 asks for; a Restore confirmed under the old policy and not yet
+admitted is refused `ApprovalPolicyMismatch` and is submitted again. Rolling
+back (removing the values) returns every namespace to legacy governed approval,
+and an older controller refuses every document the new console signed: both
+directions fail closed. The keys this needs on each namespace's `TrustPolicy`
+are in `docs/keys.md`; the example is `examples/approval-policy.values.yaml`,
+rendered to `rendered/approval-policy.yaml`.
 
 ## `controller.failFastSeconds` and `controller.jobTtlSeconds`
 

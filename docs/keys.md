@@ -353,6 +353,30 @@ as `selfAttestedRisk`.
 `KeyUsageMismatch` is a different refusal from a bad signature and points at a
 different fix.
 
+**PLAT-19.2 puts the third usage to work.** A namespace the installation binds
+to an approval policy (`docs/kubernetes.md` §8, *Approval policy*) verifies
+authorization document v2, and the keys it needs on its `TrustPolicy` are:
+
+* the console's key, usage `ConsoleConfirmation` — generate it once
+  (`openssl genpkey -algorithm ed25519 -out confirmation.key`), give the private
+  half to the console as a Secret (`approvalPolicy.confirmationKeySecret`, key
+  `confirmation.key`) and nothing else, and put the public half here;
+  `GET /api/v1/namespaces/{ns}/approval-policy` prints the key id the console
+  loaded. It attests who asked; under an `Ordinary` binding that attestation is
+  the whole authorization, and under `Governed` it authorises nothing alone.
+* for a `Governed` namespace, each approver's key, usage `GovernedApproval`,
+  with **`principal.id` set to that approver's own `<issuer>#<subject>`** — the
+  exact string the console records as a requester. Separation of duties compares
+  this principal with the console-attested requester, so a key whose principal
+  is a display name or an email proves nothing: it would differ from every
+  requester, including its own holder.
+
+The legacy roster never yields a `ConsoleConfirmation` key, so a namespace must
+be governed by a `TrustPolicy` before an approval policy can take effect in it.
+Retiring or revoking the console key refuses every new ordinary confirmation and
+governed request at once (`KeyRetired`/`KeyRevoked`), exactly as for any other
+key; rotate it with an overlap, as below.
+
 ### Migrating from the roster, and rolling back
 
 Until a `TrustPolicy` exists, a controller synthesises `legacy-roster-v1` from

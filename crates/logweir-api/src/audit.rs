@@ -84,8 +84,9 @@ pub struct AuditRecord {
     pub resource: String,
     /// `allow` or `deny`.
     pub decision: String,
-    /// The approval policy identity/digest, when a decision consulted one.
-    /// Always empty until PLAT-19.2 binds policies.
+    /// The approval policy identity/digest, when a decision consulted one:
+    /// `<policy name>@<snapshot digest>`, or `legacy-governed-v1` for an
+    /// unbound namespace (PLAT-19.2).
     pub policy_digest: String,
     /// The SHA-256 of the idempotency scope. The raw key never appears.
     pub idempotency_key_hash: String,
@@ -224,6 +225,11 @@ impl AuditContext {
             f.record.idempotency_key_hash = scope_hash.to_string();
             f.record.request_hash = request_hash.to_string();
         });
+    }
+
+    /// Record the approval policy a decision consulted (PLAT-19.2).
+    pub fn set_policy_digest(&self, policy: &str) {
+        self.with(|f| f.record.policy_digest = crate::validate::bounded(policy, 160));
     }
 
     /// Record a plan hash. The plan bytes are never recorded.
