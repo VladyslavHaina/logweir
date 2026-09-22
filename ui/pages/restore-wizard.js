@@ -2237,8 +2237,10 @@ export function validateRestore(state) {
   const problems = Object.create(null);
   const destinationName = savedDestinationName(s);
   if (destinationName.length > 0 && !savedDestinationResolved(s)) {
-    problems.archive = "saved destination " + destinationName +
-      " could not be resolved to its public location and transport settings";
+    problems.archive = typeof s.savedDestinationProblem === "string"
+      ? s.savedDestinationProblem
+      : "saved destination " + destinationName +
+        " could not be resolved to its public location and transport settings";
   }
   if (epochMs(fields.pointInTime) === null) {
     problems.pointInTime = "an RFC 3339 instant, such as 2026-09-07T14:05:00Z";
@@ -2880,7 +2882,7 @@ export async function mountRestoreWizard(node, ns, params, parse, deps, lifecycl
       if (!active(lifecycle)) {
         return;
       }
-      destination = read.item;
+      destination = requireFrozenDestination(resolved.point, read.item);
     }
     const state = initialState(ns, clusters, backups, selection, destination);
     if (state.pointState === "none") {
@@ -2985,7 +2987,11 @@ export function initialState(ns, clusters, backups, selection, savedDestination)
   const archive = spec.archive || {};
   const archiveUrl = archive.url;
   const destinationName = savedDestinationName({ point: point });
-  const destinationSettings = savedDestinationStore(savedDestination, destinationName);
+  const destinationProblem = frozenDestinationProblem(point, savedDestination);
+  const destinationSettings = destinationProblem === null
+    ? savedDestinationStore(savedDestination, destinationName)
+    : null;
+  const savedPoint = destinationName.length > 0;
   // BOTH HALVES OF THE ARCHIVE REFERENCE, FROM THE SAME OBJECT -- and that
   // object is the chosen point. A URL taken from one Backup and a credential
   // taken from another would be two archives and one name for them.
@@ -3014,8 +3020,11 @@ export function initialState(ns, clusters, backups, selection, savedDestination)
     query: "",
     archiveUrl: archiveUrl,
     archiveSecretName: archiveSecretName,
-    savedDestination: savedDestinationResolvedValue(savedDestination, destinationName),
-    evidenceBucket: destinationSettings === null ? "logweir-evidence" : destinationSettings.bucket,
+    savedDestination: destinationSettings === null ? null : savedDestination,
+    savedDestinationProblem: destinationProblem,
+    evidenceBucket: savedPoint
+      ? (destinationSettings === null ? "" : destinationSettings.bucket)
+      : "logweir-evidence",
     targetClusterName: ((target || {}).metadata || {}).name,
     // THE IDENTITY, BESIDE THE NAME. The default is a preselect and nothing
     // more, but it is a preselect BY UID from the first render, so the very
@@ -3029,9 +3038,11 @@ export function initialState(ns, clusters, backups, selection, savedDestination)
       topics: Array.isArray(spec.topics) ? spec.topics : [],
       pointInTime: pointInTime,
       source: Object.assign(
-        destinationSettings === null
+        !savedPoint
           ? { bucket: bucketOf(archiveUrl), prefix: prefixOf(archiveUrl) }
-          : { bucket: destinationSettings.bucket, prefix: destinationSettings.prefix },
+          : (destinationSettings === null
+            ? { bucket: "", prefix: "" }
+            : { bucket: destinationSettings.bucket, prefix: destinationSettings.prefix }),
         store,
       ),
       target: {
@@ -3066,7 +3077,9 @@ export function initialState(ns, clusters, backups, selection, savedDestination)
       },
       objectives: {},
       evidence: Object.assign({}, store, {
-        bucket: destinationSettings === null ? "logweir-evidence" : destinationSettings.bucket,
+        bucket: savedPoint
+          ? (destinationSettings === null ? "" : destinationSettings.bucket)
+          : "logweir-evidence",
         // Evidence never inherits the archive prefix. Global Constraint 6 is
         // the saved-destination evidence location too.
         prefix: EVIDENCE_PREFIX,
@@ -3079,6 +3092,51 @@ export function initialState(ns, clusters, backups, selection, savedDestination)
 function savedDestinationName(state) {
   const destination = ((((state || {}).point || {}).spec || {}).destinationRef) || {};
   return typeof destination.name === "string" ? destination.name : "";
+}
+
+/** A destination-backed point is pinned by all three frozen public facts.
+ * The live object answering the name must still be that exact destination,
+ * at that exact location. A replacement under the same name is not a source
+ * for this recovery point. */
+export function frozenDestinationProblem(point, destination) {
+  const p = point || {};
+  const ref = ((p.spec || {}).destinationRef) || {};
+  const expectedName = typeof ref.name === "string" ? ref.name : "";
+  if (expectedName.length === 0) {
+    return null;
+  }
+  const expectedUid = typeof ref.uid === "string" ? ref.uid : "";
+  const expectedDigest = typeof ((p.status || {}).locationDigest) === "string"
+    ? p.status.locationDigest
+    : "";
+  if (expectedUid.length === 0 || expectedDigest.length === 0) {
+    return "recovery point " + String((p.metadata || {}).name || "(unknown)") +
+      " does not publish the frozen destination UID and location digest required to restore";
+  }
+  const live = destination || {};
+  if (live.name !== expectedName) {
+    return "saved destination " + expectedName + " resolved as a different name";
+  }
+  if (live.uid !== expectedUid) {
+    return "saved destination " + expectedName + " was recreated: recovery point UID " +
+      expectedUid + " does not match live UID " + String(live.uid || "(absent)");
+  }
+  if (live.locationDigest !== expectedDigest) {
+    return "saved destination " + expectedName + " moved: recovery point location digest " +
+      expectedDigest + " does not match live digest " +
+      String(live.locationDigest || "(absent)");
+  }
+  return null;
+}
+
+/** The mount gate: no wizard state, plan bytes or controls exist until the
+ * live public destination still matches the recovery point's frozen binding. */
+export function requireFrozenDestination(point, destination) {
+  const problem = frozenDestinationProblem(point, destination);
+  if (problem !== null) {
+    throw refusal(problem);
+  }
+  return destination;
 }
 
 /** Only public destination fields become signed storage settings. */
@@ -3102,13 +3160,11 @@ function savedDestinationStore(destination, expectedName) {
   };
 }
 
-function savedDestinationResolvedValue(destination, expectedName) {
-  return savedDestinationStore(destination, expectedName) === null ? null : destination;
-}
-
 function savedDestinationResolved(state) {
   const name = savedDestinationName(state);
-  return name.length === 0 || savedDestinationStore((state || {}).savedDestination, name) !== null;
+  return name.length === 0 ||
+    ((state || {}).savedDestinationProblem === null &&
+      savedDestinationStore((state || {}).savedDestination, name) !== null);
 }
 
 // Copy public settings only. The controller projects the selected cluster's

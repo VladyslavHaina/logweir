@@ -30,6 +30,7 @@ import {
   decodeLegacyObject,
   decodeOperation,
   decodeProblem,
+  decodeRequest,
   decodeSession,
   decodeTopicPage,
   isContractFailure,
@@ -507,4 +508,26 @@ test("every_request_shape_this_client_builds_is_the_schema_s_own", () => {
     "ReadinessAcknowledgementRequest", "CreateBackupRequest"]) {
     assert.ok(CONSOLE_SHAPES[name] !== undefined, name + " is in the compared surface");
   }
+});
+
+test("saved_destination_refs_are_known_optional_restore_request_fields", () => {
+  const decoded = decodeRequest("restores", {
+    planBytes: "plan bytes\n",
+    planHash: "sha256:" + "a".repeat(64),
+    approvalRef: { name: "approval" },
+    sourceArchive: { url: "logweir-destination://primary" },
+    sourceDestinationRef: { name: "primary" },
+    evidenceDestinationRef: { name: "evidence" },
+    backupSetRef: "01JB7Z0000000000000000000B",
+    pointInTime: "2026-09-11T12:00:00Z",
+    target: {
+      clusterRef: { name: "target" }, mode: "newTopic",
+      topicNaming: { prefix: "restore-" },
+    },
+    deadlineSeconds: 3600,
+  });
+  assert.deepEqual(decoded.unknown, [],
+    "both fields are declared by the browser request decoder, not tolerated as unknown");
+  assert.equal(decoded.value.sourceDestinationRef.name, "primary");
+  assert.equal(decoded.value.evidenceDestinationRef.name, "evidence");
 });

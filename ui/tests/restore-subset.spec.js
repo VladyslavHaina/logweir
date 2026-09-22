@@ -25,6 +25,7 @@ import {
   renderPointInTimeStep,
   renderPointSelector,
   freshTargetPrefix,
+  frozenDestinationProblem,
   initialState,
   isKafkaTopicName,
   mappedTopicName,
@@ -43,6 +44,7 @@ import {
   renderStoreFields,
   renderTargetStep,
   renderTopicSubset,
+  requireFrozenDestination,
   replicationFactorOf,
   restoreBody,
   restoreReadinessRequest,
@@ -90,12 +92,13 @@ function savedWizardState(extra) {
   const backups = fixture("wizard-backups.json");
   const selection = Object.assign({}, newestPoint(backups), extra || {});
   const point = backups.items.find((item) => item.metadata.uid === selection.uid);
-  point.spec.destinationRef = { name: "primary", uid: "uid-primary" };
+  const destination = fixture("console/destination.json").item;
+  point.spec.destinationRef = { name: "primary", uid: destination.uid };
   point.spec.archive = { url: "logweir-destination://primary" };
-  point.status.locationDigest = "sha256:" + "b".repeat(64);
+  point.status.locationDigest = destination.locationDigest;
   return initialState(
     "logweir-t27", fixture("wizard-clusters.json"), backups, selection,
-    fixture("console/destination.json").item,
+    destination,
   );
 }
 
@@ -395,6 +398,8 @@ test("the_readiness_request_uses_a_saved_destination_and_only_legacy_points_send
 
 test("a_saved_point_signs_the_resolved_destination_and_has_no_legacy_storage_controls", async () => {
   const state = savedWizardState();
+  assert.equal(frozenDestinationProblem(state.point, state.savedDestination), null);
+  assert.equal(requireFrozenDestination(state.point, state.savedDestination), state.savedDestination);
   assert.deepEqual(state.fields.source, {
     bucket: "kafka-backups", prefix: "team-a/prod", region: "us-east-1",
     endpoint: "https://minio.storage.svc:9000", pathStyle: true, allowHttp: false,
@@ -436,12 +441,45 @@ test("a_saved_point_signs_the_resolved_destination_and_has_no_legacy_storage_con
   assert.match(legacyControls, /id="store-endpoint"/);
 });
 
+test("a_recreated_or_moved_saved_destination_is_refused_before_its_storage_can_be_signed", async () => {
+  const exact = savedWizardState();
+  const replacement = JSON.parse(JSON.stringify(exact.savedDestination));
+  replacement.uid = "replacement-destination-uid";
+  replacement.storage.bucket = "replacement-bucket";
+  assert.match(frozenDestinationProblem(exact.point, replacement), /was recreated/);
+  assert.throws(() => requireFrozenDestination(exact.point, replacement), /was recreated/,
+    "a same-name replacement is refused by UID before the mount constructs wizard state");
+  const uidMismatch = initialState(
+    exact.ns, exact.clusters, exact.backups, exact.selection, replacement,
+  );
+  assert.equal(uidMismatch.fields.source.bucket, "");
+  assert.equal(uidMismatch.fields.evidence.bucket, "");
+  assert.match(validateRestore(uidMismatch).archive, /was recreated/);
+  await assert.rejects(() => preparePlan(uidMismatch), /storage.bucket is required/,
+    "direct construction cannot sign any plan, let alone the replacement location");
+
+  const moved = JSON.parse(JSON.stringify(exact.savedDestination));
+  moved.locationDigest = "sha256:" + "f".repeat(64);
+  moved.storage.bucket = "moved-bucket";
+  assert.match(frozenDestinationProblem(exact.point, moved), /moved/);
+  assert.throws(() => requireFrozenDestination(exact.point, moved), /moved/,
+    "a changed location under the same UID is refused before rendering");
+  const digestMismatch = initialState(
+    exact.ns, exact.clusters, exact.backups, exact.selection, moved,
+  );
+  assert.equal(digestMismatch.fields.source.bucket, "");
+  assert.match(validateRestore(digestMismatch).archive, /moved/);
+  await assert.rejects(() => preparePlan(digestMismatch), /storage.bucket is required/);
+});
+
 test("the_wizard_mount_resolves_the_point_destination_before_it_renders_a_plan", async () => {
   const backups = fixture("wizard-backups.json");
   const selection = newestPoint(backups);
   const point = backups.items.find((item) => item.metadata.uid === selection.uid);
-  point.spec.destinationRef = { name: "primary" };
+  const destination = fixture("console/destination.json").item;
+  point.spec.destinationRef = { name: "primary", uid: destination.uid };
   point.spec.archive = { url: "logweir-destination://primary" };
+  point.status.locationDigest = destination.locationDigest;
   const calls = [];
   const api = {
     list: async (_ns, plural) => plural === "backups" ? backups : fixture("wizard-clusters.json"),

@@ -903,6 +903,10 @@ const CREATE_RESTORE_REQUEST = shapeOf(
     target: objectOf(RESTORE_TARGET_REQUEST),
     deadlineSeconds: int,
   },
+  {
+    sourceDestinationRef: objectOf(NAME_REF),
+    evidenceDestinationRef: objectOf(NAME_REF),
+  },
 );
 
 const SET_SUSPENSION_REQUEST = shapeOf(
