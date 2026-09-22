@@ -13,14 +13,19 @@
 // `logweir-api`, against the real kube-apiserver, and read back with `kubectl`
 // by name and by UID. No response body is fabricated, intercepted or delayed.
 //
-// WHAT THE LAB CANNOT DO, AND WHY THAT IS THE POINT OF FOUR OF THESE JOURNEYS.
-// No controller on this cluster reconciles `BackupDestination`, `TopicDiscovery`
-// or `Preflight` -- the images predate the three kinds. So the API creates the
-// objects and their statuses stay empty, for ever. That is precisely the state
-// the page must render honestly, and the assertions below are about exactly
-// that: a destination reads "not judged yet" and never valid or invalid; a
-// discovery and a preflight read `pending` and never succeeded or failed; and
-// no sentence anywhere claims readiness, completeness or health.
+// THE PAGE RENDERS WHAT THE CONTROLLER RECORDED, AND NOTHING ELSE. This
+// harness was first written for a lab whose controller predated
+// `BackupDestination`, `TopicDiscovery` and `Preflight`, so every status stayed
+// empty and journeys 3, 4 and 6 asserted "not judged yet" / `pending`. Since
+// D2 W11 the lab controller reconciles all three (measured 2026-09-22 by
+// plat20-1: "never saw not judged yet" at :353), so those journeys now read the
+// OBJECT with kubectl on both sides of the page read, compute the badge the
+// recorded status means independently of the API, and require the page to
+// show exactly that -- "not judged yet" only while the object carries no
+// verdict. The invariants are unchanged and asserted on every arm: nothing is
+// green unless the controller recorded `valid: true` / `ready`, a completed
+// discovery never reads complete without an attestation, and an unfinished
+// discovery never reads succeeded.
 //
 // THE CREDENTIAL JOURNEY IS THE SECURITY ONE. The page creates a destination
 // with a write-only credential typed into the form. Every response body the
@@ -192,6 +197,84 @@ async function waitForText(page, needle, label) {
     (await text(page)).slice(0, 2500));
 }
 
+// ------------------------------------------------- the recorded verdicts
+
+/** The destination badge `status` means, computed here from the object
+ *  kubectl read and NOT from the API's answer: `valid: true` is the only
+ *  green, `valid: false` is "not valid", and an absent verdict is "not judged
+ *  yet" (`ui/render.js::destinationVerdict`). */
+function expectedDestinationBadge(status) {
+  const s = status || {};
+  const reason = typeof s.reason === "string" && s.reason.length > 0 ? " (" + s.reason + ")" : "";
+  if (s.valid === true) {
+    return { kind: "green", caption: "valid" + reason, arm: "valid" };
+  }
+  if (s.valid === false) {
+    return { kind: "unverified", caption: "not valid" + reason, arm: "notValid" };
+  }
+  return { kind: "pending", caption: "not judged yet", arm: "unjudged" };
+}
+
+/** A Preflight's aggregate from its recorded `status.phase` and
+ *  `status.result.state` -- `Completed` with no recorded state is `unknown`,
+ *  never `ready` -- and the badge `ui/render.js::preflightVerdict` gives it. */
+function recordedPreflightState(object) {
+  const st = (object || {}).status || {};
+  const phase = typeof st.phase === "string" ? st.phase : "Pending";
+  const table = { Pending: "pending", Queued: "queued", Running: "running",
+    Cancelled: "cancelled", Failed: "failed" };
+  if (phase === "Completed") {
+    const state = (st.result || {}).state;
+    return state === "ready" || state === "notReady" ? state : "unknown";
+  }
+  return table[phase] || "unknown";
+}
+
+function expectedPreflightBadge(state) {
+  const captions = { ready: ["green", "ready"], notReady: ["unverified", "not ready"],
+    failed: ["unverified", "failed: no result"], cancelled: ["pending", "cancelled: no result"],
+    pending: ["pending", "pending"], queued: ["pending", "queued"],
+    running: ["pending", "running"] };
+  const [kind, caption] = captions[state] || ["pending", "unknown"];
+  return { kind: kind, caption: caption };
+}
+
+/** The first badge inside `selector`, as `{kind, caption}`; the caption is
+ *  `textContent`, i.e. before the stylesheet capitalises it. */
+async function badgeIn(page, selector) {
+  return page.evaluate((sel) => {
+    const el = document.querySelector(sel);
+    if (el === null) {
+      return null;
+    }
+    const kind = Array.from(el.classList).find((c) => c.startsWith("badge-"));
+    return { kind: kind === undefined ? null : kind.slice("badge-".length), caption: el.textContent };
+  }, selector);
+}
+
+/** Every green badge whose caption claims validity or readiness. */
+async function greenClaims(page) {
+  return page.evaluate(() => Array.from(document.querySelectorAll(".badge-green"))
+    .map((b) => b.textContent)
+    .filter((t) => /^(valid|ready)\b/.test(t)));
+}
+
+/** READ THE OBJECT, THEN THE PAGE, THEN THE OBJECT AGAIN, and judge only a
+ *  page read both object reads agree about -- otherwise a verdict written
+ *  between the two reads would be blamed on the page. */
+async function settledRead(readObject, readPage, label) {
+  for (let i = 0; i < 12; i += 1) {
+    const before = JSON.stringify(readObject());
+    const shown = await readPage();
+    const after = JSON.stringify(readObject());
+    if (before === after) {
+      return { object: JSON.parse(after), page: shown, attempts: i + 1 };
+    }
+    await pause(2000);
+  }
+  throw new Error(label + ": the object kept changing across twelve page reads");
+}
+
 // ------------------------------------------------------------- the service
 
 let api = null;
@@ -264,7 +347,12 @@ async function main() {
     input: JSON.stringify({
       apiVersion: "logweir.dev/v1alpha1", kind: "KafkaCluster",
       metadata: { name: connection, labels: { "logweir.dev/test-owner": OWNER } },
-      spec: { bootstrapServers: ["kafka-source.logweir-scram-local.svc:9092"], role: "source",
+      // A BLACKHOLE, NOT THE LAB BROKER: with a controller reconciling
+      // `TopicDiscovery`, a discovery against a refusing port is `Failed` in
+      // seconds and journey 7 would have nothing in flight to cancel. A
+      // non-routable address keeps the check dialling until its 60 s budget,
+      // so journeys 6 and 7 are about an unfinished discovery, as written.
+      spec: { bootstrapServers: ["10.255.255.1:9092"], role: "source",
         auth: { mode: "plaintext", tls: false } },
     }),
   });
@@ -340,46 +428,133 @@ async function main() {
     });
 
     // ---------------------------------------------------------------- 3
-    await page.goto(base + "#/destinations?ns=" + namespace + "&name=" + destination,
-      { waitUntil: "load", timeout: 30000 });
-    await waitForText(page, "not judged yet", "the unjudged verdict");
-    const detail = await text(page);
-    check(detail.includes("no controller has recorded a verdict"),
-      "the detail says why there is no verdict");
-    check(!/\bvalid \(/.test(detail), "and never claims the destination is valid");
+    const detailRoute = base + "#/destinations?ns=" + namespace + "&name=" + destination;
+    const judged = await settledRead(
+      () => kubeJson(["-n", namespace, "get", "backupdestination", destination]).status || null,
+      async () => {
+        await page.goto(detailRoute, { waitUntil: "load", timeout: 30000 });
+        await page.reload({ waitUntil: "load", timeout: 30000 });
+        await waitForText(page, "no access test has been recorded", "the destination detail");
+        return {
+          badge: await page.evaluate((name) => {
+            // The verdict is the badge right after the detail's own heading.
+            const h2 = Array.from(document.querySelectorAll("h2"))
+              .find((h) => h.textContent.trim() === "Destination " + name);
+            const el = h2 === undefined ? null : h2.nextElementSibling;
+            if (el === null || !el.classList.contains("badge")) {
+              return null;
+            }
+            const kind = Array.from(el.classList).find((c) => c.startsWith("badge-"));
+            return { kind: kind.slice("badge-".length), caption: el.textContent };
+          }, destination),
+          text: await text(page),
+          green: await greenClaims(page),
+        };
+      },
+      "the destination detail",
+    );
+    const wantDestination = expectedDestinationBadge(judged.object);
+    const detail = judged.page.text;
+    check(judged.page.badge !== null &&
+      judged.page.badge.caption === wantDestination.caption &&
+      judged.page.badge.kind === wantDestination.kind,
+      "the detail renders exactly the verdict the controller recorded: page " +
+        JSON.stringify(judged.page.badge) + ", object status " + JSON.stringify(judged.object));
+    check(judged.page.green.length === (wantDestination.arm === "valid" ? 1 : 0),
+      "and nothing is green unless the controller recorded valid: true: " +
+        JSON.stringify(judged.page.green));
+    if (wantDestination.arm === "unjudged") {
+      check(detail.includes("no controller has recorded a verdict"),
+        "the detail says why there is no verdict");
+      check(!/\bvalid \(/.test(detail), "and never claims the destination is valid");
+    } else {
+      check(!detail.includes("not judged yet") &&
+        !detail.includes("no controller has recorded a verdict"),
+        "a recorded verdict is never hidden behind the unjudged sentence");
+    }
     check(detail.includes("no access test has been recorded"),
       "and says nothing below claims it works");
-    await shot(page, "04-detail-unjudged");
-    record("a destination no controller has judged renders as not judged, never valid or invalid", {
-      statusOnObject: created.status === undefined ? null : created.status,
+    await shot(page, "04-detail-verdict-" + wantDestination.arm);
+    record("a destination renders exactly the verdict the controller recorded, never valid without one", {
+      arm: wantDestination.arm, statusOnObject: judged.object,
+      pageBadge: judged.page.badge, greenClaims: judged.page.green, settledAfter: judged.attempts,
     });
 
     // ---------------------------------------------------------------- 4
     await page.click("#destination-test-form button[type=submit]");
     await waitForText(page, "pf-", "the started preflight");
     await pause(1500);
-    const afterTest = await text(page);
-    check(afterTest.includes("pending"), "the preflight renders pending with no controller");
-    // NO GREEN BADGE ANYWHERE IN THE RESULT. Read from the DOM and not from
-    // `innerText`, because a class name is not text: `badge-green` is how this
-    // page spells "we are asserting something worked", and a preflight nothing
-    // has reconciled must not spell it.
+    // NO GREEN BADGE UNLESS THE CONTROLLER RECORDED `ready`. Read from the DOM
+    // and not from `innerText`, because a class name is not text:
+    // `badge-green` is how this page spells "we are asserting something
+    // worked". The object is read AFTER the panel, so a green panel over an
+    // object that is not `ready` is the page claiming more than was recorded.
     const testDom = await page.evaluate(() => {
       const panel = document.querySelector(".preflight-result");
       return panel === null ? "" : panel.outerHTML;
     });
-    check(testDom.length > 0, "the preflight result was rendered");
-    check(testDom.indexOf("badge-green") === -1,
-      "and it carries no green badge: " + testDom.slice(0, 600));
+    const firstBadge = await badgeIn(page, ".preflight-result .preflight-head .badge");
     const preflights = kubeJson(["-n", namespace, "get", "preflights"]).items;
-    check(preflights.length >= 1, "the page created a Preflight");
+    check(preflights.length === 1, "the page created exactly one Preflight: " + preflights.length);
+    const preflightName = preflights[0].metadata.name;
     result.created.push({
-      kind: "Preflight", name: preflights[0].metadata.name, uid: preflights[0].metadata.uid,
+      kind: "Preflight", name: preflightName, uid: preflights[0].metadata.uid,
     });
-    await shot(page, "05-preflight-pending");
-    record("an access test creates a real Preflight and renders it pending, never ready", {
-      preflight: preflights[0].metadata.name, uid: preflights[0].metadata.uid,
-      statusOnObject: preflights[0].status === undefined ? null : preflights[0].status,
+    check(testDom.length > 0 && firstBadge !== null, "the preflight result was rendered");
+    const stateAtRender = recordedPreflightState(preflights[0]);
+    check(Object.values({ a: "pending", b: "queued", c: "running", d: "ready", e: "not ready",
+      f: "failed: no result", g: "cancelled: no result", h: "unknown" })
+      .includes(firstBadge.caption), "the panel speaks the preflight vocabulary: " +
+        JSON.stringify(firstBadge));
+    check(testDom.indexOf("badge-green") === -1 || stateAtRender === "ready",
+      "and it carries no green badge the controller did not record: object " + stateAtRender +
+        ", panel " + testDom.slice(0, 600));
+    await shot(page, "05-preflight-started");
+    // THE RECORDED ANSWER, AFTER THE CONTROLLER HAS ONE. The detail's "last
+    // test" pointer is re-read from a reload and judged against the object.
+    const terminalPhases = ["Completed", "Failed", "Cancelled"];
+    let finished = null;
+    for (let i = 0; i < 80 && finished === null; i += 1) {
+      const o = kubeJson(["-n", namespace, "get", "preflight", preflightName]);
+      if (terminalPhases.includes((o.status || {}).phase)) {
+        finished = o;
+      } else {
+        await pause(3000);
+      }
+    }
+    check(finished !== null, "the controller recorded a terminal phase for " + preflightName +
+      " within 240 s");
+    const tested = await settledRead(
+      () => kubeJson(["-n", namespace, "get", "preflight", preflightName]).status || null,
+      async () => {
+        await page.goto(detailRoute, { waitUntil: "load", timeout: 30000 });
+        await page.reload({ waitUntil: "load", timeout: 30000 });
+        await page.waitForSelector("#destination-last-test", { timeout: 30000 });
+        return {
+          badge: await badgeIn(page, "#destination-last-test .badge"),
+          lastTest: await page.evaluate(() =>
+            document.querySelector("#destination-last-test").textContent),
+          green: await greenClaims(page),
+        };
+      },
+      "the recorded access test",
+    );
+    const recorded = recordedPreflightState({ status: tested.object });
+    const wantTest = expectedPreflightBadge(recorded);
+    check(tested.page.badge !== null && tested.page.badge.caption === wantTest.caption &&
+      tested.page.badge.kind === wantTest.kind,
+      "the last test renders exactly the state the controller recorded: page " +
+        JSON.stringify(tested.page.badge) + ", recorded " + recorded);
+    check(tested.page.lastTest.includes(preflightName), "and names the Preflight it read");
+    check(tested.page.green.filter((c) => /^ready\b/.test(c)).length ===
+      (recorded === "ready" ? 1 : 0),
+      "green reads ready only when the controller recorded ready: " +
+        JSON.stringify(tested.page.green));
+    await shot(page, "05b-preflight-recorded");
+    record("an access test creates a real Preflight and the page renders exactly what the controller recorded, green only for ready", {
+      preflight: preflightName, uid: preflights[0].metadata.uid,
+      atRender: { panel: firstBadge, recorded: stateAtRender },
+      recorded: recorded, statusOnObject: tested.object, pageBadge: tested.page.badge,
     });
 
     // ---------------------------------------------------------------- 5
@@ -427,16 +602,26 @@ async function main() {
       kind: "TopicDiscovery", name: discoveryName, uid: discoveries[0].metadata.uid,
     });
     const started = await text(page);
-    check(started.includes("pending") || started.includes("queued"),
-      "the discovery renders as pending with no controller: " + started.slice(0, 400));
+    const latestBadge = await badgeIn(page, "#discovery-latest .badge");
+    const inFlight = kubeJson(["-n", namespace, "get", "topicdiscovery", discoveryName]);
+    const inFlightPhase = (inFlight.status || {}).phase || "Pending";
+    // AN UNFINISHED DISCOVERY READS UNFINISHED. The object is read after the
+    // page; against the blackhole it is still dialling, and the page must show
+    // one of the three in-flight states and never a result.
+    check(["Pending", "Queued", "Running"].includes(inFlightPhase),
+      "the discovery is still in flight after the page read (fixture premise): " + inFlightPhase);
+    check(latestBadge !== null && ["pending", "queued", "running"].includes(latestBadge.caption),
+      "the discovery renders as in flight, never succeeded or failed: " +
+        JSON.stringify(latestBadge) + " " + started.slice(0, 400));
     check(started.indexOf("attestedcomplete") === -1,
       "and no completeness is claimed for an unfinished listing");
     check(started.indexOf("rather than calling it complete") !== -1,
       "the visibility banner says why a listing is never called complete");
     await shot(page, "07-discovery-started");
-    record("a discovery is started by the page and renders pending, never succeeded", {
+    record("a discovery is started by the page and renders in flight, never succeeded", {
       discovery: discoveryName, uid: discoveries[0].metadata.uid,
-      statusOnObject: discoveries[0].status === undefined ? null : discoveries[0].status,
+      pageBadge: latestBadge, phaseAfterPageRead: inFlightPhase,
+      statusOnObject: inFlight.status === undefined ? null : inFlight.status,
     });
 
     // ---------------------------------------------------------------- 7
