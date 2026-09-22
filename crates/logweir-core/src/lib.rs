@@ -5,6 +5,10 @@
 /// fields only; a major changes an identity rule.
 pub const FORMAT_VERSION: &str = "1.0.0";
 
+/// PLAT-19.2 / decision D0: ordinary confirmation and governed approval —
+/// the installation policy set, the policy snapshot and authorization
+/// document v2, with `now` always an argument.
+pub mod approval_policy;
 pub mod backup_receipt;
 pub mod check_contract;
 pub mod connection;
