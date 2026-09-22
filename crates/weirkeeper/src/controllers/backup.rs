@@ -4035,9 +4035,13 @@ async fn reconcile_backup_inner(
     let receipt_sha256 = reported_receipt_sha256.map(str::to_string);
     let legacy_unbound = reported_receipt_sha256.is_none() && keys.complete();
     // No runner digest means no immutable binding between this run and any
-    // object currently found at the reported keys. Suppress every fact parsed
-    // from those objects, including the window written by the terminal patch.
-    let covered = if legacy_unbound {
+    // object currently found at the reported keys, and a runner digest the
+    // fetched bytes do not hash to means those bytes are PROVABLY not this
+    // run's receipt. Either way suppress every fact parsed from those objects,
+    // including the window written by the terminal patch: a replacement
+    // receipt's window would otherwise reach protection's `newestRecordAt`
+    // and the rehearsal candidate's `covered` beside an `Invalid` verdict.
+    let covered = if legacy_unbound || digest_disagreement {
         None
     } else {
         observed_covered

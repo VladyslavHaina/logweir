@@ -9214,6 +9214,11 @@ async fn a_runner_digest_disagreement_is_invalid_and_never_self_hashes_valid() {
         json!(RUNNER_RECEIPT_SHA256),
         "the status preserves the runner's capture claim, not the fetched bytes' self-hash"
     );
+    assert!(
+        statuses.iter().all(|s| s["windowCovered"].is_null()),
+        "bytes that do not hash to the runner's claim are not this run's receipt, so their \
+         covered window is never projected: {statuses:?}"
+    );
     let second = statuses.last().expect("the verification patch exists");
     assert_eq!(second["evidence"]["verification"]["result"], "Invalid");
     let detail = second["evidence"]["verification"]["detail"]
