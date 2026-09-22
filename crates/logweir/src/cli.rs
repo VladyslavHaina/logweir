@@ -498,6 +498,29 @@ pub enum DrillCmd {
         #[arg(long, requires = "standing")]
         issued_at: Option<chrono::DateTime<chrono::Utc>>,
     },
+    /// Countersign a GOVERNED restore request (PLAT-19.2): add a
+    /// `GovernedApproval` signature to the console-confirmed authorization
+    /// document v2 an approver downloaded from the console. Prints the
+    /// requester, subject, plan hash, policy and window it is about to sign,
+    /// signs the EXACT document bytes, and writes a sidecar carrying the
+    /// console's signature and this one. Runs no drill and touches no cluster.
+    Countersign {
+        /// The authorization document v2, verbatim, as the console's
+        /// confirmation packet carries it (`approvalBytes`).
+        #[arg(long)]
+        document: PathBuf,
+        /// The console's DSSE sidecar over that document (`sidecarBytes`).
+        #[arg(long)]
+        confirmation: PathBuf,
+        /// The approver's PRIVATE key (PKCS#8 PEM). Its public half must be on
+        /// the namespace's `TrustPolicy` with usage `GovernedApproval` and a
+        /// `principal.id` of the approver's own `<issuer>#<subject>`.
+        #[arg(long)]
+        key: PathBuf,
+        /// Where the countersigned sidecar is written.
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// Run the drill: restore a sampled window into the scratch cluster,
     /// reconcile it per record, and emit a signed scorecard.
     ///
@@ -681,13 +704,19 @@ pub struct RestoreRunArgs {
     /// authorization's signature is checked against (D3 §4.3(e)).
     #[arg(long)]
     pub authorization_keys: Option<PathBuf>,
-    /// **Bundle contract v2**: the approval-policy snapshot (PLAT-19.2). This
-    /// build pins its digest and interprets nothing in it.
+    /// **Bundle contract v2**: the frozen approval-policy snapshot
+    /// (PLAT-19.2). Given together with `--confirmation-key`, its digest must
+    /// match `LOGWEIR_EXECUTION_POLICY_SNAPSHOT_SHA256`, and `--approval` is
+    /// then verified as an authorization document v2 under the snapshot's
+    /// mode (the console's signature always; a distinct approver's too under
+    /// `Governed`) before any client is constructed — exit 3 otherwise.
     #[arg(long)]
     pub policy_snapshot: Option<PathBuf>,
-    /// **Bundle contract v2**: the confirmation issuer's public key — the
-    /// second of the two public keys a v2 bundle carries (PLAT-19.2). This
-    /// build pins its digest and verifies no signature with it.
+    /// **Bundle contract v2**: the console's `ConsoleConfirmation` public key —
+    /// the second of the two public keys a v2 bundle carries (PLAT-19.2). Its
+    /// digest must match `LOGWEIR_EXECUTION_CONFIRMATION_KEY_SHA256`, and the
+    /// console's signature over the authorization document is verified with
+    /// it.
     #[arg(long)]
     pub confirmation_key: Option<PathBuf>,
     /// **Execution contract v2** (D3 §5.5 step 6): the evidence-signing

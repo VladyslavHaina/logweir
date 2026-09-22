@@ -230,9 +230,10 @@ pub const CONFIRMATION_KEY_FILE: &str = "confirmation.pub.pem";
 /// PLAT-19.2: the policy digest the bundle was rendered under, as an
 /// annotation beside the other binding annotations.
 pub const BUNDLE_APPROVAL_POLICY_DIGEST_ANNOTATION: &str = "logweir.dev/approval-policy-digest";
-/// The runner flag naming [`APPROVAL_POLICY_FILE`].
-pub const APPROVAL_POLICY_ARG: &str = "--approval-policy";
-/// The runner flag naming [`CONFIRMATION_KEY_FILE`].
+/// The runner flag naming [`APPROVAL_POLICY_FILE`] — the flag `logweir
+/// restore run` reserved for the bundle-v2 policy snapshot.
+pub const APPROVAL_POLICY_ARG: &str = "--policy-snapshot";
+/// The runner flag naming [`CONFIRMATION_KEY_FILE`] — likewise reserved.
 pub const CONFIRMATION_KEY_ARG: &str = "--confirmation-key";
 
 /// The per-Restore immutable ConfigMap mounted at [`APPROVAL_MOUNT_PATH`].

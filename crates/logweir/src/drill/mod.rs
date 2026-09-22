@@ -2020,15 +2020,60 @@ fn load_startup_inputs(
     // kind, subject, UID binding and validity window, and `plan ∈ scope`.
     // Neither path can be skipped — `execute_for_reporting` refuses a run that
     // produced no `Approved` at all.
+    // **PLAT-19.2: WHICH verifier is the BUNDLE's decision, never the
+    // document's.** A v2 bundle — one the controller pinned a policy snapshot
+    // and a confirmation key into — is verified as authorization document v2;
+    // every other bundle as today's v1 approval, whose verifier refuses a v2
+    // payload type outright. Half a v2 bundle is refused by name.
+    let v2 =
+        match (&bundle.policy_snapshot, &bundle.confirmation_key) {
+            (None, None) => None,
+            (Some(snapshot), Some(confirmation)) => Some((snapshot, confirmation)),
+            _ => return Err(GuardRefusal(
+                "an incomplete authorization-v2 bundle was mounted: the approval-policy snapshot \
+                 and the confirmation-issuer key are only meaningful together; no data operation \
+                 was started"
+                    .to_string(),
+            )
+            .into()),
+        };
     let approved =
         match (&bundle.approval, &bundle.approval_sidecar) {
-            (Some(approval), Some(approval_sidecar)) => Some(phase1_approval::verify_bytes(
-                &spec_text,
-                approval,
-                approval_sidecar,
-                &bundle.approver_key,
-                signing_key,
-            )?),
+            (Some(approval), Some(approval_sidecar)) => Some(match (v2, contract) {
+                (Some((snapshot, confirmation)), Some(contract)) => {
+                    phase1_approval::verify_authorization_v2_bytes(
+                        &spec_text,
+                        approval,
+                        approval_sidecar,
+                        &bundle.approver_key,
+                        confirmation,
+                        snapshot,
+                        &phase1_approval::ContractSubject {
+                            namespace: contract.subject_namespace.clone(),
+                            name: contract.subject_name.clone(),
+                            uid: contract.subject_uid.clone(),
+                        },
+                        signing_key,
+                    )?
+                }
+                // Unreachable: v2 material without a contract was refused
+                // above. Named, because "no contract" must never become "v1".
+                (Some(_), None) => {
+                    return Err(GuardRefusal(
+                        "an authorization-v2 bundle needs the Restore execution contract that \
+                         names its subject; no data operation was started"
+                            .to_string(),
+                    )
+                    .into())
+                }
+                (None, _) => phase1_approval::verify_bytes(
+                    &spec_text,
+                    approval,
+                    approval_sidecar,
+                    &bundle.approver_key,
+                    signing_key,
+                )?,
+            }),
             // Both absent: the standing path, already pinned above.
             (None, None) => None,
             // Unreachable — both come from one `Option<PathBuf>` — and named

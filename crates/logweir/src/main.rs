@@ -227,6 +227,17 @@ fn main() -> std::process::ExitCode {
                 standing,
             })
         }
+        cli::Command::Drill(cli::DrillCmd::Countersign {
+            document,
+            confirmation,
+            key,
+            out,
+        }) => logweir::approve::run_countersign(&logweir::approve::CountersignArgs {
+            document,
+            confirmation,
+            key,
+            out,
+        }),
         cli::Command::Drill(cli::DrillCmd::Verify {
             scorecard,
             signature,

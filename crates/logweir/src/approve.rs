@@ -434,6 +434,134 @@ pub fn mint_standing(args: &ApproveArgs) -> Result<String, String> {
     ))
 }
 
+/// `logweir drill countersign` — the governed approver's half of PLAT-19.2.
+pub struct CountersignArgs {
+    /// The authorization document v2 bytes, verbatim.
+    pub document: PathBuf,
+    /// The console's sidecar over those bytes.
+    pub confirmation: PathBuf,
+    /// The approver's private key.
+    pub key: PathBuf,
+    /// Where the countersigned sidecar goes.
+    pub out: PathBuf,
+}
+
+/// [`countersign`], as a process exit code.
+pub fn run_countersign(args: &CountersignArgs) -> ExitCode {
+    match countersign(args) {
+        Ok(summary) => {
+            print!("{summary}");
+            ExitCode::Ok
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            ExitCode::Operational
+        }
+    }
+}
+
+/// Countersign a console-confirmed, GOVERNED authorization document v2.
+///
+/// # What it refuses before signing
+///
+/// Everything the `Approval` controller would refuse about the DOCUMENT and
+/// the SIDECAR without a cluster: bytes that are not a v2 document, an
+/// `Ordinary` document (it needs no approver and a countersignature would
+/// change nothing), a document already past its `expiresAt`, a sidecar under
+/// another payload type or carrying no confirmation, and a key that already
+/// signed it. It CANNOT check that the console's signature is by a key the
+/// namespace trusts, or that this key's principal differs from the requester —
+/// the controller does both — so the summary prints the requester for the
+/// approver to read before anything is written.
+///
+/// # The bytes are never re-serialised
+///
+/// The signature covers the file's EXACT bytes, which are the bytes the
+/// console signed and the bytes the `Approval` will carry. Parsing is only for
+/// the summary and the refusals above.
+///
+/// # Errors
+///
+/// A message naming the file or the refusal.
+pub fn countersign(args: &CountersignArgs) -> Result<String, String> {
+    use logweir_core::approval_policy::{
+        ApprovalMode, RestoreAuthorization, PAYLOAD_TYPE_RESTORE_AUTHORIZATION,
+    };
+
+    let bytes =
+        std::fs::read(&args.document).map_err(|e| format!("{}: {e}", args.document.display()))?;
+    let doc = RestoreAuthorization::from_bytes(&bytes)
+        .map_err(|e| format!("{}: {e}", args.document.display()))?;
+    if doc.authorization_mode != ApprovalMode::Governed {
+        return Err(format!(
+            "{} is an {} authorization: the console's confirmation is its whole authorization, \
+             and there is nothing for an approver to countersign",
+            args.document.display(),
+            doc.authorization_mode
+        ));
+    }
+    let now = chrono::Utc::now();
+    if doc.expires_at <= now {
+        return Err(format!(
+            "the request expired at {} (it is now {}); an expired request authorises nothing \
+             and the operator must submit it again",
+            doc.expires_at.to_rfc3339(),
+            now.to_rfc3339()
+        ));
+    }
+    let sidecar_bytes = std::fs::read(&args.confirmation)
+        .map_err(|e| format!("{}: {e}", args.confirmation.display()))?;
+    let mut sidecar: logweir_evidence::Sidecar = serde_json::from_slice(&sidecar_bytes)
+        .map_err(|e| format!("{} is not a DSSE sidecar: {e}", args.confirmation.display()))?;
+    if sidecar.payload_type != PAYLOAD_TYPE_RESTORE_AUTHORIZATION {
+        return Err(format!(
+            "{} is a sidecar for {:?}, not for an authorization document v2",
+            args.confirmation.display(),
+            sidecar.payload_type
+        ));
+    }
+    if sidecar.signatures.is_empty() {
+        return Err(format!(
+            "{} carries no console confirmation; a governed approval countersigns the console's \
+             attestation of the requester and never replaces it",
+            args.confirmation.display()
+        ));
+    }
+    let key =
+        SigningKey::from_pem_file(&args.key).map_err(|e| format!("{}: {e}", args.key.display()))?;
+    let key_id = key.key_id();
+    if sidecar.signatures.iter().any(|s| s.keyid == key_id) {
+        return Err(format!(
+            "key {key_id} has already signed this document; a governed approval is a SECOND, \
+             independent signature"
+        ));
+    }
+    let mine = sign_detached(&key, PAYLOAD_TYPE_RESTORE_AUTHORIZATION, &bytes)
+        .map_err(|e| format!("signing the authorization: {e}"))?;
+    sidecar.signatures.extend(mine.signatures);
+    let out = serde_json::to_vec(&sidecar).map_err(|e| format!("serialising the sidecar: {e}"))?;
+    overwrite(&args.out, &out)?;
+
+    Ok(format!(
+        "countersigned a governed restore request\n  requester  {requester}\n  \
+         restore    {ns}/{name} (uid {uid})\n  plan_hash  {plan}\n  policy     {policy} \
+         ({digest})\n  expires    {expires}\n  ticket     {ticket}\n  key_id     {key_id}\n  \
+         wrote      {out}\n\nSubmit {out} as the approval's sidecar. The controller admits it \
+         only if this key is a\nGovernedApproval key on the namespace's TrustPolicy whose \
+         principal is NOT the requester.\n",
+        requester = doc.requester.principal_id(),
+        ns = doc.subject.namespace,
+        name = doc.subject.name,
+        uid = doc.subject.uid,
+        plan = doc.plan_hash,
+        policy = doc.policy.name,
+        digest = doc.policy.digest,
+        expires = doc.expires_at.to_rfc3339(),
+        ticket = doc.ticket.as_deref().unwrap_or("-"),
+        out = args.out.display(),
+    ))
+}
+
 /// `with_extension` on a path with no extension APPENDS one, and on
 /// `approval.json` REPLACES `.json` — which is what `phase1_approval::verify`
 /// does, so this must do the identical thing rather than something merely

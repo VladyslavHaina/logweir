@@ -1,5 +1,9 @@
 use crate::drill::DrillError;
 use chrono::{DateTime, Utc};
+use logweir_core::approval_policy::{
+    self as approval_policy, ApprovalMode, ApprovalPolicy, ExpectedSubject, RestoreAuthorization,
+    PAYLOAD_TYPE_RESTORE_AUTHORIZATION,
+};
 use logweir_core::guard::GuardRefusal;
 use logweir_core::ids::sha256_prefixed;
 use logweir_core::scorecard::ApprovalInfo;
@@ -228,6 +232,148 @@ pub fn verify_bytes(
             plan_hash: doc.plan_hash,
             approved_at: doc.approved_at,
             key_id,
+            self_attested,
+        },
+    })
+}
+
+/// The Restore this run's immutable execution contract names — what an
+/// authorization document v2 must bind.
+#[derive(Clone, Debug)]
+pub struct ContractSubject {
+    pub namespace: String,
+    pub name: String,
+    pub uid: String,
+}
+
+fn verify_under(
+    key: &VerifyingKey,
+    bytes: &[u8],
+    sidecar: &Sidecar,
+    which: &str,
+) -> Result<String, DrillError> {
+    match verify_detached(key, PAYLOAD_TYPE_RESTORE_AUTHORIZATION, bytes, sidecar) {
+        Ok(key_id) => Ok(key_id),
+        Err(EvidenceError::Malformed(msg)) => Err(DrillError::Operational(format!(
+            "authorization sidecar signature data is malformed: {msg}"
+        ))),
+        Err(EvidenceError::Verify(msg)) => Err(GuardRefusal(format!(
+            "the {which} signature over the authorization document does not verify: {msg}; no \
+             data operation was started"
+        ))
+        .into()),
+        Err(EvidenceError::Key(msg)) => Err(DrillError::Operational(msg)),
+    }
+}
+
+/// **Authorization document v2 at the runner** — PLAT-19.2, D0: "the runner
+/// revalidates it before any data-plane work".
+///
+/// Every input is a mounted bundle member the immutable Job template pins by
+/// digest (`validate_execution_contract` has already compared all of them);
+/// this re-derives the VERDICT from those bytes, so a controller-side defect
+/// cannot turn into a run nobody authorised:
+///
+/// 1. the policy snapshot is a canonical snapshot, and its digest is the one
+///    the signed document names (inside [`approval_policy::check_binding`]);
+/// 2. the console's signature verifies under the mounted confirmation key —
+///    in BOTH modes;
+/// 3. the document binds THIS Restore (namespace, name, UID from the
+///    contract), this plan's hash, and the snapshot's name, digest and mode;
+///    its window is well formed and within the policy's maximum;
+/// 4. `Ordinary`: the mounted approver key IS the console key — the console's
+///    confirmation is the whole authorization, and a bundle naming anyone else
+///    as the authoriser is not an ordinary run. `Governed`: the approver key
+///    is a DIFFERENT key and its signature over the same bytes verifies.
+///
+/// The document's EXPIRY is deliberately not re-checked against this pod's
+/// clock: the controller admitted the run inside the window and D0 says an
+/// admitted run "continues under its recorded policy snapshot"; a pod that
+/// waited in `Pending` must not turn an admitted restore into a refusal.
+///
+/// # Errors
+///
+/// [`DrillError::Guard`] (exit 3) for every refusal, [`DrillError::Operational`]
+/// for unreadable inputs — the same routing [`verify_bytes`] uses.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_authorization_v2_bytes(
+    spec_text: &str,
+    bytes: &[u8],
+    sidecar_bytes: &[u8],
+    approver_key_bytes: &[u8],
+    confirmation_key_bytes: &[u8],
+    snapshot_bytes: &[u8],
+    subject: &ContractSubject,
+    signing_key: &VerifyingKey,
+) -> Result<Approved, DrillError> {
+    let sidecar: Sidecar = serde_json::from_slice(sidecar_bytes).map_err(|_| {
+        DrillError::Operational("authorization DSSE sidecar does not parse".to_string())
+    })?;
+    let policy = ApprovalPolicy::from_snapshot_bytes(snapshot_bytes).map_err(|e| {
+        DrillError::Guard(GuardRefusal(format!("{e}; no data operation was started")))
+    })?;
+    let key = |raw: &[u8], label: &str| -> Result<VerifyingKey, DrillError> {
+        let pem = std::str::from_utf8(raw)
+            .map_err(|e| DrillError::Operational(format!("{label} is not UTF-8: {e}")))?;
+        VerifyingKey::from_pem_str(pem).map_err(|e| DrillError::Operational(e.to_string()))
+    };
+    let confirmation = key(confirmation_key_bytes, "confirmation-issuer public key")?;
+    let approver = key(approver_key_bytes, "approver public key")?;
+
+    verify_under(&confirmation, bytes, &sidecar, "console confirmation")?;
+    let doc = RestoreAuthorization::from_bytes(bytes).map_err(|e| {
+        DrillError::Guard(GuardRefusal(format!("{e}; no data operation was started")))
+    })?;
+    let expected = ExpectedSubject {
+        namespace: subject.namespace.clone(),
+        name: subject.name.clone(),
+        uid: subject.uid.clone(),
+        plan_hash: sha256_prefixed(spec_text.as_bytes()),
+    };
+    approval_policy::check_binding(&doc, &expected, &policy)
+        .and_then(|()| approval_policy::check_window_shape(&doc, &policy))
+        .map_err(|e| {
+            DrillError::Guard(GuardRefusal(format!("{e}; no data operation was started")))
+        })?;
+
+    let confirmation_id = confirmation.key_id();
+    let approver_id = approver.key_id();
+    let approver_label = match policy.mode {
+        ApprovalMode::Ordinary => {
+            if approver_id != confirmation_id {
+                return Err(GuardRefusal(format!(
+                    "policy {} is Ordinary, so the console's confirmation is the whole \
+                     authorization, but the bundle names approver key {approver_id} and \
+                     confirmation key {confirmation_id}; no data operation was started",
+                    policy.name
+                ))
+                .into());
+            }
+            doc.requester.principal_id()
+        }
+        ApprovalMode::Governed => {
+            if approver_id == confirmation_id {
+                return Err(GuardRefusal(format!(
+                    "policy {} is Governed, and the bundle names the console key \
+                     {confirmation_id} as the approver; a governed run needs a separate approver \
+                     signature; no data operation was started",
+                    policy.name
+                ))
+                .into());
+            }
+            verify_under(&approver, bytes, &sidecar, "governed approver")?;
+            format!("governed approver key {approver_id}")
+        }
+    };
+    let self_attested = approver_id == signing_key.key_id();
+    Ok(Approved {
+        validated_at: Utc::now(),
+        approval: ApprovalInfo {
+            approver: approver_label,
+            ticket: doc.ticket.clone().unwrap_or_default(),
+            plan_hash: doc.plan_hash.clone(),
+            approved_at: doc.issued_at,
+            key_id: approver_id,
             self_attested,
         },
     })
