@@ -13114,7 +13114,15 @@ mod evidence_fetch_job {
             vec![b'y'; usize::try_from(MAX_EVIDENCE_SIDECAR_BYTES).expect("fits") + 1];
         let mut lying = entry(RECEIPT_KEY, Stream::EvidencePayload, Some(&r), None);
         lying.bytes = Some(1);
-        let cases: Vec<(&str, Vec<EvidenceObjectResult>, Vec<u8>, Vec<u8>, &str)> = vec![
+        /// `(label, relayed entries, payload bytes, sidecar bytes, detail needle)`.
+        type OversizeCase = (
+            &'static str,
+            Vec<EvidenceObjectResult>,
+            Vec<u8>,
+            Vec<u8>,
+            &'static str,
+        );
+        let cases: Vec<OversizeCase> = vec![
             (
                 "payload over the 1 MiB cap",
                 vec![
