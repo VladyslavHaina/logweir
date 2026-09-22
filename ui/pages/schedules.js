@@ -111,24 +111,69 @@ export const SCHEDULE_FORM = "schedule-form";
 /** The suspend toggle's identity; each schedule has its own record. */
 export const SUSPEND_FORM = "schedule-suspend";
 
-/** The fields a draft of the create form keeps: names, a cron line, a topic
- *  list, an archive URL, a Secret NAME and two numbers. No credential. */
+/** The fields a draft of the create form keeps (PLAT-10.1): the identity, the
+ *  chosen cluster and every field of the policy the form composes. No
+ *  credential -- a Secret NAME is not one, and a destination is named and never
+ *  described here.
+ *
+ *  SPELLED OUT RATHER THAN DERIVED FROM `POLICY_DRAFT_FIELDS`, which is
+ *  declared further down this module: a `const` read at module-evaluation time
+ *  before its declaration is a temporal-dead-zone throw, and an allowlist of
+ *  what a draft may hold is worth reading in one place anyway (PLAT-13.2). */
 export const SCHEDULE_DRAFT_FIELDS = Object.freeze([
-  "name", "cron", "source", "sourceUid", "topics", "archive", "archiveSecret",
-  "keepLast", "keepDays",
+  "name", "source", "sourceUid",
+  "mode", "cron", "minute", "hour", "dayOfWeek", "dayOfMonth", "n", "timeZone",
+  "selection", "topics", "incompleteDiscovery", "excludeTopics", "excludePrefixes",
+  "destination", "archive", "archiveSecret",
+  "concurrencyPolicy", "startingDeadlineSeconds", "catchUpPolicy",
+  "maxRetries", "retryDelaySeconds", "activeDeadlineSeconds",
+  "keepLast", "keepDays", "suspended",
 ]);
 
-/** The API server's field paths, mapped to the create form's inputs. */
+/** The field paths a refused create names, mapped to this form's inputs.
+ *
+ *  TWO SPELLINGS, BECAUSE THERE ARE TWO REFUSERS. In legacy mode the API
+ *  SERVER refuses and names the stored object's own paths (`spec.schedule`);
+ *  in console mode the product API refuses and names the REQUEST's paths
+ *  (`schedule`), which is the create DTO's spelling and, since PLAT-10.1,
+ *  nearly the edit DTO's. Both are listed so the same 422 highlights the same
+ *  input whichever API answered it. */
 export const SCHEDULE_FIELD_PATHS = Object.freeze([
   ["metadata.name", "name"],
   ["spec.schedule", "cron"],
+  ["spec.timeZone", "timeZone"],
   ["spec.sourceRef", "source"],
   ["spec.topics", "topics"],
+  ["spec.allUserTopics", "incompleteDiscovery"],
+  ["spec.allUserTopics.incompleteDiscovery", "incompleteDiscovery"],
   ["spec.archive.url", "archive"],
   ["spec.archive.secretRef", "archiveSecret"],
   ["spec.archive", "archive"],
+  ["spec.destinationRef", "destination"],
   ["spec.retention.keepLast", "keepLast"],
   ["spec.retention.keepDays", "keepDays"],
+  ["schedule", "cron"],
+  ["timeZone", "timeZone"],
+  ["sourceRef", "source"],
+  ["sourceRef.name", "source"],
+  ["topics", "topics"],
+  ["allUserTopics", "incompleteDiscovery"],
+  ["allUserTopics.incompleteDiscovery", "incompleteDiscovery"],
+  ["allUserTopics.exclude.topics", "excludeTopics"],
+  ["allUserTopics.exclude.prefixes", "excludePrefixes"],
+  ["archive", "archive"],
+  ["archive.url", "archive"],
+  ["archive.credentialRef", "archiveSecret"],
+  ["destinationRef", "destination"],
+  ["destinationRef.name", "destination"],
+  ["concurrencyPolicy", "concurrencyPolicy"],
+  ["startingDeadlineSeconds", "startingDeadlineSeconds"],
+  ["catchUpPolicy", "catchUpPolicy"],
+  ["retry.maxRetries", "maxRetries"],
+  ["retry.delaySeconds", "retryDelaySeconds"],
+  ["activeDeadlineSeconds", "activeDeadlineSeconds"],
+  ["retention.keepLast", "keepLast"],
+  ["retention.keepDays", "keepDays"],
 ]);
 
 /** The defaults the CRD applies to an omitted field, and the ONE field that
@@ -138,6 +183,26 @@ const SCHEDULE_SPEC_RULES = Object.freeze({
   defaults: { concurrencyPolicy: "Forbid", suspend: false },
   ignore: ["suspend"],
 });
+
+/** THE DEEP LINK TO ONE SCHEDULE (PLAT-10.2).
+ *
+ *  `#/schedules?ns=<ns>&name=<name>` -- the shape every other list/detail pair
+ *  in this application uses, and the reason the migration note is "existing
+ *  deep links keep working" rather than "are redirected": `#/schedules?ns=<ns>`
+ *  was the only schedules link there had ever been, the router sends a hash
+ *  with no `name` to the list exactly as it always did, and this parameter is
+ *  one the old route ignored.
+ *
+ *  `null` FOR AN EMPTY NAME, so a caller cannot build a link to the list and
+ *  believe it is a link to a schedule. */
+export function scheduleDetailRoute(ns, name) {
+  const object = String(name === undefined || name === null ? "" : name).trim();
+  if (object.length === 0) {
+    return null;
+  }
+  return "#/schedules?ns=" + encodeURIComponent(String(ns || "")) +
+    "&name=" + encodeURIComponent(object);
+}
 
 function nameOf(object) {
   const meta = (object && object.metadata) || {};
@@ -597,13 +662,24 @@ export const COVERAGE_NOT_PUBLISHED =
   "there is nothing to read, and this page will not infer a coverage from the mode, the frozen " +
   "topic list or a successful phase. Read the run with kubectl until that projection lands.";
 
-/** Why a saved destination still cannot be named on a NEW schedule. */
-export const CREATE_HAS_NO_DESTINATION =
-  "A saved destination cannot be named on a NEW schedule from this page: POST /schedules takes " +
-  "an inline archive and has no destinationRef field. PLAT-06.2 owes that one. The inline URL " +
-  "and Secret below carry no endpoint, region, addressing mode or CA bundle -- which is what a " +
-  "destination exists to hold -- so this page will not derive one from the other and drop all " +
-  "four silently.";
+/** What the create form says about where a NEW schedule writes.
+ *
+ *  THE DEBT THIS SENTENCE USED TO NAME IS PAID. Until PLAT-10.1 it read "a
+ *  saved destination cannot be named on a NEW schedule from this page: POST
+ *  /schedules takes an inline archive and has no destinationRef field.
+ *  PLAT-06.2 owes that one" -- which was true, and was the reason the standard
+ *  route made an operator retype a bucket URL and a Secret name that a saved
+ *  destination already held. `CreateScheduleRequest` now carries
+ *  `destinationRef`, exactly as the edit route does, and this form sends it.
+ *  The inline fields remain, collapsed, because an installation that has not
+ *  created a destination yet still has to be able to create a schedule. */
+export const CREATE_TAKES_A_DESTINATION =
+  "Choose a saved destination and this form sends destinationRef -- the endpoint, region, " +
+  "addressing mode and CA bundle stay in the destination, where they are named once and " +
+  "audited once, and the API writes the CRD's sentinel URL itself. The inline archive below is " +
+  "the alternative for an installation with no saved destination yet: it carries a URL and a " +
+  "Secret name and none of those four things, so this page will never derive one from the " +
+  "other.";
 
 /** Why this page cannot CHANGE an existing schedule's destination either, and
  *  the reason is this page's own contract rather than a missing field.
@@ -1013,9 +1089,28 @@ export function renderReadinessPanel(view) {
   );
 }
 
+/** THE DRAFT A GUIDED CREATE OPENS ON (PLAT-10.1).
+ *
+ *  A CADENCE PRESET AND NOT A CRON LINE. The old default was the literal
+ *  `0 * * * *`, which is an expression an operator had to read before they
+ *  could trust it; the default now is "every day, at a fixed time", 02:00, and
+ *  the canonical expression it compiles to comes back from the API's own
+ *  preview before this form will submit. Everything else starts EMPTY, because
+ *  an absent policy field means the documented default and a prefilled one
+ *  would write that default into the object explicitly.
+ *
+ *  `archiveSecret` keeps its `logweir-s3` suggestion: it is the name the
+ *  install guide creates and it is a NAME, not a credential. */
 const SCHEDULE_DEFAULTS = Object.freeze({
-  name: "", cron: "0 * * * *", source: "", sourceUid: "", topics: "", archive: "",
-  archiveSecret: "logweir-s3", keepLast: "", keepDays: "",
+  name: "", source: "", sourceUid: "",
+  mode: "daily", cron: "", minute: "0", hour: "2", dayOfWeek: "1", dayOfMonth: "1", n: "6",
+  timeZone: "",
+  selection: "named", topics: "", incompleteDiscovery: "",
+  excludeTopics: "", excludePrefixes: "",
+  destination: "", archive: "", archiveSecret: "logweir-s3",
+  concurrencyPolicy: "", startingDeadlineSeconds: "", catchUpPolicy: "",
+  maxRetries: "", retryDelaySeconds: "", activeDeadlineSeconds: "",
+  keepLast: "", keepDays: "", suspended: "false",
 });
 
 /** The five glob metacharacters `logweir_core::guard::GLOB_METACHARACTERS`
@@ -1027,21 +1122,49 @@ const CRON_FIELD = /^[0-9*,/-]+$/;
 /** The scheme separator, built rather than spelled, as in `../api.js`. */
 const SCHEME_SEPARATOR = ":" + "//";
 
-/** The page's own checks for the create form, by field. A CONVENIENCE: the
- *  controller's `Ready` condition and the runner's G-GLOB guard are the gate. */
+/** A guided draft with its two MODE fields resolved.
+ *
+ *  A VALUES OBJECT WITH NO `mode` IS AN ADVANCED CRON, and one with no
+ *  `selection` is a named allowlist. Those are not defaults chosen here for
+ *  convenience: they are what a set of values carrying a cron line and a topic
+ *  list IS, and every caller that builds values by hand -- a test, a draft
+ *  written before PLAT-10.1 gave this form a cadence selector -- describes
+ *  exactly that schedule. The form's own `readScheduleValues` always reads both
+ *  from a select and never reaches this. */
+export function guidedValues(values) {
+  const v = Object.assign({}, values || {});
+  if (typeof v.mode !== "string" || v.mode.length === 0) {
+    v.mode = ADVANCED_CRON;
+  }
+  if (typeof v.selection !== "string" || v.selection.length === 0) {
+    v.selection = "named";
+  }
+  return v;
+}
+
+/** The page's own checks over a guided create, by field.
+ *
+ *  A CONVENIENCE AND NOT THE GATE, and PLAT-10.1 narrowed it deliberately.
+ *  The CADENCE and the ZONE are not refused here: 10.1's acceptance is that an
+ *  invalid field is refused by the API's own words with the draft retained, and
+ *  a page that pre-empted the cron parser would answer in words of its own that
+ *  the controller never said. What this checks is what the page can be sure of
+ *  -- an object name, a connection that was actually chosen, a selection with
+ *  something in it, a location named exactly once, and numbers inside the
+ *  cadence engine's published ranges -- which is exactly `validatePolicy`'s
+ *  set, because the two forms are one form.
+ *
+ *  THE ADVANCED-CRON SHAPE CHECK SURVIVES, in `validatePolicy`, and it is a
+ *  SHAPE check: five whitespace-separated fields of cron characters, or a
+ *  macro. `61 * * * *` passes it and is refused by the API, which is the
+ *  behaviour 10.1's "invalid cron" test measures.
+ */
 export function validateSchedule(values) {
-  const v = values || {};
-  const problems = Object.create(null);
+  const v = guidedValues(values);
+  const problems = validatePolicy(v);
   if (!isObjectName(v.name)) {
     problems.name = "a BackupSchedule name is lowercase letters, digits, '-' and '.', starting " +
       "and ending with a letter or digit";
-  }
-  const cron = String(v.cron || "").trim();
-  const fields = cron.split(/\s+/).filter((f) => f.length > 0);
-  const macro = cron === "@hourly" || cron === "@daily" || cron === "@weekly";
-  if (!macro && (fields.length !== 5 || fields.some((f) => !CRON_FIELD.test(f)))) {
-    problems.cron = "five cron fields (minute hour day-of-month month day-of-week), or @hourly, " +
-      "@daily or @weekly";
   }
   // THE EMPTY SELECTION IS ITS OWN REFUSAL (review finding F1). A refused
   // selector opens on `<option value="" selected>`, so a Create click that did
@@ -1054,64 +1177,61 @@ export function validateSchedule(values) {
   } else if (!isObjectName(v.source)) {
     problems.source = "choose a saved KafkaCluster in this namespace";
   }
-  const topics = String(v.topics || "").split(",").map((t) => t.trim()).filter((t) => t.length > 0);
-  if (topics.length === 0) {
-    problems.topics = "name at least one topic; an empty list is not an allowlist";
-  } else {
-    const globbed = topics.filter((t) => t.split("").some((c) => GLOB.indexOf(c) !== -1));
-    if (globbed.length > 0) {
-      problems.topics = "names, never patterns: " + globbed.join(", ") + " carries a glob metacharacter";
-    }
-  }
-  const archive = String(v.archive || "").trim();
-  if (archive.length === 0 || archive.indexOf(SCHEME_SEPARATOR) <= 0) {
-    problems.archive = "an object-store URL with its scheme, such as s3" + SCHEME_SEPARATOR + "bucket/prefix";
-  }
-  const secret = String(v.archiveSecret || "").trim();
-  if (secret.length > 0 && !isObjectName(secret)) {
-    problems.archiveSecret = "a Secret name is lowercase letters, digits, '-' and '.'";
-  }
-  for (const key of ["keepLast", "keepDays"]) {
-    const raw = v[key];
-    if (raw !== "" && raw !== undefined && raw !== null && !/^[0-9]+$/.test(String(raw).trim())) {
-      problems[key] = "a whole number of 0 or more, or blank";
-    }
-  }
   return problems;
 }
 
-/** The create form for a BackupSchedule, rendered from its draft, its field
- *  messages and its mutation record. Called with nothing it is the empty form. */
+
+/** THE GUIDED CREATE FORM (PLAT-10.1): one short form, composed from the
+ *  controls the earlier tasks landed, with the advanced options collapsed.
+ *
+ *  IT IS THE POLICY FORM PLUS AN IDENTITY. `renderCadenceFields`,
+ *  `renderSelectionFields`, `renderPolicyLocation` and `renderPolicyFields` are
+ *  the same four renderers the Future policy panel uses, under the same field
+ *  names, so a person who creates a schedule here and edits it there is looking
+ *  at one form twice -- and a rule that holds on one holds on both because
+ *  there is one implementation of it. What creation adds is the object's name
+ *  and the source connection, which the edit route cannot reach
+ *  (`sourceRef: field_immutable`).
+ *
+ *  THE STANDARD PATH TOUCHES NO YAML, NO ENDPOINT AND NO SIGNATURE. Cadence is
+ *  a preset with the API's own next-run preview beside it; coverage is a choice
+ *  between a named allowlist and all user topics with exclusions; the location
+ *  is a saved destination by name. The inline archive URL, the deadlines, the
+ *  catch-up policy, the retries and the concurrency policy are all inside
+ *  collapsed `<details>` -- present, reachable, and off the standard route.
+ *
+ *  THE PREVIEW IS THE ONE GATE THIS PAGE ENFORCES, and for the same reason the
+ *  edit panel enforces it: a preset has no expression until the API compiles
+ *  one, so there is literally nothing to submit until it has. An Advanced cron
+ *  is submitted as typed and refused, if it is wrong, by the API's words. */
 export function renderScheduleForm(view) {
   const v = view || {};
   const d = Object.assign({}, SCHEDULE_DEFAULTS, v.draft || {});
   const errors = ((v.errors || {}).fields) || {};
   const state = v.state || {};
   const pending = state.phase === "pending";
-  const field = (id, name) => invalidAttributes(id, errors[name]);
-  const line = (id, name) => fieldErrorLine(id, errors[name]);
+  const preview = v.preview || null;
+  const previewed = previewMatches(preview, d);
+  const ready = previewed || d.mode === ADVANCED_CRON;
   return (
     "<section class=\"create\" id=\"schedule-create\"><h3>Create a BackupSchedule</h3>" +
-    "<p class=\"note\">A schedule fires a Backup of the named topics at each slot and writes " +
-    "it to the archive. Every field but suspend is sealed once the object exists.</p>" +
+    "<p class=\"note\">A schedule fires a Backup of the topics it covers at each slot and " +
+    "writes it to the destination it names. Only the suspend flag can be changed without an " +
+    "explicit policy edit; everything here is editable afterwards from the schedule's own " +
+    "Future policy panel, which is this same form.</p>" +
     "<form id=\"schedule-form\" novalidate" + (pending ? " aria-busy=\"true\"" : "") + ">" +
     "<fieldset class=\"form-body\"" + (pending ? " disabled" : "") + ">" +
     "<div class=\"field\"><label for=\"schedule-name\">name</label>" +
     "<input id=\"schedule-name\" name=\"name\" required value=\"" + esc(d.name) + "\"" +
-    field("schedule-name", "name") + ">" + line("schedule-name", "name") + "</div>" +
-    "<div class=\"field-row\">" +
-    "<div class=\"field\"><label for=\"schedule-cron\">schedule, five cron fields</label>" +
-    "<input id=\"schedule-cron\" name=\"cron\" value=\"" + esc(d.cron) + "\" required" +
-    field("schedule-cron", "cron") + ">" +
-    "<p class=\"help\">minute hour day-of-month month day-of-week, in UTC.</p>" +
-    line("schedule-cron", "cron") + "</div>" +
-    "</div>" +
+    invalidAttributes("schedule-name", errors.name) + ">" +
+    fieldErrorLine("schedule-name", errors.name) + "</div>" +
     renderClusterSelector({
       id: "schedule-source",
       name: "source",
       label: "source KafkaCluster",
       help: "The saved connection each run of this schedule reads from. Chosen by identity: " +
-        "the draft remembers this object's uid, not its name.",
+        "the draft remembers this object's uid, not its name. It cannot be changed afterwards " +
+        "-- a different cluster is a different schedule.",
       prefer: "source",
       clusters: v.clusters,
       selection: { uid: d.sourceUid, name: d.source },
@@ -1119,71 +1239,158 @@ export function renderScheduleForm(view) {
       freshSeconds: v.freshSeconds,
       errors: errors,
     }) +
-    line("schedule-source", "source") +
-    "<div class=\"field\"><label for=\"schedule-topics\">topics, comma separated -- names, never patterns</label>" +
-    "<input id=\"schedule-topics\" name=\"topics\" required value=\"" + esc(d.topics) + "\"" +
-    field("schedule-topics", "topics") + ">" +
-    "<p class=\"help\">An explicit allowlist. A wildcard is refused before anything runs.</p>" +
-    line("schedule-topics", "topics") + "</div>" +
-    "<fieldset class=\"legacy-archive\" id=\"schedule-legacy-archive\">" +
-    "<legend>archive (inline)</legend>" +
-    "<p class=\"help\" id=\"schedule-destination-gap\">" + esc(CREATE_HAS_NO_DESTINATION) +
+    fieldErrorLine("schedule-source", errors.source) +
+    renderCadenceFields(CREATE_PANEL, d, errors) +
+    renderSelectionFields(CREATE_PANEL, d, errors) +
+    "<fieldset class=\"destination\"><legend>where runs are written</legend>" +
+    "<p class=\"help\" id=\"schedule-destination-gap\">" + esc(CREATE_TAKES_A_DESTINATION) +
     "</p>" +
     "<p class=\"help\" id=\"schedule-destination-edit\">" + esc(EDIT_IS_A_REPLACE) + "</p>" +
-    "<div class=\"field\"><label for=\"schedule-archive\">archive URL</label>" +
-    "<input id=\"schedule-archive\" name=\"archive\" required value=\"" + esc(d.archive) + "\"" +
-    field("schedule-archive", "archive") + ">" +
-    "<p class=\"help\">The bucket and prefix the runner writes the backup set under.</p>" +
-    line("schedule-archive", "archive") + "</div>" +
-    "<div class=\"field\"><label for=\"schedule-archive-secret\">archive credential (Secret name)</label>" +
-    "<input id=\"schedule-archive-secret\" name=\"archiveSecret\" value=\"" + esc(d.archiveSecret) + "\"" +
-    field("schedule-archive-secret", "archiveSecret") + ">" +
-    "<p class=\"help\">An existing Secret in this namespace, with access-key-id and secret-access-key. " +
-    "Only its name is sent. Leave blank only for anonymous or instance-role access.</p>" +
-    line("schedule-archive-secret", "archiveSecret") + "</div></fieldset>" +
-    "<div class=\"field-row\">" +
-    "<div class=\"field\"><label for=\"schedule-keeplast\">retention keepLast</label>" +
-    "<input id=\"schedule-keeplast\" name=\"keepLast\" type=\"number\" min=\"0\" value=\"" +
-    esc(d.keepLast) + "\"" + field("schedule-keeplast", "keepLast") + ">" +
-    "<p class=\"help\">How many sets a retention evaluation keeps. It reports; it never deletes.</p>" +
-    line("schedule-keeplast", "keepLast") + "</div>" +
-    "<div class=\"field\"><label for=\"schedule-keepdays\">retention keepDays</label>" +
-    "<input id=\"schedule-keepdays\" name=\"keepDays\" type=\"number\" min=\"0\" value=\"" +
-    esc(d.keepDays) + "\"" + field("schedule-keepdays", "keepDays") + ">" +
-    "<p class=\"help\">How many days of sets it keeps. Leave both blank for no evaluation.</p>" +
-    line("schedule-keepdays", "keepDays") + "</div>" +
-    "</div>" +
-    "<div class=\"actions\"><button type=\"submit\" class=\"primary\">Create</button></div>" +
+    renderPolicyLocation(CREATE_PANEL, d, errors, v.destinations, true) +
+    "</fieldset>" +
+    "<details class=\"advanced\" id=\"schedule-advanced\">" +
+    "<summary>Advanced: deadlines, catch-up, retries and concurrency</summary>" +
+    "<p class=\"help\">Every one of these is optional, and a blank field is the documented " +
+    "default rather than an unset one.</p>" +
+    renderPolicyFields(CREATE_PANEL, d, errors) +
+    "</details>" +
+    renderCreateReadiness(v) +
+    "<div class=\"actions\"><button type=\"submit\" class=\"primary\"" +
+    (ready ? "" : " disabled") + ">Create</button></div>" +
     "</fieldset>" +
     "<div class=\"form-status\" id=\"schedule-form-status\" tabindex=\"-1\">" +
     mutationStatus(state, { kind: "BackupSchedule", name: d.name }, ((v.errors || {}).unmatched)) +
     "</div>" +
-    "</form></section>"
+    "</form>" +
+    (ready
+      ? ""
+      : "<p class=\"note\" data-preview-first=\"1\">" + esc(PREVIEW_BEFORE_SAVE) + "</p>") +
+    "<div class=\"preview-slot\" id=\"schedule-preview-slot\">" +
+    renderPolicyPreview(preview, d) + "</div>" +
+    "</section>"
   );
 }
 
-/** The request body a filled-in form produces. */
-export function scheduleBody(values) {
+/** The panel name the create form's shared field renderers are keyed by, so
+ *  every input on it has an id of its own even while the same schedule's Future
+ *  policy panel is on screen. */
+export const CREATE_PANEL = "create";
+
+/** READINESS, INSIDE THE FORM AND FROM THE READINESS ROUTE (PLAT-10.1).
+ *
+ *  It starts the same `Preflight` of operation `backup` the standalone panel
+ *  starts, against THIS form's source, destination and topics rather than a
+ *  second set of inputs -- so what is checked is what is about to be created.
+ *  The verdict is the check's own recorded result, rendered by
+ *  `renderPreflight`: nothing on this page decides ready or not ready
+ *  (UI-FAKEPREFLIGHT), and a verdict that has not arrived is `pending` and
+ *  never `ready`.
+ *
+ *  IT DOES NOT BLOCK THE CREATE, and that is deliberate. A readiness check is a
+ *  statement about the minute it ran in -- a credential can be rotated and an
+ *  ACL changed in the next one -- so gating creation on it would be a promise
+ *  this product does not make. The schedule's own `Ready` condition and the
+ *  run's preflight are the gate. */
+function renderCreateReadiness(view) {
+  const v = view || {};
+  const result = v.readiness || null;
+  return (
+    "<fieldset class=\"readiness\" id=\"schedule-readiness\"><legend>readiness</legend>" +
+    "<p class=\"help\">" + esc(READINESS_SENTENCE) + "</p>" +
+    (v.readinessUnavailable === true
+      ? "<p class=\"note\" id=\"schedule-readiness-unavailable\">" +
+        cell(v.readinessUnavailableReason) + "</p>"
+      : (v.mayOperate === false
+        ? "<p class=\"note\">This login may read readiness results in this namespace and not " +
+          "start one.</p>"
+        : "<div class=\"actions\"><button type=\"button\" id=\"schedule-check-readiness\">" +
+          "Check readiness</button></div>")) +
+    "<div class=\"readiness-verdict\" id=\"schedule-readiness-verdict\">" +
+    (result === null
+      ? "<p class=\"note\" data-readiness=\"unchecked\">" + esc(READINESS_NOT_CHECKED) + "</p>"
+      : renderPreflight(result)) +
+    "</div></fieldset>"
+  );
+}
+
+/** The `BackupSchedule` a filled-in guided form describes.
+ *
+ *  A CUSTOM RESOURCE AND NOT A DTO, as it has always been: `ui/client.js`
+ *  translates it into `CreateScheduleRequest` for the product API and posts it
+ *  unchanged to kube-apiserver in legacy mode, so one builder serves both and
+ *  neither mode can grow a field the other does not have.
+ *
+ *  `canonicalSchedule` IS THE EXPRESSION THE API COMPILED. A preset is never
+ *  saved as a preset -- `spec.schedule` is the single source of truth -- and
+ *  this page does not compile one, because a second cron implementation in a
+ *  browser is a second opinion about when a backup runs. For Advanced cron the
+ *  typed line is the expression and there is nothing to compile. */
+export function scheduleBody(values, canonicalSchedule) {
+  const v = guidedValues(values);
+  const text = (key) => String(v[key] === undefined || v[key] === null ? "" : v[key]).trim();
+  const whole = (key) => (text(key).length === 0 ? null : Number(text(key)));
+  const list = (key) => text(key).split(",").map((t) => t.trim()).filter((t) => t.length > 0);
+  const compiled = typeof canonicalSchedule === "string" && canonicalSchedule.length > 0
+    ? canonicalSchedule
+    : text("cron");
   const spec = {
-    schedule: values.cron,
-    sourceRef: { name: values.source },
-    topics: String(values.topics || "")
-      .split(",")
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0),
-    archive: { url: values.archive },
-    suspend: false,
+    schedule: compiled,
+    sourceRef: { name: v.source },
+    topics: v.selection === "dynamic" ? [] : list("topics"),
+    suspend: v.suspended === "true" || v.suspended === true,
   };
-  const archiveSecret = String(values.archiveSecret || "").trim();
-  if (archiveSecret.length > 0) {
-    spec.archive.secretRef = { name: archiveSecret };
+  if (v.selection === "dynamic") {
+    const dynamic = { incompleteDiscovery: text("incompleteDiscovery") };
+    const exclude = {};
+    if (list("excludeTopics").length > 0) {
+      exclude.topics = list("excludeTopics");
+    }
+    if (list("excludePrefixes").length > 0) {
+      exclude.prefixes = list("excludePrefixes");
+    }
+    if (Object.keys(exclude).length > 0) {
+      dynamic.exclude = exclude;
+    }
+    spec.allUserTopics = dynamic;
+  }
+  if (text("timeZone").length > 0) {
+    spec.timeZone = text("timeZone");
+  }
+  // ONE LOCATION, NEVER BOTH -- the rule `policyBody` follows, for the reason
+  // the CRD's sentinel rule exists: a schedule carrying a real URL beside a
+  // destination has two answers to where its runs are written.
+  if (text("destination").length > 0) {
+    spec.destinationRef = { name: text("destination") };
+  } else {
+    spec.archive = { url: text("archive") };
+    if (text("archiveSecret").length > 0) {
+      spec.archive.secretRef = { name: text("archiveSecret") };
+    }
+  }
+  if (text("concurrencyPolicy").length > 0) {
+    spec.concurrencyPolicy = text("concurrencyPolicy");
+  }
+  if (whole("startingDeadlineSeconds") !== null) {
+    spec.startingDeadlineSeconds = whole("startingDeadlineSeconds");
+  }
+  if (text("catchUpPolicy").length > 0) {
+    spec.catchUpPolicy = text("catchUpPolicy");
+  }
+  if (whole("maxRetries") !== null) {
+    spec.retry = { maxRetries: whole("maxRetries") };
+    if (whole("retryDelaySeconds") !== null) {
+      spec.retry.delaySeconds = whole("retryDelaySeconds");
+    }
+  }
+  if (whole("activeDeadlineSeconds") !== null) {
+    spec.activeDeadlineSeconds = whole("activeDeadlineSeconds");
   }
   const retention = {};
-  if (values.keepLast !== "" && values.keepLast !== undefined && values.keepLast !== null) {
-    retention.keepLast = Number(values.keepLast);
+  if (whole("keepLast") !== null) {
+    retention.keepLast = whole("keepLast");
   }
-  if (values.keepDays !== "" && values.keepDays !== undefined && values.keepDays !== null) {
-    retention.keepDays = Number(values.keepDays);
+  if (whole("keepDays") !== null) {
+    retention.keepDays = whole("keepDays");
   }
   if (Object.keys(retention).length > 0) {
     spec.retention = retention;
@@ -1229,10 +1436,23 @@ export function sourceRefusal(resolved) {
  *  Called without `clusters` -- which is what a caller that has not read them
  *  looks like -- it falls back to the typed values, which is the pre-PLAT-07.2
  *  behaviour and is what keeps an existing draft usable. */
-export async function submitSchedule(ns, values, deps, clusters) {
+export async function submitSchedule(ns, values, deps, clusters, preview) {
   const problems = validateSchedule(values);
   if (Object.keys(problems).length > 0) {
     throw invalidInput(problems);
+  }
+  // A PRESET IS CREATED AS THE EXPRESSION THE SERVER COMPILED IT TO, and a
+  // reader with no preview of THESE values has nothing to create: the page
+  // holds no cron compiler, so there is no expression to put in `spec.schedule`
+  // until the API has produced one. `submitPolicy` refuses identically, and for
+  // the identical reason. Checked AFTER the field problems so that a form with
+  // neither a source nor a preview says both.
+  let canonicalSchedule = "";
+  if (guidedValues(values).mode !== ADVANCED_CRON) {
+    if (!previewMatches(preview, guidedValues(values))) {
+      throw invalidInput({ mode: PREVIEW_BEFORE_SAVE });
+    }
+    canonicalSchedule = String(((preview || {}).answer || {}).schedule || "");
   }
   let sent = values;
   if (clusters !== undefined && clusters !== null) {
@@ -1245,18 +1465,21 @@ export async function submitSchedule(ns, values, deps, clusters) {
     }
     sent = Object.assign({}, values, { source: resolved.name, sourceUid: resolved.uid });
   }
-  return createOnce(deps || API, ns, PLURAL, scheduleBody(sent), SCHEDULE_SPEC_RULES);
+  return createOnce(
+    deps || API, ns, PLURAL, scheduleBody(sent, canonicalSchedule), SCHEDULE_SPEC_RULES,
+  );
 }
 
 /** What the create form renders from in namespace `ns`: its draft, its record,
  *  the messages the record's failure carries, and the saved connections its
  *  source selector offers. */
-export function scheduleFormView(ns, clusters, now, freshSeconds) {
+export function scheduleFormView(ns, clusters, now, freshSeconds, extra) {
   const key = formKey(ns, SCHEDULE_FORM);
   const state = mutationFor(key).state;
   if (state.phase === "succeeded") {
     dropDraft(key);
   }
+  const e = extra || {};
   return {
     draft: readDraft(key),
     state: state,
@@ -1264,6 +1487,16 @@ export function scheduleFormView(ns, clusters, now, freshSeconds) {
     clusters: clusters,
     now: now,
     freshSeconds: freshSeconds,
+    // WHAT THIS MOUNT HAS READ AND WHAT THIS READER HAS DONE, kept apart from
+    // the draft: the destinations are a fact about the namespace, the preview
+    // and the readiness verdict are answers to questions this reader asked, and
+    // none of the three belongs in a draft that survives a failed submit.
+    destinations: e.destinations,
+    preview: e.preview || null,
+    readiness: e.readiness || null,
+    readinessUnavailable: e.readinessUnavailable === true,
+    readinessUnavailableReason: e.readinessUnavailableReason,
+    mayOperate: e.mayOperate,
   };
 }
 
@@ -1685,17 +1918,29 @@ export async function mountSchedules(node, ns, parse, lifecycle, deps) {
     }
     const panels = objects
       .map((object) => renderScheduleCard(ns, object, backups, extra)).join("");
+    // THE GUIDED FORM'S OWN SESSION (PLAT-10.1): the destinations it offers,
+    // whether this login may start a readiness check, and the two answers this
+    // reader may ask for while the form is open.
+    const creating = {
+      destinations: readiness.destinations,
+      mayOperate: extra.mayOperate,
+      readinessUnavailable: readiness.unavailable === true,
+      readinessUnavailableReason: readiness.unavailableReason,
+      preview: null,
+      readiness: null,
+    };
     replace(
       node,
       parse(
         renderScheduleList(collection, readiness.destinations) + panels +
           "<div class=\"form-slot\" id=\"schedule-form-slot\">" +
-          renderScheduleForm(scheduleFormView(ns, clusters)) + "</div>" +
+          renderScheduleForm(scheduleFormView(ns, clusters, undefined, undefined, creating)) +
+          "</div>" +
           "<div class=\"readiness-slot\" id=\"readiness-slot\">" +
           renderReadinessPanel(readinessView(ns, readiness)) + "</div>",
       ),
     );
-    wire(node, ns, parse, lifecycle, api, objects, clusters);
+    wire(node, ns, parse, lifecycle, api, objects, clusters, creating);
     wireReadiness(node, ns, parse, lifecycle, api, readiness);
     for (const object of objects) {
       wirePolicy(node, ns, parse, lifecycle, api, object, backups, extra);
@@ -1708,28 +1953,35 @@ export async function mountSchedules(node, ns, parse, lifecycle, deps) {
   }
 }
 
-/** The create form's values, read from the DOM. */
+/** The guided create form's values, read from the DOM.
+ *
+ *  THE POLICY HALF IS READ BY THE SAME LIST THE EDIT PANEL READS. A field
+ *  present in the renderer and missing here is a field silently dropped on
+ *  submit, and the only defence against that is one declared list of names used
+ *  by both the draft and the read -- which is `POLICY_DRAFT_FIELDS`, plus the
+ *  identity this form adds. A control the current mode does not render (the
+ *  cron line under a preset, the exclusions under a named allowlist) is absent
+ *  from `form.elements` and reads as the empty string, which is what it is. */
 export function readScheduleValues(form) {
   const e = form.elements;
   const source = readClusterSelection(form, "schedule-source");
-  return {
+  const values = {
     name: String(e.name.value).trim(),
-    cron: String(e.cron.value).trim(),
     source: source.name,
     sourceUid: source.uid,
-    topics: String(e.topics.value),
-    archive: String(e.archive.value).trim(),
-    archiveSecret: String(e.archiveSecret.value).trim(),
-    keepLast: String(e.keepLast.value),
-    keepDays: String(e.keepDays.value),
   };
+  for (const field of POLICY_DRAFT_FIELDS) {
+    const input = e[field];
+    values[field] = input === undefined || input === null ? "" : String(input.value);
+  }
+  return values;
 }
 
-function wire(node, ns, parse, lifecycle, api, objects, clusters) {
+function wire(node, ns, parse, lifecycle, api, objects, clusters, creating) {
   for (const toggle of node.querySelectorAll("form.suspend")) {
     wireToggle(node, ns, parse, lifecycle, api, objects, toggle);
   }
-  wireCreate(node, ns, parse, lifecycle, api, clusters);
+  wireCreate(node, ns, parse, lifecycle, api, clusters, creating);
 }
 
 function wireToggle(node, ns, parse, lifecycle, api, objects, toggle) {
@@ -1766,13 +2018,36 @@ function wireToggle(node, ns, parse, lifecycle, api, objects, toggle) {
   }, lifecycle);
 }
 
-function wireCreate(node, ns, parse, lifecycle, api, clusters) {
+/** The guided form's controls: the cadence and selection selectors repaint the
+ *  fields they govern, the preview button asks the API for the canonical
+ *  expression and the next firings, the readiness button starts a real
+ *  `Preflight` against what is on the form, and the submit creates the schedule
+ *  and goes to it.
+ *
+ *  `own` IS WHAT THIS READER HAS ASKED THIS FORM -- the preview they took, the
+ *  readiness verdict they started -- and deliberately not part of the draft:
+ *  a draft is what was typed and survives a failed submit; a verdict is an
+ *  answer about a moment that has passed. */
+function wireCreate(node, ns, parse, lifecycle, api, clusters, own) {
   const form = node.querySelector("#schedule-form");
   if (form === null) {
     return;
   }
   const key = formKey(ns, SCHEDULE_FORM);
   const mutation = mutationFor(key);
+  const held = own || {};
+  const repaint = () => {
+    if (!active(lifecycle)) {
+      return;
+    }
+    const slot = node.querySelector("#schedule-form-slot");
+    if (slot === null) {
+      return;
+    }
+    replace(slot, parse(renderScheduleForm(scheduleFormView(ns, clusters, held.now,
+      held.freshSeconds, held))));
+    wireCreate(node, ns, parse, lifecycle, api, clusters, held);
+  };
   const remember = () => {
     if (!active(lifecycle)) {
       return;
@@ -1789,22 +2064,112 @@ function wireCreate(node, ns, parse, lifecycle, api, clusters) {
   listen(form, "input", remember, lifecycle);
   listen(form, "change", remember, lifecycle);
   wireSourceSelector(node, form, remember, lifecycle);
+
+  // THE TWO SELECTORS THAT CHANGE WHICH FIELDS EXIST. A cadence mode decides
+  // the preset's parameters or the cron line; a selection mode decides the
+  // allowlist or the exclusions. Both have to repaint, and both keep the draft
+  // first so the repaint renders what was typed.
+  for (const field of ["mode", "selection"]) {
+    const control = form.elements[field];
+    if (control !== undefined && control !== null) {
+      listen(control, "change", () => {
+        remember();
+        repaint();
+      }, lifecycle);
+    }
+  }
+
   watchMutation(node, key, mutation, (state) => {
     if (state.phase === "succeeded") {
       dropDraft(key);
+      // FIRST-RUN REDIRECT (PLAT-10.1). The schedule exists; the next thing a
+      // person wants is its detail, where "Run first backup now" is -- and the
+      // route carries the name the SERVER gave the object, which in console
+      // mode is minted from the idempotency scope and is not the name typed
+      // into the form. A created object with no name in its answer is not
+      // navigated to: the list below is already re-read and shows it.
+      const created = ((state.result || {}).object || {}).metadata || {};
+      const route = scheduleDetailRoute(ns, String(created.name || ""));
+      if (route !== null && typeof window !== "undefined") {
+        window.location.hash = route;
+        return;
+      }
       mountSchedules(node, ns, parse, lifecycle, api);
       return;
     }
-    const slot = node.querySelector("#schedule-form-slot");
-    if (slot === null) {
-      return;
-    }
-    replace(slot, parse(renderScheduleForm(scheduleFormView(ns, clusters))));
-    wireCreate(node, ns, parse, lifecycle, api, clusters);
+    repaint();
     if (state.phase === "failed") {
       focusFirstProblem(node, "#schedule-form-status");
     }
   }, lifecycle);
+
+  const preview = node.querySelector("#schedule-form button[data-preview=\"" + CREATE_PANEL + "\"]");
+  if (preview !== null) {
+    listen(preview, "click", () => {
+      if (!active(lifecycle)) {
+        return;
+      }
+      const values = readScheduleValues(form);
+      keepDraft(key, values, SCHEDULE_DRAFT_FIELDS);
+      const query = previewQueryFor(values);
+      if (query === null) {
+        held.preview = {
+          query: null,
+          error: invalidInput(validateSchedule(values),
+            "this cadence is not complete enough to preview"),
+        };
+        repaint();
+        return;
+      }
+      preview.disabled = true;
+      api.previewCadence(query, readOptions(lifecycle)).then(
+        (answer) => {
+          if (!active(lifecycle)) {
+            return;
+          }
+          held.preview = { query: query, answer: answer, error: null };
+          repaint();
+        },
+        (error) => {
+          if (!cancelled(error, lifecycle) && active(lifecycle)) {
+            held.preview = { query: query, answer: null, error: error };
+            repaint();
+          }
+        },
+      );
+    }, lifecycle);
+  }
+
+  const check = node.querySelector("#schedule-check-readiness");
+  if (check !== null) {
+    listen(check, "click", () => {
+      if (!active(lifecycle)) {
+        return;
+      }
+      const values = readScheduleValues(form);
+      keepDraft(key, values, SCHEDULE_DRAFT_FIELDS);
+      check.disabled = true;
+      api.startPreflight(ns, readinessRequestFor(values)).then(
+        (answer) => {
+          if (!active(lifecycle)) {
+            return;
+          }
+          held.readiness = answer.item;
+          repaint();
+          followCreateReadiness(node, ns, parse, lifecycle, api, clusters, held);
+        },
+        (error) => {
+          if (!cancelled(error, lifecycle) && active(lifecycle)) {
+            held.readiness = null;
+            held.readinessUnavailable = true;
+            held.readinessUnavailableReason = String(error && error.message);
+            repaint();
+          }
+        },
+      );
+    }, lifecycle);
+  }
+
   listen(form, "submit", (event) => {
     event.preventDefault();
     if (!active(lifecycle) || mutation.pending()) {
@@ -1819,9 +2184,85 @@ function wireCreate(node, ns, parse, lifecycle, api, clusters) {
     // exactly when somebody rebuilds a cluster. The read carries NO ROUTE
     // SIGNAL: a submit in flight is a durable operation and navigation must
     // not cancel it (PLAT-13.2), and this read is part of that operation.
-    mutation.run(() => confirmThenCreate(ns, values, api));
+    mutation.run(() => confirmThenCreate(ns, values, api, held.preview));
   }, lifecycle);
 }
+
+/** The `Preflight` a guided form's readiness button starts: operation `backup`,
+ *  against the source, destination and topics ON THE FORM.
+ *
+ *  A DYNAMIC SELECTION NAMES NO TOPICS, and this sends none rather than
+ *  inventing a list: the check then resolves the connection and the
+ *  destination, which is what there is to check before the schedule exists.
+ *  What a dynamic run will actually cover is decided per run, by a discovery,
+ *  and no check before creation can answer it. */
+export function readinessRequestFor(values) {
+  const v = values || {};
+  const text = (key) => String(v[key] === undefined || v[key] === null ? "" : v[key]).trim();
+  const request = {
+    operation: "backup",
+    backup: {
+      sourceConnection: String(v.source || ""),
+      topics: v.selection === "dynamic"
+        ? []
+        : text("topics").split(",").map((t) => t.trim()).filter((t) => t.length > 0),
+    },
+  };
+  if (text("destination").length > 0) {
+    request.backup.destination = text("destination");
+  }
+  return request;
+}
+
+/** Re-reads a started readiness check until it is terminal or the budget is
+ *  spent, exactly as the connection check on the clusters page does: every read
+ *  is guarded by the route, the loop is bounded, and a failed re-read is not a
+ *  verdict -- the verdict on screen stays what the check last recorded. */
+async function followCreateReadiness(node, ns, parse, lifecycle, api, clusters, held) {
+  const wait = typeof api.wait === "function"
+    ? api.wait
+    : (ms) => new Promise((done) => { globalThis.setTimeout(done, ms); });
+  const repaint = () => {
+    const slot = node.querySelector("#schedule-form-slot");
+    if (slot === null) {
+      return;
+    }
+    replace(slot, parse(renderScheduleForm(scheduleFormView(ns, clusters, held.now,
+      held.freshSeconds, held))));
+    wireCreate(node, ns, parse, lifecycle, api, clusters, held);
+  };
+  for (let read = 0; read < READINESS_POLLS; read += 1) {
+    const current = held.readiness;
+    if (current === null || current === undefined || current.terminal === true) {
+      return;
+    }
+    await wait(READINESS_INTERVAL_MS);
+    if (!active(lifecycle)) {
+      return;
+    }
+    let answer;
+    try {
+      answer = await api.preflight(ns, current.id, readOptions(lifecycle));
+    } catch (error) {
+      if (cancelled(error, lifecycle) || !active(lifecycle)) {
+        return;
+      }
+      return;
+    }
+    if (!active(lifecycle)) {
+      return;
+    }
+    held.readiness = answer.item;
+    repaint();
+  }
+}
+
+/** How many times a guided form re-reads a readiness check, and how long it
+ *  waits between reads. Bounded on purpose: a form is not a watcher. */
+export const READINESS_POLLS = 20;
+
+/** The gap between those reads. */
+export const READINESS_INTERVAL_MS = 2000;
 
 /** Re-reads the namespace's saved connections and creates the schedule against
  *  that list, or refuses.
@@ -1831,7 +2272,7 @@ function wireCreate(node, ns, parse, lifecycle, api, clusters) {
  *  not find out" is not "it does", and the draft is kept either way, so the
  *  cost of refusing is one more click and the cost of not refusing is a
  *  schedule pointed at a connection nobody chose. */
-export async function confirmThenCreate(ns, values, api) {
+export async function confirmThenCreate(ns, values, api, preview) {
   let clusters;
   try {
     clusters = await api.list(ns, CLUSTERS);
@@ -1842,7 +2283,7 @@ export async function confirmThenCreate(ns, values, api) {
         "). Nothing was sent; everything you typed is still here.",
     });
   }
-  return submitSchedule(ns, values, api, clusters);
+  return submitSchedule(ns, values, api, clusters, preview);
 }
 
 /** THE SOURCE SELECTOR'S TWO BEHAVIOURS, both local to the form.
@@ -2490,19 +2931,18 @@ function renderPolicyFields(name, values, errors) {
   );
 }
 
-/** Where the runs are written, and what a saved destination costs to change. */
-function renderPolicyLocation(name, values, errors, destinations) {
+/** Where the runs are written, and what a saved destination costs to change.
+ *
+ *  `collapseInline` PUTS THE HAND-TYPED HALF BEHIND A DISCLOSURE (PLAT-10.1).
+ *  The guided create form passes it, because 10.1's acceptance is that the
+ *  standard route needs no raw endpoint reconstruction, and an URL input in front
+ *  of the person is an invitation to reconstruct one. The edit panel does not:
+ *  it is a whole-policy replace, every field it holds is a field it SENDS, and
+ *  a field being cleared inside a closed `<details>` is exactly the surprise
+ *  that panel's own sentence exists to prevent. */
+function renderPolicyLocation(name, values, errors, destinations, collapseInline) {
   const all = Array.isArray(destinations) ? destinations : [];
-  return (
-    "<fieldset class=\"legacy-archive\"><legend>where runs are written</legend>" +
-    "<div class=\"field\"><label for=\"" + esc(policyId(name, "destination")) +
-    "\">saved destination</label><select id=\"" + esc(policyId(name, "destination")) +
-    "\" name=\"destination\">" +
-    optionList(policyId(name, "destination"), "destination", values.destination,
-      [["", "none -- use the inline archive below"]]
-        .concat(all.map((d) => [d.name, d.name + " -- " + d.canonicalUrl]))) + "</select>" +
-    "<p class=\"help\">Choosing one sends destinationRef and NOT the inline fields: the two are " +
-    "two spellings of one location, and the API writes the sentinel URL itself.</p></div>" +
+  const inline =
     "<div class=\"field\"><label for=\"" + esc(policyId(name, "archive")) +
     "\">archive URL</label><input id=\"" + esc(policyId(name, "archive")) +
     "\" name=\"archive\" value=\"" + esc(String(values.archive || "")) + "\"" +
@@ -2512,7 +2952,23 @@ function renderPolicyLocation(name, values, errors, destinations) {
     "\">archive credential (Secret name)</label><input id=\"" +
     esc(policyId(name, "archiveSecret")) + "\" name=\"archiveSecret\" value=\"" +
     esc(String(values.archiveSecret || "")) + "\">" +
-    "<p class=\"help\">Only its name is sent.</p></div>" +
+    "<p class=\"help\">Only its name is sent.</p></div>";
+  return (
+    "<fieldset class=\"legacy-archive\"><legend>where runs are written</legend>" +
+    "<div class=\"field\"><label for=\"" + esc(policyId(name, "destination")) +
+    "\">saved destination</label><select id=\"" + esc(policyId(name, "destination")) +
+    "\" name=\"destination\">" +
+    optionList(policyId(name, "destination"), "destination", values.destination,
+      [["", "none -- use the inline archive below"]]
+        .concat(all.map((d) => [d.name, d.name + " -- " + d.canonicalUrl]))) + "</select>" +
+    "<p class=\"help\">Choosing one sends destinationRef and NOT the inline fields: the two are " +
+    "two spellings of one location, and the API writes the sentinel URL itself.</p>" +
+    fieldErrorLine(policyId(name, "destination"), errors.destination) + "</div>" +
+    (collapseInline === true
+      ? "<details class=\"advanced\" id=\"" + esc(policyId(name, "inline-archive")) + "\">" +
+        "<summary>Advanced: write to an archive URL instead of a saved destination</summary>" +
+        inline + "</details>"
+      : inline) +
     policyNumber(name, values, errors, "keepLast", "retention keepLast",
       "How many sets a retention evaluation keeps. It reports; it never deletes.") +
     policyNumber(name, values, errors, "keepDays", "retention keepDays",

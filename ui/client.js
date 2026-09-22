@@ -2104,18 +2104,37 @@ function requestBody(plural, object) {
     return body;
   }
   if (plural === "backupschedules") {
+    // THE WHOLE POLICY, BECAUSE THE ROUTE TAKES THE WHOLE POLICY (PLAT-10.1).
+    // `CreateScheduleRequest` used to carry five fields, so a guided form could
+    // only create a schedule and then repair it; it now carries the same set
+    // the edit route does. A field ABSENT from the custom resource stays absent
+    // from the body -- the route writes absent for absent, and an absent policy
+    // field is the documented default rather than a value this module invented.
+    //
+    // ONE LOCATION AND ONE SELECTION, decided by the object the page composed:
+    // `destinationRef` replaces `archive` and `allUserTopics` replaces a named
+    // `topics`, and the API refuses a body carrying both halves of either pair.
     const body = {
       schedule: spec.schedule,
       sourceRef: { name: spec.sourceRef.name },
-      topics: spec.topics.slice(),
-      archive: requestArchive(spec.archive),
+      topics: Array.isArray(spec.topics) ? spec.topics.slice() : [],
       suspended: spec.suspend === true,
     };
-    if (spec.concurrencyPolicy !== undefined) {
-      body.concurrencyPolicy = spec.concurrencyPolicy;
+    if (spec.destinationRef !== undefined && spec.destinationRef !== null) {
+      body.destinationRef = { name: spec.destinationRef.name };
+    } else {
+      body.archive = requestArchive(spec.archive);
     }
-    if (spec.retention !== undefined && spec.retention !== null) {
-      body.retention = spec.retention;
+    if (spec.allUserTopics !== undefined && spec.allUserTopics !== null) {
+      body.allUserTopics = spec.allUserTopics;
+    }
+    for (const field of [
+      "timeZone", "concurrencyPolicy", "startingDeadlineSeconds", "catchUpPolicy",
+      "retry", "activeDeadlineSeconds", "retention",
+    ]) {
+      if (spec[field] !== undefined && spec[field] !== null) {
+        body[field] = spec[field];
+      }
     }
     return body;
   }

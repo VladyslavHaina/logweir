@@ -235,8 +235,27 @@ export function validateRequest(plural, body) {
   } else if (plural === "backupschedules") {
     text(errors, spec.schedule, "spec.schedule", "a schedule expression is required");
     nameRef(errors, spec.sourceRef, "spec.sourceRef", "name the KafkaCluster this schedule reads");
-    nonEmptyList(errors, spec.topics, "spec.topics", "name at least one topic");
-    text(errors, (spec.archive || {}).url, "spec.archive.url", "the archive location is required");
+    // TWO XOR PAIRS, AND NEITHER HALF IS REQUIRED ON ITS OWN (PLAT-10.1). A
+    // schedule covers a NAMED allowlist or every user topic, and writes to an
+    // INLINE archive or a saved destination; requiring `topics` and
+    // `archive.url` outright -- which this did until the create route grew the
+    // other two fields -- refused, in the browser, exactly the two shapes the
+    // guided form exists to produce. What is still refused is a selection with
+    // neither half and a location with neither half: a run with nothing to do
+    // is not a run, and a run with nowhere to write is not a run.
+    if (!Array.isArray(spec.topics) || spec.topics.length === 0) {
+      if (spec.allUserTopics === undefined || spec.allUserTopics === null) {
+        fail(errors, "spec.topics", "selection_invalid",
+          "name at least one topic, or ask for all user topics");
+      }
+    }
+    if (spec.destinationRef === undefined || spec.destinationRef === null) {
+      text(errors, (spec.archive || {}).url, "spec.archive.url",
+        "name a saved destination, or the archive location to write to");
+    } else {
+      nameRef(errors, spec.destinationRef, "spec.destinationRef",
+        "a destination name is lowercase letters, digits, '-' and '.'");
+    }
   } else if (plural === "restores") {
     text(errors, spec.planBytes, "spec.planBytes", "the plan document is required");
     nameRef(errors, spec.approvalRef, "spec.approvalRef", "the Approval this Restore waits for");

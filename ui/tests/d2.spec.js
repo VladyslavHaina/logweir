@@ -96,7 +96,7 @@ import {
 } from "../pages/clusters.js";
 import {
   COVERAGE_LABELS,
-  CREATE_HAS_NO_DESTINATION,
+  CREATE_TAKES_A_DESTINATION,
   EDIT_IS_A_REPLACE,
   claimsWholeCluster,
   defaultDestination,
@@ -896,23 +896,30 @@ test("the_schedule_list_carries_a_destination_column_for_all_three_shapes", () =
   assert.match(html, /badge-pending">inline archive/, "and the legacy one");
 });
 
-test("MUTANT_the_create_form_names_the_task_that_owes_a_schedule_destination", () => {
-  // ABSENT, AND STILL ABSENT AFTER THE REBASE: `CreateScheduleRequest` has no
-  // `destinationRef`. THE MUTANT this row exists for is the sentence going
-  // stale the other way -- claiming a field is missing after it lands. It is
-  // held by naming BOTH halves: what is missing (the create route) and what is
-  // not (the edit route), so a future reader can check either against the
-  // schema in one step.
-  const html = renderScheduleForm({});
+test("MUTANT_the_create_form_offers_the_destination_the_create_route_now_takes", () => {
+  // THE DEBT THIS ROW USED TO HOLD IS PAID (PLAT-10.1). It asserted that the
+  // form said "POST /schedules ... has no destinationRef field. PLAT-06.2 owes
+  // that one", and the mutant it existed for was that sentence going stale --
+  // "claiming a field is missing after it lands". It has landed, so the row
+  // now holds the OTHER direction: the create form must OFFER a saved
+  // destination, and must not have gone back to telling people it cannot.
+  const html = renderScheduleForm({
+    destinations: [{ name: "primary", canonicalUrl: "s3://kafka-backups/logweir" }],
+  });
   assert.match(html, /id="schedule-destination-gap"/);
-  assert.match(html, /POST \/schedules/, "the sentence names the route that lacks the field");
-  assert.match(html, /PLAT-06\.2 owes that one/, "and the task that owes it");
+  assert.match(html, /<select id="policy-create-destination" name="destination">/,
+    "the create form carries the same destination selector the edit panel does");
+  assert.match(html, /<option value="primary"/, "and offers the namespace's saved destinations");
   assert.doesNotMatch(
-    CREATE_HAS_NO_DESTINATION,
-    /cannot be named here yet|kubectl or the CLI to bind a schedule/,
-    "the pre-rebase sentence claimed no schedule could name a destination at all, which " +
-      "`ScheduleView.destinationRef` and `PUT .../schedules/{name}` have both made false",
+    CREATE_TAKES_A_DESTINATION,
+    /cannot be named|owes that one|has no destinationRef/,
+    "the pre-PLAT-10.1 sentence claimed the create route had no destinationRef, which " +
+      "`CreateScheduleRequest.destinationRef` has made false",
   );
+  assert.match(CREATE_TAKES_A_DESTINATION, /this form sends destinationRef/);
+  // AND THE INLINE HALF IS STILL REACHABLE, collapsed: an installation with no
+  // saved destination yet must still be able to create a schedule.
+  assert.match(html, /<summary>Advanced: write to an archive URL instead of a saved destination/);
 });
 
 test("the_edit_route_is_named_as_existing_and_as_this_pages_own_panel", () => {
