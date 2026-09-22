@@ -1243,11 +1243,16 @@ test("the_client_side_window_check_is_labelled_a_convenience", () => {
     "and the old sentence is gone, because it is no longer true of this field",
   );
 
-  // A point outside the window complains, and a point inside does not.
+  // A point outside the window complains, and a point inside does not. The
+  // complaint carries an id since PLAT-11.2: the bound itself is printed
+  // beside the input in EVERY state, so a live journey that scanned for the
+  // window SENTENCE could not tell a refused point from an accepted one, and
+  // its own negative control caught that. The element is what distinguishes
+  // them, so the element is what these two lines look for.
   const outside = wizardState();
   outside.fields.pointInTime = "2026-09-08T00:00:00Z";
-  assert.ok(renderPointInTimeStep(outside).includes("<p class=\"complaint\">"));
-  assert.equal(renderPointInTimeStep(state).indexOf("<p class=\"complaint\">"), -1);
+  assert.ok(renderPointInTimeStep(outside).includes("id=\"point-in-time-complaint\""));
+  assert.equal(renderPointInTimeStep(state).indexOf("id=\"point-in-time-complaint\""), -1);
 });
 
 test("the_plan_step_shows_the_hash_the_names_the_caveat_and_the_command", async () => {

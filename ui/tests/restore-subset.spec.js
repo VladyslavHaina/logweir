@@ -18,6 +18,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   defaultPrefixFor,
+  renderPointInTimeStep,
   freshTargetPrefix,
   initialState,
   isKafkaTopicName,
@@ -167,6 +168,13 @@ test("a_duplicate_mapping_is_refused_before_the_submit_and_names_both_rows", () 
   );
   const step = stepStates(state)[3];
   assert.equal(step.status, "attention", "and step 4 does not read `done` over a refused mapping");
+  // AND THE REFUSAL IS ON SCREEN ON THE KEYSTROKE, not only after a submit has
+  // been refused by the server -- the window refusal in step 3 works the same
+  // way. Without this the page would show a mapping it has already decided it
+  // will not send, and the live journey found exactly that.
+  const rendered = renderTopicSubset(state);
+  assert.ok(rendered.includes("id=\"subset-complaint\""), rendered);
+  assert.ok(rendered.includes("both map to the target topic"));
 
   // THE NEGATIVE CONTROL: the same state with the duplicate removed passes
   // every one of those, so the row fails if the duplicate rule is deleted.
@@ -190,7 +198,13 @@ test("an_invalid_prefix_and_an_illegal_mapped_name_are_refused_by_name", () => {
       typeof problems.topicPrefix === "string" && problems.topicPrefix.includes(expect),
       "`" + bad + "` is refused by name: " + JSON.stringify(problems),
     );
+    const step4 = renderTargetStep(state);
+    assert.ok(step4.includes("id=\"prefix-complaint\""),
+      "and the refusal is rendered beside the field it is about, on the keystroke");
   }
+  // THE NEGATIVE CONTROL for the rendering: a legal prefix carries no
+  // complaint, so the paragraph is not simply always there.
+  assert.ok(!renderTargetStep(wizardState()).includes("id=\"prefix-complaint\""));
 
   // A LEGAL PREFIX THAT MAKES AN ILLEGAL NAME. 249 is the broker's own bound
   // and this is where the two halves meet: prefix + topic is what is created.
@@ -543,6 +557,15 @@ test("a_point_outside_the_disclosed_window_is_refused_and_the_bounds_are_shown",
       "a point ON the bound is inside the window: " + state.fields.pointInTime,
     );
   }
+  // AND THE COMPLAINT PARAGRAPH IS WHAT DISTINGUISHES THE TWO STATES, because
+  // the bound itself is printed beside the input in every state: a test that
+  // asserted "the window message is on the page" would hold for an accepted
+  // point too. The live journey's negative control caught exactly that.
+  state.fields.pointInTime = new Date(covered.toMs).toISOString();
+  assert.ok(!renderPointInTimeStep(state).includes("id=\"point-in-time-complaint\""));
+  state.fields.pointInTime = new Date(covered.toMs + 1).toISOString();
+  assert.ok(renderPointInTimeStep(state).includes("id=\"point-in-time-complaint\""));
+
   // AND STRICTLY OUTSIDE IS A REFUSAL NAMING THE WINDOW.
   for (const at of [covered.fromMs - 1, covered.toMs + 1]) {
     state.fields.pointInTime = new Date(at).toISOString();

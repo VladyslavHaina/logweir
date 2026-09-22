@@ -1022,7 +1022,14 @@ export function renderPointInTimeStep(state) {
     fieldErrorLine("point-in-time", errors.pointInTime) +
     "<p class=\"window\">" + windowMessage(covered.fromMs, covered.toMs) + "</p>" +
     "</div>" +
-    (complaint === null ? "" : "<p class=\"complaint\">" + complaint + "</p>") +
+    // THE COMPLAINT CARRIES AN ID, and it needs one: the `window` line above
+    // states the same sentence unconditionally (it is the bound, printed
+    // beside the input), so "the page contains the window message" is true of
+    // every state and cannot tell a refused point from an accepted one. A live
+    // journey asserted exactly that and its own negative control caught it.
+    (complaint === null
+      ? ""
+      : "<p class=\"complaint\" id=\"point-in-time-complaint\">" + complaint + "</p>") +
     "<p class=\"note\">" + WINDOW_REFUSAL_SENTENCE + "</p>" +
     "</section>"
   );
@@ -1259,6 +1266,7 @@ export function renderTopicSubset(state) {
   const frozen = frozenTopicsOf(s);
   const chosen = new Set(selectedTopics(s).map(String));
   const errors = errorsOf(s);
+  const problems = mappingProblems(s);
   const rows = topicMapping(s).map((row) => [esc(row.source), "<code>" + esc(row.target) + "</code>"]);
   const boxes = frozen
     .map(
@@ -1279,6 +1287,15 @@ export function renderTopicSubset(state) {
     "<button type=\"button\" id=\"select-no-topics\">Clear</button>" +
     "</div>" +
     fieldErrorLine("topic-subset", errors.topics) +
+    // THE REFUSAL IS COMPUTED HERE AND SHOWN ON THE KEYSTROKE, not only after
+    // a submit has been refused. `errorsOf` carries what the SERVER said about
+    // the last attempt; a page that only rendered those would leave an
+    // operator looking at a mapping this page has already decided it will not
+    // send. The window refusal in step 3 works the same way, for the same
+    // reason (PLAT-11.1).
+    (typeof problems.topics === "string"
+      ? "<p class=\"complaint\" id=\"subset-complaint\">" + esc(problems.topics) + "</p>"
+      : "") +
     "<h4>The mapping, before you submit</h4>" +
     "<p class=\"blurb\">" + esc(MAPPING_SENTENCE) + "</p>" +
     table(["SOURCE TOPIC", "TARGET TOPIC"], rows, "No topic is selected, so nothing is mapped.") +
@@ -1433,6 +1450,7 @@ export function renderTargetStep(state) {
     typeof target.topicPrefix === "string" && target.topicPrefix.length > 0
       ? target.topicPrefix
       : defaultPrefixFor(s);
+  const mapping = mappingProblems(s);
   const markerWarning =
     target.mode === "scratch" && typeof ((chosen || {}).spec || {}).markerTopic !== "string"
       ? "<p class=\"complaint\">" + SCRATCH_MARKER_WARNING + "</p>"
@@ -1470,6 +1488,9 @@ export function renderTargetStep(state) {
     "<input id=\"topic-prefix\" name=\"topicPrefix\" value=\"" + esc(prefix) + "\"" +
     invalidAttributes("topic-prefix", errors.topicPrefix) + ">" +
     fieldErrorLine("topic-prefix", errors.topicPrefix) +
+    (typeof mapping.topicPrefix === "string"
+      ? "<p class=\"complaint\" id=\"prefix-complaint\">" + esc(mapping.topicPrefix) + "</p>"
+      : "") +
     "<p class=\"note\">The prefix defaults to what logweir_core::spec::default_topic_prefix " +
     "produces for this instant, so a topic name says both what it is and what point it was " +
     "recovered to. It is editable.</p></div>" +
