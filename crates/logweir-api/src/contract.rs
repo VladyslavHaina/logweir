@@ -334,7 +334,7 @@ pub struct RetentionRequest {
 ///
 /// # It creates what the edit route can edit (PLAT-10.1)
 ///
-/// Until PLAT-10.1 this DTO carried five fields and the edit route carried
+/// Until PLAT-10.1 this DTO carried seven fields and the edit route carried
 /// thirteen, so a schedule the console could *edit* into shape could not be
 /// *created* in that shape: a saved destination, a dynamic selection, a zone,
 /// a catch-up policy and retries all had to be added afterwards by a second
@@ -354,6 +354,17 @@ pub struct RetentionRequest {
 /// it creates byte for byte the schedule it created before: absent `timeZone`
 /// is UTC, absent `catchUpPolicy` is `None`, absent `retry` is no retries, and
 /// absent deadlines are the documented defaults.
+///
+/// # And it hashes to the bytes it always hashed to
+///
+/// The idempotency request hash is taken over THIS type's serialisation, so
+/// every member added by PLAT-10.1 is `skip_serializing_if = "Option::is_none"`
+/// (the rule `topic_mapping` states for restores): a pre-PLAT-10.1 body
+/// retried under its old `Idempotency-Key` after an upgrade replays onto its
+/// object instead of answering `409 idempotency_conflict`. `concurrencyPolicy`
+/// and `retention` predate PLAT-10.1 and ALWAYS serialised, `null` included,
+/// so they keep doing so. `schedule_create::a_pre_plat_10_1_body_hashes_to_its_pre_upgrade_bytes`
+/// pins the bytes.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct CreateScheduleRequest {
@@ -362,7 +373,7 @@ pub struct CreateScheduleRequest {
     pub schedule: String,
     /// An IANA zone name. Absent means UTC, which is what every
     /// pre-PLAT-04.2 schedule does.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time_zone: Option<String>,
     /// The source connection, in this namespace.
     pub source_ref: NameRef,
@@ -378,32 +389,32 @@ pub struct CreateScheduleRequest {
     /// carried a top-level `topics` since PLAT-17.1 and moving it would break
     /// every existing caller to gain nothing. Both routes validate through the
     /// same `validate_selection`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub all_user_topics: Option<AllUserTopics>,
     /// Where backups are written. Exactly one of `archive` or
     /// `destinationRef`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archive: Option<ArchiveRequest>,
     /// A saved `BackupDestination` in this namespace. Exactly one of `archive`
     /// or `destinationRef`; the sentinel `archive.url` the CRD requires is
     /// built by the route and is never accepted from a body.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub destination_ref: Option<NameRef>,
     /// `Forbid` (default) or `Allow`.
     #[serde(default)]
     pub concurrency_policy: Option<ConcurrencyPolicy>,
     /// How long after its instant a slot may still start, 60 to 604800.
     /// Absent means 3600.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub starting_deadline_seconds: Option<i64>,
     /// Absent means `None`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catch_up_policy: Option<CatchUpPolicy>,
     /// Absent means no retries.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry: Option<RetryPolicy>,
     /// The run's `activeDeadlineSeconds`, 60 to 86400. Absent means 3600.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_deadline_seconds: Option<i64>,
     /// Retention reporting.
     #[serde(default)]

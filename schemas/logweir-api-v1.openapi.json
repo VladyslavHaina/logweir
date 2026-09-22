@@ -7199,7 +7199,7 @@
         "additionalProperties": false
       },
       "CreateScheduleRequest": {
-        "description": "`POST /api/v1/namespaces/{ns}/schedules`.\n\n# It creates what the edit route can edit (PLAT-10.1)\n\nUntil PLAT-10.1 this DTO carried five fields and the edit route carried thirteen, so a schedule the console could *edit* into shape could not be *created* in that shape: a saved destination, a dynamic selection, a zone, a catch-up policy and retries all had to be added afterwards by a second request against an object that was already scheduling runs from a policy nobody asked for. D2 W13's record named the first of those — \"`CreateScheduleRequest.destinationRef`\" — under *owed by the API before these pages are complete*, and the console's create form printed the debt on screen. The optional fields below close it, and they are exactly [`UpdateSchedulePolicyRequest`]'s, so one form serves both routes.\n\n# Every addition is optional, and an old body still means what it meant\n\n`archive` became optional so that `destinationRef` can take its place — **exactly one** of the two, as on the edit route — and `topics` became optional so that `allUserTopics` can take *its* place. A pre-PLAT-10.1 body names `archive` and a non-empty `topics` and is refused by neither rule, so it creates byte for byte the schedule it created before: absent `timeZone` is UTC, absent `catchUpPolicy` is `None`, absent `retry` is no retries, and absent deadlines are the documented defaults.",
+        "description": "`POST /api/v1/namespaces/{ns}/schedules`.\n\n# It creates what the edit route can edit (PLAT-10.1)\n\nUntil PLAT-10.1 this DTO carried seven fields and the edit route carried thirteen, so a schedule the console could *edit* into shape could not be *created* in that shape: a saved destination, a dynamic selection, a zone, a catch-up policy and retries all had to be added afterwards by a second request against an object that was already scheduling runs from a policy nobody asked for. D2 W13's record named the first of those — \"`CreateScheduleRequest.destinationRef`\" — under *owed by the API before these pages are complete*, and the console's create form printed the debt on screen. The optional fields below close it, and they are exactly [`UpdateSchedulePolicyRequest`]'s, so one form serves both routes.\n\n# Every addition is optional, and an old body still means what it meant\n\n`archive` became optional so that `destinationRef` can take its place — **exactly one** of the two, as on the edit route — and `topics` became optional so that `allUserTopics` can take *its* place. A pre-PLAT-10.1 body names `archive` and a non-empty `topics` and is refused by neither rule, so it creates byte for byte the schedule it created before: absent `timeZone` is UTC, absent `catchUpPolicy` is `None`, absent `retry` is no retries, and absent deadlines are the documented defaults.\n\n# And it hashes to the bytes it always hashed to\n\nThe idempotency request hash is taken over THIS type's serialisation, so every member added by PLAT-10.1 is `skip_serializing_if = \"Option::is_none\"` (the rule `topic_mapping` states for restores): a pre-PLAT-10.1 body retried under its old `Idempotency-Key` after an upgrade replays onto its object instead of answering `409 idempotency_conflict`. `concurrencyPolicy` and `retention` predate PLAT-10.1 and ALWAYS serialised, `null` included, so they keep doing so. `schedule_create::a_pre_plat_10_1_body_hashes_to_its_pre_upgrade_bytes` pins the bytes.",
         "type": "object",
         "required": [
           "schedule",
@@ -7209,26 +7209,22 @@
         "properties": {
           "activeDeadlineSeconds": {
             "description": "The run's `activeDeadlineSeconds`, 60 to 86400. Absent means 3600.",
-            "default": null,
             "type": "integer",
             "format": "int64",
             "nullable": true
           },
           "allUserTopics": {
             "description": "Dynamic selection (PLAT-09.2). Either this or a non-empty `topics`; an empty selection is refused before any write.\n\nSPELLED FLAT, NOT UNDER `topicSelection`. The edit route nests the two halves because it was written as a whole-policy replace; this route has carried a top-level `topics` since PLAT-17.1 and moving it would break every existing caller to gain nothing. Both routes validate through the same `validate_selection`.",
-            "default": null,
             "$ref": "#/components/schemas/AllUserTopics",
             "nullable": true
           },
           "archive": {
             "description": "Where backups are written. Exactly one of `archive` or `destinationRef`.",
-            "default": null,
             "$ref": "#/components/schemas/ArchiveRequest",
             "nullable": true
           },
           "catchUpPolicy": {
             "description": "Absent means `None`.",
-            "default": null,
             "$ref": "#/components/schemas/CatchUpPolicy",
             "nullable": true
           },
@@ -7240,7 +7236,6 @@
           },
           "destinationRef": {
             "description": "A saved `BackupDestination` in this namespace. Exactly one of `archive` or `destinationRef`; the sentinel `archive.url` the CRD requires is built by the route and is never accepted from a body.",
-            "default": null,
             "$ref": "#/components/schemas/NameRef",
             "nullable": true
           },
@@ -7252,7 +7247,6 @@
           },
           "retry": {
             "description": "Absent means no retries.",
-            "default": null,
             "$ref": "#/components/schemas/RetryPolicy",
             "nullable": true
           },
@@ -7266,7 +7260,6 @@
           },
           "startingDeadlineSeconds": {
             "description": "How long after its instant a slot may still start, 60 to 604800. Absent means 3600.",
-            "default": null,
             "type": "integer",
             "format": "int64",
             "nullable": true
@@ -7277,7 +7270,6 @@
           },
           "timeZone": {
             "description": "An IANA zone name. Absent means UTC, which is what every pre-PLAT-04.2 schedule does.",
-            "default": null,
             "type": "string",
             "nullable": true
           },

@@ -29,8 +29,8 @@ use crate::auth::Actor;
 use crate::authz::Action;
 use crate::contract::{
     ArchiveRequest, CatchUpPolicy, ConcurrencyPolicy, CreateScheduleRequest,
-    IncompleteDiscoveryPolicy, NameRef, ScheduleList, ScheduleResponse, SetSuspensionRequest,
-    TopicSelectionRequest, UpdateSchedulePolicyRequest,
+    IncompleteDiscoveryPolicy, NameRef, RetentionRequest, RetryPolicy, ScheduleList,
+    ScheduleResponse, SetSuspensionRequest, TopicSelectionRequest, UpdateSchedulePolicyRequest,
 };
 use crate::http::{read_json, RequestId, MAX_JSON_BODY};
 use crate::idempotency::IdempotencyKey;
@@ -136,49 +136,13 @@ pub(crate) fn validate_archive(
 /// `validation_failed` naming every invalid field.
 pub fn validate_create(request: &CreateScheduleRequest) -> Result<(), ApiError> {
     let mut errors = Vec::new();
-    match validate::check_single_line(&request.schedule, 128) {
-        Err(code) => errors.push(FieldError::new(
-            "schedule",
-            code,
-            "a cron expression is required",
-        )),
-        Ok(()) => {
-            // ONE CONDITION, ONE CODE, ON EVERY ROUTE. This used to answer
-            // `invalid_cron` while the edit route and the preview answered
-            // `schedule_invalid` — the code D1 §0.2 fixes and `docs/api.md`
-            // publishes — so a console branching on `errors[].code` to
-            // highlight the cadence input highlighted on two forms out of
-            // three for the same typo.
-            // `schedules::the_three_cadence_routes_answer_one_code` pins it.
-            //
-            // AND THE ZONE IS NOW PART OF THE SAME PARSE (PLAT-10.1). The DTO
-            // carries `timeZone`, so this route resolves the expression in the
-            // zone it will be stored with, against the controller's own tz
-            // database — an unknown zone is `timeZone: timezone_unknown` here
-            // rather than `Ready=False`/`UnknownTimeZone` on an object the
-            // console said was fine. The split is the edit route's, verbatim.
-            if let Err(e) = Cadence::parse(&request.schedule, request.time_zone.as_deref()) {
-                let (field, code) = match e {
-                    CadenceError::UnknownTimeZone { .. } => ("timeZone", TIMEZONE_UNKNOWN),
-                    CadenceError::Schedule(_) => ("schedule", SCHEDULE_INVALID),
-                };
-                errors.push(FieldError::new(
-                    field,
-                    code,
-                    validate::bounded(&e.to_string(), 256),
-                ));
-            }
-        }
-    }
-    if let Some(zone) = &request.time_zone {
-        if validate::check_single_line(zone, 64).is_err() {
-            errors.push(FieldError::new(
-                "timeZone",
-                "too_long",
-                "timeZone must be an IANA zone name of at most 64 characters",
-            ));
-        }
-    }
+    // THE ZONE IS PART OF THE SAME PARSE (PLAT-10.1): the create DTO carries
+    // `timeZone`, so this route resolves the expression in the zone it will be
+    // stored with -- an unknown zone is `timeZone: timezone_unknown` here
+    // rather than `Ready=False`/`UnknownTimeZone` on an object the console
+    // said was fine. `schedules::the_three_cadence_routes_answer_one_code`
+    // pins the one `schedule_invalid` code across the three cadence routes.
+    validate_cadence_fields(&request.schedule, request.time_zone.as_deref(), &mut errors);
     if !validate::is_dns_subdomain(&request.source_ref.name) {
         errors.push(FieldError::new(
             "sourceRef.name",
@@ -186,50 +150,19 @@ pub fn validate_create(request: &CreateScheduleRequest) -> Result<(), ApiError> 
             "must be a Kubernetes object name",
         ));
     }
-    validate_selection("", &create_selection(request), &mut errors);
-    let _ = destination_or_archive(
-        request.archive.as_ref(),
-        request.destination_ref.as_ref(),
+    validate_policy_fields(
+        &PolicyFields {
+            selection_prefix: "",
+            selection: &create_selection(request),
+            archive: request.archive.as_ref(),
+            destination_ref: request.destination_ref.as_ref(),
+            starting_deadline_seconds: request.starting_deadline_seconds,
+            active_deadline_seconds: request.active_deadline_seconds,
+            retry: request.retry.as_ref(),
+            retention: request.retention.as_ref(),
+        },
         &mut errors,
     );
-    check_range(
-        "startingDeadlineSeconds",
-        request.starting_deadline_seconds,
-        cadence::MIN_STARTING_DEADLINE_SECONDS,
-        cadence::MAX_STARTING_DEADLINE_SECONDS,
-        &mut errors,
-    );
-    check_range(
-        "activeDeadlineSeconds",
-        request.active_deadline_seconds,
-        cadence::MIN_ACTIVE_DEADLINE_SECONDS,
-        cadence::MAX_ACTIVE_DEADLINE_SECONDS,
-        &mut errors,
-    );
-    if let Some(retry) = &request.retry {
-        if !(0..=3).contains(&retry.max_retries) {
-            errors.push(FieldError::new(
-                "retry.maxRetries",
-                "out_of_range",
-                "must be from 0 to 3",
-            ));
-        }
-        check_range(
-            "retry.delaySeconds",
-            retry.delay_seconds,
-            cadence::MIN_RETRY_DELAY_SECONDS,
-            cadence::MAX_RETRY_DELAY_SECONDS,
-            &mut errors,
-        );
-    }
-    if let Some(retention) = &request.retention {
-        for (field, value) in [
-            ("retention.keepLast", retention.keep_last),
-            ("retention.keepDays", retention.keep_days),
-        ] {
-            check_range(field, value, 0, 100_000, &mut errors);
-        }
-    }
     if errors.is_empty() {
         Ok(())
     } else {
@@ -637,17 +570,51 @@ fn check_range(field: &str, value: Option<i64>, min: i64, max: i64, errors: &mut
 /// `validation_failed` naming every invalid field.
 pub fn validate_update(request: &UpdateSchedulePolicyRequest) -> Result<(), ApiError> {
     let mut errors = Vec::new();
-    match validate::check_single_line(&request.schedule, 128) {
+    validate_cadence_fields(&request.schedule, request.time_zone.as_deref(), &mut errors);
+    if request.source_ref.is_some() {
+        // THE ONE IMMUTABLE FIELD, REFUSED BEFORE ANY READ OR WRITE. The CRD's
+        // R1 would refuse it too, and says the same sentence — this is the
+        // same rule answered a round trip earlier, with the CRD's own words.
+        errors.push(FieldError::new(
+            "sourceRef",
+            "field_immutable",
+            weirkeeper::crds::backup_schedule::SOURCE_REF_IMMUTABLE_MESSAGE,
+        ));
+    }
+    validate_policy_fields(
+        &PolicyFields {
+            selection_prefix: "topicSelection",
+            selection: &request.topic_selection,
+            archive: request.archive.as_ref(),
+            destination_ref: request.destination_ref.as_ref(),
+            starting_deadline_seconds: request.starting_deadline_seconds,
+            active_deadline_seconds: request.active_deadline_seconds,
+            retry: request.retry.as_ref(),
+            retention: request.retention.as_ref(),
+        },
+        &mut errors,
+    );
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(ApiError::validation(errors))
+    }
+}
+
+/// The cadence half both routes validate identically: a single-line
+/// expression, parsed by THE CONTROLLER'S OWN PARSER in the zone it will be
+/// stored with, against the controller's own zone table, and a bounded zone
+/// name. An expression this API accepts and the scheduler refuses would leave
+/// `Ready=False` on an object the console said was fine.
+fn validate_cadence_fields(schedule: &str, time_zone: Option<&str>, errors: &mut Vec<FieldError>) {
+    match validate::check_single_line(schedule, 128) {
         Err(code) => errors.push(FieldError::new(
             "schedule",
             code,
             "a cron expression is required",
         )),
         Ok(()) => {
-            // THE CONTROLLER'S OWN PARSER, AND THE CONTROLLER'S OWN ZONE
-            // TABLE. An expression this API accepts and the scheduler refuses
-            // would leave `Ready=False` on an object the console said was fine.
-            if let Err(e) = Cadence::parse(&request.schedule, request.time_zone.as_deref()) {
+            if let Err(e) = Cadence::parse(schedule, time_zone) {
                 let (field, code) = match e {
                     CadenceError::UnknownTimeZone { .. } => ("timeZone", TIMEZONE_UNKNOWN),
                     CadenceError::Schedule(_) => ("schedule", SCHEDULE_INVALID),
@@ -660,7 +627,7 @@ pub fn validate_update(request: &UpdateSchedulePolicyRequest) -> Result<(), ApiE
             }
         }
     }
-    if let Some(zone) = &request.time_zone {
+    if let Some(zone) = time_zone {
         if validate::check_single_line(zone, 64).is_err() {
             errors.push(FieldError::new(
                 "timeZone",
@@ -669,37 +636,43 @@ pub fn validate_update(request: &UpdateSchedulePolicyRequest) -> Result<(), ApiE
             ));
         }
     }
-    if request.source_ref.is_some() {
-        // THE ONE IMMUTABLE FIELD, REFUSED BEFORE ANY READ OR WRITE. The CRD's
-        // R1 would refuse it too, and says the same sentence — this is the
-        // same rule answered a round trip earlier, with the CRD's own words.
-        errors.push(FieldError::new(
-            "sourceRef",
-            "field_immutable",
-            weirkeeper::crds::backup_schedule::SOURCE_REF_IMMUTABLE_MESSAGE,
-        ));
-    }
-    validate_selection("topicSelection", &request.topic_selection, &mut errors);
-    let _ = destination_or_archive(
-        request.archive.as_ref(),
-        request.destination_ref.as_ref(),
-        &mut errors,
-    );
+}
+
+/// The future-policy members the create and the replace routes share, read
+/// from either DTO. ONE VALIDATOR FOR BOTH (review LOW-3): the create route
+/// used to carry a copy of the edit route's rules, and the next edit to one
+/// copy would have drifted from the other.
+struct PolicyFields<'a> {
+    /// Where the selection's field errors are reported: `""` on create (flat
+    /// `topics`/`allUserTopics`), `"topicSelection"` on the replace.
+    selection_prefix: &'a str,
+    selection: &'a TopicSelectionRequest,
+    archive: Option<&'a ArchiveRequest>,
+    destination_ref: Option<&'a NameRef>,
+    starting_deadline_seconds: Option<i64>,
+    active_deadline_seconds: Option<i64>,
+    retry: Option<&'a RetryPolicy>,
+    retention: Option<&'a RetentionRequest>,
+}
+
+fn validate_policy_fields(fields: &PolicyFields<'_>, errors: &mut Vec<FieldError>) {
+    validate_selection(fields.selection_prefix, fields.selection, errors);
+    let _ = destination_or_archive(fields.archive, fields.destination_ref, errors);
     check_range(
         "startingDeadlineSeconds",
-        request.starting_deadline_seconds,
+        fields.starting_deadline_seconds,
         cadence::MIN_STARTING_DEADLINE_SECONDS,
         cadence::MAX_STARTING_DEADLINE_SECONDS,
-        &mut errors,
+        errors,
     );
     check_range(
         "activeDeadlineSeconds",
-        request.active_deadline_seconds,
+        fields.active_deadline_seconds,
         cadence::MIN_ACTIVE_DEADLINE_SECONDS,
         cadence::MAX_ACTIVE_DEADLINE_SECONDS,
-        &mut errors,
+        errors,
     );
-    if let Some(retry) = &request.retry {
+    if let Some(retry) = fields.retry {
         if !(0..=3).contains(&retry.max_retries) {
             errors.push(FieldError::new(
                 "retry.maxRetries",
@@ -712,21 +685,16 @@ pub fn validate_update(request: &UpdateSchedulePolicyRequest) -> Result<(), ApiE
             retry.delay_seconds,
             cadence::MIN_RETRY_DELAY_SECONDS,
             cadence::MAX_RETRY_DELAY_SECONDS,
-            &mut errors,
+            errors,
         );
     }
-    if let Some(retention) = &request.retention {
+    if let Some(retention) = fields.retention {
         for (field, value) in [
             ("retention.keepLast", retention.keep_last),
             ("retention.keepDays", retention.keep_days),
         ] {
-            check_range(field, value, 0, 100_000, &mut errors);
+            check_range(field, value, 0, 100_000, errors);
         }
-    }
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(ApiError::validation(errors))
     }
 }
 

@@ -1,7 +1,7 @@
 //! `POST /api/v1/namespaces/{ns}/schedules` after PLAT-10.1.
 //!
 //! WHAT CHANGED AND WHY THERE IS A FILE FOR IT. The create route used to take
-//! five fields while the edit route took thirteen, so the console's guided form
+//! seven fields while the edit route took thirteen, so the console's guided form
 //! could edit a policy it had no way to create: a saved destination, a dynamic
 //! selection, a zone, a catch-up policy and retries all had to be bolted on
 //! afterwards, by a second request, against an object that was already
@@ -336,4 +336,175 @@ async fn a_pre_plat_10_1_body_creates_what_it_always_created() {
         );
     }
     app.fake.assert_strict();
+}
+
+/// **A pre-PLAT-10.1 body hashes to the bytes it hashed to before the upgrade.**
+///
+/// The idempotency request hash is taken over `serde_json::to_vec` of the
+/// validated DTO (`routes::create_idempotent`). A script that creates its
+/// schedule under a stable `Idempotency-Key` and re-runs after the upgrade must
+/// get the replay, not `409 idempotency_conflict`, so the canonical bytes of an
+/// old-shape body must not change.
+///
+/// THE EXPECTED STRINGS ARE THE PRE-UPGRADE DTO'S OWN OUTPUT, captured by
+/// deserialising these two bodies into main `454cd6b`'s `CreateScheduleRequest`
+/// (schedule, sourceRef, topics, archive, concurrencyPolicy, retention,
+/// suspended) and serialising them. `concurrencyPolicy` and `retention`
+/// predate PLAT-10.1 and always serialised, `null` included.
+///
+/// MUTANT: drop `skip_serializing_if` from any PLAT-10.1 member (for example
+/// `time_zone`). The output gains `"timeZone":null` and this row fails.
+#[test]
+fn a_pre_plat_10_1_body_hashes_to_its_pre_upgrade_bytes() {
+    let cases = [
+        (
+            r#"{"schedule":"0 2 * * *","sourceRef":{"name":"source"},"topics":["orders"],"archive":{"url":"s3://b/p","credentialRef":{"name":"s3-creds"}},"concurrencyPolicy":"Forbid","suspended":false}"#,
+            r#"{"schedule":"0 2 * * *","sourceRef":{"name":"source"},"topics":["orders"],"archive":{"url":"s3://b/p","credentialRef":{"name":"s3-creds"}},"concurrencyPolicy":"Forbid","retention":null,"suspended":false}"#,
+        ),
+        (
+            r#"{"schedule":"0 2 * * *","sourceRef":{"name":"source"},"topics":["orders"],"archive":{"url":"s3://b/p"},"retention":{"keepLast":7},"suspended":true}"#,
+            r#"{"schedule":"0 2 * * *","sourceRef":{"name":"source"},"topics":["orders"],"archive":{"url":"s3://b/p","credentialRef":null},"concurrencyPolicy":null,"retention":{"keepLast":7,"keepDays":null},"suspended":true}"#,
+        ),
+    ];
+    for (body, pre_upgrade) in cases {
+        let parsed: logweir_api::contract::CreateScheduleRequest =
+            serde_json::from_str(body).expect("an old-shape body still parses");
+        let canonical = serde_json::to_string(&parsed).expect("serialises");
+        assert_eq!(
+            canonical, pre_upgrade,
+            "an old-shape create no longer hashes to its pre-upgrade bytes, so its retry after \
+             the upgrade is 409 idempotency_conflict instead of a replay"
+        );
+    }
+
+    // THE COUNTER-CONTROL: a body that USES an added member serialises it, so
+    // the skip is about absence and not a field silently left out of the hash.
+    let guided: logweir_api::contract::CreateScheduleRequest =
+        serde_json::from_value(guided()).expect("the guided body parses");
+    let canonical = serde_json::to_string(&guided).expect("serialises");
+    for member in [
+        "\"timeZone\":\"Europe/Berlin\"",
+        "\"allUserTopics\":",
+        "\"destinationRef\":{\"name\":\"primary\"}",
+        "\"startingDeadlineSeconds\":900",
+        "\"catchUpPolicy\":\"Latest\"",
+        "\"retry\":",
+        "\"activeDeadlineSeconds\":7200",
+    ] {
+        assert!(
+            canonical.contains(member),
+            "{member} is missing from the hash input"
+        );
+    }
+    assert!(
+        !canonical.contains("\"archive\""),
+        "an absent archive is not hashed"
+    );
+}
+
+/// **The same old-shape body, sent twice under one key through the route, is
+/// one schedule and a replay** -- the property the pinned bytes above protect,
+/// exercised end to end.
+#[tokio::test]
+async fn an_old_shape_create_retried_under_its_key_replays() {
+    let app = TestApp::new();
+    let body = json!({
+        "schedule": "0 2 * * *",
+        "sourceRef": {"name": "source"},
+        "topics": ["orders"],
+        "archive": {"url": "s3://b/p", "credentialRef": {"name": "s3-creds"}},
+        "suspended": false
+    });
+    let first = app
+        .post(
+            &create_path(),
+            Some("old-shape-key-0001"),
+            &body.to_string(),
+        )
+        .await;
+    assert_eq!(first.status.as_u16(), 201, "{}", first.text());
+    let second = app
+        .post(
+            &create_path(),
+            Some("old-shape-key-0001"),
+            &body.to_string(),
+        )
+        .await;
+    assert_eq!(second.status.as_u16(), 200, "{}", second.text());
+    assert_eq!(second.json()["replayed"], json!(true));
+    assert_eq!(
+        second.json()["item"]["name"],
+        first.json()["item"]["name"],
+        "the replay names the object the first create made"
+    );
+    assert_eq!(app.fake.count("backupschedules", NS_A), 1);
+}
+
+/// **Create and replace validate the future policy through ONE path** (review
+/// LOW-3), so the same faults answer the same field errors on both routes.
+///
+/// MUTANT: widen `validate_policy_fields`' retry bound for one caller only (or
+/// reintroduce a create-side copy that checks `activeDeadlineSeconds` against a
+/// different range). The two error sets differ and this row fails.
+#[tokio::test]
+async fn create_and_replace_refuse_the_same_policy_faults_with_the_same_errors() {
+    let app = TestApp::new();
+    let faults = json!({
+        "schedule": "61 * * * *",
+        "timeZone": "Mars/Olympus",
+        "startingDeadlineSeconds": 5,
+        "activeDeadlineSeconds": 999999,
+        "retry": {"maxRetries": 9, "delaySeconds": 1},
+        "retention": {"keepLast": -1},
+        "archive": {"url": "s3://b/p"},
+        "destinationRef": {"name": "primary"}
+    });
+    let mut create = faults.clone();
+    create["sourceRef"] = json!({"name": "source"});
+    create["topics"] = json!(["orders"]);
+    create["suspended"] = json!(false);
+    let mut replace = faults.clone();
+    replace["expectedGeneration"] = json!(1);
+    replace["topicSelection"] = json!({"topics": ["orders"]});
+    replace["suspended"] = json!(false);
+
+    let created = app
+        .post(
+            &create_path(),
+            Some("parity-create-0001"),
+            &create.to_string(),
+        )
+        .await;
+    created.assert_problem(422, "validation_failed");
+    let replaced = app
+        .put(&format!("{}/nightly", create_path()), &replace.to_string())
+        .await;
+    replaced.assert_problem(422, "validation_failed");
+
+    let errors = |body: &Value| -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = body["errors"]
+            .as_array()
+            .expect("field errors")
+            .iter()
+            .map(|e| {
+                (
+                    e["field"].as_str().unwrap_or_default().to_string(),
+                    e["code"].as_str().unwrap_or_default().to_string(),
+                )
+            })
+            .collect();
+        out.sort();
+        out
+    };
+    let on_create = errors(&created.json());
+    let on_replace = errors(&replaced.json());
+    assert!(
+        on_create.len() >= 6,
+        "the faults were not all refused: {on_create:?}"
+    );
+    assert_eq!(
+        on_create, on_replace,
+        "the two routes validate the same policy differently"
+    );
+    assert_eq!(app.fake.count("backupschedules", NS_A), 0);
 }

@@ -457,8 +457,9 @@ with the requeue interval would report a healthy schedule as stale. An absent
 
 `POST .../schedules` takes the whole policy, and has since PLAT-10.1: the same
 field set `PUT .../schedules/{name}` takes, minus `expectedGeneration` and plus
-`sourceRef`, which is settable exactly once. Before that it took five fields —
-`schedule`, `sourceRef`, `topics`, an inline `archive` and `suspended` — so a
+`sourceRef`, which is settable exactly once. Before that it took seven fields —
+`schedule`, `sourceRef`, `topics`, an inline `archive`, `concurrencyPolicy`,
+`retention` and `suspended` — so a
 console could *edit* a schedule into a shape it could not *create*, and the only
 way to a saved destination, a dynamic selection, a zone, a catch-up policy or
 retries was a second request against an object that was already admitting slots
@@ -485,7 +486,16 @@ under a policy nobody had asked for.
 * **A pre-PLAT-10.1 body creates exactly what it created before.** Every added
   field is optional and an absent one is written absent — never a default this
   route invented — so an existing caller's stored spec, and therefore its run
-  policy digest, is byte for byte what it was.
+  policy digest, is byte for byte what it was. **Its idempotency request hash
+  is unchanged too:** the added members are omitted from the canonical
+  request when absent, so an old-shape create retried under its old
+  `Idempotency-Key` after an upgrade replays onto its object rather than
+  answering `409 idempotency_conflict`.
+* **One refusal code changed for old callers.** An empty `topics` (with no
+  `allUserTopics`) was `topics: count_out_of_range` ("between 1 and 256 named
+  topics are required") and is now `topics: selection_invalid` ("a run needs
+  either named topics or allUserTopics"), the edit route's code for the same
+  condition. More than 256 named topics is still `count_out_of_range`.
 * The object's name is minted from the idempotency scope (`sch-<26 base32>`), as
   it always was, and `Idempotency-Key` is what makes a double click, a lost
   response and a reload one schedule rather than three.

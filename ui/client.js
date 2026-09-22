@@ -2105,7 +2105,7 @@ function requestBody(plural, object) {
   }
   if (plural === "backupschedules") {
     // THE WHOLE POLICY, BECAUSE THE ROUTE TAKES THE WHOLE POLICY (PLAT-10.1).
-    // `CreateScheduleRequest` used to carry five fields, so a guided form could
+    // `CreateScheduleRequest` used to carry seven fields, so a guided form could
     // only create a schedule and then repair it; it now carries the same set
     // the edit route does. A field ABSENT from the custom resource stays absent
     // from the body -- the route writes absent for absent, and an absent policy

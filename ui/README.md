@@ -1367,7 +1367,7 @@ inside a collapsed `<details>`, and so is the inline archive URL: present for an
 installation with no saved destination yet, and off the route a person is led
 down.
 
-**`POST .../schedules` takes the whole policy** (PLAT-10.1). It took five fields
+**`POST .../schedules` takes the whole policy** (PLAT-10.1). It took seven fields
 while the edit route took thirteen, which is why D2 W13's record listed
 `CreateScheduleRequest.destinationRef` under *owed by the API before these pages
 are complete* and why this form used to print that debt on screen. `archive` xor
