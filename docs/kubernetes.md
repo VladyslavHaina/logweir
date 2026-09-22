@@ -5824,8 +5824,10 @@ are not protected" is a claim nothing made.
 **The catalog keeps availability and verification apart.** Whether the archive
 can still serve a point and whether its receipt verifies under a key this
 installation accepts are different facts with different repairs. Whether a point
-may be restored from is the catalog's own materialised `selectable` field, read
-and never recomputed. Nothing is hidden: a `Missing`, a `Conflict` and an
+may be restored from is the catalog's own materialised `selectable` field as the
+API publishes it — `false` as well when the point's own `Backup` carries a
+refusal the controller reached, named in `backupVerdict` — read and never
+recomputed. Nothing is hidden: a `Missing`, a `Conflict` and an
 `UntrustedSigner` row are each listed with their state and their remedy
 sentence. **There is no one-click trust anywhere.** A point signed by a key this
 installation does not list shows the key id -- the SHA-256 of the DER SPKI, the
