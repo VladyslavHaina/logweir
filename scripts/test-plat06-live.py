@@ -285,8 +285,19 @@ def render_can_i_matrix(matrix: dict[str, Any]) -> str:
 # Independent verification of a signed receipt
 # ---------------------------------------------------------------------------
 
+def _lab_signing_pub() -> str:
+    """`$HOME/.logweir-lab/scram-e2e` first — the lab's durable home since
+    2026-09-22 — and the `/tmp/logweir-scram-e2e` symlink to it second, because
+    macOS tidies `/tmp` after three untouched days."""
+    for base in (pathlib.Path.home() / ".logweir-lab" / "scram-e2e",
+                 pathlib.Path("/tmp/logweir-scram-e2e")):
+        if (base / "signing.pub.pem").is_file():
+            return str(base / "signing.pub.pem")
+    return "/tmp/logweir-scram-e2e/signing.pub.pem"
+
+
 FIXTURE_PUBLIC_KEY = pathlib.Path(
-    os.environ.get("LOGWEIR_PLAT06_PUBKEY", "/tmp/logweir-scram-e2e/signing.pub.pem")
+    os.environ.get("LOGWEIR_PLAT06_PUBKEY") or _lab_signing_pub()
 )
 
 

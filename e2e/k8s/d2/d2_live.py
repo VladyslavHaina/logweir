@@ -1662,6 +1662,25 @@ def topics_from_chunks(discovery: dict[str, Any]) -> list[dict[str, str]]:
     return rows
 
 
+def lab_key_dir() -> pathlib.Path:
+    """Where the lab's key material lives: `LOGWEIR_SCRAM_OUT`, else the durable home.
+
+    `$HOME/.logweir-lab/scram-e2e` since 2026-09-22, with `/tmp/logweir-scram-e2e`
+    left as a symlink to it: macOS deletes files under `/tmp` that go untouched
+    for three days, which is how the lab's approver PRIVATE key vanished once
+    already. The durable path is read first so a tidied symlink does not
+    matter; the `/tmp` path is kept for a host that predates the move.
+    """
+    override = os.environ.get("LOGWEIR_SCRAM_OUT")
+    if override:
+        return pathlib.Path(override)
+    durable = pathlib.Path.home() / ".logweir-lab" / "scram-e2e"
+    for candidate in (durable, pathlib.Path("/tmp/logweir-scram-e2e")):
+        if candidate.is_dir():
+            return candidate
+    return durable
+
+
 def approver_material() -> dict[str, pathlib.Path]:
     """The lab roster's own approver and signing key pair.
 
@@ -1669,7 +1688,7 @@ def approver_material() -> dict[str, pathlib.Path]:
     waves, so this harness never edits it. It signs with the key the roster
     already carries, whose private half `scripts/test-k8s-scram.py` wrote when
     the lab was built."""
-    base = pathlib.Path(os.environ.get("LOGWEIR_SCRAM_OUT", "/tmp/logweir-scram-e2e"))
+    base = lab_key_dir()
     needed = {
         "approver": base / "approver.pem",
         "approverPub": base / "approver.pub.pem",

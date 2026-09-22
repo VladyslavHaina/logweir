@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import shutil
 import sys
 import tempfile
 
@@ -2438,6 +2439,69 @@ def test_a_mint_that_fails_half_way_leaves_no_private_key() -> None:
     row("MUTANT: a mint that fails after writing the private half removes its directory",
         raised and bool(made) and not any(p.exists() for p in made),
         f"left: {[str(p) for p in made if p.exists()]}")
+
+
+def test_the_signer_is_the_newest_build_and_must_know_standing() -> None:
+    import time as _time
+
+    root = pathlib.Path(tempfile.mkdtemp(prefix="d3-cli-"))
+    (root / "target/debug").mkdir(parents=True)
+    (root / "target/release").mkdir(parents=True)
+    debug, release = root / "target/debug/logweir", root / "target/release/logweir"
+    debug.write_text("stale")
+    release.write_text("fresh")
+    old = _time.time() - 3600
+    os.utime(debug, (old, old))
+    saved_bin = os.environ.pop("LOGWEIR_BIN", None)
+    try:
+        with _Swap(ROOT=root):
+            row("MUTANT (review LOW-5): a STALE debug build is not chosen over a fresh release "
+                "build", d3.logweir_cli() == str(release), d3.logweir_cli())
+            os.utime(release, (old - 10, old - 10))
+            row("and a debug build newer than the release build is the one just built",
+                d3.logweir_cli() == str(debug), d3.logweir_cli())
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+        if saved_bin is not None:
+            os.environ["LOGWEIR_BIN"] = saved_bin
+
+    class _Help:
+        def __init__(self, text):
+            self.stdout, self.stderr, self.returncode = text, "", 0
+
+    d3._STANDING_CLI.clear()
+    refused = ""
+    with _Swap(run=lambda *a, **k: _Help("Usage: logweir drill approve --plan <PLAN>")):
+        try:
+            d3.require_standing_signer("/sim/old-logweir")
+        except RuntimeError as e:
+            refused = str(e)
+    row("MUTANT: a binary without `drill approve --standing` is refused by name, before it "
+        "can fail as if the product refused", "--standing" in refused, refused)
+    with _Swap(run=lambda *a, **k: _Help("  --standing   mint a standing authorization")):
+        d3.require_standing_signer("/sim/new-logweir")
+    row("and one that has it is accepted", d3._STANDING_CLI.get("/sim/new-logweir") is True)
+
+
+def test_the_lab_key_material_is_read_from_its_durable_home_first() -> None:
+    home = pathlib.Path(tempfile.mkdtemp(prefix="d3-home-"))
+    (home / ".logweir-lab" / "scram-e2e").mkdir(parents=True)
+    saved = {k: os.environ.get(k) for k in ("HOME", "LOGWEIR_SCRAM_OUT")}
+    try:
+        os.environ["HOME"] = str(home)
+        os.environ.pop("LOGWEIR_SCRAM_OUT", None)
+        row("the durable $HOME/.logweir-lab/scram-e2e is read before the /tmp symlink",
+            d3.lab_key_dir() == home / ".logweir-lab" / "scram-e2e", str(d3.lab_key_dir()))
+        os.environ["LOGWEIR_SCRAM_OUT"] = "/sim/override"
+        row("and LOGWEIR_SCRAM_OUT still overrides both",
+            d3.lab_key_dir() == pathlib.Path("/sim/override"))
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
 
 _REPO = pathlib.Path(__file__).resolve().parents[3]

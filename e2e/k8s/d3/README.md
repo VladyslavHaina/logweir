@@ -13,9 +13,26 @@ nothing and it has no fixture mode.
   issues carries `--context docker-desktop`; it names no other context.
 - The shared `logweir-scram-local` lab: it copies that namespace's
   `source-scram`, `logweir-s3`, `logweir-signing-key` and `minio-root` Secrets
-  into its own namespace and dials that namespace's Kafka and MinIO by service
-  DNS. **It changes nothing outside its own namespace** except the one
-  cluster-scoped `TrustPolicy` the trust phases need.
+  — and, for `rehearsal`, `target-scram`, the scratch broker's own SCRAM
+  credential — into its own namespace and dials that namespace's Kafka and
+  MinIO by service DNS. **Outside its own namespace it writes exactly two
+  things**: the cluster-scoped `TrustPolicy` the trust phases and `rehearsal`
+  need (deleted only after an owner-label check), and, in `rehearsal`, topics
+  on the shared `kafka-target` broker — a witness named for this run and names
+  under this run's own rendered prefixes — which the phase deletes again after
+  an ownership check (see below). It never changes the shared release.
+- `openssl` on the host, for the phases that mint a keypair (`old-archive`,
+  `multiple-namespaces`, `rehearsal`).
+- For `old-archive`: the lab roster's approver PRIVATE key, `approver.pem`,
+  read from `$LOGWEIR_SCRAM_OUT`, else `$HOME/.logweir-lab/scram-e2e` (the lab's
+  durable home since 2026-09-22), else the `/tmp/logweir-scram-e2e` symlink to
+  it. It must be the private half of `TrustRoster/default.spec.approverKeys[0]`
+  — after a lab rebuild that is the NEW approver key, and a private half left
+  over from the previous lab is refused by the cluster.
+- For `rehearsal`: a `logweir` binary with `drill approve --standing` —
+  `LOGWEIR_BIN`, else the more recently built of `target/release/logweir` and
+  `target/debug/logweir`. The phase asks the binary for `--standing` first and
+  refuses, by name, one that lacks it.
 - `minio/mc:latest` and `busybox:latest` present on the node
   (`imagePullPolicy: Never`).
 - **An image carrying `logweir-retention`**, for the five enforcement phases
@@ -90,15 +107,34 @@ point's evidence verdict for a reason belonging to the previous phase; `rehearsa
 deletes and recreates the object (the CRD's `spec.keys` is append-only with no
 Revoked->Active transition), which is only correct after that phase has run. It mints the
 standing authorization with the SHIPPED signer, `logweir drill approve --standing`
-(`docs/kubernetes.md` §7g) — never in python — so `LOGWEIR_BIN` or a built
-`target/release/logweir` is required. It signs with an approver keypair it MINTS per run
-rather than the lab roster's: signing needs the private half, and the lab's lives under
-`/tmp/logweir-scram-e2e`, which macOS deletes after three untouched days (measured
-2026-09-22, when only `approver.pub.pem` was left). Both minted private halves — the
-Active one and the Retired one step 10 needs — are 0600 inside a 0700 directory, never
-enter an object or an artifact, and are deleted in the phase's `finally`. It creates and deletes topics under its own
-`rehearsal-` names on the lab's scratch broker, including the unrelated
-`rehearsal-not-ours` D3 §15 L6 names, and changes nothing else about the shared release.
+(`docs/kubernetes.md` §7g) — never in python — so a `logweir` binary that has that flag
+is required (see "What it needs"). It signs with an approver keypair it MINTS per run
+rather than the lab roster's, so the phase does not depend on the lab's approver private
+key at all (which macOS deleted once from `/tmp`, measured 2026-09-22). Both minted
+private halves — the Active one and the Retired one step 10 needs — are 0600 inside a
+0700 directory, are minted inside the phase's `try`, never enter an object or an
+artifact, and are deleted in its `finally` even when the broker sweep before them raises
+(`rehearsal-minted-private-keys-never-outlive-the-row`).
+
+**On the shared scratch broker it touches only what it made.** The unrelated topic D3
+§15 L6 names is `rehearsal-not-ours-<ownertag>-<stamp>` — the scenario's name as a
+prefix, this run's identity as the rest — because one fixed name on a shared broker is
+nobody's: two runs each deleted the other's witness. It is planted only if absent (a
+pre-existing one stops the phase, and is neither adopted nor deleted), and deleted only
+if this run planted it. Every topic under a rendered prefix `rehearsal-<uid[..8]>-` of a
+`RehearsalSchedule` this run created is deleted at the end — after the schedule is
+suspended and quiet, and after the live object's owner label and uid are checked
+against the ones its create returned. `rehearsal-shared-broker-left-as-found` records
+that sweep and fails if anything under those prefixes, or the witness, is left.
+
+**The four arms run one after another, never together.** All four name the same
+`rehearsal-target`, and the controller checks `TargetBusy` (another schedule's rehearsal
+still running against the target) BEFORE the authorization, so an arm left firing
+turns the next arm's row into a verdict about the harness. Each arm is suspended as
+soon as its row is recorded, and the next starts only when the previous one has no
+rehearsal running (`quiesce_arm`; a rehearsal held at admission with no Job is deleted,
+because it would hold the target busy for ever). `l6-rehearsal` is suspended only after
+step 5's read, because a suspended schedule records no `lastSucceeded`.
 
 **Steps 2-9 are a chain, and a step whose input never existed is recorded `NOT-REACHED`.**
 That is a third verdict on purpose: on a controller image that predates PLAT-14.3b the
@@ -106,9 +142,37 @@ standing-authorized `Restore` holds terminally at `ApprovalNotReceived` — the 
 fail-closed rollback for an older controller — so step 2 FAILS, which is that defect
 reproduced live, and steps 3-9 have no Job, no scorecard and no mapped topic to read.
 Recording those as passes would credit the product for assertions that never ran and as
-failures would blame it for a chain the first link broke. Step 10, the negative control, is
-independent of the chain and runs either way; it REQUIRES the refusal it records, because
-zero Jobs is also what a build that never reconciles this kind at all leaves behind.
+failures would blame it for a chain the first link broke. Step 2 requires ADMISSION — a
+runner Job, or phase `Running`/`Succeeded` — not merely a reason other than
+`ApprovalNotReceived`: a standing `Restore` refused `StandingAuthorizationRefused` or
+`PlanHashMismatch` fails it.
+
+The verdicts this phase can record, and what each means:
+
+| verdict | meaning |
+|---|---|
+| `PASS` | every clause held |
+| `FAIL` | a clause did not hold — a product fact, or a precondition the row names |
+| `NOT-REACHED` | the row's input never existed (the chain broke earlier), or — step 7 only — the first rehearsal finished before the controller was obliged to evaluate the next slot against it (the next `* * * * *` boundary + `REQUEUE_SECONDS` (30) + 15 s). Never a pass. |
+| `HARNESS-FAULT` | the harness's own ordering decided the row: a `TargetBusy` from another arm of this run, or (steps 5/6) a later ten-minute slot that fired before the arm was suspended. Names the busy `Restore`. Never a pass, and never blamed on the product. |
+| `INCONCLUSIVE` | step 10 only: the refusal held, but the mechanism was not shown — the refused `Approval` did not say `KeyRetired`, or the passing arm's `Approval` was not `Verified=True` in the same run, so a build on which nothing verifies would look the same |
+
+Step 7 FAILS on a second `Restore` listed while the first was still running, and on a
+first rehearsal still running after that obligation with no skip recorded. Step 10, the
+negative control, is independent of the chain and runs either way; it REQUIRES the
+refusal it records, because zero Jobs is also what a build that never reconciles this
+kind at all leaves behind — and it counts Jobs and bundle `ConfigMap`s by the child name
+prefix `logweir-rehearsal-l6-refused-`, not only through `Restore`s, so a schedule-side
+refusal does not make "zero" true by construction. Its `RehearsalHealthy` clause accepts
+`False` or `Unknown/NoResult` — a spec correction of review §4 step 10's "`False`",
+because a schedule refused before any rehearsal finished has no result to be false about
+(`rehearsal_schedule.rs::REASON_NO_RESULT`).
+
+The offline tests: `python3 -m pytest e2e/k8s/d3 e2e/k8s/d2`. `test_rows.py` drives every
+row's predicate over planted-wrong fixtures; `test_rehearsal_sim.py` runs `rehearsal()`
+itself, unmodified, against a fake cluster and controller on a fake clock, with mutants
+for each defect the loops exist to catch. It is a model of the controller, not live
+evidence.
 
 `protection-verdicts` needs only `setup`: it creates its own three policies, its own two
 catalogs, its own legacy destination and every Backup it measures, because its rows assert
@@ -204,9 +268,12 @@ no image can be resolved at all — neither an override nor the controller's own
 
 ## Safety rules it enforces in code, not in prose
 
-- Every object it creates carries `logweir.dev/test-owner=d3w14`; `cleanup`
+- Every object it creates carries `logweir.dev/test-owner=<owner>`; `cleanup`
   re-reads the namespace's label AND compares the UID it recorded at `setup`
   before deleting anything, and refuses a bucket whose name is not this run's.
+  Every phase that deletes a cluster-scoped `TrustPolicy` checks that label
+  first and refuses another run's policy of the same name
+  (`delete_owned_trust_policy`).
 - Retention enforcement only ever runs against the buckets this run created.
   The fixture's `kafka-backups` is written (the legacy-archive Backups the
   Backup-level evidence verdict needs live there) and never deleted from.

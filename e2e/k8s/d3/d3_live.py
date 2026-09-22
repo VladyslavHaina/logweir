@@ -4261,13 +4261,35 @@ def roster_approver_key() -> dict[str, Any]:
     return get("trustroster", "default", namespace="default")["spec"]["approverKeys"][0]
 
 
+def lab_key_dir() -> pathlib.Path:
+    """Where the lab's key material lives: `LOGWEIR_SCRAM_OUT`, else the durable home.
+
+    `$HOME/.logweir-lab/scram-e2e` since 2026-09-22, with `/tmp/logweir-scram-e2e`
+    left as a symlink to it: macOS deletes files under `/tmp` that go untouched
+    for three days, which is how the lab's approver PRIVATE key vanished once
+    already. The durable path is read first so a tidied symlink does not
+    matter; the `/tmp` path is kept for a host that predates the move.
+    """
+    override = os.environ.get("LOGWEIR_SCRAM_OUT")
+    if override:
+        return pathlib.Path(override)
+    durable = pathlib.Path.home() / ".logweir-lab" / "scram-e2e"
+    for candidate in (durable, pathlib.Path("/tmp/logweir-scram-e2e")):
+        if candidate.is_dir():
+            return candidate
+    return durable
+
+
 def approver_material() -> dict[str, pathlib.Path]:
     """The lab roster's approver keypair, written when the lab was built.
 
     The PRIVATE half stays where `scripts/test-k8s-scram.py` put it and is
-    passed to the CLI by path; nothing here reads or records its bytes.
+    passed to the CLI by path; nothing here reads or records its bytes. It must
+    be the pair whose public half is `TrustRoster/default.spec.approverKeys[0]`
+    (`roster_approver_key`) — after a lab rebuild that is the NEW key, and a
+    stale private half on disk is refused by the cluster, not by this function.
     """
-    base = pathlib.Path(os.environ.get("LOGWEIR_SCRAM_OUT", "/tmp/logweir-scram-e2e"))
+    base = lab_key_dir()
     needed = {"approver": base / "approver.pem", "approverPub": base / "approver.pub.pem"}
     missing = [str(v) for v in needed.values() if not v.is_file()]
     if missing:
@@ -4276,13 +4298,40 @@ def approver_material() -> dict[str, pathlib.Path]:
 
 
 def logweir_cli() -> str:
+    """The `logweir` binary: `LOGWEIR_BIN`, else the NEWER of the two builds.
+
+    It used to take `target/debug/logweir` whenever it existed, so a stale
+    debug build — one without `drill approve --standing` — was chosen over a
+    fresh release build, and the README said the release build was what ran
+    (review LOW-5). The most recently built one is the one the caller just
+    built.
+    """
     override = os.environ.get("LOGWEIR_BIN")
     if override and pathlib.Path(override).is_file():
         return override
-    for candidate in (ROOT / "target/debug/logweir", ROOT / "target/release/logweir"):
-        if candidate.is_file():
-            return str(candidate)
+    built = [c for c in (ROOT / "target/release/logweir", ROOT / "target/debug/logweir")
+             if c.is_file()]
+    if built:
+        return str(max(built, key=lambda c: c.stat().st_mtime))
     raise RuntimeError("no `logweir` binary: set LOGWEIR_BIN or build one")
+
+
+_STANDING_CLI: dict[str, bool] = {}
+
+
+def require_standing_signer(cli: str) -> None:
+    """Refuse, by name, a binary that cannot mint a standing authorization.
+
+    A binary without `drill approve --standing` fails `mint_standing` with a
+    usage error that reads like a product refusal. Asked once per binary.
+    """
+    if cli not in _STANDING_CLI:
+        out = run([cli, "drill", "approve", "--help"], check=False, timeout=60)
+        _STANDING_CLI[cli] = "--standing" in (out.stdout + out.stderr)
+    if not _STANDING_CLI[cli]:
+        raise RuntimeError(
+            f"{cli} has no `drill approve --standing`; build a current `logweir` or set "
+            f"LOGWEIR_BIN to one — the rehearsal phase mints with the shipped signer only")
 
 
 def legacy_restore_plan(backup_id: str, point_in_time: str, prefix: str) -> dict[str, Any]:
@@ -7838,9 +7887,11 @@ def rehearsal_trust(target_cluster_id: str, approver_key: dict[str, Any],
       standing document is signed with. `EvidenceSigning` is refused for this
       role by D3 §7.3, so the usage is not decoration. **It is minted and not
       the lab roster's own approver key**, because signing needs the PRIVATE
-      half and the lab's lives under `/tmp/logweir-scram-e2e`, which macOS
+      half and the lab's lived under `/tmp/logweir-scram-e2e`, which macOS
       deletes after three untouched days (WORKER-RULES, host notes) — measured
-      on 2026-09-22, when only `approver.pub.pem` was left. A row that cannot
+      on 2026-09-22, when only `approver.pub.pem` was left. (The lab's key
+      material now lives at `$HOME/.logweir-lab/scram-e2e`, see `lab_key_dir`;
+      the rehearsal still mints its own, so it depends on neither.) A row that cannot
       run because the operating system tidied a fixture is a row that proves
       nothing, and minting costs one `openssl` call;
     * a SECOND approver key minted by this run, **Retired**/`GovernedApproval`
@@ -7982,7 +8033,9 @@ def mint_standing(work: pathlib.Path, key: pathlib.Path, schedule: dict[str, Any
     scope_path = work / f"scope-{schedule['metadata']['name']}.json"
     scope_path.write_text(json.dumps(scope, indent=2, sort_keys=True) + "\n")
     out = work / f"standing-{schedule['metadata']['name']}.json"
-    run([logweir_cli(), "drill", "approve", "--standing",
+    cli = logweir_cli()
+    require_standing_signer(cli)
+    run([cli, "drill", "approve", "--standing",
          "--key", str(key),
          "--schedule-namespace", NS,
          "--schedule-name", schedule["metadata"]["name"],
