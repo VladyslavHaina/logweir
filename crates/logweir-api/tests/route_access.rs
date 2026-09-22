@@ -703,3 +703,32 @@ fn no_mutating_route_is_declared_with_a_viewers_action() {
         );
     }
 }
+
+/// **The event stream is declared with BOTH actions.** Every role in this build
+/// holds `operation.stream`, so dropping it from the declaration changes no
+/// HTTP answer at all — which is exactly why it is pinned here by name: the
+/// day a role loses the streaming grant, the layer must already be asking for
+/// it. (Equivalent at the HTTP boundary today; not equivalent in the policy.)
+#[test]
+fn the_event_stream_is_declared_with_the_stream_action() {
+    let access = access::lookup(
+        &http::Method::GET,
+        "/api/v1/namespaces/{ns}/operations/{kind}/{name}/events",
+    )
+    .expect("the stream route is declared");
+    assert_eq!(
+        access.actions(),
+        vec![Action::ReadOperations, Action::StreamOperationEvents]
+    );
+    // Every other route that can open a long-lived response is this one; the
+    // read route beside it needs only the read.
+    assert_eq!(
+        access::lookup(
+            &http::Method::GET,
+            "/api/v1/namespaces/{ns}/operations/{kind}/{name}"
+        )
+        .unwrap()
+        .actions(),
+        vec![Action::ReadOperations]
+    );
+}
