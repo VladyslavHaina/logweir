@@ -4283,6 +4283,13 @@ export async function readSchedulePoints(api, ns, lifecycle, readers) {
         for (const point of (page.items || [])) {
           points.push(point);
         }
+        if (page.incomplete === true) {
+          const error = new Error("A materialized recovery-catalog page disappeared while this detail was reading it; its history is incomplete.");
+          error.reason = "CatalogViewIncomplete";
+          failure = error;
+          complete = true;
+          break;
+        }
         cursor = (((page || {}).page || {}).nextCursor) || null;
         if (cursor === null) {
           complete = true;

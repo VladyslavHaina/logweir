@@ -2478,7 +2478,7 @@ const D3_POINT_PAGE = shapeOf(
     items: listOf(opaque), page: objectOf(PAGE), requestId: str,
     truncated: bool, viewExpired: bool,
   },
-  { viewExpiresAt: str },
+  { viewExpiresAt: str, incomplete: bool },
 );
 
 const D3_SIGNER_PAGE = shapeOf(

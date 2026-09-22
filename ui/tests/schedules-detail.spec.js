@@ -270,6 +270,26 @@ test("schedule history follows catalog cursors and marks mixed reads incomplete"
   assert.doesNotMatch(html, /not in the catalog/, "a partial catalog read cannot make an absence claim");
 });
 
+test("a catalog response with a disappeared materialized page is incomplete, not absent", async () => {
+  const result = await readSchedulePoints(null, NS, null, {
+    listCatalogs: async () => ({ items: [{ metadata: { name: "primary" } }] }),
+    readPoints: async () => ({
+      items: [{ backupId: "set-healthy", availability: "Available", verification: "Verified", selectable: true }],
+      incomplete: true,
+      page: { nextCursor: null },
+    }),
+  });
+  assert.equal(result.points.length, 1, "the API's readable prefix remains useful");
+  assert.equal(result.error.reason, "CatalogViewIncomplete");
+  const html = renderScheduleHistory(NS, schedule(), [
+    run("known", "Succeeded", { backupId: "set-healthy" }),
+    run("omitted", "Succeeded", { backupId: "set-never-read" }),
+  ], result.points, result.error);
+  assert.match(html, /Available/, "the known row retains the API fact");
+  assert.match(html, /catalog incomplete/, "the omitted row never becomes a false absence");
+  assert.doesNotMatch(html, /not in the catalog/);
+});
+
 test("the_join_is_on_the_backup_set_id_and_takes_every_point_of_the_set", () => {
   const ok = run("nightly-ok", "Succeeded", { backupId: "set-healthy" });
   assert.deepEqual(pointsForRun(ok, POINTS).map((p) => p.pointId), ["lwp1-healthy"]);

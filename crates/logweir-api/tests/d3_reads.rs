@@ -677,6 +677,40 @@ async fn an_expired_view_is_named_rather_than_reported_as_an_empty_archive() {
     assert_eq!(catalog["item"]["viewExpired"], true);
 }
 
+/// **A page that disappears before status catches up is not an empty catalog.**
+///
+/// REGRESSION REASON. Result pages are owned by a TTL'd sync Job. Returning a
+/// successful empty list after that Job collected one made schedule history
+/// call every omitted backup "not in the catalog", which is a false negative
+/// during a real reconciliation race.
+#[tokio::test]
+async fn a_missing_materialized_page_is_explicitly_incomplete() {
+    let fake = seeded();
+    let mut catalog = fixture("recovery-catalog.json");
+    catalog["status"]["pages"] = json!([{
+        "configMapName": "primary-gone-p0", "index": 0, "count": 1,
+        "sha256": format!("sha256:{}", "a".repeat(64)),
+    }]);
+    fake.seed("recoverycatalogs", NS_A, catalog);
+    let app = TestApp::with(fake, Options::default());
+
+    let response = app
+        .get("/api/v1/namespaces/team-a/catalogs/primary/points")
+        .await
+        .json();
+    assert_eq!(response["items"], json!([]));
+    assert_eq!(response["incomplete"], true);
+
+    // NEGATIVE CONTROL: a normal, intact empty view does not permanently mark
+    // the UI incomplete merely because no archived point exists yet.
+    let (normal_app, _) = catalog_with_page(None);
+    let normal = normal_app
+        .get("/api/v1/namespaces/team-a/catalogs/primary/points")
+        .await
+        .json();
+    assert!(normal.get("incomplete").is_none());
+}
+
 #[tokio::test]
 async fn connecting_an_archive_creates_one_catalog_and_replays_the_same_one() {
     let app = TestApp::with(FakeKube::new(), Options::default());

@@ -486,6 +486,11 @@ pub struct PointPageResponse {
     /// Whether the view has aged out. An empty `items` with this `true` means
     /// "the window is gone", never "the archive is empty".
     pub view_expired: bool,
+    /// Whether a ConfigMap page named by this view disappeared while it was
+    /// being read. Present only for the incomplete read so older clients keep
+    /// their established `false` behavior when the member is absent.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub incomplete: bool,
     /// When the view ages out.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub view_expires_at: Option<DateTime<Utc>>,
@@ -966,15 +971,18 @@ pub async fn points(
     let mut items: Vec<PointView> = Vec::new();
     let mut scanned = 0usize;
     let mut next_cursor = None;
+    let mut incomplete = false;
     'pages: for (page_name, digest, _count) in &pages {
         let document = match state.kube().get_result_document(&ns, page_name).await {
             Ok(document) => document,
-            // A PAGE THAT IS GONE IS A VIEW THAT AGED OUT, NOT AN EMPTY
-            // ARCHIVE. The `viewExpired` flag on the response is what says so;
-            // answering 404 here would tell a console the catalog does not
-            // exist, and answering a short list without the flag would tell it
-            // the archive is smaller than it is.
-            Err(KubeFailure::NotFound) => break 'pages,
+            // A PAGE THAT IS GONE IS NOT AN EMPTY ARCHIVE. The view may have
+            // aged out before its status was refreshed, so this response names
+            // the incomplete read rather than silently turning a partial list
+            // into a claim that a run is not in the catalog.
+            Err(KubeFailure::NotFound) => {
+                incomplete = true;
+                break 'pages;
+            }
             Err(other) => return Err(other.into_api_error()),
         };
         verify_page(&document, digest.as_deref(), page_name)?;
@@ -1025,6 +1033,7 @@ pub async fn points(
             },
             truncated: projected.truncated,
             view_expired: projected.view_expired,
+            incomplete,
             view_expires_at: projected.view_expires_at,
         },
     ))

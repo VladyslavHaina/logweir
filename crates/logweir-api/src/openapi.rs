@@ -894,7 +894,7 @@ fn paths() -> Value {
             vec![Op {
                 method: "get",
                 operation_id: "listCatalogPoints",
-                summary: "One page of the materialised point view, with availability and verification as SEPARATE columns and the controller's own `selectable` conjunction beside them. Pages are read by the names the catalog's status records, at most eight per request, and each one is refused unless it is immutable and its bytes match the digest the status recorded. The cursor is bound to the view generation: a view replaced under a paging client is cursor_invalid with 'restart the list', never a silently different page. An empty list with viewExpired true means the window aged out, not that the archive is empty.",
+                summary: "One page of the materialised point view, with availability and verification as SEPARATE columns and the controller's own `selectable` conjunction beside them. Pages are read by the names the catalog's status records, at most eight per request, and each one is refused unless it is immutable and its bytes match the digest the status recorded. The cursor is bound to the view generation: a view replaced under a paging client is cursor_invalid with 'restart the list', never a silently different page. An empty list with viewExpired true means the window aged out, not that the archive is empty. incomplete true means a named materialised page disappeared during this read; any rows are a prefix, never proof that omitted rows are absent.",
                 parameters: vec![
                     ns(),
                     name(),

@@ -331,7 +331,10 @@ in object storage; Kubernetes holds the newest `sync.viewLimit` points in
 immutable `ConfigMap` pages owned by the sync Job, and when that Job's TTL
 collects it the pages go with it. So `/points` publishes `truncated`,
 `viewExpired` and `viewExpiresAt`, and an empty list with `viewExpired: true`
-means the window aged out and **not** that the archive is empty. Page
+means the window aged out and **not** that the archive is empty. If a named
+page has already disappeared before the status is refreshed, `/points` returns
+`incomplete: true` (and may retain rows read before that page); callers must
+not report an absent row as "not in the catalog". Page
 `ConfigMap`s are read by the names the catalog's own status records — never from
 a caller — at most eight per request, and each one is refused with
 `result_integrity_failed` unless it is immutable and its bytes match the
