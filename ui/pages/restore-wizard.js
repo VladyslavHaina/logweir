@@ -1570,20 +1570,20 @@ export const READINESS_BINDING_SENTENCE =
   "so the result stops describing what you are about to submit and is shown as out of date " +
   "rather than as a verdict. Run it again against the new plan.";
 
-/** Why this step sends an inline source archive rather than a destination, and
- *  who owes the field that would change that.
- *
- *  D2 section 9 asks step 1 to take the source destination from the recovery
- *  point's FROZEN destination and match it by `locationDigest`. The CRD has
- *  the field (`weirkeeper/src/crds/backup.rs`); the product API's `Backup`
- *  projection publishes neither `destinationRef` nor `locationDigest`, so
- *  there is nothing here to read. It is a projection gap, not a model gap. */
-export const SOURCE_DESTINATION_NOT_PUBLISHED =
-  "This check reads the archive from the recovery point's own inline URL. A destination-backed " +
-  "point would let it name the saved destination instead and match the frozen locationDigest, " +
-  "which is what D2 asks for -- but this build's product API publishes neither destinationRef " +
-  "nor locationDigest on a Backup. PLAT-08.2 (D2 W10) owes that projection; until it lands this " +
-  "step cannot tell you which saved destination a recovery point came from.";
+/** Which archive identity step 5 sends, stated from the recovery point itself. */
+export function readinessSourceSentence(point) {
+  const p = point || {};
+  const destination = ((p.spec || {}).destinationRef || {});
+  if (typeof destination.name === "string" && destination.name.length > 0) {
+    const digest = (p.status || {}).locationDigest;
+    return "This check reads the saved destination `" + destination.name + "` named by the " +
+      "recovery point. Its frozen locationDigest is " +
+      (typeof digest === "string" && digest.length > 0 ? "`" + digest + "`" : "not recorded") +
+      "; the controller compares that frozen fact with the destination it resolves now.";
+  }
+  return "Legacy recovery point: this check reads the inline archive URL recorded on the Backup. " +
+    "Only a point with no destinationRef uses legacySourceArchive.";
+}
 
 /** Why a readiness result is not a promise about the run. */
 export const READINESS_CAVEAT_SENTENCE =
@@ -1668,7 +1668,7 @@ export function renderPreflightStep(state, prepared) {
       : renderPreflight(result)) +
     "<p class=\"note\">" + esc(READINESS_CAVEAT_SENTENCE) + "</p>" +
     "<p class=\"note\" id=\"readiness-source-destination\">" +
-    esc(SOURCE_DESTINATION_NOT_PUBLISHED) + "</p>" +
+    esc(readinessSourceSentence(s.point)) + "</p>" +
     "<h4>Target cluster probe (context, not a verdict)</h4>" +
     facts([
       ["target cluster", cell((((cluster || {}).metadata) || {}).name)],
@@ -3147,38 +3147,7 @@ function wireRestoreReadiness(node, state, parse, api, lifecycle, prepared) {
     if (typeof p.bytes !== "string" || typeof p.hash !== "string") {
       return;
     }
-    const cluster = targetCluster(state);
-    const point = (state.point || {}).metadata || {};
-    const request = {
-      operation: "restore",
-      restore: {
-        planBytes: p.bytes,
-        planHash: p.hash,
-        target: ((cluster || {}).metadata || {}).name,
-      },
-    };
-    if (typeof point.name === "string" && point.name.length > 0) {
-      request.restore.recoveryPoint = { backupName: point.name };
-      if (typeof point.uid === "string" && point.uid.length > 0) {
-        request.restore.recoveryPoint.backupUid = point.uid;
-      }
-    }
-    // THE SOURCE ARCHIVE IS INLINE, BECAUSE THE RECOVERY POINT PUBLISHES NO
-    // DESTINATION. `Backup`'s product-API projection carries `archive` and no
-    // `destination`/`locationDigest`, so D2 section 9's "take the source destination
-    // from the recovery point's frozen destination" has nothing to read on
-    // this build. The legacy inline archive is sent instead -- which is what
-    // the `Restore` this wizard creates would carry anyway -- and the step
-    // says so rather than offering a destination selector that would have to
-    // guess which destination that URL belongs to.
-    const url = ((state.point || {}).spec || {}).archive || {};
-    if (typeof url.url === "string" && url.url.length > 0) {
-      request.restore.legacySourceArchive = { url: url.url };
-      const secretName = String(state.archiveSecretName || "").trim();
-      if (secretName.length > 0) {
-        request.restore.legacySourceArchive.credentialRef = { name: secretName };
-      }
-    }
+    const request = restoreReadinessRequest(state, p);
     mutation.run(() => api.startPreflight(state.ns, request), { about: { planHash: p.hash } });
   }, lifecycle);
 
@@ -3202,6 +3171,51 @@ function wireRestoreReadiness(node, state, parse, api, lifecycle, prepared) {
       );
     }, lifecycle);
   }
+}
+
+/** The exact step-5 request for one recovery point.
+ *
+ * A destination-backed point names the saved destination for both archive
+ * and evidence reads. Its `recoveryPoint` reference makes the controller read
+ * that Backup and compare `status.destination.locationDigest` with the live
+ * destination; the browser never recomputes a digest. Only a point with no
+ * `destinationRef` is a legacy inline-archive point. */
+export function restoreReadinessRequest(state, prepared) {
+  const s = state || {};
+  const p = prepared || {};
+  const cluster = targetCluster(s);
+  const point = s.point || {};
+  const meta = point.metadata || {};
+  const spec = point.spec || {};
+  const request = {
+    operation: "restore",
+    restore: {
+      planBytes: p.bytes,
+      planHash: p.hash,
+      target: ((cluster || {}).metadata || {}).name,
+    },
+  };
+  if (typeof meta.name === "string" && meta.name.length > 0) {
+    request.restore.recoveryPoint = { backupName: meta.name };
+    if (typeof meta.uid === "string" && meta.uid.length > 0) {
+      request.restore.recoveryPoint.backupUid = meta.uid;
+    }
+  }
+  const destination = spec.destinationRef || {};
+  if (typeof destination.name === "string" && destination.name.length > 0) {
+    request.restore.sourceDestination = destination.name;
+    request.restore.evidenceDestination = destination.name;
+    return request;
+  }
+  const archive = spec.archive || {};
+  if (typeof archive.url === "string" && archive.url.length > 0) {
+    request.restore.legacySourceArchive = { url: archive.url };
+    const secretName = String(s.archiveSecretName || "").trim();
+    if (secretName.length > 0) {
+      request.restore.legacySourceArchive.credentialRef = { name: secretName };
+    }
+  }
+  return request;
 }
 
 function wire(node, state, parse, api, lifecycle, prepared) {

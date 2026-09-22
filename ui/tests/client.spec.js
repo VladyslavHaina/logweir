@@ -309,6 +309,16 @@ test("console_mode_reads_a_backup_detail_with_the_evidence_from_its_operation_ro
     assert.equal(object.status.evidence.receiptKey.length > 0, true);
     assert.equal(object.spec.scheduleRef.name, "orders-hourly");
     assert.equal(object.status.windowCovered.fromMs, 1789196400000);
+    assert.deepEqual(
+      object.spec.destinationRef,
+      { name: "primary", uid: "5f0cb1fa-b181-4b6a-a51f-fbfa68b8f997" },
+      "the product projection's saved destination reaches the CRD-shaped page object",
+    );
+    assert.equal(
+      object.status.locationDigest,
+      "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "and the frozen location stays on the recovery point rather than being recomputed",
+    );
   } finally {
     wire.restore();
   }

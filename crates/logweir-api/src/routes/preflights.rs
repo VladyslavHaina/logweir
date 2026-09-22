@@ -939,6 +939,56 @@ pub fn validate_create(request: &CreatePreflightRequest) -> Result<(), ApiError>
     }
 }
 
+/// Refuse the legacy marker when the named recovery point records a saved
+/// destination.
+///
+/// `legacySourceArchive` is a compatibility shape for a point whose archive
+/// location is inline in `Backup.spec.archive`. Once the point carries
+/// `spec.destinationRef`, accepting the marker only creates a `Preflight` the
+/// controller must fail terminally as `ArchiveUrlUnreadable`. Refuse that
+/// mismatch on the request instead, naming the saved destination the caller
+/// must use.
+async fn validate_legacy_source_for_point(
+    state: &AppState,
+    namespace: &str,
+    request: &CreatePreflightRequest,
+) -> Result<(), ApiError> {
+    let Some(restore) = request.restore.as_ref() else {
+        return Ok(());
+    };
+    if restore.legacy_source_archive.is_none() {
+        return Ok(());
+    }
+    let Some(point) = restore.recovery_point.as_ref() else {
+        return Ok(());
+    };
+
+    match state
+        .kube()
+        .get::<BackupCr>(namespace, &point.backup_name)
+        .await
+    {
+        Ok(backup) => {
+            let Some(destination) = backup.spec.destination_ref.as_ref() else {
+                return Ok(());
+            };
+            Err(ApiError::validation(vec![FieldError::new(
+                "restore.legacySourceArchive",
+                "destination_ref_required",
+                format!(
+                    "recovery point `{}` carries destinationRef `{}`; send that saved destination as sourceDestination and evidenceDestination instead of legacySourceArchive",
+                    point.backup_name, destination.name
+                ),
+            )]))
+        }
+        // A missing point is still a valid subject for a readiness result:
+        // `recoveryPoint.state` reports `RecoveryPointNotFound`. This guard is
+        // narrower — it refuses only the contradictory shape it can prove.
+        Err(KubeFailure::NotFound) => Ok(()),
+        Err(other) => Err(other.into_api_error()),
+    }
+}
+
 // ======================================================================
 // Building the stored object
 // ======================================================================
@@ -1097,6 +1147,7 @@ pub async fn create(
     let key = IdempotencyKey::from_headers(&headers)?;
     let mut request: CreatePreflightRequest = read_json(body, MAX_JSON_BODY).await?;
     validate_create(&request)?;
+    validate_legacy_source_for_point(&state, &ns, &request).await?;
     check_create_rate(
         &state,
         &actor,

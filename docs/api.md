@@ -179,6 +179,16 @@ rewrites it and `just schema-check` fails on drift, as does
 `crates/logweir-api/tests/contract.rs`, which compares the checked-in bytes with
 the generator in-process.
 
+`Backup` projections identify a saved archive with
+`destinationRef: {name, uid?}` and publish the run's frozen
+`locationDigest` copied from `Backup.status.destination`. The `name` is the
+destination the immutable spec requested; the optional `uid` and digest are
+facts recorded when the controller froze that destination, and are never
+recomputed from the live `BackupDestination`. `destinationRef` is absent only
+for a legacy inline-archive run. `locationDigest` is also absent when an older
+controller (or a run not frozen yet) has not recorded the frozen destination;
+that absence means "not recorded", not a location match.
+
 ### The normalized operation, and what is absent
 
 `OperationView` is PLAT-17.1's `Operation` plus D3 §2.5's additions, flattened

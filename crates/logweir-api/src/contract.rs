@@ -798,8 +798,30 @@ pub struct Backup {
     pub source_ref: NameRef,
     /// Named topics.
     pub topics: Vec<String>,
-    /// Where the archive is written.
+    /// Where the archive is written. With `destinationRef` this is the CRD's
+    /// sentinel URL `logweir-destination://<name>` and carries no credential;
+    /// a console renders the destination instead of the URL.
     pub archive: ArchiveView,
+    /// The saved `BackupDestination` this run was written to, in this
+    /// namespace.
+    ///
+    /// ABSENT means the run carries its archive location INLINE in `archive`,
+    /// exactly as every run did before saved destinations existed. It is a
+    /// legacy inline-archive run, not a degraded one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destination_ref: Option<BackupDestinationRefView>,
+    /// `sha256:<lowercase hex>` over the canonical location this run was
+    /// FROZEN against — **where this recovery point's archive actually is**,
+    /// copied verbatim from `Backup.status.destination.locationDigest`.
+    ///
+    /// ABSENT for a legacy inline-archive run, and for any run frozen by a
+    /// controller that predates the frozen-destination block. Absent means
+    /// "this recovery point publishes no frozen location", never "its location
+    /// is unknown to be wrong" — and NOTHING recomputes one from a live
+    /// `BackupDestination`: a destination edited after a run froze must not be
+    /// able to make a moved recovery point look settled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location_digest: Option<String>,
     /// The schedule that created the run.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub schedule: Option<String>,
@@ -887,6 +909,26 @@ pub struct ScheduleRefView {
     /// The digest of the policy it copied.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run_policy_sha256: Option<String>,
+}
+
+/// The saved destination a run was written to.
+///
+/// TWO HALVES FROM TWO PLACES, AND THE DIFFERENCE IS THE POINT. `name` is what
+/// the run ASKED for — `Backup.spec.destinationRef`, immutable with the rest of
+/// the spec. `uid` is what the controller RESOLVED at the freeze —
+/// `Backup.status.destination.uid` — and it is ABSENT until the freeze wrote
+/// one, and on every run frozen by a controller that predates the block. A
+/// destination deleted and recreated under the same name is a different object,
+/// and the uid is what says so; nothing here reads a live `BackupDestination`
+/// to fill it in.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupDestinationRefView {
+    /// The destination's name, in this namespace.
+    pub name: String,
+    /// Its `metadata.uid` as the freeze recorded it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uid: Option<String>,
 }
 
 /// The covered window.

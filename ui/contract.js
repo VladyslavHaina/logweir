@@ -632,6 +632,12 @@ const SCHEDULE_REF = shapeOf(
   { uid: str, generation: int, runPolicySha256: str },
 );
 
+const BACKUP_DESTINATION_REF = shapeOf(
+  "BackupDestinationRefView",
+  { name: str },
+  { uid: str },
+);
+
 const BACKUP = shapeOf(
   "Backup",
   {
@@ -644,6 +650,7 @@ const BACKUP = shapeOf(
     records: int, windowCovered: objectOf(WINDOW_COVERED),
     observedAuth: objectOf(OBSERVED_AUTH),
     trigger: objectOf(TRIGGER), scheduleRef: objectOf(SCHEDULE_REF),
+    destinationRef: objectOf(BACKUP_DESTINATION_REF), locationDigest: str,
   },
 );
 

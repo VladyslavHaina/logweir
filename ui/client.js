@@ -733,6 +733,12 @@ function projectBackup(item) {
     triggeredBy: item.triggeredBy,
     deadlineSeconds: item.deadlineSeconds,
   };
+  if (item.destinationRef !== null) {
+    object.spec.destinationRef = { name: item.destinationRef.name };
+    if (item.destinationRef.uid !== null) {
+      object.spec.destinationRef.uid = item.destinationRef.uid;
+    }
+  }
   // `schedule` IS THE OLD, COARSER FACT AND `scheduleRef` IS THE NEW ONE, and
   // the projection keeps them in one field the way the CRD does: the name
   // alone for a run created before PLAT-05.1, and the name with the uid,
@@ -775,6 +781,9 @@ function projectBackup(item) {
   }
   if (item.windowCovered !== null) {
     status.windowCovered = { fromMs: item.windowCovered.fromMs, toMs: item.windowCovered.toMs };
+  }
+  if (item.locationDigest !== null) {
+    status.locationDigest = item.locationDigest;
   }
   if (item.observedAuth !== null) {
     const auth = {};

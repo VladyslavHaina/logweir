@@ -304,10 +304,11 @@ const LONG = "fixture-backup-deliberately-longer-than-sixty-three-characters-";
 const sourceCluster = "source-" + suffix;
 const targetCluster = "target-" + suffix;
 const secondTarget = "target-b-" + suffix;
+const destinationName = "dest-" + suffix;
 const archiveUrl = "s3://logweir-fixture/" + namespace;
 const points = {};
 
-function succeededStatus(set, records, fromMs, toMs, completedAt) {
+function succeededStatus(set, records, fromMs, toMs, completedAt, destination) {
   return {
     phase: "Succeeded",
     backupId: set,
@@ -316,6 +317,7 @@ function succeededStatus(set, records, fromMs, toMs, completedAt) {
     exitReason: "ok",
     reason: "Ok",
     manifestKey: namespace + "/" + set + "/manifest.json",
+    destination: destination,
     windowCovered: { fromMs: fromMs, toMs: toMs },
     conditions: [{
       type: "Complete", status: "True", reason: "Ok", message: "fixture",
@@ -324,13 +326,14 @@ function succeededStatus(set, records, fromMs, toMs, completedAt) {
   };
 }
 
-function seedBackup(name, status) {
+function seedBackup(name, status, destination) {
   const created = apply({
     apiVersion: "logweir.dev/v1alpha1",
     kind: "Backup",
     metadata: { name: name, namespace: namespace, labels: LABELS },
     spec: {
-      archive: { url: archiveUrl },
+      archive: { url: "logweir-destination://" + destination.name },
+      destinationRef: { name: destination.name },
       deadlineSeconds: 3600,
       sourceRef: { name: sourceCluster },
       topics: TOPICS.slice(),
@@ -353,6 +356,43 @@ function seedBackup(name, status) {
     spawnSync("sleep", ["1"]);
   }
   throw new Error("the fixture Backup " + name + " did not keep the status this run set");
+}
+
+/** A saved destination whose resolved identity can be frozen onto the two
+ * recovery-point fixtures. The controller writes the digest; this harness
+ * copies that fact and never computes one. */
+async function seedDestination() {
+  kube(["-n", namespace, "create", "secret", "generic", "store-" + suffix,
+    "--from-literal=access-key-id=unused-by-the-target-rows",
+    "--from-literal=secret-access-key=unused-by-the-target-rows"]);
+  result.created.push({ kind: "Secret", name: "store-" + suffix });
+  const made = apply({
+    apiVersion: "logweir.dev/v1alpha1", kind: "BackupDestination",
+    metadata: { name: destinationName, namespace: namespace, labels: LABELS },
+    spec: {
+      storage: { provider: "S3", bucket: "kafka-backups", prefix: namespace,
+        addressing: "PathStyle", endpoint: "http" + "://minio." + LAB_NS + ".svc:9000" },
+      transport: { security: "InsecureHTTP" },
+      access: {
+        archiveWrite: { mode: "SecretKeys", secret: { name: "store-" + suffix } },
+      },
+    },
+  });
+  result.created.push({ kind: "BackupDestination", name: destinationName, uid: made.metadata.uid });
+  for (let i = 0; i < 60; i += 1) {
+    const seen = kubeJson(["-n", namespace, "get", "backupdestination", destinationName]);
+    const status = seen.status || {};
+    if (typeof status.locationDigest === "string" && status.locationDigest.startsWith("sha256:")) {
+      return {
+        name: destinationName,
+        uid: seen.metadata.uid,
+        generation: seen.metadata.generation,
+        locationDigest: status.locationDigest,
+      };
+    }
+    await pause(1000);
+  }
+  throw new Error("BackupDestination " + destinationName + " never published locationDigest");
 }
 
 function seedCluster(name, role, bootstrap, secret) {
@@ -464,18 +504,26 @@ async function main() {
   seedCluster(targetCluster, "target", LAB_TARGET_BOOTSTRAP, LAB_TARGET_SECRET);
   seedCluster(secondTarget, "target", LAB_TARGET_BOOTSTRAP, LAB_TARGET_SECRET);
 
-  // TWO POINTS, AND THE OLDER ONE IS THE ONE THIS JOURNEY RESTORES.
+  const frozenDestination = await seedDestination();
+
+  // TWO DESTINATION-BACKED POINTS, AND THE OLDER ONE IS THE ONE THIS JOURNEY
+  // restores. The status block is the destination identity the controller
+  // resolved above, copied rather than recomputed.
   points.old = seedBackup(
     NAMESPACE_PREFIX + LONG + "old-" + suffix,
-    succeededStatus("01JB7Z0000000000000000OLD", 3000, OLD_FROM_MS, OLD_TO_MS, rfc(OLD_TO_MS)),
+    succeededStatus("01JB7Z0000000000000000OLD", 3000, OLD_FROM_MS, OLD_TO_MS,
+      rfc(OLD_TO_MS), frozenDestination),
+    frozenDestination,
   );
   points.new = seedBackup(
     NAMESPACE_PREFIX + LONG + "new-" + suffix,
-    succeededStatus("01JB7Z0000000000000000NEW", 4000, NEW_FROM_MS, NEW_TO_MS, rfc(NEW_TO_MS)),
+    succeededStatus("01JB7Z0000000000000000NEW", 4000, NEW_FROM_MS, NEW_TO_MS,
+      rfc(NEW_TO_MS), frozenDestination),
+    frozenDestination,
   );
   result.fixtures.push({
     what: "two Succeeded Backup objects created with kubectl, status written by this harness",
-    older: points.old, newer: points.new, topics: TOPICS,
+    older: points.old, newer: points.new, topics: TOPICS, frozenDestination: frozenDestination,
     note: "no archive exists for either: they are fixtures for what the PAGE does with a " +
       "recovery point, and nothing here claims a run produced them",
   });
@@ -987,178 +1035,44 @@ async function main() {
       state: (p.status || {}).state || null,
       reason: (p.status || {}).reason || null,
       conditions: (p.status || {}).conditions || [],
-      checks: ((p.status || {}).checks || []).map((c) => ({ id: c.id, state: c.state, code: c.code })),
+      checks: ((((p.status || {}).result || {}).checks) || [])
+        .map((c) => ({ id: c.id, state: c.state, code: c.code })),
     })));
     await shot(page, "06-readiness");
     save("06-readiness-text.txt", await text(page));
-    if (verdict === null) {
-      result.journeys.push({
-        journey: "the readiness check for this plan reaches a verdict",
-        outcome: "NOT REACHED — the lab controller did not record a terminal state within 180 s",
-        preflights: (preflights.items || []).map((p) => ({
-          name: p.metadata.name, state: (p.status || {}).state || null,
-          reason: (p.status || {}).reason || null,
-        })),
-      });
-      process.stderr.write("== NOT REACHED: a terminal preflight verdict\n");
-    } else {
-      const state = verdict.status.reason || verdict.status.phase;
-      const vres = verdict.status.result || {};
-      const entries = (vres.checks || []).concat(vres.warnings || []);
-      const mappedRow = entries.find((c) => c.id === "target.mappedTopics");
-      record("the readiness check for this exact plan reached a verdict on the lab", {
-        preflight: verdict.metadata.name, uid: verdict.metadata.uid, state: state,
-        planHash: ((verdict.status.binding || {}).planHash) || null,
-        mappedTopicsRow: mappedRow || null,
-        collidingTopic: COLLIDING_TOPIC,
-      });
-      if (!mappedRow || mappedRow.code !== "MappedTopicExists") {
-        // RECORDED, NOT SKIPPED. Every other conditional in this file pushes a
-        // NOT REACHED entry, and this one did not -- so two runs read "zero
-        // NOT-REACHED" while one journey silently had not happened. The second
-        // review found it.
-        result.journeys.push({
-          journey: "the wizard's OWN readiness check refuses the submit over a collision",
-          outcome: "NOT REACHED",
-          why: "the wizard's step 5 sends the recovery point's inline archive URL, because " +
-            "the Backup projection publishes no destinationRef, and this build's controller " +
-            "refuses to build a check plan from one -- so no target row is ever recorded " +
-            "through the wizard's own button. preflight state=" + String(state) +
-            ", target.mappedTopics row=" + JSON.stringify(mappedRow || null),
-          defect: "BACKUP-PROJECTION-NO-DESTINATION (PLAT-08.2 projection, PLAT-03.2 route)",
-          provedInstead: "journey 6b, the same check against a saved BackupDestination",
-        });
-        process.stderr.write("== NOT REACHED: the wizard's own collision gate\n");
-      }
-      if (mappedRow && mappedRow.code === "MappedTopicExists") {
-        const said = await text(page);
-        check(said.includes("nothing is sent"),
-          "the wizard refuses the submit over a collision: " + said.slice(0, 2000));
-        const disabled = await page.evaluate(() => {
-          const b = document.querySelector("#create-restore");
-          return b === null ? null : b.disabled;
-        });
-        check(disabled === true, "and the create button is disabled");
-        record("an existing target topic with the mapped name refuses the ordinary path", {
-          topic: COLLIDING_TOPIC, code: mappedRow.code, message: mappedRow.message,
-        });
-      }
-    }
+    check(verdict !== null,
+      "the lab controller did not record a terminal preflight within 180 s: " +
+        JSON.stringify((preflights.items || []).map((p) => ({
+          name: p.metadata.name, phase: (p.status || {}).phase,
+          reason: (p.status || {}).reason,
+        }))));
+    const state = verdict.status.reason || verdict.status.phase;
+    const vres = verdict.status.result || {};
+    const entries = (vres.checks || []).concat(vres.warnings || []);
+    const mappedRow = entries.find((c) => c.id === "target.mappedTopics");
+    check(mappedRow !== undefined,
+      "the wizard's own readiness request never reached target.mappedTopics: " +
+        JSON.stringify({ state: state, result: vres }));
+    check(mappedRow.code === "MappedTopicExists",
+      "the pre-created collision did not produce MappedTopicExists: " + JSON.stringify(mappedRow));
+    record("the wizard's own readiness check reached target.mappedTopics on the lab", {
+      preflight: verdict.metadata.name, uid: verdict.metadata.uid, state: state,
+      planHash: ((verdict.status.binding || {}).planHash) || null,
+      mappedTopicsRow: mappedRow,
+      collidingTopic: COLLIDING_TOPIC,
+    });
 
-    // ------------------------------------------------------ 6b (the collision)
-    //
-    // THE WIZARD'S OWN CHECK CANNOT REACH THE TARGET ROWS ON THIS BUILD, and
-    // the controller says exactly why: step 5 sends the recovery point's
-    // INLINE archive URL, because the product API's `Backup` projection
-    // publishes neither `destinationRef` nor `locationDigest` (the gap
-    // `restore-wizard.js`'s `SOURCE_DESTINATION_NOT_PUBLISHED` already names,
-    // owed by PLAT-08.2), and this build "checks saved destinations only".
-    // So the check plan is never built and `target.mappedTopics` never runs.
-    //
-    // The TARGET half is still provable, and this is where it is proved: the
-    // same request with a saved `BackupDestination` named instead, issued
-    // from the page's own origin against the real service, so the lab's own
-    // controller decides whether the pre-created topic collides.
-    const destination = "dest-" + suffix;
-    kube(["-n", namespace, "create", "secret", "generic", "store-" + suffix,
-      "--from-literal=access-key-id=unused-by-the-target-rows",
-      "--from-literal=secret-access-key=unused-by-the-target-rows"]);
-    apply({
-      apiVersion: "logweir.dev/v1alpha1", kind: "BackupDestination",
-      metadata: { name: destination, namespace: namespace, labels: LABELS },
-      spec: {
-        storage: { provider: "S3", bucket: "kafka-backups", prefix: namespace,
-          addressing: "PathStyle", endpoint: "http" + "://minio." + LAB_NS + ".svc:9000" },
-        transport: { security: "InsecureHTTP" },
-        access: {
-          archiveWrite: { mode: "SecretKeys", secret: { name: "store-" + suffix } },
-        },
-      },
+    const said = await text(page);
+    check(said.includes("nothing is sent"),
+      "the wizard refuses the submit over a collision: " + said.slice(0, 2000));
+    const disabled = await page.evaluate(() => {
+      const b = document.querySelector("#create-restore");
+      return b === null ? null : b.disabled;
     });
-    result.created.push({ kind: "BackupDestination", name: destination });
-    const started = await page.evaluate(async (args) => {
-      const response = await fetch(args.origin + "/api/v1/namespaces/" + args.ns + "/preflights", {
-        method: "POST",
-        headers: { "content-type": "application/json", "idempotency-key": args.key },
-        credentials: "same-origin",
-        body: JSON.stringify({
-          operation: "restore",
-          restore: {
-            planBytes: args.planBytes,
-            planHash: args.planHash,
-            target: args.target,
-            sourceDestination: args.destination,
-            evidenceDestination: args.destination,
-            recoveryPoint: { backupName: args.point, backupUid: args.pointUid },
-          },
-          timeoutSeconds: 120,
-        }),
-      });
-      return { status: response.status, body: (await response.text()).slice(0, 8000) };
-    }, {
-      origin: origin, ns: namespace, key: "plat11-2-collision-1",
-      planBytes: planBytes, planHash: planHash, target: targetCluster,
-      destination: destination, point: points.old.name, pointUid: points.old.uid,
+    check(disabled === true, "the create button is disabled after the collision verdict");
+    record("an existing target topic with the mapped name refuses the ordinary path", {
+      topic: COLLIDING_TOPIC, code: mappedRow.code, message: mappedRow.message,
     });
-    save("06b-collision-preflight-start.json", started);
-    let collisionRow = null;
-    let collisionPreflight = null;
-    if (started.status === 202 || started.status === 200 || started.status === 201) {
-      const id = (JSON.parse(started.body).item || {}).id;
-      for (let i = 0; i < 90; i += 1) {
-        const o = kubeJson(["-n", namespace, "get", "preflight", id]);
-        const st = o.status || {};
-        // THE ROWS LIVE UNDER `status.result` ON THE CUSTOM RESOURCE. The
-        // product API's projection flattens them to the top level; this reads
-        // the object with `kubectl`, so it reads the CRD's own shape. (A
-        // previous run looked at `status.checks`, found nothing, and reported
-        // NOT REACHED over a check that had in fact run.)
-        const res = st.result || {};
-        const rows = (res.checks || []).concat(res.warnings || []);
-        const row = rows.find((c) => c.id === "target.mappedTopics");
-        if (row !== undefined) {
-          collisionRow = row;
-          collisionPreflight = o;
-          break;
-        }
-        if (st.phase === "Completed" || st.phase === "Failed" || st.phase === "Cancelled") {
-          collisionPreflight = o;
-          break;
-        }
-        await pause(2000);
-      }
-    }
-    // THE FINAL OBJECT, WHATEVER IT SAYS, so a run that did not reach the row
-    // still records WHY -- the namespace is deleted a minute later.
-    if (started.status === 202) {
-      try {
-        const id = (JSON.parse(started.body).item || {}).id;
-        save("06b-collision-preflight-final.json", kubeJson(["-n", namespace, "get", "preflight", id]));
-      } catch (gone) {
-        save("06b-collision-preflight-final.json", { error: String(gone) });
-      }
-    }
-    save("06b-collision-preflight.json", collisionPreflight || started);
-    if (collisionRow !== null && collisionRow.code === "MappedTopicExists") {
-      record("an existing target topic with the mapped name is refused by the readiness check", {
-        topic: COLLIDING_TOPIC, preflight: collisionPreflight.metadata.name,
-        uid: collisionPreflight.metadata.uid,
-        code: collisionRow.code, message: collisionRow.message,
-        state: (collisionPreflight.status || {}).state,
-      });
-    } else {
-      result.journeys.push({
-        journey: "an existing target topic with the mapped name is refused by the readiness check",
-        outcome: "NOT REACHED",
-        why: collisionPreflight === null
-          ? "the preflight was not accepted: " + started.body.slice(0, 600)
-          : "no target.mappedTopics row was recorded; state=" +
-            String((collisionPreflight.status || {}).state) + " reason=" +
-            String((collisionPreflight.status || {}).reason),
-        collidingTopic: COLLIDING_TOPIC,
-      });
-      process.stderr.write("== NOT REACHED: target.mappedTopics\n");
-    }
 
     // ------------------------------------------------------------------ 7
     // AN EDIT AFTER THE CHECK: THE VERDICT IS ABOUT ANOTHER PLAN, SUBMIT REFUSED.

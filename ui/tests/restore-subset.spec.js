@@ -32,6 +32,7 @@ import {
   MAX_TOPIC_NAME_CHARS,
   PARTITION_COUNT_NOT_PUBLISHED,
   readinessRefusal,
+  readinessSourceSentence,
   recoveryPoints,
   renderPlanStep,
   renderRecoveryLimits,
@@ -40,6 +41,7 @@ import {
   renderTopicSubset,
   replicationFactorOf,
   restoreBody,
+  restoreReadinessRequest,
   restorePointRoute,
   restoreRetryFromOperationRoute,
   restoreRetryRoute,
@@ -328,6 +330,41 @@ test("the_recovery_limits_come_from_contract_constants_and_never_from_prose", ()
 });
 
 // --------------------------------------------- 3. the readiness gate before a submit
+
+test("the_readiness_request_uses_a_saved_destination_and_only_legacy_points_send_an_archive", () => {
+  const prepared = { bytes: "plan bytes\n", hash: "sha256:" + "a".repeat(64) };
+  const destinationBacked = wizardState();
+  destinationBacked.point.spec.destinationRef = {
+    name: "primary",
+    uid: "uid-primary",
+  };
+  destinationBacked.point.status.locationDigest = "sha256:" + "b".repeat(64);
+
+  const saved = restoreReadinessRequest(destinationBacked, prepared);
+  assert.equal(saved.restore.sourceDestination, "primary");
+  assert.equal(saved.restore.evidenceDestination, "primary");
+  assert.equal(saved.restore.legacySourceArchive, undefined,
+    "MUTANT: a destination-backed point must never send the legacy marker");
+  assert.deepEqual(saved.restore.recoveryPoint, {
+    backupName: destinationBacked.point.metadata.name,
+    backupUid: destinationBacked.point.metadata.uid,
+  });
+  const savedSentence = readinessSourceSentence(destinationBacked.point);
+  assert.match(savedSentence, /saved destination `primary`/);
+  assert.match(savedSentence, new RegExp(destinationBacked.point.status.locationDigest),
+    "the page names the frozen digest the controller compares; it does not recompute one");
+
+  const legacy = wizardState();
+  assert.equal(legacy.point.spec.destinationRef, undefined, "the fixture is a legacy point");
+  const inline = restoreReadinessRequest(legacy, prepared);
+  assert.equal(inline.restore.sourceDestination, undefined);
+  assert.equal(inline.restore.evidenceDestination, undefined);
+  assert.deepEqual(inline.restore.legacySourceArchive, {
+    url: "s3://kafka-backups/drill-demo",
+    credentialRef: { name: "logweir-s3" },
+  });
+  assert.match(readinessSourceSentence(legacy.point), /Legacy recovery point/);
+});
 
 test("a_target_topic_collision_refuses_the_submit_and_names_the_check", () => {
   const state = wizardState();

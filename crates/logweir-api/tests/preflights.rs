@@ -31,6 +31,56 @@ fn restore_request(plan: &str) -> Value {
     })
 }
 
+fn legacy_restore_request(plan: &str, point: &str) -> Value {
+    json!({
+        "operation": "restore",
+        "restore": {
+            "planBytes": plan,
+            "planHash": plan_hash(plan),
+            "target": "target",
+            "legacySourceArchive": {
+                "url": "s3://archive/team-a",
+                "credentialRef": {"name": "legacy-reader"}
+            },
+            "recoveryPoint": {"backupName": point, "backupUid": format!("uid-{point}")}
+        }
+    })
+}
+
+fn seed_recovery_point(app: &TestApp, name: &str, destination: Option<&str>) {
+    let (archive, destination_ref) = match destination {
+        Some(destination) => (
+            json!({"url": format!("logweir-destination://{destination}")}),
+            Some(json!({"name": destination})),
+        ),
+        None => (
+            json!({
+                "url": "s3://archive/team-a",
+                "secretRef": {"name": "legacy-reader"}
+            }),
+            None,
+        ),
+    };
+    let mut spec = json!({
+        "sourceRef": {"name": "source"},
+        "topics": ["orders"],
+        "archive": archive,
+        "triggeredBy": "manual",
+        "deadlineSeconds": 1800
+    });
+    if let Some(destination_ref) = destination_ref {
+        spec["destinationRef"] = destination_ref;
+    }
+    app.fake.seed(
+        "backups",
+        NS_A,
+        json!({
+            "metadata": {"name": name, "uid": format!("uid-{name}")},
+            "spec": spec
+        }),
+    );
+}
+
 #[tokio::test]
 async fn a_restore_preflight_forwards_its_plan_bytes_verbatim() {
     let app = TestApp::new();
@@ -175,6 +225,63 @@ async fn the_block_must_match_the_operation_and_the_exclusive_pairs_hold() {
 
     assert_eq!(app.fake.count("preflights", NS_A), 0);
     assert!(app.fake.requests().is_empty());
+}
+
+/// BACKUP-PROJECTION-NO-DESTINATION's independent API rail.
+///
+/// MUTANT: remove `validate_legacy_source_for_point` from the create route (or
+/// accept `Some(legacySourceArchive)` unconditionally). The first assertion
+/// becomes 202 and a doomed `Preflight` is stored. The second half prevents
+/// the guard from becoming a blanket ban that strands pre-destination runs.
+#[tokio::test]
+async fn legacy_source_archive_is_only_accepted_for_a_truly_legacy_point() {
+    let path = format!("/api/v1/namespaces/{NS_A}/preflights");
+    let plan = plan();
+
+    let destination_backed = TestApp::new();
+    seed_recovery_point(&destination_backed, "saved-point", Some("primary"));
+    let refused = destination_backed
+        .post(
+            &path,
+            Some("preflight-destination-point-0001"),
+            &legacy_restore_request(&plan, "saved-point").to_string(),
+        )
+        .await;
+    refused.assert_problem(422, "validation_failed");
+    assert_eq!(
+        refused.json()["errors"][0]["field"],
+        "restore.legacySourceArchive"
+    );
+    assert_eq!(
+        refused.json()["errors"][0]["code"],
+        "destination_ref_required"
+    );
+    assert!(
+        refused.text().contains("destinationRef `primary`"),
+        "the refusal names the saved destination contract: {}",
+        refused.text()
+    );
+    assert_eq!(destination_backed.fake.count("preflights", NS_A), 0);
+
+    let legacy = TestApp::new();
+    seed_recovery_point(&legacy, "legacy-point", None);
+    let accepted = legacy
+        .post(
+            &path,
+            Some("preflight-legacy-point-0001"),
+            &legacy_restore_request(&plan, "legacy-point").to_string(),
+        )
+        .await;
+    assert_eq!(accepted.status.as_u16(), 202, "{}", accepted.text());
+    let id = accepted.json()["item"]["id"].as_str().unwrap().to_string();
+    let stored = legacy.fake.object("preflights", NS_A, &id).unwrap();
+    assert_eq!(
+        stored["spec"]["request"]["restore"]["legacySourceArchive"],
+        json!({
+            "url": "s3://archive/team-a",
+            "secretRef": {"name": "legacy-reader"}
+        })
+    );
 }
 
 /// D2-SOURCECHECK: the connectivity check the console's "Test connection"

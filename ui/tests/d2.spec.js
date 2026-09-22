@@ -109,7 +109,6 @@ import {
   renderTopicPicker,
   resolveDestinationSelection,
 } from "../pages/schedules.js";
-import { SOURCE_DESTINATION_NOT_PUBLISHED } from "../pages/restore-wizard.js";
 
 const console_ = (name) =>
   JSON.parse(readFileSync(new URL("./fixtures/console/" + name, import.meta.url), "utf8"));
@@ -970,11 +969,6 @@ test("a_schedule_with_neither_shape_is_now_named_exactly_rather_than_guessed_bet
   assert.match(html, /an empty allowlist is not an allowlist/);
   assert.doesNotMatch(html, /this page cannot tell you which it is/,
     "the pre-rebase sentence hedged between two shapes; `allUserTopics` distinguishes them now");
-});
-
-test("the_wizard_names_the_task_that_owes_a_recovery_points_frozen_destination", () => {
-  assert.match(SOURCE_DESTINATION_NOT_PUBLISHED, /PLAT-08\.2 \(D2 W10\) owes that projection/);
-  assert.match(SOURCE_DESTINATION_NOT_PUBLISHED, /neither destinationRef nor locationDigest/);
 });
 
 test("the_clusters_page_no_longer_says_no_check_kind_can_dial", () => {

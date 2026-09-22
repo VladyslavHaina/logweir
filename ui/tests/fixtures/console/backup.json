@@ -1,14 +1,16 @@
 {
   "item": {
     "archive": {
-      "credentialRef": {
-        "name": "logweir-s3"
-      },
-      "url": "s3://kafka-backups/orders"
+      "url": "logweir-destination://primary"
     },
     "backupId": "01JB7X00000000000000000009",
     "createdAt": "2026-09-04T08:55:00Z",
     "deadlineSeconds": 1800,
+    "destinationRef": {
+      "name": "primary",
+      "uid": "5f0cb1fa-b181-4b6a-a51f-fbfa68b8f997"
+    },
+    "locationDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "manifestKey": "orders/01JB7X00000000000000000009/manifest.json",
     "name": "orders-hourly-20260912-080000",
     "namespace": "team-a",

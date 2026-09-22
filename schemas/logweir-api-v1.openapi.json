@@ -5163,7 +5163,7 @@
         ],
         "properties": {
           "archive": {
-            "description": "Where the archive is written.",
+            "description": "Where the archive is written. With `destinationRef` this is the CRD's sentinel URL `logweir-destination://<name>` and carries no credential; a console renders the destination instead of the URL.",
             "$ref": "#/components/schemas/ArchiveView"
           },
           "backupId": {
@@ -5181,6 +5181,16 @@
             "description": "The Job deadline.",
             "type": "integer",
             "format": "int64"
+          },
+          "destinationRef": {
+            "description": "The saved `BackupDestination` this run was written to, in this namespace.\n\nABSENT means the run carries its archive location INLINE in `archive`, exactly as every run did before saved destinations existed. It is a legacy inline-archive run, not a degraded one.",
+            "$ref": "#/components/schemas/BackupDestinationRefView",
+            "nullable": true
+          },
+          "locationDigest": {
+            "description": "`sha256:<lowercase hex>` over the canonical location this run was FROZEN against — **where this recovery point's archive actually is**, copied verbatim from `Backup.status.destination.locationDigest`.\n\nABSENT for a legacy inline-archive run, and for any run frozen by a controller that predates the frozen-destination block. Absent means \"this recovery point publishes no frozen location\", never \"its location is unknown to be wrong\" — and NOTHING recomputes one from a live `BackupDestination`: a destination edited after a run froze must not be able to make a moved recovery point look settled.",
+            "type": "string",
+            "nullable": true
           },
           "manifestKey": {
             "description": "The manifest key.",
@@ -5256,6 +5266,24 @@
           "windowCovered": {
             "description": "The covered window, epoch milliseconds, end exclusive.",
             "$ref": "#/components/schemas/WindowCoveredView",
+            "nullable": true
+          }
+        }
+      },
+      "BackupDestinationRefView": {
+        "description": "The saved destination a run was written to.\n\nTWO HALVES FROM TWO PLACES, AND THE DIFFERENCE IS THE POINT. `name` is what the run ASKED for — `Backup.spec.destinationRef`, immutable with the rest of the spec. `uid` is what the controller RESOLVED at the freeze — `Backup.status.destination.uid` — and it is ABSENT until the freeze wrote one, and on every run frozen by a controller that predates the block. A destination deleted and recreated under the same name is a different object, and the uid is what says so; nothing here reads a live `BackupDestination` to fill it in.",
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "description": "The destination's name, in this namespace.",
+            "type": "string"
+          },
+          "uid": {
+            "description": "Its `metadata.uid` as the freeze recorded it.",
+            "type": "string",
             "nullable": true
           }
         }

@@ -17,13 +17,13 @@ use weirkeeper::crds::selection::IncompleteDiscovery as CrdIncompleteDiscovery;
 use weirkeeper::crds::{ArchiveRef, LocalRef};
 
 use crate::contract::{
-    ActiveRunView, AllUserTopics, Approval, ApprovalPacket, ArchiveView, Backup, CadenceAdjustment,
-    CadencePreset, CatchUpPolicy, ConcurrencyPolicy, Connection, ConnectionAuthMode,
-    ConnectionAuthView, IncompleteDiscoveryPolicy, LastTestView, NameRef, NextRunView,
-    ObservedAuthView, ReachabilityState, ReachabilityView, RemovableSetView, Restore, RestoreMode,
-    RestoreTargetView, RetentionReportView, RetentionView, RetryPolicy, Schedule,
-    SchedulePolicyView, ScheduleRefView, ScheduleStatusView, SubjectRefView, TopicExclusions,
-    TriggerKind, TriggerView, VerifiedSubjectView, WindowCoveredView,
+    ActiveRunView, AllUserTopics, Approval, ApprovalPacket, ArchiveView, Backup,
+    BackupDestinationRefView, CadenceAdjustment, CadencePreset, CatchUpPolicy, ConcurrencyPolicy,
+    Connection, ConnectionAuthMode, ConnectionAuthView, IncompleteDiscoveryPolicy, LastTestView,
+    NameRef, NextRunView, ObservedAuthView, ReachabilityState, ReachabilityView, RemovableSetView,
+    Restore, RestoreMode, RestoreTargetView, RetentionReportView, RetentionView, RetryPolicy,
+    Schedule, SchedulePolicyView, ScheduleRefView, ScheduleStatusView, SubjectRefView,
+    TopicExclusions, TriggerKind, TriggerView, VerifiedSubjectView, WindowCoveredView,
 };
 use crate::status::{backup_operation, condition_view, restore_operation, summary, MAX_CONDITIONS};
 use crate::validate::redact_url_userinfo;
@@ -297,11 +297,57 @@ fn redact_url_userinfo_in(command: &str) -> String {
         .join(" ")
 }
 
+/// WHERE A RECOVERY POINT IS, published from the two fields that record it and
+/// from nothing else (BACKUP-PROJECTION-NO-DESTINATION).
+///
+/// `spec.destinationRef` is what the run ASKED for and `status.destination` is
+/// what the controller FROZE. Both are published, and neither is invented from
+/// the other:
+///
+/// * a run with neither is a legacy inline-archive run — `None`, and the
+///   console reads `archive` as it always did;
+/// * a run with `spec.destinationRef` whose freeze has not happened yet (or
+///   whose controller predates the block) publishes the NAME with no `uid` and
+///   no `locationDigest`: it names a destination and has no frozen location;
+/// * a run with both publishes the name, the frozen uid and the frozen digest.
+///
+/// THE UID IS ONLY PUBLISHED FOR THE NAME IT BELONGS TO. The freeze writes the
+/// same name the spec asks for, so the two agree in every object this product
+/// writes; if they ever disagree the spec's name is published WITHOUT the
+/// frozen uid, because a uid attached to another object's name is worse than no
+/// uid at all.
+///
+/// A `status.destination` with no `spec.destinationRef` is not a shape this
+/// controller writes, but it is published rather than dropped: the freeze is
+/// the record of where the archive went, and dropping it would hide a location
+/// the object states.
+fn backup_destination(object: &BackupCr) -> (Option<BackupDestinationRefView>, Option<String>) {
+    let frozen = object.status.as_ref().and_then(|s| s.destination.as_ref());
+    let name = object
+        .spec
+        .destination_ref
+        .as_ref()
+        .map(|r| r.name.clone())
+        .or_else(|| frozen.map(|d| d.name.clone()));
+    let Some(name) = name else {
+        return (None, None);
+    };
+    let frozen = frozen.filter(|d| d.name == name);
+    (
+        Some(BackupDestinationRefView {
+            name,
+            uid: frozen.map(|d| d.uid.clone()),
+        }),
+        frozen.map(|d| d.location_digest.clone()),
+    )
+}
+
 /// A `Backup`.
 #[must_use]
 pub fn backup(object: &BackupCr) -> Backup {
     let status = object.status.as_ref();
     let operation = backup_operation(object);
+    let (destination_ref, location_digest) = backup_destination(object);
     Backup {
         name: object.name_any(),
         namespace: object.namespace().unwrap_or_default(),
@@ -311,6 +357,8 @@ pub fn backup(object: &BackupCr) -> Backup {
         source_ref: name_ref(&object.spec.source_ref),
         topics: object.spec.topics.clone(),
         archive: archive_view(&object.spec.archive),
+        destination_ref,
+        location_digest,
         schedule: object.spec.schedule_ref.as_ref().map(|r| r.name.clone()),
         slot: object.spec.slot.clone(),
         triggered_by: object.spec.triggered_by.clone(),
