@@ -2120,8 +2120,8 @@ fn every_exit_code_maps_to_its_wire_reason() {
     );
     assert_eq!(
         TERMINAL_STATES.len(),
-        41,
-        "the forty-one terminal states that are NOT an exit code — the original ten, plus \
+        43,
+        "the forty-three terminal states that are NOT an exit code — the original ten, plus \
          `NameTooLong` (errata E5d) and `ReferentNotFound` / `PlanConfigMapConflict` / \
          `ApprovalBundleConflict` / `ApprovalSubjectMismatch` / `JobNameConflict` / \
          `ArchiveUrlUnreadable` (errata E5a), plus `PlanHashMismatch` / `ClusterNotReachable` \
@@ -2151,7 +2151,10 @@ fn every_exit_code_maps_to_its_wire_reason() {
          rehearsal authorization on `Restore.spec.authorization` does not admit this run \
          (expired, a key withdrawn between slots, a usage that may not authorise, a plan \
          outside the signed scope); its own reason and NOT `ApprovalSubjectMismatch`, because \
-         an operator told the latter goes looking at a subject binding that is correct; \
+         an operator told the latter goes looking at a subject binding that is correct, plus \
+         PLAT-19.2's `ApprovalPolicyMismatch` / `AuthorizationExpired` — the Approval was \
+         issued under another approval policy than the namespace is bound to now, or its \
+         authorization document v2 expired before admission; both immutable, both terminal; \
          got {TERMINAL_STATES:?}"
     );
     // D3 §2.2's four are the `RunnerReady` PROJECTION of a diagnosis and not

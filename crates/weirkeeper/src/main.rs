@@ -427,6 +427,7 @@ fn run() -> ExitCode {
             client.clone(),
             archive.clone(),
             runner.clone(),
+            approval_policies.clone(),
         )));
         // Task 15c pushes the SIXTH — the `KafkaCluster` probe reconciler that
         // makes `status.reachable` mean something, by running `logweir

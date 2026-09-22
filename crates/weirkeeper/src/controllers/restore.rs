@@ -123,7 +123,8 @@ use crate::conditions::{
     REASON_ADMITTED, REASON_APPROVAL_BUNDLE_MATERIALIZATION_FAILED, REASON_APPROVAL_NOT_VERIFIED,
     REASON_EVIDENCE_KEYS_RECORDED, REASON_EVIDENCE_KEYS_UNREADABLE, REASON_OPERATIONAL,
     TERMINAL_STATE_APPROVAL_BUNDLE_CONFLICT, TERMINAL_STATE_APPROVAL_NOT_RECEIVED,
-    TERMINAL_STATE_APPROVAL_SUBJECT_MISMATCH, TERMINAL_STATE_CLUSTER_NOT_REACHABLE,
+    TERMINAL_STATE_APPROVAL_POLICY_MISMATCH, TERMINAL_STATE_APPROVAL_SUBJECT_MISMATCH,
+    TERMINAL_STATE_AUTHORIZATION_EXPIRED, TERMINAL_STATE_CLUSTER_NOT_REACHABLE,
     TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON, TERMINAL_STATE_JOB_NAME_CONFLICT,
     TERMINAL_STATE_NAME_TOO_LONG, TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT,
     TERMINAL_STATE_PLAN_HASH_MISMATCH, TERMINAL_STATE_POD_OWNERSHIP_CONTESTED,
@@ -142,6 +143,10 @@ use crate::job::{
 use crate::verification::{
     conditions_in, restore_badge, second_patch, stored_verification, verified_condition,
     EvidenceRef, VerifyOracle,
+};
+use logweir_core::approval_policy::{
+    self as approval_policy, ApprovalMode, ApprovalPolicySet, AuthorizationRefusal,
+    EffectivePolicy, ExpectedSubject, RestoreAuthorization, PAYLOAD_TYPE_RESTORE_AUTHORIZATION,
 };
 use logweir_core::check_contract::CheckCode;
 use logweir_core::ids::sha256_prefixed;
@@ -212,6 +217,23 @@ pub const APPROVAL_SIG_FILE: &str = "approval.sig";
 pub const APPROVER_KEY_FILE: &str = "approver.pub.pem";
 /// The cluster allowlist, at `/approval/allowed-clusters.json`.
 pub const ALLOWED_CLUSTERS_FILE: &str = "allowed-clusters.json";
+/// PLAT-19.2: the frozen approval-policy snapshot, at
+/// `/approval/approval-policy.json` — exactly
+/// `logweir_core::approval_policy::ApprovalPolicy::snapshot_bytes`, whose
+/// digest the signed authorization document v2 names. Present only in the
+/// bundle of a Restore authorised by a v2 document.
+pub const APPROVAL_POLICY_FILE: &str = "approval-policy.json";
+/// PLAT-19.2: the console's `ConsoleConfirmation` public key, the second of
+/// D0's "both required public keys". Present only with
+/// [`APPROVAL_POLICY_FILE`].
+pub const CONFIRMATION_KEY_FILE: &str = "confirmation.pub.pem";
+/// PLAT-19.2: the policy digest the bundle was rendered under, as an
+/// annotation beside the other binding annotations.
+pub const BUNDLE_APPROVAL_POLICY_DIGEST_ANNOTATION: &str = "logweir.dev/approval-policy-digest";
+/// The runner flag naming [`APPROVAL_POLICY_FILE`].
+pub const APPROVAL_POLICY_ARG: &str = "--approval-policy";
+/// The runner flag naming [`CONFIRMATION_KEY_FILE`].
+pub const CONFIRMATION_KEY_ARG: &str = "--confirmation-key";
 
 /// The per-Restore immutable ConfigMap mounted at [`APPROVAL_MOUNT_PATH`].
 #[must_use]
@@ -423,6 +445,22 @@ pub enum RestoreAdmission {
         /// reconciler uses for the same check before the `Restore` exists.
         detail: String,
     },
+    /// PLAT-19.2: the Approval's authorization does not match the namespace's
+    /// CURRENT approval-policy binding. TERMINAL.
+    AuthorizationPolicyMismatch {
+        /// The Approval `spec.approvalRef` names.
+        approval: String,
+        /// Both policies, or the format the binding refuses.
+        detail: String,
+    },
+    /// PLAT-19.2: the authorization document v2 expired before admission.
+    /// TERMINAL.
+    AuthorizationExpired {
+        /// The Approval `spec.approvalRef` names.
+        approval: String,
+        /// The instant and the clock.
+        detail: String,
+    },
 }
 
 impl RestoreAdmission {
@@ -441,6 +479,8 @@ impl RestoreAdmission {
             Self::StandingAuthorizationRefused { .. } => {
                 crate::conditions::TERMINAL_STATE_STANDING_AUTHORIZATION_REFUSED
             }
+            Self::AuthorizationPolicyMismatch { .. } => TERMINAL_STATE_APPROVAL_POLICY_MISMATCH,
+            Self::AuthorizationExpired { .. } => TERMINAL_STATE_AUTHORIZATION_EXPIRED,
         }
     }
 
@@ -470,7 +510,9 @@ impl RestoreAdmission {
             | Self::ApprovalSubjectMismatch { .. }
             | Self::PlanHashMismatch { .. }
             | Self::ClusterNotReachable { .. }
-            | Self::StandingAuthorizationRefused { .. } => true,
+            | Self::StandingAuthorizationRefused { .. }
+            | Self::AuthorizationPolicyMismatch { .. }
+            | Self::AuthorizationExpired { .. } => true,
         }
     }
 }
@@ -524,6 +566,18 @@ impl fmt::Display for RestoreAdmission {
                  so this slot cannot be rescued — the schedule's next slot renders a new plan \
                  and is checked again"
             ),
+            Self::AuthorizationPolicyMismatch { approval, detail } => write!(
+                f,
+                "spec.approvalRef names Approval `{approval}`, whose authorization does not match \
+                 this namespace's approval policy ({detail}); no Job is created. Both specs are \
+                 immutable: create a new Restore, which is confirmed or approved under the policy \
+                 bound now"
+            ),
+            Self::AuthorizationExpired { approval, detail } => write!(
+                f,
+                "spec.approvalRef names Approval `{approval}`, whose authorization expired before \
+                 this Restore was admitted ({detail}); no Job is created. Create a new Restore"
+            ),
         }
     }
 }
@@ -540,13 +594,174 @@ impl fmt::Display for RestoreAdmission {
 /// `None` when the bytes are not a JSON object or carry no string
 /// `plan_hash` — which is a mismatch against any real hash and is reported as
 /// one, naming what the document did and did not carry.
+///
+/// PLAT-19.2: an authorization document v2 spells it `planHash`. WHICH
+/// spelling is read is decided by the SIDECAR's payload type — the value the
+/// signature covers — and never by trying both, so a v1 document that also
+/// carried a `planHash` key cannot present a second hash.
 #[must_use]
 pub fn approval_plan_hash(approval: &Approval) -> Option<String> {
+    let field = if is_authorization_v2(approval) {
+        "planHash"
+    } else {
+        "plan_hash"
+    };
     serde_json::from_str::<Value>(&approval.spec.approval_bytes)
         .ok()?
-        .get("plan_hash")?
+        .get(field)?
         .as_str()
         .map(str::to_string)
+}
+
+/// Whether this Approval carries an authorization document v2 — its sidecar's
+/// `payloadType` is [`PAYLOAD_TYPE_RESTORE_AUTHORIZATION`].
+#[must_use]
+pub fn is_authorization_v2(approval: &Approval) -> bool {
+    serde_json::from_str::<Value>(&approval.spec.sidecar_bytes)
+        .ok()
+        .and_then(|v| {
+            v.get("payloadType")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .as_deref()
+        == Some(PAYLOAD_TYPE_RESTORE_AUTHORIZATION)
+}
+
+/// What [`admit_with_policy`] needs to judge an approval POLICY — PLAT-19.2.
+pub struct PolicyAdmission<'a> {
+    /// What the Restore's namespace is bound to NOW.
+    pub policy: &'a EffectivePolicy,
+    /// The clock, passed in — Global Constraint 1.
+    pub now: DateTime<Utc>,
+}
+
+/// The Approval's own `Verified` reason, when it is one of the two PERMANENT
+/// v2 refusals that must end the Restore rather than hold it for ever.
+fn permanent_approval_refusal(approval: &Approval, referent: &str) -> Option<RestoreAdmission> {
+    let condition = approval
+        .status
+        .as_ref()
+        .and_then(|s| s.conditions.as_ref())
+        .and_then(|cs| {
+            cs.iter()
+                .find(|c| c.r#type == super::approval::CONDITION_VERIFIED && c.status == "False")
+        })?;
+    let detail = condition.message.clone().unwrap_or_default();
+    match condition.reason.as_deref() {
+        Some(TERMINAL_STATE_AUTHORIZATION_EXPIRED) => {
+            Some(RestoreAdmission::AuthorizationExpired {
+                approval: referent.to_string(),
+                detail,
+            })
+        }
+        Some(TERMINAL_STATE_APPROVAL_POLICY_MISMATCH) => {
+            Some(RestoreAdmission::AuthorizationPolicyMismatch {
+                approval: referent.to_string(),
+                detail,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// **PLAT-19.2's admission half: the approval POLICY, re-checked against the
+/// namespace's CURRENT binding immediately before any Job exists** (D0: "The
+/// Restore controller repeats the authorization verdict immediately before
+/// materializing the bundle and before Job creation").
+///
+/// The signatures are the Approval controller's (and, again, the runner's);
+/// what this re-derives from the SIGNED BYTES is everything that depends on
+/// the namespace's binding and the clock — which a policy rollout or the
+/// passage of time can change after the Approval was verified.
+fn policy_refusal(
+    restore: &Restore,
+    approval: &Approval,
+    referent: &str,
+    admission: &PolicyAdmission<'_>,
+) -> Option<RestoreAdmission> {
+    let mismatch = |refusal: AuthorizationRefusal| RestoreAdmission::AuthorizationPolicyMismatch {
+        approval: referent.to_string(),
+        detail: refusal.to_string(),
+    };
+    let namespace = restore.namespace().unwrap_or_default();
+    let bound = match (admission.policy, is_authorization_v2(approval)) {
+        (EffectivePolicy::Legacy, false) => return None,
+        (EffectivePolicy::Legacy, true) => {
+            return Some(mismatch(approval_policy::unbound_namespace_refusal(
+                &namespace,
+            )))
+        }
+        (EffectivePolicy::Bound(bound), false) => {
+            return Some(mismatch(approval_policy::v1_under_bound_policy_refusal(
+                bound,
+            )))
+        }
+        (EffectivePolicy::Bound(bound), true) => bound,
+    };
+    let doc = match RestoreAuthorization::from_bytes(approval.spec.approval_bytes.as_bytes()) {
+        Ok(doc) => doc,
+        Err(refusal) => return Some(mismatch(refusal)),
+    };
+    let expected = ExpectedSubject {
+        namespace,
+        name: restore.name_any(),
+        uid: restore.uid().unwrap_or_default(),
+        plan_hash: recomputed_plan_hash(restore),
+    };
+    if let Err(refusal) =
+        approval_policy::check_restore_authorization(&doc, &expected, bound, admission.now)
+    {
+        return Some(match refusal {
+            AuthorizationRefusal::Expired(_) => RestoreAdmission::AuthorizationExpired {
+                approval: referent.to_string(),
+                detail: refusal.to_string(),
+            },
+            AuthorizationRefusal::PlanHashMismatch { got, want } => {
+                RestoreAdmission::PlanHashMismatch {
+                    recomputed: want,
+                    approval_says: got,
+                }
+            }
+            AuthorizationRefusal::SubjectMismatch(detail) => {
+                RestoreAdmission::ApprovalSubjectMismatch {
+                    approval: referent.to_string(),
+                    detail,
+                }
+            }
+            other => mismatch(other),
+        });
+    }
+    // THE VERDICT WAS MADE UNDER THIS POLICY, TOO. The signed bytes agree with
+    // the binding; the controller-written provenance must say the Approval
+    // controller agreed as well, so a verdict left over from before a policy
+    // rollout is never the one admitted.
+    let provenance = approval
+        .status
+        .as_ref()
+        .and_then(|s| s.authorization.as_ref());
+    let agrees = provenance.is_some_and(|p| {
+        p.policy_name == bound.name
+            && p.policy_digest == bound.digest()
+            && p.mode == bound.mode.as_str()
+    });
+    if !agrees {
+        return Some(RestoreAdmission::AuthorizationPolicyMismatch {
+            approval: referent.to_string(),
+            detail: format!(
+                "status.authorization records {} and this namespace is bound to policy {} ({}, \
+                 {}); the Approval controller has not verified it under the current binding",
+                provenance.map_or_else(
+                    || "no v2 verdict".to_string(),
+                    |p| format!("policy {} ({}, {})", p.policy_name, p.mode, p.policy_digest)
+                ),
+                bound.name,
+                bound.mode,
+                bound.digest()
+            ),
+        });
+    }
+    None
 }
 
 /// The plan hash, **recomputed from the spec bytes**.
@@ -602,6 +817,22 @@ pub fn admit(
     approval: Option<&Approval>,
     cluster: Option<&KafkaCluster>,
     standing: Option<&StandingAdmission<'_>>,
+) -> RestoreAdmission {
+    admit_with_policy(restore, approval, cluster, standing, None)
+}
+
+/// [`admit`], under the namespace's approval-policy binding — PLAT-19.2.
+///
+/// `policy: None` is `legacy-governed-v1` with no clock, which is exactly
+/// [`admit`]: the legacy arm reads neither. With a policy, step 3b below runs
+/// between "the exact Approval is Verified=True" and the plan hash.
+#[must_use]
+pub fn admit_with_policy(
+    restore: &Restore,
+    approval: Option<&Approval>,
+    cluster: Option<&KafkaCluster>,
+    standing: Option<&StandingAdmission<'_>>,
+    policy: Option<&PolicyAdmission<'_>>,
 ) -> RestoreAdmission {
     // **THE TWO AUTHORIZATIONS, DISPATCHED ON THE OBJECT AND NEVER ON WHAT
     // HAPPENS TO EXIST** — PLAT-14.3b.
@@ -678,8 +909,27 @@ pub fn admit(
     }
 
     // ---- 3. and that exact Approval must currently be Verified=True -------
+    //
+    // PLAT-19.2: two of the Approval's own refusals are PERMANENT — its
+    // document expired, or it was issued under another policy — and both specs
+    // are immutable, so holding for ever would be a Restore nobody is told is
+    // dead. They end it instead, with the Approval's own words.
     if status.and_then(|status| status.verified) != Some(true) || bound.is_none() {
+        if policy.is_some() {
+            if let Some(permanent) = permanent_approval_refusal(approval, &referent) {
+                return permanent;
+            }
+        }
         return RestoreAdmission::ApprovalNotVerified { approval: referent };
+    }
+
+    // ---- 3b. the approval POLICY, re-checked now (PLAT-19.2) --------------
+    let legacy = PolicyAdmission {
+        policy: &EffectivePolicy::Legacy,
+        now: DateTime::<Utc>::MIN_UTC,
+    };
+    if let Some(refusal) = policy_refusal(restore, approval, &referent, policy.unwrap_or(&legacy)) {
+        return refusal;
     }
 
     // ---- 4. the plan hash, RECOMPUTED, from inside the signed bytes ------
@@ -1553,6 +1803,35 @@ pub fn approval_bundle_config_map(
     trust: &crate::trust::ResolvedTrust,
     now: DateTime<Utc>,
 ) -> Result<ConfigMap, RestoreError> {
+    approval_bundle_config_map_with_policy(restore, approval, trust, &EffectivePolicy::Legacy, now)
+}
+
+/// [`approval_bundle_config_map`], under the namespace's approval-policy
+/// binding — PLAT-19.2, D0's "bundle contract v2".
+///
+/// # What a v2 authorization adds, and what it re-checks
+///
+/// For a Restore authorised by authorization document v2 the bundle carries
+/// two more PUBLIC members: [`CONFIRMATION_KEY_FILE`], the console key that
+/// attested the requester, and [`APPROVAL_POLICY_FILE`], the frozen policy
+/// snapshot whose digest the signed document names. `approver.pub.pem` holds
+/// the key that AUTHORISED the run — the governed approver's under
+/// `Governed`, the console's own under `Ordinary` — and each key must still
+/// be one this namespace's trust lets sign something new, under ITS usage. A
+/// key an administrator withdrew between verification and materialization is
+/// never mounted.
+///
+/// # Errors
+///
+/// [`RestoreError::Materialization`] when a key is gone or withdrawn, and
+/// [`RestoreError::Refused`] on a plan-hash mismatch.
+pub fn approval_bundle_config_map_with_policy(
+    restore: &Restore,
+    approval: &Approval,
+    trust: &crate::trust::ResolvedTrust,
+    policy: &EffectivePolicy,
+    now: DateTime<Utc>,
+) -> Result<ConfigMap, RestoreError> {
     let name = restore.name_any();
     let namespace = restore
         .namespace()
@@ -1586,11 +1865,14 @@ pub fn approval_bundle_config_map(
             trust_source_phrase(trust)
         ))
     })?;
-    if let Err(refusal) = trust.may_sign_new_for(
-        matched_key_id,
-        logweir_core::trust::KeyUsage::GovernedApproval,
-        now,
-    ) {
+    // THE USAGE THE AUTHORISING KEY MUST STILL HOLD is the bound policy's:
+    // a governed approver's, or — under `Ordinary` only — the console's.
+    let bound = policy.bound().filter(|_| is_authorization_v2(approval));
+    let authorising_usage = match bound.map(|p| p.mode) {
+        Some(ApprovalMode::Ordinary) => logweir_core::trust::KeyUsage::ConsoleConfirmation,
+        Some(ApprovalMode::Governed) | None => logweir_core::trust::KeyUsage::GovernedApproval,
+    };
+    if let Err(refusal) = trust.may_sign_new_for(matched_key_id, authorising_usage, now) {
         return Err(RestoreError::Materialization(format!(
             "the Approval {} verified under key {matched_key_id}, which {} no longer accepts for \
              a new authorisation ({}); no bundle is written and nothing executes under it",
@@ -1599,6 +1881,47 @@ pub fn approval_bundle_config_map(
             refusal.as_str()
         )));
     }
+    // AND THE CONSOLE KEY, UNDER v2: the second of D0's "both required public
+    // keys", re-checked here for the same reason as the first.
+    let confirmation = match bound {
+        None => None,
+        Some(bound) => {
+            let confirmation_key_id = approval
+                .status
+                .as_ref()
+                .and_then(|s| s.authorization.as_ref())
+                .map(|a| a.confirmation_key_id.clone())
+                .ok_or_else(|| {
+                    RestoreError::Materialization(format!(
+                        "the Approval {} carries an authorization document v2 and no \
+                         status.authorization.confirmationKeyId",
+                        approval.name_any()
+                    ))
+                })?;
+            let confirmation_key = trust.key(&confirmation_key_id).ok_or_else(|| {
+                RestoreError::Materialization(format!(
+                    "the Approval {} was confirmed under console key {confirmation_key_id}, which \
+                     {} does not carry",
+                    approval.name_any(),
+                    trust_source_phrase(trust)
+                ))
+            })?;
+            if let Err(refusal) = trust.may_sign_new_for(
+                &confirmation_key_id,
+                logweir_core::trust::KeyUsage::ConsoleConfirmation,
+                now,
+            ) {
+                return Err(RestoreError::Materialization(format!(
+                    "the Approval {} was confirmed under console key {confirmation_key_id}, which \
+                     {} no longer accepts ({}); no bundle is written",
+                    approval.name_any(),
+                    trust_source_phrase(trust),
+                    refusal.as_str()
+                )));
+            }
+            Some((confirmation_key.spki_pem.clone(), bound))
+        }
+    };
     let plan_hash = recomputed_plan_hash(restore);
     let approval_hash = approval_plan_hash(approval).unwrap_or_default();
     if approval_hash != plan_hash {
@@ -1621,7 +1944,7 @@ pub fn approval_bundle_config_map(
             "the target-cluster allowlist could not be rendered: {error}"
         ))
     })?;
-    let annotations = [
+    let mut annotations: BTreeMap<String, String> = [
         (
             BUNDLE_RESTORE_UID_ANNOTATION.to_string(),
             restore_uid.clone(),
@@ -1635,27 +1958,41 @@ pub fn approval_bundle_config_map(
     ]
     .into_iter()
     .collect();
+    let mut data: BTreeMap<String, String> = [
+        (
+            APPROVAL_DOC_FILE.to_string(),
+            approval.spec.approval_bytes.clone(),
+        ),
+        (
+            APPROVAL_SIG_FILE.to_string(),
+            approval.spec.sidecar_bytes.clone(),
+        ),
+        (APPROVER_KEY_FILE.to_string(), key.spki_pem.clone()), // public SPKI only
+        (ALLOWED_CLUSTERS_FILE.to_string(), allowed_bytes),
+    ]
+    .into_iter()
+    .collect();
+    if let Some((confirmation_pem, bound)) = confirmation {
+        let snapshot = String::from_utf8(bound.snapshot_bytes()).map_err(|e| {
+            RestoreError::Materialization(format!("the approval-policy snapshot is not UTF-8: {e}"))
+        })?;
+        annotations.insert(
+            BUNDLE_APPROVAL_POLICY_DIGEST_ANNOTATION.to_string(),
+            bound.digest(),
+        );
+        data.insert(CONFIRMATION_KEY_FILE.to_string(), confirmation_pem); // public SPKI only
+        data.insert(APPROVAL_POLICY_FILE.to_string(), snapshot);
+    }
+
+    // PLAT-15.2: the evidence keyring, exactly when the plan binds a point.
+    data.extend(evidence_member(restore, trust)?);
 
     Ok(bundle_object(
         name,
         namespace,
         restore_uid,
         annotations,
-        [
-            (
-                APPROVAL_DOC_FILE.to_string(),
-                approval.spec.approval_bytes.clone(),
-            ),
-            (
-                APPROVAL_SIG_FILE.to_string(),
-                approval.spec.sidecar_bytes.clone(),
-            ),
-            (APPROVER_KEY_FILE.to_string(), key.spki_pem.clone()), // public SPKI only
-            (ALLOWED_CLUSTERS_FILE.to_string(), allowed_bytes),
-        ]
-        .into_iter()
-        .chain(evidence_member(restore, trust)?)
-        .collect(),
+        data,
     ))
 }
 
@@ -2275,6 +2612,24 @@ pub fn execution_contract_env(
     trust: &crate::trust::ResolvedTrust,
     now: DateTime<Utc>,
 ) -> Result<Vec<(String, String)>, RestoreError> {
+    execution_contract_env_with_policy(restore, approval, trust, &EffectivePolicy::Legacy, now)
+}
+
+/// [`execution_contract_env`], under the namespace's approval-policy binding —
+/// PLAT-19.2. A v2 bundle's two extra members are pinned too:
+/// `POLICY_SNAPSHOT_SHA256_ENV` and `CONFIRMATION_KEY_SHA256_ENV`, the two
+/// variables execution contract v2 reserved for exactly this.
+///
+/// # Errors
+///
+/// As [`execution_contract_env`].
+pub fn execution_contract_env_with_policy(
+    restore: &Restore,
+    approval: &Approval,
+    trust: &crate::trust::ResolvedTrust,
+    policy: &EffectivePolicy,
+    now: DateTime<Utc>,
+) -> Result<Vec<(String, String)>, RestoreError> {
     use logweir_core::execution_contract as contract;
 
     // **ONE ENTRY POINT, TWO ARMS** — PLAT-14.3b. The Job template's digests
@@ -2287,7 +2642,7 @@ pub fn execution_contract_env(
         return standing_execution_contract_env(restore, &bundle, &schedule_uid);
     }
 
-    let bundle = approval_bundle_config_map(restore, approval, trust, now)?;
+    let bundle = approval_bundle_config_map_with_policy(restore, approval, trust, policy, now)?;
     let data = bundle.data.as_ref().ok_or_else(|| {
         RestoreError::Materialization("the rendered approval bundle has no data".to_string())
     })?;
@@ -2353,6 +2708,19 @@ pub fn execution_contract_env(
     ]
     .into_iter()
     .chain(evidence_keys_env(data))
+    .chain(
+        // PLAT-19.2: PRESENT EXACTLY WHEN THE BUNDLE CARRIES THE MEMBERS, so a
+        // v1 bundle's environment is byte-for-byte what it was.
+        [
+            (contract::POLICY_SNAPSHOT_SHA256_ENV, APPROVAL_POLICY_FILE),
+            (contract::CONFIRMATION_KEY_SHA256_ENV, CONFIRMATION_KEY_FILE),
+        ]
+        .into_iter()
+        .filter_map(|(env, file)| {
+            data.get(file)
+                .map(|bytes| (env.to_string(), digest(bytes.as_bytes())))
+        }),
+    )
     .collect())
 }
 
@@ -2695,6 +3063,54 @@ pub fn runner_job_spec_with_destinations(
     now: DateTime<Utc>,
     destinations: Option<&RestoreDestinations>,
 ) -> Result<RunnerJobSpec, RestoreError> {
+    runner_job_spec_with_policy(
+        restore,
+        cluster,
+        approver_key_ids,
+        approval,
+        trust,
+        &EffectivePolicy::Legacy,
+        now,
+        destinations,
+    )
+}
+
+/// Whether the Job this Restore gets carries the v2 authorization members —
+/// an authorization document v2 under an explicit binding. The ONE predicate
+/// the argv, the mount table and the environment all read, so the three can
+/// never disagree about which bundle the runner was handed.
+#[must_use]
+pub fn carries_authorization_v2(
+    restore: &Restore,
+    approval: &Approval,
+    policy: &EffectivePolicy,
+) -> bool {
+    restore.spec.authorization.is_none()
+        && policy.bound().is_some()
+        && is_authorization_v2(approval)
+}
+
+/// [`runner_job_spec_with_destinations`], under the namespace's approval-policy
+/// binding — PLAT-19.2. A v2-authorised Restore's Job mounts the two extra
+/// bundle members and passes [`APPROVAL_POLICY_ARG`] and
+/// [`CONFIRMATION_KEY_ARG`], and its environment pins both digests; nothing
+/// else about the Job changes.
+///
+/// # Errors
+///
+/// As [`runner_job_spec_with_destinations`].
+#[allow(clippy::too_many_arguments)]
+pub fn runner_job_spec_with_policy(
+    restore: &Restore,
+    cluster: &KafkaCluster,
+    approver_key_ids: &[String],
+    approval: &Approval,
+    trust: &crate::trust::ResolvedTrust,
+    policy: &EffectivePolicy,
+    now: DateTime<Utc>,
+    destinations: Option<&RestoreDestinations>,
+) -> Result<RunnerJobSpec, RestoreError> {
+    let v2 = carries_authorization_v2(restore, approval, policy);
     let name = restore.name_any();
     let namespace = restore
         .namespace()
@@ -2804,6 +3220,18 @@ pub fn runner_job_spec_with_destinations(
         },
         args: {
             let mut argv = runner_argv(restore, approver_key_ids);
+            // PLAT-19.2: THE TWO v2 MEMBERS, BY FLAG. An old runner image
+            // handed these fails to parse them and exits before it dispatches
+            // — the version-skew refusal the destination flag below relies on
+            // too — rather than verifying a v2 document as if it were v1.
+            if v2 {
+                argv.extend([
+                    APPROVAL_POLICY_ARG.to_string(),
+                    format!("{APPROVAL_MOUNT_PATH}/{APPROVAL_POLICY_FILE}"),
+                    CONFIRMATION_KEY_ARG.to_string(),
+                    format!("{APPROVAL_MOUNT_PATH}/{CONFIRMATION_KEY_FILE}"),
+                ]);
+            }
             // THE VERSION-SKEW HANDSHAKE (D2 §3.5). An old runner image handed
             // a destination-backed Job fails to parse this flag and exits
             // before it dispatches, rather than building its stores out of
@@ -2852,7 +3280,7 @@ pub fn runner_job_spec_with_destinations(
                             ),
                         ]
                     } else {
-                        vec![
+                        let mut items = vec![
                             (APPROVAL_DOC_FILE.to_string(), APPROVAL_DOC_FILE.to_string()),
                             (APPROVAL_SIG_FILE.to_string(), APPROVAL_SIG_FILE.to_string()),
                             (APPROVER_KEY_FILE.to_string(), APPROVER_KEY_FILE.to_string()),
@@ -2860,8 +3288,23 @@ pub fn runner_job_spec_with_destinations(
                                 ALLOWED_CLUSTERS_FILE.to_string(),
                                 ALLOWED_CLUSTERS_FILE.to_string(),
                             ),
-                        ]
+                        ];
+                        // PLAT-19.2: the frozen policy snapshot and the
+                        // console key, exactly when the bundle carries them.
+                        if v2 {
+                            items.push((
+                                APPROVAL_POLICY_FILE.to_string(),
+                                APPROVAL_POLICY_FILE.to_string(),
+                            ));
+                            items.push((
+                                CONFIRMATION_KEY_FILE.to_string(),
+                                CONFIRMATION_KEY_FILE.to_string(),
+                            ));
+                        }
+                        items
                     };
+                    // PLAT-15.2: the evidence keyring, exactly when the plan
+                    // binds a recovery point.
                     if plan_binds_point(restore) {
                         items.push((
                             EVIDENCE_KEYS_FILE.to_string(),
@@ -2900,7 +3343,9 @@ pub fn runner_job_spec_with_destinations(
                 // default install that sets none.
                 _ => env.extend(backup::archive_addressing_env()),
             }
-            env.extend(execution_contract_env(restore, approval, trust, now)?);
+            env.extend(execution_contract_env_with_policy(
+                restore, approval, trust, policy, now,
+            )?);
             env.extend(projection.env_literal);
             env
         },
@@ -4628,6 +5073,7 @@ async fn write_approval_bundle_config_map(
     restore: &Restore,
     approval: &Approval,
     trust: &crate::trust::ResolvedTrust,
+    policy: &EffectivePolicy,
     now: DateTime<Utc>,
     client: &kube::Client,
     namespace: &str,
@@ -4644,7 +5090,7 @@ async fn write_approval_bundle_config_map(
     let desired = if restore.spec.authorization.is_some() {
         standing_bundle_for(restore, approval, trust, now)?
     } else {
-        approval_bundle_config_map(restore, approval, trust, now)?
+        approval_bundle_config_map_with_policy(restore, approval, trust, policy, now)?
     };
     let bundle_name = approval_bundle_config_map_name(&restore_name);
     let maps: Api<ConfigMap> = Api::namespaced(client.clone(), namespace);
@@ -4864,7 +5310,35 @@ pub async fn reconcile_restore_with_runner_image(
     now: DateTime<Utc>,
     runner: &job::RunnerImage,
 ) -> Result<RestoreOutcome, RestoreError> {
-    match reconcile_restore_inner(restore, client, scorecard, verify, now, runner).await {
+    reconcile_restore_with_policy(
+        restore,
+        client,
+        scorecard,
+        verify,
+        now,
+        runner,
+        &ApprovalPolicySet::default(),
+    )
+    .await
+}
+
+/// [`reconcile_restore_with_runner_image`], under the installation's approval
+/// policies — PLAT-19.2. A seventh parameter on a new function rather than on
+/// the old one, for the reason that function gives for its own sixth.
+///
+/// # Errors
+///
+/// [`RestoreError`] for anything that is not an outcome.
+pub async fn reconcile_restore_with_policy(
+    restore: &Restore,
+    client: &kube::Client,
+    scorecard: ScorecardOracle<'_>,
+    verify: VerifyOracle<'_>,
+    now: DateTime<Utc>,
+    runner: &job::RunnerImage,
+    policies: &ApprovalPolicySet,
+) -> Result<RestoreOutcome, RestoreError> {
+    match reconcile_restore_inner(restore, client, scorecard, verify, now, runner, policies).await {
         Err(RestoreError::Materialization(message)) => {
             let name = restore.name_any();
             let namespace = restore
@@ -4947,11 +5421,15 @@ async fn reconcile_restore_inner(
     verify: VerifyOracle<'_>,
     now: DateTime<Utc>,
     runner: &job::RunnerImage,
+    policies: &ApprovalPolicySet,
 ) -> Result<RestoreOutcome, RestoreError> {
     let name = restore.name_any();
     let namespace = restore
         .namespace()
         .ok_or_else(|| RestoreError::NoNamespace(name.clone()))?;
+    // PLAT-19.2: what this namespace is bound to NOW, resolved once per pass
+    // and used for admission, the bundle, the argv and the environment alike.
+    let effective_policy = policies.resolve(&namespace);
     // The Job is named after the CR, VERBATIM.
     let job_name = name.clone();
     let jobs: Api<Job> = Api::namespaced(client.clone(), &namespace);
@@ -5035,11 +5513,15 @@ async fn reconcile_restore_inner(
         let standing_inputs = standing_trust
             .as_ref()
             .map(|trust| StandingAdmission { trust, now });
-        let admission = admit(
+        let admission = admit_with_policy(
             restore,
             approval.as_ref(),
             cluster.as_ref(),
             standing_inputs.as_ref(),
+            Some(&PolicyAdmission {
+                policy: &effective_policy,
+                now,
+            }),
         );
         match &admission {
             RestoreAdmission::Ok => {}
@@ -5180,12 +5662,13 @@ async fn reconcile_restore_inner(
         // One exact verified key, not every key the roster happens to contain.
         // The runner pins this id and verifies the detached signature again.
         let key_ids = vec![matched_key_id];
-        let mut spec = runner_job_spec_with_destinations(
+        let mut spec = runner_job_spec_with_policy(
             restore,
             &cluster,
             &key_ids,
             &approval,
             &trust,
+            &effective_policy,
             now,
             destinations.as_deref(),
         )?;
@@ -5201,8 +5684,16 @@ async fn reconcile_restore_inner(
         // deadline fires — measured live on the `Backup` path, and the reason
         // every scheduled backup was failing as an unexplained `NoExitCode`.
         write_plan_config_map(restore, client, &namespace, destinations.as_deref()).await?;
-        write_approval_bundle_config_map(restore, &approval, &trust, now, client, &namespace)
-            .await?;
+        write_approval_bundle_config_map(
+            restore,
+            &approval,
+            &trust,
+            &effective_policy,
+            now,
+            client,
+            &namespace,
+        )
+        .await?;
 
         let created = match jobs
             .create(&PostParams::default(), &job::build(&spec))
@@ -5789,7 +6280,11 @@ pub const REFERENT_NOT_FOUND_REASON: &str = "ReferentNotFound";
 /// [`unobserved_scorecard`]'s answer through the same shape: the `?` inside
 /// the future is what turns "no handle" into NOT OBSERVED, so every scorecard
 /// field is omitted from the status rather than written as nothing.
-async fn reconcile(restore: Arc<Restore>, ctx: Arc<Context>) -> Result<Action, RestoreError> {
+async fn reconcile(
+    restore: Arc<Restore>,
+    ctx: Arc<Context>,
+    approval_policies: Arc<ApprovalPolicySet>,
+) -> Result<Action, RestoreError> {
     let archive = ctx.archive.clone();
     let oracle = move |key: String| -> BoxFuture<'static, Option<ScorecardObservation>> {
         let handle = archive.clone();
@@ -5804,13 +6299,14 @@ async fn reconcile(restore: Arc<Restore>, ctx: Arc<Context>) -> Result<Action, R
         })
     };
     let verify = crate::verification::verify_oracle(ctx.archive.clone(), ctx.client.clone());
-    let outcome = reconcile_restore_with_runner_image(
+    let outcome = reconcile_restore_with_policy(
         &restore,
         &ctx.client,
         &oracle,
         &verify,
         Utc::now(),
         &ctx.runner_image,
+        &approval_policies,
     )
     .await?;
     Ok(action_for(&outcome))
@@ -5888,6 +6384,7 @@ async fn reconcile_with_trust(
     ctx: Arc<Context>,
     policies: reflector::Store<crate::crds::trust_policy::TrustPolicy>,
     synced: Arc<AtomicBool>,
+    approval_policies: Arc<ApprovalPolicySet>,
 ) -> Result<Action, RestoreError> {
     if synced.load(Ordering::Relaxed) {
         let value = serde_json::to_value(&*restore).ok();
@@ -5964,7 +6461,7 @@ async fn reconcile_with_trust(
             }
         }
     }
-    reconcile(restore, ctx).await
+    reconcile(restore, ctx, approval_policies).await
 }
 
 /// Run the `Restore` controller until the process ends.
@@ -5982,10 +6479,14 @@ async fn reconcile_with_trust(
 /// once each in `main`: an unset field is the compiled-in constant, a set one
 /// the image this cluster's nodes hold and the pull policy that makes it
 /// resolvable.
+///
+/// `approval_policies` is the installation's approval-policy document, read
+/// once by `main` (PLAT-19.2), and shared by every per-namespace copy.
 pub async fn controller(
     client: kube::Client,
     archive: Option<Arc<Store>>,
     runner_image: job::RunnerImage,
+    approval_policies: Arc<ApprovalPolicySet>,
 ) {
     // D0 STAGE 5: ONE WATCH PER WATCHED NAMESPACE. `crate::scope` is the whole
     // cluster unless `LOGWEIR_WATCH_NAMESPACES` names the execution
@@ -6003,6 +6504,7 @@ pub async fn controller(
             archive.clone(),
             runner_image.clone(),
             policies.clone(),
+            Arc::clone(&approval_policies),
             namespace,
         )
     })
@@ -6016,6 +6518,7 @@ fn controller_in(
     archive: Option<Arc<Store>>,
     runner_image: job::RunnerImage,
     shared: crate::trust::SharedPolicies,
+    approval_policies: Arc<ApprovalPolicySet>,
     namespace: Option<String>,
 ) -> impl std::future::Future<Output = ()> + Send {
     let api: Api<Restore> = crate::scope::api(&client, namespace.as_deref());
@@ -6048,7 +6551,13 @@ fn controller_in(
             })
             .run(
                 move |object, context| {
-                    reconcile_with_trust(object, context, policies.clone(), Arc::clone(&synced))
+                    reconcile_with_trust(
+                        object,
+                        context,
+                        policies.clone(),
+                        Arc::clone(&synced),
+                        Arc::clone(&approval_policies),
+                    )
                 },
                 error_policy,
                 ctx,

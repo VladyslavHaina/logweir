@@ -201,7 +201,26 @@ pub const TERMINAL_STATES: &[&str] = &[
     // reachable; it is here so the controller does not have to grow a second
     // reason vocabulary when they land.
     TERMINAL_STATE_POINT_BINDING_MISMATCH,
+    // PLAT-19.2 — the two admission refusals an approval POLICY adds. Both are
+    // properties of two immutable specs and the installation's binding, so a
+    // requeue could never rescue them.
+    TERMINAL_STATE_APPROVAL_POLICY_MISMATCH,
+    TERMINAL_STATE_AUTHORIZATION_EXPIRED,
 ];
+
+/// PLAT-19.2: the Approval a `Restore` names was issued under a different
+/// approval policy, digest or mode than the namespace is bound to NOW — a v1
+/// approval under an explicit binding, a v2 document in an unbound namespace,
+/// or a document whose policy the installation has since replaced (D0: "a
+/// binding/policy mismatch requires re-confirmation/re-approval"). THE
+/// DOWNGRADE REFUSAL: an ordinary confirmation presented for a Restore in a
+/// governed namespace ends here with no Job.
+pub const TERMINAL_STATE_APPROVAL_POLICY_MISMATCH: &str = "ApprovalPolicyMismatch";
+
+/// PLAT-19.2: the authorization document v2 an Approval carries expired
+/// before this Restore was admitted. Both specs are immutable, so the only way
+/// forward is a new Restore and a new confirmation.
+pub const TERMINAL_STATE_AUTHORIZATION_EXPIRED: &str = "AuthorizationExpired";
 
 // ===========================================================================
 // D3 §2.2 — the `RunnerReady` condition, and the states a run reaches when
