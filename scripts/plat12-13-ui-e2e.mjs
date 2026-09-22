@@ -876,7 +876,7 @@ async function selectorOffersEveryPointAndNoPlan(browser, base) {
     check(!offered.includes(points.notAPoint.uid),
       "a Backup the controller refused (phase " + points.notAPoint.phase + ") is not a recovery " +
       "point and must not be offered");
-    check(await page.locator("a[href*=\"uid=" + points.old.uid + "\"]").count() >= 1,
+    check(await page.locator(restoreLinkTo(points.old.uid)).count() >= 1,
       "and the row links to that point BY UID");
 
     // The disclosed coverage is on the row, in RFC 3339 and not as an integer.
@@ -922,16 +922,34 @@ async function selectorOffersEveryPointAndNoPlan(browser, base) {
   }
 }
 
+/**
+ * The anchor that opens the restore wizard on ONE point, and no other anchor.
+ *
+ * `restorePointRoute` (`ui/pages/restore-wizard.js`) spells it
+ * `#/restore?[ns=…&]backup=…&uid=…`. A bare `a[href*="uid=…"]` also matches the
+ * operation-view link the same row carries, so the route prefix is part of the
+ * selector.
+ */
+function restoreLinkTo(uid) {
+  return "a[href^=\"#/restore?\"][href*=\"uid=" + uid + "\"]";
+}
+
 /** PLAT-11.1: the link on a history row opens the wizard ON that point. */
 async function historyRowPreselectsThatPoint(browser, base) {
   const page = await browser.newPage({ viewport: { width: 1280, height: 1200 } });
   try {
     await page.goto(base + "#/history?ns=" + namespace);
     await page.waitForSelector("#view-slot table");
-    const link = page.locator("a[href*=\"uid=" + points.old.uid + "\"]");
+    // SCOPED TO THE RESTORE ROUTE. The row carries the uid in TWO anchors
+    // since PLAT-14.1: "Restore this point" (`#/restore?…&uid=`) and "Follow
+    // this run" (`#/operations?…&uid=`). A locator matching any anchor with
+    // the uid counted both and failed `count() === 1` against a page that was
+    // right (lab-refresh-7, 03:43Z). The count is still exact, so a row with
+    // no restore link, or with two, still fails.
+    const link = page.locator(restoreLinkTo(points.old.uid));
     check(await link.count() === 1, "the completed Backup's row carries one Restore-this-point link");
     check((await link.innerText()).trim() === "Restore this point", await link.innerText());
-    check(await page.locator("a[href*=\"uid=" + points.notAPoint.uid + "\"]").count() === 0,
+    check(await page.locator(restoreLinkTo(points.notAPoint.uid)).count() === 0,
       "and a Backup the controller refused (phase " + points.notAPoint.phase + ") carries none");
     await shot(page, "history-restore-this-point");
 
