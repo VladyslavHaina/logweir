@@ -200,16 +200,20 @@ async function waitForText(page, needle, label) {
 // ------------------------------------------------- the recorded verdicts
 
 /** The destination badge `status` means, computed here from the object
- *  kubectl read and NOT from the API's answer: `valid: true` is the only
- *  green, `valid: false` is "not valid", and an absent verdict is "not judged
- *  yet" (`ui/render.js::destinationVerdict`). */
+ *  kubectl read and NOT from the API's answer. The controller records its
+ *  verdict as the `Valid` CONDITION and a promoted `status.reason`; only
+ *  `Valid=True` is green, a `Valid` condition with any other status is "not
+ *  valid", and no `Valid` condition at all is "not judged yet"
+ *  (`ui/render.js::destinationVerdict` over the API's `status_view`). */
 function expectedDestinationBadge(status) {
   const s = status || {};
   const reason = typeof s.reason === "string" && s.reason.length > 0 ? " (" + s.reason + ")" : "";
-  if (s.valid === true) {
+  const condition = (Array.isArray(s.conditions) ? s.conditions : [])
+    .find((c) => c.type === "Valid");
+  if (condition !== undefined && condition.status === "True") {
     return { kind: "green", caption: "valid" + reason, arm: "valid" };
   }
-  if (s.valid === false) {
+  if (condition !== undefined) {
     return { kind: "unverified", caption: "not valid" + reason, arm: "notValid" };
   }
   return { kind: "pending", caption: "not judged yet", arm: "unjudged" };
