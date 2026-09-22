@@ -12,9 +12,14 @@
 // catalog sync and Restore admission below is reconciled by the ONE controller
 // on this cluster: the shared lab's `weirkeeper` in `logweir-scram-local`,
 // which watches every namespace and is only ever READ here (its pod, image and
-// its log lines about this namespace are recorded). No run status is written
-// by this harness and no second controller is deployed; the harness refuses to
-// start if any other weirkeeper Deployment exists.
+// its log lines about this namespace are recorded). No second controller is
+// deployed; the harness refuses to start if any other weirkeeper Deployment
+// exists. ONE status field is written by this harness, and it is recorded
+// under `faultInjection`: `Backup.status.windowCovered`, copied from the
+// catalog's coveredFrom/coveredTo for the same backup set, because the lab's
+// installation policy allowlists no controller-identity evidence location and
+// the lab controller therefore never reads the receipt that carries it. The
+// journey first asserts the console offers NO Restore without it.
 //
 // WHAT THIS RUN PROVISIONS, all inside one owner-labelled namespace: the
 // no-verb `logweir-runner` account; copies (never printed) of the lab's
@@ -1164,7 +1169,6 @@ async function main() {
         "a healthy point's availability is not the catalog's green word: " + JSON.stringify(row));
       check(row.verification === p.verification && row.verificationGreens >= 1,
         "a verified point's verification is not the catalog's green word: " + JSON.stringify(row));
-      check(row.restoreHref !== null, "a healthy point offers no Restore");
     }
     await shot(page, "13-history-healthy-verified");
     record("PLAT-10.2 verified runs: the lab controller's catalog says Available/Verified and the detail renders exactly that", {
@@ -1175,6 +1179,71 @@ async function main() {
         selectable: p.selectable, signerKeyId: p.signerKeyId })),
       onScreen: [rowA1, rowB1].map((r) => ({ availability: r.availability,
         verification: r.verification, greens: r.greens })),
+    });
+
+    // ================================================================== 8b
+    // THE LAB CANNOT MAKE THESE RUNS RESTORABLE, AND THE CONSOLE SAYS SO.
+    // `isRecoveryPoint` (PLAT-11.1) requires `status.windowCovered`, which the
+    // controller writes only after IT reads the signed receipt with the
+    // destination's evidence grant. The lab's installation policy allowlists no
+    // `evidence.controllerIdentityLocations`, so every run here is
+    // NotAttempted/ControllerIdentityNotAllowlisted and carries no window.
+    // CONTROL: a catalog-selectable point with no controller-observed window is
+    // offered NO Restore -- the page does not invent a window.
+    const verdictA = ((terminalA.status.evidence || {}).verification) || {};
+    check(terminalA.status.windowCovered === undefined && terminalB.status.windowCovered === undefined,
+      "a lab-controller run published a covered window; this step's premise is wrong");
+    check(rowA1.restoreHref === null && rowB1.restoreHref === null,
+      "a point with no controller-observed window was offered a Restore");
+    check(await page.evaluate(() => document.querySelector("#schedule-restore-latest") === null),
+      "a page-level Restore was offered with no recovery point");
+    control("a catalog-selectable run whose window the controller never observed offers no Restore", {
+      runs: [runA.metadata.name, runB.metadata.name],
+      controllerVerification: { result: verdictA.result,
+        detail: String(verdictA.detail || "").slice(0, 400) },
+      windowCovered: "absent on both",
+    });
+
+    // WINDOW COMPLETION -- A HARNESS STATUS WRITE, RECORDED AS ONE. The window
+    // the controller would have written is the signed receipt's `covered`,
+    // which the lab controller's catalog sync Job DID read (archiveRead grant)
+    // and published as the point's coveredFrom/coveredTo. The harness copies
+    // exactly that onto each run's status so the restore-link journeys below
+    // can run; every row after this point that depends on a Restore link is
+    // reported as depending on this write.
+    function completeWindow(run, catalogPoints) {
+      const from = Math.min(...catalogPoints.map((p) => Date.parse(p.coveredFrom)));
+      const to = Math.max(...catalogPoints.map((p) => Date.parse(p.coveredTo)));
+      check(Number.isFinite(from) && Number.isFinite(to) && from <= to,
+        "the catalog published no covered window for " + run.metadata.name);
+      kube(["-n", namespace, "patch", "backup", run.metadata.name, "--subresource=status",
+        "--type=merge", "-p", JSON.stringify({ status: { windowCovered:
+          { fromMs: from, toMs: to } } })]);
+      const stored = kubeJson(["-n", namespace, "get", "backup", run.metadata.name]);
+      check(stored.status.windowCovered.fromMs === from && stored.status.windowCovered.toMs === to,
+        "the window was not stored on " + run.metadata.name);
+      result.faultInjection.push({ kind: "Backup.status.windowCovered", run: run.metadata.name,
+        uid: run.metadata.uid, fromMs: from, toMs: to,
+        source: "catalog " + CATALOG + " coveredFrom/coveredTo for backupId " +
+          run.status.backupId,
+        why: "lab policy allowlists no evidence.controllerIdentityLocations, so the lab " +
+          "controller cannot read the receipt and never writes the window itself" });
+      return stored;
+    }
+    completeWindow(terminalA, pA);
+    completeWindow(terminalB, pB);
+    await freshPage(detailRoute);
+    await waitForSelector(page, "#schedule-restore-latest", "the page-level Restore after completion");
+    const rowA1r = await historyRow(runA.metadata.name);
+    const rowB1r = await historyRow(runB.metadata.name);
+    check(rowA1r.restoreHref !== null && rowB1r.restoreHref !== null,
+      "a window-completed point still offers no Restore");
+    rowA1.restoreHref = rowA1r.restoreHref;
+    rowB1.restoreHref = rowB1r.restoreHref;
+    await shot(page, "13b-history-window-completed");
+    record("PLAT-10.2 with the receipt's window on the run, each real point carries its own Restore (harness status write: windowCovered)", {
+      rowRestoreA: rowA1r.restoreHref, rowRestoreB: rowB1r.restoreHref,
+      dependsOn: "Backup.status.windowCovered written by this harness from the catalog",
     });
 
     // =================================================================== 9
@@ -1400,6 +1469,12 @@ async function main() {
     const runV = await backUpNow(doomed);
     const terminalV = await waitForTerminalBackup(runV.metadata.name, "the archived schedule's run");
     check(terminalV.status.phase === "Succeeded", "the archived schedule's run did not succeed");
+    const archivedSync = await syncCatalog("after-archived-run");
+    const archivedPage = await catalogPoints("after-archived-run");
+    const pV = pointOf(archivedPage, terminalV);
+    check(pV.length >= 1 && pV.every((p) => p.availability === "Available"),
+      "the catalog does not hold the archived schedule's run");
+    completeWindow(terminalV, pV);
     kube(["-n", namespace, "delete", "backupschedule", doomed, "--wait=true"]);
     const gone = kube(["-n", namespace, "get", "backupschedule", doomed], { expected: [0, 1] });
     check(gone.status !== 0, "the schedule was not deleted");
@@ -1431,7 +1506,10 @@ async function main() {
     await shot(page, "21-archived-schedule");
     record("PLAT-10.2 a deleted schedule keeps its real history and offers no schedule controls", {
       schedule: doomed, run: runV.metadata.name, runUid: runV.metadata.uid,
+      catalogSync: archivedSync.status.lastSyncJob.name,
+      catalogPoint: pV.map((p) => [p.availability, p.verification]),
       restoreLink: archivedRow.restore, controlsOffered: controls,
+      dependsOn: "Backup.status.windowCovered written by this harness from the catalog",
     });
 
     // ================================================================== 15
