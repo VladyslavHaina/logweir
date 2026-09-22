@@ -374,10 +374,21 @@ function seedConnection(name, servers) {
 }
 
 function seedDestination(name) {
-  kube(["-n", namespace, "create", "secret", "generic", name + "-access",
-    "--from-literal=access-key-id=minioadmin",
-    "--from-literal=secret-access-key=minioadmin"]);
-  kube(["-n", namespace, "label", "secret", name + "-access", OWNER_LABEL]);
+  // The fixture names the already-provisioned lab credential by reference.
+  // Copy it into the owned namespace without decoding or logging any value;
+  // cross-namespace Secret references are not valid Kubernetes references.
+  const source = kubeJson(["-n", LAB, "get", "secret", "logweir-s3"]);
+  delete source.metadata.uid;
+  delete source.metadata.resourceVersion;
+  delete source.metadata.creationTimestamp;
+  delete source.metadata.managedFields;
+  delete source.metadata.ownerReferences;
+  delete source.metadata.annotations;
+  source.metadata.name = name + "-access";
+  source.metadata.namespace = namespace;
+  source.metadata.labels = Object.assign({}, source.metadata.labels || {},
+    { "logweir.dev/test-owner": OWNER });
+  kube(["-n", namespace, "apply", "-f", "-"], { input: JSON.stringify(source) });
   kube(["-n", namespace, "create", "-f", "-"], {
     input: JSON.stringify({
       apiVersion: "logweir.dev/v1alpha1", kind: "BackupDestination",
@@ -782,10 +793,11 @@ async function main() {
       "#schedule-readiness-verdict .preflight-head .badge")).trim();
     const expected = { ready: "ready", notReady: "not ready", failed: "failed: no result",
       cancelled: "cancelled: no result", pending: "pending", queued: "queued",
-      running: "running" }[verdictState] || "unknown";
+      running: "running" }[initialAnswered.state] || "unknown";
     check(badgeText === expected,
-      "the badge says " + JSON.stringify(badgeText) + " while the route answered state " +
-        JSON.stringify(verdictState) + " (which renders as " + JSON.stringify(expected) + ")");
+      "the initial badge says " + JSON.stringify(badgeText) + " while its initial route answer " +
+        "was " + JSON.stringify(initialAnswered.state) + " (which renders as " +
+        JSON.stringify(expected) + ")");
     check(answered.id === preflight.metadata.name,
       "the readiness answer is about a different Preflight than the one in the cluster");
     // AND IT IS NOT READY. The source cannot be resolved at all, so a green
@@ -796,6 +808,10 @@ async function main() {
       document.querySelectorAll("#schedule-readiness-verdict .preflight-head .badge-green")
         .length);
     check(greenVerdict === 0, "a green readiness badge was rendered for an unreachable source");
+    check(["Completed", "Failed", "Cancelled"].includes(String((preflight.status || {}).phase || "")),
+      "the isolated controller did not record a terminal Preflight phase");
+    check(verdictState !== "ready",
+      "the terminal API projection marked an unreachable source ready");
     await shot(page, "07-readiness");
     record("the readiness check starts a real Preflight and renders its own recorded verdict", {
       preflight: preflights[0].metadata.name, uid: preflights[0].metadata.uid,
