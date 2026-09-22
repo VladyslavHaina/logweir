@@ -158,10 +158,21 @@ def test_ui_adapter_a_missing_result_document_is_no_rows(tmp_path):
     assert suites.SUITES["plat12-13"].adapter(ctx(tmp_path), {"run": 1}) == {}
 
 
-def test_plat10_is_the_only_suite_that_accepts_a_nonzero_exit():
+def test_only_documented_suites_accept_a_nonzero_exit():
     lenient = {s.id: s.accept_rcs for s in suites.SUITES.values() if s.accept_rcs != frozenset({0})}
-    assert lenient == {"plat10": frozenset({0, 3})}
-    assert suites.SUITES["plat10"].why_rcs
+    assert lenient == {"plat10": frozenset({0, 3}), "plat12-13": frozenset({0, 1}),
+                       "plat11-2": frozenset({0, 1})}
+    assert all(suites.SUITES[s].why_rcs for s in lenient)
+
+
+def test_a_failed_ui_run_without_its_cleanup_record_yields_no_rows(tmp_path):
+    """The twin of the accepted exit 1: a crash that wrote no cleanup record
+    is not trusted, so every row it did record goes MISSING."""
+    write(tmp_path, "plat12-13", "live-result-x.json", {"journeys": [{"journey": "ok"}]})
+    assert suites.SUITES["plat12-13"].adapter(ctx(tmp_path), {"run": 1}) == {}
+    write(tmp_path, "plat12-13", "live-result-x.json", {"journeys": [{"journey": "ok"}],
+                                                        "cleanup": [{"namespace": "n"}]})
+    assert suites.SUITES["plat12-13"].adapter(ctx(tmp_path), {"run": 1}) == {"ok": PASS}
 
 
 def test_a_whole_catalogue_run_with_every_row_passing_is_ok_and_gates_stay_skipped():

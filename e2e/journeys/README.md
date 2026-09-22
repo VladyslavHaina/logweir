@@ -51,6 +51,16 @@ planted-failure twins in `test_core.py`):
 | `FAIL` | a row failed, was missing, was `NOT-RUN`, `NOT-REACHED`, `BLOCKED`, `PARTIAL` or anything else, or its harness did not exit cleanly |
 | `SKIPPED` | the journey declares `requires: lab-refresh-8` or `requires: PLAT-19.2` and that gate was not opened. The reason is printed. Never a pass. |
 
+A harness's exit code counts too. Anything other than 0 fails every journey reading
+that suite, except where `suites.py` states why (`why_rcs`, pinned by
+`test_catalogue.py`):
+- plat10 exits 3 exactly when it records a `blocked` row, and such a row is never a pass.
+- plat12-13 and plat11-2 exit 1 when one of their journeys throws. Each records a
+  journey only after all its checks hold, and stops at the first throw, so earlier rows
+  are fully asserted.
+  - This is accepted only when their result document records their namespace cleanup.
+  - The failure is kept as a suite note in `summary.json`.
+
 `summary.ok` needs four things:
 - no FAIL;
 - at least one PASS (a run of only SKIPPED is not ok);
@@ -98,8 +108,10 @@ things.
   - every value of the shared lab's Secrets (`source-scram`, `target-scram`,
     `logweir-s3`, `logweir-signing-key`, `minio-root`), raw and base64;
   - the approver and signing private keys;
-  - every value in the run's private tree (plat07's broker passwords, d2's
-    minted keys).
+  - every secret in the run's private tree: plat07's `passwords.json`, d2's
+    `credentials.json`, and every private key. State files are never needles: their
+    strings are namespace names, and taking them made a live trial report 249 false
+    hits.
 
 These are loaded into memory only and never written. `core.sweep_selftest` plants a
 minted exact value, a positional secret and a PEM header, and the run fails unless

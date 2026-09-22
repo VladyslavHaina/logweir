@@ -120,6 +120,10 @@ def ui_adapter(pattern: str) -> Callable[[Ctx, dict[str, int], str], dict[str, s
 
     def adapt(ctx: Ctx, rcs: dict[str, int], suite: str) -> dict[str, str]:
         doc = _json(_newest(ctx.out(suite), pattern) or pathlib.Path("/nonexistent"))
+        if rcs.get("run") not in (None, 0, 3) and not doc.get("cleanup"):
+            # A failed run whose document does not record its own cleanup is
+            # a crash, not a journey failure: nothing it recorded is trusted.
+            return {}
         rows = {j["journey"]: PASS for j in doc.get("journeys") or [] if j.get("journey")}
         for b in doc.get("blocked") or []:
             rows.setdefault(b.get("journey", "?"), "BLOCKED")
@@ -187,12 +191,22 @@ SUITES: dict[str, Suite] = {s.id: s for s in [
         "plat12-13", "scripts/plat12-13-ui-e2e.mjs", "node", ("run",), (), frozenset({"run"}),
         lambda c: _ui_env(c, "plat12-13", "lw-plat20-p1213-"),
         lambda c, r: ui_adapter("live-result-*.json")(c, r, "plat12-13"),
-        lambda c: [f"lw-plat20-p1213-{c.stamp}"], timeout=900),
+        lambda c: [f"lw-plat20-p1213-{c.stamp}"], timeout=900,
+        accept_rcs=frozenset({0, 1}),
+        why_rcs="plat12-13 records a journey only after every check in it held and stops at the first "
+                "journey that throws (record() at scripts/plat12-13-ui-e2e.mjs:104), so rows recorded before a later "
+                "journey's failure are fully asserted; exit 1 is accepted only with a result "
+                "document that records its namespace cleanup, and the failure is kept as a note"),
     Suite(
         "plat11-2", "scripts/plat11-2-ui-e2e.mjs", "node", ("run",), (), frozenset({"run"}),
         lambda c: _ui_env(c, "plat11-2", "lw-plat20-p112-"),
         lambda c, r: ui_adapter("result.json")(c, r, "plat11-2"),
-        lambda c: [f"lw-plat20-p112-{c.stamp}"], timeout=900),
+        lambda c: [f"lw-plat20-p112-{c.stamp}"], timeout=900,
+        accept_rcs=frozenset({0, 1}),
+        why_rcs="plat11-2 records a journey only after every check in it held and stops at the first "
+                "journey that throws (record() at scripts/plat11-2-ui-e2e.mjs:141), so rows recorded before a later "
+                "journey's failure are fully asserted; exit 1 is accepted only with a result "
+                "document that records its namespace cleanup, and the failure is kept as a note"),
     Suite(
         "plat10", "scripts/plat10-ui-e2e.mjs", "node", ("run",), (), frozenset({"run"}),
         lambda c: _ui_env(c, "plat10", "lw-plat20-p10-"),
@@ -237,7 +251,7 @@ JOURNEYS: tuple[Journey, ...] = (
         "completes against the real broker", ("journey: registration and discovery",),
         (R("console", "console-registers-a-connection-the-controller-reaches", (RESOURCE,), f"{CON}:216"),
          R("console", "console-registers-a-destination-the-controller-validates", (RESOURCE,), f"{CON}:243"),
-         R("console", "console-discovery-completes-and-lists-the-run-topic", (RESOURCE, ARCHIVE), f"{CON}:275"),
+         R("console", "console-discovery-completes-and-lists-the-run-topic", (RESOURCE, ARCHIVE), f"{CON}:285"),
          R("d1", "L-09-1", (RESOURCE,), f"{D1}:1279"),
          R("d2", "S1", (RESOURCE, EVIDENCE, ARCHIVE), f"{D2}:1827",
            "two destinations: each run's manifest lands in its own bucket and not the other")),
@@ -302,9 +316,9 @@ JOURNEYS: tuple[Journey, ...] = (
     Journey(
         "stale-namespace-request", "a slow answer for namespace A never renders over B, a form left in A "
         "writes nothing, and a submit after the switch lands in B only", ("stale namespace request",),
-        (R("console", "console-slow-a-response-never-renders-over-b", (RESOURCE, TEXT), f"{CON}:326"),
-         R("console", "console-left-form-in-a-writes-nothing", (RESOURCE,), f"{CON}:368"),
-         R("console", "console-submit-after-switch-lands-in-b-only", (RESOURCE,), f"{CON}:374"))),
+        (R("console", "console-slow-a-response-never-renders-over-b", (RESOURCE, TEXT), f"{CON}:337"),
+         R("console", "console-left-form-in-a-writes-nothing", (RESOURCE,), f"{CON}:379"),
+         R("console", "console-submit-after-switch-lands-in-b-only", (RESOURCE,), f"{CON}:385"))),
     Journey(
         "duplicate-submit", "a double click, a lost response, a resubmitted restore, a duplicate create "
         "and a replayed API create each leave exactly one durable object", ("duplicate submit",),

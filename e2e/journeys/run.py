@@ -23,6 +23,7 @@ import datetime as dt
 import json
 import os
 import pathlib
+import re
 import shutil
 import sys
 import time
@@ -170,6 +171,10 @@ class Runner:
                 error = (error + "; " if error else "") + f"{phase}: {exc}"
         rows = self._rows(suite, rcs)
         rc = 0 if not error else 1
+        notes = [f"{p} exited {c} (accepted: {suite.why_rcs})" for p, c in rcs.items()
+                 if c != 0 and c in suite.accept_rcs]
+        if notes and not error:
+            error = "NOTE " + "; ".join(notes)
         self.results[suite_id] = core.SuiteResult(suite_id, rc, rows, error, round(time.time() - started, 1),
                                                   str(out))
         self.lab.write(f"suites/{suite_id}/phases.json", {"rcs": rcs, "error": error, "rows": rows})
@@ -336,10 +341,19 @@ class Runner:
         return summary
 
 
+SECRET_STORE = re.compile(r"(?i)(password|credential|secret)[^/]*\.json$")
+
+
 def private_needles(private: pathlib.Path, needles: core.Needles) -> int:
-    """Every value in the run's private tree (plat07's passwords, d2's keys,
-    minted PEMs) becomes a sweep needle before the tree is deleted: whatever
-    was private must not be in the artifacts either."""
+    """Every SECRET in the run's private tree becomes a sweep needle before
+    the tree is deleted: whatever was private must not be in the artifacts.
+
+    Only the harnesses' secret stores count — plat07's `passwords.json` and
+    d2's `credentials.json` (every value in both is a credential), and every
+    private key (`*.key`, or any file carrying a PEM private key). A state
+    file is NOT one: its strings are namespace names and stamps, and the
+    first cut of this function, which took every string in the tree, reported
+    249 "hits" on ordinary artifacts in a live trial (2026-09-22, run t5)."""
     before = len(needles)
     if not private.is_dir():
         return 0
@@ -347,24 +361,16 @@ def private_needles(private: pathlib.Path, needles: core.Needles) -> int:
         if not path.is_file() or path.stat().st_size > 1_000_000:
             continue
         text = path.read_bytes().decode("utf-8", errors="replace")
-        try:
-            doc = json.loads(text)
-        except json.JSONDecodeError:
-            if "PRIVATE KEY" in text or path.suffix in {".pem", ".key", ".txt"}:
-                needles.add(text)
-            continue
-
-        def walk(node: Any) -> None:
-            if isinstance(node, str):
-                needles.add(node)
-            elif isinstance(node, dict):
-                for v in node.values():
-                    walk(v)
-            elif isinstance(node, list):
-                for v in node:
-                    walk(v)
-
-        walk(doc)
+        if SECRET_STORE.search(path.name):
+            try:
+                doc = json.loads(text)
+            except json.JSONDecodeError:
+                continue
+            for value in (doc.values() if isinstance(doc, dict) else []):
+                if isinstance(value, str):
+                    needles.add(value)
+        elif path.suffix == ".key" or "PRIVATE KEY-----" in text:
+            needles.add(text)
     return len(needles) - before
 
 

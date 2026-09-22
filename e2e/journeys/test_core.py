@@ -7,6 +7,7 @@ as well as a right one: a rule that cannot be made to fail is not a rule.
 
 from __future__ import annotations
 
+import json
 import pathlib
 import sys
 
@@ -211,3 +212,20 @@ def test_sweep_selftest_fails_when_the_sweep_is_blind(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="cannot fail"):
         core.sweep_selftest(tmp_path, Needles())
     assert not (tmp_path / core.SELFTEST_FILE).exists()
+
+
+def test_private_needles_take_secret_stores_and_keys_but_never_state(tmp_path):
+    """Planted: a state file full of ordinary strings, a credential store and a
+    private key. Only the last two may become needles (the first cut took the
+    state file too, and every artifact naming the namespace was a "hit")."""
+    import run
+    (tmp_path / "state.json").write_text(json.dumps({"namespace": "lw-plat20-d2-ordinary-name"}))
+    (tmp_path / "keys").mkdir()
+    (tmp_path / "keys" / "credentials.json").write_text(json.dumps({"kafka-admin": "Asecretvalue123456"}))
+    (tmp_path / "keys" / "ca.key").write_text("-----BEGIN " + "PRIVATE KEY-----\n" + "K" * 64 + "\n-----END X-----\n")
+    needles = Needles()
+    run.private_needles(tmp_path, needles)
+    values = list(needles)
+    assert "Asecretvalue123456" in values
+    assert "K" * 64 in values
+    assert not any("lw-plat20-d2-ordinary-name" in v for v in values)
