@@ -15,8 +15,8 @@
 //! * [`ROUTES`] declares one [`Access`] per `(method, path)` the router serves,
 //!   public routes included, so "this route is deliberately public" is written
 //!   down rather than inferred from an absence.
-//! * [`enforce`] runs as a route layer on EVERY route group in
-//!   `crate::app::router`. It looks the matched path up; a route with no
+//! * [`enforce`] is applied ONCE over the whole of `crate::app::router`,
+//!   after the last route. It looks the matched path up; a route with no
 //!   declaration FAILS CLOSED (`500 internal_error`, audit code
 //!   `route_access_undeclared`) and its handler never runs, and a method the
 //!   table does not declare for a declared path is `405` from here, so a
@@ -64,12 +64,11 @@ pub enum Access {
     /// parameter, decided namespace first.
     Namespaced(&'static [Action]),
     /// A `POST …/{target}` command route whose action is chosen by the
-    /// target's `:verb` suffix. A target that names no known verb is decided
-    /// under `floor` and then reaches the handler, which answers 404 — so an
-    /// unknown command is never a way past the floor.
+    /// target's `:verb` suffix. A target that names no declared verb FAILS
+    /// CLOSED — `404 not_found`, audit code `unknown_command` — before any
+    /// handler runs, so a verb a handler gains without a declaration here is
+    /// unreachable rather than admitted under some other verb's action.
     Command {
-        /// The action decided when no verb matches.
-        floor: Action,
         /// `(suffix, action)` pairs, matched against the target's end.
         verbs: &'static [(&'static str, Action)],
     },
@@ -81,17 +80,25 @@ pub enum Access {
 }
 
 impl Access {
+    /// The declaration's kind, as the audit note `routeAccess` records it.
+    #[must_use]
+    pub const fn kind(self) -> &'static str {
+        match self {
+            Access::Public => "public",
+            Access::Authenticated => "authenticated",
+            Access::Namespaced(_) => "namespaced",
+            Access::Command { .. } => "command",
+            Access::AnyNamespace(_) => "anyNamespace",
+        }
+    }
+
     /// Every action this declaration can decide, for the guard tests.
     #[must_use]
     pub fn actions(self) -> Vec<Action> {
         match self {
             Access::Public | Access::Authenticated => Vec::new(),
             Access::Namespaced(actions) => actions.to_vec(),
-            Access::Command { floor, verbs } => {
-                let mut out = vec![floor];
-                out.extend(verbs.iter().map(|(_, action)| *action));
-                out
-            }
+            Access::Command { verbs } => verbs.iter().map(|(_, action)| *action).collect(),
             Access::AnyNamespace(action) => vec![action],
         }
     }
@@ -207,7 +214,6 @@ pub const ROUTES: &[RouteAccess] = &[
         "POST",
         "/api/v1/namespaces/{ns}/destinations/{name}",
         Access::Command {
-            floor: Action::ManageDestinations,
             verbs: DESTINATION_VERBS,
         },
     ),
@@ -226,7 +232,6 @@ pub const ROUTES: &[RouteAccess] = &[
         "POST",
         "/api/v1/namespaces/{ns}/topic-discoveries/{id}",
         Access::Command {
-            floor: Action::CancelTopicDiscovery,
             verbs: &[(
                 crate::routes::topic_discoveries::CANCEL,
                 Action::CancelTopicDiscovery,
@@ -252,7 +257,6 @@ pub const ROUTES: &[RouteAccess] = &[
         "POST",
         "/api/v1/namespaces/{ns}/preflights/{id}",
         Access::Command {
-            floor: Action::CancelPreflight,
             verbs: &[(crate::routes::preflights::CANCEL, Action::CancelPreflight)],
         },
     ),
@@ -286,7 +290,6 @@ pub const ROUTES: &[RouteAccess] = &[
         "POST",
         "/api/v1/namespaces/{ns}/schedules/{name}",
         Access::Command {
-            floor: Action::SetScheduleSuspension,
             verbs: &[(
                 crate::routes::schedules::SET_SUSPENSION,
                 Action::SetScheduleSuspension,
@@ -459,12 +462,15 @@ pub struct AuthenticatedActor(pub Actor);
 
 /// The route layer. See the module documentation.
 pub async fn enforce(State(state): State<AppState>, req: Request, next: Next) -> Response {
+    // NO MATCHED PATH IS THE FALLBACK AND NOTHING ELSE. This layer is applied
+    // over the whole router, so it also wraps `fallback`, which answers 404 and
+    // reads nothing; every ROUTED request carries its `MatchedPath`.
     let Some(matched) = req
         .extensions()
         .get::<MatchedPath>()
         .map(|m| m.as_str().to_string())
     else {
-        return refuse(&req, undeclared());
+        return next.run(req).await;
     };
     let access = match lookup(req.method(), &matched) {
         Some(access) => access,
@@ -484,6 +490,12 @@ pub async fn enforce(State(state): State<AppState>, req: Request, next: Next) ->
         }
         None => return refuse(&req, undeclared()),
     };
+    // THE LAYER SIGNS WHAT IT DECIDED. The audit record of every routed
+    // request names the declaration the layer applied, so a route that ever
+    // runs outside it is visible in the log and in `tests/route_access.rs`.
+    if let Some(audit) = req.extensions().get::<Arc<crate::audit::AuditContext>>() {
+        audit.note("routeAccess", access.kind());
+    }
     if access == Access::Public {
         return next.run(req).await;
     }
@@ -499,13 +511,17 @@ pub async fn enforce(State(state): State<AppState>, req: Request, next: Next) ->
             Ok(namespace) => decide_all(&state, &actor, &namespace, actions),
             Err(error) => Err(error),
         },
-        Access::Command { floor, verbs } => match params(&mut parts, &state).await {
+        Access::Command { verbs } => match params(&mut parts, &state).await {
             Ok((namespace, target)) => {
-                let action = verbs
-                    .iter()
-                    .find(|(suffix, _)| target.ends_with(suffix))
-                    .map_or(floor, |(_, action)| *action);
-                crate::routes::authorize(&state, &actor, &namespace, action)
+                match verbs.iter().find(|(suffix, _)| target.ends_with(suffix)) {
+                    Some((_, action)) => {
+                        crate::routes::authorize(&state, &actor, &namespace, *action)
+                    }
+                    None => {
+                        actor.audit.set_failure("unknown_command");
+                        Err(ApiError::new(ProblemCode::NotFound, "No such command."))
+                    }
+                }
             }
             Err(error) => Err(error),
         },

@@ -2,10 +2,10 @@
 //!
 //! THE ROUTE TABLE IS THE BOUNDARY. Every path this service answers is listed
 //! in [`router`]; there is no wildcard under `/api`, no `/apis`, no raw or
-//! proxy route, and the fallback for everything else is `not_found`. Every
-//! route group carries `crate::access::enforce` as a route layer, and every
-//! route must have an entry in `crate::access::ROUTES` — `Public` included —
-//! or it fails closed. The
+//! proxy route, and the fallback for everything else is `not_found`.
+//! `crate::access::enforce` is applied ONCE, over the whole router, after the
+//! last route; every route must have an entry in `crate::access::ROUTES` —
+//! `Public` included — or it fails closed. The
 //! route-boundary tests request `/apis/...`, `/api`, `/api/v1/raw`, core
 //! paths, Secrets, Pods and logs and expect 404 with no Kubernetes call.
 
@@ -198,9 +198,11 @@ impl AppState {
             .probe(&self.inner.settings.readiness_namespace)
             .await
             .is_ok();
-        // SHARED MODE IS ALSO NOT READY WITHOUT ITS PROVIDER (D0: discovery and
-        // JWKS must initialise). The key material was checked before the
-        // socket existed; this is the part that can change while running.
+        // SHARED MODE STARTS NOT READY UNTIL ITS PROVIDER HAS INITIALISED (D0:
+        // discovery and JWKS must initialise). Once it has, the provider half
+        // stays true: an IdP outage later must not cut the sessions that are
+        // still valid (`Provider::ready`). Key material was checked before the
+        // socket existed.
         let provider = match self.shared() {
             None => true,
             Some(shared) => shared.provider.ready().await,
@@ -372,20 +374,7 @@ pub fn router(state: AppState) -> Router {
         // administrator-only rule; `routes::trust::authorize_cluster` is that
         // rule and records the decision under the `*` pseudo-namespace.
         .route("/api/v1/trust-policies", get(trust::list))
-        .route("/api/v1/trust-policies/{name}", get(trust::get_one))
-        // THE ACCESS LAYER, INSIDE THE ORIGIN GUARD. `crate::access::enforce`
-        // is the floor no route can fall below: authentication and the
-        // declared action, namespace first, before any handler runs. It sits
-        // inside `unsafe_request_guard` so a cross-origin write is still
-        // refused as one before anyone asks who sent it.
-        .route_layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            crate::access::enforce,
-        ))
-        .route_layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            crate::http::unsafe_request_guard,
-        ));
+        .route("/api/v1/trust-policies/{name}", get(trust::get_one));
 
     // SHARED MODE'S THREE EXTRA ROUTES. `/auth/login` and `/auth/callback` are
     // the only paths an unauthenticated caller reaches that do work, so they
@@ -393,21 +382,10 @@ pub fn router(state: AppState) -> Router {
     // the same Origin/JSON/CSRF guard as every other mutation.
     let api = match state.shared() {
         None => api,
-        Some(_) => api.merge(
-            Router::new()
-                .route(
-                    "/api/v1/session/logout",
-                    axum::routing::post(crate::auth::login::logout),
-                )
-                .route_layer(axum::middleware::from_fn_with_state(
-                    state.clone(),
-                    crate::access::enforce,
-                ))
-                .route_layer(axum::middleware::from_fn_with_state(
-                    state.clone(),
-                    crate::http::unsafe_request_guard,
-                )),
-        ),
+        Some(_) => api.merge(Router::new().route(
+            "/api/v1/session/logout",
+            axum::routing::post(crate::auth::login::logout),
+        )),
     };
     let auth = match state.shared() {
         None => Router::new(),
@@ -419,11 +397,7 @@ pub fn router(state: AppState) -> Router {
             .route(
                 crate::auth::login::CALLBACK_PATH,
                 get(crate::auth::login::callback),
-            )
-            .route_layer(axum::middleware::from_fn_with_state(
-                state.clone(),
-                crate::access::enforce,
-            )),
+            ),
     };
 
     Router::new()
@@ -433,15 +407,31 @@ pub fn router(state: AppState) -> Router {
         .route("/ui", get(health::redirect_to_ui))
         .route("/ui/", get(crate::assets::serve))
         .route("/ui/{*path}", get(crate::assets::serve))
-        // Public by DECLARATION: `crate::access::ROUTES` names each of these
-        // `Public`, and a route added here without an entry fails closed.
-        .route_layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            crate::access::enforce,
-        ))
         .merge(api)
         .merge(auth)
         .fallback(fallback)
+        // THE ACCESS LAYER, ONCE, OVER THE WHOLE ROUTER — AFTER EVERY ROUTE.
+        // `axum`'s layers wrap only the routes that exist when they are
+        // applied, so a layer applied per group, before routes that a later
+        // stage appends, leaves those routes unenforced (review M1). Applied
+        // here, as the last thing before the transport layers, every route
+        // this function can build is inside it; `crate::access::ROUTES`
+        // names each one (`Public` included) or it fails closed, and a request
+        // no route matched reaches `fallback` (404). `tests/route_access.rs`
+        // holds this position in the source and checks, per declared route,
+        // that the layer recorded its decision.
+        //
+        // THE ORIGIN GUARD IS OUTSIDE IT, so a cross-origin write is refused
+        // as one before anyone asks who sent it; it reads only the `/api/`
+        // routes (`crate::http::unsafe_request_guard`).
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::access::enforce,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::http::unsafe_request_guard,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::http::boundary_guard,

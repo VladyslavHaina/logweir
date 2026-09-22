@@ -128,23 +128,57 @@ fn every_routed_path_is_declared_and_every_declaration_is_routed() {
     assert!(routed.len() > 40, "the scan found too little: {routed:?}");
 }
 
-/// Each route group in `src/app.rs` is wrapped by the access layer. The
-/// runtime tests below prove it for every route; this names the file line to
-/// look at when one of them fails.
+/// **The access layer is applied once, over the whole router, after every
+/// route.** `axum` layers wrap only the routes that exist when they are
+/// applied; a route appended after the layer would run unenforced (review M1).
+/// This holds the position in the source; `tests/route_access_marker.rs` holds
+/// it at runtime, per declared route.
 #[test]
-fn every_route_group_carries_the_access_layer() {
+fn the_access_layer_is_applied_once_after_every_route() {
     let source = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app.rs"),
     )
     .unwrap();
-    let groups = source.matches("Router::new()").count();
-    let layers = source.matches("crate::access::enforce,").count();
-    // One `Router::new()` is the empty `auth` router of localAdmin mode,
-    // which has no route to wrap.
+    let code: String = source
+        .lines()
+        .map(|l| l.split("//").next().unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let layers: Vec<usize> = code
+        .match_indices("crate::access::enforce")
+        .map(|(i, _)| i)
+        .collect();
     assert_eq!(
-        layers,
-        groups - 1,
-        "{groups} Router::new() groups, {layers} access layers"
+        layers.len(),
+        1,
+        "the access layer must be applied exactly once"
+    );
+    let layer = layers[0];
+    for needle in [
+        ".route(",
+        ".merge(",
+        ".nest(",
+        ".route_service(",
+        ".fallback(",
+    ] {
+        if let Some(last) = code.rfind(needle) {
+            assert!(
+                last < layer,
+                "`{needle}` appears after the access layer in src/app.rs: a route added there \
+                 would run outside it"
+            );
+        }
+    }
+    // The call that carries it is a whole-router `.layer(`, the last layer
+    // call before it.
+    let before = &code[..layer];
+    assert!(
+        before.rfind(".layer(").unwrap_or(0) > before.rfind(".merge(").unwrap_or(0),
+        "the access layer must be a whole-router `.layer`, after every merge"
+    );
+    assert!(
+        !code.contains(".route_layer("),
+        "src/app.rs applies a group route_layer: every layer is whole-router now"
     );
 }
 
@@ -523,16 +557,24 @@ async fn local_admin_mode_passes_the_layer_on_every_route() {
 
 static DUMMY_REACHED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-async fn dummy() -> &'static str {
-    DUMMY_REACHED.fetch_add(1, Ordering::SeqCst);
-    "reached"
-}
-
 /// Every declared route, served by a handler that checks NOTHING, behind the
 /// real access layer — the shape a route added by a later stage has if its
 /// author forgets every check. Whatever this router refuses, the layer
 /// refused.
 fn layer_only(state: logweir_api::app::AppState) -> Router {
+    layer_only_counting(state, &DUMMY_REACHED)
+}
+
+/// [`layer_only`] with its own reach counter, so tests running in parallel do
+/// not see each other's handler calls.
+fn layer_only_counting(
+    state: logweir_api::app::AppState,
+    counter: &'static std::sync::atomic::AtomicUsize,
+) -> Router {
+    let dummy = move || async move {
+        counter.fetch_add(1, Ordering::SeqCst);
+        "reached"
+    };
     let mut by_path: std::collections::BTreeMap<&str, MethodRouter<logweir_api::app::AppState>> =
         std::collections::BTreeMap::new();
     for entry in ROUTES {
@@ -731,4 +773,62 @@ fn the_event_stream_is_declared_with_the_stream_action() {
         .actions(),
         vec![Action::ReadOperations]
     );
+}
+
+/// **An undeclared `:verb` fails closed in the layer** (review L2). Every
+/// command route, served by a handler that checks NOTHING behind the real
+/// layer, a target with a verb nobody declared, an administrator allowed every
+/// declared verb: `404` and the handler never reached. NEGATIVE CONTROL: the
+/// same actor with the declared verb reaches the handler.
+#[tokio::test]
+async fn an_undeclared_command_verb_fails_closed() {
+    let shared = shared_app();
+    static VERB_REACHED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let router = layer_only_counting(shared.app.state.clone(), &VERB_REACHED);
+    let cookie = shared.session_cookie("verb-admin", &["lw-a-admins"]);
+    let csrf = shared.csrf_for("verb-admin");
+    let post = |path: String| {
+        let router = router.clone();
+        let cookie = cookie.clone();
+        let csrf = csrf.clone();
+        async move {
+            let before = VERB_REACHED.load(Ordering::SeqCst);
+            let response = router
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(&path)
+                        .header("host", SHARED_HOST)
+                        .header("origin", SHARED_ORIGIN)
+                        .header("content-type", "application/json")
+                        .header("cookie", cookie)
+                        .header("x-csrf-token", csrf)
+                        .body(Body::from("{}"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            (
+                response.status().as_u16(),
+                VERB_REACHED.load(Ordering::SeqCst) > before,
+            )
+        }
+    };
+    let mut checked = 0;
+    for entry in ROUTES {
+        let Access::Command { verbs } = entry.access else {
+            continue;
+        };
+        let base = entry
+            .path
+            .replace("{ns}", NS_A)
+            .replace("{name}", "x1{verb}")
+            .replace("{id}", "x1{verb}");
+        let unknown = base.replace("{verb}", ":promote-to-admin");
+        assert_eq!(post(unknown.clone()).await, (404, false), "{unknown}");
+        let declared = base.replace("{verb}", verbs[0].0);
+        assert_eq!(post(declared.clone()).await, (200, true), "{declared}");
+        checked += 1;
+    }
+    assert_eq!(checked, 4);
 }

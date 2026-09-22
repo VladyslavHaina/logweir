@@ -13,8 +13,8 @@
 //!    `X-Auth-Request-*` and friends) so that nothing downstream can read one
 //!    even by mistake, and refuses any `Host` this listener does not serve,
 //!    before routing.
-//! 3. The router. Under `/api/v1`, [`unsafe_request_guard`] runs as a route
-//!    layer on every matched route: an unsafe method must carry `Origin`
+//! 3. The router. On every matched `/api/` route, [`unsafe_request_guard`]
+//!    (applied over the whole router) requires that an unsafe method carry `Origin`
 //!    exactly equal to the configured public origin and
 //!    `Content-Type: application/json`, before any handler or extractor runs.
 //!    The session's synchronizer CSRF token is checked after that, by
@@ -106,12 +106,30 @@ pub fn forwarded_client(
     if !shared.trusted_proxy_cidrs.iter().any(|c| c.contains(peer)) {
         return None;
     }
-    let value = parts_headers
-        .get(HeaderName::from_static("x-forwarded-for"))?
-        .to_str()
-        .ok()?;
-    let first = value.split(',').next()?.trim();
-    (!first.is_empty()).then(|| crate::validate::bounded(first, 64))
+    // THE RIGHTMOST HOP THE TRUSTED PROXIES DID NOT ADD. A proxy APPENDS the
+    // address it received from, so everything left of its entry was sent by
+    // the client and may be invented; walking from the right past our own
+    // proxies' addresses finds the first hop none of them vouch for — the
+    // client as the outermost trusted proxy saw it (review L4). Every value is
+    // considered, across repeated header lines, in order.
+    let hops: Vec<String> = parts_headers
+        .get_all(HeaderName::from_static("x-forwarded-for"))
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(','))
+        .map(|hop| hop.trim().to_string())
+        .filter(|hop| !hop.is_empty())
+        .collect();
+    let client = hops
+        .iter()
+        .rev()
+        .find(|hop| {
+            hop.parse::<IpAddr>().map_or(true, |ip| {
+                !shared.trusted_proxy_cidrs.iter().any(|c| c.contains(ip))
+            })
+        })
+        .or_else(|| hops.first())?;
+    Some(crate::validate::bounded(client, 64))
 }
 
 /// The per-peer limit on `/auth/login` and `/auth/callback`.
@@ -457,7 +475,15 @@ pub async fn unsafe_request_guard(
     req: Request,
     next: Next,
 ) -> Response {
-    if !is_safe_method(req.method()) {
+    // THE `/api/` ROUTES ONLY. This layer wraps the whole router so that no
+    // route is outside it by position; the static page, the probes and the
+    // sign-in steps take no unsafe method (the router answers 405), and an
+    // unrouted path is the fallback's 404.
+    let api_route = req
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .is_some_and(|m| m.as_str().starts_with("/api/"));
+    if api_route && !is_safe_method(req.method()) {
         let mut origins = req.headers().get_all(header::ORIGIN).iter();
         let origin_ok = match (origins.next(), origins.next()) {
             (Some(origin), None) => origin.as_bytes() == state.public_origin().as_bytes(),

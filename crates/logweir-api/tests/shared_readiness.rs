@@ -68,3 +68,37 @@ async fn a_jwks_outage_with_nothing_cached_is_not_ready() {
         .await
         .assert_problem(503, "kubernetes_unavailable");
 }
+
+/// **Once initialised, a provider outage does not take the console out of
+/// rotation, and a signed session keeps working** (D0: the API *starts*
+/// NotReady if the provider cannot initialise; a valid session continues to
+/// its signed expiry — review M2). The caches are expired and discovery and
+/// JWKS both fail; readiness stays true and `/api/v1/session` still answers.
+/// NEGATIVE CONTROL: the rows above, where the provider never initialised.
+#[tokio::test]
+async fn a_provider_outage_after_initialisation_keeps_the_console_ready() {
+    let key = support::idp::TestKey::ec("k1");
+    let idp = support::idp::MockIdp::new(ISSUER, &[&key]);
+    let shared = app(idp.clone());
+    let provider = &shared.app.state.shared().expect("shared mode").provider;
+    assert!(provider.ready().await, "the provider initialises");
+
+    idp.set_discovery_down(true);
+    idp.set_jwks_down(true);
+    provider.expire_caches_for_test();
+    assert!(
+        provider.ready().await,
+        "an outage after initialisation took the console NotReady"
+    );
+    // The same through the probe, whose own 5-second cache is cold here.
+    let fresh = app(idp.clone());
+    let fresh_provider = &fresh.app.state.shared().unwrap().provider;
+    assert!(
+        !fresh_provider.ready().await,
+        "a replica that never initialised must still start NotReady"
+    );
+
+    let cookie = shared.session_cookie("u-v", &["lw-a-viewers"]);
+    let session = shared.get("/api/v1/session", &cookie).await;
+    assert_eq!(session.status, 200, "{}", session.text());
+}

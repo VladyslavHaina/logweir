@@ -239,7 +239,7 @@ pub struct SharedConfig {
     pub trusted_proxy_cidrs: Vec<Cidr>,
     /// Whether every request (the two probes excepted) must arrive from a
     /// `trustedProxyCidrs` peer that asserts `X-Forwarded-Proto: https`.
-    /// See `crate::http::entry_point_guard`.
+    /// See `crate::http::entry_point`.
     pub require_trusted_proxy: bool,
 }
 
@@ -317,6 +317,11 @@ impl Config {
     }
 }
 
+/// The widest IPv4 prefix `requireTrustedProxy` accepts in `trustedProxyCidrs`.
+pub const MIN_TRUSTED_PREFIX_V4: u8 = 16;
+/// The widest IPv6 prefix `requireTrustedProxy` accepts in `trustedProxyCidrs`.
+pub const MIN_TRUSTED_PREFIX_V6: u8 = 48;
+
 /// An IPv4 or IPv6 CIDR range.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cidr {
@@ -342,6 +347,16 @@ impl Cidr {
             return Err("the prefix length is longer than the address");
         }
         Ok(Cidr { base, prefix })
+    }
+
+    /// Whether this range is narrow enough to be a trusted-proxy range under
+    /// `requireTrustedProxy`: at least `/16` for IPv4, `/48` for IPv6.
+    #[must_use]
+    pub const fn is_narrow_enough_to_trust(&self) -> bool {
+        match self.base {
+            IpAddr::V4(_) => self.prefix >= MIN_TRUSTED_PREFIX_V4,
+            IpAddr::V6(_) => self.prefix >= MIN_TRUSTED_PREFIX_V6,
+        }
     }
 
     /// Whether an address falls in this range.
@@ -657,16 +672,42 @@ impl Config {
         )?;
 
         let mut trusted_proxy_cidrs = Vec::new();
+        let mut trusted_proxy_raw = Vec::new();
         for raw in file.trusted_proxy_cidrs.unwrap_or_default() {
             trusted_proxy_cidrs.push(
                 Cidr::parse(&raw)
                     .map_err(|reason| field("trustedProxyCidrs", format!("`{raw}`: {reason}")))?,
             );
+            trusted_proxy_raw.push(raw);
+        }
+        // A GATE THAT TRUSTS A WHOLE NETWORK IS A HEADER CHECK. With
+        // `requireTrustedProxy`, a range wider than /16 (IPv4) or /48 (IPv6)
+        // would admit every pod of a typical cluster — which can dial the
+        // console Service directly and send the proxy's header itself — so the
+        // gate would distinguish nothing (review M3). Logging-only ranges keep
+        // their old latitude: they decide nothing.
+        let require_trusted_proxy = file.require_trusted_proxy.unwrap_or(false);
+        if require_trusted_proxy {
+            if let Some(wide) = trusted_proxy_raw
+                .iter()
+                .zip(&trusted_proxy_cidrs)
+                .find(|(_, cidr)| !cidr.is_narrow_enough_to_trust())
+                .map(|(raw, _)| raw.clone())
+            {
+                return Err(field(
+                    "trustedProxyCidrs",
+                    format!(
+                        "`{wide}` is wider than /{MIN_TRUSTED_PREFIX_V4} (IPv4) or \
+                         /{MIN_TRUSTED_PREFIX_V6} (IPv6); with `requireTrustedProxy` a range \
+                         this wide trusts the pods the gate exists to refuse. Name the \
+                         ingress controller's own range"
+                    ),
+                ));
+            }
         }
         // A GATE WITH NOTHING BEHIND IT IS A REFUSAL OF EVERYTHING. Requiring
         // the trusted proxy with no range to trust would answer every request
         // 421 and look like an outage; it is refused here, by name, instead.
-        let require_trusted_proxy = file.require_trusted_proxy.unwrap_or(false);
         if require_trusted_proxy && trusted_proxy_cidrs.is_empty() {
             return Err(field(
                 "requireTrustedProxy",
@@ -1431,11 +1472,11 @@ mod tests {
         assert_eq!(shared.roles.revision, "2026-09-16.1");
         assert_eq!(shared.session_key.expected_version, 1);
         assert_eq!(config.kubernetes, KubeSource::InCluster);
+        assert!(shared.trusted_proxy_cidrs[0]
+            .contains("192.0.2.17".parse().expect("a literal address")));
         assert!(
-            shared.trusted_proxy_cidrs[0].contains("10.4.5.6".parse().expect("a literal address"))
+            !shared.trusted_proxy_cidrs[0].contains("10.4.5.6".parse().expect("a literal address"))
         );
-        assert!(!shared.trusted_proxy_cidrs[0]
-            .contains("192.0.2.1".parse().expect("a literal address")));
         assert!(!shared.oidc.insecure_loopback_issuer);
         assert!(shared.require_trusted_proxy);
         assert_eq!(
@@ -1445,13 +1486,30 @@ mod tests {
 
         // AND THE REFUSALS THE DOCUMENT TABULATES ARE REAL. Each row below
         // changes exactly one line of the accepted example.
-        let refusals: [(&str, &str, &str); 12] = [
+        let refusals: [(&str, &str, &str); 15] = [
             // PLAT-17.2: a trusted-proxy requirement with no range to trust
             // would refuse every request, so it is refused by name instead.
             (
-                "trustedProxyCidrs: [\"10.0.0.0/8\"]",
+                "trustedProxyCidrs: [\"192.0.2.0/24\"]",
                 "trustedProxyCidrs: []",
                 "requireTrustedProxy",
+            ),
+            // …and one whose range is so wide it trusts every pod on a typical
+            // cluster (or everybody) is not a trusted proxy at all (review M3).
+            (
+                "trustedProxyCidrs: [\"192.0.2.0/24\"]",
+                "trustedProxyCidrs: [\"10.0.0.0/8\"]",
+                "trustedProxyCidrs",
+            ),
+            (
+                "trustedProxyCidrs: [\"192.0.2.0/24\"]",
+                "trustedProxyCidrs: [\"0.0.0.0/0\"]",
+                "trustedProxyCidrs",
+            ),
+            (
+                "trustedProxyCidrs: [\"192.0.2.0/24\"]",
+                "trustedProxyCidrs: [\"::/0\"]",
+                "trustedProxyCidrs",
             ),
             // An in-cluster principal is a ServiceAccount username or nothing.
             (

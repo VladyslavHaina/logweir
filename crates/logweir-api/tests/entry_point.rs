@@ -288,3 +288,46 @@ async fn without_the_flag_the_entry_point_is_unchanged() {
     let (record, _) = log.record(&response.header("x-request-id").unwrap());
     assert_eq!(record["forwardedFor"], "");
 }
+
+/// **The audited client is the rightmost hop the trusted proxies did not add**
+/// (review L4). A client that sends its own `X-Forwarded-For: 198.51.100.66`
+/// ahead of the ingress's appended entry is recorded as the address the
+/// ingress saw, not as the one it invented.
+#[tokio::test]
+async fn the_audited_client_is_the_rightmost_untrusted_hop() {
+    let (log, _guard) = capture();
+    let app = app(true);
+    let cookie = app.session_cookie("u-v", &["lw-a-viewers"]);
+    let response = get(
+        &app,
+        "/api/v1/session",
+        Some(INGRESS),
+        &[
+            ("cookie", &cookie),
+            ("x-forwarded-proto", "https"),
+            // client-invented, then the real client the ingress saw, then a
+            // second trusted proxy hop.
+            ("x-forwarded-for", "198.51.100.66, 203.0.113.50, 10.42.0.9"),
+        ],
+    )
+    .await;
+    assert_eq!(response.status, 200);
+    let (record, _) = log.record(&response.header("x-request-id").unwrap());
+    assert_eq!(record["forwardedFor"], "203.0.113.50");
+}
+
+/// **`/readyz` is exempt too** (review L7): a kubelet dialling the Pod IP from
+/// outside every trusted range reaches the readiness handler, whatever it then
+/// answers — never the entry point's 421.
+#[tokio::test]
+async fn the_readiness_probe_is_exempt() {
+    let (_log, _guard) = capture();
+    let app = app(true);
+    let ready = get(&app, "/readyz", Some("10.1.0.1"), &[]).await;
+    assert_ne!(ready.status, 421, "{}", ready.text());
+    assert!(
+        ready.status == 200 || ready.status == 503,
+        "{}",
+        ready.status
+    );
+}

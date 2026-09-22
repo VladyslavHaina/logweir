@@ -315,6 +315,9 @@ pub struct Provider {
     settings: OidcSettings,
     http: Box<dyn HttpClient>,
     cache: Mutex<CacheState>,
+    /// Set once discovery and a non-empty key set have been obtained. See
+    /// [`Provider::ready`].
+    initialised: std::sync::atomic::AtomicBool,
 }
 
 impl Provider {
@@ -329,6 +332,7 @@ impl Provider {
                 jwks: None,
                 last_jwks_attempt: None,
             }),
+            initialised: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -338,22 +342,42 @@ impl Provider {
         &self.settings
     }
 
-    /// Whether a sign-in could complete now: the discovery document is
-    /// readable and names this issuer, and a non-empty key set is available
-    /// (fetched, or still cached inside the outage window).
+    /// Whether the provider has INITIALISED: discovery was read, naming this
+    /// issuer, and a non-empty key set was obtained — once. After that this
+    /// answers `true` for the life of the process.
     ///
-    /// D0 §"Helm, RBAC, ingress, and network changes": the API starts
-    /// NotReady if OIDC discovery or the JWKS cannot initialise. A console
-    /// that is Ready but cannot validate a single ID token would be served
-    /// traffic by its ingress and fail every sign-in, which is the outage
-    /// readiness exists to keep out of rotation. Existing sessions do not
-    /// depend on the provider, but a replica nobody can sign in to is not a
-    /// replica to route new browsers to.
+    /// D0, both halves, read together: "The API **starts** NotReady if OIDC
+    /// discovery/JWKS cannot **initialize**" (§Helm), and "an already valid
+    /// console session continues only to its signed expiry" (§Identity). A
+    /// provider outage AFTER initialisation must therefore not take replicas
+    /// out of rotation: every signed session would be cut off by a probe,
+    /// while it needs nothing from the provider. Sign-in during an outage
+    /// still fails closed on its own path (`auth::login`), which is where that
+    /// outage belongs (review M2).
     pub async fn ready(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        if self.initialised.load(Ordering::Acquire) {
+            return true;
+        }
         if self.discovery().await.is_err() {
             return false;
         }
-        self.jwks(false).await.is_ok_and(|keys| !keys.is_empty())
+        let ready = self.jwks(false).await.is_ok_and(|keys| !keys.is_empty());
+        if ready {
+            self.initialised.store(true, Ordering::Release);
+        }
+        ready
+    }
+
+    /// Drop the cached discovery document and keys, as their expiry would.
+    /// A test hook: the caches are time-based and a test does not wait an
+    /// hour.
+    #[doc(hidden)]
+    pub fn expire_caches_for_test(&self) {
+        let mut cache = self.cache.lock().expect("the cache lock is never poisoned");
+        cache.discovery = None;
+        cache.jwks = None;
+        cache.last_jwks_attempt = None;
     }
 
     /// The discovery document, fetched at most once per
