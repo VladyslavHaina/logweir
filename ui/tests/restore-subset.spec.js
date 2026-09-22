@@ -402,9 +402,28 @@ test("a_stale_preflight_and_a_target_change_both_refuse_the_submit", () => {
   // A CHECK THAT HAS NOT FINISHED is not a pass either.
   state.readiness = {
     boundHash: prepared.hash,
-    preflight: preflight(prepared.hash, { state: "running", terminal: false }),
+    preflight: preflight(prepared.hash, { state: "running", terminal: false, applicable: false }),
   };
   assert.ok(String(readinessRefusal(state, prepared)).includes("has not finished"));
+
+  // AND A CHECK THAT IS BOTH UNFINISHED AND INVALIDATED reads as INVALIDATED.
+  // The order matters: a check whose inputs have moved is about the old
+  // question, and "wait for its verdict" would be telling an operator to wait
+  // for an answer that will not apply when it arrives. `stale` is asked first;
+  // `applicable: false` alone is not, because every freshly started check
+  // reports it.
+  state.readiness = {
+    boundHash: prepared.hash,
+    preflight: preflight(prepared.hash, {
+      state: "running", terminal: false, applicable: false, stale: true,
+      staleReasons: [{ reason: "referentChanged", kind: "KafkaCluster", name: "target-b" }],
+    }),
+  };
+  const invalidated = String(readinessRefusal(state, prepared));
+  assert.ok(invalidated.includes("no longer applies"), invalidated);
+  assert.ok(invalidated.includes("referentChanged") && invalidated.includes("target-b"),
+    invalidated);
+  assert.ok(!invalidated.includes("has not finished"), invalidated);
 
   // THE NEGATIVE CONTROL: an applicable, ready, terminal verdict for THIS
   // plan submits. Every arm above therefore fails when its rule is removed.
@@ -458,18 +477,43 @@ test("a_target_swap_invalidates_the_verdict_even_when_the_plan_bytes_do_not_move
     before,
     "the twin renders the SAME plan bytes, which is what makes the hash arm blind here",
   );
-  assert.equal(state.readiness.preflight, null, "the cached verdict is dropped");
-  assert.equal(state.readiness.boundHash, "");
-  assert.ok(renderPlanStep(prepared, state).includes("id=\"readiness-not-run\""),
-    "and the page says nothing has looked for an existing target topic on this cluster");
 
-  // THE NEGATIVE CONTROL: re-selecting the SAME uid is not a change and keeps
-  // the verdict, so the rule is a change rule and not "always drop it".
+  // AND THE SUBMIT IS REFUSED, not merely warned about. D2 section 6.6 puts a
+  // referent change and a plan-hash change under one rule, so the two must
+  // produce the same answer: refused until the check is run again. An earlier
+  // fix DELETED the verdict, which landed on the "nothing has run" arm and
+  // PERMITTED the submit -- the second review named the asymmetry.
+  const refused = readinessRefusal(state, prepared);
+  assert.ok(typeof refused === "string", "the submit is refused after a target swap");
+  assert.ok(refused.includes("referentChanged"),
+    "with the server's own reason named: " + refused);
+  assert.ok(refused.includes(twin.metadata.name),
+    "and the cluster it is about: " + refused);
+  assert.ok(refused.includes("Run it again"), refused);
+  const step6 = renderPlanStep(prepared, state);
+  assert.ok(step6.includes("id=\"readiness-blocked\""), "the page says so");
+  assert.ok(step6.includes("id=\"create-restore\" class=\"primary\" disabled"),
+    "and the button is disabled: " + step6);
+  assert.ok(!step6.includes("id=\"readiness-not-run\""),
+    "this is a stale verdict, not an absent one");
+
+  // THE NEGATIVE CONTROL: re-selecting the SAME uid is not a change and leaves
+  // the verdict applicable, so the rule is a change rule and not "always
+  // refuse".
   state.readiness = { boundHash: prepared.hash, preflight: preflight(prepared.hash) };
   selectTarget(state, twin.metadata.uid, twin.metadata.name);
-  assert.notEqual(state.readiness.preflight, null,
+  assert.equal(readinessRefusal(state, prepared), null,
     "re-selecting the same target is not a target change");
-  assert.equal(readinessRefusal(state, prepared), null);
+  assert.equal(state.readiness.preflight.applicable, true);
+
+  // AND A SWAP WITH NO VERDICT HELD CHANGES NOTHING: there is nothing to mark,
+  // so the page stays on its "nothing has run" warning rather than inventing a
+  // stale verdict out of an absent one.
+  const fresh = initialState("logweir-t27", { items: items.concat([twin]) }, backups,
+    newestPoint(backups));
+  selectTarget(fresh, twin.metadata.uid, twin.metadata.name);
+  assert.equal((fresh.readiness || {}).preflight, undefined);
+  assert.equal(readinessRefusal(fresh, prepared), null);
 });
 
 test("the_prefix_is_one_value_in_both_modes_and_the_plan_maps_through_it", () => {

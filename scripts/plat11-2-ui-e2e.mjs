@@ -523,10 +523,29 @@ async function main() {
   const writesSince = (marker) => requests.slice(marker);
   const restoreCreatesSince = (marker) =>
     writesSince(marker).filter((r) => r.method === "POST" && r.url.endsWith("/restores"));
-  /** The Restore in this namespace whose stored plan bytes ARE these bytes. */
-  const restoreWithPlan = (bytes) => {
+  /** The Restore this namespace holds for THESE plan bytes AND THIS approval
+   *  reference.
+   *
+   *  BOTH HALVES, BECAUSE THE BYTES ARE NOT AN IDENTITY. More than one object
+   *  in this namespace can carry the same plan document -- journey 4's accepted
+   *  single-row probe and journey 5b's wizard create both do -- and a lookup on
+   *  the bytes alone returned whichever `kubectl get restores` happened to list
+   *  first. In the branch's own recorded run that was the PROBE, so four
+   *  assertions about "the object the wizard created" were being made against
+   *  an object this harness had created from the same bytes, and could not have
+   *  failed on the wizard's account. The second review found it.
+   *
+   *  The approval reference IS an identity here: it is minted from the plan
+   *  bytes by the page and named by the request, so `approval-<hash>` belongs
+   *  to the wizard's create and `apr-*-probe` to a harness one. */
+  const restoreFor = (bytes, approvalRef) => {
     const all = kubeJson(["-n", namespace, "get", "restores"]).items || [];
-    return all.find((o) => ((o.spec || {}).planBytes) === bytes) || null;
+    const matching = all.filter((o) => ((o.spec || {}).planBytes) === bytes &&
+      (((o.spec || {}).approvalRef || {}).name) === approvalRef);
+    check(matching.length <= 1,
+      "two Restores share these bytes AND this approval reference, so neither is an " +
+      "identity: " + JSON.stringify(matching.map((o) => o.metadata.name)));
+    return matching[0] || null;
   };
 
   const targetUid = kubeJson(["-n", namespace, "get", "kafkacluster", targetCluster]).metadata.uid;
@@ -839,9 +858,25 @@ async function main() {
 
     const marker = writesSoFar();
     await page.click("#create-restore");
+
+    // THE REQUEST FIRST, BECAUSE IT CARRIES THE IDENTITY THE READBACK NEEDS.
+    let wizardCreates = [];
+    for (let i = 0; i < 40; i += 1) {
+      wizardCreates = restoreCreatesSince(marker);
+      if (wizardCreates.length > 0) {
+        break;
+      }
+      await pause(500);
+    }
+    check(wizardCreates.length === 1,
+      "exactly one create, by the page: " + JSON.stringify(wizardCreates.map((r) => r.url)) +
+      "; page said:\n" + (await text(page)).slice(0, 1200));
+    const wizardBody = JSON.parse(wizardCreates[0].body);
+    save("5b-wizard-request.json", wizardBody);
+
     let created = null;
     for (let i = 0; i < 40; i += 1) {
-      created = restoreWithPlan(previewed.bytes);
+      created = restoreFor(previewed.bytes, wizardBody.approvalRef.name);
       if (created !== null) {
         break;
       }
@@ -849,15 +884,26 @@ async function main() {
     }
     await shot(page, "5b-submitted");
     check(created !== null,
-      "the wizard's Create button created a Restore whose stored plan bytes are the previewed " +
-      "bytes. Page said:\n" + (await text(page)).slice(0, 1500));
+      "the wizard's Create button created a Restore with the previewed bytes under its own " +
+      "approval reference " + wizardBody.approvalRef.name + ". Page said:\n" +
+      (await text(page)).slice(0, 1500));
     save("5b-created-restore.json", created);
 
-    const wizardCreates = restoreCreatesSince(marker);
-    check(wizardCreates.length === 1,
-      "exactly one create, by the page: " + JSON.stringify(wizardCreates.map((r) => r.url)));
-    const wizardBody = JSON.parse(wizardCreates[0].body);
-    save("5b-wizard-request.json", wizardBody);
+    // THE CONTROL FOR THE READBACK ITSELF. On the branch's own earlier run this
+    // assertion fails: the object found by plan bytes alone was the harness's
+    // probe, whose approvalRef is `apr-mapping-probe`. It is what makes the
+    // four stored-object assertions below about the WIZARD's object.
+    check(created.spec.approvalRef.name === wizardBody.approvalRef.name,
+      "the object read back is the one the wizard's request named: " +
+      created.spec.approvalRef.name + " vs " + wizardBody.approvalRef.name);
+    check(created.spec.approvalRef.name.startsWith("approval-"),
+      "a name minted from the plan bytes by the page, not a harness probe's: " +
+      created.spec.approvalRef.name);
+    const probes = (kubeJson(["-n", namespace, "get", "restores"]).items || [])
+      .filter((o) => ((o.spec || {}).planBytes) === previewed.bytes);
+    check(probes.length > 1,
+      "and more than one object carries these bytes, which is why the lookup needs an " +
+      "identity: " + JSON.stringify(probes.map((o) => o.metadata.name)));
 
     // THE REQUEST IS THE PREVIEW, ROW FOR ROW AND BYTE FOR BYTE.
     check(wizardBody.planBytes === previewed.bytes,
@@ -966,6 +1012,24 @@ async function main() {
         mappedTopicsRow: mappedRow || null,
         collidingTopic: COLLIDING_TOPIC,
       });
+      if (!mappedRow || mappedRow.code !== "MappedTopicExists") {
+        // RECORDED, NOT SKIPPED. Every other conditional in this file pushes a
+        // NOT REACHED entry, and this one did not -- so two runs read "zero
+        // NOT-REACHED" while one journey silently had not happened. The second
+        // review found it.
+        result.journeys.push({
+          journey: "the wizard's OWN readiness check refuses the submit over a collision",
+          outcome: "NOT REACHED",
+          why: "the wizard's step 5 sends the recovery point's inline archive URL, because " +
+            "the Backup projection publishes no destinationRef, and this build's controller " +
+            "refuses to build a check plan from one -- so no target row is ever recorded " +
+            "through the wizard's own button. preflight state=" + String(state) +
+            ", target.mappedTopics row=" + JSON.stringify(mappedRow || null),
+          defect: "BACKUP-PROJECTION-NO-DESTINATION (PLAT-08.2 projection, PLAT-03.2 route)",
+          provedInstead: "journey 6b, the same check against a saved BackupDestination",
+        });
+        process.stderr.write("== NOT REACHED: the wizard's own collision gate\n");
+      }
       if (mappedRow && mappedRow.code === "MappedTopicExists") {
         const said = await text(page);
         check(said.includes("nothing is sent"),
@@ -1159,7 +1223,7 @@ async function main() {
     }
 
     // ------------------------------------------------------------------ 8
-    // A TARGET CHANGE DROPS THE VERDICT EVEN WHEN THE PLAN BYTES DO NOT MOVE.
+    // A TARGET CHANGE REFUSES THE SUBMIT EVEN WHEN THE PLAN BYTES DO NOT MOVE.
     //
     // D2 SECTION 6.6's SECOND INVALIDATION CAUSE, AND THE ONE THE HASH CANNOT
     // SEE. Both fixture targets address the same broker with the same auth, so
@@ -1184,33 +1248,55 @@ async function main() {
         return code === null ? "" : code.textContent;
       });
       const droppedText = await text(page);
-      await shot(page, "08-target-change-drops-verdict");
+      await shot(page, "08-target-change-refuses-submit");
       save("08-target-change.txt", droppedText);
       check(hashAfterSwap === hashAtSwap,
         "the two targets render the SAME plan bytes -- which is what makes the hash arm blind " +
         "here, and what this journey is about: " + hashAtSwap + " vs " + hashAfterSwap);
-      const notRun = await page.evaluate(() =>
-        document.querySelector("#readiness-not-run") !== null);
-      check(notRun === true,
-        "the verdict about the other cluster is gone and the page says nothing has run: " +
-        droppedText.slice(0, 1500));
-      record("a target change drops the readiness verdict though the plan bytes do not move", {
+      // AND THE SUBMIT IS REFUSED, with the server's own reason named. An
+      // earlier version DELETED the verdict, which left the page on the
+      // "nothing has run" warning and PERMITTED the submit -- so a prefix edit
+      // refused and a target swap only warned, for one rule. The second review
+      // named the asymmetry.
+      const blockedText = await page.evaluate(() => {
+        const p = document.querySelector("#readiness-blocked");
+        return p === null ? null : p.textContent;
+      });
+      check(typeof blockedText === "string",
+        "the submit is refused after the swap: " + droppedText.slice(0, 1500));
+      check(blockedText.includes("referentChanged"),
+        "with D2 6.6's own reason named: " + blockedText.slice(0, 400));
+      check(blockedText.includes(secondTarget),
+        "and the cluster it is about: " + blockedText.slice(0, 400));
+      const swapDisabled = await page.evaluate(() => {
+        const b = document.querySelector("#create-restore");
+        return b === null ? null : b.disabled;
+      });
+      check(swapDisabled === true, "and the create button is disabled");
+      record("a target change refuses the submit though the plan bytes do not move", {
         planHash: hashAtSwap,
         from: targetCluster, to: secondTarget,
+        reason: blockedText.slice(0, 300),
         rule: "D2 6.6 referentChanged: choosing another target changes a referent UID, so the " +
           "result is stale",
       });
       // THE NEGATIVE CONTROL: re-selecting the SAME target is not a change, so
-      // the state stays where it is rather than being cleared unconditionally.
-      const beforeSame = await page.evaluate(() =>
-        document.querySelector("#readiness-not-run") !== null);
+      // the state stays where it is rather than being marked unconditionally.
+      const beforeSame = await page.evaluate(() => {
+        const p = document.querySelector("#readiness-blocked");
+        return p === null ? null : p.textContent;
+      });
       await page.selectOption("#target-cluster", secondUid);
       await pause(1000);
-      const afterSame = await page.evaluate(() =>
-        document.querySelector("#readiness-not-run") !== null);
+      const afterSame = await page.evaluate(() => {
+        const p = document.querySelector("#readiness-blocked");
+        return p === null ? null : p.textContent;
+      });
       check(beforeSame === afterSame,
         "re-selecting the same target changes nothing about the readiness state");
-      control("re-selecting the same target is not a target change", { state: afterSame });
+      control("re-selecting the same target is not a target change", {
+        refusalUnchanged: true,
+      });
     }
 
     // ------------------------------------------------------------------ 9
@@ -1351,22 +1437,33 @@ async function main() {
       // by assertion, and what is checked is the body the WIZARD sent.
       const retryMarker = writesSoFar();
       await page.click("#create-restore");
-      let retryCreated = null;
+      let retryCreates = [];
       for (let i = 0; i < 40; i += 1) {
-        retryCreated = restoreWithPlan(retryPlanBytes);
-        if (retryCreated !== null) {
+        retryCreates = restoreCreatesSince(retryMarker);
+        if (retryCreates.length > 0) {
           break;
         }
         await pause(500);
       }
       await shot(page, "12-retry-submitted");
-      const retryCreates = restoreCreatesSince(retryMarker);
       save("12-retry-requests.json", retryCreates);
       save("12-non-get-requests.json", requests);
       check(retryCreates.length === 1,
         "the retry sent exactly one create: " + JSON.stringify(retryCreates.map((r) => r.url)) +
         "; page said:\n" + (await text(page)).slice(0, 1200));
       const retryBody = JSON.parse(retryCreates[0].body);
+      // THE SAME IDENTITY LOOKUP AS 5b. These bytes happen to be unique to the
+      // retry, so the bytes alone would answer -- but a readback that is only
+      // correct by accident is the trap the second review named, and this file
+      // does not keep two shapes for one question.
+      let retryCreated = null;
+      for (let i = 0; i < 40; i += 1) {
+        retryCreated = restoreFor(retryPlanBytes, retryBody.approvalRef.name);
+        if (retryCreated !== null) {
+          break;
+        }
+        await pause(500);
+      }
       check(retryBody.approvalRef.name === mintedApproval,
         "and it names the NEWLY minted Approval " + mintedApproval + ", not " +
         retryBody.approvalRef.name);

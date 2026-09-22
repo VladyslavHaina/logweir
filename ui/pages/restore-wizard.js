@@ -1150,7 +1150,16 @@ export function setTopicPrefix(state, value) {
 }
 
 /** The prefix the RUN will map through, for the mode this plan is in -- the
- *  JavaScript half of `logweir_core::spec::target_topic_prefix`.
+ *  JavaScript half of `logweir_core::spec::target_topic_prefix` over the
+ *  domain this page can produce.
+ *
+ *  THE RUNNER HAS A THIRD ARM AND THIS HAS TWO, and the difference is
+ *  unreachable here: `target_topic_prefix` falls back to
+ *  `default_topic_prefix(<the recovery point>)` when a `newTopic` spec states
+ *  no `topic_naming` at all, and `ui/plan.js` renders that key through
+ *  `needed()`, which throws on an absent or empty value. So every document
+ *  this wizard can render states a prefix, and the fallback arm describes a
+ *  plan the page cannot emit.
  *
  *  It exists so the preview cannot be a statement about the other mode's key
  *  even if the two ever came apart again: `topicMapping` reads THIS, and a row
@@ -1696,11 +1705,15 @@ export function renderPreflightStep(state, prepared) {
  *      stops describing what is about to be submitted. A change of TARGET is
  *      handled one step earlier, in `selectTarget`, because two clusters can
  *      render identical bytes.
- *   3. THE SERVER SAYS IT IS STALE or does not apply: `applicable: false`,
- *      `stale: true`, or an expired verdict (`target.mappedTopics` expires in
- *      five minutes, which is the shortest budget in the catalogue and exactly
- *      the check a slow review outlives).
- *   4. THE VERDICT IS NOT `ready` -- which is where a collision lands, named
+ *   3. IT HAS BEEN INVALIDATED (`stale: true`) -- an expiry, a referent that
+ *      moved, a policy or CA that changed. Asked BEFORE completion, because an
+ *      invalidated check is about inputs that are no longer these whether or
+ *      not it has finished. (`target.mappedTopics` expires in five minutes,
+ *      the shortest budget in the catalogue and exactly the check a slow
+ *      review outlives.)
+ *   4. IT HAS NOT FINISHED.
+ *   5. IT FINISHED WITHOUT BECOMING APPLICABLE.
+ *   6. THE VERDICT IS NOT `ready` -- which is where a collision lands, named
  *      by its own check id and code.
  *
  *  Pure: no DOM, no network, no clock. The freshness judgement is the
@@ -1738,10 +1751,15 @@ export function readinessRefusal(state, prepared) {
       "not a verdict about what you are about to submit. Run it again."
     );
   }
-  if (result.terminal === false) {
-    return "the readiness check for this plan has not finished; wait for its verdict.";
-  }
-  if (result.applicable !== true || result.stale === true) {
+  // STALENESS IS ASKED ABOUT BEFORE COMPLETION, and the order matters. A check
+  // that has been INVALIDATED -- by a target swap, an expiry, a referent that
+  // moved -- is about inputs that are no longer these, whether or not it has
+  // finished: waiting for its verdict would be waiting for an answer to the
+  // old question. `stale` is the field that says exactly that, and the product
+  // API sets it only when it means it; `applicable: false` ALONE does not, and
+  // is checked below, because it is also what every freshly started check
+  // reports before it completes.
+  if (result.stale === true) {
     const reasons = (Array.isArray(result.staleReasons) ? result.staleReasons : [])
       .map((r) => staleReasonLine(r))
       .join("; ");
@@ -1749,6 +1767,15 @@ export function readinessRefusal(state, prepared) {
       "the readiness check for this plan no longer applies to the inputs it was run against" +
       (reasons.length > 0 ? " (" + reasons + ")" : "") +
       ". Run it again before submitting."
+    );
+  }
+  if (result.terminal === false) {
+    return "the readiness check for this plan has not finished; wait for its verdict.";
+  }
+  if (result.applicable !== true) {
+    return (
+      "the readiness check for this plan finished without becoming applicable to the inputs " +
+      "it was run against. Run it again before submitting."
     );
   }
   if (result.state !== "ready") {
@@ -2997,10 +3024,32 @@ export function selectTarget(state, uid, name) {
   // alternative is re-reading the preflight with `?planHash=` and believing a
   // verdict until the round trip answers.
   const changed = wanted !== state.targetClusterUid;
-  if (changed) {
-    state.readiness = Object.assign({}, state.readiness || {}, {
-      preflight: null,
-      boundHash: "",
+  const held = (state.readiness || {}).preflight || null;
+  if (changed && held !== null) {
+    // MARKED STALE, NOT DELETED. Deleting it dropped the verdict -- which was
+    // already better than keeping a green one about another cluster -- but it
+    // landed the page on the "nothing has run" arm, which WARNS and permits
+    // the submit. D2 section 6.6 puts a referent change and a plan-hash change
+    // under ONE rule ("otherwise `applicable=false, stale=true` with
+    // `staleReasons` ..."), so the two must produce the same answer: refused
+    // until the check is run again. Marking it makes the existing stale arm
+    // fire, with `referentChanged` and the cluster named -- the server's own
+    // vocabulary, not a sentence this page invented for the occasion.
+    //
+    // The mark is this page's, and it is allowed to be: it is strictly more
+    // conservative than the server's own recomputation, which would answer
+    // `referentChanged` for exactly this input. Nothing here turns a stale
+    // verdict into a fresh one.
+    state.readiness = Object.assign({}, state.readiness, {
+      preflight: Object.assign({}, held, {
+        applicable: false,
+        stale: true,
+        staleReasons: [{
+          reason: "referentChanged",
+          kind: "KafkaCluster",
+          name: typeof name === "string" && name.length > 0 ? name : wanted,
+        }],
+      }),
     });
   }
   state.targetClusterUid = wanted;

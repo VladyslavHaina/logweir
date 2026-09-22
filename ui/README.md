@@ -621,10 +621,14 @@ not the one the page was given.
 **One prefix value, and the grammar has two keys for it.** The runner's document
 carries `target.topic_naming.prefix` AND `target.topic_mapping_prefix`, and
 `logweir_core::spec::target_topic_prefix` reads the first for `newTopic` and the
-second for `scratch`. `setTopicPrefix` is the only thing in the wizard that
-writes either, and it writes both, so the preview is what the run maps through
-in **both** modes; `effectivePrefix` is the JavaScript half of that rule and is
-what `topicMapping` reads. Before this, only the first key moved on an edit, and
+second for `scratch`. **Every writer writes both keys**: `setTopicPrefix` is the only thing that
+mutates an existing state, and the two constructors that build a fields object
+from scratch -- `initialState` and `draftFrom` -- set the pair together. So the
+preview is what the run maps through in **both** modes. `effectivePrefix` is the
+JavaScript half of that rule and is what `topicMapping` reads; the runner has a
+third arm (a `newTopic` spec that states no `topic_naming` at all falls back to
+`default_topic_prefix`) which this page cannot reach, because `ui/plan.js`
+renders that key through `needed()` and throws on an absent one. Before this, only the first key moved on an edit, and
 in `scratch` the preview, the declaration and the API rail all named a prefix the
 run does not use.
 
@@ -638,8 +642,10 @@ the plan and the API never parses one; the wizard therefore does not send it in
 that mode, and the rails there are its own preview and phase 0. In legacy mode
 the field is stripped before the object is sent (`client.js`), because the
 custom resource has nowhere to put it; there the plan bytes carry the same list,
-from the same call, and phase 0 reads them. Both halves of that delivery are
-pinned in `ui/tests/client.spec.js`.
+from the same call, and phase 0 reads them. Both halves of that delivery are pinned by one test in
+`ui/tests/client.spec.js` with three arms: console sends the rows verbatim,
+an absent declaration stays absent, and legacy strips it without mutating the
+caller's object.
 
 **What a recovery changes, and what it does not**, beside the mapping, each from
 a contract constant or a plan field and never from prose this page invented:
@@ -674,13 +680,16 @@ walk past it, and it refuses four states:
 
 * the result is about **another plan** -- the prefix, the subset or the point in
   time changed, so the hash moved. Both hashes are named;
-* the **target** changed. This one is handled a step earlier, in `selectTarget`,
+* the **target** changed. This one is marked a step earlier, in `selectTarget`,
   and it has to be: two `KafkaCluster` objects with the same bootstrap servers
   and the same auth render identical plan bytes, so the hash arm is blind to the
-  swap. D2 section 6.6 makes it stale anyway -- "choosing another target or
+  swap. D2 section 6.6 puts it under the same rule -- "choosing another target or
   destination, or a recreated one, changes a referent UID, so the result is
-  stale" -- so a change of the selected UID drops the cached verdict and the
-  gate falls to its "nothing has run" arm;
+  stale" -- so a change of the selected UID marks the held verdict
+  `applicable: false, stale: true` with `referentChanged` and the cluster named,
+  and the stale arm below refuses the submit exactly as a hash change does. The
+  mark is the console's own and is strictly more conservative than the server's
+  recomputation, which answers `referentChanged` for this input;
 * the server says it is **stale or inapplicable**. The judgement is the
   server's, recomputed on every GET against the caller's own plan hash, never a
   comparison this page makes against a browser clock. `target.mappedTopics`
