@@ -152,6 +152,19 @@ function backups() {
   return kubeJson(["-n", namespace, "get", "backups"]).items;
 }
 
+async function waitForTerminalBackup(name, label) {
+  let object = null;
+  for (let attempt = 0; attempt < 90; attempt += 1) {
+    object = kubeJson(["-n", namespace, "get", "backup", name]);
+    const phase = String((object.status || {}).phase || "");
+    if (["Succeeded", "Failed", "Cancelled"].includes(phase)) {
+      return object;
+    }
+    await pause(1000);
+  }
+  throw new Error(label + ": Backup " + name + " never reached a terminal phase");
+}
+
 function pause(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -801,12 +814,15 @@ async function main() {
       "the run does not name the schedule it was taken from");
     check(manual.spec.scheduleRef.uid === selected.metadata.uid,
       "the run does not carry the schedule's identity");
+    const terminalManual = await waitForTerminalBackup(manual.metadata.name,
+      "the manual backup from the isolated controller");
     await shot(page, "09-backed-up-now");
     result.created.push({ kind: "Backup", name: manual.metadata.name,
       uid: manual.metadata.uid, createdBy: "the page" });
     record("Back up now from the detail creates one run bound to this schedule", {
       schedule: selected.metadata.name, run: manual.metadata.name, uid: manual.metadata.uid,
-      scheduleRef: manual.spec.scheduleRef,
+      scheduleRef: manual.spec.scheduleRef, terminalPhase: (terminalManual.status || {}).phase,
+      terminalReason: (((terminalManual.status || {}).conditions || [])[0] || {}).reason || null,
     });
 
     await page.reload({ waitUntil: "load", timeout: 30000 });
