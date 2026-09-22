@@ -251,6 +251,94 @@ async fn a_foreign_approval_under_the_referenced_name_is_never_adopted() {
     assert!(approvals_posted(&app.fake).is_empty());
 }
 
+/// **A confirmation for a PREVIOUS subject of the same name is not this
+/// one's.** The console's own document, byte-for-byte what it signs for this
+/// plan, policy and requester -- except that it names another UID (a Restore
+/// of this name that was deleted and recreated). Adopting it would route the
+/// new Restore to execution on an authorization that names a different
+/// object; the controller would refuse it, but the console must not answer
+/// `confirmed` for it either. The control is the same document with the
+/// current UID, which a replay adopts.
+#[tokio::test]
+async fn a_confirmation_naming_another_uid_is_never_adopted() {
+    let console = console("team-ordinary");
+    let first = app(&console);
+    let created = create(&first, NS_A, "ordinary-restore-uid").await;
+    assert_eq!(
+        created.status,
+        201,
+        "{}",
+        String::from_utf8_lossy(&created.body)
+    );
+    let restore_uid = created.json()["item"]["uid"]
+        .as_str()
+        .expect("a uid")
+        .to_string();
+    let mut stored = approvals_posted(&first.fake)
+        .pop()
+        .expect("the console stored its confirmation");
+    let bytes = stored["spec"]["approvalBytes"]
+        .as_str()
+        .expect("bytes")
+        .to_string();
+    assert!(
+        bytes.contains(&restore_uid),
+        "the document names the subject UID"
+    );
+
+    // THE ROW: the same bytes naming a previous object's UID. The Restore is
+    // still created (the subject comes first), but its confirmation is not
+    // adopted and nothing is signed over the foreign object.
+    let seeded = |uid: &str| {
+        let mut object = stored.clone();
+        object["spec"]["approvalBytes"] = Value::String(bytes.replace(&restore_uid, uid));
+        let target = app(&console);
+        target.fake.seed("approvals", NS_A, object);
+        target
+    };
+    let foreign = seeded("00000000-0000-4000-8000-0000000000aa");
+    let refused = create(&foreign, NS_A, "ordinary-restore-uid").await;
+    assert_eq!(
+        refused.status,
+        409,
+        "{}",
+        String::from_utf8_lossy(&refused.body)
+    );
+    assert_eq!(refused.code(), "state_conflict");
+    assert!(
+        approvals_posted(&foreign.fake).is_empty(),
+        "nothing is signed over the foreign object"
+    );
+    let listed = foreign
+        .get(&format!("/api/v1/namespaces/{NS_A}/restores"))
+        .await
+        .json();
+    let subject_uid = listed["items"][0]["uid"]
+        .as_str()
+        .expect("the Restore was created")
+        .to_string();
+
+    // THE CONTROL: the identical sequence, with the document naming THIS
+    // subject's UID, is adopted as this Restore's confirmation.
+    let matching = seeded(&subject_uid);
+    let adopted = create(&matching, NS_A, "ordinary-restore-uid").await;
+    assert_eq!(
+        adopted.status,
+        201,
+        "{}",
+        String::from_utf8_lossy(&adopted.body)
+    );
+    assert_eq!(
+        adopted.json()["item"]["uid"].as_str(),
+        Some(subject_uid.as_str())
+    );
+    assert_eq!(adopted.json()["authorization"]["state"], "confirmed");
+    assert!(
+        approvals_posted(&matching.fake).is_empty(),
+        "the matching confirmation is adopted, not signed again"
+    );
+}
+
 /// **The governed path**: the console's confirmation is a separate object
 /// that authorises nothing, and the submission routes to Awaiting approval.
 #[tokio::test]

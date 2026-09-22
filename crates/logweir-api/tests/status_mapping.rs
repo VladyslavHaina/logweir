@@ -540,6 +540,21 @@ fn every_restore_status_the_controller_writes() {
             },
             "ApprovalSubjectMismatch",
         ),
+        // PLAT-19.2's two terminal admission refusals: nothing executed.
+        (
+            RestoreAdmission::AuthorizationPolicyMismatch {
+                approval: "a1".into(),
+                detail: "policy".into(),
+            },
+            "ApprovalPolicyMismatch",
+        ),
+        (
+            RestoreAdmission::AuthorizationExpired {
+                approval: "a1".into(),
+                detail: "expired".into(),
+            },
+            "AuthorizationExpired",
+        ),
     ] {
         let patch = restore_ctl::refused_status_patch(
             &typed,

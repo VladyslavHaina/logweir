@@ -51,7 +51,12 @@ pub const REFUSAL_STATES: &[&str] = &[
     "ApprovalNotReceived",
     "ApprovalSubjectMismatch",
     "ApprovalBundleConflict",
+    // PLAT-19.2: the approval was issued under another policy than the
+    // namespace's current binding, or its authorization window closed, before
+    // any Job existed. Both end the Restore with nothing executed.
+    "ApprovalPolicyMismatch",
     "ArchiveUrlUnreadable",
+    "AuthorizationExpired",
     "ClusterNotReachable",
     "CredentialNotRenderable",
     "Expired",
