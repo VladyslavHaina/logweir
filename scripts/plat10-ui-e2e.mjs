@@ -31,6 +31,9 @@
 //   UI_E2E_UI_DIR      the directory to serve; default this worktree's ui/.
 //   UI_E2E_ARTIFACTS   where screenshots, the API log and the result go.
 //   UI_E2E_KEEP        "1" keeps the namespace for a look around afterwards.
+//   UI_E2E_BUCKET      an already-created, test-owned MinIO bucket. The
+//                       default remains the shared lab bucket; an isolated
+//                       catalog run supplies a unique bucket.
 
 import { spawn, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
@@ -62,6 +65,7 @@ const suffix = Math.random().toString(36).slice(2, 7);
 const LAB = "logweir-scram-local";
 const LAB_KAFKA = "kafka-source." + LAB + ".svc.cluster.local:9096";
 const LAB_MINIO = "minio." + LAB + ".svc:9000";
+const LAB_BUCKET = process.env.UI_E2E_BUCKET || "kafka-backups";
 const UNREACHABLE_KAFKA = "kafka-nowhere." + "lw-p10-void" + ".svc:9092";
 
 const ARTIFACTS = join(ARTIFACTS_ROOT, namespace);
@@ -380,7 +384,7 @@ function seedDestination(name) {
       metadata: { name: name, labels: { "logweir.dev/test-owner": OWNER } },
       spec: {
         description: "PLAT-10 live journey, the lab's MinIO, read-only use",
-        storage: { provider: "S3", bucket: "kafka-backups", prefix: namespace,
+        storage: { provider: "S3", bucket: LAB_BUCKET, prefix: namespace,
           addressing: "PathStyle", endpoint: "http" + "://" + LAB_MINIO },
         transport: { security: "InsecureHTTP" },
         access: {
@@ -1234,6 +1238,13 @@ function writeResult() {
 
 function shutDown() {
   stopApi();
+  // A retained namespace is deliberately inspectable after the browser closes.
+  // Keep its localAdmin config and cursor key with it so a follow-up can query
+  // the exact same owned API surface; ordinary runs still remove all local
+  // material immediately.
+  if (process.env.UI_E2E_KEEP === "1") {
+    return;
+  }
   try {
     rmSync(WORK_DIR, { recursive: true, force: true });
   } catch (ignored) {
