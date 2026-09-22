@@ -1457,6 +1457,30 @@ def test_the_resolve_column_closes_an_incident_exactly_once() -> None:
     row("MUTANT: `Failed` delivery is attempted, not delivered",
         not attempted["and the delivery says Delivered, not merely attempted"])
 
+    # lab-refresh-7 04:02Z, verbatim: the window opened while transition 1's
+    # delivery was still `Pending`, so its POST landed inside it — posts 2,
+    # newTransitions 1 — and the row blamed the product's dedup rule.
+    pending = _alert("Open", transition=1, notified=1, delivery="Pending")
+    in_flight = d3.deliveries_in_flight([pending])
+    row("a Pending delivery is IN FLIGHT — its POST is still owed",
+        in_flight == [{"kind": "Staleness", "transition": 1, "delivery": "Pending"}])
+    row("an alert with no delivery decided yet is in flight too",
+        len(d3.deliveries_in_flight([{"kind": "Staleness", "transition": 1}])) == 1)
+    row("Delivered, Failed and Suppressed are finished — no POST is owed for any of them",
+        not d3.deliveries_in_flight([_alert("Open", delivery=state)
+                                     for state in ("Delivered", "Failed", "Suppressed")]))
+    raced = d3.incident_resolves_exactly_once(before, after, "Healthy", 2, 1,
+                                              in_flight_at_open=in_flight)
+    row("MUTANT: THE RACE — a window opened over a Pending delivery is named, not "
+        "passed off as a dedup verdict",
+        not raced["the POST window opened with no earlier delivery still in flight"])
+    quiet_but_doubled = d3.incident_resolves_exactly_once(
+        before, after, "Healthy", 2, 1, in_flight_at_open=[])
+    row("MUTANT: a quiet window with TWO POSTs for one transition still fails — the row can "
+        "still catch a real duplicate delivery",
+        quiet_but_doubled["the POST window opened with no earlier delivery still in flight"]
+        and not quiet_but_doubled["one POST per transition this window opened, and no more"])
+
 
 def test_unknown_never_clears_an_open_incident() -> None:
     before = _alert("Open", transition=1, notified=1)

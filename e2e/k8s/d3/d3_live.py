@@ -5030,6 +5030,7 @@ def notify() -> None:
                               "scheduleRef": member["spec"].get("scheduleRef"),
                               "pointFactsThePolicyNeeds":
                                   point_facts_the_policy_needs(member.get("status") or {})}))
+    quiet_sink(what="notify's POST window", tag="notify", evidence=evidence)
     posts_before = sink_posts()
     backups_before = {b["metadata"]["name"]: b["metadata"]["resourceVersion"]
                       for b in lst("backups")}
@@ -5850,6 +5851,7 @@ def protection_cases() -> None:
     evidence.append(artifact("protect/policy-stale.json", stale))
 
     # --- (a) a fresh recovery point, and ONE delivery -----------------------
+    quiet_sink(what="protect (a)'s POST window", tag="protect-a", evidence=evidence)
     posts_mark = sink_posts()
     notified_mark = notified_total(alerts_before)
     # A RE-RUN'S POINT HAS TO BE FRESH TOO. Reusing the previous attempt's
@@ -5992,6 +5994,7 @@ def protection_cases() -> None:
     )
 
     # --- (b) an archive that can no longer serve its newest point -----------
+    quiet_sink(what="protect (b)'s POST window", tag="protect-b", evidence=evidence)
     posts_mark = sink_posts()
     alerts_before_break = policy_alerts(RECOVERY_POLICY)
     notified_mark = notified_total(alerts_before_break)
@@ -6436,9 +6439,66 @@ def valid_signature_is_protected(view: dict[str, Any], verdict: str | None,
     }
 
 
+#: `alerts[].delivery.state` values after which no further POST is owed for that
+#: transition (`protection.rs::DeliveryState`: `Pending` is the only other one).
+DELIVERY_FINISHED = frozenset({"Delivered", "Failed", "Suppressed"})
+
+
+def deliveries_in_flight(alerts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Every alert whose delivery could still POST: `Pending`, or not decided yet.
+
+    A window that counts POSTs per transition must open with this EMPTY, or a
+    POST owed to a transition from BEFORE the window is counted inside it.
+    """
+    return [
+        {"kind": a.get("kind"), "transition": a.get("transition"),
+         "delivery": (a.get("delivery") or {}).get("state")}
+        for a in alerts
+        if (a.get("delivery") or {}).get("state") not in DELIVERY_FINISHED
+    ]
+
+
+def namespace_deliveries_in_flight() -> list[dict[str, Any]]:
+    """`deliveries_in_flight` over EVERY `ProtectionPolicy` in this namespace.
+
+    The in-cluster sink is ONE log for the whole namespace, so a POST owed by a
+    different policy's earlier transition lands in any window just as surely as
+    one owed by the policy the row is about.
+    """
+    found: list[dict[str, Any]] = []
+    for policy in lst("protectionpolicies"):
+        for entry in deliveries_in_flight((policy.get("status") or {}).get("alerts") or []):
+            found.append({"policy": policy["metadata"]["name"], **entry})
+    return found
+
+
+def quiet_sink(*, seconds: int = 300, what: str, tag: str,
+               evidence: list[str]) -> list[dict[str, Any]]:
+    """Wait until no delivery in this namespace can still POST, and say what could.
+
+    Called before every `posts_mark = sink_posts()`: a window that opens while a
+    delivery is `Pending` counts that delivery's POST as its own. Returns the
+    deliveries still in flight at the deadline — EMPTY is the only state a POST
+    window may open in, and a row that needs it says so in a clause.
+    """
+    deadline = time.time() + seconds
+    in_flight = namespace_deliveries_in_flight()
+    while in_flight and time.time() < deadline:
+        time.sleep(3)
+        in_flight = namespace_deliveries_in_flight()
+    if in_flight:
+        log(f"NOT REACHED in {seconds}s: a quiet sink before {what}: {in_flight}")
+    evidence.append(artifact(f"window-open/{tag}.json",
+                             {"window": what, "inFlightAtWindowOpen": in_flight,
+                              "postsAtOpen": sink_posts(), "at": now()}))
+    return in_flight
+
+
 def incident_resolves_exactly_once(before: dict[str, Any], after: dict[str, Any],
                                    health: str | None, posts: int,
-                                   new_transitions: int) -> dict[str, bool]:
+                                   new_transitions: int, *,
+                                   in_flight_at_open: list[dict[str, Any]] | None = None,
+                                   ) -> dict[str, bool]:
     """D3 §3.3's `Staleness` resolve column, verbatim: **"`health` back to
     `Healthy`/`AtRisk`"** — and exactly one transition for it.
 
@@ -6456,6 +6516,8 @@ def incident_resolves_exactly_once(before: dict[str, Any], after: dict[str, Any]
     per transition, and no delivery without one.
     """
     return {
+        "the POST window opened with no earlier delivery still in flight":
+            not in_flight_at_open,
         "the Staleness incident was Open before": before.get("state") == "Open",
         "health came back to Healthy/AtRisk — D3 §3.3's resolve column":
             health in {"Healthy", "AtRisk"},
@@ -6676,6 +6738,7 @@ def protection_verdicts() -> None:
     )
 
     # --- (1b) with `catalogRef` REMOVED, nothing can place it -------------
+    quiet_sink(what="verdicts (1b)'s POST window", tag="verdicts-1b", evidence=evidence)
     before_alerts = policy_alerts(UNREAD_POLICY)
     posts_mark = sink_posts()
     mark = now()
@@ -6851,8 +6914,19 @@ def protection_verdicts() -> None:
     # grant, no trust object. This is also row 3's flip: the archive whose only
     # point was refused now holds a sound one, which is the condition D3 §3.3
     # resolves on.
-    staleness_before = alert_of(policy_alerts(REFUSED_POLICY), "Staleness") or {}
+    #
+    # THE WINDOW OPENS ONLY ONCE EVERY EARLIER DELIVERY HAS FINISHED. Row 3
+    # counts sink POSTs against the transitions this window opens, and a
+    # transition-1 delivery that is still `Pending` when the mark is taken
+    # lands its POST INSIDE the window: lab-refresh-7 (04:02Z) recorded
+    # `newTransitions: 1`, `posts: 2`, with `alertsBefore[0].delivery.state:
+    # "Pending"` — two transitions, two POSTs, two distinct delivery Jobs, and
+    # a row that blamed the product's dedup rule for the harness's timing. The
+    # ratio is unchanged, so a real duplicate delivery still fails it.
+    in_flight_at_open = quiet_sink(what="row 3's POST window", tag="verdicts-3a",
+                                   evidence=evidence)
     alerts_before_flip = policy_alerts(REFUSED_POLICY)
+    staleness_before = alert_of(alerts_before_flip, "Staleness") or {}
     posts_mark = sink_posts()
     sound = legacy_backup("valid-signature", topics=TOPICS)
     sound_verdict = (((sound.get("status") or {}).get("evidence") or {})
@@ -6918,10 +6992,12 @@ def protection_verdicts() -> None:
                        - sum(a.get("transition") or 0 for a in alerts_before_flip))
     final = policy_view(get("protectionpolicy", REFUSED_POLICY))
     flip = incident_resolves_exactly_once(
-        staleness_before, staleness_after, final["health"], posts, new_transitions)
+        staleness_before, staleness_after, final["health"], posts, new_transitions,
+        in_flight_at_open=in_flight_at_open)
     evidence.append(artifact("verdicts/3a-flip.json",
                              {"before": staleness_before, "after": staleness_after,
                               "alertsBefore": alerts_before_flip,
+                              "inFlightAtWindowOpen": in_flight_at_open,
                               "alertsAfter": alerts_after_flip, "posts": posts,
                               "newTransitions": new_transitions, "view": final,
                               "clauses": flip}))
@@ -6981,6 +7057,7 @@ def protection_verdicts() -> None:
                        in {"Delivered", "Failed", "Suppressed"}),
             seconds=300, what="the open transition to finish delivering",
         )
+        quiet_sink(what="verdicts (3b)'s POST window", tag="verdicts-3b", evidence=evidence)
         stays_before = alert_of(policy_alerts(STAYS_POLICY), "Staleness") or {}
         posts_mark = sink_posts()
         mark = now()
