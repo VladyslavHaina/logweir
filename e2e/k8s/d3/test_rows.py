@@ -1618,6 +1618,74 @@ def test_the_legacy_destination_names_the_archive_the_backups_write() -> None:
         and d3.DEST_PREFIX != "owner-stamp")
 
 
+def test_a_policy_that_selected_nothing_is_reported_as_such() -> None:
+    """`Unprotected` over an EMPTY candidate set is not a verdict.
+
+    D3 §3.2's `Unprotected` — "no available point at all" — is what a policy
+    says when every point it covers is unusable AND what it says when it covers
+    no points at all, and `status.health` cannot tell them apart. That is how
+    every protection row in `d3_live.py` came to measure nothing: they named
+    `scheduleRefs` while their points were manual `Backup`s with no
+    `spec.scheduleRef`, so `identity::is_run_of_schedule` excluded all of them.
+    Live, on 2026-09-22, that policy read `lastAttempt: null`
+    (`verdicts/probe-schedulerefs-membership.json`).
+    """
+    counted = {"lastAttempt": {"backupRef": {"name": "recovery-point"},
+                               "phase": "Succeeded", "at": "2026-09-22T02:38:02Z"},
+               "health": "Unprotected"}
+    row("a policy that selected a run names it in status.lastAttempt",
+        all(d3.selector_matched_a_run(counted).values()))
+
+    # The exact shape the live probe produced: the policy evaluated, opened a
+    # `Staleness` incident, and had selected nothing at all.
+    vacuum = {"health": "Unprotected", "lastAttempt": None,
+              "alerts": [_alert("Open")]}
+    empty = d3.selector_matched_a_run(vacuum)
+    row("MUTANT: the same Unprotected verdict over an EMPTY candidate set is REFUSED, "
+        "not silently passed",
+        not any(empty.values()), f"{empty}")
+    row("MUTANT: a status with no lastAttempt key at all is refused the same way",
+        not any(d3.selector_matched_a_run({"health": "Unprotected"}).values()))
+    row("MUTANT: a lastAttempt carrying no backupRef name is refused",
+        not any(d3.selector_matched_a_run(
+            {"lastAttempt": {"phase": "Succeeded"}}).values()))
+
+    # AND THE ROW IT GUARDS SAYS FALSE. The `notify` row's other clauses are
+    # all satisfiable over an empty set — one alert, one transition, one
+    # delivery attempt, health `Unprotected` — which is precisely why it passed
+    # for a year over nothing.
+    alerts = [_alert("Open")]
+    other_clauses_ok = (len(alerts) == 1 and len(alerts) == 1
+                        and (alerts[0].get("delivery") or {}).get("state") == "Delivered"
+                        and vacuum["health"] in {"Stale", "Unprotected", "Unknown"})
+    row("MUTANT: every OTHER clause of notify-stale-point-alerts-exactly-once is satisfied "
+        "by the empty set, so the selector clause is the only thing that refuses it",
+        other_clauses_ok and not all(d3.selector_matched_a_run(vacuum).values()))
+
+
+def test_a_manual_backup_is_a_member_only_when_it_references_the_schedule() -> None:
+    """D3 §3.2: "the `spec.scheduleRef.uid` field is the authority and the label
+    is the index"."""
+    plain = d3.backup_object("b", "dest-a")
+    row("a plain manual Backup carries no scheduleRef, and so is no schedule's run",
+        "scheduleRef" not in plain["spec"] and plain["spec"]["triggeredBy"] == "manual")
+    member = d3.backup_object("b", "dest-a", schedule={"name": "keeps-running", "uid": "u-1"})
+    row("a manual run OF a schedule carries name AND uid",
+        member["spec"]["scheduleRef"] == {"name": "keeps-running", "uid": "u-1"})
+    row("MUTANT: no runPolicySha256 is invented — `check_run_policy_digest` returns Ok when "
+        "it is absent and TERMINALLY refuses a mismatch when it is present",
+        "runPolicySha256" not in member["spec"]["scheduleRef"])
+    row("MUTANT: and no ownerReference — a manual run OF a schedule is not a run the "
+        "schedule created and may garbage-collect",
+        "ownerReferences" not in member["metadata"])
+    row("the two policies name DIFFERENT schedules, so neither selects the other's point",
+        d3.protection_policy("protect-a", max_age=300)["spec"]["protects"]["scheduleRefs"]
+        == [{"name": "keeps-running"}]
+        and d3.protection_policy("p", max_age=600, schedule=d3.RECOVERY_SCHEDULE)
+        ["spec"]["protects"]["scheduleRefs"] == [{"name": d3.RECOVERY_SCHEDULE}]
+        and d3.RECOVERY_SCHEDULE != "keeps-running")
+
+
 def test_zz_every_row_in_this_file_passed() -> None:
     """The file's own gate, for `python3 -m pytest e2e/k8s/d3`.
 

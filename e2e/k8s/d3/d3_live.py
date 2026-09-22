@@ -418,20 +418,64 @@ def destination(name: str, bucket: str, *, write_secret: str = "logweir-s3",
     }
 
 
-def backup_object(name: str, dest: str, topics: list[str] | None = None) -> dict[str, Any]:
+def backup_object(name: str, dest: str, topics: list[str] | None = None,
+                  schedule: dict[str, str] | None = None) -> dict[str, Any]:
+    """A manual `Backup`, optionally a manual run OF a schedule.
+
+    # `schedule` IS NOT DECORATION — it is what makes a point SELECTABLE
+
+    A `ProtectionPolicy` carrying `spec.protects.scheduleRefs` counts a run as
+    history only through `identity::is_run_of_schedule`, which accepts
+    `spec.scheduleRef.{name,uid}`, the legacy controller `ownerReference` or
+    PLAT-05.2's retention annotation — and therefore "counts a manual run of
+    the schedule as history"
+    (`controllers/protection_policy.rs::is_member`). D3 §3.1 says the same from
+    the other side: `scheduleRefs: [{name: nightly}]` means "points produced by
+    these schedules count", and §3.2 names the authority in as many words —
+    **"the `spec.scheduleRef.uid` field is the authority and the label is the
+    index"**.
+
+    A manual `Backup` with none of those three is NOT a member. Every
+    protection row in this file measured exactly that shape against a policy
+    naming a schedule, so the policies had an EMPTY candidate set and
+    `Unprotected` was an answer about nothing. Measured live on 2026-09-22
+    (`verdicts/probe-schedulerefs-membership.json`): `status.lastAttempt: null`
+    — no run counted at all.
+
+    Only `uid` and `name` are set. `runPolicySha256` is deliberately omitted:
+    `identity::check_run_policy_digest` returns `Ok` when it is absent and
+    compares it to the spec's own recomputed digest when it is present, so
+    writing one here would be inventing a control-plane fact. No
+    `ownerReference` is set either — this run is a manual run OF the schedule,
+    not a run the schedule created and may garbage-collect.
+    """
+    spec: dict[str, Any] = {
+        "sourceRef": {"name": "source"},
+        "destinationRef": {"name": dest},
+        "topics": topics or TOPICS,
+        "archive": {"url": f"logweir-destination://{dest}"},
+        "triggeredBy": "manual",
+        "deadlineSeconds": 600,
+    }
+    if schedule:
+        spec["scheduleRef"] = {"name": schedule["name"], "uid": schedule["uid"]}
     return {
         "apiVersion": "logweir.dev/v1alpha1",
         "kind": "Backup",
         "metadata": owned(name),
-        "spec": {
-            "sourceRef": {"name": "source"},
-            "destinationRef": {"name": dest},
-            "topics": topics or TOPICS,
-            "archive": {"url": f"logweir-destination://{dest}"},
-            "triggeredBy": "manual",
-            "deadlineSeconds": 600,
-        },
+        "spec": spec,
     }
+
+
+def schedule_ref(name: str) -> dict[str, str]:
+    """`{name, uid}` for a `BackupSchedule` that exists, read from the object.
+
+    The UID is read rather than assumed because "a schedule deleted and
+    recreated under the same name is a different schedule and must not adopt
+    this run" (`crds/backup.rs::ScheduleRef::uid`) — and a stale UID here would
+    silently un-select every point the row depends on.
+    """
+    return {"name": name, "uid": get("backupschedule", name)["metadata"]["uid"]}
 
 
 def mc_pod() -> dict[str, Any]:
@@ -628,9 +672,10 @@ def settle_verdict(name: str, seconds: int = 45) -> dict[str, Any]:
 
 
 def run_backup(
-    name: str, dest: str, topics: list[str] | None = None, settle: int = 12
+    name: str, dest: str, topics: list[str] | None = None, settle: int = 12,
+    schedule: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    create(backup_object(name, dest, topics))
+    create(backup_object(name, dest, topics, schedule))
     wait_for("backup", name, terminal, seconds=600, what="a terminal phase")
     done = settle_verdict(name, settle)
     if done["status"].get("phase") != "Succeeded":
@@ -1447,6 +1492,30 @@ def expected_posts(hatch_open: bool, new_transitions: int) -> int:
     and call a correct re-run a failure (observed 2026-09-18).
     """
     return new_transitions if hatch_open else 0
+
+
+def selector_matched_a_run(status: dict[str, Any]) -> dict[str, bool]:
+    """Whether `spec.protects` selected ANY run at all.
+
+    THE CLAUSE THAT SEPARATES A VERDICT FROM A VACUUM. `Unprotected` /
+    `NoAvailablePoint` is what a policy says when the points it covers are all
+    unusable AND what it says when it covers no points at all, and the two look
+    identical in `status.health`. `status.lastAttempt` is built from
+    `input.slots.first()` and `slots` is the MEMBER list
+    (`controllers/protection_policy.rs:380`), so a policy naming a run has
+    selected at least one.
+
+    Measured live on 2026-09-22 before this was a clause: every protection row
+    in this file named `scheduleRefs` while its points were manual `Backup`s
+    with no `spec.scheduleRef`, and `lastAttempt` read `null` — the rows were
+    green (or red) over an empty candidate set
+    (`verdicts/probe-schedulerefs-membership.json`).
+    """
+    named = ((status.get("lastAttempt") or {}).get("backupRef") or {}).get("name")
+    return {
+        "the policy's selector matched at least one run — status.lastAttempt names it":
+            bool(named),
+    }
 
 
 def notify_delivery_ok(hatch_open: bool, posts: int, want_posts: int, delivered: bool,
@@ -4805,7 +4874,18 @@ def sink_posts() -> int:
     return sink_post_count(out)
 
 
-def protection_policy(name: str, *, max_age: int) -> dict[str, Any]:
+def protection_policy(name: str, *, max_age: int,
+                      schedule: str = "keeps-running") -> dict[str, Any]:
+    """The `ProtectionPolicy` shape D3 §3.1 documents, over one schedule.
+
+    `schedule` is a parameter because two phases need DIFFERENT ones and the
+    reason is the rows': a policy selects "points produced by these schedules"
+    (§3.1), so two policies sharing one schedule share one candidate set, and
+    `protection_cases` — which needs its incident to OPEN over an empty set
+    before its own fresh point closes it — would instead find `notify`'s point
+    already sitting inside its objective and never open an incident at all.
+    Each phase's policy names a schedule only its own runs reference.
+    """
     return {
         "apiVersion": "logweir.dev/v1alpha1",
         "kind": "ProtectionPolicy",
@@ -4815,7 +4895,7 @@ def protection_policy(name: str, *, max_age: int) -> dict[str, Any]:
                 "sourceRef": {"name": "source"},
                 "destinationRef": {"name": "dest-a"},
                 "catalogRef": {"name": "primary"},
-                "scheduleRefs": [{"name": "keeps-running"}],
+                "scheduleRefs": [{"name": schedule}],
                 "topics": TOPICS,
             },
             "objectives": {
@@ -4836,6 +4916,12 @@ def protection_policy(name: str, *, max_age: int) -> dict[str, Any]:
             },
         },
     }
+
+
+# The CRD's own floor for `maxRecoveryPointAgeSeconds` (`>= 300`), so the wait
+# that ages the point past it is as short as the schema allows.
+NOTIFY_MAX_AGE = 300
+NOTIFY_POINT = "notify-point"
 
 
 def notify() -> None:
@@ -4863,6 +4949,33 @@ def notify() -> None:
         apply(schedule_object("keeps-running", "dest-a"))
     run(KN + ["patch", "backupschedule", "keeps-running", "--type=merge",
               "-p", json.dumps({"spec": {"suspend": True}})])
+
+    # A POINT THE POLICY CAN ACTUALLY SELECT, AND OLD ENOUGH TO BE STALE.
+    #
+    # `catalog` deletes every dest-a `Backup` CR to prove reconstruction, so
+    # this namespace reaches `notify` with none — and the manual runs the other
+    # phases make carry no `spec.scheduleRef`, so even where one survived it was
+    # not a member of a policy naming `scheduleRefs` (see `backup_object`, and
+    # `verdicts/probe-schedulerefs-membership.json`). Both together are why the
+    # `Stale` arm of the row below had never been measured: the policy was
+    # `Unprotected` over an EMPTY candidate set, and the alert it opened was
+    # about nothing.
+    #
+    # The point is made here, as a manual run OF `keeps-running`, and the view
+    # is refreshed so `requireCatalogAvailability` can answer for it. The wait
+    # below then does double duty: three evaluation intervals for the dedup
+    # claim, and past `maxRecoveryPointAgeSeconds` (the CRD's floor, 300 s) so
+    # the newest available point is genuinely past the objective.
+    if get_opt("backup", NOTIFY_POINT) is not None:
+        run(KN + ["delete", "backup", NOTIFY_POINT, "--wait=true"])
+    member = run_backup(NOTIFY_POINT, "dest-a", schedule=schedule_ref("keeps-running"))
+    point_written = time.time()
+    refresh_view("primary", f"notify-{int(point_written)}")
+    evidence.append(artifact("notify/member-point.json",
+                             {"backup": backup_facts(member),
+                              "scheduleRef": member["spec"].get("scheduleRef"),
+                              "pointFactsThePolicyNeeds":
+                                  point_facts_the_policy_needs(member.get("status") or {})}))
     posts_before = sink_posts()
     backups_before = {b["metadata"]["name"]: b["metadata"]["resourceVersion"]
                       for b in lst("backups")}
@@ -4872,7 +4985,7 @@ def notify() -> None:
     existing = get_opt("protectionpolicy", "protect-a") or {}
     notified_before = sum(a.get("notifiedTransition") or 0
                           for a in ((existing.get("status") or {}).get("alerts") or []))
-    apply(protection_policy("protect-a", max_age=300))
+    apply(protection_policy("protect-a", max_age=NOTIFY_MAX_AGE))
     wait_for(
         "protectionpolicy",
         "protect-a",
@@ -4880,10 +4993,15 @@ def notify() -> None:
         seconds=300,
         what="a health verdict",
     )
-    # three evaluation intervals' worth of wall clock, to prove the alert does
+    # Three evaluation intervals' worth of wall clock, to prove the alert does
     # not re-fire: `renotifyAfterSeconds` is unset, so one transition is one
-    # alert however many times the policy is reconciled.
-    time.sleep(200)
+    # alert however many times the policy is reconciled. AND past the
+    # objective, measured from the point's own capture rather than from here,
+    # so the newest available point is older than `maxRecoveryPointAgeSeconds`
+    # and `Stale` is reachable at all — bounded, because a wait with no bound
+    # is how a worker hangs.
+    stale_at = point_written + NOTIFY_MAX_AGE + 40
+    time.sleep(max(200.0, min(stale_at - time.time(), 600.0)))
     settled_obj = get("protectionpolicy", "protect-a")
     status = settled_obj["status"]
     alerts = status.get("alerts") or []
@@ -4910,13 +5028,21 @@ def notify() -> None:
     backups_after = {b["metadata"]["name"]: b["metadata"]["resourceVersion"]
                      for b in lst("backups")}
     delivery = (alerts[0].get("delivery") if alerts else {}) or {}
+    selector = selector_matched_a_run(status)
     check(
         "notify-stale-point-alerts-exactly-once",
         "PLAT-14.2",
         len(alerts) == 1
         and len(transitions) == 1
         and delivery.get("attempts", 0) <= 3
-        and status.get("health") in {"Stale", "Unprotected", "Unknown"},
+        and status.get("health") in {"Stale", "Unprotected", "Unknown"}
+        and all(selector.values()),
+        f"selector {selector} — `{NOTIFY_POINT}` is a manual run OF `keeps-running` "
+        f"(`spec.scheduleRef.uid`, D3 §3.2's authority), written "
+        f"{int(time.time() - point_written)}s before this read and past the objective of "
+        f"{NOTIFY_MAX_AGE}s, and status.lastAttempt names "
+        f"{((status.get('lastAttempt') or {}).get('backupRef') or {}).get('name')!r}: this "
+        f"row is a measurement of a candidate set and not of an empty one. "
         f"health={status.get('health')}; over ~3 evaluation intervals the policy holds "
         f"{len(alerts)} open alert and every delivery Job belongs to ONE transition "
         f"({sorted(transitions)}, {len(jobs)} Job(s) = the bounded retry, "
@@ -5465,6 +5591,13 @@ def catalog_access() -> None:
 
 RECOVERY_POLICY = "protect-recovery"
 RECOVERY_MAX_AGE = 600
+# THIS PHASE'S OWN SCHEDULE, and not `notify`'s. A policy selects "points
+# produced by these schedules" (D3 §3.1), so sharing `keeps-running` would mean
+# sharing `notify`'s member point — which is minutes old and therefore INSIDE
+# this policy's 600 s objective, so the incident this phase needs to open
+# before its own fresh point closes it would never open at all. Suspended at
+# birth like every schedule here; nothing fires from it.
+RECOVERY_SCHEDULE = "recovery-runs"
 
 
 def alert_of(alerts: list[dict[str, Any]], kind: str) -> dict[str, Any] | None:
@@ -5629,10 +5762,11 @@ def protection_cases() -> None:
     sink_ip = get("pod", SINK_POD)["status"]["podIP"]
     apply({"apiVersion": "v1", "kind": "Secret", "metadata": owned(SINK_URL_SECRET),
            "stringData": {"url": f"http://{sink_ip}:{SINK_PORT}/alerts"}})
-    if get_opt("backupschedule", "keeps-running") is None:
-        apply(schedule_object("keeps-running", "dest-a"))
-    run(KN + ["patch", "backupschedule", "keeps-running", "--type=merge",
-              "-p", json.dumps({"spec": {"suspend": True}})])
+    for schedule in ("keeps-running", RECOVERY_SCHEDULE):
+        if get_opt("backupschedule", schedule) is None:
+            apply(schedule_object(schedule, "dest-a"))
+        run(KN + ["patch", "backupschedule", schedule, "--type=merge",
+                  "-p", json.dumps({"spec": {"suspend": True}})])
     if get_opt("protectionpolicy", RECOVERY_POLICY) is not None:
         run(KN + ["delete", "protectionpolicy", RECOVERY_POLICY, "--wait=true"])
 
@@ -5641,7 +5775,8 @@ def protection_cases() -> None:
     before_entries = {e["pointId"]: e for e in view_entries(view)}
     newest_before = max(before_entries.values(), key=lambda e: e["recoveryPointAtMs"],
                         default={})
-    apply(protection_policy(RECOVERY_POLICY, max_age=RECOVERY_MAX_AGE))
+    apply(protection_policy(RECOVERY_POLICY, max_age=RECOVERY_MAX_AGE,
+                            schedule=RECOVERY_SCHEDULE))
     opened = settle(
         "protectionpolicy", RECOVERY_POLICY,
         lambda o: alert_of(((o.get("status") or {}).get("alerts") or []), "Staleness") is not None,
@@ -5668,7 +5803,14 @@ def protection_cases() -> None:
     # resolve that a point already in the view is supposed to have caused.
     if get_opt("backup", "recovery-point") is not None:
         run(KN + ["delete", "backup", "recovery-point", "--wait=true"])
-    fresh = run_backup("recovery-point", "dest-a")
+    # A MANUAL RUN OF THIS POLICY'S SCHEDULE. Without `spec.scheduleRef` the
+    # point is not a member (`identity::is_run_of_schedule`), the policy's
+    # candidate set stays empty, and the resolve this row measures cannot
+    # happen on ANY build — the row would then fail at the batch refresh for a
+    # harness reason that looks exactly like the product defect it exists to
+    # confirm.
+    fresh = run_backup("recovery-point", "dest-a",
+                       schedule=schedule_ref(RECOVERY_SCHEDULE))
     fresh_status = fresh.get("status") or {}
     fresh_view = refresh_view("primary", f"protect-2-{int(time.time())}")
     after_entries = {e["pointId"]: e for e in view_entries(fresh_view)}
@@ -5708,6 +5850,11 @@ def protection_cases() -> None:
         alert_of(alerts_before, "Staleness"), alert_of(alerts_after, "Staleness"),
         posts, new_transitions, newest_before.get("pointId"), newest_after.get("pointId"),
     )
+    # AND THE POLICY SELECTED IT. Everything above is about what the policy
+    # DECIDED; this is whether it had anything to decide about.
+    clauses["the policy selected the point this row created"] = (
+        (((policy_now.get("status") or {}).get("lastAttempt") or {}).get("backupRef") or {})
+        .get("name") == "recovery-point")
     blind = [name for name, present in missing_facts.items() if not present]
     verdict_written = missing_facts["evidence.verification.result is written at all"]
     entry_now = after_entries.get(newest_after.get("pointId", ""), {})
@@ -5827,6 +5974,7 @@ def protection_cases() -> None:
         victim, broken_entries.get(victim["pointId"], {}), alerts_before_break,
         alerts_after_break, posts, new_transitions,
     )
+    break_clauses.update(selector_matched_a_run((policy_broken.get("status") or {})))
     check(
         "protection-unavailable-archive-raises-the-alert",
         "PLAT-14.2",
