@@ -1342,7 +1342,23 @@ async function main() {
     if (ceiling !== null) {
       const wire = await ceiling.reader;
       dump("operation/wire-maxduration.json", wire);
-      const opensNow = await ceilingPage.evaluate(() => window.__d3uiOpens || 0);
+      // THE RECONNECT IS NOT INSTANT, AND THE PRODUCT SAYS SO. `ui/operation-watch.js`
+      // exports `BACKOFF_MS = [1000, 2000, 5000, 30000]` and reconnects after
+      // `backoffFor(0, jitter)` -- at least a second, deliberately jittered so
+      // two tabs do not reconnect in lockstep. This read used to happen in the
+      // same tick as the raw stream's `end` frame, so it could only ever
+      // observe the FIRST open and the row below could only ever fail: on
+      // 2026-09-22 it failed twice running with `Opens: 1` against a console
+      // whose reconnect works. THE ASSERTION IS UNCHANGED -- still `>= 2`, a
+      // re-open or a failure -- and only the WAIT is added; polling stops the
+      // moment the second open lands, so a console that never reconnects still
+      // fails, and takes the full window to do it.
+      const reopenDeadline = Date.now() + 30000;
+      let opensNow = await ceilingPage.evaluate(() => window.__d3uiOpens || 0);
+      while (opensNow < 2 && Date.now() < reopenDeadline) {
+        await pause(500);
+        opensNow = await ceilingPage.evaluate(() => window.__d3uiOpens || 0);
+      }
       const ceilingText = await ceilingPage.evaluate(() => document.body.innerText);
       dump("operation/ceiling-page.txt", ceilingText);
       const at = join(ARTIFACTS, "shots", "18-ceiling-page.png");
