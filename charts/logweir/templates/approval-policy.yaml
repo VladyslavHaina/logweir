@@ -1,0 +1,95 @@
+{{/*
+`approvalPolicy` — PLAT-19.2: ORDINARY CONFIRMATION VERSUS GOVERNED APPROVAL.
+
+ONE DOCUMENT, TWO READERS, ONE DIGEST. Decision D0 says the API and the
+controller "consume the same content hash". This template renders the
+installation's approval policies and namespace bindings ONCE, into an immutable
+ConfigMap whose name carries the first ten characters of the document's sha256,
+and the SAME object is mounted into the `weirkeeper` Deployment
+(`LOGWEIR_APPROVAL_POLICY_FILE`) and into the console
+(`approvalPolicyFile`). Both processes log `approval_policy_digest` at start and
+`GET /api/v1/namespaces/{ns}/approval-policy` publishes it, so an operator can
+see they agree.
+
+A CHANGED POLICY IS A ROLLOUT, NOT AN EDIT. D0: "Selecting a different policy is
+an explicit installation-admin rollout and audit event, not a namespace
+operator edit." The content-addressed name changes with every edit, so both pod
+templates change and both Deployments roll; nobody with `patch configmaps` can
+change the policy under a running controller, because the object is immutable.
+A signed document names the policy's snapshot DIGEST, so a Restore confirmed
+under the old policy and not yet admitted is refused `ApprovalPolicyMismatch`
+after the rollout — re-confirmation, which is D0's rule.
+
+NOTHING IS RENDERED WHEN NOTHING IS CONFIGURED. An install with no policies and
+no bindings renders no ConfigMap, no env and no mount, so the default render is
+byte-identical to what it was, and every namespace resolves to
+`legacy-governed-v1` — today's governed approval, unchanged.
+
+THE REFUSALS HERE ARE THE BINARY'S, MADE EARLIER. `logweir_core::approval_policy`
+refuses the same documents at controller and console start; this arm refuses
+them in `helm lint`, where the operator is still holding the values file.
+*/}}
+{{- define "logweir.approvalPolicy.configured" -}}
+{{- if or .Values.approvalPolicy.policies .Values.approvalPolicy.namespaces -}}true{{- end -}}
+{{- end -}}
+
+{{- define "logweir.approvalPolicy.document" -}}
+allowOrdinaryConfirmation: {{ .Values.approvalPolicy.allowOrdinaryConfirmation }}
+policies:
+{{ toYaml (.Values.approvalPolicy.policies | default list) | indent 2 }}
+namespaces:
+{{ toYaml (.Values.approvalPolicy.namespaces | default dict) | indent 2 }}
+{{- end -}}
+
+{{- define "logweir.approvalPolicy.name" -}}
+{{- printf "%s-approval-policy-%s" .Release.Name (trunc 10 (include "logweir.approvalPolicy.document" . | sha256sum)) -}}
+{{- end -}}
+
+{{- /* Where both readers mount it. */ -}}
+{{- define "logweir.approvalPolicy.dir" -}}/etc/logweir/approval-policy{{- end -}}
+{{- define "logweir.approvalPolicy.file" -}}{{ include "logweir.approvalPolicy.dir" . }}/approval-policy.yaml{{- end -}}
+{{- define "logweir.approvalPolicy.confirmationDir" -}}/var/run/logweir/confirmation{{- end -}}
+
+{{- define "logweir.approvalPolicy.checks" -}}
+{{- $p := .Values.approvalPolicy -}}
+{{- $names := list -}}
+{{- range $i, $policy := ($p.policies | default list) -}}
+{{- if not (and $policy.name (regexMatch "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$" $policy.name)) -}}
+{{- fail (printf "approvalPolicy.policies[%d].name %q must be a DNS label." $i ($policy.name | default "")) -}}
+{{- end -}}
+{{- if eq $policy.name "legacy-governed-v1" -}}
+{{- fail "approvalPolicy.policies names `legacy-governed-v1`, which is reserved for the policy an unbound namespace resolves to. Leave the namespace unbound instead." -}}
+{{- end -}}
+{{- if has $policy.name $names -}}
+{{- fail (printf "approvalPolicy.policies declares %q twice." $policy.name) -}}
+{{- end -}}
+{{- $names = append $names $policy.name -}}
+{{- if not (has $policy.mode (list "Governed" "Ordinary")) -}}
+{{- fail (printf "approvalPolicy.policies[%d].mode is %q; it is `Governed` or `Ordinary`." $i ($policy.mode | default "")) -}}
+{{- end -}}
+{{- if and (eq $policy.mode "Ordinary") (not $p.allowOrdinaryConfirmation) -}}
+{{- fail (printf "approvalPolicy.policies[%d] (%s) is Ordinary but approvalPolicy.allowOrdinaryConfirmation is not true. Ordinary confirmation is an explicit installation decision (D0): set the floor, or use a Governed policy." $i $policy.name) -}}
+{{- end -}}
+{{- end -}}
+{{- range $ns, $policy := ($p.namespaces | default dict) -}}
+{{- if not (has $policy $names) -}}
+{{- fail (printf "approvalPolicy.namespaces.%s names policy %q, which approvalPolicy.policies does not declare." $ns $policy) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{- if include "logweir.approvalPolicy.configured" . }}
+{{- include "logweir.approvalPolicy.checks" . }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "logweir.approvalPolicy.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: approval-policy
+immutable: true
+data:
+  approval-policy.yaml: |
+{{ include "logweir.approvalPolicy.document" . | indent 4 }}
+{{- end }}

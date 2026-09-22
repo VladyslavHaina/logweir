@@ -409,6 +409,36 @@
         "enabled": { "type": "boolean" }
       }
     },
+    "approvalPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["allowOrdinaryConfirmation", "policies", "namespaces", "confirmationKeySecret"],
+      "description": "PLAT-19.2. The installation's approval policies and namespace bindings (decision D0), rendered once into an immutable, content-addressed ConfigMap mounted into BOTH the weirkeeper controller (LOGWEIR_APPROVAL_POLICY_FILE) and the console (approvalPolicyFile), so both consume the same digest. Empty: every namespace resolves to legacy-governed-v1, today's governed approval. An Ordinary policy is refused unless allowOrdinaryConfirmation is true; a Governed policy always requires a distinct approver principal. A served namespace bound to a policy needs confirmationKeySecret: a Secret with key `confirmation.key`, the console's ConsoleConfirmation PKCS#8 private key, whose public half must be on the namespace's TrustPolicy.",
+      "properties": {
+        "allowOrdinaryConfirmation": { "type": "boolean" },
+        "policies": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "mode"],
+            "properties": {
+              "name": { "type": "string", "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$" },
+              "mode": { "type": "string", "enum": ["Governed", "Ordinary"] },
+              "maxAgeSeconds": { "type": "integer", "minimum": 60, "maximum": 604800 },
+              "requireDistinctPrincipal": { "type": "boolean" }
+            }
+          }
+        },
+        "namespaces": {
+          "type": "object",
+          "maxProperties": 256,
+          "additionalProperties": { "type": "string" }
+        },
+        "confirmationKeySecret": { "type": "string" }
+      }
+    },
     "api": {
       "type": "object",
       "additionalProperties": false,

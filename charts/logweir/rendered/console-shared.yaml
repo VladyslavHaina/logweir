@@ -127,6 +127,32 @@ spec:
                 - notAfter
                 - notBefore
                 type: object
+              authorization:
+                description: 'PLAT-19.2: the policy, mode and console-attested requester a v2 authorization was verified under — see [`AuthorizationProvenance`]. Absent for a v1 approval document, and cleared by an explicit `null` on every refusal (`controllers::approval::CLEARABLE_STATUS_FIELDS`).'
+                nullable: true
+                properties:
+                  confirmationKeyId:
+                    description: The `ConsoleConfirmation` key whose signature attested the requester.
+                    type: string
+                  mode:
+                    description: '`Governed` or `Ordinary` — the signed `authorizationMode`, which the verdict required to equal the bound policy''s mode.'
+                    type: string
+                  policyDigest:
+                    description: That policy's snapshot digest, `sha256:<hex>`.
+                    type: string
+                  policyName:
+                    description: The approval policy the document names, equal to the namespace's binding at verification time.
+                    type: string
+                  requester:
+                    description: The console-attested requester, `<issuer>#<subject>`.
+                    type: string
+                required:
+                - confirmationKeyId
+                - mode
+                - policyDigest
+                - policyName
+                - requester
+                type: object
               conditions:
                 description: '`Verified`, and whatever else the controller reports.'
                 items:
@@ -7389,11 +7415,14 @@ rules:
       - restores
       - topicdiscoveries
     verbs: ["get", "list"]
-  # `create`: seven of the eight. `approvals` is absent — `approval.submit` is
-  # NOT implemented (D0 keeps a governed approval off the API until PLAT-19.2),
-  # so a `create` on it would be a verb with no route.
+  # `create`: all eight. `approvals` joined with PLAT-19.2: the console
+  # creates the Approval its signed ordinary confirmation IS, the governed
+  # confirmation object, and — on `POST .../restores/{name}/approval` — the
+  # approver's countersigned Approval. Still no update, patch or delete on it:
+  # an Approval's spec is immutable and a refused one stays as the audit trail.
   - apiGroups: ["logweir.dev"]
     resources:
+      - approvals
       - backupdestinations
       - backups
       - backupschedules

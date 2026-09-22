@@ -166,6 +166,13 @@ demoKafka:
 retention:
   enabled: false
 
+# ------------- approvalPolicy (PLAT-19.2) — empty = legacy-governed-v1 everywhere
+approvalPolicy:
+  allowOrdinaryConfirmation: false  # D0's floor: an Ordinary policy is refused without it
+  policies: []                      # [{name, mode: Governed|Ordinary, maxAgeSeconds, requireDistinctPrincipal}]
+  namespaces: {}                    # {<namespace>: <policy name>}; unbound = legacy-governed-v1
+  confirmationKeySecret: ""         # console: Secret with `confirmation.key` (PKCS#8, ConsoleConfirmation)
+
 # ------------------------- api.enabled — the console/API principal's RBAC (D3)
 # ServiceAccount + roles only. api.console.enabled additionally runs the pod.
 api:

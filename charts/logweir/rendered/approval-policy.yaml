@@ -1,6 +1,6 @@
 # GENERATED FILE — do not edit by hand.
 # Rendered by scripts/check-chart.sh (just chart-check):
-#   helm template logweir charts/logweir -n logweir-system --include-crds -f charts/logweir/examples/minimal.values.yaml
+#   helm template logweir charts/logweir -n logweir-system --include-crds -f charts/logweir/examples/approval-policy.values.yaml
 # It is checked in so a template change lands as a diff a reviewer reads; the
 # gate compares a temporary render and fails on drift.
 ---
@@ -1075,42 +1075,6 @@ spec:
                 description: The signed receipt, and the controller's verification of it.
                 nullable: true
                 properties:
-                  observation:
-                    description: How the evidence is being read when an evidence-fetch Job reads it — D2 §3.9 step 3. Absent for every other evidence path.
-                    nullable: true
-                    properties:
-                      attempt:
-                        description: Which attempt this is, from 1. A failed fetch is retried at +1 m, +5 m and +15 m (D2 §3.9 step 5); each attempt is its own Job, `lwc-ev-<20 hex of sha256(uid + ":" + attempt)>`. Retries never re-run the backup or the restore.
-                        format: int64
-                        nullable: true
-                        type: integer
-                      jobRef:
-                        description: The evidence-fetch Job of the current attempt, once it exists. Absent while the run waits for a slot under `checks.maxEvidenceFetchActivePerNamespace`.
-                        nullable: true
-                        properties:
-                          name:
-                            description: '`metadata.name`.'
-                            nullable: true
-                            type: string
-                          uid:
-                            description: '`metadata.uid` — a same-named replacement is a different Job.'
-                            nullable: true
-                            type: string
-                        type: object
-                      mode:
-                        description: 'The resolved `evidenceRead` credential mode the Job ran with: `SecretKeys` or `WorkloadIdentity`.'
-                        nullable: true
-                        type: string
-                      presence:
-                        description: 'What the relay said about the two objects: `Complete`, `PayloadWithoutSidecar`, `Absent` (the store answered NotFound for the signed document) or `Unknown` (anything else, including a denial). Absent until a relay was read.'
-                        nullable: true
-                        type: string
-                      retryAfter:
-                        description: When the next attempt may start, after a fetch that did not finish. Absent once a verdict was reached or once the attempts are spent.
-                        format: date-time
-                        nullable: true
-                        type: string
-                    type: object
                   receiptKey:
                     description: The object key of the signed backup receipt.
                     nullable: true
@@ -1146,10 +1110,7 @@ spec:
                         nullable: true
                         type: string
                       result:
-                        description: |-
-                          `Valid`, `Invalid`, `Untrusted`, `NotAttempted` or `Pending`. An empty `TrustRoster.spec.signingKeys` is `NotAttempted` naming itself, never a silent `Invalid`.
-
-                          `Pending` (additive, D2 §3.9 step 3) is written only while an evidence-fetch check Job is reading this run's evidence with the destination's `evidenceRead` grant, or is waiting for a slot to start; `evidence.observation` names that Job. It is not `Valid`, so every surface renders it unverified, and it is replaced by a reached verdict or by an honest `NotAttempted` naming why the fetch did not finish.
+                        description: '`Valid`, `Invalid` or `NotAttempted`. An empty `TrustRoster.spec.signingKeys` is `NotAttempted` naming itself, never a silent `Invalid`.'
                         nullable: true
                         type: string
                       signedAt:
@@ -2594,27 +2555,6 @@ spec:
                     description: 'The restore block, for `operation: Restore`.'
                     nullable: true
                     properties:
-                      catalogPointRef:
-                        description: 'Or a recovery point read from a `RecoveryCatalog`''s view (PLAT-15.2, D3 §5.5 step 5): the controller re-reads that catalog row when the check runs and reports `recoveryPoint.state` from it — the row''s availability and verification, any reached `Backup` verdict on the same receipt, and whether the plan''s `source.point` is this row''s binding. At most one of this and `recoveryPointRef` (P10). ABSENT on every object written before PLAT-15.2, which therefore behaves exactly as it did.'
-                        nullable: true
-                        properties:
-                          catalogRef:
-                            description: The catalog, in this namespace.
-                            properties:
-                              name:
-                                description: The referenced object's `metadata.name`, in this namespace.
-                                type: string
-                            required:
-                            - name
-                            type: object
-                          pointId:
-                            description: '`lwp1-` plus 32 lowercase hex characters (D3 §5.1).'
-                            pattern: ^lwp1-[0-9a-f]{32}$
-                            type: string
-                        required:
-                        - catalogRef
-                        - pointId
-                        type: object
                       evidenceDestinationRef:
                         description: The destination evidence is written to.
                         nullable: true
@@ -2715,8 +2655,6 @@ spec:
                       rule: has(self.sourceDestinationRef) != has(self.legacySourceArchive)
                     - message: planHash is sha256:<64 lowercase hex>, the form logweir_core::ids::sha256_prefixed produces
                       rule: '!has(self.planHash) || self.planHash.matches(''^sha256:[0-9a-f]{64}$'')'
-                    - message: set at most one of recoveryPointRef (a Backup) or catalogPointRef (a catalog point)
-                      rule: '!(has(self.recoveryPointRef) && has(self.catalogPointRef))'
                   skipChecks:
                     description: 'Checks to leave out. **A skipped blocking check keeps the overall state `unknown`**: skipping a question is not answering it.'
                     items:
@@ -4395,7 +4333,7 @@ spec:
                     type: object
                 type: object
               lastScheduledSlot:
-                description: 'The last slot this schedule decided: fired, or skipped with `lastSkipped.slot` naming the same slot. A slot recorded here is never fired again, so a skipped slot is not run late.'
+                description: The last slot admitted.
                 nullable: true
                 type: string
               lastSkipped:
@@ -4407,7 +4345,7 @@ spec:
                     nullable: true
                     type: string
                   slot:
-                    description: The DUE slot that was refused, `yyyymmdd-hhmmss` in UTC — never the instant the controller looked.
+                    description: The slot, `yyyymmdd-hhmmss` in UTC.
                     nullable: true
                     type: string
                 type: object
@@ -4849,42 +4787,6 @@ spec:
                 description: The signed scorecard, the offset report, and the controller's verification.
                 nullable: true
                 properties:
-                  observation:
-                    description: How the evidence is being read when an evidence-fetch Job reads it — D2 §3.9 step 3. Absent for every other evidence path.
-                    nullable: true
-                    properties:
-                      attempt:
-                        description: Which attempt this is, from 1. A failed fetch is retried at +1 m, +5 m and +15 m (D2 §3.9 step 5); each attempt is its own Job, `lwc-ev-<20 hex of sha256(uid + ":" + attempt)>`. Retries never re-run the backup or the restore.
-                        format: int64
-                        nullable: true
-                        type: integer
-                      jobRef:
-                        description: The evidence-fetch Job of the current attempt, once it exists. Absent while the run waits for a slot under `checks.maxEvidenceFetchActivePerNamespace`.
-                        nullable: true
-                        properties:
-                          name:
-                            description: '`metadata.name`.'
-                            nullable: true
-                            type: string
-                          uid:
-                            description: '`metadata.uid` — a same-named replacement is a different Job.'
-                            nullable: true
-                            type: string
-                        type: object
-                      mode:
-                        description: 'The resolved `evidenceRead` credential mode the Job ran with: `SecretKeys` or `WorkloadIdentity`.'
-                        nullable: true
-                        type: string
-                      presence:
-                        description: 'What the relay said about the two objects: `Complete`, `PayloadWithoutSidecar`, `Absent` (the store answered NotFound for the signed document) or `Unknown` (anything else, including a denial). Absent until a relay was read.'
-                        nullable: true
-                        type: string
-                      retryAfter:
-                        description: When the next attempt may start, after a fetch that did not finish. Absent once a verdict was reached or once the attempts are spent.
-                        format: date-time
-                        nullable: true
-                        type: string
-                    type: object
                   offsetReportKey:
                     description: The object key of the offset report. Tag 1 renders the report and applies nothing (Global Constraint 35).
                     nullable: true
@@ -4925,10 +4827,7 @@ spec:
                         nullable: true
                         type: string
                       result:
-                        description: |-
-                          `Valid`, `Invalid`, `Untrusted`, `NotAttempted` or `Pending`. An empty `TrustRoster.spec.signingKeys` is `NotAttempted` naming itself, never a silent `Invalid`.
-
-                          `Pending` (additive, D2 §3.9 step 3) is written only while an evidence-fetch check Job is reading this run's evidence with the destination's `evidenceRead` grant, or is waiting for a slot to start; `evidence.observation` names that Job. It is not `Valid`, so every surface renders it unverified, and it is replaced by a reached verdict or by an honest `NotAttempted` naming why the fetch did not finish.
+                        description: '`Valid`, `Invalid` or `NotAttempted`. An empty `TrustRoster.spec.signingKeys` is `NotAttempted` naming itself, never a silent `Invalid`.'
                         nullable: true
                         type: string
                       signedAt:
@@ -6873,6 +6772,47 @@ metadata:
     helm.sh/chart: logweir-0.1.0
     app.kubernetes.io/component: control-plane
 ---
+# Source: logweir/templates/ui/api-rbac.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: logweir-api
+  namespace: logweir-system
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: api
+---
+# Source: logweir/templates/approval-policy.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: logweir-approval-policy-2914bfa776
+  namespace: logweir-system
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: approval-policy
+immutable: true
+data:
+  approval-policy.yaml: |
+    allowOrdinaryConfirmation: true
+    policies:
+      - maxAgeSeconds: 900
+        mode: Ordinary
+        name: team-ordinary
+      - maxAgeSeconds: 86400
+        mode: Governed
+        name: prod-governed
+        requireDistinctPrincipal: true
+    namespaces:
+      team-a: team-ordinary
+      team-b: prod-governed
+---
 # Source: logweir/templates/policy.yaml
 apiVersion: v1
 kind: ConfigMap
@@ -6911,7 +6851,7 @@ data:
       "legacyArchiveAddressing": {
         "allowHttp": false,
         "endpoint": "",
-        "region": "us-east-1",
+        "region": "",
         "virtualHostedStyle": false
       },
       "preflight": {
@@ -6920,6 +6860,37 @@ data:
       },
       "version": 1
     }
+---
+# Source: logweir/templates/ui/api-config.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: logweir-api-config-97d7f6e253
+  namespace: logweir-system
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: api
+immutable: true
+data:
+  config.yaml: |
+    mode: localAdmin
+    listen: "127.0.0.1:8484"
+    publicOrigin: "http://127.0.0.1:8484"
+    uiDirectory: /ui
+    localAdmin:
+      subject: "admin"
+    namespaces:
+      - logweir-system
+      - team-a
+      - team-b
+    kubernetes:
+      source: inCluster
+    cursorKeyFile: /var/run/logweir/keys/cursor.key
+    approvalPolicyFile: /etc/logweir/approval-policy/approval-policy.yaml
+    confirmationKeyFile: /var/run/logweir/confirmation/confirmation.key
 ---
 # Source: logweir/templates/clusterrole.yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -7203,6 +7174,98 @@ rules:
     resources: ["retentionpolicies"]
     verbs: ["get", "list", "watch", "create", "update", "patch"]
 ---
+# Source: logweir/templates/ui/api-rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: logweir-api
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: api
+rules:
+  # `ProductResource`, the whole sealed set: every projection the API serves is
+  # a `list` or a `get` on one of these eight.
+  - apiGroups: ["logweir.dev"]
+    resources:
+      - approvals
+      - backupdestinations
+      - backups
+      - backupschedules
+      - kafkaclusters
+      - preflights
+      - restores
+      - topicdiscoveries
+    verbs: ["get", "list"]
+  # `create`: all eight. `approvals` joined with PLAT-19.2: the console
+  # creates the Approval its signed ordinary confirmation IS, the governed
+  # confirmation object, and — on `POST .../restores/{name}/approval` — the
+  # approver's countersigned Approval. Still no update, patch or delete on it:
+  # an Approval's spec is immutable and a refused one stays as the audit trail.
+  - apiGroups: ["logweir.dev"]
+    resources:
+      - approvals
+      - backupdestinations
+      - backups
+      - backupschedules
+      - kafkaclusters
+      - preflights
+      - restores
+      - topicdiscoveries
+    verbs: ["create"]
+  # `patch`: the two named merge patches `linkage.rs` pins by resource
+  # (`backupschedules` suspension/policy, `backupdestinations` access), and the
+  # `CancellableCheck` seal — the only two kinds whose `spec.cancelRequested`
+  # may be raised. `Backup` and `Restore` have no cancel in v1 and are absent.
+  - apiGroups: ["logweir.dev"]
+    resources:
+      - backupdestinations
+      - backupschedules
+      - preflights
+      - topicdiscoveries
+    verbs: ["patch"]
+  # D3 W11 — the four NAMESPACED kinds Amendment G added. READ ONLY.
+  - apiGroups: ["logweir.dev"]
+    resources:
+      - protectionpolicies
+      - recoverycatalogs
+      - rehearsalschedules
+      - retentionpolicies
+    verbs: ["get", "list"]
+  # …and D3's ONE write: `catalog.connect`, PLAT-15.2's "connect existing
+  # archive". No `patch`: `catalogs/{name}:sync` and
+  # `rehearsal-schedules/{name}:set-suspension` have no route in this build,
+  # and `retention-policies/{name}:approve-plan` is an administrator path D3
+  # §10 leaves to `kubectl`.
+  - apiGroups: ["logweir.dev"]
+    resources: ["recoverycatalogs"]
+    verbs: ["create"]
+  # The two core objects, one verb each. See this file's header.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+---
+# Source: logweir/templates/ui/api-rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: logweir-api-trustpolicies
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: api
+rules:
+  - apiGroups: ["logweir.dev"]
+    resources: ["trustpolicies"]
+    verbs: ["get", "list"]
+---
 # Source: logweir/templates/clusterrolebinding.yaml
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -7221,6 +7284,26 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: weirkeeper
+    namespace: logweir-system
+---
+# Source: logweir/templates/ui/api-rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: logweir-api-trustpolicies
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: api
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: logweir-api-trustpolicies
+subjects:
+  - kind: ServiceAccount
+    name: logweir-api
     namespace: logweir-system
 ---
 # Source: logweir/templates/identity.yaml
@@ -7274,6 +7357,69 @@ subjects:
     name: logweir-identity-bootstrap
     namespace: logweir-system
 ---
+# Source: logweir/templates/ui/api-rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: logweir-api
+  namespace: logweir-system
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: api
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: logweir-api
+subjects:
+  - kind: ServiceAccount
+    name: logweir-api
+    namespace: logweir-system
+---
+# Source: logweir/templates/ui/api-rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: logweir-api
+  namespace: team-a
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: api
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: logweir-api
+subjects:
+  - kind: ServiceAccount
+    name: logweir-api
+    namespace: logweir-system
+---
+# Source: logweir/templates/ui/api-rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: logweir-api
+  namespace: team-b
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: api
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: logweir-api
+subjects:
+  - kind: ServiceAccount
+    name: logweir-api
+    namespace: logweir-system
+---
 # Source: logweir/templates/deployment.yaml
 apiVersion: apps/v1
 kind: Deployment
@@ -7321,7 +7467,7 @@ spec:
             - name: LOGWEIR_RUNNER_PULL_POLICY
               value: "Always"
             - name: LOGWEIR_ARCHIVE_URL
-              value: "s3://YOUR-BUCKET/logweir"
+              value: ""
             # D2 §4.4 — the installation policy. The override ships empty and
             # the namespace comes from the pod; `templates/policy.yaml` renders
             # `weirkeeper-policy` into exactly that namespace. See
@@ -7332,8 +7478,8 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
-            - name: AWS_REGION
-              value: "us-east-1"
+            - name: LOGWEIR_APPROVAL_POLICY_FILE
+              value: "/etc/logweir/approval-policy/approval-policy.yaml"
             - name: AWS_ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef:
@@ -7357,6 +7503,111 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
+          volumeMounts:
+            - name: approval-policy
+              mountPath: /etc/logweir/approval-policy
+              readOnly: true
+      volumes:
+        - name: approval-policy
+          configMap:
+            name: logweir-approval-policy-2914bfa776
+---
+# Source: logweir/templates/ui/api-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: logweir-api
+  namespace: logweir-system
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: logweir
+      app.kubernetes.io/instance: logweir
+      app.kubernetes.io/component: api
+  template:
+    metadata:
+      annotations:
+        checksum/logweir-api-config: 97d7f6e253a6f166f290c11d79d1b4fe2b4b519b83cdedc2a6c769a6bd55b2b7
+      labels:
+        app.kubernetes.io/name: logweir
+        app.kubernetes.io/instance: logweir
+        app.kubernetes.io/component: api
+    spec:
+      serviceAccountName: logweir-api
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: api
+          image: docker.io/vladyslavhaina/logweir-console:latest
+          imagePullPolicy: Always
+          args:
+            - --config
+            - /etc/logweir/api/config.yaml
+          ports:
+            - name: http
+              containerPort: 8484
+          resources:
+            limits:
+              memory: 256Mi
+            requests:
+              cpu: 25m
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: config
+              mountPath: /etc/logweir/api
+              readOnly: true
+            - name: keys
+              mountPath: /var/run/logweir/keys
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+            - name: approval-policy
+              mountPath: /etc/logweir/approval-policy
+              readOnly: true
+            - name: confirmation
+              mountPath: /var/run/logweir/confirmation
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: logweir-api-config-97d7f6e253
+            items:
+              - key: config.yaml
+                path: config.yaml
+        - name: keys
+          secret:
+            secretName: logweir-console-keys
+            defaultMode: 0440
+        - name: tmp
+          emptyDir: {}
+        - name: approval-policy
+          configMap:
+            name: logweir-approval-policy-2914bfa776
+        - name: confirmation
+          secret:
+            secretName: logweir-console-confirmation
+            defaultMode: 0440
+            items:
+              - key: confirmation.key
+                path: confirmation.key
 ---
 # Source: logweir/templates/identity.yaml
 # The private object is intentionally rendered EMPTY. The hook Job generates or

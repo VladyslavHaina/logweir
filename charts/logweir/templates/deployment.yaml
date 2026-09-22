@@ -155,6 +155,17 @@ spec:
             - name: LOGWEIR_JOB_TTL_SECONDS
               value: {{ .Values.controller.jobTtlSeconds | toString | quote }}
             {{- end }}
+            {{- /*
+            PLAT-19.2 — the installation's approval policies, RENDERED ONLY WHEN
+            CONFIGURED (the default install stays byte-identical to
+            `logweir.yaml`). See `templates/approval-policy.yaml`: the same
+            immutable, content-addressed ConfigMap is mounted into the console,
+            and absent means every namespace on `legacy-governed-v1`.
+            */ -}}
+            {{- if include "logweir.approvalPolicy.configured" . }}
+            - name: LOGWEIR_APPROVAL_POLICY_FILE
+              value: {{ include "logweir.approvalPolicy.file" . | quote }}
+            {{- end }}
             {{- if $endpoint }}
             - name: AWS_ENDPOINT_URL
               value: {{ $endpoint | quote }}
@@ -186,3 +197,15 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
+          {{- if include "logweir.approvalPolicy.configured" . }}
+          volumeMounts:
+            - name: approval-policy
+              mountPath: {{ include "logweir.approvalPolicy.dir" . }}
+              readOnly: true
+          {{- end }}
+      {{- if include "logweir.approvalPolicy.configured" . }}
+      volumes:
+        - name: approval-policy
+          configMap:
+            name: {{ include "logweir.approvalPolicy.name" . }}
+      {{- end }}

@@ -206,6 +206,17 @@ isolate it. The laptop `kubectl proxy --address=127.0.0.1` path is unaffected.
 {{- else -}}
 {{- fail (printf "api.console.mode is %q. The two modes are `localAdmin` (a loopback listener reached with kubectl port-forward, one configured administrator, no identity provider) and `shared` (SSO: OIDC, an encrypted session cookie, exact role bindings and TLS). There is no default: a file that forgets to say which it wants is refused rather than read as the more permissive one." $c.mode) -}}
 {{- end -}}
+{{- /*
+PLAT-19.2: a namespace this console serves that is bound to an approval policy
+needs the console's ConsoleConfirmation key -- both modes carry its signature --
+and `logweir-api` refuses to start without it. Refused here first, by name.
+*/ -}}
+{{- $served := (include "logweir.api.namespaces" . | fromJsonArray) -}}
+{{- range $ns, $policy := (.Values.approvalPolicy.namespaces | default dict) -}}
+{{- if and (has $ns $served) (not $.Values.approvalPolicy.confirmationKeySecret) -}}
+{{- fail (printf "approvalPolicy.namespaces binds %s, which the console serves, to policy %q and approvalPolicy.confirmationKeySecret is empty. Both ordinary and governed requests carry the console's ConsoleConfirmation signature (D0): create a Secret with key `confirmation.key` (a PKCS#8 PEM private key whose PUBLIC half is on the namespace's TrustPolicy with usage ConsoleConfirmation) and name it, or unbind the namespace." $ns $policy) -}}
+{{- end -}}
+{{- end -}}
 {{- if and $c.networkPolicy.enabled (eq $c.mode "shared") -}}
 {{- if or (not $c.networkPolicy.ingressNamespace) (not $c.networkPolicy.ingressPodLabels) -}}
 {{- fail "api.console.networkPolicy.enabled in shared mode needs both networkPolicy.ingressNamespace and networkPolicy.ingressPodLabels. An ingress rule with no `from` selector admits nothing at all, which would be a console nobody can reach; one with an empty podSelector admits every pod in the controller's namespace, which is not what `only the configured ingress controller` means. (In the in-cluster administrator mode there is no ingress rule to write: nothing may dial this pod, so the policy denies ingress outright and neither selector is read.)" -}}
@@ -312,6 +323,17 @@ cursorKeyFile: {{ printf "%s/cursor.key" $keys }}
 cursorKey:
   file: {{ printf "%s/cursor.key" $keys }}
   expectedVersion: {{ int $c.keyVersion }}
+{{- end }}
+{{- /*
+PLAT-19.2 — the SAME approval-policy document the controller mounts, and the
+console's ConsoleConfirmation key (a PATH into a mounted Secret, never the key:
+this ConfigMap carries no credential). Both rendered only when configured.
+*/ -}}
+{{- if include "logweir.approvalPolicy.configured" . }}
+approvalPolicyFile: {{ include "logweir.approvalPolicy.file" . }}
+{{- end }}
+{{- if .Values.approvalPolicy.confirmationKeySecret }}
+confirmationKeyFile: {{ printf "%s/confirmation.key" (include "logweir.approvalPolicy.confirmationDir" .) }}
 {{- end }}
 {{- end -}}
 

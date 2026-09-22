@@ -1,0 +1,52 @@
+# approval-policy.values.yaml — PLAT-19.2: ORDINARY CONFIRMATION AND GOVERNED
+# APPROVAL, with the in-cluster administrator console (see console.values.yaml
+# for everything about that mode).
+#
+# WHAT THIS RENDERS BEYOND console.values.yaml. One immutable, content-addressed
+# ConfigMap `<release>-approval-policy-<digest>` holding the document below,
+# mounted into the weirkeeper Deployment (LOGWEIR_APPROVAL_POLICY_FILE) and into
+# the console (approvalPolicyFile), and the console's ConsoleConfirmation key
+# mounted from `confirmationKeySecret`. Editing any policy or binding renames the
+# ConfigMap and rolls both Deployments: a policy change is an installation-admin
+# rollout (D0), and a Restore confirmed under the old policy and not yet
+# admitted is refused `ApprovalPolicyMismatch` and must be submitted again.
+#
+# TWO THINGS YOU MUST CREATE FIRST, BESIDE THE CONSOLE'S KEY SECRET:
+#
+# 1. The console's confirmation key, as a Secret with key `confirmation.key`:
+#
+#     openssl genpkey -algorithm ed25519 -out confirmation.key
+#     kubectl --context docker-desktop -n logweir-system \
+#       create secret generic logweir-console-confirmation --from-file=confirmation.key
+#     openssl pkey -in confirmation.key -pubout -out confirmation.pub.pem
+#     rm confirmation.key
+#
+# 2. Its PUBLIC half on the TrustPolicy governing each bound namespace, with
+#    usage ConsoleConfirmation (one usage per key, CEL rule G8), and — for a
+#    Governed namespace — each approver's key with usage GovernedApproval and a
+#    `principal.id` of that approver's own `<issuer>#<subject>`, which is what
+#    separation of duties compares against the console-attested requester.
+#    `GET /api/v1/namespaces/{ns}/approval-policy` prints the console key id.
+#
+# AN UNBOUND NAMESPACE IS UNCHANGED: legacy-governed-v1, today's v1 approval.
+api:
+  enabled: true
+  namespaces: [team-a, team-b]
+  console:
+    enabled: true
+    mode: localAdmin
+    keySecret: logweir-console-keys
+approvalPolicy:
+  allowOrdinaryConfirmation: true
+  policies:
+    - name: team-ordinary
+      mode: Ordinary
+      maxAgeSeconds: 900
+    - name: prod-governed
+      mode: Governed
+      maxAgeSeconds: 86400
+      requireDistinctPrincipal: true
+  namespaces:
+    team-a: team-ordinary
+    team-b: prod-governed
+  confirmationKeySecret: logweir-console-confirmation

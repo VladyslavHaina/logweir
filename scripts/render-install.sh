@@ -241,13 +241,15 @@ check_console_grants() {
   dir="$(mktemp -d "${TMPDIR:-/tmp}/logweir-console-cani.XXXXXX")"
 
   # THE ANSWER SHEET: one line per question, and the whole of what may be
-  # answered `yes`. The eight kinds sealed into `ProductResource`, the seven
-  # with a POST route (`approvals` has none — `approval.submit` is not
-  # implemented), the two named merge patches plus the two `CancellableCheck`
+  # answered `yes`. The eight kinds sealed into `ProductResource`, all eight
+  # with a POST route (`approvals` since PLAT-19.2: the console creates the
+  # Approval its ordinary confirmation IS, the governed confirmation object and
+  # the approver's countersigned Approval on `POST .../restores/{name}/approval`),
+  # the two named merge patches plus the two `CancellableCheck`
   # kinds, D3 W11's four namespaced reads and its ONE write, the cluster-scoped
   # `TrustPolicy` read, and the two core objects with one verb each.
   printf '%s\n' \
-    'get approvals'          'list approvals' \
+    'get approvals'          'list approvals'          'create approvals' \
     'get backupdestinations' 'list backupdestinations' 'create backupdestinations' 'patch backupdestinations' \
     'get backups'            'list backups'            'create backups' \
     'get backupschedules'    'list backupschedules'    'create backupschedules'    'patch backupschedules' \

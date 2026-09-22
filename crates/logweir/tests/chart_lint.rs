@@ -1861,19 +1861,11 @@ fn chart_lint_the_console_principal_holds_exactly_what_the_sealed_adapter_spends
             vec!["get".to_string(), "list".to_string()], // engine-token-ok: an RBAC verb the console spends, never an engine subcommand
         ),
         (
+            // All eight since PLAT-19.2: `approvals` is created by the console
+            // for an ordinary confirmation, a governed confirmation object and
+            // an approver's countersigned submission.
             vec!["logweir.dev".to_string()],
-            [
-                "backupdestinations",
-                "backups",
-                "backupschedules",
-                "kafkaclusters",
-                "preflights",
-                "restores",
-                "topicdiscoveries",
-            ]
-            .iter()
-            .map(|s| s.to_string())
-            .collect(),
+            eight_sealed.iter().map(|s| s.to_string()).collect(),
             vec!["create".to_string()],
         ),
         (
@@ -4462,8 +4454,14 @@ fn chart_lint_values_yaml_is_short_and_shows_every_option() {
     // Thirty-six keys is what a console with SSO, TLS, per-namespace product
     // roles and a network boundary costs to configure. The alternative was not
     // fewer keys; it was defaults nobody chose.
+    //
+    // PLAT-19.2 added the `approvalPolicy` block — FOUR keys and one header
+    // line, and no shorter spelling exists: the policies, the namespace
+    // bindings, D0's `allowOrdinaryConfirmation` floor and the console's
+    // confirmation-key Secret are each a decision an administrator must make
+    // explicitly, and the README's `approvalPolicy` section carries the prose.
     assert!(
-        lines <= 225,
+        lines <= 230,
         "charts/logweir/values.yaml is {lines} lines. The owner asked for a values file that is \
          read, not skimmed past: one short line per key, no paragraphs, and every explanation \
          in charts/logweir/README.md"

@@ -226,6 +226,16 @@ spec:
             {{- end }}
             - name: tmp
               mountPath: /tmp
+            {{- if include "logweir.approvalPolicy.configured" . }}
+            - name: approval-policy
+              mountPath: {{ include "logweir.approvalPolicy.dir" . }}
+              readOnly: true
+            {{- end }}
+            {{- if .Values.approvalPolicy.confirmationKeySecret }}
+            - name: confirmation
+              mountPath: {{ include "logweir.approvalPolicy.confirmationDir" . }}
+              readOnly: true
+            {{- end }}
       volumes:
         - name: config
           configMap:
@@ -260,6 +270,26 @@ spec:
         {{- end }}
         - name: tmp
           emptyDir: {}
+        {{- /* PLAT-19.2: the same immutable policy document the controller mounts. */}}
+        {{- if include "logweir.approvalPolicy.configured" . }}
+        - name: approval-policy
+          configMap:
+            name: {{ include "logweir.approvalPolicy.name" . }}
+        {{- end }}
+        {{- /*
+        PLAT-19.2: the ConsoleConfirmation PRIVATE key. Only `confirmation.key`
+        is projected, 0440 for the reason the keys volume gives, and no
+        `optional`: a console bound to a policy with no key must not start.
+        */}}
+        {{- if .Values.approvalPolicy.confirmationKeySecret }}
+        - name: confirmation
+          secret:
+            secretName: {{ .Values.approvalPolicy.confirmationKeySecret }}
+            defaultMode: 0440
+            items:
+              - key: confirmation.key
+                path: confirmation.key
+        {{- end }}
 {{- if gt (int $c.replicas) 1 }}
 ---
 {{- /*
