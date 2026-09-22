@@ -777,9 +777,12 @@ async fn a_forwarded_address_is_recorded_only_for_a_trusted_peer() {
     let trusted = vec![Cidr::parse("10.0.0.0/8").expect("a constant CIDR")];
     let (recorded, actor_a) = probe([10, 1, 2, 3], trusted.clone()).await;
     assert_eq!(recorded["peer"], "10.1.2.3");
+    // THE RIGHTMOST HOP THE TRUSTED PROXY DID NOT ADD (PLAT-17.2 review L4):
+    // the proxy appends the address it received from, so `198.51.100.2` is what
+    // the trusted peer saw and `203.0.113.9` is whatever the client wrote.
     assert_eq!(
-        recorded["forwardedFor"], "203.0.113.9",
-        "the first hop of a trusted proxy's header is the transport fact worth logging"
+        recorded["forwardedFor"], "198.51.100.2",
+        "the hop the trusted proxy appended is the transport fact worth logging"
     );
 
     let (ignored, actor_b) = probe([203, 0, 113, 200], trusted).await;
