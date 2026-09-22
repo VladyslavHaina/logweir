@@ -38,7 +38,7 @@
 //! pod; a lock costs a liveness failure mode.
 
 use k8s_openapi::api::batch::v1::Job;
-use kube::api::{Api, ListParams};
+use kube::api::ListParams;
 use kube::ResourceExt as _;
 
 use logweir_core::check_contract::{CheckCode, CheckPlanKind};
@@ -251,18 +251,19 @@ pub fn admit(counts: &ActiveCounts, policy: &ChecksPolicy, kind: CheckPlanKind) 
 
 /// Every check Job in the installation, active or not.
 ///
-/// `Api::all` plus the component label — the same `list` verb the three
-/// existing reconcilers already hold on Jobs. The filtering to "active" is
-/// [`is_active`]'s, in memory, because a Job's conditions are not a field
-/// selector the API server offers.
+/// Every namespace this controller acts in (`crate::scope`: the whole cluster
+/// through `Api::all` by default, one list per execution namespace when D0
+/// stage 5's scoping is on) plus the component label — the same `list` verb
+/// the three existing reconcilers already hold on Jobs. The installation-wide
+/// ceiling counts the Jobs THIS controller could have created, which in a
+/// scoped install are exactly the ones in its namespaces. The filtering to
+/// "active" is [`is_active`]'s, in memory, because a Job's conditions are not
+/// a field selector the API server offers.
 ///
 /// # Errors
 ///
 /// [`kube::Error`] from the `list`.
 pub async fn check_jobs(client: &kube::Client) -> Result<Vec<Job>, kube::Error> {
-    let jobs: Api<Job> = Api::all(client.clone());
-    let list = jobs
-        .list(&ListParams::default().labels(&active_selector()))
-        .await?;
-    Ok(list.items)
+    crate::scope::list_everywhere::<Job>(client, &ListParams::default().labels(&active_selector()))
+        .await
 }

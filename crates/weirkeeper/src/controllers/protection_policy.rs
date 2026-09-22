@@ -2032,8 +2032,6 @@ pub fn controller(
     client: kube::Client,
     runner_image: RunnerImage,
 ) -> impl std::future::Future<Output = ()> + Send {
-    let api: Api<ProtectionPolicy> = Api::all(client.clone());
-    let jobs: Api<Job> = Api::all(client.clone());
     // THE READ, ONCE PER PROCESS, and the only read of this variable in the
     // crate. It is here rather than in `fn main` because it belongs to this
     // reconciler alone — no other controller creates a delivery Job — and the
@@ -2054,6 +2052,29 @@ pub fn controller(
              cleartext http. It is a local-development setting; production leaves it unset"
         );
     }
+    // D0 STAGE 5: ONE WATCH PER WATCHED NAMESPACE (`crate::scope`). The
+    // variable above is read, and warned about, once per process — not once
+    // per namespace.
+    crate::scope::run_everywhere(move |namespace| {
+        controller_in(
+            client.clone(),
+            runner_image.clone(),
+            allow_insecure_sinks,
+            namespace,
+        )
+    })
+}
+
+/// One watch of [`controller`], over `namespace` (`None` is the whole
+/// cluster, the behaviour before D0 stage 5).
+fn controller_in(
+    client: kube::Client,
+    runner_image: RunnerImage,
+    allow_insecure_sinks: bool,
+    namespace: Option<String>,
+) -> impl std::future::Future<Output = ()> + Send {
+    let api: Api<ProtectionPolicy> = crate::scope::api(&client, namespace.as_deref());
+    let jobs: Api<Job> = crate::scope::api(&client, namespace.as_deref());
     let ctx = Arc::new(ProtectionContext {
         client,
         runner_image,

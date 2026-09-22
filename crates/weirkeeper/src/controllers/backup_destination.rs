@@ -319,7 +319,21 @@ fn error_policy(dest: Arc<BackupDestination>, err: &ReconcileError, _ctx: Arc<Co
 /// a destination is a namespaced object and the controller reconciles every
 /// namespace it is granted.
 pub fn controller(client: kube::Client) -> impl std::future::Future<Output = ()> + Send {
-    let api: Api<BackupDestination> = Api::all(client.clone());
+    // D0 STAGE 5: ONE WATCH PER WATCHED NAMESPACE. `crate::scope` is the whole
+    // cluster unless `LOGWEIR_WATCH_NAMESPACES` names the execution
+    // namespaces, and then this reconciler runs once per namespace with an
+    // `Api::namespaced` watch — the only shape the scoped chart's RoleBindings
+    // permit.
+    crate::scope::run_everywhere(move |namespace| controller_in(client.clone(), namespace))
+}
+
+/// One watch of [`controller`], over `namespace` (`None` is the whole
+/// cluster, the behaviour before D0 stage 5).
+fn controller_in(
+    client: kube::Client,
+    namespace: Option<String>,
+) -> impl std::future::Future<Output = ()> + Send {
+    let api: Api<BackupDestination> = crate::scope::api(&client, namespace.as_deref());
     let ctx = Arc::new(Context {
         client,
         // NO ARCHIVE HANDLE. This reconciler reads no archive: it validates a

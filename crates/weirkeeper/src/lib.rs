@@ -158,6 +158,7 @@ pub mod protection;
 pub mod rehearsal;
 pub mod retention;
 pub mod retention_plan;
+pub mod scope;
 pub mod slot;
 pub mod testing;
 pub mod verification;

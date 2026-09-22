@@ -448,6 +448,25 @@ fn api_callers() -> BTreeMap<String, BTreeSet<String>> {
         let src = std::fs::read_to_string(&f).expect("a readable .rs");
         let bytes: Vec<char> = src.chars().collect();
 
+        // D0 STAGE 5 (PLAT-17.2): `weirkeeper::scope::list_everywhere::<T>(…)`
+        // is a `list` on `T` in every watched namespace. It builds its handle
+        // inside the helper, generic over the kind, so the typed-binding scan
+        // below cannot see it; the turbofish at the call site is what names
+        // the kind, and it is read here.
+        let mut from = 0usize;
+        while let Some(rel) = src[from..].find("list_everywhere::<") {
+            let start = from + rel + "list_everywhere::<".len();
+            from = start;
+            if let Some(end) = src[start..].find('>') {
+                let ty = &src[start..start + end];
+                if !ty.is_empty() && ty.chars().all(is_word) {
+                    out.entry(ty.to_string())
+                        .or_default()
+                        .insert("list".to_string());
+                }
+            }
+        }
+
         // (declaration end, identifier, type)
         let mut decls: Vec<(usize, String, String)> = Vec::new();
         let mut at = 0usize;

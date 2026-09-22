@@ -1787,8 +1787,25 @@ pub fn controller(
     client: kube::Client,
     runner_image: crate::job::RunnerImage,
 ) -> impl std::future::Future<Output = ()> + Send {
-    let api: Api<RecoveryCatalog> = Api::all(client.clone());
-    let jobs: Api<Job> = Api::all(client.clone());
+    // D0 STAGE 5: ONE WATCH PER WATCHED NAMESPACE. `crate::scope` is the whole
+    // cluster unless `LOGWEIR_WATCH_NAMESPACES` names the execution
+    // namespaces, and then this reconciler runs once per namespace with an
+    // `Api::namespaced` watch — the only shape the scoped chart's RoleBindings
+    // permit.
+    crate::scope::run_everywhere(move |namespace| {
+        controller_in(client.clone(), runner_image.clone(), namespace)
+    })
+}
+
+/// One watch of [`controller`], over `namespace` (`None` is the whole
+/// cluster, the behaviour before D0 stage 5).
+fn controller_in(
+    client: kube::Client,
+    runner_image: crate::job::RunnerImage,
+    namespace: Option<String>,
+) -> impl std::future::Future<Output = ()> + Send {
+    let api: Api<RecoveryCatalog> = crate::scope::api(&client, namespace.as_deref());
+    let jobs: Api<Job> = crate::scope::api(&client, namespace.as_deref());
     let ctx = Arc::new(Context {
         client,
         // NO ARCHIVE HANDLE. The controller reads no archive: the sync Job

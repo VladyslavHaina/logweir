@@ -1812,7 +1812,21 @@ fn policy_targets(
 /// is what a cluster-scoped install means (Global Constraint 30 — one
 /// controller per cluster, no fleet).
 pub fn controller(client: kube::Client) -> impl std::future::Future<Output = ()> + Send {
-    let api: Api<Approval> = Api::all(client.clone());
+    // D0 STAGE 5: ONE WATCH PER WATCHED NAMESPACE. `crate::scope` is the whole
+    // cluster unless `LOGWEIR_WATCH_NAMESPACES` names the execution
+    // namespaces, and then this reconciler runs once per namespace with an
+    // `Api::namespaced` watch — the only shape the scoped chart's RoleBindings
+    // permit.
+    crate::scope::run_everywhere(move |namespace| controller_in(client.clone(), namespace))
+}
+
+/// One watch of [`controller`], over `namespace` (`None` is the whole
+/// cluster, the behaviour before D0 stage 5).
+fn controller_in(
+    client: kube::Client,
+    namespace: Option<String>,
+) -> impl std::future::Future<Output = ()> + Send {
+    let api: Api<Approval> = crate::scope::api(&client, namespace.as_deref());
     let policy_api: Api<crate::crds::trust_policy::TrustPolicy> = Api::all(client.clone());
     // ONE memory of what each policy bound last, owned by the mapper — the
     // same object `controllers::backup` and `controllers::restore` give theirs.

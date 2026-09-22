@@ -280,6 +280,37 @@ fn run() -> ExitCode {
         image_pull_policy: runner_pull_policy,
     };
 
+    // THE NAMESPACES THIS PROCESS WATCHES AND ACTS IN — D0 stage 5, and the
+    // FOURTH thing this file reads out of the environment. Unset or empty is
+    // the whole cluster, exactly as before; a list scopes every namespaced
+    // reconciler and every cross-object read to it, which is what the chart's
+    // per-namespace RoleBindings require (`weirkeeper::scope` has the whole
+    // argument). Same arrangement as the reads above: the read is here, the
+    // decision is a pure predicate, and a malformed list refuses to start
+    // rather than leave a namespace silently unreconciled.
+    let scope = match weirkeeper::scope::configured(std::env::var(
+        weirkeeper::scope::WATCH_NAMESPACES_ENV,
+    )) {
+        Ok(scope) => scope,
+        Err(message) => {
+            error!(error = %message, "refusing to start: the watched-namespace list is malformed");
+            return ExitCode::FAILURE;
+        }
+    };
+    match &scope {
+        weirkeeper::scope::WatchScope::Cluster => info!(
+            env = weirkeeper::scope::WATCH_NAMESPACES_ENV,
+            "watching every namespace (the cluster-wide default)"
+        ),
+        weirkeeper::scope::WatchScope::Namespaces(namespaces) => info!(
+            env = weirkeeper::scope::WATCH_NAMESPACES_ENV,
+            namespaces = %namespaces.join(","),
+            "watching and acting in these namespaces only; cluster-scoped trust kinds are still \
+             read cluster-wide"
+        ),
+    }
+    weirkeeper::scope::init(scope);
+
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

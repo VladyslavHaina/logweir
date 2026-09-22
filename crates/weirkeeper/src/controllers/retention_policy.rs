@@ -1680,14 +1680,19 @@ impl Pass<'_> {
         &self,
         location_id: &str,
     ) -> Result<BTreeSet<String>, ReconcileError> {
-        let restores: Api<Restore> = Api::all(self.ctx.client.clone());
         // A CONSISTENT LIST: `ListParams` with no `resource_version` is a
         // quorum read from etcd, not a read of the API server's watch cache.
         // D3 §6.5 requires the re-listing before a Job is created to be
-        // non-cached, and this is that read.
-        let list = restores.list(&ListParams::default()).await?;
+        // non-cached, and this is that read — over EVERY namespace this
+        // controller acts in (`crate::scope`, D0 stage 5): the whole cluster
+        // by default, the execution namespaces when scoped. A restore in a
+        // namespace the controller cannot see cannot be running a Job this
+        // controller created, and it could not have been read anyway.
+        let restores: Vec<Restore> =
+            crate::scope::list_everywhere::<Restore>(self.ctx.client, &ListParams::default())
+                .await?;
         let mut active_sets: BTreeSet<String> = BTreeSet::new();
-        for restore in &list.items {
+        for restore in &restores {
             if is_terminal_restore(restore) {
                 continue;
             }
@@ -3690,8 +3695,25 @@ pub fn controller(
     client: kube::Client,
     runner_image: crate::job::RunnerImage,
 ) -> impl std::future::Future<Output = ()> + Send {
-    let api: Api<RetentionPolicy> = Api::all(client.clone());
-    let jobs: Api<Job> = Api::all(client.clone());
+    // D0 STAGE 5: ONE WATCH PER WATCHED NAMESPACE. `crate::scope` is the whole
+    // cluster unless `LOGWEIR_WATCH_NAMESPACES` names the execution
+    // namespaces, and then this reconciler runs once per namespace with an
+    // `Api::namespaced` watch — the only shape the scoped chart's RoleBindings
+    // permit.
+    crate::scope::run_everywhere(move |namespace| {
+        controller_in(client.clone(), runner_image.clone(), namespace)
+    })
+}
+
+/// One watch of [`controller`], over `namespace` (`None` is the whole
+/// cluster, the behaviour before D0 stage 5).
+fn controller_in(
+    client: kube::Client,
+    runner_image: crate::job::RunnerImage,
+    namespace: Option<String>,
+) -> impl std::future::Future<Output = ()> + Send {
+    let api: Api<RetentionPolicy> = crate::scope::api(&client, namespace.as_deref());
+    let jobs: Api<Job> = crate::scope::api(&client, namespace.as_deref());
     let ctx = Arc::new(Context {
         client,
         archive: None,
