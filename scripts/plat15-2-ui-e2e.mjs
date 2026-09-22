@@ -98,6 +98,8 @@ const WRITER_SECRET = "p152-evidence-writer";
 const READER_USER = "p152-reader-" + suffix;
 const READER_POLICY = "p152-readonly-" + suffix;
 const DESTINATION = "archive";
+const VERIFIED_DESTINATION = "archive-verified";
+const VERIFIED_PREFIX = "verified";
 const CATALOG = "archive";
 const RESTORE_PREFIX = "p152-" + suffix + "-";
 const TAMPERED_PREFIX = "p152-" + suffix + "-forged-";
@@ -374,20 +376,27 @@ function mcJob(ns, step, script, extraEnv) {
   return logs.trim();
 }
 
-function destinationObject(ns, readSecret, writeSecret) {
+/** A destination on this run's bucket. `evidenceRead` absent is the
+ *  deterministic way to a run the controller CANNOT verify -- `NotAttempted`,
+ *  no window -- whatever the lab's build; `ArchiveReadGrant` lets a build with
+ *  the evidence-fetch Job verify it (`Valid`, with `windowCovered`). */
+function destinationObject(ns, name, prefix, readSecret, writeSecret, evidenceRead) {
+  const access = {
+    archiveWrite: { mode: "SecretKeys", secret: { name: writeSecret } },
+    archiveRead: { mode: "SecretKeys", secret: { name: readSecret } },
+  };
+  if (evidenceRead) {
+    access.evidenceRead = { mode: "ArchiveReadGrant" };
+  }
   return {
     apiVersion: "logweir.dev/v1alpha1", kind: "BackupDestination",
-    metadata: owned(DESTINATION, ns),
+    metadata: owned(name, ns),
     spec: {
       description: "PLAT-15.2 live journey: this run's own bucket on the lab's MinIO",
-      storage: { provider: "S3", bucket: BUCKET, prefix: ARCHIVE_PREFIX, addressing: "PathStyle",
+      storage: { provider: "S3", bucket: BUCKET, prefix: prefix, addressing: "PathStyle",
         endpoint: "http" + "://" + LAB_MINIO },
       transport: { security: "InsecureHTTP" },
-      access: {
-        archiveWrite: { mode: "SecretKeys", secret: { name: writeSecret } },
-        archiveRead: { mode: "SecretKeys", secret: { name: readSecret } },
-        evidenceRead: { mode: "ArchiveReadGrant" },
-      },
+      access: access,
     },
   };
 }
@@ -504,9 +513,15 @@ async function main() {
     "line; do case \"$line\" in *\" $S3_BUCKET/\") echo \"bucket present: $S3_BUCKET\";; esac; done");
   check(made.indexOf("bucket present: " + BUCKET) !== -1, "the owned bucket was not created");
   result.bucket = { name: BUCKET, endpoint: LAB_MINIO, createdBy: "this run (mc mb)", log: made };
-  create(SRC, destinationObject(SRC, STORE_SECRET, STORE_SECRET));
+  create(SRC, destinationObject(SRC, DESTINATION, ARCHIVE_PREFIX, STORE_SECRET, STORE_SECRET,
+    false));
   result.fixtures.push({ namespace: SRC, kind: "BackupDestination", name: DESTINATION,
-    bucket: BUCKET, prefix: ARCHIVE_PREFIX, createdBy: "kubectl" });
+    bucket: BUCKET, prefix: ARCHIVE_PREFIX, evidenceRead: "absent", createdBy: "kubectl" });
+  create(SRC, destinationObject(SRC, VERIFIED_DESTINATION, VERIFIED_PREFIX, STORE_SECRET,
+    STORE_SECRET, true));
+  result.fixtures.push({ namespace: SRC, kind: "BackupDestination", name: VERIFIED_DESTINATION,
+    bucket: BUCKET, prefix: VERIFIED_PREFIX, evidenceRead: "ArchiveReadGrant", createdBy: "kubectl" });
+  seedConnection(SRC, "restore-target", LAB_TARGET, "target", "target-scram");
 
   // ---- the disaster namespace's credentials, created by an operator --------
   // A READ-ONLY MinIO user of this run's own, scoped to this bucket. Its secret
@@ -664,6 +679,81 @@ async function main() {
       blocked("2. CONSOLE-RESTORE-IGNORES-CATALOG-WINDOW", {
         reason: "the lab controller wrote a window for this run (verdict " + verdict + "), so " +
           "the defect's precondition did not occur",
+      });
+    }
+
+    // ==== journey 2b: WIZARD-DEFAULT-PIT-EXCLUSIVE on a VERIFIED Backup ======
+    // A run the controller verified (evidence fetch -> Valid) has its own
+    // `windowCovered`, and the wizard opens on the BACKUP. Its default point in
+    // time must be the last instant the runner accepts, `toMs - 1`, and the
+    // runner's own archive.coverage row must say so.
+    const verifiedSchedule = await apiCall("POST", SRC, "/schedules", {
+      schedule: "0 0 1 1 *", sourceRef: { name: "orders-source" }, topics: [SOURCE_TOPIC],
+      destinationRef: { name: VERIFIED_DESTINATION }, suspended: false,
+    }, "p152-schedule-verified-" + suffix);
+    check(verifiedSchedule.status === 201 || verifiedSchedule.status === 200,
+      "the verified schedule create answered " + verifiedSchedule.status);
+    const verifiedRunCreate = await apiCall("POST", SRC, "/backups", {
+      scheduleRef: { name: verifiedSchedule.body.item.name },
+    }, "p152-run-verified-" + suffix);
+    check(verifiedRunCreate.status === 201, "the verified run create: " + verifiedRunCreate.status +
+      " " + JSON.stringify(verifiedRunCreate.body).slice(0, 400));
+    const verifiedName = verifiedRunCreate.body.item.name;
+    const verified = await waitFor("the verified run to finish and settle its verdict", 300, 2000,
+      () => {
+        const b = kubeJson(["-n", SRC, "get", "backup", verifiedName]);
+        const st = b.status || {};
+        const v = ((st.evidence || {}).verification || {}).result;
+        if (["Failed", "Cancelled"].includes(st.phase)) {
+          return b;
+        }
+        return st.phase === "Succeeded" && v !== undefined && v !== "Pending" ? b : null;
+      });
+    artifact("src/backup-verified.json", { metadata: verified.metadata, status: verified.status });
+    const vWindow = verified.status.windowCovered || null;
+    const vVerdict = (((verified.status.evidence || {}).verification) || {}).result || null;
+    if (verified.status.phase !== "Succeeded" || vWindow === null) {
+      blocked("2b. WIZARD-DEFAULT-PIT-EXCLUSIVE on a verified Backup", {
+        reason: "the lab controller wrote no window for the ArchiveReadGrant run (phase " +
+          verified.status.phase + ", verdict " + vVerdict + ")",
+      });
+    } else {
+      const wizardAt = base + "#/restore?ns=" + encodeURIComponent(SRC) + "&backup=" +
+        encodeURIComponent(verifiedName) + "&uid=" + encodeURIComponent(verified.metadata.uid);
+      await openRoute(page, wizardAt, "#point-in-time", "the wizard on the verified Backup");
+      const expected = new Date(vWindow.toMs - 1).toISOString();
+      const shown = await page.$eval("#point-in-time", (n) => n.value);
+      check(Date.parse(shown) === vWindow.toMs - 1,
+        "the default point in time is windowCovered.toMs - 1 ms: " + shown + " vs " + expected);
+      check(Date.parse(shown) !== vWindow.toMs, "never the exclusive end");
+      await page.fill("#topic-prefix", "p152-" + suffix + "-v-");
+      await page.dispatchEvent("#topic-prefix", "change");
+      await pause(800);
+      await page.click("#restore-readiness-start");
+      const vPf = await waitFor("the verified-Backup Preflight", 60, 1000, () => {
+        const items = kubeJson(["-n", SRC, "get", "preflights"]).items;
+        return items.length >= 1 ? items[items.length - 1].metadata.name : null;
+      });
+      const vDone = await waitFor("the verified-Backup Preflight to finish", 240, 2000, () => {
+        const pf = kubeJson(["-n", SRC, "get", "preflight", vPf]);
+        return ["Completed", "Failed", "Cancelled"].includes(String((pf.status || {}).phase || ""))
+          ? pf : null;
+      });
+      artifact("src/preflight-verified.json", { spec: vDone.spec, status: vDone.status });
+      const vRows = (((vDone.status || {}).result || {}).checks || []);
+      const vCoverage = vRows.find((c) => c.id === "archive.coverage") || {};
+      check(vCoverage.state === "ready" && vCoverage.code === "PointInTimeCovered",
+        "the runner accepts the wizard's default point in time: " + JSON.stringify(vCoverage));
+      await shot(page, "02d-verified-backup-default-pit");
+      // CONTROL: the exclusive end itself is refused on the field.
+      await page.fill("#point-in-time", new Date(vWindow.toMs).toISOString());
+      await page.dispatchEvent("#point-in-time", "change");
+      await waitForSelector(page, "#point-in-time-complaint", "the exclusive-end refusal");
+      control("WIZARD-DEFAULT-PIT-EXCLUSIVE: a verified Backup's exclusive windowCovered.toMs is " +
+        "refused on the field", { toMs: vWindow.toMs });
+      record("2b. a verified Backup's default point in time is the last instant the runner accepts", {
+        backup: verifiedName, verdict: vVerdict, windowCovered: vWindow, defaultShown: shown,
+        preflight: vPf, archiveCoverage: vCoverage,
       });
     }
 
