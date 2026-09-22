@@ -51,9 +51,7 @@ use std::time::Duration;
 
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
 use k8s_openapi::NamespaceResourceScope;
-use kube::api::{
-    Api, ApiResource, DynamicObject, ListParams, ObjectList, Patch, PatchParams, PostParams,
-};
+use kube::api::{Api, ListParams, ObjectList, Patch, PatchParams, PostParams};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use weirkeeper::crds::approval::Approval;
@@ -495,6 +493,54 @@ impl KubeFailure {
     }
 }
 
+/// A product object read LENIENTLY: its `metadata`, and everything else as raw
+/// JSON in `data` — the same shape as `kube::api::DynamicObject`, but bound to
+/// one sealed kind so its handle is built with the ordinary namespaced
+/// constructor (the linkage guard's constructor allowlist).
+///
+/// `data` holds `apiVersion`, `kind`, `spec` and `status` exactly as stored; no
+/// field of them can fail the decode.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(bound = "")]
+pub struct Untyped<K> {
+    /// The object's metadata.
+    pub metadata: ObjectMeta,
+    /// Every other top-level field, undecoded.
+    #[serde(flatten)]
+    pub data: serde_json::Value,
+    #[serde(skip)]
+    kind: std::marker::PhantomData<fn() -> K>,
+}
+
+impl<K: ProductResource> kube::Resource for Untyped<K> {
+    type DynamicType = ();
+    type Scope = NamespaceResourceScope;
+
+    fn kind(dt: &()) -> std::borrow::Cow<'_, str> {
+        K::kind(dt)
+    }
+
+    fn group(dt: &()) -> std::borrow::Cow<'_, str> {
+        K::group(dt)
+    }
+
+    fn version(dt: &()) -> std::borrow::Cow<'_, str> {
+        K::version(dt)
+    }
+
+    fn plural(dt: &()) -> std::borrow::Cow<'_, str> {
+        K::plural(dt)
+    }
+
+    fn meta(&self) -> &ObjectMeta {
+        &self.metadata
+    }
+
+    fn meta_mut(&mut self) -> &mut ObjectMeta {
+        &mut self.metadata
+    }
+}
+
 /// One page request against a native Kubernetes list.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PageRequest {
@@ -610,10 +656,8 @@ impl KubeAdapter {
         &self,
         namespace: &str,
         page: &PageRequest,
-    ) -> Result<ObjectList<DynamicObject>, KubeFailure> {
-        let resource = ApiResource::erase::<K>(&());
-        let api: Api<DynamicObject> =
-            Api::namespaced_with(self.client.clone(), namespace, &resource);
+    ) -> Result<ObjectList<Untyped<K>>, KubeFailure> {
+        let api: Api<Untyped<K>> = Api::namespaced(self.client.clone(), namespace);
         let mut params = ListParams::default().limit(page.limit);
         if let Some(token) = &page.continue_token {
             params = params.continue_token(token);
