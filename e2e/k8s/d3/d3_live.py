@@ -7426,6 +7426,12 @@ def rehearsal_target_cluster() -> dict[str, Any]:
     `spec.role`, which is free-form and is not authority
     (`crds/kafka_cluster.rs:104`).
     """
+    # ITS OWN CREDENTIAL. The scratch broker has its own SCRAM database, and
+    # the lab's `target-scram` Secret is the one that authenticates against it —
+    # `source-scram` is a different password and the cluster would simply report
+    # `reachable: false`, which this phase would then read as D3 §4.4's
+    # `TargetUnavailable` and blame the product for.
+    copy_secret("target-scram")
     apply({
         "apiVersion": "logweir.dev/v1alpha1",
         "kind": "KafkaCluster",
@@ -7433,7 +7439,7 @@ def rehearsal_target_cluster() -> dict[str, Any]:
         "spec": {
             "bootstrapServers": [f"{TARGET_DEPLOY}.{FIXTURE_NS}.svc.cluster.local:9096"],
             "auth": {"mode": "scramSha512", "username": "scram-user",
-                     "secretRef": {"name": "source-scram"}, "tls": False},
+                     "secretRef": {"name": "target-scram"}, "tls": False},
             "role": "target",
         },
     })
@@ -7445,7 +7451,8 @@ def rehearsal_target_cluster() -> dict[str, Any]:
     )
 
 
-def rehearsal_trust(target_cluster_id: str, refused_key: dict[str, Any]) -> dict[str, Any]:
+def rehearsal_trust(target_cluster_id: str, approver_key: dict[str, Any],
+                    refused_key: dict[str, Any]) -> dict[str, Any]:
     """This namespace's `TrustPolicy`, rebuilt for the rehearsal.
 
     # Why it is DELETED and recreated rather than patched
@@ -7471,27 +7478,33 @@ def rehearsal_trust(target_cluster_id: str, refused_key: dict[str, Any]) -> dict
       verifies the point's receipt under it, and an unverified point is not
       selectable, so without this entry step 1 fails at the point and not at
       the authorization;
-    * the lab APPROVER key, Active/`GovernedApproval` — what the standing
-      document is signed with. `EvidenceSigning` is refused for this role by
-      D3 §7.3, so the usage is not decoration;
+    * an APPROVER key minted by this run, Active/`GovernedApproval` — what the
+      standing document is signed with. `EvidenceSigning` is refused for this
+      role by D3 §7.3, so the usage is not decoration. **It is minted and not
+      the lab roster's own approver key**, because signing needs the PRIVATE
+      half and the lab's lives under `/tmp/logweir-scram-e2e`, which macOS
+      deletes after three untouched days (WORKER-RULES, host notes) — measured
+      on 2026-09-22, when only `approver.pub.pem` was left. A row that cannot
+      run because the operating system tidied a fixture is a row that proves
+      nothing, and minting costs one `openssl` call;
     * a SECOND approver key minted by this run, **Retired**/`GovernedApproval`
       — review §4 step 10's "whose key was retired between slots". It is a
       separate key so the refused arm costs the passing arm nothing: retiring
-      the shared approver key would refuse every schedule in the namespace and
-      the control would prove only that the harness broke its own fixture.
+      the one the passing arm signs with would refuse every schedule in the
+      namespace and the control would prove only that the harness broke its own
+      fixture.
     """
     if get_opt("trustpolicy", TRUST_POLICY, namespace="default") is not None:
         run(K + ["delete", "trustpolicy", TRUST_POLICY, "--wait=true"], check=False)
     signing = roster_signing_key()
-    approver = roster_approver_key()
     body = trust_policy(
         "Active",
         keys=[
             policy_key(signing["keyId"], signing["spkiPem"], "Active",
                        display="the lab signing key"),
-            policy_key(approver["keyId"], approver["spkiPem"], "Active",
-                       display="the lab approver key",
-                       subject="approver@scram-local.invalid",
+            policy_key(approver_key["keyId"], approver_key["spkiPem"], "Active",
+                       display=f"{OWNER}'s rehearsal approver key",
+                       subject=f"{OWNER}-approver@logweir.invalid",
                        usages=["GovernedApproval"]),
             policy_key(refused_key["keyId"], refused_key["spkiPem"], "Retired",
                        display=f"{OWNER}'s retired approver key",
@@ -7737,6 +7750,7 @@ def rehearsal() -> None:
     reached: dict[str, Any] = {}
     work = pathlib.Path(tempfile.mkdtemp(prefix=f"{OWNER}-l6-", dir="/tmp"))
     work.chmod(0o700)
+    approver_key = mint_signing_key(f"{OWNER}-l6-approver")
     refused_key = mint_signing_key(f"{OWNER}-l6-retired")
     planted: list[str] = []
 
@@ -7747,7 +7761,7 @@ def rehearsal() -> None:
         # ---- fixtures ----------------------------------------------------
         target = rehearsal_target_cluster()
         target_cluster_id = target["status"]["clusterId"]
-        rehearsal_trust(target_cluster_id, refused_key)
+        rehearsal_trust(target_cluster_id, approver_key, refused_key)
         point = rehearsal_point()
         target_topic_create(REHEARSAL_UNRELATED_TOPIC)
         planted.append(REHEARSAL_UNRELATED_TOPIC)
@@ -7756,6 +7770,7 @@ def rehearsal() -> None:
             "sourceClusterId": STATE.get("sourceClusterId"),
             "point": point,
             "trustPolicy": TRUST_POLICY,
+            "approverKeyId": approver_key["keyId"],
             "retiredApproverKeyId": refused_key["keyId"],
             "unrelatedTopic": REHEARSAL_UNRELATED_TOPIC,
         }))
@@ -7770,7 +7785,7 @@ def rehearsal() -> None:
             seconds=300, what="status.templateDigest, which the document signs",
         )
         schedule_uid = schedule["metadata"]["uid"]
-        envelope, sidecar = mint_standing(work, approver_material()["approver"], schedule,
+        envelope, sidecar = mint_standing(work, approver_key["private"], schedule,
                                           target_cluster_id=target_cluster_id)
         apply(standing_approval_object(approval_name, schedule, envelope, sidecar))
         approval = wait_for(
@@ -8007,7 +8022,8 @@ def rehearsal() -> None:
                       "a rehearsal never occupied the schedule (step 2), so no second slot "
                       "could find one active and ConcurrencyBlocked cannot be observed")
         else:
-            conc_ok = rehearsal_arm_concurrency(work, target_cluster_id, evidence)
+            conc_ok = rehearsal_arm_concurrency(work, target_cluster_id,
+                                                approver_key, evidence)
             reached["step7"] = conc_ok
 
         # ---- step 8: the leftover guard ------------------------------------
@@ -8016,7 +8032,8 @@ def rehearsal() -> None:
                       "no rehearsal reached a target (step 2), so a pre-created mapped name "
                       "has nothing to refuse")
         else:
-            rehearsal_arm_leftover(work, target_cluster_id, planted, evidence)
+            rehearsal_arm_leftover(work, target_cluster_id, approver_key,
+                                   planted, evidence)
 
         # ---- step 10: the refused arm — the negative control ---------------
         rehearsal_arm_refused(work, target_cluster_id, refused_key, evidence)
@@ -8031,25 +8048,30 @@ def rehearsal() -> None:
     finally:
         for topic in planted:
             target_topic_delete(topic)
-        refused_key["private"].unlink(missing_ok=True)
-        shutil.rmtree(refused_key["dir"], ignore_errors=True)
+        for key in (approver_key, refused_key):
+            key["private"].unlink(missing_ok=True)
+            shutil.rmtree(key["dir"], ignore_errors=True)
         shutil.rmtree(work, ignore_errors=True)
+        gone = not any(k["private"].exists() or k["dir"].exists()
+                       for k in (approver_key, refused_key))
         evidence.append(artifact("rehearsal/99-cleanup.json", {
             "topicsDeleted": planted,
             "topicsOnTargetAfter": sorted(target_topics()),
-            "privateKeyFileExists": refused_key["private"].exists(),
+            "approverKeyId": approver_key["keyId"],
+            "retiredApproverKeyId": refused_key["keyId"],
+            "privateKeyFilesExist": [k["private"].exists()
+                                     for k in (approver_key, refused_key)],
             "workDirExists": work.exists(),
         }))
         check(
-            "rehearsal-minted-private-key-never-outlives-the-row",
+            "rehearsal-minted-private-keys-never-outlive-the-row",
             "PLAT-14.3",
-            not refused_key["private"].exists() and not refused_key["dir"].exists()
-            and not work.exists(),
-            f"the approver key this phase minted for the refused arm is gone from disk "
-            f"(file {refused_key['private'].exists()}, dir {refused_key['dir'].exists()}), the "
-            f"scope/envelope working directory is gone ({work.exists()}), and every topic this "
-            f"phase created on the shared scratch broker is deleted: {planted}. What is "
-            f"recorded is the public SPKI and the key id",
+            gone and not work.exists(),
+            f"both approver keys this phase minted — the Active one it signs with and the "
+            f"Retired one the refused arm signs with — are gone from disk, the scope/envelope "
+            f"working directory is gone ({work.exists()}), and every topic this phase created "
+            f"on the shared scratch broker is deleted: {planted}. What is recorded is the "
+            f"public SPKI and the key id",
             evidence,
         )
 
@@ -8085,6 +8107,7 @@ def unsuspend(kind: str, name: str) -> None:
 
 
 def rehearsal_arm_concurrency(work: pathlib.Path, target_cluster_id: str,
+                              approver_key: dict[str, Any],
                               evidence: list[str]) -> bool:
     """Review §4 step 7 — a second slot arriving while the first is active.
 
@@ -8095,7 +8118,7 @@ def rehearsal_arm_concurrency(work: pathlib.Path, target_cluster_id: str,
     """
     name = REHEARSAL_CONCURRENCY_SCHEDULE
     schedule, _ = rehearsal_arm(name, cron=REHEARSAL_FAST_CRON,
-                                key=approver_material()["approver"], work=work,
+                                key=approver_key["private"], work=work,
                                 target_cluster_id=target_cluster_id)
     unsuspend("rehearsalschedule", name)
     first = rehearsal_first_restore(name, seconds=420)["metadata"]["name"]
@@ -8141,6 +8164,7 @@ def rehearsal_arm_concurrency(work: pathlib.Path, target_cluster_id: str,
 
 
 def rehearsal_arm_leftover(work: pathlib.Path, target_cluster_id: str,
+                           approver_key: dict[str, Any],
                            planted: list[str], evidence: list[str]) -> bool:
     """Review §4 step 8 — a mapped name pre-created, and it must be untouched.
 
@@ -8154,7 +8178,7 @@ def rehearsal_arm_leftover(work: pathlib.Path, target_cluster_id: str,
     """
     name = REHEARSAL_LEFTOVER_SCHEDULE
     schedule, _ = rehearsal_arm(name, cron=REHEARSAL_FAST_CRON,
-                                key=approver_material()["approver"], work=work,
+                                key=approver_key["private"], work=work,
                                 target_cluster_id=target_cluster_id)
     uid = schedule["metadata"]["uid"]
     topic = mapped_topic(uid, REHEARSAL_TOPIC)
