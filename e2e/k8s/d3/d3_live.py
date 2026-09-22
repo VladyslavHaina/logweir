@@ -5999,6 +5999,12 @@ def policy_view(obj: dict[str, Any]) -> dict[str, Any]:
         "health": status.get("health"),
         "availabilityBasis": status.get("availabilityBasis"),
         "lastAvailablePoint": status.get("lastAvailablePoint"),
+        # WHICH RUN THE POLICY COUNTED. `status.lastAttempt` is built from
+        # `input.slots.first()` and `slots` is built from the MEMBERS
+        # (`controllers/protection_policy.rs:380`), so this naming the Backup
+        # under test is the only proof from the API that the policy looked at
+        # it at all — see `counted_this_run`.
+        "lastAttempt": status.get("lastAttempt"),
         "protectedStatus": protected.get("status"),
         "protectedReason": protected.get("reason"),
         "protectedMessage": protected.get("message"),
@@ -6027,7 +6033,27 @@ def rfc3339_ms(value: str | None) -> int | None:
 # ---- the predicates, one per behaviour, all pure -------------------------
 
 
-def unread_point_is_unknown(view: dict[str, Any]) -> dict[str, bool]:
+def counted_this_run(view: dict[str, Any], backup: str) -> bool:
+    """Whether the policy's verdict is ABOUT the run this row created.
+
+    THE ROW THAT TAUGHT US TO ASK. The first live run of this phase put the
+    refused-signature policy's `protects.topics` at both topics while the
+    legacy Backups covered one, so `topics_covered` excluded every candidate,
+    the policy had NO points, and `Unprotected` came back for a reason that had
+    nothing to do with the signature: four cells green over an empty set. The
+    negative control is what caught it — it demanded `Protected` from the same
+    fixture and could not get it — and this clause is so that the next reader
+    does not need the control to notice.
+
+    `status.lastAttempt.backupRef` is built from `input.slots.first()`, and
+    `slots` is the MEMBER list (`controllers/protection_policy.rs:380`: source,
+    destination or archive URL, and the schedule membership rule), so a policy
+    that names this Backup has counted this run.
+    """
+    return ((view.get("lastAttempt") or {}).get("backupRef") or {}).get("name") == backup
+
+
+def unread_point_is_unknown(view: dict[str, Any], backup: str) -> dict[str, bool]:
     """D3 §3.2's `Unknown` row — *"evaluation impossible"* — for a point the
     controller could not PLACE.
 
@@ -6048,6 +6074,8 @@ def unread_point_is_unknown(view: dict[str, Any]) -> dict[str, bool]:
     `Unknown` too, and only this one names the read.
     """
     return {
+        "the policy counted this run — status.lastAttempt names it":
+            counted_this_run(view, backup),
         "health is Unknown — D3 §3.2's `evaluation impossible`, never `Unprotected`":
             view["health"] == "Unknown",
         "the Protected condition mirrors it (`Unknown` for `Unknown`)":
@@ -6061,7 +6089,8 @@ def unread_point_is_unknown(view: dict[str, Any]) -> dict[str, bool]:
     }
 
 
-def placed_point_is_protected(view: dict[str, Any], entry: dict[str, Any]) -> dict[str, bool]:
+def placed_point_is_protected(view: dict[str, Any], entry: dict[str, Any],
+                              backup: str) -> dict[str, bool]:
     """THE NEGATIVE CONTROL for `unread_point_is_unknown`, and what it refuses.
 
     The same policy, the same `SecretKeys` destination, the same unverified
@@ -6081,6 +6110,8 @@ def placed_point_is_protected(view: dict[str, Any], entry: dict[str, Any]) -> di
     point = view["lastAvailablePoint"] or {}
     captured = rfc3339_ms(point.get("recoveryPointAt"))
     return {
+        "the policy counted this run — status.lastAttempt names it":
+            counted_this_run(view, backup),
         "health is Healthy — the point counts": view["health"] == "Healthy",
         "Protected=True": view["protectedStatus"] == "True",
         "the reason is NOT PointFactsUnread": view["protectedReason"] != "PointFactsUnread",
@@ -6099,7 +6130,8 @@ def placed_point_is_protected(view: dict[str, Any], entry: dict[str, Any]) -> di
 
 
 def refused_signature_is_unprotected(view: dict[str, Any], verdict: str | None,
-                                     rescue: dict[str, Any] | None) -> dict[str, bool]:
+                                     rescue: dict[str, Any] | None,
+                                     backup: str) -> dict[str, bool]:
     """A verdict the controller REACHED and refused is `Unprotected` and PAGES
     — at every setting of `requireVerifiedEvidence` and with or without a
     `catalogRef`.
@@ -6126,6 +6158,8 @@ def refused_signature_is_unprotected(view: dict[str, Any], verdict: str | None,
     """
     staleness = alert_of(view["alerts"], "Staleness") or {}
     clauses = {
+        "the policy counted this run — status.lastAttempt names it":
+            counted_this_run(view, backup),
         "the controller REACHED a verdict, and it refuses the signature":
             verdict in {"Untrusted", "Invalid"},
         "health is Unprotected — D3 §3.2's `no available point at all`":
@@ -6145,7 +6179,8 @@ def refused_signature_is_unprotected(view: dict[str, Any], verdict: str | None,
     return clauses
 
 
-def valid_signature_is_protected(view: dict[str, Any], verdict: str | None) -> dict[str, bool]:
+def valid_signature_is_protected(view: dict[str, Any], verdict: str | None,
+                                 backup: str) -> dict[str, bool]:
     """THE NEGATIVE CONTROL for the refused-signature row: the same policy, the
     same archive, the same four postures — a VALID signature.
 
@@ -6158,6 +6193,8 @@ def valid_signature_is_protected(view: dict[str, Any], verdict: str | None) -> d
     staleness = alert_of(view["alerts"], "Staleness") or {}
     point = view["lastAvailablePoint"] or {}
     return {
+        "the policy counted this run — status.lastAttempt names it":
+            counted_this_run(view, backup),
         "the same archive under a trusted signer verifies Valid": verdict == "Valid",
         "health is Healthy": view["health"] == "Healthy",
         "Protected=True": view["protectedStatus"] == "True",
@@ -6371,7 +6408,7 @@ def protection_verdicts() -> None:
     placed = policy_view(settled_policy(UNREAD_POLICY))
     evidence.append(artifact("verdicts/1a-with-catalogref.json",
                              {"view": placed, "catalogEntry": entry}))
-    placed_clauses = placed_point_is_protected(placed, entry)
+    placed_clauses = placed_point_is_protected(placed, entry, "unread-point")
     unread_verdict = verdict_of(unread)
     unread_capture = unread_status.get("capture")
     unread_receipt = bool((unread_status.get("evidence") or {}).get("receiptSha256"))
@@ -6411,7 +6448,7 @@ def protection_verdicts() -> None:
     ))
     after_alerts = policy_alerts(UNREAD_POLICY)
     posts = sink_posts() - posts_mark
-    unknown_clauses = unread_point_is_unknown(unknown)
+    unknown_clauses = unread_point_is_unknown(unknown, "unread-point")
     ledger = alert_ledger_unchanged(before_alerts, after_alerts)
     evidence.append(artifact("verdicts/1b-no-catalogref.json",
                              {"view": unknown, "alertsBefore": before_alerts,
@@ -6465,7 +6502,14 @@ def protection_verdicts() -> None:
         run(KN + ["delete", "secret", "logweir-signing-key", "--wait=true"], check=False)
         run(KN + ["create", "secret", "generic", "logweir-signing-key",
                   f"--from-file=signing.pem={key['private']}"], timeout=120)
-        refused_backup = legacy_backup("refused-signature")
+        # TOPICS, NOT `legacy_backup`'s DEFAULT. `matches_policy` applies
+        # `topics_covered` (D3 §3.2's `topics ⊆ point topics`) to every
+        # candidate, and this policy protects both topics: a point covering
+        # `orders` alone is not a candidate at all, the policy has an EMPTY
+        # candidate set, and `Unprotected` comes back for a reason that has
+        # nothing to do with the signature. That is exactly how the first live
+        # run of this phase made four cells green over nothing.
+        refused_backup = legacy_backup("refused-signature", topics=TOPICS)
     finally:
         run(KN + ["delete", "secret", "logweir-signing-key", "--wait=true"], check=False)
         apply({"apiVersion": "v1", "kind": "Secret", "metadata": owned("logweir-signing-key"),
@@ -6529,7 +6573,7 @@ def protection_verdicts() -> None:
         cell = policy_view(settled_policy(REFUSED_POLICY))
         views[label] = cell
         cells[label] = refused_signature_is_unprotected(
-            cell, refused_verdict, rescue if with_catalog else None)
+            cell, refused_verdict, rescue if with_catalog else None, "refused-signature")
     evidence.append(artifact("verdicts/2-four-postures.json",
                              {"cells": cells, "views": views, "verdict": refused_verdict}))
     check(
@@ -6561,7 +6605,7 @@ def protection_verdicts() -> None:
     staleness_before = alert_of(policy_alerts(REFUSED_POLICY), "Staleness") or {}
     alerts_before_flip = policy_alerts(REFUSED_POLICY)
     posts_mark = sink_posts()
-    sound = legacy_backup("valid-signature")
+    sound = legacy_backup("valid-signature", topics=TOPICS)
     sound_verdict = (((sound.get("status") or {}).get("evidence") or {})
                      .get("verification") or {}).get("result")
     # `fresh_catalog`, not `refresh_view`: the latter's fallback recreates the
@@ -6582,7 +6626,8 @@ def protection_verdicts() -> None:
         })
         cell = policy_view(settled_policy(REFUSED_POLICY))
         control_views[label] = cell
-        control_cells[label] = valid_signature_is_protected(cell, sound_verdict)
+        control_cells[label] = valid_signature_is_protected(
+            cell, sound_verdict, "valid-signature")
     evidence.append(artifact("verdicts/2c-control-four-postures.json",
                              {"cells": control_cells, "views": control_views}))
     check(
