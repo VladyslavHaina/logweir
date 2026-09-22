@@ -171,6 +171,15 @@ isolate it. The laptop `kubectl proxy --address=127.0.0.1` path is unaffected.
 {{- if and $c.requireTrustedProxy (not $c.trustedProxyCidrs) -}}
 {{- fail "api.console.requireTrustedProxy needs api.console.trustedProxyCidrs: with no range to trust, the entry point would refuse every request (421) and the console would look like an outage. Name the ingress controller's pod or node ranges." -}}
 {{- end -}}
+{{- if $c.requireTrustedProxy -}}
+{{- range $cidr := $c.trustedProxyCidrs -}}
+{{- $prefix := int (last (splitList "/" (toString $cidr))) -}}
+{{- $floor := ternary 48 16 (contains ":" (toString $cidr)) -}}
+{{- if lt $prefix $floor -}}
+{{- fail (printf "api.console.trustedProxyCidrs names %q, wider than /%d. With requireTrustedProxy a range this wide trusts the pods the gate exists to refuse: on most clusters every pod is inside 10.0.0.0/8 and can dial the console Service directly and send the proxy's header itself. Name the ingress controller's own pod range (the binary refuses the same)." (toString $cidr) $floor) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- $granted := (include "logweir.api.namespaces" . | fromJsonArray) -}}
 {{- range $b := $c.roles.bindings -}}
 {{- if not (has $b.namespace $granted) -}}

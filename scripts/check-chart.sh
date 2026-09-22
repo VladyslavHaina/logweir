@@ -692,6 +692,14 @@ console_refuses "a trusted-proxy requirement with no range to trust" "requireTru
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
   --set-string api.console.publicBaseUrl=https://console.example.com \
   --set api.console.requireTrustedProxy=true
+console_refuses "a trusted-proxy range wide enough to trust every pod" "wider than /16" \
+  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
+  --set-string api.console.publicBaseUrl=https://console.example.com \
+  --set api.console.requireTrustedProxy=true --set "api.console.trustedProxyCidrs={10.0.0.0/8}"
+console_refuses "a trusted-proxy range of everybody (IPv6)" "wider than /48" \
+  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
+  --set-string api.console.publicBaseUrl=https://console.example.com \
+  --set api.console.requireTrustedProxy=true --set "api.console.trustedProxyCidrs={::/0}"
 console_refuses "a trusted-proxy requirement in the in-cluster administrator mode" "belongs to api.console.mode=shared" \
   "${CONSOLE_ON[@]}" "${CONSOLE_LOCAL[@]}" "${CONSOLE_KEY[@]}" \
   --set api.console.requireTrustedProxy=true

@@ -857,12 +857,38 @@ The migration, in order:
    `kubectl proxy --address=127.0.0.1` path stays.
 5. Enable `api.console` in `shared` mode. Every `roles.bindings` namespace must
    be in `controller.watchNamespaces`. Set `trustedProxyCidrs` to the ingress
-   controller's range and `requireTrustedProxy: true` to refuse any request that
-   did not come through it over HTTPS.
+   controller's OWN pod range — no wider than `/16`, containing no other pod —
+   and `requireTrustedProxy: true` to refuse any request that did not come
+   through it over HTTPS. A wider range would contain the pods it exists to
+   refuse, and is refused.
 
 Rollback is the same list emptied: `watchNamespaces: []` restores the
 cluster-wide binding (the chart then refuses shared mode again, so disable the
 console first).
+
+**Upgrading a shared console installed before this release.** A values file
+with `api.console.mode: shared` that rendered on the release before this one
+(D0 stage 7, 2026-09-21) **no longer renders** until it is brought in line —
+`helm upgrade` stops at render time, names the field, and changes nothing in the
+cluster. That is deliberate: until the controller is scoped, the console's
+session and cursor keys sit in a namespace where the controller may create a Job
+that mounts them (residual O1), and D0 says shared mode must not be run as
+secure in that state. The refusals such a file meets, in the order to fix them:
+
+| refusal (the render names it) | fix |
+|---|---|
+| `api.console.mode=shared requires controller.watchNamespaces` | list the execution namespaces (steps 1–3 above) |
+| `controller.watchNamespaces includes the release namespace` | move Backups/Restores out of the release namespace and drop it from the list |
+| `api.console.mode=shared with ui.enabled=true is refused` | set `ui.enabled=false` (the laptop `kubectl proxy` path stays) |
+| `api.console.roles.bindings names namespace … which is not in controller.watchNamespaces` | add that namespace to the list, or remove the binding |
+| `api.console.trustedProxyCidrs names … wider than /16` (only with `requireTrustedProxy`) | narrow it to the ingress controller's own pod range |
+
+Then upgrade once with all of them fixed. The running console keeps serving
+through a refused upgrade, because nothing is applied. To roll back, re-install
+the previous chart version with the previous values — the scoping objects
+(`weirkeeper-cluster-scope`, the per-namespace `weirkeeper` RoleBindings) are
+removed and the cluster-wide binding returns with it. Installs without a shared
+console render unchanged.
 
 ```console
 $ helm upgrade logweir charts/logweir -n logweir-system --reuse-values \

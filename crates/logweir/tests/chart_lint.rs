@@ -3068,6 +3068,18 @@ fn chart_lint_the_shared_console_is_outside_the_controllers_job_authority() {
         "system:serviceaccount:logweir-system:logweir-api"
     );
     assert_eq!(config["requireTrustedProxy"], true);
+    // THE SHIPPED RANGE IS A NARROW PLACEHOLDER (review M3): a documentation
+    // range, no wider than /24, never the 10.0.0.0/8 that contains every pod
+    // of a typical cluster.
+    for cidr in config["trustedProxyCidrs"].as_sequence().expect("CIDRs") {
+        let cidr = cidr.as_str().expect("a string");
+        let prefix: u8 = cidr.rsplit('/').next().unwrap().parse().unwrap();
+        assert!(prefix >= 24, "the example trusts {cidr}");
+        assert!(
+            cidr.starts_with("192.0.2."),
+            "{cidr} is not a documentation placeholder"
+        );
+    }
 
     // THE DEFAULT RENDER IS UNCHANGED: the cluster-wide binding, no variable.
     let default = rendered("default");
@@ -3085,6 +3097,7 @@ fn chart_lint_the_shared_console_is_outside_the_controllers_job_authority() {
         "api.console.mode=shared with ui.enabled=true is refused.",
         "which is not in controller.watchNamespaces",
         "api.console.requireTrustedProxy needs api.console.trustedProxyCidrs",
+        "With requireTrustedProxy a range this wide trusts the pods the gate exists to refuse",
     ] {
         assert!(
             template.contains(needle),

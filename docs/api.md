@@ -1192,7 +1192,7 @@ cursorKey:
   file: /var/run/secrets/cursor/key
   expectedVersion: 1
 sessionMaxAgeSeconds: 900                          # 60…900
-trustedProxyCidrs: ["10.0.0.0/8"]                  # the ingress; never an identity
+trustedProxyCidrs: ["192.0.2.0/24"]                # PLACEHOLDER: your ingress pods' range; never an identity
 requireTrustedProxy: true                          # refuse any request not from it over HTTPS
 namespaces: [team-a, team-b]
 kubernetes:
@@ -1274,9 +1274,8 @@ identity* below. What the proxy in front of the console may contribute is
 transport facts, and `requireTrustedProxy: true` (with `trustedProxyCidrs`)
 turns that into a refusal:
 
-* a request whose **socket peer** is outside every `trustedProxyCidrs` range —
-  a pod that dialled the ClusterIP directly, past the ingress — is `421
-  misdirected_request`, audit code `untrusted_entry_point`, note
+* a request whose **socket peer** is outside every `trustedProxyCidrs` range is
+  `421 misdirected_request`, audit code `untrusted_entry_point`, note
   `peerNotTrusted`, whatever headers it carries;
 * a request from a trusted peer that does not carry exactly one
   `X-Forwarded-Proto: https` — the proxy did not vouch for TLS — is refused the
@@ -1285,18 +1284,34 @@ turns that into a refusal:
 
 The header is read only from a peer the administrator named, and it can only
 refuse: nothing derives an identity, a callback URL or a grant from it, which is
-D0's rule. It is the application's own copy of "only the ingress may reach the
-console", for clusters whose CNI accepts a NetworkPolicy without enforcing it.
-Without the flag the entry point is exactly what it was.
+D0's rule. Without the flag the entry point is exactly what it was.
+
+**What it distinguishes depends on the range, so the range must be the ingress
+controller's own.** kube-proxy keeps the source pod IP through a ClusterIP, so a
+pod that dials the console Service directly arrives with its own address. The
+gate refuses it only if that address is outside `trustedProxyCidrs` — that is,
+only if the range covers the ingress controller's pods and no other pod. A range
+like `10.0.0.0/8` contains the whole pod network of a typical cluster and would
+let any pod through with a forged `X-Forwarded-Proto`, so with
+`requireTrustedProxy` the service (and the chart) refuses any range wider than
+`/16` (IPv4) or `/48` (IPv6) by name; the example ships the documentation range
+`192.0.2.0/24` as a placeholder. Even with a tight range this is defence in
+depth: on a cluster whose CNI enforces NetworkPolicy, the console's ingress
+policy remains the network boundary, and on one that does not (Docker Desktop
+among them), this gate is the only thing that tells the ingress from a pod.
 
 ### Readiness
 
-In shared mode `/readyz` is ready only when Kubernetes answers for the service's
-own identity **and** the provider's discovery document (naming the configured
-issuer, with https endpoints) and a non-empty key set are available — fetched,
-or still cached inside the JWKS outage window. A console nobody can sign in to is
-kept out of its ingress's rotation. The body still names no endpoint and no
-reason.
+In shared mode `/readyz` **starts** not ready: it becomes ready once Kubernetes
+answers for the service's own identity **and** the provider has initialised —
+its discovery document (naming the configured issuer, with https endpoints) and
+a non-empty key set have been read. After that the provider half stays ready for
+the life of the process. D0 says the API *starts* NotReady if the provider cannot
+initialise, and that a valid session continues to its signed expiry: an IdP
+outage later must not take every replica out of rotation and cut sessions that
+need nothing from the provider. During such an outage sign-in fails closed on
+its own path, and existing sessions keep working until they expire. The body
+still names no endpoint and no reason.
 
 ### Sign-in
 
@@ -1355,7 +1370,8 @@ outright with `400 header_not_allowed` naming the header.
 No callback URL and no authorization decision derives from `Host`, `Forwarded`
 or `X-Forwarded-*`. A forwarded client address reaches exactly one audit field,
 `forwardedFor`, and only when the immediate socket peer falls inside a
-`trustedProxyCidrs` range.
+`trustedProxyCidrs` range; it is the rightmost hop none of those proxies
+added, because everything to its left was sent by the client.
 
 There is no CORS layer: no response carries `Access-Control-Allow-Origin` or
 `Access-Control-Allow-Credentials`.

@@ -475,14 +475,18 @@ not let you install, each refused at render time with the field named:
 | `shared` with `ui.enabled` | the legacy `kubectl proxy` Service is a second, unauthenticated way to the same objects (PLAT-17.2: remove or isolate the legacy proxy) |
 | a `roles.bindings` namespace outside `controller.watchNamespaces` | the console would create objects no controller reconciles |
 | `requireTrustedProxy` with no `trustedProxyCidrs`, or in `localAdmin` mode | a gate with nothing to trust refuses every request; a loopback listener has no proxy in front of it |
+| `requireTrustedProxy` with a `trustedProxyCidrs` range wider than `/16` (IPv4) or `/48` (IPv6) | a range that wide contains the pods the gate exists to refuse |
 
 **`requireTrustedProxy: true`** makes the console answer `421` to every request
-(the two probes excepted) whose socket peer is outside `trustedProxyCidrs` — a
-pod that dialled the ClusterIP past the ingress — or that the ingress did not
-mark `X-Forwarded-Proto: https`. It can only refuse; identity stays the OIDC
-session. Set `trustedProxyCidrs` to the ingress controller's pod range. It is the
-console's own copy of what an enforcing NetworkPolicy gives, for clusters whose
-CNI does not enforce one.
+(the two probes excepted) whose socket peer is outside `trustedProxyCidrs`, or
+that the ingress did not mark `X-Forwarded-Proto: https`. It can only refuse;
+identity stays the OIDC session. It tells the ingress from a pod that dialled
+the Service directly **only when `trustedProxyCidrs` is the ingress controller's
+own pod range and contains no other pod** (kube-proxy keeps the source pod IP
+through a ClusterIP), so the chart and the binary refuse a range wider than
+`/16` (IPv4) or `/48` (IPv6) when it is on, and the example ships the
+placeholder `192.0.2.0/24`. It is defence in depth; an enforcing NetworkPolicy
+remains the network boundary.
 
 **Every object the console creates is attributed.** The rendered configuration
 names `kubernetes.principal: system:serviceaccount:<namespace>:<release>-api`,
@@ -583,8 +587,16 @@ as `system:serviceaccount:<release-namespace>:weirkeeper`, scoped to `team-a`):
 list or with one that names the release namespace: the console's session and
 cursor keys live there.
 
-**Migration.** Existing installs see no change: the default is `[]` and renders
-byte-identically. To scope an existing install: list every namespace that holds
+**Migration.** Existing installs that do not run a shared console see no
+change: the default is `[]` and renders byte-identically. **An existing
+`api.console.mode: shared` release does not render any more until it is scoped**
+— `helm upgrade` refuses at render time, naming the field, and applies nothing
+(the running console keeps serving). It meets, in order: no
+`controller.watchNamespaces`; the release namespace in that list; `ui.enabled`;
+a `roles.bindings` namespace outside the list; and, with `requireTrustedProxy`,
+a `trustedProxyCidrs` range wider than `/16`. The why is residual O1 above, and
+`docs/install.md` §5e *Upgrading a shared console installed before this release*
+has the table of fixes and the rollback. To scope an existing install: list every namespace that holds
 Logweir objects (`kubectl get backups,restores,backupschedules,kafkaclusters -A`),
 make sure each has the runner ServiceAccount and the signing identity
 (`docs/install.md` step 4, `identity.authorizedRunnerNamespaces`), set the list

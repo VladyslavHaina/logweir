@@ -6973,7 +6973,7 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: logweir-api-config-404a949ebc
+  name: logweir-api-config-399594dd7b
   namespace: logweir-system
   labels:
     app.kubernetes.io/name: logweir
@@ -7016,7 +7016,7 @@ data:
       expectedVersion: 1
     sessionMaxAgeSeconds: 900
     trustedProxyCidrs:
-      - 10.0.0.0/8
+      - 192.0.2.0/24
     requireTrustedProxy: true
     namespaces:
       - logweir-system
@@ -7797,7 +7797,7 @@ spec:
   template:
     metadata:
       annotations:
-        checksum/logweir-api-config: 404a949ebcd250676c45942b3c5473dc42e1681e562e14639e64cd89c48432a6
+        checksum/logweir-api-config: 399594dd7b00e5e63ede20ab812b97893f4146c1734c709aafa16ab53adea455
       labels:
         app.kubernetes.io/name: logweir
         app.kubernetes.io/instance: logweir
@@ -7858,7 +7858,7 @@ spec:
       volumes:
         - name: config
           configMap:
-            name: logweir-api-config-404a949ebc
+            name: logweir-api-config-399594dd7b
             items:
               - key: config.yaml
                 path: config.yaml

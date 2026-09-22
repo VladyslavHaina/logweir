@@ -60,10 +60,12 @@
 # runner ServiceAccount and the signing identity (docs/install.md step 4,
 # `identity.authorizedRunnerNamespaces`).
 #
-# `requireTrustedProxy` makes the console refuse (421) every request that did
-# not come from `trustedProxyCidrs` — the ingress controller — over HTTPS: the
-# application's own copy of the ingress-only path, for clusters whose CNI does
-# not enforce the NetworkPolicy below.
+# `requireTrustedProxy` makes the console refuse (421) every request whose
+# socket peer is outside `trustedProxyCidrs`, or that the proxy did not mark
+# HTTPS. It tells the ingress from a pod that dialled the Service directly ONLY
+# when that range is the ingress controller's own and contains no other pod
+# (kube-proxy keeps the source pod IP through a ClusterIP). It is defence in
+# depth beside the NetworkPolicy below, not a replacement for an enforcing CNI.
 controller:
   watchNamespaces: [team-a, team-b]
 kubernetes:
@@ -79,7 +81,12 @@ api:
     keyVersion: 1
     publicBaseUrl: https://console.example.com
     sessionMaxAgeSeconds: 900
-    trustedProxyCidrs: ["10.0.0.0/8"]
+    # PLACEHOLDER (192.0.2.0/24 is a documentation range): the ingress
+    # controller's OWN pod range and nothing wider. The gate below tells the
+    # ingress from other pods only when this range contains no other pod; with
+    # requireTrustedProxy the chart and the binary refuse anything wider than
+    # /16. An enforcing NetworkPolicy remains the network boundary.
+    trustedProxyCidrs: ["192.0.2.0/24"]
     requireTrustedProxy: true
     oidc:
       issuer: https://idp.example.com/realms/logweir
