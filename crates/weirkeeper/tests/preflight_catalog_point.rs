@@ -500,11 +500,19 @@ fn a_plan_not_bound_to_the_row_is_a_binding_mismatch() {
     }
     let mut f = Fixture::healthy();
     f.plan = Some(PlanFacts::of(b"source: [not a plan", None));
+    let row = f.row();
     assert_row(
-        &f.row(),
+        &row,
         CheckState::NotReady,
         CheckCode::CatalogPointBindingMismatch,
         "an unparseable plan",
+    );
+    // Said as what it is: a plan that did not parse, not one that parsed and
+    // carries no binding -- the two have different repairs.
+    assert!(
+        row.message.contains("did not parse"),
+        "the message names the parse failure: {}",
+        row.message
     );
 }
 
