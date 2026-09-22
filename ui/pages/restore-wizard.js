@@ -297,7 +297,7 @@ export const RETRY_TAIL_CHARS = 8;
 export function freshTargetPrefix(pointInTime, retryOf) {
   // AN INPUT THAT IS NOT AN INSTANT HAS NO DEFAULT PREFIX, and saying so is
   // this function's job rather than throwing. The retry route reaches the
-  // SELECTOR first -- `#/restore?ns=…&retryOf=…` names no recovery point, on
+  // SELECTOR first -- `#/restore?ns=...&retryOf=...` names no recovery point, on
   // purpose, because a `Restore` carries a backup set id and not the `Backup`
   // it came from -- so there is no point in time to derive from until one is
   // chosen. The first cut called `defaultTopicPrefix` unconditionally and a
