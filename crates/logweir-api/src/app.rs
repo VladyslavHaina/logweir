@@ -183,7 +183,9 @@ impl AppState {
         &self.inner.settings.kubernetes_principal
     }
 
-    /// Readiness, cached for [`READINESS_CACHE`].
+    /// Readiness, cached for [`READINESS_CACHE`]: Kubernetes answers for this
+    /// service's identity and, in shared mode, the OIDC provider's discovery
+    /// document and keys are available.
     pub async fn ready(&self) -> bool {
         let mut cached = self.inner.readiness.lock().await;
         if let Some((at, verdict)) = *cached {
@@ -191,11 +193,19 @@ impl AppState {
                 return verdict;
             }
         }
-        let verdict = self
+        let kubernetes = self
             .kube()
             .probe(&self.inner.settings.readiness_namespace)
             .await
             .is_ok();
+        // SHARED MODE IS ALSO NOT READY WITHOUT ITS PROVIDER (D0: discovery and
+        // JWKS must initialise). The key material was checked before the
+        // socket existed; this is the part that can change while running.
+        let provider = match self.shared() {
+            None => true,
+            Some(shared) => shared.provider.ready().await,
+        };
+        let verdict = kubernetes && provider;
         *cached = Some((Instant::now(), verdict));
         verdict
     }

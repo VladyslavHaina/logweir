@@ -89,10 +89,14 @@ pub enum KeyError {
 }
 
 /// A key file's contents, with its declared version.
+///
+/// THE BYTES ARE WIPED ON DROP (review finding N-1 of PLAT-17.2 stage 2): a
+/// `Zeroizing` buffer, so a key read at startup and dropped once its subkeys
+/// are derived does not linger in freed memory.
 #[derive(Clone)]
 pub struct VersionedKey {
     version: u32,
-    bytes: Vec<u8>,
+    bytes: zeroize::Zeroizing<Vec<u8>>,
 }
 
 impl std::fmt::Debug for VersionedKey {
@@ -111,7 +115,10 @@ impl VersionedKey {
     /// check the length.
     #[must_use]
     pub fn from_parts(version: u32, bytes: Vec<u8>) -> Self {
-        Self { version, bytes }
+        Self {
+            version,
+            bytes: zeroize::Zeroizing::new(bytes),
+        }
     }
 
     /// The declared version.
@@ -134,10 +141,13 @@ impl VersionedKey {
 ///
 /// [`KeyError`] naming the file.
 pub fn read_versioned_key(path: &Path, expected_version: u32) -> Result<VersionedKey, KeyError> {
-    let text = std::fs::read_to_string(path).map_err(|e| KeyError::Missing {
-        path: path.display().to_string(),
-        reason: e.to_string(),
-    })?;
+    let text =
+        zeroize::Zeroizing::new(
+            std::fs::read_to_string(path).map_err(|e| KeyError::Missing {
+                path: path.display().to_string(),
+                reason: e.to_string(),
+            })?,
+        );
     let file: KeyFile = serde_yaml::from_str(&text).map_err(|e| KeyError::Malformed {
         path: path.display().to_string(),
         reason: format!(
@@ -145,12 +155,15 @@ pub fn read_versioned_key(path: &Path, expected_version: u32) -> Result<Versione
             crate::validate::bounded(&e.to_string(), 200)
         ),
     })?;
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(file.key.trim())
-        .map_err(|_| KeyError::Malformed {
-            path: path.display().to_string(),
-            reason: "`key` is not standard base64".to_string(),
-        })?;
+    let encoded = zeroize::Zeroizing::new(file.key);
+    let bytes = zeroize::Zeroizing::new(
+        base64::engine::general_purpose::STANDARD
+            .decode(encoded.trim())
+            .map_err(|_| KeyError::Malformed {
+                path: path.display().to_string(),
+                reason: "`key` is not standard base64".to_string(),
+            })?,
+    );
     if bytes.len() < MIN_KEY_BYTES {
         return Err(KeyError::Malformed {
             path: path.display().to_string(),
@@ -174,20 +187,25 @@ pub fn read_versioned_key(path: &Path, expected_version: u32) -> Result<Versione
     })
 }
 
-fn derive(key: &[u8], label: &[u8]) -> [u8; 32] {
+fn derive(key: &[u8], label: &[u8]) -> zeroize::Zeroizing<[u8; 32]> {
     let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key).expect("HMAC takes any key length");
     mac.update(label);
-    let out = mac.finalize().into_bytes();
-    let mut subkey = [0u8; 32];
+    let mut out = mac.finalize().into_bytes();
+    let mut subkey = zeroize::Zeroizing::new([0u8; 32]);
     subkey.copy_from_slice(&out);
+    zeroize::Zeroize::zeroize(out.as_mut_slice());
     subkey
 }
 
 /// The two subkeys derived from one key file, plus its version.
+///
+/// The CSRF subkey is wiped on drop; the AEAD subkey's intermediate bytes are
+/// wiped as soon as `ring` has taken them, and what `ring`'s `LessSafeKey`
+/// keeps internally is `ring`'s to manage.
 pub struct CookieKeys {
     version: u32,
     aead: LessSafeKey,
-    csrf: [u8; 32],
+    csrf: zeroize::Zeroizing<[u8; 32]>,
     random: SystemRandom,
 }
 
@@ -214,7 +232,7 @@ impl CookieKeys {
     pub fn new(key: &VersionedKey) -> Self {
         let aead_bytes = derive(key.bytes(), LABEL_AEAD);
         let aead = LessSafeKey::new(
-            UnboundKey::new(&CHACHA20_POLY1305, &aead_bytes)
+            UnboundKey::new(&CHACHA20_POLY1305, aead_bytes.as_slice())
                 .expect("the derived subkey is exactly 32 bytes"),
         );
         Self {

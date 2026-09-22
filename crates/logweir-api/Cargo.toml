@@ -108,9 +108,9 @@ ulid.workspace = true
 weirkeeper = { path = "../weirkeeper" }
 # Already in `Cargo.lock` at 1.8.2 (rustls and the RustCrypto family pull it);
 # declaring it adds no package. It wipes the OIDC client secret on drop (review
-# finding F-6). The session key file's bytes and the derived CSRF subkey are NOT
-# wrapped yet (review finding N-1): they live for the process lifetime in
-# `VersionedKey` and `CookieKeys`, and a later change should wrap those two.
+# finding F-6), and since PLAT-17.2's completion the session key file's text,
+# its decoded bytes (`VersionedKey`) and the derived CSRF and AEAD subkey bytes
+# (review finding N-1). What `ring`'s `LessSafeKey` holds internally is ring's.
 zeroize = "1"
 
 [dev-dependencies]

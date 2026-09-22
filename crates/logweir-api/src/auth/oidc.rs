@@ -338,6 +338,24 @@ impl Provider {
         &self.settings
     }
 
+    /// Whether a sign-in could complete now: the discovery document is
+    /// readable and names this issuer, and a non-empty key set is available
+    /// (fetched, or still cached inside the outage window).
+    ///
+    /// D0 §"Helm, RBAC, ingress, and network changes": the API starts
+    /// NotReady if OIDC discovery or the JWKS cannot initialise. A console
+    /// that is Ready but cannot validate a single ID token would be served
+    /// traffic by its ingress and fail every sign-in, which is the outage
+    /// readiness exists to keep out of rotation. Existing sessions do not
+    /// depend on the provider, but a replica nobody can sign in to is not a
+    /// replica to route new browsers to.
+    pub async fn ready(&self) -> bool {
+        if self.discovery().await.is_err() {
+            return false;
+        }
+        self.jwks(false).await.is_ok_and(|keys| !keys.is_empty())
+    }
+
     /// The discovery document, fetched at most once per
     /// [`DISCOVERY_MAX_AGE`].
     ///
