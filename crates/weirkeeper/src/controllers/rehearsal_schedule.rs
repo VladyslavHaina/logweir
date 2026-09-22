@@ -119,6 +119,11 @@ pub const ERROR_REQUEUE_SECONDS: u64 = 60;
 /// same reason `protection::MAX_BACKUPS_SCANNED` is: a namespace with a year of
 /// hourly backups must not turn one reconcile into a ten-thousand-object walk.
 pub const MAX_BACKUPS_SCANNED: usize = 200;
+/// The page size of the `Backup` walk [`candidates`] makes.
+pub const BACKUP_PAGE_LIMIT: u32 = 500;
+/// How many `Backup` pages one pass follows — 10 000 objects, the retention
+/// controller's bound. Past it, catalog-only candidates are refused.
+pub const MAX_BACKUP_PAGES: usize = 20;
 /// How many catalog page `ConfigMap`s one pass reads.
 pub const MAX_CATALOG_PAGES: usize = 8;
 
@@ -204,6 +209,9 @@ pub struct Facts<'a> {
     pub cluster: Option<&'a KafkaCluster>,
     /// Every candidate point, in any order.
     pub candidates: &'a [PointCandidate],
+    /// The `Backup` walk behind `candidates` hit its bound, so no catalog-only
+    /// candidate was admitted; a `NoQualifyingPoint` skip says so.
+    pub backup_verdicts_incomplete: bool,
     /// The `Restore` this schedule's status names as active or pending, when
     /// one exists. Discovered by GET of the deterministic name, never by a
     /// list.
@@ -374,7 +382,18 @@ pub fn decide(facts: &Facts<'_>) -> Verdict {
         facts.now,
     ) {
         Ok(s) => s,
-        Err(skip) => return Verdict::Skipped(skip),
+        Err(mut skip) => {
+            if facts.backup_verdicts_incomplete && skip.reason == SkipReason::NoQualifyingPoint {
+                skip.detail = format!(
+                    "{} (the namespace holds more than {} Backup objects, the most one pass \
+                     reads, so no catalog-only point was admitted: a refusal on a Backup the \
+                     walk did not reach could not be ruled out — prune the Backup history)",
+                    skip.detail,
+                    MAX_BACKUP_PAGES * BACKUP_PAGE_LIMIT as usize
+                );
+            }
+            return Verdict::Skipped(skip);
+        }
     };
 
     Verdict::Fire(Box::new(FireOrder {
@@ -933,7 +952,8 @@ pub async fn reconcile_schedule(
         .await
         .map_err(ReconcileError::Api)?;
     let target_busy = busy_target(&restores, schedule, &name).await?;
-    let candidates = candidates(ctx, schedule, &namespace, now).await?;
+    let (candidates, backup_verdicts_incomplete) =
+        candidates(ctx, schedule, &namespace, now).await?;
 
     let facts = Facts {
         schedule,
@@ -943,6 +963,7 @@ pub async fn reconcile_schedule(
         trust: &trust,
         cluster: cluster.as_ref(),
         candidates: &candidates,
+        backup_verdicts_incomplete,
         active: previous.as_ref(),
         target_busy,
         now,
@@ -1365,12 +1386,15 @@ async fn busy_target(
 /// availability and verification axes: it is the one that actually listed the
 /// archive, and a `Backup` that succeeded says nothing about whether its objects
 /// are still there.
+///
+/// The `bool` is "the `Backup` walk hit its bound", which [`decide`] names in
+/// a `NoQualifyingPoint` skip.
 async fn candidates(
     ctx: &Context,
     schedule: &RehearsalSchedule,
     namespace: &str,
     now: DateTime<Utc>,
-) -> Result<Vec<PointCandidate>, ReconcileError> {
+) -> Result<(Vec<PointCandidate>, bool), ReconcileError> {
     let mut by_id: BTreeMap<String, PointCandidate> = BTreeMap::new();
     let mut refusals = crate::catalog_view::ControllerRefusals::default();
 
@@ -1378,40 +1402,87 @@ async fn candidates(
     //
     // Listed for `catalogRef` as well as for `scheduleRefs`: a catalog-only
     // point whose `Backup` the controller refused is refused too, whichever
-    // schedule produced it (`catalog_view::ControllerRefusals`). One page of
-    // 500, the bound this reconcile already paid; the runner re-verifies the
-    // point binding before any data-plane work in any case.
+    // schedule produced it (`catalog_view::ControllerRefusals`).
+    //
+    // EVERY PAGE, BOUNDED (review L1). The API server lists in NAME order, and
+    // a schedule's Backups sort chronologically, so one capped page held the
+    // OLDEST runs and missed exactly the newest — the ones `NewestAvailable`
+    // picks. The walk follows the continue token up to
+    // [`MAX_BACKUP_PAGES`] × [`BACKUP_PAGE_LIMIT`]; a walk the bound cuts
+    // short marks the refusal set incomplete, and then no catalog-only row is
+    // selectable (the skip says why). Candidates keep the NEWEST
+    // [`MAX_BACKUPS_SCANNED`] by recovery point, not the first in name order.
+    //
+    // LENIENT (review M1). Objects are read untyped: a `Backup` this build
+    // cannot type still contributes its verdict (through
+    // `BackupVerdictFacts`) and is simply not a candidate, rather than failing
+    // the whole pass.
     let schedule_refs = schedule.spec.point.schedule_refs.as_ref();
     if schedule_refs.is_some() || schedule.spec.point.catalog_ref.is_some() {
-        let backups: Api<Backup> = Api::namespaced(ctx.client.clone(), namespace);
-        let list = backups
-            .list(&ListParams::default().limit(500))
-            .await
-            .map_err(ReconcileError::Api)?;
-        refusals = crate::catalog_view::ControllerRefusals::from_backups(&list.items);
+        let resource = kube::api::ApiResource::erase::<Backup>(&());
+        let backups: Api<kube::api::DynamicObject> =
+            Api::namespaced_with(ctx.client.clone(), namespace, &resource);
         let wanted: Vec<&str> = schedule_refs
             .into_iter()
             .flatten()
             .map(|r| r.name.as_str())
             .collect();
-        let mut seen = 0usize;
-        for backup in list.items {
-            if seen >= MAX_BACKUPS_SCANNED {
+        let mut facts: Vec<crate::catalog_view::BackupVerdictFacts> = Vec::new();
+        let mut from_backups: Vec<PointCandidate> = Vec::new();
+        let mut token: Option<String> = None;
+        let mut complete = false;
+        for _ in 0..MAX_BACKUP_PAGES {
+            let mut params = ListParams::default().limit(BACKUP_PAGE_LIMIT);
+            if let Some(cursor) = token.as_deref() {
+                params = params.continue_token(cursor);
+            }
+            let page = backups.list(&params).await.map_err(ReconcileError::Api)?;
+            token = page.metadata.continue_.clone().filter(|t| !t.is_empty());
+            for object in page.items {
+                facts.push(crate::catalog_view::BackupVerdictFacts::from_json(
+                    &object.data,
+                ));
+                let Ok(backup) =
+                    serde_json::to_value(&object).and_then(serde_json::from_value::<Backup>)
+                else {
+                    continue;
+                };
+                let from = backup
+                    .spec
+                    .schedule_ref
+                    .as_ref()
+                    .map(|s| s.name.as_str())
+                    .unwrap_or_default();
+                if !wanted.contains(&from) {
+                    continue;
+                }
+                if let Some(candidate) = candidate_from_backup(&backup) {
+                    from_backups.push(candidate);
+                }
+            }
+            if token.is_none() {
+                complete = true;
                 break;
             }
-            let from = backup
-                .spec
-                .schedule_ref
-                .as_ref()
-                .map(|s| s.name.as_str())
-                .unwrap_or_default();
-            if !wanted.contains(&from) {
-                continue;
-            }
-            seen += 1;
-            if let Some(candidate) = candidate_from_backup(&backup) {
-                by_id.insert(candidate.point_id.clone(), candidate);
-            }
+        }
+        refusals = crate::catalog_view::ControllerRefusals::from_facts(facts);
+        if !complete {
+            warn!(
+                schedule = %schedule.name_any(),
+                namespace = %namespace,
+                pages = MAX_BACKUP_PAGES,
+                "the Backup walk hit its page bound; no catalog-only point is selectable from \
+                 an incomplete refusal set"
+            );
+            refusals = refusals.incomplete();
+        }
+        from_backups.sort_by(|a, b| {
+            b.recovery_point_at
+                .cmp(&a.recovery_point_at)
+                .then_with(|| a.point_id.cmp(&b.point_id))
+        });
+        for candidate in from_backups.into_iter().take(MAX_BACKUPS_SCANNED) {
+            by_id.insert(candidate.point_id.clone(), candidate);
         }
     }
 
@@ -1423,7 +1494,7 @@ async fn candidates(
             .await
             .map_err(ReconcileError::Api)?
         else {
-            return Ok(by_id.into_values().collect());
+            return Ok((by_id.into_values().collect(), !refusals.is_complete()));
         };
         let status = catalog.status.as_ref();
         // AN EXPIRED VIEW IS NOT A VIEW. Reading its pages past
@@ -1433,7 +1504,7 @@ async fn candidates(
             .and_then(|s| s.view_expires_at)
             .is_none_or(|at| at <= now)
         {
-            return Ok(by_id.into_values().collect());
+            return Ok((by_id.into_values().collect(), !refusals.is_complete()));
         }
         let destination = catalog
             .spec
@@ -1471,7 +1542,7 @@ async fn candidates(
         }
     }
 
-    Ok(by_id.into_values().collect())
+    Ok((by_id.into_values().collect(), !refusals.is_complete()))
 }
 
 /// A `Backup` object as a candidate point, or `None` when it is not one.
@@ -1501,7 +1572,7 @@ pub fn candidate_from_backup(backup: &Backup) -> Option<PointCandidate> {
         .and_then(|e| e.verification.as_ref())
         .and_then(|v| v.result.as_deref());
     // A VERDICT THE CONTROLLER REACHED STILL DECIDES. Only "I could not look"
-    // (`NotAttempted`, or no verdict at all) defers to the catalog; `Valid` is
+    // (`NotAttempted`, `Pending`, or no verdict at all) defers to the catalog; `Valid` is
     // a pass the catalog may still narrow. Everything else — `Invalid`,
     // `Untrusted`, or a spelling this build does not know — is a refusal no
     // catalog row may overrule (`protection::evidence_objective_met`).
@@ -1633,7 +1704,9 @@ pub fn merge_catalog_entry(
                     source_cluster_id: None,
                     // A CATALOG-ONLY ROW IS STILL NOT THE CATALOG'S TO DECIDE
                     // when a `Backup` for the same receipt was refused.
-                    selectable: entry.selectable && !refused_elsewhere,
+                    // Nor when the refusal set is incomplete: "no listed
+                    // Backup refused it" is then not "no Backup refused it".
+                    selectable: entry.selectable && !refused_elsewhere && refusals.is_complete(),
                     verdict_refused: refused_elsewhere,
                     retention_lease: false,
                 },

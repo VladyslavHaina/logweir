@@ -396,11 +396,11 @@ pub struct PointCandidate {
     /// "succeeded, and its evidence verified" for a point with no catalog entry.
     pub selectable: bool,
     /// The `Backup`'s own evidence verdict was REACHED and is not a pass
-    /// (`Invalid`, `Untrusted`, or any result other than `Valid`/`NotAttempted`).
+    /// (`Invalid`, `Untrusted`, or any result other than `Valid`/`NotAttempted`/`Pending`).
     ///
     /// Such a candidate is never selectable, whatever a catalog row says. The
     /// catalog may decide only where the controller could not look
-    /// (`NotAttempted`, or no verdict at all) — the same rule as
+    /// (`NotAttempted`, `Pending`, or no verdict at all) — the same rule as
     /// `protection::evidence_objective_met`. A view is served until
     /// `viewExpiresAt`, so a row harvested before the controller found a
     /// replaced receipt or a revoked signer would otherwise overrule the

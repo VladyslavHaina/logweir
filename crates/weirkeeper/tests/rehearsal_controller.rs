@@ -2559,6 +2559,7 @@ fn a_catalog_only_row_for_a_refused_backup_is_never_selectable() {
         ("Untrusted", true),
         ("SomeFutureVerdict", true),
         ("NotAttempted", false),
+        ("Pending", false),
         ("Valid", false),
     ] {
         // A Backup of ANOTHER schedule — not a candidate of this one.
@@ -2775,4 +2776,139 @@ fn a_refusal_on_another_backup_of_the_same_receipt_is_honoured() {
     let merged = &by_id[POINT_ID];
     assert!(merged.verdict_refused);
     assert!(!merged.selectable);
+}
+
+// ---- review L1 / M1: the Backup walk is complete, newest-first and lenient -
+
+/// A walk the bound cuts short admits no catalog-only point, and the skip says
+/// why — the refusal on a Backup the walk did not reach cannot be ruled out.
+///
+/// MUTANT: drop `refusals.is_complete()` from the catalog-only arm of
+/// `merge_catalog_entry`. The slot fires from an unproven row; this row fails.
+#[tokio::test]
+async fn a_truncated_backup_walk_admits_no_catalog_only_point() {
+    let (schedule, approval) = catalog_only_schedule();
+    let mut table = catalog_only_routes(approval, vec![]);
+    table.retain(|r| r.path_suffix != "/backups");
+    table.push(Route {
+        method: "GET",
+        path_suffix: "/backups",
+        status: 200,
+        body: json!({
+            "apiVersion": "v1", "kind": "BackupList",
+            "metadata": {"resourceVersion": "1", "continue": "eyJwYWdlIjoyfQ"},
+            "items": []
+        })
+        .to_string(),
+    });
+    let (client, recorder, _) = mock_client_recording_bodies(table);
+    let outcome = rs::reconcile_schedule(&schedule, &context(client), now())
+        .await
+        .expect("the reconcile answers");
+    match &outcome.verdict {
+        rs::Verdict::Skipped(s) => {
+            assert_eq!(s.reason, rehearsal::SkipReason::NoQualifyingPoint);
+            assert!(s.detail.contains("Backup objects"), "{}", s.detail);
+        }
+        other => panic!("expected a NoQualifyingPoint skip, got {other:?}"),
+    }
+    assert_eq!(posted(&recorder, RESTORES_PATH), 0);
+    let pages = seen(&recorder)
+        .iter()
+        .filter(|(m, uri)| m == "GET" && uri.split('?').next().unwrap_or("").ends_with("/backups"))
+        .count();
+    assert_eq!(
+        pages,
+        rs::MAX_BACKUP_PAGES,
+        "every page up to the bound is read"
+    );
+}
+
+/// More wanted Backups than `MAX_BACKUPS_SCANNED`, in NAME order oldest first:
+/// the newest is still a candidate and is the point rehearsed.
+///
+/// MUTANT: keep the first `MAX_BACKUPS_SCANNED` in listing order (drop the
+/// newest-first sort). The newest is cut and an older point fires.
+#[tokio::test]
+async fn the_newest_backup_is_never_cut_by_the_candidate_bound() {
+    let base = at("2026-09-01T00:00:00Z");
+    let items: Vec<Value> = (0..=rs::MAX_BACKUPS_SCANNED)
+        .map(|i| {
+            let capture = (base + chrono::Duration::minutes(i as i64 * 60)).to_rfc3339();
+            let mut v = backup_value(
+                &format!("logweir-backup-nightly-{i:04}"),
+                &capture,
+                json!(["orders"]),
+                true,
+            );
+            v["status"]["backupId"] = json!(format!("b-{i:04}"));
+            v["status"]["evidence"]["receiptSha256"] = json!(format!("sha256:{i:032x}{i:032x}"));
+            v
+        })
+        .collect();
+    // Named by its FULL digest: `lwp1-` ids are the first 32 hex characters,
+    // so the point ids below must differ in them.
+    let n = rs::MAX_BACKUPS_SCANNED;
+    let newest_digest = format!("sha256:{n:032x}{n:032x}");
+    let mut table = routes(
+        approval_value(&envelope()),
+        trust_policy_value("Active", None),
+        cluster_value(true, Some(TARGET_CLUSTER_ID)),
+        backup_list(items),
+        restore_list(vec![]),
+    );
+    let (client, _, _) = mock_client_recording_bodies(table);
+    let outcome = rs::reconcile_schedule(&schedule(), &context(client), now())
+        .await
+        .expect("the reconcile answers");
+    match &outcome.verdict {
+        rs::Verdict::Fire(order) => {
+            assert_eq!(order.selected.point.receipt_sha256, newest_digest)
+        }
+        other => panic!("expected the newest point to fire, got {other:?}"),
+    }
+}
+
+/// A Backup this build cannot type does not fail the pass: it is simply no
+/// candidate, and the rest of the walk still decides.
+///
+/// MUTANT: list typed `Backup`s again. The pass errors; this row fails.
+#[tokio::test]
+async fn a_malformed_backup_does_not_fail_the_rehearsal_pass() {
+    // A trigger kind a newer build wrote (`spec.trigger.kind` is a CLOSED enum
+    // here), and — a second object — no `spec` at all: neither decodes as
+    // this build's typed `Backup`.
+    let mut future = backup_value("b-future", "2026-09-19T01:00:00Z", json!(["orders"]), true);
+    future["spec"]["trigger"] = json!({"kind": "SomeFutureTriggerKind", "attempt": 0});
+    let mut bare = future.clone();
+    bare["metadata"]["name"] = json!("b-bare");
+    bare.as_object_mut().expect("object").remove("spec");
+    future["status"]["evidence"]["receiptSha256"] = json!(format!("sha256:{}", "9".repeat(64)));
+    let mut table = happy_routes();
+    table.retain(|r| r.path_suffix != "/backups");
+    table.push(Route {
+        method: "GET",
+        path_suffix: "/backups",
+        status: 200,
+        body: backup_list(vec![
+            future,
+            bare,
+            backup_value(
+                "logweir-backup-nightly-20260919-020000",
+                "2026-09-19T02:00:00Z",
+                json!(["orders", "payments"]),
+                true,
+            ),
+        ]),
+    });
+    let (client, recorder, _) = mock_client_recording_bodies(table);
+    let outcome = rs::reconcile_schedule(&schedule(), &context(client), now())
+        .await
+        .expect("a malformed Backup does not fail the pass");
+    assert!(
+        matches!(outcome.verdict, rs::Verdict::Fire(_)),
+        "{:?}",
+        outcome.verdict
+    );
+    assert_eq!(posted(&recorder, RESTORES_PATH), 1);
 }
