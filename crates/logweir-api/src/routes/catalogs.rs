@@ -42,7 +42,7 @@ use kube::ResourceExt;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use weirkeeper::catalog_view::{
-    ControllerRefusals, ViewEntry, PAGE_DATA_KEY, PAGE_DIGEST_ANNOTATION,
+    BackupVerdictFacts, ControllerRefusals, ViewEntry, PAGE_DATA_KEY, PAGE_DIGEST_ANNOTATION,
 };
 use weirkeeper::crds::backup::Backup as BackupCr;
 use weirkeeper::crds::recovery_catalog::{
@@ -417,7 +417,10 @@ pub struct PointView {
     pub selectable: bool,
     /// The verification result the controller recorded on this point's OWN
     /// `Backup` — `Invalid`, `Untrusted`, or a result this build does not
-    /// recognise — present ONLY when it is such a reached refusal.
+    /// recognise — present ONLY when it is such a reached refusal. It is
+    /// `Unreadable` when the `Backup`'s verdict field is present but is not a
+    /// verdict this build can read: an unreadable verdict refuses like an
+    /// unknown one.
     ///
     /// This is why a row can read `Available`/`Verified` and still be
     /// `selectable: false`: the view is served until `viewExpiresAt`, so the
@@ -519,41 +522,79 @@ pub struct PointPageResponse {
     /// When the view ages out.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub view_expires_at: Option<DateTime<Utc>>,
-    /// `true` when the namespace holds more `Backup`s than one request reads
-    /// (2 000), so a refusal on a `Backup` beyond that bound is not reflected
-    /// in `selectable` or `backupVerdict`. Absent means the listing was
-    /// complete.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    #[schemars(default)]
-    pub backup_verdicts_truncated: bool,
+    /// Present when the controller's `Backup` verdicts could not ALL be read,
+    /// so `selectable` and `backupVerdict` reflect only the ones that were —
+    /// for the rest, the catalog row alone. `Truncated`: the namespace holds
+    /// more `Backup`s than one request reads (2 000). `Unavailable`: the
+    /// `Backup` list failed (transport, RBAC, a missing CRD), or a refusal
+    /// named no receipt digest and no set id and so could be tied to no row.
+    /// Absent means every `Backup` was read. The page is served either way:
+    /// the point list is what an operator reads to choose a point, and the
+    /// Restore reconciler and the runner re-verify before any data-plane work.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backup_verdicts_incomplete: Option<BackupVerdictsIncomplete>,
 }
 
-/// The reached refusals among the namespace's `Backup`s, and whether the
-/// bounded listing was cut short.
+/// Why the `Backup` verdict join of one point page is incomplete.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub enum BackupVerdictsIncomplete {
+    /// More `Backup`s than one request reads.
+    Truncated,
+    /// The list failed, or a refusal could be tied to no row.
+    Unavailable,
+}
+
+/// The reached refusals among the namespace's `Backup`s, and why the join is
+/// incomplete when it is.
+///
+/// NEVER AN ERROR. Every `Backup` is read through the lenient
+/// [`BackupVerdictFacts`] projection, so one object this build cannot type
+/// refuses at most its own point (`backupVerdict: "Unreadable"` when its
+/// verdict field is unreadable) instead of failing the page, and a list
+/// failure — on the first page or a later one — keeps what was read and says
+/// `Unavailable`.
 async fn backup_refusals(
     state: &AppState,
     ns: &str,
-) -> Result<(ControllerRefusals, bool), ApiError> {
-    let mut backups: Vec<BackupCr> = Vec::new();
+) -> (ControllerRefusals, Option<BackupVerdictsIncomplete>) {
+    let mut facts: Vec<BackupVerdictFacts> = Vec::new();
     let mut continue_token: Option<String> = None;
+    let mut incomplete = Some(BackupVerdictsIncomplete::Truncated);
     for _ in 0..MAX_BACKUP_SCAN_PAGES {
         let page = PageRequest {
             limit: BACKUP_SCAN_PAGE,
             continue_token: continue_token.take(),
             label_selector: None,
         };
-        let list = state
-            .kube()
-            .list::<BackupCr>(ns, &page)
-            .await
-            .map_err(KubeFailure::into_api_error)?;
+        let list = match state.kube().list_untyped::<BackupCr>(ns, &page).await {
+            Ok(list) => list,
+            Err(failure) => {
+                tracing::warn!(
+                    namespace = %ns,
+                    failure = ?failure,
+                    "the Backup verdicts could not be listed; the point page is served with \
+                     backupVerdictsIncomplete: Unavailable"
+                );
+                incomplete = Some(BackupVerdictsIncomplete::Unavailable);
+                break;
+            }
+        };
         continue_token = list.metadata.continue_.filter(|t| !t.is_empty());
-        backups.extend(list.items);
+        facts.extend(
+            list.items
+                .iter()
+                .map(|o| BackupVerdictFacts::from_json(&o.data)),
+        );
         if continue_token.is_none() {
-            return Ok((ControllerRefusals::from_backups(&backups), false));
+            incomplete = None;
+            break;
         }
     }
-    Ok((ControllerRefusals::from_backups(&backups), true))
+    let refusals = ControllerRefusals::from_facts(facts);
+    if incomplete.is_none() && refusals.unattributed() > 0 {
+        incomplete = Some(BackupVerdictsIncomplete::Unavailable);
+    }
+    (refusals, incomplete)
 }
 
 /// The signer panel.
@@ -1031,7 +1072,7 @@ pub async fn points(
     // THE CONTROLLER'S OWN VERDICTS, before any row is published as
     // selectable: the catalog decides only where the controller could not
     // look (`weirkeeper::catalog_view::ControllerRefusals`).
-    let (refusals, backup_verdicts_truncated) = backup_refusals(&state, &ns).await?;
+    let (refusals, backup_verdicts_incomplete) = backup_refusals(&state, &ns).await;
 
     let mut items: Vec<PointView> = Vec::new();
     let mut scanned = 0usize;
@@ -1101,7 +1142,7 @@ pub async fn points(
             view_expired: projected.view_expired,
             incomplete: incomplete.then_some(true),
             view_expires_at: projected.view_expires_at,
-            backup_verdicts_truncated,
+            backup_verdicts_incomplete,
         },
     ))
 }

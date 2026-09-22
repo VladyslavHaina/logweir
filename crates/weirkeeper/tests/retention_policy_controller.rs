@@ -5530,7 +5530,8 @@ fn a_point_the_controller_refused_never_makes_an_older_good_point_a_candidate() 
     // CONTROL: the honest "could not look" defers to the same row, and the
     // rule then plans p3 exactly as before — which is what makes the row above
     // a measurement and not a constant.
-    for result in ["NotAttempted", "Valid"] {
+    // `Pending` is the evidence-fetch Job still reading: not a verdict.
+    for result in ["NotAttempted", "Pending", "Valid"] {
         let refusals =
             weirkeeper::catalog_view::ControllerRefusals::from_backups(&backup_objects(vec![
                 verdict_backup("b-p1", "set-p1", Some(&receipt_digest("p1")), result),
@@ -5643,16 +5644,26 @@ async fn an_incomplete_backup_listing_plans_nothing() {
     let f = fixture(routes);
     let outcome = run(&f, &policy(json!({}), json!({}))).await;
 
-    assert_eq!(outcome.ready_reason, ctrl::REASON_CATALOG_UNUSABLE);
+    // REVIEW L2: the operator is sent to the Backup history, not the catalog.
+    assert_eq!(outcome.ready_reason, ctrl::REASON_BACKUP_HISTORY_TOO_LARGE);
     assert_eq!(outcome.candidates, 0);
     assert_eq!(
-        f.condition(ctrl::CONDITION_EVALUATED)["reason"],
-        ctrl::REASON_VIEW_UNREADABLE
+        f.condition(ctrl::CONDITION_READY)["reason"],
+        ctrl::REASON_BACKUP_HISTORY_TOO_LARGE
     );
-    assert!(f.condition(ctrl::CONDITION_EVALUATED)["message"]
+    assert_eq!(
+        f.condition(ctrl::CONDITION_EVALUATED)["reason"],
+        ctrl::REASON_BACKUP_VERDICTS_INCOMPLETE
+    );
+    let message = f.condition(ctrl::CONDITION_READY)["message"]
         .as_str()
         .expect("a message")
-        .contains("Backups"));
+        .to_string();
+    assert!(message.contains("Backup objects") && message.contains("Backup history"));
+    assert!(f.condition(ctrl::CONDITION_ENFORCED)["message"]
+        .as_str()
+        .expect("a message")
+        .contains("Backup verdicts"));
     assert!(
         f.status()["lastEvaluation"].is_null(),
         "no evaluation is published from an incomplete listing"
@@ -5663,4 +5674,150 @@ async fn an_incomplete_backup_listing_plans_nothing() {
         .filter(|(m, uri)| m == "GET" && uri.contains("/backups"))
         .count();
     assert_eq!(pages, ctrl::MAX_BACKUP_PAGES, "the walk is bounded");
+}
+
+// ---- review M1: the Backup read is lenient, and its failures are published --
+
+fn routes_with_backups(body: String, status: u16) -> Vec<Route> {
+    let entries: Vec<Value> = (1..=6)
+        .map(|d| view_entry_for_receipt(&format!("p{d}"), d))
+        .collect();
+    let mut routes = happy_routes(&entries);
+    routes.retain(|r| r.path_suffix != "/backups");
+    let mut backups = route("GET", "/backups", body);
+    backups.status = status;
+    routes.push(backups);
+    routes
+}
+
+/// ONE `Backup` this build cannot type (a trigger kind a newer build wrote, and
+/// one with no `spec` at all) does not wedge the evaluation, and the refusal on
+/// another `Backup` still applies: the same plan as
+/// `the_controller_joins_backup_verdicts_before_it_counts_a_row`.
+///
+/// MUTANT: list typed `Backup`s again. The reconcile errors and this row fails.
+#[tokio::test]
+async fn a_malformed_backup_neither_wedges_retention_nor_hides_a_refusal() {
+    let mut future = verdict_backup("b-future", "set-x", Some(&receipt_digest("x")), "Valid");
+    // `spec.trigger.kind` is a CLOSED enum in this build (`TriggerKind`).
+    future["spec"]["trigger"] = json!({"kind": "SomeFutureTriggerKind", "attempt": 0});
+    let bare = json!({
+        "apiVersion": "logweir.dev/v1alpha1", "kind": "Backup",
+        "metadata": {"name": "b-bare", "namespace": NS, "resourceVersion": "3"},
+        "status": {"phase": "Running"}
+    });
+    let f = fixture(routes_with_backups(
+        backup_list_body(
+            vec![
+                future,
+                bare,
+                verdict_backup("b-p1", "set-p1", Some(&receipt_digest("p1")), "Invalid"),
+            ],
+            None,
+        ),
+        200,
+    ));
+    let outcome = run(&f, &policy(json!({}), json!({}))).await;
+    assert_eq!(outcome.phase, ctrl::RetentionPhase::Evaluated);
+    assert_eq!(outcome.candidates, 2, "p5 and p6 only");
+    assert_eq!(
+        f.status()["lastEvaluation"]["skipped"],
+        json!([{"pointId": "p1", "reason": "Unreadable"}])
+    );
+}
+
+/// A verdict field that is present but not a verdict word refuses its point.
+///
+/// MUTANT: read an unreadable verdict as absent in
+/// `ControllerRefusals::from_facts`. p1 counts again and p4 is planned.
+#[tokio::test]
+async fn an_unreadable_backup_verdict_refuses_its_point() {
+    let mut odd = verdict_backup("b-p1", "set-p1", Some(&receipt_digest("p1")), "Invalid");
+    odd["status"]["evidence"]["verification"] = json!("not-an-object");
+    let f = fixture(routes_with_backups(backup_list_body(vec![odd], None), 200));
+    let outcome = run(&f, &policy(json!({}), json!({}))).await;
+    assert_eq!(outcome.phase, ctrl::RetentionPhase::Evaluated);
+    assert_eq!(outcome.candidates, 2);
+    assert_eq!(
+        f.status()["lastEvaluation"]["skipped"],
+        json!([{"pointId": "p1", "reason": "Unreadable"}])
+    );
+}
+
+/// A failed `Backup` LIST is an answer on the object — `Evaluated=False` with
+/// its own reason, nothing planned — not a silent error-requeue loop.
+///
+/// MUTANT: propagate the list error (`?`) again. `reconcile_policy` returns
+/// `Err` and this row fails at `run`.
+#[tokio::test]
+async fn a_failed_backup_list_is_published_and_plans_nothing() {
+    let forbidden = json!({
+        "kind": "Status", "apiVersion": "v1", "status": "Failure",
+        "message": "backups is forbidden", "reason": "Forbidden", "code": 403
+    })
+    .to_string();
+    let f = fixture(routes_with_backups(forbidden, 403));
+    let outcome = run(&f, &policy(json!({}), json!({}))).await;
+    assert_eq!(
+        outcome.ready_reason,
+        ctrl::REASON_BACKUP_VERDICTS_UNREADABLE
+    );
+    assert_eq!(outcome.candidates, 0);
+    assert_eq!(
+        f.condition(ctrl::CONDITION_EVALUATED)["reason"],
+        ctrl::REASON_BACKUP_VERDICTS_INCOMPLETE
+    );
+    assert!(f.condition(ctrl::CONDITION_READY)["message"]
+        .as_str()
+        .expect("a message")
+        .contains("could not be listed"));
+    assert!(f.status()["lastEvaluation"].is_null());
+}
+
+/// A refusal that names neither a digest nor a set id cannot be tied to any
+/// point, so retention cannot prove it spares the one that matters: nothing is
+/// planned, and the object says why.
+///
+/// MUTANT: ignore `unattributed()` in `controller_refusals`. The pass
+/// evaluates and publishes a plan; this row fails.
+#[tokio::test]
+async fn an_unattributable_refusal_plans_nothing() {
+    let mut anonymous = verdict_backup("b-anon", "", None, "Invalid");
+    anonymous["status"]
+        .as_object_mut()
+        .expect("status")
+        .remove("backupId");
+    let f = fixture(routes_with_backups(
+        backup_list_body(vec![anonymous], None),
+        200,
+    ));
+    let outcome = run(&f, &policy(json!({}), json!({}))).await;
+    assert_eq!(
+        outcome.ready_reason,
+        ctrl::REASON_BACKUP_VERDICTS_UNREADABLE
+    );
+    assert_eq!(outcome.candidates, 0);
+    assert!(f.status()["lastEvaluation"].is_null());
+}
+
+/// Review L3: a SKIPPED point is retained, so a segment it shares with a
+/// candidate protects that candidate (`SharedSegment`) — a refused point never
+/// loses a segment through another point's deletion.
+///
+/// MUTANT: build `retained_segments` from the usable verdicts only. The
+/// candidate is planned and this row fails.
+#[test]
+fn a_skipped_points_segments_protect_a_candidate_that_shares_them() {
+    let mut points: Vec<plan::PointFacts> = (1..=3).map(|d| point(&format!("p{d}"), d)).collect();
+    // p1 is refused by the controller; p3 would be BeyondKeepLast.
+    points[0].refused_by_controller = true;
+    points[0].segment_keys = vec![format!("{SCOPE}/shared/seg-0001")];
+    points[2].segment_keys = vec![format!("{SCOPE}/shared/seg-0001")];
+    let evaluation = evaluate(&points, rules(Some(1), None, 1));
+    assert!(
+        candidate_ids(&evaluation).is_empty(),
+        "p3 shares a segment with the retained, skipped p1: {:?}",
+        candidate_ids(&evaluation)
+    );
+    assert_eq!(protected_reason(&evaluation, "p3"), Some("SharedSegment"));
 }

@@ -555,10 +555,22 @@ pub fn evaluate(input: &Input<'_>) -> Evaluation {
     //    manifest protects the candidate that shares it: v1 never partially
     //    deletes a shared set. Computed after the first pass, because
     //    "retained" is exactly "not a candidate after the rules".
+    //
+    //    A SKIPPED point is retained too — it is never a candidate — so its
+    //    segments protect a candidate that shares them (review L3). Otherwise
+    //    a point the catalog or the controller refused could lose a shared
+    //    segment through another point's deletion: a partial deletion of a
+    //    point this module promises neither to count nor to delete.
     let retained_segments: BTreeSet<&str> = verdicts
         .iter()
         .filter(|(_, v)| !matches!(v, Verdict::Candidate(_)))
-        .flat_map(|(l, _)| l.point.segment_keys.iter().map(String::as_str))
+        .map(|(l, _)| l.point)
+        .chain(
+            here.iter()
+                .map(|l| l.point)
+                .filter(|p| skip_reason(p).is_some()),
+        )
+        .flat_map(|p| p.segment_keys.iter().map(String::as_str))
         .collect();
     for (located, verdict) in &mut verdicts {
         if matches!(verdict, Verdict::Candidate(_))

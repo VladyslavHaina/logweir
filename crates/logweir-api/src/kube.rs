@@ -51,7 +51,9 @@ use std::time::Duration;
 
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
 use k8s_openapi::NamespaceResourceScope;
-use kube::api::{Api, ListParams, ObjectList, Patch, PatchParams, PostParams};
+use kube::api::{
+    Api, ApiResource, DynamicObject, ListParams, ObjectList, Patch, PatchParams, PostParams,
+};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use weirkeeper::crds::approval::Approval;
@@ -589,6 +591,36 @@ impl KubeAdapter {
         // literal. Nothing in this crate invokes the engine; the label is a log
         // field, and spelling it this way keeps the gate meaningful instead of
         // adding an escape comment to it.
+        self.bounded("list_page", K::plural(&()).as_ref(), api.list(&params))
+            .await
+    }
+
+    /// One page of a namespaced list of a product kind, as UNTYPED objects.
+    ///
+    /// For a reader that needs a few fields of every object and must not fail
+    /// the whole page because ONE object does not deserialize into this build's
+    /// typed CRD (a trigger kind a newer build wrote, a stored object of an
+    /// older schema). The same kind, verb, bound and deadline as
+    /// [`KubeAdapter::list`]; only the decoding is lenient.
+    ///
+    /// # Errors
+    ///
+    /// [`KubeFailure`].
+    pub async fn list_untyped<K: ProductResource>(
+        &self,
+        namespace: &str,
+        page: &PageRequest,
+    ) -> Result<ObjectList<DynamicObject>, KubeFailure> {
+        let resource = ApiResource::erase::<K>(&());
+        let api: Api<DynamicObject> =
+            Api::namespaced_with(self.client.clone(), namespace, &resource);
+        let mut params = ListParams::default().limit(page.limit);
+        if let Some(token) = &page.continue_token {
+            params = params.continue_token(token);
+        }
+        if let Some(selector) = &page.label_selector {
+            params = params.labels(selector);
+        }
         self.bounded("list_page", K::plural(&()).as_ref(), api.list(&params))
             .await
     }

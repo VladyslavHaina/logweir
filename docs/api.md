@@ -352,12 +352,28 @@ whose `Backup` the controller refused (`Invalid`, `Untrusted`, or a result this
 build does not recognise) is published `selectable: false` with that result in
 the additive `backupVerdict` field, and `?selectable=true` does not list it —
 however `Available`/`Verified` its row reads, because a view is served until
-`viewExpiresAt` and the row may predate the refusal. `NotAttempted`, an absent
-result and `Valid` leave the row in charge; `backupVerdict` is absent then, and
-absent never means "verified". When the namespace holds more `Backup`s than the
-bound, the page carries `backupVerdictsTruncated: true` and a refusal beyond it
-is not reflected. Both fields are optional additions: a client that ignores
-them still reads the corrected `selectable`.
+`viewExpiresAt` and the row may predate the refusal. `NotAttempted`, `Pending`
+(the evidence fetch is still running), an absent result and `Valid` leave the
+row in charge; `backupVerdict` is absent then, and absent never means
+"verified".
+
+**The join degrades per object, never per page.** `Backup` objects are read
+through a lenient projection of the three fields the rule needs, so one object
+this build cannot type (a newer trigger kind, an older stored schema) does not
+fail the list. A `Backup` whose verdict field is present but unreadable refuses
+its own point with `backupVerdict: "Unreadable"`. When the verdicts could not
+all be read the page is still served and carries the additive
+`backupVerdictsIncomplete`: `Truncated` when the namespace holds more `Backup`s
+than the bound, `Unavailable` when the `Backup` list failed (transport, RBAC, a
+missing CRD) or a refusal named neither a digest nor a set id and so could be
+tied to no row. Rows then reflect only the verdicts that were read. The page is
+served either way because the point list is what an operator reads to choose a
+point; the Restore reconciler and the runner re-verify the point before any
+data-plane work. Both fields are optional additions: a client that ignores
+them still reads the corrected `selectable`. The `?selectable=true` cursor is
+bound to the view generation and not to the refusal set, so a refusal recorded
+between two page requests can shift that filtered list by one point; restart
+the list to see it exactly.
 
 **`/signers` offers no button.** It publishes the key id, the point count and
 whether the bound policy accepts it, with the fingerprint command. There is no

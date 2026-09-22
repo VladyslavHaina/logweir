@@ -1977,12 +1977,27 @@ build does not recognise) is skipped with reason `Unreadable` however
 `Available`/`Verified` its row reads: a view is served until `viewExpiresAt`,
 so the row may predate the refusal, and counted as usable it would take a
 `keepLast` or `minUsablePoints` rank and push an older good point into the plan.
-`NotAttempted`, an absent result and `Valid` leave the row in charge, and a
-point no `Backup` in the namespace names is evaluated exactly as before. The
-listing follows at most 20 pages of 500; a namespace holding more `Backup`s is
-`Evaluated=False/ViewUnreadable` and plans nothing — prune the Backup history —
-because the refusal the walk did not reach is the one that would have mattered.
-`Backup`s in other namespaces writing to the same archive are not consulted.
+`NotAttempted`, `Pending` (the evidence fetch is still running), an absent
+result and `Valid` leave the row in charge, and a point no `Backup` in the
+namespace names is evaluated exactly as before. `Backup` objects are read
+through a lenient projection of the three fields the rule needs: an object this
+build cannot type does not stop the evaluation, and one whose verdict field is
+present but unreadable refuses its own point like an unknown verdict. The
+evaluation stays fail-closed where the join cannot be completed, and says so on
+the object rather than retrying silently — `Evaluated=False`, reason
+`BackupVerdictsIncomplete`, nothing planned, `Enforced=False` "nothing is
+removed while the controller's Backup verdicts cannot all be read", with
+`Ready=False` naming the cause:
+
+| `Ready` reason | cause | remedy |
+|---|---|---|
+| `BackupHistoryTooLarge` | the namespace holds more than 10 000 `Backup`s (20 pages of 500) | prune the Backup history (PLAT-05.2); the catalog view is fine |
+| `BackupVerdictsUnreadable` | the `Backup` list failed, or a refused/unreadable `Backup` names neither `receiptSha256` nor `backupId` | restore the controller's `list` on `backups`, or repair/remove the named objects |
+
+The refusal the walk did not reach is exactly the one that would have enlarged
+the plan. `Backup`s in other namespaces writing to the same archive are not
+consulted. A point the evaluation skips is retained, so a segment it shares
+with a candidate protects that candidate as `SharedSegment`.
 
 And the newest `minUsablePoints` usable
 points are kept whatever the rules say, reported as `MinUsablePoints` in
@@ -2109,15 +2124,20 @@ sorting placeholder and never makes that candidate selectable. Because
 the row's full `receiptSha256` to equal the Backup's captured digest; a colliding
 prefix cannot supply facts for another receipt. The catalog decides only where
 the controller could not look: when the Backup's own verification result is
-`NotAttempted` or absent (or `Valid`, which the catalog may still narrow). A
+`NotAttempted`, `Pending` or absent (or `Valid`, which the catalog may still
+narrow). A
 verdict the controller reached and refused — `Invalid`, `Untrusted`, or a result
 this build does not recognise — is never made selectable by a catalog row, which
 may have been harvested before the receipt was replaced or its signer revoked.
 The same holds for a catalog-only candidate — a row no `Backup` of the
 schedule's `scheduleRefs` names, which is all a `catalogRef`-only schedule sees:
-the controller lists the namespace's `Backup`s (one page of 500) for either
-kind of source, and a row whose receipt any listed `Backup` refused is never
-selectable. The catalog also decides selectability only together with a representable,
+the controller walks every page of the namespace's `Backup`s (up to 20 pages of
+500, read leniently so one object this build cannot type is simply no
+candidate) for either kind of source, and a row whose receipt any listed
+`Backup` refused is never selectable. A walk the bound cuts short admits no
+catalog-only row at all, and the `NoQualifyingPoint` skip names the Backup
+history as the reason. Of the schedule's own Backups the newest 200 by
+recovery point are candidates, so a long history never hides the newest run. The catalog also decides selectability only together with a representable,
 positive `recoveryPointAtMs`; a row without one leaves the candidate
 non-selectable. The protection policy applies the same rule, and reads an
 unrecognised verification result as `Untrusted`, never as `NotAttempted`. This

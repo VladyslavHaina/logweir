@@ -121,6 +121,12 @@ pub const REASON_DESTINATION_UNUSABLE: &str = "DestinationUnusable";
 /// `Ready=False`: the named catalog does not exist, or covers another
 /// destination.
 pub const REASON_CATALOG_UNUSABLE: &str = "CatalogUnusable";
+/// `Ready=False`: the namespace holds more `Backup`s than one evaluation reads,
+/// so the controller's own verdicts cannot all be joined and nothing is planned.
+pub const REASON_BACKUP_HISTORY_TOO_LARGE: &str = "BackupHistoryTooLarge";
+/// `Ready=False`: the `Backup` list failed, or a refused `Backup` names no
+/// receipt digest and no set id and so could be tied to no point.
+pub const REASON_BACKUP_VERDICTS_UNREADABLE: &str = "BackupVerdictsUnreadable";
 /// `Ready=False`: `ExternalLifecycle` combined with guarantees no provider rule
 /// can make.
 pub const REASON_UNSUPPORTED_COMBINATION: &str = "UnsupportedCombination";
@@ -131,6 +137,10 @@ pub const REASON_EVALUATION_COMPLETE: &str = "EvaluationComplete";
 pub const REASON_VIEW_UNREADABLE: &str = "ViewUnreadable";
 /// `Evaluated=Unknown`: nothing has been evaluated yet.
 pub const REASON_NEVER_EVALUATED: &str = "NeverEvaluated";
+/// `Evaluated=False`: the controller's own `Backup` verdicts could not all be
+/// read — [`REASON_BACKUP_HISTORY_TOO_LARGE`] or
+/// [`REASON_BACKUP_VERDICTS_UNREADABLE`] says why — so nothing is planned.
+pub const REASON_BACKUP_VERDICTS_INCOMPLETE: &str = "BackupVerdictsIncomplete";
 /// `Evaluated=False`: the plan could not be rendered — a key escaped the scope.
 pub const REASON_PLAN_REFUSED: &str = "PlanRefused";
 
@@ -1273,7 +1283,7 @@ impl Pass<'_> {
         // deletion.
         let refusals = match self.controller_refusals().await? {
             Ok(refusals) => refusals,
-            Err(message) => return self.publish_view_failure(&message).await,
+            Err((reason, message)) => return self.publish_verdicts_failure(reason, &message).await,
         };
         let points: Vec<PointFacts> = entries.iter().map(|e| point_facts(e, &refusals)).collect();
         let protection = self.protection_set(&location_id, &points).await?;
@@ -1473,35 +1483,84 @@ impl Pass<'_> {
     /// The reached refusals among this namespace's `Backup`s —
     /// [`view::ControllerRefusals`].
     ///
-    /// Bounded by [`MAX_BACKUP_PAGES`] pages of [`BACKUP_PAGE_LIMIT`].
-    /// `Ok(Err(message))` is a listing the bound cut short, which the caller
-    /// publishes as `Evaluated=False`: the refusal it did not see is exactly
-    /// the one that would have mattered.
+    /// Read through the LENIENT [`view::BackupVerdictFacts`] projection of an
+    /// untyped list: one `Backup` this build cannot type refuses at most its
+    /// own point (an unreadable verdict is a refusal) and never wedges the
+    /// evaluation. Bounded by [`MAX_BACKUP_PAGES`] pages of
+    /// [`BACKUP_PAGE_LIMIT`].
+    ///
+    /// `Ok(Err((ready_reason, message)))` is a join that could not be
+    /// completed — the bound, a list failure, or a refusal tied to no point —
+    /// which the caller PUBLISHES as `Evaluated=False` and plans nothing on:
+    /// retention is the deletion authority, and the refusal it did not see is
+    /// exactly the one that would have enlarged the plan. A list failure is an
+    /// answer on the object, not a silent error-requeue loop.
+    #[allow(clippy::type_complexity)]
     async fn controller_refusals(
         &self,
-    ) -> Result<Result<view::ControllerRefusals, String>, ReconcileError> {
-        let api: Api<Backup> = Api::namespaced(self.ctx.client.clone(), &self.namespace);
-        let mut backups: Vec<Backup> = Vec::new();
+    ) -> Result<Result<view::ControllerRefusals, (&'static str, String)>, ReconcileError> {
+        let resource = kube::api::ApiResource::erase::<Backup>(&());
+        let api: Api<kube::api::DynamicObject> =
+            Api::namespaced_with(self.ctx.client.clone(), &self.namespace, &resource);
+        let mut facts: Vec<view::BackupVerdictFacts> = Vec::new();
         let mut token: Option<String> = None;
         for _ in 0..MAX_BACKUP_PAGES {
             let mut params = ListParams::default().limit(BACKUP_PAGE_LIMIT);
             if let Some(cursor) = token.as_deref() {
                 params = params.continue_token(cursor);
             }
-            let page = api.list(&params).await?;
+            let page = match api.list(&params).await {
+                Ok(page) => page,
+                Err(e) => {
+                    warn!(
+                        policy = %self.name, namespace = %self.namespace, error = %e,
+                        "the Backup verdicts could not be listed; nothing is planned"
+                    );
+                    return Ok(Err((
+                        REASON_BACKUP_VERDICTS_UNREADABLE,
+                        format!(
+                            "the Backup objects in namespace {} could not be listed ({e}); \
+                             retention cannot establish that the controller refused none of \
+                             the points it would count as usable, so it plans nothing",
+                            self.namespace
+                        ),
+                    )));
+                }
+            };
             token = page.metadata.continue_.clone().filter(|t| !t.is_empty());
-            backups.extend(page.items);
+            facts.extend(
+                page.items
+                    .iter()
+                    .map(|o| view::BackupVerdictFacts::from_json(&o.data)),
+            );
             if token.is_none() {
-                return Ok(Ok(view::ControllerRefusals::from_backups(&backups)));
+                let refusals = view::ControllerRefusals::from_facts(facts);
+                if refusals.unattributed() > 0 {
+                    return Ok(Err((
+                        REASON_BACKUP_VERDICTS_UNREADABLE,
+                        format!(
+                            "{} Backup object(s) in namespace {} carry a refused or unreadable \
+                             evidence verdict and name neither status.evidence.receiptSha256 \
+                             nor status.backupId, so the refusal cannot be tied to a point; \
+                             retention plans nothing until they are repaired or removed",
+                            refusals.unattributed(),
+                            self.namespace
+                        ),
+                    )));
+                }
+                return Ok(Ok(refusals));
             }
         }
-        Ok(Err(format!(
-            "namespace {} holds more than {} Backups, the most one evaluation reads; retention \
-             cannot establish that the controller refused none of the points it would count as \
-             usable, so it plans nothing. Prune the Backup history (PLAT-05.2) and retention \
-             evaluates again.",
-            self.namespace,
-            MAX_BACKUP_PAGES * BACKUP_PAGE_LIMIT as usize
+        Ok(Err((
+            REASON_BACKUP_HISTORY_TOO_LARGE,
+            format!(
+                "namespace {} holds more than {} Backup objects, the most one evaluation reads; \
+                 retention cannot establish that the controller refused none of the points it \
+                 would count as usable, so it plans nothing. The catalog view is fine: prune \
+                 the Backup history (PLAT-05.2) and retention evaluates again.",
+                self.namespace,
+                MAX_BACKUP_PAGES * BACKUP_PAGE_LIMIT as usize
+            ),
         )))
     }
 
@@ -2764,6 +2823,39 @@ impl Pass<'_> {
             enforced_reason: REASON_RECOMMENDATION_ONLY,
             ..refused(REASON_CATALOG_UNUSABLE)
         })
+    }
+
+    /// The controller's own `Backup` verdicts could not all be read. NOT a
+    /// catalog failure, so it does not say one (review L2): `Ready` names the
+    /// Backup side, `Evaluated` has its own reason, and nothing is planned.
+    async fn publish_verdicts_failure(
+        &self,
+        ready_reason: &'static str,
+        message: &str,
+    ) -> Result<Outcome, ReconcileError> {
+        let conditions = self.conditions(&[
+            (CONDITION_READY, "False", ready_reason, message.to_string()),
+            (
+                CONDITION_EVALUATED,
+                "False",
+                REASON_BACKUP_VERDICTS_INCOMPLETE,
+                message.to_string(),
+            ),
+            (
+                CONDITION_ENFORCED,
+                "False",
+                REASON_RECOMMENDATION_ONLY,
+                "nothing is removed while the controller's Backup verdicts cannot all be read"
+                    .to_string(),
+            ),
+        ]);
+        let mut status = json!({
+            "enforcement": ENFORCEMENT_RECOMMENDATION_ONLY,
+            "conditions": conditions,
+        });
+        self.adopt_generation(&mut status);
+        self.patch_status(status).await?;
+        Ok(refused(ready_reason))
     }
 
     async fn publish_plan_refusal(&self, message: &str) -> Result<Outcome, ReconcileError> {

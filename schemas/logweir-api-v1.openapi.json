@@ -5396,6 +5396,25 @@
         },
         "additionalProperties": false
       },
+      "BackupVerdictsIncomplete": {
+        "description": "Why the `Backup` verdict join of one point page is incomplete.",
+        "oneOf": [
+          {
+            "description": "More `Backup`s than one request reads.",
+            "type": "string",
+            "enum": [
+              "Truncated"
+            ]
+          },
+          {
+            "description": "The list failed, or a refusal could be tied to no row.",
+            "type": "string",
+            "enum": [
+              "Unavailable"
+            ]
+          }
+        ]
+      },
       "CaBundleRequest": {
         "description": "A CA bundle in a `ConfigMap` in this namespace. A `ConfigMap` and never a Secret: a CA certificate is public material.",
         "type": "object",
@@ -9386,9 +9405,10 @@
           "viewExpired"
         ],
         "properties": {
-          "backupVerdictsTruncated": {
-            "description": "`true` when the namespace holds more `Backup`s than one request reads (2 000), so a refusal on a `Backup` beyond that bound is not reflected in `selectable` or `backupVerdict`. Absent means the listing was complete.",
-            "type": "boolean"
+          "backupVerdictsIncomplete": {
+            "description": "Present when the controller's `Backup` verdicts could not ALL be read, so `selectable` and `backupVerdict` reflect only the ones that were — for the rest, the catalog row alone. `Truncated`: the namespace holds more `Backup`s than one request reads (2 000). `Unavailable`: the `Backup` list failed (transport, RBAC, a missing CRD), or a refusal named no receipt digest and no set id and so could be tied to no row. Absent means every `Backup` was read. The page is served either way: the point list is what an operator reads to choose a point, and the Restore reconciler and the runner re-verify before any data-plane work.",
+            "$ref": "#/components/schemas/BackupVerdictsIncomplete",
+            "nullable": true
           },
           "incomplete": {
             "description": "Whether a ConfigMap page named by this view disappeared while it was being read. Present only for the incomplete read so older clients keep their established `false` behavior when the member is absent.",
@@ -9493,7 +9513,7 @@
             "type": "string"
           },
           "backupVerdict": {
-            "description": "The verification result the controller recorded on this point's OWN `Backup` — `Invalid`, `Untrusted`, or a result this build does not recognise — present ONLY when it is such a reached refusal.\n\nThis is why a row can read `Available`/`Verified` and still be `selectable: false`: the view is served until `viewExpiresAt`, so the row may have been harvested before the receipt was replaced or its signer revoked. Absent means no `Backup` this request read refused the point — never that one verified it.",
+            "description": "The verification result the controller recorded on this point's OWN `Backup` — `Invalid`, `Untrusted`, or a result this build does not recognise — present ONLY when it is such a reached refusal. It is `Unreadable` when the `Backup`'s verdict field is present but is not a verdict this build can read: an unreadable verdict refuses like an unknown one.\n\nThis is why a row can read `Available`/`Verified` and still be `selectable: false`: the view is served until `viewExpiresAt`, so the row may have been harvested before the receipt was replaced or its signer revoked. Absent means no `Backup` this request read refused the point — never that one verified it.",
             "type": "string",
             "nullable": true
           },

@@ -1479,7 +1479,7 @@ async fn a_point_the_controller_refused_is_never_listed_as_selectable() {
             assert_eq!(other["selectable"], true);
             assert!(other.get("backupVerdict").is_none());
         }
-        assert!(v.get("backupVerdictsTruncated").is_none());
+        assert!(v.get("backupVerdictsIncomplete").is_none());
 
         let selectable = app
             .get("/api/v1/namespaces/team-a/catalogs/primary/points?selectable=true")
@@ -1505,7 +1505,8 @@ async fn a_point_the_controller_refused_is_never_listed_as_selectable() {
 /// point with a `Backup` unselectable.
 #[tokio::test]
 async fn a_not_attempted_or_valid_backup_leaves_the_catalog_in_charge() {
-    for result in ["NotAttempted", "Valid"] {
+    // `Pending` (evidence-fetch still reading) is not a verdict either.
+    for result in ["NotAttempted", "Pending", "Valid"] {
         let (app, lines) = catalog_with_page(None);
         app.fake.seed(
             "backups",
@@ -1546,5 +1547,135 @@ async fn a_backup_listing_past_its_bound_is_published_as_truncated() {
         .get("/api/v1/namespaces/team-a/catalogs/primary/points")
         .await
         .json();
-    assert_eq!(v["backupVerdictsTruncated"], true);
+    assert_eq!(v["backupVerdictsIncomplete"], "Truncated");
+}
+
+// ---- review M1: the join degrades per object, never per page -------------
+
+/// ONE `Backup` this build cannot type — a trigger kind a newer build wrote,
+/// and no `spec` at all — does not blank the point list, and the refusal on
+/// another `Backup` is still applied.
+///
+/// MUTANT: read the Backups through the TYPED list again. The page is a 503
+/// and this row fails.
+#[tokio::test]
+async fn one_malformed_backup_never_fails_the_point_page() {
+    let (app, lines) = catalog_with_page(None);
+    let refused = receipt_of(&lines[0]);
+    app.fake.seed(
+        "backups",
+        NS_A,
+        verdict_backup("b-refused", &refused, "Invalid"),
+    );
+    let mut future = verdict_backup("b-future", "sha256:not-in-this-view", "Valid");
+    // `spec.trigger.kind` is a CLOSED enum in this build (`TriggerKind`).
+    future["spec"]["trigger"] = json!({"kind": "SomeFutureTriggerKind", "attempt": 0});
+    app.fake.seed("backups", NS_A, future);
+    app.fake.seed(
+        "backups",
+        NS_A,
+        json!({"metadata": {"name": "b-bare"}, "status": {"phase": "Running"}}),
+    );
+    let body = app
+        .get("/api/v1/namespaces/team-a/catalogs/primary/points")
+        .await;
+    assert_eq!(body.status.as_u16(), 200, "{}", body.text());
+    let v = body.json();
+    let items = v["items"].as_array().expect("items");
+    assert_eq!(items.len(), lines.len());
+    assert_eq!(items[0]["backupVerdict"], "Invalid");
+    assert_eq!(items[0]["selectable"], false);
+    assert!(items[1..].iter().all(|i| i["selectable"] == true));
+    assert!(v.get("backupVerdictsIncomplete").is_none());
+    app.fake.assert_strict();
+}
+
+/// A verdict field that is PRESENT but is not a verdict word refuses its own
+/// point, as `Unreadable` — an unreadable verdict is not "no verdict".
+///
+/// MUTANT: read an unreadable verdict as absent in
+/// `catalog_view::ControllerRefusals::from_facts`. Row 0 stays selectable and
+/// this row fails.
+#[tokio::test]
+async fn an_unreadable_verdict_refuses_only_its_own_point() {
+    let (app, lines) = catalog_with_page(None);
+    let mut odd = verdict_backup("b-odd", &receipt_of(&lines[0]), "Invalid");
+    odd["status"]["evidence"]["verification"]["result"] = json!(42);
+    app.fake.seed("backups", NS_A, odd);
+    let v = app
+        .get("/api/v1/namespaces/team-a/catalogs/primary/points")
+        .await
+        .json();
+    let items = v["items"].as_array().expect("items");
+    assert_eq!(items[0]["backupVerdict"], "Unreadable");
+    assert_eq!(items[0]["selectable"], false);
+    assert!(items[1..]
+        .iter()
+        .all(|i| i["selectable"] == true && i.get("backupVerdict").is_none()));
+    assert!(v.get("backupVerdictsIncomplete").is_none());
+}
+
+/// A failed `Backup` LIST serves the page: the rows keep the catalog's own
+/// `selectable`, and the page says the join did not happen.
+///
+/// MUTANT: propagate the list failure (`?`) again. The page is a 403 problem
+/// and this row fails.
+#[tokio::test]
+async fn a_failed_backup_list_serves_the_page_and_says_so() {
+    let (app, lines) = catalog_with_page(None);
+    app.fake.seed(
+        "backups",
+        NS_A,
+        verdict_backup("b-refused", &receipt_of(&lines[0]), "Invalid"),
+    );
+    app.fake.inject(support::Fault {
+        method: "GET",
+        path_contains: "/namespaces/team-a/backups".to_string(),
+        status: 403,
+        reason: "Forbidden",
+        delay: None,
+        remaining: 1,
+    });
+    let body = app
+        .get("/api/v1/namespaces/team-a/catalogs/primary/points")
+        .await;
+    assert_eq!(body.status.as_u16(), 200, "{}", body.text());
+    let v = body.json();
+    assert_eq!(v["backupVerdictsIncomplete"], "Unavailable");
+    let items = v["items"].as_array().expect("items");
+    assert_eq!(items.len(), lines.len(), "nothing is hidden");
+    assert!(
+        items.iter().all(|i| i["selectable"] == true),
+        "the join did not happen, so the catalog alone decides — and the page says so"
+    );
+}
+
+/// A refusal that names no digest and no set id can be tied to no row; the
+/// page says the join is incomplete rather than pretend it saw nothing.
+///
+/// MUTANT: drop the `unattributed() > 0` check in `backup_refusals`. The flag
+/// is absent and this row fails.
+#[tokio::test]
+async fn an_unattributable_refusal_marks_the_page_incomplete() {
+    let (app, _) = catalog_with_page(None);
+    let mut anonymous = verdict_backup("b-anon", "", "Invalid");
+    anonymous["status"]
+        .as_object_mut()
+        .expect("status")
+        .remove("backupId");
+    anonymous["status"]["evidence"]
+        .as_object_mut()
+        .expect("evidence")
+        .remove("receiptSha256");
+    app.fake.seed("backups", NS_A, anonymous);
+    let v = app
+        .get("/api/v1/namespaces/team-a/catalogs/primary/points")
+        .await
+        .json();
+    assert_eq!(v["backupVerdictsIncomplete"], "Unavailable");
+    assert!(v["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .all(|i| i.get("backupVerdict").is_none()));
 }

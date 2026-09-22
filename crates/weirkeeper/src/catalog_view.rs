@@ -239,8 +239,10 @@ pub fn selectable(availability: Availability, verification: Verification) -> boo
 /// controller REACHED that is not a pass.
 ///
 /// **The catalog decides only where the controller could not look.** `None`
-/// (no verdict written) and `NotAttempted` are "I could not look" and defer to
-/// the catalog; `Valid` is a pass the catalog may still narrow. Everything else
+/// (no verdict written), `NotAttempted` and `Pending` (the evidence-fetch Job is
+/// still reading the document — `claude/evidence-fetch`; not a verdict at all)
+/// are "I have not looked" and defer to the catalog; `Valid` is a pass the
+/// catalog may still narrow. Everything else
 /// — `Invalid`, `Untrusted`, or a spelling this build does not know (reachable
 /// after a rollback past a build that wrote a fifth verdict) — is a refusal no
 /// catalog row may overrule. The same rule as
@@ -248,7 +250,7 @@ pub fn selectable(availability: Availability, verification: Verification) -> boo
 /// `controllers::rehearsal_schedule::candidate_from_backup`.
 #[must_use]
 pub fn is_reached_refusal(result: Option<&str>) -> bool {
-    !matches!(result, None | Some("NotAttempted" | "Valid"))
+    !matches!(result, None | Some("NotAttempted" | "Pending" | "Valid"))
 }
 
 /// The points whose own `Backup` the controller REFUSED, keyed for a join
@@ -275,11 +277,110 @@ pub fn is_reached_refusal(result: Option<&str>) -> bool {
 pub struct ControllerRefusals {
     by_receipt: BTreeMap<String, String>,
     by_backup_id: BTreeMap<String, String>,
+    unattributed: usize,
+    incomplete: bool,
 }
 
 /// The longest verdict spelling a refusal carries onward. A result is a short
 /// enum word; anything longer is truncated rather than copied into a response.
 const MAX_REFUSAL_LEN: usize = 32;
+
+/// The word a refusal carries when the `Backup`'s verdict field is PRESENT but
+/// is not a verdict this build can read (not a string, or under a non-object
+/// parent). "Could not read the verdict" is not "no verdict": an unknown
+/// verdict is a refusal, and so is an unreadable one.
+pub const UNREADABLE_VERDICT: &str = "Unreadable";
+
+/// What a `Backup`'s `status.evidence.verification.result` field holds, read
+/// LENIENTLY.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VerdictField {
+    /// No verdict written: the field, or a parent of it, is absent or null.
+    Absent,
+    /// A verdict word.
+    Word(String),
+    /// Something is there and it is not a verdict word.
+    Unreadable,
+}
+
+/// The three facts the refusal rule reads from ONE `Backup` — and nothing else.
+///
+/// # Why a projection and not the typed CRD
+///
+/// A typed `Backup` list fails WHOLE when one object does not deserialize: a
+/// trigger kind a newer build wrote (`TriggerKind` is closed), a stored object
+/// from an older schema, a missing required field. The refusal rule needs three
+/// fields, and a bounded projection must not depend on the writer's field set
+/// (the reasoning `protection::CatalogEntry` gives for its own lenient type).
+/// So one malformed `Backup` refuses at most its OWN point — never the list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackupVerdictFacts {
+    /// `status.backupId`, when it is a non-empty string.
+    pub backup_id: Option<String>,
+    /// `status.evidence.receiptSha256`, when it is a non-empty string.
+    pub receipt_sha256: Option<String>,
+    /// `status.evidence.verification.result`.
+    pub result: VerdictField,
+}
+
+impl BackupVerdictFacts {
+    /// Read the three facts from an UNTYPED `Backup` object (its JSON, or the
+    /// `data` of a `DynamicObject`, which carries `status` at the top level).
+    #[must_use]
+    pub fn from_json(object: &serde_json::Value) -> Self {
+        let text = |v: Option<&serde_json::Value>| {
+            v.and_then(serde_json::Value::as_str)
+                .filter(|t| !t.is_empty())
+                .map(str::to_string)
+        };
+        let status = object.get("status");
+        let evidence = status.and_then(|s| s.get("evidence"));
+        Self {
+            backup_id: text(status.and_then(|s| s.get("backupId"))),
+            receipt_sha256: text(evidence.and_then(|e| e.get("receiptSha256"))),
+            result: verdict_at(object, &["status", "evidence", "verification", "result"]),
+        }
+    }
+
+    /// The same three facts from a typed `Backup`.
+    #[must_use]
+    pub fn from_backup(backup: &crate::crds::backup::Backup) -> Self {
+        let status = backup.status.as_ref();
+        let evidence = status.and_then(|s| s.evidence.as_ref());
+        Self {
+            backup_id: status
+                .and_then(|s| s.backup_id.clone())
+                .filter(|t| !t.is_empty()),
+            receipt_sha256: evidence
+                .and_then(|e| e.receipt_sha256.clone())
+                .filter(|t| !t.is_empty()),
+            result: evidence
+                .and_then(|e| e.verification.as_ref())
+                .and_then(|v| v.result.clone())
+                .map_or(VerdictField::Absent, VerdictField::Word),
+        }
+    }
+}
+
+/// Walk `path`; a null or missing step is [`VerdictField::Absent`], a step that
+/// is not an object where one is needed — or a leaf that is not a string — is
+/// [`VerdictField::Unreadable`].
+fn verdict_at(object: &serde_json::Value, path: &[&str]) -> VerdictField {
+    let mut here = object;
+    for key in path {
+        match here {
+            serde_json::Value::Object(map) => match map.get(*key) {
+                None | Some(serde_json::Value::Null) => return VerdictField::Absent,
+                Some(next) => here = next,
+            },
+            _ => return VerdictField::Unreadable,
+        }
+    }
+    match here {
+        serde_json::Value::String(word) => VerdictField::Word(word.clone()),
+        _ => VerdictField::Unreadable,
+    }
+}
 
 impl ControllerRefusals {
     /// Collect every reached refusal among `backups`, whatever their phase: a
@@ -290,35 +391,38 @@ impl ControllerRefusals {
     where
         I: IntoIterator<Item = &'a crate::crds::backup::Backup>,
     {
+        Self::from_facts(backups.into_iter().map(BackupVerdictFacts::from_backup))
+    }
+
+    /// The same, over lenient projections.
+    ///
+    /// A verdict word that [`is_reached_refusal`] refuses, and an
+    /// [`VerdictField::Unreadable`] verdict (published as
+    /// [`UNREADABLE_VERDICT`]), refuse the point their digest — or, with no
+    /// digest, their set id — names. A refusal that names NEITHER cannot be
+    /// tied to any row; it is counted in [`Self::unattributed`], so a caller
+    /// can say the join is incomplete rather than pretend it was not there.
+    #[must_use]
+    pub fn from_facts<I>(facts: I) -> Self
+    where
+        I: IntoIterator<Item = BackupVerdictFacts>,
+    {
         let mut out = Self::default();
-        for backup in backups {
-            let Some(status) = backup.status.as_ref() else {
-                continue;
+        for fact in facts {
+            let result: String = match &fact.result {
+                VerdictField::Absent => continue,
+                VerdictField::Word(word) if !is_reached_refusal(Some(word)) => continue,
+                VerdictField::Word(word) => word.chars().take(MAX_REFUSAL_LEN).collect(),
+                VerdictField::Unreadable => UNREADABLE_VERDICT.to_string(),
             };
-            let evidence = status.evidence.as_ref();
-            let result = evidence
-                .and_then(|e| e.verification.as_ref())
-                .and_then(|v| v.result.as_deref());
-            if !is_reached_refusal(result) {
-                continue;
-            }
-            let result: String = result
-                .unwrap_or_default()
-                .chars()
-                .take(MAX_REFUSAL_LEN)
-                .collect();
-            match evidence
-                .and_then(|e| e.receipt_sha256.as_deref())
-                .filter(|d| !d.is_empty())
-            {
-                Some(digest) => {
-                    out.by_receipt.insert(digest.to_string(), result);
+            match (fact.receipt_sha256, fact.backup_id) {
+                (Some(digest), _) => {
+                    out.by_receipt.insert(digest, result);
                 }
-                None => {
-                    if let Some(id) = status.backup_id.as_deref().filter(|id| !id.is_empty()) {
-                        out.by_backup_id.insert(id.to_string(), result);
-                    }
+                (None, Some(id)) => {
+                    out.by_backup_id.insert(id, result);
                 }
+                (None, None) => out.unattributed += 1,
             }
         }
         out
@@ -338,10 +442,32 @@ impl ControllerRefusals {
             .map(String::as_str)
     }
 
+    /// How many refusals named no digest and no set id, so could be tied to
+    /// no row.
+    #[must_use]
+    pub fn unattributed(&self) -> usize {
+        self.unattributed
+    }
+
+    /// This set was built from a listing a bound cut short: a refusal on a
+    /// `Backup` it did not reach is not in it.
+    #[must_use]
+    pub fn incomplete(mut self) -> Self {
+        self.incomplete = true;
+        self
+    }
+
+    /// Whether the listing this set was built from was complete, so "not in
+    /// the set" means "no listed `Backup` refused it" for EVERY `Backup`.
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        !self.incomplete
+    }
+
     /// Whether the set holds no refusal at all.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.by_receipt.is_empty() && self.by_backup_id.is_empty()
+        self.by_receipt.is_empty() && self.by_backup_id.is_empty() && self.unattributed == 0
     }
 }
 
