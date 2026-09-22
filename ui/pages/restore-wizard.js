@@ -2592,11 +2592,14 @@ export function approvalRoute(state, prepared) {
  *   3. when `options.reviewedHash` is given, the prepared hash must be it: the
  *      bytes a click sends are the bytes that were on screen when it was
  *      clicked, and a field changed in between is a refusal, not a surprise;
- *   4. one create, WITHOUT a route signal. Its name is minted from the bytes,
+ *   4. for a saved point, re-read its Destination and require the same frozen
+ *      name, UID and location digest. This touches no plan field, so the bytes
+ *      reviewed in step 3 remain the bytes submitted;
+ *   5. one create, WITHOUT a route signal. Its name is minted from the bytes,
  *      so `409 AlreadyExists` is this plan submitted before: an existing
  *      Restore with exactly this spec is this operation, and any other is a
  *      conflict (`resolveExisting`);
- *   5. the destination: the Restore's operation view when an Approval already
+ *   6. the destination: the Restore's operation view when an Approval already
  *      authorises exactly this Restore, else its approval page.
  *
  *  Returns `{outcome, object, route, prepared}`, or `null` when step 2 found
@@ -2631,6 +2634,9 @@ export async function submitRestore(state, deps, lifecycle, options) {
         "values hash to " + prepared.hash + "); review the plan shown now and submit again",
       { reviewedHash: reviewed, preparedHash: prepared.hash },
     );
+  }
+  if (!await confirmFrozenDestination(s, api, lifecycle)) {
+    return null;
   }
   const body = restoreBody(s, prepared);
   let created;
@@ -2698,6 +2704,54 @@ export async function confirmClusters(state, api) {
     s.targetClusterUid = resolved.uid;
   }
   return s.clusters;
+}
+
+/** Re-read a saved Destination at the last non-mutating edge before create.
+ *
+ * The mount check protects the plan initially rendered. This check protects
+ * the interval after that render: a Destination deleted, recreated or moved
+ * while the operator reviews the plan cannot make the cached public settings
+ * authoritative again merely because its name stayed the same. Nothing here
+ * replaces `savedDestination` or any plan field; the reviewed bytes stay
+ * frozen, and a mismatch sends no Restore.
+ *
+ * Like [`confirmClusters`], this read is part of the durable submit attempt and
+ * carries no route signal. A failed or absent read is uncertainty, never
+ * evidence that the frozen object still exists. */
+export async function confirmFrozenDestination(state, api, lifecycle) {
+  const s = state || {};
+  const name = savedDestinationName(s);
+  if (name.length === 0) {
+    return true;
+  }
+  let read;
+  try {
+    read = await api.destination(s.ns, name);
+  } catch (unread) {
+    throw invalidInput({
+      archive: "saved destination " + name +
+        " could not be read again before submitting (" +
+        String(unread && unread.message) +
+        "). Nothing was sent; the reviewed plan is still here.",
+    });
+  }
+  if (!active(lifecycle)) {
+    return false;
+  }
+  const live = read === null || read === undefined ? null : read.item;
+  if (live === null || live === undefined) {
+    throw invalidInput({
+      archive: "saved destination " + name +
+        " is absent. Nothing was sent; the reviewed plan is still here.",
+    });
+  }
+  const problem = frozenDestinationProblem(s.point, live);
+  if (problem !== null) {
+    throw invalidInput({
+      archive: problem + ". Nothing was sent; the reviewed plan is still here.",
+    });
+  }
+  return true;
 }
 
 // SUBMIT-REGION-END

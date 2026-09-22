@@ -1147,7 +1147,6 @@ pub async fn create(
     let key = IdempotencyKey::from_headers(&headers)?;
     let mut request: CreatePreflightRequest = read_json(body, MAX_JSON_BODY).await?;
     validate_create(&request)?;
-    validate_legacy_source_for_point(&state, &ns, &request).await?;
     check_create_rate(
         &state,
         &actor,
@@ -1155,6 +1154,10 @@ pub async fn create(
         ROUTE_CREATE,
         PREFLIGHT_CREATES_PER_MINUTE,
     )?;
+    // The limiter is the last synchronous gate: structurally invalid input is
+    // still refused precisely, but an over-limit request performs no
+    // recovery-point or other Kubernetes read.
+    validate_legacy_source_for_point(&state, &ns, &request).await?;
     // Canonical form: an omitted budget IS the default, so both spellings hash
     // identically and replay as one request.
     request.timeout_seconds = Some(

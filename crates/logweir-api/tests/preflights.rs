@@ -284,6 +284,75 @@ async fn legacy_source_archive_is_only_accepted_for_a_truly_legacy_point() {
     );
 }
 
+/// The cheap request-shape gate stays first, while the rate gate must be the
+/// last synchronous gate before any recovery-point lookup. An over-limit
+/// caller must not turn the legacy compatibility check into unbounded
+/// Kubernetes reads.
+///
+/// MUTANT: move `check_create_rate` back below
+/// `validate_legacy_source_for_point`. The final request records a GET for the
+/// missing Backup and this row fails even though the HTTP response is still
+/// 429.
+#[tokio::test]
+async fn an_over_limit_preflight_performs_no_kubernetes_read() {
+    let app = TestApp::new();
+    let namespace = support::NS_B;
+    let path = format!("/api/v1/namespaces/{namespace}/preflights");
+    let plan = plan();
+    let request = legacy_restore_request(&plan, "missing-point");
+    logweir_api::routes::reset_check_rate_limits();
+
+    for i in 0..logweir_api::routes::PREFLIGHT_CREATES_PER_MINUTE {
+        let response = app
+            .post(
+                &path,
+                Some(&format!("preflight-rate-{i:010}")),
+                &request.to_string(),
+            )
+            .await;
+        assert_eq!(
+            response.status.as_u16(),
+            202,
+            "create {i}: {}",
+            response.text()
+        );
+    }
+
+    app.fake.clear_requests();
+    let malformed = app
+        .post(
+            &path,
+            Some("preflight-rate-malformed1"),
+            r#"{"operation":"restore","restore":{}}"#,
+        )
+        .await;
+    malformed.assert_problem(422, "validation_failed");
+    assert!(
+        app.fake.requests().is_empty(),
+        "shape validation is still first"
+    );
+
+    let limited = app
+        .post(
+            &path,
+            Some("preflight-rate-overflow01"),
+            &request.to_string(),
+        )
+        .await;
+    limited.assert_problem(429, "rate_limited");
+    assert!(limited.header("retry-after").is_some());
+    assert!(
+        app.fake.requests().is_empty(),
+        "an over-limit request performed Kubernetes I/O: {:?}",
+        app.fake.requests()
+    );
+    assert_eq!(
+        app.fake.count("preflights", namespace),
+        logweir_api::routes::PREFLIGHT_CREATES_PER_MINUTE as usize
+    );
+    logweir_api::routes::reset_check_rate_limits();
+}
+
 /// D2-SOURCECHECK: the connectivity check the console's "Test connection"
 /// creates, and the two ways of asking for it wrongly.
 ///

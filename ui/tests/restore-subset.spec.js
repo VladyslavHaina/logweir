@@ -25,6 +25,7 @@ import {
   renderPointInTimeStep,
   renderPointSelector,
   freshTargetPrefix,
+  confirmFrozenDestination,
   frozenDestinationProblem,
   initialState,
   isKafkaTopicName,
@@ -470,6 +471,43 @@ test("a_recreated_or_moved_saved_destination_is_refused_before_its_storage_can_b
   assert.equal(digestMismatch.fields.source.bucket, "");
   assert.match(validateRestore(digestMismatch).archive, /moved/);
   await assert.rejects(() => preparePlan(digestMismatch), /storage.bucket is required/);
+});
+
+test("the_pre_submit_destination_read_fails_closed_without_changing_reviewed_fields", async () => {
+  const state = savedWizardState();
+  const before = JSON.stringify(state.fields);
+  const exact = JSON.parse(JSON.stringify(state.savedDestination));
+  assert.equal(await confirmFrozenDestination(state, {
+    destination: async () => ({ item: exact }),
+  }), true);
+
+  await assert.rejects(
+    () => confirmFrozenDestination(state, {
+      destination: async () => { throw new Error("gateway timeout"); },
+    }),
+    (error) => /could not be read again before submitting.*gateway timeout/
+      .test((error.fields || {}).archive || ""),
+  );
+  await assert.rejects(
+    () => confirmFrozenDestination(state, { destination: async () => ({ item: null }) }),
+    (error) => /is absent/.test((error.fields || {}).archive || ""),
+  );
+
+  const replacement = JSON.parse(JSON.stringify(exact));
+  replacement.uid = "replacement-uid";
+  await assert.rejects(
+    () => confirmFrozenDestination(state, { destination: async () => ({ item: replacement }) }),
+    (error) => /was recreated/.test((error.fields || {}).archive || ""),
+  );
+
+  const moved = JSON.parse(JSON.stringify(exact));
+  moved.locationDigest = "sha256:" + "e".repeat(64);
+  await assert.rejects(
+    () => confirmFrozenDestination(state, { destination: async () => ({ item: moved }) }),
+    (error) => /moved/.test((error.fields || {}).archive || ""),
+  );
+  assert.equal(JSON.stringify(state.fields), before,
+    "the confirmation read never replaces any field in the reviewed plan");
 });
 
 test("the_wizard_mount_resolves_the_point_destination_before_it_renders_a_plan", async () => {

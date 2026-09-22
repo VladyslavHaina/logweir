@@ -1497,6 +1497,72 @@ async function main() {
       });
     }
 
+    // ------------------------------------------------ destination TOCTOU control
+    // Render and review an exact saved-destination plan first. Only then
+    // delete and recreate the Destination under the same name. The submit's
+    // final public read must see the replacement UID, refuse, and leave both
+    // the reviewed bytes and the cluster's Restore set untouched.
+    await openOldPoint();
+    const racePlan = await page.evaluate(() => {
+      const pre = document.querySelector("#plan-bytes");
+      return pre === null ? null : pre.textContent;
+    });
+    check(typeof racePlan === "string" && racePlan.includes("bucket: \"kafka-backups\""),
+      "the TOCTOU control first reviewed the original saved location");
+    const beforeReplacement = kubeJson([
+      "-n", namespace, "get", "backupdestination", frozenDestination.name,
+    ]);
+    check(beforeReplacement.metadata.uid === frozenDestination.uid,
+      "the object about to be replaced is the destination frozen onto the point");
+    kube(["-n", namespace, "delete", "backupdestination", frozenDestination.name,
+      "--wait=true"]);
+    const replacementSpec = JSON.parse(JSON.stringify(beforeReplacement.spec));
+    replacementSpec.storage.bucket = "replacement-" + suffix;
+    const replacementMade = apply({
+      apiVersion: "logweir.dev/v1alpha1", kind: "BackupDestination",
+      metadata: { name: frozenDestination.name, namespace: namespace, labels: LABELS },
+      spec: replacementSpec,
+    });
+    check(replacementMade.metadata.uid !== frozenDestination.uid,
+      "the same-name replacement has a different UID");
+    let replacement = null;
+    for (let i = 0; i < 60; i += 1) {
+      const seen = kubeJson([
+        "-n", namespace, "get", "backupdestination", frozenDestination.name,
+      ]);
+      if (typeof ((seen.status || {}).locationDigest) === "string") {
+        replacement = seen;
+        break;
+      }
+      await pause(1000);
+    }
+    check(replacement !== null, "the replacement Destination never published a location digest");
+
+    const beforeRaceSubmit = writesSoFar();
+    await page.click("#create-restore");
+    await waitForText(page, "was recreated", "the post-review destination replacement refusal");
+    await shot(page, "13-destination-race-refused");
+    const racePlanAfter = await page.evaluate(() => {
+      const pre = document.querySelector("#plan-bytes");
+      return pre === null ? null : pre.textContent;
+    });
+    check(writesSoFar() === beforeRaceSubmit,
+      "the same-name destination replacement sent no write: " +
+        JSON.stringify(requests.slice(beforeRaceSubmit)));
+    check(racePlanAfter === racePlan,
+      "the confirming read did not replace or mutate the reviewed plan bytes");
+    check(!(await text(page)).includes(("replacement-" + suffix).toLowerCase()),
+      "the replacement bucket was neither rendered nor signed");
+    control("a saved destination recreated after review is refused before submit", {
+      name: frozenDestination.name,
+      frozenUid: frozenDestination.uid,
+      replacementUid: replacement.metadata.uid,
+      frozenLocationDigest: frozenDestination.locationDigest,
+      replacementLocationDigest: replacement.status.locationDigest,
+      writesDuring: 0,
+      reviewedPlanUnchanged: true,
+    });
+
     save("api-bodies.json", bodies);
     result.finishedAt = new Date().toISOString();
     result.outcome = "passed";

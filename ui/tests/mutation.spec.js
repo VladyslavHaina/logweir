@@ -886,6 +886,55 @@ test("the_wizard_submit_reads_the_connections_again_before_it_creates", async ()
   }
 });
 
+test("a_saved_destination_recreated_after_review_is_refused_before_create", async () => {
+  // The mount-time identity check is not enough: this replacement happens
+  // after the plan is rendered. This row drives the real click call site and
+  // fails if `submitRestore` stops doing its final destination read.
+  const ns = "wizard-destination-race-ns";
+  const k8s = wizardKubernetes(ns);
+  const point = k8s.objects.get(k8s.key(ns, "backups", k8s.point.backup));
+  const exact = fixture("console/destination.json").item;
+  point.spec.destinationRef = { name: exact.name, uid: exact.uid };
+  point.spec.archive = { url: "logweir-destination://" + exact.name };
+  point.status.locationDigest = exact.locationDigest;
+
+  let live = clone(exact);
+  k8s.destination = async (readNs, name) => {
+    k8s.calls.push({ verb: "destination", ns: readNs, name: name });
+    return { item: clone(live) };
+  };
+
+  const view = fakeView();
+  const originalWindow = globalThis.window;
+  globalThis.window = { location: { hash: "#/restore?ns=" + ns } };
+  try {
+    await mountRestoreWizard(view.root, ns, k8s.point, parse, k8s, createRouteLifecycle().begin());
+    const reviewed = planBytesOf(view.html());
+    assert.ok(reviewed.includes("bucket: \"kafka-backups\""), "the exact destination was reviewed");
+
+    live = clone(exact);
+    live.uid = "replacement-destination-uid";
+    live.storage.bucket = "replacement-bucket";
+    const mark = k8s.calls.length;
+    await view.find("#create-restore").dispatch("click");
+    await settled(12);
+
+    const during = k8s.calls.slice(mark);
+    assert.ok(during.some((call) => call.verb === "destination"),
+      "the submit re-read the destination after the plan was reviewed");
+    assert.equal(during.some((call) => call.verb === "create" && call.plural === "restores"), false,
+      "the same-name replacement sent no Restore create");
+    assert.equal(k8s.count(ns, "restores"), 0);
+    assert.match(view.html(), /was recreated/);
+    assert.equal(planBytesOf(view.html()), reviewed,
+      "the failed identity read did not mutate the reviewed plan bytes");
+    assert.doesNotMatch(view.html(), /replacement-bucket/,
+      "replacement storage is neither rendered nor signed");
+  } finally {
+    globalThis.window = originalWindow;
+  }
+});
+
 test("a_target_recreated_mid_wizard_is_refused_by_the_submit_and_creates_nothing", async () => {
   // The other half of F3, on the same call site: the object the plan was
   // reviewed against is deleted and recreated under its own name WHILE THE
