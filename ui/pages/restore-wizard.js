@@ -1122,6 +1122,47 @@ export function isKafkaTopicName(name) {
   return true;
 }
 
+/** THE ONE PLACE THE TOPIC PREFIX IS WRITTEN, and it writes BOTH keys.
+ *
+ *  THE RUNNER'S GRAMMAR CARRIES TWO, AND READS A DIFFERENT ONE PER MODE.
+ *  `logweir_core::spec::target_topic_prefix` takes `target.topic_naming.prefix`
+ *  for `newTopic` and `target.topic_mapping_prefix` for `scratch`. The wizard
+ *  offers both modes in step 4, and until this function existed only the first
+ *  was updated by an edit: `initialState` set the two equal once and the prefix
+ *  input, a restored draft and an edit prefill each moved one of them. In
+ *  `scratch` mode the preview, the declared mapping and the product API's rail
+ *  therefore all used a prefix THE RUN DOES NOT USE -- a direct falsification
+ *  of "submitted topics/mapping equal the preview" for that mode, found by the
+ *  independent review and reproduced.
+ *
+ *  So there is one setter, every write goes through it, and the two keys are
+ *  equal by construction rather than by three call sites remembering. Nothing
+ *  else in this module assigns either key. */
+export function setTopicPrefix(state, value) {
+  const s = state || {};
+  const target = (s.fields || {}).target;
+  if (target === undefined || target === null) {
+    return;
+  }
+  const next = typeof value === "string" ? value : "";
+  target.topicPrefix = next;
+  target.topicMappingPrefix = next;
+}
+
+/** The prefix the RUN will map through, for the mode this plan is in -- the
+ *  JavaScript half of `logweir_core::spec::target_topic_prefix`.
+ *
+ *  It exists so the preview cannot be a statement about the other mode's key
+ *  even if the two ever came apart again: `topicMapping` reads THIS, and a row
+ *  asserts it equals what `renderPlanBytes` emits for the same fields in both
+ *  modes. */
+export function effectivePrefix(state) {
+  const target = ((state || {}).fields || {}).target || {};
+  return target.mode === "scratch"
+    ? target.topicMappingPrefix
+    : target.topicPrefix;
+}
+
 /** THE MAPPING RULE, AND THIS BUILD HAS NO OTHER ONE.
  *
  *  `logweir_core::spec::target_topic_prefix` gives the whole grammar: mode
@@ -1169,7 +1210,7 @@ export function selectedTopics(state) {
 /** The exact source-to-target mapping, row by row: what the preview shows and
  *  what the submit declares, from ONE call. */
 export function topicMapping(state) {
-  const prefix = (((state || {}).fields || {}).target || {}).topicPrefix;
+  const prefix = effectivePrefix(state);
   return selectedTopics(state).map((source) => ({
     source: source,
     target: mappedTopicName(prefix, source),
@@ -1188,7 +1229,7 @@ export function topicMapping(state) {
  *  over distinct sources is injective -- there is no rename in the grammar. */
 export function mappingProblems(state) {
   const s = state || {};
-  const prefix = ((s.fields || {}).target || {}).topicPrefix;
+  const prefix = effectivePrefix(s);
   const problems = Object.create(null);
   const frozen = frozenTopicsOf(s);
   const chosen = selectedTopics(s);
@@ -1353,7 +1394,9 @@ export const PARTITION_COUNT_NOT_PUBLISHED =
   "count only after one, on the Restore's own completion (status.completion.newTopics[].partitions, " +
   "from the target diff). The archive manifest holds the source counts and the runner reads it; " +
   "no field of a Backup or of its product-API projection carries them, so there is nothing here " +
-  "to read and this page will not guess.";
+  "to read and this page will not guess. A topic discovery publishes a live partition count for a " +
+  "SOURCE CLUSTER, which is a different fact: it is a probe of the cluster now, not the manifest's " +
+  "count at this recovery point, and it hangs off a connection rather than off this Backup.";
 
 /** The replication factor every created topic is asked for, from the PLAN's
  *  own field. `target.default_replication_factor` in the runner's grammar,
@@ -1458,10 +1501,9 @@ export function renderTargetStep(state) {
       (target.mode === mode ? " selected" : "") +
       ">" + esc(mode) + "</option>",
   ).join("");
+  const current = effectivePrefix(s);
   const prefix =
-    typeof target.topicPrefix === "string" && target.topicPrefix.length > 0
-      ? target.topicPrefix
-      : defaultPrefixFor(s);
+    typeof current === "string" && current.length > 0 ? current : defaultPrefixFor(s);
   const mapping = mappingProblems(s);
   const markerWarning =
     target.mode === "scratch" && typeof ((chosen || {}).spec || {}).markerTopic !== "string"
@@ -1646,22 +1688,19 @@ export function renderPreflightStep(state, prepared) {
  *
  *  FIVE ARMS, IN THE ORDER AN OPERATOR MEETS THEM:
  *
- *   1. THE CHECK CANNOT RUN HERE. Legacy mode has no `logweir-api` and
- *      therefore no `Preflight` route, so there is no verdict to gate on and
- *      this returns `null` -- with step 5 saying, in its own words, that the
- *      check could not run. Gating on a check a mode cannot perform would make
- *      the wizard unusable behind `kubectl proxy` while proving nothing: the
- *      runner is the authority in both modes.
- *   2. NOTHING HAS RUN for this plan.
- *   3. THE RESULT IS ABOUT ANOTHER PLAN -- the target changed, the prefix
+ *   1. NOTHING HAS RUN for this plan -- which is also legacy mode, whose
+ *      absent `Preflight` route leaves the result absent.
+ *   2. THE RESULT IS ABOUT ANOTHER PLAN -- the prefix changed, the subset
  *      changed, the point in time changed. Any edit that moves the plan bytes
- *      moves the hash, and D2 section 6.3's invalidation rule says the verdict
- *      stops describing what is about to be submitted.
- *   4. THE SERVER SAYS IT IS STALE or does not apply: `applicable: false`,
+ *      moves the hash, and D2 section 6.6's invalidation rule says the verdict
+ *      stops describing what is about to be submitted. A change of TARGET is
+ *      handled one step earlier, in `selectTarget`, because two clusters can
+ *      render identical bytes.
+ *   3. THE SERVER SAYS IT IS STALE or does not apply: `applicable: false`,
  *      `stale: true`, or an expired verdict (`target.mappedTopics` expires in
  *      five minutes, which is the shortest budget in the catalogue and exactly
  *      the check a slow review outlives).
- *   5. THE VERDICT IS NOT `ready` -- which is where a collision lands, named
+ *   4. THE VERDICT IS NOT `ready` -- which is where a collision lands, named
  *      by its own check id and code.
  *
  *  Pure: no DOM, no network, no clock. The freshness judgement is the
@@ -1671,9 +1710,6 @@ export function readinessRefusal(state, prepared) {
   const s = state || {};
   const p = prepared || {};
   const readiness = s.readiness || {};
-  if (readiness.unavailable === true) {
-    return null;
-  }
   const result = readiness.preflight || null;
   const hash = typeof p.hash === "string" ? p.hash : "";
   if (result === null) {
@@ -1741,12 +1777,6 @@ export const READINESS_NOT_RUN_WARNING =
   "already exists and nothing is overwritten either way. Run the check in step 5 to find out " +
   "before an approver signs rather than after.";
 
-/** Why the gate is not applied in a mode with no readiness route. */
-export const READINESS_UNGATED_SENTENCE =
-  "This mode has no readiness route, so there is no verdict to hold the submit against and the " +
-  "submit is not gated here. Nothing about the product changes: the runner's phase 0 refuses a " +
-  "restore whose mapped target topic already exists, in this mode exactly as in the other one.";
-
 /** Step 6 -- the rendered plan, its hash, the two minted names, and the one
  *  guided submit.
  *
@@ -1803,13 +1833,16 @@ export function renderPlanStep(prepared, state) {
     (pending ? " aria-busy=\"true\"" : "") +
     ">Create the Restore</button>" +
     "</div>" +
+    // ONE ARM FOR "NOTHING HAS RUN", AND IT CARRIES LEGACY MODE TOO. An earlier
+    // draft had a second arm keyed on `state.readiness.unavailable`, which
+    // NOTHING in this wizard ever sets -- a refusal-bypass and a sentence no
+    // reader could reach. Legacy mode has no readiness route, so its result is
+    // absent, so it lands here and reads the same true sentence.
     (blocked === null
-      ? ((s.readiness || {}).unavailable === true
-        ? "<p class=\"note\" id=\"readiness-ungated\">" + esc(READINESS_UNGATED_SENTENCE) + "</p>"
-        : ((s.readiness || {}).preflight
-          ? ""
-          : "<p class=\"note\" id=\"readiness-not-run\">" +
-            esc(READINESS_NOT_RUN_WARNING) + "</p>"))
+      ? ((s.readiness || {}).preflight
+        ? ""
+        : "<p class=\"note\" id=\"readiness-not-run\">" +
+          esc(READINESS_NOT_RUN_WARNING) + "</p>")
       : "<p class=\"complaint\" id=\"readiness-blocked\" role=\"alert\">Nothing is sent: " +
         esc(blocked) + "</p>") +
     "<p class=\"note\">" + GUIDED_SUBMIT_SENTENCE + "</p>" +
@@ -2259,7 +2292,7 @@ export function applyWizardDraft(state, draft) {
     }
   }
   if (typeof d.topicPrefix === "string") {
-    state.fields.target.topicPrefix = d.topicPrefix;
+    setTopicPrefix(state, d.topicPrefix);
   }
   for (const block of [state.fields.source, state.fields.evidence]) {
     if (typeof d.endpoint === "string") {
@@ -2312,7 +2345,11 @@ export function draftFrom(object, fields) {
     nextTarget.mode = target.mode;
   }
   if (typeof (target.topicNaming || {}).prefix === "string") {
+    // BOTH KEYS, for `setTopicPrefix`'s reason. This one builds a fields
+    // object rather than mutating a state, so it writes them here; the row
+    // `the_prefix_is_one_value_in_both_modes` walks this path too.
     nextTarget.topicPrefix = target.topicNaming.prefix;
+    nextTarget.topicMappingPrefix = target.topicNaming.prefix;
   }
   const next = Object.assign({}, base, { target: nextTarget });
   if (typeof spec.pointInTime === "string") {
@@ -2413,7 +2450,14 @@ export function restoreBody(state, prepared) {
     // whose preview and submission disagree, and in legacy mode the plan bytes
     // -- which carry the same list, from the same `selectedTopics` call -- are
     // what phase 0 reads. One function produces both.
-    topicMapping: topicMapping(s),
+    // AND ONLY IN `newTopic`. In `scratch` the runner maps through the PLAN's
+    // `topic_mapping_prefix`, which the product API never parses, so it holds
+    // no value it could check a declaration against and refuses one by name
+    // (`topicMapping`/`unsupported_for_mode`). Sending it there would be this
+    // page asking for a verdict nobody can give. The preview is still exact in
+    // both modes -- `effectivePrefix` reads the key the run reads -- and in
+    // `scratch` the rails are the page's own and phase 0's.
+    topicMapping: target.mode === "scratch" ? undefined : topicMapping(s),
   };
 }
 
@@ -2882,6 +2926,10 @@ export function initialState(ns, clusters, backups, selection) {
         bootstrapServers: ((target || {}).spec || {}).bootstrapServers || [],
         auth: targetAuth(target),
         mode: TARGET_MODES[1],
+        // BOTH KEYS, ALWAYS THE SAME STRING -- the invariant `setTopicPrefix`
+        // maintains from here on. Switching the mode select is then a
+        // one-value change and never a document that maps through a prefix
+        // the page is not showing.
         topicPrefix: prefix,
         // UNREAD in `newTopic` mode and still required by the grammar (it has
         // no serde default, because an empty prefix maps every source topic
@@ -2931,6 +2979,30 @@ function targetAuth(cluster) {
  *  print. */
 export function selectTarget(state, uid, name) {
   const wanted = typeof uid === "string" ? uid : "";
+  // D2 SECTION 6.6's SECOND INVALIDATION CAUSE, AND IT IS NOT THE PLAN HASH.
+  // A readiness result is applicable only while
+  // "`binding.inputsDigest ==` the API's recomputation from current objects",
+  // and the reasons include `referentChanged:<Kind>/<name>` -- "Choosing
+  // another target or destination, or a recreated one, changes a referent UID,
+  // so the result is stale". The hash arm cannot see that: two `KafkaCluster`
+  // objects with the same bootstrap servers and the same auth render IDENTICAL
+  // plan bytes, so swapping between them left a `ready` verdict about the
+  // OTHER cluster in place and the submit was allowed. The review found it,
+  // and the harness's own journey had been sitting in exactly that blind spot.
+  //
+  // So a change of the selected UID drops the cached verdict here. The gate
+  // then falls to its "nothing has run" arm, which says in words that nothing
+  // has looked for an existing target topic on THIS cluster, and the operator
+  // re-runs the check. Dropping it is the fail-closed half of the choice: the
+  // alternative is re-reading the preflight with `?planHash=` and believing a
+  // verdict until the round trip answers.
+  const changed = wanted !== state.targetClusterUid;
+  if (changed) {
+    state.readiness = Object.assign({}, state.readiness || {}, {
+      preflight: null,
+      boundHash: "",
+    });
+  }
   state.targetClusterUid = wanted;
   if (wanted.length === 0) {
     // THE EMPTY OPTION CLEARS THE NAME TOO (review finding F1). A refused
@@ -3109,7 +3181,7 @@ function wire(node, state, parse, api, lifecycle, prepared) {
     if (prefix !== null) {
       // An emptied prefix is the default prefix again: the field SHOWS the
       // default when the value is empty, and the plan must be what it shows.
-      state.fields.target.topicPrefix = valueOf(prefix) || defaultPrefixFor(state);
+      setTopicPrefix(state, valueOf(prefix) || defaultPrefixFor(state));
     }
     if (cluster !== null) {
       // THE UID THE OPTION CARRIES, AND THE NAME IT SHOWED. Reading the

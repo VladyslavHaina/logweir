@@ -592,6 +592,98 @@ test("the_submitted_plan_is_the_reviewed_object_and_its_own_hash", async () => {
   }
 });
 
+test("the_declared_topic_mapping_reaches_the_product_api_and_never_the_custom_resource", async () => {
+  // THE DELIVERY SEAM, WHICH IS THE ONLY PATH THAT CARRIES THE DECLARATION AND
+  // HAD NO TEST (found by the independent review). `restoreBody` builds the
+  // rows and the row in `restore-subset.spec.js` pins THAT; what happens
+  // between it and the wire is here, in both modes, because the two modes must
+  // send DIFFERENT shapes: the product API's create request has a
+  // `topicMapping` field and the custom resource has nowhere to put one.
+  const fields = fixture("plan-fields.json");
+  const reviewed = await preparePlanDocument(fields);
+  const object = () => ({
+    apiVersion: "logweir.dev/v1alpha1",
+    kind: "Restore",
+    metadata: { name: reviewed.restoreName },
+    spec: {
+      planBytes: reviewed.bytes,
+      approvalRef: { name: reviewed.approvalName },
+      sourceArchive: { url: "s3://kafka-backups/orders" },
+      backupSetRef: "01JB7Z0000000000000000000B",
+      pointInTime: "2026-09-11T12:00:00Z",
+      target: {
+        clusterRef: { name: "orders-target" }, mode: "newTopic",
+        topicNaming: { prefix: "restore-20260911T120000Z-" },
+      },
+      deadlineSeconds: 3600,
+    },
+    topicMapping: [
+      { source: "orders", target: "restore-20260911T120000Z-orders" },
+      { source: "payments", target: "restore-20260911T120000Z-payments" },
+    ],
+  });
+
+  // CONSOLE MODE: the rows arrive on the REQUEST, verbatim and in order.
+  await console_();
+  let wire = transport((u, init) =>
+    init.method === "POST" ? { status: 201, body: fixture("console/restore.json") } : undefined);
+  try {
+    const sending = object();
+    await apiClient().create("team-a", "restores", sending);
+    const sent = JSON.parse(wire.seen[0].init.body);
+    assert.deepEqual(sent.topicMapping, sending.topicMapping,
+      "every row, in the caller's own order: " + JSON.stringify(sent.topicMapping));
+    assert.equal(sent.target.topicNaming.prefix, "restore-20260911T120000Z-",
+      "beside the prefix the API recomputes them from");
+    // AND ONLY THE TWO KEYS THE CONTRACT DECLARES, because `TopicMappingRow`
+    // is `deny_unknown_fields`: a third key would be a 400 nobody predicted.
+    for (const row of sent.topicMapping) {
+      assert.deepEqual(Object.keys(row).sort(), ["source", "target"]);
+    }
+  } finally {
+    wire.restore();
+  }
+
+  // AND AN ABSENT DECLARATION IS ABSENT, not an empty array: the API's
+  // `topicMapping`/`empty` refusal exists for a caller that means "none", and
+  // this page must not send it by accident.
+  wire = transport((u, init) =>
+    init.method === "POST" ? { status: 201, body: fixture("console/restore.json") } : undefined);
+  try {
+    const bare = object();
+    delete bare.topicMapping;
+    await apiClient().create("team-a", "restores", bare);
+    const sent = JSON.parse(wire.seen[0].init.body);
+    assert.equal("topicMapping" in sent, false, JSON.stringify(sent));
+  } finally {
+    wire.restore();
+  }
+
+  // LEGACY MODE: the custom resource has no field for it, so the object sent
+  // to the API server carries none -- and is otherwise exactly the object the
+  // caller built, which is what "and is otherwise byte-identical" means.
+  await legacy();
+  wire = transport((u, init) =>
+    init.method === "POST" ? { status: 201, body: fixture("console/restore.json") } : undefined);
+  try {
+    const sending = object();
+    await apiClient().create("team-a", "restores", sending);
+    const sent = JSON.parse(wire.seen[0].init.body);
+    assert.equal("topicMapping" in sent, false,
+      "the API server would prune it; this page does not send it: " + JSON.stringify(sent));
+    const expected = object();
+    delete expected.topicMapping;
+    assert.deepEqual(sent, expected, "and nothing else about the object moved");
+    // THE CALLER'S OWN OBJECT IS NOT MUTATED. `withoutTopicMapping` copies; a
+    // version that deleted in place would take the rows away from the wizard
+    // state that is still rendering them.
+    assert.deepEqual(sending.topicMapping, object().topicMapping);
+  } finally {
+    wire.restore();
+    resetMode();
+  }
+});
+
 test("plan_bytes_this_page_never_prepared_are_refused_before_anything_is_sent", async () => {
   await console_();
   const wire = transport(() => ({ status: 201, body: fixture("console/restore.json") }));

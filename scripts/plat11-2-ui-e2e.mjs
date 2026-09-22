@@ -516,6 +516,18 @@ async function main() {
     }
   });
   const writesSoFar = () => requests.length;
+  // THE WIZARD'S OWN WRITES, and not this harness's probes. Both go through
+  // the page (the probes are `fetch` inside `page.evaluate`, which is the
+  // point: same origin, same session), so they are told apart by WHEN they
+  // happened -- everything after a marker taken immediately before a click.
+  const writesSince = (marker) => requests.slice(marker);
+  const restoreCreatesSince = (marker) =>
+    writesSince(marker).filter((r) => r.method === "POST" && r.url.endsWith("/restores"));
+  /** The Restore in this namespace whose stored plan bytes ARE these bytes. */
+  const restoreWithPlan = (bytes) => {
+    const all = kubeJson(["-n", namespace, "get", "restores"]).items || [];
+    return all.find((o) => ((o.spec || {}).planBytes) === bytes) || null;
+  };
 
   const targetUid = kubeJson(["-n", namespace, "get", "kafkacluster", targetCluster]).metadata.uid;
   const secondUid = kubeJson(["-n", namespace, "get", "kafkacluster", secondTarget]).metadata.uid;
@@ -599,8 +611,17 @@ async function main() {
     ]) {
       check(shown.includes(sentence), "the limits panel says " + JSON.stringify(sentence));
     }
-    check(!shown.includes("exhaustive comparison of every"),
-      "and nothing claims an exhaustive check");
+    // THE WORD OCCURS ONLY INSIDE THE NEGATION, which is the property D3
+    // section 3.5 asks for. The earlier form scanned for a phrase the page
+    // never contained -- a strawman that no value could fail.
+    const sentence = "that is a sampled check, not an exhaustive comparison";
+    check(shown.includes(sentence), "the sampled clause is present verbatim");
+    check(
+      shown.split("exhaustive").length - 1 === shown.split(sentence).length - 1,
+      "and `exhaustive` occurs nowhere else on the page: " +
+        String(shown.split("exhaustive").length - 1) + " occurrence(s) vs " +
+        String(shown.split(sentence).length - 1) + " of the clause",
+    );
     await shot(page, "02-recovery-limits");
     save("02-limits-text.txt", shown);
     record("the recovery limits, the sampled scope, the cutover limit and unimplemented resume", {
@@ -699,8 +720,13 @@ async function main() {
     const problem = JSON.parse(duplicate.body);
     const dupError = (problem.errors || []).find((e) => e.code === "duplicate_mapping");
     check(dupError !== undefined, "the refusal is `duplicate_mapping`: " + duplicate.body);
-    check(dupError.message.includes("orders") && dupError.message.includes(OLD_PREFIX + "orders"),
-      "and it names both rows and the target they share: " + dupError.message);
+    // BOTH ROWS, COUNTED. A duplicate under a prefix map is the SAME source
+    // twice, so `includes("orders")` holds for a message naming one side only
+    // -- the Rust row counts occurrences for that reason and so does this.
+    check(dupError.message.split("`orders`").length - 1 === 2,
+      "the refusal names BOTH rows, not one: " + dupError.message);
+    check(dupError.message.includes(OLD_PREFIX + "orders"),
+      "and the target they share: " + dupError.message);
     record("a duplicate mapping is refused by the product API with 422 naming both rows", {
       field: dupError.field, code: dupError.code, message: dupError.message,
       issuedFrom: "the page's own origin, against the real logweir-api",
@@ -780,6 +806,104 @@ async function main() {
       "the window is closed at both ends: the bound itself is inside it");
     control("the boundary instant itself is accepted, so the window is closed at both ends", {
       typed: rfc(OLD_TO_MS),
+    });
+
+    // --------------------------------------------------- 5b (the wizard SUBMITS)
+    //
+    // THE SEAM BETWEEN THE PREVIEW AND THE WIRE, WHICH NOTHING LIVE HAD
+    // TOUCHED (the independent review's F2): every earlier `POST .../restores`
+    // in this file is a harness-authored probe, so `ui/client.js`'s delivery of
+    // the declaration -- the only code that puts it on the request -- had never
+    // run against a real service, and no Restore had ever been created by the
+    // wizard's own Create button. This journey clicks it and then reads the
+    // created object back with `kubectl` to compare its spec with what was on
+    // screen.
+    //
+    // The submit is allowed because no readiness check has run for this plan,
+    // which is a WARNING and not a refusal (D2 section 6.6 is about a verdict
+    // that has stopped applying, not about the absence of one).
+    await openOldPoint();
+    await page.uncheck(".topic-box[data-topic=\"shipments\"]");
+    await waitForText(page, OLD_PREFIX + "payments", "the mapping before the submit");
+    const previewed = await page.evaluate(() => ({
+      bytes: (document.querySelector("#plan-bytes") || {}).textContent,
+      hash: (document.querySelector("#plan-hash-value") || {}).textContent,
+      rows: Array.from(document.querySelectorAll("#step-target tbody tr"))
+        .map((tr) => Array.from(tr.querySelectorAll("td")).map((td) => td.innerText.trim()))
+        .filter((cells) => cells.length === 2),
+    }));
+    save("5b-previewed.json", previewed);
+    check(previewed.hash.startsWith("sha256:"), "the previewed hash is on screen");
+    check(previewed.rows.length === 2,
+      "two mapped rows are previewed: " + JSON.stringify(previewed.rows));
+
+    const marker = writesSoFar();
+    await page.click("#create-restore");
+    let created = null;
+    for (let i = 0; i < 40; i += 1) {
+      created = restoreWithPlan(previewed.bytes);
+      if (created !== null) {
+        break;
+      }
+      await pause(500);
+    }
+    await shot(page, "5b-submitted");
+    check(created !== null,
+      "the wizard's Create button created a Restore whose stored plan bytes are the previewed " +
+      "bytes. Page said:\n" + (await text(page)).slice(0, 1500));
+    save("5b-created-restore.json", created);
+
+    const wizardCreates = restoreCreatesSince(marker);
+    check(wizardCreates.length === 1,
+      "exactly one create, by the page: " + JSON.stringify(wizardCreates.map((r) => r.url)));
+    const wizardBody = JSON.parse(wizardCreates[0].body);
+    save("5b-wizard-request.json", wizardBody);
+
+    // THE REQUEST IS THE PREVIEW, ROW FOR ROW AND BYTE FOR BYTE.
+    check(wizardBody.planBytes === previewed.bytes,
+      "the submitted plan bytes are the bytes that were on screen");
+    check(wizardBody.planHash === previewed.hash,
+      "under the hash that was shown beside them");
+    check(Array.isArray(wizardBody.topicMapping) && wizardBody.topicMapping.length === 2,
+      "the declaration reached the request: " + JSON.stringify(wizardBody.topicMapping));
+    for (const [i, row] of wizardBody.topicMapping.entries()) {
+      check(row.source === previewed.rows[i][0] && row.target === previewed.rows[i][1],
+        "row " + i + " equals the previewed row: " + JSON.stringify(row) + " vs " +
+        JSON.stringify(previewed.rows[i]));
+      check(row.target === OLD_PREFIX + row.source, "and is `prefix + source`");
+    }
+    check(wizardBody.topicMapping.some((r) => r.source === "payments"),
+      "including the second topic, which no earlier request in this run ever carried");
+
+    // AND THE STORED OBJECT IS THE PREVIEW TOO -- with the declaration absent,
+    // because `Restore.spec` has no field for it.
+    check(created.spec.planBytes === previewed.bytes,
+      "the stored plan bytes are the previewed bytes, byte for byte");
+    check(created.spec.target.topicNaming.prefix === OLD_PREFIX,
+      "the stored prefix is the previewed prefix");
+    check(created.spec.topicMapping === undefined,
+      "the declaration is a rail, never a stored field: " + JSON.stringify(created.spec));
+    const storedTopics = created.spec.planBytes
+      .split("\n")
+      .filter((l) => l.startsWith("  - \""))
+      .map((l) => l.slice(5, -1));
+    check(JSON.stringify(storedTopics) === JSON.stringify(["orders", "payments"]),
+      "and the stored plan carries exactly the previewed subset: " + JSON.stringify(storedTopics));
+    record("the wizard submits, and the created Restore is the preview byte for byte", {
+      restore: created.metadata.name, uid: created.metadata.uid,
+      planHash: previewed.hash,
+      declared: wizardBody.topicMapping,
+      storedTopics: storedTopics,
+      storedPrefix: created.spec.target.topicNaming.prefix,
+    });
+
+    // THE NEGATIVE CONTROL: the topic that was unticked is in NEITHER the
+    // declaration nor the stored plan, so the subset is a real narrowing.
+    check(!wizardBody.topicMapping.some((r) => r.source === "shipments"), "declared");
+    check(created.spec.planBytes.indexOf("\"shipments\"") === -1,
+      "and the stored plan does not name it");
+    control("the unticked topic reaches neither the request nor the stored plan", {
+      unticked: "shipments",
     });
 
     // ------------------------------------------------------------------ 6
@@ -1101,6 +1225,12 @@ async function main() {
       });
       process.stderr.write("== NOT REACHED: a terminally failed Restore\n");
     } else {
+      // THE BASELINE FOR "UNTOUCHED", taken immediately before the retry
+      // journey starts rather than when the controller first marked the run
+      // Failed -- so the comparison at the end is about what the RETRY did and
+      // not about the controller settling.
+      const beforeRetry = kubeJson(["-n", namespace, "get", "restore", failedName]);
+      save("09-failed-restore-before-retry.json", beforeRetry);
       await page.goto(base + "#/operations?ns=" + namespace + "&kind=restore&name=" + failedName,
         { waitUntil: "load", timeout: 30000 });
       await waitForText(page, "retry to a fresh target", "the retry affordance");
@@ -1127,6 +1257,12 @@ async function main() {
         const facts = Array.from(document.querySelectorAll("code")).map((c) => c.textContent);
         return facts;
       });
+      const retryPlanBytes = await page.evaluate(() => {
+        const pre = document.querySelector("#plan-bytes");
+        return pre === null ? null : pre.textContent;
+      });
+      check(typeof retryPlanBytes === "string" && retryPlanBytes.length > 0,
+        "the retry's plan bytes are on screen");
       await shot(page, "11-retry-wizard");
       save("11-retry-text.txt", retryText);
       check(retryPrefix !== OLD_PREFIX,
@@ -1152,27 +1288,73 @@ async function main() {
         retryPrefix: retryPrefix, mintedRestore: mintedRestore, mintedApproval: mintedApproval,
       });
 
-      // THE OLD RUN IS UNTOUCHED, read back from the cluster by UID.
-      const after = kubeJson(["-n", namespace, "get", "restore", failedName]);
-      check(after.metadata.uid === failed.metadata.uid, "the failed Restore is the same object");
-      check(after.metadata.resourceVersion === failed.metadata.resourceVersion ||
-        after.status.phase === "Failed",
-        "and it is still Failed; nothing the wizard did modified it");
-      check(after.spec.target.topicNaming.prefix === OLD_PREFIX,
-        "its own prefix is unchanged");
-      save("09-failed-restore-after.json", after);
-      control("the failed Restore is byte-identical in the fields the retry could have touched", {
-        uid: after.metadata.uid, phase: after.status.phase,
-        prefix: after.spec.target.topicNaming.prefix,
+      // AND THE RETRY IS SUBMITTED, so "the old approval ref is never sent" is
+      // a statement about a request that EXISTS.
+      //
+      // THE EARLIER CONTROL COULD NOT FAIL and the review said so: it filtered
+      // every `/restores` write in the run and asserted none named the failed
+      // Approval -- but no retry create was ever issued, so the set held only
+      // this harness's own probes, whose approvalRef is `apr-mapping-probe`.
+      // No value made it fail. Now the button is clicked, the set is non-empty
+      // by assertion, and what is checked is the body the WIZARD sent.
+      const retryMarker = writesSoFar();
+      await page.click("#create-restore");
+      let retryCreated = null;
+      for (let i = 0; i < 40; i += 1) {
+        retryCreated = restoreWithPlan(retryPlanBytes);
+        if (retryCreated !== null) {
+          break;
+        }
+        await pause(500);
+      }
+      await shot(page, "12-retry-submitted");
+      const retryCreates = restoreCreatesSince(retryMarker);
+      save("12-retry-requests.json", retryCreates);
+      save("12-non-get-requests.json", requests);
+      check(retryCreates.length === 1,
+        "the retry sent exactly one create: " + JSON.stringify(retryCreates.map((r) => r.url)) +
+        "; page said:\n" + (await text(page)).slice(0, 1200));
+      const retryBody = JSON.parse(retryCreates[0].body);
+      check(retryBody.approvalRef.name === mintedApproval,
+        "and it names the NEWLY minted Approval " + mintedApproval + ", not " +
+        retryBody.approvalRef.name);
+      check(retryBody.approvalRef.name !== failedApproval,
+        "which is not the failed run's");
+      check(!JSON.stringify(retryBody).includes(failedApproval),
+        "the failed run's Approval is named nowhere in the body the wizard sent: " +
+        JSON.stringify(retryBody).slice(0, 800));
+      check(!JSON.stringify(retryBody).includes(failedName),
+        "and neither is the failed Restore");
+      check(retryBody.target.topicNaming.prefix === retryPrefix,
+        "under the fresh prefix");
+      check(retryCreated !== null, "and the object exists with the retry's own plan bytes");
+      save("12-retry-created.json", retryCreated);
+      check(retryCreated.metadata.name !== failedName, "as a different object");
+      record("the retry is submitted and names its own newly minted Approval", {
+        created: retryCreated.metadata.name, uid: retryCreated.metadata.uid,
+        approvalRef: retryBody.approvalRef.name, failedApproval: failedApproval,
+        prefix: retryBody.target.topicNaming.prefix,
+      });
+      control("the failed run's Approval is absent from a NON-EMPTY set of wizard-sent bodies", {
+        wizardCreates: retryCreates.length,
+        approvalRefSent: retryBody.approvalRef.name,
       });
 
-      // AND THE OLD APPROVAL REFERENCE IS NOWHERE IN WHAT THE RETRY WOULD SEND.
-      const wouldSend = requests.filter((r) => r.url.endsWith("/restores"));
-      save("12-non-get-requests.json", requests);
-      check(wouldSend.every((r) => !String(r.body || "").includes(failedApproval)),
-        "no request this page made names the failed run's Approval");
-      control("no request the page issued names the failed run's Approval", {
-        requestsInspected: requests.length,
+      // AND THE OLD RUN IS UNTOUCHED BY ALL OF IT, whole-object. The earlier
+      // form was `resourceVersion unchanged OR still Failed`, and the `||` let
+      // it pass on a changed revision -- the review named it. Comparing the
+      // whole object catches a status write, a label, an annotation or a spec
+      // edge anywhere.
+      const after = kubeJson(["-n", namespace, "get", "restore", failedName]);
+      save("09-failed-restore-after.json", after);
+      check(JSON.stringify(after) === JSON.stringify(beforeRetry),
+        "the failed Restore is byte-identical after the whole retry, submit included. " +
+        "resourceVersion " + beforeRetry.metadata.resourceVersion + " -> " +
+        after.metadata.resourceVersion);
+      control("the failed Restore is byte-identical after the retry was submitted, whole-object", {
+        uid: after.metadata.uid, phase: after.status.phase,
+        resourceVersion: after.metadata.resourceVersion,
+        prefix: after.spec.target.topicNaming.prefix,
       });
     }
 

@@ -18,6 +18,10 @@ import { fileURLToPath } from "node:url";
 
 import {
   defaultPrefixFor,
+  draftFrom,
+  effectivePrefix,
+  selectTarget,
+  setTopicPrefix,
   renderPointInTimeStep,
   renderPointSelector,
   freshTargetPrefix,
@@ -50,6 +54,7 @@ import {
   applyWizardDraft,
 } from "../pages/restore-wizard.js";
 import { renderRetryAction, retryRoute } from "../pages/operation.js";
+import { renderPlanBytes } from "../plan.js";
 import { COMPLETION_GUIDANCE, TARGET_MODE_MEANING } from "../render.js";
 
 const FIXTURES = fileURLToPath(new URL("./fixtures/", import.meta.url));
@@ -128,20 +133,29 @@ test("the_wizard_restores_a_chosen_subset_and_the_request_is_the_preview", () =>
   assert.deepEqual(body.topicMapping, topicMapping(state));
   assert.deepEqual(body.topicMapping, [{ source: "payments", target: prefix + "payments" }]);
 
-  // THE NEGATIVE CONTROL: a mutant that renamed one topic after the preview.
-  // The declared row and the recomputed row come apart, which is exactly what
-  // the product API answers 422 `mapping_mismatch` for.
-  const renamed = body.topicMapping.map((row) => ({ source: row.source, target: "somewhere-else" }));
-  assert.notDeepEqual(
-    renamed,
+  // THE CONTROL IS THE IDENTITY ITSELF, not a locally built array compared
+  // with the thing it was built from -- that earlier form could not fail for
+  // any value and the review said so. What can fail: `restoreBody` must return
+  // rows EQUAL to `topicMapping(state)` for a state the test moves underneath
+  // it, so a body that cached, reordered or rebuilt them is caught.
+  state.fields.topics = ["orders"];
+  assert.deepEqual(
+    restoreBody(state, { bytes: "b", hash: "sha256:h", restoreName: "r", approvalName: "a" })
+      .topicMapping,
     topicMapping(state),
-    "a row renamed after the preview is no longer the preview -- this is the state the API refuses",
+    "the declared rows follow the selection, they are not a snapshot of an earlier one",
   );
+  assert.deepEqual(topicMapping(state), [{ source: "orders", target: prefix + "orders" }]);
+  // The mutant that renames a row after the preview is planted in the SOURCE
+  // (`restoreBody`'s `topicMapping(s)`) and killed by this row; the product
+  // API's own `mapping_mismatch` rail is exercised live and in
+  // `crates/logweir-api/tests/resources.rs`.
   assert.notEqual(
-    renamed[0].target,
-    mappedTopicName(state.fields.target.topicPrefix, renamed[0].source),
-    "and it is not `prefix + source`, which is the rule the API recomputes",
+    mappedTopicName(prefix, "orders"),
+    "somewhere-else",
+    "and `prefix + source` is the rule the API recomputes",
   );
+  state.fields.topics = ["payments"];
 
   // AND THE ORDER IS THE POINT'S, NOT THE CLICK ORDER: a hash an approver
   // signs must not move because two boxes were ticked the other way round.
@@ -397,18 +411,140 @@ test("a_stale_preflight_and_a_target_change_both_refuse_the_submit", () => {
   state.readiness = { boundHash: prepared.hash, preflight: preflight(prepared.hash) };
   assert.equal(readinessRefusal(state, prepared), null);
 
-  // AND A MODE WITH NO READINESS ROUTE IS NOT GATED -- with the page saying so
-  // rather than silently allowing it.
-  const legacy = wizardState();
-  legacy.readiness = { unavailable: true, unavailableReason: "no readiness route in this mode" };
-  assert.equal(readinessRefusal(legacy, prepared), null);
-  assert.ok(renderPlanStep(prepared, legacy).includes("id=\"readiness-ungated\""));
-
-  // An UNCHECKED plan is a warning and not a refusal, and says what was not
-  // looked for.
+  // AN UNCHECKED PLAN IS A WARNING AND NOT A REFUSAL, and says what was not
+  // looked for. This is legacy mode's arm too: it has no readiness route, so
+  // its result is absent and it lands here. (An earlier draft had a second arm
+  // keyed on `readiness.unavailable`, which nothing in the wizard sets -- a
+  // refusal-bypass and a sentence no reader could reach. It is gone.)
   const unchecked = wizardState();
   assert.equal(readinessRefusal(unchecked, prepared), null);
   assert.ok(renderPlanStep(prepared, unchecked).includes("id=\"readiness-not-run\""));
+  assert.ok(!renderPlanStep(prepared, unchecked).includes("readiness-ungated"),
+    "and there is no second, unreachable arm beside it");
+});
+
+test("a_target_swap_invalidates_the_verdict_even_when_the_plan_bytes_do_not_move", () => {
+  // D2 SECTION 6.6's SECOND INVALIDATION CAUSE. The API returns a result as
+  // applicable only while `binding.inputsDigest` still matches its
+  // recomputation from current objects, and `referentChanged:<Kind>/<name>` is
+  // one of the reasons: "Choosing another target or destination, or a
+  // recreated one, changes a referent UID, so the result is stale."
+  //
+  // THE PLAN HASH CANNOT SEE THAT. Two `KafkaCluster` objects with the same
+  // bootstrap servers and the same auth render IDENTICAL plan bytes, so the
+  // hash arm holds and a `ready` verdict about the OTHER cluster stayed on
+  // screen with the submit enabled. The live journey sat in exactly this blind
+  // spot and recorded it as a journey limitation; it was a product gap.
+  const clusters = fixture("wizard-clusters.json");
+  const items = clusters.items;
+  const twin = JSON.parse(JSON.stringify(items[0]));
+  twin.metadata = Object.assign({}, twin.metadata, {
+    name: twin.metadata.name + "-twin",
+    uid: twin.metadata.uid.slice(0, -1) + (twin.metadata.uid.endsWith("0") ? "1" : "0"),
+  });
+  const backups = fixture("wizard-backups.json");
+  const state = initialState("logweir-t27", { items: items.concat([twin]) }, backups,
+    newestPoint(backups));
+  selectTarget(state, items[0].metadata.uid, items[0].metadata.name);
+  const before = JSON.stringify(state.fields.target.bootstrapServers);
+
+  const prepared = { bytes: "b", hash: "sha256:aaa", restoreName: "r", approvalName: "a" };
+  state.readiness = { boundHash: prepared.hash, preflight: preflight(prepared.hash) };
+  assert.equal(readinessRefusal(state, prepared), null, "a ready verdict for this plan submits");
+
+  selectTarget(state, twin.metadata.uid, twin.metadata.name);
+  assert.equal(
+    JSON.stringify(state.fields.target.bootstrapServers),
+    before,
+    "the twin renders the SAME plan bytes, which is what makes the hash arm blind here",
+  );
+  assert.equal(state.readiness.preflight, null, "the cached verdict is dropped");
+  assert.equal(state.readiness.boundHash, "");
+  assert.ok(renderPlanStep(prepared, state).includes("id=\"readiness-not-run\""),
+    "and the page says nothing has looked for an existing target topic on this cluster");
+
+  // THE NEGATIVE CONTROL: re-selecting the SAME uid is not a change and keeps
+  // the verdict, so the rule is a change rule and not "always drop it".
+  state.readiness = { boundHash: prepared.hash, preflight: preflight(prepared.hash) };
+  selectTarget(state, twin.metadata.uid, twin.metadata.name);
+  assert.notEqual(state.readiness.preflight, null,
+    "re-selecting the same target is not a target change");
+  assert.equal(readinessRefusal(state, prepared), null);
+});
+
+test("the_prefix_is_one_value_in_both_modes_and_the_plan_maps_through_it", () => {
+  // THE RUNNER'S GRAMMAR CARRIES TWO PREFIX KEYS AND READS A DIFFERENT ONE PER
+  // MODE (`logweir_core::spec::target_topic_prefix`): `topic_naming.prefix` for
+  // `newTopic`, `topic_mapping_prefix` for `scratch`. Only the first used to be
+  // updated by an edit, so in `scratch` the preview, the declared mapping and
+  // the API rail all used a prefix THE RUN DOES NOT USE -- "submitted
+  // topics/mapping equal the preview" was false for that mode. Found by the
+  // independent review.
+  for (const mode of ["newTopic", "scratch"]) {
+    const state = wizardState();
+    state.fields.target.mode = mode;
+    setTopicPrefix(state, "myprefix-");
+    state.fields.topics = ["orders", "payments"];
+
+    assert.equal(state.fields.target.topicPrefix, "myprefix-");
+    assert.equal(state.fields.target.topicMappingPrefix, "myprefix-",
+      mode + ": one setter writes both keys");
+    assert.equal(effectivePrefix(state), "myprefix-", mode);
+
+    // THE PREVIEW IS WHAT THE PLAN EMITS FOR THE KEY THIS MODE READS. Asserted
+    // against `renderPlanBytes`'s own output rather than against the field, so
+    // a future divergence between the two documents is what fails.
+    const bytes = renderPlanBytes(state.fields);
+    const lines = bytes.split("\n");
+    // `    prefix:` occurs three times in this grammar -- the source store's,
+    // the target naming block's and the evidence store's -- so the target one
+    // is found by the key that introduces it, not by its own indentation.
+    const at = mode === "scratch"
+      ? lines.findIndex((l) => l.startsWith("  topic_mapping_prefix: "))
+      : lines.findIndex((l) => l === "  topic_naming:") + 1;
+    assert.ok(at > 0, mode + ": the plan carries the prefix this mode reads");
+    const line = lines[at];
+    const emitted = line.slice(line.indexOf(": ") + 2).replace(/^"|"$/g, "");
+    assert.equal(emitted, "myprefix-", mode + ": the plan maps through the previewed prefix");
+    for (const row of topicMapping(state)) {
+      assert.equal(row.target, emitted + row.source, mode + ": " + row.target);
+    }
+    assert.deepEqual(mappingProblems(state), Object.create(null), mode);
+  }
+
+  // EVERY WRITE PATH, because the divergence came from three call sites each
+  // moving one key: a restored draft and an edit prefill as well as the input.
+  const drafted = wizardState();
+  drafted.fields.target.mode = "scratch";
+  assert.equal(applyWizardDraft(drafted, Object.assign(wizardDraftValues(wizardState()), {
+    topicPrefix: "from-a-draft-",
+  })), true);
+  assert.equal(drafted.fields.target.topicMappingPrefix, "from-a-draft-");
+  assert.equal(effectivePrefix(drafted), "from-a-draft-");
+
+  const prefilled = draftFrom(
+    { spec: { target: { mode: "scratch", topicNaming: { prefix: "from-an-edit-" } } } },
+    wizardState().fields,
+  );
+  assert.equal(prefilled.target.topicPrefix, "from-an-edit-");
+  assert.equal(prefilled.target.topicMappingPrefix, "from-an-edit-");
+
+  // AND THE DECLARATION IS NOT SENT IN `scratch`: the product API never parses
+  // the plan, so it holds no value it could check the rows against there, and
+  // it refuses a declaration for that mode by name.
+  const scratch = wizardState();
+  scratch.fields.target.mode = "scratch";
+  setTopicPrefix(scratch, "myprefix-");
+  const body = restoreBody(scratch, { bytes: "b", hash: "h", restoreName: "r", approvalName: "a" });
+  assert.equal(body.topicMapping, undefined, "no declaration is sent in scratch mode");
+  const newTopic = wizardState();
+  assert.equal(newTopic.fields.target.mode, "newTopic");
+  assert.deepEqual(
+    restoreBody(newTopic, { bytes: "b", hash: "h", restoreName: "r", approvalName: "a" })
+      .topicMapping,
+    topicMapping(newTopic),
+    "and it IS sent in newTopic, which is the mode it is defined for",
+  );
 });
 
 // ------------------------------------------------------ 4. the fresh-target retry

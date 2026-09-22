@@ -242,8 +242,30 @@ pub fn validate_create(request: &CreateRestoreRequest) -> Result<DateTime<Utc>, 
     // prefix is itself legal: a mismatch computed from a refused prefix would
     // name an expected target nobody could ever produce, so the operator would
     // be sent to fix the wrong field.
+    //
+    // AND ONLY FOR `newTopic`, WHICH IS A FAIL-CLOSED REFUSAL AND NOT A GAP.
+    // `logweir_core::spec::target_topic_prefix` reads
+    // `target.topic_naming.prefix` for `newTopic` and the PLAN's own
+    // `topic_mapping_prefix` for `scratch` -- and this route never parses the
+    // plan, so in `scratch` mode it does not hold the string the run will
+    // actually map through. A check against `topicNaming.prefix` would then be
+    // a verdict about a value the runner does not read: it would pass a
+    // declaration that disagrees with the run and fail one that agrees with
+    // it. This service does not perform a check on a value it does not have,
+    // so the declaration is defined for `newTopic` and is refused by name for
+    // `scratch`. The independent review found the previous code claiming both
+    // modes while checking one.
     if let Some(rows) = request.topic_mapping.as_deref() {
-        if errors
+        if matches!(request.target.mode, RestoreMode::Scratch) {
+            errors.push(FieldError::new(
+                "topicMapping",
+                "unsupported_for_mode",
+                "a declared mapping is defined for target.mode `newTopic` only: in `scratch` \
+                 the runner maps through the plan's own `topic_mapping_prefix`, which this \
+                 route never parses, so nothing here could check the declaration against the \
+                 prefix the run would use",
+            ));
+        } else if errors
             .iter()
             .all(|e| e.field != "target.topicNaming.prefix")
         {

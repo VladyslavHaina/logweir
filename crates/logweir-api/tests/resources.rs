@@ -321,6 +321,55 @@ async fn a_declared_topic_mapping_is_checked_against_the_stored_prefix() {
         );
     }
 
+    // A DECLARATION IN `scratch` IS REFUSED BY NAME, and that is fail-closed
+    // rather than a gap. `logweir_core::spec::target_topic_prefix` reads the
+    // PLAN's `topic_mapping_prefix` in that mode, this route never parses the
+    // plan, so it holds no value it could check the rows against: a check
+    // against `topicNaming.prefix` there would pass a declaration that
+    // disagrees with the run and fail one that agrees with it. The independent
+    // review found the previous code checking one mode while the doc claimed
+    // both.
+    let mut scratch = support::restore_body(&plan);
+    scratch["target"]["mode"] = json!("scratch");
+    scratch["topicMapping"] = json!([{"source": "orders", "target": format!("{prefix}orders")}]);
+    let refused = app
+        .post(
+            &format!("/api/v1/namespaces/{NS_A}/restores"),
+            Some("mapping-scratch-0001"),
+            &scratch.to_string(),
+        )
+        .await;
+    refused.assert_problem(422, "validation_failed");
+    let scratch_error = &refused.json()["errors"][0];
+    assert_eq!(scratch_error["field"], "topicMapping");
+    assert_eq!(scratch_error["code"], "unsupported_for_mode");
+    assert!(
+        scratch_error["message"]
+            .as_str()
+            .unwrap()
+            .contains("topic_mapping_prefix"),
+        "the refusal names the key the runner actually reads there: {}",
+        scratch_error["message"]
+    );
+
+    // AND `scratch` WITHOUT A DECLARATION IS UNAFFECTED: the mode is not
+    // refused, only a declaration for it.
+    let mut scratch_bare = support::restore_body(&plan);
+    scratch_bare["target"]["mode"] = json!("scratch");
+    let ok_scratch = app
+        .post(
+            &format!("/api/v1/namespaces/{NS_A}/restores"),
+            Some("mapping-scratch-0002"),
+            &scratch_bare.to_string(),
+        )
+        .await;
+    assert_eq!(
+        ok_scratch.status,
+        201,
+        "{}",
+        String::from_utf8_lossy(&ok_scratch.body)
+    );
+
     // AND AN ABSENT DECLARATION IS EXACTLY WHAT THIS ROUTE DID BEFORE. No
     // field, no mapping errors, 201.
     let plain = app

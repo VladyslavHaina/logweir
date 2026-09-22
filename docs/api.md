@@ -610,17 +610,28 @@ list — the subset lives in the opaque plan bytes
 (`logweir_core::spec::SourceSpec::topics`) — so nothing here is persisted and
 the created object is byte-for-byte what it was before the field existed.
 
-**What it buys is a rail this service can check without parsing the plan**, and
-the service still parses nothing. The mapping rule is prefix concatenation and
-nothing else in this version — `logweir_core::spec::target_topic_prefix` gives
-the whole grammar, and there is no per-topic rename in it — and
-`target.topicNaming.prefix` **is** a stored field. So `prefix + source` is a
+**It is defined for `target.mode: newTopic` only.** `logweir_core::spec::target_topic_prefix`
+reads `target.topic_naming.prefix` for `newTopic` and the **plan's own**
+`topic_mapping_prefix` for `scratch` — and this route never parses the plan, so
+in `scratch` mode it does not hold the string the run would map through. A check
+against `topicNaming.prefix` there would be a verdict about a value the runner
+does not read: it would pass a declaration that disagrees with the run and fail
+one that agrees with it. This service does not check a value it does not have,
+so a declaration with `mode: scratch` is refused `topicMapping` /
+`unsupported_for_mode`. In that mode the rails are the console's own preview and
+the runner's phase 0.
+
+**For `newTopic`, what it buys is a rail this service can check without parsing
+the plan**, and the service still parses nothing. The mapping rule is prefix
+concatenation and nothing else — there is no per-topic rename in the grammar —
+and `target.topicNaming.prefix` **is** a stored field. So `prefix + source` is a
 pure function of the object about to be created, and a request whose preview and
 whose submission disagree is refused here rather than discovered in phase 0,
 after an approver has signed.
 
 | `errors[].field` | `errors[].code` | when |
 |---|---|---|
+| `topicMapping` | `unsupported_for_mode` | `target.mode` is `scratch`. The declaration is defined for `newTopic` only — see above. |
 | `topicMapping` | `empty` | the field is present with no rows. Omit it to declare none. |
 | `topicMapping` | `too_many` | more than 1000 rows. |
 | `topicMapping[i].source` | `invalid_topic` | the source is not a name a broker accepts (`^[a-zA-Z0-9._-]{1,249}$`). |

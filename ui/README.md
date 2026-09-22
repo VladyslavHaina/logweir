@@ -618,13 +618,28 @@ with the order of the clicks -- but the DUPLICATE check reads the raw list, so a
 repeated entry is refused rather than quietly deduplicated into a list that is
 not the one the page was given.
 
-**`topicMapping` rides on the product API's create REQUEST and is never stored.**
-`Restore.spec` has no topic list -- the subset lives in the opaque plan bytes --
-so the API recomputes every row from `target.topicNaming.prefix`, which it DOES
-store, and answers 422 when the preview and the submission disagree. In legacy
-mode the field is stripped before the object is sent (`client.js`), because the
+**One prefix value, and the grammar has two keys for it.** The runner's document
+carries `target.topic_naming.prefix` AND `target.topic_mapping_prefix`, and
+`logweir_core::spec::target_topic_prefix` reads the first for `newTopic` and the
+second for `scratch`. `setTopicPrefix` is the only thing in the wizard that
+writes either, and it writes both, so the preview is what the run maps through
+in **both** modes; `effectivePrefix` is the JavaScript half of that rule and is
+what `topicMapping` reads. Before this, only the first key moved on an edit, and
+in `scratch` the preview, the declaration and the API rail all named a prefix the
+run does not use.
+
+**`topicMapping` rides on the product API's create REQUEST, is never stored, and
+is sent for `newTopic` only.** `Restore.spec` has no topic list -- the subset
+lives in the opaque plan bytes -- so the API recomputes every row from
+`target.topicNaming.prefix`, which it DOES store, and answers 422 when the
+preview and the submission disagree. It refuses a declaration for `mode:
+scratch` (`unsupported_for_mode`), because the prefix the run reads there is in
+the plan and the API never parses one; the wizard therefore does not send it in
+that mode, and the rails there are its own preview and phase 0. In legacy mode
+the field is stripped before the object is sent (`client.js`), because the
 custom resource has nowhere to put it; there the plan bytes carry the same list,
-from the same call, and phase 0 reads them.
+from the same call, and phase 0 reads them. Both halves of that delivery are
+pinned in `ui/tests/client.spec.js`.
 
 **What a recovery changes, and what it does not**, beside the mapping, each from
 a contract constant or a plan field and never from prose this page invented:
@@ -657,8 +672,15 @@ create** (PLAT-11.2, D2 section 6.3's invalidation rule). `readinessRefusal` is
 checked on the button and again inside `submitRestore`, so a direct call cannot
 walk past it, and it refuses four states:
 
-* the result is about **another plan** -- the target, the prefix, the subset or
-  the point in time changed, so the hash moved. Both hashes are named;
+* the result is about **another plan** -- the prefix, the subset or the point in
+  time changed, so the hash moved. Both hashes are named;
+* the **target** changed. This one is handled a step earlier, in `selectTarget`,
+  and it has to be: two `KafkaCluster` objects with the same bootstrap servers
+  and the same auth render identical plan bytes, so the hash arm is blind to the
+  swap. D2 section 6.6 makes it stale anyway -- "choosing another target or
+  destination, or a recreated one, changes a referent UID, so the result is
+  stale" -- so a change of the selected UID drops the cached verdict and the
+  gate falls to its "nothing has run" arm;
 * the server says it is **stale or inapplicable**. The judgement is the
   server's, recomputed on every GET against the caller's own plan hash, never a
   comparison this page makes against a browser clock. `target.mappedTopics`
@@ -668,12 +690,13 @@ walk past it, and it refuses four states:
 * it is **not ready** -- which is where a target-topic collision lands, as
   `target.mappedTopics` / `MappedTopicExists`, named with its check id and code.
 
-**An ABSENT check is a warning, not a refusal.** D2 section 6.3's rule is about
+**An ABSENT check is a warning, not a refusal.** D2 section 6.6's rule is about
 a verdict that has stopped applying; the runner's phase 0 refuses a mapped topic
 that already exists whether or not a console asked first, and legacy mode has no
-readiness route at all. So an unchecked plan may be submitted, and step 6 says
-in words what has not been looked for. In legacy mode the step says the check
-could not run here.
+readiness route at all -- so its result is absent and it lands on this same arm,
+which says in words that nothing has looked for an existing target topic. There
+is no second arm beside it: an earlier draft had one keyed on a flag nothing in
+this wizard sets, which is a refusal-bypass no reader could reach.
 
 ## Retrying a failed restore to a fresh target
 
