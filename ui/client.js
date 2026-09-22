@@ -853,8 +853,15 @@ function projectApproval(item) {
     }
   }
   status.conditions = item.conditions.map(condition);
+  // THE CRD'S OWN SPELLING, `status.verifiedSubjectRef` (PLAT-19.2, found
+  // live). This used to project `status.verifiedSubject`, which no page reads:
+  // `approvals.js`'s `approvalState` reads `verifiedSubjectRef`, as the
+  // Approval object carries it in legacy mode, so in console mode a Verified
+  // Approval was shown "awaiting verification" for ever, a verdict bound to an
+  // older UID was never shown "bound to another execution", and the wizard
+  // never routed a verified submission to its operation view.
   if (item.verifiedSubject !== null) {
-    status.verifiedSubject = {
+    status.verifiedSubjectRef = {
       kind: item.verifiedSubject.kind,
       name: item.verifiedSubject.name,
       namespace: item.verifiedSubject.namespace,

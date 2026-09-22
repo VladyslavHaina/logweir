@@ -27,6 +27,7 @@ import {
 } from "../pages/restore-wizard.js";
 import {
   COUNTERSIGN_COMMAND,
+  approvalState,
   countersignOffered,
   policyMode,
   renderApprovalSubject,
@@ -166,6 +167,42 @@ test("the_policy_read_and_the_countersign_submission_are_the_two_published_route
       post.init.headers["Idempotency-Key"],
       undefined,
       "the route refuses a key: the Approval is named by the Restore's own approvalRef",
+    );
+  } finally {
+    wire.restore();
+  }
+});
+
+test("a_console_approval_verified_for_this_restore_reads_verified_and_an_older_uid_does_not", async () => {
+  // FOUND LIVE (PLAT-19.2): the client projected the verified subject as
+  // `status.verifiedSubject`, which no page reads; `approvalState` reads the
+  // CRD's `verifiedSubjectRef`. A console-mode Approval the controller had
+  // verified showed "awaiting verification" for ever.
+  await consoleMode();
+  const approval = fixture("console/approval.json");
+  const bound = approval.item.verifiedSubject;
+  const packet = fixture("console/approval-packet.json");
+  const wire = transport((u) => {
+    if (u === "/api/v1/namespaces/team-a/approvals/orders-drill-approval") {
+      return { status: 200, body: approval };
+    }
+    if (u === "/api/v1/namespaces/team-a/approvals/orders-drill-approval/packet") {
+      return { status: 200, body: packet };
+    }
+    return undefined;
+  });
+  try {
+    const read = await apiClient().get("team-a", "approvals", "orders-drill-approval");
+    assert.deepEqual(read.status.verifiedSubjectRef, bound, "the CRD's own spelling");
+    const subject = {
+      ns: "team-a", kind: "Restore", name: bound.name, uid: bound.uid,
+      planHash: approval.item.planHash,
+    };
+    assert.equal(approvalState(read, subject).state, "verified");
+    // The control: the same verdict about an OLDER object of this name.
+    assert.equal(
+      approvalState(read, Object.assign({}, subject, { uid: "uid-of-a-newer-restore" })).state,
+      "foreign-execution",
     );
   } finally {
     wire.restore();

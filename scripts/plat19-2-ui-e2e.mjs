@@ -684,7 +684,8 @@ async function main() {
     }
     check(verified !== null, "the lab controller verified the minted Approval");
     save("03-legacy-approval-verified.json", { status: verified.status });
-    await page.goto(ui + gHash, { waitUntil: "load" });
+    // A goto to the SAME hash is a same-document no-op; reload reads again.
+    await page.reload({ waitUntil: "load" });
     await waitForText(page, "approved: verified by weirkeeper", "the Verified state on the page");
     await shot(page, "03-legacy-verified");
     record("unbound (legacy-governed-v1): Awaiting approval, then Verified with an Approval", {
