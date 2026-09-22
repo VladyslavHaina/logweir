@@ -2141,6 +2141,12 @@ function requestBody(plural, object) {
       },
       deadlineSeconds: spec.deadlineSeconds,
     };
+    if (spec.sourceDestinationRef !== undefined) {
+      body.sourceDestinationRef = { name: spec.sourceDestinationRef.name };
+    }
+    if (spec.evidenceDestinationRef !== undefined) {
+      body.evidenceDestinationRef = { name: spec.evidenceDestinationRef.name };
+    }
     // THE DECLARED MAPPING RIDES ON THE REQUEST AND NOT ON THE OBJECT
     // (PLAT-11.2). `Restore.spec` has no topic list, so this travels beside
     // the create body the wizard built: the product API recomputes every row

@@ -98,6 +98,83 @@ async fn plan_bytes_are_stored_byte_for_byte_and_never_reserialized() {
 }
 
 #[tokio::test]
+async fn saved_restore_destinations_are_validated_and_stored_as_a_pair() {
+    let app = TestApp::new();
+    let plan = support::golden_plan();
+    let mut body = support::restore_body(&plan);
+    body["sourceArchive"] = json!({"url": "logweir-destination://primary"});
+    body["sourceDestinationRef"] = json!({"name": "primary"});
+    body["evidenceDestinationRef"] = json!({"name": "evidence"});
+    let created = app
+        .post(
+            &format!("/api/v1/namespaces/{NS_A}/restores"),
+            Some("saved-destinations-01"),
+            &body.to_string(),
+        )
+        .await;
+    assert_eq!(
+        created.status,
+        201,
+        "{}",
+        String::from_utf8_lossy(&created.body)
+    );
+    let name = created.json()["item"]["name"].as_str().unwrap().to_string();
+    let stored = app.fake.object("restores", NS_A, &name).unwrap();
+    assert_eq!(stored["spec"]["sourceDestinationRef"]["name"], "primary");
+    assert_eq!(stored["spec"]["evidenceDestinationRef"]["name"], "evidence");
+    assert_eq!(
+        stored["spec"]["sourceArchive"],
+        json!({"url": "logweir-destination://primary"})
+    );
+
+    for (key, value, field, code) in [
+        (
+            "evidenceDestinationRef",
+            Value::Null,
+            "evidenceDestinationRef",
+            "required_together",
+        ),
+        (
+            "sourceArchive",
+            json!({"url": "logweir-destination://other"}),
+            "sourceArchive.url",
+            "destination_sentinel_mismatch",
+        ),
+        (
+            "sourceArchive",
+            json!({"url": "logweir-destination://primary", "credentialRef": {"name": "legacy"}}),
+            "sourceArchive.credentialRef",
+            "destination_owns_credential",
+        ),
+    ] {
+        let mut refused = body.clone();
+        if value.is_null() {
+            refused.as_object_mut().unwrap().remove(key);
+        } else {
+            refused[key] = value;
+        }
+        let response = app
+            .post(
+                &format!("/api/v1/namespaces/{NS_A}/restores"),
+                Some(&format!("saved-destination-refusal-{code}")),
+                &refused.to_string(),
+            )
+            .await;
+        response.assert_problem(422, "validation_failed");
+        assert!(
+            response.json()["errors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|error| error["field"] == field && error["code"] == code),
+            "{field}/{code}: {}",
+            response.json()
+        );
+    }
+    app.fake.assert_strict();
+}
+
+#[tokio::test]
 async fn a_plan_hash_that_does_not_match_the_bytes_is_refused() {
     let app = TestApp::new();
     let plan = support::golden_plan();

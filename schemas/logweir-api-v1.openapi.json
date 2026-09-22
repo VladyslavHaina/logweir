@@ -7157,6 +7157,11 @@
             "type": "integer",
             "format": "int64"
           },
+          "evidenceDestinationRef": {
+            "description": "The saved destination evidence is written to. Set together with `sourceDestinationRef`.",
+            "$ref": "#/components/schemas/NameRef",
+            "nullable": true
+          },
           "planBytes": {
             "description": "The exact plan document bytes the approval will bind, at most 256 KiB.",
             "type": "string"
@@ -7172,6 +7177,11 @@
           "sourceArchive": {
             "description": "The archive to restore from.",
             "$ref": "#/components/schemas/ArchiveRequest"
+          },
+          "sourceDestinationRef": {
+            "description": "The saved destination the archive is read from. Set together with `evidenceDestinationRef`; when set, `sourceArchive.url` is the `logweir-destination://<name>` sentinel and carries no credential.",
+            "$ref": "#/components/schemas/NameRef",
+            "nullable": true
           },
           "target": {
             "description": "Where the restore writes.",

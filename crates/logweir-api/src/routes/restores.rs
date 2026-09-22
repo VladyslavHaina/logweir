@@ -204,7 +204,58 @@ pub fn validate_create(request: &CreateRestoreRequest) -> Result<DateTime<Utc>, 
             "must be a Kubernetes object name",
         ));
     }
-    super::schedules::validate_archive("sourceArchive", &request.source_archive, &mut errors);
+    match (
+        request.source_destination_ref.as_ref(),
+        request.evidence_destination_ref.as_ref(),
+    ) {
+        (Some(source), Some(evidence)) => {
+            for (field, reference) in [
+                ("sourceDestinationRef.name", source),
+                ("evidenceDestinationRef.name", evidence),
+            ] {
+                if !validate::is_dns_subdomain(&reference.name) {
+                    errors.push(FieldError::new(
+                        field,
+                        "invalid_name",
+                        "must be a Kubernetes object name",
+                    ));
+                }
+            }
+            let expected = format!("logweir-destination://{}", source.name);
+            if request.source_archive.url != expected {
+                errors.push(FieldError::new(
+                    "sourceArchive.url",
+                    "destination_sentinel_mismatch",
+                    format!(
+                        "must be `{expected}` when sourceDestinationRef names `{}`",
+                        source.name
+                    ),
+                ));
+            }
+            if request.source_archive.credential_ref.is_some() {
+                errors.push(FieldError::new(
+                    "sourceArchive.credentialRef",
+                    "destination_owns_credential",
+                    "must be absent when sourceDestinationRef is set",
+                ));
+            }
+        }
+        (None, None) => super::schedules::validate_archive(
+            "sourceArchive",
+            &request.source_archive,
+            &mut errors,
+        ),
+        (Some(_), None) => errors.push(FieldError::new(
+            "evidenceDestinationRef",
+            "required_together",
+            "is required when sourceDestinationRef is set",
+        )),
+        (None, Some(_)) => errors.push(FieldError::new(
+            "sourceDestinationRef",
+            "required_together",
+            "is required when evidenceDestinationRef is set",
+        )),
+    }
     if !is_backup_set_ref(&request.backup_set_ref) {
         errors.push(FieldError::new(
             "backupSetRef",
@@ -322,11 +373,12 @@ pub fn build(
                         name: r.name.clone(),
                     }),
             },
-            // D2 W6b's saved destinations are not an API route yet: this
-            // route takes an inline archive, so both refs are absent and the
-            // object behaves exactly as it did before the fields existed.
-            source_destination_ref: None,
-            evidence_destination_ref: None,
+            source_destination_ref: request.source_destination_ref.as_ref().map(|r| LocalRef {
+                name: r.name.clone(),
+            }),
+            evidence_destination_ref: request.evidence_destination_ref.as_ref().map(|r| LocalRef {
+                name: r.name.clone(),
+            }),
             backup_set_ref: request.backup_set_ref.clone(),
             point_in_time,
             target: RestoreTarget {

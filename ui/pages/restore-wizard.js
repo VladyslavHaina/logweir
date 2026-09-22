@@ -2447,27 +2447,37 @@ export function restoreBody(state, prepared) {
   const p = prepared || {};
   const fields = s.fields || {};
   const target = fields.target || {};
+  const destination = (((s.point || {}).spec || {}).destinationRef) || {};
   const sourceArchive = { url: s.archiveUrl };
-  if (typeof s.archiveSecretName === "string" && s.archiveSecretName.length > 0) {
+  if (
+    (typeof destination.name !== "string" || destination.name.length === 0) &&
+    typeof s.archiveSecretName === "string" &&
+    s.archiveSecretName.length > 0
+  ) {
     sourceArchive.secretRef = { name: s.archiveSecretName };
+  }
+  const spec = {
+    planBytes: p.bytes,
+    approvalRef: { name: p.approvalName },
+    sourceArchive: sourceArchive,
+    backupSetRef: fields.backupSetRef,
+    pointInTime: fields.pointInTime,
+    target: {
+      clusterRef: { name: s.targetClusterName },
+      mode: target.mode,
+      topicNaming: { prefix: target.topicPrefix },
+    },
+    deadlineSeconds: typeof s.deadlineSeconds === "number" ? s.deadlineSeconds : 3600,
+  };
+  if (typeof destination.name === "string" && destination.name.length > 0) {
+    spec.sourceDestinationRef = { name: destination.name };
+    spec.evidenceDestinationRef = { name: destination.name };
   }
   return {
     apiVersion: "logweir.dev/v1alpha1",
     kind: "Restore",
     metadata: { name: p.restoreName },
-    spec: {
-      planBytes: p.bytes,
-      approvalRef: { name: p.approvalName },
-      sourceArchive: sourceArchive,
-      backupSetRef: fields.backupSetRef,
-      pointInTime: fields.pointInTime,
-      target: {
-        clusterRef: { name: s.targetClusterName },
-        mode: target.mode,
-        topicNaming: { prefix: target.topicPrefix },
-      },
-      deadlineSeconds: typeof s.deadlineSeconds === "number" ? s.deadlineSeconds : 3600,
-    },
+    spec: spec,
     // THE MAPPING THE PREVIEW SHOWED, DECLARED BESIDE THE REQUEST (PLAT-11.2).
     // `Restore.spec` has no topic list -- the subset lives in the plan bytes --
     // so this rides on the create REQUEST and is dropped by the API server in

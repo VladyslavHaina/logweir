@@ -602,6 +602,41 @@ test("the_submitted_plan_is_the_reviewed_object_and_its_own_hash", async () => {
   }
 });
 
+test("a_saved_restore_destination_reaches_the_product_api_create_request", async () => {
+  await console_();
+  const fields = fixture("plan-fields.json");
+  const reviewed = await preparePlanDocument(fields);
+  const wire = transport((u, init) =>
+    init.method === "POST" ? { status: 201, body: fixture("console/restore.json") } : undefined);
+  try {
+    await apiClient().create("team-a", "restores", {
+      apiVersion: "logweir.dev/v1alpha1",
+      kind: "Restore",
+      metadata: { name: reviewed.restoreName },
+      spec: {
+        planBytes: reviewed.bytes,
+        approvalRef: { name: reviewed.approvalName },
+        sourceArchive: { url: "logweir-destination://primary" },
+        sourceDestinationRef: { name: "primary" },
+        evidenceDestinationRef: { name: "primary" },
+        backupSetRef: "01JB7Z0000000000000000000B",
+        pointInTime: "2026-09-11T12:00:00Z",
+        target: {
+          clusterRef: { name: "orders-target" }, mode: "newTopic",
+          topicNaming: { prefix: "restore-20260911T120000Z-" },
+        },
+        deadlineSeconds: 3600,
+      },
+    });
+    const sent = JSON.parse(wire.seen[0].init.body);
+    assert.deepEqual(sent.sourceDestinationRef, { name: "primary" });
+    assert.deepEqual(sent.evidenceDestinationRef, { name: "primary" });
+    assert.deepEqual(sent.sourceArchive, { url: "logweir-destination://primary" });
+  } finally {
+    wire.restore();
+  }
+});
+
 test("the_declared_topic_mapping_reaches_the_product_api_and_never_the_custom_resource", async () => {
   // THE DELIVERY SEAM, WHICH IS THE ONLY PATH THAT CARRIES THE DECLARATION AND
   // HAD NO TEST (found by the independent review). `restoreBody` builds the

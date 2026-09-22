@@ -1026,6 +1026,15 @@ pub struct CreateRestoreRequest {
     pub approval_ref: NameRef,
     /// The archive to restore from.
     pub source_archive: ArchiveRequest,
+    /// The saved destination the archive is read from. Set together with
+    /// `evidenceDestinationRef`; when set, `sourceArchive.url` is the
+    /// `logweir-destination://<name>` sentinel and carries no credential.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_destination_ref: Option<NameRef>,
+    /// The saved destination evidence is written to. Set together with
+    /// `sourceDestinationRef`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_destination_ref: Option<NameRef>,
     /// The backup set ID inside the archive.
     pub backup_set_ref: String,
     /// The RFC 3339 point in time to restore to.

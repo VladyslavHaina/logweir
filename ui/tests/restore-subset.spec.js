@@ -353,6 +353,13 @@ test("the_readiness_request_uses_a_saved_destination_and_only_legacy_points_send
   assert.match(savedSentence, /saved destination `primary`/);
   assert.match(savedSentence, new RegExp(destinationBacked.point.status.locationDigest),
     "the page names the frozen digest the controller compares; it does not recompute one");
+  const create = restoreBody(destinationBacked, {
+    bytes: prepared.bytes, hash: prepared.hash, restoreName: "rst-x", approvalName: "apr-x",
+  });
+  assert.deepEqual(create.spec.sourceDestinationRef, { name: "primary" });
+  assert.deepEqual(create.spec.evidenceDestinationRef, { name: "primary" });
+  assert.deepEqual(create.spec.sourceArchive, { url: destinationBacked.point.spec.archive.url },
+    "the saved destination owns its credential; an old inline secret does not leak through");
 
   const legacy = wizardState();
   assert.equal(legacy.point.spec.destinationRef, undefined, "the fixture is a legacy point");
@@ -363,6 +370,11 @@ test("the_readiness_request_uses_a_saved_destination_and_only_legacy_points_send
     url: "s3://kafka-backups/drill-demo",
     credentialRef: { name: "logweir-s3" },
   });
+  const legacyCreate = restoreBody(legacy, {
+    bytes: prepared.bytes, hash: prepared.hash, restoreName: "rst-x", approvalName: "apr-x",
+  });
+  assert.equal(legacyCreate.spec.sourceDestinationRef, undefined);
+  assert.equal(legacyCreate.spec.evidenceDestinationRef, undefined);
   assert.match(readinessSourceSentence(legacy.point), /Legacy recovery point/);
 });
 
