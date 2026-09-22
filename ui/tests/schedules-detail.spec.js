@@ -19,8 +19,15 @@ import { fileURLToPath } from "node:url";
 
 import {
   ARCHIVED_SCHEDULE_SENTENCE,
+  CATALOG_EXPIRED_SENTENCE,
+  CATALOG_TRUNCATED_SENTENCE,
   CATALOG_UNREADABLE_SENTENCE,
+  CATALOG_VIEW_EXPIRED,
   NOT_IN_CATALOG,
+  OUTSIDE_CATALOG_VIEW,
+  destinationCell,
+  latestRestorablePoint,
+  renderScheduleFacts,
   NO_HISTORY_SENTENCE,
   NO_POINTS_SENTENCE,
   TWO_VERDICTS_SENTENCE,
@@ -399,7 +406,11 @@ test("a_deleted_schedule_keeps_its_history_and_says_the_schedule_is_gone", () =>
   assert.match(ARCHIVED_SCHEDULE_SENTENCE, /a DIFFERENT schedule/);
   // THE HISTORY AND THE RESTORES ARE STILL THERE.
   assert.match(html, /nightly-ok/);
-  assert.equal((html.match(/Restore this point/g) || []).length, 2);
+  // The healthy point keeps its Restore; `nightly-gone` joins the catalog's
+  // Missing set, so the catalog rules it out and it is not offered (review
+  // MEDIUM-2) -- its row says why instead.
+  assert.equal((html.match(/Restore this point/g) || []).length, 1);
+  assert.equal((html.match(/data-restore-refused="catalog"/g) || []).length, 1);
   assert.doesNotMatch(html, /id="schedule-restore-latest"/,
     "a deleted name has no single latest point across historical UIDs");
   assert.match(html, /data-archived-schedule-uid="old-uid-a"/);
@@ -446,15 +457,36 @@ test("a_recreated_schedule_does_not_inherit_the_previous_ones_runs", () => {
   // NEGATIVE CONTROL 1: with no earlier runs the section is not rendered at
   // all, so its presence above means something.
   assert.equal(renderEarlierRuns(NS, []), "");
-  // NEGATIVE CONTROL 2: a run with NO schedule uid at all -- what every run
-  // created before the uid label existed looks like -- is counted as this
-  // schedule's rather than exiled, because there is nothing to tell them apart
-  // by and the name is what the controller wrote.
+  // A RUN WITH NO SCHEDULE UID AT ALL -- what every run created before the uid
+  // label existed looks like -- is neither this schedule's nor provably an
+  // earlier one's (review LOW-1): it is its own group, never `mine`, so it can
+  // never become this schedule's "Latest recovery point".
   const legacy = runsOfSchedule("nightly", SCHEDULE_UID, {
-    items: [run("legacy-1", "Succeeded", { backupId: "set-healthy", scheduleUid: "" })],
+    items: [
+      run("legacy-1", "Succeeded", { backupId: "set-healthy", scheduleUid: "", createdAt: "2026-09-21T00:00:00Z" }),
+      run("mine-1", "Succeeded", { backupId: "set-healthy", createdAt: "2026-09-19T00:00:00Z" }),
+    ],
   });
-  assert.deepEqual(legacy.mine.map((r) => r.metadata.name), ["legacy-1"]);
+  assert.deepEqual(legacy.mine.map((r) => r.metadata.name), ["mine-1"]);
+  assert.deepEqual(legacy.legacy.map((r) => r.metadata.name), ["legacy-1"]);
   assert.deepEqual(legacy.earlier, []);
+  const detail = renderScheduleDetail({
+    ns: NS, name: "nightly", object: schedule(), runs: legacy, points: POINTS,
+    extra: { cards: { nightly: {} }, mayOperate: true },
+  });
+  assert.match(detail, /id="schedule-legacy-runs"/);
+  assert.match(detail, /legacy-1/);
+  // NEGATIVE CONTROL: the newer, uid-less run is NOT the latest point; the
+  // schedule's own older run is.
+  const latest = detail.slice(detail.indexOf("id=\"schedule-latest-point\""));
+  assert.match(latest.slice(0, 400), /mine-1/);
+  assert.doesNotMatch(latest.slice(0, 400), /legacy-1/);
+  // And with no uid-less run the section is not rendered at all.
+  assert.doesNotMatch(renderScheduleDetail({
+    ns: NS, name: "nightly", object: schedule(),
+    runs: { mine: legacy.mine, earlier: [], legacy: [] }, points: POINTS,
+    extra: { cards: { nightly: {} }, mayOperate: true },
+  }), /id="schedule-legacy-runs"/);
 });
 
 // ===========================================================================
@@ -570,4 +602,149 @@ test("the_catalog_fixture_the_console_ships_renders_through_these_columns", () =
   assert.equal((html.match(/badge-green/g) || []).length, 0,
     "no set in this fixture is wholly available and wholly selectable, so nothing is green");
   assert.match(html, /5 points/, "and the multi-point set says how many points it holds");
+});
+
+// ===========================================================================
+// Review fix round (2026-09-22): the view's window flags, and restores the
+// catalog rules out
+// ===========================================================================
+
+/** A cell's badge word, as rendered, so a sentence that merely MENTIONS a word
+ *  (the notes do) is never mistaken for the verdict itself. */
+const cellSays = (html, word) => html.indexOf("\">" + word + "</span>") !== -1;
+
+test("an_expired_catalog_view_is_catalog_view_expired_and_never_not_in_the_catalog", async () => {
+  // REVIEW HIGH-2: `viewExpired` means the sync Job's TTL collected the pages
+  // -- "the window aged out and NOT that the archive is empty" (docs/api.md).
+  const result = await readSchedulePoints(null, NS, null, {
+    listCatalogs: async () => ({ items: [{ metadata: { name: "primary" } }] }),
+    readPoints: async () => ({ items: [], page: { nextCursor: null }, truncated: false,
+      viewExpired: true }),
+  });
+  assert.equal(result.error, null, "an expired view is not a failed read");
+  assert.equal(result.window, "expired");
+  const html = renderScheduleHistory(NS, schedule(), [
+    run("aged", "Succeeded", { backupId: "set-healthy" }),
+  ], result.points, result.error, undefined, result.window);
+  assert.ok(cellSays(html, CATALOG_VIEW_EXPIRED), "the row says the view expired");
+  assert.ok(!cellSays(html, NOT_IN_CATALOG), "and makes no absence claim about the archive");
+  assert.match(html, /id="schedule-catalog-expired"/);
+  assert.ok(html.indexOf(CATALOG_EXPIRED_SENTENCE.replace(/'/g, "&#39;")) !== -1);
+  assert.equal((html.match(/badge-green/g) || []).length, 0);
+});
+
+test("a_truncated_view_calls_an_unlisted_run_outside_the_view_and_keeps_the_listed_ones", async () => {
+  // REVIEW HIGH-2: `truncated` -- the archive holds more points than the view
+  // carries, so a schedule older than the view limit has runs the view cannot
+  // list. They are outside the view, not absent from the archive.
+  const result = await readSchedulePoints(null, NS, null, {
+    listCatalogs: async () => ({ items: [{ metadata: { name: "primary" } }] }),
+    readPoints: async () => ({
+      items: [{ backupId: "set-healthy", availability: "Available", verification: "Verified",
+        selectable: true }],
+      page: { nextCursor: null }, truncated: true, viewExpired: false,
+    }),
+  });
+  assert.equal(result.error, null);
+  assert.equal(result.window, "truncated");
+  const html = renderScheduleHistory(NS, schedule(), [
+    run("listed", "Succeeded", { backupId: "set-healthy" }),
+    run("older", "Succeeded", { backupId: "set-older-than-the-view" }),
+  ], result.points, result.error, undefined, result.window);
+  assert.ok(cellSays(html, "Available"), "the listed run keeps the catalog's own word");
+  assert.ok(cellSays(html, OUTSIDE_CATALOG_VIEW), "the unlisted run is outside the view");
+  assert.ok(!cellSays(html, NOT_IN_CATALOG), "and is never called absent");
+  assert.match(html, /id="schedule-catalog-truncated"/);
+  assert.ok(html.indexOf(CATALOG_TRUNCATED_SENTENCE.replace(/'/g, "&#39;")) !== -1);
+});
+
+test("only_a_complete_current_view_may_say_not_in_the_catalog_and_a_failed_read_dominates", async () => {
+  // NEGATIVE CONTROL for the two rows above: the same unlisted run under a
+  // complete, current view IS "not in the catalog", so the words above are the
+  // flags' doing and not a renderer that no longer emits the absence word.
+  const healthy = await readSchedulePoints(null, NS, null, {
+    listCatalogs: async () => ({ items: [{ metadata: { name: "primary" } }] }),
+    readPoints: async () => ({ items: [], page: { nextCursor: null }, truncated: false,
+      viewExpired: false }),
+  });
+  assert.equal(healthy.window, null);
+  const fine = renderScheduleHistory(NS, schedule(), [
+    run("unlisted", "Succeeded", { backupId: "set-never-listed" }),
+  ], healthy.points, healthy.error, undefined, healthy.window);
+  assert.ok(cellSays(fine, NOT_IN_CATALOG));
+  assert.doesNotMatch(fine, /id="schedule-catalog-(expired|truncated|unreadable)"/);
+
+  // PRECEDENCE: a read that lost a page is "catalog incomplete" even if the
+  // pages it did read were expired or truncated.
+  const mixed = await readSchedulePoints(null, NS, null, {
+    listCatalogs: async () => ({ items: [{ metadata: { name: "a" } }, { metadata: { name: "b" } }] }),
+    readPoints: async (name) => (name === "a"
+      ? { items: [], page: { nextCursor: null }, truncated: true, viewExpired: true }
+      : { items: [], page: { nextCursor: null }, incomplete: true }),
+  });
+  assert.equal(mixed.window, "expired");
+  assert.equal(mixed.error.reason, "CatalogViewIncomplete");
+  const worst = renderScheduleHistory(NS, schedule(), [
+    run("unlisted", "Succeeded", { backupId: "set-never-listed" }),
+  ], mixed.points, mixed.error, undefined, mixed.window);
+  assert.ok(cellSays(worst, "catalog incomplete"));
+  assert.ok(!cellSays(worst, CATALOG_VIEW_EXPIRED));
+});
+
+test("the_page_level_restore_skips_a_set_the_catalog_marks_not_selectable", () => {
+  // REVIEW MEDIUM-2: the newest set's manifest is gone (catalog `Missing`,
+  // `selectable: false`) and an older set is healthy. The page's primary
+  // Restore must be the older one, and say why the newer is not offered.
+  const newest = run("newest", "Succeeded", { backupId: "set-gone", createdAt: "2026-09-21T02:30:00Z" });
+  const older = run("older", "Succeeded", { backupId: "set-healthy", createdAt: "2026-09-19T02:30:00Z" });
+  const runs = [newest, older];
+  const choice = latestRestorablePoint(runs, POINTS);
+  assert.equal(choice.point.metadata.name, "older");
+  assert.deepEqual(choice.skipped.map((r) => r.metadata.name), ["newest"]);
+  const latest = renderLatestPointAction(NS, runs, POINTS, null);
+  assert.match(latest, /id="schedule-restore-latest"/);
+  assert.match(latest, /uid=uid-older/, "the offered Restore is the healthy older set");
+  assert.doesNotMatch(latest, /uid=uid-newest/, "and never the set the catalog rules out");
+  assert.match(latest, /id="schedule-latest-skipped"/);
+  assert.match(latest, /newest/);
+  assert.match(latest, /Missing/);
+  // The row of the ruled-out set offers no Restore of its own either.
+  const history = renderScheduleHistory(NS, schedule(), runs, POINTS, null);
+  const newestRow = history.slice(history.indexOf(">newest<"), history.indexOf(">older<"));
+  assert.match(newestRow, /data-restore-refused="catalog"/);
+  assert.doesNotMatch(newestRow, /Restore this point/);
+  // And the facts' protection age is the offered point's.
+  const facts = renderScheduleFacts(schedule(), { mine: runs }, [], "2026-09-22T00:00:00Z", POINTS);
+  assert.match(facts, /Latest restorable point<\/dt><dd>older</);
+
+  // NEGATIVE CONTROL 1: with no catalog answer about the newest set, the newest
+  // IS offered -- the skip above is the catalog's verdict, not "prefer older".
+  const unlisted = renderLatestPointAction(NS, [
+    run("newest", "Succeeded", { backupId: "set-unlisted", createdAt: "2026-09-21T02:30:00Z" }),
+    older,
+  ], POINTS, null);
+  assert.match(unlisted, /uid=uid-newest/);
+  assert.doesNotMatch(unlisted, /id="schedule-latest-skipped"/);
+  // NEGATIVE CONTROL 2: when the catalog rules out every set, nothing is offered.
+  const none = renderLatestPointAction(NS, [newest], POINTS, null);
+  assert.doesNotMatch(none, /id="schedule-restore-latest"/);
+  assert.match(none, /No recovery point of this schedule is restorable/);
+});
+
+test("a_failed_destinations_read_is_said_as_such_and_never_as_an_absent_destination", () => {
+  // REVIEW LOW-4: a transient failure of GET .../destinations made the facts
+  // panel assert that the destination does not exist.
+  const object = schedule();
+  const failed = destinationCell(object, [], true);
+  assert.match(failed, /could not read the destinations/);
+  assert.doesNotMatch(failed, /no destination of that name is in this namespace/);
+  const detail = renderScheduleDetail({
+    ns: NS, name: "nightly", object: object, runs: { mine: [], earlier: [] }, points: [],
+    extra: { cards: { nightly: {} }, mayOperate: true, destinations: [],
+      destinationsUnavailable: true },
+  });
+  assert.match(detail, /could not read the destinations/);
+  // NEGATIVE CONTROL: a SUCCESSFUL read that lacks the name still says it is
+  // absent, so the sentence above is the failed read's.
+  assert.match(destinationCell(object, [], false), /no destination of that name is in this namespace/);
 });

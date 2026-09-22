@@ -1404,6 +1404,15 @@ topic list because what it will cover is decided per run by a discovery. It does
 **not** gate the create: a readiness check is a statement about the minute it ran
 in, and a credential can be rotated in the next one.
 
+**A verdict belongs to the request it answered.** The form records the exact
+readiness request it sent; once the source, destination or topics no longer
+describe that request, the verdict is replaced by a stale note
+(`data-readiness="stale"`) rather than shown beside inputs it was not about. A
+refused or failed start is an answer too: the Check button stays, the refusal is
+shown beside it (`#schedule-readiness-error`), and its field errors
+(`backup.topics`, `backup.sourceConnection`, `backup.destination`) are placed on
+the inputs they name.
+
 **A successful create navigates to the new schedule**, carrying the name the
 *server* minted -- in console mode that is `sch-<hash>` from the idempotency
 scope and not the name typed into the form. That is 10.1's first-run redirect,
@@ -1447,6 +1456,21 @@ that nobody has looked. A catalog that cannot be read at all -- legacy mode has
 no route for the point list -- says so in its own words and still colours
 nothing.
 
+**Only a complete, current view may say `not in the catalog`.** The points
+route answers with the view's own coverage (`docs/api.md`), and a run the view
+does not list is named by it, never by a guess:
+
+| The view says | An unlisted run reads | Why |
+| --- | --- | --- |
+| a page vanished mid-read (`incomplete`), a page failed, or the page budget ran out | `catalog incomplete` | the read is partial; nothing about the archive follows |
+| `viewExpired: true` | `catalog view expired` | the sync Job's TTL collected the pages -- the window aged out, not the archive |
+| `truncated: true` | `outside the catalog view` | the archive holds more points than the view's `sync.viewLimit`; an older run may be in the archive |
+| none of the above | `not in the catalog` | a complete, current view that has looked and does not list it |
+
+A failed or partial read dominates, then an expired view, then a truncated one;
+each also puts a note above the table (`#schedule-catalog-unreadable`,
+`#schedule-catalog-expired`, `#schedule-catalog-truncated`).
+
 ### Paused, and deleted
 
 A **paused** schedule keeps its history and its restores: suspension stops
@@ -1468,10 +1492,30 @@ predecessor's runs would attribute one policy's protection to another.
 Every restore on this page is PLAT-11.1's deep link, built by
 `restorePointRoute` -- `#/restore?ns=&backup=&uid=` -- and the wizard is
 untouched by this task. The page-level "Restore from this point" takes the
-newest recovery point and the per-row links take their own, so choosing an older
-one is a different link and not the same link with a row highlighted. A row that
-is not a recovery point (`isRecoveryPoint`: `Succeeded`, with a backup set id
-and a covered window) offers no link, because there is no plan to build.
+newest recovery point **the catalog does not rule out** and the per-row links
+take their own, so choosing an older one is a different link and not the same
+link with a row highlighted. A row that is not a recovery point
+(`isRecoveryPoint`: `Succeeded`, with a backup set id and a covered window)
+offers no link, because there is no plan to build.
+
+**The catalog can rule a point out.** A set the catalog lists with any point
+not `selectable` (a `Missing` manifest, an untrusted signer) offers no row link
+-- the row says the catalog marks it not selectable -- and is never the
+page-level Restore or the "Latest restorable point" whose age the facts report.
+A newer set skipped that way is named beside the offered one. A run the view
+does not list is not ruled out by it: the catalog has said nothing, and the
+row's verdict words say which of the four cases above applies.
+
+**Runs with no schedule UID are their own group.** A run naming this schedule
+in `spec.scheduleRef` with no `uid` -- what runs created before the UID was
+recorded look like -- could be this schedule's or an earlier same-name
+schedule's, so the live detail lists it under "Runs naming this schedule
+without a schedule UID" and never counts it as this schedule's latest point.
+
+**Every action re-reads this page.** A successful pause, resume, policy save or
+Back up now re-mounts the detail from the API server's current objects (the
+run-now panel keeps its result across the re-read), and never the namespace
+list.
 
 ## The operation route, and the run it names
 

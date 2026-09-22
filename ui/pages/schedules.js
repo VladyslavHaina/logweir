@@ -236,7 +236,7 @@ export const NO_SCHEDULE_SENTENCE =
   "Backup at each slot of its cron schedule.";
 
 /** The schedules table. NAME, SCHEDULE, SUSPEND, LAST, NEXT, READY. */
-export function renderScheduleList(input, destinations) {
+export function renderScheduleList(input, destinations, destinationsUnavailable) {
   const rows = itemsOf(input).map((object) => {
     const spec = object.spec || {};
     const status = object.status || {};
@@ -247,7 +247,7 @@ export function renderScheduleList(input, destinations) {
       // is where its history and its bound actions are.
       detailLink("schedules", String(meta.namespace || ""), String(meta.name || "")),
       "<code>" + cell(spec.schedule) + "</code>",
-      destinationCell(object, destinations),
+      destinationCell(object, destinations, destinationsUnavailable === true),
       suspendBadge(spec),
       cell(status.lastFireTime),
       cell(status.nextFireTime),
@@ -281,7 +281,7 @@ export function renderScheduleList(input, destinations) {
  *  A schedule with no `destinationRef` carries an inline archive, which is
  *  what every schedule written before PLAT-06.2 carries, and the cell says so
  *  rather than leaving a blank that reads as "none". */
-export function destinationCell(object, destinations) {
+export function destinationCell(object, destinations, unavailable) {
   const spec = (object || {}).spec || {};
   const ref = spec.destinationRef;
   const name = ref === null || ref === undefined ? "" : String(ref.name || "");
@@ -290,6 +290,13 @@ export function destinationCell(object, destinations) {
     return typeof url === "string" && url.length > 0
       ? badge("pending", "inline archive") + " <code>" + esc(url) + "</code>"
       : ABSENT;
+  }
+  if (unavailable === true) {
+    // THE PAGE READ NOTHING (review LOW-4), so it says that and makes no claim
+    // about whether the destination exists.
+    return badge("pending", "names " + name) +
+      " <span class=\"note\">this page could not read the destinations in this namespace, so " +
+      "it cannot say where this schedule writes</span>";
   }
   const all = Array.isArray(destinations) ? destinations : [];
   const found = all.find((d) => d.name === name);
@@ -1227,7 +1234,12 @@ export function renderScheduleForm(view) {
     "<fieldset class=\"form-body\"" + (pending ? " disabled" : "") + ">" +
     "<div class=\"field\"><label for=\"schedule-name\">name</label>" +
     "<input id=\"schedule-name\" name=\"name\" required value=\"" + esc(d.name) + "\"" +
-    invalidAttributes("schedule-name", errors.name) + ">" +
+    (invalidAttributes("schedule-name", errors.name).length > 0
+      ? invalidAttributes("schedule-name", errors.name)
+        .replace("aria-describedby=\"schedule-name-error\"",
+          "aria-describedby=\"schedule-name-error schedule-name-help\"")
+      : " aria-describedby=\"schedule-name-help\"") + ">" +
+    "<p class=\"help\" id=\"schedule-name-help\">" + esc(SCHEDULE_NAME_HELP) + "</p>" +
     fieldErrorLine("schedule-name", errors.name) + "</div>" +
     renderClusterSelector({
       id: "schedule-source",
@@ -1275,6 +1287,13 @@ export function renderScheduleForm(view) {
   );
 }
 
+/** Beside the name field (review LOW-5): in console mode the product API names
+ *  the object itself, so the typed name is not the object's name there. */
+export const SCHEDULE_NAME_HELP =
+  "Through the product API (console mode) the schedule is named sch-<hash> from this " +
+  "request's idempotency key, and this name is not used; through kubectl proxy it is the " +
+  "object's name. Either way the page opens the created schedule by the name the server gave it.";
+
 /** The panel name the create form's shared field renderers are keyed by, so
  *  every input on it has an id of its own even while the same schedule's Future
  *  policy panel is on screen. */
@@ -1316,11 +1335,54 @@ function renderCreateReadiness(view) {
         : "<div class=\"actions\"><button type=\"button\" id=\"schedule-check-readiness\">" +
           "Check readiness</button></div>"))) +
     "<div class=\"readiness-verdict\" id=\"schedule-readiness-verdict\">" +
-    (result === null
-      ? "<p class=\"note\" data-readiness=\"unchecked\">" + esc(READINESS_NOT_CHECKED) + "</p>"
-      : renderPreflight(result)) +
+    renderReadinessVerdict(v) +
     "</div></fieldset>"
   );
+}
+
+/** The readiness verdict slot: unchecked, the recorded verdict, a refused
+ *  start, or STALE -- a verdict about a source, destination or topic set the
+ *  form no longer describes (review MEDIUM-3). A stale verdict is not shown as
+ *  a verdict at all: a green `ready` beside inputs it was not about is the
+ *  PLAT-13.2 stale-answer defect. */
+export function renderReadinessVerdict(view) {
+  const v = view || {};
+  const result = v.readiness || null;
+  const error = v.readinessError || null;
+  if (result === null && error === null) {
+    return "<p class=\"note\" data-readiness=\"unchecked\">" + esc(READINESS_NOT_CHECKED) + "</p>";
+  }
+  if (v.readinessRequest !== undefined &&
+    readinessKey(readinessRequestFor(Object.assign({}, SCHEDULE_DEFAULTS, v.draft || {}))) !==
+      v.readinessRequest) {
+    return "<p class=\"note\" data-readiness=\"stale\" id=\"schedule-readiness-stale\">" +
+      esc(READINESS_STALE_SENTENCE) + "</p>";
+  }
+  if (error !== null) {
+    return "<div id=\"schedule-readiness-error\">" + errorBlock(error, true) + "</div>";
+  }
+  return renderPreflight(result);
+}
+
+/** What the slot says when the form changed after a check. */
+export const READINESS_STALE_SENTENCE =
+  "The source, destination or topics changed after this readiness check, so its answer is " +
+  "about a different request and is not shown. Check readiness again for what the form " +
+  "describes now.";
+
+/** Where a readiness refusal's field errors land on the form. */
+export const READINESS_FIELD_PATHS = Object.freeze([
+  ["backup.sourceConnection", "source"],
+  ["backup.topics", "topics"],
+  ["backup.destination", "destination"],
+  ["backup.legacyArchive.url", "archive"],
+  ["backup.legacyArchive.credentialRef", "archiveSecret"],
+  ["backup.legacyArchive", "archive"],
+]);
+
+/** One readiness request as a comparable string (`null` for none). */
+export function readinessKey(request) {
+  return request === null || request === undefined ? "null" : JSON.stringify(request);
 }
 
 /** The `BackupSchedule` a filled-in guided form describes.
@@ -1493,7 +1555,9 @@ export function scheduleFormView(ns, clusters, now, freshSeconds, extra) {
   return {
     draft: readDraft(key),
     state: state,
-    errors: state.phase === "failed" ? fieldErrors(state.error, SCHEDULE_FIELD_PATHS) : null,
+    errors: state.phase === "failed"
+      ? fieldErrors(state.error, SCHEDULE_FIELD_PATHS)
+      : (e.readinessError ? fieldErrors(e.readinessError, READINESS_FIELD_PATHS) : null),
     clusters: clusters,
     now: now,
     freshSeconds: freshSeconds,
@@ -1504,6 +1568,8 @@ export function scheduleFormView(ns, clusters, now, freshSeconds, extra) {
     destinations: e.destinations,
     preview: e.preview || null,
     readiness: e.readiness || null,
+    readinessRequest: e.readinessRequest,
+    readinessError: e.readinessError || null,
     readinessUnavailable: e.readinessUnavailable === true,
     readinessUnavailableReason: e.readinessUnavailableReason,
     mayOperate: e.mayOperate,
@@ -1739,9 +1805,11 @@ async function readReadiness(api, ns, lifecycle, clusters) {
 }
 
 /** Every RetentionPolicy in `ns`, or an empty list when the read is refused. */
-async function readRetentionPolicies(ns, lifecycle) {
+async function readRetentionPolicies(ns, lifecycle, readers) {
+  const listRetention = ((readers || {}).listRetention) ||
+    (() => listD3("retention", ns, readOptions(lifecycle)));
   try {
-    return itemsOf(await listD3("retention", ns, readOptions(lifecycle)));
+    return itemsOf(await listRetention());
   } catch (error) {
     if (cancelled(error, lifecycle)) {
       throw error;
@@ -1952,7 +2020,7 @@ export async function mountSchedules(node, ns, parse, lifecycle, deps) {
     replace(
       node,
       parse(
-        renderScheduleList(collection, readiness.destinations) + panels +
+        renderScheduleList(collection, readiness.destinations, readiness.unavailable === true) + panels +
           "<div class=\"form-slot\" id=\"schedule-form-slot\">" +
           renderScheduleForm(scheduleFormView(ns, clusters, undefined, undefined, creating)) +
           "</div>" +
@@ -2004,15 +2072,24 @@ function wire(node, ns, parse, lifecycle, api, objects, clusters, creating) {
   wireCreate(node, ns, parse, lifecycle, api, clusters, creating);
 }
 
-function wireToggle(node, ns, parse, lifecycle, api, objects, toggle) {
+/** `remount` is how a SUCCESS re-reads: the list passes nothing and gets the
+ *  list; the schedule detail passes its own mount (review HIGH-1). Re-mounting
+ *  the namespace list into a detail whose route still names one schedule threw
+ *  the operator off the page their action was about, with its history, facts
+ *  and Restore actions gone -- the opposite of "actions retain schedule and
+ *  recovery-point context". */
+function wireToggle(node, ns, parse, lifecycle, api, objects, toggle, remount) {
   const name = toggle.getAttribute("data-name");
   const key = formKey(ns, SUSPEND_FORM, name);
   const mutation = mutationFor(key);
   const object = (objects || []).find((o) => ((o || {}).metadata || {}).name === name) || null;
+  const reread = typeof remount === "function"
+    ? remount
+    : () => mountSchedules(node, ns, parse, lifecycle, api);
   watchMutation(node, key, mutation, (state) => {
     if (state.phase === "succeeded") {
       mutation.clear();
-      mountSchedules(node, ns, parse, lifecycle, api);
+      reread();
       return;
     }
     const button = toggle.querySelector("button");
@@ -2072,7 +2149,19 @@ function wireCreate(node, ns, parse, lifecycle, api, clusters, own) {
     if (!active(lifecycle)) {
       return;
     }
-    keepDraft(key, readScheduleValues(form), SCHEDULE_DRAFT_FIELDS);
+    const values = readScheduleValues(form);
+    keepDraft(key, values, SCHEDULE_DRAFT_FIELDS);
+    // AN EDIT THAT CHANGES WHAT A CHECK WOULD ASK MAKES ITS VERDICT STALE AT
+    // ONCE, without repainting the inputs the reader is typing in.
+    if ((held.readiness || held.readinessError) && held.readinessRequest !== undefined) {
+      const slot = node.querySelector("#schedule-readiness-verdict");
+      if (slot !== null) {
+        replace(slot, parse(renderReadinessVerdict({
+          readiness: held.readiness || null, readinessError: held.readinessError || null,
+          readinessRequest: held.readinessRequest, draft: values,
+        })));
+      }
+    }
     if (mutation.state.phase === "succeeded") {
       mutation.clear();
       const status = node.querySelector("#schedule-form-status");
@@ -2177,6 +2266,11 @@ function wireCreate(node, ns, parse, lifecycle, api, clusters, own) {
         return;
       }
       check.disabled = true;
+      // THE VERDICT IS BOUND TO THE REQUEST THAT PRODUCED IT (review MEDIUM-3):
+      // it is shown as current only while the form still describes that
+      // request, and marked stale the moment it does not.
+      held.readinessRequest = readinessKey(request);
+      held.readinessError = null;
       api.startPreflight(ns, request).then(
         (answer) => {
           if (!active(lifecycle)) {
@@ -2188,9 +2282,11 @@ function wireCreate(node, ns, parse, lifecycle, api, clusters, own) {
         },
         (error) => {
           if (!cancelled(error, lifecycle) && active(lifecycle)) {
+            // A REFUSED START IS AN ANSWER TO THIS REQUEST, NOT A STATE OF THE
+            // FORM: the button stays, the refusal is shown beside it and its
+            // field errors are placed on the inputs they name.
             held.readiness = null;
-            held.readinessUnavailable = true;
-            held.readinessUnavailableReason = String(error && error.message);
+            held.readinessError = error;
             repaint();
           }
         },
@@ -3667,9 +3763,17 @@ function wirePolicy(node, ns, parse, lifecycle, api, object, backups, extra) {
     // refused `412` for a reason the reader could not see. The answer is not a
     // cleverer repaint: it is to read the object the API server now holds. The
     // record is cleared first so the remount does not re-enter this arm.
+    //
+    // THE RE-READ IS THE CALLER'S OWN VIEW (review HIGH-1): `extra.remount`
+    // is the schedule detail's mount when this form is on the detail, and the
+    // list otherwise.
     if (state.phase === "succeeded") {
       mutation.clear();
-      mountSchedules(node, ns, parse, lifecycle, api);
+      if (typeof extra.remount === "function") {
+        extra.remount();
+      } else {
+        mountSchedules(node, ns, parse, lifecycle, api);
+      }
       return;
     }
     repaintCard(node, ns, parse, lifecycle, api, object, backups, extra);
@@ -3781,6 +3885,15 @@ function wireRunNow(node, ns, parse, lifecycle, api, object, backups, extra) {
   watchMutation(node, key, mutation, (state) => {
     if (state.phase === "succeeded") {
       own.result = state.result;
+      // ON THE DETAIL, A NEW RUN IS NEW HISTORY (review LOW-5): the detail
+      // re-reads itself once per result, carrying this panel's state across
+      // the remount so "Follow this run" stays on screen. The carried
+      // `reread` marker is what stops the re-mounted panel re-entering here.
+      if (typeof extra.remount === "function" && own.reread !== state.result) {
+        own.reread = state.result;
+        extra.remount();
+        return;
+      }
     }
     repaintCard(node, ns, parse, lifecycle, api, object, backups, extra);
   }, lifecycle);
@@ -3895,6 +4008,33 @@ export const NO_HISTORY_SENTENCE =
  *  and until a catalog covering that destination has synced, nobody has looked. */
 export const NOT_IN_CATALOG = "not in the catalog";
 
+/** What a row the view does not list says when the view has AGED OUT
+ *  (`viewExpired`, review HIGH-2): the sync Job's pages were collected, which
+ *  is a statement about the view and never about the archive. */
+export const CATALOG_VIEW_EXPIRED = "catalog view expired";
+
+/** What a row the view does not list says when the view is TRUNCATED: the
+ *  archive holds more points than the view carries, so an unlisted run may be
+ *  in the archive and outside the newest `sync.viewLimit` the view keeps. */
+export const OUTSIDE_CATALOG_VIEW = "outside the catalog view";
+
+/** The word for an unlisted row, per the view's coverage. */
+export const CATALOG_INCOMPLETE = "catalog incomplete";
+
+/** The note beside a history whose catalog view has aged out. */
+export const CATALOG_EXPIRED_SENTENCE =
+  "The recovery catalog's view has aged out since its last sync (viewExpired), so it lists " +
+  "nothing now. That is a fact about the view and not about the archive: a run it does not " +
+  "list is marked catalog view expired, never not in the catalog. A new catalog sync " +
+  "republishes the view.";
+
+/** The note beside a history whose catalog view is truncated. */
+export const CATALOG_TRUNCATED_SENTENCE =
+  "The recovery catalog holds more points than its view carries (truncated), and the view " +
+  "lists only the newest of them. A run it does not list is marked outside the catalog view: " +
+  "it may still be in the archive, older than the view's window, and this page will not call " +
+  "it absent.";
+
 /** What the availability column says when this mode cannot read a catalog at
  *  all, so that an empty column is never mistaken for a verdict. */
 export const CATALOG_UNREADABLE_SENTENCE =
@@ -3935,15 +4075,21 @@ export function runsOfSchedule(name, uid, backups) {
     // A deleted schedule has no UID to select one historical identity. Name
     // alone is expressly reusable, so returning all rows as `mine` would join
     // two different schedules and make a latest-point Restore ambiguous.
-    return { mine: [], earlier: newestFirst };
+    return { mine: [], earlier: newestFirst, legacy: [] };
   }
-  const sameUid = (backup) =>
-    String(((((backup || {}).spec) || {}).scheduleRef || {}).uid || "") === identity;
+  const uidOf = (backup) =>
+    String(((((backup || {}).spec) || {}).scheduleRef || {}).uid || "");
+  // A RUN WITH NO SCHEDULE UID IS NEITHER MINE NOR PROVABLY ANOTHER'S (review
+  // LOW-1). Every run created before the uid was recorded looks like this, and
+  // so does a run of an earlier same-name schedule from that era; the name
+  // alone cannot tell them apart. Counting it as this schedule's let it become
+  // the "Latest recovery point"; it is shown in its own group instead, as the
+  // archived view already does.
   return {
-    mine: newestFirst.filter((backup) => sameUid(backup) ||
-      String(((((backup || {}).spec) || {}).scheduleRef || {}).uid || "").length === 0),
-    earlier: newestFirst.filter((backup) => !sameUid(backup) &&
-      String(((((backup || {}).spec) || {}).scheduleRef || {}).uid || "").length > 0),
+    mine: newestFirst.filter((backup) => uidOf(backup) === identity),
+    earlier: newestFirst.filter((backup) => uidOf(backup).length > 0 &&
+      uidOf(backup) !== identity),
+    legacy: newestFirst.filter((backup) => uidOf(backup).length === 0),
   };
 }
 
@@ -3998,16 +4144,11 @@ function distinctWords(points, field) {
  *  Availability keeps its own green: it is a different fact with a different
  *  repair, and a point whose bytes are readable but whose signer is a stranger
  *  is an evidence problem and not an outage. */
-export function verdictCells(points, incomplete) {
+export function verdictCells(points, coverage) {
   const all = Array.isArray(points) ? points : (points === null || points === undefined ? [] : [points]);
   if (all.length === 0) {
-    if (incomplete) {
-      return [badge("unverified", "catalog incomplete"), badge("unverified", "catalog incomplete")];
-    }
-    return [
-      badge("unverified", NOT_IN_CATALOG),
-      badge("unverified", NOT_IN_CATALOG),
-    ];
+    const word = unlistedWord(coverage);
+    return [badge("unverified", word), badge("unverified", word)];
   }
   const selectable = all.every((point) => (point || {}).selectable === true);
   const availability = distinctWords(all, "availability");
@@ -4019,6 +4160,55 @@ export function verdictCells(points, incomplete) {
   ];
 }
 
+/** What a run the catalog view does not list is called, by the view's
+ *  COVERAGE: `true`/`"incomplete"` (a read that lost pages or failed),
+ *  `"expired"` (the view aged out), `"truncated"` (the view is the newest part
+ *  of a larger archive), or nothing (a complete, current view). Only the last
+ *  may say "not in the catalog". */
+export function unlistedWord(coverage) {
+  if (coverage === true || coverage === "incomplete") {
+    return CATALOG_INCOMPLETE;
+  }
+  if (coverage === CATALOG_WINDOW_EXPIRED) {
+    return CATALOG_VIEW_EXPIRED;
+  }
+  if (coverage === CATALOG_WINDOW_TRUNCATED) {
+    return OUTSIDE_CATALOG_VIEW;
+  }
+  return NOT_IN_CATALOG;
+}
+
+/** The coverage of one history read: a failed or partial read dominates, then
+ *  an expired view, then a truncated one. */
+export function catalogCoverage(catalogError, catalogWindow) {
+  if (catalogError !== null && catalogError !== undefined) {
+    return "incomplete";
+  }
+  return catalogWindow === CATALOG_WINDOW_EXPIRED || catalogWindow === CATALOG_WINDOW_TRUNCATED
+    ? catalogWindow
+    : null;
+}
+
+/** Whether the catalog RULES OUT restoring from this run (review MEDIUM-2):
+ *  the catalog lists the run's set and at least one of its points is not
+ *  `selectable`. A run the view does not list is not ruled out by it -- the
+ *  catalog has said nothing -- and a row still says which of the four
+ *  unlisted words applies. */
+export function catalogRefuses(run, points) {
+  const found = pointsForRun(run, points);
+  return found.length > 0 && !found.every((point) => (point || {}).selectable === true);
+}
+
+/** The catalog's words for one run, as plain text for a sentence. */
+function catalogWordsFor(run, points, coverage) {
+  const found = pointsForRun(run, points);
+  if (found.length === 0) {
+    return unlistedWord(coverage);
+  }
+  return distinctWords(found, "availability").join("/") + " / " +
+    distinctWords(found, "verification").join("/");
+}
+
 /** ONE SCHEDULE'S FILTERED HISTORY: every run it made, newest first, with the
  *  two catalog verdicts and the restore that is bound to that run.
  *
@@ -4028,15 +4218,17 @@ export function verdictCells(points, incomplete) {
  *  and disagree with the cluster. What changes per row is what is OFFERED: a
  *  restore link only where a plan can be built, which is `isRecoveryPoint`'s
  *  question and PLAT-11.1's answer. */
-export function renderScheduleHistory(ns, object, runs, points, catalogError, sectionId) {
+export function renderScheduleHistory(ns, object, runs, points, catalogError, sectionId,
+  catalogWindow) {
   const spec = (object || {}).spec || {};
   const maxRetries = (spec.retry || {}).maxRetries;
+  const coverage = catalogCoverage(catalogError, catalogWindow);
   const rows = runs.map((run) => {
     const meta = run.metadata || {};
     const status = run.status || {};
     const covered = status.windowCovered || {};
     const found = pointsForRun(run, points);
-    const verdicts = verdictCells(found, catalogError !== null && catalogError !== undefined);
+    const verdicts = verdictCells(found, coverage);
     return [
       detailLink("backups", String(ns || meta.namespace || ""), String(meta.name || "")),
       triggerBadge(run.spec ? run.spec.trigger : undefined, maxRetries),
@@ -4050,9 +4242,7 @@ export function renderScheduleHistory(ns, object, runs, points, catalogError, se
       cell(rfc3339(covered.toMs)),
       verdicts[0],
       verdicts[1],
-      isRecoveryPoint(run)
-        ? "<a href=\"" + esc(restorePointRoute(ns, run)) + "\">Restore this point</a>"
-        : cell(""),
+      restoreCell(ns, run, points),
     ];
   });
   return (
@@ -4063,6 +4253,14 @@ export function renderScheduleHistory(ns, object, runs, points, catalogError, se
       ? ""
       : "<p class=\"note\" id=\"schedule-catalog-unreadable\">" +
         esc(CATALOG_UNREADABLE_SENTENCE) + "</p>" + errorBlock(catalogError, true)) +
+    (coverage === CATALOG_WINDOW_EXPIRED
+      ? "<p class=\"note\" id=\"schedule-catalog-expired\">" +
+        esc(CATALOG_EXPIRED_SENTENCE) + "</p>"
+      : "") +
+    (coverage === CATALOG_WINDOW_TRUNCATED
+      ? "<p class=\"note\" id=\"schedule-catalog-truncated\">" +
+        esc(CATALOG_TRUNCATED_SENTENCE) + "</p>"
+      : "") +
     table(
       ["RUN", "TRIGGER", "PHASE", "SLOT", "BACKUP SET", "COVERED FROM", "COVERED TO",
         "AVAILABILITY", "VERIFICATION", ""],
@@ -4073,15 +4271,31 @@ export function renderScheduleHistory(ns, object, runs, points, catalogError, se
   );
 }
 
+/** A row's restore action. A run a plan can be built from gets its own link,
+ *  bound to it by UID -- UNLESS the catalog lists its set as not selectable
+ *  (review MEDIUM-2), in which case the cell says the catalog rules it out and
+ *  offers nothing. */
+export function restoreCell(ns, run, points) {
+  if (!isRecoveryPoint(run)) {
+    return cell("");
+  }
+  if (catalogRefuses(run, points)) {
+    return "<span class=\"note\" data-restore-refused=\"catalog\">not restorable: the catalog " +
+      "marks this set not selectable</span>";
+  }
+  return "<a href=\"" + esc(restorePointRoute(ns, run)) + "\">Restore this point</a>";
+}
+
 /** Why there are two verdict columns and what a blank one would have meant. */
 export const TWO_VERDICTS_SENTENCE =
   "Availability answers whether the archive can still serve this point; verification answers " +
   "whether its evidence verifies under a key this installation accepts. They are separate " +
-  "facts with separate repairs, both read from the durable catalog, and a run the catalog has " +
-  "no entry for is neither available nor unavailable -- nobody has looked.";
+  "facts with separate repairs, both read from the durable catalog, and a run a complete, " +
+  "current catalog view has no entry for is neither available nor unavailable -- nobody has " +
+  "looked.";
 
 /** The runs of a PREVIOUS schedule that answered to this name, shown apart. */
-export function renderEarlierRuns(ns, earlier) {
+export function renderEarlierRuns(ns, earlier, points) {
   if (earlier.length === 0) {
     return "";
   }
@@ -4100,13 +4314,33 @@ export function renderEarlierRuns(ns, earlier) {
           detailLink("backups", String(ns || meta.namespace || ""), String(meta.name || "")),
           cell((((run.spec || {}).scheduleRef) || {}).uid),
           cell(((run.status) || {}).backupId),
-          isRecoveryPoint(run)
-            ? "<a href=\"" + esc(restorePointRoute(ns, run)) + "\">Restore this point</a>"
-            : cell(""),
+          restoreCell(ns, run, points),
         ];
       }),
       "",
     ) +
+    "</section>"
+  );
+}
+
+/** THE RUNS THAT NAME THIS SCHEDULE AND CARRY NO SCHEDULE UID (review LOW-1),
+ *  shown apart: nothing can say whether this schedule or an earlier one of
+ *  the same name made them, so they are never this schedule's latest point. */
+export function renderLegacyRuns(ns, legacy, points, catalogError, catalogWindow) {
+  if (!Array.isArray(legacy) || legacy.length === 0) {
+    return "";
+  }
+  return (
+    "<section class=\"history\" id=\"schedule-legacy-runs\"><h3>Runs naming this schedule " +
+    "without a schedule UID</h3>" +
+    "<p class=\"note\">" + String(legacy.length) + " run(s) name this schedule in " +
+    "spec.scheduleRef and record no schedule UID -- what every run created before the UID was " +
+    "recorded looks like. Nothing tells this schedule's runs from an earlier same-name " +
+    "schedule's among them, so they are not counted above and are never offered as this " +
+    "schedule's latest point. Each point is still restorable on its own.</p>" +
+    renderScheduleHistory(ns, null, legacy, points, catalogError, "schedule-legacy-history",
+      catalogWindow).replace(/^<section[^>]*>/, "<div class=\"legacy-history\">")
+      .replace(/<\/section>$/, "</div>") +
     "</section>"
   );
 }
@@ -4117,19 +4351,49 @@ export function renderEarlierRuns(ns, earlier) {
  *  IT IS THE SAME LINK THE ROW CARRIES, built by the same helper, so "restore
  *  the latest" and "restore this one" cannot disagree about what the latest is.
  *  With no point at all there is no button and the sentence says why. */
-export function renderLatestPointAction(ns, runs) {
-  const points = recoveryPoints(runs);
-  if (points.length === 0) {
+export function renderLatestPointAction(ns, runs, points, coverage) {
+  const choice = latestRestorablePoint(runs, points);
+  if (choice.all.length === 0) {
     return "<p class=\"note\" id=\"schedule-latest-point\">" + esc(NO_POINTS_SENTENCE) + "</p>";
   }
-  const newest = points[0];
-  const meta = newest.metadata || {};
+  const skipped = choice.skipped.length === 0
+    ? ""
+    : " <span class=\"note\" id=\"schedule-latest-skipped\">Not offered: " +
+      choice.skipped.map((run) => cell((run.metadata || {}).name) + " (catalog: " +
+        esc(catalogWordsFor(run, points, coverage)) + ")").join(", ") +
+      " -- the catalog marks " + (choice.skipped.length === 1 ? "that set" : "those sets") +
+      " not selectable.</span>";
+  if (choice.point === null) {
+    return (
+      "<p class=\"note\" id=\"schedule-latest-point\">No recovery point of this schedule is " +
+      "restorable: the catalog marks every completed set not selectable." + skipped + "</p>"
+    );
+  }
+  const meta = choice.point.metadata || {};
   return (
     "<p class=\"note\" id=\"schedule-latest-point\">Latest recovery point: " +
-    cell(meta.name) + ", backup set " + cell((newest.status || {}).backupId) + ". " +
-    "<a href=\"" + esc(restorePointRoute(ns, newest)) + "\" id=\"schedule-restore-latest\">" +
-    "Restore from this point</a></p>"
+    cell(meta.name) + ", backup set " + cell((choice.point.status || {}).backupId) +
+    " (catalog: " + esc(catalogWordsFor(choice.point, points, coverage)) + "). " +
+    "<a href=\"" + esc(restorePointRoute(ns, choice.point)) + "\" id=\"schedule-restore-latest\">" +
+    "Restore from this point</a>" + skipped + "</p>"
   );
+}
+
+/** THE LATEST POINT THE CATALOG DOES NOT RULE OUT (review MEDIUM-2): newest
+ *  completion first, skipping every set the catalog lists as not selectable.
+ *  `all` is every recovery point, `skipped` the newer ones the catalog ruled
+ *  out, and `point` the one offered (or `null`). */
+export function latestRestorablePoint(runs, points) {
+  const all = recoveryPoints(runs);
+  const skipped = [];
+  for (const run of all) {
+    if (catalogRefuses(run, points)) {
+      skipped.push(run);
+      continue;
+    }
+    return { all: all, skipped: skipped, point: run };
+  }
+  return { all: all, skipped: skipped, point: null };
 }
 
 /** Read-only facts that remain useful when the viewer has no mutation grant.
@@ -4137,10 +4401,12 @@ export function renderLatestPointAction(ns, runs) {
  * These are deliberately outside the action card: source, resolved
  * destination, policy revision and the most recent successful point are facts
  * about objects already read by this route, not permissions to change them. */
-export function renderScheduleFacts(object, runs, destinations, now) {
+export function renderScheduleFacts(object, runs, destinations, now, points, destinationsUnavailable) {
   const spec = (object || {}).spec || {};
   const status = (object || {}).status || {};
-  const latest = recoveryPoints((runs || {}).mine || [])[0] || null;
+  // THE SAME CHOICE THE PAGE-LEVEL RESTORE MAKES (review MEDIUM-2), so the
+  // protection age is never the age of a set the catalog says is gone.
+  const latest = latestRestorablePoint((runs || {}).mine || [], points).point;
   const latestMeta = (latest || {}).metadata || {};
   const latestStatus = (latest || {}).status || {};
   const complete = latestStatus.completedAt ||
@@ -4160,9 +4426,9 @@ export function renderScheduleFacts(object, runs, destinations, now) {
     "<section class=\"schedule-facts\" id=\"schedule-facts\"><h3>Schedule facts</h3>" +
     facts([
       ["Source", cell(((spec.sourceRef || {}).name))],
-      ["Destination", destinationCell(object, destinations)],
+      ["Destination", destinationCell(object, destinations, destinationsUnavailable)],
       ["Policy revision", policy === undefined ? ABSENT : cell("g" + String(policy))],
-      ["Latest successful point", latest === null ? ABSENT : cell(latestMeta.name)],
+      ["Latest restorable point", latest === null ? ABSENT : cell(latestMeta.name)],
       ["Latest point completed", complete.length === 0 ? ABSENT : cell(complete)],
       ["Latest point age", ageWords],
     ]) + "</section>"
@@ -4180,18 +4446,22 @@ export function renderScheduleDetail(view) {
   const name = String(v.name || ((object || {}).metadata || {}).name || "");
   const runs = v.runs || { mine: [], earlier: [] };
   if (object === null) {
-    return renderArchivedSchedule(ns, name, runs, v.points, v.catalogError);
+    return renderArchivedSchedule(ns, name, runs, v.points, v.catalogError, v.catalogWindow);
   }
   return (
     "<section class=\"detail\" id=\"schedule-detail\" data-schedule-detail=\"" + esc(name) +
     "\">" +
     "<p class=\"crumb\"><a href=\"#/schedules?ns=" + esc(encodeURIComponent(ns)) +
     "\">All schedules</a></p>" +
-    renderScheduleFacts(object, runs, ((v.extra || {}).destinations), v.now) +
-    renderLatestPointAction(ns, runs.mine) +
+    renderScheduleFacts(object, runs, ((v.extra || {}).destinations), v.now, v.points,
+      ((v.extra || {}).destinationsUnavailable) === true) +
+    renderLatestPointAction(ns, runs.mine, v.points,
+      catalogCoverage(v.catalogError, v.catalogWindow)) +
     renderScheduleCard(ns, object, { items: runs.mine }, v.extra) +
-    renderScheduleHistory(ns, object, runs.mine, v.points, v.catalogError) +
-    renderEarlierRuns(ns, runs.earlier) +
+    renderScheduleHistory(ns, object, runs.mine, v.points, v.catalogError, undefined,
+      v.catalogWindow) +
+    renderEarlierRuns(ns, runs.earlier, v.points) +
+    renderLegacyRuns(ns, runs.legacy, v.points, v.catalogError, v.catalogWindow) +
     "</section>"
   );
 }
@@ -4202,8 +4472,9 @@ export function renderScheduleDetail(view) {
  *  what this renders is the history, the reason the schedule is missing, and
  *  the per-point restores. There is no toggle, no policy form and no "Back up
  *  now": every one of those needs a schedule to act on. */
-export function renderArchivedSchedule(ns, name, runs, points, catalogError) {
-  const all = ((runs || {}).mine || []).concat((runs || {}).earlier || []);
+export function renderArchivedSchedule(ns, name, runs, points, catalogError, catalogWindow) {
+  const all = ((runs || {}).mine || []).concat((runs || {}).earlier || [])
+    .concat((runs || {}).legacy || []);
   const groups = [];
   for (const run of all) {
     const uid = String(((((run || {}).spec) || {}).scheduleRef || {}).uid || "");
@@ -4215,7 +4486,7 @@ export function renderArchivedSchedule(ns, name, runs, points, catalogError) {
     group.runs.push(run);
   }
   const histories = groups.length === 0
-    ? renderScheduleHistory(ns, null, [], points, catalogError)
+    ? renderScheduleHistory(ns, null, [], points, catalogError, undefined, catalogWindow)
     : groups.map((group, index) =>
       "<section class=\"archived-schedule-identity\" data-archived-schedule-uid=\"" +
       esc(group.uid || "legacy-no-uid") + "\"><h3>Schedule identity " +
@@ -4223,7 +4494,7 @@ export function renderArchivedSchedule(ns, name, runs, points, catalogError) {
       "<p class=\"note\">These runs share this exact historical schedule identity; they are not " +
       "merged with another schedule that reused the name.</p>" +
       renderScheduleHistory(ns, null, group.runs, points, catalogError,
-        "schedule-history-archived-" + String(index)) + "</section>").join("");
+        "schedule-history-archived-" + String(index), catalogWindow) + "</section>").join("");
   return (
     "<section class=\"detail\" id=\"schedule-detail\" data-schedule-detail=\"" + esc(name) +
     "\" data-archived=\"1\">" +
@@ -4262,10 +4533,19 @@ export async function readSchedulePoints(api, ns, lifecycle, readers) {
     if (cancelled(error, lifecycle)) {
       throw error;
     }
-    return { points: [], error: error };
+    return { points: [], error: error, window: null };
   }
   const points = [];
   let failure = null;
+  // THE VIEW'S TWO WINDOW FLAGS (review HIGH-2), which say what an ABSENT
+  // entry means. `viewExpired` is the sync Job's TTL having collected the
+  // pages: the window aged out, "not that the archive is empty" (docs/api.md).
+  // `truncated` is an archive holding more points than the view carries: the
+  // view is the newest `sync.viewLimit`. Under either, a run the view does not
+  // list may be in the archive, so the history must not say "not in the
+  // catalog" for it.
+  let expired = false;
+  let truncated = false;
   for (const catalog of catalogs) {
     const catalogName = ((catalog || {}).metadata || {}).name || "";
     if (catalogName.length === 0) {
@@ -4282,6 +4562,12 @@ export async function readSchedulePoints(api, ns, lifecycle, readers) {
         const page = await readPoints(catalogName, query);
         for (const point of (page.items || [])) {
           points.push(point);
+        }
+        if (page.viewExpired === true) {
+          expired = true;
+        }
+        if (page.truncated === true) {
+          truncated = true;
         }
         if (page.incomplete === true) {
           const error = new Error("A materialized recovery-catalog page disappeared while this detail was reading it; its history is incomplete.");
@@ -4308,8 +4594,19 @@ export async function readSchedulePoints(api, ns, lifecycle, readers) {
       failure = error;
     }
   }
-  return { points: points, error: failure };
+  return {
+    points: points,
+    error: failure,
+    window: expired ? CATALOG_WINDOW_EXPIRED : (truncated ? CATALOG_WINDOW_TRUNCATED : null),
+  };
 }
+
+/** `readSchedulePoints(...).window` when a catalog's view has aged out. */
+export const CATALOG_WINDOW_EXPIRED = "expired";
+
+/** `readSchedulePoints(...).window` when a catalog's view carries only the
+ *  newest points of a larger archive. */
+export const CATALOG_WINDOW_TRUNCATED = "truncated";
 
 /** How many points one catalog page contributes to a schedule's history. The
  *  catalog view is itself a window over the archive (D3 section 5.6); this is a
@@ -4322,8 +4619,11 @@ export const DETAIL_POINT_PAGE_BUDGET = 25;
 
 /** `#/schedules?ns=<ns>&name=<name>`: one schedule, its actions and its
  *  history. */
-export async function mountScheduleDetail(node, ns, name, parse, lifecycle, deps) {
+export async function mountScheduleDetail(node, ns, name, parse, lifecycle, deps, carry) {
   const api = deps || API;
+  // AUXILIARY READERS A TEST OR ANOTHER ADAPTER MAY SUPPLY; absent, the page
+  // reads the catalog and retention routes through the product client.
+  const readers = (api || {}).detailReaders || {};
   try {
     const [schedule, backups, clusters] = await Promise.all([
       api.get(ns, PLURAL, name, readOptions(lifecycle)).catch((error) => {
@@ -4353,19 +4653,29 @@ export async function mountScheduleDetail(node, ns, name, parse, lifecycle, deps
     if (!active(lifecycle)) {
       return;
     }
-    const catalog = await readSchedulePoints(api, ns, lifecycle);
+    const catalog = await readSchedulePoints(api, ns, lifecycle, readers);
     if (!active(lifecycle)) {
       return;
     }
     const uid = ((schedule || {}).metadata || {}).uid;
     const runs = runsOfSchedule(name, uid, backups);
-    const cards = Object.create(null);
-    cards[name] = {};
+    // A RE-READ KEEPS WHAT THIS READER WAS DOING: the run-now panel's result and
+    // acknowledgement survive the remount a successful action triggers.
+    const cards = ((carry || {}).cards) || Object.create(null);
+    if (cards[name] === undefined) {
+      cards[name] = {};
+    }
     const extra = {
       cards: cards,
       destinations: readiness.destinations,
+      destinationsUnavailable: readiness.unavailable === true,
       mayOperate: mayOperate(ns),
-      retentionPolicies: await readRetentionPolicies(ns, lifecycle),
+      retentionPolicies: await readRetentionPolicies(ns, lifecycle, readers),
+      // EVERY SUCCESSFUL ACTION ON THIS PAGE RE-READS THIS PAGE (review
+      // HIGH-1): the toggle, the policy save and Back up now re-mount the
+      // detail with the facts the API server now holds.
+      remount: () => mountScheduleDetail(node, ns, name, parse, lifecycle, api,
+        { cards: cards }),
     };
     if (!active(lifecycle)) {
       return;
@@ -4377,6 +4687,7 @@ export async function mountScheduleDetail(node, ns, name, parse, lifecycle, deps
       runs: runs,
       points: catalog.points,
       catalogError: catalog.error,
+      catalogWindow: catalog.window,
       extra: extra,
     })));
     if (schedule === null) {
@@ -4385,7 +4696,7 @@ export async function mountScheduleDetail(node, ns, name, parse, lifecycle, deps
     const objects = [schedule];
     const backupsForCard = { items: runs.mine };
     for (const toggle of node.querySelectorAll("form.suspend")) {
-      wireToggle(node, ns, parse, lifecycle, api, objects, toggle);
+      wireToggle(node, ns, parse, lifecycle, api, objects, toggle, extra.remount);
     }
     wirePolicy(node, ns, parse, lifecycle, api, schedule, backupsForCard, extra);
     wireRunNow(node, ns, parse, lifecycle, api, schedule, backupsForCard, extra);

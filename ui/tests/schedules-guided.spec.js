@@ -20,6 +20,7 @@ import { fileURLToPath } from "node:url";
 
 import { CONSOLE, resetMode, selectMode } from "../client.js";
 import { dropDraft, formKey, keepDraft, mutationFor, readDraft } from "../lifecycle.js";
+import { LIFE, fakeView, parse } from "./fake-view.js";
 import {
   ADVANCED_CRON,
   CREATE_PANEL,
@@ -28,8 +29,13 @@ import {
   SCHEDULE_DRAFT_FIELDS,
   SCHEDULE_FIELD_PATHS,
   SCHEDULE_FORM,
+  READINESS_STALE_SENTENCE,
+  SCHEDULE_NAME_HELP,
   guidedValues,
+  mountSchedules,
+  readinessKey,
   readinessRequestFor,
+  renderReadinessVerdict,
   renderScheduleForm,
   scheduleBody,
   scheduleDetailRoute,
@@ -541,4 +547,131 @@ test("the_create_body_reaches_the_product_api_as_the_whole_policy", async () => 
   // `archive` and no `destinationRef`, so the row above is about what the
   // object says and not about a translator that always writes both halves.
   assert.equal(sent.sourceRef.name, "orders-prod");
+});
+
+// ===========================================================================
+// Review fix round (2026-09-22): a readiness verdict belongs to the request
+// that produced it, and a refused start keeps the button
+// ===========================================================================
+
+test("a_readiness_verdict_goes_stale_when_the_form_no_longer_describes_its_request", () => {
+  // REVIEW MEDIUM-3: check source A with `orders`, get `ready`, switch to
+  // source B -- the form used to keep showing A's `ready` beside B's inputs.
+  const ready = fixture("console/preflight-ready.json").item;
+  const checked = readinessKey(readinessRequestFor(draft()));
+  const current = renderReadinessVerdict({ readiness: ready, readinessRequest: checked,
+    draft: draft() });
+  assert.doesNotMatch(current, /data-readiness="stale"/,
+    "NEGATIVE CONTROL: unchanged inputs keep the verdict");
+  assert.match(current, /ready/);
+  for (const changed of [
+    draft({ source: "orders-dr" }),
+    draft({ topics: "orders" }),
+    draft({ destination: "offsite" }),
+  ]) {
+    const stale = renderReadinessVerdict({ readiness: ready, readinessRequest: checked,
+      draft: changed });
+    assert.match(stale, /data-readiness="stale"/);
+    assert.doesNotMatch(stale, /badge-green/, "a stale verdict is not shown as a verdict");
+    assert.ok(stale.indexOf(READINESS_STALE_SENTENCE) !== -1);
+  }
+  // A CHANGE THAT DOES NOT ALTER THE REQUEST (the cadence) is not staleness.
+  assert.doesNotMatch(renderReadinessVerdict({ readiness: ready, readinessRequest: checked,
+    draft: draft({ hour: "5" }) }), /data-readiness="stale"/);
+});
+
+test("a_refused_readiness_start_keeps_the_button_and_places_its_field_errors", async () => {
+  // REVIEW MEDIUM-3: a 422 (a mistyped topic) or a network error on
+  // startPreflight replaced the Check button with a note until reload.
+  selectMode(CONSOLE);
+  const ns = "readiness-refused";
+  const key = formKey(ns, SCHEDULE_FORM);
+  dropDraft(key);
+  keepDraft(key, draft({ source: "uid-A" }), SCHEDULE_DRAFT_FIELDS);
+  const view = fakeView();
+  let started = 0;
+  const refusal = Object.assign(new Error("backup.topics: must be a Kafka topic name"), {
+    status: 422, reason: "validation_failed",
+    details: { causes: [{ field: "backup.topics", reason: "invalid_topic",
+      message: "must be a Kafka topic name" }] },
+  });
+  const api = {
+    list(namespace, plural) {
+      return Promise.resolve(plural === "kafkaclusters" ? CLUSTERS : { items: [] });
+    },
+    destinations() { return Promise.resolve({ items: DESTINATIONS }); },
+    startPreflight() { started += 1; return Promise.reject(refusal); },
+  };
+  try {
+    await mountSchedules(view.root, ns, parse, LIFE(), api);
+    const button = view.find("#schedule-check-readiness");
+    assert.ok(button !== null, "the form offers the check");
+    await button.dispatch("click");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(started, 1);
+    const after = view.chunks[view.chunks.length - 1].html;
+    assert.match(after, /id="schedule-check-readiness"/, "the button survives the refusal");
+    assert.match(after, /id="schedule-readiness-error"/, "the refusal is shown beside it");
+    assert.match(after, /must be a Kafka topic name/);
+    assert.match(after, /id="policy-create-topics"[^>]*aria-invalid="true"/,
+      "and its field error is on the topics input");
+    assert.doesNotMatch(after, /id="schedule-readiness-unavailable"/);
+    // NEGATIVE CONTROL: the button is enabled again, so a second check can run.
+    await view.find("#schedule-check-readiness").dispatch("click");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(started, 2, "a second check was possible without a reload");
+  } finally {
+    dropDraft(key);
+    resetMode();
+  }
+});
+
+test("the_name_field_says_what_console_mode_does_with_it", () => {
+  // REVIEW LOW-5: console mode names the object sch-<hash>, and the form did
+  // not say so beside the field.
+  const html = renderScheduleForm({ draft: draft(), clusters: CLUSTERS, mayOperate: true });
+  assert.match(html, /id="schedule-name"[^>]*aria-describedby="schedule-name-help"/);
+  assert.match(html, /id="schedule-name-help"/);
+  assert.match(SCHEDULE_NAME_HELP, /sch-<hash>/);
+  // With a name error, both descriptions are referenced from ONE attribute.
+  const invalid = renderScheduleForm({ draft: draft({ name: "" }), clusters: CLUSTERS,
+    mayOperate: true, errors: { fields: { name: ["a name is required"] }, unmatched: [] } });
+  const tag = /<input id="schedule-name"[^>]*>/.exec(invalid)[0];
+  assert.equal((tag.match(/aria-describedby=/g) || []).length, 1);
+  assert.match(tag, /aria-describedby="schedule-name-error schedule-name-help"/);
+});
+
+test("editing_a_checked_field_marks_the_verdict_stale_without_a_repaint", async () => {
+  // REVIEW MEDIUM-3, mounted: typing into a field the check was about replaces
+  // the verdict slot with the stale note at once.
+  selectMode(CONSOLE);
+  const ns = "readiness-stale";
+  const key = formKey(ns, SCHEDULE_FORM);
+  dropDraft(key);
+  keepDraft(key, draft({ source: "uid-A" }), SCHEDULE_DRAFT_FIELDS);
+  const view = fakeView();
+  const ready = fixture("console/preflight-ready.json").item;
+  const api = {
+    list(namespace, plural) {
+      return Promise.resolve(plural === "kafkaclusters" ? CLUSTERS : { items: [] });
+    },
+    destinations() { return Promise.resolve({ items: DESTINATIONS }); },
+    startPreflight() { return Promise.resolve({ item: Object.assign({}, ready, { terminal: true }) }); },
+  };
+  try {
+    await mountSchedules(view.root, ns, parse, LIFE(), api);
+    await view.find("#schedule-check-readiness").dispatch("click");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.doesNotMatch(view.chunks[view.chunks.length - 1].html, /data-readiness="stale"/,
+      "NEGATIVE CONTROL: right after the check the verdict is current");
+    const form = view.find("#schedule-form");
+    form.elements.topics.value = "orders, refunds";
+    await form.dispatch("input");
+    const last = view.chunks[view.chunks.length - 1].html;
+    assert.match(last, /data-readiness="stale"/, "the edit made the verdict stale");
+    assert.doesNotMatch(last, /badge-green/);
+  } finally {
+    dropDraft(key);
+    resetMode();
+  }
 });
