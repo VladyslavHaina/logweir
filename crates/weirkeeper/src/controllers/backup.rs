@@ -1771,6 +1771,22 @@ async fn continue_evidence_fetch(
         });
     let owed = crate::evidence_fetch::owed_attempt(result, observation, now);
     if owed.is_none() && !unrecorded {
+        // THE VERDICT IS COMMITTED; ITS JOB'S TTL MAY NOT BE (review LOW-4).
+        if let Some(owner) = backup_owner(backup) {
+            crate::evidence_fetch::repair_ttl(
+                client,
+                namespace,
+                &owner,
+                result,
+                evidence
+                    .and_then(|e| e.verification.as_ref())
+                    .and_then(|v| v.verified_at),
+                observation,
+                now,
+            )
+            .await
+            .map_err(BackupError::Api)?;
+        }
         return Ok(false);
     }
     let source = evidence_source(backup, client, namespace, now)
@@ -3929,6 +3945,11 @@ async fn reconcile_backup_inner(
     if let Some(job) = existing.as_ref() {
         if !compatible_backup_job(job, backup) {
             if status_is_terminal(backup) {
+                // THE FOREIGN JOB HOLDS THE RUNNER'S NAME, NOT THE EVIDENCE
+                // JOB'S (review LOW-3). The runner Job is not read; a fetch
+                // this run still owes has its own name and its own owner check,
+                // and must not stall `Pending` behind a stranger's object.
+                continue_evidence_fetch(backup, client, &namespace, now, runner).await?;
                 return Ok(BackupOutcome {
                     job_name,
                     created: false,

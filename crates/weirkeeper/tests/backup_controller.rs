@@ -13059,7 +13059,18 @@ mod evidence_fetch_job {
             Some(v),
             Some(o),
         );
-        let mut routes = evidence_routes(2, None, vec![], vec![], String::new());
+        // ATTEMPT 1'S FAILED JOB IS STILL THERE (its TTL already set), routed
+        // FIRST: a name that ignored the attempt would find it and re-observe
+        // a finished failure instead of creating attempt 2 (review LOW-5).
+        let mut failed = ev_job(&ev_name(1), Some("Failed"), UID);
+        failed["spec"]["ttlSecondsAfterFinished"] = json!(600);
+        let mut routes = vec![route(
+            "GET",
+            leak(format!("/jobs/{}", ev_name(1))),
+            200,
+            failed.to_string(),
+        )];
+        routes.extend(evidence_routes(2, None, vec![], vec![], String::new()));
         routes.extend(terminal_runner_routes(secret_backed_destination()));
         let early = run(&backup, routes.clone(), utc(2026, 11, 9, 3, 22)).await;
         assert!(
@@ -13073,10 +13084,206 @@ mod evidence_fetch_job {
         assert_eq!(jobs.len(), 1);
         let job: Value = serde_json::from_str(&jobs[0].body).expect("a Job");
         assert_eq!(job["metadata"]["name"], json!(ev_name(2)));
-        assert_ne!(ev_name(1), ev_name(2));
+        assert_eq!(
+            ev_name(2),
+            format!(
+                "lwc-ev-{}",
+                &logweir_core::ids::sha256_hex(format!("{UID}:2").as_bytes())[..20]
+            ),
+            "D2 §3.9's name for attempt 2"
+        );
         let last = patched_statuses(&late).last().cloned().expect("Pending");
         assert_eq!(last["evidence"]["observation"]["attempt"], json!(2));
         assert!(last["evidence"]["observation"]["retryAfter"].is_null());
+    }
+
+    /// **THE CONTROLLER ENFORCES THE PER-OBJECT CAPS ITSELF** (review
+    /// MEDIUM-1). A relay that carries more than 1 MiB of payload or 64 KiB of
+    /// sidecar WITHOUT flagging `truncated`, or whose declared length is not
+    /// what it relayed, is `NotAttempted` — never `Valid`, and never `Invalid`
+    /// over bytes the contract never allowed in.
+    #[tokio::test]
+    async fn an_oversized_relay_is_not_attempted_even_if_not_flagged_truncated() {
+        use logweir_core::check_contract::{
+            MAX_EVIDENCE_PAYLOAD_BYTES, MAX_EVIDENCE_SIDECAR_BYTES,
+        };
+        let (r, s) = (receipt(), sidecar());
+        let big_payload =
+            vec![b'x'; usize::try_from(MAX_EVIDENCE_PAYLOAD_BYTES).expect("fits") + 1];
+        let big_sidecar =
+            vec![b'y'; usize::try_from(MAX_EVIDENCE_SIDECAR_BYTES).expect("fits") + 1];
+        let mut lying = entry(RECEIPT_KEY, Stream::EvidencePayload, Some(&r), None);
+        lying.bytes = Some(1);
+        let cases: Vec<(&str, Vec<EvidenceObjectResult>, Vec<u8>, Vec<u8>, &str)> = vec![
+            (
+                "payload over the 1 MiB cap",
+                vec![
+                    entry(
+                        RECEIPT_KEY,
+                        Stream::EvidencePayload,
+                        Some(&big_payload),
+                        None,
+                    ),
+                    entry(SIDECAR_KEY, Stream::EvidenceSidecar, Some(&s), None),
+                ],
+                big_payload.clone(),
+                s.clone(),
+                "cap",
+            ),
+            (
+                "sidecar over the 64 KiB cap",
+                vec![
+                    entry(RECEIPT_KEY, Stream::EvidencePayload, Some(&r), None),
+                    entry(
+                        SIDECAR_KEY,
+                        Stream::EvidenceSidecar,
+                        Some(&big_sidecar),
+                        None,
+                    ),
+                ],
+                r.clone(),
+                big_sidecar.clone(),
+                "cap",
+            ),
+            (
+                "declared length is not the relayed length",
+                vec![
+                    lying,
+                    entry(SIDECAR_KEY, Stream::EvidenceSidecar, Some(&s), None),
+                ],
+                r.clone(),
+                s.clone(),
+                "declared",
+            ),
+        ];
+        for (label, entries, payload, side, needle) in cases {
+            let (v, o) = pending(1, Some(&ev_name(1)));
+            let backup = terminal_backup(&logweir_core::ids::sha256_prefixed(&r), Some(v), Some(o));
+            let log = relay_log(entries, Some(&payload), Some(&side));
+            let mut routes = evidence_routes(
+                1,
+                Some(ev_job(&ev_name(1), Some("Complete"), UID)),
+                vec![],
+                vec![ev_pod(EV_JOB_UID, 0)],
+                log,
+            );
+            routes.extend(terminal_runner_routes(secret_backed_destination()));
+            let bodies = run(&backup, routes, utc(2026, 11, 9, 3, 22)).await;
+            let last = patched_statuses(&bodies)
+                .last()
+                .cloned()
+                .expect("the verdict");
+            let verification = &last["evidence"]["verification"];
+            assert_eq!(
+                verification["result"],
+                json!("NotAttempted"),
+                "{label}: {last}"
+            );
+            assert!(
+                verification["detail"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains(needle),
+                "{label}: {verification}"
+            );
+            assert!(
+                last["windowCovered"].is_null(),
+                "{label}: nothing projected"
+            );
+        }
+    }
+
+    /// **A TTL LOST AFTER THE COMMIT IS REPAIRED** (review LOW-4). A verdict
+    /// is committed and the recorded Job is finished with no TTL — the
+    /// `set_ttl` failed, or the controller died between the two writes. The
+    /// next terminal pass inside the repair window patches the TTL, writes no
+    /// status, and sends nothing once the window has passed.
+    #[tokio::test]
+    async fn a_ttl_lost_after_the_verdict_is_repaired_by_a_later_pass() {
+        let v = json!({"result": "Valid", "matchedKeyId": FIXTURE_KEY_ID,
+                       "payloadType": logweir_verify::PAYLOAD_TYPE_BACKUP_RECEIPT,
+                       "verifiedAt": "2026-11-09T03:22:00Z"});
+        let o = json!({"mode": "SecretKeys", "attempt": 1, "presence": "Complete",
+                       "jobRef": {"name": ev_name(1), "uid": EV_JOB_UID}});
+        let backup = terminal_backup(
+            &logweir_core::ids::sha256_prefixed(&receipt()),
+            Some(v),
+            Some(o),
+        );
+        let mut routes = evidence_routes(
+            1,
+            Some(ev_job(&ev_name(1), Some("Complete"), UID)),
+            vec![],
+            vec![],
+            String::new(),
+        );
+        routes.extend(terminal_runner_routes(secret_backed_destination()));
+        let ev_patches = |bodies: &[SeenBody]| {
+            bodies
+                .iter()
+                .filter(|b| b.method == "PATCH" && path(&b.uri).ends_with(&ev_name(1)))
+                .count()
+        };
+        let soon = run(&backup, routes.clone(), utc(2026, 11, 9, 3, 30)).await;
+        assert_eq!(ev_patches(&soon), 1, "the lost TTL is repaired");
+        assert!(soon
+            .iter()
+            .any(|b| path(&b.uri).ends_with(&ev_name(1))
+                && b.body.contains("ttlSecondsAfterFinished")));
+        assert!(
+            patched_statuses(&soon).is_empty(),
+            "a repair writes no status"
+        );
+        let later = run(&backup, routes, utc(2026, 11, 9, 5, 0)).await;
+        assert_eq!(
+            ev_patches(&later),
+            0,
+            "and nothing once the window has passed"
+        );
+        assert!(!later.iter().any(|b| path(&b.uri).ends_with(&ev_name(1))));
+    }
+
+    /// **A STRANGER HOLDING THE RUNNER JOB'S NAME DOES NOT STALL THE FETCH**
+    /// (review LOW-3). The terminal run's runner Job name is taken by a Job
+    /// this Backup does not control; the evidence Job is still observed.
+    #[tokio::test]
+    async fn a_foreign_runner_job_does_not_stall_a_pending_fetch() {
+        let (v, o) = pending(1, Some(&ev_name(1)));
+        let backup = terminal_backup(
+            &logweir_core::ids::sha256_prefixed(&receipt()),
+            Some(v),
+            Some(o),
+        );
+        let foreign = job_body("Complete").replace(UID, "a-stranger-uid");
+        let mut routes = vec![route(
+            "GET",
+            "/jobs/logweir-backup-nightly-20261109-031700",
+            200,
+            foreign,
+        )];
+        routes.extend(evidence_routes(
+            1,
+            Some(ev_job(&ev_name(1), Some("Complete"), UID)),
+            vec![],
+            vec![ev_pod(EV_JOB_UID, 0)],
+            good_relay(),
+        ));
+        routes.extend(terminal_runner_routes(secret_backed_destination()));
+        let bodies = run(&backup, routes, utc(2026, 11, 9, 3, 22)).await;
+        let last = patched_statuses(&bodies)
+            .last()
+            .cloned()
+            .expect("the verdict");
+        assert_eq!(
+            last["evidence"]["verification"]["result"],
+            json!("Valid"),
+            "{last}"
+        );
+        assert!(
+            !bodies.iter().any(|b| b.method == "PATCH"
+                && path(&b.uri).ends_with("/jobs/logweir-backup-nightly-20261109-031700")),
+            "the stranger's Job is never patched"
+        );
     }
 
     /// **SEC-PODLOG: A FOREIGN POD IS NOT READ.** A pod wearing the Job's

@@ -388,6 +388,28 @@ fn answer<'a>(
                  relayed"
             ));
         }
+        // THE CAP IS THE CONTROLLER'S, NOT ONLY THE RUNNER'S (review MEDIUM-1).
+        // `truncated` is the runner's own report, and a pod that relays more
+        // than it was asked for without saying so is exactly the pod whose
+        // report is not to be trusted. So the controller measures what it
+        // received against the contract's per-object cap, and against the
+        // length the relay declared for it.
+        let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        if len > cap {
+            return Answer::Unreadable(format!(
+                "{key} is larger than the {cap}-byte cap an evidence fetch relays ({len} bytes \
+                 relayed); nothing was verified"
+            ));
+        }
+        if entry.bytes != Some(len) {
+            return Answer::Unreadable(format!(
+                "the evidence-fetch relay declared {} bytes for {key} and relayed {len}; \
+                 nothing was verified",
+                entry
+                    .bytes
+                    .map_or_else(|| "no length".to_string(), |b| b.to_string())
+            ));
+        }
         return Answer::Bytes(bytes);
     }
     match entry.code {
@@ -954,4 +976,81 @@ pub fn retry_due_in(
     let at = observation.retry_after?;
     let secs = (at - now).num_seconds().max(1);
     u64::try_from(secs).ok()
+}
+
+/// How long after a verdict a terminal pass still checks that the recorded
+/// Job got its TTL.
+///
+/// An HOUR, and bounded on purpose (review LOW-4). The TTL is patched only
+/// after the verdict commits; a `set_ttl` that fails makes that pass return an
+/// error, and the controller's error policy requeues it within seconds, so a
+/// transient failure is repaired on the next pass inside this window. A
+/// controller that dies between the two writes and stays down longer than
+/// this leaves the Job to ownerReference garbage collection when its `Backup`
+/// or `Restore` goes — at most [`MAX_ATTEMPTS`] small finished Jobs per run.
+/// A window rather than "forever" because a terminal `Backup` is reconciled
+/// every 15 seconds for its whole life, and one `GET` per pass per verified
+/// run, forever, is a cost with no finding behind it.
+pub const TTL_REPAIR_WINDOW_SECONDS: i64 = 3600;
+
+/// Patch the TTL onto the recorded evidence-fetch Job when the verdict has
+/// been committed and the Job never got one — review LOW-4.
+///
+/// Sends nothing unless ALL hold: the verdict is not `Pending` (the Job's
+/// relay may still be needed), it was reached within
+/// [`TTL_REPAIR_WINDOW_SECONDS`], the recorded Job exists with the recorded
+/// UID, is controlled by `owner`, has finished and carries no TTL. A Job this
+/// subject does not control is never patched.
+///
+/// # Errors
+///
+/// [`kube::Error`] from the `GET` or the `PATCH`.
+pub async fn repair_ttl(
+    client: &kube::Client,
+    namespace: &str,
+    owner: &RunnerOwner,
+    result: Option<&str>,
+    verified_at: Option<DateTime<Utc>>,
+    observation: Option<&crate::crds::EvidenceObservation>,
+    now: DateTime<Utc>,
+) -> Result<bool, kube::Error> {
+    if matches!(result, None | Some("Pending")) {
+        return Ok(false);
+    }
+    let Some(at) = verified_at else {
+        return Ok(false);
+    };
+    if (now - at).num_seconds() > TTL_REPAIR_WINDOW_SECONDS {
+        return Ok(false);
+    }
+    let Some(recorded) = observation.and_then(|o| o.job_ref.as_ref()) else {
+        return Ok(false);
+    };
+    let Some(name) = recorded.name.as_deref() else {
+        return Ok(false);
+    };
+    let jobs: Api<Job> = Api::namespaced(client.clone(), namespace);
+    let Some(job) = jobs.get_opt(name).await? else {
+        return Ok(false);
+    };
+    let same_job = recorded.uid.is_none() || job.uid() == recorded.uid;
+    let has_ttl = job
+        .spec
+        .as_ref()
+        .and_then(|s| s.ttl_seconds_after_finished)
+        .is_some();
+    if !same_job
+        || !is_owned(&job, owner)
+        || !crate::controllers::backup::job_finished(&job)
+        || has_ttl
+    {
+        return Ok(false);
+    }
+    check::set_ttl(client, namespace, name).await?;
+    info!(
+        namespace = %namespace,
+        job = %name,
+        "the evidence verdict was committed and its Job carried no TTL; the TTL is repaired"
+    );
+    Ok(true)
 }

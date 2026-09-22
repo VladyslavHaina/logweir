@@ -3489,7 +3489,7 @@ async fn evidence_fetch_pass(
                         .ok()
                         .and_then(|d| d.get("run_id").and_then(Value::as_str).map(str::to_string));
                     match claimed_run {
-                        Some(run) if payload_key.ends_with(&format!("/{run}.json")) => {
+                        Some(run) if payload_key == format!("logweir/drills/{run}.json") => {
                             let reference = EvidenceRef {
                                 namespace: namespace.to_string(),
                                 payload_key: payload_key.clone(),
@@ -3604,6 +3604,24 @@ async fn continue_evidence_fetch(
         None => Requeue::AwaitChange,
     };
     if owed.is_none() && !unrecorded {
+        // THE VERDICT IS COMMITTED; ITS JOB'S TTL MAY NOT BE (review LOW-4).
+        // A failed `set_ttl` on the committing pass returned an error, and the
+        // error policy's requeue lands here.
+        if let Some(owner) = restore_owner(restore) {
+            crate::evidence_fetch::repair_ttl(
+                client,
+                namespace,
+                &owner,
+                result,
+                evidence
+                    .and_then(|e| e.verification.as_ref())
+                    .and_then(|v| v.verified_at),
+                observation,
+                now,
+            )
+            .await
+            .map_err(RestoreError::Api)?;
+        }
         return Ok(waiting);
     }
     let source = backup::evidence_source_for(
