@@ -200,8 +200,17 @@ class Native:
             "sourceRef": {"name": source}, "topics": [self.topic],
             "archive": {"url": f"s3://{BUCKET}/{self.prefix}/{path}", "secretRef": {"name": "logweir-s3"}},
             "triggeredBy": "manual", "deadlineSeconds": deadline}))
-        return self.lab.wait_for("backup", name, self.ns, lambda o: (o.get("status") or {}).get("phase") in TERMINAL,
+        done = self.lab.wait_for("backup", name, self.ns, lambda o: (o.get("status") or {}).get("phase") in TERMINAL,
                                  seconds=deadline + 120, what="a terminal phase")
+        # The runner also writes a signed catalog record into the SHARED
+        # evidence root and names it only in its log (`catalog-key=`); it is
+        # recorded here so cleanup removes it with the receipts.
+        logs = self.lab.kubectl("logs", f"job/{name}", "--tail=400", ns=self.ns, check=False).stdout
+        for line in logs.splitlines():
+            if line.startswith("catalog-key=") and line.endswith("/record.json"):
+                key = line.split("=", 1)[1].strip()
+                self.evidence_keys += [key, key[: -len("record.json")] + "record.sig"]
+        return done
 
     def verified(self, kind: str, name: str) -> dict[str, Any]:
         return self.lab.wait_for(
@@ -337,6 +346,12 @@ class Native:
                        "topic_mapping_prefix": "logweir-scratch-", "marker_topic": "logweir.scratch",
                        "default_replication_factor": 1, "teardown": "delete"},
             "restore": {"point_in_time": pit},
+            # REQUIRED by the runner's plan schema ("drill spec does not parse:
+            # missing field `sample`", measured live 2026-09-22). The API and
+            # the controller forward plan bytes unparsed, so a plan without it
+            # is admitted and fails in the runner's first phase.
+            "sample": {"window_start": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - 86400)),
+                       "window_end": pit, "records_per_partition": 25, "anchor": "head"},
             "objectives": {"rto_seconds": 3600, "rpo_seconds": 86400, "pass_rate": 1.0},
             "evidence": {**storage, "prefix": "logweir/"},
             "notifications": {"webhooks": []},
@@ -392,6 +407,9 @@ class Native:
             "byte for byte",
             {"old": old_id, "new": new_id, "restoreBackupSetRef": spec.get("backupSetRef"), "restore": name,
              "uid": uid})
+        # Recorded BEFORE the restore runs, so a partial restore's topic is
+        # removed too.
+        self.created_topics.append(("target", self.restored_prefix + self.topic))
         # --- the approval, through the ceremony the product ships ----------
         lab.create(self._obj("Approval", approval, {
             "approvalBytes": approval_bytes, "sidecarBytes": sidecar_bytes, "planHash": plan_hash,
@@ -409,7 +427,12 @@ class Native:
 
         done = lab.wait_for("restore", name, ns, lambda o: (o.get("status") or {}).get("phase") in TERMINAL,
                             seconds=1100, what="a terminal phase", every=sample)
-        done = self.verified("restore", name)
+        if (done.get("status") or {}).get("phase") == "Succeeded":
+            # Only a run that finished has a verdict to wait for. A failed one
+            # falls through, so every row below is RECORDED as a FAIL with its
+            # clauses, instead of the journey dying on a wait for evidence
+            # that can never come.
+            done = self.verified("restore", name)
         lab.write("native/restore.json", done)
         lab.write("native/restore-progress.json", seen)
         st = done.get("status") or {}
@@ -417,7 +440,6 @@ class Native:
         self.evidence_keys += [ev[k] for k in ("scorecardKey", "sidecarKey") if ev.get(k)]
         # --- the restored records -----------------------------------------
         restored_topic = self.restored_prefix + self.topic
-        self.created_topics.append(("target", restored_topic))
         restored_end = self._end_offset("target", restored_topic) if st.get("phase") == "Succeeded" else None
         values = []
         if restored_end:

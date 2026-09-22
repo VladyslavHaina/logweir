@@ -94,6 +94,12 @@ const kopt = (args) => {
   return d.status === 0 ? JSON.parse(d.stdout) : null;
 };
 const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+// THE API NAMES A NEW CONNECTION ITSELF (`conn-<random>`, measured live:
+// the typed name is not the object's name), so a created object is found by
+// the UID set difference, never by the name that was typed.
+const clusters = (ns) => new Map(kjson(["-n", ns, "get", "kafkaclusters"]).items
+  .map((o) => [o.metadata.uid, o]));
+const added = (before, ns) => [...clusters(ns).entries()].filter(([uid]) => !before.has(uid)).map(([, o]) => o);
 
 async function until(what, probe, seconds) {
   const deadline = Date.now() + seconds * 1000;
@@ -193,17 +199,23 @@ async function fillCluster(page, name, servers, scram) {
 // ------------------------------------------------------------ journey 1
 
 async function registrationAndDiscovery(page, base, port) {
-  const conn = "src-" + sfx;
+  const beforeReg = clusters(NS_A);
   await page.goto(base + "#/clusters?ns=" + NS_A, { waitUntil: "load" });
-  await fillCluster(page, conn, SOURCE, true);
+  await fillCluster(page, "src-" + sfx, SOURCE, true);
   await page.click("#cluster-form button[type=submit]");
+  const made = await until("the page's connection to exist", async () => {
+    const n = added(beforeReg, NS_A);
+    return n.length ? n : null;
+  }, 60);
+  const conn = made[0].metadata.name;
   const reached = await until("the controller to reach the registered connection", async () => {
     const o = kopt(["-n", NS_A, "get", "kafkacluster", conn]);
     return o && o.status && o.status.reachable === true ? o : null;
   }, 240);
   await shot(page, "01-connection-registered");
   row("console-registers-a-connection-the-controller-reaches",
-    reached.spec.bootstrapServers[0] === SOURCE && reached.spec.auth.secretRef.name === "source-scram" &&
+    made.length === 1 && reached.metadata.uid === made[0].metadata.uid &&
+      reached.spec.bootstrapServers[0] === SOURCE && reached.spec.auth.secretRef.name === "source-scram" &&
       Boolean(reached.status.clusterId),
     "the page created KafkaCluster/" + conn + " (uid " + reached.metadata.uid + "); the controller reached " +
       "it and recorded cluster id " + reached.status.clusterId,
@@ -243,11 +255,13 @@ async function registrationAndDiscovery(page, base, port) {
   }, 360);
   let listed = [];
   let cursor = null;
+  const apiStatuses = [];
   for (let i = 0; i < 20; i += 1) {
     const url = "http://127.0.0.1:" + port + "/api/v1/namespaces/" + NS_A + "/topic-discoveries/" +
-      done.d.metadata.name + "/topics?limit=500" + (cursor ? "&cursor=" + encodeURIComponent(cursor) : "");
+      done.d.metadata.name + "/topics?limit=200" + (cursor ? "&cursor=" + encodeURIComponent(cursor) : "");
     const r = await fetch(url);
     const body = await r.json();
+    apiStatuses.push(r.status);
     listed = listed.concat((body.items || []).map((t) => t.name));
     cursor = body.page && body.page.nextCursor;
     if (!cursor) break;
@@ -255,19 +269,28 @@ async function registrationAndDiscovery(page, base, port) {
   writeFileSync(join(OUT, "discovery.json"), JSON.stringify({ object: done.d, listed: listed }, null, 2));
   let shown = false;
   try {
-    await page.goto(base + "#/clusters?ns=" + NS_A + "&name=" + conn, { waitUntil: "load" });
+    // A RELOAD, not a goto: the same hash is a same-document navigation and
+    // the page would keep the view it rendered while the discovery was
+    // pending (measured). The stored inventory is then searched through the
+    // page's own filter form.
+    await page.reload({ waitUntil: "load" });
+    await page.waitForSelector("#topic-filters");
+    await page.fill("#topic-q", TOPIC);
+    await page.click("#topic-filters button[type=submit]");
+    // innerText carries no input value, so the typed filter cannot satisfy this.
     await waitText(page, TOPIC, 60);
     shown = true;
   } catch (notShown) { shown = false; }
   await shot(page, "03-discovery-complete");
   row("console-discovery-completes-and-lists-the-run-topic",
-    done.count === 1 && done.d.status.phase === "Succeeded" && listed.includes(TOPIC) && shown,
+    done.count === 1 && done.d.status.phase === "Succeeded" && apiStatuses.every((c) => c === 200) &&
+      listed.includes(TOPIC) && shown,
     "one TopicDiscovery (" + done.d.metadata.name + ") started by the page ended " + done.d.status.phase +
       "; the API's inventory holds " + listed.length + " topic(s) and " +
       (listed.includes(TOPIC) ? "names" : "does NOT name") + " the run's own topic " + TOPIC +
       ", which the page " + (shown ? "shows" : "does NOT show"),
     { discovery: done.d.metadata.name, uid: done.d.metadata.uid, phase: done.d.status.phase,
-      topics: listed.length, hasRunTopic: listed.includes(TOPIC), shownOnPage: shown });
+      topics: listed.length, hasRunTopic: listed.includes(TOPIC), shownOnPage: shown, apiStatuses: apiStatuses });
 }
 
 // ------------------------------------------------------------ journey 2
@@ -330,35 +353,41 @@ async function staleNamespace(page, base) {
   await page.evaluate((ns) => { location.hash = "#/clusters?ns=" + encodeURIComponent(ns); }, NS_B);
   await waitText(page, inB, 30);
   const before = posts.length;
+  const leftBeforeA = clusters(NS_A);
+  const leftBeforeB = clusters(NS_B);
   await oldForm.evaluate((f) => f.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
   await pause(2500);
   const leftPosts = posts.length - before;
-  const leftTruth = { inA: kopt(["-n", NS_A, "get", "kafkacluster", left]) !== null,
-    inB: kopt(["-n", NS_B, "get", "kafkacluster", left]) !== null };
+  const leftTruth = { inA: added(leftBeforeA, NS_A).length > 0, inB: added(leftBeforeB, NS_B).length > 0 };
 
   // 2c. A submit after the switch lands in B, and only in B.
   const later = "after-" + sfx;
   await fillCluster(page, later, "nowhere.invalid:9092", false);
   const beforeB = posts.length;
+  const laterBeforeA = clusters(NS_A);
+  const laterBeforeB = clusters(NS_B);
   await page.click("#cluster-form button[type=submit]");
-  const landed = await until("the submitted connection to exist", async () =>
-    kopt(["-n", NS_B, "get", "kafkacluster", later]) || kopt(["-n", NS_A, "get", "kafkacluster", later]), 30);
+  const landedAll = await until("the submitted connection to exist", async () => {
+    const n = added(laterBeforeB, NS_B).concat(added(laterBeforeA, NS_A));
+    return n.length ? n : null;
+  }, 30);
+  await pause(1500);
+  const landed = landedAll[0];
   const bPosts = posts.slice(beforeB);
-  const laterTruth = { inB: kopt(["-n", NS_B, "get", "kafkacluster", later]) !== null,
-    inA: kopt(["-n", NS_A, "get", "kafkacluster", later]) !== null };
+  const laterTruth = { inB: added(laterBeforeB, NS_B).length, inA: added(laterBeforeA, NS_A).length };
   await shot(page, "05-submit-after-switch");
   row("console-left-form-in-a-writes-nothing",
     leftPosts === 0 && !leftTruth.inA && !leftTruth.inB && bPosts.length >= 1,
-    "submitting the form left behind in A issued " + leftPosts + " POST(s); " + left + " exists in A: " +
+    "submitting the form left behind in A issued " + leftPosts + " POST(s); a new KafkaCluster appeared in A: " +
       leftTruth.inA + ", in B: " + leftTruth.inB + ". The current form on B did POST (" + bPosts.length +
       "), so the silence is the old form's and not a page that never posts",
     { leftPosts: leftPosts, truth: leftTruth });
   row("console-submit-after-switch-lands-in-b-only",
-    laterTruth.inB && !laterTruth.inA && bPosts.length >= 1 &&
+    laterTruth.inB === 1 && laterTruth.inA === 0 && landed.metadata.namespace === NS_B && bPosts.length >= 1 &&
       bPosts.every((u) => u.includes("/namespaces/" + NS_B + "/")),
     "the submit after the switch POSTed to " + JSON.stringify(bPosts.map((u) => new URL(u).pathname)) +
-      "; kubectl finds " + later + " in B: " + laterTruth.inB + ", in A: " + laterTruth.inA +
-      " (uid " + landed.metadata.uid + ")",
+      "; kubectl finds " + laterTruth.inB + " new KafkaCluster(s) in B and " + laterTruth.inA +
+      " in A (" + landed.metadata.name + ", uid " + landed.metadata.uid + ")",
     { posts: bPosts.map((u) => new URL(u).pathname), truth: laterTruth, uid: landed.metadata.uid });
 }
 

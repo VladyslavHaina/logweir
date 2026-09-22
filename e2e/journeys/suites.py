@@ -235,9 +235,9 @@ JOURNEYS: tuple[Journey, ...] = (
     Journey(
         "registration-and-discovery", "a connection and a destination are registered and a discovery "
         "completes against the real broker", ("journey: registration and discovery",),
-        (R("console", "console-registers-a-connection-the-controller-reaches", (RESOURCE,), f"{CON}:205"),
-         R("console", "console-registers-a-destination-the-controller-validates", (RESOURCE,), f"{CON}:231"),
-         R("console", "console-discovery-completes-and-lists-the-run-topic", (RESOURCE, ARCHIVE), f"{CON}:263"),
+        (R("console", "console-registers-a-connection-the-controller-reaches", (RESOURCE,), f"{CON}:216"),
+         R("console", "console-registers-a-destination-the-controller-validates", (RESOURCE,), f"{CON}:243"),
+         R("console", "console-discovery-completes-and-lists-the-run-topic", (RESOURCE, ARCHIVE), f"{CON}:275"),
          R("d1", "L-09-1", (RESOURCE,), f"{D1}:1279"),
          R("d2", "S1", (RESOURCE, EVIDENCE, ARCHIVE), f"{D2}:1827",
            "two destinations: each run's manifest lands in its own bucket and not the other")),
@@ -289,7 +289,7 @@ JOURNEYS: tuple[Journey, ...] = (
     Journey(
         "source-offline", "a source nobody answers for fails the run by name and writes nothing; a "
         "discovery against it fails by name", ("source offline",),
-        (R("native", "backup-from-an-offline-source-fails-and-writes-nothing", (RESOURCE, ARCHIVE), f"{NAT}:294"),
+        (R("native", "backup-from-an-offline-source-fails-and-writes-nothing", (RESOURCE, ARCHIVE), f"{NAT}:303"),
          R("d2", "S11", (RESOURCE,), f"{D2}:3058")),
         data=True),
     Journey(
@@ -302,9 +302,9 @@ JOURNEYS: tuple[Journey, ...] = (
     Journey(
         "stale-namespace-request", "a slow answer for namespace A never renders over B, a form left in A "
         "writes nothing, and a submit after the switch lands in B only", ("stale namespace request",),
-        (R("console", "console-slow-a-response-never-renders-over-b", (RESOURCE, TEXT), f"{CON}:314"),
-         R("console", "console-left-form-in-a-writes-nothing", (RESOURCE,), f"{CON}:350"),
-         R("console", "console-submit-after-switch-lands-in-b-only", (RESOURCE,), f"{CON}:356"))),
+        (R("console", "console-slow-a-response-never-renders-over-b", (RESOURCE, TEXT), f"{CON}:326"),
+         R("console", "console-left-form-in-a-writes-nothing", (RESOURCE,), f"{CON}:368"),
+         R("console", "console-submit-after-switch-lands-in-b-only", (RESOURCE,), f"{CON}:374"))),
     Journey(
         "duplicate-submit", "a double click, a lost response, a resubmitted restore, a duplicate create "
         "and a replayed API create each leave exactly one durable object", ("duplicate submit",),
@@ -313,7 +313,7 @@ JOURNEYS: tuple[Journey, ...] = (
          R("plat12-13", "restore submission routes to Awaiting approval, and a resubmission creates nothing",
            (RESOURCE,), f"{U1213}:631"),
          R("plat06", "case-g", (RESOURCE, EVIDENCE), f"{P06}:1274"),
-         R("native", "api-restore-replay-is-one-object", (RESOURCE,), f"{NAT}:376"))),
+         R("native", "api-restore-replay-is-one-object", (RESOURCE,), f"{NAT}:391"))),
     Journey(
         "old-point-selection", "an older point chosen in the console and through the API is the point the "
         "durable Restore names, and the point that is restored", ("old-point selection",),
@@ -321,16 +321,16 @@ JOURNEYS: tuple[Journey, ...] = (
            (TEXT,), f"{U1213}:1013"),
          R("plat11-2", "the wizard submits, and the created Restore is the preview byte for byte",
            (RESOURCE,), f"{U112}:972"),
-         R("native", "restore-cr-carries-the-selected-older-point", (RESOURCE,), f"{NAT}:386"),
-         R("native", "older-point-restore-restores-exactly-its-records", (ARCHIVE, RESOURCE), f"{NAT}:437")),
+         R("native", "restore-cr-carries-the-selected-older-point", (RESOURCE,), f"{NAT}:401"),
+         R("native", "older-point-restore-restores-exactly-its-records", (ARCHIVE, RESOURCE), f"{NAT}:459")),
         data=True),
     Journey(
         "selected-point-restore-and-progress", "a selected point restores to completion with verified "
         "evidence, and its progress is durable on the object and projected by the API",
         ("journey: selected-point restore and durable progress",),
-        (R("native", "older-point-restore-restores-exactly-its-records", (ARCHIVE, RESOURCE), f"{NAT}:437"),
-         R("native", "restore-evidence-verifies-with-two-verifiers", (EVIDENCE,), f"{NAT}:500"),
-         R("native", "restore-progress-is-durable-and-projected", (RESOURCE,), f"{NAT}:457")),
+        (R("native", "older-point-restore-restores-exactly-its-records", (ARCHIVE, RESOURCE), f"{NAT}:459"),
+         R("native", "restore-evidence-verifies-with-two-verifiers", (EVIDENCE,), f"{NAT}:522"),
+         R("native", "restore-progress-is-durable-and-projected", (RESOURCE,), f"{NAT}:479")),
         data=True),
     Journey(
         "scheduled-backup-restore", "a SCHEDULED run's point is offered for restore and the wizard opens "
