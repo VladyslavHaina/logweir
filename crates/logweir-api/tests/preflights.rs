@@ -1585,3 +1585,55 @@ async fn last_test_finds_the_newest_check_and_refuses_a_predecessors() {
         );
     }
 }
+
+/// **A referent recorded WITHOUT a generation is bound by uid alone.**
+///
+/// The controller records the recovery-point `Backup` (and the `Approval`)
+/// with no generation — `Referent::generation` is `None` "for a kind whose
+/// generation is not meaningful". Comparing the live object's generation
+/// against that `None` reported `referentChanged` for every restore check
+/// naming a recovery point, on every `?planHash=` re-read, so the console's
+/// pre-submit re-read refused every such submit (found by PLAT-08.2's live
+/// journey). The same uid is unchanged; a recreated object is still a change.
+#[tokio::test]
+async fn a_referent_recorded_without_a_generation_is_compared_by_uid_alone() {
+    for (live_uid, changed, why) in [
+        ("uid-point", false, "the same Backup, whatever its generation"),
+        ("uid-recreated", true, "a Backup recreated under the same name"),
+    ] {
+        let app = TestApp::new();
+        let mut preflight = seed_preflight(
+            &app.fake,
+            NS_A,
+            "pf-point",
+            "Restore",
+            None,
+            Some(LOCAL_ADMIN_ACTOR),
+        );
+        preflight["status"]["binding"]["referents"] = json!([
+            {"kind": "KafkaCluster", "name": "target", "uid": "uid-target", "generation": 1},
+            {"kind": "Backup", "name": "point", "uid": "uid-point"}
+        ]);
+        app.fake.seed("preflights", NS_A, preflight);
+        seed_bound_referent(&app, "uid-target", 1);
+        app.fake.seed(
+            "backups",
+            NS_A,
+            json!({
+                "metadata": {"name": "point", "uid": live_uid, "generation": 3},
+                "spec": {"sourceRef": {"name": "source"}, "topics": ["orders"],
+                         "archive": {"url": "s3://archive/team-a"},
+                         "triggeredBy": "manual", "deadlineSeconds": 1800}
+            }),
+        );
+        let response = app
+            .get(&format!("/api/v1/namespaces/{NS_A}/preflights/pf-point"))
+            .await;
+        let item = response.json()["item"].clone();
+        let names_point = item["staleReasons"].as_array().unwrap().iter().any(|r| {
+            r["reason"] == "referentChanged" && r["kind"] == "Backup" && r["name"] == "point"
+        });
+        assert_eq!(names_point, changed, "{why}: {}", item["staleReasons"]);
+        app.fake.assert_strict();
+    }
+}

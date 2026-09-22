@@ -539,12 +539,22 @@ fn staleness(
                     referent.uid.as_deref().unwrap_or_default(),
                     referent.generation,
                 ));
+                // A REFERENT RECORDED WITHOUT A GENERATION IS BOUND BY UID
+                // ALONE. `logweir_core::check_contract::Referent::generation`
+                // is `None` "for a kind whose generation is not meaningful" —
+                // the controller records the recovery-point `Backup` and the
+                // `Approval` that way — so the live side is compared on the
+                // same terms. Comparing a live `Some(n)` against a recorded
+                // `None` reported `referentChanged` for EVERY restore check
+                // that names a recovery point, on every re-read (found by
+                // PLAT-08.2's live journey); a recreated object still differs
+                // by uid and is still reported.
                 current_referents.push(core_referent(
                     &referent.kind,
                     namespace,
                     &referent.name,
                     uid,
-                    *generation,
+                    referent.generation.and(*generation),
                 ));
             }
         }
