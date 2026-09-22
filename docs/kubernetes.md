@@ -1309,6 +1309,82 @@ PLAT-15.2's connect-an-existing-archive path and **this build creates no sync Jo
 for it**: such a catalog reports `Ready=False/LegacyArchiveUnsupported` and names
 the supported path (a `BackupDestination` with a read-only `archiveRead` grant).
 
+### 7d.1 Disaster restore: an archive, and no `Backup` object at all (PLAT-15.2)
+
+A recovery point is a signed receipt in object storage. A cluster that lost every
+`Backup` object — rebuilt from nothing, restored from an etcd snapshot older than
+the archive, or a fresh installation pointed at an archive another installation
+wrote — still has every point, and this is the supported way to restore one.
+**No `Backup`, `BackupSchedule` or source `KafkaCluster` is read at any step, and
+no configuration is reconstructed by hand.**
+
+1. **A read-only credential, by Secret reference.** Create the Secret holding
+   the archive's read-only key pair with `kubectl`, then a `BackupDestination`
+   naming it by NAME (`access.archiveRead: {mode: SecretKeys, secret: {name}}`)
+   — on the console's *Destinations* page choose *existing Secret name*. The
+   console never asks for or shows a key.
+2. **Connect the archive.** Create a `RecoveryCatalog` with
+   `spec.destinationRef` and `sync.mode: Full` (the console's *Catalog* page,
+   *Connect an existing archive*, or `POST .../catalogs`). The sync Job walks
+   the archive's `logweir/catalog/v1/` records and the controller publishes the
+   view (§7d). Repeating the connect with the same `Idempotency-Key` returns the
+   same object; a second sync of the same archive yields the same point ids.
+3. **Establish trust explicitly.** A point signed by a key this namespace's
+   trust does not list is `UntrustedSigner` and is never offered. The catalog's
+   signer panel shows the key id; compare it out of band (`docs/keys.md`) and
+   add the key to the `TrustPolicy` with `kubectl apply`. There is no one-click
+   trust, and a key found beside the archive is a claim, not a trust decision.
+4. **Choose a catalog-verified point.** The wizard (`#/restore?ns=<ns>` lists
+   *Recovery points from connected archives*; the catalog table links each
+   restorable row) opens on `#/restore?ns=<ns>&catalog=<name>&point=<pointId>`
+   and **re-reads the point from the product API**. It is offered only when the
+   API publishes the row `selectable` — `Available` and `Verified` or
+   `VerifiedHistorical`, joined server side with the namespace's `Backup`
+   verdicts (`backupVerdict`) — the verdict join is complete
+   (`backupVerdictsIncomplete` absent), and the row carries an unredacted
+   receipt key and both digests. The operator names the topics to restore: the
+   view does not publish a point's topic list, and the readiness check reads the
+   manifest for exactly those names.
+5. **The plan is bound to the point.** It carries `source.backup: <backupId>`
+   and `source.point {point_id, receipt_key, receipt_sha256, manifest_sha256}`;
+   the restore point in time defaults to `coveredTo − 1 ms` (the catalog's end
+   is exclusive). The approver signs those bytes, so the approval covers WHICH
+   archive object is recovered.
+6. **Readiness re-reads the row.** Step 5 starts a `Preflight` with
+   `spec.request.restore.catalogPointRef {catalogRef, pointId}` (at most one of
+   it and `recoveryPointRef`, CEL rule P10). §21.8 lists what
+   `recoveryPoint.state` answers.
+7. **Approve and run.** The `Restore` is the ordinary one — `backupSetRef` is
+   the point's set, `sourceDestinationRef`/`evidenceDestinationRef` the
+   catalog's destination — and waits for its `Approval`. The runner, before it
+   constructs any client (execution contract v2), re-reads the receipt the plan
+   names, re-derives the point id from its bytes, compares both digests and
+   reads the manifest back; a mismatch is exit 3 `PointBindingMismatch` and no
+   data moves. The source cluster is never contacted.
+
+**A run the controller could not verify is restored the same way
+(CONSOLE-RESTORE-IGNORES-CATALOG-WINDOW).** A destination-backed `Backup` whose
+own verdict is `NotAttempted` (no evidence grant, or a `ControllerIdentity`
+location the administrator did not allowlist) has no `status.windowCovered`, so
+it is not a recovery point on its own. The schedule detail and the wizard offer
+it **from its catalog row** only when its own verdict is absent or
+`NotAttempted` — never `Invalid`, `Untrusted`, `Pending` or a word this build
+does not know — exactly one row answers its receipt digest (its set id when it
+reported no digest), that row is offerable as above, and the catalog reads the
+destination the run froze (same name, UID and location digest). The link opens
+the wizard on the catalog point, so the plan is bound to that receipt.
+
+**Upgrade and rollback.** Everything here is additive. A plan without
+`source.point` is byte-identical to before and restores as before;
+`catalogPointRef` is one optional field and one CEL rule on the `Preflight`
+kind, whose objects are immutable, so no existing object changes; the five new
+check codes are new members of a closed vocabulary. Rolling the controller back
+leaves a `catalogPointRef` Preflight answering no `recoveryPoint.state` row (an
+older controller ignores the field — the CRD prunes it once the older schema is
+re-applied); rolling the console back removes the catalog-point route and its
+links. Archives, catalog records and the runner's binding check (which predates
+this change) are untouched in both directions.
+
 ### 7e. A `ProtectionPolicy` says whether you can recover, and a green schedule does not
 
 An enabled schedule is not protection. It says the cron is firing; it says
@@ -6881,6 +6957,24 @@ so `approval.state` is `skipped` with `SubjectNotCreated` and the verdict is
   or restores from one archived through the destination. Nothing is refused
   that was not refused before — an `unknown` verdict authorises nothing, exactly
   as a `skipped` blocking row does.
+- **A catalog point's `recoveryPoint.state` is read from the catalog row
+  (PLAT-15.2).** With `catalogPointRef`, the controller reads the catalog, the
+  page `ConfigMap`s its status names (by those names only; each must be
+  `immutable` and hash to its recorded digest), and the namespace's `Backup`s in
+  at most four pages of 500, and answers, in this order:
+
+  | What it found | Answer |
+  |---|---|
+  | no such catalog, or the view does not list the point | `notReady`, `RecoveryPointNotFound` |
+  | no view yet, an expired view, a page gone, mutable or altered | `unknown`, `CatalogPointViewUnavailable` |
+  | a `Backup` of the same receipt digest (set id for a digest-less run) whose own verdict is anything but absent, `NotAttempted` or `Valid` | `notReady`, `CatalogPointRefusedByController` |
+  | the row is not `selectable` | `notReady`, `CatalogPointNotSelectable`, both axes named |
+  | more `Backup`s than the four pages read | `unknown`, `CatalogPointViewUnavailable` — asked after the refusal it could not rule out |
+  | the plan has no `source.point`, or its binding or `source.backup` is not the row's | `notReady`, `CatalogPointBindingMismatch` |
+  | otherwise | `ready`, `CatalogPointSelectable` |
+
+  The catalog joins the check's referents. A `ready` here authorises nothing:
+  the runner re-verifies the binding against the archive before any data moves.
 - **`gc.rs` IS wired, since D2 W11.** A terminal `Preflight` is collected an
   hour after `result.expiresAt` (or after `observedAt`, when it never produced
   a verdict with an expiry), by the reconciler's own hourly pass, with a UID

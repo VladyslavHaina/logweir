@@ -920,6 +920,27 @@ connection is not a smaller check. Every request body on this API is
 `deny_unknown_fields`, so a destination or a topic list added to that block is
 `422 unknown_field` rather than a wider check nobody asked for.
 
+**A restore check names ONE recovery point** (PLAT-15.2). `restore.recoveryPoint
+{backupName, backupUid}` names a `Backup`; `restore.catalogPoint {catalog,
+pointId}` names a point in a `RecoveryCatalog`'s view instead — a point with no
+`Backup` object behind it, or a run the controller could not verify itself.
+Both at once is `422 exactly_one` on `restore.catalogPoint`; a `pointId` that is
+not `lwp1-` plus 32 lowercase hex is `422 invalid_point_id`. The controller
+re-reads that row when the check runs — availability, verification, any
+reached `Backup` verdict on the same receipt, and whether the plan's
+`source.point` is the row's binding — and reports `recoveryPoint.state` from it
+(`docs/kubernetes.md` §21.8):
+
+```http
+POST /api/v1/namespaces/team-a/preflights
+Idempotency-Key: <one per deliberate check>
+
+{"operation": "restore", "restore": {
+  "planBytes": "<the exact plan bytes>", "planHash": "sha256:…", "target": "target",
+  "sourceDestination": "archive", "evidenceDestination": "archive",
+  "catalogPoint": {"catalog": "archive", "pointId": "lwp1-0123456789abcdef0123456789abcdef"}}}
+```
+
 **The idempotency key of a connectivity test is per deliberate test, not per
 subject.** For a readiness check over an unchanged plan the subject IS the
 question, so a retry after a lost response replays. A connectivity test's

@@ -197,6 +197,7 @@ authorisation story is "the API server evaluated the viewer's RBAC".
 | `tests/selector.spec.js` | the saved-cluster selector: identity, rename, delete-and-recreate, freshness, the two contract v1 references, and the same rules in both client modes. |
 | `tests/d2.spec.js` | **destinations, topic discovery and operation readiness**: every state the product API can put in front of those three surfaces, and the five sentences this product refuses to render. |
 | `tests/d3.spec.js` | **the operation view, protection, the catalog, the keys view, the badge cases and the retention panel**: every state D3 declares, over the objects the D3 live runs recorded, and the five claims this product refuses to make. |
+| `tests/restore-catalog.spec.js` | **PLAT-15.2**: the catalog-point route, the offer rule and every refusal it makes, the catalog-window offer for a run the controller could not verify, the bound plan and its golden, the readiness request, the restore body, drafts per point, and the selector, catalog-table and schedule-detail links -- each with its negative control. |
 | `tests/preview-server.js` | a development tool, never a test: serves this directory over the fixtures under `tests/fixtures/preview/`. See *Previewing with fixtures*. |
 
 **The design system** lives in `style.css` and nowhere else. It is written from
@@ -582,6 +583,65 @@ point's backup set and its covered window, so choosing another point changes the
 bytes, the sha256 on screen and both minted names -- and the reviewed-plan check
 (PLAT-13.2) refuses a submit whose prepared hash is not the hash that was
 displayed. An approval covers the point it was signed over, and nothing else.
+
+## A catalog point: the restore with no `Backup` behind it (PLAT-15.2)
+
+**The second route** is a point read back from a connected archive:
+
+```
+#/restore?ns=<namespace>&catalog=<catalog name>&point=<lwp1-point-id>
+```
+
+plus `&backup=<name>&uid=<uid>` when the offer came from a run (below). The
+point id is content-derived from the signed receipt (D3 section 5.1), so it is
+the identity, and **everything the plan is built from is read again from the
+product API** -- the catalog, the point (cursor-paged through at most 25 pages
+of 200), and the catalog's saved destination. A receipt key or digest in the
+address is never read: an address is something anyone can edit.
+
+**When a point is offered** (`catalogPointOffer`, the one rule the selector, the
+catalog table, the schedule detail and the wizard's own mount share): the API
+row is `selectable` -- the controller's conjunction, joined server side with the
+namespace's `Backup` verdicts; no `backupVerdict`; no `backupVerdictsIncomplete`
+on the page (a join nobody finished cannot say that no `Backup` refused this
+receipt); a current view; a point id, an unredacted receipt key and both
+digests; and a covered window. Anything else is a refusal naming the reason,
+with no plan, no hash and no submit, and never a substituted point.
+
+**What the six steps do with it.** Step 1 reads the archive the catalog reads
+(its saved destination, frozen at mount by UID and location digest and checked
+again before the create, exactly as a Backup's destination is). Step 2 shows the
+two verdicts, the signer key id, the binding and an input for the **topics to
+restore** -- the view publishes no topic list, so the operator names them and
+the readiness check reads the manifest for exactly those names. Step 3's
+window is `[coveredFrom, coveredTo - 1 ms]`, because the catalog's end is
+exclusive. The plan carries `source.backup` pinned to the point's set and
+`source.point {point_id, receipt_key, receipt_sha256, manifest_sha256}`; the
+runner re-reads that receipt and manifest before it contacts a broker and
+refuses a mismatch (exit 3 `PointBindingMismatch`). A plan built from a
+`Backup` carries no `point` block and is byte-identical to before
+(`ui/tests/fixtures/plan-point.golden.yaml` beside `plan.golden.yaml`). Step 5
+sends `restore.catalogPoint {catalog, pointId}` and nothing else, so the
+controller re-reads the row when the check runs. A draft is kept per point: a
+draft made for a Backup is never applied to a catalog point of the same set.
+
+**Where the links come from.** The selector lists *Recovery points from
+connected archives* beside the Backups, and a namespace with no completed
+Backup shows them instead of the "wait for a run" advice (with a link to
+connect an archive when there are none). `#/catalog`'s table links every row
+the rule offers and says why a selectable row is not offered; it shows the
+controller's `backupVerdict` beside the verification word and a banner when
+`backupVerdictsIncomplete` is set.
+
+**A run the controller wrote no window for (CONSOLE-RESTORE-IGNORES-CATALOG-WINDOW).**
+A `Succeeded` destination-backed run whose own verdict is absent or
+`NotAttempted` is offered on the schedule detail (the row's *Restore this point
+(catalog window)*, and the latest-point action) from its catalog row -- only
+when exactly one row answers its receipt digest (its set id when it reported
+none), that row is offered by the rule above, and, in the wizard, the catalog
+reads the destination the run froze (same name, UID and location digest). A
+run whose verdict the controller REACHED -- `Invalid`, `Untrusted`, `Pending`, or
+a word this build does not know -- is never made restorable by a row.
 
 ## The topic subset, the mapping, and what a recovery does not do
 
