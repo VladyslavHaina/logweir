@@ -1485,11 +1485,10 @@ pub fn candidate_from_backup(backup: &Backup) -> Option<PointCandidate> {
     // matching catalog row below supplies the authoritative capture/window and
     // selectability axes. A real API object always has creationTimestamp; it is
     // only a non-selectable placeholder until that merge happens.
-    let recovery_point_at = status
-        .capture
-        .as_ref()
-        .and_then(|c| c.started_at)
-        .or_else(|| backup.metadata.creation_timestamp.as_ref().map(|t| t.0))?;
+    let receipt_capture_at = status.capture.as_ref().and_then(|c| c.started_at);
+    let needs_catalog_capture = receipt_capture_at.is_none();
+    let recovery_point_at =
+        receipt_capture_at.or_else(|| backup.metadata.creation_timestamp.as_ref().map(|t| t.0))?;
     let covered = status.window_covered.as_ref().map(|w| Window {
         from_ms: w.from_ms,
         to_ms: w.to_ms,
@@ -1516,10 +1515,11 @@ pub fn candidate_from_backup(backup: &Backup) -> Option<PointCandidate> {
         // A `Backup` on its own establishes that the run succeeded, never that
         // its archive objects are still readable — that is the catalog's axis,
         // and it overwrites this below when a catalog is consulted.
-        selectable: evidence
-            .and_then(|e| e.verification.as_ref())
-            .and_then(|v| v.result.as_deref())
-            == Some("Valid"),
+        selectable: !needs_catalog_capture
+            && evidence
+                .and_then(|e| e.verification.as_ref())
+                .and_then(|v| v.result.as_deref())
+                == Some("Valid"),
         retention_lease: false,
     })
 }
@@ -1546,6 +1546,12 @@ pub fn merge_catalog_entry(
     let recovery_point_at = DateTime::from_timestamp_millis(entry.recovery_point_at_ms);
     match by_id.get_mut(&entry.point_id) {
         Some(existing) => {
+            // `pointId` deliberately carries only the first 128 digest bits.
+            // It is an index, not the equality proof: a catalog row may enrich
+            // this Backup only when the full receipt digest agrees.
+            if entry.receipt_sha256 != existing.receipt_sha256 {
+                return;
+            }
             // THE CATALOG DECIDES SELECTABILITY, because it is the axis it
             // actually measured: it listed the archive and re-evaluated trust.
             existing.selectable = entry.selectable;

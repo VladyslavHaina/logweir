@@ -9170,6 +9170,65 @@ fn the_record_count_is_the_sum_of_the_receipts_own_per_topic_counts() {
     );
 }
 
+/// The runner's digest is the capture claim; the controller-computed digest
+/// is only an old-runner fallback. If fetched bytes disagree, verification is
+/// `Invalid` even when the injected verifier would otherwise answer `Valid`.
+#[tokio::test]
+async fn a_runner_digest_disagreement_is_invalid_and_never_self_hashes_valid() {
+    let observation = |_keys: EvidenceKeys| -> BoxFuture<'static, Option<ArchiveObservation>> {
+        Box::pin(async {
+            Some(ArchiveObservation {
+                presence: EvidencePresence {
+                    payload: true,
+                    sidecar: true,
+                },
+                covered: Some((1_758_236_400_000, 1_758_240_000_000)),
+                receipt_sha256: Some(
+                    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                        .to_string(),
+                ),
+                records: Some(42),
+                capture: Some((utc(2026, 11, 9, 3, 17), utc(2026, 11, 9, 3, 19))),
+            })
+        })
+    };
+    let (client, _seen, bodies) = mock_client_recording_bodies(finished_routes(
+        &pod_list_terminated(0),
+        log_body(&i7_tail_with_digest()),
+        200,
+        "Complete",
+    ));
+    reconcile_backup(
+        &frozen_backup(),
+        &client,
+        &observation,
+        &valid_evidence,
+        utc(2026, 11, 9, 3, 20),
+    )
+    .await
+    .expect("the disagreement is a terminal verdict, not a reconcile error");
+
+    let statuses = patched_statuses(&bodies.lock().expect("the recorder is readable"));
+    assert_eq!(
+        statuses[0]["evidence"]["receiptSha256"],
+        json!(RUNNER_RECEIPT_SHA256),
+        "the status preserves the runner's capture claim, not the fetched bytes' self-hash"
+    );
+    let second = statuses.last().expect("the verification patch exists");
+    assert_eq!(second["evidence"]["verification"]["result"], "Invalid");
+    let detail = second["evidence"]["verification"]["detail"]
+        .as_str()
+        .expect("the mismatch is explained");
+    assert!(
+        detail.contains(RUNNER_RECEIPT_SHA256) && detail.contains("sha256:bbbb"),
+        "both digests are named: {detail}"
+    );
+    assert!(
+        second["records"].is_null() && second["capture"].is_null(),
+        "replacement bytes never gain verified facts: {second}"
+    );
+}
+
 /// **Defect STATUS-RECORDS, through the reconciler.** The count reaches the
 /// status only on a VERIFIED receipt.
 #[tokio::test]

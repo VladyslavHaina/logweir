@@ -384,6 +384,11 @@ pub struct Verified {
     /// signature — the value [`verify_detached`] RETURNED, never
     /// `sidecar.signatures[0].keyid`.
     pub matched_key_id: String,
+    /// The policy usage under which the matched signature was admitted.
+    /// Restore approvals require `GovernedApproval`; standing rehearsal
+    /// authorizations additionally admit ordinary-policy
+    /// `ConsoleConfirmation` signatures (D3 §4.3).
+    pub authorization_usage: KeyUsage,
     /// **The matched key's declared validity window** — `None` only when the
     /// resolved trust does not carry the matched id at all, which check 6 has
     /// already made unreachable.
@@ -402,6 +407,10 @@ pub struct Verified {
     /// key is good until 12:00 while the controller sleeps until 13:00. They
     /// are the same value read twice.
     pub key_window: Option<ApproverKeyWindow>,
+    /// The authenticated document's own expiry, when this document kind has
+    /// one. A standing verdict is valid only until the earlier of this instant
+    /// and the matched key's `notAfter`.
+    pub document_expires_at: Option<DateTime<Utc>>,
     /// The approver named inside the signed bytes.
     pub approver: String,
     /// The change ticket named inside the signed bytes.
@@ -427,8 +436,9 @@ pub struct Verified {
 }
 
 impl Verified {
-    /// **The instant this verdict stops being true on its own** — the matched
-    /// key's `notAfter`.
+    /// **The instant this verdict stops being true on its own** — the earlier
+    /// of the authenticated document's expiry and the matched key's
+    /// `notAfter`.
     ///
     /// THE FALLBACK IS A DEADLINE THAT NEVER FIRES RATHER THAN A PANIC. A
     /// `None` window means the resolved trust does not carry the id check 6
@@ -437,10 +447,14 @@ impl Verified {
     /// falls back to the heartbeat and the STATUS publishes nothing at all —
     /// unknown, never valid.
     #[must_use]
-    pub const fn valid_until(&self) -> DateTime<Utc> {
-        match &self.key_window {
-            Some(window) => window.not_after,
-            None => DateTime::<Utc>::MAX_UTC,
+    pub fn valid_until(&self) -> DateTime<Utc> {
+        let key = self
+            .key_window
+            .as_ref()
+            .map_or(DateTime::<Utc>::MAX_UTC, |window| window.not_after);
+        match self.document_expires_at {
+            Some(document) if document < key => document,
+            Some(_) | None => key,
         }
     }
 }
@@ -710,14 +724,23 @@ fn evaluate_inner(
     // somewhere to record which entry failed. `blocked_for` carries the
     // legacy message byte-for-byte, so the sentence an operator reads did not
     // change on the day this path replaced the roster walk.
-    if let Some(message) = trust.blocked_for(KeyUsage::GovernedApproval) {
+    let allowed_usages: &[KeyUsage] = if standing.is_some() {
+        &[KeyUsage::GovernedApproval, KeyUsage::ConsoleConfirmation]
+    } else {
+        &[KeyUsage::GovernedApproval]
+    };
+    if let Some(message) = allowed_usages
+        .iter()
+        .find_map(|usage| trust.blocked_for(*usage))
+    {
         return Err(ApprovalRefusal::SignatureInvalid(message.to_string()));
     }
     let declared: Vec<&ResolvedKey> = trust
         .keys
         .iter()
-        .filter(|k| k.trust.has_usage(KeyUsage::GovernedApproval))
+        .filter(|k| allowed_usages.iter().any(|usage| k.trust.has_usage(*usage)))
         .collect();
+    let usage_names = join(allowed_usages.iter().map(|usage| usage.as_str()));
 
     // ---- 3. an entry must agree with its own key material ----------------
     for entry in &declared {
@@ -740,9 +763,10 @@ fn evaluate_inner(
     if matching.is_empty() {
         return Err(ApprovalRefusal::KeyIdNotInRoster {
             key_id: format!(
-                "the sidecar names [{}] and {}'s GovernedApproval keys are [{}]",
+                "the sidecar names [{}] and {}'s approval keys for [{}] are [{}]",
                 join(sidecar.signatures.iter().map(|s| s.keyid.as_str())),
                 trust_object(trust),
+                usage_names,
                 join(declared.iter().map(|k| k.trust.key_id.as_str())),
             ),
         });
@@ -795,52 +819,73 @@ fn evaluate_inner(
     //
     // The MATCHED key's lifecycle, not the first key's: a policy may hold
     // several approver keys and only one of them signed this.
-    if let Err(refusal) = trust.may_sign_new_for(&matched_key_id, KeyUsage::GovernedApproval, now) {
-        return Err(signing_refusal(trust, &matched_key_id, refusal));
+    let matched_usage = allowed_usages
+        .iter()
+        .copied()
+        .find(|usage| {
+            trust
+                .key(&matched_key_id)
+                .is_some_and(|key| key.trust.has_usage(*usage))
+        })
+        .ok_or_else(|| ApprovalRefusal::KeyIdNotInRoster {
+            key_id: format!(
+                "{} offers no approval key for [{}] with id {matched_key_id}",
+                trust_object(trust),
+                usage_names
+            ),
+        })?;
+    if let Err(refusal) = trust.may_sign_new_for(&matched_key_id, matched_usage, now) {
+        return Err(signing_refusal(
+            trust,
+            &matched_key_id,
+            matched_usage,
+            refusal,
+        ));
     }
 
     // ---- the bytes are authentic; now read the RIGHT document shape -------
-    let (approver, ticket) = if let Some((referent, template_digest)) = standing {
-        use logweir_core::execution_contract as wire;
+    let (approver, ticket, document_expires_at) =
+        if let Some((referent, template_digest)) = standing {
+            use logweir_core::execution_contract as wire;
 
-        let doc: wire::StandingAuthorization =
-            serde_json::from_slice(approval_bytes).map_err(|e| {
-                ApprovalRefusal::StandingDocumentInvalid {
-                    detail: format!(
-                        "the signature over spec.approvalBytes verified under key id \
+            let doc: wire::StandingAuthorization =
+                serde_json::from_slice(approval_bytes).map_err(|e| {
+                    ApprovalRefusal::StandingDocumentInvalid {
+                        detail: format!(
+                            "the signature over spec.approvalBytes verified under key id \
                      {matched_key_id}, but those bytes are not a standing authorization: {e}"
-                    ),
-                }
-            })?;
-        validate_standing_document(&doc, referent, template_digest, now)?;
-        // v1 standing documents intentionally carry no person/ticket fields.
-        (String::new(), String::new())
-    } else {
-        let doc: ApprovalDocument = serde_json::from_slice(approval_bytes).map_err(|e| {
-            ApprovalRefusal::SignatureInvalid(format!(
+                        ),
+                    }
+                })?;
+            validate_standing_document(&doc, referent, template_digest, now)?;
+            // v1 standing documents intentionally carry no person/ticket fields.
+            (String::new(), String::new(), Some(doc.expires_at))
+        } else {
+            let doc: ApprovalDocument = serde_json::from_slice(approval_bytes).map_err(|e| {
+                ApprovalRefusal::SignatureInvalid(format!(
                 "the signature over spec.approvalBytes verified under key id {matched_key_id}, but \
                  those bytes are not an approval document: {e}"
             ))
-        })?;
+            })?;
 
-        // ---- 7. the plan hash, RECOMPUTED from the referent's own bytes ---
-        let want = sha256_prefixed(referent_plan_bytes);
-        if doc.plan_hash != want {
-            return Err(ApprovalRefusal::PlanHashMismatch {
-                got: doc.plan_hash,
-                want,
-            });
-        }
+            // ---- 7. the plan hash, RECOMPUTED from the referent's own bytes ---
+            let want = sha256_prefixed(referent_plan_bytes);
+            if doc.plan_hash != want {
+                return Err(ApprovalRefusal::PlanHashMismatch {
+                    got: doc.plan_hash,
+                    want,
+                });
+            }
 
-        // ---- 8. the subject kind, from inside the signed bytes ------------
-        if doc.subject_kind != referent_kind {
-            return Err(ApprovalRefusal::SubjectKindMismatch {
-                approval_says: doc.subject_kind,
-                referent_is: referent_kind.to_string(),
-            });
-        }
-        (doc.approver, doc.ticket)
-    };
+            // ---- 8. the subject kind, from inside the signed bytes ------------
+            if doc.subject_kind != referent_kind {
+                return Err(ApprovalRefusal::SubjectKindMismatch {
+                    approval_says: doc.subject_kind,
+                    referent_is: referent_kind.to_string(),
+                });
+            }
+            (doc.approver, doc.ticket, None)
+        };
 
     // LABELLED, NEVER REFUSED — and under a real `TrustPolicy` it is
     // STRUCTURALLY IMPOSSIBLE rather than merely absent. D3 §7.3's CEL rule G8
@@ -868,6 +913,8 @@ fn evaluate_inner(
     Ok(Verified {
         key_window,
         matched_key_id,
+        authorization_usage: matched_usage,
+        document_expires_at,
         approver,
         ticket,
         self_attested_risk,
@@ -900,14 +947,15 @@ fn trust_object(trust: &ResolvedTrust) -> String {
 /// [`ApprovalRefusal::reason`] follows.
 ///
 /// `UntrustedSigner` and `KeyUsageMismatch` are UNREACHABLE from check 6: the
-/// key came out of the resolved trust's own `GovernedApproval` list, so it
-/// exists and it carries the usage. They map to
+/// key came out of the resolved trust's own allowed-usage set for this
+/// document kind, so it exists and it carries the selected usage. They map to
 /// [`ApprovalRefusal::KeyIdNotInRoster`] because that is what they would mean
 /// if a future refactor made them reachable — the key the signature named is
 /// not one this namespace's trust offers for approvals.
 fn signing_refusal(
     trust: &ResolvedTrust,
     key_id: &str,
+    usage: KeyUsage,
     refusal: SigningRefusal,
 ) -> ApprovalRefusal {
     let key = trust.key(key_id);
@@ -915,8 +963,9 @@ fn signing_refusal(
         SigningRefusal::UntrustedSigner | SigningRefusal::KeyUsageMismatch => {
             ApprovalRefusal::KeyIdNotInRoster {
                 key_id: format!(
-                    "{} offers no GovernedApproval key with id {key_id}",
-                    trust_object(trust)
+                    "{} offers no {} key with id {key_id}",
+                    trust_object(trust),
+                    usage.as_str()
                 ),
             }
         }
@@ -1138,7 +1187,7 @@ impl ApprovalOutcome {
     /// closed door left closed; `KeyIdExpired` reading verified for a few
     /// minutes too long is an expired key authorising a restore.
     #[must_use]
-    pub const fn valid_until(&self) -> Option<DateTime<Utc>> {
+    pub fn valid_until(&self) -> Option<DateTime<Utc>> {
         match self {
             Self::Verified(v) => Some(v.valid_until()),
             Self::Refused(_) | Self::Referent(_) => None,
@@ -1149,11 +1198,20 @@ impl ApprovalOutcome {
     #[must_use]
     pub fn message(&self) -> String {
         match self {
-            Self::Verified(v) => format!(
-                "the DSSE signature over spec.approvalBytes verified under GovernedApproval key \
-                 {} (trustSource={}), and the recomputed plan hash matched",
-                v.matched_key_id, v.trust_source
-            ),
+            Self::Verified(v) => {
+                let matched = if v.document_expires_at.is_some() {
+                    "subject digest"
+                } else {
+                    "plan hash"
+                };
+                format!(
+                    "the DSSE signature over spec.approvalBytes verified under {} key {} \
+                     (trustSource={}), and the recomputed {matched} matched",
+                    v.authorization_usage.as_str(),
+                    v.matched_key_id,
+                    v.trust_source
+                )
+            }
             Self::Refused(r) => r.to_string(),
             Self::Referent(p) => p.to_string(),
         }

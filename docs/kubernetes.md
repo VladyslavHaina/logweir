@@ -1446,9 +1446,13 @@ so `status.evidence.receiptSha256` is a captured public fact even when the
 controller cannot read the destination. `Backup.status.capture` remains
 receipt-derived and is still absent on `NotAttempted`; the digest therefore
 names a joinable point but does not age it, verify it or make it selectable by
-itself. Older runners that omit the digest remain compatible and yield no
-digest. Malformed or duplicate digest lines are ignored rather than promoted
-to evidence. Until 2026-09-21 the policy read such a run as *no point at all*:
+itself. That runner-reported digest is authoritative when present; if a fetched
+receipt hashes differently, verification is `Invalid` rather than validating
+the fetched bytes against their own hash. Older runners that omit the digest
+remain compatible and fall back to the digest of a fetched receipt (or publish
+no digest when nothing was fetched). Malformed or duplicate digest lines are
+ignored rather than promoted to evidence. Until 2026-09-21 the policy read such
+a run as *no point at all*:
 `health: Unprotected`, which is D3 §3.2's "nothing to recover from", and which
 **pages**, about archives whose own catalog entry for the same point read
 `Available`/`Verified`. Three changes close it and an operator sees all three:
@@ -1984,21 +1988,25 @@ arithmetic exercise.
 authorization is an ordinary immutable `Approval` with
 `spec.subjectRef.kind: RehearsalSchedule` and `spec.planHash` equal to the
 template digest. The Approval controller parses this arm as a
-`StandingRehearsalAuthorization`, not as the per-run approval document: after
+`StandingAuthorization`, not as the per-run approval document: after
 the common DSSE, roster and key-lifecycle checks, it requires the exact
 template digest and subject API version/kind/namespace/name/**UID**, a live
 positive window of at most 90 days, and a complete scratch-only scope with
 positive numeric bounds. These failures retain standing-specific reasons
 (`TemplateDigestMismatch`, `SubjectMismatch`, `WindowInvalid`, `ScopeInvalid`
 or `StandingDocumentInvalid`); they never masquerade as the Restore arm's
-`PlanHashMismatch`. Its `spec.approvalBytes` is a signed
-`StandingRehearsalAuthorization` document carrying the subject (with its
-**UID**), the scope and `issuedAt`/`expiresAt`, and its DSSE payload type is
+`PlanHashMismatch`. Standing policy keys may carry `GovernedApproval` or
+`ConsoleConfirmation`; `EvidenceSigning` is never authorization. The ordinary
+per-run `Restore` arm remains `GovernedApproval`-only. Its
+`spec.approvalBytes` is a signed `StandingAuthorization` document carrying the
+subject (with its **UID**), the scope and `issuedAt`/`expiresAt`, and its DSSE payload type is
 that document's own — so a genuinely signed drill approval replayed as a
 standing authorization is refused by the signature layer rather than by a field
-comparison. `weirkeeper` links no signer at all (`tests/linkage.rs`), so the
-controller COPIES that envelope and its sidecar into the run's bundle byte for
-byte; it cannot produce one.
+comparison. A verified standing condition is re-evaluated at the earlier of
+the signed `expiresAt` and the matched policy key's `notAfter`; it cannot remain
+green across either boundary. `weirkeeper` links no signer at all
+(`tests/linkage.rs`), so the controller COPIES that envelope and its sidecar
+into the run's bundle byte for byte; it cannot produce one.
 
 Each slot the controller re-checks, in this order, and a failure is a recorded
 skip with no `Restore`:
@@ -2015,6 +2023,17 @@ skip with no `Restore`:
 | the signed scope's `templateDigest`, `targetClusterId` and `deadlineSeconds` agree with the sealed spec | `AuthorizationInvalid` |
 | a point qualifies: covered by `spec.point.topics`, old enough, with a non-empty window, inside `maxPartitions`, not captured from the target cluster, not inside a retention lease | `NoQualifyingPoint`, `TargetUnavailable` or `PointRetentionInProgress` |
 | the RENDERED plan falls inside the signed scope | `AuthorizationInvalid` |
+
+A succeeded destination-backed `Backup` contributes its immutable named topic
+list even when evidence reading was `NotAttempted`, but it is only a joinable,
+non-selectable candidate until a catalog row supplies the receipt-derived
+capture time, window and selectability. `metadata.creationTimestamp` is only a
+sorting placeholder and never makes that candidate selectable. Because
+`pointId` truncates the receipt digest, catalog enrichment additionally requires
+the row's full `receiptSha256` to equal the Backup's captured digest; a colliding
+prefix cannot supply facts for another receipt. This preserves D3 §4.2's
+`topics ⊆ point.topics` filter without upgrading the Backup's verification or
+protection-health verdict.
 
 The last row is the one that matters most, and it runs over the bytes that will
 be frozen, before the reservation and before any `POST`: an out-of-scope plan
@@ -2367,13 +2386,18 @@ signature alike.
 | 9 | The object's own `spec.planHash` -- the unsigned field beside the documents -- equals that same recomputed hash | `PlanHashMismatch` |
 
 A RehearsalSchedule approval shares checks 1–6, then parses the verified bytes
-as `StandingRehearsalAuthorization`. Its closed standing arm checks the exact
-canonical template digest and unsigned `spec.planHash`, the full subject
+as `StandingAuthorization`. The allowed usage set for this document kind is
+explicitly `GovernedApproval` or `ConsoleConfirmation`, never
+`EvidenceSigning`; the per-run table above remains `GovernedApproval`-only.
+Its closed standing arm checks the exact canonical template digest and unsigned
+`spec.planHash`, the full subject
 identity including UID, the live at-most-90-day window, and the complete
 scratch-only scope. The corresponding reasons are
 `TemplateDigestMismatch`, `SubjectMismatch`, `WindowInvalid`, `ScopeInvalid`
 and `StandingDocumentInvalid`; no standing failure is reported as the per-run
-`PlanHashMismatch`.
+`PlanHashMismatch`. `Verified` remains valid only until the earlier of the
+document's `expiresAt` and the matched key's `notAfter`, and reconciliation is
+requeued at that boundary.
 
 Two more `reason`s reach the same `Verified` condition without being checks on
 a signature at all. They are properties of the **referent** — the object

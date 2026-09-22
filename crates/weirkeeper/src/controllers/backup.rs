@@ -113,7 +113,7 @@ use crate::job::{self, EnvFromSecret, RunnerJobSpec, RunnerOwner, SecretMount, C
 use crate::policy::SelectionShape;
 use crate::verification::{
     backup_badge, conditions_in, second_patch, stored_verification, verified_condition,
-    EvidenceRef, VerificationVerdict, VerifyOracle,
+    EvidenceRef, VerificationResult, VerificationVerdict, VerifyOracle,
 };
 use logweir_core::check_contract::CheckCode;
 use logweir_core::ids::sha256_prefixed;
@@ -4022,10 +4022,19 @@ async fn reconcile_backup_inner(
     };
     let orphan = orphan_state(exit_code, observed.as_ref().map(|o| o.presence));
     let covered = observed.as_ref().and_then(|o| o.covered);
-    let receipt_sha256 = observed
-        .as_ref()
-        .and_then(|o| o.receipt_sha256.clone())
-        .or_else(|| keys.receipt_sha256.clone());
+    let observed_receipt_sha256 = observed.as_ref().and_then(|o| o.receipt_sha256.as_deref());
+    let reported_receipt_sha256 = keys.receipt_sha256.as_deref();
+    let digest_disagreement = reported_receipt_sha256
+        .zip(observed_receipt_sha256)
+        .is_some_and(|(reported, observed)| reported != observed);
+    // The runner reports the digest it computed over the exact bytes it
+    // persisted. That capture claim is the fence verification must test. A
+    // controller-computed digest is only the old-runner fallback: preferring
+    // it would compare fetched bytes to their own hash and turn replacement
+    // bytes into a self-validating receipt.
+    let receipt_sha256 = reported_receipt_sha256
+        .or(observed_receipt_sha256)
+        .map(str::to_string);
 
     // WARNED ONLY WHERE IT IS NEWS. A refusal (exit 3), an operational failure
     // (1) or a signing failure (4) wrote no artifact BY CONTRACT (GC11), so
@@ -4142,32 +4151,49 @@ async fn reconcile_backup_inner(
         }),
         _ => None,
     };
-    let verdict = match (&evidence_from, reference) {
-        // THE DECISION IS ALREADY MADE AND IT IS RECORDED. `evidence_source`
-        // answered with the reason there is no reader for this run's evidence;
-        // the guard is `keys.complete()` and not the digest, because the
-        // question this arm answers is "was a receipt written", which the keys
-        // say and the digest — which only a fetch produces — cannot.
-        (EvidenceSource::NotAttempted { detail }, _) if keys.complete() => {
-            Some(crate::verification::VerificationResult::not_attempted(
-                logweir_verify::PAYLOAD_TYPE_BACKUP_RECEIPT,
-                detail.clone(),
-            ))
-        }
-        (EvidenceSource::GlobalHandle, Some(reference)) => Some(verify(reference).await),
-        // THE SAME VERIFIER, ON THE DESTINATION'S OWN HANDLE — D2 §3.9's
-        // "no second verification path". `verify_oracle` already takes the
-        // store it reads through, resolves this namespace's trust and runs
-        // `verify_resolved` inside one `spawn_blocking`; handing it another
-        // handle is the whole change. Digest, DSSE and the trust
-        // projection are D3 W10's and are not re-decided here.
-        (EvidenceSource::Destination(store), Some(reference)) => Some(
-            crate::verification::verify_oracle(Some(Arc::clone(store)), client.clone())(reference)
+    let verdict = if digest_disagreement {
+        Some(VerificationResult {
+            result: VerificationVerdict::Invalid,
+            matched_key_id: None,
+            payload_type: logweir_verify::PAYLOAD_TYPE_BACKUP_RECEIPT.to_string(),
+            verified_at: now,
+            detail: Some(format!(
+                "the fetched receipt hashes to {}, but the runner reported {}",
+                observed_receipt_sha256.unwrap_or("<absent>"),
+                reported_receipt_sha256.unwrap_or("<absent>")
+            )),
+            trust: None,
+        })
+    } else {
+        match (&evidence_from, reference) {
+            // THE DECISION IS ALREADY MADE AND IT IS RECORDED. `evidence_source`
+            // answered with the reason there is no reader for this run's evidence;
+            // the guard is `keys.complete()` and not the digest, because the
+            // question this arm answers is "was a receipt written", which the keys
+            // say and the digest — which only a fetch produces — cannot.
+            (EvidenceSource::NotAttempted { detail }, _) if keys.complete() => {
+                Some(crate::verification::VerificationResult::not_attempted(
+                    logweir_verify::PAYLOAD_TYPE_BACKUP_RECEIPT,
+                    detail.clone(),
+                ))
+            }
+            (EvidenceSource::GlobalHandle, Some(reference)) => Some(verify(reference).await),
+            // THE SAME VERIFIER, ON THE DESTINATION'S OWN HANDLE — D2 §3.9's
+            // "no second verification path". `verify_oracle` already takes the
+            // store it reads through, resolves this namespace's trust and runs
+            // `verify_resolved` inside one `spawn_blocking`; handing it another
+            // handle is the whole change. Digest, DSSE and the trust
+            // projection are D3 W10's and are not re-decided here.
+            (EvidenceSource::Destination(store), Some(reference)) => Some(
+                crate::verification::verify_oracle(Some(Arc::clone(store)), client.clone())(
+                    reference,
+                )
                 .await,
-        ),
-        // GC11's no-artifact case, and a fetch that returned no digest: no
-        // document, no opinion, no block.
-        _ => None,
+            ),
+            // GC11's no-artifact case, and a fetch that returned no digest: no
+            // document, no opinion, no block.
+            _ => None,
+        }
     };
     if let Some(result) = verdict {
         let current = backup

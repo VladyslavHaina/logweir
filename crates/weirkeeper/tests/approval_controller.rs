@@ -2166,6 +2166,85 @@ fn a_per_run_document_never_parses_as_standing() {
     assert_eq!(refusal.reason(), "StandingDocumentInvalid");
 }
 
+/// D3 §4.3 has two standing-policy modes: governed authorization accepts a
+/// `GovernedApproval` signature, while ordinary policy accepts a
+/// `ConsoleConfirmation` signature alone. Evidence-signing material remains
+/// outside both authorization sets.
+#[test]
+fn standing_authorization_accepts_each_policy_usage_and_never_evidence_signing() {
+    let fixture = standing_fixture();
+    for usage in [SpecUsage::GovernedApproval, SpecUsage::ConsoleConfirmation] {
+        let verified = approval::evaluate_standing(
+            fixture.as_bytes(),
+            standing_sidecar(STANDING_FIXTURE_SIG).as_bytes(),
+            &policy_trust(vec![standing_policy_key(usage)]),
+            at("2026-09-10T00:00:00Z"),
+            &standing_subject(),
+            "sha256:aa",
+        )
+        .expect("each D3 §4.3 standing authorization usage is admitted");
+        assert_eq!(verified.authorization_usage.as_str(), format!("{usage:?}"));
+    }
+
+    let refusal = approval::evaluate_standing(
+        fixture.as_bytes(),
+        standing_sidecar(STANDING_FIXTURE_SIG).as_bytes(),
+        &policy_trust(vec![standing_policy_key(SpecUsage::EvidenceSigning)]),
+        at("2026-09-10T00:00:00Z"),
+        &standing_subject(),
+        "sha256:aa",
+    )
+    .expect_err("EvidenceSigning never authorizes a standing rehearsal");
+    assert_eq!(refusal.reason(), "KeyIdNotInRoster");
+}
+
+/// A standing verdict expires at the earlier authenticated boundary: the
+/// document's `expiresAt` or the matched key's `notAfter`. At `expiresAt`
+/// itself the document is already invalid.
+#[test]
+fn standing_validity_and_requeue_stop_at_the_earlier_boundary() {
+    use logweir_core::execution_contract::StandingAuthorization;
+    let fixture = standing_fixture();
+    let doc: StandingAuthorization = serde_json::from_str(&fixture).expect("fixture parses");
+
+    let verified = approval::evaluate_standing(
+        fixture.as_bytes(),
+        standing_sidecar(STANDING_FIXTURE_SIG).as_bytes(),
+        &standing_trust(),
+        at("2026-09-10T00:00:00Z"),
+        &standing_subject(),
+        "sha256:aa",
+    )
+    .expect("the standing document is live before expiry");
+    assert_eq!(verified.document_expires_at, Some(doc.expires_at));
+    assert_eq!(verified.valid_until(), doc.expires_at);
+
+    let at_boundary = approval::evaluate_standing(
+        fixture.as_bytes(),
+        standing_sidecar(STANDING_FIXTURE_SIG).as_bytes(),
+        &standing_trust(),
+        doc.expires_at,
+        &standing_subject(),
+        "sha256:aa",
+    )
+    .expect_err("expiresAt is an exclusive boundary");
+    assert_eq!(at_boundary.reason(), "WindowInvalid");
+
+    let key_boundary = at("2026-09-20T00:00:00Z");
+    let mut key = standing_policy_key(SpecUsage::GovernedApproval);
+    key.not_after = key_boundary;
+    let verified = approval::evaluate_standing(
+        fixture.as_bytes(),
+        standing_sidecar(STANDING_FIXTURE_SIG).as_bytes(),
+        &policy_trust(vec![key]),
+        at("2026-09-10T00:00:00Z"),
+        &standing_subject(),
+        "sha256:aa",
+    )
+    .expect("the key is live before its earlier boundary");
+    assert_eq!(verified.valid_until(), key_boundary);
+}
+
 /// Every authenticated standing claim has its own refusal name. These are
 /// post-signature checks; field mutations drive the pure validator directly.
 #[test]
@@ -2256,6 +2335,14 @@ fn policy_key(usages: Vec<SpecUsage>) -> SpecKey {
         revocation_reason: None,
         revocation_effective_from: None,
     }
+}
+
+fn standing_policy_key(usage: SpecUsage) -> SpecKey {
+    let mut key = policy_key(vec![usage]);
+    key.key_id = STANDING_KEY_ID.to_string();
+    key.spki_pem = STANDING_PEM.to_string();
+    key.principal.id = format!("install:{STANDING_KEY_ID}");
+    key
 }
 
 fn at(s: &str) -> DateTime<Utc> {

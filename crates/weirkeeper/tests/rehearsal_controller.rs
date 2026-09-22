@@ -1930,6 +1930,24 @@ fn an_unverified_backup_is_never_a_candidate() {
             .selectable
     );
 
+    let mut valid_without_capture = backup_value(
+        "b-valid-no-capture",
+        "2026-09-19T02:00:00Z",
+        json!(["orders"]),
+        true,
+    );
+    valid_without_capture["status"]["capture"] = Value::Null;
+    valid_without_capture["status"]["windowCovered"] = Value::Null;
+    let valid_without_capture: weirkeeper::crds::backup::Backup =
+        serde_json::from_value(valid_without_capture).expect("the capture-less fixture parses");
+    assert!(
+        !rs::candidate_from_backup(&valid_without_capture)
+            .expect("the digest still makes the point joinable")
+            .selectable,
+        "creationTimestamp is only a join placeholder: even Valid verification cannot make it a \
+         receipt capture time"
+    );
+
     let mut destination_backed = backup_value(
         "b3",
         "2026-09-19T02:00:00Z",
@@ -1955,7 +1973,7 @@ fn an_unverified_backup_is_never_a_candidate() {
     );
 
     let mut by_id = std::collections::BTreeMap::from([(candidate.point_id.clone(), candidate)]);
-    let catalog_entry = serde_json::from_value(json!({
+    let catalog_entry: weirkeeper::catalog_view::ViewEntry = serde_json::from_value(json!({
         "pointId": POINT_ID,
         "backupId": "set-b3",
         "runId": "run-b3",
@@ -1971,6 +1989,17 @@ fn an_unverified_backup_is_never_a_candidate() {
         "selectable": true
     }))
     .expect("the catalog entry parses");
+    let mut colliding_entry = catalog_entry.clone();
+    colliding_entry.receipt_sha256 =
+        "sha256:1111111111111111111111111111111122222222222222222222222222222222".to_string();
+    rs::merge_catalog_entry(&mut by_id, colliding_entry, Some(DESTINATION.to_string()));
+    let unmerged = by_id.get(POINT_ID).expect("the Backup candidate remains");
+    assert!(
+        !unmerged.selectable && unmerged.covered.is_none(),
+        "the truncated pointId is not equality: a different full receipt digest supplies no \
+         capture, window, or selectability"
+    );
+
     rs::merge_catalog_entry(&mut by_id, catalog_entry, Some(DESTINATION.to_string()));
     let merged = by_id.get(POINT_ID).expect("the matching point merged");
     assert!(
