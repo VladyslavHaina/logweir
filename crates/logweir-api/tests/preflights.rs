@@ -284,6 +284,69 @@ async fn legacy_source_archive_is_only_accepted_for_a_truly_legacy_point() {
     );
 }
 
+/// A recovery point is a name plus its optional frozen UID, never the newest
+/// object answering that name. The compatibility lookup may inspect the name,
+/// but it must not recommend a replacement object's destination for the old
+/// point the request actually identifies.
+///
+/// MUTANT: remove the UID comparison in
+/// `validate_legacy_source_for_point`. This request becomes a misleading 422
+/// naming `replacement-primary` instead of storing a preflight whose ordinary
+/// binding check can report the recreated recovery point.
+#[tokio::test]
+async fn a_recreated_recovery_point_never_supplies_legacy_destination_advice() {
+    let app = TestApp::new();
+    let point = "saved-point-recreated";
+    seed_recovery_point(&app, point, Some("original-primary"));
+
+    // Delete/recreate under the same name in the fake apiserver: the request
+    // below retains `uid-{point}`, while this replacement has another UID and
+    // another destination.
+    let mut replacement = app.fake.object("backups", NS_A, point).unwrap();
+    replacement["metadata"]["uid"] = json!("uid-of-replacement");
+    replacement["spec"]["destinationRef"]["name"] = json!("replacement-primary");
+    replacement["spec"]["archive"]["url"] = json!("logweir-destination://replacement-primary");
+    app.fake.seed("backups", NS_A, replacement);
+    app.fake.clear_requests();
+
+    let response = app
+        .post(
+            &format!("/api/v1/namespaces/{NS_A}/preflights"),
+            Some("preflight-recreated-point01"),
+            &legacy_restore_request(&plan(), point).to_string(),
+        )
+        .await;
+    assert_eq!(response.status.as_u16(), 202, "{}", response.text());
+    assert!(
+        !response.text().contains("replacement-primary"),
+        "no response may claim the replacement destination: {}",
+        response.text()
+    );
+    let id = response.json()["item"]["id"].as_str().unwrap().to_string();
+    let stored = app.fake.object("preflights", NS_A, &id).unwrap();
+    assert_eq!(
+        stored["spec"]["request"]["restore"]["recoveryPointRef"],
+        json!({"name": point, "uid": format!("uid-{point}")}),
+        "the stored binding remains the old point's identity"
+    );
+    assert_eq!(
+        app.fake
+            .requests()
+            .iter()
+            .filter(|request| request.path.ends_with(&format!("/backups/{point}")))
+            .count(),
+        1,
+        "the guard performs only its one bounded Backup lookup"
+    );
+    assert!(
+        app.fake
+            .requests()
+            .iter()
+            .all(|request| !request.path.contains("backupdestinations")),
+        "the replacement destination is never looked up"
+    );
+}
+
 /// The cheap request-shape gate stays first, while the rate gate must be the
 /// last synchronous gate before any recovery-point lookup. An over-limit
 /// caller must not turn the legacy compatibility check into unbounded

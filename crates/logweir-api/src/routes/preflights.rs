@@ -969,6 +969,16 @@ async fn validate_legacy_source_for_point(
         .await
     {
         Ok(backup) => {
+            // The name is only a lookup key. When the caller froze a UID, a
+            // same-name replacement is not this recovery point and its
+            // destination must not be used to diagnose or advise this
+            // request. Let the stored preflight's ordinary binding check
+            // report the disappeared/recreated referent instead.
+            if let Some(expected_uid) = point.backup_uid.as_deref() {
+                if backup.metadata.uid.as_deref() != Some(expected_uid) {
+                    return Ok(());
+                }
+            }
             let Some(destination) = backup.spec.destination_ref.as_ref() else {
                 return Ok(());
             };
