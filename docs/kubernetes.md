@@ -5687,11 +5687,23 @@ is projected and the schedules table renders it, resolved by name against the
 destinations in the namespace: a live one is shown with the location it writes
 to, a schedule naming a destination that is not there any more is a refusal to
 say where it writes rather than a guess at the object now holding that name,
-and a schedule with no reference is labelled as carrying an inline archive. The
-console does **not** write that field on a CREATE: `POST .../schedules` has no
-`destinationRef`. An EXISTING schedule is bound to one from the Future policy
-panel below, which sends `PUT .../schedules/{name}` -- the route that does take
-it -- or with `kubectl`.
+and a schedule with no reference is labelled as carrying an inline archive.
+The create form sends `destinationRef` on `POST .../schedules` (PLAT-10.1) and,
+when nobody has chosen a location yet, preselects the namespace default
+destination (PLAT-08.2); an EXISTING schedule is bound to one from the Future
+policy panel below (`PUT .../schedules/{name}`) or with `kubectl`. Both forms
+show what the schedule inherits from the chosen destination -- location,
+endpoint, region, addressing, transport, CA, verdict -- as facts, pin the choice
+by uid and refuse at submit a destination deleted or recreated under the same
+name while the form was open (an access or CA edit keeps the uid and is not a
+refusal). **Converting an inline schedule:** when the panel changes where a
+schedule writes, it compares the old and new locations by bucket and prefix; the
+same location is saved as is (recovery points before and after share the prefix,
+and runs already created keep the inputs they froze), while a different location,
+or one it cannot compare, needs an explicit "write new runs to the new location"
+box. The engine's endpoint for an inline archive comes from the controller's
+environment, which the console cannot read, so confirm the destination names the
+endpoint those runs used.
 
 ### The schedule policy, its previews and manual runs are console-only too
 

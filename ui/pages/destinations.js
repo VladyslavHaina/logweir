@@ -522,6 +522,18 @@ export function validateDestination(values) {
     problems.endpoint = "insecureHttp requires an explicit " + HTTP + " endpoint. There is no " +
       "way to reach AWS S3 in the clear and this page will not pretend there is";
   }
+  // A CUSTOM ENDPOINT NEEDS pathStyle ADDRESSING ON THIS ENGINE (D2 G4,
+  // ENGINE-PATHSTYLE): the pinned engine addresses a custom endpoint pathStyle
+  // whatever it is told, so a virtual-hosted destination there would describe a
+  // location its runs never use. The product API refuses it as
+  // `addressing_unsupported_by_engine` and the controller as
+  // `AddressingUnsupportedByEngine`; this says so beside the control, and it
+  // changes neither control to suit the other.
+  if (endpoint.length > 0 && v.addressing === "virtualHosted" && problems.endpoint === undefined) {
+    problems.addressing = "virtualHosted addressing with a custom endpoint is refused: this " +
+      "engine addresses a custom endpoint as pathStyle, so the location would not be the one its " +
+      "runs use. Choose pathStyle, or clear the endpoint for AWS S3";
+  }
   const caName = String(v.caName || "").trim();
   if (caName.length > 0) {
     if (security !== "tls") {

@@ -917,9 +917,81 @@ and is never re-derived. The behaviour gate row is
 `restore_wizard_path_style_does_not_enable_http`, which drives the real mount
 half and compares the bytes it submits.
 
-One endpoint, one region and one addressing value still apply to **both** the
-source archive and the evidence store. Separating those two is PLAT-08.2's UI
-slice and is not done here.
+~~One endpoint, one region and one addressing value still apply to **both** the
+source archive and the evidence store.~~ **Closed by PLAT-08.2** -- see
+*Storage choices* below: the evidence store has its own four controls, and its
+own insecure-transport box.
+
+## Storage choices: inherited destinations, two stores, one control each (PLAT-08.2)
+
+**A saved recovery point is restored with nothing re-entered.** The wizard reads
+the point's `destinationRef`, pins the destination by uid and frozen
+`locationDigest`, and signs the destination's public storage -- bucket, prefix,
+region, endpoint, addressing, transport -- into both plan blocks. There is no
+endpoint, region, addressing, transport, evidence-bucket or Secret input for such
+a point, and a kept draft cannot override them.
+
+**The evidence store is its own choice.** Step 1 offers an *evidence destination*
+selector, by uid, starting on the point's own destination. Choosing another one
+rebuilds only the plan's evidence block, from that destination's storage exactly
+as `BackupDestination::evidence_storage_url` does (its bucket under `logweir/`,
+its own endpoint, addressing and transport), and the create body and readiness
+request name it as `evidenceDestinationRef` / `evidenceDestination`. The archive
+does not move. A kept choice whose uid no longer answers is a refusal that signs
+nothing, and the pre-submit read confirms the evidence destination's uid and
+digest as it does the source's. The list comes from `GET .../destinations`; when
+that read fails only the point's own destination is offered, and the page says
+so.
+
+**A legacy point's evidence store has its own settings.** A ticked box, *the
+evidence store uses the archive store's endpoint, region, addressing and
+transport*, keeps the old plan bytes; unticking it gives the evidence store its
+own endpoint, region, `path_style` box and **its own "Allow insecure HTTP"** box,
+which defaults off. No box on either store sets the other store's flags, and no
+addressing box sets any transport flag. A draft kept before this change (one set
+of values) still means one store.
+
+**Readiness follows the check, and the submit asks again.** Step 5 re-reads a
+started check until it is terminal (`?planHash=` of the plan on screen). The
+submit re-reads the held check against the reviewed plan's hash before anything
+is created, so a destination edited during the draft -- an access rotation, a CA
+change: the generation moves, the plan bytes do not -- refuses the submit with
+the product API's `referentChanged:BackupDestination/<name>` until the check is
+run again. A staleness mark the page made itself (a changed target or evidence
+destination, which the server's binding cannot see) survives a fresher read and
+is cleared only by a new check.
+
+**A schedule inherits its destination, and says what it inherits.** A create
+form nobody has chosen a location on preselects the namespace default
+destination (two defaults are none); a draft that chose the inline archive keeps
+it. Beside the choice the form shows, as facts and never as inputs, what the
+schedule inherits: location, endpoint, region, addressing, transport, CA, the
+destination's verdict and the revision read. The choice is pinned by uid; at
+submit the destinations are read again, and a destination deleted or recreated
+under the same name while the form was open is refused, while an *edit* (same
+uid) is not -- the next run simply resolves the edited destination.
+
+**Converting an inline schedule keeps the location, or says it moves.** When the
+Future policy panel changes where a schedule writes (inline to a destination, a
+destination to inline, one destination to another), it compares the two
+locations by bucket and prefix. The same location is a note -- recovery points
+before and after share the prefix, runs already created keep what they froze,
+and an inline archive's endpoint comes from the controller environment this page
+cannot read. A different location, or one the page cannot compare, needs an
+explicit *write new runs to the new location* box before the save is sent.
+
+**The destination form refuses `virtualHosted` with a custom endpoint** beside
+the addressing control, as the product API does (`addressing_unsupported_by_engine`):
+the pinned engine addresses a custom endpoint path-style whatever it is told.
+Transport and addressing stay two radios in two fieldsets; the only rule touching
+both is the scheme/transport consistency check, and neither is changed to suit
+the other.
+
+Rows: `ui/tests/storage-choices.spec.js`, and in `ui/tests/mutation.spec.js`
+`restore_wizard_evidence_store_has_its_own_transport_and_addressing`,
+`a_saved_point_inherits_its_destination_and_can_write_evidence_to_another` and
+`a_destination_edited_during_the_draft_refuses_the_submit_until_the_check_runs_again`.
+The browser journey is `scripts/plat08-2-ui-e2e.mjs`.
 
 ## Destinations, discovery and readiness
 
@@ -1045,13 +1117,11 @@ sentence with no owner is how a gap becomes a permanent feature.
   column resolving `spec.destinationRef` by name against the destinations it
   read, showing the location a live one writes to, refusing to say where a
   vanished one writes, and naming an inline archive as one.
-* **A recovery point publishes no frozen destination.** `Backup`'s projection
-  carries `archive` and no `destinationRef`/`locationDigest`, so the wizard
-  cannot take a source destination from the point's frozen one or match the
-  digest. It sends the inline source archive -- which is what the `Restore` it
-  creates carries anyway -- and step 5 says so and names **PLAT-08.2 (D2 W10)**,
-  whose projection owes it. The CRD already has the field; this is a projection
-  gap, not a model gap.
+* ~~**A recovery point publishes no frozen destination.**~~ **Closed.** The
+  `Backup` projection now publishes `destinationRef` (with the frozen uid) and
+  `locationDigest` (BACKUP-PROJECTION-NO-DESTINATION), the wizard takes the
+  source destination from the point and matches the digest, and PLAT-08.2 adds
+  the evidence destination -- see *Storage choices*.
 * **A coverage label needs a field the console does not publish.** The three
   strings are `Coverage::label()`'s, verbatim, and D1 W7 built the surface:
   wherever an object carries `status.selection`, the page renders its

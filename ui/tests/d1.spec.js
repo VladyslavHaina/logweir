@@ -386,6 +386,9 @@ test("every_field_of_the_policy_is_on_screen_because_every_one_is_sent", () => {
       "excludeTopics", "excludePrefixes"].indexOf(field) !== -1) {
       continue; // present only in the shape that uses them
     }
+    if (field === "moveLocation") {
+      continue; // present only when an edit moves the archive (storage-choices.spec.js)
+    }
     assert.ok(html.indexOf("name=\"" + field + "\"") !== -1,
       field + " has an input in the panel");
   }

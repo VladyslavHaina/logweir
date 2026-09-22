@@ -68,6 +68,7 @@ import {
   badge,
   cell,
   copyBlock,
+  destinationVerdict,
   detailLink,
   errorBlock,
   errorBox,
@@ -94,7 +95,7 @@ import {
   resolveClusterSelection,
 } from "../select.js";
 import { focusFirstProblem, isObjectName, itemsOf, readFormValues } from "./clusters.js";
-import { renderPreflight } from "./destinations.js";
+import { renderPreflight, transportCell } from "./destinations.js";
 import { isRecoveryPoint, recoveryPoints, restorePointRoute } from "./restore-wizard.js";
 import { listD3, readCatalogPoints } from "../operation-watch.js";
 import { operationRoute } from "./operation.js";
@@ -124,7 +125,7 @@ export const SCHEDULE_DRAFT_FIELDS = Object.freeze([
   "name", "source", "sourceUid",
   "mode", "cron", "minute", "hour", "dayOfWeek", "dayOfMonth", "n", "timeZone",
   "selection", "topics", "incompleteDiscovery", "excludeTopics", "excludePrefixes",
-  "destination", "archive", "archiveSecret",
+  "destination", "destinationUid", "archive", "archiveSecret",
   "concurrencyPolicy", "startingDeadlineSeconds", "catchUpPolicy",
   "maxRetries", "retryDelaySeconds", "activeDeadlineSeconds",
   "keepLast", "keepDays", "suspended",
@@ -1218,6 +1219,19 @@ export function validateSchedule(values) {
 export function renderScheduleForm(view) {
   const v = view || {};
   const d = Object.assign({}, SCHEDULE_DEFAULTS, v.draft || {});
+  // THE NAMESPACE DEFAULT DESTINATION IS INHERITED (PLAT-08.2, D2 section 9)
+  // by a form nobody has chosen a location on yet -- and ONLY then. A draft
+  // that holds `destination: ""` is an operator who chose the inline archive,
+  // and that choice is theirs. Two defaults are no default
+  // (`defaultDestination`), so nothing is preselected for them.
+  if (v.draft === null || v.draft === undefined || !("destination" in v.draft)) {
+    const inherited = defaultDestination(v.destinations);
+    if (inherited !== null) {
+      d.destination = inherited.name;
+      d.destinationUid = inherited.uid;
+      d.destinationDefaulted = true;
+    }
+  }
   const errors = ((v.errors || {}).fields) || {};
   const state = v.state || {};
   const pending = state.phase === "pending";
@@ -1754,6 +1768,12 @@ export function policyFormView(ns, object, own, destinations, may) {
     preview: (own || {}).preview || null,
     destinations: destinations,
     mayOperate: may,
+    // WHERE THE STORED SCHEDULE WRITES NOW, so the panel can say whether an
+    // edit moves the archive (PLAT-08.2 migration).
+    current: {
+      destination: String((((object || {}).spec || {}).destinationRef || {}).name || ""),
+      archive: String((((object || {}).spec || {}).archive || {}).url || ""),
+    },
   };
 }
 
@@ -2059,8 +2079,7 @@ export function readScheduleValues(form) {
     sourceUid: source.uid,
   };
   for (const field of POLICY_DRAFT_FIELDS) {
-    const input = e[field];
-    values[field] = input === undefined || input === null ? "" : String(input.value);
+    values[field] = policyInputValue(e[field]);
   }
   return values;
 }
@@ -2187,6 +2206,13 @@ function wireCreate(node, ns, parse, lifecycle, api, clusters, own) {
       }, lifecycle);
     }
   }
+  // THE DESTINATION IS CHOSEN BY IDENTITY, and what it hands down is shown
+  // (PLAT-08.2): a change pins the uid of the name just chosen, from the list
+  // this mount read, and repaints the inherited settings beside it.
+  wireDestinationChoice(form, held.destinations, () => {
+    remember();
+    repaint();
+  }, lifecycle);
 
   watchMutation(node, key, mutation, (state) => {
     if (state.phase === "succeeded") {
@@ -2402,6 +2428,7 @@ export const READINESS_INTERVAL_MS = 2000;
  *  cost of refusing is one more click and the cost of not refusing is a
  *  schedule pointed at a connection nobody chose. */
 export async function confirmThenCreate(ns, values, api, preview) {
+  const confirmed = await confirmDestination(ns, values, api);
   let clusters;
   try {
     clusters = await api.list(ns, CLUSTERS);
@@ -2412,7 +2439,7 @@ export async function confirmThenCreate(ns, values, api, preview) {
         "). Nothing was sent; everything you typed is still here.",
     });
   }
-  return submitSchedule(ns, values, api, clusters, preview);
+  return submitSchedule(ns, confirmed, api, clusters, preview);
 }
 
 /** THE SOURCE SELECTOR'S TWO BEHAVIOURS, both local to the form.
@@ -2501,6 +2528,10 @@ export const POLICY_DRAFT_FIELDS = Object.freeze([
   "mode", "cron", "minute", "hour", "dayOfWeek", "dayOfMonth", "n",
   "timeZone", "topics", "selection", "incompleteDiscovery", "excludeTopics",
   "excludePrefixes", "archive", "archiveSecret", "destination",
+  // PLAT-08.2: the destination is chosen BY IDENTITY -- the uid the chosen
+  // name resolved to when it was chosen -- and a policy edit that moves the
+  // archive location says so with its own explicit box.
+  "destinationUid", "moveLocation",
   "concurrencyPolicy", "startingDeadlineSeconds", "catchUpPolicy",
   "maxRetries", "retryDelaySeconds", "activeDeadlineSeconds",
   "keepLast", "keepDays", "suspended",
@@ -2649,6 +2680,10 @@ export function policyValuesOf(object) {
     archive: String(archive.url || ""),
     archiveSecret: String((archive.secretRef || {}).name || ""),
     destination: String((spec.destinationRef || {}).name || ""),
+    // A stored destinationRef carries a name and no uid; the panel pins the
+    // uid that name resolves to in the list it read (`chosenDestination`).
+    destinationUid: "",
+    moveLocation: "",
     concurrencyPolicy: String(spec.concurrencyPolicy || ""),
     startingDeadlineSeconds: number(spec.startingDeadlineSeconds),
     catchUpPolicy: String(spec.catchUpPolicy || ""),
@@ -3069,7 +3104,7 @@ function renderPolicyFields(name, values, errors) {
  *  it is a whole-policy replace, every field it holds is a field it SENDS, and
  *  a field being cleared inside a closed `<details>` is exactly the surprise
  *  that panel's own sentence exists to prevent. */
-function renderPolicyLocation(name, values, errors, destinations, collapseInline) {
+function renderPolicyLocation(name, values, errors, destinations, collapseInline, current) {
   const all = Array.isArray(destinations) ? destinations : [];
   const inline =
     "<div class=\"field\"><label for=\"" + esc(policyId(name, "archive")) +
@@ -3082,17 +3117,38 @@ function renderPolicyLocation(name, values, errors, destinations, collapseInline
     esc(policyId(name, "archiveSecret")) + "\" name=\"archiveSecret\" value=\"" +
     esc(String(values.archiveSecret || "")) + "\">" +
     "<p class=\"help\">Only its name is sent.</p></div>";
+  const chosen = String(values.destination || "");
+  const pin = chosenDestination(all, values);
   return (
     "<fieldset class=\"legacy-archive\"><legend>where runs are written</legend>" +
     "<div class=\"field\"><label for=\"" + esc(policyId(name, "destination")) +
     "\">saved destination</label><select id=\"" + esc(policyId(name, "destination")) +
-    "\" name=\"destination\">" +
-    optionList(policyId(name, "destination"), "destination", values.destination,
+    "\" name=\"destination\"" +
+    invalidAttributes(policyId(name, "destination"), errors.destination) + ">" +
+    optionList(policyId(name, "destination"), "destination", chosen,
       [["", "none -- use the inline archive below"]]
-        .concat(all.map((d) => [d.name, d.name + " -- " + d.canonicalUrl]))) + "</select>" +
+        .concat(all.map((d) => [d.name, d.name + (d.default === true ? " (namespace default)" : "") +
+          " -- " + d.canonicalUrl]))) + "</select>" +
+    // THE IDENTITY THE CHOSEN NAME RESOLVED TO WHEN IT WAS CHOSEN. The API
+    // takes a name; this page keeps the uid beside it, so a destination deleted
+    // and recreated under that name while the form is open is refused at
+    // submit rather than followed (the source connection's rule, PLAT-07.2).
+    "<input type=\"hidden\" id=\"" + esc(policyId(name, "destination-uid")) +
+    "\" name=\"destinationUid\" value=\"" +
+    esc(pin.state === "selected" || pin.state === "recreated" || pin.state === "missing"
+      ? String(pin.uid || "") : "") + "\">" +
+    (values.destinationDefaulted === true && chosen.length > 0
+      ? "<p class=\"note\" id=\"" + esc(policyId(name, "destination-default")) +
+        "\">Preselected: the namespace default <code>" + esc(chosen) + "</code>. Choose " +
+        "another, or none, to change it.</p>"
+      : "") +
     "<p class=\"help\">Choosing one sends destinationRef and NOT the inline fields: the two are " +
     "two spellings of one location, and the API writes the sentinel URL itself.</p>" +
     fieldErrorLine(policyId(name, "destination"), errors.destination) + "</div>" +
+    renderInheritedDestination(name, pin) +
+    (current === undefined || current === null
+      ? ""
+      : renderLocationChange(name, locationChange(current, values, all), values, errors)) +
     (collapseInline === true
       ? "<details class=\"advanced\" id=\"" + esc(policyId(name, "inline-archive")) + "\">" +
         "<summary>Advanced: write to an archive URL instead of a saved destination</summary>" +
@@ -3104,6 +3160,214 @@ function renderPolicyLocation(name, values, errors, destinations, collapseInline
       "How many days of sets it keeps.") +
     "</fieldset>"
   );
+}
+
+/** The chosen destination, resolved against the list this page read: by the
+ *  uid kept beside the name when there is one, by the name otherwise (and then
+ *  pinned). `{state: "none"}` for an inline archive. */
+export function chosenDestination(destinations, values) {
+  const v = values || {};
+  const name = String(v.destination || "").trim();
+  if (name.length === 0) {
+    return { state: "none" };
+  }
+  const uid = String(v.destinationUid || "").trim();
+  const resolved = resolveDestinationSelection(destinations, { uid: uid, name: name });
+  // A NAME THAT RESOLVES TO ANOTHER UID THAN THE ONE KEPT is the recreated
+  // case; `resolveDestinationSelection` follows a uid across a rename, and a
+  // name chosen from THIS list that now names a different uid is a
+  // recreation, which is what the page refuses.
+  if (resolved.state === "selected" && uid.length > 0 && resolved.name !== name) {
+    const taken = (Array.isArray(destinations) ? destinations : []).find((d) => d.name === name);
+    if (taken !== undefined) {
+      return { state: "recreated", uid: uid, name: name, recreatedUid: taken.uid };
+    }
+  }
+  return resolved;
+}
+
+/** Said beside the destination a schedule inherits its storage from. */
+export const INHERITED_DESTINATION_SENTENCE =
+  "Nothing about the store is re-entered here. Each run resolves this destination when it is " +
+  "admitted and freezes what it resolved -- location, endpoint, addressing, transport and the " +
+  "grant it will use -- so an access rotation or CA change on the destination reaches the next " +
+  "run and never one already created. Location and transport cannot be changed in place.";
+
+/** WHAT A SCHEDULE INHERITS FROM ITS DESTINATION (PLAT-08.2): the public
+ *  storage and transport settings the chosen destination publishes, as facts
+ *  -- never as inputs -- with its verdict and the revision this page read. A
+ *  selection whose uid stopped answering is a refusal, in the connection
+ *  selector's words. */
+export function renderInheritedDestination(name, pin) {
+  const p = pin || {};
+  if (p.state === "none") {
+    return "";
+  }
+  if (p.state !== "selected") {
+    return renderDestinationRefusal(policyId(name, "destination"), p);
+  }
+  const d = p.item || {};
+  const storage = d.storage || {};
+  const transport = d.transport || {};
+  const ca = transport.caBundle || {};
+  return (
+    "<div class=\"inherited-destination\" id=\"" + esc(policyId(name, "destination-inherited")) +
+    "\" data-destination-uid=\"" + esc(String(d.uid || "")) + "\">" +
+    "<p class=\"note\">Inherited from <code>" + esc(String(d.name || "")) + "</code> " +
+    destinationVerdict(d.status) + " at revision <code>g" + esc(String(d.generation)) +
+    "</code>:</p>" +
+    facts([
+      ["location", "<code>" + cell(d.canonicalUrl) + "</code>"],
+      ["endpoint", storage.endpoint ? cell(storage.endpoint) : "- (AWS S3)"],
+      ["region", cell(storage.region)],
+      ["addressing", "<span data-inherited=\"addressing\">" + cell(storage.addressing) + "</span>"],
+      ["transport", "<span data-inherited=\"transport\">" + transportCell(transport.security) +
+        "</span>"],
+      ["private CA", ca.configMapName ? cell(ca.configMapName) : "- (the runner image's trust store)"],
+      ["uid", "<code>" + cell(d.uid) + "</code>"],
+    ]) +
+    "<p class=\"help\">" + esc(INHERITED_DESTINATION_SENTENCE) + "</p>" +
+    "</div>"
+  );
+}
+
+/** Where a set of policy values writes, as a canonical `s3://bucket/prefix`
+ *  string, or `null` when it cannot be told (a destination this page did not
+ *  read, an archive URL of another shape). */
+export function locationOf(values, destinations) {
+  const v = values || {};
+  const name = String(v.destination || "").trim();
+  if (name.length > 0) {
+    const found = (Array.isArray(destinations) ? destinations : []).find((d) => d.name === name);
+    return found === undefined || typeof found.canonicalUrl !== "string"
+      ? null : canonicalLocation(found.canonicalUrl);
+  }
+  return canonicalLocation(String(v.archive || ""));
+}
+
+function canonicalLocation(url) {
+  const text = String(url || "").trim();
+  if (text.indexOf("s3" + SCHEME_SEPARATOR) !== 0) {
+    return null;
+  }
+  const rest = text.slice(("s3" + SCHEME_SEPARATOR).length).replace(/\/+$/, "").replace(/\/{2,}/g, "/");
+  return rest.length === 0 ? null : "s3" + SCHEME_SEPARATOR + rest;
+}
+
+/** WHETHER A POLICY EDIT MOVES THE ARCHIVE (PLAT-08.2 migration: "convert
+ *  inline archive configuration without changing ... archive location").
+ *
+ *  `current` is the stored schedule's own location fields; `values` is the
+ *  form. The same spelling (the same destination, or the same inline URL) is
+ *  no change. A new spelling -- inline to a destination, a destination to
+ *  inline, one destination to another -- is compared by bucket and prefix, and
+ *  a comparison this page cannot make is reported as `unknown`, never as
+ *  "unchanged". */
+export function locationChange(current, values, destinations) {
+  const c = current || {};
+  const v = values || {};
+  const fromName = String(c.destination || "").trim();
+  const toName = String(v.destination || "").trim();
+  if (fromName === toName && (fromName.length > 0 ||
+    String(c.archive || "").trim() === String(v.archive || "").trim())) {
+    return { state: "unchanged" };
+  }
+  const from = locationOf(c, destinations);
+  const to = locationOf(v, destinations);
+  if (from === null || to === null) {
+    return { state: "unknown", from: from, to: to, fromName: fromName, toName: toName };
+  }
+  return { state: from === to ? "same" : "moves", from: from, to: to, fromName: fromName,
+    toName: toName };
+}
+
+/** What a policy edit that changes the location's SPELLING says, and the one
+ *  explicit box a location MOVE needs before it is saved. */
+export function renderLocationChange(name, change, values, errors) {
+  const c = change || {};
+  if (c.state === "unchanged") {
+    return "";
+  }
+  const kept = "Runs already created keep the location and storage settings they froze; only " +
+    "runs admitted after the save use the new spelling.";
+  if (c.state === "same") {
+    return (
+      "<p class=\"note\" id=\"" + esc(policyId(name, "location-same")) + "\">The archive " +
+      "location does not move: <code>" + esc(c.from) + "</code> before and after, so recovery " +
+      "points from before and after this edit share one prefix. " + esc(kept) +
+      (c.fromName.length === 0
+        ? " An inline archive's endpoint and transport come from the installation's controller " +
+          "environment, which this page cannot read: confirm the destination names the endpoint " +
+          "those runs used."
+        : "") + "</p>"
+    );
+  }
+  const checked = String((values || {}).moveLocation || "") === "true";
+  return (
+    "<div class=\"location-move\" id=\"" + esc(policyId(name, "location-move")) +
+    "\" role=\"alert\">" +
+    "<p class=\"complaint\">" + (c.state === "moves"
+      ? "This edit MOVES the archive: runs are written to <code>" + esc(String(c.from)) +
+        "</code> now, and would be written to <code>" + esc(String(c.to)) + "</code> after it. " +
+        "Recovery points already taken stay where they are; new ones go elsewhere."
+      : "This edit changes where runs are written, and this page cannot tell whether the " +
+        "location moves: " + (c.from === null ? "the current location" : "the new location") +
+        " is not one it could read.") + " " + esc(kept) + "</p>" +
+    "<label class=\"inline\" for=\"" + esc(policyId(name, "moveLocation")) + "\">" +
+    "<input type=\"checkbox\" id=\"" + esc(policyId(name, "moveLocation")) +
+    "\" name=\"moveLocation\" value=\"true\"" + (checked ? " checked" : "") +
+    invalidAttributes(policyId(name, "moveLocation"), (errors || {}).moveLocation) +
+    "> write new runs to the new location</label>" +
+    fieldErrorLine(policyId(name, "moveLocation"), (errors || {}).moveLocation) +
+    "</div>"
+  );
+}
+
+/** The refusal a location move without its box gets. */
+export const LOCATION_MOVE_REFUSAL =
+  "this edit moves the archive location and the box that says so is not ticked; nothing was " +
+  "sent. Tick it to write new runs to the new location, or keep the current one";
+
+/** Re-reads the destinations at submit and confirms the chosen one is still
+ *  the object that was chosen (PLAT-08.2, "destination edit during a draft").
+ *
+ *  An EDIT -- an access rotation, a CA change -- keeps the uid and the
+ *  location, and is not a refusal: the next run simply resolves the edited
+ *  destination. A DELETE, or a delete and recreate under the same name, is:
+ *  a recreated destination is a different store reached with a different
+ *  credential. A kept uid is required for the check; a form that never read a
+ *  destination list (legacy mode) has none and is sent as before. A read that
+ *  fails is a refusal, for `confirmThenCreate`'s reason. */
+export async function confirmDestination(ns, values, api) {
+  const v = values || {};
+  const name = String(v.destination || "").trim();
+  const uid = String(v.destinationUid || "").trim();
+  if (name.length === 0 || uid.length === 0 || typeof (api || {}).destinations !== "function") {
+    return v;
+  }
+  let page;
+  try {
+    page = await api.destinations(ns);
+  } catch (unread) {
+    throw invalidInput({
+      destination: "the saved destinations could not be read again before saving, so the " +
+        "destination this form names could not be confirmed (" + String(unread && unread.message) +
+        "). Nothing was sent; everything you typed is still here.",
+    });
+  }
+  const resolved = chosenDestination((page || {}).items, v);
+  if (resolved.state !== "selected") {
+    throw invalidInput({
+      destination: resolved.state === "recreated"
+        ? "the destination this form selected (" + name + ", uid " + uid + ") is gone and a " +
+          "different object now answers to that name (uid " + resolved.recreatedUid + "). A " +
+          "recreated destination is a different store reached with a different credential, so " +
+          "nothing was sent; choose the destination you mean"
+        : "the destination this form selected (" + name + ", uid " + uid + ") is not in this " +
+          "namespace any more, so nothing was sent; choose a saved destination",
+    });
+  }
+  return Object.assign({}, v, { destination: resolved.name, destinationUid: resolved.uid });
 }
 
 /** ONE SCHEDULE'S FUTURE POLICY, editable.
@@ -3148,7 +3412,7 @@ export function renderPolicyForm(view) {
     "<fieldset class=\"form-body\"" + (pending ? " disabled" : "") + ">" +
     renderCadenceFields(name, values, errors) +
     renderSelectionFields(name, values, errors) +
-    renderPolicyLocation(name, values, errors, v.destinations) +
+    renderPolicyLocation(name, values, errors, v.destinations, false, v.current || null) +
     renderPolicyFields(name, values, errors) +
     "<div class=\"actions\"><button type=\"submit\" class=\"primary\"" +
     (previewed || values.mode === ADVANCED_CRON ? "" : " disabled") + ">Save policy</button>" +
@@ -3734,10 +3998,23 @@ function repaintCard(node, ns, parse, lifecycle, api, object, backups, extra) {
 export function readPolicyValues(form) {
   const values = Object.create(null);
   for (const field of POLICY_DRAFT_FIELDS) {
-    const input = form.elements[field];
-    values[field] = input === undefined || input === null ? "" : String(input.value);
+    values[field] = policyInputValue(form.elements[field]);
   }
   return values;
+}
+
+/** One policy input's value. A CHECKBOX IS ITS `checked`, never its `value`
+ *  attribute -- which is the same string whether or not it is ticked, so a
+ *  box read by value would be an acknowledgement nobody gave. */
+export function policyInputValue(input) {
+  if (input === undefined || input === null) {
+    return "";
+  }
+  const type = typeof input.getAttribute === "function" ? input.getAttribute("type") : input.type;
+  if (type === "checkbox") {
+    return input.checked === true ? "true" : "";
+  }
+  return String(input.value);
 }
 
 /** One schedule's policy form: the cadence selector repaints the parameters,
@@ -3791,6 +4068,14 @@ function wirePolicy(node, ns, parse, lifecycle, api, object, backups, extra) {
       }, lifecycle);
     }
   }
+  wireDestinationChoice(form, extra.destinations, () => {
+    remember();
+    repaintCard(node, ns, parse, lifecycle, api, object, backups, extra);
+  }, lifecycle);
+  const move = form.elements.moveLocation;
+  if (move !== undefined && move !== null) {
+    listen(move, "change", remember, lifecycle);
+  }
   for (const input of form.querySelectorAll("input, select")) {
     listen(input, "input", remember, lifecycle);
   }
@@ -3839,7 +4124,29 @@ function wirePolicy(node, ns, parse, lifecycle, api, object, backups, extra) {
     }
     const values = readPolicyValues(form);
     keepDraft(key, values, POLICY_DRAFT_FIELDS);
-    mutation.run(() => submitPolicy(ns, object, values, own.preview, api));
+    mutation.run(() => submitPolicy(ns, object, values, own.preview, api, extra.destinations));
+  }, lifecycle);
+}
+
+/** A destination select's change: pin the uid the chosen name resolves to in
+ *  `destinations` (the list the mount read), then hand over to `after`. An
+ *  inline choice clears the pin. */
+function wireDestinationChoice(form, destinations, after, lifecycle) {
+  const select = form.elements.destination;
+  const pin = form.elements.destinationUid;
+  if (select === undefined || select === null) {
+    return;
+  }
+  listen(select, "change", () => {
+    if (!active(lifecycle)) {
+      return;
+    }
+    const name = String(select.value || "");
+    const found = (Array.isArray(destinations) ? destinations : []).find((d) => d.name === name);
+    if (pin !== undefined && pin !== null) {
+      pin.value = found === undefined ? "" : String(found.uid || "");
+    }
+    after();
   }, lifecycle);
 }
 
@@ -3850,11 +4157,29 @@ function wirePolicy(node, ns, parse, lifecycle, api, object, backups, extra) {
  *  else: if the preview on screen is not a preview of THESE values, this
  *  refuses rather than sending a cron line the page made up or an expression
  *  that answers a different question. */
-export async function submitPolicy(ns, object, values, preview, api) {
+export async function submitPolicy(ns, object, values, preview, api, destinations) {
   const problems = validatePolicy(values);
   if (Object.keys(problems).length > 0) {
     throw invalidInput(problems);
   }
+  // A LOCATION MOVE IS SAID, AND SAID ON PURPOSE (PLAT-08.2 migration). D1
+  // section 5.1 makes the destination mutable, and it should be; what this
+  // refuses is a move nobody acknowledged -- the inline-to-destination
+  // conversion that was meant to keep the archive where it is and did not.
+  // Only when the page read a destination list: with none it cannot compare,
+  // and legacy mode keeps its behaviour.
+  if (Array.isArray(destinations) && destinations.length > 0) {
+    const spec = (object || {}).spec || {};
+    const change = locationChange({
+      destination: String((spec.destinationRef || {}).name || ""),
+      archive: String((spec.archive || {}).url || ""),
+    }, values, destinations);
+    if ((change.state === "moves" || change.state === "unknown") &&
+      String(values.moveLocation || "") !== "true") {
+      throw invalidInput({ moveLocation: LOCATION_MOVE_REFUSAL });
+    }
+  }
+  values = await confirmDestination(ns, values, api);
   const generation = ((object || {}).metadata || {}).generation;
   if (typeof generation !== "number") {
     throw invalidInput({ cron: NO_GENERATION_SENTENCE });
