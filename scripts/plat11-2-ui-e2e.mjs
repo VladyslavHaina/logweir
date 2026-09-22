@@ -958,6 +958,13 @@ async function main() {
       "the submitted plan bytes are the bytes that were on screen");
     check(wizardBody.planHash === previewed.hash,
       "under the hash that was shown beside them");
+    check((wizardBody.sourceDestinationRef || {}).name === frozenDestination.name,
+      "the wizard create request carries the recovery point's saved source destination");
+    check((wizardBody.evidenceDestinationRef || {}).name === frozenDestination.name,
+      "the wizard create request carries the recovery point's saved evidence destination");
+    check(wizardBody.sourceArchive.url === "logweir-destination://" + frozenDestination.name &&
+      wizardBody.sourceArchive.credentialRef === undefined,
+    "the create request uses the destination sentinel and no inline credential");
     check(Array.isArray(wizardBody.topicMapping) && wizardBody.topicMapping.length === 2,
       "the declaration reached the request: " + JSON.stringify(wizardBody.topicMapping));
     for (const [i, row] of wizardBody.topicMapping.entries()) {
@@ -975,6 +982,12 @@ async function main() {
       "the stored plan bytes are the previewed bytes, byte for byte");
     check(created.spec.target.topicNaming.prefix === OLD_PREFIX,
       "the stored prefix is the previewed prefix");
+    check((created.spec.sourceDestinationRef || {}).name === frozenDestination.name &&
+      (created.spec.evidenceDestinationRef || {}).name === frozenDestination.name,
+    "the stored Restore keeps both saved destination references");
+    check(created.spec.sourceArchive.url === "logweir-destination://" + frozenDestination.name &&
+      created.spec.sourceArchive.secretRef === undefined,
+    "the stored Restore keeps the sentinel and no inline credential");
     check(created.spec.topicMapping === undefined,
       "the declaration is a rail, never a stored field: " + JSON.stringify(created.spec));
     // THE `topics:` BLOCK, not every list entry in the document: the target's
@@ -999,6 +1012,8 @@ async function main() {
       declared: wizardBody.topicMapping,
       storedTopics: storedTopics,
       storedPrefix: created.spec.target.topicNaming.prefix,
+      sourceDestinationRef: created.spec.sourceDestinationRef,
+      evidenceDestinationRef: created.spec.evidenceDestinationRef,
     });
 
     // THE NEGATIVE CONTROL: the topic that was unticked is in NEITHER the
