@@ -1455,7 +1455,6 @@ mod tests {
         assert_eq!(back, binding);
     }
 
-    #[test]
     /// **LOW-2: `STANDING_MANDATORY_ENV` is a hand-written list, and this is
     /// what binds it to [`ALL_ENV`].**
     ///
@@ -1490,6 +1489,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn an_authorization_kind_is_a_closed_set() {
         assert_eq!(
             AuthorizationKind::parse("approval"),
