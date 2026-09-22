@@ -178,6 +178,13 @@ export const WIZARD_DRAFT_FIELDS = Object.freeze([
   // dropped it would restore a plan over every topic the point froze -- which
   // is precisely the choice the operator made and this page lost.
   "topics",
+  // PLAT-08.2: the evidence store is its own choice. A saved point keeps the
+  // evidence destination it chose BY IDENTITY (name beside uid); a legacy
+  // point keeps whether the evidence store shares the archive store's
+  // settings, and its own four when it does not. None is a credential.
+  "evidenceDestination", "evidenceDestinationUid",
+  "evidenceSameAsArchive", "evidenceEndpoint", "evidenceRegion", "evidencePathStyle",
+  "evidenceAllowHttp",
 ]);
 
 /** The API server's field paths, mapped to the wizard's inputs. `archive` and
@@ -195,6 +202,9 @@ export const WIZARD_FIELD_PATHS = Object.freeze([
   // or `topicMapping[i].target`; the longest-prefix match sends every one of
   // them to the subset control they are about.
   ["topicMapping", "topics"],
+  // PLAT-08.2: the two saved references, each beside the control it is about.
+  ["evidenceDestinationRef", "evidenceDestination"],
+  ["spec.evidenceDestinationRef", "evidenceDestination"],
 ]);
 
 /** The fields of `WIZARD_FIELD_PATHS` with no input of their own. */
@@ -724,22 +734,19 @@ export function renderArchiveCredentialField(state) {
 export function renderStoreFields(state) {
   const s = state || {};
   const store = ((s.fields || {}).source) || {};
+  const evidence = ((s.fields || {}).evidence) || {};
   const destination = savedDestinationName(s);
+  const errors = errorsOf(s);
   if (destination.length > 0) {
-    const evidence = ((s.fields || {}).evidence) || {};
     return (
       "<h4>Where that archive actually is</h4>" +
       "<p class=\"note\">These signed-plan values come from the public location and transport " +
       "settings of saved destination <code>" + esc(destination) + "</code>. They are fixed for " +
       "this recovery point; credentials and Secret values are never read or shown here.</p>" +
-      "<dl><dt>archive bucket / prefix</dt><dd><code>" + esc(store.bucket) + "/" +
-      esc(store.prefix) + "</code></dd><dt>evidence bucket / prefix</dt><dd><code>" +
-      esc(evidence.bucket) + "/" + esc(evidence.prefix) + "</code></dd><dt>region</dt><dd><code>" +
-      esc(store.region || "(default)") + "</code></dd><dt>endpoint</dt><dd><code>" +
-      esc(store.endpoint || "AWS S3") + "</code></dd><dt>addressing</dt><dd>" +
-      (store.pathStyle === true ? "pathStyle" : "virtualHosted") +
-      "</dd><dt>transport</dt><dd>" + (store.allowHttp === true ? "insecureHttp" : "TLS") +
-      "</dd></dl>"
+      storeFacts("archive", store, store.bucket + "/" + store.prefix) +
+      renderEvidenceDestinationField(s, errors) +
+      storeFacts("evidence", evidence, String(evidence.bucket || "") + "/" +
+        String(evidence.prefix || ""))
     );
   }
   return (
@@ -757,16 +764,146 @@ export function renderStoreFields(state) {
     (store.pathStyle === true ? " checked" : "") + "> path_style addressing</label>" +
     "<p class=\"note\">" + ADDRESSING_NOTE + "</p>" +
     renderInsecureTransportField(s) +
+    "<h4>Where the evidence is written</h4>" +
     "<div class=\"field\"><label for=\"evidence-bucket\">evidence bucket</label>" +
     "<input id=\"evidence-bucket\" name=\"evidenceBucket\" value=\"" +
-    esc(((s.fields || {}).evidence || {}).bucket) + "\"" +
-    invalidAttributes("evidence-bucket", errorsOf(s).evidenceBucket) + ">" +
-    fieldErrorLine("evidence-bucket", errorsOf(s).evidenceBucket) +
+    esc(evidence.bucket) + "\"" +
+    invalidAttributes("evidence-bucket", errors.evidenceBucket) + ">" +
+    fieldErrorLine("evidence-bucket", errors.evidenceBucket) +
     "<p class=\"note\">The evidence prefix is fixed at " + esc(EVIDENCE_PREFIX) + " by Global " +
     "Constraint 6 and is not an input: a plan naming another one is refused at phase 0, " +
-    "after the approver has already signed it.</p></div>"
+    "after the approver has already signed it.</p></div>" +
+    renderEvidenceStoreFields(s)
   );
 }
+
+/** One storage block, as the facts the plan signs for it. */
+function storeFacts(role, block, location) {
+  const b = block || {};
+  return (
+    "<dl id=\"" + esc(role) + "-store-facts\"><dt>" + esc(role) + " bucket / prefix</dt><dd><code>" +
+    esc(location) + "</code></dd><dt>region</dt><dd><code>" +
+    esc(b.region || "(default)") + "</code></dd><dt>endpoint</dt><dd><code>" +
+    esc(b.endpoint || "AWS S3") + "</code></dd><dt>addressing</dt><dd data-addressing=\"" +
+    esc(role) + "\">" + (b.pathStyle === true ? "pathStyle" : "virtualHosted") +
+    "</dd><dt>transport</dt><dd data-transport=\"" + esc(role) + "\">" +
+    (b.allowHttp === true ? "insecureHttp" : "TLS") + "</dd></dl>"
+  );
+}
+
+/** Said above the evidence destination selector. */
+export const EVIDENCE_DESTINATION_SENTENCE =
+  "The run writes its signed scorecard and offsets to this destination's evidence store -- its " +
+  "bucket under logweir/, reached with its own endpoint, addressing, transport and evidenceWrite " +
+  "credential. It starts as the recovery point's own destination, so nothing has to be entered; " +
+  "choosing another one keeps the archive where it is and changes only where the evidence goes, " +
+  "which is part of the plan an approver signs.";
+
+/** THE EVIDENCE DESTINATION, CHOSEN BY IDENTITY (PLAT-08.2, D2 section 9).
+ *
+ *  `Restore.spec` carries TWO saved references, `sourceDestinationRef` and
+ *  `evidenceDestinationRef`, and the controller checks the plan's evidence
+ *  block against the second one (D2 section 3.6, check 8). Until this control
+ *  existed the page always sent the SOURCE destination twice, so a restore
+ *  could not keep its evidence apart from the archive it reads. The option
+ *  VALUE is the uid: a destination deleted and recreated under the same name
+ *  is a different store reached with a different credential. */
+export function renderEvidenceDestinationField(state, errors) {
+  const s = state || {};
+  const e = errors || {};
+  const options = evidenceDestinationOptions(s);
+  const pinned = s.evidenceDestination || {};
+  const refused = typeof s.evidenceDestinationProblem === "string" &&
+    s.evidenceDestinationProblem.length > 0;
+  const own = String((((s.point || {}).spec || {}).destinationRef || {}).name || "");
+  return (
+    "<h4>Where the evidence is written</h4>" +
+    "<div class=\"field\"><label for=\"evidence-destination\">evidence destination</label>" +
+    (refused
+      ? "<p class=\"refusal\" id=\"evidence-destination-refusal\">" +
+        esc(s.evidenceDestinationProblem) + "</p>"
+      : "") +
+    "<select id=\"evidence-destination\" name=\"evidenceDestination\"" +
+    invalidAttributes("evidence-destination", e.evidenceDestination) + ">" +
+    (refused ? "<option value=\"\" selected>choose an evidence destination</option>" : "") +
+    options.map((d) =>
+      "<option value=\"" + esc(d.uid) + "\"" +
+      (!refused && d.uid === pinned.uid ? " selected" : "") + ">" +
+      esc(d.name + " -- " + String(d.canonicalUrl || "") + " (" +
+        String(((d.transport || {}).security) || "?") + ", " +
+        String(((d.storage || {}).addressing) || "?") + ")" +
+        (d.name === own ? " -- this recovery point's destination" : "")) +
+      "</option>").join("") +
+    "</select>" +
+    fieldErrorLine("evidence-destination", e.evidenceDestination) +
+    "<p class=\"note\">" + esc(EVIDENCE_DESTINATION_SENTENCE) + "</p>" +
+    (s.evidenceDestinationsUnavailable === true
+      ? "<p class=\"note\" id=\"evidence-destinations-unavailable\">The other destinations in " +
+        "this namespace could not be read, so only the recovery point's own destination is " +
+        "offered.</p>"
+      : "") +
+    "</div>"
+  );
+}
+
+/** Said beside the "evidence store uses the archive store's settings" box. */
+export const EVIDENCE_SAME_STORE_SENTENCE =
+  "Ticked, the evidence block of the plan is reached with exactly the endpoint, region, " +
+  "addressing and transport of the archive store above. Untick it when the evidence bucket is on " +
+  "another store: the evidence store then gets controls of its own, and nothing on the archive " +
+  "side changes them -- nor do they change the archive side.";
+
+/** THE LEGACY EVIDENCE STORE'S OWN SETTINGS (PLAT-08.2, second half of defect
+ *  UI-HTTPDOWNGRADE). The plan has two storage blocks and the runner reaches
+ *  each with its own four settings; this page used to write the archive's four
+ *  into both, so an evidence bucket on another store could not be named at
+ *  all. The default is the old behaviour, SAID on screen as a ticked box, so an
+ *  existing walkthrough's plan bytes do not move; unticking it gives the
+ *  evidence store an endpoint, a region, an addressing box and an explicit
+ *  insecure-transport box of its own, and the last defaults OFF and is set by
+ *  nothing but itself. */
+export function renderEvidenceStoreFields(state) {
+  const s = state || {};
+  const evidence = ((s.fields || {}).evidence) || {};
+  const same = s.evidenceSameAsArchive !== false;
+  return (
+    "<label class=\"inline\" for=\"evidence-same-store\">" +
+    "<input type=\"checkbox\" id=\"evidence-same-store\" name=\"evidenceSameAsArchive\"" +
+    (same ? " checked" : "") + "> the evidence store uses the archive store's endpoint, " +
+    "region, addressing and transport</label>" +
+    "<p class=\"note\">" + esc(EVIDENCE_SAME_STORE_SENTENCE) + "</p>" +
+    (same
+      ? ""
+      : "<fieldset class=\"evidence-store\" id=\"evidence-store\"><legend>evidence store</legend>" +
+        "<div class=\"field-row\">" +
+        "<div class=\"field\"><label for=\"evidence-endpoint\">evidence endpoint</label>" +
+        "<input id=\"evidence-endpoint\" name=\"evidenceEndpoint\" value=\"" +
+        esc(evidence.endpoint) + "\"></div>" +
+        "<div class=\"field\"><label for=\"evidence-region\">evidence region</label>" +
+        "<input id=\"evidence-region\" name=\"evidenceRegion\" value=\"" +
+        esc(evidence.region) + "\"></div>" +
+        "</div>" +
+        "<label class=\"inline\" for=\"evidence-pathStyle\">" +
+        "<input type=\"checkbox\" id=\"evidence-pathStyle\" name=\"evidencePathStyle\"" +
+        (evidence.pathStyle === true ? " checked" : "") + "> path_style addressing for the " +
+        "evidence store</label>" +
+        "<p class=\"note\">" + ADDRESSING_NOTE + "</p>" +
+        "<label class=\"inline\" for=\"evidence-allow-insecure\">" +
+        "<input type=\"checkbox\" id=\"evidence-allow-insecure\" name=\"evidenceAllowHttp\"" +
+        (evidence.allowHttp === true ? " checked" : "") +
+        "> Allow insecure HTTP to the evidence store (explicit, local development only)</label>" +
+        "<p class=\"complaint\" id=\"evidence-insecure-transport-warning\">" +
+        EVIDENCE_INSECURE_TRANSPORT_WARNING + "</p>" +
+        "</fieldset>")
+  );
+}
+
+/** The warning under the evidence store's own insecure-transport box. */
+export const EVIDENCE_INSECURE_TRANSPORT_WARNING =
+  "Ticking this writes allow_" + "http" + " true into the EVIDENCE block of the plan an approver " +
+  "signs: the runner then writes the signed scorecard to the evidence store over an unencrypted " +
+  "connection, with the evidence credential in the clear. It is independent of the archive " +
+  "store's box and of every addressing box, and it defaults to off.";
 
 /** Said beside the addressing checkbox, so a reader knows what it does and --
  *  as of decision D2 section 13.2, task W13a -- what it does NOT do. */
@@ -808,8 +945,9 @@ export function renderInsecureTransportField(state) {
 /** The warning printed under that box, whether or not it is ticked. */
 export const INSECURE_TRANSPORT_WARNING =
   "Ticking this writes allow_" + "http" + " true into the plan an approver signs, and the " +
-  "runner then reaches the archive and the evidence store over an unencrypted connection: " +
-  "the object-store credential and every restored record cross the network in the clear. " +
+  "runner then reaches the archive store -- and the evidence store too, while the evidence " +
+  "store uses the archive store's settings -- over an unencrypted connection: the " +
+  "object-store credential and every restored record cross the network in the clear. " +
   "Nothing else on this page sets it -- not the addressing style, not the endpoint, not any " +
   "value from the environment -- and it defaults to off. Tick it only for a store on your " +
   "own machine.";
@@ -2284,6 +2422,12 @@ export function validateRestore(state) {
       "choose a saved connection: nothing is selected, so there is no cluster for this restore " +
       "to write to";
   }
+  if (destinationName.length > 0 && (typeof s.evidenceDestinationProblem === "string" ||
+    evidenceDestinationName(s).length === 0)) {
+    problems.evidenceDestination = typeof s.evidenceDestinationProblem === "string"
+      ? s.evidenceDestinationProblem
+      : "choose the saved destination the evidence is written to";
+  }
   if (typeof ((fields.evidence || {}).bucket) !== "string" || fields.evidence.bucket.length === 0) {
     problems.evidenceBucket = "the bucket the signed evidence is written to";
   }
@@ -2336,6 +2480,13 @@ export function wizardDraftValues(state) {
     evidenceBucket: (f.evidence || {}).bucket,
     archiveSecret: s.archiveSecretName,
     topics: selectedTopics(s),
+    evidenceDestination: evidenceDestinationName(s),
+    evidenceDestinationUid: ((s.evidenceDestination || {}).uid) || "",
+    evidenceSameAsArchive: s.evidenceSameAsArchive !== false,
+    evidenceEndpoint: (f.evidence || {}).endpoint,
+    evidenceRegion: (f.evidence || {}).region,
+    evidencePathStyle: (f.evidence || {}).pathStyle === true,
+    evidenceAllowHttp: (f.evidence || {}).allowHttp === true,
   };
 }
 
@@ -2382,7 +2533,11 @@ export function applyWizardDraft(state, draft) {
   // A saved destination is the frozen source of these signed-plan values.
   // Older drafts may contain legacy controls, but must never override it.
   const legacyStorage = savedDestinationName(state).length === 0;
-  for (const block of legacyStorage ? [state.fields.source, state.fields.evidence] : []) {
+  // THE ARCHIVE BLOCK FROM THE ARCHIVE CONTROLS, AND ONLY THE ARCHIVE BLOCK
+  // (PLAT-08.2). The evidence block follows below from its own kept values --
+  // or, for a draft kept before the evidence store had controls of its own,
+  // from the "same store" rule that draft was made under.
+  for (const block of legacyStorage ? [state.fields.source] : []) {
     if (typeof d.endpoint === "string") {
       block.endpoint = d.endpoint;
     }
@@ -2399,6 +2554,33 @@ export function applyWizardDraft(state, draft) {
     if (typeof d.allowHttp === "boolean") {
       block.allowHttp = d.allowHttp;
     }
+  }
+  if (legacyStorage) {
+    state.evidenceSameAsArchive = d.evidenceSameAsArchive !== false;
+    if (state.evidenceSameAsArchive) {
+      syncEvidenceStore(state);
+    } else {
+      const evidence = state.fields.evidence;
+      if (typeof d.evidenceEndpoint === "string") {
+        evidence.endpoint = d.evidenceEndpoint;
+      }
+      if (typeof d.evidenceRegion === "string") {
+        evidence.region = d.evidenceRegion;
+      }
+      if (typeof d.evidencePathStyle === "boolean") {
+        evidence.pathStyle = d.evidencePathStyle;
+      }
+      // Its OWN kept flag, never the archive's and never an addressing box.
+      if (typeof d.evidenceAllowHttp === "boolean") {
+        evidence.allowHttp = d.evidenceAllowHttp;
+      }
+    }
+  } else if (typeof d.evidenceDestinationUid === "string" && d.evidenceDestinationUid.length > 0) {
+    // THE KEPT EVIDENCE DESTINATION BY UID, applied even when that uid no
+    // longer answers, for `targetClusterUid`'s reason: dropping it would put
+    // the point's own destination back silently, which is a substitution.
+    selectEvidenceDestination(state, d.evidenceDestinationUid,
+      typeof d.evidenceDestination === "string" ? d.evidenceDestination : "");
   }
   if (legacyStorage && typeof d.evidenceBucket === "string") {
     state.fields.evidence.bucket = d.evidenceBucket;
@@ -2532,7 +2714,10 @@ export function restoreBody(state, prepared) {
   };
   if (typeof destination.name === "string" && destination.name.length > 0) {
     spec.sourceDestinationRef = { name: destination.name };
-    spec.evidenceDestinationRef = { name: destination.name };
+    // THE EVIDENCE DESTINATION THE OPERATOR CHOSE (PLAT-08.2) -- the point's
+    // own unless step 1 named another. Never a fallback to the source: a
+    // refused choice has already stopped the submit in `validateRestore`.
+    spec.evidenceDestinationRef = { name: evidenceDestinationName(s) };
   }
   return {
     apiVersion: "logweir.dev/v1alpha1",
@@ -2617,6 +2802,11 @@ export async function submitRestore(state, deps, lifecycle, options) {
   // action; once `create` starts, deliberately pass no route signal so an
   // accepted server mutation can finish after navigation.
   if (!active(lifecycle)) {
+    return null;
+  }
+  // AND AGAINST A FRESH READ OF THE CHECK (PLAT-08.2): a destination edited
+  // during the draft moves no byte of the plan and does make its verdict stale.
+  if (!await confirmReadiness(s, api, prepared, lifecycle)) {
     return null;
   }
   // THE READINESS GATE IS CHECKED HERE AND NOT ONLY ON THE BUTTON (PLAT-11.2),
@@ -2751,6 +2941,86 @@ export async function confirmFrozenDestination(state, api, lifecycle) {
       archive: problem + ". Nothing was sent; the reviewed plan is still here.",
     });
   }
+  // AND THE EVIDENCE DESTINATION, WHEN IT IS ANOTHER ONE (PLAT-08.2). It was
+  // pinned by uid and location digest when it was chosen; the same interval
+  // this read protects for the archive applies to it, and the same answer: a
+  // replacement under the same name is not the store the plan names.
+  const pin = s.evidenceDestination || {};
+  if (typeof pin.uid === "string" && pin.uid.length > 0 && pin.uid !== live.uid) {
+    let other;
+    try {
+      other = await api.destination(s.ns, pin.name);
+    } catch (unread) {
+      throw invalidInput({
+        evidenceDestination: "evidence destination " + pin.name +
+          " could not be read again before submitting (" + String(unread && unread.message) +
+          "). Nothing was sent; the reviewed plan is still here.",
+      });
+    }
+    if (!active(lifecycle)) {
+      return false;
+    }
+    const item = other === null || other === undefined ? null : other.item;
+    const moved = item === null || item === undefined
+      ? "is absent"
+      : (item.uid !== pin.uid
+        ? "was recreated: the plan names uid " + pin.uid + " and the live one is " +
+          String(item.uid || "(absent)")
+        : (item.locationDigest !== pin.locationDigest
+          ? "moved: the plan names location digest " + pin.locationDigest + " and the live one " +
+            "is " + String(item.locationDigest || "(absent)")
+          : null));
+    if (moved !== null) {
+      throw invalidInput({
+        evidenceDestination: "evidence destination " + pin.name + " " + moved +
+          ". Nothing was sent; the reviewed plan is still here.",
+      });
+    }
+  }
+  return true;
+}
+
+/** Re-reads the readiness check on screen, at the last edge before create,
+ *  against the reviewed plan's hash (PLAT-08.2, D2 section 6.6).
+ *
+ *  THE VERDICT ON SCREEN IS A MEMORY, and the inputs it was about can move
+ *  while an operator reviews: a destination's access rotated, a CA replaced, a
+ *  connection edited -- each changes a referent's generation and the product
+ *  API then answers `stale` with `referentChanged:<Kind>/<name>`, while the
+ *  plan bytes, and so the hash, stay exactly the same. A page that trusted its
+ *  cached `ready` would submit past that. So the held check is read again
+ *  here, the answer replaces the cached one (staleness stays one-way, see
+ *  [`mergeReadiness`]), and `readinessRefusal` then judges the fresh one.
+ *
+ *  No held check means nothing to re-read, and that is `readinessRefusal`'s
+ *  "nothing has run" arm, unchanged. A read that fails is a refusal: "I could
+ *  not find out" is not "it is still ready". No route signal, for
+ *  [`confirmClusters`]'s reason. */
+export async function confirmReadiness(state, api, prepared, lifecycle) {
+  const s = state || {};
+  const held = (s.readiness || {}).preflight || null;
+  if (held === null || typeof held.id !== "string" || held.id.length === 0 ||
+    typeof (api || {}).preflight !== "function") {
+    return true;
+  }
+  const hash = typeof (prepared || {}).hash === "string" ? prepared.hash : "";
+  let answer;
+  try {
+    answer = await api.preflight(s.ns, held.id, hash.length > 0 ? { planHash: hash } : {});
+  } catch (unread) {
+    throw refusal(
+      "the readiness check " + held.id + " could not be read again before submitting (" +
+        String(unread && unread.message) + "), so whether it still applies to this plan is " +
+        "unknown. Nothing was sent; the reviewed plan is still here.",
+      { planHash: hash },
+    );
+  }
+  if (!active(lifecycle)) {
+    return false;
+  }
+  s.readiness = Object.assign({}, s.readiness, {
+    preflight: mergeReadiness(held, (answer || {}).item),
+  });
   return true;
 }
 
@@ -2938,7 +3208,24 @@ export async function mountRestoreWizard(node, ns, params, parse, deps, lifecycl
       }
       destination = requireFrozenDestination(resolved.point, read.item);
     }
-    const state = initialState(ns, clusters, backups, selection, destination);
+    // THE OTHER SAVED DESTINATIONS, for the evidence selector (PLAT-08.2). A
+    // read that fails costs the choice and nothing else: the point's own
+    // destination is still offered, and the page says the others were not read.
+    let destinations;
+    if (destination !== null && typeof api.destinations === "function") {
+      try {
+        destinations = (await api.destinations(ns, readOptions(lifecycle))).items;
+      } catch (unread) {
+        if (cancelled(unread, lifecycle)) {
+          throw unread;
+        }
+        destinations = null;
+      }
+      if (!active(lifecycle)) {
+        return;
+      }
+    }
+    const state = initialState(ns, clusters, backups, selection, destination, destinations);
     if (state.pointState === "none") {
       if (completedBackups(backups).length === 0) {
         replace(node, parse(renderNoCompletedBackup(ns, backups)));
@@ -3025,7 +3312,7 @@ async function renderAndWire(node, state, parse, api, lifecycle) {
  *  records (endpoint, region and the `path_style` flag) plus the explicit
  *  insecure-transport flag are editable in step 1 rather than left out,
  *  because the runner reads them from these bytes and from nowhere else. */
-export function initialState(ns, clusters, backups, selection, savedDestination) {
+export function initialState(ns, clusters, backups, selection, savedDestination, destinations) {
   const resolved = resolvePoint(backups, selection);
   // PLAT-11.2 / PLAT-12.2: a retry of a failed run, or "" for an ordinary
   // restore. It changes exactly one value -- the default topic prefix -- and
@@ -3076,6 +3363,16 @@ export function initialState(ns, clusters, backups, selection, savedDestination)
     archiveSecretName: archiveSecretName,
     savedDestination: destinationSettings === null ? null : savedDestination,
     savedDestinationProblem: destinationProblem,
+    // PLAT-08.2: WHERE THE EVIDENCE GOES, as its own choice. A saved point
+    // starts on its own destination -- inherited, nothing re-entered -- and may
+    // name another saved destination; a legacy point starts with its evidence
+    // store sharing the archive store's settings, said on screen as a ticked
+    // box, so an existing walkthrough's bytes do not move.
+    evidenceDestinations: Array.isArray(destinations) ? destinations : [],
+    evidenceDestinationsUnavailable: savedPoint && destinations === null,
+    evidenceDestination: destinationSettings === null ? null : destinationPin(savedDestination),
+    evidenceDestinationProblem: null,
+    evidenceSameAsArchive: true,
     evidenceBucket: savedPoint
       ? (destinationSettings === null ? "" : destinationSettings.bucket)
       : "logweir-evidence",
@@ -3219,6 +3516,128 @@ function savedDestinationResolved(state) {
   return name.length === 0 ||
     ((state || {}).savedDestinationProblem === null &&
       savedDestinationStore((state || {}).savedDestination, name) !== null);
+}
+
+// ------------------------------------ the evidence destination (PLAT-08.2)
+
+/** The three public facts that pin a saved destination: its name, its uid and
+ *  the location digest its controller published. */
+function destinationPin(destination) {
+  const d = destination || {};
+  return {
+    name: typeof d.name === "string" ? d.name : "",
+    uid: typeof d.uid === "string" ? d.uid : "",
+    locationDigest: typeof d.locationDigest === "string" ? d.locationDigest : "",
+  };
+}
+
+/** A saved destination's EVIDENCE store: its bucket rooted at Global
+ *  Constraint 6's `logweir/`, reached with its own endpoint, region,
+ *  addressing and transport -- `BackupDestination::evidence_storage_url`,
+ *  field for field. `null` when the destination publishes no usable storage. */
+export function evidenceStoreOf(destination) {
+  const d = destination || {};
+  const store = savedDestinationStore(d, d.name);
+  if (store === null) {
+    return null;
+  }
+  return {
+    bucket: store.bucket,
+    prefix: EVIDENCE_PREFIX,
+    region: store.region,
+    endpoint: store.endpoint,
+    pathStyle: store.pathStyle,
+    allowHttp: store.allowHttp,
+  };
+}
+
+/** The saved destinations the evidence selector offers: the recovery point's
+ *  own first, then every other one this page read that publishes a usable S3
+ *  location, each once by uid. */
+export function evidenceDestinationOptions(state) {
+  const s = state || {};
+  const own = s.savedDestination || null;
+  const seen = new Set();
+  const out = [];
+  for (const d of [own].concat(Array.isArray(s.evidenceDestinations) ? s.evidenceDestinations : [])) {
+    if (d === null || d === undefined || typeof d.uid !== "string" || d.uid.length === 0 ||
+      seen.has(d.uid) || evidenceStoreOf(d) === null) {
+      continue;
+    }
+    seen.add(d.uid);
+    out.push(d);
+  }
+  return out;
+}
+
+/** The evidence destination's NAME, or "" for a legacy point. */
+export function evidenceDestinationName(state) {
+  const pin = (state || {}).evidenceDestination || null;
+  return pin !== null && typeof pin.name === "string" ? pin.name : "";
+}
+
+/** Chooses the evidence destination BY UID, and rebuilds the plan's evidence
+ *  block from it and from nothing else.
+ *
+ *  A uid that no longer answers is a REFUSAL, not a fallback: the evidence
+ *  block is emptied, so no plan can be built, and the selector says why. A
+ *  change of uid also marks a held readiness verdict stale, for
+ *  `selectTarget`'s reason -- two destinations can publish identical storage
+ *  and so render identical bytes, and the verdict was about the other one. */
+export function selectEvidenceDestination(state, uid, name) {
+  const wanted = typeof uid === "string" ? uid : "";
+  const before = ((state.evidenceDestination || {}).uid) || "";
+  const found = evidenceDestinationOptions(state).find((d) => d.uid === wanted) || null;
+  const held = (state.readiness || {}).preflight || null;
+  if (wanted !== before && held !== null) {
+    state.readiness = Object.assign({}, state.readiness, {
+      preflight: Object.assign({}, held, {
+        applicable: false,
+        stale: true,
+        staleReasons: [{
+          reason: "referentChanged",
+          kind: "BackupDestination",
+          name: found !== null ? found.name : (typeof name === "string" ? name : wanted),
+        }],
+      }),
+    });
+  }
+  if (found === null) {
+    state.evidenceDestination = {
+      name: typeof name === "string" ? name : "", uid: wanted, locationDigest: "",
+    };
+    state.evidenceDestinationProblem = wanted.length === 0
+      ? "choose the saved destination the evidence is written to"
+      : "saved destination " + (typeof name === "string" && name.length > 0 ? name : "(unnamed)") +
+        " (uid " + wanted + ") is not in this namespace any more, or was recreated under a " +
+        "new uid; a different destination is a different store reached with a different " +
+        "credential, so choose the evidence destination you mean";
+    state.fields.evidence = Object.assign({}, state.fields.evidence, { bucket: "" });
+    state.evidenceBucket = "";
+    return;
+  }
+  state.evidenceDestination = destinationPin(found);
+  state.evidenceDestinationProblem = null;
+  state.fields.evidence = evidenceStoreOf(found);
+  state.evidenceBucket = state.fields.evidence.bucket;
+}
+
+/** For a LEGACY point whose "same store" box is ticked: copies the archive
+ *  store's four transport-and-address settings into the evidence block. The
+ *  caller decides whether the box is ticked; a saved point is never touched.
+ *  The bucket and the prefix are never copied: evidence has its own bucket
+ *  and Global Constraint 6's prefix. */
+export function syncEvidenceStore(state) {
+  const s = state || {};
+  if (savedDestinationName(s).length > 0) {
+    return;
+  }
+  const source = (s.fields || {}).source || {};
+  const evidence = (s.fields || {}).evidence || {};
+  evidence.endpoint = source.endpoint;
+  evidence.region = source.region;
+  evidence.pathStyle = source.pathStyle === true;
+  evidence.allowHttp = source.allowHttp === true;
 }
 
 // Copy public settings only. The controller projects the selected cluster's
@@ -3370,6 +3789,9 @@ function wireRestoreReadiness(node, state, parse, api, lifecycle, prepared) {
         : ((state.readiness || {}).boundHash || ""),
     });
     renderAndWire(node, state, parse, api, lifecycle);
+    if (record.phase === "succeeded") {
+      followRestoreReadiness(node, state, parse, api, lifecycle);
+    }
   }, lifecycle);
 
   listen(form, "submit", (event) => {
@@ -3408,6 +3830,82 @@ function wireRestoreReadiness(node, state, parse, api, lifecycle, prepared) {
   }
 }
 
+/** How many times step 5 re-reads a started check, and the gap between reads.
+ *  Bounded on purpose, as the schedules form is: a form is not a watcher. */
+export const RESTORE_READINESS_POLLS = 45;
+export const RESTORE_READINESS_INTERVAL_MS = 2000;
+
+/** A held verdict, replaced by a fresher read of the SAME check -- except that
+ *  staleness is one-way on this page. A mark `selectTarget` or
+ *  `selectEvidenceDestination` made is about a choice the server cannot see
+ *  (the check is bound to the referent it was started against, which may be
+ *  perfectly unchanged), so a fresher `applicable: true` must not erase it.
+ *  Only a NEW check, started for the current choices, does. */
+export function mergeReadiness(held, fresh) {
+  if (fresh === null || fresh === undefined) {
+    return held === undefined ? null : held;
+  }
+  if (held === null || held === undefined || held.id !== fresh.id || held.stale !== true) {
+    return fresh;
+  }
+  const reasons = (Array.isArray(fresh.staleReasons) ? fresh.staleReasons : []).slice();
+  for (const r of Array.isArray(held.staleReasons) ? held.staleReasons : []) {
+    if (!reasons.some((x) => x.reason === r.reason && x.kind === r.kind && x.name === r.name)) {
+      reasons.push(r);
+    }
+  }
+  return Object.assign({}, fresh, { applicable: false, stale: true, staleReasons: reasons });
+}
+
+/** Re-reads the check step 5 started until it is terminal, asking the product
+ *  API about the plan on screen NOW (`?planHash=`), and repaints when the
+ *  answer changes. Before PLAT-08.2 the wizard showed only the create answer
+ *  -- a check that had not run yet -- and never learned its verdict. */
+async function followRestoreReadiness(node, state, parse, api, lifecycle) {
+  const first = (state.readiness || {}).preflight || null;
+  if (first === null || typeof first.id !== "string" || typeof api.preflight !== "function") {
+    return;
+  }
+  const id = first.id;
+  const wait = typeof api.wait === "function"
+    ? api.wait
+    : (ms) => new Promise((done) => { globalThis.setTimeout(done, ms); });
+  for (let read = 0; read < RESTORE_READINESS_POLLS; read += 1) {
+    const held = (state.readiness || {}).preflight || null;
+    if (held === null || held.id !== id || held.terminal === true) {
+      return;
+    }
+    await wait(RESTORE_READINESS_INTERVAL_MS);
+    if (!active(lifecycle)) {
+      return;
+    }
+    const current = await preparePlanOrProblem(state);
+    let answer;
+    try {
+      answer = await api.preflight(state.ns, id, Object.assign({}, readOptions(lifecycle),
+        typeof current.hash === "string" ? { planHash: current.hash } : {}));
+    } catch (error) {
+      // A FAILED RE-READ IS NOT A VERDICT: the one on screen stays what the
+      // check last recorded, and the submit re-reads it again anyway.
+      return;
+    }
+    if (!active(lifecycle)) {
+      return;
+    }
+    const now = (state.readiness || {}).preflight || null;
+    if (now === null || now.id !== id) {
+      return;
+    }
+    const merged = mergeReadiness(now, (answer || {}).item);
+    const moved = merged.state !== now.state || merged.terminal !== now.terminal ||
+      merged.stale !== now.stale || merged.applicable !== now.applicable;
+    state.readiness = Object.assign({}, state.readiness, { preflight: merged });
+    if (moved) {
+      await renderAndWire(node, state, parse, api, lifecycle);
+    }
+  }
+}
+
 /** The exact step-5 request for one recovery point.
  *
  * A destination-backed point names the saved destination for both archive
@@ -3439,7 +3937,7 @@ export function restoreReadinessRequest(state, prepared) {
   const destination = spec.destinationRef || {};
   if (typeof destination.name === "string" && destination.name.length > 0) {
     request.restore.sourceDestination = destination.name;
-    request.restore.evidenceDestination = destination.name;
+    request.restore.evidenceDestination = evidenceDestinationName(s);
     return request;
   }
   const archive = spec.archive || {};
@@ -3466,6 +3964,12 @@ function wire(node, state, parse, api, lifecycle, prepared) {
   const allowInsecure = node.querySelector("#store-allow-insecure");
   const evidenceBucket = node.querySelector("#evidence-bucket");
   const archiveSecret = node.querySelector("#archive-secret");
+  const evidenceSame = node.querySelector("#evidence-same-store");
+  const evidenceEndpoint = node.querySelector("#evidence-endpoint");
+  const evidenceRegion = node.querySelector("#evidence-region");
+  const evidencePathStyle = node.querySelector("#evidence-pathStyle");
+  const evidenceInsecure = node.querySelector("#evidence-allow-insecure");
+  const evidenceDestination = node.querySelector("#evidence-destination");
   const refresh = async () => {
     if (!active(lifecycle)) {
       return;
@@ -3489,7 +3993,11 @@ function wire(node, state, parse, api, lifecycle, prepared) {
       const picked = readClusterSelection(node, "target-cluster");
       selectTarget(state, picked.uid, picked.name);
     }
-    for (const block of [state.fields.source, state.fields.evidence]) {
+    // THE ARCHIVE CONTROLS WRITE THE ARCHIVE BLOCK (PLAT-08.2). Until the
+    // evidence store had controls of its own, this loop wrote the same four
+    // values into BOTH blocks; now the evidence block gets them only through
+    // `syncEvidenceStore`, and only while the "same store" box says so.
+    for (const block of [state.fields.source]) {
       if (endpoint !== null) {
         block.endpoint = valueOf(endpoint);
       }
@@ -3508,6 +4016,35 @@ function wire(node, state, parse, api, lifecycle, prepared) {
       // and only this checkbox.
       if (allowInsecure !== null) {
         block.allowHttp = allowInsecure.checked === true;
+      }
+    }
+    if (evidenceSame !== null) {
+      state.evidenceSameAsArchive = evidenceSame.checked === true;
+    }
+    if (state.evidenceSameAsArchive !== false) {
+      syncEvidenceStore(state);
+    } else {
+      // THE EVIDENCE STORE'S OWN FOUR, from its own controls and from no other.
+      if (evidenceEndpoint !== null) {
+        state.fields.evidence.endpoint = valueOf(evidenceEndpoint);
+      }
+      if (evidenceRegion !== null) {
+        state.fields.evidence.region = valueOf(evidenceRegion);
+      }
+      if (evidencePathStyle !== null) {
+        state.fields.evidence.pathStyle = evidencePathStyle.checked === true;
+      }
+      if (evidenceInsecure !== null) {
+        state.fields.evidence.allowHttp = evidenceInsecure.checked === true;
+      }
+    }
+    if (evidenceDestination !== null) {
+      // THE OPTION CARRIES A UID AND NOTHING ELSE: the name comes from the list
+      // this page read, by that uid, so a label can never choose a store.
+      const picked = valueOf(evidenceDestination);
+      if (picked !== (((state.evidenceDestination || {}).uid) || "") ||
+        typeof state.evidenceDestinationProblem === "string") {
+        selectEvidenceDestination(state, picked, ((state.evidenceDestination || {}).name) || "");
       }
     }
     if (evidenceBucket !== null) {
@@ -3572,6 +4109,12 @@ function wire(node, state, parse, api, lifecycle, prepared) {
     allowInsecure,
     evidenceBucket,
     archiveSecret,
+    evidenceSame,
+    evidenceEndpoint,
+    evidenceRegion,
+    evidencePathStyle,
+    evidenceInsecure,
+    evidenceDestination,
   ]) {
     if (field !== null) {
       listen(field, "change", refresh, lifecycle);

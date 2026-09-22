@@ -1622,6 +1622,312 @@ test("a_restored_draft_never_re_derives_insecure_transport_from_addressing", () 
   assert.equal(state.fields.evidence.allowHttp, false);
 });
 
+// -------------------- PLAT-08.2: the evidence store is its own store
+
+/** The two `allow_http` lines and the two `path_style` lines of a rendered
+ *  plan, in document order: the source block's first, the evidence block's
+ *  second. */
+function storeFlags(bytes) {
+  const pick = (key) => bytes.split("\n").filter((l) => l.trim().startsWith(key))
+    .map((l) => l.trim().split(":")[1].trim());
+  return { allowHttp: pick("allow_" + "http"), pathStyle: pick("path_style") };
+}
+
+test("restore_wizard_evidence_store_has_its_own_transport_and_addressing", async () => {
+  // THE SECOND HALF OF DEFECT UI-HTTPDOWNGRADE. `wire()` wrote the archive's
+  // endpoint, region, addressing and transport into BOTH plan blocks, so an
+  // evidence bucket on another store could not be described at all, and the
+  // archive's insecure box silently set the evidence store's transport too.
+  const ns = "wizard-evidence-store-ns";
+  const k8s = wizardKubernetes(ns);
+  const view = fakeView();
+  const originalWindow = globalThis.window;
+  globalThis.window = { location: { hash: "#/restore?ns=" + ns } };
+  try {
+    await mountRestoreWizard(view.root, ns, k8s.point, parse, k8s, createRouteLifecycle().begin());
+    const same = view.find("#evidence-same-store");
+    assert.ok(same !== null, "the evidence store's relation to the archive store is a control");
+    assert.equal(same.checked, true, "and it starts as the old behaviour, SAID on screen");
+    assert.equal(view.find("#evidence-allow-insecure"), null,
+      "while ticked, the evidence store has no controls of its own");
+    let flags = storeFlags(planBytesOf(view.html()));
+    assert.deepEqual(flags.allowHttp, ["false", "false"]);
+
+    // UNTICK: the evidence store gets its own four, starting from the archive's.
+    same.checked = false;
+    await same.dispatch("change");
+    await settled();
+    assert.ok(view.find("#evidence-allow-insecure") !== null, "its own transport box");
+    assert.ok(view.find("#evidence-pathStyle") !== null, "its own addressing box");
+    assert.equal(view.find("#evidence-allow-insecure").checked, false, "which defaults OFF");
+
+    // THE ARCHIVE'S INSECURE BOX NOW MOVES THE ARCHIVE BLOCK ONLY.
+    view.find("#store-allow-insecure").checked = true;
+    await view.find("#store-allow-insecure").dispatch("change");
+    await settled();
+    flags = storeFlags(planBytesOf(view.html()));
+    assert.deepEqual(flags.allowHttp, ["true", "false"],
+      "NEGATIVE CONTROL: before PLAT-08.2 both lines said true here, because one box wrote both");
+    assert.equal(view.find("#evidence-allow-insecure").checked, false,
+      "the evidence store's box did not move");
+
+    // THE EVIDENCE STORE'S ADDRESSING BOX MOVES ITS ADDRESSING AND NOTHING ELSE.
+    view.find("#evidence-pathStyle").checked = true;
+    await view.find("#evidence-pathStyle").dispatch("change");
+    await settled();
+    flags = storeFlags(planBytesOf(view.html()));
+    assert.deepEqual(flags.pathStyle, ["false", "true"], "evidence addressing followed its box");
+    assert.deepEqual(flags.allowHttp, ["true", "false"],
+      "and no transport flag moved with it, on either store");
+
+    // ITS OWN TRANSPORT BOX, AND ONLY IT, SETS THE EVIDENCE FLAG.
+    view.find("#evidence-allow-insecure").checked = true;
+    await view.find("#evidence-allow-insecure").dispatch("change");
+    view.find("#store-allow-insecure").checked = false;
+    await view.find("#store-allow-insecure").dispatch("change");
+    await settled();
+    flags = storeFlags(planBytesOf(view.html()));
+    assert.deepEqual(flags.allowHttp, ["false", "true"],
+      "each store's transport is its own box, in both directions");
+    assert.deepEqual(flags.pathStyle, ["false", "true"], "and addressing did not follow either");
+
+    // THE DRAFT KEEPS BOTH STORES APART.
+    const draft = readDraft(formKey(ns, WIZARD_FORM));
+    assert.equal(draft.evidenceSameAsArchive, false);
+    assert.equal(draft.evidenceAllowHttp, true);
+    assert.equal(draft.allowHttp, false);
+    assert.equal(draft.evidencePathStyle, true);
+    assert.equal(draft.pathStyle, false);
+
+    // WHAT IS SUBMITTED IS WHAT IS SHOWN.
+    const shown = planBytesOf(view.html());
+    await view.find("#create-restore").dispatch("click");
+    await settled(20);
+    const created = k8s.creates("restores");
+    assert.equal(created.length, 1, "one create");
+    assert.equal(created[0].body.spec.planBytes, shown, "the bytes on screen are the bytes sent");
+  } finally {
+    globalThis.window = originalWindow;
+  }
+});
+
+test("an_old_draft_with_one_store_keeps_meaning_one_store", () => {
+  // A draft kept before the evidence store had its own controls carries one
+  // set of values and no `evidenceSameAsArchive`; it meant "both stores", and
+  // it still does.
+  const state = initialState("wizard-old-draft-ns", fixture("wizard-clusters.json"),
+    fixture("wizard-backups.json"), WIZARD_POINT);
+  const old = wizardDraftValues(state);
+  for (const key of ["evidenceSameAsArchive", "evidenceEndpoint", "evidenceRegion",
+    "evidencePathStyle", "evidenceAllowHttp", "evidenceDestination", "evidenceDestinationUid"]) {
+    delete old[key];
+  }
+  Object.assign(old, { endpoint: "https://minio.lab:9000", pathStyle: true, allowHttp: false });
+  assert.equal(applyWizardDraft(state, old), true);
+  assert.equal(state.fields.evidence.endpoint, "https://minio.lab:9000");
+  assert.equal(state.fields.evidence.pathStyle, true);
+  assert.equal(state.evidenceSameAsArchive, true);
+
+  // AND A NEW ONE THAT SAYS "SEPARATE" KEEPS THE EVIDENCE STORE'S OWN VALUES.
+  const separate = Object.assign(wizardDraftValues(state), {
+    evidenceSameAsArchive: false, evidenceEndpoint: "http://evidence.local:9000",
+    evidenceAllowHttp: true, evidencePathStyle: false,
+  });
+  applyWizardDraft(state, separate);
+  assert.equal(state.fields.source.endpoint, "https://minio.lab:9000");
+  assert.equal(state.fields.source.allowHttp, false,
+    "MUTANT: the evidence store's kept flag never reaches the archive block");
+  assert.equal(state.fields.evidence.endpoint, "http://evidence.local:9000");
+  assert.equal(state.fields.evidence.allowHttp, true);
+  assert.equal(state.fields.evidence.pathStyle, false);
+});
+
+// ------------- PLAT-08.2: a saved point, its evidence destination, and a draft edit
+
+/** A console-shaped api over the fake cluster: the wizard's saved-destination
+ *  reads, and a readiness check whose answers the row scripts. */
+function savedWizardApi(ns, destinations, preflightAnswers) {
+  const k8s = fakeKubernetes();
+  for (const cluster of fixture("wizard-clusters.json").items) {
+    k8s.put(ns, "kafkaclusters", cluster);
+  }
+  const own = destinations[0];
+  for (const backup of fixture("wizard-backups.json").items) {
+    const saved = clone(backup);
+    saved.spec.destinationRef = { name: own.name, uid: own.uid };
+    saved.spec.archive = { url: "logweir-destination://" + own.name };
+    saved.status.locationDigest = own.locationDigest;
+    const stored = k8s.put(ns, "backups", saved);
+    k8s.point = { uid: stored.metadata.uid, backup: stored.metadata.name };
+  }
+  k8s.destination = async (_ns, name) => {
+    k8s.calls.push({ verb: "destination", name: name });
+    const found = destinations.find((d) => d.name === name);
+    return { item: found === undefined ? null : clone(found) };
+  };
+  k8s.destinations = async () => {
+    k8s.calls.push({ verb: "destinations" });
+    return { items: clone(destinations) };
+  };
+  k8s.started = [];
+  k8s.startPreflight = async (_ns, request) => {
+    k8s.started.push(clone(request));
+    return { item: clone(preflightAnswers.started(request)), replayed: false };
+  };
+  k8s.reads = [];
+  k8s.preflight = async (_ns, id, options) => {
+    k8s.reads.push({ id: id, planHash: (options || {}).planHash });
+    return { item: clone(preflightAnswers.read(id, (options || {}).planHash)) };
+  };
+  k8s.wait = async () => {};
+  return k8s;
+}
+
+function destinationItem(name, uid, over) {
+  const base = clone(fixture("console/destination.json").item);
+  base.name = name;
+  base.uid = uid;
+  base.default = false;
+  return Object.assign(base, over || {});
+}
+
+function readinessItem(id, planHash, over) {
+  return Object.assign({
+    id: id, operation: "restore", state: "ready", terminal: true, applicable: true,
+    stale: false, staleReasons: [], staleBasis: ["plan", "referents"],
+    binding: { planHash: planHash }, checks: [], warnings: [], executionOnly: [],
+    detailsAvailable: false, conditions: [],
+  }, over || {});
+}
+
+const EVIDENCE_B = () => destinationItem("evidence-b", "uid-evidence-b", {
+  canonicalUrl: "s3://lw-evidence-b",
+  locationDigest: "sha256:" + "b".repeat(64),
+  storage: { provider: "s3", bucket: "lw-evidence-b", prefix: "", region: "eu-west-1",
+    endpoint: "http" + "://minio-b.local:9000", addressing: "pathStyle" },
+  transport: { security: "insecureHttp" },
+});
+
+test("a_saved_point_inherits_its_destination_and_can_write_evidence_to_another", async () => {
+  const ns = "wizard-two-destinations-ns";
+  const primary = destinationItem("primary", "17bc54c4-2e52-4607-b4ac-c31517a6e568");
+  const k8s = savedWizardApi(ns, [primary, EVIDENCE_B()], {
+    started: () => readinessItem("pf-x", "", { state: "pending", terminal: false }),
+    read: (id, hash) => readinessItem(id, hash),
+  });
+  const view = fakeView();
+  const originalWindow = globalThis.window;
+  globalThis.window = { location: { hash: "#/restore?ns=" + ns } };
+  try {
+    await mountRestoreWizard(view.root, ns, k8s.point, parse, k8s, createRouteLifecycle().begin());
+    // INHERITED, NOTHING ENTERED: no store input exists, and the selector sits
+    // on the point's own destination.
+    for (const id of ["#store-endpoint", "#store-region", "#store-pathStyle",
+      "#store-allow-insecure", "#evidence-bucket", "#archive-secret"]) {
+      assert.equal(view.find(id), null, "a saved point has no " + id + " to re-enter");
+    }
+    const select = view.find("#evidence-destination");
+    assert.ok(select !== null, "the evidence destination is a control");
+    assert.equal(select.value, primary.uid, "and it starts on the point's own destination");
+    let bytes = planBytesOf(view.html());
+    assert.equal((bytes.match(/bucket: "kafka-backups"/g) || []).length, 2,
+      "archive and evidence are both the saved destination's bucket: " + bytes);
+
+    // CHOOSE ANOTHER: only the evidence block moves, and it moves to exactly
+    // the other destination's public storage -- its transport included.
+    select.value = "uid-evidence-b";
+    await select.dispatch("change");
+    await settled();
+    bytes = planBytesOf(view.html());
+    assert.ok(bytes.includes("bucket: \"kafka-backups\""), "the archive stayed where it is");
+    assert.ok(bytes.includes("prefix: \"team-a/prod\""));
+    assert.ok(bytes.includes("bucket: \"lw-evidence-b\""), "the evidence moved: " + bytes);
+    const flags = storeFlags(bytes);
+    assert.deepEqual(flags.allowHttp, ["false", "true"],
+      "each block carries ITS destination's transport and nothing borrowed");
+    assert.deepEqual(flags.pathStyle, ["true", "true"]);
+    assert.equal(readDraft(formKey(ns, WIZARD_FORM)).evidenceDestinationUid, "uid-evidence-b",
+      "the draft keeps the choice by identity");
+    // AN UNRELATED EDIT DOES NOT PULL THE ARCHIVE'S SETTINGS INTO THE EVIDENCE
+    // BLOCK: the legacy "same store" rule never applies to a saved point.
+    view.find("#topic-prefix").value = "restore-two-destinations-";
+    await view.find("#topic-prefix").dispatch("change");
+    await settled();
+    assert.deepEqual(storeFlags(planBytesOf(view.html())).allowHttp, ["false", "true"],
+      "the evidence block still carries evidence-b's own transport after another edit");
+
+    // THE READINESS REQUEST AND THE CREATE NAME BOTH REFERENCES.
+    await view.find("#restore-readiness-form").dispatch("submit");
+    await settled(20);
+    assert.equal(k8s.started.length, 1);
+    assert.equal(k8s.started[0].restore.sourceDestination, "primary");
+    assert.equal(k8s.started[0].restore.evidenceDestination, "evidence-b",
+      "MUTANT: the evidence reference was the source destination twice");
+    assert.ok(k8s.reads.length >= 1, "the started check was re-read, not left at its create answer");
+    assert.ok(view.html().includes("pf-x"), "and its verdict is on screen");
+
+    await view.find("#create-restore").dispatch("click");
+    await settled(20);
+    const created = k8s.creates("restores");
+    assert.equal(created.length, 1, "one create: " + view.html().slice(-800));
+    assert.deepEqual(created[0].body.spec.sourceDestinationRef, { name: "primary" });
+    assert.deepEqual(created[0].body.spec.evidenceDestinationRef, { name: "evidence-b" });
+    assert.ok(created[0].body.spec.planBytes.includes("lw-evidence-b"));
+  } finally {
+    globalThis.window = originalWindow;
+  }
+});
+
+test("a_destination_edited_during_the_draft_refuses_the_submit_until_the_check_runs_again", async () => {
+  // D2 S21, in the console. The destination's access is rotated after the
+  // check said ready: its generation moves, the plan bytes do not, and the
+  // product API answers the SAME check `stale` with referentChanged. The page
+  // held a `ready` copy; the submit must ask again and believe the answer.
+  const ns = "wizard-draft-edit-ns";
+  const primary = destinationItem("primary", "17bc54c4-2e52-4607-b4ac-c31517a6e568");
+  let edited = false;
+  const k8s = savedWizardApi(ns, [primary], {
+    started: (request) => readinessItem("pf-edit", request.restore.planHash),
+    read: (id, hash) => edited
+      ? readinessItem(id, hash, {
+        applicable: false, stale: true,
+        staleReasons: [{ reason: "referentChanged", kind: "BackupDestination", name: "primary" }],
+      })
+      : readinessItem(id, hash),
+  });
+  const view = fakeView();
+  const originalWindow = globalThis.window;
+  globalThis.window = { location: { hash: "#/restore?ns=" + ns } };
+  try {
+    await mountRestoreWizard(view.root, ns, k8s.point, parse, k8s, createRouteLifecycle().begin());
+    await view.find("#restore-readiness-form").dispatch("submit");
+    await settled(20);
+    const hashBefore = k8s.started[0].restore.planHash;
+    // THE EDIT: nothing on the page moves, because nothing in the plan did.
+    edited = true;
+    await view.find("#create-restore").dispatch("click");
+    await settled(20);
+    assert.equal(k8s.creates("restores").length, 0,
+      "NEGATIVE CONTROL: without the pre-submit re-read the cached ready verdict let this through");
+    const last = k8s.reads[k8s.reads.length - 1];
+    assert.equal(last.id, "pf-edit");
+    assert.equal(last.planHash, hashBefore, "asked about the reviewed plan, whose hash did not move");
+    assert.match(view.html(), /referentChanged|BackupDestination\/primary|BackupDestination primary/,
+      "the refusal names what moved");
+    // RUN IT AGAIN, AND THE SAME PLAN MAY BE SUBMITTED.
+    edited = false;
+    await view.find("#restore-readiness-form").dispatch("submit");
+    await settled(20);
+    await view.find("#create-restore").dispatch("click");
+    await settled(20);
+    assert.equal(k8s.creates("restores").length, 1, "a fresh ready check lets the same plan go");
+    assert.equal(k8s.creates("restores")[0].body.spec.planBytes.length > 0, true);
+    assert.equal(k8s.started[1].restore.planHash, hashBefore, "the plan hash never moved");
+  } finally {
+    globalThis.window = originalWindow;
+  }
+});
+
 // ------------------------------ PLAT-11.1 through the real mount half
 
 test("a_visit_with_no_recovery_point_gets_the_selector_and_a_gone_one_gets_a_refusal", async () => {
