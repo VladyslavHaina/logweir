@@ -1756,16 +1756,31 @@ async fn continue_evidence_fetch(
     let result = evidence
         .and_then(|e| e.verification.as_ref())
         .and_then(|v| v.result.as_deref());
-    let Some(attempt) = crate::evidence_fetch::owed_attempt(
-        result,
-        evidence.and_then(|e| e.observation.as_ref()),
-        now,
-    ) else {
+    let observation = evidence.and_then(|e| e.observation.as_ref());
+    // THE CRASH WINDOW. A pass that wrote the terminal patch and stopped
+    // before recording the fetch — before the Job, or after the Job and
+    // before its `Pending` — leaves a run with both keys, the runner's digest,
+    // no verdict and no observation. Only such a run is re-examined here, and
+    // only a destination whose grant IS a Job's resumes as attempt 1 (whose
+    // Job, if it exists, is found by name, never created twice).
+    let unrecorded = result.is_none()
+        && observation.is_none()
+        && backup.spec.destination_ref.is_some()
+        && evidence.is_some_and(|e| {
+            e.receipt_key.is_some() && e.sidecar_key.is_some() && e.receipt_sha256.is_some()
+        });
+    let owed = crate::evidence_fetch::owed_attempt(result, observation, now);
+    if owed.is_none() && !unrecorded {
         return Ok(false);
-    };
+    }
     let source = evidence_source(backup, client, namespace, now)
         .await
         .map_err(BackupError::Api)?;
+    let attempt = match (owed, &source) {
+        (Some(attempt), _) => attempt,
+        (None, EvidenceSource::FetchJob { .. }) => 1,
+        (None, _) => return Ok(false),
+    };
     let backups: Api<Backup> = Api::namespaced(client.clone(), namespace);
     evidence_fetch_pass(
         &backups,

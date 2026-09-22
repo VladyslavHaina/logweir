@@ -3327,10 +3327,11 @@ async fn write_fetch_verdict(
 ///   so — exactly as the controller's own-handle path does — the digest is
 ///   computed HERE over the relayed bytes and is what the signature is
 ///   checked against; `scorecardSha256` records it.
-/// * **The binding.** The scorecard's `approval.plan_hash`, when it carries
-///   one, must be this `Restore`'s `sha256(spec.planBytes)`. A scorecard for
-///   another plan is `Invalid` and projects nothing. A scorecard written
-///   before phase 1 carries an empty hash, which names no other plan.
+/// * **The binding.** The runner writes its scorecard at
+///   `logweir/drills/<run_id>.json` and prints that key; the relayed
+///   document's own `run_id` must be the one the key names. Another run's
+///   scorecard copied to this key — however validly signed — is `Invalid` and
+///   projects nothing.
 /// * **The facts.** `outcome`, `lastPhaseCompleted`, `objectives`,
 ///   `integrity`, `measured` and the offset report's digest are copied out of
 ///   the relayed bytes by JSON pointer (`scorecard_observation`, the one
@@ -3484,24 +3485,11 @@ async fn evidence_fetch_pass(
                 }
                 Relayed::Both { payload, sidecar } => {
                     let fetched = sha256_prefixed(&payload);
-                    let claimed_plan = serde_json::from_slice::<Value>(&payload)
+                    let claimed_run = serde_json::from_slice::<Value>(&payload)
                         .ok()
-                        .and_then(|d| {
-                            d.pointer("/approval/plan_hash")
-                                .and_then(Value::as_str)
-                                .map(str::to_string)
-                        })
-                        .filter(|h| !h.is_empty());
-                    let plan = recomputed_plan_hash(restore);
-                    match claimed_plan {
-                        Some(claimed) if claimed != plan => VerificationResult::invalid(
-                            payload_type,
-                            format!(
-                                "the relayed scorecard names plan_hash {claimed}, and this \
-                                 Restore's plan hashes to {plan}; it is not this run's scorecard"
-                            ),
-                        ),
-                        _ => {
+                        .and_then(|d| d.get("run_id").and_then(Value::as_str).map(str::to_string));
+                    match claimed_run {
+                        Some(run) if payload_key.ends_with(&format!("/{run}.json")) => {
                             let reference = EvidenceRef {
                                 namespace: namespace.to_string(),
                                 payload_key: payload_key.clone(),
@@ -3544,6 +3532,19 @@ async fn evidence_fetch_pass(
                             }
                             result
                         }
+                        // BOUND TO THIS RUN OR NOT READ AS IT. The runner
+                        // writes a scorecard at `logweir/drills/<run_id>.json`;
+                        // a document whose own `run_id` is not the one its key
+                        // names is another run's scorecard, however validly
+                        // signed, and nothing is copied out of it.
+                        claimed => VerificationResult::invalid(
+                            payload_type,
+                            format!(
+                                "the relayed scorecard at {payload_key} names run_id {}, which \
+                                 is not the run its key names; it is not this run's scorecard",
+                                claimed.as_deref().unwrap_or("<absent>")
+                            ),
+                        ),
                     }
                 }
             };
@@ -3591,14 +3592,20 @@ async fn continue_evidence_fetch(
         .and_then(|e| e.verification.as_ref())
         .and_then(|v| v.result.as_deref());
     let observation = evidence.and_then(|e| e.observation.as_ref());
-    let Some(attempt) = crate::evidence_fetch::owed_attempt(result, observation, now) else {
-        return Ok(
-            match crate::evidence_fetch::retry_due_in(result, observation, now) {
-                Some(secs) => Requeue::After(secs),
-                None => Requeue::AwaitChange,
-            },
-        );
+    // THE CRASH WINDOW — see the `Backup` twin: a terminal pass that stopped
+    // between the terminal patch and the recorded fetch.
+    let unrecorded = result.is_none()
+        && observation.is_none()
+        && restore.spec.evidence_destination_ref.is_some()
+        && evidence.is_some_and(|e| e.scorecard_key.is_some() && e.sidecar_key.is_some());
+    let owed = crate::evidence_fetch::owed_attempt(result, observation, now);
+    let waiting = match crate::evidence_fetch::retry_due_in(result, observation, now) {
+        Some(secs) => Requeue::After(secs),
+        None => Requeue::AwaitChange,
     };
+    if owed.is_none() && !unrecorded {
+        return Ok(waiting);
+    }
     let source = backup::evidence_source_for(
         restore.spec.evidence_destination_ref.as_ref(),
         client,
@@ -3607,6 +3614,11 @@ async fn continue_evidence_fetch(
     )
     .await
     .map_err(RestoreError::Api)?;
+    let attempt = match (owed, &source) {
+        (Some(attempt), _) => attempt,
+        (None, backup::EvidenceSource::FetchJob { .. }) => 1,
+        (None, _) => return Ok(waiting),
+    };
     let restores: Api<Restore> = Api::namespaced(client.clone(), namespace);
     evidence_fetch_pass(
         &restores,

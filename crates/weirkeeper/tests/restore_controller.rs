@@ -6822,3 +6822,338 @@ async fn the_admission_condition_survives_the_terminal_transition() {
         "and the Job the run ran in is still named; got {conditions:?}"
     );
 }
+
+// ===========================================================================
+// EVIDENCE-FETCH-JOB-UNBUILT — the `Restore` half of D2 §3.9: the scorecard
+// read by an evidence-fetch Job with the EVIDENCE destination's grant
+// ===========================================================================
+
+mod evidence_fetch_job {
+    use super::*;
+    use logweir_core::check_contract::{
+        frames, CheckPlanKind, CheckResult, EvidenceObjectResult, Stream,
+    };
+    use std::collections::BTreeMap;
+    use weirkeeper::check::job::evidence_fetch_job_name;
+
+    const EV_JOB_UID: &str = "eeeeeeee-0000-4000-8000-0000000000e2";
+    const EV_PLAN: &str = "sha256:6666666666666666666666666666666666666666666666666666666666666666";
+    const FIXTURE_KEY_ID: &str = "917cf9a299872cbf8b2715999ce457464705bb8f48df0a07e9b1e19bb9f383fd";
+    /// The key the fixture scorecard's own `run_id` names.
+    const FIXTURE_SCORECARD_KEY: &str = "logweir/drills/01J9X2QK7C4V0R8YB3ZP6MTS5A.json";
+    const FIXTURE_SIDECAR_KEY: &str = "logweir/drills/01J9X2QK7C4V0R8YB3ZP6MTS5A.sig";
+
+    fn read(rel: &str) -> Vec<u8> {
+        std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(rel),
+        )
+        .expect("the fixture is readable")
+    }
+    fn leak(s: String) -> &'static str {
+        Box::leak(s.into_boxed_str())
+    }
+    fn ev_name() -> String {
+        evidence_fetch_job_name(UID, 1)
+    }
+    fn route(method: &'static str, suffix: &'static str, status: u16, body: String) -> Route {
+        Route {
+            method,
+            path_suffix: suffix,
+            status,
+            body,
+        }
+    }
+    fn list(kind: &str, items: Vec<Value>) -> String {
+        serde_json::json!({"apiVersion": "v1", "kind": kind, "metadata": {}, "items": items})
+            .to_string()
+    }
+
+    fn ev_job(condition: Option<&str>) -> Value {
+        let status = match condition {
+            Some(c) => serde_json::json!({"conditions": [{"type": c, "status": "True"}]}),
+            None => serde_json::json!({"active": 1}),
+        };
+        serde_json::json!({
+            "apiVersion": "batch/v1", "kind": "Job",
+            "metadata": {"name": ev_name(), "namespace": NS, "uid": EV_JOB_UID,
+                "ownerReferences": [{"apiVersion": "logweir.dev/v1alpha1", "kind": "Restore",
+                    "name": NAME, "uid": UID, "controller": true}]},
+            "spec": {"template": {"spec": {"restartPolicy": "Never", "containers": [{
+                "name": "runner", "image": "x",
+                "env": [{"name": "LOGWEIR_CHECK_PLAN_SHA256", "value": EV_PLAN}]}]}}},
+            "status": status
+        })
+    }
+
+    fn ev_pod() -> Value {
+        serde_json::json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "ev-pod", "namespace": NS,
+                "ownerReferences": [{"apiVersion": "batch/v1", "kind": "Job", "name": ev_name(),
+                    "uid": EV_JOB_UID, "controller": true}]},
+            "spec": {"containers": []},
+            "status": {"phase": "Succeeded", "containerStatuses": [{"name": "runner", "ready": false,
+                "restartCount": 0, "image": "x", "imageID": "x",
+                "state": {"terminated": {"exitCode": 0}}}]}
+        })
+    }
+
+    fn relay(payload_key: &str, sidecar_key: &str) -> String {
+        let (p, s) = (
+            read("e2e/fixtures/signed/scorecard.json"),
+            read("e2e/fixtures/signed/scorecard.sig"),
+        );
+        let mut result = CheckResult::new(CheckPlanKind::EvidenceFetch);
+        for (key, stream, bytes) in [
+            (payload_key, Stream::EvidencePayload, &p),
+            (sidecar_key, Stream::EvidenceSidecar, &s),
+        ] {
+            result.evidence.push(EvidenceObjectResult {
+                key: key.to_string(),
+                stream,
+                present: true,
+                sha256: Some(logweir_core::ids::sha256_prefixed(bytes)),
+                bytes: Some(bytes.len() as u64),
+                code: None,
+                truncated: false,
+            });
+        }
+        let r = result.to_canonical_json().expect("canonical");
+        let mut streams = BTreeMap::new();
+        let mut lines = Vec::new();
+        for (stream, bytes) in [
+            (Stream::Result, &r),
+            (Stream::EvidencePayload, &p),
+            (Stream::EvidenceSidecar, &s),
+        ] {
+            let parts = frames::write_parts(stream, bytes).expect("framable");
+            streams.insert(stream, (bytes.clone(), parts.len()));
+            lines.extend(parts);
+        }
+        lines.push(
+            frames::write_end(&frames::end_frame(EV_PLAN, UID, &streams, None)).expect("end"),
+        );
+        lines.join("\n") + "\n"
+    }
+
+    fn roster() -> String {
+        let pem = String::from_utf8(read("e2e/fixtures/signed/public.pem")).expect("utf-8");
+        serde_json::json!({
+            "apiVersion": "logweir.dev/v1alpha1", "kind": "TrustRoster",
+            "metadata": {"name": "default", "uid": "r0", "generation": 1, "resourceVersion": "9"},
+            "spec": {"approverKeys": [], "signingKeys": [{"keyId": FIXTURE_KEY_ID, "spkiPem": pem}],
+                     "allowedClusterIds": []}
+        })
+        .to_string()
+    }
+
+    fn evidence_routes(ev: Option<Value>, log: String) -> Vec<Route> {
+        let name = leak(format!("/jobs/{}", ev_name()));
+        vec![
+            route("GET", name, if ev.is_some() { 200 } else { 404 }, ev.map_or_else(
+                || r#"{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"NotFound","code":404}"#.to_string(),
+                |v| v.to_string())),
+            route("PATCH", name, 200, ev_job(Some("Complete")).to_string()),
+            route("GET", "/jobs", 200, list("JobList", vec![])),
+            route("POST", "/configmaps", 201, serde_json::json!({"apiVersion": "v1", "kind": "ConfigMap",
+                "metadata": {"name": "p", "namespace": NS}}).to_string()),
+            route("POST", "/jobs", 201, ev_job(None).to_string()),
+            route("GET", "/log", 200, log),
+            route("GET", "/pods", 200, list("PodList", vec![ev_pod()])),
+            route("GET", "/events", 200, list("EventList", vec![])),
+            route("GET", "/trustpolicies", 200, list("TrustPolicyList", vec![])),
+            route("GET", "/trustrosters/default", 200, roster()),
+        ]
+    }
+
+    fn terminal_restore(scorecard_key: &str, sidecar_key: &str) -> Restore {
+        let mut value = serde_json::to_value(destination_backed_restore()).expect("json");
+        value["status"] = serde_json::json!({
+            "phase": "Succeeded", "exitCode": 0,
+            "conditions": [{"type": "Complete", "status": "True", "reason": "Ok",
+                            "lastTransitionTime": "2026-09-10T11:59:00Z", "message": "exit 0"}],
+            "evidence": {
+                "scorecardKey": scorecard_key, "sidecarKey": sidecar_key,
+                "verification": {"result": "Pending", "payloadType": logweir_verify::PAYLOAD_TYPE_SCORECARD,
+                                 "detail": "reading", "verifiedAt": "2026-09-10T11:59:30Z"},
+                "observation": {"mode": "SecretKeys", "attempt": 1,
+                                "jobRef": {"name": ev_name(), "uid": EV_JOB_UID}}
+            }
+        });
+        serde_json::from_value(value).expect("a Restore")
+    }
+
+    fn terminal_routes() -> Vec<Route> {
+        let mut routes = vec![
+            route(
+                "GET",
+                "/jobs/logweir-restore-incident-4471",
+                200,
+                job_body("Complete"),
+            ),
+            route(
+                "PATCH",
+                "/jobs/logweir-restore-incident-4471",
+                200,
+                job_body("Complete"),
+            ),
+            route(
+                "PATCH",
+                "/restores/logweir-restore-incident-4471/status",
+                200,
+                restore_json(PLAN_BYTES, APPROVAL, NAME),
+            ),
+        ];
+        routes.extend(destination_routes(
+            source_destination_value(),
+            evidence_destination_with_pod_only_read(),
+        ));
+        routes
+    }
+
+    /// **THE FINISHED PASS CREATES THE JOB WITH THE EVIDENCE DESTINATION'S
+    /// `evidenceRead` GRANT**, copies nothing out of a scorecard nobody read,
+    /// writes `Pending`, and comes back on a timer instead of waiting for a
+    /// change a terminal `Restore` would never get.
+    #[tokio::test]
+    async fn a_restore_with_a_pod_only_grant_is_verified_through_an_evidence_fetch_job() {
+        let mut routes = finished_routes_for_destinations(
+            pod_list_terminated(0),
+            log_body(&i8_tail()),
+            evidence_destination_with_pod_only_read(),
+        );
+        routes.extend(evidence_routes(None, String::new()));
+        let (client, _rec, bodies) = mock_client_recording_bodies(routes);
+        let outcome = reconcile_restore(
+            &destination_backed_restore(),
+            &client,
+            &unobserved_scorecard,
+            &unverified_evidence,
+            now(),
+        )
+        .await
+        .expect("the reconcile succeeds");
+        assert!(
+            matches!(outcome.requeue, Requeue::After(_)),
+            "a pending fetch is looked at again"
+        );
+        let bodies = bodies.lock().expect("readable").clone();
+        let jobs: Vec<&SeenBody> = bodies
+            .iter()
+            .filter(|b| b.method == "POST" && path(&b.uri).ends_with("/jobs"))
+            .collect();
+        assert_eq!(jobs.len(), 1);
+        let job: Value = serde_json::from_str(&jobs[0].body).expect("a Job");
+        assert_eq!(job["metadata"]["name"], serde_json::json!(ev_name()));
+        assert_eq!(
+            job["metadata"]["ownerReferences"][0]["kind"],
+            serde_json::json!("Restore")
+        );
+        let secrets: Vec<&str> = job["spec"]["template"]["spec"]["containers"][0]["env"]
+            .as_array()
+            .expect("env")
+            .iter()
+            .filter_map(|e| {
+                e.pointer("/valueFrom/secretKeyRef/name")
+                    .and_then(Value::as_str)
+            })
+            .collect();
+        assert!(
+            !secrets.is_empty() && secrets.iter().all(|s| *s == "ev-evidence-reader"),
+            "only the EVIDENCE destination's evidenceRead Secret: {secrets:?}"
+        );
+        let last = patched_statuses(&bodies).last().cloned().expect("Pending");
+        assert_eq!(
+            last["evidence"]["verification"]["result"],
+            serde_json::json!("Pending")
+        );
+        assert!(
+            last["outcome"].is_null(),
+            "nothing copied from a document nobody read"
+        );
+    }
+
+    /// **A VERIFIED RELAY IS `Valid`, AND THE SCORECARD'S FACTS LAND** —
+    /// `outcome`, `objectives`, `integrity`, `measured` and the digest, from
+    /// the relayed bytes; `Verified=True` needs `Valid` AND `outcome: pass`.
+    #[tokio::test]
+    async fn a_relayed_scorecard_is_valid_and_its_outcome_is_copied() {
+        let mut routes = evidence_routes(
+            Some(ev_job(Some("Complete"))),
+            relay(FIXTURE_SCORECARD_KEY, FIXTURE_SIDECAR_KEY),
+        );
+        routes.extend(terminal_routes());
+        let (client, _rec, bodies) = mock_client_recording_bodies(routes);
+        reconcile_restore(
+            &terminal_restore(FIXTURE_SCORECARD_KEY, FIXTURE_SIDECAR_KEY),
+            &client,
+            &unobserved_scorecard,
+            &unverified_evidence,
+            now(),
+        )
+        .await
+        .expect("the reconcile succeeds");
+        let bodies = bodies.lock().expect("readable").clone();
+        let last = patched_statuses(&bodies)
+            .last()
+            .cloned()
+            .expect("the verdict");
+        assert_eq!(
+            last["evidence"]["verification"]["result"],
+            serde_json::json!("Valid"),
+            "{last}"
+        );
+        assert_eq!(last["outcome"], serde_json::json!("pass"));
+        assert_eq!(last["measured"]["rtoSeconds"], serde_json::json!(512));
+        assert_eq!(last["objectives"]["rtoSeconds"], serde_json::json!(900));
+        assert_eq!(
+            last["evidence"]["scorecardSha256"],
+            serde_json::json!(logweir_core::ids::sha256_prefixed(&read(
+                "e2e/fixtures/signed/scorecard.json"
+            )))
+        );
+        let verified = conditions_of(&last)
+            .into_iter()
+            .find(|(t, ..)| t == "Verified")
+            .expect("Verified");
+        assert_eq!(verified.1, "True", "{last}");
+    }
+
+    /// **ANOTHER RUN'S SCORECARD IS NOT THIS RUN'S.** The relayed document's
+    /// `run_id` is not the run its key names: `Invalid`, nothing copied.
+    #[tokio::test]
+    async fn a_relayed_scorecard_for_another_run_is_invalid_and_copies_nothing() {
+        let mut routes = evidence_routes(
+            Some(ev_job(Some("Complete"))),
+            relay(SCORECARD_KEY, SIDECAR_KEY),
+        );
+        routes.extend(terminal_routes());
+        let (client, _rec, bodies) = mock_client_recording_bodies(routes);
+        reconcile_restore(
+            &terminal_restore(SCORECARD_KEY, SIDECAR_KEY),
+            &client,
+            &unobserved_scorecard,
+            &unverified_evidence,
+            now(),
+        )
+        .await
+        .expect("the reconcile succeeds");
+        let bodies = bodies.lock().expect("readable").clone();
+        let last = patched_statuses(&bodies)
+            .last()
+            .cloned()
+            .expect("the verdict");
+        assert_eq!(
+            last["evidence"]["verification"]["result"],
+            serde_json::json!("Invalid"),
+            "{last}"
+        );
+        assert!(
+            last["outcome"].is_null()
+                && last["objectives"].is_null()
+                && last["evidence"]["scorecardSha256"].is_null()
+        );
+    }
+}

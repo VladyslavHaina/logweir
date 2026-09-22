@@ -567,10 +567,10 @@ block; a `Restore` naming `sourceDestinationRef` and `evidenceDestinationRef`
 resolves both and checks the approved plan against them (§7d). A schedule
 propagates its `destinationRef` to the `Backup`s it creates.
 
-What is NOT in this build is listed in §7e: the evidence-fetch Job for a
-`SecretKeys` or `WorkloadIdentity` `evidenceRead`, and a destination carrying a
-`transport.caBundle` for a Backup or Restore — that last one is refused, not
-ignored. The frozen destination now DOES reach `Backup.status.destination`;
+What is NOT in this build is listed in §7e: a destination carrying a
+`transport.caBundle` for a Backup or Restore is refused, not ignored. A
+`SecretKeys`, `WorkloadIdentity` or `ArchiveReadGrant` `evidenceRead` IS read,
+by an evidence-fetch check Job (§7e). The frozen destination now DOES reach `Backup.status.destination`;
 §10 says what it holds and §21.8 what the `Preflight` does with it.
 
 The controller's own environment reaches no destination-backed runner Job. That
@@ -727,15 +727,51 @@ same reason.
   `LOGWEIR_POLICY_CONFIGMAP` / `LOGWEIR_INSTALLATION_NAMESPACE` on the
   Deployment at all (a hand-wired controller; the chart and `logweir.yaml` both
   set the pair), or the named `ConfigMap` simply absent.
-- **A `SecretKeys` or `WorkloadIdentity` `evidenceRead` is not read.** That
-  grant needs an evidence-fetch Job in the object's own namespace, because the
-  controller holds no verb on `secrets` and must not. Such a run gets
-  `verification: NotAttempted` whose `detail` names the missing capability and
-  the two ways forward; what it never gets is a fall-back to the controller's
-  global handle, which holds a different principal over a different bucket.
-  `evidenceRead: ControllerIdentity` at an allowlisted location IS read, through
-  the bounded store cache, and verified by the same verifier every other path
-  uses.
+- **A `SecretKeys`, `WorkloadIdentity` or `ArchiveReadGrant` `evidenceRead` is
+  read by an evidence-fetch check Job, never by the controller** (D2 §3.8
+  option C, the default). The controller holds no verb on `secrets` and still
+  gets none. After the terminal patch and the runner's TTL it creates
+  `lwc-ev-<first 20 hex of sha256(<uid>:<attempt>)>` in the object's own
+  namespace. The Job is owned by the `Backup` (or the `Restore`, for its
+  scorecard and the EVIDENCE destination's grant). Its plan is the immutable
+  `<job>-plan` `ConfigMap`, and its argv is `check run` for kind
+  `evidenceFetch`. The kubelet projects exactly the `evidenceRead` grant into
+  the pod:
+  - `SecretKeys`: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and optionally
+    `AWS_SESSION_TOKEN` from that grant's Secret;
+  - `ArchiveReadGrant`: the same variables from the `archiveRead` Secret;
+  - `WorkloadIdentity`: that grant's ServiceAccount.
+
+  Nothing else is projected: no signing key, no `archiveWrite` or
+  `evidenceWrite`, no Kafka credential, and no token automount. The pod relays
+  the two objects, at most 1 MiB for the document and 64 KiB for the sidecar.
+  The controller reads the relay only from a pod whose controller owner is that
+  Job's UID. It then verifies in its own process, in this order:
+  1. the relayed receipt's sha256 against the RUNNER-reported
+     `receiptSha256`. A disagreement is `Invalid` and projects no window,
+     records or capture.
+  2. the document's binding to the run: the receipt's `backup_id` against
+     `status.backupId`, or the scorecard's `run_id` against its key.
+  3. DSSE against the namespace's resolved trust, through the same
+     `verify_fetched` the `ControllerIdentity` handle feeds.
+
+  It then writes the same facts that path writes. While the Job runs,
+  `status.evidence.verification.result` is `Pending` (additive, never green)
+  and `status.evidence.observation` is `{mode, jobRef{name, uid}, attempt}`,
+  plus `presence` once a relay is read. A Job that ends without a verified
+  relay, a runner refusal, a denial, a missing object or a document over the
+  cap is `NotAttempted` naming the cause, never `Valid`. A failed attempt is
+  retried with a new Job at +1 m, +5 m and +15 m (`observation.retryAfter`),
+  and the run itself is never re-run. At most
+  `checks.maxEvidenceFetchActivePerNamespace` fetches are active per namespace,
+  and a run over the limit waits `Pending`. The Job's TTL (10 minutes) is set
+  only after the verdict commits. A Job holding the name that this object does
+  not control is never observed. A run whose runner reported no receipt digest
+  (legacy-unbound) gets no Job. What such a read never does is fall back to the
+  controller's global handle, which holds a different principal over a
+  different bucket. `evidenceRead: ControllerIdentity` at an allowlisted
+  location is read through the bounded store cache and verified by the same
+  verifier.
 - **The frozen destination DOES reach `Backup.status` now**, as
   `status.destination` — four fields, `{name, uid, generation, locationDigest}`,
   written at the freeze from the same snapshot the plan is rendered from (§10).
@@ -5118,6 +5154,7 @@ green badge names a retired key.
 | `Invalid` | the DOCUMENT: the digest did not match, or no key verified the sidecar |
 | `NotAttempted` | the CONTROLLER: no evidence credential, an unreadable object, no trust material, or a namespace two policies contest |
 | `Untrusted` | the SIGNER: the bytes are authentic and the key that made them is one this installation will not accept |
+| `Pending` | NOTHING YET: an evidence-fetch check Job is reading the document with the destination's `evidenceRead` grant, or is waiting for a slot (§7e). Never green, and replaced by one of the four above |
 
 `Untrusted` is deliberately not `Invalid`. Telling an operator their archive is
 corrupt when their key was revoked sends them to re-run a backup instead of to

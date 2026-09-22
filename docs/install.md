@@ -518,6 +518,37 @@ presence rather than `Absent`.
 refuses that mode unless an explicit `spec.access.archiveRead` exists: a write
 grant is never reused to verify what it wrote.
 
+**How a `SecretKeys`, `WorkloadIdentity` or `ArchiveReadGrant` evidence read
+happens.** The controller holds no verb on Secrets, so it never reads this
+credential itself. After a run finishes, it creates a short evidence-fetch check
+Job, `lwc-ev-<20 hex>`, in the run's own namespace. The Job is owned by the
+`Backup` or `Restore` and its plan `ConfigMap` is immutable. The kubelet
+projects exactly the `evidenceRead` grant into the Job: that grant's Secret
+keys, or for `WorkloadIdentity` its ServiceAccount (default `logweir-runner`).
+For `ArchiveReadGrant` that grant is the `archiveRead` Secret. The Job gets no
+signing key, no `archiveWrite` or `evidenceWrite` grant, and no
+ServiceAccount token.
+
+The Job relays the receipt (or scorecard) and its sidecar, at most 1 MiB and
+64 KiB. The controller then does all the verifying itself:
+
+- it hashes the relayed receipt and compares the digest with the one the runner
+  reported;
+- it checks that the document names this run;
+- it checks the DSSE signature against the namespace's trust.
+
+While the Job runs, `status.evidence.verification.result` is `Pending` and
+`status.evidence.observation` names the Job, its UID and the attempt. `Pending`
+is never green. It becomes the reached verdict (`Valid` also brings
+`windowCovered`, which is what makes the console offer *Restore this point*).
+If the Job cannot finish, it becomes `NotAttempted` with the cause named. A
+failed attempt is retried after 1, 5 and 15 minutes, each time with a new Job;
+the backup itself is never re-run. At most
+`checks.maxEvidenceFetchActivePerNamespace` (default 4) such Jobs run in one
+namespace at a time, and a run waits `Pending` for a free slot. The Job gets a
+10-minute TTL once its verdict is recorded, and owner garbage collection removes
+it with its run.
+
 **Absent grants do not widen.** `archiveRead` and `evidenceWrite` absent mean
 `archiveWrite` is used; `evidenceRead` absent means verification is
 `NotAttempted`, with a detail naming the field.

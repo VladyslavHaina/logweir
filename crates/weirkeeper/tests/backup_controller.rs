@@ -12140,3 +12140,1107 @@ async fn the_admission_condition_survives_the_backup_terminal_transition() {
         "and the Job the run ran in is still named; got {conditions:?}"
     );
 }
+
+// ===========================================================================
+// EVIDENCE-FETCH-JOB-UNBUILT — D2 §3.8 option C, §3.9: the evidence-fetch
+// check Job for a destination whose `evidenceRead` grant only a pod may hold
+// ===========================================================================
+
+mod evidence_fetch_job {
+    use super::*;
+    use logweir_core::check_contract::{
+        frames, CheckCode, CheckPlanKind, CheckResult, EvidenceObjectResult, Stream,
+    };
+    use std::collections::BTreeMap;
+    use weirkeeper::check::job::evidence_fetch_job_name;
+
+    /// The evidence-fetch Job's own UID — the ONLY thing that makes an
+    /// evidence pod this Job's (SEC-PODLOG).
+    const EV_JOB_UID: &str = "eeeeeeee-0000-4000-8000-0000000000e1";
+    /// The plan digest the Job was created with, pinned in its env.
+    const EV_PLAN: &str = "sha256:5555555555555555555555555555555555555555555555555555555555555555";
+    /// The evidence pod.
+    const EV_POD: &str = "lwc-ev-pod-abcde";
+    /// The fixture signer's key id (`e2e/fixtures/signed/public.pem`).
+    const FIXTURE_KEY_ID: &str = "917cf9a299872cbf8b2715999ce457464705bb8f48df0a07e9b1e19bb9f383fd";
+    /// The fixture receipt's own `backup_id`.
+    const FIXTURE_BACKUP_ID: &str = "logweir-backup-01J8Z9QK7V";
+
+    fn read(rel: &str) -> Vec<u8> {
+        std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(rel),
+        )
+        .expect("the fixture is readable")
+    }
+    fn receipt() -> Vec<u8> {
+        read("e2e/fixtures/signed/backup-receipt.json")
+    }
+    fn sidecar() -> Vec<u8> {
+        read("e2e/fixtures/signed/backup-receipt.sig")
+    }
+
+    fn leak(s: String) -> &'static str {
+        Box::leak(s.into_boxed_str())
+    }
+
+    fn ev_name(attempt: u32) -> String {
+        evidence_fetch_job_name(UID, attempt)
+    }
+
+    /// `dest-b` whose `evidenceRead` is `ArchiveReadGrant` over a SEPARATE
+    /// `archiveRead` Secret — the lab-refresh-8 row's shape.
+    fn archive_read_grant_destination() -> Value {
+        let mut value = dest_b_value();
+        value["spec"]["access"]["archiveRead"] = json!({"mode": "SecretKeys", "secret": {
+            "name": "lw-b-archive-reader", "accessKeyIdKey": "rid", "secretAccessKeyKey": "rkey"
+        }});
+        value["spec"]["access"]["evidenceRead"] = json!({"mode": "ArchiveReadGrant"});
+        value
+    }
+
+    fn not_found() -> String {
+        r#"{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"NotFound","code":404}"#
+            .to_string()
+    }
+
+    fn list(kind: &str, items: Vec<Value>) -> String {
+        json!({"apiVersion": "v1", "kind": kind, "metadata": {}, "items": items}).to_string()
+    }
+
+    /// An evidence-fetch Job: `condition` `None` is running.
+    fn ev_job(name: &str, condition: Option<&str>, owner_uid: &str) -> Value {
+        let status = match condition {
+            Some(c) => json!({"conditions": [{"type": c, "status": "True"}]}),
+            None => json!({"active": 1}),
+        };
+        json!({
+            "apiVersion": "batch/v1", "kind": "Job",
+            "metadata": {
+                "name": name, "namespace": NS, "uid": EV_JOB_UID,
+                "labels": {
+                    "app.kubernetes.io/component": "check",
+                    "logweir.dev/check-kind": "evidenceFetch"
+                },
+                "ownerReferences": [{
+                    "apiVersion": "logweir.dev/v1alpha1", "kind": "Backup", "name": NAME,
+                    "uid": owner_uid, "controller": true, "blockOwnerDeletion": true
+                }]
+            },
+            "spec": {"template": {"spec": {"restartPolicy": "Never", "containers": [{
+                "name": "runner", "image": "x",
+                "env": [{"name": "LOGWEIR_CHECK_PLAN_SHA256", "value": EV_PLAN}]
+            }]}}},
+            "status": status
+        })
+    }
+
+    fn ev_pod(owner_job_uid: &str, exit_code: i32) -> Value {
+        json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {
+                "name": EV_POD, "namespace": NS,
+                "labels": {"batch.kubernetes.io/job-name": ev_name(1)},
+                "ownerReferences": [{
+                    "apiVersion": "batch/v1", "kind": "Job", "name": ev_name(1),
+                    "uid": owner_job_uid, "controller": true
+                }]
+            },
+            "spec": {"containers": []},
+            "status": {"phase": "Succeeded", "containerStatuses": [{
+                "name": "runner", "ready": false, "restartCount": 0, "image": "x", "imageID": "x",
+                "state": {"terminated": {"exitCode": exit_code}}
+            }]}
+        })
+    }
+
+    fn entry(
+        key: &str,
+        stream: Stream,
+        bytes: Option<&[u8]>,
+        code: Option<CheckCode>,
+    ) -> EvidenceObjectResult {
+        EvidenceObjectResult {
+            key: key.to_string(),
+            stream,
+            present: bytes.is_some(),
+            sha256: bytes.map(logweir_core::ids::sha256_prefixed),
+            bytes: bytes.map(|b| b.len() as u64),
+            code,
+            truncated: false,
+        }
+    }
+
+    /// A verified relay, framed exactly as `logweir check run` frames one.
+    fn relay_log(
+        entries: Vec<EvidenceObjectResult>,
+        payload: Option<&[u8]>,
+        sidecar: Option<&[u8]>,
+    ) -> String {
+        let mut result = CheckResult::new(CheckPlanKind::EvidenceFetch);
+        result.evidence = entries;
+        let result_bytes = result.to_canonical_json().expect("canonical");
+        let mut streams = BTreeMap::new();
+        let mut lines =
+            vec!["{\"level\":\"WARN\",\"message\":\"stderr is not stdout\"}".to_string()];
+        for (stream, bytes) in [
+            (Stream::Result, Some(result_bytes.as_slice())),
+            (Stream::EvidencePayload, payload),
+            (Stream::EvidenceSidecar, sidecar),
+        ] {
+            if let Some(b) = bytes {
+                let parts = frames::write_parts(stream, b).expect("framable");
+                streams.insert(stream, (b.to_vec(), parts.len()));
+                lines.extend(parts);
+            }
+        }
+        let end = frames::end_frame(EV_PLAN, UID, &streams, None);
+        lines.push(frames::write_end(&end).expect("framable end"));
+        lines.join("\n") + "\n"
+    }
+
+    fn good_relay() -> String {
+        let (r, s) = (receipt(), sidecar());
+        relay_log(
+            vec![
+                entry(RECEIPT_KEY, Stream::EvidencePayload, Some(&r), None),
+                entry(SIDECAR_KEY, Stream::EvidenceSidecar, Some(&s), None),
+            ],
+            Some(&r),
+            Some(&s),
+        )
+    }
+
+    fn roster() -> String {
+        let pem = String::from_utf8(read("e2e/fixtures/signed/public.pem")).expect("utf-8");
+        json!({
+            "apiVersion": "logweir.dev/v1alpha1", "kind": "TrustRoster",
+            "metadata": {"name": "default", "uid": "r0", "generation": 1, "resourceVersion": "9"},
+            "spec": {"approverKeys": [],
+                     "signingKeys": [{"keyId": FIXTURE_KEY_ID, "spkiPem": pem}],
+                     "allowedClusterIds": []}
+        })
+        .to_string()
+    }
+
+    fn route(method: &'static str, suffix: &'static str, status: u16, body: String) -> Route {
+        Route {
+            method,
+            path_suffix: suffix,
+            status,
+            body,
+        }
+    }
+
+    /// The routes the evidence half of a pass may take, on top of whatever
+    /// the runner half takes. `ev` is the answer to `GET …/jobs/<ev name>`.
+    fn evidence_routes(
+        attempt: u32,
+        ev: Option<Value>,
+        active: Vec<Value>,
+        pods: Vec<Value>,
+        log: String,
+    ) -> Vec<Route> {
+        let name = leak(format!("/jobs/{}", ev_name(attempt)));
+        vec![
+            route(
+                "GET",
+                name,
+                if ev.is_some() { 200 } else { 404 },
+                ev.as_ref().map_or_else(not_found, Value::to_string),
+            ),
+            route(
+                "PATCH",
+                name,
+                200,
+                ev_job(&ev_name(attempt), Some("Complete"), UID).to_string(),
+            ),
+            route("GET", "/jobs", 200, list("JobList", active)),
+            route(
+                "POST",
+                "/configmaps",
+                201,
+                json!({"apiVersion": "v1", "kind": "ConfigMap",
+                "metadata": {"name": format!("{}-plan", ev_name(attempt)), "namespace": NS}})
+                .to_string(),
+            ),
+            route(
+                "POST",
+                "/jobs",
+                201,
+                ev_job(&ev_name(attempt), None, UID).to_string(),
+            ),
+            route("GET", "/log", 200, log),
+            route("GET", "/pods", 200, list("PodList", pods)),
+            route("GET", "/events", 200, list("EventList", vec![])),
+            route(
+                "GET",
+                "/trustpolicies",
+                200,
+                list("TrustPolicyList", vec![]),
+            ),
+            route("GET", "/trustrosters/default", 200, roster()),
+        ]
+    }
+
+    /// The runner half of a pass over a TERMINAL `Backup`: its finished Job
+    /// (whose TTL `repair_ttl` may patch), the status route, the destination.
+    fn terminal_runner_routes(destination: Value) -> Vec<Route> {
+        vec![
+            route(
+                "GET",
+                "/jobs/logweir-backup-nightly-20261109-031700",
+                200,
+                job_body("Complete"),
+            ),
+            route(
+                "PATCH",
+                "/jobs/logweir-backup-nightly-20261109-031700",
+                200,
+                job_body("Complete"),
+            ),
+            route(
+                "PATCH",
+                "/backups/logweir-backup-nightly-20261109-031700/status",
+                200,
+                backup_json(),
+            ),
+            route(
+                "GET",
+                "/backupdestinations/dest-b",
+                200,
+                destination.to_string(),
+            ),
+        ]
+    }
+
+    /// A TERMINAL destination-backed `Backup` whose evidence a Job reads:
+    /// the terminal patch has landed with the runner's digest.
+    fn terminal_backup(
+        digest: &str,
+        verification: Option<Value>,
+        observation: Option<Value>,
+    ) -> Backup {
+        let mut value =
+            serde_json::to_value(frozen_destination_backed_backup("dest-b")).expect("json");
+        let mut evidence = json!({
+            "receiptKey": RECEIPT_KEY, "sidecarKey": SIDECAR_KEY, "receiptSha256": digest
+        });
+        if let Some(v) = verification {
+            evidence["verification"] = v;
+        }
+        if let Some(o) = observation {
+            evidence["observation"] = o;
+        }
+        value["status"]["phase"] = json!("Succeeded");
+        value["status"]["exitCode"] = json!(0);
+        value["status"]["backupId"] = json!(FIXTURE_BACKUP_ID);
+        value["status"]["evidence"] = evidence;
+        value["status"]["conditions"] = json!([{
+            "type": "Complete", "status": "True", "reason": "Ok",
+            "lastTransitionTime": "2026-11-09T03:19:00Z", "message": "exit 0"
+        }]);
+        serde_json::from_value(value).expect("a Backup")
+    }
+
+    fn pending(attempt: u32, job: Option<&str>) -> (Value, Value) {
+        (
+            json!({"result": "Pending",
+                   "payloadType": logweir_verify::PAYLOAD_TYPE_BACKUP_RECEIPT,
+                   "detail": "reading", "verifiedAt": "2026-11-09T03:20:00Z"}),
+            json!({"mode": "SecretKeys", "attempt": attempt,
+                   "jobRef": job.map(|n| json!({"name": n, "uid": EV_JOB_UID}))}),
+        )
+    }
+
+    async fn run(backup: &Backup, routes: Vec<Route>, now: DateTime<Utc>) -> Vec<SeenBody> {
+        let (client, _seen, bodies) = mock_client_recording_bodies(routes);
+        reconcile_backup(
+            backup,
+            &client,
+            &unobserved_archive,
+            &unverified_evidence,
+            now,
+        )
+        .await
+        .expect("the reconcile succeeds");
+        let out = bodies.lock().expect("readable").clone();
+        out
+    }
+
+    fn posts<'a>(bodies: &'a [SeenBody], suffix: &str) -> Vec<&'a SeenBody> {
+        bodies
+            .iter()
+            .filter(|b| b.method == "POST" && path(&b.uri).ends_with(suffix))
+            .collect()
+    }
+
+    fn secret_backed_destination() -> Value {
+        let mut value = dest_b_value();
+        value["spec"]["access"]["evidenceRead"] = json!({"mode": "SecretKeys", "secret": {
+            "name": "lw-b-evidence-reader", "accessKeyIdKey": "id", "secretAccessKeyKey": "key"
+        }});
+        value
+    }
+
+    /// **THE JOB IS CREATED, AND IT HOLDS EXACTLY THE `evidenceRead` GRANT.**
+    ///
+    /// The lab-refresh-8 row's shape: `evidenceRead: ArchiveReadGrant` over a
+    /// separate `archiveRead` Secret. The finished pass writes the terminal
+    /// patch (no window — nothing has been read), patches the runner's TTL,
+    /// then posts the plan `ConfigMap`, then the Job, then `Pending` naming it.
+    ///
+    /// KILLS: projecting `archiveWrite`'s Secret; adding the signing volume;
+    /// automounting a token; a name that is not `lwc-ev-<sha256(uid:1)>`; a
+    /// Job not owned by the Backup; the Job before its plan; a window on the
+    /// terminal patch; `Valid` before any relay.
+    #[tokio::test]
+    async fn a_pod_only_grant_creates_an_evidence_fetch_job_holding_exactly_that_grant() {
+        let mut routes = finished_routes_for_destination(
+            &pod_list_terminated(0),
+            log_body(&i7_tail_with_digest()),
+            "/backupdestinations/dest-b",
+            archive_read_grant_destination(),
+        );
+        routes.extend(evidence_routes(1, None, vec![], vec![], String::new()));
+        let bodies = run(
+            &frozen_destination_backed_backup("dest-b"),
+            routes,
+            utc(2026, 11, 9, 3, 20),
+        )
+        .await;
+
+        // ---- the Job -------------------------------------------------------
+        let jobs = posts(&bodies, "/jobs");
+        assert_eq!(jobs.len(), 1, "exactly one evidence-fetch Job");
+        let job: Value = serde_json::from_str(&jobs[0].body).expect("a Job");
+        assert_eq!(job["metadata"]["name"], json!(ev_name(1)));
+        assert_eq!(
+            ev_name(1),
+            format!(
+                "lwc-ev-{}",
+                &logweir_core::ids::sha256_hex(format!("{UID}:1").as_bytes())[..20]
+            ),
+            "D2 §3.9's name, verbatim"
+        );
+        let owner = &job["metadata"]["ownerReferences"][0];
+        assert_eq!(
+            (
+                owner["kind"].as_str(),
+                owner["uid"].as_str(),
+                owner["controller"].as_bool()
+            ),
+            (Some("Backup"), Some(UID), Some(true)),
+            "owned by the Backup, so ownerReference GC cleans it up: {owner}"
+        );
+        assert_eq!(
+            job["metadata"]["labels"]["logweir.dev/check-kind"],
+            json!("evidenceFetch")
+        );
+        let pod = &job["spec"]["template"]["spec"];
+        assert_eq!(pod["automountServiceAccountToken"], json!(false));
+        assert_eq!(pod["serviceAccountName"], json!(RUNNER_SERVICE_ACCOUNT));
+        let volumes: Vec<&str> = pod["volumes"]
+            .as_array()
+            .map(|v| v.iter().filter_map(|x| x["name"].as_str()).collect())
+            .unwrap_or_default();
+        assert_eq!(
+            volumes,
+            vec!["check-plan", "work"],
+            "the plan and the scratch emptyDir, nothing else — no signing key"
+        );
+        assert!(
+            pod["volumes"]
+                .as_array()
+                .expect("volumes")
+                .iter()
+                .all(|v| v.get("secret").is_none()),
+            "no Secret is mounted into an evidence pod: {pod}"
+        );
+        let container = &pod["containers"][0];
+        let env = container["env"].as_array().expect("env");
+        let mut from_secret = Vec::new();
+        for e in env {
+            let name = e["name"].as_str().unwrap_or_default();
+            if let Some(r) = e.pointer("/valueFrom/secretKeyRef") {
+                from_secret.push((
+                    name.to_string(),
+                    r["name"].as_str().unwrap_or_default().to_string(),
+                    r["key"].as_str().unwrap_or_default().to_string(),
+                ));
+            } else {
+                assert!(
+                    weirkeeper::evidence_fetch::CONTRACT_ENV.contains(&name)
+                        || name.starts_with("AWS_")
+                        || name.starts_with("LOGWEIR_ENGINE_")
+                        || [
+                            "LOGWEIR_STORE_CONTRACT_VERSION",
+                            "LOGWEIR_ARCHIVE_CREDENTIALS",
+                            "TMPDIR"
+                        ]
+                        .contains(&name),
+                    "an unexpected literal variable reached the evidence pod: {name}"
+                );
+                assert_ne!(
+                    name, "LOGWEIR_ARCHIVE_CA_FILE",
+                    "a check pod has no /plan mount"
+                );
+            }
+        }
+        from_secret.sort();
+        assert_eq!(
+            from_secret,
+            vec![
+                (
+                    "AWS_ACCESS_KEY_ID".to_string(),
+                    "lw-b-archive-reader".to_string(),
+                    "rid".to_string()
+                ),
+                (
+                    "AWS_SECRET_ACCESS_KEY".to_string(),
+                    "lw-b-archive-reader".to_string(),
+                    "rkey".to_string()
+                ),
+            ],
+            "EXACTLY the evidenceRead grant — ArchiveReadGrant is archiveRead's Secret, never \
+             archiveWrite's `lw-b-writer`"
+        );
+        assert!(
+            !jobs[0].body.contains("lw-b-writer") && !jobs[0].body.contains("signing"),
+            "no archiveWrite / evidenceWrite grant and no signing key: {}",
+            jobs[0].body
+        );
+        assert_eq!(container["args"][0], json!("check"));
+
+        // ---- its plan ------------------------------------------------------
+        let plans = posts(&bodies, "/configmaps");
+        assert_eq!(plans.len(), 1);
+        let cm: Value = serde_json::from_str(&plans[0].body).expect("a ConfigMap");
+        assert_eq!(cm["immutable"], json!(true));
+        assert_eq!(cm["metadata"]["ownerReferences"][0]["uid"], json!(UID));
+        let plan: Value =
+            serde_json::from_str(cm["data"]["check-plan.json"].as_str().expect("plan"))
+                .expect("plan JSON");
+        let objects = &plan["request"]["evidenceFetch"]["objects"];
+        assert_eq!(objects[0]["key"], json!(RECEIPT_KEY));
+        assert_eq!(objects[1]["key"], json!(SIDECAR_KEY));
+        assert!(objects
+            .as_array()
+            .expect("objects")
+            .iter()
+            .all(|o| o["role"] == json!("EvidenceRead")));
+        assert_eq!(plan["subjectUid"], json!(UID));
+
+        // ---- the order and the status --------------------------------------
+        let order: Vec<String> = bodies
+            .iter()
+            .filter(|b| b.method != "GET")
+            .map(|b| {
+                format!(
+                    "{} {}",
+                    b.method,
+                    path(&b.uri).rsplit('/').next().unwrap_or_default()
+                )
+            })
+            .collect();
+        let at = |needle: &str| {
+            order
+                .iter()
+                .position(|o| o == needle)
+                .unwrap_or_else(|| panic!("{needle} in {order:?}"))
+        };
+        assert!(
+            at("POST configmaps") < at("POST jobs"),
+            "the plan before the Job: {order:?}"
+        );
+        assert!(
+            at(&format!("PATCH {NAME}")) < at("POST configmaps"),
+            "the runner TTL before the fetch: {order:?}"
+        );
+        let statuses = patched_statuses(&bodies);
+        assert!(
+            statuses[0]["windowCovered"].is_null(),
+            "the terminal patch reads nothing: {}",
+            statuses[0]
+        );
+        let last = statuses.last().expect("the Pending patch");
+        assert_eq!(
+            last["evidence"]["verification"]["result"],
+            json!("Pending"),
+            "{last}"
+        );
+        let observation = &last["evidence"]["observation"];
+        assert_eq!(observation["mode"], json!("SecretKeys"));
+        assert_eq!(observation["attempt"], json!(1));
+        assert_eq!(observation["jobRef"]["name"], json!(ev_name(1)));
+        assert_eq!(observation["jobRef"]["uid"], json!(EV_JOB_UID));
+        assert!(last["windowCovered"].is_null() && last["records"].is_null());
+        let (state, reason, _) = condition_named(last, "Verified").expect("Verified");
+        assert_eq!(
+            (state.as_str(), reason.as_str()),
+            ("False", "VerificationNotAttempted")
+        );
+    }
+
+    /// **LEGACY-UNBOUND IS UNCHANGED: no runner digest, no Job.** Nothing a
+    /// fetch returned could be bound to the run, so none is started.
+    #[tokio::test]
+    async fn a_legacy_unbound_run_gets_no_evidence_fetch_job() {
+        let mut routes = finished_routes_for_destination(
+            &pod_list_terminated(0),
+            log_body(&i7_tail()),
+            "/backupdestinations/dest-b",
+            secret_backed_destination(),
+        );
+        routes.extend(evidence_routes(1, None, vec![], vec![], String::new()));
+        let bodies = run(
+            &frozen_destination_backed_backup("dest-b"),
+            routes,
+            utc(2026, 11, 9, 3, 20),
+        )
+        .await;
+        assert!(posts(&bodies, "/jobs").is_empty() && posts(&bodies, "/configmaps").is_empty());
+        let last = patched_statuses(&bodies).last().cloned().expect("a status");
+        assert_eq!(
+            last["evidence"]["verification"]["result"],
+            json!("NotAttempted")
+        );
+        assert!(last["evidence"]["verification"]["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("legacy-unbound"));
+        assert!(last["evidence"]["observation"].is_null());
+    }
+
+    /// **THE SLOT IS RESPECTED.** With `maxEvidenceFetchActivePerNamespace`
+    /// (4) evidence Jobs active in the namespace, nothing is created; the run
+    /// is `Pending` saying so, with no `jobRef`, and the next pass tries again.
+    ///
+    /// KILLS: dropping `limits::admit`; counting another namespace's Jobs.
+    #[tokio::test]
+    async fn a_full_evidence_fetch_pool_waits_and_creates_nothing() {
+        let active: Vec<Value> = (0..4)
+            .map(|i| {
+                let mut j = ev_job(&format!("lwc-ev-other{i}"), None, "someone-else");
+                j["metadata"]["namespace"] = json!(NS);
+                j
+            })
+            .collect();
+        let mut routes = finished_routes_for_destination(
+            &pod_list_terminated(0),
+            log_body(&i7_tail_with_digest()),
+            "/backupdestinations/dest-b",
+            secret_backed_destination(),
+        );
+        routes.extend(evidence_routes(1, None, active, vec![], String::new()));
+        let bodies = run(
+            &frozen_destination_backed_backup("dest-b"),
+            routes,
+            utc(2026, 11, 9, 3, 20),
+        )
+        .await;
+        assert!(posts(&bodies, "/jobs").is_empty(), "no Job over the limit");
+        assert!(
+            posts(&bodies, "/configmaps").is_empty(),
+            "and no plan either"
+        );
+        let last = patched_statuses(&bodies).last().cloned().expect("a status");
+        assert_eq!(last["evidence"]["verification"]["result"], json!("Pending"));
+        assert!(last["evidence"]["verification"]["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("maxEvidenceFetchActivePerNamespace"));
+        assert!(last["evidence"]["observation"]["jobRef"].is_null());
+
+        // …and the same four Jobs in ANOTHER namespace do not count.
+        let elsewhere: Vec<Value> = (0..4)
+            .map(|i| {
+                let mut j = ev_job(&format!("lwc-ev-other{i}"), None, "someone-else");
+                j["metadata"]["namespace"] = json!("another-team");
+                j
+            })
+            .collect();
+        let mut routes = finished_routes_for_destination(
+            &pod_list_terminated(0),
+            log_body(&i7_tail_with_digest()),
+            "/backupdestinations/dest-b",
+            secret_backed_destination(),
+        );
+        routes.extend(evidence_routes(1, None, elsewhere, vec![], String::new()));
+        let bodies = run(
+            &frozen_destination_backed_backup("dest-b"),
+            routes,
+            utc(2026, 11, 9, 3, 20),
+        )
+        .await;
+        assert_eq!(
+            posts(&bodies, "/jobs").len(),
+            1,
+            "another namespace's pool is its own"
+        );
+    }
+
+    /// **PENDING WHILE IT RUNS, AND NEVER A SECOND JOB.** A pass over a
+    /// running fetch (a restarted controller's first pass looks exactly like
+    /// this) finds the Job by name and posts nothing.
+    #[tokio::test]
+    async fn a_running_fetch_stays_pending_and_is_never_created_twice() {
+        let (v, o) = pending(1, Some(&ev_name(1)));
+        let backup = terminal_backup(
+            &logweir_core::ids::sha256_prefixed(&receipt()),
+            Some(v),
+            Some(o),
+        );
+        let mut routes = evidence_routes(
+            1,
+            Some(ev_job(&ev_name(1), None, UID)),
+            vec![],
+            vec![],
+            String::new(),
+        );
+        routes.extend(terminal_runner_routes(secret_backed_destination()));
+        let bodies = run(&backup, routes, utc(2026, 11, 9, 3, 21)).await;
+        assert!(posts(&bodies, "/jobs").is_empty() && posts(&bodies, "/configmaps").is_empty());
+        assert!(
+            !bodies.iter().any(|b| path(&b.uri).ends_with("/log")),
+            "a running Job's log is not read"
+        );
+        for s in patched_statuses(&bodies) {
+            assert_ne!(s["evidence"]["verification"]["result"], json!("Valid"));
+        }
+    }
+
+    /// **THE CRASH WINDOW.** The terminal patch landed, the Job was created,
+    /// and the controller died before recording `Pending`: the object has
+    /// keys and a digest and no verdict. The next pass finds the SAME Job by
+    /// name and records it — it never creates a second.
+    ///
+    /// KILLS: dropping the `unrecorded` resumption (the run would stay
+    /// unverified forever); creating before looking.
+    #[tokio::test]
+    async fn a_restarted_controller_resumes_the_recorded_fetch_without_a_second_job() {
+        let backup = terminal_backup(&logweir_core::ids::sha256_prefixed(&receipt()), None, None);
+        let mut routes = evidence_routes(
+            1,
+            Some(ev_job(&ev_name(1), None, UID)),
+            vec![],
+            vec![],
+            String::new(),
+        );
+        routes.extend(terminal_runner_routes(secret_backed_destination()));
+        let bodies = run(&backup, routes, utc(2026, 11, 9, 3, 21)).await;
+        assert!(
+            posts(&bodies, "/jobs").is_empty(),
+            "the existing Job is found by name"
+        );
+        let last = patched_statuses(&bodies)
+            .last()
+            .cloned()
+            .expect("the Pending record");
+        assert_eq!(last["evidence"]["verification"]["result"], json!("Pending"));
+        assert_eq!(
+            last["evidence"]["observation"]["jobRef"]["uid"],
+            json!(EV_JOB_UID)
+        );
+    }
+
+    /// **A VERIFIED RELAY IS `Valid`, WITH ITS WINDOW** — the same facts the
+    /// `ControllerIdentity` path writes: `windowCovered`, `records`, `capture`,
+    /// `Verified=True`, and the Job's TTL only after the status commit.
+    #[tokio::test]
+    async fn a_verified_relay_is_valid_and_carries_the_receipts_window() {
+        let (v, o) = pending(1, Some(&ev_name(1)));
+        let backup = terminal_backup(
+            &logweir_core::ids::sha256_prefixed(&receipt()),
+            Some(v),
+            Some(o),
+        );
+        let mut routes = evidence_routes(
+            1,
+            Some(ev_job(&ev_name(1), Some("Complete"), UID)),
+            vec![],
+            vec![ev_pod(EV_JOB_UID, 0)],
+            good_relay(),
+        );
+        routes.extend(terminal_runner_routes(secret_backed_destination()));
+        let bodies = run(&backup, routes, utc(2026, 11, 9, 3, 22)).await;
+        let last = patched_statuses(&bodies)
+            .last()
+            .cloned()
+            .expect("the verdict");
+        let verification = &last["evidence"]["verification"];
+        assert_eq!(verification["result"], json!("Valid"), "{last}");
+        assert_eq!(verification["matchedKeyId"], json!(FIXTURE_KEY_ID));
+        assert_eq!(
+            last["windowCovered"],
+            json!({"fromMs": 1_757_415_734_000_i64, "toMs": 1_757_419_486_000_i64})
+        );
+        assert_eq!(last["records"], json!(4211 + 917));
+        assert_eq!(last["capture"]["startedAt"], json!("2026-09-09T11:02:19Z"));
+        assert_eq!(
+            last["evidence"]["observation"]["presence"],
+            json!("Complete")
+        );
+        assert!(last["evidence"]["observation"]["retryAfter"].is_null());
+        let (state, _, _) = condition_named(&last, "Verified").expect("Verified");
+        assert_eq!(state, "True");
+        let status_at = bodies
+            .iter()
+            .rposition(|b| b.method == "PATCH" && path(&b.uri).ends_with("/status"))
+            .expect("status");
+        let ttl_at = bodies
+            .iter()
+            .rposition(|b| b.method == "PATCH" && path(&b.uri).ends_with(&ev_name(1)))
+            .expect("the TTL patch");
+        assert!(status_at < ttl_at, "the TTL only after the status commit");
+        assert!(bodies[ttl_at].body.contains("ttlSecondsAfterFinished"));
+    }
+
+    /// **THE RUNNER'S DIGEST IS AUTHORITATIVE.** A relayed receipt that does
+    /// not hash to `receiptSha256` is `Invalid`, and NOTHING is projected
+    /// from it — no window, no records, no capture (`9cda784`, `67aad4f`).
+    ///
+    /// KILLS: anchoring on the relay's own digest; writing the window before
+    /// the digest check.
+    #[tokio::test]
+    async fn a_relayed_receipt_the_runner_did_not_report_is_invalid_and_projects_nothing() {
+        let (v, o) = pending(1, Some(&ev_name(1)));
+        let backup = terminal_backup(RUNNER_RECEIPT_SHA256, Some(v), Some(o));
+        let mut routes = evidence_routes(
+            1,
+            Some(ev_job(&ev_name(1), Some("Complete"), UID)),
+            vec![],
+            vec![ev_pod(EV_JOB_UID, 0)],
+            good_relay(),
+        );
+        routes.extend(terminal_runner_routes(secret_backed_destination()));
+        let bodies = run(&backup, routes, utc(2026, 11, 9, 3, 22)).await;
+        let last = patched_statuses(&bodies)
+            .last()
+            .cloned()
+            .expect("the verdict");
+        assert_eq!(
+            last["evidence"]["verification"]["result"],
+            json!("Invalid"),
+            "{last}"
+        );
+        assert!(last["evidence"]["verification"]["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(RUNNER_RECEIPT_SHA256));
+        for field in ["windowCovered", "records", "capture"] {
+            assert!(
+                last[field].is_null(),
+                "{field} projected from bytes the runner did not write: {last}"
+            );
+        }
+    }
+
+    /// **THE RECEIPT IS BOUND TO THIS RUN.** A validly signed receipt whose
+    /// `backup_id` is another run's is `Invalid`, and projects nothing.
+    #[tokio::test]
+    async fn a_relayed_receipt_for_another_backup_is_invalid() {
+        let (v, o) = pending(1, Some(&ev_name(1)));
+        let mut backup = terminal_backup(
+            &logweir_core::ids::sha256_prefixed(&receipt()),
+            Some(v),
+            Some(o),
+        );
+        backup.status.as_mut().expect("status").backup_id = Some("some-other-run".to_string());
+        let mut routes = evidence_routes(
+            1,
+            Some(ev_job(&ev_name(1), Some("Complete"), UID)),
+            vec![],
+            vec![ev_pod(EV_JOB_UID, 0)],
+            good_relay(),
+        );
+        routes.extend(terminal_runner_routes(secret_backed_destination()));
+        let bodies = run(&backup, routes, utc(2026, 11, 9, 3, 22)).await;
+        let last = patched_statuses(&bodies)
+            .last()
+            .cloned()
+            .expect("the verdict");
+        assert_eq!(
+            last["evidence"]["verification"]["result"],
+            json!("Invalid"),
+            "{last}"
+        );
+        assert!(last["evidence"]["verification"]["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("backup_id"));
+        assert!(last["windowCovered"].is_null());
+    }
+
+    /// **A JOB THAT ENDS WITHOUT A RELAY IS `NotAttempted` NAMING WHY**, is
+    /// retried at +1 m, and is never `Valid`; the last attempt says none
+    /// remain.
+    #[tokio::test]
+    async fn a_failed_fetch_is_not_attempted_with_its_cause_and_a_retry() {
+        let (v, o) = pending(1, Some(&ev_name(1)));
+        let backup = terminal_backup(
+            &logweir_core::ids::sha256_prefixed(&receipt()),
+            Some(v),
+            Some(o),
+        );
+        let mut routes = evidence_routes(
+            1,
+            Some(ev_job(&ev_name(1), Some("Failed"), UID)),
+            vec![],
+            vec![ev_pod(EV_JOB_UID, 1)],
+            "logweir: the store refused the connection\n".to_string(),
+        );
+        routes.extend(terminal_runner_routes(secret_backed_destination()));
+        let now = utc(2026, 11, 9, 3, 22);
+        let bodies = run(&backup, routes, now).await;
+        let last = patched_statuses(&bodies)
+            .last()
+            .cloned()
+            .expect("the verdict");
+        let verification = &last["evidence"]["verification"];
+        assert_eq!(verification["result"], json!("NotAttempted"), "{last}");
+        let detail = verification["detail"].as_str().unwrap_or_default();
+        assert!(
+            detail.contains(&ev_name(1)) && detail.contains("ResultUnreadable"),
+            "{detail}"
+        );
+        assert!(
+            !detail.contains("refused the connection"),
+            "no log content in a status: {detail}"
+        );
+        assert_eq!(
+            last["evidence"]["observation"]["retryAfter"],
+            json!("2026-11-09T03:23:00Z")
+        );
+        assert!(last["windowCovered"].is_null());
+
+        // THE LAST ATTEMPT schedules nothing.
+        let (v, o) = pending(4, Some(&ev_name(4)));
+        let backup = terminal_backup(
+            &logweir_core::ids::sha256_prefixed(&receipt()),
+            Some(v),
+            Some(o),
+        );
+        let mut routes = evidence_routes(
+            4,
+            Some(ev_job(&ev_name(4), Some("Failed"), UID)),
+            vec![],
+            vec![ev_pod(EV_JOB_UID, 1)],
+            String::new(),
+        );
+        routes.extend(terminal_runner_routes(secret_backed_destination()));
+        let bodies = run(&backup, routes, now).await;
+        let last = patched_statuses(&bodies)
+            .last()
+            .cloned()
+            .expect("the verdict");
+        assert!(last["evidence"]["observation"]["retryAfter"].is_null());
+        assert!(last["evidence"]["verification"]["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("no attempts remain"));
+    }
+
+    /// **A RETRY WAITS FOR ITS INSTANT, THEN USES A NEW JOB.** Before
+    /// `retryAfter` nothing is sent; after it, attempt 2 is
+    /// `lwc-ev-<sha256(uid:2)>`.
+    #[tokio::test]
+    async fn a_scheduled_retry_waits_then_creates_the_next_attempts_job() {
+        let v = json!({"result": "NotAttempted", "payloadType": logweir_verify::PAYLOAD_TYPE_BACKUP_RECEIPT,
+                       "detail": "attempt 1 failed", "verifiedAt": "2026-11-09T03:22:00Z"});
+        let o = json!({"mode": "SecretKeys", "attempt": 1, "retryAfter": "2026-11-09T03:23:00Z",
+                       "jobRef": {"name": ev_name(1), "uid": EV_JOB_UID}});
+        let backup = terminal_backup(
+            &logweir_core::ids::sha256_prefixed(&receipt()),
+            Some(v),
+            Some(o),
+        );
+        let mut routes = evidence_routes(2, None, vec![], vec![], String::new());
+        routes.extend(terminal_runner_routes(secret_backed_destination()));
+        let early = run(&backup, routes.clone(), utc(2026, 11, 9, 3, 22)).await;
+        assert!(
+            early
+                .iter()
+                .all(|b| b.method == "GET" || path(&b.uri).ends_with(NAME)),
+            "nothing before retryAfter: {early:?}"
+        );
+        let late = run(&backup, routes, utc(2026, 11, 9, 3, 24)).await;
+        let jobs = posts(&late, "/jobs");
+        assert_eq!(jobs.len(), 1);
+        let job: Value = serde_json::from_str(&jobs[0].body).expect("a Job");
+        assert_eq!(job["metadata"]["name"], json!(ev_name(2)));
+        assert_ne!(ev_name(1), ev_name(2));
+        let last = patched_statuses(&late).last().cloned().expect("Pending");
+        assert_eq!(last["evidence"]["observation"]["attempt"], json!(2));
+        assert!(last["evidence"]["observation"]["retryAfter"].is_null());
+    }
+
+    /// **SEC-PODLOG: A FOREIGN POD IS NOT READ.** A pod wearing the Job's
+    /// label whose controller owner is another UID is ignored: no `pods/log`
+    /// read, and no verdict other than `NotAttempted`.
+    #[tokio::test]
+    async fn a_pod_this_job_does_not_own_is_never_read() {
+        let (v, o) = pending(1, Some(&ev_name(1)));
+        let backup = terminal_backup(
+            &logweir_core::ids::sha256_prefixed(&receipt()),
+            Some(v),
+            Some(o),
+        );
+        let mut routes = evidence_routes(
+            1,
+            Some(ev_job(&ev_name(1), Some("Complete"), UID)),
+            vec![],
+            vec![ev_pod("ffffffff-0000-4000-8000-00000000ffff", 0)],
+            good_relay(),
+        );
+        routes.extend(terminal_runner_routes(secret_backed_destination()));
+        let bodies = run(&backup, routes, utc(2026, 11, 9, 3, 22)).await;
+        assert!(
+            !bodies.iter().any(|b| path(&b.uri).ends_with("/log")),
+            "the foreign pod's log was read"
+        );
+        let last = patched_statuses(&bodies)
+            .last()
+            .cloned()
+            .expect("the verdict");
+        assert_eq!(
+            last["evidence"]["verification"]["result"],
+            json!("NotAttempted"),
+            "{last}"
+        );
+        assert!(last["windowCovered"].is_null());
+    }
+
+    /// **A JOB THIS BACKUP DOES NOT CONTROL IS NEVER OBSERVED.** The name is
+    /// predictable; a Job carrying it with another owner is refused.
+    #[tokio::test]
+    async fn a_foreign_job_holding_the_name_is_refused_and_not_observed() {
+        let (v, o) = pending(1, None);
+        let backup = terminal_backup(
+            &logweir_core::ids::sha256_prefixed(&receipt()),
+            Some(v),
+            Some(o),
+        );
+        let mut routes = evidence_routes(
+            1,
+            Some(ev_job(&ev_name(1), Some("Complete"), "a-stranger")),
+            vec![],
+            vec![ev_pod(EV_JOB_UID, 0)],
+            good_relay(),
+        );
+        routes.extend(terminal_runner_routes(secret_backed_destination()));
+        let bodies = run(&backup, routes, utc(2026, 11, 9, 3, 22)).await;
+        assert!(!bodies
+            .iter()
+            .any(|b| path(&b.uri).ends_with("/pods") || path(&b.uri).ends_with("/log")));
+        let last = patched_statuses(&bodies)
+            .last()
+            .cloned()
+            .expect("the verdict");
+        assert_eq!(
+            last["evidence"]["verification"]["result"],
+            json!("NotAttempted")
+        );
+        assert!(last["evidence"]["verification"]["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("not controlled by"));
+    }
+
+    /// **CAPS ARE A REFUSAL, NOT A BAD DOCUMENT.** A receipt the runner
+    /// truncated at 1 MiB is `NotAttempted`, never `Invalid`.
+    #[tokio::test]
+    async fn a_truncated_receipt_is_not_attempted() {
+        let (v, o) = pending(1, Some(&ev_name(1)));
+        let backup = terminal_backup(
+            &logweir_core::ids::sha256_prefixed(&receipt()),
+            Some(v),
+            Some(o),
+        );
+        let (r, s) = (receipt(), sidecar());
+        let mut big = entry(RECEIPT_KEY, Stream::EvidencePayload, Some(&r), None);
+        big.truncated = true;
+        let log = relay_log(
+            vec![
+                big,
+                entry(SIDECAR_KEY, Stream::EvidenceSidecar, Some(&s), None),
+            ],
+            Some(&r),
+            Some(&s),
+        );
+        let mut routes = evidence_routes(
+            1,
+            Some(ev_job(&ev_name(1), Some("Complete"), UID)),
+            vec![],
+            vec![ev_pod(EV_JOB_UID, 0)],
+            log,
+        );
+        routes.extend(terminal_runner_routes(secret_backed_destination()));
+        let bodies = run(&backup, routes, utc(2026, 11, 9, 3, 22)).await;
+        let last = patched_statuses(&bodies)
+            .last()
+            .cloned()
+            .expect("the verdict");
+        assert_eq!(
+            last["evidence"]["verification"]["result"],
+            json!("NotAttempted"),
+            "{last}"
+        );
+        assert!(last["evidence"]["verification"]["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("cap"));
+        assert_eq!(
+            last["evidence"]["observation"]["presence"],
+            json!("Unknown")
+        );
+    }
+
+    /// **ABSENCE NEEDS A `NotFound`; A DENIAL IS NOT ABSENCE.**
+    #[tokio::test]
+    async fn presence_is_absent_only_on_not_found() {
+        for (code, want) in [
+            (CheckCode::ObjectNotFound, "Absent"),
+            (CheckCode::AccessDenied, "Unknown"),
+        ] {
+            let (v, o) = pending(1, Some(&ev_name(1)));
+            let backup = terminal_backup(
+                &logweir_core::ids::sha256_prefixed(&receipt()),
+                Some(v),
+                Some(o),
+            );
+            let s = sidecar();
+            let log = relay_log(
+                vec![
+                    entry(RECEIPT_KEY, Stream::EvidencePayload, None, Some(code)),
+                    entry(SIDECAR_KEY, Stream::EvidenceSidecar, Some(&s), None),
+                ],
+                None,
+                Some(&s),
+            );
+            let mut routes = evidence_routes(
+                1,
+                Some(ev_job(&ev_name(1), Some("Complete"), UID)),
+                vec![],
+                vec![ev_pod(EV_JOB_UID, 0)],
+                log,
+            );
+            routes.extend(terminal_runner_routes(secret_backed_destination()));
+            let bodies = run(&backup, routes, utc(2026, 11, 9, 3, 22)).await;
+            let last = patched_statuses(&bodies)
+                .last()
+                .cloned()
+                .expect("the verdict");
+            assert_eq!(
+                last["evidence"]["verification"]["result"],
+                json!("NotAttempted")
+            );
+            assert_eq!(
+                last["evidence"]["observation"]["presence"],
+                json!(want),
+                "{code}"
+            );
+        }
+    }
+}
