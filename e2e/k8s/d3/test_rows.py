@@ -2108,6 +2108,63 @@ def test_the_five_standing_bundle_members_are_the_controllers_own_names() -> Non
         len(d3.STANDING_BUNDLE_KEYS) == 5)
 
 
+_REPO = pathlib.Path(__file__).resolve().parents[3]
+
+
+def duplicated_top_level_names(source: str) -> dict[str, list[int]]:
+    """Every top-level `def`/`class` name a module binds more than once.
+
+    Python binds a module's definitions in file order, so the LAST one wins
+    for every caller, including callers written above it — no error, no
+    warning. That is how `patch_policy` (RetentionPolicy) was replaced by
+    `patch_policy` (ProtectionPolicy) and `legal_hold` quietly patched the
+    wrong kind (lab-refresh-7, 03:55Z).
+    """
+    import ast
+    import collections
+
+    seen: dict[str, list[int]] = collections.defaultdict(list)
+    for node in ast.parse(source).body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            seen[node.name].append(node.lineno)
+    return {name: lines for name, lines in seen.items() if len(lines) > 1}
+
+
+def harness_modules() -> list[pathlib.Path]:
+    """Every Python harness module the live rows run from: D2, D3, `scripts/`."""
+    found = set(_REPO.glob("e2e/k8s/*/*.py"))
+    found |= set(_REPO.glob("scripts/*.py"))
+    found |= set(_REPO.glob("scripts/live/**/*.py"))
+    found |= set(_REPO.glob("scripts/fixtures/*.py"))
+    return sorted(found)
+
+
+def test_no_harness_module_defines_a_top_level_name_twice() -> None:
+    modules = harness_modules()
+    row("the duplicate-definition sweep reads the D2 and D3 harnesses and scripts/*.py",
+        any(p.name == "d3_live.py" for p in modules)
+        and any(p.name == "d2_live.py" for p in modules)
+        and any(p.name == "test-plat06-live.py" for p in modules),
+        f"modules: {[str(p.relative_to(_REPO)) for p in modules]}")
+    for path in modules:
+        dups = duplicated_top_level_names(path.read_text())
+        row(f"{path.relative_to(_REPO)} binds no top-level name twice", not dups, str(dups))
+    # PLANTED: the exact shape of the defect, which the sweep must name.
+    planted = ("def patch_policy(name, spec_patch):\n    return 'retentionpolicy'\n\n"
+               "def other():\n    return patch_policy('keep-b', {})\n\n"
+               "def patch_policy(name, patch):\n    return 'protectionpolicy'\n")
+    row("the sweep NAMES a module that defines patch_policy twice",
+        duplicated_top_level_names(planted) == {"patch_policy": [1, 7]})
+    import inspect
+
+    retention_body = inspect.getsource(d3.patch_policy).split('"""')[-1]
+    protection_body = inspect.getsource(d3.patch_protection_policy).split('"""')[-1]
+    row("patch_policy (legal_hold, bounded_retry) patches a RetentionPolicy",
+        '"retentionpolicy"' in retention_body and '"protectionpolicy"' not in retention_body)
+    row("and patch_protection_policy patches a ProtectionPolicy",
+        '"protectionpolicy"' in protection_body and '"retentionpolicy"' not in protection_body)
+
+
 def test_zz_every_row_in_this_file_passed() -> None:
     """The file's own gate, for `python3 -m pytest e2e/k8s/d3`.
 

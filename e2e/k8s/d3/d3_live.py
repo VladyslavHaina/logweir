@@ -6516,7 +6516,17 @@ def verdict_after(name: str, mark: str, predicate: Callable[[dict[str, Any]], bo
     return looked if looked is not None else get("protectionpolicy", name)
 
 
-def patch_policy(name: str, patch: dict[str, Any]) -> None:
+def patch_protection_policy(name: str, patch: dict[str, Any]) -> None:
+    """Merge-patch a `ProtectionPolicy` with a whole-object patch.
+
+    ITS OWN NAME, AND THAT IS THE FIX. This was `patch_policy` too, and Python
+    binds a module's `def`s in file order, so it silently replaced the
+    `RetentionPolicy` helper of the same name ~4 000 lines up: `legal_hold` and
+    `bounded_retry` then patched a `ProtectionPolicy` called `keep-b` that does
+    not exist (lab-refresh-7, 03:55Z, proved by `inspect.getsourcelines`).
+    `test_rows.py::test_no_harness_module_defines_a_top_level_name_twice` is
+    the guard for the class.
+    """
     run(KN + ["patch", "protectionpolicy", name, "--type=merge", "-p", json.dumps(patch)])
 
 
@@ -6615,7 +6625,7 @@ def protection_verdicts() -> None:
     before_alerts = policy_alerts(UNREAD_POLICY)
     posts_mark = sink_posts()
     mark = now()
-    patch_policy(UNREAD_POLICY, {"spec": {"protects": {"catalogRef": None}}})
+    patch_protection_policy(UNREAD_POLICY, {"spec": {"protects": {"catalogRef": None}}})
     want = get("protectionpolicy", UNREAD_POLICY)["metadata"]["generation"]
     unknown = policy_view(verdict_after(
         UNREAD_POLICY, mark,
@@ -6749,7 +6759,7 @@ def protection_verdicts() -> None:
     views: dict[str, dict[str, Any]] = {}
     for verified, with_catalog in postures:
         label = f"requireVerifiedEvidence={verified} catalogRef={'present' if with_catalog else 'absent'}"
-        patch_policy(REFUSED_POLICY, {
+        patch_protection_policy(REFUSED_POLICY, {
             "spec": {
                 "protects": {"catalogRef": {"name": LEGACY_CATALOG} if with_catalog else None},
                 "objectives": {"requireVerifiedEvidence": verified},
@@ -6803,7 +6813,7 @@ def protection_verdicts() -> None:
     control_views: dict[str, dict[str, Any]] = {}
     for verified, with_catalog in postures:
         label = f"requireVerifiedEvidence={verified} catalogRef={'present' if with_catalog else 'absent'}"
-        patch_policy(REFUSED_POLICY, {
+        patch_protection_policy(REFUSED_POLICY, {
             "spec": {
                 "protects": {"catalogRef": {"name": LEGACY_CATALOG} if with_catalog else None},
                 "objectives": {"requireVerifiedEvidence": verified},
