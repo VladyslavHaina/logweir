@@ -694,14 +694,17 @@ impl PointCandidate {
     }
 }
 
-/// D3 §5.1's point identity, derived from the digest the controller already
-/// recorded instead of from a catalog round trip.
+/// D3 §5.1's point identity, derived from the immutable receipt digest the
+/// runner reported and the controller recorded instead of from a catalog round
+/// trip.
 ///
 /// `pointId = "lwp1-" + lowercase_hex(sha256(receipt_bytes))[0..32]`, and
-/// `Backup.status.evidence.receiptSha256` IS `sha256:<that hex>` — the
-/// controller COMPUTED it over the bytes it fetched (`crds/backup.rs`'s own
-/// note), so the two agree by construction and this is the same value the
-/// catalog would supply. That matters because
+/// `Backup.status.evidence.receiptSha256` IS `sha256:<that hex>` when a current
+/// runner supplied the capture claim. A controller that can fetch the receipt
+/// independently hashes those bytes and rejects a mismatch; it never publishes
+/// that fetched self-hash as the run's claim. A full-digest catalog join is
+/// therefore evidence that both sources name the same point, not agreement by
+/// construction. That matters because
 /// `logweir::notify::LastAvailablePoint` requires `point_id`: without this,
 /// every event from a `KubernetesStatus`-basis policy would have to omit the
 /// whole `last_available_point` block and print "no available recovery point"
@@ -1113,14 +1116,12 @@ fn evidence_objective_met(
 ///
 /// # Why the second key exists (`PROTECTION-SECRETKEYS-UNPROTECTED`)
 ///
-/// `point_id` comes from `Backup.status.evidence.receiptSha256`, which is
-/// written only where the controller could fetch and verify the receipt. On a
-/// destination whose `evidenceRead` grant is `SecretKeys` — the posture the
-/// documentation recommends, since it gives the controller no Secret verb —
-/// that field is absent, the join answered `None => false` for every point,
-/// and the policy reported that the archive held nothing. The archive set id
-/// is on the object from the pre-Job patch and on the catalog row under
-/// `backupId`, so the fact the join needs was already on both sides.
+/// `point_id` comes from `Backup.status.evidence.receiptSha256`, which a current
+/// runner can report even when the controller cannot fetch or verify the
+/// receipt. It is absent for older runners and for malformed or ambiguous
+/// digest output. The archive set id is on the object from the pre-Job patch
+/// and on the catalog row under `backupId`, so those digest-less compatibility
+/// cases still have the coarser join key already present on both sides.
 ///
 /// `point_id` DECIDES where the candidate has one: it is the narrower key, and
 /// a candidate whose identity the view does not list is a candidate the view

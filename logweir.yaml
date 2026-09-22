@@ -1224,9 +1224,9 @@ spec:
                     type: string
                   receiptSha256:
                     description: |-
-                      The sha256 of the receipt at `receiptKey`, as `sha256:<lowercase hex>` — the one digest spelling this corpus uses everywhere (`logweir_core::ids::sha256_prefixed`). **COMPUTED by the controller over the bytes it fetched**, not copied: a document cannot carry its own digest.
+                      The immutable sha256 capture claim the runner reported for the exact receipt bytes it signed and uploaded at `receiptKey`, as `sha256:<lowercase hex>` — the one digest spelling this corpus uses everywhere (`logweir_core::ids::sha256_prefixed`). The controller never manufactures this status value from bytes it fetched.
 
-                      WHY IT IS HERE AT ALL, AND IT IS NOT DECORATION (Task 24). It is the value `verification` is checked against on a LATER pass: the controller re-fetches the receipt with its read-only evidence credential and compares this recorded digest against the bytes in the bucket right now. Without it, `verify_evidence` could only check the signature — and a genuinely-signed OLDER receipt put in this one's place would verify. `Restore` has carried the same field for the scorecard since Task 20 (`restore::RestoreEvidence::scorecard_sha256`).
+                      When the controller can read the destination, it independently hashes the fetched receipt and compares that observation with this claim; disagreement is `Invalid`. An older runner that reports only the two object keys supplies no immutable digest anchor: fetched evidence is `NotAttempted`/`legacy-unbound`, no controller-computed digest is published here, and no receipt facts are projected. Absence therefore remains backward-compatible without turning replacement bytes into a self-validating receipt.
                     nullable: true
                     type: string
                   sidecarKey:

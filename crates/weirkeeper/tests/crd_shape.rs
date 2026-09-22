@@ -2661,6 +2661,39 @@ fn window_covered_is_epoch_milliseconds() {
     }
 }
 
+/// The public status contract must describe the receipt digest as the runner's
+/// immutable capture claim, never as a controller-computed self-hash. This is
+/// asserted against the checked-in CRD because that description is what API
+/// clients and operators actually receive.
+#[test]
+fn receipt_digest_description_names_its_real_trust_boundary() {
+    let doc = crd("backups.yaml");
+    let digest = at(
+        status_schema(&doc),
+        &["properties", "evidence", "properties", "receiptSha256"],
+    );
+    let description = digest
+        .get("description")
+        .and_then(Value::as_str)
+        .expect("status.evidence.receiptSha256 has a public description");
+    for required in [
+        "runner reported",
+        "never manufactures",
+        "independently hashes",
+        "NotAttempted`/`legacy-unbound",
+        "no controller-computed digest",
+    ] {
+        assert!(
+            description.contains(required),
+            "the receipt digest description must name `{required}`; got {description}"
+        );
+    }
+    assert!(
+        !description.contains("COMPUTED by the controller over the bytes it fetched"),
+        "the stale self-hash trust claim must not reappear: {description}"
+    );
+}
+
 /// Interface **I34**: `Restore.status.objectives{rtoSeconds, rpoSeconds,
 /// passRate, met}` and `Restore.status.integrity.partialReason`.
 ///

@@ -1378,11 +1378,10 @@ pub struct EvidencePresence {
 /// `covered` block (interface **I22**'s window) — so they are one observation
 /// rather than two round trips against the same bucket.
 /// **NOT `Copy` SINCE TASK 24**, and the reason is a `String`. `receipt_sha256`
-/// is the digest of the bytes this observation fetched, which the status has
-/// to record so that a LATER pass can re-fetch and compare — a verification
-/// that only checked the signature would accept a genuinely-signed OLDER
-/// receipt put in this one's place. Every call site that took the value by
-/// copy now takes it by reference.
+/// is the controller-computed digest of the bytes this observation fetched.
+/// It is used only to compare those bytes with the runner's immutable capture
+/// claim; it is never substituted for that claim in status. Every call site
+/// that took the value by copy now takes it by reference.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ArchiveObservation {
     /// Whether each of the two evidence objects exists.
@@ -1517,9 +1516,9 @@ pub fn observe_archive(store: &Store, keys: &EvidenceKeys) -> Option<ArchiveObse
     let records = document.as_ref().and_then(records_from_receipt);
     let capture = document.as_ref().and_then(capture_from_receipt);
     // THE DIGEST OF WHAT WAS ACTUALLY FETCHED, in the one spelling this corpus
-    // uses (`sha256:<lowercase hex>`), so a value read off the status and a
-    // value read out of a signed document compare as strings. Task 24's
-    // `verify_evidence` re-fetches this object on a later pass and compares.
+    // uses (`sha256:<lowercase hex>`), so it can be compared directly with the
+    // runner's immutable capture claim during this completion pass. This
+    // observation is never published as a fallback claim.
     let receipt_sha256 = receipt.as_deref().map(sha256_prefixed);
     Some(ArchiveObservation {
         presence: EvidencePresence {
@@ -2634,9 +2633,10 @@ pub fn finished_status_patch(
     if let Some(k) = keys.sidecar.as_ref() {
         evidence.insert("sidecarKey".to_string(), json!(k));
     }
-    // OMITTED, NEVER NULLED, when the receipt was not read: a merge patch with
-    // no key means "leave it alone", and a run whose receipt could not be
-    // fetched must not erase a digest a previous pass recorded.
+    // OMITTED, NEVER NULLED, when the runner did not report one canonical
+    // digest line: a merge patch with no key means "leave it alone". Fetched
+    // bytes never manufacture this capture claim, even when their self-hash
+    // and signature are otherwise valid.
     if let Some(d) = receipt_sha256 {
         evidence.insert("receiptSha256".to_string(), json!(d));
     }
@@ -4124,8 +4124,10 @@ async fn reconcile_backup_inner(
     // digest of the exact bytes it signed and uploaded. That CAPTURE fact is
     // published on the terminal patch above; it does not make this source a
     // verifier and cannot change the verdict selected below. Older runners
-    // report no digest and retain the previous absent-field behaviour. While a
-    // digest was demanded of every source this whole block was skipped for it,
+    // report no digest: the field remains absent, and fetched evidence is
+    // explicitly `NotAttempted`/`legacy-unbound` rather than being allowed to
+    // validate against its own controller-computed hash. While a digest was
+    // demanded of every source this whole block was skipped for it,
     // so an operator whose destination reads evidence with a grant only a pod
     // may hold (`SecretKeys`, `WorkloadIdentity`) saw NO
     // `status.evidence.verification` at all rather than the honest
