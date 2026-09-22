@@ -144,6 +144,9 @@ def load_secrets() -> None:
         "a-writer": "W" + secrets.token_urlsafe(20),
         "a-reader": "D" + secrets.token_urlsafe(20),
         "a-evidence-ro": "V" + secrets.token_urlsafe(20),
+        # EVF-1's `archiveRead` principal: read-only on the archive prefix AND
+        # `logweir/`, so an `ArchiveReadGrant` evidence read can succeed.
+        "a-archread": "K" + secrets.token_urlsafe(20),
         "a-denied": "X" + secrets.token_urlsafe(20),
         "b-writer": "B" + secrets.token_urlsafe(20),
         "b-evidence-ro": "N" + secrets.token_urlsafe(20),
@@ -1925,7 +1928,8 @@ def s11_criteria(status: dict[str, Any], job_conditions: list[dict[str, Any]],
 
 def not_attempted_is_honest(verification: Any,
                             identity_locations: Any) -> dict[str, bool]:
-    """Each clause S1.statusVerification rests on, judged on its own.
+    """Each clause S1.notAttempted rests on, judged on its own (it was
+    S1.statusVerification's, until dest-a's grant became readable by the Job).
 
     `NotAttempted` exists as a verdict distinct from `Invalid` precisely so an
     operator can tell "we did not check" from "it did not verify"; a block that
@@ -1936,8 +1940,10 @@ def not_attempted_is_honest(verification: Any,
     block = verification if isinstance(verification, dict) else {}
     return {
         "a verification block exists": verification is not None,
-        "the verdict is one of the three published":
-            block.get("result") in {"Valid", "Invalid", "NotAttempted"},
+        # The CRD's whole vocabulary: `Untrusted` since D3 §7.4, `Pending`
+        # since D2 §3.9's evidence-fetch Job. A word outside it is refused.
+        "the verdict is one of the published results":
+            block.get("result") in {"Valid", "Invalid", "Untrusted", "NotAttempted", "Pending"},
         "no controller identity location is allowed": not identity_locations,
         "the verdict is NotAttempted": block.get("result") == "NotAttempted",
         "NotAttempted says why": bool((block.get("detail") or "").strip()),
@@ -1946,57 +1952,888 @@ def not_attempted_is_honest(verification: Any,
 
 
 def s1b() -> None:
-    """The half of S1 the build could not reach, now that it reaches it.
+    """What S1's destination-backed runs' STATUS says about their evidence.
 
-    D2-EVIDENCE-NOTATTEMPTED-UNWRITTEN was that NO verification block was
-    written at all for a destination whose `evidenceRead` is `SecretKeys`: the
-    controller answered `EvidenceSource::NotAttempted`, but with
-    `receipt_sha256` absent the second status patch was skipped, so an operator
-    saw no verification field rather than an explicit `NotAttempted` with its
-    sentence. Silence and "we did not check" look identical to a console, which
-    is the whole reason `NotAttempted` exists as a verdict distinct from
-    `Invalid`.
+    THE EXPECTATION MOVED WITH THE PRODUCT, AND THE ROW SAYS SO. dest-a's and
+    dest-b's `evidenceRead` is a `SecretKeys` grant — a credential only a pod
+    may hold. Until EVIDENCE-FETCH-JOB-UNBUILT closed (`claude/evidence-fetch`,
+    D2 §3.9) the controller had no way to read it and published `NotAttempted`
+    with a sentence saying so; this row asserted exactly that, and it was right
+    for that build. D2 §3.9's evidence-fetch Job is that way: the controller
+    creates `lwc-ev-<sha256(uid:attempt)[:20]>` holding ONLY the read grant,
+    reads the relayed bytes, checks them against the RUNNER's receipt digest
+    and verifies the DSSE sidecar itself. So a `SecretKeys` destination now
+    reaches `Valid`, and `NotAttempted` belongs to a destination the Job
+    cannot use either — which `S1.notAttempted` (phase `s1c`) keeps asserting.
 
-    This row hard-coded `notRun` and recorded the measurement beside it, so a
-    closed defect could not move its verdict — the block became real and the
-    row still said `notRun` (lab-refresh-3 §8.4). It asserts now.
+    The premise clause stays: the installation policy allowlists no
+    controller-identity location, so a `Valid` here can only have come through
+    the Job, never through the controller's own read-only handle.
     """
     with Scenario("S1.statusVerification",
                   "status.evidence.verification on a destination-backed Backup") as sc:
-        obj = get_opt("backup", "bk-a")
-        check(obj is not None, "Backup/bk-a is absent; run S1 first")
-        verification = (obj.get("status", {}).get("evidence", {}) or {}).get("verification")
         policy = get_opt("configmap", "weirkeeper-policy", LAB_NS)
         identity_locations = None
         if policy and "policy.json" in policy.get("data", {}):
             identity_locations = json.loads(policy["data"]["policy.json"]).get(
                 "evidence", {}).get("controllerIdentityLocations")
-        sc.detail["observedVerificationField"] = verification
         sc.detail["policyControllerIdentityLocations"] = identity_locations
-        artifact("objects/s1/status-verification.json",
-                 {"verification": verification,
-                  "policyControllerIdentityLocations": identity_locations,
-                  "destinationEvidenceRead": "SecretKeys"})
-        # WHY `NotAttempted` IS THE RIGHT ANSWER HERE, and not a failure to
-        # verify: dest-a's `evidenceRead` is `SecretKeys`, a grant only a pod may
-        # hold, and the only other route — `ControllerIdentity` — needs an entry
-        # in the shared installation policy's
-        # `evidence.controllerIdentityLocations`, which the lab deliberately
-        # leaves empty. The premise is a clause of its own, so a policy that
-        # started listing one fails this row instead of quietly changing what it
-        # means.
-        criteria = not_attempted_is_honest(verification, identity_locations)
-        sc.detail["criteria"] = criteria
-        sc.detail["notAttemptedDetail"] = (verification or {}).get("detail")
-        failed = sorted(name for name, ok in criteria.items() if not ok)
-        check(not failed,
-              "S1.statusVerification: " + "; ".join(failed)
-              + f". Observed {json.dumps(verification)} with "
-              f"controllerIdentityLocations={identity_locations!r}. An absent block is the "
-              "silence D2-EVIDENCE-NOTATTEMPTED-UNWRITTEN was about: the operator cannot "
-              "tell 'we did not check' from 'nobody wrote anything'")
+        failed_all: list[str] = []
+        for name in ("bk-a", "bk-b"):
+            obj = get_opt("backup", name)
+            check(obj is not None, f"Backup/{name} is absent; run S1 first")
+            # BOUNDED, AND LONG ENOUGH FOR THE JOB: a fetch is a pod start plus
+            # the plan's 120 s budget plus a requeue, so the 45 s the old
+            # settle allowed would have read `Pending` and called it a verdict.
+            obj = settle_reached_verdict("backup", name)
+            verification = (obj.get("status", {}).get("evidence", {}) or {}).get("verification")
+            criteria = fetched_verdict_is_valid(obj, identity_locations)
+            sc.detail.setdefault("backups", {})[name] = {
+                "observedVerificationField": verification,
+                "observation": ((obj.get("status") or {}).get("evidence") or {}).get(
+                    "observation"),
+                "windowCovered": (obj.get("status") or {}).get("windowCovered"),
+                "criteria": criteria,
+            }
+            failed_all += [f"{name}: {k}" for k, ok in criteria.items() if not ok]
+        artifact("objects/s1/status-verification.json", sc.detail)
+        check(not failed_all,
+              "S1.statusVerification: " + "; ".join(failed_all)
+              + ". A SecretKeys destination is read by D2 §3.9's evidence-fetch Job on this "
+              "build; `NotAttempted` here is EVIDENCE-FETCH-JOB-UNBUILT reproduced, and "
+              "`Pending` after the bounded wait is a fetch that never finished")
         # The receipt itself is verified from its stored bytes in S1; this row
         # is only about what the STATUS says.
+
+
+# --------------------------------------------------------------------------
+# D2 §3.9 — the evidence-fetch Job (EVIDENCE-FETCH-JOB-UNBUILT, PLAT-08.1)
+#
+# lab-refresh-8's rows for `claude/evidence-fetch`. Every row judges a pure
+# predicate below over what a live object said, and `e2e/k8s/d2/
+# test_evidence_fetch_rows.py` drives each predicate over the shape the fixed
+# controller writes AND a planted-wrong shape it must refuse.
+# --------------------------------------------------------------------------
+
+#: `check/job.rs::evidence_fetch_job_name` — `lwc-ev-<first 20 hex of
+#: sha256(owner uid + ":" + attempt)>`. The unit twin reads the Rust source.
+EVIDENCE_FETCH_PREFIX = "lwc-ev-"
+EVIDENCE_FETCH_KIND = "evidenceFetch"
+#: `check::job::TTL_SECONDS`, patched on only after the verdict commits.
+EVIDENCE_FETCH_TTL_SECONDS = 600
+#: `evidence_fetch::RETRY_DELAYS_SECONDS[0]` — attempt 2 starts this long after
+#: attempt 1's `NotAttempted`.
+EVIDENCE_FETCH_FIRST_RETRY_SECONDS = 60
+#: THE BOUNDED WAIT FOR A REACHED VERDICT. A fetch is an image-present pod
+#: start, the plan's `FETCH_TIMEOUT_SECONDS` (120) and one requeue (15 s); the
+#: Job's own deadline is that plus `DEADLINE_MARGIN_SECONDS` (90). 240 s
+#: covers the whole budget of one attempt, and not a retry.
+VERDICT_SETTLE_SECONDS = 240
+#: The verdicts that END a wait. `Pending` is not one: it is "the Job is
+#: reading", and a wait that stopped on it would call a fetch in flight a
+#: verdict.
+REACHED_VERDICTS = frozenset({"Valid", "Invalid", "Untrusted", "NotAttempted"})
+#: The codes an unusable `evidenceRead` grant surfaces as — the kubelet's
+#: `CreateContainerConfigError` classified (`check/waiting.rs`), or the store's
+#: own denial relayed by the runner.
+BROKEN_GRANT_CODES = ("CredentialSecretKeyMissing", "CredentialSecretNotFound", "AccessDenied")
+
+
+def evidence_fetch_job_name(owner_uid: str, attempt: int) -> str:
+    """The Job name D2 §3.9 step 2 derives, for one attempt."""
+    digest_hex = hashlib.sha256(f"{owner_uid}:{attempt}".encode()).hexdigest()
+    return EVIDENCE_FETCH_PREFIX + digest_hex[:20]
+
+
+def verdict_of(obj: dict[str, Any] | None) -> str | None:
+    return ((((obj or {}).get("status") or {}).get("evidence") or {})
+            .get("verification") or {}).get("result")
+
+
+def settle_reached_verdict(kind: str, name: str, *, seconds: int = VERDICT_SETTLE_SECONDS,
+                           namespace: str = "") -> dict[str, Any]:
+    """Wait a BOUNDED time for a reached verdict and return the object either way.
+
+    The row then judges what is there: a `Pending` still standing at the bound
+    is a fetch that did not finish, and the predicate says so by name.
+    """
+    deadline = time.monotonic() + seconds
+    obj = get(kind, name, namespace)
+    while time.monotonic() < deadline and verdict_of(obj) not in REACHED_VERDICTS:
+        time.sleep(3)
+        obj = get(kind, name, namespace)
+    return obj
+
+
+def _ms_window(window: Any) -> bool:
+    w = window if isinstance(window, dict) else {}
+    lo, hi = w.get("fromMs"), w.get("toMs")
+    return isinstance(lo, int) and isinstance(hi, int) and 0 < lo <= hi
+
+
+def _controller_ref(obj: dict[str, Any] | None, kind: str, uid: str | None) -> bool:
+    """Whether `obj` is CONTROLLED by (kind, uid) — the ownerReference with
+    `controller: true`, which is the only one the controller reads."""
+    return bool(uid) and any(
+        ref.get("kind") == kind and ref.get("uid") == uid and ref.get("controller") is True
+        for ref in (((obj or {}).get("metadata") or {}).get("ownerReferences") or []))
+
+
+def _condition(obj: dict[str, Any] | None, kind: str) -> dict[str, Any]:
+    for c in (((obj or {}).get("status") or {}).get("conditions") or []):
+        if c.get("type") == kind:
+            return c
+    return {}
+
+
+def fetched_verdict_is_valid(obj: dict[str, Any],
+                             identity_locations: Any) -> dict[str, bool]:
+    """A `Backup` whose `SecretKeys`-read evidence the Job relayed and the
+    controller verified — each clause on its own.
+
+    The window, records and capture are the receipt's facts, projected only
+    when the digest and the binding hold (`controllers/backup.rs`), so their
+    presence is what separates a verified receipt from a verdict word.
+    """
+    meta = obj.get("metadata") or {}
+    status = obj.get("status") or {}
+    evidence = status.get("evidence") or {}
+    ver = evidence.get("verification") or {}
+    obs = evidence.get("observation") or {}
+    attempt = obs.get("attempt") if isinstance(obs.get("attempt"), int) else 0
+    records = status.get("records")
+    return {
+        "the verdict is Valid": ver.get("result") == "Valid",
+        "a trusted key matched": bool(ver.get("matchedKeyId")),
+        "the observation names the Job of the attempt it records":
+            attempt >= 1 and (obs.get("jobRef") or {}).get("name")
+            == evidence_fetch_job_name(meta.get("uid") or "", attempt),
+        "the grant the Job read with is a pod-only SecretKeys grant":
+            obs.get("mode") == "SecretKeys",
+        "the relay read both objects whole (presence Complete)":
+            obs.get("presence") == "Complete",
+        "no retry is pending on a reached verdict": not obs.get("retryAfter"),
+        "windowCovered is projected from the verified receipt":
+            _ms_window(status.get("windowCovered")),
+        "records are projected": records not in (None, {}, [], 0),
+        "capture is projected": bool((status.get("capture") or {}).get("startedAt")),
+        "Verified=True": _condition(obj, "Verified").get("status") == "True",
+        "the runner's receipt digest is published": str(
+            evidence.get("receiptSha256") or "").startswith("sha256:"),
+        "no controller-identity location is allowlisted, so the Job and not the "
+        "controller's own handle read it": not identity_locations,
+    }
+
+
+# --- the verdict trail: every resourceVersion a watch saw ----------------------
+
+
+def parse_watch_stream(text: str) -> list[dict[str, Any]]:
+    """`kubectl get … --watch --output-watch-events -o json` prints one JSON
+    document per event, pretty-printed and back to back. A watch stopped by
+    the harness can leave a truncated LAST document; it is dropped, never
+    guessed at."""
+    decoder = json.JSONDecoder()
+    out: list[dict[str, Any]] = []
+    i, n = 0, len(text)
+    while i < n:
+        while i < n and text[i].isspace():
+            i += 1
+        if i >= n:
+            break
+        try:
+            doc, end = decoder.raw_decode(text, i)
+        except json.JSONDecodeError:
+            break
+        if isinstance(doc, dict):
+            out.append(doc)
+        i = end
+    return out
+
+
+def verdict_trail(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One entry per resourceVersion, in the order the API server sent them.
+
+    A merge patch is one resourceVersion, so `Pending` — written in its own
+    patch between the terminal patch and the verdict — is one entry here even
+    when it lived for a second, which a poll can miss and a watch cannot.
+    """
+    trail: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for event in events:
+        obj = event.get("object") if isinstance(event.get("object"), dict) else event
+        meta = obj.get("metadata") or {}
+        rv = str(meta.get("resourceVersion") or "")
+        if not rv or rv in seen:
+            continue
+        seen.add(rv)
+        status = obj.get("status") or {}
+        evidence = status.get("evidence") or {}
+        ver = evidence.get("verification") or {}
+        obs = evidence.get("observation") or {}
+        trail.append({
+            "type": event.get("type"),
+            "resourceVersion": rv,
+            "uid": meta.get("uid"),
+            "phase": status.get("phase"),
+            "result": ver.get("result"),
+            "detail": ver.get("detail"),
+            "verifiedAt": ver.get("verifiedAt"),
+            "attempt": obs.get("attempt"),
+            "jobRef": (obs.get("jobRef") or {}).get("name"),
+            "jobUid": (obs.get("jobRef") or {}).get("uid"),
+            "mode": obs.get("mode"),
+            "presence": obs.get("presence"),
+            "retryAfter": obs.get("retryAfter"),
+            "windowCovered": status.get("windowCovered"),
+        })
+    return trail
+
+
+LWTIMEOUT = pathlib.Path("/tmp/lwtimeout")
+
+
+class ObjectWatch:
+    """A `kubectl --watch` of ONE object by name, from before it exists.
+
+    `--field-selector metadata.name=` rather than `get <kind> <name>`, because
+    the latter refuses an object that does not exist yet and the first
+    `Pending` can be written seconds after the create. The child is bounded
+    twice: `/tmp/lwtimeout` (WORKER-RULES) when the host has it, and `stop()`
+    — always called from a `finally` — terminates and then kills it.
+    """
+
+    def __init__(self, plural: str, name: str, *, seconds: int = 1800,
+                 namespace: str = "") -> None:
+        self.plural, self.name = plural, name
+        self.path = OUT / f"watch-{plural}-{name}-{int(time.time())}.json"
+        args = CTX + ["-n", namespace or NS, "get", plural,
+                      "--field-selector", f"metadata.name={name}",
+                      "--watch", "--output-watch-events", "-o", "json"]
+        if LWTIMEOUT.exists():
+            args = [str(LWTIMEOUT), str(seconds)] + args
+        self.handle = self.path.open("w")
+        self.proc = subprocess.Popen(args, stdout=self.handle, stderr=subprocess.DEVNULL,
+                                     cwd=ROOT)
+        self.deadline = time.monotonic() + seconds
+
+    def trail(self) -> list[dict[str, Any]]:
+        self.handle.flush()
+        return verdict_trail(parse_watch_stream(self.path.read_text()))
+
+    def stop(self) -> list[dict[str, Any]]:
+        if self.proc.poll() is None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                self.proc.wait(timeout=15)
+        self.handle.close()
+        return verdict_trail(parse_watch_stream(self.path.read_text()))
+
+
+def trail_went_pending_then(trail: list[dict[str, Any]], uid: str, final: str,
+                            *, allowed: frozenset[str] = frozenset({"Pending", "Valid"}),
+                            ) -> dict[str, bool]:
+    """What a watch saw on the way to `final`, each clause on its own.
+
+    `Pending` is written in the same pass that creates attempt 1's Job and
+    names it (D2 §3.9 step 3); the verdict replaces it. A trail with no
+    `Pending` is a verdict that did not come through the Job — the pre-fetch
+    build's `NotAttempted`, or a controller-identity read.
+    """
+    results = [t.get("result") for t in trail]
+    pending = [i for i, r in enumerate(results) if r == "Pending"]
+    finals = [i for i, r in enumerate(results) if r == final]
+    return {
+        "the verdict was observed Pending while the fetch ran": bool(pending),
+        "the Pending block named attempt 1's Job": any(
+            trail[i].get("attempt") == 1
+            and trail[i].get("jobRef") == evidence_fetch_job_name(uid, 1)
+            for i in pending),
+        f"Pending preceded {final} and never followed it":
+            bool(pending) and bool(finals) and pending[0] < finals[0]
+            and not any(i > finals[0] for i in pending),
+        f"no verdict outside {sorted(allowed)} was written on the way":
+            {r for r in results if r} <= set(allowed),
+    }
+
+
+def fetch_reached_valid(trail: list[dict[str, Any]], final: dict[str, Any],
+                        identity_locations: Any) -> dict[str, bool]:
+    """EVF-1: Pending → Valid through the Job, with the receipt's facts."""
+    uid = (final.get("metadata") or {}).get("uid") or ""
+    clauses = trail_went_pending_then(trail, uid, "Valid")
+    clauses.update(fetched_verdict_is_valid(final, identity_locations))
+    return clauses
+
+
+def evidence_job_holds_only_the_read_grant(
+    job: dict[str, Any] | None, pod: dict[str, Any] | None,
+    plan: dict[str, Any] | None, owner: dict[str, Any], *,
+    owner_kind: str, read_secret: str, forbidden_secrets: set[str],
+) -> dict[str, bool]:
+    """EVF-2: the Job holds EXACTLY the `evidenceRead` grant and nothing else.
+
+    `forbidden_secrets` is what an `ArchiveReadGrant` must never resolve to —
+    the archive-WRITE Secret (the one D2 §3.4 would fall back to if the grant
+    were resolved as `archiveWrite`) and the signing key.
+    """
+    job = job or {}
+    meta = job.get("metadata") or {}
+    template = ((job.get("spec") or {}).get("template") or {}).get("spec") or {}
+    containers = template.get("containers") or []
+    env = [e for c in containers for e in (c.get("env") or [])]
+    refs = {e.get("name"): ((e.get("valueFrom") or {}).get("secretKeyRef") or {}).get("name")
+            for e in env if ((e.get("valueFrom") or {}).get("secretKeyRef"))}
+    volumes = template.get("volumes") or []
+    named_secrets = set(refs.values())
+    named_secrets |= {(v.get("secret") or {}).get("secretName") for v in volumes
+                      if v.get("secret")}
+    named_secrets |= {((f.get("secretRef") or {}).get("name")) for c in containers
+                      for f in (c.get("envFrom") or []) if f.get("secretRef")}
+    check_plan = next((v for v in volumes if v.get("name") == "check-plan"), {})
+    owner_uid = (owner.get("metadata") or {}).get("uid") or ""
+    attempt = ((((owner.get("status") or {}).get("evidence") or {}).get("observation") or {})
+               .get("attempt"))
+    return {
+        "the Job is the lwc-ev- name of the attempt the status records":
+            isinstance(attempt, int)
+            and meta.get("name") == evidence_fetch_job_name(owner_uid, attempt),
+        "labelled logweir.dev/check-kind=evidenceFetch":
+            (meta.get("labels") or {}).get("logweir.dev/check-kind") == EVIDENCE_FETCH_KIND,
+        f"controlled by this {owner_kind} (kind, uid, controller: true)":
+            _controller_ref(job, owner_kind, owner_uid),
+        "its credential env is exactly AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY":
+            set(refs) - {"AWS_SESSION_TOKEN"} == {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"},
+        f"both from the evidenceRead grant's own Secret {read_secret}":
+            bool(refs) and set(refs.values()) == {read_secret},
+        "no Secret the fetch must not hold is named anywhere in the pod":
+            not (named_secrets & set(forbidden_secrets)),
+        "no evidence-WRITE variable (LOGWEIR_EVIDENCE_AWS_*)":
+            not any(str(e.get("name", "")).startswith("LOGWEIR_EVIDENCE_AWS_") for e in env),
+        "no envFrom at all": not any(c.get("envFrom") for c in containers),
+        "automountServiceAccountToken is false":
+            template.get("automountServiceAccountToken") is False,
+        "it runs as logweir-runner": template.get("serviceAccountName") == "logweir-runner",
+        "its volumes are exactly check-plan and work":
+            sorted(v.get("name") for v in volumes) == ["check-plan", "work"],
+        "no volume is a Secret or a projected token":
+            not any(v.get("secret") or v.get("projected") for v in volumes),
+        "check-plan mounts this Job's own plan ConfigMap, <job>-plan":
+            (check_plan.get("configMap") or {}).get("name") == f"{meta.get('name')}-plan",
+        f"the plan ConfigMap is immutable and controlled by this {owner_kind}":
+            (plan or {}).get("immutable") is True
+            and _controller_ref(plan, owner_kind, owner_uid),
+        "the real pod is controlled by this Job's UID (SEC-PODLOG)":
+            _controller_ref(pod, "Job", meta.get("uid")),
+        "ttlSecondsAfterFinished is 600 once the verdict is committed":
+            (job.get("spec") or {}).get("ttlSecondsAfterFinished")
+            == EVIDENCE_FETCH_TTL_SECONDS,
+    }
+
+
+def _seconds_between(earlier: str | None, later: str | None) -> float | None:
+    try:
+        return (rfc3339(str(later)) - rfc3339(str(earlier))).total_seconds()
+    except (TypeError, ValueError):
+        return None
+
+
+def broken_grant_retries(trail: list[dict[str, Any]], final: dict[str, Any],
+                         attempt_two: dict[str, Any] | None) -> dict[str, bool]:
+    """EVF-4: an unusable grant is an honest `NotAttempted`, and it is retried.
+
+    A Job failure (the kubelet could not project the Secret's key) is not an
+    answer about the evidence, so D2 §3.9 step 5 schedules attempt 2 at +1 m
+    with a NEW Job name; nothing is verified and no window is projected.
+    """
+    uid = (final.get("metadata") or {}).get("uid") or ""
+    first = next((t for t in trail
+                  if t.get("result") == "NotAttempted" and t.get("attempt") == 1), {})
+    detail = str(first.get("detail") or "")
+    gap = _seconds_between(first.get("verifiedAt"), first.get("retryAfter"))
+    status = final.get("status") or {}
+    return {
+        "attempt 1 ended NotAttempted": bool(first),
+        "its detail names attempt 1's Job": evidence_fetch_job_name(uid, 1) in detail,
+        "and the grant's failure by its code": any(c in detail for c in BROKEN_GRANT_CODES),
+        "and says when attempt 2 starts": "attempt 2 starts at" in detail,
+        "a retry is scheduled about +60 s after that verdict":
+            gap is not None and 45 <= gap <= 90,
+        "the verdict was never Valid":
+            "Valid" not in {t.get("result") for t in trail} and verdict_of(final) != "Valid",
+        "no window was ever projected":
+            all(t.get("windowCovered") is None for t in trail)
+            and status.get("windowCovered") is None,
+        "attempt 2's own Job lwc-ev-<sha256(uid:2)> was created":
+            ((attempt_two or {}).get("metadata") or {}).get("name")
+            == evidence_fetch_job_name(uid, 2),
+        "controlled by the same Backup": _controller_ref(attempt_two, "Backup", uid),
+        "and the status moved on to attempt 2": any(t.get("attempt") == 2 for t in trail),
+    }
+
+
+def restart_resumed_the_fetch(trail: list[dict[str, Any]], final: dict[str, Any],
+                              jobs: list[dict[str, Any]], *, down_at: str, up_at: str | None,
+                              pending_before_down: bool) -> dict[str, bool]:
+    """EVF-5: a controller that went away while the Job ran finds THAT Job again.
+
+    The Job's name is a pure function of the Backup's UID and the attempt, so
+    the controller that comes back recomputes it, GETs it and reads its relay
+    — one attempt, one Job, never two. The verdict must be written AFTER the
+    new controller started, or the row measured the old one finishing.
+    """
+    uid = (final.get("metadata") or {}).get("uid") or ""
+    names = sorted((j.get("metadata") or {}).get("name") for j in jobs)
+    obs = (((final.get("status") or {}).get("evidence") or {}).get("observation") or {})
+    ver = (((final.get("status") or {}).get("evidence") or {}).get("verification") or {})
+    first = next((j for j in jobs if (j.get("metadata") or {}).get("name")
+                  == evidence_fetch_job_name(uid, 1)), {})
+    created = (first.get("metadata") or {}).get("creationTimestamp")
+    after_up = _seconds_between(up_at, ver.get("verifiedAt"))
+    before_down = _seconds_between(created, down_at)
+    return {
+        "the verdict was Pending, naming attempt 1's Job, when the controller went down":
+            pending_before_down,
+        "attempt 1's Job was created before the controller went down":
+            before_down is not None and before_down >= 0,
+        "exactly one evidence-fetch Job exists for this Backup, and it is attempt 1's":
+            names == [evidence_fetch_job_name(uid, 1)],
+        "the verdict is Valid": ver.get("result") == "Valid",
+        "and it names the Job the old controller created":
+            bool(obs.get("jobRef")) and (obs.get("jobRef") or {}).get("uid")
+            == (first.get("metadata") or {}).get("uid"),
+        "the verdict was written after the new controller started":
+            after_up is not None and after_up >= 0,
+        "the watch saw nothing but Pending and Valid":
+            {t.get("result") for t in trail if t.get("result")} <= {"Pending", "Valid"},
+    }
+
+
+def restore_fetch_reached_valid(trail: list[dict[str, Any]], final: dict[str, Any],
+                                job: dict[str, Any] | None) -> dict[str, bool]:
+    """EVF-6: a destination-backed `Restore`'s scorecard, Pending → Valid.
+
+    The facts are copied from the relayed bytes only when the scorecard's
+    `run_id` is the run its printed key names (`controllers/restore.rs`), and
+    `Verified=True` requires `outcome: pass` as well as `Valid`.
+    """
+    meta = final.get("metadata") or {}
+    uid = meta.get("uid") or ""
+    status = final.get("status") or {}
+    evidence = status.get("evidence") or {}
+    ver = evidence.get("verification") or {}
+    obs = evidence.get("observation") or {}
+    verified = _condition(final, "Verified").get("status")
+    clauses = trail_went_pending_then(trail, uid, "Valid")
+    clauses.update({
+        "the verdict is Valid": ver.get("result") == "Valid",
+        "a trusted key matched": bool(ver.get("matchedKeyId")),
+        "the observation names attempt's Job and a SecretKeys grant":
+            isinstance(obs.get("attempt"), int)
+            and (obs.get("jobRef") or {}).get("name")
+            == evidence_fetch_job_name(uid, obs.get("attempt") or 0)
+            and obs.get("mode") == "SecretKeys",
+        "the relay read both objects whole (presence Complete)":
+            obs.get("presence") == "Complete",
+        "outcome is copied from the relayed scorecard": bool(status.get("outcome")),
+        "objectives are copied from it": bool(status.get("objectives")),
+        "the scorecard digest over the relayed bytes is published":
+            str(evidence.get("scorecardSha256") or "").startswith("sha256:"),
+        "Verified=True exactly when outcome is pass":
+            (verified == "True") == (status.get("outcome") == "pass"),
+        "the Job is controlled by this Restore": _controller_ref(job, "Restore", uid),
+    })
+    return clauses
+
+
+def no_fetch_for_a_grant_no_job_may_use(obj: dict[str, Any], trail: list[dict[str, Any]],
+                                        fetch_jobs: list[dict[str, Any]],
+                                        identity_locations: Any) -> dict[str, bool]:
+    """S1.notAttempted: a destination the Job cannot read for either.
+
+    No `evidenceRead` at all, or `ControllerIdentity` at a location the
+    installation does not allowlist: the controller has no grant a pod may
+    hold and none it may use itself, so it creates NO Job, writes no
+    observation and says `NotAttempted` with its reason — the distinction the
+    verdict exists for. Silence would read as "nobody wrote anything".
+    """
+    verification = (((obj.get("status") or {}).get("evidence") or {}).get("verification"))
+    clauses = not_attempted_is_honest(verification, identity_locations)
+    clauses.update({
+        "no evidence-fetch Job was created for it": not fetch_jobs,
+        "no observation block is written":
+            not (((obj.get("status") or {}).get("evidence") or {}).get("observation")),
+        "the verdict never went through Pending":
+            "Pending" not in {t.get("result") for t in trail},
+        "no window is projected from a receipt nobody read":
+            (obj.get("status") or {}).get("windowCovered") is None,
+    })
+    return clauses
+
+
+# --- the live phases -----------------------------------------------------------
+
+
+def identity_locations_now() -> Any:
+    policy = get_opt("configmap", "weirkeeper-policy", LAB_NS)
+    if policy and "policy.json" in policy.get("data", {}):
+        return json.loads(policy["data"]["policy.json"]).get("evidence", {}).get(
+            "controllerIdentityLocations")
+    return None
+
+
+def fetch_jobs_for(uid: str) -> list[dict[str, Any]]:
+    """Every evidence-fetch Job in this namespace whose owner-uid LABEL is `uid`.
+
+    The label is an index, not an identity (`check/job.rs`), so the rows that
+    care about ownership also read `ownerReferences`."""
+    return get_list("jobs", selector=f"logweir.dev/check-kind={EVIDENCE_FETCH_KIND},"
+                                     f"logweir.dev/check-owner-uid={uid}")
+
+
+def owned_pod_of(job: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not job:
+        return None
+    pods = get_list("pods", selector=f"batch.kubernetes.io/job-name={job['metadata']['name']}")
+    owned_pods = [p for p in pods if _controller_ref(p, "Job", job["metadata"].get("uid"))]
+    return (owned_pods or pods or [None])[0]
+
+
+def watched_backup(name: str, obj: dict[str, Any], *, seconds: int = 1800,
+                   settle: int = VERDICT_SETTLE_SECONDS,
+                   until: Callable[[dict[str, Any]], bool] | None = None,
+                   ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Create a Backup under a watch, wait for its terminal phase and then for
+    `until` (default: a reached verdict), and return (final object, trail)."""
+    watch = ObjectWatch("backups", name, seconds=seconds)
+    try:
+        apply(obj)
+        wait_backup(name, timeout=720)
+        done = until or (lambda o: verdict_of(o) in REACHED_VERDICTS)
+        deadline = time.monotonic() + settle
+        final = get("backup", name)
+        while time.monotonic() < deadline and not done(final):
+            time.sleep(3)
+            final = get("backup", name)
+        time.sleep(2)  # let the watch deliver the event the last read already saw
+    finally:
+        trail = watch.stop()
+    return final, trail
+
+
+def ensure_archive_read_principal() -> None:
+    """dest-arg's `archiveRead` grant: its OWN principal, read-only on both the
+    archive prefix and `logweir/`, so an `ArchiveReadGrant` evidence read can
+    succeed — and so a Job that resolved the grant as `archiveWrite` would name
+    a DIFFERENT Secret, which EVF-2 refuses."""
+    if state.get("archiveReadPrincipal"):
+        return
+    literal_secret("a-archread", {"access-key-id": "a-archread",
+                                  "secret-access-key": SECRETS["a-archread"]})
+    minio_user("a", "a-archread", "d2w14-a-archread",
+               _policy("lw-a", write=False, prefixes=[ARCHIVE_PREFIX + "/", "logweir/"]))
+    state["archiveReadPrincipal"] = True
+    save()
+
+
+def wait_destination(name: str) -> dict[str, Any]:
+    return wait_for(
+        "backupdestination", name,
+        lambda o: any(c.get("type") == "Valid"
+                      for c in o.get("status", {}).get("conditions", [])),
+        timeout=180, what="a Valid condition")
+
+
+def evf() -> None:
+    """EVF-1 and EVF-2: an `ArchiveReadGrant` destination, Pending → Valid, and
+    the Job that read it holds exactly that grant."""
+    ensure_archive_read_principal()
+    apply(destination("dest-arg", bucket="lw-a", prefix=ARCHIVE_PREFIX,
+                      endpoint=f"http://minio-a.{NS}.svc:9000", security="InsecureHTTP",
+                      archive_write="a-writer", archive_read="a-archread",
+                      evidence_write="a-writer", evidence_read_mode="ArchiveReadGrant",
+                      description="evidenceRead: ArchiveReadGrant over a separate read "
+                                  "principal (EVF-1)"))
+    artifact("objects/evf/backupdestination-dest-arg.json", wait_destination("dest-arg"))
+    name = f"bk-evf1-{attempt('evf1Attempt')}"
+    identity = identity_locations_now()
+    with Scenario("EVF-1", "an ArchiveReadGrant destination goes Pending -> Valid through "
+                           "the evidence-fetch Job") as sc:
+        final, trail = watched_backup(
+            name, backup(name, source="source-admin", topics=["orders"],
+                         destination_ref="dest-arg"))
+        artifact(f"objects/evf/backup-{name}.json", final)
+        artifact(f"objects/evf/trail-{name}.json", trail)
+        clauses = fetch_reached_valid(trail, final, identity)
+        sc.detail.update({"backup": name, "uid": final["metadata"]["uid"],
+                          "trail": trail, "clauses": clauses,
+                          "policyControllerIdentityLocations": identity})
+        failed = sorted(k for k, ok in clauses.items() if not ok)
+        check(not failed, "EVF-1: " + "; ".join(failed))
+    with Scenario("EVF-2", "the evidence-fetch Job holds only the read grant; its pod is "
+                           "controlled by the Job's UID") as sc:
+        final = get("backup", name)
+        obs = ((final.get("status") or {}).get("evidence") or {}).get("observation") or {}
+        job_name = (obs.get("jobRef") or {}).get("name") or evidence_fetch_job_name(
+            final["metadata"]["uid"], 1)
+        # THE TTL IS PATCHED AFTER THE VERDICT COMMITS — a second or two later.
+        job = None
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            job = get_opt("job", job_name)
+            if job is None or (job.get("spec") or {}).get("ttlSecondsAfterFinished"):
+                break
+            time.sleep(2)
+        pod = owned_pod_of(job)
+        plan = get_opt("configmap", f"{job_name}-plan")
+        for label, body in (("job", job), ("pod", pod), ("plan", plan)):
+            artifact(f"objects/evf/{label}-{job_name}.json", body or {})
+        clauses = evidence_job_holds_only_the_read_grant(
+            job, pod, plan, final, owner_kind="Backup", read_secret="a-archread",
+            forbidden_secrets={"a-writer", "logweir-signing-key"})
+        sc.detail.update({"job": job_name, "jobUid": ((job or {}).get("metadata") or {}).get("uid"),
+                          "podOwnerReferences": ((pod or {}).get("metadata") or {}).get(
+                              "ownerReferences"),
+                          "clauses": clauses})
+        failed = sorted(k for k, ok in clauses.items() if not ok)
+        check(job is not None, f"the evidence-fetch Job {job_name} was not found at all")
+        check(not failed, "EVF-2: " + "; ".join(failed))
+    with Scenario("EVF-1.ttl", "the finished evidence-fetch Job is collected by its TTL") as sc:
+        # ttlSecondsAfterFinished 600, plus the TTL controller's own lag.
+        gone = False
+        deadline = time.monotonic() + EVIDENCE_FETCH_TTL_SECONDS + 120
+        while time.monotonic() < deadline:
+            if get_opt("job", job_name) is None:
+                gone = True
+                break
+            time.sleep(15)
+        sc.detail.update({"job": job_name, "gone": gone})
+        check(gone, f"{job_name} still exists {EVIDENCE_FETCH_TTL_SECONDS + 120}s after its "
+                    "verdict; the TTL patch never landed or never took effect")
+
+
+def evf4() -> None:
+    """EVF-4: a broken `evidenceRead` grant is `NotAttempted`, and retried."""
+    literal_secret("ev-broken", {"access-key-id": "a-evidence-ro"})  # no secret-access-key
+    apply(destination("dest-evbroken", bucket="lw-a", prefix=ARCHIVE_PREFIX,
+                      endpoint=f"http://minio-a.{NS}.svc:9000", security="InsecureHTTP",
+                      archive_write="a-writer", archive_read="a-reader",
+                      evidence_write="a-writer", evidence_read="ev-broken",
+                      description="evidenceRead names a Secret with no secret-access-key "
+                                  "(EVF-4)"))
+    artifact("objects/evf4/backupdestination-dest-evbroken.json",
+             wait_destination("dest-evbroken"))
+    name = f"bk-evf4-{attempt('evf4Attempt')}"
+    with Scenario("EVF-4", "a broken evidenceRead grant is NotAttempted with a retry, and "
+                           "attempt 2 gets its own Job") as sc:
+        seen_two = lambda o: (((o.get("status") or {}).get("evidence") or {})  # noqa: E731
+                              .get("observation") or {}).get("attempt") == 2
+        final, trail = watched_backup(
+            name, backup(name, source="source-admin", topics=["orders"],
+                         destination_ref="dest-evbroken"),
+            settle=VERDICT_SETTLE_SECONDS + EVIDENCE_FETCH_FIRST_RETRY_SECONDS + 60,
+            until=seen_two)
+        uid = final["metadata"]["uid"]
+        attempt_two = get_opt("job", evidence_fetch_job_name(uid, 2))
+        artifact(f"objects/evf4/backup-{name}.json", final)
+        artifact(f"objects/evf4/trail-{name}.json", trail)
+        artifact(f"objects/evf4/attempt-2-job-{name}.json", attempt_two or {})
+        clauses = broken_grant_retries(trail, final, attempt_two)
+        sc.detail.update({"backup": name, "uid": uid, "trail": trail, "clauses": clauses})
+        failed = sorted(k for k, ok in clauses.items() if not ok)
+        check(not failed, "EVF-4: " + "; ".join(failed))
+
+
+def evf5() -> None:
+    """EVF-5: the controller goes away while the fetch Job runs and comes back.
+
+    CLUSTER LOCK. The shared controller is scaled to zero right after the
+    `Pending` block names attempt 1's Job, the Job is left to finish with no
+    controller at all, and the original replica count is restored in a
+    `finally` whatever happens. That is a restart with the widest possible gap:
+    the controller that writes the verdict is not the one that created the Job.
+
+    `notRun`, never `pass`, when the fetch beat the harness: a verdict written
+    before the old controller's pods were gone measured nothing about a restart.
+    """
+    title = ("a controller restart while the fetch Job runs creates no second Job, and the "
+             "verdict still arrives")
+    deploy = get("deployment", "weirkeeper", LAB_NS)
+    original = int((deploy.get("spec") or {}).get("replicas") or 1)
+    name = f"bk-evf5-{attempt('evf5Attempt')}"
+    watch = ObjectWatch("backups", name, seconds=2400)
+    try:
+        apply(backup(name, source="source-admin", topics=["orders"], destination_ref="dest-a"))
+        obj = wait_for("backup", name,
+                       lambda o: verdict_of(o) == "Pending" or verdict_of(o) in REACHED_VERDICTS,
+                       timeout=900, what="a Pending verdict or any reached one")
+        if verdict_of(obj) != "Pending":
+            record("EVF-5", title, "notRun",
+                   reason=f"the fetch finished ({verdict_of(obj)}) before a Pending read; "
+                          "re-run the phase",
+                   detail={"backup": name, "trail": watch.trail()})
+            return
+        uid = obj["metadata"]["uid"]
+        job_name = evidence_fetch_job_name(uid, 1)
+        down_at = now()
+        run(CTX + ["-n", LAB_NS, "scale", "deployment", "weirkeeper", "--replicas=0"],
+            timeout=60)
+        deadline = time.monotonic() + 180
+        while time.monotonic() < deadline and get_list(
+                "pods", LAB_NS, "app.kubernetes.io/component=control-plane"):
+            time.sleep(3)
+        gone_at = now()
+        while_down = get("backup", name)
+        if verdict_of(while_down) != "Pending":
+            record("EVF-5", title, "notRun",
+                   reason=f"the old controller wrote {verdict_of(while_down)} before its pods "
+                          "were gone; nothing about a restart was measured — re-run the phase",
+                   detail={"backup": name, "downAt": down_at, "oldPodsGoneAt": gone_at})
+            return
+        with Scenario("EVF-5", title) as sc:
+            wait_for("job", job_name,
+                     lambda j: bool((j.get("status") or {}).get("succeeded")
+                                    or (j.get("status") or {}).get("failed")),
+                     timeout=300, what="the Job to finish with no controller running")
+            while_down = get("backup", name)
+            run(CTX + ["-n", LAB_NS, "scale", "deployment", "weirkeeper",
+                       f"--replicas={original}"], timeout=60)
+            run(CTX + ["-n", LAB_NS, "rollout", "status", "deployment/weirkeeper",
+                       "--timeout=240s"], timeout=270)
+            pods = get_list("pods", LAB_NS, "app.kubernetes.io/component=control-plane")
+            starts = [(p.get("status") or {}).get("startTime") for p in pods]
+            up_at = min((t for t in starts if t), default=None)
+            final = settle_reached_verdict("backup", name)
+            time.sleep(2)
+            trail = watch.trail()
+            jobs = fetch_jobs_for(uid)
+            artifact(f"objects/evf5/backup-{name}.json", final)
+            artifact(f"objects/evf5/trail-{name}.json", trail)
+            artifact(f"objects/evf5/jobs-{name}.json", jobs)
+            clauses = restart_resumed_the_fetch(trail, final, jobs, down_at=down_at,
+                                                up_at=up_at, pending_before_down=True)
+            clauses["the verdict was still Pending while no controller ran"] = (
+                verdict_of(while_down) == "Pending")
+            sc.detail.update({"backup": name, "uid": uid, "downAt": down_at,
+                              "oldPodsGoneAt": gone_at, "upAt": up_at,
+                              "originalReplicas": original, "clauses": clauses})
+            failed = sorted(k for k, ok in clauses.items() if not ok)
+            check(not failed, "EVF-5: " + "; ".join(failed))
+    finally:
+        watch.stop()
+        current = int((get("deployment", "weirkeeper", LAB_NS).get("spec") or {}).get(
+            "replicas") or 0)
+        if current != original:
+            run(CTX + ["-n", LAB_NS, "scale", "deployment", "weirkeeper",
+                       f"--replicas={original}"], timeout=60)
+            run(CTX + ["-n", LAB_NS, "rollout", "status", "deployment/weirkeeper",
+                       "--timeout=240s"], timeout=270, check=False)
+        artifact("objects/evf5/controller-restored.json",
+                 {"originalReplicas": original,
+                  "replicasNow": (get("deployment", "weirkeeper", LAB_NS).get("spec") or {})
+                  .get("replicas")})
+
+
+def evf6() -> None:
+    """EVF-6: a destination-backed Restore's scorecard, fetched by dest-b's
+    `SecretKeys` `evidenceRead` grant, goes Pending -> Valid."""
+    facts = backup_facts("bk-a", "a", "lw-a")
+    backup_id, finished = facts["backupId"], facts["pointInTime"]
+    target_id = get("kafkacluster", "target")["status"]["clusterId"]
+    source_id = get("kafkacluster", "source-admin")["status"]["clusterId"]
+    index = attempt("evf6Attempt")
+    restore_name, approval_name = f"rs-evf6-{index}", f"rs-evf6-approval-{index}"
+    prefix = f"d2w14-evf6-{index}-"
+    with Scenario("EVF-6", "a Restore's scorecard goes Pending -> Valid through the "
+                           "evidence-fetch Job") as sc:
+        plan = restore_plan(backup_id, finished, prefix)
+        minted = mint_approval(approval_name, restore_name, plan, ticket="EVF6")
+        approval_bundle("logweir-approval-bundle", minted, [target_id], source_id)
+        watch = ObjectWatch("restores", restore_name, seconds=2400)
+        try:
+            created = apply({
+                "apiVersion": "logweir.dev/v1alpha1", "kind": "Restore",
+                "metadata": owned(restore_name),
+                "spec": {
+                    "sourceDestinationRef": {"name": "dest-a"},
+                    "evidenceDestinationRef": {"name": "dest-b"},
+                    "sourceArchive": {"url": "logweir-destination://dest-a"},
+                    "backupSetRef": backup_id,
+                    "pointInTime": finished,
+                    "planBytes": minted["planBytes"],
+                    "approvalRef": {"name": approval_name},
+                    "deadlineSeconds": 900,
+                    "target": {"clusterRef": {"name": "target"}, "mode": "newTopic",
+                               "topicNaming": {"prefix": prefix}},
+                },
+            })
+            record_approval(minted)
+            wait_for("restore", restore_name, terminal_phase, timeout=900,
+                     what="a terminal phase")
+            final = settle_reached_verdict("restore", restore_name)
+            time.sleep(2)
+        finally:
+            trail = watch.stop()
+        uid = created["metadata"]["uid"]
+        obs = ((final.get("status") or {}).get("evidence") or {}).get("observation") or {}
+        job = get_opt("job", (obs.get("jobRef") or {}).get("name")
+                      or evidence_fetch_job_name(uid, 1))
+        artifact(f"objects/evf6/restore-{restore_name}.json", final)
+        artifact(f"objects/evf6/trail-{restore_name}.json", trail)
+        artifact(f"objects/evf6/job-{restore_name}.json", job or {})
+        clauses = restore_fetch_reached_valid(trail, final, job)
+        sc.detail.update({"restore": restore_name, "uid": uid, "trail": trail,
+                          "clauses": clauses})
+        failed = sorted(k for k, ok in clauses.items() if not ok)
+        check(not failed, "EVF-6: " + "; ".join(failed))
+
+
+def s1c() -> None:
+    """S1.notAttempted: the two destinations the evidence-fetch Job must NOT read.
+
+    THE NEGATIVE CONTROL for EVF-1. A controller that created a fetch Job for
+    every destination-backed run — or one that wrote `Valid` from somewhere
+    else — fails here: dest-noread declares no `evidenceRead` at all, and
+    dest-ci asks for `ControllerIdentity` at a location the lab's installation
+    policy does not allowlist.
+    """
+    apply(destination("dest-noread", bucket="lw-a", prefix=ARCHIVE_PREFIX,
+                      endpoint=f"http://minio-a.{NS}.svc:9000", security="InsecureHTTP",
+                      archive_write="a-writer", archive_read="a-reader",
+                      evidence_write="a-writer",
+                      description="no evidenceRead grant at all (S1.notAttempted)"))
+    apply(destination("dest-ci", bucket="lw-a", prefix=ARCHIVE_PREFIX,
+                      endpoint=f"http://minio-a.{NS}.svc:9000", security="InsecureHTTP",
+                      archive_write="a-writer", archive_read="a-reader",
+                      evidence_write="a-writer", evidence_read_mode="ControllerIdentity",
+                      description="ControllerIdentity at a location nobody allowlisted "
+                                  "(S1.notAttempted)"))
+    for dest in ("dest-noread", "dest-ci"):
+        artifact(f"objects/s1c/backupdestination-{dest}.json", wait_destination(dest))
+    identity = identity_locations_now()
+    index = attempt("s1cAttempt")
+    with Scenario("S1.notAttempted", "no evidence-fetch Job, and an honest NotAttempted, for a "
+                                     "grant neither a pod nor the controller may use") as sc:
+        failed_all: list[str] = []
+        for dest in ("dest-noread", "dest-ci"):
+            name = f"bk-{dest.removeprefix('dest-')}-{index}"
+            final, trail = watched_backup(
+                name, backup(name, source="source-admin", topics=["orders"],
+                             destination_ref=dest))
+            jobs = fetch_jobs_for(final["metadata"]["uid"])
+            clauses = no_fetch_for_a_grant_no_job_may_use(final, trail, jobs, identity)
+            artifact(f"objects/s1c/backup-{name}.json", final)
+            sc.detail.setdefault("runs", {})[dest] = {
+                "backup": name, "trail": trail, "fetchJobs": [j["metadata"]["name"] for j in jobs],
+                "verification": ((final.get("status") or {}).get("evidence") or {}).get(
+                    "verification"),
+                "clauses": clauses}
+            failed_all += [f"{dest}: {k}" for k, ok in clauses.items() if not ok]
+        sc.detail["policyControllerIdentityLocations"] = identity
+        check(not failed_all, "S1.notAttempted: " + "; ".join(failed_all))
 
 
 # --------------------------------------------------------------------------
@@ -6022,7 +6859,7 @@ def phase_table() -> dict[str, Callable[[], None]]:
     }
     for name, value in sorted(globals().items()):
         if re.fullmatch(
-            r"(s\d+[a-z]*|e\d+|u\d+[a-z]*|bulk|negative_control|ui|api_probe)", name
+            r"(s\d+[a-z]*|e\d+|u\d+[a-z]*|evf\d*|bulk|negative_control|ui|api_probe)", name
         ) and callable(value):
             table[name] = value
     return table

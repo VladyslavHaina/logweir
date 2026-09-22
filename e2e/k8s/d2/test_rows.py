@@ -131,11 +131,16 @@ def test_s11_judges_the_reachable_form_of_the_fifth_criterion() -> None:
             S11_RELAYED, []).values()))
 
 
-# --- S1.statusVerification, as the fixed product answers it -----------------
+# --- S1.notAttempted, as the fixed product answers it ------------------------
+#
+# THIS USED TO BE dest-a's SHAPE, and dest-a no longer has it: its `SecretKeys`
+# grant is read by D2 §3.9's evidence-fetch Job and reaches `Valid`
+# (`test_evidence_fetch_rows.py`). `NotAttempted` is now what a destination
+# with NO `evidenceRead` grant gets — `s1c`'s dest-noread.
 NOT_ATTEMPTED = {
     "result": "NotAttempted",
-    "detail": ("BackupDestination lw-d2w14/dest-a reads evidence with a grant only a pod may "
-               "hold (D2 §3.9's evidence-fetch Job)"),
+    "detail": ("BackupDestination lw-d2w14/dest-noread declares no evidenceRead grant, so "
+               "nothing could read this run's evidence"),
     "payloadType": "application/vnd.logweir.backup-receipt+json;version=1.0.0",
     "verifiedAt": "2026-09-18T18:47:10Z",
 }
@@ -148,7 +153,7 @@ def test_not_attempted_is_written_and_says_why() -> None:
         not all(d2.not_attempted_is_honest(None, []).values()))
     row("MUTANT: NotAttempted with nothing said about why",
         not all(d2.not_attempted_is_honest(dict(NOT_ATTEMPTED, detail=""), []).values()))
-    row("MUTANT: a verdict outside the three published ones",
+    row("MUTANT: a verdict outside the published ones",
         not all(d2.not_attempted_is_honest(dict(NOT_ATTEMPTED, result="Unknown"), []).values()))
     row("MUTANT: nothing was verified, yet a key is named",
         not all(d2.not_attempted_is_honest(
