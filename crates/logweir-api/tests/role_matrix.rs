@@ -232,7 +232,11 @@ fn probes() -> Vec<Probe> {
         Probe {
             label: "set suspension",
             method: "POST",
-            path: "/schedules/sched-1",
+            // THE COMMAND'S OWN PATH. This probe used to omit the verb and was
+            // decided under the route's floor action; since review L2 an
+            // undeclared verb is 404 in the access layer for everyone, so the
+            // probe names the command it means.
+            path: "/schedules/sched-1:set-suspension",
             body: suspension,
             action: Action::SetScheduleSuspension,
         },
