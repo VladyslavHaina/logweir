@@ -5035,7 +5035,7 @@ def notify() -> None:
         len(alerts) == 1
         and len(transitions) == 1
         and delivery.get("attempts", 0) <= 3
-        and status.get("health") in {"Stale", "Unprotected", "Unknown"}
+        and status.get("health") == "Stale"
         and all(selector.values()),
         f"selector {selector} — `{NOTIFY_POINT}` is a manual run OF `keeps-running` "
         f"(`spec.scheduleRef.uid`, D3 §3.2's authority), written "
@@ -6075,7 +6075,7 @@ REFUSED_POLICY = "protect-refused"
 STAYS_POLICY = "protect-stays"
 LEGACY_DEST = "dest-legacy"
 LEGACY_CATALOG = "legacy-cat"
-UNREAD_CATALOG = "primary"
+UNREAD_CATALOG = "verdict-cat"
 # 86 400 s, so that a point the policy CAN place is `Healthy` rather than
 # `Stale`: these rows are about whether a point can be placed and counted at
 # all, and an objective tight enough to age it out would answer a different
@@ -6351,6 +6351,7 @@ def refused_signature_is_unprotected(view: dict[str, Any], verdict: str | None,
     if rescue is not None:
         clauses["the catalog held ONE row for this point, so it COULD have placed it"] = (
             rescue.get("recoveryPointAtMs") is not None
+            and rescue.get("availability") == "Available"
         )
     return clauses
 

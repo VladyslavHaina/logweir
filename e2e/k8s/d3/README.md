@@ -24,7 +24,9 @@ nothing and it has no fixture mode.
   §"The enforcer's image". `--retention-image` overrides it to measure a build
   the lab is not running; a phase records **NOT-RUN** only when neither can be
   resolved.
-- A python3 with no third-party packages.
+- A python3 of version 3.12 or newer with no third-party packages (the shared
+  venv `/tmp/logweir-roadmap-run/venv/bin/python3` on the lab host; the macOS
+  `/usr/bin/python3` is 3.9 and fails at the first PEP 701 f-string).
 
 ## Running it
 
