@@ -22,6 +22,7 @@ PLATFORMS = {
     "logweir": ("amd64",),
     "weirkeeper": ("amd64", "arm64"),
     "logweir-ui": ("amd64", "arm64"),
+    "logweir-console": ("amd64", "arm64"),
 }
 
 DOCKER = r'''#!/usr/bin/env python3
@@ -192,7 +193,7 @@ class PromotionTests(unittest.TestCase):
         self.run_promotion()
         state = json.loads(self.registry.read_text())
         writes = self.writes()
-        self.assertEqual(len(writes), 6)
+        self.assertEqual(len(writes), 2 * len(PLATFORMS))
         for product, arches in PLATFORMS.items():
             repo = f"docker.io/{NS}/{product}"
             immutable = repo + ":sha-" + SHA
@@ -203,7 +204,12 @@ class PromotionTests(unittest.TestCase):
             self.assertEqual(state[repo + ":main"], published)
             self.assertEqual(state[repo + ":latest"], published)
             # The release output must describe exactly the digest now reachable by both tags.
-            output_name = {"logweir": "runner_digest", "weirkeeper": "controller_digest", "logweir-ui": "ui_digest"}[product]
+            output_name = {
+                "logweir": "runner_digest",
+                "weirkeeper": "controller_digest",
+                "logweir-ui": "ui_digest",
+                "logweir-console": "console_digest",
+            }[product]
             self.assertIn(f"{output_name}={published['digest']}\n", Path(self.env["GITHUB_OUTPUT"]).read_text())
             inspected = [call[3] for call in self.calls() if call[:3] == ["buildx", "imagetools", "inspect"]]
             self.assertIn(repo + ":main", inspected)
@@ -219,7 +225,7 @@ class PromotionTests(unittest.TestCase):
         self.registry.write_text(json.dumps(state))
         self.run_promotion()
         state = json.loads(self.registry.read_text())
-        self.assertEqual(len(self.writes()), 3)
+        self.assertEqual(len(self.writes()), len(PLATFORMS))
         for product in PLATFORMS:
             for tag in ("main", "latest"):
                 self.assertEqual(state[f"docker.io/{NS}/{product}:{tag}"], previous)
@@ -228,7 +234,7 @@ class PromotionTests(unittest.TestCase):
         self.env.update(TAG="v1.2.3", GITHUB_REF="refs/tags/v1.2.3", PROMOTE_LATEST="false")
         self.run_promotion()
         state = json.loads(self.registry.read_text())
-        self.assertEqual(len(self.writes()), 3)
+        self.assertEqual(len(self.writes()), len(PLATFORMS))
         for product in PLATFORMS:
             repo = f"docker.io/{NS}/{product}"
             self.assertIn(repo + ":v1.2.3", state)
