@@ -1460,6 +1460,14 @@ pub async fn open_stream(
         .map_err(crate::kube::KubeFailure::into_api_error)?;
 
     let (tx, rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(STREAM_BUFFER);
+    // Own one channel slot for the terminal frame for the stream's whole
+    // lifetime. A timed-out capacity waiter is not a reliable reservation at
+    // the exact deadline; this permit is explicit and cannot be consumed by a
+    // snapshot or heartbeat.
+    let terminal_permit = tx
+        .clone()
+        .try_reserve_owned()
+        .expect("a new stream channel has terminal capacity");
     tokio::spawn(async move {
         // The slot lives exactly as long as this task; a dropped connection
         // ends the task at the next tick and releases it.
@@ -1468,6 +1476,7 @@ pub async fn open_stream(
         let deadline = started + bounds.max_connection;
         let mut last_emit = started;
         let mut version = first.operation.resource_version.clone();
+        let mut terminal_permit = Some(terminal_permit);
 
         // RESUME IS A FULL SNAPSHOT OR NOTHING. The event id is the
         // resourceVersion, and this service keeps no history of them, so it
@@ -1492,7 +1501,7 @@ pub async fn open_stream(
             last_emit = std::time::Instant::now();
         }
         if is_settled(&first) {
-            let _ = send_end(&tx, StreamEnd::Settled, deadline).await;
+            let _ = send_end(&tx, &mut terminal_permit, StreamEnd::Settled, deadline).await;
             return;
         }
 
@@ -1501,7 +1510,7 @@ pub async fn open_stream(
             // interval past it would make the ceiling "300 s plus up to one
             // poll", which is not what `docs/api.md` says.
             let Some(left) = remaining(deadline) else {
-                let _ = send_end(&tx, StreamEnd::MaxDuration, deadline).await;
+                let _ = send_end(&tx, &mut terminal_permit, StreamEnd::MaxDuration, deadline).await;
                 return;
             };
             // A closed receiver is a client that went away. `timeout` resolves
@@ -1513,13 +1522,14 @@ pub async fn open_stream(
                 return;
             }
             if remaining(deadline).is_none() {
-                let _ = send_end(&tx, StreamEnd::MaxDuration, deadline).await;
+                let _ = send_end(&tx, &mut terminal_permit, StreamEnd::MaxDuration, deadline).await;
                 return;
             }
             let view = match kind.read(&state, &namespace, &name, state.now()).await {
                 Ok(view) => view,
                 Err(crate::kube::KubeFailure::NotFound) => {
-                    let _ = send_end(&tx, StreamEnd::Vanished, deadline).await;
+                    let _ =
+                        send_end(&tx, &mut terminal_permit, StreamEnd::Vanished, deadline).await;
                     return;
                 }
                 // A TRANSIENT FAILURE IS NOT AN EVENT. The client is already
@@ -1533,15 +1543,19 @@ pub async fn open_stream(
             if view.operation.resource_version != version {
                 version = view.operation.resource_version.clone();
                 if !send_view(&tx, "operation", &view, deadline).await {
+                    let _ =
+                        send_end(&tx, &mut terminal_permit, StreamEnd::MaxDuration, deadline).await;
                     return;
                 }
                 last_emit = std::time::Instant::now();
                 if is_settled(&view) {
-                    let _ = send_end(&tx, StreamEnd::Settled, deadline).await;
+                    let _ = send_end(&tx, &mut terminal_permit, StreamEnd::Settled, deadline).await;
                     return;
                 }
             } else if last_emit.elapsed() >= bounds.heartbeat {
                 if !send_heartbeat(&tx, state.now(), deadline).await {
+                    let _ =
+                        send_end(&tx, &mut terminal_permit, StreamEnd::MaxDuration, deadline).await;
                     return;
                 }
                 last_emit = std::time::Instant::now();
@@ -1574,14 +1588,15 @@ fn remaining(deadline: std::time::Instant) -> Option<Duration> {
     deadline.checked_duration_since(std::time::Instant::now())
 }
 
-/// Send one frame, or give up when the connection budget runs out.
+/// Send one non-terminal frame, or give up when the connection budget runs out.
 ///
 /// THE TIMEOUT IS THE WHOLE POINT. A bounded channel is the memory bound and a
 /// blocking `send` is the backpressure, but a `send` that can block for ever
 /// is also a task and a stream slot that live for ever. Past the deadline this
-/// returns `false` and the caller drops the stream, which closes the body — a
-/// client that has not read for five minutes is not waiting for an `end`
-/// frame.
+/// returns `false`. The caller holds one channel permit separately for the
+/// terminal `end` frame, so non-terminal sends can never consume that slot.
+/// Without that explicit permit, a scheduler-stalled body collector could let
+/// heartbeats fill all eight slots and close the body with no reason.
 async fn send(
     tx: &tokio::sync::mpsc::Sender<bytes::Bytes>,
     text: String,
@@ -1621,24 +1636,35 @@ async fn send_heartbeat(
 
 /// The last frame, which must not be lost to its own deadline.
 ///
-/// `end` IS SENT WITH WHAT IS LEFT, AND OTHERWISE WITHOUT WAITING. A client
-/// that is reading has room in the channel and receives the reason its stream
-/// closed; a client that is not reading has a full channel and gets nothing,
-/// which is correct — it has not read a frame for the length of the whole
-/// connection and is not waiting for one more. Using the bounded `send` alone
-/// would have dropped the `end` frame for EVERY stream that hit the ceiling,
-/// because the budget is exhausted at exactly the moment the frame is written.
+/// `end` FIRST TAKES THE PERMIT reserved before the producer starts. The
+/// bounded fallback is defensive for a repeated call, and the final
+/// non-blocking offer closes the near-deadline race where the timeout and a
+/// reader freeing capacity become ready together.
 async fn send_end(
     tx: &tokio::sync::mpsc::Sender<bytes::Bytes>,
+    terminal_permit: &mut Option<tokio::sync::mpsc::OwnedPermit<bytes::Bytes>>,
     end: StreamEnd,
     deadline: std::time::Instant,
 ) -> bool {
     let data = serde_json::json!({ "reason": end.as_str() }).to_string();
-    let text = frame("end", None, &data);
-    if remaining(deadline).is_some() {
-        return send(tx, text, deadline).await;
+    let bytes = bytes::Bytes::from(frame("end", None, &data));
+    if let Some(permit) = terminal_permit.take() {
+        let _ = permit.send(bytes);
+        return true;
     }
-    tx.try_send(bytes::Bytes::from(text)).is_ok()
+    if tx.try_send(bytes.clone()).is_ok() {
+        return true;
+    }
+    let Some(left) = remaining(deadline) else {
+        return false;
+    };
+    if matches!(
+        tokio::time::timeout(left, tx.send(bytes.clone())).await,
+        Ok(Ok(()))
+    ) {
+        return true;
+    }
+    tx.try_send(bytes).is_ok()
 }
 
 /// A CRD enum's WIRE spelling, not its Rust one.

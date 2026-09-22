@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use http::Request;
+use http_body_util::BodyExt as _;
 use logweir_api::auth::ratelimit::STREAMS_PER_ACTOR_NAMESPACE;
 use logweir_api::status::{set_stream_bounds_for_test, StreamBounds};
 use serde_json::{json, Value};
@@ -86,7 +87,8 @@ async fn open_without_reading(app: &TestApp, namespace: &str) -> axum::response:
     response
 }
 
-/// **A client that never reads does not hold its slot past the ceiling.**
+/// **A client that never reads does not hold its slot past the ceiling, and
+/// the buffered stream still ends with its reason.**
 ///
 /// REGRESSION REASON, MEASURED BY THE REVIEWER. The ceiling used to be checked
 /// only BETWEEN sends. A client that opened the stream and stopped reading
@@ -132,15 +134,44 @@ async fn a_client_that_never_reads_releases_its_slot_at_the_ceiling() {
         elapsed < CEILING * 8,
         "a slot took {elapsed:?} to come back against a {CEILING:?} ceiling"
     );
+
+    // Read one of the bodies only AFTER its producer hit the ceiling. The
+    // old implementation let the opening frame plus heartbeats consume all
+    // eight channel slots. Its ninth heartbeat waited until the deadline and
+    // returned from the producer without ever queuing `end`, so this final
+    // event was deterministically a heartbeat under scheduler pressure.
+    let response = held.pop().expect("one deliberately unread response");
+    let bytes = tokio::time::timeout(CEILING * 4, response.into_body().collect())
+        .await
+        .expect("the bounded producer closes its body")
+        .expect("the body is infallible")
+        .to_bytes();
+    let body = String::from_utf8_lossy(&bytes);
+    let events: Vec<&str> = body
+        .lines()
+        .filter_map(|line| line.strip_prefix("event: "))
+        .collect();
+    assert_eq!(
+        events.last(),
+        Some(&"end"),
+        "the terminal slot was consumed by a heartbeat: {events:?}"
+    );
+    let last: Value = body
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .next_back()
+        .map(|line| serde_json::from_str(line).expect("JSON"))
+        .expect("a final frame");
+    assert_eq!(last["reason"], "maxDuration");
     drop(held);
 }
 
 /// **A client that DOES read still gets its `end` frame at the ceiling.**
 ///
-/// The fix must not throw the last frame away: the bounded send's budget is
-/// exhausted at exactly the moment `end` is written, so `send_end` falls back
-/// to a non-blocking offer. A reader has room and is told why its stream
-/// closed; a non-reader has a full channel and gets nothing, which is correct.
+/// The fix must not throw the last frame away: every non-terminal send leaves
+/// one bounded-channel slot for `end`, and `send_end` takes that slot without
+/// waiting on an already exhausted connection budget. Readers and temporarily
+/// stalled clients therefore receive the reason before the body closes.
 #[tokio::test]
 async fn a_reading_client_is_told_why_the_stream_closed() {
     let app = app(NS_READ);
