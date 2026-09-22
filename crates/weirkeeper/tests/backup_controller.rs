@@ -133,6 +133,8 @@ const SCHEDULE_UID: &str = "9c4d2e6f-0000-4000-8000-0000000000d1";
 
 /// The two keys interface **I7** prints.
 const RECEIPT_KEY: &str = "logweir/backups/b1/r1.receipt.json";
+const RUNNER_RECEIPT_SHA256: &str =
+    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const SIDECAR_KEY: &str = "logweir/backups/b1/r1.receipt.sig";
 
 /// A MANUAL `Backup` as the API server would hand it over: typed spec, the
@@ -501,9 +503,16 @@ fn log_body(tail: &str) -> String {
     )
 }
 
-/// The two interface-I7 lines, in the contract's order.
+/// An older runner's two interface-I7 lines, retained as the compatibility fixture.
 fn i7_tail() -> String {
     format!("receipt-key={RECEIPT_KEY}\nsidecar-key={SIDECAR_KEY}\n")
+}
+
+/// A current runner's capture digest followed by I7's unchanged final pair.
+fn i7_tail_with_digest() -> String {
+    format!(
+        "receipt-sha256={RUNNER_RECEIPT_SHA256}\nreceipt-key={RECEIPT_KEY}\nsidecar-key={SIDECAR_KEY}\n"
+    )
 }
 
 /// The route table for a reconcile that finds a finished Job.
@@ -3837,11 +3846,31 @@ async fn the_runner_keys_are_read_from_the_final_two_stdout_lines() {
     // And the pure function, over the three shapes plus a trailing blank line
     // and a `\r\n`.
     let keys = evidence_keys(&format!(
-        "noise\nreceipt-key={RECEIPT_KEY}\r\nsidecar-key={SIDECAR_KEY}\r\n\n"
+        "noise\nreceipt-sha256={RUNNER_RECEIPT_SHA256}\r\nreceipt-key={RECEIPT_KEY}\r\nsidecar-key={SIDECAR_KEY}\r\n\n"
     ));
     assert_eq!(keys.receipt.as_deref(), Some(RECEIPT_KEY));
     assert_eq!(keys.sidecar.as_deref(), Some(SIDECAR_KEY));
     assert!(keys.complete());
+    assert_eq!(keys.receipt_sha256.as_deref(), Some(RUNNER_RECEIPT_SHA256));
+    for malformed in [
+        "sha256:short",
+        "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "md5:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    ] {
+        assert!(
+            evidence_keys(&format!("receipt-sha256={malformed}\n"))
+                .receipt_sha256
+                .is_none(),
+            "malformed digest {malformed:?} is ignored, never published"
+        );
+    }
+    let duplicate = evidence_keys(&format!(
+        "receipt-sha256={RUNNER_RECEIPT_SHA256}\nreceipt-sha256={RUNNER_RECEIPT_SHA256}\n"
+    ));
+    assert!(
+        duplicate.receipt_sha256.is_none(),
+        "the closed grammar admits exactly one digest line"
+    );
     let none = evidence_keys("nothing here\nor here\n");
     assert!(
         none.receipt.is_none() && none.sidecar.is_none() && !none.complete(),
@@ -4388,6 +4417,7 @@ fn the_real_oracle_reads_two_objects_and_the_window_off_one_get() {
     let keys = EvidenceKeys {
         receipt: Some(RECEIPT_KEY.to_string()),
         sidecar: Some(SIDECAR_KEY.to_string()),
+        receipt_sha256: None,
     };
     let observed = observe_archive(&store, &keys).expect("both keys were looked up");
     assert_eq!(
@@ -10915,7 +10945,7 @@ async fn a_destination_backed_run_with_a_pod_only_grant_publishes_not_attempted(
 
     let (client, _seen, bodies) = mock_client_recording_bodies(finished_routes_for_destination(
         &pod_list_terminated(0),
-        log_body(&i7_tail()),
+        log_body(&i7_tail_with_digest()),
         "/backupdestinations/dest-b",
         value,
     ));
@@ -10945,6 +10975,11 @@ async fn a_destination_backed_run_with_a_pod_only_grant_publishes_not_attempted(
         verification["result"],
         json!("NotAttempted"),
         "the honest verdict, and the ONLY one writable with no bytes: {verification}"
+    );
+    assert_eq!(
+        statuses[0]["evidence"]["receiptSha256"],
+        json!(RUNNER_RECEIPT_SHA256),
+        "the runner-reported digest is captured even though verification is NotAttempted"
     );
     let detail = verification["detail"]
         .as_str()

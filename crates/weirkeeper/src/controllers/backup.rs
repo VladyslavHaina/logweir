@@ -240,6 +240,9 @@ pub fn archive_addressing_env() -> Vec<(String, String)> {
 
 /// `receipt-key=` — interface **I7**'s first line.
 pub const RECEIPT_KEY_PREFIX: &str = "receipt-key=";
+/// The runner's public capture digest, emitted immediately before I7's final
+/// receipt/sidecar key pair.
+pub const RECEIPT_SHA256_PREFIX: &str = "receipt-sha256=";
 /// `sidecar-key=` — interface **I7**'s second line.
 pub const SIDECAR_KEY_PREFIX: &str = "sidecar-key=";
 /// `refusal-reason=` — Global Constraint 11's final line for exit 3.
@@ -1343,6 +1346,9 @@ pub struct EvidenceKeys {
     pub receipt: Option<String>,
     /// `sidecar-key=<key>`'s value.
     pub sidecar: Option<String>,
+    /// Digest of the exact receipt bytes the runner signed and uploaded.
+    /// Captured from stdout; its presence never implies signature verification.
+    pub receipt_sha256: Option<String>,
 }
 
 impl EvidenceKeys {
@@ -1595,6 +1601,7 @@ pub fn capture_from_receipt(receipt: &Value) -> Option<(DateTime<Utc>, DateTime<
 #[must_use]
 pub fn evidence_keys(log: &str) -> EvidenceKeys {
     let mut keys = EvidenceKeys::default();
+    let mut digest_lines = 0usize;
     for line in tail_lines(log) {
         if let Some(v) = line.strip_prefix(RECEIPT_KEY_PREFIX) {
             keys.receipt = Some(v.to_string());
@@ -1602,6 +1609,22 @@ pub fn evidence_keys(log: &str) -> EvidenceKeys {
         if let Some(v) = line.strip_prefix(SIDECAR_KEY_PREFIX) {
             keys.sidecar = Some(v.to_string());
         }
+        if let Some(v) = line.strip_prefix(RECEIPT_SHA256_PREFIX) {
+            digest_lines += 1;
+            let canonical = v.strip_prefix("sha256:").is_some_and(|hex| {
+                hex.len() == 64
+                    && hex
+                        .bytes()
+                        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+            });
+            keys.receipt_sha256 = canonical.then(|| v.to_string());
+        }
+    }
+    // The grammar has one digest fact. Two lines are ambiguous even when they
+    // happen to agree, so an old/noisy runner degrades to the backward-
+    // compatible absence instead of choosing one.
+    if digest_lines != 1 {
+        keys.receipt_sha256 = None;
     }
     keys
 }
@@ -3999,7 +4022,10 @@ async fn reconcile_backup_inner(
     };
     let orphan = orphan_state(exit_code, observed.as_ref().map(|o| o.presence));
     let covered = observed.as_ref().and_then(|o| o.covered);
-    let receipt_sha256 = observed.as_ref().and_then(|o| o.receipt_sha256.clone());
+    let receipt_sha256 = observed
+        .as_ref()
+        .and_then(|o| o.receipt_sha256.clone())
+        .or_else(|| keys.receipt_sha256.clone());
 
     // WARNED ONLY WHERE IT IS NEWS. A refusal (exit 3), an operational failure
     // (1) or a signing failure (4) wrote no artifact BY CONTRACT (GC11), so
@@ -4085,8 +4111,11 @@ async fn reconcile_backup_inner(
     // all. That absence is the GC11 distinction and it is DELIBERATELY kept.
     //
     // THE DIGEST IS REQUIRED BY THE PATHS THAT VERIFY BYTES, AND BY THEM ONLY.
-    // A `NotAttempted` source fetched nothing, so `receipt_sha256` is `None`
-    // BY CONSTRUCTION (`observed` is `None` for it, above) — and while the
+    // A `NotAttempted` source fetched nothing, but a current runner reports the
+    // digest of the exact bytes it signed and uploaded. That CAPTURE fact is
+    // published on the terminal patch above; it does not make this source a
+    // verifier and cannot change the verdict selected below. Older runners
+    // report no digest and retain the previous absent-field behaviour. While a
     // digest was demanded of every source this whole block was skipped for it,
     // so an operator whose destination reads evidence with a grant only a pod
     // may hold (`SecretKeys`, `WorkloadIdentity`) saw NO

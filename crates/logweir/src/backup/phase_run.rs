@@ -213,6 +213,10 @@ pub struct Persisted {
     pub receipt_key: String,
     /// `logweir/backups/<backup_id>/<run_id>.receipt.sig`
     pub sidecar_key: String,
+    /// `sha256:<lowercase hex>` over the exact receipt bytes uploaded above.
+    /// Public capture metadata; it says nothing about whether a controller has
+    /// verified the receipt's signature.
+    pub receipt_sha256: String,
     /// `logweir/catalog/v1/points/<pointId>/record.json`, when the catalog
     /// point record was written (PLAT-15.1, D3 §5.2).
     ///
@@ -237,6 +241,7 @@ pub fn receipt_keys(backup_id: &str, run_id: &str) -> Persisted {
     Persisted {
         receipt_key: format!("logweir/backups/{backup_id}/{run_id}.receipt.json"),
         sidecar_key: format!("logweir/backups/{backup_id}/{run_id}.receipt.sig"),
+        receipt_sha256: String::new(),
         // Not knowable from the two ids: the point id is derived from the
         // receipt's BYTES (D3 §5.1), which do not exist yet at this call.
         // Filled in by `persist_receipt`'s step 6.
@@ -378,6 +383,7 @@ pub(crate) fn persist_receipt(
     // 2. The EXACT bytes.
     let bytes = logweir_core::det_json::to_deterministic_json(&receipt)
         .map_err(|e| sig(format!("the backup receipt could not be serialised: {e}")))?;
+    let receipt_sha256 = logweir_core::ids::sha256_prefixed(&bytes);
 
     // 3. Sign with the signer exercised before engine work.
     //    `logweir-evidence` is the ONE signer (Global Constraint 27): this is
@@ -393,6 +399,7 @@ pub(crate) fn persist_receipt(
     //    (`StoreError::AlreadyExists`), never overwritten, so one run can
     //    never silently replace another's evidence.
     let mut keys = receipt_keys(&outcome.backup_id, &outcome.run_id);
+    keys.receipt_sha256 = receipt_sha256;
     crate::backup::print_progress_step(crate::backup::PROGRESS_STEP_UPLOAD);
     store
         .put_create_only(&keys.receipt_key, &bytes)

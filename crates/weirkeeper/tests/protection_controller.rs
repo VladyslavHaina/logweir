@@ -879,6 +879,29 @@ fn a_point_whose_facts_are_unreadable_is_unknown_and_never_unprotected() {
     );
 }
 
+/// A captured receipt digest gives the point an identity; it does not mean a
+/// verifier read the receipt. NotAttempted therefore remains the
+/// `Unknown/PointFactsUnread` arm.
+#[test]
+fn a_not_attempted_point_with_a_digest_is_still_unread_and_unknown() {
+    assert!(
+        !p::Evidence::NotAttempted.was_reached(),
+        "a digest is capture metadata, not a reached verification verdict"
+    );
+    let mut point = unreadable_point(2);
+    point.point_id = Some(point_id("digest-only"));
+    let verdict = p::evaluate(&inputs(
+        &spec(),
+        &[point],
+        &p::CatalogAnswer::NotConsulted,
+        &[healthy_schedule()],
+        &[],
+        &p::RehearsalFacts::default(),
+    ));
+    assert_eq!(verdict.health, p::Health::Unknown);
+    assert_eq!(verdict.reason, p::FreshnessReason::PointFactsUnread);
+}
+
 /// `PointFactsUnread` is the LAST resort and never masks a reason an operator
 /// can act on, nor a point that IS placeable.
 ///

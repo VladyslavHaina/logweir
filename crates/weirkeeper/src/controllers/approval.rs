@@ -118,7 +118,7 @@ pub const ROSTER_NOT_FOUND_MESSAGE: &str =
 
 /// Why an `Approval` was refused.
 ///
-/// SEVEN VARIANTS, AND THE SET IS CLOSED. Tasks 20, 24 and 27 read
+/// THE SET IS CLOSED. Tasks 20, 24 and 27 read
 /// [`Self::reason`] off `status.conditions[type=Verified].reason` and route on
 /// it, so a variant is an interface and not an implementation detail.
 ///
@@ -223,6 +223,34 @@ pub enum ApprovalRefusal {
         /// The referent's actual kind.
         referent_is: String,
     },
+    /// A standing document's `scope.templateDigest` names another sealed
+    /// schedule template.
+    TemplateDigestMismatch {
+        /// The digest inside the signed scope.
+        got: String,
+        /// The digest recomputed from the referent's sealed spec.
+        want: String,
+    },
+    /// A standing document names another schedule identity.
+    SubjectMismatch {
+        /// A precise description of the signed and observed identities.
+        detail: String,
+    },
+    /// A standing document's issue/expiry window is not usable now.
+    WindowInvalid {
+        /// The exact invalid boundary or duration.
+        detail: String,
+    },
+    /// A standing document is malformed or carries an empty scope.
+    ScopeInvalid {
+        /// The exact missing or unsupported scope member.
+        detail: String,
+    },
+    /// Authentic bytes are not a supported standing-authorization document.
+    StandingDocumentInvalid {
+        /// The parse, format-version or document-kind mismatch.
+        detail: String,
+    },
     /// There is no cluster-scoped [`TrustRoster`] named [`ROSTER_NAME`].
     ///
     /// The one variant [`evaluate`] can never return — it takes a
@@ -252,6 +280,11 @@ impl ApprovalRefusal {
             Self::PayloadTypeMismatch { .. } => "PayloadTypeMismatch",
             Self::PlanHashMismatch { .. } => "PlanHashMismatch",
             Self::SubjectKindMismatch { .. } => "SubjectKindMismatch",
+            Self::TemplateDigestMismatch { .. } => "TemplateDigestMismatch",
+            Self::SubjectMismatch { .. } => "SubjectMismatch",
+            Self::WindowInvalid { .. } => "WindowInvalid",
+            Self::ScopeInvalid { .. } => "ScopeInvalid",
+            Self::StandingDocumentInvalid { .. } => "StandingDocumentInvalid",
             Self::RosterNotFound => "RosterNotFound",
         }
     }
@@ -330,6 +363,15 @@ impl fmt::Display for ApprovalRefusal {
                 "the approval binds subject kind {approval_says:?} and the referent is a \
                  {referent_is}; an approval for one kind never authorises another"
             ),
+            Self::TemplateDigestMismatch { got, want } => write!(
+                f,
+                "the standing authorization scope names template digest {got}, but the referred \
+                 RehearsalSchedule's sealed spec hashes to {want}"
+            ),
+            Self::SubjectMismatch { detail } => write!(f, "{detail}"),
+            Self::WindowInvalid { detail } => write!(f, "{detail}"),
+            Self::ScopeInvalid { detail } => write!(f, "{detail}"),
+            Self::StandingDocumentInvalid { detail } => write!(f, "{detail}"),
             Self::RosterNotFound => write!(f, "{ROSTER_NOT_FOUND_MESSAGE}"),
         }
     }
@@ -492,6 +534,141 @@ pub fn evaluate(
     referent_kind: &str,
     referent_plan_bytes: &[u8],
 ) -> Result<Verified, ApprovalRefusal> {
+    evaluate_inner(
+        approval_bytes,
+        sidecar_bytes,
+        trust,
+        now,
+        referent_kind,
+        referent_plan_bytes,
+        None,
+    )
+}
+
+/// Verify the standing document carried by an `Approval` for one exact
+/// `RehearsalSchedule` referent.
+///
+/// This is deliberately a second typed entry point rather than a permissive
+/// parse in [`evaluate`]: the per-run path continues to parse only
+/// [`ApprovalDocument`], while this path requires every field of
+/// [`logweir_core::execution_contract::StandingAuthorization`].
+pub fn evaluate_standing(
+    approval_bytes: &[u8],
+    sidecar_bytes: &[u8],
+    trust: &ResolvedTrust,
+    now: DateTime<Utc>,
+    referent: &VerifiedSubjectRef,
+    template_digest: &str,
+) -> Result<Verified, ApprovalRefusal> {
+    evaluate_inner(
+        approval_bytes,
+        sidecar_bytes,
+        trust,
+        now,
+        SubjectKind::RehearsalSchedule.as_str(),
+        &[],
+        Some((referent, template_digest)),
+    )
+}
+
+/// Validate the authenticated claims of one standing document against the
+/// schedule object the API server returned.
+pub fn validate_standing_document(
+    doc: &logweir_core::execution_contract::StandingAuthorization,
+    referent: &VerifiedSubjectRef,
+    template_digest: &str,
+    now: DateTime<Utc>,
+) -> Result<(), ApprovalRefusal> {
+    use logweir_core::execution_contract as wire;
+
+    if doc.format_version.split('.').next() != Some("1")
+        || doc.kind != wire::STANDING_AUTHORIZATION_KIND
+    {
+        return Err(ApprovalRefusal::StandingDocumentInvalid {
+            detail: format!(
+                "the standing authorization declares formatVersion {:?} and kind {:?}; this \
+                 build reads major 1 and kind {:?}",
+                doc.format_version,
+                doc.kind,
+                wire::STANDING_AUTHORIZATION_KIND
+            ),
+        });
+    }
+    let subject = &doc.subject_ref;
+    if subject.api_version != referent.api_version
+        || subject.kind != SubjectKind::RehearsalSchedule.as_str()
+        || subject.namespace != referent.namespace
+        || subject.name != referent.name
+        || subject.uid != referent.uid
+    {
+        return Err(ApprovalRefusal::SubjectMismatch {
+            detail: format!(
+                "the signed standing subject is {}/{}/{} UID {}, but the referent is \
+                 {}/{}/{} UID {}",
+                subject.api_version,
+                subject.namespace,
+                subject.name,
+                subject.uid,
+                referent.api_version,
+                referent.namespace,
+                referent.name,
+                referent.uid
+            ),
+        });
+    }
+    let lifetime = doc.expires_at - doc.issued_at;
+    if lifetime <= chrono::Duration::zero()
+        || lifetime > chrono::Duration::days(wire::MAX_STANDING_AUTHORIZATION_DAYS)
+        || doc.issued_at > now
+        || doc.expires_at <= now
+    {
+        return Err(ApprovalRefusal::WindowInvalid {
+            detail: format!(
+                "the standing authorization window {}..{} is not valid at {} or exceeds {} days",
+                doc.issued_at.to_rfc3339(),
+                doc.expires_at.to_rfc3339(),
+                now.to_rfc3339(),
+                wire::MAX_STANDING_AUTHORIZATION_DAYS
+            ),
+        });
+    }
+    let scope = &doc.scope;
+    let scope_invalid = scope.template_digest.trim().is_empty()
+        || scope.target_cluster_id.trim().is_empty()
+        || scope.topic_prefix.trim().is_empty()
+        || scope.topics.is_empty()
+        || scope.topics.iter().any(|topic| topic.trim().is_empty())
+        || scope.max_partitions == 0
+        || scope.records_per_partition == 0
+        || scope.deadline_seconds == 0
+        || !scope.is_scratch_only();
+    if scope_invalid {
+        return Err(ApprovalRefusal::ScopeInvalid {
+            detail: "the standing authorization scope must name a template digest, target \
+                     cluster, topic prefix, at least one non-blank topic, positive bounds, and \
+                     exactly scratch mode"
+                .to_string(),
+        });
+    }
+    if scope.template_digest != template_digest {
+        return Err(ApprovalRefusal::TemplateDigestMismatch {
+            got: scope.template_digest.clone(),
+            want: template_digest.to_string(),
+        });
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_inner(
+    approval_bytes: &[u8],
+    sidecar_bytes: &[u8],
+    trust: &ResolvedTrust,
+    now: DateTime<Utc>,
+    referent_kind: &str,
+    referent_plan_bytes: &[u8],
+    standing: Option<(&VerifiedSubjectRef, &str)>,
+) -> Result<Verified, ApprovalRefusal> {
     // ---- 0. the sidecar is a document before it is a signature -----------
     let sidecar: Sidecar = serde_json::from_slice(sidecar_bytes).map_err(|e| {
         ApprovalRefusal::SignatureInvalid(format!(
@@ -622,36 +799,48 @@ pub fn evaluate(
         return Err(signing_refusal(trust, &matched_key_id, refusal));
     }
 
-    // ---- the bytes are authentic; now read what they say ------------------
-    let doc: ApprovalDocument = serde_json::from_slice(approval_bytes).map_err(|e| {
-        ApprovalRefusal::SignatureInvalid(format!(
-            "the signature over spec.approvalBytes verified under key id {matched_key_id}, but \
-             those bytes are not an approval document: {e}"
-        ))
-    })?;
+    // ---- the bytes are authentic; now read the RIGHT document shape -------
+    let (approver, ticket) = if let Some((referent, template_digest)) = standing {
+        use logweir_core::execution_contract as wire;
 
-    // ---- 7. the plan hash, RECOMPUTED from the referent's own bytes -------
-    //
-    // Never read from the referent's `status.planHash` — a status is written
-    // by a controller and is not part of anything anyone signed, so a status
-    // field could rescue an approval that binds a different plan.
-    // `approval_recomputes_the_plan_hash_from_the_referent_bytes`'s second arm
-    // sets that status to the CORRECT value and asserts it does not.
-    let want = sha256_prefixed(referent_plan_bytes);
-    if doc.plan_hash != want {
-        return Err(ApprovalRefusal::PlanHashMismatch {
-            got: doc.plan_hash,
-            want,
-        });
-    }
+        let doc: wire::StandingAuthorization =
+            serde_json::from_slice(approval_bytes).map_err(|e| {
+                ApprovalRefusal::StandingDocumentInvalid {
+                    detail: format!(
+                        "the signature over spec.approvalBytes verified under key id \
+                     {matched_key_id}, but those bytes are not a standing authorization: {e}"
+                    ),
+                }
+            })?;
+        validate_standing_document(&doc, referent, template_digest, now)?;
+        // v1 standing documents intentionally carry no person/ticket fields.
+        (String::new(), String::new())
+    } else {
+        let doc: ApprovalDocument = serde_json::from_slice(approval_bytes).map_err(|e| {
+            ApprovalRefusal::SignatureInvalid(format!(
+                "the signature over spec.approvalBytes verified under key id {matched_key_id}, but \
+                 those bytes are not an approval document: {e}"
+            ))
+        })?;
 
-    // ---- 8. the subject kind, from inside the signed bytes ----------------
-    if doc.subject_kind != referent_kind {
-        return Err(ApprovalRefusal::SubjectKindMismatch {
-            approval_says: doc.subject_kind,
-            referent_is: referent_kind.to_string(),
-        });
-    }
+        // ---- 7. the plan hash, RECOMPUTED from the referent's own bytes ---
+        let want = sha256_prefixed(referent_plan_bytes);
+        if doc.plan_hash != want {
+            return Err(ApprovalRefusal::PlanHashMismatch {
+                got: doc.plan_hash,
+                want,
+            });
+        }
+
+        // ---- 8. the subject kind, from inside the signed bytes ------------
+        if doc.subject_kind != referent_kind {
+            return Err(ApprovalRefusal::SubjectKindMismatch {
+                approval_says: doc.subject_kind,
+                referent_is: referent_kind.to_string(),
+            });
+        }
+        (doc.approver, doc.ticket)
+    };
 
     // LABELLED, NEVER REFUSED — and under a real `TrustPolicy` it is
     // STRUCTURALLY IMPOSSIBLE rather than merely absent. D3 §7.3's CEL rule G8
@@ -679,8 +868,8 @@ pub fn evaluate(
     Ok(Verified {
         key_window,
         matched_key_id,
-        approver: doc.approver,
-        ticket: doc.ticket,
+        approver,
+        ticket,
         self_attested_risk,
         trust_source: trust.source.name().to_string(),
         verified_subject_ref: None,
@@ -1237,49 +1426,72 @@ pub async fn decide(
 
     // `.as_bytes()`, WITH NO DECODE STEP. Interface **I18**: `approvalBytes`
     // and `sidecarBytes` are the UTF-8 document text, verbatim, never base64.
-    Ok(
-        match evaluate(
+    let now = Utc::now();
+    let want = sha256_prefixed(plan_bytes.as_bytes());
+    let evaluated = if subject.kind == SubjectKind::RehearsalSchedule {
+        // Constructed in the schedule arm above. Keeping the option in the
+        // shared tuple makes the Restore path byte-for-byte the same shape.
+        let referent = verified_subject_ref
+            .as_ref()
+            .ok_or_else(|| ReconcileError::NoUid(subject.name.clone()))?;
+        evaluate_standing(
             approval.spec.approval_bytes.as_bytes(),
             approval.spec.sidecar_bytes.as_bytes(),
             &trust,
-            Utc::now(),
+            now,
+            referent,
+            &want,
+        )
+    } else {
+        evaluate(
+            approval.spec.approval_bytes.as_bytes(),
+            approval.spec.sidecar_bytes.as_bytes(),
+            &trust,
+            now,
             referent_kind,
             plan_bytes.as_bytes(),
-        ) {
-            Ok(mut verified) => {
-                // ---- THE UNSIGNED CLAIM MUST AGREE WITH THE SIGNED ONE -----
-                //
-                // `spec.planHash` is a plain CRD field beside the documents: a
-                // create form fills it in so an operator can compare it, and
-                // `kubectl get approval -o yaml`, `kubectl get approval` and
-                // the UI all SHOW it. Checks 1-8 never read it -- check 7
-                // recomputes the hash and compares it with the one INSIDE the
-                // signed bytes, which is what authorisation must rest on. So
-                // without this an `Approval` could be `Verified=True` while
-                // displaying a plan hash that is not the plan it authorises,
-                // and the one thing this field exists for -- letting a reader
-                // compare -- would be the one thing it could not be trusted
-                // for. The CRD has always said a wrong `planHash` is a refusal
-                // (`crds/approval.rs`); this is where that becomes true.
-                //
-                // THE VERDICT IS CHECK 7's, because the FACT is check 7's: this
-                // approval names a plan the referent does not carry. The
-                // message names both hashes and says both places must agree.
-                let want = sha256_prefixed(plan_bytes.as_bytes());
-                if approval.spec.plan_hash != want {
-                    return Ok(ApprovalOutcome::Refused(
+        )
+    };
+    Ok(match evaluated {
+        Ok(mut verified) => {
+            // ---- THE UNSIGNED CLAIM MUST AGREE WITH THE SIGNED ONE -----
+            //
+            // `spec.planHash` is a plain CRD field beside the documents: a
+            // create form fills it in so an operator can compare it, and
+            // `kubectl get approval -o yaml`, `kubectl get approval` and
+            // the UI all SHOW it. Checks 1-8 never read it -- check 7
+            // recomputes the hash and compares it with the one INSIDE the
+            // signed bytes, which is what authorisation must rest on. So
+            // without this an `Approval` could be `Verified=True` while
+            // displaying a plan hash that is not the plan it authorises,
+            // and the one thing this field exists for -- letting a reader
+            // compare -- would be the one thing it could not be trusted
+            // for. The CRD has always said a wrong `planHash` is a refusal
+            // (`crds/approval.rs`); this is where that becomes true.
+            //
+            // THE VERDICT IS CHECK 7's, because the FACT is check 7's: this
+            // approval names a plan the referent does not carry. The
+            // message names both hashes and says both places must agree.
+            if approval.spec.plan_hash != want {
+                return Ok(ApprovalOutcome::Refused(
+                    if subject.kind == SubjectKind::RehearsalSchedule {
+                        ApprovalRefusal::TemplateDigestMismatch {
+                            got: approval.spec.plan_hash.clone(),
+                            want,
+                        }
+                    } else {
                         ApprovalRefusal::PlanHashMismatch {
                             got: approval.spec.plan_hash.clone(),
                             want,
-                        },
-                    ));
-                }
-                verified.verified_subject_ref = verified_subject_ref;
-                ApprovalOutcome::Verified(verified)
+                        }
+                    },
+                ));
             }
-            Err(refusal) => ApprovalOutcome::Refused(refusal),
-        },
-    )
+            verified.verified_subject_ref = verified_subject_ref;
+            ApprovalOutcome::Verified(verified)
+        }
+        Err(refusal) => ApprovalOutcome::Refused(refusal),
+    })
 }
 
 /// The `/status` body one outcome produces.

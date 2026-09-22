@@ -274,7 +274,7 @@ fn backup_value(name: &str, capture: &str, topics: Value, verified: bool) -> Val
     json!({
         "apiVersion": "logweir.dev/v1alpha1",
         "kind": "Backup",
-        "metadata": {"name": name, "namespace": NS, "uid": format!("uid-{name}"), "resourceVersion": "9"},
+        "metadata": {"name": name, "namespace": NS, "uid": format!("uid-{name}"), "resourceVersion": "9", "creationTimestamp": capture},
         "spec": {
             "sourceRef": {"name": "prod-kafka"},
             "topics": topics,
@@ -1899,9 +1899,10 @@ fn a_retired_key_never_reaches_the_keyring() {
     assert_eq!(ring.keys[0].key_id, KEY_ID);
 }
 
-/// A `Backup` whose evidence did not verify is never a candidate —
+/// A `Backup` whose evidence did not verify is never selectable on its own —
 /// `spec.point.requireVerifiedEvidence` is `true` in v1 and there is no way to
-/// turn it off.
+/// turn it off. A destination-backed run that captured the runner's receipt
+/// digest remains joinable so the catalog can supply the facts it measured.
 #[test]
 fn an_unverified_backup_is_never_a_candidate() {
     let verified: weirkeeper::crds::backup::Backup = serde_json::from_value(backup_value(
@@ -1927,6 +1928,67 @@ fn an_unverified_backup_is_never_a_candidate() {
         !rs::candidate_from_backup(&unverified)
             .expect("still a candidate object")
             .selectable
+    );
+
+    let mut destination_backed = backup_value(
+        "b3",
+        "2026-09-19T02:00:00Z",
+        json!(["orders", "payments"]),
+        false,
+    );
+    destination_backed["status"]["capture"] = Value::Null;
+    destination_backed["status"]["windowCovered"] = Value::Null;
+    destination_backed["status"]["evidence"]["verification"]["result"] = json!("NotAttempted");
+    let destination_backed: weirkeeper::crds::backup::Backup =
+        serde_json::from_value(destination_backed).expect("the NotAttempted fixture parses");
+    let candidate = rs::candidate_from_backup(&destination_backed)
+        .expect("a succeeded run with a captured receipt digest remains a joinable candidate");
+    assert_eq!(
+        candidate.topics,
+        Some(vec!["orders".to_string(), "payments".to_string()]),
+        "the immutable named selection supplies D3 §4.2's topic subset fact"
+    );
+    assert!(
+        !candidate.selectable,
+        "NotAttempted is not silently upgraded; a matching verified catalog row decides \
+         selectability when candidates merge"
+    );
+
+    let mut by_id = std::collections::BTreeMap::from([(candidate.point_id.clone(), candidate)]);
+    let catalog_entry = serde_json::from_value(json!({
+        "pointId": POINT_ID,
+        "backupId": "set-b3",
+        "runId": "run-b3",
+        "recoveryPointAtMs": 1_758_240_000_000_i64,
+        "coveredFromMs": 1_758_236_400_000_i64,
+        "coveredToMs": 1_758_240_000_000_i64,
+        "locations": [{"locationId": DESTINATION, "availability": "Available"}],
+        "receiptKey": "receipts/set-b3.json",
+        "receiptSha256": RECEIPT_SHA,
+        "manifestSha256": MANIFEST_SHA,
+        "availability": "Available",
+        "verification": "Verified",
+        "selectable": true
+    }))
+    .expect("the catalog entry parses");
+    rs::merge_catalog_entry(&mut by_id, catalog_entry, Some(DESTINATION.to_string()));
+    let merged = by_id.get(POINT_ID).expect("the matching point merged");
+    assert!(
+        merged.selectable,
+        "the catalog supplies its selectability axis"
+    );
+    assert_eq!(
+        merged.topics,
+        Some(vec!["orders".to_string(), "payments".to_string()]),
+        "the merge retains the immutable named topics from Backup.spec"
+    );
+    assert_eq!(
+        merged.covered,
+        Some(weirkeeper::rehearsal::Window {
+            from_ms: 1_758_236_400_000,
+            to_ms: 1_758_240_000_000,
+        }),
+        "the catalog supplies the receipt-derived window"
     );
 }
 

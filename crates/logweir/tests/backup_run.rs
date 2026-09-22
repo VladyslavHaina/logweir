@@ -891,6 +891,11 @@ fn backup_run_writes_a_signed_receipt() {
         "`logweir drill verify --payload-type backup-receipt` must exit 0 over the bytes \
          this run signed and put"
     );
+    assert_eq!(
+        outcome.receipt_sha256,
+        logweir_core::ids::sha256_prefixed(&doc),
+        "the reported capture digest is over the exact stored receipt bytes"
+    );
 
     // The document says what the run measured — spot-checked on the fields an
     // auditor reads first, so a receipt full of defaults cannot pass this row.
@@ -1302,6 +1307,28 @@ fn the_runner_prints_its_two_evidence_keys_last() {
             && last_two[0].ends_with(".receipt.json"),
         "the PENULTIMATE line is `receipt-key=<key>`, got {:?} in:\n{stdout}",
         last_two[0]
+    );
+    let digest_lines: Vec<&str> = lines
+        .iter()
+        .copied()
+        .filter(|line| line.starts_with("receipt-sha256="))
+        .collect();
+    assert_eq!(
+        digest_lines.len(),
+        1,
+        "one public capture digest is emitted before I7's final key pair: {stdout}"
+    );
+    let digest = digest_lines[0]
+        .strip_prefix("receipt-sha256=sha256:")
+        .expect("the canonical digest prefix");
+    assert_eq!(digest.len(), 64);
+    assert!(digest
+        .bytes()
+        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
+    assert!(
+        lines.iter().position(|line| *line == digest_lines[0])
+            < lines.iter().position(|line| *line == last_two[0]),
+        "the digest precedes the final two lines and does not break old consumers"
     );
     assert!(
         last_two[1].starts_with("sidecar-key=logweir/backups/i7-demo/")

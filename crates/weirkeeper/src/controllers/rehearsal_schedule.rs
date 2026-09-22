@@ -1480,7 +1480,16 @@ pub fn candidate_from_backup(backup: &Backup) -> Option<PointCandidate> {
     let evidence = status.evidence.as_ref();
     let receipt_sha256 = evidence.and_then(|e| e.receipt_sha256.clone())?;
     let point_id = point_id_from_receipt_digest(&receipt_sha256)?;
-    let capture = status.capture.as_ref().and_then(|c| c.started_at);
+    // `capture` is receipt-derived and therefore absent when verification was
+    // NotAttempted. Keep the Backup as a joinable candidate in that state: a
+    // matching catalog row below supplies the authoritative capture/window and
+    // selectability axes. A real API object always has creationTimestamp; it is
+    // only a non-selectable placeholder until that merge happens.
+    let recovery_point_at = status
+        .capture
+        .as_ref()
+        .and_then(|c| c.started_at)
+        .or_else(|| backup.metadata.creation_timestamp.as_ref().map(|t| t.0))?;
     let covered = status.window_covered.as_ref().map(|w| Window {
         from_ms: w.from_ms,
         to_ms: w.to_ms,
@@ -1489,8 +1498,12 @@ pub fn candidate_from_backup(backup: &Backup) -> Option<PointCandidate> {
         point_id,
         backup_id: status.backup_id.clone()?,
         backup_name: Some(backup.name_any()),
-        recovery_point_at: capture?,
+        recovery_point_at,
         covered,
+        // Backup.spec is immutable. For named selection this is the exact list
+        // frozen into the runner plan; retaining it across the catalog merge is
+        // what proves D3 §4.2's `topics ⊆ point.topics` filter. Dynamic mode's
+        // spec list is deliberately empty, so it makes no invented claim.
         topics: Some(backup.spec.topics.clone()),
         partitions: None,
         receipt_key: evidence
@@ -1525,7 +1538,7 @@ pub fn point_id_from_receipt_digest(digest: &str) -> Option<String> {
 }
 
 /// Fold one catalog view entry into the candidate set.
-fn merge_catalog_entry(
+pub fn merge_catalog_entry(
     by_id: &mut BTreeMap<String, PointCandidate>,
     entry: crate::catalog_view::ViewEntry,
     destination: Option<String>,
@@ -1536,6 +1549,13 @@ fn merge_catalog_entry(
             // THE CATALOG DECIDES SELECTABILITY, because it is the axis it
             // actually measured: it listed the archive and re-evaluated trust.
             existing.selectable = entry.selectable;
+            if let Some(at) = recovery_point_at {
+                existing.recovery_point_at = at;
+                existing.covered = Some(Window {
+                    from_ms: entry.covered_from_ms,
+                    to_ms: entry.covered_to_ms,
+                });
+            }
             if existing.manifest_sha256.is_none() {
                 existing.manifest_sha256 = entry.manifest_sha256.clone();
             }

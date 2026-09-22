@@ -158,6 +158,10 @@ pub struct BackupOutcome {
     /// `logweir/backups/<backup_id>/<run_id>.receipt.sig`. The runner's FINAL
     /// stdout line (**I7**).
     pub sidecar_key: String,
+    /// Digest of the exact signed receipt bytes. This is a capture fact, not a
+    /// verification verdict, and is printed for a credential-isolated
+    /// controller that cannot fetch those bytes itself.
+    pub receipt_sha256: String,
     /// `logweir/catalog/v1/points/<pointId>/record.json` when the recovery
     /// catalog point was written, `None` when the catalog write failed
     /// (PLAT-15.1, D3 §5.2).
@@ -537,6 +541,7 @@ fn execute_with_signer(
         // outcome only after the puts succeeded, and a failure is an `Err`.
         receipt_key: String::new(),
         sidecar_key: String::new(),
+        receipt_sha256: String::new(),
         catalog_key: None,
     };
 
@@ -546,6 +551,7 @@ fn execute_with_signer(
     let persisted = phase_run::persist_receipt(&outcome, signer, receipt_out_path(args), evidence)?;
     outcome.receipt_key = persisted.receipt_key;
     outcome.sidecar_key = persisted.sidecar_key;
+    outcome.receipt_sha256 = persisted.receipt_sha256;
     outcome.catalog_key = persisted.catalog_key;
 
     Ok(outcome)
@@ -613,6 +619,7 @@ fn report(run_id: &str, outcome: Result<BackupOutcome, BackupError>) -> ExitCode
         Ok(o) => o.catalog_key.clone(),
         Err(_) => None,
     };
+    let receipt_sha256 = outcome.as_ref().ok().map(|o| o.receipt_sha256.clone());
     let code = match &outcome {
         Ok(o) => {
             tracing::info!(
@@ -640,6 +647,7 @@ fn report(run_id: &str, outcome: Result<BackupOutcome, BackupError>) -> ExitCode
         refusal_message.as_deref(),
         evidence_keys,
         catalog_key,
+        receipt_sha256,
     )
 }
 
@@ -673,6 +681,7 @@ fn exiting(
     refusal_message: Option<&str>,
     evidence_keys: Option<(String, String)>,
     catalog_key: Option<String>,
+    receipt_sha256: Option<String>,
 ) -> ExitCode {
     let meaning = match code {
         ExitCode::Ok => {
@@ -745,6 +754,9 @@ fn exiting(
     if code == ExitCode::Ok {
         if let Some(catalog_key) = catalog_key {
             println!("catalog-key={catalog_key}");
+        }
+        if let Some(receipt_sha256) = receipt_sha256 {
+            println!("receipt-sha256={receipt_sha256}");
         }
     }
     if let (ExitCode::Ok, Some((receipt_key, sidecar_key))) = (code, evidence_keys) {

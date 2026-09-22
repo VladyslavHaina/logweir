@@ -229,6 +229,7 @@ fn every_backup_status_the_controller_writes() {
     let keys = EvidenceKeys {
         receipt: Some("logweir/backups/b1/r.receipt.json".into()),
         sidecar: Some("logweir/backups/b1/r.receipt.sig".into()),
+        receipt_sha256: None,
     };
     let digest = Some("sha256:00ff");
     let no_keys = EvidenceKeys::default();

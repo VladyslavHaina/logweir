@@ -1441,13 +1441,17 @@ axes preserved.
 a destination whose `evidenceRead` grant is `SecretKeys` or `WorkloadIdentity`
 the controller holds no Secret verb by design, so it verifies nothing itself and
 records `evidence.verification.result: NotAttempted` with a sentence naming the
-grant. `Backup.status.capture` and `status.evidence.receiptSha256` are written
-only on a verdict, so on that posture a succeeded run carries neither — the
-point can be neither aged against the objective nor named. Until 2026-09-21 the
-policy read that as *no point at all*: `health: Unprotected`, which is D3 §3.2's
-"nothing to recover from", and which **pages**, about archives whose own catalog
-entry for the same point read `Available`/`Verified`. Three changes close it and
-an operator sees all three:
+grant. The runner now prints the SHA-256 of the exact persisted receipt bytes,
+so `status.evidence.receiptSha256` is a captured public fact even when the
+controller cannot read the destination. `Backup.status.capture` remains
+receipt-derived and is still absent on `NotAttempted`; the digest therefore
+names a joinable point but does not age it, verify it or make it selectable by
+itself. Older runners that omit the digest remain compatible and yield no
+digest. Malformed or duplicate digest lines are ignored rather than promoted
+to evidence. Until 2026-09-21 the policy read such a run as *no point at all*:
+`health: Unprotected`, which is D3 §3.2's "nothing to recover from", and which
+**pages**, about archives whose own catalog entry for the same point read
+`Available`/`Verified`. Three changes close it and an operator sees all three:
 
 - The catalog join answers on the **archive set id** (`Backup.status.execution.id`
   / `status.backupId`, and `backupId` on the catalog row) when the point has no
@@ -1979,7 +1983,15 @@ arithmetic exercise.
 **One standing approval, checked twice — and never minted here.** The
 authorization is an ordinary immutable `Approval` with
 `spec.subjectRef.kind: RehearsalSchedule` and `spec.planHash` equal to the
-template digest. Its `spec.approvalBytes` is a signed
+template digest. The Approval controller parses this arm as a
+`StandingRehearsalAuthorization`, not as the per-run approval document: after
+the common DSSE, roster and key-lifecycle checks, it requires the exact
+template digest and subject API version/kind/namespace/name/**UID**, a live
+positive window of at most 90 days, and a complete scratch-only scope with
+positive numeric bounds. These failures retain standing-specific reasons
+(`TemplateDigestMismatch`, `SubjectMismatch`, `WindowInvalid`, `ScopeInvalid`
+or `StandingDocumentInvalid`); they never masquerade as the Restore arm's
+`PlanHashMismatch`. Its `spec.approvalBytes` is a signed
 `StandingRehearsalAuthorization` document carrying the subject (with its
 **UID**), the scope and `issuedAt`/`expiresAt`, and its DSSE payload type is
 that document's own — so a genuinely signed drill approval replayed as a
@@ -2333,9 +2345,10 @@ carry.
 
 ### The checks
 
-Each `Approval` event resolves the roster, fetches the referent named by
-`spec.subjectRef`, reads its `spec.planBytes`, and runs the checks **in this
-order**. The order is load-bearing: the DSSE verifier refuses a `payloadType`
+Each `Approval` event resolves the roster and fetches the referent named by
+`spec.subjectRef`. A Restore approval reads `spec.planBytes` and runs the
+per-run checks below **in this order**. The order is load-bearing: the DSSE
+verifier refuses a `payloadType`
 mismatch itself and returns the same error kind for "no signature by this key",
 so an implementation that simply tried the roster's keys would report *one*
 refusal for a substituted document, an attacker's key and a genuinely broken
@@ -2353,6 +2366,15 @@ signature alike.
 | 8 | The document's `subject_kind` equals the referent's kind | `SubjectKindMismatch` |
 | 9 | The object's own `spec.planHash` -- the unsigned field beside the documents -- equals that same recomputed hash | `PlanHashMismatch` |
 
+A RehearsalSchedule approval shares checks 1–6, then parses the verified bytes
+as `StandingRehearsalAuthorization`. Its closed standing arm checks the exact
+canonical template digest and unsigned `spec.planHash`, the full subject
+identity including UID, the live at-most-90-day window, and the complete
+scratch-only scope. The corresponding reasons are
+`TemplateDigestMismatch`, `SubjectMismatch`, `WindowInvalid`, `ScopeInvalid`
+and `StandingDocumentInvalid`; no standing failure is reported as the per-run
+`PlanHashMismatch`.
+
 Two more `reason`s reach the same `Verified` condition without being checks on
 a signature at all. They are properties of the **referent** — the object
 `spec.subjectRef` points at — and are kept in their own vocabulary because
@@ -2363,13 +2385,14 @@ a signature at all. They are properties of the **referent** — the object
 | — | `spec.subjectRef` names an object that does not exist in this namespace | `ReferentNotFound` |
 | — | The referent exists and its KIND carries no `spec.planBytes` for check 7 to recompute a hash from — in tag 1 that is `subjectRef.kind: Backup` | `ReferentHasNoPlanBytes` |
 
-**So `Verified`'s `reason` is one of FOURTEEN strings, and this is the one place
-all fourteen are named**: `PayloadTypeMismatch`, `SignatureInvalid`,
+**So `Verified`'s `reason` is one of NINETEEN strings, and this is the one place
+all nineteen are named**: `PayloadTypeMismatch`, `SignatureInvalid`,
 `KeyIdNotInRoster`, `KeyIdExpired`, `KeyRetired`, `KeyRevoked`,
 `KeyNotYetValid`, `TrustPolicyConflict`, `PlanHashMismatch`,
 `SubjectKindMismatch`, `RosterNotFound` (install step 1, above),
-`ReferentNotFound`, `ReferentHasNoPlanBytes` and `ReferentUidChanged`. A
-fifteenth would be a compile error rather than a surprise: each reason is the
+`ReferentNotFound`, `ReferentHasNoPlanBytes`, `ReferentUidChanged`,
+`TemplateDigestMismatch`, `SubjectMismatch`, `WindowInvalid`, `ScopeInvalid`
+and `StandingDocumentInvalid`. A twentieth would be a compile error rather than a surprise: each reason is the
 name of the enum variant that produced it, and both `match`es are wildcard-free
 on purpose.
 
@@ -4082,8 +4105,9 @@ name-minting time, under the same reason string; this is the same refusal for a
 
 ### Where the two evidence keys come from
 
-`logweir backup run` prints, as its **final two stdout lines** and in this
-order, `receipt-key=<key>` then `sidecar-key=<key>`. The controller reads them
+`logweir backup run` prints `receipt-sha256=sha256:<64-lowercase-hex>` for the
+exact persisted receipt bytes, followed by its **final two stdout lines** in
+this order: `receipt-key=<key>` then `sidecar-key=<key>`. The controller reads them
 back through the **`pods/log` subresource** and writes them to
 `status.evidence.receiptKey` and `status.evidence.sidecarKey`.
 
