@@ -50,6 +50,8 @@ controller:
   logLevel: info                # RUST_LOG; below info the per-object lines are lost
   failFastSeconds: ""           # D3: patience for a stuck run. "" = 300s; 0 = never; floor 60
   jobTtlSeconds: ""             # D3: how long a finished Job is kept. "" = 604800s; floor 3600
+  watchNamespaces: []           # D0 stage 5: [] = every namespace (ClusterRoleBinding). A list = RoleBindings
+                                # there only; required by api.console.mode=shared, release namespace excluded
   resources:
     requests: { cpu: 50m, memory: 128Mi }
     limits: { memory: 512Mi }
@@ -183,7 +185,8 @@ api:
     keyVersion: 1               # the `version:` those key files must declare
     publicBaseUrl: ""           # shared: EXACT https:// URL, no path, no trailing slash
     sessionMaxAgeSeconds: 900   # shared: 60..900; a stateless session cannot be revoked
-    trustedProxyCidrs: []       # shared: transport LOGGING only, never an identity
+    trustedProxyCidrs: []       # shared: the ingress's ranges; never an identity
+    requireTrustedProxy: false  # shared: refuse (421) any request not from those ranges over HTTPS
     oidc:
       issuer: ""                # EXACT, as the discovery document states it
       clientId: ""              # EXACT; also the expected audience

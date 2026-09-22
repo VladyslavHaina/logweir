@@ -5486,6 +5486,18 @@ Job-create authority and a separate trusted execution mechanism must perform
 the signing. Merely adding a namespace-scoped RoleBinding does not narrow the
 shipped cluster-wide grant. This split is not implemented by the default install.
 
+**What the scoped install narrows, and what it does not (D0 stage 5).** The
+chart's `controller.watchNamespaces` REPLACES the cluster-wide binding with one
+RoleBinding per execution namespace (`charts/logweir/README.md`
+§`controller.watchNamespaces`), and the controller then watches and creates Jobs
+in those namespaces only (`LOGWEIR_WATCH_NAMESPACES`,
+`crates/weirkeeper/src/scope.rs`). O1 then covers the execution namespaces and
+nothing else: a namespace that is not listed — the release namespace, where the
+shared console's session and cursor keys live — is outside the controller's
+Job-create authority, and `kubectl auth can-i create jobs` there answers `no`
+for `weirkeeper`. The signing key in each execution namespace is still inside
+it, so O1 itself stands.
+
 None of this stops a cluster-admin — `docs/stability.md`, **O0**.
 
 ### 15.5 Where the object store is, for a local demo

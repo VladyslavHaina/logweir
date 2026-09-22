@@ -2943,6 +2943,157 @@ fn chart_lint_the_console_mode_has_no_default_and_only_shared_is_exposed() {
     );
 }
 
+/// **The shared console is rendered outside the controller's Job-create
+/// authority (D0 stage 5), and never beside the legacy proxy.**
+///
+/// WHAT THE SCOPED RENDER MUST SAY. In `console-shared`, which sets
+/// `controller.watchNamespaces: [team-a, team-b]`:
+///
+/// * no `ClusterRoleBinding/weirkeeper` — the cluster-wide grant that put every
+///   namespace, the key namespace included, inside the controller's authority;
+/// * one `RoleBinding/weirkeeper` to the unchanged `weirkeeper` ClusterRole in
+///   EXACTLY the watched namespaces, and none in the release namespace;
+/// * `ClusterRole/weirkeeper-cluster-scope`, bound cluster-wide, naming the two
+///   cluster-scoped trust kinds and nothing else — no Job, Pod, ConfigMap,
+///   Secret or namespaced kind;
+/// * in the release namespace, `get` on the one policy ConfigMap by name and
+///   nothing else;
+/// * the controller's `LOGWEIR_WATCH_NAMESPACES` equal to the bound set, so
+///   the watch it starts is one the API server allows;
+/// * the console's configuration naming the Kubernetes principal it writes as
+///   and requiring its trusted proxy.
+///
+/// And the default render keeps the cluster-wide binding and renders no
+/// variable (the install file comparison holds that byte for byte).
+///
+/// MUTANT: render the `weirkeeper` ClusterRoleBinding unconditionally, bind the
+/// release namespace, or widen `weirkeeper-cluster-scope` with a namespaced
+/// kind — each fails here naming the object.
+#[test]
+fn chart_lint_the_shared_console_is_outside_the_controllers_job_authority() {
+    const RELEASE_NS: &str = "logweir-system";
+    let shared = rendered("console-shared");
+    assert!(
+        !names_of(&shared, "ClusterRoleBinding").contains("weirkeeper"),
+        "console-shared renders ClusterRoleBinding/weirkeeper: the controller would hold Job \
+         create in the release namespace, where the console's keys live (D0 stage 5)"
+    );
+    let bound: BTreeSet<String> = shared
+        .iter()
+        .filter(|d| {
+            d.kind == "RoleBinding"
+                && d.value["roleRef"]["kind"] == "ClusterRole"
+                && d.value["roleRef"]["name"] == "weirkeeper"
+        })
+        .map(|d| {
+            assert_eq!(
+                d.value["subjects"][0]["name"], "weirkeeper",
+                "a weirkeeper RoleBinding binds someone else"
+            );
+            assert_eq!(d.value["subjects"][0]["namespace"], RELEASE_NS);
+            d.value["metadata"]["namespace"]
+                .as_str()
+                .expect("a namespaced RoleBinding")
+                .to_string()
+        })
+        .collect();
+    assert_eq!(
+        bound,
+        BTreeSet::from(["team-a".to_string(), "team-b".to_string()]),
+        "the weirkeeper ClusterRole must be bound in exactly the watched namespaces"
+    );
+    assert!(!bound.contains(RELEASE_NS));
+
+    let cluster_scope = find(&shared, "ClusterRole", "weirkeeper-cluster-scope");
+    let resources: BTreeSet<String> = rules_of(cluster_scope)
+        .into_iter()
+        .flat_map(|(groups, resources, _)| {
+            assert_eq!(groups, vec!["logweir.dev".to_string()]);
+            resources
+        })
+        .collect();
+    assert_eq!(
+        resources,
+        BTreeSet::from([
+            "trustpolicies".to_string(),
+            "trustpolicies/status".to_string(),
+            "trustrosters".to_string(),
+            "trustrosters/status".to_string(),
+        ]),
+        "weirkeeper-cluster-scope must hold the two cluster-scoped trust kinds and nothing else"
+    );
+    let binding = find(&shared, "ClusterRoleBinding", "weirkeeper-cluster-scope");
+    assert_eq!(binding.value["roleRef"]["name"], "weirkeeper-cluster-scope");
+    assert_eq!(binding.value["subjects"][0]["name"], "weirkeeper");
+
+    let policy_role = find(&shared, "Role", "weirkeeper-installation-policy");
+    assert_eq!(policy_role.value["metadata"]["namespace"], RELEASE_NS);
+    let rules = policy_role.value["rules"].as_sequence().expect("rules");
+    assert_eq!(rules.len(), 1, "one rule in the release namespace");
+    assert_eq!(
+        serde_yaml::to_string(&rules[0]).unwrap(),
+        "apiGroups:\n- ''\nresources:\n- configmaps\nresourceNames:\n- weirkeeper-policy\nverbs:\n- get\n"
+    );
+    // Nothing else in the render grants the controller anything in the
+    // release namespace.
+    for doc in shared.iter().filter(|d| {
+        d.kind == "RoleBinding"
+            && d.value["metadata"]["namespace"] == RELEASE_NS
+            && d.value["subjects"]
+                .as_sequence()
+                .is_some_and(|s| s.iter().any(|x| x["name"] == "weirkeeper"))
+    }) {
+        assert_eq!(
+            doc.name(),
+            "weirkeeper-installation-policy",
+            "an unexpected grant to weirkeeper in the release namespace"
+        );
+    }
+
+    let controller = find(&shared, "Deployment", "weirkeeper");
+    let env = env_of(container(controller));
+    let watched = env
+        .get("LOGWEIR_WATCH_NAMESPACES")
+        .and_then(|e| e["value"].as_str())
+        .expect("the scoped controller carries LOGWEIR_WATCH_NAMESPACES");
+    let watched: BTreeSet<String> = watched.split(',').map(str::to_string).collect();
+    assert_eq!(
+        watched, bound,
+        "the watch and the grant must be the same list"
+    );
+
+    let (_, config) = console_config("console-shared");
+    assert_eq!(
+        config["kubernetes"]["principal"],
+        "system:serviceaccount:logweir-system:logweir-api"
+    );
+    assert_eq!(config["requireTrustedProxy"], true);
+
+    // THE DEFAULT RENDER IS UNCHANGED: the cluster-wide binding, no variable.
+    let default = rendered("default");
+    assert!(names_of(&default, "ClusterRoleBinding").contains("weirkeeper"));
+    assert!(!names_of(&default, "ClusterRole").contains("weirkeeper-cluster-scope"));
+    assert!(
+        !env_of(container(find(&default, "Deployment", "weirkeeper")))
+            .contains_key("LOGWEIR_WATCH_NAMESPACES")
+    );
+
+    let template = read("charts/logweir/templates/ui/api-config.yaml");
+    for needle in [
+        "api.console.mode=shared requires controller.watchNamespaces (D0 stage 5).",
+        "includes the release namespace %q, which holds the shared console's keys",
+        "api.console.mode=shared with ui.enabled=true is refused.",
+        "which is not in controller.watchNamespaces",
+        "api.console.requireTrustedProxy needs api.console.trustedProxyCidrs",
+    ] {
+        assert!(
+            template.contains(needle),
+            "templates/ui/api-config.yaml must still refuse at render time with `{needle}` \
+             (scripts/check-chart.sh arm 8 runs it)"
+        );
+    }
+}
+
 /// A tiny matcher for the ONE anchored alternation shape this schema uses
 /// (`^$|^https://[^/?#@]+$`). Written here rather than pulling in a regex crate
 /// for a test: a dependency added to assert one pattern is a dependency the

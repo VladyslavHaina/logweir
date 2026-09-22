@@ -268,6 +268,12 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "watchNamespaces": {
+          "type": "array",
+          "description": "D0 stage 5: the execution namespaces the controller watches and creates Jobs in. Empty is every namespace through the cluster-wide ClusterRoleBinding, the behaviour of every earlier release. A list renders one RoleBinding per namespace instead, a ClusterRole for the two cluster-scoped trust kinds only, and LOGWEIR_WATCH_NAMESPACES on the controller. Shared console mode requires a list that excludes the release namespace, where the console's keys live.",
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$" }
+        },
         "logLevel": { "type": "string", "minLength": 1 },
         "failFastSeconds": { "$ref": "#/definitions/secondsOrBuildDefault" },
         "jobTtlSeconds": { "$ref": "#/definitions/secondsOrBuildDefault" },
@@ -442,6 +448,10 @@
             "trustedProxyCidrs": {
               "type": "array",
               "items": { "type": "string", "minLength": 1 }
+            },
+            "requireTrustedProxy": {
+              "type": "boolean",
+              "description": "Shared mode: refuse (421 misdirected_request) any request, the two probes excepted, whose socket peer is outside trustedProxyCidrs or that the proxy did not mark X-Forwarded-Proto: https. Refused at render time with no CIDR to trust."
             },
             "oidc": {
               "type": "object",

@@ -4,7 +4,14 @@ Binds the `weirkeeper` ClusterRole to the `weirkeeper` ServiceAccount —
 because `TrustRoster` is cluster-scoped and the controller reads it with
 `Api::all`; the subject's namespace is the release namespace, which is the one
 place the source manifest's fixed `logweir-system` becomes a parameter.
+
+ONLY WHEN THE CONTROLLER IS NOT SCOPED (D0 stage 5). With
+`controller.watchNamespaces` set, this binding is NOT rendered: the namespaced
+rules of the `weirkeeper` ClusterRole are bound per execution namespace and the
+two cluster-scoped trust kinds through `weirkeeper-cluster-scope`
+(`controller-scope.yaml`). The default render is unchanged.
 */ -}}
+{{- if not .Values.controller.watchNamespaces }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
@@ -20,3 +27,4 @@ subjects:
   - kind: ServiceAccount
     name: weirkeeper
     namespace: {{ .Release.Namespace }}
+{{- end }}

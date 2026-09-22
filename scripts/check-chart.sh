@@ -590,14 +590,21 @@ echo "== 8. the console's refusals, run =="
 CONSOLE_ON=(--set api.enabled=true --set api.console.enabled=true)
 CONSOLE_KEY=(--set api.console.keySecret=logweir-console-keys)
 CONSOLE_LOCAL=(--set api.console.mode=localAdmin)
+# PLAT-17.2 (D0 stage 5): a shared console renders only beside a controller
+# scoped AWAY from the release namespace, so the base shared shape binds its
+# viewers in an execution namespace the controller watches and the console is
+# bound in — never in `$NAMESPACE`, which holds the console's keys.
+CONSOLE_EXEC_NS=team-a
 CONSOLE_SHARED=(
   --set api.console.mode=shared
+  --set "api.namespaces={$CONSOLE_EXEC_NS}"
+  --set "controller.watchNamespaces={$CONSOLE_EXEC_NS}"
   --set api.console.oidc.issuer=https://idp.example.com/realms/logweir
   --set api.console.oidc.clientId=logweir-console
   --set api.console.oidc.clientSecret=logweir-console-oidc
   --set api.console.roles.revision=2026-09-21.1
   --set api.console.roles.bindings[0].role=viewer
-  --set "api.console.roles.bindings[0].namespace=$NAMESPACE"
+  --set "api.console.roles.bindings[0].namespace=$CONSOLE_EXEC_NS"
   --set api.console.roles.bindings[0].groups[0]=logweir-viewers
 )
 console_refuses() {
@@ -660,6 +667,36 @@ console_refuses "a shared-console NetworkPolicy with no ingress-controller selec
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
   --set-string api.console.publicBaseUrl=https://console.example.com \
   --set api.console.networkPolicy.enabled=true
+# PLAT-17.2 — D0 stage 5 and the legacy proxy. The shared console is not
+# rendered inside the controller's Job-create authority, nor beside the
+# unauthenticated `kubectl proxy` Service, nor with a trusted-proxy gate that
+# has nothing to trust.
+console_refuses "a shared console with the controller unscoped" "requires controller.watchNamespaces" \
+  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
+  --set-string api.console.publicBaseUrl=https://console.example.com \
+  --set "controller.watchNamespaces=null"
+console_refuses "a shared console whose controller may create Jobs in the key namespace" "includes the release namespace" \
+  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
+  --set-string api.console.publicBaseUrl=https://console.example.com \
+  --set "controller.watchNamespaces={$CONSOLE_EXEC_NS,$NAMESPACE}"
+console_refuses "a shared console beside the legacy kubectl proxy" "with ui.enabled=true is refused" \
+  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
+  --set-string api.console.publicBaseUrl=https://console.example.com \
+  --set ui.enabled=true
+console_refuses "a product role binding in a namespace no controller reconciles" "which is not in controller.watchNamespaces" \
+  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
+  --set-string api.console.publicBaseUrl=https://console.example.com \
+  --set "api.namespaces={$CONSOLE_EXEC_NS,team-b}" \
+  --set "api.console.roles.bindings[0].namespace=team-b"
+console_refuses "a trusted-proxy requirement with no range to trust" "requireTrustedProxy needs" \
+  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
+  --set-string api.console.publicBaseUrl=https://console.example.com \
+  --set api.console.requireTrustedProxy=true
+console_refuses "a trusted-proxy requirement in the in-cluster administrator mode" "belongs to api.console.mode=shared" \
+  "${CONSOLE_ON[@]}" "${CONSOLE_LOCAL[@]}" "${CONSOLE_KEY[@]}" \
+  --set api.console.requireTrustedProxy=true
+console_refuses "a watched namespace that is not a namespace name" "does not match pattern" \
+  --set "controller.watchNamespaces={Team_A}"
 
 # AND THE TWO SUPPORTED SHAPES STILL RENDER — a gate whose every arm refuses
 # proves only that the template fails. The Service is the interesting half: the

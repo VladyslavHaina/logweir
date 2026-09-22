@@ -6973,7 +6973,7 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: logweir-api-config-adab2a2c60
+  name: logweir-api-config-404a949ebc
   namespace: logweir-system
   labels:
     app.kubernetes.io/name: logweir
@@ -7017,12 +7017,14 @@ data:
     sessionMaxAgeSeconds: 900
     trustedProxyCidrs:
       - 10.0.0.0/8
+    requireTrustedProxy: true
     namespaces:
       - logweir-system
       - team-a
       - team-b
     kubernetes:
       source: inCluster
+      principal: "system:serviceaccount:logweir-system:logweir-api"
     cursorKey:
       file: /var/run/logweir/keys/cursor.key
       expectedVersion: 1
@@ -7162,6 +7164,36 @@ rules:
     verbs: ["list", "watch"]
   - apiGroups: ["logweir.dev"]
     resources: ["retentionpolicies/status"]
+    verbs: ["patch"]
+---
+# Source: logweir/templates/controller-scope.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: weirkeeper-cluster-scope
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: control-plane
+rules:
+  # The two cluster-scoped kinds, with exactly the verbs `clusterrole.yaml`
+  # grants on them — and nothing namespaced. `TrustRoster` is read and its
+  # status patched by `controllers::trust_roster`; `TrustPolicy` is watched by
+  # the trust, approval, backup and restore reconcilers and its status patched
+  # by `controllers::trust_policy`.
+  - apiGroups: ["logweir.dev"]
+    resources: ["trustrosters"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["logweir.dev"]
+    resources: ["trustrosters/status"]
+    verbs: ["patch"]
+  - apiGroups: ["logweir.dev"]
+    resources: ["trustpolicies"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["logweir.dev"]
+    resources: ["trustpolicies/status"]
     verbs: ["patch"]
 ---
 # Source: logweir/templates/human-roles.yaml
@@ -7398,11 +7430,11 @@ rules:
     resources: ["trustpolicies"]
     verbs: ["get", "list"]
 ---
-# Source: logweir/templates/clusterrolebinding.yaml
+# Source: logweir/templates/controller-scope.yaml
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: weirkeeper
+  name: weirkeeper-cluster-scope
   labels:
     app.kubernetes.io/name: logweir
     app.kubernetes.io/instance: logweir
@@ -7412,7 +7444,7 @@ metadata:
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
-  name: weirkeeper
+  name: weirkeeper-cluster-scope
 subjects:
   - kind: ServiceAccount
     name: weirkeeper
@@ -7437,6 +7469,27 @@ subjects:
   - kind: ServiceAccount
     name: logweir-api
     namespace: logweir-system
+---
+# Source: logweir/templates/controller-scope.yaml
+# The installation policy (`templates/policy.yaml`), read by name from the
+# release namespace (`LOGWEIR_INSTALLATION_NAMESPACE`). `get` on this one
+# ConfigMap and nothing else: no Job, no Pod, no other ConfigMap, no Secret.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: weirkeeper-installation-policy
+  namespace: logweir-system
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: control-plane
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["weirkeeper-policy"]
+    verbs: ["get"]
 ---
 # Source: logweir/templates/identity.yaml
 # The bootstrap account cannot list Secrets and cannot read arbitrary names.
@@ -7467,6 +7520,69 @@ rules:
     resources: ["configmaps"]
     resourceNames: ["logweir-signing-trust"]
     verbs: ["get", "patch"]
+---
+# Source: logweir/templates/controller-scope.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: weirkeeper
+  namespace: team-a
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: control-plane
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: weirkeeper
+subjects:
+  - kind: ServiceAccount
+    name: weirkeeper
+    namespace: logweir-system
+---
+# Source: logweir/templates/controller-scope.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: weirkeeper
+  namespace: team-b
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: control-plane
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: weirkeeper
+subjects:
+  - kind: ServiceAccount
+    name: weirkeeper
+    namespace: logweir-system
+---
+# Source: logweir/templates/controller-scope.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: weirkeeper-installation-policy
+  namespace: logweir-system
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: control-plane
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: weirkeeper-installation-policy
+subjects:
+  - kind: ServiceAccount
+    name: weirkeeper
+    namespace: logweir-system
 ---
 # Source: logweir/templates/identity.yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -7633,6 +7749,8 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            - name: LOGWEIR_WATCH_NAMESPACES
+              value: "team-a,team-b"
             - name: AWS_ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef:
@@ -7679,7 +7797,7 @@ spec:
   template:
     metadata:
       annotations:
-        checksum/logweir-api-config: adab2a2c60f40816c80c921043373763953bce2990d3ba496dd8470dba30ed6c
+        checksum/logweir-api-config: 404a949ebcd250676c45942b3c5473dc42e1681e562e14639e64cd89c48432a6
       labels:
         app.kubernetes.io/name: logweir
         app.kubernetes.io/instance: logweir
@@ -7740,7 +7858,7 @@ spec:
       volumes:
         - name: config
           configMap:
-            name: logweir-api-config-adab2a2c60
+            name: logweir-api-config-404a949ebc
             items:
               - key: config.yaml
                 path: config.yaml

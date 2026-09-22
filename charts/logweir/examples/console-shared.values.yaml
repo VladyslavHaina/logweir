@@ -48,6 +48,24 @@
 # addresses. NetworkPolicy has no FQDN concept: left empty under an enforcing
 # CNI, this policy BLOCKS OIDC discovery and the console starts NotReady. That
 # is the honest failure and not a reason to widen the rule to 0.0.0.0/0.
+# ---------------------------------------------------------------------------
+# D0 STAGE 5: THE CONTROLLER IS SCOPED AWAY FROM THE CONSOLE'S KEYS
+# ---------------------------------------------------------------------------
+# The keys above live in the RELEASE namespace. `controller.watchNamespaces`
+# replaces the controller's cluster-wide binding with one RoleBinding per
+# execution namespace, so the controller can create Jobs — which can mount any
+# Secret in their namespace — in team-a and team-b and NOT in the release
+# namespace. Shared mode refuses to render without this list, and refuses a list
+# that includes the release namespace. Each execution namespace still needs the
+# runner ServiceAccount and the signing identity (docs/install.md step 4,
+# `identity.authorizedRunnerNamespaces`).
+#
+# `requireTrustedProxy` makes the console refuse (421) every request that did
+# not come from `trustedProxyCidrs` — the ingress controller — over HTTPS: the
+# application's own copy of the ingress-only path, for clusters whose CNI does
+# not enforce the NetworkPolicy below.
+controller:
+  watchNamespaces: [team-a, team-b]
 kubernetes:
   namespace: team-a
 api:
@@ -62,6 +80,7 @@ api:
     publicBaseUrl: https://console.example.com
     sessionMaxAgeSeconds: 900
     trustedProxyCidrs: ["10.0.0.0/8"]
+    requireTrustedProxy: true
     oidc:
       issuer: https://idp.example.com/realms/logweir
       clientId: logweir-console

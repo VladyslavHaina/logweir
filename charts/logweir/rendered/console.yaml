@@ -6939,7 +6939,7 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: logweir-api-config-99dcdebca5
+  name: logweir-api-config-0ff2b603a0
   namespace: logweir-system
   labels:
     app.kubernetes.io/name: logweir
@@ -6960,6 +6960,7 @@ data:
       - logweir-system
     kubernetes:
       source: inCluster
+      principal: "system:serviceaccount:logweir-system:logweir-api"
     cursorKeyFile: /var/run/logweir/keys/cursor.key
 ---
 # Source: logweir/templates/clusterrole.yaml
@@ -7549,7 +7550,7 @@ spec:
   template:
     metadata:
       annotations:
-        checksum/logweir-api-config: 99dcdebca5e50b216f7771dc01deb1840578ee7ed5f2644676f9b1536cd7c40a
+        checksum/logweir-api-config: 0ff2b603a076cee8d6da73029187810790054799e3fce3045776494371a1a7b2
       labels:
         app.kubernetes.io/name: logweir
         app.kubernetes.io/instance: logweir
@@ -7597,7 +7598,7 @@ spec:
       volumes:
         - name: config
           configMap:
-            name: logweir-api-config-99dcdebca5
+            name: logweir-api-config-0ff2b603a0
             items:
               - key: config.yaml
                 path: config.yaml

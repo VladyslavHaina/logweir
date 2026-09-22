@@ -1,0 +1,137 @@
+{{- /*
+D0 STAGE 5 — THE CONTROLLER'S AUTHORITY, SCOPED TO THE EXECUTION NAMESPACES.
+
+WHY. `weirkeeper` creates Jobs, and a Job can mount any Secret in its
+namespace, so Job-create authority in a namespace is every Secret there —
+residual O1 (`docs/kubernetes.md` §15.4). The default install grants the
+`weirkeeper` ClusterRole through a cluster-wide ClusterRoleBinding, which puts
+EVERY namespace inside that authority, including the release namespace where
+the shared console's session and cursor keys live. D0: "Until that is done,
+the documented Job-create signing-oracle residual would extend to the
+console's keys and shared mode must not be declared secure." RBAC is additive
+— nothing can subtract a namespace from a ClusterRoleBinding — so the only
+narrowing is not to grant it: this file replaces the ClusterRoleBinding with
+
+* one `RoleBinding` per `controller.watchNamespaces` entry, to the SAME
+  `weirkeeper` ClusterRole (under a RoleBinding its namespaced rules apply in
+  that namespace only, and its cluster-scoped rules apply nowhere);
+* the ClusterRole `weirkeeper-cluster-scope`, bound cluster-wide, holding the
+  two cluster-scoped trust kinds and NOTHING else — no Job, no Pod, no
+  ConfigMap, no namespaced kind;
+* a Role in the release namespace for the ONE object the controller reads there,
+  the installation policy ConfigMap, by name.
+
+The controller itself watches exactly the listed namespaces
+(`LOGWEIR_WATCH_NAMESPACES`, rendered by `deployment.yaml` from the same value).
+
+WHAT IT DOES NOT CHANGE. The `weirkeeper` ClusterRole is rendered exactly as
+before (`clusterrole.yaml`), so `logweir.yaml` and the default render still
+agree; the execution namespaces still carry O1 for their own signing key
+(`docs/kubernetes.md` §15.4 — that residual is the design's, and moving the
+signer out is not this stage). Cluster-admin is out of scope (O0).
+
+`kubectl --context docker-desktop auth can-i create jobs -n <release-namespace>
+--as system:serviceaccount:<release-namespace>:weirkeeper` answers `no` under
+this render; `charts/logweir/README.md` §`controller.watchNamespaces` has the
+whole matrix.
+*/ -}}
+{{- with .Values.controller.watchNamespaces }}
+{{- range $ns := . }}
+{{- if not (regexMatch "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$" $ns) }}
+{{- fail (printf "controller.watchNamespaces names %q, which is not a namespace name (a DNS label). The controller refuses the same list at startup rather than leave a namespace silently unreconciled." $ns) }}
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: weirkeeper
+  namespace: {{ $ns }}
+  labels:
+    {{- include "logweir.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: control-plane
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: weirkeeper
+subjects:
+  - kind: ServiceAccount
+    name: weirkeeper
+    namespace: {{ $.Release.Namespace }}
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: weirkeeper-cluster-scope
+  labels:
+    {{- include "logweir.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: control-plane
+rules:
+  # The two cluster-scoped kinds, with exactly the verbs `clusterrole.yaml`
+  # grants on them — and nothing namespaced. `TrustRoster` is read and its
+  # status patched by `controllers::trust_roster`; `TrustPolicy` is watched by
+  # the trust, approval, backup and restore reconcilers and its status patched
+  # by `controllers::trust_policy`.
+  - apiGroups: ["logweir.dev"]
+    resources: ["trustrosters"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["logweir.dev"]
+    resources: ["trustrosters/status"]
+    verbs: ["patch"]
+  - apiGroups: ["logweir.dev"]
+    resources: ["trustpolicies"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["logweir.dev"]
+    resources: ["trustpolicies/status"]
+    verbs: ["patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: weirkeeper-cluster-scope
+  labels:
+    {{- include "logweir.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: control-plane
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: weirkeeper-cluster-scope
+subjects:
+  - kind: ServiceAccount
+    name: weirkeeper
+    namespace: {{ $.Release.Namespace }}
+---
+# The installation policy (`templates/policy.yaml`), read by name from the
+# release namespace (`LOGWEIR_INSTALLATION_NAMESPACE`). `get` on this one
+# ConfigMap and nothing else: no Job, no Pod, no other ConfigMap, no Secret.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: weirkeeper-installation-policy
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "logweir.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: control-plane
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["weirkeeper-policy"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: weirkeeper-installation-policy
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "logweir.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: control-plane
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: weirkeeper-installation-policy
+subjects:
+  - kind: ServiceAccount
+    name: weirkeeper
+    namespace: {{ $.Release.Namespace }}
+{{- end }}

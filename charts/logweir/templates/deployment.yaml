@@ -135,6 +135,18 @@ spec:
             `fail` would turn a typo into a failed upgrade of the whole
             release, and the controller's answer is the safer one.
             */ -}}
+            {{- /*
+            D0 STAGE 5: THE NAMESPACES THIS CONTROLLER WATCHES AND ACTS IN,
+            RENDERED ONLY WHEN SCOPED so the default install stays byte-identical
+            to `logweir.yaml`. It must be exactly the list the RoleBindings in
+            `controller-scope.yaml` grant: a namespace named here and not bound
+            is a watch the API server refuses, and one bound and not named is a
+            namespace nobody reconciles. Both come from the one value.
+            */ -}}
+            {{- with .Values.controller.watchNamespaces }}
+            - name: LOGWEIR_WATCH_NAMESPACES
+              value: {{ join "," . | quote }}
+            {{- end }}
             {{- if ne (toString .Values.controller.failFastSeconds) "" }}
             - name: LOGWEIR_FAIL_FAST_SECONDS
               value: {{ .Values.controller.failFastSeconds | toString | quote }}

@@ -789,14 +789,15 @@ $ kubectl --context docker-desktop -n logweir-system \
 $ rm cursor.key
 ```
 
-**This Secret is inside `weirkeeper`'s Job-create authority, and D0 requires
-that said.** It lives in the release namespace, which the chart binds
-`weirkeeper` over cluster-wide. Residual **O1** (`docs/kubernetes.md` §15.4, which
-states it for the installation signing key: Job CRUD in a namespace that holds
-that key is equivalent to holding it, because a Job the controller creates can
-mount it) therefore extends to the console's session and cursor keys as well —
-holding Job CRUD in this namespace is equivalent to holding them. D0 stage 5 scopes the controller's namespaces; **until it lands, an
-installation must not describe shared mode as secure.**
+**Where this Secret sits relative to the controller.** It lives in the release
+namespace. Residual **O1** (`docs/kubernetes.md` §15.4, which states it for the
+installation signing key: Job CRUD in a namespace that holds that key is
+equivalent to holding it, because a Job the controller creates can mount it)
+applies to any Secret in a namespace where `weirkeeper` may create Jobs, and the
+default chart binds `weirkeeper` cluster-wide. For the `localAdmin` shape that is
+accepted — its authority is the port-forward permission. For `shared` mode it is
+not, and the chart refuses to render shared mode until the controller is scoped
+away from the release namespace (D0 stage 5, below).
 
 In `shared` mode that Secret carries two files instead, each two lines, and
 `api.console.keyVersion` must equal the `version:` they declare:
@@ -829,6 +830,39 @@ Ordinary confirmation and it is **not** a shared console.
 
 **`shared` is the only mode that may be exposed through a Service or an
 Ingress.**
+
+**Before shared mode: scope the controller (D0 stage 5).** Shared mode renders
+only with `controller.watchNamespaces` — the execution namespaces where Backups,
+Restores and checks run — and never with the release namespace in that list.
+The chart then binds the controller with one RoleBinding per listed namespace
+instead of its cluster-wide ClusterRoleBinding, grants the two cluster-scoped
+trust kinds through `weirkeeper-cluster-scope`, and sets
+`LOGWEIR_WATCH_NAMESPACES` so the controller watches exactly those namespaces.
+The migration, in order:
+
+1. List every namespace that holds Logweir objects:
+   `kubectl --context docker-desktop get backups,restores,backupschedules,kafkaclusters -A`.
+   Any that run in the release namespace move to an execution namespace first.
+2. Prepare each execution namespace as step 4 describes (the runner
+   ServiceAccount and the signing identity — `identity.authorizedRunnerNamespaces`).
+3. Upgrade with `--set 'controller.watchNamespaces={team-a,team-b}'` and confirm
+   with `kubectl auth can-i create jobs -n <release-namespace> --as
+   system:serviceaccount:<release-namespace>:weirkeeper` that the answer is
+   `no` (`charts/logweir/README.md` §`controller.watchNamespaces` has the
+   whole matrix). Objects in a namespace left off the list stop being
+   reconciled — nothing is deleted — until it is added.
+4. Disable the in-cluster legacy proxy (`ui.enabled=false`): the chart refuses
+   it beside a shared console, because anyone who reaches that Service acts as
+   its ServiceAccount without signing in. The laptop
+   `kubectl proxy --address=127.0.0.1` path stays.
+5. Enable `api.console` in `shared` mode. Every `roles.bindings` namespace must
+   be in `controller.watchNamespaces`. Set `trustedProxyCidrs` to the ingress
+   controller's range and `requireTrustedProxy: true` to refuse any request that
+   did not come through it over HTTPS.
+
+Rollback is the same list emptied: `watchNamespaces: []` restores the
+cluster-wide binding (the chart then refuses shared mode again, so disable the
+console first).
 
 ```console
 $ helm upgrade logweir charts/logweir -n logweir-system --reuse-values \

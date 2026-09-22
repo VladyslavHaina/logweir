@@ -432,16 +432,18 @@ explicitly. The same applies to `api.console.oidc.clientSecret`, which is the
 **name** of a Secret holding the client secret under the key `clientSecret`, and
 to `api.console.ingress.tlsSecretName`.
 
-**Residual O1 extends to this Secret, and D0 requires that to be said.** It
-lives in the release namespace, which `templates/clusterrolebinding.yaml` binds
-`weirkeeper` over cluster-wide. Residual **O1** (`docs/kubernetes.md` §15.4:
-*"Job CRUD in a namespace that holds `logweir-signing-key` is equivalent to
-holding that key, because a Job the controller creates can mount it"*) therefore
-covers the console's session and cursor keys as well: a Job the controller
-creates can mount them, so holding Job CRUD here is equivalent to holding them.
-D0 stage 5 scopes the controller's namespaces away from the cluster-wide
-binding; **until it lands, an installation must not describe shared mode as
-secure.** D0 says so in the same sentence that asks for the keys to be moved.
+**Where this Secret sits relative to the controller's authority.** It lives in
+the release namespace. Residual **O1** (`docs/kubernetes.md` §15.4: *"Job CRUD
+in a namespace that holds `logweir-signing-key` is equivalent to holding that
+key, because a Job the controller creates can mount it"*) applies to ANY Secret
+in a namespace where `weirkeeper` may create Jobs. Under the default
+`templates/clusterrolebinding.yaml` that is every namespace, the release
+namespace included — which is fine for the in-cluster administrator mode, whose
+authority is the port-forward permission anyway, and is why **`shared` mode
+renders only with `controller.watchNamespaces`** (D0 stage 5,
+§`controller.watchNamespaces` below): the controller then holds Job-create authority in the listed execution
+namespaces and nowhere else, and the chart refuses a list that includes the
+release namespace.
 
 **No credential is ever in the ConfigMap.** The rendered configuration carries
 *paths* — `oidc.clientSecretFile`, `sessionKey.file`, `cursorKey.file` — into
@@ -468,7 +470,27 @@ not let you install, each refused at render time with the field named:
 | `api.console.enabled` without `api.enabled` | a pod with no grants, which 403s on every route |
 | `api.console.enabled` with no `api.console.mode` | there is no default, here or in the binary; a mode read by fall-through is the more permissive one nobody chose |
 | `ingress.host` that is not `publicBaseUrl`'s authority | the redirect URI is `publicBaseUrl` + `/auth/callback` and the service answers `421 misdirected_request` to any other `Host`, so a mismatch publishes a console every browser is refused by |
+| `shared` without `controller.watchNamespaces` | D0 stage 5: with the cluster-wide binding the controller may create a Job in the release namespace that mounts the console's keys (O1) |
+| `controller.watchNamespaces` containing the release namespace | the same authority, put back by name |
+| `shared` with `ui.enabled` | the legacy `kubectl proxy` Service is a second, unauthenticated way to the same objects (PLAT-17.2: remove or isolate the legacy proxy) |
+| a `roles.bindings` namespace outside `controller.watchNamespaces` | the console would create objects no controller reconciles |
+| `requireTrustedProxy` with no `trustedProxyCidrs`, or in `localAdmin` mode | a gate with nothing to trust refuses every request; a loopback listener has no proxy in front of it |
 
+**`requireTrustedProxy: true`** makes the console answer `421` to every request
+(the two probes excepted) whose socket peer is outside `trustedProxyCidrs` — a
+pod that dialled the ClusterIP past the ingress — or that the ingress did not
+mark `X-Forwarded-Proto: https`. It can only refuse; identity stays the OIDC
+session. Set `trustedProxyCidrs` to the ingress controller's pod range. It is the
+console's own copy of what an enforcing NetworkPolicy gives, for clusters whose
+CNI does not enforce one.
+
+**Every object the console creates is attributed.** The rendered configuration
+names `kubernetes.principal: system:serviceaccount:<namespace>:<release>-api`,
+and the console stamps it — with the actor, how they authenticated, the product
+action, the binding revision and, for a restore, the selected recovery point —
+onto every CR and credential Secret it creates (`docs/api.md` §*The audit
+record*), so a Kubernetes audit entry for `<release>-api` and a Logweir audit
+line join on `api.logweir.dev/request-id`.
 `replicas` above 1 also renders a `PodDisruptionBudget` with
 `maxUnavailable: 1`. At one replica it renders none, deliberately: a budget over
 a single pod makes `kubectl drain` block forever on the node carrying it.
@@ -513,6 +535,71 @@ configmaps` can change the role table under a running console. Going the other
 way — from `shared` back to `localAdmin` — ends every live session, because the
 listener moves to loopback and the session cookie's origin no longer exists;
 plan it as a withdrawal of access rather than as a setting change.
+
+## `controller.watchNamespaces` — the controller's authority, scoped (D0 stage 5)
+
+| value | default | what it decides |
+|---|---|---|
+| `controller.watchNamespaces` | `[]` | the execution namespaces the controller watches and creates Jobs in; `[]` is every namespace |
+
+**Why it exists.** `weirkeeper` creates Jobs, and a Job can mount any Secret in
+its namespace, so Job-create authority in a namespace is every Secret there —
+residual **O1**. The default install binds the `weirkeeper` ClusterRole with a
+cluster-wide `ClusterRoleBinding`, so that authority covers every namespace.
+Kubernetes RBAC is additive; nothing can subtract a namespace from a
+ClusterRoleBinding, so the only narrowing is not to grant it.
+
+**What a list renders instead** (`templates/controller-scope.yaml`):
+
+* no `ClusterRoleBinding/weirkeeper`;
+* one `RoleBinding/weirkeeper` per listed namespace, to the **unchanged**
+  `weirkeeper` ClusterRole — under a RoleBinding its namespaced rules apply in
+  that namespace only;
+* `ClusterRole/weirkeeper-cluster-scope`, bound cluster-wide, holding the two
+  cluster-scoped trust kinds (`trustrosters`, `trustpolicies` and their status)
+  and nothing namespaced;
+* `Role/weirkeeper-installation-policy` in the release namespace: `get` on the
+  `weirkeeper-policy` ConfigMap by name, and nothing else;
+* `LOGWEIR_WATCH_NAMESPACES` on the controller, from the same list, so every
+  namespaced reconciler runs one `Api::namespaced` watch per listed namespace
+  and every cross-object read (the retention protection set, the check ceiling)
+  reads those namespaces only. A name that is not a DNS label is refused by the
+  schema, by the template and by the controller at startup.
+
+**What an administrator can ask Kubernetes before anything runs** (`auth can-i`
+as `system:serviceaccount:<release-namespace>:weirkeeper`, scoped to `team-a`):
+
+| question | answer |
+|---|---|
+| `create jobs -n team-a`, `list pods -n team-a`, `get pods/log -n team-a`, `create configmaps -n team-a` | yes |
+| `watch backups -n team-a` | yes |
+| `create jobs -n <release-namespace>`, `list jobs -n <release-namespace>` | **no** |
+| `create jobs -n team-z` (not listed), `watch backups --all-namespaces` | **no** |
+| `get configmaps/weirkeeper-policy -n <release-namespace>` | yes |
+| `get configmaps/<any other> -n <release-namespace>`, `get secrets` anywhere | **no** |
+| `list trustpolicies`, `get trustrosters` (cluster-scoped) | yes |
+
+**Required for `api.console.mode: shared`**, which the chart refuses without a
+list or with one that names the release namespace: the console's session and
+cursor keys live there.
+
+**Migration.** Existing installs see no change: the default is `[]` and renders
+byte-identically. To scope an existing install: list every namespace that holds
+Logweir objects (`kubectl get backups,restores,backupschedules,kafkaclusters -A`),
+make sure each has the runner ServiceAccount and the signing identity
+(`docs/install.md` step 4, `identity.authorizedRunnerNamespaces`), set the list
+and upgrade. Objects in a namespace left off the list are **not reconciled** —
+they keep their status and evidence, and resume when the namespace is added. If
+Backups or Restores currently run in the release namespace, move them before
+enabling a shared console there. Rollback is `watchNamespaces: []`, which
+restores the cluster-wide binding; the controller restarts either way because
+its environment changes. Adding a namespace later is an upgrade (a new
+RoleBinding and a controller restart), not a cluster-admin grant.
+
+**What it does not change.** The execution namespaces still carry O1 for their
+own signing key — moving the signer out of the controller's reach is not this
+setting. Each listed namespace costs one watch per namespaced kind (twelve, plus
+their owned Jobs), which is the price of not holding a cluster-wide list.
 
 ## `controller.failFastSeconds` and `controller.jobTtlSeconds`
 

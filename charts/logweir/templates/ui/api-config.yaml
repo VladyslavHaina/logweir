@@ -113,6 +113,9 @@ laptop with no cluster.
 {{- if not $c.localAdminSubject -}}
 {{- fail "api.console.localAdminSubject is empty. localAdmin mode has no identity provider: every request is attributed to this one configured administrator, so the name it is recorded under is not optional." -}}
 {{- end -}}
+{{- if $c.requireTrustedProxy -}}
+{{- fail "api.console.requireTrustedProxy belongs to api.console.mode=shared. The in-cluster administrator mode binds loopback and is reached only through kubectl port-forward; there is no proxy in front of it to trust." -}}
+{{- end -}}
 {{- if $c.ingress.enabled -}}
 {{- fail "api.console.ingress.enabled with api.console.mode=localAdmin is refused. D0: the local administrator path \"must not bind 0.0.0.0, get an Ingress, or be described as shared-console mode\" — it authenticates nobody, so an Ingress in front of it is an unauthenticated shared console. Set api.console.mode=shared and configure OIDC and TLS, or reach localAdmin mode with `kubectl port-forward`." -}}
 {{- end -}}
@@ -138,6 +141,36 @@ laptop with no cluster.
 {{- if not $c.roles.bindings -}}
 {{- fail "api.console.roles.bindings is empty. Shared mode has no default namespace and no implicit grant: with no binding every authenticated user is authorized for nothing, which is a console that installs and serves 403." -}}
 {{- end -}}
+{{- /*
+D0 STAGE 5 — SHARED MODE IS NOT RENDERED INSIDE THE CONTROLLER'S JOB-CREATE
+AUTHORITY. The console's session and cursor keys live in the release namespace
+(`api.console.keySecret`). Under the default cluster-wide ClusterRoleBinding the
+controller may create a Job there, and a Job can mount that Secret — residual
+O1 extended to the console, which D0 says must not be declared secure. So
+shared mode requires the scoped controller (`controller.watchNamespaces`), and
+refuses a list that includes the release namespace, because that list is where
+the controller may create Jobs.
+*/ -}}
+{{- $watch := .Values.controller.watchNamespaces | default list -}}
+{{- if not $watch -}}
+{{- fail (printf "api.console.mode=shared requires controller.watchNamespaces (D0 stage 5). The console's session and cursor keys live in the release namespace %q, and with the default cluster-wide ClusterRoleBinding the controller may create a Job there that mounts them — the signing-oracle residual O1 extended to the console's keys, which D0 says must not be declared secure. List the namespaces Backups and Restores run in; the controller then holds Job-create authority there and nowhere else. charts/logweir/README.md §controller.watchNamespaces has the migration." .Release.Namespace) -}}
+{{- end -}}
+{{- if has .Release.Namespace $watch -}}
+{{- fail (printf "controller.watchNamespaces includes the release namespace %q, which holds the shared console's keys (api.console.keySecret). The controller may create Jobs in every listed namespace, so this list would put the keys back inside its Job-create authority (D0 stage 5). Run Backups and Restores in other namespaces and remove %q from the list." .Release.Namespace .Release.Namespace) -}}
+{{- end -}}
+{{- /*
+THE LEGACY PROXY IS NOT RENDERED BESIDE THE SHARED CONSOLE. `ui.enabled` is the
+`kubectl proxy` ClusterIP: anyone who reaches it acts as its ServiceAccount, with
+no login and no per-user authorization. Next to a shared console it is a second,
+unauthenticated way to the same objects, and PLAT-17.2 says to remove or
+isolate it. The laptop `kubectl proxy --address=127.0.0.1` path is unaffected.
+*/ -}}
+{{- if .Values.ui.enabled -}}
+{{- fail "api.console.mode=shared with ui.enabled=true is refused. ui.enabled renders the legacy `kubectl proxy` Service, which acts as its own ServiceAccount for anyone in the cluster who reaches it — no sign-in, no per-user role — so beside a shared console it is an unauthenticated second path to the same objects (PLAT-17.2: remove or isolate the legacy proxy). Set ui.enabled=false; an administrator keeps the laptop `kubectl proxy --www=./ui --address=127.0.0.1` path, or api.console.mode=localAdmin through port-forward." -}}
+{{- end -}}
+{{- if and $c.requireTrustedProxy (not $c.trustedProxyCidrs) -}}
+{{- fail "api.console.requireTrustedProxy needs api.console.trustedProxyCidrs: with no range to trust, the entry point would refuse every request (421) and the console would look like an outage. Name the ingress controller's pod or node ranges." -}}
+{{- end -}}
 {{- $granted := (include "logweir.api.namespaces" . | fromJsonArray) -}}
 {{- range $b := $c.roles.bindings -}}
 {{- if not (has $b.namespace $granted) -}}
@@ -145,6 +178,9 @@ laptop with no cluster.
 {{- end -}}
 {{- if or (contains "*" (toString (concat ($b.groups | default list) ($b.subjects | default list)))) (contains "?" (toString (concat ($b.groups | default list) ($b.subjects | default list)))) -}}
 {{- fail (printf "api.console.roles.bindings for role %q in namespace %q contains `*` or `?`. Bindings are EXACT strings: there is no regex, no wildcard and no email-domain inference, and a `*` is refused by name rather than silently matching nothing." $b.role $b.namespace) -}}
+{{- end -}}
+{{- if not (has $b.namespace $watch) -}}
+{{- fail (printf "api.console.roles.bindings names namespace %q, which is not in controller.watchNamespaces (%s). The console would create Backups, Restores and checks there that no controller reconciles. Add it to controller.watchNamespaces, or remove the binding." $b.namespace (join ", " $watch)) -}}
 {{- end -}}
 {{- end -}}
 {{- if $c.ingress.enabled -}}
@@ -252,11 +288,15 @@ sessionMaxAgeSeconds: {{ int $c.sessionMaxAgeSeconds }}
 trustedProxyCidrs:
 {{ toYaml . | indent 2 }}
 {{- end }}
+{{- if $c.requireTrustedProxy }}
+requireTrustedProxy: true
+{{- end }}
 {{- end }}
 namespaces:
 {{ toYaml $ns | indent 2 }}
 kubernetes:
   source: inCluster
+  principal: {{ printf "system:serviceaccount:%s:%s" .Release.Namespace (include "logweir.api.consoleName" .) | quote }}
 {{- if eq $c.mode "localAdmin" }}
 cursorKeyFile: {{ printf "%s/cursor.key" $keys }}
 {{- else }}

@@ -49,21 +49,26 @@ a Deployment and a Service and leaves every custom resource, every grant and
 every piece of evidence untouched — this service creates and reads objects and
 executes nothing.
 
-**Shared mode is a supported deployment shape and is still not a completed
-release claim.** The image, the chart templates, the ingress, the NetworkPolicy,
+**Shared mode is a supported deployment shape, and since PLAT-17.2's
+completion the chart renders it only outside the controller's Job-create
+authority.** The image, the chart templates, the ingress, the NetworkPolicy,
 the ServiceAccount and its RoleBindings exist and refuse the configurations that
-would publish a console over plain HTTP. What is not finished is the rest of
-D0's release criteria — the browser journey against a real provider, the
-production-CNI evidence for the NetworkPolicy (Docker Desktop's acceptance of a
-policy proves nothing about deny behaviour), and the trust-read narrowing
-recorded in `charts/logweir/templates/ui/api-rbac.yaml`. Read those before
-calling an installation a shared console.
+would publish a console over plain HTTP; D0 stage 5 is met by
+`controller.watchNamespaces` (the controller holds Job-create authority only in
+the execution namespaces, never in the release namespace that holds the
+console's keys — *Deployment* below), and the chart refuses shared mode without
+it. What D0 still lists beyond this service's own boundary is the browser
+journey against a real provider and TLS ingress (stage 8), the production-CNI
+evidence for the NetworkPolicy (Docker Desktop's acceptance of a policy proves
+nothing about deny behaviour), and the trust-read narrowing recorded in
+`charts/logweir/templates/ui/api-rbac.yaml`. Read those before calling an
+installation a production shared console.
 
 A domain whose routes do not exist yet has **no route at all** — no stub and no
 `501`. `GET /api/v1/session` reports each one as `false` under `capabilities`,
 so a client learns what is unavailable instead of discovering it from an error.
-Today that is: connection tests, manual backup creation, approval submission
-and operation event streams. Saved destinations, topic discovery, preflight
+Today that is: connection tests and approval submission (PLAT-19.2). Manual
+backup creation and the operation event stream have routes. Saved destinations, topic discovery, preflight
 checks and write-only credential input **do** have routes now (D2 W12); their
 three capability flags are the domain's READ floor, and whether the actor may
 also start or cancel is the role table each grant publishes in `roles`.
@@ -1235,6 +1240,63 @@ does not come up at all, because the first two look like they are working.
 | a binding string contains `*` or `?` | bindings are EXACT: a `*` would match nothing, so it is refused by name rather than silently granting nothing |
 | `roles.revision` is empty | it is the provenance of every decision in the audit log |
 | `sessionMaxAgeSeconds` outside 60…900 | a stateless session cannot be revoked before it expires |
+| `requireTrustedProxy: true` with no `trustedProxyCidrs` | the entry point would refuse every request and look like an outage |
+| `requireTrustedProxy` in `localAdmin` mode | there is no proxy in front of a loopback listener |
+| an in-cluster `kubernetes.principal` that is not `system:serviceaccount:<namespace>:<name>` | the value goes onto every created object; a pod's token can only be a ServiceAccount |
+
+### Every route declares who may reach it
+
+`crates/logweir-api/src/access.rs` holds one declaration per `(method, path)`
+the router serves — `Public` (the probes, the page, the two sign-in steps),
+`Authenticated` (`/session`, `/namespaces`, logout), `Namespaced(actions)`,
+`Command{floor, verbs}` for the `:verb` command routes, or `AnyNamespace(action)`
+for the two routes with no `{ns}` — and one route layer on every route group
+enforces it **before any handler runs**: it authenticates (the CSRF token
+included on unsafe methods), decides the declared actions against the role table
+below, namespace first and before any Kubernetes call, and records the decision.
+The event stream is declared as both `operation.read` and `operation.stream`, so
+it is refused without an identity before any slot is taken or any watch opens.
+
+**A route with no declaration is not served.** A path the router matches but the
+table does not name answers `500 internal_error` (audit code
+`route_access_undeclared`) and its handler never runs; a method registered on a
+declared path without its own declaration is answered `405` by the layer.
+`tests/route_access.rs` holds the table to `src/app.rs` in both directions and
+sweeps every declared route for all four roles, so a route added by any later
+stage inherits the enforcement or fails the build. Handlers keep their own
+checks as defence in depth and for the object-level rules (an operator cancels
+only its own checks; an approver reads only restore preflights).
+
+### The trusted entry point
+
+Identity is the OIDC session and nothing else; see *What can never be an
+identity* below. What the proxy in front of the console may contribute is
+transport facts, and `requireTrustedProxy: true` (with `trustedProxyCidrs`)
+turns that into a refusal:
+
+* a request whose **socket peer** is outside every `trustedProxyCidrs` range —
+  a pod that dialled the ClusterIP directly, past the ingress — is `421
+  misdirected_request`, audit code `untrusted_entry_point`, note
+  `peerNotTrusted`, whatever headers it carries;
+* a request from a trusted peer that does not carry exactly one
+  `X-Forwarded-Proto: https` — the proxy did not vouch for TLS — is refused the
+  same way, note `forwardedProtoNotHttps`;
+* `/healthz` and `/readyz` are exempt, because the kubelet dials the Pod IP.
+
+The header is read only from a peer the administrator named, and it can only
+refuse: nothing derives an identity, a callback URL or a grant from it, which is
+D0's rule. It is the application's own copy of "only the ingress may reach the
+console", for clusters whose CNI accepts a NetworkPolicy without enforcing it.
+Without the flag the entry point is exactly what it was.
+
+### Readiness
+
+In shared mode `/readyz` is ready only when Kubernetes answers for the service's
+own identity **and** the provider's discovery document (naming the configured
+issuer, with https endpoints) and a non-empty key set are available — fetched,
+or still cached inside the JWKS outage window. A console nobody can sign in to is
+kept out of its ingress's rotation. The body still names no endpoint and no
+reason.
 
 ### Sign-in
 
@@ -1348,8 +1410,31 @@ by the middleware so no handler can forget one:
 `actorId`, `displayClaim` (kept separate because it is never an authorization
 input), `sessionIdHash`, `bindingRevision`, `roles`, `namespace`, `action`,
 `resource`, `decision`, `policyDigest`, `idempotencyKeyHash`, `requestHash`,
-`planHash`, `objectName`, `objectUid`, `objectResourceVersion`, `httpStatus`,
-`latencyMs`, `failureCode`, `peer`, `forwardedFor`, `ignoredIdentityHeaders`.
+`planHash`, `recoveryPoint`, `kubernetesPrincipal`, `objectName`, `objectUid`,
+`objectResourceVersion`, `httpStatus`, `latencyMs`, `failureCode`, `peer`,
+`forwardedFor`, `ignoredIdentityHeaders`.
+
+**Every durable object the API creates carries its attribution** — CRs and the
+write-only credential Secrets alike — in reserved annotations, stamped by the
+Kubernetes adapter from the request's own audit record so no route passes them
+and none can forget them:
+
+| annotation | value |
+|---|---|
+| `api.logweir.dev/actor` | `<issuer>#<subject>` — never a display name |
+| `api.logweir.dev/authentication-mode` | `oidc` or `localAdmin` |
+| `api.logweir.dev/action` | the product action that authorized the write, e.g. `restore.create` |
+| `api.logweir.dev/binding-revision` | the role-binding revision that decided it (shared mode) |
+| `api.logweir.dev/kubernetes-principal` | the identity the write was made as — what Kubernetes audit records for the same call (`kubernetes.principal`; the chart sets `system:serviceaccount:<namespace>:<release>-api`) |
+| `api.logweir.dev/recovery-point` | for a restore-shaped create: `backupSet=… pointInTime=… source=destination/<name>` (or the archive location with userinfo, query and fragment removed) |
+| `api.logweir.dev/request-id` | the audit ID, `X-Request-ID` |
+| `api.logweir.dev/request-sha256`, `api.logweir.dev/idempotency-scope-sha256` | D0's correlation hashes, unchanged |
+
+A create with no authenticated actor or no decided action behind it is refused
+before anything is sent. Objects created before this change keep their older
+annotation set and still replay: replay compares only the two hashes. None of
+these values is a credential; the recovery point names a destination, never its
+access.
 
 A record that reaches no decision point defaults to `deny`. Never logged:
 cookies, bearer/authorization-code/refresh tokens, CSRF tokens, the raw
@@ -1383,9 +1468,11 @@ politeness bound on how fast one operator can queue check Jobs, not a security
 control. The real ceiling on concurrent checks is the controller's
 `checks.maxActivePerNamespace`, which no API can talk past.
 
-There is no event stream yet: `capabilities.operationEvents` is `false` and no
-path serves one, authenticated or not. The per-actor, per-namespace connection
-slots it will need are implemented and tested.
+The operation event stream (`…/operations/{kind}/{name}/events`) is declared
+`operation.read` + `operation.stream`, so it answers `401` without a session
+before anything else happens, and each principal holds a bounded number of
+concurrent streams per namespace (`429` beyond it); a stream closes at its
+maximum duration with a terminal `end` event.
 
 ## Deployment
 
@@ -1431,11 +1518,18 @@ one of the three — the OIDC client secret, the session key, the cursor MAC key
 appears as a *path* into a read-only Secret volume under `/var/run/logweir/`,
 never as a value. The Secrets are the operator's: the chart generates no key
 material, because a Helm-generated key changes on every render and is
-unrecoverable on upgrade. **Those Secrets live in the release namespace, which
-is inside `weirkeeper`'s cluster-wide Job-create authority, so residual O1
-(`docs/kubernetes.md` §15.4) extends to the console's session and cursor keys
-until D0 stage 5 scopes the controller's namespaces — and until it does, an
-installation must not describe shared mode as secure.** `kubernetes.source` is always `inCluster` and there is
+unrecoverable on upgrade. **Those Secrets live in the release namespace, and
+shared mode renders only when that namespace is outside `weirkeeper`'s
+Job-create authority (D0 stage 5).** A Job can mount any Secret in its
+namespace, so Job-create authority there would be holding the keys — residual
+O1 (`docs/kubernetes.md` §15.4). `controller.watchNamespaces` replaces the
+controller's cluster-wide binding with one RoleBinding per execution namespace
+plus a ClusterRole for the two cluster-scoped trust kinds only, and the
+controller watches exactly those namespaces; the chart refuses shared mode
+without the list, with a list that includes the release namespace, beside the
+legacy `ui.enabled` proxy, and with a product binding in a namespace no
+controller reconciles. `charts/logweir/README.md` §`controller.watchNamespaces`
+has the `kubectl auth can-i` matrix and the migration. `kubernetes.source` is always `inCluster` and there is
 no chart value for the other source — a pod that read a kubeconfig would act
 with whatever identity that file carried, and the RBAC argument above would be
 about an account nothing runs as. The token is the projected, time-bound kind
