@@ -9883,9 +9883,12 @@ def refused_point() -> None:
             wait_for("backupdestination", name,
                      lambda o: condition(o, "Valid").get("status") == "True",
                      seconds=180, what="Valid=True")
-        for schedule in (RP_REFUSED_SCHEDULE, RP_REVOKED_SCHEDULE):
+        # Each schedule names the destination its one run writes through, so a
+        # run OF it is also a run INTO it (protection's membership reads both).
+        for schedule, dest in ((RP_REFUSED_SCHEDULE, RP_SLOW_DEST),
+                               (RP_REVOKED_SCHEDULE, RP_DEST)):
             if get_opt("backupschedule", schedule) is None:
-                apply(schedule_object(schedule, RP_DEST))
+                apply(schedule_object(schedule, dest))
         sink_ready()
         for name in ("rp-1", "rp-2", "rp-3", "rp-4"):
             if get_opt("backup", name) is not None:
