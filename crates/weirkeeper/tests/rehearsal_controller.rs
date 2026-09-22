@@ -1351,16 +1351,21 @@ async fn the_rendered_bundle_is_what_the_runner_loads() {
     );
     // EVERY PINNED DIGEST HAS A MOUNTED MEMBER AND EVERY MOUNTED MEMBER A
     // PINNED DIGEST — the both-directions rule `validate_execution_contract`
-    // applies over the v2 optional members, mirrored here because `weirkeeper`
-    // cannot depend on the `logweir` crate. **No shared byte fixture binds the
-    // two sides**; an earlier revision of this comment promised one that has
-    // not been written, and it is recorded as an open gap in
-    // `claude/plat14-3b.result.md` §7 rather than left as a promise here. What
-    // DOES bind them today is `logweir-core`: both sides compute their digests
-    // with `logweir_core::ids::sha256_prefixed` and read the same
-    // `execution_contract` constants, and the runner's real-binary rows in
-    // `crates/logweir/tests/execution_contract_v2.rs` exercise the consuming
-    // half against bytes of the same shape.
+    // applies over the v2 optional members, MIRRORED here because `weirkeeper`
+    // cannot depend on the `logweir` crate — that split is what keeps the
+    // signer out of the controller, and `scripts/check-one-signer.sh` enforces
+    // it. The rule itself therefore has two statements of it; what stops them
+    // drifting is `logweir-core`, which both sides read: the same
+    // `execution_contract` constants and the same
+    // `logweir_core::ids::sha256_prefixed`.
+    //
+    // The standing ENVELOPE is not mirrored — it is shared as committed bytes.
+    // `crates/logweir-core/tests/fixtures/standing-authorization.json` is
+    // minted by `logweir drill approve --standing`, re-minted and byte-compared
+    // by `crates/logweir/tests/standing_approve.rs::
+    // the_committed_fixture_is_what_this_command_mints_today`, and admitted by
+    // `crates/weirkeeper/tests/standing_restore.rs::
+    // the_minted_standing_authorization_is_admitted_by_the_controller`.
     // **THE MUTANT IS NOW DISCRIMINATING.** While the per-run slot held a
     // duplicate of the standing envelope, pinning one digest where the other
     // belonged was an EQUIVALENT mutant and this file said so. PLAT-14.3b

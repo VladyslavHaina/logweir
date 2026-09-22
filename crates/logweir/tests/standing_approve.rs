@@ -1,7 +1,7 @@
-//! PLAT-14.3b fix round 1, prerequisite **P0** — `logweir approve --standing`.
+//! PLAT-14.3b fix round 1, prerequisite **P0** — `logweir drill approve --standing`.
 //!
 //! Nothing in the product minted a signed `StandingRehearsalAuthorization`
-//! before this. `logweir approve` signed only `PAYLOAD_TYPE_APPROVAL`, while
+//! before this. `logweir drill approve` signed only `PAYLOAD_TYPE_APPROVAL`, while
 //! the `Approval` controller REQUIRES
 //! `PAYLOAD_TYPE_STANDING_AUTHORIZATION` for a `RehearsalSchedule` referent
 //! and the runner refuses anything else — so the only producers were Rust test
@@ -138,6 +138,11 @@ fn allowed() -> logweir_core::spec::AllowedClusters {
 /// **THE P0 ROW.** Bytes this command mints are bytes the RUNNER accepts —
 /// signature, key usage, kind, subject UID, window and `plan ∈ scope`, through
 /// the runner's own entry point and not a paraphrase of it.
+///
+/// **What it does NOT prove:** the keyring here is hand-built from the key that
+/// signed, not rendered by `rehearsal_schedule::keyring`. This row is about the
+/// ENVELOPE; the controller's rendering of `authorization-keys.json` is proved
+/// separately by `rehearsal_controller.rs::the_rendered_bundle_is_what_the_runner_loads`.
 #[test]
 fn a_minted_standing_authorization_is_accepted_by_the_runner() {
     let minted = mint(30);
@@ -157,10 +162,42 @@ fn a_minted_standing_authorization_is_accepted_by_the_runner() {
         verified.key_id, minted.key_id,
         "the key that VERIFIED is the one that signed"
     );
-    assert_eq!(verified.document.subject_ref.uid, SCHEDULE_UID);
-    assert_eq!(verified.document.subject_ref.name, SCHEDULE);
-    assert_eq!(verified.document.scope.target_cluster_id, TARGET_CLUSTER_ID);
-    assert_eq!(verified.document.scope.deadline_seconds, 3600);
+    // **EVERY field of the document, read back from the bytes whose signature
+    // just verified** — not from the struct the command built. A scope field
+    // dropped or defaulted on the way through the signer would be a scope a
+    // human did not sign, and the runner would enforce the wrong bound.
+    let doc = &verified.document;
+    assert_eq!(doc.format_version, "1.0.0");
+    assert_eq!(doc.kind, "StandingRehearsalAuthorization");
+    assert_eq!(doc.subject_ref.api_version, "logweir.dev/v1alpha1");
+    assert_eq!(doc.subject_ref.kind, "RehearsalSchedule");
+    assert_eq!(doc.subject_ref.namespace, NS);
+    assert_eq!(doc.subject_ref.name, SCHEDULE);
+    assert_eq!(doc.subject_ref.uid, SCHEDULE_UID);
+    assert_eq!(doc.issued_at, issued_at());
+    assert_eq!(doc.expires_at, issued_at() + chrono::Duration::days(30));
+
+    // All eight scope fields, against the file the operator passed.
+    let scope: serde_json::Value =
+        serde_json::from_str(&scope_json()).expect("the fixture scope parses");
+    assert_eq!(doc.scope.template_digest, scope["templateDigest"]);
+    assert_eq!(doc.scope.target_cluster_id, scope["targetClusterId"]);
+    assert_eq!(doc.scope.topic_prefix, scope["topicPrefix"]);
+    assert_eq!(
+        doc.scope.topics,
+        vec!["orders".to_string()],
+        "the topic list is carried verbatim"
+    );
+    assert_eq!(u64::from(doc.scope.max_partitions), scope["maxPartitions"]);
+    assert_eq!(
+        u64::from(doc.scope.records_per_partition),
+        scope["recordsPerPartition"]
+    );
+    assert_eq!(
+        u64::from(doc.scope.deadline_seconds),
+        scope["deadlineSeconds"]
+    );
+    assert_eq!(doc.scope.modes, vec!["scratch".to_string()]);
 }
 
 /// The payload type is the whole point of the second signer path: a standing
@@ -214,7 +251,7 @@ fn the_committed_fixture_is_what_this_command_mints_today() {
     assert_eq!(
         String::from_utf8_lossy(&minted.envelope),
         String::from_utf8_lossy(&committed),
-        "the committed fixture and `logweir approve --standing` have diverged; re-mint it \
+        "the committed fixture and `logweir drill approve --standing` have diverged; re-mint it \
          (the controller's rows in weirkeeper read these exact bytes)"
     );
     assert!(
@@ -242,6 +279,27 @@ fn a_document_the_cluster_would_refuse_is_refused_before_it_is_signed() {
         assert!(error.contains(why), "{days}: {error}");
     }
 
+    // **AN ALREADY-EXPIRED DOCUMENT IS NEVER SIGNED.** `--issued-at` exists so
+    // a test can mint the same bytes twice, but it can also move the window
+    // out from under the document — and `admit_standing_authorization` is
+    // handed `issued_at` as its clock, so it answers "self-consistent", not
+    // "valid now". Signing this would spend a key on bytes every reader
+    // refuses, which is the one thing this command promises not to do.
+    let mut long_past = base(30);
+    long_past.standing.as_mut().expect("standing").issued_at = Some(
+        chrono::DateTime::parse_from_rfc3339("2020-01-01T00:00:00Z")
+            .expect("an instant")
+            .with_timezone(&chrono::Utc),
+    );
+    let out_past = dir.path().join("sa-past.json");
+    long_past.out = out_past.clone();
+    let error = mint_standing(&long_past).expect_err("an already-expired document is refused");
+    assert!(
+        error.contains("already in the past"),
+        "the refusal says what is wrong: {error}"
+    );
+    assert!(!out_past.exists(), "and nothing was signed");
+
     // A blank UID is not a UID: it is what binds the document to ONE object.
     let mut blank = base(30);
     blank.standing.as_mut().expect("standing").schedule_uid = "  ".to_string();
@@ -268,12 +326,24 @@ fn a_document_the_cluster_would_refuse_is_refused_before_it_is_signed() {
         .expect_err("approval.json is refused")
         .contains("standing-authorization.json"));
 
-    // Scope bounds whose absence the runner treats as a MISMATCH.
+    // **EVERY scope field, and the assertion is on the `Err` ARM.**
+    //
+    // An earlier revision used `unwrap_or_else(|e| e)`, which turns a SUCCESS
+    // summary into `error` — and that summary prints `scope      <path>`, so a
+    // `why` of `"maxPartitions"` was satisfied by the filename
+    // `scope-maxPartitions.json` whether the check ran or not. Two planted
+    // mutants deleting the zero-bound and the blank checks SURVIVED it. The
+    // row now requires a refusal, and every `why` is a phrase from the message
+    // that cannot appear in a path.
     for (edit, why) in [
         (r#""modes": ["newTopic"]"#, "and nothing else"),
-        (r#""maxPartitions": 0"#, "maxPartitions"),
         (r#""topics": []"#, "authorises the restore of nothing"),
-        (r#""targetClusterId": """#, "targetClusterId"),
+        (r#""maxPartitions": 0"#, "is a BOUND"),
+        (r#""recordsPerPartition": 0"#, "is a BOUND"),
+        (r#""deadlineSeconds": 0"#, "is a BOUND"),
+        (r#""targetClusterId": """#, "is blank"),
+        (r#""topicPrefix": """#, "is blank"),
+        (r#""templateDigest": """#, "is blank"),
     ] {
         let field = edit.split(':').next().expect("a field").trim_matches('"');
         let mut value: serde_json::Value =
@@ -284,9 +354,19 @@ fn a_document_the_cluster_would_refuse_is_refused_before_it_is_signed() {
         let bad = dir.path().join(format!("scope-{field}.json"));
         std::fs::write(&bad, value.to_string()).expect("written");
         let mut args = args_for(dir.path(), &bad, &key, 30);
-        args.out = dir.path().join(format!("sa-{field}.json"));
-        let error = mint_standing(&args).unwrap_or_else(|e| e);
-        assert!(error.contains(why), "{field}: {error}");
+        let out = dir.path().join(format!("sa-{field}.json"));
+        args.out = out.clone();
+        let error = mint_standing(&args).expect_err(
+            "a scope this build cannot act on must be refused BEFORE anything is signed",
+        );
+        assert!(
+            error.contains(why),
+            "{field}: the refusal names what it refused: {error}"
+        );
+        assert!(
+            !out.exists() && !out.with_extension("sig").exists(),
+            "{field}: a refused mint signs nothing and writes nothing"
+        );
     }
 
     // And nothing was written for any of them.

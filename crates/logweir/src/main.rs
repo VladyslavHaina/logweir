@@ -217,8 +217,10 @@ fn main() -> std::process::ExitCode {
             logweir::approve::run(&logweir::approve::ApproveArgs {
                 spec,
                 key,
-                approver,
-                ticket,
+                // Absent only under `--standing`, which refuses a non-empty
+                // value for either; clap requires both on the per-run path.
+                approver: approver.unwrap_or_default(),
+                ticket: ticket.unwrap_or_default(),
                 out,
                 // The parser owns the vocabulary; `approve` owns the bytes.
                 subject_kind: subject_kind.as_str().to_string(),

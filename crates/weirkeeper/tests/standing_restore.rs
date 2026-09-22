@@ -881,7 +881,7 @@ fn the_file_table_names_are_the_five_standing_members() {
 }
 
 // ---------------------------------------------------------------------------
-// 4. The SHARED BYTE FIXTURE — the other half of `logweir approve --standing`
+// 4. The SHARED BYTE FIXTURE — the other half of `logweir drill approve --standing`
 // ---------------------------------------------------------------------------
 
 /// **P0's controller half, over bytes the product actually minted.**
@@ -889,7 +889,7 @@ fn the_file_table_names_are_the_five_standing_members() {
 /// `weirkeeper` cannot depend on `logweir` — that split is what keeps the
 /// signer out of the controller, and `scripts/check-one-signer.sh` enforces
 /// it — so the two sides of "a document this product mints is one this
-/// product accepts" meet on BYTES. `logweir approve --standing` wrote this
+/// product accepts" meet on BYTES. `logweir drill approve --standing` wrote this
 /// file; `crates/logweir/tests/standing_approve.rs` re-mints it and requires
 /// byte equality, so it cannot drift from what the command emits; and this row
 /// drives it through the controller's admission.
@@ -950,7 +950,7 @@ fn the_minted_standing_authorization_is_admitted_by_the_controller() {
             }),
         ),
         RestoreAdmission::Ok,
-        "the controller admits a document `logweir approve --standing` minted"
+        "the controller admits a document `logweir drill approve --standing` minted"
     );
 
     // And the same bytes after the window closes are refused — otherwise this

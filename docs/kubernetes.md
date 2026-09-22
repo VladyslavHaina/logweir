@@ -2141,14 +2141,15 @@ and creates no Job. An absent or unverified `Approval` stays a thirty-second
 hold. This is the one kind for which trust is resolved BEFORE admission; the
 ordinary path still resolves it only when a Job is going to exist.
 
-*Minting the document.* `logweir approve --standing` signs it — the same
+*Minting the document.* `logweir drill approve --standing` signs it — the same
 signer as a per-run approval, under the standing payload type:
 
 ```
-logweir approve --standing \
+logweir drill approve --standing \
   --key approver-private.pem \
   --schedule-namespace team-a --schedule-name weekly-orders \
-  --schedule-uid $(kubectl get rehearsalschedule weekly-orders -o jsonpath='{.metadata.uid}') \
+  --schedule-uid $(kubectl --context <ctx> -n team-a get rehearsalschedule weekly-orders \
+                     -o jsonpath='{.metadata.uid}') \
   --scope scope.json --valid-days 30 \
   --out standing-authorization.json
 ```
@@ -2174,8 +2175,17 @@ child `Restore` as `logweir.dev/approval-uid`, and admission requires the
 resolved object to carry it — an `Approval` deleted and recreated under the
 same name is refused. A standing `Restore` with no such annotation is refused
 too: every one this build creates carries it, and one that predates it never
-executed. (A `uid` field on `approvalRef` would let the reference itself carry
-this; that is a CRD change for a follow-up.)
+executed.
+
+**The pin is metadata, and metadata is not frozen by the API server.**
+`Restore.spec` is CEL-immutable; an annotation is not, so "the `Approval`
+object a slot was authorised against cannot be re-pointed" rests on RBAC — no
+shipped human role has `patch` or `update` on `restores` — rather than on
+admission, unlike every other authorization input beside it in `spec`. Once the
+bundle exists the window closes anyway: the bundle is immutable and carries the
+resolved `Approval`'s UID, so any change is a terminal `ApprovalBundleConflict`.
+The real fix is a `uid` field on `approvalRef` so the reference carries the
+identity it means; that is a CRD change queued as a follow-up.
 
 *On the schedule.* A rehearsal that fails — verification, preflight, or its
 authorization — is recorded as the failure it is on `RehearsalHealthy` and

@@ -58,7 +58,7 @@ pub struct ApproveArgs {
     /// `PAYLOAD_TYPE_STANDING_AUTHORIZATION` for a `RehearsalSchedule`
     /// referent, and the runner refuses a standing document that is not signed
     /// under it. Before this flag nothing in the product could produce those
-    /// bytes — `logweir approve` signed only `PAYLOAD_TYPE_APPROVAL`, and the
+    /// bytes — `logweir drill approve` signed only `PAYLOAD_TYPE_APPROVAL`, and the
     /// only producers in the repository were Rust test fixtures. A feature an
     /// operator cannot mint the authorisation for is a feature nobody can use,
     /// which is why this lands with PLAT-14.3b rather than after it.
@@ -136,6 +136,20 @@ pub fn mint(args: &ApproveArgs) -> Result<String, String> {
     // `fs::read_to_string` and computes `sha256_prefixed(spec_text.as_bytes())`.
     // A spec that is not valid UTF-8 is refused HERE rather than approved into
     // a hash the drill can never reproduce.
+    // **A BLANK APPROVER IS NOT AN APPROVER.** clap requires both flags on this
+    // path, so this is the second line — and it is the line that holds if a
+    // future caller builds `ApproveArgs` itself. `approver` and `ticket` are
+    // signed and copied verbatim into the scorecard's accountability record by
+    // `phase1_approval::verify`; a drill approved by nobody under no ticket is
+    // exactly what that record exists to prevent.
+    for (value, flag) in [(&args.approver, "--approver"), (&args.ticket, "--ticket")] {
+        if value.trim().is_empty() {
+            return Err(format!(
+                "{flag} is required and must not be blank: it is signed into the approval and \
+                 copied verbatim into the scorecard's accountability record"
+            ));
+        }
+    }
     let spec_text =
         std::fs::read_to_string(spec_path).map_err(|e| format!("{}: {e}", spec_path.display()))?;
     let plan_hash = sha256_prefixed(spec_text.as_bytes());
@@ -348,6 +362,26 @@ pub fn mint_standing(args: &ApproveArgs) -> Result<String, String> {
         issued_at,
         expires_at: issued_at + chrono::Duration::days(standing.valid_days),
     };
+
+    // **AN ALREADY-EXPIRED DOCUMENT IS NOT MINTED.** `admit_standing_authorization`
+    // below is handed `issued_at` as its clock, which answers "is this document
+    // self-consistent" and not "is it valid NOW" — so with `--issued-at` far
+    // enough in the past it would happily sign something every reader refuses.
+    // The header promises this command refuses what the cluster would refuse;
+    // this is the line that keeps that true for the one flag that can move the
+    // window out from under it.
+    let now = chrono::Utc::now();
+    if doc.expires_at <= now {
+        return Err(format!(
+            "the authorization would expire at {} and it is now {}: --issued-at {} plus \
+             --valid-days {} is already in the past, and signing it would spend a key on a \
+             document every reader refuses",
+            doc.expires_at.to_rfc3339(),
+            now.to_rfc3339(),
+            issued_at.to_rfc3339(),
+            standing.valid_days
+        ));
+    }
 
     // **THE RUNNER'S OWN PREDICATE, BEFORE ANYTHING IS WRITTEN.** Not a
     // paraphrase of it — the same function, from the same crate both halves

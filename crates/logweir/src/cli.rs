@@ -401,12 +401,27 @@ pub enum DrillCmd {
         ///
         /// Not used with `--standing`: version 1.0.0 of the standing document
         /// carries no such field, so a value would not be signed.
-        #[arg(long, default_value = "")]
-        approver: String,
+        //
+        // REQUIRED, AND ONLY `--standing` RELAXES IT. Fix round 1 made both
+        // `default_value = ""` so the standing arm would not have to supply
+        // them, which silently allowed a PER-RUN approval to be minted by
+        // nobody under no ticket — signed bytes that `phase1_approval::verify`
+        // copies verbatim into the scorecard's `approval.approver`. The
+        // accountability record is the product's output; it does not get to be
+        // blank because a sibling subcommand found the flag inconvenient.
+        //
+        // `Option<String>` is the shape clap-derive needs for a CONDITIONALLY
+        // required argument: a bare `String` makes the derive infer
+        // `required(true)` (which then conflicts with `required_unless_present`)
+        // and, with `required(false)`, fail at RUNTIME when extracting the
+        // value. `main` collapses the absent case, which only `--standing`
+        // reaches.
+        #[arg(long, required_unless_present = "standing")]
+        approver: Option<String>,
         /// The change ticket this drill is authorised under. Not used with
         /// `--standing`, for the same reason as `--approver`.
-        #[arg(long, default_value = "")]
-        ticket: String,
+        #[arg(long, required_unless_present = "standing")]
+        ticket: Option<String>,
         /// Where the approval JSON is written. Its DSSE sidecar lands beside
         /// it with the extension replaced by `.sig`, which is the only place
         /// `drill run` looks for it.
@@ -422,7 +437,20 @@ pub enum DrillCmd {
         /// the `Approval` reconciler's check 8 when the referent it names is
         /// not a `Restore`, because there the field is compared against the
         /// referent's actual kind and an absent field matches nothing.
-        #[arg(long, value_enum, default_value_t = SubjectKindArg::Restore)]
+        //
+        // `conflicts_with = "standing"` and NOT a silent override. Under
+        // `--standing` the document's `subjectRef.kind` is always
+        // `RehearsalSchedule`, so an operator who wrote `--subject-kind
+        // Backup` had their explicit instruction discarded while this flag's
+        // own help promised it was "written INSIDE the signed bytes". clap
+        // does not count a default as present for a conflict, so the ordinary
+        // `--standing` invocation is unaffected.
+        #[arg(
+            long,
+            value_enum,
+            default_value_t = SubjectKindArg::Restore,
+            conflicts_with = "standing"
+        )]
         subject_kind: SubjectKindArg,
         /// Mint a **standing rehearsal authorization** (D3 §4.3(e)) instead of
         /// a per-run approval: one signature covering every slot of one
@@ -437,10 +465,10 @@ pub enum DrillCmd {
         #[arg(long)]
         standing: bool,
         /// With `--standing`: the `RehearsalSchedule`'s namespace.
-        #[arg(long, requires = "standing")]
+        #[arg(long, requires = "standing", required_if_eq("standing", "true"))]
         schedule_namespace: Option<String>,
         /// With `--standing`: the `RehearsalSchedule`'s name.
-        #[arg(long, requires = "standing")]
+        #[arg(long, requires = "standing", required_if_eq("standing", "true"))]
         schedule_name: Option<String>,
         /// With `--standing`: the `RehearsalSchedule`'s `metadata.uid`.
         ///
@@ -448,7 +476,7 @@ pub enum DrillCmd {
         /// controller stamps on the Job, so a document signed for a schedule
         /// that was deleted and recreated under the same name authorises
         /// nothing.
-        #[arg(long, requires = "standing")]
+        #[arg(long, requires = "standing", required_if_eq("standing", "true"))]
         schedule_uid: Option<String>,
         /// With `--standing`: a JSON file holding D3 §4.3's `RehearsalScope`
         /// in camelCase — `templateDigest`, `targetClusterId`, `topicPrefix`,
@@ -457,7 +485,7 @@ pub enum DrillCmd {
         ///
         /// A FILE, not a dozen flags: it is what the signature covers, so an
         /// operator should be able to diff it and keep it in version control.
-        #[arg(long, requires = "standing")]
+        #[arg(long, requires = "standing", required_if_eq("standing", "true"))]
         scope: Option<PathBuf>,
         /// With `--standing`: `expiresAt - issuedAt` in days. D3 §4.3 caps it
         /// at 90 and this command refuses more, so the limit is learned at
