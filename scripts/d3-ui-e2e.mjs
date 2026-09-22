@@ -565,9 +565,15 @@ async function main() {
   await context.addInitScript(() => {
     window.__d3uiFrames = [];
     window.__d3uiOpens = 0;
+    // WHEN each stream was constructed, so the ceiling row can ask "was there
+    // an open AFTER this tab's own `maxDuration` end" rather than only "were
+    // there two opens" -- a count a page opening two streams at load would
+    // satisfy without ever reconnecting.
+    window.__d3uiOpenedAt = [];
     const Native = window.EventSource;
     window.EventSource = function (url, init) {
       window.__d3uiOpens += 1;
+      try { window.__d3uiOpenedAt.push(new Date().toISOString()); } catch (ignored) { /* observe only */ }
       const source = new Native(url, init);
       const add = source.addEventListener.bind(source);
       source.addEventListener = (type, handler, options) => {
@@ -1353,12 +1359,40 @@ async function main() {
       // re-open or a failure -- and only the WAIT is added; polling stops the
       // moment the second open lands, so a console that never reconnects still
       // fails, and takes the full window to do it.
-      const reopenDeadline = Date.now() + 30000;
-      let opensNow = await ceilingPage.evaluate(() => window.__d3uiOpens || 0);
-      while (opensNow < 2 && Date.now() < reopenDeadline) {
+      //
+      // AND THE WAIT IS FOR THE TAB'S OWN CLOSE, NOT THE RAW READER'S. The raw
+      // reader's stream was opened before this tab loaded, so it reaches the
+      // ceiling first; the tab's own `end` arrives a page-load later, and only
+      // then does the backoff start. So the question asked is the precise one:
+      // did THIS tab receive `end: maxDuration`, and was a stream constructed
+      // AFTER it (`__d3uiOpenedAt`, stamped by the init script). The window is
+      // 30 s after the tab's end frame, or 330 s in all if the tab never
+      // received one -- which fails the first clause below, as it should.
+      const reopenState = () => ceilingPage.evaluate(() => {
+        const ends = (window.__d3uiFrames || []).filter(
+          (f) => f.type === "end" && String(f.data).indexOf("maxDuration") !== -1);
+        const openedAt = window.__d3uiOpenedAt || [];
+        const firstEndAt = ends.length > 0 ? ends[0].at : null;
+        return {
+          opens: window.__d3uiOpens || 0,
+          maxDurationEndsInTab: ends.length,
+          firstEndAt: firstEndAt,
+          openedAt: openedAt,
+          reopenedAfterEnd: firstEndAt !== null && openedAt.some((t) => t > firstEndAt),
+        };
+      });
+      const hardDeadline = Date.now() + 330000;
+      let endSeenAt = null;
+      let reopen = await reopenState();
+      while (!reopen.reopenedAfterEnd && Date.now() < hardDeadline &&
+             (endSeenAt === null || Date.now() < endSeenAt + 30000)) {
         await pause(500);
-        opensNow = await ceilingPage.evaluate(() => window.__d3uiOpens || 0);
+        reopen = await reopenState();
+        if (endSeenAt === null && reopen.firstEndAt !== null) {
+          endSeenAt = Date.now();
+        }
       }
+      const opensNow = reopen.opens;
       const ceilingText = await ceilingPage.evaluate(() => document.body.innerText);
       dump("operation/ceiling-page.txt", ceilingText);
       const at = join(ARTIFACTS, "shots", "18-ceiling-page.png");
@@ -1369,6 +1403,7 @@ async function main() {
         startedAt: result.ceilingStartedAt,
         wireFrames: wire.frames, wireEndReason: wire.endReason,
         streamOpensInTheConsoleTab: opensNow,
+        consoleTab: reopen,
       };
       check(wire.frames.indexOf("heartbeat") !== -1,
         "a quiet stream is kept alive by heartbeats. Frames: " + JSON.stringify(wire.frames));
@@ -1376,9 +1411,13 @@ async function main() {
         "an operation that never settles reaches the CONNECTION's ceiling and the server says " +
           "so. Got: " + JSON.stringify(wire.endReason) + " after " +
           JSON.stringify(wire.frames));
-      check(opensNow >= 2,
+      check(reopen.maxDurationEndsInTab >= 1,
+        "the console tab itself received the `end: maxDuration` frame (without it the reconnect " +
+          "below would be about some other close). Tab: " + JSON.stringify(reopen));
+      check(opensNow >= 2 && reopen.reopenedAfterEnd,
         "THE FIX, LIVE: the console RE-OPENS the stream after a `maxDuration` close instead of " +
-          "stopping. Opens: " + opensNow);
+          "stopping -- a stream constructed AFTER the tab's own end frame. Opens: " + opensNow +
+          ", tab: " + JSON.stringify(reopen));
       record("a `maxDuration` close is the connection's ceiling, not the end of the run: the " +
         "wire says so and the console reconnects", {
         restore: ceiling.held.name, uid: ceiling.held.uid,
@@ -1386,6 +1425,7 @@ async function main() {
         wireFrames: wire.frames, wireEndReason: wire.endReason,
         endPayload: (/event: end\ndata: (.+)/.exec(wire.text) || [])[1] || null,
         streamOpensInTheConsoleTab: opensNow,
+        consoleTab: reopen,
         evidence: "operation/wire-maxduration.json, operation/ceiling-page.txt, " +
           "shots/18-ceiling-page.png",
       });
