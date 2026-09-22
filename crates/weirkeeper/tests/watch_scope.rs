@@ -225,9 +225,30 @@ fn every_standalone_watch_stream_backs_off() {
             at = start + 1;
         }
     }
-    assert!(seen >= 2, "{seen}");
+    assert!(seen >= 1, "{seen}");
     assert!(
         offenders.is_empty(),
         "watch streams without backoff: {offenders:?}"
     );
+}
+
+/// **The cluster-scoped `TrustPolicy` reflector is built once per reconciler,
+/// not once per watched namespace** (review L3): no `reflector::reflector(`
+/// inside a `controller_in`, and backup and restore take the shared store.
+#[test]
+fn the_trust_policy_reflector_is_not_per_namespace() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/controllers");
+    for name in ["backup", "restore"] {
+        let text = std::fs::read_to_string(dir.join(format!("{name}.rs"))).unwrap();
+        let body = &text[text.find("fn controller_in(").expect("controller_in")..];
+        let body = &body[..body.find("\n}\n").unwrap()];
+        assert!(
+            !body.contains("reflector::reflector(") && !body.contains("reflector::store::<"),
+            "controllers/{name}.rs builds a TrustPolicy reflector per watched namespace"
+        );
+        assert!(
+            text.contains("crate::trust::spawn_policy_reflector(&client)"),
+            "{name}"
+        );
+    }
 }

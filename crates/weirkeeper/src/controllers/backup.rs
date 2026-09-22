@@ -71,7 +71,7 @@ use k8s_openapi::api::core::v1::{ConfigMap, Pod};
 use kube::api::{Api, LogParams, Patch, PatchParams, PostParams};
 use kube::runtime::controller::Action;
 use kube::runtime::reflector::{self, ObjectRef};
-use kube::runtime::{watcher, Controller, WatchStreamExt as _};
+use kube::runtime::{watcher, Controller};
 use kube::{Resource, ResourceExt as _};
 use serde_json::{json, Value};
 use tracing::{debug, info, warn};
@@ -5062,24 +5062,31 @@ async fn reconcile_with_trust(
 /// and a set one is what the operator's install asked for — the image this
 /// cluster's nodes actually hold, and the policy that makes that reference
 /// resolvable (a LOADED tag must not be pulled; a `latest` tag must be).
-pub fn controller(
+pub async fn controller(
     client: kube::Client,
     archive: Option<Arc<Store>>,
     runner_image: job::RunnerImage,
-) -> impl std::future::Future<Output = ()> + Send {
+) {
     // D0 STAGE 5: ONE WATCH PER WATCHED NAMESPACE. `crate::scope` is the whole
     // cluster unless `LOGWEIR_WATCH_NAMESPACES` names the execution
     // namespaces, and then this reconciler runs once per namespace with an
     // `Api::namespaced` watch — the only shape the scoped chart's RoleBindings
     // permit.
+    //
+    // The `TrustPolicy` store is built ONCE here and shared by every copy
+    // (review L3): the kind is cluster-scoped, so a reflector per namespace
+    // would be N identical cluster-wide watches.
+    let policies = crate::trust::spawn_policy_reflector(&client);
     crate::scope::run_everywhere(move |namespace| {
         controller_in(
             client.clone(),
             archive.clone(),
             runner_image.clone(),
+            policies.clone(),
             namespace,
         )
     })
+    .await;
 }
 
 /// One watch of [`controller`], over `namespace` (`None` is the whole
@@ -5088,6 +5095,7 @@ fn controller_in(
     client: kube::Client,
     archive: Option<Arc<Store>>,
     runner_image: job::RunnerImage,
+    shared: crate::trust::SharedPolicies,
     namespace: Option<String>,
 ) -> impl std::future::Future<Output = ()> + Send {
     let api: Api<Backup> = crate::scope::api(&client, namespace.as_deref());
@@ -5098,42 +5106,16 @@ fn controller_in(
         archive,
         runner_image,
     });
-    // ONE reflector over `TrustPolicy`, shared by the trigger and by every
-    // resolution this controller performs (review finding F9). A watch is one
-    // long-lived connection; a LIST per reconcile is one round trip per object
-    // per requeue, and this controller holds every object in the cluster.
-    let (policies, policy_writer) = reflector::store::<crate::crds::trust_policy::TrustPolicy>();
+    // The ONE `TrustPolicy` store, shared by the trigger's resolutions and by
+    // every copy of this reconciler (`crate::trust::spawn_policy_reflector`).
+    // The trigger itself is a watch per copy: it maps a policy event to the
+    // objects in THIS copy's store.
+    let policies = shared.store;
+    let synced = shared.synced;
     let policy_api: Api<crate::crds::trust_policy::TrustPolicy> = Api::all(client_for_watch);
-    let synced = Arc::new(AtomicBool::new(false));
     // ONE memory of what each policy bound last, owned by the mapper.
     let scopes = Arc::new(crate::trust::PolicyScopeMemory::default());
     async move {
-        // NOT `wait_until_ready().await` BEFORE STARTING. A cluster whose
-        // `trustpolicies` CRD is not installed never syncs, and awaiting here
-        // would mean this controller never reconciles anything at all — a
-        // startup regression for every install that has not migrated. The flag
-        // is the same answer without the hostage: until it is set, the
-        // re-trust pass is skipped and everything else runs exactly as before.
-        let ready_probe = policies.clone();
-        let ready_flag = Arc::clone(&synced);
-        tokio::spawn(async move {
-            if ready_probe.wait_until_ready().await.is_ok() {
-                ready_flag.store(true, Ordering::Relaxed);
-            }
-        });
-        tokio::spawn(
-            // BACKED OFF, like every trigger watch `Controller` runs. Without
-            // it a refused or failing LIST is retried in a tight loop — the
-            // PLAT-17.2 live run measured ~175 retries a second per stream
-            // when the scoped ServiceAccount lacked the cluster-scoped trust
-            // grant — and an API-server outage becomes load on the API server.
-            reflector::reflector(
-                policy_writer,
-                watcher(policy_api.clone(), watcher::Config::default()).default_backoff(),
-            )
-            .for_each(|_| std::future::ready(())),
-        );
-
         let controller = Controller::new(api, watcher::Config::default());
         let objects = controller.store();
         controller

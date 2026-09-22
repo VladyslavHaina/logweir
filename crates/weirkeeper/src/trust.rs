@@ -885,3 +885,56 @@ impl PolicyScopeMemory {
         }
     }
 }
+
+/// The ONE `TrustPolicy` reflector a reconciler's watches share, and the flag
+/// that says it has synced.
+///
+/// ONE PER RECONCILER, NOT ONE PER NAMESPACE (PLAT-17.2 review L3). A scoped
+/// controller runs a copy of each reconciler per watched namespace, and a
+/// reflector built inside that copy would open one identical cluster-wide
+/// `TrustPolicy` watch per namespace. `TrustPolicy` is cluster-scoped, so the
+/// store is the same data for every copy: it is built once in `controller()`
+/// and handed to each.
+#[derive(Clone)]
+pub struct SharedPolicies {
+    /// The reflector's store.
+    pub store: kube::runtime::reflector::Store<crate::crds::trust_policy::TrustPolicy>,
+    /// Set once the store has synced. Until then the re-trust pass is skipped
+    /// and everything else runs exactly as it would without a policy.
+    pub synced: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// Build the store and spawn its reflector (backed off) and its sync probe.
+/// Call it from inside the runtime, once per reconciler.
+#[must_use]
+pub fn spawn_policy_reflector(client: &kube::Client) -> SharedPolicies {
+    use futures::StreamExt as _;
+    use kube::runtime::{watcher, WatchStreamExt as _};
+    let (store, writer) =
+        kube::runtime::reflector::store::<crate::crds::trust_policy::TrustPolicy>();
+    let policies: Api<TrustPolicy> = Api::all(client.clone());
+    let synced = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // NOT `wait_until_ready().await` BEFORE STARTING. A cluster whose
+    // `trustpolicies` CRD is not installed never syncs, and awaiting would
+    // mean the reconciler never reconciles anything at all — a startup
+    // regression for every install that has not migrated.
+    let probe = store.clone();
+    let flag = std::sync::Arc::clone(&synced);
+    tokio::spawn(async move {
+        if probe.wait_until_ready().await.is_ok() {
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    });
+    tokio::spawn(
+        // BACKED OFF, like every trigger watch `Controller` runs. Without it a
+        // refused or failing LIST is retried in a tight loop — the PLAT-17.2
+        // live run measured ~175 retries a second per stream when the scoped
+        // ServiceAccount lacked the cluster-scoped trust grant.
+        kube::runtime::reflector::reflector(
+            writer,
+            watcher(policies, watcher::Config::default()).default_backoff(),
+        )
+        .for_each(|_| std::future::ready(())),
+    );
+    SharedPolicies { store, synced }
+}
