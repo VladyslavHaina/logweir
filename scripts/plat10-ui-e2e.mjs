@@ -192,38 +192,34 @@ async function waitForSelector(page, selector, label) {
   }
 }
 
-/** Focuses one control BY ID, waiting for it and for the view to settle.
- *
- *  THE VIEW REPAINTS MORE THAN ONCE PER LOAD, on purpose: `ui/app.js` renders
- *  immediately and renders again once `GET /api/v1/session` has answered and
- *  the grants have replaced the runtime namespace list, and the schedules mount
- *  itself replaces the node after its later reads. A `focus()` evaluated in the
- *  gap between two of those repaints finds nothing. This waits for the element,
- *  focuses it, and then CHECKS that the focus took -- which is the only
- *  statement worth making, because everything typed next goes wherever the
- *  focus actually is. No pointer event is sent. */
-async function focusById(page, id, label) {
-  for (let i = 0; i < 20; i += 1) {
-    try {
-      await page.waitForSelector("#" + id, { timeout: 5000 });
-      const landed = await page.evaluate((target) => {
-        const node = document.getElementById(target);
-        if (node === null) {
-          return null;
-        }
-        node.focus();
-        return document.activeElement === null ? null : document.activeElement.id;
-      }, id);
-      if (landed === id) {
-        return;
+/** Reaches an element ONLY by Tab. This is deliberately not `locator.focus()`:
+ *  the keyboard row must prove the browser's focus order, rather than merely
+ *  put a caret in a field that a keyboard user could not reach. The schedule
+ *  view can repaint while a selection changes the fields that exist, so a
+ *  missed element is reported with the focus trail instead of silently using a
+ *  pointer or programmatic focus fallback. */
+async function tabTo(page, selector, label) {
+  const seen = [];
+  for (let i = 0; i < 160; i += 1) {
+    await page.keyboard.press("Tab");
+    const landed = await page.evaluate(() => {
+      const node = document.activeElement;
+      if (node === null) {
+        return "(none)";
       }
-    } catch (repainting) {
-      // the node was replaced under the read; try again below
+      return node.id || node.getAttribute("name") || node.tagName.toLowerCase();
+    });
+    seen.push(landed);
+    const matched = await page.evaluate((target) => {
+      const node = document.querySelector(target);
+      return node !== null && document.activeElement === node;
+    }, selector);
+    if (matched) {
+      return seen;
     }
-    await pause(400);
   }
-  throw new Error(label + ": could not put the keyboard focus on #" + id + ". Saw:\n" +
-    (await text(page)).slice(0, 1200));
+  throw new Error(label + ": Tab did not reach " + selector + ". Focus trail: " +
+    JSON.stringify(seen) + ". Saw:\n" + (await text(page)).slice(0, 1200));
 }
 
 /** Opens a route and waits for the control that says it rendered, RELOADING
@@ -973,45 +969,45 @@ async function main() {
     // Keyboard-only creation: Tab, arrows, Space and Enter, and no click.
     result.reloads = (result.reloads || 0) + await openRoute(page, listRoute, "#schedule-form", "the create form for the keyboard journey");
     const beforeKeyboard = schedules().length;
-    // Focus the first field WITHOUT a pointer: the skip link is the page's own
-    // first stop, so Tab from the document start reaches the form in order.
-    await focusById(page, "schedule-name", "the keyboard journey's first field");
-    let clicks = 0;
-    page.on("console", () => { /* nothing: the counter below is the guard */ });
+    // The FIRST field, every selection, and submit are reached by Tab. This
+    // starts at the document's natural focus position; there is intentionally
+    // no `focus()`, locator click or `selectOption()` on this path.
+    await tabTo(page, "#schedule-name", "the keyboard journey's first field");
+    await page.evaluate(() => {
+      window.__plat10PointerEvents = 0;
+      document.addEventListener("pointerdown", () => { window.__plat10PointerEvents += 1; },
+        { capture: true });
+    });
     const typedName = "kbd-" + suffix;
     await page.keyboard.type(typedName);
     const sourceUid = kubeJson(["-n", namespace, "get", "kafkacluster", source]).metadata.uid;
-    // Tab to the source selector -- past the selector's own search box -- and
-    // choose with the keyboard, then Tab on through the cadence.
-    await page.keyboard.press("Tab");
-    await page.keyboard.press("Tab");
-    const focusedId = await page.evaluate(() => document.activeElement.id);
-    check(focusedId === "schedule-source",
-      "tabbing from the name did not reach the source selector; reached " + focusedId);
+    // Tab to the source selector and choose with the keyboard.
+    await tabTo(page, "#schedule-source", "the keyboard journey's source selector");
     const sourceKeys = await keyboardSelect("#schedule-source", sourceUid, source[0]);
-    // Fill the rest by focusing each control and typing -- still no pointer.
-    for (const [id, value] of [["policy-create-topics", "orders"]]) {
-      await focusById(page, id, "the keyboard journey's topic field");
-      await page.keyboard.type(value);
-    }
-    await focusById(page, "policy-create-destination", "the keyboard journey's destination");
+    // Advanced cron is selected with the keyboard, which repaints the preset
+    // parameters into the cron field. `a` is recorded like the other select
+    // keys, and the next Tab traversal begins at the repainted document.
+    await tabTo(page, "#policy-create-mode", "the keyboard journey's cadence mode");
+    const modeKeys = await keyboardSelect("#policy-create-mode", "advanced", "a");
+    await waitForSelector(page, "#policy-create-cron", "the keyboard journey's cron field");
+    await tabTo(page, "#policy-create-cron", "the keyboard journey's cron field");
+    await page.keyboard.type("9 3 * * *");
+    await tabTo(page, "#policy-create-topics", "the keyboard journey's topic field");
+    await page.keyboard.type("orders");
+    await tabTo(page, "#policy-create-destination", "the keyboard journey's destination");
     const destinationKeys = await keyboardSelect("#policy-create-destination", destination,
       destination[0]);
-    await focusById(page, "policy-create-mode", "the keyboard journey's cadence mode");
-    // Advanced cron is the first option, so one Home keeps the keyboard route
-    // free of a preview round trip that Enter could not complete.
-    await page.keyboard.press("Home");
-    await focusById(page, "policy-create-cron", "the keyboard journey's cron field");
-    await page.keyboard.type("9 3 * * *");
     const focusVisible = await page.evaluate(() => {
       const node = document.getElementById("policy-create-cron");
       const style = window.getComputedStyle(node, ":focus-visible");
       return { outline: style.outlineStyle, width: style.outlineWidth };
     });
     await shot(page, "18-keyboard-filled");
-    // ENTER IN A TEXT FIELD SUBMITS THE FORM. That is the whole point of a real
-    // `<button type="submit">`, and it is the last step of the keyboard route.
-    await page.keyboard.press("Enter");
+    // The native submit button is reached and activated with Space, so the
+    // final action is also an explicit keyboard action rather than a synthetic
+    // form submit.
+    await tabTo(page, "#schedule-form button[type=submit]", "the keyboard journey's Create button");
+    await page.keyboard.press("Space");
     await waitForSelector(page, "#schedule-detail", "the redirect after a keyboard-only create");
     const keyboardMade = schedules().filter((s) => s.spec.schedule === "9 3 * * *");
     check(keyboardMade.length === 1,
@@ -1030,9 +1026,10 @@ async function main() {
       expression: keyboardMade[0].spec.schedule,
       sourceRef: keyboardMade[0].spec.sourceRef,
       destinationRef: keyboardMade[0].spec.destinationRef,
-      pointerEvents: clicks,
+      pointerEvents: await page.evaluate(() => window.__plat10PointerEvents),
       keysForTheConnection: sourceKeys,
       keysForTheDestination: destinationKeys,
+      keysForTheCadenceMode: modeKeys,
       focusVisibleOutline: focusVisible,
     });
 
@@ -1040,7 +1037,7 @@ async function main() {
     // refused and creates nothing, so the row above is about what was typed.
     result.reloads = (result.reloads || 0) + await openRoute(page, listRoute, "#schedule-form", "the create form for the keyboard control");
     const beforeEmpty = schedules().length;
-    await focusById(page, "schedule-name", "the keyboard control's first field");
+    await tabTo(page, "#schedule-name", "the keyboard control's first field");
     await page.keyboard.press("Enter");
     await pause(1200);
     check(schedules().length === beforeEmpty,
