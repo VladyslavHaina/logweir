@@ -1120,6 +1120,452 @@ def test_the_reconstructed_view_publishes_the_key_a_restore_binds_to() -> None:
         not all(d3.reconstructed_view_ok([], set(), 0).values()))
 
 
+# --- PLAT-14.2: the three protection arms, over planted status blocks -------
+#
+# Every predicate `protection_verdicts` decides from, exercised without a
+# cluster. Each is driven TWICE at least: once over the shape the FIXED
+# controller publishes (`docs/kubernetes.md`'s "A point whose receipt the
+# controller could not read", D3 §3.2's health table and §3.3's resolve
+# column), and once over a shape that must be REFUSED — the pre-fix answer, the
+# neighbouring `Unknown` cause, the rewritten verdict, the resolve that D3 does
+# not allow. The sentences are the controller's own (`protection::summarize`),
+# copied so a row cannot pass against a message the product never writes.
+
+_UNREAD_MESSAGE = (
+    "a run for this policy succeeded, but its recovery point could not be placed in time: "
+    "the controller read no verification verdict for it and so holds no capture time, and an "
+    "age cannot be compared to the objective of 1d 0h. This is not a pass and not a failure"
+)
+_UNPROTECTED_MESSAGE = "there is no available recovery point for this policy at all"
+_HEALTHY_MESSAGE = (
+    "the newest available recovery point is 3m old, inside the objective of 1d 0h"
+)
+_CATALOG_STALE_MESSAGE = (
+    "protection could not be evaluated (CatalogStale); this is not a pass and not a failure"
+)
+
+# The catalog row for the `SecretKeys` point, as the view publishes it: both of
+# D3 §5.4's axes, the archive set id the join runs on where the point has no
+# receipt-derived identity, and `recoveryPointAtMs`, which IS the receipt's
+# `started_at` carried through.
+_ENTRY = {
+    "pointId": "lwp1-622d7a41",
+    "backupId": "bk-01jw8y0e2n",
+    "recoveryPointAtMs": 1_790_012_000_000,
+    "availability": "Available",
+    "verification": "Verified",
+    "selectable": True,
+}
+_PLACED_POINT = {
+    "pointId": "lwp1-622d7a41",
+    "recoveryPointAt": "2026-09-21T17:33:20Z",
+    "ageSeconds": 180,
+    # NOT REWRITTEN. The controller still did not read this receipt; the
+    # catalog answered availability, not verification (D3 §5.4).
+    "evidence": "NotAttempted",
+}
+
+
+def _policy(health, protected, reason, message, *, point=None, alerts=None,
+            basis=None, generation=3):
+    return {
+        "metadata": {"name": "p", "generation": generation},
+        "status": {
+            "health": health,
+            "availabilityBasis": basis,
+            "lastAvailablePoint": point,
+            "alerts": alerts or [],
+            "observedGeneration": generation,
+            "evaluatedAt": "2026-09-21T17:36:00Z",
+            "conditions": [
+                {"type": "Ready", "status": "True", "reason": "Evaluated", "message": "ok"},
+                {"type": "Protected", "status": protected, "reason": reason,
+                 "message": message},
+            ],
+        },
+    }
+
+
+def _alert(state, *, transition=1, notified=1, delivery="Delivered", kind="Staleness"):
+    return {"key": "logweir-protection-uid-staleness", "kind": kind, "state": state,
+            "transition": transition, "notifiedTransition": notified,
+            "delivery": {"state": delivery}}
+
+
+_UNKNOWN_POLICY = _policy("Unknown", "Unknown", "PointFactsUnread", _UNREAD_MESSAGE)
+_PLACED_POLICY = _policy("Healthy", "True", "WithinObjective", _HEALTHY_MESSAGE,
+                         point=_PLACED_POINT, basis="Catalog")
+# WHAT `af64073` ANSWERS on the same objects, and the whole of the defect:
+# `Unprotected` is D3 §3.2's "no available point at all", and it PAGES.
+_PREFIX_DEFECT_POLICY = _policy("Unprotected", "False", "NoAvailablePoint",
+                                _UNPROTECTED_MESSAGE, alerts=[_alert("Open")],
+                                basis="Catalog")
+
+
+def test_unplaceable_point_is_unknown_not_unprotected() -> None:
+    ok = d3.unread_point_is_unknown(d3.policy_view(_UNKNOWN_POLICY))
+    row("PointFactsUnread: Unknown/Unknown/PointFactsUnread with no point published",
+        all(ok.values()), f"{ok}")
+
+    defect = d3.unread_point_is_unknown(d3.policy_view(_PREFIX_DEFECT_POLICY))
+    row("MUTANT: `af64073`'s Unprotected/NoAvailablePoint — the defect — is refused on "
+        "every clause that names the answer (it publishes no point either, which is the "
+        "one thing the two states agree about)",
+        not defect["health is Unknown — D3 §3.2's `evaluation impossible`, never `Unprotected`"]
+        and not defect["the Protected condition mirrors it (`Unknown` for `Unknown`)"]
+        and not defect["with reason PointFactsUnread, and not another Unknown cause"]
+        and not defect["and a message naming the READ rather than a missing object"],
+        f"{defect}")
+
+    # The OTHER `Unknown` causes. D3 §3.2 lands five different failures on
+    # `Unknown`; a row that accepted any of them would pass on a policy whose
+    # catalog went stale and would say nothing about a point that could not be
+    # placed.
+    stale = d3.unread_point_is_unknown(d3.policy_view(
+        _policy("Unknown", "Unknown", "CatalogStale", _CATALOG_STALE_MESSAGE)))
+    row("MUTANT: Unknown for a STALE CATALOG is not this row's Unknown",
+        not stale["with reason PointFactsUnread, and not another Unknown cause"]
+        and not stale["and a message naming the READ rather than a missing object"],
+        f"{stale}")
+
+    # A reason string with the generic message under it: the reason is right
+    # and the sentence sends an operator looking for a missing object.
+    generic = d3.unread_point_is_unknown(d3.policy_view(
+        _policy("Unknown", "Unknown", "PointFactsUnread",
+                "protection could not be evaluated (PointFactsUnread); this is not a pass "
+                "and not a failure")))
+    row("MUTANT: the reason without the sentence that names the READ is refused",
+        not generic["and a message naming the READ rather than a missing object"],
+        f"{generic}")
+
+    # `Unknown` while still publishing a point would be a policy claiming it
+    # cannot evaluate and naming what it evaluated.
+    contradictory = d3.unread_point_is_unknown(d3.policy_view(
+        _policy("Unknown", "Unknown", "PointFactsUnread", _UNREAD_MESSAGE,
+                point=_PLACED_POINT)))
+    row("MUTANT: Unknown that still publishes a lastAvailablePoint is refused",
+        not contradictory["nothing is published as the newest available point"])
+
+
+def test_the_catalog_places_the_point_and_does_not_rewrite_the_verdict() -> None:
+    ok = d3.placed_point_is_protected(d3.policy_view(_PLACED_POLICY), _ENTRY)
+    row("the control: Healthy/Protected=True, the capture time and the id off the row, "
+        "verdict still NotAttempted",
+        all(ok.values()), f"{ok}")
+
+    everything_unread = d3.placed_point_is_protected(
+        d3.policy_view(_UNKNOWN_POLICY), _ENTRY)
+    row("MUTANT: a controller answering PointFactsUnread for EVERY unverified point "
+        "fails the control, which is what makes the control a control",
+        not any(everything_unread.values()), f"{everything_unread}")
+
+    rewritten = json.loads(json.dumps(_PLACED_POLICY))
+    rewritten["status"]["lastAvailablePoint"]["evidence"] = "Valid"
+    forged = d3.placed_point_is_protected(d3.policy_view(rewritten), _ENTRY)
+    row("MUTANT: a verdict rewritten to Valid — the catalog answering VERIFICATION, "
+        "which D3 §5.4 keeps on its own axis — is refused",
+        not forged["the verdict is NOT rewritten — it still reads NotAttempted"]
+        and all(v for k, v in forged.items()
+                if k != "the verdict is NOT rewritten — it still reads NotAttempted"),
+        f"{forged}")
+
+    other_row = dict(_ENTRY, recoveryPointAtMs=_ENTRY["recoveryPointAtMs"] - 7_200_000)
+    wrong_time = d3.placed_point_is_protected(d3.policy_view(_PLACED_POLICY), other_row)
+    row("MUTANT: a capture time that is not THIS row's is refused — a point placed from "
+        "the wrong entry looks exactly like a measurement",
+        not wrong_time["which is the catalog row's own recoveryPointAtMs, to the second"])
+
+    other_id = dict(_ENTRY, pointId="lwp1-deadbeef")
+    wrong_id = d3.placed_point_is_protected(d3.policy_view(_PLACED_POLICY), other_id)
+    row("MUTANT: an identity that is not the row's is refused",
+        not wrong_id["and the catalog row's own point id"])
+
+    kubernetes_basis = json.loads(json.dumps(_PLACED_POLICY))
+    kubernetes_basis["status"]["availabilityBasis"] = "KubernetesStatus"
+    basis = d3.placed_point_is_protected(d3.policy_view(kubernetes_basis), _ENTRY)
+    row("MUTANT: Healthy decided from Kubernetes status alone does not prove the catalog "
+        "placed anything",
+        not basis["availability was decided by the catalog, and says so"])
+
+    nothing = d3.placed_point_is_protected(
+        d3.policy_view(_policy("Healthy", "True", "WithinObjective", _HEALTHY_MESSAGE,
+                               basis="Catalog")), _ENTRY)
+    row("MUTANT: Healthy with no point published satisfies no clause vacuously",
+        not nothing["a point is published with a capture time"])
+
+
+_REFUSED_POLICY = _policy("Unprotected", "False", "NoAvailablePoint", _UNPROTECTED_MESSAGE,
+                          alerts=[_alert("Open")])
+_SOUND_POLICY = _policy(
+    "Healthy", "True", "WithinObjective", _HEALTHY_MESSAGE,
+    point={"pointId": "lwp1-91ac0f33", "recoveryPointAt": "2026-09-21T17:40:00Z",
+           "ageSeconds": 60, "evidence": "Valid"},
+    alerts=[_alert("Resolved", transition=2, notified=2)], basis="Catalog")
+
+
+def test_a_refused_signature_is_unprotected_at_every_posture() -> None:
+    for verdict in ("Untrusted", "Invalid"):
+        ok = d3.refused_signature_is_unprotected(
+            d3.policy_view(_REFUSED_POLICY), verdict, _ENTRY)
+        row(f"refused signature ({verdict}) with a catalogRef: Unprotected, Staleness Open, "
+            f"and the catalog row that could have rescued it did not",
+            all(ok.values()), f"{ok}")
+    no_catalog = d3.refused_signature_is_unprotected(
+        d3.policy_view(_REFUSED_POLICY), "Untrusted", None)
+    row("refused signature with no catalogRef: the same answer, and no rescue clause",
+        all(no_catalog.values())
+        and "the catalog held ONE row for this point, so it COULD have placed it"
+        not in no_catalog)
+
+    # MEDIUM-1 of `claude/fix-protection.review-2.md`, measured on the branch it
+    # was found on: `requireVerifiedEvidence: false` + a reached-and-refused
+    # verdict read `Healthy`, `Protected=True`, nothing open, publishing
+    # `evidence: "Invalid"` beside it.
+    rescued = d3.refused_signature_is_unprotected(
+        d3.policy_view(_policy(
+            "Healthy", "True", "WithinObjective", _HEALTHY_MESSAGE,
+            point={"pointId": "lwp1-622d7a41", "recoveryPointAt": "2026-09-21T17:33:20Z",
+                   "ageSeconds": 180, "evidence": "Invalid"}, basis="Catalog")),
+        "Invalid", _ENTRY)
+    row("MUTANT: MEDIUM-1's shape — a catalog row rescuing a REFUSED verdict into Healthy "
+        "— is refused on every clause that matters",
+        not rescued["health is Unprotected — D3 §3.2's `no available point at all`"]
+        and not rescued["Protected=False"]
+        and not rescued["the Staleness incident is Open — this PAGES"]
+        and not rescued["nothing is published as the newest available point"],
+        f"{rescued}")
+
+    # HIGH-1b inverted: `Unknown` with `PointFactsUnread`'s sentence says the
+    # controller read no verdict, which is FALSE about a point it refused — and
+    # `Unknown` opens no alert, so it stops paging an installation whose own
+    # TrustPolicy rejects the archive.
+    as_unread = d3.refused_signature_is_unprotected(
+        d3.policy_view(_UNKNOWN_POLICY), "Untrusted", None)
+    row("MUTANT: HIGH-1b's shape — a refused point reported Unknown/PointFactsUnread — is "
+        "refused, including on the message clause",
+        not as_unread["health is Unprotected — D3 §3.2's `no available point at all`"]
+        and not as_unread[
+            "and the message does NOT say the controller read no verdict — it read one"],
+        f"{as_unread}")
+
+    not_reached = d3.refused_signature_is_unprotected(
+        d3.policy_view(_REFUSED_POLICY), "NotAttempted", _ENTRY)
+    row("MUTANT: `NotAttempted` is not a refusal — the fixture clause refuses it, so this "
+        "row can never be satisfied by row 1's point",
+        not not_reached["the controller REACHED a verdict, and it refuses the signature"])
+
+    empty_view = d3.refused_signature_is_unprotected(
+        d3.policy_view(_REFUSED_POLICY), "Untrusted", {})
+    row("MUTANT: a catalogRef cell whose view held NO row for the point proves nothing "
+        "about rescue, and says so",
+        not empty_view["the catalog held ONE row for this point, so it COULD have placed it"])
+
+    silent = json.loads(json.dumps(_REFUSED_POLICY))
+    silent["status"]["alerts"] = []
+    quiet = d3.refused_signature_is_unprotected(d3.policy_view(silent), "Untrusted", _ENTRY)
+    row("MUTANT: Unprotected that opens no incident does not page, and is refused",
+        not quiet["the Staleness incident is Open — this PAGES"])
+
+
+def test_a_valid_signature_is_the_control_that_requires_protection() -> None:
+    ok = d3.valid_signature_is_protected(d3.policy_view(_SOUND_POLICY), "Valid")
+    row("the control: the same archive under a trusted signer is Healthy/Protected=True",
+        all(ok.values()), f"{ok}")
+    always_unprotected = d3.valid_signature_is_protected(
+        d3.policy_view(_REFUSED_POLICY), "Valid")
+    row("MUTANT: a controller answering Unprotected for EVERY point on this archive would "
+        "pass all four refused cells and fails the control",
+        not any(v for k, v in always_unprotected.items()
+                if k != "the same archive under a trusted signer verifies Valid"),
+        f"{always_unprotected}")
+    unread_verdict = d3.valid_signature_is_protected(d3.policy_view(_PLACED_POLICY),
+                                                     "NotAttempted")
+    row("MUTANT: a point that is Healthy because the CATALOG placed it is not this "
+        "control — the control is about a verdict the controller reached",
+        not unread_verdict["the same archive under a trusted signer verifies Valid"]
+        and not unread_verdict["carrying the verdict the controller reached"],
+        f"{unread_verdict}")
+
+
+def test_the_resolve_column_closes_an_incident_exactly_once() -> None:
+    before = _alert("Open", transition=1, notified=1, delivery="Delivered")
+    after = _alert("Resolved", transition=2, notified=2, delivery="Delivered")
+    ok = d3.incident_resolves_exactly_once(before, after, "Healthy", 1, 1)
+    row("D3 §3.3 resolve column: Open -> Resolved at Healthy, one transition, one POST",
+        all(ok.values()), f"{ok}")
+    row("AtRisk resolves too — the column is two values, not one",
+        all(d3.incident_resolves_exactly_once(before, after, "AtRisk", 1, 1).values()))
+
+    for health in ("Unknown", "Stale", "Unprotected"):
+        bad = d3.incident_resolves_exactly_once(before, after, health, 1, 1)
+        row(f"MUTANT: a resolve at health {health} is not \"back to Healthy/AtRisk\"",
+            not bad["health came back to Healthy/AtRisk — D3 §3.3's resolve column"])
+
+    stuck = d3.incident_resolves_exactly_once(before, _alert("Open", transition=1, notified=1),
+                                              "Healthy", 0, 0)
+    row("MUTANT: an incident that never closed is refused",
+        not stuck["the incident is Resolved after it"]
+        and not stuck["one POST per transition this window opened, and no more"])
+
+    twice = d3.incident_resolves_exactly_once(
+        before, _alert("Resolved", transition=3, notified=3), "Healthy", 2, 2)
+    row("MUTANT: two notified transitions for one close is not `exactly once`",
+        not twice["which is exactly one new notified transition on this incident"])
+
+    unbalanced = d3.incident_resolves_exactly_once(before, after, "Healthy", 3, 1)
+    row("MUTANT: three POSTs for one transition breaks D3 §3.3's dedup rule",
+        not unbalanced["one POST per transition this window opened, and no more"])
+
+    silent = d3.incident_resolves_exactly_once(before, after, "Healthy", 0, 0)
+    row("MUTANT: a resolve nobody was told about is refused (0 POSTs, 0 transitions)",
+        not silent["one POST per transition this window opened, and no more"])
+
+    attempted = d3.incident_resolves_exactly_once(
+        before, _alert("Resolved", transition=2, notified=2, delivery="Failed"),
+        "Healthy", 1, 1)
+    row("MUTANT: `Failed` delivery is attempted, not delivered",
+        not attempted["and the delivery says Delivered, not merely attempted"])
+
+
+def test_unknown_never_clears_an_open_incident() -> None:
+    before = _alert("Open", transition=1, notified=1)
+    unchanged = _alert("Open", transition=1, notified=1)
+    ok = d3.incident_stays_open_on_unknown(
+        before, unchanged, d3.policy_view(_UNKNOWN_POLICY), 0)
+    row("D3 §3.3, the other direction: Unknown/PointFactsUnread keeps the incident open, "
+        "un-renotified, undelivered",
+        all(ok.values()), f"{ok}")
+
+    resolved = d3.incident_stays_open_on_unknown(
+        before, _alert("Resolved", transition=2, notified=2),
+        d3.policy_view(_UNKNOWN_POLICY), 1)
+    row("MUTANT: a controller that resolved on `no longer Stale` closes a real incident "
+        "because it stopped being able to look — refused on four clauses",
+        not resolved["the incident is STILL Open — `Unknown` is not back to Healthy/AtRisk"]
+        and not resolved["no new transition was recorded"]
+        and not resolved["it was not re-notified"]
+        and not resolved["and nothing was delivered for it"],
+        f"{resolved}")
+
+    renotified = d3.incident_stays_open_on_unknown(
+        before, _alert("Open", transition=2, notified=2),
+        d3.policy_view(_UNKNOWN_POLICY), 1)
+    row("MUTANT: re-paging an incident the policy can no longer measure is refused",
+        not renotified["no new transition was recorded"]
+        and not renotified["it was not re-notified"])
+
+    still_unprotected = d3.incident_stays_open_on_unknown(
+        before, unchanged, d3.policy_view(_PREFIX_DEFECT_POLICY), 0)
+    row("MUTANT: `af64073` keeps the incident open too, because it stays Unprotected — "
+        "which is the defect and not the rule, so the health clause refuses it",
+        not still_unprotected["the policy is now Unknown/PointFactsUnread"]
+        and all(v for k, v in still_unprotected.items()
+                if k != "the policy is now Unknown/PointFactsUnread"),
+        f"{still_unprotected}")
+
+
+def test_an_unmeasurable_policy_neither_pages_nor_unpages() -> None:
+    open_staleness = [_alert("Open")]
+    row("nothing opened, nothing closed, no transition",
+        all(d3.alert_ledger_unchanged(open_staleness, open_staleness).values()))
+    row("an empty ledger that stays empty is unchanged",
+        all(d3.alert_ledger_unchanged([], []).values()))
+    opened = d3.alert_ledger_unchanged(
+        [], [_alert("Open", kind="ArchiveUnavailable")])
+    row("MUTANT: an alert kind that opened is refused",
+        not opened["no alert kind opened that was not open before"]
+        and not opened["and no transition was recorded at all"])
+    closed = d3.alert_ledger_unchanged(
+        open_staleness, [_alert("Resolved", transition=2, notified=2)])
+    row("MUTANT: an open incident that was resolved is refused",
+        not closed["nothing that was open was resolved"]
+        and not closed["and no transition was recorded at all"])
+
+
+def test_policy_view_reads_the_condition_the_rows_decide_from() -> None:
+    view = d3.policy_view(_PLACED_POLICY)
+    row("policy_view: health, basis, point, and the Protected condition's three fields",
+        view["health"] == "Healthy" and view["availabilityBasis"] == "Catalog"
+        and view["protectedStatus"] == "True" and view["protectedReason"] == "WithinObjective"
+        and view["lastAvailablePoint"] == _PLACED_POINT
+        and view["observedGeneration"] == view["generation"] == 3,
+        f"{view}")
+    # `Ready` is first in the list and carries `status: True` and a reason of
+    # its own; a view that read the first condition would report every policy
+    # as Protected=True/Evaluated.
+    row("MUTANT: the Protected condition is selected by TYPE, not by position — `Ready` "
+        "is first in the list and would report every policy as Evaluated",
+        view["protectedReason"] == "WithinObjective"
+        and view["protectedMessage"] == _HEALTHY_MESSAGE
+        and _PLACED_POLICY["status"]["conditions"][0]["reason"] == "Evaluated")
+    empty = d3.policy_view({"metadata": {"name": "p"}})
+    row("a policy with no status at all reads as absent, not as healthy",
+        empty["health"] is None and empty["protectedStatus"] is None
+        and empty["alerts"] == [] and not empty["lastAvailablePoint"])
+
+
+def test_the_catalog_row_is_joined_on_the_archive_set_id() -> None:
+    backup = {"status": {"backupId": "bk-01jw8y0e2n"}}
+    entries = [dict(_ENTRY), dict(_ENTRY, pointId="lwp1-otherpoint", backupId="bk-other")]
+    row("the ONE row for this archive set is the one the join returns",
+        d3.entry_for_backup(entries, backup)["pointId"] == "lwp1-622d7a41")
+    row("MUTANT: no row for this set fills nothing",
+        d3.entry_for_backup([entries[1]], backup) == {})
+    row("MUTANT: TWO rows for one archive set are two POINTS — ambiguity fills nothing "
+        "rather than picking one",
+        d3.entry_for_backup([dict(_ENTRY), dict(_ENTRY, pointId="lwp1-twin")], backup) == {})
+    row("MUTANT: a Backup with no archive set id matches nothing",
+        d3.entry_for_backup(entries, {"status": {}}) == {})
+
+
+def test_the_capture_time_comparison_is_in_milliseconds() -> None:
+    row("an RFC3339 Time is epoch milliseconds",
+        d3.rfc3339_ms("2026-09-21T17:33:20Z") == 1_790_012_000_000)
+    row("absent is None, and None never compares equal to a row's timestamp",
+        d3.rfc3339_ms(None) is None and d3.rfc3339_ms("") is None)
+    row("MUTANT: an unparseable timestamp is None, not a silent zero",
+        d3.rfc3339_ms("not-a-time") is None)
+
+
+def test_the_policy_fixture_asks_what_the_rows_claim_it_asks() -> None:
+    spec = d3.verdict_policy(
+        "p", subject={"destinationRef": {"name": "dest-a"}}, catalog="primary")["spec"]
+    row("no scheduleRefs — every Backup these rows create is manual, and `is_member` "
+        "would exclude all of them from a policy that named a schedule",
+        "scheduleRefs" not in spec["protects"])
+    row("maxConsecutiveFailedRuns 0 disables the failure axis, so `Healthy` and "
+        "`Staleness` mean what the rows say",
+        spec["objectives"]["maxConsecutiveFailedRuns"] == 0)
+    row("the catalogRef axis is a parameter, present and absent",
+        spec["protects"]["catalogRef"] == {"name": "primary"}
+        and "catalogRef" not in d3.verdict_policy(
+            "p", subject={"destinationRef": {"name": "dest-a"}}, catalog=None
+        )["spec"]["protects"])
+    row("and the evidence objective is the other axis, defaulting to the safe direction",
+        spec["objectives"]["requireVerifiedEvidence"] is True
+        and d3.verdict_policy("p", subject={"destinationRef": {"name": "d"}}, catalog=None,
+                              require_verified=False
+                              )["spec"]["objectives"]["requireVerifiedEvidence"] is False)
+    legacy = d3.verdict_policy(
+        "p", subject={"legacyArchive": {"url": "s3://kafka-backups/x"}}, catalog=None)["spec"]
+    row("a legacy-archive subject names no destination — CEL rule H1 is an XOR",
+        "legacyArchive" in legacy["protects"] and "destinationRef" not in legacy["protects"])
+    row("every alert kind these rows read is routed, or a transition would be Suppressed "
+        "and no POST would be owed",
+        set(spec["notifications"]["kinds"]) >= {"Staleness", "ArchiveUnavailable"}
+        and spec["notifications"]["sendResolved"] is True)
+
+
+def test_the_legacy_destination_names_the_archive_the_backups_write() -> None:
+    dest = d3.destination("dest-legacy", "kafka-backups", prefix="owner-stamp")
+    row("the prefix is the archive root the legacy Backups use, not the default",
+        dest["spec"]["storage"]["prefix"] == "owner-stamp"
+        and dest["spec"]["storage"]["bucket"] == "kafka-backups")
+    row("MUTANT: the default prefix would point the catalog at a root nothing wrote to",
+        d3.destination("dest-a", "b")["spec"]["storage"]["prefix"] == d3.DEST_PREFIX
+        and d3.DEST_PREFIX != "owner-stamp")
+
+
 def test_zz_every_row_in_this_file_passed() -> None:
     """The file's own gate, for `python3 -m pytest e2e/k8s/d3`.
 
