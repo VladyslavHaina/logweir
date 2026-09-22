@@ -623,3 +623,52 @@ fn the_documented_standing_command_line_uses_flags_this_binary_has() {
         "the documented block should exercise the standing flags; only {checked} were checked"
     );
 }
+
+/// **The blank-approver refusal is `mint`'s own, not clap's.**
+///
+/// `--approver` is `required_unless_present = "standing"`, so the command line
+/// cannot omit it — which means a mutant deleting the check inside `mint`
+/// survives every subprocess row here. This one calls the library directly,
+/// the way any future caller that builds `ApproveArgs` itself would, and a
+/// whitespace-only value is refused for the same reason an absent one is: the
+/// value is signed and copied verbatim into the scorecard's accountability
+/// record.
+#[test]
+fn a_blank_approver_or_ticket_is_refused_by_mint_itself() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec = dir.path().join("drill.yaml");
+    std::fs::write(&spec, example_spec()).unwrap();
+    let key = write_key(dir.path());
+
+    let args = |approver: &str, ticket: &str| logweir::approve::ApproveArgs {
+        spec: Some(spec.clone()),
+        key: key.clone(),
+        approver: approver.to_string(),
+        ticket: ticket.to_string(),
+        out: dir.path().join("blank.json"),
+        subject_kind: "Restore".to_string(),
+        standing: None,
+    };
+
+    for (approver, ticket, flag) in [
+        ("", "CHG-1", "--approver"),
+        ("   ", "CHG-1", "--approver"),
+        ("me", "", "--ticket"),
+        ("me", "\t", "--ticket"),
+    ] {
+        let error = logweir::approve::mint(&args(approver, ticket))
+            .expect_err("a blank accountability field is refused");
+        assert!(
+            error.contains(flag) && error.contains("must not be blank"),
+            "{approver:?}/{ticket:?}: {error}"
+        );
+    }
+    assert!(
+        !dir.path().join("blank.json").exists(),
+        "and nothing was signed"
+    );
+
+    // The control: a named approver and ticket still mint.
+    logweir::approve::mint(&args("operator@example.com", "CHG-42")).expect("the ordinary case");
+    assert!(dir.path().join("blank.json").exists());
+}
