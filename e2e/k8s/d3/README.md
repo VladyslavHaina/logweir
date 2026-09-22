@@ -51,6 +51,8 @@ python3 e2e/k8s/d3/d3_live.py trust            # CLUSTER LOCK (TrustPolicy is cl
 python3 e2e/k8s/d3/d3_live.py signed-at-probe  # CLUSTER LOCK
 python3 e2e/k8s/d3/d3_live.py notify           # PLAT-14.2: staleness, dedup, transport
 python3 e2e/k8s/d3/d3_live.py protection-cases # PLAT-14.2: recovery, unavailable archive, scope
+python3 e2e/k8s/d3/d3_live.py protection-verdicts  # PLAT-14.2: PointFactsUnread, a refused
+                                               #   signature, D3 §3.3's resolve column
 python3 e2e/k8s/d3/d3_live.py control          # the negative control — it MUST fail
 python3 e2e/k8s/d3/d3_live.py report
 python3 e2e/k8s/d3/d3_live.py cleanup          # CLUSTER LOCK (deletes the TrustPolicy)
@@ -63,6 +65,18 @@ runs 104 real Backups, which is the only honest way past `viewLimit`'s CRD floor
 nothing here edits that floor. `protection-cases` needs `catalog` (for the view it refreshes)
 and `notify` (for the namespace's first alert), and both are declared in
 `PHASE_PRECONDITIONS`.
+
+`protection-verdicts` needs only `setup`: it creates its own three policies, its own two
+catalogs, its own legacy destination and every Backup it measures, because its rows assert
+exact alert ledgers and an incident another phase opened on the same policy would make
+every count in them somebody else's. Three of its rows are written against the CORRECT —
+fixed — behaviour of `PROTECTION-SECRETKEYS-UNPROTECTED`, so on a controller image that
+predates the fix they FAIL, and that failure is the defect's live reproduction; each row's
+detail says which of the two a reader is looking at, and `verdicts/controller.json` records
+the image's `org.opencontainers.image.revision`. It writes no cluster-scoped object: the
+refused signature is produced by SIGNING with a key the installation has never heard of
+(this namespace's `logweir-signing-key`, restored afterwards) rather than by revoking a
+known one, which would need a `TrustPolicy` and the cluster lock.
 
 Who this run is, and where: `LOGWEIR_D3_OWNER` (default `d3w14`) is the
 `logweir.dev/test-owner` label `cleanup` checks, the prefix of the buckets and of the shared
