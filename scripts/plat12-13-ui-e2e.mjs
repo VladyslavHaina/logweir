@@ -1195,6 +1195,31 @@ function seedCluster(name, spec) {
   return { name: name, uid: created.metadata.uid };
 }
 
+/** FILLS PLAT-10.1'S GUIDED SCHEDULE FORM. The form these journeys were
+ *  written against had a free-text `#schedule-topics` and `#schedule-archive`;
+ *  PLAT-10's guided form replaced both (`ui/pages/schedules.js`
+ *  `renderSelectionFields` / `renderPolicyLocation`): the topics are
+ *  `#policy-create-topics`, the hand-typed archive URL sits behind the
+ *  collapsed `#policy-create-inline-archive` disclosure, and a preset cadence
+ *  cannot be submitted until its preview is read -- so the journeys choose
+ *  the advanced cron line, which the form submits as typed. The mode is chosen
+ *  FIRST because a mode change repaints the form from its draft. What the
+ *  journeys assert about the source selector is unchanged. */
+async function fillGuidedSchedule(page, name, topics) {
+  await page.selectOption("#policy-create-mode", "advanced");
+  await page.waitForSelector("#policy-create-cron");
+  await page.fill("#policy-create-cron", "0 3 * * *");
+  await page.fill("#schedule-name", name);
+  await page.fill("#policy-create-topics", topics);
+  await page.evaluate(() => {
+    const inline = document.querySelector("#policy-create-inline-archive");
+    if (inline !== null) {
+      inline.open = true;
+    }
+  });
+  await page.fill("#policy-create-archive", archiveUrl);
+}
+
 /** The selected option of one selector, read out of the live DOM. */
 async function selection(page, id) {
   return page.evaluate((selectorId) => {
@@ -1250,12 +1275,16 @@ async function selectorPicksByUidAndSurvivesARename(browser, base) {
       "the SELECTED option is never hidden: " + JSON.stringify(searched));
     await page.fill("#schedule-source-search", "");
 
-    // The schedule is created against the connection that was chosen.
-    await page.fill("#schedule-name", selectorNames.schedule);
-    await page.fill("#schedule-topics", "orders");
-    await page.fill("#schedule-archive", archiveUrl);
+    // The schedule is created against the connection that was chosen. The
+    // mode repaint keeps the draft, and the selection is read back after it.
+    await fillGuidedSchedule(page, selectorNames.schedule, "orders");
+    const beforeSubmit = await selection(page, "schedule-source");
+    check(beforeSubmit.hiddenUid === sourceUid,
+      "the guided form's repaint kept the chosen connection: " + JSON.stringify(beforeSubmit));
     await page.click("#schedule-form button[type=submit]");
-    await page.waitForSelector(".mutation-succeeded", { timeout: 20000 });
+    // PLAT-10.1'S FIRST-RUN REDIRECT: a successful create opens the created
+    // schedule's detail, named by the server's answer.
+    await page.waitForSelector("#schedule-detail", { timeout: 20000 });
     const stored = kubeJson(["-n", namespace, "get", "backupschedule", selectorNames.schedule]);
     result.created.push({ kind: "BackupSchedule", name: selectorNames.schedule, uid: stored.metadata.uid });
     check(stored.spec.sourceRef.name === sourceCluster,
@@ -1293,7 +1322,10 @@ async function selectorPicksByUidAndSurvivesARename(browser, base) {
         "API server; every other object and field in the response is the API server's own",
     });
     // THE SELECTION IS MADE AGAIN -- the successful create consumed the draft
-    // -- so the page is holding `{uid, old name}` when the rename lands.
+    // and redirected to the detail -- so the page is holding `{uid, old name}`
+    // when the rename lands.
+    await page.goto(base + "#/schedules?ns=" + namespace);
+    await page.waitForSelector("#schedule-source");
     await page.selectOption("#schedule-source", sourceUid);
     const held = await selection(page, "schedule-source");
     check(held.hiddenUid === sourceUid && held.hiddenName === sourceCluster,
@@ -1345,10 +1377,8 @@ async function aRecreatedClusterIsRefused(browser, base) {
     const first = seedCluster(selectorNames.recreated, { role: "source" });
     await page.goto(base + "#/schedules?ns=" + namespace);
     await page.waitForSelector("#schedule-source");
+    await fillGuidedSchedule(page, scheduleName2, "orders");
     await page.selectOption("#schedule-source", first.uid);
-    await page.fill("#schedule-name", scheduleName2);
-    await page.fill("#schedule-topics", "orders");
-    await page.fill("#schedule-archive", archiveUrl);
     const chosen = await selection(page, "schedule-source");
     check(chosen.hiddenUid === first.uid, "the draft holds the first object's uid");
 
@@ -1372,7 +1402,7 @@ async function aRecreatedClusterIsRefused(browser, base) {
     const none = kube(["-n", namespace, "get", "backupschedule", scheduleName2,
       "--ignore-not-found=true", "-o", "name"]).stdout.trim();
     check(none === "", "no BackupSchedule was created: " + none);
-    const draftKept = await page.inputValue("#schedule-topics");
+    const draftKept = await page.inputValue("#policy-create-topics");
     check(draftKept === "orders", "and the draft is kept: " + draftKept);
     await shot(page, "selector-recreated-refused");
     record("a recreated cluster is refused", {
