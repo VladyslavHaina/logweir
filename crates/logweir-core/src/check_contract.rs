@@ -228,6 +228,9 @@ closed_vocabulary! {
         PlanMatchesReferences => "PlanMatchesReferences",
         MappedNamesLegal => "MappedNamesLegal",
         RecoveryPointSucceeded => "RecoveryPointSucceeded",
+        // PLAT-15.2: the catalog lists the point selectable, no `Backup`
+        // verdict refuses its receipt, and the plan is bound to it.
+        CatalogPointSelectable => "CatalogPointSelectable",
         ManifestReadable => "ManifestReadable",
         PointInTimeCovered => "PointInTimeCovered",
         SegmentsPresent => "SegmentsPresent",
@@ -282,6 +285,14 @@ closed_vocabulary! {
         RecoveryPointNotSucceeded => "RecoveryPointNotSucceeded",
         RecoveryPointUidChanged => "RecoveryPointUidChanged",
         RecoveryPointLocationMismatch => "RecoveryPointLocationMismatch",
+        // PLAT-15.2 (D3 §5.5 step 5): a restore readiness check about a
+        // CATALOG point re-reads the catalog row when it runs. The row is not
+        // restorable (availability or verification), the controller reached a
+        // refusal on a `Backup` of the same receipt, or the plan's
+        // `source.point` / `source.backup` is not this row's binding.
+        CatalogPointNotSelectable => "CatalogPointNotSelectable",
+        CatalogPointRefusedByController => "CatalogPointRefusedByController",
+        CatalogPointBindingMismatch => "CatalogPointBindingMismatch",
         BackupSetNotFound => "BackupSetNotFound",
         ManifestUnreadable => "ManifestUnreadable",
         PointInTimeBeforeCoverage => "PointInTimeBeforeCoverage",
@@ -332,6 +343,11 @@ closed_vocabulary! {
         ApproverKeyWindowUnknown => "ApproverKeyWindowUnknown",
         SubjectNotCreated => "SubjectNotCreated",
         RecoveryPointLocationUnknown => "RecoveryPointLocationUnknown",
+        // PLAT-15.2: the catalog's view could not be read in full -- expired,
+        // a page gone, a page whose digest does not match, or the `Backup`
+        // verdicts could not all be listed -- so "is this point restorable"
+        // has no answer, and a blocking row with no answer is never `ready`.
+        CatalogPointViewUnavailable => "CatalogPointViewUnavailable",
         // -- framework / phase codes (D2 §4.2, §4.3, §5.1, §6.2) ---------
         CheckContractMismatch => "CheckContractMismatch",
         ResultUnreadable => "ResultUnreadable",

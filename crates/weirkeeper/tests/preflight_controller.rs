@@ -5681,3 +5681,181 @@ async fn the_binding_is_recorded_before_the_plan_and_the_job_are_created() {
         "and that first patch carries the binding, not just a phase: {first}"
     );
 }
+
+// ===========================================================================
+// PLAT-15.2 — the catalog point is read THROUGH THE RECONCILER
+// ===========================================================================
+
+const CATALOG_POINT: &str = "lwp1-0123456789abcdef0123456789abcdef";
+const CATALOG_PAGE: &str = "archive-g1-p0";
+
+fn catalog_receipt_sha() -> String {
+    format!("sha256:{}", "a1".repeat(32))
+}
+
+fn catalog_manifest_sha() -> String {
+    format!("sha256:{}", "b2".repeat(32))
+}
+
+fn catalog_receipt_key() -> String {
+    "logweir/backups/bk-1/01JB7Z00000000000000000000.receipt.json".to_string()
+}
+
+/// A draft plan in the runner's grammar, BOUND to the catalog point when
+/// `bound` — the one fact that separates the ready case from the mismatch.
+fn catalog_plan_yaml(bound: bool) -> String {
+    let mut plan = plan_yaml("restore-", "s3-bucket");
+    if bound {
+        plan = plan.replace(
+            "  topics:\n    - orders\n",
+            &format!(
+                "  topics:\n    - orders\n  point:\n    point_id: {CATALOG_POINT}\n    receipt_key: \
+                 {}\n    receipt_sha256: '{}'\n    manifest_sha256: '{}'\n",
+                catalog_receipt_key(),
+                catalog_receipt_sha(),
+                catalog_manifest_sha()
+            ),
+        );
+    }
+    plan
+}
+
+/// The catalog, its one immutable page, and the page's recorded digest.
+fn catalog_objects(selectable: bool) -> (Value, Value) {
+    let entry = json!({
+        "pointId": CATALOG_POINT, "backupId": "bk-1", "runId": "01JB7Z00000000000000000000",
+        "recoveryPointAtMs": 1_757_000_000_000_i64,
+        "coveredFromMs": 1_756_990_000_000_i64, "coveredToMs": 1_757_000_000_000_i64,
+        "receiptKey": catalog_receipt_key(), "receiptSha256": catalog_receipt_sha(),
+        "manifestSha256": catalog_manifest_sha(),
+        "availability": "Available",
+        "verification": if selectable { "Verified" } else { "UntrustedSigner" },
+        "selectable": selectable
+    })
+    .to_string();
+    let digest = weirkeeper::catalog_view::page_digest(&[entry.as_str()]);
+    let page = json!({
+        "apiVersion": "v1", "kind": "ConfigMap",
+        "metadata": {"name": CATALOG_PAGE, "namespace": NS},
+        "immutable": true,
+        "data": {(weirkeeper::catalog_view::PAGE_DATA_KEY): format!("{entry}\n")}
+    });
+    let catalog = json!({
+        "apiVersion": "logweir.dev/v1alpha1", "kind": "RecoveryCatalog",
+        "metadata": {"name": "archive", "namespace": NS, "uid": "catalog-uid"},
+        "spec": {
+            "destinationRef": {"name": "primary"},
+            "sync": {"intervalSeconds": 0, "mode": "Full", "maxObjectsPerRun": 100000,
+                     "deepCheck": "ManifestDigest", "viewLimit": 2000}
+        },
+        "status": {
+            "viewExpiresAt": (now() + Duration::hours(1)).to_rfc3339(),
+            "pages": [{"configMapName": CATALOG_PAGE, "index": 0, "count": 1,
+                       "sha256": format!("sha256:{digest}")}]
+        }
+    });
+    (catalog, page)
+}
+
+async fn restore_over_catalog_point(bound: bool, selectable: bool, backups: Vec<Value>) -> Value {
+    let job = job_name(CheckPlanKind::RestorePreflight);
+    let mut evidence = backup_destination("evidence");
+    evidence["spec"]["storage"]["bucket"] = json!("evidence-bucket");
+    let (catalog, page) = catalog_objects(selectable);
+    let routes = vec![
+        route(
+            "GET",
+            "/trustrosters/default",
+            roster(RUNNER_KEY_ID, vec!["target-id"]).to_string(),
+        ),
+        route(
+            "GET",
+            "/kafkaclusters/target",
+            kafka_cluster("target", Some("target-id")).to_string(),
+        ),
+        route(
+            "GET",
+            "/backupdestinations/primary",
+            backup_destination("primary").to_string(),
+        ),
+        route("GET", "/backupdestinations/evidence", evidence.to_string()),
+        route("GET", "/recoverycatalogs/archive", catalog.to_string()),
+        route("GET", "/configmaps/archive-g1-p0", page.to_string()),
+        route("GET", "/backups", list_of(backups)),
+        route("GET", leak(job.clone()), finished_job(&job).to_string()),
+        route(
+            "GET",
+            "/pods",
+            list_of(vec![owned_pod(&job, terminated(0))]),
+        ),
+        route("GET", "/events", list_of(vec![])),
+        route(
+            "GET",
+            "-plan",
+            plan_config_map(&job, PLAN_DIGEST).to_string(),
+        ),
+        route("GET", "/log", relay_log(PLAN_DIGEST, vec![], None)),
+        route("PATCH", "/pf-1/status", echo("Preflight", "pf-1")),
+        route("PATCH", leak(job.clone()), echo("Job", &job)),
+    ];
+    let bytes = catalog_plan_yaml(bound);
+    let mut request = restore_request(json!({
+        "catalogPointRef": {"catalogRef": {"name": "archive"}, "pointId": CATALOG_POINT}
+    }));
+    request["restore"]["planBytes"] = json!(bytes);
+    request["restore"]["planHash"] = json!(logweir_core::ids::sha256_prefixed(bytes.as_bytes()));
+    let (status, _) = reconcile_with(&preflight(request), routes).await;
+    status
+}
+
+fn refusing_backup(verdict: &str) -> Value {
+    let mut object = recovery_point_object(None);
+    object["status"]["backupId"] = json!("bk-1");
+    object["status"]["evidence"] = json!({
+        "receiptSha256": catalog_receipt_sha(),
+        "verification": {"result": verdict}
+    });
+    object
+}
+
+/// **THE ROW IS WIRED TO THE OBJECTS.** `catalog_point_facts` is exercised on
+/// its own in `preflight_catalog_point.rs`; this reconciles a request naming
+/// `catalogPointRef` through the routes and reads the PUBLISHED verdict, so the
+/// reads themselves — the catalog, its page by the name the status gives, the
+/// namespace's `Backup`s — are what is under test.
+///
+/// KILLS: the reconciler never calling `read_catalog_point` (no row at all);
+/// the Backup list not consulted (the refusal case turns `ready`); the plan not
+/// passed in (the bound case turns `CatalogPointBindingMismatch`).
+#[tokio::test]
+async fn a_catalog_point_request_is_answered_from_the_catalog_row() {
+    let ready = restore_over_catalog_point(true, true, vec![]).await;
+    let row = check_entry(&ready, "recoveryPoint.state");
+    assert_eq!(row["code"], "CatalogPointSelectable", "{row}");
+    assert_eq!(row["state"], "ready");
+    assert_eq!(row["scope"]["kind"], "RecoveryCatalog");
+
+    let unbound = restore_over_catalog_point(false, true, vec![]).await;
+    let row = check_entry(&unbound, "recoveryPoint.state");
+    assert_eq!(row["code"], "CatalogPointBindingMismatch", "{row}");
+    assert_eq!(unbound["result"]["state"], "notReady");
+
+    let refused = restore_over_catalog_point(true, true, vec![refusing_backup("Invalid")]).await;
+    let row = check_entry(&refused, "recoveryPoint.state");
+    assert_eq!(row["code"], "CatalogPointRefusedByController", "{row}");
+    assert_eq!(refused["result"]["state"], "notReady");
+
+    // CONTROL: the controller could not look, so the catalog decides.
+    let deferred =
+        restore_over_catalog_point(true, true, vec![refusing_backup("NotAttempted")]).await;
+    assert_eq!(
+        check_entry(&deferred, "recoveryPoint.state")["code"],
+        "CatalogPointSelectable"
+    );
+
+    let unselectable = restore_over_catalog_point(true, false, vec![]).await;
+    assert_eq!(
+        check_entry(&unselectable, "recoveryPoint.state")["code"],
+        "CatalogPointNotSelectable"
+    );
+}

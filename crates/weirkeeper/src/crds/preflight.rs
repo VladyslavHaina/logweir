@@ -94,6 +94,18 @@ pub const P9_PLAN_HASH_RULE: &str =
 pub const P9_PLAN_HASH_MESSAGE: &str =
     "planHash is sha256:<64 lowercase hex>, the form logweir_core::ids::sha256_prefixed produces";
 
+/// P10 — a restore check is about ONE recovery point: a `Backup` or a catalog
+/// point (PLAT-15.2), never both. Two answers to "which point" in one check
+/// would leave `recoveryPoint.state` choosing between them.
+pub const P10_ONE_RECOVERY_POINT_RULE: &str =
+    "!(has(self.recoveryPointRef) && has(self.catalogPointRef))";
+/// P10's message.
+pub const P10_ONE_RECOVERY_POINT_MESSAGE: &str =
+    "set at most one of recoveryPointRef (a Backup) or catalogPointRef (a catalog point)";
+
+/// A catalog point's id: `lwp1-` plus 32 lowercase hex (D3 §5.1).
+pub const POINT_ID_PATTERN: &str = "^lwp1-[0-9a-f]{32}$";
+
 /// The rules on `.spec` itself.
 pub const SPEC_RULES: [super::SpecRule; 1] = [super::SpecRule::new(
     P2_CANCEL_MONOTONIC_RULE,
@@ -109,7 +121,7 @@ pub const REQUEST_RULE: (&[&str], &str, &str) = (
 
 /// The validation rules attached below `.spec`, each at the node whose fields
 /// it reads. None of them names `oldSelf`.
-pub const NESTED_RULES: [(&[&str], &str, &str); 7] = [
+pub const NESTED_RULES: [(&[&str], &str, &str); 8] = [
     (
         &["request"],
         P3_OPERATION_BLOCK_RULE,
@@ -144,6 +156,11 @@ pub const NESTED_RULES: [(&[&str], &str, &str); 7] = [
         &["request", "restore"],
         P9_PLAN_HASH_RULE,
         P9_PLAN_HASH_MESSAGE,
+    ),
+    (
+        &["request", "restore"],
+        P10_ONE_RECOVERY_POINT_RULE,
+        P10_ONE_RECOVERY_POINT_MESSAGE,
     ),
 ];
 
@@ -243,6 +260,27 @@ pub struct RestorePreflightRequest {
     /// The recovery point being restored, by the identity PLAT-11.1 fixes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery_point_ref: Option<UidRef>,
+    /// Or a recovery point read from a `RecoveryCatalog`'s view (PLAT-15.2,
+    /// D3 §5.5 step 5): the controller re-reads that catalog row when the
+    /// check runs and reports `recoveryPoint.state` from it — the row's
+    /// availability and verification, any reached `Backup` verdict on the same
+    /// receipt, and whether the plan's `source.point` is this row's binding.
+    /// At most one of this and `recoveryPointRef` (P10). ABSENT on every
+    /// object written before PLAT-15.2, which therefore behaves exactly as it
+    /// did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog_point_ref: Option<CatalogPointRef>,
+}
+
+/// A recovery point in a `RecoveryCatalog`'s view, by its content-derived id.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogPointRef {
+    /// The catalog, in this namespace.
+    pub catalog_ref: LocalRef,
+    /// `lwp1-` plus 32 lowercase hex characters (D3 §5.1).
+    #[schemars(regex(path = "POINT_ID_PATTERN"))]
+    pub point_id: String,
 }
 
 /// What a destination-access check needs to know.

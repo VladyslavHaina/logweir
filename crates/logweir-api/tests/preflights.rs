@@ -1645,3 +1645,123 @@ async fn a_referent_recorded_without_a_generation_is_compared_by_uid_alone() {
         app.fake.assert_strict();
     }
 }
+
+// ======================================================================
+// PLAT-15.2 — a restore readiness check about a CATALOG point
+// ======================================================================
+
+const CATALOG_POINT_ID: &str = "lwp1-0123456789abcdef0123456789abcdef";
+
+fn catalog_point_request(plan: &str) -> Value {
+    let mut request = restore_request(plan);
+    let restore = request["restore"]
+        .as_object_mut()
+        .expect("the restore block");
+    restore.remove("recoveryPoint");
+    restore.insert(
+        "catalogPoint".to_string(),
+        json!({"catalog": "archive", "pointId": CATALOG_POINT_ID}),
+    );
+    request
+}
+
+/// The catalog point reaches the stored object as `catalogPointRef`, by the
+/// catalog's NAME and the point's content-derived id, and nothing else is
+/// invented beside it: no `recoveryPointRef` (CRD rule P10), no Backup read.
+///
+/// MUTANT: drop the `catalog_point_ref` mapping in `build` — the stored
+/// object carries no reference and the controller never re-reads the row.
+#[tokio::test]
+async fn a_catalog_point_is_stored_as_the_reference_the_controller_reads() {
+    let app = TestApp::new();
+    let plan = plan();
+    let response = app
+        .post(
+            &format!("/api/v1/namespaces/{NS_A}/preflights"),
+            Some("preflight-catalog-00001"),
+            &catalog_point_request(&plan).to_string(),
+        )
+        .await;
+    assert_eq!(response.status.as_u16(), 202, "{}", response.text());
+    let id = response.json()["item"]["id"].as_str().unwrap().to_string();
+    let stored = app.fake.object("preflights", NS_A, &id).unwrap();
+    let restore = &stored["spec"]["request"]["restore"];
+    assert_eq!(
+        restore["catalogPointRef"],
+        json!({"catalogRef": {"name": "archive"}, "pointId": CATALOG_POINT_ID})
+    );
+    assert!(
+        restore.get("recoveryPointRef").is_none_or(Value::is_null),
+        "one point per check: {restore}"
+    );
+    app.fake.assert_strict();
+}
+
+/// The two refusals the route makes itself, each with its control.
+///
+/// MUTANTS: accept both references (the first request stores a check whose
+/// `recoveryPoint.state` has two answers — the CRD's P10 refuses it only at
+/// the API server, with a message nobody wrote for this form); accept any
+/// point id (the second stores a reference no view entry can ever match).
+#[tokio::test]
+async fn a_catalog_point_is_refused_beside_a_backup_point_or_with_a_malformed_id() {
+    let app = TestApp::new();
+    let path = format!("/api/v1/namespaces/{NS_A}/preflights");
+    let plan = plan();
+
+    let mut both = catalog_point_request(&plan);
+    both["restore"]["recoveryPoint"] =
+        json!({"backupName": "logweir-backup-nightly-20260915-030000"});
+    let response = app
+        .post(&path, Some("preflight-catalog-00002"), &both.to_string())
+        .await;
+    response.assert_problem(422, "validation_failed");
+    assert!(
+        field_names(&response.json()).contains(&"restore.catalogPoint".to_string()),
+        "{}",
+        response.text()
+    );
+
+    for bad in [
+        "lwp1-0123",
+        "lwp1-0123456789ABCDEF0123456789ABCDEF",
+        "lwp2-0123456789abcdef0123456789abcdef",
+        "",
+    ] {
+        let mut request = catalog_point_request(&plan);
+        request["restore"]["catalogPoint"]["pointId"] = json!(bad);
+        let response = app
+            .post(&path, Some("preflight-catalog-00003"), &request.to_string())
+            .await;
+        response.assert_problem(422, "validation_failed");
+        assert!(
+            field_names(&response.json()).contains(&"restore.catalogPoint.pointId".to_string()),
+            "{bad:?}: {}",
+            response.text()
+        );
+    }
+
+    let mut request = catalog_point_request(&plan);
+    request["restore"]["catalogPoint"]["catalog"] = json!("Not_A_Name");
+    let response = app
+        .post(&path, Some("preflight-catalog-00004"), &request.to_string())
+        .await;
+    response.assert_problem(422, "validation_failed");
+    assert!(
+        field_names(&response.json()).contains(&"restore.catalogPoint.catalog".to_string()),
+        "{}",
+        response.text()
+    );
+
+    assert_eq!(app.fake.count("preflights", NS_A), 0);
+
+    // CONTROL: the same request, well formed, is accepted.
+    let response = app
+        .post(
+            &path,
+            Some("preflight-catalog-00005"),
+            &catalog_point_request(&plan).to_string(),
+        )
+        .await;
+    assert_eq!(response.status.as_u16(), 202, "{}", response.text());
+}

@@ -2520,6 +2520,19 @@ pub struct RecoveryPointRequest {
     pub backup_uid: Option<String>,
 }
 
+/// A recovery point in a `RecoveryCatalog`'s view (PLAT-15.2). The
+/// controller re-reads that row when the check runs: availability,
+/// verification, any reached `Backup` verdict on the same receipt, and whether
+/// the plan's `source.point` is the row's binding.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CatalogPointRequest {
+    /// The catalog, in this namespace.
+    pub catalog: String,
+    /// The content-derived point id: `lwp1-` plus 32 lowercase hex.
+    pub point_id: String,
+}
+
 /// The restore half of a preflight request.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -2551,6 +2564,11 @@ pub struct RestorePreflightRequest {
     /// The recovery point.
     #[serde(default)]
     pub recovery_point: Option<RecoveryPointRequest>,
+    /// Or a catalog point — a point with no `Backup` object behind it, or one
+    /// the controller could not verify itself. At most one of this and
+    /// `recoveryPoint`.
+    #[serde(default)]
+    pub catalog_point: Option<CatalogPointRequest>,
 }
 
 /// The destination-access half of a preflight request.

@@ -4910,19 +4910,15 @@ export function restoreReadinessRequest(state, prepared) {
     },
   };
   if (isCatalogPoint(point)) {
-    // A CATALOG POINT IS NAMED BY ITS CATALOG AND ITS ID, and the Backup it was
-    // offered from -- when there was one -- by that Backup's own identity. The
-    // controller re-reads the catalog row when the check runs, so a point that
-    // became Missing or refused since this page read it is not ready.
+    // A CATALOG POINT IS NAMED BY ITS CATALOG AND ITS ID, and by nothing else:
+    // one check answers `recoveryPoint.state` about ONE point (CRD rule P10),
+    // and the catalog row is the one the plan is bound to. The controller
+    // re-reads that row when the check runs -- joined with every Backup
+    // verdict on the same receipt, including the run this offer came from --
+    // so a point that became Missing or refused since this page read it is
+    // not ready.
     const c = point.catalogPoint;
     request.restore.catalogPoint = { catalog: c.catalog, pointId: c.pointId };
-    if (c.backup !== null && c.backup !== undefined && typeof c.backup.name === "string" &&
-      c.backup.name.length > 0) {
-      request.restore.recoveryPoint = { backupName: c.backup.name };
-      if (typeof c.backup.uid === "string" && c.backup.uid.length > 0) {
-        request.restore.recoveryPoint.backupUid = c.backup.uid;
-      }
-    }
   } else if (typeof meta.name === "string" && meta.name.length > 0) {
     request.restore.recoveryPoint = { backupName: meta.name };
     if (typeof meta.uid === "string" && meta.uid.length > 0) {

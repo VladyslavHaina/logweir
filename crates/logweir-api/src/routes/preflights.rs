@@ -42,8 +42,8 @@ use weirkeeper::crds::backup_schedule::BackupSchedule;
 use weirkeeper::crds::kafka_cluster::KafkaCluster;
 use weirkeeper::crds::preflight::Referent;
 use weirkeeper::crds::preflight::{
-    BackupPreflightRequest as CrdBackupRequest, DestinationAccessRequest, Preflight as PreflightCr,
-    PreflightOperation, PreflightRequest, PreflightSpec,
+    BackupPreflightRequest as CrdBackupRequest, CatalogPointRef, DestinationAccessRequest,
+    Preflight as PreflightCr, PreflightOperation, PreflightRequest, PreflightSpec,
     RestorePreflightRequest as CrdRestoreRequest,
     SourceConnectionPreflightRequest as CrdSourceConnectionRequest, UidRef,
 };
@@ -896,6 +896,27 @@ pub fn validate_create(request: &CreatePreflightRequest) -> Result<(), ApiError>
                 &mut errors,
             );
         }
+        // PLAT-15.2: a catalog point, named by its catalog and its
+        // content-derived id — and never beside a `Backup` point, because one
+        // check answers `recoveryPoint.state` about ONE point (CRD rule P10).
+        if let Some(point) = &restore.catalog_point {
+            if restore.recovery_point.is_some() {
+                errors.push(FieldError::new(
+                    "restore.catalogPoint",
+                    "exactly_one",
+                    "name the recovery point once: a Backup (recoveryPoint) or a catalog point \
+                     (catalogPoint), not both",
+                ));
+            }
+            check_reference("restore.catalogPoint.catalog", &point.catalog, &mut errors);
+            if !is_point_id(&point.point_id) {
+                errors.push(FieldError::new(
+                    "restore.catalogPoint.pointId",
+                    "invalid_point_id",
+                    "a point id is `lwp1-` followed by 32 lowercase hexadecimal characters",
+                ));
+            }
+        }
     }
     if let Some(access) = &request.destination_access {
         check_reference(
@@ -947,6 +968,17 @@ pub fn validate_create(request: &CreatePreflightRequest) -> Result<(), ApiError>
     } else {
         Err(ApiError::validation(errors))
     }
+}
+
+/// `lwp1-` plus 32 lowercase hex — D3 §5.1's point identity, and the CRD's
+/// `POINT_ID_PATTERN`.
+fn is_point_id(value: &str) -> bool {
+    value.strip_prefix("lwp1-").is_some_and(|hex| {
+        hex.len() == 32
+            && hex
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    })
 }
 
 /// Refuse the legacy marker when the named recovery point records a saved
@@ -1085,6 +1117,10 @@ pub fn build(
                     recovery_point_ref: r.recovery_point.as_ref().map(|p| UidRef {
                         name: p.backup_name.clone(),
                         uid: p.backup_uid.clone(),
+                    }),
+                    catalog_point_ref: r.catalog_point.as_ref().map(|p| CatalogPointRef {
+                        catalog_ref: local(&p.catalog),
+                        point_id: p.point_id.clone(),
                     }),
                 }),
                 destination_access: request.destination_access.as_ref().map(|d| {

@@ -1405,6 +1405,10 @@ const CREATE_TOPIC_DISCOVERY_REQUEST = shapeOf(
 
 const RECOVERY_POINT_REQUEST = shapeOf("RecoveryPointRequest", { backupName: str }, { backupUid: str });
 
+/** PLAT-15.2: a catalog point a restore readiness check is about -- the
+ *  catalog that lists it and its content-derived id. */
+const CATALOG_POINT_REQUEST = shapeOf("CatalogPointRequest", { catalog: str, pointId: str });
+
 const BACKUP_PREFLIGHT_REQUEST = shapeOf(
   "BackupPreflightRequest",
   { sourceConnection: str, topics: listOf(str) },
@@ -1419,6 +1423,7 @@ const RESTORE_PREFLIGHT_REQUEST = shapeOf(
     sourceDestination: str, evidenceDestination: str,
     legacySourceArchive: objectOf(ARCHIVE_REQUEST),
     recoveryPoint: objectOf(RECOVERY_POINT_REQUEST),
+    catalogPoint: objectOf(CATALOG_POINT_REQUEST),
   },
 );
 
@@ -1615,6 +1620,7 @@ export const CONSOLE_SHAPES = Object.freeze({
   DestinationFromLegacyRequest: DESTINATION_FROM_LEGACY_REQUEST,
   CreateTopicDiscoveryRequest: CREATE_TOPIC_DISCOVERY_REQUEST,
   RecoveryPointRequest: RECOVERY_POINT_REQUEST,
+  CatalogPointRequest: CATALOG_POINT_REQUEST,
   BackupPreflightRequest: BACKUP_PREFLIGHT_REQUEST,
   RestorePreflightRequest: RESTORE_PREFLIGHT_REQUEST,
   DestinationAccessPreflightRequest: DESTINATION_ACCESS_PREFLIGHT_REQUEST,

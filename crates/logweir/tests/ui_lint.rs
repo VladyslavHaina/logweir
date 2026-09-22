@@ -1612,7 +1612,11 @@ fn the_catalog_bound_plan_carries_the_point_binding_the_runner_reads() {
             .to_string()
     };
     assert_eq!(point.point_id, want("pointId"), "source.point.point_id");
-    assert_eq!(point.receipt_key, want("receiptKey"), "source.point.receipt_key");
+    assert_eq!(
+        point.receipt_key,
+        want("receiptKey"),
+        "source.point.receipt_key"
+    );
     assert_eq!(
         point.receipt_sha256,
         want("receiptSha256"),

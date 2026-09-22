@@ -6011,6 +6011,25 @@
           }
         }
       },
+      "CatalogPointRequest": {
+        "description": "A recovery point in a `RecoveryCatalog`'s view (PLAT-15.2). The controller re-reads that row when the check runs: availability, verification, any reached `Backup` verdict on the same receipt, and whether the plan's `source.point` is the row's binding.",
+        "type": "object",
+        "required": [
+          "catalog",
+          "pointId"
+        ],
+        "properties": {
+          "catalog": {
+            "description": "The catalog, in this namespace.",
+            "type": "string"
+          },
+          "pointId": {
+            "description": "The content-derived point id: `lwp1-` plus 32 lowercase hex.",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
       "CatalogResponse": {
         "description": "One catalog.",
         "type": "object",
@@ -11155,6 +11174,12 @@
         "description": "The restore half of a preflight request.",
         "type": "object",
         "properties": {
+          "catalogPoint": {
+            "description": "Or a catalog point — a point with no `Backup` object behind it, or one the controller could not verify itself. At most one of this and `recoveryPoint`.",
+            "default": null,
+            "$ref": "#/components/schemas/CatalogPointRequest",
+            "nullable": true
+          },
           "evidenceDestination": {
             "description": "The destination evidence is read from. Set together with `sourceDestination`.",
             "default": null,

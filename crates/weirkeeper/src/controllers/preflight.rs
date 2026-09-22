@@ -1751,6 +1751,413 @@ pub fn recovery_point_row(facts: &RecoveryPointFacts, now: DateTime<Utc>) -> Opt
     }
 }
 
+// ---------------------------------------------------------------------------
+// A catalog point (PLAT-15.2, D3 §5.5 step 5)
+// ---------------------------------------------------------------------------
+
+/// How many `Backup`s one list page reads for the catalog point's verdict join.
+pub const CATALOG_POINT_BACKUP_PAGE: u32 = 500;
+/// How many such pages one check reads. A namespace holding more `Backup`s than
+/// `4 × 500` cannot be shown to hold no refusal of this receipt, and the row
+/// says so (`unknown`) rather than guessing.
+pub const CATALOG_POINT_BACKUP_PAGES: usize = 4;
+/// How many view pages one check reads — the view's own ceiling (D3 §5.3).
+pub const CATALOG_POINT_VIEW_PAGES: usize = 8;
+
+/// The catalog point a restore check is about, reduced.
+///
+/// # Why the controller re-reads the row
+///
+/// The console read the row when the operator chose the point; this is the
+/// check D3 §5.5 step 5 asks for — "re-evaluates trust, so a green preview
+/// cannot survive a point that became `Missing`". The row is the controller's
+/// own materialised judgement (availability × verification, trust already
+/// applied), read from the immutable page `ConfigMap`s the catalog's status
+/// names and checked against their recorded digests, and joined with the
+/// namespace's `Backup` verdicts on the receipt digest: **the catalog decides
+/// only where the controller could not look**, so a `Backup` of the same
+/// receipt whose own verdict is a reached refusal refuses the point whatever
+/// the row says.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CatalogPointFacts {
+    /// No `catalogPointRef` was given. The row is not reported by this path.
+    NotRequested,
+    /// The catalog does not exist in this namespace.
+    CatalogNotFound {
+        /// The catalog asked for.
+        catalog: String,
+    },
+    /// The view could not be read in full, so no answer is possible.
+    ViewUnavailable {
+        /// The catalog.
+        catalog: String,
+        /// Why, in words.
+        detail: String,
+    },
+    /// The view was read in full and does not list the point.
+    NotInView {
+        /// The catalog.
+        catalog: String,
+        /// The point asked for.
+        point_id: String,
+    },
+    /// The view lists it.
+    Found(Box<CatalogPointFound>),
+}
+
+/// What the view says about a point it lists, and what the check compares.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CatalogPointFound {
+    /// The catalog.
+    pub catalog: String,
+    /// Its UID.
+    pub catalog_uid: String,
+    /// The row, as the controller materialised it.
+    pub entry: crate::catalog_view::ViewEntry,
+    /// A reached verdict on a `Backup` of this receipt, when one exists:
+    /// `(backup name, verdict)`.
+    pub refused_by: Option<(String, String)>,
+    /// Whether every `Backup` in the namespace was read. `false` makes the
+    /// row `unknown`: an unread `Backup` could hold the refusal.
+    pub backups_complete: bool,
+    /// The plan's `source.point`, when the plan parsed and carries one.
+    pub plan_point: Option<logweir_core::execution_contract::PointBinding>,
+    /// The plan's `source.backup`, when the plan parsed.
+    pub plan_backup: Option<String>,
+    /// Whether the check has a parsed plan at all.
+    pub plan_parsed: bool,
+}
+
+/// Whether a `Backup`'s own evidence verdict is one the controller REACHED and
+/// that refuses: anything but absent, `NotAttempted` or `Valid`. The rule of
+/// `rehearsal_schedule::candidate_from_backup` and `protection.rs`
+/// (`dffe118`, `95c2279`): an unknown spelling is a refusal, never a deferral.
+#[must_use]
+pub fn backup_verdict_refuses(backup: &Backup) -> Option<String> {
+    let verdict = backup
+        .status
+        .as_ref()
+        .and_then(|s| s.evidence.as_ref())
+        .and_then(|e| e.verification.as_ref())
+        .and_then(|v| v.result.as_deref());
+    match verdict {
+        None | Some("NotAttempted" | "Valid") => None,
+        Some(other) => Some(other.to_string()),
+    }
+}
+
+/// The first `Backup` of this receipt whose own verdict refuses it:
+/// `(name, verdict)`. Joined on the FULL receipt digest where the `Backup`
+/// recorded one, and on the backup set id only for a `Backup` that recorded
+/// none — a digest-less run of the set cannot be told apart from this point,
+/// so its refusal is honoured rather than guessed away.
+#[must_use]
+pub fn catalog_point_refusal(
+    entry: &crate::catalog_view::ViewEntry,
+    backups: &[Backup],
+) -> Option<(String, String)> {
+    for backup in backups {
+        let Some(verdict) = backup_verdict_refuses(backup) else {
+            continue;
+        };
+        let status = backup.status.as_ref();
+        let digest = status
+            .and_then(|s| s.evidence.as_ref())
+            .and_then(|e| e.receipt_sha256.as_deref())
+            .filter(|d| !d.is_empty());
+        let same = match digest {
+            Some(d) => d == entry.receipt_sha256,
+            None => status.and_then(|s| s.backup_id.as_deref()) == Some(entry.backup_id.as_str()),
+        };
+        if same {
+            return Some((backup.name_any(), verdict));
+        }
+    }
+    None
+}
+
+/// Everything [`catalog_point_facts`] reads, gathered by the reconciler.
+pub struct CatalogPointRead<'a> {
+    /// The catalog asked for.
+    pub catalog_name: &'a str,
+    /// The point asked for.
+    pub point_id: &'a str,
+    /// The catalog, when it exists.
+    pub catalog: Option<&'a crate::crds::recovery_catalog::RecoveryCatalog>,
+    /// Each page the status names, in order, with the object read for it
+    /// (`None` when it is gone).
+    pub pages: &'a [(String, Option<k8s_openapi::api::core::v1::ConfigMap>)],
+    /// The namespace's `Backup`s.
+    pub backups: &'a [Backup],
+    /// Whether that list is the whole namespace.
+    pub backups_complete: bool,
+    /// The plan, when the check has one.
+    pub plan: Option<&'a PlanFacts>,
+    /// The check's clock.
+    pub now: DateTime<Utc>,
+}
+
+/// Reduce what the reconciler read to [`CatalogPointFacts`]. Pure.
+///
+/// A page is trusted only when it is `immutable: true` and its entry lines hash
+/// to the digest the catalog's status recorded for it — the API's `/points`
+/// rule, and the only integrity a Job-owned page has (D3 §5.3). A page that is
+/// gone, mutable, or disagrees with its digest makes the view unreadable: an
+/// entry read from it would be a row nobody recorded.
+#[must_use]
+pub fn catalog_point_facts(read: &CatalogPointRead<'_>) -> CatalogPointFacts {
+    let catalog = read.catalog_name.to_string();
+    let Some(object) = read.catalog else {
+        return CatalogPointFacts::CatalogNotFound { catalog };
+    };
+    let unavailable = |detail: String| CatalogPointFacts::ViewUnavailable {
+        catalog: catalog.clone(),
+        detail,
+    };
+    let status = object.status.as_ref();
+    match status.and_then(|s| s.view_expires_at) {
+        None => return unavailable("the catalog has published no view yet".to_string()),
+        Some(at) if at <= read.now => {
+            return unavailable(format!(
+                "the catalog's view expired at {}; sync the catalog again",
+                at.to_rfc3339()
+            ))
+        }
+        Some(_) => {}
+    }
+    let recorded: Vec<&crate::crds::recovery_catalog::CatalogPage> = status
+        .and_then(|s| s.pages.as_ref())
+        .map(|p| p.iter().collect())
+        .unwrap_or_default();
+    if recorded.len() > CATALOG_POINT_VIEW_PAGES {
+        return unavailable(format!(
+            "the view names {} pages and a check reads at most {CATALOG_POINT_VIEW_PAGES}",
+            recorded.len()
+        ));
+    }
+    let mut found: Option<crate::catalog_view::ViewEntry> = None;
+    for page in &recorded {
+        let map = read
+            .pages
+            .iter()
+            .find(|(name, _)| name == &page.config_map_name)
+            .and_then(|(_, map)| map.as_ref());
+        let Some(map) = map else {
+            return unavailable(format!(
+                "view page {} is gone; the view aged out or is being replaced",
+                page.config_map_name
+            ));
+        };
+        if map.immutable != Some(true) {
+            return unavailable(format!(
+                "view page {} is not immutable, so its rows cannot be trusted",
+                page.config_map_name
+            ));
+        }
+        let body = map
+            .data
+            .as_ref()
+            .and_then(|d| d.get(crate::catalog_view::PAGE_DATA_KEY))
+            .map(String::as_str)
+            .unwrap_or_default();
+        let lines: Vec<&str> = body.lines().filter(|l| !l.trim().is_empty()).collect();
+        let computed = crate::catalog_view::page_digest(&lines);
+        let bare = |d: &str| d.strip_prefix("sha256:").unwrap_or(d).to_string();
+        match page.sha256.as_deref() {
+            Some(want) if bare(want) == bare(&computed) => {}
+            _ => {
+                return unavailable(format!(
+                    "view page {} does not match the digest the catalog recorded for it",
+                    page.config_map_name
+                ))
+            }
+        }
+        if found.is_none() {
+            found = lines
+                .iter()
+                .filter_map(|l| serde_json::from_str::<crate::catalog_view::ViewEntry>(l).ok())
+                .find(|e| e.point_id == read.point_id);
+        }
+    }
+    let Some(entry) = found else {
+        return CatalogPointFacts::NotInView {
+            catalog,
+            point_id: read.point_id.to_string(),
+        };
+    };
+    let parsed = read.plan.and_then(|p| p.parsed.as_ref().ok());
+    CatalogPointFacts::Found(Box::new(CatalogPointFound {
+        catalog,
+        catalog_uid: object.uid().unwrap_or_default(),
+        refused_by: catalog_point_refusal(&entry, read.backups),
+        backups_complete: read.backups_complete,
+        plan_point: parsed.and_then(|p| p.source.point.clone()),
+        plan_backup: parsed.map(|p| p.source.backup.clone()),
+        plan_parsed: parsed.is_some(),
+        entry,
+    }))
+}
+
+/// `recoveryPoint.state` for a catalog point.
+///
+/// # The order is the order an operator repairs in
+///
+/// 1. the catalog or its view is not there → `notReady`/`unknown`;
+/// 2. the view does not list the point → `notReady RecoveryPointNotFound`;
+/// 3. a `Backup` of this receipt carries a reached refusal →
+///    `notReady CatalogPointRefusedByController`, whatever the row says;
+/// 4. the row is not selectable → `notReady CatalogPointNotSelectable`, with
+///    both axes in the message;
+/// 5. not every `Backup` could be read → `unknown CatalogPointViewUnavailable`
+///    — asked AFTER the refusal it could not rule out, because a refusal that
+///    WAS found is an answer;
+/// 6. the plan is not bound to this row (no `source.point`, a different
+///    binding, or a `source.backup` that is not the row's set) →
+///    `notReady CatalogPointBindingMismatch`;
+/// 7. otherwise `ready CatalogPointSelectable`.
+#[must_use]
+pub fn catalog_point_row(facts: &CatalogPointFacts, now: DateTime<Utc>) -> Option<CheckOutcome> {
+    let op = PreflightOperation::Restore;
+    let mk = |state: CheckState, code: CheckCode| {
+        outcome(op, CheckId::RecoveryPointState, state, code, now)
+    };
+    let scope = |name: &str, uid: Option<String>| CheckScope {
+        kind: "RecoveryCatalog".to_string(),
+        name: name.to_string(),
+        uid,
+    };
+    match facts {
+        CatalogPointFacts::NotRequested => None,
+        CatalogPointFacts::CatalogNotFound { catalog } => Some(
+            mk(CheckState::NotReady, CheckCode::RecoveryPointNotFound)
+                .with_scope(scope(catalog, None))
+                .with_message(&format!(
+                    "no RecoveryCatalog named `{catalog}` exists in this namespace"
+                ))
+                .with_remedy("Connect the archive (create the catalog), or choose a point from a catalog that exists."),
+        ),
+        CatalogPointFacts::ViewUnavailable { catalog, detail } => Some(
+            mk(CheckState::Unknown, CheckCode::CatalogPointViewUnavailable)
+                .with_scope(scope(catalog, None))
+                .with_message(detail)
+                .with_remedy("Request a catalog sync and run this check again once the view is published."),
+        ),
+        CatalogPointFacts::NotInView { catalog, point_id } => Some(
+            mk(CheckState::NotReady, CheckCode::RecoveryPointNotFound)
+                .with_scope(scope(catalog, None))
+                .with_message(&format!(
+                    "the catalog's current view does not list recovery point `{point_id}`"
+                ))
+                .with_remedy("Choose a point the catalog lists; a point outside the view is reachable with `logweir catalog list`."),
+        ),
+        CatalogPointFacts::Found(found) => {
+            let f = found.as_ref();
+            let e = &f.entry;
+            let at = scope(&f.catalog, Some(f.catalog_uid.clone()));
+            if let Some((backup, verdict)) = &f.refused_by {
+                return Some(
+                    mk(CheckState::NotReady, CheckCode::CatalogPointRefusedByController)
+                        .with_scope(at)
+                        .with_message(&format!(
+                            "Backup `{backup}` of this receipt carries the verdict `{verdict}`; \
+                             the controller reached it, and a catalog row never outranks it"
+                        ))
+                        .with_remedy("Choose another recovery point; this receipt's own evidence was refused."),
+                );
+            }
+            if !e.selectable {
+                return Some(
+                    mk(CheckState::NotReady, CheckCode::CatalogPointNotSelectable)
+                        .with_scope(at)
+                        .with_message(&format!(
+                            "the catalog lists `{}` with availability {} and verification {}",
+                            e.point_id,
+                            e.availability.as_str(),
+                            e.verification.as_str()
+                        ))
+                        .with_remedy(
+                            e.remedy
+                                .as_deref()
+                                .unwrap_or("Choose a point the catalog marks restorable."),
+                        ),
+                );
+            }
+            if !f.backups_complete {
+                return Some(
+                    mk(CheckState::Unknown, CheckCode::CatalogPointViewUnavailable)
+                        .with_scope(at)
+                        .with_message(&format!(
+                            "this namespace holds more Backups than one check reads ({} x {}), \
+                             so no reached refusal of this receipt can be ruled out",
+                            CATALOG_POINT_BACKUP_PAGES, CATALOG_POINT_BACKUP_PAGE
+                        ))
+                        .with_remedy("Prune the namespace's Backup history, or verify the receipt with `logweir catalog list`."),
+                );
+            }
+            let mismatch = |why: String| {
+                mk(CheckState::NotReady, CheckCode::CatalogPointBindingMismatch)
+                    .with_scope(scope(&f.catalog, Some(f.catalog_uid.clone())))
+                    .with_message(&why)
+                    .with_remedy("Re-render the plan from the catalog point; the runner refuses a plan whose binding is not the archive's.")
+            };
+            if !f.plan_parsed {
+                return Some(mismatch(
+                    "the plan did not parse, so it cannot be shown to be bound to this point"
+                        .to_string(),
+                ));
+            }
+            let Some(point) = f.plan_point.as_ref() else {
+                return Some(mismatch(
+                    "the plan carries no source.point, so the runner would restore without \
+                     re-verifying this receipt"
+                        .to_string(),
+                ));
+            };
+            let manifest = e.manifest_sha256.as_deref().unwrap_or_default();
+            let mut faults = Vec::new();
+            if point.point_id != e.point_id {
+                faults.push(format!("point_id {} is not {}", point.point_id, e.point_id));
+            }
+            if point.receipt_key != e.receipt_key {
+                faults.push(format!(
+                    "receipt_key {} is not {}",
+                    point.receipt_key, e.receipt_key
+                ));
+            }
+            if point.receipt_sha256 != e.receipt_sha256 {
+                faults.push("receipt_sha256 is not the row's".to_string());
+            }
+            if manifest.is_empty() || point.manifest_sha256 != manifest {
+                faults.push("manifest_sha256 is not the row's".to_string());
+            }
+            if f.plan_backup.as_deref() != Some(e.backup_id.as_str()) {
+                faults.push(format!(
+                    "source.backup {} is not the row's set {}",
+                    f.plan_backup.as_deref().unwrap_or("(none)"),
+                    e.backup_id
+                ));
+            }
+            if !faults.is_empty() {
+                return Some(mismatch(format!(
+                    "the plan's binding is not this catalog row's: {}",
+                    faults.join("; ")
+                )));
+            }
+            Some(
+                mk(CheckState::Ready, CheckCode::CatalogPointSelectable)
+                    .with_scope(at)
+                    .with_message(&format!(
+                        "the catalog lists `{}` {} and {}, no Backup verdict refuses its \
+                         receipt, and the plan is bound to it",
+                        e.point_id,
+                        e.availability.as_str(),
+                        e.verification.as_str()
+                    )),
+            )
+        }
+    }
+}
+
 /// The `Approval`, reduced.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ApprovalFacts {
@@ -2958,6 +3365,9 @@ pub struct Inputs {
     pub bindings: BindingFacts,
     /// The recovery point.
     pub recovery_point: RecoveryPointFacts,
+    /// Or a catalog point (PLAT-15.2). When requested, it is what
+    /// `recoveryPoint.state` reports.
+    pub catalog_point: CatalogPointFacts,
     /// The approval.
     pub approval: ApprovalFacts,
     /// The approval's contribution to the binding.
@@ -3008,6 +3418,7 @@ impl Default for Inputs {
             plan: None,
             bindings: BindingFacts::default(),
             recovery_point: RecoveryPointFacts::NotRequested,
+            catalog_point: CatalogPointFacts::NotRequested,
             approval: ApprovalFacts::Draft,
             approval_binding: None,
             restore_name: None,
@@ -3205,7 +3616,12 @@ impl Inputs {
                 out.push(plan_names_row(plan, now));
                 out.push(plan_bindings_row(plan, &self.bindings, now));
             }
-            if let Some(row) = recovery_point_row(&self.recovery_point, now) {
+            // ONE `recoveryPoint.state` ROW: the catalog point's when the
+            // request names one (P10 forbids naming both), the Backup's
+            // otherwise.
+            if let Some(row) = catalog_point_row(&self.catalog_point, now)
+                .or_else(|| recovery_point_row(&self.recovery_point, now))
+            {
                 out.push(row);
             }
             out.extend(approval_rows(
@@ -3569,6 +3985,70 @@ fn roster_facts(load: &super::approval::RosterLoad) -> RosterFacts {
             allowed_cluster_ids: r.spec.allowed_cluster_ids.clone(),
         },
     }
+}
+
+/// Read what [`catalog_point_facts`] needs: the catalog, the page `ConfigMap`s
+/// its status names (by those names and no others), and the namespace's
+/// `Backup`s in bounded pages.
+async fn read_catalog_point(
+    client: &kube::Client,
+    namespace: &str,
+    reference: &crate::crds::preflight::CatalogPointRef,
+    plan: Option<&PlanFacts>,
+    now: DateTime<Utc>,
+) -> Result<CatalogPointFacts, ReconcileError> {
+    use crate::crds::recovery_catalog::RecoveryCatalog;
+    use k8s_openapi::api::core::v1::ConfigMap;
+    let catalogs: Api<RecoveryCatalog> = Api::namespaced(client.clone(), namespace);
+    let catalog = catalogs
+        .get_opt(&reference.catalog_ref.name)
+        .await
+        .map_err(ReconcileError::Api)?;
+    let mut pages: Vec<(String, Option<ConfigMap>)> = Vec::new();
+    if let Some(c) = catalog.as_ref() {
+        let maps: Api<ConfigMap> = Api::namespaced(client.clone(), namespace);
+        for page in c
+            .status
+            .as_ref()
+            .and_then(|s| s.pages.as_ref())
+            .into_iter()
+            .flatten()
+            .take(CATALOG_POINT_VIEW_PAGES)
+        {
+            let map = maps
+                .get_opt(&page.config_map_name)
+                .await
+                .map_err(ReconcileError::Api)?;
+            pages.push((page.config_map_name.clone(), map));
+        }
+    }
+    let api: Api<Backup> = Api::namespaced(client.clone(), namespace);
+    let mut backups: Vec<Backup> = Vec::new();
+    let mut complete = false;
+    let mut token: Option<String> = None;
+    for _ in 0..CATALOG_POINT_BACKUP_PAGES {
+        let mut params = ListParams::default().limit(CATALOG_POINT_BACKUP_PAGE);
+        if let Some(t) = token.take() {
+            params = params.continue_token(&t);
+        }
+        let list = api.list(&params).await.map_err(ReconcileError::Api)?;
+        token = list.metadata.continue_.filter(|t| !t.is_empty());
+        backups.extend(list.items);
+        if token.is_none() {
+            complete = true;
+            break;
+        }
+    }
+    Ok(catalog_point_facts(&CatalogPointRead {
+        catalog_name: &reference.catalog_ref.name,
+        point_id: &reference.point_id,
+        catalog: catalog.as_ref(),
+        pages: &pages,
+        backups: &backups,
+        backups_complete: complete,
+        plan,
+        now,
+    }))
 }
 
 fn referent(
@@ -3965,6 +4445,21 @@ pub async fn resolve(
                     }
                 }
             };
+
+            // --- a catalog point (PLAT-15.2, D3 §5.5 step 5) ----------------
+            if let Some(cp) = r.and_then(|r| r.catalog_point_ref.as_ref()) {
+                inputs.catalog_point =
+                    read_catalog_point(client, namespace, cp, inputs.plan.as_ref(), now).await?;
+                if let CatalogPointFacts::Found(found) = &inputs.catalog_point {
+                    inputs.referents.push(referent(
+                        "RecoveryCatalog",
+                        namespace,
+                        &found.catalog,
+                        &found.catalog_uid,
+                        None,
+                    ));
+                }
+            }
 
             // --- the approval ----------------------------------------------
             inputs.approval = match restore_object.as_ref() {
