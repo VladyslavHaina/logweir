@@ -232,6 +232,120 @@ pub fn selectable(availability: Availability, verification: Verification) -> boo
 }
 
 // ===========================================================================
+// The controller's own verdict outranks a view row
+// ===========================================================================
+
+/// Whether a `Backup.status.evidence.verification.result` is a verdict the
+/// controller REACHED that is not a pass.
+///
+/// **The catalog decides only where the controller could not look.** `None`
+/// (no verdict written) and `NotAttempted` are "I could not look" and defer to
+/// the catalog; `Valid` is a pass the catalog may still narrow. Everything else
+/// — `Invalid`, `Untrusted`, or a spelling this build does not know (reachable
+/// after a rollback past a build that wrote a fifth verdict) — is a refusal no
+/// catalog row may overrule. The same rule as
+/// `protection::evidence_objective_met` and
+/// `controllers::rehearsal_schedule::candidate_from_backup`.
+#[must_use]
+pub fn is_reached_refusal(result: Option<&str>) -> bool {
+    !matches!(result, None | Some("NotAttempted" | "Valid"))
+}
+
+/// The points whose own `Backup` the controller REFUSED, keyed for a join
+/// against view rows.
+///
+/// # Why a view row is not enough
+///
+/// A view is served until `viewExpiresAt`, so a row harvested before a receipt
+/// was replaced or its signer revoked still says `Available`/`Verified`/
+/// `selectable` after the controller fetched the receipt and recorded the
+/// `Backup` `Invalid` or `Untrusted`. Every surface that reads a view row as
+/// "usable" — retention's keep set, the console's point list — asks this set
+/// first.
+///
+/// # The join
+///
+/// The FULL receipt digest decides wherever the `Backup` carries one
+/// (`status.evidence.receiptSha256`, the digest the view row's `receiptSha256`
+/// names). A `Backup` with no digest joins on the archive set id
+/// (`status.backupId` = the row's `backupId`), the compatibility key
+/// `protection::entries_for` uses for the same case. Both directions are
+/// conservative: a match can only take a point OUT of the usable set.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ControllerRefusals {
+    by_receipt: BTreeMap<String, String>,
+    by_backup_id: BTreeMap<String, String>,
+}
+
+/// The longest verdict spelling a refusal carries onward. A result is a short
+/// enum word; anything longer is truncated rather than copied into a response.
+const MAX_REFUSAL_LEN: usize = 32;
+
+impl ControllerRefusals {
+    /// Collect every reached refusal among `backups`, whatever their phase: a
+    /// verdict the controller reached about some receipt bytes is a verdict
+    /// about those bytes whether or not the run's Job succeeded.
+    #[must_use]
+    pub fn from_backups<'a, I>(backups: I) -> Self
+    where
+        I: IntoIterator<Item = &'a crate::crds::backup::Backup>,
+    {
+        let mut out = Self::default();
+        for backup in backups {
+            let Some(status) = backup.status.as_ref() else {
+                continue;
+            };
+            let evidence = status.evidence.as_ref();
+            let result = evidence
+                .and_then(|e| e.verification.as_ref())
+                .and_then(|v| v.result.as_deref());
+            if !is_reached_refusal(result) {
+                continue;
+            }
+            let result: String = result
+                .unwrap_or_default()
+                .chars()
+                .take(MAX_REFUSAL_LEN)
+                .collect();
+            match evidence
+                .and_then(|e| e.receipt_sha256.as_deref())
+                .filter(|d| !d.is_empty())
+            {
+                Some(digest) => {
+                    out.by_receipt.insert(digest.to_string(), result);
+                }
+                None => {
+                    if let Some(id) = status.backup_id.as_deref().filter(|id| !id.is_empty()) {
+                        out.by_backup_id.insert(id.to_string(), result);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// The refused verdict for this view row's point, or `None` when no
+    /// `Backup` in the set refused it.
+    #[must_use]
+    pub fn refusal_for(&self, entry: &ViewEntry) -> Option<&str> {
+        self.by_receipt
+            .get(&entry.receipt_sha256)
+            .or_else(|| {
+                Some(entry.backup_id.as_str())
+                    .filter(|id| !id.is_empty())
+                    .and_then(|id| self.by_backup_id.get(id))
+            })
+            .map(String::as_str)
+    }
+
+    /// Whether the set holds no refusal at all.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.by_receipt.is_empty() && self.by_backup_id.is_empty()
+    }
+}
+
+// ===========================================================================
 // The trust seam
 // ===========================================================================
 

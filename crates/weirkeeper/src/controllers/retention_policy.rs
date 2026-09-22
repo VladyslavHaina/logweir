@@ -77,6 +77,7 @@ use logweir_core::destination::DestinationRole;
 use crate::catalog_view::{self as view, ViewEntry};
 use crate::check;
 use crate::conditions::{merge_condition, status_unchanged};
+use crate::crds::backup::Backup;
 use crate::crds::recovery_catalog::RecoveryCatalog;
 use crate::crds::restore::Restore;
 use crate::crds::retention_policy::{RetentionMode, RetentionPolicy};
@@ -1263,7 +1264,18 @@ impl Pass<'_> {
             location_id: location_id.clone(),
             scope_prefix: self.policy.spec.scope.prefix.clone(),
         };
-        let points: Vec<PointFacts> = entries.iter().map(point_facts).collect();
+        // THE CONTROLLER'S OWN VERDICTS, BEFORE ANY ROW IS COUNTED. A point
+        // whose `Backup` the controller refused is not usable, whatever the
+        // (possibly older) view row says — and a listing that could not be
+        // completed is an evaluation that could not be completed: an unseen
+        // refusal would let a stale row take a keep rank and push an older
+        // good point into the plan, and "could not tell" never authorises a
+        // deletion.
+        let refusals = match self.controller_refusals().await? {
+            Ok(refusals) => refusals,
+            Err(message) => return self.publish_view_failure(&message).await,
+        };
+        let points: Vec<PointFacts> = entries.iter().map(|e| point_facts(e, &refusals)).collect();
         let protection = self.protection_set(&location_id, &points).await?;
         let holds: Vec<plan::Hold> = self
             .policy
@@ -1456,6 +1468,41 @@ impl Pass<'_> {
             uid: self.uid.clone(),
             generation: self.generation(),
         }
+    }
+
+    /// The reached refusals among this namespace's `Backup`s —
+    /// [`view::ControllerRefusals`].
+    ///
+    /// Bounded by [`MAX_BACKUP_PAGES`] pages of [`BACKUP_PAGE_LIMIT`].
+    /// `Ok(Err(message))` is a listing the bound cut short, which the caller
+    /// publishes as `Evaluated=False`: the refusal it did not see is exactly
+    /// the one that would have mattered.
+    async fn controller_refusals(
+        &self,
+    ) -> Result<Result<view::ControllerRefusals, String>, ReconcileError> {
+        let api: Api<Backup> = Api::namespaced(self.ctx.client.clone(), &self.namespace);
+        let mut backups: Vec<Backup> = Vec::new();
+        let mut token: Option<String> = None;
+        for _ in 0..MAX_BACKUP_PAGES {
+            let mut params = ListParams::default().limit(BACKUP_PAGE_LIMIT);
+            if let Some(cursor) = token.as_deref() {
+                params = params.continue_token(cursor);
+            }
+            let page = api.list(&params).await?;
+            token = page.metadata.continue_.clone().filter(|t| !t.is_empty());
+            backups.extend(page.items);
+            if token.is_none() {
+                return Ok(Ok(view::ControllerRefusals::from_backups(&backups)));
+            }
+        }
+        Ok(Err(format!(
+            "namespace {} holds more than {} Backups, the most one evaluation reads; retention \
+             cannot establish that the controller refused none of the points it would count as \
+             usable, so it plans nothing. Prune the Backup history (PLAT-05.2) and retention \
+             evaluates again.",
+            self.namespace,
+            MAX_BACKUP_PAGES * BACKUP_PAGE_LIMIT as usize
+        )))
     }
 
     /// Read the catalog's published pages.
@@ -3393,8 +3440,13 @@ fn failure_detail(exit_code: Option<i32>, codes: &[String]) -> String {
 /// here**: D3 W8's page entry carries `manifestKey` and no segment list. The
 /// plan therefore names the manifest and the set's key bound, and the worker
 /// enumerates within that bound — see `retention_plan::PlanLine::enumerate_set`.
+///
+/// `refusals` is the namespace's `Backup`s' reached refusals: a row whose own
+/// `Backup` the controller recorded `Invalid`/`Untrusted` is marked
+/// [`PointFacts::refused_by_controller`], whatever the (possibly older) row
+/// says. An empty set changes nothing.
 #[must_use]
-pub fn point_facts(entry: &ViewEntry) -> PointFacts {
+pub fn point_facts(entry: &ViewEntry, refusals: &view::ControllerRefusals) -> PointFacts {
     PointFacts {
         point_id: entry.point_id.clone(),
         backup_id: entry.backup_id.clone(),
@@ -3409,8 +3461,18 @@ pub fn point_facts(entry: &ViewEntry) -> PointFacts {
         manifest_key: entry.manifest_key.clone(),
         segment_keys: Vec::new(),
         bytes: None,
+        refused_by_controller: refusals.refusal_for(entry).is_some(),
     }
 }
+
+/// The page size of the `Backup` listing a retention evaluation joins against
+/// ([`view::ControllerRefusals`]).
+pub const BACKUP_PAGE_LIMIT: u32 = 500;
+
+/// How many `Backup` pages one evaluation follows before it refuses to plan —
+/// 10 000 objects, far above `protection_policy`'s 1 000, because here an
+/// incomplete listing stops retention rather than narrowing a health verdict.
+pub const MAX_BACKUP_PAGES: usize = 20;
 
 /// The terminal `Restore` phases. A restore in any other phase — including one
 /// with no phase at all, which is a `Restore` the reconciler has not seen yet —

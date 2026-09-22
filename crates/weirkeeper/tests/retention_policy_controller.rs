@@ -73,6 +73,7 @@ fn point(id: &str, age_days: i64) -> plan::PointFacts {
         manifest_key: Some(format!("{SCOPE}/set-{id}/manifest.json")),
         segment_keys: Vec::new(),
         bytes: Some(1024),
+        refused_by_controller: false,
     }
 }
 
@@ -1344,6 +1345,7 @@ fn routes_for_destination(entries: &[Value], destination: String) -> Vec<Route> 
             ),
         ),
         route("GET", "/configmaps/page-0", page_config_map(entries)),
+        route("GET", "/backups", empty_list("Backup")),
         route("GET", "/restores", empty_list("Restore")),
         route(
             "PATCH",
@@ -3529,7 +3531,7 @@ async fn each_status_patch_carries_the_version_the_last_one_returned() {
 async fn shared_segment_protection_is_reported_not_enforced() {
     let entry: weirkeeper::catalog_view::ViewEntry =
         serde_json::from_value(view_entry("p1", 1)).expect("a view entry");
-    let facts = ctrl::point_facts(&entry);
+    let facts = ctrl::point_facts(&entry, &Default::default());
     assert!(
         facts.segment_keys.is_empty(),
         "the catalog view entry has no segment field at all, so there is nothing to protect with"
@@ -5394,4 +5396,271 @@ async fn a_job_create_failure_after_the_record_leaves_no_run_to_harvest() {
             .is_none_or(|c| c["status"] == json!("False")),
         "nothing is degraded by a Job that was never created. Status: {after_pass}"
     );
+}
+
+// ===========================================================================
+// RETENTION-PLAN-IGNORES-REFUSED-VERDICT — the controller's reached verdict
+// outranks a (possibly stale) view row
+// ===========================================================================
+
+/// A distinct, well-formed receipt digest per point id.
+fn receipt_digest(id: &str) -> String {
+    let hex: String = id
+        .bytes()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>()
+        .chars()
+        .chain(std::iter::repeat('a'))
+        .take(64)
+        .collect();
+    format!("sha256:{hex}")
+}
+
+/// [`view_entry`] with its own receipt digest — a stale, selectable,
+/// `Available`/`Verified` row for exactly that receipt.
+fn view_entry_for_receipt(id: &str, age_days: i64) -> Value {
+    let mut entry = view_entry(id, age_days);
+    entry["receiptSha256"] = json!(receipt_digest(id));
+    entry
+}
+
+/// A `Backup` whose own evidence verdict is `result`, over `digest` (or none).
+fn verdict_backup(name: &str, set: &str, digest: Option<&str>, result: &str) -> Value {
+    let mut evidence = json!({"verification": {"result": result}});
+    if let Some(d) = digest {
+        evidence["receiptSha256"] = json!(d);
+    }
+    json!({
+        "apiVersion": "logweir.dev/v1alpha1",
+        "kind": "Backup",
+        "metadata": {"name": name, "namespace": NS, "uid": format!("uid-{name}"), "resourceVersion": "9"},
+        "spec": {
+            "sourceRef": {"name": "prod-kafka"},
+            "topics": ["orders"],
+            "archive": {"url": format!("logweir-destination://{DEST}")},
+            "destinationRef": {"name": DEST},
+            "triggeredBy": "schedule/nightly",
+            "deadlineSeconds": 3600
+        },
+        "status": {
+            "phase": "Succeeded",
+            "exitCode": 0,
+            "backupId": set,
+            "evidence": evidence
+        }
+    })
+}
+
+fn backup_objects(values: Vec<Value>) -> Vec<weirkeeper::crds::backup::Backup> {
+    values
+        .into_iter()
+        .map(|v| serde_json::from_value(v).expect("the fixture is a Backup"))
+        .collect()
+}
+
+fn backup_list_body(items: Vec<Value>, continue_token: Option<&str>) -> String {
+    let mut metadata = json!({"resourceVersion": "1"});
+    if let Some(t) = continue_token {
+        metadata["continue"] = json!(t);
+    }
+    json!({
+        "apiVersion": "logweir.dev/v1alpha1", "kind": "BackupList",
+        "metadata": metadata,
+        "items": items
+    })
+    .to_string()
+}
+
+/// Three rows, newest first: `p1` (1 day), `p2` (2 days), `p3` (3 days).
+fn three_rows() -> Vec<weirkeeper::catalog_view::ViewEntry> {
+    (1..=3)
+        .map(|d| {
+            serde_json::from_value(view_entry_for_receipt(&format!("p{d}"), d))
+                .expect("the row parses")
+        })
+        .collect()
+}
+
+/// **The defect row.** `p1`'s view row is stale — `Available`, `Verified`,
+/// `selectable` — but the controller fetched `p1`'s receipt and recorded its
+/// `Backup` `Invalid` (or `Untrusted`, or a verdict this build does not know).
+/// With `keepLast: 2` the refused point used to take a keep rank and push the
+/// older GOOD point `p3` into the plan. It is now skipped `Unreadable` — never
+/// counted as usable and never a candidate itself — and `p3` is kept.
+///
+/// MUTANT: drop the `refused_by_controller` arm of
+/// `retention_plan::skip_reason` (or make `point_facts` ignore `refusals`).
+/// `p1` is usable again and `p3` is planned `BeyondKeepLast`; this row fails.
+#[test]
+fn a_point_the_controller_refused_never_makes_an_older_good_point_a_candidate() {
+    let rows = three_rows();
+    for result in ["Invalid", "Untrusted", "SomeFutureVerdict"] {
+        let refusals =
+            weirkeeper::catalog_view::ControllerRefusals::from_backups(&backup_objects(vec![
+                verdict_backup("b-p1", "set-p1", Some(&receipt_digest("p1")), result),
+            ]));
+        let points: Vec<plan::PointFacts> = rows
+            .iter()
+            .map(|e| ctrl::point_facts(e, &refusals))
+            .collect();
+        assert!(
+            points[0].refused_by_controller,
+            "{result} is a reached refusal"
+        );
+        assert!(!points[1].refused_by_controller && !points[2].refused_by_controller);
+
+        let evaluation = evaluate(&points, rules(Some(2), None, 1));
+        assert!(
+            candidate_ids(&evaluation).is_empty(),
+            "a {result} Backup under a stale selectable row must not push p3 out of keepLast; \
+             candidates: {:?}",
+            candidate_ids(&evaluation)
+        );
+        assert_eq!(
+            evaluation.skipped,
+            vec![plan::Skipped {
+                point_id: "p1".to_string(),
+                reason: plan::SkipReason::Unreadable,
+            }],
+            "the refused point is skipped, so it is neither usable nor deletable ({result})"
+        );
+        assert_eq!(evaluation.kept, vec!["p2".to_string(), "p3".to_string()]);
+    }
+
+    // CONTROL: the honest "could not look" defers to the same row, and the
+    // rule then plans p3 exactly as before — which is what makes the row above
+    // a measurement and not a constant.
+    for result in ["NotAttempted", "Valid"] {
+        let refusals =
+            weirkeeper::catalog_view::ControllerRefusals::from_backups(&backup_objects(vec![
+                verdict_backup("b-p1", "set-p1", Some(&receipt_digest("p1")), result),
+            ]));
+        assert!(refusals.is_empty(), "{result} is not a refusal");
+        let points: Vec<plan::PointFacts> = rows
+            .iter()
+            .map(|e| ctrl::point_facts(e, &refusals))
+            .collect();
+        let evaluation = evaluate(&points, rules(Some(2), None, 1));
+        assert_eq!(
+            candidate_ids(&evaluation),
+            vec!["p3"],
+            "{result}: the row decides, p1 counts, p3 is beyond keepLast"
+        );
+        assert!(evaluation.skipped.is_empty());
+    }
+}
+
+/// The join is the FULL receipt digest where the `Backup` has one, and the
+/// archive set id only where it has none — and a catalog-only point (no
+/// `Backup` names it) is unchanged.
+#[test]
+fn the_refusal_join_is_by_receipt_digest_then_by_set_id() {
+    let rows = three_rows();
+    let refusals =
+        weirkeeper::catalog_view::ControllerRefusals::from_backups(&backup_objects(vec![
+            // A digest-less (legacy-runner) Backup: joins p2 by `backupId`.
+            verdict_backup("b-p2", "set-p2", None, "Invalid"),
+            // A Backup of p3's SET whose digest names other bytes: the digest
+            // decides, so p3's row is not refused by it.
+            verdict_backup("b-p3", "set-p3", Some(&receipt_digest("other")), "Invalid"),
+        ]));
+    let facts: Vec<bool> = rows
+        .iter()
+        .map(|e| ctrl::point_facts(e, &refusals).refused_by_controller)
+        .collect();
+    assert_eq!(facts, vec![false, true, false]);
+    assert_eq!(refusals.refusal_for(&rows[1]), Some("Invalid"));
+}
+
+/// The controller path: the namespace's `Backup`s are listed, and a stale row
+/// for a refused `Backup` changes the plan the status publishes.
+///
+/// Six rows, `keepLast: 2`, `minUsablePoints: 3`: with nothing refused the plan
+/// is p4, p5, p6. With p1's `Backup` recorded `Invalid`, p1 is skipped and the
+/// floor keeps p2..p4, so p4 — an older good point — is NOT planned.
+#[tokio::test]
+async fn the_controller_joins_backup_verdicts_before_it_counts_a_row() {
+    let entries: Vec<Value> = (1..=6)
+        .map(|d| view_entry_for_receipt(&format!("p{d}"), d))
+        .collect();
+    let mut routes = happy_routes(&entries);
+    routes.retain(|r| r.path_suffix != "/backups");
+    routes.push(route(
+        "GET",
+        "/backups",
+        backup_list_body(
+            vec![verdict_backup(
+                "b-p1",
+                "set-p1",
+                Some(&receipt_digest("p1")),
+                "Invalid",
+            )],
+            None,
+        ),
+    ));
+    let f = fixture(routes);
+    let outcome = run(&f, &policy(json!({}), json!({}))).await;
+
+    assert_eq!(outcome.phase, ctrl::RetentionPhase::Evaluated);
+    assert_eq!(outcome.candidates, 2, "p5 and p6 only");
+    assert_eq!(outcome.skipped, 1);
+    let status = f.status();
+    let planned: Vec<&str> = status["lastEvaluation"]["candidates"]
+        .as_array()
+        .expect("candidates")
+        .iter()
+        .filter_map(|c| c["pointId"].as_str())
+        .collect();
+    assert_eq!(planned, vec!["p5", "p6"]);
+    assert_eq!(
+        status["lastEvaluation"]["skipped"],
+        json!([{"pointId": "p1", "reason": "Unreadable"}])
+    );
+    assert!(
+        f.seen()
+            .iter()
+            .any(|(m, uri)| m == "GET" && uri.contains("/backups")),
+        "the Backup verdicts were read"
+    );
+}
+
+/// A `Backup` listing the bound cut short is an evaluation that could not be
+/// completed: `Evaluated=False`, no plan, nothing to approve — the refusal the
+/// walk did not reach is exactly the one that would have mattered.
+///
+/// MUTANT: return the partial set instead of `Err` at the bound. The pass
+/// evaluates and publishes a plan; this row fails.
+#[tokio::test]
+async fn an_incomplete_backup_listing_plans_nothing() {
+    let mut routes = happy_routes(&six_points());
+    routes.retain(|r| r.path_suffix != "/backups");
+    // Every page says there is more, so the walk reaches its bound.
+    routes.push(route(
+        "GET",
+        "/backups",
+        backup_list_body(vec![], Some("eyJwYWdlIjoyfQ")),
+    ));
+    let f = fixture(routes);
+    let outcome = run(&f, &policy(json!({}), json!({}))).await;
+
+    assert_eq!(outcome.ready_reason, ctrl::REASON_CATALOG_UNUSABLE);
+    assert_eq!(outcome.candidates, 0);
+    assert_eq!(
+        f.condition(ctrl::CONDITION_EVALUATED)["reason"],
+        ctrl::REASON_VIEW_UNREADABLE
+    );
+    assert!(f.condition(ctrl::CONDITION_EVALUATED)["message"]
+        .as_str()
+        .expect("a message")
+        .contains("Backups"));
+    assert!(
+        f.status()["lastEvaluation"].is_null(),
+        "no evaluation is published from an incomplete listing"
+    );
+    let pages = f
+        .seen()
+        .iter()
+        .filter(|(m, uri)| m == "GET" && uri.contains("/backups"))
+        .count();
+    assert_eq!(pages, ctrl::MAX_BACKUP_PAGES, "the walk is bounded");
 }

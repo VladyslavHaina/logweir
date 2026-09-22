@@ -1483,7 +1483,7 @@ pub fn candidate_from_backup(backup: &Backup) -> Option<PointCandidate> {
     // a pass the catalog may still narrow. Everything else — `Invalid`,
     // `Untrusted`, or a spelling this build does not know — is a refusal no
     // catalog row may overrule (`protection::evidence_objective_met`).
-    let verdict_refused = !matches!(verdict, None | Some("NotAttempted" | "Valid"));
+    let verdict_refused = crate::catalog_view::is_reached_refusal(verdict);
     Some(PointCandidate {
         point_id,
         backup_id: status.backup_id.clone()?,

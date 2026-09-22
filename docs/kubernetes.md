@@ -1966,7 +1966,25 @@ A point is a deletion candidate only if the catalog said `Available` **and**
 `Conflict`, `UntrustedSigner`, `NotAttempted` — lands in
 `status.lastEvaluation.skipped` and can never become a candidate. **A retention
 pass that cannot read the archive proposes nothing**, which is the opposite of
-what a timestamp-driven bucket rule does. And the newest `minUsablePoints` usable
+what a timestamp-driven bucket rule does.
+
+**The controller's own verdict outranks the row.** Before it counts a row the
+evaluation lists the namespace's `Backup` objects and joins their
+`status.evidence.verification.result` to the rows — by the full
+`receiptSha256`, or by `backupId` for a `Backup` that carries no digest. A point
+whose `Backup` the controller refused (`Invalid`, `Untrusted`, or a result this
+build does not recognise) is skipped with reason `Unreadable` however
+`Available`/`Verified` its row reads: a view is served until `viewExpiresAt`,
+so the row may predate the refusal, and counted as usable it would take a
+`keepLast` or `minUsablePoints` rank and push an older good point into the plan.
+`NotAttempted`, an absent result and `Valid` leave the row in charge, and a
+point no `Backup` in the namespace names is evaluated exactly as before. The
+listing follows at most 20 pages of 500; a namespace holding more `Backup`s is
+`Evaluated=False/ViewUnreadable` and plans nothing — prune the Backup history —
+because the refusal the walk did not reach is the one that would have mattered.
+`Backup`s in other namespaces writing to the same archive are not consulted.
+
+And the newest `minUsablePoints` usable
 points are kept whatever the rules say, reported as `MinUsablePoints` in
 `status.lastEvaluation.protected` so an operator can see which points the rules
 wanted and the floor saved.

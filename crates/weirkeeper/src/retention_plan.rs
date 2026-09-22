@@ -115,6 +115,19 @@ pub struct PointFacts {
     pub segment_keys: Vec<String>,
     /// How many bytes the point occupies, when the catalog knew.
     pub bytes: Option<i64>,
+    /// This point's own `Backup` carries a verification verdict the controller
+    /// REACHED and that is not a pass (`Invalid`, `Untrusted`, or a result this
+    /// build does not know) — `catalog_view::ControllerRefusals`.
+    ///
+    /// **The catalog decides only where the controller could not look.** A view
+    /// row is served until `viewExpiresAt`, so a row harvested before the
+    /// receipt was replaced or its signer revoked still reads
+    /// `Available`/`Verified`; counted as usable, it would take a `keepLast` or
+    /// `minUsablePoints` rank and push an older GOOD point out of the keep set
+    /// and into the plan. Such a point is skipped `Unreadable` (see
+    /// [`skip_reason`]). Always `false` for a point no `Backup` in the namespace
+    /// names (a catalog-only point), whose behaviour is unchanged.
+    pub refused_by_controller: bool,
 }
 
 /// What to keep — `RetentionPolicy.spec.rules`, in the pure layer's shape.
@@ -250,7 +263,11 @@ impl ProtectReason {
 pub enum SkipReason {
     /// The catalog could not read it (`Unreadable`, `Missing`, `Partial`) or
     /// could not establish trust (`UntrustedSigner`, `Invalid`, `NoEvidence`,
-    /// `NotAttempted`, `Revoked`).
+    /// `NotAttempted`, `Revoked`) — or the controller itself refused the
+    /// point's `Backup` evidence (`Invalid`, `Untrusted`), which no catalog row
+    /// overrules ([`PointFacts::refused_by_controller`]). One reason for both,
+    /// because to retention they are the same fact: trust in this point could
+    /// not be established, so it is neither counted as usable nor deleted.
     Unreadable,
     /// The record's major version is above this build's.
     UnsupportedFormat,
@@ -396,8 +413,9 @@ impl<'a> Located<'a> {
 
 /// D3 §6.4, in order.
 ///
-/// 1. `usable` = `Available` ∧ (`Verified` | `VerifiedHistorical`). Everything
-///    else is `skipped` and is **never** a candidate.
+/// 1. `usable` = `Available` ∧ (`Verified` | `VerifiedHistorical`) ∧ not
+///    [`PointFacts::refused_by_controller`]. Everything else is `skipped` and
+///    is **never** a candidate.
 /// 2. Sort `usable` by `recovery_point_at_ms` DESC, tie-break `point_id` ASC.
 /// 3. Keep: rank ≤ `keepLast`; age ≤ `keepDays`; and ALWAYS the newest
 ///    `minUsablePoints`, whatever the rules say.
@@ -615,6 +633,13 @@ pub fn skip_reason(point: &PointFacts) -> Option<SkipReason> {
         Availability::Missing | Availability::Unreadable | Availability::Partial => {
             return Some(SkipReason::Unreadable)
         }
+    }
+    // A VERDICT THE CONTROLLER REACHED OUTRANKS THE ROW. The row may predate
+    // the refusal (a view is served until `viewExpiresAt`); the controller's
+    // `Invalid`/`Untrusted` on this point's own `Backup` is newer information
+    // about the same receipt bytes.
+    if point.refused_by_controller {
+        return Some(SkipReason::Unreadable);
     }
     match point.verification {
         Verification::Verified | Verification::VerifiedHistorical => None,
