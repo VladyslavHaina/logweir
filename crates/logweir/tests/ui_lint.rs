@@ -74,7 +74,7 @@ const VIEWER_AUTHORITY: &str = "viewer's entire cluster authority";
 /// has nothing to do with the `kafka-backup` subcommand GC3 denies. The escape
 /// sits on the element's own line because that gate matches per physical line
 /// -- which is also why this paragraph spells the name without its quotes.
-const API_EXPORTS: [&str; 27] = [
+const API_EXPORTS: [&str; 28] = [
     "GROUP",
     "VERSION",
     "WRITABLE_PLURALS",
@@ -113,6 +113,10 @@ const API_EXPORTS: [&str; 27] = [
     // action is looked up in a frozen table in `api.js`, so the reachable set
     // is still a list a reviewer reads in one place.
     "consoleAction",
+    // PLAT-19.2: ONE read, `GET .../approval-policy` -- the namespace's
+    // effective approval policy the submit step and the approvals page render.
+    // No body, no query, no write.
+    "consoleApprovalPolicy",
     "consoleCreate",
     "consoleSetSuspension",
     // D1 W7: the draft-cadence preview (a safe, namespace-less GET that reads

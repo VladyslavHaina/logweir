@@ -4967,7 +4967,7 @@
           },
           "authorization": {
             "description": "PLAT-19.2: the policy, mode and console-attested requester a v2 authorization was VERIFIED under. Absent for a v1 approval and for anything not (or no longer) verified.",
-            "$ref": "#/components/schemas/ApprovalAuthorizationView",
+            "$ref": "#/components/schemas/ApprovalProvenanceView",
             "nullable": true
           },
           "conditions": {
@@ -5037,39 +5037,6 @@
             "description": "The exact verified subject.",
             "$ref": "#/components/schemas/VerifiedSubjectView",
             "nullable": true
-          }
-        }
-      },
-      "ApprovalAuthorizationView": {
-        "description": "PLAT-19.2: `Approval.status.authorization`, as the console renders it.",
-        "type": "object",
-        "required": [
-          "confirmationKeyId",
-          "mode",
-          "policyDigest",
-          "policyName",
-          "requester"
-        ],
-        "properties": {
-          "confirmationKeyId": {
-            "description": "The console key that attested it.",
-            "type": "string"
-          },
-          "mode": {
-            "description": "`Governed` or `Ordinary`.",
-            "type": "string"
-          },
-          "policyDigest": {
-            "description": "The policy snapshot digest.",
-            "type": "string"
-          },
-          "policyName": {
-            "description": "The policy name.",
-            "type": "string"
-          },
-          "requester": {
-            "description": "The console-attested requester, `<issuer>#<subject>`.",
-            "type": "string"
           }
         }
       },
@@ -5247,6 +5214,39 @@
           "requireDistinctPrincipal": {
             "description": "Whether an approver must be a different principal from the requester.",
             "type": "boolean"
+          }
+        }
+      },
+      "ApprovalProvenanceView": {
+        "description": "PLAT-19.2: `Approval.status.authorization`, as the console renders it.",
+        "type": "object",
+        "required": [
+          "confirmationKeyId",
+          "mode",
+          "policyDigest",
+          "policyName",
+          "requester"
+        ],
+        "properties": {
+          "confirmationKeyId": {
+            "description": "The console key that attested it.",
+            "type": "string"
+          },
+          "mode": {
+            "description": "`Governed` or `Ordinary`.",
+            "type": "string"
+          },
+          "policyDigest": {
+            "description": "The policy snapshot digest.",
+            "type": "string"
+          },
+          "policyName": {
+            "description": "The policy name.",
+            "type": "string"
+          },
+          "requester": {
+            "description": "The console-attested requester, `<issuer>#<subject>`.",
+            "type": "string"
           }
         }
       },
@@ -11435,60 +11435,6 @@
           }
         }
       },
-      "RestoreAuthorizationView": {
-        "description": "PLAT-19.2: the frozen policy decision for one submitted Restore.",
-        "type": "object",
-        "required": [
-          "approvalName",
-          "legacy",
-          "mode",
-          "policy",
-          "state"
-        ],
-        "properties": {
-          "approvalName": {
-            "description": "The Approval the Restore references (`spec.approvalRef.name`).",
-            "type": "string"
-          },
-          "confirmationName": {
-            "description": "Governed (bound): the console's confirmation object an approver countersigns, `<approvalName>-confirmation`.",
-            "type": "string",
-            "nullable": true
-          },
-          "expiresAt": {
-            "description": "When the signed document stops authorising anything new.",
-            "type": "string",
-            "format": "date-time",
-            "nullable": true
-          },
-          "legacy": {
-            "description": "`true` for an unbound namespace (today's governed behaviour).",
-            "type": "boolean"
-          },
-          "mode": {
-            "description": "The mode the namespace's binding requires.",
-            "$ref": "#/components/schemas/ApprovalModeView"
-          },
-          "policy": {
-            "description": "The policy name — `legacy-governed-v1` for an unbound namespace.",
-            "type": "string"
-          },
-          "policyDigest": {
-            "description": "The policy snapshot digest the console signed; absent for the legacy synthesis, which accepts only today's v1 approval document.",
-            "type": "string",
-            "nullable": true
-          },
-          "requester": {
-            "description": "The console-attested requester, `<issuer>#<subject>`, when the console signed anything.",
-            "type": "string",
-            "nullable": true
-          },
-          "state": {
-            "description": "Where the submission goes next.",
-            "$ref": "#/components/schemas/AuthorizationState"
-          }
-        }
-      },
       "RestoreList": {
         "description": "A page of `Restore` items.",
         "type": "object",
@@ -11605,7 +11551,7 @@
         "properties": {
           "authorization": {
             "description": "PLAT-19.2: on a create, where the submission goes next.",
-            "$ref": "#/components/schemas/RestoreAuthorizationView",
+            "$ref": "#/components/schemas/RestoreRoutingView",
             "nullable": true
           },
           "item": {
@@ -11620,6 +11566,60 @@
           "requestId": {
             "description": "The request ID.",
             "type": "string"
+          }
+        }
+      },
+      "RestoreRoutingView": {
+        "description": "PLAT-19.2: the frozen policy decision for one submitted Restore.",
+        "type": "object",
+        "required": [
+          "approvalName",
+          "legacy",
+          "mode",
+          "policy",
+          "state"
+        ],
+        "properties": {
+          "approvalName": {
+            "description": "The Approval the Restore references (`spec.approvalRef.name`).",
+            "type": "string"
+          },
+          "confirmationName": {
+            "description": "Governed (bound): the console's confirmation object an approver countersigns, `<approvalName>-confirmation`.",
+            "type": "string",
+            "nullable": true
+          },
+          "expiresAt": {
+            "description": "When the signed document stops authorising anything new.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "legacy": {
+            "description": "`true` for an unbound namespace (today's governed behaviour).",
+            "type": "boolean"
+          },
+          "mode": {
+            "description": "The mode the namespace's binding requires.",
+            "$ref": "#/components/schemas/ApprovalModeView"
+          },
+          "policy": {
+            "description": "The policy name — `legacy-governed-v1` for an unbound namespace.",
+            "type": "string"
+          },
+          "policyDigest": {
+            "description": "The policy snapshot digest the console signed; absent for the legacy synthesis, which accepts only today's v1 approval document.",
+            "type": "string",
+            "nullable": true
+          },
+          "requester": {
+            "description": "The console-attested requester, `<issuer>#<subject>`, when the console signed anything.",
+            "type": "string",
+            "nullable": true
+          },
+          "state": {
+            "description": "Where the submission goes next.",
+            "$ref": "#/components/schemas/AuthorizationState"
           }
         }
       },

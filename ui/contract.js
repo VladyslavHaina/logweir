@@ -681,6 +681,13 @@ const VERIFIED_SUBJECT = shapeOf(
   { kind: str, name: str, namespace: str, uid: str },
 );
 
+// PLAT-19.2: the policy, mode and console-attested requester a v2 verdict
+// was made under. Present only while the Approval is verified.
+const APPROVAL_AUTHORIZATION = shapeOf(
+  "ApprovalProvenanceView",
+  { mode: str, policyName: str, policyDigest: str, requester: str, confirmationKeyId: str },
+);
+
 const APPROVAL = shapeOf(
   "Approval",
   {
@@ -692,8 +699,33 @@ const APPROVAL = shapeOf(
   {
     createdAt: str, verified: bool, matchedKeyId: str, approver: str,
     ticket: str, selfAttestedRisk: bool, verifiedSubject: objectOf(VERIFIED_SUBJECT),
+    authorization: objectOf(APPROVAL_AUTHORIZATION),
   },
 );
+
+// PLAT-19.2 / PLAT-12.1: where a submitted Restore goes next, decided by the
+// namespace's frozen approval policy. `state` is `confirmed` (route to the
+// operation) or `awaitingApproval` (route to its approval page); `mode` is
+// `governed` or `ordinary`. Read as strings, and compared by the one function
+// that routes on them, `ui/pages/restore-wizard.js`'s `frozenDecision`.
+const RESTORE_AUTHORIZATION = shapeOf(
+  "RestoreRoutingView",
+  { mode: str, policy: str, legacy: bool, state: str, approvalName: str },
+  { policyDigest: str, confirmationName: str, requester: str, expiresAt: str },
+);
+
+// PLAT-19.2: a namespace's effective approval policy.
+const APPROVAL_POLICY = shapeOf(
+  "ApprovalPolicyView",
+  {
+    namespace: str, name: str, mode: str, legacy: bool,
+    requireDistinctPrincipal: bool, installationDigest: str,
+  },
+  { maxAgeSeconds: int, digest: str, confirmationKeyId: str },
+);
+
+// PLAT-19.2: a governed approver's countersigned sidecar.
+const SUBMIT_APPROVAL_REQUEST = shapeOf("SubmitApprovalRequest", { sidecarBytes: str });
 
 const APPROVAL_PACKET = shapeOf(
   "ApprovalPacket",
@@ -777,10 +809,16 @@ function readOnlyItem(name, itemShape) {
 const CONNECTION_RESPONSE = item("ConnectionResponse", CONNECTION);
 const SCHEDULE_RESPONSE = item("ScheduleResponse", SCHEDULE);
 const BACKUP_RESPONSE = item("BackupResponse", BACKUP);
-const RESTORE_RESPONSE = item("RestoreResponse", RESTORE);
+// Not `item(...)`: a create answers PLAT-19.2's `authorization` beside the item.
+const RESTORE_RESPONSE = shapeOf(
+  "RestoreResponse",
+  { item: objectOf(RESTORE), requestId: str },
+  { replayed: bool, authorization: objectOf(RESTORE_AUTHORIZATION) },
+);
 const APPROVAL_RESPONSE = item("ApprovalResponse", APPROVAL);
 const APPROVAL_PACKET_RESPONSE = readOnlyItem("ApprovalPacketResponse", APPROVAL_PACKET);
 const OPERATION_RESPONSE = readOnlyItem("OperationResponse", OPERATION);
+const APPROVAL_POLICY_RESPONSE = readOnlyItem("ApprovalPolicyResponse", APPROVAL_POLICY);
 
 // ------------------------------------------- D1 W7: the three W6 answers
 
@@ -1471,6 +1509,8 @@ export const CONSOLE_REQUESTS = Object.freeze({
   // run is keyed by the plural, because it goes through `consoleCreate`.
   "schedules:policy": UPDATE_SCHEDULE_POLICY_REQUEST,
   backups: CREATE_BACKUP_REQUEST,
+  // PLAT-19.2: a governed approver's countersignature, keyed by the action.
+  "restores:approval": SUBMIT_APPROVAL_REQUEST,
 });
 
 /** Checks a body this client BUILT against the shape the server publishes.
@@ -1533,6 +1573,11 @@ export const CONSOLE_SHAPES = Object.freeze({
   ScheduleResponse: SCHEDULE_RESPONSE,
   BackupResponse: BACKUP_RESPONSE,
   RestoreResponse: RESTORE_RESPONSE,
+  RestoreRoutingView: RESTORE_AUTHORIZATION,
+  ApprovalProvenanceView: APPROVAL_AUTHORIZATION,
+  ApprovalPolicyView: APPROVAL_POLICY,
+  ApprovalPolicyResponse: APPROVAL_POLICY_RESPONSE,
+  SubmitApprovalRequest: SUBMIT_APPROVAL_REQUEST,
   ApprovalResponse: APPROVAL_RESPONSE,
   ApprovalPacketResponse: APPROVAL_PACKET_RESPONSE,
   OperationResponse: OPERATION_RESPONSE,
@@ -1733,6 +1778,11 @@ export function decodeConsoleItem(plural, value) {
     throw contractFailure("ConsoleRoute", plural, "no item route is defined for this kind");
   }
   return decodeWith(route.response, value);
+}
+
+/** PLAT-19.2: a namespace's effective approval policy. @returns {Decoded} */
+export function decodeApprovalPolicy(value) {
+  return decodeWith(APPROVAL_POLICY_RESPONSE, value);
 }
 
 /** @returns {Decoded} */

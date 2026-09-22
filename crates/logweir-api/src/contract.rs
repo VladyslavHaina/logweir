@@ -1259,7 +1259,7 @@ pub struct Approval {
     /// authorization was VERIFIED under. Absent for a v1 approval and for
     /// anything not (or no longer) verified.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub authorization: Option<ApprovalAuthorizationView>,
+    pub authorization: Option<ApprovalProvenanceView>,
     /// The status conditions, at most 16.
     pub conditions: Vec<ConditionView>,
 }
@@ -1267,7 +1267,7 @@ pub struct Approval {
 /// PLAT-19.2: `Approval.status.authorization`, as the console renders it.
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct ApprovalAuthorizationView {
+pub struct ApprovalProvenanceView {
     /// `Governed` or `Ordinary`.
     pub mode: String,
     /// The policy name.
@@ -3317,7 +3317,7 @@ pub struct RestoreResponse {
     pub item: Restore,
     /// PLAT-19.2: on a create, where the submission goes next.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub authorization: Option<RestoreAuthorizationView>,
+    pub authorization: Option<RestoreRoutingView>,
 }
 
 // ======================================================================
@@ -3358,7 +3358,7 @@ pub enum AuthorizationState {
 /// PLAT-19.2: the frozen policy decision for one submitted Restore.
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct RestoreAuthorizationView {
+pub struct RestoreRoutingView {
     /// The mode the namespace's binding requires.
     pub mode: ApprovalModeView,
     /// The policy name — `legacy-governed-v1` for an unbound namespace.

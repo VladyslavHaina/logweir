@@ -29,8 +29,8 @@ use crate::approval;
 use crate::auth::Actor;
 use crate::authz::Action;
 use crate::contract::{
-    ApprovalResponse, AuthorizationState, CreateRestoreRequest, RestoreAuthorizationView,
-    RestoreList, RestoreMode, RestoreResponse, SubmitApprovalRequest, TopicMappingRow,
+    ApprovalResponse, AuthorizationState, CreateRestoreRequest, RestoreList, RestoreMode,
+    RestoreResponse, RestoreRoutingView, SubmitApprovalRequest, TopicMappingRow,
 };
 use crate::http::{read_json, RequestId, MAX_JSON_BODY};
 use crate::idempotency::IdempotencyKey;
@@ -569,11 +569,11 @@ async fn authorize_submission(
     restore: &Restore,
     approval_name: &str,
     effective: &EffectivePolicy,
-) -> Result<RestoreAuthorizationView, ApiError> {
+) -> Result<RestoreRoutingView, ApiError> {
     actor.audit.note("approvalPolicy", effective.name());
     actor.audit.note("approvalMode", effective.mode().as_str());
     let Some(policy) = effective.bound() else {
-        return Ok(RestoreAuthorizationView {
+        return Ok(RestoreRoutingView {
             mode: effective.mode().into(),
             policy: effective.name().to_string(),
             policy_digest: None,
@@ -598,7 +598,7 @@ async fn authorize_submission(
     } else {
         approval_name.to_string()
     };
-    let view = |doc: &RestoreAuthorization| RestoreAuthorizationView {
+    let view = |doc: &RestoreAuthorization| RestoreRoutingView {
         mode: policy.mode.into(),
         policy: policy.name.clone(),
         policy_digest: Some(policy.digest()),

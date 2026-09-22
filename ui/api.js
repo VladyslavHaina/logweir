@@ -489,6 +489,16 @@ export async function consoleAction(ns, action, name, body, options) {
   return problemBody(response);
 }
 
+/** PLAT-19.2: reads a namespace's effective approval policy, `GET
+ *  /api/v1/namespaces/{ns}/approval-policy`. A read; no body, no query. */
+export async function consoleApprovalPolicy(ns, options) {
+  const response = await request(
+    path("api", "v1", "namespaces", ns, "approval-policy"),
+    readInit(options || {}),
+  );
+  return problemBody(response);
+}
+
 /** Creates one product object. `options.idempotencyKey` is REQUIRED by the
  *  route and is what makes a lost response, a double click and a restart all
  *  target the same object; this module refuses to send a durable create
@@ -833,6 +843,12 @@ const CONSOLE_ACTIONS = Object.freeze({
   }),
   "preflights:cancel": Object.freeze({
     plural: "preflights", named: true, suffix: ":cancel", key: false,
+  }),
+  // PLAT-19.2: a governed approver submits the countersigned sidecar for ONE
+  // Restore. No key: the Approval it creates is named by the Restore's own
+  // immutable approvalRef, so a replay targets the same object by name.
+  "restores:approval": Object.freeze({
+    plural: "restores", named: true, suffix: "/approval", key: false,
   }),
 });
 

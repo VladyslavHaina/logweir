@@ -697,9 +697,27 @@ export function renderApprovalSubject(view, now) {
     "Restore's operation view</a></p>" +
     "</section>" +
     existing +
-    (formOffered(v) ? renderApprovalForm(s, v) : "") +
+    subjectAction(v) +
     back
   );
+}
+
+/** What this page offers to DO for the subject, by the namespace's policy. */
+function subjectAction(v) {
+  const mode = policyMode(v.policy);
+  if (mode === "governed") {
+    return countersignOffered(v) ? renderCountersignPanel(v) : "";
+  }
+  if (mode === "ordinary") {
+    return "<section class=\"step\" id=\"ordinary-confirmation\"><h3>Ordinary " +
+      "confirmation</h3><p class=\"note\">Namespace policy <code>" +
+      esc(((v.policy || {}).name) || "") + "</code> is ordinary confirmation: the console " +
+      "recorded its signed confirmation of the requester as Approval <code>" +
+      esc(((v.subject || {}).approvalName) || "") + "</code> when the Restore was created, and " +
+      "there is nothing for an approver to add. The state above is weirkeeper's verdict on it." +
+      "</p></section>";
+  }
+  return formOffered(v) ? renderApprovalForm(v.subject || {}, v) : "";
 }
 
 /** The create form: the subject, read-only, and the two documents.
@@ -947,6 +965,26 @@ export async function loadApprovalSubject(api, ns, route, lifecycle) {
       }
     }
   }
+  // PLAT-19.2: the namespace's effective policy, and -- under an explicit
+  // Governed binding -- the console's confirmation an approver countersigns.
+  // Neither read takes the page away: an unread policy is today's flow.
+  const policy = await readPolicy(api, ns, lifecycle);
+  let confirmation = null;
+  let confirmationError = null;
+  if (policyMode(policy) === "governed" && subject.approvalName.length > 0) {
+    try {
+      confirmation = await api.get(
+        ns, PLURAL, confirmationNameFor(subject.approvalName), readOptions(lifecycle),
+      );
+    } catch (error) {
+      if (cancelled(error, lifecycle)) {
+        throw error;
+      }
+      if (!(error !== null && typeof error === "object" && error.status === 404)) {
+        confirmationError = error;
+      }
+    }
+  }
   return {
     ns: ns,
     route: r,
@@ -956,7 +994,142 @@ export async function loadApprovalSubject(api, ns, route, lifecycle) {
     found: approvalError === null ? approvalState(approval, subject) : null,
     approvalError: approvalError,
     mismatches: routeMismatches(r, subject),
+    policy: policy,
+    confirmation: confirmation,
+    confirmationError: confirmationError,
   };
+}
+
+/** PLAT-19.2: `ordinary` or `governed` for an EXPLICIT binding the console
+ *  published, `null` otherwise -- legacy mode, an unbound namespace, or an
+ *  unread policy all mean today's v1 approval flow. */
+export function policyMode(policy) {
+  const p = policy !== null && typeof policy === "object" ? policy : null;
+  if (p === null || p.legacy !== false) {
+    return null;
+  }
+  return p.mode === "ordinary" || p.mode === "governed" ? p.mode : null;
+}
+
+/** The console's confirmation object for a governed request. */
+export function confirmationNameFor(approvalName) {
+  return String(approvalName) + "-confirmation";
+}
+
+async function readPolicy(api, ns, lifecycle) {
+  if (typeof (api || {}).approvalPolicy !== "function") {
+    return null;
+  }
+  try {
+    return await api.approvalPolicy(ns, readOptions(lifecycle));
+  } catch (unread) {
+    if (cancelled(unread, lifecycle)) {
+      throw unread;
+    }
+    return null;
+  }
+}
+
+/** Whether the governed countersign panel is offered: an explicit Governed
+ *  binding, a Restore that still waits, a route that agrees with it, and no
+ *  Approval under its approvalRef yet. */
+export function countersignOffered(view) {
+  const v = view || {};
+  if (policyMode(v.policy) !== "governed" || v.restore === null || v.restore === undefined) {
+    return false;
+  }
+  if (Array.isArray(v.mismatches) && v.mismatches.length > 0) {
+    return false;
+  }
+  const phase = ((v.restore.status || {}).phase);
+  if (phase !== undefined && phase !== null && phase !== "" && phase !== "Pending") {
+    return false;
+  }
+  return ((v.found || {}).state) === "absent";
+}
+
+/** THE GOVERNED APPROVER'S PANEL (PLAT-19.2). The console's confirmation --
+ *  its document and sidecar, exactly as stored -- to copy, the one command
+ *  that countersigns it, and a field for the sidecar that command wrote.
+ *
+ *  THE DOCUMENT IS NEVER PARSED HERE, for the rule this page keeps for every
+ *  approval document: what the approver reviews is what their own CLI prints
+ *  from the bytes, and what is submitted is those bytes' sidecar. The server
+ *  refuses the requester (403), a stale or expired confirmation, and a
+ *  sidecar that adds no second signature. */
+export function renderCountersignPanel(view) {
+  const v = view || {};
+  const s = v.subject || {};
+  const state = v.countersign || {};
+  const pending = state.phase === "pending";
+  const confirmation = v.confirmation;
+  const spec = (confirmation || {}).spec || {};
+  const packet = typeof spec.approvalBytes === "string" && typeof spec.sidecarBytes === "string";
+  const policyName = esc(((v.policy || {}).name) || "");
+  const intro = "<p class=\"blurb\">Namespace policy <code>" + policyName + "</code> is " +
+    "governed: this Restore runs only after an approver who is NOT its requester countersigns " +
+    "the console's confirmation below. Copy both documents to the machine holding your " +
+    "approver key, run the command, and paste the sidecar it wrote.</p>";
+  if (v.confirmationError) {
+    return "<section class=\"step\" id=\"countersign-section\"><h3>Governed approval</h3>" +
+      intro + errorLine(v.confirmationError) + "</section>";
+  }
+  if (confirmation === null || confirmation === undefined) {
+    return "<section class=\"step\" id=\"countersign-section\"><h3>Governed approval</h3>" +
+      intro + "<p class=\"complaint\" id=\"no-confirmation\">No console confirmation " +
+      "<code>" + esc(confirmationNameFor(s.approvalName)) + "</code> exists for this Restore, " +
+      "so there is nothing to countersign. A Restore submitted through the console carries " +
+      "one; a Restore written directly to the cluster in a governed namespace never runs.</p>" +
+      "</section>";
+  }
+  return (
+    "<section class=\"step\" id=\"countersign-section\"><h3>Governed approval</h3>" + intro +
+    (packet
+      ? "<div class=\"field\"><label for=\"confirmation-document\">approvalBytes (the " +
+        "document)</label><textarea id=\"confirmation-document\" rows=\"6\" readonly " +
+        "spellcheck=\"false\"></textarea></div>" +
+        "<div class=\"field\"><label for=\"confirmation-sidecar\">sidecarBytes (the console's " +
+        "signature)</label><textarea id=\"confirmation-sidecar\" rows=\"4\" readonly " +
+        "spellcheck=\"false\"></textarea></div>"
+      : "<p class=\"note\" id=\"packet-unreadable\">This viewer may not read the " +
+        "confirmation's documents (approvalPacketRead). Ask for them, or read them with " +
+        "kubectl from Approval <code>" + esc(confirmation.metadata.name) + "</code>.</p>") +
+    "<pre class=\"copy\">" + esc(COUNTERSIGN_COMMAND) + "</pre>" +
+    "<form id=\"countersign-form\" novalidate" + (pending ? " aria-busy=\"true\"" : "") + ">" +
+    "<fieldset class=\"form-body\"" + (pending ? " disabled" : "") + ">" +
+    "<div class=\"field\"><label for=\"countersigned-sidecar\">approval.sig (countersigned)" +
+    "</label><textarea id=\"countersigned-sidecar\" name=\"sidecarBytes\" rows=\"6\" " +
+    "autocomplete=\"off\" spellcheck=\"false\"></textarea>" +
+    "<p class=\"help\">The sidecar `logweir drill countersign` wrote: the console's signature " +
+    "and yours, over the same bytes.</p></div>" +
+    "<p class=\"refusal-rule\">" + PRIVATE_KEY_REFUSAL + ".</p>" +
+    "<div class=\"actions\"><button type=\"submit\" class=\"primary\" " +
+    "id=\"submit-countersignature\">Submit the governed approval</button></div>" +
+    "</fieldset>" +
+    "<div class=\"form-status\" id=\"countersign-status\" tabindex=\"-1\">" +
+    mutationStatus(state, { kind: "Approval", name: s.approvalName }) +
+    "</div></form></section>"
+  );
+}
+
+/** The countersign command, verbatim (the same words the wizard shows). */
+export const COUNTERSIGN_COMMAND =
+  "logweir drill countersign --document <approvalBytes> --confirmation <sidecarBytes> " +
+  "--key <privkey> --out approval.sig";
+
+/** Submits a governed approver's countersigned sidecar, or refuses before
+ *  anything is sent: no text, or text that is key material. */
+export async function submitCountersignature(subject, sidecarBytes, deps) {
+  const s = subject || {};
+  const text = typeof sidecarBytes === "string" ? sidecarBytes : "";
+  if (refuseKeyMaterial("", text) !== null) {
+    throw refusal(PRIVATE_KEY_REFUSAL);
+  }
+  if (text.trim().length === 0) {
+    throw invalidInput({ sidecarBytes: "paste the sidecar `logweir drill countersign` wrote" });
+  }
+  const api = deps || API;
+  return { outcome: "created", object: await api.submitGovernedApproval(s.ns, s.name, text) };
 }
 
 /** What the subject page's form renders from: the record and its messages. */
@@ -967,7 +1140,61 @@ export function approvalFormView(view) {
   return Object.assign({}, v, {
     state: state,
     errors: state.phase === "failed" ? fieldErrors(state.error, APPROVAL_FIELD_PATHS) : null,
+    countersign: mutationFor(formKey(v.ns, COUNTERSIGN_FORM, ((v.subject || {}).name) || "")).state,
   });
+}
+
+/** The countersign form's mutation-record key suffix (PLAT-19.2). */
+export const COUNTERSIGN_FORM = "countersign-form";
+
+/** Wires the governed countersign panel: the two confirmation documents go
+ *  into their read-only fields THROUGH THE DOM, never through markup, and one
+ *  submit runs one mutation. */
+function wireCountersign(node, view, parse, api, lifecycle) {
+  const spec = ((view.confirmation || {}).spec) || {};
+  const documentArea = node.querySelector("#confirmation-document");
+  const sidecarArea = node.querySelector("#confirmation-sidecar");
+  if (documentArea !== null && typeof spec.approvalBytes === "string") {
+    documentArea.value = spec.approvalBytes;
+  }
+  if (sidecarArea !== null && typeof spec.sidecarBytes === "string") {
+    sidecarArea.value = spec.sidecarBytes;
+  }
+  const form = node.querySelector("#countersign-form");
+  if (form === null) {
+    return;
+  }
+  const key = formKey(view.ns, COUNTERSIGN_FORM, view.subject.name);
+  const mutation = mutationFor(key);
+  watchMutation(node, key, mutation, (state) => {
+    if (state.phase === "succeeded") {
+      mountApprovals(node, view.ns, view.route, parse, api, lifecycle);
+      return;
+    }
+    const body = form.querySelector("fieldset");
+    if (body !== null) {
+      body.disabled = state.phase === "pending";
+    }
+    const slot = node.querySelector("#countersign-status");
+    if (slot !== null) {
+      replace(slot, parse(mutationStatus(state, { kind: "Approval", name: view.subject.approvalName })));
+      if (state.phase === "failed" && typeof slot.focus === "function") {
+        slot.focus();
+      }
+    }
+  }, lifecycle);
+  listen(form, "submit", (event) => {
+    event.preventDefault();
+    if (!active(lifecycle) || mutation.pending()) {
+      return;
+    }
+    const area = form.querySelector("#countersigned-sidecar");
+    const text = area === null ? "" : String(area.value);
+    if (refuseKeyMaterial("", text) !== null && area !== null) {
+      area.value = "";
+    }
+    mutation.run(() => submitCountersignature(view.subject, text, api));
+  }, lifecycle);
 }
 
 export async function mountApprovals(node, ns, route, parse, deps, lifecycle) {
@@ -997,7 +1224,9 @@ export async function mountApprovals(node, ns, route, parse, deps, lifecycle) {
     }
     const view = approvalFormView(loaded);
     replace(node, parse(renderApprovalSubject(view)));
-    if (formOffered(view)) {
+    if (countersignOffered(view)) {
+      wireCountersign(node, view, parse, api, lifecycle);
+    } else if (policyMode(view.policy) === null && formOffered(view)) {
       wire(node, view, parse, api, lifecycle);
     }
   } catch (error) {

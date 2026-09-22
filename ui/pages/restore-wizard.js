@@ -131,7 +131,7 @@ import {
 import { isObjectName, itemsOf } from "./clusters.js";
 import { listD3, readCatalogPoints, readD3, readOperation } from "../operation-watch.js";
 import { renderPreflight } from "./destinations.js";
-import { approvalAuthorizes, restoreOperationRoute } from "./approvals.js";
+import { COUNTERSIGN_COMMAND, approvalAuthorizes, restoreOperationRoute } from "./approvals.js";
 
 const PLURAL = "restores";
 const CLUSTERS = "kafkaclusters";
@@ -2821,10 +2821,7 @@ export function renderPlanStep(prepared, state) {
     "<button type=\"button\" id=\"download-plan\"" + (renderable ? "" : " disabled") + ">Download plan</button>" +
     "</div>" +
     "<p class=\"caveat\">" + esc(COPY_CAVEAT) + "</p>" +
-    "<h4>Approve it out of band</h4>" +
-    "<p class=\"note\">Run this on the machine that holds the approver's private key. This " +
-    "page never sees it.</p>" +
-    copyBlock([APPROVE_COMMAND]) +
+    approvalPolicyBlock(s.approvalPolicy) +
     "<div class=\"actions actions-final\">" +
     "<button type=\"button\" id=\"create-restore\" class=\"primary\"" +
     (pending || !renderable || blocked !== null ? " disabled" : "") +
@@ -2853,11 +2850,71 @@ export function renderPlanStep(prepared, state) {
 
 /** What the one submit button does, said beside it. */
 export const GUIDED_SUBMIT_SENTENCE =
-  "Create the Restore sends exactly the plan above, then opens what the Restore needs next: its " +
-  "approval page while it waits for a verified Approval, or its operation view once one " +
-  "authorises it. Submitting this plan again -- a second click, a retry after a lost response, " +
-  "or the same plan after a reload -- never creates a second Restore, because its name is minted " +
-  "from these bytes.";
+  "Create the Restore sends exactly the plan above, then opens what the Restore needs next " +
+  "under this namespace's approval policy: its operation view when the console's confirmation " +
+  "is the authorization (ordinary confirmation) or an Approval already authorises it, and its " +
+  "approval page while it waits for one. Submitting this plan again -- a second click, a retry " +
+  "after a lost response, or the same plan after a reload -- never creates a second Restore, " +
+  "because its name is minted from these bytes.";
+
+
+/** The approval step under the namespace's EFFECTIVE policy (PLAT-19.2).
+ *
+ *  `policy` is the product API's `ApprovalPolicyView`, or `null` when the mode
+ *  cannot know it (legacy `kubectl proxy`) or the read failed -- and `null`
+ *  renders exactly today's governed instructions, which is the fail-safe
+ *  reading: nothing here ever tells an operator a Restore will run on their
+ *  confirmation unless the console said the namespace is bound Ordinary. */
+export function approvalPolicyBlock(policy) {
+  const p = policy !== null && typeof policy === "object" ? policy : null;
+  if (p !== null && p.legacy === false && p.mode === "ordinary") {
+    return (
+      "<h4 id=\"approval-policy-ordinary\">Ordinary confirmation</h4>" +
+      "<p class=\"note\">This namespace is bound to approval policy <code>" + esc(p.name) +
+      "</code> (ordinary confirmation). Create the Restore is your confirmation: the console " +
+      "signs, as its attestation that you asked, a document naming exactly this Restore, its " +
+      "UID and this plan hash, and the Restore runs once weirkeeper verifies it. No approver " +
+      "and no out-of-band signature are involved.</p>"
+    );
+  }
+  if (p !== null && p.legacy === false && p.mode === "governed") {
+    return (
+      "<h4 id=\"approval-policy-governed\">Governed approval</h4>" +
+      "<p class=\"note\">This namespace is bound to approval policy <code>" + esc(p.name) +
+      "</code> (governed approval). Create the Restore records the console's confirmation of " +
+      "you as the requester; the Restore runs only after an approver who is NOT you " +
+      "countersigns that confirmation on their own machine and submits it on the Restore's " +
+      "approval page.</p>" +
+      copyBlock([COUNTERSIGN_COMMAND])
+    );
+  }
+  return (
+    "<h4>Approve it out of band</h4>" +
+    "<p class=\"note\">Run this on the machine that holds the approver's private key. This " +
+    "page never sees it.</p>" +
+    copyBlock([APPROVE_COMMAND])
+  );
+}
+
+/** THE FROZEN POLICY'S ANSWER for a created Restore (PLAT-19.2 / PLAT-12.1):
+ *  the product API's `authorization` block, carried on the created object by
+ *  `ui/client.js` as `__contract.authorization`. `null` in legacy mode, where
+ *  the page falls back to reading the Approval itself.
+ *
+ *  ONLY THE TWO KNOWN STATES ARE ROUTED ON. An unrecognised value is `null`
+ *  and takes the fallback: a newer server's state this page does not know is
+ *  never read as "confirmed". */
+export function frozenDecision(restore) {
+  const contract = (restore || {}).__contract;
+  const found = contract !== null && typeof contract === "object" ? contract.authorization : null;
+  if (found === null || typeof found !== "object") {
+    return null;
+  }
+  if (found.state !== "confirmed" && found.state !== "awaitingApproval") {
+    return null;
+  }
+  return found;
+}
 
 /** Whether an outcome is about a plan this page is no longer showing.
  *
@@ -3635,16 +3692,27 @@ export async function submitRestore(state, deps, lifecycle, options) {
   return { outcome: created.outcome, object: created.object, route: route, prepared: prepared };
 }
 
-/** Where a submitted Restore goes next, under today's approval semantics:
- *  every Restore waits for a verified Approval. The operation view when the
- *  Approval its `spec.approvalRef` names already authorises exactly this
- *  Restore -- this name, this namespace, this UID, this plan -- and its
- *  approval page otherwise. A read that fails is not an authorisation, so it
- *  lands on the approval page, which reads the state again for itself. */
+/** Where a submitted Restore goes next, UNDER THE FROZEN APPROVAL POLICY
+ *  (PLAT-19.2 / PLAT-12.1).
+ *
+ *  1. The product API answered `confirmed`: the namespace is bound Ordinary
+ *     and the console's signed confirmation IS the Approval the Restore
+ *     names, so the submission goes to EXECUTION -- the operation view, which
+ *     shows weirkeeper admitting it (or refusing it, with the reason).
+ *  2. Otherwise -- `awaitingApproval`, or legacy mode with no answer at all --
+ *     today's rule: the operation view when the Approval its
+ *     `spec.approvalRef` names already authorises exactly this Restore (this
+ *     name, namespace, UID and plan), and its approval page otherwise. A read
+ *     that fails is not an authorisation, so it lands on the approval page,
+ *     which reads the state again for itself. */
 export async function restoreDestination(api, state, prepared, restore) {
   const s = state || {};
   const p = prepared || {};
   const meta = (restore || {}).metadata || {};
+  const frozen = frozenDecision(restore);
+  if (frozen !== null && frozen.state === "confirmed") {
+    return restoreOperationRoute(s.ns, typeof meta.name === "string" ? meta.name : p.restoreName);
+  }
   const approvalName = (((restore || {}).spec || {}).approvalRef || {}).name || p.approvalName;
   let approval = null;
   try {
@@ -4054,6 +4122,13 @@ export async function mountRestoreWizard(node, ns, params, parse, deps, lifecycl
       }
     }
     const state = initialState(ns, clusters, backups, selection, destination, destinations);
+    // PLAT-19.2: the namespace's effective approval policy, for the submit
+    // step's words. NOT a gate: routing uses the answer the create returns,
+    // and an unread policy renders today's governed instructions.
+    state.approvalPolicy = await readApprovalPolicy(api, ns, lifecycle);
+    if (!active(lifecycle)) {
+      return;
+    }
     if (state.pointState === "none") {
       // THE CONNECTED ARCHIVES' POINTS, beside the Backups (PLAT-15.2). A
       // namespace that lost every Backup object still has its archive, and the
@@ -4249,6 +4324,13 @@ async function mountCatalogPoint(node, ns, selection, parse, api, lifecycle, clu
   // catalog point: `undefined` offers the point's own destination, as before.
   const state = initialState(ns, clusters, backups, selection, choice.destination, undefined,
     choice);
+  // PLAT-19.2: the namespace's effective approval policy, read exactly as the
+  // Backup-point mount reads it, so a catalog point's submission is routed by
+  // the same policy as any other restore.
+  state.approvalPolicy = await readApprovalPolicy(api, ns, lifecycle);
+  if (!active(lifecycle)) {
+    return;
+  }
   const key = formKey(ns, WIZARD_FORM);
   const record = mutationFor(key);
   if (record.state.phase === "succeeded") {
@@ -4396,6 +4478,22 @@ export const CATALOG_OFFERS_SENTENCE =
   "only where the catalog marks them restorable and the product API found no Backup verdict " +
   "refusing them. No Backup object is needed: a plan built from one of these is bound to the " +
   "point's own receipt, which the runner re-verifies before any data moves.";
+
+/** The namespace's approval policy, or `null` when this mode has none to
+ *  offer or the read failed. A cancelled read is still a cancellation. */
+async function readApprovalPolicy(api, ns, lifecycle) {
+  if (typeof (api || {}).approvalPolicy !== "function") {
+    return null;
+  }
+  try {
+    return await api.approvalPolicy(ns, readOptions(lifecycle));
+  } catch (unread) {
+    if (cancelled(unread, lifecycle)) {
+      throw unread;
+    }
+    return null;
+  }
+}
 
 /** Renders the wizard over `state` -- with its mutation record and its field
  *  messages -- and wires what was rendered to the plan it shows. */

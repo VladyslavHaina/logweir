@@ -478,7 +478,7 @@ pub fn approval(object: &ApprovalCr) -> Approval {
                 uid: v.uid.clone(),
             }),
         authorization: status.and_then(|s| s.authorization.as_ref()).map(|a| {
-            crate::contract::ApprovalAuthorizationView {
+            crate::contract::ApprovalProvenanceView {
                 mode: a.mode.clone(),
                 policy_name: a.policy_name.clone(),
                 policy_digest: a.policy_digest.clone(),

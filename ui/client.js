@@ -41,6 +41,7 @@
 import {
   cadencePreview,
   consoleAction,
+  consoleApprovalPolicy,
   consoleCreate,
   consoleGet,
   consoleList,
@@ -58,6 +59,7 @@ import {
 import {
   contractFailure,
   decodeApprovalPacket,
+  decodeApprovalPolicy,
   decodeCadencePreview,
   decodeCancel,
   decodeCheckOperation,
@@ -859,6 +861,17 @@ function projectApproval(item) {
       uid: item.verifiedSubject.uid,
     };
   }
+  // PLAT-19.2: the Approval CRD's own `status.authorization` spelling, so a
+  // page reads one shape in both modes.
+  if (item.authorization !== null) {
+    status.authorization = {
+      mode: item.authorization.mode,
+      policyName: item.authorization.policyName,
+      policyDigest: item.authorization.policyDigest,
+      requester: item.authorization.requester,
+      confirmationKeyId: item.authorization.confirmationKeyId,
+    };
+  }
   object.status = status;
   object.__lengths = {
     approvalBytes: item.approvalBytesLength,
@@ -1252,6 +1265,20 @@ const legacyApi = Object.freeze({
   async patchSuspend(ns, name, value) {
     return patchSuspend(ns, name, value);
   },
+  // PLAT-19.2. THIS MODE CANNOT KNOW THE INSTALLATION'S APPROVAL POLICY: the
+  // document is mounted into the controller and the console, and `kubectl
+  // proxy` serves neither. `null` is "unknown", and every page reads it as
+  // today's governed flow -- which is also D0's rule for this UI: "Ordinary
+  // confirmation is unavailable through this legacy direct-CR UI".
+  async approvalPolicy() {
+    return null;
+  },
+  async submitGovernedApproval() {
+    throw noRoute(
+      "a governed approval under an explicit approval policy is submitted through the " +
+        "product API console; this page is served by kubectl proxy and has no such route",
+    );
+  },
   async listCluster(plural, options) {
     return decodeLegacyList(plural, await listCluster(plural, options)).value;
   },
@@ -1558,6 +1585,10 @@ const consoleApi = Object.freeze({
       // "already existed" for a replay and "created" for a create, in this
       // mode exactly as the 409 read-back says it in the other one.
       made.__contract.replayed = decoded.value.replayed === true;
+      // PLAT-19.2 / PLAT-12.1: THE FROZEN POLICY'S ANSWER TRAVELS WITH THE
+      // OBJECT, exactly as `replayed` does. Only a Restore create carries one;
+      // `ui/pages/restore-wizard.js`'s `frozenDecision` is its one reader.
+      made.__contract.authorization = decoded.value.authorization || null;
       return made;
     });
   },
@@ -1615,6 +1646,43 @@ const consoleApi = Object.freeze({
     } catch (refused) {
       throw withCauses(refused, "schedules");
     }
+  },
+  // PLAT-19.2: the namespace's effective approval policy, or `null` when this
+  // session may not read approvals there (the policy route is gated on the
+  // same read).
+  async approvalPolicy(ns, options) {
+    if (!granted(ns, "approvalsRead")) {
+      return null;
+    }
+    return decodeApprovalPolicy(await consoleApprovalPolicy(ns, options)).value.item;
+  },
+  // PLAT-19.2: a governed approver's countersigned sidecar for one Restore.
+  // The product API refuses the requester (403), a non-Governed namespace
+  // (409 policy_mismatch) and a stale or expired confirmation; this page
+  // renders each refusal as it arrives.
+  async submitGovernedApproval(ns, restoreName, sidecarBytes) {
+    requireGrant(ns, "approvalSubmit");
+    const body = { sidecarBytes: String(sidecarBytes) };
+    const checked = decodeRequest("restores:approval", body);
+    if (checked.unknown.length > 0) {
+      throw contractFailure(
+        "SubmitApprovalRequest",
+        checked.unknown[0],
+        "this page built a submission this API does not declare; it was not sent",
+      );
+    }
+    let answer;
+    try {
+      answer = await consoleAction(ns, "restores:approval", restoreName, body, {
+        token: decided === null ? null : decided.token,
+      });
+    } catch (refused) {
+      throw withCauses(refused, "approvals");
+    }
+    const decoded = decodeConsoleItem("approvals", answer);
+    const made = note(projectApproval(decoded.value.item), "approvals", decoded.unknown);
+    made.__contract.replayed = decoded.value.replayed === true;
+    return made;
   },
   async runBackupNow(ns, body, key) {
     requireGrant(ns, "manualBackupCreate");
@@ -2336,6 +2404,13 @@ export function apiClient() {
     },
     runBackupNow(ns, body, key) {
       return dispatch((api) => api.runBackupNow(ns, body, key));
+    },
+    // PLAT-19.2.
+    approvalPolicy(ns, options) {
+      return dispatch((api) => api.approvalPolicy(ns, options));
+    },
+    submitGovernedApproval(ns, restoreName, sidecarBytes) {
+      return dispatch((api) => api.submitGovernedApproval(ns, restoreName, sidecarBytes));
     },
 
     // D2 (PLAT-08, PLAT-09.1, PLAT-03): saved destinations, bounded topic
