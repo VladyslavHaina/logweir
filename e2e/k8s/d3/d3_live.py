@@ -8692,6 +8692,9 @@ def rehearsal() -> None:
             unreached("rehearsal-7-second-slot-is-concurrency-blocked", "PLAT-14.3",
                       "a rehearsal never occupied the schedule (step 2), so no second slot "
                       "could find one active and ConcurrencyBlocked cannot be observed")
+            unreached(REHEARSAL_SKIP_CONSUMED_ROW, "PLAT-14.3",
+                      "a rehearsal never occupied the schedule (step 2), so no slot was "
+                      "skipped and none could be fired late")
         else:
             reached["step7"] = rehearsal_arm_concurrency(
                 work, target_cluster_id, approver_key, arms, evidence)
@@ -8882,6 +8885,9 @@ def rehearsal_arm_concurrency(work: pathlib.Path, target_cluster_id: str,
         skipped: dict[str, Any] = {}
         live: dict[str, Any] = {}
         decision = "WAIT"
+        # EVERY READ, for step 7b: the skip, the slot it names and
+        # `lastScheduledSlot` beside it, as ONE observation per read.
+        observations: list[dict[str, Any]] = []
         deadline = time.time() + 480
         while True:
             live = get("rehearsalschedule", name)
@@ -8897,6 +8903,7 @@ def rehearsal_arm_concurrency(work: pathlib.Path, target_cluster_id: str,
             else:
                 first_terminal = True
             latest = (live.get("status") or {}).get("lastSkipped") or {}
+            observations.append(slot_observation(live, active, baseline))
             if latest and latest != baseline:
                 skipped = latest
             decision = concurrency_decision(
@@ -8930,7 +8937,7 @@ def rehearsal_arm_concurrency(work: pathlib.Path, target_cluster_id: str,
                    f"({ready_message(live)!r}). That is the harness's ordering, not a verdict "
                    f"about ConcurrencyBlocked", evidence)
             return False
-        return check(
+        step7 = check(
             scenario,
             "PLAT-14.3",
             decision == "EVALUATE" and all(clauses.values()),
@@ -8947,8 +8954,153 @@ def rehearsal_arm_concurrency(work: pathlib.Path, target_cluster_id: str,
             + "; ".join(f"{k}={v}" for k, v in clauses.items()),
             evidence,
         )
+        rehearsal_row_7b(name, first, first_slot, observations, step7, evidence)
+        return step7
     finally:
         quiesce_arm(name, evidence)
+
+
+#: Step 7b's row name.
+REHEARSAL_SKIP_CONSUMED_ROW = "rehearsal-7b-a-skipped-slot-is-consumed-never-fired-late"
+#: The concurrency arm's cadence, in seconds (`REHEARSAL_FAST_CRON`).
+REHEARSAL_FAST_PERIOD_SECONDS = 60
+
+
+def slot_observation(live: dict[str, Any], active: bool,
+                     baseline: dict[str, Any]) -> dict[str, Any]:
+    """One read of the schedule: when, whether the first ran, the skip — only
+    if it is NEW since the first rehearsal appeared — and `lastScheduledSlot`."""
+    status = live.get("status") or {}
+    skip = status.get("lastSkipped") or {}
+    return {"at": time.time(), "active": active,
+            "skip": skip if skip and skip != baseline else None,
+            "lastScheduledSlot": status.get("lastScheduledSlot")}
+
+
+def rehearsal_restore_slots(schedule: str) -> dict[str, str]:
+    """name -> `logweir.dev/rehearsal-slot`, for every Restore of a schedule."""
+    return {r["metadata"]["name"]: (r["metadata"].get("labels") or {}).get(
+        "logweir.dev/rehearsal-slot", "") for r in rehearsal_restores(schedule)}
+
+
+def skipped_slot_is_consumed(observations: list[dict[str, Any]], restore_slots: dict[str, str],
+                             first: str, *, period: int = REHEARSAL_FAST_PERIOD_SECONDS,
+                             ) -> tuple[str, dict[str, bool]]:
+    """verdict-precedence §5 row 3 (REHEARSAL-SKIP-DEFERS-SLOT): a skipped slot
+    is SKIPPED, never deferred.
+
+    The fixed controller writes `lastSkipped {slot: <the DUE slot>, reason}`
+    and advances `lastScheduledSlot` to that same slot in the same patch, so
+    the slot is decided: when the blocker finishes inside
+    `startingDeadlineSeconds`, no Restore is ever created for it, and the next
+    rehearsal is for a later slot. The pre-fix build wrote
+    `slot_name(now)` — the evaluation instant, rewritten every requeue — and
+    never advanced `lastScheduledSlot`, so the blocked slot fired LATE.
+
+    D3/verdict-precedence phrase the row over the ten-minute schedule
+    ("two reads ≥ 60 s apart within S"); it is measured on step 7's
+    one-minute arm, where a slot is 60 s long, so "one record per slot"
+    stands in for "the same `lastSkipped` in two reads". NOT-REACHED when the
+    premise did not hold: no skip was seen, or the first rehearsal did not
+    finish while the harness still watched a whole slot past it.
+    """
+    skips = [o for o in observations if (o.get("skip") or {}).get("reason")
+             == "ConcurrencyBlocked"]
+    slots = sorted({str(o["skip"].get("slot") or "") for o in skips})
+    finished = [o["at"] for o in observations if not o.get("active")]
+    later = {n: sl for n, sl in restore_slots.items() if n != first}
+    watched_past = (bool(finished) and observations[-1]["at"]
+                    >= finished[0] + period + REHEARSAL_REQUEUE_SECONDS
+                    + REHEARSAL_OBLIGATION_MARGIN_SECONDS)
+    premise = {
+        "a ConcurrencyBlocked skip was recorded while the first rehearsal ran": bool(skips),
+        "the first rehearsal finished while the schedule was still unsuspended":
+            bool(finished),
+        # A later rehearsal ends the watch early: its slot IS the answer.
+        "and the harness watched a whole slot past that, or saw the next rehearsal fire":
+            watched_past or bool(later),
+    }
+
+    def boundary(slot: str, at: float) -> bool:
+        try:
+            epoch = slot_epoch(slot)
+        except ValueError:
+            return False
+        return epoch % period == 0 and epoch <= at
+
+    def epoch_or_none(slot: str) -> float | None:
+        try:
+            return slot_epoch(slot)
+        except ValueError:
+            return None
+
+    last_skipped = max((e for e in (epoch_or_none(x) for x in slots) if e is not None),
+                       default=None)
+    clauses = {
+        "every skip names a DUE slot — a cron boundary no later than the read that saw it":
+            bool(skips) and all(boundary(str(o["skip"].get("slot") or ""), o["at"])
+                                for o in skips),
+        # CONSUMED: `lastScheduledSlot` is the skipped slot, or a slot decided
+        # after it — never still the first rehearsal's, which is what a
+        # deferring controller leaves it at.
+        "…and lastScheduledSlot was advanced to it (or past it) by the time it was read":
+            bool(skips) and all(
+                (epoch_or_none(str(o.get("lastScheduledSlot") or "")) or -1)
+                >= (epoch_or_none(str(o["skip"].get("slot") or "")) or float("inf"))
+                for o in skips),
+        "one slot, one record — no two skip slots fall inside the same period":
+            len(slots) == len({int((epoch_or_none(x) or -1) // period) for x in slots}),
+        "no Restore was ever created for a slot recorded as skipped":
+            not any(sl in slots for sl in restore_slots.values()),
+        "every later rehearsal is for a slot after the last skipped one":
+            last_skipped is not None and all(
+                (epoch_or_none(sl) or 0) > last_skipped for sl in later.values()),
+    }
+    if not all(premise.values()):
+        return "NOT-REACHED", {**premise, **clauses}
+    return ("PASS" if all(clauses.values()) else "FAIL"), {**premise, **clauses}
+
+
+def rehearsal_row_7b(name: str, first: str, first_slot: str,
+                     observations: list[dict[str, Any]], step7: bool,
+                     evidence: list[str]) -> None:
+    """Step 7b: keep the arm UNSUSPENDED through the first rehearsal's end and
+    one whole slot past it, then judge `skipped_slot_is_consumed`.
+
+    Only after step 7 passed: without a recorded `ConcurrencyBlocked` skip
+    there is no skipped slot to see fired late. The watch stops as soon as a
+    later rehearsal appears (its slot is the answer) or the bound passes; the
+    `finally` of the arm suspends it and waits for anything it started.
+    """
+    if not step7:
+        record(REHEARSAL_SKIP_CONSUMED_ROW, "PLAT-14.3", "NOT-REACHED",
+               "step 7 did not observe a ConcurrencyBlocked skip, so there is no skipped slot "
+               "whose late fire could be watched for", evidence)
+        return
+    deadline = time.time() + 1200
+    finished_at: float | None = None
+    while time.time() < deadline:
+        live = get("rehearsalschedule", name)
+        active = not terminal(get("restore", first))
+        observations.append(slot_observation(live, active, {}))
+        if not active and finished_at is None:
+            finished_at = time.time()
+        slots = rehearsal_restore_slots(name)
+        if finished_at is not None and (
+                len(slots) > 1 or time.time() >= finished_at + REHEARSAL_FAST_PERIOD_SECONDS
+                + REHEARSAL_REQUEUE_SECONDS + REHEARSAL_OBLIGATION_MARGIN_SECONDS):
+            break
+        time.sleep(5)
+    restore_slots = rehearsal_restore_slots(name)
+    verdict, clauses = skipped_slot_is_consumed(observations, restore_slots, first)
+    evidence.append(artifact("rehearsal/07b-skip-consumed.json", {
+        "first": first, "firstSlot": first_slot, "observations": observations,
+        "restoreSlots": restore_slots, "verdict": verdict, "clauses": clauses}))
+    record(REHEARSAL_SKIP_CONSUMED_ROW, "PLAT-14.3", verdict,
+           f"{name}'s first rehearsal {first} (slot {first_slot}) blocked "
+           f"{sorted({(o.get('skip') or {}).get('slot') for o in observations if o.get('skip')})}"
+           f"; after it finished the schedule's Restores are {restore_slots}. "
+           + "; ".join(f"{k}={v}" for k, v in clauses.items()), evidence)
 
 
 def rehearsal_arm_leftover(work: pathlib.Path, target_cluster_id: str,
@@ -9140,6 +9292,859 @@ def rehearsal_arm_refused(work: pathlib.Path, target_cluster_id: str,
 # ---------------------------------------------------------------------------
 # The negative control, the report and the cleanup
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# lab-refresh-8: a point the controller REFUSED, under a view that still offers it
+# ---------------------------------------------------------------------------
+#
+# ONE FIXTURE, THREE BRANCHES' ROWS. `claude/verdict-precedence` makes a verdict
+# the controller REACHED on a point's own `Backup` outrank a catalog row that
+# predates it — in retention (skip it `Unreadable`, never count it usable), in
+# the API's `/points` (`selectable: false`, `backupVerdict`) and in the rehearsal
+# join. `claude/fix-standing-verify` owes the same rule live for protection and
+# the rehearsal (its rows 11 and 12). All of them need the same state: a view
+# harvested while the point was sound, and a `Backup` the controller then
+# refused. This phase builds it through the PRODUCT, not by patching status:
+#
+# * ROW 11 — the receipt object is REPLACED in this run's own bucket after the
+#   catalog harvested it, and the controller's evidence-fetch Job reads the
+#   replacement: its digest disagrees with the runner's, so the controller
+#   itself writes `Invalid`. The ORDER is what makes that possible: the point's
+#   destination (`RP_SLOW_DEST`) reads with a Secret that lacks its key, so the
+#   Job's first attempt fails at the kubelet (`CredentialSecretKeyMissing`) and
+#   D2 §3.9 step 5 schedules a retry; the harness harvests the view, measures
+#   every control, replaces the receipt and ONLY THEN repairs the Secret, and
+#   the retry reads what is now there. An operator's broken Secret and a
+#   tampered object are both states the product must meet; nothing here writes
+#   a status field.
+# * ROW 12 — a point signed by a key this run minted and put on the namespace's
+#   `TrustPolicy` as Active is `Valid`; the key is then REVOKED
+#   (`KeyCompromise`), and the controller re-derives `Untrusted`.
+#
+# The two refused points sit in one archive location with two sound ones, so
+# retention has an older good point to (not) promote and `/points` a sound row
+# to keep selectable. CLUSTER LOCK: the `TrustPolicy` is rebuilt, like
+# `rehearsal` rebuilds it, and the rehearsal arms touch the shared scratch
+# broker only under their own rendered prefixes.
+
+BUCKET_R = f"{OWNER}-{STAMP}-r"
+RP_PREFIX = "archive-refused"
+#: A sound `evidenceRead` grant over the location: the Job reads, `Valid`.
+RP_DEST = "dest-rp"
+#: The SAME location, read with `RP_EVREAD_SECRET`, which starts without its
+#: `secret-access-key` key — row 11's point is written through it.
+RP_SLOW_DEST = "dest-rp-slow"
+RP_EVREAD_SECRET = f"{OWNER}-rp-evread"
+RP_CATALOG = "rp-cat"
+#: One schedule per refused point, so each policy and each rehearsal arm has
+#: that point, and only it, as a run of its schedule.
+RP_REFUSED_SCHEDULE = "rp-refused-runs"
+RP_REVOKED_SCHEDULE = "rp-revoked-runs"
+RP_RETENTION = "rp-keep"
+RP_PROTECT_REFUSED = "rp-protect-refused"
+RP_PROTECT_REVOKED = "rp-protect-revoked"
+RP_ARM_REFUSED = "rp-rehearse-refused"
+RP_ARM_REVOKED = "rp-rehearse-revoked"
+#: `evidence_fetch::MAX_ATTEMPTS`: the first attempt and three retries.
+EVIDENCE_FETCH_MAX_ATTEMPTS = 4
+#: The receipt's replacement: the same document plus one byte. The JSON still
+#: parses, the DSSE signature no longer covers it, and — first — its digest is
+#: not the one the runner reported.
+TAMPER_SUFFIX = b"\n"
+
+
+def point_id_of(backup: dict[str, Any]) -> str | None:
+    """`lwp1-<first 128 bits of the runner's receipt digest>` — the point id the
+    catalog, retention and the API all key on (`protection.rs:641`)."""
+    receipt = ((backup.get("status") or {}).get("evidence") or {}).get("receiptSha256") or ""
+    if receipt.startswith("sha256:") and len(receipt) >= 39:
+        return f"lwp1-{receipt[len('sha256:'):][:32]}"
+    return None
+
+
+def observation_of(obj: dict[str, Any] | None) -> dict[str, Any]:
+    return (((obj or {}).get("status") or {}).get("evidence") or {}).get("observation") or {}
+
+
+def fetch_retry_owed(backup: dict[str, Any]) -> bool:
+    """Whether a `NotAttempted` still has an evidence-fetch attempt coming."""
+    obs = observation_of(backup)
+    attempt = obs.get("attempt") if isinstance(obs.get("attempt"), int) else 0
+    return (verdict_of(backup) == "NotAttempted" and bool(obs.get("retryAfter"))
+            and attempt < EVIDENCE_FETCH_MAX_ATTEMPTS)
+
+
+def fetch_will_read_again(backup: dict[str, Any]) -> bool:
+    """Whether the controller will fetch this run's evidence at least once more
+    — a scheduled retry, or an attempt in flight (`Pending`), which, if its pod
+    is still stuck on the broken Secret, fails and schedules one while attempts
+    remain, and if the kubelet already re-read the repaired Secret, reads now."""
+    obs = observation_of(backup)
+    attempt = obs.get("attempt") if isinstance(obs.get("attempt"), int) else 0
+    return fetch_retry_owed(backup) or (
+        verdict_of(backup) == "Pending" and attempt < EVIDENCE_FETCH_MAX_ATTEMPTS)
+
+
+#: `evidence_fetch::RETRY_DELAYS_SECONDS` — the delay before retry n+1 after
+#: attempt n did not finish.
+EVIDENCE_FETCH_RETRY_DELAYS = (60, 300, 900)
+
+
+def read_again_within(backup: dict[str, Any], *, now_epoch: float | None = None) -> int:
+    """How long the controller may take to fetch this run's evidence once more:
+    until a scheduled retry plus one attempt's budget, or — for an attempt in
+    flight — that attempt failing, the next delay, and one attempt's budget.
+    Bounded at 25 minutes, the whole retry schedule."""
+    at = time.time() if now_epoch is None else now_epoch
+    obs = observation_of(backup)
+    attempt = obs.get("attempt") if isinstance(obs.get("attempt"), int) else 1
+    if verdict_of(backup) == "Pending":
+        delay = EVIDENCE_FETCH_RETRY_DELAYS[min(max(attempt, 1), 3) - 1]
+        return min(1500, VERDICT_SETTLE_SECONDS + delay + VERDICT_SETTLE_SECONDS)
+    retry_ms = rfc3339_ms(obs.get("retryAfter"))
+    until = max(0, int(retry_ms / 1000 - at)) if retry_ms is not None else 0
+    return min(1500, VERDICT_SETTLE_SECONDS + until)
+
+
+def refused_point_fixture_is_real(points: dict[str, dict[str, Any]],
+                                  entries: dict[str, dict[str, Any]],
+                                  key_id: str) -> dict[str, bool]:
+    """The state every row below is about, each part on its own.
+
+    `points` is `{rp-1, rp-2, rp-4, rp-3}` by name; `entries` the view row of
+    each. rp-3 is the one whose fetch must still be OWED — a retry scheduled —
+    or the replacement below would never be read by the controller.
+    """
+    rp3 = points.get("rp-3") or {}
+    rp4 = points.get("rp-4") or {}
+    obs3 = observation_of(rp3)
+    detail3 = str((((rp3.get("status") or {}).get("evidence") or {}).get("verification")
+                   or {}).get("detail") or "")
+    return {
+        "the two sound points verified Valid through the evidence-fetch Job": all(
+            verdict_of(points.get(n) or {}) == "Valid" for n in ("rp-1", "rp-2")),
+        "the point signed by this run's minted key verified Valid under it":
+            verdict_of(rp4) == "Valid"
+            and (((rp4.get("status") or {}).get("evidence") or {}).get("verification")
+                 or {}).get("matchedKeyId") == key_id,
+        "row 11's point is NotAttempted: its grant's Secret lacks its key":
+            verdict_of(rp3) == "NotAttempted" and "CredentialSecretKeyMissing" in detail3,
+        "…and its fetch is still OWED — a retry is scheduled": fetch_retry_owed(rp3),
+        "…after attempt 1's own Job failed": obs3.get("attempt") == 1,
+        "every point carries the runner's receipt digest, so it has a point id": all(
+            point_id_of(points.get(n) or {}) for n in ("rp-1", "rp-2", "rp-3", "rp-4")),
+        "the view holds one Available/Verified/selectable row for each of the four": all(
+            (entries.get(n) or {}).get("availability") == "Available"
+            and (entries.get(n) or {}).get("verification") == "Verified"
+            and (entries.get(n) or {}).get("selectable") is True
+            for n in ("rp-1", "rp-2", "rp-3", "rp-4")),
+        "…each keyed by the Backup's own runner digest":
+            all((entries.get(n) or {}).get("receiptSha256")
+                == (((points.get(n) or {}).get("status") or {}).get("evidence") or {})
+                .get("receiptSha256") for n in ("rp-1", "rp-2", "rp-3", "rp-4")),
+        "row 11's point is the newest, and row 12's the second newest":
+            [n for n, _ in sorted(entries.items(),
+                                  key=lambda kv: kv[1].get("recoveryPointAtMs") or 0)][-2:]
+            == ["rp-4", "rp-3"],
+    }
+
+
+def replaced_receipt_is_invalid(before: dict[str, Any], after: dict[str, Any],
+                                entry: dict[str, Any], replaced_digest: str) -> dict[str, bool]:
+    """fix-standing-verify row 11: a replaced receipt is `Invalid`, projects
+    nothing, and the stale view row that still offers it is only a premise.
+
+    `receiptSha256` stays the RUNNER's claim — the controller hashes what it
+    fetched only to compare — so the join by digest still finds the view row
+    harvested from the original bytes, which is what makes the stale row
+    reachable by every consumer below.
+    """
+    status = after.get("status") or {}
+    evidence = status.get("evidence") or {}
+    ver = evidence.get("verification") or {}
+    obs = evidence.get("observation") or {}
+    runner = ((before.get("status") or {}).get("evidence") or {}).get("receiptSha256")
+    return {
+        "before the replacement nobody had read it (NotAttempted, or Pending on a retry)":
+            verdict_of(before) in {"NotAttempted", "Pending"},
+        "the controller wrote Invalid itself, from the bytes the retry fetched":
+            ver.get("result") == "Invalid",
+        "on a retry — the first attempt never read anything":
+            isinstance(obs.get("attempt"), int) and obs.get("attempt") >= 2,
+        "receiptSha256 is still the runner's claim, not the replacement's digest":
+            bool(runner) and evidence.get("receiptSha256") == runner
+            and runner != replaced_digest,
+        "no windowCovered is projected": status.get("windowCovered") is None,
+        "no records are projected": status.get("records") in (None, {}, []),
+        "no capture is projected": not status.get("capture"),
+        "no key is named as matching": not ver.get("matchedKeyId"),
+        "Verified is not True": condition(after, "Verified").get("status") != "True",
+        "PREMISE: the view row harvested before the replacement still offers the point":
+            entry.get("availability") == "Available" and entry.get("verification") == "Verified"
+            and entry.get("selectable") is True and entry.get("receiptSha256") == runner,
+    }
+
+
+def revoked_signer_is_untrusted(before: dict[str, Any], after: dict[str, Any],
+                                entry: dict[str, Any], key_id: str) -> dict[str, bool]:
+    """fix-standing-verify row 12: revoking the signer re-derives `Untrusted`
+    on the terminal `Backup`, while the pre-revocation view still offers it."""
+    ver_b = ((before.get("status") or {}).get("evidence") or {}).get("verification") or {}
+    ver_a = ((after.get("status") or {}).get("evidence") or {}).get("verification") or {}
+    return {
+        "before the revocation the point was Valid under the minted key":
+            ver_b.get("result") == "Valid" and ver_b.get("matchedKeyId") == key_id,
+        "after it the controller reads Untrusted": ver_a.get("result") == "Untrusted",
+        "about the same key — the signature still verifies, the authority does not":
+            ver_a.get("matchedKeyId") == key_id,
+        "the run itself is untouched — still Succeeded":
+            (after.get("status") or {}).get("phase") == "Succeeded",
+        "Verified is not True": condition(after, "Verified").get("status") != "True",
+        "PREMISE: the view row harvested before the revocation still offers the point":
+            entry.get("availability") == "Available" and entry.get("verification") == "Verified"
+            and entry.get("selectable") is True,
+    }
+
+
+def refused_point_is_skipped_by_retention(control: dict[str, Any], after: dict[str, Any],
+                                          refused: str, promoted: str) -> dict[str, bool]:
+    """verdict-precedence §5 row 1 (RETENTION-PLAN-IGNORES-REFUSED-VERDICT).
+
+    `keepLast: 1, minUsablePoints: 1`. While the newest point was sound it
+    was the one kept and `promoted` — the next good one — was a candidate.
+    Once the controller refused the newest, retention must skip it
+    `Unreadable` and keep `promoted` instead: counting the refused point as
+    usable is exactly what would have planned `promoted`'s deletion.
+    """
+    c_ids = evaluation_point_ids({"status": {"lastEvaluation": control}})
+    a_ids = evaluation_point_ids({"status": {"lastEvaluation": after}})
+    skipped = {row.get("pointId"): row.get("reason") for row in (after.get("skipped") or [])
+               if isinstance(row, dict)}
+    return {
+        "CONTROL: while it was sound, the newest point was the one kept": refused in c_ids["kept"],
+        "CONTROL: …and the next good point was planned BeyondKeepLast":
+            any(c.get("pointId") == promoted and c.get("reason") == "BeyondKeepLast"
+                for c in (control.get("candidates") or [])),
+        "the refused point is skipped Unreadable": skipped.get(refused) == "Unreadable",
+        "…and is neither kept nor a candidate":
+            refused not in a_ids["kept"] and refused not in a_ids["candidates"],
+        "the next good point is kept instead": promoted in a_ids["kept"],
+        "…and is NOT a deletion candidate": promoted not in a_ids["candidates"],
+        "every skip reason is in the closed vocabulary":
+            set(skipped.values()) <= SKIPPED_REASONS,
+        "the plan changed — its digest differs from the control's":
+            bool(after.get("planSha256")) and after.get("planSha256") != control.get(
+                "planSha256"),
+    }
+
+
+def refused_point_is_not_selectable(control: dict[str, Any], page: dict[str, Any],
+                                    selectable_page: dict[str, Any], point_id: str,
+                                    verdict: str, sound_point: str) -> dict[str, bool]:
+    """verdict-precedence §5 row 2 (CATALOG-LIST-IGNORES-REFUSED-VERDICT).
+
+    `GET …/catalogs/<name>/points`: the row the view still calls
+    `Available`/`Verified` is published `selectable: false` with the
+    controller's own word, and `?selectable=true` omits it — the filter and the
+    row cannot disagree. A sound point beside it stays selectable, which is
+    what stops a build that refused EVERY row passing this.
+    """
+    def by_id(doc: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        return {i.get("pointId"): i for i in (doc.get("items") or []) if isinstance(i, dict)}
+
+    before, now_, filtered = by_id(control), by_id(page), by_id(selectable_page)
+    row = now_.get(point_id) or {}
+    return {
+        "CONTROL: before the refusal the point was listed selectable, with no backupVerdict":
+            (before.get(point_id) or {}).get("selectable") is True
+            and "backupVerdict" not in (before.get(point_id) or {}),
+        "the point is still listed": bool(row),
+        f"…with backupVerdict {verdict}": row.get("backupVerdict") == verdict,
+        "…and selectable: false": row.get("selectable") is False,
+        "PREMISE: its row still reads Available/Verified — the view predates the refusal":
+            row.get("availability") == "Available" and row.get("verification") == "Verified",
+        "?selectable=true omits it": point_id not in filtered,
+        "a sound point beside it stays selectable, in both listings":
+            (now_.get(sound_point) or {}).get("selectable") is True and sound_point in filtered,
+        "every Backup verdict was read (no backupVerdictsIncomplete/Truncated)":
+            "backupVerdictsIncomplete" not in page and "backupVerdictsTruncated" not in page,
+    }
+
+
+def refused_point_is_never_selected(schedule: dict[str, Any], approval: dict[str, Any],
+                                    restores: list[str], jobs: list[str],
+                                    entry: dict[str, Any], candidate: dict[str, Any],
+                                    since_slot: str) -> tuple[str, dict[str, bool]]:
+    """fix-standing-verify rows 11/12 (rehearsal half) and verdict-precedence §5
+    row 4: a schedule whose only run is a REFUSED point skips
+    `NoQualifyingPoint`, creates nothing — while the view still calls the point
+    selectable and the standing authorization verifies.
+
+    The premise clauses make it differential: the authorization passed (so the
+    skip is not `AuthorizationInvalid`), the view row is selectable and the
+    run covers `orders` (so, with its verdict ignored, the point WOULD qualify
+    and the slot would fire). `TargetBusy` is the harness's ordering →
+    HARNESS-FAULT; a premise that did not hold → INCONCLUSIVE; a refusal
+    clause that did not hold → FAIL.
+    """
+    skip = (schedule.get("status") or {}).get("lastSkipped") or {}
+    slot = str(skip.get("slot") or "")
+    topics = ((candidate.get("spec") or {}).get("topics") or [])
+    premise = {
+        "the arm's standing Approval is Verified=True":
+            condition(approval, "Verified").get("status") == "True",
+        "the view row for the point is still selectable":
+            entry.get("selectable") is True,
+        "the refused run is a run of this schedule and covers orders":
+            ((candidate.get("spec") or {}).get("scheduleRef") or {}).get("name") is not None
+            and REHEARSAL_TOPIC in topics,
+    }
+    clauses = {
+        "a slot due after the arm was unsuspended was decided": bool(slot) and slot >= since_slot,
+        "it was skipped NoQualifyingPoint": skip.get("reason") == "NoQualifyingPoint",
+        "no Restore was created": not restores,
+        "no rehearsal Job exists for the schedule": not jobs,
+    }
+    if skip.get("reason") == "TargetBusy" and not restores:
+        return "HARNESS-FAULT", {**premise, **clauses}
+    if not all(clauses.values()):
+        return "FAIL", {**premise, **clauses}
+    if not all(premise.values()):
+        return "INCONCLUSIVE", {**premise, **clauses}
+    return "PASS", {**premise, **clauses}
+
+
+# --- a loopback logweir-api, for the /points rows ------------------------------
+
+API_BIN_ENV = "LOGWEIR_API_BIN"
+
+
+def logweir_api_bin() -> str | None:
+    """`LOGWEIR_API_BIN`, else the newer of the worktree's release/debug builds."""
+    override = os.environ.get(API_BIN_ENV)
+    if override:
+        return override if pathlib.Path(override).is_file() else None
+    built = [p for p in (ROOT / "target/release/logweir-api", ROOT / "target/debug/logweir-api")
+             if p.is_file()]
+    return str(max(built, key=lambda p: p.stat().st_mtime)) if built else None
+
+
+class LoopbackApi:
+    """`logweir-api` in `localAdmin` mode on 127.0.0.1, against THIS namespace.
+
+    The process is this run's own; `stop()` — called from a `finally` —
+    terminates and then kills it. Every request carries a timeout.
+    """
+
+    def __init__(self, binary: str) -> None:
+        import socket
+
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            self.port = probe.getsockname()[1]
+        self.work = OUT / "api"
+        self.work.mkdir(mode=0o700, parents=True, exist_ok=True)
+        cursor = self.work / "cursor.key"
+        cursor.write_bytes(secrets.token_bytes(32))
+        cursor.chmod(0o600)
+        config = "\n".join([
+            "mode: localAdmin",
+            f'listen: "127.0.0.1:{self.port}"',
+            f'publicOrigin: "http://127.0.0.1:{self.port}"',
+            f"uiDirectory: {ROOT / 'ui'}",
+            "localAdmin:",
+            f"  subject: {OWNER}-api",
+            "  displayName: D3 live acceptance",
+            f"namespaces: [{NS}]",
+            "kubernetes:",
+            "  source: kubeconfig",
+            "  context: docker-desktop",
+            f"cursorKeyFile: {cursor}",
+            "",
+        ])
+        (self.work / "config.yaml").write_text(config)
+        self.log = (self.work / "api.log").open("ab")
+        self.proc = subprocess.Popen([binary, "--config", str(self.work / "config.yaml")],
+                                     stdout=self.log, stderr=self.log, cwd=ROOT)
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            if self.proc.poll() is not None:
+                raise RuntimeError(f"logweir-api exited {self.proc.returncode}; see "
+                                   f"{self.work / 'api.log'}")
+            try:
+                if self.get("/healthz")[0] == 200:
+                    return
+            except OSError:
+                pass
+            time.sleep(0.5)
+        self.stop()
+        raise RuntimeError("logweir-api never answered /healthz within 60 s")
+
+    def get(self, path: str) -> tuple[int, Any]:
+        import urllib.error
+        import urllib.request
+
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{self.port}{path}",
+                                        timeout=30) as response:
+                body = response.read().decode()
+                status = response.status
+        except urllib.error.HTTPError as e:
+            body, status = e.read().decode(), e.code
+        try:
+            return status, json.loads(body)
+        except json.JSONDecodeError:
+            return status, body
+
+    def points(self, catalog: str, *, selectable: bool = False) -> dict[str, Any]:
+        query = "?selectable=true" if selectable else ""
+        status, body = self.get(f"/api/v1/namespaces/{NS}/catalogs/{catalog}/points{query}")
+        if status != 200 or not isinstance(body, dict):
+            return {"status": status, "body": body, "items": []}
+        return body
+
+    def stop(self) -> None:
+        if self.proc.poll() is None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                self.proc.wait(timeout=20)
+        self.log.close()
+
+
+# --- the phase's own fixtures ---------------------------------------------------
+
+
+def refused_point_trust(target_cluster_id: str, approver_key: dict[str, Any],
+                        signer_key: dict[str, Any], *, revoked: bool = False) -> dict[str, Any]:
+    """This namespace's `TrustPolicy` for the phase: the lab signing key and
+    the MINTED signer, both Active for `EvidenceSigning`, the minted approver
+    for `GovernedApproval`, and the scratch broker's cluster id.
+
+    Created by delete-and-recreate the first time (`trust` leaves the lab key
+    Revoked; `spec.keys` has no Revoked→Active transition) and APPLIED with
+    `revoked=True` for row 12 — Active→Revoked is the one direction the CRD
+    allows, and it is the event the controller re-derives the verdict on.
+    """
+    signing = roster_signing_key()
+    stamp = now()
+    minted = policy_key(signer_key["keyId"], signer_key["spkiPem"],
+                        "Revoked" if revoked else "Active",
+                        display=f"{OWNER}'s refused-point signing key",
+                        subject=f"{OWNER}-rp-signer@logweir.invalid")
+    if revoked:
+        minted.update(retiredAt=stamp, revokedAt=stamp, revocationEffectiveFrom=stamp,
+                      revocationReason="KeyCompromise")
+    body = trust_policy(
+        "Active",
+        keys=[
+            policy_key(signing["keyId"], signing["spkiPem"], "Active",
+                       display="the lab signing key"),
+            minted,
+            policy_key(approver_key["keyId"], approver_key["spkiPem"], "Active",
+                       display=f"{OWNER}'s refused-point approver key",
+                       subject=f"{OWNER}-rp-approver@logweir.invalid",
+                       usages=["GovernedApproval"]),
+        ],
+    )
+    body["spec"]["allowedTargetClusterIds"] = [target_cluster_id]
+    if not revoked:
+        delete_owned_trust_policy(TRUST_POLICY, check=False)
+    return apply(body)
+
+
+def broken_read_secret() -> None:
+    """`RP_EVREAD_SECRET` WITHOUT `secret-access-key`: the kubelet cannot
+    project the grant, which `check/waiting.rs` classifies as
+    `CredentialSecretKeyMissing` — a Job failure, so D2 §3.9 retries it."""
+    source = get("secret", "logweir-s3")
+    run(KN + ["delete", "secret", RP_EVREAD_SECRET, "--ignore-not-found=true", "--wait=true"])
+    apply({"apiVersion": "v1", "kind": "Secret", "metadata": owned(RP_EVREAD_SECRET),
+           "type": "Opaque",
+           "data": {"access-key-id": source["data"]["access-key-id"]}})
+
+
+def repaired_read_secret() -> None:
+    """The same Secret, now carrying both keys — the operator fixed it."""
+    copy_secret("logweir-s3", RP_EVREAD_SECRET)
+
+
+def signed_backup(name: str, dest: str, key: dict[str, Any],
+                  schedule: dict[str, str]) -> dict[str, Any]:
+    """A run whose receipt is signed by `key`, with the namespace's own
+    `logweir-signing-key` put back afterwards whatever happens — the same
+    swap `protection_verdicts` row 2 makes, with an ACTIVE key this time."""
+    original = get("secret", "logweir-signing-key")
+    try:
+        run(KN + ["delete", "secret", "logweir-signing-key", "--wait=true"], check=False)
+        run(KN + ["create", "secret", "generic", "logweir-signing-key",
+                  f"--from-file=signing.pem={key['private']}"], timeout=120)
+        run(KN + ["label", "secret", "logweir-signing-key",
+                  f"logweir.dev/test-owner={OWNER}", "--overwrite"], timeout=60)
+        return run_backup(name, dest, schedule=schedule)
+    finally:
+        run(KN + ["delete", "secret", "logweir-signing-key", "--wait=true"], check=False)
+        apply({"apiVersion": "v1", "kind": "Secret", "metadata": owned("logweir-signing-key"),
+               "data": original.get("data", {}), "type": original.get("type", "Opaque")})
+
+
+def evaluation_after(name: str, mark: str, *, seconds: int = 300) -> dict[str, Any]:
+    """`lastEvaluation` from an evaluation that STARTED after `mark` — the
+    retention controller re-evaluates every 60 s when idle."""
+    obj = settle("retentionpolicy", name,
+                 lambda o: moved_past(((o.get("status") or {}).get("lastEvaluation") or {})
+                                      .get("at"), mark),
+                 seconds=seconds, what=f"an evaluation after {mark}")
+    return ((obj or get("retentionpolicy", name)).get("status") or {}).get("lastEvaluation") or {}
+
+
+def rp_rehearsal_arm(name: str, schedule_name: str, candidate: dict[str, Any],
+                     entry: dict[str, Any], *, work: pathlib.Path,
+                     approver_key: dict[str, Any], target_cluster_id: str,
+                     arms: dict[str, str], evidence: list[str]) -> tuple[str, dict[str, bool]]:
+    """One schedule whose only run is the refused point, for one slot."""
+    schedule, approval_name = rehearsal_arm(
+        name, cron=REHEARSAL_FAST_CRON, key=approver_key["private"], work=work,
+        target_cluster_id=target_cluster_id, arms=arms,
+        point=rehearsal_point_spec(schedule_name, RP_CATALOG))
+    try:
+        approval = get("approval", approval_name)
+        since = dt.datetime.fromtimestamp(time.time(), dt.timezone.utc).strftime(
+            "%Y%m%d-%H%M%S")
+        unsuspend("rehearsalschedule", name)
+        live = poll(lambda: get_opt("rehearsalschedule", name),
+                    lambda o: str(((o.get("status") or {}).get("lastSkipped") or {})
+                                  .get("slot") or "") >= since
+                    or bool(rehearsal_restores(name)),
+                    seconds=240)
+        restores = [r["metadata"]["name"] for r in rehearsal_restores(name)]
+        jobs = schedule_children(name)["jobs"]
+        verdict, clauses = refused_point_is_never_selected(
+            live, approval, restores, jobs, entry, candidate, since)
+        evidence.append(artifact(f"refused-point/rehearsal-{name}.json", {
+            "schedule": live.get("status"), "approval": approval.get("status"),
+            "restores": restores, "jobs": jobs, "since": since, "entry": entry,
+            "verdict": verdict, "clauses": clauses}))
+        return verdict, clauses
+    finally:
+        quiesce_arm(name, evidence)
+
+
+def refused_point() -> None:
+    """lab-refresh-8's refused-point rows: verdict-precedence §5 rows 1, 2 and
+    4, fix-standing-verify rows 11 and 12. See the block comment above.
+
+    CLUSTER LOCK (the `TrustPolicy`). Needs `setup` and — for the same reason
+    as `rehearsal` — runs after `trust`, and after `rehearsal`, which rebuilds
+    the same `TrustPolicy` with other keys.
+    """
+    evidence: list[str] = []
+    task = "PLAT-16.2/PLAT-15.1/PLAT-14.3"
+    arms: dict[str, str] = {}
+    work: pathlib.Path | None = None
+    approver_key: dict[str, Any] | None = None
+    signer_key: dict[str, Any] | None = None
+    api: LoopbackApi | None = None
+    rows = ["standing-11-replaced-receipt-is-invalid-and-projects-nothing",
+            "retention-refused-newest-point-is-skipped-unreadable",
+            "catalog-points-refused-point-is-not-selectable",
+            "protection-refused-point-under-a-stale-view-is-unprotected",
+            "rehearsal-refused-point-is-never-selected",
+            "standing-12-revoked-signer-is-untrusted",
+            "retention-revoked-point-is-skipped-unreadable",
+            "catalog-points-revoked-point-is-not-selectable",
+            "protection-revoked-point-under-a-stale-view-is-unprotected",
+            "rehearsal-revoked-point-is-never-selected"]
+
+    def unreached(from_row: str, why: str) -> None:
+        for name in rows[rows.index(from_row):]:
+            if name not in STATE["scenarios"] or STATE["scenarios"][name].get("at", "") < started:
+                record(name, task, "NOT-REACHED", why, evidence)
+
+    started = now()
+    try:
+        # ---- fixtures ------------------------------------------------------
+        work = pathlib.Path(tempfile.mkdtemp(prefix=f"{OWNER}-rp-", dir="/tmp"))
+        work.chmod(0o700)
+        approver_key = mint_signing_key(f"{OWNER}-rp-approver")
+        signer_key = mint_signing_key(f"{OWNER}-rp-signer")
+        target = rehearsal_target_cluster()
+        target_cluster_id = target["status"]["clusterId"]
+        refused_point_trust(target_cluster_id, approver_key, signer_key)
+        ensure_bucket(BUCKET_R)
+        broken_read_secret()
+        apply(destination(RP_DEST, BUCKET_R, prefix=RP_PREFIX))
+        apply(destination(RP_SLOW_DEST, BUCKET_R, prefix=RP_PREFIX,
+                          evidence_read_secret=RP_EVREAD_SECRET))
+        for name in (RP_DEST, RP_SLOW_DEST):
+            wait_for("backupdestination", name,
+                     lambda o: condition(o, "Valid").get("status") == "True",
+                     seconds=180, what="Valid=True")
+        for schedule in (RP_REFUSED_SCHEDULE, RP_REVOKED_SCHEDULE):
+            if get_opt("backupschedule", schedule) is None:
+                apply(schedule_object(schedule, RP_DEST))
+        sink_ready()
+        for name in ("rp-1", "rp-2", "rp-3", "rp-4"):
+            if get_opt("backup", name) is not None:
+                run(KN + ["delete", "backup", name, "--wait=true"])
+        points: dict[str, dict[str, Any]] = {}
+        points["rp-1"] = run_backup("rp-1", RP_DEST)
+        points["rp-2"] = run_backup("rp-2", RP_DEST)
+        points["rp-4"] = signed_backup("rp-4", RP_DEST, signer_key,
+                                       schedule_ref(RP_REVOKED_SCHEDULE))
+        # NEWEST, AND WRITTEN THROUGH THE BROKEN GRANT: its fetch fails and is
+        # retried, which is the window the replacement is delivered in.
+        points["rp-3"] = run_backup("rp-3", RP_SLOW_DEST,
+                                    schedule=schedule_ref(RP_REFUSED_SCHEDULE))
+        # MANUAL-ONLY (`intervalSeconds: 0`): the view is fresh for the TTL
+        # floor (one hour) and is NEVER re-harvested unless asked, so it keeps
+        # describing the archive as it was — the stale row the rows are about.
+        view = fresh_catalog(RP_CATALOG, RP_DEST, intervalSeconds=0)
+        all_entries = view_entries(view)
+        entries = {n: entry_for_backup(all_entries, b) for n, b in points.items()}
+        fixture = refused_point_fixture_is_real(points, entries, signer_key["keyId"])
+        evidence.append(artifact("refused-point/00-fixture.json", {
+            "points": {n: backup_facts(b) for n, b in points.items()},
+            "entries": entries, "clauses": fixture,
+            "signerKeyId": signer_key["keyId"], "trustPolicy": TRUST_POLICY}))
+        if not check("refused-point-fixture-is-real", task, all(fixture.values()),
+                     "the state every refused-point row is about: two sound Job-verified "
+                     "points, one signed by a minted Active key, and the newest written "
+                     "through a grant whose Secret lacks its key, still owed a retry; the "
+                     "view offers all four. " + "; ".join(f"{k}={v}" for k, v in fixture.items()),
+                     evidence):
+            unreached(rows[0], "the fixture is not what the rows are about "
+                               "(`refused-point-fixture-is-real`), so none of them measured it")
+            return
+        rp3_id, rp4_id = point_id_of(points["rp-3"]), point_id_of(points["rp-4"])
+        rp2_id, rp1_id = point_id_of(points["rp-2"]), point_id_of(points["rp-1"])
+
+        # ---- the controls, before any refusal --------------------------------
+        if get_opt("retentionpolicy", RP_RETENTION) is not None:
+            run(KN + ["delete", "retentionpolicy", RP_RETENTION, "--wait=true"])
+        mark = now()
+        apply(retention_policy(RP_RETENTION, RP_DEST, RP_CATALOG, prefix=RP_PREFIX,
+                               rules={"keepLast": 1, "minUsablePoints": 1}))
+        control_eval = evaluation_after(RP_RETENTION, mark)
+        binary = logweir_api_bin()
+        api_error = "" if binary else (f"no logweir-api binary ({API_BIN_ENV}, target/release, "
+                                       f"target/debug)")
+        if binary:
+            try:
+                api = LoopbackApi(binary)
+            except RuntimeError as e:
+                api, api_error = None, str(e)
+        control_points = api.points(RP_CATALOG) if api else {}
+        for policy, schedule, dest in ((RP_PROTECT_REFUSED, RP_REFUSED_SCHEDULE, RP_SLOW_DEST),
+                                       (RP_PROTECT_REVOKED, RP_REVOKED_SCHEDULE, RP_DEST)):
+            if get_opt("protectionpolicy", policy) is not None:
+                run(KN + ["delete", "protectionpolicy", policy, "--wait=true"])
+            apply(verdict_policy(policy, subject={"destinationRef": {"name": dest},
+                                                  "scheduleRefs": [{"name": schedule}]},
+                                 catalog=RP_CATALOG))
+        control_refused = policy_view(settled_policy(RP_PROTECT_REFUSED))
+        control_revoked = policy_view(settled_policy(RP_PROTECT_REVOKED))
+        evidence.append(artifact("refused-point/01-controls.json", {
+            "retention": control_eval, "points": control_points,
+            "protectRefused": control_refused, "protectRevoked": control_revoked,
+            "apiBinary": binary}))
+
+        # ---- ROW 11: the receipt is replaced, then the grant is repaired -----
+        before = get("backup", "rp-3")
+        receipt_key = before["status"]["evidence"]["receiptKey"]
+        original = cat(BUCKET_R, receipt_key)
+        replacement = original + TAMPER_SUFFIX
+        put(BUCKET_R, receipt_key, replacement)
+        replaced_digest = "sha256:" + hashlib.sha256(replacement).hexdigest()
+        owed = fetch_will_read_again(before)
+        repaired_read_secret()
+        wait = read_again_within(before)
+        after = settle("backup", "rp-3",
+                       lambda o: verdict_of(o) in {"Invalid", "Untrusted", "Valid"}
+                       or (verdict_of(o) == "NotAttempted" and not fetch_retry_owed(o)),
+                       seconds=min(wait, 1500), what="the retry's verdict") \
+            or get("backup", "rp-3")
+        eleven = replaced_receipt_is_invalid(before, after, entries["rp-3"], replaced_digest)
+        evidence.append(artifact("refused-point/11-replaced-receipt.json", {
+            "before": backup_facts(before), "after": backup_facts(after),
+            "receiptKey": receipt_key, "originalDigest": "sha256:" + hashlib.sha256(
+                original).hexdigest(), "replacedDigest": replaced_digest,
+            "retryWasOwedAtReplacement": owed, "clauses": eleven}))
+        if not owed:
+            record(rows[0], task, "HARNESS-FAULT",
+                   "rp-3's evidence fetch had no attempt left when the receipt was replaced, "
+                   "so the controller was never going to read the replacement; the harness "
+                   "was too slow between the fixture and the fault", evidence)
+            unreached(rows[1], "row 11's refusal was never produced")
+            return
+        if not check(rows[0], task, all(eleven.values()),
+                     f"the receipt object {receipt_key} was replaced in this run's own bucket "
+                     f"after the view harvested it, and the grant repaired; the controller's "
+                     f"retry fetched the replacement and wrote "
+                     f"{verdict_of(after)!r} (attempt {observation_of(after).get('attempt')}). "
+                     + "; ".join(f"{k}={v}" for k, v in eleven.items()), evidence):
+            unreached(rows[1], "row 11's Invalid was not produced, so nothing downstream of "
+                               "it measured a refusal")
+            return
+
+        mark = now()
+        after_eval = evaluation_after(RP_RETENTION, mark)
+        retention11 = refused_point_is_skipped_by_retention(control_eval, after_eval,
+                                                            rp3_id, rp4_id)
+        evidence.append(artifact("refused-point/11-retention.json",
+                                 {"control": control_eval, "after": after_eval,
+                                  "clauses": retention11}))
+        check(rows[1], "PLAT-16.2", all(retention11.values()),
+              f"keepLast 1 / minUsablePoints 1 over four points; the newest ({rp3_id}) is now "
+              f"Invalid on its own Backup while the view still calls it Verified. Skipped "
+              f"{after_eval.get('skipped')}, kept {after_eval.get('kept')}, candidates "
+              f"{[c.get('pointId') for c in after_eval.get('candidates') or []]}. "
+              + "; ".join(f"{k}={v}" for k, v in retention11.items()), evidence)
+
+        if api is None:
+            record(rows[2], "PLAT-15.1", "NOT-RUN",
+                   f"{api_error}; build logweir-api from main after claude/verdict-precedence "
+                   f"lands and pass it as {API_BIN_ENV}", evidence)
+        else:
+            page, filtered = api.points(RP_CATALOG), api.points(RP_CATALOG, selectable=True)
+            points11 = refused_point_is_not_selectable(control_points, page, filtered,
+                                                       rp3_id, "Invalid", rp1_id)
+            evidence.append(artifact("refused-point/11-points.json",
+                                     {"control": control_points, "page": page,
+                                      "selectable": filtered, "clauses": points11}))
+            check(rows[2], "PLAT-15.1", all(points11.values()),
+                  f"GET …/catalogs/{RP_CATALOG}/points lists {rp3_id} as "
+                  + json.dumps({k: v for k, v in next(
+                      (i for i in page.get("items") or [] if i.get("pointId") == rp3_id), {}
+                  ).items() if k in ("availability", "verification", "selectable",
+                                     "backupVerdict")})
+                  + ". " + "; ".join(f"{k}={v}" for k, v in points11.items()), evidence)
+
+        protect11 = policy_view(verdict_after(
+            RP_PROTECT_REFUSED, mark, lambda o: (o.get("status") or {}).get("health")
+            == "Unprotected", seconds=300, what="Unprotected"))
+        control11 = placed_point_is_protected(control_refused, entries["rp-3"], "rp-3")
+        refused11 = refused_signature_is_unprotected(protect11, verdict_of(after),
+                                                     entries["rp-3"], "rp-3")
+        evidence.append(artifact("refused-point/11-protection.json", {
+            "control": control_refused, "after": protect11,
+            "controlClauses": control11, "clauses": refused11}))
+        check(rows[3], "PLAT-14.2", all(control11.values()) and all(refused11.values()),
+              f"a policy whose only run is rp-3, with catalogRef {RP_CATALOG}: while the "
+              f"point was NotAttempted the catalog placed it ({control_refused['health']}/"
+              f"{control_refused['availabilityBasis']}); once the controller refused it the "
+              f"policy is {protect11['health']}/{protect11['protectedReason']} although the "
+              f"row still offers it. Control {control11}; clauses {refused11}", evidence)
+
+        # ---- ROW 12: the minted signer is revoked --------------------------------
+        before12 = get("backup", "rp-4")
+        mark = now()
+        refused_point_trust(target_cluster_id, approver_key, signer_key, revoked=True)
+        after12 = settle("backup", "rp-4", lambda o: verdict_of(o) == "Untrusted",
+                         seconds=VERDICT_SETTLE_SECONDS, what="Untrusted") \
+            or get("backup", "rp-4")
+        twelve = revoked_signer_is_untrusted(before12, after12, entries["rp-4"],
+                                             signer_key["keyId"])
+        evidence.append(artifact("refused-point/12-revoked.json", {
+            "before": backup_facts(before12), "after": backup_facts(after12),
+            "clauses": twelve}))
+        if not check(rows[5], task, all(twelve.values()),
+                     f"the minted signer {signer_key['keyId'][:16]}… was revoked "
+                     f"(KeyCompromise) on {TRUST_POLICY}; rp-4 reads {verdict_of(after12)!r}. "
+                     + "; ".join(f"{k}={v}" for k, v in twelve.items()), evidence):
+            unreached(rows[6], "row 12's Untrusted was not produced")
+        else:
+            eval12 = evaluation_after(RP_RETENTION, mark)
+            retention12 = refused_point_is_skipped_by_retention(after_eval, eval12,
+                                                                rp4_id, rp2_id)
+            # rp-3 stays skipped too; the control for rp-4 is row 11's evaluation.
+            retention12["row 11's point is still skipped"] = any(
+                r.get("pointId") == rp3_id and r.get("reason") == "Unreadable"
+                for r in eval12.get("skipped") or [])
+            evidence.append(artifact("refused-point/12-retention.json",
+                                     {"control": after_eval, "after": eval12,
+                                      "clauses": retention12}))
+            check(rows[6], "PLAT-16.2", all(retention12.values()),
+                  f"with rp-4 ({rp4_id}) now Untrusted, retention keeps "
+                  f"{eval12.get('kept')} and skips {eval12.get('skipped')}. "
+                  + "; ".join(f"{k}={v}" for k, v in retention12.items()), evidence)
+            if api is None:
+                record(rows[7], "PLAT-15.1", "NOT-RUN", api_error, evidence)
+            else:
+                page12 = api.points(RP_CATALOG)
+                filtered12 = api.points(RP_CATALOG, selectable=True)
+                points12 = refused_point_is_not_selectable(control_points, page12, filtered12,
+                                                           rp4_id, "Untrusted", rp1_id)
+                evidence.append(artifact("refused-point/12-points.json",
+                                         {"page": page12, "selectable": filtered12,
+                                          "clauses": points12}))
+                check(rows[7], "PLAT-15.1", all(points12.values()),
+                      "; ".join(f"{k}={v}" for k, v in points12.items()), evidence)
+            protect12 = policy_view(verdict_after(
+                RP_PROTECT_REVOKED, mark, lambda o: (o.get("status") or {}).get("health")
+                == "Unprotected", seconds=300, what="Unprotected"))
+            control12 = valid_signature_is_protected(control_revoked, verdict_of(before12),
+                                                     "rp-4")
+            refused12 = refused_signature_is_unprotected(protect12, verdict_of(after12),
+                                                         entries["rp-4"], "rp-4")
+            evidence.append(artifact("refused-point/12-protection.json", {
+                "control": control_revoked, "after": protect12,
+                "controlClauses": control12, "clauses": refused12}))
+            check(rows[8], "PLAT-14.2", all(control12.values()) and all(refused12.values()),
+                  f"a policy whose only run is rp-4: Valid under the minted key it was "
+                  f"{control_revoked['health']}; revoked, it is {protect12['health']}/"
+                  f"{protect12['protectedReason']} while the view still offers the point. "
+                  f"Control {control12}; clauses {refused12}", evidence)
+
+        # ---- the rehearsal arms, one after the other -------------------------------
+        for row_name, arm, schedule, backup_name in (
+                (rows[4], RP_ARM_REFUSED, RP_REFUSED_SCHEDULE, "rp-3"),
+                (rows[9], RP_ARM_REVOKED, RP_REVOKED_SCHEDULE, "rp-4")):
+            if verdict_of(get("backup", backup_name)) not in {"Invalid", "Untrusted"}:
+                record(row_name, "PLAT-14.3", "NOT-REACHED",
+                       f"{backup_name} is not refused, so there is no refused point to select",
+                       evidence)
+                continue
+            verdict, clauses = rp_rehearsal_arm(
+                arm, schedule, get("backup", backup_name), entries[backup_name],
+                work=work, approver_key=approver_key, target_cluster_id=target_cluster_id,
+                arms=arms, evidence=evidence)
+            record(row_name, "PLAT-14.3", verdict,
+                   f"a RehearsalSchedule whose only run is {backup_name} (refused by the "
+                   f"controller, still selectable in {RP_CATALOG}'s stale view) decided a "
+                   f"slot: " + "; ".join(f"{k}={v}" for k, v in clauses.items()), evidence)
+    finally:
+        try:
+            if api is not None:
+                api.stop()
+            quiet: dict[str, bool] = {}
+            for name in sorted(arms):
+                quiet[name] = quiesce_arm(name, evidence)["quiet"]
+            live = {name: get_opt("rehearsalschedule", name) for name in arms}
+            owned_prefixes, not_swept = owned_rehearsal_prefixes(arms, live, quiet)
+            swept = topics_to_sweep(target_topics(), list(owned_prefixes.values())) if arms \
+                else []
+            for topic in swept:
+                target_topic_delete(topic)
+            evidence.append(artifact("refused-point/98-broker-sweep.json", {
+                "arms": arms, "quiet": quiet, "swept": swept, "notSwept": not_swept}))
+        finally:
+            minted = [k for k in (approver_key, signer_key) if k is not None]
+            for key in minted:
+                key["private"].unlink(missing_ok=True)
+                shutil.rmtree(key["dir"], ignore_errors=True)
+            if work is not None:
+                shutil.rmtree(work, ignore_errors=True)
+            gone = not any(k["private"].exists() or k["dir"].exists() for k in minted) and (
+                work is None or not work.exists())
+            check("refused-point-minted-keys-never-outlive-the-row", task, gone,
+                  f"the {len(minted)} key(s) this phase minted (the approver and the signer "
+                  f"row 12 revokes) and the working directory are gone from disk; what is "
+                  f"recorded is the public SPKI and the key id", evidence)
+            save()
 
 
 def control() -> None:
@@ -9431,6 +10436,12 @@ PHASE_PRECONDITIONS: dict[str, tuple[str, ...]] = {
     # deleted and recreated, exactly as `old_archive` does), which is only correct
     # AFTER the phase whose rows are about that revocation.
     "rehearsal": ("catalog", "trust"),
+    # lab-refresh-8's refused-point rows. It builds its own bucket, destinations,
+    # catalog and points (only `setup`), and it REBUILDS the same TrustPolicy
+    # `rehearsal` does, with other keys — so it runs after `trust` for the
+    # reason `rehearsal` does, and after `rehearsal` so neither inherits the
+    # other's keys.
+    "refused_point": ("setup", "trust", "rehearsal"),
 }
 
 
@@ -9473,7 +10484,7 @@ PHASES = [
     "bounded_retry", "trust",
     "signed_at_probe", "trust_rbac", "old_archive", "multiple_namespaces", "notify", "protection_cases",
     "protection_verdicts",
-    "rehearsal",
+    "rehearsal", "refused_point",
     "control", "report", "cleanup",
 ]
 

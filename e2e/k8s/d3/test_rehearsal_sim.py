@@ -68,6 +68,7 @@ class FakeCluster:
 
     def __init__(self, *, second_restore_during_slot: bool = False, silent_skip: bool = False,
                  nothing_verifies: bool = False, rehearsal_seconds: int = 150,
+                 skip_defers_slot: bool = False,
                  job_ttl_seconds: int = 300, topics: set[str] | None = None) -> None:
         self.now = START
         self.objs: dict[str, dict[str, dict[str, Any]]] = {k: {} for k in set(KINDS.values())}
@@ -75,6 +76,10 @@ class FakeCluster:
         self.second_restore_during_slot = second_restore_during_slot
         self.silent_skip = silent_skip
         self.nothing_verifies = nothing_verifies
+        # THE PRE-verdict-precedence CONTROLLER (REHEARSAL-SKIP-DEFERS-SLOT): a
+        # skip names the evaluation instant and never advances
+        # `lastScheduledSlot`, so the blocked slot fires late.
+        self.skip_defers_slot = skip_defers_slot
         self.rehearsal_seconds = rehearsal_seconds
         self.job_ttl_seconds = job_ttl_seconds
         self.last_reconcile: dict[str, float] = {}
@@ -216,8 +221,7 @@ class FakeCluster:
             return
         if active is not None and not d3.terminal(active):
             if not self.silent_skip:
-                status["lastSkipped"] = {"slot": slot_name_for_sim(self.now),
-                                         "reason": "ConcurrencyBlocked"}
+                self.skip(schedule, slot, "ConcurrencyBlocked")
             if self.second_restore_during_slot:
                 self.fire(schedule, slot)
             return
@@ -227,8 +231,7 @@ class FakeCluster:
             if (labels.get("logweir.dev/rehearsal-target") == target
                     and labels.get("logweir.dev/rehearsal-schedule") != name
                     and not d3.terminal(other)):
-                status["lastSkipped"] = {"slot": slot_name_for_sim(self.now),
-                                         "reason": "TargetBusy"}
+                self.skip(schedule, slot, "TargetBusy")
                 set_condition(schedule, "Ready", "True", "Scheduled",
                               f"the Restore {other['metadata']['name']} is rehearsing against "
                               f"the same target cluster `{target}`")
@@ -236,11 +239,21 @@ class FakeCluster:
                 return
         approval = self.objs["approval"].get(spec["authorization"]["standingApprovalRef"]["name"])
         if approval is None or d3.condition(approval, "Verified").get("status") != "True":
-            status["lastSkipped"] = {"slot": slot_name_for_sim(self.now),
-                                     "reason": "AuthorizationInvalid"}
+            self.skip(schedule, slot, "AuthorizationInvalid")
             set_condition(schedule, "Authorized", "False", "AuthorizationInvalid")
             return
         self.fire(schedule, slot)
+
+    def skip(self, schedule: dict[str, Any], slot: str, reason: str) -> None:
+        """`rehearsal_schedule.rs::status_patch` since verdict-precedence: the
+        DUE slot is named and consumed in the same patch (a skipped slot is
+        skipped, never deferred) — or, under the mutant, the old behaviour."""
+        status = schedule["status"]
+        if self.skip_defers_slot:
+            status["lastSkipped"] = {"slot": slot_name_for_sim(self.now), "reason": reason}
+            return
+        status["lastSkipped"] = {"slot": slot, "reason": reason}
+        status["lastScheduledSlot"] = slot
 
     def fire(self, schedule: dict[str, Any], slot: str) -> None:
         name = schedule["metadata"]["name"]
@@ -389,6 +402,7 @@ ROWS = [
     "rehearsal-5-schedule-records-the-pass",
     "rehearsal-6-topics-owned-torn-down-unrelated-survives",
     "rehearsal-7-second-slot-is-concurrency-blocked",
+    d3.REHEARSAL_SKIP_CONSUMED_ROW,
     "rehearsal-8-leftover-guard-keeps-the-pre-created-topic",
     "rehearsal-9-evidence-outlives-the-job-ttl",
     "rehearsal-10-refused-arm-reaches-no-job",
@@ -439,6 +453,15 @@ def test_mutant_a_second_restore_during_the_occupied_slot_fails_step_seven() -> 
     assert verdicts["rehearsal-7-second-slot-is-concurrency-blocked"] == "FAIL", verdicts
     verdicts = simulate(FakeCluster(second_restore_during_slot=True))
     assert verdicts["rehearsal-7-second-slot-is-concurrency-blocked"] == "FAIL", verdicts
+
+
+def test_mutant_a_skip_that_defers_its_slot_fails_step_seven_b() -> None:
+    """REHEARSAL-SKIP-DEFERS-SLOT, modelled: the skip names `now` and leaves
+    `lastScheduledSlot` alone, so the blocked slot fires the moment the first
+    rehearsal ends. Step 7 still passes (a skip WAS recorded); 7b must not."""
+    verdicts = simulate(FakeCluster(skip_defers_slot=True))
+    assert verdicts["rehearsal-7-second-slot-is-concurrency-blocked"] == "PASS", verdicts
+    assert verdicts[d3.REHEARSAL_SKIP_CONSUMED_ROW] == "FAIL", verdicts
 
 
 def test_mutant_a_slot_skipped_without_a_record_fails_step_seven() -> None:
