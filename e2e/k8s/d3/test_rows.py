@@ -657,37 +657,89 @@ HIST = {"result": "Valid", "matchedKeyId": "6607952c", "trust": {"basis": "Histo
 AFTER_RETIREMENT_SIG = {"result": "Untrusted", "matchedKeyId": "6607952c"}
 
 
+ADMITTED_AT = {"type": "Admitted", "status": "True",
+               "lastTransitionTime": "2026-09-22T21:40:01Z"}
+RESTORED_OK = {"status": {"phase": "Succeeded", "outcome": "pass",
+                          "evidence": {"verification": {"result": "Valid"}}}}
+SCORECARD_OK = {"source": {"backup_id": "bk-hist"},
+                "sample": {"records_expected": 25, "records_restored": 25},
+                "integrity": {"result": "pass"}}
+
+
 def _restores(**over):
-    args = dict(verdict=HIST, admitted={"type": "Admitted", "status": "True"},
-                job="d3w14-historical-restore", phase="Running",
+    args = dict(verdict=HIST, admitted_first=ADMITTED_AT, admitted_final=dict(ADMITTED_AT),
+                job="d3w14-historical-restore", final=RESTORED_OK, scorecard=SCORECARD_OK,
+                restored_end=40, archived=40, backup_id="bk-hist",
                 fresh=AFTER_RETIREMENT_SIG)
     args.update(over)
     return all(d3.historical_archive_still_restores(**args).values())
 
 
-def test_a_retired_keys_archive_is_still_readable() -> None:
-    row("Valid/Historical, Admitted=True, a Job running, no new signature", _restores())
-    row("a Succeeded restore counts too", _restores(phase="Succeeded"))
+def test_a_retired_keys_archive_is_still_restorable() -> None:
+    row("Valid/Historical, admitted, Succeeded/pass, Valid scorecard, every record back, "
+        "no new signature", _restores())
+    # plat20-1 §7 item 1: the row accepted `Running`, and its plan lacked the
+    # `sample` block the runner refuses to parse — so it passed on restores
+    # that were about to fail at phase -1. Each shape below is one it passed.
+    row("MUTANT: still RUNNING — the read has not happened yet",
+        not _restores(final={"status": {"phase": "Running"}}))
+    row("MUTANT: the restore FAILED (the missing-`sample` shape: phase -1 refusal)",
+        not _restores(final={"status": {"phase": "Failed", "outcome": None,
+                                        "exitReason": "drill spec does not parse"}}))
+    row("MUTANT: Succeeded but the outcome is not pass",
+        not _restores(final={"status": {"phase": "Succeeded", "outcome": "fail-integrity",
+                                        "evidence": {"verification": {"result": "Valid"}}}}))
+    row("MUTANT: Succeeded, but nothing was restored — no restored topic",
+        not _restores(restored_end=None))
+    row("MUTANT: the restored topic is short of what the Backup archived",
+        not _restores(restored_end=39))
+    row("MUTANT: an EMPTY archive restores an empty topic — zero is not proof",
+        not _restores(restored_end=0, archived=0))
+    row("MUTANT: the scorecard's sample restored fewer records than it expected",
+        not _restores(scorecard={**SCORECARD_OK,
+                                 "sample": {"records_expected": 25, "records_restored": 24}}))
+    row("MUTANT: a sample of nothing",
+        not _restores(scorecard={**SCORECARD_OK,
+                                 "sample": {"records_expected": 0, "records_restored": 0}}))
+    row("MUTANT: integrity partial", not _restores(scorecard={**SCORECARD_OK,
+                                                              "integrity": {"result": "partial"}}))
+    row("MUTANT: no scorecard could be read", not _restores(scorecard={}))
+    row("MUTANT: the scorecard is about ANOTHER backup",
+        not _restores(scorecard={**SCORECARD_OK, "source": {"backup_id": "bk-other"}}))
+    row("MUTANT: the controller did not verify the restore's scorecard",
+        not _restores(final={"status": {"phase": "Succeeded", "outcome": "pass",
+                                        "evidence": {"verification": {"result": "Untrusted"}}}}))
     row("MUTANT: a HOLD at admission — Admitted=False",
-        not _restores(admitted={"status": "False", "reason": "ApprovalNotVerified"}))
-    # RESTORE-ADMITTED-DROPPED's own shape: the controller wrote `Admitted=True`
-    # and the next reconcile of the same RUNNING object replaced the condition
-    # array without it. The row asked `!= "False"` and passed straight through
-    # it; it asks `== "True"` now and FAILS on a lab build that predates the fix
-    # on `claude/status-sweep` — the honest reading, because an auditor looking
-    # at the object cannot tell it was approved.
-    row("MUTANT: the condition is GONE — RESTORE-ADMITTED-DROPPED's own shape",
-        not _restores(admitted={}))
-    row("MUTANT: no runner Job, so nothing proceeded",
-        not _restores(job=None))
-    row("MUTANT: still Pending — admitted by nobody",
-        not _restores(phase="Pending"))
+        not _restores(admitted_first={"status": "False", "reason": "ApprovalNotVerified"}))
+    # RESTORE-ADMITTED-DROPPED's own shapes, the Restore half: the controller
+    # wrote `Admitted=True` and a later status write dropped or restamped it.
+    row("MUTANT: the condition is GONE at terminal — RESTORE-ADMITTED-DROPPED",
+        not _restores(admitted_final={}))
+    row("MUTANT: the condition was RESTAMPED at terminal",
+        not _restores(admitted_final={**ADMITTED_AT,
+                                      "lastTransitionTime": "2026-09-22T21:44:00Z"}))
+    row("MUTANT: no timestamp to compare — equality of two absences proves nothing",
+        not _restores(admitted_first={"status": "True"}, admitted_final={"status": "True"}))
+    row("MUTANT: no runner Job", not _restores(job=None))
     row("MUTANT: the archive is not on the historical basis",
         not _restores(verdict={"result": "Valid", "trust": {"basis": "Current"}}))
     row("MUTANT: the archive does not verify at all",
         not _restores(verdict={"result": "Untrusted", "trust": {"basis": "None"}}))
     row("MUTANT: `retired` MEANS NOTHING — a signature made after it is Valid too",
         not _restores(fresh={"result": "Valid", "matchedKeyId": "6607952c"}))
+
+
+def test_the_historical_restore_plan_is_one_the_runner_parses() -> None:
+    plan = d3.legacy_restore_plan("bk-hist", "2026-09-22T21:00:00Z", "own-hist-")
+    sample = plan.get("sample") or {}
+    row("the plan carries the runner-required `sample` block (no serde default)",
+        {"window_start", "window_end"} <= set(sample),
+        str(sample))
+    row("and a newTopic target, so phase 9 leaves the restored topic to be read",
+        plan["target"]["mode"] == "newTopic"
+        and plan["target"]["topic_naming"]["prefix"] == "own-hist-")
+    row("on the scratch broker, never the source broker the archive was taken from",
+        all("kafka-target." in b for b in plan["target"]["bootstrap_servers"]))
 
 
 # --- PLAT-15.1: a catalog larger than the view it publishes ------------------

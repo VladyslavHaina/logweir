@@ -4364,7 +4364,24 @@ def require_standing_signer(cli: str) -> None:
 
 
 def legacy_restore_plan(backup_id: str, point_in_time: str, prefix: str) -> dict[str, Any]:
-    """A restore plan over the LEGACY inline archive this namespace writes to."""
+    """A restore plan over the LEGACY inline archive this namespace writes to.
+
+    TWO THINGS A PLAN NEEDS TO ACTUALLY RESTORE, and this one had neither
+    (plat20-1 §7 item 1, lab-refresh-8):
+
+    - `sample` is REQUIRED by the runner's plan schema (`logweir_core::spec::
+      SampleSpec`, no serde default). The API and the controller forward plan
+      bytes unparsed, so a plan without it is admitted and signed and then dies
+      in the runner's phase -1 with "drill spec does not parse: missing field
+      `sample`" (measured live 2026-09-22, plat20-1 trial t1).
+    - `newTopic` into the lab's SCRATCH broker (`kafka-target`, the broker and
+      credential the lab's own reference restore uses) under a prefix this run
+      owns. The old plan asked for `scratch` mode on the SOURCE broker, whose
+      `logweir.scratch` marker nothing ever created; and in `scratch` mode
+      phase 9 deletes the restored topic, so no record could be read back.
+      `newTopic` tears nothing down (Global Constraint 19): the row reads the
+      restored topic, and `old_archive` deletes it, by this run's prefix only.
+    """
     return {
         "source": {
             "storage": {"backend": "s3", "bucket": "kafka-backups",
@@ -4374,9 +4391,9 @@ def legacy_restore_plan(backup_id: str, point_in_time: str, prefix: str) -> dict
             "topics": TOPICS[:1],
         },
         "target": {
-            "bootstrap_servers": [f"kafka-source.{FIXTURE_NS}.svc.cluster.local:9096"],
+            "bootstrap_servers": [f"{TARGET_DEPLOY}.{FIXTURE_NS}.svc.cluster.local:9096"],
             "auth": {"mode": "scramSha512", "username": "scram-user", "tls": False},
-            "mode": "scratch",
+            "mode": "newTopic",
             "topic_naming": {"prefix": prefix},
             "topic_mapping_prefix": "logweir-scratch-",
             "marker_topic": "logweir.scratch",
@@ -4384,6 +4401,12 @@ def legacy_restore_plan(backup_id: str, point_in_time: str, prefix: str) -> dict
             "teardown": "delete",
         },
         "restore": {"point_in_time": point_in_time},
+        "sample": {
+            "window_start": "2026-09-01T00:00:00Z",
+            "window_end": point_in_time,
+            "records_per_partition": 25,
+            "anchor": "head",
+        },
         "objectives": {"rto_seconds": 3600, "rpo_seconds": 86400, "pass_rate": 1.0},
         "evidence": {"backend": "s3", "bucket": "kafka-backups",
                      "prefix": "logweir/", "region": "us-east-1",
@@ -4392,48 +4415,78 @@ def legacy_restore_plan(backup_id: str, point_in_time: str, prefix: str) -> dict
     }
 
 
-def historical_archive_still_restores(verdict: dict[str, Any], admitted: dict[str, Any],
-                                      job: str | None, phase: str | None,
+def historical_archive_still_restores(verdict: dict[str, Any],
+                                      admitted_first: dict[str, Any],
+                                      admitted_final: dict[str, Any],
+                                      job: str | None,
+                                      final: dict[str, Any],
+                                      scorecard: dict[str, Any],
+                                      restored_end: int | None,
+                                      archived: int | None,
+                                      backup_id: str,
                                       fresh: dict[str, Any]) -> dict[str, bool]:
-    """A retired key's archive is still READABLE, and still unsignable.
+    """A retired key's archive is still READABLE — RESTORED, not merely admitted
+    — and still unsignable.
 
     D3 §7.4's green rule is `Valid ∧ (basis Current|Historical)`, and the point
     of `Historical` is that a retirement must not strand the archives the key
     signed: an operator has to be able to RESTORE from them. So the read side
-    has to proceed — the Restore admitted and its Job created — while the write
-    side does not: a run signed after the retirement is refused.
+    has to proceed while the write side does not: a run signed after the
+    retirement is refused.
+
+    THIS ROW USED TO PASS ON A RESTORE THAT NEVER RESTORED (plat20-1 §7 item 1):
+    it accepted phase `Running`, and its plan lacked the `sample` block the
+    runner refuses to parse without — so every run it ever recorded was a
+    Restore about to fail at phase -1. It now waits for a terminal phase and
+    REQUIRES `Succeeded` with `outcome: pass`, a controller-verified scorecard
+    whose sample restored every record it expected, and the restored topic
+    holding exactly as many records as the Backup archived.
+
+    `Admitted` is read TWICE (RESTORE-ADMITTED-DROPPED, the Restore half): when
+    first observed and at terminal. The condition must still be `True` at the
+    end with the SAME `lastTransitionTime` — a later status write that dropped
+    or restamped it would leave an auditor unable to tell when, or whether, the
+    restore was approved.
 
     The last clause is what stops this being a row about a restore that happened
     to work: if a NEW signature were also accepted, "retired" would mean nothing
     and the read half would be proving no rule at all.
     """
-    # ADMISSION IS A CONDITION, AND THIS ROW ASKS FOR IT. The comment here used
-    # to say the opposite — that on `Ok` the controller "creates the Job instead
-    # of stamping `Admitted=True`", and that a first draft asking for
-    # `Admitted=True` had been "asserting something the product never writes",
-    # so the clause was weakened to `!= "False"`.
-    #
-    # That was a DEFECT OBSERVED LIVE AND MIS-DIAGNOSED. The controller does
-    # write `Admitted=True`; the next reconcile of the same running object then
-    # dropped it, because `diagnostics::apply` replaced the condition array
-    # instead of upserting into it. That is RESTORE-ADMITTED-DROPPED, already
-    # recorded and fixed on `claude/status-sweep` (review
-    # `claude/status-sweep.review.md`, LOW-1, which named this very comment as
-    # the defect's strongest live corroboration).
-    #
-    # The clause is therefore tightened back to `== "True"`. ON A LAB BUILD
-    # THAT PREDATES THAT FIX THIS ROW FAILS, and that is the honest reading: an
-    # auditor looking at the Restore cannot tell that it was approved. It is
-    # expected to pass at the first batch refresh that carries the fix.
+    status = final.get("status") or {}
+    ev = (status.get("evidence") or {}).get("verification") or {}
+    sample = scorecard.get("sample") or {}
+    expected = sample.get("records_expected")
+    restored = sample.get("records_restored")
+    first_ltt = admitted_first.get("lastTransitionTime")
     return {
         "the archive verifies on the historical basis": (
             verdict.get("result") == "Valid"
             and (verdict.get("trust") or {}).get("basis") == "Historical"
         ),
         "the Restore says it was admitted (`Admitted=True`)":
-            admitted.get("status") == "True",
-        "its runner Job exists and it is running — the read PROCEEDED": (
-            bool(job) and phase in {"Running", "Succeeded"}
+            admitted_first.get("status") == "True",
+        "and still says so at terminal, with the SAME lastTransitionTime": (
+            admitted_final.get("status") == "True"
+            and bool(first_ltt)
+            and admitted_final.get("lastTransitionTime") == first_ltt
+        ),
+        "its runner Job exists": bool(job),
+        "the restore Succeeded with outcome pass": (
+            status.get("phase") == "Succeeded" and status.get("outcome") == "pass"
+        ),
+        "the controller verified the restore's signed scorecard (Valid)":
+            ev.get("result") == "Valid",
+        "the scorecard is about the retired key's archive": (
+            bool(backup_id)
+            and (scorecard.get("source") or {}).get("backup_id") == backup_id
+        ),
+        "its sample restored every record it expected, and integrity passed": (
+            isinstance(expected, int) and isinstance(restored, int)
+            and expected > 0 and restored >= expected
+            and (scorecard.get("integrity") or {}).get("result") == "pass"
+        ),
+        "the restored topic holds exactly the records the Backup archived": (
+            isinstance(archived, int) and archived > 0 and restored_end == archived
         ),
         "while a run signed after the retirement is refused":
             fresh.get("result") != "Valid",
@@ -4573,79 +4626,155 @@ def old_archive() -> None:
             run(KN + ["delete", kind, name, "--ignore-not-found=true", "--wait=true"],
                 check=False, timeout=120)
         subject = get("backup", f"{OWNER}-old-archive")
-        plan = legacy_restore_plan(subject["status"]["backupId"],
+        backup_id = subject["status"]["backupId"]
+        archived = subject["status"].get("records")
+        # THE RESTORE'S OWN SCORECARD IS SIGNED WITH THE LAB KEY, not the retired
+        # one. The runner signs with this namespace's `logweir-signing-key`, which
+        # still holds the minted key this row just RETIRED — a scorecard signed
+        # with it now is exactly the "signed after the retirement" the last
+        # clause requires to be refused, and the restore's own verdict would
+        # then be about the retirement rather than about whether the archive
+        # could be read. The lab key is Active in this namespace's policy.
+        run(KN + ["delete", "secret", "logweir-signing-key", "--wait=true"], check=False)
+        apply({"apiVersion": "v1", "kind": "Secret", "metadata": owned("logweir-signing-key"),
+               "data": original.get("data", {}), "type": original.get("type", "Opaque")})
+        target = rehearsal_target_cluster()
+        prefix = f"{OWNER_TAG}-{STAMP}-hist-"
+        restored_topic = f"{prefix}{TOPICS[0]}"
+        if restored_topic in target_topics():
+            raise RuntimeError(f"{restored_topic} already exists on {TARGET_DEPLOY}; it is not "
+                               f"this run's and is neither adopted nor deleted")
+        plan = legacy_restore_plan(backup_id,
                                    subject["status"].get("capture", {}).get("finishedAt")
-                                   or now(), f"{OWNER}-hist-")
+                                   or now(), prefix)
         plan_bytes = json.dumps(plan, indent=2) + "\n"
         work = pathlib.Path(tempfile.mkdtemp(prefix=f"{OWNER}-hist-", dir="/tmp"))
         work.chmod(0o700)
+        restore_created = False
         try:
-            (work / "plan.json").write_text(plan_bytes)
-            run([logweir_cli(), "drill", "approve", "--spec", str(work / "plan.json"),
-                 "--key", str(approver_material()["approver"]), "--approver", OWNER,
-                 "--ticket", "HR7", "--subject-kind", "Restore",
-                 "--out", str(work / "approval.json")], timeout=120)
-            apply({
-                "apiVersion": "logweir.dev/v1alpha1", "kind": "Restore",
-                "metadata": owned(restore_name),
-                "spec": {
-                    "sourceArchive": {"url": LEGACY_ARCHIVE,
-                                      "secretRef": {"name": "logweir-s3"}},
-                    "backupSetRef": subject["status"]["backupId"],
-                    "pointInTime": plan["restore"]["point_in_time"],
-                    "planBytes": plan_bytes,
-                    "approvalRef": {"name": approval_name},
-                    "deadlineSeconds": 900,
-                    "target": {"clusterRef": {"name": "source"}, "mode": "scratch",
-                               "topicNaming": {"prefix": f"{OWNER}-hist-"}},
-                },
-            })
-            apply({
-                "apiVersion": "logweir.dev/v1alpha1", "kind": "Approval",
-                "metadata": owned(approval_name),
-                "spec": {
-                    "approvalBytes": (work / "approval.json").read_text(),
-                    "sidecarBytes": (work / "approval.sig").read_text(),
-                    "planHash": "sha256:" + hashlib.sha256(plan_bytes.encode()).hexdigest(),
-                    "subjectRef": {"kind": "Restore", "name": restore_name},
-                },
-            })
+            try:
+                (work / "plan.json").write_text(plan_bytes)
+                run([logweir_cli(), "drill", "approve", "--spec", str(work / "plan.json"),
+                     "--key", str(approver_material()["approver"]), "--approver", OWNER,
+                     "--ticket", "HR7", "--subject-kind", "Restore",
+                     "--out", str(work / "approval.json")], timeout=120)
+                apply({
+                    "apiVersion": "logweir.dev/v1alpha1", "kind": "Restore",
+                    "metadata": owned(restore_name),
+                    "spec": {
+                        "sourceArchive": {"url": LEGACY_ARCHIVE,
+                                          "secretRef": {"name": "logweir-s3"}},
+                        "backupSetRef": backup_id,
+                        "pointInTime": plan["restore"]["point_in_time"],
+                        "planBytes": plan_bytes,
+                        "approvalRef": {"name": approval_name},
+                        "deadlineSeconds": 900,
+                        "target": {"clusterRef": {"name": REHEARSAL_TARGET},
+                                   "mode": "newTopic",
+                                   "topicNaming": {"prefix": prefix}},
+                    },
+                })
+                restore_created = True
+                apply({
+                    "apiVersion": "logweir.dev/v1alpha1", "kind": "Approval",
+                    "metadata": owned(approval_name),
+                    "spec": {
+                        "approvalBytes": (work / "approval.json").read_text(),
+                        "sidecarBytes": (work / "approval.sig").read_text(),
+                        "planHash": "sha256:" + hashlib.sha256(plan_bytes.encode()).hexdigest(),
+                        "subjectRef": {"kind": "Restore", "name": restore_name},
+                    },
+                })
+            finally:
+                shutil.rmtree(work, ignore_errors=True)
+            # FIRST SIGHT OF ADMISSION, recorded so the terminal read can be
+            # compared with it (RESTORE-ADMITTED-DROPPED, the Restore half).
+            first = wait_for(
+                "restore", restore_name,
+                lambda o: (condition(o, "Admitted").get("status") == "True"
+                           or terminal(o)),
+                seconds=420, what="the restore from the retired key's archive to be admitted",
+            )
+            admitted_first = condition(first, "Admitted")
+            evidence.append(artifact("trust/historical-restore-admitted.json", first))
+            # A TERMINAL PHASE, NOT `Running`. The row used to stop here and pass.
+            final = wait_for("restore", restore_name, terminal, seconds=1100,
+                             what="the restore from the retired key's archive to finish")
+            if (final.get("status") or {}).get("phase") == "Succeeded":
+                final = wait_for("restore", restore_name,
+                                 lambda o: verdict_of(o) in VERDICTS,
+                                 seconds=VERDICT_SETTLE_SECONDS,
+                                 what="the restore's evidence verdict")
+            evidence.append(artifact("trust/historical-restore.json", final))
+            status = final.get("status") or {}
+            job = (status.get("jobRef") or {}).get("name")
+            admitted_final = condition(final, "Admitted")
+            phase = status.get("phase")
+            scorecard_key = (status.get("evidence") or {}).get("scorecardKey") or ""
+            scorecard: dict[str, Any] = {}
+            if scorecard_key:
+                try:
+                    scorecard = json.loads(cat("kafka-backups", scorecard_key))
+                except Exception:  # noqa: BLE001 - recorded as an empty scorecard
+                    scorecard = {}
+            restored_end = None
+            if restored_topic in target_topics():
+                out = target_exec([f"{KAFKA_BIN}/kafka-get-offsets.sh", "--bootstrap-server",
+                                   "localhost:9092", "--topic", restored_topic, "--time", "-1"],
+                                  check_rc=False).stdout
+                for line in out.splitlines():
+                    parts = line.strip().split(":")
+                    if len(parts) == 3 and parts[0] == restored_topic and parts[2].isdigit():
+                        restored_end = (restored_end or 0) + int(parts[2])
+            evidence.append(artifact("trust/historical-restore-data.json", {
+                "scorecardKey": scorecard_key, "scorecard": scorecard,
+                "restoredTopic": restored_topic, "restoredEndOffset": restored_end,
+                "backupRecords": archived, "backupId": backup_id,
+                "targetClusterId": (target.get("status") or {}).get("clusterId")}))
+            clauses = historical_archive_still_restores(
+                after, admitted_first, admitted_final, job, final, scorecard,
+                restored_end, archived, backup_id, fresh)
+            evidence.append(artifact("trust/historical-restore-clauses.json", clauses))
+            check(
+                "trust-old-archive-still-restores",
+                "PLAT-19.1",
+                all(clauses.values()),
+                f"the archive signed by the key retired at {retired_at} verifies "
+                f"{after.get('result')} on basis {(after.get('trust') or {}).get('basis')}, "
+                f"and a Restore from it RESTORES: Admitted={admitted_first.get('status')} at "
+                f"{admitted_first.get('lastTransitionTime')} and "
+                f"{admitted_final.get('status')} at {admitted_final.get('lastTransitionTime')} "
+                f"at terminal, phase {phase!r} outcome {status.get('outcome')!r}, runner Job "
+                f"{job!r}, restore evidence "
+                f"{((status.get('evidence') or {}).get('verification') or {}).get('result')!r}, "
+                f"scorecard sample {(scorecard.get('sample') or {}).get('records_restored')}/"
+                f"{(scorecard.get('sample') or {}).get('records_expected')} integrity "
+                f"{(scorecard.get('integrity') or {}).get('result')!r}; {restored_topic} ends at "
+                f"offset {restored_end} against {archived} record(s) the Backup archived. "
+                f"Meanwhile a Backup signed by that same key AFTER the retirement verifies "
+                f"{fresh.get('result')} — the archive stays readable and the key stays "
+                f"unusable, which is what `Historical` is for. "
+                + "; ".join(f"{k}={v}" for k, v in clauses.items()),
+                evidence,
+            )
+            STATE["oldArchive"] = {"mintedKeyId": key["keyId"], "retiredAt": retired_at,
+                                   "before": before, "after": after, "fresh": fresh,
+                                   "restore": {"name": restore_name, "job": job,
+                                               "phase": phase,
+                                               "admittedFirst": admitted_first,
+                                               "admittedFinal": admitted_final,
+                                               "restoredTopic": restored_topic,
+                                               "restoredEnd": restored_end}}
+            save()
         finally:
-            shutil.rmtree(work, ignore_errors=True)
-        restored = wait_for(
-            "restore", restore_name,
-            lambda o: (condition(o, "Admitted").get("status") == "True"
-                       or (o.get("status") or {}).get("jobRef")
-                       or (o.get("status") or {}).get("phase") in
-                       {"Running", "Succeeded", "Failed", "Refused"}),
-            seconds=420, what="the restore from the retired key's archive to be admitted",
-        )
-        job = ((restored.get("status") or {}).get("jobRef") or {}).get("name")
-        admitted = condition(restored, "Admitted")
-        evidence.append(artifact("trust/historical-restore.json", restored))
-        phase = (restored.get("status") or {}).get("phase")
-        clauses = historical_archive_still_restores(after, admitted, job, phase, fresh)
-        evidence.append(artifact("trust/historical-restore-clauses.json", clauses))
-        check(
-            "trust-old-archive-still-restores",
-            "PLAT-19.1",
-            all(clauses.values()),
-            f"the archive signed by the key retired at {retired_at} verifies "
-            f"{after.get('result')} on basis {(after.get('trust') or {}).get('basis')}, and a "
-            f"Restore from it PROCEEDS: nothing holds it at admission "
-            f"(Admitted={admitted.get('status')}/{admitted.get('reason')}), phase "
-            f"{phase!r}, runner Job {job!r}. Meanwhile a "
-            f"Backup signed by that same key AFTER the retirement verifies "
-            f"{fresh.get('result')} — the archive stays readable and the key stays unusable, "
-            f"which is what `Historical` is for. "
-            + "; ".join(f"{k}={v}" for k, v in clauses.items()),
-            evidence,
-        )
-        STATE["oldArchive"] = {"mintedKeyId": key["keyId"], "retiredAt": retired_at,
-                               "before": before, "after": after, "fresh": fresh,
-                               "restore": {"name": restore_name, "job": job,
-                                           "admitted": admitted}}
-        save()
+            # THE RESTORED TOPIC IS THIS RUN'S, by its prefix; removed whatever
+            # the row said. Nothing else on the shared broker is touched.
+            if restore_created and restored_topic.startswith(prefix) and \
+                    restored_topic in target_topics():
+                target_topic_delete(restored_topic)
+            evidence.append(artifact("trust/historical-restore-topic-cleanup.json", {
+                "restoredTopic": restored_topic,
+                "leftOnBroker": restored_topic in target_topics()}))
     finally:
         # THE PRIVATE HALF GOES, whatever happened above.
         for path in (key["private"],):
