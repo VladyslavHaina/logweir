@@ -6104,7 +6104,7 @@ fn the_ca_bundles_are_copied_into_the_runs_own_immutable_plan() {
 // ===========================================================================
 
 /// [`evidence_destination_value`] with an `evidenceRead` grant only a pod may
-/// hold — D2 §3.9's evidence-fetch Job, which this build does not create.
+/// hold — read by D2 §3.9's evidence-fetch Job.
 fn evidence_destination_with_pod_only_read() -> Value {
     let mut value = evidence_destination_value();
     value["spec"]["access"]["evidenceRead"] = serde_json::json!({"mode": "SecretKeys", "secret": {
@@ -6144,11 +6144,16 @@ fn finished_routes_for_destinations(pods: String, log: String, evidence: Value) 
 /// `Invalid` or `Untrusted` without bytes; dropping the detail sentence;
 /// copying `outcome`, `objectives` or `measured` out of a document nobody read.
 #[tokio::test]
-async fn a_destination_backed_restore_with_a_pod_only_grant_publishes_not_attempted() {
+async fn a_destination_backed_restore_with_no_evidence_reader_publishes_not_attempted() {
+    // NO `evidenceRead` on the evidence destination. A pod-only grant is now
+    // read by an evidence-fetch Job (see
+    // `a_restore_with_a_pod_only_grant_is_verified_through_an_evidence_fetch_job`);
+    // the verdict that must be PUBLISHED rather than skipped is the one for a
+    // destination that names no reader.
     let (client, _rec, bodies) = mock_client_recording_bodies(finished_routes_for_destinations(
         pod_list_terminated(0),
         log_body(&i8_tail()),
-        evidence_destination_with_pod_only_read(),
+        evidence_destination_value(),
     ));
     reconcile_restore(
         &destination_backed_restore(),
@@ -6175,8 +6180,8 @@ async fn a_destination_backed_restore_with_a_pod_only_grant_publishes_not_attemp
         .as_str()
         .expect("the verdict carries its detail");
     assert!(
-        detail.contains("evidence-fetch Job") && detail.contains("logweir drill verify"),
-        "the sentence names the capability that is missing and the command an operator can run \
+        detail.contains("spec.access.evidenceRead") && detail.contains("logweir drill verify"),
+        "the sentence names the field that is missing and the command an operator can run \
          instead: {detail}"
     );
     assert!(

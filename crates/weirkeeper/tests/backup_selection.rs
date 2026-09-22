@@ -1179,6 +1179,7 @@ fn the_discovery_job_is_the_check_job_shape_named_after_the_backup() {
         env_literal: projection.env_literal,
         image: None,
         image_pull_policy: None,
+        attempt: None,
     };
     let job = sel::build_discovery_job(&spec, &discovery_job(UID), 300, "sha256:abc");
     let value = serde_json::to_value(&job).expect("serialisable");

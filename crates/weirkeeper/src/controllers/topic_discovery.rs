@@ -1641,6 +1641,7 @@ async fn start(
         env_literal: projection.env_literal,
         image: ctx.runner_image.image.clone(),
         image_pull_policy: ctx.runner_image.image_pull_policy.clone(),
+        attempt: None,
     };
     match check::create_job(&ctx.client, &spec).await {
         Ok(_) => {}

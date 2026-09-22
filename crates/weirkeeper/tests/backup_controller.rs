@@ -10623,26 +10623,44 @@ async fn evidence_is_routed_by_grant_and_never_falls_back_to_the_global_handle()
         other => panic!("an absent evidenceRead is NotAttempted; got {other:?}"),
     }
 
-    // ---- SecretKeys and WorkloadIdentity: NotAttempted, NEVER the handle
+    // ---- SecretKeys, WorkloadIdentity, ArchiveReadGrant: the FETCH JOB ----
     //
-    // THE ROW THE REVIEWER'S SURVIVING MUTANT NEEDED. Both of these grants are
-    // read by an evidence-fetch Job in the object's own namespace (D2 §3.9),
-    // because the controller holds no verb on `secrets` and must not. Until
-    // that Job exists the honest answer is `NotAttempted` naming the missing
-    // capability — and the one answer that must never be given is the global
-    // handle's, which is a different principal over a different bucket.
-    for mode in [
-        serde_json::json!({"mode": "SecretKeys", "secret": {
-            "name": "lw-b-evidence-reader",
-            "accessKeyIdKey": "id", "secretAccessKeyKey": "key"
-        }}),
-        serde_json::json!({"mode": "WorkloadIdentity",
-                           "workloadIdentity": {"serviceAccountName": "lw-b-reader"}}),
+    // THE ROW THE REVIEWER'S SURVIVING MUTANT NEEDED. These grants are read by
+    // an evidence-fetch Job in the object's own namespace (D2 §3.9, option C —
+    // the default), because the controller holds no verb on `secrets` and must
+    // not. The one answer that must never be given is the global handle's,
+    // which is a different principal over a different bucket. And the grant
+    // the Job will hold is the `evidenceRead` one: for `ArchiveReadGrant`,
+    // the destination's `archiveRead` Secret — never `archiveWrite`'s.
+    for (mode, archive_read, want_secret) in [
+        (
+            serde_json::json!({"mode": "SecretKeys", "secret": {
+                "name": "lw-b-evidence-reader",
+                "accessKeyIdKey": "id", "secretAccessKeyKey": "key"
+            }}),
+            None,
+            Some("lw-b-evidence-reader"),
+        ),
+        (
+            serde_json::json!({"mode": "WorkloadIdentity",
+                               "workloadIdentity": {"serviceAccountName": "lw-b-reader"}}),
+            None,
+            None,
+        ),
+        (
+            serde_json::json!({"mode": "ArchiveReadGrant"}),
+            Some(
+                serde_json::json!({"mode": "SecretKeys", "secret": {"name": "lw-b-archive-reader"}}),
+            ),
+            Some("lw-b-archive-reader"),
+        ),
     ] {
-        let (client, _r, _b) = mock_client_recording_bodies(destination_route(
-            "/backupdestinations/dest-b",
-            with_evidence_read(mode.clone()),
-        ));
+        let mut value = with_evidence_read(mode.clone());
+        if let Some(read) = archive_read {
+            value["spec"]["access"]["archiveRead"] = read;
+        }
+        let (client, _r, _b) =
+            mock_client_recording_bodies(destination_route("/backupdestinations/dest-b", value));
         let source = evidence_source_for(Some(&reference), &client, NS, now)
             .await
             .expect("the read succeeds");
@@ -10652,11 +10670,25 @@ async fn evidence_is_routed_by_grant_and_never_falls_back_to_the_global_handle()
              principal over the controller's own bucket. Mode {mode:?} gave {source:?}"
         );
         match source {
-            EvidenceSource::NotAttempted { detail } => assert!(
-                detail.contains("evidence-fetch Job"),
-                "the detail names the capability that is missing: {detail}"
-            ),
-            other => panic!("got {other:?}"),
+            EvidenceSource::FetchJob { destination, .. } => {
+                assert_eq!(destination.role, DestinationRole::EvidenceRead);
+                match (&destination.grant, want_secret) {
+                    (ResolvedGrant::SecretKeys { secret, .. }, Some(want)) => assert_eq!(
+                        secret, want,
+                        "the Job holds the evidenceRead grant's Secret and no other"
+                    ),
+                    (
+                        ResolvedGrant::WorkloadIdentity {
+                            service_account_name,
+                        },
+                        None,
+                    ) => {
+                        assert_eq!(service_account_name, "lw-b-reader");
+                    }
+                    (other, _) => panic!("mode {mode:?} resolved to {other:?}"),
+                }
+            }
+            other => panic!("mode {mode:?} must be read by an evidence-fetch Job; got {other:?}"),
         }
     }
 
@@ -11143,13 +11175,13 @@ fn finished_routes_for_destination(
 /// `Invalid` or `Untrusted` without bytes; dropping the detail sentence;
 /// writing `records`/`capture` off an unverified run.
 #[tokio::test]
-async fn a_destination_backed_run_with_a_pod_only_grant_publishes_not_attempted() {
-    let evidence_read = serde_json::json!({"mode": "SecretKeys", "secret": {
-        "name": "lw-b-evidence-reader",
-        "accessKeyIdKey": "id", "secretAccessKeyKey": "key"
-    }});
-    let mut value = dest_b_value();
-    value["spec"]["access"]["evidenceRead"] = evidence_read;
+async fn a_destination_backed_run_with_no_evidence_reader_publishes_not_attempted() {
+    // NO `evidenceRead` AT ALL. Since the evidence-fetch Job landed a
+    // `SecretKeys`/`WorkloadIdentity` grant IS read (see
+    // `a_pod_only_grant_creates_an_evidence_fetch_job_holding_exactly_that_grant`);
+    // the verdict that has to be PUBLISHED rather than skipped is now the one
+    // for a destination that names no reader.
+    let value = dest_b_value();
 
     let (client, _seen, bodies) = mock_client_recording_bodies(finished_routes_for_destination(
         &pod_list_terminated(0),
@@ -11193,9 +11225,9 @@ async fn a_destination_backed_run_with_a_pod_only_grant_publishes_not_attempted(
         .as_str()
         .expect("the verdict carries its detail");
     assert!(
-        detail.contains("evidence-fetch Job"),
-        "the sentence names the capability that is missing — that is the whole reason to \
-         publish the verdict: {detail}"
+        detail.contains("spec.access.evidenceRead"),
+        "the sentence names the field that is missing — that is the whole reason to publish \
+         the verdict: {detail}"
     );
     assert!(
         detail.contains("logweir drill verify"),
@@ -11204,6 +11236,10 @@ async fn a_destination_backed_run_with_a_pod_only_grant_publishes_not_attempted(
     assert!(
         verification["matchedKeyId"].is_null(),
         "nothing was verified, so no key matched: {verification}"
+    );
+    assert!(
+        second["evidence"]["observation"].is_null(),
+        "no Job reads this run's evidence, so no observation is written: {second}"
     );
     assert!(
         second["records"].is_null() && second["capture"].is_null(),
@@ -11328,12 +11364,9 @@ use weirkeeper::verification::{backup_badge, verification_patch_value};
 /// a field the verdict DOES hold; moving the nulls inside `to_status_value`.
 #[tokio::test]
 async fn the_verification_patch_nulls_every_field_the_verdict_does_not_hold() {
-    let evidence_read = serde_json::json!({"mode": "SecretKeys", "secret": {
-        "name": "lw-b-evidence-reader",
-        "accessKeyIdKey": "id", "secretAccessKeyKey": "key"
-    }});
-    let mut value = dest_b_value();
-    value["spec"]["access"]["evidenceRead"] = evidence_read;
+    // A destination with no `evidenceRead`: its `NotAttempted` is written with
+    // no fetch at all, which is the shortest path to a second patch.
+    let value = dest_b_value();
 
     let (client, _seen, bodies) = mock_client_recording_bodies(finished_routes_for_destination(
         &pod_list_terminated(0),

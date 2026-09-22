@@ -405,7 +405,7 @@ impl Evidence {
     ///
     /// The last arm is for a result THIS BUILD DOES NOT KNOW, which is
     /// unreachable for a verdict written by
-    /// [`crate::verification::VerificationVerdict`] — all four of its spellings
+    /// [`crate::verification::VerificationVerdict`] — all five of its spellings
     /// are named above it — and is reachable after a rollback past a build
     /// that wrote a fifth one. It is not a panic, because a controller must not
     /// crash on a status a newer build wrote, and it is **not** `NotAttempted`:
@@ -423,7 +423,12 @@ impl Evidence {
             (Some("Valid"), _) => Self::Valid,
             (Some("Invalid"), _) => Self::Invalid,
             (Some("Untrusted"), _) => Self::Untrusted,
-            (None | Some("NotAttempted"), _) => Self::NotAttempted,
+            // `Pending` IS NOT A VERDICT (D2 §3.9 step 3): an evidence-fetch
+            // Job is still reading the document and nothing about it has been
+            // decided — exactly what `NotAttempted` means here. Read as a
+            // refusal, every freshly finished destination-backed run would
+            // page as `Unprotected` for the seconds its fetch takes.
+            (None | Some("NotAttempted" | "Pending"), _) => Self::NotAttempted,
             (Some(_), _) => Self::Untrusted,
         }
     }

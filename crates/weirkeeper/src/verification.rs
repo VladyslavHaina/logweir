@@ -226,6 +226,15 @@ pub enum VerificationVerdict {
     /// the problem. An operator acts on their trust policy for one and on
     /// their archive for the other.
     Untrusted,
+    /// **Not a verdict yet** — D2 §3.9 step 3's additive value. An
+    /// evidence-fetch check Job is reading this run's evidence with the
+    /// destination's `evidenceRead` grant (or is waiting for a slot), and the
+    /// controller will verify what it relays. Written with no `matchedKeyId`
+    /// and never green; it is replaced by one of the four values above.
+    ///
+    /// A claim about the CONTROLLER, like `NotAttempted`: no document has been
+    /// read, so nothing about it has been decided.
+    Pending,
 }
 
 impl VerificationVerdict {
@@ -237,6 +246,7 @@ impl VerificationVerdict {
             Self::Invalid => "Invalid",
             Self::NotAttempted => "NotAttempted",
             Self::Untrusted => "Untrusted",
+            Self::Pending => "Pending",
         }
     }
 }
@@ -374,8 +384,23 @@ impl VerificationResult {
         }
     }
 
+    /// A `Pending` carrying `detail` — an evidence-fetch Job is reading the
+    /// document, and nothing has been decided about it (D2 §3.9 step 3).
+    #[must_use]
+    pub fn pending(payload_type: &str, detail: impl Into<String>) -> Self {
+        Self {
+            result: VerificationVerdict::Pending,
+            matched_key_id: None,
+            payload_type: payload_type.to_string(),
+            verified_at: Utc::now(),
+            detail: Some(detail.into()),
+            trust: None,
+        }
+    }
+
     /// An `Invalid` carrying `detail`.
-    fn invalid(payload_type: &str, detail: impl Into<String>) -> Self {
+    #[must_use]
+    pub fn invalid(payload_type: &str, detail: impl Into<String>) -> Self {
         Self {
             result: VerificationVerdict::Invalid,
             matched_key_id: None,
@@ -712,10 +737,44 @@ pub fn verify_evidence(
         Ok((bytes, _version)) => bytes,
         Err(e) => return VerificationResult::not_attempted(payload_type, store_detail(&e)),
     };
+    verify_fetched(
+        &payload,
+        &sidecar_bytes,
+        trust,
+        payload_key,
+        payload_sha256,
+        sidecar_key,
+        payload_type,
+    )
+}
 
+/// Steps 3–5 of [`verify_evidence`] over bytes that were ALREADY fetched — D2
+/// §3.9 step 4's `verify_fetched`, refactored out of it.
+///
+/// # ONE VERIFIER, TWO WAYS TO GET THE BYTES
+///
+/// The controller's own read-only handle ([`verify_evidence`]) and an
+/// evidence-fetch check Job's relay (`crate::evidence_fetch`) both end here,
+/// so the digest fence, the DSSE check, the usage filter and the trust
+/// projection are decided by one body of code whichever principal read the
+/// bucket. A relayed document is not trusted more than a fetched one: its
+/// digest is recomputed HERE, against `payload_sha256`, which the caller takes
+/// from the runner's own report and never from the relay.
+///
+/// Pure and synchronous: no store, no clock beyond the verdict's instant.
+#[must_use]
+pub fn verify_fetched(
+    payload: &[u8],
+    sidecar_bytes: &[u8],
+    trust: &ResolvedTrust,
+    payload_key: &str,
+    payload_sha256: &str,
+    sidecar_key: &str,
+    payload_type: &str,
+) -> VerificationResult {
     // STEP 3. The digest the status recorded, against the bytes in the bucket
     // right now. A MISMATCH IS `Invalid`.
-    let computed = sha256_prefixed(&payload);
+    let computed = sha256_prefixed(payload);
     if computed != payload_sha256 {
         return VerificationResult::invalid(
             payload_type,
@@ -730,7 +789,7 @@ pub fn verify_evidence(
     // sidecar that is not JSON is a fact about the OBJECT, so this is
     // `Invalid`: the bytes were fetched, they are the evidence this run named,
     // and they are not a DSSE sidecar.
-    let sidecar: Sidecar = match serde_json::from_slice(&sidecar_bytes) {
+    let sidecar: Sidecar = match serde_json::from_slice(sidecar_bytes) {
         Ok(s) => s,
         Err(e) => {
             return VerificationResult::invalid(
@@ -774,7 +833,7 @@ pub fn verify_evidence(
                 continue;
             }
         };
-        match verify_detached(&key, payload_type, &payload, &sidecar) {
+        match verify_detached(&key, payload_type, payload, &sidecar) {
             // THE POLICY'S OWN `keyId`, not the one `verify_detached` returned
             // out of the sidecar. They are the same string whenever the policy
             // declares its ids correctly, and when they are not, the id an
@@ -785,7 +844,7 @@ pub fn verify_evidence(
                 // been checked have no claim worth reading, and a claim read
                 // before the digest comparison would be the SUBSTITUTED
                 // document's claim.
-                let claim = match serde_json::from_slice::<Value>(&payload) {
+                let claim = match serde_json::from_slice::<Value>(payload) {
                     Ok(json) => EvidenceClaim::from_document(payload_type, &json),
                     // The signature verified over bytes that are not JSON at
                     // all — possible only for a payload type this build does
@@ -857,6 +916,77 @@ pub fn verify_resolved(
             VerificationResult::not_attempted(payload_type, NO_SIGNING_KEYS_DETAIL)
         }
     }
+}
+
+/// [`verify_resolved`] over bytes that were already fetched — the same three
+/// resolutions, the same [`verify_fetched`].
+#[must_use]
+pub fn verify_fetched_resolved(
+    payload: &[u8],
+    sidecar: &[u8],
+    resolution: &Resolution,
+    payload_key: &str,
+    payload_sha256: &str,
+    sidecar_key: &str,
+    payload_type: &str,
+) -> VerificationResult {
+    match resolution {
+        Resolution::Trust(trust) => verify_fetched(
+            payload,
+            sidecar,
+            trust,
+            payload_key,
+            payload_sha256,
+            sidecar_key,
+            payload_type,
+        ),
+        Resolution::Conflict {
+            namespace,
+            policies,
+        } => VerificationResult::not_attempted(
+            payload_type,
+            trust_policy_conflict_detail(namespace, policies),
+        ),
+        Resolution::Unconfigured => {
+            VerificationResult::not_attempted(payload_type, NO_SIGNING_KEYS_DETAIL)
+        }
+    }
+}
+
+/// [`verify_oracle`]'s trust resolution in front of [`verify_fetched_resolved`]
+/// — the evidence-fetch Job's half of "no second verification path".
+///
+/// The namespace's trust is resolved exactly as the controller's own handle
+/// resolves it (`crate::trust::resolve`), and an unreadable resolution is the
+/// same `NotAttempted` with [`ROSTER_UNREADABLE_DETAIL`]. There is no store
+/// here, so nothing needs `spawn_blocking`: the bytes are already in memory.
+pub async fn verify_relayed(
+    client: &kube::Client,
+    r: &EvidenceRef,
+    payload: &[u8],
+    sidecar: &[u8],
+) -> VerificationResult {
+    let resolution = match crate::trust::resolve(client, &r.namespace).await {
+        Ok(resolution) => resolution,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                namespace = %r.namespace,
+                "this namespace's trust could not be resolved; this verification is \
+                 NotAttempted rather than Invalid"
+            );
+            return VerificationResult::not_attempted(r.payload_type, ROSTER_UNREADABLE_DETAIL);
+        }
+    };
+    verify_fetched_resolved(
+        payload,
+        sidecar,
+        &resolution,
+        &r.payload_key,
+        &r.payload_sha256,
+        &r.sidecar_key,
+        r.payload_type,
+    )
 }
 
 /// A `StoreError` as the `detail` of a `NotAttempted`.
@@ -2309,7 +2439,9 @@ pub fn catalog_verification(
 ) -> CatalogVerdict {
     let state = match result {
         VerificationVerdict::Invalid => "Invalid",
-        VerificationVerdict::NotAttempted => "NotAttempted",
+        // A pending fetch has read nothing, which is what `NotAttempted`
+        // says; the catalog never sees one, and would not be told otherwise.
+        VerificationVerdict::NotAttempted | VerificationVerdict::Pending => "NotAttempted",
         VerificationVerdict::Valid => match verdict.map(|v| v.basis) {
             Some(TrustBasis::Historical) => "VerifiedHistorical",
             _ => "Verified",

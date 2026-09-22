@@ -191,9 +191,16 @@ pub struct Condition {
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct EvidenceVerification {
-    /// `Valid`, `Invalid` or `NotAttempted`. An empty
+    /// `Valid`, `Invalid`, `Untrusted`, `NotAttempted` or `Pending`. An empty
     /// `TrustRoster.spec.signingKeys` is `NotAttempted` naming itself, never a
     /// silent `Invalid`.
+    ///
+    /// `Pending` (additive, D2 §3.9 step 3) is written only while an
+    /// evidence-fetch check Job is reading this run's evidence with the
+    /// destination's `evidenceRead` grant, or is waiting for a slot to start;
+    /// `evidence.observation` names that Job. It is not `Valid`, so every
+    /// surface renders it unverified, and it is replaced by a reached verdict
+    /// or by an honest `NotAttempted` naming why the fetch did not finish.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<String>,
     /// The `keyId` of the `TrustRoster` signing key whose public key verified
@@ -317,6 +324,60 @@ pub struct TrustBasis {
     /// failed, and never beside a `signedAt`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signing_time_read: Option<String>,
+}
+
+/// How a destination-backed run's evidence is being read — D2 §3.9 step 3.
+///
+/// Written only for a run whose `BackupDestination` reads evidence with a
+/// grant only a pod may hold (`evidenceRead` `SecretKeys`, `WorkloadIdentity`,
+/// or `ArchiveReadGrant` resolving to either): the controller holds no verb on
+/// `secrets`, so it asks an evidence-fetch check Job in the object's own
+/// namespace to relay the signed document and its detached sidecar, and then
+/// verifies the relayed bytes itself. Absent on every other run, and on every
+/// object an older controller reconciled.
+///
+/// REFERENCES AND FACTS ONLY. No byte of the document and no credential is
+/// ever copied here; the Job is named so an operator can `kubectl logs` it.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EvidenceObservation {
+    /// The resolved `evidenceRead` credential mode the Job ran with:
+    /// `SecretKeys` or `WorkloadIdentity`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    /// The evidence-fetch Job of the current attempt, once it exists. Absent
+    /// while the run waits for a slot under
+    /// `checks.maxEvidenceFetchActivePerNamespace`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_ref: Option<ObservedJobRef>,
+    /// Which attempt this is, from 1. A failed fetch is retried at +1 m,
+    /// +5 m and +15 m (D2 §3.9 step 5); each attempt is its own Job,
+    /// `lwc-ev-<20 hex of sha256(uid + ":" + attempt)>`. Retries never re-run
+    /// the backup or the restore.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<i64>,
+    /// What the relay said about the two objects: `Complete`,
+    /// `PayloadWithoutSidecar`, `Absent` (the store answered NotFound for the
+    /// signed document) or `Unknown` (anything else, including a denial).
+    /// Absent until a relay was read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presence: Option<String>,
+    /// When the next attempt may start, after a fetch that did not finish.
+    /// Absent once a verdict was reached or once the attempts are spent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after: Option<Time>,
+}
+
+/// A Job this controller created, by name and UID.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ObservedJobRef {
+    /// `metadata.name`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// `metadata.uid` — a same-named replacement is a different Job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uid: Option<String>,
 }
 
 /// A cluster-scoped `TrustPolicy`, with the revision a verdict used.

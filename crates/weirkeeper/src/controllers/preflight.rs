@@ -3534,6 +3534,7 @@ pub fn build_job_shape(
         env_literal,
         image: image.image.clone(),
         image_pull_policy: image.image_pull_policy.clone(),
+        attempt: None,
     };
     Ok(JobShape {
         documents,

@@ -106,6 +106,7 @@ fn spec() -> cjob::CheckJobSpec {
         env_literal: Vec::new(),
         image: None,
         image_pull_policy: None,
+        attempt: None,
     }
 }
 

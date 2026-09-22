@@ -236,6 +236,10 @@ pub struct BackupEvidence {
     /// What `weirkeeper` recorded when it verified the pair above.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verification: Option<EvidenceVerification>,
+    /// How the evidence is being read when an evidence-fetch Job reads it —
+    /// D2 §3.9 step 3. Absent for every other evidence path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation: Option<super::EvidenceObservation>,
 }
 
 /// The server-derived identity of this run and the immutable inputs it

@@ -1340,6 +1340,7 @@ async fn start(
         // `job::RUNNER_IMAGE_ENV` reached the runner Job and NOT this one.
         image: runner.image.clone(),
         image_pull_policy: runner.image_pull_policy.clone(),
+        attempt: None,
     };
     let desired = build_discovery_job(&spec, job_name, job_deadline, source_sha256);
     let jobs: Api<Job> = Api::namespaced(client.clone(), namespace);

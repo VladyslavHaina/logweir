@@ -120,6 +120,24 @@ pub fn check_job_name(kind: CheckPlanKind, owner_uid: &str) -> String {
     )
 }
 
+/// The evidence-fetch Job name for one ATTEMPT —
+/// `lwc-ev-<first 20 hex of sha256(owner uid + ":" + attempt)>` (D2 §3.9 step 2).
+///
+/// THE ATTEMPT IS IN THE NAME, AND THAT IS THE WHOLE IDEMPOTENCE ARGUMENT. A
+/// fetch that did not finish is retried with a NEW Job (D2 §3.9 step 5), and a
+/// controller restarted between creating attempt `n`'s Job and recording it on
+/// the status recomputes this same name and finds that Job instead of making a
+/// second one. Two attempts can never share a Job; one attempt can never have
+/// two. Same length and alphabet as [`check_job_name`], so the 27-character
+/// argument there holds here too.
+#[must_use]
+pub fn evidence_fetch_job_name(owner_uid: &str, attempt: u32) -> String {
+    check_job_name(
+        CheckPlanKind::EvidenceFetch,
+        &format!("{owner_uid}:{attempt}"),
+    )
+}
+
 /// The labels on a check Job and on its pod template — the same map, on both.
 ///
 /// `connection_uid` is `None` for a kind that dials no cluster; the key is then
@@ -187,13 +205,21 @@ pub struct CheckJobSpec {
     pub image: Option<String>,
     /// The pull policy this process was handed, or `None` for the compiled-in.
     pub image_pull_policy: Option<String>,
+    /// The evidence-fetch attempt this Job serves — `Some` for
+    /// [`CheckPlanKind::EvidenceFetch`] only, whose name is
+    /// [`evidence_fetch_job_name`]. `None` for every other kind: one subject,
+    /// one check, one name.
+    pub attempt: Option<u32>,
 }
 
 impl CheckJobSpec {
     /// This check's Job name.
     #[must_use]
     pub fn job_name(&self) -> String {
-        check_job_name(self.kind, &self.owner.uid)
+        match self.attempt {
+            Some(attempt) => evidence_fetch_job_name(&self.owner.uid, attempt),
+            None => check_job_name(self.kind, &self.owner.uid),
+        }
     }
 
     /// This check's labels.

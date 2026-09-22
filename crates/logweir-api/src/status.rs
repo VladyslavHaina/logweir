@@ -246,7 +246,9 @@ fn verification_of(o: &Observed<'_>, terminal_run: bool) -> OperationVerificatio
         }
         Some("Valid") | Some("NotAttempted") => VerificationState::NotAttempted,
         Some("Invalid") => VerificationState::Invalid,
-        None => VerificationState::Pending,
+        // D2 §3.9 step 3: an evidence-fetch Job is reading the document and
+        // no verdict is recorded yet — this vocabulary's own `pending`.
+        None | Some("Pending") => VerificationState::Pending,
         Some(_) => VerificationState::Unknown,
     };
     OperationVerification {

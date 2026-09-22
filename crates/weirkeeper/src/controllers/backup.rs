@@ -1180,6 +1180,20 @@ pub enum EvidenceSource {
     /// region, endpoint, addressing and CA from the destination, and only the
     /// CREDENTIAL from the controller's own environment.
     Destination(Arc<Store>),
+    /// A destination-backed run whose `evidenceRead` grant only a POD may hold
+    /// — `SecretKeys` or `WorkloadIdentity`, including an `ArchiveReadGrant`
+    /// that resolves to one of them — D2 §3.8 option **C**, the default. An
+    /// evidence-fetch check Job in the object's own namespace reads the two
+    /// objects with exactly this grant and relays them
+    /// ([`crate::evidence_fetch`]); the controller verifies what it relays.
+    FetchJob {
+        /// The destination resolved for `DestinationRole::EvidenceRead`.
+        destination: Box<ResolvedDestination>,
+        /// The installation's check limits, for the per-namespace slot.
+        checks: crate::check::policy::ChecksPolicy,
+        /// The installation policy digest, recorded in the check plan.
+        policy_digest: String,
+    },
     /// Nothing may read this run's evidence from here, and the reason is a
     /// fact about the destination or about this build. `NotAttempted` with
     /// this detail, never `Invalid`: a missing reader is not a bad document.
@@ -1189,11 +1203,60 @@ pub enum EvidenceSource {
     },
 }
 
+impl EvidenceSource {
+    /// What an evidence-fetch pass needs from this source: the destination to
+    /// render a Job from, the check limits, the policy digest — or, when the
+    /// source is no longer a Job's to read, why not. A Job that already exists
+    /// is still observed either way; only CREATING one needs the destination.
+    #[must_use]
+    pub fn fetch_inputs(
+        &self,
+    ) -> (
+        Option<&ResolvedDestination>,
+        crate::check::policy::ChecksPolicy,
+        Option<&str>,
+        Option<String>,
+    ) {
+        let defaults = crate::check::policy::Policy::defaults().checks;
+        match self {
+            Self::FetchJob {
+                destination,
+                checks,
+                policy_digest,
+            } => (
+                Some(destination.as_ref()),
+                *checks,
+                Some(policy_digest.as_str()),
+                None,
+            ),
+            Self::NotAttempted { detail } => (None, defaults, None, Some(detail.clone())),
+            Self::GlobalHandle | Self::Destination(_) => (
+                None,
+                defaults,
+                None,
+                Some(
+                    "the destination's evidenceRead grant is no longer one only a pod may hold, \
+                     and this run's evidence-fetch Job was never created; run the printed \
+                     logweir drill verify command"
+                        .to_string(),
+                ),
+            ),
+        }
+    }
+}
+
 impl std::fmt::Debug for EvidenceSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::GlobalHandle => f.write_str("GlobalHandle"),
             Self::Destination(_) => f.write_str("Destination(<read-only store>)"),
+            Self::FetchJob { destination, .. } => f
+                .debug_struct("FetchJob")
+                .field(
+                    "destination",
+                    &format!("{}/{}", destination.namespace, destination.name),
+                )
+                .finish_non_exhaustive(),
             Self::NotAttempted { detail } => f
                 .debug_struct("NotAttempted")
                 .field("detail", detail)
@@ -1216,14 +1279,14 @@ impl std::fmt::Debug for EvidenceSource {
 /// # The three grants that are not `ControllerIdentity`
 ///
 /// * **Absent** (`NotConfigured`): `NotAttempted` naming the field to add.
-/// * **`SecretKeys` / `WorkloadIdentity`**: D2 §3.9 reads these through an
-///   evidence-fetch JOB in the object's own namespace, because the controller
-///   holds no verb on `secrets` and must not — option **B** was rejected for
-///   exactly that (D2 §3.8). **THIS BUILD DOES NOT CREATE THAT JOB.** The
-///   answer is `NotAttempted` with a detail that says so, which is the honest
-///   report of a capability that is not here; what it must never be is a
-///   silent fall-back to the global handle, because that handle holds a
-///   different principal over a different bucket.
+/// * **`SecretKeys` / `WorkloadIdentity`** (and `ArchiveReadGrant`, which
+///   resolves to the destination's `archiveRead` grant): D2 §3.9 reads these
+///   through an evidence-fetch JOB in the object's own namespace, because the
+///   controller holds no verb on `secrets` and must not — option **B** was
+///   rejected for exactly that (D2 §3.8). The answer is
+///   [`EvidenceSource::FetchJob`], and [`crate::evidence_fetch`] runs it. What
+///   it must never be is a silent fall-back to the global handle, because
+///   that handle holds a different principal over a different bucket.
 /// * **Not allowlisted**: the resolver's own
 ///   `ControllerIdentityNotAllowlisted`, so an operator cannot point the
 ///   controller's principal at a location a cluster administrator did not list.
@@ -1295,7 +1358,7 @@ pub async fn evidence_source_for(
             });
         }
     };
-    match &resolved.grant {
+    match &resolved.grant.clone() {
         crate::destination::ResolvedGrant::NotConfigured => Ok(EvidenceSource::NotAttempted {
             detail: format!(
                 "{EVIDENCE_READ_NOT_CONFIGURED_PREFIX}{}{EVIDENCE_READ_NOT_CONFIGURED_SUFFIX}",
@@ -1304,16 +1367,13 @@ pub async fn evidence_source_for(
         }),
         crate::destination::ResolvedGrant::SecretKeys { .. }
         | crate::destination::ResolvedGrant::WorkloadIdentity { .. } => {
-            Ok(EvidenceSource::NotAttempted {
-                detail: format!(
-                    "BackupDestination {}/{} reads evidence with a grant only a pod may hold (D2 \
-                     §3.9's evidence-fetch Job), and this build does not create that Job. The \
-                     controller holds no verb on secrets and does not read this credential \
-                     itself; run the printed logweir drill verify command, or set \
-                     spec.access.evidenceRead.mode: ControllerIdentity for an allowlisted \
-                     location",
-                    resolved.namespace, resolved.name
-                ),
+            // D2 §3.8 OPTION C, THE DEFAULT. The kubelet projects this grant
+            // into an evidence-fetch check Job's pod; the controller never
+            // reads it and still holds no verb on `secrets`.
+            Ok(EvidenceSource::FetchJob {
+                checks: load.policy().checks,
+                policy_digest: load.policy().digest(),
+                destination: Box::new(resolved),
             })
         }
         crate::destination::ResolvedGrant::ControllerIdentity => {
@@ -1334,6 +1394,393 @@ pub async fn evidence_source_for(
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// The evidence-fetch Job's half — D2 §3.9 steps 2–5, `SecretKeys` /
+// `WorkloadIdentity` `evidenceRead`
+// ---------------------------------------------------------------------------
+
+/// The `Backup` this Job and plan belong to, as an owner reference.
+fn backup_owner(backup: &Backup) -> Option<RunnerOwner> {
+    Some(RunnerOwner {
+        api_version: Backup::api_version(&()).to_string(),
+        kind: Backup::kind(&()).to_string(),
+        name: backup.name_any(),
+        uid: backup.uid()?,
+    })
+}
+
+/// Write one evidence-fetch verdict — `Pending`, a reached verdict, or an
+/// honest `NotAttempted` — with its `observation`, the `Verified` condition
+/// and any receipt facts, as ONE resourceVersion-preconditioned merge PATCH.
+///
+/// `backup` is the CURRENT projection (the stored status this pass believes
+/// in), so the condition list the patch carries is the object's own with
+/// `Verified` merged in — a merge PATCH replaces arrays, and a list built
+/// from anything older would delete a condition another pass wrote.
+#[allow(clippy::too_many_arguments)]
+async fn write_fetch_verdict(
+    backups: &Api<Backup>,
+    backup: &Backup,
+    name: &str,
+    at: &StatusVersion,
+    result: &VerificationResult,
+    observation: Value,
+    facts: serde_json::Map<String, Value>,
+    now: DateTime<Utc>,
+) -> Result<StatusVersion, BackupError> {
+    let current = backup
+        .status
+        .as_ref()
+        .and_then(|s| serde_json::to_value(s).ok());
+    let (patch, badge) = crate::evidence_fetch::verdict_patch(
+        current.as_ref(),
+        backup
+            .status
+            .as_ref()
+            .and_then(|s| s.conditions.as_deref())
+            .unwrap_or_default(),
+        backup.meta().generation,
+        result,
+        observation,
+        serde_json::Map::new(),
+        facts,
+        backup_badge,
+        now,
+    );
+    info!(
+        backup = %name,
+        verification = %result.result,
+        matched_key_id = result.matched_key_id.as_deref().unwrap_or("<none>"),
+        green = badge.green,
+        "weirkeeper recorded this Backup's evidence verdict"
+    );
+    patch_status_at(backups, backup, name, at, patch).await
+}
+
+/// One pass over this run's evidence-fetch Job, and the status it implies.
+///
+/// # What is decided here, in order (D2 §3.9 step 4)
+///
+/// 1. **The digest.** The relayed receipt is hashed HERE and compared with
+///    `status.evidence.receiptSha256` — the digest THE RUNNER reported for the
+///    bytes it signed and uploaded, which the terminal patch recorded before
+///    any fetch began. The relay's own digest is never the anchor. A
+///    disagreement is `Invalid` and projects NOTHING from those bytes: no
+///    window, no records, no capture (`9cda784`, `67aad4f`).
+/// 2. **The binding.** The receipt's `backup_id` must be this run's
+///    `status.backupId`. A different id is `Invalid`, and projects nothing.
+/// 3. **The signature**, through `verification::verify_relayed` — the
+///    namespace's resolved trust and `verify_fetched`, the same code the
+///    controller's own `ControllerIdentity` handle feeds.
+/// 4. **The facts**, exactly as the `ControllerIdentity` path writes them:
+///    `windowCovered` from the receipt whose digest and binding held
+///    (whatever the signature verdict, as the terminal patch does for that
+///    path), and `records` / `capture` only on `Valid`.
+///
+/// A Job that ends with no relay, a runner refusal, a relay that does not
+/// decode, a denial or a missing object is `NotAttempted` naming the cause,
+/// never `Valid` and never `Invalid`; a failed attempt is retried at +1 m,
+/// +5 m and +15 m and never re-runs the backup.
+#[allow(clippy::too_many_arguments)]
+async fn evidence_fetch_pass(
+    backups: &Api<Backup>,
+    backup: &Backup,
+    at: &StatusVersion,
+    client: &kube::Client,
+    namespace: &str,
+    name: &str,
+    attempt: u32,
+    source: &EvidenceSource,
+    now: DateTime<Utc>,
+    runner: &job::RunnerImage,
+) -> Result<(), BackupError> {
+    let payload_type = logweir_verify::PAYLOAD_TYPE_BACKUP_RECEIPT;
+    let status = backup.status.as_ref();
+    let evidence = status.and_then(|s| s.evidence.as_ref());
+    let (Some(payload_key), Some(sidecar_key)) = (
+        evidence.and_then(|e| e.receipt_key.clone()),
+        evidence.and_then(|e| e.sidecar_key.clone()),
+    ) else {
+        return Ok(());
+    };
+    let Some(owner) = backup_owner(backup) else {
+        return Ok(());
+    };
+    let reported = evidence.and_then(|e| e.receipt_sha256.clone());
+    let stored_mode = evidence
+        .and_then(|e| e.observation.as_ref())
+        .and_then(|o| o.mode.clone());
+    let request = crate::evidence_fetch::Request {
+        payload_key: payload_key.clone(),
+        sidecar_key: sidecar_key.clone(),
+    };
+    let (destination, checks, policy_digest, unresolved) = source.fetch_inputs();
+    let mode = destination
+        .and_then(|d| crate::evidence_fetch::grant_mode(&d.grant))
+        .map(str::to_string)
+        .or(stored_mode);
+    let step = crate::evidence_fetch::advance(&crate::evidence_fetch::Inputs {
+        client,
+        namespace,
+        owner: &owner,
+        attempt,
+        request: &request,
+        destination,
+        unresolved: unresolved.as_deref(),
+        checks: &checks,
+        policy_digest,
+        image: runner,
+        now,
+    })
+    .await
+    .map_err(BackupError::Api)?;
+
+    use crate::evidence_fetch::{observation_patch, Presence, Relayed, Step};
+    let none = serde_json::Map::new();
+    match step {
+        Step::Queued { detail } => {
+            write_fetch_verdict(
+                backups,
+                backup,
+                name,
+                at,
+                &VerificationResult::pending(payload_type, detail),
+                observation_patch(mode.as_deref(), None, attempt, None, None),
+                none,
+                now,
+            )
+            .await?;
+        }
+        Step::Running { job_ref, detail } => {
+            write_fetch_verdict(
+                backups,
+                backup,
+                name,
+                at,
+                &VerificationResult::pending(payload_type, detail),
+                observation_patch(mode.as_deref(), Some(&job_ref), attempt, None, None),
+                none,
+                now,
+            )
+            .await?;
+        }
+        Step::Refused { detail } => {
+            write_fetch_verdict(
+                backups,
+                backup,
+                name,
+                at,
+                &VerificationResult::not_attempted(payload_type, detail),
+                observation_patch(mode.as_deref(), None, attempt, None, None),
+                none,
+                now,
+            )
+            .await?;
+        }
+        Step::Failed {
+            job_name,
+            job_uid,
+            detail,
+        } => {
+            let retry = crate::evidence_fetch::retry_after(attempt, now);
+            let detail = crate::evidence_fetch::failed_detail(&detail, attempt, retry);
+            let job_ref = crate::crds::ObservedJobRef {
+                name: Some(job_name.clone()),
+                uid: job_uid,
+            };
+            write_fetch_verdict(
+                backups,
+                backup,
+                name,
+                at,
+                &VerificationResult::not_attempted(payload_type, detail),
+                observation_patch(mode.as_deref(), Some(&job_ref), attempt, None, retry),
+                none,
+                now,
+            )
+            .await?;
+            // ONLY AFTER THE STATUS COMMIT — the relay (here: the cause) lives
+            // on the pod, and the TTL controller deletes both together.
+            check::set_ttl(client, namespace, &job_name)
+                .await
+                .map_err(BackupError::Api)?;
+        }
+        Step::Relayed {
+            job_name,
+            job_uid,
+            presence,
+            relayed,
+        } => {
+            let job_ref = crate::crds::ObservedJobRef {
+                name: Some(job_name.clone()),
+                uid: job_uid,
+            };
+            let mut facts = serde_json::Map::new();
+            let result = match relayed {
+                Relayed::Unread { detail } => {
+                    // STEP 5's ORPHAN CHECK, FROM THE RELAY'S PRESENCE. Only a
+                    // known presence counts; `Unknown` is not "absent".
+                    let known = match presence {
+                        Presence::Complete => Some(EvidencePresence {
+                            payload: true,
+                            sidecar: true,
+                        }),
+                        Presence::PayloadWithoutSidecar => Some(EvidencePresence {
+                            payload: true,
+                            sidecar: false,
+                        }),
+                        Presence::Absent | Presence::Unknown => None,
+                    };
+                    if let Some(orphan) =
+                        orphan_state(status.and_then(|s| s.exit_code).unwrap_or(0), known)
+                    {
+                        facts.insert("exitReason".to_string(), json!(orphan));
+                    }
+                    VerificationResult::not_attempted(payload_type, detail)
+                }
+                Relayed::Both { payload, sidecar } => {
+                    let fetched = sha256_prefixed(&payload);
+                    let document = serde_json::from_slice::<Value>(&payload).ok();
+                    let claimed_id = document
+                        .as_ref()
+                        .and_then(|d| d.get("backup_id"))
+                        .and_then(Value::as_str);
+                    let run_id = status
+                        .and_then(|s| s.backup_id.clone())
+                        .unwrap_or_else(|| plan_backup_id(backup));
+                    match reported.as_deref() {
+                        // THE RUNNER'S DIGEST IS REQUIRED — a Job is never
+                        // created without one (`legacy_unbound` stays on the
+                        // store-less path), and this arm says so if one ever is.
+                        None => VerificationResult::not_attempted(
+                            payload_type,
+                            "the runner reported no receipt-sha256 anchor; relayed evidence is \
+                             legacy-unbound and no receipt facts are projected",
+                        ),
+                        Some(anchor) if anchor != fetched => VerificationResult::invalid(
+                            payload_type,
+                            format!(
+                                "the fetched receipt hashes to {fetched}, but the runner \
+                                 reported {anchor}"
+                            ),
+                        ),
+                        Some(_) if claimed_id != Some(run_id.as_str()) => {
+                            VerificationResult::invalid(
+                                payload_type,
+                                format!(
+                                    "the relayed receipt names backup_id {}, and this run's \
+                                     backupId is {run_id}; it is not this run's receipt",
+                                    claimed_id.unwrap_or("<absent>")
+                                ),
+                            )
+                        }
+                        Some(anchor) => {
+                            let reference = EvidenceRef {
+                                namespace: namespace.to_string(),
+                                payload_key: payload_key.clone(),
+                                payload_sha256: anchor.to_string(),
+                                sidecar_key: sidecar_key.clone(),
+                                payload_type,
+                            };
+                            let result = crate::verification::verify_relayed(
+                                client, &reference, &payload, &sidecar,
+                            )
+                            .await;
+                            if let Some(doc) = document.as_ref() {
+                                if let Some((from_ms, to_ms)) = covered_from_receipt(doc) {
+                                    facts.insert(
+                                        "windowCovered".to_string(),
+                                        window_covered(from_ms, to_ms),
+                                    );
+                                }
+                                if result.result == VerificationVerdict::Valid {
+                                    if let Some(records) = records_from_receipt(doc) {
+                                        facts.insert("records".to_string(), json!(records));
+                                    }
+                                    if let Some((started, finished)) = capture_from_receipt(doc) {
+                                        facts.insert(
+                                            "capture".to_string(),
+                                            json!({ "startedAt": started, "finishedAt": finished }),
+                                        );
+                                    }
+                                }
+                            }
+                            result
+                        }
+                    }
+                }
+            };
+            write_fetch_verdict(
+                backups,
+                backup,
+                name,
+                at,
+                &result,
+                observation_patch(
+                    mode.as_deref(),
+                    Some(&job_ref),
+                    attempt,
+                    Some(presence),
+                    None,
+                ),
+                facts,
+                now,
+            )
+            .await?;
+            check::set_ttl(client, namespace, &job_name)
+                .await
+                .map_err(BackupError::Api)?;
+        }
+    }
+    Ok(())
+}
+
+/// The fetch a TERMINAL `Backup` still owes, if any — run from the two
+/// already-terminal branches of [`reconcile_backup_inner`], which otherwise
+/// read nothing and write nothing.
+///
+/// `Pending` continues the recorded attempt; a `NotAttempted` whose
+/// observation carries a `retryAfter` that has passed starts the next one.
+/// Nothing else is touched: a reached verdict is final here, and a run whose
+/// evidence was never the Job's to read has no observation at all.
+async fn continue_evidence_fetch(
+    backup: &Backup,
+    client: &kube::Client,
+    namespace: &str,
+    now: DateTime<Utc>,
+    runner: &job::RunnerImage,
+) -> Result<bool, BackupError> {
+    let evidence = backup.status.as_ref().and_then(|s| s.evidence.as_ref());
+    let result = evidence
+        .and_then(|e| e.verification.as_ref())
+        .and_then(|v| v.result.as_deref());
+    let Some(attempt) = crate::evidence_fetch::owed_attempt(
+        result,
+        evidence.and_then(|e| e.observation.as_ref()),
+        now,
+    ) else {
+        return Ok(false);
+    };
+    let source = evidence_source(backup, client, namespace, now)
+        .await
+        .map_err(BackupError::Api)?;
+    let backups: Api<Backup> = Api::namespaced(client.clone(), namespace);
+    evidence_fetch_pass(
+        &backups,
+        backup,
+        &StatusVersion::observed(backup.meta()),
+        client,
+        namespace,
+        &backup.name_any(),
+        attempt,
+        &source,
+        now,
+        runner,
+    )
+    .await?;
+    Ok(true)
 }
 
 /// The two evidence keys, as read off the log.
@@ -3499,6 +3946,10 @@ async fn reconcile_backup_inner(
                 namespace = %namespace,
                 "the Job is gone and the status is terminal; nothing to do"
             );
+            // …EXCEPT THE EVIDENCE FETCH IT MAY STILL OWE (D2 §3.9). The
+            // runner Job's TTL has nothing to do with the evidence-fetch
+            // Job's, and a `Pending` verdict is not a finished one.
+            continue_evidence_fetch(backup, client, &namespace, now, runner).await?;
             return Ok(BackupOutcome {
                 job_name,
                 created: false,
@@ -3892,6 +4343,12 @@ async fn reconcile_backup_inner(
             diagnostics::repair_ttl(client, &namespace, &job, &backup.uid().unwrap_or_default())
                 .await
                 .map_err(BackupError::Api)?;
+        // THE OTHER THING A TERMINAL `Backup` MAY STILL OWE: its evidence
+        // verdict, when an evidence-fetch Job is reading it (D2 §3.9). The
+        // runner's pod is still not read and the run's own fields are still
+        // not rewritten — this touches `evidence.verification`,
+        // `evidence.observation`, `Verified` and the receipt facts only.
+        continue_evidence_fetch(backup, client, &namespace, now, runner).await?;
         return Ok(BackupOutcome {
             job_name,
             created: false,
@@ -4018,7 +4475,12 @@ async fn reconcile_backup_inner(
         // `orphan_state` gets `None` and no run is called an
         // `OrphanedScorecard` for want of a reader; no `windowCovered`, because
         // the window is the RECEIPT's and no receipt was fetched.
-        EvidenceSource::NotAttempted { .. } => None,
+        //
+        // `FetchJob` too, ON THIS PASS: D2 §3.9 step 1 — the terminal patch of
+        // a run whose evidence a Job reads carries no window and no orphan
+        // presence, because no store read has happened yet. The Job's relay
+        // supplies both, on a later write.
+        EvidenceSource::NotAttempted { .. } | EvidenceSource::FetchJob { .. } => None,
     };
     let orphan = orphan_state(exit_code, observed.as_ref().map(|o| o.presence));
     let observed_covered = observed.as_ref().and_then(|o| o.covered);
@@ -4197,6 +4659,9 @@ async fn reconcile_backup_inner(
                     detail.clone(),
                 ))
             }
+            // THE JOB'S VERDICT IS WRITTEN BY THE JOB'S PASS, below — never
+            // here, where nothing has been read.
+            (EvidenceSource::FetchJob { .. }, _) => None,
             (EvidenceSource::GlobalHandle, Some(reference)) => Some(verify(reference).await),
             // THE SAME VERIFIER, ON THE DESTINATION'S OWN HANDLE — D2 §3.9's
             // "no second verification path". `verify_oracle` already takes the
@@ -4295,6 +4760,31 @@ async fn reconcile_backup_inner(
             }
         }
         patch_status_at(&backups, backup, &name, &at, evidence_patch).await?;
+    }
+
+    // D2 §3.9 STEP 2, THE DEFAULT ARM: an evidence-fetch Job reads this run's
+    // receipt with the destination's `evidenceRead` grant. AFTER the terminal
+    // patch and the runner Job's TTL, like every verdict. A legacy-unbound run
+    // (no runner digest) gets no Job: nothing a fetch returned could be bound
+    // to it, and its `NotAttempted` was written above.
+    if matches!(evidence_from, EvidenceSource::FetchJob { .. })
+        && keys.complete()
+        && !legacy_unbound
+    {
+        let stored = with_status_written(backup, &terminal, &at);
+        evidence_fetch_pass(
+            &backups,
+            &stored,
+            &at,
+            client,
+            &namespace,
+            &name,
+            1,
+            &evidence_from,
+            now,
+            runner,
+        )
+        .await?;
     }
 
     info!(
@@ -4481,6 +4971,17 @@ async fn reconcile_with_trust(
                                 Ok(EvidenceSource::GlobalHandle) => (ctx.archive.clone(), None),
                                 Ok(EvidenceSource::Destination(store)) => (Some(store), None),
                                 Ok(EvidenceSource::NotAttempted { detail }) => (None, Some(detail)),
+                                // A POD-ONLY GRANT IS NOT RE-READ HERE: the
+                                // re-trust hook has no Job to wait for.
+                                Ok(EvidenceSource::FetchJob { destination, .. }) => (
+                                    None,
+                                    Some(format!(
+                                        "BackupDestination {}/{} reads evidence with a grant only \
+                                         a pod may hold; the signing time is not re-read by the \
+                                         re-trust pass",
+                                        destination.namespace, destination.name
+                                    )),
+                                ),
                                 Err(e) => (
                                     None,
                                     Some(crate::verification::evidence_path_unreadable(&e)),

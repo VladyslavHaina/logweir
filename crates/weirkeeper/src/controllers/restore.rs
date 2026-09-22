@@ -3239,6 +3239,391 @@ async fn patch_status_at(
     .map_err(RestoreError::Api)
 }
 
+/// `restore` as it stands AFTER `patch` was stored at `at` — the projection a
+/// second write of one pass builds from and preconditions on (seam **S7**).
+fn with_status_written(restore: &Restore, patch: &Value, at: &StatusVersion) -> Restore {
+    let mut next = restore.clone();
+    if let Some(fragment) = patch.get("status") {
+        let mut status = restore
+            .status
+            .as_ref()
+            .and_then(|s| serde_json::to_value(s).ok())
+            .unwrap_or(Value::Null);
+        crate::conditions::apply_merge_patch(&mut status, fragment);
+        if let Ok(projected) = serde_json::from_value(status) {
+            next.status = Some(projected);
+        }
+    }
+    if let Some(version) = at.get() {
+        next.metadata.resource_version = Some(version.to_string());
+    }
+    next
+}
+
+// ---------------------------------------------------------------------------
+// The evidence-fetch Job's half — D2 §3.9's Restore paragraph
+// ---------------------------------------------------------------------------
+
+/// The `Restore` this Job and plan belong to, as an owner reference.
+fn restore_owner(restore: &Restore) -> Option<RunnerOwner> {
+    Some(RunnerOwner {
+        api_version: Restore::api_version(&()).to_string(),
+        kind: Restore::kind(&()).to_string(),
+        name: restore.name_any(),
+        uid: restore.uid()?,
+    })
+}
+
+/// Write one evidence-fetch verdict for a `Restore`; see
+/// [`crate::evidence_fetch::verdict_patch`].
+#[allow(clippy::too_many_arguments)]
+async fn write_fetch_verdict(
+    restores: &Api<Restore>,
+    restore: &Restore,
+    name: &str,
+    at: &StatusVersion,
+    result: &crate::verification::VerificationResult,
+    observation: Value,
+    evidence_facts: serde_json::Map<String, Value>,
+    facts: serde_json::Map<String, Value>,
+    now: DateTime<Utc>,
+) -> Result<StatusVersion, RestoreError> {
+    let current = restore
+        .status
+        .as_ref()
+        .and_then(|s| serde_json::to_value(s).ok());
+    let (patch, badge) = crate::evidence_fetch::verdict_patch(
+        current.as_ref(),
+        restore
+            .status
+            .as_ref()
+            .and_then(|s| s.conditions.as_deref())
+            .unwrap_or_default(),
+        restore.meta().generation,
+        result,
+        observation,
+        evidence_facts,
+        facts,
+        restore_badge,
+        now,
+    );
+    info!(
+        restore = %name,
+        verification = %result.result,
+        matched_key_id = result.matched_key_id.as_deref().unwrap_or("<none>"),
+        green = badge.green,
+        "weirkeeper recorded this Restore's evidence verdict"
+    );
+    patch_status_at(restores, restore, name, at, patch).await
+}
+
+/// One pass over this run's evidence-fetch Job — the `Restore` twin of
+/// `controllers::backup`'s, on `scorecard-key` / `sidecar-key` and the
+/// EVIDENCE destination's `evidenceRead` grant (D2 §3.9, Restore paragraph).
+///
+/// # What differs from the `Backup` half, and why
+///
+/// * **The digest.** A restore runner reports no scorecard digest of its own,
+///   so — exactly as the controller's own-handle path does — the digest is
+///   computed HERE over the relayed bytes and is what the signature is
+///   checked against; `scorecardSha256` records it.
+/// * **The binding.** The scorecard's `approval.plan_hash`, when it carries
+///   one, must be this `Restore`'s `sha256(spec.planBytes)`. A scorecard for
+///   another plan is `Invalid` and projects nothing. A scorecard written
+///   before phase 1 carries an empty hash, which names no other plan.
+/// * **The facts.** `outcome`, `lastPhaseCompleted`, `objectives`,
+///   `integrity`, `measured` and the offset report's digest are copied out of
+///   the relayed bytes by JSON pointer (`scorecard_observation`, the one
+///   reader) — the same facts, the same rule the own-handle path applies on
+///   its terminal patch: whenever the document was read and is bound to this
+///   run, whatever the signature verdict. The badge is still green only on
+///   `Valid` with `outcome: pass`.
+#[allow(clippy::too_many_arguments)]
+async fn evidence_fetch_pass(
+    restores: &Api<Restore>,
+    restore: &Restore,
+    at: &StatusVersion,
+    client: &kube::Client,
+    namespace: &str,
+    name: &str,
+    attempt: u32,
+    source: &backup::EvidenceSource,
+    now: DateTime<Utc>,
+    runner: &job::RunnerImage,
+) -> Result<(), RestoreError> {
+    use crate::evidence_fetch::{observation_patch, Relayed, Step};
+    use crate::verification::VerificationResult;
+    let payload_type = logweir_verify::PAYLOAD_TYPE_SCORECARD;
+    let status = restore.status.as_ref();
+    let evidence = status.and_then(|s| s.evidence.as_ref());
+    let (Some(payload_key), Some(sidecar_key)) = (
+        evidence.and_then(|e| e.scorecard_key.clone()),
+        evidence.and_then(|e| e.sidecar_key.clone()),
+    ) else {
+        return Ok(());
+    };
+    let Some(owner) = restore_owner(restore) else {
+        return Ok(());
+    };
+    let stored_mode = evidence
+        .and_then(|e| e.observation.as_ref())
+        .and_then(|o| o.mode.clone());
+    let request = crate::evidence_fetch::Request {
+        payload_key: payload_key.clone(),
+        sidecar_key: sidecar_key.clone(),
+    };
+    let (destination, checks, policy_digest, unresolved) = source.fetch_inputs();
+    let mode = destination
+        .and_then(|d| crate::evidence_fetch::grant_mode(&d.grant))
+        .map(str::to_string)
+        .or(stored_mode);
+    let step = crate::evidence_fetch::advance(&crate::evidence_fetch::Inputs {
+        client,
+        namespace,
+        owner: &owner,
+        attempt,
+        request: &request,
+        destination,
+        unresolved: unresolved.as_deref(),
+        checks: &checks,
+        policy_digest,
+        image: runner,
+        now,
+    })
+    .await
+    .map_err(RestoreError::Api)?;
+
+    let none = serde_json::Map::new;
+    match step {
+        Step::Queued { detail } => {
+            write_fetch_verdict(
+                restores,
+                restore,
+                name,
+                at,
+                &VerificationResult::pending(payload_type, detail),
+                observation_patch(mode.as_deref(), None, attempt, None, None),
+                none(),
+                none(),
+                now,
+            )
+            .await?;
+        }
+        Step::Running { job_ref, detail } => {
+            write_fetch_verdict(
+                restores,
+                restore,
+                name,
+                at,
+                &VerificationResult::pending(payload_type, detail),
+                observation_patch(mode.as_deref(), Some(&job_ref), attempt, None, None),
+                none(),
+                none(),
+                now,
+            )
+            .await?;
+        }
+        Step::Refused { detail } => {
+            write_fetch_verdict(
+                restores,
+                restore,
+                name,
+                at,
+                &VerificationResult::not_attempted(payload_type, detail),
+                observation_patch(mode.as_deref(), None, attempt, None, None),
+                none(),
+                none(),
+                now,
+            )
+            .await?;
+        }
+        Step::Failed {
+            job_name,
+            job_uid,
+            detail,
+        } => {
+            let retry = crate::evidence_fetch::retry_after(attempt, now);
+            let job_ref = crate::crds::ObservedJobRef {
+                name: Some(job_name.clone()),
+                uid: job_uid,
+            };
+            write_fetch_verdict(
+                restores,
+                restore,
+                name,
+                at,
+                &VerificationResult::not_attempted(
+                    payload_type,
+                    crate::evidence_fetch::failed_detail(&detail, attempt, retry),
+                ),
+                observation_patch(mode.as_deref(), Some(&job_ref), attempt, None, retry),
+                none(),
+                none(),
+                now,
+            )
+            .await?;
+            check::set_ttl(client, namespace, &job_name)
+                .await
+                .map_err(RestoreError::Api)?;
+        }
+        Step::Relayed {
+            job_name,
+            job_uid,
+            presence,
+            relayed,
+        } => {
+            let job_ref = crate::crds::ObservedJobRef {
+                name: Some(job_name.clone()),
+                uid: job_uid,
+            };
+            let mut evidence_facts = serde_json::Map::new();
+            let mut facts = serde_json::Map::new();
+            let result = match relayed {
+                Relayed::Unread { detail } => {
+                    VerificationResult::not_attempted(payload_type, detail)
+                }
+                Relayed::Both { payload, sidecar } => {
+                    let fetched = sha256_prefixed(&payload);
+                    let claimed_plan = serde_json::from_slice::<Value>(&payload)
+                        .ok()
+                        .and_then(|d| {
+                            d.pointer("/approval/plan_hash")
+                                .and_then(Value::as_str)
+                                .map(str::to_string)
+                        })
+                        .filter(|h| !h.is_empty());
+                    let plan = recomputed_plan_hash(restore);
+                    match claimed_plan {
+                        Some(claimed) if claimed != plan => VerificationResult::invalid(
+                            payload_type,
+                            format!(
+                                "the relayed scorecard names plan_hash {claimed}, and this \
+                                 Restore's plan hashes to {plan}; it is not this run's scorecard"
+                            ),
+                        ),
+                        _ => {
+                            let reference = EvidenceRef {
+                                namespace: namespace.to_string(),
+                                payload_key: payload_key.clone(),
+                                payload_sha256: fetched.clone(),
+                                sidecar_key: sidecar_key.clone(),
+                                payload_type,
+                            };
+                            let result = crate::verification::verify_relayed(
+                                client, &reference, &payload, &sidecar,
+                            )
+                            .await;
+                            if let Some(o) = scorecard_observation(&payload) {
+                                evidence_facts
+                                    .insert("scorecardSha256".to_string(), json!(fetched));
+                                if let Some(d) = o.offset_report_sha256.as_ref() {
+                                    evidence_facts
+                                        .insert("offsetReportSha256".to_string(), json!(d));
+                                }
+                                if let Some(v) = o.outcome.as_ref() {
+                                    facts.insert("outcome".to_string(), json!(v));
+                                }
+                                if let Some(v) = o.last_phase_completed {
+                                    facts.insert("lastPhaseCompleted".to_string(), json!(v));
+                                }
+                                for (key, block) in [
+                                    ("objectives", objectives_block(&o)),
+                                    ("integrity", integrity_block(&o)),
+                                    ("measured", measured_block(&o)),
+                                ] {
+                                    if !block.is_empty() {
+                                        facts.insert(key.to_string(), Value::Object(block));
+                                    }
+                                }
+                                if let Some(state) = window_not_covered(
+                                    status.and_then(|s| s.exit_code).unwrap_or(0),
+                                    o.outcome.as_deref(),
+                                ) {
+                                    facts.insert("exitReason".to_string(), json!(state));
+                                }
+                            }
+                            result
+                        }
+                    }
+                }
+            };
+            write_fetch_verdict(
+                restores,
+                restore,
+                name,
+                at,
+                &result,
+                observation_patch(
+                    mode.as_deref(),
+                    Some(&job_ref),
+                    attempt,
+                    Some(presence),
+                    None,
+                ),
+                evidence_facts,
+                facts,
+                now,
+            )
+            .await?;
+            check::set_ttl(client, namespace, &job_name)
+                .await
+                .map_err(RestoreError::Api)?;
+        }
+    }
+    Ok(())
+}
+
+/// The fetch a TERMINAL `Restore` still owes, and when to look again.
+///
+/// Returns the requeue a terminal pass should use: `After` while a fetch is
+/// pending or a retry is scheduled (a terminal `Restore` otherwise waits for a
+/// change, and a queued fetch or a `+5 m` retry is not one), `AwaitChange`
+/// once the verdict is reached.
+async fn continue_evidence_fetch(
+    restore: &Restore,
+    client: &kube::Client,
+    namespace: &str,
+    now: DateTime<Utc>,
+    runner: &job::RunnerImage,
+) -> Result<Requeue, RestoreError> {
+    let evidence = restore.status.as_ref().and_then(|s| s.evidence.as_ref());
+    let result = evidence
+        .and_then(|e| e.verification.as_ref())
+        .and_then(|v| v.result.as_deref());
+    let observation = evidence.and_then(|e| e.observation.as_ref());
+    let Some(attempt) = crate::evidence_fetch::owed_attempt(result, observation, now) else {
+        return Ok(
+            match crate::evidence_fetch::retry_due_in(result, observation, now) {
+                Some(secs) => Requeue::After(secs),
+                None => Requeue::AwaitChange,
+            },
+        );
+    };
+    let source = backup::evidence_source_for(
+        restore.spec.evidence_destination_ref.as_ref(),
+        client,
+        namespace,
+        now,
+    )
+    .await
+    .map_err(RestoreError::Api)?;
+    let restores: Api<Restore> = Api::namespaced(client.clone(), namespace);
+    evidence_fetch_pass(
+        &restores,
+        restore,
+        &StatusVersion::observed(restore.meta()),
+        client,
+        namespace,
+        &restore.name_any(),
+        attempt,
+        &source,
+        now,
+        runner,
+    )
+    .await?;
+    Ok(Requeue::After(REQUEUE_SECS))
+}
+
 /// The `/status` merge patch for an admission that is a HOLD rather than a
 /// verdict — interface **I19**.
 ///
@@ -4480,6 +4865,8 @@ async fn reconcile_restore_inner(
                 namespace = %namespace,
                 "the Job is gone and the status is terminal; nothing to do"
             );
+            // …except an evidence fetch it may still owe (D2 §3.9).
+            let requeue = continue_evidence_fetch(restore, client, &namespace, now, runner).await?;
             return Ok(RestoreOutcome {
                 job_name,
                 created: false,
@@ -4488,7 +4875,7 @@ async fn reconcile_restore_inner(
                 terminal_state: None,
                 keys: RestoreEvidenceKeys::default(),
                 ttl_patched: false,
-                requeue: Requeue::AwaitChange,
+                requeue,
             });
         }
 
@@ -4849,6 +5236,10 @@ async fn reconcile_restore_inner(
             diagnostics::repair_ttl(client, &namespace, &job, &restore.uid().unwrap_or_default())
                 .await
                 .map_err(RestoreError::Api)?;
+        // The other thing a terminal `Restore` may still owe: its evidence
+        // verdict, when an evidence-fetch Job reads it (D2 §3.9). The run's
+        // own pod is still not read.
+        let requeue = continue_evidence_fetch(restore, client, &namespace, now, runner).await?;
         return Ok(RestoreOutcome {
             job_name,
             created: false,
@@ -4857,7 +5248,7 @@ async fn reconcile_restore_inner(
             terminal_state: None,
             keys: RestoreEvidenceKeys::default(),
             ttl_patched,
-            requeue: Requeue::AwaitChange,
+            requeue,
         });
     }
 
@@ -4981,8 +5372,12 @@ async fn reconcile_restore_inner(
         }
         // NOTHING WAS READ AND NOTHING IS GUESSED: no `outcome`, no
         // `objectives`, no `measured` block copied out of a document nobody
-        // fetched.
-        (Some(_), backup::EvidenceSource::NotAttempted { .. }) => None,
+        // fetched. `FetchJob` ON THIS PASS too: the Job's relay supplies
+        // them, on a later write.
+        (
+            Some(_),
+            backup::EvidenceSource::NotAttempted { .. } | backup::EvidenceSource::FetchJob { .. },
+        ) => None,
     };
     let topics = topic_mapping(restore);
     // GUARD **G-TS**, erratum **E10(c)**'s controller half: scanned by NAME
@@ -5113,6 +5508,8 @@ async fn reconcile_restore_inner(
                 detail.clone(),
             ))
         }
+        // THE JOB'S VERDICT IS WRITTEN BY THE JOB'S PASS, below.
+        (backup::EvidenceSource::FetchJob { .. }, _) => None,
         (backup::EvidenceSource::GlobalHandle, Some(reference)) => Some(verify(reference).await),
         // THE SAME VERIFIER, ON THE EVIDENCE DESTINATION'S HANDLE — D2
         // §3.9's "no second verification path".
@@ -5182,6 +5579,30 @@ async fn reconcile_restore_inner(
         .await?;
     }
 
+    // D2 §3.9, THE DEFAULT ARM: an evidence-fetch Job reads the scorecard
+    // with the EVIDENCE destination's `evidenceRead` grant, after the terminal
+    // patch and the runner Job's TTL. A terminal `Restore` otherwise waits for
+    // a change, so while the fetch is owed it is looked at again on a timer.
+    let mut requeue = Requeue::AwaitChange;
+    if matches!(evidence_from, backup::EvidenceSource::FetchJob { .. }) && keys.mandatory_complete()
+    {
+        let stored = with_status_written(restore, &terminal, &at);
+        evidence_fetch_pass(
+            &restores,
+            &stored,
+            &at,
+            client,
+            &namespace,
+            &name,
+            1,
+            &evidence_from,
+            now,
+            runner,
+        )
+        .await?;
+        requeue = Requeue::After(REQUEUE_SECS);
+    }
+
     let coverage = window_not_covered(
         exit_code,
         observed.as_ref().and_then(|o| o.outcome.as_deref()),
@@ -5208,7 +5629,7 @@ async fn reconcile_restore_inner(
         terminal_state: coverage.map(str::to_string).or(refusal),
         keys,
         ttl_patched: true,
-        requeue: Requeue::AwaitChange,
+        requeue,
     })
 }
 
@@ -5380,6 +5801,17 @@ async fn reconcile_with_trust(
                             Ok(backup::EvidenceSource::NotAttempted { detail }) => {
                                 (None, Some(detail))
                             }
+                            // A pod-only grant is not re-read by the re-trust
+                            // hook: there is no Job to wait for here.
+                            Ok(backup::EvidenceSource::FetchJob { destination, .. }) => (
+                                None,
+                                Some(format!(
+                                    "BackupDestination {}/{} reads evidence with a grant only a \
+                                     pod may hold; the signing time is not re-read by the \
+                                     re-trust pass",
+                                    destination.namespace, destination.name
+                                )),
+                            ),
                             Err(e) => (
                                 None,
                                 Some(crate::verification::evidence_path_unreadable(&e)),
