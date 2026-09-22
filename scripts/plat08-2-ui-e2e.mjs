@@ -451,6 +451,7 @@ function deployTargetKafka() {
           containers: [{
             name: "kafka", image: "apache/kafka:3.7.1", imagePullPolicy: "IfNotPresent",
             resources: { requests: { cpu: "100m", memory: "512Mi" }, limits: { memory: "1Gi" } },
+            readinessProbe: { tcpSocket: { port: 9094 }, periodSeconds: 3, initialDelaySeconds: 5 },
             env: [
               ["CLUSTER_ID", clusterId], ["KAFKA_NODE_ID", "1"],
               ["KAFKA_PROCESS_ROLES", "broker,controller"],
@@ -535,11 +536,15 @@ async function main() {
   const source = "orders-" + suffix;
   const target = "target-" + suffix;
   connection(source, LAB_SOURCE, "source", "source-scram");
+  // THE TARGET IS DECLARED ONCE ITS BROKER ANSWERS, so the controller's first
+  // probe is of a broker that exists (a failed first probe waits a full probe
+  // interval before the next, which run 4 of this harness measured).
+  kube(["-n", namespace, "rollout", "status", "deploy/kafka-p082", "--timeout=300s"], { timeout: 320000 });
   connection(target, targetServers, "target");
   await until("the lab controller probes both connections",
     () => kubeJson(["-n", namespace, "get", "kafkaclusters"]).items,
     (items) => items.length === 2 && items.every((c) => typeof ((c.status || {}).clusterId) === "string" &&
-      c.status.clusterId.length > 0), 300);
+      c.status.clusterId.length > 0), 600);
 
   const port = await freePort();
   await startApi(port);
@@ -1050,6 +1055,18 @@ async function main() {
     const targetUid = kubeJson(["-n", namespace, "get", "kafkacluster", target]).metadata.uid;
     await page.selectOption("#target-cluster", targetUid);
     await pause(1000);
+    // THE POINT IN TIME, CHOSEN BY HAND AND SAID TO BE. The wizard defaults to
+    // `windowCovered.toMs`, which the controller documents as EXCLUSIVE, and the
+    // runner's own coverage check refuses it (run 6 of this harness:
+    // `archive.coverage` PointInTimeAfterCoverage, "newest covered timestamp"
+    // one millisecond earlier). That default is recorded as a defect in the
+    // result; this journey is about storage, so it picks the last covered ms.
+    const lastCovered = new Date(covered.to_ms - 1).toISOString();
+    await page.fill("#point-in-time", lastCovered);
+    await page.press("#point-in-time", "Tab");
+    await pause(1000);
+    result.pointInTimeChosen = { value: lastCovered, defaultWas: new Date(covered.to_ms).toISOString(),
+      reason: "the default (toMs) is the exclusive end of the covered window" };
     const planOf = () => page.evaluate(() => ({
       bytes: (document.querySelector("#plan-bytes") || {}).textContent || "",
       hash: ((document.querySelector("#plan-hash-value") || {}).textContent || "").trim(),
@@ -1103,7 +1120,9 @@ async function main() {
     save("t5-plan-split.txt", split.bytes);
     check(fSplit.bucket[0] === "\"" + BUCKET_A + "\"" && fSplit.bucket[1] === "\"" + BUCKET_B + "\"",
       "archive/evidence buckets are not A/B: " + JSON.stringify(fSplit.bucket));
-    check(fSplit.prefix[0] === "\"" + PREFIX_A + "\"" && fSplit.prefix[1] === "\"logweir/\"",
+    // `prefix:` also names the target's topic prefix, between the two stores.
+    const evidencePrefix = fSplit.prefix[fSplit.prefix.length - 1];
+    check(fSplit.prefix[0] === "\"" + PREFIX_A + "\"" && evidencePrefix === "\"logweir/\"",
       "prefixes: " + JSON.stringify(fSplit.prefix));
     await shot("t5-01-wizard-evidence-dest-b");
 
@@ -1134,25 +1153,72 @@ async function main() {
     const bindings1 = entries1.find((c) => c.id === "plan.bindings");
     check(bindings1 !== undefined && bindings1.code === "PlanMatchesReferences",
       "the controller did not match the plan to BOTH saved references: " + JSON.stringify(bindings1 || res1));
-    check(pf1.spec.restore.sourceDestinationRef.name === DEST_A &&
-      pf1.spec.restore.evidenceDestinationRef.name === DEST_B,
-    "the readiness check does not name dest-a/dest-b: " + JSON.stringify(pf1.spec.restore));
+    const pfRestore = ((pf1.spec.request || {}).restore) || {};
+    check(pfRestore.sourceDestinationRef.name === DEST_A && pfRestore.evidenceDestinationRef.name === DEST_B,
+      "the readiness check does not name dest-a/dest-b: " + JSON.stringify(pfRestore));
     await shot("t5-02-readiness");
     const verdict1 = pf1.status.reason || pf1.status.phase;
     const readyState = String((res1.state || verdict1 || "")).toLowerCase();
     row("T5", "archive/evidence separation: choosing dest-b as the evidence destination moves only the evidence block (bucket B under logweir/), and the lab controller's own plan.bindings row matches the signed plan to BOTH references", {
-      plan: { archive: [fSplit.bucket[0], fSplit.prefix[0]], evidence: [fSplit.bucket[1], fSplit.prefix[1]],
+      plan: { archive: [fSplit.bucket[0], fSplit.prefix[0]], evidence: [fSplit.bucket[1], evidencePrefix],
         hash: split.hash },
       preflight: { name: pf1.metadata.name, uid: pf1.metadata.uid, state: res1.state || null, pageHead: pf1.pageHead,
-        planBindings: bindings1, source: pf1.spec.restore.sourceDestinationRef,
-        evidence: pf1.spec.restore.evidenceDestinationRef,
+        planBindings: bindings1, source: pfRestore.sourceDestinationRef,
+        evidence: pfRestore.evidenceDestinationRef,
         blocking: (res1.checks || []).map((c) => [c.id, c.state, c.code]) },
     });
 
     // ===================================================================== T3
     // DESTINATION EDIT DURING THE DRAFT: dest-b is edited on its own page while
     // the wizard holds a verdict. The plan does not move; the verdict does.
+    //
+    // WHAT THIS LAB LETS THE PAGE SHOW, AND WHAT IT DOES NOT. Every draft
+    // restore check on this build aggregates `unknown`: `approval.state` is a
+    // BLOCKING row that is `skipped`/SubjectNotCreated for any draft, and
+    // D2 section 6.4 counts a skipped blocking row as unknown. PLAT-11.2's
+    // gate refuses anything but `ready`, so the Create button is disabled after
+    // ANY check -- before and after the edit alike -- and the submit-time
+    // re-read this task added cannot be clicked through here. That is recorded
+    // as a defect (see the result document); the page's re-read is proved by
+    // `ui/tests/mutation.spec.js`'s
+    // `a_destination_edited_during_the_draft_refuses_the_submit_until_the_check_runs_again`.
+    // What IS proved live: the API's answer to the page's own question
+    // (`GET .../preflights/{id}?planHash=<the hash on screen>`) before and after
+    // the edit, the plan hash on screen across the edit, and the gate's words.
     const heldHash = (await planOf()).hash;
+    const gateBefore = await page.evaluate(() => ({
+      disabled: (document.querySelector("#create-restore") || {}).disabled === true,
+      blocked: ((document.querySelector("#readiness-blocked") || {}).innerText || ""),
+    }));
+    save("t3-gate-before-edit.json", gateBefore);
+    const askAbout = async (label) => {
+      const response = await fetch(apiBase + "/preflights/" + encodeURIComponent(pf1.metadata.name) +
+        "?planHash=" + encodeURIComponent(heldHash));
+      const body = await response.text();
+      check(response.ok, label + ": GET preflight answered " + response.status + ": " + body.slice(0, 300));
+      const item = JSON.parse(body).item || {};
+      return { stale: item.stale, applicable: item.applicable, staleReasons: item.staleReasons,
+        state: item.state, planHash: (item.binding || {}).planHash };
+    };
+    // THE CONTROL IS ABOUT dest-b, NOT ABOUT `stale` AS A WHOLE. TrustRoster
+    // is `unverifiable` to this service (it holds no verb on the kind), so the
+    // held check is never `stale: false` here. Run 8 also recorded a
+    // referentChanged for the recovery-point Backup on EVERY read: the
+    // controller binds a Backup by uid alone (no generation) and the API
+    // compared the live generation against that absence. This branch fixes the
+    // API; the assertion below is that fix, live: before the edit, NO
+    // referentChanged at all.
+    const namesDestB = (answer) => (answer.staleReasons || []).some((r) =>
+      r.reason === "referentChanged" && r.kind === "BackupDestination" && r.name === DEST_B);
+    const beforeEdit = await askAbout("before the edit");
+    check(!namesDestB(beforeEdit),
+      "CONTROL: before the edit no stale reason names dest-b: " + JSON.stringify(beforeEdit));
+    const changedBefore = (beforeEdit.staleReasons || []).filter((r) => r.reason === "referentChanged");
+    check(changedBefore.length === 0,
+      "before any edit the API reports a referent change (the Backup-referent defect): " +
+        JSON.stringify(changedBefore));
+    control("API-referent", "a recovery-point Backup bound by uid alone is not reported changed on re-read (routes/preflights.rs fix); only TrustRoster's unverifiable remains", {
+      beforeEdit: beforeEdit });
     const genB = destination(DEST_B).metadata.generation;
     const editor = await context.newPage();
     await editor.goto(base + "#/destinations?ns=" + namespace + "&name=" + DEST_B, { waitUntil: "load" });
@@ -1165,32 +1231,61 @@ async function main() {
     const editedB = await until("dest-b's generation moves again", () => destination(DEST_B),
       (o) => o.metadata.generation > genB, 30);
     await editor.close();
-    const restoresBefore = kubeJson(["-n", namespace, "get", "restores"]).items.length;
-    const readsBefore = bodies.length;
-    await page.click("#create-restore");
-    await waitForText("no longer applies to the inputs it was run against", "the stale-readiness refusal", 30);
-    await pause(1500);
-    const restoresAfterRefusal = kubeJson(["-n", namespace, "get", "restores"]).items.length;
-    check(restoresAfterRefusal === restoresBefore, "a Restore was created on a stale verdict");
-    const reread = bodies.slice(readsBefore).find((b) => b.url.indexOf("/preflights/" + pf1.metadata.name) !== -1 &&
-      b.url.indexOf("planHash=") !== -1);
-    check(reread !== undefined, "the submit did not re-read the held check with ?planHash=");
-    const rereadItem = JSON.parse(reread.body).item || {};
-    check(rereadItem.stale === true && JSON.stringify(rereadItem.staleReasons || []).indexOf(DEST_B) !== -1,
-      "the product API did not answer stale for dest-b: " + JSON.stringify(rereadItem.staleReasons));
+    const afterEdit = await askAbout("after the edit");
+    check(afterEdit.stale === true && namesDestB(afterEdit),
+      "the product API did not answer referentChanged for dest-b: " + JSON.stringify(afterEdit));
     const hashAfterEdit = (await planOf()).hash;
     check(hashAfterEdit === heldHash, "the plan hash moved on a destination edit");
-    save("t3-reread.json", { url: reread.url, status: reread.status, stale: rereadItem.stale,
-      staleReasons: rereadItem.staleReasons, applicable: rereadItem.applicable });
-    await shot("t3-02-wizard-stale-refused");
-    control("T3", "after dest-b was edited, Create re-read the held check, the API answered stale (referentChanged), and no Restore was created", {
-      restoresBefore: restoresBefore, restoresAfter: restoresAfterRefusal, staleReasons: rereadItem.staleReasons });
+    check(editedB.metadata.uid === objB.metadata.uid &&
+      editedB.status.locationDigest === objB.status.locationDigest, "the edit moved dest-b's identity or location");
+    save("t3-api-before-after.json", { planHash: heldHash, beforeEdit: beforeEdit, afterEdit: afterEdit,
+      generation: [genB, editedB.metadata.generation] });
+    await shot("t3-02-wizard-after-edit");
+    control("T3", "before the edit no stale reason in the product API's answer to the page's question (held check, plan on screen) names dest-b; after dest-b is edited, referentChanged BackupDestination/dest-b appears, with the plan hash unchanged", {
+      beforeEdit: beforeEdit, afterEdit: afterEdit });
 
+    // THE CHECK RUN AGAIN is about the same plan and is current again.
     const pf2 = await readiness("the check run again");
     save("t3-preflight-2.json", { metadata: pf2.metadata, spec: pf2.spec, status: pf2.status });
-    const res2 = pf2.status.result || {};
     check(pf2.status.binding.planHash === heldHash, "the second check is about another plan");
-    const shown = await planOf();
+    const res2 = pf2.status.result || {};
+    const bindings2 = ((res2.checks || []).concat(res2.warnings || [])).find((c) => c.id === "plan.bindings");
+    const approvalRow = (res2.checks || []).find((c) => c.id === "approval.state") || null;
+    const gateAfter = await page.evaluate(() => ({
+      disabled: (document.querySelector("#create-restore") || {}).disabled === true,
+      blocked: ((document.querySelector("#readiness-blocked") || {}).innerText || ""),
+    }));
+    save("t3-gate-after-recheck.json", { gate: gateAfter, aggregate: res2.state, approvalRow: approvalRow });
+    row("T3", "destination edit during a restore draft: dest-b edited on its own page (generation " + genB + " -> " +
+      editedB.metadata.generation + ", same uid and location digest) moved no plan byte; the product API answered the page's held check stale naming dest-b, and a check run again is bound to the same plan hash", {
+      planHash: { before: heldHash, afterEdit: hashAfterEdit, secondCheck: pf2.status.binding.planHash },
+      api: { beforeEdit: beforeEdit, afterEdit: afterEdit },
+      preflights: [pf1.metadata.name, pf2.metadata.name], secondBindings: bindings2 || null,
+    });
+    blocked("T3-submit", "the submit-time re-read cannot be clicked on this build: every draft restore check aggregates unknown (approval.state is a blocking row that is skipped/SubjectNotCreated for a draft), and PLAT-11.2's gate disables Create for anything but ready -- before and after the edit alike", {
+      gateBeforeEdit: gateBefore, gateAfterRecheck: gateAfter, aggregate: res2.state, approvalRow: approvalRow,
+      provedBy: "ui/tests/mutation.spec.js a_destination_edited_during_the_draft_refuses_the_submit_until_the_check_runs_again",
+    });
+
+    // THE RESTORE IS CREATED FROM A RE-MOUNT OF THE SAME DRAFT: leaving the
+    // route and coming back (in-page navigation; a draft lives in page memory)
+    // drops the held verdict -- a verdict is not a draft field -- and the kept
+    // draft brings the evidence destination back BY UID, which the mount reads
+    // in full before applying it. So what is created is the plan on screen,
+    // with both saved references, and no check held.
+    const hashRoute = route.slice(route.indexOf("#"));
+    await page.evaluate((h) => { window.location.hash = h; }, "#/schedules?ns=" + namespace);
+    await waitFor("#schedule-form", "the schedules route in between");
+    await page.evaluate((h) => { window.location.hash = h; }, hashRoute);
+    await waitFor("#plan-bytes", "the wizard, re-mounted on the same point");
+    await waitForText("Your unsubmitted edits to this plan", "the draft coming back");
+    await pause(1500);
+    const reloaded = await planOf();
+    check(reloaded.evidence === objB.metadata.uid,
+      "the kept draft did not bring the evidence destination back by uid: " + reloaded.evidence);
+    check(reloaded.hash === heldHash, "the reloaded draft renders another plan: " + reloaded.hash + " vs " + heldHash);
+    const restoresBefore = kubeJson(["-n", namespace, "get", "restores"]).items.length;
+    const shown = reloaded;
     await page.click("#create-restore");
     const restore = await until("the wizard creates the Restore",
       () => kubeJson(["-n", namespace, "get", "restores"]).items, (items) => items.length === restoresBefore + 1, 60)
@@ -1199,15 +1294,15 @@ async function main() {
     check(restore.spec.planBytes === shown.bytes, "the submitted plan is not the one on screen");
     check(restore.spec.sourceDestinationRef.name === DEST_A && restore.spec.evidenceDestinationRef.name === DEST_B,
       "the Restore does not name dest-a/dest-b: " + JSON.stringify([restore.spec.sourceDestinationRef, restore.spec.evidenceDestinationRef]));
+    check(restore.spec.sourceArchive.url === "logweir-destination://" + DEST_A &&
+      restore.spec.sourceArchive.secretRef === undefined, "the Restore carries an inline archive or credential");
     save("t5-restore.json", { metadata: restore.metadata, spec: restore.spec });
-    row("T3", "destination edit during a restore draft: dest-b edited (generation " + genB + " -> " + editedB.metadata.generation +
-      ") moved no plan byte, the held verdict became stale on re-read and refused the submit; a fresh check let the same plan through", {
-      planHash: { before: heldHash, afterEdit: hashAfterEdit, secondCheck: pf2.status.binding.planHash },
-      preflights: [pf1.metadata.name, pf2.metadata.name], secondState: res2.state || null,
+    await shot("t5-03-restore-created");
+    row("T5-submit", "the wizard creates the Restore with sourceDestinationRef dest-a and evidenceDestinationRef dest-b, the sentinel archive URL and no inline credential; the plan sent is the plan shown, and a reload of the draft kept the evidence destination by uid", {
       restore: { name: restore.metadata.name, uid: restore.metadata.uid,
-        sourceDestinationRef: restore.spec.sourceDestinationRef, evidenceDestinationRef: restore.spec.evidenceDestinationRef },
+        sourceDestinationRef: restore.spec.sourceDestinationRef, evidenceDestinationRef: restore.spec.evidenceDestinationRef,
+        sourceArchive: restore.spec.sourceArchive }, planHash: heldHash,
     });
-
     // ===================================================================== M3
     // THE RESTORE RUNS: archive read from bucket A, evidence written to bucket B.
     const approvalName = restore.spec.approvalRef.name;
