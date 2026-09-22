@@ -96,7 +96,14 @@ import {
 } from "../select.js";
 import { focusFirstProblem, isObjectName, itemsOf, readFormValues } from "./clusters.js";
 import { renderPreflight, transportCell } from "./destinations.js";
-import { isRecoveryPoint, recoveryPoints, restorePointRoute } from "./restore-wizard.js";
+import {
+  backupCatalogOfferFrom,
+  isRecoveryPoint,
+  noteCatalogSource,
+  recoveryPoints,
+  restoreCatalogPointRoute,
+  restorePointRoute,
+} from "./restore-wizard.js";
 import { listD3, readCatalogPoints } from "../operation-watch.js";
 import { operationRoute } from "./operation.js";
 
@@ -4614,6 +4621,19 @@ export function renderScheduleHistory(ns, object, runs, points, catalogError, se
  *  offers nothing. */
 export function restoreCell(ns, run, points) {
   if (!isRecoveryPoint(run)) {
+    // CONSOLE-RESTORE-IGNORES-CATALOG-WINDOW (PLAT-15.2). A destination-backed
+    // run the controller could not verify itself -- no evidence grant, or an
+    // identity the administrator did not allowlist -- is `Succeeded` with
+    // verdict `NotAttempted` and NO window, while the durable catalog lists its
+    // receipt `Available/Verified`. The catalog may then answer for it, and
+    // only then: the run's own verdict must be absent or NotAttempted, never a
+    // reached refusal. The link opens the wizard on the CATALOG POINT, so the
+    // plan is bound to that receipt and the runner re-verifies it.
+    const offer = backupCatalogOfferFrom(run, points);
+    if (offer.offer) {
+      return "<a href=\"" + esc(restoreCatalogPointRoute(ns, offer.catalog, offer.entry.pointId,
+        run)) + "\" data-restore-from=\"catalog\">Restore this point (catalog window)</a>";
+    }
     return cell("");
   }
   if (catalogRefuses(run, points)) {
@@ -4707,11 +4727,21 @@ export function renderLatestPointAction(ns, runs, points, coverage) {
     );
   }
   const meta = choice.point.metadata || {};
+  // A RUN OFFERED FROM ITS CATALOG ROW (PLAT-15.2) OPENS THE WIZARD ON THAT ROW,
+  // so the plan carries the point binding; a run with its own window opens it
+  // on the Backup, exactly as before.
+  const fromCatalog = isRecoveryPoint(choice.point)
+    ? null
+    : backupCatalogOfferFrom(choice.point, points);
+  const route = fromCatalog === null
+    ? restorePointRoute(ns, choice.point)
+    : restoreCatalogPointRoute(ns, fromCatalog.catalog, fromCatalog.entry.pointId, choice.point);
   return (
     "<p class=\"note\" id=\"schedule-latest-point\">Latest recovery point: " +
     cell(meta.name) + ", backup set " + cell((choice.point.status || {}).backupId) +
     " (catalog: " + esc(catalogWordsFor(choice.point, points, coverage)) + "). " +
-    "<a href=\"" + esc(restorePointRoute(ns, choice.point)) + "\" id=\"schedule-restore-latest\">" +
+    "<a href=\"" + esc(route) + "\" id=\"schedule-restore-latest\"" +
+    (fromCatalog === null ? "" : " data-restore-from=\"catalog\"") + ">" +
     "Restore from this point</a>" + skipped + "</p>"
   );
 }
@@ -4721,7 +4751,12 @@ export function renderLatestPointAction(ns, runs, points, coverage) {
  *  `all` is every recovery point, `skipped` the newer ones the catalog ruled
  *  out, and `point` the one offered (or `null`). */
 export function latestRestorablePoint(runs, points) {
-  const all = recoveryPoints(runs);
+  // A run the catalog may answer for (PLAT-15.2) is a recovery point here too,
+  // in the same newest-completion order; `backupCatalogOfferFrom` offers one
+  // only over a complete, current, selectable row and never over a verdict the
+  // controller reached.
+  const all = recoveryPoints(runs, (run) =>
+    isRecoveryPoint(run) || backupCatalogOfferFrom(run, points).offer);
   const skipped = [];
   for (const run of all) {
     if (catalogRefuses(run, points)) {
@@ -4898,7 +4933,10 @@ export async function readSchedulePoints(api, ns, lifecycle, readers) {
         }
         const page = await readPoints(catalogName, query);
         for (const point of (page.items || [])) {
-          points.push(point);
+          // THE ROW'S SOURCE, KEPT BESIDE IT (PLAT-15.2): the catalog it came
+          // from and this page's flags, which a restore offered from the
+          // catalog's window needs and the row itself does not carry.
+          points.push(noteCatalogSource(point, catalogName, page));
         }
         if (page.viewExpired === true) {
           expired = true;

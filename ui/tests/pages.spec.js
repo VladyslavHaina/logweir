@@ -2032,18 +2032,22 @@ test("the_point_route_carries_name_and_uid_and_is_read_back_exactly", () => {
     // that state rather than an absent key -- so a reader of this object never
     // has to tell "not a retry" from "the key was not parsed".
     retryOf: "",
+    // PLAT-15.2: a Backup link names no catalog point, and the empty strings
+    // are that state for the same reason.
+    catalog: "",
+    point: "",
   });
   // TWO VALUES THAT MUST NOT BE SWAPPED. A hand-off that read the name into
   // `uid` would leave the whole suite green if only one of them were asserted.
   assert.notEqual(read.uid, read.backup);
   assert.deepEqual(
     restoreRouteParams("#/restore?ns=incident"),
-    { ns: "incident", uid: "", backup: "", retryOf: "" },
+    { ns: "incident", uid: "", backup: "", retryOf: "", catalog: "", point: "" },
     "a visit with no point is the selector",
   );
   assert.deepEqual(
     restoreRouteParams("#/restore"),
-    { ns: "", uid: "", backup: "", retryOf: "" },
+    { ns: "", uid: "", backup: "", retryOf: "", catalog: "", point: "" },
     "and so is a visit with no query at all",
   );
   assert.equal(restoreSelectorRoute("incident"), "#/restore?ns=incident");

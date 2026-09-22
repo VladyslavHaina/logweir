@@ -113,6 +113,7 @@ export function renderPlanBytes(fields) {
   pushStorage(out, "  ", source);
   out.push("  backup: " + quote(needed(f.backupSetRef, "backupSetRef")));
   pushList(out, "  ", "topics", requireList(f.topics, "topics"), quote);
+  pushPointBinding(out, f.point);
 
   out.push("target:");
   pushList(
@@ -345,6 +346,60 @@ function pushStorageFields(out, indent, block) {
   // `SCHEME_SEPARATOR`: build it visibly in ASCII rather than hide it in a
   // codepoint nobody can see in a diff.
   out.push(indent + "allow_" + "http" + ": " + (b.allowHttp === true ? "true" : "false"));
+}
+
+/** THE RECOVERY POINT A CATALOG-BACKED PLAN IS BOUND TO (PLAT-15.2, D3
+ *  section 5.5 step 4): `source.point {point_id, receipt_key, receipt_sha256,
+ *  manifest_sha256}`, execution contract v2's `PointBinding`.
+ *
+ *  ABSENT IS THE OLD DOCUMENT, BYTE FOR BYTE. A plan built from a `Backup`
+ *  whose own window the controller wrote carries no binding, and emitting an
+ *  empty block would change the hash of every such plan for no change of
+ *  meaning. So `point` absent (or `null`) renders nothing at all.
+ *
+ *  PRESENT, IT IS WHOLE OR IT IS REFUSED. The runner re-reads the receipt the
+ *  binding names BEFORE it constructs a client, re-derives the point id from
+ *  its bytes and compares both digests; a malformed field is exit 3
+ *  `PointBindingMismatch` there (`crates/logweir/src/drill/binding.rs`
+ *  `check_point_shape`). The same four shapes are refused HERE, so an approver
+ *  is never asked to sign a document that cannot pass that check: a point id
+ *  of `lwp1-` plus 32 lowercase hex characters, a non-empty receipt key, and
+ *  two `sha256:` digests of 64 lowercase hex characters (the form
+ *  `sha256_prefixed` computes, and the only form the runner's comparison can
+ *  match). `RestoreSpec` has no
+ *  `deny_unknown_fields`, so a misspelt key would be ignored rather than
+ *  refused -- which is why `ui_lint.rs` deserialises the point golden and
+ *  asserts the four values arrive. */
+function pushPointBinding(out, point) {
+  if (point === undefined || point === null) {
+    return;
+  }
+  const p = point;
+  const id = needed(p.pointId, "point.pointId");
+  if (!/^lwp1-[0-9a-f]{32}$/.test(id)) {
+    throw new RangeError(
+      "point.pointId is `" + id + "`, not `lwp1-` plus 32 lowercase hex " +
+        "characters; the runner refuses such a binding with PointBindingMismatch",
+    );
+  }
+  const receiptKey = needed(p.receiptKey, "point.receiptKey");
+  if (receiptKey.trim().length === 0) {
+    throw new RangeError("point.receiptKey is blank; the runner refuses such a binding");
+  }
+  for (const field of ["receiptSha256", "manifestSha256"]) {
+    const value = needed(p[field], "point." + field);
+    if (!/^sha256:[0-9a-f]{64}$/.test(value)) {
+      throw new RangeError(
+        "point." + field + " is `" + value + "`, not `sha256:` plus 64 lowercase " +
+          "hex characters; the runner refuses such a binding with PointBindingMismatch",
+      );
+    }
+  }
+  out.push("  point:");
+  out.push("    point_id: " + quote(id));
+  out.push("    receipt_key: " + quote(receiptKey));
+  out.push("    receipt_sha256: " + quote(p.receiptSha256));
+  out.push("    manifest_sha256: " + quote(p.manifestSha256));
 }
 
 function pushList(out, indent, key, values, render) {

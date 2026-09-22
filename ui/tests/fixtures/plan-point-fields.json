@@ -1,0 +1,67 @@
+{
+  "_comment": [
+    "PLAT-15.2's catalog-bound plan: the same wizard state as plan-fields.json, plus the",
+    "recovery point binding `point {pointId, receiptKey, receiptSha256, manifestSha256}` a",
+    "plan built from a catalog-verified point carries (D3 section 5.5 step 4). It renders",
+    "`source.point` in plan-point.golden.yaml.",
+    "",
+    "Both sides read this file: ui/tests/pages.spec.js renders it and byte-compares the result",
+    "with the golden, and crates/logweir/tests/ui_lint.rs deserialises the golden into",
+    "`logweir_core::spec::RestoreSpec` and asserts `source.point` carries these four values --",
+    "RestoreSpec has no deny_unknown_fields, so a misspelt key would otherwise be dropped",
+    "silently rather than refused.",
+    "",
+    "Regenerate with `node ui/tests/emit-plan.js plan-point-fields.json > ui/tests/fixtures/plan-point.golden.yaml`."
+  ],
+  "name": "orders-disaster-restore",
+  "backupSetRef": "3f1c9d2e-8a7b-4c6d-9e0f-1a2b3c4d5e6f-20260907-140000",
+  "topics": [
+    "orders",
+    "payments"
+  ],
+  "pointInTime": "2026-09-07T14:05:00Z",
+  "source": {
+    "bucket": "kafka-backups",
+    "prefix": "drill-demo",
+    "region": "us-east-1",
+    "endpoint": "http://localhost:9000",
+    "pathStyle": true,
+    "allowHttp": true
+  },
+  "target": {
+    "bootstrapServers": [
+      "localhost:9092"
+    ],
+    "mode": "newTopic",
+    "topicPrefix": "restore-20260907T140500Z-",
+    "topicMappingPrefix": "restore-20260907T140500Z-",
+    "markerTopic": "logweir.scratch",
+    "replicationFactor": 1,
+    "teardown": "delete"
+  },
+  "sample": {
+    "windowStart": "2026-09-07T12:00:00Z",
+    "windowEnd": "2026-09-07T15:00:00Z",
+    "recordsPerPartition": 25,
+    "anchor": "head"
+  },
+  "objectives": {
+    "rtoSeconds": 900,
+    "rpoSeconds": 300,
+    "passRate": 1.0
+  },
+  "evidence": {
+    "bucket": "logweir-evidence",
+    "prefix": "logweir/",
+    "region": "us-east-1",
+    "endpoint": "http://localhost:9000",
+    "pathStyle": true,
+    "allowHttp": true
+  },
+  "point": {
+    "pointId": "lwp1-0123456789abcdef0123456789abcdef",
+    "receiptKey": "logweir/backups/3f1c9d2e-8a7b-4c6d-9e0f-1a2b3c4d5e6f-20260907-140000/01JB7Z00000000000000000000.receipt.json",
+    "receiptSha256": "sha256:0123456789abcdef0123456789abcdeffedcba9876543210fedcba9876543210",
+    "manifestSha256": "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+  }
+}

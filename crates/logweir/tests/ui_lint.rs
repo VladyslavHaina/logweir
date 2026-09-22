@@ -1566,6 +1566,91 @@ fn render_plan_bytes_emits_a_document_the_runner_parses() {
     );
 }
 
+// ---- 18b. the catalog-bound plan carries the recovery point binding (PLAT-15.2)
+
+#[test]
+fn the_catalog_bound_plan_carries_the_point_binding_the_runner_reads() {
+    // ARM 1 of the point golden (arm 2 is `ui/tests/restore-catalog.spec.js`,
+    // which byte-compares the emitter's output with the same file, and
+    // `scripts/check-ui-behaviour.sh` re-runs the emitter and `diff -u`s it).
+    //
+    // `RestoreSpec` HAS NO `deny_unknown_fields`, so a golden that spelt the
+    // block `recovery_point:` or a key `receiptSha256:` would still parse --
+    // into a plan with NO binding, which the runner restores from `backup`
+    // alone without the re-verification D3 §5.5 step 6 exists for. So this arm
+    // asserts the binding ARRIVES, field by field, with the fixture's values.
+    let golden_path = ui_root()
+        .join("tests")
+        .join("fixtures")
+        .join("plan-point.golden.yaml");
+    let golden = read(&golden_path);
+    let spec: logweir_core::spec::RestoreSpec = serde_yaml::from_str(&golden).unwrap_or_else(|e| {
+        panic!(
+            "{} does not deserialise into logweir_core::spec::RestoreSpec: {e}. Regenerate with \
+             `node ui/tests/emit-plan.js plan-point-fields.json > \
+             ui/tests/fixtures/plan-point.golden.yaml` AFTER fixing the emitter.",
+            shown(&golden_path)
+        )
+    });
+    let fields_path = ui_root()
+        .join("tests")
+        .join("fixtures")
+        .join("plan-point-fields.json");
+    let fields: serde_json::Value =
+        serde_json::from_str(&read(&fields_path)).expect("plan-point-fields.json is JSON");
+    let point = spec.source.point.as_ref().unwrap_or_else(|| {
+        panic!(
+            "{} parsed with NO `source.point`: the emitter wrote the binding under a key the \
+             runner does not read, and the runner would restore without re-verifying the point",
+            shown(&golden_path)
+        )
+    });
+    let want = |key: &str| {
+        fields["point"][key]
+            .as_str()
+            .unwrap_or_else(|| panic!("point.{key} is a string in the fixture"))
+            .to_string()
+    };
+    assert_eq!(point.point_id, want("pointId"), "source.point.point_id");
+    assert_eq!(point.receipt_key, want("receiptKey"), "source.point.receipt_key");
+    assert_eq!(
+        point.receipt_sha256,
+        want("receiptSha256"),
+        "source.point.receipt_sha256"
+    );
+    assert_eq!(
+        point.manifest_sha256,
+        want("manifestSha256"),
+        "source.point.manifest_sha256"
+    );
+    assert_eq!(
+        spec.source.backup,
+        fields["backupSetRef"].as_str().expect("backupSetRef"),
+        "source.backup is the point's backup set, PINNED -- never `latestCompleted`"
+    );
+
+    // AND THE BACKUP-BOUND GOLDEN CARRIES NONE: absent is v1's document, byte
+    // for byte, and the runner performs no binding check for it.
+    let plain: logweir_core::spec::RestoreSpec = serde_yaml::from_str(&read(
+        &ui_root()
+            .join("tests")
+            .join("fixtures")
+            .join("plan.golden.yaml"),
+    ))
+    .expect("plan.golden.yaml parses");
+    assert!(
+        plain.source.point.is_none(),
+        "the Backup-bound golden must not carry a point binding"
+    );
+
+    // The gate diffs this golden too.
+    let gate = read(&repo_root().join("scripts").join("check-ui-behaviour.sh"));
+    assert!(
+        gate.contains("plan-point.golden.yaml") && gate.contains("plan-point-fields.json"),
+        "scripts/check-ui-behaviour.sh must re-emit and diff the point golden as well"
+    );
+}
+
 // -------------------- 19. the wizard never reserialises the plan bytes
 
 #[test]

@@ -88,6 +88,12 @@ import {
   readD3,
 } from "../operation-watch.js";
 import { FINGERPRINT_COMMAND } from "./keys.js";
+import {
+  REDACTION_MARKER,
+  catalogPointOffer,
+  isRedacted,
+  restoreCatalogPointRoute,
+} from "./restore-wizard.js";
 
 /** The sentence a namespace with no catalog carries. */
 export const NO_CATALOG_SENTENCE =
@@ -326,6 +332,11 @@ export function renderCatalogStatus(object) {
  *  none and this page invents none. What names the location instead is the
  *  CATALOG's `destinationRef` (one destination per catalog, immutable by CEL)
  *  plus the `locationId` of the location that can serve the point. */
+// THE WIZARD READS ONLY `catalog` AND `point` FROM THIS LINK (PLAT-15.2): it
+// re-reads the point from the product API and builds the binding from that
+// answer. The richer spelling below is kept for links minted before the wizard
+// could restore a catalog point; the table now links through
+// `restoreCatalogPointRoute`, the wizard's own helper.
 export function restorePointRoute(ns, catalog, entry, destination) {
   const e = entry || {};
   const location = bestLocation(e);
@@ -345,23 +356,17 @@ export function restorePointRoute(ns, catalog, entry, destination) {
   );
 }
 
-/** The marker the product's own archive-key redactor leaves behind.
- *
- *  A REDACTED KEY IS NOT A KEY, AND THIS PAGE WILL NOT PASS ONE ON. The
- *  catalog sync runs every archive key it records through
- *  `logweir::check::redact_path`, and that redactor refuses a component longer
- *  than its free-component cap -- which a 26-character ULID is. So a point
- *  this product wrote itself comes back with
- *  `receiptKey: "[redacted].receipt.json"`, observed on every live run of this
- *  branch. Carrying that into a plan would build `source.point.receipt_key`
- *  out of the redactor's output and earn exit 3 `PointBindingMismatch` from
- *  the runner, one step later and one layer further from the cause. */
-export const REDACTION_MARKER = "[redacted]";
-
-/** Whether a published archive key is the redactor's output rather than a key. */
-export function isRedacted(value) {
-  return typeof value === "string" && value.indexOf(REDACTION_MARKER) !== -1;
-}
+// THE REDACTION MARKER. A REDACTED KEY IS NOT A KEY, AND THIS PAGE WILL NOT
+// PASS ONE ON. The catalog sync runs every archive key it records through
+// `logweir::check::redact_path`, and a runner that predates the ULID exemption
+// (CATALOG-RECEIPTKEY-REDACTED) rewrote the 26-character run id, so a point
+// comes back with `receiptKey: "[redacted].receipt.json"`. Carrying that into
+// a plan would build `source.point.receipt_key` out of the redactor's output
+// and earn exit 3 `PointBindingMismatch` from the runner, one step later and
+// one layer further from the cause. The rule lives beside the wizard's point
+// selection (PLAT-15.2), which refuses such a point too, and is re-exported
+// here so this page and the wizard cannot disagree about it.
+export { REDACTION_MARKER, isRedacted };
 
 /** The location a restore would read from: the first one the catalog reports
  *  `Available`, or the first one there is.
@@ -395,10 +400,20 @@ export const POINT_BINDING_SENTENCE =
   "runner re-checks that binding before it constructs a client: a mismatch is a refusal, not a " +
   "restore of something else.";
 
-/** ONE POINT AS A ROW: the two axes, the signer, and the remedy. */
-export function pointRow(entry, ns, catalog, destination) {
+/** ONE POINT AS A ROW: the two axes, the signer, and the remedy.
+ *
+ *  THE RESTORE CELL IS THE WIZARD'S OWN QUESTION (PLAT-15.2). A row the catalog
+ *  marks `selectable` is offered only when `catalogPointOffer` -- the rule the
+ *  wizard applies when it opens -- offers it too: a complete Backup-verdict
+ *  join, an unredacted receipt key and both digests. A selectable row it
+ *  refuses says why in the cell, so the table never offers a link the wizard
+ *  will refuse. The controller's verdict on the point's own `Backup`
+ *  (`backupVerdict`) is printed beside the catalog's verification, because it
+ *  is the reason a green-looking row can be unselectable. */
+export function pointRow(entry, ns, catalog, destination, page) {
   const e = entry || {};
   const location = bestLocation(e);
+  const offer = catalogPointOffer(e, page || {});
   return [
     "<code>" + cell(e.pointId) + "</code>",
     cell(e.recoveryPointAt),
@@ -408,16 +423,30 @@ export function pointRow(entry, ns, catalog, destination) {
         ? "green"
         : "unverified",
       String(e.verification || ""),
-    ),
+    ) +
+      (typeof e.backupVerdict === "string" && e.backupVerdict.length > 0
+        ? " " + badge("unverified", "Backup verdict " + e.backupVerdict)
+        : ""),
     location === null ? ABSENT : cell(location.locationId),
     "<code>" + cell(e.signerKeyId) + "</code>",
     cell(e.remedy),
-    e.selectable === true
-      ? "<a href=\"" + esc(restorePointRoute(ns, catalog, e, destination)) +
-        "\">Restore this point</a>"
-      : ABSENT,
+    e.selectable !== true
+      ? ABSENT
+      : (offer.offer
+        ? "<a href=\"" + esc(restoreCatalogPointRoute(ns, catalog, e.pointId)) +
+          "\" data-restore-point=\"" + esc(e.pointId) + "\">Restore this point</a>"
+        : "<span class=\"note\" data-restore-refused=\"wizard\">not offered: " +
+          esc(offer.reason) + "</span>"),
   ];
 }
+
+/** Said above the point table when the product API could not read every
+ *  `Backup` verdict for this page (`backupVerdictsIncomplete`). */
+export const BACKUP_VERDICTS_INCOMPLETE_SENTENCE =
+  "The product API could not read every Backup verdict in this namespace for this page, so a " +
+  "row's selectable reflects the catalog alone for the Backups it could not read. No restore is " +
+  "offered from this page while that is so: a catalog row never outranks a verdict the " +
+  "controller reached, and one nobody could read might be such a verdict.";
 
 /** The point table. Every entry, with its exact state. */
 export function renderPoints(page, ns, catalog, destination) {
@@ -428,9 +457,15 @@ export function renderPoints(page, ns, catalog, destination) {
     table(
       ["POINT", "RECOVERY POINT", "AVAILABILITY", "VERIFICATION", "LOCATION", "SIGNER", "REMEDY",
         "RESTORE"],
-      entries.map((entry) => pointRow(entry, ns, catalog, destination)),
+      entries.map((entry) => pointRow(entry, ns, catalog, destination, page)),
       NO_POINT_SENTENCE,
     ) +
+    (typeof (page || {}).backupVerdictsIncomplete === "string" &&
+      page.backupVerdictsIncomplete.length > 0
+      ? "<p class=\"complaint\" data-backup-verdicts-incomplete=\"" +
+        esc(page.backupVerdictsIncomplete) + "\">" + esc(BACKUP_VERDICTS_INCOMPLETE_SENTENCE) +
+        " (" + esc(page.backupVerdictsIncomplete) + ")</p>"
+      : "") +
     // ONE HTTP PAGE, SAID AS ONE. `CATALOG_WINDOW_SENTENCE` above is about the
     // Kubernetes VIEW's own `viewLimit`; this is the separate truncation of
     // this REQUEST, and reading the two as one would make a 200-row table look

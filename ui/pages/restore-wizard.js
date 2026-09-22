@@ -129,6 +129,7 @@ import {
   resolveClusterSelection,
 } from "../select.js";
 import { isObjectName, itemsOf } from "./clusters.js";
+import { listD3, readCatalogPoints, readD3 } from "../operation-watch.js";
 import { renderPreflight } from "./destinations.js";
 import { approvalAuthorizes, restoreOperationRoute } from "./approvals.js";
 
@@ -185,6 +186,9 @@ export const WIZARD_DRAFT_FIELDS = Object.freeze([
   "evidenceDestination", "evidenceDestinationUid",
   "evidenceSameAsArchive", "evidenceEndpoint", "evidenceRegion", "evidencePathStyle",
   "evidenceAllowHttp",
+  // PLAT-15.2: which catalog point the draft was made for (`""` for a Backup),
+  // and the topic list typed for it -- a catalog point publishes none.
+  "catalogPointId", "catalogTopics",
 ]);
 
 /** The API server's field paths, mapped to the wizard's inputs. `archive` and
@@ -248,7 +252,7 @@ const API = apiClient();
  *  suite green. */
 export function restoreRouteParams(hash) {
   const text = typeof hash === "string" ? hash : "";
-  const route = { ns: "", uid: "", backup: "", retryOf: "" };
+  const route = { ns: "", uid: "", backup: "", retryOf: "", catalog: "", point: "" };
   const question = text.indexOf("?");
   if (question === -1) {
     return route;
@@ -266,6 +270,15 @@ export function restoreRouteParams(hash) {
       route.backup = value;
     } else if (key === "ns" && value.length > 0) {
       route.ns = value;
+    } else if (key === "catalog") {
+      // PLAT-15.2: a catalog-verified point, named by the catalog that lists
+      // it and by its content-derived id. Every other value the link may carry
+      // (the receipt key, the digests) is IGNORED here: the wizard reads the
+      // point again from the product API and builds the binding from that
+      // answer, never from an address somebody could have edited.
+      route.catalog = value;
+    } else if (key === "point") {
+      route.point = value;
     } else if (key === "retryOf") {
       // PLAT-11.2: the failed Restore this one retries. It is carried for the
       // PREFIX it derives and for the banner that names it, and for nothing
@@ -449,9 +462,12 @@ export function isRecoveryPoint(backup) {
  *  about the RECORDS and two runs can cover windows that end in the other
  *  order from the order they ran. A tie keeps list order, which is
  *  `kubectl`'s. Pure; no clock. */
-export function recoveryPoints(backups) {
+export function recoveryPoints(backups, accept) {
+  // `accept` widens the filter for a caller that can offer more than a run's
+  // own window -- the schedule detail offers a run from its catalog row
+  // (PLAT-15.2) -- and leaves the ORDER, which is this function's, alone.
   return itemsOf(backups)
-    .filter(isRecoveryPoint)
+    .filter(typeof accept === "function" ? accept : isRecoveryPoint)
     .map((point, index) => ({ point: point, index: index }))
     .sort((a, b) => {
       const left = completedAt(a.point);
@@ -595,6 +611,497 @@ export function archiveAvailability(backup) {
     : "no manifest recorded";
 }
 
+// ------------------------------------ the catalog-verified point (PLAT-15.2)
+//
+// A RECOVERY POINT IS A SIGNED RECEIPT IN AN ARCHIVE, NOT A CUSTOM RESOURCE.
+// The durable catalog (D3 section 5) lists every point an archive holds, read
+// back from object storage by a sync Job and judged by the controller against
+// the namespace's trust -- so a cluster that lost every `Backup` object, or a
+// fresh installation pointed at an archive another one wrote, still has the
+// points. This section is how the wizard restores one of them.
+//
+// THE RULE IS D3 section 5.5 step 4 AND THE CONTROLLER-VERDICT PRECEDENCE
+// RULE (`dffe118`, `95c2279`): the catalog decides only where the controller
+// could not look. A point is offered from the catalog only when
+//
+//   * the product API published the row `selectable: true` -- the
+//     controller's own conjunction of "the archive can serve it" and "its
+//     receipt verifies under a key this namespace accepts", joined server
+//     side with the namespace's `Backup` verdicts (`backupVerdict`);
+//   * that join was COMPLETE (`backupVerdictsIncomplete` absent) -- a join the
+//     API could not finish cannot say that no `Backup` refused this receipt,
+//     and this page does not guess;
+//   * the row carries everything the plan binding needs, unredacted: the
+//     point id, the receipt key, and both digests;
+//   * and, when the offer came from a `Backup` (a destination-backed run the
+//     controller could not verify itself, so it wrote no window), that
+//     Backup's OWN verdict is absent or `NotAttempted` -- never a reached
+//     refusal -- and the row is the one for that run's receipt.
+//
+// AND THE PLAN IS BOUND TO THE POINT, NOT TO A NAME. The plan carries
+// `source.point {point_id, receipt_key, receipt_sha256, manifest_sha256}` and
+// `source.backup` pinned to the point's set; the runner re-reads the receipt
+// and the manifest those name BEFORE it constructs a client and refuses a
+// mismatch with exit 3 `PointBindingMismatch` (execution contract v2). The
+// approver signs those bytes, so the approval covers WHICH archive object the
+// restore recovers from.
+
+/** How many points one catalog page read asks for. */
+export const CATALOG_POINT_PAGE = 200;
+
+/** How many cursor pages the wizard follows looking for one point. The view is
+ *  at most 5000 points (D3 section 5.3), so 25 pages of 200 read all of it. */
+export const CATALOG_POINT_PAGE_BUDGET = 25;
+
+/** The marker the product's archive-key redactor leaves behind. A key that
+ *  carries it is the redactor's output and not a key, and it is never put
+ *  into a plan binding (`ui/pages/catalog.js` re-exports this). */
+export const REDACTION_MARKER = "[redacted]";
+
+/** Whether a published archive key is the redactor's output rather than a key. */
+export function isRedacted(value) {
+  return typeof value === "string" && value.indexOf(REDACTION_MARKER) !== -1;
+}
+
+/** The two verdicts that let a catalog row answer for a `Backup`: none at all,
+ *  or `NotAttempted` -- the controller could not look. Everything else it
+ *  wrote is a verdict it REACHED (`Valid` included: a Valid run has its own
+ *  window and never needs the catalog's). */
+export const DEFERRING_VERDICTS = Object.freeze(["NotAttempted"]);
+
+/** What the Backup's own evidence verdict is, or `null` when it wrote none. */
+export function backupOwnVerdict(backup) {
+  const verification = (((backup || {}).status || {}).evidence || {}).verification || {};
+  return typeof verification.result === "string" && verification.result.length > 0
+    ? verification.result
+    : null;
+}
+
+/** Whether a `Backup`'s own verdict lets the catalog decide for it. */
+export function catalogMayAnswerFor(backup) {
+  const verdict = backupOwnVerdict(backup);
+  return verdict === null || DEFERRING_VERDICTS.indexOf(verdict) !== -1;
+}
+
+/** The catalog's covered window as the wizard's inclusive window, or `null`.
+ *
+ *  THE CATALOG'S END IS EXCLUSIVE (`BackupReceipt.covered.to_ms`), and the
+ *  restore window's end is inclusive, so the last instant a plan may name is
+ *  `coveredTo - 1 ms` (D3 section 5.5 step 4). The wizard's window checks are
+ *  closed at both ends, so the window it is given is `[coveredFrom,
+ *  coveredTo - 1 ms]`. */
+export function catalogWindow(entry) {
+  const e = entry || {};
+  const from = epochMs(e.coveredFrom);
+  const to = epochMs(e.coveredTo);
+  if (from === null || to === null || to - 1 < from) {
+    return null;
+  }
+  return { fromMs: from, toMs: to - 1 };
+}
+
+const POINT_ID_SHAPE = /^lwp1-[0-9a-f]{32}$/;
+const DIGEST_SHAPE = /^sha256:[0-9a-f]{64}$/;
+
+/** WHETHER ONE CATALOG ROW MAY BE OFFERED AS A RESTORE, and if not, why.
+ *
+ *  `page` is the point page the row came from (its `viewExpired` and
+ *  `backupVerdictsIncomplete` are facts about every row on it). Returns
+ *  `{offer: true, reason: null}` or `{offer: false, reason: <sentence>}`.
+ *  Pure; no clock. The ORDER of the refusals is the order an operator would
+ *  repair them in, and each names the value that is wrong. */
+export function catalogPointOffer(entry, page) {
+  const e = entry || null;
+  const p = page || {};
+  const no = (reason) => ({ offer: false, reason: reason });
+  if (e === null) {
+    return no("the catalog's view does not list this point");
+  }
+  if (p.viewExpired === true) {
+    return no("the catalog's view has aged out (viewExpired); sync the catalog again");
+  }
+  if (typeof e.backupVerdict === "string" && e.backupVerdict.length > 0) {
+    return no(
+      "the controller refused this point's own Backup evidence (" + e.backupVerdict + "); a " +
+        "catalog row never outranks a verdict the controller reached",
+    );
+  }
+  if (typeof p.backupVerdictsIncomplete === "string" && p.backupVerdictsIncomplete.length > 0) {
+    return no(
+      "the product API could not read every Backup verdict in this namespace (" +
+        p.backupVerdictsIncomplete + "), so it cannot say that no Backup refused this " +
+        "receipt; this page does not offer a point over a verdict nobody could read",
+    );
+  }
+  if (e.selectable !== true) {
+    return no(
+      "the catalog does not list this point as restorable: availability " +
+        String(e.availability || "unknown") + ", verification " +
+        String(e.verification || "unknown") +
+        (typeof e.remedy === "string" && e.remedy.length > 0 ? " (" + e.remedy + ")" : ""),
+    );
+  }
+  if (typeof e.pointId !== "string" || !POINT_ID_SHAPE.test(e.pointId)) {
+    return no("the point id is not `lwp1-` plus 32 lowercase hex characters");
+  }
+  if (typeof e.receiptKey !== "string" || e.receiptKey.trim().length === 0) {
+    return no("the catalog published no receipt key for this point");
+  }
+  if (isRedacted(e.receiptKey)) {
+    return no(
+      "the catalog published this point's receipt key as `" + e.receiptKey + "`: the " +
+        "archive-key redactor rewrote it, so the plan binding cannot name the object the " +
+        "runner must re-read; re-sync the catalog with a runner that keeps a ULID run id",
+    );
+  }
+  if (typeof e.receiptSha256 !== "string" || !DIGEST_SHAPE.test(e.receiptSha256)) {
+    return no("the catalog published no well-formed receipt digest for this point");
+  }
+  if (typeof e.manifestSha256 !== "string" || !DIGEST_SHAPE.test(e.manifestSha256)) {
+    return no(
+      "the catalog published no manifest digest for this point, and the plan binding needs " +
+        "one: the runner checks the manifest the receipt attests before any data moves",
+    );
+  }
+  if (typeof e.backupId !== "string" || !/^[A-Za-z0-9._-]{1,128}$/.test(e.backupId)) {
+    return no("the catalog published no usable backup set id for this point");
+  }
+  if (catalogWindow(e) === null) {
+    return no("the catalog published no covered window for this point");
+  }
+  return { offer: true, reason: null };
+}
+
+/** The catalog rows that belong to ONE run: the run's set, and -- when the
+ *  run reported the digest of the receipt it signed -- that exact receipt. A
+ *  set can hold several points (an upstream append writes a second receipt
+ *  under the same backup id), and a join that took the first would bind the
+ *  plan to a point this run did not produce. */
+export function catalogRowsForBackup(backup, points) {
+  const status = (backup || {}).status || {};
+  const id = typeof status.backupId === "string" ? status.backupId : "";
+  if (id.length === 0 || !Array.isArray(points)) {
+    return [];
+  }
+  const digest = ((status.evidence || {}).receiptSha256);
+  return points.filter((point) => {
+    const p = point || {};
+    if (p.backupId !== id) {
+      return false;
+    }
+    return typeof digest !== "string" || digest.length === 0 || p.receiptSha256 === digest;
+  });
+}
+
+/** CONSOLE-RESTORE-IGNORES-CATALOG-WINDOW: whether a `Backup` the controller
+ *  wrote no window for may be restored from the catalog's, and from which row.
+ *
+ *  Only a `Succeeded` run with a set, whose OWN verdict is absent or
+ *  `NotAttempted`, and for which exactly one catalog row answers that
+ *  [`catalogPointOffer`] offers. A run with its own window is not this
+ *  function's to answer ([`isRecoveryPoint`] already offers it), and a run
+ *  whose verdict the controller reached -- `Invalid`, `Untrusted`, `Pending`,
+ *  or a word this build does not know -- is never made restorable by a row. */
+export function backupCatalogOffer(backup, points, page) {
+  const b = backup || null;
+  const no = (reason) => ({ offer: false, reason: reason, entry: null });
+  if (b === null) {
+    return no("no Backup");
+  }
+  if (isRecoveryPoint(b)) {
+    return no("the controller wrote this run's own covered window; it needs no catalog row");
+  }
+  const status = b.status || {};
+  if (status.phase !== "Succeeded") {
+    return no("the run is in phase " + String(status.phase || "(none)"));
+  }
+  if (typeof status.backupId !== "string" || status.backupId.length === 0) {
+    return no("the run recorded no backup set");
+  }
+  if (!catalogMayAnswerFor(b)) {
+    return no(
+      "the controller reached a verdict on this run's own evidence (" + backupOwnVerdict(b) +
+        "), and a catalog row never outranks it",
+    );
+  }
+  const rows = catalogRowsForBackup(b, points);
+  if (rows.length === 0) {
+    return no("no catalog row answers this run's receipt");
+  }
+  if (rows.length > 1) {
+    return no(
+      "the catalog lists " + String(rows.length) + " points for this run's set and the run " +
+        "reported no receipt digest to choose between them",
+    );
+  }
+  const verdict = catalogPointOffer(rows[0], page);
+  return verdict.offer ? { offer: true, reason: null, entry: rows[0] } : no(verdict.reason);
+}
+
+// WHICH CATALOG A ROW WAS READ FROM, kept beside the row and not on it. A page
+// that reads several catalogs (the schedule detail) hands its renderers one
+// flat list of rows; the offer needs the catalog's NAME for the link and the
+// page's flags (`viewExpired`, `backupVerdictsIncomplete`) for the rule, and
+// neither is a field of the API's row. A WeakMap keeps them out of the row
+// itself, so a decoded row stays exactly what the API published.
+const catalogSources = new WeakMap();
+
+/** Records that `row` was read from catalog `catalog` on a page carrying
+ *  `page`'s flags. Returns the row. */
+export function noteCatalogSource(row, catalog, page) {
+  if (row !== null && typeof row === "object") {
+    const p = page || {};
+    catalogSources.set(row, {
+      catalog: String(catalog || ""),
+      page: {
+        viewExpired: p.viewExpired === true,
+        backupVerdictsIncomplete: typeof p.backupVerdictsIncomplete === "string"
+          ? p.backupVerdictsIncomplete
+          : null,
+      },
+    });
+  }
+  return row;
+}
+
+/** `{catalog, page}` for a row [`noteCatalogSource`] recorded, else `null`. */
+export function catalogSourceOf(row) {
+  return row !== null && typeof row === "object" ? (catalogSources.get(row) || null) : null;
+}
+
+/** [`backupCatalogOffer`] over rows read from possibly several catalogs, each
+ *  carrying its source: the offer, plus the catalog its row came from. A row
+ *  with no recorded source is never offered -- the link would have no catalog
+ *  to name. */
+export function backupCatalogOfferFrom(backup, points) {
+  const rows = catalogRowsForBackup(backup, points);
+  const source = rows.length === 1 ? catalogSourceOf(rows[0]) : null;
+  const offer = backupCatalogOffer(backup, points, source === null ? {} : source.page);
+  if (offer.offer && (source === null || source.catalog.length === 0)) {
+    return { offer: false, reason: "the catalog row carries no catalog name", entry: null,
+      catalog: "" };
+  }
+  return Object.assign({}, offer, { catalog: source === null ? "" : source.catalog });
+}
+
+/** The link that opens the wizard on ONE catalog point:
+ *  `#/restore?ns=<ns>&catalog=<name>&point=<pointId>`, plus the run's own
+ *  identity when the offer came from a `Backup`. The point id is the identity;
+ *  everything the plan is built from is read again from the product API. */
+export function restoreCatalogPointRoute(ns, catalog, pointId, backup) {
+  const n = typeof ns === "string" ? ns.trim() : "";
+  const meta = ((backup || {}).metadata) || {};
+  return (
+    "#/restore?" +
+    (n.length > 0 ? "ns=" + encodeURIComponent(n) + "&" : "") +
+    "catalog=" + encodeURIComponent(String(catalog || "")) +
+    "&point=" + encodeURIComponent(String(pointId || "")) +
+    (typeof meta.name === "string" && meta.name.length > 0
+      ? "&backup=" + encodeURIComponent(meta.name)
+      : "") +
+    (typeof meta.uid === "string" && meta.uid.length > 0
+      ? "&uid=" + encodeURIComponent(meta.uid)
+      : "")
+  );
+}
+
+/** FIND ONE POINT IN A CATALOG'S VIEW, by its id, following the cursor.
+ *
+ *  `readPoints(query)` is one page read. Returns `{entry, page}`: the row (or
+ *  `null`) and the page-level facts every page read carried -- `viewExpired`
+ *  and `backupVerdictsIncomplete` from ANY page, because a flag on one page is
+ *  a fact about the whole read. A view that has more pages than the budget and
+ *  did not contain the point is `{entry: null, page: {budgetExhausted: true}}`,
+ *  said as such and never as "not in the catalog". */
+export async function findCatalogPoint(readPoints, pointId) {
+  const flags = { viewExpired: false, backupVerdictsIncomplete: null, incomplete: false,
+    budgetExhausted: false };
+  let cursor = null;
+  for (let read = 0; read < CATALOG_POINT_PAGE_BUDGET; read += 1) {
+    const query = { limit: CATALOG_POINT_PAGE };
+    if (cursor !== null) {
+      query.cursor = cursor;
+    }
+    const page = (await readPoints(query)) || {};
+    if (page.viewExpired === true) {
+      flags.viewExpired = true;
+    }
+    if (typeof page.backupVerdictsIncomplete === "string" &&
+      page.backupVerdictsIncomplete.length > 0) {
+      flags.backupVerdictsIncomplete = page.backupVerdictsIncomplete;
+    }
+    if (page.incomplete === true) {
+      flags.incomplete = true;
+    }
+    for (const item of (Array.isArray(page.items) ? page.items : [])) {
+      if ((item || {}).pointId === pointId) {
+        return { entry: item, page: flags };
+      }
+    }
+    cursor = ((page.page || {}).nextCursor) || null;
+    if (cursor === null || flags.incomplete) {
+      return { entry: null, page: flags };
+    }
+  }
+  flags.budgetExhausted = true;
+  return { entry: null, page: flags };
+}
+
+/** The destination a catalog reads, by name, or `""` for a legacy archive. */
+export function catalogDestinationName(catalog) {
+  const ref = (((catalog || {}).spec || {}).destinationRef) || {};
+  return typeof ref.name === "string" ? ref.name : "";
+}
+
+/** A legacy-archive catalog's `{url, secretName}`, in either spelling the two
+ *  modes project (`credentialRef` from the product API, `secretRef` from the
+ *  custom resource), or `null`. */
+export function catalogLegacyArchive(catalog) {
+  const legacy = (((catalog || {}).spec || {}).legacyArchive) || null;
+  if (legacy === null || typeof legacy.url !== "string" || legacy.url.length === 0) {
+    return null;
+  }
+  const secret = legacy.credentialRef || legacy.secretRef || {};
+  return { url: legacy.url, secretName: typeof secret.name === "string" ? secret.name : "" };
+}
+
+/** THE CHOSEN CATALOG POINT, IN THE SHAPE EVERY STEP OF THIS WIZARD READS.
+ *
+ *  The six steps were written over a `Backup`, and they read five things off
+ *  it: its identity, its set, its covered window, its topics and its frozen
+ *  destination. A catalog point has all five, from different places, and this
+ *  puts them where the steps look -- so the steps, the draft, the readiness
+ *  request and the submit build ONE plan from ONE point, and the one field a
+ *  Backup never had -- `catalogPoint`, the binding -- rides beside them.
+ *
+ *  THE DESTINATION IS FROZEN HERE, AT MOUNT. A destination-backed catalog's
+ *  point is read through that destination; its UID and location digest as the
+ *  API served them now are recorded as `spec.destinationRef.uid` and
+ *  `status.locationDigest`, which is what [`confirmFrozenDestination`]
+ *  re-checks before the create: a destination deleted, recreated or moved
+ *  while the plan was being reviewed is a refusal, not a different archive.
+ *
+ *  THE TOPICS START EMPTY. The catalog view does not publish a point's topic
+ *  list, so the operator names the topics to restore; the readiness check
+ *  reads the manifest for exactly those names, and the runner restores
+ *  nothing the set does not hold. */
+export function catalogRecoveryPoint(catalog, entry, destination, backup) {
+  const e = entry || {};
+  const window = catalogWindow(e) || {};
+  const destinationName = catalogDestinationName(catalog);
+  const legacy = catalogLegacyArchive(catalog);
+  const live = destination || {};
+  const spec = { topics: [] };
+  if (destinationName.length > 0) {
+    spec.destinationRef = { name: destinationName, uid: live.uid };
+    spec.archive = { url: "logweir-destination://" + destinationName };
+  } else if (legacy !== null) {
+    spec.archive = legacy.secretName.length > 0
+      ? { url: legacy.url, secretRef: { name: legacy.secretName } }
+      : { url: legacy.url };
+  }
+  const location = (Array.isArray(e.locations) ? e.locations : [])
+    .find((l) => (l || {}).availability === "Available") || null;
+  return {
+    kind: "CatalogPoint",
+    metadata: { name: e.pointId, uid: "" },
+    spec: spec,
+    status: {
+      phase: "Succeeded",
+      backupId: e.backupId,
+      windowCovered: { fromMs: window.fromMs, toMs: window.toMs },
+      locationDigest: live.locationDigest,
+    },
+    catalogPoint: {
+      catalog: String((((catalog || {}).metadata) || {}).name || ""),
+      pointId: e.pointId,
+      receiptKey: e.receiptKey,
+      receiptSha256: e.receiptSha256,
+      manifestSha256: e.manifestSha256,
+      availability: e.availability,
+      verification: e.verification,
+      signerKeyId: e.signerKeyId,
+      recoveryPointAt: e.recoveryPointAt,
+      coveredFrom: e.coveredFrom,
+      coveredTo: e.coveredTo,
+      locationId: location === null ? null : location.locationId,
+      runId: e.runId,
+      backup: backup === null || backup === undefined
+        ? null
+        : { name: (backup.metadata || {}).name, uid: (backup.metadata || {}).uid },
+    },
+  };
+}
+
+/** Whether the wizard's chosen point is a catalog point. */
+export function isCatalogPoint(point) {
+  return ((point || {}).catalogPoint || null) !== null &&
+    typeof point.catalogPoint === "object";
+}
+
+/** The identity a catalog point is kept under in this page's registries (the
+ *  readiness attempt key, the selection): the catalog and the point id. Not a
+ *  Kubernetes UID, and never sent as one. */
+export function catalogPointUid(point) {
+  const c = ((point || {}).catalogPoint) || {};
+  return "catalog/" + String(c.catalog || "") + "/" + String(c.pointId || "");
+}
+
+/** The plan's `source.point` binding for a catalog point, or `undefined` for a
+ *  Backup-bound plan -- whose document therefore stays byte-identical to the
+ *  one it always was. */
+export function pointBindingOf(point) {
+  if (!isCatalogPoint(point)) {
+    return undefined;
+  }
+  const c = point.catalogPoint;
+  return {
+    pointId: c.pointId,
+    receiptKey: c.receiptKey,
+    receiptSha256: c.receiptSha256,
+    manifestSha256: c.manifestSha256,
+  };
+}
+
+/** Parses the operator's topic list: names separated by commas or whitespace,
+ *  in the order typed, blanks dropped. Duplicates are KEPT, so the mapping
+ *  check can refuse them by name rather than this page silently collapsing
+ *  them. */
+export function parseTopicList(text) {
+  return String(text === undefined || text === null ? "" : text)
+    .split(/[\s,]+/)
+    .filter((topic) => topic.length > 0);
+}
+
+/** Sets the catalog point's topic list: the list the subset is chosen from AND
+ *  the subset itself, so every named topic is restored unless unticked. */
+export function setCatalogTopics(state, topics) {
+  const s = state || {};
+  const list = Array.isArray(topics) ? topics.slice() : [];
+  if (isCatalogPoint(s.point)) {
+    s.point.spec.topics = list.slice();
+  }
+  if (s.fields) {
+    s.fields.topics = list.slice();
+  }
+  s.catalogTopicsText = list.join(", ");
+}
+
+/** What the recovery-point step says about a catalog point's topics. */
+export const CATALOG_TOPICS_SENTENCE =
+  "The catalog's view does not publish a recovery point's topic list, so name the topics to " +
+  "restore, separated by commas. The readiness check reads the point's manifest for exactly " +
+  "these names before an approver signs, and the runner restores nothing the backup set does " +
+  "not hold.";
+
+/** What a catalog-bound plan carries, and why. */
+export const CATALOG_BINDING_SENTENCE =
+  "This plan is bound to the recovery point itself: its bytes carry source.point {point_id, " +
+  "receipt_key, receipt_sha256, manifest_sha256}, and the runner re-reads that receipt and the " +
+  "manifest it attests BEFORE it contacts any broker. A receipt or manifest that no longer " +
+  "matches is refused (exit 3, PointBindingMismatch) -- the restore never runs from a " +
+  "different object than the one the approver signed for.";
+
 // ---------------------------------------------------------------- the steps
 
 /** Step 1 -- the archive. A `KafkaCluster` with `role: source`, and the
@@ -620,9 +1127,14 @@ export function renderArchiveStep(state) {
   });
   return (
     "<section class=\"step\" id=\"step-archive\" tabindex=\"-1\"><h3>1. Archive</h3>" +
-    "<p class=\"blurb\">The source cluster this restore reads an archive of. The archives " +
-    "below were read from this namespace's Backup objects: this page holds no bucket " +
-    "credential and lists no object storage.</p>" +
+    (isCatalogPoint(s.point)
+      ? "<p class=\"blurb\" id=\"catalog-archive\">This restore reads the archive catalog <code>" +
+        esc(s.point.catalogPoint.catalog) + "</code> reads, not an archive named by a Backup " +
+        "object: the recovery point was found in that archive, and the source cluster is " +
+        "never contacted by a restore. The saved connections below are context only.</p>"
+      : "<p class=\"blurb\">The source cluster this restore reads an archive of. The archives " +
+        "below were read from this namespace's Backup objects: this page holds no bucket " +
+        "credential and lists no object storage.</p>") +
     renderSourceBinding(s) +
     table(
       ["SOURCE CLUSTER", "BOOTSTRAP", "CLUSTER ID", "CONNECTION PROBE", "ARCHIVE",
@@ -994,15 +1506,33 @@ export function completedBackups(backups) {
  *  empty: the heading, the sentence, and the catalog table so the reader sees
  *  what the namespace does hold. Pure; never throws on an empty or
  *  running-only list. */
-export function renderNoCompletedBackup(ns, backups) {
+export function renderNoCompletedBackup(ns, backups, catalogOffers) {
+  const offered = (((catalogOffers || {}).offers) || []).length > 0;
   return (
     "<h2>Restore wizard</h2>" +
-    "<div class=\"empty-state\"><p class=\"note\">" + NO_COMPLETED_BACKUP_SENTENCE + "</p></div>" +
+    // A NAMESPACE WITH NO COMPLETED BACKUP MAY STILL HOLD AN ARCHIVE (PLAT-15.2):
+    // the cluster lost its objects, or this is a fresh installation pointed at
+    // an archive another one wrote. The connected archives' points come first,
+    // and the "wait for a scheduled run" advice is only the whole story when
+    // there are none.
+    (offered
+      ? ""
+      : "<div class=\"empty-state\"><p class=\"note\">" + NO_COMPLETED_BACKUP_SENTENCE +
+        "</p><p class=\"note\" id=\"connect-archive-hint\">" + esc(CONNECT_ARCHIVE_HINT) +
+        " <a href=\"#/catalog?ns=" + esc(encodeURIComponent(String(ns || ""))) +
+        "\">Connect an existing archive</a></p></div>") +
+    renderCatalogOffers(ns, catalogOffers) +
     "<section class=\"step\" id=\"step-catalog\" tabindex=\"-1\"><h3>What this namespace holds</h3>" +
     renderCatalogTable(itemsOf(backups), null) +
     "<p class=\"note\">" + NO_SUCCEEDED_SENTENCE + "</p></section>"
   );
 }
+
+/** Said where a namespace holds nothing to restore from. */
+export const CONNECT_ARCHIVE_HINT =
+  "If the archive survived and the Backup objects did not -- a rebuilt cluster, or a fresh " +
+  "installation -- connect the archive: its catalog lists every point it holds, and a point " +
+  "the catalog verifies is restorable from here without any Backup object.";
 
 /** Every `Backup` in the list with its set, its covered range CONVERTED TO RFC
  *  3339 (interface I22: the field is two integers, and a viewer reading
@@ -1043,6 +1573,9 @@ export function renderCatalogTable(backups, chosenName) {
 export function renderRecoveryPointStep(state) {
   const s = state || {};
   const point = s.point || null;
+  if (isCatalogPoint(point)) {
+    return renderCatalogPointStep(s);
+  }
   const meta = (point || {}).metadata || {};
   const spec = (point || {}).spec || {};
   const status = (point || {}).status || {};
@@ -1072,6 +1605,60 @@ export function renderRecoveryPointStep(state) {
     esc(restoreSelectorRoute(s.ns)) + "\">Choose a different recovery point</a></div>" +
     "<h4>What this namespace holds</h4>" +
     renderCatalogTable(backupsOf(s), meta.name) +
+    "</section>"
+  );
+}
+
+/** Step 2 for a CATALOG point: what the catalog says about it, the binding
+ *  the plan will carry, and the topics to restore.
+ *
+ *  Every value was read from the product API's point view -- the controller's
+ *  two verdicts, kept as two columns, and the keys and digests the binding is
+ *  built from. The covered window shown is the one the plan may name:
+ *  `coveredTo` is exclusive, so the last instant is one millisecond before it. */
+export function renderCatalogPointStep(state) {
+  const s = state || {};
+  const point = s.point || {};
+  const c = point.catalogPoint || {};
+  const covered = ((point.status || {}).windowCovered) || {};
+  const errors = errorsOf(s);
+  const typed = typeof s.catalogTopicsText === "string" ? s.catalogTopicsText : "";
+  return (
+    "<section class=\"step\" id=\"step-backup-set\" tabindex=\"-1\"><h3>2. Recovery point</h3>" +
+    "<p class=\"blurb\">A point read back from a connected archive by its catalog, pinned by " +
+    "its content-derived id. No Backup object is involved: everything below was read from " +
+    "the catalog's view through the product API.</p>" +
+    facts([
+      ["catalog", "<code id=\"point-catalog\">" + esc(c.catalog) + "</code>"],
+      ["point", "<code id=\"point-name\">" + esc(c.pointId) + "</code>"],
+      ["backup set", cell((point.status || {}).backupId)],
+      ["run", cell(c.runId)],
+      ["recovery point", cell(c.recoveryPointAt)],
+      ["covered from", cell(rfc3339(covered.fromMs))],
+      ["covered to (inclusive)", cell(rfc3339(covered.toMs)) +
+        " <span class=\"note\">(the catalog's coveredTo " + esc(String(c.coveredTo || "")) +
+        " is exclusive)</span>"],
+      ["availability", badge("green", String(c.availability || ""))],
+      ["verification", badge("green", String(c.verification || ""))],
+      ["signer key id", "<code>" + cell(c.signerKeyId) + "</code>"],
+      ["location", cell(c.locationId)],
+      ["receipt", "<code id=\"point-receipt-key\">" + esc(c.receiptKey) + "</code>"],
+      ["receipt sha256", "<code id=\"point-receipt-sha256\">" + esc(c.receiptSha256) +
+        "</code>"],
+      ["manifest sha256", "<code id=\"point-manifest-sha256\">" + esc(c.manifestSha256) +
+        "</code>"],
+      ["offered from", c.backup === null || c.backup === undefined
+        ? "the catalog (no Backup object)"
+        : "Backup <code>" + esc(c.backup.name) + "</code>, uid <code>" + esc(c.backup.uid) +
+          "</code>, whose own verdict is absent or NotAttempted"],
+    ]) +
+    "<p class=\"note\" id=\"catalog-binding\">" + esc(CATALOG_BINDING_SENTENCE) + "</p>" +
+    "<div class=\"field\"><label for=\"catalog-topics\">topics to restore</label>" +
+    "<input id=\"catalog-topics\" name=\"catalogTopics\" value=\"" + esc(typed) + "\"" +
+    invalidAttributes("catalog-topics", errors.topics) + ">" +
+    "<p class=\"note\">" + esc(CATALOG_TOPICS_SENTENCE) + "</p></div>" +
+    "<div class=\"actions\"><a class=\"nav-link\" id=\"choose-another-point\" href=\"" +
+    esc(restoreSelectorRoute(s.ns)) + "\">Choose a different recovery point</a></div>" +
     "</section>"
   );
 }
@@ -1155,7 +1742,8 @@ export function renderPointSelector(state) {
     "<p class=\"note\" id=\"no-match\" hidden>" + NO_MATCH_SENTENCE + "</p>" +
     "<h4>What this namespace holds</h4>" +
     renderCatalogTable(itemsOf(s.backups), null) +
-    "</section>"
+    "</section>" +
+    renderCatalogOffers(s.ns, s.catalogOffers)
   );
 }
 
@@ -1762,6 +2350,15 @@ export const READINESS_BINDING_SENTENCE =
 /** Which archive identity step 5 sends, stated from the recovery point itself. */
 export function readinessSourceSentence(point) {
   const p = point || {};
+  if (isCatalogPoint(p)) {
+    const name = (((p.spec || {}).destinationRef) || {}).name;
+    return "This check reads the archive the catalog " + String(p.catalogPoint.catalog) +
+      " reads" + (typeof name === "string" && name.length > 0
+      ? ", saved destination `" + name + "`"
+      : ", an inline archive") +
+      ", and names the catalog point so the controller re-reads its row -- availability, " +
+      "verification and any Backup verdict against it -- when the check runs.";
+  }
   const destination = ((p.spec || {}).destinationRef || {});
   if (typeof destination.name === "string" && destination.name.length > 0) {
     const digest = (p.status || {}).locationDigest;
@@ -2487,6 +3084,8 @@ export function wizardDraftValues(state) {
     evidenceRegion: (f.evidence || {}).region,
     evidencePathStyle: (f.evidence || {}).pathStyle === true,
     evidenceAllowHttp: (f.evidence || {}).allowHttp === true,
+    catalogPointId: isCatalogPoint(s.point) ? catalogPointUid(s.point) : "",
+    catalogTopics: isCatalogPoint(s.point) ? frozenTopicsOf(s) : [],
   };
 }
 
@@ -2505,6 +3104,18 @@ export function applyWizardDraft(state, draft) {
   const retrying = typeof ((state || {}).retryOf) === "string" ? state.retryOf : "";
   if ((typeof d.retryOf === "string" ? d.retryOf : "") !== retrying) {
     return false;
+  }
+  // AND FOR THE SAME KIND OF POINT (PLAT-15.2). A catalog point and a Backup can
+  // share a backup set -- the catalog lists the Backup's own receipt -- and a
+  // draft made over one must not become edits to the other: their topic lists
+  // and bindings are different documents. An older draft carries no
+  // `catalogPointId` and reads as the Backup draft it was.
+  const pointKey = isCatalogPoint((state || {}).point) ? catalogPointUid(state.point) : "";
+  if ((typeof d.catalogPointId === "string" ? d.catalogPointId : "") !== pointKey) {
+    return false;
+  }
+  if (pointKey.length > 0 && Array.isArray(d.catalogTopics)) {
+    setCatalogTopics(state, d.catalogTopics.map(String));
   }
   if (typeof d.pointInTime === "string") {
     state.fields.pointInTime = d.pointInTime;
@@ -3198,6 +3809,13 @@ export async function mountRestoreWizard(node, ns, params, parse, deps, lifecycl
     }
     const clusters = collections[0];
     const backups = collections[1];
+    // PLAT-15.2: A CATALOG POINT IS ITS OWN MOUNT, and it never falls back to
+    // a Backup. A link naming a catalog and a point that do not resolve is a
+    // refusal naming them, exactly as a Backup UID that does not resolve is.
+    if (typeof selection.catalog === "string" && selection.catalog.length > 0) {
+      await mountCatalogPoint(node, ns, selection, parse, api, lifecycle, clusters, backups);
+      return;
+    }
     const resolved = resolvePoint(backups, selection);
     const destinationName = savedDestinationName({ point: resolved.point });
     let destination = null;
@@ -3249,8 +3867,16 @@ export async function mountRestoreWizard(node, ns, params, parse, deps, lifecycl
     }
     const state = initialState(ns, clusters, backups, selection, destination, destinations);
     if (state.pointState === "none") {
+      // THE CONNECTED ARCHIVES' POINTS, beside the Backups (PLAT-15.2). A
+      // namespace that lost every Backup object still has its archive, and the
+      // selector is where an operator looks for something to restore.
+      state.catalogOffers = await readCatalogOffers(ns, catalogReadersOf(api, ns, lifecycle),
+        lifecycle);
+      if (!active(lifecycle)) {
+        return;
+      }
       if (completedBackups(backups).length === 0) {
-        replace(node, parse(renderNoCompletedBackup(ns, backups)));
+        replace(node, parse(renderNoCompletedBackup(ns, backups, state.catalogOffers)));
         return;
       }
       replace(node, parse(renderPointSelector(state)));
@@ -3281,6 +3907,293 @@ export async function mountRestoreWizard(node, ns, params, parse, deps, lifecycl
     }
   }
 }
+
+/** The readers the catalog half uses: the product API's catalog routes, or
+ *  the stand-ins a test hands in as `api.catalogReaders` (the same arrangement
+ *  as the schedule detail's `detailReaders`). */
+export function catalogReadersOf(api, ns, lifecycle) {
+  const given = (api || {}).catalogReaders || {};
+  return {
+    listCatalogs: given.listCatalogs ||
+      (() => listD3("catalog", ns, readOptions(lifecycle))),
+    readCatalog: given.readCatalog ||
+      ((name) => readD3("catalog", ns, name, readOptions(lifecycle))),
+    readPoints: given.readPoints ||
+      ((name, query) => readCatalogPoints(ns, name, query, readOptions(lifecycle))),
+  };
+}
+
+/** RESOLVE A CATALOG POINT FOR THE WIZARD, or say exactly why not.
+ *
+ *  Reads the catalog, finds the point in its view by id, and applies
+ *  [`catalogPointOffer`]. When the route also names a `Backup` -- the offer
+ *  came from a run the controller wrote no window for -- that run must still
+ *  be the one named (same UID), [`backupCatalogOffer`] must offer THIS row
+ *  for it, and the catalog must read the destination the run froze. Returns
+ *  `{state: "selected", point}` or `{state: "refused", reason, ...}`; a read
+ *  that FAILS is thrown, because "could not read" is not "refused". */
+export async function resolveCatalogChoice(api, ns, selection, backups, readers, lifecycle) {
+  const wanted = selection || {};
+  const catalogName = String(wanted.catalog || "");
+  const pointId = String(wanted.point || "");
+  const refused = (reason, extra) => Object.assign(
+    { state: "refused", reason: reason, catalog: catalogName, pointId: pointId }, extra || {});
+  if (pointId.length === 0) {
+    return refused("the link names a catalog and no recovery point");
+  }
+  const catalog = await readers.readCatalog(catalogName);
+  if (!active(lifecycle)) {
+    return null;
+  }
+  const found = await findCatalogPoint((query) => readers.readPoints(catalogName, query), pointId);
+  if (!active(lifecycle)) {
+    return null;
+  }
+  if (found.entry === null) {
+    return refused(
+      found.page.budgetExhausted
+        ? "the catalog's view holds more pages than this page reads, and the point was not in " +
+          "the ones it read"
+        : (found.page.viewExpired
+          ? "the catalog's view has aged out (viewExpired); sync the catalog again"
+          : (found.page.incomplete
+            ? "a page of the catalog's view disappeared while it was being read; reload"
+            : "the catalog's view does not list this point")),
+    );
+  }
+  let backup = null;
+  const uid = String(wanted.uid || "");
+  const name = String(wanted.backup || "");
+  if (uid.length > 0 || name.length > 0) {
+    backup = itemsOf(backups).find((b) => {
+      const meta = (b || {}).metadata || {};
+      return uid.length > 0 ? meta.uid === uid : meta.name === name;
+    }) || null;
+    if (backup === null) {
+      return refused(
+        "the link names Backup " + (name || "(unnamed)") + " (uid " + (uid || "none") + ") and " +
+          "no Backup in this namespace answers to it; open the point from the catalog instead",
+      );
+    }
+    const offer = backupCatalogOffer(backup, [found.entry], found.page);
+    if (!offer.offer) {
+      return refused(offer.reason, { entry: found.entry });
+    }
+  } else {
+    const offer = catalogPointOffer(found.entry, found.page);
+    if (!offer.offer) {
+      return refused(offer.reason, { entry: found.entry });
+    }
+  }
+  const destinationName = catalogDestinationName(catalog);
+  let destination = null;
+  if (destinationName.length > 0) {
+    const read = await api.destination(ns, destinationName, readOptions(lifecycle));
+    if (!active(lifecycle)) {
+      return null;
+    }
+    destination = (read || {}).item || null;
+    if (destination === null) {
+      return refused("the catalog reads saved destination " + destinationName +
+        ", which is absent");
+    }
+    if (savedDestinationStore(destination, destinationName) === null) {
+      return refused("saved destination " + destinationName + " does not publish an S3 " +
+        "location this page can put into a plan");
+    }
+  } else if (catalogLegacyArchive(catalog) === null) {
+    return refused("the catalog names neither a saved destination nor an archive");
+  }
+  if (backup !== null) {
+    // A RUN IS RESTORED FROM THE DESTINATION IT WAS WRITTEN TO (D2 section
+    // 3.12), so an offer that came from a Backup must be read through the
+    // destination that run froze -- the same name, the same object, the same
+    // location digest.
+    const frozen = (((backup.spec || {}).destinationRef) || {}).name || "";
+    if (frozen !== destinationName) {
+      return refused(
+        "Backup " + String((backup.metadata || {}).name) + " was written through destination " +
+          (frozen || "(inline archive)") + " and this catalog reads " +
+          (destinationName || "an inline archive"),
+      );
+    }
+    if (destinationName.length > 0) {
+      const problem = frozenDestinationProblem(backup, destination);
+      if (problem !== null) {
+        return refused(problem);
+      }
+    }
+  }
+  return {
+    state: "selected",
+    point: catalogRecoveryPoint(catalog, found.entry, destination, backup),
+    destination: destination,
+  };
+}
+
+/** The wizard over one catalog point: resolve it, refuse by name, or build the
+ *  six steps over it. */
+async function mountCatalogPoint(node, ns, selection, parse, api, lifecycle, clusters, backups) {
+  const choice = await resolveCatalogChoice(api, ns, selection, backups,
+    catalogReadersOf(api, ns, lifecycle), lifecycle);
+  if (choice === null || !active(lifecycle)) {
+    return;
+  }
+  if (choice.state !== "selected") {
+    replace(node, parse(renderCatalogPointRefusal(ns, choice)));
+    return;
+  }
+  // The evidence selector's other destinations (PLAT-08.2) are not read on
+  // this path: `undefined` offers the point's own destination, as before.
+  const state = initialState(ns, clusters, backups, selection, choice.destination, undefined,
+    choice);
+  const key = formKey(ns, WIZARD_FORM);
+  const record = mutationFor(key);
+  if (record.state.phase === "succeeded") {
+    dropDraft(key);
+  }
+  const draft = readDraft(key);
+  if (draft !== null) {
+    if (applyWizardDraft(state, draft)) {
+      state.draftRestored = true;
+    } else {
+      dropDraft(key);
+    }
+  }
+  await renderAndWire(node, state, parse, api, lifecycle);
+}
+
+/** THE REFUSAL a catalog point that cannot be offered gets: the catalog and the
+ *  point asked for, the reason in the catalog's own words, and a way back. No
+ *  plan, no hash, no submit. */
+export function renderCatalogPointRefusal(ns, choice) {
+  const c = choice || {};
+  const n = typeof ns === "string" ? ns : "";
+  return (
+    "<h2>Restore wizard</h2>" +
+    "<div class=\"refusal-block\" id=\"catalog-point-refusal\" role=\"alert\">" +
+    "<p class=\"refusal\">This recovery point is not offered for a restore: " +
+    esc(c.reason) + ". Nothing was sent, and no other point was put in its place.</p>" +
+    "<p class=\"note\">Asked for: point <code>" + esc(c.pointId) + "</code> in catalog " +
+    "<code>" + esc(c.catalog) + "</code>.</p>" +
+    "<p class=\"note\"><a href=\"#/catalog?ns=" + esc(encodeURIComponent(n)) + "&name=" +
+    esc(encodeURIComponent(String(c.catalog || ""))) + "\">Open the catalog</a> &middot; " +
+    "<a href=\"" + esc(restoreSelectorRoute(n)) + "\">Choose a recovery point</a></p></div>"
+  );
+}
+
+/** EVERY CATALOG POINT THE SELECTOR MAY OFFER, across every catalog in the
+ *  namespace: `{offers: [{catalog, entry}], notes: [sentence]}`.
+ *
+ *  Only rows [`catalogPointOffer`] offers are listed; a catalog whose points
+ *  could not be read is a NOTE naming it, never an empty table that reads as
+ *  "the archive holds nothing". Legacy mode has no point route at all and says
+ *  so once. Never throws, except for a cancelled read. */
+export async function readCatalogOffers(ns, readers, lifecycle) {
+  const result = { offers: [], notes: [] };
+  let catalogs;
+  try {
+    catalogs = itemsOf(await readers.listCatalogs());
+  } catch (error) {
+    if (cancelled(error, lifecycle)) {
+      throw error;
+    }
+    result.notes.push("the connected archives could not be listed here (" +
+      String((error || {}).message || error) + ")");
+    return result;
+  }
+  for (const catalog of catalogs) {
+    const name = String((((catalog || {}).metadata) || {}).name || "");
+    if (name.length === 0) {
+      continue;
+    }
+    try {
+      let cursor = null;
+      let complete = false;
+      for (let read = 0; read < CATALOG_POINT_PAGE_BUDGET; read += 1) {
+        const query = { limit: CATALOG_POINT_PAGE, selectable: "true" };
+        if (cursor !== null) {
+          query.cursor = cursor;
+        }
+        const page = (await readers.readPoints(name, query)) || {};
+        for (const entry of (Array.isArray(page.items) ? page.items : [])) {
+          if (catalogPointOffer(entry, page).offer) {
+            result.offers.push({ catalog: name, entry: entry });
+          }
+        }
+        if (typeof page.backupVerdictsIncomplete === "string" &&
+          page.backupVerdictsIncomplete.length > 0) {
+          result.notes.push("catalog " + name + ": the product API could not read every " +
+            "Backup verdict (" + page.backupVerdictsIncomplete + "), so its points are not " +
+            "offered here");
+        }
+        cursor = ((page.page || {}).nextCursor) || null;
+        if (cursor === null) {
+          complete = true;
+          break;
+        }
+      }
+      if (!complete) {
+        result.notes.push("catalog " + name + " holds more points than this page reads; open " +
+          "it for the rest");
+      }
+    } catch (error) {
+      if (cancelled(error, lifecycle)) {
+        throw error;
+      }
+      result.notes.push("catalog " + name + "'s points could not be read (" +
+        String((error || {}).message || error) + ")");
+    }
+  }
+  return result;
+}
+
+/** The selector's catalog section: the points connected archives offer, each a
+ *  link that opens the wizard on it. */
+export function renderCatalogOffers(ns, offers) {
+  const o = offers || { offers: [], notes: [] };
+  const list = Array.isArray(o.offers) ? o.offers : [];
+  const notes = Array.isArray(o.notes) ? o.notes : [];
+  if (list.length === 0 && notes.length === 0) {
+    return "";
+  }
+  const rows = list.map((offer) => {
+    const e = offer.entry || {};
+    return [
+      cell(offer.catalog),
+      "<code>" + cell(e.pointId) + "</code>",
+      cell(e.backupId),
+      cell(e.recoveryPointAt),
+      cell(e.coveredFrom),
+      cell(e.coveredTo),
+      badge("green", String(e.availability || "")),
+      badge("green", String(e.verification || "")),
+      "<a href=\"" + esc(restoreCatalogPointRoute(ns, offer.catalog, e.pointId)) +
+        "\">Restore this point</a>",
+    ];
+  });
+  return (
+    "<section class=\"step\" id=\"step-catalog-points\" tabindex=\"-1\">" +
+    "<h3>Recovery points from connected archives</h3>" +
+    "<p class=\"blurb\">" + esc(CATALOG_OFFERS_SENTENCE) + "</p>" +
+    table(
+      ["CATALOG", "POINT", "BACKUP SET", "RECOVERY POINT", "COVERED FROM", "COVERED TO",
+        "AVAILABILITY", "VERIFICATION", ""],
+      rows,
+      "no connected archive lists a point this page may offer",
+    ) +
+    notes.map((note) => "<p class=\"note\" data-catalog-note=\"true\">" + esc(note) +
+      "</p>").join("") +
+    "</section>"
+  );
+}
+
+/** What the selector's catalog section is. */
+export const CATALOG_OFFERS_SENTENCE =
+  "Points read back from an archive this namespace has connected (a RecoveryCatalog), listed " +
+  "only where the catalog marks them restorable and the product API found no Backup verdict " +
+  "refusing them. No Backup object is needed: a plan built from one of these is bound to the " +
+  "point's own receipt, which the runner re-verifies before any data moves.";
 
 /** Renders the wizard over `state` -- with its mutation record and its field
  *  messages -- and wires what was rendered to the plan it shows. */
@@ -3334,8 +4247,23 @@ async function renderAndWire(node, state, parse, api, lifecycle) {
  *  records (endpoint, region and the `path_style` flag) plus the explicit
  *  insecure-transport flag are editable in step 1 rather than left out,
  *  because the runner reads them from these bytes and from nowhere else. */
-export function initialState(ns, clusters, backups, selection, savedDestination, destinations) {
-  const resolved = resolvePoint(backups, selection);
+export function initialState(ns, clusters, backups, selection, savedDestination, destinations,
+  catalogChoice) {
+  // PLAT-15.2: a catalog-verified point the mount half has already resolved
+  // and checked ([`resolveCatalogChoice`]). It REPLACES the Backup resolution
+  // -- there may be no Backup at all -- and nothing below searches for a
+  // different point when it is absent.
+  const chosenFromCatalog = ((catalogChoice || {}).point) || null;
+  const resolved = chosenFromCatalog !== null
+    ? {
+      state: "selected",
+      point: chosenFromCatalog,
+      uid: catalogPointUid(chosenFromCatalog),
+      name: chosenFromCatalog.catalogPoint.pointId,
+      phase: "Succeeded",
+      renamed: false,
+    }
+    : resolvePoint(backups, selection);
   // PLAT-11.2 / PLAT-12.2: a retry of a failed run, or "" for an ordinary
   // restore. It changes exactly one value -- the default topic prefix -- and
   // through that value it changes the plan bytes, the plan hash and both
@@ -3373,7 +4301,19 @@ export function initialState(ns, clusters, backups, selection, savedDestination,
     retryOf: retryOf,
     clusters: clusters,
     backups: backups,
-    selection: { uid: resolved.uid, backup: resolved.name },
+    // THE ROUTE'S IDENTITY, KEPT FOR EVERY RE-MOUNT: for a catalog point the
+    // catalog and the point id, and the run it was offered from when there
+    // was one.
+    selection: chosenFromCatalog !== null
+      ? {
+        catalog: chosenFromCatalog.catalogPoint.catalog,
+        point: chosenFromCatalog.catalogPoint.pointId,
+        uid: ((chosenFromCatalog.catalogPoint.backup || {}).uid) || "",
+        backup: ((chosenFromCatalog.catalogPoint.backup || {}).name) || "",
+        retryOf: retryOf,
+      }
+      : { uid: resolved.uid, backup: resolved.name },
+    catalogTopicsText: "",
     point: point,
     pointState: resolved.state,
     pointUid: resolved.uid,
@@ -3409,6 +4349,10 @@ export function initialState(ns, clusters, backups, selection, savedDestination,
     fields: {
       backupSetRef: status.backupId,
       topics: Array.isArray(spec.topics) ? spec.topics : [],
+      // THE RECOVERY POINT BINDING (PLAT-15.2): present for a catalog point,
+      // ABSENT for a Backup -- whose plan is therefore the document it always
+      // was, byte for byte.
+      point: pointBindingOf(point),
       pointInTime: pointInTime,
       source: Object.assign(
         !savedPoint
@@ -3965,7 +4909,21 @@ export function restoreReadinessRequest(state, prepared) {
       target: ((cluster || {}).metadata || {}).name,
     },
   };
-  if (typeof meta.name === "string" && meta.name.length > 0) {
+  if (isCatalogPoint(point)) {
+    // A CATALOG POINT IS NAMED BY ITS CATALOG AND ITS ID, and the Backup it was
+    // offered from -- when there was one -- by that Backup's own identity. The
+    // controller re-reads the catalog row when the check runs, so a point that
+    // became Missing or refused since this page read it is not ready.
+    const c = point.catalogPoint;
+    request.restore.catalogPoint = { catalog: c.catalog, pointId: c.pointId };
+    if (c.backup !== null && c.backup !== undefined && typeof c.backup.name === "string" &&
+      c.backup.name.length > 0) {
+      request.restore.recoveryPoint = { backupName: c.backup.name };
+      if (typeof c.backup.uid === "string" && c.backup.uid.length > 0) {
+        request.restore.recoveryPoint.backupUid = c.backup.uid;
+      }
+    }
+  } else if (typeof meta.name === "string" && meta.name.length > 0) {
     request.restore.recoveryPoint = { backupName: meta.name };
     if (typeof meta.uid === "string" && meta.uid.length > 0) {
       request.restore.recoveryPoint.backupUid = meta.uid;
@@ -4007,9 +4965,22 @@ function wire(node, state, parse, api, lifecycle, prepared) {
   const evidencePathStyle = node.querySelector("#evidence-pathStyle");
   const evidenceInsecure = node.querySelector("#evidence-allow-insecure");
   const evidenceDestination = node.querySelector("#evidence-destination");
+  const catalogTopics = node.querySelector("#catalog-topics");
   const refresh = async () => {
     if (!active(lifecycle)) {
       return;
+    }
+    // THE CATALOG POINT'S TOPIC LIST (PLAT-15.2), read FIRST: it is the list
+    // the subset boxes below are drawn from, so a new list replaces the subset
+    // with every topic it names, and the boxes are read only when the list did
+    // not change in this edit.
+    let topicsRetyped = false;
+    if (catalogTopics !== null && isCatalogPoint(state.point)) {
+      const typed = parseTopicList(valueOf(catalogTopics));
+      if (typed.join("\n") !== frozenTopicsOf(state).join("\n")) {
+        setCatalogTopics(state, typed);
+        topicsRetyped = true;
+      }
     }
     if (point !== null) {
       state.fields.pointInTime = valueOf(point);
@@ -4117,7 +5088,7 @@ function wire(node, state, parse, api, lifecycle, prepared) {
     // canonicalised through `selectedTopics` so the plan bytes, and therefore
     // the hash an approver signs, do not move with the order of the clicks.
     const boxes = node.querySelectorAll(".topic-box");
-    if (boxes.length > 0) {
+    if (boxes.length > 0 && !topicsRetyped) {
       const ticked = [];
       for (const box of boxes) {
         if (box.checked === true) {
@@ -4168,6 +5139,7 @@ function wire(node, state, parse, api, lifecycle, prepared) {
     evidencePathStyle,
     evidenceInsecure,
     evidenceDestination,
+    catalogTopics,
   ]) {
     if (field !== null) {
       listen(field, "change", refresh, lifecycle);

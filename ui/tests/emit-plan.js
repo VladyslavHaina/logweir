@@ -28,8 +28,18 @@ import { fileURLToPath } from "node:url";
 
 import { renderPlanBytes } from "../plan.js";
 
+// ONE OPTIONAL ARGUMENT: the fields fixture's file name under `fixtures/`.
+// Absent, it is `plan-fields.json` -- the Backup-bound plan, with no recovery
+// point binding. `plan-point-fields.json` is PLAT-15.2's catalog-bound plan,
+// whose golden `plan-point.golden.yaml` carries `source.point`; the gate diffs
+// both, and `ui_lint.rs` deserialises both. Only a bare file name is accepted,
+// so this tool cannot be pointed outside the fixture directory.
+const name = process.argv[2] === undefined ? "plan-fields.json" : process.argv[2];
+if (!/^[a-z0-9-]+\.json$/.test(name)) {
+  throw new Error("emit-plan.js takes a fixture file name such as plan-fields.json");
+}
 const fields = JSON.parse(
-  readFileSync(fileURLToPath(new URL("./fixtures/plan-fields.json", import.meta.url)), "utf8"),
+  readFileSync(fileURLToPath(new URL("./fixtures/" + name, import.meta.url)), "utf8"),
 );
 
 process.stdout.write(renderPlanBytes(fields));

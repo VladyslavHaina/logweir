@@ -179,5 +179,35 @@ logweir_core::spec::RestoreSpec from Rust." >&2
 fi
 echo "== plan golden: $golden is byte-identical to node ui/tests/emit-plan.js =="
 
+# THE POINT GOLDEN (PLAT-15.2): the same three arms for the catalog-bound plan,
+# whose `source.point` block is what the runner re-verifies before any data
+# moves. `ui_lint.rs` asserts the binding ARRIVES in `RestoreSpec`, field by
+# field -- the type has no deny_unknown_fields, so a misspelt key would parse.
+point_golden="ui/tests/fixtures/plan-point.golden.yaml"
+[ -f "$point_golden" ] || {
+  echo "check-ui-behaviour: $point_golden is missing. Regenerate with: node ui/tests/emit-plan.js \
+plan-point-fields.json > $point_golden" >&2; exit 1; }
+tmp="$(mktemp "${TMPDIR:-/tmp}/logweir-plan-point-golden.XXXXXX")"
+set +e
+node ui/tests/emit-plan.js plan-point-fields.json > "$tmp"
+emit_rc=$?
+set -e
+if [ "$emit_rc" -ne 0 ]; then
+  rm -f "$tmp"
+  echo "check-ui-behaviour: node ui/tests/emit-plan.js plan-point-fields.json exited $emit_rc." >&2
+  exit "$emit_rc"
+fi
+set +e
+diff -u "$point_golden" "$tmp"
+diff_rc=$?
+set -e
+rm -f "$tmp"
+if [ "$diff_rc" -ne 0 ]; then
+  echo "check-ui-behaviour: the committed point golden and the emitter disagree (diff exited \
+$diff_rc). Regenerate with: node ui/tests/emit-plan.js plan-point-fields.json > $point_golden" >&2
+  exit "$diff_rc"
+fi
+echo "== plan golden: $point_golden is byte-identical to node ui/tests/emit-plan.js plan-point-fields.json =="
+
 echo "== ui behaviour gate: $count test(s) under ui/tests/, node $v, LOGWEIR_BIN=$LOGWEIR_BIN =="
 exit 0
