@@ -532,6 +532,8 @@ async function main() {
 
   try {
     // ---------------------------------------------------------------- 0
+    // The page must be ON the service's origin before it can fetch from it.
+    await page.goto(ui, { waitUntil: "load", timeout: 30000 });
     const policies = {};
     for (const [key, ns] of Object.entries(NS)) {
       const read = await page.evaluate(async (u) => {

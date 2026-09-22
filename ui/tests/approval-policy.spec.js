@@ -238,6 +238,29 @@ test("a_governed_or_legacy_submission_routes_to_awaiting_approval", async () => 
   }
 });
 
+test("awaiting_approval_opens_the_approvals_page_of_the_restore_that_was_created", async () => {
+  // FOUND LIVE (PLAT-19.2). In console mode the product API mints the
+  // Restore's name (`rst-...`); the page's minted `restoreName` is never an
+  // object. The approvals route must name the CREATED Restore and its own
+  // `spec.approvalRef`, or the approver lands on "no restore named ...".
+  const governed = Object.assign({}, ORDINARY, {
+    mode: "governed", policy: "prod-governed", state: "awaitingApproval",
+  });
+  const restore = {
+    metadata: { name: "rst-01server", uid: "uid-s" },
+    spec: { approvalRef: { name: "approval-x" } },
+    __contract: { mode: "console", authorization: governed },
+  };
+  const api = readsOnly({});
+  const route = await restoreDestination(api, STATE, PREPARED, restore);
+  assert.ok(route.startsWith("#/approvals?subject=rst-01server&"), route);
+  assert.ok(route.includes("&name=approval-x"), route);
+  assert.ok(!route.includes("restore-x"), "the page's own name is not a subject: " + route);
+  // The control: with no created object to read, the prepared names stand.
+  const legacy = await restoreDestination(readsOnly({}), STATE, PREPARED, null);
+  assert.ok(legacy.startsWith("#/approvals?subject=restore-x&"), legacy);
+});
+
 test("an_unknown_state_is_never_read_as_confirmed", async () => {
   const api = readsOnly({});
   const strange = Object.assign({}, ORDINARY, { state: "approvedByMagic" });

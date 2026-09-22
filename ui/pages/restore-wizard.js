@@ -3656,9 +3656,18 @@ export function restoreBody(state, prepared) {
  *  from HERE and never from the approval documents: the approvals page is
  *  forbidden from parsing those, so the hash cannot be lifted out of them
  *  either. */
-export function approvalRoute(state, prepared) {
+export function approvalRoute(state, prepared, restore) {
   const s = state || {};
   const p = prepared || {};
+  // THE SUBJECT IS THE OBJECT THAT WAS CREATED (PLAT-19.2, found live). In
+  // console mode the product API mints the Restore's name (`rst-...`) and
+  // the page's `restoreName` is never an object; routing to it opened an
+  // approvals page about a Restore that does not exist. The created object's
+  // own name and `spec.approvalRef` win whenever there is one.
+  const meta = (restore || {}).metadata || {};
+  const ref = (((restore || {}).spec || {}).approvalRef || {}).name;
+  const subject = typeof meta.name === "string" && meta.name.length > 0 ? meta.name : p.restoreName;
+  const approvalName = typeof ref === "string" && ref.length > 0 ? ref : p.approvalName;
   // There is no implicit namespace on a router that deliberately refuses to
   // guess one. In particular, `default` is a real selected namespace and
   // must cross this hand-off explicitly rather than being elided as a legacy
@@ -3666,11 +3675,11 @@ export function approvalRoute(state, prepared) {
   const ns = typeof s.ns === "string" ? s.ns.trim() : "";
   return (
     "#/approvals?subject=" +
-    encodeURIComponent(p.restoreName) +
+    encodeURIComponent(subject) +
     "&hash=" +
     encodeURIComponent(p.hash) +
     "&name=" +
-    encodeURIComponent(p.approvalName) +
+    encodeURIComponent(approvalName) +
     (ns.length > 0 ? "&ns=" + encodeURIComponent(ns) : "")
   );
 }
@@ -3778,7 +3787,7 @@ export async function restoreDestination(api, state, prepared, restore) {
   if (approval !== null && approvalAuthorizes(approval, restore, p.hash)) {
     return restoreOperationRoute(s.ns, typeof meta.name === "string" ? meta.name : p.restoreName);
   }
-  return approvalRoute(s, p);
+  return approvalRoute(s, p, restore);
 }
 
 /** Reads the namespace's saved connections again and puts them on the state,
