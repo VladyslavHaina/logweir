@@ -413,7 +413,8 @@ pub struct RehearsalFailure {
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SkippedSlot {
-    /// The slot, `yyyymmdd-hhmmss` in UTC.
+    /// The DUE slot that was refused, `yyyymmdd-hhmmss` in UTC — never the
+    /// instant the controller looked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slot: Option<String>,
     /// `NoQualifyingPoint`, `TargetUnavailable`, `AuthorizationInvalid`,
@@ -446,7 +447,9 @@ pub struct RehearsalScheduleStatus {
     /// The `metadata.generation` this status was computed from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_generation: Option<i64>,
-    /// The last slot admitted.
+    /// The last slot this schedule decided: fired, or skipped with
+    /// `lastSkipped.slot` naming the same slot. A slot recorded here is never
+    /// fired again, so a skipped slot is not run late.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_scheduled_slot: Option<String>,
     /// When the next one is due.

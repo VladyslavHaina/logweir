@@ -834,12 +834,16 @@ pub async fn reconcile_schedule(
         } else {
             verdict
         };
+        let slot = match verdict {
+            Verdict::Skipped(_) => due_unconsumed_slot(schedule, now),
+            _ => None,
+        };
         commit(
             &api,
             schedule,
             &StatusUpdate {
                 verdict: verdict.clone(),
-                slot: None,
+                slot,
                 next_fire: next_fire(schedule, now),
                 observation: Observation::default(),
                 template_digest,
@@ -876,7 +880,7 @@ pub async fn reconcile_schedule(
                 schedule,
                 &StatusUpdate {
                     verdict: Verdict::Skipped(skip.clone()),
-                    slot: None,
+                    slot: due_unconsumed_slot(schedule, now),
                     next_fire: next_fire(schedule, now),
                     observation,
                     template_digest,
@@ -901,7 +905,7 @@ pub async fn reconcile_schedule(
                 schedule,
                 &StatusUpdate {
                     verdict: Verdict::Skipped(skip.clone()),
-                    slot: None,
+                    slot: due_unconsumed_slot(schedule, now),
                     next_fire: next_fire(schedule, now),
                     observation,
                     template_digest,
@@ -958,7 +962,12 @@ pub async fn reconcile_schedule(
                 Fired::Refused(skip) => Verdict::Skipped(skip),
             }
         }
-        other => other,
+        // A SKIP NAMES AND CONSUMES THE SLOT IT REFUSED — see `status_patch`.
+        Verdict::Skipped(skip) => {
+            slot = due_unconsumed_slot(schedule, now);
+            Verdict::Skipped(skip)
+        }
+        Verdict::Idle => Verdict::Idle,
     };
 
     commit(
@@ -1685,7 +1694,10 @@ pub fn observe(restore: Option<&Restore>) -> Observation {
 pub struct StatusUpdate {
     /// The verdict.
     pub verdict: Verdict,
-    /// The slot, when one was due.
+    /// The due slot this pass decided — fired, or refused and therefore
+    /// consumed ([`due_unconsumed_slot`]). `None` when no undecided slot is
+    /// due, in which case a skip verdict writes neither `lastSkipped` nor
+    /// `lastScheduledSlot`.
     pub slot: Option<String>,
     /// The next fire time.
     pub next_fire: Option<DateTime<Utc>>,
@@ -1778,14 +1790,31 @@ pub fn status_patch(
     }
 
     // ---- the skip ---------------------------------------------------------
-    if let Verdict::Skipped(skip) = &update.verdict {
+    //
+    // A SKIPPED SLOT IS SKIPPED (REHEARSAL-SKIP-DEFERS-SLOT). `lastSkipped.slot`
+    // names the DUE slot that was refused — never the instant this pass ran —
+    // and `lastScheduledSlot` advances to it in the same compare-and-set
+    // write, so `decide` reads that slot as already decided and does not fire
+    // it late when the blocker clears inside `startingDeadlineSeconds`. A
+    // rehearsal's value is that it measures recovery AT a cadence; one that ran
+    // forty minutes late because its predecessor overran would record an RTO
+    // for a slot that never happened. Every reason consumes its slot (D3 §4.1,
+    // §4.3, §4.4, §13; `docs/kubernetes.md`).
+    //
+    // A skip with NO due, undecided slot (a pass inside a slot this schedule
+    // already decided, or a cron this build cannot read) writes neither: the
+    // `Ready` message still carries the refusal, and `lastSkipped` stays the
+    // record of the last slot that was actually refused rather than being
+    // rewritten every requeue.
+    if let (Verdict::Skipped(skip), Some(slot)) = (&update.verdict, update.slot.as_deref()) {
         status.insert(
             "lastSkipped".to_string(),
             json!({
-                "slot": update.slot.clone().unwrap_or_else(|| crate::slot::slot_name(now)),
+                "slot": slot,
                 "reason": skip.reason.as_str(),
             }),
         );
+        status.insert("lastScheduledSlot".to_string(), json!(slot));
     }
 
     // ---- conditions -------------------------------------------------------
@@ -2027,6 +2056,25 @@ async fn commit(
         }
         Err(e) => Err(ReconcileError::Api(e)),
     }
+}
+
+/// The slot a pass at `now` is deciding, or `None` when there is none to
+/// decide: the cron does not parse, nothing is due yet, or the latest due slot
+/// is already `status.lastScheduledSlot` (fired, or skipped and consumed).
+///
+/// The same arithmetic as [`decide`]'s cadence step, so a skip can name the
+/// slot it refused rather than the instant it looked.
+#[must_use]
+pub fn due_unconsumed_slot(schedule: &RehearsalSchedule, now: DateTime<Utc>) -> Option<String> {
+    let due = crate::cadence::Cadence::parse(&schedule.spec.schedule, None)
+        .ok()?
+        .latest_due_slot(now)?;
+    let slot = crate::slot::slot_name(due);
+    let decided = schedule
+        .status
+        .as_ref()
+        .and_then(|s| s.last_scheduled_slot.as_deref());
+    (decided != Some(slot.as_str())).then_some(slot)
 }
 
 /// The next instant this schedule fires, or `None` when it is suspended or its

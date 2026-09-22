@@ -387,7 +387,7 @@ spec:
                     type: object
                 type: object
               lastScheduledSlot:
-                description: The last slot admitted.
+                description: 'The last slot this schedule decided: fired, or skipped with `lastSkipped.slot` naming the same slot. A slot recorded here is never fired again, so a skipped slot is not run late.'
                 nullable: true
                 type: string
               lastSkipped:
@@ -399,7 +399,7 @@ spec:
                     nullable: true
                     type: string
                   slot:
-                    description: The slot, `yyyymmdd-hhmmss` in UTC.
+                    description: The DUE slot that was refused, `yyyymmdd-hhmmss` in UTC — never the instant the controller looked.
                     nullable: true
                     type: string
                 type: object

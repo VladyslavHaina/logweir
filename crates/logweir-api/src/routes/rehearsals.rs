@@ -136,7 +136,8 @@ pub struct RehearsalFailureView {
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SkippedSlotView {
-    /// The slot.
+    /// The DUE slot that was refused — never the instant the controller
+    /// looked. A skipped slot is consumed and is not fired late.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub slot: Option<String>,
     /// The reason, from the closed list.
@@ -204,7 +205,8 @@ pub struct RehearsalScheduleView {
     /// The generation the status was computed from.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub observed_generation: Option<i64>,
-    /// The last slot the controller scheduled.
+    /// The last slot the controller decided: fired, or skipped with
+    /// `lastSkipped.slot` naming the same slot.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_scheduled_slot: Option<String>,
     /// When it fires next.

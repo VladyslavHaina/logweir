@@ -2212,3 +2212,309 @@ fn the_point_id_derivation_is_the_catalogs_own() {
     assert!(rs::point_id_from_receipt_digest("not-a-digest").is_none());
     assert!(rs::point_id_from_receipt_digest("sha256:short").is_none());
 }
+
+// ===========================================================================
+// REHEARSAL-SKIP-DEFERS-SLOT — a skipped slot is skipped
+// ===========================================================================
+
+/// The `0 3 * * 0` slot `now()` is inside.
+const DUE_SLOT: &str = "20260920-030000";
+/// The previous week's rehearsal, the blocker in the rows below.
+const PREVIOUS_CHILD: &str = "logweir-rehearsal-weekly-orders-20260913-030000";
+
+fn previous_child_value(phase: &str) -> Value {
+    json!({
+        "apiVersion": "logweir.dev/v1alpha1",
+        "kind": "Restore",
+        "metadata": {"name": PREVIOUS_CHILD, "namespace": NS, "uid": "r1", "resourceVersion": "3"},
+        "spec": {
+            "planBytes": "{}",
+            "sourceArchive": {"url": "s3://x"},
+            "backupSetRef": "b",
+            "pointInTime": "2026-09-13T02:00:00Z",
+            "target": {"clusterRef": {"name": TARGET}, "mode": "scratch", "topicNaming": {"prefix": "rehearsal-"}},
+            "deadlineSeconds": 3600
+        },
+        "status": if phase == "Running" {
+            json!({"phase": "Running"})
+        } else {
+            json!({"phase": phase, "exitCode": 0, "outcome": "pass"})
+        }
+    })
+}
+
+fn routes_with_previous_child(phase: &str) -> Vec<Route> {
+    let mut table = happy_routes();
+    table.push(Route {
+        method: "GET",
+        path_suffix: "/restores/logweir-rehearsal-weekly-orders-20260913-030000",
+        status: 200,
+        body: previous_child_value(phase).to_string(),
+    });
+    table
+}
+
+/// The schedule as the API server would hold it after `patch` was applied.
+fn after(schedule_status: Value, patch: &Value) -> RehearsalSchedule {
+    let mut status = schedule_status;
+    weirkeeper::conditions::apply_merge_patch(&mut status, &patch["status"]);
+    let mut value = schedule_value(status);
+    value["metadata"]["resourceVersion"] = json!("102");
+    serde_json::from_value(value).expect("the patched schedule parses")
+}
+
+/// **The defect row.** Slot `20260920-030000` is due while last week's
+/// rehearsal is still running: it is skipped `ConcurrencyBlocked`, and the
+/// skip names THAT slot — not the 03:30 instant the controller looked — and
+/// consumes it. Fifteen minutes later the blocker has finished, well inside
+/// the one-hour `startingDeadlineSeconds`: the next pass records the finished
+/// run and creates NO `Restore`, because the slot was skipped, not deferred.
+///
+/// MUTANT: drop the `lastScheduledSlot` insert from the skip block of
+/// `rehearsal_schedule::status_patch`. Pass 2 fires the skipped slot late and
+/// this row fails; `lastSkipped.slot = slot_name(now)` fails the first half.
+#[tokio::test]
+async fn a_blocker_that_finishes_inside_the_horizon_gets_no_late_restore() {
+    let start = json!({"activeRestoreRef": {"name": PREVIOUS_CHILD}});
+
+    // ---- pass 1: 03:30, the blocker is still running ----------------------
+    let (client, recorder, bodies) =
+        mock_client_recording_bodies(routes_with_previous_child("Running"));
+    let outcome = rs::reconcile_schedule(&schedule_with(start.clone()), &context(client), now())
+        .await
+        .expect("the reconcile answers");
+    assert!(
+        matches!(&outcome.verdict, rs::Verdict::Skipped(s) if s.reason == rehearsal::SkipReason::ConcurrencyBlocked),
+        "{:?}",
+        outcome.verdict
+    );
+    assert_eq!(posted(&recorder, RESTORES_PATH), 0);
+    let patch = patch_bodies(&bodies).pop().expect("the skip is written");
+    assert_eq!(
+        patch["status"]["lastSkipped"],
+        json!({"slot": DUE_SLOT, "reason": "ConcurrencyBlocked"}),
+        "the skip names the DUE slot it refused, not the instant it looked"
+    );
+    assert_eq!(
+        patch["status"]["lastScheduledSlot"], DUE_SLOT,
+        "and consumes it"
+    );
+    assert_eq!(
+        patch["metadata"]["resourceVersion"], "101",
+        "under the compare-and-set precondition (seam S7)"
+    );
+
+    // ---- pass 2: 03:45, the blocker finished inside the horizon -----------
+    let skipped = after(start.clone(), &patch);
+    let (client, recorder, bodies) =
+        mock_client_recording_bodies(routes_with_previous_child("Succeeded"));
+    let later = at("2026-09-20T03:45:00Z");
+    let outcome = rs::reconcile_schedule(&skipped, &context(client), later)
+        .await
+        .expect("the reconcile answers");
+    assert!(
+        matches!(outcome.verdict, rs::Verdict::Idle),
+        "a skipped slot is not fired late: {:?}",
+        outcome.verdict
+    );
+    assert_eq!(posted(&recorder, RESTORES_PATH), 0, "no late Restore");
+    assert_eq!(posted(&recorder, CONFIGMAPS_PATH), 0);
+    let patch = patch_bodies(&bodies)
+        .pop()
+        .expect("the finished run is written");
+    assert!(
+        patch["status"]["lastSucceeded"].is_object(),
+        "the finished blocker is still recorded"
+    );
+    assert!(
+        patch["status"].get("lastSkipped").is_none(),
+        "an idle pass does not rewrite the skip record"
+    );
+
+    // CONTROL: the same second pass over the PRE-FIX status (the slot not
+    // consumed) does fire — so the table above could have produced a Restore,
+    // and "no Restore" is a measurement.
+    let (client, recorder, _) =
+        mock_client_recording_bodies(routes_with_previous_child("Succeeded"));
+    let outcome = rs::reconcile_schedule(&schedule_with(start), &context(client), later)
+        .await
+        .expect("the reconcile answers");
+    assert!(
+        matches!(outcome.verdict, rs::Verdict::Fire(_)),
+        "{:?}",
+        outcome.verdict
+    );
+    assert_eq!(posted(&recorder, RESTORES_PATH), 1);
+}
+
+/// Every skip reason consumes the slot it refused, and names it. D3 §4.1 lists
+/// the eight; none of them means "try this slot again later".
+#[test]
+fn every_skip_reason_names_and_consumes_the_due_slot() {
+    use rehearsal::SkipReason as R;
+    let schedule = schedule();
+    for reason in [
+        R::NoQualifyingPoint,
+        R::TargetUnavailable,
+        R::AuthorizationInvalid,
+        R::AuthorizationExpired,
+        R::ConcurrencyBlocked,
+        R::TargetBusy,
+        R::LeftoverTopics,
+        R::PointRetentionInProgress,
+    ] {
+        let update = rs::StatusUpdate {
+            verdict: rs::Verdict::Skipped(rehearsal::Skip::new(reason, "why")),
+            slot: rs::due_unconsumed_slot(&schedule, now()),
+            next_fire: None,
+            observation: rs::Observation::default(),
+            template_digest: template_digest(),
+            created: None,
+        };
+        let patch = rs::status_patch(&schedule, &update, now());
+        assert_eq!(
+            patch["status"]["lastSkipped"],
+            json!({"slot": DUE_SLOT, "reason": reason.as_str()})
+        );
+        assert_eq!(
+            patch["status"]["lastScheduledSlot"],
+            DUE_SLOT,
+            "{} consumes its slot",
+            reason.as_str()
+        );
+    }
+
+    // No due, undecided slot: neither record is (re)written, so `lastSkipped`
+    // stays the last slot actually refused rather than moving every requeue.
+    let decided = schedule_with(json!({
+        "lastScheduledSlot": DUE_SLOT,
+        "lastSkipped": {"slot": DUE_SLOT, "reason": "TargetBusy"}
+    }));
+    assert_eq!(rs::due_unconsumed_slot(&decided, now()), None);
+    let update = rs::StatusUpdate {
+        verdict: rs::Verdict::Skipped(rehearsal::Skip::new(R::LeftoverTopics, "why")),
+        slot: rs::due_unconsumed_slot(&decided, now()),
+        next_fire: None,
+        observation: rs::Observation::default(),
+        template_digest: template_digest(),
+        created: None,
+    };
+    let patch = rs::status_patch(&decided, &update, now());
+    assert!(patch["status"].get("lastSkipped").is_none());
+    assert!(patch["status"].get("lastScheduledSlot").is_none());
+}
+
+/// The stale-slot skip names the slot that went stale (03:00), not the 13:00
+/// pass that noticed, and the next pass inside the same slot is idle.
+#[tokio::test]
+async fn a_stale_slot_skip_names_the_stale_slot_and_is_written_once() {
+    let (client, _, bodies) = mock_client_recording_bodies(happy_routes());
+    let late = at("2026-09-20T13:00:00Z");
+    rs::reconcile_schedule(&schedule(), &context(client), late)
+        .await
+        .expect("the reconcile answers");
+    let patch = patch_bodies(&bodies).pop().expect("the miss is written");
+    assert_eq!(patch["status"]["lastSkipped"]["slot"], DUE_SLOT);
+    assert_eq!(patch["status"]["lastScheduledSlot"], DUE_SLOT);
+
+    let (client, recorder, bodies) = mock_client_recording_bodies(happy_routes());
+    let outcome = rs::reconcile_schedule(
+        &after(json!({}), &patch),
+        &context(client),
+        at("2026-09-20T13:00:30Z"),
+    )
+    .await
+    .expect("the reconcile answers");
+    assert!(matches!(outcome.verdict, rs::Verdict::Idle));
+    assert_eq!(posted(&recorder, RESTORES_PATH), 0);
+    assert!(patch_bodies(&bodies)
+        .iter()
+        .all(|p| p["status"].get("lastSkipped").is_none()));
+}
+
+/// The pre-read `LeftoverTopics` path names the due slot too, and a pass
+/// inside a slot already decided does not rewrite the record.
+#[tokio::test]
+async fn a_leftover_topics_skip_names_the_due_slot_once() {
+    let patch_only = || {
+        vec![Route {
+            method: "PATCH",
+            path_suffix: SCHEDULE_STATUS_PATH,
+            status: 200,
+            body: schedule_value(json!({})).to_string(),
+        }]
+    };
+    let pending = json!({
+        "cleanup": {"pendingTopics": ["rehearsal-3f2a91c7-orders"], "since": "2026-09-13T04:00:00Z"}
+    });
+    let (client, _, bodies) = mock_client_recording_bodies(patch_only());
+    rs::reconcile_schedule(&schedule_with(pending.clone()), &context(client), now())
+        .await
+        .expect("the reconcile answers");
+    let patch = patch_bodies(&bodies).pop().expect("the skip is written");
+    assert_eq!(
+        patch["status"]["lastSkipped"],
+        json!({"slot": DUE_SLOT, "reason": "LeftoverTopics"})
+    );
+    assert_eq!(patch["status"]["lastScheduledSlot"], DUE_SLOT);
+
+    let (client, _, bodies) = mock_client_recording_bodies(patch_only());
+    let outcome = rs::reconcile_schedule(
+        &after(pending, &patch),
+        &context(client),
+        at("2026-09-20T03:31:00Z"),
+    )
+    .await
+    .expect("the reconcile answers");
+    assert!(
+        matches!(&outcome.verdict, rs::Verdict::Skipped(s) if s.reason == rehearsal::SkipReason::LeftoverTopics),
+        "the refusal is still the verdict and still in Ready"
+    );
+    let patch = patch_bodies(&bodies).pop().expect("a status write");
+    assert!(patch["status"].get("lastSkipped").is_none());
+    assert!(patch["status"].get("lastScheduledSlot").is_none());
+}
+
+/// The two trust-resolution refusals are skips of the due slot as well — they
+/// are decided before `decide` runs, so they name and consume it themselves.
+#[tokio::test]
+async fn an_unconfigured_trust_skip_names_and_consumes_the_due_slot() {
+    let empty = json!({
+        "apiVersion": "v1",
+        "kind": "TrustPolicyList",
+        "metadata": {"resourceVersion": "1"},
+        "items": []
+    });
+    let mut table = happy_routes();
+    table.retain(|r| r.path_suffix != "/trustpolicies");
+    table.push(Route {
+        method: "GET",
+        path_suffix: "/trustpolicies",
+        status: 200,
+        body: empty.to_string(),
+    });
+    // No TrustPolicy, and no legacy roster either: nothing in this namespace
+    // can verify an approver.
+    table.push(Route {
+        method: "GET",
+        path_suffix: "/trustrosters/default",
+        status: 404,
+        body: json!({"kind": "Status", "apiVersion": "v1", "status": "Failure", "reason": "NotFound", "code": 404}).to_string(),
+    });
+    let (client, recorder, bodies) = mock_client_recording_bodies(table);
+    let outcome = rs::reconcile_schedule(&schedule(), &context(client), now())
+        .await
+        .expect("the reconcile answers");
+    assert!(
+        matches!(&outcome.verdict, rs::Verdict::Skipped(s) if s.reason == rehearsal::SkipReason::AuthorizationInvalid),
+        "{:?}",
+        outcome.verdict
+    );
+    assert_eq!(posted(&recorder, RESTORES_PATH), 0);
+    let patch = patch_bodies(&bodies).pop().expect("the skip is written");
+    assert_eq!(
+        patch["status"]["lastSkipped"],
+        json!({"slot": DUE_SLOT, "reason": "AuthorizationInvalid"})
+    );
+    assert_eq!(patch["status"]["lastScheduledSlot"], DUE_SLOT);
+}

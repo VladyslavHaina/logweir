@@ -10803,7 +10803,7 @@
             "nullable": true
           },
           "lastScheduledSlot": {
-            "description": "The last slot the controller scheduled.",
+            "description": "The last slot the controller decided: fired, or skipped with `lastSkipped.slot` naming the same slot.",
             "type": "string",
             "nullable": true
           },
@@ -12366,7 +12366,7 @@
             "nullable": true
           },
           "slot": {
-            "description": "The slot.",
+            "description": "The DUE slot that was refused — never the instant the controller looked. A skipped slot is consumed and is not fired late.",
             "type": "string",
             "nullable": true
           }

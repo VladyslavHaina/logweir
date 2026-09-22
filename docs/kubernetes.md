@@ -2082,6 +2082,24 @@ skip with no `Restore`:
 | a point qualifies: covered by `spec.point.topics`, old enough, with a non-empty window, inside `maxPartitions`, not captured from the target cluster, not inside a retention lease | `NoQualifyingPoint`, `TargetUnavailable` or `PointRetentionInProgress` |
 | the RENDERED plan falls inside the signed scope | `AuthorizationInvalid` |
 
+**A skipped slot is skipped, never deferred.** Whatever the reason — every row
+above, and a namespace whose trust cannot verify any approver
+(`AuthorizationInvalid`) — the skip names the DUE slot it refused in
+`status.lastSkipped.slot` (not the instant the controller looked) and advances
+`status.lastScheduledSlot` to that slot in the same resourceVersion-checked
+status write. The slot is therefore decided: when the blocker clears inside
+`startingDeadlineSeconds` — last week's rehearsal finishes, the target becomes
+reachable, a Backup lands, the approval is re-verified — **that slot is not run
+late**; the next rehearsal is the next slot. A rehearsal measures recovery AT a
+cadence, and one fired forty minutes late because its predecessor overran would
+record an RTO for a slot that never happened. D3 names each of these reasons as
+a skip of the slot; for `TargetBusy` and `PointRetentionInProgress`, where it
+names the skip but not the late-fire question, the same conservative rule
+applies. A pass inside a slot already decided writes neither field — the `Ready`
+message still carries the current refusal — so `lastSkipped` stays the record
+of the last slot actually refused. Upgrading from a build that deferred: a slot
+that build left undecided is decided by the first pass of this one.
+
 A succeeded destination-backed `Backup` contributes its immutable named topic
 list even when evidence reading was `NotAttempted`, but it is only a joinable,
 non-selectable candidate until a catalog row supplies the receipt-derived
