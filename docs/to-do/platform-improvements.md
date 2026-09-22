@@ -214,11 +214,12 @@ Wave 2 resumes every branch in place with the prompts under
 | PLAT-04.1 defect (P0) | Fixed (`bdd26dc`, live-proved) | w0-reservation → plat06-live | `backup_schedule.rs:1359` reserves a Forbid slot with `replace_status`, which RBAC authorizes as `update` on `backupschedules/status`; the shipped role grants only `patch` (`config/rbac/role.yaml:118`, `charts/logweir/templates/clusterrole.yaml:29`). Confirmed on docker-desktop: the lab ServiceAccount has `update` no, `patch` yes, so with the default `Forbid` policy no scheduled Backup is created on a shipped install. PLAT-04.1's live run used custom namespace Roles and never exercised this. Fix: resourceVersion-conditional merge PATCH, an audit of every other call against the shipped role, a reverse "every call has a grant" lint with mutant evidence, and live proof under shipped RBAC. |
 | PLAT-06.1 | Done | plat06-live, plat06-review | Completion record under PLAT-06.1. Integrated into main as `8e362f9..10f6c28`. |
 | PLAT-07.1 | Done | plat07-finish, plat07-integrate, plat07-review, plat07-live | Completion record under PLAT-07.1. Integrated into main as `6c534b2..199020a` plus the live harness `50e641f`. | Versioned connection contract, one shared resolver for probe/backup/restore Jobs, TLS private CA, rotation, redaction, write-only credential builder; live SCRAM rotation and TLS cases. |
+| PLAT-11.2 | Done | ui-restore-selection, d2w13, d3w12, plat11-2 (+ two reviews) | Completion record under PLAT-11.2; live on docker-desktop 2026-09-22, all eight tests through the console. |
 | PLAT-07.2 | In progress | ui072, ui072-review | Partial record under PLAT-07.2. Integrated into main as `8bbe4d1..b65f23f`. "Test connection" cannot yet force a re-probe (D2 W13). | Saved-cluster selector by UID, probe vocabulary, freshness budget; live 20/20 |
 | PLAT-13.2 | Done | ui-correct, ui-correct-review, ui-correct-fix | Completion record under PLAT-13.2. Integrated into main as `2a34abd..8020876`. |
 | PLAT-11.1 | Done | ui-restore-selection, ui-restore-selection-review | Completion record under PLAT-11.1. Integrated into main as `6c2c95e..02426c8`; the same branch fixes the `allowHttp` half of UI-HTTPDOWNGRADE (D2 W13a). |
 | PLAT-18.1 | Done | ui-typed-client, ui-typed-client-review | Completion record under PLAT-18.1; D0 stage 6 (static client migration) done for its own scope. Integrated into main as `fa73824..48d5ec0`. |
-| PLAT-12.1 (immediate slice), PLAT-12.2 (subject slice) | In progress (slices landed) | ui-correct | The guided submit, idempotent durable Restore and subject binding landed with PLAT-13.2 (records under each task); remaining: PLAT-11.2/13.2-backed selection flow and PLAT-19.2 policy routing for 12.1, retry identity for 12.2. |
+| PLAT-12.1 (immediate slice), PLAT-12.2 (subject + retry slices) | In progress (slices landed; 12.2's retry identity closed by `claude/plat11-2` 2026-09-22 — a retry never silently reuses an approval bound to another execution, fresh target + new approval; open for 12.2: the verified-approval live route (an approver key the lab lacks); open for 12.1: PLAT-19.2 policy routing, the PLAT-11.2-backed selection flow having landed) | ui-correct, plat11-2 | The guided submit, idempotent durable Restore, subject binding and the fresh-target retry landed (records under each task). |
 | PLAT-17.2 (stage 2) | In progress (stage landed) | plat17-2-authz, plat17-2-authz-review | Partial record under PLAT-17.2. Integrated into main as `24752f4..90ecd0c`. Shared mode is implemented and live-verified locally; deployable since D0 stage 7 (PLAT-17.1 Done 2026-09-21) but not declarable secure until D0 stage 5. |
 | PLAT-05.2 | Done | d1w4, d1w8, d1-fence (+ reviews) | Completion record under PLAT-05.2; live on docker-desktop 2026-09-18 behind D1 §13.1's fence. |
 | PLAT-04.2 | Done | d1w2, d1w6, d1w8, d1-fence, d1w7 (+ reviews) | Completion record under PLAT-04.2; live on docker-desktop 2026-09-18 incl. the console journey. |
@@ -2371,6 +2372,53 @@ PLAT-03.2.
 **Migration/safety and done evidence:** Preserve approved byte identity after
 review; any material edit requires new approval where configured. Demonstrate
 an older-point subset restore and clearly identify unimplemented resume.
+
+**Completion record — Done (2026-09-22), PLAT-11.2.** Source landed on main as
+`claude/plat11-2` (`..d5090ed`; review `claude/plat11-2.review.md` ACCEPT-WITH-FIXES with two
+HIGH — a scratch-mode prefix that desynchronised the preview from the run, and an untested
+declaration path with no submitted wizard restore — then `claude/plat11-2.review-2.md`
+ACCEPT-WITH-FIXES on the evidence, all applied; seventeen API and console mutants killed).
+The wizard's audit found three of the eight tests already covered (timestamp boundary;
+collision and invalid prefix server-side), two displayed but unenforced (target change,
+stale preflight) and three missing (subset, duplicate mapping, failed retry), and none
+needing the controller, CRD or runner, because the subset lives in the plan bytes. Landed:
+subset selection from the selected point's FROZEN topic list; the saved target; the exact
+new-name mapping per topic shown before submit, with one prefix state driving the preview,
+the declaration and the request (the runner's per-mode rule in `effectivePrefix`; the API
+rail refuses `scratch` with `unsupported_for_mode` because the route never parses the plan
+the run reads), so the request equals the preview byte for byte — pinned by a node row over
+the delivery seam, an API row, and the live wizard submit whose created object is read
+back with `kubectl` and compared to the preview (`spec.planBytes` byte-identical, the
+on-screen hash equal); duplicate mapping refused on the keystroke and by the API with a
+422 naming both rows; invalid prefix refused by name; the recovery limits — target
+replication/partition counts from the manifest, the sampled verification scope (never
+"exhaustive"), the consumer-cutover limitation, "resume is not implemented" — each from a
+contract constant pinned by a fixture; collision refused at the gate (`MappedTopicExists`
+from the readiness route against a topic pre-created on the lab's target broker); a stale
+or invalidated preflight refuses the submit, and a target swap marks the verdict stale and
+refuses until the preflight is re-run (D2 §6.3/§6.6); a failed Restore retries to a fresh
+target as a NEW Restore with a new prefix, a new plan hash and new names, the old approval
+reference never sent (the controller's `PlanHashMismatch` is the backstop) and the old
+Restore untouched — PLAT-12.2's retry identity; the point's window shown and a selection
+outside it refused by name. Every listed test PASSES live on docker-desktop in localAdmin
+console mode against the lab (`scripts/plat11-2-ui-e2e.mjs`: fifteen journeys, ten
+negative controls each requiring its refusal, one honest NOT REACHED; the reviewers
+re-drove the collision, duplicate, retry and wizard-submit steps in their own namespaces):
+**subset restore** — an OLDER point, one of two topics unticked, the plan bytes carrying
+exactly the other; **duplicate mapping**; **collision**; **invalid prefix**; **target
+change**; **stale preflight**; **failed retry** — a real `Failed/ApprovalSubjectMismatch`
+retried to a fresh prefix and two new minted names; **timestamp boundary**. Acceptance:
+the submitted topics and mapping equal the preview, and no existing target topic is
+overwritten by the ordinary path — proved by the byte comparison and the collision refusal.
+Migration: approved byte identity is preserved after review (the reviewed-plan hash guard);
+a material edit produces a new plan hash and needs a new approval where the namespace is
+governed; resume is identified as unimplemented on screen. Residue, none of it this task's
+acceptance: the console's own step-5 readiness check on this build ends
+`ArchiveUrlUnreadable` because the Backup projection publishes no `destinationRef`
+(BACKUP-PROJECTION-NO-DESTINATION, defect table — the collision refusal was proved through
+the readiness route directly); a verified scorecard for a wizard-created Restore needs an
+approver key the lab does not hold (the Restore ends `Pending/ApprovalNotVerified`, no
+Job); the wizard's own collision journey is NOT REACHED for the same projection reason.
 
 ## PLAT-12 — Unify restore creation, approval and retry
 
