@@ -61,9 +61,13 @@ pub struct SharedMode {
     pub streams: Arc<StreamSlots>,
     /// The session lifetime in seconds.
     pub session_max_age_seconds: i64,
-    /// Proxy ranges whose forwarded headers may be RECORDED. Never read by a
-    /// decision.
+    /// Proxy ranges whose forwarded headers may be RECORDED. Never an
+    /// identity input.
     pub trusted_proxy_cidrs: Vec<Cidr>,
+    /// Whether the entry point refuses any request that did not arrive
+    /// through one of those proxies over HTTPS
+    /// (`crate::http::boundary_guard`, `requireTrustedProxy`).
+    pub require_trusted_proxy: bool,
 }
 
 /// Everything a request handler needs.
@@ -88,6 +92,9 @@ pub struct Settings {
     pub readiness_namespace: String,
     /// Shared mode's extras, absent in localAdmin mode.
     pub shared: Option<Arc<SharedMode>>,
+    /// The Kubernetes identity this process writes as, recorded on every
+    /// created object and in every audit line (`kubernetes.principal`).
+    pub kubernetes_principal: String,
 }
 
 struct Inner {
@@ -168,6 +175,12 @@ impl AppState {
     #[must_use]
     pub fn shared(&self) -> Option<&Arc<SharedMode>> {
         self.inner.settings.shared.as_ref()
+    }
+
+    /// The Kubernetes identity this process writes as.
+    #[must_use]
+    pub fn kubernetes_principal(&self) -> &str {
+        &self.inner.settings.kubernetes_principal
     }
 
     /// Readiness, cached for [`READINESS_CACHE`].

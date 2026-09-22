@@ -1187,10 +1187,12 @@ cursorKey:
   file: /var/run/secrets/cursor/key
   expectedVersion: 1
 sessionMaxAgeSeconds: 900                          # 60…900
-trustedProxyCidrs: ["10.0.0.0/8"]                  # transport LOGGING only
+trustedProxyCidrs: ["10.0.0.0/8"]                  # the ingress; never an identity
+requireTrustedProxy: true                          # refuse any request not from it over HTTPS
 namespaces: [team-a, team-b]
 kubernetes:
   source: inCluster
+  principal: system:serviceaccount:logweir-system:logweir-api  # recorded on every object
 ```
 
 **`allowedHosts` widens a security guard, so it is not a convenience.** The

@@ -93,6 +93,16 @@ pub struct AuditRecord {
     pub request_hash: String,
     /// The plan hash, when the request carried one. Never the plan bytes.
     pub plan_hash: String,
+    /// The recovery point a restore-shaped request selected — backup set,
+    /// point in time and the saved destination (or the credential-free
+    /// archive location) it is read from — as the one-line form
+    /// [`recovery_point_of`] builds. Empty for every other request.
+    pub recovery_point: String,
+    /// The Kubernetes identity this process writes as: the `user.username`
+    /// Kubernetes audit records for the calls this request made. Configured
+    /// (`kubernetes.principal`, which the chart renders from the
+    /// ServiceAccount it runs the pod as), never taken from a request.
+    pub kubernetes_principal: String,
     /// The Kubernetes object's name, when one was created or read.
     pub object_name: String,
     /// Its UID.
@@ -221,6 +231,84 @@ impl AuditContext {
         self.with(|f| f.record.plan_hash = crate::validate::bounded(plan_hash, 80));
     }
 
+    /// Record the recovery point a request selected. The caller builds the
+    /// value with [`recovery_point_of`], which never carries a credential.
+    pub fn set_recovery_point(&self, recovery_point: &str) {
+        self.with(|f| {
+            f.record.recovery_point = redact(&crate::validate::bounded(recovery_point, 512));
+        });
+    }
+
+    /// Record the Kubernetes identity this process writes as.
+    pub fn set_kubernetes_principal(&self, principal: &str) {
+        self.with(|f| {
+            f.record.kubernetes_principal = crate::validate::bounded(principal, 253);
+        });
+    }
+
+    /// The attribution every durable object this request creates carries.
+    ///
+    /// ONE PLACE, CALLED BY THE ADAPTER. `crate::kube::KubeAdapter::create` and
+    /// `create_credential` merge this into the object's annotations on the way
+    /// out, so a route another stage adds attributes its objects without
+    /// knowing this function exists. The values are the record's own: the
+    /// actor the authenticator produced, the action and binding revision the
+    /// authorizer decided under, the request ID, the Kubernetes principal the
+    /// write is made as, and the selected recovery point when there is one.
+    ///
+    /// # Errors
+    ///
+    /// When the request reached no authenticated actor or no decided action.
+    /// The adapter then refuses the write: a durable object with no author is
+    /// exactly what attribution exists to prevent, so it is not created.
+    pub fn object_annotations(&self) -> Result<BTreeMap<String, String>, &'static str> {
+        self.with(|f| {
+            let r = &f.record;
+            if r.actor_id.is_empty() || r.authentication_mode.is_empty() {
+                return Err("no authenticated actor");
+            }
+            if r.action.is_empty() || r.action == "unknown" {
+                return Err("no decided action");
+            }
+            let mut out = BTreeMap::from([
+                (
+                    crate::idempotency::ANNOTATION_ACTOR.to_string(),
+                    r.actor_id.clone(),
+                ),
+                (
+                    crate::idempotency::ANNOTATION_REQUEST_ID.to_string(),
+                    r.audit_id.clone(),
+                ),
+                (
+                    ANNOTATION_AUTHENTICATION_MODE.to_string(),
+                    r.authentication_mode.clone(),
+                ),
+                (ANNOTATION_ACTION.to_string(), r.action.clone()),
+                (
+                    ANNOTATION_KUBERNETES_PRINCIPAL.to_string(),
+                    if r.kubernetes_principal.is_empty() {
+                        UNDECLARED_PRINCIPAL.to_string()
+                    } else {
+                        r.kubernetes_principal.clone()
+                    },
+                ),
+            ]);
+            if !r.binding_revision.is_empty() {
+                out.insert(
+                    ANNOTATION_BINDING_REVISION.to_string(),
+                    r.binding_revision.clone(),
+                );
+            }
+            if !r.recovery_point.is_empty() {
+                out.insert(
+                    ANNOTATION_RECOVERY_POINT.to_string(),
+                    r.recovery_point.clone(),
+                );
+            }
+            Ok(out)
+        })
+    }
+
     /// Record the transport facts.
     pub fn set_transport(
         &self,
@@ -280,6 +368,97 @@ impl AuditContext {
     pub fn notes(&self) -> BTreeMap<String, String> {
         self.with(|f| f.extra.clone())
     }
+}
+
+/// How the creating actor was authenticated: `localAdmin` or `oidc`.
+pub const ANNOTATION_AUTHENTICATION_MODE: &str = "api.logweir.dev/authentication-mode";
+/// The product action the create was authorized as, e.g. `restore.create`.
+pub const ANNOTATION_ACTION: &str = "api.logweir.dev/action";
+/// The role-binding revision that authorized it (shared mode).
+pub const ANNOTATION_BINDING_REVISION: &str = "api.logweir.dev/binding-revision";
+/// The Kubernetes identity the object was written as.
+pub const ANNOTATION_KUBERNETES_PRINCIPAL: &str = "api.logweir.dev/kubernetes-principal";
+/// The recovery point a restore-shaped create selected.
+pub const ANNOTATION_RECOVERY_POINT: &str = "api.logweir.dev/recovery-point";
+
+/// What [`AuditContext::object_annotations`] records when no principal is
+/// configured — a laptop run whose kubeconfig identity this process cannot
+/// name. Kubernetes audit still has the real one.
+pub const UNDECLARED_PRINCIPAL: &str = "undeclared";
+
+tokio::task_local! {
+    static CURRENT: std::sync::Arc<AuditContext>;
+}
+
+/// Run `future` with `context` as the current request's audit record.
+///
+/// `crate::http::request_context` is the one caller: every handler, and every
+/// adapter call a handler makes, runs inside it.
+pub async fn scope<F: std::future::Future>(
+    context: std::sync::Arc<AuditContext>,
+    future: F,
+) -> F::Output {
+    CURRENT.scope(context, future).await
+}
+
+/// The current request's audit record, when called inside [`scope`].
+#[must_use]
+pub fn current() -> Option<std::sync::Arc<AuditContext>> {
+    CURRENT.try_with(std::sync::Arc::clone).ok()
+}
+
+/// The recovery point a validated request selected, read from its canonical
+/// JSON — or `None` when the request selects none.
+///
+/// READ FROM THE REQUEST, NOT PASSED BY EACH ROUTE, for the reason the plan
+/// hash is: a route that submits a restore-shaped request cannot forget to
+/// attribute what it restores. The fields are the ones every restore-shaped
+/// DTO in this crate uses (`backupSetRef`, `pointInTime`, and the source as
+/// `sourceDestinationRef.name` or `sourceArchive.url`), plus a catalog
+/// `recoveryPointRef` when a request carries one.
+///
+/// NO CREDENTIAL CAN ENTER IT. A destination is recorded by NAME; a legacy
+/// archive URL has any userinfo replaced before it is recorded; nothing else
+/// is copied.
+#[must_use]
+pub fn recovery_point_of(canonical: &serde_json::Value) -> Option<String> {
+    let text = |pointer: &str| {
+        canonical
+            .pointer(pointer)
+            .and_then(serde_json::Value::as_str)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
+    };
+    let backup_set = text("/backupSetRef");
+    let point_in_time = text("/pointInTime");
+    let catalog_point = text("/recoveryPointRef/name").or_else(|| text("/recoveryPointRef"));
+    if backup_set.is_none() && point_in_time.is_none() && catalog_point.is_none() {
+        return None;
+    }
+    let source = text("/sourceDestinationRef/name")
+        .map(|name| format!("destination/{name}"))
+        .or_else(|| {
+            // The LOCATION only: userinfo replaced, and no query or fragment,
+            // which is where a pre-signed parameter would ride.
+            text("/sourceArchive/url").map(|url| {
+                let location = url.split(['?', '#']).next().unwrap_or_default();
+                crate::validate::redact_url_userinfo(location)
+            })
+        });
+    let mut parts = Vec::new();
+    if let Some(v) = catalog_point {
+        parts.push(format!("recoveryPoint={v}"));
+    }
+    if let Some(v) = backup_set {
+        parts.push(format!("backupSet={v}"));
+    }
+    if let Some(v) = point_in_time {
+        parts.push(format!("pointInTime={v}"));
+    }
+    if let Some(v) = source {
+        parts.push(format!("source={v}"));
+    }
+    Some(crate::validate::bounded(&parts.join(" "), 512))
 }
 
 /// Dependency log targets pinned below DEBUG, whatever `RUST_LOG` says.

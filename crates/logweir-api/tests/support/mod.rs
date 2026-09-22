@@ -365,6 +365,37 @@ impl FakeKube {
     }
 }
 
+/// The annotations every durable object the API creates must carry
+/// (PLAT-17.2). The fake records a create without them as UNEXPECTED, so every
+/// test in this crate that creates an object and calls
+/// [`FakeKube::assert_strict`] is also an attribution guard.
+pub const ATTRIBUTION_ANNOTATIONS: [&str; 5] = [
+    "api.logweir.dev/actor",
+    "api.logweir.dev/request-id",
+    "api.logweir.dev/authentication-mode",
+    "api.logweir.dev/action",
+    "api.logweir.dev/kubernetes-principal",
+];
+
+fn check_attribution(s: &mut State, plural: &str, name: &str, object: &Value) {
+    let missing: Vec<&str> = ATTRIBUTION_ANNOTATIONS
+        .iter()
+        .copied()
+        .filter(|key| {
+            object
+                .pointer("/metadata/annotations")
+                .and_then(|a| a.get(*key))
+                .and_then(Value::as_str)
+                .is_none_or(str::is_empty)
+        })
+        .collect();
+    if !missing.is_empty() {
+        s.unexpected.push(format!(
+            "unattributed create {plural}/{name}: missing {missing:?}"
+        ));
+    }
+}
+
 /// The kinds whose spec this fake will accept a merge patch for.
 pub const PATCHABLE: [&str; 4] = [
     "backupschedules",
@@ -465,6 +496,7 @@ fn core_answer(s: &mut State, recorded: &Recorded, rest: &str) -> (Option<Durati
                 object["kind"] = json!("Secret");
                 return (None, 201, object.to_string());
             }
+            check_attribution(s, "secrets", &name, &object);
             s.next_rv += 1;
             s.next_uid += 1;
             let uid = format!("00000000-0000-4000-9000-{:012}", s.next_uid);
@@ -775,6 +807,7 @@ fn answer_inner(state: &Arc<Mutex<State>>, recorded: Recorded) -> (Option<Durati
                     ),
                 );
             }
+            check_attribution(&mut s, &plural, &name, &object);
             s.next_rv += 1;
             s.next_uid += 1;
             let uid = format!("00000000-0000-4000-8000-{:012}", s.next_uid);
@@ -1020,6 +1053,7 @@ pub struct Options {
     pub public_origin: String,
     pub allowed_hosts: Vec<String>,
     pub shared: Option<Arc<SharedMode>>,
+    pub kubernetes_principal: String,
 }
 
 impl Default for Options {
@@ -1038,9 +1072,13 @@ impl Default for Options {
                 "[::1]:8484".into(),
             ],
             shared: None,
+            kubernetes_principal: KUBERNETES_PRINCIPAL.to_string(),
         }
     }
 }
+
+/// The Kubernetes principal every test app declares it writes as.
+pub const KUBERNETES_PRINCIPAL: &str = "system:serviceaccount:logweir-system:logweir-api";
 
 pub fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1225,6 +1263,7 @@ pub fn app_state(fake: &FakeKube, options: Options, clock: &Arc<TestClock>) -> A
             .expect("the UI directory loads"),
         readiness_namespace: options.namespaces[0].clone(),
         shared: options.shared.clone(),
+        kubernetes_principal: options.kubernetes_principal.clone(),
     })
 }
 
@@ -1596,6 +1635,8 @@ pub struct SharedOptions {
     pub trusted_proxy_cidrs: Vec<logweir_api::config::Cidr>,
     /// The login rate limiter.
     pub login_limiter: Option<RateLimiter>,
+    /// `requireTrustedProxy`.
+    pub require_trusted_proxy: bool,
 }
 
 impl Default for SharedOptions {
@@ -1608,6 +1649,7 @@ impl Default for SharedOptions {
             allowed_algorithms: vec!["RS256".into(), "ES256".into()],
             trusted_proxy_cidrs: Vec::new(),
             login_limiter: None,
+            require_trusted_proxy: false,
         }
     }
 }
@@ -1696,6 +1738,7 @@ impl SharedApp {
             streams: StreamSlots::new(),
             session_max_age_seconds: options.session_max_age_seconds,
             trusted_proxy_cidrs: options.trusted_proxy_cidrs.clone(),
+            require_trusted_proxy: options.require_trusted_proxy,
         });
         let app = TestApp::with_clock(
             fake,

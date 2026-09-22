@@ -204,6 +204,7 @@ pub fn state_from_parts(
                     streams: auth::ratelimit::StreamSlots::new(),
                     session_max_age_seconds: settings.session_max_age_seconds,
                     trusted_proxy_cidrs: settings.trusted_proxy_cidrs.clone(),
+                    require_trusted_proxy: settings.require_trusted_proxy,
                 })),
             )
         }
@@ -227,5 +228,6 @@ pub fn state_from_parts(
         assets: preflight.assets,
         readiness_namespace: config.namespaces[0].clone(),
         shared,
+        kubernetes_principal: config.kubernetes_principal.clone(),
     }))
 }

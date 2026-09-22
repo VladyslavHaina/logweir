@@ -335,6 +335,10 @@ pub enum KubeFailure {
     Timeout,
     /// A transport failure, an unparseable response or a 5xx.
     Unavailable,
+    /// A durable create was asked for outside an attributed request — no
+    /// authenticated actor, or no decided action, in the request's audit
+    /// record. It is refused before anything is sent (PLAT-17.2).
+    Unattributed,
 }
 
 /// A CRD validation rule the API server refused a write with.
@@ -489,6 +493,10 @@ impl KubeFailure {
                 ProblemCode::KubernetesUnavailable,
                 "Kubernetes could not be reached.",
             ),
+            KubeFailure::Unattributed => ApiError::new(
+                ProblemCode::InternalError,
+                "The object was not created: the request carries no attributed actor.",
+            ),
         }
     }
 }
@@ -539,6 +547,40 @@ impl<K: ProductResource> kube::Resource for Untyped<K> {
     fn meta_mut(&mut self) -> &mut ObjectMeta {
         &mut self.metadata
     }
+}
+
+/// Merge the current request's attribution into an object about to be
+/// created, or refuse the create.
+///
+/// EVERY DURABLE OBJECT THIS SERVICE CREATES PASSES HERE. [`KubeAdapter::create`]
+/// and [`KubeAdapter::create_credential`] are the only two creates the adapter
+/// offers (the dry-run name probe persists nothing), and both call this, so a
+/// route cannot create an object without an author — including a route added
+/// after this line was written. The values come from
+/// [`crate::audit::AuditContext::object_annotations`]: actor, authentication
+/// mode, decided action, binding revision, request ID, the Kubernetes
+/// principal the write is made as, and the selected recovery point.
+///
+/// # Errors
+///
+/// [`KubeFailure::Unattributed`] outside a request, or before the request has
+/// an authenticated actor and a decided action.
+fn attribute(meta: &mut ObjectMeta) -> Result<(), KubeFailure> {
+    let Some(context) = crate::audit::current() else {
+        tracing::error!("a create was asked for outside any request; refused");
+        return Err(KubeFailure::Unattributed);
+    };
+    let stamp = context.object_annotations().map_err(|reason| {
+        tracing::error!(
+            reason,
+            "a create was asked for without attribution; refused"
+        );
+        KubeFailure::Unattributed
+    })?;
+    meta.annotations
+        .get_or_insert_with(std::collections::BTreeMap::new)
+        .extend(stamp);
+    Ok(())
 }
 
 /// One page request against a native Kubernetes list.
@@ -694,6 +736,8 @@ impl KubeAdapter {
         namespace: &str,
         object: &K,
     ) -> Result<K, KubeFailure> {
+        let mut object = object.clone();
+        attribute(object.meta_mut())?;
         let api: Api<K> = Api::namespaced(self.client.clone(), namespace);
         let params = PostParams {
             dry_run: false,
@@ -702,7 +746,7 @@ impl KubeAdapter {
         self.bounded(
             "create",
             K::plural(&()).as_ref(),
-            api.create(&params, object),
+            api.create(&params, &object),
         )
         .await
     }
@@ -1050,13 +1094,15 @@ impl KubeAdapter {
         namespace: &str,
         secret: &WriteOnlyCredential,
     ) -> Result<CreatedCredential, KubeFailure> {
+        let mut secret = secret.clone();
+        attribute(&mut secret.metadata)?;
         let api: Api<WriteOnlyCredential> = Api::namespaced(self.client.clone(), namespace);
         let params = PostParams {
             dry_run: false,
             field_manager: Some(FIELD_MANAGER.to_string()),
         };
         let created = self
-            .bounded("create", "secrets", api.create(&params, secret))
+            .bounded("create", "secrets", api.create(&params, &secret))
             .await?;
         Ok(CreatedCredential {
             name: created.metadata.name.unwrap_or_default(),

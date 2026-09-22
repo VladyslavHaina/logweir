@@ -154,7 +154,11 @@ pub async fn request_context(mut req: Request, next: Next) -> Response {
     let audit = Arc::new(AuditContext::new(&request_id, method.as_str(), &path));
     req.extensions_mut().insert(Arc::clone(&audit));
 
-    let mut response = next.run(req).await;
+    // THE AUDIT RECORD IS THE REQUEST'S AMBIENT CONTEXT. Everything the
+    // handler awaits — including the adapter call that creates an object —
+    // runs inside this scope, which is how `crate::kube` stamps a created
+    // object with its author without any route passing one.
+    let mut response = crate::audit::scope(Arc::clone(&audit), next.run(req)).await;
 
     if let Some(PendingProblem(error)) = response.extensions_mut().remove::<PendingProblem>() {
         response = rerender(&response, &error, &request_id);
@@ -285,6 +289,7 @@ pub async fn boundary_guard(
     let stripped = strip_identity_headers(req.headers_mut());
     let peer = req.extensions().get::<PeerAddr>().copied();
     if let Some(audit) = req.extensions().get::<Arc<AuditContext>>().cloned() {
+        audit.set_kubernetes_principal(state.kubernetes_principal());
         let forwarded = forwarded_client(&state, req.headers(), peer.map(|p| p.0));
         audit.set_transport(
             &peer.map(|p| p.0.to_string()).unwrap_or_default(),
@@ -334,7 +339,75 @@ pub async fn boundary_guard(
             ),
         );
     }
+    if !exempt {
+        if let Err(reason) = entry_point(&state, req.headers(), peer.map(|p| p.0)) {
+            if let Some(audit) = req.extensions().get::<Arc<AuditContext>>() {
+                audit.set_failure("untrusted_entry_point");
+                audit.note("entryPoint", reason);
+            }
+            return axum::response::IntoResponse::into_response(ApiError::new(
+                ProblemCode::MisdirectedRequest,
+                "This console accepts requests only through its trusted HTTPS entry point.",
+            ));
+        }
+    }
     next.run(req).await
+}
+
+/// The trusted-entry-point contract (`requireTrustedProxy`, shared mode).
+///
+/// WHAT IT IS. With the flag on, a request is served only when BOTH hold:
+/// the immediate socket peer is inside a `trustedProxyCidrs` range — the
+/// ingress, not a pod that dialled the ClusterIP directly — and that proxy
+/// asserted, in exactly one `X-Forwarded-Proto` header, that the browser's
+/// hop was `https`. A request from anywhere else, or one the proxy did not
+/// vouch for, is `421 misdirected_request` (audit code
+/// `untrusted_entry_point`, with `peerNotTrusted` or
+/// `forwardedProtoNotHttps` as the note). The two probes are exempt, because a
+/// kubelet dials the Pod IP.
+///
+/// WHAT IT IS NOT, AND WHY IT DOES NOT BREAK D0. D0 forbids deriving an
+/// IDENTITY, a callback URL or an authorization decision from forwarded
+/// headers, and nothing here does: the header is read only from a peer the
+/// administrator named, and it can only ever REFUSE. A forged
+/// `X-Forwarded-Proto` from an untrusted peer is never read — the peer check
+/// refuses first — and a correct one grants nothing that a session and a role
+/// binding did not already grant. It is the application's own copy of what an
+/// enforcing NetworkPolicy gives the ingress path, for the clusters (Docker
+/// Desktop among them) where a NetworkPolicy is accepted and not enforced.
+///
+/// # Errors
+///
+/// The reason, for the audit note.
+pub fn entry_point(
+    state: &AppState,
+    headers: &http::HeaderMap,
+    peer: Option<IpAddr>,
+) -> Result<(), &'static str> {
+    let Some(shared) = state.shared() else {
+        return Ok(());
+    };
+    if !shared.require_trusted_proxy {
+        return Ok(());
+    }
+    let trusted =
+        peer.is_some_and(|peer| shared.trusted_proxy_cidrs.iter().any(|c| c.contains(peer)));
+    if !trusted {
+        return Err("peerNotTrusted");
+    }
+    let mut protos = headers
+        .get_all(HeaderName::from_static("x-forwarded-proto"))
+        .iter();
+    let https = match (protos.next(), protos.next()) {
+        (Some(value), None) => value
+            .to_str()
+            .is_ok_and(|v| v.trim().eq_ignore_ascii_case("https")),
+        _ => false,
+    };
+    if !https {
+        return Err("forwardedProtoNotHttps");
+    }
+    Ok(())
 }
 
 /// Render a transport-boundary refusal AND attribute it.

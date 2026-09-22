@@ -517,16 +517,24 @@ where
     // the canonical plan hash; it is read from the validated request rather
     // than passed in by each route, so a future route that submits a plan
     // cannot forget to attribute it.
-    if let Some(plan_hash) = serde_json::from_slice::<serde_json::Value>(&canonical)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("planHash")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string)
-        })
-    {
+    let canonical_value = serde_json::from_slice::<serde_json::Value>(&canonical).ok();
+    if let Some(plan_hash) = canonical_value.as_ref().and_then(|value| {
+        value
+            .get("planHash")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    }) {
         actor.audit.set_plan_hash(&plan_hash);
+    }
+    // THE SELECTED RECOVERY POINT, by the same rule and for the same reason:
+    // read from the validated request, so every restore-shaped create is
+    // attributed with WHAT it restores, on the object (the adapter stamps it)
+    // and in the audit line.
+    if let Some(point) = canonical_value
+        .as_ref()
+        .and_then(crate::audit::recovery_point_of)
+    {
+        actor.audit.set_recovery_point(&point);
     }
     let object = build(
         identity.name.clone(),

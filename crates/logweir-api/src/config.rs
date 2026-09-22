@@ -65,6 +65,8 @@ struct ConfigFile {
     session_max_age_seconds: Option<i64>,
     #[serde(default)]
     trusted_proxy_cidrs: Option<Vec<String>>,
+    #[serde(default)]
+    require_trusted_proxy: Option<bool>,
     namespaces: Vec<String>,
     kubernetes: KubernetesFile,
     #[serde(default)]
@@ -134,6 +136,8 @@ struct KubernetesFile {
     kubeconfig: Option<PathBuf>,
     #[serde(default)]
     context: Option<String>,
+    #[serde(default)]
+    principal: Option<String>,
 }
 
 /// Where the Kubernetes client configuration comes from.
@@ -231,8 +235,12 @@ pub struct SharedConfig {
     /// The role bindings.
     pub roles: RolesConfig,
     /// Proxy ranges whose forwarded headers may be recorded in the transport
-    /// log. Never an authorization input.
+    /// log. Never an identity input.
     pub trusted_proxy_cidrs: Vec<Cidr>,
+    /// Whether every request (the two probes excepted) must arrive from a
+    /// `trustedProxyCidrs` peer that asserts `X-Forwarded-Proto: https`.
+    /// See `crate::http::entry_point_guard`.
+    pub require_trusted_proxy: bool,
 }
 
 /// Which mode the file asked for, with that mode's settings.
@@ -283,6 +291,13 @@ pub struct Config {
     pub kubernetes: KubeSource,
     /// Where the cursor MAC key comes from.
     pub cursor_key: CursorKeySource,
+    /// The Kubernetes identity this process writes as, for the attribution
+    /// every created object and every audit line carries. `kubernetes.principal`
+    /// when set (the chart always sets it, to
+    /// `system:serviceaccount:<namespace>:<release>-api`); otherwise
+    /// `inCluster` or `kubeconfig-context:<context>`, which name WHERE the
+    /// identity comes from without claiming to know it.
+    pub kubernetes_principal: String,
 }
 
 impl Config {
@@ -424,8 +439,9 @@ impl Config {
 
         let namespaces = check_namespaces(&file.namespaces)?;
         let kubernetes = kube_source(base, &file.kubernetes)?;
+        let kubernetes_principal = kubernetes_principal(&file.kubernetes, &kubernetes)?;
 
-        match file.mode.as_str() {
+        let config = match file.mode.as_str() {
             "localAdmin" => Config::local_admin_mode(file, base, namespaces, kubernetes),
             "shared" => Config::shared_mode(file, base, namespaces, kubernetes),
             other => Err(field(
@@ -435,7 +451,11 @@ impl Config {
                      loopback administrator listener) and `shared` (the SSO console)"
                 ),
             )),
-        }
+        }?;
+        Ok(Config {
+            kubernetes_principal,
+            ..config
+        })
     }
 
     fn local_admin_mode(
@@ -514,6 +534,7 @@ impl Config {
             namespaces,
             kubernetes,
             cursor_key: CursorKeySource::RawFile(resolve(base, &cursor_key_file)),
+            kubernetes_principal: String::new(),
         })
     }
 
@@ -642,6 +663,17 @@ impl Config {
                     .map_err(|reason| field("trustedProxyCidrs", format!("`{raw}`: {reason}")))?,
             );
         }
+        // A GATE WITH NOTHING BEHIND IT IS A REFUSAL OF EVERYTHING. Requiring
+        // the trusted proxy with no range to trust would answer every request
+        // 421 and look like an outage; it is refused here, by name, instead.
+        let require_trusted_proxy = file.require_trusted_proxy.unwrap_or(false);
+        if require_trusted_proxy && trusted_proxy_cidrs.is_empty() {
+            return Err(field(
+                "requireTrustedProxy",
+                "requires at least one `trustedProxyCidrs` range: the entry point would \
+                 otherwise refuse every request",
+            ));
+        }
 
         Ok(Config {
             listen,
@@ -659,6 +691,7 @@ impl Config {
                 session_max_age_seconds,
                 roles,
                 trusted_proxy_cidrs,
+                require_trusted_proxy,
             })),
             namespaces,
             kubernetes,
@@ -666,6 +699,7 @@ impl Config {
                 file: resolve(base, &cursor_key.file),
                 expected_version: cursor_key.expected_version,
             }),
+            kubernetes_principal: String::new(),
         })
     }
 }
@@ -681,6 +715,7 @@ fn refuse_shared_only_fields(file: &ConfigFile) -> Result<(), ConfigError> {
             "sessionMaxAgeSeconds",
         ),
         (file.trusted_proxy_cidrs.is_some(), "trustedProxyCidrs"),
+        (file.require_trusted_proxy.is_some(), "requireTrustedProxy"),
     ] {
         if present {
             return Err(field(
@@ -720,6 +755,44 @@ fn check_namespaces(namespaces: &[String]) -> Result<Vec<String>, ConfigError> {
         }
     }
     Ok(namespaces.to_vec())
+}
+
+/// The Kubernetes principal attribution records. See [`Config::kubernetes_principal`].
+///
+/// A DECLARATION, CHECKED FOR SHAPE. The value goes onto every object this
+/// service creates, so it is a single line with no whitespace, and an
+/// in-cluster value must be a ServiceAccount username — the only identity a
+/// pod's projected token can carry.
+fn kubernetes_principal(file: &KubernetesFile, source: &KubeSource) -> Result<String, ConfigError> {
+    match (&file.principal, source) {
+        (Some(principal), source) => {
+            validate::check_single_line(principal, 253)
+                .map_err(|code| field("kubernetes.principal", code))?;
+            if principal.chars().any(char::is_whitespace) {
+                return Err(field("kubernetes.principal", "must not contain whitespace"));
+            }
+            if matches!(source, KubeSource::InCluster) {
+                let parts: Vec<&str> = principal.split(':').collect();
+                let shaped = parts.len() == 4
+                    && parts[0] == "system"
+                    && parts[1] == "serviceaccount"
+                    && validate::is_dns_label(parts[2])
+                    && validate::is_dns_subdomain(parts[3]);
+                if !shaped {
+                    return Err(field(
+                        "kubernetes.principal",
+                        "an in-cluster principal is the pod's ServiceAccount, written \
+                         `system:serviceaccount:<namespace>:<name>`",
+                    ));
+                }
+            }
+            Ok(principal.clone())
+        }
+        (None, KubeSource::InCluster) => Ok("inCluster".to_string()),
+        (None, KubeSource::Kubeconfig { context, .. }) => {
+            Ok(format!("kubeconfig-context:{context}"))
+        }
+    }
 }
 
 fn kube_source(base: &Path, file: &KubernetesFile) -> Result<KubeSource, ConfigError> {
@@ -1364,10 +1437,33 @@ mod tests {
         assert!(!shared.trusted_proxy_cidrs[0]
             .contains("192.0.2.1".parse().expect("a literal address")));
         assert!(!shared.oidc.insecure_loopback_issuer);
+        assert!(shared.require_trusted_proxy);
+        assert_eq!(
+            config.kubernetes_principal,
+            "system:serviceaccount:logweir-system:logweir-api"
+        );
 
         // AND THE REFUSALS THE DOCUMENT TABULATES ARE REAL. Each row below
         // changes exactly one line of the accepted example.
-        let refusals: [(&str, &str, &str); 9] = [
+        let refusals: [(&str, &str, &str); 12] = [
+            // PLAT-17.2: a trusted-proxy requirement with no range to trust
+            // would refuse every request, so it is refused by name instead.
+            (
+                "trustedProxyCidrs: [\"10.0.0.0/8\"]",
+                "trustedProxyCidrs: []",
+                "requireTrustedProxy",
+            ),
+            // An in-cluster principal is a ServiceAccount username or nothing.
+            (
+                "principal: system:serviceaccount:logweir-system:logweir-api",
+                "principal: admin",
+                "kubernetes.principal",
+            ),
+            (
+                "principal: system:serviceaccount:logweir-system:logweir-api",
+                "principal: \"system:serviceaccount:logweir-system:logweir api\"",
+                "kubernetes.principal",
+            ),
             (
                 "publicBaseUrl: \"https://console.example.com\"",
                 "publicBaseUrl: \"http://console.example.com\"",
@@ -1422,6 +1518,35 @@ mod tests {
                 }
                 other => panic!("`{to}` was not refused: {other:?}"),
             }
+        }
+    }
+
+    /// **The principal attribution records names where it comes from when no
+    /// value is declared, and `requireTrustedProxy` belongs to shared mode.**
+    #[test]
+    fn the_kubernetes_principal_defaults_to_its_source_and_the_proxy_flag_is_shared_only() {
+        let base = text("127.0.0.1:8484", "http://127.0.0.1:8484");
+        let config = Config::parse(&base, Path::new("/etc/logweir")).unwrap();
+        assert_eq!(
+            config.kubernetes_principal,
+            "kubeconfig-context:docker-desktop"
+        );
+        // A kubeconfig principal is not a ServiceAccount, so only its shape as
+        // a single token is checked.
+        let declared = base.replace(
+            "  context: docker-desktop\n",
+            "  context: docker-desktop\n  principal: admin@docker-desktop\n",
+        );
+        assert_eq!(
+            Config::parse(&declared, Path::new("/etc/logweir"))
+                .unwrap()
+                .kubernetes_principal,
+            "admin@docker-desktop"
+        );
+        let local_with_proxy = format!("{base}requireTrustedProxy: true\n");
+        match Config::parse(&local_with_proxy, Path::new("/etc/logweir")) {
+            Err(ConfigError::Field { field, .. }) => assert_eq!(field, "requireTrustedProxy"),
+            other => panic!("localAdmin accepted requireTrustedProxy: {other:?}"),
         }
     }
 
