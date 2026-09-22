@@ -2139,9 +2139,25 @@ fn key_validity_row(
             deadline.to_rfc3339()
         ))
         .with_remedy("Rotate the approver key, or start the restore sooner."),
-        _ => mk(CheckState::Ready, CheckCode::ApproverKeyValid).with_message(&format!(
+        Some(_) => mk(CheckState::Ready, CheckCode::ApproverKeyValid).with_message(&format!(
             "the Approval controller verified this approval under approver key `{}`, whose \
              published validity window runs to {}; this restore's deadline falls inside it",
+            window.key_id,
+            window.not_after.to_rfc3339()
+        )),
+        // NO DEADLINE, SO NO COMPARISON — AND THE SENTENCE SAYS SO. This arm
+        // used to share the one above and claim "this restore's deadline falls
+        // inside it" about a comparison that never happened. It is reachable:
+        // `deadline` is `now + spec.deadlineSeconds` and `deadlineSeconds` is
+        // an unbounded `int64` in the CRD, so an absurd value overflows the
+        // addition to `None` and silences the warning for a key that expires in
+        // a minute. The verdict is unchanged — an advisory row cannot refuse,
+        // and the blocking `approval.state` row already reports a WITHDRAWN
+        // verdict — but a green row must not describe work it did not do.
+        None => mk(CheckState::Ready, CheckCode::ApproverKeyValid).with_message(&format!(
+            "the Approval controller verified this approval under approver key `{}`, whose \
+             published validity window runs to {}; this restore names no deadline to compare \
+             it against",
             window.key_id,
             window.not_after.to_rfc3339()
         )),

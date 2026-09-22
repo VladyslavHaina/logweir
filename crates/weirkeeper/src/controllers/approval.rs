@@ -54,7 +54,8 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use futures::StreamExt as _;
 use kube::runtime::controller::Action;
-use kube::runtime::{watcher, Controller};
+use kube::runtime::reflector::ObjectRef;
+use kube::runtime::{reflector, watcher, Controller};
 use kube::{Api, Resource, ResourceExt};
 use logweir_core::ids::sha256_prefixed;
 use logweir_core::trust::{KeyUsage, SigningRefusal};
@@ -1501,6 +1502,38 @@ fn error_policy(approval: Arc<Approval>, err: &ReconcileError, _ctx: Arc<Context
     Action::requeue(std::time::Duration::from_secs(30))
 }
 
+/// The `Approval`s a `TrustPolicy` event should enqueue — the same re-trust
+/// trigger `controllers::backup` and `controllers::restore` carry (D3 W10).
+///
+/// # Why this controller needs one at all
+///
+/// Its verdict is a function of the namespace's RESOLVED TRUST, and this
+/// reconciler does not watch `TrustPolicy`: before this, a policy edit reached
+/// an `Approval` only at the five-minute heartbeat (or sooner, at the matched
+/// key's `notAfter`, which defect `TRUST-EXPIRY-LAG` armed). Five minutes is
+/// the right pace for "install the roster, then look again"; it is the wrong
+/// pace for "this key was revoked thirty seconds ago", and it is the wrong pace
+/// for the WINDOW this task publishes — a narrowed `notAfter` that an operator
+/// can see on the `TrustPolicy` but not yet on the `Approval` is exactly the
+/// lag the published window exists to remove.
+///
+/// It costs nothing to fix: `objects` is this controller's OWN store, so the
+/// mapping is zero API calls, and it over-approximates on the safe side — see
+/// [`crate::verification::targets_in_scope`].
+fn policy_targets(
+    objects: &reflector::Store<Approval>,
+    scopes: &crate::trust::PolicyScopeMemory,
+    policy: &crate::crds::trust_policy::TrustPolicy,
+) -> Vec<ObjectRef<Approval>> {
+    // THE UNION OF BEFORE AND AFTER. A `watches` mapper is handed only the NEW
+    // object, so an edit that NARROWS — a namespace removed, `default` cleared
+    // — would otherwise enqueue nothing in the namespace it just stopped
+    // governing, which is the one edit that certainly changed that namespace's
+    // resolution. See `trust::PolicyScopeMemory`.
+    let scope = scopes.observe(policy);
+    crate::verification::targets_in_scope(objects.state(), &scope)
+}
+
 /// Run the `Approval` controller until the process ends.
 ///
 /// `Api::all`: this controller reconciles approvals in every namespace, which
@@ -1508,6 +1541,10 @@ fn error_policy(approval: Arc<Approval>, err: &ReconcileError, _ctx: Arc<Context
 /// controller per cluster, no fleet).
 pub fn controller(client: kube::Client) -> impl std::future::Future<Output = ()> + Send {
     let api: Api<Approval> = Api::all(client.clone());
+    let policy_api: Api<crate::crds::trust_policy::TrustPolicy> = Api::all(client.clone());
+    // ONE memory of what each policy bound last, owned by the mapper — the
+    // same object `controllers::backup` and `controllers::restore` give theirs.
+    let scopes = Arc::new(crate::trust::PolicyScopeMemory::default());
     // Task 19: this reconciler holds NO archive handle. Spelled out
     // rather than defaulted, so the one context field that is a
     // capability is visible at every construction site.
@@ -1522,7 +1559,17 @@ pub fn controller(client: kube::Client) -> impl std::future::Future<Output = ()>
         runner_image: crate::job::RunnerImage::default(),
     });
     async move {
-        Controller::new(api, watcher::Config::default())
+        let controller = Controller::new(api, watcher::Config::default());
+        let objects = controller.store();
+        controller
+            // THE RE-TRUST TRIGGER. A `TrustPolicy` event maps to the
+            // `Approval`s this controller already holds in the namespaces that
+            // policy could govern — see [`policy_targets`]. No reflector of its
+            // own: `decide` resolves trust live on every pass, so the trigger
+            // only has to say WHEN.
+            .watches(policy_api, watcher::Config::default(), move |policy| {
+                policy_targets(&objects, &scopes, &policy)
+            })
             .run(reconcile, error_policy, ctx)
             // Every item is already logged by `reconcile_approval` or by
             // `error_policy`; the stream exists to be DRIVEN, and a second log

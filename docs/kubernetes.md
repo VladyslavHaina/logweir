@@ -2383,11 +2383,12 @@ refusal: `verified: false` and a `Verified` condition whose `reason` is the name
 from the table above and whose `message` says what was compared — and **no**
 `approver`, **no** `matchedKeyId` and **no** `approverKeyWindow`, because a name
 lifted out of bytes whose signature nobody authorised is an attacker-controlled
-string on a field a UI renders. Those four are sent as an explicit `null` on a
-refusal, not merely left out: a JSON merge patch that omits a key leaves the old
-value, so an `Approval` verified at 09:00 and refused at 09:05 used to keep all
-of them (fixed 2026-09-21 with `approverKeyWindow`'s arrival, which made it
-load-bearing rather than untidy).
+string on a field a UI renders. Those five — the three above plus `ticket` and
+`selfAttestedRisk` — are sent as an explicit `null` on a refusal, not merely
+left out: a JSON merge patch that omits a key leaves the old value, so an
+`Approval` verified at 09:00 and refused at 09:05 used to keep all of them
+(fixed 2026-09-21 with `approverKeyWindow`'s arrival, which made it load-bearing
+rather than untidy).
 
 `selfAttestedRisk` is `true` when the matched approver key id also appears in
 `spec.signingKeys[].keyId`. It is **labelled, never refused**: `false` means
@@ -6507,7 +6508,8 @@ specs are immutable and the stored verdict is not revised in place.
 
 `approval.state` is the `Approval`'s own verdict, relayed. The check reads
 `status.verified`, the `Verified` condition's **reason** and its **message**,
-and `status.matchedKeyId` — and it derives nothing of its own about the
+`status.matchedKeyId` and `status.approverKeyWindow` — the last of which also
+decides this row's own `expiresAt` — and it derives nothing of its own about the
 approver key.
 
 | what the `Approval` says | `approval.state` |

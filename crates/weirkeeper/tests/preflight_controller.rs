@@ -1727,6 +1727,23 @@ fn both_approval_rows_re_check_inside_the_published_window() {
             row.id
         );
     }
+    // …and with NO deadline there was no comparison, so the ready sentence must
+    // not claim one. Reachable in production: `deadlineSeconds` is an unbounded
+    // `int64`, and an absurd value overflows `now + deadlineSeconds` to `None`.
+    let no_deadline = validity_row(&far);
+    assert_eq!(no_deadline.code, CheckCode::ApproverKeyValid);
+    assert!(
+        no_deadline
+            .message
+            .contains("names no deadline to compare it against"),
+        "a green row must not describe work it did not do: {}",
+        no_deadline.message
+    );
+    assert!(
+        !no_deadline.message.contains("falls inside it"),
+        "that is the sentence for a comparison that happened: {}",
+        no_deadline.message
+    );
 }
 
 /// **Deliverable 2, third half: no window is UNKNOWN, and never valid.**

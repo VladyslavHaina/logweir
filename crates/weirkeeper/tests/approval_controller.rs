@@ -3165,3 +3165,64 @@ fn the_published_window_is_the_matched_keys_and_not_the_first_keys() {
         "the window belongs to the key that actually verified the signature"
     );
 }
+
+/// **A `TrustPolicy` edit wakes this controller, rather than waiting out the
+/// heartbeat** — review MEDIUM-1's second half.
+///
+/// The verdict AND the window beside it are functions of the namespace's
+/// resolved trust, and until now this reconciler did not watch `TrustPolicy` at
+/// all: an edit reached an `Approval` at the five-minute heartbeat, or sooner
+/// only at the matched key's own `notAfter` (which `TRUST-EXPIRY-LAG` armed).
+/// Five minutes is the right pace for "install the roster, then look again" and
+/// the wrong pace for "this key was revoked thirty seconds ago" — and for the
+/// published window, whose whole purpose is that a reader can see the narrowed
+/// `notAfter` the operator just applied. `controllers::backup` and
+/// `controllers::restore` have carried this trigger since D3 W10; this one now
+/// does too, over its OWN store, so the mapping costs no API call.
+///
+/// A SOURCE SCAN, for the reason the requeue row above gives: `controller()`
+/// returns a future that needs a live watch, and the property is structural.
+/// The mapping itself is `verification::targets_in_scope`, which
+/// `tests/verification.rs` covers generically — what cannot be covered there is
+/// whether this controller is wired to it at all, which is exactly what got
+/// lost.
+///
+/// KILLS: "drop the `.watches()` arm" — the branch's own previous behaviour;
+/// "map with the policy's CURRENT scope only", which enqueues nothing in a
+/// namespace a policy just stopped governing, the one edit that certainly
+/// changed that namespace's resolution.
+#[test]
+fn a_trust_policy_event_enqueues_the_approvals_it_could_govern() {
+    let src = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/controllers/approval.rs"),
+    )
+    .expect("the reconciler's own source");
+    let start = src
+        .find("pub fn controller(client: kube::Client)")
+        .expect("the controller constructor");
+    let body = &src[start..];
+    assert!(
+        body.contains(".watches(policy_api, watcher::Config::default()"),
+        "a TrustPolicy event has to reach this controller. Body:\n{body}"
+    );
+    assert!(
+        body.contains("policy_targets(&objects, &scopes, &policy)"),
+        "…mapped over this controller's OWN store, so the trigger costs no API call. \
+         Body:\n{body}"
+    );
+
+    let mapper = src
+        .find("fn policy_targets(")
+        .map(|i| &src[i..])
+        .expect("the mapper");
+    assert!(
+        mapper.contains("scopes.observe(policy)"),
+        "the scope is the UNION of what the policy bound before and after the event; the NEW \
+         object alone misses every narrowing edit. Mapper:\n{}",
+        &mapper[..mapper.len().min(600)]
+    );
+    assert!(
+        mapper.contains("crate::verification::targets_in_scope("),
+        "and the mapping is the shared one, not a second copy of the rule"
+    );
+}
