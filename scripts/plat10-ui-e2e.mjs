@@ -36,13 +36,21 @@
 // green, a Restore that must be held for its Approval -- together with a
 // `kubectl` read proving what did or did not reach the cluster.
 //
-// WHAT THIS LAB CANNOT DO, recorded under `blocked` rather than worked
-// around: make a destination-backed run restorable. `isRecoveryPoint` needs
-// `status.windowCovered`, which the controller writes only after it reads the
-// receipt through the destination's evidence grant; this controller build
-// performs that read only for an allowlisted ControllerIdentity location
-// (a SecretKeys/ArchiveReadGrant grant is NotAttempted: "this build does not
-// create that Job"), and the lab policy allowlists none.
+// RESTORABILITY IS THE CONTROLLER'S, AND THIS BUILD PROVIDES IT.
+// `isRecoveryPoint` needs `status.windowCovered`, which the controller writes
+// only after it reads the signed receipt through the destination's evidence
+// grant. Since D2 §3.9's evidence-fetch Job landed (`claude/evidence-fetch`,
+// EVIDENCE-FETCH-JOB-UNBUILT), an `ArchiveReadGrant` destination's run goes
+// `Pending` -> `Valid` through that Job and gets its window; before it, such a
+// run was `NotAttempted` ("this build does not create that Job") and this
+// harness recorded the three restore journeys `blocked`. They now take their
+// full path, and a destination-backed run that never reaches `Valid` is a
+// FAILURE of this build, not a block: per-point Restore, older-backup
+// navigation, and create -> backup -> detail -> restore through an Approval
+// minted with the SHIPPED signer (`logweir drill approve`, the lab roster's
+// approver key, read by path and verified against the roster by keyId first)
+// to a Succeeded Restore whose restored records are compared, partition by
+// partition, with the source topic's own records.
 //
 // Dependencies: Node.js, kubectl, a built `logweir-api`, Playwright/Chromium:
 //   NODE_PATH="$(npm root -g)" node scripts/plat10-ui-e2e.mjs
@@ -57,14 +65,21 @@
 //   UI_E2E_KEEP        "1" keeps the namespace for a look around afterwards.
 //   UI_E2E_BUCKET      the bucket this run creates and removes; default the
 //                       namespace name. It must not exist beforehand.
+//   UI_E2E_LOGWEIR_BIN the `logweir` CLI whose `drill approve` signs the
+//                       Restore's plan; default target/release/logweir.
+//   UI_E2E_APPROVER_KEY the lab approver's PRIVATE key, used by path only and
+//                       never read by this process; default
+//                       $HOME/.logweir-lab/scram-e2e/approver.pem. Its public
+//                       half must be TrustRoster/default's approverKeys[0].
 
 import { spawn, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { createServer } from "node:net";
-import { existsSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
+import { homedir } from "node:os";
 
 const require = createRequire(import.meta.url);
 const { chromium } = require("playwright");
@@ -74,6 +89,13 @@ const KUBECTL = process.env.UI_E2E_KUBECTL || "kubectl";
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const UI_DIR = process.env.UI_E2E_UI_DIR || join(REPO, "ui");
 const API_BIN = process.env.UI_E2E_API_BIN || join(REPO, "target", "release", "logweir-api");
+const LOGWEIR_BIN = process.env.UI_E2E_LOGWEIR_BIN || join(REPO, "target", "release", "logweir");
+// BY PATH ONLY: this process hands the path to the shipped signer and derives
+// the PUBLIC half with openssl to compare keyIds; the private bytes are never
+// read, printed, copied or written to an artifact.
+const APPROVER_KEY = process.env.UI_E2E_APPROVER_KEY ||
+  join(homedir(), ".logweir-lab", "scram-e2e", "approver.pem");
+const KAFKA_CLIENT = "p10-kafka-client";
 const OWNER = process.env.UI_E2E_OWNER || "plat10";
 const ARTIFACTS_ROOT = process.env.UI_E2E_ARTIFACTS ||
   ("/tmp/logweir-roadmap-run/claude/artifacts/plat10-ui");
@@ -167,7 +189,7 @@ function kube(args, options) {
     encoding: "utf8",
     input: opts.input,
     timeout: opts.timeout || 30000,
-    maxBuffer: 4 * 1024 * 1024,
+    maxBuffer: opts.maxBuffer || 4 * 1024 * 1024,
   });
   const expected = opts.expected || [0];
   if (!expected.includes(done.status)) {
@@ -210,6 +232,68 @@ async function waitForTerminalBackup(name, label) {
     await pause(1000);
   }
   throw new Error(label + ": Backup " + name + " never reached a terminal phase");
+}
+
+/** Waits for the controller's REACHED evidence verdict on a terminal run.
+ *
+ *  `Pending` (the evidence-fetch Job is in flight), an absent verdict, and a
+ *  `NotAttempted` that names a retry still owed (`observation.retryAfter`) are
+ *  all "not yet"; `Valid`, `Invalid`, `Untrusted` and a `NotAttempted` with no
+ *  retry owed are the controller's answer. Every distinct verdict seen is
+ *  returned in order, so the record says whether `Pending` was observed. */
+async function waitForEvidenceVerdict(kind, name, label, seconds) {
+  const seen = [];
+  let object = null;
+  let reached = false;
+  const deadline = Date.now() + (seconds || 360) * 1000;
+  while (Date.now() < deadline) {
+    object = kubeJson(["-n", namespace, "get", kind, name]);
+    const verification = (((object.status || {}).evidence || {}).verification) || {};
+    const verdict = verification.result === undefined ? "absent" : String(verification.result);
+    if (seen[seen.length - 1] !== verdict) {
+      seen.push(verdict);
+    }
+    const retryOwed = verdict === "NotAttempted" &&
+      ((verification.observation || {}).retryAfter || "").length > 0;
+    if (verdict !== "Pending" && verdict !== "absent" && !retryOwed) {
+      reached = true;
+      break;
+    }
+    await pause(2000);
+  }
+  const verification = ((((object || {}).status || {}).evidence || {}).verification) || {};
+  return { object: object, seen: seen, reached: reached, label: label,
+    result: verification.result, detail: String(verification.detail || "").slice(0, 600),
+    matchedKeyId: verification.matchedKeyId, observation: verification.observation || null };
+}
+
+/** The records comparator: every restored partition's records, in order, are
+ *  exactly the source partition's first records. `restored` and `source` map a
+ *  partition number to the ordered list of `key\tvalue` lines. */
+function sameRecords(restored, source) {
+  const partitions = Object.keys(restored);
+  if (partitions.length === 0) {
+    return false;
+  }
+  return partitions.every((p) => {
+    const want = source[p] || [];
+    const got = restored[p];
+    return got.length > 0 && got.length === want.length &&
+      got.every((line, i) => line === want[i]);
+  });
+}
+
+/** `kafka-console-consumer.sh --property print.partition=true
+ *  --property print.key=true` output -> {partition: [key\tvalue, ...]}. */
+function byPartition(output) {
+  const out = {};
+  for (const line of String(output || "").split("\n")) {
+    const m = /^Partition:(\d+)\t(.*)$/.exec(line);
+    if (m !== null) {
+      (out[m[1]] = out[m[1]] || []).push(m[2]);
+    }
+  }
+  return out;
 }
 
 function pause(ms) {
@@ -414,6 +498,57 @@ function seedConnection(name, servers, role, labSecret) {
   return name;
 }
 
+/** A Kafka client pod in THIS namespace, for reading the restored records and
+ *  the source records they are compared with. The SCRAM passwords reach it as
+ *  environment variables from this run's own Secret copies and are written
+ *  into client configs INSIDE the pod: never in argv, never in this process,
+ *  never in an artifact. The shared brokers are only ever read here, except
+ *  for deleting the topics this run's own Restore created (see cleanUp). */
+let kafkaClientReady = false;
+function ensureKafkaClient(sourceSecret, targetSecret) {
+  if (kafkaClientReady) {
+    return;
+  }
+  const props = "security.protocol=SASL_PLAINTEXT\\nsasl.mechanism=SCRAM-SHA-512\\n" +
+    "sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required " +
+    "username=\\\"scram-user\\\" password=\\\"$PW\\\";\\n";
+  const script = "PW=\"$SRC_PW\"; printf \"" + props + "\" > /tmp/src.properties; " +
+    "PW=\"$TGT_PW\"; printf \"" + props + "\" > /tmp/tgt.properties; " +
+    "unset SRC_PW TGT_PW PW; touch /tmp/ready; sleep 10800";
+  const env = (name, secret) => ({ name: name,
+    valueFrom: { secretKeyRef: { name: secret, key: "password" } } });
+  kube(["-n", namespace, "create", "-f", "-"], {
+    input: JSON.stringify({
+      apiVersion: "v1", kind: "Pod",
+      metadata: { name: KAFKA_CLIENT, labels: { "logweir.dev/test-owner": OWNER } },
+      spec: {
+        restartPolicy: "Never", automountServiceAccountToken: false,
+        containers: [{
+          name: "kafka", image: "apache/kafka:3.7.1", imagePullPolicy: "IfNotPresent",
+          command: ["/bin/bash", "-c", script],
+          env: [env("SRC_PW", sourceSecret), env("TGT_PW", targetSecret)],
+          readinessProbe: { exec: { command: ["test", "-f", "/tmp/ready"] }, periodSeconds: 1 },
+        }],
+      },
+    }),
+  });
+  kube(["-n", namespace, "wait", "--for=condition=Ready", "pod/" + KAFKA_CLIENT,
+    "--timeout=180s"], { timeout: 200000 });
+  result.fixtures.push({ kind: "Pod", name: KAFKA_CLIENT, image: "apache/kafka:3.7.1",
+    note: "reads the restored and the source records; passwords stay inside the pod" });
+  kafkaClientReady = true;
+}
+
+function kafkaTool(broker, tool, args, timeoutMs) {
+  const bootstrap = broker === "source" ? LAB_KAFKA : LAB_TARGET;
+  const flag = { "kafka-topics.sh": "--command-config",
+    "kafka-console-consumer.sh": "--consumer.config" }[tool];
+  const conf = broker === "source" ? "/tmp/src.properties" : "/tmp/tgt.properties";
+  return kube(["-n", namespace, "exec", KAFKA_CLIENT, "--", "/opt/kafka/bin/" + tool,
+    "--bootstrap-server", bootstrap, flag, conf].concat(args),
+  { timeout: timeoutMs || 120000, expected: [0, 1], maxBuffer: 256 * 1024 * 1024 });
+}
+
 /** One `minio/mc` Job in THIS namespace, against THIS run's bucket only, with
  *  the owned copy of the lab's object-store credential. Its log is the
  *  evidence; it never prints a credential (the alias line is silenced). */
@@ -585,6 +720,7 @@ async function main() {
   const target = seedConnection("target-" + suffix, LAB_TARGET, "target", "target-scram");
   const destination = seedDestination("primary-" + suffix, true, namespace);
   const noGrant = seedDestination("nogrant-" + suffix, false, namespace + "-nogrant");
+  result.kafkaClientSecrets = [source + "-scram", target + "-scram"];
 
   // THE DURABLE CATALOG, reconciled by the lab controller from this run's own
   // bucket. Synced once while the bucket is empty, so the first history below
@@ -1234,8 +1370,8 @@ async function main() {
     }
     await freshPage(detailRoute);
     await waitForSelector(page, "#schedule-history", "the history after the sync");
-    const rowA1 = await historyRow(runA.metadata.name);
-    const rowB1 = await historyRow(runB.metadata.name);
+    let rowA1 = await historyRow(runA.metadata.name);
+    let rowB1 = await historyRow(runB.metadata.name);
     for (const [row, p] of [[rowA1, pA[0]], [rowB1, pB[0]]]) {
       check(row.availability === p.availability && row.availabilityGreens >= 1,
         "a healthy point's availability is not the catalog's green word: " + JSON.stringify(row));
@@ -1256,39 +1392,57 @@ async function main() {
     // ================================================================== 8b
     // RESTORABILITY IS THE CONTROLLER'S. `isRecoveryPoint` (PLAT-11.1)
     // requires `status.windowCovered`, which the controller writes only after
-    // IT reads the signed receipt through the destination's evidence grant.
-    // Re-read both runs: whatever the controller wrote is all there is.
-    const liveA = kubeJson(["-n", namespace, "get", "backup", runA.metadata.name]);
-    const liveB = kubeJson(["-n", namespace, "get", "backup", runB.metadata.name]);
-    const evidenceOf = (run) => (((run.status || {}).evidence || {}).verification) || {};
-    const restorable = liveA.status.windowCovered !== undefined &&
-      liveB.status.windowCovered !== undefined;
-    const restoreRefusal = {
-      controllerVerification: [liveA, liveB].map((run) => ({ run: run.metadata.name,
-        result: evidenceOf(run).result, detail: String(evidenceOf(run).detail || "") })),
+    // IT reads the signed receipt through the destination's evidence grant --
+    // for an ArchiveReadGrant destination, through the evidence-fetch Job
+    // (`Pending` -> `Valid`). Wait for the controller's REACHED verdict on both
+    // runs: whatever it wrote is all there is, and a run that never reaches
+    // `Valid` fails this row (EVIDENCE-FETCH-JOB-UNBUILT again), because this
+    // harness no longer has a "blocked" answer for a missing window.
+    const fetchedA = await waitForEvidenceVerdict("backup", runA.metadata.name, "run A", 420);
+    const fetchedB = await waitForEvidenceVerdict("backup", runB.metadata.name, "run B", 420);
+    const liveA = fetchedA.object;
+    const liveB = fetchedB.object;
+    const restoreFacts = {
+      controllerVerification: [fetchedA, fetchedB].map((f) => ({ run: f.object.metadata.name,
+        result: f.result, verdictsSeen: f.seen, reached: f.reached, detail: f.detail,
+        matchedKeyId: f.matchedKeyId, observation: f.observation })),
       windowCovered: [liveA, liveB].map((run) => run.status.windowCovered === undefined
         ? "absent" : run.status.windowCovered),
+      records: [liveA, liveB].map((run) => run.status.records === undefined
+        ? "absent" : run.status.records),
       destinationAccess: { archiveRead: "SecretKeys", evidenceRead: "ArchiveReadGrant" },
     };
     writeFileSync(join(ARTIFACTS, "restorability.json"),
-      JSON.stringify(restoreRefusal, null, 2) + "\n");
-    if (restorable) {
-      check(rowA1.restoreHref !== null && rowB1.restoreHref !== null,
-        "a point the controller made restorable offers no Restore");
-      record("PLAT-10.2 each real point carries its own Restore, from the controller's own window", {
-        rowRestoreA: rowA1.restoreHref, rowRestoreB: rowB1.restoreHref,
-        windows: restoreRefusal.windowCovered,
-      });
-    } else {
-      // The console agrees with the controller: no window, no Restore.
-      check(rowA1.restoreHref === null && rowB1.restoreHref === null &&
-        await page.evaluate(() => document.querySelector("#schedule-restore-latest") === null),
-        "a point with no controller-written window was offered a Restore");
-      blocked("PLAT-10.2 each real point carries its own Restore", Object.assign({
-        condition: "the lab controller wrote no status.windowCovered for a destination-backed " +
-          "run with evidenceRead ArchiveReadGrant; the console therefore offers no Restore",
-      }, restoreRefusal));
-    }
+      JSON.stringify(restoreFacts, null, 2) + "\n");
+    const fetchJob = (f) => String(((f.observation || {}).jobRef || {}).name || "");
+    check([fetchedA, fetchedB].every((f) => f.result === "Valid" &&
+      fetchJob(f).startsWith("lwc-ev-")) &&
+      liveA.status.windowCovered !== undefined && liveB.status.windowCovered !== undefined,
+    "a destination-backed run with evidenceRead ArchiveReadGrant did not reach Valid with a " +
+      "window through the evidence-fetch Job (EVIDENCE-FETCH-JOB-UNBUILT): " +
+      JSON.stringify(restoreFacts).slice(0, 2500));
+    // THE PAGE IS RE-READ NOW: the rows above may have been painted before the
+    // fetch Job's verdict landed.
+    await freshPage(detailRoute);
+    await waitForSelector(page, "#schedule-history", "the history after the evidence fetch");
+    rowA1 = await historyRow(runA.metadata.name);
+    rowB1 = await historyRow(runB.metadata.name);
+    check(rowA1.restoreHref !== null && rowB1.restoreHref !== null,
+      "a point the controller made restorable offers no Restore: " +
+        JSON.stringify([rowA1, rowB1]));
+    check(rowA1.restoreHref.indexOf("uid=" + runA.metadata.uid) !== -1 &&
+      rowB1.restoreHref.indexOf("uid=" + runB.metadata.uid) !== -1,
+    "a row's Restore is not bound to its own run: " +
+      JSON.stringify([rowA1.restoreHref, rowB1.restoreHref]));
+    check(rowA1.restoreHref !== rowB1.restoreHref, "two rows share one Restore link");
+    await shot(page, "13a-history-rows-restorable");
+    record("PLAT-10.2 each real point carries its own Restore, from the controller's own window", {
+      rowRestoreA: rowA1.restoreHref, rowRestoreB: rowB1.restoreHref,
+      windows: restoreFacts.windowCovered,
+      verdicts: restoreFacts.controllerVerification.map((v) => ({ run: v.run,
+        result: v.result, seen: v.verdictsSeen, fetchJob: (v.observation || {}).jobRef,
+        attempt: (v.observation || {}).attempt, mode: (v.observation || {}).mode })),
+    });
 
     // CONTROL: a run whose destination has NO evidence grant is NotAttempted
     // and offers no Restore -- the correct product behaviour, on a real run.
@@ -1296,12 +1450,20 @@ async function main() {
       noGrant);
     await freshPage(detailOf(noGrantSchedule.metadata.name));
     const runN = await backUpNow(noGrantSchedule.metadata.name);
-    const terminalN = await waitForTerminalBackup(runN.metadata.name, "the no-grant run");
-    check(terminalN.status.phase === "Succeeded", "the no-grant run did not succeed");
-    const verdictN = evidenceOf(terminalN);
-    check(verdictN.result === "NotAttempted" && terminalN.status.windowCovered === undefined,
-      "a run with no evidence grant was verified or given a window: " +
-        JSON.stringify({ verification: verdictN, window: terminalN.status.windowCovered }));
+    const terminalN0 = await waitForTerminalBackup(runN.metadata.name, "the no-grant run");
+    check(terminalN0.status.phase === "Succeeded", "the no-grant run did not succeed");
+    // THE SAME WAIT AS THE GRANTED RUNS, so the two answers are comparable: a
+    // run with no evidence grant must reach NotAttempted with no retry owed,
+    // never pass through Pending (no fetch Job may exist for it) and get no window.
+    const fetchedN = await waitForEvidenceVerdict("backup", runN.metadata.name, "the no-grant run",
+      120);
+    const terminalN = fetchedN.object;
+    const verdictN = ((terminalN.status.evidence || {}).verification) || {};
+    check(fetchedN.reached && verdictN.result === "NotAttempted" &&
+      fetchedN.seen.indexOf("Pending") === -1 && terminalN.status.windowCovered === undefined,
+    "a run with no evidence grant was verified, fetched or given a window: " +
+        JSON.stringify({ verification: verdictN, seen: fetchedN.seen,
+          window: terminalN.status.windowCovered }));
     await freshPage(detailOf(noGrantSchedule.metadata.name));
     await waitForSelector(page, "#schedule-history", "the no-grant history");
     const rowN = await historyRow(runN.metadata.name);
@@ -1313,57 +1475,37 @@ async function main() {
     control("a real run whose destination has no evidence grant is NotAttempted and offers no Restore", {
       schedule: noGrantSchedule.metadata.name, run: runN.metadata.name,
       verification: { result: verdictN.result, detail: String(verdictN.detail || "") },
-      windowCovered: "absent", rowRestore: rowN.restoreHref,
+      verdictsSeen: fetchedN.seen, windowCovered: "absent", rowRestore: rowN.restoreHref,
     });
 
     // =================================================================== 9
     // PLAT-10.2 navigation to an OLDER backup: A's own link opens the wizard
     // bound to A, while B is the newest.
-    const wizardRouteOf = (run) => "#/restore?ns=" + encodeURIComponent(namespace) +
-      "&backup=" + encodeURIComponent(run.metadata.name) + "&uid=" +
-      encodeURIComponent(run.metadata.uid);
-    /** What the wizard itself says about a point the console offered no link
-     *  to. Opened ONLY to record the product's own refusal; it is never counted
-     *  as the console offering a restore. */
-    async function wizardAnswer(run, label) {
-      await page.goto(base + wizardRouteOf(run), { waitUntil: "load", timeout: 30000 });
-      await page.reload({ waitUntil: "load", timeout: 30000 });
-      await pause(2500);
-      await shot(page, label);
-      const said = (await page.evaluate(() => document.body.innerText)).trim();
-      return { route: wizardRouteOf(run), offeredByConsole: false,
-        boundUid: await page.evaluate(() => {
-          const node = document.querySelector("#point-uid");
-          return node === null ? null : node.textContent.trim();
-        }),
-        createButton: await page.evaluate(() => document.querySelector("#create-restore") !== null),
-        said: said.slice(0, 1500) };
-    }
-    if (restorable) {
-      const latestHref = await page.getAttribute("#schedule-restore-latest", "href");
-      check(latestHref.indexOf("uid=" + runB.metadata.uid) !== -1,
-        "the page-level Restore is not bound to the newest real point: " + latestHref);
-      check(rowA1.restoreHref.indexOf("uid=" + runA.metadata.uid) !== -1,
-        "run A's row Restore is not bound to run A: " + rowA1.restoreHref);
-      result.reloads = (result.reloads || 0) +
-        await openRoute(page, base + rowA1.restoreHref, "#point-uid", "the wizard on the older point");
-      const boundName = (await page.textContent("#point-name")).trim();
-      const boundUid = (await page.textContent("#point-uid")).trim();
-      check(boundUid === runA.metadata.uid, "the wizard is bound to " + boundUid);
-      check(boundName === runA.metadata.name, "the wizard named " + boundName);
-      check(boundUid !== runB.metadata.uid,
-        "the wizard substituted the newest point for the one the link named");
-      await shot(page, "14-wizard-on-older-point");
-      record("PLAT-10.2 navigation to an older real backup opens the wizard bound to it, not the newest", {
-        followed: rowA1.restoreHref, boundName: boundName, boundUid: boundUid,
-        newestUid: runB.metadata.uid, pageLevelRestore: latestHref,
-      });
-    } else {
-      blocked("PLAT-10.2 navigation to an older backup", {
-        condition: "no row offers a Restore (no controller-written window)",
-        wizardOnOlderPoint: await wizardAnswer(runA, "14-wizard-refuses-older-point"),
-      });
-    }
+    // The link is FOLLOWED FROM THE PAGE: A's row anchor is clicked on the
+    // detail, so what is proved is the navigation a person would take, not a
+    // route this harness assembled.
+    await freshPage(detailRoute);
+    await waitForSelector(page, "#schedule-restore-latest", "the page-level Restore");
+    const latestHref = await page.getAttribute("#schedule-restore-latest", "href");
+    check(latestHref.indexOf("uid=" + runB.metadata.uid) !== -1,
+      "the page-level Restore is not bound to the newest real point: " + latestHref);
+    const rowAHref = (await historyRow(runA.metadata.name)).restoreHref;
+    check(rowAHref !== null && rowAHref.indexOf("uid=" + runA.metadata.uid) !== -1,
+      "run A's row Restore is not bound to run A: " + rowAHref);
+    await page.click("#schedule-history a[href=\"" + rowAHref + "\"]");
+    await waitForSelector(page, "#point-uid", "the wizard on the older point");
+    const boundName = (await page.textContent("#point-name")).trim();
+    const boundUid = (await page.textContent("#point-uid")).trim();
+    const followedTo = await page.evaluate(() => window.location.hash);
+    check(boundUid === runA.metadata.uid, "the wizard is bound to " + boundUid);
+    check(boundName === runA.metadata.name, "the wizard named " + boundName);
+    check(boundUid !== runB.metadata.uid,
+      "the wizard substituted the newest point for the one the link named");
+    await shot(page, "14-wizard-on-older-point");
+    record("PLAT-10.2 navigation to an older real backup opens the wizard bound to it, not the newest", {
+      followed: rowAHref, landedOn: followedTo, boundName: boundName, boundUid: boundUid,
+      newestUid: runB.metadata.uid, pageLevelRestore: latestHref,
+    });
 
     // ================================================================== 10
     // PLAT-10.2 an UNAVAILABLE archive beside a healthy one: remove only A's
@@ -1394,6 +1536,17 @@ async function main() {
     check(rowB2.availability === "Available" && rowB2.availabilityGreens >= 1 &&
       rowB2.verificationGreens >= 1, "the healthy point beside it lost its green: " +
       JSON.stringify(rowB2));
+    // THE PER-ROW RESTORE FOLLOWS THE CATALOG: the point whose archive is gone
+    // is no longer offered, while the healthy one beside it still is.
+    check(rowA2.restoreHref === null,
+      "a point the catalog now calls " + pA2[0].availability + " still offers a Restore: " +
+        rowA2.restoreHref);
+    check(rowB2.restoreHref !== null && rowB2.restoreHref.indexOf("uid=" + runB.metadata.uid) !== -1,
+      "the healthy point beside it lost its own Restore: " + rowB2.restoreHref);
+    control("a point whose archive is gone offers no Restore, beside a healthy point that does", {
+      unavailable: { run: runA.metadata.name, restoreHref: rowA2.restoreHref },
+      healthy: { run: runB.metadata.name, restoreHref: rowB2.restoreHref },
+    });
     await shot(page, "15-history-unavailable-beside-healthy");
     record("PLAT-10.2 an unavailable archive is distinguishable from a healthy point in one history", {
       removedKey: BUCKET + "/" + manifestKey, mcLog: removed,
@@ -1407,125 +1560,289 @@ async function main() {
     // ================================================================== 11
     // DONE EVIDENCE: create -> backup -> schedule detail -> restore, with no
     // configuration reconstructed. B's row opens the wizard bound to B; the
-    // harness picks ONLY a target cluster and presses Create.
-    if (restorable) {
-      result.reloads = (result.reloads || 0) +
-        await openRoute(page, base + rowB2.restoreHref, "#point-uid", "the wizard on the healthy point");
-      check((await page.textContent("#point-uid")).trim() === runB.metadata.uid,
-        "the wizard is not bound to run B");
-      await waitForSelector(page, "#target-cluster", "the wizard's target step");
-      const targetUid = kubeJson(["-n", namespace, "get", "kafkacluster", target]).metadata.uid;
-      await page.selectOption("#target-cluster", targetUid);
-      await waitForSelector(page, "#plan-bytes", "the plan preview");
-      await pause(1000);
-      const previewed = await page.evaluate(() => ({
-        bytes: (document.querySelector("#plan-bytes") || {}).textContent || "",
-        hash: (document.querySelector("#plan-hash-value") || {}).textContent || "",
-      }));
-      writeFileSync(join(ARTIFACTS, "restore-previewed-plan.txt"), previewed.bytes);
-      await shot(page, "16-wizard-before-create");
-      const restoreMarker = result.requests.length;
-      await page.click("#create-restore");
-      let restorePosts = [];
-      for (let i = 0; i < 40 && restorePosts.length === 0; i += 1) {
-        await pause(500);
-        restorePosts = result.requests.slice(restoreMarker).filter((r) =>
-          r.method === "POST" && /\/restores$/.test(r.url));
-      }
-      check(restorePosts.length === 1, "the wizard sent " + restorePosts.length +
-        " restore create(s). Page said:\n" + (await text(page)).slice(0, 1500));
-      const restoreBody = JSON.parse(restorePosts[0].body);
-      writeFileSync(join(ARTIFACTS, "restore-create-request.json"),
-        JSON.stringify(restoreBody, null, 2) + "\n");
-      check((restoreBody.sourceDestinationRef || {}).name === destination,
-        "the restore request does not carry the schedule's saved destination: " +
-          JSON.stringify(restoreBody.sourceDestinationRef));
-      check(((restoreBody.sourceArchive || {}).url) === "logweir-destination://" + destination &&
-        (restoreBody.sourceArchive || {}).credentialRef === undefined,
-        "the restore request reconstructed an archive location or carried a credential: " +
-          JSON.stringify(restoreBody.sourceArchive));
-      check(restoreBody.planBytes === previewed.bytes, "the submitted plan is not the preview");
-      check(previewed.bytes.indexOf(terminalB.status.backupId) !== -1,
-        "the plan does not name run B's backup set");
-      check(previewed.bytes.indexOf(terminalA.status.backupId) === -1,
-        "the plan names run A's backup set");
-      let restore = null;
-      for (let i = 0; i < 40 && restore === null; i += 1) {
-        restore = (kubeJson(["-n", namespace, "get", "restores"]).items || []).find((r) =>
-          ((r.spec || {}).approvalRef || {}).name === (restoreBody.approvalRef || {}).name) || null;
-        if (restore === null) {
-          await pause(500);
-        }
-      }
-      check(restore !== null, "no Restore object carries the wizard's approval reference");
-      result.created.push({ kind: "Restore", name: restore.metadata.name,
-        uid: restore.metadata.uid, createdBy: "the page (restore wizard)" });
-      await shot(page, "17-restore-submitted");
-      // ADMISSION: the lab controller holds the Restore until an Approval that
-      // the TrustRoster's approver key verifies exists. The approver's private
-      // key is not on this host, so no Approval can be minted here.
-      let held = null;
-      for (let i = 0; i < 60; i += 1) {
-        const current = kubeJson(["-n", namespace, "get", "restore", restore.metadata.name]);
-        const admitted = ((current.status || {}).conditions || []).find((c) => c.type === "Admitted");
-        if (admitted !== undefined) {
-          held = current;
-          break;
-        }
-        await pause(1000);
-      }
-      check(held !== null, "the lab controller never admitted or held the Restore");
-      const admitted = held.status.conditions.find((c) => c.type === "Admitted");
-      // THE REFUSAL THIS ROW REQUIRES: held, not running, for the approval.
-      check(admitted.status === "False" && admitted.reason === "ApprovalNotVerified",
-        "the Restore was not held for its approval: " + JSON.stringify(admitted));
-      check(["Running", "Succeeded"].indexOf(String(held.status.phase || "")) === -1,
-        "a Restore with no verified Approval is " + held.status.phase);
-      const approval = kube(["-n", namespace, "get", "approval", restoreBody.approvalRef.name],
-        { expected: [0, 1] });
-      check(approval.status !== 0, "an Approval exists that this run did not mint");
-      writeFileSync(join(ARTIFACTS, "restore-held.json"),
-        JSON.stringify({ metadata: { name: held.metadata.name, uid: held.metadata.uid },
-          spec: { approvalRef: held.spec.approvalRef, sourceDestinationRef:
-            held.spec.sourceDestinationRef, sourceArchive: held.spec.sourceArchive },
-          status: held.status }, null, 2) + "\n");
-      record("DONE EVIDENCE create -> backup -> detail -> restore: the wizard submits with the schedule's destination and point carried; admission BLOCKED ON HOST KEY MATERIAL", {
-        schedule: selected.metadata.name, point: { name: runB.metadata.name,
-          uid: runB.metadata.uid, backupId: terminalB.status.backupId },
-        harnessTyped: "only the target cluster selection",
-        request: { sourceDestinationRef: restoreBody.sourceDestinationRef,
-          evidenceDestinationRef: restoreBody.evidenceDestinationRef,
-          sourceArchive: restoreBody.sourceArchive, approvalRef: restoreBody.approvalRef },
-        restore: { name: held.metadata.name, uid: held.metadata.uid, phase: held.status.phase,
-          admitted: admitted },
-        approvalObject: "absent (NotFound)",
-        blocked: "BLOCKED ON HOST KEY MATERIAL: the approver private key for " +
-          "approver@scram-local.invalid is not on this host, so no verifiable Approval can be minted",
-      });
-      // THE APPROVAL IS NOT MINTED BY THIS HARNESS VERSION: on this lab no
-      // destination-backed point has ever become restorable, so the mint path
-      // (`logweir drill approve` over `spec.planBytes`, then an Approval whose
-      // subjectRef is this Restore) has never had a subject to run against.
-      blocked("DONE EVIDENCE Approval, admission and restored records", {
-        condition: "a restorable point reached the wizard; the Approval mint is the next step " +
-          "and is not implemented in this harness version",
-        restore: held.metadata.name,
-      });
-    } else {
-      blocked("DONE EVIDENCE create -> backup -> schedule detail -> restore", {
-        condition: "create, backup and the schedule detail are real; the detail offers no " +
-          "Restore because the lab controller wrote no status.windowCovered " +
-          "(evidenceRead ArchiveReadGrant -> NotAttempted), so no Restore object, Approval or " +
-          "restored record exists",
-        schedule: selected.metadata.name,
-        point: { name: runB.metadata.name, uid: runB.metadata.uid,
-          backupId: terminalB.status.backupId },
-        pointCatalogVerdict: pB2.map((p) => [p.availability, p.verification, p.selectable]),
-        wizardOnNewestPoint: await wizardAnswer(runB, "16-wizard-refuses-healthy-point"),
-        approverKey: "present at the path the coordinator named (0600); never read, since " +
-          "no Restore exists to approve",
-      });
+    // harness picks ONLY a target cluster and presses Create. The Restore is
+    // held for its Approval (the refusal this row requires first), then an
+    // Approval is minted over the Restore's OWN stored planBytes with the
+    // shipped signer and the lab roster's approver key, and the Restore runs
+    // to Succeeded; its restored records are read back from the target and
+    // compared with the source topic's records.
+    // FOLLOWED FROM THE DETAIL: the page is the schedule detail section 10
+    // just re-read, and B's own row link is clicked.
+    await page.click("#schedule-history a[href=\"" + rowB2.restoreHref + "\"]");
+    await waitForSelector(page, "#point-uid", "the wizard on the healthy point");
+    check((await page.textContent("#point-uid")).trim() === runB.metadata.uid,
+      "the wizard is not bound to run B");
+    await waitForSelector(page, "#target-cluster", "the wizard's target step");
+    const targetUid = kubeJson(["-n", namespace, "get", "kafkacluster", target]).metadata.uid;
+    await page.selectOption("#target-cluster", targetUid);
+    await waitForSelector(page, "#plan-bytes", "the plan preview");
+    await pause(1000);
+    const previewed = await page.evaluate(() => ({
+      bytes: (document.querySelector("#plan-bytes") || {}).textContent || "",
+      hash: (document.querySelector("#plan-hash-value") || {}).textContent || "",
+    }));
+    writeFileSync(join(ARTIFACTS, "restore-previewed-plan.txt"), previewed.bytes);
+    await shot(page, "16-wizard-before-create");
+    const restoreMarker = result.requests.length;
+    await page.click("#create-restore");
+    let restorePosts = [];
+    for (let i = 0; i < 40 && restorePosts.length === 0; i += 1) {
+      await pause(500);
+      restorePosts = result.requests.slice(restoreMarker).filter((r) =>
+        r.method === "POST" && /\/restores$/.test(r.url));
     }
+    check(restorePosts.length === 1, "the wizard sent " + restorePosts.length +
+      " restore create(s). Page said:\n" + (await text(page)).slice(0, 1500));
+    const restoreBody = JSON.parse(restorePosts[0].body);
+    // RECORDED BEFORE ANYTHING RUNS, so the cleanup removes the restored
+    // topics even when the restore fails half way.
+    result.restoreTargets = (restoreBody.topicMapping || []).map((m) => m.target);
+    writeFileSync(join(ARTIFACTS, "restore-create-request.json"),
+      JSON.stringify(restoreBody, null, 2) + "\n");
+    check((restoreBody.sourceDestinationRef || {}).name === destination,
+      "the restore request does not carry the schedule's saved destination: " +
+        JSON.stringify(restoreBody.sourceDestinationRef));
+    check(((restoreBody.sourceArchive || {}).url) === "logweir-destination://" + destination &&
+      (restoreBody.sourceArchive || {}).credentialRef === undefined,
+      "the restore request reconstructed an archive location or carried a credential: " +
+        JSON.stringify(restoreBody.sourceArchive));
+    check(restoreBody.planBytes === previewed.bytes, "the submitted plan is not the preview");
+    check(previewed.bytes.indexOf(terminalB.status.backupId) !== -1,
+      "the plan does not name run B's backup set");
+    check(previewed.bytes.indexOf(terminalA.status.backupId) === -1,
+      "the plan names run A's backup set");
+    let restore = null;
+    for (let i = 0; i < 40 && restore === null; i += 1) {
+      restore = (kubeJson(["-n", namespace, "get", "restores"]).items || []).find((r) =>
+        ((r.spec || {}).approvalRef || {}).name === (restoreBody.approvalRef || {}).name) || null;
+      if (restore === null) {
+        await pause(500);
+      }
+    }
+    check(restore !== null, "no Restore object carries the wizard's approval reference");
+    result.created.push({ kind: "Restore", name: restore.metadata.name,
+      uid: restore.metadata.uid, createdBy: "the page (restore wizard)" });
+    await shot(page, "17-restore-submitted");
+    // ADMISSION: the lab controller holds the Restore until an Approval that
+    // the TrustRoster's approver key verifies exists. Nothing is minted until
+    // that hold is observed, so the hold is measured, not assumed.
+    let held = null;
+    for (let i = 0; i < 60; i += 1) {
+      const current = kubeJson(["-n", namespace, "get", "restore", restore.metadata.name]);
+      const admitted = ((current.status || {}).conditions || []).find((c) => c.type === "Admitted");
+      if (admitted !== undefined) {
+        held = current;
+        break;
+      }
+      await pause(1000);
+    }
+    check(held !== null, "the lab controller never admitted or held the Restore");
+    const admitted = held.status.conditions.find((c) => c.type === "Admitted");
+    // THE REFUSAL THIS ROW REQUIRES: held, not running, for the approval.
+    check(admitted.status === "False" && admitted.reason === "ApprovalNotVerified",
+      "the Restore was not held for its approval: " + JSON.stringify(admitted));
+    check(["Running", "Succeeded"].indexOf(String(held.status.phase || "")) === -1,
+      "a Restore with no verified Approval is " + held.status.phase);
+    const approval = kube(["-n", namespace, "get", "approval", restoreBody.approvalRef.name],
+      { expected: [0, 1] });
+    check(approval.status !== 0, "an Approval exists that this run did not mint");
+    writeFileSync(join(ARTIFACTS, "restore-held.json"),
+      JSON.stringify({ metadata: { name: held.metadata.name, uid: held.metadata.uid },
+        spec: { approvalRef: held.spec.approvalRef, sourceDestinationRef:
+          held.spec.sourceDestinationRef, sourceArchive: held.spec.sourceArchive },
+        status: held.status }, null, 2) + "\n");
+    const heldAdmitted = admitted;
+    control("a Restore the wizard created is HELD for its Approval: Admitted=False/ApprovalNotVerified, not running, no Approval object", {
+      restore: held.metadata.name, admitted: heldAdmitted, phase: held.status.phase,
+    });
+
+    // --- the Approval, through the ceremony the product ships -------------
+    // THE KEY IS THE ROSTER'S: its public half is derived with openssl and its
+    // keyId compared with TrustRoster/default.spec.approverKeys[0] BEFORE the
+    // path is handed to the signer, so a stale key from an earlier lab is a
+    // named refusal here and not an unverifiable Approval later.
+    check(existsSync(APPROVER_KEY), "the approver key is not at " + APPROVER_KEY);
+    check(existsSync(LOGWEIR_BIN), "the logweir CLI is not at " + LOGWEIR_BIN);
+    const spki = spawnSync("openssl", ["pkey", "-in", APPROVER_KEY, "-pubout", "-outform", "DER"],
+      { timeout: 30000 });
+    check(spki.status === 0 && spki.stdout.length > 0, "openssl could not derive the approver's public key");
+    const approverKeyId = createHash("sha256").update(spki.stdout).digest("hex");
+    const roster = kubeJson(["get", "trustroster", "default"]);
+    const rosterApprover = ((((roster.spec || {}).approverKeys) || [])[0] || {}).keyId;
+    check(approverKeyId === rosterApprover, "the approver key on this host is " +
+      approverKeyId.slice(0, 16) + "..., not the roster's approverKeys[0] " +
+      String(rosterApprover).slice(0, 16) + "...");
+    const planBytes = held.spec.planBytes;
+    check(planBytes === previewed.bytes, "the Restore's stored planBytes are not the previewed plan");
+    const planHash = "sha256:" + createHash("sha256").update(planBytes, "utf8").digest("hex");
+    const signDir = mkdtempSync(join(WORK_DIR, "sign-"));
+    let approvalBytes = null;
+    let sidecarBytes = null;
+    try {
+      writeFileSync(join(signDir, "plan.json"), planBytes);
+      const signed = spawnSync(LOGWEIR_BIN, ["drill", "approve", "--spec", join(signDir, "plan.json"),
+        "--key", APPROVER_KEY, "--approver", OWNER, "--ticket", "PLAT-10.2",
+        "--subject-kind", "Restore", "--out", join(signDir, "approval.json")],
+      { encoding: "utf8", timeout: 120000 });
+      check(signed.status === 0, "the shipped signer refused: " +
+        String(signed.stderr || "").slice(0, 800));
+      approvalBytes = readFileSync(join(signDir, "approval.json"), "utf8");
+      sidecarBytes = readFileSync(join(signDir, "approval.sig"), "utf8");
+    } finally {
+      rmSync(signDir, { recursive: true, force: true });
+    }
+    kube(["-n", namespace, "create", "-f", "-"], {
+      input: JSON.stringify({
+        apiVersion: "logweir.dev/v1alpha1", kind: "Approval",
+        metadata: { name: restoreBody.approvalRef.name,
+          labels: { "logweir.dev/test-owner": OWNER } },
+        spec: { subjectRef: { kind: "Restore", name: restore.metadata.name },
+          planHash: planHash, approvalBytes: approvalBytes, sidecarBytes: sidecarBytes },
+      }),
+    });
+    const approvalObject = kubeJson(["-n", namespace, "get", "approval",
+      restoreBody.approvalRef.name]);
+    result.created.push({ kind: "Approval", name: approvalObject.metadata.name,
+      uid: approvalObject.metadata.uid, createdBy: "this harness (logweir drill approve)" });
+
+    // --- admission, execution, and the terminal answer ---------------------
+    const terminalPhases = ["Succeeded", "Failed", "Refused", "Cancelled"];
+    const progress = [];
+    let admittedTrue = null;
+    let finished = null;
+    for (let i = 0; i < 600 && finished === null; i += 1) {
+      const current = kubeJson(["-n", namespace, "get", "restore", restore.metadata.name]);
+      const st = current.status || {};
+      const adm = (st.conditions || []).find((c) => c.type === "Admitted") || {};
+      if (adm.status === "True" && admittedTrue === null) {
+        admittedTrue = adm;
+      }
+      const point = { phase: st.phase || null, stage: (st.progress || {}).stage || null,
+        admitted: adm.status || null };
+      if (progress.length === 0 ||
+        JSON.stringify(progress[progress.length - 1]) !== JSON.stringify(point)) {
+        progress.push(point);
+      }
+      if (terminalPhases.indexOf(String(st.phase || "")) !== -1) {
+        finished = current;
+        break;
+      }
+      await pause(2000);
+    }
+    check(finished !== null, "the approved Restore never reached a terminal phase: " +
+      JSON.stringify(progress.slice(-5)));
+    const approvalAfter = kubeJson(["-n", namespace, "get", "approval",
+      restoreBody.approvalRef.name]);
+    const fetchedR = finished.status.phase === "Succeeded"
+      ? await waitForEvidenceVerdict("restore", restore.metadata.name, "the restore", 420)
+      : { object: finished, seen: [], reached: false, result: null, observation: null };
+    const done = fetchedR.object;
+    const doneStatus = done.status || {};
+    writeFileSync(join(ARTIFACTS, "restore-terminal.json"), JSON.stringify({
+      metadata: { name: done.metadata.name, uid: done.metadata.uid }, status: doneStatus,
+      progress: progress, approval: { name: approvalAfter.metadata.name,
+        uid: approvalAfter.metadata.uid, status: approvalAfter.status } }, null, 2) + "\n");
+    const admittedEnd = (doneStatus.conditions || []).find((c) => c.type === "Admitted") || {};
+    const verifiedCond = (doneStatus.conditions || []).find((c) => c.type === "Verified") || {};
+    const completion = doneStatus.completion || {};
+    const ranClauses = {
+      "the Approval verified against the roster key": (((approvalAfter.status || {}).conditions ||
+        []).find((c) => c.type === "Verified") || {}).status === "True" &&
+        (approvalAfter.status || {}).matchedKeyId === approverKeyId,
+      "the Restore was admitted once the Approval arrived": admittedTrue !== null,
+      "and its Admitted condition survives to the terminal status with the same instant":
+        admittedEnd.status === "True" && admittedTrue !== null &&
+        admittedEnd.lastTransitionTime === admittedTrue.lastTransitionTime,
+      "the Restore Succeeded with outcome pass": doneStatus.phase === "Succeeded" &&
+        doneStatus.outcome === "pass",
+      "its evidence is Valid (the evidence-fetch Job read the scorecard)":
+        fetchedR.result === "Valid" && verifiedCond.status === "True",
+      "the sampled comparison matched every sampled record": typeof completion.recordsSampled ===
+        "number" && completion.recordsSampled > 0 &&
+        completion.recordsSampledMatching === completion.recordsSampled,
+    };
+
+    // --- the restored records, compared with the source --------------------
+    ensureKafkaClient(source + "-scram", target + "-scram");
+    const mapping = (restore.spec.topicMapping || restoreBody.topicMapping || []);
+    const newTopics = (completion.newTopics || []).map((t) => t.name);
+    result.restoredTopics = newTopics.slice();
+    const recordChecks = [];
+    for (const entry of mapping) {
+      const restoredOut = kafkaTool("target", "kafka-console-consumer.sh", ["--topic",
+        entry.target, "--from-beginning", "--timeout-ms", "30000",
+        "--property", "print.partition=true", "--property", "print.key=true"], 300000).stdout;
+      const restored = byPartition(restoredOut);
+      const sourceParts = {};
+      for (const p of Object.keys(restored)) {
+        sourceParts[p] = byPartition(kafkaTool("source", "kafka-console-consumer.sh", ["--topic",
+          entry.source, "--partition", p, "--offset", "earliest", "--max-messages",
+          String(restored[p].length), "--timeout-ms", "30000",
+          "--property", "print.partition=true", "--property", "print.key=true"], 300000).stdout)[p]
+          || [];
+      }
+      const restoredCount = Object.values(restored).reduce((n, l) => n + l.length, 0);
+      // NEGATIVE CONTROL OF THE COMPARATOR: the same source read, shifted by
+      // one record per partition, must be refused. A comparator that cannot
+      // refuse this proves nothing about the restored records.
+      const shifted = {};
+      for (const p of Object.keys(sourceParts)) {
+        shifted[p] = sourceParts[p].slice(1).concat(["<shifted>"]);
+      }
+      recordChecks.push({ source: entry.source, target: entry.target,
+        restoredPerPartition: Object.fromEntries(Object.entries(restored).map(([p, l]) =>
+          [p, l.length])),
+        restoredCount: restoredCount, equal: sameRecords(restored, sourceParts),
+        shiftedRefused: !sameRecords(restored, shifted),
+        firstRestored: Object.fromEntries(Object.entries(restored).map(([p, l]) =>
+          [p, l.slice(0, 2)])) });
+    }
+    writeFileSync(join(ARTIFACTS, "restored-records.json"),
+      JSON.stringify({ mapping: mapping, newTopics: newTopics, checks: recordChecks,
+        completion: completion, backupRecords: terminalB.status.records === undefined
+          ? null : terminalB.status.records }, null, 2) + "\n");
+    const totalRestored = recordChecks.reduce((n, c) => n + c.restoredCount, 0);
+    const liveBRecords = kubeJson(["-n", namespace, "get", "backup", runB.metadata.name])
+      .status.records;
+    check(recordChecks.length > 0 && recordChecks.every((c) => c.shiftedRefused),
+      "the records comparator did not refuse a shifted source: " + JSON.stringify(recordChecks));
+    control("the restored-records comparator refuses the source shifted by one record", {
+      checks: recordChecks.map((c) => ({ target: c.target, shiftedRefused: c.shiftedRefused })),
+    });
+    const recordClauses = {
+      "the Restore maps the schedule's topic to a new topic it reports creating":
+        mapping.length > 0 && mapping.every((m) => newTopics.indexOf(m.target) !== -1),
+      "records were restored": totalRestored > 0,
+      "every restored partition is exactly the source partition's records, in order":
+        recordChecks.every((c) => c.equal),
+      "the restored count is the one the Restore reports":
+        totalRestored === completion.recordsRestored,
+      "and the one the controller verified for run B": totalRestored === liveBRecords,
+    };
+    const clauses = Object.assign({}, ranClauses, recordClauses);
+    await shot(page, "17b-after-restore");
+    check(Object.values(clauses).every((v) => v === true),
+      "the create -> backup -> detail -> restore journey did not complete: " +
+        JSON.stringify({ clauses: clauses, phase: doneStatus.phase, outcome: doneStatus.outcome,
+          reason: doneStatus.reason, verdictsSeen: fetchedR.seen, progress: progress.slice(-4),
+          records: recordChecks.map((c) => [c.target, c.restoredCount, c.equal]) }).slice(0, 3000));
+    record("DONE EVIDENCE create -> backup -> schedule detail -> restore: an approved Restore Succeeded and restored exactly the source's records", {
+      schedule: selected.metadata.name, point: { name: runB.metadata.name,
+        uid: runB.metadata.uid, backupId: terminalB.status.backupId, records: liveBRecords },
+      harnessTyped: "only the target cluster selection",
+      request: { sourceDestinationRef: restoreBody.sourceDestinationRef,
+        evidenceDestinationRef: restoreBody.evidenceDestinationRef,
+        sourceArchive: restoreBody.sourceArchive, approvalRef: restoreBody.approvalRef },
+      approval: { name: approvalAfter.metadata.name, uid: approvalAfter.metadata.uid,
+        approverKeyId: approverKeyId, planHash: planHash,
+        matchedKeyId: (approvalAfter.status || {}).matchedKeyId },
+      restore: { name: done.metadata.name, uid: done.metadata.uid, phase: doneStatus.phase,
+        outcome: doneStatus.outcome, heldFirst: heldAdmitted, admitted: admittedTrue,
+        admittedAtTerminal: admittedEnd, evidenceVerdictsSeen: fetchedR.seen,
+        evidenceJob: (fetchedR.observation || {}).jobRef || null, progress: progress },
+      clauses: clauses, records: recordChecks.map((c) => ({ source: c.source, target: c.target,
+        restoredPerPartition: c.restoredPerPartition, equal: c.equal })),
+    });
 
     // ================================================================== 12
     // PLAT-10.2 INCOMPLETE evidence: the materialised page the view names
@@ -1575,10 +1892,12 @@ async function main() {
     const pausedA = await historyRow(runA.metadata.name);
     const pausedB = await historyRow(runB.metadata.name);
     check(pausedA !== null && pausedB !== null, "a paused schedule stopped listing its runs");
-    if (restorable) {
-      check(pausedA.restoreHref !== null && pausedB.restoreHref !== null,
-        "a paused schedule stopped offering its recovery points");
-    }
+    // A is unavailable since section 10 and offers no Restore; B is healthy and
+    // must still offer its own while the schedule is paused.
+    check(pausedA.restoreHref === null && pausedB.restoreHref !== null &&
+      pausedB.restoreHref.indexOf("uid=" + runB.metadata.uid) !== -1,
+    "a paused schedule changed which of its recovery points it offers: " +
+      JSON.stringify([pausedA.restoreHref, pausedB.restoreHref]));
     const exactSuspended = () => page.evaluate(() => Array.from(
       document.querySelectorAll("#schedule-detail .badge")).some((node) =>
       node.textContent.trim() === "suspended"));
@@ -1600,8 +1919,7 @@ async function main() {
       resumedSpecSuspend: resumed.spec.suspend, saysSuspended: pausedBadge,
       pauseReRenderedInPlace: pausedInPlace, resumeReRenderedInPlace: resumedInPlace,
       runsListedWhilePaused: [pausedA.text.split("\t")[0], pausedB.text.split("\t")[0]],
-      restoreLinksWhilePaused: restorable ? [pausedA.restoreHref, pausedB.restoreHref]
-        : "not applicable: no point is restorable on this lab (see blocked)",
+      restoreLinksWhilePaused: [pausedA.restoreHref, pausedB.restoreHref],
     });
 
     // ================================================================== 14
@@ -1611,6 +1929,14 @@ async function main() {
     const runV = await backUpNow(doomed);
     const terminalV = await waitForTerminalBackup(runV.metadata.name, "the archived schedule's run");
     check(terminalV.status.phase === "Succeeded", "the archived schedule's run did not succeed");
+    // Its destination is the ArchiveReadGrant one, so the controller must make
+    // it restorable before the schedule is deleted; the archived history must
+    // then keep offering exactly that point.
+    const fetchedV = await waitForEvidenceVerdict("backup", runV.metadata.name,
+      "the archived schedule's run", 420);
+    check(fetchedV.result === "Valid" && fetchedV.object.status.windowCovered !== undefined,
+      "the archived schedule's run never reached Valid with a window: " +
+        JSON.stringify({ seen: fetchedV.seen, detail: fetchedV.detail }));
     const archivedSync = await syncCatalog("after-archived-run");
     const archivedPage = await catalogPoints("after-archived-run");
     const pV = pointOf(archivedPage, terminalV);
@@ -1636,15 +1962,10 @@ async function main() {
     check(archivedRow !== null && archivedRow.text.indexOf("Succeeded") !== -1,
       "the archived schedule's real run is not in its retained history: " +
         JSON.stringify(archivedRow));
-    const liveV = kubeJson(["-n", namespace, "get", "backup", runV.metadata.name]);
-    if (liveV.status.windowCovered !== undefined) {
-      check(archivedRow.restore !== null &&
-        archivedRow.restore.indexOf("uid=" + runV.metadata.uid) !== -1,
-        "the archived schedule's restorable run offers no Restore by its UID");
-    } else {
-      check(archivedRow.restore === null,
-        "an archived run with no controller-written window was offered a Restore");
-    }
+    check(archivedRow.restore !== null &&
+      archivedRow.restore.indexOf("uid=" + runV.metadata.uid) !== -1,
+    "the archived schedule's restorable run offers no Restore by its UID: " +
+      archivedRow.restore);
     const controls = await page.evaluate(() => ({
       suspend: document.querySelectorAll("form.suspend").length,
       policy: document.querySelectorAll("form.policy-form").length,
@@ -1657,8 +1978,7 @@ async function main() {
       schedule: doomed, run: runV.metadata.name, runUid: runV.metadata.uid,
       catalogSync: archivedSync.status.lastSyncJob.name,
       catalogPoint: pV.map((p) => [p.availability, p.verification]),
-      restoreLink: archivedRow.restore === null
-        ? "none: no controller-written window (see blocked)" : archivedRow.restore,
+      restoreLink: archivedRow.restore, verdictsSeen: fetchedV.seen,
       controlsOffered: controls,
     });
 
@@ -1807,6 +2127,27 @@ function cleanUp(how) {
     if (process.env.UI_E2E_KEEP === "1") {
       result.cleanup.push({ namespace: namespace, how: how, kept: true });
       return;
+    }
+    // THE TOPICS THIS RUN'S OWN RESTORE CREATED on the shared target broker,
+    // while this namespace's SCRAM copies still exist. Only names the wizard's
+    // own mapping or the Restore's completion named, never the source topic.
+    const restoredTopics = Array.from(new Set((result.restoreTargets || [])
+      .concat(result.restoredTopics || []))).filter((t) => t !== "orders" && t.length > 0);
+    if (restoredTopics.length > 0) {
+      const topicCleanup = { topics: restoredTopics, deleted: [], leftAfter: null };
+      try {
+        ensureKafkaClient(result.kafkaClientSecrets[0], result.kafkaClientSecrets[1]);
+        for (const topic of restoredTopics) {
+          const del = kafkaTool("target", "kafka-topics.sh", ["--delete", "--topic", topic], 120000);
+          topicCleanup.deleted.push({ topic: topic, exit: del.status });
+        }
+        const listed = kafkaTool("target", "kafka-topics.sh", ["--list"], 120000).stdout
+          .split("\n").map((l) => l.trim());
+        topicCleanup.leftAfter = restoredTopics.filter((t) => listed.indexOf(t) !== -1);
+      } catch (failed) {
+        topicCleanup.error = failed instanceof Error ? failed.message : String(failed);
+      }
+      result.topicCleanup = topicCleanup;
     }
     // THE BUCKET FIRST, while this namespace's credential copy still exists.
     // It is this run's own bucket (created with `mc mb`, never --ignore-existing).
