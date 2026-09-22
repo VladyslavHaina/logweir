@@ -636,6 +636,23 @@ console_refuses "the console workload without its principal (api.enabled=false)"
   --set api.enabled=false --set api.console.enabled=true "${CONSOLE_LOCAL[@]}" "${CONSOLE_KEY[@]}"
 console_refuses "the console with no key Secret" "api.console.keySecret is empty" \
   "${CONSOLE_ON[@]}" "${CONSOLE_LOCAL[@]}"
+# PLAT-19.2 — the approval policy's three refusals, run. The first two need no
+# console at all: the controller mounts the same document.
+console_refuses "an Ordinary approval policy without the installation floor" \
+  "is Ordinary but approvalPolicy.allowOrdinaryConfirmation is not true" \
+  --set approvalPolicy.policies[0].name=team-ordinary \
+  --set approvalPolicy.policies[0].mode=Ordinary
+console_refuses "a namespace bound to an undeclared approval policy" \
+  "which approvalPolicy.policies does not declare" \
+  --set approvalPolicy.policies[0].name=prod-governed \
+  --set approvalPolicy.policies[0].mode=Governed \
+  --set "approvalPolicy.namespaces.$NAMESPACE=nothing"
+console_refuses "a console-served namespace bound to a policy with no confirmation key" \
+  "approvalPolicy.confirmationKeySecret is empty" \
+  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_LOCAL[@]}" \
+  --set approvalPolicy.policies[0].name=prod-governed \
+  --set approvalPolicy.policies[0].mode=Governed \
+  --set "approvalPolicy.namespaces.$NAMESPACE=prod-governed"
 console_refuses "shared mode over plain HTTP" "publicBaseUrl" \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
   --set-string api.console.publicBaseUrl=http://console.example.com

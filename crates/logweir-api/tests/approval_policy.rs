@@ -639,3 +639,57 @@ fn a_bound_namespace_without_a_console_key_refuses_to_start() {
     assert!(ApprovalSettings::load(Some(&path), None, &[NS_B.to_string()]).is_ok());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A confirmation issued under a policy the installation has since replaced is
+/// not approvable: the approver is told to have the Restore submitted again
+/// (D0: "binding/policy mismatch requires re-confirmation/re-approval").
+#[tokio::test]
+async fn a_confirmation_from_before_a_policy_change_cannot_be_approved() {
+    let (app, _console) = governed_shared_app();
+    let created = shared_create(&app, "alice", "ops", "governed-shared-04").await;
+    assert_eq!(
+        created.status,
+        201,
+        "{}",
+        String::from_utf8_lossy(&created.body)
+    );
+    let name = restore_name(&created);
+    let sidecar = countersigned(&app.app, NS_A, &SigningKey::generate_ed25519());
+
+    // The same cluster, a console restarted under an EDITED Governed policy.
+    let edited = ApprovalPolicySet::parse(&format!(
+        "{}  - name: prod-governed\n    mode: Governed\n    maxAgeSeconds: 7200\nnamespaces:\n  {NS_A}: prod-governed\n",
+        "allowOrdinaryConfirmation: true\npolicies:\n  - name: team-ordinary\n    mode: Ordinary\n"
+    ))
+    .expect("valid");
+    let restarted = SharedApp::new(
+        app.app.fake.clone(),
+        support::idp::MockIdp::new(ISSUER, &[]),
+        SharedOptions {
+            bindings: support::RoleBindings {
+                revision: "p192-2".into(),
+                bindings: vec![support::binding(Role::Approver, NS_A, &["approvers"])],
+            },
+            approval: Arc::new(ApprovalSettings {
+                policies: edited,
+                confirmation: Some(
+                    ConfirmationKey::from_key(SigningKey::generate_ed25519()).expect("key"),
+                ),
+            }),
+            ..SharedOptions::default()
+        },
+    );
+    let refused = shared_submit(&restarted, "bob", "approvers", &name, &sidecar).await;
+    assert_eq!(
+        refused.status,
+        409,
+        "{}",
+        String::from_utf8_lossy(&refused.body)
+    );
+    assert_eq!(refused.code(), "policy_mismatch");
+    assert!(restarted
+        .app
+        .fake
+        .object("approvals", NS_A, "approval-1234abcd")
+        .is_none());
+}

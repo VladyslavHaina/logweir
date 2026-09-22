@@ -520,7 +520,8 @@ pub struct Verified {
     pub trust_source: String,
     /// PLAT-19.2: the policy, mode and console-attested requester a v2
     /// authorization was verified under; `None` for a v1 approval document.
-    pub authorization: Option<AuthorizationProvenance>,
+    /// Boxed so `ApprovalOutcome`'s variants stay comparable in size.
+    pub authorization: Option<Box<AuthorizationProvenance>>,
     /// Filled by [`decide`] with the API object whose bytes were checked.
     /// Pure [`evaluate`] callers have no Kubernetes referent and leave it
     /// absent; only a reconcile outcome is written to status.
@@ -1233,13 +1234,13 @@ pub fn evaluate_authorization_v2(
         ticket: doc.ticket.clone().unwrap_or_default(),
         self_attested_risk,
         trust_source: trust.source.name().to_string(),
-        authorization: Some(AuthorizationProvenance {
+        authorization: Some(Box::new(AuthorizationProvenance {
             mode: bound.mode.as_str().to_string(),
             policy_name: bound.name.clone(),
             policy_digest: bound.digest(),
             requester,
             confirmation_key_id,
-        }),
+        })),
         verified_subject_ref: None,
         matched_key_id,
     })
@@ -2009,7 +2010,7 @@ pub fn status_for(
             Some(v.ticket.clone()),
             Some(v.self_attested_risk),
             v.key_window.clone(),
-            v.authorization.clone(),
+            v.authorization.as_deref().cloned(),
             v.verified_subject_ref.clone(),
         ),
         // A refused approval reports NO approver, NO key id AND NO KEY
