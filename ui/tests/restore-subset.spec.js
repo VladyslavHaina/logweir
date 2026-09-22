@@ -512,6 +512,26 @@ test("the_prefix_is_one_value_in_both_modes_and_the_plan_maps_through_it", () =>
     assert.deepEqual(mappingProblems(state), Object.create(null), mode);
   }
 
+  // AND `effectivePrefix` PICKS THE MODE'S KEY WHEN THEY DISAGREE, which is the
+  // only condition under which it does any work. `setTopicPrefix` keeps them
+  // equal, so a state built THROUGH the setter cannot tell the two readings
+  // apart -- a mutant that made `effectivePrefix` always read `topicPrefix`
+  // survived the rows above for exactly that reason. This arm builds the
+  // disagreement by hand, which is the state any other producer of a fields
+  // object (a hand-written harness, a future prefill, the pre-fix code) could
+  // still hand this page, and asserts the reading follows the runner's rule.
+  const skewed = wizardState();
+  skewed.fields.target.topicPrefix = "naming-";
+  skewed.fields.target.topicMappingPrefix = "mapping-";
+  skewed.fields.target.mode = "newTopic";
+  assert.equal(effectivePrefix(skewed), "naming-", "newTopic reads topic_naming.prefix");
+  assert.equal(topicMapping(skewed)[0].target, "naming-orders");
+  skewed.fields.target.mode = "scratch";
+  assert.equal(effectivePrefix(skewed), "mapping-",
+    "scratch reads topic_mapping_prefix -- logweir_core::spec::target_topic_prefix");
+  assert.equal(topicMapping(skewed)[0].target, "mapping-orders",
+    "and the preview follows the key the RUN reads, not the other one");
+
   // EVERY WRITE PATH, because the divergence came from three call sites each
   // moving one key: a restored draft and an edit prefill as well as the input.
   const drafted = wizardState();

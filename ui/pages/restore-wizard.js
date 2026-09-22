@@ -2347,7 +2347,7 @@ export function draftFrom(object, fields) {
   if (typeof (target.topicNaming || {}).prefix === "string") {
     // BOTH KEYS, for `setTopicPrefix`'s reason. This one builds a fields
     // object rather than mutating a state, so it writes them here; the row
-    // `the_prefix_is_one_value_in_both_modes` walks this path too.
+    // `the_prefix_is_one_value_in_both_modes` walks this call site too.
     nextTarget.topicPrefix = target.topicNaming.prefix;
     nextTarget.topicMappingPrefix = target.topicNaming.prefix;
   }

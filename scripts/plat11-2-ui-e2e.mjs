@@ -883,10 +883,20 @@ async function main() {
       "the stored prefix is the previewed prefix");
     check(created.spec.topicMapping === undefined,
       "the declaration is a rail, never a stored field: " + JSON.stringify(created.spec));
-    const storedTopics = created.spec.planBytes
-      .split("\n")
-      .filter((l) => l.startsWith("  - \""))
-      .map((l) => l.slice(5, -1));
+    // THE `topics:` BLOCK, not every list entry in the document: the target's
+    // `bootstrap_servers` list is spelled identically and would otherwise be
+    // read as a topic. The block is the lines after `  topics:` up to the next
+    // line that is not a list entry.
+    const planLines = created.spec.planBytes.split("\n");
+    const topicsAt = planLines.indexOf("  topics:");
+    check(topicsAt !== -1, "the stored plan carries a topics block");
+    const storedTopics = [];
+    for (let i = topicsAt + 1; i < planLines.length; i += 1) {
+      if (!planLines[i].startsWith("    - \"")) {
+        break;
+      }
+      storedTopics.push(planLines[i].slice(7, -1));
+    }
     check(JSON.stringify(storedTopics) === JSON.stringify(["orders", "payments"]),
       "and the stored plan carries exactly the previewed subset: " + JSON.stringify(storedTopics));
     record("the wizard submits, and the created Restore is the preview byte for byte", {
@@ -1087,42 +1097,15 @@ async function main() {
     }
 
     // ------------------------------------------------------------------ 7
-    // A TARGET CHANGE INVALIDATES THE VERDICT AND REFUSES THE SUBMIT.
+    // AN EDIT AFTER THE CHECK: THE VERDICT IS ABOUT ANOTHER PLAN, SUBMIT REFUSED.
+    //
+    // THIS COMES BEFORE THE TARGET SWAP ON PURPOSE. The swap now DROPS the
+    // verdict (journey 8), so an edit performed after one would have nothing
+    // left to be stale about.
     const hashBefore = await page.evaluate(() => {
       const code = document.querySelector("#plan-hash-value");
       return code === null ? "" : code.textContent;
     });
-    await page.selectOption("#target-cluster", secondUid);
-    await pause(1500);
-    const hashAfter = await page.evaluate(() => {
-      const code = document.querySelector("#plan-hash-value");
-      return code === null ? "" : code.textContent;
-    });
-    const staleText = await text(page);
-    await shot(page, "07-target-change-stale");
-    save("07-stale-text.txt", staleText);
-    if (hashBefore === hashAfter) {
-      // The two targets address the same broker, so the plan bytes do not
-      // move. That is a property of this fixture and it is recorded as such
-      // rather than asserted away: journey 8 changes the prefix instead.
-      result.journeys.push({
-        journey: "a target change re-runs the readiness check",
-        outcome: "NOT DISTINGUISHING — both fixture targets address the same broker, so the " +
-          "plan bytes and the hash are identical. Journey 8 changes the plan instead.",
-        hash: hashBefore,
-      });
-    } else {
-      check(staleText.includes("out of date") || staleText.includes("run it again") ||
-        staleText.includes("nothing is sent"),
-        "a target change makes the verdict out of date: " + staleText.slice(0, 2000));
-      record("a target change moves the plan hash and the readiness verdict stops applying", {
-        before: hashBefore, after: hashAfter,
-      });
-    }
-
-    // ------------------------------------------------------------------ 8
-    // AN EDIT AFTER THE CHECK: THE VERDICT IS ABOUT ANOTHER PLAN, SUBMIT REFUSED.
-    await page.selectOption("#target-cluster", targetUid);
     await page.fill("#topic-prefix", "moved-" + suffix + "-");
     await page.dispatchEvent("#topic-prefix", "change");
     await pause(1500);
@@ -1131,8 +1114,8 @@ async function main() {
       return code === null ? "" : code.textContent;
     });
     const editedText = await text(page);
-    await shot(page, "08-stale-after-edit");
-    save("08-stale-after-edit.txt", editedText);
+    await shot(page, "07-stale-after-edit");
+    save("07-stale-after-edit.txt", editedText);
     check(editedHash !== hashBefore, "the edited plan hashes differently");
     if (verdict !== null) {
       check(editedText.includes("out of date") || editedText.includes("run it again"),
@@ -1156,9 +1139,78 @@ async function main() {
         return code === null ? "" : code.textContent;
       });
       check(restoredHash === hashBefore, "the plan is back to the one that was checked");
-      control("restoring the plan restores the verdict's applicability", {
-        hash: restoredHash,
+      // THE CONTROL IS THAT THE *STALE* REFUSAL IS GONE, not that every
+      // refusal is: this lab's verdict is `notReady` for its own reasons
+      // (journey 6), so the gate still refuses -- with a different sentence.
+      // Asserting "no refusal at all" would be asserting something false about
+      // a correct page, which is how a control becomes noise.
+      const refusalNow = await page.evaluate(() => {
+        const p = document.querySelector("#readiness-blocked");
+        return p === null ? null : p.textContent;
       });
+      check(refusalNow === null || !refusalNow.includes(editedHash),
+        "the refusal no longer names the edited plan: " + String(refusalNow).slice(0, 400));
+      check(refusalNow === null || !refusalNow.includes("Run it again"),
+        "and it is no longer the stale-plan refusal: " + String(refusalNow).slice(0, 400));
+      control("restoring the plan removes the stale-plan refusal, and only that one", {
+        hash: restoredHash,
+        refusalStillShown: refusalNow === null ? null : refusalNow.slice(0, 200),
+      });
+    }
+
+    // ------------------------------------------------------------------ 8
+    // A TARGET CHANGE DROPS THE VERDICT EVEN WHEN THE PLAN BYTES DO NOT MOVE.
+    //
+    // D2 SECTION 6.6's SECOND INVALIDATION CAUSE, AND THE ONE THE HASH CANNOT
+    // SEE. Both fixture targets address the same broker with the same auth, so
+    // they render IDENTICAL plan bytes -- which is exactly the configuration
+    // the earlier version of this journey recorded as "NOT DISTINGUISHING" and
+    // walked past. `selectTarget` now drops the cached verdict on a UID change,
+    // so the page falls back to "nothing has run" and the operator re-runs the
+    // check against the cluster they actually chose.
+    if (verdict !== null) {
+      const hadVerdict = await page.evaluate(() =>
+        document.querySelector("#readiness-not-run") === null);
+      check(hadVerdict === true,
+        "a verdict is on screen before the swap; otherwise this journey proves nothing");
+      const hashAtSwap = await page.evaluate(() => {
+        const code = document.querySelector("#plan-hash-value");
+        return code === null ? "" : code.textContent;
+      });
+      await page.selectOption("#target-cluster", secondUid);
+      await pause(1500);
+      const hashAfterSwap = await page.evaluate(() => {
+        const code = document.querySelector("#plan-hash-value");
+        return code === null ? "" : code.textContent;
+      });
+      const droppedText = await text(page);
+      await shot(page, "08-target-change-drops-verdict");
+      save("08-target-change.txt", droppedText);
+      check(hashAfterSwap === hashAtSwap,
+        "the two targets render the SAME plan bytes -- which is what makes the hash arm blind " +
+        "here, and what this journey is about: " + hashAtSwap + " vs " + hashAfterSwap);
+      const notRun = await page.evaluate(() =>
+        document.querySelector("#readiness-not-run") !== null);
+      check(notRun === true,
+        "the verdict about the other cluster is gone and the page says nothing has run: " +
+        droppedText.slice(0, 1500));
+      record("a target change drops the readiness verdict though the plan bytes do not move", {
+        planHash: hashAtSwap,
+        from: targetCluster, to: secondTarget,
+        rule: "D2 6.6 referentChanged: choosing another target changes a referent UID, so the " +
+          "result is stale",
+      });
+      // THE NEGATIVE CONTROL: re-selecting the SAME target is not a change, so
+      // the state stays where it is rather than being cleared unconditionally.
+      const beforeSame = await page.evaluate(() =>
+        document.querySelector("#readiness-not-run") !== null);
+      await page.selectOption("#target-cluster", secondUid);
+      await pause(1000);
+      const afterSame = await page.evaluate(() =>
+        document.querySelector("#readiness-not-run") !== null);
+      check(beforeSame === afterSame,
+        "re-selecting the same target changes nothing about the readiness state");
+      control("re-selecting the same target is not a target change", { state: afterSame });
     }
 
     // ------------------------------------------------------------------ 9
