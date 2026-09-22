@@ -145,7 +145,13 @@ fn state_of(o: &Observed<'_>) -> (OperationState, Option<String>) {
             reason.or_else(|| Some("JobCreated".to_string())),
         ),
         Some(phase @ ("Succeeded" | "Failed")) => {
-            if o.evidence_recorded && o.verification.is_none() {
+            // A `Pending` block is not a verdict (D2 §3.9 step 3): an
+            // evidence-fetch Job is still reading the document, which is
+            // exactly "evidence recorded, no verdict yet".
+            let no_verdict = o
+                .verification
+                .is_none_or(|v| v.result.as_deref() == Some("Pending"));
+            if o.evidence_recorded && no_verdict {
                 return (
                     OperationState::Verifying,
                     Some("EvidenceVerificationPending".to_string()),

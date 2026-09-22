@@ -1049,6 +1049,42 @@ spec:
                 description: The signed receipt, and the controller's verification of it.
                 nullable: true
                 properties:
+                  observation:
+                    description: How the evidence is being read when an evidence-fetch Job reads it — D2 §3.9 step 3. Absent for every other evidence path.
+                    nullable: true
+                    properties:
+                      attempt:
+                        description: Which attempt this is, from 1. A failed fetch is retried at +1 m, +5 m and +15 m (D2 §3.9 step 5); each attempt is its own Job, `lwc-ev-<20 hex of sha256(uid + ":" + attempt)>`. Retries never re-run the backup or the restore.
+                        format: int64
+                        nullable: true
+                        type: integer
+                      jobRef:
+                        description: The evidence-fetch Job of the current attempt, once it exists. Absent while the run waits for a slot under `checks.maxEvidenceFetchActivePerNamespace`.
+                        nullable: true
+                        properties:
+                          name:
+                            description: '`metadata.name`.'
+                            nullable: true
+                            type: string
+                          uid:
+                            description: '`metadata.uid` — a same-named replacement is a different Job.'
+                            nullable: true
+                            type: string
+                        type: object
+                      mode:
+                        description: 'The resolved `evidenceRead` credential mode the Job ran with: `SecretKeys` or `WorkloadIdentity`.'
+                        nullable: true
+                        type: string
+                      presence:
+                        description: 'What the relay said about the two objects: `Complete`, `PayloadWithoutSidecar`, `Absent` (the store answered NotFound for the signed document) or `Unknown` (anything else, including a denial). Absent until a relay was read.'
+                        nullable: true
+                        type: string
+                      retryAfter:
+                        description: When the next attempt may start, after a fetch that did not finish. Absent once a verdict was reached or once the attempts are spent.
+                        format: date-time
+                        nullable: true
+                        type: string
+                    type: object
                   receiptKey:
                     description: The object key of the signed backup receipt.
                     nullable: true
@@ -1084,7 +1120,10 @@ spec:
                         nullable: true
                         type: string
                       result:
-                        description: '`Valid`, `Invalid` or `NotAttempted`. An empty `TrustRoster.spec.signingKeys` is `NotAttempted` naming itself, never a silent `Invalid`.'
+                        description: |-
+                          `Valid`, `Invalid`, `Untrusted`, `NotAttempted` or `Pending`. An empty `TrustRoster.spec.signingKeys` is `NotAttempted` naming itself, never a silent `Invalid`.
+
+                          `Pending` (additive, D2 §3.9 step 3) is written only while an evidence-fetch check Job is reading this run's evidence with the destination's `evidenceRead` grant, or is waiting for a slot to start; `evidence.observation` names that Job. It is not `Valid`, so every surface renders it unverified, and it is replaced by a reached verdict or by an honest `NotAttempted` naming why the fetch did not finish.
                         nullable: true
                         type: string
                       signedAt:
@@ -4761,6 +4800,42 @@ spec:
                 description: The signed scorecard, the offset report, and the controller's verification.
                 nullable: true
                 properties:
+                  observation:
+                    description: How the evidence is being read when an evidence-fetch Job reads it — D2 §3.9 step 3. Absent for every other evidence path.
+                    nullable: true
+                    properties:
+                      attempt:
+                        description: Which attempt this is, from 1. A failed fetch is retried at +1 m, +5 m and +15 m (D2 §3.9 step 5); each attempt is its own Job, `lwc-ev-<20 hex of sha256(uid + ":" + attempt)>`. Retries never re-run the backup or the restore.
+                        format: int64
+                        nullable: true
+                        type: integer
+                      jobRef:
+                        description: The evidence-fetch Job of the current attempt, once it exists. Absent while the run waits for a slot under `checks.maxEvidenceFetchActivePerNamespace`.
+                        nullable: true
+                        properties:
+                          name:
+                            description: '`metadata.name`.'
+                            nullable: true
+                            type: string
+                          uid:
+                            description: '`metadata.uid` — a same-named replacement is a different Job.'
+                            nullable: true
+                            type: string
+                        type: object
+                      mode:
+                        description: 'The resolved `evidenceRead` credential mode the Job ran with: `SecretKeys` or `WorkloadIdentity`.'
+                        nullable: true
+                        type: string
+                      presence:
+                        description: 'What the relay said about the two objects: `Complete`, `PayloadWithoutSidecar`, `Absent` (the store answered NotFound for the signed document) or `Unknown` (anything else, including a denial). Absent until a relay was read.'
+                        nullable: true
+                        type: string
+                      retryAfter:
+                        description: When the next attempt may start, after a fetch that did not finish. Absent once a verdict was reached or once the attempts are spent.
+                        format: date-time
+                        nullable: true
+                        type: string
+                    type: object
                   offsetReportKey:
                     description: The object key of the offset report. Tag 1 renders the report and applies nothing (Global Constraint 35).
                     nullable: true
@@ -4801,7 +4876,10 @@ spec:
                         nullable: true
                         type: string
                       result:
-                        description: '`Valid`, `Invalid` or `NotAttempted`. An empty `TrustRoster.spec.signingKeys` is `NotAttempted` naming itself, never a silent `Invalid`.'
+                        description: |-
+                          `Valid`, `Invalid`, `Untrusted`, `NotAttempted` or `Pending`. An empty `TrustRoster.spec.signingKeys` is `NotAttempted` naming itself, never a silent `Invalid`.
+
+                          `Pending` (additive, D2 §3.9 step 3) is written only while an evidence-fetch check Job is reading this run's evidence with the destination's `evidenceRead` grant, or is waiting for a slot to start; `evidence.observation` names that Job. It is not `Valid`, so every surface renders it unverified, and it is replaced by a reached verdict or by an honest `NotAttempted` naming why the fetch did not finish.
                         nullable: true
                         type: string
                       signedAt:

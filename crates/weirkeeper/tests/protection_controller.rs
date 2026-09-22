@@ -3165,6 +3165,13 @@ fn an_unrecognised_verdict_is_a_refusal_the_catalog_cannot_overrule() {
         p::Evidence::from_verification(Some("NotAttempted"), None),
         p::Evidence::NotAttempted
     );
+    // `Pending` (D2 §3.9 step 3) is not a reached verdict: an evidence-fetch
+    // Job is still reading the document. Read as a refusal, every freshly
+    // finished destination-backed run would page `Unprotected`.
+    assert_eq!(
+        p::Evidence::from_verification(Some("Pending"), None),
+        p::Evidence::NotAttempted
+    );
 
     let spec = {
         let mut value = spec_value();

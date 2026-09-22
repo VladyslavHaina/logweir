@@ -257,6 +257,23 @@ fn every_backup_status_the_controller_writes() {
             false,
         ),
     );
+    // D2 §3.9 step 3: an evidence-fetch Job is reading the receipt. The
+    // block exists and names `Pending`; the operation is still verifying.
+    let (fetching, _) = patched::<Backup>(
+        finished.clone(),
+        &backup_second(&finished, &terminal, VerificationVerdict::Pending),
+    );
+    run_backup(
+        "exit 0 evidence-fetch pending",
+        &fetching,
+        e(
+            S::Verifying,
+            Some("EvidenceVerificationPending"),
+            R::Pass,
+            V::Pending,
+            false,
+        ),
+    );
     for (verdict_value, v, success) in [
         (VerificationVerdict::Valid, V::Valid, true),
         (VerificationVerdict::Invalid, V::Invalid, false),
