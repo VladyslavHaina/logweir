@@ -60,7 +60,7 @@ const suffix = Math.random().toString(36).slice(2, 7);
 // The shared lab's Kafka and MinIO, read-only, from this namespace. Named here
 // so the result document records exactly which shared fixture was addressed.
 const LAB = "logweir-scram-local";
-const LAB_KAFKA = "kafka-source." + LAB + ".svc:9092";
+const LAB_KAFKA = "kafka-source." + LAB + ".svc.cluster.local:9096";
 const LAB_MINIO = "minio." + LAB + ".svc:9000";
 const UNREACHABLE_KAFKA = "kafka-nowhere." + "lw-p10-void" + ".svc:9092";
 
@@ -325,13 +325,31 @@ function stopApi() {
 // ------------------------------------------------------------- the fixtures
 
 function seedConnection(name, servers) {
+  const sharedSource = servers === LAB_KAFKA;
+  if (sharedSource) {
+    const secret = kubeJson(["-n", LAB, "get", "secret", "source-scram"]);
+    delete secret.metadata.uid;
+    delete secret.metadata.resourceVersion;
+    delete secret.metadata.creationTimestamp;
+    delete secret.metadata.managedFields;
+    delete secret.metadata.ownerReferences;
+    delete secret.metadata.annotations;
+    secret.metadata.name = name + "-scram";
+    secret.metadata.namespace = namespace;
+    secret.metadata.labels = Object.assign({}, secret.metadata.labels || {},
+      { "logweir.dev/test-owner": OWNER });
+    kube(["-n", namespace, "apply", "-f", "-"], { input: JSON.stringify(secret) });
+  }
   kube(["-n", namespace, "create", "-f", "-"], {
     input: JSON.stringify({
       apiVersion: "logweir.dev/v1alpha1", kind: "KafkaCluster",
       metadata: { name: name, labels: { "logweir.dev/test-owner": OWNER } },
       spec: {
         bootstrapServers: [servers], role: "source",
-        auth: { mode: "plaintext", tls: false },
+        auth: sharedSource
+          ? { mode: "scramSha512", tls: false, username: "scram-user",
+            secretRef: { name: name + "-scram" } }
+          : { mode: "plaintext", tls: false },
       },
     }),
   });
