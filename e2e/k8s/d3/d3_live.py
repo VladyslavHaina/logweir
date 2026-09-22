@@ -3756,6 +3756,27 @@ def policy_key(key_id: str, spki_pem: str, state: str, *, display: str,
     return entry
 
 
+def delete_owned_trust_policy(name: str, *, check: bool = True) -> bool:
+    """Delete a cluster-scoped `TrustPolicy` THIS run owns, and refuse any other.
+
+    BY OWNER LABEL, NOT BY NAME. The names are this run's (`{OWNER}-{STAMP}…`),
+    but `STAMP` and `OWNER` have defaults, and two runs left on those defaults
+    share a name — a delete by name would then remove another run's trust and
+    break its rows mid-phase. `cleanup()` always checked the label; the phases
+    that rebuild their policy now do too. Returns whether an object was deleted.
+    """
+    policy = get_opt("trustpolicy", name, namespace="default")
+    if policy is None:
+        return False
+    owner = (policy["metadata"].get("labels") or {}).get("logweir.dev/test-owner")
+    if owner != OWNER:
+        raise RuntimeError(
+            f"refusing to delete TrustPolicy/{name}: its logweir.dev/test-owner is {owner!r}, "
+            f"not this run's {OWNER!r}")
+    run(K + ["delete", "trustpolicy", name, "--wait=true"], check=check)
+    return True
+
+
 def trust_policy(state: str, *, keys: list[dict[str, Any]] | None = None,
                  namespaces: list[str] | None = None, name: str | None = None,
                  **over: Any) -> dict[str, Any]:
@@ -4013,8 +4034,7 @@ def signed_at_probe() -> None:
     )
     # a NEW policy object: the lifecycle rules are per-object history, and this
     # probe needs a policy event it can repeat.
-    if get_opt("trustpolicy", TRUST_POLICY, namespace="default") is not None:
-        run(K + ["delete", "trustpolicy", TRUST_POLICY, "--wait=true"])
+    delete_owned_trust_policy(TRUST_POLICY)
     apply(trust_policy("Active"))
 
     fresh = legacy_backup("signedat-subject")
@@ -4031,7 +4051,7 @@ def signed_at_probe() -> None:
     )
     stripped = get("backup", "signedat-subject")["status"]["evidence"]["verification"]
     evidence.append(artifact("trust/signedat-2-stripped.json", stripped))
-    run(K + ["delete", "trustpolicy", TRUST_POLICY, "--wait=true"])
+    delete_owned_trust_policy(TRUST_POLICY)
     apply(trust_policy("Active", notAfter="2027-06-01T00:00:00Z"))
     # WAITING FOR THE HEALED SHAPE, not for the defect. The old loop broke as
     # soon as the verdict stopped being `Valid` OR `signedAt` came back — which
@@ -4060,7 +4080,7 @@ def signed_at_probe() -> None:
             "-p", json.dumps({"status": {"evidence": {"verification": None}}}),
         ]
     )
-    run(K + ["delete", "trustpolicy", TRUST_POLICY, "--wait=true"])
+    delete_owned_trust_policy(TRUST_POLICY)
     apply(trust_policy("Active", notAfter="2027-07-01T00:00:00Z"))
     deadline = time.time() + 150
     restored: dict[str, Any] = {}
@@ -4207,24 +4227,32 @@ def mint_signing_key(tag: str) -> dict[str, Any]:
     entry before trusting this function at all.
     """
     work = pathlib.Path(tempfile.mkdtemp(prefix=f"{tag}-", dir="/tmp"))
-    work.chmod(0o700)
-    private = work / "signing.pem"
-    sec1 = work / "sec1.pem"
-    run(["openssl", "ecparam", "-name", "prime256v1", "-genkey", "-noout",
-         "-out", str(sec1)], timeout=60)
-    sec1.chmod(0o600)
-    # PKCS#8, NOT SEC1. `logweir_evidence::keys` parses with `from_pkcs8_pem`,
-    # and `openssl ecparam -genkey` writes `BEGIN EC PRIVATE KEY` (SEC1), which
-    # that parser refuses — the runner then exits 4 with no evidence at all,
-    # which is exactly how this row first failed.
-    run(["openssl", "pkcs8", "-topk8", "-nocrypt", "-in", str(sec1),
-         "-out", str(private)], timeout=60)
-    private.chmod(0o600)
-    sec1.unlink(missing_ok=True)
-    spki_pem = run(["openssl", "ec", "-in", str(private), "-pubout"],
-                   timeout=60).stdout
-    der = subprocess.run(["openssl", "pkey", "-pubin", "-outform", "DER"],
-                         input=spki_pem.encode(), capture_output=True, timeout=60).stdout
+    # A MINT THAT FAILS HALF-WAY LEAVES NOTHING BEHIND. The caller's `finally`
+    # can only remove a key it was handed, so a private half written before
+    # `openssl pkey` (or anything else below) raised would otherwise outlive
+    # the run with nobody holding its path.
+    try:
+        work.chmod(0o700)
+        private = work / "signing.pem"
+        sec1 = work / "sec1.pem"
+        run(["openssl", "ecparam", "-name", "prime256v1", "-genkey", "-noout",
+             "-out", str(sec1)], timeout=60)
+        sec1.chmod(0o600)
+        # PKCS#8, NOT SEC1. `logweir_evidence::keys` parses with `from_pkcs8_pem`,
+        # and `openssl ecparam -genkey` writes `BEGIN EC PRIVATE KEY` (SEC1), which
+        # that parser refuses — the runner then exits 4 with no evidence at all,
+        # which is exactly how this row first failed.
+        run(["openssl", "pkcs8", "-topk8", "-nocrypt", "-in", str(sec1),
+             "-out", str(private)], timeout=60)
+        private.chmod(0o600)
+        sec1.unlink(missing_ok=True)
+        spki_pem = run(["openssl", "ec", "-in", str(private), "-pubout"],
+                       timeout=60).stdout
+        der = subprocess.run(["openssl", "pkey", "-pubin", "-outform", "DER"],
+                             input=spki_pem.encode(), capture_output=True, timeout=60).stdout
+    except BaseException:
+        shutil.rmtree(work, ignore_errors=True)
+        raise
     return {"dir": work, "private": private, "spkiPem": spki_pem,
             "keyId": hashlib.sha256(der).hexdigest()}
 
@@ -4349,10 +4377,11 @@ def old_archive() -> None:
     # run of this phase mints a DIFFERENT second key, so applying over a
     # previous run's policy is refused. The policy is this run's own, named with
     # the stamp, and is removed rather than edited.
-    if get_opt("trustpolicy", TRUST_POLICY, namespace="default") is not None:
-        run(K + ["delete", "trustpolicy", TRUST_POLICY, "--wait=true"], check=False)
-    key = mint_signing_key(f"{OWNER}-signer2")
+    delete_owned_trust_policy(TRUST_POLICY, check=False)
+    # READ FIRST, MINT SECOND: a `get` that raised after the mint would leave a
+    # private key on disk that the `finally` below never sees.
     original = get("secret", "logweir-signing-key")
+    key = mint_signing_key(f"{OWNER}-signer2")
     try:
         # the recipe, checked against the lab's own key before it is relied on
         lab = roster_signing_key()
@@ -4662,8 +4691,7 @@ def multiple_namespaces() -> None:
     try:
         trust_namespace(second)
         for name in (first_policy, second_policy):
-            if get_opt("trustpolicy", name, namespace="default") is not None:
-                run(K + ["delete", "trustpolicy", name, "--wait=true"], check=False)
+            delete_owned_trust_policy(name, check=False)
         apply(trust_policy("Active", name=first_policy, namespaces=[NS],
                            keys=[policy_key(lab["keyId"], lab["spkiPem"], "Active",
                                             display="the lab signing key")]))
@@ -4701,8 +4729,7 @@ def multiple_namespaces() -> None:
             path.unlink(missing_ok=True)
         shutil.rmtree(other["dir"], ignore_errors=True)
         for name in (first_policy, second_policy):
-            run(K + ["delete", "trustpolicy", name, "--ignore-not-found=true", "--wait=true"],
-                check=False)
+            delete_owned_trust_policy(name, check=False)
         run(K + ["delete", "namespace", second, "--ignore-not-found=true", "--wait=true"],
             check=False, timeout=300)
         left = [t["metadata"]["name"] for t in json.loads(
@@ -7635,8 +7662,7 @@ def rehearsal_trust(target_cluster_id: str, approver_key: dict[str, Any],
       namespace and the control would prove only that the harness broke its own
       fixture.
     """
-    if get_opt("trustpolicy", TRUST_POLICY, namespace="default") is not None:
-        run(K + ["delete", "trustpolicy", TRUST_POLICY, "--wait=true"], check=False)
+    delete_owned_trust_policy(TRUST_POLICY, check=False)
     signing = roster_signing_key()
     body = trust_policy(
         "Active",

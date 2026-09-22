@@ -2154,6 +2154,82 @@ def test_the_scheduled_backups_row_can_pass_and_can_fail() -> None:
         not all(d3.the_schedule_kept_running(_RUNNING, [], [_CHILD], {_CHILD}).values()))
 
 
+class _Swap:
+    """Replace module attributes of `d3_live` for one block, and put them back."""
+
+    def __init__(self, **attrs):
+        self.attrs = attrs
+        self.saved = {}
+
+    def __enter__(self):
+        for name, value in self.attrs.items():
+            self.saved[name] = getattr(d3, name)
+            setattr(d3, name, value)
+        return self
+
+    def __exit__(self, *exc):
+        for name, value in self.saved.items():
+            setattr(d3, name, value)
+        return False
+
+
+def test_a_trust_policy_is_deleted_only_when_this_run_owns_it() -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(args, **_kw):
+        calls.append(list(args))
+
+    ours = {"metadata": {"name": "p", "labels": {"logweir.dev/test-owner": d3.OWNER}}}
+    theirs = {"metadata": {"name": "p", "labels": {"logweir.dev/test-owner": "someone-else"}}}
+    with _Swap(get_opt=lambda *a, **k: ours, run=fake_run):
+        deleted = d3.delete_owned_trust_policy("p")
+    row("a TrustPolicy carrying this run's owner label is deleted",
+        deleted and any("delete" in c and "trustpolicy" in c for c in calls))
+    calls.clear()
+    refused = False
+    with _Swap(get_opt=lambda *a, **k: theirs, run=fake_run):
+        try:
+            d3.delete_owned_trust_policy("p")
+        except RuntimeError:
+            refused = True
+    row("MUTANT: another run's TrustPolicy of the SAME name is refused, and nothing is deleted",
+        refused and not calls)
+    with _Swap(get_opt=lambda *a, **k: None, run=fake_run):
+        row("an absent TrustPolicy is not an error and deletes nothing",
+            d3.delete_owned_trust_policy("p") is False and not calls)
+
+
+def test_a_mint_that_fails_half_way_leaves_no_private_key() -> None:
+    made: list[pathlib.Path] = []
+    real_mkdtemp = d3.tempfile.mkdtemp
+
+    def tracking_mkdtemp(*a, **k):
+        path = real_mkdtemp(*a, **k)
+        made.append(pathlib.Path(path))
+        return path
+
+    def failing_run(args, **_kw):
+        # the first openssl call "writes" a private key, the second fails
+        if "ecparam" in args:
+            pathlib.Path(args[args.index("-out") + 1]).write_text("PRIVATE")
+            return None
+        raise RuntimeError("openssl pkcs8 failed")
+
+    d3.tempfile.mkdtemp = tracking_mkdtemp
+    raised = False
+    try:
+        with _Swap(run=failing_run):
+            try:
+                d3.mint_signing_key("d3-test-rows-mint")
+            except RuntimeError:
+                raised = True
+    finally:
+        d3.tempfile.mkdtemp = real_mkdtemp
+    row("MUTANT: a mint that fails after writing the private half removes its directory",
+        raised and bool(made) and not any(p.exists() for p in made),
+        f"left: {[str(p) for p in made if p.exists()]}")
+
+
 _REPO = pathlib.Path(__file__).resolve().parents[3]
 
 
