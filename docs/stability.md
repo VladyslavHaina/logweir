@@ -690,17 +690,20 @@ The document is canonical JSON with the DSSE payload type
 ```
 
 Unknown fields are ignored on read, so a document PLAT-19.2 later enriches with `policy`,
-`requester` or a second signature still verifies against this build. A higher `formatVersion` major
-is refused.
+`requester` or a second signature still parses against this build. Those future fields cannot widen
+authority here: current/pre-PLAT-19.2 readers have no immutable policy-mode binding and therefore
+require `GovernedApproval`. A higher `formatVersion` major is refused.
 
 **The runner's order, and what each step buys.** The signature is checked over the envelope bytes
 *before* they are parsed, so nothing read out of the document is believed until those exact bytes
-are known to be signed. The key that verified is then judged on its **usage**: a rehearsal may be
-authorised only by a key carrying `GovernedApproval` or `ConsoleConfirmation`. A key carrying only
-`EvidenceSigning` is refused even when its signature is perfectly good — the installation's own
-evidence identity must never be able to authorise its own rehearsals (D3 §7.3), and that fault is
-reported as `KeyUsageMismatch` and never as a bad signature, because an operator told "bad
-signature" about a genuinely signed document goes looking at the wrong thing.
+are known to be signed. The key that verified is then judged on its **usage**. The current and
+pre-PLAT-19.2 standing contract accepts `GovernedApproval` only. A `ConsoleConfirmation` key fails
+closed until policy mode is immutably resolved and carried end-to-end; merely finding such a key in
+the resolved policy cannot authorise a run. A key carrying only `EvidenceSigning` is likewise
+refused even when its signature is perfectly good — the installation's own evidence identity must
+never be able to authorise its own rehearsals (D3 §7.3). Both faults are reported as
+`KeyUsageMismatch` and never as a bad signature, because an operator told "bad signature" about a
+genuinely signed document goes looking at the wrong thing.
 
 **`…_REHEARSAL_SCHEDULE_UID` is a verified binding.** The environment says which schedule this run
 claims to be; the signed document's `subjectRef.uid` says which schedule the human authorised; the

@@ -372,6 +372,21 @@ fn the_documented_standing_command_line_mints_both_files() {
         String::from_utf8_lossy(&done.stderr)
     );
     assert_eq!(done.status.code(), Some(0), "{transcript}");
+    let stdout = String::from_utf8_lossy(&done.stdout);
+    assert!(
+        stdout.contains("The current/pre-PLAT-19.2 standing format accepts\nGovernedApproval only"),
+        "success guidance pins the current governed-only contract: {stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "ConsoleConfirmation will fail until policy mode is immutably\nresolved and carried end-to-end"
+        ),
+        "success guidance explains why a console key cannot authorize yet: {stdout}"
+    );
+    assert!(
+        !stdout.contains("GovernedApproval or ConsoleConfirmation"),
+        "the superseded authority claim must not return: {stdout}"
+    );
     assert!(out.exists(), "the envelope: {transcript}");
     assert!(
         out.with_extension("sig").exists(),

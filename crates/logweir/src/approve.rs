@@ -418,7 +418,9 @@ pub fn mint_standing(args: &ApproveArgs) -> Result<String, String> {
          \nPut these two files on the Approval as spec.approvalBytes and spec.sidecarBytes,\n\
          with spec.subjectRef.kind RehearsalSchedule and spec.planHash set to the schedule's\n\
          templateDigest. The signing key's PUBLIC half must be on this namespace's trust with\n\
-         usage GovernedApproval or ConsoleConfirmation — never EvidenceSigning.\n",
+         usage GovernedApproval. The current/pre-PLAT-19.2 standing format accepts\n\
+         GovernedApproval only: ConsoleConfirmation will fail until policy mode is immutably\n\
+         resolved and carried end-to-end; EvidenceSigning never authorises.\n",
         ns = standing.schedule_namespace,
         name = standing.schedule_name,
         uid = standing.schedule_uid,
