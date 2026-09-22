@@ -130,7 +130,7 @@ anything not listed is `404`.
 | `POST /api/v1/namespaces/{ns}/connections` | Create a `KafkaCluster` that references an existing credential Secret by name. |
 | `GET /api/v1/cadence-previews` | What a cron expression — or a preset — will actually do in a time zone, before anything is saved. No namespace, no Kubernetes call. |
 | `GET /api/v1/namespaces/{ns}/schedules[/{name}]` | `BackupSchedule` projections, with the cadence policy, the revision and the controller's own next runs. |
-| `POST /api/v1/namespaces/{ns}/schedules` | Create a `BackupSchedule`. |
+| `POST /api/v1/namespaces/{ns}/schedules` | Create a `BackupSchedule` from the whole policy: cadence and zone, a named or dynamic selection, an inline archive **or** a saved destination, deadlines, catch-up, retries and retention. |
 | `PUT /api/v1/namespaces/{ns}/schedules/{name}` | Replace the schedule's **future** policy under `expectedGeneration`. It cannot name `spec.sourceRef` and it never reaches a run that already exists. |
 | `POST /api/v1/namespaces/{ns}/schedules/{name}:set-suspension` | Suspend or resume, under `expectedResourceVersion`. |
 | `GET /api/v1/namespaces/{ns}/backups[/{name}]` | `Backup` projections, with the trigger and the schedule revision the run copied. |
@@ -449,6 +449,43 @@ and not a liveness probe — the controller re-examines every schedule every 30 
 and deliberately writes nothing when nothing changed, so comparing that instant
 with the requeue interval would report a healthy schedule as stale. An absent
 `status.activeRuns` means "not yet computed", never "none are running".
+
+### Creating a schedule
+
+`POST .../schedules` takes the whole policy, and has since PLAT-10.1: the same
+field set `PUT .../schedules/{name}` takes, minus `expectedGeneration` and plus
+`sourceRef`, which is settable exactly once. Before that it took five fields —
+`schedule`, `sourceRef`, `topics`, an inline `archive` and `suspended` — so a
+console could *edit* a schedule into a shape it could not *create*, and the only
+way to a saved destination, a dynamic selection, a zone, a catch-up policy or
+retries was a second request against an object that was already admitting slots
+under a policy nobody had asked for.
+
+* **`archive` xor `destinationRef`.** Exactly one, as on the edit route, and the
+  sentinel `archive.url` (`logweir-destination://<name>`, no `secretRef`) is
+  built by the route and never accepted from a body.
+* **`topics` xor `allUserTopics`**, spelled flat rather than under a
+  `topicSelection` object: this route has carried a top-level `topics` since
+  PLAT-17.1 and moving it would break every existing caller to gain a nesting.
+  Both routes validate through one function, so an empty selection, a glob, a
+  duplicate and an exclusion pattern are refused here with the codes and
+  messages the edit route uses, on `topics`, `topics[i]` and
+  `allUserTopics.exclude.prefixes[i]`.
+* **`timeZone`, `startingDeadlineSeconds`, `catchUpPolicy`, `retry`,
+  `activeDeadlineSeconds`, `retention` and `concurrencyPolicy`** are all
+  optional, and absent each means exactly what the edit route's documentation
+  says it means: UTC, 3600, `None`, no retries, 3600, no evaluation, `Forbid`.
+* **The cadence is parsed in the zone it will be stored with**, by the
+  controller's own parser and tz database, so an unknown zone is `timeZone:
+  timezone_unknown` here rather than `Ready=False`/`UnknownTimeZone` on an
+  object this route said was fine.
+* **A pre-PLAT-10.1 body creates exactly what it created before.** Every added
+  field is optional and an absent one is written absent — never a default this
+  route invented — so an existing caller's stored spec, and therefore its run
+  policy digest, is byte for byte what it was.
+* The object's name is minted from the idempotency scope (`sch-<26 base32>`), as
+  it always was, and `Idempotency-Key` is what makes a double click, a lost
+  response and a reload one schedule rather than three.
 
 ### Editing a schedule's future policy
 
@@ -1000,9 +1037,10 @@ on it exactly.
 An expression the cadence engine cannot read is `schedule: schedule_invalid`
 from `POST .../schedules`, `PUT .../schedules/{name}` and
 `GET /api/v1/cadence-previews` alike; a zone it cannot resolve is `timeZone:
-timezone_unknown`. (`POST .../schedules` answered `invalid_cron` before D1 W6,
-which meant a console highlighting the cadence input worked on the edit form
-and the preview and silently did not on the create form, for the same typo.)
+timezone_unknown` — from all three of them, since PLAT-10.1 gave the create
+route a `timeZone` as well. (`POST .../schedules` answered `invalid_cron` before
+D1 W6, which meant a console highlighting the cadence input worked on the edit
+form and the preview and silently did not on the create form, for the same typo.)
 
 **Every response** carries `X-Request-ID` — freshly minted; a client-supplied ID
 is ignored — a Content-Security-Policy, `X-Content-Type-Options: nosniff`,

@@ -868,16 +868,32 @@ const CREATE_CONNECTION_REQUEST = shapeOf(
 
 const RETENTION_REQUEST = shapeOf("RetentionRequest", {}, { keepLast: int, keepDays: int });
 
+/** `POST .../schedules`: THE WHOLE POLICY, as of PLAT-10.1.
+ *
+ *  IT CREATES WHAT THE EDIT ROUTE CAN EDIT, and until PLAT-10.1 it did not:
+ *  five required fields against the edit route's thirteen, so a form could
+ *  edit a schedule into a shape it had no way to create and every guided
+ *  creation would have been a create followed by a repair. `archive` and
+ *  `topics` left the required set to make room for the two spellings that
+ *  replace them -- `destinationRef` and `allUserTopics` -- and the xor of each
+ *  pair is the SERVER's rule, not a copy kept here: a body with both, or with
+ *  neither, is `422 validation_failed` naming the field. This shape's job is
+ *  only to notice a field that became required on the server and stayed
+ *  optional here, which is the silent field loss PLAT-18.1 exists to stop. */
 const CREATE_SCHEDULE_REQUEST = shapeOf(
   "CreateScheduleRequest",
   {
     schedule: str,
     sourceRef: objectOf(NAME_REF),
-    topics: listOf(str),
-    archive: objectOf(ARCHIVE_REQUEST),
     suspended: bool,
   },
-  { concurrencyPolicy: oneOf(CONCURRENCY_POLICIES), retention: objectOf(RETENTION_REQUEST) },
+  {
+    timeZone: str, topics: listOf(str), allUserTopics: objectOf(ALL_USER_TOPICS),
+    archive: objectOf(ARCHIVE_REQUEST), destinationRef: objectOf(NAME_REF),
+    concurrencyPolicy: oneOf(CONCURRENCY_POLICIES), startingDeadlineSeconds: int,
+    catchUpPolicy: oneOf(CATCH_UP_POLICIES), retry: objectOf(RETRY_POLICY),
+    activeDeadlineSeconds: int, retention: objectOf(RETENTION_REQUEST),
+  },
 );
 
 const TOPIC_NAMING_REQUEST = shapeOf("TopicNamingRequest", { prefix: str });

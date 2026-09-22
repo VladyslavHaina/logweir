@@ -653,11 +653,14 @@ async fn the_three_cadence_routes_answer_one_code() {
         );
     }
 
-    // The zone half of the same rule, on the two routes that take a zone.
-    // `POST .../schedules` has no `timeZone` field yet; when it grows one it
-    // must use this code, and the constant is shared so it will.
+    // The zone half of the same rule, on all THREE routes. `POST
+    // .../schedules` grew `timeZone` with PLAT-10.1's guided form, and this
+    // loop is what holds it to the shared constant rather than to a third
+    // spelling.
     edit_body["schedule"] = json!("0 2 * * *");
     edit_body["timeZone"] = json!("Mars/Olympus");
+    create["schedule"] = json!("0 2 * * *");
+    create["timeZone"] = json!("Mars/Olympus");
     for (route, response) in [
         (
             "PUT",
@@ -671,6 +674,15 @@ async fn the_three_cadence_routes_answer_one_code() {
             "preview",
             app.get("/api/v1/cadence-previews?schedule=0%202%20*%20*%20*&timeZone=Mars/Olympus")
                 .await,
+        ),
+        (
+            "POST .../schedules",
+            app.post(
+                &format!("/api/v1/namespaces/{NS_A}/schedules"),
+                Some("one-code-probe-03"),
+                &create.to_string(),
+            )
+            .await,
         ),
     ] {
         let error = &response.json()["errors"][0];

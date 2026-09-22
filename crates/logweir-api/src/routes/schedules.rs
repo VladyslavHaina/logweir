@@ -148,17 +148,35 @@ pub fn validate_create(request: &CreateScheduleRequest) -> Result<(), ApiError> 
             // `schedule_invalid` — the code D1 §0.2 fixes and `docs/api.md`
             // publishes — so a console branching on `errors[].code` to
             // highlight the cadence input highlighted on two forms out of
-            // three for the same typo. `Cadence::parse` is also strictly
-            // stronger than the bare cron parser: it validates the zone as
-            // well, which this DTO does not carry yet but the next one will.
+            // three for the same typo.
             // `schedules::the_three_cadence_routes_answer_one_code` pins it.
-            if let Err(e) = Cadence::parse(&request.schedule, None) {
+            //
+            // AND THE ZONE IS NOW PART OF THE SAME PARSE (PLAT-10.1). The DTO
+            // carries `timeZone`, so this route resolves the expression in the
+            // zone it will be stored with, against the controller's own tz
+            // database — an unknown zone is `timeZone: timezone_unknown` here
+            // rather than `Ready=False`/`UnknownTimeZone` on an object the
+            // console said was fine. The split is the edit route's, verbatim.
+            if let Err(e) = Cadence::parse(&request.schedule, request.time_zone.as_deref()) {
+                let (field, code) = match e {
+                    CadenceError::UnknownTimeZone { .. } => ("timeZone", TIMEZONE_UNKNOWN),
+                    CadenceError::Schedule(_) => ("schedule", SCHEDULE_INVALID),
+                };
                 errors.push(FieldError::new(
-                    "schedule",
-                    SCHEDULE_INVALID,
+                    field,
+                    code,
                     validate::bounded(&e.to_string(), 256),
                 ));
             }
+        }
+    }
+    if let Some(zone) = &request.time_zone {
+        if validate::check_single_line(zone, 64).is_err() {
+            errors.push(FieldError::new(
+                "timeZone",
+                "too_long",
+                "timeZone must be an IANA zone name of at most 64 characters",
+            ));
         }
     }
     if !validate::is_dns_subdomain(&request.source_ref.name) {
@@ -168,44 +186,48 @@ pub fn validate_create(request: &CreateScheduleRequest) -> Result<(), ApiError> 
             "must be a Kubernetes object name",
         ));
     }
-    if request.topics.is_empty() || request.topics.len() > 256 {
-        errors.push(FieldError::new(
-            "topics",
-            "count_out_of_range",
-            "between 1 and 256 named topics are required; patterns are refused",
-        ));
-    }
-    let mut seen = std::collections::BTreeSet::new();
-    for (i, topic) in request.topics.iter().enumerate() {
-        if !validate::is_topic_name(topic) {
+    validate_selection("", &create_selection(request), &mut errors);
+    let _ = destination_or_archive(
+        request.archive.as_ref(),
+        request.destination_ref.as_ref(),
+        &mut errors,
+    );
+    check_range(
+        "startingDeadlineSeconds",
+        request.starting_deadline_seconds,
+        cadence::MIN_STARTING_DEADLINE_SECONDS,
+        cadence::MAX_STARTING_DEADLINE_SECONDS,
+        &mut errors,
+    );
+    check_range(
+        "activeDeadlineSeconds",
+        request.active_deadline_seconds,
+        cadence::MIN_ACTIVE_DEADLINE_SECONDS,
+        cadence::MAX_ACTIVE_DEADLINE_SECONDS,
+        &mut errors,
+    );
+    if let Some(retry) = &request.retry {
+        if !(0..=3).contains(&retry.max_retries) {
             errors.push(FieldError::new(
-                format!("topics[{i}]"),
-                "invalid_topic",
-                "must be a Kafka topic name; patterns are refused",
-            ));
-        } else if !seen.insert(topic.as_str()) {
-            errors.push(FieldError::new(
-                format!("topics[{i}]"),
-                "duplicate",
-                "each topic may appear once",
+                "retry.maxRetries",
+                "out_of_range",
+                "must be from 0 to 3",
             ));
         }
+        check_range(
+            "retry.delaySeconds",
+            retry.delay_seconds,
+            cadence::MIN_RETRY_DELAY_SECONDS,
+            cadence::MAX_RETRY_DELAY_SECONDS,
+            &mut errors,
+        );
     }
-    validate_archive("archive", &request.archive, &mut errors);
     if let Some(retention) = &request.retention {
         for (field, value) in [
             ("retention.keepLast", retention.keep_last),
             ("retention.keepDays", retention.keep_days),
         ] {
-            if let Some(v) = value {
-                if !(0..=100_000).contains(&v) {
-                    errors.push(FieldError::new(
-                        field,
-                        "out_of_range",
-                        "must be from 0 to 100000",
-                    ));
-                }
-            }
+            check_range(field, value, 0, 100_000, &mut errors);
         }
     }
     if errors.is_empty() {
@@ -215,7 +237,23 @@ pub fn validate_create(request: &CreateScheduleRequest) -> Result<(), ApiError> 
     }
 }
 
+/// The create route's two selection fields, read as the one selection both
+/// routes validate and build from.
+fn create_selection(request: &CreateScheduleRequest) -> TopicSelectionRequest {
+    TopicSelectionRequest {
+        topics: request.topics.clone(),
+        all_user_topics: request.all_user_topics.clone(),
+    }
+}
+
 /// Build the stored object.
+///
+/// # Panics
+///
+/// Never: `validate_create` runs first and is what refuses a request with
+/// neither or both of `archive` and `destinationRef`. The debug assertion
+/// below is there so that a caller who skips it fails loudly in tests rather
+/// than writing an empty `archive.url`.
 #[must_use]
 pub fn build(
     namespace: &str,
@@ -223,6 +261,17 @@ pub fn build(
     annotations: BTreeMap<String, String>,
     request: &CreateScheduleRequest,
 ) -> BackupSchedule {
+    let mut errors = Vec::new();
+    // THE SENTINEL IS BUILT, NEVER ACCEPTED — the same helper the edit route
+    // uses, so `logweir-destination://<name>` has exactly one producer in this
+    // binary and `destinationRef` cannot arrive with an inline URL beside it.
+    let (archive, destination_ref) = destination_or_archive(
+        request.archive.as_ref(),
+        request.destination_ref.as_ref(),
+        &mut errors,
+    );
+    debug_assert!(errors.is_empty(), "validate_create ran first");
+    let (topics, all_user_topics) = selection_fields(&create_selection(request));
     BackupSchedule {
         metadata: ObjectMeta {
             name: Some(name),
@@ -235,30 +284,29 @@ pub fn build(
             source_ref: LocalRef {
                 name: request.source_ref.name.clone(),
             },
-            topics: request.topics.clone(),
-            archive: ArchiveRef {
-                url: request.archive.url.clone(),
-                secret_ref: request.archive.credential_ref.as_ref().map(|r| LocalRef {
-                    name: r.name.clone(),
-                }),
-            },
-            // As in the restore route: this route takes an inline archive, so
-            // the saved-destination reference is absent and the sentinel rule
-            // has nothing to bind.
-            destination_ref: None,
+            topics,
+            archive,
+            destination_ref,
             // D1 W2 added the cadence and selection policy fields to
-            // `BackupScheduleSpec`. This route is PLAT-17.1's create shape and
-            // its DTO does not carry them yet (D1 §11.1 gives the API routes to
-            // W6), so it writes the absent value for each — which is exactly
-            // today's behaviour: UTC, a one-hour starting deadline, no
-            // catch-up, no retries, a 3600 s run deadline and a named
-            // allowlist.
-            all_user_topics: None,
-            time_zone: None,
-            starting_deadline_seconds: None,
-            catch_up_policy: None,
-            retry: None,
-            active_deadline_seconds: None,
+            // `BackupScheduleSpec` and D1 W6 gave the edit route all of them.
+            // PLAT-10.1 gave them to this route as well, because a form that
+            // can only create a policy it cannot express has to follow every
+            // create with an edit against an object that is already
+            // scheduling. An ABSENT field is still written absent, which is
+            // still the documented default: UTC, a one-hour starting deadline,
+            // no catch-up, no retries and a 3600 s run deadline.
+            all_user_topics,
+            time_zone: request.time_zone.clone(),
+            starting_deadline_seconds: request.starting_deadline_seconds,
+            catch_up_policy: request.catch_up_policy.map(|c| match c {
+                CatchUpPolicy::None => CrdCatchUp::None,
+                CatchUpPolicy::Latest => CrdCatchUp::Latest,
+            }),
+            retry: request.retry.as_ref().map(|r| RetrySpec {
+                max_retries: r.max_retries,
+                delay_seconds: r.delay_seconds,
+            }),
+            active_deadline_seconds: request.active_deadline_seconds,
             concurrency_policy: match request.concurrency_policy {
                 None | Some(ConcurrencyPolicy::Forbid) => CrdConcurrency::Forbid,
                 Some(ConcurrencyPolicy::Allow) => CrdConcurrency::Allow,
@@ -400,21 +448,36 @@ pub const MAX_TOPICS: usize = 256;
 /// a run. The THIRD SHAPE — a named allowlist together with `allUserTopics` —
 /// is NOT refused here: it is the CRD's own R2, and D1 §5.2 says the API must
 /// let the API server refuse it rather than keep a copy that can drift.
+///
+/// WHERE THE FIELD PATHS COME FROM. `field` is the name the selection has in
+/// the request that carries it — `topicSelection` on the edit route, and the
+/// EMPTY STRING on the create route, whose `topics` and `allUserTopics` are
+/// top-level fields (PLAT-10.1). With an empty `field` the paths lose their
+/// prefix (`topics[0]`, not `.topics[0]`) and the empty-selection refusal is
+/// reported on `topics`, which is the input a console has to highlight; the
+/// edit route's own paths are byte-identical to what they were.
 pub(crate) fn validate_selection(
     field: &str,
     selection: &TopicSelectionRequest,
     errors: &mut Vec<FieldError>,
 ) {
+    let path = |suffix: &str| {
+        if field.is_empty() {
+            suffix.to_string()
+        } else {
+            format!("{field}.{suffix}")
+        }
+    };
     if selection.topics.is_empty() && selection.all_user_topics.is_none() {
         errors.push(FieldError::new(
-            field,
+            if field.is_empty() { "topics" } else { field },
             "selection_invalid",
             "a run needs either named topics or allUserTopics; an empty selection is not a run",
         ));
     }
     if selection.topics.len() > MAX_TOPICS {
         errors.push(FieldError::new(
-            format!("{field}.topics"),
+            path("topics"),
             "count_out_of_range",
             format!("at most {MAX_TOPICS} named topics; patterns are refused"),
         ));
@@ -423,13 +486,13 @@ pub(crate) fn validate_selection(
     for (i, topic) in selection.topics.iter().enumerate() {
         if !validate::is_topic_name(topic) {
             errors.push(FieldError::new(
-                format!("{field}.topics[{i}]"),
+                path(&format!("topics[{i}]")),
                 "invalid_topic",
                 "must be a Kafka topic name; patterns are refused",
             ));
         } else if !seen.insert(topic.as_str()) {
             errors.push(FieldError::new(
-                format!("{field}.topics[{i}]"),
+                path(&format!("topics[{i}]")),
                 "duplicate",
                 "each topic may appear once",
             ));
@@ -444,7 +507,7 @@ pub(crate) fn validate_selection(
     for (i, topic) in exclude.topics.iter().flatten().enumerate() {
         if !validate::is_topic_name(topic) {
             errors.push(FieldError::new(
-                format!("{field}.allUserTopics.exclude.topics[{i}]"),
+                path(&format!("allUserTopics.exclude.topics[{i}]")),
                 "invalid_topic",
                 "an exclusion is an exact Kafka topic name, never a pattern",
             ));
@@ -453,7 +516,7 @@ pub(crate) fn validate_selection(
     for (i, prefix) in exclude.prefixes.iter().flatten().enumerate() {
         if prefix.is_empty() || prefix.len() > 249 || !is_topic_prefix(prefix) {
             errors.push(FieldError::new(
-                format!("{field}.allUserTopics.exclude.prefixes[{i}]"),
+                path(&format!("allUserTopics.exclude.prefixes[{i}]")),
                 "invalid_prefix",
                 "an exclusion prefix is 1 to 249 characters of [a-zA-Z0-9._-]; `orders-` \
                  excludes `orders-eu` because it is a literal prefix, and `orders*` is not a \
