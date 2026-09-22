@@ -56,8 +56,8 @@ pub struct SharedMode {
     pub keys: Arc<CookieKeys>,
     /// The per-peer limit on the unauthenticated login surface.
     pub login_limiter: RateLimiter,
-    /// Per-actor, per-namespace concurrent stream slots. No route uses one
-    /// yet; see `crate::auth::ratelimit`.
+    /// Per-actor, per-namespace concurrent stream slots, taken by the
+    /// operation event stream; see `crate::auth::ratelimit`.
     pub streams: Arc<StreamSlots>,
     /// The session lifetime in seconds.
     pub session_max_age_seconds: i64,

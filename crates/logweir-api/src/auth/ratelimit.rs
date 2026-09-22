@@ -10,16 +10,18 @@
 //!
 //! THE KEY IS THE IMMEDIATE PEER, NOT A HEADER. `X-Forwarded-For` is attacker-
 //! controlled unless the immediate peer is a trusted proxy, and D0 allows
-//! forwarded values for transport LOGGING only — never for a decision. So the
+//! forwarded values for transport logging only — never for an identity or a
+//! grant (`requireTrustedProxy` reads the forwarded SCHEME from a trusted peer,
+//! and only ever to refuse; see `crate::http::entry_point`). So the
 //! bucket key is the socket peer address, which is the reverse proxy's address
 //! in a shared deployment. That is a deliberate trade: behind one ingress the
 //! limit is a global limit, which is the correct conservative behaviour for a
 //! service whose per-user limits live behind authentication.
 //!
-//! STREAM SLOTS ARE A SEAM. No route streams yet ([`crate::authz::Action`]
-//! `StreamOperationEvents` has no route and is advertised `false`), but the
-//! limit the streams will need is implemented and tested here so that adding
-//! the route is adding a route, not inventing a limiter.
+//! STREAM SLOTS BOUND THE EVENT STREAM. `routes::operations::events` takes one
+//! per open stream, keyed by principal and namespace, and answers `429` when
+//! the principal already holds its share; the slot is released when the
+//! stream ends.
 
 use std::collections::HashMap;
 use std::net::IpAddr;
