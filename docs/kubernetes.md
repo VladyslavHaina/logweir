@@ -7086,7 +7086,12 @@ reported, with `state: skipped`, and **a skipped blocking check keeps the
 overall verdict `unknown`**. The same applies to the one row a draft cannot
 answer: a `Preflight` over `planBytes` has no `Restore` for an approver to sign,
 so `approval.state` is `skipped` with `SubjectNotCreated` and the verdict is
-`unknown` however green everything else is.
+`unknown` however green everything else is. The aggregate stays that way on
+purpose. The console's restore wizard reads it as submittable only in exactly
+that shape: every other blocking row `ready` and this one row skipped with this
+one code. Creating the `Restore` is what makes the row answerable. Anything
+else that is not `ready` still refuses the Create (`ui/README.md`, *The
+readiness check holds the submit*).
 
 ### 21.8 What this build does not do
 

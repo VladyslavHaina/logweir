@@ -664,6 +664,43 @@ fn a_withdrawn_or_wrong_usage_key_is_never_mounted() {
         refused.is_err(),
         "the authorising key must hold the bound mode's usage"
     );
+
+    // UNDER GOVERNED, THE CONSOLE KEY IS THE SECOND FROZEN KEY and is
+    // re-checked on its own: a valid approver does not carry a console key
+    // retired since the confirmation was signed. The negative control is the
+    // same approval under the unchanged trust, which mounts.
+    let governed = effective("prod-governed");
+    approval_bundle_config_map_with_policy(
+        &restore(),
+        &governed_approval(),
+        &trust(),
+        &governed,
+        now(),
+    )
+    .expect("the governed control mounts under the unchanged trust");
+    let refused = approval_bundle_config_map_with_policy(
+        &restore(),
+        &governed_approval(),
+        &weirkeeper::trust::from_policy(&trust_policy(revoked_console())),
+        &governed,
+        now(),
+    );
+    let message = format!(
+        "{:?}",
+        refused.expect_err("a retired console key mounts nothing")
+    );
+    assert!(
+        message.contains(CONSOLE_KEY_ID),
+        "the refusal names the console key: {message}"
+    );
+}
+
+/// [`keys`] with the console key retired an hour ago.
+fn revoked_console() -> Vec<SpecKey> {
+    let mut keys = keys();
+    keys[0].state = KeyState::Retired;
+    keys[0].retired_at = Some(now() - chrono::Duration::hours(1));
+    keys
 }
 
 // ---------------------------------------------------------------------------

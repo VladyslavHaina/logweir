@@ -78,7 +78,7 @@ const V2_PAYLOAD = "application/vnd.logweir.restore-authorization+json;version=2
 
 const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\..*/, "Z").toLowerCase();
 const base = NAMESPACE_PREFIX + stamp;
-const NS = { ordinary: base + "-o", governed: base + "-v", legacy: base + "-g" };
+const NS = { ordinary: base + "-o", governed: base + "-v", legacy: base + "-g", readiness: base + "-r" };
 const ARTIFACTS = join(process.env.UI_E2E_ARTIFACTS ||
   "/tmp/logweir-roadmap-run/claude/artifacts/plat19-2", stamp);
 const WORK_DIR = join("/tmp", "plat19-2-live-" + stamp);
@@ -86,6 +86,7 @@ const suffix = randomBytes(3).toString("hex");
 const TOPICS = ["orders", "payments"];
 const FROM_MS = 1760000000000;
 const TO_MS = 1760000060000;
+const BASE_REV = process.env.UI_E2E_BASE_REV || "f49849d";
 
 const result = {
   harness: "scripts/plat19-2-ui-e2e.mjs",
@@ -266,6 +267,7 @@ async function startApi(port) {
     "namespaces:",
     "  " + NS.ordinary + ": p192-ordinary",
     "  " + NS.governed + ": p192-governed",
+    "  " + NS.readiness + ": p192-ordinary",
     "",
   ].join("\n");
   writeFileSync(policyPath, policy);
@@ -279,7 +281,7 @@ async function startApi(port) {
     "localAdmin:",
     "  subject: admin",
     "  displayName: Local administrator",
-    "namespaces: [" + [NS.ordinary, NS.governed, NS.legacy].join(", ") + "]",
+    "namespaces: [" + Object.values(NS).join(", ") + "]",
     "kubernetes:",
     "  source: kubeconfig",
     "  context: " + KUBE_CONTEXT,
@@ -329,7 +331,24 @@ function copyLabSecret(ns, name) {
   result.created.push({ kind: "Secret", namespace: ns, name: name, note: "copied from the lab, value never printed" });
 }
 
-async function seedNamespace(ns) {
+/** The newest Succeeded lab Backup: its backupId and covered window are the
+ *  REAL archive the readiness namespace's fixture point names. Read-only. */
+function labRecoveryPoint() {
+  const items = (kubeJson(["-n", LAB_NS, "get", "backups"]).items || [])
+    .filter((b) => (b.status || {}).phase === "Succeeded" && (b.status || {}).backupId &&
+      ((b.status || {}).windowCovered || {}).toMs)
+    .sort((a, b) => b.status.windowCovered.toMs - a.status.windowCovered.toMs);
+  check(items.length > 0, "the lab has no Succeeded Backup to read an archive from");
+  const b = items[0];
+  const url = String(((b.spec || {}).archive || {}).url || "");
+  const m = /^s3:\/\/([^/]+)\/(.*)$/.exec(url);
+  check(m !== null, "the lab Backup's archive url is not s3://bucket/prefix: " + url);
+  return { name: b.metadata.name, backupId: b.status.backupId, windowCovered: b.status.windowCovered,
+    topics: b.spec.topics, bucket: m[1], prefix: m[2],
+    secret: ((((b.spec || {}).archive || {}).secretRef) || {}).name };
+}
+
+async function seedNamespace(ns, lab) {
   assertSafeNamespace(ns);
   kube(["create", "namespace", ns]);
   kube(["label", "namespace", ns, OWNER_LABEL]);
@@ -362,13 +381,29 @@ async function seedNamespace(ns) {
   cluster("source-" + suffix, "source", LAB_SOURCE_BOOTSTRAP, sourceSecret);
   const target = cluster("target-" + suffix, "target", LAB_TARGET_BOOTSTRAP, LAB_TARGET_SECRET);
 
-  kube(["-n", ns, "create", "secret", "generic", "store-" + suffix,
-    "--from-literal=access-key-id=unused", "--from-literal=secret-access-key=unused"]);
+  if (lab) {
+    // THE LAB'S OWN ARCHIVE, READ ONLY: the store Secret is copied (value never
+    // printed) so the readiness check can READ the manifest and segments the
+    // lab's real run wrote. Nothing in this journey writes to the store.
+    const source = kubeJson(["-n", LAB_NS, "get", "secret", lab.secret]);
+    kube(["-n", ns, "create", "-f", "-"], {
+      input: JSON.stringify({
+        apiVersion: "v1", kind: "Secret", type: source.type || "Opaque",
+        metadata: { name: "store-" + suffix, namespace: ns, labels: LABELS }, data: source.data,
+      }),
+    });
+    result.created.push({ kind: "Secret", namespace: ns, name: "store-" + suffix,
+      note: "copied from the lab's " + lab.secret + ", value never printed" });
+  } else {
+    kube(["-n", ns, "create", "secret", "generic", "store-" + suffix,
+      "--from-literal=access-key-id=unused", "--from-literal=secret-access-key=unused"]);
+  }
   const dest = apply(ns, {
     apiVersion: "logweir.dev/v1alpha1", kind: "BackupDestination",
     metadata: { name: "dest-" + suffix, namespace: ns, labels: LABELS },
     spec: {
-      storage: { provider: "S3", bucket: "kafka-backups", prefix: ns, addressing: "PathStyle",
+      storage: { provider: "S3", bucket: lab ? lab.bucket : "kafka-backups",
+        prefix: lab ? lab.prefix : ns, addressing: "PathStyle",
         endpoint: "http" + "://minio." + LAB_NS + ".svc:9000" },
       transport: { security: "InsecureHTTP" },
       access: { archiveWrite: { mode: "SecretKeys", secret: { name: "store-" + suffix } } },
@@ -393,13 +428,16 @@ async function seedNamespace(ns) {
     apiVersion: "logweir.dev/v1alpha1", kind: "Backup",
     metadata: { name: name, namespace: ns, labels: LABELS },
     spec: { archive: { url: "logweir-destination://" + frozen.name }, destinationRef: { name: frozen.name },
-      deadlineSeconds: 3600, sourceRef: { name: "source-" + suffix }, topics: TOPICS.slice(),
+      deadlineSeconds: 3600, sourceRef: { name: "source-" + suffix },
+      topics: lab ? lab.topics.slice() : TOPICS.slice(),
       triggeredBy: "manual" },
   });
   const status = {
-    phase: "Succeeded", backupId: "01JB7Z0000000000000000P192", records: 1000, exitCode: 0,
-    exitReason: "ok", reason: "Ok", manifestKey: ns + "/set/manifest.json", destination: frozen,
-    windowCovered: { fromMs: FROM_MS, toMs: TO_MS },
+    phase: "Succeeded", backupId: lab ? lab.backupId : "01JB7Z0000000000000000P192", records: 1000,
+    exitCode: 0, exitReason: "ok", reason: "Ok",
+    manifestKey: lab ? lab.prefix + "/" + lab.backupId + "/manifest.json" : ns + "/set/manifest.json",
+    destination: frozen,
+    windowCovered: lab ? lab.windowCovered : { fromMs: FROM_MS, toMs: TO_MS },
     conditions: [{ type: "Complete", status: "True", reason: "Ok", message: "fixture",
       lastTransitionTime: rfc(TO_MS) }],
   };
@@ -413,8 +451,12 @@ async function seedNamespace(ns) {
   }
   check(kept, "the fixture Backup did not keep its status in " + ns);
   result.created.push({ kind: "Backup", namespace: ns, name: name, uid: backup.metadata.uid });
-  result.fixtures.push({ namespace: ns, backup: name, note: "a Succeeded fixture Backup; no archive exists for it" });
-  return { point: { name: name, uid: backup.metadata.uid }, targetUid: target.metadata.uid };
+  result.fixtures.push({ namespace: ns, backup: name, note: lab
+    ? "a Succeeded fixture Backup whose backupId and covered window are the lab run " + lab.name +
+      "'s, frozen to a destination over the lab's own bucket/prefix: the archive it names is REAL"
+    : "a Succeeded fixture Backup; no archive exists for it" });
+  return { point: { name: name, uid: backup.metadata.uid }, targetUid: target.metadata.uid,
+    targetName: target.metadata.name, window: status.windowCovered };
 }
 
 // ------------------------------------------------------------------ the run
@@ -427,9 +469,17 @@ async function main() {
   }
   const labController = kubeJson(["-n", LAB_NS, "get", "deploy", "weirkeeper"]);
   result.labControllerImage = labController.spec.template.spec.containers[0].image;
+  result.labControllerRevision = (labController.spec.template.metadata.labels || {});
+  result.labControllerPods = (kubeJson(["-n", LAB_NS, "get", "pods"]).items || [])
+    .filter((p) => p.metadata.name.startsWith("weirkeeper"))
+    .map((p) => ({ name: p.metadata.name, phase: (p.status || {}).phase,
+      imageIDs: ((p.status || {}).containerStatuses || []).map((c) => c.imageID) }));
+  const lab = labRecoveryPoint();
+  result.labRecoveryPoint = { name: lab.name, backupId: lab.backupId, windowCovered: lab.windowCovered,
+    bucket: lab.bucket, prefix: lab.prefix };
   const seeded = {};
   for (const [key, ns] of Object.entries(NS)) {
-    seeded[key] = await seedNamespace(ns);
+    seeded[key] = await seedNamespace(ns, key === "readiness" ? lab : null);
   }
 
   const port = await freePort();
@@ -639,6 +689,135 @@ async function main() {
       namespace: g.ns, restore: g.restore, routedTo: gHash, approval: g.approvalName,
       matchedKeyId: verified.status.matchedKeyId,
     });
+
+    // ---------------------------------------------------------------- 4
+    // DRAFT-PREFLIGHT-NEVER-READY: the wizard's own readiness check, run by
+    // the lab controller against a REAL archive, answers `approval.state`
+    // skipped/SubjectNotCreated for the draft and keeps the aggregate
+    // `unknown` -- and the shipped gate lets exactly that verdict submit.
+    const r = NS.readiness;
+    const rs = seeded.readiness;
+    await page.goto(ui + "#/restore?ns=" + r + "&backup=" + rs.point.name + "&uid=" + rs.point.uid,
+      { waitUntil: "load", timeout: 30000 });
+    await waitFor(page, "#step-target", "the wizard in " + r);
+    await page.selectOption("#target-cluster", rs.targetUid);
+    await pause(500);
+    const prefix = "p192" + suffix + "-";
+    await page.fill("#topic-prefix", prefix);
+    await page.press("#topic-prefix", "Tab");
+    // `windowCovered.toMs` is EXCLUSIVE (WIZ-PIT-EXCLUSIVE-DEFAULT, owned by
+    // plat15-2): the last covered millisecond is chosen by hand, and said to be.
+    const lastCovered = new Date(rs.window.toMs - 1).toISOString();
+    await page.fill("#point-in-time", lastCovered);
+    await page.press("#point-in-time", "Tab");
+    await pause(1000);
+    await waitFor(page, "#plan-bytes", "the plan in " + r);
+    const rPlan = await page.evaluate(() => ({
+      bytes: document.querySelector("#plan-bytes").textContent,
+      hash: (document.querySelector("#plan-hash-value") || {}).textContent.trim(),
+    }));
+    save("04-draft-plan.txt", rPlan.bytes);
+    const before = new Set((kubeJson(["-n", r, "get", "preflights"]).items || []).map((x) => x.metadata.uid));
+    await page.click("#restore-readiness-start");
+    let pf = null;
+    for (let i = 0; i < 150 && pf === null; i += 1) {
+      const mine = (kubeJson(["-n", r, "get", "preflights"]).items || [])
+        .find((x) => !before.has(x.metadata.uid));
+      if (mine && ["Completed", "Failed", "Cancelled"].includes(String((mine.status || {}).phase))) {
+        pf = mine;
+      } else {
+        await pause(2000);
+      }
+    }
+    check(pf !== null, "the lab controller recorded no terminal readiness check within 300 s");
+    await shot(page, "04-draft-readiness-started");
+    // WHAT THE PAGE ITSELF HOLDS. At this base the wizard keeps the create
+    // answer (non-terminal) and never follows the check to its verdict; that
+    // follow is PLAT-08.2's (`followRestoreReadiness`, claude/plat08-2, not on
+    // main). Recorded, not asserted: the gate under test is fed below with the
+    // exact item that follow would hold.
+    const pageGate = await page.evaluate(() => {
+      const p = document.querySelector("#readiness-blocked");
+      return p === null ? null : p.innerText;
+    });
+    result.pageHeldReadiness = { blockedSentence: pageGate,
+      note: "the page's own follow-to-verdict is PLAT-08.2's; see the result file" };
+    // THE VERDICT AS THE PRODUCT API SERVES IT TO THE PAGE, bound to this plan.
+    const served = await page.evaluate(async (u) => {
+      const res = await fetch(u);
+      return { status: res.status, body: await res.json() };
+    }, origin + "/api/v1/namespaces/" + r + "/preflights/" + pf.metadata.name +
+      "?planHash=" + encodeURIComponent(rPlan.hash));
+    save("04-draft-preflight-served.json", served);
+    save("04-draft-preflight-object.json", { status: pf.status });
+    check(served.status === 200, "the product API answered " + served.status);
+    const item = served.body.item;
+    const rows = (item.checks || []).map((c) => ({ id: c.id, state: c.state, gating: c.gating, code: c.code }));
+    const approvalRow = rows.find((c) => c.id === "approval.state");
+    check(approvalRow && approvalRow.state === "skipped" && approvalRow.code === "SubjectNotCreated",
+      "the controller answered the draft's approval row " + JSON.stringify(approvalRow));
+    check(item.state === "unknown", "and kept the aggregate unknown: " + item.state);
+    const otherBlocking = rows.filter((c) => c.gating === "blocking" && c.id !== "approval.state" &&
+      c.state !== "ready");
+    // THE SHIPPED GATE, loaded from the service this run serves, on the served
+    // verdict; and the gate at the rebase base, on the same verdict.
+    const gate = (moduleUrl, verdict, hash) => page.evaluate(async ([m, v, h]) => {
+      const mod = await import(m);
+      return mod.readinessRefusal({ readiness: { boundHash: h, preflight: v } }, { hash: h });
+    }, [moduleUrl, verdict, hash]);
+    const shipped = await gate(origin + "/ui/pages/restore-wizard.js", item, rPlan.hash);
+    const flipped = JSON.parse(JSON.stringify(item));
+    flipped.state = "notReady";
+    flipped.checks.find((c) => c.id === "approval.state").state = "notReady";
+    flipped.checks.find((c) => c.id === "approval.state").code = "ApprovalNotVerified";
+    const refusedNotReady = await gate(origin + "/ui/pages/restore-wizard.js", flipped, rPlan.hash);
+    const other = JSON.parse(JSON.stringify(item));
+    const victim = other.checks.find((c) => c.gating === "blocking" && c.id !== "approval.state" &&
+      c.state === "ready");
+    let refusedOther = null;
+    if (victim) {
+      victim.state = "unknown";
+      victim.code = "BlockedByPrerequisite";
+      refusedOther = await gate(origin + "/ui/pages/restore-wizard.js", other, rPlan.hash);
+    }
+    const baseDir = join(WORK_DIR, "base-ui");
+    mkdirSync(baseDir, { recursive: true });
+    const archived = spawnSync("bash", ["-c", "git -C " + JSON.stringify(REPO) + " archive " +
+      BASE_REV + " ui | tar -x -C " + JSON.stringify(baseDir)], { encoding: "utf8", timeout: 60000 });
+    check(archived.status === 0, "git archive of the base ui failed: " + archived.stderr);
+    const baseModule = await import(join(baseDir, "ui", "pages", "restore-wizard.js"));
+    const atBase = baseModule.readinessRefusal({ readiness: { boundHash: rPlan.hash, preflight: item } },
+      { hash: rPlan.hash });
+    const gateRecord = { shipped: shipped, atBase: atBase, approvalNotReady: refusedNotReady,
+      otherRowUnknown: { row: victim ? victim.id : null, refusal: refusedOther }, baseRev: BASE_REV };
+    save("04-draft-gate.json", gateRecord);
+    if (otherBlocking.length === 0) {
+      check(shipped === null, "the shipped gate refused the draft-shaped live verdict: " + shipped);
+      check(typeof atBase === "string" && atBase.includes("approval.state (SubjectNotCreated)"),
+        "the base gate refused it for the draft row (the defect, reproduced): " + atBase);
+      record("DRAFT-PREFLIGHT-NEVER-READY: the lab controller's draft verdict (every blocking row ready but " +
+        "approval.state skipped/SubjectNotCreated, aggregate unknown) passes the shipped gate and was refused at " +
+        BASE_REV, {
+        namespace: r, preflight: pf.metadata.name, planHash: rPlan.hash, aggregate: item.state,
+        approvalRow: approvalRow, blockingReady: rows.filter((c) => c.gating === "blocking" && c.state === "ready").length,
+        atBase: atBase,
+      });
+    } else {
+      record("DRAFT-PREFLIGHT-NEVER-READY (partial): the live verdict carries other non-ready blocking rows, " +
+        "so the gate refuses naming THEM", { namespace: r, preflight: pf.metadata.name, others: otherBlocking,
+        shipped: shipped });
+      check(typeof shipped === "string" && otherBlocking.every((c) => shipped.includes(c.id + " (" + c.code + ")")) &&
+        !shipped.includes("approval.state"), "the refusal names the other rows and not the draft row: " + shipped);
+    }
+    check(typeof refusedNotReady === "string" && refusedNotReady.includes("approval.state (ApprovalNotVerified)"),
+      "approval.state notReady refuses: " + refusedNotReady);
+    control("the same live verdict with approval.state notReady/ApprovalNotVerified refuses by id and code",
+      { refusal: refusedNotReady });
+    check(victim === undefined || (typeof refusedOther === "string" &&
+      refusedOther.includes(victim.id + " (BlockedByPrerequisite)") && !refusedOther.includes("approval.state")),
+    "another blocking row unknown refuses naming it: " + refusedOther);
+    control("the same live verdict with one other blocking row unknown refuses naming that row only",
+      { row: victim ? victim.id : null, refusal: refusedOther });
   } finally {
     save("api-log.txt", apiLog.join("").replace(/-----BEGIN[\s\S]*?-----END[^\n]*\n/g, "<pem redacted>\n"));
     await browser.close();

@@ -817,6 +817,21 @@ walk past it, and it refuses four states:
 * it is **not ready** -- which is where a target-topic collision lands, as
   `target.mappedTopics` / `MappedTopicExists`, named with its check id and code.
 
+**A draft's approval row is the one exception, and it is exactly one shape**
+(DRAFT-PREFLIGHT-NEVER-READY, PLAT-19.2). A check run before the Restore exists
+answers `approval.state` with `skipped` / `SubjectNotCreated` -- no approver has
+been asked -- and the controller's aggregate deliberately keeps a skipped
+blocking row `unknown`. Before the fix that made every readiness check refuse
+the Create. `isDraftApprovalRow` accepts that row and nothing wider: the
+aggregate must be `unknown`, every OTHER blocking row must be `ready`, and at
+least one of them must exist. `approval.state` `notReady`, a `skipped` row with
+another code, or any other `unknown`/`skipped` blocking row still refuses, named
+by id and code. The exception lives in the console and not in the API response:
+it is a rule about the next action -- the click that creates the subject the row
+is waiting for -- and a second aggregate on the wire would sit beside the
+controller's for every client to misread. The controller and the runner still
+refuse an unverified approval whatever this page decides.
+
 **An ABSENT check is a warning, not a refusal.** D2 section 6.6's rule is about
 a verdict that has stopped applying; the runner's phase 0 refuses a mapped topic
 that already exists whether or not a console asked first, and legacy mode has no
