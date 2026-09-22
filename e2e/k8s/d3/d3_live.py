@@ -6016,18 +6016,46 @@ def policy_view(obj: dict[str, Any]) -> dict[str, Any]:
 
 
 def rfc3339_ms(value: str | None) -> int | None:
-    """`2026-09-21T18:00:00Z` as epoch milliseconds, or `None`."""
+    """`2026-09-21T18:00:00Z` — or `2026-09-22T02:28:38.193596887Z` — as epoch
+    milliseconds, or `None`.
+
+    THE FRACTION IS NOT OPTIONAL TO HANDLE. `logweir.dev`'s `Time` serializes
+    with nanosecond precision wherever the controller wrote one directly
+    (`status.evaluatedAt` in this run's own artifacts reads
+    `2026-09-22T02:28:38.193596887Z`), so a parser that accepted only whole
+    seconds would answer `None` for a real capture time and the clause that
+    compares it to the catalog row would fail against a product that was
+    right. Parsing is in one place for the same reason.
+    """
     if not value:
         return None
+    body = value.strip().removesuffix("Z")
+    fraction = "000000"
+    if "." in body:
+        body, fraction = body.split(".", 1)
+        fraction = fraction[:6].ljust(6, "0")
+    if not fraction.isdigit():
+        return None
     try:
-        return int(
-            dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
-            .replace(tzinfo=dt.timezone.utc)
-            .timestamp()
-            * 1000
-        )
+        base = (dt.datetime.strptime(body, "%Y-%m-%dT%H:%M:%S")
+                .replace(tzinfo=dt.timezone.utc))
     except ValueError:
         return None
+    return int(base.timestamp() * 1000) + int(fraction) // 1000
+
+
+def moved_past(value: str | None, mark: str) -> bool:
+    """Whether an RFC3339 instant is later than `mark`.
+
+    NOT `>` ON THE STRINGS. `2026-09-22T02:28:38.193596887Z` sorts BEFORE
+    `2026-09-22T02:28:38Z` byte-wise — `.` is 0x2E and `Z` is 0x5A — so the
+    string comparison this replaced said a controller that HAD re-evaluated
+    had not, and `verdict_after`'s second wait would have run its full timeout
+    on every call and then reported the previous posture's answer.
+    """
+    at = rfc3339_ms(value)
+    since = rfc3339_ms(mark)
+    return at is not None and since is not None and at > since
 
 
 # ---- the predicates, one per behaviour, all pure -------------------------
@@ -6333,7 +6361,7 @@ def verdict_after(name: str, mark: str, predicate: Callable[[dict[str, Any]], bo
         return obj
     looked = settle(
         "protectionpolicy", name,
-        lambda o: ((o.get("status") or {}).get("evaluatedAt") or "") > mark,
+        lambda o: moved_past((o.get("status") or {}).get("evaluatedAt"), mark),
         seconds=150, what=f"any evaluation after {mark}",
     )
     return looked if looked is not None else get("protectionpolicy", name)

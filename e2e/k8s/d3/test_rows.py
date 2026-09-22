@@ -1552,10 +1552,31 @@ def test_the_catalog_row_is_joined_on_the_archive_set_id() -> None:
 def test_the_capture_time_comparison_is_in_milliseconds() -> None:
     row("an RFC3339 Time is epoch milliseconds",
         d3.rfc3339_ms("2026-09-21T17:33:20Z") == 1_790_012_000_000)
+    # THE SHAPE THIS RUN'S OWN ARTIFACTS CARRY. `status.evaluatedAt` read
+    # `2026-09-22T02:28:38.193596887Z` on the first live run, and a parser
+    # that took whole seconds only would answer `None` for a real capture time
+    # — the clause comparing it to the catalog row would then fail against a
+    # product that was right.
+    row("nanosecond precision, as logweir.dev's Time actually serializes it",
+        d3.rfc3339_ms("2026-09-21T17:33:20.193596887Z") == 1_790_012_000_193)
+    row("and a millisecond fraction is not truncated to the second",
+        d3.rfc3339_ms("2026-09-21T17:33:20.500Z") == 1_790_012_000_500)
     row("absent is None, and None never compares equal to a row's timestamp",
         d3.rfc3339_ms(None) is None and d3.rfc3339_ms("") is None)
     row("MUTANT: an unparseable timestamp is None, not a silent zero",
-        d3.rfc3339_ms("not-a-time") is None)
+        d3.rfc3339_ms("not-a-time") is None and d3.rfc3339_ms("2026-09-21T17:33:20.xyzZ")
+        is None)
+    # `.` is 0x2E and `Z` is 0x5A, so the fractional form sorts BEFORE the
+    # whole-second one: the string comparison this replaced said a controller
+    # that HAD re-evaluated had not.
+    row("moved_past compares instants, not bytes",
+        d3.moved_past("2026-09-22T02:28:38.193596887Z", "2026-09-22T02:28:38Z")
+        and "2026-09-22T02:28:38.193596887Z" < "2026-09-22T02:28:38Z")
+    row("an instant before the mark has not moved past it",
+        not d3.moved_past("2026-09-22T02:28:37.999Z", "2026-09-22T02:28:38Z"))
+    row("MUTANT: an absent or unparseable evaluatedAt is not proof the controller looked",
+        not d3.moved_past(None, "2026-09-22T02:28:38Z")
+        and not d3.moved_past("garbage", "2026-09-22T02:28:38Z"))
 
 
 def test_the_policy_fixture_asks_what_the_rows_claim_it_asks() -> None:
