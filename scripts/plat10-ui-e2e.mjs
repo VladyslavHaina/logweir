@@ -10,10 +10,9 @@
 // Page-created objects are real API/Kubernetes writes and are read back by
 // name and UID.  The saved connection/destination and finished Backup rows
 // below are explicitly labelled rendering fixtures: they are NEVER offered as
-// controller-reconciliation evidence.  `observeSharedLab` separately captures
-// read-only, controller-produced verified/failed facts from the shared lab,
-// records the exact source revision and API binary hash, and names a missing
-// catalog or Preflight instead of inventing a verdict for either.
+// controller-reconciliation evidence. The external Kafka/MinIO endpoints are
+// infrastructure only; every observed CR and Job belongs to the owner-labelled
+// namespace created by this harness.
 //
 // EVERY JOURNEY HAS A NEGATIVE CONTROL, and each control is an assertion that
 // the page REFUSED something -- a create with no compiled expression, a
@@ -135,51 +134,6 @@ function kube(args, options) {
 
 function kubeJson(args) {
   return JSON.parse(kube(args.concat(["-o", "json"])).stdout);
-}
-
-/**
- * Capture the installed lab's controller-produced facts without ever using a
- * mutating verb there.  This is deliberately separate from the disposable
- * namespace journey below: a fixture status is useful for a rendering unit
- * test, but cannot be evidence that a controller reconciled anything.
- */
-function observeSharedLab() {
-  const records = kubeJson(["-n", LAB, "get", "backups", "-o", "json"]).items;
-  const verified = records.find((item) => ((item.status || {}).conditions || []).some((condition) =>
-    condition.type === "Verified" && condition.status === "True"));
-  const failed = records.find((item) => (item.status || {}).phase === "Failed");
-  const catalogs = kubeJson(["-n", LAB, "get", "recoverycatalogs", "-o", "json"]).items;
-  const preflights = kubeJson(["-n", LAB, "get", "preflights", "-o", "json"]).items;
-  check(verified !== undefined,
-    "the read-only lab observation found no controller-verified Backup");
-  check(failed !== undefined,
-    "the read-only lab observation found no controller-failed Backup");
-  result.lab.reconciled = {
-    observedAt: new Date().toISOString(),
-    readOnlyCommands: ["get backups", "get recoverycatalogs", "get preflights"],
-    verifiedBackup: {
-      name: verified.metadata.name,
-      uid: verified.metadata.uid,
-      phase: verified.status.phase,
-      verification: ((verified.status.evidence || {}).verification || {}).result || null,
-    },
-    failedBackup: {
-      name: failed.metadata.name,
-      uid: failed.metadata.uid,
-      phase: failed.status.phase,
-      reason: (((failed.status.conditions || [])[0]) || {}).reason || null,
-    },
-    catalogCount: catalogs.length,
-    preflightCount: preflights.length,
-  };
-  // A zero is evidence too.  Do not turn an absent catalog or Preflight into
-  // a fabricated unavailable point or terminal readiness verdict.
-  record("read-only shared-lab observation records actual verified and failed controller runs", {
-    verifiedBackup: result.lab.reconciled.verifiedBackup,
-    failedBackup: result.lab.reconciled.failedBackup,
-    catalogCount: catalogs.length,
-    preflightCount: preflights.length,
-  });
 }
 
 function commandText(command, args) {
@@ -474,13 +428,6 @@ async function main() {
   result.apiBinarySha256 = commandText("shasum", ["-a", "256", API_BIN]);
   check(result.revision !== null, "the harness could not record its source revision");
   check(result.apiBinarySha256 !== null, "the harness could not hash its API binary");
-
-  // THE SHARED LAB IS READ-ONLY AND ITS ROLLOUT IS WAITED FOR, never taken
-  // under a lock this harness does not hold.
-  const rollout = kube(["-n", LAB, "rollout", "status", "deploy/weirkeeper",
-    "--timeout=300s"], { timeout: 310000 });
-  result.lab.rollout = String(rollout.stdout || "").trim();
-  observeSharedLab();
 
   const existingNamespace = kube(["get", "namespace", namespace, "-o", "json"],
     { expected: [0, 1] });
