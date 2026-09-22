@@ -4140,12 +4140,32 @@ def s22() -> None:
             approver["keyId"], approver["spkiPem"], usages=[APPROVER_USAGE],
             not_after=closes)]))
         detail["narrowedNotAfter"] = closes
+        # AND THE APPROVAL IS NUDGED, so the re-derivation does not have to wait
+        # out a heartbeat inside the nine minutes this row is measuring.
+        #
+        # The Approval controller now WATCHES `TrustPolicy`, so the edit above
+        # should already have enqueued this object within seconds. The nudge is
+        # deliberately kept anyway and is deliberately not a `spec` edit: an
+        # `Approval`'s spec is sealed by CEL (`self == oldSelf`) and its
+        # METADATA is not, so an annotation is a write the watch sees and the
+        # verdict cannot depend on. It makes this row measure the WINDOW rather
+        # than the wake-up path — and it still holds if the row is ever run
+        # against an image built before the watch, where a verified approval is
+        # requeued only every `min(300 s, notAfter - now)`.
+        run(K + ["annotate", "approval", approval_name,
+                 "logweir.dev/test-nudge="
+                 + str(int(dt.datetime.now(dt.timezone.utc).timestamp())),
+                 "--overwrite"], check=False, timeout=120)
         narrowed = wait_for(
             "approval", approval_name,
             lambda o: (((o.get("status") or {}).get("approverKeyWindow") or {})
                        .get("notAfter") or "").startswith(closes[:16]),
-            timeout=300,
+            # 360 s, NOT 300. The heartbeat IS 300 s, so a 300 s budget is
+            # exactly the worst case and can time out on a correct controller.
+            timeout=360,
             what="the published approverKeyWindow to follow the TrustPolicy edit")
+        detail["secondsLeftInWindow"] = round(
+            (rfc3339(closes) - dt.datetime.now(dt.timezone.utc)).total_seconds())
         approval_now = approval_facts(narrowed)
         detail["approvalAfterNarrowing"] = approval_now
         artifact("objects/s22/approval-narrowed.json", narrowed)
