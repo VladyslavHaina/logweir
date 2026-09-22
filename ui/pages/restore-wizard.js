@@ -2685,7 +2685,9 @@ export function renderPreflightStep(state, prepared) {
  *   4. IT HAS NOT FINISHED.
  *   5. IT FINISHED WITHOUT BECOMING APPLICABLE.
  *   6. THE VERDICT IS NOT `ready` -- which is where a collision lands, named
- *      by its own check id and code.
+ *      by its own check id and code. One shape is not a refusal: a draft's
+ *      `approval.state` `skipped`/`SubjectNotCreated` when EVERY other
+ *      blocking check is `ready` (see [`isDraftApprovalRow`]).
  *
  *  Pure: no DOM, no network, no clock. The freshness judgement is the
  *  SERVER's (`applicable`/`stale`, recomputed on every GET against the caller's
@@ -2750,8 +2752,25 @@ export function readinessRefusal(state, prepared) {
     );
   }
   if (result.state !== "ready") {
-    const failing = (Array.isArray(result.checks) ? result.checks : [])
-      .filter((c) => (c || {}).gating === "blocking" && (c || {}).state !== "ready")
+    const gating = (Array.isArray(result.checks) ? result.checks : [])
+      .filter((c) => (c || {}).gating === "blocking");
+    const blocking = gating.filter((c) => (c || {}).state !== "ready");
+    const others = blocking.filter((c) => !isDraftApprovalRow(c));
+    // THE ONE ROW A DRAFT CANNOT MAKE READY (DRAFT-PREFLIGHT-NEVER-READY). See
+    // [`isDraftApprovalRow`]: every blocking check but that one is `ready`, the
+    // aggregate is `unknown` for that reason alone, and the Restore this click
+    // creates is exactly what turns the row into a real approval verdict. At
+    // least one OTHER blocking check must have come back `ready`, for the
+    // aggregate's own reason: nothing checked is not everything passed.
+    if (
+      result.state === "unknown" &&
+      others.length === 0 &&
+      blocking.length > 0 &&
+      gating.some((c) => c.state === "ready")
+    ) {
+      return null;
+    }
+    const failing = (others.length > 0 ? others : blocking)
       .map((c) => String(c.id) + " (" + String(c.code) + ")")
       .join(", ");
     return (
@@ -2761,6 +2780,42 @@ export function readinessRefusal(state, prepared) {
     );
   }
   return null;
+}
+
+/** The approval row of a readiness check run against a DRAFT plan.
+ *
+ *  DRAFT-PREFLIGHT-NEVER-READY. The controller answers `approval.state` for a
+ *  plan no Restore has been created for with `skipped` + `SubjectNotCreated`
+ *  (`weirkeeper::controllers::preflight::approval_rows`, `ApprovalFacts::Draft`)
+ *  -- there is no Approval to verify because no approver has been asked yet --
+ *  and `logweir_core::check_contract::aggregate` DELIBERATELY makes a skipped
+ *  blocking row `unknown` overall, because a verdict about an unfinished
+ *  subject is not `ready`. Both rules are right and stay as they are. But the
+ *  wizard used to refuse every verdict that was not `ready`, so after ANY
+ *  readiness check the Create button was refused, and the only way to submit
+ *  was not to run the check at all.
+ *
+ *  WHY THE CONSOLE AND NOT A `draftReady` FIELD ON THE API RESPONSE. The API
+ *  projects the controller's verdict; it has no idea whether its caller is
+ *  about to create the subject or has just opened a page about it. "A draft
+ *  may be submitted when this is the only thing not ready" is a rule about the
+ *  NEXT action, and the next action is this page's: the click that creates
+ *  the Restore is the one that makes the row answerable. Putting it on the
+ *  wire would add a second aggregate beside the real one for every client to
+ *  misread as the verdict. The runner's phase 0 and the controller's
+ *  admission still refuse an unverified approval whatever this page decides.
+ *
+ *  PRECISELY THIS SHAPE, NOTHING WIDER: the id, the `skipped` state and the
+ *  `SubjectNotCreated` code together. `approval.state` `notReady` (an Approval
+ *  that exists and does not verify), a `skipped` row with another code, or any
+ *  other check that is `unknown` or `skipped` all still refuse by id and code. */
+export function isDraftApprovalRow(check) {
+  const c = check || {};
+  return (
+    c.id === "approval.state" &&
+    c.state === "skipped" &&
+    c.code === "SubjectNotCreated"
+  );
 }
 
 /** Said when no readiness check has run for the plan on screen.

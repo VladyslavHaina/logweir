@@ -524,19 +524,19 @@ page. In console mode the product API answers the create with an
 `authorization` block (`docs/api.md`, *Approval policy*), which the client
 carries on the created object, and `restoreDestination` routes on it:
 
-* **`confirmed`** — the namespace is bound to an `Ordinary` policy and the
+* **`confirmed`** -- the namespace is bound to an `Ordinary` policy and the
   console's signed confirmation IS the Approval; the page opens the Restore's
   **operation view**, where weirkeeper admits the run (or refuses it, with the
   reason).
-* **`awaitingApproval`** — Governed, or unbound; and **legacy mode**, which gets
-  no answer at all — keep today's rule: the operation view only when an
+* **`awaitingApproval`** -- Governed, or unbound; and **legacy mode**, which gets
+  no answer at all -- keep today's rule: the operation view only when an
   Approval already authorises exactly this Restore, and its approval page
   otherwise. A state this page does not recognise is never read as confirmed.
 
 The submit step says what the effective policy requires, read from `GET
 .../approval-policy`: ordinary confirmation, a governed countersignature by
 someone other than the requester (with the `logweir drill countersign`
-command), or — unbound, unknown, or legacy mode — today's out-of-band
+command), or -- unbound, unknown, or legacy mode -- today's out-of-band
 `logweir drill approve`. It is words, not a gate: routing uses the create's
 answer.
 
