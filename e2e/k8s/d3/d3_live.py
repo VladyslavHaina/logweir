@@ -6516,6 +6516,14 @@ def protection_verdicts() -> None:
     # nowhere else. `spec.protects.legacyArchive` is the CRD's own way to point
     # a policy at it (CEL rule H1: a saved destination XOR an inline archive).
     subject = {"legacyArchive": {"url": LEGACY_ARCHIVE, "secretRef": {"name": "logweir-s3"}}}
+    # A PREVIOUS RUN'S SOUND POINT IS THIS RUN'S SILENT PASS. `valid-signature`
+    # is created LATER in this phase, so on a second run of it the four cells
+    # below would be measured against an archive that already holds a point
+    # the installation accepts — and `Unprotected` would then be the wrong
+    # answer for the right reason, or the right answer for the wrong one.
+    # Every fixture this phase measures against is created by this run.
+    if get_opt("backup", "valid-signature") is not None:
+        run(KN + ["delete", "backup", "valid-signature", "--wait=true"])
     key = mint_signing_key(f"{OWNER}-untrusted")
     original = get("secret", "logweir-signing-key")
     refused_backup: dict[str, Any] = {}
@@ -6730,6 +6738,13 @@ def protection_verdicts() -> None:
     # the point that arrives next is one the controller cannot place.
     if get_opt("protectionpolicy", STAYS_POLICY) is not None:
         run(KN + ["delete", "protectionpolicy", STAYS_POLICY, "--wait=true"])
+    # THE POINT ARRIVES AFTER THE INCIDENT, and on a re-run that means deleting
+    # the previous run's `unplaceable-point` FIRST. The incident has to open
+    # over a destination with nothing in it — `Unprotected`, "no available
+    # recovery point for this policy at all" — or the transition this row
+    # measures would already have happened before the row started.
+    if get_opt("backup", "unplaceable-point") is not None:
+        run(KN + ["delete", "backup", "unplaceable-point", "--wait=true"])
     apply(verdict_policy(STAYS_POLICY,
                          subject={"destinationRef": {"name": "dest-b"}}, catalog=None))
     opened = settle(
@@ -6756,8 +6771,6 @@ def protection_verdicts() -> None:
         stays_before = alert_of(policy_alerts(STAYS_POLICY), "Staleness") or {}
         posts_mark = sink_posts()
         mark = now()
-        if get_opt("backup", "unplaceable-point") is not None:
-            run(KN + ["delete", "backup", "unplaceable-point", "--wait=true"])
         stays_backup = run_backup("unplaceable-point", "dest-b")
         stays_view = policy_view(verdict_after(
             STAYS_POLICY, mark,
