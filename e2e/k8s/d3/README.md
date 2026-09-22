@@ -13,15 +13,18 @@ nothing and it has no fixture mode.
   issues carries `--context docker-desktop`; it names no other context.
 - The shared `logweir-scram-local` lab: it copies that namespace's
   `source-scram`, `logweir-s3`, `logweir-signing-key` and `minio-root` Secrets
-  — and, for `rehearsal` and `refused-point`, `target-scram`, the scratch broker's own SCRAM
+  — and, for `old-archive`, `rehearsal` and `refused-point`, `target-scram`, the scratch broker's own SCRAM
   credential — into its own namespace and dials that namespace's Kafka and
   MinIO by service DNS. **Outside its own namespace it writes exactly two
   things**: the cluster-scoped `TrustPolicy` the trust phases, `rehearsal` and
   `refused-point` need (deleted only after an owner-label check), and, in
-  `rehearsal` and `refused-point`, topics on the shared `kafka-target` broker —
-  a witness named for this run and names under this run's own rendered
-  prefixes — which the phase deletes again after an ownership check (see
-  below). No phase of THIS harness changes the shared release; D2's `evf5`
+  `old-archive`, `rehearsal` and `refused-point`, topics on the shared
+  `kafka-target` broker — `old-archive`'s restored topic under the prefix
+  `<owner>-<stamp>-hist-`, a witness named for this run and names under this
+  run's own rendered prefixes — which the phase deletes again after an
+  ownership check (see below). `old-archive`'s row requires the Restore to
+  finish `Succeeded`/`pass` with a Valid scorecard and the restored topic
+  holding exactly the records the Backup archived; `Running` is not a restore. No phase of THIS harness changes the shared release; D2's `evf5`
   (lab-refresh-8's rows, below) scales its controller and restores it.
 - For `refused-point`'s two `/points` rows: a `logweir-api` binary
   (`LOGWEIR_API_BIN`, else the newer of `target/{release,debug}/logweir-api`),
