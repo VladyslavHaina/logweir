@@ -4915,7 +4915,13 @@ def multiple_namespaces() -> None:
     other = mint_signing_key(f"{OWNER}-otherkey")
     try:
         trust_namespace(second)
-        for name in (first_policy, second_policy):
+        # THIS RUN'S EARLIER POLICY OVER `NS` GOES FIRST. `trust` and
+        # `old-archive` leave `TRUST_POLICY` naming this namespace, and a
+        # namespace claimed by two policies resolves to NO trust
+        # (`TrustPolicyConflict`), which made this row fail on a correct
+        # controller when it ran after them (lab-refresh-8). Owner-checked
+        # like every delete here; later phases rebuild their own.
+        for name in (TRUST_POLICY, first_policy, second_policy):
             delete_owned_trust_policy(name, check=False)
         apply(trust_policy("Active", name=first_policy, namespaces=[NS],
                            keys=[policy_key(lab["keyId"], lab["spkiPem"], "Active",
