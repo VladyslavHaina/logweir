@@ -1172,19 +1172,17 @@ async function main() {
     // DESTINATION EDIT DURING THE DRAFT: dest-b is edited on its own page while
     // the wizard holds a verdict. The plan does not move; the verdict does.
     //
-    // WHAT THIS LAB LETS THE PAGE SHOW, AND WHAT IT DOES NOT. Every draft
-    // restore check on this build aggregates `unknown`: `approval.state` is a
-    // BLOCKING row that is `skipped`/SubjectNotCreated for any draft, and
-    // D2 section 6.4 counts a skipped blocking row as unknown. PLAT-11.2's
-    // gate refuses anything but `ready`, so the Create button is disabled after
-    // ANY check -- before and after the edit alike -- and the submit-time
-    // re-read this task added cannot be clicked through here. That is recorded
-    // as a defect (see the result document); the page's re-read is proved by
-    // `ui/tests/mutation.spec.js`'s
-    // `a_destination_edited_during_the_draft_refuses_the_submit_until_the_check_runs_again`.
-    // What IS proved live: the API's answer to the page's own question
+    // WHAT THE PAGE SHOWS, AND THE CLICK (lab-refresh-9). Until 779b7e1 every
+    // draft restore check aggregated `unknown` (`approval.state` is a blocking
+    // row that is `skipped`/SubjectNotCreated for any draft) and PLAT-11.2's
+    // gate refused anything but `ready`, so Create was disabled after ANY
+    // check and the submit-time re-read this task added could not be clicked;
+    // that row was BLOCKED. The gate now admits a draft whose only non-ready
+    // blocking row is the draft approval row, so below the page is CLICKED
+    // after the edit and must refuse on its own re-read, sending nothing.
+    // Also proved: the API's answer to the page's own question
     // (`GET .../preflights/{id}?planHash=<the hash on screen>`) before and after
-    // the edit, the plan hash on screen across the edit, and the gate's words.
+    // the edit, and the plan hash on screen across the edit.
     const heldHash = (await planOf()).hash;
     const gateBefore = await page.evaluate(() => ({
       disabled: (document.querySelector("#create-restore") || {}).disabled === true,
@@ -1244,6 +1242,42 @@ async function main() {
     control("T3", "before the edit no stale reason in the product API's answer to the page's question (held check, plan on screen) names dest-b; after dest-b is edited, referentChanged BackupDestination/dest-b appears, with the plan hash unchanged", {
       beforeEdit: beforeEdit, afterEdit: afterEdit });
 
+    // T3-SUBMIT, AS A REAL CLICK (lab-refresh-9). Since 779b7e1 a draft whose
+    // only non-ready blocking row is the draft approval row is submittable, so
+    // Create is ENABLED on the held check (asserted: otherwise the refusal
+    // below would be the gate's, not the re-read's). dest-b has just moved
+    // under that held check; the page cannot know until it asks. The click
+    // must make it ask (`confirmReadiness`), refuse on the answer naming
+    // dest-b, and send NOTHING: no POST to .../restores, no Restore object.
+    check(gateBefore.disabled === false,
+      "T3-submit precondition: Create was not enabled on the held check before the edit, so a " +
+        "refusal after it would prove nothing about the re-read: " + JSON.stringify(gateBefore));
+    const restoresBeforeClick = kubeJson(["-n", namespace, "get", "restores"]).items.length;
+    const postsBeforeClick = postsTo("/restores").length;
+    await page.click("#create-restore");
+    const refusalText = () => page.evaluate(() => ["#readiness-blocked", "#restore-submit-status"]
+      .map((sel) => ((document.querySelector(sel) || {}).innerText || "")).join(" | "));
+    const namesTheEdit = (t) => t.indexOf("no longer applies") !== -1 &&
+      t.indexOf("BackupDestination/" + DEST_B) !== -1;
+    let refusedWith = await refusalText();
+    for (let i = 0; i < 30 && !namesTheEdit(refusedWith); i += 1) {
+      await pause(1000);
+      refusedWith = await refusalText();
+    }
+    check(namesTheEdit(refusedWith),
+      "the page did not refuse the submit naming BackupDestination/" + DEST_B + " within 30 s: " +
+        JSON.stringify(refusedWith).slice(0, 800));
+    await pause(3000);
+    const postsAfterClick = postsTo("/restores").slice(postsBeforeClick);
+    const restoresAfterClick = kubeJson(["-n", namespace, "get", "restores"]).items.length;
+    save("t3-submit-refused.json", { gateBeforeEdit: gateBefore, refusal: refusedWith,
+      postsToRestores: postsAfterClick, restores: [restoresBeforeClick, restoresAfterClick] });
+    await shot("t3-03-submit-refused");
+    check(postsAfterClick.length === 0,
+      "the page SENT a Restore after dest-b moved under its held check: " + JSON.stringify(postsAfterClick));
+    check(restoresAfterClick === restoresBeforeClick,
+      "a Restore exists after the refused submit: " + restoresBeforeClick + " -> " + restoresAfterClick);
+
     // THE CHECK RUN AGAIN is about the same plan and is current again.
     const pf2 = await readiness("the check run again");
     save("t3-preflight-2.json", { metadata: pf2.metadata, spec: pf2.spec, status: pf2.status });
@@ -1262,9 +1296,12 @@ async function main() {
       api: { beforeEdit: beforeEdit, afterEdit: afterEdit },
       preflights: [pf1.metadata.name, pf2.metadata.name], secondBindings: bindings2 || null,
     });
-    blocked("T3-submit", "the submit-time re-read cannot be clicked on this build: every draft restore check aggregates unknown (approval.state is a blocking row that is skipped/SubjectNotCreated for a draft), and PLAT-11.2's gate disables Create for anything but ready -- before and after the edit alike", {
-      gateBeforeEdit: gateBefore, gateAfterRecheck: gateAfter, aggregate: res2.state, approvalRow: approvalRow,
-      provedBy: "ui/tests/mutation.spec.js a_destination_edited_during_the_draft_refuses_the_submit_until_the_check_runs_again",
+    check(gateAfter.disabled === false && gateAfter.blocked === "",
+      "after the check ran again Create is still refused: " + JSON.stringify(gateAfter));
+    row("T3-submit", "the submit-time re-read, clicked: with Create enabled on the held check, dest-b edited under it, the click re-read the check, refused naming BackupDestination/" + DEST_B + " and sent nothing (0 POSTs to restores, no Restore); after the check ran again Create is enabled", {
+      gateBeforeEdit: gateBefore, refusal: refusedWith, postsToRestores: postsAfterClick.length,
+      restores: [restoresBeforeClick, restoresAfterClick], gateAfterRecheck: gateAfter,
+      aggregateAfterRecheck: res2.state, approvalRow: approvalRow,
     });
 
     // THE RESTORE IS CREATED FROM A RE-MOUNT OF THE SAME DRAFT: leaving the
