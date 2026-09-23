@@ -244,6 +244,8 @@ export function renderDestinationList(page, ns) {
       rows,
       "No destination in this namespace yet. Create one below, or adopt the location an " +
         "existing schedule already writes to.",
+      undefined,
+      { id: "destinations", label: "destinations" },
     ) +
     "<p class=\"note\">" + esc(DEFAULT_DESTINATION_SENTENCE) + "</p>" +
     (defaults.length === 0

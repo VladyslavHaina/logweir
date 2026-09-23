@@ -273,6 +273,8 @@ export function renderScheduleList(input, destinations, destinationsUnavailable)
       ["NAME", "SCHEDULE", "DESTINATION", "SUSPEND", "LAST", "NEXT", "READY"],
       rows,
       NO_SCHEDULE_SENTENCE,
+      undefined,
+      { id: "schedules", label: "schedules" },
     ) +
     listFooter()
   );
@@ -4612,6 +4614,8 @@ export function renderScheduleHistory(ns, object, runs, points, catalogError, se
         "AVAILABILITY", "VERIFICATION", ""],
       rows,
       NO_HISTORY_SENTENCE,
+      undefined,
+      { id: "schedule-runs", label: "runs" },
     ) +
     "</section>"
   );
@@ -4677,6 +4681,8 @@ export function renderEarlierRuns(ns, earlier, points) {
         ];
       }),
       "",
+      undefined,
+      { id: "earlier-runs", label: "earlier runs" },
     ) +
     "</section>"
   );

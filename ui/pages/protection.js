@@ -146,6 +146,8 @@ export function renderProtectionList(collection, ns) {
       ["NAME", "PROTECTION", "OBJECTIVE", "POINT AGE (s)", "FAILED RUNS", "SCHEDULES", "OPEN ALERTS"],
       rows,
       NO_POLICY_SENTENCE,
+      undefined,
+      { id: "protection-policies", label: "protection policies" },
     ) +
     listFooter()
   );

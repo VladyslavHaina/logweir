@@ -102,6 +102,7 @@ import {
   cell,
   COMPLETION_GUIDANCE,
   copyBlock,
+  datagrid,
   epochMs,
   errorBox,
   esc,
@@ -2176,7 +2177,11 @@ export function selectedTopics(state) {
   // A SELECTION THE FROZEN LIST DOES NOT HOLD IS KEPT, NOT DROPPED. It is what
   // `mappingProblems` refuses by name; silently discarding it would leave the
   // page submitting a different subset from the one it was showing.
-  const extra = chosen.filter((t) => frozen.indexOf(t) === -1);
+  // A SET, NOT `indexOf` IN A LOOP (PLAT-18.2): with a 2,000-topic point the
+  // quadratic scan was most of a keystroke's render time. Same membership,
+  // strict equality both ways.
+  const frozenSet = new Set(frozen);
+  const extra = chosen.filter((t) => !frozenSet.has(t));
   return inOrder.concat(extra);
 }
 
@@ -2234,7 +2239,8 @@ export function mappingProblems(state) {
       "grammar has no empty list";
     return problems;
   }
-  const stranger = chosen.find((t) => frozen.indexOf(t) === -1);
+  const frozenSet = new Set(frozen);
+  const stranger = chosen.find((t) => !frozenSet.has(t));
   if (stranger !== undefined) {
     problems.topics =
       "`" + String(stranger) + "` is not in this recovery point's frozen topic list, so this " +
@@ -2307,7 +2313,12 @@ export function renderTopicSubset(state) {
     "<p class=\"blurb\">" + esc(SUBSET_SENTENCE) + "</p>" +
     (frozen.length === 0
       ? "<p class=\"note\" id=\"no-frozen-topics\">" + esc(NO_FROZEN_TOPICS) + "</p>"
-      : "<ul class=\"topic-subset\">" + boxes + "</ul>") +
+      // A DATAGRID IN LIST FORM (PLAT-18.2): a point can freeze thousands of
+      // topics, so the boxes get Clarity's filter and pagination. Every box
+      // stays in the document -- the ones off the page are hidden, not
+      // removed -- because `refresh` reads the selection off every box.
+      : datagrid({ id: "subset-topics", label: "topics" },
+        "<ul class=\"topic-subset\">" + boxes + "</ul>")) +
     "<div class=\"actions\">" +
     "<button type=\"button\" id=\"select-all-topics\">Select all</button>" +
     "<button type=\"button\" id=\"select-no-topics\">Clear</button>" +
@@ -2324,7 +2335,8 @@ export function renderTopicSubset(state) {
       : "") +
     "<h4>The mapping, before you submit</h4>" +
     "<p class=\"blurb\">" + esc(MAPPING_SENTENCE) + "</p>" +
-    table(["SOURCE TOPIC", "TARGET TOPIC"], rows, "No topic is selected, so nothing is mapped.") +
+    table(["SOURCE TOPIC", "TARGET TOPIC"], rows, "No topic is selected, so nothing is mapped.",
+      undefined, { id: "topic-mapping", label: "mapped topics" }) +
     "<p class=\"note\" id=\"mapping-identity\">" + esc(MAPPING_RULE_SENTENCE) + "</p>"
   );
 }

@@ -255,6 +255,8 @@ export function renderPolicyKeys(object, now) {
       ["KEY ID", "PRINCIPAL", "USAGES", "STATE", "VALIDITY", "LIFECYCLE", "EVALUATION", "MAY"],
       rows,
       "This policy carries no key. A policy with no key verifies nothing and authorises nothing.",
+      undefined,
+      { id: "trust-keys", label: "keys" },
     )
   );
 }

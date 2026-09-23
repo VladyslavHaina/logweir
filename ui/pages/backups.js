@@ -221,6 +221,8 @@ export function renderBackupList(input, ns) {
       ["NAME", "TRIGGER", "PHASE", "EXIT", "RECORDS", "SIGNED", "AGE", "OPERATION"],
       rows,
       NO_BACKUP_SENTENCE,
+      undefined,
+      { id: "backups", label: "backups" },
     ) +
     listFooter()
   );

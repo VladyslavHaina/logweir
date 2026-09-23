@@ -270,7 +270,8 @@ function approvalTable(collection, now) {
       cell(ageOf(meta.creationTimestamp, at)),
     ];
   });
-  return table(["SUBJECT", "VERIFIED", "APPROVER", "KEY-ID", "AGE"], rows, NO_APPROVAL_SENTENCE);
+  return table(["SUBJECT", "VERIFIED", "APPROVER", "KEY-ID", "AGE"], rows, NO_APPROVAL_SENTENCE,
+    undefined, { id: "approvals", label: "approvals" });
 }
 
 /** One approval's recorded status, with `selfAttestedRisk` rendered as a
@@ -547,7 +548,8 @@ export function renderApprovalsIndex(ns, approvals, restores, now, restoresError
   const listing = restoresError
     ? "<p class=\"note\">The Restores in this namespace could not be listed, so none can be " +
       "chosen here:</p>" + errorLine(restoresError)
-    : table(["RESTORE", "PHASE", "APPROVAL", "APPROVAL STATE", "CREATED"], rows, NO_AWAITING_SENTENCE);
+    : table(["RESTORE", "PHASE", "APPROVAL", "APPROVAL STATE", "CREATED"], rows, NO_AWAITING_SENTENCE,
+      undefined, { id: "awaiting-restores", label: "restores" });
   // A LIST THIS VIEWER MAY NOT READ IS A WARNING BESIDE THE PAGE, NOT INSTEAD
   // OF IT. An approver whose role grants `create` on approvals but not `list`
   // still has to reach a Restore's own approval page, and that page does its

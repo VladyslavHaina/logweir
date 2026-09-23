@@ -59,9 +59,81 @@ export function clear(node) {
   return node;
 }
 
-/** Replaces a node's children in one step. */
+/** Replaces a node's children in one step -- AND KEEPS THE READER'S PLACE.
+ *
+ *  FOCUS SURVIVES A RE-RENDER (PLAT-18.2; the PLAT-10 review's LOW). Every
+ *  page here re-renders by replacing its whole subtree: the restore wizard on
+ *  every change, a schedule detail after every action. Replacing the node a
+ *  keyboard reader is on moves their focus to the document body, so the next
+ *  Tab starts again at the skip link -- the page worked for a mouse and was
+ *  lost to a keyboard. So when the focused element is inside `node` and has
+ *  an `id`, the element with the same `id` in the new subtree takes focus
+ *  again, with its caret and selection when it is a text field, and without
+ *  scrolling. An element that is gone is not replaced by a guess: focus then
+ *  goes to `node` itself when it can take it (the view slot is
+ *  `tabindex="-1"`), which is where a screen reader expects a re-read page to
+ *  start.
+ *
+ *  Nothing here runs without a document: the node suites drive `replace`
+ *  through fake nodes that have no `ownerDocument`, and for them this is the
+ *  plain replace it always was. */
 export function replace(node, children) {
-  return append(clear(node), children);
+  const kept = focusWithin(node);
+  append(clear(node), children);
+  if (kept !== null) {
+    restoreFocus(node, kept);
+  }
+  return node;
+}
+
+/** Where focus is inside `node`, as something that survives a re-render:
+ *  the focused element's `id`, and its text selection when it has one. `null`
+ *  when there is no document, or focus is elsewhere. */
+export function focusWithin(node) {
+  const doc = node && node.ownerDocument;
+  if (!doc || typeof node.contains !== "function") {
+    return null;
+  }
+  const active = doc.activeElement;
+  if (!active || active === doc.body || active === node || !node.contains(active)) {
+    return null;
+  }
+  const id = typeof active.getAttribute === "function" ? active.getAttribute("id") : null;
+  let selection = null;
+  try {
+    if (typeof active.selectionStart === "number" && typeof active.selectionEnd === "number") {
+      selection = [active.selectionStart, active.selectionEnd];
+    }
+  } catch (notText) {
+    // a checkbox or a select has no text selection; asking some throws
+    selection = null;
+  }
+  return { id: typeof id === "string" && id.length > 0 ? id : null, selection: selection };
+}
+
+/** Puts focus back where [`focusWithin`] found it, in the new subtree. */
+export function restoreFocus(node, kept) {
+  const doc = node && node.ownerDocument;
+  if (!doc || kept === null || kept === undefined) {
+    return false;
+  }
+  const target = kept.id === null ? null : doc.getElementById(kept.id);
+  if (target !== null && node.contains(target) && typeof target.focus === "function") {
+    target.focus({ preventScroll: true });
+    if (kept.selection !== null && typeof target.setSelectionRange === "function") {
+      try {
+        target.setSelectionRange(kept.selection[0], kept.selection[1]);
+      } catch (notText) {
+        // the new element is not a text field; its focus is what matters
+      }
+    }
+    return true;
+  }
+  if (typeof node.focus === "function" && typeof node.hasAttribute === "function" &&
+    node.hasAttribute("tabindex")) {
+    node.focus({ preventScroll: true });
+  }
+  return false;
 }
 
 /** Renders an error from `api.js` as the API server reported it: its own
@@ -306,8 +378,17 @@ export const EMPTY_TABLE_SENTENCE = "no object of this kind in this namespace";
  *  Backup's UID and filters in place, and an index-counted lookup would follow
  *  the wrong row the moment the list changed under it. It is a string OF OURS
  *  (a caller renders it from `esc`'d values) and is never a value read out of
- *  the cluster unescaped. */
-export function table(columns, rows, empty, rowAttributes) {
+ *  the cluster unescaped.
+ *
+ *  `grid`, when given, DECLARES THE TABLE A DATAGRID (PLAT-18.2): `{id,
+ *  label}`, where `id` names it for the page's lifetime and `label` is the
+ *  plural noun its filter and pagination speak of ("backups"). The table is
+ *  then wrapped in `div.datagrid[data-datagrid]`, and `enhanceDatagrids` --
+ *  run on every parsed fragment by `app.js` -- adds Clarity's filter, sortable
+ *  column headers and pagination footer around the SAME rows. The string
+ *  gains the wrapper and nothing else, so every row a test asserts on is
+ *  exactly the row a browser receives. */
+export function table(columns, rows, empty, rowAttributes, grid) {
   const attributes = Array.isArray(rowAttributes) ? rowAttributes : [];
   const head = columns.map((c) => "<th scope=\"col\">" + esc(c) + "</th>").join("");
   const body = rows
@@ -326,14 +407,407 @@ export function table(columns, rows, empty, rowAttributes) {
   const none = rows.length === 0
     ? "<tr><td class=\"empty\" colspan=\"" + columns.length + "\">" + sentence + "</td></tr>"
     : "";
-  return (
+  const html =
     "<div class=\"table-wrap\"><table class=\"grid\"><thead><tr>" +
     head +
     "</tr></thead><tbody>" +
     body +
     none +
-    "</tbody></table></div>"
+    "</tbody></table></div>";
+  return grid === undefined || grid === null ? html : datagrid(grid, html);
+}
+
+// ===========================================================================
+// PLAT-18.2: THE DATAGRID -- Clarity's filter, sort and pagination over a
+// table the page already rendered.
+// ===========================================================================
+//
+// WHY AN ENHANCEMENT AND NOT A NEW RENDERER. Every list here is a pure string
+// from a JSON object, asserted as such under `node --test`. A datagrid that
+// re-rendered the rows itself would be a second renderer the suites never see.
+// So the page declares a table a datagrid (the `grid` argument of `table`),
+// the string gains one wrapper, and `enhanceDatagrids` works on the parsed
+// rows: it FILTERS them, SORTS them and SHOWS ONE PAGE of them, and never
+// changes what a row says. Its arithmetic is [`datagridView`], a pure
+// function the suites drive directly.
+//
+// WHY NOT VIRTUALISATION. Measured before this was written
+// (`scripts/plat18-2-measure.mjs`, `scripts/plat18-2-ui-e2e.mjs`): the strings
+// for 1,000 history rows render in under 5 ms; what a large list costs is
+// the browser laying out every row. Pagination keeps one page of rows in the
+// layout -- the others are detached (a read-only table) or hidden (a table
+// whose rows hold controls a page wires after it parses) -- which is the
+// benefit virtualisation would buy, without a scroll model a keyboard and a
+// screen reader then have to fight. The figures are in the PLAT-18.2 report.
+//
+// THE STATE IS MEMORY, NOT STORAGE. A grid's filter, sort and page live in
+// the map below for the life of the loaded page, keyed by the grid's id, so a
+// re-render (the detail after an action, the wizard after an edit) keeps the
+// reader where they were. Nothing is written to browser storage; the offline
+// gate's rule 2 forbids it and a reload starts clean.
+
+/** Clarity's datagrid page sizes, and the one a grid starts at. */
+export const DATAGRID_PAGE_SIZES = Object.freeze([10, 20, 50, 100]);
+export const DATAGRID_DEFAULT_PAGE_SIZE = 20;
+
+/** Rows at or below this many get sorting and a count, but no filter and no
+ *  pager: a control that can only ever show everything is noise. */
+export const DATAGRID_CONTROLS_ABOVE = 10;
+
+/** The wrapper `table` puts around a declared datagrid. */
+export function datagrid(grid, html) {
+  const g = grid || {};
+  return (
+    "<div class=\"datagrid\" data-datagrid=\"" + esc(g.id) + "\" data-datagrid-label=\"" +
+    esc(g.label || "rows") + "\">" + html + "</div>"
   );
+}
+
+/** A filter query as the terms every visible row must contain. */
+export function datagridTerms(query) {
+  return String(query === undefined || query === null ? "" : query)
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((t) => t.length > 0);
+}
+
+function absentText(value) {
+  const text = String(value === undefined || value === null ? "" : value).trim();
+  return text === "" || text === ABSENT;
+}
+
+/** Compares two cell texts the way a reader expects a column to sort:
+ *  numbers as numbers, everything else as text (an RFC 3339 instant sorts
+ *  correctly as text). An absent value (`-` or empty) is not compared here;
+ *  [`datagridView`] puts it last in either direction. */
+export function datagridCompare(a, b) {
+  const left = String(a === undefined || a === null ? "" : a).trim();
+  const right = String(b === undefined || b === null ? "" : b).trim();
+  const numeric = /^-?\d+(\.\d+)?$/;
+  if (numeric.test(left) && numeric.test(right)) {
+    return Number(left) - Number(right);
+  }
+  return left < right ? -1 : (left > right ? 1 : 0);
+}
+
+/** THE DATAGRID'S ARITHMETIC, pure: which rows one page shows, in which
+ *  order, and the numbers the footer says.
+ *
+ *  `rows` are `{text, cells}` -- the row's whole text and its cells' texts;
+ *  `state` is `{query, sortColumn, sortDirection, page, pageSize}`. A row
+ *  matches when it contains every term of the query, case-insensitively.
+ *  Sorting is stable: equal keys keep the page's own order, and `sortColumn`
+ *  -1 is that order. An absent value sorts last in both directions. `page`
+ *  is clamped into range, so a page that no longer exists (the list shrank,
+ *  the filter narrowed it) is the last one that does, never an empty screen. */
+export function datagridView(rows, state) {
+  const list = Array.isArray(rows) ? rows : [];
+  const s = state || {};
+  const terms = datagridTerms(s.query);
+  const matched = [];
+  for (let i = 0; i < list.length; i += 1) {
+    const text = String((list[i] || {}).text || "").toLowerCase();
+    if (terms.every((t) => text.indexOf(t) !== -1)) {
+      matched.push(i);
+    }
+  }
+  const column = typeof s.sortColumn === "number" ? s.sortColumn : -1;
+  if (column >= 0) {
+    const sign = s.sortDirection === "descending" ? -1 : 1;
+    matched.sort((x, y) => {
+      const cx = ((list[x] || {}).cells || [])[column];
+      const cy = ((list[y] || {}).cells || [])[column];
+      const ax = absentText(cx);
+      const ay = absentText(cy);
+      if (ax || ay) {
+        return ax === ay ? x - y : (ax ? 1 : -1);
+      }
+      const order = datagridCompare(cx, cy);
+      return order !== 0 ? sign * order : x - y;
+    });
+  }
+  const size = DATAGRID_PAGE_SIZES.indexOf(s.pageSize) === -1 ? DATAGRID_DEFAULT_PAGE_SIZE : s.pageSize;
+  const pages = Math.max(1, Math.ceil(matched.length / size));
+  const wanted = typeof s.page === "number" && isFinite(s.page) ? Math.floor(s.page) : 1;
+  const page = Math.min(Math.max(1, wanted), pages);
+  const start = (page - 1) * size;
+  const shown = matched.slice(start, start + size);
+  return {
+    indices: shown,
+    total: list.length,
+    matched: matched.length,
+    page: page,
+    pages: pages,
+    pageSize: size,
+    first: shown.length === 0 ? 0 : start + 1,
+    last: start + shown.length,
+    filtered: terms.length > 0,
+  };
+}
+
+/** What the footer says about one view, in words, for sight and for the live
+ *  region alike. */
+export function datagridSummary(view, label) {
+  const v = view || {};
+  const noun = typeof label === "string" && label.length > 0 ? label : "rows";
+  if (v.total === 0) {
+    return "No " + noun + ".";
+  }
+  if (v.matched === 0) {
+    return "No " + noun + " match the filter (" + String(v.total) + " in all).";
+  }
+  const range = String(v.first) + "-" + String(v.last) + " of " + String(v.matched) + " " + noun;
+  return v.filtered ? range + " matching the filter (" + String(v.total) + " in all)." : range + ".";
+}
+
+const DATAGRID_STATE = new Map();
+
+/** The state one grid id carries for the life of the loaded page. */
+export function datagridState(id) {
+  const key = String(id || "");
+  if (!DATAGRID_STATE.has(key)) {
+    DATAGRID_STATE.set(key, {
+      query: "",
+      sortColumn: -1,
+      sortDirection: "ascending",
+      page: 1,
+      pageSize: DATAGRID_DEFAULT_PAGE_SIZE,
+    });
+  }
+  return DATAGRID_STATE.get(key);
+}
+
+/** Enhances every declared datagrid in `root` (and `root` itself). Called by
+ *  `app.js` on every parsed fragment, BEFORE a page wires its controls, so a
+ *  grid whose rows hold controls keeps every row in the document (hidden, not
+ *  detached) and the page's own `querySelectorAll` still finds them. */
+export function enhanceDatagrids(root) {
+  if (!root || typeof root.querySelectorAll !== "function") {
+    return 0;
+  }
+  const found = [];
+  if (typeof root.matches === "function" && root.matches("[data-datagrid]")) {
+    found.push(root);
+  }
+  for (const one of Array.from(root.querySelectorAll("[data-datagrid]"))) {
+    found.push(one);
+  }
+  for (const container of found) {
+    enhanceOne(container);
+  }
+  return found.length;
+}
+
+function make(doc, tag, attrs, text) {
+  const node = doc.createElement(tag);
+  for (const key of Object.keys(attrs || {})) {
+    if (attrs[key] !== null && attrs[key] !== undefined) {
+      node.setAttribute(key, String(attrs[key]));
+    }
+  }
+  if (text !== undefined && text !== null) {
+    node.appendChild(doc.createTextNode(String(text)));
+  }
+  return node;
+}
+
+function enhanceOne(container) {
+  if (container.getAttribute("data-datagrid-ready") === "true") {
+    return;
+  }
+  container.setAttribute("data-datagrid-ready", "true");
+  const doc = container.ownerDocument;
+  const id = container.getAttribute("data-datagrid") || "grid";
+  const label = container.getAttribute("data-datagrid-label") || "rows";
+  const table = container.querySelector("table");
+  const list = table === null ? container.querySelector("ul, ol") : null;
+  const body = table !== null ? table.tBodies[0] : list;
+  if (!body) {
+    return;
+  }
+  const items = Array.from(body.children).filter((row) =>
+    row.querySelector("td.empty") === null);
+  if (items.length === 0) {
+    return;
+  }
+  // A row that holds a control stays in the document: the page wires it
+  // after this runs, by querying for it.
+  const keepAll = body.querySelector("input, select, textarea, button, form") !== null;
+  const rows = items.map((row) => ({
+    text: row.textContent,
+    cells: table !== null ? Array.from(row.children).map((c) => c.textContent) : [],
+  }));
+  const state = datagridState(id);
+  const columns = table !== null ? Array.from(table.querySelectorAll("thead th")) : [];
+  const controls = items.length > DATAGRID_CONTROLS_ABOVE;
+  const regionId = id + "-grid";
+  (table !== null ? table : body).setAttribute("id", regionId);
+
+  // The live count, which is also what a screen reader hears after a change.
+  const count = make(doc, "p", { class: "datagrid-count", id: id + "-count", role: "status",
+    "aria-live": "polite" });
+
+  let filter = null;
+  if (controls) {
+    const toolbar = make(doc, "div", { class: "datagrid-toolbar" });
+    const field = make(doc, "div", { class: "field" });
+    field.appendChild(make(doc, "label", { for: id + "-filter" }, "Filter " + label));
+    filter = make(doc, "input", { type: "search", id: id + "-filter", "aria-controls": regionId,
+      "aria-describedby": id + "-count", autocomplete: "off", spellcheck: "false" });
+    filter.value = state.query;
+    field.appendChild(filter);
+    toolbar.appendChild(field);
+    container.insertBefore(toolbar, container.firstChild);
+  }
+
+  // Sortable headers: the caption becomes a button; `aria-sort` on the th.
+  const sorters = [];
+  if (table !== null && items.length > 1) {
+    columns.forEach((th, index) => {
+      if (th.hasAttribute("colspan")) {
+        return;
+      }
+      const caption = th.textContent;
+      const button = make(doc, "button", { type: "button", class: "datagrid-sort",
+        id: id + "-sort-" + String(index) }, caption);
+      while (th.firstChild !== null) {
+        th.removeChild(th.firstChild);
+      }
+      th.appendChild(button);
+      sorters.push({ th: th, button: button, index: index });
+    });
+  }
+
+  const footer = make(doc, "div", { class: "datagrid-footer" });
+  footer.appendChild(count);
+  let size = null;
+  let first = null;
+  let previous = null;
+  let next = null;
+  let last = null;
+  let pageOf = null;
+  if (controls) {
+    const sizeLabel = make(doc, "label", { for: id + "-page-size" }, "Rows per page");
+    size = make(doc, "select", { id: id + "-page-size", "aria-controls": regionId });
+    for (const option of DATAGRID_PAGE_SIZES) {
+      const o = make(doc, "option", { value: String(option) }, String(option));
+      if (option === state.pageSize) {
+        o.setAttribute("selected", "");
+      }
+      size.appendChild(o);
+    }
+    sizeLabel.appendChild(size);
+    footer.appendChild(sizeLabel);
+    const pager = make(doc, "div", { class: "datagrid-pages", role: "group",
+      "aria-label": "Pages of " + label });
+    first = make(doc, "button", { type: "button", id: id + "-first", "aria-label": "First page",
+      "aria-controls": regionId }, "\u00ab");
+    previous = make(doc, "button", { type: "button", id: id + "-previous",
+      "aria-label": "Previous page", "aria-controls": regionId }, "\u2039");
+    pageOf = make(doc, "span", { class: "datagrid-page-of", id: id + "-page-of" });
+    next = make(doc, "button", { type: "button", id: id + "-next", "aria-label": "Next page",
+      "aria-controls": regionId }, "\u203a");
+    last = make(doc, "button", { type: "button", id: id + "-last", "aria-label": "Last page",
+      "aria-controls": regionId }, "\u00bb");
+    for (const part of [first, previous, pageOf, next, last]) {
+      pager.appendChild(part);
+    }
+    footer.appendChild(pager);
+  }
+  container.appendChild(footer);
+
+  const noMatch = make(doc, table !== null ? "tr" : "li", { class: "datagrid-no-match" });
+  const noMatchCell = table !== null
+    ? make(doc, "td", { class: "empty", colspan: String(Math.max(1, columns.length)) })
+    : noMatch;
+  if (table !== null) {
+    noMatch.appendChild(noMatchCell);
+  }
+
+  const update = () => {
+    const view = datagridView(rows, state);
+    state.page = view.page;
+    const show = new Set(view.indices);
+    const order = state.sortColumn >= 0
+      ? view.indices.concat(items.map((_, i) => i).filter((i) => !show.has(i)))
+      : items.map((_, i) => i);
+    while (body.firstChild !== null) {
+      body.removeChild(body.firstChild);
+    }
+    for (const i of order) {
+      if (show.has(i)) {
+        items[i].hidden = false;
+        body.appendChild(items[i]);
+      } else if (keepAll) {
+        items[i].hidden = true;
+        body.appendChild(items[i]);
+      }
+    }
+    if (view.matched === 0) {
+      noMatchCell.textContent =
+        "No " + label + " match the filter. Clear it to see all " + String(view.total) + ".";
+      body.appendChild(noMatch);
+    }
+    count.textContent = datagridSummary(view, label);
+    for (const s of sorters) {
+      if (s.index === state.sortColumn) {
+        s.th.setAttribute("aria-sort", state.sortDirection);
+      } else {
+        s.th.removeAttribute("aria-sort");
+      }
+    }
+    if (pageOf !== null) {
+      pageOf.textContent = "Page " + String(view.page) + " of " + String(view.pages);
+      first.disabled = view.page <= 1;
+      previous.disabled = view.page <= 1;
+      next.disabled = view.page >= view.pages;
+      last.disabled = view.page >= view.pages;
+    }
+  };
+
+  if (filter !== null) {
+    filter.addEventListener("input", () => {
+      state.query = filter.value;
+      state.page = 1;
+      update();
+    });
+  }
+  for (const s of sorters) {
+    s.button.addEventListener("click", () => {
+      if (state.sortColumn !== s.index) {
+        state.sortColumn = s.index;
+        state.sortDirection = "ascending";
+      } else if (state.sortDirection === "ascending") {
+        state.sortDirection = "descending";
+      } else {
+        state.sortColumn = -1;
+        state.sortDirection = "ascending";
+      }
+      update();
+    });
+  }
+  if (size !== null) {
+    size.addEventListener("change", () => {
+      state.pageSize = Number(size.value);
+      state.page = 1;
+      update();
+    });
+    // A pager button that disables itself under the reader's focus would drop
+    // that focus to the body; it moves to the control that still works.
+    const go = (to, fallback) => () => {
+      state.page = to();
+      update();
+      const active = doc.activeElement;
+      if (active === null || active === doc.body || active.disabled === true) {
+        fallback().focus();
+      }
+    };
+    first.addEventListener("click", go(() => 1, () => next));
+    previous.addEventListener("click", go(() => state.page - 1, () => next));
+    next.addEventListener("click", go(() => state.page + 1, () => previous));
+    last.addEventListener("click", go(() => Number.MAX_SAFE_INTEGER, () => previous));
+  }
+  update();
 }
 
 /** A link to one object's detail view: `#/<route>?ns=<ns>&name=<name>`.

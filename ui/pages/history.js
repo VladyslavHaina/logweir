@@ -253,6 +253,8 @@ export function renderHistoryList(input, second, ns) {
       ["NAME", "KIND", "CREATED", "PHASE", "RESULT", "SIGNED", "OPERATION", "RESTORE"],
       rows,
       NO_HISTORY_SENTENCE,
+      undefined,
+      { id: "history", label: "runs" },
     ) +
     listFooter()
   );

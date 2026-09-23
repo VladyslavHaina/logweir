@@ -283,6 +283,7 @@ export function renderClusterList(input, ns, now, freshSeconds) {
       rows,
       NO_CLUSTER_SENTENCE,
       attributes,
+      { id: "clusters", label: "connections" },
     ) +
     "<p class=\"note\">" + TEST_CONNECTION_SENTENCE + "</p>" +
     listFooter()

@@ -270,6 +270,8 @@ export function renderCatalogList(collection, ns) {
       ["NAME", "DESTINATION", "READY", "POINTS", "AVAILABLE", "UNTRUSTED SIGNER", "SYNCED", "VIEW EXPIRES"],
       rows,
       NO_CATALOG_SENTENCE,
+      undefined,
+      { id: "catalogs", label: "catalogs" },
     ) +
     listFooter()
   );
@@ -459,6 +461,8 @@ export function renderPoints(page, ns, catalog, destination) {
         "RESTORE"],
       entries.map((entry) => pointRow(entry, ns, catalog, destination, page)),
       NO_POINT_SENTENCE,
+      undefined,
+      { id: "catalog-points", label: "recovery points" },
     ) +
     (typeof (page || {}).backupVerdictsIncomplete === "string" &&
       page.backupVerdictsIncomplete.length > 0
