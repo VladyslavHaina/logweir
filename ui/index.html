@@ -6,18 +6,21 @@
     <meta name="color-scheme" content="light dark">
     <title>Logweir</title>
     <!--
-      EVERY REFERENCE ON THIS PAGE IS RELATIVE, AND THERE ARE ONLY TWO.
+      EVERY REFERENCE ON THIS PAGE IS RELATIVE, AND THERE ARE FOUR.
       No font, no stylesheet, no script and no icon is fetched from anywhere
       outside this directory: the shipped assets are the sources, there is no
       build step, and `scripts/check-ui-offline.sh` fails the lint gate on any
       line here that names an external resource.
 
-      The icon is an empty inline one, so the browser asks for no icon at all
-      rather than requesting a file that does not exist. The one graphic on
-      the page -- the mark beside the product name -- is inline SVG below,
-      decorative and hidden from assistive technology.
+      The icon is the console server's own (`logweir-api` compiles it in and
+      serves it beside these files), so it is fetched from this origin and the
+      server's Content-Security-Policy, which admits no `data:` image, has
+      nothing to refuse. The legacy `kubectl proxy` serves no such file and
+      answers 404 for it. The one graphic on the page -- the mark beside the
+      product name -- is inline SVG below, decorative and hidden from
+      assistive technology.
     -->
-    <link rel="icon" href="data:,">
+    <link rel="icon" href="./favicon.svg">
     <link rel="stylesheet" href="./style.css">
     <!-- Helm mounts this non-secret, same-origin runtime context when it serves
          the UI. A standalone kubectl proxy has no such mount and app.js then

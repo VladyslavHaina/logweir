@@ -510,6 +510,180 @@ async fn every_shipped_asset_is_served_byte_for_byte() {
     );
 }
 
+/// The served policy as `directive -> sources`, and the sources a fetch of
+/// `directive` is actually held to (CSP3 §6.8.3: an absent fetch directive
+/// falls back to `default-src`).
+fn effective_sources(csp: &str, directive: &str) -> Vec<String> {
+    let mut map = std::collections::BTreeMap::new();
+    for part in csp.split(';') {
+        let mut words = part.split_whitespace();
+        if let Some(name) = words.next() {
+            map.insert(
+                name.to_string(),
+                words.map(str::to_string).collect::<Vec<_>>(),
+            );
+        }
+    }
+    map.get(directive)
+        .or_else(|| map.get("default-src"))
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Every `src="…"` / `href="…"` value in an HTML file, with the tag it sits in.
+fn references(html: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for (start, _) in html.match_indices('<') {
+        let rest = &html[start + 1..];
+        let Some(end) = rest.find('>') else { continue };
+        let tag = &rest[..end];
+        let name: String = tag
+            .chars()
+            .take_while(char::is_ascii_alphanumeric)
+            .collect::<String>()
+            .to_ascii_lowercase();
+        if name.is_empty() {
+            continue;
+        }
+        for attr in ["src=", "href="] {
+            for (at, _) in tag.match_indices(attr) {
+                let preceded = tag[..at].ends_with(char::is_whitespace);
+                let value = &tag[at + attr.len()..];
+                let Some(quote) = value.chars().next().filter(|c| *c == '"' || *c == '\'') else {
+                    continue;
+                };
+                let Some(close) = value[1..].find(quote) else {
+                    continue;
+                };
+                if preceded {
+                    out.push((name.clone(), value[1..=close].to_string()));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// PLAT-18.2's live run: every console page load logged a CSP violation,
+/// because `ui/index.html` named its icon `data:,` and this server's policy
+/// admits no `data:` image (`img-src` falls back to `default-src 'self'`).
+/// The fix is the icon from `'self'`, NOT a wider policy — so this holds both
+/// halves: the policy a page is held to is exactly `'self'` for every fetch a
+/// page makes, and every asset any shipped page names is a same-origin path
+/// this server answers 200 for.
+///
+/// REGRESSION REASONS. Put `data:,` back in `ui/index.html`: the reference
+/// walk fails naming it. Drop the compiled-in icon from `assets.rs`: the
+/// served-200 arm fails naming `/ui/favicon.svg`. Add `data:` to the policy:
+/// the policy arm fails.
+#[tokio::test]
+async fn no_console_page_names_an_asset_the_served_policy_forbids() {
+    let app = TestApp::new();
+    let index = app.get("/ui/").await;
+    let csp = index
+        .header("content-security-policy")
+        .expect("the page carries a policy");
+    for directive in [
+        "img-src",
+        "script-src",
+        "style-src",
+        "font-src",
+        "connect-src",
+    ] {
+        assert_eq!(
+            effective_sources(&csp, directive),
+            vec!["'self'".to_string()],
+            "a page's `{directive}` must be exactly 'self': the icon is served from this \
+             origin so that no fetch a page makes needs a wider source ({csp})"
+        );
+    }
+    for token in csp.split(|c: char| c == ';' || c.is_whitespace()) {
+        assert!(
+            !matches!(
+                token,
+                "data:" | "blob:" | "*" | "'unsafe-inline'" | "'unsafe-eval'" | "http:" | "https:"
+            ),
+            "the served policy admits `{token}`: {csp}"
+        );
+    }
+
+    let pages: Vec<String> = shipped_ui_files()
+        .into_iter()
+        .filter(|f| f.ends_with(".html"))
+        .collect();
+    assert!(!pages.is_empty(), "no shipped page was found under ui/");
+    let mut checked = 0usize;
+    for page in &pages {
+        let html = std::fs::read_to_string(support::repo_root().join(page)).unwrap();
+        let dir = page.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+        for (tag, value) in references(&html) {
+            // A fragment is navigation inside the page, never a fetch.
+            if tag == "a" || value.starts_with('#') {
+                continue;
+            }
+            let scheme = value
+                .split_once(':')
+                .map(|(s, _)| s)
+                .filter(|s| !s.is_empty() && !s.contains('/') && !s.contains('.'));
+            assert!(
+                scheme.is_none() && !value.starts_with("//") && !value.starts_with('/'),
+                "{page}: <{tag}> names `{value}`, which is not a path relative to the page. \
+                 The served policy holds every fetch to 'self' ({csp}); a `data:` or remote \
+                 reference is refused by the browser on every load"
+            );
+            let mut segments: Vec<&str> = dir.split('/').filter(|s| !s.is_empty()).collect();
+            for segment in value.split('/') {
+                match segment {
+                    "." | "" => {}
+                    ".." => {
+                        segments.pop();
+                    }
+                    other => segments.push(other),
+                }
+            }
+            let url = format!("/{}", segments.join("/"));
+            let response = app.get(&url).await;
+            assert_eq!(
+                response.status, 200,
+                "{page}: <{tag}> names `{value}`, and this server answers {} for {url}",
+                response.status
+            );
+            checked += 1;
+        }
+    }
+    assert!(
+        checked >= 4,
+        "only {checked} page references were resolved; the walk has gone quiet"
+    );
+
+    let icon = app
+        .get(&format!("/ui/{}", logweir_api::assets::ICON_PATH))
+        .await;
+    assert_eq!(icon.status, 200);
+    assert_eq!(
+        icon.header("content-type").as_deref(),
+        Some("image/svg+xml")
+    );
+    assert_eq!(icon.body, logweir_api::assets::ICON_SVG.as_bytes());
+    assert_eq!(icon.header("content-security-policy").as_deref(), Some(CSP));
+    assert_eq!(
+        icon.header("x-content-type-options").as_deref(),
+        Some("nosniff")
+    );
+    let body = String::from_utf8(icon.body.clone()).unwrap();
+    assert!(
+        !body.contains("<script") && !body.contains("<style") && !body.contains("href"),
+        "the icon carries no script, no inline style and no reference: {body}"
+    );
+    assert!(
+        index
+            .body
+            .windows(b"href=\"./favicon.svg\"".len())
+            .any(|w| w == b"href=\"./favicon.svg\""),
+        "ui/index.html names the served icon"
+    );
+}
+
 #[tokio::test]
 async fn tests_fixtures_keys_readmes_listings_and_traversals_are_not_served() {
     let app = TestApp::new();

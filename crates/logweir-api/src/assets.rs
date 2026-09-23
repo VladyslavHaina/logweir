@@ -9,6 +9,18 @@
 //! no decoding, normalisation or directory index, and anything not in the map
 //! is 404.
 //!
+//! ONE ENTRY IS NOT A FILE: the page icon, [`ICON_PATH`]. `ui/index.html`
+//! names it (`<link rel="icon" href="./favicon.svg">`), and it is compiled in
+//! here rather than shipped under `ui/` because every shipped UI file is held
+//! to plain ASCII text with no URL scheme on any line
+//! (`scripts/check-ui-offline.sh`), and a standalone SVG cannot render without
+//! its XML namespace URI. It used to be `data:,`, which this server's
+//! Content-Security-Policy (`img-src` falls back to `default-src 'self'`)
+//! refuses, so every console page load logged a CSP violation (PLAT-18.2's
+//! live run). Served from `'self'`, the icon needs no widening of the policy.
+//! A `.svg` FILE under `ui/` is still never selected: the extension list below
+//! is unchanged, so the selection stays `Dockerfile.ui`'s.
+//!
 //! READ ONCE, INTO MEMORY. The bytes a browser receives are the bytes this
 //! process read at startup; nothing on disk can swap a file under a running
 //! server, and no request performs file-system I/O.
@@ -26,6 +38,22 @@ use crate::problem::ApiError;
 
 /// The largest single asset accepted, 8 MiB.
 pub const MAX_ASSET_BYTES: u64 = 8 * 1024 * 1024;
+
+/// The page icon's path under `/ui/` — what `ui/index.html`'s
+/// `<link rel="icon">` names, relative to the page.
+pub const ICON_PATH: &str = "favicon.svg";
+
+/// The page icon: the masthead's brand mark (`ui/index.html`'s inline
+/// `.brand-mark`), in the light theme's `--accent` / `--on-accent`. Colours are
+/// presentation attributes, not a `<style>` element, so nothing in it is an
+/// inline style the policy would have to allow; it carries no script and no
+/// reference to anything.
+pub const ICON_SVG: &str = concat!(
+    r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">"##,
+    r##"<rect x="1" y="1" width="30" height="30" rx="8" fill="#0b5cad"/>"##,
+    r##"<path fill="#ffffff" d="M6 8h20v3.2H6zM12 14.4h14v3.2H12zM18 20.8h8v3.2h-8z"/>"##,
+    "</svg>\n"
+);
 
 /// One served file.
 #[derive(Clone, Debug)]
@@ -80,6 +108,14 @@ impl StaticAssets {
                 dir.display()
             ));
         }
+        // No file can collide with it: `.svg` is not a selected extension.
+        files.insert(
+            ICON_PATH.to_string(),
+            Asset {
+                bytes: Bytes::from_static(ICON_SVG.as_bytes()),
+                content_type: "image/svg+xml",
+            },
+        );
         Ok(StaticAssets { files })
     }
 
@@ -178,5 +214,8 @@ mod tests {
         assert!(!safe_name(".hidden.js"));
         assert!(!safe_name("sp ace.js"));
         assert!(safe_name("restore-wizard.js"));
+        // The icon is compiled in, and a file of its extension is never
+        // selected — so no `ui/` file can shadow it.
+        assert_eq!(content_type_for(ICON_PATH), None);
     }
 }
