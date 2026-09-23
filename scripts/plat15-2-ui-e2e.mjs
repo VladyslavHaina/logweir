@@ -527,7 +527,12 @@ async function main() {
   // A READ-ONLY MinIO user of this run's own, scoped to this bucket. Its secret
   // half is minted here, handed to the mc Job and the Secret through stdin
   // only, and never printed.
-  const readerSecret = randomBytes(24).toString("base64url");
+  //
+  // HEX, NEVER BASE64URL. A base64url value starts with `-` one time in 32,
+  // and `mc admin user add adm <user> <secret>` then parses the secret as an
+  // unknown FLAG: the step fails, and mc's usage error prints the value into
+  // the Job log this harness saves (seen live, 2026-09-23). Hex has no `-`.
+  const readerSecret = randomBytes(24).toString("hex");
   const policy = JSON.stringify({ Version: "2012-10-17", Statement: [{ Effect: "Allow",
     Action: ["s3:GetObject", "s3:ListBucket"],
     Resource: ["arn:aws:s3:::" + BUCKET, "arn:aws:s3:::" + BUCKET + "/*"] }] });
