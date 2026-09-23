@@ -294,6 +294,9 @@ export async function runPass() {
     if (wants("probes")) {
       await focusProbes(browser, state, route);
     }
+    if (wants("filter")) {
+      await filterProbe(browser, state, route);
+    }
     if (wants("routes")) {
       await routePass(browser, state, route);
     }
@@ -753,7 +756,10 @@ async function runAxe(page) {
   await page.addScriptTag({ path: AXE });
   return page.evaluate(async (tags) => {
     const out = await window.axe.run(document, { runOnly: { type: "tag", values: tags },
-      resultTypes: ["violations"] });
+      resultTypes: ["violations", "incomplete"] });
+    // `incomplete` is what axe could not decide (a contrast over an image, a
+    // colour behind a gradient). Recorded beside each visit, not asserted.
+    window.__p182Incomplete = out.incomplete.map((v) => v.id + "(" + v.nodes.length + ")");
     return out.violations.map((v) => ({
       id: v.id, impact: v.impact, help: v.help, nodes: v.nodes.length,
       targets: v.nodes.slice(0, 4).map((n) => n.target.join(" ")),
@@ -866,6 +872,7 @@ async function routePass(browser, state, route) {
         entry.ring = await focusRing(page);
         entry.axe = await runAxe(page);
         entry.axeViolations = entry.axe.length;
+        entry.axeIncomplete = await page.evaluate(() => window.__p182Incomplete || []);
       } catch (error) {
         entry.error = error instanceof Error ? error.message.slice(0, 800) : String(error);
       }
@@ -1158,5 +1165,100 @@ async function largePass(browser, state, route) {
     failed("large datasets", new Error(String(entry.listError || entry.wizardError)));
   } else {
     record("large datasets measured (1,000 history rows, 500 backup rows, 2,000 frozen topics)", entry);
+  }
+}
+
+// ------------------------------------------------------ the filter probe
+
+/** Review HIGH-1, in Chromium: a topic filter typed in the wizard for one
+ *  recovery point must not hide the next point's topics. Point A's topic list
+ *  is inflated to 15 (so the filter box renders), filtered to one stream, and
+ *  then the wizard is opened on a DIFFERENT real point, whose own topics must
+ *  all be visible with no stale filter. The same route re-opened on point A
+ *  must still show its filter, with the hidden count and Clear. */
+async function filterProbe(browser, state, route) {
+  const name = "a filter scoped to its recovery point (review HIGH-1, live)";
+  const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  const page = await context.newPage();
+  try {
+    let other = null;
+    for (let i = 0; i < 90 && other === null; i += 1) {
+      other = kubeJson(["-n", namespace, "get", "backups"]).items.find((b) =>
+        b.metadata.uid !== state.backupUid && (b.status || {}).phase === "Succeeded" &&
+        (b.status || {}).windowCovered !== undefined) || null;
+      if (other === null) {
+        await pause(2000);
+      }
+    }
+    check(other !== null, "no second Succeeded recovery point to open the wizard on");
+    const many = Array.from({ length: 15 }, (_, i) => "orders.stream-" + String(i));
+    await page.route((url) => /\/api\/v1\/namespaces\/[^/]+\/backups(\/[^/]+)?$/
+      .test(new URL(url.toString()).pathname), async (r) => {
+      const real = await r.fetch();
+      const body = await real.json();
+      const touch = (item) => {
+        if (item && item.uid === state.backupUid && Array.isArray(item.topics)) {
+          item.topics = many.slice();
+        }
+      };
+      (Array.isArray(body.items) ? body.items : []).forEach(touch);
+      touch(body);
+      touch(body.item);
+      await r.fulfill({ response: real, body: JSON.stringify(body) });
+    });
+    const wizardOf = (b) => route("restore?backup=" + encodeURIComponent(b.metadata ? b.metadata.name : b.name) +
+      "&uid=" + encodeURIComponent(b.metadata ? b.metadata.uid : b.uid));
+    await open(page, wizardOf({ name: state.backup, uid: state.backupUid }));
+    await waitFor(page, "#subset-topics-filter", "the topic filter over 15 topics");
+    await page.focus("#subset-topics-filter");
+    await page.keyboard.type("stream-14");
+    await pause(400);
+    const a = await page.evaluate(() => ({
+      visible: Array.from(document.querySelectorAll(".topic-box")).filter((b) => b.offsetParent !== null).length,
+      boxes: document.querySelectorAll(".topic-box").length,
+      hidden: (document.getElementById("subset-topics-hidden") || {}).textContent || null,
+    }));
+    await shot(page, "filter-probe-a-filtered");
+    // THE SAME PAGE LIFETIME: a hash navigation, never a reload (a reload
+    // would clear the in-memory state and prove nothing).
+    const hashOf = (url) => url.slice(url.indexOf("#"));
+    const loadsBefore = await page.evaluate(() => performance.getEntriesByType("navigation").length);
+    await page.evaluate((h) => { window.location.hash = h; }, hashOf(wizardOf(other)));
+    await page.waitForFunction((uid) => window.location.hash.indexOf(uid) !== -1 &&
+      document.querySelectorAll(".topic-box").length > 0, other.metadata.uid, { timeout: 30000 });
+    await pause(600);
+    const b = await page.evaluate(() => ({
+      visible: Array.from(document.querySelectorAll(".topic-box")).filter((x) => x.offsetParent !== null).length,
+      boxes: document.querySelectorAll(".topic-box").length,
+      filterBox: document.getElementById("subset-topics-filter") !== null,
+    }));
+    await shot(page, "filter-probe-b-next-point");
+    // CONTROL: back to point A in the same page -- its own filter is still in
+    // force, and so its box, the hidden count and Clear are on screen.
+    await page.evaluate((h) => { window.location.hash = h; },
+      hashOf(wizardOf({ name: state.backup, uid: state.backupUid })));
+    await page.waitForFunction(() => document.getElementById("subset-topics-filter") !== null,
+      null, { timeout: 30000 });
+    await pause(600);
+    const back = await page.evaluate(() => ({
+      value: document.getElementById("subset-topics-filter").value,
+      hidden: (document.getElementById("subset-topics-hidden") || {}).textContent || null,
+      clear: document.getElementById("subset-topics-clear") !== null,
+      reloads: performance.getEntriesByType("navigation").length,
+    }));
+    await shot(page, "filter-probe-a-again");
+    check(back.reloads === loadsBefore, "the probe reloaded the page; it must stay in one lifetime");
+    check(back.value === "stream-14" && back.clear && /^14 topics hidden by the filter\./.test(back.hidden || ""),
+      "back on point A the filter in force is not shown with its hidden count and Clear: " +
+        JSON.stringify(back));
+    check(a.visible === 1 && a.boxes === 15, "point A was not filtered to one of 15: " + JSON.stringify(a));
+    check(b.boxes > 0 && b.visible === b.boxes,
+      "the next point's topics are hidden by point A's filter: " + JSON.stringify(b));
+    record(name, { pointA: state.backup, pointB: other.metadata.name, a: a, b: b, back: back });
+  } catch (error) {
+    await shot(page, "filter-probe-failure").catch(() => null);
+    failed(name, error);
+  } finally {
+    await context.close();
   }
 }
