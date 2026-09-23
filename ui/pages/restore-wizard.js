@@ -209,6 +209,8 @@ export const WIZARD_FIELD_PATHS = Object.freeze([
   // PLAT-08.2: the two saved references, each beside the control it is about.
   ["evidenceDestinationRef", "evidenceDestination"],
   ["spec.evidenceDestinationRef", "evidenceDestination"],
+  // PLAT-19.2: the change ticket a Governed policy requires (D0).
+  ["ticket", "ticket"],
 ]);
 
 /** The fields of `WIZARD_FIELD_PATHS` with no input of their own. */
@@ -2876,10 +2878,10 @@ export function renderPlanStep(prepared, state) {
     "<button type=\"button\" id=\"download-plan\"" + (renderable ? "" : " disabled") + ">Download plan</button>" +
     "</div>" +
     "<p class=\"caveat\">" + esc(COPY_CAVEAT) + "</p>" +
-    approvalPolicyBlock(s.approvalPolicy) +
+    approvalPolicyBlock(s.approvalPolicy, s.ticket, errors.ticket) +
     "<div class=\"actions actions-final\">" +
     "<button type=\"button\" id=\"create-restore\" class=\"primary\"" +
-    (pending || !renderable || blocked !== null ? " disabled" : "") +
+    (pending || !renderable || blocked !== null || policyRefusal(s) !== null ? " disabled" : "") +
     (pending ? " aria-busy=\"true\"" : "") +
     ">Create the Restore</button>" +
     "</div>" +
@@ -2920,8 +2922,20 @@ export const GUIDED_SUBMIT_SENTENCE =
  *  renders exactly today's governed instructions, which is the fail-safe
  *  reading: nothing here ever tells an operator a Restore will run on their
  *  confirmation unless the console said the namespace is bound Ordinary. */
-export function approvalPolicyBlock(policy) {
+export function approvalPolicyBlock(policy, ticket, ticketErrors) {
   const p = policy !== null && typeof policy === "object" ? policy : null;
+  if (p !== null && p.legacy === false && p.mode === "ordinary" &&
+    p.ordinaryConfirmationAvailable === false) {
+    return (
+      "<h4 id=\"approval-policy-ordinary-unavailable\">Ordinary confirmation is not " +
+      "available here</h4>" +
+      "<p class=\"complaint\">This namespace is bound to approval policy <code>" +
+      esc(p.name) + "</code> (ordinary confirmation), and this console runs in the " +
+      "administrator mode, which does not offer ordinary confirmation: its one identity is " +
+      "whoever holds the port-forward, not a person the confirmation could attest. Submit " +
+      "this restore through the shared console.</p>"
+    );
+  }
   if (p !== null && p.legacy === false && p.mode === "ordinary") {
     return (
       "<h4 id=\"approval-policy-ordinary\">Ordinary confirmation</h4>" +
@@ -2940,6 +2954,13 @@ export function approvalPolicyBlock(policy) {
       "you as the requester; the Restore runs only after an approver who is NOT you " +
       "countersigns that confirmation on their own machine and submits it on the Restore's " +
       "approval page.</p>" +
+      "<div class=\"field\"><label for=\"change-ticket\">Change ticket (required)</label>" +
+      "<input id=\"change-ticket\" name=\"ticket\" maxlength=\"128\" value=\"" +
+      esc(typeof ticket === "string" ? ticket : "") + "\"" +
+      invalidAttributes("change-ticket", ticketErrors) + ">" +
+      fieldErrorLine("change-ticket", ticketErrors) +
+      "<p class=\"note\">Signed into the confirmation with the plan hash; the approver sees " +
+      "it before countersigning.</p></div>" +
       copyBlock([COUNTERSIGN_COMMAND])
     );
   }
@@ -3649,7 +3670,34 @@ export function restoreBody(state, prepared) {
     // both modes -- `effectivePrefix` reads the key the run reads -- and in
     // `scratch` the rails are the page's own and phase 0's.
     topicMapping: target.mode === "scratch" ? undefined : topicMapping(s),
+    // PLAT-19.2: the change ticket, a field of the create REQUEST that the
+    // console signs into the authorization document. Sent only under an
+    // explicit binding; an unbound namespace signs nothing.
+    ticket: ticketFor(s),
   };
+}
+
+/** The ticket this state sends, or `undefined`. */
+function ticketFor(state) {
+  const s = state || {};
+  const p = s.approvalPolicy;
+  const bound = p !== null && typeof p === "object" && p.legacy === false;
+  const ticket = typeof s.ticket === "string" ? s.ticket.trim() : "";
+  return bound && ticket.length > 0 ? ticket : undefined;
+}
+
+/** A refusal the namespace's approval POLICY makes before anything is sent
+ *  (PLAT-19.2), or `null`: an Ordinary binding in a console that does not
+ *  offer ordinary confirmation (D0: the administrator mode "does not expose
+ *  Ordinary"). The product API refuses the same request; this says so first. */
+export function policyRefusal(state) {
+  const p = (state || {}).approvalPolicy;
+  if (p !== null && typeof p === "object" && p.legacy === false && p.mode === "ordinary" &&
+    p.ordinaryConfirmationAvailable === false) {
+    return "namespace policy " + String(p.name) + " is ordinary confirmation, which this " +
+      "console mode does not offer; submit through the shared console";
+  }
+  return null;
 }
 
 /** The route "Request approval" navigates to. `subjectRef` and `planHash` come
@@ -3733,6 +3781,16 @@ export async function submitRestore(state, deps, lifecycle, options) {
   const blocked = readinessRefusal(s, prepared);
   if (blocked !== null) {
     throw refusal(blocked, { planHash: prepared.hash });
+  }
+  const unoffered = policyRefusal(s);
+  if (unoffered !== null) {
+    throw refusal(unoffered);
+  }
+  if (((s.approvalPolicy || {}).ticketRequired) === true && ticketFor(s) === undefined) {
+    throw invalidInput({
+      ticket: "a namespace under a Governed approval policy requires a change ticket; it is " +
+        "signed into the confirmation the approver countersigns",
+    });
   }
   const reviewed = (options || {}).reviewedHash;
   if (typeof reviewed === "string" && reviewed !== prepared.hash) {
@@ -5507,6 +5565,14 @@ function wire(node, state, parse, api, lifecycle, prepared) {
     if (field !== null) {
       listen(field, "change", refresh, lifecycle);
     }
+  }
+  // THE TICKET IS NOT IN THE PLAN BYTES, so typing it re-renders nothing: it
+  // is read into the state and sent beside the create body (PLAT-19.2).
+  const ticket = node.querySelector("#change-ticket");
+  if (ticket !== null) {
+    listen(ticket, "input", () => {
+      state.ticket = valueOf(ticket);
+    }, lifecycle);
   }
   for (const box of node.querySelectorAll(".topic-box")) {
     listen(box, "change", refresh, lifecycle);

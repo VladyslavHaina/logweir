@@ -369,7 +369,9 @@ authorization document v2, and the keys it needs on its `TrustPolicy` are:
   exact string the console records as a requester. Separation of duties compares
   this principal with the console-attested requester, so a key whose principal
   is a display name or an email proves nothing: it would differ from every
-  requester, including its own holder.
+  requester, including its own holder. Such a key is therefore **refused**
+  (`SelfApprovalRefused`) under a Governed policy: the controller fails closed on
+  any `principal.id` that is not `<issuer>#<subject>`.
 
 The legacy roster never yields a `ConsoleConfirmation` key, so a namespace must
 be governed by a `TrustPolicy` before an approval policy can take effect in it.

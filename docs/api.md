@@ -200,7 +200,19 @@ Restore exists (so it has a UID) the response carries `authorization`:
 reading what exists, never signs twice, and never adopts an `Approval` this
 Restore did not produce (`409 state_conflict`). In a Governed-bound namespace
 `approvalRef.name` is at most 240 characters, so its confirmation name is still
-an object name.
+an object name, and may not end in `-confirmation` (`422`, `reserved_suffix`),
+which is where another Restore's confirmation lives.
+
+Refused **before anything is created** (no Restore, no Approval):
+
+| request | answer |
+|---|---|
+| an `Ordinary`-bound namespace in a **`localAdmin`** console — D0: that mode "does not expose Ordinary"; its one identity is the port-forward administrator, not a person a confirmation could attest | `409 policy_mismatch`; use the shared console. `GET .../approval-policy` says `ordinaryConfirmationAvailable: false` |
+| a `Governed`-bound namespace without `ticket`, or a blank / padded / over-128-character one (D0: the ticket is "required in Governed") | `422`, field `ticket` (`required` / `invalid`) |
+| `ticket` in an unbound namespace, which signs nothing (`logweir drill approve --ticket` carries it there) | `422`, field `ticket`, `not_accepted` |
+
+`ticket` is optional under `Ordinary`; when given it is signed into the
+document. `GET .../approval-policy` also answers `ticketRequired`.
 
 **`POST .../restores/{name}/approval`** takes `{"sidecarBytes": "…"}` — the file
 `logweir drill countersign --document <approvalBytes> --confirmation
@@ -230,7 +242,7 @@ An Ordinary namespace has nothing to approve (`409 policy_mismatch`).
 | `409 policy_mismatch` | the namespace is bound to an Ordinary policy, or the confirmation names another UID, plan or policy digest (the policy changed since: submit the Restore again), or — unbound — the sidecar is not a v1 approval's |
 | `404 not_found` | no such Restore, or no console confirmation for it |
 | `409 state_conflict` | the request has expired, or an Approval with other contents holds the name |
-| `422 validation_failed` | not a sidecar, or it adds no signature beside the console's |
+| `422 validation_failed` | not a sidecar, or it adds no signature beside the console's; or either field carries private-key text (`private_key` — refused on the server as well as by the page, and never echoed; D0 forbids a private key in any custom resource) |
 
 The Approval it creates carries the confirmation's **exact** document bytes and
 the console's signatures plus the approver's. The controller then verifies both

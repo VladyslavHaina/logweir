@@ -629,7 +629,15 @@ ConfigMap `<release>-approval-policy-<digest>` and mounts the same object into
 the `weirkeeper` Deployment (`LOGWEIR_APPROVAL_POLICY_FILE`) and into the
 console (`approvalPolicyFile` in its config), and mounts the key Secret into the
 console only (`confirmationKeyFile`). Both processes log the document's digest
-at start and refuse to start on a document that does not validate. Editing a
+at start and refuse to start on a document that does not validate — and a
+controller that refuses to start stops every reconciler, backups included — so
+**the chart refuses at render every document the binary refuses**: the
+`requireDistinctPrincipal` rules, the `maxAgeSeconds` range, unknown policy
+fields, namespace keys that are not DNS labels, and the rest. The cases are
+listed once in `scripts/approval-policy-refusals/`, which `scripts/check-chart.sh`
+renders and `crates/logweir/tests/chart_lint.rs` feeds to the binary's parser.
+`requireDistinctPrincipal` compares the approver key's `principal.id`, which must
+be `<issuer>#<subject>`; any other form is refused under Governed. Editing a
 policy renames the ConfigMap and rolls both Deployments — the installation-admin
 rollout D0 asks for; a Restore confirmed under the old policy and not yet
 admitted is refused `ApprovalPolicyMismatch` and is submitted again. Rolling

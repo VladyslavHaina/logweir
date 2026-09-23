@@ -537,8 +537,17 @@ The submit step says what the effective policy requires, read from `GET
 .../approval-policy`: ordinary confirmation, a governed countersignature by
 someone other than the requester (with the `logweir drill countersign`
 command), or -- unbound, unknown, or legacy mode -- today's out-of-band
-`logweir drill approve`. It is words, not a gate: routing uses the create's
-answer.
+`logweir drill approve`. Routing uses the create's answer. Two things in that
+block ARE gates, each also refused by the product API:
+
+* **Under `Governed` the step asks for a change ticket** (`#change-ticket`; D0:
+  "required in Governed"). Create refuses to send without one, and the ticket
+  travels beside the create body -- never inside `Restore.spec` -- to be signed
+  into the confirmation. An unbound namespace and legacy mode never send one.
+* **In the administrator (`localAdmin`) console an `Ordinary` binding is not
+  offered** (D0: that mode "does not expose Ordinary"). The policy read says
+  `ordinaryConfirmationAvailable: false`; the step says to use the shared
+  console and Create is disabled (`policyRefusal`).
 
 **The approvals page under a Governed binding** shows the console's
 confirmation documents verbatim in read-only fields (never parsed here, the rule

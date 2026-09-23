@@ -2842,8 +2842,24 @@ the console with its **own** `ConsoleConfirmation` key after the Restore exists:
             "name":"rst-…","uid":"…"},
  "planHash":"sha256:…","requester":{"issuer":"…","subject":"…"},
  "policy":{"name":"team-ordinary","digest":"sha256:…"},
- "issuedAt":"…","expiresAt":"…"}
+ "issuedAt":"…","expiresAt":"…","ticket":"CHG-4711"}
 ```
+
+`ticket` is the change ticket the requester gives when submitting (the create
+request's `ticket`). D0: **required under `Governed`** — a governed document
+without one is refused `AuthorizationDocumentInvalid` by the controller, at
+admission and by the runner, and the console refuses the request before
+anything exists — and optional under `Ordinary`. At most 128 printable
+characters.
+
+**Ordinary confirmation needs the shared console.** D0: the administrator
+(`localAdmin`) mode "does not expose Ordinary". Its one identity is whoever
+holds the port-forward (`urn:logweir:local-admin#admin`), not a person a
+confirmation could attest, so in an `Ordinary`-bound namespace that console
+refuses the submission `409 policy_mismatch` before creating anything, and
+`GET .../approval-policy` answers `ordinaryConfirmationAvailable: false`. A
+`Governed` namespace works in both modes: there the console only attests the
+requester, and an independent approver key decides.
 
 The console's signature attests **which authenticated principal asked** and
 nothing else. Under `Ordinary` it is the whole authorization and the console
@@ -2877,7 +2893,12 @@ between **principals**, never display names or key ids: a governed approver's
 key must carry `principal.id: <issuer>#<subject>` — the approver's own OIDC
 identity, the same string the console records as the requester — and the
 console additionally refuses an approval submitted by the requester (403,
-whatever roles the actor holds). An administrator is not a bypass.
+whatever roles the actor holds). An administrator is not a bypass. **The form is
+enforced, failing closed:** under a Governed policy an approver key whose
+`principal.id` is not `<non-empty issuer>#<non-empty subject>` (an email, a
+display name, an `install:` id) is refused `SelfApprovalRefused`, because a
+principal that cannot be compared with the requester cannot be shown to differ
+from it.
 
 **Keys to add to the namespace's `TrustPolicy`.** The console's public key with
 usage `ConsoleConfirmation` (`GET /api/v1/namespaces/{ns}/approval-policy`
@@ -2905,7 +2926,12 @@ document every namespace is `legacy-governed-v1` and every existing `Approval`
 and signed archive verifies exactly as before. Binding a namespace applies to
 Restores not yet admitted: a Restore created before the binding whose v1
 Approval was not yet admitted is refused `ApprovalPolicyMismatch` and must be
-submitted again through the console; a run already admitted continues. Order:
+submitted again through the console; a run already admitted continues.
+**A policy change is a rollout, and it may need resubmits:** while the console
+Deployment rolls, an old console pod can still sign under the old policy
+digest, and the controller refuses those documents `ApprovalPolicyMismatch`
+(terminal, by D0's rule). A Restore submitted during a policy rollout may
+therefore have to be submitted again once the rollout completes. Order:
 CRDs (the `Approval` status gains `authorization`) → controller and runner
 image → console with its confirmation key → the `TrustPolicy` keys → the
 binding.

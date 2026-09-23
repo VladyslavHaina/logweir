@@ -720,6 +720,7 @@ const APPROVAL_POLICY = shapeOf(
   {
     namespace: str, name: str, mode: str, legacy: bool,
     requireDistinctPrincipal: bool, installationDigest: str,
+    ordinaryConfirmationAvailable: bool, ticketRequired: bool,
   },
   { maxAgeSeconds: int, digest: str, confirmationKeyId: str },
 );
@@ -962,6 +963,9 @@ const CREATE_RESTORE_REQUEST = shapeOf(
   {
     sourceDestinationRef: objectOf(NAME_REF),
     evidenceDestinationRef: objectOf(NAME_REF),
+    // PLAT-19.2: the change ticket the console signs; required under a
+    // Governed policy (D0).
+    ticket: str,
   },
 );
 

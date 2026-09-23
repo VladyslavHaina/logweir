@@ -2271,6 +2271,13 @@ function requestBody(plural, object) {
     // from `target.topicNaming.prefix` and answers 422 when the preview and
     // the submission disagree. It is carried only when it is there, so a
     // caller that predates it sends exactly what it always did.
+    // PLAT-19.2: the change ticket rides beside the create body the same way
+    // -- a field of the REQUEST, signed into the authorization document, never
+    // of `Restore.spec`.
+    const ticket = (object || {}).ticket;
+    if (typeof ticket === "string" && ticket.length > 0) {
+      body.ticket = ticket;
+    }
     const mapping = (object || {}).topicMapping;
     if (Array.isArray(mapping) && mapping.length > 0) {
       body.topicMapping = mapping.map((row) => ({
@@ -2286,11 +2293,17 @@ function requestBody(plural, object) {
 /** The create body without its product-API-only mapping declaration. Returns
  *  the SAME object when there is none, so every other create is untouched. */
 function withoutTopicMapping(object) {
-  if (object === null || typeof object !== "object" || object.topicMapping === undefined) {
+  if (
+    object === null || typeof object !== "object" ||
+    (object.topicMapping === undefined && object.ticket === undefined)
+  ) {
     return object;
   }
   const copy = Object.assign({}, object);
   delete copy.topicMapping;
+  // The change ticket is a product-API request field too (PLAT-19.2); legacy
+  // mode signs nothing and records the ticket with `logweir drill approve`.
+  delete copy.ticket;
   return copy;
 }
 
