@@ -11591,6 +11591,22 @@ LOCK_CATALOG = "lock-cat"
 LOCK_POLICY = "keep-lock"
 LOCK_POINTS = ("lock-1", "lock-2", "lock-3")
 LOCK_PROBE_KEY = "probe/held-object"
+LOCK_DELETE_USER = f"{OWNER_TAG}lockdel"
+LOCK_DELETE_POLICY = f"{OWNER}-lockdel"
+LOCK_DELETE_SECRET = f"{OWNER}-lockdel-s3"
+
+
+def delete_only_policy(bucket: str, prefix: str) -> str:
+    """The retention principal: read, list and delete under the archive prefix."""
+    return json.dumps({
+        "Version": "2012-10-17",
+        "Statement": [
+            {"Effect": "Allow", "Action": ["s3:ListBucket", "s3:GetBucketLocation"],
+             "Resource": [f"arn:aws:s3:::{bucket}"]},
+            {"Effect": "Allow", "Action": ["s3:GetObject", "s3:DeleteObject"],
+             "Resource": [f"arn:aws:s3:::{bucket}/{prefix}/*"]},
+        ],
+    })
 
 
 def mc_json(*args: str, check_rc: bool = False) -> list[dict[str, Any]]:
@@ -11607,12 +11623,27 @@ def mc_json(*args: str, check_rc: bool = False) -> list[dict[str, Any]]:
 
 
 def versions_under(bucket: str, prefix: str) -> list[dict[str, Any]]:
-    """Every VERSION under a prefix, delete markers included."""
-    return [{"key": r.get("key"), "versionId": r.get("versionId"),
+    """Every VERSION under a prefix, delete markers included, keyed from the
+    bucket root, with `isLatest` derived.
+
+    `mc ls --versions --json` reports keys RELATIVE to the path it was given
+    and never sets `isLatest` (measured on the lab's `mc` 2025-08-13): the
+    newest version of a key is the one with the highest `versionOrdinal`.
+    """
+    rows = [{"key": prefix + str(r.get("key") or ""), "versionId": r.get("versionId"),
              "isDeleteMarker": bool(r.get("isDeleteMarker")),
-             "isLatest": bool(r.get("isLatest")), "size": r.get("size")}
+             "ordinal": int(r.get("versionOrdinal") or 0), "size": r.get("size")}
             for r in mc_json("ls", "--recursive", "--versions", f"local/{bucket}/{prefix}")
             if r.get("status") == "success"]
+    return mark_latest(rows)
+
+
+def mark_latest(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """`isLatest` on each version row: the highest ordinal of its key."""
+    top: dict[str, int] = {}
+    for r in rows:
+        top[r["key"]] = max(top.get(r["key"], 0), int(r.get("ordinal") or 0))
+    return [dict(r, isLatest=int(r.get("ordinal") or 0) == top[r["key"]]) for r in rows]
 
 
 def provider_lock_semantics(bucket: str) -> dict[str, Any]:
@@ -11699,6 +11730,7 @@ def object_lock() -> None:
     """PLAT-16.2's provider object-lock half, through the controller's own Job."""
     evidence: list[str] = []
     created_bucket = False
+    minted_user = False
     try:
         mb = run(KN + ["exec", MC_POD, "--", "mc", "mb", "--with-lock", f"local/{BUCKET_LOCK}"],
                  check=False, timeout=120)
@@ -11736,11 +11768,12 @@ def object_lock() -> None:
                  lambda o: condition(o, "Valid").get("status") == "True",
                  seconds=180, what="Valid=True")
         points = []
+        # FRESH EVERY RUN: the bucket is new, so a Backup CR left by an earlier
+        # run names a set that is not in it.
         for name in LOCK_POINTS:
-            if get_opt("backup", name) is None:
-                points.append(backup_facts(run_backup(name, LOCK_DEST, TOPICS[:1])))
-            else:
-                points.append(backup_facts(get("backup", name)))
+            if get_opt("backup", name) is not None:
+                run(KN + ["delete", "backup", name, "--wait=true"])
+            points.append(backup_facts(run_backup(name, LOCK_DEST, TOPICS[:1])))
         catalog = fresh_catalog(LOCK_CATALOG, LOCK_DEST)
         entries = view_entries(catalog)
         ordered = sorted(entries, key=lambda e: e.get("recoveryPointAtMs") or 0)
@@ -11752,11 +11785,14 @@ def object_lock() -> None:
             return
         held, control = ordered[0], ordered[1]
         held_set = f"{DEST_PREFIX}/{held['backupId']}/"
-        hold = mc_json("legalhold", "set", "--recursive", f"local/{BUCKET_LOCK}/{held_set}")
-        hold_info = mc_json("legalhold", "info", "--recursive", f"local/{BUCKET_LOCK}/{held_set}")
-        hold_was_on = bool(hold_info) and all(
-            str(r.get("legalhold", r.get("status", ""))).upper() in {"ON", "SUCCESS"}
-            for r in hold_info) and any("ON" in json.dumps(r).upper() for r in hold_info)
+        # ONE OBJECT AT A TIME: `mc legalhold set|info --recursive --json` print
+        # nothing on the lab's `mc`, so a recursive call is a claim nobody reads.
+        held_keys = [o["key"] for o in objects(BUCKET_LOCK, held_set)]
+        hold = [mc_json("legalhold", "set", f"local/{BUCKET_LOCK}/{key}") for key in held_keys]
+        hold_info = [row for key in held_keys
+                     for row in mc_json("legalhold", "info", f"local/{BUCKET_LOCK}/{key}")]
+        hold_was_on = bool(held_keys) and len(hold_info) == len(held_keys) and all(
+            r.get("legalhold") == "ON" for r in hold_info)
         versions_before = versions_under(BUCKET_LOCK, held_set)
         evidence.append(artifact("lock/02-hold.json", {
             "heldPoint": held["pointId"], "heldSet": held_set, "controlPoint": control["pointId"],
@@ -11764,10 +11800,17 @@ def object_lock() -> None:
 
         if get_opt("retentionpolicy", LOCK_POLICY) is not None:
             run(KN + ["delete", "retentionpolicy", LOCK_POLICY, "--wait=true"])
+        # THE DELETE CREDENTIAL IS ITS OWN PRINCIPAL. `docs/kubernetes.md` §7f's
+        # two-credential rule: the controller refuses (`EvidenceGrantUnusable`,
+        # no Job) a policy whose delete Secret is the destination's
+        # `evidenceWrite` Secret — measured on the first run of this phase.
+        mint_minio_user(LOCK_DELETE_USER, LOCK_DELETE_POLICY,
+                        delete_only_policy(BUCKET_LOCK, DEST_PREFIX), LOCK_DELETE_SECRET)
+        minted_user = True
         created = apply(retention_policy(
             LOCK_POLICY, LOCK_DEST, LOCK_CATALOG, mode="Enforce",
             rules={"keepLast": 1, "minUsablePoints": 1},
-            enforcement={"credentialSecretRef": {"name": "logweir-s3"},
+            enforcement={"credentialSecretRef": {"name": LOCK_DELETE_SECRET},
                          "schedule": "* * * * *", "requireApprovedPlan": False,
                          "deadlineSeconds": 300, "maxDeletionsPerRun": 10,
                          "maxObjectsPerRun": 200}))
@@ -11832,6 +11875,9 @@ def object_lock() -> None:
             run(KN + ["delete", "retentionpolicy", LOCK_POLICY, "--ignore-not-found=true",
                       "--wait=true"], check=False)
             evidence.append(artifact("lock/99-cleanup.json", clear_lock_bucket(BUCKET_LOCK)))
+        if minted_user:
+            evidence.append(artifact("lock/99-minio-user-cleanup.json",
+                                     remove_minio_user(LOCK_DELETE_USER, LOCK_DELETE_POLICY)))
 
 
 # ---------------------------------------------------------------------------
