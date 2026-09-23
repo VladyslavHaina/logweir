@@ -424,6 +424,12 @@ fn fixture(routes: Vec<Route>) -> Fixture {
     }
 }
 
+/// An empty `TrustPolicy` list: no policy governs the namespace, so the
+/// catalog resolves the synthesised `legacy-roster-v1` from the roster route.
+fn no_trust_policies() -> String {
+    json!({"apiVersion": "logweir.dev/v1alpha1", "kind": "TrustPolicyList", "metadata": {"resourceVersion": "1"}, "items": []}).to_string()
+}
+
 fn route(method: &'static str, path_suffix: &'static str, body: String) -> Route {
     Route {
         method,
@@ -561,6 +567,7 @@ fn harvest_routes(
 ) -> Vec<Route> {
     vec![
         route("GET", "/trustrosters/default", roster_body()),
+        route("GET", "/trustpolicies", no_trust_policies()),
         route(
             "GET",
             job_path(stem),
@@ -599,6 +606,7 @@ async fn a_second_sync_request_is_harvested_and_publishes_a_new_view() {
     // ---- pass 1: the second request starts its own Job ------------------
     let f1 = fixture(vec![
         route("GET", "/trustrosters/default", roster_body()),
+        route("GET", "/trustpolicies", no_trust_policies()),
         route(
             "GET",
             job_path(first),
@@ -700,6 +708,7 @@ async fn the_started_record_names_every_field_of_last_sync_job() {
     let stem = leak(request_stem("token-1"));
     let f = fixture(vec![
         route("GET", "/trustrosters/default", roster_body()),
+        route("GET", "/trustpolicies", no_trust_policies()),
         route("GET", "/backupdestinations/archive", destination_body()),
         route("POST", "/configmaps", empty_config_map()),
         route("POST", "/jobs", created_job(stem, JOB_UID_1)),
@@ -768,6 +777,7 @@ async fn the_harvested_record_names_every_field_of_last_sync_job() {
     let bare = leak(format!("{stem}-bare"));
     let f2 = fixture(vec![
         route("GET", "/trustrosters/default", roster_body()),
+        route("GET", "/trustpolicies", no_trust_policies()),
         route(
             "GET",
             job_path(bare),
@@ -886,6 +896,7 @@ async fn a_completed_sync_serves_its_interval_slot_and_synced_stays_true() {
     let published_at = at(2026, 9, 16, 12, 2, 0);
     let f = fixture(vec![
         route("GET", "/trustrosters/default", roster_body()),
+        route("GET", "/trustpolicies", no_trust_policies()),
         route(
             "GET",
             job_path(stem),
@@ -993,6 +1004,7 @@ async fn a_failed_sync_spends_its_slot_and_is_not_re_created_every_pass() {
     );
     let f = fixture(vec![
         route("GET", "/trustrosters/default", roster_body()),
+        route("GET", "/trustpolicies", no_trust_policies()),
         route("GET", job_path(stem), job),
         status_route(),
     ]);
@@ -1031,6 +1043,7 @@ async fn a_failed_sync_spends_its_slot_and_is_not_re_created_every_pass() {
     let periodic = leak(slot_stem(at(2026, 9, 16, 13, 0, 0)));
     let f2 = fixture(vec![
         route("GET", "/trustrosters/default", roster_body()),
+        route("GET", "/trustpolicies", no_trust_policies()),
         route(
             "GET",
             job_path(stem),
@@ -1079,6 +1092,7 @@ async fn the_next_slot_starts_one_sync_and_it_is_harvested() {
     // ---- the slot rolls over: one Job, named after the slot ---------------
     let f1 = fixture(vec![
         route("GET", "/trustrosters/default", roster_body()),
+        route("GET", "/trustpolicies", no_trust_policies()),
         route(
             "GET",
             job_path(previous),
@@ -1165,6 +1179,7 @@ async fn a_stale_finished_job_is_never_harvested_twice() {
     let published_at = at(2026, 9, 16, 12, 2, 0);
     let f = fixture(vec![
         route("GET", "/trustrosters/default", roster_body()),
+        route("GET", "/trustpolicies", no_trust_policies()),
         route(
             "GET",
             job_path(stem),

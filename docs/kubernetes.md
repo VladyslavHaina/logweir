@@ -1168,6 +1168,38 @@ listed*: a key the trust source lists with `state: Revoked` is reported
 point is `NotAttempted` — an installation that holds no key has not disproved
 anything.
 
+**The trust source is the one bound to the catalog's namespace.** The controller
+resolves it exactly as it resolves the trust an `Approval` in that namespace is
+verified against (and the restore preflight re-judges a catalog point's signer
+against): the `TrustPolicy` whose `spec.namespaces` names the namespace, else the
+`default: true` policy, else `legacy-roster-v1` synthesised from
+`TrustRoster/default`. Only the policy's `EvidenceSigning` keys are mounted and
+consulted, and only those whose PEM parses and hashes to the declared `keyId`;
+each is judged by its lifecycle as `logweir_core::trust::decide` judges it — an
+`Active` key verifies what it signed inside its window (`VerifiedHistorical` once
+`notAfter` has passed); a `Retired` key verifies what it signed at or before
+`retiredAt` as `VerifiedHistorical`, and a later signing claim is `Invalid`; a key
+revoked for `KeyCompromise` makes everything it signed `Revoked`, and a
+`Superseded`/`Unspecified` revocation is a retirement at `revocationEffectiveFrom`.
+A namespace two policies claim resolves to nothing: every point is `NotAttempted`
+and `TrustAvailable=False/TrustPolicyConflict` names the policies. A roster-only
+namespace mounts the same bundle and reaches the same verdicts as builds before
+this. A `TrustPolicy` event wakes every catalog in the namespaces it could govern
+(the same trigger the `Approval` controller carries, backed off like every
+controller watch), so `TrustAvailable` and the NEXT sync's bundle and verdicts
+follow a key change at once. **A published view is not re-classified in place:**
+its rows keep the verdicts of the sync that wrote them until the next sync (or
+`spec.syncRequest`), which is why a restore from a catalog point re-judges the
+row's signer against the current trust in preflight and again in the runner.
+Builds before this read only `TrustRoster/default`, so a point signed under a
+`TrustPolicy` key was `UntrustedSigner` (or `NotAttempted` with no roster) and
+never offered, and a policy's retirement or revocation never reached the view
+(defect CATALOG-TRUST-ROSTER-ONLY). **Upgrade:** nothing to migrate; the next sync
+of a policy-governed catalog mounts the policy's keys (a new trust `ConfigMap`,
+named by the key set) and its points are re-classified then — request one with
+`spec.syncRequest` to see it at once. **Rollback:** an older controller reads the
+roster again and classifies as before.
+
 A sync also does not re-derive the facts it displays. The signed receipt is the
 verification root: the point id is `sha256` of the receipt bytes, and a **restore
 re-verifies its point at execution**, so nothing here is evidence — it is an

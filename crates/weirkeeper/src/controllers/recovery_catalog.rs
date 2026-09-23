@@ -35,10 +35,14 @@
 //! The Job reads the archive, so it decides availability and whether a DSSE
 //! signature verified. **Trust is decided here**, once, in
 //! [`crate::catalog_view::classify_verification`], against
-//! [`crate::catalog_view::TrustView`] — today synthesised from the
-//! `TrustRoster`, which is the trust source in use. D3 W1/W10 replace that one
-//! constructor with the bound `TrustPolicy`, and nothing else in this file
-//! moves.
+//! [`crate::catalog_view::TrustView`] — the trust bound to the catalog's
+//! namespace, resolved by [`crate::trust::resolve`] exactly as the `Approval`
+//! controller and the restore preflight resolve it: the governing
+//! `TrustPolicy`, else the synthesised `legacy-roster-v1`. A `TrustPolicy`
+//! event wakes every catalog in the namespaces it could govern (the same
+//! re-trust trigger the `Approval` controller carries), so a new, retired or
+//! revoked key reaches `TrustAvailable` and the next sync's bundle and
+//! classification without waiting for the requeue.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -49,6 +53,7 @@ use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::ConfigMap;
 use kube::api::{Api, Patch, PatchParams, PostParams};
 use kube::runtime::controller::Action;
+use kube::runtime::reflector::{self, ObjectRef};
 use kube::runtime::{watcher, Controller};
 use kube::{Resource as _, ResourceExt as _};
 use serde_json::{json, Value};
@@ -127,6 +132,11 @@ pub const REASON_TRUST_MATERIAL_PRESENT: &str = "TrustMaterialPresent";
 /// `TrustAvailable=False`: nothing here can verify anything, and every point is
 /// `NotAttempted` rather than `Invalid`.
 pub const REASON_NO_TRUST_MATERIAL: &str = "NoTrustMaterial";
+/// `TrustAvailable=False`: two `TrustPolicy` objects claim this namespace, so
+/// it resolves to no trust ([`crate::trust::REASON_TRUST_POLICY_CONFLICT`],
+/// the reason an `Approval` there is refused with). Every point is
+/// `NotAttempted`.
+pub const REASON_TRUST_POLICY_CONFLICT: &str = crate::trust::REASON_TRUST_POLICY_CONFLICT;
 
 /// Every reason this reconciler can write. One list, so the
 /// `metav1.Condition.reason` regex test cannot miss one.
@@ -146,6 +156,7 @@ pub const CONDITION_REASONS: &[&str] = &[
     REASON_VIEW_FRESH,
     REASON_TRUST_MATERIAL_PRESENT,
     REASON_NO_TRUST_MATERIAL,
+    REASON_TRUST_POLICY_CONFLICT,
 ];
 
 /// What `Ready=False/LegacyArchiveUnsupported` says.
@@ -310,7 +321,7 @@ pub async fn reconcile_catalog(
         return Ok(refused_outcome(REASON_DESTINATION_UNUSABLE));
     };
 
-    let trust = trust_view(ctx.client).await?;
+    let trust = trust_view(ctx.client, &namespace).await?;
     let mut pass = Pass {
         catalog,
         name,
@@ -339,17 +350,24 @@ fn refused_outcome(reason: &'static str) -> Outcome {
     }
 }
 
-/// The trust source, projected — **the seam D3 W1/W10 replaces**.
+/// The trust bound to the catalog's namespace, projected
+/// (CATALOG-TRUST-ROSTER-ONLY).
 ///
-/// `TrustRoster` is the trust source in use today, so this is where it is read.
-/// When `TrustPolicy` resolution lands, this function resolves the policy bound
-/// to the catalog's namespace instead and everything downstream is unchanged:
-/// [`view::TrustView`] already carries `Retired` and `Revoked`, and
-/// [`view::classify_verification`] already produces `VerifiedHistorical` and
-/// `Revoked` from them.
-async fn trust_view(client: &kube::Client) -> Result<TrustView, ReconcileError> {
-    let spec = super::roster_spec(client).await?;
-    Ok(TrustView::from_roster(&spec))
+/// [`crate::trust::resolve`] — THE resolution: the `Approval` controller
+/// verifies against it, the restore preflight re-judges a catalog point's
+/// signer against it, and the runner's evidence keyring is rendered from it.
+/// A namespace a `TrustPolicy` governs is judged by that policy's
+/// `EvidenceSigning` keys, with their `Retired`/`Revoked` states; one no
+/// policy governs falls back to the synthesised `legacy-roster-v1`, projected
+/// exactly as the roster was before. Builds before this read only the
+/// `TrustRoster`, so a point signed under a `TrustPolicy` key was never
+/// `Verified` and a policy's retirement or revocation never reached the view.
+///
+/// A failed read is a reconcile error and the pass is retried under
+/// [`error_policy`]'s fixed delay — the same answer a failed roster read gave.
+async fn trust_view(client: &kube::Client, namespace: &str) -> Result<TrustView, ReconcileError> {
+    let resolution = crate::trust::resolve(client, namespace).await?;
+    Ok(TrustView::from_resolution(&resolution))
 }
 
 struct Pass<'a> {
@@ -840,10 +858,12 @@ impl Pass<'_> {
     /// The trust source's generation — what makes the bundle's name change when
     /// the keys do.
     ///
-    /// The digest of the key ids and nothing else: the roster carries a
-    /// `metadata.generation`, but this controller reads its SPEC through
-    /// [`super::roster_spec`] and a digest over what was actually projected is
-    /// the number that cannot disagree with the bytes.
+    /// The digest of the key ids and nothing else: a `TrustPolicy` (and the
+    /// roster) carries a `metadata.generation`, but it moves on edits that do
+    /// not change the bundle — a retirement, a revocation — and a digest over
+    /// what was actually projected is the number that cannot disagree with the
+    /// bytes. A key's STATE is not in the bundle (it is public material only);
+    /// it is applied here, at classification.
     fn trust_generation(&self) -> i64 {
         let joined = self
             .trust
@@ -1486,36 +1506,7 @@ impl Pass<'_> {
                     "the view is within two sync intervals of its last refresh".to_string()
                 }),
             },
-            Condition {
-                r#type: CONDITION_TRUST_AVAILABLE.to_string(),
-                status: if self.trust.is_empty() {
-                    "False"
-                } else {
-                    "True"
-                }
-                .to_string(),
-                observed_generation: Some(generation),
-                last_transition_time: Some(self.ctx.now),
-                reason: Some(
-                    if self.trust.is_empty() {
-                        REASON_NO_TRUST_MATERIAL
-                    } else {
-                        REASON_TRUST_MATERIAL_PRESENT
-                    }
-                    .to_string(),
-                ),
-                message: Some(if self.trust.is_empty() {
-                    "this installation holds no signing key material, so every point is \
-                     NotAttempted and nothing here is presented as verified evidence"
-                        .to_string()
-                } else {
-                    format!(
-                        "{} signing key(s) from {} are available to verify with",
-                        self.trust.keys.len(),
-                        self.trust.source
-                    )
-                }),
-            },
+            trust_available(&self.trust, generation, self.ctx.now),
         ];
         rows.into_iter()
             .map(|next| {
@@ -1583,6 +1574,45 @@ impl Pass<'_> {
 // ---------------------------------------------------------------------------
 // Small pure helpers
 // ---------------------------------------------------------------------------
+
+/// The `TrustAvailable` condition for this pass's resolved trust.
+///
+/// THREE ANSWERS, NOT TWO: keys to verify with (`True`), a namespace two
+/// `TrustPolicy` objects contest (`False/TrustPolicyConflict`, naming them —
+/// trust IS configured, it just does not resolve), and no key material at all
+/// (`False/NoTrustMaterial`). Reporting a conflict as "no key material" would
+/// send an operator looking for a missing roster in a cluster that has two
+/// policies.
+#[must_use]
+pub fn trust_available(trust: &TrustView, generation: i64, now: DateTime<Utc>) -> Condition {
+    let (status, reason, message) = match (&trust.unresolved, trust.is_empty()) {
+        (Some(conflict), _) => ("False", REASON_TRUST_POLICY_CONFLICT, conflict.clone()),
+        (None, true) => (
+            "False",
+            REASON_NO_TRUST_MATERIAL,
+            "this installation holds no signing key material, so every point is NotAttempted \
+             and nothing here is presented as verified evidence"
+                .to_string(),
+        ),
+        (None, false) => (
+            "True",
+            REASON_TRUST_MATERIAL_PRESENT,
+            format!(
+                "{} signing key(s) from {} are available to verify with",
+                trust.keys.len(),
+                trust.source
+            ),
+        ),
+    };
+    Condition {
+        r#type: CONDITION_TRUST_AVAILABLE.to_string(),
+        status: status.to_string(),
+        observed_generation: Some(generation),
+        last_transition_time: Some(now),
+        reason: Some(reason.to_string()),
+        message: Some(message),
+    }
+}
 
 /// Whether `record` is the record of **this Job's** completion, and therefore
 /// whether this Job's result has already been read.
@@ -1777,12 +1807,36 @@ fn error_policy(catalog: Arc<RecoveryCatalog>, err: &ReconcileError, _ctx: Arc<C
     Action::requeue(std::time::Duration::from_secs(ERROR_REQUEUE_SECONDS))
 }
 
+/// The `RecoveryCatalog`s a `TrustPolicy` event should enqueue — the re-trust
+/// trigger the `Approval`, `Backup` and `Restore` controllers carry.
+///
+/// A catalog's `TrustAvailable`, its trust bundle and every point its next sync
+/// classifies are a function of the namespace's RESOLVED trust, so a policy
+/// edit — a new key, a retirement, a revocation — must reach it now, not at the
+/// idle requeue. `objects` is this controller's OWN store (zero API calls),
+/// and the scope is the UNION of what the policy bound before and after the
+/// event, so an edit that NARROWS still wakes the namespace it stopped
+/// governing (see [`crate::trust::PolicyScopeMemory`]).
+fn policy_targets(
+    objects: &reflector::Store<RecoveryCatalog>,
+    scopes: &crate::trust::PolicyScopeMemory,
+    policy: &crate::crds::trust_policy::TrustPolicy,
+) -> Vec<ObjectRef<RecoveryCatalog>> {
+    let scope = scopes.observe(policy);
+    crate::verification::targets_in_scope(objects.state(), &scope)
+}
+
 /// Run the `RecoveryCatalog` controller until the process ends.
 ///
 /// `.owns(jobs, …)` so a sync Job finishing wakes the catalog that owns it
 /// rather than waiting out the requeue — the same arrangement the `Backup`,
 /// `Restore` and `KafkaCluster` controllers have, and it needs no verb this
-/// role does not already grant.
+/// role does not already grant. `.watches(TrustPolicy)` is the re-trust
+/// trigger ([`policy_targets`]); like every trigger watch `Controller` runs it
+/// is backed off (`watcher::default_backoff`), so a refused or failing
+/// `TrustPolicy` LIST is retried with bounded exponential delay rather than in
+/// a tight loop. No reflector of its own: [`trust_view`] resolves trust live on
+/// every pass, so the trigger only has to say WHEN.
 pub fn controller(
     client: kube::Client,
     runner_image: crate::job::RunnerImage,
@@ -1815,9 +1869,16 @@ fn controller_in(
         archive: None,
         runner_image,
     });
+    let policy_api: Api<crate::crds::trust_policy::TrustPolicy> = Api::all(ctx.client.clone());
+    let scopes = Arc::new(crate::trust::PolicyScopeMemory::default());
     async move {
-        Controller::new(api, watcher::Config::default())
+        let controller = Controller::new(api, watcher::Config::default());
+        let objects = controller.store();
+        controller
             .owns(jobs, watcher::Config::default())
+            .watches(policy_api, watcher::Config::default(), move |policy| {
+                policy_targets(&objects, &scopes, &policy)
+            })
             .run(reconcile, error_policy, ctx)
             .for_each(|_| std::future::ready(()))
             .await;

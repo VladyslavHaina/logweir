@@ -40,9 +40,11 @@
 //! whether a key is one this installation accepts, whether it is retired or
 //! revoked, is a question about the trust source and the controller is what
 //! holds that. [`classify_verification`] is the one place the two meet, and
-//! [`TrustView`] is the seam D3 W1/W10 replaces when `TrustPolicy` resolution
-//! lands (today it is synthesised from the `TrustRoster`, the trust source in
-//! use).
+//! [`TrustView`] is the trust bound to the catalog's namespace, projected by
+//! [`TrustView::from_resolution`] from [`crate::trust::resolve`] — the same
+//! resolution the `Approval` controller, the restore preflight and the runner's
+//! keyring are built from, with the synthesised `legacy-roster-v1` as the
+//! fallback when no `TrustPolicy` governs the namespace.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -478,9 +480,8 @@ impl ControllerRefusals {
 /// What a trust source says about one key.
 ///
 /// `Retired` and `Revoked` are the two D3 §7.4 states a `TrustRoster` cannot
-/// express, which is exactly why `TrustPolicy` exists. They are declared here
-/// so the classification below is complete TODAY and the day W1/W10 land only
-/// [`TrustView::from_roster`] changes.
+/// express, which is exactly why `TrustPolicy` exists.
+/// [`TrustView::from_resolved`] produces them from a bound policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrustKeyState {
     /// Accepted for new evidence and for old.
@@ -513,26 +514,37 @@ pub struct TrustKey {
 
 /// The trust source, projected into the one shape this view needs.
 ///
-/// # THE SEAM D3 W1/W10 OWNS
+/// # Built from the namespace's RESOLVED trust (CATALOG-TRUST-ROSTER-ONLY)
 ///
-/// Today this is synthesised from the cluster-scoped `TrustRoster` —
-/// [`TrustView::from_roster`] — because that is the trust source in use. When
-/// `TrustPolicy` resolution lands, a second constructor takes the bound policy
-/// and nothing else in this file moves: `state` stops being `Active` for every
-/// key, and `Retired`/`Revoked` start being produced. The classification below
-/// already handles all three, and
-/// `a_retired_key_verifies_evidence_it_signed_while_valid` already asserts the
-/// behaviour, so the seam has a test before it has an implementation.
+/// [`TrustView::from_resolution`] projects what [`crate::trust::resolve`]
+/// answers for the catalog's namespace: the `TrustPolicy` that governs it, or
+/// the synthesised `legacy-roster-v1` when none does. That is the resolution
+/// the `Approval` controller verifies against, the restore preflight re-judges
+/// a catalog point's signer against, and the runner's evidence keyring is
+/// rendered from — so a point signed under a `TrustPolicy` key is `Verified`
+/// here too, and a retired or revoked key is reflected. Builds before this
+/// read only the `TrustRoster` ([`TrustView::from_roster`], kept for its
+/// tests), so a `TrustPolicy`-signed point was `UntrustedSigner` or
+/// `NotAttempted` in the view and never offered.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TrustView {
     /// The keys, in the source's own order.
     pub keys: Vec<TrustKey>,
     /// Which source produced this — for a status message, never for a decision.
     pub source: String,
+    /// Why the namespace resolved to NO trust although trust is configured —
+    /// two `TrustPolicy` objects claim it ([`crate::trust::Resolution::Conflict`]).
+    /// `keys` is then empty, every point is `NotAttempted`, and
+    /// `TrustAvailable=False` names the conflict rather than "no key material".
+    pub unresolved: Option<String>,
 }
 
 impl TrustView {
-    /// The `TrustRoster`'s signing keys, every one of them `Active`.
+    /// The `TrustRoster`'s signing keys, every one of them `Active` — the
+    /// projection a roster-only namespace had before [`Self::from_resolution`]
+    /// was wired in, and the reference `from_resolved` reproduces for the
+    /// synthesised `legacy-roster-v1` (`tests/catalog_controller.rs`,
+    /// `a_roster_only_namespace_projects_exactly_as_the_roster_did`).
     ///
     /// `signingKeys` AND NOT `approverKeys`: D3 §7.3's usage split says a key
     /// that may AUTHORISE a restore is not thereby a key that may ATTEST to
@@ -559,6 +571,102 @@ impl TrustView {
                 })
                 .collect(),
             source: TRUST_SOURCE_ROSTER.to_string(),
+            unresolved: None,
+        }
+    }
+
+    /// The trust [`crate::trust::resolve`] answered for the catalog's
+    /// namespace, projected.
+    ///
+    /// * [`Resolution::Trust`](crate::trust::Resolution::Trust) →
+    ///   [`Self::from_resolved`].
+    /// * [`Resolution::Conflict`](crate::trust::Resolution::Conflict) → NO
+    ///   keys and [`Self::unresolved`] naming the contesting policies: a
+    ///   namespace claimed twice resolves to nothing (the module header of
+    ///   [`crate::trust`] says why), and the catalog verifies nothing there
+    ///   rather than picking a policy by sort order.
+    /// * [`Resolution::Unconfigured`](crate::trust::Resolution::Unconfigured)
+    ///   → no keys, under the roster's name — exactly what an absent
+    ///   `TrustRoster` produced before `TrustPolicy` resolution was wired in.
+    #[must_use]
+    pub fn from_resolution(resolution: &crate::trust::Resolution) -> Self {
+        match resolution {
+            crate::trust::Resolution::Trust(trust) => Self::from_resolved(trust),
+            crate::trust::Resolution::Conflict {
+                namespace,
+                policies,
+            } => Self {
+                keys: Vec::new(),
+                source: String::new(),
+                unresolved: Some(format!(
+                    "the namespace {namespace} is claimed by more than one TrustPolicy ({}), so \
+                     it resolves to no trust and no point here is presented as verified; \
+                     remove it from all but one policy",
+                    policies.join(", ")
+                )),
+            },
+            crate::trust::Resolution::Unconfigured => Self {
+                keys: Vec::new(),
+                source: TRUST_SOURCE_ROSTER.to_string(),
+                unresolved: None,
+            },
+        }
+    }
+
+    /// One namespace's resolved trust, projected: its `EvidenceSigning` keys
+    /// only, each with the state and acceptance bound [`classify_verification`]
+    /// reads.
+    ///
+    /// # The projection, key by key — [`logweir_core::trust::decide`]'s rules
+    ///
+    /// * `Active` → `Active`, bounded by `notAfter` (a key past it verifies
+    ///   what it signed inside it, as `VerifiedHistorical`).
+    /// * `Retired` → `Retired`, bounded by `accepted_through()` — the earlier
+    ///   of `notAfter` and `retiredAt` — so evidence signed after the
+    ///   retirement is not historical.
+    /// * `Revoked` for `KeyCompromise` → `Revoked`: nothing it signed is
+    ///   accepted, whenever it claims to have signed it.
+    /// * `Revoked` for `Superseded`/`Unspecified` → `Retired` at the
+    ///   revocation's effective instant (D3 §7.4: "treated as retirement"),
+    ///   which is what `decide` answers for the same key.
+    ///
+    /// # Which keys
+    ///
+    /// `EvidenceSigning` and nothing else — a key that may AUTHORISE a restore
+    /// is not thereby a key that may ATTEST to one (D3 §7.3). From a real
+    /// policy, only USABLE keys (the PEM parses and hashes to its declared id):
+    /// the runner is handed exactly those (`restore::evidence_keyring_bytes`),
+    /// and a key it cannot verify with verifies nothing here either.
+    ///
+    /// From the synthesised `legacy-roster-v1`, every `signingKeys` entry,
+    /// `Active`, with `notAfter` as the roster wrote it — [`Self::from_roster`]'s
+    /// projection, so a roster-only installation mounts the same bundle and
+    /// classifies every point exactly as before.
+    #[must_use]
+    pub fn from_resolved(trust: &crate::trust::ResolvedTrust) -> Self {
+        use logweir_core::trust::KeyUsage;
+        let legacy = trust.source.is_legacy();
+        let keys = trust
+            .keys
+            .iter()
+            .filter(|k| k.trust.has_usage(KeyUsage::EvidenceSigning))
+            .filter(|k| legacy || k.is_usable())
+            .map(|k| {
+                if legacy {
+                    legacy_trust_key(k)
+                } else {
+                    policy_trust_key(k)
+                }
+            })
+            .collect();
+        Self {
+            keys,
+            source: if legacy {
+                TRUST_SOURCE_ROSTER.to_string()
+            } else {
+                format!("TrustPolicy/{}", trust.source.name())
+            },
+            unresolved: None,
         }
     }
 
@@ -582,6 +690,45 @@ impl TrustView {
 
 /// [`TrustView::source`] for the legacy roster.
 pub const TRUST_SOURCE_ROSTER: &str = "TrustRoster/default";
+
+/// One synthesised `legacy-roster-v1` key, as [`TrustView::from_roster`]
+/// projects the same roster entry: `Active`, and `notAfter` absent when the
+/// roster wrote none (the synthesis fills [`crate::trust::legacy_not_after`]).
+/// The roster's display-only `subject` is not carried by the synthesis and is
+/// read by nothing here.
+fn legacy_trust_key(key: &crate::trust::ResolvedKey) -> TrustKey {
+    TrustKey {
+        key_id: key.trust.key_id.clone(),
+        spki_pem: key.spki_pem.clone(),
+        subject: None,
+        not_after: (key.trust.not_after != crate::trust::legacy_not_after())
+            .then_some(key.trust.not_after),
+        state: TrustKeyState::Active,
+    }
+}
+
+/// One `TrustPolicy` key — see [`TrustView::from_resolved`] for the rules.
+fn policy_trust_key(key: &crate::trust::ResolvedKey) -> TrustKey {
+    use logweir_core::trust::{KeyState, RevocationReason};
+    let lifecycle = &key.trust;
+    let (state, not_after) = match lifecycle.state {
+        KeyState::Active => (TrustKeyState::Active, Some(lifecycle.not_after)),
+        KeyState::Retired => (TrustKeyState::Retired, lifecycle.accepted_through()),
+        KeyState::Revoked => match lifecycle.reason() {
+            RevocationReason::KeyCompromise => (TrustKeyState::Revoked, Some(lifecycle.not_after)),
+            RevocationReason::Superseded | RevocationReason::Unspecified => {
+                (TrustKeyState::Retired, lifecycle.accepted_through())
+            }
+        },
+    };
+    TrustKey {
+        key_id: lifecycle.key_id.clone(),
+        spki_pem: key.spki_pem.clone(),
+        subject: Some(lifecycle.principal_id.clone()),
+        not_after,
+        state,
+    }
+}
 
 /// Turn a signature verdict into a verification state, under a trust source.
 ///

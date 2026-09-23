@@ -390,6 +390,12 @@ fn fixture(routes: Vec<Route>) -> Fixture {
     }
 }
 
+/// An empty `TrustPolicy` list: no policy governs the namespace, so the
+/// catalog resolves the synthesised `legacy-roster-v1` from the roster route.
+fn no_trust_policies() -> String {
+    json!({"apiVersion": "logweir.dev/v1alpha1", "kind": "TrustPolicyList", "metadata": {"resourceVersion": "1"}, "items": []}).to_string()
+}
+
 fn route(method: &'static str, path_suffix: &'static str, body: String) -> Route {
     Route {
         method,
@@ -425,6 +431,7 @@ fn harvest_routes(plan_sha: &str, log: String, job_owner_uid: &str) -> Vec<Route
     let job_path: &'static str = Box::leak(format!("/jobs/{stem}").into_boxed_str());
     vec![
         route("GET", "/trustrosters/default", roster_body()),
+        route("GET", "/trustpolicies", no_trust_policies()),
         route(
             "GET",
             job_path,
@@ -722,6 +729,7 @@ fn trust_with(key_id: &str, state: TrustKeyState, not_after: Option<DateTime<Utc
             state,
         }],
         source: view::TRUST_SOURCE_ROSTER.to_string(),
+        unresolved: None,
     }
 }
 
@@ -1662,6 +1670,7 @@ fn sync_job_spec() -> view::SyncJobSpec {
 async fn a_first_pass_creates_one_sync_job_and_deletes_nothing() {
     let f = fixture(vec![
         route("GET", "/trustrosters/default", roster_body()),
+        route("GET", "/trustpolicies", no_trust_policies()),
         route("GET", "/backupdestinations/archive", destination_body()),
         route("POST", "/configmaps", empty_config_map()),
         route("POST", "/jobs", empty_job()),
@@ -1752,6 +1761,7 @@ async fn a_first_pass_creates_one_sync_job_and_deletes_nothing() {
 async fn the_sync_job_carries_the_destinations_explicit_environment_and_no_credential_value() {
     let f = fixture(vec![
         route("GET", "/trustrosters/default", roster_body()),
+        route("GET", "/trustpolicies", no_trust_policies()),
         route("GET", "/backupdestinations/archive", destination_body()),
         route("POST", "/configmaps", empty_config_map()),
         route("POST", "/jobs", empty_job()),
@@ -2051,7 +2061,11 @@ async fn an_impostor_pod_is_never_read() {
     let plan_sha = format!("sha256:{}", "4".repeat(64));
     let mut routes = harvest_routes(&plan_sha, framed(&plan_sha, UID, &happy_body()), UID);
     // The listing answers with a pod whose controller owner is NOT this Job.
-    routes[2] = route("GET", "/pods", pod_list_body("some-other-job-uid"));
+    let pods = routes
+        .iter()
+        .position(|r| r.path_suffix == "/pods")
+        .expect("the harvest table lists pods");
+    routes[pods] = route("GET", "/pods", pod_list_body("some-other-job-uid"));
     // The log route is REMOVED: if the reconciler reads it, the double panics.
     routes.retain(|r| r.path_suffix != "/log");
     let f = fixture(routes);
@@ -2089,6 +2103,7 @@ async fn a_job_owned_by_something_else_is_refused_and_never_read() {
     let job_path: &'static str = Box::leak(format!("/jobs/{stem}").into_boxed_str());
     let f = fixture(vec![
         route("GET", "/trustrosters/default", roster_body()),
+        route("GET", "/trustpolicies", no_trust_policies()),
         route(
             "GET",
             job_path,
@@ -2147,6 +2162,7 @@ async fn a_view_whose_job_is_gone_reports_view_expired_and_stops_listing_its_pag
     let job_path: &'static str = Box::leak(format!("/jobs/{stem}").into_boxed_str());
     let f = fixture(vec![
         route("GET", "/trustrosters/default", roster_body()),
+        route("GET", "/trustpolicies", no_trust_policies()),
         Route {
             method: "GET",
             path_suffix: job_path,
@@ -2206,6 +2222,7 @@ async fn a_repeated_sync_request_starts_nothing_and_a_new_one_starts_one_job() {
     let job_path: &'static str = Box::leak(format!("/jobs/{stem}").into_boxed_str());
     let f = fixture(vec![
         route("GET", "/trustrosters/default", roster_body()),
+        route("GET", "/trustpolicies", no_trust_policies()),
         route("GET", job_path, job_body(stem, true, "sha256:x", UID)),
         route(
             "PATCH",
@@ -2236,6 +2253,7 @@ async fn a_repeated_sync_request_starts_nothing_and_a_new_one_starts_one_job() {
     // (b) a new token: exactly one Job, named after that token and not the slot.
     let f = fixture(vec![
         route("GET", "/trustrosters/default", roster_body()),
+        route("GET", "/trustpolicies", no_trust_policies()),
         route("GET", job_path, job_body(stem, true, "sha256:x", UID)),
         route("GET", "/backupdestinations/archive", destination_body()),
         route("POST", "/configmaps", empty_config_map()),
@@ -2267,6 +2285,7 @@ async fn a_running_sync_is_watched_and_never_duplicated() {
     let job_path: &'static str = Box::leak(format!("/jobs/{stem}").into_boxed_str());
     let f = fixture(vec![
         route("GET", "/trustrosters/default", roster_body()),
+        route("GET", "/trustpolicies", no_trust_policies()),
         route("GET", job_path, job_body(stem, false, "sha256:x", UID)),
         route(
             "GET",
@@ -2299,6 +2318,7 @@ async fn an_unusable_destination_creates_nothing() {
     body["status"]["conditions"][0]["status"] = json!("False");
     let f = fixture(vec![
         route("GET", "/trustrosters/default", roster_body()),
+        route("GET", "/trustpolicies", no_trust_policies()),
         route("GET", "/backupdestinations/archive", body.to_string()),
         route(
             "PATCH",
@@ -2319,6 +2339,7 @@ async fn an_unusable_destination_creates_nothing() {
 async fn a_legacy_archive_catalog_is_refused_by_name_and_creates_no_job() {
     let f = fixture(vec![
         route("GET", "/trustrosters/default", roster_body()),
+        route("GET", "/trustpolicies", no_trust_policies()),
         route(
             "PATCH",
             "/recoverycatalogs/primary/status",
@@ -2350,6 +2371,7 @@ async fn a_page_name_taken_by_a_foreign_object_refuses_the_publish() {
         Box::leak(format!("/configmaps/{}", view::page_config_map_name(&stem, 0)).into_boxed_str());
     let f = fixture(vec![
         route("GET", "/trustrosters/default", roster_body()),
+        route("GET", "/trustpolicies", no_trust_policies()),
         route("GET", job_path, job_body(&stem, true, &plan_sha, UID)),
         route("GET", "/pods", pod_list_body(JOB_UID)),
         route("GET", "/log", framed(&plan_sha, UID, &happy_body())),
@@ -2426,6 +2448,7 @@ async fn an_unchanged_status_sends_no_patch() {
     // Two passes: the first writes, the second is handed back what it wrote.
     let f = fixture(vec![
         route("GET", "/trustrosters/default", roster_body()),
+        route("GET", "/trustpolicies", no_trust_policies()),
         route("GET", job_path, job_body(stem, true, "sha256:x", UID)),
         route(
             "PATCH",
@@ -2456,6 +2479,7 @@ async fn an_unchanged_status_sends_no_patch() {
     let settled: RecoveryCatalog = serde_json::from_value(value).expect("a catalog");
     let f2 = fixture(vec![
         route("GET", "/trustrosters/default", roster_body()),
+        route("GET", "/trustpolicies", no_trust_policies()),
         route("GET", job_path, job_body(stem, true, "sha256:x", UID)),
     ]);
     run(&f2, &settled).await;
@@ -2780,6 +2804,7 @@ async fn an_expired_view_is_cleared_on_the_refusal_path_too() {
     dest["status"]["conditions"][0]["status"] = json!("False");
     let f = fixture(vec![
         route("GET", "/trustrosters/default", roster_body()),
+        route("GET", "/trustpolicies", no_trust_policies()),
         Route {
             method: "GET",
             path_suffix: job_path,
@@ -2831,6 +2856,7 @@ async fn an_expired_view_is_cleared_when_a_sync_result_does_not_read() {
     // status whose recorded expiry has passed.
     let f = fixture(vec![
         route("GET", "/trustrosters/default", roster_body()),
+        route("GET", "/trustpolicies", no_trust_policies()),
         route("GET", job_path, job_body(&stem, true, &plan_sha, UID)),
         route("GET", "/pods", pod_list_body(JOB_UID)),
         route(
@@ -2874,6 +2900,7 @@ async fn a_catalog_with_live_pages_that_starts_a_sync_keeps_ready_true() {
     let job_path: &'static str = Box::leak(format!("/jobs/{stem}").into_boxed_str());
     let f = fixture(vec![
         route("GET", "/trustrosters/default", roster_body()),
+        route("GET", "/trustpolicies", no_trust_policies()),
         // The PREVIOUS generation's Job, still present and already harvested.
         route("GET", job_path, job_body(stem, true, "sha256:x", UID)),
         route("GET", "/backupdestinations/archive", destination_body()),
@@ -3305,5 +3332,632 @@ fn the_crd_and_the_plan_spell_the_two_enums_identically() {
             serde_json::to_value(plan).expect("the plan enum serialises"),
             "`{deep:?}` is spelled two ways"
         );
+    }
+}
+
+// ===========================================================================
+// CATALOG-TRUST-ROSTER-ONLY — the catalog judges points by the trust bound to
+// its namespace (`trust::resolve`), not by the `TrustRoster` alone
+// ===========================================================================
+
+/// A REAL Ed25519 public key (SubjectPublicKeyInfo PEM) — public material, the
+/// same one `trust_policy_controller.rs` and `rehearsal_controller.rs` use —
+/// so the policy's key is USABLE: it parses and hashes to its declared id.
+const POLICY_KEY_PEM: &str =
+    "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEApFpEU8uY5S8Lv43HL4DcXKKyM8WHurCPZIxvq8ZBfpY=\n-----END PUBLIC KEY-----\n";
+/// `sha256(POLICY_KEY_PEM's SPKI DER)`, lowercase hex.
+const POLICY_KEY: &str = "f27c7f51aad0700db76887b306d413a039156b44ee147c1d82c5e4dc339558f6";
+const POLICY_NAME: &str = "team-a-trust";
+
+/// 2026-03-01T00:00:00Z — signed well inside every fixture key's life.
+const EARLY_MS: i64 = 1_772_323_200_000;
+/// 2026-08-01T00:00:00Z — after the fixtures' 2026-06-01 retirement.
+const LATE_MS: i64 = 1_785_542_400_000;
+
+/// One `EvidenceSigning` key, `lifecycle` merged over an Active base.
+fn policy_key(lifecycle: Value) -> Value {
+    let mut key = json!({
+        "keyId": POLICY_KEY,
+        "spkiPem": POLICY_KEY_PEM,
+        "algorithm": "ed25519",
+        "usages": ["EvidenceSigning"],
+        "principal": {"id": "install:team-a-runner"},
+        "notBefore": "2025-01-01T00:00:00Z",
+        "notAfter": "2027-06-01T00:00:00Z",
+        "state": "Active"
+    });
+    for (k, v) in lifecycle.as_object().expect("an object") {
+        key[k] = v.clone();
+    }
+    key
+}
+
+fn policy_value(name: &str, namespaces: &[&str], keys: Vec<Value>) -> Value {
+    json!({
+        "apiVersion": "logweir.dev/v1alpha1",
+        "kind": "TrustPolicy",
+        "metadata": {"name": name, "uid": format!("uid-{name}"), "generation": 1, "resourceVersion": "3"},
+        "spec": {"namespaces": namespaces, "keys": keys}
+    })
+}
+
+fn policy_list(items: Vec<Value>) -> String {
+    json!({
+        "apiVersion": "logweir.dev/v1alpha1", "kind": "TrustPolicyList",
+        "metadata": {"resourceVersion": "4"}, "items": items
+    })
+    .to_string()
+}
+
+/// The harvest table with `policies` answering the `TrustPolicy` LIST. The
+/// roster route stays and still lists [`TRUSTED_KEY`]: a namespace a policy
+/// governs must not consult it.
+fn harvest_with_policies(body: &str, policies: String) -> Fixture {
+    let plan_sha = format!("sha256:{}", "4".repeat(64));
+    let mut routes = harvest_routes(&plan_sha, framed(&plan_sha, UID, body), UID);
+    let at = routes
+        .iter()
+        .position(|r| r.path_suffix == "/trustpolicies")
+        .expect("the harvest table lists trust policies");
+    routes[at] = route("GET", "/trustpolicies", policies);
+    fixture(routes)
+}
+
+/// Two points signed by [`POLICY_KEY`] (early, late) and one by the roster's
+/// [`TRUSTED_KEY`].
+fn policy_signed_body() -> String {
+    body_for(
+        &[vec![
+            entry_value(
+                "lwp1-cccccccccccccccccccccccccccccccc",
+                LATE_MS,
+                "Available",
+                "verified",
+                POLICY_KEY,
+            ),
+            entry_value(
+                "lwp1-dddddddddddddddddddddddddddddddd",
+                EARLY_MS,
+                "Available",
+                "verified",
+                POLICY_KEY,
+            ),
+            entry_value(
+                "lwp1-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                EARLY_MS - 1,
+                "Available",
+                "verified",
+                TRUSTED_KEY,
+            ),
+        ]],
+        counts_value(3, 3),
+        json!([
+            {"keyId": POLICY_KEY, "points": 2, "principalHint": "team-a runner"},
+            {"keyId": TRUSTED_KEY, "points": 1, "principalHint": "runner"}
+        ]),
+        true,
+    )
+}
+
+/// `pointId → (verification, selectable)` from the one page this sync wrote.
+fn page_verdicts(f: &Fixture) -> BTreeMap<String, (String, bool)> {
+    let page = f
+        .posted("/configmaps")
+        .into_iter()
+        .find(|cm| cm["data"][view::PAGE_DATA_KEY].is_string())
+        .expect("a page was written");
+    page["data"][view::PAGE_DATA_KEY]
+        .as_str()
+        .expect("entries")
+        .lines()
+        .map(|line| {
+            let e: Value = serde_json::from_str(line).expect("an entry");
+            (
+                e["pointId"].as_str().expect("id").to_string(),
+                (
+                    e["verification"]
+                        .as_str()
+                        .expect("verification")
+                        .to_string(),
+                    e["selectable"].as_bool().expect("selectable"),
+                ),
+            )
+        })
+        .collect()
+}
+
+fn signer_trusted(status: &Value, key: &str) -> Option<bool> {
+    status["signers"]
+        .as_array()?
+        .iter()
+        .find(|s| s["keyId"] == key)
+        .and_then(|s| s["trusted"].as_bool())
+}
+
+fn verdict(v: &str, selectable: bool) -> (String, bool) {
+    (v.to_string(), selectable)
+}
+
+/// **The lab-refresh-8 row, as a unit.** A point signed under a `TrustPolicy`
+/// key is `Verified` and selectable, the policy names itself on
+/// `TrustAvailable`, and the roster the policy displaced is NOT consulted — its
+/// key is an untrusted signer here.
+///
+/// KILLS: `trust_view` reading only the `TrustRoster` (the defect) — the
+/// policy-signed points become `UntrustedSigner` and the roster-signed one
+/// `Verified`.
+#[tokio::test]
+async fn a_point_signed_under_a_trust_policy_key_is_verified() {
+    let f = harvest_with_policies(
+        &policy_signed_body(),
+        policy_list(vec![policy_value(
+            POLICY_NAME,
+            &[NS],
+            vec![policy_key(json!({}))],
+        )]),
+    );
+    run(&f, &catalog(json!({}), tracked_status(&periodic_stem()))).await;
+
+    let verdicts = page_verdicts(&f);
+    assert_eq!(
+        verdicts["lwp1-cccccccccccccccccccccccccccccccc"],
+        verdict("Verified", true)
+    );
+    assert_eq!(
+        verdicts["lwp1-dddddddddddddddddddddddddddddddd"],
+        verdict("Verified", true)
+    );
+    assert_eq!(
+        verdicts["lwp1-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"],
+        verdict("UntrustedSigner", false),
+        "a governed namespace is judged by its policy and not by the roster"
+    );
+    let status = f.patched_status()["status"].clone();
+    assert_eq!(signer_trusted(&status, POLICY_KEY), Some(true));
+    assert_eq!(signer_trusted(&status, TRUSTED_KEY), Some(false));
+    assert_condition(&status, ctrl::CONDITION_TRUST_AVAILABLE, "True");
+    let trust = status["conditions"]
+        .as_array()
+        .expect("conditions")
+        .iter()
+        .find(|c| c["type"] == ctrl::CONDITION_TRUST_AVAILABLE)
+        .expect("TrustAvailable")
+        .clone();
+    assert!(
+        trust["message"]
+            .as_str()
+            .is_some_and(|m| m.contains(&format!("TrustPolicy/{POLICY_NAME}"))),
+        "{trust}"
+    );
+}
+
+/// A key the policy REVOKED for `KeyCompromise` turns every point it signed
+/// `Revoked` — early or late — and its signer row untrusted.
+///
+/// KILLS: projecting a compromise revocation as anything but `Revoked` (the
+/// points would stay `Verified`/`VerifiedHistorical` and selectable).
+#[tokio::test]
+async fn a_trust_policy_revoked_key_gives_revoked() {
+    let revoked = policy_key(json!({
+        "state": "Revoked",
+        "revokedAt": "2026-09-01T00:00:00Z",
+        "revocationReason": "KeyCompromise",
+        "revocationEffectiveFrom": "2026-09-01T00:00:00Z"
+    }));
+    let f = harvest_with_policies(
+        &policy_signed_body(),
+        policy_list(vec![policy_value(POLICY_NAME, &[NS], vec![revoked])]),
+    );
+    run(&f, &catalog(json!({}), tracked_status(&periodic_stem()))).await;
+
+    let verdicts = page_verdicts(&f);
+    assert_eq!(
+        verdicts["lwp1-cccccccccccccccccccccccccccccccc"],
+        verdict("Revoked", false)
+    );
+    assert_eq!(
+        verdicts["lwp1-dddddddddddddddddddddddddddddddd"],
+        verdict("Revoked", false)
+    );
+    let status = f.patched_status()["status"].clone();
+    assert_eq!(signer_trusted(&status, POLICY_KEY), Some(false));
+}
+
+/// A key the policy RETIRED still verifies what it signed before `retiredAt`
+/// — `VerifiedHistorical`, selectable — and nothing it claims to have signed
+/// after it.
+///
+/// KILLS: projecting a retired key as `Active` (both points `Verified`), and
+/// bounding it by `notAfter` instead of `accepted_through()` (the late point
+/// `VerifiedHistorical`).
+#[tokio::test]
+async fn a_trust_policy_retired_key_gives_verified_historical() {
+    let retired = policy_key(json!({"state": "Retired", "retiredAt": "2026-06-01T00:00:00Z"}));
+    let f = harvest_with_policies(
+        &policy_signed_body(),
+        policy_list(vec![policy_value(POLICY_NAME, &[NS], vec![retired])]),
+    );
+    run(&f, &catalog(json!({}), tracked_status(&periodic_stem()))).await;
+
+    let verdicts = page_verdicts(&f);
+    assert_eq!(
+        verdicts["lwp1-dddddddddddddddddddddddddddddddd"],
+        verdict("VerifiedHistorical", true),
+        "signed before retiredAt"
+    );
+    assert_eq!(
+        verdicts["lwp1-cccccccccccccccccccccccccccccccc"],
+        verdict("Invalid", false),
+        "claims a signing time after retiredAt"
+    );
+    let status = f.patched_status()["status"].clone();
+    assert_eq!(
+        signer_trusted(&status, POLICY_KEY),
+        Some(true),
+        "a retired key is still accepted for what it signed while valid"
+    );
+}
+
+/// A namespace two policies claim resolves to NO trust: every point is
+/// `NotAttempted`, and `TrustAvailable=False/TrustPolicyConflict` names both —
+/// not "no key material", in a cluster that has two policies.
+#[tokio::test]
+async fn a_contested_namespace_verifies_nothing_and_names_the_conflict() {
+    let f = harvest_with_policies(
+        &policy_signed_body(),
+        policy_list(vec![
+            policy_value("policy-one", &[NS], vec![policy_key(json!({}))]),
+            policy_value("policy-two", &[NS], vec![policy_key(json!({}))]),
+        ]),
+    );
+    run(&f, &catalog(json!({}), tracked_status(&periodic_stem()))).await;
+
+    for (point, (verification, selectable)) in page_verdicts(&f) {
+        assert_eq!(verification, "NotAttempted", "{point}");
+        assert!(!selectable, "{point}");
+    }
+    let status = f.patched_status()["status"].clone();
+    let trust = status["conditions"]
+        .as_array()
+        .expect("conditions")
+        .iter()
+        .find(|c| c["type"] == ctrl::CONDITION_TRUST_AVAILABLE)
+        .expect("TrustAvailable")
+        .clone();
+    assert_eq!(trust["status"], "False");
+    assert_eq!(trust["reason"], ctrl::REASON_TRUST_POLICY_CONFLICT);
+    let message = trust["message"].as_str().expect("a message");
+    assert!(
+        message.contains("policy-one") && message.contains("policy-two"),
+        "{message}"
+    );
+}
+
+/// A policy for ANOTHER namespace does not govern this one: the catalog falls
+/// back to the synthesised `legacy-roster-v1`, and the roster-signed point is
+/// `Verified` exactly as it always was.
+#[tokio::test]
+async fn a_policy_for_another_namespace_leaves_the_roster_in_charge() {
+    let f = harvest_with_policies(
+        &policy_signed_body(),
+        policy_list(vec![policy_value(
+            POLICY_NAME,
+            &["team-b"],
+            vec![policy_key(json!({}))],
+        )]),
+    );
+    run(&f, &catalog(json!({}), tracked_status(&periodic_stem()))).await;
+
+    let verdicts = page_verdicts(&f);
+    assert_eq!(
+        verdicts["lwp1-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"],
+        verdict("Verified", true)
+    );
+    assert_eq!(
+        verdicts["lwp1-cccccccccccccccccccccccccccccccc"],
+        verdict("UntrustedSigner", false)
+    );
+}
+
+/// The trust BUNDLE the sync Job mounts is the governing policy's
+/// `EvidenceSigning` keys — so the Job can verify a policy-signed receipt at
+/// all. Approval-only keys are not in it.
+#[tokio::test]
+async fn the_sync_job_mounts_the_policys_signing_keys() {
+    let mut approver = policy_key(json!({"usages": ["GovernedApproval"]}));
+    approver["keyId"] = json!(STRANGER_KEY);
+    let f = fixture(vec![
+        route("GET", "/trustrosters/default", roster_body()),
+        route(
+            "GET",
+            "/trustpolicies",
+            policy_list(vec![policy_value(
+                POLICY_NAME,
+                &[NS],
+                vec![policy_key(json!({})), approver],
+            )]),
+        ),
+        route("GET", "/backupdestinations/archive", destination_body()),
+        route("POST", "/configmaps", empty_config_map()),
+        route("POST", "/jobs", empty_job()),
+        route(
+            "PATCH",
+            "/recoverycatalogs/primary/status",
+            patched_catalog(),
+        ),
+    ]);
+    run(&f, &catalog(json!({}), json!({}))).await;
+    let bundle = f
+        .posted("/configmaps")
+        .into_iter()
+        .find(|cm| cm["data"][view::TRUST_KEY_IDS_KEY].is_string())
+        .expect("a trust bundle was written");
+    assert_eq!(bundle["data"][view::TRUST_KEY_IDS_KEY], POLICY_KEY);
+    assert_eq!(
+        bundle["data"][view::TRUST_BUNDLE_KEY],
+        POLICY_KEY_PEM.trim_end()
+    );
+}
+
+/// **Roster-only behaviour is unchanged.** For a roster with no `TrustPolicy`
+/// in the cluster, the projection of the synthesised `legacy-roster-v1` is the
+/// projection the roster always had: the same keys in the same order, the same
+/// public material (unparseable entries included, as before), the same
+/// `notAfter`, `Active`, and therefore the same bundle bytes, the same bundle
+/// name and the same verdict for every point.
+///
+/// KILLS: dropping unusable keys from the LEGACY projection (the roster's
+/// fixture PEMs do not parse, so the view would empty and every point turn
+/// `NotAttempted`); reading the synthesis's `9999-12-31` fallback as a real
+/// `notAfter`.
+#[test]
+fn a_roster_only_namespace_projects_exactly_as_the_roster_did() {
+    let expiry = Utc
+        .with_ymd_and_hms(2026, 6, 1, 0, 0, 0)
+        .single()
+        .expect("instant");
+    let spec: weirkeeper::crds::trust_roster::TrustRosterSpec = serde_json::from_value(json!({
+        "approverKeys": [{"keyId": STRANGER_KEY, "spkiPem": spki(0xB2)}],
+        "signingKeys": [
+            {"keyId": TRUSTED_KEY, "spkiPem": spki(0xA1), "subject": "runner"},
+            {"keyId": POLICY_KEY, "spkiPem": POLICY_KEY_PEM, "notAfter": expiry}
+        ],
+        "allowedClusterIds": []
+    }))
+    .expect("a roster spec");
+    let before = TrustView::from_roster(&spec);
+    let resolution = weirkeeper::trust::resolve_in(NS, &[], Some(&spec));
+    let after = TrustView::from_resolution(&resolution);
+
+    let shape = |v: &TrustView| -> Vec<(String, String, Option<DateTime<Utc>>, TrustKeyState)> {
+        v.keys
+            .iter()
+            .map(|k| (k.key_id.clone(), k.spki_pem.clone(), k.not_after, k.state))
+            .collect()
+    };
+    assert_eq!(shape(&after), shape(&before));
+    assert_eq!(after.source, before.source);
+    assert_eq!(after.unresolved, None);
+    let owner = weirkeeper::job::RunnerOwner {
+        api_version: "logweir.dev/v1alpha1".to_string(),
+        kind: "RecoveryCatalog".to_string(),
+        name: NAME.to_string(),
+        uid: UID.to_string(),
+    };
+    assert_eq!(
+        view::trust_config_map("n", NS, &owner, &after).data,
+        view::trust_config_map("n", NS, &owner, &before).data,
+        "the same bundle bytes"
+    );
+    for key in [TRUSTED_KEY, POLICY_KEY, STRANGER_KEY] {
+        for at in [EARLY_MS, LATE_MS] {
+            let signed = Utc.timestamp_millis_opt(at).single();
+            assert_eq!(
+                view::classify_verification(
+                    SignatureVerdict::Verified,
+                    Some(key),
+                    signed,
+                    &after,
+                    now()
+                ),
+                view::classify_verification(
+                    SignatureVerdict::Verified,
+                    Some(key),
+                    signed,
+                    &before,
+                    now()
+                ),
+                "{key} at {at}"
+            );
+        }
+    }
+    // And an ABSENT roster is what it was: no keys, the roster's name.
+    let none = TrustView::from_resolution(&weirkeeper::trust::resolve_in(NS, &[], None));
+    assert!(none.is_empty());
+    assert_eq!(none.source, view::TRUST_SOURCE_ROSTER);
+}
+
+/// A supersession is a RETIREMENT at `revocationEffectiveFrom` (D3 §7.4, and
+/// what `logweir_core::trust::decide` answers for the same key) — not a
+/// compromise: what was signed before it stays `VerifiedHistorical`.
+#[test]
+fn a_superseded_revocation_is_a_retirement_at_its_effective_instant() {
+    let policy: weirkeeper::crds::trust_policy::TrustPolicy = serde_json::from_value(policy_value(
+        POLICY_NAME,
+        &[NS],
+        vec![policy_key(json!({
+            "state": "Revoked",
+            "revokedAt": "2026-09-01T00:00:00Z",
+            "revocationReason": "Superseded",
+            "revocationEffectiveFrom": "2026-06-01T00:00:00Z"
+        }))],
+    ))
+    .expect("a policy");
+    let trust = TrustView::from_resolution(&weirkeeper::trust::resolve_in(NS, &[policy], None));
+    let at = |ms: i64| Utc.timestamp_millis_opt(ms).single();
+    assert_eq!(
+        view::classify_verification(
+            SignatureVerdict::Verified,
+            Some(POLICY_KEY),
+            at(EARLY_MS),
+            &trust,
+            now()
+        ),
+        Verification::VerifiedHistorical
+    );
+    assert_eq!(
+        view::classify_verification(
+            SignatureVerdict::Verified,
+            Some(POLICY_KEY),
+            at(LATE_MS),
+            &trust,
+            now()
+        ),
+        Verification::Invalid
+    );
+}
+
+/// **The re-trust trigger.** A `TrustPolicy` event must reach the catalogs in
+/// the namespaces it could govern — a new key, a retirement or a revocation
+/// changes `TrustAvailable` and what the next sync mounts and concludes — not
+/// wait for the idle requeue. A SOURCE SCAN, for the reason
+/// `approval_controller.rs`'s twin gives: `controller()` returns a future that
+/// needs a live watch, and the property is structural.
+///
+/// KILLS: dropping the `.watches()` arm; mapping with the policy's CURRENT
+/// scope only (a narrowing edit then wakes nothing in the namespace it stopped
+/// governing); a second copy of the mapping rule.
+#[test]
+fn a_trust_policy_event_enqueues_the_catalogs_it_could_govern() {
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/controllers/recovery_catalog.rs"),
+    )
+    .expect("the reconciler's own source");
+    let start = src
+        .find("pub fn controller(")
+        .expect("the controller constructor");
+    let body = &src[start..];
+    assert!(
+        body.contains(".watches(policy_api, watcher::Config::default()"),
+        "a TrustPolicy event has to reach this controller. Body:\n{body}"
+    );
+    assert!(
+        body.contains("policy_targets(&objects, &scopes, &policy)"),
+        "…mapped over this controller's OWN store. Body:\n{body}"
+    );
+    assert!(
+        !body.contains("reflector::reflector("),
+        "no standalone reflector: a trigger watch inherits Controller's backoff, a hand-built \
+         reflector stream does not"
+    );
+    let mapper = src
+        .find("fn policy_targets(")
+        .map(|i| &src[i..])
+        .expect("the mapper");
+    assert!(mapper.contains("scopes.observe(policy)"));
+    assert!(mapper.contains("crate::verification::targets_in_scope("));
+    let resolver = src
+        .find("async fn trust_view(")
+        .map(|i| &src[i..])
+        .expect("trust_view");
+    assert!(
+        resolver[..resolver.find("\n}\n").unwrap_or(resolver.len())]
+            .contains("crate::trust::resolve(client, namespace)"),
+        "the catalog resolves the namespace's trust through the one resolver"
+    );
+}
+
+/// The `TrustAvailable` reason vocabulary includes the conflict, so the
+/// `metav1.Condition.reason` rules that walk [`ctrl::CONDITION_REASONS`] cover
+/// it.
+#[test]
+fn the_conflict_reason_is_in_the_closed_vocabulary() {
+    assert!(ctrl::CONDITION_REASONS.contains(&ctrl::REASON_TRUST_POLICY_CONFLICT));
+    assert_eq!(
+        ctrl::REASON_TRUST_POLICY_CONFLICT,
+        weirkeeper::trust::REASON_TRUST_POLICY_CONFLICT
+    );
+}
+
+/// **The projection agrees with `logweir_core::trust::decide`** — the judge the
+/// restore preflight and the runner apply to the same key — for every
+/// lifecycle a `TrustPolicy` key can have and a point signed before and after
+/// the lifecycle instant. `Valid/Current` ↔ `Verified`, `Valid/Historical` ↔
+/// `VerifiedHistorical`, `Untrusted/Revoked` ↔ `Revoked`,
+/// `Untrusted/SignedOutsideValidity` ↔ `Invalid`.
+///
+/// KILLS: projecting `Retired` as `Active` — equivalent to the correct
+/// projection while `retiredAt` is past (the bound does the work), and caught
+/// by the key retired at a FUTURE instant, which `decide` already calls
+/// `Historical`.
+#[test]
+fn the_policy_projection_agrees_with_the_core_trust_decision() {
+    use logweir_core::trust::{
+        EvidenceClaim, IndependentObservation, KeyUsage, TrustBasis, TrustResult, UntrustReason,
+    };
+    let lifecycles = [
+        ("active", json!({})),
+        (
+            "retired-past",
+            json!({"state": "Retired", "retiredAt": "2026-06-01T00:00:00Z"}),
+        ),
+        (
+            "retired-future",
+            json!({"state": "Retired", "retiredAt": "2026-12-01T00:00:00Z"}),
+        ),
+        ("expired", json!({"notAfter": "2026-06-01T00:00:00Z"})),
+        (
+            "revoked-compromise",
+            json!({"state": "Revoked", "revokedAt": "2026-09-01T00:00:00Z",
+                   "revocationReason": "KeyCompromise", "revocationEffectiveFrom": "2026-06-01T00:00:00Z"}),
+        ),
+        (
+            "revoked-superseded",
+            json!({"state": "Revoked", "revokedAt": "2026-09-01T00:00:00Z",
+                   "revocationReason": "Superseded", "revocationEffectiveFrom": "2026-06-01T00:00:00Z"}),
+        ),
+    ];
+    for (label, lifecycle) in lifecycles {
+        let policy: weirkeeper::crds::trust_policy::TrustPolicy = serde_json::from_value(
+            policy_value(POLICY_NAME, &[NS], vec![policy_key(lifecycle)]),
+        )
+        .expect("a policy");
+        let weirkeeper::trust::Resolution::Trust(resolved) =
+            weirkeeper::trust::resolve_in(NS, &[policy], None)
+        else {
+            panic!("{label}: the policy governs the namespace")
+        };
+        let projected = TrustView::from_resolved(&resolved);
+        for at in [EARLY_MS, LATE_MS] {
+            let signed = Utc.timestamp_millis_opt(at).single().expect("instant");
+            let decided = resolved.decide_for(
+                POLICY_KEY,
+                KeyUsage::EvidenceSigning,
+                &EvidenceClaim::at(signed),
+                &IndependentObservation::none(),
+                now(),
+            );
+            let want = match (decided.result, decided.basis, decided.reason) {
+                (TrustResult::Valid, TrustBasis::Current, _) => Verification::Verified,
+                (TrustResult::Valid, TrustBasis::Historical, _) => Verification::VerifiedHistorical,
+                (TrustResult::Untrusted, _, Some(UntrustReason::Revoked)) => Verification::Revoked,
+                (TrustResult::Untrusted, _, Some(UntrustReason::SignedOutsideValidity)) => {
+                    Verification::Invalid
+                }
+                other => panic!("{label} at {at}: a verdict this table does not map: {other:?}"),
+            };
+            assert_eq!(
+                view::classify_verification(
+                    SignatureVerdict::Verified,
+                    Some(POLICY_KEY),
+                    Some(signed),
+                    &projected,
+                    now()
+                ),
+                want,
+                "{label}, signed at {signed}"
+            );
+        }
     }
 }
