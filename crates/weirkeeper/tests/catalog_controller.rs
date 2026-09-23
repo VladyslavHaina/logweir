@@ -725,6 +725,7 @@ fn trust_with(key_id: &str, state: TrustKeyState, not_after: Option<DateTime<Utc
             key_id: key_id.to_string(),
             spki_pem: spki(0xA1),
             subject: Some("runner".to_string()),
+            not_before: None,
             not_after,
             state,
         }],
@@ -3887,7 +3888,8 @@ fn the_conflict_reason_is_in_the_closed_vocabulary() {
 /// `VerifiedHistorical`, `Untrusted/Revoked` ↔ `Revoked`,
 /// `Untrusted/SignedOutsideValidity` ↔ `Invalid`.
 ///
-/// KILLS: projecting `Retired` as `Active` — equivalent to the correct
+/// KILLS: ignoring `notBefore` (the `staged` key's early point would read
+/// `Verified`); projecting `Retired` as `Active` — equivalent to the correct
 /// projection while `retiredAt` is past (the bound does the work), and caught
 /// by the key retired at a FUTURE instant, which `decide` already calls
 /// `Historical`.
@@ -3907,6 +3909,7 @@ fn the_policy_projection_agrees_with_the_core_trust_decision() {
             json!({"state": "Retired", "retiredAt": "2026-12-01T00:00:00Z"}),
         ),
         ("expired", json!({"notAfter": "2026-06-01T00:00:00Z"})),
+        ("staged", json!({"notBefore": "2026-04-01T00:00:00Z"})),
         (
             "revoked-compromise",
             json!({"state": "Revoked", "revokedAt": "2026-09-01T00:00:00Z",

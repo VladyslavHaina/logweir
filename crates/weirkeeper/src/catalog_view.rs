@@ -506,6 +506,10 @@ pub struct TrustKey {
     pub spki_pem: String,
     /// Who the source says it belongs to. Display only, never authority.
     pub subject: Option<String>,
+    /// When it starts being accepted: evidence claiming a signing time
+    /// before it is not evidence this key could have signed inside its window.
+    /// `None` for a roster key (the roster has no such field).
+    pub not_before: Option<Time>,
     /// When it stops being accepted for NEW evidence.
     pub not_after: Option<Time>,
     /// Its lifecycle state.
@@ -566,6 +570,7 @@ impl TrustView {
                     key_id: k.key_id.clone(),
                     spki_pem: k.spki_pem.clone(),
                     subject: k.subject.clone(),
+                    not_before: None,
                     not_after: k.not_after,
                     state: TrustKeyState::Active,
                 })
@@ -701,6 +706,7 @@ fn legacy_trust_key(key: &crate::trust::ResolvedKey) -> TrustKey {
         key_id: key.trust.key_id.clone(),
         spki_pem: key.spki_pem.clone(),
         subject: None,
+        not_before: None,
         not_after: (key.trust.not_after != crate::trust::legacy_not_after())
             .then_some(key.trust.not_after),
         state: TrustKeyState::Active,
@@ -725,6 +731,7 @@ fn policy_trust_key(key: &crate::trust::ResolvedKey) -> TrustKey {
         key_id: lifecycle.key_id.clone(),
         spki_pem: key.spki_pem.clone(),
         subject: Some(lifecycle.principal_id.clone()),
+        not_before: Some(lifecycle.not_before),
         not_after,
         state,
     }
@@ -751,7 +758,10 @@ fn policy_trust_key(key: &crate::trust::ResolvedKey) -> TrustKey {
 /// 5. **Revoked wins over everything else the key could be**, because a
 ///    revocation is a statement that the private half is in someone else's
 ///    hands.
-/// 6. **An expired or retired key still verifies what it signed while it was
+/// 6. **Evidence claiming a signing time before the key's `notBefore` is
+///    [`Verification::Invalid`]** — the key was not accepted then (a policy key
+///    only; the roster has no `notBefore`).
+/// 7. **An expired or retired key still verifies what it signed while it was
 ///    valid** — [`Verification::VerifiedHistorical`], D3 §7.4. Evidence signed
 ///    AFTER `notAfter` is [`Verification::Invalid`]: the key was not accepted
 ///    then either.
@@ -784,6 +794,14 @@ pub fn classify_verification(
     };
     if key.state == TrustKeyState::Revoked {
         return Verification::Revoked;
+    }
+    // Signed before the key's window opened — `decide`'s
+    // `SignedOutsideValidity`. A staged successor key verifies nothing it
+    // claims to have signed before `notBefore`.
+    if let (Some(not_before), Some(signed)) = (key.not_before, signed_at) {
+        if signed < not_before {
+            return Verification::Invalid;
+        }
     }
     match key.not_after {
         // Still inside its validity, whatever its declared state: a key that is
