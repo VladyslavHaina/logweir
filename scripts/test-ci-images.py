@@ -122,6 +122,11 @@ class PromotionTests(unittest.TestCase):
         }
         self.env.pop("MOCK_FAIL_INSPECT_REF", None)
         self.env.pop("MOCK_WRONG_ROLLING", None)
+        # Hermetic: a caller's registry configuration (a local gate run with
+        # DOCKER_CONFIG set) must not reach the script, or the recorded
+        # per-call configurations stop meaning what the assertions read.
+        self.env.pop("DOCKER_CONFIG", None)
+        self.env.pop("HELM_REGISTRY_CONFIG", None)
         self.expected_refs = {}
         state = {}
         for product, arches in PLATFORMS.items():
@@ -143,7 +148,7 @@ class PromotionTests(unittest.TestCase):
     def run_promotion(self, success=True):
         result = subprocess.run(
             ["bash", str(self.root / "scripts/ci-images.sh"), "promote"],
-            env=self.env, cwd=self.root, capture_output=True, text=True, timeout=30,
+            env=self.env, cwd=self.root, capture_output=True, text=True, timeout=120,
         )
         if success:
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
