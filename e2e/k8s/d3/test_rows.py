@@ -2996,6 +2996,22 @@ def test_a_shared_set_must_not_be_planned_under_a_retained_point() -> None:
     row("shared set: one of the two not usable -> NOT-REACHED", verdict == "NOT-REACHED")
 
 
+def test_a_minted_value_is_never_read_as_an_option() -> None:
+    import re as _re
+    values = [d3.mint() for _ in range(400)]
+    row("every minted value is lowercase hex (no '-', '_' or '+' an `mc` argv could "
+        "read as a flag)", all(_re.fullmatch(r"[0-9a-f]{48}", v) for v in values),
+        str([v[:4] for v in values if not _re.fullmatch(r"[0-9a-f]{48}", v)][:5]))
+    row("and each is registered for the literal sweep", all(v in d3.MINTED for v in values))
+    # PLANTED: the base64url shape this replaced. 400 draws of token_urlsafe(24)
+    # always contain a '-' or '_' somewhere, and a leading '-' 1 time in 32;
+    # the same predicate must refuse them, or it is no guard.
+    import secrets as _secrets
+    planted = [_secrets.token_urlsafe(24) for _ in range(400)]
+    row("PLANTED: base64url values are refused by the same predicate",
+        not all(_re.fullmatch(r"[0-9a-f]{48}", v) for v in planted))
+
+
 def test_the_redactor_keeps_pod_specs_valid_json_and_still_redacts() -> None:
     spec = json.dumps({"automountServiceAccountToken": False, "token": "abcdef123456"})
     out = d3.redact(spec)

@@ -130,8 +130,17 @@ MINTED: set[str] = set()
 
 
 def mint(nbytes: int = 24) -> str:
-    """A fresh value, registered so it can never reach an artifact."""
-    value = secrets.token_urlsafe(nbytes)
+    """A fresh value, registered so it can never reach an artifact.
+
+    HEX, NEVER base64url (ui-harness-drift's class sweep). Every minted value
+    here is handed to `mc admin user add` as a POSITIONAL argument, and a
+    `token_urlsafe` value starts with `-` one time in 32: `mc` then reads the
+    secret as a flag, the user is never created, and `>/dev/null 2>&1` hides
+    why (plat15-2 printed such a value into a Job log before its own fix,
+    `816fb5f`). Hex has no `-`, `_` or `+`, so no value can be parsed as an
+    option or need quoting. 2*nbytes characters, the same entropy.
+    """
+    value = secrets.token_hex(nbytes)
     MINTED.add(value)
     return value
 
