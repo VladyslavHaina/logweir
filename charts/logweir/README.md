@@ -312,7 +312,10 @@ both `myrel-api` once you set the value, and neither can be silently wrong.
 off, and the refusal does not apply.)
 
 `./scripts/render-install.sh --check` answers the `kubectl auth can-i` question
-for every pair above, in both directions, against the checked-in render.
+for every pair above, in both directions, against every checked-in render. It
+finds the console's roles through the bindings that name its ServiceAccount,
+whatever the roles are called, and refuses a binding that names anyone else
+beside the account.
 
 ## `api.console.enabled` — the console itself, and the two names it goes by
 
