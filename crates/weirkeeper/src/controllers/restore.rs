@@ -3491,7 +3491,33 @@ pub struct ScorecardObservation {
     /// fetched. **Computed here and not copied**, because a document cannot
     /// carry its own digest.
     pub scorecard_sha256: Option<String>,
+    /// `target_diff.would_create`, as `(topic, partitions)` pairs — the
+    /// source of `status.completion.newTopics` (D3 §2.2). `None` when the
+    /// document has no such list, when any entry is not a `[string, integer]`
+    /// pair, or when it holds more than [`COMPLETION_NEW_TOPICS_MAX`]
+    /// entries: a partial list would be a claim the signed document does not
+    /// make, and one past the CRD's `maxItems` would make the API server refuse
+    /// the WHOLE status patch the fact rides in.
+    pub would_create: Option<Vec<(String, i64)>>,
+    /// `sample.records_expected` — the canary size.
+    pub sample_records_expected: Option<i64>,
+    /// `sample.records_restored` — records consumed back from the target in
+    /// the sampled window (NOT the whole restore's record count).
+    pub sample_records_restored: Option<i64>,
+    /// `integrity.records_sampled`.
+    pub integrity_records_sampled: Option<i64>,
+    /// `integrity.records_sampled_matching`.
+    pub integrity_records_sampled_matching: Option<i64>,
+    /// `sample.window_start`, verbatim, and only when it is an RFC 3339
+    /// instant (the CRD types it `date-time`; a value that would not parse
+    /// back would make the stored object unreadable to every typed client).
+    pub sample_window_start: Option<String>,
+    /// `sample.window_end`, under the same rule.
+    pub sample_window_end: Option<String>,
 }
+
+/// `Restore.status.completion.newTopics`'s `maxItems` (`crds/restore.rs`).
+pub const COMPLETION_NEW_TOPICS_MAX: usize = 256;
 
 /// Guard **G-TS**'s observation, read off the pod log by key name.
 ///
@@ -3555,7 +3581,36 @@ pub fn scorecard_observation(bytes: &[u8]) -> Option<ScorecardObservation> {
         measured_rpo_seconds: i("/measured/rpo_seconds"),
         offset_report_sha256: s("/evidence/offset_report_sha256"),
         scorecard_sha256: Some(sha256_prefixed(bytes)),
+        would_create: doc
+            .pointer("/target_diff/would_create")
+            .and_then(would_create_pairs),
+        sample_records_expected: i("/sample/records_expected"),
+        sample_records_restored: i("/sample/records_restored"),
+        integrity_records_sampled: i("/integrity/records_sampled"),
+        integrity_records_sampled_matching: i("/integrity/records_sampled_matching"),
+        sample_window_start: s("/sample/window_start").filter(|t| is_rfc3339(t)),
+        sample_window_end: s("/sample/window_end").filter(|t| is_rfc3339(t)),
     })
+}
+
+/// `target_diff.would_create` read as `(topic, partitions)` pairs — all of
+/// them, or none (see [`ScorecardObservation::would_create`]).
+fn would_create_pairs(list: &Value) -> Option<Vec<(String, i64)>> {
+    let entries = list.as_array()?;
+    if entries.len() > COMPLETION_NEW_TOPICS_MAX {
+        return None;
+    }
+    entries
+        .iter()
+        .map(|entry| match entry.as_array().map(Vec::as_slice) {
+            Some([name, partitions]) => Some((name.as_str()?.to_string(), partitions.as_i64()?)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn is_rfc3339(value: &str) -> bool {
+    DateTime::parse_from_rfc3339(value).is_ok()
 }
 
 /// What the archive-facing half of this reconciler is handed, and the reason it
@@ -3881,7 +3936,8 @@ async fn write_fetch_verdict(
 ///   scorecard copied to this key — however validly signed — is `Invalid` and
 ///   projects nothing.
 /// * **The facts.** `outcome`, `lastPhaseCompleted`, `objectives`,
-///   `integrity`, `measured` and the offset report's digest are copied out of
+///   `integrity`, `measured`, `completion` and the offset report's digest are
+///   copied out of
 ///   the relayed bytes by JSON pointer (`scorecard_observation`, the one
 ///   reader) — the same facts, the same rule the own-handle path applies on
 ///   its terminal patch: whenever the document was read and is bound to this
@@ -4066,6 +4122,7 @@ async fn evidence_fetch_pass(
                                     ("objectives", objectives_block(&o)),
                                     ("integrity", integrity_block(&o)),
                                     ("measured", measured_block(&o)),
+                                    ("completion", completion_block(&o)),
                                 ] {
                                     if !block.is_empty() {
                                         facts.insert(key.to_string(), Value::Object(block));
@@ -4419,8 +4476,8 @@ pub fn running_status_patch(
 /// # What is copied, and what is decided
 ///
 /// `exitCode` and the condition are DECIDED from the pod. Everything else —
-/// `outcome`, `integrity`, `measured`, `objectives`, `lastPhaseCompleted` and
-/// the evidence digests — is COPIED VERBATIM out of the scorecard the runner
+/// `outcome`, `integrity`, `measured`, `objectives`, `completion`,
+/// `lastPhaseCompleted` and the evidence digests — is COPIED VERBATIM out of the scorecard the runner
 /// signed, through [`ScorecardObservation`], and every one of them is OMITTED
 /// when the archive was not observed. A merge patch with no key means "leave
 /// it alone", which is the only honest thing to write about a document that
@@ -4588,6 +4645,10 @@ pub fn finished_status_patch(
         if !measured.is_empty() {
             status.insert("measured".to_string(), Value::Object(measured));
         }
+        let completion = completion_block(o);
+        if !completion.is_empty() {
+            status.insert("completion".to_string(), Value::Object(completion));
+        }
     }
 
     if let Some((old, new)) = topics {
@@ -4661,6 +4722,66 @@ pub fn measured_block(o: &ScorecardObservation) -> serde_json::Map<String, Value
     }
     if let Some(v) = o.measured_rpo_seconds {
         m.insert("rpoSeconds".to_string(), json!(v));
+    }
+    m
+}
+
+/// `status.completion` — D3 §2.2 and §3.5, PLAT-14.1's durable completion
+/// report (defect RESTORE-COMPLETION-UNWRITTEN).
+///
+/// COPIED BY JSON POINTER FROM THE SIGNED SCORECARD, NEVER RECOMPUTED, and
+/// every key is ABSENT when the document does not carry it: `newTopics` from
+/// `target_diff.would_create`, `recordsExpected`/`recordsRestored` from
+/// `sample`, `recordsSampled`/`recordsSampledMatching`/`integrityLevel` from
+/// `integrity`, `sampleWindow` from `sample.window_start`/`window_end`. An
+/// empty map — nothing observed — means the caller writes no `completion` at
+/// all, so a run whose scorecard was never read (no archive handle, an
+/// evidence fetch `NotAttempted`, a relayed document bound to another run)
+/// keeps the field absent rather than reporting zeros nobody signed.
+///
+/// `newTopics` IS A WHOLE-VALUE COPY. A JSON merge patch replaces an array,
+/// and that is correct here only because the array has exactly one source —
+/// the signed document's full `would_create` list — and one writer; there is
+/// no other entry a replacement could drop.
+#[must_use]
+pub fn completion_block(o: &ScorecardObservation) -> serde_json::Map<String, Value> {
+    let mut m = serde_json::Map::new();
+    if let Some(topics) = o.would_create.as_ref() {
+        m.insert(
+            "newTopics".to_string(),
+            Value::Array(
+                topics
+                    .iter()
+                    .map(|(name, partitions)| json!({"name": name, "partitions": partitions}))
+                    .collect(),
+            ),
+        );
+    }
+    for (key, value) in [
+        ("recordsExpected", o.sample_records_expected),
+        ("recordsRestored", o.sample_records_restored),
+        ("recordsSampled", o.integrity_records_sampled),
+        (
+            "recordsSampledMatching",
+            o.integrity_records_sampled_matching,
+        ),
+    ] {
+        if let Some(v) = value {
+            m.insert(key.to_string(), json!(v));
+        }
+    }
+    if let Some(v) = o.integrity_level.as_ref() {
+        m.insert("integrityLevel".to_string(), json!(v));
+    }
+    let mut window = serde_json::Map::new();
+    if let Some(v) = o.sample_window_start.as_ref() {
+        window.insert("start".to_string(), json!(v));
+    }
+    if let Some(v) = o.sample_window_end.as_ref() {
+        window.insert("end".to_string(), json!(v));
+    }
+    if !window.is_empty() {
+        m.insert("sampleWindow".to_string(), Value::Object(window));
     }
     m
 }

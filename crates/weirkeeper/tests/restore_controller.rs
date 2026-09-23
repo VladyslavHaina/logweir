@@ -6259,6 +6259,11 @@ async fn a_destination_backed_restore_with_no_evidence_reader_publishes_not_atte
         "and NOTHING is copied out of a scorecard nobody fetched — the verdict is the only thing \
          this patch learned: {second}"
     );
+    assert!(
+        statuses.iter().all(|s| s["completion"].is_null()),
+        "evidence NotAttempted: no scorecard was read, so `status.completion` stays ABSENT \
+         rather than reporting counts nobody signed: {statuses:?}"
+    );
     let (_, state, reason) = conditions_of(second)
         .into_iter()
         .find(|(t, ..)| t == "Verified")
@@ -6894,6 +6899,246 @@ async fn the_admission_condition_survives_the_terminal_transition() {
 // read by an evidence-fetch Job with the EVIDENCE destination's grant
 // ===========================================================================
 
+// ===========================================================================
+// RESTORE-COMPLETION-UNWRITTEN — PLAT-14.1's durable completion report
+// (D3 §2.2, §3.5): `status.completion`, copied by JSON pointer from the signed
+// scorecard and written on the preconditioned status write that carries the
+// other scorecard facts.
+// ===========================================================================
+
+/// The signed scorecard fixture `logweir-core`'s `emit_fixture` produces
+/// (`crates/logweir-core/tests/fixture_regen.rs` pins it), so the pointers read
+/// here are the ones the runner's real document carries.
+fn signed_fixture_scorecard() -> Vec<u8> {
+    std::fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../e2e/fixtures/signed/scorecard.json"),
+    )
+    .expect("the signed scorecard fixture is readable")
+}
+
+/// What `status.completion` must be for [`signed_fixture_scorecard`] —
+/// written out by hand from the fixture's `target_diff.would_create`,
+/// `sample` and `integrity`, not computed by the code under test.
+fn fixture_completion() -> Value {
+    serde_json::json!({
+        "newTopics": [{"name": "drill-orders", "partitions": 3}],
+        "recordsExpected": 75,
+        "recordsRestored": 75,
+        "recordsSampled": 75,
+        "recordsSampledMatching": 75,
+        "integrityLevel": "byte-fingerprint",
+        "sampleWindow": {"start": "2026-08-29T00:00:00Z", "end": "2026-08-30T02:00:00Z"}
+    })
+}
+
+/// The whole `PATCH …/status` body (metadata included) that wrote
+/// `status.completion`. Exactly one write carries it.
+fn patch_body_with_completion(bodies: &[SeenBody]) -> Value {
+    let with: Vec<Value> = bodies
+        .iter()
+        .filter(|b| b.method == "PATCH" && path(&b.uri).ends_with("/status"))
+        .map(|b| serde_json::from_str::<Value>(&b.body).expect("a status patch is JSON"))
+        .filter(|v| !v["status"]["completion"].is_null())
+        .collect();
+    assert_eq!(
+        with.len(),
+        1,
+        "exactly one status write carries completion: {with:?}"
+    );
+    with[0].clone()
+}
+
+fn fixture_scorecard_oracle(_key: String) -> BoxFuture<'static, Option<ScorecardObservation>> {
+    Box::pin(async { scorecard_observation(&signed_fixture_scorecard()) })
+}
+
+/// Every completion field comes from its D3 §2.2 pointer, verbatim.
+#[test]
+fn the_completion_is_copied_from_the_signed_scorecard_by_pointer() {
+    let o = scorecard_observation(&signed_fixture_scorecard()).expect("a scorecard object");
+    assert_eq!(
+        Value::Object(weirkeeper::controllers::restore::completion_block(&o)),
+        fixture_completion()
+    );
+    // EACH FIELD FROM ITS OWN POINTER. The fixture's four counts are all 75,
+    // so a swapped pointer would pass above; distinct values here make every
+    // pointer answer for itself.
+    let mut distinct: Value = serde_json::from_slice(&signed_fixture_scorecard()).expect("JSON");
+    distinct["sample"]["records_expected"] = serde_json::json!(25);
+    distinct["sample"]["records_restored"] = serde_json::json!(24);
+    distinct["integrity"]["records_sampled"] = serde_json::json!(23);
+    distinct["integrity"]["records_sampled_matching"] = serde_json::json!(22);
+    distinct["integrity"]["level"] = serde_json::json!("consume-only");
+    distinct["target_diff"]["would_create"] = serde_json::json!([["a", 1], ["b", 7]]);
+    distinct["sample"]["window_start"] = serde_json::json!("2026-09-22T23:45:29.256Z");
+    let d = scorecard_observation(distinct.to_string().as_bytes()).expect("object");
+    assert_eq!(
+        Value::Object(weirkeeper::controllers::restore::completion_block(&d)),
+        serde_json::json!({
+            "newTopics": [{"name": "a", "partitions": 1}, {"name": "b", "partitions": 7}],
+            "recordsExpected": 25,
+            "recordsRestored": 24,
+            "recordsSampled": 23,
+            "recordsSampledMatching": 22,
+            "integrityLevel": "consume-only",
+            "sampleWindow": {"start": "2026-09-22T23:45:29.256Z", "end": "2026-08-30T02:00:00Z"}
+        })
+    );
+    // And the terminal write builds it into `status.completion`.
+    let keys = restore_evidence_keys(&i8_tail());
+    let patch = finished_status_patch(&restore(), 0, &keys, None, Some(&o), None, None, now());
+    assert_eq!(
+        patch["status"]["completion"],
+        fixture_completion(),
+        "{patch}"
+    );
+    // THE STORED SHAPE PARSES BACK: a status the typed clients (this
+    // controller's watcher, `logweir-api`'s operation view) could not read
+    // would take the whole object down with it.
+    let mut status = serde_json::json!({});
+    apply_merge_patch(&mut status, &patch["status"]);
+    let typed: weirkeeper::crds::restore::RestoreStatus =
+        serde_json::from_value(status).expect("the written status is a RestoreStatus");
+    let completion = typed.completion.expect("completion");
+    assert_eq!(completion.records_restored, Some(75));
+    assert_eq!(completion.records_sampled_matching, Some(75));
+    assert_eq!(
+        completion.new_topics.expect("newTopics")[0].partitions,
+        Some(3)
+    );
+}
+
+/// NEVER FABRICATED. A fact the scorecard does not carry is absent; a list
+/// that cannot be copied WHOLE is not copied at all; a run whose scorecard was
+/// not observed writes no `completion` key.
+#[test]
+fn a_completion_fact_the_scorecard_does_not_carry_is_absent() {
+    use weirkeeper::controllers::restore::{completion_block, COMPLETION_NEW_TOPICS_MAX};
+    let base: Value = serde_json::from_slice(&signed_fixture_scorecard()).expect("JSON");
+    let block_of = |doc: &Value| {
+        completion_block(
+            &scorecard_observation(doc.to_string().as_bytes()).expect("a scorecard object"),
+        )
+    };
+
+    // No `sample`, no `integrity`, no `target_diff`: nothing to copy.
+    let mut bare = base.clone();
+    for key in ["sample", "integrity", "target_diff"] {
+        bare.as_object_mut().expect("object").remove(key);
+    }
+    assert!(block_of(&bare).is_empty(), "{:?}", block_of(&bare));
+    let keys = restore_evidence_keys(&i8_tail());
+    let o = scorecard_observation(bare.to_string().as_bytes()).expect("object");
+    let patch = finished_status_patch(&restore(), 0, &keys, None, Some(&o), None, None, now());
+    assert!(
+        patch["status"].get("completion").is_none(),
+        "an empty completion is not written: {patch}"
+    );
+    // Not observed at all: no key.
+    let patch = finished_status_patch(&restore(), 0, &keys, None, None, None, None, now());
+    assert!(patch["status"].get("completion").is_none(), "{patch}");
+
+    // A malformed `would_create` entry: the list is not copied, the counts are.
+    let mut malformed = base.clone();
+    malformed["target_diff"]["would_create"] = serde_json::json!([["drill-orders", 3], ["x"]]);
+    let block = block_of(&malformed);
+    assert!(!block.contains_key("newTopics"), "{block:?}");
+    assert_eq!(block.get("recordsRestored"), Some(&serde_json::json!(75)));
+
+    // Past the CRD's maxItems: not copied (a truncated list is a claim the
+    // document does not make, and an oversized one fails the whole patch).
+    let mut many = base.clone();
+    many["target_diff"]["would_create"] = Value::Array(
+        (0..=COMPLETION_NEW_TOPICS_MAX)
+            .map(|n| serde_json::json!([format!("t-{n}"), 1]))
+            .collect(),
+    );
+    assert!(!block_of(&many).contains_key("newTopics"));
+    let mut at_bound = base.clone();
+    at_bound["target_diff"]["would_create"] = Value::Array(
+        (0..COMPLETION_NEW_TOPICS_MAX)
+            .map(|n| serde_json::json!([format!("t-{n}"), 1]))
+            .collect(),
+    );
+    assert_eq!(
+        block_of(&at_bound)["newTopics"]
+            .as_array()
+            .expect("copied")
+            .len(),
+        COMPLETION_NEW_TOPICS_MAX
+    );
+
+    // A window instant that is not RFC 3339 is not written; the other end is.
+    let mut window = base.clone();
+    window["sample"]["window_start"] = serde_json::json!("yesterday");
+    assert_eq!(
+        block_of(&window)["sampleWindow"],
+        serde_json::json!({"end": "2026-08-30T02:00:00Z"})
+    );
+
+    // A count no `int64` can hold is absent, never wrapped or clamped.
+    let mut huge = base;
+    huge["sample"]["records_restored"] = serde_json::json!(u64::MAX);
+    let block = block_of(&huge);
+    assert!(!block.contains_key("recordsRestored"), "{block:?}");
+    assert_eq!(block.get("recordsSampled"), Some(&serde_json::json!(75)));
+}
+
+/// **THE OWN-HANDLE TERMINAL WRITE CARRIES THE COMPLETION IT OBSERVED**, in the
+/// same resourceVersion-preconditioned PATCH as the exit code. MUTANT: drop the
+/// `completion` insert from `finished_status_patch` and this fails.
+#[tokio::test]
+async fn the_terminal_write_carries_the_completion_it_observed() {
+    let (client, _rec, bodies) = mock_client_recording_bodies(finished_routes(
+        pod_list_terminated(0),
+        log_body(&i8_tail()),
+        "Complete",
+    ));
+    reconcile_restore(
+        &restore(),
+        &client,
+        &fixture_scorecard_oracle,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("the reconcile completes");
+    let bodies = bodies.lock().expect("readable").clone();
+    let body = patch_body_with_completion(&bodies);
+    assert_eq!(body["status"]["completion"], fixture_completion(), "{body}");
+    assert_eq!(
+        body["status"]["exitCode"],
+        serde_json::json!(0),
+        "the terminal write"
+    );
+    assert_eq!(
+        body["metadata"]["resourceVersion"],
+        serde_json::json!(FIXTURE_RESOURCE_VERSION),
+        "preconditioned on the object this pass observed: {body}"
+    );
+
+    // The same run with no archive handle observes nothing and writes none.
+    let (client, _rec, bodies) = mock_client_recording_bodies(finished_routes(
+        pod_list_terminated(0),
+        log_body(&i8_tail()),
+        "Complete",
+    ));
+    reconcile_restore(
+        &restore(),
+        &client,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("the reconcile completes");
+    let statuses = patched_statuses(&bodies.lock().expect("readable"));
+    assert!(
+        !statuses.is_empty() && statuses.iter().all(|s| s["completion"].is_null()),
+        "{statuses:?}"
+    );
+}
+
 mod evidence_fetch_job {
     use super::*;
     use logweir_core::check_contract::{
@@ -7139,6 +7384,10 @@ mod evidence_fetch_job {
             last["outcome"].is_null(),
             "nothing copied from a document nobody read"
         );
+        assert!(
+            last["completion"].is_null(),
+            "no completion from a document nobody read (RESTORE-COMPLETION-UNWRITTEN): {last}"
+        );
     }
 
     /// **A VERIFIED RELAY IS `Valid`, AND THE SCORECARD'S FACTS LAND** —
@@ -7172,6 +7421,20 @@ mod evidence_fetch_job {
             "{last}"
         );
         assert_eq!(last["outcome"], serde_json::json!("pass"));
+        // RESTORE-COMPLETION-UNWRITTEN: `status.completion`, copied by JSON
+        // pointer out of the relayed, signed fixture (the one
+        // `logweir-core`'s `emit_fixture` produces), exactly and entirely.
+        assert_eq!(
+            last["completion"],
+            fixture_completion(),
+            "the relayed scorecard's completion lands on the verdict write: {last}"
+        );
+        let verdict_body = patch_body_with_completion(&bodies);
+        assert_eq!(
+            verdict_body["metadata"]["resourceVersion"],
+            serde_json::json!(FIXTURE_RESOURCE_VERSION),
+            "completion rides the resourceVersion-preconditioned verdict write: {verdict_body}"
+        );
         assert_eq!(last["measured"]["rtoSeconds"], serde_json::json!(512));
         assert_eq!(last["objectives"]["rtoSeconds"], serde_json::json!(900));
         assert_eq!(
@@ -7226,6 +7489,7 @@ mod evidence_fetch_job {
             assert!(
                 last["outcome"].is_null()
                     && last["objectives"].is_null()
+                    && last["completion"].is_null()
                     && last["evidence"]["scorecardSha256"].is_null()
             );
         }

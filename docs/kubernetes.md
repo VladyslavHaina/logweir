@@ -271,6 +271,22 @@ controller reading a standing-authorised one refuses terminally with
 carry the rehearsal controller refuses such an `Approval` visibly with
 `ReferentHasNoPlanBytes` rather than verifying it against bytes nobody hashed.
 
+**Where `Restore.status.completion` comes from.** The controller copies it by
+JSON pointer out of the run's signed scorecard and computes none of it:
+`newTopics` (name and partitions) from `target_diff.would_create`,
+`recordsExpected` and `recordsRestored` from `sample`, `recordsSampled`,
+`recordsSampledMatching` and `integrityLevel` from `integrity`, and
+`sampleWindow` from `sample.window_start`/`window_end`. It is written in the
+same resourceVersion-preconditioned status patch as the other scorecard facts
+(`outcome`, `integrity`, `measured`): the terminal write when the controller
+reads the archive itself, or the evidence-fetch verdict write when the
+evidence-fetch Job relays a scorecard bound to this run. It stays **absent**
+while no scorecard has been read — evidence `NotAttempted`, a fetch still
+pending, or a relayed document naming another run — and a field the document
+does not carry is omitted rather than written as zero. `recordsRestored` is
+the count consumed back from the target **in the sampled window**, not the
+restore's total record count.
+
 **Absent-field behaviour for the additive fields.** `Backup.spec.destinationRef`,
 `BackupSchedule.spec.destinationRef`, `Restore.spec.sourceDestinationRef` and
 `Restore.spec.evidenceDestinationRef` are all optional: absent means the object
