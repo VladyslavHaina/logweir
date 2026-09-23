@@ -522,3 +522,53 @@ fn a_fresh_verification_passes_only_as_valid() {
         assert!(!result.is_pass(), "{other:?}");
     }
 }
+
+// ===========================================================================
+// The fixture both sides read
+// ===========================================================================
+
+/// `ui/tests/fixtures/d3/backup-valid-basis-none.json` — a `Valid` whose
+/// `trust` block is PRESENT with `basis: "None"`. The console's legacy mode
+/// used to paint it green (review LOW-1 of `claude/api-trust-state`);
+/// `ui/tests/trust-basis-class.spec.js` and `ui/tests/d3.spec.js` read this
+/// same file and now say not green. Here every controller reader refuses it.
+#[test]
+fn the_shared_valid_basis_none_fixture_is_refused_by_every_controller_reader() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../ui/tests/fixtures/d3/backup-valid-basis-none.json"
+    );
+    let object: Value = serde_json::from_str(
+        &std::fs::read_to_string(path).expect("the console fixture is readable"),
+    )
+    .expect("the console fixture parses");
+    let status = &object["status"];
+    let verification = &status["evidence"]["verification"];
+    assert_eq!(verification["result"].as_str(), Some("Valid"));
+    assert_eq!(verification["trust"]["basis"].as_str(), Some("None"));
+
+    let badge = v::backup_badge(status);
+    assert!(!badge.green);
+    assert_eq!(badge.reason, "VerificationUntrusted");
+    assert_eq!(
+        ValidBasis::of_json(verification.get("trust")),
+        ValidBasis::Refused
+    );
+
+    let typed: Backup = serde_json::from_value(object.clone()).expect("a typed Backup");
+    let block = typed
+        .status
+        .as_ref()
+        .and_then(|s| s.evidence.as_ref())
+        .and_then(|e| e.verification.as_ref())
+        .and_then(|v| v.trust.as_ref());
+    assert_eq!(
+        p::Evidence::from_verification(Some("Valid"), block),
+        p::Evidence::Untrusted
+    );
+    let refusals = ControllerRefusals::from_facts([BackupVerdictFacts::from_json(&object)]);
+    assert!(
+        !refusals.is_empty(),
+        "a refusal no catalog row may overrule"
+    );
+}

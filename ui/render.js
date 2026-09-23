@@ -2246,7 +2246,7 @@ export function verificationCase(verification, runSucceeded) {
     return VERIFICATION_CASES.RecordedBeforeRevocation;
   }
   if (v.result === "Valid") {
-    if (!basisAllowsGreen(trust.basis)) {
+    if (!trustBlockAllowsGreen(v.trust)) {
       return VERIFICATION_CASES.NotRecorded;
     }
     return runSucceeded === true ? "" : VERIFICATION_CASES.RunNotSucceeded;
@@ -2255,19 +2255,44 @@ export function verificationCase(verification, runSucceeded) {
   return typeof named === "string" ? named : VERIFICATION_CASES.NotRecorded;
 }
 
-/** Whether a recorded `trust.basis` leaves a `Valid` verdict green.
+/** Whether a `trust.basis` the PRODUCT API published (`OperationTrust.basis`)
+ *  leaves a `Valid` verdict green.
  *
- *  THREE ANSWERS COLLAPSE TO YES, and they are three different facts: the
- *  trust layer said `Current`, it said `Historical`, or it said nothing at all
- *  -- as an absent block, or as [`TRUST_BASIS_NOT_OBSERVED`], which is the same
- *  absence spelled by a document that has to spell something. What is left is
- *  a basis this build does not know, and that one is not green, because a word
- *  this page cannot read is not a word it may treat as a pass. */
+ *  FOR THE API'S DTO ONLY -- NOT FOR A CUSTOM RESOURCE. The DTO has to spell
+ *  something, and it spells an absent block as [`TRUST_BASIS_NOT_OBSERVED`];
+ *  so here three answers collapse to yes: `Current`, `Historical`, and that
+ *  absence. What is left is a basis this build does not know, and that one is
+ *  not green, because a word this page cannot read is not a word it may treat
+ *  as a pass. A custom resource CAN say "no block" by having none, so a
+ *  present `basis: None` there is not an absence: read a raw resource with
+ *  [`trustBlockAllowsGreen`]. */
 export function basisAllowsGreen(basis) {
   if (typeof basis !== "string" || basis === TRUST_BASIS_NOT_OBSERVED) {
     return true;
   }
   return GREEN_BASES.indexOf(basis) !== -1;
+}
+
+/** Whether a RAW `status.evidence.verification.trust` leaves a `Valid`
+ *  verdict green -- legacy mode's rule, and the rule for every object shaped
+ *  like a custom resource (TRUST-VALID-BASIS-CLASS).
+ *
+ *  THE CONTROLLER'S RULE, `weirkeeper::verification::ValidBasis`: NO `trust`
+ *  key at all is D3 section 12's absent field and keeps the pre-existing rule
+ *  (green); a PRESENT block is green only on `Current` or `Historical`. So
+ *  `{basis: "None"}`, `{}`, `{basis: null}`, `null`, `Unverified`,
+ *  `RecordedBeforeRevocation` and a word this build does not know are all not
+ *  green -- the controller badge says `VerificationUntrusted` or
+ *  `VerificationNotAttempted` for each, and `logweir-api` says `untrusted` or
+ *  `notAttempted`. Reading a present `None` as absence here (review finding
+ *  F1's rule, which belongs to the DTO) made legacy mode the one surface that
+ *  painted those objects green (review LOW-1 of `claude/api-trust-state`). */
+export function trustBlockAllowsGreen(trust) {
+  if (trust === undefined) {
+    return true;
+  }
+  return trust !== null && typeof trust === "object" && typeof trust.basis === "string" &&
+    GREEN_BASES.indexOf(trust.basis) !== -1;
 }
 
 /** The caption a badge that is not green carries: the one word every older

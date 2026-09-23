@@ -1934,17 +1934,25 @@ document carries.
 trust basis that leaves the verdict standing **and** the kind's own success
 field (`exitCode == 0` for a Backup, `outcome == "pass"` for a Restore).
 
-**Three bases leave it standing, and they are three different facts:**
-`Current`, `Historical`, and *no basis at all* -- which arrives two ways. An
-object an older controller wrote carries no `trust` block; a DTO that has to
-spell something spells it `basis: "None"`, which is what D3 section 12 says it
-carries for exactly that object. Both are ABSENCES: the trust layer has nothing
-to say about the verdict, not that the verdict is worse. Reading either as a
-downgrade would put `unverified: no verification was recorded` on every archive
-an upgraded cluster holds, with `result: Valid`, `verifiedAt` and
-`matchedKeyId` sitting beside it saying otherwise. A basis this build cannot
-read is not green, because a word the page cannot understand is not one it may
-treat as a pass.
+**Three shapes leave it standing, and they are three different facts:**
+`Current`, `Historical`, and *no `trust` block at all* -- an object an older
+controller wrote, which D3 section 12 says keeps the pre-existing rule. Reading
+that absence as a downgrade would put `unverified: no verification was
+recorded` on every archive an upgraded cluster holds, with `result: Valid`,
+`verifiedAt` and `matchedKeyId` sitting beside it saying otherwise.
+
+**A PRESENT block is green only on `Current` or `Historical`** -- the
+controller's own rule (`weirkeeper::verification::ValidBasis`,
+TRUST-VALID-BASIS-CLASS; `render.js` `trustBlockAllowsGreen`). So a custom
+resource carrying `{basis: "None"}`, `{}`, `{basis: null}`, `Unverified`,
+`RecordedBeforeRevocation` or a word this build cannot read is not green: the
+controller's `Verified` condition says `VerificationUntrusted` or
+`VerificationNotAttempted` for each, and `logweir-api` says `untrusted` or
+`notAttempted`. The product API's DTO is different: it has to spell an absent
+block somehow and spells it `basis: "None"` (D3 section 12), so in CONSOLE mode
+`None` beside the word `verified` is that absence. A console detail therefore
+writes no `trust` block where the API published `None`, and a present `None`
+block reaches it already folded to `Untrusted`.
 
 A **`Historical`** basis carries `(signed before that key was retired)` and is a
 **pass, not a warning**: the supported key rotation is meant to produce exactly

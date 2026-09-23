@@ -8,6 +8,9 @@
 //   Restore -- green requires `evidence.verification.result == "Valid"` AND
 //              `status.outcome === "pass"`.  (pages/history.js)
 //
+// In both, `Valid` counts only beside no `trust` block or a `Current` /
+// `Historical` basis (`validVerification`, D3 sections 7.4 and 12).
+//
 // A `Backup` HAS NO `outcome` FIELD AT ALL. Not on the status
 // (`crates/weirkeeper/src/crds/backup.rs`), not on the recorded verification,
 // not on the signed receipt. So the `Backup` rule cannot be the `Restore` rule
@@ -37,7 +40,7 @@ import { active, cancelled, readOptions } from "../lifecycle.js";
 import {
   HISTORICAL_SUFFIX,
   badge,
-  basisAllowsGreen,
+  trustBlockAllowsGreen,
   bucketOf,
   cell,
   detailLink,
@@ -80,16 +83,23 @@ export const NO_BACKUP_SENTENCE =
  *  treated here as no verdict at all rather than as a green badge whose label
  *  cannot be written.
  *
- *  THE TRUST BASIS IS PART OF THE RULE NOW (D3 section 7.4). Green requires `Valid`
- *  AND a basis of `Current` or `Historical`. The two bases that are NOT green
- *  are `RecordedBeforeRevocation` -- a compromised key signed it and a
- *  controller happened to have seen it first, which is an observation and not
- *  a signature this installation still accepts -- and `None`.
+ *  THE TRUST BASIS IS PART OF THE RULE NOW (D3 section 7.4), and it is the
+ *  controller's rule (`weirkeeper::verification::ValidBasis`, read here by
+ *  render.js `trustBlockAllowsGreen`). A PRESENT `trust` block is green only
+ *  on `Current` or `Historical`. Every other present block is NOT green:
+ *  `RecordedBeforeRevocation` (a compromised key signed it and a controller
+ *  happened to have seen it first, which is an observation and not a
+ *  signature this installation still accepts), `Unverified` (nothing has been
+ *  compared yet), the string `None`, a block with no basis or a `null` one,
+ *  and a word this build does not know. The controller's badge and
+ *  `logweir-api` refuse each of those too.
  *
- *  AN OBJECT WITH NO `trust` BLOCK AT ALL STAYS GREEN. The block is additive
+ *  AN OBJECT WITH NO `trust` KEY AT ALL STAYS GREEN. The block is additive
  *  and every object written before D3 carries none; D3 section 12's rule is that an
  *  absent field is NOT OBSERVED, and treating "an older controller wrote this"
- *  as a downgrade would turn every archive in an upgraded cluster red. */
+ *  as a downgrade would turn every archive in an upgraded cluster red. A console
+ *  detail (`client.js` `mergeOperation`) writes no block where the API said
+ *  the block was absent, so it reaches this rule the same way. */
 export function validVerification(status) {
   const evidence = (status && status.evidence) || {};
   const verification = evidence.verification || {};
@@ -104,10 +114,10 @@ export function validVerification(status) {
   if (typeof key !== "string" || key.length === 0) {
     return null;
   }
-  const basis = (verification.trust || {}).basis;
-  if (!basisAllowsGreen(basis)) {
+  if (!trustBlockAllowsGreen(verification.trust)) {
     return null;
   }
+  const basis = (verification.trust || {}).basis;
   return [at, key, typeof basis === "string" ? basis : null];
 }
 

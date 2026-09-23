@@ -80,7 +80,7 @@ import {
   isContractFailure,
 } from "./contract.js";
 import { preparedFor } from "./plan.js";
-import { basisAllowsGreen } from "./render.js";
+import { basisAllowsGreen, TRUST_BASIS_NOT_OBSERVED } from "./render.js";
 import { causesFrom, validateRequest } from "./validate.js";
 
 /** The two modes, by name. */
@@ -1006,7 +1006,14 @@ function mergeOperation(object, operation, trust) {
       verification[field] = operation.verification[field];
     }
   }
-  if (verification.result !== undefined && trust !== null && trust !== undefined) {
+  // AN ABSENT BLOCK STAYS ABSENT (TRUST-VALID-BASIS-CLASS). The DTO spells a
+  // missing `trust` block as `basis: None`; written here as a block, the
+  // custom-resource rule (`trustBlockAllowsGreen`) would read it as a PRESENT
+  // `None` and turn every object an older controller wrote red. A present
+  // `None` block the API judged `untrusted` has already folded to `Untrusted`
+  // above, so nothing that needs the block loses it.
+  if (verification.result !== undefined && trust !== null && trust !== undefined &&
+    trust.basis !== TRUST_BASIS_NOT_OBSERVED) {
     verification.trust = { basis: trust.basis };
     if (trust.keyState !== null) {
       verification.trust.keyState = trust.keyState;

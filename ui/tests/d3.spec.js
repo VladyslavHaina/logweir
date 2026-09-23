@@ -1133,15 +1133,17 @@ test("a_recorded_before_revocation_basis_is_never_green", () => {
   }), /badge-unverified/, "and the Backup rule agrees");
 });
 
-test("an_explicit_basis_None_is_an_ABSENCE_and_reads_by_the_pre_existing_rule", () => {
-  // REVIEW F1. D3 section 12 spells this exact case: "`trust` absent ->
-  // `basis: None` and the badge uses the pre-existing rule". The STRING
-  // `"None"` and an absent block are one fact said two ways -- one by a custom
-  // resource an older controller wrote, one by a DTO that fills the block in
-  // for it -- and reading the string as a downgrade put
-  // `unverified: no verification was recorded` on every archive an upgraded
-  // cluster carries, with `result: Valid`, `verifiedAt` and `matchedKeyId`
-  // sitting beside it saying otherwise.
+test("an_explicit_basis_None_is_an_absence_in_the_DTO_and_a_refused_block_in_a_resource", () => {
+  // REVIEW F1, NARROWED BY TRUST-VALID-BASIS-CLASS. D3 section 12 spells the
+  // DTO's case: "`trust` absent -> `basis: None` and the badge uses the
+  // pre-existing rule". So in the PRODUCT API's document the string `"None"`
+  // is an absence (`basisAllowsGreen`). A CUSTOM RESOURCE can say "absent" by
+  // carrying no block, so a PRESENT `{basis: "None"}` there is a block the
+  // controller refuses (`weirkeeper::verification::valid_verification`:
+  // `VerificationUntrusted`), and legacy mode now reads it with the
+  // controller's rule (`trustBlockAllowsGreen`) -- review LOW-1 of
+  // `claude/api-trust-state`. An object an older controller wrote carries no
+  // block at all and stays green (`an_object_with_no_trust_block_at_all_stays_green`).
   //
   // THE FIXTURE IS A REAL PRE-D3 OBJECT. `backup-pre-d3-basis-none.json` is
   // the lab's own 2026-09-14 Backup, captured whole; its `trust` block is
@@ -1153,7 +1155,7 @@ test("an_explicit_basis_None_is_an_ABSENCE_and_reads_by_the_pre_existing_rule", 
   assert.equal(verification.trust.basis, "None");
   assert.equal(verification.trust.policy.name, "legacy-roster-v1");
   assert.equal(TRUST_BASIS_NOT_OBSERVED, "None");
-  assert.equal(basisAllowsGreen("None"), true, "an explicit None is an absence");
+  assert.equal(basisAllowsGreen("None"), true, "an explicit None in the DTO is an absence");
   assert.equal(basisAllowsGreen(undefined), true, "and so is no basis at all");
   assert.equal(basisAllowsGreen("Current"), true);
   assert.equal(basisAllowsGreen("Historical"), true);
@@ -1170,27 +1172,27 @@ test("an_explicit_basis_None_is_an_ABSENCE_and_reads_by_the_pre_existing_rule", 
   assert.equal(untrusted.indexOf("no verification was recorded"), -1,
     "the caption is the case the controller recorded, not a claim that nothing did");
 
-  // AND THE SAME OBJECT WITH THE CONTROLLER'S OWN `Valid` IS GREEN.
+  // AND THE SAME OBJECT WITH `result: Valid` IS STILL NOT GREEN: the block is
+  // PRESENT, and its basis is not one the green rule admits. The controller's
+  // badge says `VerificationUntrusted` for exactly these bytes (the fixture's
+  // own `Verified` condition), and `crates/weirkeeper/tests/trust_basis_class.rs`
+  // reads this file to assert it.
   const valid = d3("backup-valid-basis-none.json");
   assert.equal(valid.status.evidence.verification.result, "Valid");
   assert.equal(valid.status.evidence.verification.trust.basis, "None");
   assert.equal(valid.status.exitCode, 0);
-  const ok = validVerification(valid.status);
-  assert.notEqual(ok, null, "an explicit None does not withdraw a recorded verdict");
-  assert.equal(ok[2], "None", "and the basis travels as what it is");
+  assert.equal(validVerification(valid.status), null,
+    "a present `None` block is not the absent-field rule");
   const badge = decode(backupBadge(valid.status));
-  assert.ok(badge.indexOf("badge-green") !== -1,
-    "every archive an upgraded cluster carries stays green: " + badge);
-  assert.match(badge, /verified by weirkeeper at 2026-09-14T23:51:21Z against key/);
-  assert.equal(badge.indexOf("signed before that key was retired"), -1,
-    "and it carries no qualifier, because no basis was established to qualify it");
+  assert.ok(badge.indexOf("badge-unverified") !== -1, badge);
+  assert.equal(badge.indexOf("badge-green"), -1, badge);
 
   // THE OPERATION VIEW'S EVIDENCE BLOCK READS THE SAME FUNCTION, so the two
   // halves of the rule cannot come to disagree.
   const facts = operationFacts(valid, false);
   assert.equal(facts.console, false, "a custom resource, read in legacy mode");
-  assert.ok(decode(renderEvidence(facts)).indexOf("badge-green") !== -1,
-    "the operation view agrees with the badge, because both call basisAllowsGreen");
+  assert.equal(decode(renderEvidence(facts)).indexOf("badge-green"), -1,
+    "the operation view agrees with the badge, because both call trustBlockAllowsGreen");
 });
 
 test("an_object_with_no_trust_block_at_all_stays_green", () => {

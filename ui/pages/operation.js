@@ -58,6 +58,7 @@ import {
   scorecardClaim,
   stateBadge,
   table,
+  trustBlockAllowsGreen,
   unverifiedCaption,
   unverifiedTrustCaption,
   verificationScopeSentence,
@@ -423,8 +424,10 @@ export function renderResult(v) {
  *  DOCUMENT, `NotAttempted` is about the CONTROLLER, and `Untrusted` is about
  *  the SIGNER. They are never flattened into one word here. */
 /** Whether this run's evidence is green, by the evidence section's own rule:
- *  the API's combined trust word in console mode, `result` + `basis` in
- *  legacy mode.
+ *  the API's combined trust word in console mode, `result` + the raw `trust`
+ *  block in legacy mode (render.js `trustBlockAllowsGreen`, the controller's
+ *  rule: no block keeps D3 section 12's rule, a present one is green only on
+ *  `Current`/`Historical`).
  *
  *  THE BASIS STILL VETOES IN CONSOLE MODE (CONSOLE-DETAIL-TRUST-BASIS-DROPPED).
  *  A `logweir-api` built before TRUST-STATE-RBR-VERIFIED projects a `Valid`
@@ -439,7 +442,7 @@ export function evidenceGreen(v) {
   const ver = (console_ ? v.verification : v.evidenceVerification) || {};
   return console_
     ? (GREEN_TRUST_STATES.indexOf(v.trustState) !== -1 && basisAllowsGreen(trust.basis))
-    : (ver.result === "Valid" && basisAllowsGreen(trust.basis));
+    : (ver.result === "Valid" && trustBlockAllowsGreen((v.evidenceVerification || {}).trust));
 }
 
 /** The caption of a console evidence badge that is not green. A green trust
