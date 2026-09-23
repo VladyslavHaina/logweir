@@ -314,6 +314,11 @@ object alone.
 | `retention-object-lock-provider-refusal-is-recorded` | `object-lock` | a bucket made `--with-lock`, three points, a legal hold on every object of the oldest, a `mode: Enforce` policy (`keepLast 1`, `requireApprovedPlan: false`): the controller's own run deletes the unheld candidate, the held objects are still the LATEST versions, `lastEnforcement.failed` names the held point with `Locked`, the next evaluation protects it `LegalHold`, `guarantees.legalHold: ProviderEnforcedUnverified`. The provider's own semantics are recorded beside it (`lock/00-provider.json`: a DELETE with no version id, and one of the held version) | twin: the delete-marker shape the lab produced, a `LogweirEnforced` claim, a bucket without lock |
 | `retention-shared-set-is-never-planned-under-a-retained-point` | `shared-set` | one Backup's Job run twice from its frozen inputs (two receipts, one backup set, `catalog-duplicate-identity`'s technique), a Report policy `keepLast 1`: no candidate shares its `backupId` with a retained point. `NOT-REACHED` unless both points are Available and Verified | twin: a candidate over a retained point's set, both planned together, one unusable |
 
+`notify-transport` must run with no other phase creating, deleting or verifying Backups in
+the namespace: its no-rewrite clause compares EVERY Backup's `resourceVersion` across
+the window, so a concurrent phase's churn fails it for the harness's reason (measured:
+run alongside `operation-states`, it failed on exactly the Backups that phase recreated).
+
 `rehearsal-faults` runs after `rehearsal` and `refused-point`: it rebuilds the same
 `TrustPolicy`. Both arms select from the phase's own point (`l6f-point`, made first);
 a re-run deletes its two schedules, their Approvals and that point before starting,
