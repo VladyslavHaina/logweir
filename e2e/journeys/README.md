@@ -126,7 +126,8 @@ values. The d1 and d2 sweeps have no self-test, and this one covers their output
   UID recorded at creation are read back.
 - The composed harnesses keep their own owner labels, in namespaces named with this
   run's stamp, and run their own `cleanup` in a `finally`.
-- Nothing is written to the shared `logweir-scram-local` release. Three things that
+- Nothing is written to the shared `logweir-scram-local` release, with ONE gated
+  exception: the `plat19-2` suite that `two-approvals` reads (below). Three things that
   would write to it are never invoked:
   - plat06 `case-d`, which deletes the shared controller pod;
   - plat07's `lab-baseline`/`lab-swap`/`lab-restore`, which repoint the shared
@@ -142,10 +143,22 @@ values. The d1 and d2 sweeps have no self-test, and this one covers their output
   console and plat06), plus d3's and plat10's own buckets, which they remove. The
   prefix and the evidence objects the native runs' statuses name are removed at the
   end.
-- No phase changes cluster-scoped state, so the run needs no cluster lock. The one
-  cluster-scoped delete a composed phase can make is d3 `cleanup` deleting its
-  TrustPolicy, which it only does for a TrustPolicy its trust phases created, and
-  none of those phases run here.
+- Without `--open PLAT-19.2` no phase changes cluster-scoped state, so the run needs no
+  cluster lock. The one cluster-scoped delete a composed phase can make is d3 `cleanup`
+  deleting its TrustPolicy, which it only does for a TrustPolicy its trust phases
+  created, and none of those phases run here.
+- **`--open PLAT-19.2` changes the shared controller, under the cluster lock.** The
+  `plat19-2` suite (`e2e/journeys/governed.py`) mounts that run's approval-policy
+  document into the lab controller the chart's way
+  (`scripts/live/approval_policy_swap.py`):
+  - `swap-on` takes the lock unless its owner (`plat20-1-governed`) already holds it,
+    and records the Deployment it found;
+  - `swap-off` runs in `finally`, fails unless the containers and volumes are
+    byte-identical to that record, and releases the lock only after that check holds;
+  - the plat19-2 harness also creates and deletes one owner-labelled TrustPolicy.
+
+  `test_catalogue.py::test_the_one_suite_that_changes_the_shared_release_is_gated_locked_and_restored_in_finally`
+  pins all three.
 
 ## The journeys
 
@@ -157,7 +170,7 @@ values. The d1 and d2 sweeps have no self-test, and this one covers their output
 | `scram-rotation` | SCRAM rotation | plat07 `case-e`, `case-f` | evidence, durable-resource |
 | `new-topic-dynamic-policy` | new topic in dynamic policy | d1 `L-09-1`, `L-09-2` | durable-resource, evidence |
 | `overlap` | overlap | plat06 `case-e` | durable-resource, evidence |
-| `two-approvals` | two approvals | **requires: PLAT-19.2**, so it is skipped | — |
+| `two-approvals` | two approvals | **requires: PLAT-19.2** (skipped unless opened): plat19-2 journey 2, the governed restore in the shared console — the confirmation alone refused `GovernedApprovalRequired` with no Job, the requester's own approval 403, a second person's approval recorded, Verified with Governed provenance, and a Job carrying the frozen policy | durable-resource |
 | `source-offline` | source offline | native: backup from an offline source; d2 `S11` | durable-resource, archive-data |
 | `cr-loss` | CR loss | d3 `catalog-records-written`, `catalog-reconstruction-after-cr-loss`; plat06 `case-e` | archive-data, evidence, durable-resource |
 | `stale-namespace-request` | stale namespace request | console: slow A never renders over B / left form writes nothing / submit after switch lands in B only | durable-resource |
@@ -182,7 +195,8 @@ assertion.
     Restore to succeed and restore exactly the source's records; it no longer records a
     separate `blocked` Approval row. The native older-point journey here also drives a
     restore to completion.
-- **`requires: PLAT-19.2`** needs a governed approval policy. No build has one yet.
-  - The approvals API says "Approval submission is PLAT-19.2 and has no route".
-  - Opening this gate today FAILS the journey by name: its row is missing, because no
-    harness records it.
+- **`requires: PLAT-19.2`** needs a controller bound to a Governed approval policy, and
+  the lab's values bind none. Opening the gate runs the `plat19-2` suite, which binds
+  one for the length of the run under the cluster lock and restores the controller in
+  `finally` (see Safety). The journey requires plat19-2's journey-2 row, recorded at
+  `scripts/plat19-2-ui-e2e.mjs` only after every check in it held.

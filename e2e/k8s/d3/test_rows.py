@@ -3197,8 +3197,10 @@ def duplicated_top_level_names(source: str) -> dict[str, list[int]]:
 
 
 def harness_modules() -> list[pathlib.Path]:
-    """Every Python harness module the live rows run from: D2, D3, `scripts/`."""
+    """Every Python harness module the live rows run from: D2, D3, the PLAT-20.1
+    journey runner (`e2e/journeys`), `scripts/` and `scripts/live/**`."""
     found = set(_REPO.glob("e2e/k8s/*/*.py"))
+    found |= set(_REPO.glob("e2e/journeys/*.py"))
     found |= set(_REPO.glob("scripts/*.py"))
     found |= set(_REPO.glob("scripts/live/**/*.py"))
     found |= set(_REPO.glob("scripts/fixtures/*.py"))
@@ -3207,10 +3209,13 @@ def harness_modules() -> list[pathlib.Path]:
 
 def test_no_harness_module_defines_a_top_level_name_twice() -> None:
     modules = harness_modules()
-    row("the duplicate-definition sweep reads the D2 and D3 harnesses and scripts/*.py",
+    row("the duplicate-definition sweep reads the D2 and D3 harnesses, e2e/journeys, scripts/*.py and "
+        "scripts/live/** (the PLAT-17.2 harness included)",
         any(p.name == "d3_live.py" for p in modules)
         and any(p.name == "d2_live.py" for p in modules)
-        and any(p.name == "test-plat06-live.py" for p in modules),
+        and any(p.name == "test-plat06-live.py" for p in modules)
+        and any(p.name == "suites.py" and p.parent.name == "journeys" for p in modules)
+        and any(p.name == "live_p172_expired.py" for p in modules),
         f"modules: {[str(p.relative_to(_REPO)) for p in modules]}")
     for path in modules:
         dups = duplicated_top_level_names(path.read_text())
