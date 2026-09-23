@@ -30,7 +30,7 @@ section.
 
 **The PoC install profile is this path, made concrete.**
 [deploy/poc/](../deploy/poc/README.md) installs it end to end with Helm and the
-published `sha-` images: ingress-nginx, a cert-manager local CA for real TLS,
+published `sha-` images: an ingress controller, a cert-manager local CA for real TLS,
 Dex for sign-in with one user per console role, the shared console, a scoped
 controller, an approval-policy binding and a demo Kafka and MinIO to back up —
 ordered commands, a check per step, first sign-in per role, the first backup
@@ -91,7 +91,10 @@ trustpolicy`) reports its keys loaded.
 
 ### 3. Roles and the console
 
-1. Bind the five human roles per namespace ([install.md](install.md) §5).
+1. Bind the human roles ([install.md](install.md) §5): viewer, operator,
+   approver and retention-admin with a `RoleBinding` per namespace, and
+   `logweir-trust-admin` once, with a `ClusterRoleBinding` (it is
+   cluster-scoped).
 2. Turn the console on ([install.md](install.md) §5e). `localAdmin` is one
    administrator reached by `kubectl port-forward` — for a lab or break-glass;
    `shared` is the SSO console, needs `controller.watchNamespaces`, an OIDC
@@ -218,7 +221,9 @@ ServiceAccount, and an administrator's approval of each plan digest
 
 Read [release-notes.md](release-notes.md) before every upgrade: it lists the
 required actions in order. The standing rule is **CRDs first, then the controller
-and runner together, then the console** ([install.md](install.md), *Upgrade CRDs
+and runner together, then the console** (on the Helm path these are successive
+`helm upgrade`s of one release: first the image values, then any
+approval-policy binding) ([install.md](install.md), *Upgrade CRDs
 before upgrading the controller*), with the identity backed up beforehand.
 
 ### Terms: what the console says, and what it means

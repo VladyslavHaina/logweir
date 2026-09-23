@@ -7846,7 +7846,8 @@ security opinion:** `admissionregistration.k8s.io/v1`
 where the document is rejected with `no matches for kind`.
 
 **It fences the console the chart renders.** Since D0 stage 7 the chart
-renders the `logweir-api` ServiceAccount under `api.enabled`, with its `create
+renders the console's ServiceAccount, `<release>-api` (`logweir-api` for a
+release named `logweir`), under `api.enabled`, with its `create
 secrets` grant, and refuses to render an admission policy whose
 `admissionPolicy.consoleServiceAccountName` is not that account — a name that
 fenced nobody would install, look enabled and bound nothing. (Earlier revisions

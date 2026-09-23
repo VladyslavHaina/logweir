@@ -166,7 +166,8 @@ admissionPolicy:
 ```
 
 **It fences the console this chart renders.** With `api.enabled` the chart
-renders the `logweir-api` ServiceAccount, and it refuses a
+renders the console's ServiceAccount, `<release>-api` (`logweir-api` for a
+release named `logweir`), and it refuses a
 `admissionPolicy.consoleServiceAccountName` that is not that account — a
 subject naming nobody would install, look enabled and fence nothing. The value
 is REQUIRED and non-empty: an absent, empty or null one renders a subject that

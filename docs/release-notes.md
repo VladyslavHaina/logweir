@@ -63,7 +63,7 @@ find ui -type f ! -name '*.md' ! -path 'ui/tests/*' | LC_ALL=C sort | xargs shas
   remains a supported legacy view; the destination, discovery, readiness,
   catalog and schedule-policy flows are console-only.
 - **A versioned PoC install profile**, [deploy/poc/](../deploy/poc/README.md):
-  ingress-nginx, cert-manager with a local CA, Dex and the shared console, all
+  an ingress controller, cert-manager with a local CA, Dex and the shared console, all
   by Helm and the published `sha-` images, with the chart gaps it had to stand
   in for listed there (G1–G6). [UNVERIFIED — the profile has been rendered, not yet installed on docker-desktop.]
 - **Fourteen kinds** on `logweir.dev/v1alpha1`, all additive over `v0.1.5`
@@ -98,7 +98,9 @@ under its item below.
    (item 6).
 6. **Apply the CRDs, wait for all fourteen to be established**, then roll the
    controller **and the runner image together** (item 5), then the console,
-   then any approval-policy binding (item 7).
+   then any approval-policy binding (item 7). On the Helm path these are one
+   release and successive `helm upgrade`s: first the image values (controller,
+   runner and console move together), then the `approvalPolicy.*` values.
 
 ### The ten operator-facing changes
 
@@ -149,8 +151,11 @@ approvals hold. A shared set with more receipts than `maxDeletionsPerRun` is
 never selected; raise the ceiling to let it go. **Scope:** found live by
 harness-rows-11 (it was data loss); fixed on `main` `b57753b`, Tier-A review
 with two fix rounds. [UNVERIFIED — the shared-set row runs at lab-refresh-9 against the rebuilt lab.]
-**Rollback:** an older worker refuses a plan carrying `co_point_ids` (exit 3)
-and deletes nothing.
+**Rollback:** set every `RetentionPolicy` to `mode: Report` **before** rolling
+back: an older controller plans without this protection again and could plan
+a set a retained receipt still names (a deletion would still need a fresh
+`approvedPlanSha256`). An older worker refuses a plan carrying `co_point_ids`
+(exit 3) and deletes nothing.
 
 #### 4. Runs that end without an exit code are named
 
@@ -235,9 +240,11 @@ bound. **Scope:** `main` `fa3384e`, both kinds. [UNVERIFIED — the pre-creation
 #### 10. The API's `trust.state` never calls a revoked-key observation green
 
 **Changed.** `trust.state` for `result: Valid` beside
-`trust.basis: RecordedBeforeRevocation` — or any basis that is not `Current` or
-`Historical` — is now `untrusted`, where it read `verified`
-(TRUST-STATE-RBR-VERIFIED). **Do:** a client that must also read older servers
+`trust.basis: RecordedBeforeRevocation`, `None`, an absent basis inside a
+`trust` block, or a basis word the server does not know is now `untrusted`,
+where it read `verified`; `Valid` beside `Unverified` (nothing compared yet) is
+`notAttempted` (TRUST-STATE-RBR-VERIFIED). `Current` stays `verified` and
+`Historical` stays `verifiedHistorical`. **Do:** a client that must also read older servers
 checks `trust.basis` as well ([api.md](api.md)). **Scope:** `main` `178cc1c`,
 Tier-A review; the console reads the same word in both modes. **Rollback:** an
 older API server says `verified` again for that pairing.
@@ -303,9 +310,20 @@ is converted and no stored object is rewritten
 4. Let destination-backed and `v2`-frozen `Backup`s finish; an older controller
    refuses them terminally rather than running them ([kubernetes.md](kubernetes.md)
    §10, *Backups created under the previous execution contract*).
-5. Unbind approval policies, or expect not-yet-admitted v2 approvals to be
+5. Let point-bound `Restore`s that have no Job yet reach one, or recreate them
+   after the rollback: an older controller re-renders their approval bundle
+   without the evidence keyring and ends them `ApprovalBundleConflict` (item 5;
+   fail-closed, nothing is restored).
+6. Unbind approval policies, or expect not-yet-admitted v2 approvals to be
    refused (item 7).
-6. Roll the controller and runner back together, and leave the CRDs in place.
+7. Roll the controller and runner back together, and leave the CRDs in place.
+
+**How this upgrade is rehearsed.** From `v0.1.5` (the last version tag: 6 →
+14 CRDs, the managed identity adopting a hand-provisioned signer, the console
+arriving) and from `sha-f49849d…` (the last build before `ac00819`, which
+crosses all ten items above); [release-handoff.md](release-handoff.md) names
+the images, the state each rehearsal sets up first, and which items it
+exercises. An upgrade from `sha-7b0277b…` crosses items 1–4 only.
 
 Archives, evidence and catalog records are untouched in both directions; old
 signed archives keep verifying as long as their public keys stay in the trust
@@ -314,9 +332,9 @@ policy or roster ([keys.md](keys.md)).
 ### Limitations and open items
 
 - **The live half of PLAT-20.2 is not yet run**: a clean install on
-  docker-desktop following [quickstart.md](quickstart.md), and an upgrade from
-  the last published image that keeps installation identities, schedules and
-  archive readability. [UNVERIFIED — owed by PLAT-20.2's live round after lab-refresh-9 releases the cluster.]
+  docker-desktop following [quickstart.md](quickstart.md), and upgrades from
+  `v0.1.5` and from `sha-f49849d…` that keep installation identities, schedules
+  and archive readability. [UNVERIFIED — owed by PLAT-20.2's live round after lab-refresh-9 releases the cluster.]
 - **The product API's OpenAPI document is still `1.0.0-alpha.1`**, although the
   console image and the chart now consume it; ship and upgrade the console and
   the API together until the owner freezes it ([stability.md](stability.md)).

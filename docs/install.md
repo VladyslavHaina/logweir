@@ -1084,7 +1084,8 @@ kubectl --context docker-desktop apply \
 server has the kind.
 
 **It fences the console this chart renders.** With `api.enabled` the chart
-renders the `logweir-api` ServiceAccount and its `create secrets` grant (§5d),
+renders the console's ServiceAccount, `<release>-api` (`logweir-api` for a
+release named `logweir`), and its `create secrets` grant (§5d),
 and it refuses to render the policy when
 `admissionPolicy.consoleServiceAccountName` is not that account, because a
 policy naming nobody would install, look enabled and fence nothing.

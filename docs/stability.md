@@ -516,7 +516,7 @@ shared with other builds (load average 4–7 throughout). Medians of five runs
 | Controller: split into chunks, and index them | 10,000 / 20,000 / 50,000 topics (4 / 8 / 20 chunks) | 2.2 / 3.3 / 8.1 ms; index < 0.01 ms |
 | Controller: classify a dynamic selection (10 exact, 5 prefix exclusions) | 10,000 / 20,000 / 50,000 topics | 0.6 / 0.9 / 2.1 ms |
 | API: page a stored inventory at 200 | 10,000 topics (51 requests) / 50,000 (251) | median 0.40 / 0.42 ms per page, max 0.83 ms; at most 2 chunk reads a page |
-| API: a search that matches nothing | 10,000 topics / 50,000 topics | 1 request, 2.7 ms / 3 requests, median 5.6 ms, 8 chunk reads each |
+| API: a search that matches nothing | 10,000 topics / 50,000 topics | 1 request, 2.7 ms, 4 chunk reads / 3 requests, median 5.6 ms, 8, 8 and 4 chunk reads |
 | API: walk the largest catalog view at 200 | 5,000 points in 8 pages, no `Backup`s (26 requests) | median 12.3 ms, max 20.3 ms, 311 ms in all |
 | API: the same, beside 2,000 `Backup`s for the verdict join | 26 requests | median 26.9 ms, max 35.8 ms, 687 ms in all; 4 `LIST`s a request |
 | API: walk the console's list budget at 200 (status load) | 5,000 `Backup`s / 5,000 `Restore`s (25 requests each) | median 6.2 / 6.0 ms, max 7.1 ms; one `LIST` a page |
