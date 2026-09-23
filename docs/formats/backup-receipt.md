@@ -60,7 +60,7 @@ five arms.
 |---|---|---|
 | `format_version` | string | Semver of **this** format. `1.0.0`. Independent of the scorecard's. |
 | `run_id` | string | ULID of the run that produced this receipt. Also the object key stem in the evidence bucket. |
-| `backup_id` | string | The engine's identifier for the archive this run wrote. **Not** `run_id`: two runs can be asked to append to one backup set, and `archive.manifest_key` is keyed on this. |
+| `backup_id` | string | The engine's identifier for the archive this run wrote — the **execution** id under Kubernetes. **Not** `run_id`: `archive.manifest_key` is keyed on this, and a set written by an older build can carry receipts from two runs. Since RECEIPT-DUP was fixed, at most one run per `backup_id` reaches the engine (see [the execution claim](#the-execution-claim-one-engine-run-per-backup_id)), so a new execution signs exactly one receipt. |
 | `requested_at` | RFC 3339 | When the run was requested. |
 | `started_at` | RFC 3339 | When the engine subprocess started. Logweir-measured. |
 | `finished_at` | RFC 3339 | When the engine subprocess finished. Logweir-measured. |
@@ -295,6 +295,63 @@ sidecar-key=logweir/backups/<backup_id>/<run_id>.receipt.sig
 That is a machine contract (interface **I7**): the Kubernetes pod log API has no
 stream selector, so a controller reading a Job's output cannot separate stdout
 from stderr and reads the last lines instead.
+
+### The execution claim: one engine run per `backup_id`
+
+A third object sits beside the receipts, and it is the only one there whose key
+does not carry a run id:
+
+```
+logweir/backups/<backup_id>/execution.claim.json
+```
+
+**Why it exists (tracker defect RECEIPT-DUP).** The engine writes
+`<prefix>/<backup_id>/manifest.json` with its own, unconditional store client. A
+second engine run under the same `backup_id` — a Kubernetes Backup Job lost and
+re-created from its frozen inputs, or a second `logweir backup run` with the
+same spec — replaced the manifest the first run's receipt attests. When the
+topic had advanced in between, the first receipt's `archive.manifest_sha256` no
+longer matched the manifest in the bucket, and every verifier that reads the
+archive back (a point-bound drill, the `catalogSync` deep check, an auditor with
+`sha256sum`) reported the first receipt as describing an archive that is no
+longer there. Logweir cannot make the engine's write conditional, so it makes
+sure the second engine run never starts.
+
+**What the runner does.** After every local and read-only check and
+immediately before the engine starts, `logweir backup run` puts the claim with a
+conditional create (`If-None-Match: *`) and then puts it a second time: the
+second put must be refused as `AlreadyExists`. Only then does the engine start.
+
+| What the store answers | Exit | The message names | What happened |
+|---|---|---|---|
+| first create succeeds, second is refused as already existing | — | — | the run holds the claim; the engine starts |
+| the first create is refused because the claim **already exists** | **1** | `ExecutionAlreadyClaimed` | an earlier run of this `backup_id` reached the engine. **No engine run, no receipt.** Retry under a **new** `backup_id` (a new `Backup`; a schedule's retry policy does this by itself, since exit 1 is retryable) |
+| the first create is refused for any other reason (a missing `s3:PutObject` on `logweir/*`, a transport error) | **4** | `ExecutionClaimUnproven` | lock-proof failed, nothing uploaded — the engine never started |
+| the backend reports conditional put unsupported (the store falls back to HEAD-then-PUT) | **4** | `ExecutionClaimUnproven` | a HEAD-then-PUT is not exclusive, so the claim is no lock |
+| the **second** create succeeds | **4** | `ExecutionClaimUnproven` | the store accepts `If-None-Match: *` and overwrites anyway; a claim on it is no lock |
+
+The claim is **unsigned and never read by the runner**: it is a lock, not
+evidence, and its existence is learned from the conditional put's own answer.
+So it needs no permission the runner did not already hold — `s3:PutObject` on
+`logweir/*` (`evidenceWrite`) — and adds no `s3:GetObject` or `s3:ListBucket`
+under `logweir/`. Its body names the run that holds it, for an operator who can
+read the evidence root:
+
+```json
+{"backup_id":"<backup_id>","claimed_at":"<RFC 3339>","format_version":"1.0.0","run_id":"<run_id>"}
+```
+
+It is never deleted by Logweir: the retention worker refuses every key under
+`logweir/`, and a deleted claim would let a later run of the same execution
+overwrite an attested manifest again.
+
+**What it does not cover.** A set whose first run was made by a build without
+the claim has no claim, so a later run of that same `backup_id` by a new build
+is not stopped. That is a window at upgrade (a Backup Job lost while the
+controller is upgraded) and for a standalone `backup run` re-using a
+`backup_id` an older build already wrote to; sets written before the fix may
+therefore carry two receipts, and the catalog keeps both as two points (see
+[`catalog-point.md`](catalog-point.md)).
 
 `--receipt-out <path>` additionally writes the same bytes to `<path>` and the
 DSSE sidecar to `<path>` with the extension replaced by `.sig` — the pairing

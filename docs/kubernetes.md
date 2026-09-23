@@ -516,6 +516,14 @@ The `Harness row` column names the phase that measured the line; the
 | retention enforcer | `s3:GetObject` on `<bucket>/<prefix>/*` | measured before OBJECT-LOCK-DELETE-MARKER: the operation still succeeded — **SUPERSEDED: now required**; without it every key is `Kept` with `code=VersionProbeRefused` and nothing is deleted (see below) | `u6-ret-058` |
 | retention enforcer | `s3:DeleteObject` on `<bucket>/<prefix>/*` | **the operation fails**: `state=Kept`, `code=AccessDenied` and `retention-result=deleted=0 failed=1 objects=0` | `u6-ret-059` |
 
+**Since RECEIPT-DUP's fix, the `s3:PutObject` on `logweir/*` rows
+(`u6-bk-029`, `u6-bk-043`) fail EARLIER, with the same exit code.** The runner's
+first write under `logweir/` is now its create-only execution claim, put before
+the engine starts, so without that grant the Backup exits `4` /
+`signing-or-lock` naming `ExecutionClaimUnproven` with no archive written,
+instead of after the engine. The claim needs no action the table does not
+already grant. [UNVERIFIED — the two rows are re-measured against the claim at lab-refresh-10.]
+
 **A wider grant than this table is not required by anything in this build.**
 Every action outside a role's row was removed and the role's operation still
 succeeded, on the same fixture, in the same run. `s3:ListBucket`'s two
@@ -2134,8 +2142,10 @@ Each of `ageExpiry`, `minUsablePoints`, `activeRestoreProtection`,
 * `sharedSegments` is **`NotEnforced`**, because the guarantee needs a point's
   segment keys and the catalog view entry has no segment field at all. What
   **is** enforced is the set half of it. Two receipts can name one backup set
-  — a runner Job re-created from its frozen inputs rewrites the same
-  `<prefix>/<backupId>/` and signs a second receipt over it — and every key a
+  — before RECEIPT-DUP was fixed a runner Job re-created from its frozen inputs
+  rewrote the same `<prefix>/<backupId>/` and signed a second receipt over it,
+  and such sets, and sets whose first run was made by a build without the
+  execution claim, are still in buckets — and every key a
   plan line may remove lies under its own set's directory. So the evaluation
   groups points that share a `backupId`, a manifest key or a segment key
   (transitively), and a group holding any retained point — kept, protected,
@@ -2207,10 +2217,12 @@ Each of `ageExpiry`, `minUsablePoints`, `activeRestoreProtection`,
   responsibility; `object_store` 0.14 can neither list nor delete them, and
   Logweir does not see them. **Residual, accepted and tracked (it needs a
   version-aware store client):** a bucket whose versioning was Enabled, then
-  *Suspended*, and whose keys were then written again — and re-run backups DO
-  rewrite the same keys: a runner Job re-created from its frozen inputs writes
-  the same `<prefix>/<backupId>/` objects, which is exactly how two receipts
-  come to name one set. There the current version is a null version (no
+  *Suspended*, and whose keys were then written again — and re-run backups
+  DID rewrite the same keys: before RECEIPT-DUP was fixed a runner Job
+  re-created from its frozen inputs wrote the same `<prefix>/<backupId>/`
+  objects, which is exactly how two receipts came to name one set (a build with
+  the execution claim refuses that second engine run; sets written earlier
+  remain). There the current version is a null version (no
   version id on the HEAD, none on a PUT to a Suspended bucket), the delete
   removes it, the point is recorded `Deleted`, and the Enabled-era version
   beneath it survives. No hold is possible on a suspended null version, and an
@@ -2370,7 +2382,9 @@ re-created from frozen inputs between the approval and the deletes — is not
 seen by the worker, whose rails are the approved plan, the prefix and the
 evidence root (D3 §6.5). It needs a re-run over a set old enough to be a
 candidate; the next evaluation reads the new receipt, and a set it names is
-never planned again.
+never planned again. Since RECEIPT-DUP was fixed a runner with the execution
+claim cannot sign that second receipt at all; the residual remains only for a
+set whose first run was made by a build without the claim.
 ### 7g. A `RehearsalSchedule` proves recovery on a cron, under one signed authorization
 
 A backup that has never been restored is a hypothesis. PLAT-14.3's
@@ -4628,6 +4642,20 @@ which is what makes deleting a running Job a retry of one run rather than the
 start of another. The Job keeps the `Backup`'s name, so the pod carrying the
 exit code is selected by the job-name label **and** by its owner Job's UID: a
 deleted Job's pod is never read as the new Job's evidence.
+
+**The re-created Job never runs the engine a second time over one execution**
+(tracker defect RECEIPT-DUP). Every runner claims its execution id with a
+create-only `logweir/backups/<backupId>/execution.claim.json` immediately before
+the engine starts ([the execution claim](formats/backup-receipt.md#the-execution-claim-one-engine-run-per-backup_id)).
+If the lost Job's pod got that far, the re-created Job finds the claim and exits
+**1** naming `ExecutionAlreadyClaimed`, with no engine run and no receipt: a
+second engine run would have overwritten the manifest the first run's signed
+receipt attests. The `Backup` ends `Failed` (`operational`), which is retryable,
+so a schedule's retry policy starts a **new** execution; a manual `Backup` is
+retried by creating a new one. A Job lost before its pod reached the claim is
+re-created and runs normally. An evidence store that does not honour
+conditional create (`If-None-Match: *`) makes every backup exit **4** naming
+`ExecutionClaimUnproven` before the engine starts.
 
 The source connection is configured once on `KafkaCluster`, and one resolver
 (§20) turns it into every Job: the probe and each backup reuse that object's
