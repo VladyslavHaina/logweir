@@ -389,3 +389,68 @@ test("an_operation_announces_its_state_stage_and_reason_in_one_sentence", async 
   const { announce } = await import("../render.js");
   assert.equal(announce("anything"), false, "without a document nothing is announced, and nothing throws");
 });
+
+test("a_control_disabled_by_a_pending_fieldset_hands_focus_to_its_form_status", () => {
+  // Found by the PLAT-18.2 live pass: a form going pending re-renders with its
+  // controls inside a disabled fieldset; the button there has `disabled ===
+  // false` and still refuses focus, so focus fell to the body. It must land on
+  // the form's status region, where the outcome is announced.
+  const doc = { activeElement: null, body: null };
+  const FOCUSABLE_TAGS = ["BUTTON", "INPUT", "SELECT", "TEXTAREA", "SUMMARY"];
+  class El {
+    constructor(tag, opts) {
+      const o = opts || {};
+      this.ownerDocument = doc;
+      this.tagName = tag;
+      this.id = o.id || null;
+      this.cls = o.cls || "";
+      this.tabindex = o.tabindex === true;
+      this.fieldsetDisabled = o.fieldsetDisabled === true;
+      this.disabled = false;
+      this.children = [];
+      this.parent = null;
+    }
+    get firstChild() { return this.children[0] || null; }
+    removeChild(c) { this.children.splice(this.children.indexOf(c), 1); c.parent = null; return c; }
+    appendChild(c) { this.children.push(c); c.parent = this; return c; }
+    contains(o) { for (let a = o; a; a = a.parent) { if (a === this) { return true; } } return false; }
+    getAttribute(n) { return n === "id" ? this.id : null; }
+    hasAttribute(n) { return n === "tabindex" && this.tabindex; }
+    walk(out) { for (const c of this.children) { out.push(c); c.walk(out); } return out; }
+    matches(sel) {
+      if (sel === ":disabled") { return this.fieldsetDisabled; }
+      if (sel === ".form-status") { return this.cls === "form-status"; }
+      if (sel === "form") { return this.tagName === "FORM"; }
+      if (sel === ".form-status[tabindex]") { return this.cls === "form-status" && this.tabindex; }
+      return FOCUSABLE_TAGS.indexOf(this.tagName) !== -1 || this.tabindex;
+    }
+    querySelectorAll(sel) { return this.walk([]).filter((e) => e.matches(sel)); }
+    querySelector(sel) { return this.querySelectorAll(sel)[0] || null; }
+    closest(sel) { for (let a = this; a; a = a.parent) { if (a.matches(sel)) { return a; } } return null; }
+    focus() {
+      // A browser ignores focus() on a control a disabled fieldset disables.
+      if (!this.fieldsetDisabled) { doc.activeElement = this; }
+    }
+  }
+  doc.body = new El("BODY", { id: "body" });
+  doc.getElementById = (id) => doc.body.walk([]).find((e) => e.id === id) || null;
+  const slot = doc.body.appendChild(new El("DIV", { id: "cluster-form-slot" }));
+  const build = (pending) => {
+    const form = new El("FORM", { id: "cluster-form" });
+    form.appendChild(new El("INPUT", { id: "cluster-name", fieldsetDisabled: pending }));
+    form.appendChild(new El("BUTTON", { fieldsetDisabled: pending }));
+    form.appendChild(new El("DIV", { id: "cluster-form-status", cls: "form-status", tabindex: true }));
+    return form;
+  };
+  slot.appendChild(build(false));
+  slot.querySelectorAll("form")[0].children[1].focus();
+  assert.equal(doc.activeElement.tagName, "BUTTON", "a keyboard reader is on Create");
+  replace(slot, [build(true)]);
+  assert.equal(doc.activeElement.id, "cluster-form-status",
+    "the pending re-render hands focus to the form's status region, not to the body");
+  // Negative control (run by hand at this commit): with `canTakeFocus` no
+  // longer asking `:disabled`, restoreFocus picks the disabled button, the
+  // browser ignores the focus() call, and this row fails with focus still on
+  // the detached old button -- the body, in a browser.
+  assert.notEqual(doc.activeElement, doc.body);
+});

@@ -132,9 +132,20 @@ export function focusWithin(node) {
 /** What a keyboard can land on inside a form, in document order. */
 const FOCUSABLE = "a[href], button, input, select, textarea, summary, [tabindex]";
 
+/** Whether focus can land on `element`. A control inside a disabled
+ *  `fieldset` -- how every form here shows it is pending -- has
+ *  `disabled === false` and still refuses focus, so `:disabled` is asked
+ *  where the element can answer it. */
 function canTakeFocus(element) {
-  return element !== null && element !== undefined && typeof element.focus === "function" &&
-    element.disabled !== true && element.hidden !== true;
+  if (element === null || element === undefined || typeof element.focus !== "function" ||
+    element.disabled === true || element.hidden === true) {
+    return false;
+  }
+  try {
+    return typeof element.matches !== "function" || !element.matches(":disabled");
+  } catch (unsupported) {
+    return true;
+  }
 }
 
 /** Puts focus back where [`focusWithin`] found it, in the new subtree: the

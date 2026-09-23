@@ -380,6 +380,8 @@ async function configureJourney(browser, state, route) {
     result.created.push({ kind: "KafkaCluster", name: source, uid: made.metadata.uid,
       createdBy: "the page (keyboard only)" });
     const statusFocus = await activeId(page);
+    check(statusFocus !== "(body)", "after Create, focus fell to the body instead of the " +
+      "form's status region: " + statusFocus);
     await shot(page, "k1-01-connection-created");
 
     // 2. A schedule, from the schedules page, by keyboard.
