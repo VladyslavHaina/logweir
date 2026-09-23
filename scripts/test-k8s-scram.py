@@ -161,6 +161,35 @@ def brokerexec(role, script, timeout=180):
     ).stdout
 
 
+#: The source broker's seed topics. The shared lab (`scram-local`) is built once
+#: and then read by every live harness for weeks, so the seed must outlive the
+#: broker's default 7-day `retention.ms`: with it, `orders`/`payments` emptied a
+#: week after the 2026-09-22 lab build and every Backup of them captured nothing
+#: (LAB-SEED-TOPIC-RETENTION). `retention.ms=-1` keeps the 100 records per topic
+#: for the life of the broker; lab-refresh-8 re-seeded the live lab that way.
+SEED_TOPICS = ("orders", "payments")
+SEED_RECORDS_PER_TOPIC = 100
+
+
+def seed_topic_script(topic):
+    """The broker shell script that creates one seed topic and writes its records.
+
+    Pure (no cluster access), so `scripts/test_k8s_scram_seed.py` can check it."""
+    script = (
+        "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092"
+        f" --create --topic {topic} --partitions 1 --replication-factor 1"
+        " --config retention.ms=-1\n"
+    )
+    script += (
+        "printf '%s\\n' "
+        + " ".join(
+            f"'{topic}-record-{n:03}'" for n in range(1, SEED_RECORDS_PER_TOPIC + 1)
+        )
+        + f" | /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server localhost:9092 --topic {topic}\n"
+    )
+    return script
+
+
 def setup():
     if cmd(CTX + ["get", "ns", NS], check=False).returncode == 0:
         raise RuntimeError("Namespace exists; refusing setup overwrite")
@@ -306,14 +335,8 @@ def setup():
             role,
             f'/opt/kafka/bin/kafka-configs.sh --bootstrap-server localhost:9092 --alter --add-config "SCRAM-SHA-512=[password={state["password"]}]" --entity-type users --entity-name scram-user\n',
         )
-    for topic in ["orders", "payments"]:
-        script = f"/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --topic {topic} --partitions 1 --replication-factor 1\n"
-        script += (
-            "printf '%s\\n' "
-            + " ".join(f"'{topic}-record-{n:03}'" for n in range(1, 101))
-            + f" | /opt/kafka/bin/kafka-console-producer.sh --bootstrap-server localhost:9092 --topic {topic}\n"
-        )
-        brokerexec("source", script)
+    for topic in SEED_TOPICS:
+        brokerexec("source", seed_topic_script(topic))
     brokerexec(
         "target",
         "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --create --topic logweir.scratch --partitions 1 --replication-factor 1\n",
