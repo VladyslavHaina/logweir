@@ -779,13 +779,22 @@ fn runner_facts(facts: &Facts<'_>, runner: Option<&ContainerStatus>) -> RunnerFa
             .map(|r| truncate_on_char_boundary(&r, 64)),
         // RUNNING OR TERMINATED: a runner that crashed between two passes is
         // first seen terminated, and it started all the same.
+        //
+        // AND A RUNNER FIRST SEEN CRASH-LOOPING (re-check RL3): state
+        // `waiting` (`CrashLoopBackOff`) with the previous run in
+        // `lastState.terminated` (or, briefly, `lastState.running`). The
+        // kubelet fills `lastState` whenever `restartCount > 0`, so a restarted
+        // runner always carries a start instant here; a `restartCount` with no
+        // `lastState` at all has no instant to record, and `derive`'s
+        // `started` still says it ran for this pass.
         started_at: runner.and_then(|c| {
-            let state = c.state.as_ref()?;
-            state
-                .running
-                .as_ref()
-                .and_then(|r| r.started_at.as_ref())
-                .or_else(|| state.terminated.as_ref()?.started_at.as_ref())
+            let current = c.state.as_ref();
+            let last = c.last_state.as_ref();
+            current
+                .and_then(|s| s.running.as_ref()?.started_at.as_ref())
+                .or_else(|| current?.terminated.as_ref()?.started_at.as_ref())
+                .or_else(|| last?.terminated.as_ref()?.started_at.as_ref())
+                .or_else(|| last?.running.as_ref()?.started_at.as_ref())
                 .map(|t| t.0)
         }),
     }

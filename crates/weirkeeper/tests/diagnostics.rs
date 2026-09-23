@@ -2106,3 +2106,27 @@ fn an_error_class_code_outranks_a_newer_warning() {
         Some("CredentialReferenceMissing")
     );
 }
+
+/// Re-check RL3: a runner first seen CRASH-LOOPING — state `waiting`, the
+/// previous run in `lastState.terminated` — has started, and the start is
+/// recorded, so a later pod-less pass cannot make it read as never-started.
+///
+/// MUTANT: drop the `lastState` arms from `runner_facts`. `startedAt` is
+/// absent and this row fails.
+#[test]
+fn a_runner_first_seen_crash_looping_has_started() {
+    let p = pod(json!({
+        "phase": "Running",
+        "conditions": [{"type": "PodScheduled", "status": "True"}],
+        "containerStatuses": [
+            {"name": "runner", "ready": false, "restartCount": 2, "image": "x", "imageID": "x",
+             "state": {"waiting": {"reason": "CrashLoopBackOff"}},
+             "lastState": {"terminated": {"exitCode": 1,
+                                          "startedAt": "2026-11-09T03:19:20Z",
+                                          "finishedAt": "2026-11-09T03:19:25Z"}}},
+        ],
+    }));
+    let d = derive(&facts(Some(&p), &[], at(20, 0)));
+    assert!(d.started);
+    assert_eq!(d.runner.started_at, Some(at(19, 20)));
+}
