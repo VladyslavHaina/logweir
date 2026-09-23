@@ -1,0 +1,40 @@
+# deploy/poc/issuers.yaml — the PoC's local certificate authority.
+#
+#   kubectl --context docker-desktop apply -f deploy/poc/issuers.yaml
+#
+# A self-signed bootstrap issuer signs one CA certificate (its key stays in the
+# cert-manager namespace), and the `logweir-poc-ca` ClusterIssuer signs every
+# Ingress certificate with it. Export the CA certificate to trust it in your
+# browser and to hand it to the console (README.md, step 5).
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: logweir-poc-selfsigned
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: logweir-poc-ca
+  namespace: cert-manager
+spec:
+  isCA: true
+  commonName: Logweir PoC local CA
+  secretName: logweir-poc-ca
+  duration: 8760h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    group: cert-manager.io
+    kind: ClusterIssuer
+    name: logweir-poc-selfsigned
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: logweir-poc-ca
+spec:
+  ca:
+    secretName: logweir-poc-ca

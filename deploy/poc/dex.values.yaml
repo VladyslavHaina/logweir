@@ -1,0 +1,91 @@
+# deploy/poc/dex.values.yaml — Dex as the console's OIDC provider.
+# Chart dex 0.24.1 (dex v2.44.0), image pinned by digest.
+#
+#   helm upgrade --install dex dex --repo https://charts.dexidp.io --version 0.24.1 \
+#     -n dex --create-namespace -f deploy/poc/dex.values.yaml --wait
+#
+# NO SECRET IS IN THIS FILE. The console's client secret and the four users'
+# bcrypt hashes come from the Secret `dex-poc-secrets` (README.md, step 4)
+# through `envFrom`: `secretEnv` for the client and `hashFromEnv` for each user
+# are Dex's own ways of reading them from the environment.
+#
+# FOUR STATIC USERS, ONE PER LOGWEIR ROLE. Dex v2.44.0's static password
+# database carries no groups, so the console binds these four by SUBJECT
+# (`<issuer>#<sub>`, logweir.values.yaml). Dex's `sub` for a local user is the
+# base64url of {userID, "local"}, which is why each userID below is fixed.
+# A real connector (LDAP, GitHub, an upstream OIDC provider — README.md,
+# "Swapping in a real identity provider") emits groups, and the console's
+# bindings then name groups instead.
+image:
+  repository: ghcr.io/dexidp/dex
+  tag: v2.44.0
+  digest: sha256:5d0656fce7d453c0e3b2706abf40c0d0ce5b371fb0b73b3cf714d05f35fa5f86
+replicaCount: 2
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+envFrom:
+  - secretRef:
+      name: dex-poc-secrets
+config:
+  issuer: https://dex.localtest.me
+  storage:
+    type: kubernetes             # refresh tokens and keys survive a restart
+    config:
+      inCluster: true
+  web:
+    http: 0.0.0.0:5556           # TLS terminates at the ingress controller
+  oauth2:
+    responseTypes: [code]
+    skipApprovalScreen: true
+  expiry:
+    idTokens: 15m
+  enablePasswordDB: true
+  staticClients:
+    - id: logweir-console
+      name: Logweir console
+      secretEnv: LOGWEIR_CONSOLE_CLIENT_SECRET
+      redirectURIs:
+        - https://logweir.localtest.me/auth/callback
+  staticPasswords:
+    - email: viewer@logweir.localtest.me
+      username: viewer
+      userID: 1f0c9a4e-0001-4a1e-9e1a-000000000001
+      hashFromEnv: DEX_HASH_VIEWER
+    - email: operator@logweir.localtest.me
+      username: operator
+      userID: 1f0c9a4e-0002-4a1e-9e1a-000000000002
+      hashFromEnv: DEX_HASH_OPERATOR
+    - email: approver@logweir.localtest.me
+      username: approver
+      userID: 1f0c9a4e-0003-4a1e-9e1a-000000000003
+      hashFromEnv: DEX_HASH_APPROVER
+    - email: admin@logweir.localtest.me
+      username: admin
+      userID: 1f0c9a4e-0004-4a1e-9e1a-000000000004
+      hashFromEnv: DEX_HASH_ADMIN
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: logweir-poc-ca
+  hosts:
+    - host: dex.localtest.me
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: dex-tls
+      hosts: [dex.localtest.me]
+resources:
+  requests: { cpu: 10m, memory: 32Mi }
+  limits: { memory: 128Mi }
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]

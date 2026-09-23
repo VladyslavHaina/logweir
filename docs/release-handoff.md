@@ -91,14 +91,16 @@ TRUST-STATE-RBR-VERIFIED and the rest).
 On docker-desktop, in namespaces the run owns, after lab-refresh-9 releases the
 cluster:
 
-1. **A clean install** following [quickstart.md](quickstart.md)'s supported
-   path from an empty namespace set: the Helm install with the managed identity,
+1. **A clean install** with the PoC profile, [deploy/poc/](../deploy/poc/README.md)
+   (Helm and the published `sha-306cebf…` images only), following
+   [quickstart.md](quickstart.md)'s supported path from an empty namespace set: the Helm install with the managed identity,
    trust, a console, a saved connection and destination, a schedule, the first
    backup to a green badge, a restore of a chosen point through an approval, the
    independent verifier over its scorecard, and a disaster restore from a
    connected archive on a namespace with no `Backup` objects.
-2. **An upgrade from the last published image** (the newest `main` publication,
-   and `v0.1.5` if the owner wants the tag as well) to the candidate, following
+2. **An upgrade from the last published image** (the previous `main`
+   publication, `sha-7b0277b…`, per `deploy/poc/versions.env`; `v0.1.5` too if
+   the owner wants the tag) to the candidate, following
    [release-notes.md](release-notes.md)'s order, that keeps:
    - the installation identity — the same `key-id` and private-key digest in
      `logweir-signing-key` / `logweir-signing-trust`;

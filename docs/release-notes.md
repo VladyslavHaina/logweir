@@ -62,6 +62,10 @@ find ui -type f ! -name '*.md' ! -path 'ui/tests/*' | LC_ALL=C sort | xargs shas
   ([quickstart.md](quickstart.md)). The static page behind `kubectl proxy`
   remains a supported legacy view; the destination, discovery, readiness,
   catalog and schedule-policy flows are console-only.
+- **A versioned PoC install profile**, [deploy/poc/](../deploy/poc/README.md):
+  ingress-nginx, cert-manager with a local CA, Dex and the shared console, all
+  by Helm and the published `sha-` images, with the chart gaps it had to stand
+  in for listed there (G1–G6). [UNVERIFIED — the profile has been rendered, not yet installed on docker-desktop.]
 - **Fourteen kinds** on `logweir.dev/v1alpha1`, all additive over `v0.1.5`
   ([install.md](install.md), *Upgrade CRDs before upgrading the controller*).
 - **Trust has a lifecycle.** A `TrustPolicy` governs a namespace's keys with

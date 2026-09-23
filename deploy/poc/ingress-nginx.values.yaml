@@ -1,0 +1,43 @@
+# deploy/poc/ingress-nginx.values.yaml — the ingress controller in front of the
+# Logweir console and Dex. Chart ingress-nginx 4.15.1 (controller v1.15.1);
+# the chart's defaults already pin every image by digest.
+#
+#   helm upgrade --install ingress-nginx ingress-nginx \
+#     --repo https://kubernetes.github.io/ingress-nginx --version 4.15.1 \
+#     -n ingress-nginx --create-namespace -f deploy/poc/ingress-nginx.values.yaml --wait
+#
+# PoC vs production: one replica here (docker-desktop has one node); a
+# production install runs >= 2 replicas across nodes behind the PDB below, and a
+# dedicated ingress node pool whose pod range is what the console's
+# `trustedProxyCidrs` names (README.md, "What production keeps").
+controller:
+  replicaCount: 1
+  minAvailable: 1                # the chart renders a PDB when replicaCount > 1
+  ingressClassResource:
+    name: nginx
+    default: false               # the Logweir and Dex Ingresses name the class explicitly
+  ingressClass: nginx
+  allowSnippetAnnotations: false # no configuration snippets from Ingress annotations
+  config:
+    # HSTS for every host this controller serves over TLS; the console's
+    # Ingress also asks for it per host (logweir.values.yaml).
+    hsts: "true"
+    hsts-max-age: "31536000"
+    ssl-redirect: "true"
+    # The console requires the proxy to say the original scheme was https
+    # (`requireTrustedProxy`); ingress-nginx sets X-Forwarded-Proto itself and
+    # this keeps a client from supplying its own.
+    use-forwarded-headers: "false"
+  service:
+    type: LoadBalancer           # docker-desktop maps this to 127.0.0.1:80/443
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits: { memory: 512Mi }
+  metrics:
+    enabled: false
+  admissionWebhooks:
+    enabled: true
+  networkPolicy:
+    enabled: true                # rendered; docker-desktop does not enforce it
+defaultBackend:
+  enabled: false
