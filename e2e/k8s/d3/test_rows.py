@@ -2054,7 +2054,8 @@ def test_the_standing_job_mounts_five_members_and_no_per_run_approval() -> None:
         L6_ARGV, L6_ENV, L6_BUNDLE_OF_SEVEN, L6_SCHEDULE, L6_SLOT, L6_UID)
     row("L6 step 3 refuses a SEVEN-key bundle carrying approval.json/.sig",
         not all(seven.values())
-        and not seven["the bundle ConfigMap has exactly the five standing members"]
+        and not seven["the bundle ConfigMap has exactly the five standing members (and the "
+                      "evidence keyring when the plan binds a point)"]
         and not seven["and neither approval.json nor approval.sig"])
     digested = d3.the_job_carries_the_standing_mount(
         L6_ARGV, L6_ENV_WITH_THE_APPROVAL_SHA, L6_BUNDLE, L6_SCHEDULE, L6_SLOT, L6_UID)
@@ -2075,6 +2076,21 @@ def test_the_standing_job_mounts_five_members_and_no_per_run_approval() -> None:
         L6_BUNDLE, L6_SCHEDULE, L6_SLOT, L6_UID)
     row("L6 step 3 refuses a blank rehearsal-schedule UID in the execution contract",
         not all(wrong_uid.values()))
+    # lab-refresh-9: a POINT-BOUND plan (every rehearsal's) carries the evidence
+    # keyring as a sixth member and `--evidence-keys` (PLAT-15.2's receipt check).
+    bound_argv = L6_ARGV + ["--evidence-keys", "/approval/evidence-keys.json"]
+    bound_bundle = L6_BUNDLE | {"evidence-keys.json"}
+    row("L6 step 3: a point-bound plan's Job carries the keyring member and --evidence-keys",
+        all(d3.the_job_carries_the_standing_mount(
+            bound_argv, L6_ENV, bound_bundle, L6_SCHEDULE, L6_SLOT, L6_UID,
+            point_bound=True).values()))
+    row("L6 step 3 refuses a point-bound Job WITHOUT the keyring (five members, no flag)",
+        not all(d3.the_job_carries_the_standing_mount(
+            L6_ARGV, L6_ENV, L6_BUNDLE, L6_SCHEDULE, L6_SLOT, L6_UID,
+            point_bound=True).values()))
+    row("L6 step 3 refuses a keyring on a plan that binds no point",
+        not all(d3.the_job_carries_the_standing_mount(
+            bound_argv, L6_ENV, bound_bundle, L6_SCHEDULE, L6_SLOT, L6_UID).values()))
 
 
 def test_the_scorecard_names_a_schedule_and_never_a_person() -> None:
@@ -2185,14 +2201,18 @@ def test_the_rehearsal_evidence_outlives_its_job() -> None:
     fetched = {"scorecard": True, "sidecar": True, "offset report": True,
                "teardown attestation": True}
     row("L6 step 9: the Job is collected and all four signed objects are still fetchable",
-        all(d3.the_evidence_outlives_the_job(True, fetched).values()))
-    gone = d3.the_evidence_outlives_the_job(True, {**fetched, "teardown attestation": False})
+        all(d3.the_evidence_outlives_the_job(True, fetched, 604800).values()))
+    gone = d3.the_evidence_outlives_the_job(True, {**fetched, "teardown attestation": False},
+                                            604800)
     row("L6 step 9 refuses a teardown attestation that is no longer fetchable",
         not all(gone.values()))
-    still_there = d3.the_evidence_outlives_the_job(False, fetched)
+    still_there = d3.the_evidence_outlives_the_job(False, fetched, 604800)
     row("L6 step 9 refuses the claim while the Job is still there — nothing was retained yet",
         not all(still_there.values())
-        and not still_there["the runner Job is gone after its TTL"])
+        and not still_there["the runner Job is gone (by its TTL, or by the TTL controller's "
+                            "own delete)"])
+    row("L6 step 9 refuses a finished Job the product never set a TTL on",
+        not all(d3.the_evidence_outlives_the_job(True, fetched, None).values()))
 
 
 def test_the_refused_arm_requires_the_refusal_and_not_merely_silence() -> None:
@@ -2441,6 +2461,8 @@ def test_the_five_standing_bundle_members_are_the_controllers_own_names() -> Non
             f'"{member}"' in source)
     row("and the harness expects exactly five of them",
         len(d3.STANDING_BUNDLE_KEYS) == 5)
+    row(f"the controller defines the point keyring member `{d3.POINT_KEYRING_MEMBER}`",
+        f'EVIDENCE_KEYS_FILE: &str = "{d3.POINT_KEYRING_MEMBER}"' in source)
 
 
 _RUNNING = {"spec": {"schedule": "* * * * *", "suspend": False}}

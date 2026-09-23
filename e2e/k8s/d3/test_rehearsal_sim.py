@@ -299,7 +299,8 @@ class FakeCluster:
                          "value": restore["scheduleUid"]}],
             }
             self.objs["job"][name] = {"metadata": {"name": name},
-                                      "spec": {"template": {"spec": {"containers": [container]}}}}
+                                      "spec": {"ttlSecondsAfterFinished": self.job_ttl_seconds,
+                                               "template": {"spec": {"containers": [container]}}}}
             self.objs["pod"][name] = {"metadata": {"name": name, "labels": {
                 "batch.kubernetes.io/job-name": name}}, "spec": {"containers": [container]}}
             self.objs["configmap"][f"{name}-approval-bundle"] = {
@@ -429,6 +430,15 @@ def test_a_correct_controller_passes_every_row_and_nothing_is_left_behind() -> N
     # one topic it did not make was touched.
     assert cluster.topics == FOREIGN, cluster.topics ^ FOREIGN
     assert all(s["spec"]["suspend"] for s in cluster.objs["rehearsalschedule"].values())
+
+
+def test_a_ttl_longer_than_the_row_can_wait_is_stood_in_for() -> None:
+    """lab-refresh-9: the product's default Job TTL is seven days. Step 9
+    removes the finished Job the way the TTL controller would and still
+    requires the four signed objects; the row says who removed it."""
+    cluster = FakeCluster(topics=FOREIGN, job_ttl_seconds=604800)
+    verdicts = simulate(cluster)
+    assert verdicts["rehearsal-9-evidence-outlives-the-job-ttl"] == "PASS", verdicts
 
 
 def test_a_witness_that_already_exists_is_neither_adopted_nor_deleted() -> None:

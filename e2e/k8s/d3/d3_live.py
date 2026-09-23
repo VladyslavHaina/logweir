@@ -52,6 +52,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from typing import Any, Callable
 
@@ -7534,6 +7535,12 @@ STANDING_BUNDLE_KEYS = {
     "allowed-clusters.json",
     "approver.pub.pem",
 }
+#: The sixth member, present exactly when the plan binds a recovery point
+#: (`controllers/restore.rs` `EVIDENCE_KEYS_FILE`, `plan_binds_point`): the
+#: evidence keyring the runner verifies the bound receipt's signature under
+#: (D3 §5.5 step 6, PLAT-15.2). Every rehearsal plan binds its point since
+#: REHEARSAL-NO-CANDIDATE-WITHOUT-DIGEST, so a rehearsal Job carries six.
+POINT_KEYRING_MEMBER = "evidence-keys.json"
 #: The two per-run digests a standing Job must NOT carry (PLAT-14.3b).
 APPROVAL_DIGEST_ENV = (
     "LOGWEIR_EXECUTION_APPROVAL_SHA256",
@@ -7687,7 +7694,7 @@ def restore_is_created_on_the_standing_authorization(
 
 def the_job_carries_the_standing_mount(
     argv: list[str], env: dict[str, str], bundle_keys: set[str],
-    schedule: str, slot: str, schedule_uid: str,
+    schedule: str, slot: str, schedule_uid: str, *, point_bound: bool = False,
 ) -> dict[str, bool]:
     """Review §4 step 3: the argv, the five-member bundle and the env.
 
@@ -7699,7 +7706,11 @@ def the_job_carries_the_standing_mount(
     checked the additions would not notice it.
     """
     pairs = {argv[i]: argv[i + 1] for i in range(len(argv) - 1)}
+    expected = STANDING_BUNDLE_KEYS | ({POINT_KEYRING_MEMBER} if point_bound else set())
     return {
+        "a point-bound plan's Job carries --evidence-keys …/evidence-keys.json, and only then":
+            (pairs.get("--evidence-keys") == f"/approval/{POINT_KEYRING_MEMBER}") == point_bound
+            and (("--evidence-keys" in argv) == point_bound),
         "argv carries --standing-authorization …/standing-authorization.json":
             pairs.get("--standing-authorization") == "/approval/standing-authorization.json",
         "argv carries --authorization-keys …/authorization-keys.json":
@@ -7708,8 +7719,9 @@ def the_job_carries_the_standing_mount(
             pairs.get("--triggered-by") == f"rehearsal/{schedule}/{slot}",
         "argv carries NO --approval":
             "--approval" not in argv,
-        "the bundle ConfigMap has exactly the five standing members":
-            bundle_keys == STANDING_BUNDLE_KEYS,
+        "the bundle ConfigMap has exactly the five standing members (and the evidence "
+        "keyring when the plan binds a point)":
+            bundle_keys == expected,
         "and neither approval.json nor approval.sig":
             not ({"approval.json", "approval.sig"} & bundle_keys),
         "LOGWEIR_EXECUTION_AUTHORIZATION_KIND is standing":
@@ -7884,7 +7896,7 @@ def the_leftover_guard_refuses_and_keeps_the_topic(
 
 
 def the_evidence_outlives_the_job(
-    job_gone: bool, fetched: dict[str, bool]
+    job_gone: bool, fetched: dict[str, bool], ttl: Any = None
 ) -> dict[str, bool]:
     """Review §4 step 9: "scorecard, sidecar, offset report and teardown objects
     are still fetchable after the Job TTL".
@@ -7893,7 +7905,11 @@ def the_evidence_outlives_the_job(
     objects are readable while the Job is still there would prove nothing about
     retention — so it is a clause and not a guard.
     """
-    clauses = {"the runner Job is gone after its TTL": job_gone}
+    clauses = {
+        "the finished Job carries a ttlSecondsAfterFinished (the product collects it)":
+            isinstance(ttl, int) and ttl > 0,
+        "the runner Job is gone (by its TTL, or by the TTL controller's own delete)": job_gone,
+    }
     for key, ok in sorted(fetched.items()):
         clauses[f"`{key}` is still fetchable from the evidence destination"] = ok
     return clauses
@@ -8702,17 +8718,49 @@ def rehearsal() -> None:
             slot = (restore["metadata"].get("labels") or {}).get("logweir.dev/rehearsal-slot", "")
             during: set[str] = set(target_topics())
             facts: dict[str, Any] = {"job": None, "complete": False}
+            # "DURING" IS SAMPLED CONTINUOUSLY, NOT ONCE PER POLL (lab-refresh-9):
+            # the first live rehearsal restored and tore down its topic inside
+            # eight seconds (Job 17:20:05Z → Complete 17:20:13Z), between two
+            # polls, so a per-poll `kafka-topics --list` saw nothing and the row
+            # blamed the product. One thread lists the broker back to back
+            # until the run is terminal.
+            sampling = threading.Event()
+
+            def sample() -> None:
+                while not sampling.is_set():
+                    try:
+                        during.update(target_topics())
+                    except Exception:  # noqa: BLE001 - a missed sample is only a missed sample
+                        time.sleep(0.5)
+
+            sampler = threading.Thread(target=sample, daemon=True)
+            sampler.start()
 
             def watch(obj: dict[str, Any]) -> bool:
-                during.update(target_topics())
                 if not facts.get("complete"):
                     fresh = job_facts(obj)
                     if fresh.get("job"):
                         facts.update(fresh)
                 return terminal(obj)
 
-            final = wait_for("restore", first_name, watch, seconds=1500,
-                             what="the rehearsal to reach a terminal phase")
+            try:
+                final = wait_for("restore", first_name, watch, seconds=1500,
+                                 what="the rehearsal to reach a terminal phase")
+            finally:
+                sampling.set()
+                sampler.join(timeout=30)
+            # THE VERDICT, NOT THE PHASE (lab-refresh-9): since the evidence-fetch
+            # Job (D2 §3.9) a Restore is terminal BEFORE its verdict — `outcome`
+            # and the verification arrive with the fetch, seconds later — so the
+            # scorecard row reads the object once the verdict is reached, as the
+            # PLAT-10 journey does. A verdict that never leaves Pending is read
+            # as it stands and fails the row by name.
+            final = settle("restore", first_name,
+                           lambda o: (((o.get("status") or {}).get("evidence") or {})
+                                      .get("verification") or {}).get("result")
+                           not in (None, "Pending"),
+                           seconds=420, what="the rehearsal's evidence verdict") or \
+                get("restore", first_name)
             # step 5's input, read while the schedule still observes its child:
             # a SUSPENDED schedule records no `lastSucceeded` at all (the
             # suspended branch of `reconcile_schedule` commits an empty
@@ -8733,9 +8781,13 @@ def rehearsal() -> None:
                            - {first_name})
 
             evidence.append(artifact("rehearsal/03-job.json", facts))
+            # A REHEARSAL PLAN BINDS ITS POINT (`source.point.receipt_sha256`),
+            # read off the Restore's own plan bytes, not assumed.
+            point_bound = "receipt_sha256" in str((final.get("spec") or {}).get("planBytes") or "")
             job_clauses = the_job_carries_the_standing_mount(
                 facts.get("podArgv") or [], facts.get("podEnv") or {},
-                set(facts.get("bundleKeys") or []), REHEARSAL_SCHEDULE, slot, schedule_uid)
+                set(facts.get("bundleKeys") or []), REHEARSAL_SCHEDULE, slot, schedule_uid,
+                point_bound=point_bound)
             job_clauses["the pod the kubelet ran was observed, beside the Job and the bundle"] = (
                 bool(facts.get("complete")))
             job_clauses["and the pod ran exactly the Job template's argv and env"] = (
@@ -8850,12 +8902,29 @@ def rehearsal() -> None:
             # step 9 — the evidence outlives the Job
             job_name = facts.get("job")
             job_gone = False
+            live_job = get_opt("job", job_name) if job_name else None
+            ttl = ((live_job or {}).get("spec") or {}).get("ttlSecondsAfterFinished")
+            removed_by = None
             deadline = time.time() + 600
             while time.time() < deadline:
                 if job_name and get_opt("job", job_name) is None:
                     job_gone = True
+                    removed_by = "its TTL"
+                    break
+                if isinstance(ttl, int) and ttl > 600:
                     break
                 time.sleep(10)
+            if not job_gone and job_name and isinstance(ttl, int) and ttl > 600:
+                # THE TTL IS LONGER THAN ANY ROW CAN WAIT (the product's default
+                # is seven days, `diagnostics::job_ttl_seconds`). The TTL
+                # controller's whole act is a background-propagated DELETE of the
+                # finished Job; the harness performs exactly that, owner-checked,
+                # and the row then asks what it is about — whether the evidence
+                # outlives the Job — and says who removed it.
+                run(KN + ["delete", "job", job_name, "--cascade=background", "--wait=true"],
+                    check=False, timeout=180)
+                job_gone = get_opt("job", job_name) is None
+                removed_by = f"the harness, standing in for the TTL controller (ttl {ttl}s)"
             keys = {
                 "scorecard": scorecard_key,
                 "sidecar": f"logweir/drills/{run_id}.sig" if run_id else "",
@@ -8863,15 +8932,16 @@ def rehearsal() -> None:
                 "teardown attestation": f"logweir/drills/{run_id}.teardown.json" if run_id else "",
             }
             fetched = {name: fetchable(BUCKET_A, key) for name, key in keys.items()}
-            retention = the_evidence_outlives_the_job(job_gone, fetched)
+            retention = the_evidence_outlives_the_job(job_gone, fetched, ttl)
             evidence.append(artifact("rehearsal/09-retention.json",
-                                     {"job": job_name, "jobGone": job_gone, "keys": keys,
+                                     {"job": job_name, "jobGone": job_gone, "ttl": ttl,
+                                      "removedBy": removed_by, "keys": keys,
                                       "fetched": fetched, "clauses": retention}))
             check(
                 "rehearsal-9-evidence-outlives-the-job-ttl",
                 "PLAT-14.3",
                 all(retention.values()),
-                f"after Job {job_name!r} was collected by its TTL (gone={job_gone}) the four "
+                f"after Job {job_name!r} was removed by {removed_by} (gone={job_gone}) the four "
                 f"signed objects under logweir/drills/ are still fetchable from "
                 f"{BUCKET_A}: {json.dumps(fetched)}. Rehearsal evidence is never deleted "
                 f"(D3 §4.4). "
