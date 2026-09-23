@@ -40,12 +40,15 @@ const SHAPES = [
   ["Current", { basis: "Current", keyState: "Active" }, true],
   ["Historical", { basis: "Historical", keyState: "Retired" }, true],
   ["no trust key (D3 section 12)", ABSENT, true],
+  // `trust: null` is the same absence: the CRD field is nullable, and the
+  // controller (`ValidBasis::of_json`), the typed readers and the API all read
+  // it as no block (review LOW-1 of `trust-basis-class`).
+  ["a null trust (the same absence)", null, true],
   ["Unverified", { basis: "Unverified", keyState: "Active" }, false],
   ["RecordedBeforeRevocation", { basis: "RecordedBeforeRevocation", keyState: "Revoked" }, false],
   ["a present basis None", { basis: "None", keyState: "Active" }, false],
   ["an empty block", {}, false],
   ["a null basis", { basis: null }, false],
-  ["a null block", null, false],
   ["a word this build does not know", { basis: "SomeFutureBasis" }, false],
 ];
 
@@ -186,14 +189,14 @@ test("a_console_detail_keeps_an_absent_block_absent_and_green", async () => {
 test("the_old_legacy_rule_fails_the_rows_above", () => {
   // NEGATIVE CONTROL. The rule legacy mode used before this change read a raw
   // resource's basis with the DTO rule (`basisAllowsGreen`), so a present
-  // `None`, `{}`, `{basis: null}` and `null` all read as absence and went
-  // green. Under it the table above must fail.
+  // `None`, `{}` and `{basis: null}` all read as absence and went green.
+  // Under it the table above must fail.
   const oldRule = (trust) => {
     const green = basisAllowsGreen(((trust === ABSENT ? undefined : trust) || {}).basis);
     return { oldRule: green };
   };
   assert.throws(() => judgeShapes(oldRule), /a present basis None: oldRule/);
-  for (const trust of [{ basis: "None" }, {}, { basis: null }, null]) {
+  for (const trust of [{ basis: "None" }, {}, { basis: null }]) {
     assert.equal(oldRule(trust).oldRule, true, JSON.stringify(trust) + " was green before");
   }
 });

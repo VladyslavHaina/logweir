@@ -94,7 +94,8 @@ export const NO_BACKUP_SENTENCE =
  *  and a word this build does not know. The controller's badge and
  *  `logweir-api` refuse each of those too.
  *
- *  AN OBJECT WITH NO `trust` KEY AT ALL STAYS GREEN. The block is additive
+ *  AN OBJECT WITH NO `trust` KEY AT ALL -- OR `trust: null`, THE SAME ABSENCE --
+ *  STAYS GREEN. The block is additive
  *  and every object written before D3 carries none; D3 section 12's rule is that an
  *  absent field is NOT OBSERVED, and treating "an older controller wrote this"
  *  as a downgrade would turn every archive in an upgraded cluster red. A console

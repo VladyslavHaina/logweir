@@ -11357,11 +11357,11 @@ use weirkeeper::verification::{backup_badge, verification_patch_value};
 ///
 /// **THE NULLS BELONG TO THE PATCH AND NOT TO THE RENDERED BLOCK**, which is
 /// why `verification_patch_value` is a wrapper rather than an edit to
-/// `to_status_value`: `verification::valid_verification` reads `trust` as
-/// `None => compatible` but `Some(anything unreadable) => Untrusted`, so a
-/// `trust: null` inside the value the badge is computed over would turn a
-/// legacy `Valid` that carries no trust projection into `Untrusted`. The last
-/// arm below pins that.
+/// `to_status_value`: the block the badge is computed over is the block the
+/// controller rendered. Since TRUST-VALID-BASIS-CLASS (review LOW-1) a
+/// `trust: null` reads as an ABSENT block (`ValidBasis::of_json`), so the
+/// nulled form and the rendered form give the same badge; arm 4 below pins
+/// that agreement.
 ///
 /// KILLS: dropping `verification_patch_value` from either reconciler; nulling
 /// a field the verdict DOES hold; moving the nulls inside `to_status_value`.
@@ -11442,11 +11442,12 @@ async fn the_verification_patch_nulls_every_field_the_verdict_does_not_hold() {
 
     // ---- 4. THE BADGE'S VALUE IS THE UN-NULLED ONE --------------------
     //
-    // `valid_verification` reads `trust` as `None => compatible` and
-    // `Some(unreadable) => Untrusted`. A `Valid` verdict that carries no trust
-    // projection renders WITHOUT a `trust` key, and putting a null there would
-    // flip it to `Untrusted` — so the wrapper must not be applied to the value
-    // the badge is computed over.
+    // A `Valid` verdict that carries no trust projection renders WITHOUT a
+    // `trust` key, and the patch form writes `trust: null`. Both are D3 §12's
+    // absent block (`ValidBasis::of_json`: a `null` field is no block), so the
+    // badge is green over either — the reading every typed reader already
+    // gives `null`. Before review LOW-1 of `trust-basis-class` the raw badge
+    // read `null` as a malformed block and refused it.
     let rendered = VerificationResult {
         result: VerificationVerdict::Valid,
         matched_key_id: Some("test-key".to_string()),
@@ -11476,14 +11477,13 @@ async fn the_verification_patch_nulls_every_field_the_verdict_does_not_hold() {
         "the PATCH form nulls it: {nulled}"
     );
     assert!(
-        !backup_badge(&json!({
+        backup_badge(&json!({
             "exitCode": 0,
             "evidence": { "verification": nulled.clone() }
         }))
         .green,
-        "MUTANT: applying the wrapper to the value the badge reads turns a legacy `Valid` into \
-         `Untrusted`. That is why `verification_patch_value` is applied ONLY on the way into \
-         `second_patch`. Got: {nulled}"
+        "`trust: null` is an absent block, not a malformed one: the nulled form reads exactly as \
+         the rendered one. Got: {nulled}"
     );
 
     // ---- 5. AND THE RECONCILER STILL GOES GREEN ----------------------
@@ -11492,8 +11492,7 @@ async fn the_verification_patch_nulls_every_field_the_verdict_does_not_hold() {
     // and a misplaced wrapper is a call-site mistake. `valid_evidence` answers
     // `Valid` with `trust: None` — the legacy shape — over an observation that
     // carries a digest, so this run takes the `GlobalHandle` arm and must end
-    // `Verified=True`. Moving `verification_patch_value` onto `projected`
-    // flips it to `Untrusted` and this assertion is what says so.
+    // `Verified=True`.
     let observation = |_keys: EvidenceKeys| -> BoxFuture<'static, Option<ArchiveObservation>> {
         Box::pin(async move {
             Some(ArchiveObservation {

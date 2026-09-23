@@ -3470,9 +3470,10 @@ fn the_retrust_pass_repairs_a_condition_that_contradicts_its_own_block() {
 
 /// **F7.** A `trust` block this build cannot read is not green.
 ///
-/// Two states were folded together: "no `trust` key at all", which is an object
-/// written before PLAT-19.1 and is correctly green, and "a `trust` key with no
-/// readable `basis`", which is malformed. This module argues at length for
+/// Two states were folded together: "no `trust` key at all" (or `trust: null`,
+/// the same absence), which is an object written before PLAT-19.1 and is
+/// correctly green, and "a `trust` block with no readable `basis`", which is
+/// malformed. This module argues at length for
 /// reading the basis clause BECAUSE one-field badge rules rot; the arm that
 /// keeps the old rule must not swallow a shape the old rule never had.
 ///
@@ -3497,13 +3498,22 @@ fn a_trust_block_this_build_cannot_read_is_not_green() {
         backup_badge(&base(None)).green,
         "an object that predates the trust block is not downgraded by its absence"
     );
+    // `trust: null` IS THAT SAME ABSENCE, not a malformed block (review LOW-1
+    // of `trust-basis-class`): the CRD field is nullable, a null field carries
+    // no block, and every typed reader — protection, the rehearsal join,
+    // `logweir-api` — already reads it as `None`. `ValidBasis::of_json`
+    // documents the decision.
+    assert!(
+        backup_badge(&base(Some(json!(null)))).green,
+        "`trust: null` reads as no block, exactly as a typed reader sees it"
+    );
 
     // MALFORMED — present and unreadable, in four shapes.
     for malformed in [
         json!({"keyState": "Active"}),
         json!({"basis": null, "keyState": "Active"}),
         json!({"basis": 7}),
-        json!(null),
+        json!({}),
     ] {
         let badge = backup_badge(&base(Some(malformed.clone())));
         assert!(

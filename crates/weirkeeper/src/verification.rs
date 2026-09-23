@@ -1117,9 +1117,10 @@ fn valid_verification(status: &Value) -> Result<(&str, &str, bool), &'static str
     // TWO DIFFERENT STATES, AND THEY WERE FOLDED TOGETHER (finding F7).
     //
     // **No `trust` key at all** is the additive-compatibility case: an object
-    // written by a controller that predates PLAT-19.1, correctly green.
-    // **A `trust` key this build cannot read** — no `basis`, a `null`, a
-    // number, a basis nobody defined — is malformed, and a badge rule that
+    // written by a controller that predates PLAT-19.1, correctly green. A
+    // `trust: null` is that same absence (`ValidBasis::of_json` says why).
+    // **A `trust` block this build cannot read** — `{}`, no `basis`, a `null`
+    // basis, a number, a basis nobody defined — is malformed, and a badge rule that
     // reads one field is one edit away from rendering green over a state
     // nobody intended. That is the argument this module makes for reading the
     // basis clause at all, so the arm that keeps the old rule must not be the
@@ -1208,17 +1209,42 @@ impl ValidBasis {
         }
     }
 
-    /// From a raw `verification.trust` value. A key that is PRESENT, even as
-    /// `null` or `{}`, is a block: finding F7 (see [`valid_verification`]) —
-    /// "a `trust` key this build cannot read is malformed", not absent.
+    /// From a raw `verification.trust` value.
+    ///
+    /// # `trust: null` IS AN ABSENT BLOCK (review LOW-1, `trust-basis-class`)
+    ///
+    /// The CRD declares the field `nullable: true`, so a `null` written by an
+    /// update, a server-side apply or a JSON patch IS stored (a merge patch's
+    /// `null` deletes the key instead, which is why no controller write
+    /// produces one). It has to read ONE way everywhere, and it reads as
+    /// absent, for four reasons:
+    ///
+    /// 1. D3 §12's rule is about the FIELD: "`trust` absent → … the badge uses
+    ///    the pre-existing rule". A `null` field carries no block, no basis and
+    ///    no key state — nothing a trust decision could have been read from.
+    /// 2. Kubernetes and JSON merge patch (RFC 7386) treat `null` as "no
+    ///    value": it is how a field is removed.
+    /// 3. Every typed reader already sees it that way — `Option<TrustBasis>`
+    ///    deserialises `null` to `None` — which is what the protection
+    ///    evaluation, the rehearsal join's typed path and `logweir-api`'s
+    ///    `trust_state` read. Refusing it here and passing it there was the
+    ///    split this rule exists to prevent.
+    /// 4. It grants nothing: anyone who can write `trust: null` to a status
+    ///    can equally delete the key, which is the D3 §12 shape.
+    ///
+    /// Finding F7 still holds for everything that IS a block: `{}`, a `null`
+    /// or missing `basis`, a number, a word nobody defined — those are
+    /// present and unreadable, and [`Self::Refused`].
     #[must_use]
     pub fn of_json(trust: Option<&Value>) -> Self {
-        Self::of_word(trust.map(|t| t.get("basis").and_then(Value::as_str)))
+        match trust {
+            None | Some(Value::Null) => Self::Absent,
+            Some(t) => Self::of_word(Some(t.get("basis").and_then(Value::as_str))),
+        }
     }
 
-    /// From the typed CRD block. A `trust: null` a typed read sees as `None`
-    /// is absent here; the apiserver prunes a `null` from a non-nullable
-    /// field, so a stored object cannot carry one.
+    /// From the typed CRD block. A `trust: null` deserialises to `None` and is
+    /// [`Self::Absent`], exactly as [`Self::of_json`] reads it.
     #[must_use]
     pub fn of_block(trust: Option<&crate::crds::TrustBasis>) -> Self {
         Self::of_word(trust.map(|t| t.basis.as_deref()))
@@ -1367,13 +1393,12 @@ const VERIFICATION_CLEARED_KEYS: [&str; 4] = ["matchedKeyId", "detail", "signedA
 /// that no longer holds"* — and seam **S7** are the rule; this is its second
 /// half.
 ///
-/// **THE NULLS BELONG TO THE PATCH AND NOT TO THE RENDERED BLOCK.**
-/// [`valid_verification`] reads `trust` with
-/// `None => compatible, Some(malformed) => Untrusted`, so a `trust: null`
-/// inside the value the badge is computed over would turn a legacy `Valid`
-/// with no trust projection into `Untrusted`. The badge is computed over
-/// `to_status_value`'s block, unchanged; this wrapper is applied on the way
-/// into [`second_patch`] and nowhere else.
+/// **THE NULLS BELONG TO THE PATCH AND NOT TO THE RENDERED BLOCK.** The
+/// badge is computed over `to_status_value`'s block, unchanged; this wrapper
+/// is applied on the way into [`second_patch`] and nowhere else. (A `trust:
+/// null` reads as an absent block — [`ValidBasis::of_json`] — so the badge
+/// no longer depends on this for `trust`; it still keeps the value the badge
+/// reads identical to the block the controller rendered.)
 ///
 /// **IT CANNOT CAUSE A WRITE STORM.** `conditions::apply_merge_patch` removes
 /// a key sent as `null` and does nothing when it was already absent, so

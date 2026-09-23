@@ -270,9 +270,7 @@ fn verify_receipt_signature(
     keyring: &wire::EvidenceKeyring,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), DrillError> {
-    use logweir_core::trust::{
-        decide, EvidenceClaim, IndependentObservation, KeyUsage, TrustResult,
-    };
+    use logweir_core::trust::{decide, EvidenceClaim, IndependentObservation, KeyUsage};
 
     let sidecar_key = crate::catalog::cli::sidecar_key_of(receipt_key);
     let sidecar_bytes = match archive.get(&sidecar_key) {
@@ -347,7 +345,13 @@ fn verify_receipt_signature(
         &IndependentObservation::none(),
         now,
     );
-    if verdict.result != TrustResult::Valid {
+    // A PASS IS `Valid` ON A `Current`/`Historical` BASIS, not `Valid` alone
+    // (TRUST-VALID-BASIS-CLASS). `Verdict::may_render_green` is that rule for a
+    // decided verdict — the same allow-list `weirkeeper::verification::ValidBasis`
+    // applies to a stored one (this crate does not link `weirkeeper`).
+    // `decide` pairs `Valid` with those two bases only, so this reads the same
+    // today; the allow-list is what keeps it so.
+    if !verdict.may_render_green() {
         return Err(refuse(format!(
             "{POINT_UNTRUSTED}. Recovery point {}'s receipt verifies under key {}, and this \
              installation's trust refuses that key for it: {} (key state {}); no data operation \

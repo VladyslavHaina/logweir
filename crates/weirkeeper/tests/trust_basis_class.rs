@@ -69,6 +69,9 @@ fn shapes() -> Vec<(&'static str, Option<Value>, Expect)> {
             Expect::PassHistorical,
         ),
         ("no trust block (D3 §12)", None, Expect::Pass),
+        // `nullable: true` in the CRD, so a stored object can carry it. It is
+        // the same absence as no key (review LOW-1; `ValidBasis::of_json`).
+        ("trust: null", Some(Value::Null), Expect::Pass),
         (
             "Unverified (the 03c2a85..e247cf9 lab shape)",
             Some(json!({"basis": "Unverified", "keyState": "Active"})),
@@ -153,7 +156,8 @@ fn typed_backup(trust: Option<&Value>) -> Backup {
 
 /// The typed block, as a typed reader (`Backup.status`) sees it.
 fn typed_block(trust: Option<&Value>) -> Option<weirkeeper::crds::TrustBasis> {
-    trust.map(|t| serde_json::from_value(t.clone()).expect("the trust block parses"))
+    // `Option<_>`, exactly as the CRD field is typed: serde reads `null` here.
+    trust.and_then(|t| serde_json::from_value(t.clone()).expect("the trust block parses"))
 }
 
 /// A `Verified`, selectable catalog row for the same receipt digest.
@@ -186,9 +190,10 @@ fn the_one_rule_admits_current_historical_and_an_absent_block_only() {
     for (label, trust, expect) in shapes() {
         let from_json = ValidBasis::of_json(trust.as_ref());
         let from_block = ValidBasis::of_block(typed_block(trust.as_ref()).as_ref());
-        let want = match (expect, trust.is_some()) {
-            (Expect::Pass, false) => ValidBasis::Absent,
-            (Expect::Pass, true) => ValidBasis::Current,
+        let absent = trust.as_ref().is_none_or(Value::is_null);
+        let want = match (expect, absent) {
+            (Expect::Pass, true) => ValidBasis::Absent,
+            (Expect::Pass, false) => ValidBasis::Current,
             (Expect::PassHistorical, _) => ValidBasis::Historical,
             (Expect::Undecided, _) => ValidBasis::Unverified,
             (Expect::Refused, _) => ValidBasis::Refused,
@@ -571,4 +576,26 @@ fn the_shared_valid_basis_none_fixture_is_refused_by_every_controller_reader() {
         !refusals.is_empty(),
         "a refusal no catalog row may overrule"
     );
+}
+
+/// `crates/logweir/src/drill/binding.rs` (the restore-time recheck, a crate
+/// that does not link `weirkeeper`) reads `decide`'s verdict with
+/// `Verdict::may_render_green`. This row holds that core rule and
+/// `ValidBasis::of_core(..).is_pass()` to ONE answer for every basis, so the
+/// CLI and the controller cannot drift apart (review LOW-2).
+#[test]
+fn the_core_green_rule_and_the_shared_helper_agree_on_every_basis() {
+    for basis in [
+        TrustBasis::Current,
+        TrustBasis::Historical,
+        TrustBasis::RecordedBeforeRevocation,
+        TrustBasis::Unverified,
+        TrustBasis::None,
+    ] {
+        assert_eq!(
+            valid_verdict(basis, TrustKeyState::Active).may_render_green(),
+            ValidBasis::of_core(basis).is_pass(),
+            "Valid on {basis:?}"
+        );
+    }
 }

@@ -2278,9 +2278,11 @@ export function basisAllowsGreen(basis) {
  *  like a custom resource (TRUST-VALID-BASIS-CLASS).
  *
  *  THE CONTROLLER'S RULE, `weirkeeper::verification::ValidBasis`: NO `trust`
- *  key at all is D3 section 12's absent field and keeps the pre-existing rule
- *  (green); a PRESENT block is green only on `Current` or `Historical`. So
- *  `{basis: "None"}`, `{}`, `{basis: null}`, `null`, `Unverified`,
+ *  key at all -- or `trust: null`, the same absence (the CRD field is
+ *  nullable, and every typed reader and the API read `null` as no block) --
+ *  is D3 section 12's absent field and keeps the pre-existing rule (green); a
+ *  PRESENT block is green only on `Current` or `Historical`. So
+ *  `{basis: "None"}`, `{}`, `{basis: null}`, `Unverified`,
  *  `RecordedBeforeRevocation` and a word this build does not know are all not
  *  green -- the controller badge says `VerificationUntrusted` or
  *  `VerificationNotAttempted` for each, and `logweir-api` says `untrusted` or
@@ -2288,10 +2290,10 @@ export function basisAllowsGreen(basis) {
  *  F1's rule, which belongs to the DTO) made legacy mode the one surface that
  *  painted those objects green (review LOW-1 of `claude/api-trust-state`). */
 export function trustBlockAllowsGreen(trust) {
-  if (trust === undefined) {
+  if (trust === undefined || trust === null) {
     return true;
   }
-  return trust !== null && typeof trust === "object" && typeof trust.basis === "string" &&
+  return typeof trust === "object" && typeof trust.basis === "string" &&
     GREEN_BASES.indexOf(trust.basis) !== -1;
 }
 

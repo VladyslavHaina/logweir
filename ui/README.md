@@ -1936,7 +1936,9 @@ field (`exitCode == 0` for a Backup, `outcome == "pass"` for a Restore).
 
 **Three shapes leave it standing, and they are three different facts:**
 `Current`, `Historical`, and *no `trust` block at all* -- an object an older
-controller wrote, which D3 section 12 says keeps the pre-existing rule. Reading
+controller wrote, which D3 section 12 says keeps the pre-existing rule. A
+`trust: null` is the same absence (the CRD field is nullable, and the
+controller reads `null` as no block). Reading
 that absence as a downgrade would put `unverified: no verification was
 recorded` on every archive an upgraded cluster holds, with `result: Valid`,
 `verifiedAt` and `matchedKeyId` sitting beside it saying otherwise.

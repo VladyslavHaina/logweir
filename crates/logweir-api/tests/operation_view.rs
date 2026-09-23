@@ -451,8 +451,11 @@ fn valid_with_trust(trust: Option<Value>) -> OperationView {
 /// from the badge in either direction fails the second assertion.
 #[test]
 fn a_valid_verdict_is_verified_only_on_a_basis_the_green_rule_admits() {
-    let rows: [(&str, Option<Value>, TrustState); 8] = [
+    let rows: [(&str, Option<Value>, TrustState); 9] = [
         ("absent block", None, TrustState::Verified),
+        // The CRD field is nullable; `null` is the same absence on every
+        // reader (`weirkeeper::verification::ValidBasis::of_json`).
+        ("trust: null", Some(Value::Null), TrustState::Verified),
         (
             "Current",
             Some(json!({"basis": "Current", "keyState": "Active"})),
