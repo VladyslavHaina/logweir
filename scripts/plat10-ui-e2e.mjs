@@ -140,6 +140,10 @@ const result = {
   mode: "console (logweir-api, localAdmin, loopback)",
   statusWrites: 0,
   blocked: [],
+  // A journey that FAILED on a product answer but whose failure does not
+  // invalidate the journeys after it: recorded here, the run continues, and
+  // any entry makes the run exit 1 (never 0, never 3).
+  failed: [],
   journeys: [],
   controls: [],
   fixtures: [],
@@ -253,18 +257,21 @@ async function waitForEvidenceVerdict(kind, name, label, seconds) {
     if (seen[seen.length - 1] !== verdict) {
       seen.push(verdict);
     }
-    const retryOwed = verdict === "NotAttempted" &&
-      ((verification.observation || {}).retryAfter || "").length > 0;
+    // `observation` is a sibling of `verification` on `status.evidence` (the
+    // CRD's `EvidenceObservation`), never inside it.
+    const observed = (((object.status || {}).evidence || {}).observation) || {};
+    const retryOwed = verdict === "NotAttempted" && String(observed.retryAfter || "").length > 0;
     if (verdict !== "Pending" && verdict !== "absent" && !retryOwed) {
       reached = true;
       break;
     }
     await pause(2000);
   }
-  const verification = ((((object || {}).status || {}).evidence || {}).verification) || {};
+  const evidence = (((object || {}).status || {}).evidence) || {};
+  const verification = evidence.verification || {};
   return { object: object, seen: seen, reached: reached, label: label,
     result: verification.result, detail: String(verification.detail || "").slice(0, 600),
-    matchedKeyId: verification.matchedKeyId, observation: verification.observation || null };
+    matchedKeyId: verification.matchedKeyId, observation: evidence.observation || null };
 }
 
 /** The records comparator: every restored partition's records, in order, are
@@ -1255,9 +1262,19 @@ async function main() {
       restoreOffered: runningRow.restoreHref !== null,
     });
 
-    const terminalA = await waitForTerminalBackup(runA.metadata.name, "run A");
-    check(terminalA.status.phase === "Succeeded",
-      "run A did not succeed: " + JSON.stringify(terminalA.status).slice(0, 1500));
+    const terminalA0 = await waitForTerminalBackup(runA.metadata.name, "run A");
+    check(terminalA0.status.phase === "Succeeded",
+      "run A did not succeed: " + JSON.stringify(terminalA0.status).slice(0, 1500));
+    // A SUCCEEDED RUN READS "verifying" UNTIL ITS EVIDENCE FETCH ANSWERS. Since
+    // the evidence-fetch Job (09f17e7) a destination-backed run is Pending while
+    // the Job reads its receipt, and the console says so rather than
+    // "Succeeded" (measured on lab-refresh-8: the row read at the terminal
+    // phase was not `Succeeded`). The row is read once the controller has
+    // REACHED a verdict, and must then say Succeeded.
+    const settledA = await waitForEvidenceVerdict("backup", runA.metadata.name, "run A", 420);
+    check(settledA.reached, "run A's evidence verdict was never reached: " +
+      JSON.stringify(settledA.seen));
+    const terminalA = settledA.object;
     await freshPage(detailRoute);
     await waitForSelector(page, "#schedule-history", "the history after run A");
     const rowA0 = await historyRow(runA.metadata.name);
@@ -1797,15 +1814,22 @@ async function main() {
       "and it no longer says awaiting approval":
         !/awaiting (approval|verification)/i.test(approvalPageVerified.text),
     };
-    check(Object.values(approvalPageClauses).every(Boolean),
-      "the verified-approval route: " + JSON.stringify({ clauses: approvalPageClauses,
-        page: approvalPageVerified }));
-    record("PLAT-12.2: the approvals route renders the controller-verified Approval for exactly this Restore", {
+    // A FAILURE HERE IS RECORDED, NOT THROWN: the page's reading of an
+    // Approval does not change the Restore, so the done-evidence clauses
+    // below still measure what they measure. The run still exits 1.
+    const approvalRouteRow = {
+      journey: "PLAT-12.2: the approvals route renders the controller-verified Approval for exactly this Restore",
       route: approvalsRoute.slice(base.length), approval: approvalAfter.metadata.name,
       approvalUid: approvalAfter.metadata.uid, matchedKeyId: (approvalAfter.status || {}).matchedKeyId,
       restore: restore.metadata.name, restoreUid: restore.metadata.uid,
       heldPage: approvalPageHeld, verifiedPage: approvalPageVerified, clauses: approvalPageClauses,
-    });
+    };
+    if (Object.values(approvalPageClauses).every(Boolean)) {
+      record(approvalRouteRow.journey, approvalRouteRow);
+    } else {
+      result.failed.push(approvalRouteRow);
+      process.stderr.write("== FAILED (recorded, run continues): " + approvalRouteRow.journey + "\n");
+    }
     const fetchedR = finished.status.phase === "Succeeded"
       ? await waitForEvidenceVerdict("restore", restore.metadata.name, "the restore", 420)
       : { object: finished, seen: [], reached: false, result: null, observation: null };
@@ -1818,6 +1842,17 @@ async function main() {
     const admittedEnd = (doneStatus.conditions || []).find((c) => c.type === "Admitted") || {};
     const verifiedCond = (doneStatus.conditions || []).find((c) => c.type === "Verified") || {};
     const completion = doneStatus.completion || {};
+    // THE SIGNED SCORECARD, read from the evidence destination by the key the
+    // controller recorded; only after its Valid verdict does it count.
+    let scorecard = {};
+    if (fetchedR.result === "Valid" && (doneStatus.evidence || {}).scorecardKey) {
+      const raw = mcJob("scorecard", "mc cat \"p10/$S3_BUCKET/" +
+        doneStatus.evidence.scorecardKey + "\"");
+      scorecard = JSON.parse(raw);
+      writeFileSync(join(ARTIFACTS, "restore-scorecard.json"), JSON.stringify(scorecard, null, 2) + "\n");
+    }
+    const scoreIntegrity = scorecard.integrity || {};
+    const scoreRunId = String(scorecard.run_id || "");
     const ranClauses = {
       "the Approval verified against the roster key": (((approvalAfter.status || {}).conditions ||
         []).find((c) => c.type === "Verified") || {}).status === "True" &&
@@ -1830,15 +1865,25 @@ async function main() {
         doneStatus.outcome === "pass",
       "its evidence is Valid (the evidence-fetch Job read the scorecard)":
         fetchedR.result === "Valid" && verifiedCond.status === "True",
-      "the sampled comparison matched every sampled record": typeof completion.recordsSampled ===
-        "number" && completion.recordsSampled > 0 &&
-        completion.recordsSampledMatching === completion.recordsSampled,
+      // FROM THE SIGNED SCORECARD THE CONTROLLER VERIFIED, not from
+      // `status.completion`: this build declares `completion` and never
+      // writes it (PLAT-14.1's recorded gap), so the comparison the runner
+      // signed is read from the evidence itself; the Restore's own report is
+      // held to its own row below.
+      "the sampled comparison matched every sampled record (signed scorecard, integrity pass)":
+        (doneStatus.integrity || {}).result === "pass" &&
+        typeof scoreIntegrity.records_sampled === "number" && scoreIntegrity.records_sampled > 0 &&
+        scoreIntegrity.records_sampled_matching === scoreIntegrity.records_sampled &&
+        scoreIntegrity.result === "pass" && scoreRunId.length > 0 &&
+        String(doneStatus.evidence.scorecardKey || "").indexOf(scoreRunId) !== -1,
     };
 
     // --- the restored records, compared with the source --------------------
     ensureKafkaClient(source + "-scram", target + "-scram");
     const mapping = (restore.spec.topicMapping || restoreBody.topicMapping || []);
-    const newTopics = (completion.newTopics || []).map((t) => t.name);
+    // `status.newTopics` is what the controller publishes (names);
+    // `status.completion.newTopics` is declared and unwritten on this build.
+    const newTopics = (doneStatus.newTopics || []).map((t) => (typeof t === "string" ? t : t.name));
     result.restoredTopics = newTopics.slice();
     const recordChecks = [];
     for (const entry of mapping) {
@@ -1883,15 +1928,35 @@ async function main() {
       checks: recordChecks.map((c) => ({ target: c.target, shiftedRefused: c.shiftedRefused })),
     });
     const recordClauses = {
-      "the Restore maps the schedule's topic to a new topic it reports creating":
+      "the Restore maps the schedule's topic to a new topic it reports creating (status.newTopics)":
         mapping.length > 0 && mapping.every((m) => newTopics.indexOf(m.target) !== -1),
       "records were restored": totalRestored > 0,
       "every restored partition is exactly the source partition's records, in order":
         recordChecks.every((c) => c.equal),
-      "the restored count is the one the Restore reports":
-        totalRestored === completion.recordsRestored,
-      "and the one the controller verified for run B": totalRestored === liveBRecords,
+      "and the count the controller verified for run B": totalRestored === liveBRecords,
     };
+    // THE RESTORE'S OWN REPORT OF WHAT IT DID, held to its own row. The
+    // clause is unchanged from the journey's first version; it is separated
+    // so a build that still leaves `status.completion` unwritten (PLAT-14.1's
+    // recorded gap) fails THIS row by name rather than hiding the restored
+    // records above. Recorded as a failure, never skipped; the run exits 1.
+    const completionClauses = {
+      "the Restore reports its completion (status.completion)": doneStatus.completion !== undefined &&
+        doneStatus.completion !== null,
+      "the restored count is the one the Restore reports": totalRestored === completion.recordsRestored,
+      "and its sampled comparison": typeof completion.recordsSampled === "number" &&
+        completion.recordsSampled > 0 && completion.recordsSampledMatching === completion.recordsSampled,
+    };
+    const completionRow = { journey: "PLAT-10.2 the approved Restore reports its own completion " +
+      "(status.completion: recordsRestored, recordsSampled, newTopics)",
+      restore: done.metadata.name, completion: doneStatus.completion === undefined ? null :
+        doneStatus.completion, totalRestoredOnTheBroker: totalRestored, clauses: completionClauses };
+    if (Object.values(completionClauses).every(Boolean)) {
+      record(completionRow.journey, completionRow);
+    } else {
+      result.failed.push(completionRow);
+      process.stderr.write("== FAILED (recorded, run continues): " + completionRow.journey + "\n");
+    }
     const clauses = Object.assign({}, ranClauses, recordClauses);
     await shot(page, "17b-after-restore");
     check(Object.values(clauses).every((v) => v === true),
@@ -1952,6 +2017,15 @@ async function main() {
     // PLAT-10.2 pause and resume, from the detail.
     result.reloads = (result.reloads || 0) +
       await openRoute(page, detailRoute, "form.suspend", "the suspend toggle on the detail");
+    // WHAT THE DETAIL OFFERS JUST BEFORE THE PAUSE, under the same catalog
+    // state (section 12 left the view incomplete, so A's Missing verdict is
+    // no longer listed and A's own controller window is offered -- the
+    // console withholds a point only on a catalog refusal, plat10 review
+    // MEDIUM-2). The pause must change none of it.
+    await waitForSelector(page, "#schedule-history", "the history before the pause");
+    const beforePauseA = await historyRow(runA.metadata.name);
+    const beforePauseB = await historyRow(runB.metadata.name);
+    check(beforePauseA !== null && beforePauseB !== null, "the history before the pause lists both runs");
     const loadsBeforePause = pageLoads;
     await page.click("form.suspend button[type=submit]");
     const pausedInPlace = await inPlace(selected.metadata.name, loadsBeforePause,
@@ -1965,12 +2039,18 @@ async function main() {
     const pausedA = await historyRow(runA.metadata.name);
     const pausedB = await historyRow(runB.metadata.name);
     check(pausedA !== null && pausedB !== null, "a paused schedule stopped listing its runs");
-    // A is unavailable since section 10 and offers no Restore; B is healthy and
-    // must still offer its own while the schedule is paused.
-    check(pausedA.restoreHref === null && pausedB.restoreHref !== null &&
+    // THE PAUSE CHANGES NOTHING ON OFFER: each row offers exactly what it
+    // offered a moment before, and B, healthy, still offers its OWN point.
+    // (The first version required A to offer nothing, which held only while
+    // no destination-backed run was ever restorable -- EVIDENCE-FETCH-JOB-
+    // UNBUILT; with a window and an incomplete view A is offered both before
+    // and during the pause, measured on lab-refresh-8.)
+    check(pausedA.restoreHref === beforePauseA.restoreHref &&
+      pausedB.restoreHref === beforePauseB.restoreHref && pausedB.restoreHref !== null &&
       pausedB.restoreHref.indexOf("uid=" + runB.metadata.uid) !== -1,
     "a paused schedule changed which of its recovery points it offers: " +
-      JSON.stringify([pausedA.restoreHref, pausedB.restoreHref]));
+      JSON.stringify({ before: [beforePauseA.restoreHref, beforePauseB.restoreHref],
+        paused: [pausedA.restoreHref, pausedB.restoreHref] }));
     const exactSuspended = () => page.evaluate(() => Array.from(
       document.querySelectorAll("#schedule-detail .badge")).some((node) =>
       node.textContent.trim() === "suspended"));
@@ -1992,6 +2072,7 @@ async function main() {
       resumedSpecSuspend: resumed.spec.suspend, saysSuspended: pausedBadge,
       pauseReRenderedInPlace: pausedInPlace, resumeReRenderedInPlace: resumedInPlace,
       runsListedWhilePaused: [pausedA.text.split("\t")[0], pausedB.text.split("\t")[0]],
+      restoreLinksBeforePause: [beforePauseA.restoreHref, beforePauseB.restoreHref],
       restoreLinksWhilePaused: [pausedA.restoreHref, pausedB.restoreHref],
     });
 
@@ -2160,8 +2241,21 @@ async function main() {
         kube(["-n", namespace, "get", kind, "-o", "json"], { expected: [0, 1] }).stdout);
     }
     // What the ONE reconciler said about this namespace.
-    const labLog = kube(["-n", LAB, "logs", "deploy/weirkeeper", "--since=2h"],
-      { expected: [0, 1], timeout: 60000 }).stdout;
+    // BOUNDED TO THIS RUN, AND NEVER ALLOWED TO MASK ITS FAILURE. This dump
+    // runs in `finally`: a throw here replaces the journey's own error. Two
+    // hours of the SHARED controller's log overflowed the 4 MiB spawn buffer
+    // on lab-refresh-8 (status null) and hid why the run had stopped, so the
+    // window is this run's own duration and a failed read is recorded, not
+    // thrown.
+    const sinceSeconds = Math.ceil((Date.now() - Date.parse(result.startedAt)) / 1000) + 60;
+    let labLog = "";
+    try {
+      labLog = kube(["-n", LAB, "logs", "deploy/weirkeeper", "--since=" + sinceSeconds + "s"],
+        { expected: [0, 1], timeout: 120000, maxBuffer: 64 * 1024 * 1024 }).stdout;
+    } catch (unread) {
+      labLog = "";
+      result.labControllerLogUnread = String(unread.message || unread).slice(0, 500);
+    }
     writeFileSync(join(ARTIFACTS, "lab-controller-log-this-namespace.txt"),
       labLog.split("\n").filter((line) => line.indexOf(namespace) !== -1).join("\n") + "\n");
     await browser.close();
@@ -2291,8 +2385,14 @@ function shutDown() {
 main().then(
   () => {
     shutDown();
-    cleanUp(result.blocked.length === 0 ? "passed" : "blocked");
+    cleanUp(result.failed.length > 0 ? "failed" : result.blocked.length === 0 ? "passed" : "blocked");
     const at = writeResult();
+    if (result.failed.length > 0) {
+      process.stderr.write("\n== " + result.journeys.length + " journey(s) and " +
+        result.controls.length + " control(s) passed; " + result.failed.length +
+        " FAILED: " + result.failed.map((f) => f.journey).join("; ") + "; result: " + at + "\n");
+      process.exit(1);
+    }
     if (result.blocked.length > 0) {
       process.stderr.write("\n== " + result.journeys.length + " journey(s) and " +
         result.controls.length + " control(s) passed; " + result.blocked.length +
