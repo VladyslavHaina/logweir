@@ -3055,6 +3055,22 @@ def test_a_shared_set_must_not_be_planned_under_a_retained_point() -> None:
     stale = [entries[0], dict(entries[1], verification="Invalid")]
     verdict, _ = d3.shared_set_is_protected(stale, exposed)
     row("shared set: one of the two not usable -> NOT-REACHED", verdict == "NOT-REACHED")
+    # lab-refresh-9: the view spans the destination; a shared set OUTSIDE the
+    # policy's scope prefix is not the policy's to evaluate.
+    scoped = [dict(e, manifestKey="shared/set-1/manifest.json") for e in entries] + [
+        {"pointId": "lwp1-x", "backupId": "set-9", "availability": "Available",
+         "verification": "Verified", "manifestKey": "archive/set-9/manifest.json"},
+        {"pointId": "lwp1-y", "backupId": "set-9", "availability": "Available",
+         "verification": "Verified", "manifestKey": "archive/set-9/manifest.json"}]
+    verdict, clauses = d3.shared_set_is_protected(scoped, guarded, "shared")
+    row("shared set: an out-of-scope shared set elsewhere in the view is not judged -> PASS",
+        verdict == "PASS", str(clauses))
+    verdict, _ = d3.shared_set_is_protected(scoped, guarded)
+    row("PLANTED: judged without the scope, that out-of-scope set fails the row",
+        verdict == "FAIL")
+    verdict, _ = d3.shared_set_is_protected(scoped, exposed, "shared")
+    row("shared set: the in-scope exposure is still refused under the scope -> FAIL",
+        verdict == "FAIL")
 
 
 def test_a_minted_value_is_never_read_as_an_option() -> None:

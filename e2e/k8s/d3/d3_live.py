@@ -12171,15 +12171,24 @@ SHARED_POLICY = "keep-shared"
 SHARED_POINT = "shared-1"
 
 
-def shared_set_is_protected(entries: list[dict[str, Any]], ev: dict[str, Any]
-                            ) -> tuple[str, dict[str, bool]]:
+def shared_set_is_protected(entries: list[dict[str, Any]], ev: dict[str, Any],
+                            scope_prefix: str | None = None) -> tuple[str, dict[str, bool]]:
     """Two usable points over ONE backup set: the set must not be planned
     for deletion while one of them is retained.
 
     NOT-REACHED unless the premise holds: at least two entries share a
     `backupId` and both are usable (Available, Verified) — otherwise the
     evaluator never had a shared set to protect.
+
+    `scope_prefix` is the policy's `spec.scope.prefix`: the catalog VIEW spans
+    the whole destination, and a set outside the policy's scope is not the
+    policy's to evaluate. Measured at lab-refresh-9, where the full chain put
+    `catalog-duplicate-identity`'s own shared set (`archive/…`) in the same
+    view and the "both points evaluated" clause failed on it.
     """
+    if scope_prefix:
+        entries = [e for e in entries
+                   if str(e.get("manifestKey") or "").startswith(scope_prefix.rstrip("/") + "/")]
     by_set: dict[str, list[dict[str, Any]]] = {}
     for e in entries:
         by_set.setdefault(str(e.get("backupId")), []).append(e)
@@ -12245,7 +12254,7 @@ def shared_set() -> None:
         except (RuntimeError, KeyError, StopIteration, json.JSONDecodeError):
             plan = {}
     set_objects = objects(BUCKET_A, f"{SHARED_PREFIX}/{backup_id}/")
-    verdict, clauses = shared_set_is_protected(entries, ev)
+    verdict, clauses = shared_set_is_protected(entries, ev, SHARED_PREFIX)
     lines = [{k: ln.get(k) for k in ("point_id", "backup_id", "set_prefix", "enumerate_set")}
              for ln in (plan.get("lines") or [])]
     evidence.append(artifact("shared-set/evaluation.json", {
