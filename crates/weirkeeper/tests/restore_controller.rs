@@ -3371,6 +3371,159 @@ async fn an_owned_pod_is_read_and_two_claimants_are_refused() {
     }
 }
 
+/// A `Restore` whose progress block recorded `diagnostics` (JSON), as the
+/// running passes leave it.
+fn restore_with_diagnostics(diagnostics: Value) -> Restore {
+    restore_with_progress(serde_json::json!({
+        "stage": "Preparing", "reason": "WaitingForPod", "diagnostics": diagnostics,
+    }))
+}
+
+fn restore_with_progress(progress: Value) -> Restore {
+    let mut r = restore();
+    r.status = Some(
+        serde_json::from_value(serde_json::json!({"phase": "Running", "progress": progress}))
+            .expect("a RestoreStatus"),
+    );
+    r
+}
+
+fn stored_diagnostic(code: &str, severity: &str, last_seen: &str) -> Value {
+    serde_json::json!({
+        "code": code, "severity": severity, "message": format!("{code} on the runner pod"),
+        "object": {"kind": "Pod", "name": "logweir-restore-incident-4471-x7k2p"},
+        "firstSeen": "2026-09-10T11:50:00Z", "lastSeen": last_seen, "count": 3,
+    })
+}
+
+/// Defect WARNING-DIAGNOSTICS-NOEXITCODE through the `Restore` reconciler: the
+/// Job failed at 11:59 with its pod gone, and the WARNING recorded while it
+/// waited — a projected ConfigMap that never mounted, a pod no node took — is
+/// the terminal reason, not `NoExitCode`. The Secret-mount (`Error`) row is
+/// unchanged, and a warning last seen long before the end is not a cause.
+///
+/// The write is still the one resourceVersion-preconditioned status patch,
+/// and it carries the stored condition array rather than replacing it.
+///
+/// MUTANT: restore the `Severity::Error`-only filter in
+/// `diagnostics::recorded_terminal_state`. The first two arms fail. MUTANT:
+/// pass the pass's `now` instead of `job_ended_at`. The same two arms fail.
+#[tokio::test]
+async fn a_warning_that_ended_the_restore_is_its_terminal_reason() {
+    let empty = r#"{"apiVersion":"v1","kind":"PodList","metadata":{},"items":[]}"#;
+    for (label, diagnostics, expected) in [
+        (
+            "ConfigMap mount, then WaitingForPod after fail-fast deleted the pod",
+            serde_json::json!([
+                stored_diagnostic("WaitingForPod", "Warning", "2026-09-10T11:59:10Z"),
+                stored_diagnostic("VolumeMountFailed", "Warning", "2026-09-10T11:58:30Z"),
+            ]),
+            "VolumeMountFailed",
+        ),
+        (
+            "an unschedulable pod until the Job's own deadline",
+            serde_json::json!([stored_diagnostic(
+                "PodUnschedulable",
+                "Warning",
+                "2026-09-10T11:58:45Z"
+            )]),
+            "PodUnschedulable",
+        ),
+        (
+            "the Secret-mount row, unchanged",
+            serde_json::json!([stored_diagnostic(
+                "SigningKeyMissing",
+                "Error",
+                "2026-09-10T11:00:00Z"
+            )]),
+            "VolumeMountFailed",
+        ),
+        (
+            "a warning that stopped being seen long before the end",
+            serde_json::json!([stored_diagnostic(
+                "RunnerImagePullFailed",
+                "Warning",
+                "2026-09-10T11:30:00Z"
+            )]),
+            "NoExitCode",
+        ),
+    ] {
+        let (client, _rec, bodies) = mock_client_recording_bodies(finished_routes(
+            empty.to_string(),
+            log_body(""),
+            "Failed",
+        ));
+        let outcome = reconcile_restore(
+            &restore_with_diagnostics(diagnostics),
+            &client,
+            &unobserved_scorecard,
+            &unverified_evidence,
+            // Twenty minutes after the Job ended (11:59): "still observed when
+            // the run ended" is measured from the Job, never from this pass.
+            now() + chrono::Duration::minutes(20),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{label}: {e}"));
+        assert_eq!(outcome.terminal_state.as_deref(), Some(expected), "{label}");
+        assert_eq!(outcome.exit_code, None, "{label}: no code is invented");
+        let seen = bodies.lock().expect("the body recorder").clone();
+        let raw = seen
+            .iter()
+            .find(|b| b.method == "PATCH" && path(&b.uri).ends_with("/status"))
+            .expect("one status patch");
+        let body: Value = serde_json::from_str(&raw.body).expect("JSON");
+        assert!(
+            body["metadata"]["resourceVersion"].is_string(),
+            "{label}: the terminal write is resourceVersion-preconditioned: {body}"
+        );
+        let status = &body["status"];
+        assert_eq!(status["phase"].as_str(), Some("Failed"), "{label}");
+        assert_eq!(status["reason"].as_str(), Some(expected), "{label}");
+        assert_eq!(
+            status["progress"]["reason"].as_str(),
+            Some(expected),
+            "{label}: the progress block agrees with the condition"
+        );
+        assert!(
+            status["progress"].get("diagnostics").is_none(),
+            "{label}: the finished write leaves the recorded diagnostics alone (a partial merge)"
+        );
+    }
+}
+
+/// Review L7/M3, the `Restore` half: a warning recorded before the runner
+/// STARTED is not what ended it. The progress block says the runner started
+/// (`startedAt`, kept sticky across pod-less passes), the Job then failed with
+/// its pod gone, and the answer is `NoExitCode` — not the warning's class.
+///
+/// MUTANT: drop the `!started` clause in `recorded_terminal_state`. This row
+/// fails (the reviewer's R5 survived the `Restore` suite before it existed).
+#[tokio::test]
+async fn a_warning_before_the_restore_runner_started_is_not_its_cause() {
+    let empty = r#"{"apiVersion":"v1","kind":"PodList","metadata":{},"items":[]}"#;
+    let (client, _rec, _bodies) =
+        mock_client_recording_bodies(finished_routes(empty.to_string(), log_body(""), "Failed"));
+    let outcome = reconcile_restore(
+        &restore_with_progress(serde_json::json!({
+            "stage": "Queued",
+            "reason": "WaitingForPod",
+            "runner": {"jobName": NAME, "startedAt": "2026-09-10T11:58:20Z"},
+            "diagnostics": [stored_diagnostic(
+                "VolumeMountFailed",
+                "Warning",
+                "2026-09-10T11:58:00Z"
+            )],
+        })),
+        &client,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("the reconcile completes");
+    assert_eq!(outcome.terminal_state.as_deref(), Some("NoExitCode"));
+}
+
 /// The crashed-Job case: a Job that finished with no terminated state for
 /// `runner` gets a TERMINAL status with `exitCode` ABSENT.
 #[tokio::test]

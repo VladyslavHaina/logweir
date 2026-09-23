@@ -18,12 +18,12 @@ use weirkeeper::conditions::{
 };
 use weirkeeper::crds::{Condition, Diagnostic, DiagnosticObject, RunProgress, RunnerPhase};
 use weirkeeper::diagnostics::{
-    apply, apply_finished, bounded, derive, fail_fast_window, held_for, merge_diagnostics,
-    parse_progress, parse_progress_after, recorded_terminal_state, sanitize, should_fail_fast,
-    should_read_progress, terminal_state, Code, Diagnosis, Facts, Progress, Severity, Stage, Write,
-    DIAGNOSTICS_MAX, FAIL_FAST_NEVER, FAIL_FAST_SECONDS_DEFAULT, FAIL_FAST_SECONDS_MIN,
-    MESSAGE_MAX_BYTES, MOUNT_TRANSIENT_FOR, OBSERVED_HEARTBEAT, PROGRESS_LINE_MAX_BYTES,
-    WAITING_FOR_POD_GRACE,
+    apply, apply_finished, bounded, derive, fail_fast_window, held_for, job_ended_at,
+    merge_diagnostics, parse_progress, parse_progress_after, recorded_terminal_state, sanitize,
+    should_fail_fast, should_read_progress, terminal_state, Code, Diagnosis, Facts, Progress,
+    Severity, Stage, Write, DIAGNOSTICS_MAX, FAIL_FAST_NEVER, FAIL_FAST_SECONDS_DEFAULT,
+    FAIL_FAST_SECONDS_MIN, MESSAGE_MAX_BYTES, MOUNT_TRANSIENT_FOR, OBSERVED_HEARTBEAT,
+    PROGRESS_LINE_MAX_BYTES, WAITING_FOR_POD_GRACE, WARNING_CAUSE_WINDOW,
 };
 
 const NS: &str = "logweir-d3w2";
@@ -840,10 +840,14 @@ fn the_diagnostics_list_is_bounded_at_eight() {
     );
 }
 
-/// The terminal state a crashed pass reads back off the recorded list.
-#[test]
-fn the_recorded_diagnostic_names_the_terminal_state_and_a_warning_never_does() {
-    let stored = |code: Code| RunProgress {
+/// A stored progress block holding `codes`, OLDEST FIRST, each last seen at
+/// its own instant — the shape a run leaves behind after several passes.
+fn stored_with(codes: &[(Code, DateTime<Utc>)]) -> RunProgress {
+    let mut diagnostics = None;
+    for (code, seen) in codes {
+        diagnostics = merge_diagnostics(diagnostics.as_ref(), Some(&diagnosis(*code, POD)), *seen);
+    }
+    RunProgress {
         stage: Stage::Preparing.as_str().to_string(),
         reason: None,
         message: None,
@@ -851,28 +855,194 @@ fn the_recorded_diagnostic_names_the_terminal_state_and_a_warning_never_does() {
         last_observed_time: None,
         runner: None,
         runner_phase: None,
-        diagnostics: merge_diagnostics(None, Some(&diagnosis(code, POD)), at(1, 0)),
-    };
+        diagnostics,
+    }
+}
+
+/// The terminal state a crashed pass reads back off the recorded list.
+#[test]
+fn the_recorded_diagnostic_names_the_terminal_state() {
+    let ended = at(20, 0);
+    let stored = |code: Code| stored_with(&[(code, at(19, 30))]);
     assert_eq!(
-        recorded_terminal_state(Some(&stored(Code::CredentialSecretNotFound))),
+        recorded_terminal_state(Some(&stored(Code::CredentialSecretNotFound)), ended),
         Some("CredentialReferenceMissing"),
         "D3 §15's L1: a Backup whose archive secretRef names a missing Secret reaches \
          `Failed/CredentialReferenceMissing` with `exitCode` ABSENT"
     );
     assert_eq!(
-        recorded_terminal_state(Some(&stored(Code::PodUnschedulable))),
+        recorded_terminal_state(Some(&stored(Code::WaitingForPod)), ended),
         None,
-        "a WARNING never becomes a verdict: an unschedulable pod's terminal state comes from \
-         `crash_terminal_state` reading the pod, which is a stronger observation"
+        "\"nothing has happened yet\" is never a verdict"
     );
     assert_eq!(
-        recorded_terminal_state(Some(&stored(Code::WaitingForPod))),
-        None
-    );
-    assert_eq!(
-        recorded_terminal_state(None),
+        recorded_terminal_state(None, ended),
         None,
         "no record, no override"
+    );
+}
+
+/// Defect WARNING-DIAGNOSTICS-NOEXITCODE (PLAT-14.1), the two live rows.
+///
+/// A projected ConfigMap that never mounted (fail-fast fired, deadline
+/// 900 → 1) and a pod no node would take (the Job's own deadline) are both
+/// WARNING-class, and in both the Job controller deletes the pod when the
+/// deadline passes — so `crash_terminal_state` has no pod to read, and the
+/// recorded diagnostic is the only witness. harness-rows-11 measured both
+/// ending `NoExitCode` while the diagnostic named the cause.
+///
+/// The pass after fail-fast deletes the pod records `WaitingForPod` on top;
+/// it is newer, it is not a verdict, and the cause beneath it still wins.
+///
+/// MUTANT: restore the `Severity::Error`-only filter. All three arms fail.
+#[test]
+fn a_warning_that_ended_the_run_is_its_terminal_reason() {
+    let ended = at(20, 0);
+    assert_eq!(
+        recorded_terminal_state(
+            Some(&stored_with(&[
+                (Code::VolumeMountFailed, at(19, 30)),
+                (Code::WaitingForPod, at(20, 10)),
+            ])),
+            ended
+        ),
+        Some("VolumeMountFailed"),
+        "ops-mount-failure-is-volume-mount-failed: the ConfigMap never mounted"
+    );
+    assert_eq!(
+        recorded_terminal_state(
+            Some(&stored_with(&[(Code::PodUnschedulable, at(19, 40))])),
+            ended
+        ),
+        Some("PodUnschedulable"),
+        "ops-unschedulable-pod-is-pod-unschedulable: no node took the pod until the deadline"
+    );
+    assert_eq!(
+        recorded_terminal_state(
+            Some(&stored_with(&[(Code::RunnerImagePullFailed, at(19, 0))])),
+            ended
+        ),
+        Some("RunnerImageUnavailable")
+    );
+}
+
+/// NEGATIVE CONTROL: the Secret-mount row, which passed live before the fix,
+/// is unchanged — an `Error`-class code is read however long ago it was last
+/// seen, exactly as before.
+#[test]
+fn an_error_class_mount_failure_is_read_as_before() {
+    assert_eq!(
+        recorded_terminal_state(
+            Some(&stored_with(&[(Code::SigningKeyMissing, at(1, 0))])),
+            at(20, 0)
+        ),
+        Some("VolumeMountFailed"),
+        "ops-mount-failure-secret-is-volume-mount-failed"
+    );
+}
+
+/// A warning that STOPPED being observed had resolved: it is not what ended
+/// the run, and the answer stays `NoExitCode` rather than an invented cause.
+///
+/// MUTANT: drop the `seen_at_the_end` clause. This row fails.
+#[test]
+fn a_warning_no_longer_seen_when_the_job_ended_is_not_its_cause() {
+    let ended = at(20, 0);
+    let just_inside = ended - chrono::Duration::from_std(WARNING_CAUSE_WINDOW).expect("fits");
+    assert_eq!(
+        recorded_terminal_state(
+            Some(&stored_with(&[(Code::RunnerImagePullFailed, at(3, 0))])),
+            ended
+        ),
+        None,
+        "an image pull that backed off at 03:03 and was not seen again explains nothing about \
+         a Job that ended at 03:20"
+    );
+    assert_eq!(
+        recorded_terminal_state(
+            Some(&stored_with(&[(Code::PodUnschedulable, just_inside)])),
+            ended
+        ),
+        Some("PodUnschedulable"),
+        "the window's edge is inside it"
+    );
+    // An older ERROR beneath a stale warning is still read, as before.
+    assert_eq!(
+        recorded_terminal_state(
+            Some(&stored_with(&[
+                (Code::CredentialSecretNotFound, at(2, 0)),
+                (Code::RunnerImagePullFailed, at(3, 0)),
+            ])),
+            ended
+        ),
+        Some("CredentialReferenceMissing")
+    );
+}
+
+/// A warning about a runner that then STARTED explains nothing about how it
+/// ended — every "started" fact the stored status can carry rules it out.
+///
+/// MUTANT: drop the `started` clause. This row fails.
+#[test]
+fn a_warning_before_the_runner_started_is_not_its_cause() {
+    let ended = at(20, 0);
+    let fresh = || stored_with(&[(Code::VolumeMountFailed, at(19, 50))]);
+    let mut started_at = fresh();
+    started_at.runner =
+        Some(serde_json::from_value(json!({"startedAt": "2026-11-09T03:19:55Z"})).expect("facts"));
+    let mut terminated = fresh();
+    terminated.runner =
+        Some(serde_json::from_value(json!({"containerState": "Terminated"})).expect("facts"));
+    let mut phased = fresh();
+    phased.runner_phase = Some(RunnerPhase {
+        number: Some(-1),
+        name: Some("engine".to_string()),
+    });
+    for (label, stored) in [
+        ("startedAt", started_at),
+        ("containerState", terminated),
+        ("runnerPhase", phased),
+    ] {
+        assert_eq!(
+            recorded_terminal_state(Some(&stored), ended),
+            None,
+            "{label}: the runner ran"
+        );
+    }
+    // …while a stored block with no runner facts at all is "never started".
+    assert_eq!(
+        recorded_terminal_state(Some(&fresh()), ended),
+        Some("VolumeMountFailed")
+    );
+}
+
+/// When a Job ended: its terminal condition's transition, else its completion.
+#[test]
+fn a_jobs_end_is_its_terminal_condition() {
+    let job = |status: Value| -> Job {
+        serde_json::from_value(json!({
+            "apiVersion": "batch/v1", "kind": "Job",
+            "metadata": {"name": JOB, "namespace": NS},
+            "status": status,
+        }))
+        .expect("a Job")
+    };
+    assert_eq!(
+        job_ended_at(&job(json!({"conditions": [
+            {"type": "FailureTarget", "status": "True", "lastTransitionTime": "2026-11-09T03:19:00Z"},
+            {"type": "Failed", "status": "True", "lastTransitionTime": "2026-11-09T03:20:00Z"},
+        ]}))),
+        Some(at(20, 0))
+    );
+    assert_eq!(
+        job_ended_at(&job(json!({"completionTime": "2026-11-09T03:21:00Z"}))),
+        Some(at(21, 0))
+    );
+    assert_eq!(
+        job_ended_at(&job(json!({"conditions": [
+            {"type": "Failed", "status": "False", "lastTransitionTime": "2026-11-09T03:20:00Z"},
+        ]}))),
+        None
     );
 }
 
@@ -1861,4 +2031,102 @@ fn apply_carries_a_stored_condition_the_base_builder_did_not_name() {
         "in the order the object already holds them, with this patch's own appended — \
          `status_unchanged` compares arrays element by element: {conditions:?}"
     );
+}
+
+/// Review M3: "the runner started" is STICKY. A pass that finds no pod — the
+/// Job controller deleted it at a deadline, before the Job reads `Failed` —
+/// keeps the recorded `startedAt`, so the terminal pass cannot mistake a
+/// runner that ran for one that never started and name an old warning as the
+/// cause.
+///
+/// MUTANT: write this pass's derived `runner` block as-is. `startedAt` is
+/// absent from the patch and this row fails.
+#[test]
+fn a_pass_with_no_pod_keeps_the_recorded_start() {
+    let mut stored = stored_with(&[(Code::RunnerImagePullFailed, at(19, 0))]);
+    stored.runner = Some(
+        serde_json::from_value(json!({
+            "jobName": JOB, "podName": POD, "containerState": "Running",
+            "startedAt": "2026-11-09T03:19:30Z",
+        }))
+        .expect("facts"),
+    );
+    let d = derive(&facts(None, &[], at(20, 0)));
+    let out = apply(
+        json!({"status": {"conditions": []}}),
+        &write_for(&d, &Progress::default(), Some(&stored), at(20, 0), false),
+    );
+    assert_eq!(
+        out["status"]["progress"]["runner"]["startedAt"].as_str(),
+        Some("2026-11-09T03:19:30Z"),
+        "{}",
+        out["status"]["progress"]
+    );
+    let after: RunProgress =
+        serde_json::from_value(out["status"]["progress"].clone()).expect("round-trips");
+    assert_eq!(
+        recorded_terminal_state(Some(&after), at(20, 30)),
+        None,
+        "the image-pull warning is not the cause of a run whose runner ran"
+    );
+}
+
+/// A runner first seen TERMINATED (it crashed between two passes) has a start
+/// too — `runner.startedAt` reads it from the terminated state.
+#[test]
+fn a_runner_first_seen_terminated_has_started() {
+    let p = pod(json!({
+        "phase": "Failed",
+        "conditions": [{"type": "PodScheduled", "status": "True"}],
+        "containerStatuses": [
+            {"name": "runner", "ready": false, "restartCount": 0, "image": "x", "imageID": "x",
+             "state": {"terminated": {"exitCode": 1, "startedAt": "2026-11-09T03:19:40Z",
+                                      "finishedAt": "2026-11-09T03:19:45Z"}}},
+        ],
+    }));
+    let d = derive(&facts(Some(&p), &[], at(20, 0)));
+    assert_eq!(d.runner.started_at, Some(at(19, 40)));
+}
+
+/// Review L6: an ERROR-class code outranks a NEWER qualifying warning, as it
+/// did before the warning path existed.
+///
+/// MUTANT: one newest-first scan over both classes (the first fix). The
+/// warning wins and this row fails.
+#[test]
+fn an_error_class_code_outranks_a_newer_warning() {
+    assert_eq!(
+        recorded_terminal_state(
+            Some(&stored_with(&[
+                (Code::CredentialSecretNotFound, at(18, 0)),
+                (Code::PodUnschedulable, at(19, 50)),
+            ])),
+            at(20, 0)
+        ),
+        Some("CredentialReferenceMissing")
+    );
+}
+
+/// Re-check RL3: a runner first seen CRASH-LOOPING — state `waiting`, the
+/// previous run in `lastState.terminated` — has started, and the start is
+/// recorded, so a later pod-less pass cannot make it read as never-started.
+///
+/// MUTANT: drop the `lastState` arms from `runner_facts`. `startedAt` is
+/// absent and this row fails.
+#[test]
+fn a_runner_first_seen_crash_looping_has_started() {
+    let p = pod(json!({
+        "phase": "Running",
+        "conditions": [{"type": "PodScheduled", "status": "True"}],
+        "containerStatuses": [
+            {"name": "runner", "ready": false, "restartCount": 2, "image": "x", "imageID": "x",
+             "state": {"waiting": {"reason": "CrashLoopBackOff"}},
+             "lastState": {"terminated": {"exitCode": 1,
+                                          "startedAt": "2026-11-09T03:19:20Z",
+                                          "finishedAt": "2026-11-09T03:19:25Z"}}},
+        ],
+    }));
+    let d = derive(&facts(Some(&p), &[], at(20, 0)));
+    assert!(d.started);
+    assert_eq!(d.runner.started_at, Some(at(19, 20)));
 }

@@ -1622,6 +1622,95 @@ async fn a_job_with_no_uid_adopts_nothing_and_lists_nothing() {
     );
 }
 
+/// Defect WARNING-DIAGNOSTICS-NOEXITCODE through the `Backup` reconciler — the
+/// twin of the `Restore` row: the Job failed at 03:20 with its pod gone, and
+/// a WARNING still being observed when it ended is the terminal reason.
+///
+/// MUTANT: restore the `Severity::Error`-only filter in
+/// `diagnostics::recorded_terminal_state`. The first two arms fail. MUTANT:
+/// pass the pass's `now` instead of `job_ended_at`. The same two arms fail.
+#[tokio::test]
+async fn a_warning_that_ended_the_backup_is_its_terminal_reason() {
+    let diagnostic = |code: &str, severity: &str, last_seen: &str| {
+        serde_json::json!({
+            "code": code, "severity": severity, "message": format!("{code} on the runner pod"),
+            "object": {"kind": "Pod", "name": "logweir-backup-nightly-20261109-031700-abcde"},
+            "firstSeen": "2026-11-09T03:05:00Z", "lastSeen": last_seen, "count": 2,
+        })
+    };
+    let empty = r#"{"apiVersion":"v1","kind":"PodList","metadata":{},"items":[]}"#;
+    for (label, diagnostics, expected) in [
+        (
+            "ConfigMap mount, then WaitingForPod",
+            serde_json::json!([
+                diagnostic("WaitingForPod", "Warning", "2026-11-09T03:20:10Z"),
+                diagnostic("VolumeMountFailed", "Warning", "2026-11-09T03:19:30Z"),
+            ]),
+            "VolumeMountFailed",
+        ),
+        (
+            "an unschedulable pod",
+            serde_json::json!([diagnostic(
+                "PodUnschedulable",
+                "Warning",
+                "2026-11-09T03:19:45Z"
+            )]),
+            "PodUnschedulable",
+        ),
+        (
+            "the Secret-mount row, unchanged",
+            serde_json::json!([diagnostic(
+                "SigningKeyMissing",
+                "Error",
+                "2026-11-09T03:06:00Z"
+            )]),
+            "VolumeMountFailed",
+        ),
+        (
+            "a warning about a runner that then started",
+            serde_json::json!([diagnostic(
+                "VolumeMountFailed",
+                "Warning",
+                "2026-11-09T03:19:30Z"
+            )]),
+            TERMINAL_STATE_NO_EXIT_CODE,
+        ),
+    ] {
+        let mut b = frozen_backup();
+        let status = b.status.get_or_insert_with(BackupStatus::default);
+        let mut progress = serde_json::json!({"stage": "Preparing", "diagnostics": diagnostics});
+        if label.contains("then started") {
+            progress["runner"] = serde_json::json!({"startedAt": "2026-11-09T03:19:50Z"});
+        }
+        status.progress = Some(serde_json::from_value(progress).expect("a RunProgress"));
+        let (client, _seen, bodies) =
+            mock_client_recording_bodies(finished_routes(empty, String::new(), 200, "Failed"));
+        let outcome = reconcile_backup(
+            &b,
+            &client,
+            &unobserved_archive,
+            &unverified_evidence,
+            // TWENTY MINUTES AFTER THE JOB ENDED — a controller that was down
+            // when it did. "Still observed when the run ended" is measured
+            // from the Job's own `Failed` transition (03:20), never from this
+            // pass's clock; measured from 03:40 every warning would be stale.
+            utc(2026, 11, 9, 3, 40),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{label}: {e}"));
+        assert_eq!(outcome.terminal_state.as_deref(), Some(expected), "{label}");
+        let statuses = patched_statuses(&bodies.lock().expect("the body recorder"));
+        assert_eq!(statuses.len(), 1, "{label}");
+        assert_eq!(statuses[0]["phase"].as_str(), Some("Failed"), "{label}");
+        assert!(statuses[0]["exitCode"].is_null(), "{label}");
+        assert_eq!(
+            statuses[0]["progress"]["reason"].as_str(),
+            Some(expected),
+            "{label}"
+        );
+    }
+}
+
 /// A pod wearing this Job's name label but not owned by it is NEVER read —
 /// D-SEAMS **S6**, defect `SEC-PODLOG`.
 ///

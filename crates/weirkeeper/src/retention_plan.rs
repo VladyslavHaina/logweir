@@ -373,6 +373,95 @@ pub struct Evaluation {
     /// How many candidates the `maxDeletionsPerRun` truncation dropped. A
     /// number rather than a bool, so a console can say "50 of 380".
     pub truncated_by_cap: i64,
+    /// What every point at this destination that is NOT a candidate still
+    /// names — its backup set and the object keys the view knows for it.
+    ///
+    /// Not a status field and not in the plan bytes: it is the input of
+    /// [`plan_document`]'s own rail, which refuses to render a line whose set
+    /// a retained point still names (defect SHARED-SET-RETENTION). Derived
+    /// from the evaluation's OUTPUT, independently of the grouping step 4
+    /// performs — so it is a second line against a REGRESSION in step 4 or in
+    /// the ceiling. It reads the same `PointFacts`, so it defends nothing
+    /// against missing or wrong view data (review L2).
+    pub retained: RetainedObjects,
+}
+
+/// The objects retained points still name — [`Evaluation::retained`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RetainedObjects {
+    /// Every retained point's `backup_id`.
+    pub backup_ids: BTreeSet<String>,
+    /// Every retained point's manifest key and every segment key the view
+    /// carried for it (none, on every view this build reads).
+    pub keys: BTreeSet<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Deletion groups — which points one deletion would take together
+// ---------------------------------------------------------------------------
+
+/// Points linked by what deleting them removes: the same `backup_id`, the same
+/// manifest key, or a common segment key, transitively (a union-find over the
+/// points at this destination).
+///
+/// Keyed by the point's ADDRESS in the caller's slice, not by `point_id`: two
+/// rows of one id are a catalog conflict, and grouping must not merge or split
+/// them by spelling.
+struct Groups {
+    root_of: BTreeMap<usize, usize>,
+}
+
+impl Groups {
+    fn of(points: &[&PointFacts]) -> Self {
+        let addr = |p: &PointFacts| std::ptr::from_ref(p) as usize;
+        let mut parent: Vec<usize> = (0..points.len()).collect();
+        fn find(parent: &mut [usize], mut i: usize) -> usize {
+            while parent[i] != i {
+                parent[i] = parent[parent[i]];
+                i = parent[i];
+            }
+            i
+        }
+        let mut first_with: BTreeMap<String, usize> = BTreeMap::new();
+        for (i, p) in points.iter().enumerate() {
+            // An EMPTY backup id names no set, so it links nothing; a point
+            // with no set id and no keys is its own group.
+            let links = (!p.backup_id.is_empty())
+                .then(|| format!("set:{}", p.backup_id))
+                .into_iter()
+                .chain(p.manifest_key.iter().map(|m| format!("key:{m}")))
+                .chain(p.segment_keys.iter().map(|k| format!("key:{k}")));
+            for link in links {
+                match first_with.get(&link) {
+                    Some(&j) => {
+                        let (a, b) = (find(&mut parent, i), find(&mut parent, j));
+                        if a != b {
+                            parent[a] = b;
+                        }
+                    }
+                    None => {
+                        first_with.insert(link, i);
+                    }
+                }
+            }
+        }
+        let mut root_of = BTreeMap::new();
+        for (i, p) in points.iter().enumerate() {
+            let root = find(&mut parent, i);
+            root_of.insert(addr(p), root);
+        }
+        Self { root_of }
+    }
+
+    /// The group of a point that is in the slice [`Groups::of`] was built
+    /// from. A point that is not (impossible by construction: every verdict
+    /// is built from that slice) falls into ONE shared group past every real
+    /// root — the conservative direction, since merging groups can only
+    /// protect more.
+    fn of_point(&self, point: &PointFacts) -> usize {
+        let addr = std::ptr::from_ref(point) as usize;
+        self.root_of.get(&addr).copied().unwrap_or(usize::MAX)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -535,6 +624,16 @@ pub fn evaluate(input: &Input<'_>) -> Evaluation {
             verdicts.push((*located, Verdict::Protected(ProtectReason::Unknown)));
             continue;
         };
+        // NOR can a point whose set id names no single directory (review L8):
+        // an empty id is the bound `<scope>//`, and an id with a `/` is a
+        // bound that CONTAINS other sets — set `a`'s enumeration would remove
+        // set `a/b`. Generated ids never look like either; "could not tell"
+        // never authorises a delete, so such a point is kept `Unknown` rather
+        // than left to refuse the whole plan at the writer.
+        if point.backup_id.is_empty() || point.backup_id.contains('/') {
+            verdicts.push((*located, Verdict::Protected(ProtectReason::Unknown)));
+            continue;
+        }
 
         // WITHIN the rules is kept; outside either rule is a candidate.
         // D3 §6.4's union, with `OlderThanKeepDays` taking precedence over
@@ -551,17 +650,51 @@ pub fn evaluate(input: &Input<'_>) -> Evaluation {
         verdicts.push((*located, verdict));
     }
 
-    // 4. Shared segments. A segment key that appears in a RETAINED point's
-    //    manifest protects the candidate that shares it: v1 never partially
-    //    deletes a shared set. Computed after the first pass, because
-    //    "retained" is exactly "not a candidate after the rules".
+    // 4. Shared sets and shared segments (defect SHARED-SET-RETENTION).
     //
-    //    A SKIPPED point is retained too — it is never a candidate — so its
-    //    segments protect a candidate that shares them (review L3). Otherwise
-    //    a point the catalog or the controller refused could lose a shared
-    //    segment through another point's deletion: a partial deletion of a
-    //    point this module promises neither to count nor to delete.
-    let retained_segments: BTreeSet<&str> = verdicts
+    //    Points are GROUPED by what their deletion would remove: two points are
+    //    in one group when they name the same backup set (`backup_id`), the
+    //    same manifest key, or a common segment key — transitively. A group
+    //    that holds ANY retained point (kept, protected, or skipped) is a group
+    //    none of whose candidates may be deleted: every candidate in it is
+    //    protected `SharedSegment`. v1 never partially deletes a shared set.
+    //
+    //    WHY THE SET AND NOT ONLY THE SEGMENTS. The catalog view carries no
+    //    segment keys, so a segment-only rule had nothing to apply to — and two
+    //    receipts CAN name one set: a runner Job re-created from its frozen
+    //    inputs rewrites the same `<scope>/<backup_id>/` and signs a second
+    //    receipt over it (PLAT-06.1 case e; live on the lab as harness-rows-11's
+    //    `retention-shared-set-is-never-planned-under-a-retained-point`). With
+    //    `keepLast 1` the older receipt was planned, and deleting it enumerates
+    //    and removes the set the KEPT receipt names. Every key a plan line may
+    //    delete is bounded by `<scope>/<backup_id>/` (`validate_key`, and the
+    //    worker's own re-derivation), so the set is exactly the unit a deletion
+    //    removes, and the unit that must be matched.
+    //
+    //    A SKIPPED point is retained too — it is never a candidate — so it
+    //    protects a candidate that shares with it (review L3). Otherwise a
+    //    point the catalog or the controller refused could lose its set through
+    //    another point's deletion.
+    //
+    //    Transitive, so a candidate linked to a retained point through ANOTHER
+    //    candidate is protected as well: that other candidate is now retained.
+    //
+    //    AND A ROW WHOSE LOCATION THE CATALOG COULD NOT ESTABLISH (no
+    //    `locations[]` at all, review L1) is retained too. It is never counted
+    //    here and never a candidate — but if it names a candidate's set, "could
+    //    not tell where it lives" must not authorise deleting what it names.
+    let location_less: Vec<&PointFacts> = input
+        .points
+        .iter()
+        .filter(|p| p.locations.is_empty())
+        .collect();
+    let grouped: Vec<&PointFacts> = here
+        .iter()
+        .map(|l| l.point)
+        .chain(location_less.iter().copied())
+        .collect();
+    let groups = Groups::of(&grouped);
+    let retained_groups: BTreeSet<usize> = verdicts
         .iter()
         .filter(|(_, v)| !matches!(v, Verdict::Candidate(_)))
         .map(|(l, _)| l.point)
@@ -570,15 +703,12 @@ pub fn evaluate(input: &Input<'_>) -> Evaluation {
                 .map(|l| l.point)
                 .filter(|p| skip_reason(p).is_some()),
         )
-        .flat_map(|p| p.segment_keys.iter().map(String::as_str))
+        .chain(location_less.iter().copied())
+        .map(|p| groups.of_point(p))
         .collect();
     for (located, verdict) in &mut verdicts {
         if matches!(verdict, Verdict::Candidate(_))
-            && located
-                .point
-                .segment_keys
-                .iter()
-                .any(|k| retained_segments.contains(k.as_str()))
+            && retained_groups.contains(&groups.of_point(located.point))
         {
             *verdict = Verdict::Protected(ProtectReason::SharedSegment);
         }
@@ -586,7 +716,24 @@ pub fn evaluate(input: &Input<'_>) -> Evaluation {
 
     // 5. Project. `kept` and `candidates` stay in newest-first order; the
     //    protected list is sorted by id so the status block is stable.
+    //
+    //    THE CEILING IS APPLIED PER GROUP, NEVER THROUGH ONE. Every group that
+    //    still holds a candidate holds ONLY candidates (step 4), and a group is
+    //    selected whole or not at all: selecting one receipt of a shared set
+    //    and keeping its sibling "over the ceiling" would remove the set a
+    //    point this evaluation reports as kept still names. A group larger
+    //    than the room left is kept and counted in `truncated_by_cap`, and the
+    //    walk continues with the groups that fit.
     let cap = usize::try_from(input.max_deletions_per_run.max(0)).unwrap_or(usize::MAX);
+    let mut group_size: BTreeMap<usize, usize> = BTreeMap::new();
+    for (located, verdict) in &verdicts {
+        if matches!(verdict, Verdict::Candidate(_)) {
+            *group_size
+                .entry(groups.of_point(located.point))
+                .or_default() += 1;
+        }
+    }
+    let mut group_selected: BTreeMap<usize, bool> = BTreeMap::new();
     let mut selected = 0usize;
     let mut over_cap = 0i64;
     for (located, verdict) in &verdicts {
@@ -601,7 +748,16 @@ pub fn evaluate(input: &Input<'_>) -> Evaluation {
                 });
             }
             Verdict::Candidate(reason) => {
-                if selected >= cap {
+                let group = groups.of_point(point);
+                let take = *group_selected.entry(group).or_insert_with(|| {
+                    let size = group_size.get(&group).copied().unwrap_or(1);
+                    let fits = selected.saturating_add(size) <= cap;
+                    if fits {
+                        selected += size;
+                    }
+                    fits
+                });
+                if !take {
                     // Over the ceiling is KEPT and counted, never silently
                     // dropped: a console that showed 50 candidates out of 380
                     // without saying so would read as "380 is all there is".
@@ -609,7 +765,6 @@ pub fn evaluate(input: &Input<'_>) -> Evaluation {
                     over_cap += 1;
                     continue;
                 }
-                selected += 1;
                 out.candidates.push(Candidate {
                     point_id: point.point_id.clone(),
                     backup_id: point.backup_id.clone(),
@@ -625,6 +780,22 @@ pub fn evaluate(input: &Input<'_>) -> Evaluation {
             }
         }
     }
+    // WHAT STAYS, as the objects it names — the input of `plan_document`'s
+    // own rail, derived from the OUTPUT rather than from the grouping above, so
+    // a regression in step 4 is refused at the writer instead of approved.
+    let chosen: BTreeSet<&str> = out.candidates.iter().map(|c| c.point_id.as_str()).collect();
+    let mut retained = RetainedObjects::default();
+    for p in &grouped {
+        if chosen.contains(p.point_id.as_str()) {
+            continue;
+        }
+        retained.backup_ids.insert(p.backup_id.clone());
+        if let Some(m) = &p.manifest_key {
+            retained.keys.insert(m.clone());
+        }
+        retained.keys.extend(p.segment_keys.iter().cloned());
+    }
+    out.retained = retained;
     out.protected.sort_by(|a, b| a.point_id.cmp(&b.point_id));
     out.truncated_by_cap = over_cap;
     out
@@ -792,6 +963,17 @@ pub struct PlanLine {
     pub enumerate_set: bool,
     /// Every key this plan could name, manifest first — never a glob.
     pub object_keys: Vec<String>,
+    /// Other points whose receipts name this SAME set and are removed with it
+    /// (review M2). Two receipts over one set that are both due used to render
+    /// two lines with one manifest key, which the worker refuses as
+    /// `DuplicateKey` — the WHOLE plan, on every run, so one shared set stopped
+    /// every deletion the policy owed. One line per set, with every point it
+    /// removes named here: each delete stays attributable to one line and each
+    /// point gets its own outcome and tombstones in the record. Skipped when
+    /// empty, so a plan with no shared set is byte-identical to one from before
+    /// this field and its approved digest still holds.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub co_point_ids: Vec<String>,
 }
 
 /// The plan document — D3 §6.4 step 6.
@@ -877,6 +1059,15 @@ pub enum PlanError {
     Scope(ScopeViolation),
     /// The document did not serialise — named rather than unwrapped.
     Encode(String),
+    /// A line would remove a set, or an object, that a point this evaluation
+    /// RETAINS still names (defect SHARED-SET-RETENTION). The plan is not
+    /// written at all.
+    SharedWithRetained {
+        /// The candidate whose line was refused.
+        point_id: String,
+        /// What the retained point still names: its set, or one of its keys.
+        named: String,
+    },
 }
 
 impl std::fmt::Display for PlanError {
@@ -884,6 +1075,12 @@ impl std::fmt::Display for PlanError {
         match self {
             Self::Scope(v) => write!(f, "the plan would name a key outside its scope: {v}"),
             Self::Encode(e) => write!(f, "the plan document did not serialise: {e}"),
+            Self::SharedWithRetained { point_id, named } => write!(
+                f,
+                "the plan would remove point `{point_id}`'s set, and a point this evaluation \
+                 retains still names {named}; deleting it would take the retained point's data \
+                 with it, so no plan is written"
+            ),
         }
     }
 }
@@ -912,7 +1109,7 @@ pub fn plan_document(
     rules: Rules,
     evaluation: &Evaluation,
 ) -> Result<PlanDocument, PlanError> {
-    let mut lines = Vec::with_capacity(evaluation.candidates.len());
+    let mut lines: Vec<PlanLine> = Vec::with_capacity(evaluation.candidates.len());
     for candidate in &evaluation.candidates {
         let mut object_keys = Vec::with_capacity(candidate.segment_keys.len() + 1);
         // THE MANIFEST FIRST, and the order is the execution order: a run
@@ -929,6 +1126,50 @@ pub fn plan_document(
             destination.scope_prefix.trim_end_matches('/'),
             candidate.backup_id
         );
+        // THE WRITER'S OWN RAIL (defect SHARED-SET-RETENTION). The worker may
+        // enumerate and remove everything under `set_prefix`, so no retained
+        // point may name this set, nor any key under it. Checked against what
+        // the evaluation RETAINED — not against the grouping that decided it —
+        // so a regression in `evaluate` step 4 is a refused plan, never an
+        // approvable one.
+        if evaluation
+            .retained
+            .backup_ids
+            .contains(&candidate.backup_id)
+        {
+            return Err(PlanError::SharedWithRetained {
+                point_id: candidate.point_id.clone(),
+                named: format!("backup set `{}`", candidate.backup_id),
+            });
+        }
+        if let Some(key) = evaluation
+            .retained
+            .keys
+            .iter()
+            .find(|k| k.starts_with(&set_prefix) || object_keys.contains(k))
+        {
+            return Err(PlanError::SharedWithRetained {
+                point_id: candidate.point_id.clone(),
+                named: format!("object `{key}`"),
+            });
+        }
+        // ONE LINE PER SET (review M2). A candidate naming the same set and
+        // manifest as a line already written joins that line as a co-point:
+        // `evaluate` selects a shared set's receipts together, so they arrive
+        // here together, and two lines over one manifest are a plan the worker
+        // refuses whole.
+        if let Some(existing) = lines.iter_mut().find(|l| {
+            l.backup_id == candidate.backup_id && l.manifest_key == candidate.manifest_key
+        }) {
+            existing.co_point_ids.push(candidate.point_id.clone());
+            for key in object_keys.into_iter().skip(1) {
+                if !existing.object_keys.contains(&key) {
+                    existing.object_keys.push(key);
+                }
+            }
+            existing.enumerate_set &= candidate.segment_keys.is_empty();
+            continue;
+        }
         lines.push(PlanLine {
             point_id: candidate.point_id.clone(),
             backup_id: candidate.backup_id.clone(),
@@ -940,6 +1181,7 @@ pub fn plan_document(
             // so today every line names its manifest and its bound.
             enumerate_set: candidate.segment_keys.is_empty(),
             object_keys,
+            co_point_ids: Vec::new(),
         });
     }
     Ok(PlanDocument {

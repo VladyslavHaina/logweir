@@ -465,7 +465,7 @@ The `Harness row` column names the phase that measured the line; the
 | `evidenceRead` | `s3:GetObject` on `<bucket>/logweir/*` | Preflight `u6-da-027` | `U6/evidence-read` |
 | write probe | `s3:PutObject` on `<bucket>/logweir/readiness/*` | Preflight `u6-bp-019` | `U6/write-probe` |
 | `catalogSync` reader | `s3:ListBucket` on the BUCKET arn (`s3:prefix` in `logweir/*`); `s3:GetObject` on `<bucket>/<prefix>/*`; `s3:GetObject` on `<bucket>/logweir/*` | RecoveryCatalog `u6-cat-052` | `U6/catalog-sync` |
-| retention enforcer | `s3:ListBucket` on the BUCKET arn (`s3:prefix` in `<prefix>/*`); `s3:DeleteObject` on `<bucket>/<prefix>/*` | Job `u6-ret-060` | `U6/retention-enforcer` |
+| retention enforcer | `s3:ListBucket` on the BUCKET arn (`s3:prefix` in `<prefix>/*`); `s3:DeleteObject` on `<bucket>/<prefix>/*` — **SUPERSEDED: this build also needs `s3:GetObject` on `<bucket>/<prefix>/*`**, see the note below the bisection | Job `u6-ret-060` (measured before OBJECT-LOCK-DELETE-MARKER) | `U6/retention-enforcer` |
 
 | Role | Action removed | Verdict, and the product's own answer | Harness object |
 |---|---|---|---|
@@ -502,7 +502,7 @@ The `Harness row` column names the phase that measured the line; the
 | `catalogSync` reader | `s3:GetObject` on `<bucket>/logweir/*` | **the operation fails**: `PartialScan` | `u6-cat-051` |
 | retention enforcer | `s3:ListBucket` on the BUCKET arn (`s3:prefix` in `<prefix>/*`) | **the operation fails**: `state=Kept`, `code=ListRefused:AccessDenied` and `retention-result=deleted=0 failed=1 objects=0` | `u6-ret-056` |
 | retention enforcer | `s3:GetBucketLocation` on the BUCKET arn | the operation still succeeds — **not required** | `u6-ret-057` |
-| retention enforcer | `s3:GetObject` on `<bucket>/<prefix>/*` | the operation still succeeds — **not required** | `u6-ret-058` |
+| retention enforcer | `s3:GetObject` on `<bucket>/<prefix>/*` | measured before OBJECT-LOCK-DELETE-MARKER: the operation still succeeded — **SUPERSEDED: now required**; without it every key is `Kept` with `code=VersionProbeRefused` and nothing is deleted (see below) | `u6-ret-058` |
 | retention enforcer | `s3:DeleteObject` on `<bucket>/<prefix>/*` | **the operation fails**: `state=Kept`, `code=AccessDenied` and `retention-result=deleted=0 failed=1 objects=0` | `u6-ret-059` |
 
 **A wider grant than this table is not required by anything in this build.**
@@ -553,10 +553,12 @@ listing was refused relays no body and lands `ResultUnreadable`. **If you
 separate the two, give the destination a `archiveRead` grant wide enough for
 the catalog, or accept that `RecoveryCatalog` will not sync.**
 
-**The retention enforcer needs no `s3:GetObject`.** It lists a set's objects
-and deletes them by the explicit key list its approved plan carries; it never
-reads one. The starting set here was §7f's own two-credential row, and
-removing `s3:GetObject` on `<bucket>/<prefix>/*` changed nothing about the run.
+**SUPERSEDED — the retention enforcer now needs `s3:GetObject`.** When this
+row was measured the worker listed a set's objects and deleted them by the key
+list its approved plan carries, never reading one, and removing
+`s3:GetObject` on `<bucket>/<prefix>/*` changed nothing about the run. Since
+OBJECT-LOCK-DELETE-MARKER it HEADs every key before deleting it (the note
+below), and that HEAD is a `GetObject`.
 
 **One note about that row, and which principal it was measured on.** *A
 `RetentionPolicy` in `Enforce` is the one thing Logweir does that cannot be
@@ -578,6 +580,14 @@ The `retention enforcer` row itself is
 about the **delete** credential and is unchanged by that fix — but its live
 baseline was taken with the record written by the wrong principal, so
 `U6/retention-enforcer` is re-run at the next lab refresh.
+
+**`s3:GetObject` on `<bucket>/<prefix>/*` is now required for the retention
+enforcer** (defect OBJECT-LOCK-DELETE-MARKER): the worker HEADs every key
+before it deletes it, to refuse a versioned bucket where a delete by key would
+only write a delete marker. Rows `u6-ret-058` ("not required") and `u6-ret-060`
+(the minimal set without it) were measured on the build before that change;
+without the grant a run now deletes nothing and records every key `Kept` with
+`code=VersionProbeRefused`. [UNVERIFIED — re-measured by U6/retention-enforcer at the next lab refresh.]
 
 ### 7b. A destination-backed run carries a complete `AWS_*` set, and none of it is the controller's
 
@@ -2096,19 +2106,105 @@ Each of `ageExpiry`, `minUsablePoints`, `activeRestoreProtection`,
 `ProviderEnforcedUnverified` or `NotEnforced`. Two of them are never
 `LogweirEnforced` on a view this build can read, and the reasons are different:
 
+* `sharedSegments` is **`NotEnforced`**, because the guarantee needs a point's
+  segment keys and the catalog view entry has no segment field at all. What
+  **is** enforced is the set half of it. Two receipts can name one backup set
+  — a runner Job re-created from its frozen inputs rewrites the same
+  `<prefix>/<backupId>/` and signs a second receipt over it — and every key a
+  plan line may remove lies under its own set's directory. So the evaluation
+  groups points that share a `backupId`, a manifest key or a segment key
+  (transitively), and a group holding any retained point — kept, protected,
+  skipped, or a row whose location the catalog could not establish — plans
+  none of its candidates: each is protected `SharedSegment`. The
+  `maxDeletionsPerRun` ceiling selects such a group whole or not at all, and
+  the plan writer refuses outright (`Evaluated=False`, no plan) a line whose
+  set a retained point still names. When EVERY receipt of a set is due, the
+  set is removed by ONE plan line that names the others in `co_point_ids`:
+  each point gets its own outcome and tombstones, and the objects are counted
+  once. What stays unseen is a manifest that names a segment under *another*
+  set's directory; the engine does not write that layout, but the guarantee as
+  worded covers it, so the value stays `NotEnforced` and the `Evaluated`
+  message says which half is in force. It becomes `LogweirEnforced` on its
+  own, with no code change, the day a view entry carries its keys.
 * `legalHold` is `ProviderEnforcedUnverified` even in `Enforce`, because
   `object_store` 0.14 exposes no WORM readback. "Legal hold respected" means
   exactly *a provider refusal is authoritative, recorded, not retried, and
   excluded from the next plan* — never "Logweir knows the hold exists". The
   exclusion half is real: `status.lastEnforcement.failed[]` carries the closed
-  code, and the next evaluation protects that point as `LegalHold`.
-* `sharedSegments` is **`NotEnforced`**, because the guarantee needs a point's
-  segment keys and the catalog view entry has no segment field at all. The
-  evaluation implements the rule — a segment a retained point's manifest names
-  protects the candidate that shares it — and has nothing to apply it to. It
-  becomes `LogweirEnforced` on its own, with no code change, the day a view
-  entry carries its keys. **Until then, do not read this destination as
-  protected against a shared-segment removal.**
+  code `Locked`, and the next evaluation protects that point as `LegalHold`.
+* **A provider can only refuse a delete it is asked to make, and on a
+  versioned bucket a delete by key asks for nothing.** Every S3 Object Lock
+  bucket is versioned, and on a versioned bucket a `DELETE` with no version id
+  is answered success and removes nothing: the provider writes a delete marker,
+  the data stays as a noncurrent version, and a hold on that version is never
+  consulted (measured on the lab MinIO by harness-rows-11's `object-lock` row).
+  `object_store` 0.14 can neither delete a specific version nor read the
+  marker header off the response, so the worker **refuses the combination**
+  rather than record a marker as a deletion, from three signals:
+  1. **The bucket, now.** Before any delete of a point the worker PUTs its
+     create-only intent tombstone into the same bucket (under `logweir/`). A
+     provider answers that PUT with a version id exactly when versioning is
+     *Enabled* on the bucket (measured on MinIO: a version id from an Enabled
+     bucket, none from a plain or a Suspended one). Then nothing of the point
+     is deleted and it is `Kept` with code `VersionedBucket` — including
+     objects written *before* versioning was turned on, whose own HEAD
+     carries no version id and which a delete by key would still only hide.
+  2. **The key.** Before every delete it HEADs the key; a current version
+     carrying a version id (`x-amz-version-id`) is not deleted — the point is
+     `Kept` (or `Orphaned`, if the manifest had already gone) with
+     `VersionedBucket`. This catches objects stored under Enabled versioning
+     in a bucket since *Suspended*, where the tombstone PUT carries no id.
+  3. **The bucket, after the deletes.** Versioning can be switched on while
+     a point's deletes run — minutes for a large set — and every delete after
+     that is a marker the per-key HEAD cannot see (a null version answers no
+     version id). So after a point's deletes the worker PUTs one more
+     create-only check object (`logweir/retention/<policyUid>/<runId>/<pointId>.check.json`)
+     into the same bucket. If that comes back with a version id, or cannot be
+     written, the point is NOT recorded `Deleted`: it is `Orphaned` with
+     `VersionedBucket` (or `VersionCheckRefused:…`), every planned key named as
+     possibly remaining and no object counted as removed.
+
+  The run exits 1, and three such runs set `EnforcementDegraded`, whose
+  message names the remedy: enforce on an unversioned bucket, or declare the
+  provider's own lifecycle (`NoncurrentVersionExpiration` honours holds) with
+  `mode: ExternalLifecycle`. **It resumes on its own**: a policy degraded only
+  by `VersionedBucket` or `VersionProbeRefused` starts one re-probe run 24 h
+  after its last run — it deletes nothing unless the refusal has cleared —
+  so no spec edit is needed once the bucket or the grant is fixed.
+  `VersionedBucket` is not a hold verdict and does not protect the point as
+  `LegalHold`; the `Locked` path remains for a provider that refuses a plain
+  `DELETE` itself. The HEAD needs `s3:GetObject` on `<prefix>/*` — the scope
+  D3 §6.5 always documented for the retention credential; without it every
+  key is `Kept` with `VersionProbeRefused` and nothing is deleted.
+
+  **`Deleted` means the CURRENT object at each key was removed — nothing more.**
+  Noncurrent versions that bucket versioning keeps are the bucket's lifecycle
+  responsibility; `object_store` 0.14 can neither list nor delete them, and
+  Logweir does not see them. **Residual, accepted and tracked (it needs a
+  version-aware store client):** a bucket whose versioning was Enabled, then
+  *Suspended*, and whose keys were then written again — and re-run backups DO
+  rewrite the same keys: a runner Job re-created from its frozen inputs writes
+  the same `<prefix>/<backupId>/` objects, which is exactly how two receipts
+  come to name one set. There the current version is a null version (no
+  version id on the HEAD, none on a PUT to a Suspended bucket), the delete
+  removes it, the point is recorded `Deleted`, and the Enabled-era version
+  beneath it survives. No hold is possible on a suspended null version, and an
+  Object Lock bucket cannot suspend versioning, so this is a false deletion
+  record, not a hold bypass. **Do not enforce on a bucket whose versioning was
+  ever enabled and later suspended** — use `mode: ExternalLifecycle` or a
+  noncurrent-version lifecycle rule — **and do not change a bucket's
+  versioning while a retention run is in flight.**
+
+  **What else is not seen, stated so nothing claims it:**
+  * whether AWS answers `x-amz-version-id: null` for a PUT or HEAD of a null
+    version is unmeasured — the worker counts any version id, `null`
+    included, as versioned, so the unmeasured answer can only refuse more;
+  * a key whose latest version is *already* a marker (for instance one written
+    by an earlier build) answers the HEAD `404` and is counted gone: nothing
+    live remains, but its data may survive as noncurrent versions;
+  * versioning switched on and then back to *Suspended* while one point's
+    deletes run (two operator toggles inside one point): the post-delete check
+    is written after the second toggle and answers no version id.
 
 **`mode: ExternalLifecycle` is a declaration, not an enforcement.** It records
 that a bucket lifecycle rule exists so a console can stop claiming retention is
@@ -2170,7 +2266,8 @@ removed while the controller's Backup verdicts cannot all be read", with
 The refusal the walk did not reach is exactly the one that would have enlarged
 the plan. `Backup`s in other namespaces writing to the same archive are not
 consulted. A point the evaluation skips is retained, so a segment it shares
-with a candidate protects that candidate as `SharedSegment`.
+with a candidate — or a backup set it names — protects that candidate as
+`SharedSegment`.
 
 And the newest `minUsablePoints` usable
 points are kept whatever the rules say, reported as `MinUsablePoints` in
@@ -2210,6 +2307,46 @@ policy to `mode: Report`, wait for `status.lease` to clear and for any
 enforcement Job to finish, and only then roll back. Objects already removed from
 the archive are gone; the tombstones and the record under `logweir/retention/`
 are what remains, and they are readable by any S3 client.
+
+**Upgrading to a build with the versioned-bucket refusal and one line per shared
+set** (defects OBJECT-LOCK-DELETE-MARKER and SHARED-SET-RETENTION), in order:
+
+1. **Grant the retention delete credential `s3:GetObject` on
+   `<bucket>/<prefix>/*` BEFORE upgrading the controller or the runner image.**
+   Without it every enforcement run keeps every point (`VersionProbeRefused`)
+   and deletes nothing. A policy that degraded on it anyway resumes by itself:
+   one re-probe run is started 24 h after its last run. To resume at once,
+   edit its spec (any change bumps `metadata.generation` and releases the
+   budget).
+2. **On a versioned or Object Lock bucket, `Enforce` now deletes nothing** and
+   degrades with `VersionedBucket`. Enforcement records from earlier builds on
+   such a bucket that say `Deleted` are FALSE: the data is still there as
+   noncurrent versions behind delete markers. Move the policy to an
+   unversioned bucket or to `mode: ExternalLifecycle`. **Do not change a
+   bucket's versioning while a retention run is in flight, and do not enforce
+   on a bucket whose versioning was ever enabled and later suspended** (use
+   `mode: ExternalLifecycle` or a noncurrent-version lifecycle rule): re-run
+   backups rewrite the same keys, and a deletion there removes only the
+   newest copy while being recorded `Deleted` — the accepted residual above.
+3. **Plans over re-run receipts change.** The older receipt of a shared set is
+   now `protected: SharedSegment` until every receipt naming the set is due
+   together, and then the set is removed by ONE plan line naming every point
+   (`co_point_ids`). A digest approved over such a plan must be re-approved; a
+   plan with no shared set is byte-identical and its approval holds. A shared
+   set with more receipts than `maxDeletionsPerRun` is never selected — raise
+   the ceiling to let it go.
+4. **Rollback**: first set every policy on a versioned bucket to
+   `mode: Report` — the older worker records delete markers as deletions
+   there. An older worker also refuses a plan carrying `co_point_ids` (its
+   plan type rejects unknown fields): the run exits 3 and deletes nothing.
+
+**A residual the enforcer does not re-check** (review L3): a second receipt
+signed over a set AFTER the run-start pass evaluated it — a runner Job
+re-created from frozen inputs between the approval and the deletes — is not
+seen by the worker, whose rails are the approved plan, the prefix and the
+evidence root (D3 §6.5). It needs a re-run over a set old enough to be a
+candidate; the next evaluation reads the new receipt, and a set it names is
+never planned again.
 ### 7g. A `RehearsalSchedule` proves recovery on a cron, under one signed authorization
 
 A backup that has never been restored is a hypothesis. PLAT-14.3's
@@ -4842,11 +4979,27 @@ a `metav1` reason is a closed label other software matches on. The parameters �
 which Secret, which volume — travel in the diagnostic's `object` and `message`.
 
 Four of those reasons are also terminal states: `VolumeMountFailed`,
-`CredentialReferenceMissing`, `RunnerImageUnavailable`, `PodCreationForbidden`.
-They replace `NoExitCode` **only** when the matching diagnostic was recorded
-before the Job ended; otherwise the table above is unchanged, and `exitCode`
-stays absent in all four. A run whose pod never started has no code to lift, and
-none is invented.
+`CredentialReferenceMissing`, `RunnerImageUnavailable`, `PodCreationForbidden`
+(and `PodUnschedulable` already was one). They replace `NoExitCode` **only**
+when the matching diagnostic was recorded before the Job ended; otherwise the
+table above is unchanged, and `exitCode` stays absent in all of them. A run
+whose pod never started has no code to lift, and none is invented.
+
+**A warning-class diagnostic that ended the run is its terminal reason.** When
+a Job hits its deadline — its own, or the one fail-fast collapses — the Job
+controller deletes its pod, so the pod-reading table above has nothing to read
+and the recorded diagnostic is the only witness. An `Error`-class code
+(`CredentialSecretNotFound`, `SigningKeyMissing`, …) is read whenever it was
+recorded, because it does not resolve on its own. A `Warning`-class code
+(`VolumeMountFailed` from a volume that never mounted, `PodUnschedulable`,
+`RunnerImagePullFailed`) is read only when the runner **never started** and the
+diagnostic was **still being observed when the Job ended** — its `lastSeen`
+within three minutes of the Job's `Failed` transition — because a warning that
+stopped being seen had resolved. So a projected ConfigMap that never mounts
+ends `Failed/VolumeMountFailed` and a pod no node takes ends
+`Failed/PodUnschedulable`, not `NoExitCode`; anything less certain stays
+`NoExitCode`. `WaitingForPod` — what the pass after fail-fast deleted the pod
+records — is never a terminal state.
 
 ### Failing fast, and what it costs
 
@@ -6299,7 +6452,10 @@ digest rather than after.
 `ProviderEnforcedUnverified` as "declared by your provider; Logweir cannot verify
 it", because `object_store` exposes no WORM readback and the guarantee is exactly
 "a provider refusal is authoritative, recorded, not retried and excluded from the
-next plan".
+next plan". On a versioned (and so on every Object Lock) bucket the worker never
+asks the provider at all: it refuses the delete as `VersionedBucket`, because a
+delete by key there writes a marker instead of being refused (§7f, the
+versioned-bucket bullet, including the cases it does not see).
 
 **The legacy in-cluster UI ServiceAccount reads none of the four D3 kinds.**
 `charts/logweir/templates/ui/ui.yaml`'s ClusterRole is unchanged by this change,

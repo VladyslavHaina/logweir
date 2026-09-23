@@ -502,10 +502,24 @@ this row, or the catalog publishes no view.
 **No role is ever granted `s3:DeleteObject`.** Logweir prints the removal
 commands and an operator runs them; the only component that deletes is
 `logweir-retention`, under its own separate `spec.enforcement.credentialSecretRef`
-(measured minimum: `s3:ListBucket` with `s3:prefix` in `<prefix>/*`, and
-`s3:DeleteObject` on `arn:aws:s3:::<bucket>/<prefix>/*` — it needs no
-`s3:GetObject`, because it deletes the explicit key list its approved plan
-carries and reads nothing).
+(`s3:ListBucket` with `s3:prefix` in `<prefix>/*`, and `s3:GetObject` and
+`s3:DeleteObject` on `arn:aws:s3:::<bucket>/<prefix>/*`). `s3:GetObject` is
+for a HEAD before every delete: on a versioned bucket — every S3 Object Lock
+bucket is one — a delete by key only writes a delete marker and never
+consults a legal hold, so the worker refuses to delete there (code
+`VersionedBucket`, also read from the version id its own intent tombstone
+gets back), and without the grant it cannot tell and deletes nothing (code
+`VersionProbeRefused`). **Grant it before upgrading**; a policy that degraded
+without it re-probes 24 h after its last run, or at once on a spec edit
+(`docs/kubernetes.md` §7f, "Upgrade and rollback"). **`Deleted` means the
+current object at each key was removed**; noncurrent versions a bucket keeps
+are its lifecycle's responsibility and Logweir cannot see them. So **do not
+enforce on a bucket whose versioning was ever enabled and later suspended**
+(re-run backups rewrite the same keys, and there a deletion removes only the
+newest copy while being recorded `Deleted`), and **do not change a bucket's
+versioning while a retention run is in flight** — use `mode: ExternalLifecycle`
+or a noncurrent-version lifecycle rule instead. The measured minimum before that check was
+`s3:ListBucket` and `s3:DeleteObject` alone. [UNVERIFIED — the grant with s3:GetObject is re-measured by U6/retention-enforcer at the next lab refresh.]
 
 **Grant `evidenceRead` its `s3:ListBucket` if you want "absent" to mean absent.**
 It is not in the measured minimum — the `destination.evidenceReadable` probe

@@ -259,6 +259,15 @@ pub const ERROR_REQUEUE_SECONDS: u64 = 30;
 /// How many consecutive failed runs stop the scheduling — D3 §6.5.
 pub const DEGRADED_AFTER_FAILURES: i64 = 3;
 
+/// The per-point codes that are about the BUCKET or the CREDENTIAL rather than
+/// the plan — the only ones a degraded policy re-probes for on its own
+/// (`reprobe_due`, review M1).
+pub const BUCKET_LEVEL_CODES: &[&str] = &["VersionedBucket", "VersionProbeRefused"];
+
+/// How long after a bucket-level refusal a degraded policy starts one re-probe
+/// run.
+pub const REPROBE_AFTER: chrono::TimeDelta = chrono::TimeDelta::hours(24);
+
 /// How long a lease lives beyond the Job's deadline, so a lease never outlives
 /// the run it protects by much and never dies before it.
 pub const LEASE_MARGIN_SECONDS: i64 = 300;
@@ -631,6 +640,42 @@ impl Pass<'_> {
         self.budget_before() >= DEGRADED_AFTER_FAILURES
     }
 
+    /// A degraded policy may start ONE re-probe run now (review M1).
+    ///
+    /// D3 §6.5 releases a degraded policy on a spec change, because what failed
+    /// is usually something the spec can fix. Two refusals are not:
+    /// `VersionProbeRefused` clears when an operator grants the retention
+    /// credential `s3:GetObject`, and `VersionedBucket` when the bucket stops
+    /// being versioned — both outside the object. So when EVERY per-point code
+    /// of the last run is one of [`BUCKET_LEVEL_CODES`] and that run finished
+    /// at least [`REPROBE_AFTER`] ago, one run is scheduled again. It is safe
+    /// by construction: the worker refuses before deleting anything for as
+    /// long as the reason holds (a HEAD per key, the intent tombstone's version
+    /// id), so a re-probe deletes nothing unless the refusal has cleared, and
+    /// it costs one Job and one intent tombstone per planned point per day.
+    /// A failed re-probe re-stamps `finishedAt`, which is the backoff.
+    fn reprobe_due(&self) -> bool {
+        let Some(last) = self
+            .policy
+            .status
+            .as_ref()
+            .and_then(|s| s.last_enforcement.as_ref())
+        else {
+            return false;
+        };
+        let codes: Vec<String> = last
+            .failed
+            .iter()
+            .flatten()
+            .map(|f| f.code.clone())
+            .collect();
+        only_bucket_level(&codes)
+            && last
+                .finished_at
+                .as_ref()
+                .is_some_and(|f| self.ctx.now - *f >= REPROBE_AFTER)
+    }
+
     /// The last run's outcome IN WORDS, for the `EnforcementDegraded` message.
     ///
     /// A condition that says only "3 consecutive runs have failed" tells an
@@ -643,11 +688,18 @@ impl Pass<'_> {
             .status
             .as_ref()
             .and_then(|s| s.last_enforcement.as_ref());
-        let codes: Vec<String> = record
+        failure_detail(record.and_then(|r| r.exit_code), &self.last_failure_codes())
+    }
+
+    /// The closed per-point codes the last run left on the object.
+    fn last_failure_codes(&self) -> Vec<String> {
+        self.policy
+            .status
+            .as_ref()
+            .and_then(|s| s.last_enforcement.as_ref())
             .and_then(|r| r.failed.as_ref())
             .map(|f| f.iter().map(|d| d.code.clone()).collect())
-            .unwrap_or_default();
-        failure_detail(record.and_then(|r| r.exit_code), &codes)
+            .unwrap_or_default()
     }
 
     fn owner(&self) -> RunnerOwner {
@@ -1049,14 +1101,9 @@ impl Pass<'_> {
                  durable answer."
             ),
         };
-        let detail = failure_detail(
-            exit_code,
-            &report
-                .failed
-                .iter()
-                .map(|(_, code)| code.clone())
-                .collect::<Vec<String>>(),
-        );
+        let codes: Vec<String> = report.failed.iter().map(|(_, code)| code.clone()).collect();
+        let detail = failure_detail(exit_code, &codes);
+        let stop = scheduling_stop(&codes);
         let conditions = self.conditions(&[
             (
                 CONDITION_READY,
@@ -1081,10 +1128,9 @@ impl Pass<'_> {
                 if degraded {
                     format!(
                         "{failures} consecutive retention runs have failed and the retry budget \
-                         is spent: {detail}. No further run is scheduled until spec changes \
-                         (edit spec.enforcement, or spec.rules, and the count clears with it). \
-                         status.lastEnforcement.recordKey names the durable record of the last \
-                         run."
+                         is spent: {detail}. {stop} (edit spec.enforcement, or spec.rules, and \
+                         the count clears with it). status.lastEnforcement.recordKey names the \
+                         durable record of the last run."
                     )
                 } else {
                     format!("{failures} consecutive run failures; {detail}")
@@ -2388,14 +2434,14 @@ impl Pass<'_> {
         // in `harvest` and in `publish_evaluation`, so the condition a console
         // reads and the decision this pass makes cannot disagree.
         let failures = self.budget_before();
-        if self.budget_spent() {
+        if self.budget_spent() && !self.reprobe_due() {
             return EnforcementDecision {
                 start: false,
                 enforcement: ENFORCEMENT_LOGWEIR_WORKER,
                 reason: REASON_RUN_FAILED,
                 message: format!(
-                    "{failures} consecutive runs failed; no further run is scheduled until the \
-                     spec changes"
+                    "{failures} consecutive runs failed; {}",
+                    scheduling_stop(&self.last_failure_codes()).to_lowercase()
                 ),
             };
         }
@@ -2593,9 +2639,27 @@ impl Pass<'_> {
         // Derived from the POINTS rather than from a constant, so the day a
         // view entry carries its segment keys the value changes with no other
         // edit, and a test that goes through `point_facts` is what observes it.
+        //
+        // SHARED SETS ARE PROTECTED NOW, AND THIS STILL SAYS `NotEnforced`
+        // (defect SHARED-SET-RETENTION). `evaluate` step 4 protects every
+        // candidate that names the same backup set as a retained point, from
+        // the `backupId` every view entry carries, and that is the whole of
+        // the sharing the engine's own layout produces (every key under
+        // `{backup_id}/`). What it cannot see is a manifest naming a segment in
+        // ANOTHER set's directory, and the guarantee as worded — "a segment
+        // two points share is not removed with one of them" — covers that
+        // case. `LogweirEnforced` would claim it; the Evaluated message says
+        // exactly which half is in force instead.
         let segments_visible = points.iter().any(|p| !p.segment_keys.is_empty());
         let guarantees = json!({
-            "ageExpiry": if decision.enforcement == ENFORCEMENT_LOGWEIR_WORKER {
+            // NOT WHILE THE RETRY BUDGET IS SPENT (review M4). A degraded policy
+            // schedules no run — and one degraded by `VersionedBucket` can never
+            // delete at all — so "age expiry is enforced by Logweir" is not true
+            // of it, whatever `spec.mode` asks for. `EnforcementDegraded` says
+            // why; this field must not contradict it.
+            "ageExpiry": if decision.enforcement == ENFORCEMENT_LOGWEIR_WORKER
+                && !self.budget_spent()
+            {
                 GUARANTEE_LOGWEIR
             } else {
                 GUARANTEE_NOT_ENFORCED
@@ -2636,7 +2700,11 @@ impl Pass<'_> {
                     } else {
                         // SAID ON THE OBJECT, not only in a Rust doc comment
                         // (review `d3w9` H1 and M1).
-                        " This catalog view carries no segment keys, so shared-segment                          protection is NotEnforced and the plan names each set's key prefix                          rather than its objects:"
+                        " This catalog view carries no segment keys. Points that name one \
+                         backup set are protected together (SharedSegment, matched on \
+                         backupId), but a segment one set's manifest names under another \
+                         set's directory cannot be seen, so sharedSegments is NotEnforced, \
+                         and the plan names each set's key prefix rather than its objects:"
                     },
                     if segments_visible {
                         String::new()
@@ -2681,11 +2749,11 @@ impl Pass<'_> {
                 if self.budget_spent() {
                     format!(
                         "{} consecutive retention runs have failed and the retry budget is \
-                         spent: {}. No further run is scheduled until spec changes. \
-                         status.lastEnforcement.recordKey names the durable record of the last \
-                         run.",
+                         spent: {}. {}. status.lastEnforcement.recordKey names the durable \
+                         record of the last run.",
                         self.budget_before(),
-                        self.last_failure_detail()
+                        self.last_failure_detail(),
+                        scheduling_stop(&self.last_failure_codes())
                     )
                 } else if self.spec_changed() {
                     "the spec changed; the consecutive-failure budget is released and \
@@ -3524,11 +3592,62 @@ fn failure_detail(exit_code: Option<i32>, codes: &[String]) -> String {
     if counted.is_empty() {
         return format!("{exit} and named no per-point code");
     }
+    let versioned = counted.contains_key("VersionedBucket");
+    let unprobed = counted.contains_key("VersionProbeRefused");
     let named: Vec<String> = counted
         .into_iter()
         .map(|(code, n)| format!("{code} on {n} point(s)"))
         .collect();
-    format!("{exit} with {}", named.join(", "))
+    // THE TWO REFUSALS THAT ARE ABOUT THE BUCKET, NOT THE POINT (defect
+    // OBJECT-LOCK-DELETE-MARKER), said with their remedy: nothing about them
+    // clears on a retry, so the retry budget is what stops the policy, and the
+    // condition that says so must say why.
+    let mut remedy = String::new();
+    if versioned {
+        remedy.push_str(
+            ". VersionedBucket: the bucket is versioned (every S3 Object Lock bucket is), so \
+             a delete by key would only write a delete marker over the data and never consult \
+             a legal hold; the worker deletes nothing there. Enforce on an unversioned bucket, \
+             or declare the provider's own lifecycle with mode: ExternalLifecycle",
+        );
+    }
+    if unprobed {
+        remedy.push_str(
+            ". VersionProbeRefused: the retention credential could not HEAD the object, so \
+             the worker could not establish that a delete would remove it; grant it \
+             s3:GetObject on <prefix>/*",
+        );
+    }
+    if only_bucket_level(codes) {
+        remedy.push_str(
+            ". This refusal is about the bucket or the credential, not the plan: once the \
+             retry budget is spent, one re-probe run is started 24 h after the last run, and it \
+             deletes nothing unless the refusal has cleared, so no spec edit is needed to resume",
+        );
+    }
+    format!("{exit} with {}{remedy}", named.join(", "))
+}
+
+/// Whether every per-point code of a run is about the bucket or the
+/// credential ([`BUCKET_LEVEL_CODES`]) — the one condition under which a
+/// degraded policy re-probes on its own.
+fn only_bucket_level(codes: &[String]) -> bool {
+    !codes.is_empty()
+        && codes
+            .iter()
+            .all(|c| BUCKET_LEVEL_CODES.contains(&c.as_str()))
+}
+
+/// What a spent retry budget means for scheduling, IN THE SAME WORDS the
+/// re-probe rule uses (re-check RL1): the plain D3 §6.5 stop, or the stop with
+/// its one exception when every code was bucket-level.
+fn scheduling_stop(codes: &[String]) -> &'static str {
+    if only_bucket_level(codes) {
+        "Scheduling is stopped except for one re-probe run 24 h after the last run; a spec \
+         edit resumes it at once"
+    } else {
+        "No further run is scheduled until spec changes"
+    }
 }
 
 /// One view entry, as the evaluation sees it.
