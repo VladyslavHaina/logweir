@@ -216,6 +216,20 @@ SUITES: dict[str, Suite] = {s.id: s for s in [
         why_rcs="plat10 exits 3 exactly when a row is recorded in `blocked[]` "
                 "(scripts/plat10-ui-e2e.mjs:2396-2400); those rows are adapted as BLOCKED, which "
                 "never passes, and only the lab-refresh-8 journey names them"),
+    Suite(
+        # THE ONE SUITE THAT CHANGES THE SHARED RELEASE, under the cluster lock:
+        # the two-approvals journey needs a controller bound to a Governed
+        # policy, and the lab's values bind none. `swap-on` mounts the run's
+        # own policy document the chart's way; `swap-off` (always run) restores
+        # the controller byte-for-byte and fails when it cannot
+        # (e2e/journeys/governed.py, scripts/live/approval_policy_swap.py).
+        "plat19-2", "e2e/journeys/governed.py", "python", ("swap-on", "run"), ("swap-off",),
+        frozenset({"swap-on", "run"}),
+        lambda c: {"GOV_STAMP": c.stamp, "GOV_OUT": str(c.out("plat19-2")), "GOV_OWNER": f"{c.owner}-governed",
+                   "GOV_PREFIX": "lw-plat20-p192-", "UI_E2E_API_BIN": c.api_bin, "UI_E2E_LOGWEIR_BIN": c.cli,
+                   "NODE_PATH": c.node_path},
+        lambda c, r: ui_adapter("result.json")(c, {"run": r.get("run")}, "plat19-2"),
+        lambda c: [f"lw-plat20-p192-{c.stamp}-{s}" for s in "ovgr"], timeout=1800),
     Suite("native", "e2e/journeys/native.py", "native", ("setup", "journeys"), ("cleanup",),
           frozenset({"setup", "cleanup"}), lambda c: {}, _native_adapter,
           lambda c: [f"lw-plat20-n-{c.stamp}"]),
@@ -233,6 +247,7 @@ R = Row
 P06, P07 = "scripts/test-plat06-live.py", "scripts/test-plat07-live.py"
 D1, D2, D3 = "scripts/live/d1/run.py", "e2e/k8s/d2/d2_live.py", "e2e/k8s/d3/d3_live.py"
 U1213, U112, U10 = "scripts/plat12-13-ui-e2e.mjs", "scripts/plat11-2-ui-e2e.mjs", "scripts/plat10-ui-e2e.mjs"
+U192 = "scripts/plat19-2-ui-e2e.mjs"
 NAT, CON = "e2e/journeys/native.py", "e2e/journeys/console.mjs"
 
 P10_RESTORE_ROWS = (
@@ -297,8 +312,14 @@ JOURNEYS: tuple[Journey, ...] = (
     Journey(
         "two-approvals", "a governed restore needs two separate approvals and refuses one",
         ("two approvals",),
-        (R("native", "two-approvals-governed-restore", (RESOURCE,),
-           "docs/to-do/platform-improvements.md:3674"),),
+        (R("plat19-2", "governed in the SHARED console: alice asks with a ticket, is refused approving her own "
+           "request, bob approves from his own browser, and the controller admits only on both signatures",
+           (RESOURCE,), f"{U192}:1151",
+           "confirmation alone GovernedApprovalRequired with no Job; alice's own countersignature 403 and no "
+           "Approval; bob's recorded 201 with two signatures; Verified=True Governed provenance; the Job carries "
+           "--policy-snapshot and --confirmation-key"),),
+        # The gate stays: this is the one journey whose suite takes the cluster
+        # lock and changes the shared controller, so a plain `run` never does.
         requires="PLAT-19.2"),
     Journey(
         "source-offline", "a source nobody answers for fails the run by name and writes nothing; a "
@@ -359,7 +380,8 @@ def suites_for(journeys: tuple[Journey, ...] | list[Journey], opened: set[str]) 
     namespace (the `mc` pod that removes this run's archive prefix, and the
     Kafka client that created the topic the console discovery must find)."""
     wanted = {r.suite for j in journeys if j.requires is None or j.requires in opened for r in j.rows}
-    order = ["native", "console", "plat12-13", "plat11-2", "plat10", "plat06", "plat07", "d1", "d2", "d3"]
+    order = ["native", "console", "plat12-13", "plat11-2", "plat10", "plat19-2", "plat06", "plat07", "d1", "d2",
+             "d3"]
     if wanted:
         wanted.add("native")
     if "console" in wanted:

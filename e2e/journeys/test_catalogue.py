@@ -106,6 +106,38 @@ def test_no_suite_runs_a_phase_that_touches_the_shared_release():
     assert not any("test-k8s-scram" in s.script for s in suites.SUITES.values())
 
 
+def test_the_one_suite_that_changes_the_shared_release_is_gated_locked_and_restored_in_finally():
+    """plat19-2 mounts an approval-policy document into the SHARED controller.
+    It may do so only (a) behind the PLAT-19.2 gate, so a plain `run` never
+    takes the lock, (b) through the swap tool that refuses without the lock,
+    and (c) with the restore in `cleanup`, which run.py runs in `finally`."""
+    touching = {s.id for s in suites.SUITES.values() if s.script == "e2e/journeys/governed.py"}
+    assert touching == {"plat19-2"}
+    suite = suites.SUITES["plat19-2"]
+    assert suite.phases[0] == "swap-on" and suite.cleanup == ("swap-off",)
+    assert suite.accept_rcs == frozenset({0})
+    readers = [j for j in suites.JOURNEYS if any(r.suite == "plat19-2" for r in j.rows)]
+    assert readers and all(j.requires == "PLAT-19.2" for j in readers)
+    assert suites.suites_for(readers, set()) == []
+    assert suites.suites_for(readers, {"PLAT-19.2"}) == ["native", "plat19-2"]
+    governed = (ROOT / suite.script).read_text()
+    assert '"--acquire"' in governed and '["--release"]' in governed
+    swap = (ROOT / "scripts/live/approval_policy_swap.py").read_text()
+    assert "def require_lock" in swap and "require_lock(args.owner)" in swap
+    assert 'out["restored"]' in swap and "the lock stays held" in swap
+
+
+def test_plat19_2_rows_are_its_harness_journeys_and_a_crash_without_cleanup_is_no_rows(tmp_path):
+    c = ctx(tmp_path)
+    row = next(r.name for j in suites.JOURNEYS for r in j.rows if r.suite == "plat19-2")
+    write(tmp_path, "plat19-2", "20260922t0000z/result.json",
+          {"journeys": [{"journey": row}], "cleanup": [{"namespace": "n"}]})
+    assert suites.SUITES["plat19-2"].adapter(c, {"swap-on": 0, "run": 0}) == {row: PASS}
+    # its twin: the harness threw and recorded no cleanup -> nothing is trusted
+    write(tmp_path, "plat19-2", "20260922t0000z/result.json", {"journeys": [{"journey": row}]})
+    assert suites.SUITES["plat19-2"].adapter(c, {"swap-on": 0, "run": 1}) == {}
+
+
 # --- adapters: each shape, with its planted-failure twin --------------------
 
 
@@ -116,7 +148,7 @@ def ctx(tmp_path):
 
 def write(tmp_path, suite, name, doc):
     d = tmp_path / "suites" / suite
-    d.mkdir(parents=True, exist_ok=True)
+    (d / name).parent.mkdir(parents=True, exist_ok=True)
     (d / name).write_text(json.dumps(doc))
 
 
