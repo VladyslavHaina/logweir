@@ -1233,6 +1233,9 @@ async function filterProbe(browser, state, route) {
       filterBox: document.getElementById("subset-topics-filter") !== null,
     }));
     await shot(page, "filter-probe-b-next-point");
+    check(a.visible === 1 && a.boxes === 15, "point A was not filtered to one of 15: " + JSON.stringify(a));
+    check(b.boxes > 0 && b.visible === b.boxes,
+      "the next point's topics are hidden by point A's filter: " + JSON.stringify(b));
     // CONTROL: back to point A in the same page -- its own filter is still in
     // force, and so its box, the hidden count and Clear are on screen.
     await page.evaluate((h) => { window.location.hash = h; },
@@ -1251,9 +1254,6 @@ async function filterProbe(browser, state, route) {
     check(back.value === "stream-14" && back.clear && /^14 topics hidden by the filter\./.test(back.hidden || ""),
       "back on point A the filter in force is not shown with its hidden count and Clear: " +
         JSON.stringify(back));
-    check(a.visible === 1 && a.boxes === 15, "point A was not filtered to one of 15: " + JSON.stringify(a));
-    check(b.boxes > 0 && b.visible === b.boxes,
-      "the next point's topics are hidden by point A's filter: " + JSON.stringify(b));
     record(name, { pointA: state.backup, pointB: other.metadata.name, a: a, b: b, back: back });
   } catch (error) {
     await shot(page, "filter-probe-failure").catch(() => null);
