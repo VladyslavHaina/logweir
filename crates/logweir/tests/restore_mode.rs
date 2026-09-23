@@ -991,6 +991,190 @@ fn the_i8_child_runs_one_restore_and_exits() {
 }
 
 // ===========================================================================
+// I8 AS AMENDED — A FAILED DRILL PUBLISHES ITS SIGNED EVIDENCE KEYS TOO
+// ===========================================================================
+
+/// Re-exec one `#[ignore]`d child of this binary and return its exit code and
+/// stdout — the same mechanism as
+/// [`the_runner_prints_its_three_evidence_keys_last`], for the same reason.
+fn failed_child(name: &str) -> (Option<i32>, String) {
+    let out = Command::new(std::env::current_exe().expect("this test binary's own path"))
+        .args(["--ignored", "--exact", name, "--nocapture"])
+        .output()
+        .expect("re-exec this test binary");
+    (
+        out.status.code(),
+        String::from_utf8(out.stdout).expect("stdout is utf-8"),
+    )
+}
+
+/// **FAILED-DRILL-EVIDENCE-UNPUBLISHED, the runner half.** Every exit-2 path
+/// signs and puts a scorecard, and each now names it on stdout exactly as a
+/// pass does: `scorecard-key=`, `sidecar-key=` and — only when the engine
+/// wrote an offset report — `offset-report-key=`, as the FINAL lines, all one
+/// run's stem.
+///
+/// Three shapes, because there are three places the orchestrator builds
+/// `DrillError::NotPass` and each hands its own keys out of its own put:
+/// the mainline `fail-integrity` gate after phase 9 (with an offset report),
+/// phase 5's `preflight-failed` jump and phase 6's no-op interception (both
+/// without one, because no restore completed).
+///
+/// MUTANTS this kills: `exiting` printing keys on `ExitCode::Ok` only (the
+/// pre-amendment rule — every arm fails at "no key line"); any one of the three
+/// sites passing `None` instead of `Some(EvidenceKeys::of(&signed))` (that
+/// arm fails); `report_with` mapping `NotPass` to `None` (every arm fails);
+/// an `offset-report-key=` printed for a run that had no report (the two
+/// report-less arms fail on the line count).
+#[test]
+fn a_failed_drill_prints_its_signed_evidence_keys_last() {
+    for (child, want_offset_report) in [
+        ("the_failed_i8_child_reconciles_with_mismatches", true),
+        ("the_failed_i8_child_blocks_at_preflight", false),
+        ("the_failed_i8_child_restores_nothing", false),
+    ] {
+        let (code, stdout) = failed_child(child);
+        assert_eq!(
+            code,
+            Some(ExitCode::DrillNotPass as u8 as i32),
+            "{child}: the shape is an exit-2 drill RESULT, or it proves nothing about exit 2:\n\
+             {stdout}"
+        );
+        let lines: Vec<&str> = stdout.lines().collect();
+        let n = if want_offset_report { 3 } else { 2 };
+        let tail = &lines[lines.len().saturating_sub(n)..];
+        assert!(
+            tail[0].starts_with("scorecard-key=logweir/drills/") && tail[0].ends_with(".json"),
+            "{child}: an exit-2 run names its SIGNED scorecard, got {:?} in:\n{stdout}",
+            tail[0]
+        );
+        assert!(
+            tail[1].starts_with("sidecar-key=logweir/drills/") && tail[1].ends_with(".sig"),
+            "{child}: …and its sidecar, got {:?} in:\n{stdout}",
+            tail[1]
+        );
+        if want_offset_report {
+            assert!(
+                tail[2].starts_with("offset-report-key=logweir/drills/")
+                    && tail[2].ends_with(".offsets.json"),
+                "{child}: the restore completed, so the report exists, got {:?} in:\n{stdout}",
+                tail[2]
+            );
+        } else {
+            assert!(
+                !stdout.contains("offset-report-key="),
+                "{child}: no restore completed, so no report was put and none may be named:\n\
+                 {stdout}"
+            );
+        }
+        assert!(
+            stdout.ends_with(&format!("{}\n", tail.join("\n"))),
+            "{child}: nothing after the keys (plan erratum E4):\n{stdout}"
+        );
+        let stem = |line: &str| {
+            line.split('=')
+                .nth(1)
+                .expect("key=value")
+                .trim_start_matches("logweir/drills/")
+                .split('.')
+                .next()
+                .expect("a stem")
+                .to_string()
+        };
+        for line in &tail[1..] {
+            assert_eq!(stem(tail[0]), stem(line), "{child}: one run, one stem");
+        }
+        assert!(
+            !stdout.contains("refusal-reason="),
+            "{child}: exit 2 is a result, not a refusal:\n{stdout}"
+        );
+    }
+}
+
+/// One exit-2 run over `shape`, then `exit` with its code — the children of
+/// [`a_failed_drill_prints_its_signed_evidence_keys_last`].
+fn run_failed_child(shape: fixtures::Drill) -> ! {
+    let f = fixtures::orchestrator_fixture(shape);
+    let mut discarded = Vec::new();
+    let code = drill::run_with(
+        &f.args,
+        &f.run_id,
+        &f.ctx,
+        drill::InvokedAs::Restore,
+        &mut discarded,
+    );
+    std::process::exit(code as u8 as i32);
+}
+
+#[test]
+#[ignore]
+fn the_failed_i8_child_reconciles_with_mismatches() {
+    run_failed_child(fixtures::Drill::ReconcilesWithMismatches);
+}
+
+#[test]
+#[ignore]
+fn the_failed_i8_child_blocks_at_preflight() {
+    run_failed_child(fixtures::Drill::BlocksAtPreflight);
+}
+
+#[test]
+#[ignore]
+fn the_failed_i8_child_restores_nothing() {
+    run_failed_child(fixtures::Drill::RestoresNothing);
+}
+
+/// The keys an exit-2 run hands out are the keys it PUT: the orchestrator's
+/// `NotPass` carries `EvidenceKeys` naming objects that exist in the evidence
+/// store and whose scorecard is the non-passing document the error carries.
+/// A key reconstructed from anything but the put would pass the parent row
+/// above and fail here.
+#[test]
+fn a_failed_drills_keys_name_the_objects_it_put() {
+    for shape in [
+        fixtures::Drill::ReconcilesWithMismatches,
+        fixtures::Drill::BlocksAtPreflight,
+        fixtures::Drill::RestoresNothing,
+    ] {
+        let f = fixtures::orchestrator_fixture(shape);
+        let err = drill::execute_with(&f.args, &f.run_id, &f.ctx)
+            .expect_err("every shape here is a drill result that did not pass");
+        let (sc, keys) = match err {
+            DrillError::NotPass(sc, keys) => (sc, keys),
+            other => panic!("{shape:?}: expected NotPass, got {other:?}"),
+        };
+        let keys = keys.unwrap_or_else(|| panic!("{shape:?}: a signed failure names its keys"));
+        assert_eq!(
+            keys.scorecard_key,
+            format!("logweir/drills/{}.json", f.run_id),
+            "{shape:?}"
+        );
+        let (bytes, _) = f
+            .ctx
+            .store
+            .get(&keys.scorecard_key)
+            .unwrap_or_else(|e| panic!("{shape:?}: the scorecard key names no object: {e}"));
+        let signed: logweir_core::scorecard::Scorecard =
+            serde_json::from_slice(&bytes).expect("the put scorecard parses");
+        assert_eq!(signed.outcome, sc.outcome, "{shape:?}: the SAME document");
+        assert_ne!(
+            signed.outcome,
+            logweir_core::outcome::Outcome::Pass,
+            "{shape:?}: a failed drill's keys name a FAILED document"
+        );
+        f.ctx
+            .store
+            .get(&keys.sidecar_key)
+            .unwrap_or_else(|e| panic!("{shape:?}: the sidecar key names no object: {e}"));
+        if let Some(k) = &keys.offset_report_key {
+            f.ctx.store.get(k).unwrap_or_else(|e| {
+                panic!("{shape:?}: the offset report key names no object: {e}")
+            });
+        }
+    }
+}
+
+// ===========================================================================
 // I20 — ONE GRAMMAR, TWO NAMES
 // ===========================================================================
 

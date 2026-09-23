@@ -643,7 +643,7 @@ fn restored_count_is_inside_the_manifest_bound() {
     let mut sc = fixtures::scorecard_pass();
     sc.outcome = outcome;
     sc.integrity = out.integrity.clone();
-    let code = ExitCode::from(DrillError::NotPass(Box::new(sc)));
+    let code = ExitCode::from(DrillError::NotPass(Box::new(sc), None));
     assert_eq!(code, ExitCode::DrillNotPass);
     assert_eq!(
         code as i32, 2,
