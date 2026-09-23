@@ -2798,13 +2798,22 @@ fn no_literal_colour_or_size_outside_the_token_layer() {
         .filter(|d| !d.in_token_layer)
         .count();
     assert!(
-        tokens >= 150 && rules >= 300 && read_back.root_blocks == 2,
+        tokens >= 150 && rules >= 300 && read_back.root_blocks >= 2,
         "the parser found {tokens} token declaration(s), {rules} rule declaration(s) and {} \
          `:root` block(s) in ui/style.css; a lint that read almost nothing is not a pass",
         read_back.root_blocks
     );
 
     let mut findings = Vec::new();
+    // TWO `:root` BLOCKS: the light layer and the dark one. A third is a
+    // second place a token could be defined.
+    if read_back.root_blocks != 2 {
+        findings.push(format!(
+            "ui/style.css: {} `:root` blocks; the token layer is exactly two (light, and dark \
+             under prefers-color-scheme)",
+            read_back.root_blocks
+        ));
+    }
     let mut stylesheets = 0;
     let mut pages = 0;
     for asset in shipped_assets() {
