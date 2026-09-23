@@ -33,10 +33,15 @@ pre-release ruling by accident.**
 
 `schemas/logweir-api-v1.openapi.json` is the third checked-in schema and the
 only one the rule above does **not** cover. `info.version` is
-`1.0.0-alpha.1`: `logweir-api` is `publish = false`, no image builds it, the
-chart does not deploy it, and nothing outside this repository reads the
-document. It is therefore still in the "internal edit" state the scorecard left
-behind at v0.1.0.
+`1.0.0-alpha.1`, and it is still in the "internal edit" state the scorecard left
+behind at v0.1.0. **Its consumers now exist** — the `logweir-console` image
+(`Dockerfile.console`) carries `logweir-api`, the chart deploys it under
+`api.console.*`, and the static console's typed client (PLAT-18.1) reads it —
+but the binary is still `publish = false` and no client outside this repository
+is supported. Freezing the document at `1.0.0` (and from then on applying the
+MINOR/MAJOR rule below verbatim) is an owner decision owed before the next
+version tag; until it is taken, the console and the API ship and upgrade
+together, and [release-notes.md](release-notes.md) says so.
 
 While that holds, adding, retyping or removing a field is a pre-release bump of
 the `-alpha.N` suffix and needs no maintainer approval — but it is never a
@@ -379,10 +384,14 @@ configures both.
 **The trust stores are separate, and this is Global Constraint 29.** The
 engine falls back to bundled `webpki-roots` unless `ssl_ca_location` is set
 [U:crates/kafka-backup-core/src/kafka/tls.rs:22-23,126-129]; Logweir's rdkafka
-path uses the runtime image's `ca-certificates`. So a **private-CA adopter
-configures two things**, not one: the CA file for the engine, and a CA bundle
-the image trusts for Logweir. Tag 1 renders no `ssl_ca_location` — an adopter
-with a private CA is a case tag 1 does not configure for them.
+path uses the runtime image's `ca-certificates`. Since PLAT-07.1 a **private-CA
+adopter configures one thing**: `KafkaCluster.spec.auth.tlsCa` on Kubernetes, or
+`LOGWEIR_SOURCE_TLS_CA_FILE` / `LOGWEIR_TARGET_TLS_CA_FILE` for a standalone
+run. The runner hands that one file to both clients — librdkafka's
+`ssl.ca.location` and the engine's rendered `ssl_ca_location` — so the two
+cannot disagree ([kubernetes.md](kubernetes.md) §20.2). (Tag 1 rendered no
+`ssl_ca_location`; that sentence described v0.1 and no longer describes this
+build.)
 
 **Use each client's mechanism spelling.** librdkafka expects
 `SCRAM-SHA-512`; the engine's YAML parser expects `SCRAM-SHA512`. The engine
@@ -464,6 +473,88 @@ cold builder took 121 s, including a 92.1 s Cargo layer; a cached rebuild took
 took 3027 s, **33x** the native cross-compile. Cache state, dependency changes
 and host load change these figures; they are not release budgets.
 
+## Measured scale limits (PLAT-20.2)
+
+These are the sizes the product bounds itself to, and what working at those
+sizes was measured to cost. The bounds are contracts; the milliseconds are one
+machine's measurements and are **not** budgets.
+
+**The bounds.**
+
+| Surface | Bound | Beyond it |
+|---|---|---|
+| Topic discovery | `maxTopics` 20,000 by default, 50,000 installation ceiling (`hardMaxTopics`); chunks of 2,500 names / 768 KiB, at most 64 | the inventory is `truncated: true` with `MaxTopics` or `RelayLimit` ([kubernetes.md](kubernetes.md) §7c) |
+| A dynamic backup's selection | 5,000 resolved names or 256 KiB | `SelectionTooLarge`; name the topics or split the schedule (§10) |
+| Catalog view (history from an archive) | the newest `spec.sync.viewLimit` points, 100–5,000, in at most 8 page `ConfigMap`s | counted and histogrammed over the whole archive, `truncated: true`; the rest is `logweir catalog list` against the archive (§7d) |
+| Catalog point page (`…/points`) | 200 rows; the verdict join reads at most 2,000 `Backup`s (4 × 500) | `backupVerdictsIncomplete: Truncated`, and the console offers no restore from that page |
+| API list page | 200 objects | follow `nextCursor` |
+| Console lists (history, backups, runs) | 25 pages × 200 = 5,000 rows per kind | the page refuses and says how many it read, rather than showing a prefix as the whole; prune history or use `kubectl` |
+
+**How it was measured.** Offline and in process, with no cluster: the product
+API's real router over its strict in-process fake API server (so each figure
+includes that fake's JSON encoding, and excludes network latency, etcd and a
+real API server's own cost), the controller's and the runner's pure discovery
+steps over synthetic inventories, and the console's own render functions in
+node. The harnesses are checked in and re-runnable:
+
+```bash
+cargo test --release -p logweir-api  --test scale -- --ignored --nocapture --test-threads=1
+cargo test --release -p weirkeeper   --test scale -- --ignored --nocapture --test-threads=1
+cargo test --release -p logweir-kafka --test scale -- --ignored --nocapture --test-threads=1
+MEASURE_ROWS=5000 MEASURE_TOPICS=5000 node scripts/plat18-2-measure.mjs
+```
+
+Recorded 2026-09-23 at `306cebf` plus the harness commit, release builds, on an
+Apple M4 (10 cores, 32 GiB, macOS 26.6.2), rustc 1.89.0, node 25.6.1, on a host
+shared with other builds (load average 4–7 throughout). Medians of five runs
+(Rust) or seven (node); a walk reports every request.
+
+| What | Size | Result |
+|---|---|---|
+| Runner: assemble an inventory from the broker's listing | 10,000 / 20,000 / 50,000 topics | 4.1 / 8.2 / 18.1 ms |
+| Controller: decode and verify the relay | 10,000 / 20,000 / 50,000 topics (0.55 / 1.1 / 2.8 MB) | 3.1 / 4.2 / 10.2 ms |
+| Controller: split into chunks, and index them | 10,000 / 20,000 / 50,000 topics (4 / 8 / 20 chunks) | 2.2 / 3.3 / 8.1 ms; index < 0.01 ms |
+| Controller: classify a dynamic selection (10 exact, 5 prefix exclusions) | 10,000 / 20,000 / 50,000 topics | 0.6 / 0.9 / 2.1 ms |
+| API: page a stored inventory at 200 | 10,000 topics (51 requests) / 50,000 (251) | median 0.40 / 0.42 ms per page, max 0.83 ms; at most 2 chunk reads a page |
+| API: a search that matches nothing | 10,000 topics / 50,000 topics | 1 request, 2.7 ms / 3 requests, median 5.6 ms, 8 chunk reads each |
+| API: walk the largest catalog view at 200 | 5,000 points in 8 pages, no `Backup`s (26 requests) | median 12.3 ms, max 20.3 ms, 311 ms in all |
+| API: the same, beside 2,000 `Backup`s for the verdict join | 26 requests | median 26.9 ms, max 35.8 ms, 687 ms in all; 4 `LIST`s a request |
+| API: walk the console's list budget at 200 (status load) | 5,000 `Backup`s / 5,000 `Restore`s (25 requests each) | median 6.2 / 6.0 ms, max 7.1 ms; one `LIST` a page |
+| API: one operation read among 5,000 `Backup`s | — | median 0.05 ms |
+| Console: render the history list | 1,000 rows / 5,000 rows | 8.7 / 23.7 ms (2.9 MB of markup at 5,000) |
+| Console: render the backups list | 1,000 / 5,000 rows | 5.7 / 20.9 ms |
+| Console: restore wizard with a point's frozen topics | 2,000 / 5,000 topics | topic subset 5.7 / 18.9 ms; whole wizard 9.8 / 27.9 ms |
+
+**What the numbers say.** Nothing measured here is near a budget the product
+has: the discovery steps are milliseconds against a discovery Job's
+300-second deadline, and every API request stays in tens of milliseconds at the
+largest size the product will page. Two shapes are worth knowing:
+
+- **A catalog point page re-reads its view from the first page.** The cursor
+  is a row offset, so a request deep into the view parses and digest-checks
+  every page before it, and walking a whole 5,000-point view costs about as
+  much as 13 full reads of it. It is bounded — a request never reads more than
+  eight pages — and the `Backup` verdict join, not the view, is the larger
+  cost. A page-and-line cursor (the inventory route's shape) would make each
+  request constant; it is not needed at these sizes.
+- **A walk ends with one empty page when the total is an exact multiple of the
+  page size** (26 requests for 5,000 points, 51 for 10,000 topics): the route
+  cannot tell that the row filling a page was the last one.
+
+**Not measured here:** a real API server and network, browser layout and paint
+(the console's datagrid shows one page at a time; PLAT-18.2 timed Chromium
+separately), the broker's metadata round trip, and a catalog sync's walk of an
+archive in object storage, which is storage-bound and needs a bucket.
+
+**The regression checks are on work, not time.** A wall-clock assertion on a
+shared CI host is a flaky test, so `crates/logweir-api/tests/scale.rs` asserts
+the bounds above instead, in the default suite: a point page reads the catalog
+once, at most 8 page `ConfigMap`s and at most 4 `Backup` pages however large
+the view and the namespace; a topic search reads at most 8 chunks even when it
+matches nothing in 50,000 topics; and walking the console's 5,000-row budget is
+one bounded `LIST` per page with no per-item read. Each was shown to fail when
+its bound is removed.
+
 ## Recorded rulings that have no ADR yet
 
 ### A `Backup` frozen against a saved destination is REFUSED by an older controller, not run
@@ -485,7 +576,7 @@ POST.
 **Planning a downgrade:** let destination-backed runs reach a terminal phase
 first, or expect them to end `Failed` with that reason. Nothing is written to
 the wrong place either way, and legacy inline-`archive` objects are unaffected.
-See `docs/kubernetes.md` §7e and §10.
+See `docs/kubernetes.md` §7b.3 and §10.
 
 ### Exit 3 has one documented exception: phase 0's `LogAppendTime` override probe
 
@@ -1445,7 +1536,8 @@ future bump has something to disagree with.
 ## Deliberately not in tag 1
 
 The original deferred scope is retained below with current status. Most items
-remain deferred; the Helm chart is now delivered and is marked accordingly.
+remain deferred; the Helm chart and retention deletion are now delivered, and
+key generation and rotation are partly delivered, each marked accordingly.
 The separate **Never** list records product boundaries, not scheduled work.
 
 ### Later, named — original scope with current status
@@ -1456,13 +1548,13 @@ The separate **Never** list records product boundaries, not scheduled work.
 | 2 | **Strimzi as a source** | That population's default engine is `v0.19.1`, **below the `0.21.0` floor**. Supporting it would mean supporting an engine that lacks levers Logweir needs, which is why it is reported `unsupported (lever-absent)` and never as a fault. | spec §13; `docs/support-matrix.md` |
 | 3 | **The in-browser WASM verifier** | Tag 1's UI ships no build step and no bundler, so there is nothing to compile a verifier into; verification is the CLI and `docs/verify_scorecard.py`. | spec §8 |
 | 4 | **`OsoCliEngine::validation_run`** | The trait method is not overridden, so the engine's own validation run is never executed and `engine_subreport` is `null` in every document tag 1 produces. The subcommand is on the allowlist as a ceiling, not as a description. | spec §13; `docs/platform/find-engine.md` |
-| 5 | **Retention deletion** | Retention **reports** and never deletes. Deleting would need a two-handle store model — the archive handle is `read_only_from_url` — and an amendment to the constraint that says Logweir writes only under its own prefix with create-only semantics. ADR 0008 **Amendment H** has now taken that amendment, so the claim is version-scoped: it holds wherever `RetentionPolicy.mode != Enforce`. **In this build it holds unqualified** — `RetentionPolicy` ships as a shape whose `mode` defaults to `Report`, no retention worker is linked, `logweir-store` is delete-free, and no Logweir component holds any object-store delete capability. | spec §5, §13 |
+| 5 | **Retention deletion — delivered, opt-in** | ADR 0008 **Amendment H** took the amendment deletion needed, and the worker exists: a `RetentionPolicy` in `mode: Enforce` runs the separately linked `logweir-retention` binary under its own delete-capable credential, only against an administrator-approved plan digest, and writes create-only (unsigned) tombstones and a record under `logweir/retention/`. `mode: Report` is the default and deletes nothing; a schedule's `spec.retention` still only reports; the controller, `logweir-store`, `logweir` and `logweir-api` link no delete path (`scripts/check-no-archive-write.sh` check 3). Versioned and Object Lock buckets are refused (`VersionedBucket`). | [kubernetes.md](kubernetes.md) §7f; [release-notes.md](release-notes.md) |
 | 6 | **Byte-faithful production restores** (`strip_offset_headers: true` for `mode: newTopic`) | Gated on phase 7 gaining a **second reconciliation key**: today the injected header is the only key phase 7 has, so stripping it removes the only thing that makes a per-record claim checkable. | spec §6.1, §13 |
 | 7 | **Multi-tenancy beyond namespace RBAC** | The isolation tag 1 offers is the API server's own: namespaces and RBAC. There is no tenant object, no per-tenant quota and no cross-namespace policy. | spec §13 |
 | 8 | **Delegated rule-based schedule approval** | Every approval in tag 1 is a signed document over exact bytes. A rule that approves on a schedule's behalf is a different trust model and gets its own design. | `design-operator.md:663-670` |
 | 9 | **A Helm chart — delivered** | The self-contained chart now ships alongside kustomize. `just chart-check` verifies copied assets and rendered manifests; `just helm-demo` exercises a cluster installation. This item is no longer deferred. | [Chart guide](../charts/logweir/README.md) |
 | 10 | **KMS / PKCS#11 signing** | `sign_detached` takes a concrete `&SigningKey` with **no trait seam**, so an external signer is a refactor and not a configuration option. | spec §13 |
-| 11 | **Key generation and rotation** | Tag 1 mints nothing and rotates nothing: the operator creates both keypairs with `openssl` and puts the public halves in the `TrustRoster`. `docs/keys.md` is the rotation story, not a rotation feature. | spec §13 |
+| 11 | **Key generation and rotation — partly delivered** | The chart's bootstrap Job now generates and retains the installation signing key (PLAT-02.1), and a `TrustPolicy` carries a key lifecycle so a rotation is an overlap rather than a replacement (PLAT-19.1). Still not shipped: an in-place runner cutover to a new signing key (`identity.activeSigningSecretName` and `logweir identity rotate` do not exist), and approver keys remain operator-generated. | [keys.md](keys.md), *The supported procedure* |
 | 12 | **A PVC for the runner pod** | The runner streams and writes to an emptyDir; a large restore is bounded by that, and a persistent volume would be a new lifecycle to own. | spec §13 |
 | 13 | **Subprocess timeout, cancellation and SIGTERM handling** | The engine subprocess runs to completion. A Job deleted mid-run leaves the child to the kubelet, and nothing in tag 1 propagates a cancel. | spec §13 |
 | 14 | **A configurable Kafka client timeout** | It is a **20 s constant**, not a setting. | `crates/logweir-kafka/src/rdkafka_reader.rs:16` |

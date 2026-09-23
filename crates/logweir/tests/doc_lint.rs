@@ -1540,6 +1540,76 @@ fn stability_lists_the_deferred_items() {
     }
 }
 
+// ------------------------------------------------------------ release notes
+
+/// **The release notes exist, the checklist's release-notes row points at
+/// them, and they carry every operator action PLAT-20.2 collected.**
+///
+/// `docs/tag1-checklist.md` row 9 ("release notes describe limitations …")
+/// had no release notes to point at, and README.md promised a `ui/` bundle
+/// "listed by digest in the release notes" that no file listed. The ten
+/// operator actions below were collected from merged changes on 2026-09-23;
+/// each is named by the token an operator would act on, so dropping one from
+/// the notes is a red build rather than an upgrade that surprises someone.
+///
+/// NEGATIVE CONTROLS (run 2026-09-23): point row 9 back at
+/// `scripts/check-unverified-labels.sh` and `docs/stability.md` alone, or
+/// respell `co_point_ids` out of `docs/release-notes.md`, and this fails
+/// naming which.
+#[test]
+fn the_release_notes_carry_every_owed_operator_action() {
+    let notes = read("docs/release-notes.md");
+    let checklist = read("docs/tag1-checklist.md");
+
+    let row9 = checklist
+        .lines()
+        .find(|l| l.starts_with("| 9 |"))
+        .expect("the release checklist carries row 9");
+    assert!(
+        row9.contains("`docs/release-notes.md`"),
+        "release checklist row 9 must name `docs/release-notes.md` as its evidence \
+         source; it reads: {row9}"
+    );
+
+    for (item, token) in [
+        ("1, the retention delete grant", "s3:GetObject"),
+        ("2, versioned buckets", "VersionedBucket"),
+        ("3, shared backup sets", "co_point_ids"),
+        ("4, operation states", "NoExitCode"),
+        ("5, point-bound restores", "--evidence-keys"),
+        ("6, the shared console's scope", "controller.watchNamespaces"),
+        ("7, the approval policy floor", "allowOrdinaryConfirmation"),
+        ("8, restore completion", "recordsRestored"),
+        ("9, pre-creation slots", "metadata.creationTimestamp"),
+        ("10, the API trust state", "RecordedBeforeRevocation"),
+    ] {
+        assert!(
+            notes.contains(token),
+            "docs/release-notes.md no longer carries owed item {item} (`{token}`)"
+        );
+    }
+
+    // The UI bundle digest listing README.md promises, with the gate's own
+    // selection of shipped files.
+    assert!(
+        notes.contains("find ui -type f ! -name '*.md' ! -path 'ui/tests/*'"),
+        "docs/release-notes.md must give the command that lists the shipped ui/ files \
+         by digest — README.md says the release notes carry that list"
+    );
+    for heading in [
+        "### Required operator actions",
+        "### Verification scope",
+        "### Retention authority",
+        "### Migration and rollback",
+        "### Limitations and open items",
+    ] {
+        assert!(
+            notes.contains(heading),
+            "docs/release-notes.md is missing its `{heading}` section"
+        );
+    }
+}
+
 // -------------------------------------------------------------- trademarks
 
 /// **`TRADEMARKS.md` states the clearance act and the announcement gate.**
