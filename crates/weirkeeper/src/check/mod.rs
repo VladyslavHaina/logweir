@@ -310,6 +310,11 @@ pub struct Projections {
     pub connection_secret: Option<String>,
     /// The Secret the destination's credential comes from.
     pub destination_secret: Option<String>,
+    /// The Secret a SEPARATE `evidenceWrite` grant's credential comes from,
+    /// when the check writes the create-only marker as that principal
+    /// (PREFLIGHT-EVIDENCEWRITABLE-WRONG-PRINCIPAL). Still the destination's
+    /// credential, so a missing one is `destination.credentialProjected`.
+    pub evidence_write_secret: Option<String>,
     /// The Secret the signing key comes from.
     pub signer_secret: Option<String>,
     /// Every `ConfigMap` projected as trust material.
@@ -340,7 +345,9 @@ pub fn attribute(waiting: &Waiting, projections: &Projections) -> Option<CheckId
             let named = waiting.secret.as_deref()?;
             if projections.connection_secret.as_deref() == Some(named) {
                 Some(CheckId::ConnectionCredentialProjected)
-            } else if projections.destination_secret.as_deref() == Some(named) {
+            } else if projections.destination_secret.as_deref() == Some(named)
+                || projections.evidence_write_secret.as_deref() == Some(named)
+            {
                 Some(CheckId::DestinationCredentialProjected)
             } else if projections.signer_secret.as_deref() == Some(named) {
                 Some(CheckId::SignerPrivateKeyUsable)

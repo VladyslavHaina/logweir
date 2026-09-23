@@ -29,7 +29,9 @@ use logweir_core::check_contract::{
     frames, Authority, CheckCode, CheckId, CheckOutcome, CheckPlanKind, CheckResult, CheckState,
     EndFrame, Gating, OverallState, Stream,
 };
-use logweir_core::check_contract::{CheckRequest, Referent, RosterRef, StaleReason};
+use logweir_core::check_contract::{
+    CheckRequest, EvidenceWriteGrant, Referent, RosterRef, StaleReason,
+};
 use logweir_core::destination::DestinationRole;
 use serde_json::{json, Value};
 
@@ -1892,6 +1894,7 @@ fn projections() -> Projections {
     Projections {
         connection_secret: Some("kafka-src".to_string()),
         destination_secret: Some("logweir-s3".to_string()),
+        evidence_write_secret: None,
         signer_secret: Some("logweir-signing-key".to_string()),
         trust_config_maps: vec!["private-ca".to_string()],
     }
@@ -5069,12 +5072,9 @@ fn backup_inputs(rich: bool) -> Inputs {
         .expect("fixture");
     let policy = weirkeeper::check::policy::Policy::defaults();
     let mut roles = vec![DestinationRole::ArchiveRead, DestinationRole::EvidenceWrite];
-    let evidence_read_configured = !matches!(
-        weirkeeper::destination::resolve(&object, DestinationRole::EvidenceRead, &policy)
-            .map(|d| d.grant),
-        Ok(weirkeeper::destination::ResolvedGrant::NotConfigured) | Err(_)
-    );
-    if evidence_read_configured {
+    // THE CONTROLLER'S OWN DERIVATION, not a copy of it.
+    let facts = pf::destination_spec_facts(PreflightOperation::Backup, &object, &roles, &policy);
+    if facts.request_evidence_read {
         roles.push(DestinationRole::EvidenceRead);
     }
     Inputs {
@@ -5094,7 +5094,8 @@ fn backup_inputs(rich: bool) -> Inputs {
             &policy,
         )),
         roles,
-        write_probe: weirkeeper::destination::write_probe_enabled(&object),
+        write_probe: facts.write_probe,
+        evidence_write_grant: facts.evidence_write_grant,
         topics: vec!["orders".to_string()],
         ..Inputs::default()
     }
@@ -5221,6 +5222,486 @@ fn the_write_probe_is_read_from_the_spec_and_defaults_closed() {
     assert!(!of(Some(json!({}))), "absent `writeProbe` is Disabled");
     assert!(!of(Some(json!({"writeProbe": "Disabled"}))));
     assert!(of(Some(json!({"writeProbe": "CreateOnlyMarker"}))));
+}
+
+// ===========================================================================
+// PREFLIGHT-EVIDENCEWRITABLE-WRONG-PRINCIPAL / DESTINATIONACCESS-IGNORES-WRITEPROBE
+// ===========================================================================
+
+/// The Secret a separated `evidenceWrite` grant names.
+const EVIDENCE_SECRET: &str = "evidence-writer";
+
+/// A destination whose `evidenceWrite` grant is a DIFFERENT principal from its
+/// `archiveWrite` grant, opted in to the marker (or not).
+fn separated_destination(name: &str, evidence_write: Value, write_probe: bool) -> Value {
+    let mut object = backup_destination(name);
+    let spec = object["spec"].as_object_mut().expect("spec");
+    spec["access"]
+        .as_object_mut()
+        .expect("access")
+        .insert("evidenceWrite".to_string(), evidence_write);
+    if write_probe {
+        spec.insert(
+            "readiness".to_string(),
+            json!({"writeProbe": "CreateOnlyMarker"}),
+        );
+    }
+    object
+}
+
+fn evidence_secret_grant() -> Value {
+    json!({
+        "mode": "SecretKeys",
+        "secret": {
+            "name": EVIDENCE_SECRET,
+            "accessKeyIdKey": "access-key-id",
+            "secretAccessKeyKey": "secret-access-key"
+        }
+    })
+}
+
+fn owner() -> weirkeeper::job::RunnerOwner {
+    weirkeeper::job::RunnerOwner {
+        api_version: "logweir.dev/v1alpha1".to_string(),
+        kind: "Preflight".to_string(),
+        name: "pf-1".to_string(),
+        uid: PF_UID.to_string(),
+    }
+}
+
+/// The `Inputs` the REAL resolver and the REAL spec derivation produce for a
+/// check of `object` with `operation` and `roles`.
+fn inputs_for(
+    operation: PreflightOperation,
+    object: &Value,
+    roles: Vec<DestinationRole>,
+) -> Inputs {
+    let object: weirkeeper::crds::backup_destination::BackupDestination =
+        serde_json::from_value(object.clone()).expect("fixture");
+    let policy = weirkeeper::check::policy::Policy::defaults();
+    let facts = pf::destination_spec_facts(operation, &object, &roles, &policy);
+    let primary = match operation {
+        PreflightOperation::Backup => DestinationRole::ArchiveWrite,
+        _ => pf::access_primary_role(&roles),
+    };
+    let mut inputs = Inputs {
+        operation,
+        namespace: NS.to_string(),
+        timeout_seconds: 120,
+        policy_digest: policy.digest(),
+        archive_name: Some("primary".to_string()),
+        archive: Some(weirkeeper::destination::resolve(&object, primary, &policy)),
+        roles,
+        write_probe: facts.write_probe,
+        evidence_write_grant: facts.evidence_write_grant,
+        ..Inputs::default()
+    };
+    if operation == PreflightOperation::Backup {
+        let cluster: weirkeeper::crds::kafka_cluster::KafkaCluster =
+            serde_json::from_value(kafka_cluster("source", Some("prod-id"))).expect("fixture");
+        inputs.cluster_uid = Some(CLUSTER_UID.to_string());
+        inputs.connection = Some(weirkeeper::connection::resolve(
+            &cluster,
+            weirkeeper::connection::ConnectionUse::PreflightSource,
+        ));
+        inputs.topics = vec!["orders".to_string()];
+    }
+    inputs
+}
+
+fn shape_of(inputs: &Inputs) -> Result<pf::JobShape, String> {
+    pf::build_job_shape(inputs, &owner(), &weirkeeper::job::RunnerImage::default())
+}
+
+fn access_request(shape: &pf::JobShape) -> logweir_core::check_contract::DestinationAccessRequest {
+    let CheckRequest::DestinationAccess(r) = &shape.plan.request else {
+        panic!("a destinationAccess plan")
+    };
+    r.clone()
+}
+
+fn projected(shape: &pf::JobShape, env: &str) -> Option<String> {
+    shape
+        .spec
+        .env_from_secret
+        .iter()
+        .find(|e| e.name == env)
+        .map(|e| e.secret_name.clone())
+}
+
+fn literal<'a>(shape: &'a pf::JobShape, env: &str) -> Option<&'a str> {
+    shape
+        .spec
+        .env_literal
+        .iter()
+        .find(|(n, _)| n == env)
+        .map(|(_, v)| v.as_str())
+}
+
+/// **DESTINATIONACCESS-IGNORES-WRITEPROBE.** A `DestinationAccess` check reads
+/// `spec.readiness.writeProbe` like every other operation, and a destination
+/// that did not opt in still writes nothing.
+///
+/// MUTANT RP-5 (`preflight.rs`): make `destination_spec_facts` answer
+/// `write_probe: false` for `DestinationAccess` (the old
+/// `operation != DestinationAccess` gate). The first assertion fails.
+#[test]
+fn a_destination_access_check_reads_the_write_probe_opt_in() {
+    let roles = vec![DestinationRole::ArchiveRead, DestinationRole::EvidenceWrite];
+    let opted_in = inputs_for(
+        PreflightOperation::DestinationAccess,
+        &separated_destination("primary", evidence_secret_grant(), true),
+        roles.clone(),
+    );
+    assert!(
+        opted_in.write_probe,
+        "a DestinationAccess check asking about EvidenceWrite on an opted-in destination \
+         must probe it; WriteNotProbed there is a check that cannot fail"
+    );
+    assert!(access_request(&shape_of(&opted_in).expect("renders")).write_probe);
+
+    let not_opted_in = inputs_for(
+        PreflightOperation::DestinationAccess,
+        &separated_destination("primary", evidence_secret_grant(), false),
+        roles,
+    );
+    let r = access_request(&shape_of(&not_opted_in).expect("renders"));
+    assert!(
+        !r.write_probe,
+        "Disabled is the owner's choice and still writes nothing"
+    );
+    assert!(
+        r.evidence_write.is_none(),
+        "and with no marker there is no reason to project a second credential"
+    );
+}
+
+/// **PREFLIGHT-EVIDENCEWRITABLE-WRONG-PRINCIPAL, controller half.** On a
+/// separated destination the plan names the evidence-write grant BY REFERENCE
+/// and the pod is projected its keys under `LOGWEIR_EVIDENCE_AWS_*`, beside —
+/// never instead of — the checked grant's `AWS_*`.
+///
+/// MUTANT RP-6 (`preflight.rs`): make `evidence_write_principal` return
+/// `Ok(None)` when the grants differ. The plan carries no grant and the runner
+/// writes the marker as the archive principal; the first assertion fails.
+#[test]
+fn a_separated_destination_access_plan_carries_and_projects_the_evidence_write_grant() {
+    let inputs = inputs_for(
+        PreflightOperation::DestinationAccess,
+        &separated_destination("primary", evidence_secret_grant(), true),
+        vec![DestinationRole::ArchiveRead, DestinationRole::EvidenceWrite],
+    );
+    let shape = shape_of(&inputs).expect("renders");
+    let r = access_request(&shape);
+    assert_eq!(
+        r.evidence_write,
+        Some(EvidenceWriteGrant::static_secret(EVIDENCE_SECRET)),
+        "the plan names the evidence-write principal"
+    );
+    assert_eq!(
+        projected(&shape, "LOGWEIR_EVIDENCE_AWS_ACCESS_KEY_ID").as_deref(),
+        Some(EVIDENCE_SECRET)
+    );
+    assert_eq!(
+        projected(&shape, "LOGWEIR_EVIDENCE_AWS_SECRET_ACCESS_KEY").as_deref(),
+        Some(EVIDENCE_SECRET)
+    );
+    assert_eq!(
+        projected(&shape, "AWS_ACCESS_KEY_ID").as_deref(),
+        Some("logweir-s3"),
+        "the checked (archive) grant keeps the unprefixed variables"
+    );
+    assert_eq!(
+        literal(&shape, "LOGWEIR_EVIDENCE_CREDENTIALS"),
+        Some("static")
+    );
+    assert_eq!(
+        inputs.projections().evidence_write_secret.as_deref(),
+        Some(EVIDENCE_SECRET),
+        "a missing evidence-write Secret is attributed to destination.credentialProjected"
+    );
+    // REFERENCES ONLY: the plan the pod mounts names the Secret, and carries
+    // no key material and no key NAME beyond what the Job projects.
+    let bytes = String::from_utf8(shape.documents.check_plan.clone()).expect("utf-8");
+    assert!(
+        bytes.contains(
+            "\"evidenceWrite\":{\"credentials\":\"static\",\"secretName\":\"evidence-writer\"}"
+        ),
+        "{bytes}"
+    );
+    assert!(!bytes.contains("secret-access-key"), "{bytes}");
+}
+
+/// The Backup readiness plan: same principal rule, same projection.
+#[test]
+fn a_separated_backup_readiness_plan_writes_the_marker_as_the_evidence_write_grant() {
+    let inputs = inputs_for(
+        PreflightOperation::Backup,
+        &separated_destination("primary", evidence_secret_grant(), true),
+        vec![DestinationRole::ArchiveRead, DestinationRole::EvidenceWrite],
+    );
+    let shape = shape_of(&inputs).expect("renders");
+    let CheckRequest::OperationReadiness(r) = &shape.plan.request else {
+        panic!("a readiness plan")
+    };
+    assert!(r.write_probe);
+    assert_eq!(
+        r.evidence_write,
+        Some(EvidenceWriteGrant::static_secret(EVIDENCE_SECRET))
+    );
+    assert_eq!(
+        projected(&shape, "LOGWEIR_EVIDENCE_AWS_ACCESS_KEY_ID").as_deref(),
+        Some(EVIDENCE_SECRET)
+    );
+}
+
+/// **Unchanged when the grants are one grant.** No `evidenceWrite` on the
+/// destination (it falls back to `archiveWrite`): no grant in the plan, no key
+/// `evidenceWrite` in its bytes at all, and no second credential in the pod.
+#[test]
+fn a_destination_that_does_not_separate_its_grants_renders_as_before() {
+    let mut object = backup_destination("primary");
+    object["spec"].as_object_mut().expect("spec").insert(
+        "readiness".to_string(),
+        json!({"writeProbe": "CreateOnlyMarker"}),
+    );
+    for operation in [
+        PreflightOperation::Backup,
+        PreflightOperation::DestinationAccess,
+    ] {
+        let inputs = inputs_for(
+            operation,
+            &object,
+            vec![DestinationRole::ArchiveRead, DestinationRole::EvidenceWrite],
+        );
+        let shape = shape_of(&inputs).expect("renders");
+        let bytes = String::from_utf8(shape.documents.check_plan.clone()).expect("utf-8");
+        assert!(bytes.contains("\"writeProbe\":true"), "{bytes}");
+        assert!(!bytes.contains("evidenceWrite\""), "{operation:?}: {bytes}");
+        assert!(
+            projected(&shape, "LOGWEIR_EVIDENCE_AWS_ACCESS_KEY_ID").is_none()
+                && literal(&shape, "LOGWEIR_EVIDENCE_CREDENTIALS").is_none(),
+            "{operation:?}: {:?}",
+            shape.spec
+        );
+        assert_eq!(inputs.projections().evidence_write_secret, None);
+    }
+}
+
+/// A workload-identity evidence grant beside a static archive grant: the pod
+/// runs as the evidence grant's ServiceAccount, and the plan says the marker
+/// uses the injected identity only.
+#[test]
+fn a_workload_identity_evidence_grant_runs_the_check_as_its_service_account() {
+    let inputs = inputs_for(
+        PreflightOperation::DestinationAccess,
+        &separated_destination(
+            "primary",
+            json!({"mode": "WorkloadIdentity", "workloadIdentity": {"serviceAccountName": "evidence-sa"}}),
+            true,
+        ),
+        vec![DestinationRole::ArchiveRead, DestinationRole::EvidenceWrite],
+    );
+    let shape = shape_of(&inputs).expect("renders");
+    assert_eq!(
+        access_request(&shape).evidence_write,
+        Some(EvidenceWriteGrant::workload_identity("evidence-sa"))
+    );
+    assert_eq!(shape.spec.service_account_name, "evidence-sa");
+    assert_eq!(
+        literal(&shape, "LOGWEIR_EVIDENCE_CREDENTIALS"),
+        Some("workloadIdentity")
+    );
+}
+
+/// Two workload identities on two ServiceAccounts cannot share one pod. That
+/// is a `destination.resolved` refusal naming the field, and NO Job: a marker
+/// that cannot be written as the right principal is not written as another.
+#[test]
+fn two_workload_identities_are_a_conflict_and_no_job_is_rendered() {
+    let mut object = separated_destination(
+        "primary",
+        json!({"mode": "WorkloadIdentity", "workloadIdentity": {"serviceAccountName": "evidence-sa"}}),
+        true,
+    );
+    object["spec"]["access"]["archiveWrite"] = json!({"mode": "WorkloadIdentity", "workloadIdentity": {"serviceAccountName": "archive-sa"}});
+    let inputs = inputs_for(
+        PreflightOperation::Backup,
+        &object,
+        vec![DestinationRole::ArchiveRead, DestinationRole::EvidenceWrite],
+    );
+    let row = inputs
+        .destination_verdict_row(now())
+        .expect("a destination row");
+    assert_eq!(
+        (row.state, row.code),
+        (CheckState::NotReady, CheckCode::ExecutionContextConflict),
+        "{row:?}"
+    );
+    assert!(row.message.contains("evidence-sa") && row.message.contains("archive-sa"));
+    assert!(!inputs.plan_blockers(std::slice::from_ref(&row)).is_empty());
+    assert!(shape_of(&inputs).is_err());
+}
+
+/// **Fail closed.** A marker is about to be written and the controller never
+/// resolved the evidence-write grant: that is a refusal, never "use the
+/// destination grant".
+///
+/// MUTANT RP-7 (`preflight.rs`): answer `Ok(None)` in the `None` arm of
+/// `evidence_write_principal`. The row reads `DestinationValid` and this test
+/// fails.
+#[test]
+fn an_unresolved_evidence_write_grant_refuses_rather_than_guesses() {
+    let mut inputs = inputs_for(
+        PreflightOperation::DestinationAccess,
+        &separated_destination("primary", evidence_secret_grant(), true),
+        vec![DestinationRole::ArchiveRead, DestinationRole::EvidenceWrite],
+    );
+    inputs.evidence_write_grant = None;
+    let row = inputs
+        .destination_verdict_row(now())
+        .expect("a destination row");
+    assert_eq!(
+        (row.state, row.code),
+        (
+            CheckState::NotReady,
+            CheckCode::DestinationRoleNotConfigured
+        ),
+        "{row:?}"
+    );
+    assert!(shape_of(&inputs).is_err());
+}
+
+/// The spec derivation's other two answers: `EvidenceRead` is added to a
+/// Backup check only, and the evidence-write grant is resolved only for the
+/// two operations that write a marker and only when `EvidenceWrite` is asked.
+#[test]
+fn the_spec_facts_are_scoped_to_the_operations_that_use_them() {
+    let object: weirkeeper::crds::backup_destination::BackupDestination =
+        serde_json::from_value(rich_destination("primary")).expect("fixture");
+    let policy = weirkeeper::check::policy::Policy::defaults();
+    let with_ew = [DestinationRole::ArchiveRead, DestinationRole::EvidenceWrite];
+    let backup = pf::destination_spec_facts(PreflightOperation::Backup, &object, &with_ew, &policy);
+    assert!(backup.request_evidence_read && backup.write_probe);
+    assert!(matches!(backup.evidence_write_grant, Some(Ok(_))));
+    let access = pf::destination_spec_facts(
+        PreflightOperation::DestinationAccess,
+        &object,
+        &with_ew,
+        &policy,
+    );
+    assert!(
+        !access.request_evidence_read,
+        "an access check names its own roles"
+    );
+    assert!(access.write_probe);
+    assert!(matches!(access.evidence_write_grant, Some(Ok(_))));
+    let restore =
+        pf::destination_spec_facts(PreflightOperation::Restore, &object, &with_ew, &policy);
+    assert!(restore.evidence_write_grant.is_none());
+    let no_ew = pf::destination_spec_facts(
+        PreflightOperation::DestinationAccess,
+        &object,
+        &[DestinationRole::ArchiveRead],
+        &policy,
+    );
+    assert!(no_ew.evidence_write_grant.is_none());
+}
+
+/// The same wrong-principal class on the LISTING row: a `DestinationAccess`
+/// check that requests both archive roles resolves its credential for
+/// `ArchiveRead`, because `archiveWrite` is never probed.
+///
+/// MUTANT RP-8 (`preflight.rs`): put `ArchiveWrite` first in
+/// `access_primary_role`'s order (the old `DestinationRole::ALL` minimum).
+#[test]
+fn a_destination_access_check_lists_the_archive_as_the_archive_read_principal() {
+    use DestinationRole::{ArchiveRead, ArchiveWrite, EvidenceRead, EvidenceWrite};
+    assert_eq!(
+        pf::access_primary_role(&[ArchiveWrite, ArchiveRead, EvidenceWrite, EvidenceRead]),
+        ArchiveRead
+    );
+    assert_eq!(
+        pf::access_primary_role(&[ArchiveWrite, EvidenceWrite]),
+        ArchiveWrite
+    );
+    assert_eq!(
+        pf::access_primary_role(&[EvidenceWrite, EvidenceRead]),
+        EvidenceWrite
+    );
+    assert_eq!(pf::access_primary_role(&[EvidenceRead]), EvidenceRead);
+    assert_eq!(pf::access_primary_role(&[]), ArchiveRead);
+}
+
+/// **Through the reconciler.** A `DestinationAccess` Preflight against a
+/// separated, opted-in destination creates a plan `ConfigMap` naming the
+/// evidence-write grant and a Job projecting its keys — read from the POST
+/// bodies the controller really sent.
+#[tokio::test]
+async fn a_destination_access_preflight_renders_the_evidence_write_principal_end_to_end() {
+    let job = job_name(CheckPlanKind::DestinationAccess);
+    let routes = vec![
+        route(
+            "GET",
+            "/trustrosters/default",
+            roster(RUNNER_KEY_ID, vec![]).to_string(),
+        ),
+        route("GET", "/trustpolicies", no_trust_policies()),
+        route(
+            "GET",
+            "/backupdestinations/primary",
+            separated_destination("primary", evidence_secret_grant(), true).to_string(),
+        ),
+        not_found("GET", leak(job.clone())),
+        route("GET", "/apis/batch/v1/jobs", list_of(vec![])),
+        route("PATCH", "/pf-1/status", echo("Preflight", "pf-1")),
+        route("POST", "/configmaps", echo("ConfigMap", "plan")),
+        route("POST", "/jobs", echo("Job", &job)),
+    ];
+    let (client, _recorder, bodies) = mock_client_recording_bodies(routes);
+    let ctx = context(client);
+    let cache = weirkeeper::check::policy::PolicyCache::new();
+    let request = json!({
+        "operation": "DestinationAccess",
+        "destinationAccess": {
+            "destinationRef": {"name": "primary"},
+            "roles": ["ArchiveWrite", "ArchiveRead", "EvidenceWrite"]
+        },
+        "timeoutSeconds": 120
+    });
+    pf::reconcile_preflight(&preflight(request), &ctx, &cache, now())
+        .await
+        .expect("the reconcile completes");
+    let bodies = bodies.lock().expect("bodies");
+    let body_of = |uri: &str| {
+        bodies
+            .iter()
+            .find(|b| b.method == "POST" && b.uri.contains(uri))
+            .unwrap_or_else(|| panic!("no POST {uri}"))
+            .body
+            .clone()
+    };
+    let plan_cm: Value = serde_json::from_str(&body_of("/configmaps")).expect("json");
+    let plan_json = plan_cm["data"]
+        .as_object()
+        .expect("data")
+        .values()
+        .find_map(|v| v.as_str().filter(|s| s.contains("\"destinationAccess\"")))
+        .expect("the check plan document");
+    let plan: Value = serde_json::from_str(plan_json).expect("plan json");
+    let access = &plan["request"]["destinationAccess"];
+    assert_eq!(access["writeProbe"], true, "{plan}");
+    assert_eq!(
+        access["evidenceWrite"],
+        json!({"credentials": "static", "secretName": EVIDENCE_SECRET}),
+        "{plan}"
+    );
+    let job_body = body_of("/jobs");
+    assert!(
+        job_body.contains("LOGWEIR_EVIDENCE_AWS_ACCESS_KEY_ID")
+            && job_body.contains(&format!("\"name\":\"{EVIDENCE_SECRET}\"")),
+        "the Job projects the evidence-write keys from their own Secret: {job_body}"
+    );
 }
 
 /// **F2(a).** An unanswered BLOCKING row holds the verdict back. The mutant is

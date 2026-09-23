@@ -1018,6 +1018,7 @@ fn a_waiting_code_belongs_to_the_check_whose_projection_it_names() {
     let projections = Projections {
         connection_secret: Some("orders-sasl".to_string()),
         destination_secret: Some("minio-keys".to_string()),
+        evidence_write_secret: Some("evidence-writer".to_string()),
         signer_secret: Some("logweir-signing-key".to_string()),
         trust_config_maps: vec!["minio-ca".to_string()],
     };
@@ -1035,6 +1036,13 @@ fn a_waiting_code_belongs_to_the_check_whose_projection_it_names() {
     );
     assert_eq!(
         check::attribute(&secret_not_found("minio-keys"), &projections),
+        Some(CheckId::DestinationCredentialProjected)
+    );
+    // A SEPARATE evidence-write grant's Secret is still the destination's
+    // credential (PREFLIGHT-EVIDENCEWRITABLE-WRONG-PRINCIPAL): a check pod that
+    // cannot start because of it names the destination row, not the pod.
+    assert_eq!(
+        check::attribute(&secret_not_found("evidence-writer"), &projections),
         Some(CheckId::DestinationCredentialProjected)
     );
     assert_eq!(
