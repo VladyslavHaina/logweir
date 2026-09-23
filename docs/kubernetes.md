@@ -1396,7 +1396,13 @@ check codes are new members of a closed vocabulary. The runner's receipt
 signature check is a runner-image change with its own migration note in
 [`stability.md`](stability.md#a-bound-points-receipt-signature-is-verified-before-any-data-moves-d3-55-step-6):
 a point-bound plan now needs the evidence keyring a controller at this version
-renders. Rolling the controller back
+renders. **Upgrade the controller and runner images together**: a runner at
+this version handed a point-bound plan by an older controller refuses it
+`PointUntrusted`, and an older runner does not know `--evidence-keys` and exits
+1 before any work. A standalone `logweir restore run` of a point-bound plan now
+needs `--evidence-keys`, and a point-bound `Restore` caught mid-upgrade (its
+approval bundle created by the older controller, its Job not yet) ends
+`ApprovalBundleConflict`: delete it and create it again. Rolling the controller back
 leaves a `catalogPointRef` Preflight answering no `recoveryPoint.state` row (an
 older controller ignores the field — the CRD prunes it once the older schema is
 re-applied); rolling the console back removes the catalog-point route and its
