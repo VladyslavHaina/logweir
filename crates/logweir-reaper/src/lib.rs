@@ -1042,6 +1042,7 @@ pub fn execute<D: Deleter, S: Sleeper, T: TombstoneSink, L: Lister>(
             continue;
         }
         let mut removed = 1i64;
+        let mut code_text_override: Option<String> = None;
         out.objects_deleted = out.objects_deleted.saturating_add(1);
 
         // 2. The segments.
@@ -1069,6 +1070,34 @@ pub fn execute<D: Deleter, S: Sleeper, T: TombstoneSink, L: Lister>(
             }
         }
 
+        // 2b. THE BUCKET, AGAIN, AFTER THE DELETES (re-check RH1). The intent
+        //     proved versioning was not Enabled when this line started; it
+        //     proves nothing about the minutes the deletes took. Versioning
+        //     switched on in between turns every later delete by key into a
+        //     marker — and the per-key HEAD cannot see it for an object stored
+        //     before (a null version answers no version id). So one more
+        //     create-only object is PUT into the same bucket, and if THAT comes
+        //     back versioned, nothing the deletes answered can be trusted: the
+        //     line is not `Deleted`. It is `Orphaned` (the manifest DELETE was
+        //     answered, so no reader that does not ask for versions sees a
+        //     usable set) with `VersionedBucket`, every planned key named as
+        //     possibly remaining, and no object counted as removed. A check
+        //     that could not be written is the same "could not tell".
+        let mut unverified: Option<String> = None;
+        match write_check(tombstones, run, line) {
+            Ok(Some(v)) if !v.is_empty() => {
+                unverified = Some(DeleteError::VersionedBucket.as_str().to_string());
+            }
+            Ok(_) => {}
+            Err(e) => unverified = Some(format!("VersionCheckRefused:{e}")),
+        }
+        if let Some(why) = unverified {
+            out.objects_deleted = out.objects_deleted.saturating_sub(removed);
+            removed = 0;
+            remaining.clone_from(&keys);
+            code_text_override = Some(why);
+        }
+
         // 3. The verdict, and the completion tombstone beside it — one per
         //    point. A completion that could not be written does not un-delete
         //    anything, so it is recorded on the point and the run reports it;
@@ -1078,7 +1107,9 @@ pub fn execute<D: Deleter, S: Sleeper, T: TombstoneSink, L: Lister>(
         } else {
             PointState::Orphaned
         };
-        let mut code_text = code.map(|c| c.as_str().to_string());
+        let mut code_text = code_text_override
+            .clone()
+            .or_else(|| code.map(|c| c.as_str().to_string()));
         for point in line_points(line) {
             if let Err(e) = write_tombstone(
                 tombstones,
@@ -1088,7 +1119,9 @@ pub fn execute<D: Deleter, S: Sleeper, T: TombstoneSink, L: Lister>(
                 "completion",
                 removed,
                 &remaining,
-                code.map(DeleteError::as_str),
+                code_text_override
+                    .as_deref()
+                    .or_else(|| code.map(DeleteError::as_str)),
             ) {
                 code_text = Some(format!("TombstoneIncomplete:{e}"));
             }
@@ -1210,6 +1243,43 @@ fn write_tombstone<T: TombstoneSink>(
         .map_err(|e| SinkError(e.to_string()))?;
     sink.put_create_only(
         &tombstone_key(&run.policy_uid, &run.run_id, point_id, stage),
+        &bytes,
+    )
+}
+
+/// The post-delete versioning check's media type (re-check RH1).
+pub const VERSIONING_CHECK_MEDIA_TYPE: &str =
+    "application/vnd.logweir.retention-versioning-check+json;version=1.0.0";
+
+/// The versioning check one line writes after its deletes — a create-only
+/// object under `logweir/`, in the same bucket, whose only job is the version
+/// id the provider answers it with.
+#[derive(Serialize)]
+struct VersioningCheck<'a> {
+    format: &'a str,
+    run_id: &'a str,
+    policy_uid: &'a str,
+    point_id: &'a str,
+    purpose: &'a str,
+}
+
+fn write_check<T: TombstoneSink>(
+    sink: &T,
+    run: &RunAttribution,
+    line: &PlanLine,
+) -> Result<Option<String>, SinkError> {
+    let doc = VersioningCheck {
+        format: VERSIONING_CHECK_MEDIA_TYPE,
+        run_id: &run.run_id,
+        policy_uid: &run.policy_uid,
+        point_id: &line.point_id,
+        purpose: "a version id on this object means bucket versioning was Enabled when the \
+                  point's deletes finished, so they may have written delete markers",
+    };
+    let bytes = logweir_core::det_json::to_deterministic_json(&doc)
+        .map_err(|e| SinkError(e.to_string()))?;
+    sink.put_create_only(
+        &tombstone_key(&run.policy_uid, &run.run_id, &line.point_id, "check"),
         &bytes,
     )
 }

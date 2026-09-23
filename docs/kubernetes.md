@@ -2102,6 +2102,26 @@ Each of `ageExpiry`, `minUsablePoints`, `activeRestoreProtection`,
 `ProviderEnforcedUnverified` or `NotEnforced`. Two of them are never
 `LogweirEnforced` on a view this build can read, and the reasons are different:
 
+* `sharedSegments` is **`NotEnforced`**, because the guarantee needs a point's
+  segment keys and the catalog view entry has no segment field at all. What
+  **is** enforced is the set half of it. Two receipts can name one backup set
+  — a runner Job re-created from its frozen inputs rewrites the same
+  `<prefix>/<backupId>/` and signs a second receipt over it — and every key a
+  plan line may remove lies under its own set's directory. So the evaluation
+  groups points that share a `backupId`, a manifest key or a segment key
+  (transitively), and a group holding any retained point — kept, protected,
+  skipped, or a row whose location the catalog could not establish — plans
+  none of its candidates: each is protected `SharedSegment`. The
+  `maxDeletionsPerRun` ceiling selects such a group whole or not at all, and
+  the plan writer refuses outright (`Evaluated=False`, no plan) a line whose
+  set a retained point still names. When EVERY receipt of a set is due, the
+  set is removed by ONE plan line that names the others in `co_point_ids`:
+  each point gets its own outcome and tombstones, and the objects are counted
+  once. What stays unseen is a manifest that names a segment under *another*
+  set's directory; the engine does not write that layout, but the guarantee as
+  worded covers it, so the value stays `NotEnforced` and the `Evaluated`
+  message says which half is in force. It becomes `LogweirEnforced` on its
+  own, with no code change, the day a view entry carries its keys.
 * `legalHold` is `ProviderEnforcedUnverified` even in `Enforce`, because
   `object_store` 0.14 exposes no WORM readback. "Legal hold respected" means
   exactly *a provider refusal is authoritative, recorded, not retried, and
@@ -2116,7 +2136,7 @@ Each of `ageExpiry`, `minUsablePoints`, `activeRestoreProtection`,
   consulted (measured on the lab MinIO by harness-rows-11's `object-lock` row).
   `object_store` 0.14 can neither delete a specific version nor read the
   marker header off the response, so the worker **refuses the combination**
-  rather than record a marker as a deletion, from two signals:
+  rather than record a marker as a deletion, from three signals:
   1. **The bucket, now.** Before any delete of a point the worker PUTs its
      create-only intent tombstone into the same bucket (under `logweir/`). A
      provider answers that PUT with a version id exactly when versioning is
@@ -2130,6 +2150,15 @@ Each of `ageExpiry`, `minUsablePoints`, `activeRestoreProtection`,
      `Kept` (or `Orphaned`, if the manifest had already gone) with
      `VersionedBucket`. This catches objects stored under Enabled versioning
      in a bucket since *Suspended*, where the tombstone PUT carries no id.
+  3. **The bucket, after the deletes.** Versioning can be switched on while
+     a point's deletes run — minutes for a large set — and every delete after
+     that is a marker the per-key HEAD cannot see (a null version answers no
+     version id). So after a point's deletes the worker PUTs one more
+     create-only check object (`logweir/retention/<policyUid>/<runId>/<pointId>.check.json`)
+     into the same bucket. If that comes back with a version id, or cannot be
+     written, the point is NOT recorded `Deleted`: it is `Orphaned` with
+     `VersionedBucket` (or `VersionCheckRefused:…`), every planned key named as
+     possibly remaining and no object counted as removed.
 
   The run exits 1, and three such runs set `EnforcementDegraded`, whose
   message names the remedy: enforce on an unversioned bucket, or declare the
@@ -2144,21 +2173,34 @@ Each of `ageExpiry`, `minUsablePoints`, `activeRestoreProtection`,
   D3 §6.5 always documented for the retention credential; without it every
   key is `Kept` with `VersionProbeRefused` and nothing is deleted.
 
-  **What is still not seen, stated so nothing claims it:**
-  * a *Suspended* bucket where a key's current version is a null version with
-    an older, Enabled-era version beneath it: neither signal fires, the delete
-    removes the null version and records the point `Deleted`, and the older
-    version remains. It needs the same key rewritten across a suspension,
-    which a backup set does not do; no hold is possible on a suspended null
-    version;
+  **`Deleted` means the CURRENT object at each key was removed — nothing more.**
+  Noncurrent versions that bucket versioning keeps are the bucket's lifecycle
+  responsibility; `object_store` 0.14 can neither list nor delete them, and
+  Logweir does not see them. **Residual, accepted and tracked (it needs a
+  version-aware store client):** a bucket whose versioning was Enabled, then
+  *Suspended*, and whose keys were then written again — and re-run backups DO
+  rewrite the same keys: a runner Job re-created from its frozen inputs writes
+  the same `<prefix>/<backupId>/` objects, which is exactly how two receipts
+  come to name one set. There the current version is a null version (no
+  version id on the HEAD, none on a PUT to a Suspended bucket), the delete
+  removes it, the point is recorded `Deleted`, and the Enabled-era version
+  beneath it survives. No hold is possible on a suspended null version, and an
+  Object Lock bucket cannot suspend versioning, so this is a false deletion
+  record, not a hold bypass. **Do not enforce on a bucket whose versioning was
+  ever enabled and later suspended** — use `mode: ExternalLifecycle` or a
+  noncurrent-version lifecycle rule — **and do not change a bucket's
+  versioning while a retention run is in flight.**
+
+  **What else is not seen, stated so nothing claims it:**
   * whether AWS answers `x-amz-version-id: null` for a PUT or HEAD of a null
     version is unmeasured — the worker counts any version id, `null`
     included, as versioned, so the unmeasured answer can only refuse more;
   * a key whose latest version is *already* a marker (for instance one written
     by an earlier build) answers the HEAD `404` and is counted gone: nothing
     live remains, but its data may survive as noncurrent versions;
-  * versioning enabled in the milliseconds between a key's HEAD and its
-    DELETE is not seen by that key (the next point's intent PUT sees it).
+  * versioning switched on and then back to *Suspended* while one point's
+    deletes run (two operator toggles inside one point): the post-delete check
+    is written after the second toggle and answers no version id.
 
 **`mode: ExternalLifecycle` is a declaration, not an enforcement.** It records
 that a bucket lifecycle rule exists so a console can stop claiming retention is
@@ -2273,7 +2315,12 @@ set** (defects OBJECT-LOCK-DELETE-MARKER and SHARED-SET-RETENTION), in order:
    degrades with `VersionedBucket`. Enforcement records from earlier builds on
    such a bucket that say `Deleted` are FALSE: the data is still there as
    noncurrent versions behind delete markers. Move the policy to an
-   unversioned bucket or to `mode: ExternalLifecycle`.
+   unversioned bucket or to `mode: ExternalLifecycle`. **Do not change a
+   bucket's versioning while a retention run is in flight, and do not enforce
+   on a bucket whose versioning was ever enabled and later suspended** (use
+   `mode: ExternalLifecycle` or a noncurrent-version lifecycle rule): re-run
+   backups rewrite the same keys, and a deletion there removes only the
+   newest copy while being recorded `Deleted` — the accepted residual above.
 3. **Plans over re-run receipts change.** The older receipt of a shared set is
    now `protected: SharedSegment` until every receipt naming the set is due
    together, and then the set is removed by ONE plan line naming every point

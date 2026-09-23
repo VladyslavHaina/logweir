@@ -139,6 +139,10 @@ struct ModelBucket {
     mode: std::cell::Cell<Mode>,
     versions: RefCell<BTreeMap<String, Vec<Ver>>>,
     next_id: std::cell::Cell<u32>,
+    /// An operator's hand: after this many more tombstone PUTs, the bucket's
+    /// versioning becomes `Enabled` (re-check RH1 — versioning switched on
+    /// while a point's deletes are in flight).
+    enable_after_sink_puts: std::cell::Cell<Option<usize>>,
 }
 
 impl ModelBucket {
@@ -147,6 +151,7 @@ impl ModelBucket {
             mode: std::cell::Cell::new(mode),
             versions: RefCell::new(BTreeMap::new()),
             next_id: std::cell::Cell::new(1),
+            enable_after_sink_puts: std::cell::Cell::new(None),
         }
     }
 
@@ -258,7 +263,16 @@ impl TombstoneSink for ModelBucket {
         if self.latest_is_data(key) {
             return Err(SinkError(format!("{key} already exists")));
         }
-        Ok(self.put(key))
+        let version = self.put(key);
+        if let Some(n) = self.enable_after_sink_puts.get() {
+            if n <= 1 {
+                self.mode.set(Mode::Enabled);
+                self.enable_after_sink_puts.set(None);
+            } else {
+                self.enable_after_sink_puts.set(Some(n - 1));
+            }
+        }
+        Ok(version)
     }
 }
 
@@ -1000,10 +1014,12 @@ fn the_intent_is_written_before_the_first_delete() {
     assert_eq!(
         sink.keys(),
         vec![
+            tombstone_key(UID, "r0123456789abcdef", "lwp1-a", "check"),
             tombstone_key(UID, "r0123456789abcdef", "lwp1-a", "completion"),
             tombstone_key(UID, "r0123456789abcdef", "lwp1-a", "intent"),
         ],
-        "both stages exist (the list is key-sorted, so `completion` sorts first)"
+        "both stages exist, and the post-delete versioning check (re-check RH1); the list \
+         is key-sorted"
     );
     for key in sink.keys() {
         assert!(
@@ -1813,4 +1829,79 @@ fn a_dry_run_names_a_versioned_manifest() {
         Some("DryRun:VersionedBucket")
     );
     assert_eq!(bucket.markers(), 0);
+}
+
+// ===========================================================================
+// Re-check RH1 — versioning switched on WHILE a point's deletes run
+// ===========================================================================
+
+/// A plain bucket; the operator enables versioning right after the point's
+/// intent tombstone is written. The intent came back unversioned, every key's
+/// HEAD answers no version id (null versions), and every DELETE is answered
+/// success — and wrote a marker. The post-delete check object comes back
+/// VERSIONED, so the point is NOT `Deleted`: `Orphaned` with
+/// `VersionedBucket`, every planned key named, nothing counted as removed.
+///
+/// MUTANT: ignore the check object's version id. The point is recorded
+/// `Deleted` with 3 objects while all three survive behind markers, and this
+/// row fails.
+#[test]
+fn versioning_enabled_during_a_points_deletes_is_not_recorded_deleted() {
+    let point = line("lwp1-a", "set-a", &["seg-0", "seg-1"]);
+    let bucket = ModelBucket::new(Mode::Unversioned);
+    bucket.put_all(&point.object_keys);
+    bucket.enable_after_sink_puts.set(Some(1));
+    let outcome = run_over(&plan(vec![point.clone()]), &bucket, &bucket);
+    assert!(outcome.deleted().is_empty(), "{:?}", outcome.points);
+    let only = &outcome.points[0];
+    assert_eq!(only.state, PointState::Orphaned.as_str());
+    assert_eq!(only.code.as_deref(), Some("VersionedBucket"));
+    assert_eq!(only.objects_deleted, 0);
+    assert_eq!(
+        outcome.objects_deleted, 0,
+        "no object is claimed as removed"
+    );
+    assert_eq!(only.remaining_keys, point.object_keys);
+    assert!(
+        point.object_keys.iter().all(|k| bucket.data_survives(k)),
+        "the model confirms the premise: every object survives behind a marker"
+    );
+    assert_eq!(bucket.markers(), 3);
+}
+
+/// NEGATIVE CONTROL: the same run on a bucket that stays plain is `Deleted`,
+/// its check object answered with no version id.
+#[test]
+fn a_bucket_that_stays_plain_during_the_deletes_is_deleted() {
+    let point = line("lwp1-a", "set-a", &["seg-0", "seg-1"]);
+    let bucket = ModelBucket::new(Mode::Unversioned);
+    bucket.put_all(&point.object_keys);
+    let outcome = run_over(&plan(vec![point.clone()]), &bucket, &bucket);
+    assert_eq!(outcome.deleted(), vec!["lwp1-a"]);
+    assert!(point.object_keys.iter().all(|k| !bucket.data_survives(k)));
+}
+
+/// A check object that could not be written is "could not tell": the point is
+/// not recorded `Deleted`.
+#[test]
+fn a_refused_versioning_check_is_not_recorded_deleted() {
+    struct RefusesTheCheck(FakeSink);
+    impl TombstoneSink for RefusesTheCheck {
+        fn put_create_only(&self, key: &str, bytes: &[u8]) -> Result<Option<String>, SinkError> {
+            if key.ends_with(".check.json") {
+                return Err(SinkError("refused".to_string()));
+            }
+            self.0.put_create_only(key, bytes)
+        }
+    }
+    let outcome = run_over(
+        &plan(vec![line("lwp1-a", "set-a", &["seg-0"])]),
+        &FakeDeleter::default(),
+        &RefusesTheCheck(FakeSink::default()),
+    );
+    assert!(outcome.deleted().is_empty());
+    assert!(outcome.points[0]
+        .code
+        .as_deref()
+        .is_some_and(|c| c.starts_with("VersionCheckRefused:")));
 }

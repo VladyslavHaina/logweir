@@ -663,14 +663,13 @@ impl Pass<'_> {
         else {
             return false;
         };
-        let codes: Vec<&str> = last
+        let codes: Vec<String> = last
             .failed
             .iter()
             .flatten()
-            .map(|f| f.code.as_str())
+            .map(|f| f.code.clone())
             .collect();
-        !codes.is_empty()
-            && codes.iter().all(|c| BUCKET_LEVEL_CODES.contains(c))
+        only_bucket_level(&codes)
             && last
                 .finished_at
                 .as_ref()
@@ -689,11 +688,18 @@ impl Pass<'_> {
             .status
             .as_ref()
             .and_then(|s| s.last_enforcement.as_ref());
-        let codes: Vec<String> = record
+        failure_detail(record.and_then(|r| r.exit_code), &self.last_failure_codes())
+    }
+
+    /// The closed per-point codes the last run left on the object.
+    fn last_failure_codes(&self) -> Vec<String> {
+        self.policy
+            .status
+            .as_ref()
+            .and_then(|s| s.last_enforcement.as_ref())
             .and_then(|r| r.failed.as_ref())
             .map(|f| f.iter().map(|d| d.code.clone()).collect())
-            .unwrap_or_default();
-        failure_detail(record.and_then(|r| r.exit_code), &codes)
+            .unwrap_or_default()
     }
 
     fn owner(&self) -> RunnerOwner {
@@ -1095,14 +1101,9 @@ impl Pass<'_> {
                  durable answer."
             ),
         };
-        let detail = failure_detail(
-            exit_code,
-            &report
-                .failed
-                .iter()
-                .map(|(_, code)| code.clone())
-                .collect::<Vec<String>>(),
-        );
+        let codes: Vec<String> = report.failed.iter().map(|(_, code)| code.clone()).collect();
+        let detail = failure_detail(exit_code, &codes);
+        let stop = scheduling_stop(&codes);
         let conditions = self.conditions(&[
             (
                 CONDITION_READY,
@@ -1127,10 +1128,9 @@ impl Pass<'_> {
                 if degraded {
                     format!(
                         "{failures} consecutive retention runs have failed and the retry budget \
-                         is spent: {detail}. No further run is scheduled until spec changes \
-                         (edit spec.enforcement, or spec.rules, and the count clears with it). \
-                         status.lastEnforcement.recordKey names the durable record of the last \
-                         run."
+                         is spent: {detail}. {stop} (edit spec.enforcement, or spec.rules, and \
+                         the count clears with it). status.lastEnforcement.recordKey names the \
+                         durable record of the last run."
                     )
                 } else {
                     format!("{failures} consecutive run failures; {detail}")
@@ -2440,8 +2440,8 @@ impl Pass<'_> {
                 enforcement: ENFORCEMENT_LOGWEIR_WORKER,
                 reason: REASON_RUN_FAILED,
                 message: format!(
-                    "{failures} consecutive runs failed; no further run is scheduled until the \
-                     spec changes"
+                    "{failures} consecutive runs failed; {}",
+                    scheduling_stop(&self.last_failure_codes()).to_lowercase()
                 ),
             };
         }
@@ -2749,11 +2749,11 @@ impl Pass<'_> {
                 if self.budget_spent() {
                     format!(
                         "{} consecutive retention runs have failed and the retry budget is \
-                         spent: {}. No further run is scheduled until spec changes. \
-                         status.lastEnforcement.recordKey names the durable record of the last \
-                         run.",
+                         spent: {}. {}. status.lastEnforcement.recordKey names the durable \
+                         record of the last run.",
                         self.budget_before(),
-                        self.last_failure_detail()
+                        self.last_failure_detail(),
+                        scheduling_stop(&self.last_failure_codes())
                     )
                 } else if self.spec_changed() {
                     "the spec changed; the consecutive-failure budget is released and \
@@ -3618,11 +3618,7 @@ fn failure_detail(exit_code: Option<i32>, codes: &[String]) -> String {
              s3:GetObject on <prefix>/*",
         );
     }
-    if !codes.is_empty()
-        && codes
-            .iter()
-            .all(|c| BUCKET_LEVEL_CODES.contains(&c.as_str()))
-    {
+    if only_bucket_level(codes) {
         remedy.push_str(
             ". This refusal is about the bucket or the credential, not the plan: once the \
              retry budget is spent, one re-probe run is started 24 h after the last run, and it \
@@ -3630,6 +3626,28 @@ fn failure_detail(exit_code: Option<i32>, codes: &[String]) -> String {
         );
     }
     format!("{exit} with {}{remedy}", named.join(", "))
+}
+
+/// Whether every per-point code of a run is about the bucket or the
+/// credential ([`BUCKET_LEVEL_CODES`]) — the one condition under which a
+/// degraded policy re-probes on its own.
+fn only_bucket_level(codes: &[String]) -> bool {
+    !codes.is_empty()
+        && codes
+            .iter()
+            .all(|c| BUCKET_LEVEL_CODES.contains(&c.as_str()))
+}
+
+/// What a spent retry budget means for scheduling, IN THE SAME WORDS the
+/// re-probe rule uses (re-check RL1): the plain D3 §6.5 stop, or the stop with
+/// its one exception when every code was bucket-level.
+fn scheduling_stop(codes: &[String]) -> &'static str {
+    if only_bucket_level(codes) {
+        "Scheduling is stopped except for one re-probe run 24 h after the last run; a spec \
+         edit resumes it at once"
+    } else {
+        "No further run is scheduled until spec changes"
+    }
 }
 
 /// One view entry, as the evaluation sees it.

@@ -572,7 +572,11 @@ fn a_complete_run_exits_zero_and_attributes_every_point() {
         "manifest first, then the segments"
     );
     let written = sink.written.borrow().clone();
-    assert_eq!(written.len(), 2, "intent and completion: {written:?}");
+    assert_eq!(
+        written.len(),
+        3,
+        "intent, the post-delete versioning check, completion: {written:?}"
+    );
     assert!(written.iter().all(|k| k.starts_with("logweir/retention/")));
     assert!(report
         .lines

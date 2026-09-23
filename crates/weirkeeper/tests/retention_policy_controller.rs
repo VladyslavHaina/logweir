@@ -5028,6 +5028,12 @@ async fn a_bucket_level_refusal_reprobes_a_day_later_without_a_spec_edit() {
             !label.contains("mixed"),
             "{label}: the condition says whether it resumes on its own: {message}"
         );
+        // …AND NEVER THE OPPOSITE IN THE SAME BREATH (re-check RL1).
+        assert_eq!(
+            message.contains("No further run is scheduled until spec changes"),
+            label.contains("mixed"),
+            "{label}: the stop sentence agrees with the re-probe rule: {message}"
+        );
     }
 }
 

@@ -511,7 +511,14 @@ consults a legal hold, so the worker refuses to delete there (code
 gets back), and without the grant it cannot tell and deletes nothing (code
 `VersionProbeRefused`). **Grant it before upgrading**; a policy that degraded
 without it re-probes 24 h after its last run, or at once on a spec edit
-(`docs/kubernetes.md` §7f, "Upgrade and rollback"). The measured minimum before that check was
+(`docs/kubernetes.md` §7f, "Upgrade and rollback"). **`Deleted` means the
+current object at each key was removed**; noncurrent versions a bucket keeps
+are its lifecycle's responsibility and Logweir cannot see them. So **do not
+enforce on a bucket whose versioning was ever enabled and later suspended**
+(re-run backups rewrite the same keys, and there a deletion removes only the
+newest copy while being recorded `Deleted`), and **do not change a bucket's
+versioning while a retention run is in flight** — use `mode: ExternalLifecycle`
+or a noncurrent-version lifecycle rule instead. The measured minimum before that check was
 `s3:ListBucket` and `s3:DeleteObject` alone. [UNVERIFIED — the grant with s3:GetObject is re-measured by U6/retention-enforcer at the next lab refresh.]
 
 **Grant `evidenceRead` its `s3:ListBucket` if you want "absent" to mean absent.**
