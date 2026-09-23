@@ -214,6 +214,19 @@ pub enum BackupError {
     /// those states one code.
     #[error("signing: {0}")]
     Signing(String),
+    /// **RECEIPT-DUP.** The execution claim could not be PROVEN exclusive —
+    /// the evidence store refused the create-only put, answered it without
+    /// enforcing it, or accepted a second create of the same key
+    /// (`phase_run::claim_execution`). **Exit 4**, GC11's "lock-proof failed,
+    /// nothing uploaded": no engine run was started, so there is no archive
+    /// and no receipt, and a store that does not honour `If-None-Match: *` is
+    /// a configuration no retry changes.
+    ///
+    /// A claim that already EXISTS is not this variant: that is an earlier run
+    /// of the same execution, and it is `Operational` (exit 1) so a schedule's
+    /// retry policy starts a new execution.
+    #[error("lock: {0}")]
+    Lock(String),
 }
 
 impl BackupError {
@@ -226,7 +239,7 @@ impl BackupError {
     pub fn exit_code(&self) -> ExitCode {
         match self {
             BackupError::Guard(_) => ExitCode::GuardRefused, // 3
-            BackupError::Signing(_) => ExitCode::SigningOrLock, // 4
+            BackupError::Signing(_) | BackupError::Lock(_) => ExitCode::SigningOrLock, // 4
             BackupError::Operational(_) | BackupError::Kafka(_) | BackupError::Engine(_) => {
                 ExitCode::Operational // 1
             }
@@ -511,6 +524,21 @@ fn execute_with_signer(
         }
     }
 
+    // **RECEIPT-DUP — ONE ENGINE RUN PER EXECUTION.** The last step before
+    // the engine, after every refusal that needs no write: claim `backup_id`
+    // with a create-only put under the evidence root and prove the claim is
+    // exclusive. A run of an execution an earlier run already claimed — a
+    // PLAT-06.1 case-e Job re-created from its frozen inputs — stops HERE,
+    // before the engine could overwrite the manifest the earlier receipt
+    // attests. See `phase_run::claim_execution`.
+    let claim_key = phase_run::claim_execution(&backup_id, run_id, requested_at, evidence)?;
+    tracing::info!(
+        run_id = %run_id,
+        backup_id = %backup_id,
+        claim_key = %claim_key,
+        "execution claimed; starting the engine"
+    );
+
     let mut obs = crate::metrics::PhaseLogger::new(run_id);
     let ran = phase_run::run(&plan, engine, store, &mut obs)?;
 
@@ -715,7 +743,10 @@ fn exiting(
         // validation and the later validate → sign → put order both precede
         // every evidence write. The archive may exist for failures discovered
         // after engine work; a signing-prerequisite error explicitly states
-        // that no engine data operation started.
+        // that no engine data operation started. `BackupError::Lock`
+        // (RECEIPT-DUP's unproven execution claim) reaches this code before
+        // the engine too, and its own message says so; the line below stays
+        // true for it, because "may exist" is not "does exist".
         ExitCode::SigningOrLock => {
             "the backup's result is unattested: no receipt was signed or uploaded, though the \
              archive may exist"

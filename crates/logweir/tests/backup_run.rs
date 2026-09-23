@@ -562,10 +562,14 @@ fn backup_run_reads_the_source_cluster_id_from_the_broker() {
     let reader = StubReader::answering("CID-FROM-BROKER");
     let engine = RecordingEngine::one_topic();
     let (store, _key, _bytes) = archive_with_one_manifest("CID-FROM-SPEC");
+    // ONE STORE PER RUN: each run claims `CID-FROM-SPEC` (RECEIPT-DUP's execution
+    // claim), so a second run over the same store is — correctly — refused
+    // as `ExecutionAlreadyClaimed` before it reaches what this row asserts.
+    let (store2, _key2, _bytes2) = archive_with_one_manifest("CID-FROM-SPEC");
 
     let outcome = execute_with(&f.args, "run-1", &reader, &engine, &store, &store).unwrap();
     assert_eq!(outcome.source_cluster_id, "CID-FROM-BROKER");
-    assert_eq!(run_with(&f.args, &reader, &engine, &store), ExitCode::Ok);
+    assert_eq!(run_with(&f.args, &reader, &engine, &store2), ExitCode::Ok);
 }
 
 /// A broker that cannot answer is an OPERATIONAL failure (exit 1) — the plan
@@ -784,12 +788,16 @@ fn an_engine_failure_is_operational_not_a_guard_refusal() {
     let reader = StubReader::answering("SOURCE-CLUSTER-00000001");
     let engine = RecordingEngine::failing();
     let (store, _k, _b) = archive_with_one_manifest("mvp-demo");
+    // ONE STORE PER RUN: each run claims `mvp-demo` (RECEIPT-DUP's execution
+    // claim), so a second run over the same store is — correctly — refused
+    // as `ExecutionAlreadyClaimed` before it reaches what this row asserts.
+    let (store2, _k2, _b2) = archive_with_one_manifest("mvp-demo");
 
     assert_eq!(
         run_with(&f.args, &reader, &engine, &store),
         ExitCode::Operational
     );
-    match execute_with(&f.args, "run-1", &reader, &engine, &store, &store).unwrap_err() {
+    match execute_with(&f.args, "run-1", &reader, &engine, &store2, &store2).unwrap_err() {
         BackupError::Engine(_) => {}
         other => panic!("expected BackupError::Engine (exit 1), got {other:?}"),
     }
@@ -805,12 +813,16 @@ fn a_missing_backup_set_after_a_clean_exit_is_operational() {
     let reader = StubReader::answering("SOURCE-CLUSTER-00000001");
     let engine = RecordingEngine::one_topic();
     let store = empty_archive();
+    // ONE STORE PER RUN: each run claims `mvp-demo` (RECEIPT-DUP's execution
+    // claim), so a second run over the same store is — correctly — refused
+    // as `ExecutionAlreadyClaimed` before it reaches what this row asserts.
+    let store2 = empty_archive();
 
     assert_eq!(
         run_with(&f.args, &reader, &engine, &store),
         ExitCode::Operational
     );
-    let err = execute_with(&f.args, "run-1", &reader, &engine, &store, &store).unwrap_err();
+    let err = execute_with(&f.args, "run-1", &reader, &engine, &store2, &store2).unwrap_err();
     let msg = err.to_string();
     assert!(msg.contains("holds no backup set `mvp-demo`"), "{msg}");
 }
@@ -840,8 +852,9 @@ fn verify_receipt(dir: &Path, doc: &[u8], sidecar: &[u8], public_pem: &Path) -> 
 
 /// **The acceptance for I6's evidence half, and for Global Constraint 6.**
 ///
-/// One `run_with` against the in-memory store puts EXACTLY TWO objects under
-/// `logweir/backups/<backup_id>/`, both create-only, and the pair verifies
+/// One `run_with` against the in-memory store puts EXACTLY THREE objects under
+/// `logweir/backups/<backup_id>/`, all create-only — the execution claim
+/// (RECEIPT-DUP) and the receipt pair — and the pair verifies
 /// under the receipt's own payload type — signature AND all five invariants,
 /// which is what `--payload-type backup-receipt` checks since Task 5b.
 ///
@@ -859,17 +872,22 @@ fn backup_run_writes_a_signed_receipt() {
     assert_eq!(outcome.receipt_key, receipt_key);
     assert_eq!(outcome.sidecar_key, sidecar_key);
 
-    // EXACTLY TWO objects under this run's evidence prefix, and they are the
-    // two the outcome names. The archive fixture's own manifest lives at
-    // `logweir/mvp-demo/…`, outside this prefix, so the count is about the
-    // receipt and nothing else.
+    // EXACTLY THREE objects under this run's evidence prefix: the two the
+    // outcome names, and the execution claim every run takes before its
+    // engine starts (RECEIPT-DUP) — the one execution-scoped key there. The
+    // archive fixture's own manifest lives at `logweir/mvp-demo/…`, outside
+    // this prefix, so the count is about the evidence and nothing else.
     let mut written = store.list_keys("logweir/backups/mvp-demo/").unwrap();
     written.sort();
     assert_eq!(
         written,
-        vec![receipt_key.clone(), sidecar_key.clone()],
-        "one run writes exactly the receipt and its detached sidecar, under `logweir/` \
-         (Global Constraint 6)"
+        vec![
+            logweir::backup::phase_run::claim_key("mvp-demo"),
+            receipt_key.clone(),
+            sidecar_key.clone()
+        ],
+        "one run writes exactly its execution claim, the receipt and its detached sidecar, \
+         under `logweir/` (Global Constraint 6)"
     );
 
     // CREATE-ONLY. A second put of the same key is REFUSED, never overwritten,
