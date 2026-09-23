@@ -95,6 +95,15 @@ async fn run(config: logweir_api::config::Config, preflight: logweir_api::Prefli
             return ExitCode::FAILURE;
         }
     };
+    // What the provider's TLS certificate is verified against (chart gap G1),
+    // read before the preflight is consumed: how many private anchors the
+    // bundle added, and whether the system roots are consulted too.
+    let (oidc_extra_roots, oidc_system_roots) = preflight.shared.as_ref().map_or((0, true), |s| {
+        (
+            s.tls_trust.extra_root_count(),
+            s.tls_trust.uses_system_roots(),
+        )
+    });
     let state = match logweir_api::state_from_parts(&config, preflight, client) {
         Ok(state) => state,
         Err(reason) => {
@@ -118,6 +127,8 @@ async fn run(config: logweir_api::config::Config, preflight: logweir_api::Prefli
         role_bindings = config.shared().map_or(0, |s| s.roles.bindings.len()),
         binding_revision = config.shared().map_or("", |s| s.roles.revision.as_str()),
         issuer = config.shared().map_or("", |s| s.oidc.issuer.as_str()),
+        oidc_extra_roots,
+        oidc_system_roots,
         // PLAT-19.2 readiness (D0: "API and controller consume the same content
         // hash and expose it"): the controller logs the same digest at start.
         approval_policy_digest = %state.approval().policies.digest(),

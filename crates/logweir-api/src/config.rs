@@ -116,6 +116,10 @@ struct OidcFile {
     token_auth_method: Option<String>,
     #[serde(default)]
     insecure_loopback_issuer: Option<bool>,
+    #[serde(default)]
+    ca_bundle_file: Option<PathBuf>,
+    #[serde(default)]
+    system_roots: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -215,6 +219,16 @@ pub struct OidcConfig {
     /// Whether a plain-HTTP loopback issuer is permitted. For a local mock
     /// provider in development and tests; refused for any non-loopback host.
     pub insecure_loopback_issuer: bool,
+    /// A PEM bundle of ADDITIONAL trust anchors for the provider's TLS
+    /// certificate — a private CA that issued the issuer's certificate. Read
+    /// before any socket exists (`crate::preflight`); an unreadable file, a
+    /// file with no certificate and a file carrying anything but certificates
+    /// are all refusals, never an empty addition.
+    pub ca_bundle_file: Option<PathBuf>,
+    /// Whether the operating system's trust store is consulted as well.
+    /// `true` unless the administrator says otherwise; `false` requires
+    /// `ca_bundle_file`, because a client with no trust anchor trusts nothing.
+    pub system_roots: bool,
 }
 
 /// The validated role-binding table.
@@ -1111,6 +1125,21 @@ fn parse_oidc(base: &Path, file: OidcFile) -> Result<OidcConfig, ConfigError> {
         }
     };
 
+    // THE PROVIDER'S TLS TRUST (chart gap G1). A private issuer CA is ADDED to
+    // the system roots by default; dropping the system roots is an explicit
+    // second decision, and it is refused without a bundle to put in their
+    // place — a client with no trust anchor would refuse every provider and
+    // look like an outage. The bundle is only a PATH here: it is read, and
+    // every refusal about its CONTENT made, in `crate::preflight`.
+    let system_roots = file.system_roots.unwrap_or(true);
+    if !system_roots && file.ca_bundle_file.is_none() {
+        return Err(field(
+            "oidc.systemRoots",
+            "`false` requires `oidc.caBundleFile`: without the system roots and without a \
+             bundle the console would trust no certificate at all",
+        ));
+    }
+
     Ok(OidcConfig {
         issuer,
         client_id: file.client_id,
@@ -1121,6 +1150,8 @@ fn parse_oidc(base: &Path, file: OidcFile) -> Result<OidcConfig, ConfigError> {
         display_name_claim,
         token_auth_method,
         insecure_loopback_issuer,
+        ca_bundle_file: file.ca_bundle_file.map(|p| resolve(base, &p)),
+        system_roots,
     })
 }
 

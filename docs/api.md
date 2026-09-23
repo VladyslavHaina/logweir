@@ -1315,6 +1315,8 @@ oidc:
   groupsClaim: groups                              # the EXACT claim name
   displayNameClaim: name                           # presentation only
   tokenAuthMethod: clientSecretBasic               # or clientSecretPost
+  caBundleFile: /var/run/logweir/oidc-ca/ca.crt    # OPTIONAL: a private issuer CA, ADDED to the system roots
+  systemRoots: true                                # false: trust caBundleFile alone
 roles:
   revision: "2026-09-16.1"                         # recorded in every audit line
   bindings:
@@ -1353,6 +1355,23 @@ sidecar uses, say — and never a wildcard, which the field does not support.
 `/healthz` and `/readyz` are exempt from the allowlist regardless, because a
 kubelet addresses the Pod by IP; neither reads a header, a cookie or a body.
 
+**A private CA for the issuer (`caBundleFile`, `systemRoots`).** An issuer
+whose certificate a private CA issued — a Dex behind an ingress with an
+internal certificate, an IdP on a corporate PKI — is trusted by naming a PEM
+bundle of that CA's **public** certificates. Its certificates are trust anchors
+*in addition to* the operating system's; `systemRoots: false` drops the system
+roots and is refused without a bundle. The bundle widens who may issue the
+provider's certificate and nothing else: the chain, its validity and the host
+name in the URL are verified exactly as for a public CA, and `iss` is still
+compared for exact equality with `issuer`. The bundle is read before the socket
+binds; a file that cannot be read, holds no certificate, holds a malformed
+block or holds anything but `CERTIFICATE` blocks (a private key mounted by
+mistake) is exit 2. The chart mounts it from a ConfigMap or Secret
+(`api.console.oidc.caBundle`, [charts/logweir/README.md](../charts/logweir/README.md)).
+While the provider has not initialised, the console logs why at `warn` with the
+transport cause — `invalid peer certificate: UnknownIssuer` is a missing
+bundle, a name that does not resolve is a missing `hostAliases` entry.
+
 A key file is two lines:
 
 ```console
@@ -1376,6 +1395,8 @@ does not come up at all, because the first two look like they are working.
 | an `allowedAlgorithms` entry is not `RS256` or `ES256` | `none` cannot be on the list, so an `alg: none` token has no matching entry |
 | `oidc.issuer` ends in `/`, or carries a query, fragment or userinfo | the issuer is compared for exact equality with the token's `iss` |
 | a plain-HTTP issuer without `oidc.insecureLoopbackIssuer` | and that flag is accepted only for a loopback host, for a local mock provider in development |
+| `oidc.systemRoots: false` without `oidc.caBundleFile` | a client with no trust anchor trusts no provider at all |
+| `oidc.caBundleFile` cannot be read, holds no `CERTIFICATE` block, a malformed one, or any other section | a bundle that adds nothing is never what naming one means, and a private key there is a secret in the wrong place |
 | a role binding names a role that is not one of the four | |
 | a role binding names a namespace outside `namespaces` | |
 | a role binding has neither `groups` nor `subjects` | |

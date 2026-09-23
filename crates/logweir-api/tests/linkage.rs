@@ -662,10 +662,13 @@ fn the_manifest_pins_the_one_new_dependency() {
     // lockfile, and `THIRD_PARTY_NOTICES.md` must already name it.
     let lock = std::fs::read_to_string(workspace_root().join("Cargo.lock")).unwrap();
     let notices = std::fs::read_to_string(workspace_root().join("THIRD_PARTY_NOTICES.md")).unwrap();
-    for name in ["hyper", "hyper-util"] {
+    // CHART GAP G1 added `rustls-native-certs` on the same terms: the loader
+    // `hyper-rustls` already called, declared so `auth::oidc::TlsTrust` can put
+    // a private CA BESIDE the system roots.
+    for name in ["hyper", "hyper-util", "rustls-native-certs"] {
         assert!(
             entries.iter().any(|l| l.starts_with(&format!("{name} ="))),
-            "{name} is declared for the transport limits"
+            "{name} is declared (the transport limits; the OIDC trust store)"
         );
         assert!(
             lock.contains(&format!("name = \"{name}\"")),
