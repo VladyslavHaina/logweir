@@ -27,8 +27,9 @@ resulting scorecard. It requires Docker, Rust, `just`, OpenSSL, `awk`, and
 Python with `cryptography`. Output goes to the ignored `.demo/mvp/` directory.
 The generated demo keys prove integrity but have no independent provenance.
 
-[Quickstart](docs/quickstart.md) covers prerequisites, the scratch-cluster
-drill demo, and running against your own archive.
+[Quickstart](docs/quickstart.md) starts with the one supported setup-and-recovery
+path on Kubernetes, then covers the scratch-cluster drill demo and running
+against your own archive.
 [Verification](docs/verify-a-scorecard.md) explains what the signed result proves.
 
 ## Install
@@ -127,7 +128,7 @@ vulnerability report.
 
 [SECURITY.md](SECURITY.md) carries the same four beside what **is** in scope.
 
-**Release notes list the `ui/` bundle by digest.** The page runs with the
+**[Release notes](docs/release-notes.md) list the `ui/` bundle by digest.** The page runs with the
 viewer's authority, so what is in the bundle matters: there is no telemetry in
 it, nothing in it is fetched from anywhere else, and its contents are listed by
 digest in the release notes so that the bytes a browser executed can be
@@ -140,9 +141,10 @@ package and fixture READMEs stay beside the files they describe.
 
 | Task | Guide |
 |---|---|
+| Set up, back up, restore and recover — the one supported path | [Quickstart, *The supported path*](docs/quickstart.md) |
 | Install with manifests or local images | [Installation](docs/install.md) |
 | Install or configure Helm | [Chart guide](charts/logweir/README.md) |
-| Run a backup, restore, or drill | [Quickstart](docs/quickstart.md) |
+| Run the demos, a drill, or the standalone CLI | [Quickstart, *Demos and the standalone CLI*](docs/quickstart.md) |
 | Operate controllers, jobs, approvals and retention | [Kubernetes](docs/kubernetes.md) |
 | Use or develop the static UI | [UI guide](ui/README.md) |
 | Use the bounded product API (`logweir-api`) | [Product API](docs/api.md) |
@@ -153,7 +155,8 @@ package and fixture READMEs stay beside the files they describe.
 | Understand architecture and decisions | [Architecture](docs/architecture.md) |
 | Check compatibility and limitations | [Stability](docs/stability.md), [engine support](docs/support-matrix.md) |
 | Build, test and contribute | [Contributing](CONTRIBUTING.md), [gate reference](docs/gates.md) |
-| Assess release readiness | [Release checklist](docs/tag1-checklist.md) |
+| Read what changed and what an upgrade requires | [Release notes](docs/release-notes.md) |
+| Assess release readiness | [Release checklist](docs/tag1-checklist.md), [release handoff](docs/release-handoff.md) |
 | Report security issues | [Security policy](SECURITY.md) |
 | Find project governance and attribution | [Maintainers](MAINTAINERS.md), [trademarks](TRADEMARKS.md), [third-party notices](THIRD_PARTY_NOTICES.md) |
 

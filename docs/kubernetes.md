@@ -1,8 +1,9 @@
 # Running Logweir on Kubernetes
 
 Operational reference for the CLI CronJob and the `weirkeeper` controller.
-Start with [install.md](install.md) for deployment or [quickstart.md](quickstart.md)
-for demos. The [CronJob example](../examples/cronjob-drill.yaml) schedules the CLI.
+A new operator starts at [quickstart.md](quickstart.md), *The supported path*,
+which walks install to disaster restore and links here for each detail;
+[install.md](install.md) is the deployment reference. The [CronJob example](../examples/cronjob-drill.yaml) schedules the CLI.
 Numbered sections remain stable for existing source and documentation references.
 Historical test results below describe the named environment and date, not a
 new validation of this checkout.
@@ -154,8 +155,9 @@ its missing-file limitation. No alert rules ship with the repository.
 
 ## 6. Runtime boundaries
 
-The repository includes the CLI, `weirkeeper`, six CRDs and an optional Helm
-UI deployment. The CLI runs the engine as a local subprocess inside its runner
+The repository includes the CLI, `weirkeeper`, the fourteen CRDs of §7, the
+optional product API and console (`logweir-api`, [api.md](api.md)) and an
+optional Helm UI deployment. The CLI runs the engine as a local subprocess inside its runner
 pod; the operator creates that Job. A scratch restore uses a marker topic and
 cluster allowlist, not namespace labels, to guard the target.
 
@@ -291,7 +293,9 @@ signature did not verify never reaches it. (`outcome`, `integrity` and
 the badge is what says whether to trust them.) A field the document does not
 carry is omitted rather than written as zero. `recordsRestored` is
 the count consumed back from the target **in the sampled window**, not the
-restore's total record count.
+restore's total record count — the console labels it *records verified in the
+sampled window*, and the count that matched byte for byte is
+`recordsSampledMatching` (*records sampled and matching*).
 
 **Absent-field behaviour for the additive fields.** `Backup.spec.destinationRef`,
 `BackupSchedule.spec.destinationRef`, `Restore.spec.sourceDestinationRef` and
@@ -423,14 +427,14 @@ controller with `DestinationRoleNotConfigured`, naming the rule, because that
 spelling is an attempt at a cross-namespace reference and "Secret not found"
 would send you looking for the wrong thing.
 
-**How legible that kubelet answer is depends on a wiring that is not in this
-build.** The friendly code — `CredentialSecretNotFound`, naming the Secret and
-the key — comes from the check framework's pod-waiting classification, which
-reaches the `Backup` and `Restore` controllers only with the execution wiring
-§7b describes. Until then an absent Secret surfaces as a pod that never starts
-and a Job that ends at its `activeDeadlineSeconds`. The pre-flight answer that
-*does* work today is a `Preflight` with `operation: DestinationAccess`, which
-runs a pod in the object's own namespace and reports what the kubelet said.
+**How that kubelet answer reaches you.** The friendly code —
+`CredentialSecretNotFound`, naming the Secret and the key — comes from the
+pod-waiting classification. On a run it is `status.progress.diagnostics[]` and
+the `RunnerReady` condition (§10, *`RunnerReady`, and the four states a run can
+reach with no exit code*), and a run whose pod never started ends with that
+reason rather than `NoExitCode`. Before any run, a `Preflight` with
+`operation: DestinationAccess` runs a pod in the object's own namespace and
+reports what the kubelet said.
 
 #### The object-storage permission each grant actually needs, measured
 
@@ -562,8 +566,7 @@ below), and that HEAD is a `GetObject`.
 
 **One note about that row, and which principal it was measured on.** *A
 `RetentionPolicy` in `Enforce` is the one thing Logweir does that cannot be
-undone* — this file carries two `### 7f.` headings, and that is the one meant
-here — says the tombstones and the record are written with the destination's
+undone* (§7f) — says the tombstones and the record are written with the destination's
 own `evidenceWrite` grant, and that this is what makes a deletion attributable
 by a principal that cannot delete. When the `retention enforcer` row above was
 measured the reconciler did not do that: it resolved the destination under
@@ -596,14 +599,18 @@ naming a `destinationRef` resolves it for `archiveWrite` before anything is
 created, freezes the resolution into its execution inputs (§10's `destination`
 block) and renders the environment below into its runner Job from that FROZEN
 block; a `Restore` naming `sourceDestinationRef` and `evidenceDestinationRef`
-resolves both and checks the approved plan against them (§7d). A schedule
+resolves both and checks the approved plan against them (§7b.1). A schedule
 propagates its `destinationRef` to the `Backup`s it creates.
 
-What is NOT in this build is listed in §7e: a destination carrying a
+What is NOT in this build is listed in §7b.3: a destination carrying a
 `transport.caBundle` for a Backup or Restore is refused, not ignored. A
 `SecretKeys`, `WorkloadIdentity` or `ArchiveReadGrant` `evidenceRead` IS read,
-by an evidence-fetch check Job (§7e). The frozen destination now DOES reach `Backup.status.destination`;
+by an evidence-fetch check Job (§7b.3). The frozen destination now DOES reach `Backup.status.destination`;
 §10 says what it holds and §21.8 what the `Preflight` does with it.
+
+(The three subsections that follow were numbered `7d`, `7f` and `7e` until
+PLAT-20.2, which collided with §7d, §7e and §7f further down. They are
+§7b.1–§7b.3 now; every other section keeps its number.)
 
 The controller's own environment reaches no destination-backed runner Job. That
 is not a convention — it is the defect the design closes. The legacy inline path
@@ -656,7 +663,7 @@ digest. Editing a destination afterwards — rotating a credential, rotating a C
 cannot change a run that already exists, and a destination deleted and recreated
 under the same name is a different input.
 
-### 7d. What a destination-backed `Restore` is checked against
+### 7b.1 What a destination-backed `Restore` is checked against
 
 A `Restore` names TWO destinations and they are set together or neither is: it
 reads its archive under the source destination's `archiveRead` and writes its
@@ -703,7 +710,7 @@ Both destinations' CA bundles are copied into the run's own immutable plan
 `ConfigMap` would mean a root rotated mid-run changes what an approved run
 trusts. `restore.yaml` is still `spec.planBytes` verbatim.
 
-### 7f. A destination edited after the freeze changes nothing for a running run
+### 7b.2 A destination edited after the freeze changes nothing for a running run
 
 Every edit to a `BackupDestination` bumps its `metadata.generation`, and the
 frozen block records the generation it resolved. A pass that RE-CREATES a
@@ -719,7 +726,7 @@ is frozen yet and the destination is resolved; present means the plan is the
 answer. The topic selection has had the same readback since D1 W5, for the
 same reason.
 
-### 7e. What destination-backed execution does not do in this build
+### 7b.3 What destination-backed execution does not do in this build
 
 - **A destination declaring `spec.transport.caBundle` is REFUSED for `Backup`
   and `Restore`** with `CaBundleUnsupportedByEngine`. Whether the pinned engine
@@ -824,40 +831,39 @@ same reason.
   a Job under that SA), but the chart's `identity.authorizedRunnerNamespaces`
   machinery governs the DEFAULT runner SA and not this override. **W11/W14 to
   confirm and record in `docs/install.md` §4.**
-- **`status.records` is still never written**, so the `RECORDS` printer column
-  is blank. The count is in the signed receipt; the observation this branch
-  makes carries the window and the digest and not the document. PLAT-14.1
-  (D3 W2) widens the observation. Note for after that merge: a
-  destination-backed run whose `evidenceRead` is not `ControllerIdentity`
-  observes nothing at all, so `RECORDS` stays blank for it either way.
-- **A destination-backed `BackupSchedule` gets no retention report.** The
-  controller's one global archive handle is for objects without a
-  `destinationRef` (§9); a report computed through it would describe another
+- **`status.records` is written only from a verified receipt** (§10,
+  *`status.records` and `status.capture` come from the verified receipt*), so
+  the `RECORDS` printer column is blank until the controller — or the
+  evidence-fetch Job relaying the receipt — has reached a `Valid` verdict over
+  it. A run whose verdict is `NotAttempted` keeps a blank column, which is the
+  honest answer rather than a zero.
+- **A destination-backed `BackupSchedule` gets no evaluated retention
+  report.** The controller's one global archive handle is for objects without
+  a `destinationRef`; a report computed through it would describe another
   bucket's catalogue while printing `aws s3 rm` commands naming keys in this
-  one. A schedule whose `archive.url` bucket differs from the handle's gets the
-  same answer, and one INFO line names both buckets.
+  one. Such a schedule's `status.retentionReport` carries only a `note` saying
+  so, with every list empty, and a legacy schedule whose archive is not the
+  handle's gets the same shape with its own note — §9, *A schedule on another
+  bucket is now told so*. A `RetentionPolicy` (§7f) is the per-destination
+  answer.
 
 ### 7c. A `TopicDiscovery` is one observation, and `unknown` is its honest default
 
-**PARTLY IN THIS BUILD.** The reconciler described here exists and is tested: it
-resolves the connection, renders the plan, creates the check Job, stores the
-chunks and writes the status. The runner's `logweir check run` subcommand, which
-prints the frames it reads, is a separate change that has landed since. Against a
-runner image without it a discovery ends `Failed` with
+**In this build, end to end.** The reconciler resolves the connection, renders
+the plan, creates the check Job, stores the chunks and writes the status, and
+the runner's `logweir check run` prints the frames it reads. PLAT-09.1 is Done
+on live docker-desktop runs (D2 W14 and lab-refresh-3: a 5,003-topic inventory
+in three chunks, an empty cluster, an ACL-limited principal). Against a runner
+image older than `check run` a discovery ends `Failed` with
 `RunnerContractUnsupported` or `ResultUnreadable`; nothing is stored and nothing
-is claimed. **No end-to-end run against a real broker has been performed for this
-section**, and nothing here is live evidence.
+is claimed.
 
-**And `attestedComplete` is unreachable in this build.** The attestation route
-below is implemented and tested, but the controller only reads an installation
-policy when `LOGWEIR_POLICY_CONFIGMAP` — or `LOGWEIR_INSTALLATION_NAMESPACE`, for
-the default `weirkeeper-policy` name — is set on the `weirkeeper` Deployment, and
-**neither variable is set anywhere in `config/` or in the chart today**. Until
-the chart renders `weirkeeper-policy` and those variables (W11), every check runs
-under the built-in defaults: no attestations, so every honest observation is
-`unknown` or `limited`, and the concurrency ceilings and `freshSeconds` are the
-compiled-in numbers rather than an administrator's. Writing the `ConfigMap` by
-hand does not help while the variables are unset.
+**`attestedComplete` needs an administrator's attestation, and nothing else can
+produce it.** The controller reads the installation policy through
+`LOGWEIR_POLICY_CONFIGMAP` or `LOGWEIR_INSTALLATION_NAMESPACE`; the chart and
+`logweir.yaml` both set them (§22.2), and the chart renders `weirkeeper-policy`
+itself. With no attestation in that document every honest observation is
+`unknown` or `limited`. [UNVERIFIED — an attestation matching a live broker has not been run on docker-desktop; the matching rules are unit-tested only.]
 
 A `TopicDiscovery` is a **request**, not a cache. `spec.request` is immutable, so
 one object is one observation with one recorded instant, and refreshing means
@@ -1319,12 +1325,16 @@ line's required fields are the receipt-derived facts, and there is no honest
 value for any of them when the record is `Missing` or `Unreadable`; the counts
 carry the fact and a row of zeroes would carry a fiction.
 
-**`Deleted` and `Partial` are in the table and this build cannot produce
-either.** `Deleted` needs D3 §6's retention tombstones and `Partial` needs
-segment sampling, and neither exists; they are listed because they are the
-vocabulary a reader of a page must be able to interpret, not because a sync can
-report one today. An operator waiting for a `Deleted` row is waiting for
-something that cannot arrive.
+**`Deleted` and `Partial` are in the table and this build's sync produces
+neither.** `Partial` needs segment sampling, which does not exist. `Deleted`
+needs the sync to read the retention tombstones §7f's worker writes under
+`logweir/retention/`, and the sync does not read them yet: a point a
+`RetentionPolicy` removed reads `Missing` (its manifest is deleted first, by
+design), and the retention record is where its removal is attested. Both values
+are listed because they are the vocabulary a reader of a page must be able to
+interpret. Do not confuse this availability word with the retention worker's
+own per-point outcome `Deleted` in `status.lastEnforcement` — that one is a
+fact about one run, and on a versioned bucket it has a narrower meaning (§7f).
 
 **`deepCheck: SegmentSample` is admitted and not implemented.** A plan naming it
 is honoured as `ManifestDigest` and the check result says so
@@ -2017,12 +2027,13 @@ object storage**, which outlives the Job, the pod, the controller and the policy
 codes so that the common question is answered without following any of them.
 **Do not use a Job census to decide whether a run happened**; use the record.
 
-**This controller does not function live until the retention ServiceAccount
-exists.** Every Job it builds requests `logweir-retention`, and the chart does
-not create it yet (`retention.enabled` and the SA are the wave-4 RBAC worker's).
-An `Enforce` policy before that lands produces a Job whose pods the API server
-will not admit — correctly fail-closed, and a merge-ordering constraint rather
-than something to discover at the live acceptance.
+**Enforcement needs the retention ServiceAccount in the policy's namespace.**
+Every Job this controller builds requests `logweir-retention`. The chart renders
+it when `retention.enabled` is true, in the release namespace and every
+`identity.authorizedRunnerNamespaces` entry; on the low-level path apply
+`config/rbac/retention-serviceaccount.yaml` ([install.md](install.md) step 4).
+Without it an `Enforce` policy produces a Job whose pod the API server will not
+admit — fail-closed, and nothing is deleted.
 
 The controller never reads either Secret — `config/rbac/role.yaml` grants it no
 verb on `secrets` at all — and never inherits them: the reaper builds its handle
@@ -2099,6 +2110,13 @@ front of them:
   run is removed**, without having been in the approved bytes. That is the
   honest cost of the bound, and it is what `spec.enforcement.planMaxAgeSeconds`
   is for.
+
+**`status.enforcement` says what is actually happening**, which is not always
+what `spec.mode` asked for: `RecommendationOnly` (nothing is deleted — every
+`Report` policy, and an `Enforce` policy that cannot run, for example
+`EvidenceGrantUnusable` above), `LogweirWorker` (the isolated worker deletes
+under this policy) or `ExternalLifecycleDeclared` (the bucket's own rule does).
+The console keys its retention sentence on this field and never on the mode.
 
 **`status.guarantees` says who is enforcing what, and never flatters anyone.**
 Each of `ageExpiry`, `minUsablePoints`, `activeRestoreProtection`,
@@ -2282,11 +2300,10 @@ names a candidate's set. That is deliberately wider than the design asks, and it
 is fail-closed: a run refused for a restore it would not have touched costs one
 cadence slot, and the other way costs the set.
 
-The one that does **not** exist yet is the restore-side half: `Restore`
-admission and rehearsal point selection are supposed to hold with reason
-`PointRetentionInProgress` while a matching `status.lease` exists.
-`controllers/restore.rs` is another worker's file and the arm is a recorded
-hand-off. So the residual window is a `Restore` **created after** the
+The restore-side half is only partly there. Rehearsal point selection holds
+with reason `PointRetentionInProgress` while a matching `status.lease` exists
+(§7g's table); `Restore` admission does **not** consult the lease in this build.
+So the residual window is a `Restore` **created after** the
 controller's consistent list and before the run's first delete. It is narrow; it
 is real; and until the admission arm lands, an operator planning a large restore
 during a retention window should suspend the policy (`mode: Report`) rather than
@@ -3179,7 +3196,12 @@ is not the v1 approval's — and an older runner refuses the two new flags befor
 dispatch: both fail closed. Nothing deletes public key material in either
 direction, and v1 documents and archives are untouched.
 
-## 9. Schedules and retention: Logweir deletes nothing
+## 9. Schedules, and a schedule's retention report (which deletes nothing)
+
+A schedule's `spec.retention` only ever **reports**. The one component that can
+delete archive objects is a `RetentionPolicy` in `mode: Enforce`, run by a
+separately linked worker under its own credential and an administrator's
+approved plan — §7f is that boundary, and nothing in this section changes it.
 
 ### A schedule's name has a 32-character budget
 
@@ -3235,16 +3257,13 @@ PLAT-06.1 freezes the resolved settings into an immutable ConfigMap before any
 Job exists — so an edit reaches the next admission and **cannot** move a run
 that is already going, its inputs or its Job.
 
-One operator-facing consequence, because it is reachable by an edit and was not
-before. Retention evaluates the **current** `archive.url`, so after a move the
-old destination's sets stop being reported; and the open defect
-**RET-WRONGBUCKET** (`docs/to-do/platform-improvements.md`, PLAT-16.1 — the
-controller lists manifests through its single global store while rendering
-removal commands for the schedule's own URL) is now reachable by editing a
-schedule's destination, not only by creating a schedule on another bucket. The
-wrong-bucket report can therefore appear **between** runs; it can never appear
-mid-run, because the run that is going froze its destination before the edit
-landed. PLAT-16.1 owns the fix.
+One operator-facing consequence, because it is reachable by an edit. The
+schedule's retention report evaluates the **current** `archive.url`, so after a
+move the old destination's sets stop being reported. The wrong-bucket report
+this edit used to be able to produce (defect **RET-WRONGBUCKET**) is closed
+since PLAT-16.1: a schedule whose archive is not the controller's handle now
+gets a `note` and empty lists instead (*A schedule on another bucket is now
+told so*, below).
 
 Re-pointing a schedule at a different `KafkaCluster` is refused:
 
@@ -3419,9 +3438,9 @@ section used to carry is gone with the ownerReference that made it necessary.
 
 ### What retained history costs, and how to prune it
 
-Nothing here is deleted by Logweir — see *Retention **reports***, below, and
-the explicit rules under it. Retaining history is therefore an etcd cost you
-choose:
+No `Backup`, plan ConfigMap or Job is deleted by Logweir — see *A schedule's
+retention report reports*, below, and the explicit rules under it. Retaining
+history is therefore an etcd cost you choose:
 
 Per retained run: the `Backup` CR is roughly 4–6 KiB (spec, status with three
 or four conditions and evidence, managedFields), the plan ConfigMap roughly
@@ -3812,7 +3831,7 @@ default, and `kubectl explain backupschedule.status.lastMissedSlot` states the
 one-hour horizon it reproduces, so both are discoverable from the cluster and
 not only from this page.
 
-### Retention **reports**. It never deletes
+### A schedule's retention report reports. It never deletes
 
 `spec.retention{keepLast, keepDays}` is evaluated by the controller on every
 reconcile against the manifests it lists, and the result goes into
@@ -3827,8 +3846,10 @@ kubectl --context docker-desktop get backupschedule nightly \
 ```
 
 **Logweir prints them. An operator runs them.** Nothing in the report was
-deleted, and **no Logweir component in tag 1 holds any delete capability
-against object storage** — the controller's archive handle is built with the
+deleted, nothing that computes it can delete, and **no Logweir component in
+tag 1 holds any delete capability against object storage** (since Amendment H
+the one exception is §7f's separately linked worker — the version-scoped form
+below) — the controller's archive handle is built with the
 read-only constructor, which refuses every write before it checks anything
 else, and guard **G-RET** (`scripts/check-no-archive-write.sh`, in `just
 lint`) fails the build if a source file in the control plane names the
@@ -3933,28 +3954,21 @@ block therefore means *no evaluation has happened*; an empty
 `setsThatWouldBeRemoved` means *the evaluation found nothing to remove*, and
 they are different answers.
 
-#### And the report is withheld when it would be about another bucket
+**Which locations count as the handle's, exactly.** The comparison is on the
+bucket **and** the prefix after normalisation, so `s3://b/p` and `s3://b/p/` are
+one location and `s3://b/p` and `s3://b/pp` are two
+(`retention_plan::legacy_report_applies`). An earlier revision of this section
+said a different prefix in the same bucket still reported and a mismatch was an
+omitted report with an INFO line; neither is what this build does — the
+mismatch gets the `note` above, and the controller logs it at `WARN`.
 
-That one handle is the controller's, built from `LOGWEIR_ARCHIVE_URL`. A
-schedule's `archive.url` is the schedule's. On an installation where those name
-**different buckets**, listing through the handle while rendering `aws s3 rm`
-commands for the schedule's own URL produces a report about bucket A printed as
-though it described bucket B — with commands naming keys in B that were listed in
-A. An operator who runs them deletes the wrong objects, or nothing; either way
-the report was never about their catalogue.
-
-So the report is evaluated only when the schedule's bucket equals the handle's.
-Otherwise it is omitted and one INFO line names both buckets. A different
-**prefix** in the same bucket still reports, because the listing is prefix-scoped
-by the report itself; a different bucket cannot be.
-
-**A destination-backed schedule gets no retention report at all** through this
-path, even at the same bucket: the global handle's credential is not the
-destination's, and a report produced with the wrong principal under-reports
-whatever that principal cannot list. The per-destination replacement is the
-archive-inventory check kind, which is not in this build. An absent
-`retentionReport` on a destination-backed schedule is therefore the documented
-behaviour and not a failure.
+**A destination-backed schedule gets a note too, never an evaluation**, even
+at the same bucket: the global handle's credential is not the destination's,
+and a report produced with the wrong principal under-reports whatever that
+principal cannot list. Its `status.retentionReport.note` says the schedule
+writes to a saved `BackupDestination` and that a `RetentionPolicy` reports
+retention there; every list is empty. That is the documented behaviour and not a
+failure.
 
 ## 10. The exit-code contract, as the `Backup` reconciler makes it visible
 
@@ -4279,11 +4293,12 @@ never proof. `limited` requires an observed authorization failure.
 `attestedComplete` requires an administrator attestation in the installation
 policy ConfigMap naming the namespace, the `KafkaCluster`, the principal and the
 observed cluster id, and not expired — a blank principal or cluster id fails
-closed. **Today no chart renders that policy reference, so
-`attestedComplete` is unreachable and `coverage: AllUserTopicsAttested` is
-never written.** The two reachable labels are `VisibleUserTopicsOnly` (with
-`incompleteDiscovery: BackUpVisibleTopics`) and, for a named allowlist,
-`NamedTopics`.
+closed. The chart and `logweir.yaml` wire the policy reference (§22.2), so
+`coverage: AllUserTopicsAttested` is written exactly when such an attestation
+matches; without one the two labels a run can earn are `VisibleUserTopicsOnly`
+(with `incompleteDiscovery: BackUpVisibleTopics`) and, for a named allowlist,
+`NamedTopics`. (Earlier revisions said no chart rendered the reference; that
+stopped being true with D2 W11.)
 
 **What the frozen plan records.** `topics` is the exact list handed to
 `backup.yaml`; `selection.discovery` is its provenance — `observedAt`,
@@ -5026,12 +5041,12 @@ floor. The case this lever is for is a cluster where an external controller
 (external-secrets, a vault injector) materialises a Secret a few minutes behind
 the Job, where an otherwise healthy run would be cancelled at the default.
 
-> **Both of these are environment variables on the controller Deployment, and
-> neither is a Helm value yet.** D3 §9 assigns `controller.failFastSeconds` and
-> `controller.jobTtlSeconds` to the chart worker (W13) and they are **not** in
-> `charts/logweir/values.yaml` today. Until they land, set
-> `LOGWEIR_FAIL_FAST_SECONDS` and `LOGWEIR_JOB_TTL_SECONDS` directly on the
-> controller Deployment — there is no other supported lever.
+> **Both are controller environment variables, and the chart sets them.**
+> `controller.failFastSeconds` and `controller.jobTtlSeconds` in
+> `charts/logweir/values.yaml` render `LOGWEIR_FAIL_FAST_SECONDS` and
+> `LOGWEIR_JOB_TTL_SECONDS` on the `weirkeeper` Deployment when they are not
+> empty ([chart reference](../charts/logweir/README.md)); on the low-level path
+> set the variables on the Deployment directly.
 
 ### Diagnostics are derived from Events, which are best effort
 
@@ -5238,8 +5253,10 @@ TTL at creation time:
 
 The Job template pins the SHA-256 of the plan and every approval-bundle member,
 including `allowed-clusters.json`, plus the Restore and Approval identities.
-New Jobs also pass `--execution-contract-version 1`, matching
-`LOGWEIR_EXECUTION_CONTRACT_VERSION=1` in the immutable pod template. The
+New Jobs also pass `--execution-contract-version 2`, matching
+`LOGWEIR_EXECUTION_CONTRACT_VERSION=2` in the immutable pod template (v1 is
+accepted only for already-created legacy Restores — `docs/stability.md`,
+*Execution contract v2*). The
 runner captures the projected bytes once, checks every digest, verifies the
 approval signature and plan hash, and only then constructs Kafka, archive or
 engine clients. A current runner rejects a missing, partial or mismatched
@@ -5310,13 +5327,15 @@ object. It is exactly the failure the `Backup` archive sentinel was designed to
 avoid, and the enum cannot be given the same treatment — a sentinel needs a
 field to hide in, and this is the field.
 
-**In this build the hazard is latent and nothing triggers it.** No component
-creates such an `Approval`: the rehearsal controller does not exist, and this
-build's `Approval` reconciler refuses a `RehearsalSchedule` subject visibly with
-`ReferentHasNoPlanBytes` rather than verifying it. So an operator who applies
-these CRDs and rolls the controller back is unaffected.
+**The hazard is live once anyone has minted a standing authorization.** The
+rehearsal controller exists (§7g) and an operator creates such an `Approval` by
+hand from `logweir drill approve --standing`. An installation that never created
+one can apply these CRDs and roll the controller back unaffected; one that did
+must follow the order below. (An earlier revision of this section said no
+component created one and the rehearsal controller did not exist; that stopped
+being true with PLAT-14.3.)
 
-**The rule for the rehearsal worker, and the rollback order:**
+**The rollback order:**
 
 1. Do **not** create an `Approval` with `subjectRef.kind: RehearsalSchedule`
    until every controller image you might roll back to already understands the
@@ -5373,9 +5392,9 @@ the only thing that tells them apart is the runner's `refusal-reason=` line.
 (plan erratum **E4**): the line is the last line of the runner's *stdout*, but
 a pod log is stdout and stderr merged in nondeterministic order, and the pod
 log API has no stream selector — so the position is not a rule in either
-direction. This reconciler scans the final eight non-empty lines and matches by
-key name, exactly as the `Backup` path does and through the same shared
-function. **A log body with no such line at exit 3 yields
+direction. This reconciler scans the final sixteen non-empty lines
+(`KEY_SCAN_TAIL_LINES`, §10) and matches by key name, exactly as the `Backup`
+path does and through the same shared function. **A log body with no such line at exit 3 yields
 `GuardRefusedUnknownReason`, never a guess at which guard fired.**
 
 Interface **I8**'s three evidence keys are read the same way, by name:
@@ -5493,11 +5512,13 @@ error messages saying “docs/kubernetes.md install step 1” refer to that guid
 keypair, roster and Secret preparation. See §16, Serving the UI, for the local
 proxy and its authority.
 
-`logweir-operator` grants ordinary `update` on BackupSchedules. CEL in the CRD,
-not RBAC, restricts mutation to `spec.suspend`. The controller has reads on the
-six kinds, status patches, Backup creation **and one `patch` on Backups**, Job
-create/read/patch, Pod and `pods/log` reads, and ConfigMap create/get. It has no
-Secret read, pod exec, pod attach or delete permission, and **no `update` on
+`logweir-operator` grants `update` and `patch` on BackupSchedules. CEL in the
+CRD, not RBAC, decides what may change: since PLAT-05.1 every field except
+`spec.sourceRef` (§7, §9). The controller reads all fourteen kinds, patches
+their status, creates Backups and Restores **and holds one `patch` on
+Backups**, Job create/read/patch, Pod and `pods/log` reads, ConfigMap
+create/get, and `delete` on exactly two transient kinds (§22.1). It has no
+Secret read, pod exec or pod attach permission, and **no `update` on
 anything**: every status write, the `Forbid` slot reservation included, is a
 merge `PATCH` whose body carries `metadata.resourceVersion` as the
 compare-and-set precondition (§10's three RBAC notes). Inspect
@@ -5655,11 +5676,14 @@ See [keys.md](keys.md) for key identity and attestation.
 **different principal** from the runner's `logweir-s3` (spec §9; Global
 Constraint 6 already contemplates "a separate bucket and a separate
 principal"). It needs `s3:GetObject` on the evidence prefix and nothing else.
-It cannot write or delete in any bucket, and — because retention only reports
-(guard **G-RET**) — **no Logweir component has any delete capability against
-object storage in tag 1.**
+It cannot write or delete in any bucket, and — because a schedule's retention
+only reports (guard **G-RET**) — **neither the controller nor any component it
+links holds a delete capability against object storage.** The one component
+that can delete archive objects is the separately linked `logweir-retention`
+worker of a `RetentionPolicy` in `mode: Enforce`, under its own credential
+(§7f, ADR 0008 Amendment H); an installation that never enforces has none.
 
-That sentence is about **object storage**, and it is unchanged. The controller
+That sentence is about **object storage**. The controller
 does now hold a Kubernetes `delete` verb, on exactly two resources:
 `topicdiscoveries` and `preflights`, the transient check requests, so their
 retention windows can be enforced (§22.3). It is a different subject and a
@@ -5759,7 +5783,7 @@ green badge names a retired key.
 | `Invalid` | the DOCUMENT: the digest did not match, or no key verified the sidecar |
 | `NotAttempted` | the CONTROLLER: no evidence credential, an unreadable object, no trust material, or a namespace two policies contest |
 | `Untrusted` | the SIGNER: the bytes are authentic and the key that made them is one this installation will not accept |
-| `Pending` | NOTHING YET: an evidence-fetch check Job is reading the document with the destination's `evidenceRead` grant, or is waiting for a slot (§7e). Never green, and replaced by one of the four above |
+| `Pending` | NOTHING YET: an evidence-fetch check Job is reading the document with the destination's `evidenceRead` grant, or is waiting for a slot (§7b.3). Never green, and replaced by one of the four above |
 
 `Untrusted` is deliberately not `Invalid`. Telling an operator their archive is
 corrupt when their key was revoked sends them to re-run a backup instead of to
@@ -6184,8 +6208,10 @@ refuses anything else before the request is built. `trustrosters` is deliberatel
 absent: it is cluster-scoped, it carries the public key material every approval
 check reads, and a namespace tenant that could write one could widen its own
 allowlist. The page also has exactly one update beyond `create`: a JSON-merge
-patch over a `BackupSchedule` touching `spec.suspend` and nothing else, which is
-the one field that CRD's own `x-kubernetes-validations` rule leaves mutable.
+patch over a `BackupSchedule` touching `spec.suspend` and nothing else. (The
+CRD itself leaves every field but `spec.sourceRef` mutable since PLAT-05.1;
+the page's other schedule edits are the console's `PUT` below, which a merge
+patch against the API server cannot replace.)
 
 Those are the page's limits, not the cluster's. The API server's limits are
 whatever the kubeconfig that started the proxy carries, which is the subject of
@@ -6523,8 +6549,12 @@ identical in `ui/README.md`, in this document and in the `ui` recipe of the
 ## 17. Approving a restore out of band
 
 A `Restore` does not run because it exists. It runs when an `Approval` naming it
-carries a signature by a key the cluster-scoped `TrustRoster` lists, over the
-exact bytes of that restore's plan. Nothing in this product can produce that
+carries a signature by a key the namespace's resolved trust lists — its
+`TrustPolicy`, or `TrustRoster/default` when no policy governs it (§8, *Trust
+resolution*) — over the exact bytes of that restore's plan. This section is the
+`legacy-governed-v1` flow; a namespace bound to an approval policy uses the
+console's confirmation and, under `Governed`, `logweir drill countersign`
+instead (§8, *Approval policy*). Nothing in this product can produce that
 signature: `weirkeeper` holds no approver key, and the UI holds no key of any
 kind. The approver signs on their own machine, and this section is that flow as
 an operator performs it.
@@ -6607,8 +6637,8 @@ from the referent's own bytes regardless (checks 7 and 9).
 
 **5. The controller decides.** It recomputes the plan hash from the referent's
 own bytes, resolves the signing key id out of the signature (the **matched** key
-id, never the first one listed), checks that id against
-`TrustRoster.spec.approverKeys[]`, compares the `payloadType` in full, and
+id, never the first one listed), checks that id against the approver keys of
+the namespace's resolved trust (§8), compares the `payloadType` in full, and
 compares the subject *kind* inside the signed bytes with the referent's actual
 kind -- so a restore's approval can never authorise anything else. Only then does
 `Approval.status.verified` become `true`, the `Restore`'s next reconcile passes,
@@ -6634,6 +6664,14 @@ The digest is the `keyId` the roster carries and the `matchedKeyId` the
 controller records.
 
 ### Editing the roster
+
+**Prefer a `TrustPolicy`.** `TrustRoster` is deprecated, and its `spec` is
+sealed by CEL (§7, *The immutability seals*): a changed roster cannot be
+applied over the old one, only created in its place, and every approval check
+is interrupted while `TrustRoster/default` is absent. Key rotation with an
+overlap is a `TrustPolicy` edit ([keys.md](keys.md), *The supported
+procedure*). What follows is the roster's shape, for a namespace no policy
+governs.
 
 `TrustRoster` is cluster-scoped and admin-only, so the keys page renders this and
 does not submit it (the plural is absent from the page's writable set, and
@@ -6665,8 +6703,12 @@ spec:
 ```
 
 ```bash
-kubectl --context docker-desktop apply -f roster.yml
+kubectl --context docker-desktop create -f roster.yml
 ```
+
+`create`, not `apply`: on a cluster that already has `TrustRoster/default` the
+API server refuses a changed spec, and replacing it means deleting it first
+([install.md](install.md), *The cluster-scoped `TrustRoster`*).
 
 `signingKeys[]` carries key **material**, not ids: `verify_evidence` resolves a
 runner's signing key from the roster and has nothing to verify against without
@@ -6738,7 +6780,9 @@ loaded tags with `Never`. Runner pull policy reaches Jobs through
 
 The optional UI uses its own ServiceAccount, not the viewer's kubeconfig.
 Anyone who can reach its Service acts with that account's authority. The
-proxy restricts paths to `/ui/` and the Logweir API; the chart has no Ingress.
+proxy restricts paths to `/ui/` and the Logweir API; the chart renders no
+Ingress for it (the console's `shared` mode is the one component that may have
+one — [install.md](install.md) §5e).
 The chart reference documents bindings and the port-forward command. For the
 laptop proxy's distinct authority, see §16, Serving the UI.
 
@@ -7530,8 +7574,9 @@ optional admission rule that narrows a grant RBAC cannot narrow.
 
 ### 22.1 The roles, and the one verb that changed
 
-`logweir.yaml` and the chart ship **five** ClusterRoles, all of them unbound
-except the controller's.
+`logweir.yaml` and the chart ship **six** ClusterRoles, all of them unbound
+except the controller's ([install.md](install.md) step 5 binds the five human
+ones).
 
 | Role | What it is for |
 |---|---|
@@ -7540,6 +7585,7 @@ except the controller's.
 | `logweir-operator` | `create` on the operational kinds; `update`/`patch` on `backupschedules`; `create`/`patch` on `backupdestinations`, `topicdiscoveries` and `preflights`. |
 | `logweir-approver` | `create` on `approvals`, `get`/`list` on `preflights`, nothing else. |
 | `logweir-trust-admin` | Cluster-scoped read and write on `trustpolicies`. The only holder of a write verb on the kind. |
+| `logweir-retention-admin` | Namespaced write on `retentionpolicies` — the only holder of one, because moving a policy to `Enforce` is what makes an installation delete archive objects (§7f). No `delete`. |
 
 The console API's own principal is not in that list: the chart renders it under
 `api.enabled` (`<release>-api`, `<release>-api-trustpolicies` and
@@ -7602,9 +7648,10 @@ Everything else is unchanged and is asserted to be:
   still goes by the API server's TTL controller, and plan and result
   `ConfigMap`s still go by owner cascade — which is why collecting a check
   leaves nothing behind.
-* **No delete capability against object storage**, at all, anywhere (§15.1).
-  That is a different subject, guarded by a different gate, and this change did
-  not touch it.
+* **No delete capability against object storage** in the controller or in
+  anything it links (§15.1). The only archive deleter is a `RetentionPolicy`'s
+  enforcement worker, under its own credential (§7f). That is a different
+  subject, guarded by a different gate, and this change did not touch it.
 
 ### 22.2 `weirkeeper-policy`: the one administrator-owned document
 
@@ -7798,16 +7845,14 @@ security opinion:** `admissionregistration.k8s.io/v1`
 `ValidatingAdmissionPolicy` is Kubernetes 1.30+ and Logweir's floor is 1.29,
 where the document is rejected with `no matches for kind`.
 
-**It is INERT in this build, and that is not a defect — it is the order the
-work lands in.** The chart ships no `logweir-api` ServiceAccount and no console
-`create secrets` grant: `console.*` is D0 stage 7 and has not landed. So the
-subject list names a principal that does not exist yet, and the policy fences
-nothing until it does. Enable it anyway if you like — it costs one object and
-becomes load-bearing the moment the console arrives — but do not read an
-enabled policy as evidence that a grant is fenced today. When `console.*` does
-land, its ServiceAccount name must match
-`admissionPolicy.consoleServiceAccountName`, or the fence keeps pointing at the
-wrong subject.
+**It fences the console the chart renders.** Since D0 stage 7 the chart
+renders the console's ServiceAccount, `<release>-api` (`logweir-api` for a
+release named `logweir`), under `api.enabled`, with its `create
+secrets` grant, and refuses to render an admission policy whose
+`admissionPolicy.consoleServiceAccountName` is not that account — a name that
+fenced nobody would install, look enabled and bound nothing. (Earlier revisions
+of this section called the policy inert because the console had not landed;
+that is no longer the case.)
 
 **A `create`-only fence assumes there is nothing else to fence.** The policy
 matches `CREATE`, because `create` is the only verb on `secrets` any Logweir

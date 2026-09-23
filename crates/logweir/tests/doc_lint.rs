@@ -1540,6 +1540,151 @@ fn stability_lists_the_deferred_items() {
     }
 }
 
+// ------------------------------------------------------------ release notes
+
+/// The `#### N.` item sections of one release entry, in file order: each is
+/// `(N, body)`, where the body runs to the next `#### ` or `### ` heading.
+fn release_note_items(notes: &str) -> Vec<(u32, String)> {
+    let mut items: Vec<(u32, String)> = Vec::new();
+    let mut current: Option<(u32, String)> = None;
+    for line in notes.lines() {
+        if line.starts_with("#### ") || line.starts_with("### ") || line.starts_with("## ") {
+            if let Some(done) = current.take() {
+                items.push(done);
+            }
+            if let Some(rest) = line.strip_prefix("#### ") {
+                let number = rest
+                    .split_once('.')
+                    .and_then(|(n, _)| n.trim().parse::<u32>().ok())
+                    .unwrap_or_else(|| {
+                        panic!("a `#### ` heading in docs/release-notes.md is not numbered: {line}")
+                    });
+                current = Some((number, String::new()));
+                continue;
+            }
+        }
+        if let Some((_, body)) = current.as_mut() {
+            body.push_str(line);
+            body.push('\n');
+        }
+    }
+    if let Some(done) = current.take() {
+        items.push(done);
+    }
+    items
+}
+
+/// **The release notes exist, the checklist's release-notes row points at
+/// them, and they carry every operator action PLAT-20.2 collected.**
+///
+/// `docs/tag1-checklist.md` row 9 ("release notes describe limitations …")
+/// had no release notes to point at, and README.md promised a `ui/` bundle
+/// "listed by digest in the release notes" that no file listed. The ten
+/// operator-facing changes were collected from merged changes on 2026-09-23.
+///
+/// EACH ITEM IS CHECKED INSIDE ITS OWN SECTION. A token searched over the
+/// whole file also matches the *Required operator actions* summary and the
+/// *Verification scope* section, so deleting a whole item could stay green
+/// (review M1: items 1, 4, 6 and 10 were deletable). The notes are split on
+/// their `#### N.` headings, there must be exactly ten numbered 1 to 10 in
+/// order, and each item's token must be in that item's own body, together
+/// with the three things every item owes: a scope and a rollback.
+///
+/// NEGATIVE CONTROLS (fix round, 2026-09-23): deleting each of the ten
+/// `#### N.` sections in turn fails this test ten times out of ten; so does
+/// pointing row 9 back at `docs/stability.md` alone, and dropping one of the
+/// six required upgrade actions.
+#[test]
+fn the_release_notes_carry_every_owed_operator_action() {
+    let notes = read("docs/release-notes.md");
+    let checklist = read("docs/tag1-checklist.md");
+
+    let row9 = checklist
+        .lines()
+        .find(|l| l.starts_with("| 9 |"))
+        .expect("the release checklist carries row 9");
+    assert!(
+        row9.contains("`docs/release-notes.md`"),
+        "release checklist row 9 must name `docs/release-notes.md` as its evidence \
+         source; it reads: {row9}"
+    );
+
+    // Only the newest entry's items are the owed ten: the first `## ` entry.
+    let entry = notes
+        .split_once("\n## ")
+        .map(|(_, rest)| rest)
+        .expect("docs/release-notes.md carries at least one `## ` release entry");
+    let entry = entry.split("\n## ").next().unwrap_or(entry);
+    let items = release_note_items(entry);
+    let numbers: Vec<u32> = items.iter().map(|(n, _)| *n).collect();
+    assert_eq!(
+        numbers,
+        (1..=10).collect::<Vec<u32>>(),
+        "the release entry must carry exactly ten operator-facing changes, `#### 1.` to \
+         `#### 10.` in order; found {numbers:?}"
+    );
+
+    for ((number, body), (item, token)) in items.iter().zip([
+        ("the retention delete grant", "s3:GetObject"),
+        ("versioned buckets", "VersionedBucket"),
+        ("shared backup sets", "co_point_ids"),
+        ("operation states", "NoExitCode"),
+        ("point-bound restores", "--evidence-keys"),
+        ("the shared console's scope", "controller.watchNamespaces"),
+        ("the approval policy floor", "allowOrdinaryConfirmation"),
+        ("restore completion", "recordsRestored"),
+        ("pre-creation slots", "metadata.creationTimestamp"),
+        ("the API trust state", "RecordedBeforeRevocation"),
+    ]) {
+        assert!(
+            body.contains(token),
+            "docs/release-notes.md item {number} ({item}) no longer carries `{token}` in \
+             its own section"
+        );
+        for owed in ["**Scope:**", "**Rollback:**"] {
+            assert!(
+                body.contains(owed),
+                "docs/release-notes.md item {number} ({item}) has no `{owed}` paragraph"
+            );
+        }
+    }
+
+    // The six required actions, numbered, in the section that orders them.
+    let actions = entry
+        .split_once("### Required operator actions")
+        .and_then(|(_, rest)| rest.split("\n### ").next())
+        .expect("docs/release-notes.md carries `### Required operator actions`");
+    let steps: Vec<u32> = actions
+        .lines()
+        .filter_map(|l| l.split_once(". ").and_then(|(n, _)| n.parse::<u32>().ok()))
+        .collect();
+    assert_eq!(
+        steps,
+        (1..=6).collect::<Vec<u32>>(),
+        "*Required operator actions* must keep its six numbered steps, in order"
+    );
+
+    // The UI bundle digest listing README.md promises, with the gate's own
+    // selection of shipped files.
+    assert!(
+        notes.contains("find ui -type f ! -name '*.md' ! -path 'ui/tests/*'"),
+        "docs/release-notes.md must give the command that lists the shipped ui/ files \
+         by digest — README.md says the release notes carry that list"
+    );
+    for heading in [
+        "### Required operator actions",
+        "### Verification scope",
+        "### Retention authority",
+        "### Migration and rollback",
+        "### Limitations and open items",
+    ] {
+        assert!(
+            notes.contains(heading),
+            "docs/release-notes.md is missing its `{heading}` section"
+        );
+    }
+}
+
 // -------------------------------------------------------------- trademarks
 
 /// **`TRADEMARKS.md` states the clearance act and the announcement gate.**

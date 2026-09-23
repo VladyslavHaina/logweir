@@ -48,10 +48,11 @@ candidate digest before promotion; the compatible reviewed digest must be
 pinned in chart defaults before a release is supported.
 
 The public ConfigMap is a publication record, not authorization. Its
-`trust-reference` points at the current verifier's actual location,
+`trust-reference` names the legacy roster location,
 `TrustRoster/default.spec.signingKeys`; a cluster administrator decides whether
-to add it. A public key arriving beside an archive is never trusted merely by
-proximity.
+to add the key there or, where a `TrustPolicy` governs the namespace, as a key
+with usage `EvidenceSigning` on that policy (below). A public key arriving
+beside an archive is never trusted merely by proximity.
 
 ## Generating a fixture or externally managed keypair
 
@@ -168,30 +169,17 @@ public key merely because the new signer works.
 
 ## Rotation with a `TrustPolicy`, and old archives still verifying
 
-> **NOT YET IN EFFECT. Read this before acting on anything below it.**
->
-> `TrustPolicy` is served, validated by the API server and reconciled: you can
-> create one, the controller parses every key, resolves it against the clock
-> and reports `status.keys[].effectiveState`, and `kubectl get trustpolicy`
-> renders it. **Nothing consults it for a verification or an approval yet.**
-> `Approval` admission and evidence verification both still read
-> `TrustRoster/default` and nothing else.
->
-> The practical consequence, stated plainly because it is the one that bites:
-> **a revocation you record on a `TrustPolicy` today is not applied.** Set a key
-> to `state: Revoked, revocationReason: KeyCompromise` and the policy will show
-> `effectiveState: Revoked` while governed approvals signed by that key are
-> still accepted, because the code that admits them has never read the policy.
-> **To withdraw a key today, remove it from `TrustRoster/default`'s
-> `approverKeys` / `signingKeys`** — that is still the only enforcement point.
->
-> The consumer is PLAT-19.1's verification worker, which replaces `load_roster`
-> in `weirkeeper::controllers::approval` and the roster read in
-> `weirkeeper::verification`. Until it lands, treat everything below as the
-> contract those two will implement — accurate about the shapes, and not yet
-> about the enforcement. `docs/stability.md`'s rule applies: a documented
-> guarantee the code does not deliver is a defect, so this notice is part of
-> the document and stays until the wiring does.
+> **IN EFFECT since PLAT-19.1 (D3 W10).** `Approval` admission, evidence
+> verification, the catalog view, the restore preflight and every governed
+> restore bundle resolve the namespace's trust through its `TrustPolicy`
+> (falling back to `TrustRoster/default` only where no policy governs), so **a
+> key retired or revoked on a policy is withdrawn**: a fresh approval refuses
+> it, a fresh verification refuses it, and an object that already finished has
+> its verdict re-derived when the policy changes
+> ([kubernetes.md](kubernetes.md) §8, *Trust resolution*, and §15.2b). An
+> earlier revision of this notice said the policy was not consulted yet; that
+> stopped being true when PLAT-19.1 landed, and it is recorded here because
+> older copies of this page are still in circulation.
 
 `TrustPolicy` (cluster-scoped, PLAT-19.1) is what makes a rotation an overlap
 instead of a replacement. A key on it carries a lifecycle — `notBefore`,
@@ -266,8 +254,10 @@ policy is not a trusted one.
    `retiredAt: <now>`.
 4. **Old archives keep verifying.** A retired key's evidence verifies with
    `trust.basis: Historical`, which is not a downgrade of `Current`: it is the
-   honest answer for a key that was valid when it signed. The badge carries
-   "verified against retired key `<id>` (signed before retirement)".
+   honest answer for a key that was valid when it signed. The badge reads
+   "verified by weirkeeper at `<verifiedAt>` against key `<id>` (signed before
+   that key was retired)" — the console's `HISTORICAL_SUFFIX`, and
+   `kubernetes.md` §15.2's wording.
 
 Nothing in step 3 invalidates anything. The rule the controller applies is one
 pure function of the key's declared history and the document's own claimed
@@ -340,9 +330,8 @@ A key declares what it may do, **exactly one** of the three uses below, enforced
 by the API server (CEL rule G8) because `usages` is immutable once written and
 `spec.keys` is append-only — a key that both attests and authorises could never
 be narrowed afterwards. A key presented for the wrong use is refused with
-`KeyUsageMismatch` **once the verification worker lands** (see the notice at the
-top of this section); on the roster path the overlap is still only *labelled*,
-as `selfAttestedRisk`.
+`KeyUsageMismatch` wherever a `TrustPolicy` governs; on the roster path the
+overlap is still only *labelled*, as `selfAttestedRisk`.
 
 | usage | who holds it | what it may do |
 |---|---|---|

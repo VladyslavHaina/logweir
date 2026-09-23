@@ -1,12 +1,272 @@
 # Quickstart
 
-**Installing Logweir onto a Kubernetes cluster is a different document: [install.md](install.md).**
-This one is the CLI and the local stack.
+This page is **the one supported setup-and-recovery guide**. A new operator
+follows [*The supported path*](#the-supported-path-install-to-disaster-restore)
+from top to bottom: install, a saved connection and destination, a schedule, the
+first backup, a restore of a chosen point, verification, and a disaster restore
+from a connected archive. Each step names who decides it and links to the
+reference that owns the detail; this page does not restate those references.
 
-Choose the product backup/restore demo, the scratch-drill demo, or a drill
-against your own archive. The laptop Kubernetes walkthrough follows those CLI
-paths. To interpret evidence someone gives you, use
-[verify-a-scorecard.md](verify-a-scorecard.md).
+The CLI and the local stack come after it, as
+[*Demos and the standalone CLI*](#demos-and-the-standalone-cli): the product
+backup/restore demo, the scratch-drill demo, a drill against your own archive
+and the laptop Kubernetes walkthrough. To interpret evidence someone gives you,
+use [verify-a-scorecard.md](verify-a-scorecard.md). What changed since the last
+release, and what an upgrade requires, is [release-notes.md](release-notes.md).
+
+---
+
+## The supported path: install to disaster restore
+
+**What this path is.** The Helm chart with its managed installation identity,
+the `weirkeeper` controller, the product console (`logweir-api`, in `localAdmin`
+or `shared` mode), and saved `KafkaCluster` connections and `BackupDestination`s.
+The static page behind `kubectl proxy` is a supported **legacy** view of the same
+objects, but the destination, discovery, readiness, catalog and schedule-policy
+steps below are console-only ([kubernetes.md](kubernetes.md) §16). Each step
+is a shipped task with its own docker-desktop evidence; what has not been run —
+this page as one walk on a fresh install, among others — is named in the last
+section.
+
+**The PoC install profile is this path, made concrete.**
+[deploy/poc/](../deploy/poc/README.md) installs it end to end with Helm and the
+published `sha-` images: an ingress controller, a cert-manager local CA for real TLS,
+Dex for sign-in with one user per console role, the shared console, a scoped
+controller, an approval-policy binding and a demo Kafka and MinIO to back up —
+ordered commands, a check per step, first sign-in per role, the first backup
+and restore, upgrade from the previous tag and uninstall. Use it for a proof of
+concept; the steps below are the same path for any installation.
+
+### Who decides what
+
+| Decision | Who | Where it is made |
+|---|---|---|
+| Install, upgrade, CRDs, controller scope | cluster administrator | Helm values ([install.md](install.md)) |
+| Whose keys may approve and attest, per namespace | `logweir-trust-admin` (a `TrustPolicy`), or a cluster administrator (the legacy `TrustRoster/default`) | [keys.md](keys.md); never a namespace operator |
+| How a namespace's restores are approved: `legacy-governed-v1`, `Ordinary` or `Governed` | installation administrator | `approvalPolicy.*` values, one rollout ([install.md](install.md) §5f); never a namespace object |
+| Approving one restore | an approver who is not the requester | `logweir drill approve` / `logweir drill countersign`, on their own machine |
+| Connections, destinations, schedules, backups, restore requests | `logweir-operator` (console role Operator) | the console |
+| Whether archive objects are ever deleted | `logweir-retention-admin`, plus an administrator's approval of each plan digest | a `RetentionPolicy` ([kubernetes.md](kubernetes.md) §7f); the default deletes nothing |
+
+Bind the operator, approver, trust-admin and retention-admin roles to
+**different** people ([install.md](install.md) §5): one person holding two of
+them can approve their own restore, or enforce a deletion plan they wrote.
+
+### 1. Install
+
+1. Check the floors: Kubernetes 1.29+, amd64-capable nodes for runner Jobs, and
+   engine 0.21.0 ([install.md](install.md), top; [support-matrix.md](support-matrix.md)).
+2. Choose images: the published digests of the exact CI run you deploy, not
+   `latest` ([install.md](install.md), *Choose an image and installation path*).
+3. Install with Helm and the managed identity — path (c) — declaring every
+   namespace where backups and restores will run in
+   `identity.authorizedRunnerNamespaces` (those namespaces must exist first).
+   Add `retention.enabled=true` only if you will ever enforce retention.
+4. Back up the installation identity at once ([install.md](install.md),
+   *Back up and recover the installation identity*). Losing it loses the
+   ability to sign; losing its public half loses the ability to verify old
+   archives.
+
+**Check:** the controller Deployment is ready, and
+`logweir-signing-trust` carries a `key-id` ([install.md](install.md) §1).
+
+### 2. Trust, keys and approval policy
+
+1. Generate the approver's key pair on the approver's machine; its private half
+   never enters the cluster ([install.md](install.md) §1).
+2. Establish trust: the smallest first step is `TrustRoster/default` with the
+   approver key and the installation's signing key from `logweir-signing-trust`
+   ([install.md](install.md) §2). A `TrustPolicy` is the current mechanism —
+   retirement, revocation and overlap rotation — and `logweir trust
+   migrate-roster` writes one from the roster ([keys.md](keys.md)).
+3. Decide each namespace's approval policy. Doing nothing leaves every namespace
+   on `legacy-governed-v1`: an out-of-band signed approval per restore.
+   `Ordinary` (the console's own confirmation) needs the **shared** console;
+   `Governed` needs a change ticket and an independent approver
+   ([install.md](install.md) §5f; [kubernetes.md](kubernetes.md) §8, *Approval
+   policy*).
+
+**Check:** `kubectl --context <ctx> get trustroster default` (or `get
+trustpolicy`) reports its keys loaded.
+
+### 3. Roles and the console
+
+1. Bind the human roles ([install.md](install.md) §5): viewer, operator,
+   approver and retention-admin with a `RoleBinding` per namespace, and
+   `logweir-trust-admin` once, with a `ClusterRoleBinding` (it is
+   cluster-scoped).
+2. Turn the console on ([install.md](install.md) §5e). `localAdmin` is one
+   administrator reached by `kubectl port-forward` — for a lab or break-glass;
+   `shared` is the SSO console, needs `controller.watchNamespaces`, an OIDC
+   client and a TLS Ingress, and is the only mode that can serve `Ordinary`
+   confirmation.
+3. If the cluster is 1.30+, fence the console's `create secrets` with the
+   admission policy ([install.md](install.md) §5b).
+
+**Check:** the console loads and `GET /api/v1/session` lists your namespaces.
+
+### 4. A saved connection
+
+Create the Kafka credential Secret with `kubectl`, then the connection in the
+console's cluster page, naming that Secret — the console never shows or reads a
+credential value. For a private CA set `auth.tls` and `auth.tlsCa` once; both of
+the runner's TLS clients use it ([kubernetes.md](kubernetes.md) §20).
+
+**Check:** *Test connection* creates a `SourceConnection` readiness check and
+shows each row's state, code and remedy ([kubernetes.md](kubernetes.md) §21.0).
+A `ready` connection check authorises nothing by itself.
+
+### 5. A saved destination
+
+Create a `BackupDestination` on the console's *Destinations* page with separate
+grants per role — `archiveWrite`, `archiveRead`, `evidenceWrite`, `evidenceRead`
+— scoped exactly as the measured table says ([install.md](install.md) §3.11).
+**Give it an `evidenceRead` grant**: without one, every run's verification is
+`NotAttempted` and no badge can turn green. No role is ever granted
+`s3:DeleteObject`.
+
+**Check:** the destination reads `Valid`, and *Test access* (a
+`DestinationAccess` readiness check) is `ready` for the roles you configured
+([kubernetes.md](kubernetes.md) §7a).
+
+### 6. A schedule, and the first backup
+
+1. On *Schedules*, create one: the source connection, **named topics** or **all
+   user topics** (a discovery per run; say what happens when completeness
+   cannot be established), the cadence with its preview in your time zone, and
+   the destination ([ui/README.md](../ui/README.md), *Creating a schedule*).
+   Everything but the source connection can be edited later, and an edit never
+   reaches a run that already exists ([kubernetes.md](kubernetes.md) §9).
+2. Press *Run first backup now* rather than waiting: a slot due before the
+   schedule existed never fires.
+
+**Check:** the run's operation page reaches `Succeeded` with a green badge —
+*verified by weirkeeper … against key …* — and the run shows the window it
+covered. A run that succeeded but reads `unverified: not attempted` is almost
+always a destination with no `evidenceRead` grant.
+
+### 7. Restore a chosen point
+
+1. From the schedule's page, choose *Restore this point* on the exact row you
+   want — an older point is its own link, not a highlighted row
+   ([ui/README.md](../ui/README.md), *Restore, from here*).
+2. In the wizard, choose the target connection (a `target` role), the topics and
+   the new-topic mapping, and the point in time inside the covered window.
+   Restores only ever write **new** topics.
+3. The readiness check must pass before *Create the Restore* is enabled: every
+   blocking row `ready`, except the approval row, which is `skipped` until the
+   Restore exists ([kubernetes.md](kubernetes.md) §21.7; [ui/README.md](../ui/README.md),
+   *The readiness check holds the submit*).
+4. Get it approved, by the namespace's policy:
+   - `legacy-governed-v1`: download the plan bytes; the approver runs
+     `logweir drill approve … --subject-kind Restore` on their machine and
+     records the two files through the console (Approver role) or `kubectl`
+     ([kubernetes.md](kubernetes.md) §17);
+   - `Ordinary`: the shared console's confirmation is the authorization;
+   - `Governed`: the console confirms the requester, and a different approver
+     runs `logweir drill countersign` and submits it ([kubernetes.md](kubernetes.md)
+     §8, *Approval policy*).
+
+**Check:** the `Approval` reads `Verified=True`, the `Restore` is admitted,
+and its operation page reaches `Succeeded` with a completion panel.
+
+### 8. Verify what you got
+
+- **The badge** is green only when the signed document verified under a key the
+  namespace's trust accepts **and** the run succeeded (a Backup's `exitCode 0`,
+  a Restore's `outcome pass`). *Signed before that key was retired* is still a
+  pass; *recorded before revocation* never is ([kubernetes.md](kubernetes.md)
+  §15.2).
+- **The record check is a sample.** *Records verified in the sampled window* is
+  the count read back from the new topics inside the sampled window, and *records
+  sampled and matching* is how many of those matched byte for byte. Neither is
+  the total the restore wrote, and no level in this version compares every
+  record (*Terms* below).
+- **Check it without Logweir.** Fetch the scorecard and its sidecar from the
+  keys on the `Restore` (`status.evidence`) and run
+  `python3 docs/verify_scorecard.py` over them ([verify-a-scorecard.md](verify-a-scorecard.md)).
+
+### 9. Disaster restore from a connected archive
+
+When the cluster that ran the backups is gone — or this is a fresh installation
+pointed at an archive another installation wrote — no `Backup`, schedule or
+source connection is needed ([kubernetes.md](kubernetes.md) §7d.1):
+
+1. Create a read-only credential Secret with `kubectl`, and a destination whose
+   `archiveRead` names it by name (*existing Secret name*). Widen `archiveRead`
+   to the catalog row of [install.md](install.md) §3.11, or the catalog will not
+   sync.
+2. *Catalog* → *Connect an existing archive* (a `Full` sync).
+3. Establish trust for the archive's signing key out of band, then re-sync;
+   there is no one-click trust ([keys.md](keys.md)).
+4. Choose a point the catalog marks selectable (`Available` and `Verified` or
+   `VerifiedHistorical`), name the topics, and restore it as in step 7 — the plan
+   is bound to that exact receipt, and the runner re-verifies it before any data
+   moves.
+
+**Check:** the catalog reads `Synced`, the signer panel lists the key you
+trusted, and the restore's completion panel appears.
+
+### 10. Retention: reported by default, deleted only by decision
+
+A schedule's retention settings only **report** what would be removed. A
+`RetentionPolicy` starts in `mode: Report`. Moving it to `Enforce` is a
+retention administrator's decision that also needs a separate delete-capable
+credential with `s3:GetObject`, an unversioned bucket, the `logweir-retention`
+ServiceAccount, and an administrator's approval of each plan digest
+([kubernetes.md](kubernetes.md) §7f; [release-notes.md](release-notes.md), items
+1–3). `mode: ExternalLifecycle` declares that the bucket's own rule deletes.
+
+### 11. Upgrade and roll back
+
+Read [release-notes.md](release-notes.md) before every upgrade: it lists the
+required actions in order. The standing rule is **CRDs first, then the controller
+and runner together, then the console** (on the Helm path these are successive
+`helm upgrade`s of one release: first the image values, then any
+approval-policy binding) ([install.md](install.md), *Upgrade CRDs
+before upgrading the controller*), with the identity backed up beforehand.
+
+### Terms: what the console says, and what it means
+
+| The console says | The field behind it | What it means |
+|---|---|---|
+| *verified by weirkeeper at T against key K* | `status.evidence.verification.result: Valid` with `trust.basis` `Current` or `Historical` (or no `trust` block, on an object an older controller wrote), plus `exitCode 0` or `outcome pass` | the green badge ([kubernetes.md](kubernetes.md) §15.2) |
+| *(signed before that key was retired)* | `trust.basis: Historical` | a pass; the key was valid when it signed |
+| *unverified: invalid* | `result: Invalid` | a fact about the **document**: a signature or digest did not match |
+| *unverified: not attempted* | `result: NotAttempted` | a fact about the **controller**: no credential, no object, or no trust material |
+| *unverified: untrusted signer* | `result: Untrusted` | a fact about the **signer**: authentic bytes, a key this installation does not accept |
+| *recorded before revocation* | `trust.basis: RecordedBeforeRevocation` | never green; a compromise-revoked key signed it |
+| *pending* | `result: Pending` | the evidence fetch has not answered yet |
+| *records verified in the sampled window* | `Restore.status.completion.recordsRestored` (`sample.records_restored`) | records read back from the new topics inside the sampled window — not the total written, and not the matching count |
+| *records sampled and matching* | `completion.recordsSampledMatching` | how many sampled records matched byte for byte |
+| verification scope `sampled` / `degraded` / `none` | `verificationScope.level` | how the records were compared; `complete` does not exist |
+| *Visible user topics only — completeness not established* | `status.selection.coverage: VisibleUserTopicsOnly` | a dynamic run backed up what its principal could see; Kafka hides the rest silently |
+| *All user topics (attested complete)* | `AllUserTopicsAttested` | only with an administrator's attestation ([kubernetes.md](kubernetes.md) §22.2) |
+| catalog availability / verification | `Available`…`Partial` / `Verified`…`NotAttempted` | two separate axes; *selectable* needs both ([kubernetes.md](kubernetes.md) §7d) |
+| protection health | `Healthy`, `AtRisk`, `Stale`, `Unprotected`, `Unknown` | `Unknown` is never healthy and never a failure ([kubernetes.md](kubernetes.md) §7e) |
+| *Logweir reports what would be removed under this policy and removes nothing* | `RetentionPolicy.status.enforcement: RecommendationOnly` | nothing is deleted |
+| *An isolated Logweir retention worker deletes archive objects under this policy* | `status.enforcement: LogweirWorker` | an approved plan is being enforced |
+| *enforced by Logweir* / *declared by your provider; Logweir cannot verify it* / *not enforced* | `status.guarantees.*` | who, if anyone, enforces each retention guarantee |
+| key evaluation `unknown` | a `TrustPolicy` with no fresh status | never read as valid |
+
+### What this path has not yet been shown to do end to end
+
+Every step above is on `main` and was exercised on docker-desktop by its own
+task's journey; which of those tasks are Done and which still wait for a lab
+run is in [release-handoff.md](release-handoff.md). This
+page as one walk on a fresh install, and an upgrade from the last published
+image that keeps identities, schedules and archive readability, are PLAT-20.2's
+live half. [UNVERIFIED — a clean docker-desktop install following this page end to end is owed by PLAT-20.2's live round.]
+Shared mode behind a real identity provider and TLS ingress, AWS S3, MSK and a
+NetworkPolicy-enforcing CNI have not been run at all
+([release-notes.md](release-notes.md), *Limitations*).
+
+---
+
+## Demos and the standalone CLI
+
+The four paths below run the CLI and the local stack. They are demos and
+drills, not an installation: nothing in them is the supported path above.
 
 ---
 

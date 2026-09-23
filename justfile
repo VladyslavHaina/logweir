@@ -236,7 +236,7 @@ engine:
 # http/https are never fetched (Global Constraint 17); this is a repository
 # integrity check, not a network check.
 links:
-    ./scripts/check-links.sh docs/ README.md SECURITY.md MAINTAINERS.md CONTRIBUTING.md TRADEMARKS.md THIRD_PARTY_NOTICES.md third_party/ e2e/fixtures/ ui/ charts/
+    ./scripts/check-links.sh docs/ README.md SECURITY.md MAINTAINERS.md CONTRIBUTING.md TRADEMARKS.md THIRD_PARTY_NOTICES.md third_party/ e2e/fixtures/ ui/ charts/ deploy/
 
 # Task 22. The v0.1.0 definition of done, as far as it is mechanically
 # checkable without GitHub Actions or a live stack. Prints what it could NOT

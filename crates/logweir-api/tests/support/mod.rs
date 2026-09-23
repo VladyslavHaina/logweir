@@ -751,6 +751,11 @@ fn answer_inner(state: &Arc<Mutex<State>>, recorded: Recorded) -> (Option<Durati
                 .get("continue")
                 .map(|c| c.strip_prefix("fake-continue:").unwrap_or("").to_string());
             let selector = query.get("labelSelector").cloned().unwrap_or_default();
+            // ONLY THE PAGE IS CLONED. Filtering on references and stopping at
+            // `limit + 1` keeps a page of a 5,000-object namespace as cheap as a
+            // page of fifty (`tests/scale.rs` walks the console's whole list
+            // budget), and changes no answer: `more` is still "one past the
+            // limit exists".
             let mut items: Vec<Value> = s
                 .objects
                 .iter()
@@ -758,8 +763,9 @@ fn answer_inner(state: &Arc<Mutex<State>>, recorded: Recorded) -> (Option<Durati
                 .filter(|((_, _, name), _)| {
                     after.as_ref().is_none_or(|a| name.as_str() > a.as_str())
                 })
+                .filter(|(_, v)| labels_match(v, &selector))
+                .take(limit.saturating_add(1))
                 .map(|(_, v)| v.clone())
-                .filter(|v| labels_match(v, &selector))
                 .collect();
             let more = items.len() > limit;
             items.truncate(limit);

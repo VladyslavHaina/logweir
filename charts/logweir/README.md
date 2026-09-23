@@ -60,7 +60,7 @@ install document; this README is the chart's own.
 | `NetworkPolicy` `logweir-identity-kubernetes-api-egress` | every identity-enabled runner namespace | excludes bootstrap from runner arbitrary-443 egress; permits DNS plus discovered/configured Kubernetes API destinations only |
 | `Deployment` + `Service` `<release>-minio`, a PVC, `Secret` `<release>-minio-root`, `Secret` `logweir-s3`, `Job` `<release>-minio-seed` | `minio.enabled` | an in-cluster archive with the buckets `kafka-backups` and `logweir-evidence` |
 | `StatefulSet` + two `Service`s `<release>-kafka-source` and `-target`, `Job` `<release>-kafka-seed` | `demoKafka.enabled` | two single-broker KRaft clusters; `orders` and `payments` seeded on the source, the marker topic `logweir.scratch` on the target |
-| `Deployment`, `Service`, `ServiceAccount`, `ClusterRole`s, `RoleBinding` `<release>-ui` | `ui.enabled` | `kubectl proxy` serving the twenty-two UI files and the API on one origin, with its own authority (below). The files come from the image `ui.image`, not from a ConfigMap |
+| `Deployment`, `Service`, `ServiceAccount`, `ClusterRole`s, `RoleBinding` `<release>-ui` | `ui.enabled` | `kubectl proxy` serving the twenty-six UI files and the API on one origin, with its own authority (below). The files come from the image `ui.image`, not from a ConfigMap |
 | `ServiceAccount` `logweir-retention`, in the release namespace **and every `identity.authorizedRunnerNamespaces` entry** | `retention.enabled` | the identity every `mode: Enforce` Job names, in every namespace that runs one. **No Role and no RoleBinding**: the retention worker makes zero Kubernetes API calls |
 | `ServiceAccount`, two `ClusterRole`s, `ClusterRoleBinding`, `RoleBinding` `<release>-api` | `api.enabled` | the console/API principal's grants. **RBAC only** — no Deployment, no image, no Service |
 | `ConfigMap` `<release>-api-config-<digest>` + `Deployment` `<release>-api` | `api.console.enabled` | the console itself: `logweir-api` out of the `logweir-console` image, serving `/ui/` and `/api/v1` on one origin as the principal above. `api.console.mode` is **required** — see *`api.console.mode`* below |
@@ -165,14 +165,14 @@ admissionPolicy:
     - system:serviceaccount:team-a:logweir-api
 ```
 
-**It is inert until D0 stage 7 lands `console.*`**: this chart ships no
-`logweir-api` ServiceAccount, so the subject list names a principal that does
-not exist yet. Enabling it early costs one object and it becomes load-bearing
-the moment the console arrives — but "enabled" is not "fenced" before then, and
-the console's ServiceAccount name must then equal
-`admissionPolicy.consoleServiceAccountName` (which is REQUIRED and non-empty:
-an absent, empty or null one renders a subject that matches nobody, so the
-schema and the template both refuse it).
+**It fences the console this chart renders.** With `api.enabled` the chart
+renders the console's ServiceAccount, `<release>-api` (`logweir-api` for a
+release named `logweir`), and it refuses a
+`admissionPolicy.consoleServiceAccountName` that is not that account — a
+subject naming nobody would install, look enabled and fence nothing. The value
+is REQUIRED and non-empty: an absent, empty or null one renders a subject that
+matches nobody, so the schema and the template both refuse it. (Earlier
+revisions called the policy inert until D0 stage 7 landed the console; it has.)
 
 It requires that a Secret the console creates carries one of the two Logweir
 credential types (`logweir.dev/object-store-credential`,
@@ -1052,7 +1052,7 @@ the opposite of GHCR's:
 ## `environment:`
 
 A label, and nothing else: `logweir.dev/environment: <value>` on every object
-the chart renders (the six CRDs excepted — Helm copies `crds/` verbatim and
+the chart renders (the fourteen CRDs excepted — Helm copies `crds/` verbatim and
 never templates it). It switches no behaviour, changes no name and gates
 nothing. A key that silently did something would be worse than no key.
 
@@ -1092,7 +1092,7 @@ serves it).
 
 `ui.image` defaults to `docker.io/vladyslavhaina/logweir-ui:latest`. **What is
 in it:** the pinned `registry.k8s.io/kubectl` (v1.34.1, resolved by digest on
-2026-09-12 — the command is below) with the **twenty-two shipped UI files copied
+2026-09-12 — the command is below) with the **twenty-six shipped UI files copied
 in at `/ui`** and nothing else: no `README.md`, no `ui/tests/` (which carries a
 throwaway keypair), no key material of any kind. It also carries Logweir's
 `LICENSE` and `NOTICE` and, under `/usr/share/licenses/kubectl/`, kubectl's
@@ -1381,7 +1381,7 @@ directory is the same act.
 helm uninstall logweir -n logweir-system
 ```
 
-removes everything the release created **except**: the six CRDs (Helm never
+removes everything the release created **except**: the fourteen CRDs (Helm never
 deletes `crds/`; `kubectl delete crd <name>` removes each and every custom
 resource stored under it), the MinIO `PersistentVolumeClaim` when
 `minio.persistence.enabled` (delete it yourself, or keep the archive), the
@@ -1411,7 +1411,7 @@ Logweir — Global Constraint 6.
   namespace derived from the runner pin.
 * `scripts/check-image-ui.sh` (`just smoke-ui`; needs a Docker daemon, so it is
   in `docs/gates.md`'s stack/cluster table rather than in `just gate`): the
-  twenty-two files the `logweir-ui` image serves, sha256 for sha256 against
+  twenty-six files the `logweir-ui` image serves, sha256 for sha256 against
   `ui/`, and nothing else under `/ui`. This is what replaced the chart's
   byte-copy arm.
 * The existing image publication path runs `scripts/check-image.sh` against the

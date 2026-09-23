@@ -1,0 +1,139 @@
+# deploy/poc/logweir.values.yaml — Logweir, the shared (SSO) console, for the
+# PoC profile. Install it with the chart from the SAME commit the image tags
+# name (versions.env LOGWEIR_COMMIT) — README.md step 6 has the exact command:
+#
+#   helm upgrade --install logweir ./charts/logweir -n logweir-system \
+#     -f deploy/poc/logweir.values.yaml \
+#     --set-json "api.console.trustedProxyCidrs=[\"$INGRESS_POD_IP/32\"]" \
+#     --set-json "api.console.networkPolicy.oidcCIDRs=[\"$INGRESS_SVC_IP/32\"]" \
+#     --wait --timeout 10m
+#
+# The two addresses are the cluster's, not constants: the ingress controller's
+# pod IP (the one peer the console trusts to have terminated TLS) and the
+# ingress controller Service's ClusterIP (where the console reaches Dex). The
+# placeholders below are documentation addresses (RFC 5737) so this file
+# renders on its own; installing it WITHOUT the two --set-json lines produces a
+# console that refuses every request, which is the safe failure.
+#
+# NOTHING SECRET IS IN THIS FILE: every key and the OIDC client secret are named
+# Secrets created before the install (README.md, step 5).
+
+# ------------------------------------------------------------------ images
+# The published main images of one commit, by their immutable `sha-` tag. The
+# bootstrap image stays the chart's own reviewed digest pin (identity.*).
+controllerImage: docker.io/vladyslavhaina/weirkeeper:sha-306cebf63adda5d6fd872674ffca5b2c05a2236c
+runnerImage: docker.io/vladyslavhaina/logweir:sha-306cebf63adda5d6fd872674ffca5b2c05a2236c
+imagePullPolicy: IfNotPresent
+runnerImagePullPolicy: IfNotPresent
+
+environment: poc
+
+# ---------------------------------------------------- where backups execute
+# `logweir-poc` is the one execution namespace. It must exist before the
+# install (the chart copies the signing identity and the runner account into
+# it). The controller is scoped to it (D0 stage 5): it cannot create Jobs in
+# logweir-system, where the console's keys live.
+kubernetes:
+  namespace: logweir-poc
+identity:
+  authorizedRunnerNamespaces: [logweir-poc]
+controller:
+  watchNamespaces: [logweir-poc]
+retention:
+  enabled: true                  # the account an Enforce policy would need; deletes nothing by itself
+
+# The console's `create secrets` is fenced to Logweir-shaped Secrets
+# (Kubernetes >= 1.30; docker-desktop ships 1.34).
+admissionPolicy:
+  enabled: true
+  consoleServiceAccountName: logweir-api
+
+# -------------------------------------------------------- the shared console
+api:
+  enabled: true
+  namespaces: [logweir-poc]
+  console:
+    enabled: true
+    image: docker.io/vladyslavhaina/logweir-console:sha-306cebf63adda5d6fd872674ffca5b2c05a2236c
+    imagePullPolicy: IfNotPresent
+    mode: shared
+    replicas: 2                  # >= 2 renders the PodDisruptionBudget
+    keySecret: logweir-console-keys
+    keyVersion: 1
+    publicBaseUrl: https://logweir.localtest.me
+    sessionMaxAgeSeconds: 900
+    trustedProxyCidrs: ["192.0.2.10/32"]   # REPLACED at install: the ingress controller pod IP
+    requireTrustedProxy: true
+    oidc:
+      issuer: https://dex.localtest.me     # EXACT: Dex's `issuer`, no trailing slash
+      clientId: logweir-console
+      clientSecret: logweir-console-oidc   # the NAME of a Secret with key `clientSecret`
+    roles:
+      revision: "poc-2026-09-23.1"
+      # One Dex user per role, bound by subject (`<issuer>#<sub>`; dex.values.yaml
+      # says why). The `groups` entries are what a real connector's groups bind
+      # to; they match nobody under Dex's static users.
+      bindings:
+        - role: viewer
+          namespace: logweir-poc
+          groups: ["logweir-poc-viewers"]
+          subjects: ["https://dex.localtest.me#CiQxZjBjOWE0ZS0wMDAxLTRhMWUtOWUxYS0wMDAwMDAwMDAwMDESBWxvY2Fs"]
+        - role: operator
+          namespace: logweir-poc
+          groups: ["logweir-poc-operators"]
+          subjects: ["https://dex.localtest.me#CiQxZjBjOWE0ZS0wMDAyLTRhMWUtOWUxYS0wMDAwMDAwMDAwMDISBWxvY2Fs"]
+        - role: approver
+          namespace: logweir-poc
+          groups: ["logweir-poc-approvers"]
+          subjects: ["https://dex.localtest.me#CiQxZjBjOWE0ZS0wMDAzLTRhMWUtOWUxYS0wMDAwMDAwMDAwMDMSBWxvY2Fs"]
+        - role: administrator
+          namespace: logweir-poc
+          groups: ["logweir-poc-admins"]
+          subjects: ["https://dex.localtest.me#CiQxZjBjOWE0ZS0wMDA0LTRhMWUtOWUxYS0wMDAwMDAwMDAwMDQSBWxvY2Fs"]
+    ingress:
+      enabled: true
+      className: nginx
+      host: logweir.localtest.me
+      tlsSecretName: logweir-console-tls
+      annotations:
+        cert-manager.io/cluster-issuer: logweir-poc-ca
+        nginx.ingress.kubernetes.io/hsts: "true"
+        nginx.ingress.kubernetes.io/hsts-max-age: "31536000"
+    networkPolicy:
+      enabled: true              # rendered; docker-desktop does NOT enforce NetworkPolicy
+      ingressNamespace: ingress-nginx
+      ingressPodLabels:
+        app.kubernetes.io/name: ingress-nginx
+        app.kubernetes.io/component: controller
+      oidcCIDRs: ["192.0.2.20/32"]         # REPLACED at install: the ingress controller Service ClusterIP
+    resources:
+      requests: { cpu: 25m, memory: 64Mi }
+      limits: { memory: 256Mi }
+
+# -------------------------------------------------------- approval policy
+# `logweir-poc` restores are authorised by the console's own confirmation of
+# the signed-in requester (Ordinary). The confirmation key is a Secret created
+# before the install, and its PUBLIC half goes on the TrustPolicy that governs
+# logweir-poc (README.md, step 7).
+approvalPolicy:
+  allowOrdinaryConfirmation: true
+  policies:
+    - name: poc-ordinary
+      mode: Ordinary
+      maxAgeSeconds: 900
+  namespaces:
+    logweir-poc: poc-ordinary
+  confirmationKeySecret: logweir-console-confirmation
+
+# ------------------------------------------- something to back up (demo only)
+# Two throwaway KRaft brokers and a MinIO archive, in logweir-system. They are
+# reached from logweir-poc by Service name; the connection, destination and
+# credentials are created in logweir-poc through the console (README.md,
+# step 8). Remove both for a real installation.
+demoKafka:
+  enabled: true
+minio:
+  enabled: true
+  persistence:
+    enabled: true
+    size: 5Gi

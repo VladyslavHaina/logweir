@@ -6350,8 +6350,8 @@ fn finished_routes_for_destinations(pods: String, log: String, evidence: Value) 
 /// `backup.rs`'s — `if let (Some(payload_key), Some(sidecar_key),
 /// Some(digest))` — and its `NotAttempted` arm was dead for the identical
 /// reason: `observed` is `None` for that source, so `scorecard_sha256` is
-/// `None` by construction. `docs/kubernetes.md` §7e promises the
-/// `NotAttempted` verdict for destination-backed execution generally, §7d
+/// `None` by construction. `docs/kubernetes.md` §7b.3 promises the
+/// `NotAttempted` verdict for destination-backed execution generally, §7b.1
 /// (`Restore`) included; fixing only the `Backup` half would have made that
 /// documented sentence true for one kind and still false for the other.
 ///
