@@ -3,21 +3,32 @@
 // approval policy sends it.
 //
 // THE LAUNCHER AND THE FIXTURES ARE `scripts/plat11-2-ui-e2e.mjs`'s. This
-// starts the source-built `logweir-api` in localAdmin mode on a loopback port
-// against docker-desktop, with an approval-policy document and a per-run
-// ConsoleConfirmation key, and drives a real Chromium against three namespaces
-// this run creates:
+// starts TWO source-built `logweir-api` consoles over ONE approval-policy
+// document and ONE per-run ConsoleConfirmation key, against docker-desktop,
+// and drives real Chromium browsers:
 //
-//   <ns>-o   bound to an ORDINARY policy: Create the Restore signs the console's
-//            confirmation, stores it as the Approval the Restore names, and the
-//            page routes straight to the operation view.
-//   <ns>-v   bound to a GOVERNED policy: Create the Restore stores the console's
-//            confirmation as `<approvalRef>-confirmation`, routes to Awaiting
-//            approval, and the requester's own countersignature is refused.
-//   <ns>-g   UNBOUND (`legacy-governed-v1`): routes to Awaiting approval; an
-//            Approval minted with the lab's own approver key (`d2_live.py`
-//            `mint_approval`'s procedure) is recorded and the lab controller
-//            verifies it, and the page then shows it Verified.
+//   * the SHARED console (review H1: D0's administrator mode "does not expose
+//     Ordinary"), behind a TLS terminator that overwrites the forwarded
+//     headers like an ingress, signing people in through a local ES256 OpenID
+//     provider (PKCE S256, client_secret_basic) -- alice (operator) and bob
+//     (approver), each in their own browser context;
+//   * the ADMINISTRATOR (`localAdmin`) console on loopback.
+//
+// Four namespaces this run creates:
+//
+//   <ns>-o   bound ORDINARY. Shared: alice's Create signs the console's
+//            confirmation of ALICE and routes to the operation view.
+//            Administrator console: the page disables Create and the product
+//            API refuses the same request `policy_mismatch`, creating nothing.
+//   <ns>-v   bound GOVERNED. Shared: alice's Create (with the ticket D0
+//            requires) stores the confirmation and routes to Awaiting
+//            approval; alice's own countersignature is refused 403; bob's,
+//            from his own browser, is recorded (201) with both signatures.
+//   <ns>-g   UNBOUND (`legacy-governed-v1`), administrator console: Awaiting
+//            approval; the approver's `logweir drill approve` files (the lab
+//            key, by path) are recorded THROUGH THE PAGE, the lab controller
+//            verifies them, and the page shows Verified.
+//   <ns>-r   UNBOUND, over the lab's real archive: DRAFT-PREFLIGHT-NEVER-READY.
 //
 // WHAT THE LAB CONTROLLER IS, AND WHAT THAT MEANS HERE. The shared lab runs the
 // `weirkeeper` image of the last lab refresh, which predates PLAT-19.2, so it
@@ -48,7 +59,12 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { createServer } from "node:net";
-import { createHash, createPublicKey, randomBytes, verify as verifySig } from "node:crypto";
+import { createServer as createHttpServer, request as httpRequest } from "node:http";
+import { createServer as createHttpsServer } from "node:https";
+import {
+  createHash, createPublicKey, generateKeyPairSync, randomBytes, sign as cryptoSign,
+  verify as verifySig,
+} from "node:crypto";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -238,23 +254,27 @@ function pae(type, body) {
 // ------------------------------------------------------------- the service
 
 let api = null;
+let sharedApi = null;
 const apiLog = [];
+const sharedLog = [];
 let consolePublicPem = "";
+let consoleKeyPath = "";
+let policyPath = "";
 
-async function startApi(port) {
+/** The approval-policy document and the per-run console key, shared by both
+ *  consoles (the chart mounts ONE document and ONE key Secret). */
+function writePolicyAndKey() {
   mkdirSync(WORK_DIR, { recursive: true, mode: 0o700 });
-  const cursorKey = join(WORK_DIR, "cursor.key");
-  writeFileSync(cursorKey, randomBytes(32), { mode: 0o600 });
-  const consoleKey = join(WORK_DIR, "confirmation.key");
-  const minted = spawnSync("openssl", ["genpkey", "-algorithm", "ed25519", "-out", consoleKey],
+  consoleKeyPath = join(WORK_DIR, "confirmation.key");
+  const minted = spawnSync("openssl", ["genpkey", "-algorithm", "ed25519", "-out", consoleKeyPath],
     { encoding: "utf8", timeout: 30000 });
   check(minted.status === 0, "openssl could not mint the console key");
-  const pub = spawnSync("openssl", ["pkey", "-in", consoleKey, "-pubout"],
+  const pub = spawnSync("openssl", ["pkey", "-in", consoleKeyPath, "-pubout"],
     { encoding: "utf8", timeout: 30000 });
   check(pub.status === 0, "openssl could not derive the console public key");
   consolePublicPem = pub.stdout;
   save("console-confirmation.pub.pem", consolePublicPem);
-  const policyPath = join(WORK_DIR, "approval-policy.yaml");
+  policyPath = join(WORK_DIR, "approval-policy.yaml");
   const policy = [
     "allowOrdinaryConfirmation: true",
     "policies:",
@@ -267,11 +287,32 @@ async function startApi(port) {
     "namespaces:",
     "  " + NS.ordinary + ": p192-ordinary",
     "  " + NS.governed + ": p192-governed",
-    "  " + NS.readiness + ": p192-ordinary",
     "",
   ].join("\n");
   writeFileSync(policyPath, policy);
   save("approval-policy.yaml", policy);
+}
+
+async function waitHealthy(url, log, what) {
+  for (let i = 0; i < 60; i += 1) {
+    try {
+      const probe = await fetch(url);
+      if (probe.ok) {
+        return;
+      }
+    } catch (notYet) {
+      // still binding
+    }
+    await pause(500);
+  }
+  throw new Error(what + " never answered " + url + " within 30 s. Log:\n" + log.join(""));
+}
+
+/** THE ADMINISTRATOR (`localAdmin`) CONSOLE, on loopback, serving every run
+ *  namespace. D0: it does not expose Ordinary. */
+async function startApi(port) {
+  const cursorKey = join(WORK_DIR, "cursor.key");
+  writeFileSync(cursorKey, randomBytes(32), { mode: 0o600 });
   const configPath = join(WORK_DIR, "config.yaml");
   const config = [
     "mode: localAdmin",
@@ -287,7 +328,7 @@ async function startApi(port) {
     "  context: " + KUBE_CONTEXT,
     "cursorKeyFile: " + cursorKey,
     "approvalPolicyFile: " + policyPath,
-    "confirmationKeyFile: " + consoleKey,
+    "confirmationKeyFile: " + consoleKeyPath,
     "",
   ].join("\n");
   writeFileSync(configPath, config);
@@ -295,23 +336,223 @@ async function startApi(port) {
   api = spawn(API_BIN, ["--config", configPath], { stdio: ["ignore", "pipe", "pipe"] });
   api.stdout.on("data", (b) => apiLog.push(String(b)));
   api.stderr.on("data", (b) => apiLog.push(String(b)));
-  for (let i = 0; i < 60; i += 1) {
-    try {
-      const probe = await fetch("http://127.0.0.1:" + port + "/healthz");
-      if (probe.ok) {
-        return;
-      }
-    } catch (notYet) {
-      // still binding
+  await waitHealthy("http://127.0.0.1:" + port + "/healthz", apiLog, "the localAdmin console");
+}
+
+// ------------------------------------------------ the shared console (H1)
+//
+// REVIEW H1: ordinary confirmation is proved in the SHARED console with real
+// signed-in identities. Three loopback processes stand in for what a cluster
+// provides: a local OpenID provider (ES256, PKCE S256, client_secret_basic),
+// a TLS terminator that OVERWRITES X-Forwarded-For/Proto like an ingress
+// controller, and the source-built `logweir-api` in `mode: shared` behind it.
+// The approach is PLAT-17.2's live harness (claude/artifacts/plat17-2/harness),
+// ported to this process so the browser drives the real login redirects.
+
+const CLIENT_ID = "logweir-console";
+const CLIENT_SECRET = "p192-client-" + randomBytes(8).toString("hex");
+const idpKey = generateKeyPairSync("ec", { namedCurve: "P-256" });
+const idpNext = { sub: "alice", groups: [] };
+const idpCodes = new Map();
+let idpServer = null;
+let proxyServer = null;
+let IDP_ISSUER = "";
+
+const b64u = (buf) => Buffer.from(buf).toString("base64").replace(/=+$/, "")
+  .replace(/\+/g, "-").replace(/\//g, "_");
+
+function mintIdToken(claims) {
+  const header = b64u(JSON.stringify({ alg: "ES256", kid: "p192-es256", typ: "JWT" }));
+  const payload = b64u(JSON.stringify(claims));
+  const sig = cryptoSign("sha256", Buffer.from(header + "." + payload),
+    { key: idpKey.privateKey, dsaEncoding: "ieee-p1363" });
+  return header + "." + payload + "." + b64u(sig);
+}
+
+async function startIdp(port) {
+  IDP_ISSUER = "http://127.0.0.1:" + port;
+  const jwk = Object.assign(idpKey.publicKey.export({ format: "jwk" }),
+    { kid: "p192-es256", alg: "ES256", use: "sig" });
+  idpServer = createHttpServer((req, res) => {
+    const u = new URL(req.url, IDP_ISSUER);
+    const send = (status, body, headers) => {
+      const data = Buffer.from(JSON.stringify(body));
+      res.writeHead(status, Object.assign({ "content-type": "application/json",
+        "content-length": data.length }, headers || {}));
+      res.end(data);
+    };
+    if (req.method === "GET" && u.pathname === "/.well-known/openid-configuration") {
+      return send(200, { issuer: IDP_ISSUER, authorization_endpoint: IDP_ISSUER + "/authorize",
+        token_endpoint: IDP_ISSUER + "/token", jwks_uri: IDP_ISSUER + "/jwks",
+        response_types_supported: ["code"], subject_types_supported: ["public"],
+        id_token_signing_alg_values_supported: ["ES256"] });
     }
-    await pause(500);
-  }
-  throw new Error("logweir-api never answered /healthz within 30 s. Log:\n" + apiLog.join(""));
+    if (req.method === "GET" && u.pathname === "/jwks") {
+      return send(200, { keys: [jwk] });
+    }
+    if (req.method === "GET" && u.pathname === "/authorize") {
+      const q = Object.fromEntries(u.searchParams);
+      if (q.client_id !== CLIENT_ID || q.code_challenge_method !== "S256") {
+        return send(400, { error: "invalid_request" });
+      }
+      const code = randomBytes(18).toString("hex");
+      idpCodes.set(code, { user: Object.assign({}, idpNext), nonce: q.nonce,
+        challenge: q.code_challenge, redirect: q.redirect_uri });
+      res.writeHead(302, { location: q.redirect_uri + "?" +
+        new URLSearchParams({ code: code, state: q.state }).toString(), "content-length": 0 });
+      return res.end();
+    }
+    if (req.method === "POST" && u.pathname === "/token") {
+      let raw = "";
+      req.on("data", (c) => { raw += c; });
+      req.on("end", () => {
+        const basic = "Basic " + Buffer.from(encodeURIComponent(CLIENT_ID) + ":" +
+          encodeURIComponent(CLIENT_SECRET)).toString("base64");
+        if (req.headers.authorization !== basic) {
+          return send(401, { error: "invalid_client" });
+        }
+        const form = Object.fromEntries(new URLSearchParams(raw));
+        const grant = idpCodes.get(form.code);
+        idpCodes.delete(form.code);
+        if (!grant || form.redirect_uri !== grant.redirect) {
+          return send(400, { error: "invalid_grant" });
+        }
+        const challenge = b64u(createHash("sha256").update(form.code_verifier || "").digest());
+        if (challenge !== grant.challenge) {
+          return send(400, { error: "invalid_grant" });
+        }
+        const now = Math.floor(Date.now() / 1000);
+        return send(200, {
+          id_token: mintIdToken({ iss: IDP_ISSUER, aud: CLIENT_ID, sub: grant.user.sub, iat: now,
+            exp: now + 600, auth_time: now, nonce: grant.nonce, groups: grant.user.groups,
+            name: grant.user.sub }),
+          access_token: "at-" + randomBytes(8).toString("hex"), token_type: "Bearer",
+          expires_in: 600,
+        });
+      });
+      return undefined;
+    }
+    return send(404, { error: "not_found" });
+  });
+  await new Promise((ok) => idpServer.listen(port, "127.0.0.1", ok));
+}
+
+/** The stand-in ingress: TLS on loopback, forwarding over HTTP, OVERWRITING
+ *  the forwarded headers rather than trusting the client's. */
+async function startProxy(port, upstream) {
+  const certDir = join(WORK_DIR, "tls");
+  mkdirSync(certDir, { recursive: true, mode: 0o700 });
+  const made = spawnSync("openssl", ["req", "-x509", "-newkey", "ec", "-pkeyopt",
+    "ec_paramgen_curve:prime256v1", "-nodes", "-days", "1", "-subj", "/CN=localhost",
+    "-addext", "subjectAltName=DNS:localhost", "-keyout", join(certDir, "tls.key"),
+    "-out", join(certDir, "tls.crt")], { encoding: "utf8", timeout: 30000 });
+  check(made.status === 0, "openssl could not mint the proxy certificate");
+  const hop = new Set(["connection", "keep-alive", "transfer-encoding", "te", "upgrade",
+    "x-forwarded-for", "x-forwarded-proto", "x-forwarded-host", "forwarded"]);
+  proxyServer = createHttpsServer({
+    key: readFileSync(join(certDir, "tls.key")), cert: readFileSync(join(certDir, "tls.crt")),
+  }, (req, res) => {
+    const headers = {};
+    for (const [k, v] of Object.entries(req.headers)) {
+      if (!hop.has(k.toLowerCase())) {
+        headers[k] = v;
+      }
+    }
+    headers["x-forwarded-for"] = req.socket.remoteAddress.replace("::ffff:", "");
+    headers["x-forwarded-proto"] = "https";
+    const up = httpRequest({ host: "127.0.0.1", port: upstream, method: req.method, path: req.url,
+      headers: headers }, (answer) => {
+      const out = {};
+      for (const [k, v] of Object.entries(answer.headers)) {
+        if (!hop.has(k.toLowerCase())) {
+          out[k] = v;
+        }
+      }
+      res.writeHead(answer.statusCode, out);
+      answer.pipe(res);
+    });
+    up.on("error", () => { res.writeHead(502); res.end(); });
+    req.pipe(up);
+  });
+  await new Promise((ok) => proxyServer.listen(port, "127.0.0.1", ok));
+}
+
+/** THE SHARED CONSOLE, serving the Ordinary and the Governed namespaces:
+ *  alice operates in both, bob approves in the Governed one. */
+async function startSharedApi(port, proxyPort) {
+  const secretPath = join(WORK_DIR, "client-secret");
+  writeFileSync(secretPath, CLIENT_SECRET, { mode: 0o600 });
+  const sessionKey = join(WORK_DIR, "session.key");
+  writeFileSync(sessionKey, "version: 1\nkey: \"" + randomBytes(32).toString("base64") + "\"\n",
+    { mode: 0o600 });
+  const cursorKey = join(WORK_DIR, "cursor-shared.key");
+  writeFileSync(cursorKey, "version: 1\nkey: \"" + randomBytes(32).toString("base64") + "\"\n",
+    { mode: 0o600 });
+  const configPath = join(WORK_DIR, "shared.yaml");
+  const config = [
+    "mode: shared",
+    "listen: \"127.0.0.1:" + port + "\"",
+    "publicBaseUrl: \"https://localhost:" + proxyPort + "\"",
+    "uiDirectory: " + UI_DIR,
+    "oidc:",
+    "  issuer: " + IDP_ISSUER,
+    "  clientId: " + CLIENT_ID,
+    "  clientSecretFile: " + secretPath,
+    "  allowedAlgorithms: [ES256]",
+    "  scopes: [openid, profile, groups]",
+    "  groupsClaim: groups",
+    "  displayNameClaim: name",
+    "  insecureLoopbackIssuer: true",
+    "roles:",
+    "  revision: p192-live-1",
+    "  bindings:",
+    "    - {role: operator, namespace: " + NS.ordinary + ", groups: [p192-ops]}",
+    "    - {role: operator, namespace: " + NS.governed + ", groups: [p192-ops]}",
+    "    - {role: approver, namespace: " + NS.governed + ", groups: [p192-approvers]}",
+    "sessionKey: {file: " + sessionKey + ", expectedVersion: 1}",
+    "cursorKey: {file: " + cursorKey + ", expectedVersion: 1}",
+    "sessionMaxAgeSeconds: 900",
+    "trustedProxyCidrs: [\"127.0.0.1/32\"]",
+    "namespaces: [" + NS.ordinary + ", " + NS.governed + "]",
+    "kubernetes:",
+    "  source: kubeconfig",
+    "  context: " + KUBE_CONTEXT,
+    "approvalPolicyFile: " + policyPath,
+    "confirmationKeyFile: " + consoleKeyPath,
+    "",
+  ].join("\n");
+  writeFileSync(configPath, config);
+  save("shared.yaml", config.replace(CLIENT_SECRET, "<redacted>"));
+  sharedApi = spawn(API_BIN, ["--config", configPath], { stdio: ["ignore", "pipe", "pipe"] });
+  sharedApi.stdout.on("data", (b) => sharedLog.push(String(b)));
+  sharedApi.stderr.on("data", (b) => sharedLog.push(String(b)));
+  await waitHealthy("http://127.0.0.1:" + port + "/healthz", sharedLog, "the shared console");
+}
+
+/** Sign `sub` (in `groups`) in through the real redirect flow, in `context`. */
+async function signIn(context, base, sub, groups) {
+  idpNext.sub = sub;
+  idpNext.groups = groups;
+  const page = await context.newPage();
+  await page.goto(base + "/auth/login", { waitUntil: "load", timeout: 30000 });
+  const session = await page.evaluate(async () => {
+    const r = await fetch("/api/v1/session");
+    return { status: r.status, body: await r.json() };
+  });
+  check(session.status === 200, sub + " did not sign in: " + JSON.stringify(session));
+  return { page: page, session: session.body };
 }
 
 function stopApi() {
-  if (api !== null && api.exitCode === null) {
-    api.kill("SIGTERM");
+  for (const child of [api, sharedApi]) {
+    if (child !== null && child.exitCode === null) {
+      child.kill("SIGTERM");
+    }
+  }
+  for (const server of [idpServer, proxyServer]) {
+    if (server !== null) {
+      server.close();
+    }
   }
 }
 
@@ -482,43 +723,78 @@ async function main() {
     seeded[key] = await seedNamespace(ns, key === "readiness" ? lab : null);
   }
 
+  writePolicyAndKey();
   const port = await freePort();
   await startApi(port);
   const origin = "http://127.0.0.1:" + port;
   const ui = origin + "/ui/";
   result.port = port;
   result.apiStartLine = apiLog.join("").split("\n").find((l) => l.includes("logweir-api started")) || "";
+  const idpPort = await freePort();
+  await startIdp(idpPort);
+  const sharedPort = await freePort();
+  const proxyPort = await freePort();
+  await startProxy(proxyPort, sharedPort);
+  await startSharedApi(sharedPort, proxyPort);
+  const sharedBase = "https://localhost:" + proxyPort;
+  const sharedUi = sharedBase + "/ui/";
+  result.sharedConsole = { base: sharedBase, idp: IDP_ISSUER, listen: "127.0.0.1:" + sharedPort,
+    startLine: sharedLog.join("").split("\n").find((l) => l.includes("logweir-api started")) || "" };
 
   const browser = await chromium.launch();
-  const page = await (await browser.newContext()).newPage();
   const bodies = [];
-  page.on("response", async (r) => {
+  const capture = (p) => p.on("response", async (r) => {
     try {
       if (r.url().indexOf("/api/v1/") !== -1) {
         bodies.push({ url: r.url(), method: r.request().method(), status: r.status(),
+          request: (r.request().postData() || "").slice(0, 400000),
           body: (await r.text()).slice(0, 20000) });
       }
     } catch (gone) {
       // body no longer available
     }
   });
-  const createAnswer = (ns) => bodies.filter((b) => b.method === "POST" &&
+  const page = await (await browser.newContext()).newPage();
+  capture(page);
+  // Two people, two browsers: alice operates, bob approves.
+  // alice holds BOTH roles in the Governed namespace (D0's role union), so
+  // the refusal of her own approval is the separation-of-duties rule and not
+  // a missing grant.
+  const alice = await signIn(await browser.newContext({ ignoreHTTPSErrors: true }), sharedBase,
+    "alice", ["p192-ops", "p192-approvers"]);
+  capture(alice.page);
+  const bob = await signIn(await browser.newContext({ ignoreHTTPSErrors: true }), sharedBase,
+    "bob", ["p192-approvers"]);
+  capture(bob.page);
+  const ALICE = IDP_ISSUER + "#alice";
+  check(alice.session.authenticationMode === "oidc" && ((alice.session.actor || {}).id) === ALICE,
+    "alice signed in through the provider: " + JSON.stringify(alice.session));
+  save("00-sessions.json", { alice: { mode: alice.session.authenticationMode,
+    actor: (alice.session.actor || {}).id }, bob: { mode: bob.session.authenticationMode,
+    actor: (bob.session.actor || {}).id } });
+  const createAnswer = (ns, since) => bodies.slice(since || 0).filter((b) => b.method === "POST" &&
     b.url.endsWith("/namespaces/" + ns + "/restores")).pop();
 
-  async function submitIn(key) {
+  async function submitIn(key, onPage, base, ticket) {
+    const at = onPage || page;
     const ns = NS[key];
-    const route = ui + "#/restore?ns=" + ns + "&backup=" + seeded[key].point.name +
+    const route = (base || ui) + "#/restore?ns=" + ns + "&backup=" + seeded[key].point.name +
       "&uid=" + seeded[key].point.uid;
-    await page.goto(route, { waitUntil: "load", timeout: 30000 });
-    await waitFor(page, "#step-target", "the wizard in " + ns);
-    await page.selectOption("#target-cluster", seeded[key].targetUid);
-    await waitFor(page, "#plan-bytes", "the plan in " + ns);
-    const planBytes = await page.evaluate(() => document.querySelector("#plan-bytes").textContent);
-    const planStep = await page.evaluate(() => document.querySelector("#step-plan").innerText);
-    await page.click("#create-restore");
+    const since = bodies.length;
+    await at.goto(route, { waitUntil: "load", timeout: 30000 });
+    await waitFor(at, "#step-target", "the wizard in " + ns);
+    await at.selectOption("#target-cluster", seeded[key].targetUid);
+    await waitFor(at, "#plan-bytes", "the plan in " + ns);
+    if (typeof ticket === "string") {
+      await waitFor(at, "#change-ticket", "the Governed ticket field in " + ns);
+      await at.fill("#change-ticket", ticket);
+    }
+    const planBytes = await at.evaluate(() => document.querySelector("#plan-bytes").textContent);
+    const planStep = await at.evaluate(() => document.querySelector("#step-plan").innerText);
+    await at.click("#create-restore");
     let answer = null;
     for (let i = 0; i < 60 && answer === null; i += 1) {
-      answer = createAnswer(ns) || null;
+      answer = createAnswer(ns, since) || null;
       if (answer === null) {
         await pause(500);
       }
@@ -526,7 +802,7 @@ async function main() {
     check(answer !== null && (answer.status === 201 || answer.status === 200),
       "the page's create in " + ns + " answered " + JSON.stringify(answer));
     const body = JSON.parse(answer.body);
-    return { ns: ns, planBytes: planBytes, planStep: planStep, answer: body,
+    return { ns: ns, planBytes: planBytes, planStep: planStep, answer: body, request: answer.request,
       restore: body.item.name, approvalName: body.item.approvalRef.name };
   }
 
@@ -534,39 +810,48 @@ async function main() {
     // ---------------------------------------------------------------- 0
     // The page must be ON the service's origin before it can fetch from it.
     await page.goto(ui, { waitUntil: "load", timeout: 30000 });
+    const readPolicy = (p, base, ns) => p.evaluate(async (u) => {
+      const r = await fetch(u);
+      return { status: r.status, body: await r.json() };
+    }, base + "/api/v1/namespaces/" + ns + "/approval-policy");
     const policies = {};
     for (const [key, ns] of Object.entries(NS)) {
-      const read = await page.evaluate(async (u) => {
-        const r = await fetch(u);
-        return { status: r.status, body: await r.json() };
-      }, origin + "/api/v1/namespaces/" + ns + "/approval-policy");
+      const read = await readPolicy(page, origin, ns);
       check(read.status === 200, "the policy route answered " + read.status);
       policies[key] = read.body.item;
     }
-    save("00-approval-policies.json", policies);
+    const sharedOrdinary = (await readPolicy(alice.page, sharedBase, NS.ordinary)).body.item;
+    save("00-approval-policies.json", { localAdmin: policies, sharedOrdinary: sharedOrdinary });
     check(policies.ordinary.mode === "ordinary" && policies.ordinary.legacy === false, "o is Ordinary");
-    check(policies.governed.mode === "governed" && policies.governed.requireDistinctPrincipal === true,
-      "v is Governed with distinct principals");
+    check(policies.ordinary.ordinaryConfirmationAvailable === false,
+      "the localAdmin console does not offer Ordinary");
+    check(sharedOrdinary.ordinaryConfirmationAvailable === true,
+      "the shared console offers it: " + JSON.stringify(sharedOrdinary));
+    check(policies.governed.mode === "governed" && policies.governed.requireDistinctPrincipal === true &&
+      policies.governed.ticketRequired === true, "v is Governed, distinct principals, ticket required");
     check(policies.legacy.name === "legacy-governed-v1" && policies.legacy.legacy === true, "g is unbound");
-    check(policies.ordinary.installationDigest === policies.governed.installationDigest,
-      "one installation document");
-    record("GET .../approval-policy publishes each namespace's effective policy", {
+    check(policies.ordinary.installationDigest === sharedOrdinary.installationDigest,
+      "both consoles read one installation document");
+    record("GET .../approval-policy publishes each namespace's effective policy, per console mode", {
       policies: Object.fromEntries(Object.entries(policies).map(([k, v]) => [k, v.name + "/" + v.mode])),
+      ordinaryAvailable: { localAdmin: false, shared: true },
       installationDigest: policies.ordinary.installationDigest,
       confirmationKeyId: policies.ordinary.confirmationKeyId,
     });
 
     // ---------------------------------------------------------------- 1
-    // ORDINARY: the submission routes to EXECUTION.
-    const o = await submitIn("ordinary");
+    // ORDINARY, IN THE SHARED CONSOLE (review H1): alice, signed in through
+    // the provider, submits; the console attests HER; the page routes to
+    // execution.
+    const o = await submitIn("ordinary", alice.page, sharedUi);
     check(o.planStep.toLowerCase().includes("ordinary confirmation"),
       "the submit step said the policy before the click: " + o.planStep.slice(0, 800));
     check(!o.planStep.includes("logweir drill approve"), "and offered no out-of-band approval");
     check(o.answer.authorization && o.answer.authorization.state === "confirmed",
       "the product API answered confirmed: " + JSON.stringify(o.answer.authorization));
-    const oHash = await waitForHash(page, "#/history?ns=" + o.ns + "&name=" + o.restore,
+    const oHash = await waitForHash(alice.page, "#/history?ns=" + o.ns + "&name=" + o.restore,
       "the ordinary submission's destination");
-    await shot(page, "01-ordinary-operation-view");
+    await shot(alice.page, "01-ordinary-operation-view");
     const oApproval = kubeJson(["-n", o.ns, "get", "approval", o.approvalName]);
     const oRestore = kubeJson(["-n", o.ns, "get", "restore", o.restore]);
     save("01-ordinary-approval.json", oApproval);
@@ -577,13 +862,14 @@ async function main() {
     check(doc.subject.uid === oRestore.metadata.uid, "bound to the Restore's UID");
     check(doc.planHash === "sha256:" + createHash("sha256").update(oRestore.spec.planBytes).digest("hex"),
       "bound to the Restore's plan hash");
-    check(doc.requester.issuer === "urn:logweir:local-admin" && doc.requester.subject === "admin",
-      "the console attested the local administrator");
+    check(doc.requester.issuer === IDP_ISSUER && doc.requester.subject === "alice",
+      "the console attested alice, the signed-in person: " + JSON.stringify(doc.requester));
     check(doc.policy.name === "p192-ordinary" && doc.policy.digest === policies.ordinary.digest,
       "and the bound policy's snapshot digest");
     const signed = verifySig(null, pae(V2_PAYLOAD, Buffer.from(oApproval.spec.approvalBytes)),
       createPublicKey(consolePublicPem), Buffer.from(sidecar.signatures[0].sig, "base64"));
     check(signed, "the console's signature verifies over the exact stored bytes");
+    const annotations = oRestore.metadata.annotations || {};
     // The lab controller predates PLAT-19.2: record its verdict, whatever it is.
     let labVerdict = null;
     for (let i = 0; i < 30 && labVerdict === null; i += 1) {
@@ -598,55 +884,122 @@ async function main() {
     const oJobs = (kubeJson(["-n", o.ns, "get", "jobs"]).items || []).map((j) => j.metadata.name);
     save("01-lab-controller-verdict.json", { approval: labVerdict, restoreStatus: oRestoreNow.status || null, jobs: oJobs });
     check(!oJobs.includes(o.restore), "the pre-19.2 lab controller created no Job for a v2 document");
-    record("ordinary confirmation: one click, the console signs, the page routes to execution", {
+    record("ordinary confirmation in the SHARED console: alice signs in, one click, the console attests alice, the page routes to execution", {
       namespace: o.ns, restore: o.restore, restoreUid: oRestore.metadata.uid, approval: o.approvalName,
-      routedTo: oHash, requester: "urn:logweir:local-admin#admin", policy: doc.policy,
+      routedTo: oHash, requester: doc.requester, policy: doc.policy,
+      restoreActorAnnotation: annotations["api.logweir.dev/actor"] || null,
       labControllerVerdict: labVerdict,
       labControllerNote: "the lab image predates PLAT-19.2: an old controller refuses every v2 " +
         "document and creates no Job -- D0's rollback rule, observed. Admission by the new " +
         "controller is the lab-refresh row.",
     });
 
+    // ---------------------------------------------------------------- 1b
+    // THE ADMINISTRATOR CONSOLE DOES NOT OFFER ORDINARY (review H1). The page
+    // says so and disables Create; and the product API itself refuses the
+    // very request alice's page sent, replayed from the administrator page,
+    // before anything exists.
+    await page.goto(ui + "#/restore?ns=" + NS.ordinary + "&backup=" + seeded.ordinary.point.name +
+      "&uid=" + seeded.ordinary.point.uid, { waitUntil: "load", timeout: 30000 });
+    await waitFor(page, "#step-target", "the wizard in the administrator console");
+    await page.selectOption("#target-cluster", seeded.ordinary.targetUid);
+    await waitFor(page, "#approval-policy-ordinary-unavailable", "the unavailable sentence");
+    const disabled = await page.evaluate(() => document.querySelector("#create-restore").disabled);
+    check(disabled === true, "Create is disabled in the administrator console");
+    await shot(page, "01b-local-admin-ordinary-unavailable");
+    const restoresBefore = (kubeJson(["-n", NS.ordinary, "get", "restores"]).items || []).length;
+    const direct = await page.evaluate(async ([u, body]) => {
+      const r = await fetch(u, { method: "POST", body: body, headers: {
+        "Content-Type": "application/json", "Idempotency-Key": "p192-local-ordinary-0001" } });
+      return { status: r.status, body: await r.json() };
+    }, [origin + "/api/v1/namespaces/" + NS.ordinary + "/restores", o.request]);
+    save("01b-local-admin-ordinary-refusal.json", direct);
+    const restoresAfter = (kubeJson(["-n", NS.ordinary, "get", "restores"]).items || []).length;
+    check(direct.status === 409 && direct.body.code === "policy_mismatch",
+      "the localAdmin console refused Ordinary: " + JSON.stringify(direct));
+    check(restoresAfter === restoresBefore, "and created nothing (" + restoresBefore + " → " +
+      restoresAfter + ")");
+    record("the administrator (localAdmin) console never signs an ordinary confirmation: the page " +
+      "disables Create and the product API refuses the same request with nothing created", {
+      namespace: NS.ordinary, status: direct.status, code: direct.body.code,
+      restoresBefore: restoresBefore, restoresAfter: restoresAfter,
+    });
+
     // ---------------------------------------------------------------- 2
-    // GOVERNED (explicit): Awaiting approval, and the requester cannot approve.
-    const v = await submitIn("governed");
+    // GOVERNED, IN THE SHARED CONSOLE: alice asks (with a ticket), cannot
+    // approve her own request, and bob -- a different signed-in person --
+    // approves through his own browser.
+    const TICKET = "CHG-P192-" + stamp;
+    const v = await submitIn("governed", alice.page, sharedUi, TICKET);
     check(v.answer.authorization && v.answer.authorization.state === "awaitingApproval" &&
       v.answer.authorization.mode === "governed" && v.answer.authorization.legacy === false,
       "governed answered awaitingApproval: " + JSON.stringify(v.answer.authorization));
-    const vHash = await waitForHash(page, "#/approvals?subject=" + v.restore, "the governed destination");
-    await waitFor(page, "#countersign-form", "the governed countersign panel");
-    await shot(page, "02-governed-awaiting-approval");
+    const vHash = await waitForHash(alice.page, "#/approvals?subject=" + v.restore, "the governed destination");
+    await waitFor(alice.page, "#countersign-form", "the governed countersign panel");
+    await shot(alice.page, "02-governed-awaiting-approval");
     const confirmationName = v.approvalName + "-confirmation";
     const confirmation = kubeJson(["-n", v.ns, "get", "approval", confirmationName]);
     save("02-governed-confirmation.json", confirmation);
+    const vDoc = JSON.parse(confirmation.spec.approvalBytes);
+    check(vDoc.ticket === TICKET, "the ticket alice typed is signed into the confirmation");
+    check(vDoc.requester.subject === "alice", "the confirmation attests alice");
     check(kube(["-n", v.ns, "get", "approval", v.approvalName], { expected: [0, 1] }).status === 1,
       "the referenced Approval does not exist until an approver submits");
-    // The requester countersigns with a throwaway key and submits through the PAGE.
     const doc2 = join(WORK_DIR, "confirmation.json");
     const conf2 = join(WORK_DIR, "confirmation.sig");
     writeFileSync(doc2, confirmation.spec.approvalBytes);
     writeFileSync(conf2, confirmation.spec.sidecarBytes);
-    const throwaway = join(WORK_DIR, "self-approver.pem");
-    check(spawnSync("openssl", ["genpkey", "-algorithm", "ed25519", "-out", throwaway], { timeout: 30000 }).status === 0,
-      "a throwaway approver key");
-    const counter = runCli(["drill", "countersign", "--document", doc2, "--confirmation", conf2,
-      "--key", throwaway, "--out", join(WORK_DIR, "self.sig")]);
-    check(counter.status === 0, "logweir drill countersign: " + counter.out);
-    save("02-countersign-summary.txt", counter.out.replace(/key_id\s+\S+/, "key_id <redacted>"));
-    await page.fill("#countersigned-sidecar", readFileSync(join(WORK_DIR, "self.sig"), "utf8"));
-    await page.click("#submit-countersignature");
-    await waitForText(page, "requested this restore", "the self-approval refusal");
-    await shot(page, "02-governed-self-approval-refused");
+    const countersignWith = (who) => {
+      const key = join(WORK_DIR, who + "-approver.pem");
+      check(spawnSync("openssl", ["genpkey", "-algorithm", "ed25519", "-out", key], { timeout: 30000 }).status === 0,
+        "a throwaway approver key for " + who);
+      const out = join(WORK_DIR, who + ".sig");
+      const counter = runCli(["drill", "countersign", "--document", doc2, "--confirmation", conf2,
+        "--key", key, "--out", out]);
+      check(counter.status === 0, "logweir drill countersign: " + counter.out);
+      save("02-countersign-summary-" + who + ".txt", counter.out.replace(/key_id\s+\S+/g, "key_id <redacted>"));
+      return readFileSync(out, "utf8");
+    };
+    await alice.page.fill("#countersigned-sidecar", countersignWith("alice"));
+    await alice.page.click("#submit-countersignature");
+    await waitForText(alice.page, "requested this restore", "the self-approval refusal");
+    await shot(alice.page, "02-governed-self-approval-refused");
     const refusal = bodies.filter((b) => b.url.endsWith("/restores/" + v.restore + "/approval")).pop();
     save("02-self-approval-response.json", refusal);
     check(refusal && refusal.status === 403, "the product API refused the requester: " + JSON.stringify(refusal));
     check(kube(["-n", v.ns, "get", "approval", v.approvalName], { expected: [0, 1] }).status === 1,
       "and no Approval was created");
-    record("governed: Awaiting approval, and the requester's own countersignature is refused", {
+    control("alice, the requester, holds the Approver role too and is still refused approving her own request (403 forbidden)", {});
+
+    await bob.page.goto(sharedUi + vHash, { waitUntil: "load", timeout: 30000 });
+    await waitFor(bob.page, "#countersign-form", "bob's countersign panel");
+    await bob.page.fill("#countersigned-sidecar", countersignWith("bob"));
+    await bob.page.click("#submit-countersignature");
+    let bobAnswer = null;
+    for (let i = 0; i < 60 && bobAnswer === null; i += 1) {
+      bobAnswer = bodies.filter((b) => b.url.endsWith("/restores/" + v.restore + "/approval") &&
+        b.status !== 403).pop() || null;
+      if (bobAnswer === null) {
+        await pause(500);
+      }
+    }
+    save("02-bob-approval-response.json", bobAnswer);
+    check(bobAnswer !== null && bobAnswer.status === 201, "bob's approval was recorded: " +
+      JSON.stringify(bobAnswer));
+    await shot(bob.page, "02-governed-approved-by-bob");
+    const vApproval = kubeJson(["-n", v.ns, "get", "approval", v.approvalName]);
+    save("02-governed-approval.json", vApproval);
+    const vSidecar = JSON.parse(vApproval.spec.sidecarBytes);
+    check(vApproval.spec.approvalBytes === confirmation.spec.approvalBytes,
+      "the Approval carries the confirmation's exact bytes");
+    check(vSidecar.signatures.length === 2, "the console's signature and bob's");
+    check(((vApproval.metadata.annotations || {})["logweir.dev/approver"]) === IDP_ISSUER + "#bob",
+      "bob is recorded as the approver");
+    record("governed in the SHARED console: alice asks with a ticket, is refused approving her own request, and bob approves from his own browser", {
       namespace: v.ns, restore: v.restore, routedTo: vHash, confirmation: confirmationName,
-      selfApproval: { status: refusal.status, code: JSON.parse(refusal.body).code },
+      ticket: TICKET, selfApproval: { status: refusal.status, code: JSON.parse(refusal.body).code },
+      bobApproval: { status: bobAnswer.status, signatures: vSidecar.signatures.length },
     });
-    control("the requester is refused whatever it holds: localAdmin holds every action, including approval.submit", {});
 
     // ---------------------------------------------------------------- 3
     // LEGACY (unbound): Awaiting approval, then Verified with a minted Approval.
@@ -859,6 +1212,8 @@ async function main() {
       { row: victim ? victim.id : null, refusal: refusedOther });
   } finally {
     save("api-log.txt", apiLog.join("").replace(/-----BEGIN[\s\S]*?-----END[^\n]*\n/g, "<pem redacted>\n"));
+    save("api-shared-log.txt", sharedLog.join("").split(CLIENT_SECRET).join("<redacted>")
+      .replace(/-----BEGIN[\s\S]*?-----END[^\n]*\n/g, "<pem redacted>\n"));
     await browser.close();
     stopApi();
   }
