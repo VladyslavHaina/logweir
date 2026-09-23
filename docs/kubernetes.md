@@ -3846,10 +3846,10 @@ kubectl --context docker-desktop get backupschedule nightly \
 ```
 
 **Logweir prints them. An operator runs them.** Nothing in the report was
-deleted, and **nothing that computes it holds any delete capability against
-object storage** (in tag 1 that was true of every Logweir component; since
-Amendment H the one exception is §7f's separately linked worker) — the
-controller's archive handle is built with the
+deleted, nothing that computes it can delete, and **no Logweir component in
+tag 1 holds any delete capability against object storage** (since Amendment H
+the one exception is §7f's separately linked worker — the version-scoped form
+below) — the controller's archive handle is built with the
 read-only constructor, which refuses every write before it checks anything
 else, and guard **G-RET** (`scripts/check-no-archive-write.sh`, in `just
 lint`) fails the build if a source file in the control plane names the
