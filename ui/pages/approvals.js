@@ -69,6 +69,7 @@ import {
   UNVERIFIED,
   badge,
   cell,
+  disableKeepingFocus,
   errorBox,
   esc,
   facts,
@@ -1177,7 +1178,7 @@ function wireCountersign(node, view, parse, api, lifecycle) {
     }
     const body = form.querySelector("fieldset");
     if (body !== null) {
-      body.disabled = state.phase === "pending";
+      disableKeepingFocus(body, state.phase === "pending", node.querySelector("#countersign-status"));
     }
     const slot = node.querySelector("#countersign-status");
     if (slot !== null) {
@@ -1341,7 +1342,7 @@ function wire(node, view, parse, api, lifecycle) {
     }
     const body = form.querySelector("fieldset");
     if (body !== null) {
-      body.disabled = state.phase === "pending";
+      disableKeepingFocus(body, state.phase === "pending", node.querySelector("#approval-form-status"));
     }
     showStatus(state);
     if (state.phase === "failed") {

@@ -454,3 +454,37 @@ test("a_control_disabled_by_a_pending_fieldset_hands_focus_to_its_form_status", 
   // the detached old button -- the body, in a browser.
   assert.notEqual(doc.activeElement, doc.body);
 });
+
+test("disabling_the_focused_control_in_place_moves_focus_to_the_status_first", async () => {
+  const { disableKeepingFocus } = await import("../render.js");
+  const doc = { activeElement: null };
+  const mk = (id) => ({
+    id: id, ownerDocument: doc, disabled: false, kids: [],
+    contains(o) { return o === this || this.kids.indexOf(o) !== -1; },
+    closest: () => null,
+    focus() { doc.activeElement = this; },
+  });
+  const view = mk("view-slot");
+  doc.getElementById = (id) => (id === "view-slot" ? view : null);
+  const status = mk("discovery-status");
+  const cancel = mk("discovery-cancel");
+  cancel.focus();
+  disableKeepingFocus(cancel, true, status);
+  assert.equal(cancel.disabled, true);
+  assert.equal(doc.activeElement, status, "focus moved to the status region before disabling");
+  // No status given and no form: the view takes it, never the body.
+  const again = mk("re-read");
+  again.focus();
+  disableKeepingFocus(again, true);
+  assert.equal(doc.activeElement, view);
+  // Re-enabling does not move focus, and a control without focus is just disabled.
+  disableKeepingFocus(again, false);
+  assert.equal(again.disabled, false);
+  assert.equal(doc.activeElement, view);
+  // Negative control: the bare assignment this replaced leaves focus on a
+  // disabled control, which a browser then drops to the body.
+  const bare = mk("bare");
+  bare.focus();
+  bare.disabled = true;
+  assert.equal(doc.activeElement, bare, "the old way: focus left on the disabled control");
+});

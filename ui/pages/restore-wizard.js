@@ -103,6 +103,7 @@ import {
   COMPLETION_GUIDANCE,
   copyBlock,
   datagrid,
+  disableKeepingFocus,
   epochMs,
   errorBox,
   esc,
@@ -5233,7 +5234,7 @@ function wireRestoreReadiness(node, state, parse, api, lifecycle, prepared) {
       if (!active(lifecycle) || current === null || current === undefined) {
         return;
       }
-      cancel.disabled = true;
+      disableKeepingFocus(cancel, true);
       api.cancelPreflight(state.ns, current.id).then(
         () => {
           if (active(lifecycle)) {
@@ -5701,7 +5702,7 @@ function wire(node, state, parse, api, lifecycle, prepared) {
     if (settled.phase === "pending") {
       const button = node.querySelector("#create-restore");
       if (button !== null) {
-        button.disabled = true;
+        disableKeepingFocus(button, true);
         button.setAttribute("aria-busy", "true");
       }
       const status = node.querySelector("#restore-submit-status");

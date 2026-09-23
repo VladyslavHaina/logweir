@@ -62,6 +62,7 @@ import {
   ABSENT,
   EMPTY_INVENTORY_SENTENCE,
   badge,
+  disableKeepingFocus,
   cell,
   detailLink,
   errorBlock,
@@ -1451,7 +1452,7 @@ function wireDiscovery(node, ns, name, parse, lifecycle, api, object, view) {
         if (!active(lifecycle) || latest === null || latest === undefined) {
           return;
         }
-        cancel.disabled = true;
+        disableKeepingFocus(cancel, true, node.querySelector("#discovery-status"));
         api.cancelDiscovery(ns, latest.id).then(
           () => {
             if (active(lifecycle)) {
@@ -1556,7 +1557,7 @@ function wireDetailProbe(node, ns, name, parse, lifecycle, api, discovery, check
     reading = true;
     const button = form.querySelector("button");
     if (button !== null) {
-      button.disabled = true;
+      disableKeepingFocus(button, true);
     }
     api.get(ns, PLURAL, name, readOptions(lifecycle)).then(
       (object) => {
@@ -1620,7 +1621,7 @@ function wireRowProbe(node, ns, parse, lifecycle, api, form) {
     reading = true;
     const button = form.querySelector("button");
     if (button !== null) {
-      button.disabled = true;
+      disableKeepingFocus(button, true);
     }
     api.get(ns, PLURAL, name, readOptions(lifecycle)).then(
       (object) => {

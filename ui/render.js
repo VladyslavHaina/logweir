@@ -197,6 +197,39 @@ export function restoreFocus(node, kept) {
   return false;
 }
 
+/** Disables (or re-enables) a control IN PLACE without stranding the reader.
+ *
+ *  A button disabled while it holds focus drops that focus to the document
+ *  body. So when `disabled` is true and focus is on `control` or inside it,
+ *  focus first moves to `fallback` (a status region the outcome will be
+ *  written into), else to the status region of the form the control is in,
+ *  else to the view slot -- then the control is disabled. The class of defect
+ *  `replace()`'s bookkeeping closes for a re-render, closed for the pages that
+ *  disable a control without one (PLAT-18.2 class sweep). */
+export function disableKeepingFocus(control, disabled, fallback) {
+  if (control === null || control === undefined) {
+    return;
+  }
+  const doc = control.ownerDocument;
+  if (disabled === true && doc && typeof control.contains === "function" &&
+    doc.activeElement !== null && control.contains(doc.activeElement)) {
+    const form = typeof control.closest === "function" ? control.closest("form") : null;
+    const candidates = [
+      fallback,
+      form === null ? null : form.querySelector(".form-status[tabindex]"),
+      doc.getElementById("view-slot"),
+    ];
+    for (const candidate of candidates) {
+      if (candidate !== null && candidate !== undefined && candidate !== control &&
+        !control.contains(candidate) && typeof candidate.focus === "function") {
+        candidate.focus({ preventScroll: true });
+        break;
+      }
+    }
+  }
+  control.disabled = disabled === true;
+}
+
 /** Renders an error from `api.js` as the API server reported it: its own
  *  status code, its own `reason`, its own `message`, and nothing added.
  *
