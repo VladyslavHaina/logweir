@@ -677,8 +677,21 @@ async function focusProbes(browser, state, route) {
         insideView: main !== null && node !== null && main.contains(node),
       };
     });
+    // C. The operation view announces its state in the page's one live
+    // region, which no re-render replaces.
+    await open(page, route("operations?kind=backup&name=" + encodeURIComponent(state.backup) +
+      "&uid=" + encodeURIComponent(state.backupUid)));
+    await pause(1500);
+    probes.operationAnnouncement = await page.evaluate(() => {
+      const region = document.getElementById("announcer");
+      return region === null ? null : { text: region.textContent,
+        role: region.getAttribute("role"), live: region.getAttribute("aria-live") };
+    });
     result.focusProbes = probes;
-    const kept = probes.wizardToggle.active === "topic-0" && probes.scheduleRemount.insideView;
+    const announced = probes.operationAnnouncement !== null &&
+      probes.operationAnnouncement.text.indexOf("Operation " + state.backup + ": ") === 0;
+    const kept = probes.wizardToggle.active === "topic-0" && probes.scheduleRemount.insideView &&
+      announced;
     if (LABEL === "baseline") {
       control("main's ui/ loses focus on a re-render (the PLAT-10 LOW, reproduced)", {
         probes: probes, lost: !kept });

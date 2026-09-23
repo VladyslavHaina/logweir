@@ -375,3 +375,17 @@ test("a_region_that_scrolls_becomes_reachable_and_one_that_fits_adds_no_tab_stop
   assert.equal(wide.attrs.role, undefined);
   assert.equal(authored.attrs.tabindex, "-1", "and the page's own is still left alone");
 });
+
+test("an_operation_announces_its_state_stage_and_reason_in_one_sentence", async () => {
+  const { operationAnnouncement } = await import("../pages/operation.js");
+  assert.equal(
+    operationAnnouncement({ state: "running", stage: "copying", reason: "Admitted" }, "b-1"),
+    "Operation b-1: running, stage copying (Admitted).",
+  );
+  assert.equal(operationAnnouncement({ phase: "Succeeded" }, "b-2"), "Operation b-2: Succeeded.",
+    "a custom resource's phase stands in for a state");
+  assert.equal(operationAnnouncement({}, "b-3"), "Operation b-3: unknown.",
+    "no state is said as unknown, never as a success");
+  const { announce } = await import("../render.js");
+  assert.equal(announce("anything"), false, "without a document nothing is announced, and nothing throws");
+});

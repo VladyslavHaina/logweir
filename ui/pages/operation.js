@@ -37,6 +37,7 @@
 
 import {
   ABSENT,
+  announce,
   COMPLETION_GUIDANCE,
   GREEN_TRUST_STATES,
   HISTORICAL_SUFFIX,
@@ -636,6 +637,19 @@ export function renderOperation(view) {
   );
 }
 
+/** What the page's live region says when an operation moves: its name, its
+ *  state (or, for a custom resource, its phase), its stage and its reason --
+ *  the facts the view shows, in one sentence. Pure, so the suite reads it. */
+export function operationAnnouncement(f, name) {
+  const facts_ = f || {};
+  const state = facts_.state || facts_.phase || "unknown";
+  return (
+    "Operation " + String(name || facts_.name || "") + ": " + String(state) +
+    (facts_.stage ? ", stage " + String(facts_.stage) : "") +
+    (facts_.reason ? " (" + String(facts_.reason) + ")" : "") + "."
+  );
+}
+
 // --------------------------------------------------------------- mount half
 
 /** Reads one operation, renders it, and follows it until it settles. */
@@ -676,6 +690,7 @@ export async function mountOperation(node, ns, params, parse, deps, lifecycle) {
         view.document = null;
       } else {
         view.document = document;
+        announce(operationAnnouncement(operationFacts(document, console_), view.name));
       }
     }
     paint();

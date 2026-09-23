@@ -46,6 +46,9 @@
       <div id="nav-slot"></div>
     </header>
     <main id="view-slot" tabindex="-1"></main>
+    <!-- The one live region no view replaces: progress that a reader is
+         waiting on is announced here (render.js `announce`). -->
+    <div id="announcer" class="visually-hidden" role="status" aria-live="polite" aria-atomic="true"></div>
     <footer class="colophon">
       <p>
         Served by <code>kubectl proxy</code>, which attaches the viewer's own

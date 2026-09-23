@@ -627,6 +627,28 @@ export function datagridState(id) {
   return DATAGRID_STATE.get(key);
 }
 
+/** ONE POLITE LIVE REGION FOR THE WHOLE PAGE (PLAT-18.2: accessible progress
+ *  announcements). A view that re-renders by replacing its subtree replaces
+ *  any live region inside it, and a region that is removed and re-added is
+ *  not reliably announced. `index.html` carries `#announcer`, which no view
+ *  replaces; a page hands it a sentence when something a reader is waiting
+ *  on changed -- an operation's state or stage -- and the same sentence twice
+ *  in a row is said once. Nothing happens without a document. */
+let lastAnnouncement = "";
+export function announce(message) {
+  const text = String(message === undefined || message === null ? "" : message).trim();
+  if (text.length === 0 || text === lastAnnouncement || typeof document === "undefined") {
+    return false;
+  }
+  const region = document.getElementById("announcer");
+  if (region === null) {
+    return false;
+  }
+  lastAnnouncement = text;
+  region.textContent = text;
+  return true;
+}
+
 /** THE SCROLLING REGIONS, MADE REACHABLE (PLAT-18.2; axe-core's
  *  `scrollable-region-focusable`). A wide table or a long plan block scrolls
  *  sideways inside its own box; a region that scrolls and holds nothing
