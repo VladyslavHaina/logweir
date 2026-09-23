@@ -2032,3 +2032,77 @@ fn apply_carries_a_stored_condition_the_base_builder_did_not_name() {
          `status_unchanged` compares arrays element by element: {conditions:?}"
     );
 }
+
+/// Review M3: "the runner started" is STICKY. A pass that finds no pod — the
+/// Job controller deleted it at a deadline, before the Job reads `Failed` —
+/// keeps the recorded `startedAt`, so the terminal pass cannot mistake a
+/// runner that ran for one that never started and name an old warning as the
+/// cause.
+///
+/// MUTANT: write this pass's derived `runner` block as-is. `startedAt` is
+/// absent from the patch and this row fails.
+#[test]
+fn a_pass_with_no_pod_keeps_the_recorded_start() {
+    let mut stored = stored_with(&[(Code::RunnerImagePullFailed, at(19, 0))]);
+    stored.runner = Some(
+        serde_json::from_value(json!({
+            "jobName": JOB, "podName": POD, "containerState": "Running",
+            "startedAt": "2026-11-09T03:19:30Z",
+        }))
+        .expect("facts"),
+    );
+    let d = derive(&facts(None, &[], at(20, 0)));
+    let out = apply(
+        json!({"status": {"conditions": []}}),
+        &write_for(&d, &Progress::default(), Some(&stored), at(20, 0), false),
+    );
+    assert_eq!(
+        out["status"]["progress"]["runner"]["startedAt"].as_str(),
+        Some("2026-11-09T03:19:30Z"),
+        "{}",
+        out["status"]["progress"]
+    );
+    let after: RunProgress =
+        serde_json::from_value(out["status"]["progress"].clone()).expect("round-trips");
+    assert_eq!(
+        recorded_terminal_state(Some(&after), at(20, 30)),
+        None,
+        "the image-pull warning is not the cause of a run whose runner ran"
+    );
+}
+
+/// A runner first seen TERMINATED (it crashed between two passes) has a start
+/// too — `runner.startedAt` reads it from the terminated state.
+#[test]
+fn a_runner_first_seen_terminated_has_started() {
+    let p = pod(json!({
+        "phase": "Failed",
+        "conditions": [{"type": "PodScheduled", "status": "True"}],
+        "containerStatuses": [
+            {"name": "runner", "ready": false, "restartCount": 0, "image": "x", "imageID": "x",
+             "state": {"terminated": {"exitCode": 1, "startedAt": "2026-11-09T03:19:40Z",
+                                      "finishedAt": "2026-11-09T03:19:45Z"}}},
+        ],
+    }));
+    let d = derive(&facts(Some(&p), &[], at(20, 0)));
+    assert_eq!(d.runner.started_at, Some(at(19, 40)));
+}
+
+/// Review L6: an ERROR-class code outranks a NEWER qualifying warning, as it
+/// did before the warning path existed.
+///
+/// MUTANT: one newest-first scan over both classes (the first fix). The
+/// warning wins and this row fails.
+#[test]
+fn an_error_class_code_outranks_a_newer_warning() {
+    assert_eq!(
+        recorded_terminal_state(
+            Some(&stored_with(&[
+                (Code::CredentialSecretNotFound, at(18, 0)),
+                (Code::PodUnschedulable, at(19, 50)),
+            ])),
+            at(20, 0)
+        ),
+        Some("CredentialReferenceMissing")
+    );
+}

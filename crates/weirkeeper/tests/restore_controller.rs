@@ -3374,14 +3374,16 @@ async fn an_owned_pod_is_read_and_two_claimants_are_refused() {
 /// A `Restore` whose progress block recorded `diagnostics` (JSON), as the
 /// running passes leave it.
 fn restore_with_diagnostics(diagnostics: Value) -> Restore {
+    restore_with_progress(serde_json::json!({
+        "stage": "Preparing", "reason": "WaitingForPod", "diagnostics": diagnostics,
+    }))
+}
+
+fn restore_with_progress(progress: Value) -> Restore {
     let mut r = restore();
     r.status = Some(
-        serde_json::from_value(serde_json::json!({
-            "phase": "Running",
-            "progress": {"stage": "Preparing", "reason": "WaitingForPod",
-                         "diagnostics": diagnostics},
-        }))
-        .expect("a RestoreStatus"),
+        serde_json::from_value(serde_json::json!({"phase": "Running", "progress": progress}))
+            .expect("a RestoreStatus"),
     );
     r
 }
@@ -3487,6 +3489,39 @@ async fn a_warning_that_ended_the_restore_is_its_terminal_reason() {
             "{label}: the finished write leaves the recorded diagnostics alone (a partial merge)"
         );
     }
+}
+
+/// Review L7/M3, the `Restore` half: a warning recorded before the runner
+/// STARTED is not what ended it. The progress block says the runner started
+/// (`startedAt`, kept sticky across pod-less passes), the Job then failed with
+/// its pod gone, and the answer is `NoExitCode` — not the warning's class.
+///
+/// MUTANT: drop the `!started` clause in `recorded_terminal_state`. This row
+/// fails (the reviewer's R5 survived the `Restore` suite before it existed).
+#[tokio::test]
+async fn a_warning_before_the_restore_runner_started_is_not_its_cause() {
+    let empty = r#"{"apiVersion":"v1","kind":"PodList","metadata":{},"items":[]}"#;
+    let (client, _rec, _bodies) =
+        mock_client_recording_bodies(finished_routes(empty.to_string(), log_body(""), "Failed"));
+    let outcome = reconcile_restore(
+        &restore_with_progress(serde_json::json!({
+            "stage": "Queued",
+            "reason": "WaitingForPod",
+            "runner": {"jobName": NAME, "startedAt": "2026-09-10T11:58:20Z"},
+            "diagnostics": [stored_diagnostic(
+                "VolumeMountFailed",
+                "Warning",
+                "2026-09-10T11:58:00Z"
+            )],
+        })),
+        &client,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("the reconcile completes");
+    assert_eq!(outcome.terminal_state.as_deref(), Some("NoExitCode"));
 }
 
 /// The crashed-Job case: a Job that finished with no terminated state for

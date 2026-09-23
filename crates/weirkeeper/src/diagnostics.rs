@@ -777,8 +777,17 @@ fn runner_facts(facts: &Facts<'_>, runner: Option<&ContainerStatus>) -> RunnerFa
         waiting_reason: runner
             .and_then(|c| c.state.as_ref()?.waiting.as_ref()?.reason.clone())
             .map(|r| truncate_on_char_boundary(&r, 64)),
-        started_at: runner
-            .and_then(|c| Some(c.state.as_ref()?.running.as_ref()?.started_at.as_ref()?.0)),
+        // RUNNING OR TERMINATED: a runner that crashed between two passes is
+        // first seen terminated, and it started all the same.
+        started_at: runner.and_then(|c| {
+            let state = c.state.as_ref()?;
+            state
+                .running
+                .as_ref()
+                .and_then(|r| r.started_at.as_ref())
+                .or_else(|| state.terminated.as_ref()?.started_at.as_ref())
+                .map(|t| t.0)
+        }),
     }
 }
 
@@ -1261,16 +1270,31 @@ pub fn recorded_terminal_state(
 ) -> Option<&'static str> {
     let stored = stored?;
     let started = runner_recorded_as_started(stored);
-    stored.diagnostics.as_ref()?.iter().find_map(|d| {
+    let diagnostics = stored.diagnostics.as_ref()?;
+    let projected = |d: &Diagnostic| {
         let code = Code::ALL.iter().find(|c| c.as_str() == d.code)?;
         let reason = code
             .runner_ready_reason()
             .filter(|r| *r != REASON_WAITING_FOR_POD)?;
-        match code.severity() {
-            Severity::Error => Some(reason),
-            Severity::Warning => (!started && seen_at_the_end(d, ended_at)).then_some(reason),
-        }
-    })
+        Some((code.severity(), reason))
+    };
+    // ERROR-CLASS FIRST, exactly as before the warning path existed (review
+    // L6): a newer warning must not outrank a recorded code that does not
+    // resolve on its own. Then the newest warning that qualifies.
+    diagnostics
+        .iter()
+        .find_map(|d| match projected(d)? {
+            (Severity::Error, reason) => Some(reason),
+            (Severity::Warning, _) => None,
+        })
+        .or_else(|| {
+            diagnostics.iter().find_map(|d| match projected(d)? {
+                (Severity::Warning, reason) => {
+                    (!started && seen_at_the_end(d, ended_at)).then_some(reason)
+                }
+                (Severity::Error, _) => None,
+            })
+        })
 }
 
 /// Whether the stored status records the runner as ever having started.
@@ -1478,9 +1502,23 @@ pub fn apply(base: Value, write: &Write<'_>) -> Value {
         // field cleared with explicit null when it no longer holds".
         observed.map_or(Value::Null, |t| json!(t)),
     );
+    // "THE RUNNER STARTED" IS STICKY (review M3). A pass that finds no pod —
+    // the Job controller deleted it at a deadline, an eviction, a node loss —
+    // derives no `startedAt`, and the terminal pass reads this block to decide
+    // whether a warning could have been what ended the run
+    // ([`recorded_terminal_state`]). A started runner must never read as one
+    // that never started, so the stored instant is carried EXPLICITLY rather
+    // than left to a merge patch's "absent means unchanged".
+    let mut runner = d.runner.clone();
+    if runner.started_at.is_none() {
+        runner.started_at = write
+            .stored
+            .and_then(|p| p.runner.as_ref())
+            .and_then(|r| r.started_at);
+    }
     progress.insert(
         "runner".to_string(),
-        serde_json::to_value(&d.runner).unwrap_or(Value::Null),
+        serde_json::to_value(&runner).unwrap_or(Value::Null),
     );
     progress.insert(
         "runnerPhase".to_string(),
