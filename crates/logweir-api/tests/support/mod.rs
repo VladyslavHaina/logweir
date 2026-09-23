@@ -62,10 +62,14 @@ pub const PLURALS: [&str; 12] = [
     "retentionpolicies",
 ];
 
-/// The one CLUSTER-SCOPED plural. It lives under `PREFIX`'s parent path, with
-/// no `namespaces/<ns>/` segment, so a route that tried to read it as if it
+/// The CLUSTER-SCOPED plurals. They live under `PREFIX`'s parent path, with
+/// no `namespaces/<ns>/` segment, so a route that tried to read one as if it
 /// were namespaced would be `unexpected` rather than quietly answered.
-pub const CLUSTER_PLURALS: [&str; 1] = ["trustpolicies"];
+///
+/// `trustrosters` answers ONE request: `GET trustrosters/default`, which is the
+/// whole of the console's grant on it. A list, or any other name, is
+/// `unexpected` — see [`cluster_answer`].
+pub const CLUSTER_PLURALS: [&str; 2] = ["trustpolicies", "trustrosters"];
 /// The namespace key cluster-scoped objects are stored under in the fake's own
 /// table. It is not a namespace and no request path contains it.
 pub const CLUSTER_KEY: &str = "\u{0}cluster";
@@ -160,6 +164,7 @@ fn kind_of(plural: &str) -> &'static str {
         "recoverycatalogs" => "RecoveryCatalog",
         "retentionpolicies" => "RetentionPolicy",
         "trustpolicies" => "TrustPolicy",
+        "trustrosters" => "TrustRoster",
         "configmaps" => "ConfigMap",
         "secrets" => "Secret",
         _ => "Unknown",
@@ -523,7 +528,8 @@ fn core_answer(s: &mut State, recorded: &Recorded, rest: &str) -> (Option<Durati
     }
 }
 
-/// The cluster-scoped kind: `GET` list and `GET` by name, and nothing else.
+/// The cluster-scoped kinds: `GET` list and `GET` by name, and nothing else —
+/// and for `trustrosters`, `GET trustrosters/default` only.
 ///
 /// ANY OTHER VERB IS `unexpected`. D3 §10 keeps trust WRITES off the API in v1,
 /// and the way a test proves that is for the fake to refuse a write rather than
@@ -548,6 +554,20 @@ fn cluster_answer(
             );
         }
     };
+    // THE ROSTER IS ONE OBJECT BY ONE NAME. The console's grant is `get` with
+    // `resourceNames: ["default"]`, so a list or another name is a request the
+    // real API server would refuse with 403 — here it is `unexpected`, and
+    // every test that calls `assert_strict` fails on it.
+    if plural == "trustrosters" && (recorded.method != "GET" || name.as_deref() != Some("default"))
+    {
+        s.unexpected
+            .push(format!("{} {}", recorded.method, recorded.path));
+        return (
+            None,
+            403,
+            status_body(403, "Forbidden", "not allowed by the fake"),
+        );
+    }
     let query: BTreeMap<String, String> =
         serde_urlencoded::from_str(&recorded.query).unwrap_or_default();
     match (recorded.method.as_str(), name) {

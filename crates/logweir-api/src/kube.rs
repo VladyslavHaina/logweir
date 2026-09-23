@@ -6,9 +6,11 @@
 //! `BackupDestination`, `TopicDiscovery`, `Preflight`, `ProtectionPolicy`,
 //! `RehearsalSchedule`, `RecoveryCatalog` and `RetentionPolicy` — plus the one
 //! CLUSTER-SCOPED kind, `TrustPolicy`, behind its own read-only seal
-//! ([`ClusterResource`]). There is no method that takes a group, a version, a
-//! plural or a path, so no request can name a Pod, a log, an exec stream, a Job
-//! or a core Namespace; there is no delete.
+//! ([`ClusterResource`]), and ONE cluster-scoped object that is not a kind in
+//! any seal: the `TrustRoster` named `default`, read by
+//! [`KubeAdapter::get_trust_roster`] and by nothing else. There is no method
+//! that takes a group, a version, a plural or a path, so no request can name a
+//! Pod, a log, an exec stream, a Job or a core Namespace; there is no delete.
 //!
 //! TWO CORE OBJECTS ARE REACHED, EACH THROUGH ONE VERB AND ONE HAND-WRITTEN
 //! TYPE. [`ResultDocument`] is a `configmaps` GET and nothing else: it is a
@@ -70,6 +72,7 @@ use weirkeeper::crds::retention_policy::RetentionPolicy;
 use weirkeeper::crds::selection::AllUserTopics;
 use weirkeeper::crds::topic_discovery::TopicDiscovery;
 use weirkeeper::crds::trust_policy::TrustPolicy;
+use weirkeeper::crds::trust_roster::TrustRoster;
 use weirkeeper::crds::{ArchiveRef, LocalRef};
 
 use crate::config::KubeSource;
@@ -1013,6 +1016,29 @@ impl KubeAdapter {
     pub async fn get_cluster<K: ClusterResource>(&self, name: &str) -> Result<K, KubeFailure> {
         let api: Api<K> = Api::all(self.client.clone());
         self.bounded("get", K::plural(&()).as_ref(), api.get(name))
+            .await
+    }
+
+    /// The cluster's ONE `TrustRoster`, `default`, and no other. Reads only.
+    ///
+    /// WHY THIS IS A METHOD AND NOT A THIRD KIND IN [`ClusterResource`]. The
+    /// only caller is the preflight staleness recomputation
+    /// (`routes::preflights`), which compares the roster's uid and generation
+    /// with the ones the controller recorded in `status.binding.referents[]`
+    /// — and the controller only ever records `weirkeeper::ROSTER_NAME`.
+    /// Sealing `TrustRoster` into `ClusterResource` would hand every route a
+    /// generic `list_cluster::<TrustRoster>` and a `get_cluster` by any name:
+    /// a list of every roster's key material that no route needs. So the name
+    /// is fixed HERE and not passed in, the RBAC grant is `get` with
+    /// `resourceNames: ["default"]` (`charts/logweir/templates/ui/api-rbac.yaml`,
+    /// `<release>-api-trustroster`), and `linkage.rs` pins both.
+    ///
+    /// # Errors
+    ///
+    /// [`KubeFailure`], `NotFound` included.
+    pub async fn get_trust_roster(&self) -> Result<TrustRoster, KubeFailure> {
+        let api: Api<TrustRoster> = Api::all(self.client.clone());
+        self.bounded("get", "trustrosters", api.get(weirkeeper::ROSTER_NAME))
             .await
     }
 

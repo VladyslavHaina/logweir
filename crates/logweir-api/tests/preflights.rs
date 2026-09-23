@@ -1185,24 +1185,25 @@ async fn a_referent_that_cannot_be_read_fails_closed() {
         assert!(reason["basis"].is_string(), "{reason}");
     }
 
-    // (b) a kind the sealed adapter has no verb for. `TrustRoster` is
-    // cluster-scoped and deliberately outside the product set.
+    // (b) a kind this build has no read for. Both cluster-scoped trust kinds
+    // ARE read now (PREFLIGHT-TRUSTROSTER-STALE, below); a kind a later
+    // controller adds is not, and is still reported rather than skipped.
     let app = TestApp::new();
     seed_preflight(
         &app.fake,
         NS_A,
-        "pf-roster",
+        "pf-future",
         "Restore",
         None,
         Some(LOCAL_ADMIN_ACTOR),
     );
-    let mut object = app.fake.object("preflights", NS_A, "pf-roster").unwrap();
+    let mut object = app.fake.object("preflights", NS_A, "pf-future").unwrap();
     object["status"]["binding"]["referents"] = json!([
-        {"kind": "TrustRoster", "name": "logweir-trust", "uid": "uid-roster", "generation": 1}
+        {"kind": "FutureTrustKind", "name": "default", "uid": "uid-future", "generation": 1}
     ]);
     app.fake.seed("preflights", NS_A, object);
     let response = app
-        .get(&format!("/api/v1/namespaces/{NS_A}/preflights/pf-roster"))
+        .get(&format!("/api/v1/namespaces/{NS_A}/preflights/pf-future"))
         .await;
     let item = response.json()["item"].clone();
     assert_eq!(item["applicable"], false);
@@ -1210,7 +1211,283 @@ async fn a_referent_that_cannot_be_read_fails_closed() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|r| { r["reason"] == "unverifiable" && r["kind"] == "TrustRoster" }));
+        .any(|r| { r["reason"] == "unverifiable" && r["kind"] == "FutureTrustKind" }));
+    app.fake.assert_strict();
+}
+
+// ======================================================================
+// PREFLIGHT-TRUSTROSTER-STALE: the cluster-scoped trust referents
+// ======================================================================
+//
+// The controller records `TrustRoster/default` whenever it exists (since
+// `4c4d2ed`) and the namespace's governing `TrustPolicy`. Until this fix the
+// API could read neither, so EVERY readiness result on a cluster with a roster
+// was served `unverifiable` → stale, and the wizard refused all of them. Now
+// both are compared by uid and generation like every other referent — and a
+// read that is refused stays `unverifiable`, which is the fail-closed half.
+
+/// One trust kind under test: its binding kind, its RBAC plural, the name the
+/// binding records, and a minimal object of that kind the typed read accepts.
+struct TrustKind {
+    kind: &'static str,
+    plural: &'static str,
+    name: &'static str,
+    spec: fn() -> Value,
+}
+
+const ROSTER: TrustKind = TrustKind {
+    kind: "TrustRoster",
+    plural: "trustrosters",
+    name: "default",
+    spec: || json!({"approverKeys": [], "signingKeys": [], "allowedClusterIds": []}),
+};
+
+const POLICY: TrustKind = TrustKind {
+    kind: "TrustPolicy",
+    plural: "trustpolicies",
+    name: "org-default",
+    spec: || json!({"default": false, "namespaces": [NS_A], "keys": []}),
+};
+
+/// A completed restore check whose binding names the bound `KafkaCluster`
+/// (unchanged, seeded here) and ONE trust referent recorded at `uid`/`generation`.
+fn seed_trust_bound(app: &TestApp, id: &str, trust: &TrustKind, uid: &str, generation: i64) {
+    seed_preflight(&app.fake, NS_A, id, "Restore", None, Some(LOCAL_ADMIN_ACTOR));
+    seed_bound_referent(app, "uid-target", 1);
+    let mut object = app.fake.object("preflights", NS_A, id).unwrap();
+    object["status"]["binding"]["referents"] = json!([
+        {"kind": "KafkaCluster", "name": "target", "uid": "uid-target", "generation": 1},
+        {"kind": trust.kind, "name": trust.name, "uid": uid, "generation": generation}
+    ]);
+    app.fake.seed("preflights", NS_A, object);
+}
+
+/// The live trust object, as it is NOW.
+fn seed_trust_live(app: &TestApp, trust: &TrustKind, uid: &str, generation: i64) {
+    app.fake.seed_cluster(
+        trust.plural,
+        json!({
+            "metadata": {"name": trust.name, "uid": uid, "generation": generation},
+            "spec": (trust.spec)(),
+        }),
+    );
+}
+
+async fn read_item(app: &TestApp, id: &str) -> Value {
+    app.get(&format!("/api/v1/namespaces/{NS_A}/preflights/{id}"))
+        .await
+        .json()["item"]
+        .clone()
+}
+
+/// And the request the recomputation made is the one read the grant allows:
+/// `GET` of that object by name, cluster-scoped, and no list.
+fn assert_read_by_name(app: &TestApp, trust: &TrustKind) {
+    let wanted = format!("/apis/logweir.dev/v1alpha1/{}/{}", trust.plural, trust.name);
+    let reads: Vec<String> = app
+        .fake
+        .requests()
+        .into_iter()
+        .filter(|r| r.path.contains(trust.plural))
+        .map(|r| format!("{} {}", r.method, r.path))
+        .collect();
+    assert_eq!(reads, vec![format!("GET {wanted}")], "{}", trust.kind);
+}
+
+async fn an_unchanged_trust_referent_leaves_the_verdict_applicable(trust: &TrustKind) {
+    let app = TestApp::new();
+    seed_trust_bound(&app, "pf-trust-same", trust, "uid-trust", 3);
+    seed_trust_live(&app, trust, "uid-trust", 3);
+    let item = read_item(&app, "pf-trust-same").await;
+    assert_eq!(
+        item["staleReasons"],
+        json!([]),
+        "{}: an unchanged trust referent made the verdict stale",
+        trust.kind
+    );
+    assert_eq!(item["stale"], false, "{}", trust.kind);
+    assert_eq!(item["applicable"], true, "{}", trust.kind);
+    assert!(
+        item["staleBasis"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("referents:2")),
+        "{}: both referents were compared: {}",
+        trust.kind,
+        item["staleBasis"]
+    );
+    assert_read_by_name(&app, trust);
+    app.fake.assert_strict();
+}
+
+async fn a_trust_referent_whose_generation_moved_is_stale(trust: &TrustKind) {
+    let app = TestApp::new();
+    seed_trust_bound(&app, "pf-trust-edited", trust, "uid-trust", 3);
+    seed_trust_live(&app, trust, "uid-trust", 4);
+    let item = read_item(&app, "pf-trust-edited").await;
+    assert_eq!(item["stale"], true, "{}", trust.kind);
+    assert_eq!(item["applicable"], false, "{}", trust.kind);
+    assert_eq!(
+        item["staleReasons"],
+        json!([{"reason": "referentChanged", "kind": trust.kind, "name": trust.name}]),
+        "{}: an edited trust object must be named as the change",
+        trust.kind
+    );
+    app.fake.assert_strict();
+}
+
+async fn a_recreated_trust_referent_is_stale(trust: &TrustKind) {
+    let app = TestApp::new();
+    seed_trust_bound(&app, "pf-trust-recreated", trust, "uid-trust", 3);
+    // SAME generation, NEW uid: a delete and re-create of the same name.
+    seed_trust_live(&app, trust, "uid-trust-recreated", 3);
+    let item = read_item(&app, "pf-trust-recreated").await;
+    assert_eq!(item["stale"], true, "{}", trust.kind);
+    assert_eq!(item["applicable"], false, "{}", trust.kind);
+    assert_eq!(
+        item["staleReasons"],
+        json!([{"reason": "referentChanged", "kind": trust.kind, "name": trust.name}]),
+        "{}: a re-created trust object must be named as the change",
+        trust.kind
+    );
+    app.fake.assert_strict();
+}
+
+async fn a_refused_trust_read_stays_unverifiable(trust: &TrustKind) {
+    let app = TestApp::new();
+    seed_trust_bound(&app, "pf-trust-refused", trust, "uid-trust", 3);
+    // The object exists and is UNCHANGED — the only thing wrong is that this
+    // service may not read it. That must not read as "unchanged".
+    seed_trust_live(&app, trust, "uid-trust", 3);
+    app.fake.inject(support::Fault {
+        method: "GET",
+        path_contains: format!("/{}/{}", trust.plural, trust.name),
+        status: 403,
+        reason: "Forbidden",
+        delay: None,
+        remaining: 1,
+    });
+    let item = read_item(&app, "pf-trust-refused").await;
+    assert_eq!(item["stale"], true, "{}", trust.kind);
+    assert_eq!(
+        item["applicable"], false,
+        "{}: a refused trust read failed OPEN",
+        trust.kind
+    );
+    let reasons = item["staleReasons"].as_array().unwrap();
+    assert_eq!(reasons.len(), 1, "{}: {reasons:?}", trust.kind);
+    assert_eq!(reasons[0]["reason"], "unverifiable");
+    assert_eq!(reasons[0]["kind"], trust.kind);
+    assert_eq!(reasons[0]["name"], trust.name);
+    assert!(
+        reasons[0]["basis"]
+            .as_str()
+            .unwrap()
+            .contains("could not be read"),
+        "{}: {}",
+        trust.kind,
+        reasons[0]
+    );
+    app.fake.assert_strict();
+}
+
+/// A trust object that is gone is a change, named like any other vanished
+/// referent — never "unchanged", never "unverifiable".
+async fn a_vanished_trust_referent_is_stale(trust: &TrustKind) {
+    let app = TestApp::new();
+    seed_trust_bound(&app, "pf-trust-gone", trust, "uid-trust", 3);
+    let item = read_item(&app, "pf-trust-gone").await;
+    assert_eq!(item["stale"], true, "{}", trust.kind);
+    assert_eq!(
+        item["staleReasons"],
+        json!([{"reason": "referentChanged", "kind": trust.kind, "name": trust.name}]),
+        "{}",
+        trust.kind
+    );
+    app.fake.assert_strict();
+}
+
+#[tokio::test]
+async fn an_unchanged_trust_roster_leaves_the_verdict_applicable() {
+    an_unchanged_trust_referent_leaves_the_verdict_applicable(&ROSTER).await;
+}
+
+#[tokio::test]
+async fn a_trust_roster_whose_generation_moved_makes_the_verdict_stale() {
+    a_trust_referent_whose_generation_moved_is_stale(&ROSTER).await;
+}
+
+#[tokio::test]
+async fn a_recreated_trust_roster_makes_the_verdict_stale() {
+    a_recreated_trust_referent_is_stale(&ROSTER).await;
+}
+
+#[tokio::test]
+async fn a_refused_trust_roster_read_keeps_the_verdict_stale() {
+    a_refused_trust_read_stays_unverifiable(&ROSTER).await;
+}
+
+#[tokio::test]
+async fn a_deleted_trust_roster_makes_the_verdict_stale() {
+    a_vanished_trust_referent_is_stale(&ROSTER).await;
+}
+
+#[tokio::test]
+async fn an_unchanged_trust_policy_leaves_the_verdict_applicable() {
+    an_unchanged_trust_referent_leaves_the_verdict_applicable(&POLICY).await;
+}
+
+#[tokio::test]
+async fn a_trust_policy_whose_generation_moved_makes_the_verdict_stale() {
+    a_trust_referent_whose_generation_moved_is_stale(&POLICY).await;
+}
+
+#[tokio::test]
+async fn a_recreated_trust_policy_makes_the_verdict_stale() {
+    a_recreated_trust_referent_is_stale(&POLICY).await;
+}
+
+#[tokio::test]
+async fn a_refused_trust_policy_read_keeps_the_verdict_stale() {
+    a_refused_trust_read_stays_unverifiable(&POLICY).await;
+}
+
+#[tokio::test]
+async fn a_deleted_trust_policy_makes_the_verdict_stale() {
+    a_vanished_trust_referent_is_stale(&POLICY).await;
+}
+
+/// **Only `TrustRoster/default` is read.** The controller records no other
+/// roster name, and the grant is `get` with `resourceNames: ["default"]`. A
+/// binding that names another roster is `unverifiable` WITHOUT a Kubernetes
+/// call — `assert_strict` fails on any roster request but `GET .../default`.
+#[tokio::test]
+async fn a_roster_not_named_default_is_unverifiable_and_never_read() {
+    let app = TestApp::new();
+    let other = TrustKind {
+        name: "logweir-trust",
+        ..ROSTER
+    };
+    seed_trust_bound(&app, "pf-trust-other", &other, "uid-trust", 1);
+    let item = read_item(&app, "pf-trust-other").await;
+    assert_eq!(item["stale"], true);
+    assert_eq!(item["applicable"], false);
+    let reasons = item["staleReasons"].as_array().unwrap();
+    assert_eq!(reasons.len(), 1, "{reasons:?}");
+    assert_eq!(reasons[0]["reason"], "unverifiable");
+    assert_eq!(reasons[0]["kind"], "TrustRoster");
+    assert_eq!(reasons[0]["name"], "logweir-trust");
+    assert!(reasons[0]["basis"]
+        .as_str()
+        .unwrap()
+        .contains("only the TrustRoster named `default`"));
+    assert!(
+        !app.fake
+            .requests()
+            .iter()
+            .any(|r| r.path.contains("trustrosters")),
+        "a roster other than `default` must not be requested at all"
+    );
     app.fake.assert_strict();
 }
 

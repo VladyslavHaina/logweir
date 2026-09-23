@@ -2407,8 +2407,9 @@ pub enum StaleReasonKind {
     PlanHashChanged,
     /// A named object's UID or generation moved, or it appeared or vanished,
     /// since the verdict was computed — a recreated destination, an edited
-    /// access block, a re-created recovery point, a `TrustRoster` edit, or an
-    /// `Approval` whose resourceVersion moved when verification landed.
+    /// access block, a re-created recovery point, an edited or re-created
+    /// `TrustRoster` or governing `TrustPolicy`, or an `Approval` whose
+    /// resourceVersion moved when verification landed.
     /// [`StaleReasonView::kind`] and [`StaleReasonView::name`] say which.
     ReferentChanged,
     /// A destination's CA bundle `ConfigMap` now digests differently, so the
@@ -2471,10 +2472,8 @@ pub struct StaleReasonView {
     /// `unverifiable` only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
-    /// That object's name — or, for the `TrustRoster` and `Approval` a binding
-    /// names, its UID, because those two are identified in the binding by UID
-    /// and a name would add nothing. `referentChanged` and `unverifiable`
-    /// only.
+    /// That object's name, as the binding recorded it (`default` for the
+    /// cluster's `TrustRoster`). `referentChanged` and `unverifiable` only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// Why this service could not compare something. `unverifiable` only, and

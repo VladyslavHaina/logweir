@@ -48,6 +48,7 @@ use weirkeeper::crds::preflight::{
     SourceConnectionPreflightRequest as CrdSourceConnectionRequest, UidRef,
 };
 use weirkeeper::crds::restore::Restore as RestoreCr;
+use weirkeeper::crds::trust_policy::TrustPolicy;
 use weirkeeper::crds::{ArchiveRef, LocalRef};
 
 use super::{
@@ -184,14 +185,20 @@ const fn is_terminal(state: PreflightState) -> bool {
 /// The kinds a `Preflight`'s `status.binding.referents[]` can name, and
 /// whether this service can read one.
 ///
-/// FIVE OF SIX ARE IN THE SEALED ADAPTER. The reconciler records
-/// `KafkaCluster`, `BackupDestination`, `Backup`, `Restore`, `Approval` and
-/// `TrustRoster`; the first five are `ProductResource`s this API already
-/// reads. `TrustRoster` is CLUSTER-SCOPED and deliberately outside the sealed
-/// set — the console has no verb for it — so a binding that names one is
-/// reported [`StaleReasonKind::Unverifiable`] rather than quietly skipped.
-/// Skipping it would mean a roster edit, which is exactly the kind of change
-/// that invalidates a signer check, silently left out of the comparison.
+/// ALL EIGHT ARE READ. The reconciler records `KafkaCluster`,
+/// `BackupDestination`, `Backup`, `Restore`, `Approval` and `BackupSchedule`
+/// — namespaced `ProductResource`s this API already reads — plus two
+/// CLUSTER-SCOPED trust referents: `TrustRoster/default` whenever it exists
+/// (since `4c4d2ed`), and the namespace's governing `TrustPolicy`. Both trust
+/// kinds are compared by uid and generation like every other referent
+/// (PREFLIGHT-TRUSTROSTER-STALE): the roster through
+/// [`crate::kube::KubeAdapter::get_trust_roster`], which reads `default` and
+/// nothing else, and the policy through the existing read-only
+/// `ClusterResource` seal. A kind this build does not know — anything a later
+/// controller adds — is still reported [`StaleReasonKind::Unverifiable`]
+/// rather than quietly skipped, and so is a read that fails: a roster or
+/// policy edit is exactly the kind of change that invalidates a signer check,
+/// and not being able to see one must never read as "unchanged".
 pub const REFERENT_KIND_KAFKA_CLUSTER: &str = "KafkaCluster";
 /// See [`REFERENT_KIND_KAFKA_CLUSTER`].
 pub const REFERENT_KIND_DESTINATION: &str = "BackupDestination";
@@ -203,10 +210,21 @@ pub const REFERENT_KIND_RESTORE: &str = "Restore";
 pub const REFERENT_KIND_APPROVAL: &str = "Approval";
 /// See [`REFERENT_KIND_KAFKA_CLUSTER`].
 pub const REFERENT_KIND_SCHEDULE: &str = "BackupSchedule";
+/// See [`REFERENT_KIND_KAFKA_CLUSTER`]. Cluster-scoped; only `default` is read.
+pub const REFERENT_KIND_TRUST_ROSTER: &str = "TrustRoster";
+/// See [`REFERENT_KIND_KAFKA_CLUSTER`]. Cluster-scoped.
+pub const REFERENT_KIND_TRUST_POLICY: &str = "TrustPolicy";
 
 /// `basis` for a referent whose kind this service has no verb for.
 pub const BASIS_KIND_NOT_READABLE: &str =
     "this service has no verb for this kind, so its revision cannot be compared";
+/// `basis` for a `TrustRoster` referent that names any roster but `default`.
+///
+/// The controller records only `weirkeeper::ROSTER_NAME`, and this service's
+/// grant is `get` on that one name, so another name is not something it can
+/// compare — and it is reported, never skipped.
+pub const BASIS_ROSTER_NOT_DEFAULT: &str =
+    "this service reads only the TrustRoster named `default`, so this roster's revision cannot be compared";
 /// `basis` for a referent whose read failed.
 pub const BASIS_READ_FAILED: &str =
     "the object could not be read, so its revision cannot be compared";
@@ -348,7 +366,19 @@ async fn read_one_referent(
         REFERENT_KIND_SCHEDULE => {
             revision::<BackupSchedule>(state, namespace, &referent.name).await
         }
-        // `TrustRoster` and anything a later controller adds.
+        // THE TWO CLUSTER-SCOPED TRUST REFERENTS. The check's namespace does
+        // not enter either read: a cluster-scoped object has none.
+        REFERENT_KIND_TRUST_ROSTER if referent.name == weirkeeper::ROSTER_NAME => {
+            reading_of(state.kube().get_trust_roster().await)
+        }
+        REFERENT_KIND_TRUST_ROSTER => ReferentReading::Unreadable(BASIS_ROSTER_NOT_DEFAULT),
+        REFERENT_KIND_TRUST_POLICY => reading_of(
+            state
+                .kube()
+                .get_cluster::<TrustPolicy>(&referent.name)
+                .await,
+        ),
+        // Anything a later controller adds.
         _ => ReferentReading::Unreadable(BASIS_KIND_NOT_READABLE),
     }
 }
@@ -358,7 +388,14 @@ async fn revision<K: crate::kube::ProductResource>(
     namespace: &str,
     name: &str,
 ) -> ReferentReading {
-    match state.kube().get::<K>(namespace, name).await {
+    reading_of(state.kube().get::<K>(namespace, name).await)
+}
+
+/// One read's outcome as a [`ReferentReading`]. A refused, timed-out or
+/// otherwise failed read is `Unreadable` — NEVER `Live` and never `Absent` —
+/// which is what keeps the comparison fail-closed.
+fn reading_of<K: kube::Resource>(read: Result<K, KubeFailure>) -> ReferentReading {
+    match read {
         Ok(object) => ReferentReading::Live {
             uid: object.meta().uid.clone().unwrap_or_default(),
             generation: object.meta().generation,

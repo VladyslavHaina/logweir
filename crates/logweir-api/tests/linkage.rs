@@ -505,6 +505,9 @@ fn the_adapter_spends_each_verb_on_exactly_these_resources() {
         "patch <ProductResource plural>",
         "patch backupschedules",
         "patch backupdestinations",
+        // THE ONE CLUSTER-SCOPED OBJECT OUTSIDE THE SEALS: `TrustRoster/default`,
+        // `get` by that fixed name (PREFLIGHT-TRUSTROSTER-STALE). No list.
+        "get trustrosters",
         // THE TWO CORE OBJECTS, one verb each.
         "get configmaps",
         "create secrets",
@@ -532,6 +535,9 @@ fn the_adapter_spends_each_verb_on_exactly_these_resources() {
         "\"delete\"",
         "\"create\", \"configmaps\"",
         "\"patch\", \"configmaps\"",
+        "\"list_page\", \"trustrosters\"",
+        "\"patch\", \"trustrosters\"",
+        "\"create\", \"trustrosters\"",
     ] {
         assert!(
             !code_lines(&text).any(|(_, line)| line.contains(forbidden)),
@@ -718,9 +724,9 @@ fn the_cluster_scoped_read_is_one_sealed_kind_and_two_read_verbs() {
     let all_sites = code.iter().filter(|l| l.contains("Api::all(")).count();
     assert_eq!(
         all_sites,
-        2,
-        "`Api::all` belongs to the two cluster-scoped READ methods and to nothing else; \
-         {all_sites} sites were found in {}",
+        3,
+        "`Api::all` belongs to the two cluster-scoped READ methods and to the one \
+         fixed-name roster read, and to nothing else; {all_sites} sites were found in {}",
         path.display()
     );
 
@@ -763,4 +769,78 @@ fn the_cluster_scoped_read_is_one_sealed_kind_and_two_read_verbs() {
             .any(|l| l.contains("impl ClusterResource for TrustPolicy")),
         "TrustPolicy is the one implementor of the cluster-scoped read trait"
     );
+    assert!(
+        !code
+            .iter()
+            .any(|l| l.contains("impl ClusterResource for TrustRoster")),
+        "TrustRoster must never join the cluster seal: that would give every route a \
+         `list_cluster::<TrustRoster>` and a `get_cluster` by any name"
+    );
+}
+
+/// **The roster read is ONE object, by a name no caller supplies.**
+///
+/// PREFLIGHT-TRUSTROSTER-STALE gave the adapter a `get` on
+/// `trustrosters/default` so the preflight staleness recomputation can compare
+/// the roster the controller recorded. The grant is `get` with
+/// `resourceNames: ["default"]`, and the adapter must not be able to spend
+/// anything wider: this pins that `TrustRoster` is named by exactly one
+/// `Api<…>` handle, in exactly one function, which takes no argument but
+/// `&self`, and whose `get` names `weirkeeper::ROSTER_NAME`.
+///
+/// REGRESSION REASON. Widening `get_trust_roster(&self)` to
+/// `get_trust_roster(&self, name: &str)`, or adding a `list` over the same
+/// handle, leaves the verb set and the `(verb, resource)` pairs above
+/// unchanged except for one new pair — and a list of rosters would be the key
+/// material of every roster in the cluster, which no route needs.
+#[test]
+fn the_roster_read_is_one_get_of_the_default_roster() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/kube.rs");
+    let text = std::fs::read_to_string(&path).expect("src/kube.rs is readable");
+    let code: Vec<String> = code_lines(&text)
+        .map(|(_, line)| line.trim().to_string())
+        .collect();
+
+    let handles: Vec<&String> = code
+        .iter()
+        .filter(|l| l.contains("Api<TrustRoster>"))
+        .collect();
+    assert_eq!(
+        handles.len(),
+        1,
+        "exactly one `Api<TrustRoster>` handle may exist in {}: {handles:?}",
+        path.display()
+    );
+    let signatures: Vec<&String> = code
+        .iter()
+        .filter(|l| l.contains("fn ") && l.contains("TrustRoster"))
+        .collect();
+    assert_eq!(
+        signatures,
+        vec![&"pub async fn get_trust_roster(&self) -> Result<TrustRoster, KubeFailure> {"
+            .to_string()],
+        "the roster is read by one function that takes no name"
+    );
+    let joined = code.join(" ").replace(" .", ".");
+    assert!(
+        joined.contains(
+            "self.bounded(\"get\", \"trustrosters\", api.get(weirkeeper::ROSTER_NAME))"
+        ),
+        "the one roster read is a `get` of `weirkeeper::ROSTER_NAME`"
+    );
+    // The handle's function spends `get` and nothing else.
+    let start = code
+        .iter()
+        .position(|l| l.contains("fn get_trust_roster"))
+        .expect("get_trust_roster exists");
+    let body: Vec<&String> = code[start..]
+        .iter()
+        .take_while(|l| l.as_str() != "}")
+        .collect();
+    for verb in ["api.list(", "api.create(", "api.patch(", "api.watch("] {
+        assert!(
+            !body.iter().any(|l| l.contains(verb)),
+            "the roster read spends `{verb}`: {body:?}"
+        );
+    }
 }
