@@ -237,11 +237,24 @@ fn the_chart_is_published_beside_the_images_it_names() {
         "docker buildx imagetools inspect \"docker.io/$NS/$product:$TAG\"",
         // "Public" is asked anonymously (review L5).
         "DOCKER_CONFIG=\"$anonymous_docker\" docker buildx imagetools inspect",
-        "HELM_REGISTRY_CONFIG=\"$dir/anonymous/config.json\"",
+        "DOCKER_CONFIG=\"$anonymous_docker\" HELM_REGISTRY_CONFIG=\"$dir/anonymous/config.json\"",
+        "HELM_REGISTRY_CONFIG=\"$dir/login/config.json\" helm push",
     ] {
         assert!(
             script.contains(needle),
             "scripts/ci-images.sh's chart arm must keep `{needle}`"
+        );
+    }
+    // THE OPERATOR ACTION A FAIL-CLOSED PULL-BACK IMPLIES IS DOCUMENTED (re-check
+    // L-rf1): a chart repository created private makes the step fail until it
+    // is made Public and the job re-run, and both documents say so.
+    for doc in ["docs/install.md", "docs/release-notes.md"] {
+        let text = std::fs::read_to_string(root().join(doc)).unwrap();
+        assert!(
+            text.contains("`vladyslavhaina/logweir-chart` must be Public in Docker Hub")
+                && text.contains("re-run"),
+            "{doc} must say the chart repository must be Public on first publication, or the \
+             chart step fails closed until it is made Public and the job re-run"
         );
     }
     assert!(

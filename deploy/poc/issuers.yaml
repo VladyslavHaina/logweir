@@ -39,11 +39,57 @@ spec:
   ca:
     secretName: logweir-poc-ca
 ---
-# Dex's OWN serving certificate, for the console's back-channel (dex.values.yaml
-# `web.https`): the console reaches Dex's Service directly and Dex terminates
-# that TLS itself, so no Ingress is on the console's path to its IdP. Issued by
-# the same local CA the console's `oidc.caBundle` carries. The `dex` namespace
-# must exist first (README.md step 1).
+# DEX'S BACK-CHANNEL PKI — ITS OWN, AND USABLE IN NAMESPACE `dex` ONLY.
+#
+# The console verifies Dex's back-channel certificate against a bundle that
+# holds THIS CA and nothing else (logweir.values.yaml: `oidc.caBundle` names it,
+# `systemRoots: false`). It is not the `logweir-poc-ca` ClusterIssuer: every
+# namespace can request a certificate from a ClusterIssuer (cert-manager's
+# aggregated `edit` role grants `certificates`), so a bundle holding that CA
+# would accept a `dex.localtest.me` certificate minted by any namespace editor —
+# which, with an on-path position (a Service `externalIPs` claim on Dex's
+# address, CVE-2020-8554, or Dex's ClusterIP taken while its Service is absent),
+# is a forged IdP holding the console's client secret. A namespaced `Issuer`
+# can be referenced only from its own namespace. The browser path through
+# Traefik keeps the cluster-wide local CA; that is a separate trust.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: dex-backchannel-selfsigned
+  namespace: dex
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: dex-backchannel-ca
+  namespace: dex
+spec:
+  isCA: true
+  commonName: Logweir PoC Dex back-channel CA
+  secretName: dex-backchannel-ca
+  duration: 8760h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    group: cert-manager.io
+    kind: Issuer
+    name: dex-backchannel-selfsigned
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: dex-backchannel
+  namespace: dex
+spec:
+  ca:
+    secretName: dex-backchannel-ca
+---
+# Dex's OWN serving certificate for the console's back-channel (dex.values.yaml
+# `web.https`), issued by the namespaced `dex-backchannel` Issuer above. The
+# `dex` namespace must exist first (README.md step 1).
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
@@ -58,5 +104,5 @@ spec:
     size: 256
   issuerRef:
     group: cert-manager.io
-    kind: ClusterIssuer
-    name: logweir-poc-ca
+    kind: Issuer
+    name: dex-backchannel

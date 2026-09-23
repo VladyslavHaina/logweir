@@ -285,7 +285,8 @@ if args[:1] in (["lint"], ["template"]):
     sys.exit(0)
 if args[:2] == ["registry", "login"]:
     secret = sys.stdin.read() if "--password-stdin" in args else ""
-    pathlib.Path(os.environ["MOCK_HELM_LOGIN"]).write_text(json.dumps({"stdin": secret, "args": args}))
+    pathlib.Path(os.environ["MOCK_HELM_LOGIN"]).write_text(json.dumps(
+        {"stdin": secret, "args": args, "registry_config": os.environ.get("HELM_REGISTRY_CONFIG")}))
     sys.exit(0)
 if args[:1] == ["package"]:
     chart = pathlib.Path(args[1])
@@ -309,8 +310,12 @@ if args[:1] == ["push"]:
     sys.exit(0)
 if args[:1] == ["pull"]:
     ref = args[1]; version = args[args.index("--version") + 1]; out = pathlib.Path(args[args.index("-d") + 1])
-    pathlib.Path(os.environ["MOCK_HELM_PULL_ENV"]).write_text(json.dumps(
-        {"registry_config": os.environ.get("HELM_REGISTRY_CONFIG")}))
+    docker_config = os.environ.get("DOCKER_CONFIG")
+    pathlib.Path(os.environ["MOCK_HELM_PULL_ENV"]).write_text(json.dumps({
+        "registry_config": os.environ.get("HELM_REGISTRY_CONFIG"),
+        "docker_config": docker_config,
+        "docker_config_entries": sorted(os.listdir(docker_config))
+            if docker_config and os.path.isdir(docker_config) else None}))
     name = ref.rsplit("/", 1)[1]
     key = ref.rsplit("/", 1)[0] + "/" + f"{name}-{version}"
     if key not in state:
@@ -410,9 +415,18 @@ class ChartPublicationTests(unittest.TestCase):
         chart_inspects = [i for i in chart_inspects
                           if i["ref"].endswith(f":sha-{SHA}") and i["docker_config"]]
         self.assertEqual(len(chart_inspects), 4, chart_inspects)
-        registry_config = json.loads(self.pull_env.read_text())["registry_config"]
+        pull_env = json.loads(self.pull_env.read_text())
+        registry_config = pull_env["registry_config"]
         self.assertTrue(registry_config, "the pull-back must name its own registry config")
         self.assertFalse(Path(registry_config).exists(), "the pull-back must carry no registry login")
+        # Helm falls back to Docker's stored credentials: the pull-back must
+        # also run with an EMPTY Docker configuration directory (re-check L-rf1).
+        self.assertTrue(pull_env["docker_config"], "the pull-back must name an empty DOCKER_CONFIG")
+        self.assertEqual(pull_env["docker_config_entries"], [],
+                         "the pull-back's DOCKER_CONFIG must be an existing, empty directory")
+        # The login is scoped to its own registry config, not the default one.
+        self.assertTrue(login["registry_config"], "the login must use its own registry config")
+        self.assertNotEqual(login["registry_config"], registry_config)
 
     def test_a_release_tag_publishes_the_semver_chart(self):
         self.env.update(TAG="v1.2.3", GITHUB_REF="refs/tags/v1.2.3", PROMOTE_LATEST="false")

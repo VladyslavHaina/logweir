@@ -73,6 +73,20 @@ render() { # label chart namespace [helm args...]; RELEASE overrides the release
   check_images "$label" "$work/$label.yaml"
 }
 
+# One YAML document of a multi-document file, by kind and metadata.name.
+doc_of() { # kind name file
+  awk -v kind="$1" -v name="$2" '
+    function flush() { if (k == kind && n == name) printf "%s", buf; buf = ""; k = ""; n = ""; m = 0 }
+    /^---/ { flush(); next }
+    { buf = buf $0 "\n" }
+    /^kind: / { k = $2 }
+    /^metadata:/ { m = 1; next }
+    m && /^  name: / { n = $2 }
+    /^[^ ]/ && !/^metadata:/ { m = 0 }
+    END { flush() }
+  ' "$3"
+}
+
 need() { # label file needle...
   local label="$1" file="$2"; shift 2
   for needle in "$@"; do
@@ -130,7 +144,8 @@ if [ -f "$work/logweir.yaml" ] && [ -f "$work/logweir-checkout.yaml" ]; then
     "docker.io/vladyslavhaina/weirkeeper:$LOGWEIR_TAG" \
     "docker.io/vladyslavhaina/logweir-console:$LOGWEIR_TAG" \
     "caBundleFile: /var/run/logweir/oidc-ca/ca.crt" \
-    "name: logweir-poc-ca" \
+    "name: logweir-dex-ca" \
+    "systemRoots: false" \
     "ip: $DEX_CLUSTER_IP" \
     "- $DEX_HOST" \
     "trustedProxyService:" \
@@ -235,16 +250,48 @@ if [ -f "$work/logweir.yaml" ] && [ -f "$work/dex.yaml" ] && [ -f "$work/traefik
   dex_ip="$(awk '/^kind: Service$/{s=1} s && /^  clusterIP:/{print $2; exit}' "$work/dex.yaml")"
   if [ -z "$alias_ip" ] || [ "$alias_ip" != "$dex_ip" ]; then
     echo "FAIL: the console's alias for $DEX_HOST is '$alias_ip', not Dex's own Service ($dex_ip)" >&2; fail=1
-  elif grep -q "clusterIP: $alias_ip" "$work/traefik.yaml"; then
-    echo "FAIL: the console's alias for $DEX_HOST is Traefik's address — the shared ingress is on its IdP path" >&2; fail=1
   elif awk '/^kind: NetworkPolicy$/{n=1} n && /egress:/{e=1} e && /kubernetes.io\/metadata.name: '"$INGRESS_NAMESPACE"'/{bad=1} /^---/{n=0;e=0} END{exit !bad}' "$work/logweir.yaml"; then
     echo "FAIL: the console's egress names the ingress namespace; its IdP path must be Dex's pods" >&2; fail=1
   else
     echo "   ok: the console reaches $DEX_HOST at Dex's own Service ($dex_ip), never through Traefik"
   fi
 fi
-if ! grep -q 'name: dex-internal-tls' deploy/poc/issuers.yaml || ! grep -q "dnsNames: \[$DEX_HOST\]" deploy/poc/issuers.yaml; then
-  echo "FAIL: issuers.yaml does not ask the local CA for Dex's own serving certificate" >&2; fail=1
+# THE CONSOLE TRUSTS A CA ONLY NAMESPACE `dex` CAN USE (the re-check's M1
+# residual). Routing does not keep the back-channel on Dex's pods (a Service
+# `externalIPs` claim, a released ClusterIP); the TLS check does, and only if no
+# other namespace can mint `dex.localtest.me` under the bundle's CA. So: Dex's
+# serving certificate is in `dex`, issued by a namespaced `Issuer` there whose CA
+# is a namespaced self-signed CA there, and the console's bundle is built from
+# that CA alone, with the system roots off.
+tls_doc="$(doc_of Certificate dex-internal-tls deploy/poc/issuers.yaml)"
+issuer_doc="$(doc_of Issuer dex-backchannel deploy/poc/issuers.yaml)"
+ca_doc="$(doc_of Certificate dex-backchannel-ca deploy/poc/issuers.yaml)"
+backchannel_ok=1
+case "$tls_doc" in
+  *"namespace: $DEX_NAMESPACE"*"dnsNames: [$DEX_HOST]"*"kind: Issuer"*"name: dex-backchannel"*) : ;;
+  *) echo "FAIL: dex-internal-tls must be a Certificate in namespace $DEX_NAMESPACE for $DEX_HOST, issued by the namespaced Issuer dex-backchannel" >&2; backchannel_ok=0 ;;
+esac
+case "$tls_doc" in *ClusterIssuer*) echo "FAIL: dex-internal-tls is issued by a ClusterIssuer, which every namespace can use" >&2; backchannel_ok=0 ;; esac
+case "$issuer_doc" in
+  *"namespace: $DEX_NAMESPACE"*"secretName: dex-backchannel-ca"*) : ;;
+  *) echo "FAIL: the Issuer dex-backchannel must be in namespace $DEX_NAMESPACE, signing with dex-backchannel-ca" >&2; backchannel_ok=0 ;;
+esac
+case "$ca_doc" in
+  *"namespace: $DEX_NAMESPACE"*"isCA: true"*"kind: Issuer"*) : ;;
+  *) echo "FAIL: dex-backchannel-ca must be a namespaced CA Certificate in $DEX_NAMESPACE from a namespaced Issuer" >&2; backchannel_ok=0 ;;
+esac
+case "$ca_doc" in *ClusterIssuer*) echo "FAIL: dex-backchannel-ca comes from a ClusterIssuer" >&2; backchannel_ok=0 ;; esac
+# The console's bundle ConfigMap is built from that CA, and only from it.
+if ! grep -q 'create configmap logweir-dex-ca' deploy/poc/README.md \
+   || ! grep -q -- '--from-file=ca.crt=poc-secrets/dex-backchannel-ca.crt' deploy/poc/README.md \
+   || ! grep -q 'get secret dex-backchannel-ca' deploy/poc/README.md; then
+  echo "FAIL: README.md does not build the console's logweir-dex-ca bundle from dex/dex-backchannel-ca alone" >&2
+  backchannel_ok=0
+fi
+if [ "$backchannel_ok" -eq 1 ]; then
+  echo "   ok: the console's IdP trust is Dex's own namespaced CA alone (systemRoots off); no other namespace can mint under it"
+else
+  fail=1
 fi
 # The retired controller may be NAMED in a comment (why it is gone), never used.
 if grep -rn -i 'nginx' deploy/poc/*.yaml deploy/poc/*.env deploy/poc/rehearsals/ | grep -v -E ':[0-9]+:[[:space:]]*#' > "$work/nginx.hits"; then

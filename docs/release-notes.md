@@ -72,6 +72,9 @@ find ui -type f ! -name '*.md' ! -path 'ui/tests/*' | LC_ALL=C sort | xargs shas
 - **The chart is published** as `oci://registry-1.docker.io/vladyslavhaina/logweir-chart`,
   beside the images and versioned with them ([install.md](install.md), *(c) The
   Helm chart*). [UNVERIFIED — the first publication happens on the first main push after this lands.]
+  **On first publication, `vladyslavhaina/logweir-chart` must be Public in Docker Hub**, or `main` CI's
+  chart step fails closed (its anonymous pull-back is refused) until the repository is made Public and
+  the job is re-run.
 - **Fourteen kinds** on `logweir.dev/v1alpha1`, all additive over `v0.1.5`
   ([install.md](install.md), *Upgrade CRDs before upgrading the controller*).
 - **Trust has a lifecycle.** A `TrustPolicy` governs a namespace's keys with

@@ -83,9 +83,14 @@ api:
       issuer: https://dex.localtest.me     # EXACT: Dex's `issuer`, no trailing slash
       clientId: logweir-console
       clientSecret: logweir-console-oidc   # the NAME of a Secret with key `clientSecret`
-      # G1: the local CA's PUBLIC certificate (README.md step 5), added to the
-      # system roots. Never inline PEM.
-      caBundle: { configMap: logweir-poc-ca, key: ca.crt }
+      # G1: the PUBLIC certificate of Dex's own back-channel CA — a namespaced
+      # Issuer in `dex` that no other namespace can use (issuers.yaml; README.md
+      # step 5) — and NOTHING ELSE: not the cluster-wide local CA any namespace
+      # can request a `dex.localtest.me` certificate from, and not the system
+      # roots (`localtest.me` is a public domain whose owner could hold a public
+      # certificate for it). Never inline PEM.
+      caBundle: { configMap: logweir-dex-ca, key: ca.crt }
+      systemRoots: false
     roles:
       revision: "poc-2026-09-23.2"
       # One Dex user per role, bound by subject (`<issuer>#<sub>`; dex.values.yaml

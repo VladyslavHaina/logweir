@@ -116,23 +116,27 @@ case "${1:-}" in
     for product in logweir weirkeeper logweir-ui logweir-console; do
       DOCKER_CONFIG="$anonymous_docker" docker buildx imagetools inspect "docker.io/$NS/$product:$TAG" >/dev/null
     done
-    rm -rf "$anonymous_docker"
     dir=$(mktemp -d)
     package=$(chart_package "$dir")
     version=$(chart_version)
     # The SAME credentials the image steps use, handed to Helm's own registry
-    # client on stdin; nothing is written to the job log.
-    printf '%s' "$DOCKERHUB_TOKEN" | helm registry login registry-1.docker.io \
-      --username "$DOCKERHUB_USERNAME" --password-stdin
-    helm push "$package" "$CHART_REPOSITORY"
-    # Verify by content, not by exit code, and ANONYMOUSLY: pull what the
-    # registry now serves under that version with an empty Helm registry
-    # configuration and compare the bytes with what was pushed. A chart
-    # repository Docker Hub created private on its first push fails here,
-    # loudly, instead of publishing a chart nobody can install.
-    mkdir -p "$dir/pulled" "$dir/anonymous"
-    HELM_REGISTRY_CONFIG="$dir/anonymous/config.json" \
+    # client on stdin; nothing is written to the job log. The login is scoped
+    # to its OWN registry configuration file, used for the push alone.
+    mkdir -p "$dir/login" "$dir/pulled" "$dir/anonymous"
+    printf '%s' "$DOCKERHUB_TOKEN" | HELM_REGISTRY_CONFIG="$dir/login/config.json" \
+      helm registry login registry-1.docker.io --username "$DOCKERHUB_USERNAME" --password-stdin
+    HELM_REGISTRY_CONFIG="$dir/login/config.json" helm push "$package" "$CHART_REPOSITORY"
+    # Verify by content, not by exit code, and TRULY ANONYMOUSLY: Helm falls
+    # back to Docker's stored credentials (the ones docker/login-action left)
+    # when its own registry configuration has none, so the pull-back runs with
+    # BOTH an empty Docker configuration directory and a Helm registry
+    # configuration that does not exist, then compares the bytes with what was
+    # pushed. A chart repository Docker Hub created private on its first push
+    # fails here, loudly: make `$NS/logweir-chart` Public and re-run the job
+    # (docs/install.md, *(c) The Helm chart*).
+    DOCKER_CONFIG="$anonymous_docker" HELM_REGISTRY_CONFIG="$dir/anonymous/config.json" \
       helm pull "$CHART_REPOSITORY/$CHART_NAME" --version "$version" -d "$dir/pulled"
+    rm -rf "$anonymous_docker"
     pushed=$(sha256sum "$package" | awk '{print $1}')
     served=$(sha256sum "$dir/pulled/$CHART_NAME-$version.tgz" | awk '{print $1}')
     [[ "$pushed" == "$served" ]] || { echo "the registry serves different chart bytes" >&2; exit 1; }

@@ -125,6 +125,8 @@ the chart, and `vladyslavhaina/logweir` is the runner image); everything it
 installs is named exactly as from the source chart. The publication step
 compares the bytes the registry serves back with the bytes it pushed. [UNVERIFIED — no chart has been pushed yet: the first publication is the first main push after this change merges.]
 
+**On first publication, `vladyslavhaina/logweir-chart` must be Public in Docker Hub.** The publication step pulls the chart back anonymously; if Docker Hub creates the repository private (the namespace's default visibility decides), `main` CI's chart step fails closed until the repository is made Public (Repository → Settings → Visibility) and the job is re-run — the re-push overwrites the same version and is compared again.
+
 **From a checkout.** `identity.bootstrapImage` is pinned in
 `charts/logweir/values.yaml` to a reviewed runner digest that contains the
 identity CLI, so the clean default command needs neither a local key nor an

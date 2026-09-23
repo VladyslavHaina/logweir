@@ -126,8 +126,12 @@ kubectl --context "$CTX" apply -f deploy/poc/issuers.yaml
 kubectl --context "$CTX" wait --for=condition=Ready clusterissuer/logweir-poc-ca --timeout=120s
 # Dex's own serving certificate, for the console's back-channel (step 4):
 kubectl --context "$CTX" -n dex wait --for=condition=Ready certificate/dex-internal-tls --timeout=120s
+# The browser CA (for your keychain) ...
 kubectl --context "$CTX" -n cert-manager get secret logweir-poc-ca \
   -o jsonpath='{.data.ca\.crt}' | base64 -d > poc-secrets/ca.crt
+# ... and Dex's own back-channel CA, the ONLY anchor the console will trust (step 5):
+kubectl --context "$CTX" -n dex get secret dex-backchannel-ca \
+  -o jsonpath='{.data.ca\.crt}' | base64 -d > poc-secrets/dex-backchannel-ca.crt
 ```
 
 `poc-secrets/ca.crt` is the CA's **public** certificate. Trust it in your
@@ -157,19 +161,37 @@ helm upgrade --install dex dex --repo "$DEX_REPO" --version "$DEX_CHART_VERSION"
 returns a document whose `issuer` is exactly `https://dex.localtest.me`, and the
 response carries `strict-transport-security: max-age=31536000`.
 
-**Two ways into Dex, on purpose.** Browsers reach Dex through Traefik. The
-console never does: in its pod `dex.localtest.me` is mapped (`hostAliases`) to
-Dex's OWN Service, fixed at `10.96.0.81` (`service.clusterIP`, PoC-only), on
-port 443, where Dex terminates TLS itself with `dex-internal-tls` — a
-certificate for the same name from the same local CA. So the console's
-discovery, JWKS and token requests (the last carries its client secret) reach
-only pods of Service `dex/dex`, and no Ingress anywhere can answer them. A
-production IdP is resolved through real DNS; a pinned ClusterIP and a host
+**Two ways into Dex, on purpose, with two trusts.** Browsers reach Dex through
+Traefik, with the cluster-wide local CA you put in your keychain. The console
+never does: in its pod `dex.localtest.me` is mapped (`hostAliases`) to Dex's
+OWN Service, fixed at `10.96.0.81` (`service.clusterIP`, PoC-only), on port
+443, where Dex terminates TLS itself with `dex-internal-tls`. That certificate
+comes from **Dex's own back-channel CA** — a namespaced `Issuer` in `dex` that
+no other namespace can reference — and the console trusts that CA and nothing
+else (`oidc.caBundle` holds only it; `oidc.systemRoots: false`). No Ingress can
+answer the console's discovery, JWKS and token requests (the last carries its
+client secret).
+
+**What protects the back-channel is the TLS check, not the routing.** Routing
+alone does not keep the requests on Dex's pods: a Service in ANY namespace with
+`spec.externalIPs: [10.96.0.81]` makes kube-proxy program a second rule for that
+address (CVE-2020-8554, unfixed by design), and while Service `dex/dex` does
+not exist — before step 4, or between a Dex uninstall and reinstall — anyone may
+create a Service with `clusterIP: 10.96.0.81`. Either puts someone else on the
+console's path. What they cannot do is present a certificate for
+`dex.localtest.me` that chains to Dex's back-channel CA, because only the `dex`
+namespace can use that Issuer — so the handshake fails and nothing is sent. The
+residual is therefore: whoever can create Certificates, Issuers or Secrets in
+namespace `dex` (or read `dex-backchannel-ca`'s key there) can impersonate the
+IdP to the console. **Production:** block Service `externalIPs` cluster-wide —
+the API server's `DenyServiceExternalIPs` admission plugin, or a
+`ValidatingAdmissionPolicy` refusing `spec.externalIPs` (the pattern the chart's
+own `admissionPolicy` uses) — and restrict certificate issuance for the IdP's
+name. A production IdP is resolved through real DNS; a pinned ClusterIP and a host
 alias are laptop-cluster devices. If the Dex Service is refused because
 `10.96.0.81` is outside your cluster's Service range, pick a free address in it
 and set it in `dex.values.yaml`, `logweir.values.yaml` (`hostAliases`) and
-`versions.env` (`DEX_CLUSTER_IP`); `validate.sh` checks that they agree and that
-the address is not Traefik's.
+`versions.env` (`DEX_CLUSTER_IP`); `validate.sh` checks that they agree.
 
 ## 5. Logweir's own Secrets and the CA reference
 
@@ -190,10 +212,11 @@ openssl genpkey -algorithm ed25519 -out poc-secrets/confirmation.key
 openssl pkey -in poc-secrets/confirmation.key -pubout -out poc-secrets/confirmation.pub.pem
 kubectl --context "$CTX" -n "$LOGWEIR_NAMESPACE" create secret generic logweir-console-confirmation \
   --from-file=confirmation.key=poc-secrets/confirmation.key
-# The local CA's PUBLIC certificate — `api.console.oidc.caBundle` names this
-# ConfigMap, and the console trusts it beside the system roots (chart gap G1).
-kubectl --context "$CTX" -n "$LOGWEIR_NAMESPACE" create configmap logweir-poc-ca \
-  --from-file=ca.crt=poc-secrets/ca.crt
+# Dex's back-channel CA, PUBLIC certificate only — `api.console.oidc.caBundle`
+# names this ConfigMap and, with `systemRoots: false`, it is the console's only
+# trust anchor for its IdP (chart gap G1). NOT the browser CA in ca.crt.
+kubectl --context "$CTX" -n "$LOGWEIR_NAMESPACE" create configmap logweir-dex-ca \
+  --from-file=ca.crt=poc-secrets/dex-backchannel-ca.crt
 # The three least-privilege MinIO users' secret keys (step 7).
 for u in writer reader evidence; do openssl rand -hex 20 | tr -d '\n' > "poc-secrets/minio-$u"; done
 kubectl --context "$CTX" -n "$LOGWEIR_NAMESPACE" create secret generic logweir-poc-minio-users \
@@ -514,7 +537,7 @@ your keychain.
 | Ingress controller | Traefik, 1 replica, routing the profile's namespaces only | **a maintained ingress controller** (Traefik, or another that is maintained), ≥ 2 replicas across nodes with a PDB, whose host claims are restricted to their owners (watched namespaces, or an admission policy on Ingress hosts); Gateway API with the same controller is an option later. ingress-nginx is retired and is not one |
 | TLS | cert-manager local CA; HSTS at the entry point | your CA or ACME issuer — only `issuers.yaml` and the Ingress annotation change |
 | Identity provider | Dex static users, bound by subject | your IdP (below), bound by group |
-| Console's trust of the IdP | the local CA by `oidc.caBundle`; `dex.localtest.me` mapped by `hostAliases` to **Dex's own Service** (pinned ClusterIP), where Dex terminates TLS itself — never to the shared ingress | a publicly trusted issuer needs no bundle, a corporate PKI keeps `oidc.caBundle`; the IdP is resolved through **real DNS** — no host alias, no pinned ClusterIP. If an alias is ever needed, its target must be an endpoint only the IdP's owner can route, and the bundle's CA must not issue the IdP's name to anyone else on that path |
+| Console's trust of the IdP | `oidc.caBundle` = Dex's own namespaced back-channel CA only, `systemRoots: false`; `dex.localtest.me` mapped by `hostAliases` to **Dex's own Service** (pinned ClusterIP), where Dex terminates TLS itself — never to the shared ingress. Residual: anyone who can issue or read certificates in namespace `dex` | a publicly trusted issuer needs no bundle, a corporate PKI keeps `oidc.caBundle`; the IdP is resolved through **real DNS** — no host alias, no pinned ClusterIP. If an alias is ever needed, its target must be an endpoint only the IdP's owner can route, and the bundle's CA must not issue the IdP's name to anyone else on that path. Block Service `externalIPs` (`DenyServiceExternalIPs` or a ValidatingAdmissionPolicy) so no namespace can claim the IdP's address |
 | Console | `shared`, 2 replicas, PDB, liveness and readiness probes, non-root, read-only root filesystem, `requireTrustedProxy` | the same |
 | Trusted proxy | the Traefik Service's serving pods (`trustedProxyService`) | the same, naming your ingress controller's Service. Anyone who can edit that Service, write its EndpointSlices or create a Pod matching its selector in that namespace can add an address; a `hostNetwork` controller's endpoint is its NODE, so the node's other host processes are trusted too ([charts/logweir/README.md](../../charts/logweir/README.md)) |
 | Controller | scoped to `logweir-poc` (`watchNamespaces`), non-root, read-only root filesystem, resources set, **exec liveness and readiness probes** | the same, one namespace per team |
@@ -567,13 +590,15 @@ first publication carrying these chart fixes:
 1. **The install is Helm only**: steps 1–8 run as written, from the OCI chart,
    with no `kubectl patch` and no address read from the cluster; the Traefik,
    Dex and Logweir releases reach `--wait` Ready.
-2. **G1** — the console reaches `Ready` against Dex's locally issued
-   certificate with `oidc.caBundle`; with the ConfigMap's key renamed the pod
+2. **G1** — the console reaches `Ready` against Dex's back-channel
+   certificate with `oidc.caBundle` holding only `dex-backchannel-ca` and
+   `systemRoots: false`; a `dex.localtest.me` certificate from the cluster-wide
+   `logweir-poc-ca`, served at `10.96.0.81`, is refused (UnknownIssuer); with the ConfigMap's key renamed the pod
    stays in `ContainerCreating`, and with an empty `ca.crt` it exits 2 naming
    the bundle.
 3. **G2** — inside a console pod, `dex.localtest.me` resolves to `10.96.0.81`
    (`kubectl exec deploy/logweir-api -- getent hosts dex.localtest.me`), Dex's
-   own Service; `curl --cacert poc-secrets/ca.crt --resolve dex.localtest.me:443:10.96.0.81`
+   own Service; `curl --cacert poc-secrets/dex-backchannel-ca.crt --resolve dex.localtest.me:443:10.96.0.81`
    from a pod in `dex` gets Dex's discovery over Dex's own TLS; sign-in
    completes; and an Ingress for host `dex.localtest.me` created in another
    namespace (e.g. `logweir-poc`) is NOT routed by Traefik.
