@@ -1562,9 +1562,14 @@ def test_the_resolve_column_closes_an_incident_exactly_once() -> None:
         in_flight == [{"kind": "Staleness", "transition": 1, "delivery": "Pending"}])
     row("an alert with no delivery decided yet is in flight too",
         len(d3.deliveries_in_flight([{"kind": "Staleness", "transition": 1}])) == 1)
-    row("Delivered, Failed and Suppressed are finished — no POST is owed for any of them",
+    spent = _alert("Open")
+    spent["delivery"] = {"state": "Failed", "attempts": d3.MAX_DELIVERY_ATTEMPTS}
+    row("Delivered, Suppressed and a Failed whose attempts are spent are finished — no POST "
+        "is owed for any of them",
         not d3.deliveries_in_flight([_alert("Open", delivery=state)
-                                     for state in ("Delivered", "Failed", "Suppressed")]))
+                                     for state in ("Delivered", "Suppressed")] + [spent]))
+    row("a Failed with a retry still owed (attempt 1 of 3, lab-refresh-9) is IN FLIGHT",
+        len(d3.deliveries_in_flight([_alert("Open", delivery="Failed")])) == 1)
     raced = d3.incident_resolves_exactly_once(before, after, "Healthy", 2, 1,
                                               in_flight_at_open=in_flight)
     row("MUTANT: THE RACE — a window opened over a Pending delivery is named, not "
@@ -3067,6 +3072,24 @@ def test_a_slot_due_before_creation_is_never_fired() -> None:
         not all(rule(quiet, [later], early, slot, later, quiet).values()))
     row("creation bound: a schedule that never fires (no later child) is REFUSED",
         not all(rule(ok_status, [], early, slot, later, ok_status).values()))
+
+
+def test_a_first_failed_attempt_is_not_a_finished_delivery() -> None:
+    f = d3.delivery_finished
+    row("Delivered is finished", f({"state": "Delivered", "attempts": 1}))
+    row("Suppressed is finished", f({"state": "Suppressed"}))
+    row("Failed after the third attempt is finished", f({"state": "Failed", "attempts": 3}))
+    row("Failed after ONE attempt is still owed a retry (lab-refresh-9's shape)",
+        not f({"state": "Failed", "attempts": 1}))
+    row("Pending is in flight", not f({"state": "Pending", "attempts": 2}))
+    row("no delivery yet is in flight", not f(None))
+    # PLANTED: the set this replaced read Failed/1 as finished.
+    row("PLANTED: the old set predicate stops at the first Failed; delivery_finished does not",
+        ({"state": "Failed", "attempts": 1}.get("state") in d3.DELIVERY_FINISHED)
+        and not f({"state": "Failed", "attempts": 1}))
+    in_flight = d3.deliveries_in_flight([{"kind": "Staleness", "transition": 1,
+                                          "delivery": {"state": "Failed", "attempts": 1}}])
+    row("a retry owed counts as in flight for the POST window", len(in_flight) == 1, str(in_flight))
 
 
 def test_the_redactor_keeps_pod_specs_valid_json_and_still_redacts() -> None:

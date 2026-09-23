@@ -6115,10 +6115,9 @@ def protection_cases() -> None:
         raise RuntimeError("no Staleness alert opened at all; the rows below measure nothing")
     settle(
         "protectionpolicy", RECOVERY_POLICY,
-        lambda o: (((alert_of(((o.get("status") or {}).get("alerts") or []), "Staleness") or {})
-                    .get("delivery") or {}).get("state") in {"Delivered", "Failed",
-                                                             "Suppressed"}),
-        seconds=300, what="the open transition to finish delivering",
+        lambda o: delivery_finished((alert_of(((o.get("status") or {}).get("alerts") or []),
+                                              "Staleness") or {}).get("delivery")),
+        seconds=480, what="the open transition to finish delivering",
     )
     stale = get("protectionpolicy", RECOVERY_POLICY)
     alerts_before = (stale.get("status") or {}).get("alerts") or []
@@ -6155,9 +6154,9 @@ def protection_cases() -> None:
     if resolved is not None:
         settle(
             "protectionpolicy", RECOVERY_POLICY,
-            lambda o: (((alert_of(((o.get("status") or {}).get("alerts") or []), "Staleness")
-                         or {}).get("delivery") or {}).get("state") in {"Delivered", "Failed"}),
-            seconds=300, what="the resolve transition to finish delivering",
+            lambda o: delivery_finished((alert_of(((o.get("status") or {}).get("alerts") or []),
+                                                  "Staleness") or {}).get("delivery")),
+            seconds=480, what="the resolve transition to finish delivering",
         )
     policy_now = get("protectionpolicy", RECOVERY_POLICY)
     alerts_after = (policy_now.get("status") or {}).get("alerts") or []
@@ -6285,10 +6284,9 @@ def protection_cases() -> None:
     if degraded is not None:
         settle(
             "protectionpolicy", RECOVERY_POLICY,
-            lambda o: all(((a.get("delivery") or {}).get("state")
-                           in {"Delivered", "Failed", "Suppressed"})
+            lambda o: all(delivery_finished(a.get("delivery"))
                           for a in ((o.get("status") or {}).get("alerts") or [])),
-            seconds=300, what="every transition to finish delivering",
+            seconds=480, what="every transition to finish delivering",
         )
     policy_broken = get("protectionpolicy", RECOVERY_POLICY)
     alerts_after_break = (policy_broken.get("status") or {}).get("alerts") or []
@@ -6729,8 +6727,29 @@ def valid_signature_is_protected(view: dict[str, Any], verdict: str | None,
 
 
 #: `alerts[].delivery.state` values after which no further POST is owed for that
-#: transition (`protection.rs::DeliveryState`: `Pending` is the only other one).
+#: transition (`protection.rs::DeliveryState`: `Pending` is the only other one) —
+#: `Failed` ONLY once the attempts are spent: see `delivery_finished`.
 DELIVERY_FINISHED = frozenset({"Delivered", "Failed", "Suppressed"})
+
+#: `crate::protection::MAX_DELIVERY_ATTEMPTS`.
+MAX_DELIVERY_ATTEMPTS = 3
+
+
+def delivery_finished(delivery: dict[str, Any] | None) -> bool:
+    """Is no further POST owed for this transition?
+
+    `Failed` IS NOT TERMINAL UNTIL THE ATTEMPTS ARE SPENT (measured at
+    lab-refresh-9): after a first attempt that met a transport error the alert
+    read `{state: Failed, attempts: 1}` and the controller retried 61 s later
+    (`Pending`, then `Delivered` on attempt 2). A wait that stopped at the
+    first `Failed` judged a delivery the product was still making, and failed
+    `protection-unavailable-archive-raises-the-alert` on a correct controller.
+    """
+    d = delivery or {}
+    state = d.get("state")
+    if state in {"Delivered", "Suppressed"}:
+        return True
+    return state == "Failed" and int(d.get("attempts") or 0) >= MAX_DELIVERY_ATTEMPTS
 
 
 def deliveries_in_flight(alerts: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -6743,7 +6762,7 @@ def deliveries_in_flight(alerts: list[dict[str, Any]]) -> list[dict[str, Any]]:
         {"kind": a.get("kind"), "transition": a.get("transition"),
          "delivery": (a.get("delivery") or {}).get("state")}
         for a in alerts
-        if (a.get("delivery") or {}).get("state") not in DELIVERY_FINISHED
+        if not delivery_finished(a.get("delivery"))
     ]
 
 
@@ -7291,10 +7310,9 @@ def protection_verdicts() -> None:
     if staleness_after.get("state") == "Resolved":
         settle(
             "protectionpolicy", REFUSED_POLICY,
-            lambda o: all(((a.get("delivery") or {}).get("state")
-                           in {"Delivered", "Failed", "Suppressed"})
+            lambda o: all(delivery_finished(a.get("delivery"))
                           for a in ((o.get("status") or {}).get("alerts") or [])),
-            seconds=300, what="every transition to finish delivering",
+            seconds=480, what="every transition to finish delivering",
         )
         alerts_after_flip = policy_alerts(REFUSED_POLICY)
         staleness_after = alert_of(alerts_after_flip, "Staleness") or {}
@@ -7369,10 +7387,9 @@ def protection_verdicts() -> None:
     else:
         settle(
             "protectionpolicy", STAYS_POLICY,
-            lambda o: (((alert_of(((o.get("status") or {}).get("alerts") or []), "Staleness")
-                         or {}).get("delivery") or {}).get("state")
-                       in {"Delivered", "Failed", "Suppressed"}),
-            seconds=300, what="the open transition to finish delivering",
+            lambda o: delivery_finished((alert_of(((o.get("status") or {}).get("alerts") or []),
+                                                  "Staleness") or {}).get("delivery")),
+            seconds=480, what="the open transition to finish delivering",
         )
         quiet_sink(what="verdicts (3b)'s POST window", tag="verdicts-3b", evidence=evidence)
         stays_before = alert_of(policy_alerts(STAYS_POLICY), "Staleness") or {}
