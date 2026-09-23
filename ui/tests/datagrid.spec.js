@@ -327,3 +327,17 @@ test("replace_without_a_document_is_the_plain_replace", () => {
   assert.deepEqual(children, [child]);
   assert.equal(focusWithin(node), null);
 });
+
+test("a_success_line_never_prints_an_empty_name_or_uid", async () => {
+  const { mutationStatus } = await import("../render.js");
+  // The manual-backup answer carries no metadata (the PLAT-18.2 live pass saw
+  // "Created Backup  (uid )."). The line now says only what it knows.
+  const bare = mutationStatus({ phase: "succeeded", result: { object: {} } },
+    { kind: "Backup", name: "", idempotencyKey: true }, null);
+  assert.ok(bare.includes("<p>Created Backup.</p>"), bare);
+  assert.ok(!bare.includes("(uid )"), "no empty uid parenthesis");
+  const full = mutationStatus(
+    { phase: "succeeded", result: { object: { metadata: { name: "b1", uid: "u-1" } } } },
+    { kind: "Backup", name: "" }, null);
+  assert.ok(full.includes("<p>Created Backup b1 (uid u-1).</p>"), "a known identity is still printed: " + full);
+});

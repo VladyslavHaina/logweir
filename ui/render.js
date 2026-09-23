@@ -87,7 +87,9 @@ export function replace(node, children) {
 }
 
 /** Where focus is inside `node`, as something that survives a re-render:
- *  the focused element's `id`, and its text selection when it has one. `null`
+ *  the focused element's `id` and text selection, and -- for a control with
+ *  no id, or one the re-render disables (a form going pending disables its
+ *  own submit button) -- which form it was in and where in that form. `null`
  *  when there is no document, or focus is elsewhere. */
 export function focusWithin(node) {
   const doc = node && node.ownerDocument;
@@ -108,17 +110,44 @@ export function focusWithin(node) {
     // a checkbox or a select has no text selection; asking some throws
     selection = null;
   }
-  return { id: typeof id === "string" && id.length > 0 ? id : null, selection: selection };
+  const form = typeof active.closest === "function" ? active.closest("form") : null;
+  let formIndex = -1;
+  let controlIndex = -1;
+  let onStatus = false;
+  if (form !== null && typeof node.querySelectorAll === "function") {
+    formIndex = Array.from(node.querySelectorAll("form")).indexOf(form);
+    controlIndex = Array.from(form.querySelectorAll(FOCUSABLE)).indexOf(active);
+    onStatus = typeof active.matches === "function" && active.matches(".form-status");
+  }
+  return {
+    id: typeof id === "string" && id.length > 0 ? id : null,
+    selection: selection,
+    formIndex: formIndex,
+    controlIndex: controlIndex,
+    onStatus: onStatus,
+    tag: String(active.tagName || ""),
+  };
 }
 
-/** Puts focus back where [`focusWithin`] found it, in the new subtree. */
+/** What a keyboard can land on inside a form, in document order. */
+const FOCUSABLE = "a[href], button, input, select, textarea, summary, [tabindex]";
+
+function canTakeFocus(element) {
+  return element !== null && element !== undefined && typeof element.focus === "function" &&
+    element.disabled !== true && element.hidden !== true;
+}
+
+/** Puts focus back where [`focusWithin`] found it, in the new subtree: the
+ *  same id; else the same position in the same form; else -- the control is
+ *  gone or disabled, as a submit button is while its request is pending --
+ *  that form's status region, which is where the outcome is announced; else
+ *  the view itself. Never a guess outside the form the reader was in. */
 export function restoreFocus(node, kept) {
   const doc = node && node.ownerDocument;
   if (!doc || kept === null || kept === undefined) {
     return false;
   }
-  const target = kept.id === null ? null : doc.getElementById(kept.id);
-  if (target !== null && node.contains(target) && typeof target.focus === "function") {
+  const take = (target) => {
     target.focus({ preventScroll: true });
     if (kept.selection !== null && typeof target.setSelectionRange === "function") {
       try {
@@ -128,6 +157,27 @@ export function restoreFocus(node, kept) {
       }
     }
     return true;
+  };
+  const byId = kept.id === null ? null : doc.getElementById(kept.id);
+  if (byId !== null && node.contains(byId) && canTakeFocus(byId)) {
+    return take(byId);
+  }
+  if (kept.formIndex !== -1 && typeof node.querySelectorAll === "function") {
+    const form = Array.from(node.querySelectorAll("form"))[kept.formIndex] || null;
+    if (form !== null) {
+      const status = form.querySelector(".form-status[tabindex]");
+      if (!kept.onStatus && kept.controlIndex !== -1) {
+        const same = Array.from(form.querySelectorAll(FOCUSABLE))[kept.controlIndex] || null;
+        if (same !== null && String(same.tagName) === kept.tag && canTakeFocus(same) &&
+          (kept.id === null || same.getAttribute("id") === kept.id)) {
+          return take(same);
+        }
+      }
+      if (canTakeFocus(status)) {
+        status.focus({ preventScroll: true });
+        return true;
+      }
+    }
   }
   if (typeof node.focus === "function" && typeof node.hasAttribute === "function" &&
     node.hasAttribute("tabindex")) {
@@ -664,10 +714,12 @@ function enhanceOne(container) {
   const sorters = [];
   if (table !== null && items.length > 1) {
     columns.forEach((th, index) => {
-      if (th.hasAttribute("colspan")) {
+      const caption = th.textContent;
+      // A column with no caption (a row's action column) is not a sort key a
+      // reader can name, and a button without words has no accessible name.
+      if (th.hasAttribute("colspan") || caption.trim().length === 0) {
         return;
       }
-      const caption = th.textContent;
       const button = make(doc, "button", { type: "button", class: "datagrid-sort",
         id: id + "-sort-" + String(index) }, caption);
       while (th.firstChild !== null) {
@@ -1352,10 +1404,16 @@ export function mutationStatus(state, subject, unmatched) {
     }
     return statusRegion(
       "succeeded",
+      // A NAME OR A UID THE ANSWER DID NOT CARRY IS LEFT OUT, NOT PRINTED
+      // EMPTY (found by the PLAT-18.2 live pass): a manual Backup's answer is
+      // projected without `metadata`, and the line read "Created Backup  (uid
+      // )." -- a hole where an identity should be. The run's own name and uid
+      // are in the panel's result block beside this line.
       result.outcome === "existing"
-        ? "<p>" + kind + " " + shown + " already existed with exactly this content (uid " + uid +
-          "); nothing new was created.</p>"
-        : "<p>Created " + kind + " " + shown + " (uid " + uid + ").</p>",
+        ? "<p>" + kind + (shown ? " " + shown : "") + " already existed with exactly this " +
+          "content" + (uid ? " (uid " + uid + ")" : "") + "; nothing new was created.</p>"
+        : "<p>Created " + kind + (shown ? " " + shown : "") + (uid ? " (uid " + uid + ")" : "") +
+          ".</p>",
     );
   }
   if (s.phase !== "failed") {
