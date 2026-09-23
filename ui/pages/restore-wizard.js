@@ -2318,7 +2318,8 @@ export function renderTopicSubset(state) {
       // topics, so the boxes get Clarity's filter and pagination. Every box
       // stays in the document -- the ones off the page are hidden, not
       // removed -- because `refresh` reads the selection off every box.
-      : datagrid({ id: "subset-topics", label: "topics" },
+      : datagrid({ id: "subset-topics", label: "topics",
+        scope: String(((((s.point || {}).metadata) || {}).uid) || (s.point || {}).uid || "") },
         "<ul class=\"topic-subset\">" + boxes + "</ul>")) +
     "<div class=\"actions\">" +
     "<button type=\"button\" id=\"select-all-topics\">Select all</button>" +
@@ -2337,7 +2338,8 @@ export function renderTopicSubset(state) {
     "<h4>The mapping, before you submit</h4>" +
     "<p class=\"blurb\">" + esc(MAPPING_SENTENCE) + "</p>" +
     table(["SOURCE TOPIC", "TARGET TOPIC"], rows, "No topic is selected, so nothing is mapped.",
-      undefined, { id: "topic-mapping", label: "mapped topics" }) +
+      undefined, { id: "topic-mapping", label: "mapped topics",
+        scope: String(((((s.point || {}).metadata) || {}).uid) || (s.point || {}).uid || "") }) +
     "<p class=\"note\" id=\"mapping-identity\">" + esc(MAPPING_RULE_SENTENCE) + "</p>"
   );
 }

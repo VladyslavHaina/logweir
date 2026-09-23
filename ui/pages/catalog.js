@@ -462,7 +462,8 @@ export function renderPoints(page, ns, catalog, destination) {
       entries.map((entry) => pointRow(entry, ns, catalog, destination, page)),
       NO_POINT_SENTENCE,
       undefined,
-      { id: "catalog-points", label: "recovery points" },
+      { id: "catalog-points", label: "recovery points",
+        scope: String(ns) + "/" + String(((catalog || {}).metadata || {}).name || (catalog || {}).name || "") },
     ) +
     (typeof (page || {}).backupVerdictsIncomplete === "string" &&
       page.backupVerdictsIncomplete.length > 0

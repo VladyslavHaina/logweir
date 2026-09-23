@@ -4616,7 +4616,8 @@ export function renderScheduleHistory(ns, object, runs, points, catalogError, se
       rows,
       NO_HISTORY_SENTENCE,
       undefined,
-      { id: "schedule-runs", label: "runs" },
+      { id: "schedule-runs", label: "runs",
+        scope: String(ns) + "/" + String(((object || {}).metadata || {}).uid || "") },
     ) +
     "</section>"
   );
@@ -4683,7 +4684,7 @@ export function renderEarlierRuns(ns, earlier, points) {
       }),
       "",
       undefined,
-      { id: "earlier-runs", label: "earlier runs" },
+      { id: "earlier-runs", label: "earlier runs", scope: ns },
     ) +
     "</section>"
   );

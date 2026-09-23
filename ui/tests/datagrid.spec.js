@@ -16,6 +16,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import {
+  enhanceDatagrids,
   DATAGRID_DEFAULT_PAGE_SIZE,
   DATAGRID_PAGE_SIZES,
   datagridCompare,
@@ -28,6 +29,7 @@ import {
   restoreFocus,
   table,
 } from "../render.js";
+import { build, fakeDocument as fakeDom } from "./fake-dom.js";
 import { renderBackupList } from "../pages/backups.js";
 import { renderHistoryList } from "../pages/history.js";
 import { renderClusterList } from "../pages/clusters.js";
@@ -147,17 +149,19 @@ test("a_declared_datagrid_gains_one_wrapper_and_an_undeclared_table_is_unchanged
 test("every_dense_list_declares_itself_a_datagrid", () => {
   const backups = { items: [fixture("backup-valid-exit0.json"), fixture("backup-valid-exit2.json")] };
   const lists = [
-    ["backups", "backups", renderBackupList(backups, "ns")],
-    ["history", "runs", renderHistoryList(fixture("restore-valid-pass.json"), backups, "ns")],
-    ["clusters", "connections", renderClusterList(fixture("cluster-scram.json"))],
-    ["schedules", "schedules", renderScheduleList(fixture("schedule-retention.json"))],
-    ["approvals", "approvals", renderApprovalList(fixture("approvals-selfattested.json"), 0)],
+    ["backups", "backups", "ns", renderBackupList(backups, "ns")],
+    ["history", "runs", "ns", renderHistoryList(fixture("restore-valid-pass.json"), backups, "ns")],
+    ["clusters", "connections", null, renderClusterList(fixture("cluster-scram.json"))],
+    ["schedules", "schedules", null, renderScheduleList(fixture("schedule-retention.json"))],
+    ["approvals", "approvals", null, renderApprovalList(fixture("approvals-selfattested.json"), 0)],
   ];
-  for (const [id, label, html] of lists) {
+  for (const [id, label, scope, html] of lists) {
     assert.ok(
       html.includes("<div class=\"datagrid\" data-datagrid=\"" + id + "\" data-datagrid-label=\"" +
-        label + "\"><div class=\"table-wrap\">"),
-      id + " declares the datagrid `" + id + "` over its table:\n" + html.slice(0, 400),
+        label + "\"" + (scope === null ? "" : " data-datagrid-scope=\"" + scope + "\"") +
+        "><div class=\"table-wrap\">"),
+      id + " declares the datagrid `" + id + "` over its table" +
+        (scope === null ? "" : ", scoped to its namespace") + ":\n" + html.slice(0, 400),
     );
   }
 });
@@ -172,8 +176,9 @@ test("the_wizard_topic_subset_is_a_list_datagrid_and_keeps_every_box", () => {
   const html = renderTopicSubset(state);
   assert.ok(
     html.includes("<div class=\"datagrid\" data-datagrid=\"subset-topics\" " +
-      "data-datagrid-label=\"topics\"><ul class=\"topic-subset\">"),
-    "the subset list is wrapped as a list datagrid",
+      "data-datagrid-label=\"topics\" data-datagrid-scope=\"" + newest.metadata.uid +
+      "\"><ul class=\"topic-subset\">"),
+    "the subset list is wrapped as a list datagrid scoped to the point's uid",
   );
   assert.equal((html.match(/class="topic-box"/g) || []).length, 2000,
     "every frozen topic still has its box in the string: pagination hides, it never drops");
@@ -487,4 +492,117 @@ test("disabling_the_focused_control_in_place_moves_focus_to_the_status_first", a
   bare.focus();
   bare.disabled = true;
   assert.equal(doc.activeElement, bare, "the old way: focus left on the disabled control");
+});
+
+// ------------------------------------- the enhancement, in a fake document
+//
+// Review HIGH-1: a filter kept per grid id and applied to every list of that
+// id -- with the box only rendered over ten rows -- hid all five runs of the
+// next namespace, a Missing archive among them, behind a filter nobody could
+// see or clear. These rows drive `enhanceDatagrids` itself.
+
+
+function historyGrid(doc, count, missingAt) {
+  const rows = [];
+  for (let i = 0; i < count; i += 1) {
+    rows.push(["tr", {},
+      ["td", {}, (i < 2 ? "prod-" : "run-") + String(i)],
+      ["td", {}, i === missingAt ? ["span", { class: "badge badge-danger" }, "Missing"] : "Available"],
+    ]);
+  }
+  return build(doc, ["div", { class: "datagrid", "data-datagrid": "history",
+    "data-datagrid-label": "runs" },
+  ["div", { class: "table-wrap" }, ["table", { class: "grid" },
+    ["thead", {}, ["tr", {}, ["th", { scope: "col" }, "NAME"], ["th", { scope: "col" }, "ARCHIVE"]]],
+    ["tbody", {}, ...rows]]]]);
+}
+
+function mount(doc, grid) {
+  while (doc.body.firstChild !== null) {
+    doc.body.removeChild(doc.body.firstChild);
+  }
+  doc.body.appendChild(grid);
+  enhanceDatagrids(grid);
+  return grid;
+}
+
+function shownRows(grid) {
+  return grid.querySelectorAll("tbody tr").filter((tr) => tr.shown() &&
+    tr.querySelector("td.empty") === null);
+}
+
+
+test("a_filter_typed_over_one_namespace_does_not_hide_the_next_namespaces_short_list", () => {
+  const doc = fakeDom("#/history?ns=team-a");
+  const a = mount(doc, historyGrid(doc, 15));
+  const filter = a.querySelector("#history-filter");
+  assert.ok(filter !== null, "15 rows render the filter box");
+  filter.value = "prod";
+  filter.dispatch("input");
+  assert.equal(shownRows(a).length, 2, "the filter narrows team-a to its two prod runs");
+
+  // The next namespace: 5 runs, one of them a Missing archive.
+  doc.defaultView.location.hash = "#/history?ns=team-b";
+  const b = mount(doc, historyGrid(doc, 5, 3));
+  assert.equal(shownRows(b).length, 5, "every run of team-b is shown");
+  assert.ok(b.querySelector(".badge-danger").shown(), "including the Missing archive");
+  assert.equal(b.querySelector("#history-filter"), null, "and a short list with no filter has no box");
+  assert.equal(b.querySelector("#history-count").textContent, "1-5 of 5 runs.");
+});
+
+test("a_filter_in_force_on_a_short_list_always_renders_its_box_and_a_clear_control", () => {
+  // NEGATIVE CONTROL for the row above: the SAME route and list, shrunk under
+  // a live filter (a re-render after runs were deleted). The filter still
+  // applies -- and so the box, the hidden count and Clear must be on screen.
+  const doc = fakeDom("#/history?ns=team-a");
+  const a = mount(doc, historyGrid(doc, 15));
+  const filter = a.querySelector("#history-filter");
+  filter.value = "zzz-matches-nothing";
+  filter.dispatch("input");
+  const shrunk = mount(doc, historyGrid(doc, 5, 3));
+  const box = shrunk.querySelector("#history-filter");
+  assert.ok(box !== null && box.shown(), "the box is rendered over 5 rows because a filter is in force");
+  assert.equal(box.value, "zzz-matches-nothing", "showing the filter that applies");
+  assert.equal(shownRows(shrunk).length, 0, "the filter does hide every row");
+  const hidden = shrunk.querySelector("#history-hidden");
+  assert.ok(hidden.shown(), "the hidden line is shown");
+  assert.match(hidden.textContent, /^5 runs hidden by the filter\. Clear filter$/);
+  shrunk.querySelector("#history-clear").click();
+  assert.equal(shownRows(shrunk).length, 5, "Clear shows all five");
+  assert.equal(hidden.shown(), false, "and the hidden line goes away");
+  assert.equal(doc.activeElement, box, "focus returns to the emptied filter");
+});
+
+test("a_topic_filter_for_one_point_does_not_hide_the_next_points_topics", () => {
+  const topicsGrid = (doc, uid, count) => build(doc, ["div", { class: "datagrid",
+    "data-datagrid": "subset-topics", "data-datagrid-label": "topics", "data-datagrid-scope": uid },
+  ["ul", { class: "topic-subset" }, ...Array.from({ length: count }, (_, i) =>
+    ["li", {}, ["label", {}, ["input", { type: "checkbox", class: "topic-box",
+      id: "topic-" + String(i) }], "orders.stream-" + String(i)]])]]);
+  // The same wizard hash shape, a different point: scope is the point's uid.
+  const doc = fakeDom("#/restore?ns=team-a&backup=b1&uid=u-1");
+  const one = mount(doc, topicsGrid(doc, "u-1", 15));
+  const filter = one.querySelector("#subset-topics-filter");
+  filter.value = "stream-1";
+  filter.dispatch("input");
+  const visible = (grid) => grid.querySelectorAll("li").filter((li) => li.shown()).length;
+  assert.equal(visible(one), 6, "stream-1 and stream-10..14");
+  doc.defaultView.location.hash = "#/restore?ns=team-a&backup=b2&uid=u-2";
+  const two = mount(doc, topicsGrid(doc, "u-2", 3));
+  assert.equal(visible(two), 3, "all three topics of the next point are visible and tickable");
+  assert.equal(two.querySelector("#subset-topics-filter"), null);
+  // And every box of the first point stayed in its form while filtered.
+  assert.equal(one.querySelectorAll(".topic-box").length, 15);
+});
+
+test("a_row_needing_attention_on_another_page_is_counted_on_this_one", () => {
+  const doc = fakeDom("#/history?ns=team-c");
+  const grid = mount(doc, historyGrid(doc, 25, 22));
+  assert.equal(shownRows(grid).length, 20, "page 1 of 25");
+  const line = grid.querySelector("#history-attention");
+  assert.ok(line.shown(), "the attention line is shown");
+  assert.equal(line.textContent,
+    "1 needing attention (failed, unverified, refused or unavailable) is not on this page: page 2.");
+  grid.querySelector("#history-next").click();
+  assert.equal(line.shown(), false, "on page 2 it is on the page, and the line goes away");
 });

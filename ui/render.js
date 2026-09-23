@@ -551,9 +551,12 @@ export const DATAGRID_CONTROLS_ABOVE = 10;
 /** The wrapper `table` puts around a declared datagrid. */
 export function datagrid(grid, html) {
   const g = grid || {};
+  const scope = g.scope === undefined || g.scope === null || String(g.scope).length === 0
+    ? ""
+    : " data-datagrid-scope=\"" + esc(g.scope) + "\"";
   return (
     "<div class=\"datagrid\" data-datagrid=\"" + esc(g.id) + "\" data-datagrid-label=\"" +
-    esc(g.label || "rows") + "\">" + html + "</div>"
+    esc(g.label || "rows") + "\"" + scope + ">" + html + "</div>"
   );
 }
 
@@ -628,6 +631,7 @@ export function datagridView(rows, state) {
   const shown = matched.slice(start, start + size);
   return {
     indices: shown,
+    order: matched,
     total: list.length,
     matched: matched.length,
     page: page,
@@ -656,7 +660,89 @@ export function datagridSummary(view, label) {
 
 const DATAGRID_STATE = new Map();
 
-/** The state one grid id carries for the life of the loaded page. */
+/** THE KEY A GRID'S STATE IS KEPT UNDER: its id, the route it is on, and the
+ *  list instance it shows (review HIGH-1). A grid id is a constant --
+ *  `history`, `subset-topics` -- shared by every namespace and every recovery
+ *  point, so keyed on the id alone a filter typed over one namespace's 15 runs
+ *  silently emptied the next namespace's 5, whose grid rendered no box to
+ *  clear it. The route is the whole hash (namespace, name, uid); `scope` is the
+ *  instance a page names itself (a schedule's uid, a point's uid). */
+export function datagridScopeKey(id, route, scope) {
+  return [String(id || ""), String(route || ""), String(scope || "")].join("\n");
+}
+
+/** WHAT A GRID OF `rowCount` ROWS SHOWS, given its kept state (review HIGH-1).
+ *
+ *  The filter box is rendered when the list is long enough to need one OR a
+ *  filter is in force -- so a query can never apply without the box that shows
+ *  it and clears it. The pager is rendered only for a long list; a short one
+ *  is always page 1. Pure, so the suite drives it. */
+export function datagridPlan(rowCount, state) {
+  const s = state || {};
+  const query = String(s.query || "");
+  const long = rowCount > DATAGRID_CONTROLS_ABOVE;
+  const filter = long || query.trim().length > 0;
+  return {
+    filter: filter,
+    pager: long,
+    state: {
+      query: filter ? query : "",
+      sortColumn: typeof s.sortColumn === "number" ? s.sortColumn : -1,
+      sortDirection: s.sortDirection === "descending" ? "descending" : "ascending",
+      page: long ? s.page : 1,
+      pageSize: long ? s.pageSize : DATAGRID_PAGE_SIZES[DATAGRID_PAGE_SIZES.length - 1],
+    },
+  };
+}
+
+/** How many rows the filter hides, in words, or "" when it hides none. */
+export function datagridHiddenSentence(view, label) {
+  const v = view || {};
+  const hidden = (v.total || 0) - (v.matched || 0);
+  if (!v.filtered || hidden <= 0) {
+    return "";
+  }
+  return String(hidden) + " " + (label || "rows") + " hidden by the filter.";
+}
+
+/** ROWS THAT NEED ATTENTION AND ARE NOT ON THIS PAGE (review LOW-2): an
+ *  unavailable archive or a failed run on page 3 must not be invisible on page
+ *  1. `attention[i]` says whether row `i` carries such a state. Returns the
+ *  count and the pages they are on, over the rows the filter keeps. */
+export function datagridOffPageAttention(view, attention) {
+  const v = view || {};
+  const order = Array.isArray(v.order) ? v.order : [];
+  const flags = Array.isArray(attention) ? attention : [];
+  const size = v.pageSize || DATAGRID_DEFAULT_PAGE_SIZE;
+  const pages = new Set();
+  let count = 0;
+  order.forEach((row, position) => {
+    const page = Math.floor(position / size) + 1;
+    if (flags[row] === true && page !== v.page) {
+      count += 1;
+      pages.add(page);
+    }
+  });
+  return { count: count, pages: Array.from(pages).sort((a, b) => a - b) };
+}
+
+/** The footer's words for [`datagridOffPageAttention`], or "". */
+export function datagridAttentionSentence(off, label) {
+  const o = off || {};
+  if (!o.count) {
+    return "";
+  }
+  return String(o.count) + " needing attention (failed, unverified, refused or unavailable) " +
+    (o.count === 1 ? "is" : "are") + " not on this page: " +
+    (o.pages.length === 1 ? "page " : "pages ") + o.pages.join(", ") + ".";
+}
+
+/** A row that carries a state an operator must not miss. */
+export const DATAGRID_ATTENTION =
+  ".badge-danger, .badge-phase-failed, .badge-unverified, .badge-warn, .complaint, .refusal";
+
+/** The state one grid carries for the life of the loaded page, under the key
+ *  [`datagridScopeKey`] builds (an id alone is the key of a grid shown once). */
 export function datagridState(id) {
   const key = String(id || "");
   if (!DATAGRID_STATE.has(key)) {
@@ -810,9 +896,22 @@ function enhanceOne(container) {
     text: row.textContent,
     cells: table !== null ? Array.from(row.children).map((c) => c.textContent) : [],
   }));
-  const state = datagridState(id);
+  const route = doc.defaultView && doc.defaultView.location
+    ? String(doc.defaultView.location.hash || "")
+    : "";
+  const state = datagridState(datagridScopeKey(id, route,
+    container.getAttribute("data-datagrid-scope") || ""));
+  const attention = items.map((row) => row.querySelector(DATAGRID_ATTENTION) !== null);
   const columns = table !== null ? Array.from(table.querySelectorAll("thead th")) : [];
-  const controls = items.length > DATAGRID_CONTROLS_ABOVE;
+  const plan = datagridPlan(items.length, state);
+  // A SHORT LIST NEVER CARRIES A PAGE OR A SIZE IT CANNOT SHOW; its query is
+  // kept only while the box that shows it is on screen (always, by the plan).
+  state.query = plan.state.query;
+  if (!plan.pager) {
+    state.page = 1;
+  }
+  const controls = plan.pager;
+  const filtering = plan.filter;
   const regionId = id + "-grid";
   (table !== null ? table : body).setAttribute("id", regionId);
 
@@ -821,7 +920,10 @@ function enhanceOne(container) {
     "aria-live": "polite" });
 
   let filter = null;
-  if (controls) {
+  let hiddenLine = null;
+  let hiddenText = null;
+  let clear = null;
+  if (filtering) {
     const toolbar = make(doc, "div", { class: "datagrid-toolbar" });
     const field = make(doc, "div", { class: "field" });
     const caption = make(doc, "div", { class: "datagrid-filter-caption" });
@@ -837,6 +939,15 @@ function enhanceOne(container) {
     filter.value = state.query;
     field.appendChild(filter);
     toolbar.appendChild(field);
+    // WHENEVER THE FILTER HIDES ROWS, SAY HOW MANY AND OFFER TO CLEAR IT.
+    hiddenLine = make(doc, "p", { class: "datagrid-hidden", id: id + "-hidden" });
+    hiddenText = make(doc, "span", {});
+    clear = make(doc, "button", { type: "button", id: id + "-clear", "aria-controls": regionId },
+      "Clear filter");
+    hiddenLine.appendChild(hiddenText);
+    hiddenLine.appendChild(doc.createTextNode(" "));
+    hiddenLine.appendChild(clear);
+    toolbar.appendChild(hiddenLine);
     container.insertBefore(toolbar, container.firstChild);
   }
 
@@ -862,6 +973,8 @@ function enhanceOne(container) {
 
   const footer = make(doc, "div", { class: "datagrid-footer" });
   footer.appendChild(count);
+  const attentionLine = make(doc, "p", { class: "datagrid-attention", id: id + "-attention" });
+  footer.appendChild(attentionLine);
   let size = null;
   let first = null;
   let previous = null;
@@ -907,7 +1020,8 @@ function enhanceOne(container) {
   }
 
   const update = () => {
-    const view = datagridView(rows, state);
+    const view = datagridView(rows, plan.pager ? state
+      : Object.assign({}, state, { page: 1, pageSize: plan.state.pageSize }));
     state.page = view.page;
     const show = new Set(view.indices);
     const order = state.sortColumn >= 0
@@ -927,10 +1041,19 @@ function enhanceOne(container) {
     }
     if (view.matched === 0) {
       noMatchCell.textContent =
-        "No " + label + " match the filter. Clear it to see all " + String(view.total) + ".";
+        "No " + label + " match the filter. Clear the filter above to see all " +
+        String(view.total) + ".";
       body.appendChild(noMatch);
     }
     count.textContent = datagridSummary(view, label);
+    if (hiddenLine !== null) {
+      const said = datagridHiddenSentence(view, label);
+      hiddenText.textContent = said;
+      hiddenLine.hidden = said.length === 0;
+    }
+    const off = datagridAttentionSentence(datagridOffPageAttention(view, attention), label);
+    attentionLine.textContent = off;
+    attentionLine.hidden = off.length === 0;
     for (const s of sorters) {
       if (s.index === state.sortColumn) {
         s.th.setAttribute("aria-sort", state.sortDirection);
@@ -952,6 +1075,13 @@ function enhanceOne(container) {
       state.query = filter.value;
       state.page = 1;
       update();
+    });
+    clear.addEventListener("click", () => {
+      state.query = "";
+      state.page = 1;
+      filter.value = "";
+      update();
+      filter.focus();
     });
   }
   for (const s of sorters) {

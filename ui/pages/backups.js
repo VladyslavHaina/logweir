@@ -222,7 +222,7 @@ export function renderBackupList(input, ns) {
       rows,
       NO_BACKUP_SENTENCE,
       undefined,
-      { id: "backups", label: "backups" },
+      { id: "backups", label: "backups", scope: ns },
     ) +
     listFooter()
   );

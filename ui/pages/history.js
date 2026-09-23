@@ -254,7 +254,7 @@ export function renderHistoryList(input, second, ns) {
       rows,
       NO_HISTORY_SENTENCE,
       undefined,
-      { id: "history", label: "runs" },
+      { id: "history", label: "runs", scope: ns },
     ) +
     listFooter()
   );

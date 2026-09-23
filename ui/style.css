@@ -849,6 +849,27 @@ th[aria-sort="descending"] .datagrid-sort::after {
   font-size: var(--cds-global-typography-secondary-font-size);
 }
 
+.datagrid-hidden {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--cds-global-space-5);
+  margin: 0;
+  color: var(--cds-alias-typography-color-500);
+  font-size: var(--cds-global-typography-secondary-font-size);
+  font-weight: var(--cds-global-typography-font-weight-semibold);
+}
+
+.datagrid-attention {
+  flex-basis: 100%;
+  order: -1;
+  margin: 0;
+  padding-left: var(--cds-global-space-5);
+  border-left: var(--cds-alias-object-border-width-300) solid var(--cds-alias-status-warning-shade);
+  color: var(--cds-alias-typography-color-500);
+  font-weight: var(--cds-global-typography-font-weight-semibold);
+}
+
 .datagrid-footer .datagrid-count {
   margin: 0 auto 0 0;
 }
