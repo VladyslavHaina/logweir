@@ -204,7 +204,7 @@ SUITES: dict[str, Suite] = {s.id: s for s in [
         lambda c: [f"lw-plat20-p112-{c.stamp}"], timeout=900,
         accept_rcs=frozenset({0, 1}),
         why_rcs="plat11-2 records a journey only after every check in it held and stops at the first "
-                "journey that throws (record() at scripts/plat11-2-ui-e2e.mjs:141), so rows recorded before a later "
+                "journey that throws (record() at scripts/plat11-2-ui-e2e.mjs:150), so rows recorded before a later "
                 "journey's failure are fully asserted; exit 1 is accepted only with a result "
                 "document that records its namespace cleanup, and the failure is kept as a note"),
     Suite(
@@ -332,9 +332,9 @@ JOURNEYS: tuple[Journey, ...] = (
         "old-point-selection", "an older point chosen in the console and through the API is the point the "
         "durable Restore names, and the point that is restored", ("old-point selection",),
         (R("plat12-13", "an older point stays selected when a newer Backup completes mid-wizard",
-           (TEXT,), f"{U1213}:1013"),
+           (TEXT,), f"{U1213}:1027"),
          R("plat11-2", "the wizard submits, and the created Restore is the preview byte for byte",
-           (RESOURCE,), f"{U112}:972"),
+           (RESOURCE,), f"{U112}:989"),
          R("native", "restore-cr-carries-the-selected-older-point", (RESOURCE,), f"{NAT}:401"),
          R("native", "older-point-restore-restores-exactly-its-records", (ARCHIVE, RESOURCE), f"{NAT}:459")),
         data=True),
