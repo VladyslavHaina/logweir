@@ -890,12 +890,24 @@ async function selectorOffersEveryPointAndNoPlan(browser, base) {
 
     // THE SEARCH FILTERS IN PLACE: the input keeps its caret and the rows it
     // hides are hidden, not re-rendered.
+    //
+    // WHAT "HIDDEN" MEANS IS READ TWICE, from the attribute and from layout
+    // (PLAT-18.2). The page used to write an inline `display: none` beside
+    // `hidden`; the token lint now forbids an inline style, and the stylesheet's
+    // `[hidden] { display: none !important }` does the hiding. A row counts as
+    // shown only when it carries no `hidden` AND lays out as something other than
+    // `display: none`; hidden only when both say so -- so neither an attribute
+    // the stylesheet ignores nor a style the reader's assistive technology
+    // cannot see passes.
     await page.fill("#point-search", "20261009-060000");
     await page.waitForFunction(
       (uid) => {
         const rows = Array.from(document.querySelectorAll("tr[data-point]"));
-        const shown = rows.filter((r) => r.style.display !== "none");
-        return shown.length === 1 && shown[0].getAttribute("data-point") === uid;
+        const off = (r) => r.hidden && getComputedStyle(r).display === "none";
+        const on = (r) => !r.hidden && getComputedStyle(r).display !== "none";
+        const shown = rows.filter(on);
+        return rows.every((r) => on(r) || off(r)) &&
+          shown.length === 1 && shown[0].getAttribute("data-point") === uid;
       },
       points.old.uid,
       { timeout: 5000 },
@@ -908,7 +920,9 @@ async function selectorOffersEveryPointAndNoPlan(browser, base) {
     await page.waitForFunction(() => {
       const rows = Array.from(document.querySelectorAll("tr[data-point]"));
       const empty = document.querySelector("#no-match");
-      return rows.every((r) => r.style.display === "none") && empty !== null && !empty.hidden;
+      return rows.length > 0 &&
+        rows.every((r) => r.hidden && getComputedStyle(r).display === "none") &&
+        empty !== null && !empty.hidden;
     }, null, { timeout: 5000 });
 
     check(posts.length === 0, "the selector wrote something: " + posts.join(", "));
@@ -1492,8 +1506,13 @@ async function aFailedProbeShowsTheControllersReason(browser, base) {
     // sentence still says the words, while pointing somewhere else -- so this
     // journey had stopped checking that the probe panel offers a control at
     // all. Reading the BUTTON is what makes it a control assertion again.
-    const rereadLabel = (await page.locator("#cluster-probe form.probe-test button").innerText())
-      .trim();
+    //
+    // ITS SHIPPED LABEL, NOT ITS RENDERING (PLAT-18.2). Clarity draws every
+    // button in capitals through `text-transform`, and `innerText` reports the
+    // rendered "RE-READ PROBE"; the label the page ships -- and the name a
+    // screen reader announces -- is the node's text, which is what is compared.
+    const rereadLabel = String(
+      await page.locator("#cluster-probe form.probe-test button").textContent()).trim();
     check(rereadLabel === "Re-read probe",
       "the probe panel offers its re-read control, by the label the page ships: " + rereadLabel);
     check(!/\bready\b/i.test(panel), "and never says ready: " + panel);
