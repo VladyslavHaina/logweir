@@ -11,6 +11,7 @@ lint:
     ./scripts/check-pure-core.sh
     ./scripts/check-verifier-parity.sh
     ./scripts/check-invariant-corpus.sh
+    python3 scripts/test_k8s_scram_seed.py
     ./scripts/check-one-signer.sh
     ./scripts/check-no-archive-write.sh
     ./scripts/check-ui-offline.sh
