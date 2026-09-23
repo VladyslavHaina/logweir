@@ -2128,29 +2128,154 @@ fn the_live_journey_expects_the_probe_control_the_page_actually_ships() {
 /// as surely as a hex triple is. `transparent` and `currentcolor` are not in
 /// the list: they name no colour of their own.
 const CSS_NAMED_COLOURS: [&str; 148] = [
-    "aliceblue", "antiquewhite", "aqua", "aquamarine", "azure", "beige", "bisque", "black",
-    "blanchedalmond", "blue", "blueviolet", "brown", "burlywood", "cadetblue", "chartreuse",
-    "chocolate", "coral", "cornflowerblue", "cornsilk", "crimson", "cyan", "darkblue",
-    "darkcyan", "darkgoldenrod", "darkgray", "darkgreen", "darkgrey", "darkkhaki",
-    "darkmagenta", "darkolivegreen", "darkorange", "darkorchid", "darkred", "darksalmon",
-    "darkseagreen", "darkslateblue", "darkslategray", "darkslategrey", "darkturquoise",
-    "darkviolet", "deeppink", "deepskyblue", "dimgray", "dimgrey", "dodgerblue", "firebrick",
-    "floralwhite", "forestgreen", "fuchsia", "gainsboro", "ghostwhite", "gold", "goldenrod",
-    "gray", "green", "greenyellow", "grey", "honeydew", "hotpink", "indianred", "indigo",
-    "ivory", "khaki", "lavender", "lavenderblush", "lawngreen", "lemonchiffon", "lightblue",
-    "lightcoral", "lightcyan", "lightgoldenrodyellow", "lightgray", "lightgreen", "lightgrey",
-    "lightpink", "lightsalmon", "lightseagreen", "lightskyblue", "lightslategray",
-    "lightslategrey", "lightsteelblue", "lightyellow", "lime", "limegreen", "linen", "magenta",
-    "maroon", "mediumaquamarine", "mediumblue", "mediumorchid", "mediumpurple",
-    "mediumseagreen", "mediumslateblue", "mediumspringgreen", "mediumturquoise",
-    "mediumvioletred", "midnightblue", "mintcream", "mistyrose", "moccasin", "navajowhite",
-    "navy", "oldlace", "olive", "olivedrab", "orange", "orangered", "orchid", "palegoldenrod",
-    "palegreen", "paleturquoise", "palevioletred", "papayawhip", "peachpuff", "peru", "pink",
-    "plum", "powderblue", "purple", "rebeccapurple", "red", "rosybrown", "royalblue",
-    "saddlebrown", "salmon", "sandybrown", "seagreen", "seashell", "sienna", "silver",
-    "skyblue", "slateblue", "slategray", "slategrey", "snow", "springgreen", "steelblue", "tan",
-    "teal", "thistle", "tomato", "turquoise", "violet", "wheat", "white", "whitesmoke",
-    "yellow", "yellowgreen",
+    "aliceblue",
+    "antiquewhite",
+    "aqua",
+    "aquamarine",
+    "azure",
+    "beige",
+    "bisque",
+    "black",
+    "blanchedalmond",
+    "blue",
+    "blueviolet",
+    "brown",
+    "burlywood",
+    "cadetblue",
+    "chartreuse",
+    "chocolate",
+    "coral",
+    "cornflowerblue",
+    "cornsilk",
+    "crimson",
+    "cyan",
+    "darkblue",
+    "darkcyan",
+    "darkgoldenrod",
+    "darkgray",
+    "darkgreen",
+    "darkgrey",
+    "darkkhaki",
+    "darkmagenta",
+    "darkolivegreen",
+    "darkorange",
+    "darkorchid",
+    "darkred",
+    "darksalmon",
+    "darkseagreen",
+    "darkslateblue",
+    "darkslategray",
+    "darkslategrey",
+    "darkturquoise",
+    "darkviolet",
+    "deeppink",
+    "deepskyblue",
+    "dimgray",
+    "dimgrey",
+    "dodgerblue",
+    "firebrick",
+    "floralwhite",
+    "forestgreen",
+    "fuchsia",
+    "gainsboro",
+    "ghostwhite",
+    "gold",
+    "goldenrod",
+    "gray",
+    "green",
+    "greenyellow",
+    "grey",
+    "honeydew",
+    "hotpink",
+    "indianred",
+    "indigo",
+    "ivory",
+    "khaki",
+    "lavender",
+    "lavenderblush",
+    "lawngreen",
+    "lemonchiffon",
+    "lightblue",
+    "lightcoral",
+    "lightcyan",
+    "lightgoldenrodyellow",
+    "lightgray",
+    "lightgreen",
+    "lightgrey",
+    "lightpink",
+    "lightsalmon",
+    "lightseagreen",
+    "lightskyblue",
+    "lightslategray",
+    "lightslategrey",
+    "lightsteelblue",
+    "lightyellow",
+    "lime",
+    "limegreen",
+    "linen",
+    "magenta",
+    "maroon",
+    "mediumaquamarine",
+    "mediumblue",
+    "mediumorchid",
+    "mediumpurple",
+    "mediumseagreen",
+    "mediumslateblue",
+    "mediumspringgreen",
+    "mediumturquoise",
+    "mediumvioletred",
+    "midnightblue",
+    "mintcream",
+    "mistyrose",
+    "moccasin",
+    "navajowhite",
+    "navy",
+    "oldlace",
+    "olive",
+    "olivedrab",
+    "orange",
+    "orangered",
+    "orchid",
+    "palegoldenrod",
+    "palegreen",
+    "paleturquoise",
+    "palevioletred",
+    "papayawhip",
+    "peachpuff",
+    "peru",
+    "pink",
+    "plum",
+    "powderblue",
+    "purple",
+    "rebeccapurple",
+    "red",
+    "rosybrown",
+    "royalblue",
+    "saddlebrown",
+    "salmon",
+    "sandybrown",
+    "seagreen",
+    "seashell",
+    "sienna",
+    "silver",
+    "skyblue",
+    "slateblue",
+    "slategray",
+    "slategrey",
+    "snow",
+    "springgreen",
+    "steelblue",
+    "tan",
+    "teal",
+    "thistle",
+    "tomato",
+    "turquoise",
+    "violet",
+    "wheat",
+    "white",
+    "whitesmoke",
+    "yellow",
+    "yellowgreen",
 ];
 
 /// The colour functions. `var(` is not one: it is how a value READS a token.
@@ -2190,7 +2315,8 @@ fn css_declarations(css: &str) -> Vec<CssDeclaration> {
     while i < bytes.len() {
         if bytes[i] == '/' && i + 1 < bytes.len() && bytes[i + 1] == '*' {
             i += 2;
-            while i < bytes.len() && !(bytes[i] == '*' && i + 1 < bytes.len() && bytes[i + 1] == '/')
+            while i < bytes.len()
+                && !(bytes[i] == '*' && i + 1 < bytes.len() && bytes[i + 1] == '/')
             {
                 text.push(if bytes[i] == '\n' { '\n' } else { ' ' });
                 i += 1;
@@ -2292,11 +2418,19 @@ fn css_literal_in(value: &str) -> Option<String> {
             let n = j - i - 1;
             let ends = j >= chars.len() || !is_ident_char(chars[j]);
             if (3..=8).contains(&n) && ends {
-                return Some(format!("a hex colour `{}`", chars[i..j].iter().collect::<String>()));
+                return Some(format!(
+                    "a hex colour `{}`",
+                    chars[i..j].iter().collect::<String>()
+                ));
             }
         }
         // A number with a length unit: `12px`, `.5rem`, `-0.05em`.
-        let starts_number = (c.is_ascii_digit() || (c == '.' && chars.get(i + 1).map(|d| d.is_ascii_digit()).unwrap_or(false)))
+        let starts_number = (c.is_ascii_digit()
+            || (c == '.'
+                && chars
+                    .get(i + 1)
+                    .map(|d| d.is_ascii_digit())
+                    .unwrap_or(false)))
             && prev.map(|p| !is_ident_char(p) || p == '-').unwrap_or(true)
             && !(prev == Some('-') && i >= 2 && is_ident_char(chars[i - 2]) && chars[i - 2] != ' ');
         if starts_number {
@@ -2371,7 +2505,13 @@ fn inline_style_findings(file: &str, source: &str) -> Vec<String> {
         if trimmed.starts_with("//") || trimmed.starts_with('*') || trimmed.starts_with("/*") {
             continue;
         }
-        for needle in ["style=\"", "style=\\\"", "style='", ".style.", ".setProperty("] {
+        for needle in [
+            "style=\"",
+            "style=\\\"",
+            "style='",
+            ".style.",
+            ".setProperty(",
+        ] {
             if line.contains(needle) {
                 findings.push(format!(
                     "{file}:{}: writes an inline style (`{needle}`): {}",
@@ -2436,35 +2576,95 @@ fn the_token_lint_refuses_each_kind_of_literal() {
     let flagged = |css: &str| token_layer_findings("mutant.css", css).len();
     assert_eq!(flagged(".a { color: #0072a3; }"), 1, "a hex colour");
     assert_eq!(flagged(".a { color: #fff; }"), 1, "a short hex colour");
-    assert_eq!(flagged(".a { background: hsl(198, 100%, 34%); }"), 1, "a colour function");
-    assert_eq!(flagged(".a { border-color: rgba(0, 0, 0, 0.5); }"), 1, "rgba");
+    assert_eq!(
+        flagged(".a { background: hsl(198, 100%, 34%); }"),
+        1,
+        "a colour function"
+    );
+    assert_eq!(
+        flagged(".a { border-color: rgba(0, 0, 0, 0.5); }"),
+        1,
+        "rgba"
+    );
     assert_eq!(flagged(".a { color: red; }"), 1, "a named colour");
     assert_eq!(flagged(".a { margin: 4px 0; }"), 1, "a px length");
-    assert_eq!(flagged(".a { padding: .5rem; }"), 1, "a bare-decimal rem length");
-    assert_eq!(flagged(".a { letter-spacing: -0.05em; }"), 1, "a negative em length");
-    assert_eq!(flagged(".a { border: 1px solid var(--x); }"), 1, "a border width");
-    assert_eq!(flagged(".a { --lw-x: 1rem; }"), 1, "a token declared outside :root");
+    assert_eq!(
+        flagged(".a { padding: .5rem; }"),
+        1,
+        "a bare-decimal rem length"
+    );
+    assert_eq!(
+        flagged(".a { letter-spacing: -0.05em; }"),
+        1,
+        "a negative em length"
+    );
+    assert_eq!(
+        flagged(".a { border: 1px solid var(--x); }"),
+        1,
+        "a border width"
+    );
+    assert_eq!(
+        flagged(".a { --lw-x: 1rem; }"),
+        1,
+        "a token declared outside :root"
+    );
     assert_eq!(
         flagged("@media (max-width: 1px) { .a { gap: 2rem; } }"),
         1,
         "a length inside a media block is still a rule, not a token"
     );
     // And the GREEN side: what the stylesheet is allowed to say.
-    assert_eq!(flagged(":root { --a: #fff; --b: 4px; }"), 0, "the token layer itself");
+    assert_eq!(
+        flagged(":root { --a: #fff; --b: 4px; }"),
+        0,
+        "the token layer itself"
+    );
     assert_eq!(
         flagged("@media (prefers-color-scheme: dark) { :root { --a: hsl(0, 0%, 0%); } }"),
         0,
         "the dark token layer"
     );
-    assert_eq!(flagged(".a { color: var(--a); margin: 0; width: 100%; }"), 0, "var, zero, %");
-    assert_eq!(flagged("@media (max-width: 767.98px) { .a { display: block; } }"), 0, "a breakpoint");
-    assert_eq!(flagged(".a { content: \"#fff 4px red\"; }"), 0, "a quoted string is content");
-    assert_eq!(flagged(".a { white-space: nowrap; line-height: 1.5; }"), 0, "unitless values");
-    assert_eq!(flagged(".a { transform: rotate(360deg); z-index: 20; }"), 0, "angles and indexes");
+    assert_eq!(
+        flagged(".a { color: var(--a); margin: 0; width: 100%; }"),
+        0,
+        "var, zero, %"
+    );
+    assert_eq!(
+        flagged("@media (max-width: 767.98px) { .a { display: block; } }"),
+        0,
+        "a breakpoint"
+    );
+    assert_eq!(
+        flagged(".a { content: \"#fff 4px red\"; }"),
+        0,
+        "a quoted string is content"
+    );
+    assert_eq!(
+        flagged(".a { white-space: nowrap; line-height: 1.5; }"),
+        0,
+        "unitless values"
+    );
+    assert_eq!(
+        flagged(".a { transform: rotate(360deg); z-index: 20; }"),
+        0,
+        "angles and indexes"
+    );
     assert_eq!(flagged(".a { grid-row: 1 / span 2; }"), 0, "grid lines");
 
     let inline = |js: &str| inline_style_findings("mutant.js", js).len();
-    assert_eq!(inline("row.style.display = \"none\";"), 1, "a style property write");
-    assert_eq!(inline("return \"<p style=\\\"color: red\\\">\";"), 1, "a style attribute in a string");
-    assert_eq!(inline("// a comment may mention .style. freely"), 0, "a comment");
+    assert_eq!(
+        inline("row.style.display = \"none\";"),
+        1,
+        "a style property write"
+    );
+    assert_eq!(
+        inline("return \"<p style=\\\"color: red\\\">\";"),
+        1,
+        "a style attribute in a string"
+    );
+    assert_eq!(
+        inline("// a comment may mention .style. freely"),
+        0,
+        "a comment"
+    );
 }
