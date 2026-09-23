@@ -922,10 +922,11 @@ async function main() {
     // THE REFRESHED LAB'S BRANCH, REQUIRED (lab-refresh-9): the served Preflight
     // CRD carries catalogPointRef, so the stored object keeps it and the
     // controller answers the recovery point's row about the catalog point.
-    check(storedRef !== null && storedRef.catalog === CATALOG && storedRef.pointId === point.pointId,
+    check(storedRef !== null && (storedRef.catalogRef || {}).name === CATALOG && storedRef.pointId === point.pointId,
       "the stored Preflight does not carry the catalog point (a pruned catalogPointRef): " +
         JSON.stringify(storedRef));
-    check(rpRow !== null && rpRow.state === "ready" && rpRow.code === "CatalogPointSelectable",
+    check(rpRow !== null && rpRow.state === "ready" && rpRow.code === "CatalogPointSelectable" &&
+      (rpRow.scope || {}).kind === "RecoveryCatalog" && (rpRow.scope || {}).name === CATALOG,
       "recoveryPoint.state is not ready/CatalogPointSelectable: " + JSON.stringify(rpRow));
     record("5. readiness runs through the normal Preflight path for the catalog point", {
       preflight: pfName, phase: preflight.status.phase,
