@@ -300,6 +300,19 @@ object.** The rules, exactly:
   refines an already-safe result and never rescues an unsafe one — no basis
   string turns a result that is not `Valid` into a verified state, and `Valid`
   beside `basis: Unverified` is `notAttempted`.
+- `trust.state` is `verified`/`verifiedHistorical` exactly where the
+  controller's badge may be green: `Valid` with no `trust` block (the
+  pre-existing rule), `Valid` on `basis: Current` (`verified`) or
+  `basis: Historical` (`verifiedHistorical`), and nothing else. `Valid` on
+  `basis: RecordedBeforeRevocation` is **`untrusted`** — D3 §7.4: a verdict
+  recorded before its key's compromise revocation is "never green" — and so is
+  `Valid` beside a `trust` block whose basis is `None`, absent, or a word this
+  build does not know. A recorded `result: Untrusted` is `untrusted` whatever
+  the key state beside it; `NotAttempted` beside `basis: Unverified` is
+  `notAttempted` (no verdict has been reached). Builds before
+  `TRUST-STATE-RBR-VERIFIED` published `verified` for
+  `RecordedBeforeRevocation`; a client that must read older servers checks
+  `trust.basis` as well.
 - `verificationScope.level` is `sampled` (`byte-fingerprint`), `degraded`
   (`consume-only`) or `none`. **`complete` does not exist in v1.** A Backup is
   always `none` with the three counts **absent** rather than zero: a receipt

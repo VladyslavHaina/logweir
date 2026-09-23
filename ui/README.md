@@ -1903,11 +1903,22 @@ under a key this installation does not accept is `verification: valid` and
 `trust: untrusted`, and only the second one decides the badge.
 
 **The basis still vetoes a green word.** `logweir-api` projects a `Valid`
-verdict on `trust.basis: RecordedBeforeRevocation` as `trust.state: verified`,
-and D3 section 7.4 says that case is never green. So the operation view reads
-the word **and** the basis beside it, through the same basis check legacy mode
-applies, and names the case ("recorded before revocation") when the basis
-vetoes. The Backup and Restore **detail** views in console mode read the
+verdict on `trust.basis: RecordedBeforeRevocation` as `trust.state: untrusted`
+(D3 section 7.4: that case is never green); a server built before
+TRUST-STATE-RBR-VERIFIED said `verified`. So the operation view reads the word
+**and** the basis beside it, through the same basis check legacy mode applies,
+and names the case ("recorded before revocation") whenever the basis is
+`RecordedBeforeRevocation` -- beside a `Valid` result or beside the
+`Untrusted` one the controller actually writes for it, in both modes.
+
+**The API's `untrusted` word travels into a console detail.** The operation
+route's signature column has no word for the controller's `result: Untrusted`
+(it arrives as `verification.state: unknown`), so a detail fold that read that
+column alone wrote no result and the page said "no verification was recorded".
+The fold now writes `Untrusted` wherever `trust.state` is `untrusted` and the
+signature column says `unknown`, or says `valid` on a basis this page would
+otherwise read as green (a `trust` block whose basis is `None`, which the DTO
+spells like an absent block). The Backup and Restore **detail** views in console mode read the
 operation route and fold it into the custom-resource shape the pages render;
 `trust.basis` is folded in with the verdict, to
 `status.evidence.verification.trust.basis`, so the badge and the scorecard
