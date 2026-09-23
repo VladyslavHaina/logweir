@@ -4460,8 +4460,14 @@ fn chart_lint_values_yaml_is_short_and_shows_every_option() {
     // bindings, D0's `allowOrdinaryConfirmation` floor and the console's
     // confirmation-key Secret are each a decision an administrator must make
     // explicitly, and the README's `approvalPolicy` section carries the prose.
+    //
+    // PLAT-17.2 (D0 stage 5) added three lines in parallel with PLAT-19.2 and
+    // used the slack the ceiling then had: `controller.watchNamespaces` (a key
+    // and the one continuation line its two refusals need) and
+    // `api.console.requireTrustedProxy`. Each branch fitted its own ceiling;
+    // integrated, the file is the sum of both, so the ceiling is too.
     assert!(
-        lines <= 230,
+        lines <= 232,
         "charts/logweir/values.yaml is {lines} lines. The owner asked for a values file that is \
          read, not skimmed past: one short line per key, no paragraphs, and every explanation \
          in charts/logweir/README.md"
