@@ -6,7 +6,8 @@
 //   Backup  -- green requires `evidence.verification.result == "Valid"` AND
 //              `status.exitCode === 0`.
 //   Restore -- green requires `evidence.verification.result == "Valid"` AND
-//              `status.outcome === "pass"`.  (pages/history.js)
+//              `status.outcome === "pass"`, and never over a recorded non-zero
+//              `status.exitCode`.  (pages/history.js)
 //
 // In both, `Valid` counts only beside no `trust` block or a `Current` /
 // `Historical` basis (`validVerification`, D3 sections 7.4 and 12).

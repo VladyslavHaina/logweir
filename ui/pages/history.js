@@ -3,7 +3,8 @@
 //
 // THE RESTORE HALF OF THE BADGE RULE lives here: green requires
 // `evidence.verification.result == "Valid"` (on a basis `validVerification`
-// admits) AND `status.outcome === "pass"`. Only `pass` is green. A `fail-integrity` run produced a perfectly valid,
+// admits) AND `status.outcome === "pass"` AND no recorded non-zero `status.exitCode`
+// (an exit-2 run publishes a signed failure since interface I8's amendment). Only `pass` is green. A `fail-integrity` run produced a perfectly valid,
 // perfectly signed document SAYING THE RESTORE DID NOT RECONCILE, and a green
 // badge over it would invert the single most valuable thing this product
 // reports. The verification half is shared with the Backup rule and imported
