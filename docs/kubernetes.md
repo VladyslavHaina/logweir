@@ -2241,6 +2241,14 @@ skip with no `Restore`:
 | a point qualifies: covered by `spec.point.topics`, old enough, with a non-empty window, inside `maxPartitions`, not captured from the target cluster, not inside a retention lease | `NoQualifyingPoint`, `TargetUnavailable` or `PointRetentionInProgress` |
 | the RENDERED plan falls inside the signed scope | `AuthorizationInvalid` |
 
+**A slot that came due before the `RehearsalSchedule` was created is not its
+slot.** The controller never rehearses a slot whose due time is before the
+object's `metadata.creationTimestamp`, even inside
+`spec.bounds.startingDeadlineSeconds`; the pass is idle, and the slot is neither
+named in `status.lastSkipped` nor written to `status.lastScheduledSlot`. The
+first rehearsal is the first slot at or after creation, the same rule as a
+`BackupSchedule` and a Kubernetes CronJob.
+
 **A skipped slot is skipped, never deferred.** Whatever the reason — every row
 above, and a namespace whose trust cannot verify any approver
 (`AuthorizationInvalid`) — the skip names the DUE slot it refused in
@@ -3530,6 +3538,7 @@ Evaluation is top to bottom; the first matching row decides. "Blocked" means
 | 3 | `suspend: true` | nothing; `nextRuns` empty | `Suspended` (False) |
 | 4 | Cron, zone, selection or run policy invalid | nothing; running work continues | `UnparseableSchedule` / `UnknownTimeZone` / `InvalidTopicSelection` / `InvalidRunPolicy` (all False) |
 | 5 | No due slot inside the walk bound | nothing | `NoDueSlot` (False) |
+| 5a | The latest due slot came due before the schedule's `metadata.creationTimestamp` | nothing; not counted in `missedSlots`, no `lastSlot` | `Scheduled` (True) |
 | 6 | The slot's deterministic name is held by an object that is not a scheduled run of this schedule | nothing | `SlotNameUnavailable` / `NameUnavailable` |
 | 7 | Some attempt of S succeeded | nothing | `Scheduled` / `Admitted` |
 | 8 | The highest attempt of S is nonterminal | nothing | `Scheduled` |
@@ -3547,6 +3556,17 @@ Evaluation is top to bottom; the first matching row decides. "Blocked" means
 | 20 | No attempt, past the deadline, `Latest`, blocked | nothing | `CatchUpBlocked` / `Blocked` |
 | 21 | No attempt, past the deadline, `Latest`, not blocked | `name(S,0)`, kind `CatchUp` | `CaughtUp` / `CaughtUp` |
 | 22 | A newer slot comes due while 11, 12, 16 or 20 wait | per the new slot | per the new slot; the old one is counted once |
+
+Row 5a is the Kubernetes CronJob rule: a schedule never fires a slot whose due
+time is before the schedule itself existed, even when that slot is still inside
+`startingDeadlineSeconds`. A schedule created at 00:53 with a slot at 00:30
+first fires at the next slot; the `Ready` message names the earlier slot and
+the creation time. The bound is strictly before, at the one-second resolution
+of `creationTimestamp`, so a slot at exactly the creation second is the
+schedule's own. It applies to creation only: a slot that came due before an
+**edit** is still decided by rows 17–21 (row 19 keeps catch-up from
+back-filling a revision). Use "Run first backup now" (a manual `Backup`) for an
+immediate first run.
 
 What an operator can predict from it: a controller down for a week with
 `catchUpPolicy: None` runs **nothing** until the next slot and records the
@@ -3587,6 +3607,13 @@ hour** before the controller looked, byte for byte the horizon an older
 controller hard-coded. A controller restarted after a week must not fire six
 days of backlog, because a `Backup` for a window nobody is waiting for costs the
 same broker read as one somebody is.
+
+A slot that came due **before the schedule was created** is not a skipped slot
+of that schedule at all: it is never fired, never counted in
+`status.missedSlots` or `status.lastMissedSlot`, and the schedule reports
+`Ready=True reason=Scheduled` until its first slot (row 5a above). Only slots
+at or after `metadata.creationTimestamp` are fired, missed, caught up or
+retried.
 
 A skip is a fact, not a silence. It lands in `status.missedSlots` with a `Ready`
 condition whose reason is `SlotMissed`, and in the older single-valued

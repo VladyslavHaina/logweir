@@ -648,9 +648,12 @@ pub enum MissedReason {
 /// THE ORDER OF THE ARMS IS THE TRUTH TABLE'S ORDER AND IS LOAD-BEARING. The
 /// deadline is tested FIRST, so a slot inside the horizon is `Scheduled`
 /// whatever `catchUpPolicy` says and whatever `effective_since` is — that is
-/// today's behaviour and D1 §4.7 keeps it deliberately ("a slot that came due
-/// before the schedule was created but is still inside
-/// `startingDeadlineSeconds` is admitted by row 17").
+/// today's behaviour, and D1 §4.7 keeps it for a slot that came due before an
+/// EDIT. A slot that came due before the schedule was CREATED is never
+/// admitted: the schedule controllers bound the latest due slot by
+/// `metadata.creationTimestamp` before asking this function
+/// (`backup_schedule::bound_by_creation`, decided 2026-09-22 and superseding
+/// D1 §4.7's "admitted by row 17" note).
 ///
 /// THE BOUNDARY IS INCLUSIVE. `now - slot == starting_deadline` is INSIDE the
 /// horizon, which is what `<=` means and what

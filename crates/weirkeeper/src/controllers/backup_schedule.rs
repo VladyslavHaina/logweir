@@ -66,6 +66,18 @@
 //! `status.lastFireTime` produces two objects when the controller crashes
 //! between the `create` and the status write).
 //!
+//! # A slot that predates the schedule is not its slot
+//!
+//! A schedule never fires a slot whose due time is before its own
+//! `metadata.creationTimestamp` — the Kubernetes `CronJob` rule (D1 / PLAT-04.2,
+//! decided 2026-09-22, SCHEDULE-FIRES-SLOT-BEFORE-CREATION). The starting
+//! deadline alone admitted one: a schedule created at 00:53:11Z fired its
+//! 00:30:00Z slot on lab-refresh-8. [`bound_by_creation`] runs on [`decide`]'s
+//! output before any status refinement and turns such a slot into
+//! [`SlotDecision::BeforeCreation`] — not fired, not missed, `Ready=True`. Every
+//! slot at or after creation is decided exactly as D1 §4.5/§4.7 say, missed
+//! slots, catch-up and retries included.
+//!
 //! # `suspend` is the one mutable field
 //!
 //! Task 15b's object-level CEL rule
@@ -338,6 +350,32 @@ pub enum SlotDecision {
         /// When it will next fire, if ever.
         next_fire_time: Option<DateTime<Utc>>,
     },
+    /// The latest due slot came due BEFORE this schedule's own
+    /// `metadata.creationTimestamp`, so it is not this schedule's slot at all.
+    ///
+    /// D1 / PLAT-04.2, decided 2026-09-22 (SCHEDULE-FIRES-SLOT-BEFORE-CREATION):
+    /// a schedule never fires a slot whose due time is before it existed — the
+    /// Kubernetes `CronJob` rule, which schedules from `creationTimestamp` when
+    /// it has no `lastScheduleTime`. Without it a schedule created at 00:53:11Z
+    /// fired its 00:30:00Z slot (lab-refresh-8, `lr8merged-20260923t0052z`):
+    /// the one-hour starting deadline admitted a slot nobody had asked for.
+    ///
+    /// NOT A MISS. Nothing is recorded in `status.missedSlots` or
+    /// `status.lastMissedSlot` and no `lastSlot` is written, because a slot the
+    /// schedule did not exist for was never this schedule's to miss. `Ready`
+    /// is `True`: a schedule waiting for its first slot is healthy. Produced
+    /// only by [`bound_by_creation`], only from [`Self::Due`],
+    /// [`Self::CatchUpDue`] and [`Self::Missed`], and it carries no name.
+    BeforeCreation {
+        /// The slot that came due before the schedule existed.
+        due: DateTime<Utc>,
+        /// That slot as [`slot_name`] spells it.
+        slot: String,
+        /// The schedule's `metadata.creationTimestamp`.
+        created_at: DateTime<Utc>,
+        /// When it will first fire.
+        next_fire_time: Option<DateTime<Utc>>,
+    },
     /// A slot came due, is older than [`MISSED_SLOT_HORIZON`], and
     /// `status.lastFireTime` says this schedule already fired it.
     ///
@@ -583,9 +621,13 @@ impl SlotDecision {
             }
             Self::RunFailed { .. } => REASON_RUN_FAILED,
             Self::CrdOutdated { .. } => REASON_CRD_OUTDATED,
-            Self::Due { .. } | Self::AlreadyFired { .. } | Self::InProgress { .. } => {
-                REASON_SCHEDULED
-            }
+            // A SCHEDULE WAITING FOR ITS FIRST SLOT IS BEING HONOURED, and no
+            // new reason is minted for it: D1 §3.4's vocabulary is closed, and
+            // the message says which slot predated the schedule.
+            Self::Due { .. }
+            | Self::AlreadyFired { .. }
+            | Self::InProgress { .. }
+            | Self::BeforeCreation { .. } => REASON_SCHEDULED,
         }
     }
 
@@ -609,6 +651,7 @@ impl SlotDecision {
         match self {
             Self::Due { .. }
             | Self::AlreadyFired { .. }
+            | Self::BeforeCreation { .. }
             | Self::InProgress { .. }
             | Self::Missed { .. }
             | Self::ConcurrencyBlocked { .. }
@@ -648,6 +691,7 @@ impl SlotDecision {
             | Self::InvalidRunPolicy { .. }
             | Self::RetryNamesTooLong { .. } => None,
             Self::NoDueSlot { next_fire_time }
+            | Self::BeforeCreation { next_fire_time, .. }
             | Self::AlreadyFired { next_fire_time, .. }
             | Self::InProgress { next_fire_time, .. }
             | Self::Missed { next_fire_time, .. }
@@ -715,6 +759,14 @@ impl SlotDecision {
             Self::NoDueSlot { .. } => format!(
                 "spec.schedule has no firing at or before now, so nothing is due; the next \
                  firing is {next}"
+            ),
+            Self::BeforeCreation {
+                slot, created_at, ..
+            } => format!(
+                "slot {slot} came due before this schedule was created at {}; a slot due \
+                 before its schedule existed is never fired and is not counted as missed, and \
+                 the first firing is {next}",
+                created_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
             ),
             // WHAT THE HEALTHY STEADY STATE SAYS, and it says the fired slot
             // and the instant it was fired rather than repeating "nothing is
@@ -1148,6 +1200,76 @@ pub fn refine_against_status(
             }
         }
         other => other,
+    }
+}
+
+/// Whether a slot due at `due` came due before a schedule created at
+/// `created_at` existed.
+///
+/// STRICTLY BEFORE. `metadata.creationTimestamp` has one-second resolution and
+/// every slot falls on a whole minute, so a slot at exactly the creation second
+/// is the schedule's own and fires; one a second earlier does not. An object
+/// with no `creationTimestamp` (a test fixture; the API server always sets it)
+/// is not bounded, which is the behaviour before this rule existed.
+///
+/// Shared with the `RehearsalSchedule` controller, which applies the same rule
+/// to its cadence step (`rehearsal_schedule::latest_owned_slot`).
+#[must_use]
+pub fn slot_predates_creation(due: DateTime<Utc>, created_at: Option<DateTime<Utc>>) -> bool {
+    created_at.is_some_and(|created| due < created)
+}
+
+/// Bound a decision by the schedule's own creation time (D1 / PLAT-04.2,
+/// SCHEDULE-FIRES-SLOT-BEFORE-CREATION).
+///
+/// A [`SlotDecision::Due`], [`SlotDecision::CatchUpDue`] or
+/// [`SlotDecision::Missed`] whose slot came due before `created_at` becomes
+/// [`SlotDecision::BeforeCreation`]; every other decision, and every slot at or
+/// after creation, is returned untouched — so a slot missed AFTER creation is
+/// still missed, caught up or retried exactly as D1 §4.5/§4.7 say.
+///
+/// A SEPARATE STEP, NOT A FOURTH ARGUMENT TO [`decide`], for the reason
+/// [`refine_against_status`] records: the pure function that mints the name
+/// keeps its three arguments. This one can only take a name AWAY — it never
+/// constructs `Due` or `CatchUpDue` — so it cannot endanger G-SLOT.
+///
+/// THE ONLY SLOT IT CAN BOUND IS THE LATEST DUE ONE, and that is enough: when
+/// the latest due slot predates creation, every earlier slot does too, and the
+/// first slot at or after creation is by construction the next firing.
+#[must_use]
+pub fn bound_by_creation(
+    decision: SlotDecision,
+    created_at: Option<DateTime<Utc>>,
+) -> SlotDecision {
+    let (due, slot, next_fire_time) = match &decision {
+        SlotDecision::Due {
+            due,
+            slot,
+            next_fire_time,
+            ..
+        }
+        | SlotDecision::CatchUpDue {
+            due,
+            slot,
+            next_fire_time,
+            ..
+        }
+        | SlotDecision::Missed {
+            due,
+            slot,
+            next_fire_time,
+            ..
+        } => (*due, slot.clone(), *next_fire_time),
+        _ => return decision,
+    };
+    match created_at {
+        Some(created) if slot_predates_creation(due, created_at) => SlotDecision::BeforeCreation {
+            due,
+            slot,
+            created_at: created,
+            next_fire_time,
+        },
+        _ => decision,
     }
 }
 
@@ -2404,7 +2526,14 @@ pub async fn reconcile_schedule_with_archive_at(
     // an older generation says when THAT revision started, which is not a fact
     // about this one; taking it would make a catch-up decide row 19 against
     // the wrong instant.
-    let decision = decide(&name, &schedule.spec, now);
+    //
+    // THE CREATION BOUND COMES FIRST. A slot that predates the object is not
+    // this schedule's slot, so no status refinement may report it fired or
+    // missed (D1 / PLAT-04.2, SCHEDULE-FIRES-SLOT-BEFORE-CREATION).
+    let decision = bound_by_creation(
+        decide(&name, &schedule.spec, now),
+        schedule.metadata.creation_timestamp.as_ref().map(|t| t.0),
+    );
     let effective_since = stored
         .and_then(|s| s.policy.as_ref())
         .filter(|p| p.generation == generation)
@@ -3026,6 +3155,7 @@ fn disposition_of(decision: &SlotDecision) -> &'static str {
         | SlotDecision::InvalidRunPolicy { .. }
         | SlotDecision::RetryNamesTooLong { .. }
         | SlotDecision::NoDueSlot { .. }
+        | SlotDecision::BeforeCreation { .. }
         | SlotDecision::NameTooLong { .. }
         | SlotDecision::CrdOutdated { .. }
         | SlotDecision::InProgress { .. }

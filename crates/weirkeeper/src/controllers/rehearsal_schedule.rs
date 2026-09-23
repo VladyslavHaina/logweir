@@ -280,7 +280,7 @@ pub fn decide(facts: &Facts<'_>) -> Verdict {
             ))
         }
     };
-    let Some(due) = cadence.latest_due_slot(facts.now) else {
+    let Some(due) = latest_owned_slot(facts.schedule, &cadence, facts.now) else {
         return Verdict::Idle;
     };
     let slot = crate::slot::slot_name(due);
@@ -2185,15 +2185,39 @@ async fn commit(
 /// slot it refused rather than the instant it looked.
 #[must_use]
 pub fn due_unconsumed_slot(schedule: &RehearsalSchedule, now: DateTime<Utc>) -> Option<String> {
-    let due = crate::cadence::Cadence::parse(&schedule.spec.schedule, None)
-        .ok()?
-        .latest_due_slot(now)?;
+    let cadence = crate::cadence::Cadence::parse(&schedule.spec.schedule, None).ok()?;
+    let due = latest_owned_slot(schedule, &cadence, now)?;
     let slot = crate::slot::slot_name(due);
     let decided = schedule
         .status
         .as_ref()
         .and_then(|s| s.last_scheduled_slot.as_deref());
     (decided != Some(slot.as_str())).then_some(slot)
+}
+
+/// The latest slot due at `now` that belongs to this schedule: `None` when
+/// nothing is due, or when the latest due slot came due before the schedule's
+/// own `metadata.creationTimestamp`.
+///
+/// D1 / PLAT-04.2's creation bound (SCHEDULE-FIRES-SLOT-BEFORE-CREATION), the
+/// same rule as `backup_schedule::bound_by_creation` and the Kubernetes
+/// `CronJob`'s: a schedule never fires a slot whose due time is before it
+/// existed. Without it a `RehearsalSchedule` created at 00:53 with
+/// `30 * * * *` and a `startingDeadlineSeconds` of an hour or more rehearsed
+/// its 00:30 slot. A pre-creation slot is IDLE, not a skip: it is not named in
+/// `status.lastSkipped` and does not advance `status.lastScheduledSlot`,
+/// because it was never this schedule's slot to refuse. Both [`decide`] and
+/// [`due_unconsumed_slot`] read the slot through here, so the slot a skip
+/// names and the slot the cadence step decided cannot disagree.
+#[must_use]
+pub fn latest_owned_slot(
+    schedule: &RehearsalSchedule,
+    cadence: &crate::cadence::Cadence,
+    now: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
+    let due = cadence.latest_due_slot(now)?;
+    let created = schedule.metadata.creation_timestamp.as_ref().map(|t| t.0);
+    (!super::backup_schedule::slot_predates_creation(due, created)).then_some(due)
 }
 
 /// The next instant this schedule fires, or `None` when it is suspended or its

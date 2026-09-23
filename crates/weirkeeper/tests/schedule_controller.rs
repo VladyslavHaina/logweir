@@ -32,10 +32,10 @@ use weirkeeper::backup_execution::{
 };
 use weirkeeper::conditions::apply_merge_patch;
 use weirkeeper::controllers::backup_schedule::{
-    decide, reconcile_schedule, refine_against_status, scheduled_backup, status_patch,
-    ScheduleOutcome, SlotDecision, MISSED_SLOT_HORIZON, REASON_CONCURRENCY_BLOCKED,
-    REASON_SCHEDULED, REASON_SLOT_MISSED, REASON_SUSPENDED, REQUEUE_SECS, SCHEDULE_LABEL,
-    SLOT_LABEL, TRIGGERED_BY_SCHEDULE,
+    bound_by_creation, decide, reconcile_schedule, refine_against_status, scheduled_backup,
+    slot_predates_creation, status_patch, ScheduleOutcome, SlotDecision, MISSED_SLOT_HORIZON,
+    REASON_CONCURRENCY_BLOCKED, REASON_SCHEDULED, REASON_SLOT_MISSED, REASON_SUSPENDED,
+    REQUEUE_SECS, SCHEDULE_LABEL, SLOT_LABEL, TRIGGERED_BY_SCHEDULE,
 };
 use weirkeeper::crds::backup_schedule::{
     BackupSchedule, BackupScheduleStatus, ConcurrencyPolicy, SOURCE_REF_IMMUTABLE_RULE,
@@ -7635,4 +7635,271 @@ fn destination_backed_job_env() -> Vec<(String, String)> {
     weirkeeper::controllers::backup::runner_job_spec_from_inputs(&backup, &cluster, &frozen)
         .expect("the Job renders")
         .env_literal
+}
+
+// ---------------------------------------------------------------------------
+// SCHEDULE-FIRES-SLOT-BEFORE-CREATION (D1 / PLAT-04.2, decided 2026-09-22)
+// ---------------------------------------------------------------------------
+
+/// The lab's own shape: `30 2 * * *` in `Europe/Berlin` is 00:30:00Z in
+/// September (CEST), and lab-refresh-8's schedule was created at 00:53:11Z.
+const BERLIN_NIGHTLY: &str = "30 2 * * *";
+
+/// [`schedule`] with a time zone and a `metadata.creationTimestamp`.
+fn created_schedule(cron: &str, zone: Option<&str>, created: DateTime<Utc>) -> BackupSchedule {
+    let mut v: serde_json::Value =
+        serde_json::from_str(&schedule_json("nightly", UID, cron, false)).expect("JSON");
+    v["metadata"]["creationTimestamp"] =
+        serde_json::json!(created.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+    if let Some(zone) = zone {
+        v["spec"]["timeZone"] = serde_json::json!(zone);
+    }
+    serde_json::from_value(v).expect("the fixture is a BackupSchedule")
+}
+
+fn created_at(schedule: &BackupSchedule) -> Option<DateTime<Utc>> {
+    schedule.metadata.creation_timestamp.as_ref().map(|t| t.0)
+}
+
+fn at(y: i32, m: u32, d: u32, h: u32, min: u32, s: u32) -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(y, m, d, h, min, s)
+        .single()
+        .expect("the fixture instant exists")
+}
+
+/// A schedule created at 00:53:11Z does NOT fire its 00:30:00Z slot, even though
+/// that slot is 23 minutes old and well inside the one-hour starting deadline.
+///
+/// THE LAB MEASUREMENT, REPLAYED (lab-refresh-8 `lr8merged-20260923t0052z`).
+/// Before the bound, `decide` said `Due` and the reconcile POSTed
+/// `logweir-backup-nightly-20260923-003000`. Removing the `bound_by_creation`
+/// call from `reconcile_schedule_with_archive_at` makes the POST count 1.
+#[tokio::test]
+async fn a_schedule_created_after_its_slot_came_due_does_not_fire_that_slot() {
+    let created = at(2026, 9, 23, 0, 53, 11);
+    let schedule = created_schedule(BERLIN_NIGHTLY, Some("Europe/Berlin"), created);
+    let now = at(2026, 9, 23, 0, 53, 30);
+    let slot = slot_name(utc(2026, 9, 23, 0, 30));
+    assert_eq!(slot, "20260923-003000", "the fixture is the lab's slot");
+    let name = scheduled_backup_name("nightly", &slot).expect("the fixture name fits");
+
+    // The unbounded decision is the defect: without the bound this slot is Due.
+    assert!(
+        matches!(
+            decide("nightly", &schedule.spec, now),
+            SlotDecision::Due { .. }
+        ),
+        "the fixture reproduces the defect's precondition"
+    );
+
+    let (client, calls, bodies) = mock_client_recording_bodies(vec![
+        no_backups(),
+        absent_backup(&name),
+        // A POST route is present so that ZERO POSTs is a choice, not a panic.
+        Route {
+            method: "POST",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 201,
+            body: created_backup_body(&name),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/backupschedules/nightly/status",
+            status: 200,
+            body: patched_schedule_body(),
+        },
+    ]);
+    let outcome = reconcile_schedule(&schedule, &client, now)
+        .await
+        .expect("a pre-creation slot is a decision, not an error");
+    let seen = calls.lock().expect("the recorder is readable").clone();
+    assert_eq!(
+        seen.iter().filter(|c| c.method == "POST").count(),
+        0,
+        "a slot due before the schedule existed is never fired. Calls: {seen:?}"
+    );
+    assert_eq!(outcome.created, None);
+
+    let status = patched_status(&bodies.lock().expect("the body recorder is readable"));
+    let condition = &status["conditions"][0];
+    assert_eq!(condition["type"], serde_json::json!("Ready"));
+    assert_eq!(
+        condition["status"],
+        serde_json::json!("True"),
+        "a schedule waiting for its first slot is healthy: {condition}"
+    );
+    assert_eq!(condition["reason"], serde_json::json!(REASON_SCHEDULED));
+    assert_eq!(
+        condition["message"],
+        serde_json::json!(
+            "slot 20260923-003000 came due before this schedule was created at \
+             2026-09-23T00:53:11Z; a slot due before its schedule existed is never fired and is \
+             not counted as missed, and the first firing is 2026-09-24T00:30:00Z"
+        )
+    );
+    assert_eq!(
+        status["nextFireTime"],
+        serde_json::json!("2026-09-24T00:30:00Z")
+    );
+    // NOT A MISS: the slot was never this schedule's to miss.
+    assert!(status.get("lastMissedSlot").is_none(), "{status}");
+    assert!(status.get("lastSlot").is_none(), "{status}");
+    assert!(
+        status.get("missedSlots").is_none() || status["missedSlots"]["count"] == 0,
+        "{status}"
+    );
+}
+
+/// The bound is on the SLOT'S DUE TIME against `creationTimestamp`, strictly
+/// before, and it takes a slot away from every arm `decide` can mint one in —
+/// `Due`, `CatchUpDue` and `Missed` — and from nothing else.
+#[test]
+fn the_creation_bound_is_strict_and_covers_every_slot_bearing_decision() {
+    let slot_at = at(2026, 9, 23, 0, 30, 0);
+    let now = at(2026, 9, 23, 0, 31, 0);
+    // Created AT the slot's second: the slot is the schedule's own and fires.
+    let same_second = created_schedule(BERLIN_NIGHTLY, Some("Europe/Berlin"), slot_at);
+    assert!(matches!(
+        bound_by_creation(
+            decide("nightly", &same_second.spec, now),
+            created_at(&same_second)
+        ),
+        SlotDecision::Due { .. }
+    ));
+    assert!(!slot_predates_creation(slot_at, Some(slot_at)));
+    // One second later: the slot predates the schedule.
+    let one_later = created_schedule(
+        BERLIN_NIGHTLY,
+        Some("Europe/Berlin"),
+        at(2026, 9, 23, 0, 30, 1),
+    );
+    let bounded = bound_by_creation(
+        decide("nightly", &one_later.spec, now),
+        created_at(&one_later),
+    );
+    assert!(
+        matches!(
+            bounded,
+            SlotDecision::BeforeCreation { ref slot, .. } if slot == "20260923-003000"
+        ),
+        "{bounded:?}"
+    );
+    assert!(bounded.ready());
+    // No creationTimestamp (never true of an API object) is not bounded.
+    assert!(!slot_predates_creation(slot_at, None));
+
+    // `Missed` is bounded too: created 09:00, a daily 00:30Z slot 8.5 h old is
+    // not a miss of THIS schedule, and a missed slot is not recorded for it.
+    let created_morning = created_schedule(
+        BERLIN_NIGHTLY,
+        Some("Europe/Berlin"),
+        at(2026, 9, 23, 9, 0, 0),
+    );
+    let later = at(2026, 9, 23, 9, 0, 30);
+    assert!(matches!(
+        decide("nightly", &created_morning.spec, later),
+        SlotDecision::Missed { .. }
+    ));
+    assert!(matches!(
+        bound_by_creation(
+            decide("nightly", &created_morning.spec, later),
+            created_at(&created_morning)
+        ),
+        SlotDecision::BeforeCreation { .. }
+    ));
+
+    // `CatchUpDue` is bounded too.
+    let mut catch_up = created_morning.clone();
+    catch_up.spec.catch_up_policy = Some(weirkeeper::crds::backup_schedule::CatchUpPolicy::Latest);
+    assert!(matches!(
+        decide("nightly", &catch_up.spec, later),
+        SlotDecision::CatchUpDue { .. }
+    ));
+    assert!(matches!(
+        bound_by_creation(
+            decide("nightly", &catch_up.spec, later),
+            created_at(&catch_up)
+        ),
+        SlotDecision::BeforeCreation { .. }
+    ));
+
+    // Every other decision passes through untouched.
+    let mut suspended = created_morning.clone();
+    suspended.spec.suspend = true;
+    assert_eq!(
+        bound_by_creation(
+            decide("nightly", &suspended.spec, later),
+            created_at(&suspended)
+        ),
+        SlotDecision::Suspended
+    );
+}
+
+/// A slot missed AFTER creation keeps D1 §4.7 exactly: row 17 inside the
+/// deadline, row 18 (`None`) counted as missed past it, row 21 (`Latest`) one
+/// catch-up past it. The creation bound changes none of them.
+#[test]
+fn a_slot_missed_after_creation_still_follows_d1() {
+    // Created the day before; the controller wakes at various points after the
+    // 2026-09-23 00:30:00Z slot.
+    let created = at(2026, 9, 22, 0, 53, 11);
+    let schedule = created_schedule(BERLIN_NIGHTLY, Some("Europe/Berlin"), created);
+    let bounded = |spec: &weirkeeper::crds::backup_schedule::BackupScheduleSpec, now| {
+        bound_by_creation(decide("nightly", spec, now), Some(created))
+    };
+
+    // Row 17: inside startingDeadlineSeconds (absent = 3600) — fires.
+    assert!(matches!(
+        bounded(&schedule.spec, at(2026, 9, 23, 1, 29, 0)),
+        SlotDecision::Due { ref slot, .. } if slot == "20260923-003000"
+    ));
+    // Row 18: past the deadline with catchUpPolicy None — missed, and the
+    // refinement against status keeps it missed (never fired).
+    let missed = refine_against_status(
+        bounded(&schedule.spec, at(2026, 9, 23, 3, 0, 0)),
+        // The schedule has never fired: the 2026-09-22 slot predated it.
+        None,
+        None,
+    );
+    assert!(
+        matches!(missed, SlotDecision::Missed { ref slot, .. } if slot == "20260923-003000"),
+        "{missed:?}"
+    );
+    assert_eq!(missed.reason(), REASON_SLOT_MISSED);
+    // Row 21: past the deadline with Latest and a revision in force since
+    // creation — one catch-up.
+    let mut latest = schedule.clone();
+    latest.spec.catch_up_policy = Some(weirkeeper::crds::backup_schedule::CatchUpPolicy::Latest);
+    let caught = refine_against_status(
+        bounded(&latest.spec, at(2026, 9, 23, 3, 0, 0)),
+        None,
+        Some(created),
+    );
+    assert!(
+        matches!(caught, SlotDecision::CatchUpDue { ref slot, .. } if slot == "20260923-003000"),
+        "{caught:?}"
+    );
+}
+
+/// The same slot, after creation, through the reconciler: it IS fired. The
+/// control for `a_schedule_created_after_its_slot_came_due_does_not_fire_that_slot`
+/// — a bound that refused every slot would pass that test and fail this one.
+#[tokio::test]
+async fn a_schedule_created_before_its_slot_fires_it() {
+    let schedule = created_schedule(
+        BERLIN_NIGHTLY,
+        Some("Europe/Berlin"),
+        at(2026, 9, 23, 0, 10, 0),
+    );
+    let now = at(2026, 9, 23, 0, 31, 0);
+    let name = scheduled_backup_name("nightly", &slot_name(utc(2026, 9, 23, 0, 30)))
+        .expect("the fixture name fits");
+    let (client, _calls, bodies) = mock_client_recording_bodies(daily_routes(&name, 201));
+    let outcome = reconcile_schedule(&schedule, &client, now)
+        .await
+        .expect("a due slot is a decision");
+    let bodies = bodies.lock().expect("the body recorder is readable");
+    let created: Vec<String> = posts(&bodies).into_iter().map(body_name).collect();
+    assert_eq!(created, vec![name.clone()], "the post-creation slot fires");
+    assert_eq!(outcome.created, Some(name));
 }

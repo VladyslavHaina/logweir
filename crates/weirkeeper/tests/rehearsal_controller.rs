@@ -3158,3 +3158,80 @@ fn the_template_digest_does_not_depend_on_the_targets_auth() {
 /// `the_template_digest_does_not_depend_on_the_targets_auth`.
 const STANDING_TEMPLATE_DIGEST_GOLDEN: &str =
     "sha256:9ba5b07076412c832668ef61b7bd29abfec90218f652659582efe994e093937b";
+
+// ===========================================================================
+// SCHEDULE-FIRES-SLOT-BEFORE-CREATION (D1 / PLAT-04.2, decided 2026-09-22)
+// ===========================================================================
+
+/// [`schedule`] with a `metadata.creationTimestamp`.
+fn schedule_created_at(created: &str) -> RehearsalSchedule {
+    let mut v = schedule_value(json!({}));
+    v["metadata"]["creationTimestamp"] = json!(created);
+    serde_json::from_value(v).expect("the fixture schedule parses")
+}
+
+/// A `RehearsalSchedule` created at 03:20 does NOT rehearse its 03:00 slot,
+/// although that slot is inside `startingDeadlineSeconds` (3600) and every
+/// other check would pass. It is IDLE, not a skip: the slot is not named in
+/// `lastSkipped` and does not advance `lastScheduledSlot`, because it was never
+/// this schedule's slot. MUTANT: read `cadence.latest_due_slot(facts.now)`
+/// directly in `decide` again, and the Restore is created.
+#[tokio::test]
+async fn a_schedule_created_after_its_slot_came_due_does_not_rehearse_it() {
+    let schedule = schedule_created_at("2026-09-20T03:20:00Z");
+    assert_eq!(
+        rs::due_unconsumed_slot(&schedule, now()),
+        None,
+        "the pre-creation slot is not a slot to decide"
+    );
+    let (client, recorder, bodies) = mock_client_recording_bodies(happy_routes());
+    let outcome = rs::reconcile_schedule(&schedule, &context(client), now())
+        .await
+        .expect("the reconcile answers");
+    assert!(
+        matches!(outcome.verdict, rs::Verdict::Idle),
+        "{:?}",
+        outcome.verdict
+    );
+    assert_eq!(posted(&recorder, RESTORES_PATH), 0, "no Restore is created");
+    assert_eq!(
+        posted(&recorder, CONFIGMAPS_PATH),
+        0,
+        "no bundle is written"
+    );
+    assert_eq!(
+        last_skip(&bodies),
+        None,
+        "a pre-creation slot is not a skip"
+    );
+    for patch in patch_bodies(&bodies) {
+        assert!(
+            patch.pointer("/status/lastScheduledSlot").is_none(),
+            "the slot is not consumed: {patch}"
+        );
+    }
+}
+
+/// The control: created at 02:59, the same 03:00 slot IS rehearsed; created at
+/// exactly 03:00:00 it is too (the bound is strictly before).
+#[tokio::test]
+async fn a_schedule_created_before_its_slot_rehearses_it() {
+    for created in ["2026-09-20T02:59:00Z", "2026-09-20T03:00:00Z"] {
+        let schedule = schedule_created_at(created);
+        assert_eq!(
+            rs::due_unconsumed_slot(&schedule, now()).as_deref(),
+            Some("20260920-030000"),
+            "created {created}"
+        );
+        let (client, recorder, _) = mock_client_recording_bodies(happy_routes());
+        let outcome = rs::reconcile_schedule(&schedule, &context(client), now())
+            .await
+            .expect("the reconcile answers");
+        assert!(
+            matches!(&outcome.verdict, rs::Verdict::Fire(order) if order.slot == "20260920-030000"),
+            "created {created}: {:?}",
+            outcome.verdict
+        );
+        assert_eq!(posted(&recorder, RESTORES_PATH), 1, "created {created}");
+    }
+}

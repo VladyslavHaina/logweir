@@ -445,7 +445,10 @@ pub struct BackupScheduleSpec {
     /// absent; the slot identity is always the UTC instant. A slot that comes
     /// due more than `startingDeadlineSeconds` before the controller looks is
     /// skipped and counted in `status.missedSlots`, unless `catchUpPolicy` is
-    /// `Latest`.
+    /// `Latest`. A slot that came due before this object's
+    /// `metadata.creationTimestamp` is never fired and is not counted as
+    /// missed, as with a Kubernetes CronJob: the first run is the first slot at
+    /// or after creation.
     pub schedule: String,
     /// The `KafkaCluster` to back up, in this namespace.
     ///
