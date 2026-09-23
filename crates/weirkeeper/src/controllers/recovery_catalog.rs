@@ -1859,10 +1859,7 @@ fn policy_targets(
 /// a tight loop. The resolution reads the process-wide `TrustPolicy` store
 /// ([`crate::trust::spawn_policy_reflector`], one per reconciler, shared by
 /// every namespace copy) once it has synced, and one `LIST` until then.
-pub fn controller(
-    client: kube::Client,
-    runner_image: crate::job::RunnerImage,
-) -> impl std::future::Future<Output = ()> + Send {
+pub async fn controller(client: kube::Client, runner_image: crate::job::RunnerImage) {
     // D0 STAGE 5: ONE WATCH PER WATCHED NAMESPACE. `crate::scope` is the whole
     // cluster unless `LOGWEIR_WATCH_NAMESPACES` names the execution
     // namespaces, and then this reconciler runs once per namespace with an
@@ -1872,22 +1869,19 @@ pub fn controller(
     // The `TrustPolicy` store is built ONCE here and shared by every copy
     // (review L3 of PLAT-17.2): the kind is cluster-scoped, so a reflector per
     // namespace would be N identical cluster-wide watches. `trust_view`
-    // resolves from it once it has synced (review LOW-5).
-    //
-    // Spawned when the future is first POLLED, inside the runtime —
-    // `spawn_policy_reflector` calls `tokio::spawn`.
-    async move {
-        let policies = crate::trust::spawn_policy_reflector(&client);
-        crate::scope::run_everywhere(move |namespace| {
-            controller_in(
-                client.clone(),
-                runner_image.clone(),
-                policies.clone(),
-                namespace,
-            )
-        })
-        .await;
-    }
+    // resolves from it once it has synced (review LOW-5). An `async fn`, so the
+    // reflector is spawned when the future is first polled, inside the runtime
+    // (`spawn_policy_reflector` calls `tokio::spawn`).
+    let policies = crate::trust::spawn_policy_reflector(&client);
+    crate::scope::run_everywhere(move |namespace| {
+        controller_in(
+            client.clone(),
+            runner_image.clone(),
+            policies.clone(),
+            namespace,
+        )
+    })
+    .await;
 }
 
 /// One watch of [`controller`], over `namespace` (`None` is the whole

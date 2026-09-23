@@ -3837,7 +3837,7 @@ fn a_trust_policy_event_enqueues_the_catalogs_it_could_govern() {
     )
     .expect("the reconciler's own source");
     let start = src
-        .find("pub fn controller(")
+        .find("pub async fn controller(")
         .expect("the controller constructor");
     let body = &src[start..];
     assert!(
