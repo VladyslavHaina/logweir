@@ -62,9 +62,12 @@ console's keys — *Deployment* below), and the chart refuses shared mode withou
 it. What D0 still lists beyond this service's own boundary is the browser
 journey against a real provider and TLS ingress (stage 8), the production-CNI
 evidence for the NetworkPolicy (Docker Desktop's acceptance of a policy proves
-nothing about deny behaviour), and the trust-read narrowing recorded in
-`charts/logweir/templates/ui/api-rbac.yaml`. Read those before calling an
-installation a production shared console.
+nothing about deny behaviour). The trust-read narrowing that
+`charts/logweir/templates/ui/api-rbac.yaml`'s comment still calls open (D3 W11
+F2) has landed: `GET /api/v1/trust-policies` is Administrator-only and filters
+namespace lists to the actor's (*Protection, rehearsals, catalogs, retention
+and trust* below). Read those before calling an installation a production
+shared console.
 
 A domain whose routes do not exist yet has **no route at all** — no stub and no
 `501`. `GET /api/v1/session` reports each one as `false` under `capabilities`,
@@ -322,8 +325,11 @@ object.** The rules, exactly:
   has not been observed for 300 s or an object has carried no status for 120 s
   after creation. A **terminal** object never goes stale: nothing is going to
   observe it again.
-- `readiness` is `{state: "unknown", basis: "notImplemented"}` until PLAT-03.1
-  lands. It is a separate object and never overwrites `state`.
+- `readiness` is always `{state: "unknown", basis: "notImplemented"}` on an
+  operation in this build: readiness is served by the `Preflight` routes
+  ([Readiness that is a result about something](#readiness-that-is-a-result-about-something)),
+  and the operation projection does not join one. It is a separate object and
+  never overwrites `state`.
 - `targetMode` (`scratch` or `newTopic`) is on the operation and not on the
   completion panel: D3 §3.5 keys its two fixed guidance blocks on
   `spec.target.mode`, which is a fact about the run from the moment it is
@@ -1632,7 +1638,7 @@ maximum duration with a terminal `end` event.
 The service ships as one image and one optional Helm component.
 
 **The image is `logweir-console`, built by `Dockerfile.console`.** It carries
-`/usr/local/bin/logweir-api` and, at `/ui`, the same twenty-two static files the
+`/usr/local/bin/logweir-api` and, at `/ui`, the same twenty-six static files the
 `logweir-ui` image carries — the same two globs, from the same one `ui/`
 directory in the source tree, so there is one copy of the page in the repository
 and two images that copy from it. `scripts/check-image-api.sh` hashes every file

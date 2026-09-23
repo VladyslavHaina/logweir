@@ -377,12 +377,14 @@ recovery-point binding, the standing rehearsal authorisation and the new key
 lines. `v1` stays accepted for already-created `Restore`s under the documented
 transition in `docs/kubernetes.md` §12.
 
-**Not yet performed.** This amendment is recorded here ahead of the code, as
-Amendment A requires for a decision that changes a shipped contract; the version
-constant, the bundle shape and the runner's re-validation are the rehearsal and
-catalog workers'. Nothing in the CRD shapes depends on the bump: a `Restore`
-carrying `spec.authorization` is refused by a v1 runner because the bundle it
-needs is absent, which is the same fail-closed path as a missing approval.
+**Performed.** This amendment was recorded ahead of the code, as Amendment A
+requires for a decision that changes a shipped contract; the rehearsal and
+catalog workers have since landed it — `VERSION` is `"2"`, controller-built
+Restore Jobs pass `--execution-contract-version 2`, and v1 is accepted only for
+already-created legacy Restores (`docs/stability.md`, *Execution contract v2*).
+Nothing in the CRD shapes depends on the bump: a `Restore` carrying
+`spec.authorization` is refused by a v1 runner because the bundle it needs is
+absent, which is the same fail-closed path as a missing approval.
 
 Documentation is licensed [CC-BY-4.0](LICENSE-docs).
 

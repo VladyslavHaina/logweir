@@ -4,6 +4,9 @@ Use this guide for image selection, cluster prerequisites, installation and
 uninstall. See [kubernetes.md](kubernetes.md) for operation and troubleshooting,
 and [the chart reference](../charts/logweir/README.md) for Helm values.
 Commands use `docker-desktop`; substitute your intended context explicitly.
+**A new operator starts at [quickstart.md](quickstart.md), *The supported
+path***, which walks this guide's supported steps in order and then carries on
+to the first backup, a restore and a disaster restore.
 
 **Minimum Kubernetes: 1.29.** The fourteen CRDs use CEL validation rules, which
 are GA at 1.29. The `ValidatingAdmissionPolicy` example is 1.30+ and ships
@@ -335,6 +338,13 @@ openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out approver.pem
 
 ### 2. The cluster-scoped `TrustRoster`, whose name is fixed
 
+**A `TrustPolicy` is the current way to say whose keys a namespace trusts**
+(PLAT-19.1: lifecycle, overlap rotation, one usage per key — [keys.md](keys.md)).
+The roster below is the legacy fallback every namespace no policy governs
+resolves to; it is still the smallest first-install step, and nothing has to be
+migrated off it. A namespace a policy governs never consults the roster
+([kubernetes.md](kubernetes.md) §8, *Trust resolution*).
+
 ```bash
 kubectl --context docker-desktop apply -f config/samples/trustroster.yaml
 ```
@@ -440,9 +450,10 @@ kubectl --context docker-desktop -n <namespace> create secret generic \
 
 **4. `logweir-evidence-ro`** — the controller's **read-only** evidence-bucket
 credential, and the only one of the four the controller's own pod consumes. A
-**different principal** from the runner's archive credential, and read-only: no
-Logweir component holds any object-store delete capability. Created in
-`logweir-system`.
+**different principal** from the runner's archive credential, and read-only:
+neither the controller nor the runner holds any object-store delete capability.
+The one deleter is a `RetentionPolicy`'s enforcement worker, under its own
+separately granted credential (§3.11 below). Created in `logweir-system`.
 
 ```bash
 kubectl --context docker-desktop -n logweir-system create secret generic \
@@ -738,16 +749,15 @@ And what it does **not** hold, each for a reason:
   operation in v1; the supported path is `kubectl apply` under
   `logweir-trust-admin` (see [keys.md](keys.md)).
 
-**One caveat before you run a console against this account.** `TrustPolicy` is
-cluster-scoped, so its read grant is installation-wide and no RBAC rule can
-narrow it to a namespace — the service is expected to narrow it per actor, and
-for `GET /api/v1/trust-policies` it does not yet: an actor holding
-`trustPolicy.read` in one bound namespace is currently served every policy's
-`spec.namespaces[]`, which is the list of every governed namespace. The grant is
-the enabling half and is correct; the route is the defective half, tracked
-against the console API's own wave. Until it lands, an installation that does
-not want that exposure should leave `api.enabled` off rather than assume the
-read is bounded above the grant.
+**The per-actor narrowing of the trust read is the service's.** `TrustPolicy`
+is cluster-scoped, so its read grant is installation-wide and no RBAC rule can
+narrow it to a namespace. `GET /api/v1/trust-policies` does: it is
+Administrator-only, serves a policy only when it governs a namespace the actor
+administers (or is the installation default), and filters the namespace lists
+inside it to that administered set, saying so with `namespacesFiltered`
+([kubernetes.md](kubernetes.md) §16, *Reading a TrustPolicy needs an
+administrator binding*). An earlier revision of this paragraph said the route
+served every governed namespace; that defect is closed.
 
 `./scripts/render-install.sh --check` answers the `kubectl auth can-i` question
 for every pair above, in both directions, against every checked-in render — so a
@@ -787,7 +797,7 @@ and the order is deliberate: install the principal, satisfy yourself with
 the console.
 
 **The image.** `logweir-console`, built by `Dockerfile.console`: the
-`logweir-api` binary plus the same twenty-two static page files the
+`logweir-api` binary plus the same twenty-six static page files the
 `logweir-ui` image carries, copied from the same one `ui/` directory in the
 source tree. `scripts/check-image-api.sh` hashes what the image will serve
 against that directory, so the console and the legacy proxy cannot drift apart,
@@ -1073,13 +1083,11 @@ kubectl --context docker-desktop apply \
 `no matches for kind` and the whole apply fails. Turn it on wherever the API
 server has the kind.
 
-**It is inert until the console chart stage lands.** This chart ships no
-`logweir-api` ServiceAccount and no console `create secrets` grant — `console.*`
-is D0 stage 7 — so today the policy's subject list names a principal that does
-not exist and it fences nothing. Enabling it early is harmless and it becomes
-load-bearing the moment the console arrives; just do not read "enabled" as
-"fenced" before then. When `console.*` lands, its ServiceAccount name must equal
-`admissionPolicy.consoleServiceAccountName`.
+**It fences the console this chart renders.** With `api.enabled` the chart
+renders the `logweir-api` ServiceAccount and its `create secrets` grant (§5d),
+and it refuses to render the policy when
+`admissionPolicy.consoleServiceAccountName` is not that account, because a
+policy naming nobody would install, look enabled and fence nothing.
 
 **What it does not do.** A cluster administrator can delete the policy; it
 raises the cost of a mistake and of a compromised console, not of a deliberate
@@ -1168,12 +1176,14 @@ that created it read it.
 No existing object is converted, nothing is rewritten, and an object that names
 none of the new fields resolves exactly as it did.
 
-**One widening is not rollback-safe, and nothing in this build triggers it.**
+**One widening is not rollback-safe once you use it.**
 `Approval.spec.subjectRef.kind` gained `RehearsalSchedule`. A controller image
 that predates this change cannot decode such an object, and that is a reflector
-decode error which stalls **every** `Approval` reconcile — not one object. No
-component here creates one, so applying these CRDs and rolling the controller
-back is safe today. Before any worker starts creating them, read
+decode error which stalls **every** `Approval` reconcile — not one object. Only
+a standing rehearsal authorization creates one (`logweir drill approve
+--standing`, [kubernetes.md](kubernetes.md) §7g); an installation that never
+minted one can apply these CRDs and roll the controller back safely, and one
+that did must remove those `Approval`s first — see
 [kubernetes.md, "The one widening that is NOT rollback-safe"](kubernetes.md#the-one-widening-that-is-not-rollback-safe-approvalspecsubjectrefkind). The one field that stopped
 being required — `Restore.spec.approvalRef` — is still required in effect: CEL
 demands exactly one of it and `spec.authorization`, so an unauthorised `Restore`
@@ -1259,46 +1269,33 @@ kubectl --context docker-desktop proxy --www=./ui --www-prefix=/ui/ --address=12
 
 Then open `http://127.0.0.1:8001/ui/`.
 
-`kubectl proxy` forwards every API path except pod exec and attach, on the same
-origin as the page, under the viewer's kubeconfig. So the page runs with the
-**viewer's entire cluster authority**, not with the roles `logweir.yaml` ships:
-`logweir-viewer`, `logweir-operator` and `logweir-approver` bind the **user**,
-and under this serving path they bind nothing at all about the page. Anyone who
-runs the UI from a cluster-admin kubeconfig gives the shipped bundle
-cluster-admin. That residual is why there is no telemetry in this bundle, why
-nothing in it is fetched from anywhere else, and why its contents are listed by
-digest in the release notes.
-
-**Two flags are the one-line escalation of exactly that residual, and neither
-may change:** `--address=127.0.0.1` binds loopback only, and `--disable-filter`
-must **never** be passed — the default keeps the cross-site request filter on.
-**Changing either turns a local page holding your cluster authority into a network service holding it.**
-
-**The hardened alternative is a kubeconfig that holds less**: bind a subject to
-`logweir-viewer` (and `logweir-operator` if the page should write) and nothing
-else, build a throwaway kubeconfig carrying that subject, and serve from it —
-the context in it is named `docker-desktop` on purpose, so the command above is
-unchanged. [kubernetes.md](kubernetes.md) §16, *Serving the UI*, carries that
-section in full, with the exact `kubectl config` lines, and is the authority
-for it; this document does not restate it.
+`kubectl proxy` runs the page with the **viewer's entire cluster authority**,
+not with the roles `logweir.yaml` ships, and two flags (`--address=127.0.0.1`,
+and never `--disable-filter`) are all that keep it a local page.
+[kubernetes.md](kubernetes.md) §16, *Serving the UI*, is the authority for that
+residual, the two flags and the hardened kubeconfig that holds less; this
+document does not restate it. This page is the **legacy** serving path: the
+supported console is `logweir-api` (§5e), whose identity and roles are its own
+([quickstart.md](quickstart.md), *The supported path*).
 
 ---
 
 ## Two clients, two trust stores
 
-Logweir speaks to Kafka through **two different TLS stacks**, and a private-CA
-adopter must configure **both**:
+Logweir speaks to Kafka through **two different TLS stacks**: the engine
+(`kafka-backup`) falls back to its **bundled `webpki-roots`**, and Logweir's own
+rdkafka path uses the **image's `ca-certificates`**. A private CA installed on
+the node reaches neither.
 
-- **The engine** (`kafka-backup`, invoked by the runner) falls back to its
-  **bundled `webpki-roots`** unless `ssl_ca_location` is set. A private CA that
-  is installed on the node is **not** enough — the engine never looks there.
-- **Logweir's own rdkafka path** (the verification consumer) uses the
-  **image's `ca-certificates`** bundle, at the OpenSSL default location.
-
-Configuring one and not the other produces a working backup and a failing
-verification, or the reverse, and neither failure names the trust store as the
-cause. Set `ssl_ca_location` for the engine **and** ensure the CA is in the
-image's bundle.
+**On Kubernetes, name the CA once on the saved connection:**
+`KafkaCluster.spec.auth.tlsCa` (with `auth.tls: true`). The runner hands that
+one file to **both** clients — librdkafka's `ssl.ca.location` and the engine's
+`ssl_ca_location` — so they cannot disagree ([kubernetes.md](kubernetes.md)
+§20.2). **A standalone CLI run** gets the same through
+`LOGWEIR_SOURCE_TLS_CA_FILE` / `LOGWEIR_TARGET_TLS_CA_FILE`. Configuring a CA
+for only one of the two clients by hand (an image bundle edit, an engine config
+edit) produces a working backup and a failing verification, or the reverse, and
+neither failure names the trust store as the cause.
 
 ---
 
@@ -1384,21 +1381,23 @@ match exactly; bootstrap never repairs a mismatch by overwriting trust.
 ### Trust reference and rotation contract
 
 The public ConfigMap's `trust-reference` is
-`logweir.dev/v1alpha1/TrustRoster/default#spec.signingKeys`, matching the actual
-v0.1 verifier. Bootstrap publishes material but does not silently authorize it:
-a cluster administrator explicitly copies it into that roster. The current CRD
-makes `TrustRoster.spec` immutable and the current controller reads the global
-name `default`; changing that is PLAT-19.1 work, not behavior this bootstrap
-pretends already exists.
+`logweir.dev/v1alpha1/TrustRoster/default#spec.signingKeys`, the legacy roster
+the bootstrap was written against. Bootstrap publishes material but does not
+silently authorize it: a cluster administrator explicitly copies it into the
+trust that governs each namespace — a `TrustPolicy` key with usage
+`EvidenceSigning` (PLAT-19.1), or `TrustRoster/default`'s `signingKeys` where no
+policy governs ([kubernetes.md](kubernetes.md) §8, *Trust resolution*). The
+reference string itself is unchanged, so readers that parse it keep working.
 
 During a planned rotation, retain the retiring public key alongside the new key
 for old-archive verification, stop new signing with the retired private key,
 and record the policy-effective time. Routine retirement preserves historical
 verification; revocation is a separate policy decision and may deliberately
 make historical evidence untrusted. Never infer trust from a public key stored
-beside an archive. Until explicit overlapping trust-policy references land,
-rotation of the immutable default roster is an administrator-coordinated
-maintenance window and rollback must restore the prior roster plus matching
+beside an archive. The overlap is a `TrustPolicy` edit (PLAT-19.1,
+[keys.md](keys.md), *The supported procedure*); on a roster-only installation,
+rotation of the immutable default roster is still an administrator-coordinated
+maintenance window, and rollback must restore the prior roster plus the matching
 private/public identity backup together.
 
 ```bash
@@ -1430,7 +1429,8 @@ intended, using the actual names and prefixes from the evidence:
 # scratch topics a `mode: scratch` restore created (phase 9 normally removes them)
 kafka-topics.sh --bootstrap-server <broker> --delete --topic 'logweir-scratch-<name>'
 
-# archive objects — Logweir NEVER deletes these; retention only reports
+# archive objects — uninstall never deletes these; only a RetentionPolicy in
+# mode Enforce ever did, under its own credential (docs/kubernetes.md §7f)
 aws s3 rm 's3://kafka-backups/logweir/<backup_id>/' --recursive
 
 # evidence objects — likewise, and the controller's credential is read-only
