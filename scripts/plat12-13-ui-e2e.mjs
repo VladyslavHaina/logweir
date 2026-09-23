@@ -53,7 +53,8 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { createServer } from "node:net";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { generateKeyPairSync, createHash } from "node:crypto";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -1703,6 +1704,131 @@ async function aTargetRecreatedMidWizardIsRefused(browser, base) {
   }
 }
 
+// PLAT-12.2 "expiry" (harness-rows-12): AN EXPIRED APPROVAL RENDERS EXPIRED,
+// NEVER VERIFIED. A Restore is created by the page for the newer point; the
+// approver key is a per-run key listed ONLY in a TrustPolicy over this run's
+// namespace with a notAfter ~80 s ahead; `logweir drill approve` signs the
+// Restore's own plan with it (by path, the key never read by this process) and
+// the two files are recorded THROUGH THE PAGE's form. The same page must first
+// render "approved: verified by weirkeeper" (the control: the reading below
+// can see a verified state), and after the key's notAfter -- with nothing
+// touched -- weirkeeper refuses it KeyIdExpired and the page, reloaded, must
+// render "expired" and no longer "verified".
+//
+// The TrustPolicy is cluster-scoped (owner-labelled, over this namespace only,
+// deleted in the driver's `finally`): run this harness under the cluster lock.
+const EXPIRY_TRUST_POLICY = NAMESPACE_PREFIX + "expiry-" + suffix;
+const LOGWEIR_BIN = process.env.UI_E2E_LOGWEIR_BIN || join(REPO, "target", "debug", "logweir");
+
+async function anExpiredApprovalRendersExpiredNeverVerified(browser, base) {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 1000 } });
+  const work = join("/tmp", "plat12-13-expiry-" + suffix);
+  mkdirSync(work, { recursive: true, mode: 0o700 });
+  try {
+    await page.goto(base + pointRoute(points.newer));
+    await page.waitForSelector("#create-restore");
+    const planHash = (await page.locator("#plan-hash-value").innerText()).trim();
+    const restoreName = "restore-" + planHash.replace("sha256:", "").slice(0, 8);
+    await page.click("#create-restore");
+    await page.waitForFunction(() => location.hash.startsWith("#/approvals?subject="), null, { timeout: 20000 });
+    await page.waitForSelector("#approval-form");
+    const restore = kubeJson(["-n", namespace, "get", "restore", restoreName]);
+    result.created.push({ kind: "Restore", name: restoreName, uid: restore.metadata.uid });
+    const approvalName = restore.spec.approvalRef.name;
+
+    // The approver key: minted here, written 0600 into a 0700 directory,
+    // passed to `logweir drill approve` by path, deleted in `finally`.
+    const minted = generateKeyPairSync("ed25519");
+    const keyPath = join(work, "approver.pem");
+    writeFileSync(keyPath, minted.privateKey.export({ type: "pkcs8", format: "pem" }), { mode: 0o600 });
+    const spki = minted.publicKey.export({ type: "spki", format: "der" });
+    const keyId = createHash("sha256").update(spki).digest("hex");
+    const notAfterMs = Date.now() + 80000;
+    const notAfter = new Date(notAfterMs).toISOString().replace(/\.\d+Z$/, "Z");
+    const policy = apply({
+      apiVersion: "logweir.dev/v1alpha1", kind: "TrustPolicy",
+      metadata: { name: EXPIRY_TRUST_POLICY, labels: LABELS },
+      spec: { namespaces: [namespace], keys: [{ keyId: keyId, algorithm: "ed25519",
+        spkiPem: minted.publicKey.export({ type: "spki", format: "pem" }),
+        principal: { id: "expiry-approver@" + namespace + ".invalid", display: "the expiry row's approver" },
+        usages: ["GovernedApproval"], state: "Active",
+        notBefore: new Date(Date.now() - 3600000).toISOString().replace(/\.\d+Z$/, "Z"), notAfter: notAfter }] },
+    });
+    result.created.push({ kind: "TrustPolicy", name: EXPIRY_TRUST_POLICY, uid: policy.metadata.uid, keyId: keyId, notAfter: notAfter });
+    writeFileSync(join(work, "plan.yaml"), restore.spec.planBytes);
+    const approved = spawnSync(LOGWEIR_BIN, ["drill", "approve", "--spec", join(work, "plan.yaml"), "--key", keyPath,
+      "--approver", "plat12-2-expiry", "--ticket", "PLAT-12.2-EXPIRY", "--subject-kind", "Restore",
+      "--out", join(work, "approval.json")], { encoding: "utf8", timeout: 120000 });
+    check(approved.status === 0, "logweir drill approve exited " + approved.status + ": " + String(approved.stderr).slice(0, 400));
+
+    // RECORDED THROUGH THE PAGE.
+    await page.fill("#approval-json", readFileSync(join(work, "approval.json"), "utf8"));
+    await page.fill("#approval-sig", readFileSync(join(work, "approval.sig"), "utf8"));
+    await page.click("#approval-form button[type=submit]");
+    await until("the Approval exists", () => kube(["-n", namespace, "get", "approval", approvalName,
+      "--ignore-not-found=true", "-o", "name"]).stdout.trim(), (n) => n.length > 0, 20);
+    const stored = kubeJson(["-n", namespace, "get", "approval", approvalName, "--show-managed-fields"]);
+    check((stored.metadata.managedFields || []).some((f) => f.manager === "logweir-ui"), "the page wrote the Approval");
+    result.created.push({ kind: "Approval", name: approvalName, uid: stored.metadata.uid });
+
+    // THE CONTROL: while the key is inside its window the page says verified.
+    const verified = await until("weirkeeper verifies the approval", () =>
+      (kubeJson(["-n", namespace, "get", "approval", approvalName]).status || {}),
+    (st) => st && st.verified === true && st.matchedKeyId === keyId, 30);
+    await page.reload({ waitUntil: "load" });
+    await page.waitForSelector(".approval-state");
+    const before = await page.locator(".approval-state").innerText();
+    const badgeBefore = (await page.locator(".approval-state > :first-child").textContent()).trim();
+    check(badgeBefore === "approved: verified by weirkeeper" && before.includes(keyId),
+      "the control: the page did not render the verified Approval as verified: " + before);
+    await shot(page, "approval-expiry-before");
+    check(Date.now() < notAfterMs, "the verified reading was taken inside the key's window");
+
+    // PAST notAfter, WITH NOTHING TOUCHED.
+    const expired = await until("weirkeeper refuses the approval KeyIdExpired", () =>
+      (kubeJson(["-n", namespace, "get", "approval", approvalName]).status || {}),
+    (st) => st && st.verified === false && (st.conditions || []).some((c) => c.type === "Verified" &&
+      c.status === "False" && c.reason === "KeyIdExpired"), 150);
+    const condition = expired.conditions.find((c) => c.type === "Verified");
+    check(Date.parse(condition.lastTransitionTime) >= notAfterMs - 1000,
+      "the refusal is the expiry, not something earlier: " + condition.lastTransitionTime + " vs " + notAfter);
+    await page.reload({ waitUntil: "load" });
+    await page.waitForSelector(".approval-state");
+    const after = await page.locator(".approval-state").innerText();
+    const badgeAfter = (await page.locator(".approval-state > :first-child").textContent()).trim();
+    await shot(page, "approval-expiry-after");
+    check(badgeAfter === "expired" && after.includes("KeyIdExpired"),
+      "the page did not render the expired Approval as expired: [" + badgeAfter + "] " + after);
+    check(!after.includes("approved: verified by weirkeeper") && !/verified by weirkeeper/i.test(after),
+      "the page still renders the expired Approval as verified: " + after);
+    check(await page.locator("#approval-form").count() === 0,
+      "a second form was offered under a name an Approval already holds");
+    record("PLAT-12.2 expiry: an Approval verified inside its key's window renders verified, and past the key's notAfter weirkeeper refuses it KeyIdExpired and the page renders it expired, never verified", {
+      restore: { name: restoreName, uid: restore.metadata.uid }, approval: { name: approvalName, uid: stored.metadata.uid },
+      keyId: keyId, notAfter: notAfter, verifiedMatchedKeyId: verified.matchedKeyId,
+      controllerRefusal: { reason: condition.reason, at: condition.lastTransitionTime, message: condition.message.slice(0, 300) },
+      badgeBefore: badgeBefore, badgeAfter: badgeAfter,
+      pageBefore: before.replace(/\s+/g, " ").slice(0, 240), pageAfter: after.replace(/\s+/g, " ").slice(0, 240),
+    });
+  } finally {
+    await page.close();
+    rmSync(work, { recursive: true, force: true });
+  }
+}
+
+function deleteExpiryTrustPolicy() {
+  const seen = kube(["get", "trustpolicy", EXPIRY_TRUST_POLICY, "--ignore-not-found=true", "-o", "json"]).stdout.trim();
+  if (seen === "") {
+    return;
+  }
+  const live = JSON.parse(seen);
+  check((live.metadata.labels || {})["logweir.dev/test-owner"] === OWNER,
+    "refusing to delete TrustPolicy " + EXPIRY_TRUST_POLICY + ": not this run's");
+  kube(["delete", "trustpolicy", EXPIRY_TRUST_POLICY, "--wait=true"], { timeout: 60000 });
+  result.cleanup.push({ trustPolicy: EXPIRY_TRUST_POLICY, uid: live.metadata.uid,
+    deleted: kube(["get", "trustpolicy", EXPIRY_TRUST_POLICY, "--ignore-not-found=true", "-o", "name"]).stdout.trim() === "" });
+}
+
 // ------------------------------------------------------------------ driver
 
 let proxy = null;
@@ -1763,6 +1889,9 @@ try {
   await aFailedProbeShowsTheControllersReason(browser, url);
   await aTargetRecreatedMidWizardIsRefused(browser, url);
   await aRotationRefreshesTheObservedTime(browser, url);
+  // PLAT-12.2 expiry. Last: it adds a TrustPolicy over this namespace, which
+  // would change every earlier journey's trust source.
+  await anExpiredApprovalRendersExpiredNeverVerified(browser, url);
 } catch (error) {
   failure = error;
   result.failure = errorText(error);
@@ -1777,6 +1906,12 @@ try {
   }
   if (proxy !== null) {
     proxy.kill("SIGTERM");
+  }
+  try {
+    deleteExpiryTrustPolicy();
+  } catch (error) {
+    failure = failure || error;
+    result.cleanupFailure = errorText(error);
   }
   try {
     if (process.env.UI_E2E_KEEP === "1") {
