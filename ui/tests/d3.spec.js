@@ -2576,3 +2576,35 @@ test("the_signer_panel_reads_the_published_envelope_and_the_apis_own_command", (
     "and the command is the API's own, so one installation computes a key id one way");
   assert.equal(html.indexOf("<button"), -1, "still no one-click trust");
 });
+
+test("records_restored_is_labelled_as_the_sampled_window_count_with_the_window_beside_it", () => {
+  // Orchestrator addition to PLAT-18.2: `completion.recordsRestored` is
+  // `sample.records_restored` -- the records read back in the SAMPLED window
+  // (CRD field description; D3 section 3.5) -- not the total restored.
+  const facts = operationFacts(operationOf("operation-restore-completed.json"), true);
+  const html = decode(renderCompletion(facts));
+  assert.match(html, /<dt>records verified in the sampled window<\/dt><dd>200<\/dd>/,
+    "the count carries the sampled-window caption");
+  assert.match(html,
+    /<dt>sampled window<\/dt><dd>2026-09-19T01:09:08\.259Z to 2026-09-19T01:09:17\.277Z \(inclusive\)<\/dd>/,
+    "and the window it counts is beside it");
+  // NEGATIVE CONTROL: the old caption, which read as the total restored.
+  assert.equal(html.indexOf("<dt>records restored</dt>"), -1,
+    "no row calls the sampled count `records restored`");
+});
+
+test("a_finished_restore_without_a_completion_says_not_yet_verified_and_never_zero", () => {
+  const running = operationFacts(operationOf("operation-restore-untrusted.json"), true);
+  const finished = Object.assign({}, running, { completion: null, terminal: true, state: "succeeded" });
+  const html = decode(renderCompletion(finished));
+  assert.match(html, /data-completion="unverified"/);
+  assert.match(html, /Completion not yet verified/);
+  // NEGATIVE CONTROL: no count row and no zero is rendered for the absence.
+  assert.equal(html.indexOf("records verified in the sampled window"), -1, "no count row");
+  assert.equal(/<dd>0<\/dd>/.test(html), false, "nothing is shown as zero");
+  // A run still going has no panel at all (the existing rule, unchanged).
+  assert.equal(renderCompletion(Object.assign({}, finished, { terminal: false, state: "running" })), "");
+  // And a legacy custom resource, finished by its phase, says the same.
+  assert.match(decode(renderCompletion({ kind: "restore", completion: null, terminal: false,
+    phase: "Succeeded" })), /Completion not yet verified/);
+});

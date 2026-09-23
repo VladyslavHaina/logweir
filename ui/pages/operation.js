@@ -528,8 +528,20 @@ export function renderTargetMode(v) {
 export function renderCompletion(v) {
   const c = v.completion || null;
   if (c === null) {
-    return "";
+    // A FINISHED RESTORE WITHOUT A COMPLETION IS SAID TO BE WITHOUT ONE, NEVER
+    // SHOWN AS ZERO. The controller copies `status.completion` only once the
+    // run's signed scorecard has verified; before that there are no counts to
+    // show, and an empty or zero row would read as "nothing was restored". A
+    // run still going has no panel at all, which is the same honesty.
+    const finished = v.terminal === true ||
+      ["Succeeded", "Failed", "Cancelled"].indexOf(String(v.phase)) !== -1;
+    return v.kind === "restore" && finished
+      ? "<section class=\"completion\"><h3>What this restore produced</h3>" +
+        "<p class=\"note\" data-completion=\"unverified\">" + esc(COMPLETION_NOT_VERIFIED) +
+        "</p></section>"
+      : "";
   }
+  const sampleWindow = c.sampleWindow || null;
   const topics = Array.isArray(c.newTopics) ? c.newTopics : [];
   const guidance = COMPLETION_GUIDANCE[String(v.targetMode)];
   return (
@@ -541,7 +553,14 @@ export function renderCompletion(v) {
     ) +
     facts([
       ["records expected", cell(c.recordsExpected)],
-      ["records restored", cell(c.recordsRestored)],
+      // `recordsRestored` IS `sample.records_restored`: the records READ BACK
+      // in the sampled window, not everything this restore wrote (the CRD's
+      // field description, D3 section 3.5). Labelled as what it is, with the
+      // window beside it.
+      [RECORDS_IN_WINDOW_LABEL, cell(c.recordsRestored)],
+      ["sampled window", sampleWindow === null || (!sampleWindow.start && !sampleWindow.end)
+        ? ABSENT
+        : cell(sampleWindow.start) + " to " + cell(sampleWindow.end) + " (inclusive)"],
       ["records sampled", cell(c.recordsSampled)],
       ["records sampled and matching", cell(c.recordsSampledMatching)],
       ["integrity level", cell(c.integrityLevel)],
@@ -555,6 +574,16 @@ export function renderCompletion(v) {
     "</section>"
   );
 }
+
+/** The caption of `completion.recordsRestored`, which is a count of the
+ *  SAMPLED WINDOW and never the total a restore wrote. */
+export const RECORDS_IN_WINDOW_LABEL = "records verified in the sampled window";
+
+/** What a finished restore with no `status.completion` shows instead of counts. */
+export const COMPLETION_NOT_VERIFIED =
+  "Completion not yet verified: the counts of what this restore produced are copied from its " +
+  "signed scorecard only once that scorecard has verified, and it has not. Nothing here is a " +
+  "zero; there is no count to show yet.";
 
 /** The teardown a rehearsal recorded: what was deleted, and what was not. */
 export function renderTeardown(v) {
