@@ -48,6 +48,7 @@ fn line(point: &str, backup: &str, segments: &[&str]) -> PlanLine {
         set_prefix: format!("{SCOPE}/{backup}/"),
         enumerate_set: false,
         object_keys,
+        co_point_ids: Vec::new(),
     }
 }
 
@@ -165,9 +166,9 @@ struct FakeSink {
 }
 
 impl TombstoneSink for FakeSink {
-    fn put_create_only(&self, key: &str, _bytes: &[u8]) -> Result<(), SinkError> {
+    fn put_create_only(&self, key: &str, _bytes: &[u8]) -> Result<Option<String>, SinkError> {
         self.written.borrow_mut().push(key.to_string());
-        Ok(())
+        Ok(None)
     }
 }
 

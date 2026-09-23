@@ -380,8 +380,9 @@ pub struct Evaluation {
     /// [`plan_document`]'s own rail, which refuses to render a line whose set
     /// a retained point still names (defect SHARED-SET-RETENTION). Derived
     /// from the evaluation's OUTPUT, independently of the grouping step 4
-    /// performs, so the two would have to fail together for a shared set to
-    /// reach an approvable plan.
+    /// performs — so it is a second line against a REGRESSION in step 4 or in
+    /// the ceiling. It reads the same `PointFacts`, so it defends nothing
+    /// against missing or wrong view data (review L2).
     pub retained: RetainedObjects,
 }
 
@@ -411,7 +412,7 @@ struct Groups {
 }
 
 impl Groups {
-    fn of(points: &[Located<'_>]) -> Self {
+    fn of(points: &[&PointFacts]) -> Self {
         let addr = |p: &PointFacts| std::ptr::from_ref(p) as usize;
         let mut parent: Vec<usize> = (0..points.len()).collect();
         fn find(parent: &mut [usize], mut i: usize) -> usize {
@@ -422,8 +423,7 @@ impl Groups {
             i
         }
         let mut first_with: BTreeMap<String, usize> = BTreeMap::new();
-        for (i, located) in points.iter().enumerate() {
-            let p = located.point;
+        for (i, p) in points.iter().enumerate() {
             // An EMPTY backup id names no set, so it links nothing; a point
             // with no set id and no keys is its own group.
             let links = (!p.backup_id.is_empty())
@@ -446,9 +446,9 @@ impl Groups {
             }
         }
         let mut root_of = BTreeMap::new();
-        for (i, located) in points.iter().enumerate() {
+        for (i, p) in points.iter().enumerate() {
             let root = find(&mut parent, i);
-            root_of.insert(addr(located.point), root);
+            root_of.insert(addr(p), root);
         }
         Self { root_of }
     }
@@ -624,6 +624,16 @@ pub fn evaluate(input: &Input<'_>) -> Evaluation {
             verdicts.push((*located, Verdict::Protected(ProtectReason::Unknown)));
             continue;
         };
+        // NOR can a point whose set id names no single directory (review L8):
+        // an empty id is the bound `<scope>//`, and an id with a `/` is a
+        // bound that CONTAINS other sets — set `a`'s enumeration would remove
+        // set `a/b`. Generated ids never look like either; "could not tell"
+        // never authorises a delete, so such a point is kept `Unknown` rather
+        // than left to refuse the whole plan at the writer.
+        if point.backup_id.is_empty() || point.backup_id.contains('/') {
+            verdicts.push((*located, Verdict::Protected(ProtectReason::Unknown)));
+            continue;
+        }
 
         // WITHIN the rules is kept; outside either rule is a candidate.
         // D3 §6.4's union, with `OlderThanKeepDays` taking precedence over
@@ -668,7 +678,22 @@ pub fn evaluate(input: &Input<'_>) -> Evaluation {
     //
     //    Transitive, so a candidate linked to a retained point through ANOTHER
     //    candidate is protected as well: that other candidate is now retained.
-    let groups = Groups::of(&here);
+    //
+    //    AND A ROW WHOSE LOCATION THE CATALOG COULD NOT ESTABLISH (no
+    //    `locations[]` at all, review L1) is retained too. It is never counted
+    //    here and never a candidate — but if it names a candidate's set, "could
+    //    not tell where it lives" must not authorise deleting what it names.
+    let location_less: Vec<&PointFacts> = input
+        .points
+        .iter()
+        .filter(|p| p.locations.is_empty())
+        .collect();
+    let grouped: Vec<&PointFacts> = here
+        .iter()
+        .map(|l| l.point)
+        .chain(location_less.iter().copied())
+        .collect();
+    let groups = Groups::of(&grouped);
     let retained_groups: BTreeSet<usize> = verdicts
         .iter()
         .filter(|(_, v)| !matches!(v, Verdict::Candidate(_)))
@@ -678,6 +703,7 @@ pub fn evaluate(input: &Input<'_>) -> Evaluation {
                 .map(|l| l.point)
                 .filter(|p| skip_reason(p).is_some()),
         )
+        .chain(location_less.iter().copied())
         .map(|p| groups.of_point(p))
         .collect();
     for (located, verdict) in &mut verdicts {
@@ -759,8 +785,7 @@ pub fn evaluate(input: &Input<'_>) -> Evaluation {
     // a regression in step 4 is refused at the writer instead of approved.
     let chosen: BTreeSet<&str> = out.candidates.iter().map(|c| c.point_id.as_str()).collect();
     let mut retained = RetainedObjects::default();
-    for located in &here {
-        let p = located.point;
+    for p in &grouped {
         if chosen.contains(p.point_id.as_str()) {
             continue;
         }
@@ -938,6 +963,17 @@ pub struct PlanLine {
     pub enumerate_set: bool,
     /// Every key this plan could name, manifest first — never a glob.
     pub object_keys: Vec<String>,
+    /// Other points whose receipts name this SAME set and are removed with it
+    /// (review M2). Two receipts over one set that are both due used to render
+    /// two lines with one manifest key, which the worker refuses as
+    /// `DuplicateKey` — the WHOLE plan, on every run, so one shared set stopped
+    /// every deletion the policy owed. One line per set, with every point it
+    /// removes named here: each delete stays attributable to one line and each
+    /// point gets its own outcome and tombstones in the record. Skipped when
+    /// empty, so a plan with no shared set is byte-identical to one from before
+    /// this field and its approved digest still holds.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub co_point_ids: Vec<String>,
 }
 
 /// The plan document — D3 §6.4 step 6.
@@ -1073,7 +1109,7 @@ pub fn plan_document(
     rules: Rules,
     evaluation: &Evaluation,
 ) -> Result<PlanDocument, PlanError> {
-    let mut lines = Vec::with_capacity(evaluation.candidates.len());
+    let mut lines: Vec<PlanLine> = Vec::with_capacity(evaluation.candidates.len());
     for candidate in &evaluation.candidates {
         let mut object_keys = Vec::with_capacity(candidate.segment_keys.len() + 1);
         // THE MANIFEST FIRST, and the order is the execution order: a run
@@ -1117,6 +1153,23 @@ pub fn plan_document(
                 named: format!("object `{key}`"),
             });
         }
+        // ONE LINE PER SET (review M2). A candidate naming the same set and
+        // manifest as a line already written joins that line as a co-point:
+        // `evaluate` selects a shared set's receipts together, so they arrive
+        // here together, and two lines over one manifest are a plan the worker
+        // refuses whole.
+        if let Some(existing) = lines.iter_mut().find(|l| {
+            l.backup_id == candidate.backup_id && l.manifest_key == candidate.manifest_key
+        }) {
+            existing.co_point_ids.push(candidate.point_id.clone());
+            for key in object_keys.into_iter().skip(1) {
+                if !existing.object_keys.contains(&key) {
+                    existing.object_keys.push(key);
+                }
+            }
+            existing.enumerate_set &= candidate.segment_keys.is_empty();
+            continue;
+        }
         lines.push(PlanLine {
             point_id: candidate.point_id.clone(),
             backup_id: candidate.backup_id.clone(),
@@ -1128,6 +1181,7 @@ pub fn plan_document(
             // so today every line names its manifest and its bound.
             enumerate_set: candidate.segment_keys.is_empty(),
             object_keys,
+            co_point_ids: Vec::new(),
         });
     }
     Ok(PlanDocument {

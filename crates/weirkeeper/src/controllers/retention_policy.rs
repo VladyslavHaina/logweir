@@ -259,6 +259,15 @@ pub const ERROR_REQUEUE_SECONDS: u64 = 30;
 /// How many consecutive failed runs stop the scheduling — D3 §6.5.
 pub const DEGRADED_AFTER_FAILURES: i64 = 3;
 
+/// The per-point codes that are about the BUCKET or the CREDENTIAL rather than
+/// the plan — the only ones a degraded policy re-probes for on its own
+/// (`reprobe_due`, review M1).
+pub const BUCKET_LEVEL_CODES: &[&str] = &["VersionedBucket", "VersionProbeRefused"];
+
+/// How long after a bucket-level refusal a degraded policy starts one re-probe
+/// run.
+pub const REPROBE_AFTER: chrono::TimeDelta = chrono::TimeDelta::hours(24);
+
 /// How long a lease lives beyond the Job's deadline, so a lease never outlives
 /// the run it protects by much and never dies before it.
 pub const LEASE_MARGIN_SECONDS: i64 = 300;
@@ -629,6 +638,43 @@ impl Pass<'_> {
     /// The retry budget is spent: scheduling stops until the spec changes.
     fn budget_spent(&self) -> bool {
         self.budget_before() >= DEGRADED_AFTER_FAILURES
+    }
+
+    /// A degraded policy may start ONE re-probe run now (review M1).
+    ///
+    /// D3 §6.5 releases a degraded policy on a spec change, because what failed
+    /// is usually something the spec can fix. Two refusals are not:
+    /// `VersionProbeRefused` clears when an operator grants the retention
+    /// credential `s3:GetObject`, and `VersionedBucket` when the bucket stops
+    /// being versioned — both outside the object. So when EVERY per-point code
+    /// of the last run is one of [`BUCKET_LEVEL_CODES`] and that run finished
+    /// at least [`REPROBE_AFTER`] ago, one run is scheduled again. It is safe
+    /// by construction: the worker refuses before deleting anything for as
+    /// long as the reason holds (a HEAD per key, the intent tombstone's version
+    /// id), so a re-probe deletes nothing unless the refusal has cleared, and
+    /// it costs one Job and one intent tombstone per planned point per day.
+    /// A failed re-probe re-stamps `finishedAt`, which is the backoff.
+    fn reprobe_due(&self) -> bool {
+        let Some(last) = self
+            .policy
+            .status
+            .as_ref()
+            .and_then(|s| s.last_enforcement.as_ref())
+        else {
+            return false;
+        };
+        let codes: Vec<&str> = last
+            .failed
+            .iter()
+            .flatten()
+            .map(|f| f.code.as_str())
+            .collect();
+        !codes.is_empty()
+            && codes.iter().all(|c| BUCKET_LEVEL_CODES.contains(c))
+            && last
+                .finished_at
+                .as_ref()
+                .is_some_and(|f| self.ctx.now - *f >= REPROBE_AFTER)
     }
 
     /// The last run's outcome IN WORDS, for the `EnforcementDegraded` message.
@@ -2388,7 +2434,7 @@ impl Pass<'_> {
         // in `harvest` and in `publish_evaluation`, so the condition a console
         // reads and the decision this pass makes cannot disagree.
         let failures = self.budget_before();
-        if self.budget_spent() {
+        if self.budget_spent() && !self.reprobe_due() {
             return EnforcementDecision {
                 start: false,
                 enforcement: ENFORCEMENT_LOGWEIR_WORKER,
@@ -2606,7 +2652,14 @@ impl Pass<'_> {
         // exactly which half is in force instead.
         let segments_visible = points.iter().any(|p| !p.segment_keys.is_empty());
         let guarantees = json!({
-            "ageExpiry": if decision.enforcement == ENFORCEMENT_LOGWEIR_WORKER {
+            // NOT WHILE THE RETRY BUDGET IS SPENT (review M4). A degraded policy
+            // schedules no run — and one degraded by `VersionedBucket` can never
+            // delete at all — so "age expiry is enforced by Logweir" is not true
+            // of it, whatever `spec.mode` asks for. `EnforcementDegraded` says
+            // why; this field must not contradict it.
+            "ageExpiry": if decision.enforcement == ENFORCEMENT_LOGWEIR_WORKER
+                && !self.budget_spent()
+            {
                 GUARANTEE_LOGWEIR
             } else {
                 GUARANTEE_NOT_ENFORCED
@@ -3563,6 +3616,17 @@ fn failure_detail(exit_code: Option<i32>, codes: &[String]) -> String {
             ". VersionProbeRefused: the retention credential could not HEAD the object, so \
              the worker could not establish that a delete would remove it; grant it \
              s3:GetObject on <prefix>/*",
+        );
+    }
+    if !codes.is_empty()
+        && codes
+            .iter()
+            .all(|c| BUCKET_LEVEL_CODES.contains(&c.as_str()))
+    {
+        remedy.push_str(
+            ". This refusal is about the bucket or the credential, not the plan: once the \
+             retry budget is spent, one re-probe run is started 24 h after the last run, and it \
+             deletes nothing unless the refusal has cleared, so no spec edit is needed to resume",
         );
     }
     format!("{exit} with {}{remedy}", named.join(", "))

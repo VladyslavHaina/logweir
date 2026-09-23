@@ -97,51 +97,115 @@ impl Deleter for NeverDeletes {
     }
 }
 
-/// An S3 bucket with VERSIONING, modelled the way the lab MinIO behaves
-/// (harness-rows-11 `object-lock`, `00-provider.json`; ctl-batch-2's own probe):
-///
-/// * a HEAD of a stored key answers its version id (`x-amz-version-id`);
-/// * a DELETE with NO version id is ANSWERED SUCCESS and removes nothing — it
-///   pushes a delete marker onto the key, the data stays as a noncurrent
-///   version, and a legal hold on that version is never consulted;
-/// * a HEAD of a key whose latest version is a marker answers 404.
-///
-/// `held` keys carry a legal hold. The fake cannot be asked to delete a
-/// specific version, because the worker cannot ask that either (`object_store`
-/// 0.14 has no delete-by-version call). What a row can read afterwards is the
-/// truth: which keys are still LATEST, and how many markers were written.
-struct VersionedBucket {
-    /// `key -> versions`, oldest first; `None` is a delete marker.
-    versions: RefCell<BTreeMap<String, Vec<Option<String>>>>,
-    /// Keys whose data version carries a legal hold (the hold never stops a
-    /// marker — that is the defect).
-    held: Vec<String>,
-    /// Keys stored while versioning was suspended: a NULL version, which a
-    /// HEAD answers with no version id and a DELETE really removes.
-    null_versions: Vec<String>,
+/// A bucket's versioning state, as S3 names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mode {
+    /// Never versioned.
+    Unversioned,
+    /// Versioning (and Object Lock, which requires it) on.
+    Enabled,
+    /// Versioning on once, now suspended.
+    Suspended,
 }
 
-impl VersionedBucket {
-    fn with(keys: &[String], held: &[String], null_versions: &[String]) -> Self {
+/// One stored version: `id` is `None` for a NULL version; `marker` for a
+/// delete marker.
+#[derive(Clone, Debug)]
+struct Ver {
+    id: Option<String>,
+    marker: bool,
+}
+
+/// An S3-compatible bucket, modelled the way MinIO behaves — the lab's
+/// (harness-rows-11 `object-lock`, ctl-batch-2's probe) and the reviewer's
+/// local one (ctl-batch-2 review H1):
+///
+/// * a PUT answers a version id only while versioning is ENABLED;
+/// * a HEAD answers the current version's id, and nothing for a null version
+///   — **including an object written BEFORE versioning was enabled** (H1);
+///   a key whose latest version is a marker answers 404;
+/// * a DELETE with no version id is ANSWERED SUCCESS: it removes the object
+///   on an unversioned bucket, pushes a marker over everything under Enabled
+///   versioning, and under Suspended replaces the null version with a null
+///   marker (older, Enabled-era versions survive). No legal hold is consulted
+///   by a delete that names no version — which is the defect.
+///
+/// The worker cannot delete a specific version (`object_store` 0.14 has no
+/// such call), so neither can this. What a row reads afterwards is the truth:
+/// whether any DATA version of a key survives, and how many markers exist.
+/// It is also the run's tombstone sink, because the real sink writes into the
+/// same bucket.
+struct ModelBucket {
+    mode: std::cell::Cell<Mode>,
+    versions: RefCell<BTreeMap<String, Vec<Ver>>>,
+    next_id: std::cell::Cell<u32>,
+}
+
+impl ModelBucket {
+    fn new(mode: Mode) -> Self {
         Self {
-            versions: RefCell::new(
-                keys.iter()
-                    .map(|k| (k.clone(), vec![Some(format!("v-{k}"))]))
-                    .collect(),
-            ),
-            held: held.to_vec(),
-            null_versions: null_versions.to_vec(),
+            mode: std::cell::Cell::new(mode),
+            versions: RefCell::new(BTreeMap::new()),
+            next_id: std::cell::Cell::new(1),
         }
     }
 
-    /// Whether the key's LATEST version is still data (not a marker, not gone).
+    fn fresh_id(&self) -> String {
+        let n = self.next_id.get();
+        self.next_id.set(n + 1);
+        format!("v{n}")
+    }
+
+    /// Store keys under the bucket's CURRENT mode.
+    fn put_all(&self, keys: &[String]) {
+        for key in keys {
+            self.put(key);
+        }
+    }
+
+    fn put(&self, key: &str) -> Option<String> {
+        let mut versions = self.versions.borrow_mut();
+        let entry = versions.entry(key.to_string()).or_default();
+        match self.mode.get() {
+            Mode::Unversioned => {
+                *entry = vec![Ver {
+                    id: None,
+                    marker: false,
+                }];
+                None
+            }
+            Mode::Enabled => {
+                let id = self.fresh_id();
+                entry.push(Ver {
+                    id: Some(id.clone()),
+                    marker: false,
+                });
+                Some(id)
+            }
+            Mode::Suspended => {
+                entry.retain(|v| v.id.is_some());
+                entry.push(Ver {
+                    id: None,
+                    marker: false,
+                });
+                None
+            }
+        }
+    }
+
+    fn data_survives(&self, key: &str) -> bool {
+        self.versions
+            .borrow()
+            .get(key)
+            .is_some_and(|v| v.iter().any(|x| !x.marker))
+    }
+
     fn latest_is_data(&self, key: &str) -> bool {
         self.versions
             .borrow()
             .get(key)
-            .and_then(|v| v.last().cloned())
-            .flatten()
-            .is_some()
+            .and_then(|v| v.last())
+            .is_some_and(|x| !x.marker)
     }
 
     fn markers(&self) -> usize {
@@ -149,34 +213,52 @@ impl VersionedBucket {
             .borrow()
             .values()
             .flatten()
-            .filter(|v| v.is_none())
+            .filter(|v| v.marker)
             .count()
     }
 }
 
-impl Deleter for VersionedBucket {
+impl Deleter for ModelBucket {
     fn delete_exact(&self, key: &str) -> Result<(), DeleteError> {
+        let mode = self.mode.get();
+        let id = (mode == Mode::Enabled).then(|| self.fresh_id());
         let mut versions = self.versions.borrow_mut();
-        if self.null_versions.iter().any(|k| k == key) {
-            versions.remove(key);
-            return Ok(());
+        match mode {
+            Mode::Unversioned => {
+                versions.remove(key);
+            }
+            Mode::Enabled => versions
+                .entry(key.to_string())
+                .or_default()
+                .push(Ver { id, marker: true }),
+            Mode::Suspended => {
+                let entry = versions.entry(key.to_string()).or_default();
+                entry.retain(|v| v.id.is_some());
+                entry.push(Ver {
+                    id: None,
+                    marker: true,
+                });
+            }
         }
-        // THE DEFECT'S MECHANISM: no version id, so a marker, and success.
-        // `held` is not consulted, exactly as S3 does not consult it here.
-        let _ = &self.held;
-        versions.entry(key.to_string()).or_default().push(None);
         Ok(())
     }
 
     fn probe_versioning(&self, key: &str) -> Result<Versioning, DeleteError> {
-        let versions = self.versions.borrow();
-        match versions.get(key).and_then(|v| v.last().cloned()) {
-            None | Some(None) => Err(DeleteError::NotFound),
-            Some(Some(_)) if self.null_versions.iter().any(|k| k == key) => {
-                Ok(Versioning::Unversioned)
-            }
-            Some(Some(_)) => Ok(Versioning::Versioned),
+        match self.versions.borrow().get(key).and_then(|v| v.last()) {
+            None => Err(DeleteError::NotFound),
+            Some(v) if v.marker => Err(DeleteError::NotFound),
+            Some(v) if v.id.is_some() => Ok(Versioning::Versioned),
+            Some(_) => Ok(Versioning::Unversioned),
         }
+    }
+}
+
+impl TombstoneSink for ModelBucket {
+    fn put_create_only(&self, key: &str, _bytes: &[u8]) -> Result<Option<String>, SinkError> {
+        if self.latest_is_data(key) {
+            return Err(SinkError(format!("{key} already exists")));
+        }
+        Ok(self.put(key))
     }
 }
 
@@ -244,7 +326,7 @@ impl FakeSink {
 }
 
 impl TombstoneSink for FakeSink {
-    fn put_create_only(&self, key: &str, bytes: &[u8]) -> Result<(), SinkError> {
+    fn put_create_only(&self, key: &str, bytes: &[u8]) -> Result<Option<String>, SinkError> {
         if self.refuse {
             return Err(SinkError("the sink refused".to_string()));
         }
@@ -253,7 +335,7 @@ impl TombstoneSink for FakeSink {
             return Err(SinkError(format!("{key} already exists")));
         }
         written.insert(key.to_string(), bytes.to_vec());
-        Ok(())
+        Ok(None)
     }
 }
 
@@ -301,6 +383,7 @@ fn line(point: &str, backup: &str, segments: &[&str]) -> PlanLine {
         set_prefix: format!("{SCOPE}/{backup}/"),
         enumerate_set: false,
         object_keys,
+        co_point_ids: Vec::new(),
     }
 }
 
@@ -1386,7 +1469,11 @@ fn a_key_whose_normalised_form_differs_is_refused() {
 // Defect OBJECT-LOCK-DELETE-MARKER — a delete marker is not a deletion
 // ===========================================================================
 
-fn run_over<D: Deleter>(p: &Plan, deleter: &D, sink: &FakeSink) -> logweir_reaper::Outcome {
+fn run_over<D: Deleter, T: TombstoneSink>(
+    p: &Plan,
+    deleter: &D,
+    sink: &T,
+) -> logweir_reaper::Outcome {
     execute(
         p,
         deleter,
@@ -1398,45 +1485,75 @@ fn run_over<D: Deleter>(p: &Plan, deleter: &D, sink: &FakeSink) -> logweir_reape
     )
 }
 
-/// THE LIVE DEFECT, on a model of the provider. A lock-enabled (therefore
-/// versioned) bucket, a legal hold on every object of one point, an unheld
-/// control point: the run deletes NOTHING, writes NO marker, and records both
-/// points `Kept` with `VersionedBucket` — never `Deleted`.
+/// The four bucket states, each against one plan line. `before` is the mode the
+/// set was WRITTEN under, `now` the mode the run meets.
+fn bucket_run(before: Mode, now: Mode) -> (ModelBucket, PlanLine, logweir_reaper::Outcome) {
+    let point = line("lwp1-a", "set-a", &["seg-0", "seg-1"]);
+    let bucket = ModelBucket::new(before);
+    bucket.put_all(&point.object_keys);
+    bucket.mode.set(now);
+    let outcome = run_over(&plan(vec![point.clone()]), &bucket, &bucket);
+    (bucket, point, outcome)
+}
+
+fn assert_refused_and_intact(
+    label: &str,
+    bucket: &ModelBucket,
+    point: &PlanLine,
+    outcome: &logweir_reaper::Outcome,
+) {
+    assert!(
+        outcome.deleted().is_empty(),
+        "{label}: {:?}",
+        outcome.points
+    );
+    assert_eq!(
+        outcome.points[0].state,
+        PointState::Kept.as_str(),
+        "{label}"
+    );
+    assert_eq!(
+        outcome.points[0].code.as_deref(),
+        Some("VersionedBucket"),
+        "{label}"
+    );
+    assert_eq!(
+        outcome.attempts, 0,
+        "{label}: no delete call was issued at all"
+    );
+    assert_eq!(bucket.markers(), 0, "{label}: no delete marker was written");
+    assert!(
+        point.object_keys.iter().all(|k| bucket.latest_is_data(k)),
+        "{label}: every object is still the latest version"
+    );
+}
+
+/// **REVIEW H1, THE CASE THE FIRST FIX MISSED.** The set was written BEFORE
+/// versioning was enabled, so every object is a NULL version and its HEAD
+/// carries no version id — the per-key probe says `Unversioned`. Under Enabled
+/// versioning a delete by key still writes a marker over it (measured on MinIO
+/// by the review). The run's own intent tombstone, PUT into the same bucket,
+/// comes back WITH a version id, and that refuses the line.
 ///
-/// MUTANT: skip the probe in `attempt` (delete by key as before). Both points
-/// are recorded `Deleted`, the held keys' latest versions are markers, and
-/// this row fails on every clause.
+/// MUTANT: ignore the intent tombstone's version id in `execute`. The point
+/// is recorded `Deleted`, markers are written, the data survives, and this row
+/// fails.
+#[test]
+fn an_object_written_before_versioning_was_enabled_is_not_recorded_deleted() {
+    let (bucket, point, outcome) = bucket_run(Mode::Unversioned, Mode::Enabled);
+    assert_refused_and_intact("pre-versioning, now Enabled", &bucket, &point, &outcome);
+}
+
+/// Versioning (or Object Lock) ENABLED throughout — the live lab shape
+/// (harness-rows-11 `object-lock`). Both signals fire; nothing is deleted.
+///
+/// MUTANT: drop BOTH the intent-version refusal and the per-key HEAD refusal.
+/// Markers are written, the point is `Deleted`, and this row fails. (Either
+/// check alone keeps it green — that is the defence in depth.)
 #[test]
 fn a_versioned_bucket_is_refused_and_nothing_is_recorded_deleted() {
-    let held = line("lwp1-held", "set-held", &["seg-0"]);
-    let control = line("lwp1-ctl", "set-ctl", &["seg-0"]);
-    let keys: Vec<String> = held
-        .object_keys
-        .iter()
-        .chain(control.object_keys.iter())
-        .cloned()
-        .collect();
-    let bucket = VersionedBucket::with(&keys, &held.object_keys, &[]);
-    let p = plan(vec![held.clone(), control]);
-    let outcome = run_over(&p, &bucket, &FakeSink::default());
-
-    assert!(outcome.deleted().is_empty(), "{:?}", outcome.points);
-    for point in &outcome.points {
-        assert_eq!(point.state, PointState::Kept.as_str(), "{point:?}");
-        assert_eq!(point.code.as_deref(), Some("VersionedBucket"), "{point:?}");
-        assert_eq!(point.objects_deleted, 0);
-    }
-    assert_eq!(bucket.markers(), 0, "no delete marker was written");
-    assert!(keys.iter().all(|k| bucket.latest_is_data(k)));
-    assert_eq!(outcome.objects_deleted, 0);
-    assert_eq!(outcome.attempts, 0, "no delete call was issued at all");
-    assert_eq!(
-        outcome.failed(),
-        vec![
-            ("lwp1-held", "VersionedBucket"),
-            ("lwp1-ctl", "VersionedBucket")
-        ]
-    );
+    let (bucket, point, outcome) = bucket_run(Mode::Enabled, Mode::Enabled);
+    assert_refused_and_intact("Enabled throughout", &bucket, &point, &outcome);
     assert!(!DeleteError::VersionedBucket.retryable());
     assert!(
         !DeleteError::VersionedBucket.is_hold(),
@@ -1444,19 +1561,42 @@ fn a_versioned_bucket_is_refused_and_nothing_is_recorded_deleted() {
     );
 }
 
-/// NEGATIVE CONTROL for the row above: the same fake with every key stored as
-/// a NULL version (written while versioning was suspended — a HEAD answers no
-/// version id and a delete really removes) is deleted normally. A worker that
-/// refused everything would pass the row above and fail this one.
+/// Versioning SUSPENDED after the set was written under Enabled: a PUT now
+/// answers no version id, so the bucket-level signal is silent — and a delete
+/// by key would put a null marker over the Enabled-era versions and remove
+/// nothing. The per-key HEAD sees their version ids and refuses.
+///
+/// MUTANT: drop the per-key HEAD refusal in `attempt`. This row fails.
 #[test]
-fn null_versions_are_really_deleted() {
-    let point = line("lwp1-a", "set-a", &["seg-0", "seg-1"]);
-    let bucket = VersionedBucket::with(&point.object_keys, &[], &point.object_keys);
-    let outcome = run_over(&plan(vec![point.clone()]), &bucket, &FakeSink::default());
-    assert_eq!(outcome.deleted(), vec!["lwp1-a"]);
-    assert_eq!(outcome.objects_deleted, 3);
-    assert!(point.object_keys.iter().all(|k| !bucket.latest_is_data(k)));
+fn enabled_era_objects_in_a_suspended_bucket_are_not_recorded_deleted() {
+    let (bucket, point, outcome) = bucket_run(Mode::Enabled, Mode::Suspended);
+    assert!(outcome.deleted().is_empty(), "{:?}", outcome.points);
+    assert_eq!(outcome.points[0].code.as_deref(), Some("VersionedBucket"));
     assert_eq!(bucket.markers(), 0);
+    assert!(point.object_keys.iter().all(|k| bucket.latest_is_data(k)));
+}
+
+/// NEGATIVE CONTROLS: a bucket that was never versioned, and a Suspended one
+/// whose set was written while suspended (null versions, which a delete really
+/// replaces), are deleted — and no data version of any key survives. A worker
+/// that refused every bucket would pass the three rows above and fail these.
+///
+/// MUTANT: refuse the line whenever the intent tombstone was written at all
+/// (read `None` as versioned). Both arms fail.
+#[test]
+fn unversioned_and_suspended_era_objects_are_really_deleted() {
+    for (label, before, now) in [
+        ("never versioned", Mode::Unversioned, Mode::Unversioned),
+        ("written while suspended", Mode::Suspended, Mode::Suspended),
+    ] {
+        let (bucket, point, outcome) = bucket_run(before, now);
+        assert_eq!(outcome.deleted(), vec!["lwp1-a"], "{label}");
+        assert_eq!(outcome.objects_deleted, 3, "{label}");
+        assert!(
+            point.object_keys.iter().all(|k| !bucket.data_survives(k)),
+            "{label}: `Deleted` means the data is gone"
+        );
+    }
 }
 
 /// A set written across a suspension: the manifest is a null version and goes,
@@ -1466,15 +1606,23 @@ fn null_versions_are_really_deleted() {
 fn a_versioned_segment_is_left_and_named() {
     let point = line("lwp1-a", "set-a", &["seg-0", "seg-1"]);
     let versioned_segment = point.object_keys[2].clone();
-    let nulls: Vec<String> = point.object_keys[..2].to_vec();
-    let bucket = VersionedBucket::with(&point.object_keys, &[], &nulls);
-    let outcome = run_over(&plan(vec![point]), &bucket, &FakeSink::default());
+    let point_keys = point.object_keys.clone();
+    let bucket = ModelBucket::new(Mode::Enabled);
+    bucket.put_all(std::slice::from_ref(&versioned_segment));
+    bucket.mode.set(Mode::Suspended);
+    bucket.put_all(&point.object_keys[..2]);
+    let outcome = run_over(&plan(vec![point]), &bucket, &bucket);
     let only = &outcome.points[0];
     assert_eq!(only.state, PointState::Orphaned.as_str());
     assert_eq!(only.code.as_deref(), Some("VersionedBucket"));
     assert_eq!(only.remaining_keys, vec![versioned_segment.clone()]);
     assert!(bucket.latest_is_data(&versioned_segment));
-    assert_eq!(bucket.markers(), 0);
+    assert_eq!(
+        bucket.markers(),
+        2,
+        "only the two null versions' own null markers, each a real removal"
+    );
+    assert!(!bucket.data_survives(&point_keys[0]) && !bucket.data_survives(&point_keys[1]));
 }
 
 /// A probe that cannot be answered — `AccessDenied` on the HEAD, a credential
@@ -1562,4 +1710,107 @@ fn a_version_id_on_the_head_is_what_versioned_means() {
     assert_eq!(versioning_of(&meta(Some("null"))), Versioning::Versioned);
     assert_eq!(versioning_of(&meta(None)), Versioning::Unversioned);
     assert_eq!(versioning_of(&meta(Some(""))), Versioning::Unversioned);
+}
+
+// ===========================================================================
+// Review M2 — one line per shared set, every point attributed
+// ===========================================================================
+
+/// Two receipts over ONE set, both due: ONE line, the second receipt a
+/// co-point. The plan validates (it used to be refused whole as
+/// `DuplicateKey` on every run), the set is removed ONCE, the objects are
+/// counted once, and BOTH points get an outcome and a pair of tombstones.
+///
+/// MUTANT: `push_line` records only the line's own point. `lwp1-b` has no
+/// outcome and this row fails. MUTANT: tombstones for the line's own point
+/// only. The co-point's intent is missing and this row fails.
+#[test]
+fn a_shared_set_line_removes_the_set_once_and_attributes_every_point() {
+    let mut shared = line("lwp1-a", "set-a", &["seg-0", "seg-1"]);
+    shared.co_point_ids = vec!["lwp1-b".to_string()];
+    let p = plan(vec![shared, line("lwp1-c", "set-c", &[])]);
+    validate_plan(&p, &binding()).expect("one line per set is a valid plan");
+    let deleter = FakeDeleter::default();
+    let sink = FakeSink::default();
+    let outcome = run(&p, &deleter, &sink, limits());
+    assert_eq!(outcome.deleted(), vec!["lwp1-a", "lwp1-b", "lwp1-c"]);
+    assert_eq!(
+        outcome.objects_deleted, 4,
+        "the shared set's 3 keys once, plus 1"
+    );
+    assert_eq!(deleter.keys().len(), 4, "no key is deleted twice");
+    let b = outcome
+        .points
+        .iter()
+        .find(|p| p.point_id == "lwp1-b")
+        .expect("the co-point has its own outcome");
+    assert_eq!(
+        b.objects_deleted, 0,
+        "its objects are counted on the line's point"
+    );
+    for point in ["lwp1-a", "lwp1-b"] {
+        for stage in ["intent", "completion"] {
+            let key = tombstone_key(UID, "r0123456789abcdef", point, stage);
+            assert!(
+                sink.keys().contains(&key),
+                "{point} {stage}: {:?}",
+                sink.keys()
+            );
+        }
+    }
+}
+
+/// A point named twice — a line's own point repeated as a co-point elsewhere —
+/// is refused before any delete: its removal would be recorded twice.
+#[test]
+fn a_point_named_twice_is_refused() {
+    let mut first = line("lwp1-a", "set-a", &[]);
+    first.co_point_ids = vec!["lwp1-c".to_string()];
+    let p = plan(vec![first, line("lwp1-c", "set-c", &[])]);
+    assert_eq!(
+        validate_plan(&p, &binding()),
+        Err(Refusal::DuplicatePoint("lwp1-c".to_string()))
+    );
+}
+
+/// `maxDeletionsPerRun` counts POINTS, co-points included.
+#[test]
+fn the_point_ceiling_counts_co_points() {
+    let mut shared = line("lwp1-a", "set-a", &[]);
+    shared.co_point_ids = vec!["lwp1-b".to_string()];
+    let mut tight = binding();
+    tight.max_deletions_per_run = 1;
+    assert!(matches!(
+        validate_plan(&plan(vec![shared]), &tight),
+        Err(Refusal::OverCap {
+            what: "points",
+            found: 2,
+            cap: 1
+        })
+    ));
+}
+
+/// Review L9: the dry run says when the run would refuse a versioned manifest.
+#[test]
+fn a_dry_run_names_a_versioned_manifest() {
+    let bucket = ModelBucket::new(Mode::Enabled);
+    let point = line("lwp1-a", "set-a", &[]);
+    bucket.put_all(&point.object_keys);
+    let outcome = execute(
+        &plan(vec![point]),
+        &bucket,
+        &FakeSleeper::default(),
+        &logweir_reaper::NoTombstones,
+        &FakeLister(Vec::new()),
+        &attribution(),
+        Limits {
+            dry_run: true,
+            max_objects: 20_000,
+        },
+    );
+    assert_eq!(
+        outcome.points[0].code.as_deref(),
+        Some("DryRun:VersionedBucket")
+    );
+    assert_eq!(bucket.markers(), 0);
 }

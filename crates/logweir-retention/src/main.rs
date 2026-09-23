@@ -138,7 +138,7 @@ fn run(flags: &[&str]) -> i32 {
                 &admitted.attribution.run_id,
             );
             match sink.put_create_only(&key, &bytes) {
-                Ok(()) => println!("{}", record_line(&key, &digest)),
+                Ok(_) => println!("{}", record_line(&key, &digest)),
                 Err(e) => eprintln!(
                     "logweir-retention: the enforcement record at `{key}` was not written: {e}. \
                      The per-point tombstones under the same prefix are the surviving trail."
@@ -193,10 +193,13 @@ impl EvidenceSink {
 }
 
 impl TombstoneSink for EvidenceSink {
-    fn put_create_only(&self, key: &str, bytes: &[u8]) -> Result<(), SinkError> {
+    /// The provider's version id comes back: the reaper refuses a line whose
+    /// intent tombstone was versioned, because versioning is then Enabled on
+    /// the bucket it deletes from (review H1).
+    fn put_create_only(&self, key: &str, bytes: &[u8]) -> Result<Option<String>, SinkError> {
         self.store
             .put_create_only(key, bytes)
-            .map(|_| ())
+            .map(|outcome| outcome.version_id)
             .map_err(|e| SinkError(e.to_string()))
     }
 }

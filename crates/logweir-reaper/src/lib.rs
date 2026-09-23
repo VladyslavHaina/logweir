@@ -133,6 +133,16 @@ pub struct PlanLine {
     pub enumerate_set: bool,
     /// Every key the plan could name, manifest first. Explicit: never a glob.
     pub object_keys: Vec<String>,
+    /// Other points whose receipts name this SAME set and are removed with it
+    /// (review M2). Two receipts over one set that are both due used to render
+    /// two lines with one manifest key, which [`validate_plan`] refuses as
+    /// `DuplicateKey` — the whole plan, on every run. One line per set, with
+    /// every point it removes named here, keeps each delete attributable to one
+    /// line and each point attributable in the record (one outcome and one
+    /// pair of tombstones per point). Absent — and so byte-identical to a
+    /// plan from before this field — when the set has one point.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub co_point_ids: Vec<String>,
 }
 
 /// The plan document, as the worker reads it.
@@ -273,6 +283,10 @@ pub enum Refusal {
     /// A line names no key at all.
     #[error("point `{0}` names no object key, so it describes no deletion")]
     EmptyLine(String),
+    /// A point is named twice — on two lines, or as a line's own point and a
+    /// co-point. Its removal would then be recorded twice.
+    #[error("point `{0}` is named more than once in the plan; each point is removed by one line")]
+    DuplicatePoint(String),
     /// A key appears on two lines: one delete could then be attributed to two
     /// points, and D3 §6.5 requires every delete to be attributable to exactly
     /// one plan line.
@@ -361,7 +375,22 @@ pub fn validate_plan(plan: &Plan, binding: &RunBinding) -> Result<(), Refusal> {
             expected: format!("scope `{}`", binding.scope_prefix),
         });
     }
-    let points = i64::try_from(plan.lines.len()).unwrap_or(i64::MAX);
+    // EVERY POINT, co-points included: `maxDeletionsPerRun` bounds points,
+    // and a line that removes three receipts' set removes three points.
+    let points = plan
+        .lines
+        .iter()
+        .map(|l| 1 + l.co_point_ids.len())
+        .fold(0usize, usize::saturating_add);
+    let points = i64::try_from(points).unwrap_or(i64::MAX);
+    let mut named_points: BTreeSet<&str> = BTreeSet::new();
+    for line in &plan.lines {
+        for point in line_points(line) {
+            if !named_points.insert(point) {
+                return Err(Refusal::DuplicatePoint(point.to_string()));
+            }
+        }
+    }
     if points > binding.max_deletions_per_run {
         return Err(Refusal::OverCap {
             what: "points",
@@ -493,24 +522,33 @@ pub enum DeleteError {
     Unclassified,
 }
 
-/// What a HEAD of one key says about how a delete of it BY KEY would land.
+/// What a HEAD of one key says about how a delete of it BY KEY would land —
+/// ONE of the two signals the worker reads, and not sufficient alone.
 ///
 /// `object_store` 0.14 has no delete-by-version call and discards the DELETE
 /// response's `x-amz-delete-marker` header, so the worker can neither delete a
 /// specific version (where the provider would refuse a held one) nor tell,
 /// after the fact, that it wrote a marker. What it CAN read is
 /// `ObjectMeta::version`, which the S3 client fills from `x-amz-version-id` on
-/// a HEAD. A provider returns that header only for an object stored under
-/// versioning, so it is exactly the signal "a delete by key would be a
-/// marker". Measured on the lab MinIO (`claude/artifacts/ctl-batch-2/
+/// a HEAD. Measured on the lab MinIO (`claude/artifacts/ctl-batch-2/
 /// minio-version-header-probe.txt`): present on a versioned bucket, a
 /// `--with-lock` bucket, and an object written while versioning was enabled
 /// in a now-suspended bucket; absent on a plain bucket and on an object written
-/// while versioning was suspended (a null version, which a delete really
-/// removes).
+/// while versioning was suspended.
+///
+/// **`Versioned` proves a delete by key would be a marker. `Unversioned` does
+/// NOT prove it would remove the object** (review H1, measured on MinIO): an
+/// object stored BEFORE versioning was enabled is a null version, its HEAD
+/// carries no version id, and under Enabled versioning a delete by key still
+/// writes a marker over it. That case is caught by the bucket-level signal —
+/// the version id the provider returns for the run's own intent tombstone,
+/// written into the same bucket ([`TombstoneSink::put_create_only`]). The HEAD
+/// remains for what that signal cannot see: a key stored under Enabled
+/// versioning in a bucket since Suspended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Versioning {
-    /// No provider version id: a delete by key removes the object.
+    /// No provider version id on this key's current version. With no version
+    /// id on the run's intent tombstone either, a delete by key removes it.
     Unversioned,
     /// A provider version id: a delete by key would only hide the object.
     Versioned,
@@ -653,12 +691,21 @@ pub struct SinkError(pub String);
 /// removal does and survives it. A sink that refuses the intent stops that
 /// point: an unattributable delete is not performed.
 pub trait TombstoneSink {
-    /// Write these bytes at this key, refusing if something is already there.
+    /// Write these bytes at this key, refusing if something is already there,
+    /// and answer the provider's VERSION ID for the object written, if it gave
+    /// one (`PutResult::version`, from `x-amz-version-id`).
+    ///
+    /// **The version id is load-bearing** (review H1): the sink writes into
+    /// the same bucket the run deletes from, and a provider returns one exactly
+    /// when versioning is Enabled on that bucket now — in which case a delete
+    /// by key would only write a marker, whatever a key's own HEAD says.
+    /// [`execute`] refuses the line `VersionedBucket` when the intent comes
+    /// back versioned. A sink that cannot know answers `None`.
     ///
     /// # Errors
     ///
     /// [`SinkError`], carrying a message that names no credential.
-    fn put_create_only(&self, key: &str, bytes: &[u8]) -> Result<(), SinkError>;
+    fn put_create_only(&self, key: &str, bytes: &[u8]) -> Result<Option<String>, SinkError>;
 }
 
 /// A sink that accepts nothing — for a dry run, where no tombstone is written
@@ -667,7 +714,7 @@ pub trait TombstoneSink {
 pub struct NoTombstones;
 
 impl TombstoneSink for NoTombstones {
-    fn put_create_only(&self, key: &str, _bytes: &[u8]) -> Result<(), SinkError> {
+    fn put_create_only(&self, key: &str, _bytes: &[u8]) -> Result<Option<String>, SinkError> {
         Err(SinkError(format!(
             "this run writes no tombstone, so `{key}` was not written; a run that deletes must \
              be given a sink"
@@ -886,23 +933,36 @@ pub fn execute<D: Deleter, S: Sleeper, T: TombstoneSink, L: Lister>(
             // plan's own keys, which is the honest answer for a caller that
             // holds no list grant.
             let keys = resolve_keys(line, lister).unwrap_or_else(|_| line.object_keys.clone());
-            out.points.push(PointOutcome {
-                point_id: line.point_id.clone(),
-                state: PointState::Kept.as_str().to_string(),
-                objects_deleted: 0,
-                remaining_keys: keys,
-                code: Some("DryRun".to_string()),
-            });
+            // AND IT SAYS WHEN THE RUN WOULD REFUSE (review L9). A dry run
+            // writes no tombstone, so the bucket-level signal the run reads
+            // ([`TombstoneSink::put_create_only`]'s version id) does not exist
+            // here; the manifest's own HEAD is what the preview can ask. A
+            // manifest stored as a null version under versioning enabled later
+            // answers no version id, so a preview can still look runnable
+            // where the run refuses — the run's own signal is the authority.
+            let code = match deleter.probe_versioning(&line.manifest_key) {
+                Ok(Versioning::Versioned) => "DryRun:VersionedBucket",
+                _ => "DryRun",
+            };
+            push_line(
+                &mut out,
+                line,
+                PointState::Kept,
+                0,
+                keys,
+                Some(code.to_string()),
+            );
             continue;
         }
         if out.objects_deleted >= limits.max_objects {
-            out.points.push(PointOutcome {
-                point_id: line.point_id.clone(),
-                state: PointState::Kept.as_str().to_string(),
-                objects_deleted: 0,
-                remaining_keys: line.object_keys.clone(),
-                code: Some(DeleteError::BudgetExhausted.as_str().to_string()),
-            });
+            push_line(
+                &mut out,
+                line,
+                PointState::Kept,
+                0,
+                line.object_keys.clone(),
+                Some(DeleteError::BudgetExhausted.as_str().to_string()),
+            );
             continue;
         }
 
@@ -913,41 +973,72 @@ pub fn execute<D: Deleter, S: Sleeper, T: TombstoneSink, L: Lister>(
         let keys = match resolve_keys(line, lister) {
             Ok(k) => k,
             Err(code) => {
-                out.points.push(PointOutcome {
-                    point_id: line.point_id.clone(),
-                    state: PointState::Kept.as_str().to_string(),
-                    objects_deleted: 0,
-                    remaining_keys: line.object_keys.clone(),
-                    code: Some(code),
-                });
+                push_line(
+                    &mut out,
+                    line,
+                    PointState::Kept,
+                    0,
+                    line.object_keys.clone(),
+                    Some(code),
+                );
                 continue;
             }
         };
 
-        // 0b. THE INTENT, BEFORE ANY DELETE. A point whose intent could not be
-        //     written is not deleted: "every deletion is attributable" is a
-        //     precondition, not a report.
-        if let Err(e) = write_tombstone(tombstones, run, line, "intent", 0, &keys, None) {
-            out.points.push(PointOutcome {
-                point_id: line.point_id.clone(),
-                state: PointState::Kept.as_str().to_string(),
-                objects_deleted: 0,
-                remaining_keys: keys,
-                code: Some(format!("TombstoneRefused:{e}")),
-            });
+        // 0b. THE INTENT, BEFORE ANY DELETE — one per point the line removes,
+        //     co-points included. A point whose intent could not be written is
+        //     not deleted: "every deletion is attributable" is a precondition,
+        //     not a report.
+        //
+        //     AND THE INTENT IS THE BUCKET'S VERSIONING PROBE (review H1). The
+        //     tombstone is PUT into the SAME bucket (one `DestinationLocation`
+        //     holds the archive prefix and `logweir/`), and a provider answers
+        //     a PUT with a version id exactly when versioning is ENABLED on the
+        //     bucket now — measured on MinIO by the ctl-batch-2 review: a
+        //     version id from an Enabled bucket, none from a plain or a
+        //     Suspended one. Under Enabled versioning EVERY delete by key is a
+        //     marker, including of an object stored before versioning was
+        //     turned on — whose HEAD answers no version id, which is why the
+        //     per-key HEAD alone was not enough. So: nothing is deleted, and
+        //     the line is `VersionedBucket`.
+        let mut intent_versioned = false;
+        let mut refused: Option<String> = None;
+        for point in line_points(line) {
+            match write_tombstone(tombstones, run, line, point, "intent", 0, &keys, None) {
+                Ok(version) => intent_versioned |= version.is_some_and(|v| !v.is_empty()),
+                Err(e) => {
+                    refused = Some(format!("TombstoneRefused:{e}"));
+                    break;
+                }
+            }
+        }
+        if let Some(code) = refused {
+            push_line(&mut out, line, PointState::Kept, 0, keys, Some(code));
+            continue;
+        }
+        if intent_versioned {
+            push_line(
+                &mut out,
+                line,
+                PointState::Kept,
+                0,
+                keys,
+                Some(DeleteError::VersionedBucket.as_str().to_string()),
+            );
             continue;
         }
 
         // 1. The manifest.
         let (manifest_ok, manifest_code) = attempt(deleter, sleeper, &line.manifest_key, &mut out);
         if !manifest_ok {
-            out.points.push(PointOutcome {
-                point_id: line.point_id.clone(),
-                state: PointState::Kept.as_str().to_string(),
-                objects_deleted: 0,
-                remaining_keys: keys,
-                code: manifest_code.map(|c| c.as_str().to_string()),
-            });
+            push_line(
+                &mut out,
+                line,
+                PointState::Kept,
+                0,
+                keys,
+                manifest_code.map(|c| c.as_str().to_string()),
+            );
             continue;
         }
         let mut removed = 1i64;
@@ -978,36 +1069,61 @@ pub fn execute<D: Deleter, S: Sleeper, T: TombstoneSink, L: Lister>(
             }
         }
 
-        // 3. The verdict, and the completion tombstone beside it. A completion
-        //    that could not be written does not un-delete anything, so it is
-        //    recorded on the point and the run reports it; the intent is
-        //    already there, so the deletion stays attributable.
+        // 3. The verdict, and the completion tombstone beside it — one per
+        //    point. A completion that could not be written does not un-delete
+        //    anything, so it is recorded on the point and the run reports it;
+        //    the intent is already there, so the deletion stays attributable.
         let state = if remaining.is_empty() {
             PointState::Deleted
         } else {
             PointState::Orphaned
         };
         let mut code_text = code.map(|c| c.as_str().to_string());
-        if let Err(e) = write_tombstone(
-            tombstones,
-            run,
-            line,
-            "completion",
-            removed,
-            &remaining,
-            code_text.as_deref(),
-        ) {
-            code_text = Some(format!("TombstoneIncomplete:{e}"));
+        for point in line_points(line) {
+            if let Err(e) = write_tombstone(
+                tombstones,
+                run,
+                line,
+                point,
+                "completion",
+                removed,
+                &remaining,
+                code.map(DeleteError::as_str),
+            ) {
+                code_text = Some(format!("TombstoneIncomplete:{e}"));
+            }
         }
-        out.points.push(PointOutcome {
-            point_id: line.point_id.clone(),
-            state: state.as_str().to_string(),
-            objects_deleted: removed,
-            remaining_keys: remaining,
-            code: code_text,
-        });
+        push_line(&mut out, line, state, removed, remaining, code_text);
     }
     out
+}
+
+/// Every point one line removes: its own, then its co-points
+/// ([`PlanLine::co_point_ids`]), in plan order.
+fn line_points(line: &PlanLine) -> impl Iterator<Item = &str> {
+    std::iter::once(line.point_id.as_str()).chain(line.co_point_ids.iter().map(String::as_str))
+}
+
+/// One outcome per point the line removes. The objects are counted ONCE, on
+/// the line's own point: a co-point shares the set, so its removal is the same
+/// removal, and counting it twice would make `objects_deleted` a lie.
+fn push_line(
+    out: &mut Outcome,
+    line: &PlanLine,
+    state: PointState,
+    objects_deleted: i64,
+    remaining_keys: Vec<String>,
+    code: Option<String>,
+) {
+    for (i, point) in line_points(line).enumerate() {
+        out.points.push(PointOutcome {
+            point_id: point.to_string(),
+            state: state.as_str().to_string(),
+            objects_deleted: if i == 0 { objects_deleted } else { 0 },
+            remaining_keys: remaining_keys.clone(),
+            code: code.clone(),
+        });
+    }
 }
 
 /// Every key one line means, manifest first.
@@ -1058,15 +1174,17 @@ pub struct RunAttribution {
     pub plan_sha256: String,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_tombstone<T: TombstoneSink>(
     sink: &T,
     run: &RunAttribution,
     line: &PlanLine,
+    point_id: &str,
     stage: &str,
     objects_deleted: i64,
     remaining: &[String],
     code: Option<&str>,
-) -> Result<(), SinkError> {
+) -> Result<Option<String>, SinkError> {
     let state = if stage == "intent" {
         PointState::Kept
     } else if remaining.is_empty() {
@@ -1080,7 +1198,7 @@ fn write_tombstone<T: TombstoneSink>(
         run_id: run.run_id.clone(),
         policy_uid: run.policy_uid.clone(),
         plan_sha256: run.plan_sha256.clone(),
-        point_id: line.point_id.clone(),
+        point_id: point_id.to_string(),
         backup_id: line.backup_id.clone(),
         object_keys: line.object_keys.clone(),
         objects_deleted,
@@ -1091,7 +1209,7 @@ fn write_tombstone<T: TombstoneSink>(
     let bytes = logweir_core::det_json::to_deterministic_json(&doc)
         .map_err(|e| SinkError(e.to_string()))?;
     sink.put_create_only(
-        &tombstone_key(&run.policy_uid, &run.run_id, &line.point_id, stage),
+        &tombstone_key(&run.policy_uid, &run.run_id, point_id, stage),
         &bytes,
     )
 }

@@ -754,6 +754,120 @@ fn the_deletion_ceiling_never_splits_a_shared_set() {
     assert_eq!(two.truncated_by_cap, 1);
 }
 
+/// Review M2: two receipts over ONE set that are BOTH due render ONE plan
+/// line, the second receipt a co-point — never two lines over one manifest,
+/// which the worker refuses as `DuplicateKey` (the whole plan, every run).
+///
+/// MUTANT: drop the one-line-per-set join in `plan_document`. Two lines with
+/// one manifest key come back and this row fails.
+#[test]
+fn both_receipts_of_a_due_shared_set_render_one_line() {
+    let first = point("p2", 2);
+    let second = second_receipt_over(&first, "p3", 3);
+    let evaluation = evaluate(
+        &[point("p1", 1), first, second, point("p4", 4)],
+        rules(Some(1), None, 1),
+    );
+    assert_eq!(candidate_ids(&evaluation), vec!["p2", "p3", "p4"]);
+    let document = plan::plan_document(
+        &identity(),
+        &destination(),
+        rules(Some(1), None, 1),
+        &evaluation,
+    )
+    .expect("a plan");
+    let lines: Vec<(&str, &[String])> = document
+        .lines
+        .iter()
+        .map(|l| (l.point_id.as_str(), l.co_point_ids.as_slice()))
+        .collect();
+    assert_eq!(
+        lines,
+        vec![("p2", &["p3".to_string()][..]), ("p4", &[][..])],
+        "one line per set, every point named"
+    );
+    let manifests: BTreeSet<&str> = document
+        .lines
+        .iter()
+        .map(|l| l.manifest_key.as_str())
+        .collect();
+    assert_eq!(
+        manifests.len(),
+        document.lines.len(),
+        "no manifest on two lines"
+    );
+    // A plan with no shared set carries no `co_point_ids` key at all, so its
+    // bytes — and an approved digest — are what they were before the field.
+    let unshared = plan::plan_document(
+        &identity(),
+        &destination(),
+        rules(Some(1), None, 1),
+        &evaluate(&[point("p1", 1), point("p4", 4)], rules(Some(1), None, 1)),
+    )
+    .expect("a plan");
+    let (bytes, _) = plan::plan_bytes(&unshared).expect("bytes");
+    assert!(!String::from_utf8(bytes)
+        .expect("utf8")
+        .contains("co_point_ids"));
+}
+
+/// Review L1: a row over the candidate's set whose location the catalog could
+/// not establish (`locations[]` empty) is never counted here — and it still
+/// protects the set it names.
+///
+/// MUTANT: leave location-less rows out of the grouping. `p-old` is planned
+/// and this row fails.
+#[test]
+fn a_location_less_receipt_over_a_set_protects_it() {
+    let newest = point("p1", 1);
+    let old = point("p-old", 3);
+    let mut unplaced = second_receipt_over(&old, "p-unplaced", 2);
+    unplaced.locations.clear();
+    let evaluation = evaluate(&[newest, old, unplaced], rules(Some(1), None, 1));
+    assert!(
+        candidate_ids(&evaluation).is_empty(),
+        "{:?}",
+        candidate_ids(&evaluation)
+    );
+    assert_eq!(
+        protected_reason(&evaluation, "p-old"),
+        Some("SharedSegment")
+    );
+    assert_eq!(
+        evaluation.points_evaluated, 2,
+        "and it is not counted as here"
+    );
+}
+
+/// Review L8: a set id that names no single directory — empty, or containing a
+/// `/` (a bound that would contain OTHER sets) — is kept `Unknown`, not planned.
+///
+/// MUTANT: drop the check. `p-nested` is planned (its bound `team-a/a/b/` is
+/// fine) or the empty id refuses the whole plan at the writer; this row fails
+/// either way.
+#[test]
+fn a_set_id_that_names_no_single_directory_is_never_planned() {
+    let mut empty = point("p-empty", 3);
+    empty.backup_id = String::new();
+    let mut nested = point("p-nested", 4);
+    nested.backup_id = "a/b".to_string();
+    nested.manifest_key = Some(format!("{SCOPE}/a/b/manifest.json"));
+    let evaluation = evaluate(
+        &[point("p1", 1), point("p2", 2), empty, nested],
+        rules(Some(1), None, 1),
+    );
+    assert_eq!(candidate_ids(&evaluation), vec!["p2"]);
+    assert_eq!(protected_reason(&evaluation, "p-empty"), Some("Unknown"));
+    assert_eq!(protected_reason(&evaluation, "p-nested"), Some("Unknown"));
+    plan::plan_document(
+        &identity(),
+        &destination(),
+        rules(Some(1), None, 1),
+        &evaluation,
+    )
+    .expect("the rest of the plan is still written");
+}
+
 /// THE WRITER'S OWN RAIL, independent of the grouping: an evaluation that
 /// names a candidate over a set a retained point still names is refused, and
 /// no plan is written.
@@ -4831,6 +4945,120 @@ async fn a_policy_stopped_on_a_versioned_bucket_says_why_and_what_to_change() {
     assert!(message.contains("delete marker"), "{message}");
     assert!(message.contains("mode: ExternalLifecycle"), "{message}");
     assert!(!message.contains("  "), "{message:?}");
+}
+
+/// A policy at the retry ceiling, its last run refused with `codes`, that
+/// run finished at `finished_at`.
+fn degraded_status(codes: &[&str], finished_at: &str) -> Value {
+    json!({
+        "observedGeneration": 4,
+        "consecutiveRunFailures": 3,
+        "lastEnforcement": {
+            "runId": "r00000000deadbeec",
+            "startedAt": "2026-09-15T04:00:00Z",
+            "finishedAt": finished_at,
+            "exitCode": 1,
+            "failed": codes
+                .iter()
+                .enumerate()
+                .map(|(i, c)| json!({"pointId": format!("p{}", i + 5), "code": c}))
+                .collect::<Vec<Value>>()
+        }
+    })
+}
+
+/// Review M1: a policy degraded ONLY by a bucket- or credential-level refusal
+/// resumes on its own. The operator grants `s3:GetObject` (or unversions the
+/// bucket) — nothing on the object changes — and 24 h after the last run one
+/// re-probe run is scheduled, with no spec edit. A refusal about the PLAN
+/// (`AccessDenied` on a delete, here mixed in) still waits for the spec, as
+/// D3 §6.5 says, and so does a re-probe inside the 24 h.
+///
+/// MUTANT: `reprobe_due` always false (the pre-fix rule). The first arm posts
+/// no Job and this row fails. MUTANT: drop the all-bucket-level clause. The
+/// mixed arm posts a Job and this row fails.
+#[tokio::test]
+async fn a_bucket_level_refusal_reprobes_a_day_later_without_a_spec_edit() {
+    let digest = learned_digest().await;
+    for (label, codes, finished, expect_job) in [
+        (
+            "VersionProbeRefused, 24 h 12 min ago",
+            vec!["VersionProbeRefused", "VersionProbeRefused"],
+            "2026-09-16T04:05:00Z",
+            true,
+        ),
+        (
+            "VersionedBucket, 24 h 12 min ago",
+            vec!["VersionedBucket"],
+            "2026-09-16T04:05:00Z",
+            true,
+        ),
+        (
+            "VersionProbeRefused, one hour ago",
+            vec!["VersionProbeRefused"],
+            "2026-09-17T03:17:00Z",
+            false,
+        ),
+        (
+            "mixed with a plan-level AccessDenied",
+            vec!["VersionedBucket", "AccessDenied"],
+            "2026-09-16T04:05:00Z",
+            false,
+        ),
+    ] {
+        let status = degraded_status(&codes, finished);
+        let f = quiet_pass(
+            &policy(unattended_enforcing(), status.clone()),
+            now(),
+            &digest,
+        )
+        .await;
+        assert_eq!(
+            !f.posted("/jobs").is_empty(),
+            expect_job,
+            "{label}: {}",
+            after(&status, &f)
+        );
+        let after_pass = after(&status, &f);
+        let degraded =
+            condition_of(&after_pass, ctrl::CONDITION_DEGRADED).expect("EnforcementDegraded");
+        let message = degraded["message"].as_str().expect("a message");
+        assert_eq!(
+            message.contains("no spec edit is needed to resume"),
+            !label.contains("mixed"),
+            "{label}: the condition says whether it resumes on its own: {message}"
+        );
+    }
+}
+
+/// Review M4: while the retry budget is spent, `ageExpiry` is not claimed as
+/// Logweir-enforced — nothing is being deleted, and on a versioned bucket
+/// nothing ever can be.
+///
+/// MUTANT: drop `&& !self.budget_spent()` from the `ageExpiry` derivation.
+/// This row fails.
+#[tokio::test]
+async fn a_degraded_policy_does_not_claim_age_expiry() {
+    let digest = learned_digest().await;
+    let status = degraded_status(&["VersionedBucket"], "2026-09-17T03:17:00Z");
+    let f = quiet_pass(
+        &policy(unattended_enforcing(), status.clone()),
+        now(),
+        &digest,
+    )
+    .await;
+    let after_pass = after(&status, &f);
+    assert_eq!(
+        after_pass["guarantees"]["ageExpiry"],
+        ctrl::GUARANTEE_NOT_ENFORCED,
+        "{after_pass}"
+    );
+    // …and a healthy enforcing policy still says LogweirEnforced.
+    let healthy = quiet_pass(&policy(unattended_enforcing(), json!({})), now(), &digest).await;
+    assert_eq!(
+        after(&json!({}), &healthy)["guarantees"]["ageExpiry"],
+        ctrl::GUARANTEE_LOGWEIR
+    );
 }
 
 /// **Review finding G1: a refusal path must not eat the operator's spec edit.**

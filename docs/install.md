@@ -507,8 +507,11 @@ commands and an operator runs them; the only component that deletes is
 for a HEAD before every delete: on a versioned bucket — every S3 Object Lock
 bucket is one — a delete by key only writes a delete marker and never
 consults a legal hold, so the worker refuses to delete there (code
-`VersionedBucket`), and without the grant it cannot tell and deletes nothing
-(code `VersionProbeRefused`). The measured minimum before that check was
+`VersionedBucket`, also read from the version id its own intent tombstone
+gets back), and without the grant it cannot tell and deletes nothing (code
+`VersionProbeRefused`). **Grant it before upgrading**; a policy that degraded
+without it re-probes 24 h after its last run, or at once on a spec edit
+(`docs/kubernetes.md` §7f, "Upgrade and rollback"). The measured minimum before that check was
 `s3:ListBucket` and `s3:DeleteObject` alone. [UNVERIFIED — the grant with s3:GetObject is re-measured by U6/retention-enforcer at the next lab refresh.]
 
 **Grant `evidenceRead` its `s3:ListBucket` if you want "absent" to mean absent.**

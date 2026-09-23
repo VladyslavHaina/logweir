@@ -224,8 +224,11 @@ impl Deleter for ArchiveReaper {
     /// A HEAD of the key, read for `ObjectMeta::version`.
     ///
     /// The S3 client fills `version` from `x-amz-version-id`, which a provider
-    /// sends only for an object stored under versioning — so `Some` is exactly
-    /// "a delete by key would write a marker" (see [`Versioning`]). The local
+    /// sends only for an object stored under versioning — so `Some` means "a
+    /// delete by key would write a marker". `None` does NOT mean the opposite:
+    /// a null version under Enabled versioning answers no header and a delete
+    /// still writes a marker, which the run's intent-tombstone signal catches
+    /// (see [`Versioning`], review H1). The local
     /// filesystem store never versions. The same normalisation rail as
     /// [`Deleter::delete_exact`]: the probe asks about the path the delete
     /// would address, or refuses.
