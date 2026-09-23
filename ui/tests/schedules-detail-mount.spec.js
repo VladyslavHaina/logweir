@@ -78,7 +78,15 @@ function detailPage(ns, state, overrides, catalog) {
       }
       return Promise.resolve({ items: [] });
     },
-    destinations() { return Promise.resolve({ items: [] }); },
+    // THE DESTINATION THE FIXTURE'S `destinationRef` NAMES (`dest`). An empty
+    // list beside a schedule that names one is a destination that is gone, and
+    // since PLAT-08.2 review L5 a policy save then asks for the location-move
+    // box, as it always did beside a non-empty list without it.
+    destinations() {
+      return Promise.resolve({
+        items: [Object.assign(fixture("console/destination.json").item, { name: "dest" })],
+      });
+    },
     detailReaders: {
       listCatalogs: async () => ({ items: [{ metadata: { name: "primary" } }] }),
       readPoints: points,

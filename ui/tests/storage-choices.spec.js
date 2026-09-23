@@ -333,6 +333,30 @@ test("converting_an_inline_schedule_keeps_its_location_or_says_it_moves", async 
   assert.equal(sent[1].archive, undefined, "one location, never both");
 });
 
+test("an_inline_archive_move_needs_the_box_in_a_namespace_with_no_destinations", async () => {
+  // PLAT-08.2 review L5. The same inline-to-inline URL edit is a move whether
+  // or not the namespace has a destination; an EMPTY list that was read is a
+  // list the page can compare against, and only NO list (never read, or the
+  // read failed) keeps the legacy behaviour.
+  const sent = [];
+  const api = { editSchedulePolicy: async (_ns, _name, body) => { sent.push(body); return body; } };
+  const values = Object.assign(policyValuesOf(INLINE_SCHEDULE()),
+    { archive: "s3://kafka-backups/team-a/elsewhere" });
+  assert.equal(locationChange({ destination: "", archive: "s3://kafka-backups/team-a/prod" },
+    values, []).state, "moves");
+  await assert.rejects(() => submitPolicy("team-a", INLINE_SCHEDULE(), values, null, api, []),
+    (e) => (e.fields || {}).moveLocation === LOCATION_MOVE_REFUSAL);
+  assert.equal(sent.length, 0,
+    "NEGATIVE CONTROL: with `destinations.length > 0` an empty namespace skipped the box and sent");
+  await submitPolicy("team-a", INLINE_SCHEDULE(), Object.assign({}, values, { moveLocation: "true" }),
+    null, api, []);
+  assert.equal(sent.length, 1, "the explicit box lets the move through");
+  assert.equal(sent[0].archive.url, "s3://kafka-backups/team-a/elsewhere");
+  // NO LIST AT ALL: the page cannot compare, and the legacy path is unchanged.
+  await submitPolicy("team-a", INLINE_SCHEDULE(), values, null, api, null);
+  assert.equal(sent.length, 2, "an unread list keeps the legacy behaviour");
+});
+
 test("a_checkbox_policy_input_is_its_checked_state_not_its_value", () => {
   const box = { type: "checkbox", value: "true", checked: false,
     getAttribute: (n) => (n === "type" ? "checkbox" : null) };

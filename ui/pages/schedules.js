@@ -2030,6 +2030,7 @@ export async function mountSchedules(node, ns, parse, lifecycle, deps) {
     const extra = {
       cards: cards,
       destinations: readiness.destinations,
+      destinationsUnavailable: readiness.unavailable === true,
       mayOperate: mayOperate(ns),
       retentionPolicies: await readRetentionPolicies(ns, lifecycle),
     };
@@ -4148,7 +4149,10 @@ function wirePolicy(node, ns, parse, lifecycle, api, object, backups, extra) {
     }
     const values = readPolicyValues(form);
     keepDraft(key, values, POLICY_DRAFT_FIELDS);
-    mutation.run(() => submitPolicy(ns, object, values, own.preview, api, extra.destinations));
+    // A list that could not be read is not an empty list: `readReadiness`
+    // answers `[]` for both, and only the one that was READ can be compared.
+    mutation.run(() => submitPolicy(ns, object, values, own.preview, api,
+      extra.destinationsUnavailable === true ? null : extra.destinations));
   }, lifecycle);
 }
 
@@ -4190,9 +4194,13 @@ export async function submitPolicy(ns, object, values, preview, api, destination
   // section 5.1 makes the destination mutable, and it should be; what this
   // refuses is a move nobody acknowledged -- the inline-to-destination
   // conversion that was meant to keep the archive where it is and did not.
-  // Only when the page read a destination list: with none it cannot compare,
-  // and legacy mode keeps its behaviour.
-  if (Array.isArray(destinations) && destinations.length > 0) {
+  // Whenever the page READ a destination list -- an EMPTY one included
+  // (PLAT-08.2 review L5): an inline-to-inline URL edit in a namespace with no
+  // destinations moves the archive exactly as it does beside one, and the box
+  // must not depend on a neighbour's existence. With no list at all (never
+  // read, or the read failed) it cannot compare, and legacy mode keeps its
+  // behaviour.
+  if (Array.isArray(destinations)) {
     const spec = (object || {}).spec || {};
     const change = locationChange({
       destination: String((spec.destinationRef || {}).name || ""),
