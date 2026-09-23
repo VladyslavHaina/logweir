@@ -61,6 +61,7 @@ pub mod problem;
 pub mod projection;
 pub mod routes;
 pub mod status;
+pub mod trusted_proxy;
 pub mod validate;
 
 use std::sync::Arc;
@@ -226,7 +227,10 @@ pub fn state_from_parts(
                     login_limiter: auth::ratelimit::RateLimiter::for_login(),
                     streams: auth::ratelimit::StreamSlots::new(),
                     session_max_age_seconds: settings.session_max_age_seconds,
-                    trusted_proxy_cidrs: settings.trusted_proxy_cidrs.clone(),
+                    trusted_proxies: Arc::new(trusted_proxy::TrustedProxies::new(
+                        settings.trusted_proxy_cidrs.clone(),
+                        settings.trusted_proxy_service.clone(),
+                    )),
                     require_trusted_proxy: settings.require_trusted_proxy,
                 })),
             )

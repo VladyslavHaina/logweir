@@ -81,6 +81,10 @@ const GROUP_PREFIX: &str = "/apis/logweir.dev/v1alpha1/";
 /// write-only credential). Anything else under it is `unexpected`.
 const CORE_PREFIX: &str = "/api/v1/namespaces/";
 pub const CORE_PLURALS: [&str; 2] = ["configmaps", "secrets"];
+/// The discovery group: `endpointslices` LIST and nothing else — the
+/// trusted-proxy set's one read (chart gap G6). A GET by name, any write and
+/// any other plural are `unexpected`.
+const DISCOVERY_PREFIX: &str = "/apis/discovery.k8s.io/v1/namespaces/";
 
 /// One request the fake received.
 #[derive(Clone, Debug)]
@@ -167,6 +171,7 @@ fn kind_of(plural: &str) -> &'static str {
         "trustrosters" => "TrustRoster",
         "configmaps" => "ConfigMap",
         "secrets" => "Secret",
+        "endpointslices" => "EndpointSlice",
         _ => "Unknown",
     }
 }
@@ -265,6 +270,8 @@ impl FakeKube {
             .or_insert(json!("2026-09-15T10:00:00Z"));
         object["apiVersion"] = json!(if CORE_PLURALS.contains(&plural) {
             "v1"
+        } else if plural == "endpointslices" {
+            "discovery.k8s.io/v1"
         } else {
             "logweir.dev/v1alpha1"
         });
@@ -408,6 +415,46 @@ pub const PATCHABLE: [&str; 4] = [
     "topicdiscoveries",
     "preflights",
 ];
+
+/// The discovery group: a labelled LIST of `endpointslices`, and nothing else.
+fn discovery_answer(
+    s: &mut State,
+    recorded: &Recorded,
+    rest: &str,
+) -> (Option<Duration>, u16, String) {
+    let parts: Vec<&str> = rest.split('/').collect();
+    let (["GET"], [namespace, "endpointslices"]) = ([recorded.method.as_str()], parts.as_slice())
+    else {
+        s.unexpected
+            .push(format!("{} {}", recorded.method, recorded.path));
+        return (
+            None,
+            500,
+            status_body(500, "InternalError", "not allowed by the fake"),
+        );
+    };
+    let query: BTreeMap<String, String> =
+        serde_urlencoded::from_str(&recorded.query).unwrap_or_default();
+    let selector = query.get("labelSelector").cloned().unwrap_or_default();
+    let items: Vec<Value> = s
+        .objects
+        .iter()
+        .filter(|((p, n, _), _)| p == "endpointslices" && n == namespace)
+        .filter(|(_, v)| labels_match(v, &selector))
+        .map(|(_, v)| v.clone())
+        .collect();
+    (
+        None,
+        200,
+        json!({
+            "apiVersion": "discovery.k8s.io/v1",
+            "kind": "EndpointSliceList",
+            "metadata": {"resourceVersion": s.next_rv.to_string()},
+            "items": items,
+        })
+        .to_string(),
+    )
+}
 
 /// The core group: `configmaps` GET and `secrets` POST, and nothing else.
 ///
@@ -690,6 +737,9 @@ fn answer_inner(state: &Arc<Mutex<State>>, recorded: Recorded) -> (Option<Durati
 
     if let Some(rest) = recorded.path.strip_prefix(CORE_PREFIX) {
         return core_answer(&mut s, &recorded, rest);
+    }
+    if let Some(rest) = recorded.path.strip_prefix(DISCOVERY_PREFIX) {
+        return discovery_answer(&mut s, &recorded, rest);
     }
     // The cluster-scoped kind, BEFORE the namespaced prefix check: its path
     // has no `namespaces/<ns>/` segment at all, and the only verbs are GET.
@@ -1668,6 +1718,9 @@ pub struct SharedOptions {
     pub allowed_algorithms: Vec<String>,
     /// Peer ranges whose forwarded headers may be recorded.
     pub trusted_proxy_cidrs: Vec<logweir_api::config::Cidr>,
+    /// A whole trusted-proxy set (chart gap G6: a Service source a test
+    /// fills by hand). When set, `trusted_proxy_cidrs` is ignored.
+    pub trusted_proxies: Option<Arc<logweir_api::trusted_proxy::TrustedProxies>>,
     /// The login rate limiter.
     pub login_limiter: Option<RateLimiter>,
     /// `requireTrustedProxy`.
@@ -1685,6 +1738,7 @@ impl Default for SharedOptions {
             session_max_age_seconds: 900,
             allowed_algorithms: vec!["RS256".into(), "ES256".into()],
             trusted_proxy_cidrs: Vec::new(),
+            trusted_proxies: None,
             login_limiter: None,
             require_trusted_proxy: false,
             approval: Arc::default(),
@@ -1775,7 +1829,11 @@ impl SharedApp {
             login_limiter: options.login_limiter.unwrap_or_else(RateLimiter::for_login),
             streams: StreamSlots::new(),
             session_max_age_seconds: options.session_max_age_seconds,
-            trusted_proxy_cidrs: options.trusted_proxy_cidrs.clone(),
+            trusted_proxies: options.trusted_proxies.clone().unwrap_or_else(|| {
+                Arc::new(logweir_api::trusted_proxy::TrustedProxies::from_cidrs(
+                    options.trusted_proxy_cidrs.clone(),
+                ))
+            }),
             require_trusted_proxy: options.require_trusted_proxy,
         });
         let app = TestApp::with_clock(

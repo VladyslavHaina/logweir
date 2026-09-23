@@ -23,7 +23,6 @@ use crate::auth::oidc::Provider;
 use crate::auth::ratelimit::{RateLimiter, StreamSlots};
 use crate::auth::Authenticator;
 use crate::authz::Authorizer;
-use crate::config::Cidr;
 use crate::cursor::CursorKey;
 use crate::kube::KubeAdapter;
 
@@ -61,9 +60,11 @@ pub struct SharedMode {
     pub streams: Arc<StreamSlots>,
     /// The session lifetime in seconds.
     pub session_max_age_seconds: i64,
-    /// Proxy ranges whose forwarded headers may be RECORDED. Never an
-    /// identity input.
-    pub trusted_proxy_cidrs: Vec<Cidr>,
+    /// The proxy peers whose forwarded headers may be RECORDED and who may
+    /// satisfy the entry-point gate: `trustedProxyCidrs`, and the serving
+    /// endpoints of `trustedProxyService` (chart gap G6). Never an identity
+    /// input.
+    pub trusted_proxies: Arc<crate::trusted_proxy::TrustedProxies>,
     /// Whether the entry point refuses any request that did not arrive
     /// through one of those proxies over HTTPS
     /// (`crate::http::boundary_guard`, `requireTrustedProxy`).
@@ -217,7 +218,13 @@ impl AppState {
             None => true,
             Some(shared) => shared.provider.ready().await,
         };
-        let verdict = kubernetes && provider;
+        // A console whose ONLY trusted proxy is a Service it has not read (or
+        // read too long ago) would answer every browser 421: that is not
+        // ready, and saying so keeps it out of the rollout (chart gap G6).
+        let proxies = self
+            .shared()
+            .is_none_or(|shared| shared.trusted_proxies.ready());
+        let verdict = kubernetes && provider && proxies;
         *cached = Some((Instant::now(), verdict));
         verdict
     }

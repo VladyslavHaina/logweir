@@ -511,6 +511,11 @@ fn the_adapter_spends_each_verb_on_exactly_these_resources() {
         // THE TWO CORE OBJECTS, one verb each.
         "get configmaps",
         "create secrets",
+        // CHART GAP G6: the trusted-proxy set's ONE read — a labelled list of
+        // `endpointslices` in the namespace and for the Service the
+        // configuration file names (`KubeAdapter::list_service_endpoints`).
+        // Addresses and conditions only; no route reaches it.
+        "list_page endpointslices",
         // The readiness probe.
         "version version",
     ]
@@ -538,6 +543,9 @@ fn the_adapter_spends_each_verb_on_exactly_these_resources() {
         "\"list_page\", \"trustrosters\"",
         "\"patch\", \"trustrosters\"",
         "\"create\", \"trustrosters\"",
+        "\"get\", \"endpointslices\"",
+        "\"create\", \"endpointslices\"",
+        "\"patch\", \"endpointslices\"",
     ] {
         assert!(
             !code_lines(&text).any(|(_, line)| line.contains(forbidden)),

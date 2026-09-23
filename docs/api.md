@@ -1355,6 +1355,27 @@ sidecar uses, say — and never a wildcard, which the field does not support.
 `/healthz` and `/readyz` are exempt from the allowlist regardless, because a
 kubelet addresses the Pod by IP; neither reads a header, a cookie or a body.
 
+**The ingress controller by its Service (`trustedProxyService`).** A
+`trustedProxyCidrs` entry for the ingress pod is a `/32` that is wrong the
+moment the pod is recreated, and a range wide enough to survive that trusts
+every other pod the node schedules. Instead of (or beside) the list, name the
+ingress controller's Service:
+
+```yaml
+trustedProxyService: {namespace: traefik, name: traefik}   # its SERVING endpoints are the trusted peers
+```
+
+The console reads that Service's `EndpointSlice`s every five seconds and trusts
+each **serving** endpoint address as a single host — the ingress pods of the
+moment, narrower than any range the width floors admit. A refresh that fails
+keeps the last complete set for at most thirty seconds; after that the Service
+source trusts nobody, browsers get `421` and `/readyz` reports not ready, so a
+stale grant is never silent. Before the first read `/readyz` is not ready
+either. The read is one `list` of `endpointslices` in that one namespace (the
+chart grants exactly that); whoever can edit that Service or write an
+`EndpointSlice` there could add an address — the ingress namespace's own
+administrator, who already terminates the console's TLS.
+
 **A private CA for the issuer (`caBundleFile`, `systemRoots`).** An issuer
 whose certificate a private CA issued — a Dex behind an ingress with an
 internal certificate, an IdP on a corporate PKI — is trusted by naming a PEM
@@ -1403,7 +1424,8 @@ does not come up at all, because the first two look like they are working.
 | a binding string contains `*` or `?` | bindings are EXACT: a `*` would match nothing, so it is refused by name rather than silently granting nothing |
 | `roles.revision` is empty | it is the provenance of every decision in the audit log |
 | `sessionMaxAgeSeconds` outside 60…900 | a stateless session cannot be revoked before it expires |
-| `requireTrustedProxy: true` with no `trustedProxyCidrs` | the entry point would refuse every request and look like an outage |
+| `requireTrustedProxy: true` with neither `trustedProxyCidrs` nor `trustedProxyService` | the entry point would refuse every request and look like an outage |
+| `trustedProxyService` whose namespace or name is not a DNS-1123 label, or in `localAdmin` mode | |
 | `requireTrustedProxy` in `localAdmin` mode | there is no proxy in front of a loopback listener |
 | an in-cluster `kubernetes.principal` that is not `system:serviceaccount:<namespace>:<name>` | the value goes onto every created object; a pod's token can only be a ServiceAccount |
 

@@ -111,6 +111,20 @@ async fn run(config: logweir_api::config::Config, preflight: logweir_api::Prefli
             return ExitCode::FAILURE;
         }
     };
+    // CHART GAP G6: the ingress controller's serving endpoints, re-read every
+    // few seconds, are the entry point's trusted peers. The first read happens
+    // before the first request can arrive in practice; until it lands,
+    // `/readyz` is false and a browser request is 421.
+    if let Some(shared) = state.shared() {
+        if let Some(service) = shared.trusted_proxies.service() {
+            tracing::info!(
+                namespace = %service.namespace,
+                service = %service.name,
+                "trusting the serving endpoints of this Service as the entry point's proxy"
+            );
+            tokio::spawn(std::sync::Arc::clone(&shared.trusted_proxies).run(state.kube().clone()));
+        }
+    }
     let listener = match tokio::net::TcpListener::bind(config.listen).await {
         Ok(listener) => listener,
         Err(error) => {

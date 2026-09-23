@@ -25,6 +25,15 @@
 //! NOT imported: a type that can hold a Secret's data is a type that can leak
 //! one.
 //!
+//! ONE MORE CORE-ADJACENT READ, FOR THE ENTRY POINT AND NOTHING ELSE.
+//! [`ProxyEndpointSlice`] is a `discovery.k8s.io/v1` `endpointslices` LIST in
+//! ONE configured namespace, filtered by the `kubernetes.io/service-name`
+//! label of ONE configured Service: the addresses of the ingress controller's
+//! serving pods, which `crate::trusted_proxy` trusts as the entry point's
+//! peers (chart gap G6). The projection carries addresses and conditions only;
+//! no route can reach it, and the namespace and Service come from the
+//! configuration file, never from a request.
+//!
 //! THE UPDATES ARE FOUR MERGE PATCHES, EACH BUILT HERE FROM TYPED
 //! ARGUMENTS: [`KubeAdapter::set_schedule_suspension`],
 //! [`KubeAdapter::set_schedule_policy`], [`KubeAdapter::set_destination_access`]
@@ -503,6 +512,105 @@ impl KubeFailure {
         }
     }
 }
+
+/// One `EndpointSlice`, projected to what the trusted-proxy set needs: the
+/// address family, and each endpoint's addresses and conditions.
+///
+/// HAND-WRITTEN, like [`ResultDocument`], so the adapter names no
+/// `k8s_openapi` API module and the type can hold nothing it does not read —
+/// no hostnames, no node names, no target references. Read by
+/// [`KubeAdapter::list_service_endpoints`] and by nothing else.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyEndpointSlice {
+    /// Name and labels.
+    #[serde(default)]
+    pub metadata: ObjectMeta,
+    /// `IPv4`, `IPv6` or `FQDN`. Only the first two are addresses.
+    #[serde(default)]
+    pub address_type: String,
+    /// The endpoints.
+    #[serde(default)]
+    pub endpoints: Vec<ProxyEndpoint>,
+}
+
+/// One endpoint of a [`ProxyEndpointSlice`].
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct ProxyEndpoint {
+    /// The endpoint's addresses (one, in practice).
+    #[serde(default)]
+    pub addresses: Vec<String>,
+    /// `ready`, `serving` and `terminating`.
+    #[serde(default)]
+    pub conditions: ProxyEndpointConditions,
+}
+
+/// The three endpoint conditions, each absent-means-unknown.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct ProxyEndpointConditions {
+    /// Ready for new traffic. Absent is `true` (the API's own rule).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ready: Option<bool>,
+    /// Still serving, terminating or not. Absent is `ready` (the API's rule).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serving: Option<bool>,
+    /// Shutting down.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminating: Option<bool>,
+}
+
+impl ProxyEndpointSlice {
+    /// The addresses of every SERVING endpoint.
+    ///
+    /// `serving`, and not `ready`, because a terminating ingress pod still
+    /// drains requests it accepted and is still that pod: its address leaves
+    /// the slice when the pod is gone, which is before the address can be
+    /// handed to another pod. An endpoint whose `serving` is absent falls back
+    /// to `ready`, and an absent `ready` is `true` — the API's documented
+    /// reading of both. A `FQDN` slice, or an address that does not parse,
+    /// contributes nothing.
+    #[must_use]
+    pub fn serving_addresses(&self) -> Vec<std::net::IpAddr> {
+        if self.address_type != "IPv4" && self.address_type != "IPv6" {
+            return Vec::new();
+        }
+        self.endpoints
+            .iter()
+            .filter(|e| e.conditions.serving.or(e.conditions.ready).unwrap_or(true))
+            .flat_map(|e| e.addresses.iter())
+            .filter_map(|a| a.parse().ok())
+            .collect()
+    }
+}
+
+impl kube::Resource for ProxyEndpointSlice {
+    type DynamicType = ();
+    type Scope = NamespaceResourceScope;
+
+    fn kind(_: &()) -> std::borrow::Cow<'_, str> {
+        "EndpointSlice".into()
+    }
+    fn group(_: &()) -> std::borrow::Cow<'_, str> {
+        "discovery.k8s.io".into()
+    }
+    fn version(_: &()) -> std::borrow::Cow<'_, str> {
+        "v1".into()
+    }
+    fn plural(_: &()) -> std::borrow::Cow<'_, str> {
+        "endpointslices".into()
+    }
+    fn meta(&self) -> &ObjectMeta {
+        &self.metadata
+    }
+    fn meta_mut(&mut self) -> &mut ObjectMeta {
+        &mut self.metadata
+    }
+}
+
+/// The most `EndpointSlice`s one trusted-proxy refresh reads. An ingress
+/// controller's Service has one or two; a page this size that is still not
+/// the end is refused rather than trusted half-read.
+pub const MAX_PROXY_SLICES: u32 = 64;
 
 /// A product object read LENIENTLY: its `metadata`, and everything else as raw
 /// JSON in `data` — the same shape as `kube::api::DynamicObject`, but bound to
@@ -1134,6 +1242,55 @@ impl KubeAdapter {
             name: created.metadata.name.unwrap_or_default(),
             uid: created.metadata.uid.unwrap_or_default(),
         })
+    }
+
+    /// The serving addresses of one Service's endpoints, for the trusted-proxy
+    /// set (chart gap G6).
+    ///
+    /// `namespace` and `service` come from the configuration file, never from
+    /// a request. One LIST of `endpointslices` in that namespace, selected by
+    /// the `kubernetes.io/service-name` label the EndpointSlice controller
+    /// sets. A result that does not fit one page ([`MAX_PROXY_SLICES`]) is a
+    /// refusal: a partial set would silently distrust the rest, and a refusal
+    /// keeps the last complete one until it goes stale.
+    ///
+    /// # Errors
+    ///
+    /// [`KubeFailure`]; [`KubeFailure::Unavailable`] for an over-long list.
+    pub async fn list_service_endpoints(
+        &self,
+        namespace: &str,
+        service: &str,
+    ) -> Result<Vec<std::net::IpAddr>, KubeFailure> {
+        let api: Api<ProxyEndpointSlice> = Api::namespaced(self.client.clone(), namespace);
+        let params = ListParams::default()
+            .labels(&format!("kubernetes.io/service-name={service}"))
+            .limit(MAX_PROXY_SLICES);
+        let slices = self
+            .bounded("list_page", "endpointslices", api.list(&params))
+            .await?;
+        if slices
+            .metadata
+            .continue_
+            .as_deref()
+            .is_some_and(|token| !token.is_empty())
+        {
+            tracing::warn!(
+                namespace,
+                service,
+                limit = MAX_PROXY_SLICES,
+                "the trusted proxy Service has more EndpointSlices than one page; refused"
+            );
+            return Err(KubeFailure::Unavailable);
+        }
+        let mut addresses: Vec<std::net::IpAddr> = slices
+            .items
+            .iter()
+            .flat_map(ProxyEndpointSlice::serving_addresses)
+            .collect();
+        addresses.sort();
+        addresses.dedup();
+        Ok(addresses)
     }
 
     /// Readiness: the API server answers and `kafkaclusters` can be listed in

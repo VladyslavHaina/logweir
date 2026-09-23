@@ -331,3 +331,173 @@ async fn the_readiness_probe_is_exempt() {
         ready.status
     );
 }
+
+// ------------------------------------------------------------------------
+// Chart gap G6: the ingress controller trusted BY ITS SERVICE, not by a /32.
+// ------------------------------------------------------------------------
+
+const PROXY_NS: &str = "traefik";
+const PROXY_SERVICE: &str = "traefik";
+
+/// One EndpointSlice of `service`, as the EndpointSlice controller writes it.
+fn slice(name: &str, service: &str, address_type: &str, endpoints: Value) -> Value {
+    serde_json::json!({
+        "metadata": {
+            "name": name,
+            "labels": {"kubernetes.io/service-name": service},
+        },
+        "addressType": address_type,
+        "endpoints": endpoints,
+    })
+}
+
+fn seed_ingress(fake: &FakeKube, ready: &str) {
+    fake.seed(
+        "endpointslices",
+        PROXY_NS,
+        slice(
+            "traefik-abcde",
+            PROXY_SERVICE,
+            "IPv4",
+            serde_json::json!([
+                // today's pod
+                {"addresses": [ready], "conditions": {"ready": true, "serving": true}},
+                // a pod shutting down: still serving what it accepted
+                {"addresses": ["10.1.0.8"],
+                 "conditions": {"ready": false, "serving": true, "terminating": true}},
+                // a pod that is not serving at all
+                {"addresses": ["10.1.0.9"], "conditions": {"ready": false, "serving": false}},
+            ]),
+        ),
+    );
+    fake.seed(
+        "endpointslices",
+        PROXY_NS,
+        slice(
+            "traefik-fqdn",
+            PROXY_SERVICE,
+            "FQDN",
+            serde_json::json!([{"addresses": ["traefik.example"], "conditions": {}}]),
+        ),
+    );
+    // Another Service in the same namespace: its pods are NOT the proxy.
+    fake.seed(
+        "endpointslices",
+        PROXY_NS,
+        slice(
+            "dashboard-xyz",
+            "traefik-dashboard",
+            "IPv4",
+            serde_json::json!([{"addresses": ["10.1.0.50"], "conditions": {"ready": true}}]),
+        ),
+    );
+}
+
+/// **The adapter reads exactly the named Service's SERVING addresses, with one
+/// labelled list in the named namespace.** A not-serving endpoint, an FQDN
+/// slice and a neighbouring Service's pod are not proxies.
+#[tokio::test]
+async fn the_proxy_service_read_is_one_labelled_list_of_serving_addresses() {
+    let fake = FakeKube::new();
+    seed_ingress(&fake, "10.1.0.7");
+    let adapter = logweir_api::kube::KubeAdapter::new(fake.client());
+    let addresses = adapter
+        .list_service_endpoints(PROXY_NS, PROXY_SERVICE)
+        .await
+        .expect("the list is answered");
+    assert_eq!(
+        addresses,
+        vec![
+            "10.1.0.7".parse::<IpAddr>().unwrap(),
+            "10.1.0.8".parse::<IpAddr>().unwrap()
+        ]
+    );
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 1, "{requests:#?}");
+    assert_eq!(requests[0].method, "GET");
+    assert_eq!(
+        requests[0].path,
+        format!("/apis/discovery.k8s.io/v1/namespaces/{PROXY_NS}/endpointslices")
+    );
+    assert!(
+        requests[0]
+            .query
+            .contains("labelSelector=kubernetes.io%2Fservice-name%3Dtraefik"),
+        "{}",
+        requests[0].query
+    );
+    fake.assert_strict();
+}
+
+/// **The pod behind the Service is trusted, and follows the pod.** The ingress
+/// pod is recreated with a new address: the new one is served after one
+/// refresh, the old one is refused, and a pod of a neighbouring Service never
+/// was trusted. Before the first read the console is not ready.
+#[tokio::test]
+async fn the_ingress_is_trusted_through_its_service_and_follows_a_restart() {
+    let (log, _guard) = capture();
+    let proxies = Arc::new(logweir_api::trusted_proxy::TrustedProxies::new(
+        Vec::new(),
+        Some(logweir_api::config::ServiceRef {
+            namespace: PROXY_NS.into(),
+            name: PROXY_SERVICE.into(),
+        }),
+    ));
+    let app = SharedApp::new(
+        FakeKube::new(),
+        support::idp::MockIdp::new(ISSUER, &[]),
+        SharedOptions {
+            bindings: support::RoleBindings {
+                revision: "entry-rev-1".into(),
+                bindings: vec![support::binding(Role::Viewer, NS_A, &["lw-a-viewers"])],
+            },
+            trusted_proxies: Some(Arc::clone(&proxies)),
+            require_trusted_proxy: true,
+            ..SharedOptions::default()
+        },
+    );
+    let fake = app.app.fake.clone();
+    let adapter = logweir_api::kube::KubeAdapter::new(fake.client());
+    let cookie = app.session_cookie("u-v", &["lw-a-viewers"]);
+    let through = |peer: &'static str| {
+        let cookie = cookie.clone();
+        let app = &app;
+        async move {
+            get(
+                app,
+                "/api/v1/session",
+                Some(peer),
+                &[("cookie", &cookie), ("x-forwarded-proto", "https")],
+            )
+            .await
+        }
+    };
+
+    assert!(!proxies.ready(), "not ready before the Service is read");
+    through("10.1.0.7")
+        .await
+        .assert_problem(421, "misdirected_request");
+
+    seed_ingress(&fake, "10.1.0.7");
+    assert_eq!(proxies.refresh(&adapter).await.unwrap(), Some(2));
+    assert!(proxies.ready());
+    let served = through("10.1.0.7").await;
+    assert_eq!(served.status, 200, "{}", served.text());
+
+    let neighbour = through("10.1.0.50").await;
+    neighbour.assert_problem(421, "misdirected_request");
+    let (_, notes) = log.record(&neighbour.header("x-request-id").unwrap());
+    assert_eq!(notes["entryPoint"], "peerNotTrusted");
+    through("10.1.0.9")
+        .await
+        .assert_problem(421, "misdirected_request");
+
+    // The ingress pod is recreated and comes back on another address.
+    seed_ingress(&fake, "10.1.0.11");
+    proxies.refresh(&adapter).await.unwrap();
+    through("10.1.0.7")
+        .await
+        .assert_problem(421, "misdirected_request");
+    let served = through("10.1.0.11").await;
+    assert_eq!(served.status, 200, "{}", served.text());
+}
