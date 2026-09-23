@@ -293,7 +293,9 @@ signature did not verify never reaches it. (`outcome`, `integrity` and
 the badge is what says whether to trust them.) A field the document does not
 carry is omitted rather than written as zero. `recordsRestored` is
 the count consumed back from the target **in the sampled window**, not the
-restore's total record count.
+restore's total record count — the console labels it *records verified in the
+sampled window*, and the count that matched byte for byte is
+`recordsSampledMatching` (*records sampled and matching*).
 
 **Absent-field behaviour for the additive fields.** `Backup.spec.destinationRef`,
 `BackupSchedule.spec.destinationRef`, `Restore.spec.sourceDestinationRef` and

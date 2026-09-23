@@ -292,13 +292,13 @@ is converted and no stored object is rewritten
    §7f, *Upgrade and rollback*).
 2. Delete `Preflight` objects with `operation: SourceConnection` — an older
    controller cannot decode them and stops reconciling every `Preflight`
-   (§21.0).
+   ([kubernetes.md](kubernetes.md) §21.0).
 3. If rolling back past Amendment G, delete every `Approval` whose
-   `spec.subjectRef.kind` is `RehearsalSchedule` first (§12, *The one widening
-   that is NOT rollback-safe*).
+   `spec.subjectRef.kind` is `RehearsalSchedule` first ([kubernetes.md](kubernetes.md)
+   §12, *The one widening that is NOT rollback-safe*).
 4. Let destination-backed and `v2`-frozen `Backup`s finish; an older controller
-   refuses them terminally rather than running them (§10, *Backups created
-   under the previous execution contract*).
+   refuses them terminally rather than running them ([kubernetes.md](kubernetes.md)
+   §10, *Backups created under the previous execution contract*).
 5. Unbind approval policies, or expect not-yet-admitted v2 approvals to be
    refused (item 7).
 6. Roll the controller and runner back together, and leave the CRDs in place.

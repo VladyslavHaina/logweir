@@ -216,7 +216,7 @@ before upgrading the controller*), with the identity backed up beforehand.
 
 | The console says | The field behind it | What it means |
 |---|---|---|
-| *verified by weirkeeper at T against key K* | `status.evidence.verification.result: Valid`, `trust.basis` `Current`/`Historical`, plus `exitCode 0` or `outcome pass` | the green badge ([kubernetes.md](kubernetes.md) §15.2) |
+| *verified by weirkeeper at T against key K* | `status.evidence.verification.result: Valid` with `trust.basis` `Current` or `Historical` (or no `trust` block, on an object an older controller wrote), plus `exitCode 0` or `outcome pass` | the green badge ([kubernetes.md](kubernetes.md) §15.2) |
 | *(signed before that key was retired)* | `trust.basis: Historical` | a pass; the key was valid when it signed |
 | *unverified: invalid* | `result: Invalid` | a fact about the **document**: a signature or digest did not match |
 | *unverified: not attempted* | `result: NotAttempted` | a fact about the **controller**: no credential, no object, or no trust material |
@@ -237,8 +237,9 @@ before upgrading the controller*), with the identity backed up beforehand.
 
 ### What this path has not yet been shown to do end to end
 
-Every step above is a shipped task exercised on docker-desktop
-([release-handoff.md](release-handoff.md) lists which, where and when). This
+Every step above is on `main` and was exercised on docker-desktop by its own
+task's journey; which of those tasks are Done and which still wait for a lab
+run is in [release-handoff.md](release-handoff.md). This
 page as one walk on a fresh install, and an upgrade from the last published
 image that keeps identities, schedules and archive readability, are PLAT-20.2's
 live half. [UNVERIFIED — a clean docker-desktop install following this page end to end is owed by PLAT-20.2's live round.]
