@@ -88,6 +88,80 @@ fn backups(app: &TestApp) -> Vec<Value> {
         .collect()
 }
 
+/// **The answer NAMES the run it made** — PLAT-18.2's live pass, whose console
+/// success line read "Created Backup  (uid )".
+///
+/// The run's identity is in the answer and always was: `item` is the created
+/// object's projection (`name`, `namespace`, `uid`, `resourceVersion`), in the
+/// SAME `{requestId, replayed, item}` envelope every other create route answers
+/// with (`RestoreResponse`, `DestinationResponse`, the schedule create …), plus
+/// the one route-specific member `schedule`. The empty line was the console
+/// reading `result.object.metadata` where its own client returns `result.run`;
+/// that is a `ui/` fix, and this row is what keeps the API half of the
+/// agreement from drifting while it is made.
+///
+/// So it holds the identity to the OBJECT THE CLUSTER STORED, on the create and
+/// on the replay, and holds the envelope's member set.
+///
+/// KILLS: answering with the object as BUILT rather than as created (no uid, no
+/// resourceVersion — the create's return value dropped); a replay that answers
+/// with a fresh build; renaming or wrapping `item` so the envelope no longer
+/// matches the other creates.
+#[tokio::test]
+async fn the_answer_names_the_created_run_in_the_create_envelope() {
+    let app = TestApp::new();
+    seed_schedule(&app.fake, "nightly", false);
+    for (attempt, expected_status) in [("create", 201), ("replay", 200)] {
+        let answer = app
+            .post(
+                &format!("/api/v1/namespaces/{NS_A}/backups"),
+                Some(KEY),
+                &from_schedule(),
+            )
+            .await;
+        assert_eq!(
+            answer.status,
+            expected_status,
+            "{attempt}: {}",
+            answer.text()
+        );
+        let body = answer.json();
+        let members: BTreeSet<&str> = body
+            .as_object()
+            .expect("an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            members,
+            BTreeSet::from(["requestId", "replayed", "item", "schedule"]),
+            "{attempt}: the create envelope every create route answers with, plus `schedule`"
+        );
+        let item = &body["item"];
+        let name = item["name"].as_str().unwrap_or_default();
+        let stored = app
+            .fake
+            .object("backups", NS_A, name)
+            .unwrap_or_else(|| panic!("{attempt}: the answer names `{name}`, which is not stored"));
+        for (field, want) in [
+            ("name", &stored["metadata"]["name"]),
+            ("namespace", &stored["metadata"]["namespace"]),
+            ("uid", &stored["metadata"]["uid"]),
+            ("resourceVersion", &stored["metadata"]["resourceVersion"]),
+        ] {
+            let got = item[field].as_str().unwrap_or_default();
+            assert!(
+                !got.is_empty() && Some(got) == want.as_str(),
+                "{attempt}: `item.{field}` is `{got}` and the stored object's is {want}. A \
+                 console names the run from this answer, and a run it cannot name is one a \
+                 person cannot follow"
+            );
+        }
+    }
+    assert_eq!(app.fake.count("backups", NS_A), 1);
+    app.fake.assert_strict();
+}
+
 /// **`same_key_same_body_returns_200_and_uid`** (D1 §12, double click).
 ///
 /// Two clicks 40 ms apart send the same key and the same body. The second is

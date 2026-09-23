@@ -741,6 +741,17 @@ because the request hash covers the body as sent and the replay returns the run
 that was created rather than a fresh copy of today's policy. Same key and a
 different body is `409 idempotency_conflict`. A new key is a new, deliberate run.
 
+**The answer names the run.** `201` (or `200` with `replayed: true`) carries
+`{requestId, replayed, item, schedule?}` — the same `{requestId, replayed,
+item}` envelope every create route answers with, plus `schedule` for a
+from-schedule run. `item` is the created `Backup`'s projection, so the run's
+identity is `item.name`, `item.namespace`, `item.uid` and
+`item.resourceVersion`, read from the object the API server stored (on a
+replay, the stored object — never a rebuild). A console names and links the run
+from `item`; there is no second, top-level copy of the name. The idempotency
+record hashes the request as sent, never the response, so the answer's shape is
+not part of what makes a replay a replay.
+
 **The schedule's state never blocks the run** (and the response says so instead
 of hiding it). A suspended schedule stops future *slots*, not people: the run is
 created, `spec.suspend` is untouched, and `schedule.suspended` comes back `true`.
