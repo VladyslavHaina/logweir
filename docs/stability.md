@@ -1093,7 +1093,16 @@ in the environment: a rollout that upgraded one and not the other is refused rat
   `Store::put_create_only` under Global Constraint 6's `logweir/` root. **"Already exists" counts as
   write-authorised**: S3 and MinIO authorise a `PUT` before they evaluate the `If-None-Match`
   precondition, so a 412 proves the grant. It is reported as `MarkerAlreadyPresent` rather than
-  `MarkerWritten`, because "I wrote it" and "it was already there" are different facts.
+  `MarkerWritten`, because "I wrote it" and "it was already there" are different facts. **The
+  marker is written as the destination's `evidenceWrite` grant.** A plan whose destination
+  separates that grant from the checked one carries `evidenceWrite: {credentials: static |
+  workloadIdentity, secretName | serviceAccountName}` — a reference, never a value — and the
+  runner builds the marker handle from `LOGWEIR_EVIDENCE_AWS_*` or the injected identity only,
+  never from the destination grant's `AWS_*`; a projected variable that is missing is
+  `CredentialSecretKeyMissing`, not a fall-back. That handle is used for the one put and nothing
+  else. An absent `evidenceWrite` means the two grants are one, and such a plan is byte-identical to
+  what earlier controllers rendered; an older runner refuses a plan that carries the field (exit 3,
+  `deny_unknown_fields`).
 * It **never creates, alters or deletes a topic.** The restore preflight's collision answer is
   targeted metadata plus a `CreateTopics` with `validate_only = true`; the execution path's probe
   topic has no counterpart here.

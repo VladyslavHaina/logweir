@@ -527,7 +527,7 @@ grant actually needs, measured*. This is a set to lock down to.
 | `archiveRead` | `s3:ListBucket` (condition `s3:prefix` in `<prefix>/*`), `s3:GetObject` | the bucket; `arn:aws:s3:::<bucket>/<prefix>/*` |
 | `evidenceWrite` | `s3:PutObject` (conditional create) | `arn:aws:s3:::<bucket>/logweir/*` |
 | `evidenceRead` | `s3:GetObject` | `arn:aws:s3:::<bucket>/logweir/*` |
-| write probe (opt-in) | `s3:PutObject` | `arn:aws:s3:::<bucket>/logweir/readiness/*` |
+| write probe (opt-in; run as the `evidenceWrite` grant, already inside its `logweir/*`) | `s3:PutObject` | `arn:aws:s3:::<bucket>/logweir/readiness/*` |
 | `RecoveryCatalog` sync | `s3:ListBucket` (condition `s3:prefix` in `logweir/*`), `s3:GetObject` | the bucket; `arn:aws:s3:::<bucket>/<prefix>/*` AND `arn:aws:s3:::<bucket>/logweir/*` |
 
 **`s3:AbortMultipartUpload` and `s3:GetBucketLocation` are in no row**, because

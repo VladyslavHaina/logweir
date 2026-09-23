@@ -1388,8 +1388,9 @@ pub enum DestinationRoleDto {
 pub enum WriteProbeDto {
     /// No object is ever written by a readiness test.
     Disabled,
-    /// A destination test may create ONE marker object under the
-    /// destination's own prefix. It is never deleted.
+    /// A destination test (or a backup readiness check) may create ONE
+    /// marker object, `logweir/readiness/<destinationUid>.json`, as the
+    /// destination's evidence-write grant. It is never overwritten or deleted.
     CreateOnlyMarker,
 }
 

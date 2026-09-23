@@ -537,15 +537,27 @@ is not needed by `evidenceWrite`**, whose puts are create-only; and
 **`s3:GetBucketLocation` is not needed by any role**, because the engine and
 the store are given an explicit region and never ask the bucket for one.
 
-**Two of these rows are about a principal other than the one their name
-suggests, and this is where that is said.** `destination.evidenceWritable`
-runs inside a check pod, and a check pod is projected exactly ONE credential
-for its destination — the archive grant, as the unprefixed `AWS_ACCESS_KEY_ID`
-with no `LOGWEIR_EVIDENCE_AWS_*` beside it. So the readiness write probe
-measures whether the ARCHIVE principal may create under `logweir/*`, and on a
-destination that separates `evidenceWrite` it says nothing at all about that
-grant. The `evidenceWrite` row below is therefore measured where the grant is
-really used: a run writing its own signed receipt.
+**The write probe is the `evidenceWrite` principal's, and this is where that is
+said.** `destination.evidenceWritable` creates its marker AS the destination's
+`evidenceWrite` grant. When that grant is the one the check's destination
+credential already came from (no `spec.access.evidenceWrite`, which falls back to
+`archiveWrite`), nothing second is projected; when it is a different Secret or
+ServiceAccount, the check plan names it (`evidenceWrite: {credentials, secretName
+| serviceAccountName}`, references only) and the check pod is projected its keys
+as `LOGWEIR_EVIDENCE_AWS_*` beside the unprefixed `AWS_*`, or runs as its
+ServiceAccount. The row carries the fact `grant=evidenceWrite` or
+`grant=destination` and names the principal. The probe asks that principal for
+exactly one create-only `PUT` of `logweir/readiness/<destinationUid>.json` — no
+read, no list, no delete — so the `write probe` row's `s3:PutObject` on
+`logweir/readiness/*` is already inside `evidenceWrite`'s own `s3:PutObject` on
+`logweir/*`. **Builds before this one** projected only the archive grant into a
+check pod, so on a destination that separates `evidenceWrite` the row measured
+whether the ARCHIVE principal could create under `logweir/*` and said nothing
+about the evidence-write grant (defect PREFLIGHT-EVIDENCEWRITABLE-WRONG-PRINCIPAL);
+the `write probe` row above was measured by that build, with the policy on the
+destination's archive grant (`U6.writeProbe` in `e2e/k8s/d2/d2_live.py`, whose
+notes still describe the pre-fix behaviour). The `evidenceWrite` row itself is measured where the
+grant is really used: a run writing its own signed receipt.
 
 **And the `catalogSync` reader is not `archiveRead`, though it uses that
 grant.** A catalog walk opens the destination's `archiveRead` handle and then
@@ -7393,12 +7405,35 @@ stopped being about the current objects.
 readiness marker `logweir/readiness/<destinationUid>.json` — but **only** when
 the destination opts in with `spec.readiness.writeProbe: CreateOnlyMarker`. With
 the field absent or `Disabled` nothing is written and the row is
-execution-only with `WriteNotProbed`.
+execution-only with `WriteNotProbed`. The same rule holds for a `Backup`
+readiness check and for a `DestinationAccess` check that requests
+`EvidenceWrite` (the console's destination test requests it whenever the
+destination configures `evidenceWrite`).
 
-The opt-in is read from the object on every pass. It used to be hard-coded off,
-which gave an operator who had opted in a row whose message said their
-destination configured no probe — a status contradicting the spec, which is the
-defect this kind exists to close.
+The opt-in is read from the object on every pass, for both operations. It used
+to be hard-coded off, which gave an operator who had opted in a row whose message
+said their destination configured no probe — a status contradicting the spec,
+which is the defect this kind exists to close — and a `DestinationAccess` check
+kept that behaviour until defect DESTINATIONACCESS-IGNORES-WRITEPROBE: it asked
+about evidence writability and always answered `WriteNotProbed`, a check that
+could not fail.
+
+**The marker is written as the `evidenceWrite` principal.** When
+`spec.access.evidenceWrite` names a different Secret or ServiceAccount than the
+grant the check's destination credential was resolved for, the plan names that
+grant and the pod is projected it (see §7a, *The write probe is the
+`evidenceWrite` principal's*); the row's fact `grant=evidenceWrite` and its
+message say which principal answered. Two workload identities on two different
+ServiceAccounts cannot share one check pod: that is `destination.resolved` →
+`ExecutionContextConflict`, and no Job is created — the same refusal a `Backup`
+or `Restore` pod with those two grants meets. A `DestinationAccess` check that
+requests `ArchiveRead` resolves its destination credential for `archiveRead`
+even when `ArchiveWrite` is also requested (it used to take `archiveWrite`,
+which is never probed), so `destination.archiveListable` is the `archiveRead`
+principal's answer. **Still one credential for the READS:** on a
+`DestinationAccess` check that requests both `ArchiveRead` and `EvidenceRead`
+on a destination whose two read grants differ, `destination.evidenceReadable`
+is answered by the `archiveRead` principal (advisory; a known limit).
 
 ### 21.6 A restore preflight writes nothing
 
@@ -7610,9 +7645,9 @@ readiness check holds the submit*).
   requesting it would add a line and no information.
 - **`destination.evidenceReadable` is only requested when the destination
   configures an `evidenceRead` grant.** A check plan carries ONE credential for
-  its destination, so probing a role the object leaves unconfigured would
-  exercise the wrong credential and report a refusal about a grant nobody asked
-  for. Absent means verification is `NotAttempted` (§7b), and the advisory row
+  its destination's READS (the marker write carries its own, §21.5), so probing
+  a role the object leaves unconfigured would exercise the wrong credential and
+  report a refusal about a grant nobody asked for. Absent means verification is `NotAttempted` (§7b), and the advisory row
   is then simply absent.
 - **The binding covers no credential Secret and no recovery-point topic set** —
   see §21.4.
@@ -7627,6 +7662,21 @@ what it does when it is `ready`, too. Nothing on an execution path reads one,
 so no `Backup`, `Restore` or `BackupSchedule` behaves differently on either
 side of the upgrade. An absent `status.binding` means "never bound" and a
 consumer must treat the result as inapplicable.
+
+**The evidence-write grant in a check plan (mixed versions).** A controller from
+this build adds `request.{operationReadiness,destinationAccess}.evidenceWrite` to
+a check plan only when the plan writes the marker AND the destination's
+`evidenceWrite` grant differs from the checked grant; every other plan is
+byte-identical to what earlier controllers rendered. An **older runner** handed a
+plan that carries the field refuses it at startup (`deny_unknown_fields`,
+`CheckContractMismatch`, exit 3) — the `Preflight` lands `phase: Failed` and
+nothing is written as the wrong principal; upgrade the runner image with the
+controller. A **newer runner** handed a plan from an older controller (no field)
+writes the marker with the destination grant, exactly as before, which on a
+separated destination is the old wrong-principal answer until the controller is
+upgraded. A `DestinationAccess` `Preflight` against an opted-in destination
+starts writing the marker after the upgrade; roll back the controller to stop
+it, or set `writeProbe: Disabled`.
 
 ## 22. The installation policy, the RBAC rows, and the console admission policy
 
