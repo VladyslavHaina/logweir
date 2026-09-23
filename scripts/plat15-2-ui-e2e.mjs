@@ -103,6 +103,10 @@ const VERIFIED_PREFIX = "verified";
 const CATALOG = "archive";
 const RESTORE_PREFIX = "p152-" + suffix + "-";
 const TAMPERED_PREFIX = "p152-" + suffix + "-forged-";
+// lab-refresh-9's rows (the PLAT-15.2 review's "rows the next lab refresh must run").
+const UNSIGNED_PREFIX = "p152-" + suffix + "-unsigned-";
+const REVOKED_PREFIX = "p152-" + suffix + "-revoked-";
+const TRUST_POLICY = "p152-" + suffix;
 
 const result = {
   harness: "scripts/plat15-2-ui-e2e.mjs",
@@ -915,17 +919,21 @@ async function main() {
     const pfRequest = requests.filter((r) => r.url.indexOf("/preflights") !== -1)
       .map((r) => r.body).join("\n");
     check(pfRequest.indexOf("\"catalogPoint\"") !== -1, "the console named the catalog point");
+    // THE REFRESHED LAB'S BRANCH, REQUIRED (lab-refresh-9): the served Preflight
+    // CRD carries catalogPointRef, so the stored object keeps it and the
+    // controller answers the recovery point's row about the catalog point.
+    check(storedRef !== null && storedRef.catalog === CATALOG && storedRef.pointId === point.pointId,
+      "the stored Preflight does not carry the catalog point (a pruned catalogPointRef): " +
+        JSON.stringify(storedRef));
+    check(rpRow !== null && rpRow.state === "ready" && rpRow.code === "CatalogPointSelectable",
+      "recoveryPoint.state is not ready/CatalogPointSelectable: " + JSON.stringify(rpRow));
     record("5. readiness runs through the normal Preflight path for the catalog point", {
       preflight: pfName, phase: preflight.status.phase,
       state: ((preflight.status || {}).result || {}).state,
       rows: rows.map((c) => c.id + "=" + c.state + "/" + c.code),
       recoveryPointRow: rpRow,
       catalogPointRefStored: storedRef,
-      note: storedRef === null
-        ? "the shared lab's Preflight CRD predates catalogPointRef, so the API server pruned it " +
-          "and the lab controller reports no recoveryPoint.state row; the row is proved by " +
-          "weirkeeper's tests and owed to the next lab refresh"
-        : "the stored object carries the reference",
+      note: "the stored object carries the reference and the controller answered its row",
     });
 
     // ==== control: the API refuses a readiness check naming two points ======
@@ -1195,6 +1203,212 @@ async function main() {
     record("8. a repeated import of the same archive yields the same point ids", {
       before: idsBefore, after: idsAfter });
 
+
+    // ==== lab-refresh-9 rows: P10, an unsigned receipt, a revoked signer ====
+    // The PLAT-15.2 review's rows for a lab whose controller, CRDs and runner
+    // carry the branch. Each needs the real API server, the real controller or
+    // the real runner image; none can be proved by a fixture. The revoked-key
+    // rows create a cluster-scoped TrustPolicy over DR only (owner-labelled,
+    // deleted in `cleanup`): run this harness under the cluster lock.
+    const catalogCheckBody = () => ({
+      operation: "restore",
+      restore: { planBytes: planBytes, planHash: "sha256:" + sha256(planBytes),
+        target: "restore-target", sourceDestination: DESTINATION, evidenceDestination: DESTINATION,
+        catalogPoint: { catalog: CATALOG, pointId: point.pointId } },
+    });
+    const catalogCheck = async (label) => {
+      const made = await apiCall("POST", DR, "/preflights", catalogCheckBody(), "p152-" + label + "-" + suffix);
+      check(made.status === 201 || made.status === 200 || made.status === 202,
+        label + ": the readiness create answered " + made.status + " " + JSON.stringify(made.body).slice(0, 400));
+      const name = ((made.body || {}).item || {}).name || ((made.body || {}).item || {}).id;
+      check(typeof name === "string" && name.length > 0, label + ": no Preflight name in " +
+        JSON.stringify(made.body).slice(0, 400));
+      const pf = await waitFor(label + ": the Preflight to finish", 240, 2000, () => {
+        const got = kubeJson(["-n", DR, "get", "preflight", name]);
+        return ["Completed", "Failed", "Cancelled"].includes(String((got.status || {}).phase || "")) ? got : null;
+      });
+      artifact("dr/lr9-" + label + "-preflight.json", { metadata: pf.metadata, spec: pf.spec, status: pf.status });
+      return { name: name, row: ((((pf.status || {}).result || {}).checks) || [])
+        .find((c) => c.id === "recoveryPoint.state") || null };
+    };
+    const signedRestore = async (label, prefix) => {
+      const plan = planBytes.split("prefix: \"" + RESTORE_PREFIX + "\"").join("prefix: \"" + prefix + "\"");
+      check(plan !== planBytes && plan.indexOf(point.receiptSha256) !== -1,
+        label + ": the plan is the reviewed one, bound to the same receipt, under a new prefix");
+      const planPath = join(WORK_DIR, "approval", label + ".yaml");
+      writeFileSync(planPath, plan);
+      const approved = spawnSync(LOGWEIR_BIN, ["drill", "approve", "--spec", planPath,
+        "--key", APPROVER_KEY, "--approver", "plat15-2-live", "--ticket", "PLAT-15.2-" + label,
+        "--subject-kind", "Restore", "--out", join(WORK_DIR, "approval", label + ".json")],
+      { encoding: "utf8", timeout: 120000 });
+      check(approved.status === 0, label + ": drill approve exited " + approved.status);
+      const hash = "sha256:" + sha256(plan);
+      const approvalName = "apr-" + label + "-" + suffix;
+      const made = await apiCall("POST", DR, "/restores", {
+        planBytes: plan, planHash: hash, approvalRef: { name: approvalName },
+        sourceArchive: { url: "logweir-destination://" + DESTINATION },
+        sourceDestinationRef: { name: DESTINATION }, evidenceDestinationRef: { name: DESTINATION },
+        backupSetRef: point.backupId, pointInTime: restore.spec.pointInTime,
+        target: { clusterRef: { name: "restore-target" }, mode: "newTopic", topicNaming: { prefix: prefix } },
+        deadlineSeconds: 1800,
+      }, "p152-" + label + "-" + suffix);
+      check(made.status === 201, label + ": the Restore create answered " + made.status + " " +
+        JSON.stringify(made.body).slice(0, 400));
+      const name = made.body.item.name;
+      const obj = kubeJson(["-n", DR, "get", "restore", name]);
+      result.created.push({ namespace: DR, kind: "Restore", name: name, uid: obj.metadata.uid,
+        createdBy: "product API (lab-refresh-9 row " + label + ")" });
+      create(DR, { apiVersion: "logweir.dev/v1alpha1", kind: "Approval", metadata: owned(approvalName, DR),
+        spec: { approvalBytes: readFileSync(join(WORK_DIR, "approval", label + ".json"), "utf8"),
+          sidecarBytes: readFileSync(join(WORK_DIR, "approval", label + ".sig"), "utf8"),
+          planHash: hash, subjectRef: { kind: "Restore", name: name } } });
+      const done = await waitFor(label + ": the Restore to finish", 240, 2000, () => {
+        const r = kubeJson(["-n", DR, "get", "restore", name]);
+        return ["Succeeded", "Failed", "Cancelled"].includes(String((r.status || {}).phase || "")) ? r : null;
+      });
+      const jobName = ((done.status || {}).jobRef || {}).name || null;
+      const job = jobName ? kubeJson(["-n", DR, "get", "job", jobName]) : null;
+      const log = jobName ? kube(["-n", DR, "logs", "job/" + jobName], { expected: [0, 1], timeout: 60000 }).stdout : "";
+      artifact("dr/lr9-" + label + "-restore.json", { metadata: done.metadata, status: done.status });
+      artifact("dr/lr9-" + label + "-runner.log", log);
+      return { name: name, uid: obj.metadata.uid, done: done, job: job, log: log };
+    };
+    const refusedBeforeData = (outcome, prefix, needle) => ({
+      "the Restore failed": outcome.done.status.phase === "Failed",
+      "exit 3, a refusal": outcome.done.status.exitCode === 3,
+      ["the runner names " + needle]: outcome.log.indexOf(needle) !== -1,
+      "no data phase began (no progress-phase=0:admit)": outcome.log.indexOf("progress-phase=0:admit") === -1,
+      "the mapped topic was never created": !topicExists("kafka-target", prefix + SOURCE_TOPIC),
+    });
+    const lr9 = { rows: {} };
+
+    // P10, EVALUATED BY A REAL API SERVER: journey 5's stored Preflight with a
+    // Backup reference added is refused at admission with the CRD's message;
+    // the same object with only its catalog reference is accepted.
+    const p10Spec = JSON.parse(JSON.stringify(preflight.spec));
+    p10Spec.request.restore.recoveryPointRef = { name: "nothing" };
+    const p10 = kube(["-n", DR, "create", "-f", "-"], { expected: [0, 1],
+      input: JSON.stringify({ apiVersion: "logweir.dev/v1alpha1", kind: "Preflight",
+        metadata: owned("p152-p10-both-" + suffix, DR), spec: p10Spec }) });
+    const only = kube(["-n", DR, "create", "-f", "-"], { expected: [0, 1],
+      input: JSON.stringify({ apiVersion: "logweir.dev/v1alpha1", kind: "Preflight",
+        metadata: owned("p152-p10-catalog-" + suffix, DR), spec: preflight.spec }) });
+    artifact("dr/lr9-p10.json", { both: { rc: p10.status, stderr: p10.stderr.slice(0, 1200) },
+      catalogOnly: { rc: only.status, stdout: only.stdout.slice(0, 400), stderr: only.stderr.slice(0, 400) } });
+    check(p10.status === 1 && p10.stderr.indexOf(
+      "set at most one of recoveryPointRef (a Backup) or catalogPointRef (a catalog point)") !== -1,
+    "P10: the API server did not refuse both refs with the P10 message: " + p10.stderr.slice(0, 600));
+    check(only.status === 0, "P10 control: a Preflight with only catalogPointRef was refused: " + only.stderr.slice(0, 600));
+    kube(["-n", DR, "delete", "preflight", "p152-p10-catalog-" + suffix, "--wait=false"], { expected: [0, 1] });
+    record("lr9-a. P10: a real API server refuses a Preflight naming a Backup and a catalog point, and admits one naming the catalog point alone", {
+      refusal: p10.stderr.trim().slice(0, 400) });
+    control("P10: the same stored spec with only catalogPointRef is admitted", { rc: only.status });
+
+    // AN UNSIGNED RECEIPT: the point's sidecar is moved aside AFTER approval
+    // is minted and before the Job runs; the runner must refuse before any data.
+    const sidecarKey = point.receiptKey.replace(/\.json$/, ".sig");
+    check(sidecarKey !== point.receiptKey && sidecarKey.endsWith(".receipt.sig"), "the sidecar key of " + point.receiptKey);
+    const aside = "lr9-aside/" + sidecarKey;
+    mcJob(SRC, "sig-aside", "mc mv \"adm/$S3_BUCKET/$SIG\" \"adm/$S3_BUCKET/$ASIDE\" && " +
+      "! mc stat \"adm/$S3_BUCKET/$SIG\" >/dev/null 2>&1 && echo moved-aside",
+    [{ name: "SIG", value: sidecarKey }, { name: "ASIDE", value: aside }]);
+    let unsigned;
+    try {
+      unsigned = await signedRestore("unsigned", UNSIGNED_PREFIX);
+    } finally {
+      mcJob(SRC, "sig-back", "mc mv \"adm/$S3_BUCKET/$ASIDE\" \"adm/$S3_BUCKET/$SIG\" && " +
+        "mc stat \"adm/$S3_BUCKET/$SIG\" >/dev/null && echo restored",
+      [{ name: "SIG", value: sidecarKey }, { name: "ASIDE", value: aside }]);
+    }
+    const unsignedClauses = Object.assign(refusedBeforeData(unsigned, UNSIGNED_PREFIX, "PointUntrusted"), {
+      "the refusal says the receipt carries no signature": unsigned.log.indexOf("carries no signature") !== -1 });
+    lr9.rows.unsigned = unsignedClauses;
+    check(Object.values(unsignedClauses).every(Boolean), "unsigned receipt: " + JSON.stringify(unsignedClauses));
+    record("lr9-b. an unsigned receipt: the runner refuses the bound point (exit 3, PointUntrusted, carries no signature) before any data moves", {
+      restore: unsigned.name, sidecarMovedAside: sidecarKey, clauses: unsignedClauses });
+
+    // A REVOKED SIGNER. DR gets a TrustPolicy naming the roster's signing key
+    // (the point's signer) Active and the lab approver key for approvals; the
+    // catalog re-syncs under it (the control: ready/CatalogPointSelectable).
+    // The signer is then revoked for compromise WITHOUT a re-sync.
+    const roster = kubeJson(["get", "trustroster", "default"]);
+    const signer = (roster.spec.signingKeys || []).find((k) => k.keyId === point.signerKeyId);
+    const approver = (roster.spec.approverKeys || [])[0];
+    check(signer !== undefined && approver !== undefined, "the point's signer and the approver key are the roster's");
+    const policyKey = (k, usage, state, extra) => Object.assign({ keyId: k.keyId, spkiPem: k.spkiPem,
+      algorithm: "p256", principal: { id: k.subject || "lab@scram-local.invalid", display: "lab " + usage },
+      usages: [usage], state: state, notBefore: "2026-01-01T00:00:00Z", notAfter: "2027-01-01T00:00:00Z" }, extra || {});
+    const trustPolicy = (signerState, extra) => ({ apiVersion: "logweir.dev/v1alpha1", kind: "TrustPolicy",
+      metadata: { name: TRUST_POLICY, labels: LABELS },
+      spec: { namespaces: [DR], keys: [policyKey(signer, "EvidenceSigning", signerState, extra),
+        policyKey(approver, "GovernedApproval", "Active")] } });
+    kube(["apply", "-f", "-"], { input: JSON.stringify(trustPolicy("Active")) });
+    result.created.push({ kind: "TrustPolicy", name: TRUST_POLICY, createdBy: "kubectl (lab-refresh-9 rows)" });
+    kube(["-n", DR, "patch", "recoverycatalog", CATALOG, "--type=merge", "-p",
+      JSON.stringify({ spec: { syncRequest: "policy-" + suffix } })]);
+    const underPolicy = await waitFor("the sync under the TrustPolicy", 180, 2000, () => {
+      const c = kubeJson(["-n", DR, "get", "recoverycatalog", CATALOG]);
+      const st = c.status || {};
+      const synced = (st.conditions || []).find((x) => x.type === "Synced");
+      return st.observedSyncRequest === "policy-" + suffix && synced && synced.status === "True" ? c : null;
+    });
+    const trustCondition = ((underPolicy.status || {}).conditions || []).find((x) => x.type === "TrustAvailable") || null;
+    artifact("dr/lr9-catalog-under-policy.json", { status: underPolicy.status });
+    const beforeRevoke = await catalogCheck("revoke-control");
+    check(beforeRevoke.row !== null && beforeRevoke.row.state === "ready" && beforeRevoke.row.code === "CatalogPointSelectable",
+      "revoked-key control: before the revocation the point is not ready/CatalogPointSelectable: " +
+        JSON.stringify(beforeRevoke.row));
+    control("revoked-key: before the revocation the catalog point is ready/CatalogPointSelectable under the TrustPolicy",
+      { preflight: beforeRevoke.name, row: beforeRevoke.row, trustAvailable: trustCondition });
+    const at = new Date().toISOString().replace(/\.\d+Z$/, "Z");
+    kube(["apply", "-f", "-"], { input: JSON.stringify(trustPolicy("Revoked", { retiredAt: at, revokedAt: at,
+      revocationEffectiveFrom: "2026-09-01T00:00:00Z", revocationReason: "KeyCompromise" })) });
+    await pause(5000);
+    const afterRevoke = await catalogCheck("revoked");
+    const revokedPreflight = {
+      "recoveryPoint.state is notReady/CatalogPointSignerUntrusted":
+        afterRevoke.row !== null && afterRevoke.row.state === "notReady" && afterRevoke.row.code === "CatalogPointSignerUntrusted",
+      "it names the key": afterRevoke.row !== null && JSON.stringify(afterRevoke.row).indexOf(signer.keyId.slice(0, 12)) !== -1,
+      "it names Revoked": afterRevoke.row !== null && JSON.stringify(afterRevoke.row).indexOf("Revoked") !== -1,
+    };
+    lr9.rows.revokedPreflight = revokedPreflight;
+    check(Object.values(revokedPreflight).every(Boolean), "revoked-key Preflight: " + JSON.stringify(afterRevoke.row));
+    record("lr9-c. a revoked signer's catalog point is refused by the Preflight (CatalogPointSignerUntrusted, naming the key and Revoked), with no re-sync", {
+      preflight: afterRevoke.name, row: afterRevoke.row, clauses: revokedPreflight });
+    const revoked = await signedRestore("revoked", REVOKED_PREFIX);
+    let bundle = null;
+    let keysDigestEnv = null;
+    if (revoked.job !== null) {
+      const podSpec = revoked.job.spec.template.spec;
+      keysDigestEnv = [].concat(...(podSpec.containers || []).map((c) => c.env || []))
+        .find((e) => e.name === "LOGWEIR_EXECUTION_EVIDENCE_KEYS_SHA256") || null;
+      for (const volume of (podSpec.volumes || [])) {
+        const cmName = (volume.configMap || {}).name || null;
+        const projected = ((volume.projected || {}).sources || []).map((src) => (src.configMap || {}).name).filter(Boolean);
+        for (const name of [cmName].concat(projected).filter(Boolean)) {
+          const cm = kube(["-n", DR, "get", "configmap", name, "-o", "json"], { expected: [0, 1] });
+          if (cm.status === 0 && (JSON.parse(cm.stdout).data || {})["evidence-keys.json"]) {
+            bundle = { configMap: name, evidenceKeys: JSON.parse(JSON.parse(cm.stdout).data["evidence-keys.json"]) };
+          }
+        }
+      }
+    }
+    artifact("dr/lr9-revoked-bundle.json", { bundle: bundle, keysDigestEnv: keysDigestEnv });
+    const listed = JSON.stringify((bundle || {}).evidenceKeys || {});
+    const revokedRunner = Object.assign(refusedBeforeData(revoked, REVOKED_PREFIX, "PointUntrusted"), {
+      "a Job was rendered after the revocation": revoked.job !== null,
+      "its bundle's evidence-keys.json lists the signer as Revoked":
+        bundle !== null && listed.indexOf(signer.keyId) !== -1 && listed.indexOf("Revoked") !== -1,
+      "its env carries LOGWEIR_EXECUTION_EVIDENCE_KEYS_SHA256": keysDigestEnv !== null,
+      "the refusal names Revoked": revoked.log.indexOf("Revoked") !== -1,
+    });
+    lr9.rows.revokedRunner = revokedRunner;
+    check(Object.values(revokedRunner).every(Boolean), "revoked-key runner: " + JSON.stringify(revokedRunner));
+    record("lr9-d. a revoked signer's catalog point is refused by the runner (exit 3, PointUntrusted, Revoked) before any data moves", {
+      restore: revoked.name, job: revoked.job ? revoked.job.metadata.name : null, clauses: revokedRunner,
+      control: "journey 7: the same point with its signer trusted restored exit 0 and logged 'recovery point binding verified'" });
+    result.labRefresh9 = lr9;
+
     result.consoleErrors = consoleErrors;
     result.requests = requests.map((r) => ({ method: r.method, url: r.url,
       bodySha256: r.body ? sha256(r.body) : null }));
@@ -1224,7 +1438,21 @@ function cleanup() {
       result.cleanup.push({ namespace: ns, dump: String(dumpFailed.message) });
     }
   }
-  for (const topic of [RESTORE_PREFIX + SOURCE_TOPIC, TAMPERED_PREFIX + SOURCE_TOPIC]) {
+  try {
+    const tp = kube(["get", "trustpolicy", TRUST_POLICY, "-o", "json"], { expected: [0, 1] });
+    if (tp.status === 0) {
+      const live = JSON.parse(tp.stdout);
+      check((live.metadata.labels || {})["logweir.dev/test-owner"] === OWNER,
+        "refusing to delete TrustPolicy " + TRUST_POLICY + ": not this run's");
+      kube(["delete", "trustpolicy", TRUST_POLICY, "--wait=true"]);
+      result.cleanup.push({ trustPolicy: TRUST_POLICY, uid: live.metadata.uid,
+        deleted: kube(["get", "trustpolicy", TRUST_POLICY], { expected: [0, 1] }).status !== 0 });
+    }
+  } catch (tpFailed) {
+    result.cleanup.push({ trustPolicy: TRUST_POLICY, error: String(tpFailed.message).slice(0, 400) });
+  }
+  for (const topic of [RESTORE_PREFIX + SOURCE_TOPIC, TAMPERED_PREFIX + SOURCE_TOPIC,
+    UNSIGNED_PREFIX + SOURCE_TOPIC, REVOKED_PREFIX + SOURCE_TOPIC]) {
     try {
       check(topic.startsWith("p152-" + suffix + "-"), "only this run's topics are deleted");
       if (topicExists("kafka-target", topic)) {
