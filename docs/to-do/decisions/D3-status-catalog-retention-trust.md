@@ -1794,6 +1794,14 @@ Two consequences worth stating plainly for implementers:
    `RetentionPolicy` deletes nothing until an administrator both selects `Enforce` and approves a
    plan hash. An upgrade changes no existing behavior; a rollback leaves the objects inert.
 
+
+**Amendments (2026-09-23, `claude/ctl-batch-2` Tier-A review M1/RL2 and fix rounds).**
+- **§6.5, bucket-level refusal re-probes.** "Three consecutive failed runs set `EnforcementDegraded` and stop scheduling until the spec changes" is kept, with one exception. When EVERY per-point code of the last run is `VersionedBucket` or `VersionProbeRefused` (a refusal whose cause lies outside the object), one re-probe run is scheduled once that run's `finishedAt` is at least 24 h old. A failed re-probe re-stamps `finishedAt`. A re-probe deletes only if the refusal has cleared **and** the current plan digest is approved (or `requireApprovedPlan: false`). `EnforcementDegraded` states the exception, and `status.guarantees.ageExpiry` is `NotEnforced` while the budget is spent.
+- **§6.4 step 4.** `SharedSegment` protects any candidate that shares a backup set, a manifest key or a segment key (transitively) with a retained, skipped or location-less point.
+- **§6.5, shared sets.** A set whose points are all due is removed by ONE plan line naming the others in `co_point_ids`.
+- **§6.5, delete markers.** The worker never records a delete marker as a deletion. It reads the version id of its intent tombstone, a HEAD per key and a post-delete check object, and refuses with `VersionedBucket` when any of them shows versioning.
+- **§16.** "Object lock cannot be read" gains the versioned-bucket refusal and the accepted residual RET-VERSIONED-SUSPENDED-REWRITE (`Deleted` means the current object at each key was removed; noncurrent versions are the bucket's lifecycle responsibility).
+
 ---
 
 Documentation is licensed [CC-BY-4.0](../../LICENSE-docs).
