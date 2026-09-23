@@ -12,7 +12,13 @@ Global Constraint 30 allows one controller per cluster anyway.
 app.kubernetes.io/name: logweir
 app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
-helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version }}
+{{- /*
+A label value is at most 63 characters and ends alphanumeric. The PUBLISHED
+chart is `logweir-chart` at `<version>-sha-<40 hex>` on main (chart gap G4,
+`scripts/ci-images.sh chart`), 64 characters here, so the value is cut the way
+Helm's own scaffold cuts it. The full version stays in `helm list`.
+*/}}
+helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" | trimSuffix "." }}
 {{- include "logweir.environmentLabel" . }}
 {{- end -}}
 

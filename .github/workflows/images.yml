@@ -22,6 +22,8 @@ on:
         value: ${{ jobs.promote.outputs.ui_digest }}
       console_digest:
         value: ${{ jobs.promote.outputs.console_digest }}
+      chart_version:
+        value: ${{ jobs.promote.outputs.chart_version }}
 permissions:
   contents: read
 jobs:
@@ -196,6 +198,7 @@ jobs:
       controller_digest: ${{ steps.promote.outputs.controller_digest }}
       ui_digest: ${{ steps.promote.outputs.ui_digest }}
       console_digest: ${{ steps.promote.outputs.console_digest }}
+      chart_version: ${{ steps.chart.outputs.chart_version }}
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
@@ -211,3 +214,20 @@ jobs:
       - name: Publish complete image set
         id: promote
         run: bash scripts/ci-images.sh promote
+      # CHART GAP G4 — THE CHART, PUBLISHED BESIDE THE IMAGES IT NAMES, and
+      # only after they are public under TAG: `ci-images.sh chart` checks all
+      # four first. It is versioned WITH them (appVersion = TAG; version
+      # `<Chart.yaml version>-sha-<commit>` on main, `<semver>` on a release
+      # tag), its four image defaults are rewritten to `:TAG`, it is pushed to
+      # oci://registry-1.docker.io/$NS/logweir-chart with the same Docker Hub
+      # credentials the login above used, and the bytes the registry serves back
+      # are compared with the bytes pushed. The Helm version is the one CI's
+      # `check` job renders the chart with.
+      - uses: azure/setup-helm@v4
+        with: { version: v4.0.1 }
+      - name: Publish the chart beside the images
+        id: chart
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: bash scripts/ci-images.sh chart

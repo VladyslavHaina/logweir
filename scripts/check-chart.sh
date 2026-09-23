@@ -904,6 +904,75 @@ for case_file in scripts/approval-policy-refusals/*.values.yaml; do
   fi
 done
 
+# The three PoC-gap refusals the schema answers first are ALSO the template's
+# own, so a helm that skips the schema still refuses them by name.
+if [ -n "$skip_schema" ]; then
+  console_refuses "an issuer CA bundle with no key (template arms only)" "caBundle.key is empty" \
+    "$skip_schema" "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" "${SHARED_URL[@]}" \
+    --set api.console.oidc.caBundle.configMap=ca --set-string api.console.oidc.caBundle.key=
+  console_refuses "a hostAliases entry with no hostname (template arms only)" "at least one hostname" \
+    "$skip_schema" "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" "${SHARED_URL[@]}" \
+    --set "api.console.hostAliases[0].ip=10.96.0.50"
+  console_refuses "an OIDC egress peer with no pod selector (template arms only)" "oidcPeers entries need" \
+    "$skip_schema" "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" "${SHARED_URL[@]}" \
+    --set "api.console.networkPolicy.oidcPeers[0].namespace=traefik" \
+    --set "api.console.networkPolicy.oidcPeers[0].port=8443"
+fi
+
+# CHART GAP G4 — THE PUBLISHED PACKAGE, BUILT HERE WITH THE REAL HELM. The
+# publish step (`scripts/ci-images.sh chart`, images.yml's promote job) runs
+# only on a main push or a release tag; this arm builds the same package from
+# this tree, offline, and checks what an installer of it gets.
+echo "== 10. the chart package the publish step pushes =="
+pkg_sha="$(printf 'a%.0s' $(seq 1 40))"
+pkg_dir="$tmp/package"
+package="$(GITHUB_SHA="$pkg_sha" NS=vladyslavhaina TAG="sha-$pkg_sha" \
+  bash scripts/ci-images.sh chart-package "$pkg_dir" 2> "$tmp/package.err")"
+rc=$?
+if [ "$rc" -ne 0 ] || [ ! -f "$package" ]; then
+  echo "FAIL: scripts/ci-images.sh chart-package did not produce a package; rc=$rc" >&2
+  sed 's/^/      /' "$tmp/package.err" >&2
+  fail=1
+else
+  helm show chart "$package" > "$tmp/package-chart.yaml" 2>&1
+  helm template logweir "$package" -n "$NAMESPACE" --set api.enabled=true --set api.console.enabled=true \
+    --set api.console.mode=localAdmin --set api.console.keySecret=k --set ui.enabled=true \
+    > "$tmp/package-render.yaml" 2> "$tmp/package-render.err"
+  rc=$?
+  pkg_ok=1
+  if [ "$rc" -ne 0 ]; then
+    echo "FAIL: the packaged chart does not render; rc=$rc" >&2
+    sed 's/^/      /' "$tmp/package-render.err" >&2
+    pkg_ok=0
+  fi
+  for needle in "name: logweir-chart" "version: 0.1.0-sha-$pkg_sha" "appVersion: sha-$pkg_sha"; do
+    if ! grep -F -x -q -- "$needle" "$tmp/package-chart.yaml"; then
+      echo "FAIL: the package's Chart.yaml lacks \`$needle\`" >&2
+      pkg_ok=0
+    fi
+  done
+  for image in weirkeeper logweir logweir-console logweir-ui; do
+    if ! grep -F -q "docker.io/vladyslavhaina/$image:sha-$pkg_sha" "$tmp/package-render.yaml"; then
+      echo "FAIL: the packaged chart does not install $image at :sha-$pkg_sha" >&2
+      pkg_ok=0
+    fi
+  done
+  if grep -F -q ':latest' "$tmp/package-render.yaml"; then
+    echo "FAIL: the packaged chart still installs a :latest image" >&2
+    pkg_ok=0
+  fi
+  long_label="$(awk '/helm.sh\/chart:/ { v = $2; if (length(v) > 63) print v }' "$tmp/package-render.yaml" | head -1)"
+  if [ -n "$long_label" ]; then
+    echo "FAIL: a helm.sh/chart label is longer than 63 characters: $long_label" >&2
+    pkg_ok=0
+  fi
+  if [ "$pkg_ok" -eq 1 ]; then
+    echo "   ok: logweir-chart 0.1.0-sha-<commit>, appVersion sha-<commit>, the four images at that tag, labels <= 63"
+  else
+    fail=1
+  fi
+fi
+
 echo
 if [ "$fail" -ne 0 ]; then
   echo "FAIL: the chart is not what the tree says it is; the lines above name what drifted." >&2
