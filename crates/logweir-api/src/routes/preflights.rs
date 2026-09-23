@@ -47,6 +47,7 @@ use weirkeeper::crds::preflight::{
     RestorePreflightRequest as CrdRestoreRequest,
     SourceConnectionPreflightRequest as CrdSourceConnectionRequest, UidRef,
 };
+use weirkeeper::crds::recovery_catalog::RecoveryCatalog;
 use weirkeeper::crds::restore::Restore as RestoreCr;
 use weirkeeper::crds::trust_policy::TrustPolicy;
 use weirkeeper::crds::{ArchiveRef, LocalRef};
@@ -185,9 +186,10 @@ const fn is_terminal(state: PreflightState) -> bool {
 /// The kinds a `Preflight`'s `status.binding.referents[]` can name, and
 /// whether this service can read one.
 ///
-/// ALL EIGHT ARE READ. The reconciler records `KafkaCluster`,
-/// `BackupDestination`, `Backup`, `Restore`, `Approval` and `BackupSchedule`
-/// — namespaced `ProductResource`s this API already reads — plus two
+/// ALL NINE ARE READ. The reconciler records `KafkaCluster`,
+/// `BackupDestination`, `Backup`, `Restore`, `Approval`, `BackupSchedule` and
+/// `RecoveryCatalog` (a catalog point's catalog, PLAT-15.2) — namespaced
+/// `ProductResource`s this API already reads — plus two
 /// CLUSTER-SCOPED trust referents: `TrustRoster/default` whenever it exists
 /// (since `4c4d2ed`), and the namespace's governing `TrustPolicy`. Both trust
 /// kinds are compared by uid and generation like every other referent
@@ -210,6 +212,35 @@ pub const REFERENT_KIND_RESTORE: &str = "Restore";
 pub const REFERENT_KIND_APPROVAL: &str = "Approval";
 /// See [`REFERENT_KIND_KAFKA_CLUSTER`].
 pub const REFERENT_KIND_SCHEDULE: &str = "BackupSchedule";
+/// See [`REFERENT_KIND_KAFKA_CLUSTER`]. The catalog a catalog-point restore
+/// check names (weirkeeper `controllers/preflight.rs`, "a catalog point"),
+/// recorded by uid alone — see [`UID_BOUND_KINDS`].
+pub const REFERENT_KIND_RECOVERY_CATALOG: &str = "RecoveryCatalog";
+
+/// The kinds the controller records WITHOUT a generation, and so the only
+/// kinds this service compares by uid alone.
+///
+/// `logweir_core::check_contract::Referent::generation` is `None` "for a kind
+/// whose generation is not meaningful", and weirkeeper's reconciler records
+/// exactly these three that way: the recovery-point `Backup` and the `Approval`
+/// (both spec-immutable by CEL, so their generation never moves), and a catalog
+/// point's `RecoveryCatalog` (PLAT-15.2). The controller's own
+/// `stale_against_status` compares all three by uid alone too — its current
+/// side records them with no generation either — so the API and the
+/// controller agree, and a catalog recreated under the same name still
+/// differs by uid.
+///
+/// A CLOSED LIST, ON PURPOSE (PLAT-08.2 review L4). Any OTHER kind recorded
+/// without a generation is reported `unverifiable` with
+/// [`BASIS_GENERATION_NOT_RECORDED`], never compared by uid alone: a mutable
+/// kind (`BackupDestination`, `KafkaCluster`, a `TrustPolicy`) whose edits are
+/// silently ignored would read as "unchanged" when nobody compared its
+/// revision.
+pub const UID_BOUND_KINDS: [&str; 3] = [
+    REFERENT_KIND_BACKUP,
+    REFERENT_KIND_APPROVAL,
+    REFERENT_KIND_RECOVERY_CATALOG,
+];
 /// See [`REFERENT_KIND_KAFKA_CLUSTER`]. Cluster-scoped; only `default` is read.
 pub const REFERENT_KIND_TRUST_ROSTER: &str = "TrustRoster";
 /// See [`REFERENT_KIND_KAFKA_CLUSTER`]. Cluster-scoped.
@@ -225,6 +256,10 @@ pub const BASIS_KIND_NOT_READABLE: &str =
 /// compare — and it is reported, never skipped.
 pub const BASIS_ROSTER_NOT_DEFAULT: &str =
     "this service reads only the TrustRoster named `default`, so this roster's revision cannot be compared";
+/// `basis` for a referent of a generation-bearing kind that was recorded
+/// without one. See [`UID_BOUND_KINDS`].
+pub const BASIS_GENERATION_NOT_RECORDED: &str =
+    "the check recorded no generation for this kind, so its revision cannot be compared";
 /// `basis` for a referent whose read failed.
 pub const BASIS_READ_FAILED: &str =
     "the object could not be read, so its revision cannot be compared";
@@ -365,6 +400,9 @@ async fn read_one_referent(
         REFERENT_KIND_APPROVAL => revision::<ApprovalCr>(state, namespace, &referent.name).await,
         REFERENT_KIND_SCHEDULE => {
             revision::<BackupSchedule>(state, namespace, &referent.name).await
+        }
+        REFERENT_KIND_RECOVERY_CATALOG => {
+            revision::<RecoveryCatalog>(state, namespace, &referent.name).await
         }
         // THE TWO CLUSTER-SCOPED TRUST REFERENTS. The check's namespace does
         // not enter either read: a cluster-scoped object has none.
@@ -569,6 +607,31 @@ fn staleness(
                 ));
             }
             ReferentReading::Live { uid, generation } => {
+                // A REFERENT RECORDED WITHOUT A GENERATION IS BOUND BY UID
+                // ALONE — BUT ONLY FOR THE KINDS THE CONTROLLER RECORDS THAT
+                // WAY. `logweir_core::check_contract::Referent::generation`
+                // is `None` "for a kind whose generation is not meaningful" —
+                // the controller records the recovery-point `Backup`, the
+                // `Approval` and a catalog point's `RecoveryCatalog` that way
+                // — so the live side is compared on the same terms. Comparing
+                // a live `Some(n)` against a recorded `None` reported
+                // `referentChanged` for EVERY restore check that names a
+                // recovery point, on every re-read (found by PLAT-08.2's live
+                // journey); a recreated object still differs by uid and is
+                // still reported. Any other kind without a generation is
+                // `unverifiable` (see [`UID_BOUND_KINDS`]).
+                let current_generation = match referent.generation {
+                    Some(_) => *generation,
+                    None if UID_BOUND_KINDS.contains(&referent.kind.as_str()) => None,
+                    None => {
+                        unverifiable.push(StaleReasonView::unverifiable(
+                            Some(crate::validate::bounded(&referent.kind, 128)),
+                            Some(crate::validate::bounded(&referent.name, 253)),
+                            BASIS_GENERATION_NOT_RECORDED,
+                        ));
+                        continue;
+                    }
+                };
                 recorded_referents.push(core_referent(
                     &referent.kind,
                     namespace,
@@ -576,22 +639,12 @@ fn staleness(
                     referent.uid.as_deref().unwrap_or_default(),
                     referent.generation,
                 ));
-                // A REFERENT RECORDED WITHOUT A GENERATION IS BOUND BY UID
-                // ALONE. `logweir_core::check_contract::Referent::generation`
-                // is `None` "for a kind whose generation is not meaningful" —
-                // the controller records the recovery-point `Backup` and the
-                // `Approval` that way — so the live side is compared on the
-                // same terms. Comparing a live `Some(n)` against a recorded
-                // `None` reported `referentChanged` for EVERY restore check
-                // that names a recovery point, on every re-read (found by
-                // PLAT-08.2's live journey); a recreated object still differs
-                // by uid and is still reported.
                 current_referents.push(core_referent(
                     &referent.kind,
                     namespace,
                     &referent.name,
                     uid,
-                    referent.generation.and(*generation),
+                    current_generation,
                 ));
             }
         }

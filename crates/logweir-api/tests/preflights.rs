@@ -1930,6 +1930,146 @@ async fn a_referent_recorded_without_a_generation_is_compared_by_uid_alone() {
     }
 }
 
+/// **A catalog point's `RecoveryCatalog` referent is READ and bound by uid
+/// alone** (PLAT-08.2 review M1).
+///
+/// The controller records `RecoveryCatalog/<catalog>` in every catalog-point
+/// restore check's binding with no generation (weirkeeper
+/// `controllers/preflight.rs`, "a catalog point"). This service had no read
+/// for the kind, so EVERY catalog-point check re-read as `unverifiable` →
+/// stale, and the console's submit-time re-read refused Create (live on
+/// lab-refresh-9, `ui/plat15-2/…/dr/gate-after-check.txt`). Now: the same
+/// catalog, whatever its generation, is unchanged and the verdict applies; a
+/// catalog recreated under the same name (a new uid) is `referentChanged`.
+///
+/// MUTANTS: drop the `RecoveryCatalog` arm in `read_one_referent` (the
+/// unchanged row turns `unverifiable`, stale); drop `RecoveryCatalog` from
+/// `UID_BOUND_KINDS` (the unchanged row turns `unverifiable`); compare the
+/// live generation against the recorded `None` (the unchanged row turns
+/// `referentChanged`).
+#[tokio::test]
+async fn a_catalog_referent_recorded_without_a_generation_is_read_and_compared_by_uid_alone() {
+    for (live_uid, changed, why) in [
+        (
+            "uid-archive",
+            false,
+            "the same RecoveryCatalog, whatever its generation",
+        ),
+        (
+            "uid-archive-recreated",
+            true,
+            "a RecoveryCatalog recreated under the same name",
+        ),
+    ] {
+        let app = TestApp::new();
+        let mut preflight = seed_preflight(
+            &app.fake,
+            NS_A,
+            "pf-catalog",
+            "Restore",
+            None,
+            Some(LOCAL_ADMIN_ACTOR),
+        );
+        preflight["status"]["binding"]["referents"] = json!([
+            {"kind": "KafkaCluster", "name": "target", "uid": "uid-target", "generation": 1},
+            {"kind": "RecoveryCatalog", "name": "archive", "uid": "uid-archive"}
+        ]);
+        app.fake.seed("preflights", NS_A, preflight);
+        seed_bound_referent(&app, "uid-target", 1);
+        // A generation the binding never recorded: a sync-interval edit moves
+        // it, and it is not what binds the point.
+        app.fake.seed(
+            "recoverycatalogs",
+            NS_A,
+            json!({
+                "metadata": {"name": "archive", "uid": live_uid, "generation": 7},
+                "spec": {"destinationRef": {"name": "primary"},
+                         "sync": {"deepCheck": "ManifestDigest", "intervalSeconds": 3600,
+                                  "maxObjectsPerRun": 100000, "mode": "Index", "viewLimit": 4}}
+            }),
+        );
+        let response = app
+            .get(&format!("/api/v1/namespaces/{NS_A}/preflights/pf-catalog"))
+            .await;
+        let item = response.json()["item"].clone();
+        let reasons = item["staleReasons"].as_array().unwrap();
+        let names_catalog = |reason: &str| {
+            reasons.iter().any(|r| {
+                r["reason"] == reason && r["kind"] == "RecoveryCatalog" && r["name"] == "archive"
+            })
+        };
+        assert!(
+            !names_catalog("unverifiable"),
+            "{why}: the catalog was not read: {reasons:?}"
+        );
+        assert_eq!(
+            names_catalog("referentChanged"),
+            changed,
+            "{why}: {reasons:?}"
+        );
+        assert_eq!(item["stale"], changed, "{why}: {reasons:?}");
+        assert_eq!(item["applicable"], !changed, "{why}: {reasons:?}");
+        app.fake.assert_strict();
+    }
+}
+
+/// **Uid-alone binding is for the three kinds the controller records that
+/// way, and no other** (PLAT-08.2 review L4).
+///
+/// A `KafkaCluster` or `BackupDestination` spec is mutable: a binding that
+/// recorded one without a generation cannot say whether it was edited since,
+/// so the verdict is `unverifiable` rather than "unchanged" — even when the
+/// uid matches. The three uid-bound kinds stay compared by uid (the rows
+/// above).
+///
+/// MUTANT: widen the rule back to any kind (`referent.generation.and(..)` for
+/// every kind) — the cluster below reads "unchanged" and the verdict applies.
+#[tokio::test]
+async fn a_mutable_referent_recorded_without_a_generation_is_unverifiable() {
+    for (kind, name) in [("KafkaCluster", "target"), ("BackupDestination", "primary")] {
+        let app = TestApp::new();
+        let mut preflight = seed_preflight(
+            &app.fake,
+            NS_A,
+            "pf-nogen",
+            "Restore",
+            None,
+            Some(LOCAL_ADMIN_ACTOR),
+        );
+        preflight["status"]["binding"]["referents"] =
+            json!([{"kind": kind, "name": name, "uid": "uid-same"}]);
+        app.fake.seed("preflights", NS_A, preflight);
+        // The live object exists with the SAME uid: only the missing recorded
+        // generation stands between this row and "unchanged".
+        if kind == "KafkaCluster" {
+            seed_bound_referent(&app, "uid-same", 4);
+        } else {
+            let mut destination = support::seed_destination(&app.fake, NS_A, name);
+            destination["metadata"]["uid"] = json!("uid-same");
+            app.fake.seed("backupdestinations", NS_A, destination);
+        }
+        let response = app
+            .get(&format!("/api/v1/namespaces/{NS_A}/preflights/pf-nogen"))
+            .await;
+        let item = response.json()["item"].clone();
+        assert_eq!(item["stale"], true, "{kind}: {}", item["staleReasons"]);
+        assert_eq!(item["applicable"], false, "{kind}");
+        let reason = item["staleReasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["reason"] == "unverifiable" && r["kind"] == kind && r["name"] == name)
+            .unwrap_or_else(|| panic!("{kind}: {}", item["staleReasons"]))
+            .clone();
+        assert_eq!(
+            reason["basis"],
+            logweir_api::routes::preflights::BASIS_GENERATION_NOT_RECORDED,
+            "{reason}"
+        );
+        app.fake.assert_strict();
+    }
+}
+
 // ======================================================================
 // PLAT-15.2 — a restore readiness check about a CATALOG point
 // ======================================================================
