@@ -33,7 +33,9 @@
 // the schedule detail offers no restore before a catalog lists the run; a
 // point id the catalog does not list is refused by the wizard with no plan; the
 // product API refuses a readiness check naming both a Backup and a catalog
-// point; and a Restore whose signed plan binds a receipt digest the archive
+// point; a point in time moved after the readiness check disables Create and
+// sends nothing (the other arm of the gate that a fresh check on the unchanged
+// point must leave OPEN -- row 5b); and a Restore whose signed plan binds a receipt digest the archive
 // does not hold is refused by the RUNNER before any data moves (exit 3,
 // PointBindingMismatch) -- its mapped topic is proved absent from the target.
 //
@@ -952,45 +954,94 @@ async function main() {
     control("a readiness check naming a Backup and a catalog point is refused (422)",
       { status: both.status, body: both.body });
 
-    // ==== a finding, not a pass: the wizard's readiness gate =================
-    // A DRAFT's readiness verdict is always `unknown` -- `approval.state` is
-    // `skipped/SubjectNotCreated` because no Restore exists yet
-    // (docs/kubernetes.md section 21.7) -- and `readinessRefusal` refuses every
-    // verdict that is not `ready`. So once a draft has been checked, the guided
-    // submit is disabled for that plan. That gate is PLAT-11.2's (outside this
-    // task); it is recorded here with its evidence, and the journey continues the
-    // way an operator can: a fresh load of the same point, the same two edits,
-    // the same bytes -- asserted by hash -- submitted with no check on screen.
+    // ==== the wizard's readiness gate on a CHECKED catalog point =============
+    // A GATE ASSERTION, NOT A FINDING (catalog-referent, PLAT-08.2 review M1).
+    // lab-refresh-9 recorded Create DISABLED here and attributed it to the
+    // closed DRAFT-PREFLIGHT-NEVER-READY; the evidence (`dr/gate-after-check.txt`)
+    // says otherwise: the product API had no read for the `RecoveryCatalog`
+    // referent every catalog-point check records, so the page's re-read answered
+    // `unverifiable (RecoveryCatalog/<catalog>)` -> stale, and the gate refused.
+    // With the referent read and bound by uid, a fresh check on an UNCHANGED
+    // catalog point must leave Create ENABLED -- the draft's only non-ready
+    // blocking row is `approval.state` skipped/SubjectNotCreated, which the gate
+    // admits since DRAFT-PREFLIGHT-NEVER-READY -- and one click must send exactly
+    // one Restore (journey 6 below). No fresh load, no unchecked submit.
     const checkedHash = await page.$eval("#plan-hash-value", (n) => n.textContent);
-    const gate = await page.evaluate(() => {
+    const gateOf = () => page.evaluate(() => {
       const b = document.querySelector("#create-restore");
-      return { disabled: b === null ? null : b.disabled,
+      const text = (sel) => ((document.querySelector(sel) || {}).innerText || "");
+      return { disabled: b === null ? null : b.disabled === true,
+        blocked: text("#readiness-blocked"), staleBanner: text("#readiness-stale"),
         said: document.body.innerText.slice(0, 20000) };
     });
-    result.findings = (result.findings || []).concat([{
-      finding: "WIZARD-READINESS-GATE-REFUSES-EVERY-CHECKED-DRAFT",
-      detail: "after a readiness check on a draft plan the create button is disabled, because " +
-        "a draft's aggregate is unknown (approval.state skipped/SubjectNotCreated) and the " +
-        "gate refuses anything but ready",
-      createDisabled: gate.disabled, aggregate: ((preflight.status || {}).result || {}).state,
-      planHash: checkedHash,
-    }]);
+    let gate = await gateOf();
+    // The page re-reads the started check every 2 s until it is terminal; give
+    // its last re-read time to land before judging the gate.
+    for (let i = 0; i < 30 && gate.disabled !== false; i += 1) {
+      await pause(1000);
+      gate = await gateOf();
+    }
     artifact("dr/gate-after-check.txt", gate.said);
-    const wizardUrl = page.url();
-    await openRoute(page, wizardUrl, "#catalog-topics", "the wizard, freshly loaded");
-    await page.fill("#catalog-topics", SOURCE_TOPIC);
-    await page.dispatchEvent("#catalog-topics", "change");
-    await waitForSelector(page, ".topic-box[data-topic=\"" + SOURCE_TOPIC + "\"]",
-      "the named topic in the subset, again");
-    await page.fill("#topic-prefix", RESTORE_PREFIX);
-    await page.dispatchEvent("#topic-prefix", "change");
+    check(gate.disabled === false && gate.blocked === "",
+      "after a fresh readiness check on an unchanged catalog point Create is still refused " +
+        "(a stale RecoveryCatalog referent reads `unverifiable`): " +
+        JSON.stringify({ disabled: gate.disabled, blocked: gate.blocked }).slice(0, 800));
+    check(gate.said.indexOf("RecoveryCatalog/" + CATALOG) === -1,
+      "the readiness verdict on screen still names RecoveryCatalog/" + CATALOG);
+    record("5b. a fresh check on an unchanged catalog point leaves Create enabled", {
+      preflight: pfName, planHash: checkedHash,
+      aggregate: ((preflight.status || {}).result || {}).state,
+      referents: ((preflight.status || {}).binding || {}).referents || [],
+      createDisabled: gate.disabled,
+    });
+
+    // ==== control: a CHANGED point in time refuses, and sends nothing =======
+    // The other arm of the same gate: move the point in time by one
+    // millisecond inside the window and the plan's bytes and hash move, so the
+    // check on screen is about another plan. Create must be DISABLED with the
+    // out-of-date banner, and no Restore may exist. Then the default comes back,
+    // the bytes and hash are the checked ones again, and the gate reopens.
+    const restoresBeforeGate = kubeJson(["-n", DR, "get", "restores"]).items.length;
+    const postsBeforeGate = requests.filter((r) => r.method === "POST" &&
+      r.url.indexOf("/restores") !== -1).length;
+    const moved = new Date(Date.parse(lastAccepted) - 1).toISOString();
+    await page.fill("#point-in-time", moved);
+    await page.dispatchEvent("#point-in-time", "change");
     await pause(800);
-    const reloadedBytes = await page.$eval("#plan-bytes", (n) => n.textContent);
-    check(reloadedBytes === planBytes, "the fresh load renders the same plan bytes");
+    const movedHash = await page.$eval("#plan-hash-value", (n) => n.textContent);
+    const movedGate = await gateOf();
+    await shot(page, "05b-changed-point-refused");
+    check(movedHash !== checkedHash, "moving the point in time did not move the plan hash");
+    check(movedGate.disabled === true && movedGate.staleBanner !== "",
+      "a changed point in time left Create enabled on a check about another plan: " +
+        JSON.stringify({ disabled: movedGate.disabled, blocked: movedGate.blocked,
+          staleBanner: movedGate.staleBanner }).slice(0, 800));
+    check(kubeJson(["-n", DR, "get", "restores"]).items.length === restoresBeforeGate &&
+      requests.filter((r) => r.method === "POST" && r.url.indexOf("/restores") !== -1).length ===
+        postsBeforeGate,
+      "a Restore was sent while the point in time differed from the checked plan");
+    control("a changed point in time makes the checked verdict about another plan: Create is " +
+      "disabled with the out-of-date banner and nothing is sent", {
+      checkedHash: checkedHash, movedHash: movedHash, pointInTime: moved,
+      blocked: movedGate.blocked, staleBanner: movedGate.staleBanner });
+    await page.fill("#point-in-time", lastAccepted);
+    await page.dispatchEvent("#point-in-time", "change");
+    await pause(800);
+    check(await page.$eval("#plan-bytes", (n) => n.textContent) === planBytes,
+      "restoring the default point in time restores the checked plan bytes");
     check(await page.$eval("#plan-hash-value", (n) => n.textContent) === checkedHash,
-      "and the same hash the readiness check was bound to");
+      "and the hash the readiness check was bound to");
+    const reopened = await gateOf();
+    check(reopened.disabled === false && reopened.blocked === "",
+      "the checked plan is back and Create is still refused: " +
+        JSON.stringify({ disabled: reopened.disabled, blocked: reopened.blocked }).slice(0, 800));
 
     // ==== journey 6: create the Restore, approve it on the console ==========
+    // ONE CLICK ON THE CHECKED PLAN, and the submit re-reads that check first
+    // (PLAT-08.2 `confirmReadiness`): the catalog referent must come back
+    // unchanged, or nothing is sent.
+    const postsBeforeSubmit = requests.filter((r) => r.method === "POST" &&
+      r.url.indexOf("/restores") !== -1).length;
     await page.click("#create-restore");
     await waitFor("the approvals page", 60, 1000, async () =>
       (await page.url()).indexOf("#/approvals") !== -1 ? true : null);
@@ -998,6 +1049,15 @@ async function main() {
       const items = kubeJson(["-n", DR, "get", "restores"]).items;
       return items.length === 1 ? items[0] : null;
     });
+    await pause(2000);
+    const restorePosts = requests.filter((r) => r.method === "POST" &&
+      r.url.indexOf("/restores") !== -1).slice(postsBeforeSubmit);
+    check(restorePosts.length === 1,
+      "the checked submit must send exactly one Restore, sent " + restorePosts.length);
+    check(kubeJson(["-n", DR, "get", "restores"]).items.length === 1,
+      "exactly one Restore exists after the checked submit");
+    check(restore.spec.planBytes === planBytes && "sha256:" + sha256(restore.spec.planBytes) === checkedHash,
+      "the Restore is the plan the readiness check was bound to");
     check(restore.spec.planBytes === planBytes, "the Restore carries the reviewed plan bytes");
     check(restore.spec.backupSetRef === point.backupId, "backupSetRef is the point's set");
     check((restore.spec.sourceDestinationRef || {}).name === DESTINATION,
@@ -1017,7 +1077,7 @@ async function main() {
     const sidecarBytes = readFileSync(join(WORK_DIR, "approval", "approval.sig"), "utf8");
     artifact("dr/approval.json", approvalBytes);
     artifact("dr/approval.sig", sidecarBytes);
-    // A SECOND FINDING. In console mode the product API mints the Restore's
+    // A FINDING. In console mode the product API mints the Restore's
     // name (`rst-...`), but the guided submit routes to the approval page of the
     // name the PAGE minted from the plan bytes (`restore-<8 hex>`), which does not
     // exist -- so that page offers no form. The submit and its routing are
