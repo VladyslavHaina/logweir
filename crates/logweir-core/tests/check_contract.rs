@@ -16,11 +16,12 @@ use logweir_core::check_contract::{
     CheckId, CheckOperation, CheckOutcome, CheckPlan, CheckPlanError, CheckPlanKind, CheckRequest,
     CheckResult, CheckResultError, CheckState, ConnectionPlan, CredentialMode,
     DestinationAccessRequest, DestinationPlan, EndFrame, EvidenceFetchRequest,
-    EvidenceObjectRequest, ExpectedSummary, FrameExpectations, Gating, OverallState, Referent,
-    RosterRef, SourceConnectionRequest, StaleReason, Stream, TopicEntry, TopicInventoryRequest,
-    TruncationReason, VisibilityBasis, VisibilitySignals, VisibilityState, CHECK_CONTRACT_VERSION,
-    CHECK_PLAN_CONTRACT, CHECK_RESULT_CONTRACT, FRAME_MAX_BYTES, MAX_CHECK_ENTRIES,
-    MESSAGE_MAX_CHARS, PART_MAX_BASE64_CHARS, REDACTED,
+    EvidenceObjectRequest, EvidenceWriteGrant, ExpectedSummary, FrameExpectations, Gating,
+    OperationReadinessRequest, OverallState, Referent, RosterRef, SourceConnectionRequest,
+    StaleReason, Stream, TopicEntry, TopicInventoryRequest, TruncationReason, VisibilityBasis,
+    VisibilitySignals, VisibilityState, CHECK_CONTRACT_VERSION, CHECK_PLAN_CONTRACT,
+    CHECK_RESULT_CONTRACT, FRAME_MAX_BYTES, MAX_CHECK_ENTRIES, MESSAGE_MAX_CHARS,
+    PART_MAX_BASE64_CHARS, REDACTED,
 };
 use logweir_core::destination::{
     Addressing, DestinationLocation, DestinationRole, StorageProvider, TransportSecurity,
@@ -346,6 +347,7 @@ fn a_destination_access_plan_needs_between_one_and_four_roles() {
             destination: destination(),
             roles: vec![DestinationRole::ArchiveRead],
             write_probe: false,
+            evidence_write: None,
         }),
     };
     assert!(plan.validate().is_ok());
@@ -354,6 +356,155 @@ fn a_destination_access_plan_needs_between_one_and_four_roles() {
     };
     r.roles.clear();
     assert!(plan.validate().is_err());
+}
+
+fn access_plan_with(
+    roles: Vec<DestinationRole>,
+    write_probe: bool,
+    evidence_write: Option<EvidenceWriteGrant>,
+) -> CheckPlan {
+    CheckPlan {
+        contract: CHECK_PLAN_CONTRACT.into(),
+        contract_version: CHECK_CONTRACT_VERSION,
+        subject_uid: "u".into(),
+        timeout_seconds: 120,
+        policy_digest: None,
+        request: CheckRequest::DestinationAccess(DestinationAccessRequest {
+            destination: destination(),
+            roles,
+            write_probe,
+            evidence_write,
+        }),
+    }
+}
+
+/// PREFLIGHT-EVIDENCEWRITABLE-WRONG-PRINCIPAL: the `evidenceWrite` grant rides
+/// ONLY on a plan that will use it, names exactly one reference, and names it
+/// as a Kubernetes object name. Every refusal here is a controller bug the
+/// runner refuses in step 4 (exit 3) rather than acts on.
+///
+/// MUTANT RP-4 (`check_contract.rs`): drop the `!write_probe` clause from
+/// `validate_evidence_write`. The first refusal below starts validating, and a
+/// plan that never writes would project a second credential into the pod for
+/// nothing.
+#[test]
+fn an_evidence_write_grant_rides_only_on_a_plan_that_writes_the_marker() {
+    let both = vec![DestinationRole::ArchiveRead, DestinationRole::EvidenceWrite];
+    let secret = EvidenceWriteGrant::static_secret("evidence-writer");
+    assert!(access_plan_with(both.clone(), true, Some(secret.clone()))
+        .validate()
+        .is_ok());
+    assert!(
+        access_plan_with(both.clone(), false, Some(secret.clone()))
+            .validate()
+            .is_err(),
+        "no probe, no second credential"
+    );
+    assert!(
+        access_plan_with(
+            vec![DestinationRole::ArchiveRead],
+            true,
+            Some(secret.clone())
+        )
+        .validate()
+        .is_err(),
+        "no EvidenceWrite role, no evidence-write credential"
+    );
+    let mut no_ref = secret.clone();
+    no_ref.secret_name = None;
+    assert!(access_plan_with(both.clone(), true, Some(no_ref))
+        .validate()
+        .is_err());
+    let mut two_refs = secret.clone();
+    two_refs.service_account_name = Some("runner".into());
+    assert!(access_plan_with(both.clone(), true, Some(two_refs))
+        .validate()
+        .is_err());
+    for bad in ["", "Evidence", "a_b", "-x", "x-", "a..b", &"a".repeat(254)] {
+        assert!(
+            access_plan_with(
+                both.clone(),
+                true,
+                Some(EvidenceWriteGrant::static_secret(bad))
+            )
+            .validate()
+            .is_err(),
+            "`{bad}` is not an object name"
+        );
+    }
+    assert!(access_plan_with(
+        both.clone(),
+        true,
+        Some(EvidenceWriteGrant::workload_identity("evidence-writer"))
+    )
+    .validate()
+    .is_ok());
+
+    // The same rules on the readiness kind.
+    let readiness = |write_probe: bool, grant: Option<EvidenceWriteGrant>| CheckPlan {
+        request: CheckRequest::OperationReadiness(Box::new(OperationReadinessRequest {
+            operation: CheckOperation::Backup,
+            connection: ConnectionPlan {
+                bootstrap_servers: vec!["kafka:9092".into()],
+                auth_mode: "plaintext".into(),
+                username: None,
+                password_env: None,
+                tls: None,
+                ca_file: None,
+                principal: "User:ANONYMOUS".into(),
+            },
+            destination: Some(destination()),
+            roles: vec![DestinationRole::ArchiveRead, DestinationRole::EvidenceWrite],
+            topics: Vec::new(),
+            signer_path: None,
+            write_probe,
+            evidence_write: grant,
+            skip_checks: Vec::new(),
+        })),
+        ..access_plan_with(both.clone(), false, None)
+    };
+    assert!(readiness(true, Some(secret.clone())).validate().is_ok());
+    assert!(readiness(false, Some(secret)).validate().is_err());
+}
+
+/// **Absent means the same grant, and absent is byte-identical.** A plan with
+/// no separate grant serialises with no `evidenceWrite` key at all, so every
+/// plan a destination WITHOUT a separated grant renders is the plan an older
+/// runner already parses; and the key an older runner does not know is
+/// refused by `deny_unknown_fields`, which is what makes a new plan handed to
+/// an old runner fail closed (exit 3) rather than run the marker as the wrong
+/// principal.
+#[test]
+fn an_absent_evidence_write_grant_is_not_serialised_and_an_unknown_one_is_refused() {
+    let both = vec![DestinationRole::ArchiveRead, DestinationRole::EvidenceWrite];
+    let plain = serde_json::to_string(&access_plan_with(both.clone(), true, None)).unwrap();
+    assert!(!plain.contains("evidenceWrite\""), "{plain}");
+
+    let separated = serde_json::to_value(access_plan_with(
+        both,
+        true,
+        Some(EvidenceWriteGrant::static_secret("evidence-writer")),
+    ))
+    .unwrap();
+    assert_eq!(
+        separated["request"]["destinationAccess"]["evidenceWrite"],
+        serde_json::json!({"credentials": "static", "secretName": "evidence-writer"}),
+        "the wire spelling, which names a reference and never a value"
+    );
+    // The old runner's view of this request is the struct WITHOUT the field;
+    // `deny_unknown_fields` on it is the property the mixed-version claim
+    // rests on, and it is asserted here on the grant itself.
+    let mut grant = separated["request"]["destinationAccess"]["evidenceWrite"].clone();
+    grant["accessKeyId"] = serde_json::json!("x");
+    assert!(
+        serde_json::from_value::<EvidenceWriteGrant>(grant).is_err(),
+        "a grant cannot smuggle a value field in"
+    );
+    let bogus = serde_json::json!({"credentials": "ambient", "secretName": "x"});
+    assert!(
+        serde_json::from_value::<EvidenceWriteGrant>(bogus).is_err(),
+        "an evidence write on the ambient chain is not spellable"
+    );
 }
 
 /// A `sourceConnection` plan carries ONE connection and there is no field on

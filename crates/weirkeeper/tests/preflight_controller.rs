@@ -4867,6 +4867,7 @@ fn runner_readiness_request() -> CheckRequest {
             topics: vec!["orders".to_string()],
             signer_path: Some("/signing/key.pem".to_string()),
             write_probe: true,
+            evidence_write: None,
             skip_checks: Vec::new(),
         },
     ))

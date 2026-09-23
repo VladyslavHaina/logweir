@@ -10,7 +10,10 @@
 //! defect SEC-ENVHTTP: a forwarded `AWS_ALLOW_HTTP=true` must not be able to
 //! put an approved TLS destination on plaintext. The only thing the
 //! environment ever supplies is the CREDENTIAL, and only through the named
-//! variables [`CredentialMode`] selects.
+//! variables [`CredentialMode`] selects — or, for the marker probe on a
+//! destination that separates its `evidenceWrite` grant, the named
+//! `LOGWEIR_EVIDENCE_AWS_*` variables [`EvidenceWriteCredentials`] selects
+//! ([`evidence_write_options`]).
 //!
 //! # The one key a check may write
 //!
@@ -38,7 +41,9 @@
 
 use std::time::Duration;
 
-use logweir_core::check_contract::{CheckCode, CredentialMode, DestinationPlan};
+use logweir_core::check_contract::{
+    CheckCode, CredentialMode, DestinationPlan, EvidenceWriteCredentials, EvidenceWriteGrant,
+};
 use logweir_core::destination::{DestinationRole, EVIDENCE_PREFIX};
 use logweir_core::engine::StorageUrl;
 use logweir_engine_oso::storage::{
@@ -377,11 +382,25 @@ pub fn prefix_for(plan: &DestinationPlan, role: DestinationRole) -> String {
 /// # Errors
 /// [`StoreFailure`] when the projected CA file cannot be read.
 pub fn options_for(plan: &DestinationPlan, budget: Duration) -> Result<StoreOptions, StoreFailure> {
-    let mut opts = match plan.credentials {
+    let opts = match plan.credentials {
         CredentialMode::Static => StoreOptions::static_from_env(),
         CredentialMode::WorkloadIdentity => StoreOptions::workload_identity(),
         CredentialMode::Ambient => StoreOptions::ambient(),
     };
+    finish_options(plan, opts, budget)
+}
+
+/// The destination's trust material and this check's budget, over a chosen
+/// credential source — the half of [`options_for`] that does not depend on
+/// WHICH principal the handle is for.
+///
+/// # Errors
+/// [`StoreFailure`] when the projected CA file cannot be read.
+fn finish_options(
+    plan: &DestinationPlan,
+    mut opts: StoreOptions,
+    budget: Duration,
+) -> Result<StoreOptions, StoreFailure> {
     if let Some(path) = plan.ca_file.as_deref() {
         let pem = std::fs::read(path).map_err(|e| {
             // The path is a projection the controller chose and is safe to
@@ -433,8 +452,77 @@ pub fn open_read(
     })
 }
 
+/// The store options the create-only marker is written with — **the
+/// `evidenceWrite` principal's**, which is the whole point of this function
+/// (defect PREFLIGHT-EVIDENCEWRITABLE-WRONG-PRINCIPAL).
+///
+/// * `grant` ABSENT — the plan's `evidenceWrite` grant IS its destination
+///   grant, so [`options_for`] is the right principal. This is also every plan
+///   an older controller renders, and it behaves exactly as before.
+/// * `static` — the three `LOGWEIR_EVIDENCE_AWS_*` variables and NOTHING else:
+///   [`CredentialSource::Static`](logweir_engine_oso::storage::CredentialSource)
+///   with the values read here, because `StaticFromEnv` would read `AWS_*`,
+///   which is the DESTINATION grant's and exactly the wrong principal. A
+///   variable the plan says is projected and is not is a refusal naming the
+///   variable, never a fall-back to `AWS_*`.
+/// * `workloadIdentity` — the injected identity only; the destination grant's
+///   static keys in the same environment are ignored (G16).
+///
+/// The location, the trust bundle and the budget are the destination's either
+/// way: it is one destination, written by a second principal.
+///
+/// `env` is the environment reader, injected so the principal selection is a
+/// pure function a test can drive without mutating the process environment.
+///
+/// # Errors
+/// [`StoreFailure`]: `CredentialSecretKeyMissing` for an absent projected
+/// variable, or [`finish_options`]'s CA refusal.
+pub fn evidence_write_options(
+    plan: &DestinationPlan,
+    grant: Option<&EvidenceWriteGrant>,
+    budget: Duration,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<StoreOptions, StoreFailure> {
+    let Some(grant) = grant else {
+        return options_for(plan, budget);
+    };
+    let opts = match grant.credentials {
+        EvidenceWriteCredentials::Static => {
+            let required = |name: &str| {
+                env(name).filter(|v| !v.is_empty()).ok_or_else(|| {
+                    // THE NAME AND NEVER THE VALUE: this closure's whole
+                    // subject is a credential.
+                    StoreFailure::new(
+                        CheckCode::CredentialSecretKeyMissing,
+                        format!(
+                            "the evidence-write grant ({}) is projected as `{name}`, and that                              variable is unset in the check pod; the marker was not written                              with any other credential",
+                            grant.reference()
+                        ),
+                    )
+                })
+            };
+            StoreOptions::static_keys(
+                required(EVIDENCE_ACCESS_KEY_ID_ENV)?,
+                required(EVIDENCE_SECRET_ACCESS_KEY_ENV)?,
+                env(EVIDENCE_SESSION_TOKEN_ENV).filter(|v| !v.is_empty()),
+            )
+        }
+        EvidenceWriteCredentials::WorkloadIdentity => StoreOptions::workload_identity(),
+    };
+    finish_options(plan, opts, budget)
+}
+
+/// The evidence-write grant's key variables — the SAME spellings the
+/// execution runner's store contract reads
+/// ([`crate::backup::store_contract`]), so a check pod and a Restore pod are
+/// projected one way.
+pub use crate::backup::store_contract::{
+    EVIDENCE_ACCESS_KEY_ID_ENV, EVIDENCE_SECRET_ACCESS_KEY_ENV, EVIDENCE_SESSION_TOKEN_ENV,
+};
+
 /// The ONE WRITABLE handle a check may hold: the evidence root, for the
-/// create-only marker.
+/// create-only marker, as the `evidenceWrite` principal
+/// ([`evidence_write_options`]).
 ///
 /// It is deliberately built over
 /// [`DestinationLocation::evidence_storage_url`], whose prefix is exactly
@@ -446,9 +534,10 @@ pub fn open_read(
 /// [`StoreFailure`].
 pub fn open_evidence_write(
     plan: &DestinationPlan,
+    grant: Option<&EvidenceWriteGrant>,
     budget: Duration,
 ) -> Result<Store, StoreFailure> {
-    let opts = options_for(plan, budget)?;
+    let opts = evidence_write_options(plan, grant, budget, &|k| std::env::var(k).ok())?;
     let url = url_for(plan, DestinationRole::EvidenceWrite);
     Store::from_url_with(&url, &opts).map_err(|e| {
         StoreFailure::new(

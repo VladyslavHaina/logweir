@@ -288,6 +288,7 @@ pub fn run(req: &OperationReadinessRequest, wiring: &dyn Wiring, deadline: Deadl
                 destination,
                 roles: &req.roles,
                 write_probe: req.write_probe,
+                evidence_write: req.evidence_write.as_ref(),
             },
             wiring,
             deadline,

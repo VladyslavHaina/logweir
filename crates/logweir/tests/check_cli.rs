@@ -47,7 +47,7 @@ use logweir_core::backup_receipt::BackupReceipt;
 use logweir_core::check_contract::{
     frames::Decoder, CheckCode, CheckId, CheckPlan, CheckRelay, CheckRequest, CheckResult,
     CheckState, ConnectionPlan, CredentialMode, DestinationAccessRequest, DestinationPlan,
-    EvidenceFetchRequest, EvidenceObjectRequest, FrameExpectations, Gating,
+    EvidenceFetchRequest, EvidenceObjectRequest, EvidenceWriteGrant, FrameExpectations, Gating,
     OperationReadinessRequest, RestorePreflightRequest, Stream, TopicEntry, TopicInventoryRequest,
     CHECK_CONTRACT_VERSION, CHECK_PLAN_CONTRACT,
 };
@@ -211,6 +211,11 @@ struct ObjectState {
     /// the write happened WITHOUT the precondition (reviewer question Q1).
     unconditional_put: bool,
     puts: Vec<(String, Vec<u8>)>,
+    /// Every operation this handle was asked for, as `get <key>`,
+    /// `list <prefix>` or `put <key>` — so a least-privilege claim ("this
+    /// principal was only ever asked to create one key") is an assertion and
+    /// not a reading of the code.
+    calls: Vec<String>,
     prefix: String,
 }
 
@@ -283,11 +288,16 @@ impl FakeObjects {
     fn puts(&self) -> Vec<(String, Vec<u8>)> {
         self.state.lock().unwrap().puts.clone()
     }
+
+    fn calls(&self) -> Vec<String> {
+        self.state.lock().unwrap().calls.clone()
+    }
 }
 
 impl ObjectAccess for FakeObjects {
     fn get(&self, key: &str) -> Result<Vec<u8>, StoreError> {
-        let s = self.state.lock().unwrap();
+        let mut s = self.state.lock().unwrap();
+        s.calls.push(format!("get {key}"));
         if let Some(f) = s.key_faults.get(key) {
             return Err(f.to_error(key));
         }
@@ -313,7 +323,8 @@ impl ObjectAccess for FakeObjects {
         start_after: Option<&str>,
         max: usize,
     ) -> Result<Vec<String>, StoreError> {
-        let s = self.state.lock().unwrap();
+        let mut s = self.state.lock().unwrap();
+        s.calls.push(format!("list {prefix}"));
         if let Some(f) = s.list_prefix_faults.get(prefix) {
             return Err(f.to_error(prefix));
         }
@@ -331,6 +342,7 @@ impl ObjectAccess for FakeObjects {
 
     fn put_create_only(&self, key: &str, bytes: &[u8]) -> Result<PutOutcome, StoreError> {
         let mut s = self.state.lock().unwrap();
+        s.calls.push(format!("put {key}"));
         if let Some(f) = &s.put_fault {
             return Err(f.to_error(key));
         }
@@ -516,6 +528,12 @@ struct FakeWiring {
     role_faults: BTreeMap<&'static str, (CheckCode, String)>,
     writer: Option<FakeObjects>,
     writer_fault: Option<(CheckCode, String)>,
+    /// The marker handle a SEPARATE `evidenceWrite` grant opens — a second
+    /// principal, which can be denied where the destination grant is not.
+    evidence_principal: Option<FakeObjects>,
+    evidence_principal_fault: Option<(CheckCode, String)>,
+    /// Every grant `evidence_writer` was handed, in order.
+    writer_grants: Arc<Mutex<Vec<Option<EvidenceWriteGrant>>>>,
     signer: Option<Result<String, String>>,
     files: BTreeMap<String, Vec<u8>>,
 }
@@ -549,6 +567,21 @@ impl FakeWiring {
     fn with_writer(mut self, o: FakeObjects) -> Self {
         self.writer = Some(o);
         self
+    }
+
+    /// The handle the separate `evidenceWrite` principal gets.
+    fn with_evidence_principal(mut self, o: FakeObjects) -> Self {
+        self.evidence_principal = Some(o);
+        self
+    }
+
+    fn evidence_principal_fails(mut self, code: CheckCode, message: &str) -> Self {
+        self.evidence_principal_fault = Some((code, message.to_string()));
+        self
+    }
+
+    fn writer_grants(&self) -> Vec<Option<EvidenceWriteGrant>> {
+        self.writer_grants.lock().unwrap().clone()
     }
 
     fn with_signer(mut self, r: Result<String, String>) -> Self {
@@ -596,8 +629,21 @@ impl Wiring for FakeWiring {
     fn evidence_writer(
         &self,
         _plan: &DestinationPlan,
+        grant: Option<&EvidenceWriteGrant>,
         _budget: std::time::Duration,
     ) -> Result<Box<dyn ObjectAccess>, StoreFailure> {
+        self.writer_grants.lock().unwrap().push(grant.cloned());
+        // TWO PRINCIPALS, TWO HANDLES. A wiring that ignored `grant` would
+        // hand the destination grant's handle to a separated destination —
+        // which is the defect these fakes exist to catch.
+        if grant.is_some() {
+            if let Some((c, m)) = &self.evidence_principal_fault {
+                return Err(StoreFailure::new(*c, m.clone()));
+            }
+            return Ok(Box::new(
+                self.evidence_principal.clone().unwrap_or_default(),
+            ));
+        }
         if let Some((c, m)) = &self.writer_fault {
             return Err(StoreFailure::new(*c, m.clone()));
         }
@@ -1627,6 +1673,7 @@ fn access_plan(roles: Vec<DestinationRole>, write_probe: bool) -> CheckPlan {
         destination: destination(),
         roles,
         write_probe,
+        evidence_write: None,
     }))
 }
 
@@ -1780,6 +1827,340 @@ fn a_denied_marker_put_is_reported_with_the_store_code() {
     let row = run.row(CheckId::DestinationEvidenceWritable);
     assert_eq!(row.code, CheckCode::AccessDenied);
     assert_eq!(row.state, CheckState::NotReady);
+}
+
+// ===========================================================================
+// 4-bis. One row, one principal (PREFLIGHT-EVIDENCEWRITABLE-WRONG-PRINCIPAL)
+// ===========================================================================
+
+/// The Secret a separated `evidenceWrite` grant names in these rows.
+const EVIDENCE_SECRET: &str = "evidence-writer";
+
+fn separated_access_plan(grant: Option<EvidenceWriteGrant>) -> CheckPlan {
+    plan_of(CheckRequest::DestinationAccess(DestinationAccessRequest {
+        destination: destination(),
+        roles: vec![DestinationRole::ArchiveRead, DestinationRole::EvidenceWrite],
+        write_probe: true,
+        evidence_write: grant,
+    }))
+}
+
+fn access_denied() -> Fault {
+    Fault::Io(
+        "Generic S3 error: <Error><Code>AccessDenied</Code></Error> (403 Forbidden)".to_string(),
+    )
+}
+
+/// **The defect's own shape.** A destination whose ARCHIVE principal may write
+/// under `logweir/` and whose EVIDENCE-WRITE principal may not: the row must be
+/// red, it must be red about the evidence-write principal, and the archive
+/// principal must not have written anything.
+///
+/// MUTANT RP-1 (`access.rs`): hand `evidence_writer` `None` instead of
+/// `probe.evidence_write`. The destination grant's handle then writes the
+/// marker, the row reads `MarkerWritten`, and this test fails on the first
+/// assertion.
+#[test]
+fn a_separated_evidence_write_principal_that_cannot_write_is_red_for_that_principal() {
+    let grant = EvidenceWriteGrant::static_secret(EVIDENCE_SECRET);
+    let m = mount(&separated_access_plan(Some(grant.clone())));
+    let archive_principal = FakeObjects::new();
+    let evidence_principal = FakeObjects::new().failing_put(access_denied());
+    let wiring = FakeWiring::default()
+        .with_role(DestinationRole::ArchiveRead, FakeObjects::new())
+        .with_writer(archive_principal.clone())
+        .with_evidence_principal(evidence_principal.clone());
+    let run = drive(&m, &wiring);
+
+    let row = run.row(CheckId::DestinationEvidenceWritable);
+    assert_eq!(
+        (row.state, row.code),
+        (CheckState::NotReady, CheckCode::AccessDenied),
+        "the evidence-write principal cannot write, so the row is red: {row:?}"
+    );
+    assert_eq!(row.gating, Gating::Blocking);
+    assert_eq!(
+        row.facts.get("grant").map(String::as_str),
+        Some("evidenceWrite"),
+        "the row says WHICH principal it is about"
+    );
+    assert!(
+        row.message.contains(EVIDENCE_SECRET),
+        "and names it by reference: {}",
+        row.message
+    );
+    assert!(!row.remedy.is_empty());
+    assert_eq!(
+        wiring.writer_grants(),
+        vec![Some(grant)],
+        "the marker handle was built for the evidence-write grant, once"
+    );
+    assert!(
+        archive_principal.calls().is_empty(),
+        "the archive principal was asked for nothing: {:?}",
+        archive_principal.calls()
+    );
+    // The archive row is about the archive principal and stays green: one row
+    // per principal, and neither answers for the other.
+    assert_eq!(
+        run.row(CheckId::DestinationArchiveListable).state,
+        CheckState::Ready
+    );
+    assert_eq!(
+        logweir_core::check_contract::aggregate(&run.result().checks),
+        logweir_core::check_contract::OverallState::NotReady
+    );
+}
+
+/// The mirror image: the archive principal is the one that cannot write under
+/// `logweir/`, the evidence-write principal can. The row is green — about the
+/// evidence-write principal — and the marker was created by it alone.
+#[test]
+fn a_separated_evidence_write_principal_that_can_write_is_green_whatever_the_archive_grant_may_do()
+{
+    let grant = EvidenceWriteGrant::static_secret(EVIDENCE_SECRET);
+    let m = mount(&separated_access_plan(Some(grant)));
+    let archive_principal = FakeObjects::new().failing_put(access_denied());
+    let evidence_principal = FakeObjects::new();
+    let run = drive(
+        &m,
+        &FakeWiring::default()
+            .with_role(DestinationRole::ArchiveRead, FakeObjects::new())
+            .with_writer(archive_principal.clone())
+            .with_evidence_principal(evidence_principal.clone()),
+    );
+    let row = run.row(CheckId::DestinationEvidenceWritable);
+    assert_eq!(
+        (row.state, row.code),
+        (CheckState::Ready, CheckCode::MarkerWritten)
+    );
+    assert_eq!(
+        row.facts.get("grant").map(String::as_str),
+        Some("evidenceWrite")
+    );
+    assert_eq!(
+        evidence_principal
+            .puts()
+            .iter()
+            .map(|(k, _)| k.clone())
+            .collect::<Vec<_>>(),
+        vec![format!("logweir/readiness/{DEST_UID}.json")]
+    );
+    assert!(archive_principal.puts().is_empty());
+}
+
+/// **Least privilege, asserted.** The evidence-write principal's handle is
+/// asked for EXACTLY one create-only put of the marker key: no read, no list,
+/// no delete (the `ObjectAccess` seam has no delete at all, and
+/// `the_only_write_in_the_check_runner_is_create_only` pins that). D2 §3.11
+/// grants `evidenceWrite` `s3:PutObject` (conditional create) and
+/// `s3:GetObject` on `logweir/*`; the probe needs the first on
+/// `logweir/readiness/*` and nothing else.
+///
+/// MUTANT RP-2 (`access.rs`): make the evidence-READ arm open its handle with
+/// `evidence_writer(dest, probe.evidence_write, …)` — a "reuse the writable
+/// handle" shortcut. The evidence principal is then asked for a `get`, and
+/// this test fails.
+#[test]
+fn the_evidence_write_principal_is_asked_for_one_create_only_put_and_nothing_else() {
+    let grant = EvidenceWriteGrant::static_secret(EVIDENCE_SECRET);
+    let m = mount(&plan_of(CheckRequest::DestinationAccess(
+        DestinationAccessRequest {
+            destination: destination(),
+            roles: vec![
+                DestinationRole::ArchiveWrite,
+                DestinationRole::ArchiveRead,
+                DestinationRole::EvidenceWrite,
+                DestinationRole::EvidenceRead,
+            ],
+            write_probe: true,
+            evidence_write: Some(grant),
+        },
+    )));
+    let evidence_principal = FakeObjects::new();
+    let run = drive(
+        &m,
+        &FakeWiring::default()
+            .with_role(DestinationRole::ArchiveRead, FakeObjects::new())
+            .with_role(DestinationRole::EvidenceRead, FakeObjects::new())
+            .with_writer(FakeObjects::new())
+            .with_evidence_principal(evidence_principal.clone()),
+    );
+    assert_eq!(run.code, ExitCode::Ok);
+    assert_eq!(
+        evidence_principal.calls(),
+        vec![format!("put logweir/readiness/{DEST_UID}.json")],
+        "the evidence-write principal is used for the one create-only marker put and for \
+         nothing else"
+    );
+}
+
+/// **Unchanged when the grants are one grant.** No `evidenceWrite` in the
+/// plan: the destination grant writes the marker, exactly as every earlier
+/// build did, and the row says the principal was the destination's.
+#[test]
+fn without_a_separate_grant_the_destination_grant_writes_the_marker_as_before() {
+    let m = mount(&separated_access_plan(None));
+    let destination_principal = FakeObjects::new();
+    let wiring = FakeWiring::default()
+        .with_role(DestinationRole::ArchiveRead, FakeObjects::new())
+        .with_writer(destination_principal.clone())
+        .evidence_principal_fails(CheckCode::AccessDenied, "never asked for");
+    let run = drive(&m, &wiring);
+    let row = run.row(CheckId::DestinationEvidenceWritable);
+    assert_eq!(
+        (row.state, row.code),
+        (CheckState::Ready, CheckCode::MarkerWritten)
+    );
+    assert_eq!(
+        row.facts.get("grant").map(String::as_str),
+        Some("destination")
+    );
+    assert_eq!(wiring.writer_grants(), vec![None]);
+    assert_eq!(destination_principal.puts().len(), 1);
+}
+
+/// A backup readiness plan answers the row for the same principal as a
+/// destination-access plan does: the one the plan names.
+#[test]
+fn a_backup_readiness_plan_answers_evidence_writable_for_the_evidence_write_principal() {
+    let grant = EvidenceWriteGrant::workload_identity("evidence-writer-sa");
+    let mut plan = readiness_plan(vec!["orders"], true, Some("/signing/key.pem"));
+    if let CheckRequest::OperationReadiness(r) = &mut plan.request {
+        r.evidence_write = Some(grant.clone());
+    }
+    let m = mount(&plan);
+    let wiring = FakeWiring::default()
+        .with_probe(
+            FakeProbe::new().with_presence("orders", TopicPresence::Present { partitions: 6 }),
+        )
+        .with_role(DestinationRole::ArchiveRead, FakeObjects::new())
+        .with_role(DestinationRole::EvidenceRead, FakeObjects::new())
+        .with_writer(FakeObjects::new())
+        .evidence_principal_fails(
+            CheckCode::WorkloadIdentityNotInjected,
+            "no web identity token in the pod",
+        )
+        .with_signer(Ok("abc123".to_string()));
+    let run = drive(&m, &wiring);
+    let row = run.row(CheckId::DestinationEvidenceWritable);
+    assert_eq!(
+        (row.state, row.code),
+        (CheckState::NotReady, CheckCode::WorkloadIdentityNotInjected),
+        "{row:?}"
+    );
+    assert!(
+        row.message.contains("evidence-writer-sa"),
+        "{}",
+        row.message
+    );
+    assert_eq!(wiring.writer_grants(), vec![Some(grant)]);
+}
+
+/// The principal selection itself, over an injected environment — the unit
+/// under both rows above, driven with no process-environment mutation.
+///
+/// MUTANT RP-3 (`store.rs`): make the `static` arm return
+/// `StoreOptions::static_from_env()` (the destination grant's `AWS_*`). The
+/// first assertion fails: the options would name `StaticFromEnv`, not the
+/// evidence keys.
+#[test]
+fn the_evidence_write_options_are_the_evidence_grants_and_never_fall_back() {
+    use logweir::check::store::{
+        evidence_write_options, EVIDENCE_ACCESS_KEY_ID_ENV, EVIDENCE_SECRET_ACCESS_KEY_ENV,
+    };
+    use logweir_engine_oso::storage::CredentialSource;
+    let plan = destination();
+    let budget = std::time::Duration::from_secs(10);
+    // Placeholder values, deliberately not credential-shaped.
+    let evidence_env = |k: &str| match k {
+        k if k == EVIDENCE_ACCESS_KEY_ID_ENV => Some("evidence-key-id-fixture".to_string()),
+        k if k == EVIDENCE_SECRET_ACCESS_KEY_ENV => Some("evidence-secret-fixture".to_string()),
+        "AWS_ACCESS_KEY_ID" => Some("destination-key-id-fixture".to_string()),
+        "AWS_SECRET_ACCESS_KEY" => Some("destination-secret-fixture".to_string()),
+        _ => None,
+    };
+
+    let grant = EvidenceWriteGrant::static_secret(EVIDENCE_SECRET);
+    let opts = evidence_write_options(&plan, Some(&grant), budget, &evidence_env)
+        .expect("the evidence keys are projected");
+    assert_eq!(
+        opts.credentials,
+        CredentialSource::Static {
+            access_key_id: "evidence-key-id-fixture".to_string(),
+            secret_access_key: "evidence-secret-fixture".to_string(),
+            session_token: None,
+        },
+        "a `static` evidence-write grant is the LOGWEIR_EVIDENCE_AWS_* keys"
+    );
+    assert_eq!(opts.request_timeout, Some(budget));
+    assert_eq!(opts.max_retries, Some(logweir::check::store::RETRIES));
+
+    // A projected variable that is missing is a REFUSAL — never the
+    // destination grant's `AWS_*`, which are right there in the environment.
+    let only_destination = |k: &str| match k {
+        "AWS_ACCESS_KEY_ID" => Some("destination-key-id-fixture".to_string()),
+        "AWS_SECRET_ACCESS_KEY" => Some("destination-secret-fixture".to_string()),
+        _ => None,
+    };
+    let refused = evidence_write_options(&plan, Some(&grant), budget, &only_destination)
+        .expect_err("no evidence keys, no marker");
+    assert_eq!(refused.code, CheckCode::CredentialSecretKeyMissing);
+    assert!(
+        refused.message.contains(EVIDENCE_ACCESS_KEY_ID_ENV)
+            && refused.message.contains(EVIDENCE_SECRET),
+        "the refusal names the variable and the Secret: {}",
+        refused.message
+    );
+    assert!(
+        !refused.message.contains("fixture"),
+        "and never a value: {}",
+        refused.message
+    );
+
+    let wi = EvidenceWriteGrant::workload_identity("evidence-writer-sa");
+    assert_eq!(
+        evidence_write_options(&plan, Some(&wi), budget, &evidence_env)
+            .expect("workload identity needs no variable here")
+            .credentials,
+        CredentialSource::WorkloadIdentity,
+        "the identity only; the static keys beside it are not this principal's"
+    );
+
+    // No separate grant: the destination grant, exactly as `options_for`
+    // builds it.
+    assert_eq!(
+        evidence_write_options(&plan, None, budget, &evidence_env)
+            .expect("the destination grant")
+            .credentials,
+        CredentialSource::StaticFromEnv
+    );
+}
+
+/// The runner's two handles must never be built from ONE grant when the plan
+/// names two: a source-level guard that `open_evidence_write` goes through
+/// `evidence_write_options` and nowhere else.
+#[test]
+fn the_marker_handle_is_built_only_through_the_principal_selection() {
+    let (_, store) = check_sources()
+        .into_iter()
+        .find(|(p, _)| p.ends_with("check/store.rs"))
+        .expect("store.rs");
+    let body = store
+        .split("pub fn open_evidence_write(")
+        .nth(1)
+        .expect("open_evidence_write exists")
+        .split("\npub fn ")
+        .next()
+        .unwrap_or_default();
+    assert!(
+        body.contains("evidence_write_options(plan, grant,"),
+        "open_evidence_write builds its options from the evidence-write grant: {body}"
+    );
+    assert!(
+        !body.contains("options_for("),
+        "and never from the destination grant's options directly: {body}"
+    );
 }
 
 // ===========================================================================
@@ -1976,6 +2357,7 @@ fn readiness_plan(topics: Vec<&str>, write_probe: bool, signer: Option<&str>) ->
             topics: topics.into_iter().map(ToString::to_string).collect(),
             signer_path: signer.map(ToString::to_string),
             write_probe,
+            evidence_write: None,
             skip_checks: Vec::new(),
         },
     )))
@@ -3665,6 +4047,7 @@ fn a_check_that_found_problems_still_exits_zero() {
         destination: dest,
         roles: vec![DestinationRole::ArchiveRead],
         write_probe: false,
+        evidence_write: None,
     }));
     let bytes = serde_json::to_vec(&plan).unwrap();
     let sha = logweir_core::ids::sha256_prefixed(&bytes);
@@ -4049,6 +4432,7 @@ mod live {
                 DestinationRole::EvidenceWrite,
             ],
             write_probe: true,
+            evidence_write: None,
         }));
         let m = mount(&plan);
         let run = drive_live(&m);

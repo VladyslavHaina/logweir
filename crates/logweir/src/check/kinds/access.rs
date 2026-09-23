@@ -8,7 +8,7 @@
 //! | `archiveRead` | one bounded `list` under the destination's prefix | `destination.archiveListable` |
 //! | `archiveWrite` | none — a write into an adopter's archive is what a RUN does | `destination.archivePrefixWritable` (execution-only) |
 //! | `evidenceRead` | a `get` of a key nobody wrote | `destination.evidenceReadable` (advisory) |
-//! | `evidenceWrite` | the optional create-only marker | `destination.evidenceWritable` |
+//! | `evidenceWrite` | the optional create-only marker, AS the `evidenceWrite` principal | `destination.evidenceWritable` |
 //!
 //! **The `archiveWrite` row is execution-only on purpose.** D2 §4.2 permits a
 //! check exactly one write, `logweir/readiness/<uid>.json`, and that key is
@@ -25,15 +25,29 @@
 //! Collapsing the two is the `NotFound`-versus-`Io` defect
 //! `logweir_store::StoreError` exists to prevent, and it is the distinction
 //! D2 §4.2 asks this probe for by name.
+//!
+//! # One row, one principal
+//!
+//! **`destination.evidenceWritable` is answered by the `evidenceWrite`
+//! grant and by no other** (defect PREFLIGHT-EVIDENCEWRITABLE-WRONG-PRINCIPAL).
+//! When the destination separates that grant from the one the plan was
+//! resolved for, the plan carries it as [`DestinationProbe::evidence_write`]
+//! and the marker handle is built with it; the row then carries the fact
+//! `grant=evidenceWrite` and names the Secret or ServiceAccount. When the plan
+//! carries none, the two grants are one grant and the row says
+//! `grant=destination`. The evidence-write handle is used for the ONE
+//! create-only put and for nothing else — no read, no list, no delete — so the
+//! probe needs `s3:PutObject` on `logweir/readiness/*` and nothing D2 §3.11
+//! does not already grant that principal.
 
 use logweir_core::check_contract::{
     CheckCode, CheckId, CheckOutcome, CheckPlanKind, CheckResult, DestinationAccessRequest,
-    DestinationPlan, Gating,
+    DestinationPlan, EvidenceWriteGrant, Gating,
 };
 use logweir_core::destination::DestinationRole;
 
 use super::{execution_only, from_store_failure, ready, remedy_for, Wiring};
-use crate::check::store::{self, LIST_PROBE_KEYS};
+use crate::check::store::{self, StoreFailure, LIST_PROBE_KEYS};
 use crate::check::{catalogue, Deadline, Emission};
 
 /// The destination half of a check, as the three kinds that have one state it.
@@ -43,6 +57,26 @@ pub struct DestinationProbe<'a> {
     /// `writeProbe: CreateOnlyMarker` on the destination — the ONLY thing that
     /// makes `destination.evidenceWritable` a blocking, actually-probed row.
     pub write_probe: bool,
+    /// The destination's `evidenceWrite` grant, when it is not the grant
+    /// `destination.credentials` describes. The marker is written AS this
+    /// principal; `None` means the two are one grant.
+    pub evidence_write: Option<&'a EvidenceWriteGrant>,
+}
+
+/// The `grant` fact on `destination.evidenceWritable`: which principal the
+/// marker was written as.
+pub const GRANT_FACT: &str = "grant";
+/// [`GRANT_FACT`] when the plan carried a separate `evidenceWrite` grant.
+pub const GRANT_EVIDENCE_WRITE: &str = "evidenceWrite";
+/// [`GRANT_FACT`] when the `evidenceWrite` grant IS the destination grant.
+pub const GRANT_DESTINATION: &str = "destination";
+
+/// The principal clause a marker row's message carries.
+fn principal_clause(grant: Option<&EvidenceWriteGrant>) -> String {
+    match grant {
+        Some(g) => format!("as the evidence-write grant ({})", g.reference()),
+        None => "as the destination's grant, which is also its evidence-write grant".to_string(),
+    }
 }
 
 /// The `BackupDestination` scope every destination row carries.
@@ -188,8 +222,32 @@ pub fn destination_checks(
                     );
                     continue;
                 }
-                let row = match wiring.evidence_writer(dest, budget) {
-                    Err(f) => from_store_failure(CheckId::DestinationEvidenceWritable, &f, now),
+                // THE PRINCIPAL IS THE EVIDENCE-WRITE GRANT'S, and the wiring
+                // is told so rather than left to assume it (defect
+                // PREFLIGHT-EVIDENCEWRITABLE-WRONG-PRINCIPAL). Passing `None`
+                // here on a plan that carries a separate grant is the defect:
+                // the row would say what the DESTINATION grant may do.
+                let grant = probe.evidence_write;
+                let grant_fact = if grant.is_some() {
+                    GRANT_EVIDENCE_WRITE
+                } else {
+                    GRANT_DESTINATION
+                };
+                // Every refusal names the principal it is about, whichever of
+                // the two steps refused: building the handle (a missing
+                // projection, an absent identity) or the put itself.
+                let about = |f: &StoreFailure| {
+                    from_store_failure(
+                        CheckId::DestinationEvidenceWritable,
+                        &StoreFailure::new(
+                            f.code,
+                            format!("{} {}", f.message, principal_clause(grant)),
+                        ),
+                        now,
+                    )
+                };
+                let row = match wiring.evidence_writer(dest, grant, budget) {
+                    Err(f) => about(&f),
                     Ok(access) => match store::put_marker(access.as_ref(), &dest.uid) {
                         Ok(outcome) => {
                             // The key FAMILY, not the key — see the
@@ -197,9 +255,10 @@ pub fn destination_checks(
                             ready(CheckId::DestinationEvidenceWritable, outcome.code(), now)
                                 .with_message(&format!(
                                     "the create-only readiness marker for this destination, \
-                                     under `{}`, is write-authorised on destination `{}`",
+                                     under `{}`, is write-authorised on destination `{}` {}",
                                     store::MARKER_PREFIX,
-                                    dest.name
+                                    dest.name,
+                                    principal_clause(grant)
                                 ))
                                 // Reviewer question Q1: whether `PutMode::Create`
                                 // was really enforced, or the backend declined it
@@ -216,10 +275,13 @@ pub fn destination_checks(
                                     },
                                 )
                         }
-                        Err(f) => from_store_failure(CheckId::DestinationEvidenceWritable, &f, now),
+                        Err(f) => about(&f),
                     },
                 };
-                out.push(row.with_scope(scope(dest)));
+                out.push(
+                    row.with_fact(GRANT_FACT, grant_fact)
+                        .with_scope(scope(dest)),
+                );
             }
         }
     }
@@ -236,6 +298,7 @@ pub fn run(req: &DestinationAccessRequest, wiring: &dyn Wiring, deadline: Deadli
             destination: &req.destination,
             roles: &req.roles,
             write_probe: req.write_probe,
+            evidence_write: req.evidence_write.as_ref(),
         },
         wiring,
         deadline,

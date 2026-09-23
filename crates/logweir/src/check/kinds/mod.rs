@@ -31,7 +31,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use logweir_core::check_contract::{CheckCode, CheckId, CheckOutcome, CheckRequest, CheckState};
-use logweir_core::check_contract::{ConnectionPlan, DestinationPlan};
+use logweir_core::check_contract::{ConnectionPlan, DestinationPlan, EvidenceWriteGrant};
 use logweir_core::destination::DestinationRole;
 use logweir_kafka::inventory::{CheckFailure, InventoryProbe};
 
@@ -68,13 +68,20 @@ pub trait Wiring {
     ) -> Result<Box<dyn ObjectAccess>, StoreFailure>;
 
     /// Build the ONE writable handle a check may hold — the evidence root, for
-    /// the create-only marker.
+    /// the create-only marker — AS THE `evidenceWrite` PRINCIPAL.
+    ///
+    /// `grant` is the plan's separate `evidenceWrite` grant, or `None` when
+    /// that grant is the destination grant `plan.credentials` describes. It is
+    /// a parameter rather than something an implementation may look up so
+    /// that no wiring can build the marker handle without being told whose it
+    /// is (defect PREFLIGHT-EVIDENCEWRITABLE-WRONG-PRINCIPAL).
     ///
     /// # Errors
     /// [`StoreFailure`].
     fn evidence_writer(
         &self,
         plan: &DestinationPlan,
+        grant: Option<&EvidenceWriteGrant>,
         budget: Duration,
     ) -> Result<Box<dyn ObjectAccess>, StoreFailure>;
 
@@ -119,9 +126,12 @@ impl Wiring for Live {
     fn evidence_writer(
         &self,
         plan: &DestinationPlan,
+        grant: Option<&EvidenceWriteGrant>,
         budget: Duration,
     ) -> Result<Box<dyn ObjectAccess>, StoreFailure> {
-        Ok(Box::new(super::store::open_evidence_write(plan, budget)?))
+        Ok(Box::new(super::store::open_evidence_write(
+            plan, grant, budget,
+        )?))
     }
 
     fn signer_key_id(&self, path: &str) -> Result<String, String> {
@@ -269,6 +279,11 @@ pub fn remedy_for(code: CheckCode) -> &'static str {
         CheckCode::WorkloadIdentityNotInjected => {
             "The destination asks for workload identity and none was injected. Annotate the \
              runner ServiceAccount, or switch the destination to static credentials."
+        }
+        CheckCode::CredentialSecretKeyMissing => {
+            "A credential the check plan says is projected is not in the check pod's \
+             environment, so the check did not use any other. Re-create the check; if it \
+             persists, the controller and runner images are from different releases."
         }
         CheckCode::CaBundleNotFound => {
             "The destination's trust bundle ConfigMap is not projected into the check pod. \
