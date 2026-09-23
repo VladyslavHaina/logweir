@@ -176,10 +176,12 @@ assertion.
   `windowCovered`, and the console offers no Restore for a scheduled point.
   - Open the gate with `run --open lab-refresh-8` after the refresh.
   - The journey then requires these three `scripts/plat10-ui-e2e.mjs` rows to be
-    recorded, not `blocked`, at :1278, :1357 and :1492.
-  - plat10's row at :1509 ("Approval, admission and restored records") still records
-    `blocked` after the refresh, because the harness mints no Approval. The native
-    older-point journey here is the one that drives a restore to completion.
+    recorded, not `blocked`, at :1472, :1538 and :1967.
+  - Since lab-refresh-8 the plat10 harness mints the Approval itself (`logweir drill
+    approve` with the lab approver key), and its row at :1967 requires the approved
+    Restore to succeed and restore exactly the source's records; it no longer records a
+    separate `blocked` Approval row. The native older-point journey here also drives a
+    restore to completion.
 - **`requires: PLAT-19.2`** needs a governed approval policy. No build has one yet.
   - The approvals API says "Approval submission is PLAT-19.2 and has no route".
   - Opening this gate today FAILS the journey by name: its row is missing, because no

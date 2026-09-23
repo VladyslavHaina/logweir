@@ -214,7 +214,7 @@ SUITES: dict[str, Suite] = {s.id: s for s in [
         lambda c: [f"lw-plat20-p10-{c.stamp}"], timeout=900,
         accept_rcs=frozenset({0, 3}),
         why_rcs="plat10 exits 3 exactly when a row is recorded in `blocked[]` "
-                "(scripts/plat10-ui-e2e.mjs:1882-1886); those rows are adapted as BLOCKED, which "
+                "(scripts/plat10-ui-e2e.mjs:2396-2400); those rows are adapted as BLOCKED, which "
                 "never passes, and only the lab-refresh-8 journey names them"),
     Suite("native", "e2e/journeys/native.py", "native", ("setup", "journeys"), ("cleanup",),
           frozenset({"setup", "cleanup"}), lambda c: {}, _native_adapter,
@@ -237,12 +237,12 @@ NAT, CON = "e2e/journeys/native.py", "e2e/journeys/console.mjs"
 
 P10_RESTORE_ROWS = (
     R("plat10", "PLAT-10.2 each real point carries its own Restore, from the controller's own window",
-      (RESOURCE, EVIDENCE), f"{U10}:1278"),
+      (RESOURCE, EVIDENCE), f"{U10}:1472"),
     R("plat10", "PLAT-10.2 navigation to an older real backup opens the wizard bound to it, not the newest",
-      (RESOURCE,), f"{U10}:1357"),
-    R("plat10", "DONE EVIDENCE create -> backup -> detail -> restore: the wizard submits with the "
-      "schedule's destination and point carried; admission BLOCKED ON HOST KEY MATERIAL",
-      (RESOURCE,), f"{U10}:1492"),
+      (RESOURCE,), f"{U10}:1538"),
+    R("plat10", "DONE EVIDENCE create -> backup -> schedule detail -> restore: an approved Restore "
+      "Succeeded and restored exactly the source's records",
+      (RESOURCE,), f"{U10}:1967"),
 )
 
 JOURNEYS: tuple[Journey, ...] = (
@@ -270,9 +270,9 @@ JOURNEYS: tuple[Journey, ...] = (
         (R("plat06", "case-c", (RESOURCE, EVIDENCE), f"{P06}:908",
            "reservation seen and cleared, one Backup per slot, trigger schedule, receipt verified"),
          R("plat10", "PLAT-10.1 selected-topic creation through the guided form, and the first-run redirect",
-           (RESOURCE,), f"{U10}:850"),
+           (RESOURCE,), f"{U10}:1009"),
          R("plat10", "PLAT-10.2 verified runs: the lab controller's catalog says Available/Verified and the "
-           "detail renders exactly that", (ARCHIVE, EVIDENCE, RESOURCE), f"{U10}:1227")),
+           "detail renders exactly that", (ARCHIVE, EVIDENCE, RESOURCE), f"{U10}:1396")),
         data=True),
     Journey(
         "scram-rotation", "a rotated SCRAM credential needs no edit, and the old value is refused",
