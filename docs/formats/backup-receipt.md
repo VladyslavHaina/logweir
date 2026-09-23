@@ -325,10 +325,25 @@ second put must be refused as `AlreadyExists`. Only then does the engine start.
 | What the store answers | Exit | The message names | What happened |
 |---|---|---|---|
 | first create succeeds, second is refused as already existing | — | — | the run holds the claim; the engine starts |
-| the first create is refused because the claim **already exists** | **1** | `ExecutionAlreadyClaimed` | an earlier run of this `backup_id` reached the engine. **No engine run, no receipt.** Retry under a **new** `backup_id` (a new `Backup`; a schedule's retry policy does this by itself, since exit 1 is retryable) |
+| the first create is refused because the claim **already exists** | **1** | `ExecutionAlreadyClaimed` | an earlier run of this `backup_id` reached the engine. **No engine run, no receipt.** Retry under a **new** `backup_id`: a new `Backup`, or — exit 1 being retryable — a schedule's next attempt `-r<k>` **when the schedule has `spec.retry`**; without it the slot is `RunFailed` |
 | the first create is refused for any other reason (a missing `s3:PutObject` on `logweir/*`, a transport error) | **4** | `ExecutionClaimUnproven` | lock-proof failed, nothing uploaded — the engine never started |
 | the backend reports conditional put unsupported (the store falls back to HEAD-then-PUT) | **4** | `ExecutionClaimUnproven` | a HEAD-then-PUT is not exclusive, so the claim is no lock |
 | the **second** create succeeds | **4** | `ExecutionClaimUnproven` | the store accepts `If-None-Match: *` and overwrites anyway; a claim on it is no lock |
+
+Both refusals end with a final stdout line `failure-reason=ExecutionAlreadyClaimed` (exit 1) or
+`failure-reason=ExecutionClaimUnproven` (exit 4), the exit-1/4 twin of exit 3's `refusal-reason=`.
+A Kubernetes controller lifts it into `Backup.status.exitReason` and the terminal condition's
+message, and only beside the exit code it belongs to.
+
+**Transient failures are safe, and say so imperfectly.** The object-store client retries a 5xx:
+if the server committed the claim before answering 5xx, the retried create is refused and the
+run's own claim is reported `ExecutionAlreadyClaimed` (exit 1). A transport failure on either
+create is exit 4. In both cases no engine ran and nothing was signed; an operator who can read the
+evidence root can tell the first case apart by comparing the claim's `run_id` with the run's own.
+`claimed_at` is the instant the run was requested, not the instant of the put.
+
+A claim also stays behind for every execution that reached it and then failed — a few hundred
+bytes each, on the same never-deleted lifecycle as receipts under `logweir/`.
 
 The claim is **unsigned and never read by the runner**: it is a lock, not
 evidence, and its existence is learned from the conditional put's own answer.

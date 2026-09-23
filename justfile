@@ -12,6 +12,7 @@ lint:
     ./scripts/check-verifier-parity.sh
     ./scripts/check-invariant-corpus.sh
     python3 scripts/test_k8s_scram_seed.py
+    python3 scripts/test_plat06_case_e_rows.py
     ./scripts/check-one-signer.sh
     ./scripts/check-no-archive-write.sh
     ./scripts/check-ui-offline.sh

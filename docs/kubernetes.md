@@ -4047,10 +4047,10 @@ it and writes it to **`Backup.status.exitCode`**, together with a wire reason on
 | Exit | `status.phase` | `status.exitReason` | Condition | What it means |
 |---|---|---|---|---|
 | **0** | `Succeeded` | `ok` | `Complete=True`, reason `Ok` | The archive was captured and the receipt was signed. |
-| **1** | `Failed` | `operational` | `Failed=True`, reason `Operational` | The run could not be attempted or continued. **No artifact was written.** |
+| **1** | `Failed` | `operational`, or `ExecutionAlreadyClaimed` off a backup runner's final `failure-reason=` line | `Failed=True`, reason `Operational` | The run could not be attempted or continued. **No artifact was written.** `ExecutionAlreadyClaimed`: an earlier run of the same execution reached the engine, so this one did not start it (RECEIPT-DUP). |
 | **2** | `Failed` | `drill-not-pass` | `Failed=True`, reason `DrillNotPass` | A result that is not a pass — **a document WAS written and signed.** Not produced by `backup run`; it is the drill path's code and the row is here because `exitReason`'s vocabulary is one vocabulary across both paths. |
 | **3** | `Failed` | the terminal state off the log's `refusal-reason=` line, or `GuardRefusedUnknownReason` | `Failed=True`, reason `GuardRefused` | A guard refused before anything ran. |
-| **4** | `Failed` | `signing-or-lock`, or `OrphanedScorecard` | `Failed=True`, reason `SigningOrLock` | Signing or the lock proof failed and **nothing was uploaded**. |
+| **4** | `Failed` | `signing-or-lock`, `OrphanedScorecard`, or `ExecutionClaimUnproven` off a backup runner's final `failure-reason=` line | `Failed=True`, reason `SigningOrLock` | Signing or the lock proof failed and **nothing was uploaded**. `ExecutionClaimUnproven`: the evidence store refused the execution claim or does not enforce conditional create; the engine never started. |
 | *(absent)* | `Failed` | `operational` | `Failed=True`, reason `DisruptedMidDrill` / `PodUnschedulable` / `NoExitCode` | The Job finished and no container named `runner` reported a terminated state. See "the crashed Job" below. |
 | *(absent)* | `Failed` | `operational` | `Failed=True`, reason `NameTooLong` | The `Backup`'s own name is longer than 63 characters, so **nothing was created**. See below. |
 | *(absent)* | `Failed` | `operational` | `Failed=True`, reason `ExecutionSpecInvalid` | The typed spec states no runnable run identity (see "Manual backups" below), so **nothing was created**. |
@@ -4650,12 +4650,20 @@ the engine starts ([the execution claim](formats/backup-receipt.md#the-execution
 If the lost Job's pod got that far, the re-created Job finds the claim and exits
 **1** naming `ExecutionAlreadyClaimed`, with no engine run and no receipt: a
 second engine run would have overwritten the manifest the first run's signed
-receipt attests. The `Backup` ends `Failed` (`operational`), which is retryable,
-so a schedule's retry policy starts a **new** execution; a manual `Backup` is
-retried by creating a new one. A Job lost before its pod reached the claim is
-re-created and runs normally. An evidence store that does not honour
-conditional create (`If-None-Match: *`) makes every backup exit **4** naming
-`ExecutionClaimUnproven` before the engine starts.
+receipt attests. The `Backup` ends `Failed` with `status.exitReason:
+ExecutionAlreadyClaimed` (the runner's final `failure-reason=` line, lifted by
+the controller; `kubectl get backup` shows it in the `REASON` column and the
+console in the run's exit reason and message). Exit 1 is retryable, so a
+schedule **with `spec.retry` configured** starts a **new** execution
+`<uid>-<slot>-r<k>`; without `spec.retry` (the default) the slot is recorded
+`RunFailed` and the next slot runs normally. A manual `Backup` is retried by
+creating a new one. Whatever the lost pod already signed stays in the bucket
+and in the catalog. A Job lost before its pod reached the claim is re-created
+and runs normally. An evidence store that does not honour conditional create
+(`If-None-Match: *`) makes every backup exit **4** with `exitReason:
+ExecutionClaimUnproven` before the engine starts — and a destination whose
+`writeProbe` is on reports that store `notReady / ConditionalCreateUnsupported`
+before the first backup (§21.5).
 
 The source connection is configured once on `KafkaCluster`, and one resolver
 (§20) turns it into every Job: the probe and each backup reuse that object's
@@ -7422,6 +7430,27 @@ readiness marker `logweir/readiness/<destinationUid>.json` — but **only** when
 the destination opts in with `spec.readiness.writeProbe: CreateOnlyMarker`. With
 the field absent or `Disabled` nothing is written and the row is
 execution-only with `WriteNotProbed`.
+
+**The probe also proves the store enforces conditional create** (RECEIPT-DUP).
+A backup runner claims each execution with a create-only put before its engine
+starts, and that claim is a lock only on a store that honours
+`If-None-Match: *`. So the probe creates a fresh marker a second time and
+requires the second create to be refused. A store that reports conditional put
+unsupported (the client falls back to HEAD-then-PUT), or that accepts the
+second create, makes the row **`notReady / ConditionalCreateUnsupported`** —
+the grant is there, but every backup to that store would exit 4
+`ExecutionClaimUnproven`. The probe uses the same key and the same
+`s3:PutObject` on `logweir/readiness/*`; nothing else is needed. **Without
+`writeProbe` the requirement is proven at the first backup instead**, which
+exits 4 before any data is written.
+
+| Object store | Conditional create (`If-None-Match: *`) |
+|---|---|
+| MinIO `RELEASE.2025-09-07T16-13-09Z` (the compose and lab image) | **Supported, measured** — a private container ran the claim and the probe |
+| MinIO releases older than that | `[UNVERIFIED — needs a run against an older MinIO release]` |
+| AWS S3 | `[UNVERIFIED — needs a real AWS S3 bucket and a credential source]`; `object_store` sends `If-None-Match: *` by default |
+| GCS, Azure Blob | `[UNVERIFIED — native conditional create in object_store, not run against either provider]` |
+| any S3-compatible store with `AWS_CONDITIONAL_PUT=disabled`, or one that ignores the header | **Unsupported** — `ConditionalCreateUnsupported` at readiness, exit 4 at every backup |
 
 The opt-in is read from the object on every pass. It used to be hard-coded off,
 which gave an operator who had opted in a row whose message said their

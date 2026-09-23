@@ -274,6 +274,13 @@ pub fn remedy_for(code: CheckCode) -> &'static str {
             "The destination's trust bundle ConfigMap is not projected into the check pod. \
              Check that it exists in this namespace."
         }
+        CheckCode::ConditionalCreateUnsupported => {
+            "The evidence store does not enforce conditional create (`If-None-Match: *`): it \
+             accepted a second create of the readiness marker, or reported conditional put \
+             unsupported. Every backup to it would exit 4 `ExecutionClaimUnproven`. Use a store \
+             that honours conditional create (MinIO does; do not set \
+             `AWS_CONDITIONAL_PUT=disabled`)."
+        }
         CheckCode::StoreErrorUnclassified => {
             "The object store refused in a way this build does not classify. Check the \
              controller log for the check Job's own stderr."

@@ -227,6 +227,14 @@ pub enum BackupError {
     /// retry policy starts a new execution.
     #[error("lock: {0}")]
     Lock(String),
+    /// **RECEIPT-DUP.** An earlier run of this execution already holds its
+    /// claim (`phase_run::claim_execution`): no engine run, nothing signed.
+    /// **Exit 1** — retryable under D1 §4.6, because a retry is a NEW
+    /// execution id with its own claim. Its own variant, not `Operational`,
+    /// so the one place that names a failure's state
+    /// ([`BackupError::failure_reason`]) matches a type, not a message.
+    #[error("operational: {0}")]
+    ExecutionClaimed(String),
 }
 
 impl BackupError {
@@ -240,9 +248,25 @@ impl BackupError {
         match self {
             BackupError::Guard(_) => ExitCode::GuardRefused, // 3
             BackupError::Signing(_) | BackupError::Lock(_) => ExitCode::SigningOrLock, // 4
-            BackupError::Operational(_) | BackupError::Kafka(_) | BackupError::Engine(_) => {
+            BackupError::Operational(_)
+            | BackupError::ExecutionClaimed(_)
+            | BackupError::Kafka(_)
+            | BackupError::Engine(_) => {
                 ExitCode::Operational // 1
             }
+        }
+    }
+
+    /// The state `failure-reason=` names for this failure, when it has one
+    /// more specific than its exit code — RECEIPT-DUP's two claim outcomes,
+    /// and nothing else. The controller lifts it into `status.exitReason`
+    /// only beside the exit code `logweir_core::guard::FAILURE_REASONS`
+    /// pairs it with.
+    pub fn failure_reason(&self) -> Option<&'static str> {
+        match self {
+            BackupError::ExecutionClaimed(_) => Some(phase_run::EXECUTION_ALREADY_CLAIMED),
+            BackupError::Lock(_) => Some(phase_run::EXECUTION_CLAIM_UNPROVEN),
+            _ => None,
         }
     }
 }
@@ -648,6 +672,9 @@ fn report(run_id: &str, outcome: Result<BackupOutcome, BackupError>) -> ExitCode
         Err(_) => None,
     };
     let receipt_sha256 = outcome.as_ref().ok().map(|o| o.receipt_sha256.clone());
+    // RECEIPT-DUP: the claim outcome, carried to `exiting` so it is the LAST
+    // stdout line — the only place a controller can read it (I9's argument).
+    let failure_reason = outcome.as_ref().err().and_then(BackupError::failure_reason);
     let code = match &outcome {
         Ok(o) => {
             tracing::info!(
@@ -673,6 +700,7 @@ fn report(run_id: &str, outcome: Result<BackupOutcome, BackupError>) -> ExitCode
         run_id,
         code,
         refusal_message.as_deref(),
+        failure_reason,
         evidence_keys,
         catalog_key,
         receipt_sha256,
@@ -707,6 +735,7 @@ fn exiting(
     run_id: &str,
     code: ExitCode,
     refusal_message: Option<&str>,
+    failure_reason: Option<&str>,
     evidence_keys: Option<(String, String)>,
     catalog_key: Option<String>,
     receipt_sha256: Option<String>,
@@ -759,6 +788,13 @@ fn exiting(
     // satisfies GC11 rather than printing nothing.
     if code == ExitCode::GuardRefused {
         crate::exit::print_refusal_reason(refusal_message.unwrap_or(""));
+    }
+    // RECEIPT-DUP: `failure-reason=` as the FINAL stdout line of an exit 1
+    // or 4 whose state is more specific than its code, for the same reason
+    // I9's line is last. Nothing follows it: the key lines below print only
+    // on exit 0.
+    if let (ExitCode::Operational | ExitCode::SigningOrLock, Some(state)) = (code, failure_reason) {
+        println!("{}", logweir_core::guard::failure_reason_line(state));
     }
     // **I7, and the ORDER is the contract.** `receipt-key=` then
     // `sidecar-key=`, as the FINAL two stdout lines of a successful run, with

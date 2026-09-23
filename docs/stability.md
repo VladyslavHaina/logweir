@@ -815,8 +815,10 @@ What changes for an operator:
 - **A second run under one `backup_id` exits 1 naming `ExecutionAlreadyClaimed`** — no engine run,
   no receipt. It used to exit 0 and append to the set. A standalone `backup run` that reused a fixed
   `backup_id` on a schedule must now use a fresh id per run (`--backup-id-override`); under
-  Kubernetes every execution already has its own id, and exit 1 is retryable, so a schedule's retry
-  starts a new execution.
+  Kubernetes every execution already has its own id. Exit 1 is retryable, so a schedule **with
+  `spec.retry` configured** starts a new execution `<uid>-<slot>-r<k>`; without `spec.retry` (the
+  default) the slot is recorded `RunFailed` and the next slot runs normally, and a manual `Backup`
+  is retried by creating a new one.
 - **An evidence store that does not honour conditional create now refuses every backup**, exit 4
   naming `ExecutionClaimUnproven`, before the engine starts — including a store that accepts
   `If-None-Match: *` and overwrites anyway, which the runner detects by creating the claim twice.

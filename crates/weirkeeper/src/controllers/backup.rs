@@ -247,6 +247,10 @@ pub const RECEIPT_SHA256_PREFIX: &str = "receipt-sha256=";
 pub const SIDECAR_KEY_PREFIX: &str = "sidecar-key=";
 /// `refusal-reason=` — Global Constraint 11's final line for exit 3.
 pub const REFUSAL_REASON_PREFIX: &str = "refusal-reason=";
+/// `failure-reason=` — the runner's final line for an exit 1 or 4 whose state
+/// is more specific than its code (RECEIPT-DUP's execution claim). The one
+/// spelling lives in `logweir-core`, which the runner prints it through.
+pub const FAILURE_REASON_PREFIX: &str = logweir_core::guard::FAILURE_REASON_PREFIX;
 
 /// How many trailing lines of the pod log the key scan looks at.
 ///
@@ -2214,6 +2218,27 @@ pub fn crash_terminal_state(pod: Option<&Pod>) -> &'static str {
     TERMINAL_STATE_NO_EXIT_CODE
 }
 
+/// The state an exit-1 or exit-4 run named on its final `failure-reason=`
+/// line — RECEIPT-DUP's `ExecutionAlreadyClaimed` (exit 1) or
+/// `ExecutionClaimUnproven` (exit 4) — read off the same bounded tail as the
+/// evidence keys and the refusal reason.
+///
+/// CLOSED, AND PAIRED WITH THE CODE: a value is lifted only when
+/// `logweir_core::guard::FAILURE_REASONS` lists it for THIS exit code, so a
+/// noisy log cannot put an arbitrary string on `status.exitReason`, and an
+/// older runner, which prints no such line, keeps the plain wire reason.
+/// The LAST occurrence wins, as for every other tail line.
+#[must_use]
+pub fn failure_state(exit_code: i32, log: &str) -> Option<&'static str> {
+    let mut found = None;
+    for line in tail_lines(log) {
+        if let Some(v) = line.strip_prefix(FAILURE_REASON_PREFIX) {
+            found = Some(v);
+        }
+    }
+    found.and_then(|v| logweir_core::guard::failure_reason_for_exit(exit_code, v.trim()))
+}
+
 /// Whether an exit-4 run left a payload without its sidecar.
 ///
 /// Returns the terminal state, or `None` when there is nothing to record —
@@ -3038,6 +3063,40 @@ pub fn finished_status_patch(
     receipt_sha256: Option<&str>,
     now: DateTime<Utc>,
 ) -> Value {
+    finished_status_patch_with_failure(
+        backup,
+        exit_code,
+        keys,
+        refusal,
+        orphan,
+        None,
+        covered,
+        receipt_sha256,
+        now,
+    )
+}
+
+/// [`finished_status_patch`] with the runner's `failure-reason=` state
+/// ([`failure_state`]) — RECEIPT-DUP. When present it becomes
+/// `status.exitReason` and is named in the terminal condition's message, so
+/// `kubectl get backup` (the REASON column), the console's exit-reason cell
+/// and its message all say `ExecutionAlreadyClaimed` / `ExecutionClaimUnproven`
+/// rather than a bare `operational` / `signing-or-lock` that reads like a
+/// broker or a signing-key problem. The condition's `reason` keeps GC11's
+/// CamelCase code, as it does for exit 3.
+#[allow(clippy::too_many_arguments)]
+#[must_use]
+pub fn finished_status_patch_with_failure(
+    backup: &Backup,
+    exit_code: i32,
+    keys: &EvidenceKeys,
+    refusal: Option<&str>,
+    orphan: Option<&str>,
+    failure: Option<&str>,
+    covered: Option<(i64, i64)>,
+    receipt_sha256: Option<&str>,
+    now: DateTime<Utc>,
+) -> Value {
     // TWO VOCABULARIES, TWO FIELDS (errata E5b, review LOW-2). The CONDITION's
     // `reason` is CamelCase, because that is what a `metav1.Condition`'s own
     // validation pattern permits; `exitReason` keeps GC11's wire string, which
@@ -3058,10 +3117,17 @@ pub fn finished_status_patch(
         cond_type,
         "True",
         cond_reason,
-        &format!(
-            "the runner exited {exit_code} ({wire_reason}); the code was read from \
-             status.containerStatuses[name={CONTAINER_NAME}].state.terminated.exitCode"
-        ),
+        &match failure {
+            Some(state) => format!(
+                "the runner exited {exit_code} ({wire_reason}: {state}); the code was read from \
+                 status.containerStatuses[name={CONTAINER_NAME}].state.terminated.exitCode \
+                 and the state from the runner's final `{FAILURE_REASON_PREFIX}` line"
+            ),
+            None => format!(
+                "the runner exited {exit_code} ({wire_reason}); the code was read from \
+                 status.containerStatuses[name={CONTAINER_NAME}].state.terminated.exitCode"
+            ),
+        },
         now,
     )];
     // THE EVIDENCE CONDITION EXISTS ONLY AT EXIT 0, AND IS ITS OWN TYPE.
@@ -3102,7 +3168,7 @@ pub fn finished_status_patch(
     // The terminal state, when there is one, is the most specific thing known
     // about the run: an orphaned scorecard on exit 4, or the guard's own state
     // on exit 3. Otherwise the GC11 wire reason.
-    let exit_reason = orphan.or(refusal).unwrap_or(wire_reason);
+    let exit_reason = orphan.or(refusal).or(failure).unwrap_or(wire_reason);
 
     let mut evidence = serde_json::Map::new();
     if let Some(k) = keys.receipt.as_ref() {
@@ -4520,6 +4586,9 @@ async fn reconcile_backup_inner(
         EvidenceSource::NotAttempted { .. } | EvidenceSource::FetchJob { .. } => None,
     };
     let orphan = orphan_state(exit_code, observed.as_ref().map(|o| o.presence));
+    // RECEIPT-DUP: the claim outcome the runner named, lifted only beside its
+    // own exit code (`failure_state` is closed and paired).
+    let failure = failure_state(exit_code, &log);
     let observed_covered = observed.as_ref().and_then(|o| o.covered);
     let observed_receipt_sha256 = observed.as_ref().and_then(|o| o.receipt_sha256.as_deref());
     let reported_receipt_sha256 = keys.receipt_sha256.as_deref();
@@ -4577,12 +4646,13 @@ async fn reconcile_backup_inner(
     // PATCH returns, the in-memory `backup` is stale and no longer says what
     // the object says. See `verification::second_patch`.
     let terminal = diagnostics::apply_finished(
-        finished_status_patch(
+        finished_status_patch_with_failure(
             &view,
             exit_code,
             &keys,
             refusal.as_deref(),
             orphan,
+            failure,
             covered,
             receipt_sha256.as_deref(),
             now,

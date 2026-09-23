@@ -173,6 +173,12 @@ pub struct Store {
     /// runner's execution claim (RECEIPT-DUP) must fail closed on it, so the
     /// runner's rows need a store that lies the way that one does.
     ignores_create_mode: bool,
+    /// TEST DOUBLE ONLY — true for [`Store::in_memory_erroring_on_existing_key`]
+    /// and never set by a production constructor. A create-only put over an
+    /// existing key answers `StoreError::Io` instead of `AlreadyExists`: a
+    /// store that errors where it should have refused. The backup runner's
+    /// exclusivity probe must not read that error as proof (RECEIPT-DUP).
+    errors_on_existing_key: bool,
 }
 
 impl Store {
@@ -272,6 +278,7 @@ impl Store {
             rt,
             read_only: false,
             ignores_create_mode: false,
+            errors_on_existing_key: false,
         })
     }
 
@@ -298,6 +305,7 @@ impl Store {
             rt,
             read_only: true,
             ignores_create_mode: false,
+            errors_on_existing_key: false,
         })
     }
 
@@ -317,6 +325,7 @@ impl Store {
             rt,
             read_only: false,
             ignores_create_mode: false,
+            errors_on_existing_key: false,
         })
     }
 
@@ -338,6 +347,7 @@ impl Store {
             rt,
             read_only: true,
             ignores_create_mode: false,
+            errors_on_existing_key: false,
         })
     }
 
@@ -532,6 +542,7 @@ impl Store {
             rt: Self::new_rt(),
             read_only: false,
             ignores_create_mode: false,
+            errors_on_existing_key: false,
         }
     }
 
@@ -551,6 +562,17 @@ impl Store {
     pub fn in_memory_ignoring_conditional_put(prefix: &str) -> Self {
         Self {
             ignores_create_mode: true,
+            ..Self::in_memory(prefix)
+        }
+    }
+
+    /// A TEST DOUBLE of a store that ERRORS (`StoreError::Io`) on a
+    /// create-only put over an existing key, where an enforcing store answers
+    /// `AlreadyExists` (RECEIPT-DUP). No production path builds it.
+    #[doc(hidden)]
+    pub fn in_memory_erroring_on_existing_key(prefix: &str) -> Self {
+        Self {
+            errors_on_existing_key: true,
             ..Self::in_memory(prefix)
         }
     }
@@ -1070,7 +1092,13 @@ impl Store {
                         })
                     }
                     Err(object_store::Error::AlreadyExists { .. }) => {
-                        return Err(StoreError::AlreadyExists(key.to_string()))
+                        if self.errors_on_existing_key {
+                            // The test double's fault: see `errors_on_existing_key`.
+                            return Err(StoreError::Io(format!(
+                                "{key}: injected transport error on an existing key"
+                            )));
+                        }
+                        return Err(StoreError::AlreadyExists(key.to_string()));
                     }
                     // The backend does not implement conditional put. Fall
                     // through to HEAD-then-PUT and RECORD that we did.

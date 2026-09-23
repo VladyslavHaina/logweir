@@ -284,3 +284,32 @@ fn terminal_state_matches_a_prefix_and_never_a_substring() {
     assert!(!line.contains(' '), "{line}");
     assert!(!line.contains('\n'), "{line}");
 }
+
+/// RECEIPT-DUP's `failure-reason=` vocabulary is closed in BOTH directions: a
+/// state is lifted only beside the one exit code it belongs to.
+#[test]
+fn a_failure_reason_is_lifted_only_beside_its_own_exit_code() {
+    use logweir_core::guard::{
+        failure_reason_for_exit, failure_reason_line, TERMINAL_STATE_EXECUTION_ALREADY_CLAIMED,
+        TERMINAL_STATE_EXECUTION_CLAIM_UNPROVEN,
+    };
+    assert_eq!(
+        failure_reason_line(TERMINAL_STATE_EXECUTION_ALREADY_CLAIMED),
+        "failure-reason=ExecutionAlreadyClaimed"
+    );
+    assert_eq!(
+        failure_reason_for_exit(1, "ExecutionAlreadyClaimed"),
+        Some(TERMINAL_STATE_EXECUTION_ALREADY_CLAIMED)
+    );
+    assert_eq!(
+        failure_reason_for_exit(4, "ExecutionClaimUnproven"),
+        Some(TERMINAL_STATE_EXECUTION_CLAIM_UNPROVEN)
+    );
+    // The wrong code for a known state, an unknown state, and exits that
+    // never carry one.
+    assert_eq!(failure_reason_for_exit(4, "ExecutionAlreadyClaimed"), None);
+    assert_eq!(failure_reason_for_exit(1, "ExecutionClaimUnproven"), None);
+    assert_eq!(failure_reason_for_exit(1, "Anything"), None);
+    assert_eq!(failure_reason_for_exit(0, "ExecutionAlreadyClaimed"), None);
+    assert_eq!(failure_reason_for_exit(3, "ExecutionClaimUnproven"), None);
+}

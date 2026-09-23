@@ -417,7 +417,13 @@ fn a_second_run_of_one_execution_never_invalidates_the_first_receipt() {
         "RECEIPT-DUP: a second run of the same execution invalidated the first signed receipt"
     );
     match second {
-        Err(BackupError::Operational(message)) => {
+        Err(ref err @ BackupError::ExecutionClaimed(ref message)) => {
+            assert_eq!(err.exit_code(), ExitCode::Operational, "exit 1: retryable");
+            assert_eq!(
+                err.failure_reason(),
+                Some(logweir::backup::phase_run::EXECUTION_ALREADY_CLAIMED),
+                "the state the runner prints as `failure-reason=`"
+            );
             assert!(
                 message.contains(logweir::backup::phase_run::EXECUTION_ALREADY_CLAIMED),
                 "the refusal names itself: {message}"
@@ -562,6 +568,66 @@ fn a_store_that_ignores_if_none_match_fails_closed() {
     );
     assert!(message.contains("ignores `If-None-Match: *`"), "{message}");
     assert_eq!(engine.runs.get(), 0, "no engine run on an unproven claim");
+}
+
+/// **F4 (review mutant R1).** A store that ERRORS on the exclusivity probe —
+/// the second create — has not refused it, so nothing is proven: exit 4, no
+/// engine run. Accepting any probe error as proof would start the engine on a
+/// claim that was never shown to be exclusive.
+#[test]
+fn an_error_on_the_exclusivity_probe_is_not_proof() {
+    let f = Fixture::new();
+    let engine = AdvancingEngine::new(&f.root());
+    let store = Store::in_memory_erroring_on_existing_key("logweir/");
+    let err = execute_with(
+        &f.args,
+        "01K5RUN0000000000000000001",
+        &StubReader,
+        &engine,
+        &store,
+        &store,
+    )
+    .expect_err("a probe that errors proves nothing");
+    assert_eq!(err.exit_code(), ExitCode::SigningOrLock, "{err}");
+    assert_eq!(
+        err.failure_reason(),
+        Some(logweir::backup::phase_run::EXECUTION_CLAIM_UNPROVEN)
+    );
+    assert!(err.to_string().contains("exclusivity probe"), "{err}");
+    assert_eq!(engine.runs.get(), 0, "no engine run on an unproven claim");
+}
+
+/// **F5 (review mutant R2).** An evidence store that REFUSES the claim put (a
+/// missing `s3:PutObject` on `logweir/*`, here a read-only handle) is exit 4 —
+/// NOT exit 1, which D1 §4.6 would retry `maxRetries` times on a permission
+/// error — with the unproven-claim state and no engine run.
+#[test]
+fn a_refused_claim_put_is_exit_4_not_retryable() {
+    let f = Fixture::new();
+    let engine = AdvancingEngine::new(&f.root());
+    let refusing = f.archive(); // read-only: every put is `StoreError::ReadOnly`
+    let err = execute_with(
+        &f.args,
+        "01K5RUN0000000000000000001",
+        &StubReader,
+        &engine,
+        &f.archive(),
+        &refusing,
+    )
+    .expect_err("a refused claim put must refuse the run");
+    assert!(matches!(err, BackupError::Lock(_)), "{err:?}");
+    assert_eq!(err.exit_code(), ExitCode::SigningOrLock, "{err}");
+    assert_eq!(
+        err.failure_reason(),
+        Some(logweir::backup::phase_run::EXECUTION_CLAIM_UNPROVEN)
+    );
+    assert!(err.to_string().contains("the put was refused"), "{err}");
+    assert_eq!(
+        engine.runs.get(),
+        0,
+        "no engine run when the claim put is refused"
+    );
+    assert!(f.receipts().is_empty(), "nothing signed");
 }
 
 /// **Catalog row.** The claim is a new object under `logweir/backups/`, which

@@ -26,14 +26,16 @@ use std::path::Path;
 /// **RECEIPT-DUP.** The token a run names when its execution was already
 /// claimed by an earlier run — see [`claim_execution`]. Exit 1: a retry under a
 /// NEW execution id is the remedy, and D1 §4.6's retry policy takes it.
-pub const EXECUTION_ALREADY_CLAIMED: &str = "ExecutionAlreadyClaimed";
+pub const EXECUTION_ALREADY_CLAIMED: &str =
+    logweir_core::guard::TERMINAL_STATE_EXECUTION_ALREADY_CLAIMED;
 
 /// **RECEIPT-DUP.** The token a run names when the evidence store could not
 /// prove the execution claim is exclusive — it refused the create-only put,
 /// answered it without enforcing it, or accepted a second create of the same
 /// key. Exit 4 (GC11: "lock-proof failed, nothing uploaded"): nothing about
 /// waiting changes a store that does not honour `If-None-Match: *`.
-pub const EXECUTION_CLAIM_UNPROVEN: &str = "ExecutionClaimUnproven";
+pub const EXECUTION_CLAIM_UNPROVEN: &str =
+    logweir_core::guard::TERMINAL_STATE_EXECUTION_CLAIM_UNPROVEN;
 
 /// `logweir/backups/<backup_id>/execution.claim.json` — the ONE
 /// execution-scoped object under `logweir/backups/<backup_id>/`. Everything
@@ -130,7 +132,7 @@ pub fn claim_execution(
             ))
         }
         Err(StoreError::AlreadyExists(_)) => {
-            return Err(BackupError::Operational(format!(
+            return Err(BackupError::ExecutionClaimed(format!(
                 "{EXECUTION_ALREADY_CLAIMED}: execution `{backup_id}` was already claimed by an \
                  earlier run ({key} exists). That run reached the engine; a second engine run \
                  would overwrite the manifest its receipt attests, so NO engine run was started \

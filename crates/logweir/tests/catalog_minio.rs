@@ -466,7 +466,7 @@ fn a_second_run_of_one_execution_is_refused_by_a_real_bucket() {
 
     let second = f.execute_as(&evidence, &backup_id, &run_id("B"));
     match second {
-        Err(logweir::backup::BackupError::Operational(message)) => assert!(
+        Err(logweir::backup::BackupError::ExecutionClaimed(message)) => assert!(
             message.contains(EXECUTION_ALREADY_CLAIMED),
             "the second run names the refusal: {message}"
         ),

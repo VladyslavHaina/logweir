@@ -185,6 +185,11 @@ fn backup_run_real_engine(spec: &Path) -> Command {
 /// pipe (STANDING RULE 20).
 #[test]
 fn backup_run_renders_and_invokes_the_engine_backup_command() {
+    // RECEIPT-DUP: every run claims `logweir/backups/drill-demo/
+    // execution.claim.json` before its engine, so a claim an earlier row (or an
+    // earlier `just e2e`) left would refuse this run with exit 1. Swept first
+    // and last, like the receipt row.
+    sweep_seeded_receipts();
     let log = demo_dir().join("backup-argv.log");
     let _ = std::fs::remove_file(&log);
     let spec = backup_spec("backup.yaml", "[orders, payments]", "", BOOTSTRAP);
@@ -239,6 +244,7 @@ fn backup_run_renders_and_invokes_the_engine_backup_command() {
     for forbidden in ["purge_topics", "dry_run", "header_preflight_external"] {
         assert!(!doc.contains(forbidden), "{forbidden} in:\n{doc}");
     }
+    sweep_seeded_receipts();
 }
 
 /// **A refused `backup run` opens no socket.** Carried finding from Task 3's
@@ -403,6 +409,11 @@ fn a_scram_backup_spec_renders_and_refuses_only_for_a_credential_reason() {
 /// stack and not about the document.
 #[test]
 fn the_real_engine_accepts_the_rendered_sasl_block() {
+    // RECEIPT-DUP: a claim left under `drill-demo` would stop this run BEFORE
+    // the engine, and every assertion below is an absence — the row would
+    // pass without the engine ever reading the document. Swept first, and the
+    // refusal is asserted absent.
+    sweep_seeded_receipts();
     let spec = backup_spec(
         "backup-scram-real-engine.yaml",
         "[orders]",
@@ -447,6 +458,12 @@ fn the_real_engine_accepts_the_rendered_sasl_block() {
     for panicky in ["panicked at", "not yet implemented"] {
         assert!(!both.contains(panicky), "{both}");
     }
+    assert!(
+        !both.contains("ExecutionAlreadyClaimed") && !both.contains("ExecutionClaimUnproven"),
+        "the run was stopped at its execution claim, so the engine never read the document \
+         and every absence above is vacuous:\n{both}"
+    );
+    sweep_seeded_receipts();
 }
 
 /// **Fix round 1, review F-3, carried forward by Task 5b.** A flag

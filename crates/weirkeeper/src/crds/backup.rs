@@ -337,6 +337,7 @@ pub struct FrozenDestination {
     status = "BackupStatus",
     printcolumn = r#"{"name":"PHASE","type":"string","jsonPath":".status.phase"}"#,
     printcolumn = r#"{"name":"EXIT","type":"integer","jsonPath":".status.exitCode","description":"0 pass, 1 operational, 2 not-a-pass, 3 refused, 4 signing failed"}"#,
+    printcolumn = r#"{"name":"REASON","type":"string","jsonPath":".status.exitReason","description":"GC11's wire reason, or the more specific terminal state the runner named - GuardRefused, ExecutionAlreadyClaimed, ExecutionClaimUnproven, OrphanedScorecard, ..."}"#,
     printcolumn = r#"{"name":"RECORDS","type":"integer","jsonPath":".status.records"}"#,
     printcolumn = r#"{"name":"SIGNED","type":"string","jsonPath":".status.evidence.verification.result","description":"green needs this Valid AND exitCode 0"}"#,
     printcolumn = r#"{"name":"AGE","type":"date","jsonPath":".metadata.creationTimestamp"}"#
@@ -444,8 +445,11 @@ pub struct BackupStatus {
     /// `ok`, `operational`, `drill-not-pass`, `guard-refused`,
     /// `signing-or-lock` — or, when the run reached a **terminal state** more
     /// specific than its code, that state: the `refusal-reason=` line the
-    /// runner printed for exit 3, or `OrphanedScorecard` for an exit-4 run
-    /// whose payload exists without its sidecar.
+    /// runner printed for exit 3, `OrphanedScorecard` for an exit-4 run
+    /// whose payload exists without its sidecar, or the `failure-reason=`
+    /// state an exit-1/4 backup run printed for its execution claim
+    /// (`ExecutionAlreadyClaimed` with exit 1, `ExecutionClaimUnproven` with
+    /// exit 4 — RECEIPT-DUP).
     ///
     /// `operational` for the crashed-Job case, where `exitCode` is absent: a
     /// run whose code is unrecoverable produced no artifact either, and the

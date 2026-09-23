@@ -1619,9 +1619,9 @@ fn the_release_notes_carry_every_owed_operator_action() {
     let numbers: Vec<u32> = items.iter().map(|(n, _)| *n).collect();
     assert_eq!(
         numbers,
-        (1..=10).collect::<Vec<u32>>(),
-        "the release entry must carry exactly ten operator-facing changes, `#### 1.` to \
-         `#### 10.` in order; found {numbers:?}"
+        (1..=11).collect::<Vec<u32>>(),
+        "the release entry must carry exactly eleven operator-facing changes, `#### 1.` to \
+         `#### 11.` in order; found {numbers:?}"
     );
 
     for ((number, body), (item, token)) in items.iter().zip([
@@ -1635,6 +1635,8 @@ fn the_release_notes_carry_every_owed_operator_action() {
         ("restore completion", "recordsRestored"),
         ("pre-creation slots", "metadata.creationTimestamp"),
         ("the API trust state", "RecordedBeforeRevocation"),
+        // RECEIPT-DUP (2026-09-23): the execution claim and its store requirement.
+        ("one engine run per execution", "ExecutionAlreadyClaimed"),
     ]) {
         assert!(
             body.contains(token),
