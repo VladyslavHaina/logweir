@@ -2599,6 +2599,402 @@ def test_the_lab_key_material_is_read_from_its_durable_home_first() -> None:
                 os.environ[k] = v
 
 
+# ---------------------------------------------------------------------------
+# harness-rows-11 — the rows lab-refresh-8 found with no committed row
+# ---------------------------------------------------------------------------
+#
+# Every predicate below is exercised on the shape the product publishes when it
+# does the documented thing, and on a PLANTED-WRONG shape — for the mount row
+# and the object-lock row, the exact shape the lab published on `f49849d`
+# (harness-rows-11, 2026-09-23). Each planted shape must be refused.
+
+
+def _cond(type_: str, status: str, reason: str, message: str = "") -> dict:
+    return {"type": type_, "status": status, "reason": reason, "message": message}
+
+
+def _backup(phase: str, conditions: list[dict], *, exit_code=None, exit_reason=None,
+            diagnostics: list[dict] | None = None, stage: str = "Preparing",
+            receipt: str | None = None) -> dict:
+    status = {"phase": phase, "conditions": conditions, "exitCode": exit_code,
+              "exitReason": exit_reason,
+              "progress": {"stage": stage, "diagnostics": diagnostics or []}}
+    if receipt:
+        status["evidence"] = {"receiptKey": receipt}
+    return {"metadata": {"name": "b"}, "status": status}
+
+
+MISSING_CA = "lw-hr11-absent-ca"
+MOUNT_DIAG = {"code": "VolumeMountFailed", "object": {"kind": "Pod", "name": "ops-mount-failure-v4bs7"},
+              "message": f'volume source-ca did not mount: MountVolume.SetUp failed for volume '
+                         f'"source-ca" : configmap "{MISSING_CA}" not found'}
+MOUNT_DURING = _backup("Running", [_cond("RunnerReady", "False", "VolumeMountFailed")],
+                       diagnostics=[MOUNT_DIAG])
+MOUNT_DURING_VIEW = {"state": "preparing", "stateReason": "VolumeMountFailed",
+                     "diagnostics": [MOUNT_DIAG]}
+MOUNT_FINAL = _backup("Failed", [_cond("Failed", "True", "VolumeMountFailed")],
+                      exit_reason="operational", stage="Finished")
+MOUNT_FINAL_VIEW = {"state": "failed", "stateReason": "VolumeMountFailed", "terminal": True,
+                    "result": {"status": "error", "exitCode": None}}
+# WHAT f49849d PUBLISHED: the diagnostic was recorded and fail-fast fired
+# (900 -> 1), and the terminal reason is still `NoExitCode`, with RunnerReady
+# overwritten by the WaitingForPod the collapsed Job left behind.
+MOUNT_FINAL_AS_F49849D = _backup(
+    "Failed", [_cond("Failed", "True", "NoExitCode"),
+               _cond("RunnerReady", "False", "WaitingForPod")],
+    exit_reason="operational", stage="Finished",
+    diagnostics=[MOUNT_DIAG, {"code": "WaitingForPod", "object": {"kind": "Job", "name": "b"}}])
+MOUNT_FINAL_VIEW_AS_F49849D = {"state": "failed", "stateReason": "NoExitCode", "terminal": True,
+                               "result": {"status": "error", "exitCode": None}}
+
+
+def test_the_mount_row_requires_the_diagnostic_as_the_terminal_reason() -> None:
+    ok = d3.mount_failure_surfaced(MOUNT_DURING, MOUNT_DURING_VIEW, MOUNT_FINAL,
+                                   MOUNT_FINAL_VIEW, 900, 1, MISSING_CA)
+    row("mount: the documented shape passes every clause", all(ok.values()), str(ok))
+    bad = d3.mount_failure_surfaced(MOUNT_DURING, MOUNT_DURING_VIEW, MOUNT_FINAL_AS_F49849D,
+                                    MOUNT_FINAL_VIEW_AS_F49849D, 900, 1, MISSING_CA)
+    row("mount: f49849d's NoExitCode after a recorded VolumeMountFailed is REFUSED",
+        not all(bad.values())
+        and not bad["the run is Failed with the terminal reason VolumeMountFailed"])
+    no_patch = d3.mount_failure_surfaced(MOUNT_DURING, MOUNT_DURING_VIEW, MOUNT_FINAL,
+                                         MOUNT_FINAL_VIEW, 900, 900, MISSING_CA)
+    row("mount: a Job whose deadline was never collapsed (no fail-fast) is REFUSED",
+        not no_patch["fail-fast collapsed the Job's activeDeadlineSeconds"])
+    unnamed = dict(MOUNT_DIAG, message="volume source-ca did not mount")
+    anon = d3.mount_failure_surfaced(
+        _backup("Running", [_cond("RunnerReady", "False", "VolumeMountFailed")],
+                diagnostics=[unnamed]),
+        MOUNT_DURING_VIEW, MOUNT_FINAL, MOUNT_FINAL_VIEW, 900, 1, MISSING_CA)
+    row("mount: a diagnostic that does not name the missing object is REFUSED",
+        not all(anon.values()))
+    waiting = d3.mount_failure_surfaced(
+        _backup("Running", [_cond("RunnerReady", "False", "WaitingForPod")]),
+        {"state": "running"}, MOUNT_FINAL, MOUNT_FINAL_VIEW, 900, 1, MISSING_CA)
+    row("mount: a run that only ever said WaitingForPod is REFUSED", not all(waiting.values()))
+    secret_diag = {"code": "SigningKeyMissing", "object": {"kind": "Pod", "name": "p"},
+                   "message": 'the signing key volume did not mount: secret "logweir-signing-key" '
+                              'not found'}
+    secret = d3.mount_failure_surfaced(
+        _backup("Running", [_cond("RunnerReady", "False", "VolumeMountFailed")],
+                diagnostics=[secret_diag]),
+        dict(MOUNT_DURING_VIEW, diagnostics=[secret_diag]), MOUNT_FINAL, MOUNT_FINAL_VIEW,
+        900, 1, "logweir-signing-key", code="SigningKeyMissing")
+    row("mount (Secret): SigningKeyMissing projected as VolumeMountFailed passes",
+        all(secret.values()), str(secret))
+    wrong_code = d3.mount_failure_surfaced(
+        _backup("Running", [_cond("RunnerReady", "False", "VolumeMountFailed")],
+                diagnostics=[secret_diag]),
+        dict(MOUNT_DURING_VIEW, diagnostics=[secret_diag]), MOUNT_FINAL, MOUNT_FINAL_VIEW,
+        900, 1, "logweir-signing-key")
+    row("mount (Secret): judged for the ConfigMap's code it is REFUSED", not all(wrong_code.values()))
+
+
+UNSCHED_POD = {"spec": {"containers": [{"name": "runner",
+                                        "resources": {"requests": {"memory": "512Gi"}}}]},
+               "status": {"conditions": [{"type": "PodScheduled", "status": "False",
+                                          "reason": "Unschedulable"}]}}
+UNSCHED_DIAG = {"code": "PodUnschedulable", "object": {"kind": "Pod", "name": "p"},
+                "message": "the check pod has been unschedulable for more than 60 seconds"}
+
+
+def test_the_unschedulable_row_requires_no_fail_fast_and_its_own_reason() -> None:
+    during = _backup("Running", [_cond("RunnerReady", "False", "PodUnschedulable")],
+                     diagnostics=[UNSCHED_DIAG])
+    view = {"state": "preparing", "stateReason": "PodUnschedulable", "diagnostics": [UNSCHED_DIAG]}
+    final = _backup("Failed", [_cond("Failed", "True", "PodUnschedulable")], stage="Finished")
+    fview = {"state": "failed", "stateReason": "PodUnschedulable", "terminal": True}
+    ok = d3.unschedulable_surfaced(during, view, final, fview, 480, 480, 480, UNSCHED_POD)
+    row("unschedulable: the documented shape passes", all(ok.values()), str(ok))
+    fast = d3.unschedulable_surfaced(during, view, final, fview, 480, 1, 480, UNSCHED_POD)
+    row("unschedulable: a fail-fast patch on the transient class is REFUSED", not all(fast.values()))
+    crash = d3.unschedulable_surfaced(
+        during, view, _backup("Failed", [_cond("Failed", "True", "NoExitCode")]),
+        dict(fview, stateReason="NoExitCode"), 480, 480, 480, UNSCHED_POD)
+    row("unschedulable: a terminal NoExitCode is REFUSED", not all(crash.values()))
+    plain = {"spec": {"containers": [{"name": "runner", "resources": {}}]},
+             "status": {"conditions": [{"type": "PodScheduled", "status": "True"}]}}
+    fixture = d3.unschedulable_surfaced(during, view, final, fview, 480, 480, 480, plain)
+    row("unschedulable: a pod that never carried the impossible request is REFUSED",
+        not all(fixture.values()))
+
+
+ENGINE_LOG = (
+    "progress-phase=-1:admit\nprogress-phase=-1:engine\n"
+    '{"line":"<Error><Code>AccessDenied</Code><Key>engine-deny/x/topics/orders/partition=0/'
+    'segment-1.bin.zst</Key></Error>"}\n'
+    "engine: operational: kafka-backup backup exited 1\n")
+
+
+def test_the_engine_crash_row_requires_the_engine_and_a_started_runner() -> None:
+    final = _backup("Failed", [_cond("RunnerReady", "True", "RunnerStarted"),
+                               _cond("Failed", "True", "Operational")],
+                    exit_code=1, exit_reason="operational", stage="Finished")
+    view = {"state": "failed", "terminal": True, "verifiedSuccess": False,
+            "result": {"status": "error", "exitCode": 1},
+            "verification": {"state": "noEvidence"}}
+    control = {"status": {"phase": "Succeeded"}}
+    ok = d3.engine_crash_surfaced(final, view, ENGINE_LOG, control)
+    row("engine crash: the documented shape passes", all(ok.values()), str(ok))
+    refused = d3.engine_crash_surfaced(
+        _backup("Failed", [_cond("RunnerReady", "True", "RunnerStarted")], exit_code=3,
+                exit_reason="guardRefused"),
+        dict(view, result={"status": "refused", "exitCode": 3}),
+        "refusal-reason=GuardRefused\n", control)
+    row("engine crash: a guard refusal (exit 3) is REFUSED", not all(refused.values()))
+    manifest_only = ENGINE_LOG.replace("x/topics/orders/partition=0/segment-1.bin.zst",
+                                       "x/manifest.json")
+    early = d3.engine_crash_surfaced(final, view, manifest_only, control)
+    row("engine crash: a refusal before any segment (manifest only) is REFUSED as not mid-run",
+        not all(early.values()))
+    never_ran = d3.engine_crash_surfaced(
+        _backup("Failed", [_cond("RunnerReady", "False", "VolumeMountFailed")], exit_code=None),
+        dict(view, result={"status": "error", "exitCode": None}), "", control)
+    row("engine crash: a runner that never started is REFUSED", not all(never_ran.values()))
+    broken = d3.engine_crash_surfaced(final, view, ENGINE_LOG, {"status": {"phase": "Failed"}})
+    row("engine crash: without a passing fixture control it is REFUSED", not all(broken.values()))
+
+
+def _job(created: str, code: int = 1, log: str | None = None) -> dict:
+    return {"created": created, "exitCode": code,
+            "log": log if log is not None else
+            "WARN protection event NOT delivered error=transport error\n"
+            "notify-result=webhook:failed\n"}
+
+
+TRANSPORT_JOBS = {
+    "protect-transport-n-1a2b3c4d-1": _job("2026-09-23T05:00:00Z"),
+    "protect-transport-n-1a2b3c4d-2": _job("2026-09-23T05:01:05Z"),
+    "protect-transport-n-1a2b3c4d-3": _job("2026-09-23T05:06:10Z"),
+}
+TRANSPORT_POLICY = {"status": {
+    "health": "Stale",
+    "alerts": [{"kind": "Staleness", "state": "Open",
+                "delivery": {"state": "Failed", "attempts": 3,
+                             "lastError": "a configured sink did not accept (webhook:failed)"}}],
+    "conditions": [_cond("NotificationsDelivered", "False", "DeliveryFailed")]}}
+
+
+def test_the_transport_row_requires_three_attempts_and_rewrites_nothing() -> None:
+    before = {"transport-point": "100", "other": "7"}
+    ok = d3.transport_failure_recorded(TRANSPORT_POLICY, TRANSPORT_JOBS, 3, before, dict(before),
+                                       "Stale", True)
+    row("transport: the documented shape passes", all(ok.values()), str(ok))
+    rewritten = d3.transport_failure_recorded(TRANSPORT_POLICY, TRANSPORT_JOBS, 3, before,
+                                              dict(before, other="8"), "Stale", True)
+    row("transport: a Backup rewritten by the failure is REFUSED", not all(rewritten.values()))
+    hatch = d3.transport_failure_recorded(TRANSPORT_POLICY, TRANSPORT_JOBS, 3, before,
+                                          dict(before), "Stale", False)
+    row("transport: with the https-only refusal (hatch shut) it is REFUSED", not all(hatch.values()))
+    fourth = d3.transport_failure_recorded(TRANSPORT_POLICY, TRANSPORT_JOBS, 4, before,
+                                           dict(before), "Stale", True)
+    row("transport: a fourth attempt after the budget is REFUSED", not all(fourth.values()))
+    rushed = dict(TRANSPORT_JOBS)
+    rushed["protect-transport-n-1a2b3c4d-3"] = _job("2026-09-23T05:01:30Z")
+    fast = d3.transport_failure_recorded(TRANSPORT_POLICY, rushed, 3, before, dict(before),
+                                         "Stale", True)
+    row("transport: a retry that did not wait the 300 s backoff is REFUSED", not all(fast.values()))
+    delivered = json.loads(json.dumps(TRANSPORT_POLICY))
+    delivered["status"]["alerts"][0]["delivery"] = {"state": "Delivered", "attempts": 1}
+    delivered["status"]["conditions"] = [_cond("NotificationsDelivered", "True", "Delivered")]
+    row("transport: a delivery that succeeded is REFUSED",
+        not all(d3.transport_failure_recorded(delivered, TRANSPORT_JOBS, 3, before, dict(before),
+                                              "Stale", True).values()))
+    refused_scheme = {n: _job(j["created"], 1, "protection event NOT delivered reason=https only\n"
+                                               "notify-result=webhook:failed\n")
+                      for n, j in TRANSPORT_JOBS.items()}
+    row("transport: an https-only refusal logged without a transport error is REFUSED",
+        not all(d3.transport_failure_recorded(TRANSPORT_POLICY, refused_scheme, 3, before,
+                                              dict(before), "Stale", True).values()))
+    relabelled = json.loads(json.dumps(TRANSPORT_POLICY))
+    relabelled["status"]["health"] = "Unknown"
+    row("transport: a protection verdict rewritten by the failure is REFUSED",
+        not all(d3.transport_failure_recorded(relabelled, TRANSPORT_JOBS, 3, before, dict(before),
+                                              "Stale", True).values()))
+    row("every_backup_unchanged refuses an empty 'before' (nothing measured)",
+        not d3.every_backup_unchanged({}, {}))
+
+
+def test_an_unavailable_target_skip_consumes_its_slot() -> None:
+    t0 = d3.slot_epoch("20260923-050100")
+    obs = [
+        {"at": t0 + 10, "skip": {"slot": "20260923-050100", "reason": "TargetUnavailable"},
+         "lastScheduledSlot": "20260923-050100",
+         "ready": "the KafkaCluster `rehearsal-target-alias` does not report status.reachable: true"},
+        {"at": t0 + 70, "skip": {"slot": "20260923-050200", "reason": "TargetUnavailable"},
+         "lastScheduledSlot": "20260923-050200",
+         "ready": "the KafkaCluster `rehearsal-target-alias` does not report status.reachable: true"},
+    ]
+    later = {"logweir-rehearsal-l6-unavailable-20260923-050400": "20260923-050400"}
+    verdict, clauses = d3.unavailable_target_consumes_the_slot(obs, later, True, True)
+    row("unavailable target: skipped, consumed, a later slot fired -> PASS", verdict == "PASS",
+        str(clauses))
+    late = {"logweir-rehearsal-l6-unavailable-20260923-050200": "20260923-050200"}
+    verdict, _ = d3.unavailable_target_consumes_the_slot(obs, late, True, True)
+    row("unavailable target: a Restore for the skipped slot (fired late) -> FAIL", verdict == "FAIL")
+    deferred = [dict(o, lastScheduledSlot="20260923-045900") for o in obs]
+    verdict, _ = d3.unavailable_target_consumes_the_slot(deferred, later, True, True)
+    row("unavailable target: lastScheduledSlot not advanced (deferred) -> FAIL", verdict == "FAIL")
+    verdict, _ = d3.unavailable_target_consumes_the_slot([], later, True, True)
+    row("unavailable target: no skip recorded at all -> FAIL", verdict == "FAIL")
+    verdict, _ = d3.unavailable_target_consumes_the_slot(obs, later, False, True)
+    row("unavailable target: a target that never went unreachable -> NOT-REACHED",
+        verdict == "NOT-REACHED")
+
+
+def _restore(phase, *, job="j", exit_code=None, outcome=None, verdict=None, reason=None) -> dict:
+    return {"metadata": {"name": "logweir-rehearsal-l6-failed-verify-20260923-051000"},
+            "status": {"phase": phase, "jobRef": {"name": job} if job else None,
+                       "exitCode": exit_code, "outcome": outcome, "reason": reason,
+                       "evidence": {"verification": {"result": verdict}} if verdict else {}}}
+
+
+def test_a_failed_verification_is_a_failed_rehearsal() -> None:
+    name = "logweir-rehearsal-l6-failed-verify-20260923-051000"
+    tampered = [{"key": "archive/x/topics/orders/partition=0/segment-1.bin.zst",
+                 "manifestSha256": "aa", "sha256After": "bb", "crcOk": True}]
+    restore = _restore("Failed", exit_code=2, outcome="fail-integrity", verdict="Valid")
+    schedule = {"metadata": {"name": "l6-failed-verify"},
+                "status": {"lastFailed": {"restoreRef": {"name": name}, "reason": "fail-integrity"},
+                           "conditions": [_cond("RehearsalHealthy", "False", "Failed")]}}
+    view = {"state": "failed", "result": {"status": "notPass"}}
+    verdict, clauses = d3.failed_verification_is_a_failed_rehearsal(restore, schedule, tampered, view)
+    row("failed verification: the documented shape -> PASS", verdict == "PASS", str(clauses))
+    counted = {"status": {"lastSucceeded": {"restoreRef": {"name": name}},
+                          "conditions": [_cond("RehearsalHealthy", "True", "Passed")]}}
+    verdict, _ = d3.failed_verification_is_a_failed_rehearsal(restore, counted, tampered, view)
+    row("failed verification: counted as a pass (RehearsalHealthy True) -> FAIL", verdict == "FAIL")
+    passed = _restore("Succeeded", exit_code=0, outcome="pass", verdict="Valid")
+    verdict, _ = d3.failed_verification_is_a_failed_rehearsal(passed, schedule, tampered, view)
+    row("failed verification: a rehearsal that PASSED over the tamper -> FAIL", verdict == "FAIL")
+    refused = _restore("Failed", job=None, reason="ConnectionPlanMismatch")
+    verdict, _ = d3.failed_verification_is_a_failed_rehearsal(refused, schedule, tampered, None)
+    row("failed verification: refused at admission (f49849d) -> NOT-REACHED",
+        verdict == "NOT-REACHED")
+    untampered = [dict(tampered[0], sha256After="aa")]
+    verdict, _ = d3.failed_verification_is_a_failed_rehearsal(restore, schedule, untampered, view)
+    row("failed verification: a segment that still hashes to its manifest -> FAIL", verdict == "FAIL")
+
+
+def _kbak(records: bytes = b"\x00" * 40) -> bytes:
+    import zlib
+    header = b"KBAK" + bytes([1, 0]) + b"\x00\x00" + (1).to_bytes(8, "little") \
+        + (0).to_bytes(8, "little") + (0).to_bytes(8, "little")
+    body = header + records
+    return body + (zlib.crc32(body) & 0xFFFFFFFF).to_bytes(4, "little") + b"BKAE"
+
+
+def test_the_segment_tamper_keeps_the_records_and_changes_only_the_digest() -> None:
+    import hashlib
+    original = _kbak()
+    row("a freshly sealed synthetic segment passes the CRC check", d3.kbak_crc_ok(original))
+    tampered = d3.tamper_kbak_reserved(original)
+    row("the tamper is CRC-sealed (every decoder still reads it)", d3.kbak_crc_ok(tampered))
+    row("the tamper changes the object's sha256",
+        hashlib.sha256(tampered).digest() != hashlib.sha256(original).digest())
+    row("and nothing but the two reserved header bytes and the CRC",
+        tampered[:6] == original[:6] and tampered[8:-8] == original[8:-8]
+        and tampered[6:8] != original[6:8] and tampered[-4:] == b"BKAE")
+    naive = original[:6] + b"LW" + original[8:]
+    row("PLANTED: a tamper that does not re-seal the CRC is refused by kbak_crc_ok",
+        not d3.kbak_crc_ok(naive))
+    try:
+        d3.tamper_kbak_reserved(b'{"legacy": "json segment"}')
+        row("a non-KBAK object is refused rather than tampered", False)
+    except ValueError:
+        row("a non-KBAK object is refused rather than tampered", True)
+    row("a segment key from a manifest is re-rooted under the storage prefix",
+        d3.object_key("archive", "abc/topics/orders/partition=0/s.bin.zst")
+        == "archive/abc/topics/orders/partition=0/s.bin.zst"
+        and d3.object_key("archive", "archive/abc/x") == "archive/abc/x")
+
+
+def test_the_object_lock_row_requires_the_refusal_recorded() -> None:
+    held, control = "lwp1-held", "lwp1-ctl"
+    after = {"status": {"lastEnforcement": {"runId": "r1", "deleted": [control],
+                                            "failed": [{"pointId": held, "code": "Locked"}]}}}
+    nxt = {"status": {"lastEvaluation": {"protected": [{"pointId": held, "reason": "LegalHold"}],
+                                         "candidates": []},
+                      "guarantees": {"legalHold": "ProviderEnforcedUnverified"}}}
+    kept = [{"key": "archive/x/manifest.json", "versionId": "v1", "isDeleteMarker": False,
+             "isLatest": True}]
+    ok = d3.legal_hold_refusal_recorded(after, nxt, held, control, kept, True, True)
+    row("object lock: a recorded provider refusal passes", all(ok.values()), str(ok))
+    # WHAT MinIO DOES (measured 2026-09-23 on the lab): the reaper's DELETE names
+    # no version, the provider writes a delete marker over the held version and
+    # returns success, and the run records the held point Deleted.
+    after_f = {"status": {"lastEnforcement": {"runId": "r1", "deleted": [held, control]}}}
+    nxt_f = {"status": {"lastEvaluation": {"protected": [], "candidates": []},
+                        "guarantees": {"legalHold": "ProviderEnforcedUnverified"}}}
+    marker = [{"key": "archive/x/manifest.json", "versionId": "v2", "isDeleteMarker": True,
+               "isLatest": True},
+              {"key": "archive/x/manifest.json", "versionId": "v1", "isDeleteMarker": False,
+               "isLatest": False}]
+    bad = d3.legal_hold_refusal_recorded(after_f, nxt_f, held, control, marker, True, True)
+    row("object lock: a delete marker over the held version, recorded Deleted, is REFUSED",
+        not all(bad.values())
+        and not bad["the refusal is recorded: the held point is in lastEnforcement.failed with "
+                    "code Locked"])
+    claim = json.loads(json.dumps(nxt))
+    claim["status"]["guarantees"]["legalHold"] = "LogweirEnforced"
+    row("object lock: a LogweirEnforced claim is REFUSED",
+        not all(d3.legal_hold_refusal_recorded(after, claim, held, control, kept, True,
+                                               True).values()))
+    row("object lock: a bucket without object lock is REFUSED as a fixture",
+        not all(d3.legal_hold_refusal_recorded(after, nxt, held, control, kept, True,
+                                               False).values()))
+
+
+def test_a_shared_set_must_not_be_planned_under_a_retained_point() -> None:
+    entries = [
+        {"pointId": "lwp1-a", "backupId": "set-1", "availability": "Available",
+         "verification": "Verified"},
+        {"pointId": "lwp1-b", "backupId": "set-1", "availability": "Available",
+         "verification": "Verified"},
+    ]
+    exposed = {"kept": ["lwp1-b"], "candidates": [{"pointId": "lwp1-a"}], "protected": []}
+    verdict, clauses = d3.shared_set_is_protected(entries, exposed)
+    row("shared set: a candidate over a retained point's set -> FAIL", verdict == "FAIL",
+        str(clauses))
+    guarded = {"kept": ["lwp1-a", "lwp1-b"], "candidates": [],
+               "protected": [{"pointId": "lwp1-a", "reason": "SharedSegment"}]}
+    verdict, clauses = d3.shared_set_is_protected(entries, guarded)
+    row("shared set: the older point protected SharedSegment -> PASS", verdict == "PASS",
+        str(clauses))
+    both_gone = {"kept": [], "candidates": [{"pointId": "lwp1-a"}, {"pointId": "lwp1-b"}]}
+    verdict, _ = d3.shared_set_is_protected(entries, both_gone)
+    row("shared set: both planned together (nothing retained over it) -> PASS",
+        verdict == "PASS")
+    one = [entries[0], dict(entries[1], backupId="set-2")]
+    verdict, _ = d3.shared_set_is_protected(one, exposed)
+    row("shared set: no two points over one set -> NOT-REACHED", verdict == "NOT-REACHED")
+    stale = [entries[0], dict(entries[1], verification="Invalid")]
+    verdict, _ = d3.shared_set_is_protected(stale, exposed)
+    row("shared set: one of the two not usable -> NOT-REACHED", verdict == "NOT-REACHED")
+
+
+def test_the_redactor_keeps_pod_specs_valid_json_and_still_redacts() -> None:
+    spec = json.dumps({"automountServiceAccountToken": False, "token": "abcdef123456"})
+    out = d3.redact(spec)
+    row("automountServiceAccountToken survives redaction as a JSON key",
+        '"automountServiceAccountToken": false' in out)
+    row("and a real token value is still redacted", "abcdef123456" not in out)
+    row("a sessionToken value is still redacted",
+        "zzz999" not in d3.redact('{"sessionToken": "zzz999"}'))
+
+
+def test_the_harness_rows_11_phases_are_registered_and_ordered() -> None:
+    new = ["operation_states", "notify_transport", "rehearsal_faults", "object_lock",
+           "shared_set"]
+    row("every new phase is in PHASES", all(p in d3.PHASES for p in new))
+    row("and declares its preconditions", all(p in d3.PHASE_PRECONDITIONS for p in new))
+    row("rehearsal_faults runs after rehearsal and refused_point (it rebuilds the TrustPolicy)",
+        d3.PHASES.index("rehearsal_faults") > d3.PHASES.index("refused_point"))
+    row("the shipped order still violates nothing", not d3.phase_order_violations(d3.PHASES))
+    row("each is callable by its phase name",
+        all(callable(getattr(d3, p, None)) for p in new))
+
+
 _REPO = pathlib.Path(__file__).resolve().parents[3]
 
 

@@ -85,6 +85,14 @@ python3 e2e/k8s/d3/d3_live.py rehearsal       # D3 §15 L6 / PLAT-14.3: a rehear
                                                #   end to end. CLUSTER LOCK
 python3 e2e/k8s/d3/d3_live.py refused-point   # lab-refresh-8: a REFUSED point under a
                                                #   stale view. CLUSTER LOCK
+python3 e2e/k8s/d3/d3_live.py operation-states  # PLAT-14.1: mount failure (ConfigMap and
+                                               #   Secret), unschedulable pod, engine crash
+python3 e2e/k8s/d3/d3_live.py notify-transport  # PLAT-14.2: a webhook scaled to zero
+python3 e2e/k8s/d3/d3_live.py rehearsal-faults  # PLAT-14.3: unavailable target, failed
+                                               #   verification. CLUSTER LOCK
+python3 e2e/k8s/d3/d3_live.py object-lock       # PLAT-16.2: a lock-enabled bucket, a legal
+                                               #   hold, the controller's own Enforce Job
+python3 e2e/k8s/d3/d3_live.py shared-set        # PLAT-16.2: two receipts over one backup set
 python3 e2e/k8s/d3/d3_live.py control          # the negative control — it MUST fail
 python3 e2e/k8s/d3/d3_live.py report
 python3 e2e/k8s/d3/d3_live.py cleanup          # CLUSTER LOCK (deletes the TrustPolicy)
@@ -214,7 +222,7 @@ which is only meaningful while the plan's objects are still there). Run
 
 ## The cluster lock
 
-`trust`, `signed-at-probe`, `rehearsal`, `refused-point` and `cleanup` touch one
+`trust`, `signed-at-probe`, `rehearsal`, `refused-point`, `rehearsal-faults` and `cleanup` touch one
 cluster-scoped
 object (the `TrustPolicy`, which binds only this run's namespace). Take the
 orchestration's lock around exactly those phases and release it immediately
@@ -281,6 +289,38 @@ so the first needs a chart install with an edited Role; the second has no
 product path at all (only a status patch writes a non-string verdict). Both are
 covered by the branch's own crate tests and are listed as gaps rather than
 built as fault injection.
+
+## harness-rows-11's rows (PLAT-14.1, 14.2, 14.3, 16.2)
+
+The tests lab-refresh-8 §5 found with NO committed row. Each is a named phase whose
+row judges a pure predicate with planted-wrong twins in `test_rows.py` (the mount
+and object-lock twins plant the exact shape the lab published on `f49849d`). Every
+fault is induced from this run's own namespace, bucket and MinIO users; nothing
+about the shared release changes. The console-view clauses read
+`GET /api/v1/namespaces/{ns}/operations/{kind}/{name}` from a host `logweir-api`
+(`LOGWEIR_API_BIN`, else the newer of `target/{release,debug}/logweir-api`); with
+no binary those clauses read `None` and the row FAILS rather than passing on the
+object alone.
+
+| row | phase | PASS requires | negative control |
+|---|---|---|---|
+| `ops-mount-failure-is-volume-mount-failed` | `operation-states` | a Backup over a `KafkaCluster` whose `tlsCa.configMapKeyRef` names an absent ConfigMap: while waiting `progress.stage=Preparing`, `RunnerReady=False/VolumeMountFailed`, a `VolumeMountFailed` diagnostic about the runner Pod naming the ConfigMap, the operation view `preparing`/`VolumeMountFailed`; fail-fast collapses the Job deadline; terminal `Failed` with the `Failed` condition reason `VolumeMountFailed`, no exit code, view `failed`/`VolumeMountFailed`/`error` (D3 §13: "the terminal reason is the diagnostic") | twin: `f49849d`'s `NoExitCode` after the recorded diagnostic, no deadline patch, an unnamed object, a run that only said `WaitingForPod` |
+| `ops-mount-failure-secret-is-volume-mount-failed` | `operation-states` | the same, for the projected `signing` Secret (this namespace's `logweir-signing-key` removed for one run, restored after): diagnostic `SigningKeyMissing`, `RunnerReady`/terminal reason `VolumeMountFailed` | twin: the Secret's shape judged for the ConfigMap's code |
+| `ops-unschedulable-pod-is-pod-unschedulable` | `operation-states` | a namespace `LimitRange` defaulting 512Gi (deleted once the pod carries it): the pod asked for it and was `Unschedulable`; `RunnerReady=False/PodUnschedulable` with a Pod diagnostic; view `preparing`/`PodUnschedulable`; the Job keeps its own `activeDeadlineSeconds` (480, longer than fail-fast's 300 + 60 grace, so "no fail-fast" can fail); terminal `PodUnschedulable`, no exit code, view `failed`/`PodUnschedulable` | twin: a fail-fast patch, a terminal `NoExitCode`, a pod without the request |
+| `ops-engine-crash-is-failed-operational` | `operation-states` | a destination whose `archiveWrite` user is denied `s3:PutObject` on SEGMENT keys only: the runner started (`RunnerReady=True/RunnerStarted`), the pod log carries `kafka-backup backup exited` and an `AccessDenied` on a `/topics/` key (the engine had read records), `Failed`, `exitCode: 1`, `exitReason: operational`, no receipt; view `failed`/`error`/`exitCode 1`/`noEvidence`; the fixture control (same source and topic, full grant) Succeeded | twin: exit 3, a manifest-only refusal, a runner that never started, a failed control |
+| `notify-transport-failure-is-recorded-and-rewrites-nothing` | `notify-transport` | a policy whose only webhook is a Service with no endpoints, over a member point aged past the objective: one `Staleness` alert, `delivery.state: Failed` after exactly 3 attempts, `lastError` naming `webhook:failed`, `NotificationsDelivered=False/DeliveryFailed`; three delivery Jobs of one transition, each exit 1 with `notify-result=webhook:failed` and `transport error`, created ≥ 60 s then ≥ 300 s apart; no fourth; the health the alert opened on unchanged; every Backup's `resourceVersion` unchanged (`every_backup_unchanged`, the same comparison `notify-delivery-never-rewrites-a-backup` makes); the insecure-sink hatch open (else the failure is the https-only refusal) | twin: a rewritten Backup, a shut hatch, a fourth attempt, a rushed retry, a delivered alert, an https refusal, a relabelled verdict |
+| `rehearsal-unavailable-target-skips-and-consumes-the-slot` | `rehearsal-faults` | a one-minute arm targeting `rehearsal-target-alias` (an ExternalName Service of this run's to the scratch broker, CUT to a non-resolving name after the standing Approval verified): a `TargetUnavailable` skip naming a due minute slot, the `Ready` message naming `reachable`, `lastScheduledSlot` advanced to it, no Restore for a skipped slot, and — with the alias restored — a Restore for a LATER slot. `NOT-REACHED` if the cluster never reported `reachable: false`, or never `true` again | twin: a skipped slot fired late, a deferred `lastScheduledSlot`, no skip |
+| `rehearsal-failed-verification-is-a-failed-rehearsal` | `rehearsal-faults` | the arm's own point with every `orders` segment re-sealed (KBAK reserved bytes changed, CRC32 recomputed: same records, different sha256): the rehearsal is `Failed`, exit 2, `outcome: fail-integrity`, its scorecard `Valid`; the schedule's `lastFailed` names it and `lastSucceeded` does not; `RehearsalHealthy=False/Failed`; the view `failed`/`notPass`. `NOT-REACHED` when the Restore never ran a Job (on `f49849d`: `ConnectionPlanMismatch`, REHEARSAL-PLAN-AUTH-PLAINTEXT) | twin: counted as a pass, passed over the tamper, an untampered segment |
+| `retention-object-lock-provider-refusal-is-recorded` | `object-lock` | a bucket made `--with-lock`, three points, a legal hold on every object of the oldest, a `mode: Enforce` policy (`keepLast 1`, `requireApprovedPlan: false`): the controller's own run deletes the unheld candidate, the held objects are still the LATEST versions, `lastEnforcement.failed` names the held point with `Locked`, the next evaluation protects it `LegalHold`, `guarantees.legalHold: ProviderEnforcedUnverified`. The provider's own semantics are recorded beside it (`lock/00-provider.json`: a DELETE with no version id, and one of the held version) | twin: the delete-marker shape the lab produced, a `LogweirEnforced` claim, a bucket without lock |
+| `retention-shared-set-is-never-planned-under-a-retained-point` | `shared-set` | one Backup's Job run twice from its frozen inputs (two receipts, one backup set, `catalog-duplicate-identity`'s technique), a Report policy `keepLast 1`: no candidate shares its `backupId` with a retained point. `NOT-REACHED` unless both points are Available and Verified | twin: a candidate over a retained point's set, both planned together, one unusable |
+
+`rehearsal-faults` runs after `rehearsal` and `refused-point`: it rebuilds the same
+`TrustPolicy`. Its broker sweep and key cleanup are recorded as
+`rehearsal-faults-shared-broker-left-as-found` and
+`rehearsal-faults-minted-private-keys-never-outlive-the-row`. `object-lock` releases
+every legal hold it placed and removes every version and the bucket in its
+`finally` (`lock/99-cleanup.json`); `cleanup`'s `rb --force` cannot remove a bucket
+with held versions.
 
 ## The enforcer's image
 
