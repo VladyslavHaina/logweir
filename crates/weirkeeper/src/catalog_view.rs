@@ -506,10 +506,14 @@ pub struct TrustKey {
     pub spki_pem: String,
     /// Who the source says it belongs to. Display only, never authority.
     pub subject: Option<String>,
-    /// When it starts being accepted: evidence claiming a signing time
-    /// before it is not evidence this key could have signed inside its window.
-    /// `None` for a roster key (the roster has no such field).
-    pub not_before: Option<Time>,
+    /// The key's full lifecycle, for a `TrustPolicy` key — and then
+    /// [`classify_verification`] judges it with [`logweir_core::trust::decide`]
+    /// ITSELF, the judge the restore preflight and the runner apply to the
+    /// same key, so the view cannot be the permissive one (a staged key, a
+    /// claim in the future, a retirement boundary). `None` for a roster key:
+    /// the roster has no lifecycle, and its classification is the one it
+    /// always had.
+    pub lifecycle: Option<logweir_core::trust::TrustedKey>,
     /// When it stops being accepted for NEW evidence.
     pub not_after: Option<Time>,
     /// Its lifecycle state.
@@ -570,7 +574,7 @@ impl TrustView {
                     key_id: k.key_id.clone(),
                     spki_pem: k.spki_pem.clone(),
                     subject: k.subject.clone(),
-                    not_before: None,
+                    lifecycle: None,
                     not_after: k.not_after,
                     state: TrustKeyState::Active,
                 })
@@ -706,7 +710,7 @@ fn legacy_trust_key(key: &crate::trust::ResolvedKey) -> TrustKey {
         key_id: key.trust.key_id.clone(),
         spki_pem: key.spki_pem.clone(),
         subject: None,
-        not_before: None,
+        lifecycle: None,
         not_after: (key.trust.not_after != crate::trust::legacy_not_after())
             .then_some(key.trust.not_after),
         state: TrustKeyState::Active,
@@ -731,7 +735,7 @@ fn policy_trust_key(key: &crate::trust::ResolvedKey) -> TrustKey {
         key_id: lifecycle.key_id.clone(),
         spki_pem: key.spki_pem.clone(),
         subject: Some(lifecycle.principal_id.clone()),
-        not_before: Some(lifecycle.not_before),
+        lifecycle: Some(lifecycle.clone()),
         not_after,
         state,
     }
@@ -758,9 +762,11 @@ fn policy_trust_key(key: &crate::trust::ResolvedKey) -> TrustKey {
 /// 5. **Revoked wins over everything else the key could be**, because a
 ///    revocation is a statement that the private half is in someone else's
 ///    hands.
-/// 6. **Evidence claiming a signing time before the key's `notBefore` is
-///    [`Verification::Invalid`]** — the key was not accepted then (a policy key
-///    only; the roster has no `notBefore`).
+/// 6. **A `TrustPolicy` key is judged by [`logweir_core::trust::decide`]
+///    itself** ([`TrustKey::lifecycle`]): every window row — a claim before
+///    `notBefore`, after the accepted bound, in the future, against a key whose
+///    window has not opened — is `decide`'s, so the view agrees with the
+///    preflight and the runner by construction. Steps 5 and 7 are the roster's.
 /// 7. **An expired or retired key still verifies what it signed while it was
 ///    valid** — [`Verification::VerifiedHistorical`], D3 §7.4. Evidence signed
 ///    AFTER `notAfter` is [`Verification::Invalid`]: the key was not accepted
@@ -792,16 +798,11 @@ pub fn classify_verification(
     let Some(key) = trust.key(key_id) else {
         return Verification::UntrustedSigner;
     };
+    if let Some(lifecycle) = key.lifecycle.as_ref() {
+        return decided(lifecycle, signed_at, now);
+    }
     if key.state == TrustKeyState::Revoked {
         return Verification::Revoked;
-    }
-    // Signed before the key's window opened — `decide`'s
-    // `SignedOutsideValidity`. A staged successor key verifies nothing it
-    // claims to have signed before `notBefore`.
-    if let (Some(not_before), Some(signed)) = (key.not_before, signed_at) {
-        if signed < not_before {
-            return Verification::Invalid;
-        }
     }
     match key.not_after {
         // Still inside its validity, whatever its declared state: a key that is
@@ -821,6 +822,54 @@ pub fn classify_verification(
             TrustKeyState::Retired => Verification::VerifiedHistorical,
             _ => Verification::Verified,
         },
+    }
+}
+
+/// A `TrustPolicy` key's verdict: [`logweir_core::trust::decide`] for
+/// `EvidenceSigning`, at the point's claimed signing time, with no independent
+/// observation (the view has none), mapped onto the view's vocabulary.
+///
+/// | `decide` | view |
+/// |---|---|
+/// | `Valid`, basis `Current` | `Verified` |
+/// | `Valid`, basis `Historical` (or recorded before a revocation) | `VerifiedHistorical` |
+/// | `Untrusted`, `Revoked` or `RecordedBeforeRevocation` | `Revoked` |
+/// | `Untrusted`, `SignedOutsideValidity` — before `notBefore`, after the accepted bound, in the future, against a key whose window has not opened, or no instant at all | `Invalid` |
+/// | `Untrusted`, `UntrustedSigner`/`KeyUsageMismatch` | `UntrustedSigner` |
+fn decided(
+    lifecycle: &logweir_core::trust::TrustedKey,
+    signed_at: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> Verification {
+    use logweir_core::trust::{
+        ClaimAbsence, EvidenceClaim, IndependentObservation, KeyUsage, TrustBasis, TrustResult,
+        UntrustReason,
+    };
+    let claim = signed_at.map_or(
+        EvidenceClaim::absent(ClaimAbsence::FieldAbsent),
+        EvidenceClaim::at,
+    );
+    let verdict = logweir_core::trust::decide(
+        Some(lifecycle),
+        KeyUsage::EvidenceSigning,
+        &claim,
+        &IndependentObservation::none(),
+        now,
+    );
+    match (verdict.result, verdict.basis, verdict.reason) {
+        (TrustResult::Valid, TrustBasis::Current, _) => Verification::Verified,
+        (TrustResult::Valid, _, _) => Verification::VerifiedHistorical,
+        (
+            TrustResult::Untrusted,
+            _,
+            Some(UntrustReason::Revoked | UntrustReason::RecordedBeforeRevocation),
+        ) => Verification::Revoked,
+        (
+            TrustResult::Untrusted,
+            _,
+            Some(UntrustReason::UntrustedSigner | UntrustReason::KeyUsageMismatch),
+        ) => Verification::UntrustedSigner,
+        (TrustResult::Untrusted, _, _) => Verification::Invalid,
     }
 }
 

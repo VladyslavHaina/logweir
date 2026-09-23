@@ -725,7 +725,7 @@ fn trust_with(key_id: &str, state: TrustKeyState, not_after: Option<DateTime<Utc
             key_id: key_id.to_string(),
             spki_pem: spki(0xA1),
             subject: Some("runner".to_string()),
-            not_before: None,
+            lifecycle: None,
             not_after,
             state,
         }],
@@ -3881,25 +3881,46 @@ fn the_conflict_reason_is_in_the_closed_vocabulary() {
     );
 }
 
-/// **The projection agrees with `logweir_core::trust::decide`** — the judge the
-/// restore preflight and the runner apply to the same key — for every
-/// lifecycle a `TrustPolicy` key can have and a point signed before and after
-/// the lifecycle instant. `Valid/Current` ↔ `Verified`, `Valid/Historical` ↔
-/// `VerifiedHistorical`, `Untrusted/Revoked` ↔ `Revoked`,
-/// `Untrusted/SignedOutsideValidity` ↔ `Invalid`.
+/// **The view agrees with `logweir_core::trust::decide` — EXHAUSTIVELY over a
+/// grid of key lifecycles × claimed signing times** (review MEDIUM-1). `decide`
+/// is the judge the restore preflight (M-2) and the runner apply to the same
+/// key; a view that is more permissive offers a green point the restore will
+/// refuse. The grid covers every window row `decide` has: before `notBefore`,
+/// inside the window, at and after `notAfter`/`retiredAt`/the revocation's
+/// effective instant, AT `now`, just after `now` (F4, a claim in the future),
+/// a key whose window has not opened yet (F3, a staged successor), and a point
+/// with no claimed instant at all.
 ///
-/// KILLS: ignoring `notBefore` (the `staged` key's early point would read
-/// `Verified`); projecting `Retired` as `Active` — equivalent to the correct
-/// projection while `retiredAt` is past (the bound does the work), and caught
-/// by the key retired at a FUTURE instant, which `decide` already calls
-/// `Historical`.
+/// The expected value is derived from `decide`'s verdict independently of the
+/// code under test: `Valid/Current` ↔ `Verified`, `Valid/Historical` ↔
+/// `VerifiedHistorical`, `Untrusted/Revoked` ↔ `Revoked`, any other refusal ↔
+/// `Invalid`.
+///
+/// KILLS: classifying a policy key without `decide` (the previous projection,
+/// which read `Verified` for a future claim and for a staged key, and
+/// `VerifiedHistorical` for a future claim under a future `retiredAt`);
+/// projecting `Retired` as `Active`; ignoring `notBefore`.
 #[test]
 fn the_policy_projection_agrees_with_the_core_trust_decision() {
     use logweir_core::trust::{
-        EvidenceClaim, IndependentObservation, KeyUsage, TrustBasis, TrustResult, UntrustReason,
+        ClaimAbsence, EvidenceClaim, IndependentObservation, KeyUsage, TrustBasis, TrustResult,
+        UntrustReason,
+    };
+    let now = now();
+    let at = |s: &str| {
+        DateTime::parse_from_rfc3339(s)
+            .expect("an instant")
+            .with_timezone(&Utc)
     };
     let lifecycles = [
         ("active", json!({})),
+        ("expires-now", json!({"notAfter": now.to_rfc3339()})),
+        ("expired", json!({"notAfter": "2026-06-01T00:00:00Z"})),
+        ("staged-past", json!({"notBefore": "2026-04-01T00:00:00Z"})),
+        (
+            "staged-future",
+            json!({"notBefore": "2026-11-01T00:00:00Z"}),
+        ),
         (
             "retired-past",
             json!({"state": "Retired", "retiredAt": "2026-06-01T00:00:00Z"}),
@@ -3908,8 +3929,6 @@ fn the_policy_projection_agrees_with_the_core_trust_decision() {
             "retired-future",
             json!({"state": "Retired", "retiredAt": "2026-12-01T00:00:00Z"}),
         ),
-        ("expired", json!({"notAfter": "2026-06-01T00:00:00Z"})),
-        ("staged", json!({"notBefore": "2026-04-01T00:00:00Z"})),
         (
             "revoked-compromise",
             json!({"state": "Revoked", "revokedAt": "2026-09-01T00:00:00Z",
@@ -3920,7 +3939,26 @@ fn the_policy_projection_agrees_with_the_core_trust_decision() {
             json!({"state": "Revoked", "revokedAt": "2026-09-01T00:00:00Z",
                    "revocationReason": "Superseded", "revocationEffectiveFrom": "2026-06-01T00:00:00Z"}),
         ),
+        (
+            "revoked-unspecified-future",
+            json!({"state": "Revoked", "revokedAt": "2026-09-01T00:00:00Z",
+                   "revocationEffectiveFrom": "2026-12-01T00:00:00Z"}),
+        ),
     ];
+    let claims: Vec<Option<DateTime<Utc>>> = vec![
+        Some(at("2024-06-01T00:00:00Z")),
+        Some(at("2026-03-01T00:00:00Z")),
+        Some(at("2026-06-01T00:00:00Z")),
+        Some(at("2026-08-01T00:00:00Z")),
+        Some(now - chrono::Duration::seconds(1)),
+        Some(now),
+        Some(now + chrono::Duration::seconds(1)),
+        Some(at("2026-11-15T00:00:00Z")),
+        Some(at("2026-12-01T00:00:00Z")),
+        None,
+    ];
+    let mut compared = 0;
+    let mut refused_by_the_new_rows = 0;
     for (label, lifecycle) in lifecycles {
         let policy: weirkeeper::crds::trust_policy::TrustPolicy = serde_json::from_value(
             policy_value(POLICY_NAME, &[NS], vec![policy_key(lifecycle)]),
@@ -3932,14 +3970,17 @@ fn the_policy_projection_agrees_with_the_core_trust_decision() {
             panic!("{label}: the policy governs the namespace")
         };
         let projected = TrustView::from_resolved(&resolved);
-        for at in [EARLY_MS, LATE_MS] {
-            let signed = Utc.timestamp_millis_opt(at).single().expect("instant");
+        for signed in &claims {
+            let claim = signed.map_or(
+                EvidenceClaim::absent(ClaimAbsence::FieldAbsent),
+                EvidenceClaim::at,
+            );
             let decided = resolved.decide_for(
                 POLICY_KEY,
                 KeyUsage::EvidenceSigning,
-                &EvidenceClaim::at(signed),
+                &claim,
                 &IndependentObservation::none(),
-                now(),
+                now,
             );
             let want = match (decided.result, decided.basis, decided.reason) {
                 (TrustResult::Valid, TrustBasis::Current, _) => Verification::Verified,
@@ -3948,19 +3989,62 @@ fn the_policy_projection_agrees_with_the_core_trust_decision() {
                 (TrustResult::Untrusted, _, Some(UntrustReason::SignedOutsideValidity)) => {
                     Verification::Invalid
                 }
-                other => panic!("{label} at {at}: a verdict this table does not map: {other:?}"),
+                other => {
+                    panic!("{label} at {signed:?}: a verdict this table does not map: {other:?}")
+                }
             };
-            assert_eq!(
-                view::classify_verification(
-                    SignatureVerdict::Verified,
-                    Some(POLICY_KEY),
-                    Some(signed),
-                    &projected,
-                    now()
-                ),
-                want,
-                "{label}, signed at {signed}"
+            let got = view::classify_verification(
+                SignatureVerdict::Verified,
+                Some(POLICY_KEY),
+                *signed,
+                &projected,
+                now,
             );
+            assert_eq!(got, want, "{label}, claim {signed:?}");
+            compared += 1;
+            if want == Verification::Invalid
+                && (signed.is_some_and(|t| t > now) || label == "staged-future")
+            {
+                refused_by_the_new_rows += 1;
+            }
         }
     }
+    assert_eq!(compared, 100, "the whole grid was compared");
+    assert!(
+        refused_by_the_new_rows >= 10,
+        "the grid exercises the future-claim and unopened-key rows: {refused_by_the_new_rows}"
+    );
+    // The reviewer's three probes, by name.
+    let probe = |lifecycle: Value, claim: &str| {
+        let policy: weirkeeper::crds::trust_policy::TrustPolicy = serde_json::from_value(
+            policy_value(POLICY_NAME, &[NS], vec![policy_key(lifecycle)]),
+        )
+        .expect("a policy");
+        let trust = TrustView::from_resolution(&weirkeeper::trust::resolve_in(NS, &[policy], None));
+        view::classify_verification(
+            SignatureVerdict::Verified,
+            Some(POLICY_KEY),
+            Some(at(claim)),
+            &trust,
+            now,
+        )
+    };
+    assert_eq!(
+        probe(json!({}), "2026-12-01T00:00:00Z"),
+        Verification::Invalid
+    );
+    assert_eq!(
+        probe(
+            json!({"notBefore": "2026-11-01T00:00:00Z"}),
+            "2026-12-01T00:00:00Z"
+        ),
+        Verification::Invalid
+    );
+    assert_eq!(
+        probe(
+            json!({"state": "Retired", "retiredAt": "2026-12-01T00:00:00Z"}),
+            "2026-11-15T00:00:00Z"
+        ),
+        Verification::Invalid
+    );
 }
