@@ -112,6 +112,32 @@ test("a_console_restore_list_row_reads_its_summary_too", async () => {
   }
 });
 
+// THE EXIT CODE STAYS AUTHORITATIVE (rehearsal-fix review, LOW-4). Since
+// interface I8's amendment an exit-2 restore publishes a signed failure that
+// verifies Valid. The legacy Restore badge mirrors the controller's rule
+// (`weirkeeper::verification::restore_badge`): a recorded non-zero exitCode is
+// never green, even beside a planted `outcome: pass`; an absent exitCode is
+// judged on the outcome. NEGATIVE CONTROL: the same object at exit 0 is green,
+// so the refusal below is the exit code's and not the fixture's.
+test("a_legacy_restore_badge_is_never_green_over_a_non_zero_exit_code", () => {
+  const cr = fixture("d3/restore-completed-newtopic.json");
+  assert.equal(cr.status.evidence.verification.result, "Valid");
+  assert.equal(cr.status.outcome, "pass");
+  const at = (exitCode) => {
+    const s = JSON.parse(JSON.stringify(cr.status));
+    if (exitCode === undefined) {
+      delete s.exitCode;
+    } else {
+      s.exitCode = exitCode;
+    }
+    return restoreBadge(s);
+  };
+  assert.match(at(0), /badge-green/, "the control: exit 0, Valid, pass");
+  assert.match(at(undefined), /badge-green/, "no recorded code is judged on the outcome");
+  assert.doesNotMatch(at(2), /badge-green/, "exit 2 with a planted pass is not green");
+  assert.match(at(2), /the run itself did not succeed/);
+});
+
 test("without_the_summary_the_old_projection_says_unrecorded_which_is_the_defect", () => {
   // NEGATIVE CONTROL for the rows above: the status the projection produced
   // before -- a phase and nothing else -- is exactly what rendered every

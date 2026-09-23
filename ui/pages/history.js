@@ -82,7 +82,11 @@ export const NO_HISTORY_SENTENCE =
 
 /** **The Restore badge rule.** Green if and only if the recorded verification
  *  is `Valid`, its trust basis is one a green badge may carry, AND the run's
- *  own outcome is `pass`.
+ *  own outcome is `pass`, AND no recorded `exitCode` other than 0 -- the
+ *  controller's own rule (`weirkeeper::verification::restore_badge`): since
+ *  interface I8's amendment an exit-2 run publishes a signed failure that
+ *  verifies Valid, and the exit code stays authoritative for success. An
+ *  absent `exitCode` is judged on the outcome, as the controller does.
  *
  *  THE NOT-GREEN CAPTION NAMES ITS CASE, exactly as the Backup rule's does.
  *  `Untrusted` means the bytes are authentic and this installation does not
@@ -97,8 +101,9 @@ export function restoreBadge(status) {
   }
   const verification = ((s.evidence || {}).verification) || {};
   const verified = validVerification(s);
-  if (verified === null || s.outcome !== "pass") {
-    return badge("unverified", unverifiedCaption(verification, s.outcome === "pass"));
+  const succeeded = s.outcome === "pass" && (s.exitCode === undefined || s.exitCode === 0);
+  if (verified === null || !succeeded) {
+    return badge("unverified", unverifiedCaption(verification, succeeded));
   }
   return badge("green", greenLabel(verified[0], verified[1], verified[2]));
 }

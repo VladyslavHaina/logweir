@@ -2495,6 +2495,99 @@ fn a_verdict_still_owed_after_the_wait_is_recorded_as_not_passed() {
     assert_eq!(seen.reason.as_deref(), Some(rs::REASON_VERDICT_NOT_REACHED));
 }
 
+/// **A run that named its evidence and has NO verification block at all** is
+/// waited for five minutes, not the hour: on the controller's own read handle
+/// that shape is permanent (a failed scorecard read leaves no digest and so no
+/// verdict), and on the fetch path it lasts milliseconds or one requeue.
+/// A `Pending` verdict at the same instant is still waited for.
+///
+/// MUTANT: use `VERDICT_WAIT_SECONDS` for every owed shape — the unrecorded
+/// row stays undecided at +300 s.
+#[test]
+fn an_unrecorded_verdict_is_decided_after_the_short_grace() {
+    let unrecorded = rehearsal_restore(terminal_status("Succeeded", 0, None, None, None));
+    let grace = rs::UNRECORDED_VERDICT_GRACE_SECONDS;
+    let inside = at(FINISHED_AT) + chrono::Duration::seconds(grace - 1);
+    assert!(!rs::observe(Some(&unrecorded), inside).decided);
+    let past = at(FINISHED_AT) + chrono::Duration::seconds(grace);
+    let seen = rs::observe(Some(&unrecorded), past);
+    assert!(seen.decided && !seen.passed, "{seen:?}");
+    assert_eq!(seen.reason.as_deref(), Some(rs::REASON_VERDICT_NOT_REACHED));
+    let pending = rehearsal_restore(terminal_status(
+        "Succeeded",
+        0,
+        None,
+        Some(json!({"result": "Pending", "payloadType": "x",
+                    "verifiedAt": "2026-09-20T03:20:02Z"})),
+        Some(json!({"attempt": 1})),
+    ));
+    assert!(
+        !rs::observe(Some(&pending), past).decided,
+        "a fetch in flight keeps the full hour"
+    );
+    assert!(grace < rs::VERDICT_WAIT_SECONDS);
+}
+
+/// **A rehearsal `Restore` deleted while its result is unrecorded** is
+/// recorded `lastFailed/RestoreDeleted`, the ref released and
+/// `RehearsalHealthy=False` — rather than the schedule naming a missing object
+/// until the next slot fires over it.
+///
+/// MUTANT: `observe(previous.as_ref(), now)` for a missing active child (the
+/// pre-fix reading) — nothing is recorded and the ref stays.
+#[tokio::test]
+async fn a_rehearsal_deleted_before_its_result_is_recorded_as_failed() {
+    let mut table = happy_routes();
+    table.push(Route {
+        method: "GET",
+        path_suffix: "/restores/logweir-rehearsal-weekly-orders-20260913-030000",
+        status: 404,
+        body: json!({
+            "kind": "Status", "apiVersion": "v1", "status": "Failure",
+            "reason": "NotFound", "code": 404,
+            "message": "restores.logweir.dev \"logweir-rehearsal-weekly-orders-20260913-030000\" not found"
+        })
+        .to_string(),
+    });
+    let (client, recorder, bodies) = mock_client_recording_bodies(table);
+    let schedule = schedule_with(json!({
+        "activeRestoreRef": {"name": PREVIOUS_CHILD},
+        "lastScheduledSlot": DUE_SLOT
+    }));
+    rs::reconcile_schedule(&schedule, &context(client), now())
+        .await
+        .expect("the reconcile answers");
+    assert_eq!(posted(&recorder, RESTORES_PATH), 0);
+    let patch = patch_bodies(&bodies).pop().expect("the pass writes status");
+    let st = &patch["status"];
+    assert_eq!(
+        st["lastFailed"]["restoreRef"]["name"], PREVIOUS_CHILD,
+        "{st}"
+    );
+    assert_eq!(st["lastFailed"]["reason"], rs::REASON_RESTORE_DELETED);
+    assert!(st.get("lastSucceeded").is_none(), "{st}");
+    assert!(
+        st["activeRestoreRef"].is_null(),
+        "the ref is released: {st}"
+    );
+    let health = st["conditions"]
+        .as_array()
+        .expect("conditions")
+        .iter()
+        .find(|c| c["type"] == "RehearsalHealthy")
+        .expect("RehearsalHealthy")
+        .clone();
+    assert_eq!(health["status"], "False", "{health}");
+    assert!(
+        health["message"]
+            .as_str()
+            .is_some_and(|m| m.contains(rs::REASON_RESTORE_DELETED)),
+        "{health}"
+    );
+    // A schedule with NO active ref and no child is untouched by this rule.
+    assert!(rs::observe(None, now()) == rs::Observation::default());
+}
+
 /// The hour is a backstop that outlasts the whole evidence-fetch schedule —
 /// every attempt at its deadline plus every retry delay — so an ordinary slow
 /// fetch is never cut short into a failure.
@@ -2561,7 +2654,10 @@ fn a_failed_drill_is_never_a_pass_whatever_its_verdict() {
     // …and an exit 2 whose signed failure is still being fetched waits for it
     // like a pass would, so its record carries the verified outcome.
     let owed = terminal_status("Failed", 2, None, None, None);
-    let seen = rs::observe(Some(&rehearsal_restore(owed)), now);
+    let seen = rs::observe(
+        Some(&rehearsal_restore(owed)),
+        at(FINISHED_AT) + chrono::Duration::seconds(5),
+    );
     assert!(!seen.decided, "{seen:?}");
     // An OLDER runner's exit 2 names no evidence: nothing is owed, and it is
     // decided at once as the failure it is (unchanged behaviour).
@@ -2698,7 +2794,14 @@ async fn a_rehearsal_is_recorded_once_its_verdict_is_reached() {
 #[tokio::test]
 async fn a_slot_due_while_a_verdict_is_owed_is_concurrency_blocked() {
     let mut value = previous_child_value("Running");
-    value["status"] = terminal_status("Succeeded", 0, None, None, None);
+    value["status"] = terminal_status(
+        "Succeeded",
+        0,
+        None,
+        Some(json!({"result": "Pending", "payloadType": "x",
+                    "verifiedAt": "2026-09-20T03:20:02Z"})),
+        Some(json!({"attempt": 1})),
+    );
     let mut table = happy_routes();
     table.push(Route {
         method: "GET",
@@ -2715,7 +2818,7 @@ async fn a_slot_due_while_a_verdict_is_owed_is_concurrency_blocked() {
         rs::Verdict::Skipped(s) => {
             assert_eq!(s.reason, rehearsal::SkipReason::ConcurrencyBlocked);
             assert!(
-                s.detail.contains("no evidence verdict is recorded yet"),
+                s.detail.contains("its evidence verdict is Pending"),
                 "the skip names the owed verdict: {}",
                 s.detail
             );

@@ -929,7 +929,20 @@ pub async fn reconcile_schedule(
     // ---- what the previous slot's child says -----------------------------
     let restores: Api<Restore> = Api::namespaced(ctx.client.clone(), &namespace);
     let previous = previous_child(schedule, &restores).await?;
-    let observation = observe(previous.as_ref(), now);
+    // AN ACTIVE REF THAT NAMES NOTHING: the child was created (that is what
+    // `activeRestoreRef` means — a `pendingRestoreRef` alone is the
+    // reservation, which the create resumes) and has since been deleted
+    // without its result being recorded.
+    let deleted_active = schedule
+        .status
+        .as_ref()
+        .and_then(|s| s.active_restore_ref.as_ref())
+        .map(|r| r.name.clone())
+        .filter(|_| previous.is_none());
+    let observation = match deleted_active.as_deref() {
+        Some(name) => deleted_observation(name),
+        None => observe(previous.as_ref(), now),
+    };
 
     // ---- the facts -------------------------------------------------------
     let trust = match crate::trust::resolve(&ctx.client, &namespace)
@@ -1791,12 +1804,46 @@ pub fn merge_catalog_entry(
 /// and the verdict, a status nobody will write again): the schedule must not
 /// hold its own concurrency slot forever, and it must not call that run a
 /// pass. `tests/rehearsal_controller.rs::the_verdict_wait_outlasts_the_whole_fetch_schedule`
-/// pins the margin.
+/// pins the margin: 2100 s of attempts and retry delays, leaving about 25
+/// minutes for what that arithmetic does not count — the per-namespace
+/// evidence-fetch slot a Job may queue for behind other fetches, and up to 30
+/// s of requeue latency on each step (LOW-3 of the rehearsal-fix review). A
+/// namespace whose fetch slot stays saturated past that margin records a
+/// genuine pass as `EvidenceVerdictNotReached`: a false FAILURE, never a
+/// false pass, and the `Restore` itself still carries the late verdict.
 pub const VERDICT_WAIT_SECONDS: i64 = 3600;
 
+/// How long a finished rehearsal that named its evidence but has NO
+/// verification block at all is waited for — five minutes, not the hour
+/// (LOW-1 of the rehearsal-fix review).
+///
+/// That shape has two causes and only one of them resolves itself. On the
+/// evidence-fetch path it is the gap between the terminal patch and the fetch
+/// pass's first `Pending` write — milliseconds in the same reconcile, or one
+/// requeue after a crash between the two (`restore.rs`'s `unrecorded` arm
+/// repairs it). On the controller's own read handle (the `GlobalHandle` and
+/// `Destination` sources) it is PERMANENT: a scorecard read that failed leaves
+/// no digest and therefore no verdict, and a lost verification patch is not
+/// retried, because a terminal `Restore` otherwise waits for a change. Waiting
+/// the full hour there would consume every slot due in it as
+/// `ConcurrencyBlocked` for a verdict that will never come.
+///
+/// WHY THE SCHEDULE AND NOT THE RESTORE RECONCILER: writing `NotAttempted` on
+/// the `Restore` for a failed own-handle read would change the verification
+/// record of every restore, not only rehearsals, and still not cover a lost
+/// second patch; bounding the wait here covers both and fails closed. A
+/// verdict that arrives later is still on the `Restore` for anyone reading it.
+pub const UNRECORDED_VERDICT_GRACE_SECONDS: i64 = 300;
+
 /// `lastFailed.reason` for an exit-0 rehearsal whose evidence verdict was
-/// still owed [`VERDICT_WAIT_SECONDS`] after it finished.
+/// still owed when its wait ran out ([`VERDICT_WAIT_SECONDS`], or
+/// [`UNRECORDED_VERDICT_GRACE_SECONDS`] for a run with no verification block).
 pub const REASON_VERDICT_NOT_REACHED: &str = "EvidenceVerdictNotReached";
+
+/// `lastFailed.reason` for a rehearsal whose `Restore` was deleted before its
+/// result was recorded (LOW-2 of the rehearsal-fix review): the object
+/// `activeRestoreRef` names is gone, so no verdict can ever be read from it.
+pub const REASON_RESTORE_DELETED: &str = "RestoreDeleted";
 
 /// What the previous slot's `Restore` finished as.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -1940,8 +1987,16 @@ pub fn observe(restore: Option<&Restore>, now: DateTime<Utc>) -> Observation {
     } else {
         None
     };
-    let waited_out = owed.is_some()
-        && finished_at(restore).is_none_or(|t| (now - t).num_seconds() >= VERDICT_WAIT_SECONDS);
+    let unrecorded = status
+        .and_then(|s| s.evidence.as_ref())
+        .is_none_or(|e| e.verification.is_none());
+    let bound = if unrecorded {
+        UNRECORDED_VERDICT_GRACE_SECONDS
+    } else {
+        VERDICT_WAIT_SECONDS
+    };
+    let waited_out =
+        owed.is_some() && finished_at(restore).is_none_or(|t| (now - t).num_seconds() >= bound);
     let decided = terminal && (owed.is_none() || waited_out);
     let status_json = status
         .and_then(|s| serde_json::to_value(s).ok())
@@ -2004,6 +2059,24 @@ pub fn observe(restore: Option<&Restore>, now: DateTime<Utc>) -> Observation {
         rto_seconds: status
             .and_then(|s| s.measured.as_ref())
             .and_then(|m| m.rto_seconds),
+    }
+}
+
+/// The observation for an `activeRestoreRef` that names a `Restore` which no
+/// longer exists — deleted before its result was recorded (LOW-2 of the
+/// rehearsal-fix review). DECIDED, as a failure with
+/// [`REASON_RESTORE_DELETED`], so the ref is released and `RehearsalHealthy`
+/// says so, rather than the schedule naming a missing object until the next
+/// slot fires over it. Never a pass: nothing is left to verify.
+#[must_use]
+pub fn deleted_observation(name: &str) -> Observation {
+    Observation {
+        restore: Some(name.to_string()),
+        terminal: false,
+        decided: true,
+        passed: false,
+        reason: Some(REASON_RESTORE_DELETED.to_string()),
+        ..Observation::default()
     }
 }
 

@@ -280,13 +280,20 @@ JSON pointer out of the run's signed scorecard and computes none of it:
 `recordsSampledMatching` and `integrityLevel` from `integrity`, and
 `sampleWindow` from `sample.window_start`/`window_end`. It is written in the
 same resourceVersion-preconditioned status patch that records the evidence
-verdict over that scorecard, and **only when that verdict is `Valid`** (trust
-basis `Current` or `Historical`): the verification write when the controller
+verdict over that scorecard, and **only for a run that passed**: the verdict is
+`Valid` (trust basis `Current` or `Historical`), the scorecard's `outcome` is
+`pass` **and** the run's `exitCode` is `0` — the `Restore` badge rule of §15.2.
+An exit-2 run publishes its signed failure since interface I8's amendment, and
+that failure verifies `Valid` like any document; its counts are still readable
+off the scorecard and `status.integrity`, but it gets no completion panel and
+no cutover guidance ("point applications at the new names…") over data that
+did not reconcile. It is written by the verification write when the controller
 reads the archive itself, or the evidence-fetch verdict write when the
 evidence-fetch Job relays a scorecard bound to this run. It is never on the
 terminal write, which lands before any verification. It stays **absent**
 while verification is pending or `NotAttempted`, when the relayed document
-names another run, and when the verdict is `Invalid` or `Untrusted` — the
+names another run, for any run that did not exit `0` with `outcome: pass`,
+and when the verdict is `Invalid` or `Untrusted` — the
 completion panel has no trust caption of its own, so a scorecard whose
 signature did not verify never reaches it. (`outcome`, `integrity` and
 `measured` are still copied from a run-bound scorecard whatever the verdict;
@@ -2579,8 +2586,18 @@ being waited for). Once the verdict is reached the run is recorded once:
   `VerificationNotAttempted` once the fetch's attempts are spent) for one that
   did;
 - a verdict still owed an hour after the run finished (`VERDICT_WAIT_SECONDS`,
-  longer than the whole fetch schedule) is `lastFailed` with reason
-  `EvidenceVerdictNotReached` — never a pass.
+  longer than the whole fetch schedule's 35 minutes; the margin is for the
+  per-namespace evidence-fetch slot a Job may queue behind and per-step requeue
+  latency, and a namespace whose fetch slot stays saturated past it records a
+  genuine pass as a failure, never a failure as a pass) is `lastFailed` with
+  reason `EvidenceVerdictNotReached` — never a pass;
+- a run that named its evidence and has **no** verification block at all five
+  minutes after it finished (`UNRECORDED_VERDICT_GRACE_SECONDS`) is decided the
+  same way: on the controller's own read handle that shape is permanent (a
+  scorecard read that failed leaves no digest and so no verdict), and on the
+  fetch path it lasts one reconcile;
+- a rehearsal `Restore` deleted while `activeRestoreRef` still names it is
+  `lastFailed` with reason `RestoreDeleted`, and the ref is released.
 
 `RehearsalHealthy` moves with the same decision (`True/Passed`, or
 `False/Failed` naming the reason). *Upgrade:* nothing to migrate. A schedule
@@ -4829,8 +4846,7 @@ guessed key points at an object that may not exist, and a verifier would then
 report `Invalid` for a run whose evidence was merely unread.
 
 **The evidence fact is its own condition, and it exists only at exit 0** (and,
-on a `Restore`, at exit 2 when the runner named its signed failure — §7's
-restore section).
+on a `Restore`, at exit 2 when the runner named its signed failure — §12).
 `EvidenceRecorded` is `True` with reason `EvidenceKeysRecorded` when both lines
 were read, `False` with reason `EvidenceKeysUnreadable` when they were not, and
 **absent at exits 1, 3 and 4** — those runs write no artifact by contract

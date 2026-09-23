@@ -3665,6 +3665,10 @@ fn scorecard_with_outcome(
 ) -> impl Fn(String) -> BoxFuture<'static, Option<ScorecardObservation>> {
     move |_key| {
         Box::pin(async move {
+            // REALISTIC COUNTS, as every real scorecard carries — so the
+            // "no completion for a run that did not pass" assertions below
+            // can fail. Without them `completion_block` is empty whatever the
+            // gate says (the rehearsal-fix review's experiment X1).
             Some(ScorecardObservation {
                 outcome: Some(outcome.to_string()),
                 last_phase_completed: Some(7),
@@ -3672,6 +3676,11 @@ fn scorecard_with_outcome(
                     "sha256:2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d"
                         .to_string(),
                 ),
+                sample_records_expected: Some(100),
+                sample_records_restored: Some(100),
+                integrity_records_sampled: Some(10),
+                integrity_records_sampled_matching: Some(7),
+                integrity_level: Some("byte-fingerprint".to_string()),
                 ..ScorecardObservation::default()
             })
         })
@@ -3769,9 +3778,12 @@ async fn an_exit_two_with_keys_records_and_verifies_its_signed_failure() {
         "a VALID signed failure is a verified FAILURE, never green"
     );
     assert!(!weirkeeper::verification::restore_badge(&status).green);
+    assert_eq!(status["phase"], "Failed");
+    assert_eq!(status["exitCode"], 2);
     assert!(
         status.get("completion").is_none(),
-        "no completion panel for a run that did not pass: {status}"
+        "no completion panel — and no cutover guidance — for a run that did not pass, though its \
+         signed failure verified Valid and carries counts: {status}"
     );
 
     // ---- arm 2 --------------------------------------------------------------
@@ -3786,6 +3798,10 @@ async fn an_exit_two_with_keys_records_and_verifies_its_signed_failure() {
         "exit 2 is never green, whatever its document says: {planted}"
     );
     assert!(!weirkeeper::verification::restore_badge(&planted).green);
+    assert!(
+        planted.get("completion").is_none(),
+        "exit 2 publishes no completion even over a planted pass: {planted}"
+    );
 
     // ---- arm 3 --------------------------------------------------------------
     let (patches, older) = finished_pass(2, "", "fail-integrity").await;
@@ -3808,6 +3824,11 @@ async fn an_exit_two_with_keys_records_and_verifies_its_signed_failure() {
     assert!(
         weirkeeper::verification::restore_badge(&passed).green,
         "exit 0, Valid and pass is green, unchanged: {passed}"
+    );
+    assert_eq!(
+        passed["completion"]["recordsSampledMatching"], 7,
+        "the CONTROL: the same counts DO reach completion on a run that passed, so the \
+         exit-2 absence above is the gate's and not the fixture's: {passed}"
     );
 }
 
@@ -3856,6 +3877,54 @@ fn a_relayed_valid_scorecard_at_exit_two_is_not_green() {
             badge.green, green,
             "exit {exit_code} with outcome {outcome}: {badge:?}"
         );
+    }
+}
+
+/// `completion_patch_value` publishes only for a run that PASSED: exit 0,
+/// `outcome: pass`, a Valid verdict. The evidence-fetch writer passes the
+/// stored `exitCode`; the own-handle writer the code it just read.
+///
+/// MUTANTS: drop the `exit_code != Some(0)` early return (the exit-2 `pass`
+/// row publishes); drop the badge check (the `fail-integrity` exit-0 row and
+/// the exit-2 rows publish).
+#[test]
+fn a_completion_is_published_only_for_a_run_that_passed() {
+    let result = VerificationResult {
+        result: VerificationVerdict::Valid,
+        matched_key_id: Some(
+            "917cf9a299872cbf8b2715999ce457464705bb8f48df0a07e9b1e19bb9f383fd".to_string(),
+        ),
+        payload_type: logweir_verify::PAYLOAD_TYPE_SCORECARD.to_string(),
+        verified_at: utc(2026, 9, 10, 12, 0),
+        detail: None,
+        trust: None,
+    };
+    let observed = |outcome: &str| ScorecardObservation {
+        outcome: Some(outcome.to_string()),
+        sample_records_expected: Some(100),
+        sample_records_restored: Some(100),
+        integrity_records_sampled: Some(10),
+        integrity_records_sampled_matching: Some(7),
+        integrity_level: Some("byte-fingerprint".to_string()),
+        ..ScorecardObservation::default()
+    };
+    use weirkeeper::controllers::restore::completion_patch_value as gate;
+    assert!(gate(&observed("pass"), &result, None, Some(0)).is_some());
+    for (label, o, code) in [
+        (
+            "exit 2, fail-integrity",
+            observed("fail-integrity"),
+            Some(2),
+        ),
+        ("exit 2, a planted pass", observed("pass"), Some(2)),
+        (
+            "exit 0, fail-integrity",
+            observed("fail-integrity"),
+            Some(0),
+        ),
+        ("no exit code", observed("pass"), None),
+    ] {
+        assert_eq!(gate(&o, &result, None, code), None, "{label}");
     }
 }
 
@@ -7340,9 +7409,13 @@ fn the_completion_is_copied_from_the_signed_scorecard_by_pointer() {
     );
     // Beside a `Valid` verdict it is the value written; the terminal write
     // (before any verdict) never carries it.
-    let written =
-        weirkeeper::controllers::restore::completion_patch_value(&o, &valid_result(), None)
-            .expect("a Valid verdict publishes the completion");
+    let written = weirkeeper::controllers::restore::completion_patch_value(
+        &o,
+        &valid_result(),
+        None,
+        Some(0),
+    )
+    .expect("a Valid verdict publishes the completion");
     assert_eq!(written, fixture_completion());
     let keys = restore_evidence_keys(&i8_tail());
     let patch = finished_status_patch(&restore(), 0, &keys, None, Some(&o), None, None, now());
@@ -7388,7 +7461,12 @@ fn a_completion_fact_the_scorecard_does_not_carry_is_absent() {
     assert!(block_of(&bare).is_empty(), "{:?}", block_of(&bare));
     let o = scorecard_observation(bare.to_string().as_bytes()).expect("object");
     assert_eq!(
-        weirkeeper::controllers::restore::completion_patch_value(&o, &valid_result(), None),
+        weirkeeper::controllers::restore::completion_patch_value(
+            &o,
+            &valid_result(),
+            None,
+            Some(0)
+        ),
         None,
         "an empty completion is not written, even beside a Valid verdict"
     );

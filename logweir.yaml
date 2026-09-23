@@ -5024,7 +5024,11 @@ spec:
                     nullable: true
                     type: string
                   evidence:
-                    description: The evidence verdict for that run.
+                    description: 'The object key of that run''s signed scorecard.
+                      Written only for a run whose verdict was green (exit 0, `outcome:
+                      pass`, `Valid` on an accepted basis), so the verdict is implied
+                      by this record existing; the key lets an auditor fetch and re-verify
+                      the document after the `Restore` is gone.'
                     nullable: true
                     type: string
                   pointId:

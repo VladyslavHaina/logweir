@@ -670,8 +670,13 @@ the document were to say `pass`), the API's `result.status` is `notPass`, and a 
   the document, and nothing becomes a pass — its badge reads `outcome`, which the signed failure's
   own document says is not `pass`, and its rehearsal projection requires exit 0. It raises no
   `EvidenceRecorded` condition at exit 2, and its rehearsal projection may record the failure before
-  the verdict lands; the failure is still a failure. A controller that ignored key lines at a
-  non-zero exit would simply leave the evidence unrecorded, which is the pre-amendment state.
+  the verdict lands; the failure is still a failure. **But it writes `Restore.status.completion`
+  for an exit-2 run whose signed failure verifies `Valid`** — its completion gate reads only the
+  verdict — and the console then renders the completion panel, with its cutover guidance, over a
+  restore whose data did not reconcile. The newer controller publishes completion only for a run
+  that passed (exit 0, `outcome: pass`, a green verdict). **Roll the controller out before the
+  runner**, and roll the runner back before the controller. A controller that ignored key lines
+  at a non-zero exit would simply leave the evidence unrecorded, which is the pre-amendment state.
 - *An older runner under a newer controller.* The runner prints no keys at exit 2, so the status is
   exactly what it was: one `Failed` condition, no `status.evidence`, no verification, no `outcome`.
   No `EvidenceKeysUnreadable` is raised at exit 2 — its absence is what that runner promised.
