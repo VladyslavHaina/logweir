@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   applyWizardDraft,
+  approvalPolicyBlock,
   backupCatalogOffer,
   backupCatalogOfferFrom,
   catalogPointOffer,
@@ -568,6 +569,81 @@ test("the_mount_opens_on_a_catalog_point_and_refuses_one_it_cannot_offer", async
   assert.match(refused, /id="catalog-point-refusal"/);
   assert.doesNotMatch(refused, /id="catalog-topics"/);
   assert.doesNotMatch(refused, /id="create-restore"/);
+});
+
+// INTEGRATION (plat15-2 x plat19-2): a catalog point's submission is routed by
+// the namespace's approval policy exactly as a Backup point's is. The policy is
+// read by the mount (`readApprovalPolicy`), so the row mounts BOTH paths over
+// the same api double and requires the same policy block from each.
+test("a_catalog_point_mount_reads_the_approval_policy_exactly_like_a_backup_point", async () => {
+  const GOVERNED = Object.freeze({
+    name: "prod-governed", mode: "governed", legacy: false,
+    ordinaryConfirmationAvailable: false, ticketRequired: true,
+  });
+  const ORDINARY_LOCAL = Object.freeze({
+    name: "team-ordinary", mode: "ordinary", legacy: false,
+    ordinaryConfirmationAvailable: false, ticketRequired: false,
+  });
+  const backups = fixture("wizard-backups.json");
+  const backupPoint = recoveryPoints(backups)[0];
+  const mount = async (selection, policy) => {
+    const node = {
+      children: [],
+      get firstChild() { return this.children.length === 0 ? null : this.children[0]; },
+      removeChild() { return this.children.shift(); },
+      appendChild(child) { this.children.push(child); return child; },
+      querySelector() { return null; },
+      querySelectorAll() { return []; },
+    };
+    const reads = [];
+    const api = {
+      list: async (_ns, plural) => plural === "backups"
+        ? (selection.catalog === undefined ? backups : { items: [] })
+        : fixture("wizard-clusters.json"),
+      destination: async () => ({ item: destination() }),
+      catalogReaders: readersOver([page([row()])]),
+    };
+    if (policy !== undefined) {
+      api.approvalPolicy = async (ns) => {
+        reads.push(ns);
+        return policy;
+      };
+    }
+    await mountRestoreWizard(node, NS, selection,
+      (html) => [{ html: html }], api, { signal: undefined, isCurrent: () => true });
+    return { html: node.children.map((child) => child.html || "").join(""), reads: reads };
+  };
+  const catalogSelection = { catalog: "archive", point: POINT };
+  const backupSelection = { uid: backupPoint.metadata.uid, backup: backupPoint.metadata.name };
+
+  const viaCatalog = await mount(catalogSelection, GOVERNED);
+  const viaBackup = await mount(backupSelection, GOVERNED);
+  assert.match(viaCatalog.html, /id="catalog-topics"/, "the wizard is over the catalog point");
+  assert.deepEqual(viaCatalog.reads, [NS], "the catalog mount reads the policy once, for NS");
+  assert.deepEqual(viaBackup.reads, [NS], "as the Backup mount does");
+  const governed = approvalPolicyBlock(GOVERNED);
+  assert.ok(viaBackup.html.includes(governed), "the Backup mount renders the governed block");
+  assert.ok(viaCatalog.html.includes(governed),
+    "the catalog mount renders the same governed block, with its change ticket");
+  assert.match(viaCatalog.html, /id="change-ticket"/);
+
+  // A policy this console cannot honour withholds Create on BOTH paths.
+  const refusedCatalog = await mount(catalogSelection, ORDINARY_LOCAL);
+  const refusedBackup = await mount(backupSelection, ORDINARY_LOCAL);
+  for (const [label, html] of [["catalog", refusedCatalog.html], ["backup", refusedBackup.html]]) {
+    assert.match(html, /id="approval-policy-ordinary-unavailable"/, label);
+    assert.match(html, /id="create-restore"[^>]* disabled/, label + ": Create is withheld");
+  }
+
+  // CONTROL: the same catalog mount with no policy to read renders today's
+  // out-of-band instructions and no governed block -- so the rows above are
+  // the policy's doing, not the fixture's.
+  const unread = await mount(catalogSelection, undefined);
+  assert.match(unread.html, /id="catalog-topics"/);
+  assert.ok(!unread.html.includes(governed));
+  assert.doesNotMatch(unread.html, /id="change-ticket"/);
+  assert.doesNotMatch(unread.html, /approval-policy-ordinary-unavailable/);
+  assert.match(unread.html, /Approve it out of band/);
 });
 
 // ------------------------------------------------ 6. the selector and catalog
