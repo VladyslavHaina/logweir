@@ -30,14 +30,28 @@
 //            verifies them, and the page shows Verified.
 //   <ns>-r   UNBOUND, over the lab's real archive: DRAFT-PREFLIGHT-NEVER-READY.
 //
-// WHAT THE LAB CONTROLLER IS, AND WHAT THAT MEANS HERE. The shared lab runs the
-// `weirkeeper` image of the last lab refresh, which predates PLAT-19.2, so it
-// cannot verify an authorization document v2. That is not hidden: journey 1
-// records the lab controller's verdict on the console's ordinary confirmation,
-// which is D0's rollback rule observed live -- an old controller refuses every
-// v2 document (`PayloadTypeMismatch`) and the Restore holds with no Job. The
-// new controller's verdicts are proved by kube-mock rows in the branch and at
-// the next batch lab refresh (see the result file).
+// WHAT THE LAB CONTROLLER MUST BE (FLIPPED AT lab-refresh-9). Until then the
+// lab ran a controller that predated PLAT-19.2 and journey 1 recorded its
+// refusal of every v2 document (`PayloadTypeMismatch`, no Job). The lab now
+// runs a PLAT-19.2 controller, so journey 1 REQUIRES the new controller to
+// ACCEPT the console's ordinary confirmation: Approval `Verified=True` with
+// `status.authorization` {mode Ordinary, the bound policy, alice, the console
+// key}, then the Restore's Job, carrying `--policy-snapshot` and
+// `--confirmation-key`. That needs two things only an installation admin can
+// give, both prepared OUTSIDE this process under the cluster lock:
+//
+//   1. the controller loads THIS run's approval-policy document, which binds
+//      the run's namespaces -- run once with `UI_E2E_POLICY_ONLY=1` and a fixed
+//      `UI_E2E_STAMP` to write `<artifacts>/<stamp>/approval-policy.yaml`,
+//      mount it into the lab controller as the chart does
+//      (`LOGWEIR_APPROVAL_POLICY_FILE`), and restore the controller after;
+//   2. a `TrustPolicy` naming the console's `ConsoleConfirmation` key for the
+//      Ordinary namespace -- this harness creates it (owner-labelled, deleted
+//      in `cleanup`) once it has minted the key.
+//
+// The harness REFUSES to start when the controller has not bound the run's
+// namespaces: a journey-1 "pass" against an unbound controller would be the
+// old refusal again.
 //
 // EVERY OBJECT IS CREATED BY THE PAGE against the real service against the real
 // API server, except the fixtures (named as such) and the minted Approval of
@@ -92,7 +106,8 @@ const LAB_TARGET_SECRET = "target-scram";
 const LAB_SOURCE_SECRET = "source-scram";
 const V2_PAYLOAD = "application/vnd.logweir.restore-authorization+json;version=2.0.0";
 
-const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\..*/, "Z").toLowerCase();
+const stamp = process.env.UI_E2E_STAMP ||
+  new Date().toISOString().replace(/[-:]/g, "").replace(/\..*/, "Z").toLowerCase();
 const base = NAMESPACE_PREFIX + stamp;
 const NS = { ordinary: base + "-o", governed: base + "-v", legacy: base + "-g", readiness: base + "-r" };
 const ARTIFACTS = join(process.env.UI_E2E_ARTIFACTS ||
@@ -261,6 +276,61 @@ let consolePublicPem = "";
 let consoleKeyPath = "";
 let policyPath = "";
 
+/** THE approval-policy document of this run: the consoles mount it, and the
+ *  lab controller must load the same one (see the header). */
+function policyDocument() {
+  return [
+    "allowOrdinaryConfirmation: true",
+    "policies:",
+    "  - name: p192-ordinary",
+    "    mode: Ordinary",
+    "    maxAgeSeconds: 900",
+    "  - name: p192-governed",
+    "    mode: Governed",
+    "    maxAgeSeconds: 86400",
+    "namespaces:",
+    "  " + NS.ordinary + ": p192-ordinary",
+    "  " + NS.governed + ": p192-governed",
+    "",
+  ].join("\n");
+}
+
+/** Does the lab controller enforce THIS run's bindings? Read from its own
+ *  startup line, which names every bound namespace. */
+function controllerBinding() {
+  const pods = (kubeJson(["-n", LAB_NS, "get", "pods"]).items || [])
+    .filter((p) => p.metadata.name.startsWith("weirkeeper") && (p.status || {}).phase === "Running");
+  const lines = pods.map((p) => kube(["-n", LAB_NS, "logs", p.metadata.name], { expected: [0, 1] }).stdout || "")
+    .join("\n").split("\n").filter((l) => l.includes("the approval policies this controller enforces"));
+  const last = lines.length > 0 ? JSON.parse(lines[lines.length - 1]) : null;
+  const fields = (last || {}).fields || {};
+  return { pods: pods.map((p) => p.metadata.name), line: fields,
+    bound: String(fields.bound_namespaces || "") };
+}
+
+/** The Ordinary namespace's TrustPolicy: the console key (ConsoleConfirmation)
+ *  and that namespace's own evidence key, so its runs stay attributable. */
+function consoleTrustPolicy() {
+  const spkiOf = (pem) => createPublicKey(pem).export({ type: "spki", format: "der" });
+  const keyIdOf = (pem) => createHash("sha256").update(spkiOf(pem)).digest("hex");
+  const evidencePem = spawnSync("openssl", ["pkey", "-in", join(WORK_DIR, "signing-" + NS.ordinary + ".pem"),
+    "-pubout"], { encoding: "utf8", timeout: 30000 }).stdout;
+  check(evidencePem.includes("BEGIN PUBLIC KEY"), "the ordinary namespace's evidence public key");
+  const notBefore = new Date(Date.now() - 3600 * 1000).toISOString().replace(/\.\d+Z$/, "Z");
+  const notAfter = new Date(Date.now() + 86400 * 1000).toISOString().replace(/\.\d+Z$/, "Z");
+  const key = (pem, usage, id, display) => ({ keyId: keyIdOf(pem), spkiPem: pem, algorithm: "ed25519",
+    principal: { id: id, display: display }, usages: [usage], state: "Active",
+    notBefore: notBefore, notAfter: notAfter });
+  return {
+    apiVersion: "logweir.dev/v1alpha1", kind: "TrustPolicy",
+    metadata: { name: base + "-console", labels: LABELS },
+    spec: { namespaces: [NS.ordinary], keys: [
+      key(consolePublicPem, "ConsoleConfirmation", "urn:logweir:console:" + base, "the run's console key"),
+      key(evidencePem, "EvidenceSigning", "signing@" + NS.ordinary + ".invalid", "the namespace's evidence key"),
+    ] },
+  };
+}
+
 /** The approval-policy document and the per-run console key, shared by both
  *  consoles (the chart mounts ONE document and ONE key Secret). */
 function writePolicyAndKey() {
@@ -275,20 +345,7 @@ function writePolicyAndKey() {
   consolePublicPem = pub.stdout;
   save("console-confirmation.pub.pem", consolePublicPem);
   policyPath = join(WORK_DIR, "approval-policy.yaml");
-  const policy = [
-    "allowOrdinaryConfirmation: true",
-    "policies:",
-    "  - name: p192-ordinary",
-    "    mode: Ordinary",
-    "    maxAgeSeconds: 900",
-    "  - name: p192-governed",
-    "    mode: Governed",
-    "    maxAgeSeconds: 86400",
-    "namespaces:",
-    "  " + NS.ordinary + ": p192-ordinary",
-    "  " + NS.governed + ": p192-governed",
-    "",
-  ].join("\n");
+  const policy = policyDocument();
   writeFileSync(policyPath, policy);
   save("approval-policy.yaml", policy);
 }
@@ -708,6 +765,12 @@ async function main() {
   for (const ns of Object.values(NS)) {
     assertSafeNamespace(ns);
   }
+  const binding = controllerBinding();
+  result.labControllerBinding = binding;
+  check(binding.bound.includes(NS.ordinary) && binding.bound.includes(NS.governed),
+    "the lab controller does not enforce this run's approval policy (bound_namespaces " +
+      JSON.stringify(binding.bound) + "); write it with UI_E2E_POLICY_ONLY=1 UI_E2E_STAMP=" + stamp +
+      ", mount it into the controller as the chart does, then run again with the same stamp");
   const labController = kubeJson(["-n", LAB_NS, "get", "deploy", "weirkeeper"]);
   result.labControllerImage = labController.spec.template.spec.containers[0].image;
   result.labControllerRevision = (labController.spec.template.metadata.labels || {});
@@ -724,6 +787,10 @@ async function main() {
   }
 
   writePolicyAndKey();
+  const trustPolicy = consoleTrustPolicy();
+  kube(["apply", "-f", "-"], { input: JSON.stringify(trustPolicy) });
+  result.created.push({ kind: "TrustPolicy", name: trustPolicy.metadata.name,
+    keyIds: trustPolicy.spec.keys.map((k) => k.keyId), usages: trustPolicy.spec.keys.map((k) => k.usages[0]) });
   const port = await freePort();
   await startApi(port);
   const origin = "http://127.0.0.1:" + port;
@@ -870,28 +937,66 @@ async function main() {
       createPublicKey(consolePublicPem), Buffer.from(sidecar.signatures[0].sig, "base64"));
     check(signed, "the console's signature verifies over the exact stored bytes");
     const annotations = oRestore.metadata.annotations || {};
-    // The lab controller predates PLAT-19.2: record its verdict, whatever it is.
+    // THE LAB CONTROLLER MUST ACCEPT IT (lab-refresh-9 flip): Verified=True
+    // on the v2 document, with the provenance it verified, and then the
+    // Restore's Job carrying the frozen policy and the console key.
     let labVerdict = null;
-    for (let i = 0; i < 30 && labVerdict === null; i += 1) {
-      const seen = kubeJson(["-n", o.ns, "get", "approval", o.approvalName]);
-      const c = ((seen.status || {}).conditions || []).find((x) => x.type === "Verified");
-      labVerdict = c ? { status: c.status, reason: c.reason, message: (c.message || "").slice(0, 300) } : null;
-      if (labVerdict === null) {
+    let oApprovalSeen = null;
+    for (let i = 0; i < 120 && (labVerdict === null || labVerdict.status !== "True"); i += 1) {
+      oApprovalSeen = kubeJson(["-n", o.ns, "get", "approval", o.approvalName]);
+      const c = ((oApprovalSeen.status || {}).conditions || []).find((x) => x.type === "Verified");
+      labVerdict = c ? { status: c.status, reason: c.reason, message: (c.message || "").slice(0, 400) } : null;
+      if (labVerdict === null || labVerdict.status !== "True") {
+        await pause(1000);
+      }
+    }
+    const provenance = (oApprovalSeen.status || {}).authorization || null;
+    save("01-controller-verdict.json", { approval: labVerdict, status: oApprovalSeen.status || null });
+    check(labVerdict !== null && labVerdict.status === "True",
+      "the PLAT-19.2 controller did not verify the console's v2 ordinary confirmation: " +
+        JSON.stringify(labVerdict));
+    check(provenance !== null && provenance.mode === "Ordinary" && provenance.policyName === "p192-ordinary" &&
+      provenance.policyDigest === policies.ordinary.digest &&
+      provenance.requester === IDP_ISSUER + "#alice" &&
+      provenance.confirmationKeyId === sidecar.signatures[0].keyid,
+    "the verdict's provenance is not the bound Ordinary policy, alice and the console key: " +
+      JSON.stringify(provenance));
+    let oJob = null;
+    for (let i = 0; i < 180 && oJob === null; i += 1) {
+      oJob = (kubeJson(["-n", o.ns, "get", "jobs"]).items || []).find((j) =>
+        (j.metadata.ownerReferences || []).some((r) => r.uid === oRestore.metadata.uid)) || null;
+      if (oJob === null) {
         await pause(1000);
       }
     }
     const oRestoreNow = kubeJson(["-n", o.ns, "get", "restore", o.restore]);
-    const oJobs = (kubeJson(["-n", o.ns, "get", "jobs"]).items || []).map((j) => j.metadata.name);
-    save("01-lab-controller-verdict.json", { approval: labVerdict, restoreStatus: oRestoreNow.status || null, jobs: oJobs });
-    check(!oJobs.includes(o.restore), "the pre-19.2 lab controller created no Job for a v2 document");
-    record("ordinary confirmation in the SHARED console: alice signs in, one click, the console attests alice, the page routes to execution", {
+    const admitted = ((oRestoreNow.status || {}).conditions || []).find((x) => x.type === "Admitted") || null;
+    check(oJob !== null, "the verified ordinary Restore got no Job: " + JSON.stringify(oRestoreNow.status || null).slice(0, 800));
+    const argv = [].concat(...(oJob.spec.template.spec.containers || []).map((c) =>
+      (c.command || []).concat(c.args || [])));
+    check(argv.includes("--policy-snapshot") && argv.includes("--confirmation-key"),
+      "the Job does not carry the frozen policy and the console key: " + JSON.stringify(argv));
+    let runnerLog = "";
+    for (let i = 0; i < 90; i += 1) {
+      const pods = (kubeJson(["-n", o.ns, "get", "pods", "-l", "job-name=" + oJob.metadata.name]).items || []);
+      const done = pods.find((p) => ((p.status || {}).containerStatuses || []).some((c) => c.state && c.state.terminated));
+      if (done) {
+        runnerLog = kube(["-n", o.ns, "logs", done.metadata.name], { expected: [0, 1] }).stdout || "";
+        break;
+      }
+      await pause(2000);
+    }
+    save("01-controller-admission.json", { job: oJob.metadata.name, jobUid: oJob.metadata.uid, argv: argv,
+      admitted: admitted, restoreStatus: oRestoreNow.status || null,
+      runnerLogTail: runnerLog.replace(/-----BEGIN[\s\S]*?-----END[^\n]*\n/g, "<pem redacted>\n").slice(-4000) });
+    record("ordinary confirmation in the SHARED console: alice signs in, one click, the console attests alice, the page routes to execution, and the PLAT-19.2 controller verifies and admits it", {
       namespace: o.ns, restore: o.restore, restoreUid: oRestore.metadata.uid, approval: o.approvalName,
       routedTo: oHash, requester: doc.requester, policy: doc.policy,
       restoreActorAnnotation: annotations["api.logweir.dev/actor"] || null,
-      labControllerVerdict: labVerdict,
-      labControllerNote: "the lab image predates PLAT-19.2: an old controller refuses every v2 " +
-        "document and creates no Job -- D0's rollback rule, observed. Admission by the new " +
-        "controller is the lab-refresh row.",
+      controllerVerdict: labVerdict, provenance: provenance, admitted: admitted,
+      job: { name: oJob.metadata.name, uid: oJob.metadata.uid, carriesPolicySnapshot: true,
+        carriesConfirmationKey: true },
+      runnerAuthorizationLine: (runnerLog.split("\n").find((l) => /authoriz/i.test(l)) || "").slice(0, 400),
     });
 
     // ---------------------------------------------------------------- 1b
@@ -1241,8 +1346,28 @@ async function cleanup() {
       result.cleanup.push({ namespace: ns, error: String(error && error.message) });
     }
   }
+  try {
+    const tp = kube(["get", "trustpolicy", base + "-console", "-o", "json"], { expected: [0, 1] });
+    if (tp.status === 0) {
+      const object = JSON.parse(tp.stdout);
+      check(((object.metadata.labels || {})["logweir.dev/test-owner"]) === OWNER,
+        "refusing to delete TrustPolicy " + base + "-console: not labelled " + OWNER_LABEL);
+      kube(["delete", "trustpolicy", base + "-console", "--wait=true"]);
+      result.cleanup.push({ trustPolicy: base + "-console", uid: object.metadata.uid,
+        deleted: kube(["get", "trustpolicy", base + "-console"], { expected: [0, 1] }).status === 1 });
+    }
+  } catch (error) {
+    result.cleanup.push({ trustPolicy: base + "-console", error: String(error && error.message) });
+  }
   rmSync(WORK_DIR, { recursive: true, force: true });
   result.cleanup.push({ workDir: WORK_DIR, removed: true });
+}
+
+if (process.env.UI_E2E_POLICY_ONLY === "1") {
+  mkdirSync(ARTIFACTS, { recursive: true });
+  writeFileSync(join(ARTIFACTS, "approval-policy.yaml"), policyDocument());
+  process.stderr.write("wrote " + join(ARTIFACTS, "approval-policy.yaml") + " for stamp " + stamp + "\n");
+  process.exit(0);
 }
 
 let failed = null;
