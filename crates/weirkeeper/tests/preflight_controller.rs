@@ -1245,6 +1245,7 @@ fn approver_roster(not_after: Option<DateTime<Utc>>) -> RosterFacts {
         signing_keys: vec![(RUNNER_KEY_ID.to_string(), None)],
         approver_keys: vec![("approver-1".to_string(), not_after)],
         allowed_cluster_ids: Vec::new(),
+        governing: None,
     }
 }
 
@@ -2448,6 +2449,12 @@ fn binding_inputs(
 
 const PLAN_DIGEST: &str = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
 
+/// An empty `TrustPolicy` list: no policy governs the namespace, so the
+/// preflight's trust is the roster's, exactly as before policies existed.
+fn no_trust_policies() -> String {
+    json!({"apiVersion": "v1", "kind": "TrustPolicyList", "metadata": {"resourceVersion": "1"}, "items": []}).to_string()
+}
+
 fn route(method: &'static str, path_suffix: &'static str, body: String) -> Route {
     Route {
         method,
@@ -2535,6 +2542,7 @@ fn referent_routes(cluster_id: Option<&str>, allowed: Vec<&str>) -> Vec<Route> {
             "/trustrosters/default",
             roster(RUNNER_KEY_ID, allowed).to_string(),
         ),
+        route("GET", "/trustpolicies", no_trust_policies()),
         route(
             "GET",
             "/kafkaclusters/source",
@@ -3361,6 +3369,7 @@ fn restore_referent_routes() -> Vec<Route> {
             "/trustrosters/default",
             roster(RUNNER_KEY_ID, vec!["target-id"]).to_string(),
         ),
+        route("GET", "/trustpolicies", no_trust_policies()),
         route(
             "GET",
             "/kafkaclusters/target",
@@ -3536,6 +3545,7 @@ async fn an_approval_expired_under_a_policy_refuses_the_restore_before_it_is_sub
 
     let mut routes = vec![
         route("GET", "/trustrosters/default", open_roster.to_string()),
+        route("GET", "/trustpolicies", no_trust_policies()),
         route("GET", "/restores/r-1", restore_object.to_string()),
         route("GET", "/approvals/ap-1", approval.to_string()),
         route(
@@ -3731,6 +3741,7 @@ async fn a_published_key_window_reaches_the_warning_and_the_cap_on_both_rows() {
 
     let mut routes = vec![
         route("GET", "/trustrosters/default", open_roster.to_string()),
+        route("GET", "/trustpolicies", no_trust_policies()),
         route("GET", "/restores/r-1", restore_object.to_string()),
         route("GET", "/approvals/ap-1", approval.to_string()),
         route(
@@ -3888,6 +3899,7 @@ async fn restore_over_recovery_point(point: Value) -> Value {
             "/trustrosters/default",
             roster(RUNNER_KEY_ID, vec!["target-id"]).to_string(),
         ),
+        route("GET", "/trustpolicies", no_trust_policies()),
         route(
             "GET",
             "/kafkaclusters/target",
@@ -5443,6 +5455,7 @@ async fn a_healthy_backup_readiness_reports_ready() {
             "/trustrosters/default",
             roster(RUNNER_KEY_ID, vec![]).to_string(),
         ),
+        route("GET", "/trustpolicies", no_trust_policies()),
         route(
             "GET",
             "/kafkaclusters/source",
@@ -5553,6 +5566,7 @@ async fn a_healthy_restore_preflight_reports_ready() {
             "/trustrosters/default",
             roster(RUNNER_KEY_ID, vec!["prod-id"]).to_string(),
         ),
+        route("GET", "/trustpolicies", no_trust_policies()),
         route("GET", "/restores/r-1", restore_object.to_string()),
         route("GET", "/approvals/ap-1", approval.to_string()),
         route(
@@ -5627,6 +5641,7 @@ async fn the_binding_is_recorded_before_the_plan_and_the_job_are_created() {
             "/trustrosters/default",
             roster(RUNNER_KEY_ID, vec![]).to_string(),
         ),
+        route("GET", "/trustpolicies", no_trust_policies()),
         route(
             "GET",
             "/kafkaclusters/source",
@@ -5986,4 +6001,301 @@ async fn a_catalog_point_whose_signer_was_revoked_since_the_sync_is_not_ready() 
     let row = check_entry(&unreadable, "recoveryPoint.state");
     assert_eq!(row["code"], "CatalogPointSignerUnknown", "{row}");
     assert_eq!(row["state"], "unknown");
+}
+
+// ===========================================================================
+// Class sweep of CATALOG-TRUST-ROSTER-ONLY: `signer.rostered` and the restore
+// allowlist judge by the trust the namespace RESOLVES to
+// ===========================================================================
+
+const SWEEP_NS: &str = "team-a";
+
+/// One `TrustPolicy` governing [`SWEEP_NS`], carrying the (real, usable)
+/// catalog signer key with `lifecycle` merged over an Active base.
+fn governing_policy(name: &str, lifecycle: Value) -> weirkeeper::crds::trust_policy::TrustPolicy {
+    let mut key = json!({
+        "keyId": CATALOG_SIGNER_KEY_ID,
+        "spkiPem": CATALOG_SIGNER_PEM,
+        "algorithm": "ed25519",
+        "usages": ["EvidenceSigning"],
+        "principal": {"id": "install:team-a"},
+        "notBefore": "2025-01-01T00:00:00Z",
+        "notAfter": "2099-01-01T00:00:00Z",
+        "state": "Active"
+    });
+    for (k, v) in lifecycle.as_object().expect("an object") {
+        key[k] = v.clone();
+    }
+    serde_json::from_value(json!({
+        "apiVersion": "logweir.dev/v1alpha1", "kind": "TrustPolicy",
+        "metadata": {"name": name, "uid": format!("uid-{name}"), "generation": 3},
+        "spec": {
+            "namespaces": [SWEEP_NS],
+            "allowedTargetClusterIds": ["policy-scratch-id"],
+            "keys": [key]
+        }
+    }))
+    .expect("a policy")
+}
+
+/// The roster lists [`RUNNER_KEY_ID`] and allows `roster-scratch-id` — so a
+/// row that still read the roster in a governed namespace would say so.
+fn listing_roster() -> RosterFacts {
+    RosterFacts {
+        found: true,
+        uid: ROSTER_UID.to_string(),
+        generation: 4,
+        signing_keys: vec![(RUNNER_KEY_ID.to_string(), None)],
+        allowed_cluster_ids: vec!["roster-scratch-id".to_string()],
+        ..RosterFacts::default()
+    }
+}
+
+fn resolved(policies: &[weirkeeper::crds::trust_policy::TrustPolicy]) -> RosterFacts {
+    let spec: weirkeeper::crds::trust_roster::TrustRosterSpec = serde_json::from_value(json!({
+        "approverKeys": [], "signingKeys": [{"keyId": RUNNER_KEY_ID, "spkiPem": "not a pem"}],
+        "allowedClusterIds": ["roster-scratch-id"]
+    }))
+    .expect("a roster spec");
+    let resolution = weirkeeper::trust::resolve_in(SWEEP_NS, policies, Some(&spec));
+    listing_roster().with_resolution(Ok(&resolution))
+}
+
+fn signer(facts: &RosterFacts, key: Option<&str>) -> logweir_core::check_contract::CheckOutcome {
+    signer_rostered_row(PreflightOperation::Backup, facts, key, now())
+}
+
+/// **A TrustPolicy-only signer is `ready`.** The key the policy carries as an
+/// Active `EvidenceSigning` key is rostered, the row names the POLICY as its
+/// scope, and its verdict expires no later than the key's `notAfter`.
+///
+/// KILLS: the row reading only the roster (the class defect) — the policy's
+/// key is not on the roster, so it would be `SignerNotRostered`.
+#[test]
+fn a_trust_policy_signer_is_ready() {
+    let facts = resolved(&[governing_policy("team-a-trust", json!({}))]);
+    let row = signer(&facts, Some(CATALOG_SIGNER_KEY_ID));
+    assert_eq!(
+        (row.state, row.code),
+        (CheckState::Ready, CheckCode::SignerRostered),
+        "{row:?}"
+    );
+    let scope = row.scope.as_ref().expect("a scope");
+    assert_eq!(
+        (
+            scope.kind.as_str(),
+            scope.name.as_str(),
+            scope.uid.as_deref()
+        ),
+        ("TrustPolicy", "team-a-trust", Some("uid-team-a-trust"))
+    );
+    assert_eq!(
+        row.expires_at
+            .map(|t| t <= Utc.with_ymd_and_hms(2099, 1, 1, 0, 0, 0).unwrap()),
+        Some(true)
+    );
+}
+
+/// **Absent from the policy is `notReady`**, even when the roster lists the
+/// key: a governed namespace is judged by its policy, never by the roster.
+#[test]
+fn a_signer_the_policy_does_not_carry_is_not_rostered_whatever_the_roster_says() {
+    let facts = resolved(&[governing_policy("team-a-trust", json!({}))]);
+    let row = signer(&facts, Some(RUNNER_KEY_ID));
+    assert_eq!(
+        (row.state, row.code),
+        (CheckState::NotReady, CheckCode::SignerNotRostered),
+        "{row:?}"
+    );
+    assert_eq!(
+        row.scope.as_ref().map(|s| s.kind.as_str()),
+        Some("TrustPolicy")
+    );
+}
+
+/// A key the policy RETIRED or REVOKED may sign nothing new, which is the
+/// question a signer about to sign is asking (`may_sign_new`, the rule
+/// `decide` defers to for new use): `SignerKeyExpired` naming the refusal.
+/// A key not yet valid is refused too, and re-asked at its `notBefore`.
+#[test]
+fn a_retired_revoked_or_not_yet_valid_policy_key_may_not_sign() {
+    for (lifecycle, refusal) in [
+        (
+            json!({"state": "Retired", "retiredAt": "2026-01-01T00:00:00Z"}),
+            "KeyRetired",
+        ),
+        (
+            json!({"state": "Revoked", "revokedAt": "2026-01-01T00:00:00Z",
+                   "revocationReason": "Superseded", "revocationEffectiveFrom": "2026-01-01T00:00:00Z"}),
+            "KeyRevoked",
+        ),
+        (json!({"notAfter": "2026-01-01T00:00:00Z"}), "KeyIdExpired"),
+        (
+            json!({"notBefore": "2098-01-01T00:00:00Z"}),
+            "KeyNotYetValid",
+        ),
+    ] {
+        let facts = resolved(&[governing_policy("team-a-trust", lifecycle)]);
+        let row = signer(&facts, Some(CATALOG_SIGNER_KEY_ID));
+        assert_eq!(
+            (row.state, row.code),
+            (CheckState::NotReady, CheckCode::SignerKeyExpired),
+            "{refusal}: {row:?}"
+        );
+        assert!(row.message.contains(refusal), "{refusal}: {}", row.message);
+    }
+}
+
+/// A contested namespace resolves to no trust: evidence signed there verifies
+/// nowhere, so the row is blocking and names both policies. A policy list that
+/// could not be READ is `unknown` — never the roster's answer.
+#[test]
+fn a_contested_or_unreadable_trust_is_never_the_rosters_answer() {
+    let facts = resolved(&[
+        governing_policy("policy-one", json!({})),
+        governing_policy("policy-two", json!({})),
+    ]);
+    let row = signer(&facts, Some(RUNNER_KEY_ID));
+    assert_eq!(
+        (row.state, row.code),
+        (CheckState::NotReady, CheckCode::TrustRosterNotLoaded)
+    );
+    assert!(row.message.contains("policy-one") && row.message.contains("policy-two"));
+    assert!(
+        facts.restore_allowlist().is_empty(),
+        "a contested namespace allows no target"
+    );
+
+    let forbidden = kube::Error::Api(kube::error::ErrorResponse {
+        status: "Failure".to_string(),
+        message: "forbidden".to_string(),
+        reason: "Forbidden".to_string(),
+        code: 403,
+    });
+    let unreadable = listing_roster().with_resolution(Err(&forbidden));
+    let row = signer(&unreadable, Some(RUNNER_KEY_ID));
+    assert_eq!(
+        (row.state, row.code),
+        (CheckState::Unknown, CheckCode::SignerTrustUnknown),
+        "{row:?}"
+    );
+}
+
+/// **Roster fallback unchanged.** With no policy governing the namespace (none
+/// at all, or one naming another namespace) the facts carry no governing trust
+/// and every answer of the roster table is the one it always was.
+#[test]
+fn with_no_governing_policy_the_roster_answers_exactly_as_before() {
+    let mut elsewhere = governing_policy("team-b-trust", json!({}));
+    elsewhere.spec.namespaces = Some(vec!["team-b".to_string()]);
+    for facts in [resolved(&[]), resolved(&[elsewhere])] {
+        assert_eq!(facts.governing, None);
+        assert_eq!(facts, listing_roster(), "the roster's facts, untouched");
+        for key in [Some(RUNNER_KEY_ID), Some(OTHER_KEY_ID), None] {
+            assert_eq!(
+                signer(&facts, key),
+                signer(&listing_roster(), key),
+                "{key:?}"
+            );
+        }
+        assert_eq!(facts.restore_allowlist(), ["roster-scratch-id".to_string()]);
+    }
+    let unconfigured =
+        listing_roster().with_resolution(Ok(&weirkeeper::trust::resolve_in(SWEEP_NS, &[], None)));
+    assert_eq!(unconfigured.governing, None);
+}
+
+/// **The restore allowlist is the governing policy's**, the list the runner's
+/// `allowed-clusters.json` is rendered from — not the roster's.
+///
+/// KILLS: `controller_rows` passing `roster.allowed_cluster_ids` (the policy's
+/// scratch cluster reads `TargetNotAllowlisted`, the roster's reads allowed).
+#[test]
+fn the_restore_allowlist_is_the_governing_policys() {
+    let facts = resolved(&[governing_policy("team-a-trust", json!({}))]);
+    assert_eq!(facts.restore_allowlist(), ["policy-scratch-id".to_string()]);
+    let inputs = Inputs {
+        operation: PreflightOperation::Restore,
+        roster: facts,
+        plan: Some(plan_facts("restore-", "s3-bucket", None)),
+        ..Inputs::default()
+    };
+    let code_for = |observed: &str| {
+        let relayed = pf::RelayFacts {
+            cluster_id: Some(observed.to_string()),
+            signer_key_id: None,
+        };
+        inputs
+            .controller_outcomes(&relayed, None, true, None, now())
+            .0
+            .into_iter()
+            .find(|c| c.id == CheckId::TargetClusterIdentity)
+            .expect("the target identity row")
+            .code
+    };
+    assert_eq!(code_for("policy-scratch-id"), CheckCode::TargetAllowed);
+    assert_eq!(
+        code_for("roster-scratch-id"),
+        CheckCode::TargetNotAllowlisted
+    );
+}
+
+/// **The reconciler is wired to the resolution.** A Backup readiness pass in a
+/// namespace a `TrustPolicy` governs: the pod reports [`RUNNER_KEY_ID`], which
+/// the ROSTER lists and the POLICY does not, so `signer.rostered` is
+/// `SignerNotRostered` scoped to the policy — and the policy is a referent of
+/// the binding, so editing it makes the verdict stale.
+///
+/// KILLS: `resolve_inputs` not folding `trust::resolve` into the facts (the row
+/// reads `SignerRostered` from the roster, the defect).
+#[tokio::test]
+async fn a_governed_namespaces_backup_readiness_judges_the_signer_by_its_policy() {
+    let job = job_name(CheckPlanKind::OperationReadiness);
+    let relayed = relay_from(&runner_pinned_ids(
+        "a_readiness_check_reports_every_row_it_owns",
+    ));
+    let log = relay_log(PLAN_DIGEST, relayed, None);
+    let policy = serde_json::to_value(governing_policy("team-a-trust", json!({})))
+        .expect("the policy serialises");
+    let mut routes: Vec<Route> = referent_routes(Some("prod-id"), vec![])
+        .into_iter()
+        .map(|r| {
+            if r.path_suffix == "/trustpolicies" {
+                route(
+                    "GET",
+                    "/trustpolicies",
+                    json!({"apiVersion": "v1", "kind": "TrustPolicyList",
+                           "metadata": {"resourceVersion": "1"}, "items": [policy.clone()]})
+                    .to_string(),
+                )
+            } else {
+                r
+            }
+        })
+        .collect();
+    routes.push(route(
+        "GET",
+        leak(job.clone()),
+        finished_job(&job).to_string(),
+    ));
+    routes.extend(observation_routes(
+        leak(job.clone()),
+        owned_pod(&job, terminated(0)),
+        log,
+    ));
+    let (status, _) = reconcile_with(&preflight(backup_request()), routes).await;
+
+    let row = check_entry(&status, "signer.rostered");
+    assert_eq!(row["code"], "SignerNotRostered", "{row}");
+    assert_eq!(row["scope"]["kind"], "TrustPolicy", "{row}");
+    assert_eq!(row["scope"]["name"], "team-a-trust", "{row}");
+    let referents = status["binding"]["referents"]
+        .as_array()
+        .expect("referents");
+    assert!(
+        referents
+            .iter()
+            .any(|r| r["kind"] == "TrustPolicy" && r["name"] == "team-a-trust"),
+        "{referents:?}"
+    );
 }

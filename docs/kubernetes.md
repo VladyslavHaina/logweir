@@ -1180,7 +1180,8 @@ each is judged by its lifecycle as `logweir_core::trust::decide` judges it — a
 `notAfter` has passed); a `Retired` key verifies what it signed at or before
 `retiredAt` as `VerifiedHistorical`, and a later signing claim is `Invalid`; a key
 revoked for `KeyCompromise` makes everything it signed `Revoked`, and a
-`Superseded`/`Unspecified` revocation is a retirement at `revocationEffectiveFrom`.
+`Superseded`/`Unspecified` revocation is a retirement at `revocationEffectiveFrom`;
+and a point claiming a signing time before a policy key's `notBefore` is `Invalid`.
 A namespace two policies claim resolves to nothing: every point is `NotAttempted`
 and `TrustAvailable=False/TrustPolicyConflict` names the policies. A roster-only
 namespace mounts the same bundle and reaches the same verdicts as builds before
@@ -7242,6 +7243,25 @@ readiness check holds the submit*).
   gate — a blocking row nobody can answer would pin every restore preflight at
   `unknown`. The runner still validates its signer before it writes anything
   (PLAT-02.2). Closing it means adding `signer_path` to the restore request.
+- **`signer.rostered` and the restore allowlist read the namespace's RESOLVED
+  trust.** The preflight resolves the namespace exactly as the `Approval`
+  controller does (`trust::resolve`). When a `TrustPolicy` governs it, the
+  runner's reported key must be a usable `EvidenceSigning` key of THAT policy
+  that may sign new evidence now (`Active`, inside `notBefore`/`notAfter`):
+  `SignerRostered`, else `SignerNotRostered` (not carried) or `SignerKeyExpired`
+  naming the refusal (`KeyRetired`, `KeyRevoked`, `KeyIdExpired`,
+  `KeyNotYetValid`), scoped to the `TrustPolicy`. A namespace two policies claim
+  is `TrustRosterNotLoaded` naming both; a policy list the controller could not
+  read is `unknown`, `SignerTrustUnknown` — never the roster's answer. A scratch
+  restore's `target.clusterIdentity` compares against the governing policy's
+  `allowedTargetClusterIds` (the list the runner's `allowed-clusters.json` is
+  rendered from). The governing policy is a binding referent, so editing it
+  makes the verdict stale. With no policy governing the namespace every answer
+  is the `TrustRoster`'s, unchanged. Builds before this judged both rows by
+  `TrustRoster/default` alone, so a TrustPolicy-only namespace read
+  `TrustRosterNotFound`/`SignerNotRostered` for a key its policy trusts. The
+  code `SignerTrustUnknown` is new and additive; a rolled-back controller never
+  writes it.
 - **`destination.archivePrefixWritable` is not requested.** A backup readiness
   plan asks for the `archiveRead`, `evidenceWrite` and — when the destination
   configures one — `evidenceRead` grants. The archive-WRITE grant is what the

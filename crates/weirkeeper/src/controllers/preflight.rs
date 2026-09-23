@@ -903,8 +903,13 @@ pub fn egress_row(
     ))
 }
 
-/// What the controller knows about the signing roster — the reduced fact
-/// `signer.rostered` reads.
+/// What the controller knows about the namespace's trust — the reduced fact
+/// `signer.rostered` and the restore allowlist read.
+///
+/// The fields below are `TrustRoster/default`'s, and they ARE the trust when
+/// [`Self::governing`] is `None`: no `TrustPolicy` governs the namespace, so it
+/// resolves to the synthesised `legacy-roster-v1` and every answer is the one
+/// this row gave before policies existed.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RosterFacts {
     /// Whether a `TrustRoster` object was found at all.
@@ -919,9 +924,110 @@ pub struct RosterFacts {
     pub approver_keys: Vec<(String, Option<DateTime<Utc>>)>,
     /// The cluster ids a restore may target.
     pub allowed_cluster_ids: Vec<String>,
+    /// The namespace's trust when a `TrustPolicy` governs it, or when two
+    /// contest it — [`crate::trust::resolve`]'s answer, the one the `Approval`
+    /// controller, the catalog and the runner's bundles are built from.
+    /// `None` is the roster fallback above.
+    pub governing: Option<GoverningTrust>,
+}
+
+/// A namespace's trust when the roster is NOT the answer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GoverningTrust {
+    /// One `TrustPolicy` governs it (an explicit `spec.namespaces` match, or
+    /// the one `default: true` policy).
+    Policy(Box<crate::trust::ResolvedTrust>),
+    /// Two or more claim it, so it resolves to no trust at all
+    /// ([`crate::trust::REASON_TRUST_POLICY_CONFLICT`]). Sorted names.
+    Conflict(Vec<String>),
+    /// The `TrustPolicy` list could not be read, so which trust governs the
+    /// namespace has no answer. The signer row is `unknown`, never the
+    /// roster's answer; the preflight still runs (a scoped install without
+    /// the cluster-scoped trust grant must not lose every other row).
+    Unreadable(String),
 }
 
 impl RosterFacts {
+    /// Fold [`crate::trust::resolve`]'s answer into the roster's facts: a
+    /// governing policy or a conflict is recorded; the legacy roster and an
+    /// unconfigured namespace leave [`Self::governing`] `None`, because the
+    /// roster fields already say exactly that.
+    #[must_use]
+    pub fn with_resolution(
+        mut self,
+        resolution: Result<&crate::trust::Resolution, &kube::Error>,
+    ) -> Self {
+        let resolution = match resolution {
+            Ok(resolution) => resolution,
+            Err(e) => {
+                self.governing = Some(GoverningTrust::Unreadable(format!(
+                    "the namespace's TrustPolicy resolution could not be read: {e}"
+                )));
+                return self;
+            }
+        };
+        self.governing = match resolution {
+            crate::trust::Resolution::Trust(trust) if !trust.source.is_legacy() => {
+                Some(GoverningTrust::Policy(trust.clone()))
+            }
+            crate::trust::Resolution::Conflict { policies, .. } => {
+                Some(GoverningTrust::Conflict(policies.clone()))
+            }
+            _ => None,
+        };
+        self
+    }
+
+    /// The cluster ids a SCRATCH restore may target — the list the runner's
+    /// `allowed-clusters.json` is rendered from (`restore.rs`, from the
+    /// resolved trust): the governing policy's `allowedTargetClusterIds`, the
+    /// roster's `allowedClusterIds` when none governs, and nothing at all in
+    /// a contested namespace. An UNREADABLE policy list keeps the roster's
+    /// list — this row's answer before policies were consulted — because the
+    /// row's vocabulary has no unknown for it; the runner's own allowlist is
+    /// rendered from the resolved trust at admission, which refuses a
+    /// namespace whose trust cannot be read, so nothing is admitted on it.
+    #[must_use]
+    pub fn restore_allowlist(&self) -> &[String] {
+        match &self.governing {
+            None | Some(GoverningTrust::Unreadable(_)) => &self.allowed_cluster_ids,
+            Some(GoverningTrust::Policy(trust)) => &trust.allowed_target_cluster_ids,
+            Some(GoverningTrust::Conflict(_)) => &[],
+        }
+    }
+
+    /// The object a trust row's remedy is about.
+    fn scope(&self) -> CheckScope {
+        match &self.governing {
+            None => CheckScope {
+                kind: "TrustRoster".to_string(),
+                name: crate::ROSTER_NAME.to_string(),
+                uid: (self.found && !self.uid.is_empty()).then(|| self.uid.clone()),
+            },
+            Some(GoverningTrust::Policy(trust)) => {
+                let uid = match &trust.source {
+                    crate::trust::TrustSource::Policy { uid, .. } => uid.clone(),
+                    crate::trust::TrustSource::LegacyRoster => None,
+                };
+                CheckScope {
+                    kind: "TrustPolicy".to_string(),
+                    name: trust.source.name().to_string(),
+                    uid,
+                }
+            }
+            Some(GoverningTrust::Conflict(policies)) => CheckScope {
+                kind: "TrustPolicy".to_string(),
+                name: policies.join(","),
+                uid: None,
+            },
+            Some(GoverningTrust::Unreadable(_)) => CheckScope {
+                kind: "TrustPolicy".to_string(),
+                name: String::new(),
+                uid: None,
+            },
+        }
+    }
+
     /// The roster's contribution to the binding digest.
     #[must_use]
     pub fn binding(&self) -> RosterRef {
@@ -957,13 +1063,18 @@ pub fn is_signer_key_id(value: &str) -> bool {
 /// can only say `SignerKeyIdNotObserved`, and saying `SignerNotRostered`
 /// instead would be a claim about a key nobody has seen.
 ///
-/// # The scope is the `TrustRoster`
+/// # The scope is the trust the namespace resolved to
 ///
 /// Every answer this row can give — not found, empty, not listed, expired,
-/// rostered — is a statement about the one cluster-scoped `TrustRoster`, and
-/// the remedy for four of the five is "edit that object". It carries the
-/// roster's UID once one was read, so a verdict taken against a roster that has
-/// since been replaced is visibly about a different object.
+/// rostered — is a statement about ONE trust object, and the remedy for four
+/// of the five is "edit that object". With no `TrustPolicy` governing the
+/// namespace that object is the cluster-scoped `TrustRoster`, and the row is
+/// what it always was. When a policy governs (CATALOG-TRUST-ROSTER-ONLY's
+/// class sweep), the row judges the key against THAT policy — the trust the
+/// `Approval` controller, the catalog and the runner's bundles use — and names
+/// it; see [`signer_policy_row`]. It carries the object's UID once one was
+/// read, so a verdict taken against a replaced object is visibly about a
+/// different one.
 #[must_use]
 pub fn signer_rostered_row(
     operation: PreflightOperation,
@@ -972,11 +1083,7 @@ pub fn signer_rostered_row(
     now: DateTime<Utc>,
 ) -> CheckOutcome {
     let id = CheckId::SignerRostered;
-    let roster_scope = CheckScope {
-        kind: "TrustRoster".to_string(),
-        name: crate::ROSTER_NAME.to_string(),
-        uid: (roster.found && !roster.uid.is_empty()).then(|| roster.uid.clone()),
-    };
+    let roster_scope = roster.scope();
     if operation == PreflightOperation::Restore {
         // See `RESTORE_CONTROLLER_ROWS`: the restore check plan carries no
         // signer path, so no pod reports a key id and there is nothing to match
@@ -998,6 +1105,10 @@ pub fn signer_rostered_row(
              `TrustRoster.spec.signingKeys` is what makes that evidence verifiable.",
         )
         .with_scope(roster_scope);
+    }
+    if let Some(governing) = roster.governing.as_ref() {
+        return signer_policy_row(operation, governing, observed_key_id, now)
+            .with_scope(roster_scope);
     }
     if !roster.found {
         return outcome(
@@ -1107,6 +1218,159 @@ pub fn signer_rostered_row(
     )
 }
 
+/// `signer.rostered` in a namespace a `TrustPolicy` governs (or two contest).
+///
+/// # Judged by the NEW-signature rule
+///
+/// The key this row asks about is the one the run is ABOUT TO SIGN evidence
+/// with, so the question is [`logweir_core::trust::may_sign_new`]'s — `Active`,
+/// `notBefore ≤ now < notAfter`, `EvidenceSigning` — resolved by key id
+/// through [`crate::trust::ResolvedTrust::may_sign_new_for`], the rule
+/// [`logweir_core::trust::decide`] defers to for any new use. A retired key
+/// still verifies what it signed (`decide`'s `Historical`), and signs nothing
+/// new: evidence it wrote today would be `SignedOutsideValidity` the moment it
+/// was read. The key must also be USABLE (its PEM parses and hashes to its
+/// id), because only usable keys reach a verifier's keyring.
+///
+/// The codes are the roster row's, so a console reading them needs no second
+/// vocabulary: a conflict or a policy with no usable signing key is
+/// `TrustRosterNotLoaded` (trust resolved, and verifies nothing), a key the
+/// policy does not carry for `EvidenceSigning` is `SignerNotRostered`, and a
+/// listed key that may not sign now is `SignerKeyExpired` naming the refusal.
+/// A policy list that could not be read is `unknown`, `SignerTrustUnknown`.
+fn signer_policy_row(
+    operation: PreflightOperation,
+    governing: &GoverningTrust,
+    observed_key_id: Option<&str>,
+    now: DateTime<Utc>,
+) -> CheckOutcome {
+    use logweir_core::trust::{KeyUsage, SigningRefusal};
+    let id = CheckId::SignerRostered;
+    let trust = match governing {
+        GoverningTrust::Conflict(policies) => {
+            return outcome(
+                operation,
+                id,
+                CheckState::NotReady,
+                CheckCode::TrustRosterNotLoaded,
+                now,
+            )
+            .with_message(&format!(
+                "this namespace is claimed by more than one TrustPolicy ({}), so it resolves to no \
+                 trust and evidence signed here verifies nowhere",
+                policies.join(", ")
+            ))
+            .with_remedy("Remove the namespace from all but one TrustPolicy's spec.namespaces.");
+        }
+        GoverningTrust::Unreadable(detail) => {
+            return outcome(
+                operation,
+                id,
+                CheckState::Unknown,
+                CheckCode::SignerTrustUnknown,
+                now,
+            )
+            .with_message(detail)
+            .with_remedy(
+                "Grant the controller list/watch on trustpolicies (the chart's ClusterRole does), \
+                 then run this check again.",
+            );
+        }
+        GoverningTrust::Policy(trust) => trust,
+    };
+    let policy = trust.source.name();
+    if trust.keys_for(KeyUsage::EvidenceSigning).next().is_none() {
+        return outcome(
+            operation,
+            id,
+            CheckState::NotReady,
+            CheckCode::TrustRosterNotLoaded,
+            now,
+        )
+        .with_message(&format!(
+            "TrustPolicy `{policy}` governs this namespace and carries no usable EvidenceSigning key"
+        ))
+        .with_remedy(&format!(
+            "Add the runner's public signing key to TrustPolicy `{policy}` with usage \
+             EvidenceSigning."
+        ));
+    }
+    let Some(key_id) = observed_key_id.filter(|k| is_signer_key_id(k)) else {
+        return outcome(
+            operation,
+            id,
+            CheckState::Unknown,
+            CheckCode::SignerKeyIdNotObserved,
+            now,
+        )
+        .with_message(&format!(
+            "the check pod has not reported which signing key it holds, so it cannot be \
+             matched against TrustPolicy `{policy}`"
+        ));
+    };
+    let listed = trust
+        .key(key_id)
+        .filter(|k| k.trust.has_usage(KeyUsage::EvidenceSigning) && k.is_usable());
+    let Some(key) = listed else {
+        return outcome(
+            operation,
+            id,
+            CheckState::NotReady,
+            CheckCode::SignerNotRostered,
+            now,
+        )
+        .with_message(&format!(
+            "the runner holds signing key `{key_id}`, which TrustPolicy `{policy}` does not \
+             carry as a usable EvidenceSigning key"
+        ))
+        .with_remedy(&format!(
+            "Add this key id to TrustPolicy `{policy}` with usage EvidenceSigning, or project \
+             the signing key the policy already trusts."
+        ));
+    };
+    match trust.may_sign_new_for(key_id, KeyUsage::EvidenceSigning, now) {
+        Ok(()) => cap_expiry(
+            outcome(
+                operation,
+                id,
+                CheckState::Ready,
+                CheckCode::SignerRostered,
+                now,
+            )
+            .with_message(&format!(
+                "signing key `{key_id}` may sign new evidence under TrustPolicy `{policy}`"
+            ))
+            .with_fact("signerKeyId", key_id),
+            Some(key.trust.not_after),
+        ),
+        Err(refusal) => {
+            let row = outcome(
+                operation,
+                id,
+                CheckState::NotReady,
+                CheckCode::SignerKeyExpired,
+                now,
+            )
+            .with_message(&format!(
+                "TrustPolicy `{policy}` carries signing key `{key_id}` but it may not sign new \
+                 evidence now: {}",
+                refusal.as_str()
+            ))
+            .with_remedy(
+                "Rotate the runner's signing key to one the policy carries as Active \
+                 EvidenceSigning, inside its notBefore/notAfter window.",
+            );
+            // A key whose window has not opened becomes usable at `notBefore`,
+            // so the verdict is re-asked then; every other refusal is final.
+            if refusal == SigningRefusal::KeyNotYetValid {
+                cap_expiry(row, Some(key.trust.not_before))
+            } else {
+                row
+            }
+        }
+    }
+}
+
 /// `connection.clusterIdentity` / `target.clusterIdentity` — the **J+C** row.
 ///
 /// The check Job reports the OBSERVED cluster id as a fact; the verdict needs
@@ -1186,11 +1450,15 @@ pub fn cluster_identity_row(
                     now,
                 )
                 .with_message(&format!(
-                    "cluster id `{observed}` is not in TrustRoster.spec.allowedClusterIds"
+                    "cluster id `{observed}` is not in this namespace's restore allowlist (the \
+                     governing TrustPolicy's spec.allowedTargetClusterIds, or \
+                     TrustRoster.spec.allowedClusterIds when no policy governs)"
                 ))
                 .with_remedy(
-                    "Add the scratch cluster's id to `TrustRoster.spec.allowedClusterIds`. The \
-                     allowlist is read from the roster and never from a plan.",
+                    "Add the scratch cluster's id to the governing TrustPolicy's \
+                     `spec.allowedTargetClusterIds` (or `TrustRoster.spec.allowedClusterIds` when \
+                     no policy governs the namespace). The allowlist is read from the trust and \
+                     never from a plan.",
                 )
                 .with_fact("clusterId", observed);
             }
@@ -1232,9 +1500,8 @@ pub fn cluster_identity_row(
                     now,
                 )
                 .with_message(&format!(
-                    "cluster id `{observed}` is listed in TrustRoster.spec.allowedClusterIds, \
-                     which marks it a restore TARGET; the runner's phase -1 rail refuses to \
-                     back one up"
+                    "cluster id `{observed}` is on this namespace's restore allowlist, which \
+                     marks it a restore TARGET; the runner's phase -1 rail refuses to back one up"
                 ))
                 .with_remedy(
                     "Back up the production cluster, not the scratch target. If this really is \
@@ -3688,7 +3955,7 @@ impl Inputs {
                 op,
                 facts.cluster_id.as_deref(),
                 self.cluster_recorded_id.as_deref(),
-                &self.roster.allowed_cluster_ids,
+                self.roster.restore_allowlist(),
                 self.source_cluster_id.as_deref(),
                 self.plan.as_ref().is_some_and(PlanFacts::scratch),
                 now,
@@ -4085,6 +4352,7 @@ fn roster_facts(load: &super::approval::RosterLoad) -> RosterFacts {
                 .map(|k| (k.key_id.clone(), k.not_after))
                 .collect(),
             allowed_cluster_ids: r.spec.allowed_cluster_ids.clone(),
+            governing: None,
         },
     }
 }
@@ -4260,7 +4528,16 @@ pub async fn resolve(
     let roster_load = super::approval::load_roster(client)
         .await
         .map_err(ReconcileError::Api)?;
-    let roster = roster_facts(&roster_load);
+    // THE NAMESPACE'S RESOLVED TRUST (class sweep of CATALOG-TRUST-ROSTER-ONLY):
+    // the resolution the `Approval` controller verifies against and the
+    // runner's bundles are rendered from. The roster is still read above — it
+    // is the fallback, and its UID is in the binding.
+    let resolution = crate::trust::resolve(client, namespace).await;
+    if let Err(e) = &resolution {
+        warn!(namespace = %namespace, error = %e,
+            "the namespace's trust could not be resolved for a preflight; signer.rostered is unknown");
+    }
+    let roster = roster_facts(&roster_load).with_resolution(resolution.as_ref());
 
     let mut inputs = Inputs {
         operation: request.operation,
@@ -4278,6 +4555,23 @@ pub async fn resolve(
         roster,
         ..Inputs::default()
     };
+    if let Some(GoverningTrust::Policy(trust)) = inputs.roster.governing.as_ref() {
+        if let crate::trust::TrustSource::Policy {
+            name,
+            uid,
+            generation,
+        } = &trust.source
+        {
+            // A POLICY EDIT MAKES THE VERDICT STALE, as a roster edit does.
+            inputs.referents.push(referent(
+                "TrustPolicy",
+                "",
+                name,
+                uid.as_deref().unwrap_or_default(),
+                *generation,
+            ));
+        }
+    }
     if inputs.roster.found {
         inputs.referents.push(referent(
             "TrustRoster",

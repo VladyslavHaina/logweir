@@ -357,6 +357,10 @@ closed_vocabulary! {
         // (two policies claim it, none does, or the read failed), or the row
         // names no signer key, so the re-check has no answer.
         CatalogPointSignerUnknown => "CatalogPointSignerUnknown",
+        // `signer.rostered`'s Unknown column when the namespace's trust could
+        // not be READ (the `TrustPolicy` list failed): which trust governs the
+        // signer has no answer, and the roster's answer is not it.
+        SignerTrustUnknown => "SignerTrustUnknown",
         // -- framework / phase codes (D2 §4.2, §4.3, §5.1, §6.2) ---------
         CheckContractMismatch => "CheckContractMismatch",
         ResultUnreadable => "ResultUnreadable",
