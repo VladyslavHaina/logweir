@@ -4245,8 +4245,8 @@ async function mountCatalogPoint(node, ns, selection, parse, api, lifecycle, clu
     replace(node, parse(renderCatalogPointRefusal(ns, choice)));
     return;
   }
-  // The evidence selector's other destinations (PLAT-08.2) are not read on
-  // this path: `undefined` offers the point's own destination, as before.
+  // The evidence selector's other destinations (PLAT-08.2) are not read for a
+  // catalog point: `undefined` offers the point's own destination, as before.
   const state = initialState(ns, clusters, backups, selection, choice.destination, undefined,
     choice);
   const key = formKey(ns, WIZARD_FORM);
