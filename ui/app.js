@@ -15,7 +15,7 @@
 
 import { GROUP, VERSION, path } from "./api.js";
 import { CONSOLE, applyGrants, grantedNamespaces, selectMode } from "./client.js";
-import { el, enhanceDatagrids, replace } from "./render.js";
+import { el, enhanceDatagrids, markScrollRegions, replace } from "./render.js";
 import { mountClusterDetail, mountClusters } from "./pages/clusters.js";
 import { mountDestinationDetail, mountDestinations } from "./pages/destinations.js";
 import { mountScheduleDetail, mountSchedules } from "./pages/schedules.js";
@@ -421,6 +421,26 @@ function boot() {
         main.focus();
       }
     });
+  }
+
+  // A REGION THAT SCROLLS IS A REGION A KEYBOARD CAN REACH (PLAT-18.2).
+  // Whether a table or a plan block overflows is a fact of layout, so it is
+  // read after every change to the view and on every resize, once per frame.
+  const view = document.getElementById("view-slot");
+  if (view !== null) {
+    let queued = false;
+    const mark = () => {
+      if (queued) {
+        return;
+      }
+      queued = true;
+      window.requestAnimationFrame(() => {
+        queued = false;
+        markScrollRegions(view);
+      });
+    };
+    new MutationObserver(mark).observe(view, { childList: true, subtree: true });
+    window.addEventListener("resize", mark);
   }
 
   if (window.location.hash === "") {

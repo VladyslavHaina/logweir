@@ -341,3 +341,37 @@ test("a_success_line_never_prints_an_empty_name_or_uid", async () => {
     { kind: "Backup", name: "" }, null);
   assert.ok(full.includes("<p>Created Backup b1 (uid u-1).</p>"), "a known identity is still printed: " + full);
 });
+
+test("a_region_that_scrolls_becomes_reachable_and_one_that_fits_adds_no_tab_stop", async () => {
+  const { markScrollRegions } = await import("../render.js");
+  const region = (wide, preset) => {
+    const attrs = Object.assign(Object.create(null), preset || {});
+    return {
+      scrollWidth: wide ? 900 : 300, clientWidth: 300, scrollHeight: 50, clientHeight: 50,
+      attrs: attrs,
+      getAttribute: (n) => (n in attrs ? attrs[n] : null),
+      setAttribute: (n, v) => { attrs[n] = String(v); },
+      removeAttribute: (n) => { delete attrs[n]; },
+      hasAttribute: (n) => n in attrs,
+      closest: () => ({ querySelector: () => ({ textContent: " Integrity " }) }),
+    };
+  };
+  const wide = region(true);
+  const fits = region(false);
+  const authored = region(true, { tabindex: "-1" });
+  const root = { querySelectorAll: () => [wide, fits, authored] };
+  assert.equal(markScrollRegions(root), 1, "only the overflowing, unauthored region is marked");
+  assert.deepEqual(
+    [wide.attrs.tabindex, wide.attrs.role, wide.attrs["aria-label"]],
+    ["0", "region", "Integrity (scrolls)"],
+    "reachable by Tab, a region, named by its section's heading",
+  );
+  assert.equal(fits.attrs.tabindex, undefined, "a region that fits adds no Tab stop");
+  assert.equal(authored.attrs.tabindex, "-1", "an attribute the page wrote is never overwritten");
+  // It stops overflowing (a wider window): the attributes this set go away.
+  wide.scrollWidth = 300;
+  markScrollRegions(root);
+  assert.equal(wide.attrs.tabindex, undefined);
+  assert.equal(wide.attrs.role, undefined);
+  assert.equal(authored.attrs.tabindex, "-1", "and the page's own is still left alone");
+});

@@ -627,6 +627,44 @@ export function datagridState(id) {
   return DATAGRID_STATE.get(key);
 }
 
+/** THE SCROLLING REGIONS, MADE REACHABLE (PLAT-18.2; axe-core's
+ *  `scrollable-region-focusable`). A wide table or a long plan block scrolls
+ *  sideways inside its own box; a region that scrolls and holds nothing
+ *  focusable cannot be scrolled from a keyboard at all. So every `.table-wrap`
+ *  and every code block (`pre`) under `root` that ACTUALLY overflows takes
+ *  `tabindex="0"`, `role="region"` and a name (its nearest heading's words),
+ *  and one that no longer overflows gives them back -- so a table that fits
+ *  adds no stop to the Tab order. It reads layout, so it runs after the view
+ *  is in the document: `app.js` calls it whenever the view changes and when
+ *  the window is resized. Only attributes this function set are removed. */
+export function markScrollRegions(root) {
+  if (!root || typeof root.querySelectorAll !== "function") {
+    return 0;
+  }
+  let marked = 0;
+  for (const region of Array.from(root.querySelectorAll(".table-wrap, pre"))) {
+    const overflows = region.scrollWidth > region.clientWidth + 1 ||
+      region.scrollHeight > region.clientHeight + 1;
+    const ours = region.getAttribute("data-scroll-region") === "true";
+    if (overflows && !region.hasAttribute("tabindex")) {
+      const section = region.closest("section, form, main");
+      const heading = section === null ? null : section.querySelector("h2, h3, h4");
+      region.setAttribute("tabindex", "0");
+      region.setAttribute("role", "region");
+      region.setAttribute("aria-label",
+        (heading === null ? "Scrollable content" : heading.textContent.trim()) + " (scrolls)");
+      region.setAttribute("data-scroll-region", "true");
+      marked += 1;
+    } else if (!overflows && ours) {
+      region.removeAttribute("tabindex");
+      region.removeAttribute("role");
+      region.removeAttribute("aria-label");
+      region.removeAttribute("data-scroll-region");
+    }
+  }
+  return marked;
+}
+
 /** Enhances every declared datagrid in `root` (and `root` itself). Called by
  *  `app.js` on every parsed fragment, BEFORE a page wires its controls, so a
  *  grid whose rows hold controls keeps every row in the document (hidden, not
@@ -659,6 +697,25 @@ function make(doc, tag, attrs, text) {
     node.appendChild(doc.createTextNode(String(text)));
   }
   return node;
+}
+
+/** Clarity's signpost, on the native disclosure element: the trigger is a
+ *  real `summary` (a button to the keyboard and to a screen reader, with its
+ *  expanded state announced by the platform), the body is a note, and Escape
+ *  closes it and returns focus to the trigger. */
+export function signpost(doc, id, label, text) {
+  const details = make(doc, "details", { class: "signpost", id: id });
+  const summary = make(doc, "summary", { "aria-label": label }, "i");
+  const body = make(doc, "div", { class: "signpost-body", role: "note" }, text);
+  details.appendChild(summary);
+  details.appendChild(body);
+  details.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && details.open) {
+      details.open = false;
+      summary.focus();
+    }
+  });
+  return details;
 }
 
 function enhanceOne(container) {
@@ -701,7 +758,14 @@ function enhanceOne(container) {
   if (controls) {
     const toolbar = make(doc, "div", { class: "datagrid-toolbar" });
     const field = make(doc, "div", { class: "field" });
-    field.appendChild(make(doc, "label", { for: id + "-filter" }, "Filter " + label));
+    const caption = make(doc, "div", { class: "datagrid-filter-caption" });
+    caption.appendChild(make(doc, "label", { for: id + "-filter" }, "Filter " + label));
+    caption.appendChild(signpost(doc, id + "-filter-help", "About filtering " + label,
+      "Every word you type must appear somewhere in a row, in any column, in any case. " +
+      "The filter, the sort and the page are kept while this page is open and forgotten on a " +
+      "reload; nothing is stored in the browser. A column header sorts by that column: once " +
+      "ascending, again descending, a third time back to the page's own order."));
+    field.appendChild(caption);
     filter = make(doc, "input", { type: "search", id: id + "-filter", "aria-controls": regionId,
       "aria-describedby": id + "-count", autocomplete: "off", spellcheck: "false" });
     filter.value = state.query;

@@ -766,13 +766,15 @@ export function renderApprovalForm(subject, view) {
     "<p class=\"help\">metadata.name, as this Restore's spec.approvalRef names it. Neither name " +
     "is ever edited: both specs are immutable.</p></div>" +
     "<div class=\"field\"><label for=\"approval-json\">approval.json</label>" +
-    "<input type=\"file\" id=\"approval-json-file\" name=\"approvalFile\">" +
+    "<input type=\"file\" id=\"approval-json-file\" name=\"approvalFile\" " +
+    "aria-label=\"approval.json: choose the file\">" +
     "<textarea id=\"approval-json\" name=\"approvalBytes\" rows=\"8\" autocomplete=\"off\" " +
     "spellcheck=\"false\"" + invalidAttributes("approval-json", errors.approvalBytes) + "></textarea>" +
     "<p class=\"help\">Choose the file, or paste its text. It is sent exactly as it is here.</p>" +
     fieldErrorLine("approval-json", errors.approvalBytes) + "</div>" +
     "<div class=\"field\"><label for=\"approval-sig\">approval.sig</label>" +
-    "<input type=\"file\" id=\"approval-sig-file\" name=\"sidecarFile\">" +
+    "<input type=\"file\" id=\"approval-sig-file\" name=\"sidecarFile\" " +
+    "aria-label=\"approval.sig: choose the file\">" +
     "<textarea id=\"approval-sig\" name=\"sidecarBytes\" rows=\"8\" autocomplete=\"off\" " +
     "spellcheck=\"false\"" + invalidAttributes("approval-sig", errors.sidecarBytes) + "></textarea>" +
     "<p class=\"help\">The signature sidecar the same command wrote beside it.</p>" +

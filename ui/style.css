@@ -822,6 +822,12 @@ th[aria-sort="descending"] .datagrid-sort::after {
   margin: 0 0 var(--cds-global-space-5);
 }
 
+.datagrid-filter-caption {
+  display: flex;
+  align-items: center;
+  gap: var(--cds-global-space-5);
+}
+
 .datagrid-toolbar .field {
   margin: 0;
   min-width: var(--lw-field-min);
@@ -1872,6 +1878,8 @@ input:focus-visible,
 select:focus-visible,
 textarea:focus-visible,
 summary:focus-visible,
+pre:focus-visible,
+.table-wrap:focus-visible,
 [tabindex]:focus-visible {
   outline: var(--cds-alias-object-interaction-outline-width) solid var(--lw-focus-color);
   outline-offset: var(--cds-alias-object-interaction-outline-offset);

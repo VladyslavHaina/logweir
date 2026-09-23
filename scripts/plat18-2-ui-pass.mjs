@@ -768,8 +768,11 @@ async function ownChecks(page) {
       .filter((el) => el.offsetParent !== null);
     const unnamed = controls.filter((el) => !named(el)).map((el) =>
       el.tagName.toLowerCase() + (el.id ? "#" + el.id : "") + (el.className ? "." + el.className : ""));
-    const inline = Array.from(document.querySelectorAll("body [style]")).map((el) =>
-      el.tagName.toLowerCase() + "#" + el.id);
+    // An EMPTY style attribute (Chromium leaves `style=""` on some inputs it
+    // touched) carries no colour and no size; only a declaration counts.
+    const inline = Array.from(document.querySelectorAll("body [style]"))
+      .filter((el) => String(el.getAttribute("style")).trim().length > 0).map((el) =>
+      el.tagName.toLowerCase() + "#" + el.id + " style=\"" + el.getAttribute("style") + "\"");
     const style = getComputedStyle(document.body);
     const root = getComputedStyle(doc);
     return {
@@ -817,7 +820,12 @@ async function focusRing(page) {
 }
 
 async function routePass(browser, state, route) {
+  const onlyVariants = (process.env.UI_E2E_VARIANTS || "").split(",").filter((v) => v.length > 0);
+  const onlyRoutes = (process.env.UI_E2E_ROUTES || "").split(",").filter((v) => v.length > 0);
   for (const variant of VARIANTS) {
+    if (onlyVariants.length > 0 && onlyVariants.indexOf(variant.id) === -1) {
+      continue;
+    }
     const context = await browser.newContext({
       viewport: { width: variant.width, height: variant.height },
       colorScheme: variant.colorScheme,
@@ -831,6 +839,9 @@ async function routePass(browser, state, route) {
       }
     });
     for (const [id, hash] of routesOf(state)) {
+      if (onlyRoutes.length > 0 && onlyRoutes.indexOf(id) === -1) {
+        continue;
+      }
       const entry = { route: id, hash: hash, variant: variant.id };
       try {
         await open(page, route(hash));
