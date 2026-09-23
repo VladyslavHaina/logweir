@@ -405,6 +405,26 @@ check_console_grants() {
     fi
     sort -u "$dir/granted.raw" > "$dir/granted"
 
+    # CHART GAP G6 — THE ONE CONDITIONAL PAIR. A render whose console
+    # configuration names `trustedProxyService` spends `list endpointslices`
+    # (`KubeAdapter::list_service_endpoints`, pinned by `linkage.rs` as
+    # `list_page endpointslices`), and must be granted it; a render that does
+    # not must not be. The pair is the variant's, so the sheet is too.
+    cp "$dir/expected" "$dir/expected.variant"
+    if grep -q '^    trustedProxyService:$' "$render_file"; then
+      case "$(sed '/^[[:space:]]*\/\//d' "$adapter")" in
+        *'"list_page", "endpointslices"'*) ;;
+        *)
+          rm -rf "$dir"
+          echo "render-install: $render_file configures trustedProxyService but $adapter no" >&2
+          echo "  longer spends \`list_page endpointslices\`; the grant would be one nobody uses." >&2
+          exit 1
+          ;;
+      esac
+      printf '%s\n' 'list endpointslices' >> "$dir/expected.variant"
+      sort -u "$dir/expected.variant" -o "$dir/expected.variant"
+    fi
+
     if [ ! -s "$dir/granted" ]; then
       if [ "$render_file" = "$demo" ]; then
         rm -rf "$dir"
@@ -420,7 +440,7 @@ check_console_grants() {
     # The wider direction first: a grant nobody spends is the finding that
     # matters more when a rule both loses and gains a pair (a dropped
     # `resourceNames` turns `get trustrosters@default` into `get trustrosters`).
-    comm -13 "$dir/expected" "$dir/granted" > "$dir/extra"
+    comm -13 "$dir/expected.variant" "$dir/granted" > "$dir/extra"
     if [ -s "$dir/extra" ]; then
       echo "render-install: the console principal can do MORE than the console does ($render_file)." >&2
       echo "  Each pair below is a \`yes\` to a question no route asks — a capability nobody" >&2
@@ -432,7 +452,7 @@ check_console_grants() {
       rm -rf "$dir"
       exit 1
     fi
-    comm -23 "$dir/expected" "$dir/granted" > "$dir/missing"
+    comm -23 "$dir/expected.variant" "$dir/granted" > "$dir/missing"
     if [ -s "$dir/missing" ]; then
       echo "render-install: the console principal CANNOT do what the console does ($render_file)." >&2
       echo "  \`kubectl auth can-i\` would answer \`no\` for each pair below, and each one is a" >&2

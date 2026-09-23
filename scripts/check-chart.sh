@@ -723,6 +723,90 @@ console_refuses "a trusted-proxy requirement in the in-cluster administrator mod
 console_refuses "a watched namespace that is not a namespace name" "does not match pattern" \
   --set "controller.watchNamespaces={Team_A}"
 
+# THE PoC CHART GAPS (G1, G2, G3, G6) — each refusal names its value.
+SHARED_URL=(--set-string api.console.publicBaseUrl=https://console.example.com)
+console_refuses "half a trusted-proxy Service" "names only half a Service" \
+  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" "${SHARED_URL[@]}" \
+  --set api.console.trustedProxyService.name=traefik
+console_refuses "a trusted-proxy Service in the in-cluster administrator mode" "trustedProxyService belongs to api.console.mode=shared" \
+  "${CONSOLE_ON[@]}" "${CONSOLE_LOCAL[@]}" "${CONSOLE_KEY[@]}" \
+  --set api.console.trustedProxyService.namespace=traefik --set api.console.trustedProxyService.name=traefik
+console_refuses "an issuer CA bundle named twice" "names both ConfigMap" \
+  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" "${SHARED_URL[@]}" \
+  --set api.console.oidc.caBundle.configMap=ca --set api.console.oidc.caBundle.secret=ca
+console_refuses "an issuer CA bundle with no key" "/api/console/oidc/caBundle/key': minLength" \
+  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" "${SHARED_URL[@]}" \
+  --set api.console.oidc.caBundle.configMap=ca --set-string api.console.oidc.caBundle.key=
+console_refuses "no trust anchor at all for the issuer" "systemRoots=false without" \
+  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" "${SHARED_URL[@]}" \
+  --set api.console.oidc.systemRoots=false
+console_refuses "a hostAliases entry with no hostname" "missing property 'hostnames'" \
+  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" "${SHARED_URL[@]}" \
+  --set "api.console.hostAliases[0].ip=10.96.0.50"
+console_refuses "an OIDC egress peer with no pod selector" "missing property 'podLabels'" \
+  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" "${SHARED_URL[@]}" \
+  --set "api.console.networkPolicy.oidcPeers[0].namespace=traefik" \
+  --set "api.console.networkPolicy.oidcPeers[0].port=8443"
+console_refuses "connection objects in a namespace the scoped controller does not watch" "does not include: the controller would never read them" \
+  --set kafka.enabled=true --set-string kafka.bootstrapServers=b1:9092 \
+  --set "controller.watchNamespaces={team-a}"
+console_refuses "the demo archive credential outside the watched namespaces" "does not include: the controller would never read them" \
+  --set minio.enabled=true --set "controller.watchNamespaces={team-a}"
+
+# AND THE SAME VALUES, SET RIGHT, RENDER WHAT THEY SAY. One shared console with
+# every PoC gap value: the CA bundle from a Secret, a host alias, an OIDC egress
+# peer by selector, the ingress by its Service, and the connection objects in
+# the watched namespace.
+helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" "${SHARED_URL[@]}" \
+  --set api.console.oidc.caBundle.secret=issuer-ca --set api.console.oidc.systemRoots=false \
+  --set "api.console.hostAliases[0].ip=10.96.0.50" --set "api.console.hostAliases[0].hostnames[0]=idp.example.com" \
+  --set api.console.networkPolicy.enabled=true --set api.console.networkPolicy.ingressNamespace=traefik \
+  --set api.console.networkPolicy.ingressPodLabels.app\\.kubernetes\\.io/name=traefik \
+  --set "api.console.networkPolicy.oidcPeers[0].namespace=traefik" \
+  --set "api.console.networkPolicy.oidcPeers[0].podLabels.app\\.kubernetes\\.io/name=traefik" \
+  --set "api.console.networkPolicy.oidcPeers[0].port=8443" \
+  --set api.console.trustedProxyService.namespace=traefik --set api.console.trustedProxyService.name=traefik \
+  --set api.console.requireTrustedProxy=true \
+  --set kafka.enabled=true --set-string kafka.bootstrapServers=b1:9092 --set minio.enabled=true \
+  --set kubernetes.connectionsNamespace=team-a \
+  > "$tmp/console-gaps.yaml" 2> "$tmp/console-gaps.err"
+rc=$?
+if [ "$rc" -ne 0 ]; then
+  echo "FAIL: the shared console with the PoC gap values did NOT render; rc=$rc" >&2
+  sed 's/^/      /' "$tmp/console-gaps.err" >&2
+  fail=1
+else
+  gaps_ok=1
+  for needle in \
+    'caBundleFile: /var/run/logweir/oidc-ca/ca.crt' \
+    'systemRoots: false' \
+    'secretName: issuer-ca' \
+    'mountPath: /var/run/logweir/oidc-ca' \
+    'ip: 10.96.0.50' \
+    'trustedProxyService:' \
+    'name: logweir-api-trusted-proxy' \
+    'resources: ["endpointslices"]' \
+    'port: 8443'; do
+    if ! grep -F -q -- "$needle" "$tmp/console-gaps.yaml"; then
+      echo "FAIL: the PoC gap render does not carry \`$needle\`" >&2
+      gaps_ok=0
+      fail=1
+    fi
+  done
+  # The two connection objects land in the watched namespace, not the release one.
+  kc_ns="$(awk '/^kind: KafkaCluster$/{k=1} k && /^  namespace:/{print $2; exit}' "$tmp/console-gaps.yaml")"
+  s3_ns="$(awk '/^kind: Secret$/{k=1} k && /^  name: logweir-s3$/{n=1} n && /^  namespace:/{print $2; exit} /^---/{k=0;n=0}' "$tmp/console-gaps.yaml")"
+  if [ "$kc_ns" != "team-a" ] || [ "$s3_ns" != "team-a" ]; then
+    echo "FAIL: connectionsNamespace=team-a put the KafkaCluster in '$kc_ns' and logweir-s3 in '$s3_ns'" >&2
+    gaps_ok=0
+    fail=1
+  fi
+  if [ "$gaps_ok" -eq 1 ]; then
+    echo "   rc=$rc  (the PoC gap values render: CA bundle, host alias, egress peer, proxy Service, connections in team-a)"
+  fi
+fi
+
 # AND THE TWO SUPPORTED SHAPES STILL RENDER — a gate whose every arm refuses
 # proves only that the template fails. The Service is the interesting half: the
 # in-cluster administrator mode must render NONE, and shared mode must render

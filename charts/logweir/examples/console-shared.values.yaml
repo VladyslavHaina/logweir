@@ -61,11 +61,26 @@
 # `identity.authorizedRunnerNamespaces`).
 #
 # `requireTrustedProxy` makes the console refuse (421) every request whose
-# socket peer is outside `trustedProxyCidrs`, or that the proxy did not mark
-# HTTPS. It tells the ingress from a pod that dialled the Service directly ONLY
-# when that range is the ingress controller's own and contains no other pod
-# (kube-proxy keeps the source pod IP through a ClusterIP). It is defence in
-# depth beside the NetworkPolicy below, not a replacement for an enforcing CNI.
+# socket peer is not a trusted proxy, or that the proxy did not mark HTTPS.
+# `trustedProxyService` names the ingress controller's Service: the console
+# trusts the addresses of its SERVING pods, re-read every five seconds, so the
+# trust follows an ingress pod that is recreated on a new address (chart gap
+# G6) and never covers a neighbouring pod. `trustedProxyCidrs` is the static
+# alternative; it tells the ingress from a pod that dialled the Service
+# directly ONLY when that range is the ingress controller's own and contains no
+# other pod. Either is defence in depth beside the NetworkPolicy below, not a
+# replacement for an enforcing CNI.
+#
+# THE INGRESS CONTROLLER IS A MAINTAINED ONE. This example uses Traefik; the
+# Kubernetes project retired ingress-nginx in March 2026 (no releases or
+# security fixes since), so no example here names it. HSTS is Traefik's to set,
+# as a `headers` Middleware on the `websecure` entry point or per Ingress with
+# the `traefik.ingress.kubernetes.io/router.middlewares` annotation below.
+#
+# `oidc.caBundle` is for an issuer whose certificate a PRIVATE CA issued (a
+# corporate PKI): the ConfigMap holds that CA's PUBLIC certificate under
+# `ca.crt`, and the console trusts it IN ADDITION to the system roots (chart
+# gap G1). Drop it for an issuer with a publicly trusted certificate.
 controller:
   watchNamespaces: [team-a, team-b]
 kubernetes:
@@ -87,11 +102,13 @@ api:
     # requireTrustedProxy the chart and the binary refuse anything wider than
     # /16. An enforcing NetworkPolicy remains the network boundary.
     trustedProxyCidrs: ["192.0.2.0/24"]
+    trustedProxyService: { namespace: traefik, name: traefik }
     requireTrustedProxy: true
     oidc:
       issuer: https://idp.example.com/realms/logweir
       clientId: logweir-console
       clientSecret: logweir-console-oidc
+      caBundle: { configMap: corporate-ca, key: ca.crt }
     roles:
       revision: "2026-09-21.1"
       bindings:
@@ -109,15 +126,15 @@ api:
           groups: ["logweir-platform-admins"]
     ingress:
       enabled: true
-      className: nginx
+      className: traefik
       host: console.example.com
       tlsSecretName: logweir-console-tls
       annotations:
-        nginx.ingress.kubernetes.io/hsts: "true"
-        nginx.ingress.kubernetes.io/hsts-max-age: "31536000"
+        # A `headers` Middleware (stsSeconds: 31536000) in THIS namespace.
+        traefik.ingress.kubernetes.io/router.middlewares: logweir-system-hsts@kubernetescrd
     networkPolicy:
       enabled: true
-      ingressNamespace: ingress-nginx
+      ingressNamespace: traefik
       ingressPodLabels:
-        app.kubernetes.io/name: ingress-nginx
+        app.kubernetes.io/name: traefik
       oidcCIDRs: ["203.0.113.10/32"]

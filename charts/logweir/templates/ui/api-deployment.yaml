@@ -84,7 +84,7 @@ authorizing the actor. The mounted token is the projected, time-bound kind
 what D0 means by "projected token".
 
 `readOnlyRootFilesystem: true` with ONE writable volume, `/tmp`, and no state in
-it: the twenty-two page files are read into memory once at startup
+it: the twenty-six page files are read into memory once at startup
 (`assets.rs`), the configuration and the keys are read-only mounts, and every
 audit record goes to stdout.
 
@@ -163,6 +163,19 @@ spec:
       {{- . | nindent 6 }}
       {{- end }}
       automountServiceAccountToken: true
+      {{- /*
+      CHART GAP G2: name resolution for the issuer, when its public name does
+      not resolve to a reachable address inside the cluster (split-horizon
+      DNS, a laptop cluster where `*.localtest.me` is 127.0.0.1). An entry here
+      changes WHERE the name resolves and nothing about what is trusted: TLS
+      still verifies the certificate against the name in the URL, and the ID
+      token's `iss` is still compared exactly with `oidc.issuer`. A wrong
+      address is a handshake that fails, never a provider that is believed.
+      */}}
+      {{- with $c.hostAliases }}
+      hostAliases:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -223,6 +236,11 @@ spec:
             - name: oidc
               mountPath: {{ include "logweir.api.oidcDir" . }}
               readOnly: true
+            {{- if include "logweir.api.oidcCaConfigured" . }}
+            - name: oidc-ca
+              mountPath: {{ include "logweir.api.oidcCaDir" . }}
+              readOnly: true
+            {{- end }}
             {{- end }}
             - name: tmp
               mountPath: /tmp
@@ -267,6 +285,28 @@ spec:
             items:
               - key: clientSecret
                 path: clientSecret
+        {{- /*
+        CHART GAP G1: the issuer's CA bundle — PUBLIC certificates — from the
+        one object `api.console.oidc.caBundle` names. Only its one key is
+        projected, and there is no `optional`: a bundle that is not there holds
+        the pod in ContainerCreating with an event naming it, and a bundle that
+        is there but unreadable or empty stops `logweir-api` at exit 2. Neither
+        ends in a console that quietly trusts the system roots alone.
+        */}}
+        {{- if include "logweir.api.oidcCaConfigured" . }}
+        - name: oidc-ca
+          {{- if $c.oidc.caBundle.configMap }}
+          configMap:
+            name: {{ $c.oidc.caBundle.configMap }}
+          {{- else }}
+          secret:
+            secretName: {{ $c.oidc.caBundle.secret }}
+          {{- end }}
+            defaultMode: 0444
+            items:
+              - key: {{ $c.oidc.caBundle.key }}
+                path: {{ $c.oidc.caBundle.key }}
+        {{- end }}
         {{- end }}
         - name: tmp
           emptyDir: {}

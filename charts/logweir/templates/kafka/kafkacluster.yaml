@@ -12,7 +12,9 @@ what the Secret must hold and that Logweir never reads it into a status field,
 a log line or a rendered document.
 
 Nothing renders unless the flag is on, so every existing example renders exactly
-as it did.
+as it did. The objects land in `kubernetes.connectionsNamespace` (default: the
+release namespace), which a scoped controller must watch — `_helpers.tpl`'s
+`logweir.connectionsNamespace` refuses the render otherwise (chart gap G3).
 */ -}}
 {{- if .Values.kafka.enabled }}
 {{- if .Values.demoKafka.enabled }}
@@ -23,7 +25,7 @@ apiVersion: logweir.dev/v1alpha1
 kind: KafkaCluster
 metadata:
   name: {{ $source.name | default "source" }}
-  namespace: {{ .Release.Namespace }}
+  namespace: {{ include "logweir.connectionsNamespace" . }}
   labels:
     {{- include "logweir.labels" . | nindent 4 }}
     app.kubernetes.io/component: kafka
@@ -51,7 +53,7 @@ apiVersion: logweir.dev/v1alpha1
 kind: KafkaCluster
 metadata:
   name: {{ .name | default "target" }}
-  namespace: {{ $.Release.Namespace }}
+  namespace: {{ include "logweir.connectionsNamespace" $ }}
   labels:
     {{- include "logweir.labels" $ | nindent 4 }}
     app.kubernetes.io/component: kafka

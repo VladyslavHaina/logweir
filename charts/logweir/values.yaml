@@ -9,6 +9,7 @@ environment: ""                 # a label on every object; switches nothing
 # runner ServiceAccount, node placement does not (not implemented).
 kubernetes:
   namespace: ""                 # feeds ui.namespaces and api.namespaces; `-n` decides the install
+  connectionsNamespace: ""      # kafka.enabled's KafkaClusters + minio's logweir-s3; "" = release ns. Must be watched
   nodeSelector: {}
   tolerations: []
   affinity: {}
@@ -193,11 +194,15 @@ api:
     publicBaseUrl: ""           # shared: EXACT https:// URL, no path, no trailing slash
     sessionMaxAgeSeconds: 900   # shared: 60..900; a stateless session cannot be revoked
     trustedProxyCidrs: []       # shared: the ingress's ranges; never an identity
-    requireTrustedProxy: false  # shared: refuse (421) any request not from those ranges over HTTPS
+    trustedProxyService: { namespace: "", name: "" }  # shared: the ingress controller's Service; its serving pods
+    requireTrustedProxy: false  # shared: refuse (421) any request not from those proxies over HTTPS
+    hostAliases: []             # [{ip, hostnames}]: e.g. the issuer's public name -> the in-cluster ingress
     oidc:
       issuer: ""                # EXACT, as the discovery document states it
       clientId: ""              # EXACT; also the expected audience
       clientSecret: ""          # the NAME of a Secret with key `clientSecret`
+      caBundle: { configMap: "", secret: "", key: ca.crt }  # a PRIVATE issuer CA, added to the system roots
+      systemRoots: true         # false: trust caBundle alone
     roles:
       revision: ""              # shared: recorded in every audit line
       bindings: []              # [{role, namespace, groups, subjects}] — EXACT strings
@@ -212,6 +217,7 @@ api:
       ingressNamespace: ""      # the ingress controller's namespace
       ingressPodLabels: {}      # and its pod labels; both required when enabled
       oidcCIDRs: []             # exact IdP /32 or /128 endpoints; TCP 443 only
+      oidcPeers: []             # [{namespace, podLabels, port}]: an in-cluster IdP path, by selector
     resources:
       requests: { cpu: 25m, memory: 64Mi }
       limits: { memory: 256Mi }
@@ -224,7 +230,7 @@ api:
 # the Service acts as it. No Ingress; reach it with kubectl port-forward.
 ui:
   enabled: false
-  image: docker.io/vladyslavhaina/logweir-ui:latest  # kubectl + the twenty-two page files
+  image: docker.io/vladyslavhaina/logweir-ui:latest  # kubectl + the twenty-six page files
   imagePullPolicy: Always      # use Never for locally loaded images
   namespaces: []                # extra namespaces to bind in; defaults to kubernetes.namespace
   nodeSelector: {}

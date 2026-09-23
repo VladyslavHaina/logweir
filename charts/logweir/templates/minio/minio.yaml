@@ -2,7 +2,8 @@
 `minio.enabled` — THE BACKEND. An in-cluster MinIO for the archive and the
 evidence: a Deployment, a Service on 9000 (and the console on 9001), a
 PersistentVolumeClaim or an emptyDir, the root credential Secret, and the
-`logweir-s3` Secret the runner Jobs read — in the release namespace, minted
+`logweir-s3` Secret the runner Jobs read — in `kubernetes.connectionsNamespace`
+(default: the release namespace; a scoped controller must watch it), minted
 from the root pair (demo-only; a production install brings its own archive and
 its own Secret and leaves `minio.enabled` false). The images are the compose
 stack's, pinned by digest at quay.io. Nothing in this file renders unless the
@@ -35,7 +36,7 @@ apiVersion: v1
 kind: Secret
 metadata:
   name: logweir-s3
-  namespace: {{ .Release.Namespace }}
+  namespace: {{ include "logweir.connectionsNamespace" . }}
   labels:
     {{- include "logweir.labels" . | nindent 4 }}
     app.kubernetes.io/component: minio

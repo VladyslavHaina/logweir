@@ -151,7 +151,7 @@ jobs:
       #
       # THE FULL ASSERTION IS `scripts/check-image-api.sh`, which the next step
       # runs on this same tag and `… candidates` runs again on the digest the
-      # registry returns: the twenty-two page files hashed against ui/, the three
+      # registry returns: the twenty-six page files hashed against ui/, the three
       # licences, the three absences, USER 65532, no key-shaped path anywhere,
       # and the version held to the workspace's. This step earns its place by
       # failing in seconds and by naming the defect.

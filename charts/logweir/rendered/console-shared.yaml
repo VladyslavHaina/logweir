@@ -6860,10 +6860,10 @@ spec:
     - from:
         - namespaceSelector:
             matchLabels:
-              kubernetes.io/metadata.name: ingress-nginx
+              kubernetes.io/metadata.name: traefik
           podSelector:
             matchLabels:
-              app.kubernetes.io/name: ingress-nginx
+              app.kubernetes.io/name: traefik
       ports:
         - protocol: TCP
           port: 8484
@@ -7022,7 +7022,7 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: logweir-api-config-399594dd7b
+  name: logweir-api-config-692870cab6
   namespace: logweir-system
   labels:
     app.kubernetes.io/name: logweir
@@ -7041,6 +7041,7 @@ data:
       issuer: "https://idp.example.com/realms/logweir"
       clientId: "logweir-console"
       clientSecretFile: /var/run/logweir/oidc/clientSecret
+      caBundleFile: /var/run/logweir/oidc-ca/ca.crt
     roles:
       revision: "2026-09-21.1"
       bindings:
@@ -7066,6 +7067,9 @@ data:
     sessionMaxAgeSeconds: 900
     trustedProxyCidrs:
       - 192.0.2.0/24
+    trustedProxyService:
+      namespace: "traefik"
+      name: "traefik"
     requireTrustedProxy: true
     namespaces:
       - logweir-system
@@ -7610,6 +7614,23 @@ rules:
     resourceNames: ["logweir-signing-trust"]
     verbs: ["get", "patch"]
 ---
+# Source: logweir/templates/ui/api-rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: logweir-api-trusted-proxy
+  namespace: traefik
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: api
+rules:
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["list"]
+---
 # Source: logweir/templates/controller-scope.yaml
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -7757,6 +7778,27 @@ subjects:
     name: logweir-api
     namespace: logweir-system
 ---
+# Source: logweir/templates/ui/api-rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: logweir-api-trusted-proxy
+  namespace: traefik
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: api
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: logweir-api-trusted-proxy
+subjects:
+  - kind: ServiceAccount
+    name: logweir-api
+    namespace: logweir-system
+---
 # Source: logweir/templates/ui/api-deployment.yaml
 apiVersion: v1
 kind: Service
@@ -7886,7 +7928,7 @@ spec:
   template:
     metadata:
       annotations:
-        checksum/logweir-api-config: 399594dd7b00e5e63ede20ab812b97893f4146c1734c709aafa16ab53adea455
+        checksum/logweir-api-config: 692870cab6f6a6b8ea53a1338c15d9b34d76fc3f59bfb5b9bd8ae2372f511e4d
       labels:
         app.kubernetes.io/name: logweir
         app.kubernetes.io/instance: logweir
@@ -7942,12 +7984,15 @@ spec:
             - name: oidc
               mountPath: /var/run/logweir/oidc
               readOnly: true
+            - name: oidc-ca
+              mountPath: /var/run/logweir/oidc-ca
+              readOnly: true
             - name: tmp
               mountPath: /tmp
       volumes:
         - name: config
           configMap:
-            name: logweir-api-config-399594dd7b
+            name: logweir-api-config-692870cab6
             items:
               - key: config.yaml
                 path: config.yaml
@@ -7962,6 +8007,13 @@ spec:
             items:
               - key: clientSecret
                 path: clientSecret
+        - name: oidc-ca
+          configMap:
+            name: corporate-ca
+            defaultMode: 0444
+            items:
+              - key: ca.crt
+                path: ca.crt
         - name: tmp
           emptyDir: {}
 ---
@@ -7978,10 +8030,9 @@ metadata:
     helm.sh/chart: logweir-0.1.0
     app.kubernetes.io/component: api
   annotations:
-    nginx.ingress.kubernetes.io/hsts: "true"
-    nginx.ingress.kubernetes.io/hsts-max-age: "31536000"
+    traefik.ingress.kubernetes.io/router.middlewares: logweir-system-hsts@kubernetescrd
 spec:
-  ingressClassName: "nginx"
+  ingressClassName: "traefik"
   tls:
     - hosts:
         - "console.example.com"

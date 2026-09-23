@@ -328,6 +328,39 @@ fn both_ui_bearing_image_gates_pin_the_current_shipped_file_count() {
     }
 }
 
+/// The CLASS, swept: every chart, workflow and Dockerfile sentence that
+/// counts the shipped page files counts twenty-six. `values.yaml`,
+/// `templates/ui/api-config.yaml` and `api-deployment.yaml` still said
+/// "twenty-two" after the gates above had moved (the PoC review's G-wording
+/// note), because only the two gate scripts were read.
+#[test]
+fn no_chart_workflow_or_dockerfile_counts_the_old_page_set() {
+    assert_eq!(shipped_ui_files().len(), 26, "update the prose rule below");
+    let mut paths: Vec<String> = files_under("charts/logweir")
+        .into_iter()
+        .filter(|p| !p.starts_with("charts/logweir/rendered/"))
+        .collect();
+    paths.extend(files_under(".github/workflows"));
+    paths.extend(
+        [
+            "Dockerfile",
+            "Dockerfile.ui",
+            "Dockerfile.console",
+            "Dockerfile.weirkeeper",
+        ]
+        .map(String::from),
+    );
+    let stale: Vec<String> = paths
+        .iter()
+        .filter(|p| read(p).contains("twenty-two"))
+        .cloned()
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "these files still count twenty-two shipped page files (there are twenty-six): {stale:?}"
+    );
+}
+
 /// **The UI image's repository, DERIVED** — the namespace of
 /// `weirkeeper::job::RUNNER_IMAGE` with the name `logweir-ui`, which is what
 /// `Dockerfile.ui` builds and what `release.yml` publishes.
@@ -2650,6 +2683,21 @@ fn chart_lint_every_grant_reaching_the_api_and_controller_accounts_is_pinned() {
             for ns in api_namespaces(&values) {
                 want.insert(ns, pinned(&API_NAMESPACED_GRANTS));
             }
+            // CHART GAP G6: a shared console that names the ingress
+            // controller's Service holds ONE more atom, in THAT namespace
+            // only — the `list_page endpointslices` pair `logweir-api`'s
+            // `linkage.rs` pins — and nothing else anywhere.
+            let console = &values["api"]["console"];
+            let proxy = &console["trustedProxyService"];
+            if console["enabled"].as_bool() == Some(true)
+                && console["mode"].as_str() == Some("shared")
+            {
+                if let (Some(ns), Some(_)) = (proxy["namespace"].as_str(), proxy["name"].as_str()) {
+                    want.entry(ns.to_string())
+                        .or_default()
+                        .insert("list discovery.k8s.io/endpointslices".to_string());
+                }
+            }
         }
         assert_grants(
             render,
@@ -3509,7 +3557,8 @@ fn chart_lint_the_shared_console_is_outside_the_controllers_job_authority() {
         "includes the release namespace %q, which holds the shared console's keys",
         "api.console.mode=shared with ui.enabled=true is refused.",
         "which is not in controller.watchNamespaces",
-        "api.console.requireTrustedProxy needs api.console.trustedProxyCidrs",
+        "api.console.requireTrustedProxy needs api.console.trustedProxyService",
+        "or api.console.trustedProxyCidrs: with nothing to trust",
         "With requireTrustedProxy a range this wide trusts the pods the gate exists to refuse",
     ] {
         assert!(
@@ -4887,8 +4936,19 @@ fn chart_lint_values_yaml_is_short_and_shows_every_option() {
     // and the one continuation line its two refusals need) and
     // `api.console.requireTrustedProxy`. Each branch fitted its own ceiling;
     // integrated, the file is the sum of both, so the ceiling is too.
+    //
+    // RAISED FROM 232 TO 240 FOR THE PoC CHART GAPS, SIX KEYS AND NO PROSE:
+    // `kubernetes.connectionsNamespace` (G3, where the chart's own connection
+    // objects land), `api.console.trustedProxyService` (G6, the ingress
+    // controller by its Service), `api.console.hostAliases` (G2, the issuer's
+    // name inside the cluster), `api.console.oidc.caBundle` and
+    // `api.console.oidc.systemRoots` (G1, a private issuer CA by reference),
+    // and `api.console.networkPolicy.oidcPeers` (the in-cluster IdP path an
+    // enforcing CNI can match, which an `ipBlock` for a ClusterIP is not).
+    // Each is something an installation must state and the chart cannot
+    // derive; the README carries every explanation.
     assert!(
-        lines <= 232,
+        lines <= 240,
         "charts/logweir/values.yaml is {lines} lines. The owner asked for a values file that is \
          read, not skimmed past: one short line per key, no paragraphs, and every explanation \
          in charts/logweir/README.md"
@@ -5011,7 +5071,16 @@ fn chart_lint_values_yaml_is_short_and_shows_every_option() {
         "api.console.publicBaseUrl",
         "api.console.sessionMaxAgeSeconds",
         "api.console.trustedProxyCidrs",
+        "api.console.trustedProxyService.namespace",
+        "api.console.trustedProxyService.name",
+        "api.console.hostAliases",
         "api.console.oidc.issuer",
+        "api.console.oidc.caBundle.configMap",
+        "api.console.oidc.caBundle.secret",
+        "api.console.oidc.caBundle.key",
+        "api.console.oidc.systemRoots",
+        "api.console.networkPolicy.oidcPeers",
+        "kubernetes.connectionsNamespace",
         "api.console.oidc.clientId",
         "api.console.oidc.clientSecret",
         "api.console.roles.revision",

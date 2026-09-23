@@ -311,4 +311,53 @@ subjects:
     name: {{ $name }}
     namespace: {{ $.Release.Namespace }}
 {{- end }}
+{{- if and .Values.api.console.enabled (include "logweir.api.proxyServiceConfigured" .) }}
+{{- $svc := .Values.api.console.trustedProxyService }}
+---
+{{/*
+CHART GAP G6 — THE ONE READ OUTSIDE THE PRODUCT'S NAMESPACES, AND WHY IT IS A
+Role. `api.console.trustedProxyService` names the ingress controller's Service;
+the console trusts the addresses of its SERVING endpoints as the entry point's
+peers (`crates/logweir-api/src/trusted_proxy.rs`). It reads them with ONE verb
+on ONE resource in ONE namespace: `list` on `discovery.k8s.io/endpointslices`
+in the ingress controller's namespace — `KubeAdapter::list_service_endpoints`,
+the `list_page endpointslices` pair `linkage.rs` pins.
+
+`list` and not `get`: EndpointSlice names are generated
+(`<service>-<random>`), so the read is a label-selected list and cannot name a
+`resourceNames`. What `list` exposes beyond the one Service is the endpoint
+addresses of the other Services in the ingress controller's namespace — pod IPs,
+not credentials. No `watch` (the console polls every five seconds), no write,
+and a Role, never a ClusterRole binding: the grant ends at that namespace.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}-trusted-proxy
+  namespace: {{ $svc.namespace }}
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+rules:
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}-trusted-proxy
+  namespace: {{ $svc.namespace }}
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}-trusted-proxy
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
 {{- end }}

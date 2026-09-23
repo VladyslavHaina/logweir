@@ -59,6 +59,17 @@ a provider behind a rotating address cannot be expressed here; D0 requires
 empty in shared mode this policy will BLOCK OIDC discovery under an enforcing
 CNI, and the console will start NotReady — which is the honest failure, not a
 reason to widen the rule to 0.0.0.0/0.
+
+AN IN-CLUSTER PROVIDER IS A SELECTOR, NOT A ClusterIP. When the issuer is
+reached inside the cluster — a Dex behind the cluster's own ingress, the issuer
+name mapped there by `api.console.hostAliases` — the console dials a Service
+ClusterIP, and an enforcing CNI evaluates egress AFTER the Service's DNAT: the
+destination it matches is the backend POD, on the pod's port. An `ipBlock` for
+the ClusterIP therefore matches nothing there (the PoC review's finding).
+`api.console.networkPolicy.oidcPeers` is the portable form: each entry allows
+egress to the pods labelled `podLabels` in `namespace`, on `port` — the POD port
+(Traefik's `websecure` listens on 8443 behind the Service's 443). Keep the
+ClusterIP in `oidcCIDRs` as well only for a CNI that matches before DNAT.
 */}}
 {{- if and .Values.api.console.enabled .Values.api.console.networkPolicy.enabled }}
 {{- include "logweir.api.consoleChecks" . }}
@@ -155,5 +166,17 @@ spec:
       ports:
         - protocol: TCP
           port: 443
+  {{- end }}
+  {{- range $peer := ($c.networkPolicy.oidcPeers | default list) }}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $peer.namespace }}
+          podSelector:
+            matchLabels:
+              {{- toYaml $peer.podLabels | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ int $peer.port }}
   {{- end }}
 {{- end }}

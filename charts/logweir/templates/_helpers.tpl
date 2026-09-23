@@ -234,3 +234,28 @@ console) or a YAML list. Whitespace around each entry is trimmed.
 {{- if not $list }}{{ fail "kafka: bootstrapServers is empty — give a comma-separated string or a list of host:port" }}{{ end -}}
 {{ toYaml $list }}
 {{- end -}}
+
+{{- /*
+CHART GAP G3 — WHERE THE CHART'S OWN CONNECTION OBJECTS LAND.
+
+`kafka.enabled` renders the `KafkaCluster`s a Backup names, and `minio.enabled`
+renders `logweir-s3`, the archive credential a Backup's `secretRef` names. Both
+are read in the namespace the Backup runs in, by a controller that only sees
+the namespaces it watches. They used to be rendered in the RELEASE namespace,
+which a shared console's scoped controller is forbidden to watch
+(`controller.watchNamespaces` may not include it): objects nothing could use.
+
+`kubernetes.connectionsNamespace` moves them; empty keeps the release namespace,
+so an unscoped installation renders exactly what it did. With a scoped
+controller the render FAILS unless the namespace is watched — the only other
+outcome is a connection the operator sees and the controller never reads. The
+namespace must exist before the install, like every execution namespace.
+*/ -}}
+{{- define "logweir.connectionsNamespace" -}}
+{{- $ns := .Values.kubernetes.connectionsNamespace | default .Release.Namespace -}}
+{{- $watch := .Values.controller.watchNamespaces | default list -}}
+{{- if and $watch (not (has $ns $watch)) -}}
+{{- fail (printf "kafka.enabled / minio.enabled render their connection objects (KafkaClusters, the logweir-s3 archive credential) into namespace %q, which controller.watchNamespaces (%s) does not include: the controller would never read them and no Backup could use them. Set kubernetes.connectionsNamespace to a watched namespace (the one Backups run in)." $ns (join ", " $watch)) -}}
+{{- end -}}
+{{- $ns -}}
+{{- end -}}
