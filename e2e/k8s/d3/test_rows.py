@@ -2911,7 +2911,7 @@ def test_the_segment_tamper_keeps_the_records_and_changes_only_the_digest() -> N
 
 def test_the_object_lock_row_requires_the_refusal_recorded() -> None:
     held, control = "lwp1-held", "lwp1-ctl"
-    after = {"status": {"lastEnforcement": {"runId": "r1", "deleted": [control],
+    after = {"status": {"lastEnforcement": {"runId": "r1", "finishedAt": "t", "deleted": [control],
                                             "failed": [{"pointId": held, "code": "Locked"}]}}}
     nxt = {"status": {"lastEvaluation": {"protected": [{"pointId": held, "reason": "LegalHold"}],
                                          "candidates": []},
@@ -2923,7 +2923,8 @@ def test_the_object_lock_row_requires_the_refusal_recorded() -> None:
     # WHAT MinIO DOES (measured 2026-09-23 on the lab): the reaper's DELETE names
     # no version, the provider writes a delete marker over the held version and
     # returns success, and the run records the held point Deleted.
-    after_f = {"status": {"lastEnforcement": {"runId": "r1", "deleted": [held, control]}}}
+    after_f = {"status": {"lastEnforcement": {"runId": "r1", "finishedAt": "t",
+                                              "deleted": [held, control]}}}
     nxt_f = {"status": {"lastEvaluation": {"protected": [], "candidates": []},
                         "guarantees": {"legalHold": "ProviderEnforcedUnverified"}}}
     marker = [{"key": "archive/x/manifest.json", "versionId": "v2", "isDeleteMarker": True,
@@ -2939,6 +2940,10 @@ def test_the_object_lock_row_requires_the_refusal_recorded() -> None:
     claim["status"]["guarantees"]["legalHold"] = "LogweirEnforced"
     row("object lock: a LogweirEnforced claim is REFUSED",
         not all(d3.legal_hold_refusal_recorded(after, claim, held, control, kept, True,
+                                               True).values()))
+    started = {"status": {"lastEnforcement": {"runId": "r1"}}}
+    row("object lock: a run read while still in progress (runId, no finishedAt) is REFUSED",
+        not all(d3.legal_hold_refusal_recorded(started, nxt, held, control, kept, True,
                                                True).values()))
     row("object lock: a bucket without object lock is REFUSED as a fixture",
         not all(d3.legal_hold_refusal_recorded(after, nxt, held, control, kept, True,

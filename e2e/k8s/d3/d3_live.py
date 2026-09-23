@@ -11710,7 +11710,8 @@ def legal_hold_refusal_recorded(policy_after_run: dict[str, Any], policy_next: d
     return {
         "the bucket was created with object lock, and the hold was ON before the run":
             lock_enabled and hold_was_on,
-        "an enforcement run of the controller's own finished": bool(last.get("runId")),
+        "an enforcement run of the controller's own finished":
+            bool(last.get("runId")) and bool(last.get("finishedAt")),
         f"the control point {control_point} (no hold) was deleted by it":
             control_point in deleted,
         "the provider refused the held point: its objects are still the LATEST versions":
@@ -11815,9 +11816,13 @@ def object_lock() -> None:
                          "deadlineSeconds": 300, "maxDeletionsPerRun": 10,
                          "maxObjectsPerRun": 200}))
         uid = created["metadata"]["uid"]
+        # FINISHED, not started: `lastEnforcement.runId` is written when the Job
+        # is created (`Enforced=True/RunInProgress`), and a read at that
+        # instant sees no `deleted` and no `failed` — measured on the second
+        # run of this phase.
         after_run = settle("retentionpolicy", LOCK_POLICY,
                            lambda o: bool(((o.get("status") or {}).get("lastEnforcement") or {})
-                                          .get("runId")),
+                                          .get("finishedAt")),
                            seconds=1200, what="a finished enforcement run") or \
             get("retentionpolicy", LOCK_POLICY)
         jobs = [j["metadata"]["name"] for j in lst("jobs")
