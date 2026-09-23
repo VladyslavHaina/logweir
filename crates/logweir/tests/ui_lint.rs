@@ -2663,9 +2663,12 @@ fn style_word_allowed(text: &str, at: usize) -> bool {
     prose_before && prose_after
 }
 
-/// The presentation attributes a shipped page may not set: colour and size
-/// belong to the stylesheet's classes and tokens.
-const PRESENTATION_ATTRIBUTES: [&str; 7] = [
+/// The presentation attributes a shipped page may not set, as markup
+/// (`name="..."`) or through `setAttribute`/`setAttributeNS`: colour and size
+/// belong to the stylesheet's classes and tokens. `style` is not listed: the
+/// word rule refuses it wherever it is code, `setAttribute("style", ...)`
+/// included.
+const PRESENTATION_ATTRIBUTES: [&str; 16] = [
     "fill",
     "stroke",
     "width",
@@ -2673,16 +2676,89 @@ const PRESENTATION_ATTRIBUTES: [&str; 7] = [
     "color",
     "bgcolor",
     "stop-color",
+    "stroke-width",
+    "fill-opacity",
+    "stroke-opacity",
+    "opacity",
+    "font-size",
+    "font-family",
+    "font-weight",
+    "background",
+    "border",
 ];
 
 /// CSSOM entry points that write a style without the word `style` in them.
-const CSSOM_WRITES: [&str; 5] = [
+/// `attributeStyleMap` and `.styleMap` are CSS Typed OM: an element's (or a
+/// rule's) style map, written with `.set(`/`.append(`. Naming the map at all
+/// is refused, so a write through an alias of it is refused too.
+const CSSOM_WRITES: [&str; 7] = [
     "cssText",
     "insertRule",
     "adoptedStyleSheets",
     "CSSStyleSheet",
     ".setProperty(",
+    "attributeStyleMap",
+    ".styleMap",
 ];
+
+/// Every `setAttribute("<presentation attribute>", ...)` and
+/// `setAttributeNS(ns, "<presentation attribute>", ...)` in a script whose
+/// attribute NAME is a literal (after [`joined_literals`], so `"fi" + "ll"` is
+/// `"fill"`). The value is not read: a presentation attribute sizes or colours
+/// an element outside the token layer whatever it is set to. A name held in a
+/// variable is deliberate evasion no textual lint can close.
+fn set_attribute_findings(file: &str, text: &str) -> Vec<String> {
+    let lower = text.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let line_of_at = |at: usize| text[..at].matches('\n').count() + 1;
+    let mut findings = Vec::new();
+    let mut from = 0;
+    while let Some(found) = lower[from..].find("setattribute") {
+        let at = from + found;
+        from = at + "setattribute".len();
+        let mut i = from;
+        let ns = lower[i..].starts_with("ns");
+        if ns {
+            i += 2;
+        }
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if bytes.get(i) != Some(&b'(') {
+            continue;
+        }
+        i += 1;
+        if ns {
+            // Skip the namespace argument: up to the first comma.
+            match lower[i..].find(',') {
+                Some(comma) => i += comma + 1,
+                None => continue,
+            }
+        }
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let Some(&quote) = bytes.get(i) else {
+            continue;
+        };
+        if quote != b'"' && quote != b'\'' && quote != b'`' {
+            continue;
+        }
+        let Some(len) = lower[i + 1..].find(quote as char) else {
+            continue;
+        };
+        let name = lower[i + 1..i + 1 + len].trim();
+        if PRESENTATION_ATTRIBUTES.contains(&name) {
+            let line = line_of_at(at);
+            findings.push(format!(
+                "{file}:{line}: `setAttribute` of the presentation attribute `{name}`: size and \
+                 colour an element by class; {}",
+                text.lines().nth(line - 1).unwrap_or("").trim()
+            ));
+        }
+    }
+    findings
+}
 
 /// Every inline style, style element, CSSOM write and presentation attribute
 /// in one shipped `.js` or `.html` file.
@@ -2768,6 +2844,8 @@ fn inline_style_findings(file: &str, source: &str) -> Vec<String> {
             }
         }
     }
+
+    findings.extend(set_attribute_findings(file, &text));
 
     for token in CSSOM_WRITES {
         if let Some(at) = text.find(token) {
@@ -3047,7 +3125,79 @@ fn the_token_lint_refuses_each_kind_of_literal() {
         "cssText, and the word"
     );
     assert_eq!(inline("sheet.insertRule(\".x{}\");"), 1, "insertRule");
+    // PLAT-18.2 re-check LOW-R1: variants 14 and 15 of the review, which the
+    // lint did not see.
+    assert_eq!(
+        inline("node.attributeStyleMap.set(\"color\", \"red\");"),
+        1,
+        "variant 15: a CSS Typed OM write"
+    );
+    assert_eq!(
+        inline("node.attributeStyleMap.append(\"margin\", CSS.px(3));"),
+        1,
+        "a Typed OM append"
+    );
+    assert_eq!(
+        inline("const m = node.attributeStyleMap;\nm.set(\"width\", CSS.px(12));"),
+        1,
+        "a Typed OM write through an alias of the map"
+    );
+    assert_eq!(
+        inline("sheet.cssRules[0].styleMap.set(\"color\", \"red\");"),
+        1,
+        "a rule's Typed OM style map"
+    );
+    assert_eq!(
+        inline("node.setAttribute(\"fill\", \"#ff0000\");"),
+        1,
+        "variant 14: setAttribute of fill"
+    );
+    assert_eq!(
+        inline("node.setAttribute(\"width\", \"12\");"),
+        1,
+        "variant 14: setAttribute of width"
+    );
+    for attribute in PRESENTATION_ATTRIBUTES {
+        assert_eq!(
+            inline(&format!("node.setAttribute('{attribute}', value);")),
+            1,
+            "setAttribute of {attribute}, whatever the value"
+        );
+    }
+    assert_eq!(
+        inline("node.setAttributeNS(null, \"stroke\", \"#000\");"),
+        1,
+        "setAttributeNS of stroke"
+    );
+    assert_eq!(
+        inline("node.setAttribute ( `Height` , \"4\");"),
+        1,
+        "spacing, a template literal and case do not hide the name"
+    );
+    assert_eq!(
+        inline("node.setAttribute(\"fi\" + \"ll\", \"red\");"),
+        1,
+        "a concatenated attribute name"
+    );
+    assert_eq!(
+        inline("node.setAttribute(\"style\", \"color: red\");"),
+        1,
+        "setAttribute of style is refused by the word rule, once"
+    );
     // The GREEN side.
+    assert_eq!(
+        inline(
+            "node.setAttribute(\"data-label\", x); node.setAttribute(\"aria-sort\", d); \
+             node.setAttribute(\"tabindex\", \"0\"); node.setAttribute(key, String(v));"
+        ),
+        0,
+        "setAttribute of a non-presentation attribute, or of a name held in a variable"
+    );
+    assert_eq!(
+        inline("node.setAttribute(\"data-width\", \"12\");"),
+        0,
+        "a data attribute that ends in a presentation word"
+    );
     assert_eq!(
         inline("// a comment may mention .style. freely"),
         0,
