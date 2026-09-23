@@ -13876,7 +13876,7 @@
             ]
           },
           {
-            "description": "The signature verifies and the key is one this installation will not accept: unknown, revoked, or holding the wrong usage.",
+            "description": "The signature verifies and the key is one this installation will not accept: unknown, revoked, or holding the wrong usage. A key revoked for compromise after this installation recorded the document (`basis: RecordedBeforeRevocation`) is here too — D3 §7.4: \"never green\".",
             "type": "string",
             "enum": [
               "untrusted"

@@ -422,6 +422,267 @@ fn no_trust_basis_promotes_a_result_that_is_not_valid() {
     }
 }
 
+/// A `Valid` verdict on the live fixture with its trust block set to `trust`
+/// (`None` removes the block entirely).
+fn valid_with_trust(trust: Option<Value>) -> OperationView {
+    let mut object = fixture("backup-succeeded-verified.json");
+    match trust {
+        Some(block) => set(&mut object, "/status/evidence/verification/trust", block),
+        None => remove(&mut object, "/status/evidence/verification/trust"),
+    }
+    view_of(&object)
+}
+
+/// **TRUST-STATE-RBR-VERIFIED: a `Valid` verdict is verified exactly where the
+/// green rule admits its basis.**
+///
+/// REGRESSION REASON. `trust_of` mapped `Valid` + `RecordedBeforeRevocation`
+/// to `verified`, and every basis it did not name — a `trust` block carrying
+/// `None`, no basis at all, or a word a later build invents — to `verified`
+/// too. D3 §7.4: a verdict recorded before its key's compromise revocation is
+/// "`Untrusted`, reason `RecordedBeforeRevocation` (rendered with the recorded
+/// instant, never green)", and `logweir_core::trust::Verdict::may_render_green`
+/// admits `Current` and `Historical` and nothing else. A client reading
+/// `trust.state` alone saw a compromise-revoked key as trusted.
+///
+/// EVERY ROW IS ALSO HELD TO THE CONTROLLER'S BADGE. The run succeeded, so
+/// `verifiedSuccess` — computed from `weirkeeper::verification::backup_badge`
+/// — is green exactly when the published word is; a projection that drifted
+/// from the badge in either direction fails the second assertion.
+#[test]
+fn a_valid_verdict_is_verified_only_on_a_basis_the_green_rule_admits() {
+    let rows: [(&str, Option<Value>, TrustState); 8] = [
+        ("absent block", None, TrustState::Verified),
+        (
+            "Current",
+            Some(json!({"basis": "Current", "keyState": "Active"})),
+            TrustState::Verified,
+        ),
+        (
+            "Historical",
+            Some(json!({"basis": "Historical", "keyState": "Retired"})),
+            TrustState::VerifiedHistorical,
+        ),
+        (
+            "RecordedBeforeRevocation",
+            Some(json!({"basis": "RecordedBeforeRevocation", "keyState": "Revoked"})),
+            TrustState::Untrusted,
+        ),
+        (
+            "Unverified",
+            Some(json!({"basis": "Unverified"})),
+            TrustState::NotAttempted,
+        ),
+        (
+            "None in a present block",
+            Some(json!({"basis": "None", "keyState": "Active"})),
+            TrustState::Untrusted,
+        ),
+        (
+            "a present block with no basis",
+            Some(json!({"keyState": "Active"})),
+            TrustState::Untrusted,
+        ),
+        (
+            "a basis this build does not know",
+            Some(json!({"basis": "SomethingNewer", "keyState": "Active"})),
+            TrustState::Untrusted,
+        ),
+    ];
+    for (what, trust, expected) in rows {
+        let view = valid_with_trust(trust);
+        assert_eq!(
+            view.operation.verification.state,
+            VerificationState::Valid,
+            "{what}: the SIGNATURE column is untouched by the basis"
+        );
+        assert_eq!(view.trust.state, expected, "{what}");
+        assert_eq!(
+            view.operation.verified_success,
+            matches!(
+                view.trust.state,
+                TrustState::Verified | TrustState::VerifiedHistorical
+            ),
+            "{what}: trust.state and the controller's badge give one answer"
+        );
+    }
+}
+
+/// **The basis travels verbatim beside the corrected word**, so a console can
+/// still render D3 §7.4's "with the recorded instant" case.
+#[test]
+fn recorded_before_revocation_is_untrusted_and_keeps_its_basis_and_key_state() {
+    let view = valid_with_trust(Some(json!({
+        "basis": "RecordedBeforeRevocation",
+        "keyState": "Revoked",
+        "policy": {"name": "org-default", "generation": 4},
+    })));
+    assert_eq!(view.trust.state, TrustState::Untrusted);
+    assert_eq!(view.trust.basis, "RecordedBeforeRevocation");
+    assert_eq!(view.trust.key_state.as_deref(), Some("Revoked"));
+    assert!(!view.operation.verified_success);
+    // The published JSON word, which is what every other client reads.
+    let wire = serde_json::to_value(&view.trust).expect("serializes");
+    assert_eq!(wire["state"], json!("untrusted"));
+    assert_eq!(wire["basis"], json!("RecordedBeforeRevocation"));
+}
+
+/// **The console's own `RecordedBeforeRevocation` fixture, read by the API.**
+///
+/// `ui/tests/fixtures/d3/restore-recorded-before-revocation.json` is what
+/// `ui/tests/d3.spec.js` renders as "recorded before revocation" and never
+/// green. A fixture two sides must agree on is read by both sides' tests, so
+/// the API projects the same object here: `untrusted`, not `verified`.
+#[test]
+fn the_consoles_recorded_before_revocation_restore_projects_untrusted() {
+    let object = serde_json::from_str::<Value>(
+        &std::fs::read_to_string(
+            repo_root().join("ui/tests/fixtures/d3/restore-recorded-before-revocation.json"),
+        )
+        .expect("the console fixture exists"),
+    )
+    .expect("the console fixture is JSON");
+    assert_eq!(
+        object.pointer("/status/evidence/verification/result"),
+        Some(&json!("Valid"))
+    );
+    let view = restore_view(&restore_from(&object), now());
+    assert_eq!(view.operation.state, OperationState::Succeeded);
+    assert_eq!(view.operation.verification.state, VerificationState::Valid);
+    assert_eq!(view.trust.basis, "RecordedBeforeRevocation");
+    assert_eq!(view.trust.state, TrustState::Untrusted);
+    assert!(!view.operation.verified_success);
+}
+
+/// **Every result that is not `Valid`, by the word D3 §2.5 gives it.**
+///
+/// REGRESSION REASON. `Untrusted` IS a `result` the controller writes
+/// (`weirkeeper::verification::VerificationVerdict::Untrusted`, every
+/// `Untrusted` row of D3 §7.4). The projection used to say it was not and
+/// decided such a verdict by the key state alone, so a `KeyUsageMismatch` on
+/// an `Active` key and a `SignedOutsideValidity` on a `Retired` one were
+/// published as `notAttempted` — "no verdict was reached" — about a verdict
+/// the controller reached. And an `Unverified` basis, which
+/// `logweir_core::trust::TrustBasis` defines as NO verdict, was published as
+/// `untrusted` beside a revoked key.
+#[test]
+fn each_result_that_is_not_valid_projects_its_own_word() {
+    let rows: [(&str, &str, Option<&str>, Option<&str>, TrustState); 14] = [
+        (
+            "Invalid",
+            "Invalid",
+            Some("Current"),
+            Some("Active"),
+            TrustState::Invalid,
+        ),
+        ("Pending", "Pending", None, None, TrustState::Pending),
+        (
+            "NotAttempted, active key",
+            "NotAttempted",
+            Some("None"),
+            Some("Active"),
+            TrustState::NotAttempted,
+        ),
+        (
+            "NotAttempted, revoked key",
+            "NotAttempted",
+            Some("None"),
+            Some("Revoked"),
+            TrustState::Untrusted,
+        ),
+        (
+            "NotAttempted, Unverified, revoked key",
+            "NotAttempted",
+            Some("Unverified"),
+            Some("Revoked"),
+            TrustState::NotAttempted,
+        ),
+        (
+            "NotAttempted, Unverified",
+            "NotAttempted",
+            Some("Unverified"),
+            None,
+            TrustState::NotAttempted,
+        ),
+        (
+            "Untrusted, RecordedBeforeRevocation",
+            "Untrusted",
+            Some("RecordedBeforeRevocation"),
+            Some("Revoked"),
+            TrustState::Untrusted,
+        ),
+        (
+            "Untrusted, Revoked",
+            "Untrusted",
+            Some("None"),
+            Some("Revoked"),
+            TrustState::Untrusted,
+        ),
+        (
+            "Untrusted, UntrustedSigner",
+            "Untrusted",
+            Some("None"),
+            Some("Unknown"),
+            TrustState::Untrusted,
+        ),
+        (
+            "Untrusted, KeyUsageMismatch on an active key",
+            "Untrusted",
+            Some("None"),
+            Some("Active"),
+            TrustState::Untrusted,
+        ),
+        (
+            "Untrusted, SignedOutsideValidity on a retired key",
+            "Untrusted",
+            Some("None"),
+            Some("Retired"),
+            TrustState::Untrusted,
+        ),
+        (
+            "Untrusted, Current basis",
+            "Untrusted",
+            Some("Current"),
+            Some("Active"),
+            TrustState::Untrusted,
+        ),
+        (
+            "Untrusted, no trust block",
+            "Untrusted",
+            None,
+            None,
+            TrustState::Untrusted,
+        ),
+        (
+            "a result this build does not know, active key",
+            "Nonsense",
+            Some("Current"),
+            Some("Active"),
+            TrustState::NotAttempted,
+        ),
+    ];
+    let base = fixture("backup-succeeded-verified.json");
+    for (what, result, basis, key_state, expected) in rows {
+        let mut object = base.clone();
+        set(
+            &mut object,
+            "/status/evidence/verification/result",
+            json!(result),
+        );
+        match (basis, key_state) {
+            (None, None) => remove(&mut object, "/status/evidence/verification/trust"),
+            _ => set(
+                &mut object,
+                "/status/evidence/verification/trust",
+                json!({"basis": basis, "keyState": key_state}),
+            ),
+        }
+        let view = view_of(&object);
+        assert_eq!(view.trust.state, expected, "{what}");
+        assert!(!view.operation.verified_success, "{what}: never green");
+    }
+}
+
 /// **A Backup's verification scope is `none` with ABSENT counts.**
 ///
 /// REGRESSION REASON. Zeroes here are worse than absence: `0 of 0 sampled

@@ -579,7 +579,10 @@ pub enum TrustState {
     /// retired. **A pass, not a downgrade** — it is what rotation looks like.
     VerifiedHistorical,
     /// The signature verifies and the key is one this installation will not
-    /// accept: unknown, revoked, or holding the wrong usage.
+    /// accept: unknown, revoked, or holding the wrong usage. A key revoked
+    /// for compromise after this installation recorded the document
+    /// (`basis: RecordedBeforeRevocation`) is here too — D3 §7.4: "never
+    /// green".
     Untrusted,
     /// The bytes do not match the signature.
     Invalid,
@@ -910,37 +913,97 @@ fn trust_basis(trust: Option<&TrustBasis>) -> String {
 /// What an absent `trust` block projects to (D3 §12).
 pub const BASIS_NONE: &str = "None";
 
-fn trust_of(
-    verification: &OperationVerification,
+/// `status.evidence.verification.result` for a verdict the controller REACHED
+/// and refused on the key (D3 §7.4) — `weirkeeper::verification`'s
+/// `VerificationVerdict::Untrusted`. This projection's `VerificationState` has
+/// no word for it and reads it as `unknown`, which is why the raw result is
+/// consulted here.
+const RESULT_UNTRUSTED: &str = "Untrusted";
+
+/// D3 §2.5's combined word, from the recorded result and the trust block.
+///
+/// # ONE RULE WITH THE CONTROLLER'S BADGE (`TRUST-STATE-RBR-VERIFIED`)
+///
+/// A `Valid` result is `verified`/`verifiedHistorical` exactly where
+/// `weirkeeper::verification::backup_badge`/`restore_badge` would let it be
+/// green, which is `logweir_core::trust::Verdict::may_render_green` plus D3
+/// §12's absent-field rule:
+///
+/// | `result` | `trust` | state |
+/// |---|---|---|
+/// | `Valid` | absent (an older controller) | `verified` — the pre-existing rule |
+/// | `Valid` | `basis: Current` | `verified` |
+/// | `Valid` | `basis: Historical` | `verifiedHistorical` |
+/// | `Valid` | `basis: Unverified` | `notAttempted` — nothing has been compared |
+/// | `Valid` | `basis: RecordedBeforeRevocation`, `None`, absent, or a word this build does not know | `untrusted` |
+/// | `Untrusted` | anything | `untrusted` |
+/// | `NotAttempted`/unrecognised | `basis: Unverified` | `notAttempted` |
+/// | `NotAttempted`/unrecognised | key `Revoked`/`Expired`/`Unknown` | `untrusted` |
+///
+/// `RecordedBeforeRevocation` is the row this build used to get wrong: it
+/// published `verified`. D3 §7.4 says that verdict is "`Untrusted`, reason
+/// `RecordedBeforeRevocation` (rendered with the recorded instant, never
+/// green)", and every client that reads `trust.state` alone read a
+/// compromise-revoked key as trusted. The basis is still published verbatim,
+/// so the recorded-instant rendering keeps its case.
+///
+/// THE RESULT DECIDES FIRST, THE BASIS ONLY REFINES IT DOWNWARD. A result that
+/// is not `Valid` can never be read up to a verified state, and a `Valid` is
+/// verified only on the two bases the green rule admits: the allow-list form,
+/// so a basis a later build invents fails closed here as it does on the badge.
+fn trust_state(
+    verification: VerificationState,
+    recorded_result: Option<&str>,
     trust: Option<&TrustBasis>,
-    signed_at: Option<DateTime<Utc>>,
-) -> OperationTrust {
-    let basis = trust_basis(trust);
-    // THE RESULT DECIDES FIRST, THE BASIS ONLY REFINES IT. `TrustBasis`'s own
-    // header says so: `Unverified` is always written beside
-    // `result: NotAttempted` and never rescues a `Valid`. So a verdict that is
-    // not `Valid` can never be read up to `verified` by anything written here.
-    let state = match verification.state {
-        VerificationState::Valid => match basis.as_str() {
-            "Historical" => TrustState::VerifiedHistorical,
-            "RecordedBeforeRevocation" => TrustState::Verified,
-            "Unverified" => TrustState::NotAttempted,
-            _ => TrustState::Verified,
+) -> TrustState {
+    let basis = trust.and_then(|t| t.basis.as_deref());
+    match verification {
+        VerificationState::Valid => match (trust, basis) {
+            (None, _) => TrustState::Verified,
+            (Some(_), Some("Current")) => TrustState::Verified,
+            (Some(_), Some("Historical")) => TrustState::VerifiedHistorical,
+            (Some(_), Some("Unverified")) => TrustState::NotAttempted,
+            (Some(_), _) => TrustState::Untrusted,
         },
         VerificationState::Invalid => TrustState::Invalid,
         VerificationState::Pending => TrustState::Pending,
         VerificationState::NoEvidence => TrustState::NotApplicable,
-        // `Untrusted` is not a `result` the CRD writes: an untrusted signer is
-        // recorded as `NotAttempted` with a trust basis that says which key.
-        // The basis is what tells the two apart, and the key state is what
-        // says why.
+        // A REACHED REFUSAL ON THE KEY, whatever the key state beside it: a
+        // `KeyUsageMismatch` on an `Active` key and a `SignedOutsideValidity`
+        // on a `Retired` one are both `Untrusted` rows of D3 §7.4, and the key
+        // state is not what makes them so.
+        VerificationState::NotAttempted | VerificationState::Unknown
+            if recorded_result == Some(RESULT_UNTRUSTED) =>
+        {
+            TrustState::Untrusted
+        }
+        // `Unverified` IS NOT A VERDICT (`logweir_core::trust::TrustBasis`):
+        // the policy has not been applied to the document yet, so the honest
+        // word is "not attempted" whatever the key's state is today.
+        VerificationState::NotAttempted | VerificationState::Unknown
+            if basis == Some("Unverified") =>
+        {
+            TrustState::NotAttempted
+        }
+        // A `NotAttempted` beside a key the policy no longer accepts: the key
+        // state is what says why nothing here can be trusted.
         VerificationState::NotAttempted | VerificationState::Unknown => {
             match trust.and_then(|t| t.key_state.as_deref()) {
                 Some("Revoked" | "Expired" | "Unknown") => TrustState::Untrusted,
                 _ => TrustState::NotAttempted,
             }
         }
-    };
+    }
+}
+
+fn trust_of(
+    verification: &OperationVerification,
+    recorded_result: Option<&str>,
+    trust: Option<&TrustBasis>,
+    signed_at: Option<DateTime<Utc>>,
+) -> OperationTrust {
+    let basis = trust_basis(trust);
+    let state = trust_state(verification.state, recorded_result, trust);
     OperationTrust {
         state,
         basis,
@@ -1070,6 +1133,7 @@ pub fn backup_view(backup: &Backup, now: DateTime<Utc>) -> OperationView {
         .and_then(|e| e.verification.as_ref());
     let trust = trust_of(
         &operation.verification,
+        recorded.and_then(|v| v.result.as_deref()),
         recorded.and_then(|v| v.trust.as_ref()),
         recorded.and_then(|v| v.signed_at),
     );
@@ -1139,6 +1203,7 @@ pub fn restore_view(restore: &Restore, now: DateTime<Utc>) -> OperationView {
         .and_then(|e| e.verification.as_ref());
     let trust = trust_of(
         &operation.verification,
+        recorded.and_then(|v| v.result.as_deref()),
         recorded.and_then(|v| v.trust.as_ref()),
         recorded.and_then(|v| v.signed_at),
     );
