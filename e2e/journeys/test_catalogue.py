@@ -255,3 +255,25 @@ def test_its_twin_one_composed_row_failing_fails_its_journeys_and_the_run():
     got = core.summarise(suites.JOURNEYS, results, set(), {"selfTest": {"killed": True}, "hits": []})
     failed = {j["id"] for j in got["journeys"] if j["verdict"] == FAIL}
     assert failed == {"overlap", "cr-loss"} and got["ok"] is False
+
+
+def test_the_plat19_2_ui_harness_deletes_only_what_this_run_created_by_uid():
+    """plat20-1.review.md L-3: its cleanup checked the owner label only. Both
+    deletes now go through `ownedByThisRun` (label AND the UID recorded at
+    creation), the TrustPolicy's UID is recorded, and the guard's planted
+    twins (run offline here, and before every live run) must all be refused."""
+    import os
+    import subprocess
+
+    src = (ROOT / "scripts/plat19-2-ui-e2e.mjs").read_text()
+    cleanup = src[src.index("async function cleanup()"):src.index('if (process.env.UI_E2E_OWNERSHIP_SELFTEST')]
+    assert cleanup.count("check(ownedByThisRun(object, ") == 2
+    assert 'uid: kubeJson(["get", "trustpolicy", trustPolicy.metadata.name]).metadata.uid' in src
+    env = dict(os.environ, UI_E2E_OWNERSHIP_SELFTEST="1",
+               NODE_PATH=os.environ.get("NODE_PATH") or "/opt/homebrew/lib/node_modules")
+    done = subprocess.run(["node", str(ROOT / "scripts/plat19-2-ui-e2e.mjs")], env=env, capture_output=True,
+                          text=True, timeout=60)
+    assert done.returncode == 0, done.stderr[-2000:]
+    got = json.loads(done.stdout)
+    assert got["killed"] is True and got["accepted"] is True
+    assert len(got["refused"]) == 6 and all(got["refused"].values())
