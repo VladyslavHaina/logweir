@@ -126,6 +126,12 @@ pub async fn policy(
                     .confirmation
                     .as_ref()
                     .map(|k| k.key_id().to_string()),
+                ordinary_confirmation_available: bound.is_some_and(|p| {
+                    p.mode == logweir_core::approval_policy::ApprovalMode::Ordinary
+                }) && state.shared().is_some(),
+                ticket_required: bound.is_some_and(|p| {
+                    p.mode == logweir_core::approval_policy::ApprovalMode::Governed
+                }),
             },
         },
     ))

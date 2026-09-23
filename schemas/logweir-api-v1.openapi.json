@@ -5172,7 +5172,9 @@
           "mode",
           "name",
           "namespace",
-          "requireDistinctPrincipal"
+          "ordinaryConfirmationAvailable",
+          "requireDistinctPrincipal",
+          "ticketRequired"
         ],
         "properties": {
           "confirmationKeyId": {
@@ -5211,8 +5213,16 @@
             "description": "The namespace asked about.",
             "type": "string"
           },
+          "ordinaryConfirmationAvailable": {
+            "description": "Whether THIS console will sign an ordinary confirmation here: `true` only for an Ordinary binding served by a `shared` console. D0: the `localAdmin` mode \"does not expose Ordinary\", so there a submission in an Ordinary namespace is refused `policy_mismatch` and nothing is created.",
+            "type": "boolean"
+          },
           "requireDistinctPrincipal": {
             "description": "Whether an approver must be a different principal from the requester.",
+            "type": "boolean"
+          },
+          "ticketRequired": {
+            "description": "Whether a submission here must carry a change ticket (an explicit Governed binding; D0).",
             "type": "boolean"
           }
         }
@@ -7533,6 +7543,11 @@
           "target": {
             "description": "Where the restore writes.",
             "$ref": "#/components/schemas/RestoreTargetRequest"
+          },
+          "ticket": {
+            "description": "PLAT-19.2: the change ticket the console signs into the authorization document. REQUIRED in a namespace bound to a Governed policy (D0), optional under Ordinary, refused in an unbound namespace (which signs nothing; `logweir drill approve --ticket` carries it there). At most 128 printable characters. Absent keeps the idempotency hash unchanged.",
+            "type": "string",
+            "nullable": true
           },
           "topicMapping": {
             "description": "The exact source→target mapping the caller previewed, checked against `target.topicNaming.prefix` and refused row by row.\n\nABSENT IS EXACTLY THE BEHAVIOUR THIS ROUTE HAD BEFORE THE FIELD EXISTED, and `skip_serializing_if` keeps an absent one out of the idempotency request hash, so a client that predates it replays onto the same object it always did.",

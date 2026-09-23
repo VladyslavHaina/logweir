@@ -72,12 +72,37 @@ fn approvals_posted(fake: &FakeKube) -> Vec<Value> {
         .collect()
 }
 
+/// The ticket every governed request here carries (D0: required in Governed).
+const TICKET: &str = "CHG-4711";
+
+fn body_with(ticket: Option<&str>) -> Value {
+    let mut body = support::restore_body(&support::golden_plan());
+    if let Some(ticket) = ticket {
+        body["ticket"] = json!(ticket);
+    }
+    body
+}
+
+/// A localAdmin create with no ticket (unbound namespaces, and the refusals).
 async fn create(app: &TestApp, ns: &str, key: &str) -> support::TestResponse {
-    let body = support::restore_body(&support::golden_plan());
+    create_with(app, ns, key, None).await
+}
+
+/// A localAdmin create in a GOVERNED namespace, which requires a ticket.
+async fn gcreate(app: &TestApp, ns: &str, key: &str) -> support::TestResponse {
+    create_with(app, ns, key, Some(TICKET)).await
+}
+
+async fn create_with(
+    app: &TestApp,
+    ns: &str,
+    key: &str,
+    ticket: Option<&str>,
+) -> support::TestResponse {
     app.post(
         &format!("/api/v1/namespaces/{ns}/restores"),
         Some(key),
-        &body.to_string(),
+        &body_with(ticket).to_string(),
     )
     .await
 }
@@ -131,9 +156,8 @@ async fn an_unbound_namespace_signs_nothing_and_awaits_a_governed_approval() {
 /// Restore's UID, plan hash and the policy digest.
 #[tokio::test]
 async fn an_ordinary_namespace_confirms_and_routes_to_execution() {
-    let console = console("team-ordinary");
-    let app = app(&console);
-    let created = create(&app, NS_A, "ordinary-restore-01").await;
+    let (app, console) = ordinary_app();
+    let created = ocreate(&app, "ordinary-restore-01").await;
     assert_eq!(
         created.status,
         201,
@@ -145,11 +169,12 @@ async fn an_ordinary_namespace_confirms_and_routes_to_execution() {
     assert_eq!(authorization["state"], "confirmed");
     assert_eq!(authorization["mode"], "ordinary");
     assert_eq!(authorization["legacy"], false);
-    assert_eq!(authorization["requester"], LOCAL_ADMIN_ACTOR);
+    assert_eq!(authorization["requester"], alice());
     assert_eq!(authorization["approvalName"], "approval-1234abcd");
     assert!(authorization.get("confirmationName").is_none());
 
     let stored = app
+        .app
         .fake
         .object("approvals", NS_A, "approval-1234abcd")
         .expect("the referenced Approval exists");
@@ -167,13 +192,17 @@ async fn an_ordinary_namespace_confirms_and_routes_to_execution() {
     let policy = console.settings.policies.resolve(NS_A);
     let policy = policy.bound().expect("bound");
     assert_eq!(doc.policy.digest, policy.digest());
-    assert_eq!(doc.requester.principal_id(), LOCAL_ADMIN_ACTOR);
+    assert_eq!(
+        doc.requester.principal_id(),
+        alice(),
+        "the confirmation attests the SIGNED-IN person, never the shared administrator"
+    );
     assert_eq!(
         (doc.expires_at - doc.issued_at).num_seconds(),
         policy.max_age_seconds
     );
     assert_eq!(stored["spec"]["subjectRef"]["name"], restore["name"]);
-    app.fake.assert_strict();
+    app.app.fake.assert_strict();
 }
 
 /// **Recovery after a lost response** (D0: "Replays complete an interrupted
@@ -182,9 +211,8 @@ async fn an_ordinary_namespace_confirms_and_routes_to_execution() {
 /// second replay signs nothing new.
 #[tokio::test]
 async fn a_replay_completes_an_interrupted_confirmation_and_signs_once() {
-    let console = console("team-ordinary");
-    let app = app(&console);
-    app.fake.inject(support::Fault {
+    let (app, _console) = ordinary_app();
+    app.app.fake.inject(support::Fault {
         method: "POST",
         path_contains: "/approvals".into(),
         status: 500,
@@ -192,12 +220,12 @@ async fn a_replay_completes_an_interrupted_confirmation_and_signs_once() {
         delay: None,
         remaining: 1,
     });
-    let first = create(&app, NS_A, "ordinary-restore-02").await;
+    let first = ocreate(&app, "ordinary-restore-02").await;
     assert_ne!(
         first.status, 201,
         "the confirmation failed, so the create did"
     );
-    let replay = create(&app, NS_A, "ordinary-restore-02").await;
+    let replay = ocreate(&app, "ordinary-restore-02").await;
     assert_eq!(
         replay.status,
         200,
@@ -206,17 +234,14 @@ async fn a_replay_completes_an_interrupted_confirmation_and_signs_once() {
     );
     assert_eq!(replay.json()["replayed"], true);
     assert_eq!(replay.json()["authorization"]["state"], "confirmed");
-    let again = create(&app, NS_A, "ordinary-restore-02").await;
+    let again = ocreate(&app, "ordinary-restore-02").await;
     assert_eq!(again.status, 200);
     assert_eq!(
-        approvals_posted(&app.fake).len(),
+        approvals_posted(&app.app.fake).len(),
         2,
         "one failed attempt and one success; the second replay reads, it does not sign again"
     );
-    let listed = app
-        .get(&format!("/api/v1/namespaces/{NS_A}/restores"))
-        .await
-        .json();
+    let listed = oget(&app, &format!("/api/v1/namespaces/{NS_A}/restores")).await;
     assert_eq!(
         listed["items"].as_array().map(Vec::len),
         Some(1),
@@ -228,9 +253,8 @@ async fn a_replay_completes_an_interrupted_confirmation_and_signs_once() {
 /// confirmation.
 #[tokio::test]
 async fn a_foreign_approval_under_the_referenced_name_is_never_adopted() {
-    let console = console("team-ordinary");
-    let app = app(&console);
-    app.fake.seed(
+    let (app, _console) = ordinary_app();
+    app.app.fake.seed(
         "approvals",
         NS_A,
         json!({
@@ -240,7 +264,7 @@ async fn a_foreign_approval_under_the_referenced_name_is_never_adopted() {
                      "planHash": "sha256:x", "approvalBytes": "{}", "sidecarBytes": "{}"}
         }),
     );
-    let created = create(&app, NS_A, "ordinary-restore-03").await;
+    let created = ocreate(&app, "ordinary-restore-03").await;
     assert_eq!(
         created.status,
         409,
@@ -248,7 +272,7 @@ async fn a_foreign_approval_under_the_referenced_name_is_never_adopted() {
         String::from_utf8_lossy(&created.body)
     );
     assert_eq!(created.code(), "state_conflict");
-    assert!(approvals_posted(&app.fake).is_empty());
+    assert!(approvals_posted(&app.app.fake).is_empty());
 }
 
 /// **A confirmation for a PREVIOUS subject of the same name is not this
@@ -261,9 +285,8 @@ async fn a_foreign_approval_under_the_referenced_name_is_never_adopted() {
 /// current UID, which a replay adopts.
 #[tokio::test]
 async fn a_confirmation_naming_another_uid_is_never_adopted() {
-    let console = console("team-ordinary");
-    let first = app(&console);
-    let created = create(&first, NS_A, "ordinary-restore-uid").await;
+    let first = ordinary_app().0;
+    let created = ocreate(&first, "ordinary-restore-uid").await;
     assert_eq!(
         created.status,
         201,
@@ -274,7 +297,7 @@ async fn a_confirmation_naming_another_uid_is_never_adopted() {
         .as_str()
         .expect("a uid")
         .to_string();
-    let stored = approvals_posted(&first.fake)
+    let stored = approvals_posted(&first.app.fake)
         .pop()
         .expect("the console stored its confirmation");
     let bytes = stored["spec"]["approvalBytes"]
@@ -292,12 +315,12 @@ async fn a_confirmation_naming_another_uid_is_never_adopted() {
     let seeded = |uid: &str| {
         let mut object = stored.clone();
         object["spec"]["approvalBytes"] = Value::String(bytes.replace(&restore_uid, uid));
-        let target = app(&console);
-        target.fake.seed("approvals", NS_A, object);
+        let target = ordinary_app().0;
+        target.app.fake.seed("approvals", NS_A, object);
         target
     };
     let foreign = seeded("00000000-0000-4000-8000-0000000000aa");
-    let refused = create(&foreign, NS_A, "ordinary-restore-uid").await;
+    let refused = ocreate(&foreign, "ordinary-restore-uid").await;
     assert_eq!(
         refused.status,
         409,
@@ -306,13 +329,10 @@ async fn a_confirmation_naming_another_uid_is_never_adopted() {
     );
     assert_eq!(refused.code(), "state_conflict");
     assert!(
-        approvals_posted(&foreign.fake).is_empty(),
+        approvals_posted(&foreign.app.fake).is_empty(),
         "nothing is signed over the foreign object"
     );
-    let listed = foreign
-        .get(&format!("/api/v1/namespaces/{NS_A}/restores"))
-        .await
-        .json();
+    let listed = oget(&foreign, &format!("/api/v1/namespaces/{NS_A}/restores")).await;
     let subject_uid = listed["items"][0]["uid"]
         .as_str()
         .expect("the Restore was created")
@@ -321,7 +341,7 @@ async fn a_confirmation_naming_another_uid_is_never_adopted() {
     // THE CONTROL: the identical sequence, with the document naming THIS
     // subject's UID, is adopted as this Restore's confirmation.
     let matching = seeded(&subject_uid);
-    let adopted = create(&matching, NS_A, "ordinary-restore-uid").await;
+    let adopted = ocreate(&matching, "ordinary-restore-uid").await;
     assert_eq!(
         adopted.status,
         201,
@@ -334,7 +354,7 @@ async fn a_confirmation_naming_another_uid_is_never_adopted() {
     );
     assert_eq!(adopted.json()["authorization"]["state"], "confirmed");
     assert!(
-        approvals_posted(&matching.fake).is_empty(),
+        approvals_posted(&matching.app.fake).is_empty(),
         "the matching confirmation is adopted, not signed again"
     );
 }
@@ -345,7 +365,7 @@ async fn a_confirmation_naming_another_uid_is_never_adopted() {
 async fn a_governed_namespace_confirms_into_a_separate_object_and_awaits_approval() {
     let console = console("prod-governed");
     let app = app(&console);
-    let created = create(&app, NS_A, "governed-restore-01").await;
+    let created = gcreate(&app, NS_A, "governed-restore-01").await;
     assert_eq!(
         created.status,
         201,
@@ -386,7 +406,7 @@ async fn a_governed_namespace_confirms_into_a_separate_object_and_awaits_approva
 async fn a_governed_approval_name_must_leave_room_for_its_confirmation() {
     let console = console("prod-governed");
     let app = app(&console);
-    let mut body = support::restore_body(&support::golden_plan());
+    let mut body = body_with(Some(TICKET));
     body["approvalRef"]["name"] = json!("a".repeat(250));
     let created = app
         .post(
@@ -401,6 +421,154 @@ async fn a_governed_approval_name_must_leave_room_for_its_confirmation() {
         "{}",
         String::from_utf8_lossy(&created.body)
     );
+    assert!(
+        String::from_utf8_lossy(&created.body).contains("too_long"),
+        "refused for the name, not for anything else"
+    );
+}
+
+/// **localAdmin never signs an ordinary confirmation** (review H1; D0: that
+/// mode "does not expose Ordinary"). The submission is refused
+/// `policy_mismatch` BEFORE anything exists: no Restore, no Approval. The
+/// policy read says so. The controls: the same namespace in a SHARED console
+/// confirms (`an_ordinary_namespace_confirms_and_routes_to_execution`), and a
+/// Governed namespace in localAdmin still accepts the request, because there
+/// the console only attests and an independent approver key decides.
+#[tokio::test]
+async fn a_local_admin_console_never_signs_an_ordinary_confirmation() {
+    let console = console("team-ordinary");
+    let app = app(&console);
+    let refused = create(&app, NS_A, "local-ordinary-01").await;
+    assert_eq!(
+        refused.status,
+        409,
+        "{}",
+        String::from_utf8_lossy(&refused.body)
+    );
+    assert_eq!(refused.code(), "policy_mismatch");
+    assert!(String::from_utf8_lossy(&refused.body).contains("localAdmin"));
+    assert!(
+        app.fake.requests().iter().all(|r| r.method != "POST"),
+        "nothing was created: no Restore, no Approval"
+    );
+    let policy = app
+        .get(&format!("/api/v1/namespaces/{NS_A}/approval-policy"))
+        .await
+        .json();
+    assert_eq!(policy["item"]["ordinaryConfirmationAvailable"], false);
+
+    let (shared, _) = ordinary_app();
+    assert_eq!(
+        oget(
+            &shared,
+            &format!("/api/v1/namespaces/{NS_A}/approval-policy")
+        )
+        .await["item"]["ordinaryConfirmationAvailable"],
+        true
+    );
+
+    let governed = console_governed_app();
+    let accepted = gcreate(&governed, NS_A, "local-governed-01").await;
+    assert_eq!(
+        accepted.status,
+        201,
+        "{}",
+        String::from_utf8_lossy(&accepted.body)
+    );
+    assert_eq!(
+        accepted.json()["authorization"]["state"],
+        "awaitingApproval"
+    );
+}
+
+/// **The change ticket** (D0: "required in Governed, optional in Ordinary").
+/// Refused before anything exists when it is missing or malformed under
+/// Governed, and when sent to an unbound namespace (which signs nothing); a
+/// Governed request that carries one signs it into the document.
+#[tokio::test]
+async fn a_governed_request_carries_a_ticket_into_the_signed_document() {
+    let governed = console_governed_app();
+    for (key, ticket, code) in [
+        ("ticket-01", None, "required"),
+        ("ticket-02", Some(""), "invalid"),
+        ("ticket-03", Some(" CHG-1"), "invalid"),
+    ] {
+        let refused = create_with(&governed, NS_A, key, ticket).await;
+        assert_eq!(
+            refused.status,
+            422,
+            "{}",
+            String::from_utf8_lossy(&refused.body)
+        );
+        let text = String::from_utf8_lossy(&refused.body).to_string();
+        assert!(text.contains("\"ticket\"") && text.contains(code), "{text}");
+    }
+    assert!(
+        governed.fake.requests().iter().all(|r| r.method != "POST"),
+        "nothing was created for a refused ticket"
+    );
+    let accepted = gcreate(&governed, NS_A, "ticket-04").await;
+    assert_eq!(accepted.status, 201);
+    let confirmation = governed
+        .fake
+        .object("approvals", NS_A, "approval-1234abcd-confirmation")
+        .expect("confirmation");
+    let doc = RestoreAuthorization::from_bytes(
+        confirmation["spec"]["approvalBytes"]
+            .as_str()
+            .expect("bytes")
+            .as_bytes(),
+    )
+    .expect("v2");
+    assert_eq!(doc.ticket.as_deref(), Some(TICKET));
+
+    let unbound = console_governed_app();
+    let refused = create_with(&unbound, NS_B, "ticket-05", Some(TICKET)).await;
+    assert_eq!(refused.status, 422);
+    assert!(String::from_utf8_lossy(&refused.body).contains("not_accepted"));
+
+    // Optional under Ordinary, and signed when given.
+    let (ordinary, _) = ordinary_app();
+    let with = shared_create_with(&ordinary, "alice", "ops", "ticket-06", Some(TICKET)).await;
+    assert_eq!(with.status, 201, "{}", String::from_utf8_lossy(&with.body));
+    let stored = ordinary
+        .app
+        .fake
+        .object("approvals", NS_A, "approval-1234abcd")
+        .expect("the ordinary confirmation");
+    let doc = RestoreAuthorization::from_bytes(
+        stored["spec"]["approvalBytes"]
+            .as_str()
+            .expect("bytes")
+            .as_bytes(),
+    )
+    .expect("v2");
+    assert_eq!(doc.ticket.as_deref(), Some(TICKET));
+}
+
+/// An approval name ending in `-confirmation` would collide with another
+/// governed Restore's confirmation object (review L4): refused under
+/// Governed, before anything exists.
+#[tokio::test]
+async fn a_governed_approval_name_may_not_end_in_the_confirmation_suffix() {
+    let governed = console_governed_app();
+    let mut body = body_with(Some(TICKET));
+    body["approvalRef"]["name"] = json!("approval-1234abcd-confirmation");
+    let refused = governed
+        .post(
+            &format!("/api/v1/namespaces/{NS_A}/restores"),
+            Some("suffix-01"),
+            &body.to_string(),
+        )
+        .await;
+    assert_eq!(
+        refused.status,
+        422,
+        "{}",
+        String::from_utf8_lossy(&refused.body)
+    );
+    assert!(String::from_utf8_lossy(&refused.body).contains("reserved_suffix"));
+    assert!(governed.fake.requests().iter().all(|r| r.method != "POST"));
 }
 
 #[tokio::test]
@@ -485,7 +653,7 @@ fn restore_name(created: &support::TestResponse) -> String {
 async fn the_requester_cannot_approve_their_own_request() {
     let console = console("prod-governed");
     let app = app(&console);
-    let created = create(&app, NS_A, "governed-restore-02").await;
+    let created = gcreate(&app, NS_A, "governed-restore-02").await;
     let name = restore_name(&created);
     let sidecar = countersigned(&app, NS_A, &SigningKey::generate_ed25519());
     let refused = app
@@ -515,17 +683,17 @@ async fn the_requester_cannot_approve_their_own_request() {
 /// A submission outside an explicit Governed binding has nothing to approve.
 #[tokio::test]
 async fn a_submission_outside_a_governed_binding_is_policy_mismatch() {
-    let console = console("team-ordinary");
-    let app = app(&console);
-    let created = create(&app, NS_A, "ordinary-restore-04").await;
+    let (app, _console) = ordinary_app();
+    let created = ocreate(&app, "ordinary-restore-04").await;
     let name = restore_name(&created);
-    let refused = app
-        .post(
-            &format!("/api/v1/namespaces/{NS_A}/restores/{name}/approval"),
-            None,
-            &json!({"sidecarBytes": "{\"payloadType\":\"x\",\"signatures\":[]}"}).to_string(),
-        )
-        .await;
+    let refused = shared_submit(
+        &app,
+        "bob",
+        "approvers",
+        &name,
+        "{\"payloadType\":\"x\",\"signatures\":[]}",
+    )
+    .await;
     assert_eq!(
         refused.status,
         409,
@@ -700,7 +868,7 @@ async fn a_recorded_approval_must_be_this_restores_v1_document() {
 
     // Under Governed, a document is refused: the confirmation's bytes are used.
     let governed = console_governed_app();
-    let created = create(&governed, NS_A, "governed-record-03").await;
+    let created = gcreate(&governed, NS_A, "governed-record-03").await;
     let name = restore_name(&created);
     let (document, sidecar) = v1_files(&hash);
     let refused = governed
@@ -716,6 +884,53 @@ async fn a_recorded_approval_must_be_this_restores_v1_document() {
         "{}",
         String::from_utf8_lossy(&refused.body)
     );
+}
+
+/// **No private key is ever stored** (review L3): the approval route refuses
+/// private-key text in either field, server-side, before anything is read or
+/// written, and never echoes it. The control is the same route with the real
+/// files (`an_unbound_namespace_records_todays_approval_files_exactly`).
+#[tokio::test]
+async fn the_approval_route_refuses_private_key_text() {
+    let console = console("team-ordinary");
+    let app = app(&console);
+    let created = create(&app, NS_B, "unbound-key-01").await;
+    let name = restore_name(&created);
+    let hash = created.json()["item"]["planHash"]
+        .as_str()
+        .expect("hash")
+        .to_string();
+    let (document, sidecar) = v1_files(&hash);
+    let pem = [
+        "-----BEGIN ",
+        "PRIVATE",
+        " KEY-----\nMC4CAQAw\n-----END ",
+        "PRIVATE",
+        " KEY-----\n",
+    ]
+    .concat();
+    for body in [
+        json!({"approvalBytes": pem, "sidecarBytes": sidecar}),
+        json!({"approvalBytes": document, "sidecarBytes": pem}),
+    ] {
+        let refused = app
+            .post(
+                &format!("/api/v1/namespaces/{NS_B}/restores/{name}/approval"),
+                None,
+                &body.to_string(),
+            )
+            .await;
+        assert_eq!(
+            refused.status,
+            422,
+            "{}",
+            String::from_utf8_lossy(&refused.body)
+        );
+        let text = String::from_utf8_lossy(&refused.body).to_string();
+        assert!(text.contains("private_key"), "{text}");
+        assert!(!text.contains("MC4CAQAw"), "the key text is never echoed");
+    }
+    assert!(approvals_posted(&app.fake).is_empty(), "nothing was stored");
 }
 
 fn console_governed_app() -> TestApp {
@@ -750,6 +965,16 @@ async fn shared_create(
     group: &str,
     key: &str,
 ) -> support::TestResponse {
+    shared_create_with(app, subject, group, key, Some(TICKET)).await
+}
+
+async fn shared_create_with(
+    app: &SharedApp,
+    subject: &str,
+    group: &str,
+    key: &str,
+    ticket: Option<&str>,
+) -> support::TestResponse {
     let cookie = app.session_cookie(subject, &[group]);
     let csrf = app.csrf_for(subject);
     app.post(
@@ -757,9 +982,48 @@ async fn shared_create(
         &cookie,
         Some(&csrf),
         Some(key),
-        &support::restore_body(&support::golden_plan()).to_string(),
+        &body_with(ticket).to_string(),
     )
     .await
+}
+
+/// `team-a` bound to the ORDINARY policy, served by a SHARED console (review
+/// H1: D0's `localAdmin` mode does not expose Ordinary). alice operates, bob
+/// approves.
+fn ordinary_app() -> (SharedApp, Console) {
+    let console = console("team-ordinary");
+    let app = SharedApp::new(
+        FakeKube::new(),
+        support::idp::MockIdp::new(ISSUER, &[]),
+        SharedOptions {
+            bindings: support::RoleBindings {
+                revision: "p192-o".into(),
+                bindings: vec![
+                    support::binding(Role::Operator, NS_A, &["ops"]),
+                    support::binding(Role::Approver, NS_A, &["approvers"]),
+                ],
+            },
+            approval: Arc::clone(&console.settings),
+            ..SharedOptions::default()
+        },
+    );
+    (app, console)
+}
+
+/// alice's create in the ordinary shared console: no ticket (optional there).
+async fn ocreate(app: &SharedApp, key: &str) -> support::TestResponse {
+    shared_create_with(app, "alice", "ops", key, None).await
+}
+
+/// alice's read in the ordinary shared console.
+async fn oget(app: &SharedApp, path: &str) -> Value {
+    let cookie = app.session_cookie("alice", &["ops"]);
+    app.get(path, &cookie).await.json()
+}
+
+/// The principal the shared console attests for alice.
+fn alice() -> String {
+    format!("{ISSUER}#alice")
 }
 
 async fn shared_submit(

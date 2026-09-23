@@ -476,6 +476,7 @@ pub async fn create(
     // PLAT-19.2: a governed request's confirmation lives beside the Approval
     // under `<approvalRef>-confirmation`, and that name must still be a name.
     let effective = state.approval().policies.resolve(&ns);
+    refuse_before_create(&state, &ns, &effective, &request)?;
     if effective.mode() == ApprovalMode::Governed
         && !effective.is_legacy()
         && request.approval_ref.name.len() > approval::MAX_GOVERNED_APPROVAL_NAME
@@ -516,6 +517,7 @@ pub async fn create(
         &created.object,
         &request.approval_ref.name,
         &effective,
+        request.ticket.as_deref(),
     )
     .await?;
     Ok(json(
@@ -529,6 +531,89 @@ pub async fn create(
     ))
 }
 
+/// PLAT-19.2's refusals that must come BEFORE the Restore exists, so a refused
+/// submission leaves nothing behind.
+///
+/// * **No Ordinary in `localAdmin`** (review H1; D0: that mode "does not
+///   expose Ordinary"). Its only identity is the shared
+///   `urn:logweir:local-admin#admin`, whose authority is the Kubernetes
+///   permission to port-forward, so a one-click confirmation would attest
+///   nobody. Governed stays: the console only attests there, and an
+///   independent approver key still decides.
+/// * **The ticket** (D0: "required in Governed, optional in Ordinary"), and
+///   none in an unbound namespace, which signs nothing.
+/// * **No `approvalRef.name` ending in `-confirmation` under Governed**
+///   (review L4): it would collide with another Restore's confirmation
+///   object.
+///
+/// # Errors
+///
+/// `policy_mismatch` or `validation_failed`.
+fn refuse_before_create(
+    state: &AppState,
+    ns: &str,
+    effective: &EffectivePolicy,
+    request: &CreateRestoreRequest,
+) -> Result<(), ApiError> {
+    let Some(policy) = effective.bound() else {
+        if request.ticket.is_some() {
+            return Err(ApiError::validation(vec![FieldError::new(
+                "ticket",
+                "not_accepted",
+                format!(
+                    "namespace {ns} is bound to no approval policy ({}), so the console signs \
+                     nothing here; the approver records the ticket with `logweir drill approve \
+                     --ticket`",
+                    logweir_core::approval_policy::LEGACY_GOVERNED_POLICY_NAME
+                ),
+            )]));
+        }
+        return Ok(());
+    };
+    if policy.mode == ApprovalMode::Ordinary && state.shared().is_none() {
+        return Err(ApiError::new(
+            ProblemCode::PolicyMismatch,
+            format!(
+                "Namespace {ns} is bound to Ordinary approval policy {}, and this console runs in \
+                 localAdmin mode, which does not expose ordinary confirmation (D0): its one \
+                 identity is the port-forward administrator, not a person the confirmation \
+                 could attest. Submit through the shared console. Nothing was created.",
+                policy.name
+            ),
+        ));
+    }
+    if let Err(reason) =
+        logweir_core::approval_policy::check_ticket(policy.mode, request.ticket.as_deref())
+    {
+        return Err(ApiError::validation(vec![FieldError::new(
+            "ticket",
+            if request.ticket.is_none() {
+                "required"
+            } else {
+                "invalid"
+            },
+            reason,
+        )]));
+    }
+    if policy.mode == ApprovalMode::Governed
+        && request
+            .approval_ref
+            .name
+            .ends_with(approval::CONFIRMATION_SUFFIX)
+    {
+        return Err(ApiError::validation(vec![FieldError::new(
+            "approvalRef.name",
+            "reserved_suffix",
+            format!(
+                "in a namespace bound to a Governed policy an Approval name may not end in `{}`: \
+                 that is where another Restore's console confirmation lives",
+                approval::CONFIRMATION_SUFFIX
+            ),
+        )]));
+    }
+    Ok(())
+}
+
 /// The v2 document an existing object carries, when it is THIS Restore's
 /// under THIS policy — the replay test for a create sequence that was
 /// interrupted after the console signed.
@@ -536,6 +621,7 @@ fn existing_is_ours(
     existing: &Approval,
     restore: &Restore,
     policy: &logweir_core::approval_policy::ApprovalPolicy,
+    ticket: Option<Option<&str>>,
 ) -> Option<RestoreAuthorization> {
     let doc = RestoreAuthorization::from_bytes(existing.spec.approval_bytes.as_bytes()).ok()?;
     let ours = existing.spec.subject_ref.kind == SubjectKind::Restore
@@ -545,7 +631,10 @@ fn existing_is_ours(
         && doc.plan_hash == logweir_core::ids::sha256_prefixed(restore.spec.plan_bytes.as_bytes())
         && doc.policy.name == policy.name
         && doc.policy.digest == policy.digest()
-        && doc.authorization_mode == policy.mode;
+        && doc.authorization_mode == policy.mode
+        // A replay must also carry the ticket it signed; `None` is "any"
+        // (the approval route, which reads the confirmation as it is).
+        && ticket.is_none_or(|t| doc.ticket.as_deref() == t);
     ours.then_some(doc)
 }
 
@@ -578,6 +667,7 @@ async fn authorize_submission(
     restore: &Restore,
     approval_name: &str,
     effective: &EffectivePolicy,
+    ticket: Option<&str>,
 ) -> Result<RestoreRoutingView, ApiError> {
     actor.audit.note("approvalPolicy", effective.name());
     actor.audit.note("approvalMode", effective.mode().as_str());
@@ -636,7 +726,8 @@ async fn authorize_submission(
     };
     match state.kube().get::<Approval>(namespace, &target).await {
         Ok(existing) => {
-            let doc = existing_is_ours(&existing, restore, policy).ok_or_else(conflict)?;
+            let doc =
+                existing_is_ours(&existing, restore, policy, Some(ticket)).ok_or_else(conflict)?;
             actor.audit.note("requester", &doc.requester.principal_id());
             return Ok(view(&doc));
         }
@@ -655,7 +746,7 @@ async fn authorize_submission(
             subject: actor.subject.clone(),
         },
         state.now(),
-        None,
+        ticket.map(str::to_string),
     );
     let bytes = doc.to_bytes();
     let sidecar = key
@@ -719,7 +810,8 @@ async fn authorize_submission(
                 .get::<Approval>(namespace, &target)
                 .await
                 .map_err(KubeFailure::into_api_error)?;
-            let doc = existing_is_ours(&existing, restore, policy).ok_or_else(conflict)?;
+            let doc =
+                existing_is_ours(&existing, restore, policy, Some(ticket)).ok_or_else(conflict)?;
             Ok(view(&doc))
         }
         Err(other) => Err(other.into_api_error()),
@@ -763,6 +855,28 @@ pub async fn submit_approval(
     authorize(&state, &actor, &ns, Action::SubmitApproval)?;
     crate::http::parse_query(uri.query(), &[])?;
     let request: SubmitApprovalRequest = read_json(body, MAX_JSON_BODY).await?;
+    // NO PRIVATE KEY IS EVER STORED (review L3; D0). The page refuses it
+    // first; this is the same rule where the bytes are written. The text is
+    // never echoed.
+    let keyed: Vec<FieldError> = [
+        ("sidecarBytes", Some(request.sidecar_bytes.as_str())),
+        ("approvalBytes", request.approval_bytes.as_deref()),
+    ]
+    .into_iter()
+    .filter(|(_, text)| text.is_some_and(approval::carries_private_key))
+    .map(|(field, _)| {
+        FieldError::new(
+            field,
+            "private_key",
+            "this carries private-key text; paste the signed files `logweir drill` wrote, never \
+             a key. Nothing was stored.",
+        )
+    })
+    .collect();
+    if !keyed.is_empty() {
+        actor.audit.set_failure("private_key_refused");
+        return Err(ApiError::validation(keyed));
+    }
     if request.sidecar_bytes.len() > MAX_SIDECAR_BYTES {
         return Err(ApiError::validation(vec![FieldError::new(
             "sidecarBytes",
@@ -834,7 +948,7 @@ pub async fn submit_approval(
         }
         Err(other) => return Err(other.into_api_error()),
     };
-    let Some(doc) = existing_is_ours(&confirmation, &restore, policy) else {
+    let Some(doc) = existing_is_ours(&confirmation, &restore, policy, None) else {
         return Err(ApiError::new(
             ProblemCode::PolicyMismatch,
             format!(

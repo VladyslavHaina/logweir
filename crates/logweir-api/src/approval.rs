@@ -204,6 +204,31 @@ impl ApprovalSettings {
     }
 }
 
+/// Whether `text` spells the words that open a private-key PEM — the console
+/// page's own rule (`ui/lifecycle.js` `KEY_MARKER`: "private" then optional
+/// whitespace, `_` or `-`, then "key", case-insensitive), applied again on the
+/// server (review L3). D0 forbids a private key in any custom resource, and the
+/// approval route stores what it is sent verbatim.
+#[must_use]
+pub fn carries_private_key(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let mut from = 0;
+    while let Some(at) = lower[from..].find("private") {
+        let mut i = from + at + "private".len();
+        while i < bytes.len()
+            && (bytes[i].is_ascii_whitespace() || bytes[i] == b'_' || bytes[i] == b'-')
+        {
+            i += 1;
+        }
+        if lower[i..].starts_with("key") {
+            return true;
+        }
+        from = from + at + 1;
+    }
+    false
+}
+
 /// Build the authorization document v2 for one created Restore.
 #[must_use]
 #[allow(clippy::too_many_arguments)]
@@ -365,5 +390,31 @@ mod tests {
         assert!(merge_countersignature(&confirmation, &confirmation).is_err());
         let other_type = sign_detached(&approver, "application/other", doc).expect("sign");
         assert!(merge_countersignature(&confirmation, &other_type).is_err());
+    }
+}
+
+#[cfg(test)]
+mod key_material_tests {
+    use super::carries_private_key;
+
+    #[test]
+    fn the_server_refuses_what_the_page_refuses() {
+        for text in [
+            "-----BEGIN PRIVATE KEY-----",
+            "-----BEGIN EC PRIVATE KEY-----",
+            "private_key",
+            "Private-Key",
+            "a private   key",
+        ] {
+            assert!(carries_private_key(text), "{text}");
+        }
+        for text in [
+            "{\"payloadType\":\"x\",\"signatures\":[]}",
+            "-----BEGIN PUBLIC KEY-----",
+            "privately keyed",
+            "",
+        ] {
+            assert!(!carries_private_key(text), "{text}");
+        }
     }
 }

@@ -1122,6 +1122,13 @@ pub struct CreateRestoreRequest {
     /// same object it always did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub topic_mapping: Option<Vec<TopicMappingRow>>,
+    /// PLAT-19.2: the change ticket the console signs into the authorization
+    /// document. REQUIRED in a namespace bound to a Governed policy (D0),
+    /// optional under Ordinary, refused in an unbound namespace (which signs
+    /// nothing; `logweir drill approve --ticket` carries it there). At most
+    /// 128 printable characters. Absent keeps the idempotency hash unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ticket: Option<String>,
 }
 
 /// A restore target, as stored.
@@ -3413,6 +3420,15 @@ pub struct ApprovalPolicyView {
     /// administrator must put on this namespace's `TrustPolicy`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confirmation_key_id: Option<String>,
+    /// Whether THIS console will sign an ordinary confirmation here: `true`
+    /// only for an Ordinary binding served by a `shared` console. D0: the
+    /// `localAdmin` mode "does not expose Ordinary", so there a submission in
+    /// an Ordinary namespace is refused `policy_mismatch` and nothing is
+    /// created.
+    pub ordinary_confirmation_available: bool,
+    /// Whether a submission here must carry a change ticket (an explicit
+    /// Governed binding; D0).
+    pub ticket_required: bool,
 }
 
 /// `GET .../approval-policy`.
