@@ -6610,8 +6610,39 @@ def unread_point_is_unknown(view: dict[str, Any], backup: str) -> dict[str, bool
     }
 
 
+#: The product's own words for a point that counts under a schedule that cannot
+#: fire (`controllers/protection_policy.rs`, `WithinObjective` while AtRisk).
+SUSPENDED_SCHEDULE_WORDS = "a suspended or not-ready schedule"
+
+
+def counts_as_protected(view: dict[str, Any], *, suspended_schedule: bool) -> dict[str, bool]:
+    """"The point counts", said exactly as the fixture allows.
+
+    With a running schedule that is `Healthy`/`Protected=True`. The
+    refused-point fixture's schedules are SUSPENDED AT BIRTH (so no stray run
+    lands in its archive), and D3 §3.2 puts such a policy at `AtRisk` however
+    good its point is: measured at lab-refresh-9, `protectedReason:
+    WithinObjective`, "…protection is at risk: …a suspended or not-ready
+    schedule…". For that fixture the control requires exactly that shape — the
+    point inside the objective, at risk for the schedule alone — and a policy
+    that did not count the point (`Unprotected`, `NoAvailablePoint`,
+    `PointFactsUnread`) fails it just the same.
+    """
+    if not suspended_schedule:
+        return {"health is Healthy — the point counts": view["health"] == "Healthy",
+                "Protected=True": view["protectedStatus"] == "True"}
+    return {
+        "the point counts: health AtRisk for the suspended schedule alone (0 failed slots)":
+            view["health"] == "AtRisk"
+            and SUSPENDED_SCHEDULE_WORDS in (view["protectedMessage"] or "")
+            and "0 consecutive failed slots" in (view["protectedMessage"] or ""),
+        "Protected=False with reason WithinObjective — the point is inside the objective":
+            view["protectedStatus"] == "False" and view["protectedReason"] == "WithinObjective",
+    }
+
+
 def placed_point_is_protected(view: dict[str, Any], entry: dict[str, Any],
-                              backup: str) -> dict[str, bool]:
+                              backup: str, *, suspended_schedule: bool = False) -> dict[str, bool]:
     """THE NEGATIVE CONTROL for `unread_point_is_unknown`, and what it refuses.
 
     The same policy, the same destination with no `evidenceRead` grant, the
@@ -6633,8 +6664,7 @@ def placed_point_is_protected(view: dict[str, Any], entry: dict[str, Any],
     return {
         "the policy counted this run — status.lastAttempt names it":
             counted_this_run(view, backup),
-        "health is Healthy — the point counts": view["health"] == "Healthy",
-        "Protected=True": view["protectedStatus"] == "True",
+        **counts_as_protected(view, suspended_schedule=suspended_schedule),
         "the reason is NOT PointFactsUnread": view["protectedReason"] != "PointFactsUnread",
         "a point is published with a capture time": captured is not None,
         "which is the catalog row's own recoveryPointAtMs, to the second":
@@ -6702,7 +6732,8 @@ def refused_signature_is_unprotected(view: dict[str, Any], verdict: str | None,
 
 
 def valid_signature_is_protected(view: dict[str, Any], verdict: str | None,
-                                 backup: str) -> dict[str, bool]:
+                                 backup: str, *, suspended_schedule: bool = False
+                                 ) -> dict[str, bool]:
     """THE NEGATIVE CONTROL for the refused-signature row: the same policy, the
     same archive, the same four postures — a VALID signature.
 
@@ -6718,8 +6749,7 @@ def valid_signature_is_protected(view: dict[str, Any], verdict: str | None,
         "the policy counted this run — status.lastAttempt names it":
             counted_this_run(view, backup),
         "the same archive under a trusted signer verifies Valid": verdict == "Valid",
-        "health is Healthy": view["health"] == "Healthy",
-        "Protected=True": view["protectedStatus"] == "True",
+        **counts_as_protected(view, suspended_schedule=suspended_schedule),
         "a point is published, with a capture time": bool(point.get("recoveryPointAt")),
         "carrying the verdict the controller reached": point.get("evidence") in
             {"Valid", "ValidHistorical"},
@@ -10295,7 +10325,9 @@ def refused_point() -> None:
         protect11 = policy_view(verdict_after(
             RP_PROTECT_REFUSED, mark, lambda o: (o.get("status") or {}).get("health")
             == "Unprotected", seconds=300, what="Unprotected"))
-        control11 = placed_point_is_protected(control_refused, entries["rp-3"], "rp-3")
+        # The refused-point schedules are suspended at birth (`schedule_object`).
+        control11 = placed_point_is_protected(control_refused, entries["rp-3"], "rp-3",
+                                              suspended_schedule=True)
         refused11 = refused_signature_is_unprotected(protect11, verdict_of(after),
                                                      entries["rp-3"], "rp-3")
         evidence.append(artifact("refused-point/11-protection.json", {
@@ -10356,7 +10388,7 @@ def refused_point() -> None:
                 RP_PROTECT_REVOKED, mark, lambda o: (o.get("status") or {}).get("health")
                 == "Unprotected", seconds=300, what="Unprotected"))
             control12 = valid_signature_is_protected(control_revoked, verdict_of(before12),
-                                                     "rp-4")
+                                                     "rp-4", suspended_schedule=True)
             refused12 = refused_signature_is_unprotected(protect12, verdict_of(after12),
                                                          entries["rp-4"], "rp-4")
             evidence.append(artifact("refused-point/12-protection.json", {

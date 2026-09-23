@@ -3114,6 +3114,28 @@ def test_a_first_failed_attempt_is_not_a_finished_delivery() -> None:
     row("a retry owed counts as in flight for the POST window", len(in_flight) == 1, str(in_flight))
 
 
+def test_a_suspended_schedules_control_requires_the_at_risk_shape_exactly() -> None:
+    at_risk = {"health": "AtRisk", "protectedStatus": "False", "protectedReason": "WithinObjective",
+               "protectedMessage": "a recovery point is inside the objective, but protection is at "
+                                   "risk: 0 consecutive failed slots, a suspended or not-ready "
+                                   "schedule, or a slot missed since the last fire"}
+    row("suspended-schedule control: lab-refresh-9's measured AtRisk/WithinObjective counts",
+        all(d3.counts_as_protected(at_risk, suspended_schedule=True).values()))
+    row("PLANTED: the same shape fails the running-schedule control (Healthy required)",
+        not all(d3.counts_as_protected(at_risk, suspended_schedule=False).values()))
+    unprotected = {"health": "Unprotected", "protectedStatus": "False",
+                   "protectedReason": "NoAvailablePoint", "protectedMessage": "no available point"}
+    row("suspended-schedule control refuses a point that did not count (Unprotected)",
+        not all(d3.counts_as_protected(unprotected, suspended_schedule=True).values()))
+    unread = dict(at_risk, protectedReason="PointFactsUnread")
+    row("suspended-schedule control refuses AtRisk for any reason but WithinObjective",
+        not all(d3.counts_as_protected(unread, suspended_schedule=True).values()))
+    other = dict(at_risk, protectedMessage=at_risk["protectedMessage"].replace(
+        "0 consecutive failed slots", "3 consecutive failed slots"))
+    row("suspended-schedule control refuses an AtRisk earned by failed slots",
+        not all(d3.counts_as_protected(other, suspended_schedule=True).values()))
+
+
 def test_the_redactor_keeps_pod_specs_valid_json_and_still_redacts() -> None:
     spec = json.dumps({"automountServiceAccountToken": False, "token": "abcdef123456"})
     out = d3.redact(spec)
