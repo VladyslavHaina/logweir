@@ -893,9 +893,16 @@ async function main() {
         filter.value = name;
         filter.dispatchEvent(new Event("input", { bubbles: true }));
       }
-      const link = "a[href*=\"name=" + encodeURIComponent(name) + "\"]";
+      // The link's `name` PARAMETER is compared exactly (PLAT-18.2 re-check
+      // LOW-R2): a substring match on `name=` would take `bk-10`'s row for
+      // `bk-1`.
+      const names = (a) => {
+        const href = a.getAttribute("href") || "";
+        const q = href.indexOf("?");
+        return q !== -1 && new URLSearchParams(href.slice(q + 1)).get("name") === name;
+      };
       const row = Array.from(root.querySelectorAll("tbody tr")).find((tr) =>
-        tr.querySelector(link) !== null);
+        Array.from(tr.querySelectorAll("a[href]")).some(names));
       const clear = () => {
         if (filter !== null) {
           filter.value = "";
@@ -1063,8 +1070,10 @@ async function main() {
     check(JSON.stringify(selected.spec.topics) === JSON.stringify(["orders", "payments"]),
       "the named allowlist was not stored");
     const detailHash = await page.evaluate(() => window.location.hash);
-    check(detailHash.indexOf("name=" + selected.metadata.name) !== -1,
-      "the redirect did not land on the created schedule: " + detailHash);
+    const hashQuery = detailHash.indexOf("?");
+    check(hashQuery !== -1 &&
+      new URLSearchParams(detailHash.slice(hashQuery + 1)).get("name") === selected.metadata.name,
+    "the redirect did not land on the created schedule: " + detailHash);
     await shot(page, "03-detail-after-create");
     result.created.push({ kind: "BackupSchedule", name: selected.metadata.name,
       uid: selected.metadata.uid, createdBy: "the page" });
@@ -2188,9 +2197,14 @@ async function main() {
         filter.value = name;
         filter.dispatchEvent(new Event("input", { bubbles: true }));
       }
-      const link = "a[href*=\"name=" + encodeURIComponent(name) + "\"]";
+      // The `name` parameter exactly, as historyRow compares it.
+      const names = (a) => {
+        const href = a.getAttribute("href") || "";
+        const q = href.indexOf("?");
+        return q !== -1 && new URLSearchParams(href.slice(q + 1)).get("name") === name;
+      };
       const row = Array.from(document.querySelectorAll("tbody tr")).find((tr) =>
-        tr.querySelector(link) !== null);
+        Array.from(tr.querySelectorAll("a[href]")).some(names));
       return row === undefined ? null : {
         text: row.innerText,
         restore: (row.querySelector("a[href^=\"#/restore\"]") || { getAttribute: () => null })
