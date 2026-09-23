@@ -569,28 +569,15 @@ fn a_store_that_ignores_if_none_match_fails_closed() {
 /// counted as unreadable, and the one real point is still found.
 #[test]
 fn catalog_sync_sees_one_point_and_ignores_the_claim() {
-    use logweir::catalog::cli::{sync_with, Location, SyncArgs};
+    use logweir::catalog::cli::sync_with;
     let f = Fixture::new();
     let engine = AdvancingEngine::new(&f.root());
     let first = f.run("01K5RUN0000000000000000001", &engine).unwrap();
     let _refused = f.run("01K5RUN0000000000000000002", &engine).unwrap_err();
 
     let signer = logweir::backup::phase_run::load_signer(&f.args.signing_key).unwrap();
-    let args = SyncArgs {
-        location: Location {
-            url: "s3://kafka-backups".into(),
-            region: None,
-            endpoint: None,
-            path_style: false,
-            allow_http: false,
-        },
-        signing_key: PathBuf::from("unused-by-the-seam"),
-        public_keys: Vec::new(),
-        since: None,
-        max: 100,
-    };
     let report = sync_with(
-        &args,
+        &sync_args(),
         &f.evidence(),
         &signer,
         &[f.public_key()],
@@ -609,6 +596,100 @@ fn catalog_sync_sees_one_point_and_ignores_the_claim() {
     );
     assert_eq!(report.points.len(), 1);
     assert_eq!(report.points[0].0, first.receipt_key);
+}
+
+/// **Old archives.** An execution directory written before the claim existed —
+/// the committed, independently signed fixture receipt with its sidecar and NO
+/// claim — still verifies, and `catalog sync` backfills it beside a new
+/// execution that did take a claim: the layout change is additive, and nothing
+/// reads a missing claim as a fault.
+#[test]
+fn an_old_archive_with_no_claim_still_verifies_and_syncs_beside_a_new_run() {
+    use logweir::catalog::cli::sync_with;
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let fixtures = workspace.join("e2e/fixtures/signed");
+    let old_bytes = std::fs::read(fixtures.join("backup-receipt.json")).unwrap();
+    let old_sig = std::fs::read(fixtures.join("backup-receipt.sig")).unwrap();
+    let old_key = VerifyingKey::from_pem_file(&fixtures.join("public.pem")).unwrap();
+    let old: BackupReceipt = serde_json::from_slice(&old_bytes).unwrap();
+    let old_receipt_key = format!(
+        "logweir/backups/{}/{}.receipt.json",
+        old.backup_id, old.run_id
+    );
+
+    let f = Fixture::new();
+    let evidence = f.evidence();
+    evidence
+        .put_create_only(&old_receipt_key, &old_bytes)
+        .unwrap();
+    evidence
+        .put_create_only(
+            &old_receipt_key.replace(".receipt.json", ".receipt.sig"),
+            &old_sig,
+        )
+        .unwrap();
+
+    // A new execution beside it claims, runs and signs as usual.
+    let engine = AdvancingEngine::new(&f.root());
+    let new = f.run("01K5RUN0000000000000000001", &engine).unwrap();
+
+    // The old receipt's signature still verifies under its own key, and its
+    // execution directory carries no claim — which nothing treats as a fault.
+    let sidecar: logweir_evidence::Sidecar = serde_json::from_slice(&old_sig).unwrap();
+    logweir_evidence::verify::verify_detached(
+        &old_key,
+        logweir_evidence::PAYLOAD_TYPE_BACKUP_RECEIPT,
+        &old_bytes,
+        &sidecar,
+    )
+    .expect("the old receipt still verifies");
+    assert!(evidence
+        .get(&logweir::backup::phase_run::claim_key(&old.backup_id))
+        .is_err());
+
+    let signer = logweir::backup::phase_run::load_signer(&f.args.signing_key).unwrap();
+    let report = sync_with(
+        &sync_args(),
+        &evidence,
+        &signer,
+        &[old_key, f.public_key()],
+        ts("2026-09-23T04:00:00Z"),
+        "s3://kafka-backups",
+    )
+    .unwrap();
+    assert_eq!(
+        report.scanned, 2,
+        "two receipts, no claim scanned: {report:?}"
+    );
+    assert_eq!(
+        report.written, 1,
+        "the old receipt is backfilled: {report:?}"
+    );
+    assert_eq!(
+        report.already_present, 1,
+        "the new run wrote its own: {report:?}"
+    );
+    assert_eq!(report.unreadable, 0, "{report:?}");
+    assert!(report.points.iter().any(|(k, _, _)| *k == old_receipt_key));
+    assert!(report.points.iter().any(|(k, _, _)| *k == new.receipt_key));
+}
+
+/// `catalog sync`'s arguments for the in-process seam: the location string is
+/// informational there, and the keys are passed to `sync_with` directly.
+fn sync_args() -> logweir::catalog::cli::SyncArgs {
+    logweir::catalog::cli::SyncArgs {
+        location: logweir::catalog::cli::Location {
+            url: "s3://kafka-backups".into(),
+            region: None,
+            endpoint: None,
+            path_style: false,
+            allow_http: false,
+        },
+        signing_key: PathBuf::from("unused-by-the-seam"),
+        public_keys: Vec::new(),
+        since: None,
+        max: 100,
+    }
 }
 
 /// **Python verifier agreement.** After the refused second run, the auditor's
