@@ -5330,7 +5330,17 @@ def notify() -> None:
     # is how a worker hangs.
     stale_at = point_written + NOTIFY_MAX_AGE + 40
     time.sleep(max(200.0, min(stale_at - time.time(), 600.0)))
-    settled_obj = get("protectionpolicy", "protect-a")
+    # AND UNTIL EVERY OPEN TRANSITION HAS FINISHED DELIVERING (lab-refresh-9):
+    # the alert can open at the very end of the window above, and a read taken
+    # seconds later saw the sink's POST beside a delivery still `Pending` — the
+    # controller had not yet harvested the Job — and failed a correct build.
+    # `delivery_finished` is the same bound every other delivery read uses.
+    settled_obj = settle(
+        "protectionpolicy", "protect-a",
+        lambda o: all(delivery_finished(a.get("delivery"))
+                      for a in ((o.get("status") or {}).get("alerts") or [])),
+        seconds=480, what="every open transition to finish delivering",
+    ) or get("protectionpolicy", "protect-a")
     status = settled_obj["status"]
     alerts = status.get("alerts") or []
     # BY OWNER, not by a name guess: a delivery Job is owned by the policy.
