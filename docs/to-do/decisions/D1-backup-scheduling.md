@@ -309,6 +309,7 @@ Evaluation order is top to bottom; the first matching row decides. "Blocked" mea
 | 3 | `suspend: true` | No slot, catch-up or retry admission; `nextRuns` empty | nothing | False `Suspended` |
 | 4 | Cron, tz, selection or run policy invalid | No admission; running work continues | nothing | False `UnparseableSchedule`/`UnknownTimeZone`/`InvalidTopicSelection`/`InvalidRunPolicy` |
 | 5 | No due slot within walk bound | Idle | nothing | False `NoDueSlot` |
+| 5a | Due slot S earlier than `metadata.creationTimestamp` (amended 2026-09-23) | Idle: S is neither fired nor counted as missed | nothing | True `Scheduled` (message names the skipped slot and the creation time) |
 | 6 | Deterministic name of S held by another schedule UID | Skip S, record | nothing | True `SlotNameUnavailable` / `NameUnavailable` |
 | 7 | Some attempt of S Succeeded | Done | nothing | True `Scheduled` / `Admitted` (steady `AlreadyFired`) |
 | 8 | Highest attempt of S nonterminal | Wait | nothing | True `Scheduled` |
@@ -327,7 +328,7 @@ Evaluation order is top to bottom; the first matching row decides. "Blocked" mea
 | 21 | No attempt, past deadline, `Latest`, not blocked | Reserve + create | `name(S,0)`, kind `CatchUp` | True `CaughtUp` / `CaughtUp` |
 | 22 | A newer slot becomes due while rows 11/12/16/20 wait | Older S is superseded, counted in `missedSlots` | per new S | per new S |
 
-Kept from today on purpose: a slot that came due before the schedule was created but is still inside `startingDeadlineSeconds` is admitted by row 17 (current behaviour, covered by PLAT-04.1 tests); catch-up (row 21) never admits such a slot because `effectiveSince` is the first observation. Users who want an immediate first run use "Run first backup now" (§8).
+**Amended 2026-09-23 (SCHEDULE-FIRES-SLOT-BEFORE-CREATION, `claude/ctl-batch-1`).** The earlier text kept admitting, by row 17, a slot that came due before the schedule was created but was still inside `startingDeadlineSeconds`. Live, that made a schedule created at 00:53:11Z fire its 00:30:00Z slot. Row 5a now decides first: such a slot is idle, never fired and never counted in `missedSlots`, which is Kubernetes CronJob semantics (a slot exactly at the creation second still fires). The same rule applies to `RehearsalSchedule`. Rows 16–21 are unchanged for slots after creation. Users who want an immediate first run still use "Run first backup now" (§8). Migration: a schedule that an older controller already fired for a pre-creation slot keeps its `lastFireTime` until its next slot.
 
 Downtime outcomes users can predict from the table: a controller down for a week with `None` runs nothing until the next slot and records the skipped count (capped at 1000); with `Latest` it runs exactly one `CatchUp` for the most recent slot. **Backlog bound**: per schedule at most one admission per reconcile, only for the latest due slot, at most `1 + maxRetries ≤ 4` runs per slot, at most one nonterminal schedule-created run under `Forbid` and at most 10 under `Allow`.
 
