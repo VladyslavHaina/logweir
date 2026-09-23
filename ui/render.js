@@ -296,7 +296,7 @@ export const EMPTY_TABLE_SENTENCE = "no object of this kind in this namespace";
  *  [`EMPTY_TABLE_SENTENCE`]. It is a sentence of OURS and is not escaped.
  *
  *  The table sits in a `div.table-wrap`, which scrolls sideways on a narrow
- *  laptop and lets the stylesheet stack the rows into cards below 720 px; the
+ *  laptop and lets the stylesheet stack the rows into cards below 768 px; the
  *  column captions those cards show are copied from the header row by
  *  `app.js` when the nodes are adopted, so the string here carries them once.
  *

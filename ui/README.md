@@ -207,7 +207,7 @@ text-muted, accent, success, warning, danger, info -- defined once for the
 light scheme and redefined once under `prefers-color-scheme: dark`, so every
 component reads from the same ten names in both. Every text-on-surface pair
 in both schemes measures 4.5:1 or better. Tables read as tables on a laptop
-and **stack into cards below 720 px**, each cell captioned by its column: the
+and **stack into cards below 768 px** (Clarity's `sm` width), each cell captioned by its column: the
 caption is copied from the header row into `data-label` by `app.js` when it
 adopts the parsed nodes, so the page modules stay pure functions from a JSON
 object to a string. Status badges carry their state in **words and colour**,

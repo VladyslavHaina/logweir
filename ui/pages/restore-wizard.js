@@ -5749,11 +5749,13 @@ function wire(node, state, parse, api, lifecycle, prepared) {
  *  carries its own haystack in `data-search`, so the filter never counts
  *  positions and never has to be told the list again.
  *
- *  `style.display` AND `hidden`, on purpose. Below 720 px the stylesheet turns
- *  every `table.grid` row into a card with `display: block`, and an author
- *  rule beats the user agent's `[hidden] { display: none }`; an inline style
- *  beats both. `hidden` is still set, because that is what an assistive
- *  technology reads. */
+ *  `hidden` AND NOTHING ELSE. Below 768 px (Clarity's `sm` width) the
+ *  stylesheet turns every `table.grid` row into a card with `display: block`,
+ *  and an author rule beats the user agent's `[hidden] { display: none }`; the
+ *  stylesheet's base section therefore restates `[hidden]` with `!important`,
+ *  so the attribute an assistive technology reads is also the one that hides
+ *  the row, and no page writes an inline style (PLAT-18.2's token lint
+ *  forbids one). */
 function wireSelector(node, state, lifecycle) {
   const search = node.querySelector("#point-search");
   if (search === null) {
@@ -5770,7 +5772,6 @@ function wireSelector(node, state, lifecycle) {
     for (const row of rows) {
       const matches = matchesQuery(row.getAttribute("data-search"), state.query);
       row.hidden = !matches;
-      row.style.display = matches ? "" : "none";
       if (matches) {
         shown += 1;
       }

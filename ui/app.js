@@ -200,7 +200,7 @@ function parseFragment(html) {
   return nodes;
 }
 
-// THE STACKED-CARD LABELS, SET HERE AND NOT IN THE STRING. Below 720 px the
+// THE STACKED-CARD LABELS, SET HERE AND NOT IN THE STRING. Below 768 px (Clarity's `sm` width) the
 // stylesheet turns every `table.grid` row into a card and shows each cell's
 // column caption beside its value, read from the cell's `data-label`. The
 // caption is copied from the header row at adoption time, with `setAttribute`

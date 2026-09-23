@@ -66,6 +66,43 @@ attributed in [NOTICE](NOTICE) instead.
 | neither; the fact is stated | 16 |
 | this workspace | 13 |
 
+## Assets copied into the console (not Cargo packages)
+
+**VMware Clarity design tokens (vmware-clarity/core v6.17.0).** `ui/style.css` section 1 copies the **names and values** of VMware Clarity's
+design tokens: the global space, typography, animation and colour-palette
+entries the console uses, and the light and dark alias mappings. Source:
+`https://github.com/vmware-clarity/core`, tag `v6.17.0`, commit
+`24e56ba2a337f8735873c379496eae2692679ed5` (2026-02-02), files
+`projects/core/build/tokens.ts` (global tokens and light aliases) and
+`projects/core/src/styles/theme.dark.scss` (dark aliases). No Clarity code,
+font or icon is copied; the page loads nothing from Clarity at run time.
+Licence: MIT (the repository's `LICENSE`); Clarity's fonts are OFL-1.1 and
+are **not** used.
+
+```text
+MIT License
+
+Copyright (c) 2016-2021 VMware, Inc.  All rights reserved.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
 ## The inventory
 
 ### adler2@2.0.1
