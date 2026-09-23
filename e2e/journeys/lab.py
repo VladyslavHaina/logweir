@@ -7,6 +7,12 @@ Every rule WORKER-RULES.md sets for live work is enforced here in code:
   name another context;
 - every subprocess has a timeout (`run`), and a return code is read from the
   completed process, never through a pipe;
+- every subprocess starts its own session, and when it times out, is
+  interrupted or exits, its WHOLE process group is killed
+  (`run_killing_group`): `subprocess.run(timeout=)` kills only the direct
+  child, and a grandchild left behind (a lock waiter under `governed.py`
+  swap-on) once went on to change the shared controller after its journey had
+  already been judged;
 - a namespace is created only with the run's owner label, and is deleted only
   after that label AND the UID recorded at creation are read back
   (`delete_owned_namespace`);
@@ -19,7 +25,9 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 import pathlib
+import signal
 import subprocess
 import time
 from typing import Any, Callable
@@ -34,6 +42,44 @@ OWNER_LABEL = "logweir.dev/test-owner"
 # sweep needles (`load_needles`), so a leak of any of them into an artifact is
 # found by exact match and not only by pattern.
 FIXTURE_SECRETS = ("source-scram", "target-scram", "logweir-s3", "logweir-signing-key", "minio-root")
+
+
+def _kill_group(pgid: int) -> None:
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass  # the group is already empty
+
+
+def run_killing_group(args: list[str], *, timeout: float, input: str | None = None,
+                      env: dict[str, str] | None = None,
+                      cwd: pathlib.Path | str | None = None) -> subprocess.CompletedProcess:
+    """`subprocess.run(..., text=True, capture_output=True, timeout=)`, except
+    that the child leads a NEW session (`start_new_session=True`) and its
+    whole process group is SIGKILLed (`os.killpg`) when the timeout fires,
+    when this call is interrupted, and after the child exits: nothing the
+    child started without leaving its group outlives this call. Raises
+    `subprocess.TimeoutExpired` on the timeout, like `subprocess.run`."""
+    proc = subprocess.Popen(args, stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env, cwd=cwd,
+                            start_new_session=True)
+    pgid = proc.pid  # a session leader's group id is its pid
+    try:
+        stdout, stderr = proc.communicate(input, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_group(pgid)
+        try:
+            proc.communicate(timeout=10)
+        except subprocess.TimeoutExpired:  # a pipe held by something outside the group
+            proc.kill()
+            proc.wait()
+        raise subprocess.TimeoutExpired(args, timeout) from None
+    except BaseException:
+        _kill_group(pgid)
+        proc.wait()
+        raise
+    _kill_group(pgid)  # a grandchild that outlived its parent inside the group
+    return subprocess.CompletedProcess(args, proc.returncode, stdout, stderr)
 
 
 def now() -> str:
@@ -64,8 +110,7 @@ class Lab:
             cwd: pathlib.Path | None = None) -> subprocess.CompletedProcess:
         started = time.time()
         try:
-            result = subprocess.run(args, input=data, text=True, capture_output=True,
-                                    timeout=timeout, env=env, cwd=cwd or self.root)
+            result = run_killing_group(args, input=data, timeout=timeout, env=env, cwd=cwd or self.root)
         except subprocess.TimeoutExpired as exc:
             self.commands.append({"at": now(), "argv": [redact(a, self.needles) for a in args[:10]],
                                   "rc": "timeout", "seconds": timeout})
@@ -164,21 +209,35 @@ class Lab:
 
     def load_needles(self, extra_files: list[pathlib.Path]) -> int:
         """The shared lab's Secret values and the given private-key files, read
-        into memory as exact-match sweep needles. Nothing is written."""
+        into memory as exact-match sweep needles. Nothing is written.
+
+        EVERY Secret in FIXTURE_SECRETS must yield at least one value, or this
+        raises: an unreadable Secret used to be skipped silently, and one
+        private-key file alone kept the needle count above zero, so the sweep
+        ran without the lab's exact values and still reported clean
+        (plat20-1.review.md L-1)."""
         import base64
 
         before = len(self.needles)
+        unread: list[str] = []
         for name in FIXTURE_SECRETS:
             obj = self.get_opt("secret", name, FIXTURE_NS)
-            for value in ((obj or {}).get("data") or {}).values():
+            values = [v for v in ((obj or {}).get("data") or {}).values() if isinstance(v, str) and v]
+            if not values:
+                unread.append(name)
+                continue
+            for value in values:
                 try:
                     self.needles.add(base64.b64decode(value).decode("utf-8", errors="replace"))
                 except ValueError:
-                    continue
+                    pass
                 self.needles.add(value)  # the base64 form too
         for path in extra_files:
             if path.is_file():
                 self.needles.add(path.read_text())
+        if unread:
+            raise RuntimeError(f"the credential sweep would run without the lab Secret(s) {unread} "
+                               f"in {FIXTURE_NS}: none of their values could be read")
         return len(self.needles) - before
 
 

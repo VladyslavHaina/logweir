@@ -314,7 +314,7 @@ JOURNEYS: tuple[Journey, ...] = (
         ("two approvals",),
         (R("plat19-2", "governed in the SHARED console: alice asks with a ticket, is refused approving her own "
            "request, bob approves from his own browser, and the controller admits only on both signatures",
-           (RESOURCE,), f"{U192}:1151",
+           (RESOURCE,), f"{U192}:1152",
            "confirmation alone GovernedApprovalRequired with no Job; alice's own countersignature 403 and no "
            "Approval; bob's recorded 201 with two signatures; Verified=True Governed provenance; the Job carries "
            "--policy-snapshot and --confirmation-key"),),
@@ -325,7 +325,7 @@ JOURNEYS: tuple[Journey, ...] = (
         "source-offline", "a source nobody answers for fails the run by name and writes nothing; a "
         "discovery against it fails by name", ("source offline",),
         (R("native", "backup-from-an-offline-source-fails-and-writes-nothing", (RESOURCE, ARCHIVE), f"{NAT}:303"),
-         R("d2", "S11", (RESOURCE,), f"{D2}:3058")),
+         R("d2", "S11", (RESOURCE,), f"{D2}:3169")),
         data=True),
     Journey(
         "cr-loss", "the catalog is rebuilt from the archive after every Backup CR is deleted, and a run "

@@ -813,6 +813,7 @@ async function main() {
   const trustPolicy = consoleTrustPolicy();
   kube(["apply", "-f", "-"], { input: JSON.stringify(trustPolicy) });
   result.created.push({ kind: "TrustPolicy", name: trustPolicy.metadata.name,
+    uid: kubeJson(["get", "trustpolicy", trustPolicy.metadata.name]).metadata.uid,
     keyIds: trustPolicy.spec.keys.map((k) => k.keyId), usages: trustPolicy.spec.keys.map((k) => k.usages[0]) });
   const sharedPort = await freePort();
   const proxyPort = await freePort();
@@ -1393,6 +1394,37 @@ async function main() {
   }
 }
 
+// Whether a live object is one THIS run created: the owner label AND the UID
+// recorded at creation (`result.created`), as `plat19-2-admission-e2e.mjs`
+// checks. A same-named, same-labelled object with another UID (an earlier
+// run's leftover, or somebody else's) is refused (plat20-1.review.md L-3).
+function ownedByThisRun(live, kind, name, created = result.created) {
+  const meta = (live && live.metadata) || {};
+  const labelled = (meta.labels || {})["logweir.dev/test-owner"] === OWNER;
+  const made = created.find((c) => c.kind === kind && c.name === name && c.uid);
+  return labelled && made !== undefined && typeof meta.uid === "string" && made.uid === meta.uid;
+}
+
+// The guard's planted twins, run before any cluster change and on request
+// (UI_E2E_OWNERSHIP_SELFTEST=1, offline): the guard must accept this run's own
+// object and refuse each wrong one, or the harness does not start.
+function ownershipSelftest() {
+  const mine = { metadata: { name: "x", uid: "uid-mine", labels: { ...LABELS } } };
+  const created = [{ kind: "Namespace", name: "x", uid: "uid-mine" }];
+  const twins = {
+    "same label, another UID": { metadata: { name: "x", uid: "uid-other", labels: { ...LABELS } } },
+    "this UID, no owner label": { metadata: { name: "x", uid: "uid-mine", labels: {} } },
+    "this UID, another owner": { metadata: { name: "x", uid: "uid-mine",
+      labels: { "logweir.dev/test-owner": OWNER + "-other" } } },
+    "no UID at all": { metadata: { name: "x", labels: { ...LABELS } } },
+  };
+  const refused = Object.fromEntries(Object.entries(twins).map(([k, o]) => [k, !ownedByThisRun(o, "Namespace", "x", created)]));
+  refused["labelled, never recorded as created"] = !ownedByThisRun(mine, "Namespace", "x", []);
+  refused["recorded as another kind"] = !ownedByThisRun(mine, "TrustPolicy", "x", created);
+  const accepted = ownedByThisRun(mine, "Namespace", "x", created);
+  return { accepted, refused, killed: accepted && Object.values(refused).every(Boolean) };
+}
+
 async function cleanup() {
   if (process.env.UI_E2E_KEEP === "1") {
     result.cleanup.push("kept on request");
@@ -1406,8 +1438,8 @@ async function cleanup() {
         continue;
       }
       const object = JSON.parse(seen.stdout);
-      check(((object.metadata.labels || {})["logweir.dev/test-owner"]) === OWNER,
-        "refusing to delete " + ns + ": not labelled " + OWNER_LABEL);
+      check(ownedByThisRun(object, "Namespace", ns),
+        "refusing to delete " + ns + ": not labelled " + OWNER_LABEL + " with the UID this run created");
       kube(["delete", "namespace", ns, "--wait=true", "--timeout=180s"], { timeout: 200000 });
       const gone = kube(["get", "namespace", ns], { expected: [0, 1] }).status === 1;
       result.cleanup.push({ namespace: ns, uid: object.metadata.uid, deleted: gone });
@@ -1419,8 +1451,9 @@ async function cleanup() {
     const tp = kube(["get", "trustpolicy", base + "-console", "-o", "json"], { expected: [0, 1] });
     if (tp.status === 0) {
       const object = JSON.parse(tp.stdout);
-      check(((object.metadata.labels || {})["logweir.dev/test-owner"]) === OWNER,
-        "refusing to delete TrustPolicy " + base + "-console: not labelled " + OWNER_LABEL);
+      check(ownedByThisRun(object, "TrustPolicy", base + "-console"),
+        "refusing to delete TrustPolicy " + base + "-console: not labelled " + OWNER_LABEL +
+        " with the UID this run created");
       kube(["delete", "trustpolicy", base + "-console", "--wait=true"]);
       result.cleanup.push({ trustPolicy: base + "-console", uid: object.metadata.uid,
         deleted: kube(["get", "trustpolicy", base + "-console"], { expected: [0, 1] }).status === 1 });
@@ -1432,6 +1465,12 @@ async function cleanup() {
   result.cleanup.push({ workDir: WORK_DIR, removed: true });
 }
 
+if (process.env.UI_E2E_OWNERSHIP_SELFTEST === "1") {
+  const own = ownershipSelftest();
+  process.stdout.write(JSON.stringify(own) + "\n");
+  process.exit(own.killed ? 0 : 1);
+}
+
 if (process.env.UI_E2E_POLICY_ONLY === "1") {
   mkdirSync(ARTIFACTS, { recursive: true });
   writeFileSync(join(ARTIFACTS, "approval-policy.yaml"), policyDocument());
@@ -1441,6 +1480,9 @@ if (process.env.UI_E2E_POLICY_ONLY === "1") {
 
 let failed = null;
 try {
+  result.ownershipSelftest = ownershipSelftest();
+  check(result.ownershipSelftest.killed, "the cleanup ownership guard cannot refuse: " +
+    JSON.stringify(result.ownershipSelftest));
   await main();
 } catch (error) {
   failed = error;

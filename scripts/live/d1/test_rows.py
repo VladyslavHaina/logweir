@@ -34,6 +34,23 @@ ROOT = pathlib.Path(__file__).resolve().parents[3]
 FAILURES: list[str] = []
 
 
+try:  # the file also runs without pytest (`python3 scripts/live/d1/test_rows.py`)
+    import pytest
+except ImportError:  # pragma: no cover
+    pytest = None
+
+if pytest is not None:
+    @pytest.fixture(autouse=True)
+    def _a_recorded_failing_row_fails_its_test():
+        """`row()` only RECORDS a failure, so under pytest every test here
+        passed whatever it recorded; this makes a failing row fail the test
+        that recorded it (the d2 files' `_fails_on_a_recorded_row`)."""
+        before = len(FAILURES)
+        yield
+        recorded = FAILURES[before:]
+        assert not recorded, "failing rows: " + "; ".join(recorded)
+
+
 def row(name: str, ok: bool, detail: str = "") -> None:
     print(f"{'PASS' if ok else 'FAIL'}  {name}" + (f" — {detail}" if detail and not ok else ""))
     if not ok:
@@ -784,6 +801,68 @@ def test_the_raw_idempotency_key_never_reaches_an_artifact() -> None:
         json.loads(cleaned)["note"] == "after it", cleaned)
     row("MUTANT: a document with no key at all is returned unchanged",
         d1.redact('{"a": "b"}') == '{"a": "b"}')
+
+
+# --- L-04-6: Forbid needs positive evidence (harness-rows.review.md M-2) ------
+HELD = "forbid-20260923t1901"
+BLOCKED_MESSAGE = (f"slot 2026-09-23T19:02:00Z was not fired because concurrencyPolicy Forbid found "
+                   f"unfinished or unknown owned Backup(s) {HELD}; the next firing is "
+                   f"2026-09-23T19:03:00Z")
+
+
+def _sample(nonterminal: list[str], jobs: list[str], reason: str | None = "Scheduled",
+            message: str | None = None) -> dict:
+    return {"at": "2026-09-23T19:02:04Z", "nonterminal": nonterminal, "jobs": jobs,
+            "readyReason": reason, "readyMessage": message}
+
+
+FORBID_FIRED = [
+    _sample([], []),
+    _sample([HELD], [HELD]),
+    _sample([HELD], [HELD], "ConcurrencyBlocked", BLOCKED_MESSAGE),
+]
+# What the old clause (`forbid_max <= 1`) passed: runs that end in seconds, so
+# no slot ever meets an active run and Forbid never acts.
+FORBID_NEVER_FIRED = [_sample([], []), _sample(["forbid-a"], ["forbid-a"]), _sample([], [])] * 3
+
+
+def test_l_04_6_forbid_needs_a_concurrency_blocked_slot_over_one_held_run() -> None:
+    ok = d1.forbid_clauses(HELD, FORBID_FIRED)
+    row("L-04-6 Forbid: one held run, ConcurrencyBlocked naming it, one Job", all(ok.values()),
+        json.dumps(ok))
+    row("NEGATIVE CONTROL: Forbid never fired (every run ended before the next slot) is refused, "
+        "though it never held two runs",
+        not all(d1.forbid_clauses("forbid-a", FORBID_NEVER_FIRED).values())
+        and max(len(x["nonterminal"]) for x in FORBID_NEVER_FIRED) <= 1)
+    row("NEGATIVE CONTROL: no run was ever held", not all(d1.forbid_clauses("", FORBID_FIRED).values()))
+    row("MUTANT: no samples at all", not all(d1.forbid_clauses(HELD, []).values()))
+    row("MUTANT: ConcurrencyBlocked while a SECOND run is nonterminal (Forbid admitted two)",
+        not all(d1.forbid_clauses(HELD, FORBID_FIRED[:2] + [
+            _sample([HELD, "forbid-b"], [HELD, "forbid-b"], "ConcurrencyBlocked", BLOCKED_MESSAGE)
+        ]).values()))
+    row("MUTANT: ConcurrencyBlocked with no run active at all",
+        not all(d1.forbid_clauses(HELD, [_sample([], [], "ConcurrencyBlocked", BLOCKED_MESSAGE)]).values()))
+    row("MUTANT: the blocked message names another run",
+        not all(d1.forbid_clauses(HELD, FORBID_FIRED[:2] + [
+            _sample([HELD], [HELD], "ConcurrencyBlocked", BLOCKED_MESSAGE.replace(HELD, "forbid-x"))
+        ]).values()))
+    row("MUTANT: two runner Jobs for the one held run",
+        not all(d1.forbid_clauses(HELD, FORBID_FIRED[:2] + [
+            _sample([HELD], [HELD, HELD + "-again"], "ConcurrencyBlocked", BLOCKED_MESSAGE)
+        ]).values()))
+    row("MUTANT: two nonterminal runs earlier in the hold",
+        not all(d1.forbid_clauses(HELD, [_sample([HELD, "forbid-b"], [HELD])] + FORBID_FIRED).values()))
+
+
+def test_l_04_6_the_scenario_requires_the_forbid_clauses() -> None:
+    src = pathlib.Path(d1.__file__).read_text()
+    body = src[src.index("def l_04_6()"):src.index("# PLAT-05.1")]
+    row("L-04-6 runs the hold and fails on any unmet Forbid clause",
+        "held = forbid_hold(forbid_uid)" in body and "require(\n        not failed_forbid," in body)
+    hold = src[src.index("def forbid_hold("):src.index("def l_04_6()")]
+    row("the hold's quota and un-suspend are undone in finally",
+        "finally:" in hold and '"resourcequota", FORBID_HOLD_QUOTA' in hold
+        and '{"spec": {"suspend": True}}' in hold)
 
 
 def main() -> int:

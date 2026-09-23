@@ -103,7 +103,8 @@ Everything written passes `core.redact`.
 run directory, screenshots and Playwright traces included, and searches for two
 things.
 - **Patterns:** a PEM private-key header, `password`/`aws_secret_access_key`
-  key-values, a positional `mc admin user add` secret, and a dumped Secret's `data`.
+  key-values, a positional `mc admin user add` secret, and a dumped Secret's `data`
+  (in either key order: `kubectl -o json` puts `data` before `kind`).
 - **Exact values:**
   - every value of the shared lab's Secrets (`source-scram`, `target-scram`,
     `logweir-s3`, `logweir-signing-key`, `minio-root`), raw and base64;
@@ -113,10 +114,13 @@ things.
     strings are namespace names, and taking them made a live trial report 249 false
     hits.
 
-These are loaded into memory only and never written. `core.sweep_selftest` plants a
-minted exact value, a positional secret and a PEM header, and the run fails unless
-the sweep reports all three. This is d3's `sweep_selftest`, extended to exact lab
-values. The d1 and d2 sweeps have no self-test, and this one covers their output too.
+These are loaded into memory only and never written. The preflight fails unless every
+one of the five lab Secrets yields a value (`Lab.load_needles`): the private key alone
+used to satisfy it. `core.sweep_selftest` plants a minted exact value and one line for
+each of the five patterns (the Secret dump in both key orders), and the run fails
+unless the sweep reports every line by its own pattern. This is d3's `sweep_selftest`,
+extended to exact lab values. The d1 and d2 sweeps have no self-test, and this one
+covers their output too.
 
 ## Safety
 
@@ -155,10 +159,17 @@ values. The d1 and d2 sweeps have no self-test, and this one covers their output
     and records the Deployment it found;
   - `swap-off` runs in `finally`, fails unless the containers and volumes are
     byte-identical to that record, and releases the lock only after that check holds;
-  - the plat19-2 harness also creates and deletes one owner-labelled TrustPolicy.
+  - the plat19-2 harness also creates and deletes one owner-labelled TrustPolicy;
+  - `swap-on` waits at most 15 minutes for the lock (`governed.LOCK_WAIT_MINUTES`,
+    passed as `--wait-minutes`), so its worst case stays below the 1800 s phase
+    timeout, and run.py starts every phase in its own session and kills the whole
+    process group on a timeout (`lab.run_killing_group`): a lock waiter can no
+    longer outlive its journey and mount the policy on the shared controller later.
 
   `test_catalogue.py::test_the_one_suite_that_changes_the_shared_release_is_gated_locked_and_restored_in_finally`
-  pins all three.
+  pins the first three, `test_governed_swap_on_ends_on_its_own_before_run_py_kills_the_phase`
+  the budget, and `test_lab.py` the process-group kill (with a toy child whose
+  grandchild survives plain `subprocess.run` as the control).
 
 ## The journeys
 

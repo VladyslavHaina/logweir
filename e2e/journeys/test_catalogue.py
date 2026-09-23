@@ -127,6 +127,34 @@ def test_the_one_suite_that_changes_the_shared_release_is_gated_locked_and_resto
     assert 'out["restored"]' in swap and "the lock stays held" in swap
 
 
+def test_governed_swap_on_ends_on_its_own_before_run_py_kills_the_phase():
+    """plat20-1.review.md M-1: swap-on waited up to 240 min for the lock
+    while run.py timed the phase out at 1800 s, and the orphaned waiter later
+    mounted this run's policy on the shared controller. swap-on's worst case
+    must stay below the phase timeout, and the lock wait it passes must be the
+    bounded one."""
+    import governed
+
+    suite = suites.SUITES["plat19-2"]
+    assert governed.SWAP_ON_BUDGET < suite.timeout, (governed.SWAP_ON_BUDGET, suite.timeout)
+    assert governed.RUN_SECONDS < suite.timeout
+    assert governed.SWAP_SECONDS >= governed.LOCK_WAIT_MINUTES * 60 + 120  # the tool's own acquire timeout
+    text = (ROOT / suite.script).read_text()
+    assert '"--wait-minutes", str(LOCK_WAIT_MINUTES)' in text
+    assert "start_new_session" not in text  # its children stay in the group run.py kills
+    swap = (ROOT / "scripts/live/approval_policy_swap.py").read_text()
+    assert 'str(args.wait_minutes)], timeout=args.wait_minutes * 60 + 120' in swap
+    assert '"240"]' not in swap
+
+
+def test_governed_budget_pin_fails_on_the_old_240_minute_wait(monkeypatch):
+    """The pin's negative control: the pre-fix numbers break it."""
+    import governed
+
+    monkeypatch.setattr(governed, "SWAP_ON_BUDGET", 120 + 240 * 60 + 900)
+    assert not governed.SWAP_ON_BUDGET < suites.SUITES["plat19-2"].timeout
+
+
 def test_plat19_2_rows_are_its_harness_journeys_and_a_crash_without_cleanup_is_no_rows(tmp_path):
     c = ctx(tmp_path)
     row = next(r.name for j in suites.JOURNEYS for r in j.rows if r.suite == "plat19-2")
@@ -227,3 +255,25 @@ def test_its_twin_one_composed_row_failing_fails_its_journeys_and_the_run():
     got = core.summarise(suites.JOURNEYS, results, set(), {"selfTest": {"killed": True}, "hits": []})
     failed = {j["id"] for j in got["journeys"] if j["verdict"] == FAIL}
     assert failed == {"overlap", "cr-loss"} and got["ok"] is False
+
+
+def test_the_plat19_2_ui_harness_deletes_only_what_this_run_created_by_uid():
+    """plat20-1.review.md L-3: its cleanup checked the owner label only. Both
+    deletes now go through `ownedByThisRun` (label AND the UID recorded at
+    creation), the TrustPolicy's UID is recorded, and the guard's planted
+    twins (run offline here, and before every live run) must all be refused."""
+    import os
+    import subprocess
+
+    src = (ROOT / "scripts/plat19-2-ui-e2e.mjs").read_text()
+    cleanup = src[src.index("async function cleanup()"):src.index('if (process.env.UI_E2E_OWNERSHIP_SELFTEST')]
+    assert cleanup.count("check(ownedByThisRun(object, ") == 2
+    assert 'uid: kubeJson(["get", "trustpolicy", trustPolicy.metadata.name]).metadata.uid' in src
+    env = dict(os.environ, UI_E2E_OWNERSHIP_SELFTEST="1",
+               NODE_PATH=os.environ.get("NODE_PATH") or "/opt/homebrew/lib/node_modules")
+    done = subprocess.run(["node", str(ROOT / "scripts/plat19-2-ui-e2e.mjs")], env=env, capture_output=True,
+                          text=True, timeout=60)
+    assert done.returncode == 0, done.stderr[-2000:]
+    got = json.loads(done.stdout)
+    assert got["killed"] is True and got["accepted"] is True
+    assert len(got["refused"]) == 6 and all(got["refused"].values())

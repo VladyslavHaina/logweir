@@ -10,7 +10,7 @@ namespace is `legacy-governed-v1`. A row that needs a BOUND namespace needs an
 installation admin's change to the shared controller, and this is that change,
 made reversibly:
 
-    approval_policy_swap.py on   --owner O --policy FILE --record DIR [--acquire]
+    approval_policy_swap.py on   --owner O --policy FILE --record DIR [--acquire [--wait-minutes N]]
     approval_policy_swap.py edit --owner O --policy FILE --record DIR
     approval_policy_swap.py off  --owner O --record DIR [--release]
     approval_policy_swap.py status
@@ -27,7 +27,9 @@ recorded baseline.
 
 THE CLUSTER LOCK. Every verb but `status` refuses to run unless
 `k8s-lock.sh status` says the lock is held by `--owner`; `--acquire` takes it
-first (waiting while another worker holds it) and `--release` gives it back
+first (waiting while another worker holds it, at most `--wait-minutes`, 240 by
+default; a caller that is itself under a deadline passes a shorter wait, so it
+is never killed while still queued for the lock) and `--release` gives it back
 after a verified restore — never after a failed one, so the next worker finds
 the lock held and the evidence in DIR. Every kubectl names `--context
 docker-desktop`, and every subprocess has a timeout.
@@ -219,6 +221,8 @@ def main(argv: list[str]) -> int:
     p.add_argument("--record")
     p.add_argument("--acquire", action="store_true")
     p.add_argument("--release", action="store_true")
+    p.add_argument("--wait-minutes", type=int, default=240,
+                   help="with --acquire: give up (exit non-zero) after waiting this long for the lock")
     args = p.parse_args(argv)
     if args.verb == "status":
         pod = running_pod()
@@ -227,8 +231,10 @@ def main(argv: list[str]) -> int:
         return 0
     if not args.owner or not args.record or (args.verb != "off" and not args.policy):
         p.error("--owner and --record are required, and --policy for on/edit")
+    if args.wait_minutes < 1:
+        p.error("--wait-minutes must be at least 1")
     if args.acquire:
-        run([LOCK, "acquire", args.owner, "240"], timeout=240 * 60 + 120)
+        run([LOCK, "acquire", args.owner, str(args.wait_minutes)], timeout=args.wait_minutes * 60 + 120)
     require_lock(args.owner)
     result = {"on": on, "edit": edit, "off": off}[args.verb](args)
     result["verb"] = args.verb

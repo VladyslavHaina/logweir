@@ -2078,6 +2078,79 @@ def _l_04_4_body(uid: str, effective_since: dt.datetime) -> dict[str, Any]:
     }
 
 
+FORBID_HOLD_QUOTA = "d1-forbid-hold"
+FORBID_HOLD_SECONDS = 240
+
+
+def forbid_clauses(held: str, samples: list[dict[str, Any]]) -> dict[str, bool]:
+    """L-04-6's Forbid clause over the hold phase's samples.
+
+    "Forbid never held two nonterminal runs" alone passes when Forbid never
+    fires: a run here ends in seconds, so the next slot never meets an active
+    one (harness-rows.review.md M-2). The clause therefore needs POSITIVE
+    evidence: a run held nonterminal, `Ready` reason `ConcurrencyBlocked`
+    naming that run while it was the ONLY nonterminal run, and exactly one
+    runner Job for the schedule's runs at that moment."""
+    during = [s for s in samples
+              if s.get("readyReason") == "ConcurrencyBlocked" and held
+              and s.get("nonterminal") == [held]]
+    return {
+        "a Forbid run was held nonterminal": bool(held),
+        "Ready=ConcurrencyBlocked was observed while the held run was the only nonterminal run":
+            bool(during),
+        "the ConcurrencyBlocked message names the held run":
+            bool(during) and all(held in (s.get("readyMessage") or "") for s in during),
+        "exactly one runner Job existed for the schedule's runs at that moment":
+            bool(during) and all(len(s.get("jobs") or []) == 1 for s in during),
+        "Forbid never held two nonterminal runs across the hold":
+            bool(samples) and all(len(s.get("nonterminal") or []) <= 1 for s in samples),
+    }
+
+
+def forbid_hold(forbid_uid: str) -> dict[str, Any]:
+    """Hold one `Forbid` run open and watch the next slot be refused.
+
+    The namespace is held at zero pods (an owner-labelled `ResourceQuota`, the
+    hold `scripts/test-plat06-live.py` case-e uses), so the next run the
+    schedule creates gets its Job but no pod and stays nonterminal for the
+    fail-fast window — several one-minute slots. The quota and the schedule's
+    un-suspend are undone in `finally`."""
+    wait_until(lambda: all(terminal(b) for b in backups_of(forbid_uid)), timeout=180, interval=2,
+               what="every earlier Forbid run to end before the hold")
+    before = {b["metadata"]["name"] for b in backups_of(forbid_uid)}
+    quota = create({"apiVersion": "v1", "kind": "ResourceQuota",
+                    "metadata": {"name": FORBID_HOLD_QUOTA, "namespace": NS, "labels": dict(LABELS)},
+                    "spec": {"hard": {"pods": "0"}}})
+    samples: list[dict[str, Any]] = []
+    held = ""
+    try:
+        patch("backupschedule", "forbid", {"spec": {"suspend": False}})
+        deadline = time.time() + FORBID_HOLD_SECONDS
+        while time.time() < deadline:
+            nonterminal = [b for b in backups_of(forbid_uid) if not terminal(b)]
+            names = sorted(b["metadata"]["name"] for b in nonterminal)
+            if not held:
+                fresh = [n for n in names if n not in before]
+                held = fresh[0] if fresh else ""
+            sched = get("backupschedule", "forbid")
+            ready = condition(sched, "Ready") or {}
+            samples.append({
+                "at": now(), "nonterminal": names,
+                "jobs": sorted(j["metadata"]["name"] for b in nonterminal for j in runner_jobs(b)),
+                "readyReason": ready.get("reason"), "readyMessage": ready.get("message"),
+                "missedSlotsRecent": ((sched.get("status") or {}).get("missedSlots") or {}).get("recent"),
+            })
+            if all(forbid_clauses(held, samples).values()):
+                break
+            time.sleep(2)
+    finally:
+        run(KN + ["patch", "backupschedule", "forbid", "--type", "merge",
+                  "-p", json.dumps({"spec": {"suspend": True}})], check=False)
+        kn("delete", "resourcequota", FORBID_HOLD_QUOTA, "--ignore-not-found=true", check=False)
+    return {"quotaUid": quota["metadata"]["uid"], "held": held, "samples": samples,
+            "clauses": forbid_clauses(held, samples)}
+
+
 @scenario("L-04-6", "PLAT-04.2", "the Allow cap, Forbid, and a manual run that is never blocked")
 def l_04_6() -> dict[str, Any]:
     """Three clauses, and only two of them are reachable on this node.
@@ -2098,8 +2171,12 @@ def l_04_6() -> dict[str, Any]:
     §13.1's fenced replica) or a genuinely large topic, and neither is in this
     run's reach. So the cap clause is recorded UNMET and the scenario is
     `partial`. What IS measured, on the real source and for a bounded window:
-    `Allow` never exceeds ten, `Forbid` never holds two, and a manual run
-    started while a scheduled run is active is admitted and completes.
+    `Allow` never exceeds ten, a manual run started while a scheduled run is
+    active is admitted and completes, and — in `forbid_hold` — a `Forbid` run
+    held open at zero pods makes the next slot `ConcurrencyBlocked` with that
+    run the only one active and one Job. "Forbid never holds two" alone was
+    true with Forbid disabled (harness-rows.review.md M-2), so the Forbid
+    clause now FAILS the scenario unless `ConcurrencyBlocked` is observed.
     """
     for stale in ("allow", "forbid"):
         kn("delete", "backupschedule", stale, "--ignore-not-found=true", "--wait=true")
@@ -2189,6 +2266,14 @@ def l_04_6() -> dict[str, Any]:
         f"({manual_done['status'].get('reason')}) while a scheduled run was active",
         obj=manual_done,
     )
+    held = forbid_hold(forbid_uid)
+    artifact("objects/L-04-6/forbid-hold.json", held)
+    failed_forbid = sorted(k for k, ok in held["clauses"].items() if not ok)
+    require(
+        not failed_forbid,
+        "the Forbid clause has no positive evidence: " + "; ".join(failed_forbid),
+        obj={"held": held["held"], "samplesTail": held["samples"][-8:]},
+    )
     unmet = (
         []
         if limit_reason_seen is not None
@@ -2205,6 +2290,11 @@ def l_04_6() -> dict[str, Any]:
         "asserted": {
             "allowMaxNonterminal": allow_max,
             "forbidMaxNonterminal": forbid_max,
+            "forbidHeldRun": held["held"],
+            "forbidBlocked": next(x for x in held["samples"]
+                                  if x.get("readyReason") == "ConcurrencyBlocked"
+                                  and x.get("nonterminal") == [held["held"]]),
+            "forbidClauses": held["clauses"],
             "activeRunLimitCondition": limit_reason_seen,
             "manualJob": manual_job[0]["metadata"]["name"],
             "manualPhase": manual_done["status"]["phase"],

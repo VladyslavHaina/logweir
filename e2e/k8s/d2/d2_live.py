@@ -2499,6 +2499,117 @@ def fetch_jobs_for(uid: str) -> list[dict[str, Any]]:
                                      f"logweir.dev/check-owner-uid={uid}")
 
 
+# EVF-1.ttl. The row used to pass on ANY disappearance of the Job name —
+# including a Job that never existed, a wrong fallback name, an owner cascade
+# or a namespace cleanup (harness-rows.review.md M-1). It now judges an
+# observation in the shape of harness-rows-12's `ttl-observer.py`: the Job
+# EVF-2 saw (same uid) present at the start, its TTL and completionTime, the
+# last instant it was seen and the first it was gone, and — at that instant —
+# its owner Backup and a same-namespace long-TTL Job (the Backup's runner Job)
+# still present.
+TTL_POLL_SECONDS = 5
+TTL_EARLY_SLACK_SECONDS = 30   # last seen at least this close to the due time
+TTL_LATE_SLACK_SECONDS = 120   # the TTL controller's lag
+TTL_CLOCK_SKEW_SECONDS = 10    # host clock vs the API server's completionTime
+
+
+def _instant(value: Any) -> dt.datetime | None:
+    try:
+        return rfc3339(value) if isinstance(value, str) and value else None
+    except ValueError:
+        return None
+
+
+def ttl_due_at(observation: dict[str, Any]) -> dt.datetime | None:
+    start = observation.get("atStart") or {}
+    done, ttl = _instant(start.get("completionTime")), start.get("ttlSecondsAfterFinished")
+    return done + dt.timedelta(seconds=ttl) if done and isinstance(ttl, int) else None
+
+
+def ttl_collection_clauses(observation: dict[str, Any]) -> dict[str, bool]:
+    """EVF-1.ttl over one observation (`observe_ttl_collection`). Every clause
+    needs a positive fact: an observation with no Job at the start, no uid,
+    no disappearance or no control fails."""
+    start = observation.get("atStart") or {}
+    expected = observation.get("expectedUid") or ""
+    due = ttl_due_at(observation)
+    last_seen = _instant(observation.get("lastSeenAt"))
+    gone = _instant(observation.get("goneObservedAt"))
+    control = observation.get("control") or {}
+    skew = dt.timedelta(seconds=TTL_CLOCK_SKEW_SECONDS)
+    return {
+        "the Job EVF-2 recorded (same uid) was present at the scenario's start":
+            bool(expected) and start.get("uid") == expected,
+        "it was controlled by the Backup": bool(start.get("controlledByOwner")),
+        f"it carried ttlSecondsAfterFinished {EVIDENCE_FETCH_TTL_SECONDS}":
+            start.get("ttlSecondsAfterFinished") == EVIDENCE_FETCH_TTL_SECONDS,
+        "it had finished (completionTime set), so its due time is known": due is not None,
+        "every poll that found the name found that uid (no replacement Job)":
+            bool(observation.get("uidsSeen")) and set(observation["uidsSeen"]) == {expected},
+        "its disappearance was observed": gone is not None,
+        f"it was still present within {TTL_EARLY_SLACK_SECONDS}s of its due time (no early deleter)":
+            bool(due and last_seen and last_seen >= due - dt.timedelta(seconds=TTL_EARLY_SLACK_SECONDS)),
+        "it was gone no earlier than completionTime + ttl":
+            bool(due and gone and gone >= due - skew),
+        f"and no later than {TTL_LATE_SLACK_SECONDS}s after it":
+            bool(due and gone and gone <= due + dt.timedelta(seconds=TTL_LATE_SLACK_SECONDS) + skew),
+        "its owner Backup (same uid) still existed when it vanished (no owner cascade)":
+            bool(observation.get("ownerUid"))
+            and observation.get("ownerUidAtGone") == observation.get("ownerUid"),
+        "a same-namespace long-TTL Job was still present when it vanished (no namespace cleanup)":
+            bool(control.get("uid")) and observation.get("controlUidAtGone") == control.get("uid"),
+    }
+
+
+def observe_ttl_collection(job_name: str, expected_uid: str, owner: dict[str, Any]) -> dict[str, Any]:
+    """Poll the evidence-fetch Job every TTL_POLL_SECONDS from now until
+    TTL_LATE_SLACK_SECONDS past its due time, and record what
+    `ttl_collection_clauses` judges. Reads only; deletes nothing."""
+    owner_meta = owner.get("metadata") or {}
+    owner_uid = owner_meta.get("uid") or ""
+    obs: dict[str, Any] = {"job": job_name, "expectedUid": expected_uid, "ownerUid": owner_uid,
+                           "owner": owner_meta.get("name"), "uidsSeen": [], "atStart": None,
+                           "control": None}
+    job = get_opt("job", job_name) if job_name else None
+    if job is None:
+        return obs
+    meta, spec, status = job.get("metadata") or {}, job.get("spec") or {}, job.get("status") or {}
+    obs["atStart"] = {"uid": meta.get("uid"), "ttlSecondsAfterFinished": spec.get("ttlSecondsAfterFinished"),
+                      "completionTime": status.get("completionTime"),
+                      "controlledByOwner": _controller_ref(job, "Backup", owner_uid), "at": now()}
+    long_lived = [j for j in get_list("jobs")
+                  if (j.get("metadata") or {}).get("name") != job_name
+                  and (((j.get("spec") or {}).get("ttlSecondsAfterFinished") is None)
+                       or j["spec"]["ttlSecondsAfterFinished"]
+                       > EVIDENCE_FETCH_TTL_SECONDS + TTL_LATE_SLACK_SECONDS + 3600)]
+    long_lived.sort(key=lambda j: (not _controller_ref(j, "Backup", owner_uid), j["metadata"]["name"]))
+    if long_lived:
+        c = long_lived[0]
+        obs["control"] = {"name": c["metadata"]["name"], "uid": c["metadata"].get("uid"),
+                          "ttlSecondsAfterFinished": (c.get("spec") or {}).get("ttlSecondsAfterFinished"),
+                          "controlledByOwner": _controller_ref(c, "Backup", owner_uid)}
+    due = ttl_due_at(obs)
+    if due is None:
+        return obs
+    deadline = due + dt.timedelta(seconds=TTL_LATE_SLACK_SECONDS + TTL_CLOCK_SKEW_SECONDS + TTL_POLL_SECONDS)
+    while dt.datetime.now(dt.timezone.utc) < deadline:
+        live = get_opt("job", job_name)
+        if live is None:
+            obs["goneObservedAt"] = now()
+            obs["ownerUidAtGone"] = ((get_opt("backup", owner_meta.get("name") or "") or {})
+                                     .get("metadata") or {}).get("uid")
+            if obs["control"]:
+                obs["controlUidAtGone"] = ((get_opt("job", obs["control"]["name"]) or {})
+                                           .get("metadata") or {}).get("uid")
+            break
+        obs["lastSeenAt"] = now()
+        uid = (live.get("metadata") or {}).get("uid")
+        if uid not in obs["uidsSeen"]:
+            obs["uidsSeen"].append(uid)
+        time.sleep(TTL_POLL_SECONDS)
+    return obs
+
+
 def owned_pod_of(job: dict[str, Any] | None) -> dict[str, Any] | None:
     if not job:
         return None
@@ -2578,6 +2689,7 @@ def evf() -> None:
                           "policyControllerIdentityLocations": identity})
         failed = sorted(k for k, ok in clauses.items() if not ok)
         check(not failed, "EVF-1: " + "; ".join(failed))
+    job_name, job, final = "", None, {}
     with Scenario("EVF-2", "the evidence-fetch Job holds only the read grant; its pod is "
                            "controlled by the Job's UID") as sc:
         final = get("backup", name)
@@ -2606,18 +2718,17 @@ def evf() -> None:
         failed = sorted(k for k, ok in clauses.items() if not ok)
         check(job is not None, f"the evidence-fetch Job {job_name} was not found at all")
         check(not failed, "EVF-2: " + "; ".join(failed))
-    with Scenario("EVF-1.ttl", "the finished evidence-fetch Job is collected by its TTL") as sc:
-        # ttlSecondsAfterFinished 600, plus the TTL controller's own lag.
-        gone = False
-        deadline = time.monotonic() + EVIDENCE_FETCH_TTL_SECONDS + 120
-        while time.monotonic() < deadline:
-            if get_opt("job", job_name) is None:
-                gone = True
-                break
-            time.sleep(15)
-        sc.detail.update({"job": job_name, "gone": gone})
-        check(gone, f"{job_name} still exists {EVIDENCE_FETCH_TTL_SECONDS + 120}s after its "
-                    "verdict; the TTL patch never landed or never took effect")
+    with Scenario("EVF-1.ttl", "the evidence-fetch Job EVF-2 saw is collected by its own TTL, "
+                               "not by any other deleter") as sc:
+        # ttlSecondsAfterFinished 600, plus the TTL controller's own lag; the
+        # clauses need the Job EVF-2 recorded, by uid, before its deletion counts.
+        expected = ((job or {}).get("metadata") or {}).get("uid") or ""
+        observation = observe_ttl_collection(job_name, expected, final or {})
+        artifact("objects/evf/ttl-observation.json", observation)
+        clauses = ttl_collection_clauses(observation)
+        sc.detail.update({"job": job_name, "observation": observation, "clauses": clauses})
+        failed = sorted(k for k, ok in clauses.items() if not ok)
+        check(not failed, "EVF-1.ttl: " + "; ".join(failed))
 
 
 def evf4() -> None:
