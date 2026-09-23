@@ -35,8 +35,19 @@ const missing = process.env.PLAT13_MISSING_NAMESPACE || "";
 const stage = process.env.PLAT13_STAGE || "single";
 const suffix = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
 const runId = `plat13-${suffix}`;
-const fixtureA = `plat13-a-${suffix}`;
-const fixtureB = second ? `plat13-b-${suffix}` : "";
+// A NAME THE LAB CONTROLLER REFUSES BEFORE IT CREATES ANYTHING. This harness
+// was written for a cluster with no reconciler (the chart README's recipe
+// deploys only the UI), and it patches a fixture Backup to `Succeeded`. The
+// docker-desktop lab now runs `weirkeeper` over every namespace, which admitted
+// that Backup, created a runner Job for it and rewrote its phase to `Running`
+// -- so the wizard, correctly, refused it as "not a recovery point" and the
+// restore journey never found its submit (measured 2026-09-23). A Job name is
+// at most 63 characters, so a Backup named past that is refused before the
+// controller creates anything, and the status this harness writes stays put:
+// the technique `scripts/trust-stale-ui-e2e.mjs` and plat08-2 use.
+const OVER_63 = "-fixture-deliberately-longer-than-sixty-three-characters";
+const fixtureA = `plat13-a-${suffix}${OVER_63}`;
+const fixtureB = second ? `plat13-b-${suffix}${OVER_63}` : "";
 const targetName = `plat13-target-${suffix}`;
 const durableName = `plat13-post-${suffix}`;
 const rejectedName = `plat13-reject-${suffix}`;
@@ -191,7 +202,7 @@ function backupObject(namespace, name, sourceName) {
   };
 }
 
-function seedFixtures() {
+async function seedFixtures() {
   const target = own("KafkaCluster", "kafkaclusters", primary, targetName, "run-label");
   seedObject(target, {
     apiVersion: "logweir.dev/v1alpha1",
@@ -211,19 +222,29 @@ function seedFixtures() {
 
   const backupA = own("Backup", "backups", primary, fixtureA, "run-label");
   seedObject(backupA, backupObject(primary, fixtureA, targetName));
-  const patched = kube([
-    "-n", primary, "patch", "backup", fixtureA,
-    "--subresource=status", "--type=merge",
-    "-p", JSON.stringify({
-      status: {
-        phase: "Succeeded",
-        backupId: `set-${fixtureA}`,
-        windowCovered: { fromMs: 1760000000000, toMs: 1760000060000 },
-      },
-    }),
-    "-o", "json",
-  ]);
-  const patchedObject = JSON.parse(patched.stdout);
+  // PATCHED UNTIL IT STICKS, and read back: the fixture is only a recovery
+  // point if the status this harness wrote is the status the page will read.
+  let patchedObject = null;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    kube([
+      "-n", primary, "patch", "backup", fixtureA,
+      "--subresource=status", "--type=merge",
+      "-p", JSON.stringify({
+        status: {
+          phase: "Succeeded",
+          backupId: `set-${fixtureA}`,
+          windowCovered: { fromMs: 1760000000000, toMs: 1760000060000 },
+        },
+      }),
+    ]);
+    await pause(1000);
+    const seen = JSON.parse(kube(["-n", primary, "get", "backup", fixtureA, "-o", "json"]).stdout);
+    if (seen?.status?.phase === "Succeeded" && seen?.status?.backupId === `set-${fixtureA}`) {
+      patchedObject = seen;
+      break;
+    }
+  }
+  check(patchedObject !== null, "the primary fixture Backup did not keep its Succeeded status");
   check(patchedObject.metadata.uid === backupA.uid, "status patch changed the primary fixture identity");
 
   if (second) {
@@ -237,11 +258,24 @@ function isKubernetesApiRequest(url) {
   return path.startsWith("/apis/") || path.startsWith("/api/");
 }
 
+// THE MODE PROBE IS NOT A KUBERNETES READ (43576bf, `ui/client.js`). At boot
+// the page asks `GET /api/v1/session` exactly once to decide between console
+// and legacy mode; through `kubectl proxy` the API server has no such resource
+// and the page stays in legacy mode. It names no namespace and reads no object,
+// so it is kept apart in `requests.modeProbes` -- exactly that method and path,
+// nothing else -- instead of being counted as the data request these rows
+// forbid. Every other `/api/` and `/apis/` request still counts.
+function isModeProbe(method, path) {
+  return method === "GET" && path === "/api/v1/session";
+}
+
 function collectApiRequests(page) {
   const requests = [];
+  requests.modeProbes = [];
   page.on("request", (request) => {
     if (isKubernetesApiRequest(request.url())) {
-      requests.push({ method: request.method(), path: new URL(request.url()).pathname });
+      const seen = { method: request.method(), path: new URL(request.url()).pathname };
+      (isModeProbe(seen.method, seen.path) ? requests.modeProbes : requests).push(seen);
     }
   });
   return requests;
@@ -335,6 +369,8 @@ async function multipleNamespaces(browser) {
       "namespace selector differs from the Helm-configured namespaces");
     await pause(100);
     check(requests.length === 0, `unselected multi-namespace route made an API request: ${JSON.stringify(requests)}`);
+    check(requests.modeProbes.length <= 1,
+      `the page probed its mode more than once at boot: ${JSON.stringify(requests.modeProbes)}`);
 
     const primaryHandled = deferred();
     await page.route(`**${apiPath(primary, "backups")}`, async (route) => {
@@ -741,7 +777,7 @@ try {
   if (cleanupNegativeControl) {
     own("Backup", "backups", primary, `plat13-cleanup-negative-${suffix}`, "run-label");
   } else {
-    seedFixtures();
+    await seedFixtures();
     browser = await chromium.launch({ headless: true });
     if (stage === "single") await oneNamespace(browser);
     await multipleNamespaces(browser);
