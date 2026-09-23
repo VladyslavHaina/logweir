@@ -45,9 +45,13 @@
 //      `UI_E2E_STAMP` to write `<artifacts>/<stamp>/approval-policy.yaml`,
 //      mount it into the lab controller as the chart does
 //      (`LOGWEIR_APPROVAL_POLICY_FILE`), and restore the controller after;
-//   2. a `TrustPolicy` naming the console's `ConsoleConfirmation` key for the
-//      Ordinary namespace -- this harness creates it (owner-labelled, deleted
-//      in `cleanup`) once it has minted the key.
+//   2. a `TrustPolicy` over the two bound namespaces naming the console's
+//      `ConsoleConfirmation` key and bob's `GovernedApproval` key (principal
+//      `<issuer>#bob`) -- this harness creates it (owner-labelled, deleted in
+//      `cleanup`) once it has minted both keys. Journey 2 then REQUIRES the
+//      confirmation alone to be `GovernedApprovalRequired` with no Job, and
+//      the two-signature Approval to be Verified (Governed provenance) and
+//      admitted with the frozen policy.
 //
 // The harness REFUSES to start when the controller has not bound the run's
 // namespaces: a journey-1 "pass" against an unbound controller would be the
@@ -79,7 +83,7 @@ import {
   createHash, createPublicKey, generateKeyPairSync, randomBytes, sign as cryptoSign,
   verify as verifySig,
 } from "node:crypto";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -308,14 +312,23 @@ function controllerBinding() {
     bound: String(fields.bound_namespaces || "") };
 }
 
-/** The Ordinary namespace's TrustPolicy: the console key (ConsoleConfirmation)
- *  and that namespace's own evidence key, so its runs stay attributable. */
+/** The bound namespaces' TrustPolicy: the console key (ConsoleConfirmation),
+ *  bob's approver key (GovernedApproval, principal `<issuer>#bob`, minted here
+ *  so the countersignature below uses it) and each namespace's own evidence
+ *  key, so their runs stay attributable. Needs IDP_ISSUER (after startIdp). */
 function consoleTrustPolicy() {
+  const bobKey = join(WORK_DIR, "bob-approver.pem");
+  check(spawnSync("openssl", ["genpkey", "-algorithm", "ed25519", "-out", bobKey], { timeout: 30000 }).status === 0,
+    "bob's approver key");
+  const bobPem = spawnSync("openssl", ["pkey", "-in", bobKey, "-pubout"], { encoding: "utf8", timeout: 30000 }).stdout;
   const spkiOf = (pem) => createPublicKey(pem).export({ type: "spki", format: "der" });
   const keyIdOf = (pem) => createHash("sha256").update(spkiOf(pem)).digest("hex");
-  const evidencePem = spawnSync("openssl", ["pkey", "-in", join(WORK_DIR, "signing-" + NS.ordinary + ".pem"),
-    "-pubout"], { encoding: "utf8", timeout: 30000 }).stdout;
-  check(evidencePem.includes("BEGIN PUBLIC KEY"), "the ordinary namespace's evidence public key");
+  const evidenceOf = (ns) => {
+    const pem = spawnSync("openssl", ["pkey", "-in", join(WORK_DIR, "signing-" + ns + ".pem"), "-pubout"],
+      { encoding: "utf8", timeout: 30000 }).stdout;
+    check(pem.includes("BEGIN PUBLIC KEY"), "the evidence public key of " + ns);
+    return pem;
+  };
   const notBefore = new Date(Date.now() - 3600 * 1000).toISOString().replace(/\.\d+Z$/, "Z");
   const notAfter = new Date(Date.now() + 86400 * 1000).toISOString().replace(/\.\d+Z$/, "Z");
   const key = (pem, usage, id, display) => ({ keyId: keyIdOf(pem), spkiPem: pem, algorithm: "ed25519",
@@ -324,9 +337,11 @@ function consoleTrustPolicy() {
   return {
     apiVersion: "logweir.dev/v1alpha1", kind: "TrustPolicy",
     metadata: { name: base + "-console", labels: LABELS },
-    spec: { namespaces: [NS.ordinary], keys: [
+    spec: { namespaces: [NS.ordinary, NS.governed], keys: [
       key(consolePublicPem, "ConsoleConfirmation", "urn:logweir:console:" + base, "the run's console key"),
-      key(evidencePem, "EvidenceSigning", "signing@" + NS.ordinary + ".invalid", "the namespace's evidence key"),
+      key(bobPem, "GovernedApproval", IDP_ISSUER + "#bob", "bob, the governed approver"),
+      key(evidenceOf(NS.ordinary), "EvidenceSigning", "signing@" + NS.ordinary + ".invalid", "o's evidence key"),
+      key(evidenceOf(NS.governed), "EvidenceSigning", "signing@" + NS.governed + ".invalid", "v's evidence key"),
     ] },
   };
 }
@@ -787,10 +802,6 @@ async function main() {
   }
 
   writePolicyAndKey();
-  const trustPolicy = consoleTrustPolicy();
-  kube(["apply", "-f", "-"], { input: JSON.stringify(trustPolicy) });
-  result.created.push({ kind: "TrustPolicy", name: trustPolicy.metadata.name,
-    keyIds: trustPolicy.spec.keys.map((k) => k.keyId), usages: trustPolicy.spec.keys.map((k) => k.usages[0]) });
   const port = await freePort();
   await startApi(port);
   const origin = "http://127.0.0.1:" + port;
@@ -799,6 +810,10 @@ async function main() {
   result.apiStartLine = apiLog.join("").split("\n").find((l) => l.includes("logweir-api started")) || "";
   const idpPort = await freePort();
   await startIdp(idpPort);
+  const trustPolicy = consoleTrustPolicy();
+  kube(["apply", "-f", "-"], { input: JSON.stringify(trustPolicy) });
+  result.created.push({ kind: "TrustPolicy", name: trustPolicy.metadata.name,
+    keyIds: trustPolicy.spec.keys.map((k) => k.keyId), usages: trustPolicy.spec.keys.map((k) => k.usages[0]) });
   const sharedPort = await freePort();
   const proxyPort = await freePort();
   await startProxy(proxyPort, sharedPort);
@@ -1056,8 +1071,10 @@ async function main() {
     writeFileSync(conf2, confirmation.spec.sidecarBytes);
     const countersignWith = (who) => {
       const key = join(WORK_DIR, who + "-approver.pem");
-      check(spawnSync("openssl", ["genpkey", "-algorithm", "ed25519", "-out", key], { timeout: 30000 }).status === 0,
-        "a throwaway approver key for " + who);
+      if (!existsSync(key)) {
+        check(spawnSync("openssl", ["genpkey", "-algorithm", "ed25519", "-out", key], { timeout: 30000 }).status === 0,
+          "a throwaway approver key for " + who);
+      }
       const out = join(WORK_DIR, who + ".sig");
       const counter = runCli(["drill", "countersign", "--document", doc2, "--confirmation", conf2,
         "--key", key, "--out", out]);
@@ -1075,6 +1092,26 @@ async function main() {
     check(kube(["-n", v.ns, "get", "approval", v.approvalName], { expected: [0, 1] }).status === 1,
       "and no Approval was created");
     control("alice, the requester, holds the Approver role too and is still refused approving her own request (403 forbidden)", {});
+    // THE CONFIRMATION ALONE AUTHORISES NOTHING (lab-refresh-9, the
+    // controller's half): the console-signed confirmation is judged
+    // GovernedApprovalRequired, and the Restore creates no Job.
+    let pending = null;
+    for (let i = 0; i < 60; i += 1) {
+      const seen = kubeJson(["-n", v.ns, "get", "approval", confirmationName]);
+      pending = ((seen.status || {}).conditions || []).find((x) => x.type === "Verified") || null;
+      if (pending !== null && pending.reason === "GovernedApprovalRequired") {
+        break;
+      }
+      await pause(1000);
+    }
+    const jobsBeforeBob = (kubeJson(["-n", v.ns, "get", "jobs"]).items || []).filter((j) =>
+      (j.metadata.ownerReferences || []).some((r) => r.name === v.restore));
+    save("02-confirmation-verdict.json", { verified: pending, jobsForTheRestore: jobsBeforeBob.map((j) => j.metadata.name) });
+    check(pending !== null && pending.status === "False" && pending.reason === "GovernedApprovalRequired",
+      "the controller did not hold the confirmation alone as GovernedApprovalRequired: " + JSON.stringify(pending));
+    check(jobsBeforeBob.length === 0, "a Job exists for the Restore before any approver signed");
+    control("the console's confirmation alone is GovernedApprovalRequired at the controller, and no Job exists", {
+      verified: pending });
 
     await bob.page.goto(sharedUi + vHash, { waitUntil: "load", timeout: 30000 });
     await waitFor(bob.page, "#countersign-form", "bob's countersign panel");
@@ -1100,10 +1137,42 @@ async function main() {
     check(vSidecar.signatures.length === 2, "the console's signature and bob's");
     check(((vApproval.metadata.annotations || {})["logweir.dev/approver"]) === IDP_ISSUER + "#bob",
       "bob is recorded as the approver");
-    record("governed in the SHARED console: alice asks with a ticket, is refused approving her own request, and bob approves from his own browser", {
+    // TWO SEPARATE APPROVALS, AND THE CONTROLLER ADMITS ON THEM (lab-refresh-9).
+    let vVerdict = null;
+    let vSeen = null;
+    for (let i = 0; i < 120 && (vVerdict === null || vVerdict.status !== "True"); i += 1) {
+      vSeen = kubeJson(["-n", v.ns, "get", "approval", v.approvalName]);
+      vVerdict = ((vSeen.status || {}).conditions || []).find((x) => x.type === "Verified") || null;
+      if (vVerdict === null || vVerdict.status !== "True") {
+        await pause(1000);
+      }
+    }
+    const vProvenance = (vSeen.status || {}).authorization || null;
+    check(vVerdict !== null && vVerdict.status === "True",
+      "the controller did not verify the two-signature governed document: " + JSON.stringify(vVerdict));
+    check(vProvenance !== null && vProvenance.mode === "Governed" && vProvenance.policyName === "p192-governed" &&
+      vProvenance.requester === IDP_ISSUER + "#alice", "the governed provenance: " + JSON.stringify(vProvenance));
+    const vRestoreObj = kubeJson(["-n", v.ns, "get", "restore", v.restore]);
+    let vJob = null;
+    for (let i = 0; i < 180 && vJob === null; i += 1) {
+      vJob = (kubeJson(["-n", v.ns, "get", "jobs"]).items || []).find((j) =>
+        (j.metadata.ownerReferences || []).some((r) => r.uid === vRestoreObj.metadata.uid)) || null;
+      if (vJob === null) {
+        await pause(1000);
+      }
+    }
+    check(vJob !== null, "the governed Restore got no Job after both approvals");
+    const vArgv = [].concat(...(vJob.spec.template.spec.containers || []).map((c) => (c.command || []).concat(c.args || [])));
+    check(vArgv.includes("--policy-snapshot") && vArgv.includes("--confirmation-key"),
+      "the governed Job does not carry the frozen policy and the console key");
+    save("02-governed-controller-admission.json", { verified: vVerdict, provenance: vProvenance,
+      job: vJob.metadata.name, argv: vArgv });
+    record("governed in the SHARED console: alice asks with a ticket, is refused approving her own request, bob approves from his own browser, and the controller admits only on both signatures", {
       namespace: v.ns, restore: v.restore, routedTo: vHash, confirmation: confirmationName,
       ticket: TICKET, selfApproval: { status: refusal.status, code: JSON.parse(refusal.body).code },
       bobApproval: { status: bobAnswer.status, signatures: vSidecar.signatures.length },
+      confirmationAlone: pending, controllerVerdict: vVerdict, provenance: vProvenance,
+      job: vJob.metadata.name,
     });
 
     // ---------------------------------------------------------------- 3
