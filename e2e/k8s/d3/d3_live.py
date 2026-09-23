@@ -11390,6 +11390,19 @@ def rehearsal_faults() -> None:
     binary = logweir_api_bin()
     api = LoopbackApi(binary) if binary else None
     try:
+        # A RE-RUN STARTS CLEAN. The schedules are sealed and the Approvals
+        # immutable, so a second run's freshly minted document cannot be
+        # applied over the first's; and the point is re-made, because the
+        # first run TAMPERED with its segments. All of it is this run's own.
+        for kind, name in (("rehearsalschedule", REHEARSAL_UNAVAILABLE_SCHEDULE),
+                           ("rehearsalschedule", REHEARSAL_VERIFY_SCHEDULE),
+                           ("approval", f"{REHEARSAL_UNAVAILABLE_SCHEDULE}-standing"),
+                           ("approval", f"{REHEARSAL_VERIFY_SCHEDULE}-standing"),
+                           ("backup", REHEARSAL_FAULT_POINT)):
+            obj = get_opt(kind, name)
+            if obj is not None and (obj["metadata"].get("labels") or {}).get(
+                    "logweir.dev/test-owner") == OWNER:
+                run(KN + ["delete", kind, name, "--wait=true"], check=False)
         work = pathlib.Path(tempfile.mkdtemp(prefix=f"{OWNER}-l6f-", dir="/tmp"))
         work.chmod(0o700)
         approver_key = mint_signing_key(f"{OWNER}-l6f-approver")
