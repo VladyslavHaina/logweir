@@ -3046,6 +3046,29 @@ def test_a_minted_value_is_never_read_as_an_option() -> None:
         not all(_re.fullmatch(r"[0-9a-f]{48}", v) for v in planted))
 
 
+def test_a_slot_due_before_creation_is_never_fired() -> None:
+    slot = "20260923-155400"
+    early, later = "logweir-backup-s-20260923-155400", "logweir-backup-s-20260923-160300"
+    ok_status = {"status": {"conditions": [{
+        "type": "Ready", "status": "True", "reason": "Scheduled",
+        "message": f"slot {slot} came due before this schedule was created at "
+                   "2026-09-23T16:00:05Z; a slot due before its schedule existed is never fired"}]}}
+    rule = d3.creation_bound_held
+    ok = rule(ok_status, [later], early, slot, later, ok_status)
+    row("creation bound: the 2ee83c5 shape passes", all(ok.values()), str(ok))
+    row("creation bound: f49849d's shape (the early slot fired) is REFUSED",
+        not all(rule(ok_status, [early, later], early, slot, later, ok_status).values()))
+    missed = {"status": dict(ok_status["status"], lastMissedSlot=slot, missedSlots={"count": 1})}
+    row("creation bound: the early slot counted missed is REFUSED",
+        not all(rule(missed, [later], early, slot, later, ok_status).values()))
+    quiet = {"status": {"conditions": [{"type": "Ready", "status": "True", "reason": "Scheduled",
+                                        "message": "the next firing is later"}]}}
+    row("creation bound: a Ready that does not name the early slot is REFUSED",
+        not all(rule(quiet, [later], early, slot, later, quiet).values()))
+    row("creation bound: a schedule that never fires (no later child) is REFUSED",
+        not all(rule(ok_status, [], early, slot, later, ok_status).values()))
+
+
 def test_the_redactor_keeps_pod_specs_valid_json_and_still_redacts() -> None:
     spec = json.dumps({"automountServiceAccountToken": False, "token": "abcdef123456"})
     out = d3.redact(spec)

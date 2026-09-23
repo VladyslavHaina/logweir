@@ -12493,6 +12493,100 @@ def phase_order_violations(phases: list[str]) -> list[str]:
 # `preview` dying on `retentionpolicy "keep-b" not found` and took the other
 # four down with it (lab-refresh-5 §8.4, confirmed again in lab-refresh-6 §16).
 # `bounded_retry` therefore runs after the phases that need `keep-b`.
+# ---------------------------------------------------------------------------
+# lab-refresh-9 — SCHEDULE-FIRES-SLOT-BEFORE-CREATION (ctl-batch-1 row 2)
+# ---------------------------------------------------------------------------
+#
+# `2ee83c5` bounds every slot-bearing decision by `metadata.creationTimestamp`:
+# a slot that came due BEFORE the schedule existed is never fired and never
+# counted missed (D1 row 5a). The live row creates a schedule mid-hour whose
+# cron names two minutes: one a few minutes BEFORE creation (inside the default
+# one-hour starting deadline, so an unbounded controller WOULD fire it — that is
+# what lab-refresh-8 measured at 00:53Z for a 00:30Z slot) and one a few minutes
+# AFTER. PASS requires no child for the early slot, `Ready=True/Scheduled`
+# naming the early slot and the creation instant, no `lastMissedSlot` and no
+# missed count, and then a child for the later slot — the control that the
+# schedule fires at all.
+
+SCHED_BOUND = "sched-bound"
+SCHED_BOUND_DEST = "dest-sched"
+
+
+def schedule_slot_name(schedule: str, slot: dt.datetime) -> str:
+    return f"logweir-backup-{schedule}-{slot.strftime('%Y%m%d-%H%M%S')}"
+
+
+def creation_bound_held(after_wait: dict[str, Any], children: list[str], early_child: str,
+                        early_slot: str, later_child: str,
+                        at_end: dict[str, Any]) -> dict[str, bool]:
+    """ctl-batch-1's row, clause by clause (pure, for the twin)."""
+    st = (after_wait or {}).get("status") or {}
+    ready = next((c for c in (st.get("conditions") or []) if c.get("type") == "Ready"), {})
+    end = (at_end or {}).get("status") or {}
+    missed = lambda s: ((s.get("missedSlots") or {}).get("count") or 0)  # noqa: E731
+    return {
+        "no Backup exists for the slot that came due before creation": early_child not in children,
+        "Ready=True/Scheduled names that slot and says it came due before creation":
+            ready.get("status") == "True" and ready.get("reason") == "Scheduled"
+            and early_slot in str(ready.get("message") or "")
+            and "came due before this schedule was created" in str(ready.get("message") or ""),
+        "no lastMissedSlot and no missed count, after the wait and at the end":
+            not st.get("lastMissedSlot") and missed(st) == 0
+            and not end.get("lastMissedSlot") and missed(end) == 0,
+        "the control: the first slot after creation fired its child": later_child in children,
+    }
+
+
+def schedule_creation_bound() -> None:
+    evidence: list[str] = []
+    apply(destination(SCHED_BOUND_DEST, BUCKET_B, prefix="sched"))
+    wait_for("backupdestination", SCHED_BOUND_DEST,
+             lambda o: condition(o, "Valid").get("status") == "True", seconds=180, what="Valid=True")
+    if get_opt("backupschedule", SCHED_BOUND) is not None:
+        run(KN + ["delete", "backupschedule", SCHED_BOUND, "--wait=true"])
+    # Never straddle a minute edge on the early side: start at :05 past.
+    while dt.datetime.now(dt.timezone.utc).second > 40:
+        time.sleep(5)
+    t0 = dt.datetime.now(dt.timezone.utc).replace(second=0, microsecond=0)
+    early = t0 - dt.timedelta(minutes=6)
+    later = t0 + dt.timedelta(minutes=3)
+    body = schedule_object(SCHED_BOUND, SCHED_BOUND_DEST)
+    body["spec"]["schedule"] = f"{early.minute},{later.minute} * * * *"
+    body["spec"]["suspend"] = False
+    created = apply(body)
+    created_at = created["metadata"]["creationTimestamp"]
+    early_child = schedule_slot_name(SCHED_BOUND, early)
+    later_child = schedule_slot_name(SCHED_BOUND, later)
+    early_slot = early.strftime("%Y%m%d-%H%M%S")  # the controller's slot spelling
+    time.sleep(60)
+    after_wait = get("backupschedule", SCHED_BOUND)
+    children_early = [b["metadata"]["name"] for b in lst("backups")
+                      if b["metadata"]["name"].startswith(f"logweir-backup-{SCHED_BOUND}-")]
+    # The control: the later slot fires within its window.
+    deadline = time.time() + (later - dt.datetime.now(dt.timezone.utc)).total_seconds() + 240
+    children = children_early
+    while time.time() < deadline and later_child not in children:
+        time.sleep(10)
+        children = [b["metadata"]["name"] for b in lst("backups")
+                    if b["metadata"]["name"].startswith(f"logweir-backup-{SCHED_BOUND}-")]
+    at_end = get("backupschedule", SCHED_BOUND)
+    run(KN + ["patch", "backupschedule", SCHED_BOUND, "--type=merge", "-p",
+              json.dumps({"spec": {"suspend": True}})], check=False)
+    clauses = creation_bound_held(after_wait, children_early + [c for c in children
+                                                                if c not in children_early],
+                                  early_child, early_slot, later_child, at_end)
+    evidence.append(artifact("schedule-bound/01-schedule.json", {
+        "createdAt": created_at, "cron": body["spec"]["schedule"], "earlySlot": early_slot,
+        "laterSlot": later.strftime("%Y-%m-%dT%H:%M:%SZ"), "earlyChild": early_child,
+        "laterChild": later_child, "childrenAfterWait": children_early, "childrenAtEnd": children,
+        "afterWait": after_wait, "atEnd": at_end, "clauses": clauses}))
+    check("schedule-slot-before-creation-is-never-fired", "PLAT-04.2", all(clauses.values()),
+          f"BackupSchedule {SCHED_BOUND} created {created_at} with `{body['spec']['schedule']}`: "
+          f"early slot {early_slot} (inside the 1 h starting deadline), later slot "
+          f"{later.strftime('%H:%M')}Z; children after 60 s {children_early}, at end {children}. "
+          + "; ".join(f"{k}={v}" for k, v in clauses.items()), evidence)
+
+
 PHASES = [
     "setup", "catalog", "catalog_cases", "catalog_scale", "catalog_access", "retention", "legal_hold", "lifecycle",
     "enforce_guards", "packaging", "preview",
@@ -12502,6 +12596,7 @@ PHASES = [
     "protection_verdicts",
     "rehearsal", "refused_point",
     "operation_states", "notify_transport", "rehearsal_faults", "object_lock", "shared_set",
+    "schedule_creation_bound",
     "control", "report", "cleanup",
 ]
 
