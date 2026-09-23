@@ -6162,7 +6162,7 @@ fn a_contested_or_unreadable_trust_is_never_the_rosters_answer() {
     );
     assert!(row.message.contains("policy-one") && row.message.contains("policy-two"));
     assert!(
-        facts.restore_allowlist().is_empty(),
+        facts.restore_allowlist().is_some_and(<[String]>::is_empty),
         "a contested namespace allows no target"
     );
 
@@ -6176,7 +6176,7 @@ fn a_contested_or_unreadable_trust_is_never_the_rosters_answer() {
     let row = signer(&unreadable, Some(RUNNER_KEY_ID));
     assert_eq!(
         (row.state, row.code),
-        (CheckState::Unknown, CheckCode::SignerTrustUnknown),
+        (CheckState::Unknown, CheckCode::TrustUnknown),
         "{row:?}"
     );
 }
@@ -6198,7 +6198,10 @@ fn with_no_governing_policy_the_roster_answers_exactly_as_before() {
                 "{key:?}"
             );
         }
-        assert_eq!(facts.restore_allowlist(), ["roster-scratch-id".to_string()]);
+        assert_eq!(
+            facts.restore_allowlist(),
+            Some(&["roster-scratch-id".to_string()][..])
+        );
     }
     let unconfigured =
         listing_roster().with_resolution(Ok(&weirkeeper::trust::resolve_in(SWEEP_NS, &[], None)));
@@ -6213,7 +6216,10 @@ fn with_no_governing_policy_the_roster_answers_exactly_as_before() {
 #[test]
 fn the_restore_allowlist_is_the_governing_policys() {
     let facts = resolved(&[governing_policy("team-a-trust", json!({}))]);
-    assert_eq!(facts.restore_allowlist(), ["policy-scratch-id".to_string()]);
+    assert_eq!(
+        facts.restore_allowlist(),
+        Some(&["policy-scratch-id".to_string()][..])
+    );
     let inputs = Inputs {
         operation: PreflightOperation::Restore,
         roster: facts,
@@ -6297,5 +6303,83 @@ async fn a_governed_namespaces_backup_readiness_judges_the_signer_by_its_policy(
             .iter()
             .any(|r| r["kind"] == "TrustPolicy" && r["name"] == "team-a-trust"),
         "{referents:?}"
+    );
+}
+
+/// **An unreadable policy list never lets the allowlist fall back to the
+/// roster** (review LOW-1). The roster allows `roster-scratch-id`; with the
+/// `TrustPolicy` list forbidden, a scratch restore's `target.clusterIdentity`
+/// against that id is `unknown`/`TrustUnknown` — so the preflight cannot read
+/// `ready` on a guess — and a backup's source check is `unknown` too. A row
+/// decided before the allowlist (the broker names a different cluster than the
+/// object records) keeps its own answer.
+///
+/// KILLS: `restore_allowlist` answering the roster's list for `Unreadable` (the
+/// restore row reads `TargetAllowed`, the aggregate `ready`).
+#[test]
+fn an_unreadable_trust_leaves_the_allowlist_unknown_and_the_preflight_not_ready() {
+    let forbidden = kube::Error::Api(kube::error::ErrorResponse {
+        status: "Failure".to_string(),
+        message: "forbidden".to_string(),
+        reason: "Forbidden".to_string(),
+        code: 403,
+    });
+    let unreadable = listing_roster().with_resolution(Err(&forbidden));
+    assert_eq!(unreadable.restore_allowlist(), None);
+
+    let restore = Inputs {
+        operation: PreflightOperation::Restore,
+        roster: unreadable.clone(),
+        plan: Some(plan_facts("restore-", "s3-bucket", None)),
+        ..Inputs::default()
+    };
+    let identity = |inputs: &Inputs, id: CheckId, observed: &str| {
+        let relayed = pf::RelayFacts {
+            cluster_id: Some(observed.to_string()),
+            signer_key_id: None,
+        };
+        inputs
+            .controller_outcomes(&relayed, None, true, None, now())
+            .0
+            .into_iter()
+            .find(|c| c.id == id)
+            .expect("the identity row")
+    };
+    let row = identity(
+        &restore,
+        CheckId::TargetClusterIdentity,
+        "roster-scratch-id",
+    );
+    assert_eq!(
+        (row.state, row.code),
+        (CheckState::Unknown, CheckCode::TrustUnknown),
+        "{row:?}"
+    );
+    assert_eq!(
+        logweir_core::check_contract::aggregate(&[row]),
+        OverallState::Unknown,
+        "a blocking unknown row keeps the verdict from reading ready"
+    );
+
+    let backup = Inputs {
+        operation: PreflightOperation::Backup,
+        roster: unreadable,
+        ..Inputs::default()
+    };
+    let row = identity(&backup, CheckId::ConnectionClusterIdentity, "prod-id");
+    assert_eq!(
+        (row.state, row.code),
+        (CheckState::Unknown, CheckCode::TrustUnknown)
+    );
+
+    let changed = Inputs {
+        cluster_recorded_id: Some("recorded-id".to_string()),
+        ..backup
+    };
+    let row = identity(&changed, CheckId::ConnectionClusterIdentity, "prod-id");
+    assert_eq!(
+        row.code,
+        CheckCode::ClusterIdentityChanged,
+        "a fact about the broker is not a fact about trust"
     );
 }

@@ -982,17 +982,18 @@ impl RosterFacts {
     /// `allowed-clusters.json` is rendered from (`restore.rs`, from the
     /// resolved trust): the governing policy's `allowedTargetClusterIds`, the
     /// roster's `allowedClusterIds` when none governs, and nothing at all in
-    /// a contested namespace. An UNREADABLE policy list keeps the roster's
-    /// list — this row's answer before policies were consulted — because the
-    /// row's vocabulary has no unknown for it; the runner's own allowlist is
-    /// rendered from the resolved trust at admission, which refuses a
-    /// namespace whose trust cannot be read, so nothing is admitted on it.
+    /// a contested namespace. `None` when the policy list could not be READ:
+    /// there is no allowlist to compare against, and the roster's is not it
+    /// (review LOW-1 — falling back to it read `ready` for a target the
+    /// governing policy may not list). [`cluster_identity_under_trust`] turns
+    /// that into `unknown`, `TrustUnknown`.
     #[must_use]
-    pub fn restore_allowlist(&self) -> &[String] {
+    pub fn restore_allowlist(&self) -> Option<&[String]> {
         match &self.governing {
-            None | Some(GoverningTrust::Unreadable(_)) => &self.allowed_cluster_ids,
-            Some(GoverningTrust::Policy(trust)) => &trust.allowed_target_cluster_ids,
-            Some(GoverningTrust::Conflict(_)) => &[],
+            None => Some(&self.allowed_cluster_ids),
+            Some(GoverningTrust::Policy(trust)) => Some(&trust.allowed_target_cluster_ids),
+            Some(GoverningTrust::Conflict(_)) => Some(&[]),
+            Some(GoverningTrust::Unreadable(_)) => None,
         }
     }
 
@@ -1237,7 +1238,7 @@ pub fn signer_rostered_row(
 /// `TrustRosterNotLoaded` (trust resolved, and verifies nothing), a key the
 /// policy does not carry for `EvidenceSigning` is `SignerNotRostered`, and a
 /// listed key that may not sign now is `SignerKeyExpired` naming the refusal.
-/// A policy list that could not be read is `unknown`, `SignerTrustUnknown`.
+/// A policy list that could not be read is `unknown`, `TrustUnknown`.
 fn signer_policy_row(
     operation: PreflightOperation,
     governing: &GoverningTrust,
@@ -1267,7 +1268,7 @@ fn signer_policy_row(
                 operation,
                 id,
                 CheckState::Unknown,
-                CheckCode::SignerTrustUnknown,
+                CheckCode::TrustUnknown,
                 now,
             )
             .with_message(detail)
@@ -1369,6 +1370,83 @@ fn signer_policy_row(
             }
         }
     }
+}
+
+/// [`cluster_identity_row`] against the namespace's trust, or `unknown` when
+/// that trust could not be read and the row's answer would depend on the
+/// allowlist.
+///
+/// The allowlist decides a scratch restore's `TargetNotAllowlisted` and a
+/// backup's `SourceIsAllowlistedTarget`. With the `TrustPolicy` list
+/// unreadable neither can be answered, so a verdict that is `ready` (or that
+/// refused only for the allowlist) becomes `unknown`, `TrustUnknown` — a
+/// blocking row, so the preflight can never read `ready` on a guess. A row
+/// decided BEFORE the allowlist (identity not observed, identity changed, the
+/// target is the source) keeps its own answer: those are facts about the
+/// broker, not about trust.
+#[must_use]
+pub fn cluster_identity_under_trust(
+    operation: PreflightOperation,
+    observed: Option<&str>,
+    recorded: Option<&str>,
+    trust: &RosterFacts,
+    source_cluster_id: Option<&str>,
+    scratch: bool,
+    now: DateTime<Utc>,
+) -> CheckOutcome {
+    if let Some(allowlist) = trust.restore_allowlist() {
+        return cluster_identity_row(
+            operation,
+            observed,
+            recorded,
+            allowlist,
+            source_cluster_id,
+            scratch,
+            now,
+        );
+    }
+    let row = cluster_identity_row(
+        operation,
+        observed,
+        recorded,
+        &[],
+        source_cluster_id,
+        scratch,
+        now,
+    );
+    let consults_the_allowlist = match operation {
+        PreflightOperation::Restore => scratch,
+        PreflightOperation::Backup => true,
+        _ => false,
+    };
+    let answered_by_the_allowlist =
+        row.state == CheckState::Ready || row.code == CheckCode::TargetNotAllowlisted;
+    if !(consults_the_allowlist && answered_by_the_allowlist) {
+        return row;
+    }
+    let detail = match &trust.governing {
+        Some(GoverningTrust::Unreadable(detail)) => detail.clone(),
+        _ => "the namespace's trust could not be read".to_string(),
+    };
+    let mut unknown = outcome(
+        operation,
+        row.id,
+        CheckState::Unknown,
+        CheckCode::TrustUnknown,
+        now,
+    )
+    .with_message(&format!(
+        "{detail}, so whether this cluster is on the namespace's restore allowlist has no answer"
+    ))
+    .with_remedy(
+        "Grant the controller list/watch on trustpolicies (the chart's ClusterRole does), then \
+         run this check again.",
+    )
+    .with_scope(trust.scope());
+    if let Some(observed) = observed {
+        unknown = unknown.with_fact("clusterId", observed);
+    }
+    unknown
 }
 
 /// `connection.clusterIdentity` / `target.clusterIdentity` — the **J+C** row.
@@ -3951,11 +4029,11 @@ impl Inputs {
                 self.cluster_name.as_deref().unwrap_or_default(),
                 now,
             ));
-            out.push(cluster_identity_row(
+            out.push(cluster_identity_under_trust(
                 op,
                 facts.cluster_id.as_deref(),
                 self.cluster_recorded_id.as_deref(),
-                self.roster.restore_allowlist(),
+                &self.roster,
                 self.source_cluster_id.as_deref(),
                 self.plan.as_ref().is_some_and(PlanFacts::scratch),
                 now,
