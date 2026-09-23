@@ -2256,7 +2256,13 @@ pub fn signer_recheck(
         &IndependentObservation::none(),
         now,
     );
-    if verdict.result != TrustResult::Valid {
+    // A PASS IS `Valid` ON A BASIS THE BADGE ADMITS, not `Valid` alone
+    // (TRUST-VALID-BASIS-CLASS). `decide` pairs `Valid` with
+    // `Current`/`Historical` only, so this reads the same today; the
+    // allow-list is what keeps it so.
+    let pass = verdict.result == TrustResult::Valid
+        && crate::verification::ValidBasis::of_core(verdict.basis).is_pass();
+    if !pass {
         return SignerRecheck::Untrusted {
             key_id: key_id.to_string(),
             reason: verdict

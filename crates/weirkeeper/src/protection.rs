@@ -55,7 +55,8 @@ use crate::crds::protection_policy::{
     AlertDelivery, AlertEntry, AlertKind, AvailablePoint, LastAttempt, MissedSummary,
     Notifications, ProtectionPolicySpec, RehearsalSummary, ScheduleSummary,
 };
-use crate::crds::{LocalRef, Time};
+use crate::crds::{LocalRef, Time, TrustBasis as TrustBlock};
+use crate::verification::ValidBasis;
 
 // ===========================================================================
 // Bounds
@@ -397,7 +398,8 @@ impl Evidence {
         !matches!(self, Self::NotAttempted)
     }
 
-    /// Read a `Backup.status.evidence.verification` pair into this vocabulary.
+    /// Read a `Backup.status.evidence.verification` result and its `trust`
+    /// block into this vocabulary.
     ///
     /// `None` result — no verification block at all — is
     /// [`Evidence::NotAttempted`], which is what an unverified point IS. It is
@@ -416,20 +418,36 @@ impl Evidence {
     /// and never deferred to the catalog (final review sweep, 2026-09-22; the
     /// rehearsal join applies the same rule in
     /// `controllers::rehearsal_schedule::candidate_from_backup`).
+    ///
+    /// # A `Valid` is read WITH its basis (TRUST-VALID-BASIS-CLASS)
+    ///
+    /// Through [`ValidBasis`], the rule the controller's badge uses: a pass on
+    /// `Current`, on `Historical` ([`Evidence::ValidHistorical`]) and on no
+    /// `trust` block at all (D3 §12). `Unverified` is "nothing compared yet"
+    /// and reads as [`Evidence::NotAttempted`], exactly as the badge names it;
+    /// every other basis — `RecordedBeforeRevocation`, `None`, a block with no
+    /// basis, a word this build does not know — is [`Evidence::Untrusted`].
+    /// Before this, `(Some("Valid"), _) => Valid` counted the `Valid` +
+    /// `Unverified` an interim build left on lab objects (`03c2a85` ..
+    /// `e247cf9`) as protecting evidence.
     #[must_use]
-    pub fn from_verification(result: Option<&str>, trust_basis: Option<&str>) -> Self {
-        match (result, trust_basis) {
-            (Some("Valid"), Some("Historical")) => Self::ValidHistorical,
-            (Some("Valid"), _) => Self::Valid,
-            (Some("Invalid"), _) => Self::Invalid,
-            (Some("Untrusted"), _) => Self::Untrusted,
+    pub fn from_verification(result: Option<&str>, trust: Option<&TrustBlock>) -> Self {
+        match result {
+            Some("Valid") => match ValidBasis::of_block(trust) {
+                ValidBasis::Absent | ValidBasis::Current => Self::Valid,
+                ValidBasis::Historical => Self::ValidHistorical,
+                ValidBasis::Unverified => Self::NotAttempted,
+                ValidBasis::Refused => Self::Untrusted,
+            },
+            Some("Invalid") => Self::Invalid,
+            Some("Untrusted") => Self::Untrusted,
             // `Pending` IS NOT A VERDICT (D2 §3.9 step 3): an evidence-fetch
             // Job is still reading the document and nothing about it has been
             // decided — exactly what `NotAttempted` means here. Read as a
             // refusal, every freshly finished destination-backed run would
             // page as `Unprotected` for the seconds its fetch takes.
-            (None | Some("NotAttempted" | "Pending"), _) => Self::NotAttempted,
-            (Some(_), _) => Self::Untrusted,
+            None | Some("NotAttempted" | "Pending") => Self::NotAttempted,
+            Some(_) => Self::Untrusted,
         }
     }
 }

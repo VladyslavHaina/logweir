@@ -62,6 +62,7 @@ use crate::crds::recovery_catalog::{
 };
 use crate::crds::{trust_roster::TrustRosterSpec, Time};
 use crate::job::{ConfigMapMount, EnvFromSecret, RunnerJobSpec, RunnerOwner};
+use crate::verification::ValidBasis;
 
 // ===========================================================================
 // The plan kind, and the one thing this module could not take from D2 yet
@@ -250,10 +251,29 @@ pub fn selectable(availability: Availability, verification: Verification) -> boo
 /// catalog row may overrule. The same rule as
 /// `protection::evidence_objective_met` and
 /// `controllers::rehearsal_schedule::candidate_from_backup`.
+///
+/// # `Valid` is a pass only on a basis [`ValidBasis`] admits (TRUST-VALID-BASIS-CLASS)
+///
+/// `basis` is the verdict's `trust` block, read by the one rule the
+/// controller's badge uses. A `Valid` on `Unverified` has compared nothing yet
+/// and defers like `NotAttempted`, which is what the badge calls it; a `Valid`
+/// on `RecordedBeforeRevocation`, `None`, a missing basis or an unknown word is
+/// a verdict this installation does not accept — a refusal. `basis` is not
+/// read for any other result.
 #[must_use]
-pub fn is_reached_refusal(result: Option<&str>) -> bool {
-    !matches!(result, None | Some("NotAttempted" | "Pending" | "Valid"))
+pub fn is_reached_refusal(result: Option<&str>, basis: ValidBasis) -> bool {
+    match result {
+        None | Some("NotAttempted" | "Pending") => false,
+        Some("Valid") => basis == ValidBasis::Refused,
+        Some(_) => true,
+    }
 }
+
+/// The word a refusal of a `Valid` on a basis [`ValidBasis`] refuses carries:
+/// the verdict is one this installation does not accept, which is what
+/// `Untrusted` says. Publishing `Valid` as the reason a point was refused would
+/// read as a contradiction.
+pub const REFUSED_VALID_VERDICT: &str = "Untrusted";
 
 /// The points whose own `Backup` the controller REFUSED, keyed for a join
 /// against view rows.
@@ -323,6 +343,9 @@ pub struct BackupVerdictFacts {
     pub receipt_sha256: Option<String>,
     /// `status.evidence.verification.result`.
     pub result: VerdictField,
+    /// `status.evidence.verification.trust`, read by [`ValidBasis`] — the
+    /// half of the refusal rule a `Valid` needs.
+    pub basis: ValidBasis,
 }
 
 impl BackupVerdictFacts {
@@ -341,6 +364,11 @@ impl BackupVerdictFacts {
             backup_id: text(status.and_then(|s| s.get("backupId"))),
             receipt_sha256: text(evidence.and_then(|e| e.get("receiptSha256"))),
             result: verdict_at(object, &["status", "evidence", "verification", "result"]),
+            basis: ValidBasis::of_json(
+                evidence
+                    .and_then(|e| e.get("verification"))
+                    .and_then(|v| v.get("trust")),
+            ),
         }
     }
 
@@ -360,6 +388,11 @@ impl BackupVerdictFacts {
                 .and_then(|e| e.verification.as_ref())
                 .and_then(|v| v.result.clone())
                 .map_or(VerdictField::Absent, VerdictField::Word),
+            basis: ValidBasis::of_block(
+                evidence
+                    .and_then(|e| e.verification.as_ref())
+                    .and_then(|v| v.trust.as_ref()),
+            ),
         }
     }
 }
@@ -413,7 +446,8 @@ impl ControllerRefusals {
         for fact in facts {
             let result: String = match &fact.result {
                 VerdictField::Absent => continue,
-                VerdictField::Word(word) if !is_reached_refusal(Some(word)) => continue,
+                VerdictField::Word(word) if !is_reached_refusal(Some(word), fact.basis) => continue,
+                VerdictField::Word(word) if word == "Valid" => REFUSED_VALID_VERDICT.to_string(),
                 VerdictField::Word(word) => word.chars().take(MAX_REFUSAL_LEN).collect(),
                 VerdictField::Unreadable => UNREADABLE_VERDICT.to_string(),
             };
@@ -832,7 +866,9 @@ pub fn classify_verification(
 /// | `decide` | view |
 /// |---|---|
 /// | `Valid`, basis `Current` | `Verified` |
-/// | `Valid`, basis `Historical` (or recorded before a revocation) | `VerifiedHistorical` |
+/// | `Valid`, basis `Historical` | `VerifiedHistorical` |
+/// | `Valid`, basis `Unverified` | `NotAttempted` |
+/// | `Valid`, any other basis | as `Untrusted` below — never selectable |
 /// | `Untrusted`, `Revoked` or `RecordedBeforeRevocation` | `Revoked` |
 /// | `Untrusted`, `SignedOutsideValidity` — before `notBefore`, after the accepted bound, in the future, against a key whose window has not opened, or no instant at all | `Invalid` |
 /// | `Untrusted`, `UntrustedSigner`/`KeyUsageMismatch` | `UntrustedSigner` |
@@ -841,10 +877,7 @@ fn decided(
     signed_at: Option<DateTime<Utc>>,
     now: DateTime<Utc>,
 ) -> Verification {
-    use logweir_core::trust::{
-        ClaimAbsence, EvidenceClaim, IndependentObservation, KeyUsage, TrustBasis, TrustResult,
-        UntrustReason,
-    };
+    use logweir_core::trust::{ClaimAbsence, EvidenceClaim, IndependentObservation, KeyUsage};
     let claim = signed_at.map_or(
         EvidenceClaim::absent(ClaimAbsence::FieldAbsent),
         EvidenceClaim::at,
@@ -856,20 +889,39 @@ fn decided(
         &IndependentObservation::none(),
         now,
     );
-    match (verdict.result, verdict.basis, verdict.reason) {
-        (TrustResult::Valid, TrustBasis::Current, _) => Verification::Verified,
-        (TrustResult::Valid, _, _) => Verification::VerifiedHistorical,
-        (
-            TrustResult::Untrusted,
-            _,
-            Some(UntrustReason::Revoked | UntrustReason::RecordedBeforeRevocation),
-        ) => Verification::Revoked,
-        (
-            TrustResult::Untrusted,
-            _,
-            Some(UntrustReason::UntrustedSigner | UntrustReason::KeyUsageMismatch),
-        ) => Verification::UntrustedSigner,
-        (TrustResult::Untrusted, _, _) => Verification::Invalid,
+    verification_of_verdict(&verdict)
+}
+
+/// [`decided`]'s mapping of one [`logweir_core::trust::Verdict`] onto the
+/// view's vocabulary — the table above.
+///
+/// # AN ALLOW-LIST (TRUST-VALID-BASIS-CLASS)
+///
+/// This used to read `(Valid, Current) => Verified, (Valid, _) =>
+/// VerifiedHistorical`: a catch-all that made any `Valid` selectable whatever
+/// its basis. `decide` pairs `Valid` with `Current`/`Historical` only, so the
+/// wildcard was unreachable — and one edit away from a selectable point on
+/// `RecordedBeforeRevocation`. A `Valid` is now read by [`ValidBasis`], the
+/// rule the controller's badge uses, and a basis that is not a pass falls to
+/// the `Untrusted` rows.
+#[must_use]
+pub fn verification_of_verdict(verdict: &logweir_core::trust::Verdict) -> Verification {
+    use logweir_core::trust::{TrustBasis, TrustResult, UntrustReason};
+    if verdict.result == TrustResult::Valid {
+        match ValidBasis::of_core(verdict.basis) {
+            ValidBasis::Absent | ValidBasis::Current => return Verification::Verified,
+            ValidBasis::Historical => return Verification::VerifiedHistorical,
+            ValidBasis::Unverified => return Verification::NotAttempted,
+            ValidBasis::Refused => {}
+        }
+    }
+    match (verdict.basis, verdict.reason) {
+        (_, Some(UntrustReason::Revoked | UntrustReason::RecordedBeforeRevocation))
+        | (TrustBasis::RecordedBeforeRevocation, _) => Verification::Revoked,
+        (_, Some(UntrustReason::UntrustedSigner | UntrustReason::KeyUsageMismatch)) => {
+            Verification::UntrustedSigner
+        }
+        _ => Verification::Invalid,
     }
 }
 

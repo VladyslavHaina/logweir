@@ -861,9 +861,7 @@ fn candidate_from_backup(
         .and_then(|e| e.verification.as_ref());
     let evidence = p::Evidence::from_verification(
         verification.and_then(|v| v.result.as_deref()),
-        verification
-            .and_then(|v| v.trust.as_ref())
-            .and_then(|t| t.basis.as_deref()),
+        verification.and_then(|v| v.trust.as_ref()),
     );
     let receipt_sha256 = status
         .and_then(|s| s.evidence.as_ref())

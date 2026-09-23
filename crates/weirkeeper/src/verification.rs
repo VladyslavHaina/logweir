@@ -398,6 +398,29 @@ impl VerificationResult {
         }
     }
 
+    /// Whether this verification is a PASS: `Valid` on a basis
+    /// [`ValidBasis::is_pass`] admits — the same rule a stored block is read
+    /// by, applied before it is stored.
+    ///
+    /// Gates the receipt-derived facts (`records`, `capture`) the `Backup`
+    /// reconciler copies onto a status only from a document some accepted key
+    /// attested to. No projection (a `result` set without the trust layer) is
+    /// D3 §12's absent block.
+    #[must_use]
+    pub fn is_pass(&self) -> bool {
+        self.result == VerificationVerdict::Valid
+            && self
+                .trust
+                .as_ref()
+                .map_or(ValidBasis::Absent, |p| {
+                    ValidBasis::of_core(
+                        p.verdict(&IndependentObservation::none(), self.verified_at)
+                            .basis,
+                    )
+                })
+                .is_pass()
+    }
+
     /// An `Invalid` carrying `detail`.
     #[must_use]
     pub fn invalid(payload_type: &str, detail: impl Into<String>) -> Self {
@@ -1101,22 +1124,125 @@ fn valid_verification(status: &Value) -> Result<(&str, &str, bool), &'static str
     // nobody intended. That is the argument this module makes for reading the
     // basis clause at all, so the arm that keeps the old rule must not be the
     // one that swallows a shape the old rule never had.
-    let historical = match v.and_then(|v| v.get("trust")) {
-        None => false,
-        Some(trust) => match trust.get("basis").and_then(Value::as_str) {
-            Some(TRUST_BASIS_CURRENT) => false,
-            Some(TRUST_BASIS_HISTORICAL) => true,
-            // THE VERDICT IS THE OLD ONE AND THE POLICY HAS NOT BEEN APPLIED
-            // TO IT YET — `TRUST-UPGRADE-SIGNEDAT`. Not green, and the reason
-            // an operator reads is the honest one: nothing was attempted. The
-            // arm below would render `VerificationUntrusted` over a `Valid`
-            // result nobody has refused, which is the same dishonesty in the
-            // other direction from a green badge.
-            Some(TRUST_BASIS_UNVERIFIED) => return Err(REASON_VERIFICATION_NOT_ATTEMPTED),
-            _ => return Err(REASON_VERIFICATION_UNTRUSTED),
-        },
-    };
-    Ok((at, key, historical))
+    //
+    // The rule itself is [`ValidBasis`], shared with every other reader of a
+    // stored `Valid` (TRUST-VALID-BASIS-CLASS).
+    match ValidBasis::of_json(v.and_then(|v| v.get("trust"))) {
+        ValidBasis::Absent | ValidBasis::Current => Ok((at, key, false)),
+        ValidBasis::Historical => Ok((at, key, true)),
+        // THE VERDICT IS THE OLD ONE AND THE POLICY HAS NOT BEEN APPLIED TO IT
+        // YET — `TRUST-UPGRADE-SIGNEDAT`. Not green, and the reason an
+        // operator reads is the honest one: nothing was attempted. The arm
+        // below would render `VerificationUntrusted` over a `Valid` result
+        // nobody has refused, which is the same dishonesty in the other
+        // direction from a green badge.
+        ValidBasis::Unverified => Err(REASON_VERIFICATION_NOT_ATTEMPTED),
+        ValidBasis::Refused => Err(REASON_VERIFICATION_UNTRUSTED),
+    }
+}
+
+/// How a stored `verification.result: Valid` reads once its `trust` block is
+/// applied — **the one rule** every reader of a stored `Valid` uses
+/// (TRUST-VALID-BASIS-CLASS).
+///
+/// D3 §7.4: "the green rule becomes `Valid ∧ (basis Current|Historical) ∧ run
+/// success`". D3 §12: "`trust` absent → … the badge uses the pre-existing
+/// rule". So a `Valid` is a PASS on exactly three shapes — no trust block at
+/// all, `basis: Current`, `basis: Historical` — and on nothing else. This is
+/// the allow-list form of that sentence: a basis a later build invents, a
+/// `null`, a block with no basis, the string `None` and
+/// `RecordedBeforeRevocation` all land on a non-pass arm without anyone having
+/// to name them.
+///
+/// # Why this exists (`TRUST-STATE-RBR-VERIFIED` and its class)
+///
+/// Four controller readers compared `result == "Valid"` and never read the
+/// basis (`protection::Evidence::from_verification`,
+/// `catalog_view::is_reached_refusal`, the rehearsal join's `selectable`, and
+/// `catalog_view`'s own `decide` mapping), and `logweir-api` published
+/// `verified` over `RecordedBeforeRevocation` for the same reason. None of
+/// them misfired on a verdict a current controller writes — `decide` pairs
+/// `Valid` with `Current`/`Historical` only — but objects written between
+/// `03c2a85` and `e247cf9` carry `Valid` + `Unverified`, and each reader was
+/// one edit away from the API's defect. One function means one place to be
+/// wrong.
+///
+/// # The two non-pass arms are different facts
+///
+/// [`Self::Unverified`] is "nothing has been compared yet"
+/// ([`TrustBasis::Unverified`]): the honest reading is `NotAttempted`, the one
+/// verdict a catalog row may still answer for. [`Self::Refused`] is a verdict
+/// this installation does not accept, or a block this build cannot read: the
+/// honest reading is `Untrusted`, a reached refusal. A caller maps each onto
+/// its own vocabulary; neither is ever a pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValidBasis {
+    /// No `trust` block at all: an object an older controller wrote. A pass,
+    /// under D3 §12's pre-existing rule.
+    Absent,
+    /// `basis: Current`. A pass.
+    Current,
+    /// `basis: Historical`: the key has since been retired, expired or
+    /// superseded and signed while it was valid. A pass, and not a warning.
+    Historical,
+    /// `basis: Unverified`: the policy has not been applied to this verdict
+    /// yet. Not a pass; reads as `NotAttempted`.
+    Unverified,
+    /// Every other shape of a PRESENT block — `RecordedBeforeRevocation`,
+    /// `None`, a missing, `null` or non-string basis, a word this build does
+    /// not know. Not a pass; reads as `Untrusted`.
+    Refused,
+}
+
+impl ValidBasis {
+    /// From the basis word of a block that is present (`Some`) or absent
+    /// (`None`). `Some(None)` is a block with no readable basis.
+    #[must_use]
+    pub fn of_word(block: Option<Option<&str>>) -> Self {
+        match block {
+            None => Self::Absent,
+            Some(Some(TRUST_BASIS_CURRENT)) => Self::Current,
+            Some(Some(TRUST_BASIS_HISTORICAL)) => Self::Historical,
+            Some(Some(TRUST_BASIS_UNVERIFIED)) => Self::Unverified,
+            Some(_) => Self::Refused,
+        }
+    }
+
+    /// From a raw `verification.trust` value. A key that is PRESENT, even as
+    /// `null` or `{}`, is a block: finding F7 (see [`valid_verification`]) —
+    /// "a `trust` key this build cannot read is malformed", not absent.
+    #[must_use]
+    pub fn of_json(trust: Option<&Value>) -> Self {
+        Self::of_word(trust.map(|t| t.get("basis").and_then(Value::as_str)))
+    }
+
+    /// From the typed CRD block. A `trust: null` a typed read sees as `None`
+    /// is absent here; the apiserver prunes a `null` from a non-nullable
+    /// field, so a stored object cannot carry one.
+    #[must_use]
+    pub fn of_block(trust: Option<&crate::crds::TrustBasis>) -> Self {
+        Self::of_word(trust.map(|t| t.basis.as_deref()))
+    }
+
+    /// From [`logweir_core::trust::decide`]'s own basis — a block that is
+    /// always present.
+    #[must_use]
+    pub fn of_core(basis: TrustBasis) -> Self {
+        Self::of_word(Some(Some(basis.as_str())))
+    }
+
+    /// Whether a `Valid` on this basis is a pass.
+    #[must_use]
+    pub fn is_pass(self) -> bool {
+        matches!(self, Self::Absent | Self::Current | Self::Historical)
+    }
+}
+
+/// Whether a stored `verification.result` is a PASS: `Valid` on a basis
+/// [`ValidBasis::is_pass`] admits, and nothing else.
+#[must_use]
+pub fn stored_result_is_pass(result: Option<&str>, basis: ValidBasis) -> bool {
+    result == Some(VerificationVerdict::Valid.as_str()) && basis.is_pass()
 }
 
 /// `trust.basis` for a verdict reached against a key that was current.
@@ -2431,6 +2557,9 @@ pub async fn recover_signing_time(
 /// |---|---|
 /// | `Valid`, basis `Current` | `Verified` |
 /// | `Valid`, basis `Historical` | `VerifiedHistorical` |
+/// | `Valid`, no verdict (D3 §12) | `Verified` |
+/// | `Valid`, basis `Unverified` | `NotAttempted` |
+/// | `Valid`, any other basis ([`ValidBasis::Refused`]) | as `Untrusted` below |
 /// | `Untrusted`, `UntrustedSigner` | `UntrustedSigner` |
 /// | `Untrusted`, `Revoked`/`RecordedBeforeRevocation` | `Revoked` |
 /// | `Untrusted`, any other row | `UntrustedSigner` |
@@ -2456,19 +2585,34 @@ pub fn catalog_verification(
         // A pending fetch has read nothing, which is what `NotAttempted`
         // says; the catalog never sees one, and would not be told otherwise.
         VerificationVerdict::NotAttempted | VerificationVerdict::Pending => "NotAttempted",
-        VerificationVerdict::Valid => match verdict.map(|v| v.basis) {
-            Some(TrustBasis::Historical) => "VerifiedHistorical",
-            _ => "Verified",
-        },
-        VerificationVerdict::Untrusted => match verdict.and_then(|v| v.reason) {
-            Some(UntrustReason::Revoked | UntrustReason::RecordedBeforeRevocation) => "Revoked",
-            _ => "UntrustedSigner",
-        },
+        // THE ALLOW-LIST, NOT "Historical, else Verified" (TRUST-VALID-BASIS-
+        // CLASS): no verdict is D3 §12's absent block; a basis that is not a
+        // pass is read by the rows its own word belongs to.
+        VerificationVerdict::Valid => {
+            match verdict.map_or(ValidBasis::Absent, |v| ValidBasis::of_core(v.basis)) {
+                ValidBasis::Absent | ValidBasis::Current => "Verified",
+                ValidBasis::Historical => "VerifiedHistorical",
+                ValidBasis::Unverified => "NotAttempted",
+                ValidBasis::Refused => untrusted_catalog_word(verdict),
+            }
+        }
+        VerificationVerdict::Untrusted => untrusted_catalog_word(verdict),
     };
     CatalogVerdict {
         state,
         reason: verdict.and_then(|v| v.reason),
         basis: verdict.map(|v| v.basis),
+    }
+}
+
+/// §5.4's word for a verdict this installation does not accept: `Revoked` for
+/// a revocation row (or a `RecordedBeforeRevocation` basis), `UntrustedSigner`
+/// for every other.
+fn untrusted_catalog_word(verdict: Option<&Verdict>) -> &'static str {
+    match verdict.map(|v| (v.basis, v.reason)) {
+        Some((_, Some(UntrustReason::Revoked | UntrustReason::RecordedBeforeRevocation)))
+        | Some((TrustBasis::RecordedBeforeRevocation, _)) => "Revoked",
+        _ => "UntrustedSigner",
     }
 }
 

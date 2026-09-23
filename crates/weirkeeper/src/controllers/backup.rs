@@ -1695,7 +1695,7 @@ async fn evidence_fetch_pass(
                                         window_covered(from_ms, to_ms),
                                     );
                                 }
-                                if result.result == VerificationVerdict::Valid {
+                                if result.is_pass() {
                                     if let Some(records) = records_from_receipt(doc) {
                                         facts.insert("records".to_string(), json!(records));
                                     }
@@ -4779,7 +4779,7 @@ async fn reconcile_backup_inner(
             verified,
             crate::verification::verification_patch_value(block),
         );
-        if result.result == VerificationVerdict::Valid {
+        if result.is_pass() {
             if let Some(status) = evidence_patch
                 .get_mut("status")
                 .and_then(Value::as_object_mut)

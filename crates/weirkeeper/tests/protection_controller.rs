@@ -3145,6 +3145,87 @@ fn an_invalid_verdict_is_unprotected_and_pages_however_good_the_catalog_row_is()
     );
 }
 
+/// **TRUST-VALID-BASIS-CLASS, through the reconciler.** A `Backup` whose
+/// `Valid` sits on a basis the badge refuses is not protecting evidence, and
+/// the reconciler hands `Evidence::from_verification` the whole `trust` block
+/// so it can tell. The unit table is `tests/trust_basis_class.rs`; this row
+/// pins the call site in `controllers::protection_policy`.
+///
+/// MUTANT: pass `None` for the trust block in `candidate_from_backup`
+/// (`controllers/protection_policy.rs`), or revert `from_verification` to the
+/// plain `Valid` check. The `Unverified`, `RecordedBeforeRevocation` and
+/// `None` rows go `Healthy` and fail; the `Current`, `Historical` and no-block
+/// rows are the negative control that the objective still passes.
+#[test]
+fn a_valid_backup_protects_only_on_a_basis_the_badge_admits() {
+    let no_catalog = {
+        let mut value = spec_value();
+        merge(
+            &mut value,
+            &json!({"objectives": {"requireCatalogAvailability": false}}),
+        );
+        value
+    };
+    for (label, trust, protects) in [
+        ("Current", json!({"basis": "Current"}), true),
+        ("Historical", json!({"basis": "Historical"}), true),
+        ("no trust block", Value::Null, true),
+        ("Unverified", json!({"basis": "Unverified"}), false),
+        (
+            "RecordedBeforeRevocation",
+            json!({"basis": "RecordedBeforeRevocation"}),
+            false,
+        ),
+        ("None", json!({"basis": "None"}), false),
+    ] {
+        let mut object = backup("b-1", 2, json!({}));
+        if !trust.is_null() {
+            object["status"]["evidence"]["verification"]["trust"] = trust;
+        }
+        let mut routes = read_routes(vec![object], json!({}));
+        if !protects {
+            routes.push(post(
+                "/configmaps",
+                json!({"apiVersion": "v1", "kind": "ConfigMap",
+                       "metadata": {"name": "cm", "namespace": NS}})
+                .to_string(),
+            ));
+            routes.push(post(
+                "/jobs",
+                json!({"apiVersion": "batch/v1", "kind": "Job",
+                       "metadata": {"name": "j", "namespace": NS}, "spec": {}})
+                .to_string(),
+            ));
+            routes.push(first_job_route(
+                &p::dedup_key(POLICY_UID, p::PolicyAlertKind::Staleness),
+                1,
+            ));
+        }
+        routes.push(patch(STATUS_PATH));
+        let (outcome, _, bodies) = drive(&policy_with(no_catalog.clone(), json!({})), routes);
+        let status = last_status_patch(&bodies);
+        if protects {
+            assert_eq!(outcome.health, p::Health::Healthy, "{label}");
+            assert_eq!(
+                status["status"]["lastAvailablePoint"]["pointId"].as_str(),
+                Some(point_id("b-1").as_str()),
+                "{label}"
+            );
+        } else {
+            assert_ne!(
+                outcome.health,
+                p::Health::Healthy,
+                "{label}: a Valid on this basis is not verified evidence"
+            );
+            assert_eq!(
+                status["status"]["lastAvailablePoint"].as_object(),
+                None,
+                "{label}: and it is not published as the policy's recovery point"
+            );
+        }
+    }
+}
+
 /// **Final review sweep (2026-09-22).** A verification result THIS BUILD does
 /// not know — reachable after a rollback past a build that wrote a fifth
 /// verdict — is still a verdict some verifier reached. It is read as a refusal

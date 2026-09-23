@@ -34,6 +34,7 @@ use serde_json::Value;
 use weirkeeper::crds::backup::Backup;
 use weirkeeper::crds::restore::Restore;
 use weirkeeper::crds::{Condition, EvidenceVerification};
+use weirkeeper::verification::ValidBasis;
 
 use crate::contract::{
     ConditionView, Operation, OperationEvidence, OperationKind, OperationResult, OperationState,
@@ -958,12 +959,14 @@ fn trust_state(
 ) -> TrustState {
     let basis = trust.and_then(|t| t.basis.as_deref());
     match verification {
-        VerificationState::Valid => match (trust, basis) {
-            (None, _) => TrustState::Verified,
-            (Some(_), Some("Current")) => TrustState::Verified,
-            (Some(_), Some("Historical")) => TrustState::VerifiedHistorical,
-            (Some(_), Some("Unverified")) => TrustState::NotAttempted,
-            (Some(_), _) => TrustState::Untrusted,
+        // THE CONTROLLER'S OWN RULE, NOT A COPY OF IT (TRUST-VALID-BASIS-CLASS):
+        // `ValidBasis` is what the badge and every controller reader of a
+        // stored `Valid` use, so this word cannot drift from them.
+        VerificationState::Valid => match ValidBasis::of_block(trust) {
+            ValidBasis::Absent | ValidBasis::Current => TrustState::Verified,
+            ValidBasis::Historical => TrustState::VerifiedHistorical,
+            ValidBasis::Unverified => TrustState::NotAttempted,
+            ValidBasis::Refused => TrustState::Untrusted,
         },
         VerificationState::Invalid => TrustState::Invalid,
         VerificationState::Pending => TrustState::Pending,

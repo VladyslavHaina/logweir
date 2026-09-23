@@ -1592,15 +1592,22 @@ pub fn candidate_from_backup(backup: &Backup) -> Option<PointCandidate> {
         from_ms: w.from_ms,
         to_ms: w.to_ms,
     });
-    let verdict = evidence
-        .and_then(|e| e.verification.as_ref())
-        .and_then(|v| v.result.as_deref());
+    let verification = evidence.and_then(|e| e.verification.as_ref());
+    let verdict = verification.and_then(|v| v.result.as_deref());
+    // A `Valid` IS READ WITH ITS BASIS (TRUST-VALID-BASIS-CLASS): the one rule
+    // the controller's badge uses, so a `Valid` + `Unverified` an interim
+    // build left on a lab object is not selectable on its own, and a `Valid`
+    // on `RecordedBeforeRevocation` or `None` is a refusal.
+    let basis =
+        crate::verification::ValidBasis::of_block(verification.and_then(|v| v.trust.as_ref()));
     // A VERDICT THE CONTROLLER REACHED STILL DECIDES. Only "I could not look"
-    // (`NotAttempted`, `Pending`, or no verdict at all) defers to the catalog; `Valid` is
-    // a pass the catalog may still narrow. Everything else — `Invalid`,
-    // `Untrusted`, or a spelling this build does not know — is a refusal no
-    // catalog row may overrule (`protection::evidence_objective_met`).
-    let verdict_refused = crate::catalog_view::is_reached_refusal(verdict);
+    // (`NotAttempted`, `Pending`, `Valid` on `Unverified`, or no verdict at
+    // all) defers to the catalog; a passing `Valid` is a pass the catalog may
+    // still narrow. Everything else — `Invalid`, `Untrusted`, a `Valid` on a
+    // basis this installation does not accept, or a spelling this build does
+    // not know — is a refusal no catalog row may overrule
+    // (`protection::evidence_objective_met`).
+    let verdict_refused = crate::catalog_view::is_reached_refusal(verdict, basis);
     Some(PointCandidate {
         point_id,
         backup_id: status.backup_id.clone()?,
@@ -1623,7 +1630,8 @@ pub fn candidate_from_backup(backup: &Backup) -> Option<PointCandidate> {
         // A `Backup` on its own establishes that the run succeeded, never that
         // its archive objects are still readable — that is the catalog's axis,
         // and it overwrites this below when a catalog is consulted.
-        selectable: !needs_catalog_capture && verdict == Some("Valid"),
+        selectable: !needs_catalog_capture
+            && crate::verification::stored_result_is_pass(verdict, basis),
         verdict_refused,
         retention_lease: false,
     })
