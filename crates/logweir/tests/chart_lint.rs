@@ -361,6 +361,55 @@ fn no_chart_workflow_or_dockerfile_counts_the_old_page_set() {
     );
 }
 
+/// **Chart gap G5: the controller has a liveness and a readiness probe, in
+/// every render and in the install file, and both are the binary's own
+/// `--probe` against its loopback listener.** An `httpGet` probe would need a
+/// pod-IP listener; a `tcpSocket` probe would pass while the runtime is wedged
+/// (the kernel accepts the connection) — only an answered request proves the
+/// runtime turns, which is what `weirkeeper --probe` asks for.
+#[test]
+fn chart_lint_the_controller_is_probed_by_its_own_binary() {
+    let mut deployments: Vec<(String, Value)> = files_under("charts/logweir/rendered")
+        .into_iter()
+        .map(|p| {
+            let docs = docs_in(&p);
+            let doc = find(&docs, "Deployment", "weirkeeper");
+            (p, container(doc).clone())
+        })
+        .collect();
+    let install = docs_in("config/manager/deployment.yaml");
+    deployments.push((
+        "config/manager/deployment.yaml".to_string(),
+        container(find(&install, "Deployment", "weirkeeper")).clone(),
+    ));
+    assert!(deployments.len() >= 11, "the walk has gone quiet");
+    for (source, c) in deployments {
+        for (probe, word) in [("livenessProbe", "live"), ("readinessProbe", "ready")] {
+            let command: Vec<&str> = c[probe]["exec"]["command"]
+                .as_sequence()
+                .unwrap_or_else(|| panic!("{source}: the controller has no exec {probe}"))
+                .iter()
+                .map(|v| v.as_str().unwrap_or_default())
+                .collect();
+            assert_eq!(
+                command,
+                ["/usr/local/bin/weirkeeper", "--probe", word],
+                "{source}: {probe}"
+            );
+            let timeout = c[probe]["timeoutSeconds"].as_u64().unwrap_or(1);
+            assert!(
+                timeout > 2,
+                "{source}: {probe}.timeoutSeconds {timeout} is not above the probe's own two-second \
+                 deadline, so a slow answer would be read as a failure"
+            );
+        }
+        assert!(
+            c["ports"].is_null(),
+            "{source}: the health listener is loopback-only; the controller exposes no port"
+        );
+    }
+}
+
 /// **The UI image's repository, DERIVED** — the namespace of
 /// `weirkeeper::job::RUNNER_IMAGE` with the name `logweir-ui`, which is what
 /// `Dockerfile.ui` builds and what `release.yml` publishes.

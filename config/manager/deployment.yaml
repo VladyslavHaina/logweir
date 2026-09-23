@@ -238,6 +238,31 @@ spec:
             # it creates (`weirkeeper::controllers::backup::ARCHIVE_ADDRESSING_ENV`),
             # so the endpoint is configured once rather than in two places that
             # can disagree.
+          # ---------------------------------------------------------------
+          # PROBES, BY EXEC, AGAINST A LOOPBACK LISTENER (chart gap G5)
+          # ---------------------------------------------------------------
+          # The controller serves `/livez` and `/readyz` on 127.0.0.1:8081
+          # (`LOGWEIR_HEALTH_ADDR`; `weirkeeper::health` refuses any
+          # non-loopback address), and the kubelet runs the controller's own
+          # binary inside the container to ask it. Liveness fails when the
+          # runtime is wedged (the listener shares the reconcilers' one
+          # thread, so it cannot answer) or a controller task has ended —
+          # the two states a restart fixes; three misses 20 s apart restart
+          # the pod. Readiness waits for the client and every controller.
+          # Nothing is exposed: no port, no Service, no NetworkPolicy change.
+          livenessProbe:
+            exec:
+              command: ["/usr/local/bin/weirkeeper", "--probe", "live"]
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command: ["/usr/local/bin/weirkeeper", "--probe", "ready"]
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
           resources:
             requests:
               cpu: 50m

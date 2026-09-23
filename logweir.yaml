@@ -8077,7 +8077,26 @@ spec:
               optional: true
         image: docker.io/vladyslavhaina/weirkeeper@sha256:fa0060bdfc6902be32ee28367a08f647cf64505063e1f1f447c6c4c73ee716ea
         imagePullPolicy: IfNotPresent
+        livenessProbe:
+          exec:
+            command:
+            - /usr/local/bin/weirkeeper
+            - --probe
+            - live
+          failureThreshold: 3
+          initialDelaySeconds: 10
+          periodSeconds: 20
+          timeoutSeconds: 5
         name: weirkeeper
+        readinessProbe:
+          exec:
+            command:
+            - /usr/local/bin/weirkeeper
+            - --probe
+            - ready
+          failureThreshold: 3
+          periodSeconds: 10
+          timeoutSeconds: 5
         resources:
           limits:
             memory: 512Mi

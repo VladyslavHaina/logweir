@@ -229,8 +229,10 @@ logweir-store = { path = "../logweir-store" }
 futures.workspace = true
 # `main.rs` needs a runtime for the kube client and a SIGTERM handler.
 # `signal` pulls `signal-hook-registry` and `mio`, both already in
-# `Cargo.lock`, so it adds no package either.
-tokio = { workspace = true, features = ["signal"] }
+# `Cargo.lock`, so it adds no package either. `io-util` is the loopback health
+# listener's read/write (`health.rs`, chart gap G5): a feature of the same
+# resolved crate, with no dependency of its own.
+tokio = { workspace = true, features = ["signal", "io-util"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 

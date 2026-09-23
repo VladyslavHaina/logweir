@@ -190,6 +190,24 @@ spec:
                   name: logweir-evidence-ro
                   key: secret-access-key
                   optional: true
+          {{- /*
+          CHART GAP G5: exec probes against the controller's loopback health
+          listener — `config/manager/deployment.yaml` carries the argument and
+          the same two blocks, so the default render stays the install file.
+          */}}
+          livenessProbe:
+            exec:
+              command: ["/usr/local/bin/weirkeeper", "--probe", "live"]
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command: ["/usr/local/bin/weirkeeper", "--probe", "ready"]
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
           resources:
             {{- toYaml .Values.controller.resources | nindent 12 }}
           securityContext:

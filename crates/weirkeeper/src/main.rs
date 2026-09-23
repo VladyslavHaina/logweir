@@ -1,8 +1,12 @@
 #![forbid(unsafe_code)]
 //! The `weirkeeper` binary.
 //!
-//! THREE ARGV FORMS AND NO ARGUMENT PARSER. `--version`, `--help`, or nothing
-//! at all; anything else exits 1 naming what it got. `clap` is deliberately
+//! FOUR ARGV FORMS AND NO ARGUMENT PARSER. `--version`, `--help`,
+//! `--probe live|ready`, or nothing at all; anything else exits 1 naming what
+//! it got. `--probe` is the kubelet's exec probe (chart gap G5): it asks the
+//! running controller's loopback health listener one question and exits 0 or
+//! 1, building no client and touching no cluster — `weirkeeper::health` has
+//! the whole argument. `clap` is deliberately
 //! not added: Global Constraint 38 closes the workspace graph, and a match on
 //! `std::env::args()` is the whole requirement. `--version` exists because
 //! Task 23's `scripts/check-image-weirkeeper.sh` check 2 runs
@@ -41,7 +45,9 @@ const HELP: &str = "weirkeeper — the Logweir control plane. It watches the six
 logweir.dev/v1alpha1 kinds and runs each restore, drill and backup as a Job; it \
 holds a read-only archive handle and verifies the DSSE signatures the UI renders, \
 and it links the verifying half of the evidence machinery and never the signer. \
-Takes no arguments: `--version` prints the version, `--help` prints this, and no \
+Takes no arguments: `--version` prints the version, `--help` prints this, \
+`--probe live` or `--probe ready` asks the running controller's loopback health listener \
+(LOGWEIR_HEALTH_ADDR, default 127.0.0.1:8081) and exits 0 when it answers ok, and no \
 argument at all runs the controller until SIGTERM.";
 
 fn main() -> ExitCode {
@@ -62,6 +68,23 @@ fn main() -> ExitCode {
         ["--help"] => {
             println!("{HELP}");
             ExitCode::SUCCESS
+        }
+        // THE KUBELET'S EXEC PROBE. No client, no subscriber, no runtime: one
+        // loopback connection with a two-second deadline on each step.
+        ["--probe", which] => {
+            let outcome = weirkeeper::health::Probe::from_arg(which).and_then(|probe| {
+                let addr = weirkeeper::health::configured_addr(std::env::var(
+                    weirkeeper::health::HEALTH_ADDR_ENV,
+                ))?;
+                weirkeeper::health::probe(addr, probe)
+            });
+            match outcome {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(reason) => {
+                    eprintln!("weirkeeper --probe: {reason}");
+                    ExitCode::FAILURE
+                }
+            }
         }
         _ => {
             // Names what it got, so an operator reading a CrashLoopBackOff log
@@ -336,6 +359,22 @@ fn run() -> ExitCode {
     }
     weirkeeper::scope::init(scope);
 
+    // THE HEALTH LISTENER'S ADDRESS — chart gap G5, and the last thing this
+    // file reads out of the environment. Same arrangement as the reads above:
+    // the decision is `weirkeeper::health::configured_addr`, and a value that
+    // is not a loopback address refuses to start rather than publish the
+    // listener.
+    let health_addr = match weirkeeper::health::configured_addr(std::env::var(
+        weirkeeper::health::HEALTH_ADDR_ENV,
+    )) {
+        Ok(addr) => addr,
+        Err(message) => {
+            error!(error = %message, "refusing to start: the health listener address is invalid");
+            return ExitCode::FAILURE;
+        }
+    };
+    let health = weirkeeper::health::Health::new();
+
     let rt = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -348,6 +387,25 @@ fn run() -> ExitCode {
     };
 
     rt.block_on(async {
+        // THE LISTENER COMES UP FIRST, so `--probe live` answers while the
+        // client is still being built; `--probe ready` says `starting` until
+        // every controller is registered. A port that cannot be bound is a
+        // refusal, not a controller with no liveness: inside a pod the port is
+        // the pod's own, so a clash is a configuration error worth a restart
+        // loop that names it.
+        let listener = match tokio::net::TcpListener::bind(health_addr).await {
+            Ok(listener) => listener,
+            Err(e) => {
+                error!(addr = %health_addr, error = %e, "could not bind the health listener");
+                return ExitCode::FAILURE;
+            }
+        };
+        info!(
+            addr = %listener.local_addr().map_or(health_addr, |a| a),
+            "health listener: /livez and /readyz, loopback only, for `weirkeeper --probe`"
+        );
+        tokio::spawn(weirkeeper::health::serve(listener, health.clone()));
+
         // In-cluster environment first, kubeconfig second — that is exactly
         // what `Client::try_default` does, and the order matters: a developer's
         // kubeconfig must never win inside a pod.
@@ -541,7 +599,21 @@ fn run() -> ExitCode {
             "weirkeeper started"
         );
 
-        let handles: Vec<_> = controllers.into_iter().map(tokio::spawn).collect();
+        // Each task is watched: one that RETURNS leaves a kind unreconciled
+        // behind a pod that still reads Running, so it fails `/livez` and the
+        // kubelet restarts the pod. The number is the registration order above.
+        let handles: Vec<_> = controllers
+            .into_iter()
+            .enumerate()
+            .map(|(index, task)| {
+                tokio::spawn(weirkeeper::health::watched(
+                    format!("#{}", index + 1),
+                    task,
+                    health.clone(),
+                ))
+            })
+            .collect();
+        health.mark_started();
 
         // Exit 0 on SIGTERM: a controller that exits non-zero on an ordinary
         // `kubectl delete pod` turns a rollout into a CrashLoopBackOff.
