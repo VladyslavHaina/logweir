@@ -2819,11 +2819,11 @@ def test_an_unavailable_target_skip_consumes_its_slot() -> None:
     t0 = d3.slot_epoch("20260923-050100")
     obs = [
         {"at": t0 + 10, "skip": {"slot": "20260923-050100", "reason": "TargetUnavailable"},
-         "lastScheduledSlot": "20260923-050100",
-         "ready": "the KafkaCluster `rehearsal-target-alias` does not report status.reachable: true"},
+         "lastScheduledSlot": "20260923-050100", "reachable": False,
+         "ready": "no slot is due"},
         {"at": t0 + 70, "skip": {"slot": "20260923-050200", "reason": "TargetUnavailable"},
-         "lastScheduledSlot": "20260923-050200",
-         "ready": "the KafkaCluster `rehearsal-target-alias` does not report status.reachable: true"},
+         "lastScheduledSlot": "20260923-050200", "reachable": False,
+         "ready": "no slot is due"},
     ]
     later = {"logweir-rehearsal-l6-unavailable-20260923-050400": "20260923-050400"}
     verdict, clauses = d3.unavailable_target_consumes_the_slot(obs, later, True, True)
@@ -2835,6 +2835,10 @@ def test_an_unavailable_target_skip_consumes_its_slot() -> None:
     deferred = [dict(o, lastScheduledSlot="20260923-045900") for o in obs]
     verdict, _ = d3.unavailable_target_consumes_the_slot(deferred, later, True, True)
     row("unavailable target: lastScheduledSlot not advanced (deferred) -> FAIL", verdict == "FAIL")
+    reachable = [dict(o, reachable=True) for o in obs]
+    verdict, _ = d3.unavailable_target_consumes_the_slot(reachable, later, True, True)
+    row("unavailable target: a skip read while the target was reachable -> FAIL",
+        verdict == "FAIL")
     verdict, _ = d3.unavailable_target_consumes_the_slot([], later, True, True)
     row("unavailable target: no skip recorded at all -> FAIL", verdict == "FAIL")
     verdict, _ = d3.unavailable_target_consumes_the_slot(obs, later, False, True)

@@ -11311,8 +11311,15 @@ def unavailable_target_consumes_the_slot(observations: list[dict[str, Any]],
                 (epoch(str(o["skip"].get("slot") or "")) or -1) % period == 0
                 and (epoch(str(o["skip"].get("slot") or "")) or float("inf")) <= o["at"]
                 for o in skips),
-        "the Ready message says why — the target does not report reachable":
-            any("reachable" in str(o.get("ready") or "") for o in skips),
+        # THE SKIP COINCIDES WITH THE FAULT: at the read that saw each skip
+        # the target reported `reachable: false`. (Not the `Ready` message: the
+        # pass that records a skip consumes the slot, and the very next pass
+        # rewrites `Ready` to "no slot is due" — measured on the first run of
+        # this phase, where no read ever caught the skip's own sentence.)
+        "every skipped slot was seen while the target reported reachable: false":
+            bool(skips) and all(any(o.get("reachable") is False for o in skips
+                                    if str(o["skip"].get("slot") or "") == slot)
+                                for slot in slots),
         "lastScheduledSlot advanced to the skipped slot (consumed, not deferred)":
             bool(skips) and all(
                 (epoch(str(o.get("lastScheduledSlot") or "")) or -1)
@@ -11390,6 +11397,15 @@ def rehearsal_faults() -> None:
         target = rehearsal_target_cluster()
         target_cluster_id = target["status"]["clusterId"]
         rehearsal_trust(target_cluster_id, approver_key, retired_key)
+        # THE ARMS' OWN POINT, FIRST. Both arms select from it; without one the
+        # unavailable-target arm's slots are `NoQualifyingPoint` once the
+        # target is back, no later slot can fire, and "consumed, never fired
+        # late" cannot be judged (measured on this phase's first run, where
+        # the point was made only for arm B and arm A read `rehearsal`'s).
+        point = rehearsal_point(REHEARSAL_FAULT_POINT_SCHEDULE, REHEARSAL_FAULT_CATALOG,
+                                REHEARSAL_FAULT_POINT)
+        point_spec = rehearsal_point_spec(REHEARSAL_FAULT_POINT_SCHEDULE,
+                                          REHEARSAL_FAULT_CATALOG)
 
         # ---- arm A: an unavailable target -----------------------------------
         apply(alias_service(REHEARSAL_ALIAS_REAL))
@@ -11408,7 +11424,7 @@ def rehearsal_faults() -> None:
             schedule, approval = rehearsal_arm(
                 REHEARSAL_UNAVAILABLE_SCHEDULE, cron=REHEARSAL_FAST_CRON,
                 key=approver_key["private"], work=work, target_cluster_id=target_cluster_id,
-                arms=arms, target=REHEARSAL_ALIAS_TARGET)
+                arms=arms, point=point_spec, target=REHEARSAL_ALIAS_TARGET)
             verified = condition(get("approval", approval), "Verified").get("status") == "True"
             apply(alias_service(REHEARSAL_ALIAS_CUT))
             cut = reprobe(REHEARSAL_ALIAS_TARGET, False)
@@ -11460,8 +11476,6 @@ def rehearsal_faults() -> None:
                    + "; ".join(f"{k}={v}" for k, v in clauses.items()), evidence)
 
         # ---- arm B: a failed verification ------------------------------------
-        point = rehearsal_point(REHEARSAL_FAULT_POINT_SCHEDULE, REHEARSAL_FAULT_CATALOG,
-                                REHEARSAL_FAULT_POINT)
         entry = point.get("entry") or {}
         tampered: list[dict[str, Any]] = []
         if not point.get("selectable") or not entry.get("manifestKey"):
@@ -11485,8 +11499,6 @@ def rehearsal_faults() -> None:
                                  "crcOk": kbak_crc_ok(reread), "records": seg["records"]})
             evidence.append(artifact("rehearsal-faults/02-tampered-segments.json",
                                      {"point": point, "tampered": tampered}))
-            point_spec = rehearsal_point_spec(REHEARSAL_FAULT_POINT_SCHEDULE,
-                                              REHEARSAL_FAULT_CATALOG)
             rehearsal_arm(REHEARSAL_VERIFY_SCHEDULE, cron=REHEARSAL_FAST_CRON,
                           key=approver_key["private"], work=work,
                           target_cluster_id=target_cluster_id, arms=arms, point=point_spec)
