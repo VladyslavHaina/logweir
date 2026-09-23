@@ -107,12 +107,16 @@ case "${1:-}" in
     : "${TAG:?}" "${GITHUB_OUTPUT:?}" "${GITHUB_STEP_SUMMARY:?}"
     : "${DOCKERHUB_USERNAME:?}" "${DOCKERHUB_TOKEN:?}"
     [[ "$TAG" =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$ ]] || exit 1
-    # The images this chart names must already be public under TAG: the chart
+    # The images this chart names must already be PUBLIC under TAG: the chart
     # is published AFTER the promote step, never before, so no published
-    # chart can point at a tag that does not exist.
+    # chart can point at a tag that does not exist. Asked ANONYMOUSLY -- an
+    # empty Docker config, not the credentials the login step left behind --
+    # so "exists for the publisher" cannot pass for "pullable by anyone".
+    anonymous_docker="$(mktemp -d)"
     for product in logweir weirkeeper logweir-ui logweir-console; do
-      docker buildx imagetools inspect "docker.io/$NS/$product:$TAG" >/dev/null
+      DOCKER_CONFIG="$anonymous_docker" docker buildx imagetools inspect "docker.io/$NS/$product:$TAG" >/dev/null
     done
+    rm -rf "$anonymous_docker"
     dir=$(mktemp -d)
     package=$(chart_package "$dir")
     version=$(chart_version)
@@ -121,10 +125,14 @@ case "${1:-}" in
     printf '%s' "$DOCKERHUB_TOKEN" | helm registry login registry-1.docker.io \
       --username "$DOCKERHUB_USERNAME" --password-stdin
     helm push "$package" "$CHART_REPOSITORY"
-    # Verify by content, not by exit code: pull what the registry now serves
-    # under that version and compare the bytes with what was pushed.
-    mkdir -p "$dir/pulled"
-    helm pull "$CHART_REPOSITORY/$CHART_NAME" --version "$version" -d "$dir/pulled"
+    # Verify by content, not by exit code, and ANONYMOUSLY: pull what the
+    # registry now serves under that version with an empty Helm registry
+    # configuration and compare the bytes with what was pushed. A chart
+    # repository Docker Hub created private on its first push fails here,
+    # loudly, instead of publishing a chart nobody can install.
+    mkdir -p "$dir/pulled" "$dir/anonymous"
+    HELM_REGISTRY_CONFIG="$dir/anonymous/config.json" \
+      helm pull "$CHART_REPOSITORY/$CHART_NAME" --version "$version" -d "$dir/pulled"
     pushed=$(sha256sum "$package" | awk '{print $1}')
     served=$(sha256sum "$dir/pulled/$CHART_NAME-$version.tgz" | awk '{print $1}')
     [[ "$pushed" == "$served" ]] || { echo "the registry serves different chart bytes" >&2; exit 1; }
@@ -198,7 +206,7 @@ case "${1:-}" in
       # serialized; version releases never move these rolling tags.
       head=$(git ls-remote origin refs/heads/main | awk '{print $1}')
       if [[ "$head" != "$GITHUB_SHA" ]]; then
-        echo 'A newer main commit exists; immutable SHA tags published, rolling tags left unchanged.' >> "$GITHUB_STEP_SUMMARY"
+        echo 'A newer main commit exists; SHA tags published, rolling tags left unchanged.' >> "$GITHUB_STEP_SUMMARY"
         exit 0
       fi
       for product in "${products[@]}"; do

@@ -34,6 +34,9 @@ state_path = pathlib.Path(os.environ["MOCK_REGISTRY"])
 state = json.loads(state_path.read_text())
 if args[:3] == ["buildx", "imagetools", "inspect"]:
     ref = args[3]
+    if os.environ.get("MOCK_DOCKER_ENV_LOG"):
+        with open(os.environ["MOCK_DOCKER_ENV_LOG"], "a") as out:
+            out.write(json.dumps({"ref": ref, "docker_config": os.environ.get("DOCKER_CONFIG")}) + "\n")
     if ref == os.environ.get("MOCK_FAIL_INSPECT_REF") or ref not in state:
         sys.exit(1)
     record = state[ref]
@@ -306,6 +309,8 @@ if args[:1] == ["push"]:
     sys.exit(0)
 if args[:1] == ["pull"]:
     ref = args[1]; version = args[args.index("--version") + 1]; out = pathlib.Path(args[args.index("-d") + 1])
+    pathlib.Path(os.environ["MOCK_HELM_PULL_ENV"]).write_text(json.dumps(
+        {"registry_config": os.environ.get("HELM_REGISTRY_CONFIG")}))
     name = ref.rsplit("/", 1)[1]
     key = ref.rsplit("/", 1)[0] + "/" + f"{name}-{version}"
     if key not in state:
@@ -340,7 +345,10 @@ class ChartPublicationTests(unittest.TestCase):
         self.helm_log = self.root / "helm.jsonl"
         self.charts = self.root / "charts.json"
         self.login = self.root / "login.json"
+        self.docker_env = self.root / "docker-env.jsonl"
+        self.pull_env = self.root / "pull-env.json"
         self.env.update(
+            MOCK_DOCKER_ENV_LOG=str(self.docker_env), MOCK_HELM_PULL_ENV=str(self.pull_env),
             MOCK_HELM_LOG=str(self.helm_log), MOCK_CHARTS=str(self.charts),
             MOCK_HELM_LOGIN=str(self.login), DOCKERHUB_USERNAME="publisher",
             DOCKERHUB_TOKEN=self.TOKEN,
@@ -395,6 +403,16 @@ class ChartPublicationTests(unittest.TestCase):
                                     "--version", version])
         push = next(i for i, c in enumerate(self.helm_calls()) if c[0] == "push")
         self.assertLess(push, self.helm_calls().index(pull), "verified after the push")
+        # "Public" is asked anonymously (review L5): the four image inspections
+        # of the chart step run with a fresh Docker config holding no login, and
+        # the pull-back with a Helm registry configuration that does not exist.
+        chart_inspects = [json.loads(line) for line in self.docker_env.read_text().splitlines()]
+        chart_inspects = [i for i in chart_inspects
+                          if i["ref"].endswith(f":sha-{SHA}") and i["docker_config"]]
+        self.assertEqual(len(chart_inspects), 4, chart_inspects)
+        registry_config = json.loads(self.pull_env.read_text())["registry_config"]
+        self.assertTrue(registry_config, "the pull-back must name its own registry config")
+        self.assertFalse(Path(registry_config).exists(), "the pull-back must carry no registry login")
 
     def test_a_release_tag_publishes_the_semver_chart(self):
         self.env.update(TAG="v1.2.3", GITHUB_REF="refs/tags/v1.2.3", PROMOTE_LATEST="false")

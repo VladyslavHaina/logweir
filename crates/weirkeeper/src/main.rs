@@ -393,7 +393,7 @@ fn run() -> ExitCode {
         // refusal, not a controller with no liveness: inside a pod the port is
         // the pod's own, so a clash is a configuration error worth a restart
         // loop that names it.
-        let listener = match tokio::net::TcpListener::bind(health_addr).await {
+        let listener = match weirkeeper::health::bind(health_addr).await {
             Ok(listener) => listener,
             Err(e) => {
                 error!(addr = %health_addr, error = %e, "could not bind the health listener");

@@ -38,3 +38,25 @@ metadata:
 spec:
   ca:
     secretName: logweir-poc-ca
+---
+# Dex's OWN serving certificate, for the console's back-channel (dex.values.yaml
+# `web.https`): the console reaches Dex's Service directly and Dex terminates
+# that TLS itself, so no Ingress is on the console's path to its IdP. Issued by
+# the same local CA the console's `oidc.caBundle` carries. The `dex` namespace
+# must exist first (README.md step 1).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: dex-internal-tls
+  namespace: dex
+spec:
+  secretName: dex-internal-tls
+  dnsNames: [dex.localtest.me]
+  duration: 2160h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    group: cert-manager.io
+    kind: ClusterIssuer
+    name: logweir-poc-ca

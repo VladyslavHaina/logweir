@@ -23,7 +23,8 @@
 #   allowSnippetAnnotations: false        no equivalent needed: Traefik has no configuration
 #                                         snippets; cross-namespace CRD references stay off
 #   ingressClassResource nginx, default   ingressClass traefik, isDefaultClass: false
-#   service.type: LoadBalancer            the same, with a FIXED ClusterIP (below)
+#   service.type: LoadBalancer            the same
+#   (watched every namespace)             providers.*.namespaces: the profile's own only (below)
 #   admissionWebhooks                     none: Traefik validates nothing at admission
 #
 # PoC vs production: one replica here (docker-desktop has one node); production
@@ -43,13 +44,24 @@ ingressClass:
   enabled: true
   isDefaultClass: false          # the Logweir and Dex Ingresses name the class explicitly
   name: traefik
+# ONLY THE PROFILE'S OWN NAMESPACES ARE ROUTED (the review's M1, defence in
+# depth). An ingress controller that reads Ingresses from every namespace lets
+# anyone who may create an Ingress anywhere claim `dex.localtest.me` or
+# `logweir.localtest.me` paths — with longer path rules outranking the owner's —
+# behind the owner's own certificate. The console's OIDC back-channel no longer
+# passes through Traefik at all (dex.values.yaml), but browsers do, so Traefik
+# reads Ingresses from `dex` and `logweir-system` only, and its CRDs (the HSTS
+# Middleware, the default TLS store) from `traefik` only.
 providers:
   kubernetesCRD:
     enabled: true                # the `hsts` Middleware below is a Traefik CRD
     allowCrossNamespace: false
+    namespaces: [traefik]
+    defaultTLSResourcesNamespace: traefik
   kubernetesIngress:
     enabled: true
     allowExternalNameServices: false
+    namespaces: [dex, logweir-system]
 ports:
   web:
     http:
@@ -71,19 +83,18 @@ ports:
 service:
   spec:
     type: LoadBalancer           # docker-desktop maps this to 127.0.0.1:80/443
-    # A FIXED ClusterIP, so `dex.localtest.me` can be mapped to it in the
-    # console pod with a constant (logweir.values.yaml, `hostAliases`) instead
-    # of an address read from the cluster at install time. 10.96.0.80 is in
-    # docker-desktop's Service range (10.96.0.0/12) and in its lower, static
-    # band, which dynamic allocation avoids. Another cluster: pick a free
-    # address in its Service range and change BOTH files (validate.sh checks
-    # they agree).
-    clusterIP: 10.96.0.80
 resources:
   requests: { cpu: 100m, memory: 128Mi }
   limits: { memory: 512Mi }
 accessLog:
   enabled: true                  # the edge's own record of who asked for what
+  fields:
+    headers:
+      defaultMode: drop          # no cookie, no Authorization header, ever
+    queryParameters:
+      # `/auth/callback?code=…&state=…` carries a single-use authorization
+      # code; it is useless without the client secret, and still not logged.
+      defaultMode: drop
 extraObjects:
   # HSTS for every host served on `websecure` (the console and Dex): one year.
   - apiVersion: traefik.io/v1alpha1

@@ -174,7 +174,18 @@ fn the_chart_is_published_beside_the_images_it_names() {
         &|s| s["run"] == "bash scripts/ci-images.sh promote",
         "image promotion",
     );
-    let helm = position(&|s| s["uses"] == "azure/setup-helm@v4", "pinned Helm setup");
+    // THE ACTION ON THE CREDENTIALED PATH IS PINNED BY COMMIT (review L6):
+    // the Helm it installs receives the Docker Hub token on stdin.
+    let helm = position(
+        &|s| {
+            s["uses"].as_str().is_some_and(|u| {
+                u.strip_prefix("azure/setup-helm@").is_some_and(|sha| {
+                    sha.len() == 40 && sha.chars().all(|c| c.is_ascii_hexdigit())
+                })
+            })
+        },
+        "Helm setup pinned by a 40-hex commit",
+    );
     let chart = position(
         &|s| s["run"] == "bash scripts/ci-images.sh chart",
         "chart publication",
@@ -224,6 +235,9 @@ fn the_chart_is_published_beside_the_images_it_names() {
         "helm pull \"$CHART_REPOSITORY/$CHART_NAME\" --version \"$version\"",
         "[[ \"$pushed\" == \"$served\" ]]",
         "docker buildx imagetools inspect \"docker.io/$NS/$product:$TAG\"",
+        // "Public" is asked anonymously (review L5).
+        "DOCKER_CONFIG=\"$anonymous_docker\" docker buildx imagetools inspect",
+        "HELM_REGISTRY_CONFIG=\"$dir/anonymous/config.json\"",
     ] {
         assert!(
             script.contains(needle),

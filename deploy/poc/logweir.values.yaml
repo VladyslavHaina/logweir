@@ -6,23 +6,24 @@
 #
 # THE IMAGES ARE NOT IN THIS FILE. The published chart (versions.env's
 # LOGWEIR_CHART at LOGWEIR_CHART_VERSION) already names the four Logweir images
-# of its own commit by their immutable `sha-` tag; the development path from a
+# of its own commit by their `sha-<commit>` tag (a tag, which Docker Hub lets
+# the publisher move; the digests are recorded per publication — README.md); the development path from a
 # checkout passes the same four with `--set` from versions.env (README.md,
 # *From a checkout*). One file, versions.env, decides the release.
 #
 # NOTHING IN THIS FILE IS A CLUSTER'S RUNTIME ADDRESS, AND NOTHING IS PATCHED
 # AFTER THE INSTALL. The ingress controller is trusted by its Service
-# (`trustedProxyService`), the issuer's name is mapped to the ingress
-# controller's FIXED ClusterIP (`hostAliases`, traefik.values.yaml), the
-# private CA arrives by reference (`oidc.caBundle`), and the console's egress
-# to Dex is a pod selector (`networkPolicy.oidcPeers`).
+# (`trustedProxyService`), the issuer's name is mapped to DEX'S OWN Service's
+# fixed ClusterIP (`hostAliases`, dex.values.yaml) — never to the shared
+# ingress — the private CA arrives by reference (`oidc.caBundle`), and the
+# console's egress to Dex is a pod selector (`networkPolicy.oidcPeers`).
 #
 # NOTHING SECRET IS IN THIS FILE: every key and the OIDC client secret are named
 # Secrets created before the install (README.md, step 5). The ONE exception in
 # this profile is the demo MinIO's root credential — README.md, *The demo
 # archive*.
 
-imagePullPolicy: IfNotPresent    # the tags are immutable `sha-` tags
+imagePullPolicy: IfNotPresent    # `sha-<commit>` tags; Docker Hub tags CAN be moved — see README.md
 runnerImagePullPolicy: IfNotPresent
 
 environment: poc
@@ -68,12 +69,15 @@ api:
     trustedProxyService: { namespace: traefik, name: traefik }
     requireTrustedProxy: true
     # G2: inside the cluster `dex.localtest.me` resolves to 127.0.0.1 (the pod
-    # itself). This maps it to Traefik's fixed ClusterIP (traefik.values.yaml),
-    # so the console reaches Dex through the same ingress the browser uses.
-    # Name resolution only: TLS still checks the name and the token's `iss` is
-    # still compared exactly with `oidc.issuer`.
+    # itself). This maps it to DEX'S OWN Service (its fixed ClusterIP,
+    # dex.values.yaml), where Dex terminates TLS itself with a certificate for
+    # that name. It is deliberately NOT the ingress controller: a shared
+    # ingress routes Ingresses from other namespaces too, and one of them could
+    # then answer the console's discovery, JWKS and token requests behind
+    # Dex's real certificate (the review's M1). The console's back-channel
+    # reaches only pods of Service `dex/dex`; browsers still use Traefik.
     hostAliases:
-      - ip: 10.96.0.80
+      - ip: 10.96.0.81
         hostnames: [dex.localtest.me]
     oidc:
       issuer: https://dex.localtest.me     # EXACT: Dex's `issuer`, no trailing slash
@@ -117,14 +121,14 @@ api:
       ingressNamespace: traefik
       ingressPodLabels:
         app.kubernetes.io/name: traefik
-      # The console reaches Dex THROUGH Traefik. An enforcing CNI matches
-      # egress after the Service's DNAT — against the Traefik pod, on its
-      # `websecure` container port 8443 — so the rule names the pods, not the
+      # The console reaches Dex's own pods (not Traefik). An enforcing CNI
+      # matches egress after the Service's DNAT — against the Dex pod, on its
+      # HTTPS container port 5554 — so the rule names the pods, not the
       # ClusterIP (the PLAT-20.2 review's L8).
       oidcPeers:
-        - namespace: traefik
-          podLabels: { app.kubernetes.io/name: traefik }
-          port: 8443
+        - namespace: dex
+          podLabels: { app.kubernetes.io/name: dex }
+          port: 5554
     resources:
       requests: { cpu: 25m, memory: 64Mi }
       limits: { memory: 256Mi }

@@ -132,3 +132,43 @@ fn a_watched_task_that_returns_is_recorded() {
     let ended = health.check(Probe::Live).unwrap_err();
     assert!(ended.contains("#3"), "{ended}");
 }
+
+/// **The listener binds loopback, and `main` binds it no other way** (the
+/// review's mutant m5). A listener on `0.0.0.0` would let any pod hold its
+/// connections and starve the kubelet's exec probe.
+#[test]
+fn the_listener_binds_loopback_only_and_main_binds_through_it() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        for refused in ["0.0.0.0:0", "[::]:0"] {
+            let err = weirkeeper::health::bind(refused.parse().unwrap())
+                .await
+                .expect_err("a wildcard address is refused at the bind site");
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{refused}");
+        }
+        let listener = weirkeeper::health::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("loopback binds");
+        assert!(listener.local_addr().unwrap().ip().is_loopback());
+    });
+    let main_rs = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"),
+    )
+    .unwrap();
+    let code: String = main_rs
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        code.contains("weirkeeper::health::bind(health_addr)"),
+        "main.rs must bind the health listener through weirkeeper::health::bind"
+    );
+    assert!(
+        !code.contains("TcpListener::bind("),
+        "main.rs binds a socket other than through weirkeeper::health::bind"
+    );
+}

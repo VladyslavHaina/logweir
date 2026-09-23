@@ -222,8 +222,10 @@ jobs:
       # oci://registry-1.docker.io/$NS/logweir-chart with the same Docker Hub
       # credentials the login above used, and the bytes the registry serves back
       # are compared with the bytes pushed. The Helm version is the one CI's
-      # `check` job renders the chart with.
-      - uses: azure/setup-helm@v4
+      # `check` job renders the chart with. PINNED BY COMMIT, not by tag: this
+      # job holds the Docker Hub credentials when it runs, and the Helm it
+      # installs receives the token (v4.3.1 = 1a275c3b…).
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
         with: { version: v4.0.1 }
       - name: Publish the chart beside the images
         id: chart

@@ -78,6 +78,36 @@ pub fn configured_addr(read: Result<String, std::env::VarError>) -> Result<Socke
     Ok(addr)
 }
 
+/// Bind the health listener — the ONE way `main` binds it.
+///
+/// The address was already refused by [`configured_addr`] if it was not
+/// loopback; this checks again at the bind site, and checks what the kernel
+/// actually bound, because a listener on `0.0.0.0` would let any pod in the
+/// cluster hold its connections (`serve` answers one at a time, two seconds
+/// each) and starve the kubelet's exec probe into a restart loop.
+/// `tests/health.rs` pins both halves and that `main.rs` binds through here.
+///
+/// # Errors
+///
+/// A non-loopback address (`InvalidInput`), or the bind's own error.
+pub async fn bind(addr: SocketAddr) -> std::io::Result<tokio::net::TcpListener> {
+    let refuse = |what: SocketAddr| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("the health listener binds loopback only, not {what}"),
+        )
+    };
+    if !addr.ip().is_loopback() {
+        return Err(refuse(addr));
+    }
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let bound = listener.local_addr()?;
+    if !bound.ip().is_loopback() {
+        return Err(refuse(bound));
+    }
+    Ok(listener)
+}
+
 /// The two probes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Probe {

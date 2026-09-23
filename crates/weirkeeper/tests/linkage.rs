@@ -1110,12 +1110,36 @@ fn the_no_argv_binary_starts_and_exits_zero_on_sigterm() {
     // (the fixture's apiserver is unreachable and every controller rides that
     // out with backoff, which is not a reason to restart). NEGATIVE CONTROLS:
     // an unknown probe word, and a port nothing listens on, exit 1.
+    // Each probe is a subprocess with its OWN outer bound (the worker rule: no
+    // child without a timeout), independent of the binary's 2 s deadlines: a
+    // probe that hangs is killed at 10 s and fails the row.
     let probe = |word: &str, addr: &str| {
-        Command::new(env!("CARGO_BIN_EXE_weirkeeper"))
+        let out_path = fixture.path().with_file_name(format!("probe-{word}.out"));
+        let err_path = fixture.path().with_file_name(format!("probe-{word}.err"));
+        let mut child = Command::new(env!("CARGO_BIN_EXE_weirkeeper"))
             .args(["--probe", word])
             .env("LOGWEIR_HEALTH_ADDR", addr)
-            .output()
-            .expect("the built binary runs")
+            .stdout(std::fs::File::create(&out_path).expect("the log file is creatable"))
+            .stderr(std::fs::File::create(&err_path).expect("the log file is creatable"))
+            .spawn()
+            .expect("the built binary runs");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("the probe is waitable") {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("`weirkeeper --probe {word}` did not exit within 10 s");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        std::process::Output {
+            status,
+            stdout: std::fs::read(&out_path).unwrap_or_default(),
+            stderr: std::fs::read(&err_path).unwrap_or_default(),
+        }
     };
     for word in ["live", "ready"] {
         let out = probe(word, &health_addr);

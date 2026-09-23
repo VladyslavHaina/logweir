@@ -169,8 +169,13 @@ spec:
       DNS, a laptop cluster where `*.localtest.me` is 127.0.0.1). An entry here
       changes WHERE the name resolves and nothing about what is trusted: TLS
       still verifies the certificate against the name in the URL, and the ID
-      token's `iss` is still compared exactly with `oidc.issuer`. A wrong
-      address is a handshake that fails, never a provider that is believed.
+      token's `iss` is still compared exactly with `oidc.issuer`. That makes a
+      wrong address a failed handshake ONLY when the target is an endpoint just
+      the IdP's owner can route — its own Service, TLS terminated by the IdP —
+      and the CA bundle does not issue that name to anyone else on the path. A
+      SHARED ingress fails that test: an Ingress from any namespace can claim
+      the issuer's host behind the owner's certificate (charts/logweir/README.md,
+      *The identity provider inside the cluster*).
       */}}
       {{- with $c.hostAliases }}
       hostAliases:

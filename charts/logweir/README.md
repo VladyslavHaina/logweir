@@ -509,12 +509,20 @@ remains the network boundary. There are two ways to say who the proxy is:
   trusts nobody through the Service, answers `421` and reports NotReady — a
   visible outage, never a silent stale grant. The chart renders one `Role` and
   `RoleBinding` in **that** namespace granting `list` on
-  `discovery.k8s.io/endpointslices` and nothing else; whoever can edit that
-  Service or write an `EndpointSlice` there could add an address, which is the
-  ingress namespace's own administrator — who already terminates the console's
-  TLS. The Service's endpoints must be the ingress controller's own pods (the
-  Traefik chart's `traefik` Service is; an admission-webhook Service that
-  selects the same pods is equivalent).
+  `discovery.k8s.io/endpointslices` and nothing else. **Who can add an
+  address:** whoever can edit that Service (its selector) or write an
+  `EndpointSlice` there, and whoever can create or relabel a Pod — or a
+  Deployment — that matches the Service's selector in that namespace, because
+  the EndpointSlice controller then lists it. All of them are the ingress
+  namespace's own administrators, who already terminate the console's TLS.
+  **An ingress controller on `hostNetwork`** publishes the NODE's address as its
+  endpoint: the console then trusts every hostNetwork pod and node process on
+  that node, and anything the CNI masquerades to the node address — not "the
+  ingress pods and no other pod". For such a controller, either accept node
+  trust knowingly or decide a `trustedProxyCidrs` `/32` knowingly. The Service's
+  endpoints must be the ingress controller's own pods (the Traefik chart's
+  `traefik` Service is; an admission-webhook Service that selects the same pods
+  is equivalent).
 - **`trustedProxyCidrs`** — static ranges. It tells the ingress from a pod that
   dialled the Service directly **only when the range is the ingress
   controller's own pod range and contains no other pod** (kube-proxy keeps the
@@ -545,8 +553,8 @@ cluster's own ingress). None of them changes what the console validates.
   its validity and the host name in the issuer URL are verified exactly as for a
   public CA.
 - **`hostAliases: [{ip, hostnames}]`** (chart gap G2) adds pod `/etc/hosts`
-  entries, e.g. the issuer's public name mapped to the in-cluster ingress
-  Service's ClusterIP. **Why this and not a separate back-channel URL.** A
+  entries, e.g. the issuer's public name mapped to the IdP's own in-cluster
+  Service. **Why this and not a separate back-channel URL.** A
   back-channel discovery/JWKS URL would either have to rewrite every endpoint
   the discovery document names — including the token endpoint, which receives
   the client secret — onto another host, or verify the provider's TLS
@@ -554,15 +562,27 @@ cluster's own ingress). None of them changes what the console validates.
   the operator would have to get right. A host alias changes only where the
   name resolves. The URL, the TLS name check, the discovery document's
   `issuer` and the ID token's `iss` are all still compared with the one
-  configured `oidc.issuer`, exactly; an alias pointing somewhere wrong is a
-  handshake that fails, never a provider that is believed. A ClusterIP is stable
-  for the Service's lifetime; recreate the Service and the alias must follow.
+  configured `oidc.issuer`, exactly. **But that holds only when the alias
+  target is an endpoint that only the IdP's owner can route.** Map the name to
+  the IdP's OWN Service, with TLS terminated by the IdP itself — never to a
+  shared ingress controller. A shared ingress serves Ingresses from other
+  namespaces too: anyone who may create one there can claim the issuer's host
+  (longer path rules outrank the owner's) and answer discovery, JWKS and the
+  token request — which carries the client secret — behind the owner's own
+  certificate, and the console then believes tokens they signed. The CA in
+  `oidc.caBundle` must likewise not issue the issuer's name to anyone who could
+  be on that path. With both conditions met, an alias pointing somewhere wrong
+  is a handshake that fails; without them it is not. A host alias is for a
+  cluster whose DNS does not resolve the issuer (a laptop cluster, split-horizon
+  DNS); a production IdP is resolved through real DNS and needs none. A
+  ClusterIP is stable for the Service's lifetime; recreate the Service and the
+  alias must follow.
 - **`networkPolicy.oidcPeers: [{namespace, podLabels, port}]`** allows the
   console's egress to an in-cluster provider path by selector. An enforcing CNI
   matches egress **after** a Service's DNAT, against the backend pod and its
   port, so an `oidcCIDRs` entry for a ClusterIP matches nothing there; name the
-  pods instead (for an issuer behind the in-cluster Traefik: namespace `traefik`,
-  its pod labels, port `8443`, `websecure`'s container port).
+  pods instead (for the PoC's Dex, which serves the console's TLS itself:
+  namespace `dex`, its pod labels, port `5554`).
 
 **Every object the console creates is attributed.** The rendered configuration
 names `kubernetes.principal: system:serviceaccount:<namespace>:<release>-api`,

@@ -131,16 +131,17 @@ if [ -f "$work/logweir.yaml" ] && [ -f "$work/logweir-checkout.yaml" ]; then
     "docker.io/vladyslavhaina/logweir-console:$LOGWEIR_TAG" \
     "caBundleFile: /var/run/logweir/oidc-ca/ca.crt" \
     "name: logweir-poc-ca" \
-    "ip: $TRAEFIK_CLUSTER_IP" \
+    "ip: $DEX_CLUSTER_IP" \
     "- $DEX_HOST" \
     "trustedProxyService:" \
     "name: logweir-api-trusted-proxy" \
     "namespace: $INGRESS_NAMESPACE" \
-    "port: 8443" \
+    "kubernetes.io/metadata.name: $DEX_NAMESPACE" \
+    "port: 5554" \
     "livenessProbe:" \
     '["/usr/local/bin/weirkeeper", "--probe", "live"]'
-  if grep -q 'ipBlock' "$work/logweir.yaml" && grep -A1 'ipBlock' "$work/logweir.yaml" | grep -q "$TRAEFIK_CLUSTER_IP"; then
-    echo "FAIL: an egress ipBlock names the Traefik ClusterIP; an enforcing CNI matches after DNAT (use oidcPeers)" >&2
+  if grep -A1 'ipBlock' "$work/logweir.yaml" | grep -q "$DEX_CLUSTER_IP"; then
+    echo "FAIL: an egress ipBlock names Dex's ClusterIP; an enforcing CNI matches after DNAT (use oidcPeers)" >&2
     fail=1
   fi
 fi
@@ -182,8 +183,10 @@ echo "== 3. Traefik, cert-manager and Dex, pinned =="
 if traefik="$(pull "$TRAEFIK_REPO" traefik "$TRAEFIK_CHART_VERSION")"; then
   if render traefik "$traefik" "$INGRESS_NAMESPACE" -f deploy/poc/traefik.values.yaml; then
     need "the Traefik render" "$work/traefik.yaml" \
-      "clusterIP: $TRAEFIK_CLUSTER_IP" \
       "--entryPoints.websecure.http.middlewares=traefik-hsts@kubernetescrd" \
+      "--providers.kubernetesingress.namespaces=$DEX_NAMESPACE,$LOGWEIR_NAMESPACE" \
+      "--providers.kubernetescrd.namespaces=$INGRESS_NAMESPACE" \
+      "--accesslog.fields.queryparameters.defaultmode=drop" \
       "--entryPoints.web.http.redirections.entryPoint.scheme=https" \
       "containerPort: 8443" \
       "app.kubernetes.io/name: traefik"
@@ -203,7 +206,9 @@ else
 fi
 if dex="$(pull "$DEX_REPO" dex "$DEX_CHART_VERSION")"; then
   render dex "$dex" "$DEX_NAMESPACE" -f deploy/poc/dex.values.yaml
-  need "the Dex render" "$work/dex.yaml" "ingressClassName: traefik"
+  need "the Dex render" "$work/dex.yaml" "ingressClassName: traefik" \
+    "clusterIP: $DEX_CLUSTER_IP" "port: 443" "targetPort: https" "- --web-https-addr" \
+    "mountPath: /etc/dex/tls" "secretName: dex-internal-tls"
   # The Dex config is rendered base64-encoded into a Secret. Decode it: no
   # password hash and no client secret may be in it, only the names of the
   # environment variables that carry them (hashFromEnv, secretEnv).
@@ -215,8 +220,31 @@ if dex="$(pull "$DEX_REPO" dex "$DEX_CHART_VERSION")"; then
   else
     echo "   ok: the Dex config names its secrets by environment variable only"
   fi
+  need "the Dex config" "$work/dex-config.yaml" "tlsCert: /etc/dex/tls/tls.crt" "tlsKey: /etc/dex/tls/tls.key"
 else
   echo "FAIL: could not obtain dex $DEX_CHART_VERSION" >&2; fail=1
+fi
+
+# THE CONSOLE'S ROUTE TO ITS IdP NEVER CROSSES THE SHARED INGRESS (the review's
+# M1). The console's host alias for the issuer must be Dex's OWN Service, whose
+# TLS Dex terminates with a certificate for that name; its egress peer must be
+# Dex's pods; nothing Traefik renders may own that address; and Traefik routes
+# Ingresses from the profile's namespaces only (checked above).
+if [ -f "$work/logweir.yaml" ] && [ -f "$work/dex.yaml" ] && [ -f "$work/traefik.yaml" ]; then
+  alias_ip="$(awk '/hostAliases:/{h=1} h && /ip:/{print $NF; exit}' "$work/logweir.yaml")"
+  dex_ip="$(awk '/^kind: Service$/{s=1} s && /^  clusterIP:/{print $2; exit}' "$work/dex.yaml")"
+  if [ -z "$alias_ip" ] || [ "$alias_ip" != "$dex_ip" ]; then
+    echo "FAIL: the console's alias for $DEX_HOST is '$alias_ip', not Dex's own Service ($dex_ip)" >&2; fail=1
+  elif grep -q "clusterIP: $alias_ip" "$work/traefik.yaml"; then
+    echo "FAIL: the console's alias for $DEX_HOST is Traefik's address — the shared ingress is on its IdP path" >&2; fail=1
+  elif awk '/^kind: NetworkPolicy$/{n=1} n && /egress:/{e=1} e && /kubernetes.io\/metadata.name: '"$INGRESS_NAMESPACE"'/{bad=1} /^---/{n=0;e=0} END{exit !bad}' "$work/logweir.yaml"; then
+    echo "FAIL: the console's egress names the ingress namespace; its IdP path must be Dex's pods" >&2; fail=1
+  else
+    echo "   ok: the console reaches $DEX_HOST at Dex's own Service ($dex_ip), never through Traefik"
+  fi
+fi
+if ! grep -q 'name: dex-internal-tls' deploy/poc/issuers.yaml || ! grep -q "dnsNames: \[$DEX_HOST\]" deploy/poc/issuers.yaml; then
+  echo "FAIL: issuers.yaml does not ask the local CA for Dex's own serving certificate" >&2; fail=1
 fi
 # The retired controller may be NAMED in a comment (why it is gone), never used.
 if grep -rn -i 'nginx' deploy/poc/*.yaml deploy/poc/*.env deploy/poc/rehearsals/ | grep -v -E ':[0-9]+:[[:space:]]*#' > "$work/nginx.hits"; then

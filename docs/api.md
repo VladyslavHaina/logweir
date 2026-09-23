@@ -1372,9 +1372,13 @@ keeps the last complete set for at most thirty seconds; after that the Service
 source trusts nobody, browsers get `421` and `/readyz` reports not ready, so a
 stale grant is never silent. Before the first read `/readyz` is not ready
 either. The read is one `list` of `endpointslices` in that one namespace (the
-chart grants exactly that); whoever can edit that Service or write an
-`EndpointSlice` there could add an address — the ingress namespace's own
-administrator, who already terminates the console's TLS.
+chart grants exactly that). Whoever can edit that Service, write an
+`EndpointSlice` there, or create or relabel a Pod matching the Service's
+selector there could add an address — the ingress namespace's own
+administrators, who already terminate the console's TLS. An ingress controller
+on `hostNetwork` publishes the node's address, so the console then trusts every
+hostNetwork pod and node process on that node and anything masqueraded to its
+address; accept that knowingly, or decide a `trustedProxyCidrs` `/32` instead.
 
 **A private CA for the issuer (`caBundleFile`, `systemRoots`).** An issuer
 whose certificate a private CA issued — a Dex behind an ingress with an
@@ -1391,7 +1395,11 @@ mistake) is exit 2. The chart mounts it from a ConfigMap or Secret
 (`api.console.oidc.caBundle`, [charts/logweir/README.md](../charts/logweir/README.md)).
 While the provider has not initialised, the console logs why at `warn` with the
 transport cause — `invalid peer certificate: UnknownIssuer` is a missing
-bundle, a name that does not resolve is a missing `hostAliases` entry.
+bundle, a name that does not resolve is a missing `hostAliases` entry. A
+`hostAliases` entry for the issuer must point at an endpoint only the IdP's
+owner can route — its own Service, with TLS terminated by the IdP — never at a
+shared ingress, where an Ingress from any namespace could answer for the
+issuer behind its real certificate ([charts/logweir/README.md](../charts/logweir/README.md)).
 
 A key file is two lines:
 

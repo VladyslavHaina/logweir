@@ -14,13 +14,21 @@
 //! the ingress controller's own pods, today's, and nothing else — narrower than
 //! any CIDR the width floors allow.
 //!
-//! WHO CAN WIDEN IT. Whoever can edit that Service's selector or write an
-//! `EndpointSlice` in that namespace can add an address. That is the ingress
-//! controller's own namespace, whose administrator already terminates the
+//! WHO CAN WIDEN IT. Whoever can edit that Service's selector, write an
+//! `EndpointSlice` in that namespace, or create or relabel a Pod (or a
+//! Deployment) matching the Service's selector there — the EndpointSlice
+//! controller then lists it — can add an address. That is the ingress
+//! controller's own namespace, whose administrators already terminate the
 //! console's TLS and could read or rewrite every request anyway; the console
 //! grants no one a power they did not hold. It is still the reason the
 //! namespace is named, not discovered, and the reason the chart's grant is a
 //! `list` of `endpointslices` in THAT namespace only.
+//!
+//! A `hostNetwork` INGRESS PUBLISHES THE NODE'S ADDRESS. Its endpoint is the
+//! node, so this source then trusts every hostNetwork pod and node process on
+//! that node and anything the CNI masquerades to the node address — not "the
+//! ingress pods and no other pod". Accept that knowingly, or decide a
+//! `trustedProxyCidrs` `/32` instead.
 //!
 //! STALENESS FAILS CLOSED. The set is refreshed every [`REFRESH_EVERY`]. A
 //! refresh that fails keeps the last complete set, but only for
@@ -57,6 +65,8 @@ pub struct TrustedProxies {
     cidrs: Vec<Cidr>,
     service: Option<ServiceRef>,
     endpoints: RwLock<Option<(BTreeSet<IpAddr>, Instant)>>,
+    every: Duration,
+    max_age: Duration,
 }
 
 impl TrustedProxies {
@@ -67,7 +77,20 @@ impl TrustedProxies {
             cidrs,
             service,
             endpoints: RwLock::new(None),
+            every: REFRESH_EVERY,
+            max_age: MAX_AGE,
         }
+    }
+
+    /// The same sources with a shorter refresh period and staleness window —
+    /// so a test can drive [`TrustedProxies::run`] itself through a failed
+    /// refresh and watch the set age out in milliseconds rather than thirty
+    /// seconds. Production uses [`REFRESH_EVERY`] and [`MAX_AGE`].
+    #[must_use]
+    pub fn with_timing(mut self, every: Duration, max_age: Duration) -> Self {
+        self.every = every;
+        self.max_age = max_age;
+        self
     }
 
     /// The static ranges alone.
@@ -111,7 +134,7 @@ impl TrustedProxies {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match &*guard {
-            Some((set, read_at)) if read_at.elapsed() <= MAX_AGE => Some(set.clone()),
+            Some((set, read_at)) if read_at.elapsed() <= self.max_age => Some(set.clone()),
             _ => None,
         }
     }
@@ -173,17 +196,22 @@ impl TrustedProxies {
 
     /// Refresh every [`REFRESH_EVERY`], forever. Spawned once by `main` when a
     /// Service is configured; the first read happens immediately.
+    ///
+    /// A FAILED REFRESH TOUCHES NOTHING. Only [`TrustedProxies::refresh`]'s
+    /// successful read stamps the set; this loop logs a failure and sleeps, so
+    /// the last complete set ages out on its own [`MAX_AGE`] clock.
+    /// `tests/entry_point.rs` drives this loop through failures to pin that.
     pub async fn run(self: std::sync::Arc<Self>, kube: KubeAdapter) {
         loop {
             if let Err(failure) = self.refresh(&kube).await {
                 tracing::warn!(
                     ?failure,
-                    max_age_seconds = MAX_AGE.as_secs(),
+                    max_age_seconds = self.max_age.as_secs(),
                     "could not read the trusted proxy Service's endpoints; the last complete set \
                      is kept until it is older than max_age_seconds"
                 );
             }
-            tokio::time::sleep(REFRESH_EVERY).await;
+            tokio::time::sleep(self.every).await;
         }
     }
 }

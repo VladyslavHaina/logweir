@@ -4,8 +4,10 @@ This directory is a **versioned proof-of-concept installation** of the supported
 path in [docs/quickstart.md](../../docs/quickstart.md): everything installed with
 Helm — Logweir itself from its **published OCI chart**, which names the four
 published Docker Hub images of the same commit (`docker.io/vladyslavhaina/weirkeeper`,
-`logweir`, `logweir-console`, `logweir-ui`, by their immutable `sha-<commit>`
-tags) — the console in `shared` mode behind **Traefik**, with real TLS from a
+`logweir`, `logweir-console`, `logweir-ui`, by their `sha-<commit>` tags —
+tags, which Docker Hub lets the publisher move; the publication step records
+each image's digest in its run summary, and a registry policy that needs
+immutability pins those digests) — the console in `shared` mode behind **Traefik**, with real TLS from a
 **cert-manager** local CA and sign-in through **Dex**. No image is built
 locally, no binary is installed by hand, and **no installed object is patched
 after the install**: every setting is a Helm value. The host needs `helm`,
@@ -19,10 +21,10 @@ says the PoC stands something in for it.
 
 | File | What it is |
 |---|---|
-| [versions.env](versions.env) | every version: the Logweir commit, its `sha-` tag and chart version, the two upgrade-rehearsal baselines, the three upstream chart versions, namespaces, hostnames and Traefik's fixed ClusterIP |
-| [traefik.values.yaml](traefik.values.yaml) | the ingress controller (chart 41.6.0, Traefik v3.7.13, by digest): HTTPS redirect, HSTS, a fixed ClusterIP |
+| [versions.env](versions.env) | every version: the Logweir commit, its `sha-` tag and chart version, the two upgrade-rehearsal baselines, the three upstream chart versions, namespaces, hostnames and Dex's fixed (PoC-only) ClusterIP |
+| [traefik.values.yaml](traefik.values.yaml) | the ingress controller (chart 41.6.0, Traefik v3.7.13, by digest): HTTPS redirect, HSTS, routes from the profile's own namespaces only, no query strings in its access log |
 | [cert-manager.values.yaml](cert-manager.values.yaml) and [issuers.yaml](issuers.yaml) | cert-manager v1.21.2, images pinned by digest, and the local CA `ClusterIssuer` |
-| [dex.values.yaml](dex.values.yaml) | Dex 0.24.1 (v2.44.0): one static user per Logweir role, secrets from a Secret |
+| [dex.values.yaml](dex.values.yaml) | Dex 0.24.1 (v2.44.0): one static user per Logweir role, secrets from a Secret; its own TLS listener for the console's back-channel |
 | [logweir.values.yaml](logweir.values.yaml) | Logweir: shared console, scoped controller, Ingress, NetworkPolicy, approval policy, demo Kafka and MinIO — and the six chart-gap values that replaced the patch |
 | [minio-grants.yaml](minio-grants.yaml) | three least-privilege MinIO users for the destination, so the demo MinIO's root credential is never given to Logweir |
 | [trustpolicy.sh](trustpolicy.sh) | prints the `TrustPolicy` for `logweir-poc` from the cluster's public signing key and the console's confirmation key |
@@ -102,13 +104,16 @@ believed from a client). Logweir only uses a standard `Ingress` with
 `ingressClassName: traefik`, so Gateway API on the same controller is an option
 later with no Logweir change.
 
+**Traefik routes the profile's own namespaces only** (`dex` and
+`logweir-system` for Ingresses, `traefik` for its CRDs). A controller that reads
+Ingresses from every namespace lets anyone who may create an Ingress anywhere
+claim a path on `dex.localtest.me` or `logweir.localtest.me` — a longer path
+rule outranks the owner's — behind the owner's own certificate. Its access log
+drops headers and query strings, so no OIDC `code` or `state` is logged.
+
 **Check:** `kubectl --context "$CTX" -n traefik get svc traefik` shows
-`CLUSTER-IP 10.96.0.80` and `EXTERNAL-IP localhost`, and
-`curl -sk https://logweir.localtest.me` answers `404` (nothing routes there
-yet). If the Service is refused because `10.96.0.80` is outside your cluster's
-Service range, pick a free address inside it and set it in `traefik.values.yaml`,
-`logweir.values.yaml` (`hostAliases`) and `versions.env` (`TRAEFIK_CLUSTER_IP`);
-`validate.sh` checks that the three agree.
+`EXTERNAL-IP localhost`, and `curl -sk https://logweir.localtest.me` answers
+`404` (nothing routes there yet).
 
 ## 3. Certificates: cert-manager and the local CA
 
@@ -119,6 +124,8 @@ helm upgrade --install cert-manager cert-manager --repo "$CERT_MANAGER_REPO" \
   -f deploy/poc/cert-manager.values.yaml --wait --timeout 10m
 kubectl --context "$CTX" apply -f deploy/poc/issuers.yaml
 kubectl --context "$CTX" wait --for=condition=Ready clusterissuer/logweir-poc-ca --timeout=120s
+# Dex's own serving certificate, for the console's back-channel (step 4):
+kubectl --context "$CTX" -n dex wait --for=condition=Ready certificate/dex-internal-tls --timeout=120s
 kubectl --context "$CTX" -n cert-manager get secret logweir-poc-ca \
   -o jsonpath='{.data.ca\.crt}' | base64 -d > poc-secrets/ca.crt
 ```
@@ -149,6 +156,20 @@ helm upgrade --install dex dex --repo "$DEX_REPO" --version "$DEX_CHART_VERSION"
 **Check:** `curl --cacert poc-secrets/ca.crt https://dex.localtest.me/.well-known/openid-configuration`
 returns a document whose `issuer` is exactly `https://dex.localtest.me`, and the
 response carries `strict-transport-security: max-age=31536000`.
+
+**Two ways into Dex, on purpose.** Browsers reach Dex through Traefik. The
+console never does: in its pod `dex.localtest.me` is mapped (`hostAliases`) to
+Dex's OWN Service, fixed at `10.96.0.81` (`service.clusterIP`, PoC-only), on
+port 443, where Dex terminates TLS itself with `dex-internal-tls` — a
+certificate for the same name from the same local CA. So the console's
+discovery, JWKS and token requests (the last carries its client secret) reach
+only pods of Service `dex/dex`, and no Ingress anywhere can answer them. A
+production IdP is resolved through real DNS; a pinned ClusterIP and a host
+alias are laptop-cluster devices. If the Dex Service is refused because
+`10.96.0.81` is outside your cluster's Service range, pick a free address in it
+and set it in `dex.values.yaml`, `logweir.values.yaml` (`hostAliases`) and
+`versions.env` (`DEX_CLUSTER_IP`); `validate.sh` checks that they agree and that
+the address is not Traefik's.
 
 ## 5. Logweir's own Secrets and the CA reference
 
@@ -241,7 +262,18 @@ this profile's single exception to "nothing secret in values" — and it can
 delete. It is never handed to Logweir. A one-shot Job reads it inside the
 cluster and creates three users with the policies
 [docs/install.md](../../docs/install.md) §3.11 measured, none of which holds
-`s3:DeleteObject`:
+`s3:DeleteObject`. **Overwrite is not excluded:** the writer's `s3:PutObject`
+on `kafka-backups/poc/*` and `…/logweir/*` can replace an existing key on this
+unversioned bucket, because `archiveWrite` is what writes a backup's segments
+and the receipt and catalog record, and S3 IAM has no put-if-absent action.
+Verification catches part of it — a replaced receipt fails its signature, and a
+manifest that no longer matches the receipt's digest is not `Available` — but
+replaced segment data is not prevented by the grant, and a restore's scorecard
+checks only its sampled window. That is a stated limit of this demo archive,
+not a guarantee. A production archive
+that must survive a compromised writer uses a versioned or Object Lock bucket
+(and then `RetentionPolicy` in `Report` or `ExternalLifecycle` mode, never
+`Enforce`):
 
 ```bash
 kubectl --context "$CTX" apply -f deploy/poc/minio-grants.yaml
@@ -478,15 +510,15 @@ your keychain.
 
 | Setting | In this profile | Production |
 |---|---|---|
-| Images and chart | one publication: the OCI chart and its four `sha-` images; upstream by digest | the same, or a release tag's chart (`--version <X.Y.Z>`); pin Logweir by digest if your registry policy requires it |
-| Ingress controller | Traefik, 1 replica, fixed ClusterIP | **a maintained ingress controller** (Traefik, or another that is maintained), ≥ 2 replicas across nodes with a PDB; Gateway API with the same controller is an option later. ingress-nginx is retired and is not one |
+| Images and chart | one publication: the OCI chart and its four `sha-` tags (tags, not digests); upstream by digest | the same, or a release tag's chart (`--version <X.Y.Z>`); pin Logweir by digest (the publication's run summary lists them) if your registry policy requires immutability |
+| Ingress controller | Traefik, 1 replica, routing the profile's namespaces only | **a maintained ingress controller** (Traefik, or another that is maintained), ≥ 2 replicas across nodes with a PDB, whose host claims are restricted to their owners (watched namespaces, or an admission policy on Ingress hosts); Gateway API with the same controller is an option later. ingress-nginx is retired and is not one |
 | TLS | cert-manager local CA; HSTS at the entry point | your CA or ACME issuer — only `issuers.yaml` and the Ingress annotation change |
 | Identity provider | Dex static users, bound by subject | your IdP (below), bound by group |
-| Console's trust of the IdP | the local CA by `oidc.caBundle`; `dex.localtest.me` mapped to Traefik by `hostAliases` | a publicly trusted issuer needs neither; a corporate PKI keeps `oidc.caBundle`; split-horizon DNS keeps `hostAliases` |
+| Console's trust of the IdP | the local CA by `oidc.caBundle`; `dex.localtest.me` mapped by `hostAliases` to **Dex's own Service** (pinned ClusterIP), where Dex terminates TLS itself — never to the shared ingress | a publicly trusted issuer needs no bundle, a corporate PKI keeps `oidc.caBundle`; the IdP is resolved through **real DNS** — no host alias, no pinned ClusterIP. If an alias is ever needed, its target must be an endpoint only the IdP's owner can route, and the bundle's CA must not issue the IdP's name to anyone else on that path |
 | Console | `shared`, 2 replicas, PDB, liveness and readiness probes, non-root, read-only root filesystem, `requireTrustedProxy` | the same |
-| Trusted proxy | the Traefik Service's serving pods (`trustedProxyService`) | the same, naming your ingress controller's Service |
+| Trusted proxy | the Traefik Service's serving pods (`trustedProxyService`) | the same, naming your ingress controller's Service. Anyone who can edit that Service, write its EndpointSlices or create a Pod matching its selector in that namespace can add an address; a `hostNetwork` controller's endpoint is its NODE, so the node's other host processes are trusted too ([charts/logweir/README.md](../../charts/logweir/README.md)) |
 | Controller | scoped to `logweir-poc` (`watchNamespaces`), non-root, read-only root filesystem, resources set, **exec liveness and readiness probes** | the same, one namespace per team |
-| NetworkPolicies | rendered for the console, the runners and the controller; console egress to Dex by **pod selector** (`oidcPeers`, Traefik's pods on 8443) | the same — **enforced**. docker-desktop does not enforce NetworkPolicy, so here they are objects, not boundaries. An IdP outside the cluster is `oidcCIDRs` (its own addresses) instead |
+| NetworkPolicies | rendered for the console, the runners and the controller; console egress to Dex by **pod selector** (`oidcPeers`, Dex's pods on 5554) | the same — **enforced**. docker-desktop does not enforce NetworkPolicy, so here they are objects, not boundaries. An IdP outside the cluster is `oidcCIDRs` (its own addresses) instead |
 | Dex | 2 replicas, PDB, Kubernetes storage | the same, or your IdP directly |
 | Archive and Kafka | the chart's demo MinIO (root credential in chart values — the one exception; Logweir gets three least-privilege users) and brokers | your object store (per-role grants, [docs/install.md](../../docs/install.md) §3.11) and clusters; the connection objects in a watched namespace (`kubernetes.connectionsNamespace`) |
 | Approval policy | `Ordinary` in `logweir-poc` | `Governed` for production namespaces, with approver keys on the `TrustPolicy` |
@@ -515,7 +547,7 @@ documents each one.
 | Gap | Was | Now |
 |---|---|---|
 | G1 — the console could not trust a private CA for its issuer | a patch mounting the CA and setting `SSL_CERT_FILE` (replacing the system roots) | `api.console.oidc.caBundle: {configMap \| secret, key}`: the bundle is added to the system roots (`oidc.systemRoots: false` to drop them); an unreadable or empty bundle refuses to start |
-| G2 — `dex.localtest.me` resolved to the console pod itself | a patch adding `hostAliases` with an address read at install | `api.console.hostAliases`, with Traefik's fixed ClusterIP. Chosen over a separate back-channel URL: it changes only where the name resolves, so the URL, the TLS name check and the exact `iss` comparison all stay on the one configured issuer |
+| G2 — `dex.localtest.me` resolved to the console pod itself | a patch adding `hostAliases` with an address read at install | `api.console.hostAliases`, mapping the name to Dex's OWN Service, where Dex terminates TLS itself. Chosen over a separate back-channel URL: it changes only where the name resolves, so the URL, the TLS name check and the exact `iss` comparison all stay on the one configured issuer — which is sound only because the target is an endpoint only Dex's owner can route (the first version pointed at the shared ingress, where any namespace's Ingress could have answered) |
 | G3 — the chart's own connection objects landed in the release namespace, which a scoped controller cannot watch | the PoC created them through the console instead | `kubernetes.connectionsNamespace`; the render fails when it is not watched |
 | G4 — the chart was not published | installed from a checkout of the image commit | `oci://registry-1.docker.io/vladyslavhaina/logweir-chart`, published by `images.yml` beside the images, versioned with them |
 | G5 — the controller had no probes | a wedged controller was never restarted | exec liveness and readiness (`weirkeeper --probe`) against a loopback health listener |
@@ -539,9 +571,12 @@ first publication carrying these chart fixes:
    certificate with `oidc.caBundle`; with the ConfigMap's key renamed the pod
    stays in `ContainerCreating`, and with an empty `ca.crt` it exits 2 naming
    the bundle.
-3. **G2** — inside a console pod, `dex.localtest.me` resolves to `10.96.0.80`
-   (`kubectl exec deploy/logweir-api -- getent hosts dex.localtest.me`), and
-   sign-in completes.
+3. **G2** — inside a console pod, `dex.localtest.me` resolves to `10.96.0.81`
+   (`kubectl exec deploy/logweir-api -- getent hosts dex.localtest.me`), Dex's
+   own Service; `curl --cacert poc-secrets/ca.crt --resolve dex.localtest.me:443:10.96.0.81`
+   from a pod in `dex` gets Dex's discovery over Dex's own TLS; sign-in
+   completes; and an Ingress for host `dex.localtest.me` created in another
+   namespace (e.g. `logweir-poc`) is NOT routed by Traefik.
 4. **G6** — `/readyz` is `200` and sign-in works; `kubectl rollout restart
    deploy/traefik`, and within seconds of the new pod serving, requests succeed
    again with no step re-run; the console log shows the trusted set moving to

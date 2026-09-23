@@ -436,20 +436,30 @@ fn discovery_answer(
     let query: BTreeMap<String, String> =
         serde_urlencoded::from_str(&recorded.query).unwrap_or_default();
     let selector = query.get("labelSelector").cloned().unwrap_or_default();
-    let items: Vec<Value> = s
+    let limit: usize = query
+        .get("limit")
+        .and_then(|l| l.parse().ok())
+        .unwrap_or(usize::MAX);
+    let mut items: Vec<Value> = s
         .objects
         .iter()
         .filter(|((p, n, _), _)| p == "endpointslices" && n == namespace)
         .filter(|(_, v)| labels_match(v, &selector))
         .map(|(_, v)| v.clone())
         .collect();
+    // PAGED LIKE THE API SERVER: past `limit` there is a continue token.
+    let mut metadata = json!({"resourceVersion": s.next_rv.to_string()});
+    if items.len() > limit {
+        items.truncate(limit);
+        metadata["continue"] = json!("fake-continue:endpointslices");
+    }
     (
         None,
         200,
         json!({
             "apiVersion": "discovery.k8s.io/v1",
             "kind": "EndpointSliceList",
-            "metadata": {"resourceVersion": s.next_rv.to_string()},
+            "metadata": metadata,
             "items": items,
         })
         .to_string(),
