@@ -24,6 +24,62 @@ const SET: &str = "3f1c9d2e-8a7b-4c6d-9e0f-1a2b3c4d5e6f-20260922-140000";
 const RECEIPT_KEY: &str =
     "logweir/backups/3f1c9d2e-8a7b-4c6d-9e0f-1a2b3c4d5e6f-20260922-140000/01JB7Z00000000000000000000.receipt.json";
 
+/// A real Ed25519 key (the fixture `standing_restore.rs` uses) acting as the
+/// installation's EvidenceSigning key.
+const SIGNER_KEY_ID: &str = "f27c7f51aad0700db76887b306d413a039156b44ee147c1d82c5e4dc339558f6";
+const SIGNER_PEM: &str = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEApFpEU8uY5S8Lv43HL4DcXKKyM8WHurCPZIxvq8ZBfpY=\n-----END PUBLIC KEY-----\n";
+/// A second real key, whose SPKI is NOT `SIGNER_KEY_ID`'s.
+const OTHER_PEM: &str = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAet+vMgdQ3pfWnI6dhsflAD9gPHDHXqakzJIfaFRdAv0=\n-----END PUBLIC KEY-----\n";
+const OTHER_KEY_ID: &str = "fcd34b4ee7e11187164366d9ba1d7dee711ce09f75e0fe2ec9e851a2bb3cf043";
+
+/// The row's recovery point, `recoveryPointAtMs` below.
+fn recovery_point() -> DateTime<Utc> {
+    DateTime::<Utc>::from_timestamp_millis(1_758_549_600_000).unwrap()
+}
+
+/// The signer as the CURRENT trust lists it: an Active EvidenceSigning key.
+fn signer_key() -> weirkeeper::crds::trust_policy::TrustedKey {
+    use weirkeeper::crds::trust_policy::{KeyAlgorithm, KeyPrincipal, KeyState, KeyUsage};
+    weirkeeper::crds::trust_policy::TrustedKey {
+        key_id: SIGNER_KEY_ID.to_string(),
+        spki_pem: SIGNER_PEM.to_string(),
+        algorithm: KeyAlgorithm::Ed25519,
+        usages: vec![KeyUsage::EvidenceSigning],
+        principal: KeyPrincipal {
+            id: format!("install:{SIGNER_KEY_ID}"),
+            display: None,
+        },
+        not_before: Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap(),
+        not_after: Utc.with_ymd_and_hms(2099, 1, 1, 0, 0, 0).unwrap(),
+        state: KeyState::Active,
+        retired_at: None,
+        revoked_at: None,
+        revocation_reason: None,
+        revocation_effective_from: None,
+    }
+}
+
+fn trust_of(
+    keys: Vec<weirkeeper::crds::trust_policy::TrustedKey>,
+) -> weirkeeper::trust::ResolvedTrust {
+    use weirkeeper::crds::trust_policy::{TrustPolicy, TrustPolicySpec};
+    weirkeeper::trust::from_policy(&TrustPolicy {
+        metadata: kube::api::ObjectMeta {
+            name: Some("org-default".to_string()),
+            uid: Some("uid-org-default".to_string()),
+            generation: Some(1),
+            ..kube::api::ObjectMeta::default()
+        },
+        spec: TrustPolicySpec {
+            default: false,
+            namespaces: Some(vec!["lw-p152".to_string()]),
+            allowed_target_cluster_ids: None,
+            keys,
+        },
+        status: None,
+    })
+}
+
 fn receipt_sha() -> String {
     format!("sha256:{}", "a1".repeat(32))
 }
@@ -51,7 +107,7 @@ fn entry(point_id: &str, selectable: bool) -> Value {
         "manifestSha256": manifest_sha(),
         "availability": "Available",
         "verification": if selectable { "Verified" } else { "UntrustedSigner" },
-        "signerKeyId": "c".repeat(64),
+        "signerKeyId": SIGNER_KEY_ID,
         "selectable": selectable,
     })
 }
@@ -169,6 +225,7 @@ struct Fixture {
     backups: Vec<Backup>,
     complete: bool,
     plan: Option<PlanFacts>,
+    trust: Result<weirkeeper::trust::ResolvedTrust, String>,
 }
 
 impl Fixture {
@@ -185,6 +242,7 @@ impl Fixture {
             backups: Vec::new(),
             complete: true,
             plan: Some(bound_plan()),
+            trust: Ok(trust_of(vec![signer_key()])),
         }
     }
 
@@ -198,6 +256,7 @@ impl Fixture {
             refusals: &refusals,
             backups_complete: self.complete,
             plan: self.plan.as_ref(),
+            trust: self.trust.as_ref().map_err(String::as_str),
             now: now(),
         })
     }
@@ -576,5 +635,170 @@ fn the_shipped_crd_carries_the_catalog_point_reference_and_rule_p10() {
     assert!(
         rules.contains(&weirkeeper::crds::preflight::P10_ONE_RECOVERY_POINT_RULE),
         "rule P10 is on the restore block: {rules:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// M-2 — the row's signer against the CURRENT trust (D3 §5.5 step 5)
+// ---------------------------------------------------------------------------
+
+/// **THE REVIEW'S M-2.** The catalog synced while the key was Active and wrote
+/// `Verified`; the key was revoked for compromise afterwards. The row must not
+/// stay green on the sync-time verdict.
+///
+/// CONTROL: `a_selectable_row_bound_into_the_plan_is_ready` — the same row
+/// under the same key, Active, is `ready`.
+///
+/// MUTANTS: `catalog_point_row` skipping the signer match; `signer_recheck`
+/// returning `Trusted` unconditionally; `read_catalog_point` passing no trust.
+#[test]
+fn a_signer_revoked_after_the_sync_makes_the_row_not_ready() {
+    use weirkeeper::crds::trust_policy::{KeyState, RevocationReason};
+    let mut key = signer_key();
+    key.state = KeyState::Revoked;
+    key.revoked_at = Some(now() - Duration::hours(1));
+    key.revocation_reason = Some(RevocationReason::KeyCompromise);
+    let mut f = Fixture::healthy();
+    f.trust = Ok(trust_of(vec![key]));
+    let row = f.row();
+    assert_row(
+        &row,
+        CheckState::NotReady,
+        CheckCode::CatalogPointSignerUntrusted,
+        "revoked after the sync",
+    );
+    let message = row.message.clone();
+    assert!(
+        message.contains(SIGNER_KEY_ID) && message.contains("Revoked"),
+        "the message names the key and why: {message}"
+    );
+}
+
+/// A key RETIRED before the receipt was written refuses it; retired AFTER, it
+/// keeps what it signed (D3 §7.4) — the control, which is `ready`.
+#[test]
+fn a_signer_retired_before_the_point_refuses_it_and_after_keeps_it() {
+    use weirkeeper::crds::trust_policy::KeyState;
+    let retired = |at: DateTime<Utc>| {
+        let mut key = signer_key();
+        key.state = KeyState::Retired;
+        key.retired_at = Some(at);
+        let mut f = Fixture::healthy();
+        f.trust = Ok(trust_of(vec![key]));
+        f.row()
+    };
+    assert_row(
+        &retired(recovery_point() - Duration::days(1)),
+        CheckState::NotReady,
+        CheckCode::CatalogPointSignerUntrusted,
+        "retired before the point",
+    );
+    assert_row(
+        &retired(recovery_point() + Duration::days(1)),
+        CheckState::Ready,
+        CheckCode::CatalogPointSelectable,
+        "retired after the point (control)",
+    );
+}
+
+/// A key the current trust does not list, and one listed without
+/// `EvidenceSigning`, are refused by name; so is one whose public half is not
+/// the key id's (the runner would not be handed it).
+#[test]
+fn a_signer_the_current_trust_does_not_accept_for_evidence_is_refused() {
+    use weirkeeper::crds::trust_policy::KeyUsage;
+    let row_for = |keys| {
+        let mut f = Fixture::healthy();
+        f.trust = Ok(trust_of(keys));
+        f.row()
+    };
+    let mut stranger = signer_key();
+    stranger.key_id = OTHER_KEY_ID.to_string();
+    stranger.spki_pem = OTHER_PEM.to_string();
+    stranger.principal.id = format!("install:{OTHER_KEY_ID}");
+    let row = row_for(vec![stranger]);
+    assert_row(
+        &row,
+        CheckState::NotReady,
+        CheckCode::CatalogPointSignerUntrusted,
+        "not listed",
+    );
+    assert!(row.message.contains("UntrustedSigner"));
+
+    let mut approver_only = signer_key();
+    approver_only.usages = vec![KeyUsage::GovernedApproval];
+    let row = row_for(vec![approver_only]);
+    assert_row(
+        &row,
+        CheckState::NotReady,
+        CheckCode::CatalogPointSignerUntrusted,
+        "wrong usage",
+    );
+    assert!(row.message.contains("KeyUsageMismatch"));
+
+    let mut mismatched = signer_key();
+    mismatched.spki_pem = OTHER_PEM.to_string();
+    let row = row_for(vec![mismatched]);
+    assert_row(
+        &row,
+        CheckState::NotReady,
+        CheckCode::CatalogPointSignerUntrusted,
+        "key material not the key id's",
+    );
+    assert!(row.message.contains("KeyMaterialUnusable"));
+}
+
+/// No trust to judge by, or a row naming no signer, is `unknown` — never the
+/// sync-time verdict passed through.
+#[test]
+fn an_unjudgeable_signer_is_unknown() {
+    let mut f = Fixture::healthy();
+    f.trust = Err("the namespace's trust is contested".to_string());
+    let row = f.row();
+    assert_row(
+        &row,
+        CheckState::Unknown,
+        CheckCode::CatalogPointSignerUnknown,
+        "no trust",
+    );
+    assert!(row.message.contains("the namespace's trust is contested"));
+
+    let mut unsigned = entry(POINT, true);
+    unsigned
+        .as_object_mut()
+        .expect("an object")
+        .remove("signerKeyId");
+    let p = page("archive-g1-p0", &[unsigned], true);
+    let mut f = Fixture::healthy();
+    f.catalog = Some(catalog(
+        std::slice::from_ref(&p),
+        now() + Duration::hours(1),
+    ));
+    f.pages = vec![(p.0, Some(p.1))];
+    assert_row(
+        &f.row(),
+        CheckState::Unknown,
+        CheckCode::CatalogPointSignerUnknown,
+        "no signer key id",
+    );
+}
+
+/// The catalog's OWN refusal keeps its message: a row already not selectable
+/// is reported as such, whatever the current trust says of its signer.
+#[test]
+fn a_row_the_catalog_already_refused_keeps_its_own_code() {
+    let p = page("archive-g1-p0", &[entry(POINT, false)], true);
+    let mut f = Fixture::healthy();
+    f.catalog = Some(catalog(
+        std::slice::from_ref(&p),
+        now() + Duration::hours(1),
+    ));
+    f.pages = vec![(p.0, Some(p.1))];
+    f.trust = Err("unresolved".to_string());
+    assert_row(
+        &f.row(),
+        CheckState::NotReady,
+        CheckCode::CatalogPointNotSelectable,
+        "catalog refusal first",
     );
 }

@@ -1828,6 +1828,112 @@ pub struct CatalogPointFound {
     pub plan_backup: Option<String>,
     /// Whether the check has a parsed plan at all.
     pub plan_parsed: bool,
+    /// The row's signer, judged again against the namespace's CURRENT trust.
+    pub signer: SignerRecheck,
+}
+
+/// The row's signer against the namespace's CURRENT trust — the PLAT-15.2
+/// review's M-2 (D3 §5.5 step 5, "re-evaluates trust").
+///
+/// The row's `verification` is the verdict the catalog reached at SYNC time,
+/// under the trust it held then. A key revoked or retired after that sync
+/// would otherwise keep a `Verified` row green until the next sync; this is
+/// the same `logweir_core::trust::decide` the runner applies before it
+/// restores (D3 §5.5 step 6), over the same trust the controller resolves for
+/// the namespace's `Approval`s (`crate::trust::resolve`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SignerRecheck {
+    /// Current trust accepts the row's signer for `EvidenceSigning`.
+    Trusted,
+    /// Current trust refuses it.
+    Untrusted {
+        /// The signer key id the row names.
+        key_id: String,
+        /// `UntrustReason::as_str`, or why the key material is unusable.
+        reason: String,
+        /// The key's lifecycle state as the verdict saw it.
+        key_state: String,
+    },
+    /// No answer: the trust could not be resolved, or the row names no key.
+    Unjudgeable {
+        /// Why, in words.
+        detail: String,
+    },
+}
+
+/// Judge `entry`'s signer against `trust`. Pure.
+///
+/// The claimed signing time is the row's recovery point: the view carries no
+/// receipt `finished_at`, and the recovery point is the earliest instant the
+/// receipt can have been signed. A key retired between the two instants is
+/// therefore accepted here and refused by the runner, which reads the real
+/// `finished_at` — the runner's refusal is the one that moves no data.
+#[must_use]
+pub fn signer_recheck(
+    entry: &crate::catalog_view::ViewEntry,
+    trust: Result<&crate::trust::ResolvedTrust, &str>,
+    now: DateTime<Utc>,
+) -> SignerRecheck {
+    use logweir_core::trust::{EvidenceClaim, IndependentObservation, KeyUsage, TrustResult};
+    let trust = match trust {
+        Ok(trust) => trust,
+        Err(detail) => {
+            return SignerRecheck::Unjudgeable {
+                detail: detail.to_string(),
+            }
+        }
+    };
+    let Some(key_id) = entry
+        .signer_key_id
+        .as_deref()
+        .filter(|k| !k.trim().is_empty())
+    else {
+        return SignerRecheck::Unjudgeable {
+            detail: format!(
+                "the catalog lists `{}` with no signer key id, so its signer cannot be judged                  against the current trust",
+                entry.point_id
+            ),
+        };
+    };
+    let Some(signed_at) = DateTime::<Utc>::from_timestamp_millis(entry.recovery_point_at_ms) else {
+        return SignerRecheck::Unjudgeable {
+            detail: format!(
+                "the catalog row for `{}` carries no usable recovery point instant",
+                entry.point_id
+            ),
+        };
+    };
+    let verdict = trust.decide_for(
+        key_id,
+        KeyUsage::EvidenceSigning,
+        &EvidenceClaim::at(signed_at),
+        &IndependentObservation::none(),
+        now,
+    );
+    if verdict.result != TrustResult::Valid {
+        return SignerRecheck::Untrusted {
+            key_id: key_id.to_string(),
+            reason: verdict
+                .reason
+                .map_or("NotAccepted", logweir_core::trust::UntrustReason::as_str)
+                .to_string(),
+            key_state: verdict.key_state.as_str().to_string(),
+        };
+    }
+    // The runner is handed only keys whose public half parses and whose id is
+    // its own (`restore::evidence_keyring_bytes`); a key it would not be
+    // handed cannot verify the receipt there.
+    if !trust
+        .key(key_id)
+        .is_some_and(crate::trust::ResolvedKey::is_usable)
+    {
+        return SignerRecheck::Untrusted {
+            key_id: key_id.to_string(),
+            reason: "KeyMaterialUnusable".to_string(),
+            key_state: verdict.key_state.as_str().to_string(),
+        };
+    }
+    SignerRecheck::Trusted
 }
 
 /// Everything [`catalog_point_facts`] reads, gathered by the reconciler.
@@ -1848,6 +1954,9 @@ pub struct CatalogPointRead<'a> {
     pub backups_complete: bool,
     /// The plan, when the check has one.
     pub plan: Option<&'a PlanFacts>,
+    /// The namespace's current trust (`crate::trust::resolve`), or why it
+    /// could not be resolved.
+    pub trust: Result<&'a crate::trust::ResolvedTrust, &'a str>,
     /// The check's clock.
     pub now: DateTime<Utc>,
 }
@@ -1951,6 +2060,7 @@ pub fn catalog_point_facts(read: &CatalogPointRead<'_>) -> CatalogPointFacts {
         plan_point: parsed.and_then(|p| p.source.point.clone()),
         plan_backup: parsed.map(|p| p.source.backup.clone()),
         plan_parsed: parsed.is_some(),
+        signer: signer_recheck(&entry, read.trust, read.now),
         entry,
     }))
 }
@@ -1965,13 +2075,16 @@ pub fn catalog_point_facts(read: &CatalogPointRead<'_>) -> CatalogPointFacts {
 ///    `notReady CatalogPointRefusedByController`, whatever the row says;
 /// 4. the row is not selectable → `notReady CatalogPointNotSelectable`, with
 ///    both axes in the message;
-/// 5. not every `Backup` could be read → `unknown CatalogPointViewUnavailable`
+/// 5. the row's signer is refused by the namespace's CURRENT trust →
+///    `notReady CatalogPointSignerUntrusted`; that trust could not be resolved
+///    or the row names no signer → `unknown CatalogPointSignerUnknown`;
+/// 6. not every `Backup` could be read → `unknown CatalogPointViewUnavailable`
 ///    — asked AFTER the refusal it could not rule out, because a refusal that
 ///    WAS found is an answer;
-/// 6. the plan is not bound to this row (no `source.point`, a different
+/// 7. the plan is not bound to this row (no `source.point`, a different
 ///    binding, or a `source.backup` that is not the row's set) →
 ///    `notReady CatalogPointBindingMismatch`;
-/// 7. otherwise `ready CatalogPointSelectable`.
+/// 8. otherwise `ready CatalogPointSelectable`.
 #[must_use]
 pub fn catalog_point_row(facts: &CatalogPointFacts, now: DateTime<Utc>) -> Option<CheckOutcome> {
     let op = PreflightOperation::Restore;
@@ -2038,6 +2151,33 @@ pub fn catalog_point_row(facts: &CatalogPointFacts, now: DateTime<Utc>) -> Optio
                                 .unwrap_or("Choose a point the catalog marks restorable."),
                         ),
                 );
+            }
+            match &f.signer {
+                SignerRecheck::Trusted => {}
+                SignerRecheck::Untrusted {
+                    key_id,
+                    reason,
+                    key_state,
+                } => {
+                    return Some(
+                        mk(CheckState::NotReady, CheckCode::CatalogPointSignerUntrusted)
+                            .with_scope(at)
+                            .with_message(&format!(
+                                "the catalog lists `{}` as {}, but its receipt's signer `{key_id}`                                  is refused by this namespace's current trust: {reason} (key                                  state {key_state}); the row predates that change",
+                                e.point_id,
+                                e.verification.as_str()
+                            ))
+                            .with_remedy("Choose a point signed by a key the current trust accepts; the runner refuses this receipt before it moves any data."),
+                    );
+                }
+                SignerRecheck::Unjudgeable { detail } => {
+                    return Some(
+                        mk(CheckState::Unknown, CheckCode::CatalogPointSignerUnknown)
+                            .with_scope(at)
+                            .with_message(detail)
+                            .with_remedy("Resolve the namespace's TrustPolicy (exactly one policy, or the legacy TrustRoster), then run this check again."),
+                    );
+                }
             }
             if !f.backups_complete {
                 return Some(
@@ -4016,6 +4156,33 @@ async fn read_catalog_point(
         }
     }
     let refusals = crate::catalog_view::ControllerRefusals::from_facts(facts);
+    // THE CURRENT TRUST (M-2): the resolution the Approval controller makes for
+    // this namespace. A failed read, a contested namespace and an unconfigured
+    // one are each an unknown row, never a pass.
+    let resolved = crate::trust::resolve(client, namespace).await;
+    let unresolved: String;
+    let trust = match &resolved {
+        Ok(crate::trust::Resolution::Trust(trust)) => Ok(trust.as_ref()),
+        Ok(crate::trust::Resolution::Conflict { policies, .. }) => {
+            unresolved = format!(
+                "the namespace's trust is contested by {} TrustPolicies ({}), so the catalog \
+                 row's signer cannot be judged against it",
+                policies.len(),
+                policies.join(", ")
+            );
+            Err(unresolved.as_str())
+        }
+        Ok(crate::trust::Resolution::Unconfigured) => Err(
+            "no TrustPolicy governs this namespace and there is no TrustRoster, so the catalog \
+             row's signer cannot be judged",
+        ),
+        Err(error) => {
+            warn!(namespace = %namespace, error = %error,
+                "the trust could not be resolved for a catalog point check");
+            unresolved = format!("the namespace's trust could not be read: {error}");
+            Err(unresolved.as_str())
+        }
+    };
     Ok(catalog_point_facts(&CatalogPointRead {
         catalog_name: &reference.catalog_ref.name,
         point_id: &reference.point_id,
@@ -4024,6 +4191,7 @@ async fn read_catalog_point(
         refusals: &refusals,
         backups_complete: complete,
         plan,
+        trust,
         now,
     }))
 }

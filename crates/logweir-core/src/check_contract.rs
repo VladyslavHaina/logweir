@@ -293,6 +293,11 @@ closed_vocabulary! {
         CatalogPointNotSelectable => "CatalogPointNotSelectable",
         CatalogPointRefusedByController => "CatalogPointRefusedByController",
         CatalogPointBindingMismatch => "CatalogPointBindingMismatch",
+        // The PLAT-15.2 review's M-2 (D3 §5.5 step 5): the row's signer is
+        // judged again against the namespace's CURRENT trust when the check
+        // runs, so a key revoked or retired after the last catalog sync
+        // refuses the point instead of riding on the sync-time verdict.
+        CatalogPointSignerUntrusted => "CatalogPointSignerUntrusted",
         BackupSetNotFound => "BackupSetNotFound",
         ManifestUnreadable => "ManifestUnreadable",
         PointInTimeBeforeCoverage => "PointInTimeBeforeCoverage",
@@ -348,6 +353,10 @@ closed_vocabulary! {
         // verdicts could not all be listed -- so "is this point restorable"
         // has no answer, and a blocking row with no answer is never `ready`.
         CatalogPointViewUnavailable => "CatalogPointViewUnavailable",
+        // M-2's Unknown column: the namespace's trust could not be resolved
+        // (two policies claim it, none does, or the read failed), or the row
+        // names no signer key, so the re-check has no answer.
+        CatalogPointSignerUnknown => "CatalogPointSignerUnknown",
         // -- framework / phase codes (D2 §4.2, §4.3, §5.1, §6.2) ---------
         CheckContractMismatch => "CheckContractMismatch",
         ResultUnreadable => "ResultUnreadable",

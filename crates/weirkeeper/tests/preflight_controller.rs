@@ -5730,6 +5730,7 @@ fn catalog_objects(selectable: bool) -> (Value, Value) {
         "manifestSha256": catalog_manifest_sha(),
         "availability": "Available",
         "verification": if selectable { "Verified" } else { "UntrustedSigner" },
+        "signerKeyId": CATALOG_SIGNER_KEY_ID,
         "selectable": selectable
     })
     .to_string();
@@ -5757,6 +5758,46 @@ fn catalog_objects(selectable: bool) -> (Value, Value) {
     (catalog, page)
 }
 
+/// A real Ed25519 key, the catalog row's signer.
+const CATALOG_SIGNER_KEY_ID: &str =
+    "f27c7f51aad0700db76887b306d413a039156b44ee147c1d82c5e4dc339558f6";
+const CATALOG_SIGNER_PEM: &str = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEApFpEU8uY5S8Lv43HL4DcXKKyM8WHurCPZIxvq8ZBfpY=\n-----END PUBLIC KEY-----\n";
+
+/// The cluster's `TrustPolicy` list, listing the row's signer as an
+/// EvidenceSigning key in `state` (revoked for compromise when `Revoked`).
+fn catalog_trust_policies(state: &str) -> Route {
+    let mut key = json!({
+        "keyId": CATALOG_SIGNER_KEY_ID,
+        "spkiPem": CATALOG_SIGNER_PEM,
+        "algorithm": "ed25519",
+        "usages": ["EvidenceSigning"],
+        "principal": {"id": format!("install:{CATALOG_SIGNER_KEY_ID}")},
+        "notBefore": "2025-01-01T00:00:00Z",
+        "notAfter": "2099-01-01T00:00:00Z",
+        "state": state
+    });
+    if state == "Revoked" {
+        let when = (now() - Duration::hours(1)).to_rfc3339();
+        key["revokedAt"] = json!(when);
+        key["revocationReason"] = json!("KeyCompromise");
+        key["revocationEffectiveFrom"] = json!(when);
+    }
+    route(
+        "GET",
+        "/trustpolicies",
+        json!({
+            "apiVersion": "v1", "kind": "TrustPolicyList",
+            "metadata": {"resourceVersion": "1"},
+            "items": [{
+                "apiVersion": "logweir.dev/v1alpha1", "kind": "TrustPolicy",
+                "metadata": {"name": "org-default", "uid": "uid-org-default", "generation": 1},
+                "spec": {"default": true, "keys": [key]}
+            }]
+        })
+        .to_string(),
+    )
+}
+
 async fn restore_over_catalog_point(bound: bool, selectable: bool, backups: Vec<Value>) -> Value {
     restore_over_catalog_point_with(
         bound,
@@ -5767,6 +5808,21 @@ async fn restore_over_catalog_point(bound: bool, selectable: bool, backups: Vec<
 }
 
 async fn restore_over_catalog_point_with(bound: bool, selectable: bool, backups: Route) -> Value {
+    restore_over_catalog_point_trusting(
+        bound,
+        selectable,
+        backups,
+        catalog_trust_policies("Active"),
+    )
+    .await
+}
+
+async fn restore_over_catalog_point_trusting(
+    bound: bool,
+    selectable: bool,
+    backups: Route,
+    trust_policies: Route,
+) -> Value {
     let job = job_name(CheckPlanKind::RestorePreflight);
     let mut evidence = backup_destination("evidence");
     evidence["spec"]["storage"]["bucket"] = json!("evidence-bucket");
@@ -5791,6 +5847,7 @@ async fn restore_over_catalog_point_with(bound: bool, selectable: bool, backups:
         route("GET", "/recoverycatalogs/archive", catalog.to_string()),
         route("GET", "/configmaps/archive-g1-p0", page.to_string()),
         backups,
+        trust_policies,
         route("GET", leak(job.clone()), finished_job(&job).to_string()),
         route(
             "GET",
@@ -5885,5 +5942,48 @@ async fn a_catalog_point_request_is_answered_from_the_catalog_row() {
     .await;
     let row = check_entry(&unlisted, "recoveryPoint.state");
     assert_eq!(row["code"], "CatalogPointViewUnavailable", "{row}");
+    assert_eq!(row["state"], "unknown");
+}
+
+/// **M-2, WIRED.** The same ready fixture, with the row's signer revoked for
+/// compromise in the cluster's `TrustPolicy` after the catalog synced: the
+/// reconciler resolves the CURRENT trust and the row turns `notReady`. The
+/// Active arm of `a_catalog_point_request_is_answered_from_the_catalog_row` is
+/// the control.
+///
+/// KILLS: `read_catalog_point` not resolving the trust (the route table would
+/// be unread and the row stays `ready`); the resolution's refusals read as a
+/// pass.
+#[tokio::test]
+async fn a_catalog_point_whose_signer_was_revoked_since_the_sync_is_not_ready() {
+    let revoked = restore_over_catalog_point_trusting(
+        true,
+        true,
+        route("GET", "/backups", list_of(vec![])),
+        catalog_trust_policies("Revoked"),
+    )
+    .await;
+    let row = check_entry(&revoked, "recoveryPoint.state");
+    assert_eq!(row["code"], "CatalogPointSignerUntrusted", "{row}");
+    assert_eq!(row["state"], "notReady");
+    assert_eq!(revoked["result"]["state"], "notReady");
+
+    // Trust the API server refuses to list is not trust that passed.
+    let unreadable = restore_over_catalog_point_trusting(
+        true,
+        true,
+        route("GET", "/backups", list_of(vec![])),
+        Route {
+            method: "GET",
+            path_suffix: "/trustpolicies",
+            status: 403,
+            body: json!({"kind": "Status", "apiVersion": "v1", "status": "Failure",
+                "reason": "Forbidden", "code": 403, "message": "forbidden"})
+            .to_string(),
+        },
+    )
+    .await;
+    let row = check_entry(&unreadable, "recoveryPoint.state");
+    assert_eq!(row["code"], "CatalogPointSignerUnknown", "{row}");
     assert_eq!(row["state"], "unknown");
 }
