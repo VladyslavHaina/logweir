@@ -1206,22 +1206,107 @@ pub async fn events_for(
 /// D3 §2.3's `limit=20` on each events list.
 pub const EVENT_LIMIT: u32 = 20;
 
+/// How recently a WARNING-class diagnostic must have been observed, measured
+/// back from the instant the Job ended, to be read as what ended it.
+///
+/// `lastSeen` is rewritten at most once per [`OBSERVED_HEARTBEAT`] while the
+/// cause persists and a running Job is reconciled every 15 s, so a cause that
+/// was still true when the Job ended carries a `lastSeen` within about 75 s of
+/// the end. Three heartbeats is that with room for one missed pass, and still
+/// short enough that a warning from a run's preparing minutes — an image pull
+/// that backed off and then succeeded — cannot be read as the reason a run
+/// that later ran for a quarter of an hour ended.
+pub const WARNING_CAUSE_WINDOW: Duration = Duration::from_secs(3 * 60);
+
 /// The terminal state a run reached WITHOUT an exit code, when a recorded
 /// diagnostic explains it — D3 §2.2.
 ///
 /// `None` when the stored status carries no diagnostic with a terminal
 /// projection, in which case `crash_terminal_state`'s existing table is
-/// unchanged and the answer is still `NoExitCode`. The NEWEST diagnostic wins,
-/// which is the list's own order.
+/// unchanged and the answer is still `NoExitCode`. The NEWEST qualifying
+/// diagnostic wins, which is the list's own order; `WaitingForPod` is never a
+/// verdict ("nothing has happened yet" cannot be a cause).
+///
+/// # A WARNING THAT ENDED THE RUN IS ITS TERMINAL REASON
+///
+/// Defect WARNING-DIAGNOSTICS-NOEXITCODE (PLAT-14.1). The first landing kept
+/// only `Error`-severity codes, on the theory that a warning's pod would
+/// still be there for `crash_terminal_state` to read. It is not: the Job
+/// controller deletes the pod of a Job that hit its deadline, and fail-fast
+/// ends a run BY hitting its deadline. So a projected ConfigMap that never
+/// mounted (fail-fast fired, deadline 900 → 1) and a pod no node would take
+/// (the Job's own deadline) both ended `NoExitCode` — live, on harness-rows-11's
+/// `operation-states` rows — while their diagnostics named the cause. D3 §2.2
+/// says the new states replace `NoExitCode` "when the matching diagnostic was
+/// recorded before the Job ended", and names no severity.
+///
+/// A warning is read as the cause only when BOTH hold, because "may resolve on
+/// its own" (D3 §2.3's column) means an old one may have:
+///
+/// * **the runner never started**, as far as the stored status says — no
+///   `startedAt`, no `Running`/`Terminated` container state, no runner phase.
+///   A warning about a runner that then ran explains nothing about how it
+///   ended; and
+/// * **it was still being observed when the Job ended**: its `lastSeen` is
+///   within [`WARNING_CAUSE_WINDOW`] of `ended_at`. A warning that stopped
+///   being seen had resolved.
+///
+/// Anything else falls back to `NoExitCode`, the weaker answer — never an
+/// invented cause (D3 §16). `Error`-severity codes are read exactly as
+/// before: they do not resolve on their own.
 #[must_use]
-pub fn recorded_terminal_state(stored: Option<&RunProgress>) -> Option<&'static str> {
-    stored?.diagnostics.as_ref()?.iter().find_map(|d| {
+pub fn recorded_terminal_state(
+    stored: Option<&RunProgress>,
+    ended_at: DateTime<Utc>,
+) -> Option<&'static str> {
+    let stored = stored?;
+    let started = runner_recorded_as_started(stored);
+    stored.diagnostics.as_ref()?.iter().find_map(|d| {
         let code = Code::ALL.iter().find(|c| c.as_str() == d.code)?;
-        (code.severity() == Severity::Error)
-            .then(|| code.runner_ready_reason())
-            .flatten()
-            .filter(|r| *r != REASON_WAITING_FOR_POD)
+        let reason = code
+            .runner_ready_reason()
+            .filter(|r| *r != REASON_WAITING_FOR_POD)?;
+        match code.severity() {
+            Severity::Error => Some(reason),
+            Severity::Warning => (!started && seen_at_the_end(d, ended_at)).then_some(reason),
+        }
     })
+}
+
+/// Whether the stored status records the runner as ever having started.
+fn runner_recorded_as_started(stored: &RunProgress) -> bool {
+    let runner = stored.runner.as_ref();
+    runner.is_some_and(|r| {
+        r.started_at.is_some()
+            || matches!(r.container_state.as_deref(), Some("Running" | "Terminated"))
+    }) || stored.runner_phase.is_some()
+}
+
+/// Whether this diagnostic was still being observed when the Job ended.
+fn seen_at_the_end(d: &Diagnostic, ended_at: DateTime<Utc>) -> bool {
+    let Some(last_seen) = d.last_seen else {
+        return false;
+    };
+    let window = chrono::Duration::from_std(WARNING_CAUSE_WINDOW).unwrap_or_default();
+    last_seen >= ended_at - window
+}
+
+/// When a finished Job ended: the `lastTransitionTime` of its `Failed` or
+/// `Complete` condition, else `completionTime`. `None` for a Job that says
+/// neither, and the caller then uses its own instant.
+#[must_use]
+pub fn job_ended_at(job: &Job) -> Option<DateTime<Utc>> {
+    let status = job.status.as_ref()?;
+    status
+        .conditions
+        .as_ref()
+        .and_then(|cs| {
+            cs.iter()
+                .filter(|c| (c.type_ == "Failed" || c.type_ == "Complete") && c.status == "True")
+                .filter_map(|c| c.last_transition_time.as_ref().map(|t| t.0))
+                .min()
+        })
+        .or_else(|| status.completion_time.as_ref().map(|t| t.0))
 }
 
 /// `<n>:<name>` against the closed vocabulary.

@@ -4875,11 +4875,27 @@ a `metav1` reason is a closed label other software matches on. The parameters �
 which Secret, which volume — travel in the diagnostic's `object` and `message`.
 
 Four of those reasons are also terminal states: `VolumeMountFailed`,
-`CredentialReferenceMissing`, `RunnerImageUnavailable`, `PodCreationForbidden`.
-They replace `NoExitCode` **only** when the matching diagnostic was recorded
-before the Job ended; otherwise the table above is unchanged, and `exitCode`
-stays absent in all four. A run whose pod never started has no code to lift, and
-none is invented.
+`CredentialReferenceMissing`, `RunnerImageUnavailable`, `PodCreationForbidden`
+(and `PodUnschedulable` already was one). They replace `NoExitCode` **only**
+when the matching diagnostic was recorded before the Job ended; otherwise the
+table above is unchanged, and `exitCode` stays absent in all of them. A run
+whose pod never started has no code to lift, and none is invented.
+
+**A warning-class diagnostic that ended the run is its terminal reason.** When
+a Job hits its deadline — its own, or the one fail-fast collapses — the Job
+controller deletes its pod, so the pod-reading table above has nothing to read
+and the recorded diagnostic is the only witness. An `Error`-class code
+(`CredentialSecretNotFound`, `SigningKeyMissing`, …) is read whenever it was
+recorded, because it does not resolve on its own. A `Warning`-class code
+(`VolumeMountFailed` from a volume that never mounted, `PodUnschedulable`,
+`RunnerImagePullFailed`) is read only when the runner **never started** and the
+diagnostic was **still being observed when the Job ended** — its `lastSeen`
+within three minutes of the Job's `Failed` transition — because a warning that
+stopped being seen had resolved. So a projected ConfigMap that never mounts
+ends `Failed/VolumeMountFailed` and a pod no node takes ends
+`Failed/PodUnschedulable`, not `NoExitCode`; anything less certain stays
+`NoExitCode`. `WaitingForPod` — what the pass after fail-fast deleted the pod
+records — is never a terminal state.
 
 ### Failing fast, and what it costs
 

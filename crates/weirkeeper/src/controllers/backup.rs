@@ -4421,6 +4421,7 @@ async fn reconcile_backup_inner(
             if from_pod == TERMINAL_STATE_NO_EXIT_CODE {
                 diagnostics::recorded_terminal_state(
                     backup.status.as_ref().and_then(|s| s.progress.as_ref()),
+                    diagnostics::job_ended_at(&job).unwrap_or(now),
                 )
                 .unwrap_or(from_pod)
             } else {
