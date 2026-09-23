@@ -1366,6 +1366,11 @@ no configuration is reconstructed by hand.**
    signer panel shows the key id; compare it out of band (`docs/keys.md`) and
    add the key to the `TrustPolicy` with `kubectl apply`. There is no one-click
    trust, and a key found beside the archive is a claim, not a trust decision.
+   The catalog is judged by the `TrustPolicy` that governs its namespace (the
+   roster only when none does; see the `RecoveryCatalog` view section above),
+   and the policy change wakes it at once — but the published rows keep their
+   verdicts until the next sync, so set `spec.syncRequest` to a new value to
+   see the key's points offered now.
 4. **Choose a catalog-verified point.** The wizard (`#/restore?ns=<ns>` lists
    *Recovery points from connected archives*; the catalog table links each
    restorable row) opens on `#/restore?ns=<ns>&catalog=<name>&point=<pointId>`
