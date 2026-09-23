@@ -3994,8 +3994,9 @@ export async function confirmFrozenDestination(state, api, lifecycle) {
  *  [`mergeReadiness`]), and `readinessRefusal` then judges the fresh one.
  *
  *  No held check means nothing to re-read, and that is `readinessRefusal`'s
- *  "nothing has run" arm, unchanged. A read that fails is a refusal: "I could
- *  not find out" is not "it is still ready". No route signal, for
+ *  "nothing has run" arm, unchanged. A read that fails, or a 2xx answer that
+ *  carries no check, is a refusal: "I could not find out" is not "it is still
+ *  ready". No route signal, for
  *  [`confirmClusters`]'s reason. */
 export async function confirmReadiness(state, api, prepared, lifecycle) {
   const s = state || {};
@@ -4019,8 +4020,21 @@ export async function confirmReadiness(state, api, prepared, lifecycle) {
   if (!active(lifecycle)) {
     return false;
   }
+  // AN ANSWER WITHOUT A CHECK IS NOT AN ANSWER (PLAT-08.2 review L2). A 2xx
+  // with no `item` -- a proxy's empty body, an older API -- would leave
+  // `mergeReadiness` holding the cached verdict, which is the "I could not find
+  // out" case wearing a success status. It is refused the same way.
+  const fresh = (answer || {}).item;
+  if (fresh === null || typeof fresh !== "object" || Array.isArray(fresh)) {
+    throw refusal(
+      "the readiness check " + held.id + " was read again before submitting, but the answer " +
+        "carried no check, so whether it still applies to this plan is unknown. Nothing was " +
+        "sent; the reviewed plan is still here.",
+      { planHash: hash },
+    );
+  }
   s.readiness = Object.assign({}, s.readiness, {
-    preflight: mergeReadiness(held, (answer || {}).item),
+    preflight: mergeReadiness(held, fresh),
   });
   return true;
 }

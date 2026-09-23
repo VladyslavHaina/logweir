@@ -1935,6 +1935,53 @@ test("a_destination_edited_during_the_draft_refuses_the_submit_until_the_check_r
   }
 });
 
+test("a_readiness_re_read_that_fails_or_carries_no_check_refuses_the_submit", async () => {
+  // PLAT-08.2 review L1 and L2. The check ran and said ready; the submit's
+  // re-read then (a) throws -- a timeout, a 503 -- or (b) answers 2xx with no
+  // `item`. Either way nobody knows whether the cached `ready` still applies,
+  // and "I could not find out" must not submit.
+  // NEGATIVE CONTROLS: `confirmReadiness`'s catch -> `return true` lets (a)
+  // create a restore; dropping the missing-item refusal lets (b) create one.
+  for (const [label, reread, says] of [
+    ["a read that throws", async () => { throw new Error("upstream timed out"); },
+      /the readiness check pf-unread could not be read again before submitting/],
+    ["a 2xx without an item", async () => ({}),
+      /the readiness check pf-unread was read again before submitting, but the answer\s+carried no check/],
+  ]) {
+    const ns = "wizard-reread-fails-ns";
+    const primary = destinationItem("primary", "17bc54c4-2e52-4607-b4ac-c31517a6e568");
+    const k8s = savedWizardApi(ns, [primary], {
+      started: (request) => readinessItem("pf-unread", request.restore.planHash),
+      read: (id, hash) => readinessItem(id, hash),
+    });
+    const view = fakeView();
+    const originalWindow = globalThis.window;
+    globalThis.window = { location: { hash: "#/restore?ns=" + ns } };
+    try {
+      await mountRestoreWizard(view.root, ns, k8s.point, parse, k8s, createRouteLifecycle().begin());
+      await view.find("#restore-readiness-form").dispatch("submit");
+      await settled(20);
+      assert.equal(k8s.started.length, 1, label);
+      // THE CHECK SAID READY; ONLY THE SUBMIT'S RE-READ GOES WRONG.
+      let rereads = 0;
+      k8s.preflight = async (_ns, id, options) => {
+        rereads += 1;
+        k8s.reads.push({ id: id, planHash: (options || {}).planHash });
+        return reread();
+      };
+      await view.find("#create-restore").dispatch("click");
+      await settled(20);
+      assert.equal(rereads, 1, label + ": the submit asked again");
+      assert.equal(k8s.creates("restores").length, 0,
+        label + ": NEGATIVE CONTROL -- the cached ready verdict let this through");
+      assert.match(view.html(), says,
+        label + ": the refusal names the check: " + view.html().slice(-600));
+    } finally {
+      globalThis.window = originalWindow;
+    }
+  }
+});
+
 // ------------------------------ PLAT-11.1 through the real mount half
 
 test("a_visit_with_no_recovery_point_gets_the_selector_and_a_gone_one_gets_a_refusal", async () => {
