@@ -4922,6 +4922,9 @@ export async function readSchedulePoints(api, ns, lifecycle, readers) {
   let truncated = false;
   for (const catalog of catalogs) {
     const catalogName = ((catalog || {}).metadata || {}).name || "";
+    // The destination this catalog reads (PLAT-15.2 review L-1): a row is
+    // offered for a run only by a catalog over that run's own destination.
+    const catalogDestination = String((((catalog || {}).spec || {}).destinationRef || {}).name || "");
     if (catalogName.length === 0) {
       continue;
     }
@@ -4936,9 +4939,10 @@ export async function readSchedulePoints(api, ns, lifecycle, readers) {
         const page = await readPoints(catalogName, query);
         for (const point of (page.items || [])) {
           // THE ROW'S SOURCE, KEPT BESIDE IT (PLAT-15.2): the catalog it came
-          // from and this page's flags, which a restore offered from the
-          // catalog's window needs and the row itself does not carry.
-          points.push(noteCatalogSource(point, catalogName, page));
+          // from, the destination that catalog reads, and this page's flags,
+          // which a restore offered from the catalog's window needs and the
+          // row itself does not carry.
+          points.push(noteCatalogSource(point, catalogName, page, catalogDestination));
         }
         if (page.viewExpired === true) {
           expired = true;

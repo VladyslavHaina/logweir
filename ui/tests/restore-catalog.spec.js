@@ -55,7 +55,7 @@ import {
   pointRow,
   renderPoints,
 } from "../pages/catalog.js";
-import { latestRestorablePoint, restoreCell } from "../pages/schedules.js";
+import { latestRestorablePoint, readSchedulePoints, restoreCell } from "../pages/schedules.js";
 import { renderPlanBytes } from "../plan.js";
 
 const FIXTURES = fileURLToPath(new URL("./fixtures/", import.meta.url));
@@ -313,7 +313,7 @@ test("the_row_is_the_one_for_the_runs_own_receipt_and_an_ambiguous_set_is_not_gu
 });
 
 test("the_schedule_detail_offers_the_catalog_window_and_never_over_a_refusal", () => {
-  const points = [noteCatalogSource(row(), "archive", page([]))];
+  const points = [noteCatalogSource(row(), "archive", page([]), "primary")];
   const cell = restoreCell(NS, unverifiedRun("NotAttempted"), points);
   assert.match(cell, /data-restore-from="catalog"/);
   assert.ok(cell.indexOf(restoreCatalogPointRoute(NS, "archive", POINT,
@@ -322,14 +322,14 @@ test("the_schedule_detail_offers_the_catalog_window_and_never_over_a_refusal", (
   assert.doesNotMatch(restoreCell(NS, unverifiedRun("Invalid"), points), /Restore/,
     "a reached refusal is never made restorable by a row");
   const incomplete = [noteCatalogSource(row(), "archive",
-    page([], { backupVerdictsIncomplete: "Unavailable" }))];
+    page([], { backupVerdictsIncomplete: "Unavailable" }), "primary")];
   assert.doesNotMatch(restoreCell(NS, unverifiedRun("NotAttempted"), incomplete), /Restore/);
   assert.doesNotMatch(restoreCell(NS, unverifiedRun("NotAttempted"), [row()]), /Restore/,
     "a row with no recorded catalog cannot name one in a link");
 });
 
 test("the_latest_point_action_counts_a_catalog_window_run_in_completion_order", () => {
-  const points = [noteCatalogSource(row(), "archive", page([]))];
+  const points = [noteCatalogSource(row(), "archive", page([]), "primary")];
   const choice = latestRestorablePoint([unverifiedRun("NotAttempted")], points);
   assert.equal(choice.point.metadata.name, "nightly-1");
   // CONTROL: the same run refused is not a point at all.
@@ -621,9 +621,83 @@ test("the_catalog_table_links_through_the_wizards_rule_and_says_why_it_does_not"
 
 test("the_offer_from_several_catalogs_names_the_catalog_its_row_came_from", () => {
   const offer = backupCatalogOfferFrom(unverifiedRun("NotAttempted"),
-    [noteCatalogSource(row(), "second-archive", page([]))]);
+    [noteCatalogSource(row(), "second-archive", page([]), "primary")]);
   assert.equal(offer.offer, true);
   assert.equal(offer.catalog, "second-archive");
+});
+
+test("only_a_catalog_over_the_runs_own_destination_is_offered_for_it", () => {
+  // The PLAT-15.2 review's L-1. The schedule detail reads every catalog in
+  // the namespace; a catalog over ANOTHER destination listing the same set id
+  // describes other bytes, and the wizard refuses the link it would offer.
+  const elsewhere = [noteCatalogSource(row(), "copy-archive", page([]), "secondary")];
+  const refused = backupCatalogOfferFrom(unverifiedRun("NotAttempted"), elsewhere);
+  assert.equal(refused.offer, false);
+  assert.doesNotMatch(restoreCell(NS, unverifiedRun("NotAttempted"), elsewhere), /Restore/);
+  assert.equal(latestRestorablePoint([unverifiedRun("NotAttempted")], elsewhere).all.length, 0);
+  // CONTROL: the same row read through a catalog over the run's destination.
+  const ours = [noteCatalogSource(row(), "archive", page([]), "primary")];
+  assert.equal(backupCatalogOfferFrom(unverifiedRun("NotAttempted"), ours).offer, true);
+  // Both catalogs listed: the one over the run's destination is the offer.
+  const both = [
+    noteCatalogSource(row(), "copy-archive", page([]), "secondary"),
+    noteCatalogSource(row(), "archive", page([]), "primary"),
+  ];
+  const offer = backupCatalogOfferFrom(unverifiedRun("NotAttempted"), both);
+  assert.equal(offer.offer, true);
+  assert.equal(offer.catalog, "archive");
+  // A row whose catalog's destination was not recorded is not offered, and
+  // neither is a run carrying an inline archive (no destinationRef).
+  assert.equal(backupCatalogOfferFrom(unverifiedRun("NotAttempted"),
+    [noteCatalogSource(row(), "archive", page([]))]).offer, false);
+  const inline = unverifiedRun("NotAttempted");
+  delete inline.spec.destinationRef;
+  const answer = backupCatalogOfferFrom(inline, ours);
+  assert.equal(answer.offer, false);
+  assert.match(answer.reason, /names no BackupDestination/);
+});
+
+test("the_schedule_detail_records_the_destination_each_catalog_reads", async () => {
+  // L-1, wired: the reader notes each catalog's `spec.destinationRef.name`
+  // beside its rows, which is what the offer compares with the run's own.
+  const read = await readSchedulePoints(null, NS, null, {
+    listCatalogs: async () => ({ items: [
+      catalogObject({ metadata: { name: "copy-archive", namespace: NS, uid: "c2" },
+        spec: { destinationRef: { name: "secondary" } } }),
+      catalogObject(),
+    ] }),
+    readPoints: async () => page([row()]),
+  });
+  assert.equal(read.points.length, 2);
+  const offer = backupCatalogOfferFrom(unverifiedRun("NotAttempted"), read.points);
+  assert.equal(offer.offer, true, offer.reason);
+  assert.equal(offer.catalog, "archive", "the catalog over the run's own destination");
+  // CONTROL: only the other destination's catalog -- nothing is offered.
+  const other = await readSchedulePoints(null, NS, null, {
+    listCatalogs: async () => ({ items: [
+      catalogObject({ metadata: { name: "copy-archive", namespace: NS, uid: "c2" },
+        spec: { destinationRef: { name: "secondary" } } }),
+    ] }),
+    readPoints: async () => page([row()]),
+  });
+  assert.equal(backupCatalogOfferFrom(unverifiedRun("NotAttempted"), other.points).offer, false);
+});
+
+test("two_catalogs_listing_the_same_receipt_are_said_as_such_not_as_a_missing_digest", () => {
+  // The PLAT-15.2 review's L-2: with the run's digest present, several rows
+  // are the same receipt listed twice, which is not "no digest to choose".
+  const twice = [noteCatalogSource(row(), "archive", page([]), "primary"),
+    noteCatalogSource(row(), "archive-2", page([]), "primary")];
+  const offer = backupCatalogOfferFrom(unverifiedRun("NotAttempted"), twice);
+  assert.equal(offer.offer, false);
+  assert.match(offer.reason, /2 catalog rows list this run's own receipt/);
+  assert.doesNotMatch(offer.reason, /no receipt digest/);
+  // CONTROL: a digestless run over two points of its set keeps the old words.
+  const upstream = row({ pointId: OTHER, receiptSha256: "sha256:" + "c3".repeat(32) });
+  const digestless = backupCatalogOffer(unverifiedRun("NotAttempted", ""), [upstream, row()],
+    page([]));
+  assert.equal(digestless.offer, false);
+  assert.match(digestless.reason, /reported no receipt digest/);
 });
 
 test("the_catalog_point_carries_the_live_destination_it_was_frozen_to", () => {
@@ -640,7 +714,7 @@ test("a_console_list_does_not_publish_a_verdict_so_an_unread_run_is_never_offere
   const listed = unverifiedRun(null);
   delete listed.status.evidence;
   listed.__contract = { mode: "console", absent: [], unknown: [] };
-  const points = [noteCatalogSource(row(), "archive", page([]))];
+  const points = [noteCatalogSource(row(), "archive", page([]), "primary")];
   assert.equal(backupCatalogOfferFrom(listed, points).offer, false,
     "unread: the list's silence is never read as a deferring verdict");
   // READ: the one operation read per candidate run notes the verdict and the

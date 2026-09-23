@@ -953,10 +953,16 @@ export function backupCatalogOffer(backup, points, page) {
     return no("no catalog row answers this run's receipt");
   }
   if (rows.length > 1) {
-    return no(
-      "the catalog lists " + String(rows.length) + " points for this run's set and the run " +
-        "reported no receipt digest to choose between them",
-    );
+    // TWO DIFFERENT FACTS (the PLAT-15.2 review's L-2). With no digest the
+    // run cannot say which of its set's points is its own; WITH one, every
+    // row is that same receipt, listed more than once -- by more than one
+    // catalog over this archive -- and the page will not pick a catalog.
+    return no(backupReceiptOf(b) === null
+      ? "the catalog lists " + String(rows.length) + " points for this run's set and the run " +
+        "reported no receipt digest to choose between them"
+      : String(rows.length) + " catalog rows list this run's own receipt -- more than one " +
+        "catalog reads this archive -- so this page does not choose a catalog; open the point " +
+        "from one catalog's page");
   }
   const verdict = catalogPointOffer(rows[0], page);
   return verdict.offer ? { offer: true, reason: null, entry: rows[0] } : no(verdict.reason);
@@ -970,13 +976,15 @@ export function backupCatalogOffer(backup, points, page) {
 // itself, so a decoded row stays exactly what the API published.
 const catalogSources = new WeakMap();
 
-/** Records that `row` was read from catalog `catalog` on a page carrying
- *  `page`'s flags. Returns the row. */
-export function noteCatalogSource(row, catalog, page) {
+/** Records that `row` was read from catalog `catalog`, which reads the
+ *  `BackupDestination` named `destination` (its `spec.destinationRef.name`),
+ *  on a page carrying `page`'s flags. Returns the row. */
+export function noteCatalogSource(row, catalog, page, destination) {
   if (row !== null && typeof row === "object") {
     const p = page || {};
     catalogSources.set(row, {
       catalog: String(catalog || ""),
+      destination: typeof destination === "string" ? destination : "",
       page: {
         viewExpired: p.viewExpired === true,
         backupVerdictsIncomplete: typeof p.backupVerdictsIncomplete === "string"
@@ -996,11 +1004,28 @@ export function catalogSourceOf(row) {
 /** [`backupCatalogOffer`] over rows read from possibly several catalogs, each
  *  carrying its source: the offer, plus the catalog its row came from. A row
  *  with no recorded source is never offered -- the link would have no catalog
- *  to name. */
+ *  to name.
+ *
+ *  ONLY A CATALOG OVER THE RUN'S OWN DESTINATION ANSWERS FOR IT (the PLAT-15.2
+ *  review's L-1). A catalog over another destination that happens to list the
+ *  same set id -- a copied archive, a second bucket -- describes other bytes,
+ *  and the wizard would refuse the link it offered
+ *  (`an_offer_from_a_backup_must_be_read_through_the_destination_that_run_froze`).
+ *  A run with no `spec.destinationRef` carries an inline archive no catalog
+ *  reads, so it is never offered from one. */
 export function backupCatalogOfferFrom(backup, points) {
-  const rows = catalogRowsForBackup(backup, points);
+  const own = String(((((backup || {}).spec || {}).destinationRef) || {}).name || "");
+  if (own.length === 0) {
+    return { offer: false, reason: "the run names no BackupDestination, so no catalog reads " +
+      "its archive", entry: null, catalog: "" };
+  }
+  const ours = (Array.isArray(points) ? points : []).filter((point) => {
+    const source = catalogSourceOf(point);
+    return source !== null && source.destination === own;
+  });
+  const rows = catalogRowsForBackup(backup, ours);
   const source = rows.length === 1 ? catalogSourceOf(rows[0]) : null;
-  const offer = backupCatalogOffer(backup, points, source === null ? {} : source.page);
+  const offer = backupCatalogOffer(backup, ours, source === null ? {} : source.page);
   if (offer.offer && (source === null || source.catalog.length === 0)) {
     return { offer: false, reason: "the catalog row carries no catalog name", entry: null,
       catalog: "" };
