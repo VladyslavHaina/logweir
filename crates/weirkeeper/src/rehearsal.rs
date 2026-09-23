@@ -756,8 +756,14 @@ pub struct PlanInputs<'a> {
     pub archive_storage: logweir_core::engine::StorageUrl,
     /// Where this run's evidence is written, from the resolved destination.
     pub evidence_storage: logweir_core::engine::StorageUrl,
-    /// The target cluster's bootstrap servers.
-    pub bootstrap_servers: Vec<String>,
+    /// The target `KafkaCluster`, resolved by [`crate::connection::resolve`]
+    /// for [`crate::connection::ConnectionUse::RestoreTarget`] — the SAME
+    /// resolution the `Restore` admission makes before it compares the plan
+    /// ([`crate::connection::ResolvedConnection::check_restore_plan`]). The
+    /// plan's `target.bootstrap_servers` and `target.auth` are read from it and
+    /// from nowhere else, so the plan this module renders is by construction
+    /// the plan that check accepts.
+    pub target: &'a crate::connection::ResolvedConnection,
     /// The schedule's own name, which becomes the plan's `name` so two
     /// schedules pointed at one cluster do not share a notification dedup key.
     pub plan_name: String,
@@ -785,6 +791,17 @@ pub struct PlanInputs<'a> {
 /// * `target.mode` = `scratch`, always. A rehearsal in `newTopic` mode would
 ///   restore into names an application might be reading, and the prefix-scoped
 ///   deletion guard that makes teardown safe only applies to scratch names.
+/// * `target.bootstrap_servers` and `target.auth` = the target `KafkaCluster`'s
+///   saved connection (PLAT-07.1's contract), resolved for `RestoreTarget`.
+///   The runner dials the PLAN's address with the plan's mode, username and TLS
+///   and authenticates with the CONNECTION's password and CA, so `Restore`
+///   admission refuses any plan whose target block differs from the resolved
+///   connection (`ConnectionPlanMismatch`). A hard-coded `plaintext` here was
+///   defect REHEARSAL-PLAN-AUTH-PLAINTEXT: every rehearsal against a SCRAM or
+///   TLS target was refused before its Job existed. Neither value is inside
+///   the standing authorization's template digest ([`template_bytes`] digests
+///   `RehearsalScheduleSpec`, which names the target by `clusterRef` only) or
+///   its signed scope, exactly as the bootstrap list never was.
 #[must_use]
 pub fn render_plan(inputs: &PlanInputs<'_>) -> DrillSpec {
     let spec = inputs.spec;
@@ -804,8 +821,8 @@ pub fn render_plan(inputs: &PlanInputs<'_>) -> DrillSpec {
             }),
         },
         target: TargetSpec {
-            bootstrap_servers: inputs.bootstrap_servers.clone(),
-            auth: logweir_core::spec::AuthSpec::default(),
+            bootstrap_servers: inputs.target.bootstrap_servers.clone(),
+            auth: inputs.target.auth.clone(),
             mode: logweir_core::spec::TargetMode::Scratch,
             topic_naming: None,
             marker_topic: spec.target.marker_topic.clone(),

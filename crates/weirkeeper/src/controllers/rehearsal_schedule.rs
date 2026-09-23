@@ -187,8 +187,10 @@ pub struct FireOrder {
     pub prefix: String,
     /// The target cluster's reported id.
     pub target_cluster_id: String,
-    /// The target cluster's bootstrap servers.
-    pub bootstrap_servers: Vec<String>,
+    /// The target cluster's saved connection, resolved for
+    /// [`crate::connection::ConnectionUse::RestoreTarget`] — where the plan's
+    /// `target.bootstrap_servers` and `target.auth` come from.
+    pub target: crate::connection::ResolvedConnection,
 }
 
 /// Everything [`decide`] reads. All of it is already fetched.
@@ -243,7 +245,9 @@ pub struct Facts<'a> {
 /// 5. **The authorization** — present, `Verified=True`, bound to THIS
 ///    schedule's UID, signed by a key that may still authorise, inside its
 ///    life bound, not expired, and its scope agrees with the sealed spec.
-/// 6. **The target** — reachable, with a reported cluster id.
+/// 6. **The target** — reachable, with a reported cluster id, and a saved
+///    connection `connection::resolve` accepts for `RestoreTarget` (the plan's
+///    `target.auth` is rendered from it).
 /// 7. **The point** — D3 §4.2's filter chain.
 ///
 /// The scope proof over the RENDERED plan is deliberately NOT here: it needs
@@ -362,6 +366,26 @@ pub fn decide(facts: &Facts<'_>) -> Verdict {
             ),
         ));
     };
+    // THE TARGET'S SAVED CONNECTION, FROM THE ONE RESOLVER (PLAT-07.1). The
+    // `Restore` admission resolves this same object for `RestoreTarget` and
+    // refuses a plan whose target block differs from it, so the plan is
+    // rendered from this value and a connection that admission would refuse
+    // is a recorded skip here rather than a `Failed` child there.
+    let target = match crate::connection::resolve(
+        cluster,
+        crate::connection::ConnectionUse::RestoreTarget,
+    ) {
+        Ok(target) => target,
+        Err(refusal) => {
+            return Verdict::Skipped(Skip::new(
+                SkipReason::TargetUnavailable,
+                format!(
+                    "the KafkaCluster `{}` does not resolve to a usable connection ({}): {}",
+                    spec.target.cluster_ref.name, refusal.field, refusal
+                ),
+            ))
+        }
+    };
     let prefix = rehearsal::rendered_prefix(&spec.target.topic_prefix, facts.uid);
     let expected =
         rehearsal::expected_scope(spec, facts.template_digest, &target_cluster_id, &prefix);
@@ -403,7 +427,7 @@ pub fn decide(facts: &Facts<'_>) -> Verdict {
         authorization,
         prefix,
         target_cluster_id,
-        bootstrap_servers: cluster.spec.bootstrap_servers.clone(),
+        target,
     }))
 }
 
@@ -1078,7 +1102,7 @@ async fn fire(
         prefix: &order.prefix,
         archive_storage: location.archive_storage_url(),
         evidence_storage: location.evidence_storage_url(),
-        bootstrap_servers: order.bootstrap_servers.clone(),
+        target: &order.target,
         plan_name: format!("rehearsal/{}", schedule.name_any()),
     });
     let plan_bytes = match rehearsal::plan_bytes(&plan) {

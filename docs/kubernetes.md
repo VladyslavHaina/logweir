@@ -2194,7 +2194,7 @@ skip with no `Restore`:
 | no other schedule is rehearsing against the same target cluster | `TargetBusy` |
 | the `Approval` is `Verified=True`, bound to **this object's UID**, its `planHash` is the recomputed digest, its key may still authorise and carries an approver usage | `AuthorizationInvalid` |
 | the signed document has not expired and was not minted for more than 90 days | `AuthorizationExpired` |
-| the target `KafkaCluster` reports `reachable: true` and a `clusterId` | `TargetUnavailable` |
+| the target `KafkaCluster` reports `reachable: true` and a `clusterId`, and its saved connection resolves (the same `RestoreTarget` resolution the `Restore` admission makes — a SCRAM connection with no `secretRef`, say, is refused here by field) | `TargetUnavailable` |
 | the signed scope's `templateDigest`, `targetClusterId` and `deadlineSeconds` agree with the sealed spec | `AuthorizationInvalid` |
 | a point qualifies: covered by `spec.point.topics`, old enough, with a non-empty window, inside `maxPartitions`, not captured from the target cluster, not inside a retention lease | `NoQualifyingPoint`, `TargetUnavailable` or `PointRetentionInProgress` |
 | the RENDERED plan falls inside the signed scope | `AuthorizationInvalid` |
@@ -2253,6 +2253,22 @@ runner's half — proving the same thing again against the mounted bundle, throu
 the same predicate from the same projection, before it constructs any client —
 is live too since PLAT-14.3b, and the `Restore` reconciler makes the same chain
 a THIRD time at admission (see "How a rehearsal executes" below).
+
+**The plan's target block is the saved connection's.** The controller renders
+`target.bootstrap_servers` and `target.auth` (mode, username, TLS) from the
+target `KafkaCluster` resolved for `RestoreTarget` — the resolution the
+`Restore` admission repeats before it compares the plan with the connection, so
+a rehearsal against a SCRAM or TLS target is admitted like any other restore.
+Neither the password, its Secret's name nor the CA is ever in the plan; they
+reach the runner through the connection's own projection. Builds before this
+fix rendered `auth: {mode: plaintext}` whatever the target was, and every
+rehearsal against an authenticated target ended `Failed/ConnectionPlanMismatch`
+with no Job (defect REHEARSAL-PLAN-AUTH-PLAINTEXT). **Existing standing
+Approvals are unaffected:** the template digest covers `RehearsalSchedule.spec`,
+which names the target only by `clusterRef`, and the signed scope carries the
+target cluster id and never its auth — so no authorization needs re-minting on
+upgrade, and a rollback renders plaintext again (and is refused at admission
+again) without touching one.
 
 **What the bundle contains.** One immutable `ConfigMap` owned by the `Restore`:
 the signed standing document at `standing-authorization.json` with its sidecar

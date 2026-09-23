@@ -2912,3 +2912,215 @@ async fn a_malformed_backup_does_not_fail_the_rehearsal_pass() {
     );
     assert_eq!(posted(&recorder, RESTORES_PATH), 1);
 }
+
+// ===========================================================================
+// REHEARSAL-PLAN-AUTH-PLAINTEXT — the plan's target block is the saved
+// connection's, so the `Restore` admission accepts what the schedule renders
+// ===========================================================================
+
+/// The fixture target with `auth` replaced — everything else as
+/// [`cluster_value`] renders it (reachable, reporting its id).
+fn cluster_with_auth(auth: Value) -> Value {
+    let mut cluster = cluster_value(true, Some(TARGET_CLUSTER_ID));
+    cluster["spec"]["auth"] = auth;
+    cluster
+}
+
+fn happy_routes_with(cluster: Value) -> Vec<Route> {
+    routes(
+        approval_value(&envelope()),
+        trust_policy_value("Active", None),
+        cluster,
+        backup_list(vec![backup_value(
+            "logweir-backup-nightly-20260919-020000",
+            "2026-09-19T02:00:00Z",
+            json!(["orders", "payments"]),
+            true,
+        )]),
+        restore_list(vec![]),
+    )
+}
+
+/// Fire one slot against `cluster` and return the child's `spec.planBytes`.
+async fn fired_plan_bytes(cluster: &Value) -> String {
+    let (client, recorder, bodies) =
+        mock_client_recording_bodies(happy_routes_with(cluster.clone()));
+    let outcome = rs::reconcile_schedule(&schedule(), &context(client), now())
+        .await
+        .expect("the reconcile answers");
+    assert!(
+        matches!(outcome.verdict, rs::Verdict::Fire(_)),
+        "the slot fires: {:?}",
+        outcome.verdict
+    );
+    assert_eq!(posted(&recorder, RESTORES_PATH), 1, "exactly one Restore");
+    let child: Value = bodies
+        .lock()
+        .expect("the body recorder is not poisoned")
+        .iter()
+        .find(|seen| is_post_to(&seen.method, &seen.uri, RESTORES_PATH))
+        .map(|seen| serde_json::from_str(&seen.body).expect("the child parses"))
+        .expect("the child was posted");
+    child
+        .pointer("/spec/planBytes")
+        .and_then(Value::as_str)
+        .expect("the child carries planBytes")
+        .to_string()
+}
+
+/// The `Restore` admission's own check, exactly as `restore.rs` runs it before
+/// the plan `ConfigMap` and the Job: resolve the target `KafkaCluster` for
+/// `RestoreTarget`, then `check_restore_plan` over the frozen bytes.
+fn admission_accepts(cluster: &Value, plan_bytes: &str) -> Result<(), String> {
+    let cluster: weirkeeper::crds::kafka_cluster::KafkaCluster =
+        serde_json::from_value(cluster.clone()).expect("the fixture cluster parses");
+    let connection = weirkeeper::connection::resolve(
+        &cluster,
+        weirkeeper::connection::ConnectionUse::RestoreTarget,
+    )
+    .map_err(|e| e.to_string())?;
+    connection
+        .check_restore_plan(plan_bytes)
+        .map_err(|e| e.to_string())
+}
+
+fn plan_target_auth(plan_bytes: &str) -> logweir_core::spec::AuthSpec {
+    let plan: logweir_core::spec::DrillSpec =
+        serde_yaml::from_str(plan_bytes).expect("the plan is the runner's own grammar");
+    plan.target.auth
+}
+
+/// **The lab-refresh-8 defect, as a row.** A SCRAM target (the lab's
+/// `rehearsal-target`, `scramSha512` as `scram-user`, no TLS): the rendered
+/// plan names the same mode and username, and the admission check that
+/// refused it live with `ConnectionPlanMismatch` now accepts it.
+///
+/// KILLS: `render_plan` rendering `AuthSpec::default()` for the target (the
+/// defect itself) — the admission then refuses "plaintext (no TLS)".
+#[tokio::test]
+async fn a_scram_target_renders_a_plan_the_restore_admission_accepts() {
+    let cluster = cluster_with_auth(json!({
+        "mode": "scramSha512",
+        "username": "scram-user",
+        "tls": false,
+        "secretRef": {"name": "rehearsal-target-scram", "passwordKey": "password"}
+    }));
+    let plan = fired_plan_bytes(&cluster).await;
+    assert_eq!(
+        plan_target_auth(&plan),
+        logweir_core::spec::AuthSpec::ScramSha512 {
+            username: "scram-user".to_string(),
+            tls: false
+        },
+        "the plan's target.auth is the saved connection's. Plan:\n{plan}"
+    );
+    assert_eq!(admission_accepts(&cluster, &plan), Ok(()));
+    assert!(
+        !plan.contains("password") && !plan.contains("rehearsal-target-scram"),
+        "the plan names the principal and never the credential or where it lives:\n{plan}"
+    );
+}
+
+/// A TLS target with a private CA: `tls: true` is carried, so the admission's
+/// downgrade check (`tls: false` against a TLS connection) accepts the plan.
+/// The CA reaches the runner through the connection's projection, never the
+/// plan.
+#[tokio::test]
+async fn a_tls_target_renders_a_plan_the_restore_admission_accepts() {
+    let cluster = cluster_with_auth(json!({
+        "mode": "scramSha512",
+        "username": "rehearsal",
+        "tls": true,
+        "secretRef": {"name": "rehearsal-target-scram"},
+        "tlsCa": {"secretKeyRef": {"name": "rehearsal-target-ca", "key": "ca.crt"}}
+    }));
+    let plan = fired_plan_bytes(&cluster).await;
+    assert_eq!(
+        plan_target_auth(&plan),
+        logweir_core::spec::AuthSpec::ScramSha512 {
+            username: "rehearsal".to_string(),
+            tls: true
+        },
+        "Plan:\n{plan}"
+    );
+    assert_eq!(admission_accepts(&cluster, &plan), Ok(()));
+    assert!(
+        !plan.contains("rehearsal-target-ca"),
+        "no CA reference in the plan:\n{plan}"
+    );
+}
+
+/// A plaintext target is unchanged: `mode: plaintext`, the bootstrap list
+/// verbatim and in order, and the admission accepts it — as before the fix.
+#[tokio::test]
+async fn a_plaintext_target_renders_the_plan_it_always_did() {
+    let mut cluster = cluster_value(true, Some(TARGET_CLUSTER_ID));
+    cluster["spec"]["bootstrapServers"] = json!(["kafka-target-1:9092", "kafka-target-0:9092"]);
+    let plan = fired_plan_bytes(&cluster).await;
+    assert_eq!(
+        plan_target_auth(&plan),
+        logweir_core::spec::AuthSpec::Plaintext
+    );
+    let parsed: logweir_core::spec::DrillSpec =
+        serde_yaml::from_str(&plan).expect("the plan parses");
+    assert_eq!(
+        parsed.target.bootstrap_servers,
+        vec![
+            "kafka-target-1:9092".to_string(),
+            "kafka-target-0:9092".to_string()
+        ],
+        "verbatim and in order"
+    );
+    assert!(
+        plan.contains("auth:\n    mode: plaintext\n"),
+        "the plaintext block is byte-for-byte the one the pre-fix renderer wrote:\n{plan}"
+    );
+    assert_eq!(admission_accepts(&cluster, &plan), Ok(()));
+}
+
+/// A target whose saved connection the resolver refuses (SCRAM with no
+/// `secretRef`) is a recorded `TargetUnavailable` skip naming the field, and
+/// no `Restore` — over a route table that HAS the `POST` routes. Before the
+/// fix the slot fired and the child failed at admission instead.
+#[tokio::test]
+async fn a_target_whose_connection_is_refused_is_a_recorded_skip() {
+    let cluster = cluster_with_auth(json!({
+        "mode": "scramSha512",
+        "username": "scram-user",
+        "tls": false
+    }));
+    let (client, recorder, bodies) = mock_client_recording_bodies(happy_routes_with(cluster));
+    let outcome = rs::reconcile_schedule(&schedule(), &context(client), now())
+        .await
+        .expect("the reconcile answers");
+    let rs::Verdict::Skipped(skip) = &outcome.verdict else {
+        panic!("{:?}", outcome.verdict)
+    };
+    assert_eq!(skip.reason, rehearsal::SkipReason::TargetUnavailable);
+    assert!(
+        skip.detail.contains("spec.auth.secretRef.name"),
+        "the skip names the refused field: {}",
+        skip.detail
+    );
+    assert_eq!(posted(&recorder, RESTORES_PATH), 0);
+    assert_eq!(posted(&recorder, CONFIGMAPS_PATH), 0);
+    assert_eq!(last_skip(&bodies).as_deref(), Some("TargetUnavailable"));
+}
+
+/// The target's auth is NOT inside the standing authorization's template
+/// digest: the digest is over `RehearsalScheduleSpec` (which names the target
+/// by `clusterRef`), so an existing standing `Approval` keeps verifying after
+/// this fix. Changing the KafkaCluster's auth changes the plan, never the
+/// digest.
+#[test]
+fn the_template_digest_does_not_depend_on_the_targets_auth() {
+    let spec = serde_json::to_value(&schedule().spec).expect("the spec serialises");
+    assert!(
+        spec.pointer("/target/auth").is_none() && !spec.to_string().contains("scramSha512"),
+        "the sealed spec carries no connection auth: {spec}"
+    );
+    assert_eq!(
+        rehearsal::template_digest(&schedule().spec).expect("digest"),
+        template_digest()
+    );
+}
