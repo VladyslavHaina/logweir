@@ -1,0 +1,63 @@
+# deploy/poc/rehearsals/r2-f49849d.values.yaml — the STARTING state of upgrade
+# rehearsal R2 (docs/release-handoff.md): the last publication before
+# PLAT-15.2/17.2/19.2 (`sha-f49849d…`, the lab-refresh-8 build), installed with
+# THAT commit's chart, before `helm upgrade` to the release versions.env names.
+# README.md, *Upgrade rehearsals*, has the full sequence.
+#
+# What f49849d's chart can say, and why this is not the PoC values file: it has
+# the managed identity and a shared console, but no `controller.watchNamespaces`,
+# no `approvalPolicy.*`, no `requireTrustedProxy` and none of the chart-gap
+# values (no CA bundle, no host aliases, no proxy Service, no controller probes).
+# So this console is a SHARED console the candidate refuses to render until its
+# values are migrated — release-note item 6, which is what R2 exists to cross —
+# and, lacking the CA bundle, it cannot trust Dex's certificate: it stays
+# NotReady before the upgrade. That is expected; nothing in R2's pre-upgrade
+# state needs a signed-in browser.
+controllerImage: docker.io/vladyslavhaina/weirkeeper:sha-f49849db035d01ff968df7472914f57fc6c2e988
+runnerImage: docker.io/vladyslavhaina/logweir:sha-f49849db035d01ff968df7472914f57fc6c2e988
+imagePullPolicy: IfNotPresent
+runnerImagePullPolicy: IfNotPresent
+environment: poc
+kubernetes:
+  namespace: logweir-poc
+identity:
+  authorizedRunnerNamespaces: [logweir-poc]
+retention:
+  enabled: true
+api:
+  enabled: true
+  namespaces: [logweir-poc]
+  console:
+    enabled: true
+    image: docker.io/vladyslavhaina/logweir-console:sha-f49849db035d01ff968df7472914f57fc6c2e988
+    imagePullPolicy: IfNotPresent
+    mode: shared
+    replicas: 1
+    keySecret: logweir-console-keys
+    keyVersion: 1
+    publicBaseUrl: https://logweir.localtest.me
+    sessionMaxAgeSeconds: 900
+    oidc:
+      issuer: https://dex.localtest.me
+      clientId: logweir-console
+      clientSecret: logweir-console-oidc
+    roles:
+      revision: "poc-r2-baseline"
+      bindings:
+        - role: operator
+          namespace: logweir-poc
+          subjects: ["https://dex.localtest.me#CiQxZjBjOWE0ZS0wMDAyLTRhMWUtOWUxYS0wMDAwMDAwMDAwMDISBWxvY2Fs"]
+    ingress:
+      enabled: true
+      className: traefik
+      host: logweir.localtest.me
+      tlsSecretName: logweir-console-tls
+      annotations:
+        cert-manager.io/cluster-issuer: logweir-poc-ca
+demoKafka:
+  enabled: true
+minio:
+  enabled: true
+  persistence:
+    enabled: true
+    size: 5Gi

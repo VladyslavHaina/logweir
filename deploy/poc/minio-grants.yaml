@@ -1,0 +1,128 @@
+# deploy/poc/minio-grants.yaml — least-privilege MinIO users for the PoC's one
+# destination, so the demo MinIO's ROOT credential is never handed to Logweir.
+#
+#   kubectl --context "$CTX" apply -f deploy/poc/minio-grants.yaml
+#   kubectl --context "$CTX" -n logweir-system wait --for=condition=complete \
+#     job/logweir-poc-minio-grants --timeout=180s
+#
+# THE PoC REVIEW'S L7. The chart's demo MinIO takes its root credential from
+# chart values (`minio.rootUser`/`minio.rootPassword`, the public default
+# `minioadmin`), so that one credential IS in a rendered Secret and in Helm's
+# release history — the profile's single exception to "nothing secret in a
+# values file", and one reason the demo MinIO is not production. It can also
+# delete. So it stays inside this Job: the Job reads it from the chart's own
+# `logweir-minio-root` Secret, creates three users with the policies
+# docs/install.md §3.11 measured, and the console is given only those three
+# (README.md step 9). None of them holds `s3:DeleteObject`.
+#
+# Bucket `kafka-backups`, archive prefix `poc`, evidence under `logweir/` in the
+# same bucket — the destination README.md step 9 creates.
+#
+#   user                  destination grant(s)           policy
+#   logweir-poc-writer    archiveWrite (+ evidenceWrite) logweir-poc-archive-write
+#   logweir-poc-reader    archiveRead (and catalog sync) logweir-poc-archive-read
+#   logweir-poc-evidence  evidenceRead                   logweir-poc-evidence-read
+#
+# The three secret keys come from the Secret `logweir-poc-minio-users`
+# (README.md step 5), generated on your machine; nothing secret is in this file.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: logweir-poc-minio-policies
+  namespace: logweir-system
+  labels:
+    app.kubernetes.io/part-of: logweir-poc
+data:
+  archive-write.json: |
+    {"Version": "2012-10-17", "Statement": [
+      {"Effect": "Allow", "Action": ["s3:ListBucket"], "Resource": ["arn:aws:s3:::kafka-backups"],
+       "Condition": {"StringLike": {"s3:prefix": ["poc/*"]}}},
+      {"Effect": "Allow", "Action": ["s3:GetObject", "s3:PutObject"], "Resource": ["arn:aws:s3:::kafka-backups/poc/*"]},
+      {"Effect": "Allow", "Action": ["s3:PutObject"], "Resource": ["arn:aws:s3:::kafka-backups/logweir/*"]}
+    ]}
+  archive-read.json: |
+    {"Version": "2012-10-17", "Statement": [
+      {"Effect": "Allow", "Action": ["s3:ListBucket"], "Resource": ["arn:aws:s3:::kafka-backups"],
+       "Condition": {"StringLike": {"s3:prefix": ["poc/*", "logweir/*"]}}},
+      {"Effect": "Allow", "Action": ["s3:GetObject"],
+       "Resource": ["arn:aws:s3:::kafka-backups/poc/*", "arn:aws:s3:::kafka-backups/logweir/*"]}
+    ]}
+  evidence-read.json: |
+    {"Version": "2012-10-17", "Statement": [
+      {"Effect": "Allow", "Action": ["s3:ListBucket"], "Resource": ["arn:aws:s3:::kafka-backups"],
+       "Condition": {"StringLike": {"s3:prefix": ["logweir/*"]}}},
+      {"Effect": "Allow", "Action": ["s3:GetObject"], "Resource": ["arn:aws:s3:::kafka-backups/logweir/*"]}
+    ]}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: logweir-poc-minio-grants
+  namespace: logweir-system
+  labels:
+    app.kubernetes.io/part-of: logweir-poc
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 300
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/part-of: logweir-poc
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: mc
+          # The chart's own `minio.mcImage` digest (charts/logweir/values.yaml).
+          image: quay.io/minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
+          imagePullPolicy: IfNotPresent
+          env:
+            - { name: MC_CONFIG_DIR, value: /tmp/.mc }
+            - name: ROOT_USER
+              valueFrom: { secretKeyRef: { name: logweir-minio-root, key: MINIO_ROOT_USER } }
+            - name: ROOT_PASSWORD
+              valueFrom: { secretKeyRef: { name: logweir-minio-root, key: MINIO_ROOT_PASSWORD } }
+            - name: WRITER_SECRET
+              valueFrom: { secretKeyRef: { name: logweir-poc-minio-users, key: writer } }
+            - name: READER_SECRET
+              valueFrom: { secretKeyRef: { name: logweir-poc-minio-users, key: reader } }
+            - name: EVIDENCE_SECRET
+              valueFrom: { secretKeyRef: { name: logweir-poc-minio-users, key: evidence } }
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              mc alias set poc http://logweir-minio.logweir-system.svc:9000 "$ROOT_USER" "$ROOT_PASSWORD" >/dev/null
+              for p in archive-write archive-read evidence-read; do
+                mc admin policy create poc "logweir-poc-$p" "/policies/$p.json"
+              done
+              mc admin user add poc logweir-poc-writer "$WRITER_SECRET"
+              mc admin user add poc logweir-poc-reader "$READER_SECRET"
+              mc admin user add poc logweir-poc-evidence "$EVIDENCE_SECRET"
+              # Attaching twice is refused by MinIO; a re-run is a no-op here.
+              mc admin policy attach poc logweir-poc-archive-write --user logweir-poc-writer || true
+              mc admin policy attach poc logweir-poc-archive-read --user logweir-poc-reader || true
+              mc admin policy attach poc logweir-poc-evidence-read --user logweir-poc-evidence || true
+              for u in logweir-poc-writer logweir-poc-reader logweir-poc-evidence; do
+                mc admin user info poc "$u"
+              done
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { memory: 128Mi }
+          volumeMounts:
+            - { name: policies, mountPath: /policies, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: policies
+          configMap: { name: logweir-poc-minio-policies }
+        - name: tmp
+          emptyDir: {}

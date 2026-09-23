@@ -92,13 +92,17 @@ On docker-desktop, in namespaces the run owns, after lab-refresh-9 releases the
 cluster:
 
 1. **A clean install** with the PoC profile, [deploy/poc/](../deploy/poc/README.md)
-   (Helm and the published `sha-306cebf…` images only), following
+   (Helm and the published chart and images only — the candidate is the first
+   `main` publication carrying the PoC chart fixes, `deploy/poc/versions.env`'s
+   `LOGWEIR_COMMIT`; `sha-306cebf…` predates them and cannot run the profile), following
    [quickstart.md](quickstart.md)'s supported path from an empty namespace set: the Helm install with the managed identity,
    trust, a console, a saved connection and destination, a schedule, the first
    backup to a green badge, a restore of a chosen point through an approval, the
    independent verifier over its scorecard, and a disaster restore from a
    connected archive on a namespace with no `Backup` objects.
-2. **Two upgrade rehearsals to the candidate `sha-306cebf…`**, each following
+2. **Two upgrade rehearsals to the candidate** (`deploy/poc/versions.env`'s
+   `LOGWEIR_TAG`; [deploy/poc/](../deploy/poc/README.md), *Upgrade rehearsals*,
+   has each starting values file and command sequence), each following
    [release-notes.md](release-notes.md)'s order and each keeping:
    - the installation identity — the same `key-id` and private-key digest in
      `logweir-signing-key` / `logweir-signing-trust`;

@@ -66,7 +66,7 @@ config:
       hashFromEnv: DEX_HASH_ADMIN
 ingress:
   enabled: true
-  className: nginx
+  className: traefik
   annotations:
     cert-manager.io/cluster-issuer: logweir-poc-ca
   hosts:

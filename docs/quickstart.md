@@ -29,12 +29,13 @@ this page as one walk on a fresh install, among others — is named in the last
 section.
 
 **The PoC install profile is this path, made concrete.**
-[deploy/poc/](../deploy/poc/README.md) installs it end to end with Helm and the
-published `sha-` images: an ingress controller, a cert-manager local CA for real TLS,
+[deploy/poc/](../deploy/poc/README.md) installs it end to end with Helm, from the
+published OCI chart and its `sha-` images, with no post-install patch: Traefik, a
+cert-manager local CA for real TLS,
 Dex for sign-in with one user per console role, the shared console, a scoped
 controller, an approval-policy binding and a demo Kafka and MinIO to back up —
 ordered commands, a check per step, first sign-in per role, the first backup
-and restore, upgrade from the previous tag and uninstall. Use it for a proof of
+and restore, the two upgrade rehearsals and uninstall. Use it for a proof of
 concept; the steps below are the same path for any installation.
 
 ### Who decides what
