@@ -24,7 +24,7 @@ nothing and it has no fixture mode.
   run's own rendered prefixes — which the phase deletes again after an
   ownership check (see below). `old-archive`'s row requires the Restore to
   finish `Succeeded`/`pass` with a Valid scorecard and the restored topic
-  holding exactly the records the Backup archived; `Running` is not a restore. No phase of THIS harness changes the shared release; D2's `evf5`
+  holding exactly the records the Backup archived; `Running` is not a restore. Its plan's RPO objective is the age of the subject Backup's own covered window plus one hour, because the shared lab's seed records are days old and a one-day constant made every such restore a signed `fail-objective` (lab-refresh-8). No phase of THIS harness changes the shared release; D2's `evf5`
   (lab-refresh-8's rows, below) scales its controller and restores it.
 - For `refused-point`'s two `/points` rows: a `logweir-api` binary
   (`LOGWEIR_API_BIN`, else the newer of `target/{release,debug}/logweir-api`),
