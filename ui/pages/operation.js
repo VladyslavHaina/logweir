@@ -548,13 +548,21 @@ export function renderCompletion(v) {
     // run's signed scorecard has verified; before that there are no counts to
     // show, and an empty or zero row would read as "nothing was restored". A
     // run still going has no panel at all, which is the same honesty.
+    //
+    // A RUN THAT DID NOT SUCCEED IS NOT "NOT YET" ANYTHING (review LOW-3): a
+    // failed, refused or cancelled restore will never write the counts this
+    // panel shows, and "not yet verified" would read as a pending state.
     const finished = v.terminal === true ||
       ["Succeeded", "Failed", "Cancelled"].indexOf(String(v.phase)) !== -1;
-    return v.kind === "restore" && finished
-      ? "<section class=\"completion\"><h3>What this restore produced</h3>" +
-        "<p class=\"note\" data-completion=\"unverified\">" + esc(COMPLETION_NOT_VERIFIED) +
-        "</p></section>"
-      : "";
+    if (v.kind !== "restore" || !finished) {
+      return "";
+    }
+    const succeeded = v.phase === "Succeeded" || v.state === "succeeded";
+    return "<section class=\"completion\"><h3>What this restore produced</h3>" +
+      (succeeded
+        ? "<p class=\"note\" data-completion=\"unverified\">" + esc(COMPLETION_NOT_VERIFIED)
+        : "<p class=\"note\" data-completion=\"none\">" + esc(COMPLETION_NOT_RECORDED)) +
+      "</p></section>";
   }
   const sampleWindow = c.sampleWindow || null;
   const topics = Array.isArray(c.newTopics) ? c.newTopics : [];
@@ -595,6 +603,11 @@ export function renderCompletion(v) {
 export const RECORDS_IN_WINDOW_LABEL = "records verified in the sampled window";
 
 /** What a finished restore with no `status.completion` shows instead of counts. */
+/** What a restore that did not succeed shows where the counts would be. */
+export const COMPLETION_NOT_RECORDED =
+  "No completion was recorded for this run: it did not succeed, so there are no counts of what " +
+  "it produced. Its result and its evidence are above.";
+
 export const COMPLETION_NOT_VERIFIED =
   "Completion not yet verified: the counts of what this restore produced are copied from its " +
   "signed scorecard only once that scorecard has verified, and it has not. Nothing here is a " +

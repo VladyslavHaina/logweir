@@ -884,9 +884,26 @@ async function main() {
       if (root === null) {
         return null;
       }
+      // BY IDENTITY, NOT BY PAGE-ONE TEXT (PLAT-18.2 review LOW-4). The
+      // history is a paginated datagrid: a run past the first page is not in
+      // the document. Its filter brings the run onto the page, the row is the
+      // one whose detail link names it, and the filter is cleared again.
+      const filter = root.querySelector("[data-datagrid] input[type=search]");
+      if (filter !== null) {
+        filter.value = name;
+        filter.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      const link = "a[href*=\"name=" + encodeURIComponent(name) + "\"]";
       const row = Array.from(root.querySelectorAll("tbody tr")).find((tr) =>
-        tr.innerText.indexOf(name) !== -1);
+        tr.querySelector(link) !== null);
+      const clear = () => {
+        if (filter !== null) {
+          filter.value = "";
+          filter.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+      };
       if (row === undefined) {
+        clear();
         return null;
       }
       const cells = Array.from(row.querySelectorAll("td"));
@@ -894,13 +911,15 @@ async function main() {
       const greens = (i) => (cells[i] === undefined ? 0
         : cells[i].querySelectorAll(".badge-green").length);
       const restore = row.querySelector("a[href^=\"#/restore\"]");
-      return {
+      const found = {
         text: row.innerText, phase: cellText(2), backupSet: cellText(4),
         availability: cellText(7), verification: cellText(8),
         availabilityGreens: greens(7), verificationGreens: greens(8),
         greens: row.querySelectorAll(".badge-green").length,
         restoreHref: restore === null ? null : restore.getAttribute("href"),
       };
+      clear();
+      return found;
     }, [runName, section || "#schedule-history"]);
   }
 
@@ -2163,8 +2182,15 @@ async function main() {
       "[data-archived=\"1\"]", "the archived schedule state");
     await waitForText(page, "no longer exists in this namespace", "the archived sentence");
     const archivedRow = await page.evaluate((name) => {
+      // By identity, through the grid's filter (see historyRow).
+      const filter = document.querySelector("[data-datagrid] input[type=search]");
+      if (filter !== null) {
+        filter.value = name;
+        filter.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      const link = "a[href*=\"name=" + encodeURIComponent(name) + "\"]";
       const row = Array.from(document.querySelectorAll("tbody tr")).find((tr) =>
-        tr.innerText.indexOf(name) !== -1);
+        tr.querySelector(link) !== null);
       return row === undefined ? null : {
         text: row.innerText,
         restore: (row.querySelector("a[href^=\"#/restore\"]") || { getAttribute: () => null })

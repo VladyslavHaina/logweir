@@ -30,6 +30,10 @@
  *   - The dark theme follows `prefers-color-scheme` rather than a
  *     `cds-theme` attribute: the page stores nothing, so it has nowhere to
  *     remember a manual choice (rule 2 of `scripts/check-ui-offline.sh`).
+ *   - Clarity's aliases are copied only where this page reads them, and every
+ *     alias that is copied carries Clarity's value in both themes (the
+ *     PLAT-18.2 review found five that did not; they now match). The
+ *     `--lw-*` tokens are the console's own, composed from Clarity's.
  *
  * NO EXTERNAL RESOURCE. No web font is declared and none is fetched. No
  * stylesheet is pulled in from anywhere, no image is referenced, no icon is
@@ -168,13 +172,16 @@
   --cds-global-color-blue-50: hsl(198, 100%, 95%);
   --cds-global-color-blue-75: hsl(198, 100%, 94%);
   --cds-global-color-blue-200: hsl(198, 100%, 78%);
+  --cds-global-color-blue-300: hsl(198, 100%, 70%);
   --cds-global-color-blue-400: hsl(198, 100%, 59%);
   --cds-global-color-blue-500: hsl(198, 100%, 48%);
   --cds-global-color-blue-700: hsl(198, 100%, 34%);
   --cds-global-color-blue-800: hsl(198, 100%, 27%);
   --cds-global-color-blue-900: hsl(198, 100%, 21%);
+  --cds-global-color-blue-1000: hsl(198, 100%, 15%);
   --cds-global-color-green-50: hsl(93, 80%, 94%);
   --cds-global-color-green-500: hsl(93, 80%, 44%);
+  --cds-global-color-green-600: hsl(93, 80%, 37%);
   --cds-global-color-green-700: hsl(93, 80%, 28%);
   --cds-global-color-green-800: hsl(93, 80%, 23%);
   --cds-global-color-ochre-100: hsl(41, 100%, 92%);
@@ -185,6 +192,7 @@
   --cds-global-color-ochre-900: hsl(36, 100%, 27%);
   --cds-global-color-red-50: hsl(9, 100%, 97%);
   --cds-global-color-red-500: hsl(9, 100%, 65%);
+  --cds-global-color-red-600: hsl(9, 100%, 59%);
   --cds-global-color-red-700: hsl(9, 100%, 44%);
   --cds-global-color-red-800: hsl(9, 100%, 38%);
   --cds-global-color-red-900: hsl(9, 100%, 28%);
@@ -224,7 +232,7 @@
   --cds-alias-object-container-background: var(--cds-global-color-white);
   --cds-alias-object-container-background-tint: var(--cds-global-color-construction-50);
   --cds-alias-object-container-background-shade: var(--cds-global-color-construction-100);
-  --cds-alias-object-container-background-inverse: var(--cds-global-color-construction-900);
+  --cds-alias-object-container-background-inverse: var(--cds-global-color-construction-600);
   --cds-alias-object-container-border-color: var(--cds-global-color-construction-200);
   --cds-alias-object-overlay-background: var(--cds-global-color-white);
 
@@ -312,8 +320,8 @@
     --cds-alias-object-interaction-background-active: var(--cds-global-color-construction-600);
     --cds-alias-object-interaction-background-selected: var(--cds-global-color-blue-900);
     --cds-alias-object-interaction-background-highlight: var(--cds-global-color-blue-400);
-    --cds-alias-object-interaction-info-hover: var(--cds-global-color-blue-200);
-    --cds-alias-object-interaction-info-secondary-hover: var(--cds-global-color-construction-800);
+    --cds-alias-object-interaction-info-hover: var(--cds-global-color-blue-300);
+    --cds-alias-object-interaction-info-secondary-hover: var(--cds-global-color-blue-1000);
     --cds-alias-object-app-background: var(--cds-global-color-construction-1000);
     --cds-alias-object-container-background: var(--cds-global-color-construction-900);
     --cds-alias-object-container-background-tint: var(--cds-global-color-construction-1000);
@@ -335,12 +343,14 @@
     --cds-alias-status-info-shade: var(--cds-global-color-blue-500);
     --cds-alias-status-success: var(--cds-global-color-green-500);
     --cds-alias-status-success-tint: var(--cds-global-color-green-800);
+    --cds-alias-status-success-shade: var(--cds-global-color-green-600);
     --cds-alias-status-warning: var(--cds-global-color-ochre-400);
     --cds-alias-status-warning-tint: var(--cds-global-color-ochre-900);
     --cds-alias-status-warning-shade: var(--cds-global-color-ochre-500);
     --cds-alias-status-warning-dark: var(--cds-global-color-ochre-600);
     --cds-alias-status-danger: var(--cds-global-color-red-500);
     --cds-alias-status-danger-tint: var(--cds-global-color-red-900);
+    --cds-alias-status-danger-shade: var(--cds-global-color-red-600);
     --cds-alias-status-danger-dark: var(--cds-global-color-red-900);
     --cds-alias-status-neutral: var(--cds-global-color-construction-300);
     --cds-alias-status-neutral-tint: var(--cds-global-color-construction-700);
