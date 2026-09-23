@@ -80,6 +80,7 @@ import {
   isContractFailure,
 } from "./contract.js";
 import { preparedFor } from "./plan.js";
+import { basisAllowsGreen } from "./render.js";
 import { causesFrom, validateRequest } from "./validate.js";
 
 /** The two modes, by name. */
@@ -454,6 +455,37 @@ const VERIFICATION_OF = Object.freeze({
   invalid: "Invalid",
   notAttempted: "NotAttempted",
 });
+
+/** The recorded result a console DETAIL folds in, with the API's combined
+ *  trust word applied where the signature column alone would say too much or
+ *  nothing (TRUST-STATE-RBR-VERIFIED).
+ *
+ *  `OperationVerification.state` is the SIGNATURE result and has no word for
+ *  the controller's `result: Untrusted`: it arrives as `unknown`, which
+ *  [`VERIFICATION_OF`] has no spelling for, so the fold used to write no
+ *  result at all and the page said "no verification was recorded" about a
+ *  verdict the controller reached. `OperationTrust.state` does carry it, so
+ *  an `untrusted` word restores the resource's own `Untrusted`.
+ *
+ *  And a `Valid` signature the API judged `untrusted` on a basis this page
+ *  would read as green -- a `trust` block whose basis is `None`, which the DTO
+ *  spells the same way as an absent block -- folds as `Untrusted` too, so the
+ *  detail and the operation view give the API's one answer. A basis the page
+ *  already refuses (`RecordedBeforeRevocation`, `Unverified`, an unknown word)
+ *  keeps `Valid` beside it, and with it the case the badge names. */
+function foldedResult(state, trust) {
+  const recorded = VERIFICATION_OF[state];
+  if (trust === null || trust === undefined || trust.state !== "untrusted") {
+    return recorded;
+  }
+  if (recorded === undefined) {
+    return "Untrusted";
+  }
+  if (recorded === "Valid" && basisAllowsGreen(trust.basis)) {
+    return "Untrusted";
+  }
+  return recorded;
+}
 
 function operationStatus(summary) {
   const status = { phase: PHASE_OF[summary.state] };
@@ -965,7 +997,7 @@ function mergeOperation(object, operation, trust) {
     }
   }
   const verification = {};
-  const recorded = VERIFICATION_OF[operation.verification.state];
+  const recorded = foldedResult(operation.verification.state, trust);
   if (recorded !== undefined) {
     verification.result = recorded;
   }

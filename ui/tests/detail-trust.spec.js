@@ -37,14 +37,21 @@ const copy = (value) => JSON.parse(JSON.stringify(value));
 const BASES = ["Current", "Historical", "RecordedBeforeRevocation"];
 
 /** The API's combined word for a `Valid` verdict on each basis, as
- *  `crates/logweir-api/src/status.rs` `trust_of` computes it. A
- *  `RecordedBeforeRevocation` verdict arrives as `verified`: the word alone
- *  does not carry the veto, which is why the basis must travel. */
+ *  `crates/logweir-api/src/status.rs` `trust_state` computes it. Since
+ *  TRUST-STATE-RBR-VERIFIED a `RecordedBeforeRevocation` verdict arrives as
+ *  `untrusted` (D3 section 7.4: "never green"), so the word carries the veto
+ *  itself; the basis still travels, for the case the badge names. */
 const STATE_OF = {
   Current: "verified",
   Historical: "verifiedHistorical",
-  RecordedBeforeRevocation: "verified",
+  RecordedBeforeRevocation: "untrusted",
 };
+
+/** What a server built before TRUST-STATE-RBR-VERIFIED said for the same
+ *  verdicts: `verified` for `RecordedBeforeRevocation`. The console still
+ *  vetoes on the basis, so a console in front of an older server gives the
+ *  same answer. */
+const PRE_FIX_STATE_OF = Object.assign({}, STATE_OF, { RecordedBeforeRevocation: "verified" });
 
 function transport(answer) {
   const original = globalThis.fetch;
@@ -94,11 +101,12 @@ function judgeClaim(html, basis, what) {
     what + ": the scorecard caption follows the badge rule");
 }
 
-/** The operation route's body for a `Valid` verdict on `basis`. */
-function operationBody(name, basis) {
+/** The operation route's body for a `Valid` verdict on `basis`, with the
+ *  combined word `states` gives it. */
+function operationBody(name, basis, states) {
   const body = fixture(name);
   body.item.trust = Object.assign({}, body.item.trust || {}, {
-    state: STATE_OF[basis], basis: basis,
+    state: (states || STATE_OF)[basis], basis: basis,
     keyState: basis === "Current" ? "Active" : basis === "Historical" ? "Retired" : "Revoked",
   });
   body.item.verifiedSuccess = basis !== "RecordedBeforeRevocation";
@@ -205,16 +213,92 @@ test("a_legacy_restore_detail_judges_the_verdict_and_the_scorecard_facts_by_the_
 // ----------------------------------------------------------- operation view
 
 test("the_operation_view_judges_the_verdict_by_the_basis_in_both_modes", () => {
-  for (const basis of BASES) {
-    const consoleView = operationFacts(decodeD3Operation(
-      operationBody("console/operation-restore-completed.json", basis)).value.item, true);
-    judge(renderEvidence(consoleView), basis, "console operation view, " + basis);
-    judgeClaim(renderResult(consoleView), basis, "console operation view, " + basis);
-    const legacyView = operationFacts(crWithBasis("restore-valid-pass.json", basis), false);
-    judge(renderEvidence(legacyView), basis, "legacy operation view, " + basis);
-    assert.equal(evidenceGreen(consoleView), evidenceGreen(legacyView),
-      basis + ": the two modes give one answer");
+  for (const states of [STATE_OF, PRE_FIX_STATE_OF]) {
+    for (const basis of BASES) {
+      const what = basis + (states === STATE_OF ? "" : " (a pre-fix server)");
+      const consoleView = operationFacts(decodeD3Operation(
+        operationBody("console/operation-restore-completed.json", basis, states)).value.item, true);
+      judge(renderEvidence(consoleView), basis, "console operation view, " + what);
+      judgeClaim(renderResult(consoleView), basis, "console operation view, " + what);
+      const legacyView = operationFacts(crWithBasis("restore-valid-pass.json", basis), false);
+      judge(renderEvidence(legacyView), basis, "legacy operation view, " + basis);
+      assert.equal(evidenceGreen(consoleView), evidenceGreen(legacyView),
+        what + ": the two modes give one answer");
+    }
   }
+});
+
+test("a_console_detail_in_front_of_a_pre_fix_server_still_vetoes_on_the_basis", async () => {
+  // An older `logweir-api` says `verified` for RecordedBeforeRevocation. The
+  // detail folds the basis where the resource keeps it, so the answer is the
+  // same one a current server gets.
+  await consoleMode();
+  const object = await consoleDetail("backups", "orders-hourly-20260912-080000", "console/backup.json",
+    operationBody("console/operation-backup.json", "RecordedBeforeRevocation", PRE_FIX_STATE_OF));
+  judge(renderBackupDetail(object), "RecordedBeforeRevocation", "console backup detail, pre-fix server");
+});
+
+// ------------------------------------------ the API's untrusted word, folded
+
+const UNTRUSTED_CASE = "untrusted signer";
+
+/** An operation body whose SIGNATURE column says `signature` and whose
+ *  combined word is `untrusted` on `basis`. */
+function untrustedBody(name, signature, basis) {
+  const body = fixture(name);
+  body.item.verification = Object.assign({}, body.item.verification, { state: signature });
+  body.item.trust = { state: "untrusted", basis: basis, keyState: "Revoked" };
+  body.item.verifiedSuccess = false;
+  return body;
+}
+
+test("the_controllers_untrusted_result_folds_as_untrusted_in_a_console_detail", async () => {
+  // THE CONTROLLER'S OWN SHAPE for D3 section 7.4's compromise rows is
+  // `result: Untrusted`, which the operation route's signature column spells
+  // `unknown`. The fold used to write no result for it, so the page said "no
+  // verification was recorded" about a verdict the controller reached. The
+  // API's word says `untrusted`, and so does the page -- in both modes.
+  await consoleMode();
+  const object = await consoleDetail("backups", "orders-hourly-20260912-080000", "console/backup.json",
+    untrustedBody("console/operation-backup.json", "unknown", "RecordedBeforeRevocation"));
+  assert.equal(object.status.evidence.verification.result, "Untrusted");
+  assert.equal(object.status.evidence.verification.trust.basis, "RecordedBeforeRevocation");
+  judge(renderBackupDetail(object), "RecordedBeforeRevocation", "console detail, result Untrusted");
+
+  // The same object read as a custom resource names the same case.
+  await legacyMode();
+  const cr = crWithBasis("backup-valid-exit0.json", "RecordedBeforeRevocation");
+  cr.status.evidence.verification.result = "Untrusted";
+  judge(renderBackupDetail(await legacyDetail("backups", "orders-hourly-20260911-124000", cr)),
+    "RecordedBeforeRevocation", "legacy detail, result Untrusted");
+
+  // And the operation view, over the API's word and over the resource.
+  const consoleView = operationFacts(decodeD3Operation(untrustedBody(
+    "console/operation-restore-completed.json", "unknown", "RecordedBeforeRevocation")).value.item, true);
+  judge(renderEvidence(consoleView), "RecordedBeforeRevocation", "console operation view, result Untrusted");
+  const legacyCr = crWithBasis("restore-valid-pass.json", "RecordedBeforeRevocation");
+  legacyCr.status.evidence.verification.result = "Untrusted";
+  judge(renderEvidence(operationFacts(legacyCr, false)), "RecordedBeforeRevocation",
+    "legacy operation view, result Untrusted");
+});
+
+test("a_valid_signature_the_api_judged_untrusted_on_a_none_basis_is_not_green", async () => {
+  // A `trust` block whose basis is `None` beside a `Valid` result is
+  // `untrusted` on the API, as on the controller's badge. The DTO spells that
+  // basis like an absent block, which this page reads as the pre-existing
+  // rule; the API's word is what tells the two apart, and the fold obeys it.
+  await consoleMode();
+  const object = await consoleDetail("backups", "orders-hourly-20260912-080000", "console/backup.json",
+    untrustedBody("console/operation-backup.json", "valid", "None"));
+  assert.equal(object.status.evidence.verification.result, "Untrusted");
+  const html = renderBackupDetail(object);
+  assert.equal(html.indexOf("badge badge-green"), -1, "the API said untrusted");
+  assert.ok(html.indexOf(UNTRUSTED_CASE) !== -1);
+
+  // AND THE OPERATION VIEW, which reads the word, agrees.
+  const view = operationFacts(decodeD3Operation(
+    untrustedBody("console/operation-restore-completed.json", "valid", "None")).value.item, true);
+  assert.equal(evidenceGreen(view), false);
 });
 
 // -------------------------------------------------------- negative controls
@@ -250,12 +334,40 @@ test("the_old_projection_without_the_basis_fails_the_rows_above", async () => {
 });
 
 test("the_old_operation_view_rule_on_the_trust_word_alone_fails_the_rows_above", () => {
-  // NEGATIVE CONTROL for the operation view. The word alone is `verified` for
-  // RecordedBeforeRevocation; with the basis unread (dropped here) the view
-  // is green, and `judge` refuses it.
-  const view = operationFacts(decodeD3Operation(
-    operationBody("console/operation-restore-completed.json", "RecordedBeforeRevocation")).value.item, true);
+  // NEGATIVE CONTROL for the operation view. A pre-fix server's word alone is
+  // `verified` for RecordedBeforeRevocation; with the basis unread (dropped
+  // here) the view is green, and `judge` refuses it.
+  const view = operationFacts(decodeD3Operation(operationBody(
+    "console/operation-restore-completed.json", "RecordedBeforeRevocation", PRE_FIX_STATE_OF)).value.item, true);
   const unread = Object.assign({}, view, { trust: Object.assign({}, view.trust, { basis: undefined }) });
   assert.throws(() => judge(renderEvidence(unread), "RecordedBeforeRevocation", "old operation view"),
     /RecordedBeforeRevocation is never green/);
+
+  // And the current server's word needs no basis to be refused: `untrusted`
+  // alone is not green (TRUST-STATE-RBR-VERIFIED).
+  const current = operationFacts(decodeD3Operation(operationBody(
+    "console/operation-restore-completed.json", "RecordedBeforeRevocation")).value.item, true);
+  const alone = Object.assign({}, current, { trust: Object.assign({}, current.trust, { basis: undefined }) });
+  assert.equal(evidenceGreen(alone), false, "the API's word carries the veto by itself");
+});
+
+test("the_old_fold_without_the_trust_word_fails_the_untrusted_rows_above", async () => {
+  // NEGATIVE CONTROL for the fold. Before TRUST-STATE-RBR-VERIFIED the fold
+  // read the signature column alone. Reproduce that output -- a `Valid` on a
+  // `None` basis, and an `unknown` with no result -- and hold it to the rows'
+  // own assertions: the first is green, the second names no case.
+  await consoleMode();
+  const valid = await consoleDetail("backups", "orders-hourly-20260912-080000", "console/backup.json",
+    untrustedBody("console/operation-backup.json", "valid", "None"));
+  valid.status.evidence.verification.result = "Valid";
+  assert.notEqual(renderBackupDetail(valid).indexOf("badge badge-green"), -1,
+    "the old fold read a Valid on a None basis as green");
+
+  const unknown = await consoleDetail("backups", "orders-hourly-20260912-080000", "console/backup.json",
+    untrustedBody("console/operation-backup.json", "unknown", "RecordedBeforeRevocation"));
+  // The old fold wrote no `result` for `unknown`, and so no basis either.
+  delete unknown.status.evidence.verification.result;
+  delete unknown.status.evidence.verification.trust;
+  assert.throws(() => judge(renderBackupDetail(unknown), "RecordedBeforeRevocation", "old fold"),
+    /the unverified badge names the case/, "the old fold dropped the controller's Untrusted verdict");
 });

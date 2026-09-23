@@ -427,12 +427,12 @@ export function renderResult(v) {
  *  legacy mode.
  *
  *  THE BASIS STILL VETOES IN CONSOLE MODE (CONSOLE-DETAIL-TRUST-BASIS-DROPPED).
- *  `logweir-api` projects a `Valid` verdict on `RecordedBeforeRevocation` as
- *  `trust.state: verified` (`crates/logweir-api/src/status.rs`, `trust_of`),
- *  and D3 section 7.4 says that case is "never green". So a green word is
- *  green only on a basis a green badge may carry -- the SAME
- *  [`basisAllowsGreen`] legacy mode applies -- and the two modes cannot
- *  disagree about one run. */
+ *  A `logweir-api` built before TRUST-STATE-RBR-VERIFIED projects a `Valid`
+ *  verdict on `RecordedBeforeRevocation` as `trust.state: verified`; a current
+ *  one says `untrusted`, and D3 section 7.4 says that case is "never green".
+ *  So a green word is green only on a basis a green badge may carry -- the
+ *  SAME [`basisAllowsGreen`] legacy mode applies -- and the two modes cannot
+ *  disagree about one run, whichever server answered. */
 export function evidenceGreen(v) {
   const console_ = v.console === true;
   const trust = (console_ ? v.trust : ((v.evidenceVerification || {}).trust)) || {};
@@ -446,6 +446,12 @@ export function evidenceGreen(v) {
  *  word the basis vetoed is named by the basis -- the words legacy mode uses
  *  for the same `Valid` + basis -- and every other word by its own case. */
 function consoleUnverifiedCaption(v, trust) {
+  // A `RecordedBeforeRevocation` verdict is named by its basis whichever word
+  // carried it -- `untrusted` from a current server, `verified` from an older
+  // one -- exactly as legacy mode names the same object.
+  if (trust.basis === "RecordedBeforeRevocation" && v.trustState === "untrusted") {
+    return unverifiedCaption({ result: "Untrusted", trust: trust }, v.verifiedSuccess);
+  }
   if (GREEN_TRUST_STATES.indexOf(v.trustState) !== -1 && !basisAllowsGreen(trust.basis)) {
     return unverifiedCaption({ result: "Valid", trust: trust }, v.verifiedSuccess);
   }

@@ -2237,10 +2237,15 @@ export const GREEN_BASES = Object.freeze(["Current", "Historical"]);
 export function verificationCase(verification, runSucceeded) {
   const v = verification || {};
   const trust = v.trust || {};
+  // `RecordedBeforeRevocation` NAMES ITS OWN CASE on either result that can
+  // carry it. The controller writes it beside `result: Untrusted` (D3 section
+  // 7.4's row), and "rendered with the recorded instant" is owed to that
+  // object, not only to a `Valid` one no controller writes.
+  if (trust.basis === "RecordedBeforeRevocation" &&
+    (v.result === "Valid" || v.result === "Untrusted")) {
+    return VERIFICATION_CASES.RecordedBeforeRevocation;
+  }
   if (v.result === "Valid") {
-    if (trust.basis === "RecordedBeforeRevocation") {
-      return VERIFICATION_CASES.RecordedBeforeRevocation;
-    }
     if (!basisAllowsGreen(trust.basis)) {
       return VERIFICATION_CASES.NotRecorded;
     }
