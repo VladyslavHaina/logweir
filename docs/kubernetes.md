@@ -1175,13 +1175,17 @@ against): the `TrustPolicy` whose `spec.namespaces` names the namespace, else th
 `default: true` policy, else `legacy-roster-v1` synthesised from
 `TrustRoster/default`. Only the policy's `EvidenceSigning` keys are mounted and
 consulted, and only those whose PEM parses and hashes to the declared `keyId`;
-each is judged by its lifecycle as `logweir_core::trust::decide` judges it — an
-`Active` key verifies what it signed inside its window (`VerifiedHistorical` once
-`notAfter` has passed); a `Retired` key verifies what it signed at or before
-`retiredAt` as `VerifiedHistorical`, and a later signing claim is `Invalid`; a key
-revoked for `KeyCompromise` makes everything it signed `Revoked`, and a
-`Superseded`/`Unspecified` revocation is a retirement at `revocationEffectiveFrom`;
-and a point claiming a signing time before a policy key's `notBefore` is `Invalid`.
+each point is judged BY `logweir_core::trust::decide` itself — the judge the
+restore preflight and the runner apply to the same key — at the point's claimed
+signing time, so the view is never the more permissive surface. `Valid/Current`
+is `Verified` (an `Active` key, signed inside its window); `Valid/Historical` is
+`VerifiedHistorical` (signed before `notAfter` has passed, at or before
+`retiredAt`, or before a `Superseded`/`Unspecified` revocation's
+`revocationEffectiveFrom`); a `KeyCompromise` revocation is `Revoked` whatever the
+claim; and every other window refusal is `Invalid` — a claim before `notBefore`,
+after the accepted bound, **in the future**, against a key whose window **has not
+opened yet** (a staged successor), or with no instant at all. (The roster has no
+lifecycle; a roster key is classified as it always was.)
 A namespace two policies claim resolves to nothing: every point is `NotAttempted`
 and `TrustAvailable=False/TrustPolicyConflict` names the policies. A roster-only
 namespace mounts the same bundle and reaches the same verdicts as builds before
@@ -7252,15 +7256,19 @@ readiness check holds the submit*).
   naming the refusal (`KeyRetired`, `KeyRevoked`, `KeyIdExpired`,
   `KeyNotYetValid`), scoped to the `TrustPolicy`. A namespace two policies claim
   is `TrustRosterNotLoaded` naming both; a policy list the controller could not
-  read is `unknown`, `SignerTrustUnknown` — never the roster's answer. A scratch
+  read is `unknown`, `TrustUnknown` — never the roster's answer. A scratch
   restore's `target.clusterIdentity` compares against the governing policy's
   `allowedTargetClusterIds` (the list the runner's `allowed-clusters.json` is
-  rendered from). The governing policy is a binding referent, so editing it
+  rendered from), and a backup's source check against the same list; with the
+  policy list unreadable both are `unknown`, `TrustUnknown`, rather than the
+  roster's allowlist, so the preflight cannot read `ready` on a guess (a row
+  decided by the broker itself — identity changed, target is the source —
+  keeps its answer). The governing policy is a binding referent, so editing it
   makes the verdict stale. With no policy governing the namespace every answer
   is the `TrustRoster`'s, unchanged. Builds before this judged both rows by
   `TrustRoster/default` alone, so a TrustPolicy-only namespace read
   `TrustRosterNotFound`/`SignerNotRostered` for a key its policy trusts. The
-  code `SignerTrustUnknown` is new and additive; a rolled-back controller never
+  code `TrustUnknown` is new and additive; a rolled-back controller never
   writes it.
 - **`destination.archivePrefixWritable` is not requested.** A backup readiness
   plan asks for the `archiveRead`, `evidenceWrite` and — when the destination
