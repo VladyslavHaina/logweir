@@ -625,15 +625,48 @@ async function staleRestorePreparation(browser) {
         `&uid=${encodeURIComponent(createdIdentity(fixtureA).uid)}`,
     );
     await page.waitForSelector("#create-restore");
+    // THE NAVIGATION IS MADE TO HAPPEN DURING THE PREPARATION, not raced
+    // against it (measured 2026-09-23). The submit no longer waits on the
+    // delayed digest above -- the reviewed plan is already prepared -- so its
+    // POST left 89-108 ms after the click in 2 of 30 local trials, on
+    // PLAT-18.2's ui/ and on the ui/ before it alike, whenever Playwright's
+    // click took longer than the hash change after it. The submit's FIRST
+    // step is a re-read of the saved connections (`confirmClusters`,
+    // PLAT-07.2); that one read is held until the route has changed, so the
+    // page always meets a navigation mid-preparation. The row then REQUIRES
+    // that the click started a submit (the held re-read was issued) and that no
+    // Restore POST followed it -- a click that did nothing no longer passes.
+    let armed = false;
+    let navigated = false;
+    const heldReads = [];
+    await page.route("**/kafkaclusters*", async (route) => {
+      if (!armed || navigated || route.request().method() !== "GET") {
+        return route.continue();
+      }
+      heldReads.push(new URL(route.request().url()).pathname);
+      for (let waited = 0; !navigated && waited < 10000; waited += 25) {
+        await pause(25);
+      }
+      return route.continue();
+    });
+    armed = true;
     await page.locator("#create-restore").click();
     await page.evaluate((ns) => { location.hash = `#/backups?ns=${encodeURIComponent(ns)}`; }, second || primary);
-    await pause(750);
+    navigated = true;
+    await pause(1500);
+    await page.unroute("**/kafkaclusters*");
+    check(heldReads.length >= 1,
+      "the click started no submit: the submit-time connections re-read was never issued");
     check(posts.length === 0, `stale restore preparation posted after navigation: ${posts.join(", ")}`);
     await assertRenderedBackup(page, second ? fixtureB : fixtureA, second ? fixtureA : "",
       "post-restore-navigation route content");
     result.positiveRealApiCases.push(
       "real restore fixtures with delayed digest produced no stale Restore POST and kept destination content",
     );
+    result.faultInjectionControls.push({
+      control: "the submit-time connections re-read held until the route changed",
+      outcome: `re-read(s) held: ${heldReads.join(", ")}; no Restore POST after the navigation`,
+    });
   } finally {
     await page.close();
   }
