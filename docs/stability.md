@@ -1102,7 +1102,9 @@ in the environment: a rollout that upgraded one and not the other is refused rat
   `CredentialSecretKeyMissing`, not a fall-back. That handle is used for the one put and nothing
   else. An absent `evidenceWrite` means the two grants are one, and such a plan is byte-identical to
   what earlier controllers rendered; an older runner refuses a plan that carries the field (exit 3,
-  `deny_unknown_fields`).
+  `deny_unknown_fields`). **The evidence-read probe follows the same rule**: `evidenceRead` names
+  its grant, its keys arrive as `LOGWEIR_EVIDENCE_READ_AWS_*`, and a `controllerIdentity` or
+  `notConfigured` grant is answered `unknown` (`EvidenceReadNotConfigured`) with no request.
 * It **never creates, alters or deletes a topic.** The restore preflight's collision answer is
   targeted metadata plus a `CreateTopics` with `validate_only = true`; the execution path's probe
   topic has no counterpart here.

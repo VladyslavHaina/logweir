@@ -7430,10 +7430,34 @@ or `Restore` pod with those two grants meets. A `DestinationAccess` check that
 requests `ArchiveRead` resolves its destination credential for `archiveRead`
 even when `ArchiveWrite` is also requested (it used to take `archiveWrite`,
 which is never probed), so `destination.archiveListable` is the `archiveRead`
-principal's answer. **Still one credential for the READS:** on a
-`DestinationAccess` check that requests both `ArchiveRead` and `EvidenceRead`
-on a destination whose two read grants differ, `destination.evidenceReadable`
-is answered by the `archiveRead` principal (advisory; a known limit).
+principal's answer.
+
+**The evidence read is the `evidenceRead` principal's, by the same rule.**
+`destination.evidenceReadable` reads its absent probe key AS the destination's
+`evidenceRead` grant. When that grant is a different Secret or ServiceAccount
+than the checked grant, the plan names it (`evidenceRead: {credentials,
+secretName | serviceAccountName}`) and the pod is projected its keys as
+`LOGWEIR_EVIDENCE_READ_AWS_*` — a third set, beside `AWS_*` and
+`LOGWEIR_EVIDENCE_AWS_*` — or runs as its ServiceAccount; the row's fact is
+`grant=evidenceRead`. It used to be answered by the checked grant (for a
+`Backup` check, the archive-WRITE grant — the one D2 rule R9 forbids ever
+reading evidence back with). A grant no check pod holds — `ControllerIdentity`,
+or none configured on a `DestinationAccess` check that asks for the role anyway
+— is answered `unknown` / `EvidenceReadNotConfigured` (advisory) and nothing is
+read. A workload identity that cannot share the check pod's ServiceAccount
+refuses a `DestinationAccess` check (`destination.resolved` →
+`ExecutionContextConflict`, no Job) and is left out of a `Backup` check, which
+only adds the advisory row for information and whose run never reads evidence
+in its own pod.
+
+**The archive-write grant is never probed, and its row is never green.**
+`destination.archivePrefixWritable` stays execution-only
+(`ArchivePrefixWriteVerifiedOnlyAtExecution`) even when the destination opts in
+to the marker and a `DestinationAccess` check requests `ArchiveWrite`: the marker
+is under `logweir/readiness/`, which proves nothing about the archive prefix, and
+a check may not write into the archive prefix to find out. The row's message
+names the archive prefix and says it was not write-probed; the run's own guards
+answer it.
 
 ### 21.6 A restore preflight writes nothing
 
@@ -7644,10 +7668,10 @@ readiness check holds the submit*).
   run itself exercises, and its row's whole content is "verified by the run", so
   requesting it would add a line and no information.
 - **`destination.evidenceReadable` is only requested when the destination
-  configures an `evidenceRead` grant.** A check plan carries ONE credential for
-  its destination's READS (the marker write carries its own, §21.5), so probing
-  a role the object leaves unconfigured would exercise the wrong credential and
-  report a refusal about a grant nobody asked for. Absent means verification is `NotAttempted` (§7b), and the advisory row
+  configures an `evidenceRead` grant.** Probing a role the object leaves
+  unconfigured would report a refusal about a grant nobody asked for; when it is
+  configured, the row is answered as that grant (§21.5), and a `ControllerIdentity`
+  grant is reported `unknown` rather than read by the check pod. Absent means verification is `NotAttempted` (§7b), and the advisory row
   is then simply absent.
 - **The binding covers no credential Secret and no recovery-point topic set** —
   see §21.4.
@@ -7676,7 +7700,13 @@ writes the marker with the destination grant, exactly as before, which on a
 separated destination is the old wrong-principal answer until the controller is
 upgraded. A `DestinationAccess` `Preflight` against an opted-in destination
 starts writing the marker after the upgrade; roll back the controller to stop
-it, or set `writeProbe: Disabled`.
+it, or set `writeProbe: Disabled`. **`evidenceRead` follows the same rules**:
+the field is added only when the `EvidenceRead` role is carried and the grant
+differs from the checked grant or is one no check pod holds; an older runner
+refuses such a plan (exit 3); a newer runner handed an older plan reads with
+the destination grant, as before. A `Backup` check whose `evidenceRead` grant is
+a workload identity other than the pod's no longer carries the advisory
+`destination.evidenceReadable` row.
 
 ## 22. The installation policy, the RBAC rows, and the console admission policy
 
