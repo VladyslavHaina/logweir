@@ -405,6 +405,7 @@ const MATRIX = [
 
 let rbacCreated = false;
 let lockHeld = false;
+let trustPolicyCreated = false;
 
 async function main() {
   mkdirSync(ARTIFACTS, { recursive: true });
@@ -439,37 +440,47 @@ async function main() {
   });
   try {
     // ------------------------------------------------ 1. the readiness check
-    await page.goto(admin + "/ui/#/restore?ns=" + NS + "&backup=" + seeded.point.name + "&uid=" + seeded.point.uid,
-      { waitUntil: "load", timeout: 30000 });
-    await waitFor(page, "#step-target", "the wizard");
-    await page.selectOption("#target-cluster", seeded.targetUid);
-    await pause(500);
-    await page.fill("#topic-prefix", "ts" + suffix + "-");
-    await page.press("#topic-prefix", "Tab");
-    await page.fill("#point-in-time", new Date(seeded.window.toMs - 1).toISOString());
-    await page.press("#point-in-time", "Tab");
-    await pause(1000);
-    await waitFor(page, "#plan-bytes", "the plan");
-    const planHash = await page.evaluate(() => document.querySelector("#plan-hash-value").textContent.trim());
-    result.planHash = planHash;
-    await page.click("#restore-readiness-start");
-    let pf = null;
-    for (let i = 0; i < 150 && pf === null; i += 1) {
-      const mine = (kubeJson(["-n", NS, "get", "preflights"]).items || [])[0];
-      if (mine && ["Completed", "Failed", "Cancelled"].includes(String((mine.status || {}).phase))) {
-        pf = mine;
-      } else {
-        await pause(2000);
+    // The page's own check, run from a freshly loaded wizard; `known` names the
+    // Preflights that existed before, so a second run reads its OWN object.
+    const readinessFromPage = async (known) => {
+      await page.goto(admin + "/ui/#/restore?ns=" + NS + "&backup=" + seeded.point.name + "&uid=" + seeded.point.uid,
+        { waitUntil: "load", timeout: 30000 });
+      await page.reload({ waitUntil: "load", timeout: 30000 });
+      await waitFor(page, "#step-target", "the wizard");
+      await page.selectOption("#target-cluster", seeded.targetUid);
+      await pause(500);
+      await page.fill("#topic-prefix", "ts" + suffix + "-");
+      await page.press("#topic-prefix", "Tab");
+      await page.fill("#point-in-time", new Date(seeded.window.toMs - 1).toISOString());
+      await page.press("#point-in-time", "Tab");
+      await pause(1000);
+      await waitFor(page, "#plan-bytes", "the plan");
+      const hash = await page.evaluate(() => document.querySelector("#plan-hash-value").textContent.trim());
+      await page.click("#restore-readiness-start");
+      let found = null;
+      for (let i = 0; i < 150 && found === null; i += 1) {
+        const mine = (kubeJson(["-n", NS, "get", "preflights"]).items || [])
+          .find((o) => !known.includes(o.metadata.name));
+        if (mine && ["Completed", "Failed", "Cancelled"].includes(String((mine.status || {}).phase))) {
+          found = mine;
+        } else {
+          await pause(2000);
+        }
       }
-    }
-    check(pf !== null, "the lab controller recorded no terminal readiness check within 300 s");
+      check(found !== null, "the lab controller recorded no terminal readiness check within 300 s");
+      return { pf: found, planHash: hash };
+    };
+    const firstCheck = await readinessFromPage([]);
+    const pf = firstCheck.pf;
+    const planHash = firstCheck.planHash;
+    result.planHash = planHash;
     save("01-preflight-object.json", pf);
     const referents = ((pf.status || {}).binding || {}).referents || [];
     const rosterRef = referents.find((r) => r.kind === "TrustRoster");
     check(rosterRef && rosterRef.name === "default" && rosterRef.uid === result.roster.uid &&
       rosterRef.generation === result.roster.generation,
     "the lab controller recorded TrustRoster/default at the live uid/generation: " + JSON.stringify(referents));
-    row("the lab controller (f49849d) recorded TrustRoster/default as a referent of the wizard's readiness check",
+    row("the lab controller recorded TrustRoster/default as a referent of the wizard's readiness check",
       { preflight: pf.metadata.name, uid: pf.metadata.uid, referents: referents });
 
     // ------------------------------------------ 2. served fresh, on re-read
@@ -602,6 +613,69 @@ async function main() {
     control("with the roster ClusterRoleBinding removed, the SAME verdict is served stale: unverifiable " +
       "TrustRoster/default (read refused), and the shipped wizard gate refuses it", {
       canIGetDefault: deniedCanI, staleReasons: reasons, gateRefusal: refusal });
+
+    // ------------------------------------------ 6. the TrustPolicy half
+    // (lab-refresh-9; the lock is still held.) A TrustPolicy of this run's
+    // governing the namespace: the lab signing key Active for EvidenceSigning
+    // and the lab approver key for GovernedApproval, so nothing about the
+    // namespace's trust changes except WHO decides it. A readiness check run
+    // after it exists must record `TrustPolicy/<name>` at its live uid and
+    // generation, be served fresh, and then -- after one edit that moves only
+    // the policy's generation -- be served stale naming exactly that policy.
+    const roster = kubeJson(["get", "trustroster", "default"]);
+    const labKey = (k, usage) => ({ keyId: k.keyId, spkiPem: k.spkiPem, algorithm: "p256",
+      principal: { id: k.subject || "lab@scram-local.invalid", display: "lab " + usage + " key" },
+      usages: [usage], state: "Active", notBefore: "2026-01-01T00:00:00Z", notAfter: "2027-01-01T00:00:00Z" });
+    const policyName = NS + "-tp";
+    const policy = create({ apiVersion: "logweir.dev/v1alpha1", kind: "TrustPolicy",
+      metadata: { name: policyName, labels: LABELS },
+      spec: { namespaces: [NS], keys: [labKey(roster.spec.signingKeys[0], "EvidenceSigning"),
+        labKey(roster.spec.approverKeys[0], "GovernedApproval")] } });
+    trustPolicyCreated = true;
+    result.created.push({ kind: "TrustPolicy", name: policyName, uid: policy.metadata.uid });
+    await pause(3000);
+    const policyCheck = await readinessFromPage([pf.metadata.name]);
+    save("06-preflight-under-policy.json", policyCheck.pf);
+    const livePolicy = kubeJson(["get", "trustpolicy", policyName]);
+    const policyRefs = ((policyCheck.pf.status || {}).binding || {}).referents || [];
+    const policyRef = policyRefs.find((r) => r.kind === "TrustPolicy");
+    check(policyRef && policyRef.name === policyName && policyRef.uid === livePolicy.metadata.uid &&
+      policyRef.generation === livePolicy.metadata.generation,
+    "the controller did not record TrustPolicy/" + policyName + " at its live uid/generation: " +
+      JSON.stringify(policyRefs));
+    row("the lab controller records the namespace's governing TrustPolicy as a referent of the readiness check",
+      { preflight: policyCheck.pf.metadata.name, referent: policyRef });
+    const policyUrl = admin + "/api/v1/namespaces/" + NS + "/preflights/" + policyCheck.pf.metadata.name +
+      "?planHash=" + encodeURIComponent(policyCheck.planHash);
+    const policyFresh = await getJson(policyUrl);
+    save("06-served-under-policy.json", policyFresh);
+    const freshItem = policyFresh.body.item || {};
+    check(policyFresh.status === 200 && freshItem.stale === false && freshItem.applicable === true &&
+      (freshItem.staleReasons || []).length === 0 &&
+      String(freshItem.staleBasis).includes("referents:" + policyRefs.length),
+    "the verdict naming the TrustPolicy was not served fresh: " + JSON.stringify({ stale: freshItem.stale,
+      staleReasons: freshItem.staleReasons, staleBasis: freshItem.staleBasis }));
+    control("before the policy moves, the verdict that names it is served fresh (the referent compared, no reason)",
+      { staleBasis: freshItem.staleBasis });
+    const displayPatch = JSON.parse(JSON.stringify(livePolicy.spec));
+    displayPatch.keys[0].principal.display = "lab EvidenceSigning key (edited " + suffix + ")";
+    kube(["patch", "trustpolicy", policyName, "--type=merge", "-p", JSON.stringify({ spec: displayPatch })]);
+    const edited = kubeJson(["get", "trustpolicy", policyName]);
+    check(edited.metadata.generation === livePolicy.metadata.generation + 1 &&
+      edited.metadata.uid === livePolicy.metadata.uid, "the edit did not move the generation by one");
+    await pause(2000);
+    const policyStale = await getJson(policyUrl);
+    save("06-served-after-policy-edit.json", policyStale);
+    const staleItem = policyStale.body.item || {};
+    const staleReasons = staleItem.staleReasons || [];
+    check(staleItem.stale === true && staleReasons.length === 1 &&
+      staleReasons[0].reason === "referentChanged" && staleReasons[0].kind === "TrustPolicy" &&
+      staleReasons[0].name === policyName,
+    "the policy edit did not make the verdict stale with exactly referentChanged TrustPolicy/" + policyName +
+      ": " + JSON.stringify(staleReasons));
+    row("an edit that moves only the TrustPolicy's generation makes the verdict stale: referentChanged " +
+      "TrustPolicy/" + policyName + " and nothing else", { generation: [livePolicy.metadata.generation,
+      edited.metadata.generation], staleReasons: staleReasons });
   } finally {
     for (const c of children) {
       save("api-" + c.label + ".log", c.log.join(""));
@@ -614,6 +688,20 @@ async function main() {
 }
 
 async function cleanup() {
+  if (trustPolicyCreated) {
+    const name = NS + "-tp";
+    const seen = kube(["get", "trustpolicy", name, "-o", "json"], { expected: [0, 1] });
+    if (seen.status === 0) {
+      const obj = JSON.parse(seen.stdout);
+      if (((obj.metadata.labels || {})["logweir.dev/test-owner"]) === OWNER) {
+        kube(["delete", "trustpolicy", name, "--wait=true"]);
+        result.cleanup.push({ kind: "trustpolicy", name: name, uid: obj.metadata.uid,
+          deleted: kube(["get", "trustpolicy", name], { expected: [0, 1] }).status === 1 });
+      } else {
+        result.cleanup.push({ kind: "trustpolicy", name: name, refused: "not labelled " + OWNER_LABEL });
+      }
+    }
+  }
   // The cluster-scoped copies: always removed, owner label checked first.
   if (rbacCreated || lockHeld) {
     for (const kind of ["clusterrolebinding", "clusterrole"]) {
