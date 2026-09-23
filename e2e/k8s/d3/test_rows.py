@@ -2914,44 +2914,78 @@ def test_the_segment_tamper_keeps_the_records_and_changes_only_the_digest() -> N
 
 
 def test_the_object_lock_row_requires_the_refusal_recorded() -> None:
+    """FLIPPED at lab-refresh-9: the versioned-bucket refusal, not `Locked`."""
     held, control = "lwp1-held", "lwp1-ctl"
-    after = {"status": {"lastEnforcement": {"runId": "r1", "finishedAt": "t", "deleted": [control],
-                                            "failed": [{"pointId": held, "code": "Locked"}]}}}
-    nxt = {"status": {"lastEvaluation": {"protected": [{"pointId": held, "reason": "LegalHold"}],
-                                         "candidates": []},
-                      "guarantees": {"legalHold": "ProviderEnforcedUnverified"}}}
-    kept = [{"key": "archive/x/manifest.json", "versionId": "v1", "isDeleteMarker": False,
-             "isLatest": True}]
-    ok = d3.legal_hold_refusal_recorded(after, nxt, held, control, kept, True, True)
-    row("object lock: a recorded provider refusal passes", all(ok.values()), str(ok))
-    # WHAT MinIO DOES (measured 2026-09-23 on the lab): the reaper's DELETE names
-    # no version, the provider writes a delete marker over the held version and
-    # returns success, and the run records the held point Deleted.
-    after_f = {"status": {"lastEnforcement": {"runId": "r1", "finishedAt": "t",
-                                              "deleted": [held, control]}}}
-    nxt_f = {"status": {"lastEvaluation": {"protected": [], "candidates": []},
-                        "guarantees": {"legalHold": "ProviderEnforcedUnverified"}}}
-    marker = [{"key": "archive/x/manifest.json", "versionId": "v2", "isDeleteMarker": True,
-               "isLatest": True},
-              {"key": "archive/x/manifest.json", "versionId": "v1", "isDeleteMarker": False,
-               "isLatest": False}]
-    bad = d3.legal_hold_refusal_recorded(after_f, nxt_f, held, control, marker, True, True)
-    row("object lock: a delete marker over the held version, recorded Deleted, is REFUSED",
-        not all(bad.values())
-        and not bad["the refusal is recorded: the held point is in lastEnforcement.failed with "
-                    "code Locked"])
-    claim = json.loads(json.dumps(nxt))
-    claim["status"]["guarantees"]["legalHold"] = "LogweirEnforced"
-    row("object lock: a LogweirEnforced claim is REFUSED",
-        not all(d3.legal_hold_refusal_recorded(after, claim, held, control, kept, True,
-                                               True).values()))
+    keys = ["archive/h/manifest.json", "archive/c/manifest.json"]
+    after = {"status": {"lastEnforcement": {
+        "runId": "r1", "finishedAt": "t", "exitCode": 1, "deleted": [],
+        "failed": [{"pointId": held, "code": "VersionedBucket"},
+                   {"pointId": control, "code": "VersionedBucket"}]}}}
+    nxt = {"status": {"lastEvaluation": {"protected": [],
+                                         "candidates": [{"pointId": held},
+                                                        {"pointId": control}]}}}
+    degraded = {"status": {
+        "conditions": [{"type": "EnforcementDegraded", "status": "True",
+                        "message": "3 consecutive retention runs have failed ...: exit 1, "
+                                   "VersionedBucket on 2 point(s). VersionedBucket: the bucket "
+                                   "is versioned ... Enforce on an unversioned bucket, or ..."}],
+        "guarantees": {"ageExpiry": "NotEnforced",
+                       "legalHold": "ProviderEnforcedUnverified"}}}
+    kept = [{"key": k, "versionId": "v1", "isDeleteMarker": False, "isLatest": True}
+            for k in keys]
+    fixture = {"the bucket was created with object lock, and the hold was ON before the run": True}
+
+    def rule(a=after, n=nxt, d=degraded, v=kept, f=fixture):
+        return d3.versioned_bucket_refusal_recorded(a, n, d, held, control, keys, v, f)
+
+    ok = rule()
+    row("object lock: the versioned-bucket refusal, recorded, passes", all(ok.values()), str(ok))
+
+    def refused(what, clauses):
+        row(f"object lock: {what} is REFUSED", not all(clauses.values()))
+
+    # WHAT f49849d DID (measured by harness-rows-11): the reaper's DELETE named
+    # no version, MinIO wrote delete markers and the run recorded both Deleted.
+    after_f = {"status": {"lastEnforcement": {"runId": "r1", "finishedAt": "t", "exitCode": 0,
+                                              "deleted": [held, control], "failed": []}}}
+    marker = [{"key": k, "versionId": "v2", "isDeleteMarker": True, "isLatest": True}
+              for k in keys] + [{"key": k, "versionId": "v1", "isDeleteMarker": False,
+                                 "isLatest": False} for k in keys]
+    refused("the f49849d shape (delete markers, recorded Deleted)", rule(a=after_f, v=marker))
+    # THE OLD EXPECTATION, now planted wrong: a provider refusal as `Locked`
+    # with the control deleted and the held point protected LegalHold.
+    after_old = {"status": {"lastEnforcement": {
+        "runId": "r1", "finishedAt": "t", "exitCode": 1, "deleted": [control],
+        "failed": [{"pointId": held, "code": "Locked"}]}}}
+    nxt_old = {"status": {"lastEvaluation": {"protected": [{"pointId": held,
+                                                             "reason": "LegalHold"}],
+                                             "candidates": []}}}
+    refused("the pre-flip expectation (control deleted, held Locked)", rule(a=after_old))
+    refused("a LegalHold protection on the next evaluation", rule(n=nxt_old))
+    only_held = json.loads(json.dumps(after))
+    only_held["status"]["lastEnforcement"]["failed"] = [{"pointId": held,
+                                                         "code": "VersionedBucket"}]
+    refused("a refusal of the held point alone (the control not named)", rule(a=only_held))
+    exit0 = json.loads(json.dumps(after))
+    exit0["status"]["lastEnforcement"]["exitCode"] = 0
+    refused("an exit 0", rule(a=exit0))
     started = {"status": {"lastEnforcement": {"runId": "r1"}}}
-    row("object lock: a run read while still in progress (runId, no finishedAt) is REFUSED",
-        not all(d3.legal_hold_refusal_recorded(started, nxt, held, control, kept, True,
-                                               True).values()))
-    row("object lock: a bucket without object lock is REFUSED as a fixture",
-        not all(d3.legal_hold_refusal_recorded(after, nxt, held, control, kept, True,
-                                               False).values()))
+    refused("a run read while still in progress (runId, no finishedAt)", rule(a=started))
+    one_marker = kept + [{"key": keys[0], "versionId": "v3", "isDeleteMarker": True,
+                          "isLatest": False}]
+    refused("a delete marker anywhere, even a non-current one", rule(v=one_marker))
+    not_degraded = json.loads(json.dumps(degraded))
+    not_degraded["status"]["conditions"][0]["status"] = "False"
+    refused("a policy that never degraded", rule(d=not_degraded))
+    flatter = json.loads(json.dumps(degraded))
+    flatter["status"]["guarantees"]["ageExpiry"] = "LogweirEnforced"
+    refused("ageExpiry still LogweirEnforced while degraded", rule(d=flatter))
+    claim = json.loads(json.dumps(degraded))
+    claim["status"]["guarantees"]["legalHold"] = "LogweirEnforced"
+    refused("a LogweirEnforced legal-hold claim", rule(d=claim))
+    refused("a bucket without object lock or a hold that was never ON",
+            rule(f={"the bucket was created with object lock, and the hold was ON": False}))
+    refused("no versions read at all", rule(v=[]))
 
 
 def test_the_latest_version_is_the_highest_ordinal_of_its_key() -> None:

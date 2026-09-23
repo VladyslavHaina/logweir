@@ -11723,59 +11723,121 @@ def clear_lock_bucket(bucket: str) -> dict[str, Any]:
     return {"bucket": bucket, "holdsReleased": released, "removed": rb.returncode == 0}
 
 
-def legal_hold_refusal_recorded(policy_after_run: dict[str, Any], policy_next: dict[str, Any],
-                                held_point: str, control_point: str,
-                                held_versions: list[dict[str, Any]], hold_was_on: bool,
-                                lock_enabled: bool) -> dict[str, bool]:
-    """D3 §13/§16 for a provider WORM refusal, clause by clause.
+def versioned_bucket_refusal_recorded(after_run: dict[str, Any], policy_next: dict[str, Any],
+                                      policy_degraded: dict[str, Any], held_point: str,
+                                      control_point: str, keys_before: list[str],
+                                      versions_after: list[dict[str, Any]],
+                                      fixture: dict[str, bool]) -> dict[str, bool]:
+    """D3 §6.5/§16 as ctl-batch-2 amended them, clause by clause.
 
-    `held_versions` is every version under the held point's set directory
-    after the run; the held data survives when a non-delete-marker version is
-    still the LATEST one — a delete marker on top means the key is gone for
-    every reader that does not ask for versions, including Logweir.
+    FLIPPED AT lab-refresh-9 (defect OBJECT-LOCK-DELETE-MARKER, `62ef1a1`,
+    `fd17eb2`, `de14881`). harness-rows-11 wrote this row for a provider that
+    refuses a held DELETE (`Locked`, then `LegalHold` protection) and measured
+    the truth on `f49849d`: a DELETE by key on a versioned bucket is never
+    refused, it writes a delete marker, and the point was recorded `Deleted`.
+    The product's answer is not `Locked`: the enforcer now reads the version id
+    of its own create-only intent tombstone, a HEAD per key and a post-delete
+    check object, and on a versioned bucket it deletes NOTHING and names every
+    planned point `VersionedBucket` (exit 1); three such runs degrade the
+    policy with the remedy, and `ageExpiry` stops claiming `LogweirEnforced`.
+    Nothing here is `LegalHold`: the refusal is the bucket's, not the point's,
+    so the held point stays a candidate. The clauses the flip REMOVED are "the
+    control point was deleted", "code Locked" and "the next evaluation
+    protects it LegalHold" — each is now a planted-wrong twin.
+
+    `versions_after` is every version under BOTH sets after the run; a delete
+    marker anywhere is the defect this refuses. `fixture` names the arm's own
+    preconditions (lock + hold ON, or written-plain-then-Enabled).
     """
-    last = ((policy_after_run or {}).get("status") or {}).get("lastEnforcement") or {}
+    last = ((after_run or {}).get("status") or {}).get("lastEnforcement") or {}
     failed = {f.get("pointId"): f.get("code") for f in (last.get("failed") or [])}
-    deleted = set(last.get("deleted") or [])
-    ev = ((policy_next or {}).get("status") or {}).get("lastEvaluation") or {}
+    deleted = list(last.get("deleted") or [])
+    nxt = (policy_next or {}).get("status") or {}
+    ev = nxt.get("lastEvaluation") or {}
     protected = {p.get("pointId"): p.get("reason") for p in (ev.get("protected") or [])}
-    guarantees = ((policy_next or {}).get("status") or {}).get("guarantees") or {}
-    latest = [v for v in held_versions if v.get("isLatest")]
-    return {
-        "the bucket was created with object lock, and the hold was ON before the run":
-            lock_enabled and hold_was_on,
+    candidates = {c.get("pointId") for c in (ev.get("candidates") or [])}
+    deg = (policy_degraded or {}).get("status") or {}
+    degraded = next((c for c in (deg.get("conditions") or [])
+                     if c.get("type") == "EnforcementDegraded"), {})
+    message = str(degraded.get("message") or "")
+    guarantees = deg.get("guarantees") or {}
+    latest_live = {v["key"] for v in versions_after
+                   if v.get("isLatest") and not v.get("isDeleteMarker")}
+    clauses = dict(fixture)
+    clauses.update({
         "an enforcement run of the controller's own finished":
             bool(last.get("runId")) and bool(last.get("finishedAt")),
-        f"the control point {control_point} (no hold) was deleted by it":
-            control_point in deleted,
-        "the provider refused the held point: its objects are still the LATEST versions":
-            bool(latest) and not any(v.get("isDeleteMarker") for v in latest),
-        "the refusal is recorded: the held point is in lastEnforcement.failed with code Locked":
-            failed.get(held_point) == "Locked" and held_point not in deleted,
-        "the next evaluation protects it with reason LegalHold (excluded from the plan)":
-            protected.get(held_point) == "LegalHold"
-            and held_point not in {c.get("pointId") for c in (ev.get("candidates") or [])},
+        "the run exited 1 (a refusal, not a guard exit 3 and not a success)":
+            last.get("exitCode") == 1,
+        "it recorded NOTHING deleted (lastEnforcement.deleted is empty)": not deleted,
+        f"the held point {held_point} is in lastEnforcement.failed with code VersionedBucket":
+            failed.get(held_point) == "VersionedBucket",
+        f"and so is the control point {control_point} (no hold): the refusal is the bucket's":
+            failed.get(control_point) == "VersionedBucket",
+        "no delete marker was written anywhere under either set":
+            bool(versions_after) and not any(v.get("isDeleteMarker") for v in versions_after),
+        "every object of both sets is still its key's LATEST, live version":
+            bool(keys_before) and all(k in latest_live for k in keys_before),
+        "the next evaluation does NOT protect the held point LegalHold; it is still a candidate":
+            protected.get(held_point) != "LegalHold" and held_point in candidates,
+        "the policy degraded: EnforcementDegraded=True naming VersionedBucket and its remedy":
+            degraded.get("status") == "True" and "VersionedBucket" in message
+            and "unversioned bucket" in message,
+        "guarantees.ageExpiry is NotEnforced while degraded (never LogweirEnforced)":
+            guarantees.get("ageExpiry") == "NotEnforced",
         "guarantees.legalHold is ProviderEnforcedUnverified":
             guarantees.get("legalHold") == "ProviderEnforcedUnverified",
         "and nothing claims LogweirEnforced for it": guarantees.get("legalHold") != "LogweirEnforced",
-    }
+    })
+    return clauses
 
 
-def object_lock() -> None:
-    """PLAT-16.2's provider object-lock half, through the controller's own Job."""
+def degraded_policy(name: str, seconds: int = 900) -> dict[str, Any] | None:
+    """The policy once `EnforcementDegraded=True` (three failed runs) AND an
+    evaluation has published the guarantees after it, or None.
+
+    The guarantees are written by the EVALUATION pass, the condition by the
+    harvest, so the two land on different passes; the second wait is for the
+    thing under test (`ageExpiry` NotEnforced) and a timeout returns what was
+    there, which the clause then refuses with the object in the artifact.
+    """
+    degraded = settle("retentionpolicy", name,
+                      lambda o: any(c.get("type") == "EnforcementDegraded"
+                                    and c.get("status") == "True"
+                                    for c in ((o.get("status") or {}).get("conditions") or [])),
+                      seconds=seconds, what="EnforcementDegraded=True")
+    if degraded is None:
+        return None
+    return settle("retentionpolicy", name,
+                  lambda o: (((o.get("status") or {}).get("guarantees") or {})
+                             .get("ageExpiry")) == "NotEnforced",
+                  seconds=300, what="guarantees.ageExpiry NotEnforced after degradation") or \
+        get("retentionpolicy", name)
+
+
+def versioned_arm(*, row_id: str, bucket: str, dest: str, catalog: str, policy: str,
+                  points_names: tuple[str, ...], user: str, user_policy: str, secret: str,
+                  with_lock: bool, tag: str) -> None:
+    """One arm of the versioned-bucket refusal, through the controller's own Job.
+
+    `with_lock`: the bucket is created `--with-lock` (versioning on from the
+    start) and the oldest point is legally held. Otherwise the bucket is
+    created PLAIN, the three sets are written into it, and only then is
+    versioning enabled (ctl-batch-2's H1 shape: every object predates
+    versioning, so a HEAD alone says `null`; the intent tombstone's version id
+    is what tells the enforcer).
+    """
     evidence: list[str] = []
     created_bucket = False
     minted_user = False
     try:
-        mb = run(KN + ["exec", MC_POD, "--", "mc", "mb", "--with-lock", f"local/{BUCKET_LOCK}"],
-                 check=False, timeout=120)
+        mb_args = ["mc", "mb"] + (["--with-lock"] if with_lock else []) + [f"local/{bucket}"]
+        mb = run(KN + ["exec", MC_POD, "--"] + mb_args, check=False, timeout=120)
         created_bucket = mb.returncode == 0
         STATE.setdefault("buckets", [])
-        if created_bucket and BUCKET_LOCK not in STATE["buckets"]:
-            STATE["buckets"].append(BUCKET_LOCK)
+        if created_bucket and bucket not in STATE["buckets"]:
+            STATE["buckets"].append(bucket)
             save()
-        versioning = mc_json("version", "info", f"local/{BUCKET_LOCK}")
-        lock_config = mc_json("retention", "info", "--default", f"local/{BUCKET_LOCK}")
         admin = run(KN + ["exec", MC_POD, "--", "mc", "admin", "info", "adm", "--json"],
                     check=False, timeout=120).stdout
         server = {}
@@ -11785,80 +11847,112 @@ def object_lock() -> None:
         except json.JSONDecodeError:
             pass
         if not created_bucket:
-            record("retention-object-lock-provider-refusal-is-recorded", "PLAT-16.2", "NOT-RUN",
-                   f"the lab MinIO refused `mc mb --with-lock`: rc={mb.returncode} "
-                   f"{redact((mb.stdout + mb.stderr)[-400:])!r} — this provider cannot hold "
-                   f"an object lock, so the provider half cannot be observed here",
-                   [artifact("lock/00-provider.json", {"mb": mb.returncode, "server": server})])
+            record(row_id, "PLAT-16.2", "NOT-RUN",
+                   f"the lab MinIO refused `{' '.join(mb_args)}`: rc={mb.returncode} "
+                   f"{redact((mb.stdout + mb.stderr)[-400:])!r}",
+                   [artifact(f"{tag}/00-provider.json", {"mb": mb.returncode, "server": server})])
             return
-        semantics = provider_lock_semantics(BUCKET_LOCK)
-        evidence.append(artifact("lock/00-provider.json", {
-            "bucket": BUCKET_LOCK, "versioning": versioning, "lockConfig": lock_config,
+        semantics = provider_lock_semantics(bucket) if with_lock else {}
+        versioning_at_create = mc_json("version", "info", f"local/{bucket}")
+        evidence.append(artifact(f"{tag}/00-provider.json", {
+            "bucket": bucket, "withLock": with_lock, "versioningAtCreate": versioning_at_create,
+            "lockConfig": mc_json("retention", "info", "--default", f"local/{bucket}")
+            if with_lock else None,
             "server": server, "semantics": semantics}))
-        lock_enabled = any(str(v.get("versioning", {}).get("status", "")).lower() == "enabled"
-                           or "enabled" in json.dumps(v).lower() for v in versioning)
 
-        apply(destination(LOCK_DEST, BUCKET_LOCK))
-        wait_for("backupdestination", LOCK_DEST,
+        apply(destination(dest, bucket))
+        wait_for("backupdestination", dest,
                  lambda o: condition(o, "Valid").get("status") == "True",
                  seconds=180, what="Valid=True")
         points = []
         # FRESH EVERY RUN: the bucket is new, so a Backup CR left by an earlier
         # run names a set that is not in it.
-        for name in LOCK_POINTS:
+        for name in points_names:
             if get_opt("backup", name) is not None:
                 run(KN + ["delete", "backup", name, "--wait=true"])
-            points.append(backup_facts(run_backup(name, LOCK_DEST, TOPICS[:1])))
-        catalog = fresh_catalog(LOCK_CATALOG, LOCK_DEST)
-        entries = view_entries(catalog)
+            points.append(backup_facts(run_backup(name, dest, TOPICS[:1])))
+        enable = None
+        if not with_lock:
+            # THE H1 SHAPE: everything above was written unversioned.
+            enable = run(KN + ["exec", MC_POD, "--", "mc", "version", "enable",
+                               f"local/{bucket}"], check=False, timeout=120)
+        versioning = mc_json("version", "info", f"local/{bucket}")
+        versioning_on = any("enabled" in json.dumps(v).lower() for v in versioning)
+        catalog_obj = fresh_catalog(catalog, dest)
+        entries = view_entries(catalog_obj)
         ordered = sorted(entries, key=lambda e: e.get("recoveryPointAtMs") or 0)
-        evidence.append(artifact("lock/01-points.json", {"backups": points, "view": entries}))
+        evidence.append(artifact(f"{tag}/01-points.json", {
+            "backups": points, "view": entries, "versioning": versioning,
+            "enable": None if enable is None else {"rc": enable.returncode,
+                                                   "out": (enable.stdout + enable.stderr)[-300:]}}))
         if len(ordered) < 3:
-            record("retention-object-lock-provider-refusal-is-recorded", "PLAT-16.2", "NOT-RUN",
-                   f"the lock bucket's view holds {len(ordered)} point(s), not the three the "
+            record(row_id, "PLAT-16.2", "NOT-RUN",
+                   f"the bucket's view holds {len(ordered)} point(s), not the three the "
                    f"fixture needs", evidence)
             return
         held, control = ordered[0], ordered[1]
         held_set = f"{DEST_PREFIX}/{held['backupId']}/"
-        # ONE OBJECT AT A TIME: `mc legalhold set|info --recursive --json` print
-        # nothing on the lab's `mc`, so a recursive call is a claim nobody reads.
-        held_keys = [o["key"] for o in objects(BUCKET_LOCK, held_set)]
-        hold = [mc_json("legalhold", "set", f"local/{BUCKET_LOCK}/{key}") for key in held_keys]
-        hold_info = [row for key in held_keys
-                     for row in mc_json("legalhold", "info", f"local/{BUCKET_LOCK}/{key}")]
-        hold_was_on = bool(held_keys) and len(hold_info) == len(held_keys) and all(
-            r.get("legalhold") == "ON" for r in hold_info)
-        versions_before = versions_under(BUCKET_LOCK, held_set)
-        evidence.append(artifact("lock/02-hold.json", {
+        control_set = f"{DEST_PREFIX}/{control['backupId']}/"
+        held_keys = [o["key"] for o in objects(bucket, held_set)]
+        control_keys = [o["key"] for o in objects(bucket, control_set)]
+        fixture: dict[str, bool] = {}
+        if with_lock:
+            # ONE OBJECT AT A TIME: `mc legalhold set|info --recursive --json`
+            # print nothing on the lab's `mc`, so a recursive call is a claim
+            # nobody reads.
+            hold = [mc_json("legalhold", "set", f"local/{bucket}/{key}") for key in held_keys]
+            hold_info = [r for key in held_keys
+                         for r in mc_json("legalhold", "info", f"local/{bucket}/{key}")]
+            hold_was_on = bool(held_keys) and len(hold_info) == len(held_keys) and all(
+                r.get("legalhold") == "ON" for r in hold_info)
+            fixture["the bucket was created with object lock, and the hold was ON before the run"] = \
+                versioning_on and hold_was_on
+        else:
+            hold, hold_info = [], []
+            before_v = versions_under(bucket, held_set) + versions_under(bucket, control_set)
+            fixture["the sets were written while the bucket was unversioned (null version ids), "
+                    "and versioning is Enabled before the run"] = (
+                versioning_on and enable is not None and enable.returncode == 0
+                and bool(before_v)
+                and all(str(v.get("versionId") or "null") == "null" for v in before_v))
+        versions_before = versions_under(bucket, held_set) + versions_under(bucket, control_set)
+        evidence.append(artifact(f"{tag}/02-fixture.json", {
             "heldPoint": held["pointId"], "heldSet": held_set, "controlPoint": control["pointId"],
-            "set": hold, "info": hold_info, "versionsBefore": versions_before}))
+            "controlSet": control_set, "holdSet": hold, "holdInfo": hold_info,
+            "versionsBefore": versions_before, "fixture": fixture}))
 
-        if get_opt("retentionpolicy", LOCK_POLICY) is not None:
-            run(KN + ["delete", "retentionpolicy", LOCK_POLICY, "--wait=true"])
-        # THE DELETE CREDENTIAL IS ITS OWN PRINCIPAL. `docs/kubernetes.md` §7f's
-        # two-credential rule: the controller refuses (`EvidenceGrantUnusable`,
-        # no Job) a policy whose delete Secret is the destination's
-        # `evidenceWrite` Secret — measured on the first run of this phase.
-        mint_minio_user(LOCK_DELETE_USER, LOCK_DELETE_POLICY,
-                        delete_only_policy(BUCKET_LOCK, DEST_PREFIX), LOCK_DELETE_SECRET)
+        if get_opt("retentionpolicy", policy) is not None:
+            run(KN + ["delete", "retentionpolicy", policy, "--wait=true"])
+        # THE DELETE CREDENTIAL IS ITS OWN PRINCIPAL (`docs/kubernetes.md` §7f's
+        # two-credential rule), and it carries `s3:GetObject`: since
+        # `62ef1a1` the enforcer HEADs every key before deleting it.
+        mint_minio_user(user, user_policy, delete_only_policy(bucket, DEST_PREFIX), secret)
         minted_user = True
         created = apply(retention_policy(
-            LOCK_POLICY, LOCK_DEST, LOCK_CATALOG, mode="Enforce",
+            policy, dest, catalog, mode="Enforce",
             rules={"keepLast": 1, "minUsablePoints": 1},
-            enforcement={"credentialSecretRef": {"name": LOCK_DELETE_SECRET},
+            enforcement={"credentialSecretRef": {"name": secret},
                          "schedule": "* * * * *", "requireApprovedPlan": False,
                          "deadlineSeconds": 300, "maxDeletionsPerRun": 10,
                          "maxObjectsPerRun": 200}))
         uid = created["metadata"]["uid"]
         # FINISHED, not started: `lastEnforcement.runId` is written when the Job
-        # is created (`Enforced=True/RunInProgress`), and a read at that
-        # instant sees no `deleted` and no `failed` — measured on the second
-        # run of this phase.
-        after_run = settle("retentionpolicy", LOCK_POLICY,
+        # is created, and a read at that instant sees no `deleted`/`failed`.
+        after_run = settle("retentionpolicy", policy,
                            lambda o: bool(((o.get("status") or {}).get("lastEnforcement") or {})
                                           .get("finishedAt")),
                            seconds=1200, what="a finished enforcement run") or \
-            get("retentionpolicy", LOCK_POLICY)
+            get("retentionpolicy", policy)
+        versions_after_first = versions_under(bucket, held_set) + versions_under(bucket, control_set)
+        refresh = sync_now(catalog, f"after-{int(time.time())}", seconds=420)
+        mark = now()
+        policy_next = settle("retentionpolicy", policy,
+                             lambda o: str(((o.get("status") or {}).get("lastEvaluation") or {})
+                                           .get("at") or "") >= mark,
+                             seconds=420, what="an evaluation after the run") or \
+            get("retentionpolicy", policy)
+        # THREE FAILED RUNS on the one-minute cadence, then the budget is spent.
+        policy_degraded = degraded_policy(policy) or get("retentionpolicy", policy)
         jobs = [j["metadata"]["name"] for j in lst("jobs")
                 if any(o.get("uid") == uid for o in (j["metadata"].get("ownerReferences") or []))]
         logs = {}
@@ -11867,56 +11961,65 @@ def object_lock() -> None:
             if pod:
                 logs[name] = redact(run(KN + ["logs", pod["metadata"]["name"]],
                                         check=False).stdout)[-6000:]
-        held_versions = versions_under(BUCKET_LOCK, held_set)
-        # THE NEXT EVALUATION, over a view refreshed after the run: that is
-        # where a refusal becomes `LegalHold` protection or a deletion becomes
-        # an absence.
-        refresh = sync_now(LOCK_CATALOG, f"after-{int(time.time())}", seconds=420)
-        mark = now()
-        policy_next = settle("retentionpolicy", LOCK_POLICY,
-                             lambda o: str(((o.get("status") or {}).get("lastEvaluation") or {})
-                                           .get("at") or "") >= mark,
-                             seconds=420, what="an evaluation after the run") or \
-            get("retentionpolicy", LOCK_POLICY)
-        # SUSPEND ENFORCEMENT before anything is read further: the cadence is
-        # one minute, and a second run would muddy "what the run did".
-        run(KN + ["delete", "retentionpolicy", LOCK_POLICY, "--wait=true"], check=False)
-        clauses = legal_hold_refusal_recorded(after_run, policy_next, held["pointId"],
-                                              control["pointId"], held_versions, hold_was_on,
-                                              lock_enabled)
+        # Every run, not only the first: no run may have written a marker.
+        versions_after = versions_under(bucket, held_set) + versions_under(bucket, control_set)
+        run(KN + ["delete", "retentionpolicy", policy, "--wait=true"], check=False)
+        clauses = versioned_bucket_refusal_recorded(
+            after_run, policy_next, policy_degraded, held["pointId"], control["pointId"],
+            held_keys + control_keys, versions_after, fixture)
         last = (after_run.get("status") or {}).get("lastEnforcement") or {}
-        evidence.append(artifact("lock/03-run.json", {
-            "policyAfterRun": after_run, "policyNext": policy_next, "jobs": jobs, "logs": logs,
-            "heldVersionsAfter": held_versions, "viewAfter": view_entries(refresh),
-            "clauses": clauses}))
-        marker_hid_it = any(v.get("isLatest") and v.get("isDeleteMarker") for v in held_versions)
-        still_stored = any(not v.get("isDeleteMarker") for v in held_versions)
+        evidence.append(artifact(f"{tag}/03-run.json", {
+            "policyAfterRun": after_run, "policyNext": policy_next,
+            "policyDegraded": policy_degraded, "jobs": jobs, "logs": logs,
+            "versionsAfterFirstRun": versions_after_first, "versionsAfter": versions_after,
+            "viewAfter": view_entries(refresh), "clauses": clauses}))
         check(
-            "retention-object-lock-provider-refusal-is-recorded",
+            row_id,
             "PLAT-16.2",
             all(clauses.values()),
-            f"bucket {BUCKET_LOCK} created --with-lock; legal hold on every object of the "
-            f"oldest point {held['pointId']} ({held_set}); the controller's Enforce run "
-            f"{last.get('runId')!r} deleted {last.get('deleted')} and failed "
-            f"{last.get('failed')}; after it the held set's LATEST versions are "
-            f"{'DELETE MARKERS' if marker_hid_it else 'the held objects'} and the held data "
-            f"{'is still stored as a non-current version' if still_stored else 'is gone'}; "
-            f"guarantees.legalHold "
-            f"{((policy_next.get('status') or {}).get('guarantees') or {}).get('legalHold')!r}. "
-            f"The provider probe: a DELETE with no version id rc="
-            f"{semantics['deleteWithoutVersionId']['rc']}, a DELETE of the held version rc="
-            f"{semantics['deleteOfTheHeldVersion']['rc']}. "
+            f"bucket {bucket} ({'--with-lock, legal hold on every object of the oldest point' if with_lock else 'written PLAIN, then versioning enabled'}); "
+            f"points held={held['pointId']} control={control['pointId']}; the controller's "
+            f"Enforce run {last.get('runId')!r} exit {last.get('exitCode')!r} deleted "
+            f"{last.get('deleted')} and failed {last.get('failed')}; "
+            f"{len(jobs)} run(s) in all; delete markers after: "
+            f"{sum(1 for v in versions_after if v.get('isDeleteMarker'))}; guarantees "
+            f"{((policy_degraded.get('status') or {}).get('guarantees') or {})}. "
             + "; ".join(f"{k}={v}" for k, v in clauses.items()),
             evidence,
         )
     finally:
         if created_bucket:
-            run(KN + ["delete", "retentionpolicy", LOCK_POLICY, "--ignore-not-found=true",
+            run(KN + ["delete", "retentionpolicy", policy, "--ignore-not-found=true",
                       "--wait=true"], check=False)
-            evidence.append(artifact("lock/99-cleanup.json", clear_lock_bucket(BUCKET_LOCK)))
+            evidence.append(artifact(f"{tag}/99-cleanup.json", clear_lock_bucket(bucket)))
         if minted_user:
-            evidence.append(artifact("lock/99-minio-user-cleanup.json",
-                                     remove_minio_user(LOCK_DELETE_USER, LOCK_DELETE_POLICY)))
+            evidence.append(artifact(f"{tag}/99-minio-user-cleanup.json",
+                                     remove_minio_user(user, user_policy)))
+
+
+BUCKET_VER = f"{OWNER}-{STAMP}-ver"
+VER_DEST = "dest-ver"
+VER_CATALOG = "ver-cat"
+VER_POLICY = "keep-ver"
+VER_POINTS = ("ver-1", "ver-2", "ver-3")
+VER_DELETE_USER = f"{OWNER_TAG}verdel"
+VER_DELETE_POLICY = f"{OWNER}-verdel"
+VER_DELETE_SECRET = f"{OWNER}-verdel-s3"
+
+
+def object_lock() -> None:
+    """PLAT-16.2's provider object-lock half, and the plain-then-versioned
+    bucket beside it, each through the controller's own Job."""
+    versioned_arm(row_id="retention-object-lock-provider-refusal-is-recorded",
+                  bucket=BUCKET_LOCK, dest=LOCK_DEST, catalog=LOCK_CATALOG, policy=LOCK_POLICY,
+                  points_names=LOCK_POINTS, user=LOCK_DELETE_USER,
+                  user_policy=LOCK_DELETE_POLICY, secret=LOCK_DELETE_SECRET,
+                  with_lock=True, tag="lock")
+    versioned_arm(row_id="retention-versioning-enabled-after-write-is-refused",
+                  bucket=BUCKET_VER, dest=VER_DEST, catalog=VER_CATALOG, policy=VER_POLICY,
+                  points_names=VER_POINTS, user=VER_DELETE_USER,
+                  user_policy=VER_DELETE_POLICY, secret=VER_DELETE_SECRET,
+                  with_lock=False, tag="ver")
 
 
 # ---------------------------------------------------------------------------
