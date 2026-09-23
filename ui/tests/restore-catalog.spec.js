@@ -190,7 +190,7 @@ async function catalogState(entry, extra) {
   );
   assert.equal(choice.state, "selected", "the fixture resolves: " + String(choice.reason));
   return initialState(NS, fixture("wizard-clusters.json"), { items: [] },
-    { catalog: "archive", point: POINT }, choice.destination, choice);
+    { catalog: "archive", point: POINT }, choice.destination, undefined, choice);
 }
 
 // --------------------------------------------------------- 1. the plan golden
@@ -504,7 +504,7 @@ test("a_legacy_archive_catalog_restores_through_its_archive_and_secret_name", as
     { items: [] }, readersOver([page([row()])], legacy), undefined);
   assert.equal(choice.state, "selected", String(choice.reason));
   const state = initialState(NS, fixture("wizard-clusters.json"), { items: [] },
-    { catalog: "archive", point: POINT }, null, choice);
+    { catalog: "archive", point: POINT }, null, undefined, choice);
   setCatalogTopics(state, ["orders"]);
   const prepared = await preparePlan(state);
   assert.match(prepared.bytes, /bucket: "old-bucket"/);
