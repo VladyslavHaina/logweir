@@ -209,21 +209,35 @@ class Lab:
 
     def load_needles(self, extra_files: list[pathlib.Path]) -> int:
         """The shared lab's Secret values and the given private-key files, read
-        into memory as exact-match sweep needles. Nothing is written."""
+        into memory as exact-match sweep needles. Nothing is written.
+
+        EVERY Secret in FIXTURE_SECRETS must yield at least one value, or this
+        raises: an unreadable Secret used to be skipped silently, and one
+        private-key file alone kept the needle count above zero, so the sweep
+        ran without the lab's exact values and still reported clean
+        (plat20-1.review.md L-1)."""
         import base64
 
         before = len(self.needles)
+        unread: list[str] = []
         for name in FIXTURE_SECRETS:
             obj = self.get_opt("secret", name, FIXTURE_NS)
-            for value in ((obj or {}).get("data") or {}).values():
+            values = [v for v in ((obj or {}).get("data") or {}).values() if isinstance(v, str) and v]
+            if not values:
+                unread.append(name)
+                continue
+            for value in values:
                 try:
                     self.needles.add(base64.b64decode(value).decode("utf-8", errors="replace"))
                 except ValueError:
-                    continue
+                    pass
                 self.needles.add(value)  # the base64 form too
         for path in extra_files:
             if path.is_file():
                 self.needles.add(path.read_text())
+        if unread:
+            raise RuntimeError(f"the credential sweep would run without the lab Secret(s) {unread} "
+                               f"in {FIXTURE_NS}: none of their values could be read")
         return len(self.needles) - before
 
 

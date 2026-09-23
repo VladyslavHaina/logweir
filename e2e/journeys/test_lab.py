@@ -107,3 +107,42 @@ def test_lab_run_goes_through_the_group_killer(tmp_path):
         handle.run([sys.executable, "-c", TOY, str(pidfile), "hang"], timeout=2)
     assert handle.commands[-1]["rc"] == "timeout"
     assert gone_within(grandchild(pidfile))
+
+
+# --- plat20-1.review.md L-1: every lab Secret must load ------------------------
+
+
+class _Stub(lab.Lab):
+    def __init__(self, tmp: pathlib.Path, readable: set[str]):
+        super().__init__(tmp, "owner", lab.Needles(), tmp)
+        self.readable = readable
+
+    def get_opt(self, kind, name, ns=None):  # noqa: D401 - a stubbed kubectl read
+        if kind == "secret" and ns == lab.FIXTURE_NS and name in self.readable:
+            import base64
+            return {"data": {"value": base64.b64encode(f"{name}-exact-value-123".encode()).decode()}}
+        return None
+
+
+def test_needles_load_from_every_fixture_secret(tmp_path):
+    handle = _Stub(tmp_path, set(lab.FIXTURE_SECRETS))
+    assert handle.load_needles([]) == 2 * len(lab.FIXTURE_SECRETS)  # raw + base64 each
+    assert "logweir-s3-exact-value-123" in list(handle.needles)
+
+
+@pytest.mark.parametrize("missing", lab.FIXTURE_SECRETS)
+def test_one_unreadable_fixture_secret_fails_the_load(tmp_path, missing):
+    handle = _Stub(tmp_path, set(lab.FIXTURE_SECRETS) - {missing})
+    with pytest.raises(RuntimeError, match=missing):
+        handle.load_needles([])
+
+
+def test_negative_control_a_key_file_alone_no_longer_passes(tmp_path):
+    """The input that used to pass: no Secret readable at all, but the
+    approver key present, so the needle count was above zero."""
+    key = tmp_path / "approver.pem"
+    key.write_text("-----BEGIN " + "PRIVATE KEY-----\n" + "K" * 64 + "\n-----END X-----\n")
+    handle = _Stub(tmp_path, set())
+    with pytest.raises(RuntimeError, match="would run without"):
+        handle.load_needles([key])
+    assert len(handle.needles) > 0  # the old `loaded == 0` guard would have let this through

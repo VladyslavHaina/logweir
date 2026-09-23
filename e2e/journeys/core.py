@@ -18,6 +18,7 @@ The verdict vocabulary is deliberately small:
 from __future__ import annotations
 
 import dataclasses
+import json
 import pathlib
 import re
 import secrets
@@ -303,8 +304,13 @@ CREDENTIAL_PATTERNS = [
     # where no key=value pattern can see it — d3's first sweep missed exactly
     # that shape (e2e/k8s/d3/d3_live.py, CREDENTIAL_PATTERNS).
     re.compile(r"(?i)\b(?:admin\s+user\s+add|user\s+add)\s+\S+\s+\S+\s+(?!\[REDACTED)(\S{8,})"),
-    # A Kubernetes Secret dumped whole: `"data": {"password": "<base64>"}`.
-    re.compile(r"\"kind\"\s*:\s*\"Secret\"[^}]*\"data\"\s*:\s*\{\s*\"[^\"]+\"\s*:\s*\"[A-Za-z0-9+/=]{12,}"),
+    # A Kubernetes Secret dumped whole, whatever its keys are called. Either
+    # order: `kubectl -o json` and `Lab.write(sort_keys=True)` put `data`
+    # BEFORE `kind`, which the kind-first spelling alone never matched
+    # (plat20-1.review.md L-2); a hand-built object may put `kind` first.
+    re.compile(
+        r"\"data\"\s*:\s*\{\s*\"[^\"]+\"\s*:\s*\"[A-Za-z0-9+/=]{12,}\"[^}]*\}[^{}]*\"kind\"\s*:\s*\"Secret\""
+        r"|\"kind\"\s*:\s*\"Secret\"[^}]*\"data\"\s*:\s*\{\s*\"[^\"]+\"\s*:\s*\"[A-Za-z0-9+/=]{12,}"),
 ]
 
 
@@ -336,23 +342,53 @@ def sweep(root: pathlib.Path, needles: Needles) -> dict[str, Any]:
 SELFTEST_FILE = "sweep-selftest.tmp"
 
 
+def selftest_lines() -> list[tuple[int, str]]:
+    """One planted line per CREDENTIAL_PATTERNS entry (by index), both orders
+    of the Secret dump, assembled at run time so no source line carries a
+    credential-shaped literal."""
+    import base64
+
+    fake = base64.b64encode(secrets.token_bytes(18)).decode()
+    return [
+        (0, "-----BEGIN " + "PRIVATE KEY-----"),
+        (1, "aws_secret_access_key" + " = " + "S" * 24),
+        (2, "pass" + "word=" + "Q" * 16),
+        (3, "kubectl exec pod -- mc admin user add adm probeuser " + "P" * 20),
+        # kubectl's own order (data before kind), under a key that is not `password`
+        (4, json.dumps({"apiVersion": "v1", "data": {"secret-access-key": fake}, "kind": "Secret"},
+                       sort_keys=True)),
+        (4, json.dumps({"kind": "Secret", "data": {"token": fake}})),
+    ]
+
+
 def sweep_selftest(root: pathlib.Path, needles: Needles) -> dict[str, Any]:
     """The sweep's mutant, planted and killed in one step: a file carrying a
-    minted exact value, a positional secret and a PEM header is written, the
-    sweep must report all three, and the file is removed either way."""
+    minted exact value and one line for EVERY credential pattern (the Secret
+    dump in both key orders) is written, the sweep must report each line by
+    its own pattern and the exact value, and the file is removed either way."""
     probe = needles.mint()
-    lines = [
-        probe,
-        "kubectl exec pod -- mc admin user add adm probeuser " + "P" * 20,
-        "-----BEGIN " + "PRIVATE KEY-----",  # assembled: no source line carries the armour
-    ]
+    planted = selftest_lines()
+    lines = [probe] + [text for _, text in planted]
     path = root / SELFTEST_FILE
     path.write_text("\n".join(lines) + "\n")
+    starts, at = [], 0
+    for line in lines:
+        starts.append(at)
+        at += len(line) + 1
     try:
-        found = {h["pattern"] for h in sweep(root, needles)["hits"] if h["file"] == SELFTEST_FILE}
+        hits = [h for h in sweep(root, needles)["hits"] if h["file"] == SELFTEST_FILE]
     finally:
         path.unlink(missing_ok=True)
         needles.discard(probe)
-    if "<exact value>" not in found or len(found) < 3:
-        raise RuntimeError(f"the credential sweep cannot fail: the planted probe produced {found}")
-    return {"planted": 3, "found": len(found), "killed": True}
+    names = [p.pattern[:60] for p in CREDENTIAL_PATTERNS]
+
+    def line_of(offset: int) -> int:
+        return max(i for i, s in enumerate(starts) if s <= offset)
+
+    found = {(h["pattern"], line_of(h["at"])) for h in hits}
+    missed = [] if ("<exact value>", 0) in found else ["<exact value>"]
+    missed += [f"pattern {index} on line {n}" for n, (index, _) in enumerate(planted, start=1)
+               if (names[index], n) not in found]
+    if missed:
+        raise RuntimeError(f"the credential sweep cannot fail: the planted probe missed {missed}")
+    return {"planted": len(lines), "found": len(found), "patterns": len(CREDENTIAL_PATTERNS), "killed": True}

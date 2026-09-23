@@ -114,7 +114,10 @@ class Runner:
         approver = keys / "approver.pem"
         if not approver.is_file():
             raise SystemExit(f"the lab approver private key is absent: {approver}")
-        loaded = self.lab.load_needles([approver, keys / "signing.pem"])
+        try:
+            loaded = self.lab.load_needles([approver, keys / "signing.pem"])
+        except RuntimeError as exc:
+            raise SystemExit(str(exc)) from None
         if loaded == 0:
             raise SystemExit("no credential value was loaded: the sweep would search for nothing")
         return {"context": "docker-desktop", "stamp": self.stamp, "revision": self._git("rev-parse", "HEAD"),

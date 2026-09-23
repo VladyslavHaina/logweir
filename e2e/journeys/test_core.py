@@ -214,6 +214,44 @@ def test_sweep_selftest_fails_when_the_sweep_is_blind(tmp_path, monkeypatch):
     assert not (tmp_path / core.SELFTEST_FILE).exists()
 
 
+@pytest.mark.parametrize("blind", range(len(core.CREDENTIAL_PATTERNS)))
+def test_sweep_selftest_fails_when_any_one_pattern_is_blind(tmp_path, monkeypatch, blind):
+    """plat20-1.review.md L-2: the self-test planted three of the five
+    patterns, so blinding `password=` or the Secret dump survived. Each
+    pattern, blinded alone, must now make the self-test raise."""
+    never = __import__("re").compile(r"(?!x)x")
+    patterns = list(core.CREDENTIAL_PATTERNS)
+    patterns[blind] = never
+    monkeypatch.setattr(core, "CREDENTIAL_PATTERNS", patterns)
+    with pytest.raises(RuntimeError, match="cannot fail"):
+        core.sweep_selftest(tmp_path, Needles())
+
+
+def test_the_selftest_plants_one_line_for_every_pattern():
+    assert {i for i, _ in core.selftest_lines()} == set(range(len(core.CREDENTIAL_PATTERNS)))
+
+
+def test_a_secret_dumped_in_kubectl_key_order_is_found_under_any_key(tmp_path):
+    """kubectl -o json and Lab.write(sort_keys=True) put `data` before `kind`;
+    the kind-first pattern alone found nothing there (the negative control:
+    the pre-fix pattern, run over the same file, finds 0)."""
+    import base64
+    import re
+    doc = json.dumps({"apiVersion": "v1", "data": {"secret-access-key": base64.b64encode(b"x" * 30).decode()},
+                      "kind": "Secret", "metadata": {"name": "logweir-s3"}, "type": "Opaque"},
+                     indent=4, sort_keys=True)
+    (tmp_path / "secret.json").write_text(doc)
+    hits = core.sweep(tmp_path, Needles())["hits"]
+    assert [h["pattern"] for h in hits] == [core.CREDENTIAL_PATTERNS[4].pattern[:60]]
+    pre_fix = re.compile(r"\"kind\"\s*:\s*\"Secret\"[^}]*\"data\"\s*:\s*\{\s*\"[^\"]+\"\s*:\s*\"[A-Za-z0-9+/=]{12,}")
+    assert not pre_fix.search(doc)
+    # and a redacted dump, or a ConfigMap's data, is not a hit
+    (tmp_path / "secret.json").write_text(doc.replace(base64.b64encode(b"x" * 30).decode(), "[REDACTED]"))
+    (tmp_path / "cm.json").write_text(json.dumps({"data": {"policy.yaml": "a" * 40}, "kind": "ConfigMap"},
+                                                 sort_keys=True))
+    assert core.sweep(tmp_path, Needles())["hits"] == []
+
+
 def test_private_needles_take_secret_stores_and_keys_but_never_state(tmp_path):
     """Planted: a state file full of ordinary strings, a credential store and a
     private key. Only the last two may become needles (the first cut took the
