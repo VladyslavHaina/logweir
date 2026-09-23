@@ -164,6 +164,15 @@ pub struct Store {
     /// this flag never widens or bypasses that guard, it only ever adds an
     /// earlier, unconditional refusal in front of it.
     read_only: bool,
+    /// TEST DOUBLE ONLY — true for [`Store::in_memory_ignoring_conditional_put`]
+    /// and NEVER set by a production constructor. It models an S3-compatible
+    /// store that accepts `If-None-Match: *` and overwrites anyway: a
+    /// create-only put over an existing key SUCCEEDS and reports
+    /// `create_only_enforced: true`, because that is what such a store tells
+    /// its client. `object_store` has no way to see it, and the backup
+    /// runner's execution claim (RECEIPT-DUP) must fail closed on it, so the
+    /// runner's rows need a store that lies the way that one does.
+    ignores_create_mode: bool,
 }
 
 impl Store {
@@ -262,6 +271,7 @@ impl Store {
             conditional_put: true,
             rt,
             read_only: false,
+            ignores_create_mode: false,
         })
     }
 
@@ -287,6 +297,7 @@ impl Store {
             conditional_put: true,
             rt,
             read_only: true,
+            ignores_create_mode: false,
         })
     }
 
@@ -305,6 +316,7 @@ impl Store {
             conditional_put: true,
             rt,
             read_only: false,
+            ignores_create_mode: false,
         })
     }
 
@@ -325,6 +337,7 @@ impl Store {
             conditional_put: true,
             rt,
             read_only: true,
+            ignores_create_mode: false,
         })
     }
 
@@ -518,12 +531,26 @@ impl Store {
             conditional_put: true,
             rt: Self::new_rt(),
             read_only: false,
+            ignores_create_mode: false,
         }
     }
 
     pub fn in_memory_without_conditional_put(prefix: &str) -> Self {
         Self {
             conditional_put: false,
+            ..Self::in_memory(prefix)
+        }
+    }
+
+    /// A TEST DOUBLE of an S3-compatible store that ACCEPTS `If-None-Match: *`
+    /// and overwrites anyway (RECEIPT-DUP): every create-only put succeeds,
+    /// replaces what is there, and reports `create_only_enforced: true` —
+    /// exactly what such a store's answer looks like to `object_store`. No
+    /// production path builds it.
+    #[doc(hidden)]
+    pub fn in_memory_ignoring_conditional_put(prefix: &str) -> Self {
+        Self {
+            ignores_create_mode: true,
             ..Self::in_memory(prefix)
         }
     }
@@ -1018,6 +1045,18 @@ impl Store {
         rt.block_on(async {
             let p = OPath::from(key);
             let payload = object_store::PutPayload::from(bytes.to_vec());
+            if self.ignores_create_mode {
+                // The test double's lie: see `ignores_create_mode`.
+                let r = self
+                    .inner
+                    .put(&p, payload)
+                    .await
+                    .map_err(|e| StoreError::Io(e.to_string()))?;
+                return Ok(PutOutcome {
+                    version_id: r.version,
+                    create_only_enforced: true,
+                });
+            }
             if self.conditional_put {
                 let opts = PutOptions {
                     mode: PutMode::Create,
