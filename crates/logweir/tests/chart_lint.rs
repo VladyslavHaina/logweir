@@ -2309,6 +2309,394 @@ fn chart_lint_the_console_principal_holds_exactly_what_the_sealed_adapter_spends
         }
     }
 }
+// ======================= WHAT AN ACCOUNT CAN REACH, DERIVED FROM THE BINDINGS
+//
+// trust-stale review LOW-1 and LOW-2. Every RBAC row above FINDS a role or a
+// binding BY NAME and reads its rules or its `subjects[0]`. That shape has two
+// holes, and the reviewer planted a mutant through each:
+//
+// * **E** — `<release>-api-trustroster`'s binding gains a second subject,
+//   `Group system:authenticated`. `subjects[0]` is still the API account, so
+//   every row passed, and every authenticated principal in the cluster could
+//   read the roster. (`-trustpolicies`' binding had no subject row at all.)
+// * **F** — a NEW ClusterRole, under a name no row knows, granting `list` on
+//   `trustrosters`, bound to the API account by a new ClusterRoleBinding. No
+//   row looks up a role it does not already know the name of, so every gate
+//   passed and the account could list every roster's key material.
+//
+// So the rows below start from the BINDINGS, not from the roles. For every
+// rendered variant, every RoleBinding and ClusterRoleBinding whose subjects
+// REACH an account — the account itself, its `system:serviceaccount:` user
+// name, or a group it is a member of — must name that account and nobody
+// else; and the union of every rule so reached, per scope, must equal a pinned
+// allowlist. A new role under any name, a wildcard, a `resourceNames` dropped
+// or a binding in an unconfigured namespace all change that union.
+
+/// The namespace every checked-in render is made with (`check-chart.sh`'s
+/// `-n logweir-system`).
+const RENDER_NAMESPACE: &str = "logweir-system";
+
+/// The console account's grants in EACH namespace it is bound in, as
+/// `verb group/resource[@name]` (core is `core`). The sealed adapter's pairs:
+/// `chart_lint_the_console_principal_holds_exactly_what_the_sealed_adapter_spends`
+/// derives them from `kube.rs`; this list pins what is REACHABLE.
+const API_NAMESPACED_GRANTS: [&str; 39] = [
+    "get logweir.dev/approvals",
+    "list logweir.dev/approvals",
+    "create logweir.dev/approvals",
+    "get logweir.dev/backupdestinations",
+    "list logweir.dev/backupdestinations",
+    "create logweir.dev/backupdestinations",
+    "patch logweir.dev/backupdestinations",
+    "get logweir.dev/backups",
+    "list logweir.dev/backups",
+    "create logweir.dev/backups",
+    "get logweir.dev/backupschedules",
+    "list logweir.dev/backupschedules",
+    "create logweir.dev/backupschedules",
+    "patch logweir.dev/backupschedules",
+    "get logweir.dev/kafkaclusters",
+    "list logweir.dev/kafkaclusters",
+    "create logweir.dev/kafkaclusters",
+    "get logweir.dev/preflights",
+    "list logweir.dev/preflights",
+    "create logweir.dev/preflights",
+    "patch logweir.dev/preflights",
+    "get logweir.dev/restores",
+    "list logweir.dev/restores",
+    "create logweir.dev/restores",
+    "get logweir.dev/topicdiscoveries",
+    "list logweir.dev/topicdiscoveries",
+    "create logweir.dev/topicdiscoveries",
+    "patch logweir.dev/topicdiscoveries",
+    "get logweir.dev/protectionpolicies",
+    "list logweir.dev/protectionpolicies",
+    "get logweir.dev/recoverycatalogs",
+    "list logweir.dev/recoverycatalogs",
+    "create logweir.dev/recoverycatalogs",
+    "get logweir.dev/rehearsalschedules",
+    "list logweir.dev/rehearsalschedules",
+    "get logweir.dev/retentionpolicies",
+    "list logweir.dev/retentionpolicies",
+    "get core/configmaps",
+    "create core/secrets",
+];
+
+/// The console account's CLUSTER-WIDE grants: `TrustPolicy` read-only, and
+/// the ONE roster by name (PREFLIGHT-TRUSTROSTER-STALE) — never a `list` of
+/// rosters, which would be every roster's key material.
+const API_CLUSTER_GRANTS: [&str; 3] = [
+    "get logweir.dev/trustpolicies",
+    "list logweir.dev/trustpolicies",
+    "get logweir.dev/trustrosters@default",
+];
+
+/// The controller's CLUSTER-WIDE grants when `controller.watchNamespaces` is
+/// set (D0 stage 5): the two cluster-scoped trust kinds and nothing
+/// namespaced. `chart_lint_the_shared_console_is_outside_the_controllers_job_authority`
+/// explains each.
+const CONTROLLER_SCOPED_CLUSTER_GRANTS: [&str; 7] = [
+    "get logweir.dev/trustrosters",
+    "list logweir.dev/trustrosters",
+    "watch logweir.dev/trustrosters",
+    "patch logweir.dev/trustrosters/status",
+    "list logweir.dev/trustpolicies",
+    "watch logweir.dev/trustpolicies",
+    "patch logweir.dev/trustpolicies/status",
+];
+
+/// Does this binding subject include `system:serviceaccount:<ns>:<sa>`? A
+/// ServiceAccount by name, the account's user name, and the three groups every
+/// ServiceAccount token carries. An unknown subject kind is assumed to reach,
+/// so it is checked rather than skipped.
+fn subject_reaches(subject: &Value, ns: &str, sa: &str) -> bool {
+    let name = subject["name"].as_str().unwrap_or_default();
+    match subject["kind"].as_str().unwrap_or_default() {
+        "ServiceAccount" => name == sa && subject["namespace"].as_str() == Some(ns),
+        "User" => name == format!("system:serviceaccount:{ns}:{sa}"),
+        "Group" => {
+            name == "system:authenticated"
+                || name == "system:serviceaccounts"
+                || name == format!("system:serviceaccounts:{ns}")
+        }
+        _ => true,
+    }
+}
+
+/// A Role's or ClusterRole's rules flattened to `verb group/resource[@name]`
+/// atoms, one per combination — so two rules that grant the same thing compare
+/// equal, and a wildcard or a dropped `resourceNames` is a different atom.
+fn grant_atoms(role: &Doc) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    if role.value.get("aggregationRule").is_some() {
+        out.insert(format!(
+            "<aggregationRule on {}: its rules are whatever the cluster aggregates>",
+            role.name()
+        ));
+    }
+    let strings = |r: &Value, k: &str| -> Vec<String> {
+        r[k].as_sequence()
+            .map(|s| {
+                s.iter()
+                    .map(|v| v.as_str().expect("an RBAC string").to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    for rule in role.value["rules"].as_sequence().into_iter().flatten() {
+        let verbs = strings(rule, "verbs");
+        for url in strings(rule, "nonResourceURLs") {
+            for verb in &verbs {
+                out.insert(format!("{verb} nonResourceURL:{url}"));
+            }
+        }
+        let names = strings(rule, "resourceNames");
+        for group in strings(rule, "apiGroups") {
+            let group = if group.is_empty() {
+                "core".to_string()
+            } else {
+                group
+            };
+            for resource in strings(rule, "resources") {
+                for verb in &verbs {
+                    if names.is_empty() {
+                        out.insert(format!("{verb} {group}/{resource}"));
+                    }
+                    for name in &names {
+                        out.insert(format!("{verb} {group}/{resource}@{name}"));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Every grant `system:serviceaccount:<ns>:<sa>` holds in one render, keyed by
+/// scope (`cluster`, or the namespace a RoleBinding is in) — after refusing any
+/// binding that reaches the account and names anyone else beside it (mutant E).
+fn reachable_grants(
+    render: &str,
+    docs: &[Doc],
+    ns: &str,
+    sa: &str,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for binding in docs
+        .iter()
+        .filter(|d| d.kind == "RoleBinding" || d.kind == "ClusterRoleBinding")
+    {
+        let subjects: &[Value] = binding.value["subjects"]
+            .as_sequence()
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        if !subjects.iter().any(|s| subject_reaches(s, ns, sa)) {
+            continue;
+        }
+        let only = &subjects[0];
+        assert!(
+            subjects.len() == 1
+                && only["kind"].as_str() == Some("ServiceAccount")
+                && only["name"].as_str() == Some(sa)
+                && only["namespace"].as_str() == Some(ns),
+            "rendered/{render}.yaml: {}/{} reaches ServiceAccount {ns}/{sa}, so its subjects \
+             must be exactly that ServiceAccount and nothing else; they are {}. A second \
+             subject hands the account's whole grant to whoever it names — trust-stale review \
+             LOW-1, mutant E, was `Group system:authenticated` on the roster binding",
+            binding.kind,
+            binding.name(),
+            serde_yaml::to_string(subjects).unwrap_or_default().trim()
+        );
+        let scope = if binding.kind == "ClusterRoleBinding" {
+            "cluster".to_string()
+        } else {
+            binding.value["metadata"]["namespace"]
+                .as_str()
+                .unwrap_or_else(|| panic!("RoleBinding {} has no namespace", binding.name()))
+                .to_string()
+        };
+        let role_kind = binding.value["roleRef"]["kind"]
+            .as_str()
+            .unwrap_or_default();
+        let role_name = binding.value["roleRef"]["name"]
+            .as_str()
+            .unwrap_or_default();
+        let role = docs.iter().find(|d| {
+            d.kind == role_kind
+                && d.name() == role_name
+                && (role_kind == "ClusterRole"
+                    || d.value["metadata"]["namespace"].as_str() == Some(scope.as_str()))
+        });
+        let atoms = out.entry(scope).or_default();
+        match role {
+            Some(role) => atoms.extend(grant_atoms(role)),
+            // A role the render does not carry (`cluster-admin`, `edit`, a
+            // typo): its rules are unknowable here, so it can never equal the
+            // allowlist.
+            None => {
+                atoms.insert(format!("<unrendered {role_kind}/{role_name}>"));
+            }
+        }
+    }
+    out
+}
+
+/// An example's values (or the chart's defaults for `default`).
+fn variant_values(render: &str) -> Value {
+    let path = format!("charts/logweir/examples/{render}.values.yaml");
+    if render == "default" {
+        return Value::Null;
+    }
+    serde_yaml::from_str(&read(&path)).expect("the example values parse")
+}
+
+fn string_list(v: &Value) -> Vec<String> {
+    v.as_sequence()
+        .map(|s| {
+            s.iter()
+                .map(|x| x.as_str().expect("a string").to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `logweir.api.namespaces`, recomputed from an example's values: the release
+/// namespace, plus `api.namespaces`, or `kubernetes.namespace` when that list
+/// is empty (the chart default of both is empty).
+fn api_namespaces(values: &Value) -> BTreeSet<String> {
+    let mut want = BTreeSet::from([RENDER_NAMESPACE.to_string()]);
+    let listed = string_list(&values["api"]["namespaces"]);
+    if listed.is_empty() {
+        if let Some(fallback) = values["kubernetes"]["namespace"].as_str() {
+            if !fallback.is_empty() {
+                want.insert(fallback.to_string());
+            }
+        }
+    } else {
+        want.extend(listed);
+    }
+    want
+}
+
+fn pinned(atoms: &[&str]) -> BTreeSet<String> {
+    atoms.iter().map(|s| (*s).to_string()).collect()
+}
+
+/// `want == got`, reported as the per-scope DIFFERENCE — the whole maps are a
+/// hundred lines each and the one extra atom is what the reader needs.
+fn assert_grants(
+    render: &str,
+    account: &str,
+    want: &BTreeMap<String, BTreeSet<String>>,
+    got: &BTreeMap<String, BTreeSet<String>>,
+    why: &str,
+) {
+    let empty = BTreeSet::new();
+    let mut diff = Vec::new();
+    for scope in want.keys().chain(got.keys()).collect::<BTreeSet<_>>() {
+        let w = want.get(scope).unwrap_or(&empty);
+        let g = got.get(scope).unwrap_or(&empty);
+        for extra in g.difference(w) {
+            diff.push(format!("  + [{scope}] {extra}"));
+        }
+        for missing in w.difference(g) {
+            diff.push(format!("  - [{scope}] {missing}"));
+        }
+    }
+    assert!(
+        diff.is_empty(),
+        "rendered/{render}.yaml: what ServiceAccount {RENDER_NAMESPACE}/{account} can reach, \
+         through EVERY binding that names it, is not its pinned grant (+ reachable and not \
+         pinned, - pinned and not reachable):\n{}\n{why}",
+        diff.join("\n")
+    );
+}
+
+/// Mutants E and F, and the class they stand for: the console account and the
+/// controller account each hold, in every rendered variant, EXACTLY a pinned
+/// set of grants per scope, computed from every binding that reaches them.
+#[test]
+fn chart_lint_every_grant_reaching_the_api_and_controller_accounts_is_pinned() {
+    let renders: Vec<String> = files_under("charts/logweir/rendered")
+        .into_iter()
+        .filter_map(|p| {
+            p.strip_prefix("charts/logweir/rendered/")
+                .and_then(|f| f.strip_suffix(".yaml"))
+                .map(str::to_string)
+        })
+        .collect();
+    assert!(
+        renders.len() >= 10,
+        "only {} rendered variants were found; the walk has gone quiet: {renders:?}",
+        renders.len()
+    );
+    let controller_role = docs_in("config/rbac/role.yaml");
+    let controller_grants = grant_atoms(find(&controller_role, "ClusterRole", "weirkeeper"));
+    assert!(
+        controller_grants.len() >= 30,
+        "config/rbac/role.yaml's weirkeeper role flattened to {} grants",
+        controller_grants.len()
+    );
+    let mut api_variants = 0usize;
+    for render in &renders {
+        let docs = rendered(render);
+        let values = variant_values(render);
+
+        // THE CONSOLE ACCOUNT.
+        let mut want: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        if values["api"]["enabled"].as_bool() == Some(true) {
+            api_variants += 1;
+            want.insert("cluster".to_string(), pinned(&API_CLUSTER_GRANTS));
+            for ns in api_namespaces(&values) {
+                want.insert(ns, pinned(&API_NAMESPACED_GRANTS));
+            }
+        }
+        assert_grants(
+            render,
+            "logweir-api",
+            &want,
+            &reachable_grants(render, &docs, RENDER_NAMESPACE, "logweir-api"),
+            "A role under a name no other row looks up still lands here — trust-stale review \
+             LOW-2, mutant F, was a new ClusterRole granting `list trustrosters`. Widen \
+             API_NAMESPACED_GRANTS / API_CLUSTER_GRANTS only together with the route that \
+             spends the grant",
+        );
+
+        // THE CONTROLLER ACCOUNT. Its role is `config/rbac/role.yaml`'s,
+        // which `manifest_lint` holds call for call; this row holds what is
+        // BOUND to it to that role and nothing more.
+        let watched = string_list(&values["controller"]["watchNamespaces"]);
+        let mut want: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        if watched.is_empty() {
+            want.insert("cluster".to_string(), controller_grants.clone());
+        } else {
+            want.insert(
+                "cluster".to_string(),
+                pinned(&CONTROLLER_SCOPED_CLUSTER_GRANTS),
+            );
+            for ns in watched {
+                want.insert(ns, controller_grants.clone());
+            }
+            want.insert(
+                RENDER_NAMESPACE.to_string(),
+                pinned(&["get core/configmaps@weirkeeper-policy"]),
+            );
+        }
+        assert_grants(
+            render,
+            "weirkeeper",
+            &want,
+            &reachable_grants(render, &docs, RENDER_NAMESPACE, "weirkeeper"),
+            "The controller holds `config/rbac/role.yaml`'s weirkeeper role — cluster-wide, or \
+             per watched namespace when `controller.watchNamespaces` is set — and nothing else",
+        );
+    }
+    assert!(
+        api_variants >= 4,
+        "only {api_variants} rendered variants enable the console; the API half has gone quiet"
+    );
+}
+
 // ============================================ D0 stage 7: the console WORKLOAD
 //
 // `chart_lint_the_console_principal_holds_exactly_what_the_sealed_adapter_spends`

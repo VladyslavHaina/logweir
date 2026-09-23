@@ -736,9 +736,14 @@ not want that exposure should leave `api.enabled` off rather than assume the
 read is bounded above the grant.
 
 `./scripts/render-install.sh --check` answers the `kubectl auth can-i` question
-for every pair above, in both directions, against the checked-in render — so a
+for every pair above, in both directions, against every checked-in render — so a
 route added without its grant, or a grant added without its route, is a red
-build rather than a 403 in production.
+build rather than a 403 in production. It finds the console's roles through
+the BINDINGS that name its ServiceAccount, not by role name: a new role under
+any name bound to the account is audited like the three above, and a binding
+that names the account must name nobody else beside it (a second subject would
+hold every grant the console holds). `chart_lint` holds the same property from
+Rust for the console and for the controller account, per scope.
 
 **What an operator may write on the D3 kinds.** `logweir-operator` gains
 `create` on `protectionpolicies`, `recoverycatalogs` and `rehearsalschedules`,
