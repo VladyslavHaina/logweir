@@ -48,18 +48,21 @@ function fixture(name) {
 
 const css = readFileSync(UI + "style.css", "utf8");
 
-/** The ten semantic colour roles the token layer must name, in both schemes. */
+/** The semantic colour roles the token layer must name, in both schemes --
+ *  Clarity's own alias names (PLAT-18.2: the tokens are named after Clarity's
+ *  token set, `vmware-clarity/core` v6.17.0). */
 const SEMANTIC = [
-  "--surface",
-  "--surface-raised",
-  "--border",
-  "--text",
-  "--text-muted",
-  "--accent",
-  "--success",
-  "--warning",
-  "--danger",
-  "--info",
+  "--cds-alias-object-app-background",
+  "--cds-alias-object-container-background",
+  "--cds-alias-object-container-background-tint",
+  "--cds-alias-object-border-color",
+  "--cds-alias-typography-color-500",
+  "--cds-alias-typography-color-300",
+  "--cds-alias-typography-link-color",
+  "--cds-alias-status-info",
+  "--cds-alias-status-success",
+  "--cds-alias-status-warning",
+  "--cds-alias-status-danger",
 ];
 
 /** The first brace-balanced block that follows `opener` in `text`, from
@@ -117,11 +120,18 @@ test("the_stylesheet_defines_the_token_layer_for_light_and_dark", () => {
       "the light :root block declares " + name + "; the block was:\n" + light.body,
     );
   }
-  for (const scale of ["--font-sans", "--font-mono", "--text-base", "--space-4", "--radius-m"]) {
+  for (const scale of [
+    "--cds-global-typography-font-family",
+    "--cds-global-typography-monospace-font-family",
+    "--cds-global-typography-body-font-size",
+    "--cds-global-space-7",
+    "--cds-alias-object-border-radius-100",
+    "--cds-alias-object-shadow-100",
+  ]) {
     assert.ok(declared(light.body, scale) !== null, "the token layer carries " + scale);
   }
   assert.match(
-    declared(light.body, "--font-sans"),
+    declared(light.body, "--cds-global-typography-font-family"),
     /^-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif$/,
     "the sans stack is the system stack and nothing is fetched",
   );
@@ -151,6 +161,40 @@ test("the_stylesheet_defines_the_token_layer_for_light_and_dark", () => {
   );
 });
 
+test("every_token_the_stylesheet_reads_is_declared_in_the_light_token_layer", () => {
+  // A `var(--x)` naming a token nobody declared computes to nothing, silently:
+  // the rule falls back to its initial value and the page renders a colour or
+  // a gap no token governs. The light :root block is the complete set; the
+  // dark block only REDEFINES members of it, never adds one.
+  const light = blockAfter(css, ":root");
+  const declaredNames = new Set();
+  for (const match of light.body.matchAll(/(^|[\s;{])(--[a-z0-9-]+)\s*:/g)) {
+    declaredNames.add(match[2]);
+  }
+  assert.ok(declaredNames.size >= 150, "the light token layer declares " + declaredNames.size);
+  const read = new Set();
+  for (const match of css.matchAll(/var\((--[a-z0-9-]+)\)/g)) {
+    read.add(match[1]);
+  }
+  assert.ok(read.size >= 60, "the stylesheet reads " + read.size + " distinct tokens");
+  const missing = [...read].filter((name) => !declaredNames.has(name));
+  assert.deepEqual(missing, [], "tokens read but never declared in the light :root block");
+
+  const dark = blockAfter(blockAfter(css, "@media (prefers-color-scheme: dark)").body, ":root");
+  const added = [];
+  for (const match of dark.body.matchAll(/(^|[\s;{])(--[a-z0-9-]+)\s*:/g)) {
+    if (!declaredNames.has(match[2])) {
+      added.push(match[2]);
+    }
+  }
+  assert.deepEqual(added, [], "the dark block redefines tokens and adds none");
+  // Clarity's rule, kept: a theme redefines ALIASES; the global palette is
+  // one set of values for every theme.
+  const globalsRedefined = [...dark.body.matchAll(/(--cds-global-color-[a-z0-9-]+)\s*:/g)]
+    .map((m) => m[1]);
+  assert.deepEqual(globalsRedefined, [], "the dark theme redefines no global palette entry");
+});
+
 test("the_stylesheet_honours_reduced_motion_and_shows_focus", () => {
   const reduce = blockAfter(css, "@media (prefers-reduced-motion: reduce)");
   assert.ok(reduce !== null, "a prefers-reduced-motion: reduce block exists");
@@ -169,11 +213,18 @@ test("the_stylesheet_honours_reduced_motion_and_shows_focus", () => {
   const focus = blockAfter(css, ":focus-visible");
   assert.ok(focus !== null, "a :focus-visible rule exists");
   assert.ok(
-    /outline:\s*2px solid/.test(focus.body),
-    "and it draws a visible ring; the rule was:\n" + focus.body,
+    /outline:\s*var\(--cds-alias-object-interaction-outline-width\) solid var\(--lw-focus-color\)/
+      .test(focus.body),
+    "and it draws a visible ring from the tokens; the rule was:\n" + focus.body,
+  );
+  const tokens = blockAfter(css, ":root");
+  assert.equal(
+    declared(tokens.body, "--cds-alias-object-interaction-outline-width"),
+    "2px",
+    "and the ring is Clarity's 2px wide",
   );
   const selector = css.slice(css.lastIndexOf("\n\n", focus.start), focus.start + ":focus-visible".length);
-  for (const element of ["a", "button", "input", "select", "textarea"]) {
+  for (const element of ["a", "button", "input", "select", "textarea", "summary"]) {
     assert.ok(
       new RegExp("(^|\\s|,)" + element + ":focus-visible").test(css),
       element + ":focus-visible is covered; the first focus rule's selector list was:" + selector,
@@ -210,8 +261,8 @@ test("the_stylesheet_names_no_resource_outside_the_directory", () => {
 });
 
 test("the_tables_collapse_to_cards_below_the_breakpoint", () => {
-  const narrow = blockAfter(css, "@media (max-width: 719.98px)");
-  assert.ok(narrow !== null, "a max-width: 719.98px block exists -- the stacked-card breakpoint");
+  const narrow = blockAfter(css, "@media (max-width: 767.98px)");
+  assert.ok(narrow !== null, "a max-width: 767.98px block exists -- the stacked-card breakpoint (Clarity's sm width)");
   assert.ok(
     narrow.body.includes(".grid td::before") && narrow.body.includes("content: attr(data-label)"),
     "below it every cell shows its column caption from data-label; the block was:\n" + narrow.body,
@@ -241,14 +292,15 @@ test("the_tables_collapse_to_cards_below_the_breakpoint", () => {
 // narrow block must keep both: the value column of a stacked cell allowed to
 // shrink to nothing (`minmax(0, 1fr)`), and a fact list in one column.
 test("the_narrow_block_keeps_long_values_inside_their_cards", () => {
-  const narrow = blockAfter(css, "@media (max-width: 719.98px)");
-  assert.ok(narrow !== null, "a max-width: 719.98px block exists -- the stacked-card breakpoint");
+  const narrow = blockAfter(css, "@media (max-width: 767.98px)");
+  assert.ok(narrow !== null, "a max-width: 767.98px block exists -- the stacked-card breakpoint (Clarity's sm width)");
   // The stacked cell's own rule -- not the multi-selector one above it that
   // also ends in `.grid td {` -- is the one whose display is grid.
   const cell = blockAfter(narrow.body, ".grid td {\n    display: grid;");
   assert.ok(cell !== null, "the stacked cell rule (display: grid) exists in the narrow block");
   assert.ok(
-    /grid-template-columns:\s*minmax\(6\.5rem, 34%\) minmax\(0, 1fr\)/.test(cell.body),
+    /grid-template-columns:\s*minmax\(var\(--lw-stack-cell-label-min\), 34%\) minmax\(0, 1fr\)/
+      .test(cell.body),
     "a stacked cell's value column may shrink to nothing, so an id cannot widen the card; the rule was:\n" +
       cell.body,
   );

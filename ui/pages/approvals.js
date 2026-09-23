@@ -69,6 +69,7 @@ import {
   UNVERIFIED,
   badge,
   cell,
+  disableKeepingFocus,
   errorBox,
   esc,
   facts,
@@ -270,7 +271,8 @@ function approvalTable(collection, now) {
       cell(ageOf(meta.creationTimestamp, at)),
     ];
   });
-  return table(["SUBJECT", "VERIFIED", "APPROVER", "KEY-ID", "AGE"], rows, NO_APPROVAL_SENTENCE);
+  return table(["SUBJECT", "VERIFIED", "APPROVER", "KEY-ID", "AGE"], rows, NO_APPROVAL_SENTENCE,
+    undefined, { id: "approvals", label: "approvals" });
 }
 
 /** One approval's recorded status, with `selfAttestedRisk` rendered as a
@@ -547,7 +549,8 @@ export function renderApprovalsIndex(ns, approvals, restores, now, restoresError
   const listing = restoresError
     ? "<p class=\"note\">The Restores in this namespace could not be listed, so none can be " +
       "chosen here:</p>" + errorLine(restoresError)
-    : table(["RESTORE", "PHASE", "APPROVAL", "APPROVAL STATE", "CREATED"], rows, NO_AWAITING_SENTENCE);
+    : table(["RESTORE", "PHASE", "APPROVAL", "APPROVAL STATE", "CREATED"], rows, NO_AWAITING_SENTENCE,
+      undefined, { id: "awaiting-restores", label: "restores" });
   // A LIST THIS VIEWER MAY NOT READ IS A WARNING BESIDE THE PAGE, NOT INSTEAD
   // OF IT. An approver whose role grants `create` on approvals but not `list`
   // still has to reach a Restore's own approval page, and that page does its
@@ -764,13 +767,15 @@ export function renderApprovalForm(subject, view) {
     "<p class=\"help\">metadata.name, as this Restore's spec.approvalRef names it. Neither name " +
     "is ever edited: both specs are immutable.</p></div>" +
     "<div class=\"field\"><label for=\"approval-json\">approval.json</label>" +
-    "<input type=\"file\" id=\"approval-json-file\" name=\"approvalFile\">" +
+    "<input type=\"file\" id=\"approval-json-file\" name=\"approvalFile\" " +
+    "aria-label=\"approval.json: choose the file\">" +
     "<textarea id=\"approval-json\" name=\"approvalBytes\" rows=\"8\" autocomplete=\"off\" " +
     "spellcheck=\"false\"" + invalidAttributes("approval-json", errors.approvalBytes) + "></textarea>" +
     "<p class=\"help\">Choose the file, or paste its text. It is sent exactly as it is here.</p>" +
     fieldErrorLine("approval-json", errors.approvalBytes) + "</div>" +
     "<div class=\"field\"><label for=\"approval-sig\">approval.sig</label>" +
-    "<input type=\"file\" id=\"approval-sig-file\" name=\"sidecarFile\">" +
+    "<input type=\"file\" id=\"approval-sig-file\" name=\"sidecarFile\" " +
+    "aria-label=\"approval.sig: choose the file\">" +
     "<textarea id=\"approval-sig\" name=\"sidecarBytes\" rows=\"8\" autocomplete=\"off\" " +
     "spellcheck=\"false\"" + invalidAttributes("approval-sig", errors.sidecarBytes) + "></textarea>" +
     "<p class=\"help\">The signature sidecar the same command wrote beside it.</p>" +
@@ -1173,7 +1178,7 @@ function wireCountersign(node, view, parse, api, lifecycle) {
     }
     const body = form.querySelector("fieldset");
     if (body !== null) {
-      body.disabled = state.phase === "pending";
+      disableKeepingFocus(body, state.phase === "pending", node.querySelector("#countersign-status"));
     }
     const slot = node.querySelector("#countersign-status");
     if (slot !== null) {
@@ -1337,7 +1342,7 @@ function wire(node, view, parse, api, lifecycle) {
     }
     const body = form.querySelector("fieldset");
     if (body !== null) {
-      body.disabled = state.phase === "pending";
+      disableKeepingFocus(body, state.phase === "pending", node.querySelector("#approval-form-status"));
     }
     showStatus(state);
     if (state.phase === "failed") {

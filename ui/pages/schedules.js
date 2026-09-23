@@ -70,6 +70,7 @@ import {
   copyBlock,
   destinationVerdict,
   detailLink,
+  disableKeepingFocus,
   errorBlock,
   errorBox,
   esc,
@@ -273,6 +274,8 @@ export function renderScheduleList(input, destinations, destinationsUnavailable)
       ["NAME", "SCHEDULE", "DESTINATION", "SUSPEND", "LAST", "NEXT", "READY"],
       rows,
       NO_SCHEDULE_SENTENCE,
+      undefined,
+      { id: "schedules", label: "schedules" },
     ) +
     listFooter()
   );
@@ -1961,7 +1964,7 @@ function wireReadiness(node, ns, parse, lifecycle, api, readiness) {
       if (!active(lifecycle) || current === null || current === undefined) {
         return;
       }
-      cancel.disabled = true;
+      disableKeepingFocus(cancel, true);
       api.cancelPreflight(ns, current.id).then(
         () => repaint({}),
         () => {
@@ -2122,7 +2125,7 @@ function wireToggle(node, ns, parse, lifecycle, api, objects, toggle, remount) {
     }
     const button = toggle.querySelector("button");
     if (button !== null) {
-      button.disabled = state.phase === "pending";
+      disableKeepingFocus(button, state.phase === "pending");
     }
     for (const slot of node.querySelectorAll("[data-suspend-status]")) {
       if (slot.getAttribute("data-suspend-status") === name) {
@@ -2265,7 +2268,7 @@ function wireCreate(node, ns, parse, lifecycle, api, clusters, own) {
         repaint();
         return;
       }
-      preview.disabled = true;
+      disableKeepingFocus(preview, true);
       api.previewCadence(query, readOptions(lifecycle)).then(
         (answer) => {
           if (!active(lifecycle)) {
@@ -2300,7 +2303,7 @@ function wireCreate(node, ns, parse, lifecycle, api, clusters, own) {
         repaint();
         return;
       }
-      check.disabled = true;
+      disableKeepingFocus(check, true);
       // THE VERDICT IS BOUND TO THE REQUEST THAT PRODUCED IT (review MEDIUM-3):
       // it is shown as current only while the form still describes that
       // request, and marked stale the moment it does not.
@@ -4119,7 +4122,7 @@ function wirePolicy(node, ns, parse, lifecycle, api, object, backups, extra) {
         repaintCard(node, ns, parse, lifecycle, api, object, backups, extra);
         return;
       }
-      preview.disabled = true;
+      disableKeepingFocus(preview, true);
       api.previewCadence(query, readOptions(lifecycle)).then(
         (answer) => {
           if (!active(lifecycle)) {
@@ -4612,6 +4615,9 @@ export function renderScheduleHistory(ns, object, runs, points, catalogError, se
         "AVAILABILITY", "VERIFICATION", ""],
       rows,
       NO_HISTORY_SENTENCE,
+      undefined,
+      { id: "schedule-runs", label: "runs",
+        scope: String(ns) + "/" + String(((object || {}).metadata || {}).uid || "") },
     ) +
     "</section>"
   );
@@ -4677,6 +4683,8 @@ export function renderEarlierRuns(ns, earlier, points) {
         ];
       }),
       "",
+      undefined,
+      { id: "earlier-runs", label: "earlier runs", scope: ns },
     ) +
     "</section>"
   );

@@ -37,6 +37,7 @@
 
 import {
   ABSENT,
+  announce,
   COMPLETION_GUIDANCE,
   GREEN_TRUST_STATES,
   HISTORICAL_SUFFIX,
@@ -54,6 +55,7 @@ import {
   facts,
   phaseBadge,
   replace,
+  scorecardClaim,
   stateBadge,
   table,
   unverifiedCaption,
@@ -397,13 +399,15 @@ export const RETRY_FRESH_TARGET_SENTENCE =
 /** THE RESULT: what the RUN did. Never the evidence, which is the next block. */
 export function renderResult(v) {
   const r = v.result || {};
+  // A RESTORE'S OUTCOME IS ITS SCORECARD'S, and is the scorecard's claim until
+  // the evidence is green by the same rule the evidence section draws.
   return (
     "<section class=\"result\"><h3>Result</h3>" +
     facts([
       ["result", cell(r.status)],
       ["exit code", cell(r.exitCode)],
       ["exit reason", cell(r.exitReason)],
-      ["outcome", cell(r.outcome)],
+      ["outcome", v.kind === "restore" ? scorecardClaim(cell(r.outcome), evidenceGreen(v)) : cell(r.outcome)],
       ["last phase completed", cell(r.lastPhaseCompleted)],
     ]) +
     "<p class=\"note\">This is what the RUN recorded. Whether the document it produced verifies " +
@@ -418,6 +422,18 @@ export function renderResult(v) {
  *  Three results, three different claims (D3 section 7.4): `Invalid` is about the
  *  DOCUMENT, `NotAttempted` is about the CONTROLLER, and `Untrusted` is about
  *  the SIGNER. They are never flattened into one word here. */
+/** Whether this run's evidence is green, by the evidence section's own rule:
+ *  the API's combined trust word in console mode, `result` + `basis` in
+ *  legacy mode. */
+export function evidenceGreen(v) {
+  const console_ = v.console === true;
+  const trust = (console_ ? v.trust : ((v.evidenceVerification || {}).trust)) || {};
+  const ver = (console_ ? v.verification : v.evidenceVerification) || {};
+  return console_
+    ? GREEN_TRUST_STATES.indexOf(v.trustState) !== -1
+    : (ver.result === "Valid" && basisAllowsGreen(trust.basis));
+}
+
 export function renderEvidence(v) {
   const e = v.evidence || {};
   // TWO DOCUMENTS, TWO RULES, EACH READING WHAT ITS OWN DOCUMENT CARRIES.
@@ -527,8 +543,28 @@ export function renderTargetMode(v) {
 export function renderCompletion(v) {
   const c = v.completion || null;
   if (c === null) {
-    return "";
+    // A FINISHED RESTORE WITHOUT A COMPLETION IS SAID TO BE WITHOUT ONE, NEVER
+    // SHOWN AS ZERO. The controller copies `status.completion` only once the
+    // run's signed scorecard has verified; before that there are no counts to
+    // show, and an empty or zero row would read as "nothing was restored". A
+    // run still going has no panel at all, which is the same honesty.
+    //
+    // A RUN THAT DID NOT SUCCEED IS NOT "NOT YET" ANYTHING (review LOW-3): a
+    // failed, refused or cancelled restore will never write the counts this
+    // panel shows, and "not yet verified" would read as a pending state.
+    const finished = v.terminal === true ||
+      ["Succeeded", "Failed", "Cancelled"].indexOf(String(v.phase)) !== -1;
+    if (v.kind !== "restore" || !finished) {
+      return "";
+    }
+    const succeeded = v.phase === "Succeeded" || v.state === "succeeded";
+    return "<section class=\"completion\"><h3>What this restore produced</h3>" +
+      (succeeded
+        ? "<p class=\"note\" data-completion=\"unverified\">" + esc(COMPLETION_NOT_VERIFIED)
+        : "<p class=\"note\" data-completion=\"none\">" + esc(COMPLETION_NOT_RECORDED)) +
+      "</p></section>";
   }
+  const sampleWindow = c.sampleWindow || null;
   const topics = Array.isArray(c.newTopics) ? c.newTopics : [];
   const guidance = COMPLETION_GUIDANCE[String(v.targetMode)];
   return (
@@ -540,7 +576,14 @@ export function renderCompletion(v) {
     ) +
     facts([
       ["records expected", cell(c.recordsExpected)],
-      ["records restored", cell(c.recordsRestored)],
+      // `recordsRestored` IS `sample.records_restored`: the records READ BACK
+      // in the sampled window, not everything this restore wrote (the CRD's
+      // field description, D3 section 3.5). Labelled as what it is, with the
+      // window beside it.
+      [RECORDS_IN_WINDOW_LABEL, cell(c.recordsRestored)],
+      ["sampled window", sampleWindow === null || (!sampleWindow.start && !sampleWindow.end)
+        ? ABSENT
+        : cell(sampleWindow.start) + " to " + cell(sampleWindow.end) + " (inclusive)"],
       ["records sampled", cell(c.recordsSampled)],
       ["records sampled and matching", cell(c.recordsSampledMatching)],
       ["integrity level", cell(c.integrityLevel)],
@@ -554,6 +597,21 @@ export function renderCompletion(v) {
     "</section>"
   );
 }
+
+/** The caption of `completion.recordsRestored`, which is a count of the
+ *  SAMPLED WINDOW and never the total a restore wrote. */
+export const RECORDS_IN_WINDOW_LABEL = "records verified in the sampled window";
+
+/** What a finished restore with no `status.completion` shows instead of counts. */
+/** What a restore that did not succeed shows where the counts would be. */
+export const COMPLETION_NOT_RECORDED =
+  "No completion was recorded for this run: it did not succeed, so there are no counts of what " +
+  "it produced. Its result and its evidence are above.";
+
+export const COMPLETION_NOT_VERIFIED =
+  "Completion not yet verified: the counts of what this restore produced are copied from its " +
+  "signed scorecard only once that scorecard has verified, and it has not. Nothing here is a " +
+  "zero; there is no count to show yet.";
 
 /** The teardown a rehearsal recorded: what was deleted, and what was not. */
 export function renderTeardown(v) {
@@ -636,6 +694,19 @@ export function renderOperation(view) {
   );
 }
 
+/** What the page's live region says when an operation moves: its name, its
+ *  state (or, for a custom resource, its phase), its stage and its reason --
+ *  the facts the view shows, in one sentence. Pure, so the suite reads it. */
+export function operationAnnouncement(f, name) {
+  const facts_ = f || {};
+  const state = facts_.state || facts_.phase || "unknown";
+  return (
+    "Operation " + String(name || facts_.name || "") + ": " + String(state) +
+    (facts_.stage ? ", stage " + String(facts_.stage) : "") +
+    (facts_.reason ? " (" + String(facts_.reason) + ")" : "") + "."
+  );
+}
+
 // --------------------------------------------------------------- mount half
 
 /** Reads one operation, renders it, and follows it until it settles. */
@@ -676,6 +747,7 @@ export async function mountOperation(node, ns, params, parse, deps, lifecycle) {
         view.document = null;
       } else {
         view.document = document;
+        announce(operationAnnouncement(operationFacts(document, console_), view.name));
       }
     }
     paint();

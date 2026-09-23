@@ -15,7 +15,7 @@
 
 import { GROUP, VERSION, path } from "./api.js";
 import { CONSOLE, applyGrants, grantedNamespaces, selectMode } from "./client.js";
-import { el, replace } from "./render.js";
+import { el, enhanceDatagrids, markScrollRegions, replace } from "./render.js";
 import { mountClusterDetail, mountClusters } from "./pages/clusters.js";
 import { mountDestinationDetail, mountDestinations } from "./pages/destinations.js";
 import { mountScheduleDetail, mountSchedules } from "./pages/schedules.js";
@@ -197,10 +197,19 @@ function parseFragment(html) {
   for (const child of Array.from(parsed.body.childNodes)) {
     nodes.push(document.importNode(child, true));
   }
+  // THE DATAGRIDS, ENHANCED HERE AND BEFORE ANY PAGE WIRES ITS CONTROLS
+  // (PLAT-18.2). A table a page declared a datagrid gains Clarity's filter,
+  // sort and pagination around the same rows (`render.js`'s
+  // `enhanceDatagrids`). It runs on the ADOPTED nodes, because `importNode`
+  // copies no listener, and before the page's own `querySelectorAll` calls,
+  // so a grid whose rows hold controls keeps every row findable.
+  for (const node of nodes) {
+    enhanceDatagrids(node);
+  }
   return nodes;
 }
 
-// THE STACKED-CARD LABELS, SET HERE AND NOT IN THE STRING. Below 720 px the
+// THE STACKED-CARD LABELS, SET HERE AND NOT IN THE STRING. Below 768 px (Clarity's `sm` width) the
 // stylesheet turns every `table.grid` row into a card and shows each cell's
 // column caption beside its value, read from the cell's `data-label`. The
 // caption is copied from the header row at adoption time, with `setAttribute`
@@ -318,7 +327,24 @@ function namespacePrompt(allowed) {
   return el("p", { class: "pending", role: "status" }, sentence);
 }
 
-function render(lifecycle, context) {
+/** FOCUS FOLLOWS A NAVIGATION (PLAT-18.2). A route change replaces the
+ *  navigation and the view, so the link a keyboard reader activated is gone
+ *  and their focus is on the document body; the next Tab would start at the
+ *  skip link again. Once the new view has rendered, focus moves to the view
+ *  slot -- the pattern a screen reader expects of a page that changed -- unless
+ *  the reader has already moved it somewhere themselves. The first render of
+ *  a page load is not a navigation and leaves focus alone. */
+function focusView(result) {
+  Promise.resolve(result).catch(() => null).then(() => {
+    const main = document.getElementById("view-slot");
+    const active = document.activeElement;
+    if (main !== null && (active === null || active === document.body)) {
+      main.focus({ preventScroll: true });
+    }
+  });
+}
+
+function render(lifecycle, context, navigated) {
   const hash = window.location.hash;
   const here = parseHash(hash, context.selected);
   const current = routeFor(here.route) || routeFor(DEFAULT_HASH);
@@ -327,17 +353,18 @@ function render(lifecycle, context) {
   if (header !== null) {
     replace(header, nav(current, here.ns, context.allowed));
   }
+  let mounted = null;
   if (main !== null) {
     if (!current.cluster && (here.ns.length === 0 || (context.allowed.length > 0 && context.allowed.indexOf(here.ns) === -1))) {
       replace(main, namespacePrompt(context.allowed));
     } else if (here.name !== "" && typeof current.detail === "function") {
       replace(main, el("p", { class: "pending", role: "status" }, "Reading " + here.name + "..."));
-      current.detail(main, here.ns, here.name, parseFragment, lifecycle);
+      mounted = current.detail(main, here.ns, here.name, parseFragment, lifecycle);
     } else if (current.cluster === true && typeof current.mount === "function") {
       // The one CLUSTER-SCOPED read in this application. It takes no
       // namespace, because the TrustRoster has none.
       replace(main, el("p", { class: "pending", role: "status" }, "Reading " + current.title + "..."));
-      current.mount(main, parseFragment, undefined, lifecycle);
+      mounted = current.mount(main, parseFragment, undefined, lifecycle);
     } else if (current.route === true && typeof current.mount === "function") {
       // THREE ROUTES CARRY AN IDENTITY IN THE HASH, and each names its own
       // extractor. The approvals page reads `subject`, `hash` and `name`; the
@@ -355,22 +382,26 @@ function render(lifecycle, context) {
       // `restoreRouteParams` are pure functions of the hash string, and the
       // suite calls both.
       replace(main, el("p", { class: "pending", role: "status" }, "Reading " + current.title + "..."));
-      current.mount(main, here.ns, current.params(hash), parseFragment, undefined, lifecycle);
+      mounted = current.mount(main, here.ns, current.params(hash), parseFragment, undefined, lifecycle);
     } else if (typeof current.mount === "function") {
       replace(main, el("p", { class: "pending", role: "status" }, "Reading " + current.title + "..."));
-      current.mount(main, here.ns, parseFragment, lifecycle);
+      mounted = current.mount(main, here.ns, parseFragment, lifecycle);
     } else {
       replace(main, view(current));
     }
   }
   document.title = "Logweir -- " + current.title;
+  if (navigated === true) {
+    focusView(mounted);
+  }
 }
 
 function boot() {
   const context = namespaceContext(document.documentElement);
   const routes = createRouteLifecycle();
   const renderCurrent = () => render(routes.begin(window.location.hash), context);
-  window.addEventListener("hashchange", renderCurrent);
+  window.addEventListener("hashchange", () =>
+    render(routes.begin(window.location.hash), context, true));
   window.addEventListener("pagehide", () => routes.dispose());
   window.addEventListener("pageshow", (event) => {
     if (event.persisted) {
@@ -390,6 +421,26 @@ function boot() {
         main.focus();
       }
     });
+  }
+
+  // A REGION THAT SCROLLS IS A REGION A KEYBOARD CAN REACH (PLAT-18.2).
+  // Whether a table or a plan block overflows is a fact of layout, so it is
+  // read after every change to the view and on every resize, once per frame.
+  const view = document.getElementById("view-slot");
+  if (view !== null) {
+    let queued = false;
+    const mark = () => {
+      if (queued) {
+        return;
+      }
+      queued = true;
+      window.requestAnimationFrame(() => {
+        queued = false;
+        markScrollRegions(view);
+      });
+    };
+    new MutationObserver(mark).observe(view, { childList: true, subtree: true });
+    window.addEventListener("resize", mark);
   }
 
   if (window.location.hash === "") {

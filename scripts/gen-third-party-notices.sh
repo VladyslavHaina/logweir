@@ -427,6 +427,43 @@ def main():
     out("| arm | entries |\n|---|---|\n")
     for arm in (ARM_LICENCE_FILE, ARM_AUTHORS, ARM_NONE, ARM_WORKSPACE):
         out("| %s | %d |\n" % (arm, tally[arm]))
+    # NOT A CARGO PACKAGE, AND STILL OWED (PLAT-18.2). The console's design
+    # tokens are VMware Clarity's names and values, copied into `ui/style.css`.
+    # `cargo metadata` cannot see a stylesheet, so this section is written
+    # here by hand, once, and regenerated with everything else.
+    out(
+        "\n## Assets copied into the console (not Cargo packages)\n\n"
+        "**VMware Clarity design tokens (vmware-clarity/core v6.17.0).** "
+        "`ui/style.css` section 1 copies the **names and values** of VMware Clarity's\n"
+        "design tokens: the global space, typography, animation and colour-palette\n"
+        "entries the console uses, and the light and dark alias mappings. Source:\n"
+        "`https://github.com/vmware-clarity/core`, tag `v6.17.0`, commit\n"
+        "`24e56ba2a337f8735873c379496eae2692679ed5` (2026-02-02), files\n"
+        "`projects/core/build/tokens.ts` (global tokens and light aliases) and\n"
+        "`projects/core/src/styles/theme.dark.scss` (dark aliases). No Clarity code,\n"
+        "font or icon is copied; the page loads nothing from Clarity at run time.\n"
+        "Licence: MIT (the repository's `LICENSE`); Clarity's fonts are OFL-1.1 and\n"
+        "are **not** used.\n\n"
+        "```text\n"
+        "MIT License\n\n"
+        "Copyright (c) 2016-2021 VMware, Inc.  All rights reserved.\n\n"
+        "Permission is hereby granted, free of charge, to any person obtaining a copy\n"
+        "of this software and associated documentation files (the \"Software\"), to deal\n"
+        "in the Software without restriction, including without limitation the rights\n"
+        "to use, copy, modify, merge, publish, distribute, sublicense, and/or sell\n"
+        "copies of the Software, and to permit persons to whom the Software is\n"
+        "furnished to do so, subject to the following conditions:\n\n"
+        "The above copyright notice and this permission notice shall be included in all\n"
+        "copies or substantial portions of the Software.\n\n"
+        "THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\n"
+        "IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\n"
+        "FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\n"
+        "AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\n"
+        "LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\n"
+        "OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\n"
+        "SOFTWARE.\n"
+        "```\n"
+    )
     out("\n## The inventory\n\n")
 
     for name, version, spdx, lines, arm in entries:

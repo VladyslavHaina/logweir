@@ -459,6 +459,20 @@ function operationStatus(summary) {
   if (summary.stateReason !== null) {
     status.reason = summary.stateReason;
   }
+  // THE LIST'S OWN VERDICT, CARRIED AND NOT DROPPED
+  // (CONSOLE-HISTORY-VALID-SHOWN-UNVERIFIED). A list item's `OperationSummary`
+  // publishes `verificationState` and `verifiedSuccess` -- the latter is the
+  // controller's own green-badge rule, computed by the API -- and no key id, no
+  // instant and no exit code. Dropping the two meant every console-mode list
+  // row read "no verification was recorded", including Valid ones. They ride
+  // under `__summary` (a projection field, like `__contract`): the custom
+  // resource has no such field, and the badge rules read it only when the
+  // object carries no recorded verification of its own.
+  status.__summary = {
+    verificationState: summary.verificationState,
+    verifiedSuccess: summary.verifiedSuccess === true,
+    terminal: summary.terminal === true,
+  };
   return status;
 }
 
@@ -508,8 +522,19 @@ const ABSENT_IN_CONSOLE = Object.freeze({
     "status.jobRef",
     "status.selection",
     "status.conditions",
+    // A LIST ITEM carries the verdict as a summary (`__summary`), not the
+    // recorded verification block or the exit: the detail view reads both from
+    // the operation route, and `mergeOperation` takes these two off the list
+    // when it supplies them.
+    "status.exitCode",
+    "status.evidence",
   ]),
-  restores: Object.freeze(["status.integrity", "status.jobRef"]),
+  restores: Object.freeze([
+    "status.integrity",
+    "status.jobRef",
+    "status.outcome",
+    "status.evidence",
+  ]),
   approvals: Object.freeze([]),
 });
 
@@ -943,6 +968,14 @@ function mergeOperation(object, operation) {
   }
   if (operation.conditions.length > 0) {
     status.conditions = operation.conditions.map(condition);
+  }
+  // WHAT THE OPERATION ROUTE SUPPLIED IS NO LONGER ABSENT.
+  const contract = object.__contract;
+  if (contract && Array.isArray(contract.absent)) {
+    const now = { "status.exitCode": status.exitCode, "status.outcome": status.outcome,
+      "status.evidence": status.evidence };
+    contract.absent = contract.absent.filter((field) =>
+      !(field in now) || now[field] === undefined);
   }
   return object;
 }

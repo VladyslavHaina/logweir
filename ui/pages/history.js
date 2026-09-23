@@ -52,6 +52,9 @@ import {
   table,
   unverifiedCaption,
   verificationScopeSentence,
+  scorecardClaim,
+  SCORECARD_CLAIM_SENTENCE,
+  summaryBadge,
 } from "../render.js";
 import { planHash } from "../plan.js";
 import { itemsOf } from "./clusters.js";
@@ -89,6 +92,9 @@ export const NO_HISTORY_SENTENCE =
  *  the case is added beside it. */
 export function restoreBadge(status) {
   const s = status || {};
+  if (((s.evidence || {}).verification) === undefined && s.__summary !== undefined) {
+    return summaryBadge(s.__summary);
+  }
   const verification = ((s.evidence || {}).verification) || {};
   const verified = validVerification(s);
   if (verified === null || s.outcome !== "pass") {
@@ -174,7 +180,9 @@ function createdAt(object) {
  *  code. Two kinds, two fields, and neither reads the other's. */
 function resultCell(object) {
   const status = (object && object.status) || {};
-  return kindOf(object) === "Backup" ? cell(status.exitCode) : cell(status.outcome);
+  return kindOf(object) === "Backup"
+    ? cell(status.exitCode)
+    : scorecardClaim(cell(status.outcome), validVerification(status) !== null);
 }
 
 /** The badge for a row, per kind. */
@@ -253,6 +261,8 @@ export function renderHistoryList(input, second, ns) {
       ["NAME", "KIND", "CREATED", "PHASE", "RESULT", "SIGNED", "OPERATION", "RESTORE"],
       rows,
       NO_HISTORY_SENTENCE,
+      undefined,
+      { id: "history", label: "runs", scope: ns },
     ) +
     listFooter()
   );
@@ -301,6 +311,10 @@ export function renderRestoreDetail(object, operation) {
   const archive = spec.sourceArchive || {};
   const newTopics = Array.isArray(status.newTopics) ? status.newTopics : [];
   const oldTopics = Array.isArray(status.oldTopics) ? status.oldTopics : [];
+  // THE SCORECARD'S FACTS ARE ITS CLAIM UNTIL IT VERIFIED -- by the same rule
+  // the verdict badge uses (`validVerification`).
+  const verified = validVerification(status) !== null;
+  const claim = (value) => scorecardClaim(cell(value), verified);
 
   return (
     "<h2>Restore " + nameOf(object) + "</h2>" +
@@ -311,17 +325,21 @@ export function renderRestoreDetail(object, operation) {
       ["exit code", cell(status.exitCode)],
       ["reason", cell(status.reason)],
       ["last phase completed", cell(status.lastPhaseCompleted)],
-      ["outcome", cell(status.outcome)],
+      ["outcome", claim(status.outcome)],
       ["target mode", cell((spec.target || {}).mode)],
       ["operation", rowOperationCell(object, (object.metadata || {}).namespace)],
       ["point in time", cell(spec.pointInTime)],
       ["backup set", cell(spec.backupSetRef)],
     ]) +
+    (verified
+      ? ""
+      : "<p class=\"caveat\" data-scorecard-claim=\"note\">" + esc(SCORECARD_CLAIM_SENTENCE) +
+        "</p>") +
     "<h3>Integrity</h3>" +
     facts([
-      ["level", cell(integrity.level)],
-      ["result", cell(integrity.result)],
-      ["partial reason", cell(integrity.partialReason)],
+      ["level", claim(integrity.level)],
+      ["result", claim(integrity.result)],
+      ["partial reason", claim(integrity.partialReason)],
     ]) +
     // HOW MUCH OF THIS RESTORE WAS ACTUALLY COMPARED, BESIDE THE RESULT AND
     // NEVER AWAY FROM IT (D3 section 2.5, section 3.5). A pass is a pass over a SAMPLE, and
@@ -333,9 +351,9 @@ export function renderRestoreDetail(object, operation) {
       ["objectives.rtoSeconds", cell(objectives.rtoSeconds)],
       ["objectives.rpoSeconds", cell(objectives.rpoSeconds)],
       ["objectives.passRate", cell(objectives.passRate)],
-      ["objectives.met", cell(objectives.met)],
-      ["measured.rtoSeconds", cell(measured.rtoSeconds)],
-      ["measured.rpoSeconds", cell(measured.rpoSeconds)],
+      ["objectives.met", claim(objectives.met)],
+      ["measured.rtoSeconds", claim(measured.rtoSeconds)],
+      ["measured.rpoSeconds", claim(measured.rpoSeconds)],
     ]) +
     "<h3>Target topic preflight</h3>" +
     facts([

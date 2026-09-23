@@ -102,6 +102,8 @@ import {
   cell,
   COMPLETION_GUIDANCE,
   copyBlock,
+  datagrid,
+  disableKeepingFocus,
   epochMs,
   errorBox,
   esc,
@@ -2176,7 +2178,11 @@ export function selectedTopics(state) {
   // A SELECTION THE FROZEN LIST DOES NOT HOLD IS KEPT, NOT DROPPED. It is what
   // `mappingProblems` refuses by name; silently discarding it would leave the
   // page submitting a different subset from the one it was showing.
-  const extra = chosen.filter((t) => frozen.indexOf(t) === -1);
+  // A SET, NOT `indexOf` IN A LOOP (PLAT-18.2): with a 2,000-topic point the
+  // quadratic scan was most of a keystroke's render time. Same membership,
+  // strict equality both ways.
+  const frozenSet = new Set(frozen);
+  const extra = chosen.filter((t) => !frozenSet.has(t));
   return inOrder.concat(extra);
 }
 
@@ -2234,7 +2240,8 @@ export function mappingProblems(state) {
       "grammar has no empty list";
     return problems;
   }
-  const stranger = chosen.find((t) => frozen.indexOf(t) === -1);
+  const frozenSet = new Set(frozen);
+  const stranger = chosen.find((t) => !frozenSet.has(t));
   if (stranger !== undefined) {
     problems.topics =
       "`" + String(stranger) + "` is not in this recovery point's frozen topic list, so this " +
@@ -2307,7 +2314,13 @@ export function renderTopicSubset(state) {
     "<p class=\"blurb\">" + esc(SUBSET_SENTENCE) + "</p>" +
     (frozen.length === 0
       ? "<p class=\"note\" id=\"no-frozen-topics\">" + esc(NO_FROZEN_TOPICS) + "</p>"
-      : "<ul class=\"topic-subset\">" + boxes + "</ul>") +
+      // A DATAGRID IN LIST FORM (PLAT-18.2): a point can freeze thousands of
+      // topics, so the boxes get Clarity's filter and pagination. Every box
+      // stays in the document -- the ones off the page are hidden, not
+      // removed -- because `refresh` reads the selection off every box.
+      : datagrid({ id: "subset-topics", label: "topics",
+        scope: String(((((s.point || {}).metadata) || {}).uid) || (s.point || {}).uid || "") },
+        "<ul class=\"topic-subset\">" + boxes + "</ul>")) +
     "<div class=\"actions\">" +
     "<button type=\"button\" id=\"select-all-topics\">Select all</button>" +
     "<button type=\"button\" id=\"select-no-topics\">Clear</button>" +
@@ -2324,7 +2337,9 @@ export function renderTopicSubset(state) {
       : "") +
     "<h4>The mapping, before you submit</h4>" +
     "<p class=\"blurb\">" + esc(MAPPING_SENTENCE) + "</p>" +
-    table(["SOURCE TOPIC", "TARGET TOPIC"], rows, "No topic is selected, so nothing is mapped.") +
+    table(["SOURCE TOPIC", "TARGET TOPIC"], rows, "No topic is selected, so nothing is mapped.",
+      undefined, { id: "topic-mapping", label: "mapped topics",
+        scope: String(((((s.point || {}).metadata) || {}).uid) || (s.point || {}).uid || "") }) +
     "<p class=\"note\" id=\"mapping-identity\">" + esc(MAPPING_RULE_SENTENCE) + "</p>"
   );
 }
@@ -5221,7 +5236,7 @@ function wireRestoreReadiness(node, state, parse, api, lifecycle, prepared) {
       if (!active(lifecycle) || current === null || current === undefined) {
         return;
       }
-      cancel.disabled = true;
+      disableKeepingFocus(cancel, true);
       api.cancelPreflight(state.ns, current.id).then(
         () => {
           if (active(lifecycle)) {
@@ -5689,7 +5704,7 @@ function wire(node, state, parse, api, lifecycle, prepared) {
     if (settled.phase === "pending") {
       const button = node.querySelector("#create-restore");
       if (button !== null) {
-        button.disabled = true;
+        disableKeepingFocus(button, true);
         button.setAttribute("aria-busy", "true");
       }
       const status = node.querySelector("#restore-submit-status");
@@ -5749,11 +5764,13 @@ function wire(node, state, parse, api, lifecycle, prepared) {
  *  carries its own haystack in `data-search`, so the filter never counts
  *  positions and never has to be told the list again.
  *
- *  `style.display` AND `hidden`, on purpose. Below 720 px the stylesheet turns
- *  every `table.grid` row into a card with `display: block`, and an author
- *  rule beats the user agent's `[hidden] { display: none }`; an inline style
- *  beats both. `hidden` is still set, because that is what an assistive
- *  technology reads. */
+ *  `hidden` AND NOTHING ELSE. Below 768 px (Clarity's `sm` width) the
+ *  stylesheet turns every `table.grid` row into a card with `display: block`,
+ *  and an author rule beats the user agent's `[hidden] { display: none }`; the
+ *  stylesheet's base section therefore restates `[hidden]` with `!important`,
+ *  so the attribute an assistive technology reads is also the one that hides
+ *  the row, and no page writes an inline style (PLAT-18.2's token lint
+ *  forbids one). */
 function wireSelector(node, state, lifecycle) {
   const search = node.querySelector("#point-search");
   if (search === null) {
@@ -5770,7 +5787,6 @@ function wireSelector(node, state, lifecycle) {
     for (const row of rows) {
       const matches = matchesQuery(row.getAttribute("data-search"), state.query);
       row.hidden = !matches;
-      row.style.display = matches ? "" : "none";
       if (matches) {
         shown += 1;
       }

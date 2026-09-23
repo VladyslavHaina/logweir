@@ -185,11 +185,12 @@ authorisation story is "the API server evaluated the viewer's RBAC".
 | `pages/operation.js` | the durable operation view: state, reason, last update, the diagnoses, the result and the evidence rendered separately, and the completion panel. |
 | `pages/protection.js` | protection health beside schedule health, the newest available recovery point with its two instants labelled apart, and the alert ledger with its delivery state. |
 | `pages/catalog.js` | the recovery catalog: the connect-archive submission, the point list with availability and verification as two columns, and the untrusted-signer panel with no one-click trust. |
-| `style.css` | the design system, in one file: tokens, light and dark, every component. System fonts; no font is fetched from anywhere. |
+| `style.css` | the design system, in one file: VMware Clarity's design language -- Clarity's token names and values, light and dark, and every component drawn to Clarity's anatomy. System fonts; no font is fetched from anywhere. See *The Clarity design language, the datagrid and focus*. |
 | `pages/index.html` | zero bytes, on purpose -- see below. |
 | `tests/api.spec.js` | the behaviour arm of the two mechanical claims, under `node --test`. |
 | `tests/pages.spec.js` | the behaviour suite over the page modules: the badge rules, the wizard, the approval form, the roster. |
-| `tests/design.spec.js` | the design system's guarantees: the token layer, both schemes, reduced motion, the focus ring, badges with words, the stepper. |
+| `tests/design.spec.js` | the design system's guarantees: the token layer (Clarity's alias names, every token read is declared, the dark theme redefines aliases only), both schemes, reduced motion, the focus ring, badges with words, the stepper. |
+| `tests/datagrid.spec.js` | **PLAT-18.2**: the datagrid's filter, sort and pagination arithmetic, the lists that declare one, the 2,000-topic subset keeping every box, and focus surviving a re-render. |
 | `tests/mutation.spec.js` | drafts, one mutation state, idempotent creates, the guided submit and the approval subject -- driven through the real mount halves over a fake node and an in-memory API. |
 | `tests/contract.spec.js` | the decoders against `schemas/logweir-api-v1.openapi.json` itself: every console fixture is an instance of the published schema, and every decoder requires exactly what the schema requires. |
 | `tests/client.spec.js` | the mode probe, the two modes' reads and writes, the idempotency key, the field-error translation and the plan round trip -- driven through the real transport with the one platform call stubbed. |
@@ -200,14 +201,17 @@ authorisation story is "the API server evaluated the viewer's RBAC".
 | `tests/restore-catalog.spec.js` | **PLAT-15.2**: the catalog-point route, the offer rule and every refusal it makes, the catalog-window offer for a run the controller could not verify, the bound plan and its golden, the readiness request, the restore body, drafts per point, and the selector, catalog-table and schedule-detail links -- each with its negative control. |
 | `tests/preview-server.js` | a development tool, never a test: serves this directory over the fixtures under `tests/fixtures/preview/`. See *Previewing with fixtures*. |
 
-**The design system** lives in `style.css` and nowhere else. It is written from
-tokens: a type scale and a spacing scale, radii and two shadows, and one
-colour system with semantic roles -- surface, surface-raised, border, text,
-text-muted, accent, success, warning, danger, info -- defined once for the
-light scheme and redefined once under `prefers-color-scheme: dark`, so every
-component reads from the same ten names in both. Every text-on-surface pair
-in both schemes measures 4.5:1 or better. Tables read as tables on a laptop
-and **stack into cards below 720 px**, each cell captioned by its column: the
+**The design system** lives in `style.css` and nowhere else. It is VMware
+Clarity's design language (PLAT-18.2): Clarity's own token names and values --
+the global space, type, animation and palette entries, and the
+`--cds-alias-object-*`, `--cds-alias-typography-*` and `--cds-alias-status-*`
+roles -- defined once for the light theme and redefined once, aliases only,
+under `prefers-color-scheme: dark`, so every component reads from the same
+names in both. No rule outside those two `:root` blocks spells a colour or a
+length, and `crates/logweir/tests/ui_lint.rs` fails the build if one does.
+Every text-on-surface pair in both themes is checked at 4.5:1 or better by
+the PLAT-18.2 live pass (axe-core's colour-contrast rule). Tables read as tables on a laptop
+and **stack into cards below 768 px** (Clarity's `sm` width), each cell captioned by its column: the
 caption is copied from the header row into `data-label` by `app.js` when it
 adopts the parsed nodes, so the page modules stay pure functions from a JSON
 object to a string. Status badges carry their state in **words and colour**,
@@ -232,6 +236,66 @@ listing for any subdirectory that has no `index.html`. An empty index is the
 whole guard. `tests/` is the one directory a local `just ui` will list, and the
 release artefact excludes it, so no test harness and no fixture is ever
 published over HTTP.
+
+## The Clarity design language, the datagrid and focus (PLAT-18.2)
+
+The console follows [VMware Clarity](https://github.com/vmware-clarity) as a
+**design language implemented in these static files**, not as a dependency:
+nothing from Clarity is loaded, imported or bundled (`@cds/core` is archived
+upstream and `ng-clarity` is Angular-only). What is taken is Clarity's token
+set -- names and values from `vmware-clarity/core` v6.17.0, commit
+`24e56ba2a337f8735873c379496eae2692679ed5`, under the MIT licence whose notice
+is in `THIRD_PARTY_NOTICES.md` -- and Clarity's component anatomy, states and
+accessibility patterns: the dark app header and a tab-strip subnav, the
+datagrid, labels, stack views, cards, alerts and app-level banners, underline
+form controls with validation beside the field, 36 px buttons, the wizard's
+steps as Clarity's timeline, and a signpost built on the native disclosure
+element. `style.css`'s header lists the four places it deliberately differs
+from Clarity and why (no web font, a 16 px base, the focus ring's colour, and
+a theme that follows `prefers-color-scheme` because the page stores nothing).
+
+**The datagrid.** A page declares a table a datagrid by passing `{id, label}`
+as `table()`'s fifth argument; the string gains one `div.datagrid` wrapper and
+nothing else. `app.js` enhances every parsed fragment before the page wires
+its controls: a labelled filter (every word must match, in any column), a sort
+button in each captioned header with `aria-sort` on its `th` (ascending,
+descending, then the page's own order; numbers as numbers, an absent `-` last
+either way), and a footer with a polite live count ("1-20 of 1000 runs."),
+Clarity's page sizes 10/20/50/100 and first/previous/next/last buttons. Rows
+off the page are detached from a read-only table and only hidden in a table
+whose rows hold controls, so a page's own `querySelectorAll` still finds and
+wires every toggle. The filter, sort and page are kept in memory per grid for
+the life of the loaded page -- a re-render keeps them, a reload starts clean,
+and nothing is written to browser storage. Declared: connections,
+destinations, schedules, a schedule's runs and earlier runs, backups, history,
+catalogs and their points, protection policies, trust keys, approvals, the
+Restores awaiting one, and the wizard's topic mapping; the wizard's topic
+subset is a list datagrid that hides, never drops, the boxes off its page.
+
+**Why pagination and not virtualisation or a framework.** Measured before
+either was chosen (`scripts/plat18-2-measure.mjs` in node,
+`scripts/plat18-2-ui-e2e.mjs` in Chromium against the live API; figures in the
+PLAT-18.2 report): the strings for 1,000 rows render in a few milliseconds, and
+what a large list costs is the browser laying out every row and, in the
+wizard, two quadratic membership scans. Pagination bounds the layout to one
+page, the scans are now Sets, and nothing else was needed.
+
+**Focus survives a re-render.** Every page re-renders by replacing its
+subtree. `replace()` now returns focus to the element with the same `id` in
+the new subtree (keeping a text field's caret), else to the same position in
+the same form, else -- when that control is gone or disabled, as a submit
+button is while its request is pending -- to that form's status region, which
+is where the outcome is announced, else to the view. A route change moves
+focus to the view once it has rendered. The PLAT-10 review's open LOW (focus
+did not return after the schedule detail re-rendered) is closed by this, and
+so is the restore wizard's loss of focus on every change.
+
+**Migration.** None for operators. Every route and deep link is unchanged
+(`#/<route>?ns=...&name=...`, the restore and approval identities in the
+hash); the shipped asset set, the offline gate and the UI image contents are
+unchanged -- no file was added under `ui/` outside `tests/`. The stacked-card
+breakpoint moved from 720 px to Clarity's `sm` width, 768 px. Rollback is the
+previous image.
 
 ## Two modes, one page
 
@@ -367,8 +431,25 @@ the adapter records what it cannot supply on every object it projects, under
 |---|---|
 | `KafkaCluster` | `status.conditions` (the reachability observation is projected; the condition list is not exposed); `spec.auth.secretRef.passwordKey` and `spec.auth.tlsCa` (connection contract v1's two references, which `ConnectionAuthView` does not carry) |
 | `BackupSchedule` | the per-manifest `status.retentionReport.skipped` entries (the API reports their **count**); `status.lastSlot`, `status.missedSlots`, `status.pendingRun` and `status.history` (D1 W7: `ScheduleStatusView` carries `policy`, `nextRuns` and `activeRuns` and stops there) |
-| `Backup` | `status.manifestSha256`, `status.jobRef`, `status.selection` and `status.conditions` (D1 W7: the run's coverage label and its `TopicsResolved` condition) |
-| `Restore` | `status.integrity`, `status.jobRef` |
+| `Backup` | `status.manifestSha256`, `status.jobRef`, `status.selection` and `status.conditions` (D1 W7: the run's coverage label and its `TopicsResolved` condition); in a LIST, also `status.exitCode` and `status.evidence` -- the detail view reads both from the operation route and takes them off the list |
+| `Restore` | `status.integrity`, `status.jobRef`; in a LIST, also `status.outcome` and `status.evidence` |
+
+**A list row's verdict in console mode.** A list item carries the API's
+`OperationSummary` -- `verificationState` and `verifiedSuccess`, the latter
+computed with the controller's own green-badge rule -- and no key id, instant
+or exit code. The adapter carries the two under `status.__summary`, and a row
+with no recorded verification block is green exactly when `verifiedSuccess`
+says so, with a caption that says the key and the instant are on the run's
+own page; every other row names its case from `verificationState`. Before
+this (CONSOLE-HISTORY-VALID-SHOWN-UNVERIFIED) every console list row read
+"no verification was recorded", Valid ones included.
+
+**A Restore's scorecard facts are its claim until it verified.** `outcome`,
+`integrity`, `objectives.met` and `measured` are copied from the run's
+scorecard whatever its verdict; wherever they are shown -- the Restore
+detail, the history list's RESULT cell, the operation view's outcome -- they
+carry an "unverified scorecard claim" label unless the verdict is green by the
+badge rule (SCORECARD-FACTS-UNVERIFIED-SHOWN).
 
 Two further differences are worth stating outright, because they are not
 absences:

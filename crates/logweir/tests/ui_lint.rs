@@ -2120,3 +2120,952 @@ fn the_live_journey_expects_the_probe_control_the_page_actually_ships() {
          is exactly how that journey came to assert nothing after the `Re-read probe` rename."
     );
 }
+
+// ------------------------------------------------ PLAT-18.2: the token layer
+//
+// THE RULE IS POSITIVE WHERE IT CAN BE (review MEDIUM-1). Tokens are defined
+// once, in `ui/style.css`'s `:root` blocks, and every page consumes them. So:
+//
+//   * a `:root` block may hold `--*` custom properties and `color-scheme`, and
+//     nothing else -- no ordinary property, no nested rule;
+//   * `:root` exists only in `ui/style.css`; every other `ui/**/*.css` is a
+//     rule file like the rest of `style.css`;
+//   * outside the token layer a value may carry a number only when it is
+//     unitless, a percentage, or one of the non-size units in
+//     [`CSS_ALLOWED_UNITS`] (every length unit, known or future, is refused),
+//     and no colour spelling at all;
+//   * a shipped `.js` or `.html` file may say the word `style` only in running
+//     prose, or in the one `href="./style.css"` link -- so no `style`
+//     attribute, no `<style>` element, no `.style` / `["style"]` write, however
+//     it is spelled or concatenated -- and may carry no presentation attribute
+//     (`fill`, `stroke`, `width`, `height`, `color`, `bgcolor`,
+//     `stop-color`) and no CSSOM write.
+
+/// The CSS named colours (CSS Color Module Level 4, section 6.1) and the CSS
+/// system colours, lower-cased. `transparent` and `currentcolor` name no colour
+/// of their own and are not here.
+const CSS_NAMED_COLOURS: [&str; 167] = [
+    "aliceblue",
+    "antiquewhite",
+    "aqua",
+    "aquamarine",
+    "azure",
+    "beige",
+    "bisque",
+    "black",
+    "blanchedalmond",
+    "blue",
+    "blueviolet",
+    "brown",
+    "burlywood",
+    "cadetblue",
+    "chartreuse",
+    "chocolate",
+    "coral",
+    "cornflowerblue",
+    "cornsilk",
+    "crimson",
+    "cyan",
+    "darkblue",
+    "darkcyan",
+    "darkgoldenrod",
+    "darkgray",
+    "darkgreen",
+    "darkgrey",
+    "darkkhaki",
+    "darkmagenta",
+    "darkolivegreen",
+    "darkorange",
+    "darkorchid",
+    "darkred",
+    "darksalmon",
+    "darkseagreen",
+    "darkslateblue",
+    "darkslategray",
+    "darkslategrey",
+    "darkturquoise",
+    "darkviolet",
+    "deeppink",
+    "deepskyblue",
+    "dimgray",
+    "dimgrey",
+    "dodgerblue",
+    "firebrick",
+    "floralwhite",
+    "forestgreen",
+    "fuchsia",
+    "gainsboro",
+    "ghostwhite",
+    "gold",
+    "goldenrod",
+    "gray",
+    "green",
+    "greenyellow",
+    "grey",
+    "honeydew",
+    "hotpink",
+    "indianred",
+    "indigo",
+    "ivory",
+    "khaki",
+    "lavender",
+    "lavenderblush",
+    "lawngreen",
+    "lemonchiffon",
+    "lightblue",
+    "lightcoral",
+    "lightcyan",
+    "lightgoldenrodyellow",
+    "lightgray",
+    "lightgreen",
+    "lightgrey",
+    "lightpink",
+    "lightsalmon",
+    "lightseagreen",
+    "lightskyblue",
+    "lightslategray",
+    "lightslategrey",
+    "lightsteelblue",
+    "lightyellow",
+    "lime",
+    "limegreen",
+    "linen",
+    "magenta",
+    "maroon",
+    "mediumaquamarine",
+    "mediumblue",
+    "mediumorchid",
+    "mediumpurple",
+    "mediumseagreen",
+    "mediumslateblue",
+    "mediumspringgreen",
+    "mediumturquoise",
+    "mediumvioletred",
+    "midnightblue",
+    "mintcream",
+    "mistyrose",
+    "moccasin",
+    "navajowhite",
+    "navy",
+    "oldlace",
+    "olive",
+    "olivedrab",
+    "orange",
+    "orangered",
+    "orchid",
+    "palegoldenrod",
+    "palegreen",
+    "paleturquoise",
+    "palevioletred",
+    "papayawhip",
+    "peachpuff",
+    "peru",
+    "pink",
+    "plum",
+    "powderblue",
+    "purple",
+    "rebeccapurple",
+    "red",
+    "rosybrown",
+    "royalblue",
+    "saddlebrown",
+    "salmon",
+    "sandybrown",
+    "seagreen",
+    "seashell",
+    "sienna",
+    "silver",
+    "skyblue",
+    "slateblue",
+    "slategray",
+    "slategrey",
+    "snow",
+    "springgreen",
+    "steelblue",
+    "tan",
+    "teal",
+    "thistle",
+    "tomato",
+    "turquoise",
+    "violet",
+    "wheat",
+    "white",
+    "whitesmoke",
+    "yellow",
+    "yellowgreen",
+    // CSS Color 4 section 6.2, system colours: a colour the page does not choose.
+    "accentcolor",
+    "accentcolortext",
+    "activetext",
+    "buttonborder",
+    "buttonface",
+    "buttontext",
+    "canvas",
+    "canvastext",
+    "field",
+    "fieldtext",
+    "graytext",
+    "highlight",
+    "highlighttext",
+    "linktext",
+    "mark",
+    "marktext",
+    "selecteditem",
+    "selecteditemtext",
+    "visitedtext",
+];
+
+/// The colour functions. `var(` is not one: it is how a value READS a token.
+const CSS_COLOUR_FUNCTIONS: [&str; 11] = [
+    "rgb(",
+    "rgba(",
+    "hsl(",
+    "hsla(",
+    "hwb(",
+    "lab(",
+    "lch(",
+    "oklab(",
+    "oklch(",
+    "color(",
+    "color-mix(",
+];
+
+/// THE ONLY UNITS A NUMBER OUTSIDE THE TOKEN LAYER MAY CARRY: a grid track's
+/// share, an angle, a time. Every length unit -- `px`, `rem`, `lh`, `dvh`,
+/// `cqi`, `cap`, and whatever CSS adds next -- is refused because it is not
+/// on this list, not because it is on another one.
+const CSS_ALLOWED_UNITS: [&str; 7] = ["fr", "deg", "turn", "rad", "grad", "s", "ms"];
+
+/// The properties a `:root` block may set besides `--*` custom properties.
+const TOKEN_LAYER_PROPERTIES: [&str; 1] = ["color-scheme"];
+
+/// One declaration or nested rule of a stylesheet.
+#[derive(Debug)]
+struct CssDeclaration {
+    line: usize,
+    property: String,
+    value: String,
+    in_token_layer: bool,
+}
+
+/// A stylesheet read into declarations, with the rules nested inside a
+/// `:root` block recorded as findings of their own.
+#[derive(Debug, Default)]
+struct CssRead {
+    declarations: Vec<CssDeclaration>,
+    root_blocks: usize,
+    nested_in_root: Vec<(usize, String)>,
+}
+
+/// Reads `css` into declarations. Comments and quoted strings are blanked, so
+/// neither can carry, or hide, a literal. A declaration is what ends at `;`
+/// or `}`; a prelude is what ends at `{` -- so a media condition or a
+/// selector is never read as a value. A block is in the token layer when its
+/// OWN prelude is exactly `:root` (possibly under an at-rule); a rule nested
+/// inside a `:root` block is NOT token layer and is recorded as a finding.
+fn read_css(css: &str) -> CssRead {
+    let mut text = String::with_capacity(css.len());
+    let chars: Vec<char> = css.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '/' && i + 1 < chars.len() && chars[i + 1] == '*' {
+            i += 2;
+            while i < chars.len()
+                && !(chars[i] == '*' && i + 1 < chars.len() && chars[i + 1] == '/')
+            {
+                text.push(if chars[i] == '\n' { '\n' } else { ' ' });
+                i += 1;
+            }
+            i += 2;
+            text.push_str("  ");
+            continue;
+        }
+        text.push(chars[i]);
+        i += 1;
+    }
+
+    // Each open block: is it a `:root` block?
+    let mut stack: Vec<bool> = Vec::new();
+    let mut out = CssRead::default();
+    let mut current = String::new();
+    let mut start_line = 1usize;
+    let mut line = 1usize;
+    let mut quote: Option<char> = None;
+    for c in text.chars() {
+        if c == '\n' {
+            line += 1;
+        }
+        if let Some(q) = quote {
+            if c == q {
+                quote = None;
+                current.push(c);
+            } else {
+                current.push(if c == '\n' { '\n' } else { ' ' });
+            }
+            continue;
+        }
+        match c {
+            '"' | '\'' => {
+                quote = Some(c);
+                current.push(c);
+            }
+            '{' => {
+                let prelude = current.trim().to_string();
+                if stack.iter().any(|root| *root) {
+                    out.nested_in_root.push((start_line, prelude.clone()));
+                }
+                let is_root = prelude == ":root";
+                if is_root {
+                    out.root_blocks += 1;
+                }
+                stack.push(is_root);
+                current.clear();
+            }
+            ';' | '}' => {
+                let decl = current.trim();
+                if let Some(colon) = decl.find(':') {
+                    let property = decl[..colon].trim().to_ascii_lowercase();
+                    if !property.is_empty() && !property.contains(char::is_whitespace) {
+                        out.declarations.push(CssDeclaration {
+                            line: start_line,
+                            property,
+                            value: decl[colon + 1..].trim().to_string(),
+                            in_token_layer: stack.last().copied().unwrap_or(false),
+                        });
+                    }
+                }
+                if c == '}' {
+                    stack.pop();
+                }
+                current.clear();
+            }
+            _ => {
+                if current.trim().is_empty() && !c.is_whitespace() {
+                    start_line = line;
+                }
+                current.push(c);
+            }
+        }
+    }
+    out
+}
+
+fn is_ident_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '-' || c == '_'
+}
+
+/// Why a value outside the token layer is a literal, or `None`.
+fn css_literal_in(value: &str) -> Option<String> {
+    let lower = value.to_ascii_lowercase();
+    for f in CSS_COLOUR_FUNCTIONS {
+        let mut from = 0;
+        while let Some(at) = lower[from..].find(f) {
+            let at = from + at;
+            let before = lower[..at].chars().last();
+            if before.map(|b| !is_ident_char(b)).unwrap_or(true) {
+                return Some(format!("a colour function `{f}`"));
+            }
+            from = at + f.len();
+        }
+    }
+    let chars: Vec<char> = lower.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        let prev = if i == 0 { None } else { Some(chars[i - 1]) };
+        if c == '#' {
+            let mut j = i + 1;
+            while j < chars.len() && chars[j].is_ascii_hexdigit() {
+                j += 1;
+            }
+            let n = j - i - 1;
+            let ends = j >= chars.len() || !is_ident_char(chars[j]);
+            if (3..=8).contains(&n) && ends {
+                return Some(format!(
+                    "a hex colour `{}`",
+                    chars[i..j].iter().collect::<String>()
+                ));
+            }
+        }
+        // A number: digits (or `.digits`) not glued to the end of an
+        // identifier -- `-0.05em` and `.5rem` are numbers, `h2` is not.
+        let digit_start = c.is_ascii_digit()
+            || (c == '.'
+                && chars
+                    .get(i + 1)
+                    .map(|d| d.is_ascii_digit())
+                    .unwrap_or(false));
+        let glued = match prev {
+            Some(p) if p.is_ascii_alphanumeric() || p == '_' => true,
+            Some('-') => i >= 2 && (chars[i - 2].is_ascii_alphanumeric() || chars[i - 2] == '_'),
+            _ => false,
+        };
+        if digit_start && !glued {
+            let mut j = i;
+            while j < chars.len() && (chars[j].is_ascii_digit() || chars[j] == '.') {
+                j += 1;
+            }
+            // An exponent is part of the number.
+            if j < chars.len()
+                && chars[j] == 'e'
+                && chars
+                    .get(j + 1)
+                    .map(|d| d.is_ascii_digit() || *d == '-' || *d == '+')
+                    .unwrap_or(false)
+            {
+                j += 2;
+                while j < chars.len() && chars[j].is_ascii_digit() {
+                    j += 1;
+                }
+            }
+            let mut k = j;
+            while k < chars.len() && chars[k].is_ascii_alphabetic() {
+                k += 1;
+            }
+            let unit: String = chars[j..k].iter().collect();
+            if !unit.is_empty() && !CSS_ALLOWED_UNITS.contains(&unit.as_str()) {
+                return Some(format!(
+                    "a dimension `{}` whose unit is not one a rule may carry",
+                    chars[i..k].iter().collect::<String>()
+                ));
+            }
+            i = k.max(i + 1);
+            continue;
+        }
+        if c.is_ascii_alphabetic() && prev.map(|p| !is_ident_char(p)).unwrap_or(true) {
+            let mut j = i;
+            while j < chars.len() && is_ident_char(chars[j]) {
+                j += 1;
+            }
+            let word: String = chars[i..j].iter().collect();
+            if CSS_NAMED_COLOURS.contains(&word.as_str()) {
+                return Some(format!("the colour name `{word}`"));
+            }
+            i = j;
+            continue;
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Every finding in one stylesheet. `tokens_allowed` is true for
+/// `ui/style.css` only: the one file where the token layer lives.
+fn stylesheet_findings(file: &str, css: &str, tokens_allowed: bool) -> Vec<String> {
+    let read = read_css(css);
+    let mut findings = Vec::new();
+    for (line, prelude) in &read.nested_in_root {
+        findings.push(format!(
+            "{file}:{line}: the rule `{prelude}` is nested inside a `:root` block; the token \
+             layer holds custom properties only"
+        ));
+    }
+    if !tokens_allowed && read.root_blocks > 0 {
+        findings.push(format!(
+            "{file}: declares a `:root` block; tokens are defined once, in ui/style.css"
+        ));
+    }
+    for d in &read.declarations {
+        if d.in_token_layer {
+            if !d.property.starts_with("--")
+                && !TOKEN_LAYER_PROPERTIES.contains(&d.property.as_str())
+            {
+                findings.push(format!(
+                    "{file}:{}: `{}` is set in a `:root` block, which may hold custom properties \
+                     and `color-scheme` only",
+                    d.line, d.property
+                ));
+            }
+            continue;
+        }
+        if d.property.starts_with("--") {
+            findings.push(format!(
+                "{file}:{}: `{}` declares a token outside the `:root` token layer",
+                d.line, d.property
+            ));
+            continue;
+        }
+        if let Some(why) = css_literal_in(&d.value) {
+            findings.push(format!(
+                "{file}:{}: `{}: {}` carries {why}; read it from a token (`var(--cds-...)`) instead",
+                d.line, d.property, d.value
+            ));
+        }
+    }
+    findings
+}
+
+/// Backward-compatible name for the stylesheet check the older rows call.
+fn token_layer_findings(file: &str, css: &str) -> Vec<String> {
+    stylesheet_findings(file, css, true)
+}
+
+/// A script or page's source with ADJACENT STRING LITERALS JOINED -- `"st" +
+/// "yle"` becomes `"style"` -- so a concatenation cannot split a word the
+/// rules below read. Line breaks inside the join are kept as line breaks so
+/// line numbers still point at the right place.
+fn joined_literals(source: &str) -> String {
+    let chars: Vec<char> = source.chars().collect();
+    let mut out = String::with_capacity(source.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '"' || c == '\'' || c == '`' {
+            // Is this a closing quote followed by `+` and an opening quote?
+            let mut j = i + 1;
+            let mut newlines = 0;
+            while j < chars.len() && chars[j].is_whitespace() {
+                if chars[j] == '\n' {
+                    newlines += 1;
+                }
+                j += 1;
+            }
+            if j < chars.len() && chars[j] == '+' {
+                let mut k = j + 1;
+                while k < chars.len() && chars[k].is_whitespace() {
+                    if chars[k] == '\n' {
+                        newlines += 1;
+                    }
+                    k += 1;
+                }
+                if k < chars.len() && (chars[k] == '"' || chars[k] == '\'' || chars[k] == '`') {
+                    for _ in 0..newlines {
+                        out.push('\n');
+                    }
+                    i = k + 1;
+                    continue;
+                }
+            }
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
+/// The words `style` may appear in, in a shipped script or page: running
+/// prose (a letter, a space, the word, then a space and a lower-case letter,
+/// or a comma or full stop and a space) and the one stylesheet link.
+fn style_word_allowed(text: &str, at: usize) -> bool {
+    let bytes = text.as_bytes();
+    let before = |n: usize| if at >= n { Some(bytes[at - n]) } else { None };
+    let after = |n: usize| bytes.get(at + 5 + n - 1).copied();
+    if text[..at].ends_with("href=\"./") && text[at..].starts_with("style.css\"") {
+        return true;
+    }
+    let prose_before =
+        before(1) == Some(b' ') && before(2).map(|b| b.is_ascii_alphabetic()).unwrap_or(false);
+    let prose_after = match after(1) {
+        Some(b' ') => after(2).map(|b| b.is_ascii_lowercase()).unwrap_or(false),
+        Some(b',') | Some(b'.') => after(2) == Some(b' '),
+        _ => false,
+    };
+    prose_before && prose_after
+}
+
+/// The presentation attributes a shipped page may not set: colour and size
+/// belong to the stylesheet's classes and tokens.
+const PRESENTATION_ATTRIBUTES: [&str; 7] = [
+    "fill",
+    "stroke",
+    "width",
+    "height",
+    "color",
+    "bgcolor",
+    "stop-color",
+];
+
+/// CSSOM entry points that write a style without the word `style` in them.
+const CSSOM_WRITES: [&str; 5] = [
+    "cssText",
+    "insertRule",
+    "adoptedStyleSheets",
+    "CSSStyleSheet",
+    ".setProperty(",
+];
+
+/// Every inline style, style element, CSSOM write and presentation attribute
+/// in one shipped `.js` or `.html` file.
+fn inline_style_findings(file: &str, source: &str) -> Vec<String> {
+    // Comment lines are documentation: they may say anything. (A trailing
+    // comment on a code line is scanned, and must be worded accordingly.)
+    let code: String = source
+        .lines()
+        .map(|l| {
+            let t = l.trim_start();
+            if t.starts_with("//") || t.starts_with('*') || t.starts_with("/*") {
+                ""
+            } else {
+                l
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let text = joined_literals(&code);
+    let line_of_at = |at: usize| text[..at].matches('\n').count() + 1;
+    let lower = text.to_ascii_lowercase();
+    let mut findings = Vec::new();
+
+    let mut from = 0;
+    while let Some(found) = lower[from..].find("style") {
+        let at = from + found;
+        let before = if at == 0 {
+            None
+        } else {
+            lower.as_bytes().get(at - 1).copied()
+        };
+        let after = lower.as_bytes().get(at + 5).copied();
+        let word = before
+            .map(|b| !(b.is_ascii_alphanumeric() || b == b'_' || b == b'$'))
+            .unwrap_or(true)
+            && after
+                .map(|b| !(b.is_ascii_alphanumeric() || b == b'_' || b == b'$'))
+                .unwrap_or(true);
+        if word && !style_word_allowed(&text, at) {
+            let line = line_of_at(at);
+            findings.push(format!(
+                "{file}:{line}: the word `style` in code (a style attribute, a <style> element or a \
+                 style write): {}",
+                text.lines().nth(line - 1).unwrap_or("").trim()
+            ));
+        }
+        from = at + 5;
+    }
+
+    for attribute in PRESENTATION_ATTRIBUTES {
+        let mut from = 0;
+        while let Some(found) = lower[from..].find(attribute) {
+            let at = from + found;
+            from = at + attribute.len();
+            let before = if at == 0 {
+                None
+            } else {
+                lower.as_bytes().get(at - 1).copied()
+            };
+            if !before
+                .map(|b| b.is_ascii_whitespace() || b == b'"' || b == b'\'')
+                .unwrap_or(true)
+            {
+                continue;
+            }
+            let rest = lower[at + attribute.len()..].trim_start();
+            let Some(value) = rest.strip_prefix('=') else {
+                continue;
+            };
+            let value = value.trim_start();
+            if value.starts_with('"')
+                || value.starts_with('\'')
+                || value.starts_with('`')
+                || value.starts_with("\\\"")
+                || value.starts_with("${")
+            {
+                let line = line_of_at(at);
+                findings.push(format!(
+                    "{file}:{line}: the presentation attribute `{attribute}=`: size and colour an \
+                     element by class; {}",
+                    text.lines().nth(line - 1).unwrap_or("").trim()
+                ));
+            }
+        }
+    }
+
+    for token in CSSOM_WRITES {
+        if let Some(at) = text.find(token) {
+            findings.push(format!(
+                "{file}:{}: a CSSOM style write (`{token}`)",
+                line_of_at(at)
+            ));
+        }
+    }
+    findings
+}
+
+#[test]
+fn no_literal_colour_or_size_outside_the_token_layer() {
+    // PLAT-18.2, the Clarity design standard: tokens are defined once, in
+    // `ui/style.css`'s `:root` blocks, and every page consumes them.
+    let css_path = ui_root().join("style.css");
+    let css = read(&css_path);
+    let read_back = read_css(&css);
+    let tokens = read_back
+        .declarations
+        .iter()
+        .filter(|d| d.in_token_layer)
+        .count();
+    let rules = read_back
+        .declarations
+        .iter()
+        .filter(|d| !d.in_token_layer)
+        .count();
+    assert!(
+        tokens >= 150 && rules >= 300 && read_back.root_blocks >= 2,
+        "the parser found {tokens} token declaration(s), {rules} rule declaration(s) and {} \
+         `:root` block(s) in ui/style.css; a lint that read almost nothing is not a pass",
+        read_back.root_blocks
+    );
+
+    let mut findings = Vec::new();
+    // TWO `:root` BLOCKS: the light layer and the dark one. A third is a
+    // second place a token could be defined.
+    if read_back.root_blocks != 2 {
+        findings.push(format!(
+            "ui/style.css: {} `:root` blocks; the token layer is exactly two (light, and dark \
+             under prefers-color-scheme)",
+            read_back.root_blocks
+        ));
+    }
+    let mut stylesheets = 0;
+    let mut pages = 0;
+    for asset in shipped_assets() {
+        let ext = asset.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let body = read(&asset);
+        if ext == "css" {
+            stylesheets += 1;
+            findings.extend(stylesheet_findings(
+                &shown(&asset),
+                &body,
+                asset == css_path,
+            ));
+        }
+        if ext == "js" || ext == "html" {
+            pages += 1;
+            findings.extend(inline_style_findings(&shown(&asset), &body));
+        }
+    }
+    assert!(
+        stylesheets >= 1 && pages >= 20,
+        "{stylesheets} stylesheet(s), {pages} script(s)/page(s)"
+    );
+    assert!(
+        findings.is_empty(),
+        "literal colours, sizes, style writes or presentation attributes outside the token \
+         layer:\n  {}",
+        findings.join("\n  ")
+    );
+}
+
+#[test]
+fn the_token_lint_refuses_each_kind_of_literal() {
+    // The RED side, one mutant per rule, so the guard above is a guard -- and
+    // the twelve escapes the PLAT-18.2 review planted, each by name.
+    let flagged = |css: &str| token_layer_findings("mutant.css", css).len();
+    let other = |css: &str| stylesheet_findings("other.css", css, false).len();
+    assert_eq!(flagged(".a { color: #0072a3; }"), 1, "a hex colour");
+    assert_eq!(flagged(".a { color: #fff; }"), 1, "a short hex colour");
+    assert_eq!(
+        flagged(".a { background: hsl(198, 100%, 34%); }"),
+        1,
+        "a colour function"
+    );
+    assert_eq!(
+        flagged(".a { border-color: rgba(0, 0, 0, 0.5); }"),
+        1,
+        "rgba"
+    );
+    assert_eq!(flagged(".a { color: red; }"), 1, "a named colour");
+    assert_eq!(
+        flagged(".a { outline-color: Highlight; }"),
+        1,
+        "a system colour"
+    );
+    assert_eq!(flagged(".a { margin: 4px 0; }"), 1, "a px length");
+    assert_eq!(
+        flagged(".a { padding: .5rem; }"),
+        1,
+        "a bare-decimal rem length"
+    );
+    assert_eq!(
+        flagged(".a { letter-spacing: -0.05em; }"),
+        1,
+        "a negative em length"
+    );
+    assert_eq!(
+        flagged(".a { border: 1px solid var(--x); }"),
+        1,
+        "a border width"
+    );
+    assert_eq!(
+        flagged(".a { --lw-x: 1rem; }"),
+        1,
+        "a token declared outside :root"
+    );
+    assert_eq!(
+        flagged("@media (max-width: 1px) { .a { gap: 2rem; } }"),
+        1,
+        "a length inside a media block is still a rule, not a token"
+    );
+    // Review MEDIUM-1, escapes 1-3 (stylesheet).
+    assert_eq!(
+        flagged(":root { .crumb { color: #ff0000; margin-top: 3px; } }"),
+        3,
+        "escape 1: a rule nested in :root is not token layer (the nesting, the colour, the size)"
+    );
+    assert_eq!(
+        flagged(":root { background: red; font-size: 13px; }"),
+        2,
+        "escape 2: an ordinary property set in :root"
+    );
+    assert_eq!(
+        flagged(".crumb { padding-top: 3lh; height: 10dvh; }"),
+        2,
+        "escape 3: units the old deny-list lacked"
+    );
+    assert_eq!(
+        flagged(".a { inline-size: 3cqi; block-size: 2cap; }"),
+        2,
+        "container and font units"
+    );
+    assert_eq!(
+        flagged(".a { width: 3zz; }"),
+        1,
+        "a unit nobody has invented yet"
+    );
+    assert_eq!(
+        other(":root { --x: 1px; }"),
+        1,
+        "a :root block anywhere but ui/style.css"
+    );
+    assert_eq!(
+        other(".a { color: #fff; }"),
+        1,
+        "a literal in another stylesheet"
+    );
+    // And the GREEN side: what the stylesheet is allowed to say.
+    assert_eq!(
+        flagged(":root { --a: #fff; --b: 4px; color-scheme: light dark; }"),
+        0,
+        "the token layer"
+    );
+    assert_eq!(
+        flagged("@media (prefers-color-scheme: dark) { :root { --a: hsl(0, 0%, 0%); } }"),
+        0,
+        "the dark token layer"
+    );
+    assert_eq!(
+        flagged(".a { color: var(--a); margin: 0; width: 100%; }"),
+        0,
+        "var, zero, %"
+    );
+    assert_eq!(
+        flagged("@media (max-width: 767.98px) { .a { display: block; } }"),
+        0,
+        "a breakpoint"
+    );
+    assert_eq!(
+        flagged(".a { content: \"#fff 4px red\"; }"),
+        0,
+        "a quoted string is content"
+    );
+    assert_eq!(
+        flagged(".a { white-space: nowrap; line-height: 1.5; }"),
+        0,
+        "unitless values"
+    );
+    assert_eq!(
+        flagged(".a { transform: rotate(360deg); z-index: 20; }"),
+        0,
+        "angles and indexes"
+    );
+    assert_eq!(
+        flagged(".a { transition: color 0.1s ease; grid-row: 1 / span 2; }"),
+        0,
+        "times, grid lines"
+    );
+    assert_eq!(
+        flagged(".a { grid-template-columns: repeat(6, 1fr); }"),
+        0,
+        "fr tracks"
+    );
+    assert_eq!(
+        flagged(".a h2 { margin: 0; }"),
+        0,
+        "a digit inside an identifier is not a number"
+    );
+
+    let inline = |js: &str| inline_style_findings("mutant.js", js).len();
+    assert_eq!(
+        inline("row.style.display = \"none\";"),
+        1,
+        "a style property write"
+    );
+    assert_eq!(
+        inline("return \"<p style=\\\"color: red\\\">\";"),
+        1,
+        "a style attribute in a string"
+    );
+    // Review MEDIUM-1, escapes 4-12 (scripts and pages).
+    assert_eq!(
+        inline("node.setAttribute(\"style\", \"color: red\");"),
+        1,
+        "escape 4: setAttribute"
+    );
+    assert_eq!(
+        inline("node.style = \"color: red\";"),
+        1,
+        "escape 5: assigning .style"
+    );
+    assert_eq!(
+        inline("Object.assign(node.style, {color: \"red\"});"),
+        1,
+        "escape 6: Object.assign"
+    );
+    assert_eq!(
+        inline("node[\"style\"].color = \"red\";"),
+        1,
+        "escape 7: a bracketed style"
+    );
+    assert_eq!(
+        inline("const x = `<p style=${q}color: red${q}>`;"),
+        1,
+        "escape 8: a template"
+    );
+    assert_eq!(
+        inline("const x = \"<p st\" + \"yle=\\\"color: red\\\">\";"),
+        1,
+        "escape 9: a concatenated word"
+    );
+    assert_eq!(
+        inline(
+            "const x = \"<svg><rect fill=\\\"#ff0000\\\" width=\\\"12\\\" height=\\\"12\\\">\";"
+        ),
+        3,
+        "escape 10: SVG presentation attributes"
+    );
+    assert_eq!(
+        inline("document.createElement(\"style\").textContent = \".x{color:#ff0000}\";"),
+        1,
+        "escape 11: a <style> element built in a script"
+    );
+    assert_eq!(
+        inline("<head>\n<style>.x { color: #ff0000; margin: 3px; }</style>\n</head>"),
+        2,
+        "escape 12: a <style> element in a page (its open and close tags)"
+    );
+    assert_eq!(
+        inline("node.style.cssText = \"\";"),
+        2,
+        "cssText, and the word"
+    );
+    assert_eq!(inline("sheet.insertRule(\".x{}\");"), 1, "insertRule");
+    // The GREEN side.
+    assert_eq!(
+        inline("// a comment may mention .style. freely"),
+        0,
+        "a comment line"
+    );
+    assert_eq!(
+        inline("\"not the addressing style, not the endpoint\""),
+        0,
+        "the word in running prose"
+    );
+    assert_eq!(
+        inline("<link rel=\"stylesheet\" href=\"./style.css\">"),
+        0,
+        "the one stylesheet link"
+    );
+    assert_eq!(
+        inline("const pathStyle = x.path_style; const height = 5;"),
+        0,
+        "identifiers, a height variable"
+    );
+}
