@@ -140,8 +140,13 @@ def redact(text: str) -> str:
     """Anything credential-shaped, removed before it can reach an artifact."""
     for value in MINTED:
         text = text.replace(value, "[REDACTED MINTED VALUE]")
+    # NOT `automountServiceAccountToken`. That key is in every pod and Job spec
+    # an artifact records, and rewriting it to `…Token=[REDACTED]` left those
+    # artifacts invalid JSON (harness-rows-11, `ops/*-watch.json`). The
+    # lookbehind excludes exactly the Kubernetes field and nothing else.
     text = re.sub(
-        r"(?i)(password|secret[-_]?access[-_]?key|access[-_]key[-_]?id|routing[-_]key|token)"
+        r"(?i)(?<!serviceaccount)"
+        r"(password|secret[-_]?access[-_]?key|access[-_]key[-_]?id|routing[-_]key|token)"
         r"[\"'= :]+[^\s\"',}]+",
         r"\1=[REDACTED]",
         text,
@@ -8153,7 +8158,9 @@ def rehearsal_trust(target_cluster_id: str, approver_key: dict[str, Any],
     return apply(body)
 
 
-def rehearsal_point() -> dict[str, Any]:
+def rehearsal_point(schedule: str = REHEARSAL_POINT_SCHEDULE,
+                    catalog: str = REHEARSAL_CATALOG,
+                    backup: str = "l6-point") -> dict[str, Any]:
     """One qualifying recovery point, and the view that makes it selectable.
 
     BOTH HALVES ARE REQUIRED, and neither is enough on its own
@@ -8169,10 +8176,13 @@ def rehearsal_point() -> dict[str, Any]:
     because `spec.point.scheduleRefs` is how the schedule names its candidates
     and a manual `Backup` with no such reference is in nobody's candidate set.
     """
-    apply(schedule_object(REHEARSAL_POINT_SCHEDULE, "dest-a"))
-    ref = schedule_ref(REHEARSAL_POINT_SCHEDULE)
-    backup = run_backup("l6-point", "dest-a", topics=[REHEARSAL_TOPIC], schedule=ref)
-    catalog = fresh_catalog(REHEARSAL_CATALOG, "dest-a")
+    # PARAMETERS, NOT A SECOND COPY: `rehearsal_faults` needs a point of its
+    # own (it tampers with one of its segments), under its own schedule and
+    # catalog, so `rehearsal`'s point is never the one it breaks.
+    apply(schedule_object(schedule, "dest-a"))
+    ref = schedule_ref(schedule)
+    backup = run_backup(backup, "dest-a", topics=[REHEARSAL_TOPIC], schedule=ref)
+    catalog = fresh_catalog(catalog, "dest-a")
     entries = view_entries(catalog)
     point_id = None
     receipt = ((backup.get("status") or {}).get("evidence") or {}).get("receiptSha256") or ""
@@ -8186,7 +8196,8 @@ def rehearsal_point() -> dict[str, Any]:
 
 def rehearsal_schedule_object(name: str, *, cron: str, approval: str,
                               suspend: bool = True,
-                              point: dict[str, Any] | None = None) -> dict[str, Any]:
+                              point: dict[str, Any] | None = None,
+                              target: str = REHEARSAL_TARGET) -> dict[str, Any]:
     """D3 §4.1's `RehearsalSchedule`, created SUSPENDED.
 
     SUSPENDED AT BIRTH, AND THAT IS THE ONLY ORDER THAT WORKS. The standing
@@ -8208,7 +8219,9 @@ def rehearsal_schedule_object(name: str, *, cron: str, approval: str,
             "point": point or rehearsal_point_spec(REHEARSAL_POINT_SCHEDULE,
                                                    REHEARSAL_CATALOG),
             "target": {
-                "clusterRef": {"name": REHEARSAL_TARGET},
+                # A PARAMETER for `rehearsal_faults`' unavailable-target arm,
+                # whose target is a KafkaCluster of its own that it can cut.
+                "clusterRef": {"name": target},
                 "topicPrefix": "rehearsal-",
                 "markerTopic": "logweir.scratch",
                 "replicationFactor": 1,
@@ -8948,13 +8961,15 @@ def rehearsal() -> None:
 
 def rehearsal_create(name: str, *, cron: str, approval: str,
                      arms: dict[str, str],
-                     point: dict[str, Any] | None = None) -> dict[str, Any]:
+                     point: dict[str, Any] | None = None,
+                     target: str = REHEARSAL_TARGET) -> dict[str, Any]:
     """Create one arm's schedule, suspended, and REGISTER it before anything else.
 
     Registered the moment its uid exists, so the `finally` suspends and sweeps
     it even when the very next line raises.
     """
-    apply(rehearsal_schedule_object(name, cron=cron, approval=approval, point=point))
+    apply(rehearsal_schedule_object(name, cron=cron, approval=approval, point=point,
+                                    target=target))
     created = get("rehearsalschedule", name)
     arms[name] = created["metadata"]["uid"]
     return wait_for(
@@ -8966,7 +8981,8 @@ def rehearsal_create(name: str, *, cron: str, approval: str,
 
 def rehearsal_arm(name: str, *, cron: str, key: pathlib.Path, work: pathlib.Path,
                   target_cluster_id: str, arms: dict[str, str],
-                  point: dict[str, Any] | None = None) -> tuple[dict[str, Any], str]:
+                  point: dict[str, Any] | None = None,
+                  target: str = REHEARSAL_TARGET) -> tuple[dict[str, Any], str]:
     """One arm's `RehearsalSchedule` and its standing `Approval`, both created
     and the `Approval` waited on until its `Verified` condition is DECIDED.
 
@@ -8975,7 +8991,8 @@ def rehearsal_arm(name: str, *, cron: str, key: pathlib.Path, work: pathlib.Path
     waiting for the control to fail.
     """
     approval = f"{name}-standing"
-    schedule = rehearsal_create(name, cron=cron, approval=approval, arms=arms, point=point)
+    schedule = rehearsal_create(name, cron=cron, approval=approval, arms=arms, point=point,
+                                target=target)
     envelope, sidecar = mint_standing(work, key, schedule,
                                       target_cluster_id=target_cluster_id)
     apply(standing_approval_object(approval, schedule, envelope, sidecar))
@@ -10303,6 +10320,1646 @@ def refused_point() -> None:
             save()
 
 
+# ---------------------------------------------------------------------------
+# harness-rows-11 — PLAT-14.1's three run failures, as the console reads them
+# ---------------------------------------------------------------------------
+#
+# lab-refresh-8 §5: "No committed row for mount failure, unschedulable pod or
+# engine crash." Each row below REQUIRES the named state and reason D3 §2.2 /
+# §2.3 / §2.5 give the failure, on the object AND in the operation view the
+# console renders (`GET /api/v1/namespaces/{ns}/operations/backup/{name}`,
+# served by the host `logweir-api` in localAdmin mode against this namespace).
+# "Not Succeeded" is never enough: a run that failed for another reason, or
+# that never failed at all, must fail the row.
+#
+# Every fault is induced from THIS namespace and nothing else:
+#
+# * mount failure, twice, because D3 §2.3 puts the two in different classes:
+#   - a projected CONFIGMAP: a `KafkaCluster` whose `auth.tlsCa.configMapKeyRef`
+#     names a ConfigMap that is never created. `ResolvedConnection::project`
+#     mounts it as the runner's CA volume, the kubelet reports `FailedMount`,
+#     and the code is `VolumeMountFailed` (Warning, transient for 180 s);
+#   - a projected SECRET: the namespace's `logweir-signing-key`, which every
+#     runner pod mounts as the `signing` volume, removed for the length of one
+#     run (this namespace's own copy; it is restored in the `finally`). The code
+#     is `SigningKeyMissing` (Error, never transient) and its `RunnerReady`
+#     reason is `VolumeMountFailed`;
+# * unschedulable pod — a `LimitRange` in this namespace defaulting a 512Gi
+#   memory request, exactly D3 §15 L2's recipe. The runner container declares
+#   no requests (`job::build`), so the default applies; the LimitRange is
+#   deleted again as soon as the pod carries the request, so nothing else in
+#   the namespace is scheduled under it;
+# * engine crash — a destination whose `archiveWrite` grant is a MinIO user of
+#   this run's that is DENIED `s3:PutObject` on SEGMENT keys under that
+#   destination's prefix (`<prefix>/*/topics/*`) and allowed everything else.
+#   The runner admits the plan, dials the source, prints
+#   `progress-phase=-1:engine` and starts `kafka-backup backup`; the ENGINE
+#   writes its initial manifest, reads records and exits non-zero when the
+#   segment upload is refused, and
+#   the runner reports "kafka-backup backup exited <n>"
+#   (`logweir-engine-oso/src/engine.rs`, the `run.exit_code != 0` arm) and
+#   exits 1. That is the engine's own failure path mid-run — not a guard
+#   refusal before it (exit 3) and not a pod the kubelet never started.
+
+OPS_CA_CLUSTER = "source-ca-missing"
+OPS_MISSING_CA = f"{OWNER}-absent-ca"
+OPS_MOUNT_BACKUP = "ops-mount-failure"
+OPS_MOUNT_SECRET_BACKUP = "ops-mount-secret"
+OPS_SIGNING_SECRET = "logweir-signing-key"
+OPS_UNSCHED_BACKUP = "ops-unschedulable"
+OPS_ENGINE_BACKUP = "ops-engine-crash"
+OPS_ENGINE_DEST = "dest-engine-deny"
+OPS_ENGINE_PREFIX = "engine-deny"
+OPS_LIMIT_RANGE = f"{OWNER}-impossible-memory"
+OPS_IMPOSSIBLE_MEMORY = "512Gi"
+# LONGER THAN FAIL-FAST, so "no fail-fast patch" is a clause that could fail:
+# the controller's default `failFastSeconds` is 300 (D3 §2.3) plus the 60 s
+# unschedulable grace, and a Job whose own deadline came first would make the
+# absence of a patch vacuous.
+OPS_UNSCHED_DEADLINE = 480
+OPS_MOUNT_DEADLINE = 900
+OPS_DENY_USER = f"{OWNER_TAG}noput"
+OPS_DENY_POLICY = f"{OWNER}-noput"
+OPS_DENY_SECRET = f"{OWNER}-noput-s3"
+
+
+def operation_view(api: Any, kind: str, name: str) -> dict[str, Any] | None:
+    """The console's operation view of one run, or `None` with no API.
+
+    The body the console's operation page renders (`routes/operations.rs::
+    get_one`, `status::backup_view`). A non-200 is returned as a marker dict so
+    the row that reads it fails on it instead of on a `None` it cannot explain.
+    """
+    if api is None:
+        return None
+    status, body = api.get(f"/api/v1/namespaces/{NS}/operations/{kind}/{name}")
+    if status == 200 and isinstance(body, dict) and isinstance(body.get("item"), dict):
+        return body["item"]
+    return {"httpStatus": status, "body": body}
+
+
+def diagnostics_of(obj: dict[str, Any]) -> list[dict[str, Any]]:
+    return ((((obj or {}).get("status") or {}).get("progress") or {}).get("diagnostics")
+            or [])
+
+
+def _view(view: dict[str, Any] | None) -> dict[str, Any]:
+    return view or {}
+
+
+def mount_failure_surfaced(during: dict[str, Any], during_view: dict[str, Any] | None,
+                           final: dict[str, Any], final_view: dict[str, Any] | None,
+                           deadline_before: int | None, deadline_after: int | None,
+                           missing: str, code: str = "VolumeMountFailed") -> dict[str, bool]:
+    """D3 §2.2/§2.3/§2.5 for a pod that cannot mount a projected object.
+
+    While it waits: stage `Preparing`, `RunnerReady=False/VolumeMountFailed`, a
+    diagnostic with the class's own `code` about the runner POD whose message
+    names the missing object — resource-scoped, as PLAT-14.1's problem
+    statement asks — and the console view says `preparing` with the
+    `VolumeMountFailed` reason. Then fail-fast collapses the Job's deadline and
+    the run is `Failed` with the terminal reason `VolumeMountFailed` and NO exit
+    code. D3 §13's mount-failure row says it in as many words: "fail-fast
+    patches the Job deadline and the terminal reason is the diagnostic" — so a
+    `NoExitCode` here, after a diagnostic that WAS recorded, fails the row.
+    """
+    st = (during or {}).get("status") or {}
+    ready = condition(during or {}, "RunnerReady")
+    diags = diagnostics_of(during)
+    mount = [d for d in diags if d.get("code") == code]
+    fst = (final or {}).get("status") or {}
+    dv, fv = _view(during_view), _view(final_view)
+    return {
+        "while waiting, status.progress.stage is Preparing":
+            (st.get("progress") or {}).get("stage") == "Preparing",
+        "RunnerReady=False with reason VolumeMountFailed":
+            ready.get("status") == "False" and ready.get("reason") == "VolumeMountFailed",
+        f"a {code} diagnostic is about the runner Pod":
+            any((d.get("object") or {}).get("kind") == "Pod" for d in mount),
+        f"and its message names {missing}, the object that is absent":
+            any(missing in str(d.get("message") or "") for d in mount),
+        f"the console view said preparing / VolumeMountFailed, with the {code} diagnostic":
+            dv.get("state") == "preparing" and dv.get("stateReason") == "VolumeMountFailed"
+            and any(d.get("code") == code for d in dv.get("diagnostics") or []),
+        "fail-fast collapsed the Job's activeDeadlineSeconds":
+            deadline_before is not None and deadline_after is not None
+            and deadline_after < deadline_before,
+        "the run is Failed with the terminal reason VolumeMountFailed":
+            fst.get("phase") == "Failed"
+            and condition(final or {}, "Failed").get("reason") == "VolumeMountFailed",
+        "and no exit code — the runner never started": fst.get("exitCode") is None,
+        "the console view says failed / VolumeMountFailed, terminal, result error":
+            fv.get("state") == "failed" and fv.get("stateReason") == "VolumeMountFailed"
+            and fv.get("terminal") is True
+            and (fv.get("result") or {}).get("status") == "error"
+            and (fv.get("result") or {}).get("exitCode") is None,
+    }
+
+
+def unschedulable_surfaced(during: dict[str, Any], during_view: dict[str, Any] | None,
+                           final: dict[str, Any], final_view: dict[str, Any] | None,
+                           deadline_before: int | None, deadline_after: int | None,
+                           spec_deadline: int, pod: dict[str, Any] | None) -> dict[str, bool]:
+    """D3 §15 L2: `RunnerReady=False/PodUnschedulable`, NO fail-fast, and the
+    terminal reason `PodUnschedulable` at the Job's own deadline.
+
+    The fixture clause comes first: the pod really asked for the impossible
+    request and the scheduler really said `Unschedulable`, so a pass is about
+    THIS fault and not some other reason a pod waited.
+    """
+    ready = condition(during or {}, "RunnerReady")
+    diags = diagnostics_of(during)
+    unsched = [d for d in diags if d.get("code") == "PodUnschedulable"]
+    requests = [((c.get("resources") or {}).get("requests") or {}).get("memory")
+                for c in (((pod or {}).get("spec") or {}).get("containers") or [])]
+    scheduled = [c for c in (((pod or {}).get("status") or {}).get("conditions") or [])
+                 if c.get("type") == "PodScheduled"]
+    fst = (final or {}).get("status") or {}
+    dv, fv = _view(during_view), _view(final_view)
+    return {
+        f"the runner pod carried the {OPS_IMPOSSIBLE_MEMORY} request and the scheduler "
+        "said Unschedulable": OPS_IMPOSSIBLE_MEMORY in requests and any(
+            c.get("status") == "False" and c.get("reason") == "Unschedulable"
+            for c in scheduled),
+        "RunnerReady=False with reason PodUnschedulable":
+            ready.get("status") == "False" and ready.get("reason") == "PodUnschedulable",
+        "a PodUnschedulable diagnostic is about the runner Pod":
+            any((d.get("object") or {}).get("kind") == "Pod" for d in unsched),
+        "the console view said preparing / PodUnschedulable, with the diagnostic":
+            dv.get("state") == "preparing" and dv.get("stateReason") == "PodUnschedulable"
+            and any(d.get("code") == "PodUnschedulable" for d in dv.get("diagnostics") or []),
+        f"NO fail-fast: the Job kept its own activeDeadlineSeconds ({spec_deadline})":
+            deadline_before == spec_deadline and deadline_after == spec_deadline,
+        "the run is Failed with the terminal reason PodUnschedulable, no exit code":
+            fst.get("phase") == "Failed"
+            and condition(final or {}, "Failed").get("reason") == "PodUnschedulable"
+            and fst.get("exitCode") is None,
+        "the console view says failed / PodUnschedulable, terminal":
+            fv.get("state") == "failed" and fv.get("stateReason") == "PodUnschedulable"
+            and fv.get("terminal") is True,
+    }
+
+
+# The runner's own words when its ENGINE subprocess exits non-zero on the
+# backup path (`logweir-engine-oso/src/engine.rs`, `EngineError::Operational`).
+ENGINE_EXIT_LINE = "kafka-backup backup exited"
+
+
+def engine_crash_surfaced(final: dict[str, Any], final_view: dict[str, Any] | None,
+                          log_text: str, fixture_control: dict[str, Any] | None
+                          ) -> dict[str, bool]:
+    """An engine that exits non-zero mid-run is a FAILED run the runner started.
+
+    What separates it from the two rows above is `RunnerReady=True/
+    RunnerStarted` (the process ran) and a recorded exit code of 1 with
+    `exitReason: operational` — D3 §2.5: "any other Failed (exit 1 …)" is
+    `failed`, and the result is `error` with `verification: noEvidence`
+    because exit 1 writes no artifact. The pod log's engine line proves the
+    exit came from the engine and not from admission (exit 3) or signing (4).
+    The fixture control proves the destination is otherwise usable: the same
+    source and topic through a full-access grant succeeded in this phase.
+    """
+    fst = (final or {}).get("status") or {}
+    ready = condition(final or {}, "RunnerReady")
+    fv = _view(final_view)
+    control = fixture_control or {}
+    refused = [ln for ln in log_text.splitlines() if "AccessDenied" in ln]
+    return {
+        "the refused write was a SEGMENT — the engine had read records before it failed":
+            any("/topics/" in ln for ln in refused),
+        "the fixture control — the same source and topic, full grant — Succeeded":
+            ((control.get("status") or {}).get("phase")) == "Succeeded",
+        "RunnerReady=True/RunnerStarted — the runner process ran":
+            ready.get("status") == "True" and ready.get("reason") == "RunnerStarted",
+        "the pod log says the ENGINE exited non-zero mid-run": ENGINE_EXIT_LINE in log_text,
+        "the run is Failed with exitCode 1 and exitReason operational":
+            fst.get("phase") == "Failed" and fst.get("exitCode") == 1
+            and fst.get("exitReason") == "operational",
+        "no evidence was recorded for it": not ((fst.get("evidence") or {}).get("receiptKey")),
+        "the console view says failed, terminal, result error with exitCode 1":
+            fv.get("state") == "failed" and fv.get("terminal") is True
+            and (fv.get("result") or {}).get("status") == "error"
+            and (fv.get("result") or {}).get("exitCode") == 1,
+        "and the view's verification is noEvidence, never verified":
+            (fv.get("verification") or {}).get("state") == "noEvidence"
+            and fv.get("verifiedSuccess") is False,
+    }
+
+
+def pod_facts(pod: dict[str, Any] | None) -> dict[str, Any] | None:
+    """What a row reads off the runner pod — its requests, conditions and
+    container states — and nothing else. The whole pod carries a spec an
+    artifact has no use for."""
+    if pod is None:
+        return None
+    return {
+        "metadata": {"name": (pod.get("metadata") or {}).get("name")},
+        "spec": {"containers": [{"name": c.get("name"), "resources": c.get("resources")}
+                                for c in ((pod.get("spec") or {}).get("containers") or [])]},
+        "status": {"phase": (pod.get("status") or {}).get("phase"),
+                   "conditions": (pod.get("status") or {}).get("conditions"),
+                   "containerStatuses": [{"name": c.get("name"), "state": c.get("state")}
+                                         for c in ((pod.get("status") or {})
+                                                   .get("containerStatuses") or [])]},
+    }
+
+
+def job_deadline(name: str) -> int | None:
+    job = get_opt("job", name)
+    return ((job or {}).get("spec") or {}).get("activeDeadlineSeconds")
+
+
+def runner_pod(job_name: str) -> dict[str, Any] | None:
+    pods = lst("pods", selector=f"batch.kubernetes.io/job-name={job_name}")
+    return pods[0] if pods else None
+
+
+def watch_run(name: str, want_reason: str, *, seconds: int, api: Any,
+              evidence: list[str], tag: str) -> dict[str, Any]:
+    """Poll one Backup until it is terminal, keeping the FIRST read on which
+    `RunnerReady` carries `want_reason` (and the view at that instant), the
+    Job's deadline when first seen and at the end, and the runner pod."""
+    out: dict[str, Any] = {"during": None, "duringView": None, "deadlineBefore": None,
+                           "deadlineAfter": None, "pod": None, "final": None,
+                           "finalView": None}
+    deadline = time.time() + seconds
+    obj: dict[str, Any] | None = None
+    while time.time() < deadline:
+        obj = get_opt("backup", name)
+        if obj is None:
+            time.sleep(5)
+            continue
+        if out["deadlineBefore"] is None:
+            out["deadlineBefore"] = job_deadline(name)
+        pod = runner_pod(name)
+        if pod is not None:
+            out["pod"] = pod_facts(pod)
+        if out["during"] is None and condition(obj, "RunnerReady").get("reason") == want_reason:
+            out["during"] = obj
+            out["duringView"] = operation_view(api, "backup", name)
+        if terminal(obj):
+            break
+        time.sleep(5)
+    out["deadlineAfter"] = job_deadline(name)
+    out["final"] = get_opt("backup", name) or obj
+    out["finalView"] = operation_view(api, "backup", name)
+    evidence.append(artifact(f"ops/{tag}.json", out))
+    return out
+
+
+def ca_missing_cluster() -> dict[str, Any]:
+    """The lab source, over TLS, with a CA ConfigMap that does not exist."""
+    return {
+        "apiVersion": "logweir.dev/v1alpha1",
+        "kind": "KafkaCluster",
+        "metadata": owned(OPS_CA_CLUSTER),
+        "spec": {
+            "bootstrapServers": [f"kafka-source.{FIXTURE_NS}.svc.cluster.local:9096"],
+            "auth": {
+                "mode": "scramSha512",
+                "username": "scram-user",
+                "secretRef": {"name": "source-scram"},
+                "tls": True,
+                "tlsCa": {"configMapKeyRef": {"name": OPS_MISSING_CA, "key": "ca.crt"}},
+            },
+            "role": "source",
+        },
+    }
+
+
+def impossible_limit_range() -> dict[str, Any]:
+    return {
+        "apiVersion": "v1",
+        "kind": "LimitRange",
+        "metadata": owned(OPS_LIMIT_RANGE),
+        "spec": {"limits": [{
+            "type": "Container",
+            "defaultRequest": {"memory": OPS_IMPOSSIBLE_MEMORY},
+            "default": {"memory": OPS_IMPOSSIBLE_MEMORY},
+        }]},
+    }
+
+
+def deny_put_policy(bucket: str, prefix: str) -> str:
+    """Read, list and write the bucket — EXCEPT a SEGMENT put under `prefix`
+    (`<prefix>/<backup_id>/topics/…`). The manifest the engine writes first is
+    allowed, so the refusal lands after it has read records."""
+    return json.dumps({
+        "Version": "2012-10-17",
+        "Statement": [
+            {"Effect": "Allow",
+             "Action": ["s3:GetObject", "s3:ListBucket", "s3:GetBucketLocation",
+                        "s3:PutObject"],
+             "Resource": [f"arn:aws:s3:::{bucket}", f"arn:aws:s3:::{bucket}/*"]},
+            {"Effect": "Deny", "Action": ["s3:PutObject"],
+             "Resource": [f"arn:aws:s3:::{bucket}/{prefix}/*/topics/*"]},
+        ],
+    })
+
+
+def mint_minio_user(user: str, policy: str, document: str, secret_name: str) -> None:
+    """A MinIO user of this run's with one policy, and the Secret naming it."""
+    password = mint()
+    run(KN + ["exec", MC_POD, "--", "/bin/sh", "-c",
+              f"printf '%s' '{document}' > /tmp/{policy}.json && "
+              f"mc admin policy create adm {policy} /tmp/{policy}.json >/dev/null 2>&1; "
+              f"mc admin user add adm {user} {password} >/dev/null 2>&1; "
+              f"mc admin policy attach adm {policy} --user {user} >/dev/null 2>&1; "
+              f"rm -f /tmp/{policy}.json; echo done"], check=False, timeout=120)
+    apply({"apiVersion": "v1", "kind": "Secret", "metadata": owned(secret_name),
+           "stringData": {"access-key-id": user, "secret-access-key": password}})
+
+
+def remove_minio_user(user: str, policy: str) -> dict[str, Any]:
+    """Remove a user and policy this run minted, and say whether they are gone."""
+    run(KN + ["exec", MC_POD, "--", "/bin/sh", "-c",
+              f"mc admin user remove adm {user} >/dev/null 2>&1; "
+              f"mc admin policy remove adm {policy} >/dev/null 2>&1; echo done"],
+        check=False, timeout=120)
+    users = run(KN + ["exec", MC_POD, "--", "mc", "admin", "user", "list", "adm", "--json"],
+                check=False, timeout=120).stdout
+    return {"user": user, "policy": policy, "userStillListed": f'"{user}"' in users}
+
+
+def operation_states() -> None:
+    """PLAT-14.1's mount failure, unschedulable pod and engine crash, live.
+
+    The mount-failure and engine-crash Backups run together (neither changes
+    anything namespace-wide); the unschedulable one runs after them, because
+    its LimitRange would otherwise give the other two pods an impossible
+    request and turn both into scheduling rows.
+    """
+    evidence: list[str] = []
+    binary = logweir_api_bin()
+    api = LoopbackApi(binary) if binary else None
+    if api is None:
+        log("NO logweir-api binary: the console-view clauses will read `None` and FAIL; set "
+            f"{API_BIN_ENV} or build `cargo build -p logweir-api`")
+    minted_user = False
+    try:
+        for name in (OPS_MOUNT_BACKUP, OPS_MOUNT_SECRET_BACKUP, OPS_ENGINE_BACKUP,
+                     OPS_UNSCHED_BACKUP, f"{OPS_ENGINE_BACKUP}-control"):
+            if get_opt("backup", name) is not None:
+                run(KN + ["delete", "backup", name, "--wait=true"], check=False)
+        if get_opt("limitrange", OPS_LIMIT_RANGE) is not None:
+            run(KN + ["delete", "limitrange", OPS_LIMIT_RANGE, "--wait=true"])
+        if get_opt("configmap", OPS_MISSING_CA) is not None:
+            raise RuntimeError(f"ConfigMap {OPS_MISSING_CA} exists; the mount row needs it absent")
+
+        # ---- fixtures -------------------------------------------------------
+        apply(ca_missing_cluster())
+        mint_minio_user(OPS_DENY_USER, OPS_DENY_POLICY,
+                        deny_put_policy(BUCKET_A, OPS_ENGINE_PREFIX), OPS_DENY_SECRET)
+        minted_user = True
+        deny_dest = destination(OPS_ENGINE_DEST, BUCKET_A, prefix=OPS_ENGINE_PREFIX)
+        deny_dest["spec"]["access"]["archiveWrite"]["secret"]["name"] = OPS_DENY_SECRET
+        apply(deny_dest)
+        wait_for("backupdestination", OPS_ENGINE_DEST,
+                 lambda o: condition(o, "Valid").get("status") == "True",
+                 seconds=180, what="Valid=True")
+        evidence.append(artifact("ops/00-fixtures.json", {
+            "caCluster": get("kafkacluster", OPS_CA_CLUSTER).get("spec"),
+            "absentConfigMap": OPS_MISSING_CA,
+            "denyDestination": get("backupdestination", OPS_ENGINE_DEST).get("spec"),
+            "denyPolicy": json.loads(deny_put_policy(BUCKET_A, OPS_ENGINE_PREFIX)),
+            "controller": controller_facts(),
+            "api": binary,
+        }))
+
+        # ---- mount failure + engine crash, together --------------------------
+        mount_obj = backup_object(OPS_MOUNT_BACKUP, "dest-a", TOPICS[:1])
+        mount_obj["spec"]["sourceRef"] = {"name": OPS_CA_CLUSTER}
+        mount_obj["spec"]["deadlineSeconds"] = OPS_MOUNT_DEADLINE
+        create(mount_obj)
+        crash_obj = backup_object(OPS_ENGINE_BACKUP, OPS_ENGINE_DEST, TOPICS[:1])
+        create(crash_obj)
+
+        crash = watch_run(OPS_ENGINE_BACKUP, "RunnerStarted", seconds=900, api=api,
+                          evidence=evidence, tag="engine-crash-watch")
+        crash_log = ""
+        if crash.get("pod"):
+            crash_log = redact(run(KN + ["logs", crash["pod"]["metadata"]["name"]],
+                                   check=False).stdout)
+        evidence.append(artifact("ops/engine-crash-pod.log", crash_log))
+        # THE FIXTURE CONTROL: the same source and topic, the same bucket, a
+        # full grant. Without it an engine failure could be the source's.
+        control = run_backup(f"{OPS_ENGINE_BACKUP}-control", "dest-a", TOPICS[:1])
+        evidence.append(artifact("ops/engine-crash-control.json", backup_facts(control)))
+        clauses = engine_crash_surfaced(crash["final"], crash["finalView"], crash_log, control)
+        fst = (crash["final"] or {}).get("status") or {}
+        check(
+            "ops-engine-crash-is-failed-operational",
+            "PLAT-14.1",
+            all(clauses.values()),
+            f"Backup {OPS_ENGINE_BACKUP} through {OPS_ENGINE_DEST}, whose archiveWrite user "
+            f"{OPS_DENY_USER} is denied s3:PutObject under {BUCKET_A}/{OPS_ENGINE_PREFIX}/: "
+            f"phase {fst.get('phase')!r}, exitCode {fst.get('exitCode')!r}, exitReason "
+            f"{fst.get('exitReason')!r}, RunnerReady "
+            f"{condition(crash['final'] or {}, 'RunnerReady').get('status')}/"
+            f"{condition(crash['final'] or {}, 'RunnerReady').get('reason')}, runnerPhase "
+            f"{json.dumps((fst.get('progress') or {}).get('runnerPhase'))}; the console view "
+            f"reads state {_view(crash['finalView']).get('state')!r} / "
+            f"{_view(crash['finalView']).get('stateReason')!r}, result "
+            f"{json.dumps(_view(crash['finalView']).get('result'))}, verification "
+            f"{(_view(crash['finalView']).get('verification') or {}).get('state')!r}. "
+            + "; ".join(f"{k}={v}" for k, v in clauses.items()),
+            evidence,
+        )
+
+        mount = watch_run(OPS_MOUNT_BACKUP, "VolumeMountFailed", seconds=OPS_MOUNT_DEADLINE + 120,
+                          api=api, evidence=evidence, tag="mount-failure-watch")
+        clauses = mount_failure_surfaced(mount["during"], mount["duringView"], mount["final"],
+                                         mount["finalView"], mount["deadlineBefore"],
+                                         mount["deadlineAfter"], OPS_MISSING_CA)
+        fst = (mount["final"] or {}).get("status") or {}
+        check(
+            "ops-mount-failure-is-volume-mount-failed",
+            "PLAT-14.1",
+            all(clauses.values()),
+            f"Backup {OPS_MOUNT_BACKUP} over KafkaCluster {OPS_CA_CLUSTER}, whose tlsCa names "
+            f"the absent ConfigMap {OPS_MISSING_CA}: while waiting RunnerReady="
+            f"{condition(mount['during'] or {}, 'RunnerReady').get('status')}/"
+            f"{condition(mount['during'] or {}, 'RunnerReady').get('reason')}, diagnostics "
+            f"{[(d.get('code'), (d.get('object') or {}).get('kind')) for d in diagnostics_of(mount['during'])]}"
+            f", view {_view(mount['duringView']).get('state')!r}/"
+            f"{_view(mount['duringView']).get('stateReason')!r}; Job deadline "
+            f"{mount['deadlineBefore']} -> {mount['deadlineAfter']}; terminal phase "
+            f"{fst.get('phase')!r} reason "
+            f"{condition(mount['final'] or {}, 'Failed').get('reason')!r} exitCode "
+            f"{fst.get('exitCode')!r}, view {_view(mount['finalView']).get('state')!r}/"
+            f"{_view(mount['finalView']).get('stateReason')!r}. "
+            + "; ".join(f"{k}={v}" for k, v in clauses.items()),
+            evidence,
+        )
+
+        # ---- mount failure of a projected SECRET, alone ----------------------
+        # This namespace's copy of the signing key goes for the length of ONE
+        # run (it is this run's object, checked), and comes back in the
+        # `finally`. Alone, because every runner pod mounts it.
+        signing = get_opt("secret", OPS_SIGNING_SECRET)
+        if signing is not None:
+            if (signing["metadata"].get("labels") or {}).get("logweir.dev/test-owner") != OWNER:
+                raise RuntimeError(f"refusing to delete Secret {OPS_SIGNING_SECRET}: not ours")
+            run(KN + ["delete", "secret", OPS_SIGNING_SECRET, "--wait=true"])
+        secret_obj = backup_object(OPS_MOUNT_SECRET_BACKUP, "dest-a", TOPICS[:1])
+        secret_obj["spec"]["deadlineSeconds"] = OPS_MOUNT_DEADLINE
+        create(secret_obj)
+        secret_run = watch_run(OPS_MOUNT_SECRET_BACKUP, "VolumeMountFailed",
+                               seconds=OPS_MOUNT_DEADLINE + 120, api=api, evidence=evidence,
+                               tag="mount-secret-watch")
+        copy_secret(OPS_SIGNING_SECRET)
+        clauses = mount_failure_surfaced(secret_run["during"], secret_run["duringView"],
+                                         secret_run["final"], secret_run["finalView"],
+                                         secret_run["deadlineBefore"],
+                                         secret_run["deadlineAfter"], OPS_SIGNING_SECRET,
+                                         code="SigningKeyMissing")
+        fst = (secret_run["final"] or {}).get("status") or {}
+        check(
+            "ops-mount-failure-secret-is-volume-mount-failed",
+            "PLAT-14.1",
+            all(clauses.values()),
+            f"Backup {OPS_MOUNT_SECRET_BACKUP} with this namespace's {OPS_SIGNING_SECRET} "
+            f"absent (the pod's projected `signing` Secret volume): while waiting RunnerReady="
+            f"{condition(secret_run['during'] or {}, 'RunnerReady').get('status')}/"
+            f"{condition(secret_run['during'] or {}, 'RunnerReady').get('reason')}, diagnostics "
+            f"{[(d.get('code'), (d.get('object') or {}).get('kind')) for d in diagnostics_of(secret_run['during'])]}"
+            f", view {_view(secret_run['duringView']).get('state')!r}/"
+            f"{_view(secret_run['duringView']).get('stateReason')!r}; Job deadline "
+            f"{secret_run['deadlineBefore']} -> {secret_run['deadlineAfter']}; terminal phase "
+            f"{fst.get('phase')!r} reason "
+            f"{condition(secret_run['final'] or {}, 'Failed').get('reason')!r} exitCode "
+            f"{fst.get('exitCode')!r}, view {_view(secret_run['finalView']).get('state')!r}/"
+            f"{_view(secret_run['finalView']).get('stateReason')!r}. "
+            + "; ".join(f"{k}={v}" for k, v in clauses.items()),
+            evidence,
+        )
+
+        # ---- unschedulable, alone -------------------------------------------
+        apply(impossible_limit_range())
+        unsched_obj = backup_object(OPS_UNSCHED_BACKUP, "dest-a", TOPICS[:1])
+        unsched_obj["spec"]["deadlineSeconds"] = OPS_UNSCHED_DEADLINE
+        create(unsched_obj)
+        # The request is written into the pod at ADMISSION, so the LimitRange
+        # goes as soon as the pod exists: nothing else here is scheduled under it.
+        pod_deadline = time.time() + 180
+        while time.time() < pod_deadline and runner_pod(OPS_UNSCHED_BACKUP) is None:
+            time.sleep(3)
+        run(KN + ["delete", "limitrange", OPS_LIMIT_RANGE, "--wait=true"], check=False)
+        unsched = watch_run(OPS_UNSCHED_BACKUP, "PodUnschedulable",
+                            seconds=OPS_UNSCHED_DEADLINE + 240, api=api, evidence=evidence,
+                            tag="unschedulable-watch")
+        clauses = unschedulable_surfaced(unsched["during"], unsched["duringView"],
+                                         unsched["final"], unsched["finalView"],
+                                         unsched["deadlineBefore"], unsched["deadlineAfter"],
+                                         OPS_UNSCHED_DEADLINE, unsched["pod"])
+        fst = (unsched["final"] or {}).get("status") or {}
+        check(
+            "ops-unschedulable-pod-is-pod-unschedulable",
+            "PLAT-14.1",
+            all(clauses.values()),
+            f"Backup {OPS_UNSCHED_BACKUP} under a LimitRange defaulting "
+            f"{OPS_IMPOSSIBLE_MEMORY} of memory (deleted once the pod carried it): while "
+            f"waiting RunnerReady="
+            f"{condition(unsched['during'] or {}, 'RunnerReady').get('status')}/"
+            f"{condition(unsched['during'] or {}, 'RunnerReady').get('reason')} with message "
+            f"{condition(unsched['during'] or {}, 'RunnerReady').get('message')!r}, view "
+            f"{_view(unsched['duringView']).get('state')!r}/"
+            f"{_view(unsched['duringView']).get('stateReason')!r}; Job deadline "
+            f"{unsched['deadlineBefore']} -> {unsched['deadlineAfter']} (spec "
+            f"{OPS_UNSCHED_DEADLINE}); terminal phase {fst.get('phase')!r} reason "
+            f"{condition(unsched['final'] or {}, 'Failed').get('reason')!r} exitCode "
+            f"{fst.get('exitCode')!r}, view {_view(unsched['finalView']).get('state')!r}/"
+            f"{_view(unsched['finalView']).get('stateReason')!r}. "
+            + "; ".join(f"{k}={v}" for k, v in clauses.items()),
+            evidence,
+        )
+    finally:
+        run(KN + ["delete", "limitrange", OPS_LIMIT_RANGE, "--ignore-not-found=true"],
+            check=False)
+        if get_opt("secret", OPS_SIGNING_SECRET) is None:
+            copy_secret(OPS_SIGNING_SECRET)
+        if api is not None:
+            api.stop()
+        if minted_user:
+            evidence.append(artifact("ops/99-minio-user-cleanup.json",
+                                     remove_minio_user(OPS_DENY_USER, OPS_DENY_POLICY)))
+
+
+# ---------------------------------------------------------------------------
+# harness-rows-11 — PLAT-14.2's notification transport failure
+# ---------------------------------------------------------------------------
+#
+# D3 §15 L5's last sentence: "with the sink scaled to zero,
+# `alerts[].delivery.state=Failed` after 3 attempts, `NotificationsDelivered=
+# False`, and every Backup's `resourceVersion` … unchanged by the protection
+# controller". The sink here is a Service of this namespace with NO endpoints
+# — a webhook whose backend is scaled to zero — so every POST is refused at the
+# transport and nothing about the event itself is wrong.
+
+TRANSPORT_POLICY = "protect-transport"
+TRANSPORT_SCHEDULE = "transport-runs"
+TRANSPORT_POINT = "transport-point"
+TRANSPORT_SINK_SERVICE = f"{OWNER}-sink-down"
+TRANSPORT_URL_SECRET = f"{OWNER}-sink-down-url"
+# `weirkeeper::protection::MAX_DELIVERY_ATTEMPTS` and `DELIVERY_BACKOFF_SECONDS`.
+DELIVERY_ATTEMPTS = 3
+DELIVERY_BACKOFF = (60, 300)
+# What `logweir notify deliver` logs for a POST the transport refused
+# (`notify.rs::redact_ureq_error`), as opposed to the https-only refusal made
+# BEFORE a dial, which never says it.
+TRANSPORT_ERROR_TEXT = "transport error"
+
+
+def every_backup_unchanged(before: dict[str, str], after: dict[str, str]) -> bool:
+    """THE NO-REWRITE CLAUSE, shared: every Backup that existed before the
+    protection controller acted still carries the resourceVersion it had.
+
+    `notify_delivery_ok` reads the same comparison; a delivery that succeeded
+    and one that failed owe the Backups exactly the same nothing.
+    """
+    return bool(before) and all(after.get(name) == rv for name, rv in before.items())
+
+
+def backup_versions() -> dict[str, str]:
+    return {b["metadata"]["name"]: b["metadata"]["resourceVersion"] for b in lst("backups")}
+
+
+def _epoch(value: str | None) -> float | None:
+    if not value:
+        return None
+    try:
+        return dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=dt.timezone.utc).timestamp()
+    except ValueError:
+        return None
+
+
+def transport_failure_recorded(policy: dict[str, Any], jobs: dict[str, dict[str, Any]],
+                               jobs_after_quiet: int, backups_before: dict[str, str],
+                               backups_after: dict[str, str], health_at_open: str | None,
+                               hatch_open: bool) -> dict[str, bool]:
+    """A refused transport: three attempts on the policy's backoff, the failure
+    recorded where D3 §3.4 puts it, and nothing else rewritten.
+
+    `jobs` is every delivery Job the policy owned during the window, by name,
+    each `{created, exitCode, log}`. The retry schedule is read off the Jobs'
+    own creation instants, because the Jobs are the attempts.
+    """
+    status = policy.get("status") or {}
+    alerts = status.get("alerts") or []
+    delivered = condition(policy, "NotificationsDelivered")
+    delivery = ((alerts[0] if len(alerts) == 1 else {}).get("delivery") or {})
+    by_attempt: dict[int, dict[str, Any]] = {}
+    transitions: set[str] = set()
+    for name, job in jobs.items():
+        head, _, attempt = name.rpartition("-")
+        transitions.add(head)
+        if attempt.isdigit():
+            by_attempt[int(attempt)] = job
+    created = [_epoch(by_attempt[a].get("created")) for a in sorted(by_attempt)]
+    gaps = [b - a for a, b in zip(created, created[1:]) if a is not None and b is not None]
+    return {
+        "the controller dials plaintext sinks here (the hatch is open), so a failure is the "
+        "transport's and not the https-only refusal": hatch_open,
+        "exactly one alert, open, whose delivery is Failed":
+            len(alerts) == 1 and alerts[0].get("state") == "Open"
+            and delivery.get("state") == "Failed",
+        f"after exactly {DELIVERY_ATTEMPTS} attempts":
+            delivery.get("attempts") == DELIVERY_ATTEMPTS,
+        "lastError names the webhook that did not accept":
+            "webhook:failed" in str(delivery.get("lastError") or ""),
+        "NotificationsDelivered=False/DeliveryFailed":
+            delivered.get("status") == "False" and delivered.get("reason") == "DeliveryFailed",
+        f"one transition, {DELIVERY_ATTEMPTS} delivery Jobs, attempts 1..{DELIVERY_ATTEMPTS}":
+            len(transitions) == 1
+            and sorted(by_attempt) == list(range(1, DELIVERY_ATTEMPTS + 1)),
+        "every attempt exited 1 with notify-result=webhook:failed and a transport error":
+            len(by_attempt) == DELIVERY_ATTEMPTS and all(
+                j.get("exitCode") == 1
+                and "notify-result=webhook:failed" in str(j.get("log") or "")
+                and TRANSPORT_ERROR_TEXT in str(j.get("log") or "")
+                for j in by_attempt.values()),
+        f"the retries waited the policy's backoff ({DELIVERY_BACKOFF[0]} s, then "
+        f"{DELIVERY_BACKOFF[1]} s)":
+            len(gaps) == len(DELIVERY_BACKOFF)
+            and all(g >= want - 2 for g, want in zip(gaps, DELIVERY_BACKOFF)),
+        "no further attempt once the budget was spent": jobs_after_quiet == DELIVERY_ATTEMPTS,
+        "the protection verdict the alert opened on is unchanged by the failure":
+            bool(health_at_open) and status.get("health") == health_at_open,
+        "every Backup keeps its resourceVersion (the failure rewrites no result)":
+            every_backup_unchanged(backups_before, backups_after),
+    }
+
+
+def sink_down_service() -> dict[str, Any]:
+    """A webhook backend scaled to zero: a Service whose selector matches no pod."""
+    return {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": owned(TRANSPORT_SINK_SERVICE),
+        "spec": {
+            "selector": {"app": f"{OWNER}-no-such-sink"},
+            "ports": [{"port": SINK_PORT, "targetPort": SINK_PORT}],
+        },
+    }
+
+
+def transport_policy() -> dict[str, Any]:
+    body = protection_policy(TRANSPORT_POLICY, max_age=NOTIFY_MAX_AGE,
+                             schedule=TRANSPORT_SCHEDULE)
+    protects = body["spec"]["protects"]
+    protects.pop("catalogRef", None)
+    body["spec"]["objectives"]["requireCatalogAvailability"] = False
+    body["spec"]["notifications"]["kinds"] = ["Staleness"]
+    body["spec"]["notifications"]["routes"] = [
+        {"name": "sink-down",
+         "webhook": {"urlSecretRef": {"name": TRANSPORT_URL_SECRET, "key": "url"}}}
+    ]
+    return body
+
+
+def delivery_jobs(policy_uid: str, seen: dict[str, dict[str, Any]]) -> None:
+    """Record every delivery Job the policy owns, with its pod's exit and log,
+    before its TTL can take it."""
+    for job in lst("jobs"):
+        if not any(o.get("uid") == policy_uid
+                   for o in (job["metadata"].get("ownerReferences") or [])):
+            continue
+        name = job["metadata"]["name"]
+        entry = seen.setdefault(name, {"created": job["metadata"].get("creationTimestamp")})
+        if entry.get("exitCode") is not None:
+            continue
+        pods = lst("pods", selector=f"batch.kubernetes.io/job-name={name}")
+        for pod in pods:
+            for cs in (pod.get("status") or {}).get("containerStatuses") or []:
+                term = (cs.get("state") or {}).get("terminated")
+                if term:
+                    entry["exitCode"] = term.get("exitCode")
+                    entry["log"] = redact(run(KN + ["logs", pod["metadata"]["name"]],
+                                              check=False).stdout)[-4000:]
+
+
+def notify_transport() -> None:
+    """PLAT-14.2's notification transport failure, on a policy of its own.
+
+    Its own schedule, point, sink and policy, so its alert ledger is nobody
+    else's: the point is a manual run OF `transport-runs` (the membership
+    `backup_object` explains), aged past the CRD's floor objective so the
+    policy opens exactly one `Staleness` alert, whose deliveries all go to a
+    Service with no endpoints.
+    """
+    evidence: list[str] = []
+    for name in (TRANSPORT_POLICY,):
+        if get_opt("protectionpolicy", name) is not None:
+            run(KN + ["delete", "protectionpolicy", name, "--wait=true"])
+    apply(sink_down_service())
+    apply({"apiVersion": "v1", "kind": "Secret", "metadata": owned(TRANSPORT_URL_SECRET),
+           "stringData": {"url": f"http://{TRANSPORT_SINK_SERVICE}.{NS}.svc.cluster.local:"
+                                 f"{SINK_PORT}/alerts"}})
+    if get_opt("backupschedule", TRANSPORT_SCHEDULE) is None:
+        apply(schedule_object(TRANSPORT_SCHEDULE, "dest-a"))
+    run(KN + ["patch", "backupschedule", TRANSPORT_SCHEDULE, "--type=merge",
+              "-p", json.dumps({"spec": {"suspend": True}})])
+    if get_opt("backup", TRANSPORT_POINT) is not None:
+        run(KN + ["delete", "backup", TRANSPORT_POINT, "--wait=true"])
+    member = run_backup(TRANSPORT_POINT, "dest-a",
+                        schedule=schedule_ref(TRANSPORT_SCHEDULE))
+    point_written = time.time()
+    endpoints = get_opt("endpoints", TRANSPORT_SINK_SERVICE) or {}
+    facts = controller_facts()
+    hatch_open = hatch_is_open(facts.get("allowInsecureSinks"))
+    evidence.append(artifact("transport/00-fixtures.json", {
+        "member": backup_facts(member), "sinkService": get("service", TRANSPORT_SINK_SERVICE),
+        "sinkEndpoints": endpoints.get("subsets") or [], "controller": facts,
+    }))
+    # Aged past the objective FIRST, so the policy's first verdict is `Stale`
+    # and the alert opens on it — the verdict the failure must not rewrite.
+    time.sleep(max(0.0, point_written + NOTIFY_MAX_AGE + 20 - time.time()))
+    backups_before = backup_versions()
+    created = apply(transport_policy())
+    policy_uid = created["metadata"]["uid"]
+    jobs: dict[str, dict[str, Any]] = {}
+    health_at_open: str | None = None
+    policy: dict[str, Any] = {}
+    # Three attempts: t0, t0+60 s, t0+60+300 s, each a Job that runs a few
+    # seconds, plus the evaluation cadence. Bounded, and the row says so.
+    deadline = time.time() + 900
+    while time.time() < deadline:
+        policy = get("protectionpolicy", TRANSPORT_POLICY)
+        status = policy.get("status") or {}
+        alerts = status.get("alerts") or []
+        if health_at_open is None and alerts:
+            health_at_open = status.get("health")
+        delivery_jobs(policy_uid, jobs)
+        delivery = ((alerts[0] if alerts else {}).get("delivery") or {})
+        if (delivery.get("attempts") or 0) >= DELIVERY_ATTEMPTS and \
+                condition(policy, "NotificationsDelivered").get("reason") == "DeliveryFailed":
+            break
+        time.sleep(10)
+    # ONE MORE EVALUATION INTERVAL AND A HALF: no fourth attempt may appear.
+    time.sleep(90)
+    delivery_jobs(policy_uid, jobs)
+    policy = get("protectionpolicy", TRANSPORT_POLICY)
+    backups_after = backup_versions()
+    member_after = get("backup", TRANSPORT_POINT)
+    clauses = transport_failure_recorded(policy, jobs, len(jobs), backups_before,
+                                         backups_after, health_at_open, hatch_open)
+    clauses["the member point's own verdict is unchanged"] = (
+        verdict_of(member_after) == verdict_of(member))
+    evidence.append(artifact("transport/policy.json", policy))
+    evidence.append(artifact("transport/delivery-jobs.json", jobs))
+    evidence.append(artifact("transport/backups.json",
+                             {"before": backups_before, "after": backups_after,
+                              "memberBefore": backup_facts(member),
+                              "memberAfter": backup_facts(member_after)}))
+    status = policy.get("status") or {}
+    alerts = status.get("alerts") or []
+    check(
+        "notify-transport-failure-is-recorded-and-rewrites-nothing",
+        "PLAT-14.2",
+        all(clauses.values()),
+        f"the policy's only route posts to {TRANSPORT_SINK_SERVICE} (a Service with no "
+        f"endpoints: {endpoints.get('subsets') or []}); health {status.get('health')!r} "
+        f"(at open {health_at_open!r}); alerts "
+        f"{[{k: a.get(k) for k in ('kind', 'state', 'delivery')} for a in alerts]}; "
+        f"NotificationsDelivered="
+        f"{condition(policy, 'NotificationsDelivered').get('status')}/"
+        f"{condition(policy, 'NotificationsDelivered').get('reason')}; delivery Jobs "
+        f"{ {n: (j.get('created'), j.get('exitCode')) for n, j in sorted(jobs.items())} }. "
+        + "; ".join(f"{k}={v}" for k, v in clauses.items()),
+        evidence,
+    )
+    run(KN + ["delete", "protectionpolicy", TRANSPORT_POLICY, "--wait=true"], check=False)
+
+
+# ---------------------------------------------------------------------------
+# harness-rows-11 — PLAT-14.3's unavailable target and failed verification
+# ---------------------------------------------------------------------------
+#
+# Two more arms in the rehearsal family, in a phase of their own so they do not
+# lengthen `rehearsal` and so a slot of theirs can never make one of its arms
+# `TargetBusy`. Both use the rehearsal's own fixtures (`rehearsal_trust`,
+# `rehearsal_arm`, `mint_standing` — the shipped signer, never python).
+#
+# * UNAVAILABLE TARGET. The arm targets `rehearsal-target-alias`, a
+#   KafkaCluster of this run's whose bootstrap is an ExternalName Service of
+#   this run's pointing at the lab's scratch broker. The standing authorization
+#   is minted while it is reachable (the scope signs the cluster id it
+#   reports). The alias is then CUT — the Service is repointed at a name that
+#   does not resolve — and the probe re-run, so the cluster reports
+#   `reachable: false`: the broker is unreachable from this namespace and
+#   nothing about the shared release changed. D3 §4.1/§13: the due slot is
+#   skipped `TargetUnavailable` and CONSUMED (REHEARSAL-SKIP-DEFERS-SLOT's
+#   rule: every reason consumes its slot). The alias is then restored, and the
+#   next rehearsal must be for a LATER slot — a skipped slot is never fired
+#   late.
+# * FAILED VERIFICATION. The arm's point is a Backup of its own, and one of its
+#   archived segments is rewritten after the catalog made it selectable: the
+#   KBAK header's two RESERVED bytes are changed and the footer CRC32 is
+#   recomputed, so every decoder reads the same records (the engine restores
+#   them, the sample fingerprints them) but the object no longer hashes to the
+#   `sha256` its manifest recorded. Phase 7's check (a) — segment sha256 against
+#   the manifest (`phase7_verify.rs::segment_evidence`) — is the only thing that
+#   can see it, which makes this a verification failure and nothing else:
+#   outcome `fail-integrity`, exit 2, a signed scorecard. D3 §13: "a rehearsal
+#   Restore with `outcome: fail-integrity` sets `RehearsalHealthy=False`".
+
+REHEARSAL_UNAVAILABLE_SCHEDULE = "l6-unavailable"
+REHEARSAL_VERIFY_SCHEDULE = "l6-failed-verify"
+REHEARSAL_ALIAS_TARGET = "rehearsal-target-alias"
+REHEARSAL_ALIAS_SERVICE = f"{OWNER}-target-alias"
+REHEARSAL_ALIAS_REAL = f"{TARGET_DEPLOY}.{FIXTURE_NS}.svc.cluster.local"
+REHEARSAL_ALIAS_CUT = f"{OWNER_TAG}-target-gone.invalid"
+REHEARSAL_FAULT_POINT_SCHEDULE = "l6f-points"
+REHEARSAL_FAULT_CATALOG = "l6f-cat"
+REHEARSAL_FAULT_POINT = "l6f-point"
+KBAK_HEADER = 32
+KBAK_FOOTER = 8
+
+
+def kbak_crc_ok(data: bytes) -> bool:
+    """A KBAK v1 segment's footer CRC32 matches every byte before it
+    (`logweir-engine-oso/src/kbak.rs`, upstream `format.rs:44-46`)."""
+    import zlib
+    if len(data) < KBAK_HEADER + KBAK_FOOTER or data[:4] != b"KBAK" or data[-4:] != b"BKAE":
+        return False
+    tail = len(data) - KBAK_FOOTER
+    return int.from_bytes(data[tail:tail + 4], "little") == (zlib.crc32(data[:tail]) & 0xFFFFFFFF)
+
+
+def tamper_kbak_reserved(data: bytes) -> bytes:
+    """The same records, different bytes: change the header's reserved field
+    (bytes 6..8) and re-seal the CRC. Refuses anything that is not a sealed
+    KBAK v1 segment, so a tamper can never be a corruption the decoder would
+    reject (that would be a different row — an engine refusal, not a failed
+    verification)."""
+    import zlib
+    if not kbak_crc_ok(data) or data[4] != 1:
+        raise ValueError("not a CRC-sealed KBAK v1 segment")
+    marker = b"LW" if data[6:8] != b"LW" else b"WL"
+    body = data[:6] + marker + data[8:len(data) - KBAK_FOOTER]
+    crc = (zlib.crc32(body) & 0xFFFFFFFF).to_bytes(4, "little")
+    return body + crc + b"BKAE"
+
+
+def cat_bytes(bucket: str, key: str) -> bytes:
+    """An object's exact bytes (`cat` decodes text and is not binary-safe)."""
+    out = run(KN + ["exec", MC_POD, "--", "/bin/sh", "-c",
+                    f"mc cat local/{bucket}/{key} | base64 | tr -d '\\n'"], timeout=120).stdout
+    return base64.b64decode(out.strip())
+
+
+def put_bytes(bucket: str, key: str, body: bytes) -> None:
+    b64 = base64.b64encode(body).decode()
+    run(KN + ["exec", MC_POD, "--", "/bin/sh", "-c",
+              f"printf '%s' '{b64}' | base64 -d > /tmp/put.bin && mc cp --quiet /tmp/put.bin "
+              f"local/{bucket}/{key} >/dev/null && rm -f /tmp/put.bin"], timeout=120)
+
+
+def object_key(prefix: str, manifest_relative: str) -> str:
+    """A manifest's segment key as a bucket key: under the storage prefix."""
+    head = prefix.strip("/")
+    if not head or manifest_relative.startswith(head + "/"):
+        return manifest_relative
+    return f"{head}/{manifest_relative}"
+
+
+def point_segments(bucket: str, manifest_key: str, topic: str) -> list[dict[str, Any]]:
+    """Every segment the point's manifest records for one topic: key and sha256."""
+    manifest = json.loads(cat_bytes(bucket, manifest_key))
+    out = []
+    for t in manifest.get("topics") or []:
+        if t.get("name") != topic:
+            continue
+        for part in t.get("partitions") or []:
+            for seg in part.get("segments") or []:
+                out.append({"key": seg.get("key"), "sha256": seg.get("sha256"),
+                            "records": seg.get("record_count")})
+    return out
+
+
+def alias_service(external: str) -> dict[str, Any]:
+    return {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": owned(REHEARSAL_ALIAS_SERVICE),
+        "spec": {"type": "ExternalName", "externalName": external,
+                 "ports": [{"port": 9096, "targetPort": 9096}]},
+    }
+
+
+def alias_target_cluster() -> dict[str, Any]:
+    return {
+        "apiVersion": "logweir.dev/v1alpha1",
+        "kind": "KafkaCluster",
+        "metadata": owned(REHEARSAL_ALIAS_TARGET),
+        "spec": {
+            "bootstrapServers": [f"{REHEARSAL_ALIAS_SERVICE}.{NS}.svc.cluster.local:9096"],
+            "auth": {"mode": "scramSha512", "username": "scram-user",
+                     "secretRef": {"name": "target-scram"}, "tls": False},
+            "role": "target",
+        },
+    }
+
+
+def reprobe(cluster: str, want: bool, *, seconds: int = 300) -> dict[str, Any] | None:
+    """Delete this cluster's FINISHED probe Job (owned by it, checked) so the
+    controller probes again now rather than at the Job's TTL, and wait for
+    `status.reachable == want`."""
+    obj = get("kafkacluster", cluster)
+    uid = obj["metadata"]["uid"]
+    job = get_opt("job", f"logweir-probe-{cluster}")
+    if job is not None and any(o.get("uid") == uid
+                               for o in (job["metadata"].get("ownerReferences") or [])):
+        run(KN + ["delete", "job", f"logweir-probe-{cluster}", "--wait=true"], check=False)
+    return settle("kafkacluster", cluster,
+                  lambda o: (o.get("status") or {}).get("reachable") is want,
+                  seconds=seconds, what=f"status.reachable == {want}")
+
+
+def unavailable_target_consumes_the_slot(observations: list[dict[str, Any]],
+                                         restore_slots: dict[str, str],
+                                         cut_seen: bool, restored_seen: bool,
+                                         period: int = 60) -> tuple[str, dict[str, bool]]:
+    """D3 §4.1/§13: an unreachable target is a recorded `TargetUnavailable`
+    skip that CONSUMES its slot, and a later slot still fires.
+
+    `observations` are reads of the schedule while the arm was unsuspended,
+    each `{at, skip, lastScheduledSlot, ready}`; `restore_slots` is every
+    Restore the arm created, name -> slot. NOT-REACHED when the fixture never
+    made the target unreachable, or never made it reachable again (then "a
+    later slot fired" cannot be asked).
+    """
+    skips = [o for o in observations if (o.get("skip") or {}).get("reason") == "TargetUnavailable"]
+    slots = sorted({str(o["skip"].get("slot") or "") for o in skips})
+
+    def epoch(slot: str) -> float | None:
+        try:
+            return slot_epoch(slot)
+        except ValueError:
+            return None
+
+    last = max((e for e in (epoch(s) for s in slots) if e is not None), default=None)
+    premise = {
+        "the target KafkaCluster reported reachable: false before the slot": cut_seen,
+        "and reachable: true again afterwards": restored_seen,
+    }
+    clauses = {
+        "a TargetUnavailable skip was recorded": bool(skips),
+        "every such skip names a DUE slot — a minute boundary no later than the read":
+            bool(skips) and all(
+                (epoch(str(o["skip"].get("slot") or "")) or -1) % period == 0
+                and (epoch(str(o["skip"].get("slot") or "")) or float("inf")) <= o["at"]
+                for o in skips),
+        "the Ready message says why — the target does not report reachable":
+            any("reachable" in str(o.get("ready") or "") for o in skips),
+        "lastScheduledSlot advanced to the skipped slot (consumed, not deferred)":
+            bool(skips) and all(
+                (epoch(str(o.get("lastScheduledSlot") or "")) or -1)
+                >= (epoch(str(o["skip"].get("slot") or "")) or float("inf"))
+                for o in skips),
+        "no Restore was ever created for a slot recorded as skipped":
+            not any(sl in slots for sl in restore_slots.values()),
+        "once the target was back, a LATER slot fired a rehearsal":
+            last is not None and any((epoch(sl) or 0) > last for sl in restore_slots.values()),
+    }
+    if not all(premise.values()):
+        return "NOT-REACHED", {**premise, **clauses}
+    return ("PASS" if all(clauses.values()) else "FAIL"), {**premise, **clauses}
+
+
+def failed_verification_is_a_failed_rehearsal(restore: dict[str, Any],
+                                              schedule: dict[str, Any],
+                                              tampered: list[dict[str, Any]],
+                                              view: dict[str, Any] | None
+                                              ) -> tuple[str, dict[str, bool]]:
+    """A rehearsal whose restore FAILED VERIFICATION is a failed rehearsal.
+
+    Premise: the rehearsal Restore was admitted and its runner reported an exit
+    code — otherwise the verification never ran and the row is NOT-REACHED
+    (on `f49849d`, REHEARSAL-PLAN-AUTH-PLAINTEXT refuses admission with
+    `ConnectionPlanMismatch` first).
+    """
+    st = (restore or {}).get("status") or {}
+    sst = (schedule or {}).get("status") or {}
+    name = ((restore or {}).get("metadata") or {}).get("name")
+    healthy = condition(schedule or {}, "RehearsalHealthy")
+    v = view or {}
+    premise = {
+        "the rehearsal Restore was admitted (a runner Job)": bool((st.get("jobRef") or {}).get("name")),
+        "and its runner reported an exit code": st.get("exitCode") is not None,
+    }
+    clauses = {
+        "the tampered segment still decodes (CRC sealed) and no longer hashes to its manifest "
+        "sha256": bool(tampered) and all(t.get("crcOk") and t.get("sha256After")
+                                         != t.get("manifestSha256") for t in tampered),
+        "the Restore is Failed with exit 2 and outcome fail-integrity":
+            st.get("phase") == "Failed" and st.get("exitCode") == 2
+            and st.get("outcome") == "fail-integrity",
+        "the failure is signed evidence that verifies (Valid)":
+            ((st.get("evidence") or {}).get("verification") or {}).get("result") == "Valid",
+        "the schedule records it in lastFailed": ((sst.get("lastFailed") or {}).get("restoreRef")
+                                                  or {}).get("name") == name and bool(name),
+        "and never as lastSucceeded": ((sst.get("lastSucceeded") or {}).get("restoreRef")
+                                       or {}).get("name") != name,
+        "RehearsalHealthy=False/Failed":
+            healthy.get("status") == "False" and healthy.get("reason") == "Failed",
+        "the console view of the Restore says failed / notPass":
+            v.get("state") == "failed" and (v.get("result") or {}).get("status") == "notPass",
+    }
+    if not all(premise.values()):
+        return "NOT-REACHED", {**premise, **clauses}
+    return ("PASS" if all(clauses.values()) else "FAIL"), {**premise, **clauses}
+
+
+def rehearsal_faults() -> None:
+    """PLAT-14.3's unavailable target and failed verification. CLUSTER LOCK
+    (it rebuilds this namespace's TrustPolicy, as `rehearsal` does)."""
+    evidence: list[str] = []
+    arms: dict[str, str] = {}
+    work: pathlib.Path | None = None
+    approver_key: dict[str, Any] | None = None
+    retired_key: dict[str, Any] | None = None
+    binary = logweir_api_bin()
+    api = LoopbackApi(binary) if binary else None
+    try:
+        work = pathlib.Path(tempfile.mkdtemp(prefix=f"{OWNER}-l6f-", dir="/tmp"))
+        work.chmod(0o700)
+        approver_key = mint_signing_key(f"{OWNER}-l6f-approver")
+        retired_key = mint_signing_key(f"{OWNER}-l6f-retired")
+        target = rehearsal_target_cluster()
+        target_cluster_id = target["status"]["clusterId"]
+        rehearsal_trust(target_cluster_id, approver_key, retired_key)
+
+        # ---- arm A: an unavailable target -----------------------------------
+        apply(alias_service(REHEARSAL_ALIAS_REAL))
+        apply(alias_target_cluster())
+        alias = reprobe(REHEARSAL_ALIAS_TARGET, True)
+        alias_id = ((alias or {}).get("status") or {}).get("clusterId")
+        evidence.append(artifact("rehearsal-faults/00-alias.json",
+                                 {"alias": alias, "targetClusterId": target_cluster_id}))
+        if alias is None or alias_id != target_cluster_id:
+            record("rehearsal-unavailable-target-skips-and-consumes-the-slot", "PLAT-14.3",
+                   "NOT-REACHED",
+                   f"the alias KafkaCluster {REHEARSAL_ALIAS_TARGET} never reported the lab "
+                   f"target's clusterId ({alias_id!r} vs {target_cluster_id!r}), so no "
+                   f"standing authorization could name it", evidence)
+        else:
+            schedule, approval = rehearsal_arm(
+                REHEARSAL_UNAVAILABLE_SCHEDULE, cron=REHEARSAL_FAST_CRON,
+                key=approver_key["private"], work=work, target_cluster_id=target_cluster_id,
+                arms=arms, target=REHEARSAL_ALIAS_TARGET)
+            verified = condition(get("approval", approval), "Verified").get("status") == "True"
+            apply(alias_service(REHEARSAL_ALIAS_CUT))
+            cut = reprobe(REHEARSAL_ALIAS_TARGET, False)
+            observations: list[dict[str, Any]] = []
+            unsuspend("rehearsalschedule", REHEARSAL_UNAVAILABLE_SCHEDULE)
+            restored = None
+            # Watch the cut target through at least two slots, then restore it
+            # and watch until a later slot fires, bounded.
+            deadline = time.time() + 900
+            restore_after = time.time() + 150
+            while time.time() < deadline:
+                live = get("rehearsalschedule", REHEARSAL_UNAVAILABLE_SCHEDULE)
+                st = live.get("status") or {}
+                observations.append({"at": time.time(), "skip": st.get("lastSkipped"),
+                                     "lastScheduledSlot": st.get("lastScheduledSlot"),
+                                     "ready": ready_message(live),
+                                     "reachable": ((get_opt("kafkacluster",
+                                                            REHEARSAL_ALIAS_TARGET) or {})
+                                                   .get("status") or {}).get("reachable")})
+                if restored is None and time.time() >= restore_after and any(
+                        (o.get("skip") or {}).get("reason") == "TargetUnavailable"
+                        for o in observations):
+                    apply(alias_service(REHEARSAL_ALIAS_REAL))
+                    restored = reprobe(REHEARSAL_ALIAS_TARGET, True)
+                    if restored is None:
+                        break
+                if restored is not None and len(rehearsal_restore_slots(
+                        REHEARSAL_UNAVAILABLE_SCHEDULE)) >= 1:
+                    break
+                time.sleep(5)
+            slots = rehearsal_restore_slots(REHEARSAL_UNAVAILABLE_SCHEDULE)
+            quiesce_arm(REHEARSAL_UNAVAILABLE_SCHEDULE, evidence)
+            verdict, clauses = unavailable_target_consumes_the_slot(
+                observations, slots, cut is not None, restored is not None)
+            clauses["the arm's standing Approval was Verified=True"] = verified
+            if not verified:
+                verdict = "NOT-REACHED"
+            evidence.append(artifact("rehearsal-faults/01-unavailable.json", {
+                "schedule": schedule["metadata"]["name"], "uid": schedule["metadata"]["uid"],
+                "observations": observations, "restoreSlots": slots, "cut": cut,
+                "restored": restored, "verdict": verdict, "clauses": clauses}))
+            record("rehearsal-unavailable-target-skips-and-consumes-the-slot", "PLAT-14.3",
+                   verdict,
+                   f"{REHEARSAL_UNAVAILABLE_SCHEDULE} (one-minute cron) targets "
+                   f"{REHEARSAL_ALIAS_TARGET}; cut via Service {REHEARSAL_ALIAS_SERVICE} -> "
+                   f"{REHEARSAL_ALIAS_CUT}: skips "
+                   f"{sorted({json.dumps(o['skip'], sort_keys=True) for o in observations if o.get('skip')})}"
+                   f"; Restores by slot {slots}. "
+                   + "; ".join(f"{k}={v}" for k, v in clauses.items()), evidence)
+
+        # ---- arm B: a failed verification ------------------------------------
+        point = rehearsal_point(REHEARSAL_FAULT_POINT_SCHEDULE, REHEARSAL_FAULT_CATALOG,
+                                REHEARSAL_FAULT_POINT)
+        entry = point.get("entry") or {}
+        tampered: list[dict[str, Any]] = []
+        if not point.get("selectable") or not entry.get("manifestKey"):
+            record("rehearsal-failed-verification-is-a-failed-rehearsal", "PLAT-14.3",
+                   "NOT-REACHED",
+                   f"the arm's own point {point.get('pointId')} is not selectable in "
+                   f"{REHEARSAL_FAULT_CATALOG} ({json.dumps(entry)[:400]}), so no slot could "
+                   f"select it", evidence)
+        else:
+            for seg in point_segments(BUCKET_A, entry["manifestKey"], REHEARSAL_TOPIC):
+                # A manifest names its segments RELATIVE TO the storage prefix
+                # (`<backup_id>/topics/...`), measured on this lab.
+                key = object_key(DEST_PREFIX, seg["key"])
+                before = cat_bytes(BUCKET_A, key)
+                after = tamper_kbak_reserved(before)
+                put_bytes(BUCKET_A, key, after)
+                reread = cat_bytes(BUCKET_A, key)
+                tampered.append({"key": key, "manifestSha256": seg["sha256"],
+                                 "sha256Before": hashlib.sha256(before).hexdigest(),
+                                 "sha256After": hashlib.sha256(reread).hexdigest(),
+                                 "crcOk": kbak_crc_ok(reread), "records": seg["records"]})
+            evidence.append(artifact("rehearsal-faults/02-tampered-segments.json",
+                                     {"point": point, "tampered": tampered}))
+            point_spec = rehearsal_point_spec(REHEARSAL_FAULT_POINT_SCHEDULE,
+                                              REHEARSAL_FAULT_CATALOG)
+            rehearsal_arm(REHEARSAL_VERIFY_SCHEDULE, cron=REHEARSAL_FAST_CRON,
+                          key=approver_key["private"], work=work,
+                          target_cluster_id=target_cluster_id, arms=arms, point=point_spec)
+            unsuspend("rehearsalschedule", REHEARSAL_VERIFY_SCHEDULE)
+            first = rehearsal_first_restore(REHEARSAL_VERIFY_SCHEDULE, seconds=600)
+            restore: dict[str, Any] = {}
+            schedule_after: dict[str, Any] = {}
+            view = None
+            if first is not None:
+                name = first["metadata"]["name"]
+                restore = poll(lambda: get_opt("restore", name), terminal, seconds=1500)
+                schedule_after = poll(
+                    lambda: get_opt("rehearsalschedule", REHEARSAL_VERIFY_SCHEDULE),
+                    lambda o: ((o.get("status") or {}).get("lastFailed") or {})
+                    .get("restoreRef", {}).get("name") == name
+                    or ((o.get("status") or {}).get("lastSucceeded") or {})
+                    .get("restoreRef", {}).get("name") == name,
+                    seconds=300)
+                view = operation_view(api, "restore", name)
+            quiesce_arm(REHEARSAL_VERIFY_SCHEDULE, evidence)
+            verdict, clauses = failed_verification_is_a_failed_rehearsal(
+                restore, schedule_after, tampered, view)
+            rst = restore.get("status") or {}
+            evidence.append(artifact("rehearsal-faults/03-failed-verification.json", {
+                "restore": restore, "schedule": schedule_after, "view": view,
+                "verdict": verdict, "clauses": clauses}))
+            record("rehearsal-failed-verification-is-a-failed-rehearsal", "PLAT-14.3", verdict,
+                   f"{len(tampered)} segment(s) of {REHEARSAL_FAULT_POINT} re-sealed with "
+                   f"different bytes; the rehearsal "
+                   f"{(restore.get('metadata') or {}).get('name')!r} is phase "
+                   f"{rst.get('phase')!r}, reason {rst.get('reason')!r}, exitCode "
+                   f"{rst.get('exitCode')!r}, outcome {rst.get('outcome')!r}; schedule "
+                   f"lastFailed {json.dumps((schedule_after.get('status') or {}).get('lastFailed'))}"
+                   f", RehearsalHealthy "
+                   f"{condition(schedule_after, 'RehearsalHealthy').get('status')}/"
+                   f"{condition(schedule_after, 'RehearsalHealthy').get('reason')}. "
+                   + "; ".join(f"{k}={v}" for k, v in clauses.items()), evidence)
+    finally:
+        try:
+            quiet = {name: quiesce_arm(name, evidence)["quiet"] for name in sorted(arms)}
+            live = {name: get_opt("rehearsalschedule", name) for name in arms}
+            owned_prefixes, not_swept = owned_rehearsal_prefixes(arms, live, quiet)
+            before_sweep = target_topics()
+            swept = topics_to_sweep(before_sweep, list(owned_prefixes.values()))
+            for topic in swept:
+                target_topic_delete(topic)
+            left = topics_to_sweep(target_topics(),
+                                   [rendered_prefix(uid) for uid in arms.values()])
+            evidence.append(artifact("rehearsal-faults/98-broker-sweep.json", {
+                "arms": arms, "quiet": quiet, "swept": swept, "notSwept": not_swept,
+                "left": left}))
+            check("rehearsal-faults-shared-broker-left-as-found", "PLAT-14.3",
+                  all(quiet.values()) and not left,
+                  f"arms {sorted(arms)} suspended and quiet={quiet}; swept {swept}; left under "
+                  f"this phase's prefixes: {left}", evidence)
+        finally:
+            if api is not None:
+                api.stop()
+            minted = [k for k in (approver_key, retired_key) if k is not None]
+            for key in minted:
+                key["private"].unlink(missing_ok=True)
+                shutil.rmtree(key["dir"], ignore_errors=True)
+            if work is not None:
+                shutil.rmtree(work, ignore_errors=True)
+            gone = not any(k["private"].exists() or k["dir"].exists() for k in minted)
+            check("rehearsal-faults-minted-private-keys-never-outlive-the-row", "PLAT-14.3",
+                  gone and (work is None or not work.exists()),
+                  f"{len(minted)} minted approver key(s) and the work directory are gone",
+                  evidence)
+
+
+# ---------------------------------------------------------------------------
+# harness-rows-11 — PLAT-16.2: the provider object-lock half of "legal hold/lock"
+# ---------------------------------------------------------------------------
+#
+# D3 §16: "`object_store` 0.14 exposes no WORM readback, so 'legal hold
+# respected' means 'a provider refusal is authoritative and recorded', not
+# 'Logweir knows the hold exists'." D3 §13: "provider refusal → `LegalHold`,
+# excluded from the next plan". This phase puts that sentence in front of a real
+# provider: a MinIO bucket of this run's created WITH object lock (which turns
+# versioning on), three points in it, a legal hold on every object of the
+# oldest, and the CONTROLLER's own enforcement Job (`mode: Enforce`) deleting
+# the two points beyond `keepLast: 1`.
+#
+# The row REQUIRES the documented outcome: the held point is refused by the
+# provider, recorded in `status.lastEnforcement.failed` with the closed code
+# `Locked`, protected `LegalHold` by the next evaluation, and the guarantee
+# reads `ProviderEnforcedUnverified` — never `LogweirEnforced`. The unheld
+# candidate is the control: the same Job, the same credential, deleted.
+#
+# THE PROVIDER'S OWN SEMANTICS ARE MEASURED BESIDE IT, on a probe object in the
+# same bucket, because they decide what the enforcer can ever observe: on an
+# S3-compatible store a legal hold protects an object VERSION, a DELETE with no
+# version id is not refused — it writes a delete marker over the held version —
+# and only a DELETE naming the version is refused ("WORM protected"). The
+# enforcer deletes by key (`logweir-reaper/src/archive.rs`,
+# `self.inner.delete(&path)`), so the evidence says which of the two it met.
+
+BUCKET_LOCK = f"{OWNER}-{STAMP}-lock"
+LOCK_DEST = "dest-lock"
+LOCK_CATALOG = "lock-cat"
+LOCK_POLICY = "keep-lock"
+LOCK_POINTS = ("lock-1", "lock-2", "lock-3")
+LOCK_PROBE_KEY = "probe/held-object"
+
+
+def mc_json(*args: str, check_rc: bool = False) -> list[dict[str, Any]]:
+    """`mc … --json`, one object per line; unparseable lines are dropped."""
+    out = run(KN + ["exec", MC_POD, "--", "mc", *args, "--json"], check=check_rc,
+              timeout=180).stdout
+    rows = []
+    for line in out.splitlines():
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return rows
+
+
+def versions_under(bucket: str, prefix: str) -> list[dict[str, Any]]:
+    """Every VERSION under a prefix, delete markers included."""
+    return [{"key": r.get("key"), "versionId": r.get("versionId"),
+             "isDeleteMarker": bool(r.get("isDeleteMarker")),
+             "isLatest": bool(r.get("isLatest")), "size": r.get("size")}
+            for r in mc_json("ls", "--recursive", "--versions", f"local/{bucket}/{prefix}")
+            if r.get("status") == "success"]
+
+
+def provider_lock_semantics(bucket: str) -> dict[str, Any]:
+    """What this provider does to a DELETE of a legally-held object, both ways."""
+    run(KN + ["exec", MC_POD, "--", "/bin/sh", "-c",
+              f"echo held > /tmp/held && mc cp --quiet /tmp/held local/{bucket}/{LOCK_PROBE_KEY} "
+              f">/dev/null && rm -f /tmp/held"], timeout=120)
+    hold = mc_json("legalhold", "set", f"local/{bucket}/{LOCK_PROBE_KEY}")
+    held = [v for v in versions_under(bucket, LOCK_PROBE_KEY) if not v["isDeleteMarker"]]
+    version = held[0]["versionId"] if held else ""
+    unversioned = run(KN + ["exec", MC_POD, "--", "mc", "rm", f"local/{bucket}/{LOCK_PROBE_KEY}"],
+                      check=False, timeout=120)
+    versioned = run(KN + ["exec", MC_POD, "--", "mc", "rm", "--version-id", version,
+                          f"local/{bucket}/{LOCK_PROBE_KEY}"], check=False, timeout=120)
+    after = versions_under(bucket, LOCK_PROBE_KEY)
+    return {
+        "legalHoldSet": hold,
+        "heldVersion": version,
+        "deleteWithoutVersionId": {"rc": unversioned.returncode,
+                                   "out": redact((unversioned.stdout + unversioned.stderr)[-600:])},
+        "deleteOfTheHeldVersion": {"rc": versioned.returncode,
+                                   "out": redact((versioned.stdout + versioned.stderr)[-600:])},
+        "versionsAfter": after,
+    }
+
+
+def clear_lock_bucket(bucket: str) -> dict[str, Any]:
+    """Release every legal hold this run placed, then remove every version and
+    the bucket. Only this run's bucket, by name."""
+    if not bucket.startswith(f"{OWNER}-"):
+        raise RuntimeError(f"refusing to clear bucket {bucket}: not this run's")
+    released = 0
+    for v in versions_under(bucket, ""):
+        if v["isDeleteMarker"] or not v["versionId"]:
+            continue
+        rc = run(KN + ["exec", MC_POD, "--", "mc", "legalhold", "clear", "--version-id",
+                       v["versionId"], f"local/{bucket}/{v['key']}"], check=False,
+                 timeout=120).returncode
+        released += rc == 0
+    run(KN + ["exec", MC_POD, "--", "mc", "rm", "--recursive", "--versions", "--force",
+              f"local/{bucket}"], check=False, timeout=300)
+    rb = run(KN + ["exec", MC_POD, "--", "mc", "rb", f"local/{bucket}"], check=False, timeout=120)
+    return {"bucket": bucket, "holdsReleased": released, "removed": rb.returncode == 0}
+
+
+def legal_hold_refusal_recorded(policy_after_run: dict[str, Any], policy_next: dict[str, Any],
+                                held_point: str, control_point: str,
+                                held_versions: list[dict[str, Any]], hold_was_on: bool,
+                                lock_enabled: bool) -> dict[str, bool]:
+    """D3 §13/§16 for a provider WORM refusal, clause by clause.
+
+    `held_versions` is every version under the held point's set directory
+    after the run; the held data survives when a non-delete-marker version is
+    still the LATEST one — a delete marker on top means the key is gone for
+    every reader that does not ask for versions, including Logweir.
+    """
+    last = ((policy_after_run or {}).get("status") or {}).get("lastEnforcement") or {}
+    failed = {f.get("pointId"): f.get("code") for f in (last.get("failed") or [])}
+    deleted = set(last.get("deleted") or [])
+    ev = ((policy_next or {}).get("status") or {}).get("lastEvaluation") or {}
+    protected = {p.get("pointId"): p.get("reason") for p in (ev.get("protected") or [])}
+    guarantees = ((policy_next or {}).get("status") or {}).get("guarantees") or {}
+    latest = [v for v in held_versions if v.get("isLatest")]
+    return {
+        "the bucket was created with object lock, and the hold was ON before the run":
+            lock_enabled and hold_was_on,
+        "an enforcement run of the controller's own finished": bool(last.get("runId")),
+        f"the control point {control_point} (no hold) was deleted by it":
+            control_point in deleted,
+        "the provider refused the held point: its objects are still the LATEST versions":
+            bool(latest) and not any(v.get("isDeleteMarker") for v in latest),
+        "the refusal is recorded: the held point is in lastEnforcement.failed with code Locked":
+            failed.get(held_point) == "Locked" and held_point not in deleted,
+        "the next evaluation protects it with reason LegalHold (excluded from the plan)":
+            protected.get(held_point) == "LegalHold"
+            and held_point not in {c.get("pointId") for c in (ev.get("candidates") or [])},
+        "guarantees.legalHold is ProviderEnforcedUnverified":
+            guarantees.get("legalHold") == "ProviderEnforcedUnverified",
+        "and nothing claims LogweirEnforced for it": guarantees.get("legalHold") != "LogweirEnforced",
+    }
+
+
+def object_lock() -> None:
+    """PLAT-16.2's provider object-lock half, through the controller's own Job."""
+    evidence: list[str] = []
+    created_bucket = False
+    try:
+        mb = run(KN + ["exec", MC_POD, "--", "mc", "mb", "--with-lock", f"local/{BUCKET_LOCK}"],
+                 check=False, timeout=120)
+        created_bucket = mb.returncode == 0
+        STATE.setdefault("buckets", [])
+        if created_bucket and BUCKET_LOCK not in STATE["buckets"]:
+            STATE["buckets"].append(BUCKET_LOCK)
+            save()
+        versioning = mc_json("version", "info", f"local/{BUCKET_LOCK}")
+        lock_config = mc_json("retention", "info", "--default", f"local/{BUCKET_LOCK}")
+        admin = run(KN + ["exec", MC_POD, "--", "mc", "admin", "info", "adm", "--json"],
+                    check=False, timeout=120).stdout
+        server = {}
+        try:
+            server = {k: v for k, v in (json.loads(admin).get("info") or {}).items()
+                      if k in ("mode", "deploymentID", "backend")}
+        except json.JSONDecodeError:
+            pass
+        if not created_bucket:
+            record("retention-object-lock-provider-refusal-is-recorded", "PLAT-16.2", "NOT-RUN",
+                   f"the lab MinIO refused `mc mb --with-lock`: rc={mb.returncode} "
+                   f"{redact((mb.stdout + mb.stderr)[-400:])!r} — this provider cannot hold "
+                   f"an object lock, so the provider half cannot be observed here",
+                   [artifact("lock/00-provider.json", {"mb": mb.returncode, "server": server})])
+            return
+        semantics = provider_lock_semantics(BUCKET_LOCK)
+        evidence.append(artifact("lock/00-provider.json", {
+            "bucket": BUCKET_LOCK, "versioning": versioning, "lockConfig": lock_config,
+            "server": server, "semantics": semantics}))
+        lock_enabled = any(str(v.get("versioning", {}).get("status", "")).lower() == "enabled"
+                           or "enabled" in json.dumps(v).lower() for v in versioning)
+
+        apply(destination(LOCK_DEST, BUCKET_LOCK))
+        wait_for("backupdestination", LOCK_DEST,
+                 lambda o: condition(o, "Valid").get("status") == "True",
+                 seconds=180, what="Valid=True")
+        points = []
+        for name in LOCK_POINTS:
+            if get_opt("backup", name) is None:
+                points.append(backup_facts(run_backup(name, LOCK_DEST, TOPICS[:1])))
+            else:
+                points.append(backup_facts(get("backup", name)))
+        catalog = fresh_catalog(LOCK_CATALOG, LOCK_DEST)
+        entries = view_entries(catalog)
+        ordered = sorted(entries, key=lambda e: e.get("recoveryPointAtMs") or 0)
+        evidence.append(artifact("lock/01-points.json", {"backups": points, "view": entries}))
+        if len(ordered) < 3:
+            record("retention-object-lock-provider-refusal-is-recorded", "PLAT-16.2", "NOT-RUN",
+                   f"the lock bucket's view holds {len(ordered)} point(s), not the three the "
+                   f"fixture needs", evidence)
+            return
+        held, control = ordered[0], ordered[1]
+        held_set = f"{DEST_PREFIX}/{held['backupId']}/"
+        hold = mc_json("legalhold", "set", "--recursive", f"local/{BUCKET_LOCK}/{held_set}")
+        hold_info = mc_json("legalhold", "info", "--recursive", f"local/{BUCKET_LOCK}/{held_set}")
+        hold_was_on = bool(hold_info) and all(
+            str(r.get("legalhold", r.get("status", ""))).upper() in {"ON", "SUCCESS"}
+            for r in hold_info) and any("ON" in json.dumps(r).upper() for r in hold_info)
+        versions_before = versions_under(BUCKET_LOCK, held_set)
+        evidence.append(artifact("lock/02-hold.json", {
+            "heldPoint": held["pointId"], "heldSet": held_set, "controlPoint": control["pointId"],
+            "set": hold, "info": hold_info, "versionsBefore": versions_before}))
+
+        if get_opt("retentionpolicy", LOCK_POLICY) is not None:
+            run(KN + ["delete", "retentionpolicy", LOCK_POLICY, "--wait=true"])
+        created = apply(retention_policy(
+            LOCK_POLICY, LOCK_DEST, LOCK_CATALOG, mode="Enforce",
+            rules={"keepLast": 1, "minUsablePoints": 1},
+            enforcement={"credentialSecretRef": {"name": "logweir-s3"},
+                         "schedule": "* * * * *", "requireApprovedPlan": False,
+                         "deadlineSeconds": 300, "maxDeletionsPerRun": 10,
+                         "maxObjectsPerRun": 200}))
+        uid = created["metadata"]["uid"]
+        after_run = settle("retentionpolicy", LOCK_POLICY,
+                           lambda o: bool(((o.get("status") or {}).get("lastEnforcement") or {})
+                                          .get("runId")),
+                           seconds=1200, what="a finished enforcement run") or \
+            get("retentionpolicy", LOCK_POLICY)
+        jobs = [j["metadata"]["name"] for j in lst("jobs")
+                if any(o.get("uid") == uid for o in (j["metadata"].get("ownerReferences") or []))]
+        logs = {}
+        for name in jobs:
+            pod = runner_pod(name)
+            if pod:
+                logs[name] = redact(run(KN + ["logs", pod["metadata"]["name"]],
+                                        check=False).stdout)[-6000:]
+        held_versions = versions_under(BUCKET_LOCK, held_set)
+        # THE NEXT EVALUATION, over a view refreshed after the run: that is
+        # where a refusal becomes `LegalHold` protection or a deletion becomes
+        # an absence.
+        refresh = sync_now(LOCK_CATALOG, f"after-{int(time.time())}", seconds=420)
+        mark = now()
+        policy_next = settle("retentionpolicy", LOCK_POLICY,
+                             lambda o: str(((o.get("status") or {}).get("lastEvaluation") or {})
+                                           .get("at") or "") >= mark,
+                             seconds=420, what="an evaluation after the run") or \
+            get("retentionpolicy", LOCK_POLICY)
+        # SUSPEND ENFORCEMENT before anything is read further: the cadence is
+        # one minute, and a second run would muddy "what the run did".
+        run(KN + ["delete", "retentionpolicy", LOCK_POLICY, "--wait=true"], check=False)
+        clauses = legal_hold_refusal_recorded(after_run, policy_next, held["pointId"],
+                                              control["pointId"], held_versions, hold_was_on,
+                                              lock_enabled)
+        last = (after_run.get("status") or {}).get("lastEnforcement") or {}
+        evidence.append(artifact("lock/03-run.json", {
+            "policyAfterRun": after_run, "policyNext": policy_next, "jobs": jobs, "logs": logs,
+            "heldVersionsAfter": held_versions, "viewAfter": view_entries(refresh),
+            "clauses": clauses}))
+        marker_hid_it = any(v.get("isLatest") and v.get("isDeleteMarker") for v in held_versions)
+        still_stored = any(not v.get("isDeleteMarker") for v in held_versions)
+        check(
+            "retention-object-lock-provider-refusal-is-recorded",
+            "PLAT-16.2",
+            all(clauses.values()),
+            f"bucket {BUCKET_LOCK} created --with-lock; legal hold on every object of the "
+            f"oldest point {held['pointId']} ({held_set}); the controller's Enforce run "
+            f"{last.get('runId')!r} deleted {last.get('deleted')} and failed "
+            f"{last.get('failed')}; after it the held set's LATEST versions are "
+            f"{'DELETE MARKERS' if marker_hid_it else 'the held objects'} and the held data "
+            f"{'is still stored as a non-current version' if still_stored else 'is gone'}; "
+            f"guarantees.legalHold "
+            f"{((policy_next.get('status') or {}).get('guarantees') or {}).get('legalHold')!r}. "
+            f"The provider probe: a DELETE with no version id rc="
+            f"{semantics['deleteWithoutVersionId']['rc']}, a DELETE of the held version rc="
+            f"{semantics['deleteOfTheHeldVersion']['rc']}. "
+            + "; ".join(f"{k}={v}" for k, v in clauses.items()),
+            evidence,
+        )
+    finally:
+        if created_bucket:
+            run(KN + ["delete", "retentionpolicy", LOCK_POLICY, "--ignore-not-found=true",
+                      "--wait=true"], check=False)
+            evidence.append(artifact("lock/99-cleanup.json", clear_lock_bucket(BUCKET_LOCK)))
+
+
+# ---------------------------------------------------------------------------
+# harness-rows-11 — PLAT-16.2's "shared segment", on the controller path
+# ---------------------------------------------------------------------------
+#
+# lab-refresh-8 left `retention-shared-segment` NOT-RUN with two ways out:
+# "either the view carries segment keys or the archive format's segment sharing
+# is shown impossible, with evidence". It is NOT impossible. A backup SET is a
+# directory `<prefix>/<backup_id>/` holding ONE manifest and its segments, and
+# two recovery points (two signed receipts) can name the same set: a runner Job
+# re-created from a Backup's frozen inputs runs under the SAME execution id and
+# signs a SECOND receipt over the same set (`clone_runner_job`, PLAT-06.1 case
+# e; `catalog-duplicate-identity` proves the two points live). Every key of
+# such a point — its manifest and every segment — is also a key of the other.
+#
+# `retention_plan::evaluate` step 4 protects a candidate whose segment keys a
+# retained point also names; with no segment keys in a view entry it cannot,
+# and nothing else compares the two points' `backupId`. A plan line then names
+# the candidate's `set_prefix` with `enumerate_set: true` — the retained
+# point's whole set. This row puts two such points under a Report-mode policy
+# and REQUIRES D3 §13's "a segment referenced by another retained manifest
+# protects the point": the older one must not be a candidate while the newer
+# one over the same set is kept.
+
+SHARED_DEST = "dest-shared"
+SHARED_PREFIX = "shared"
+SHARED_CATALOG = "shared-cat"
+SHARED_POLICY = "keep-shared"
+SHARED_POINT = "shared-1"
+
+
+def shared_set_is_protected(entries: list[dict[str, Any]], ev: dict[str, Any]
+                            ) -> tuple[str, dict[str, bool]]:
+    """Two usable points over ONE backup set: the set must not be planned
+    for deletion while one of them is retained.
+
+    NOT-REACHED unless the premise holds: at least two entries share a
+    `backupId` and both are usable (Available, Verified) — otherwise the
+    evaluator never had a shared set to protect.
+    """
+    by_set: dict[str, list[dict[str, Any]]] = {}
+    for e in entries:
+        by_set.setdefault(str(e.get("backupId")), []).append(e)
+    shared = {k: v for k, v in by_set.items() if len(v) >= 2}
+    usable = {k: v for k, v in shared.items()
+              if all(e.get("availability") == "Available" and e.get("verification") == "Verified"
+                     for e in v)}
+    candidates = {c.get("pointId") for c in (ev.get("candidates") or [])}
+    retained = set(ev.get("kept") or [])
+    protected = {p.get("pointId"): p.get("reason") for p in (ev.get("protected") or [])}
+    ids = {e.get("pointId"): str(e.get("backupId")) for e in entries}
+    exposed = sorted(c for c in candidates
+                     if any(ids.get(r) == ids.get(c) for r in retained if r != c))
+    premise = {
+        "two points (two receipts) name the same backup set": bool(shared),
+        "and both are usable — Available and Verified": bool(usable),
+    }
+    clauses = {
+        "the policy evaluated the shared set (both points evaluated)":
+            all(e.get("pointId") in candidates | retained for v in usable.values() for e in v),
+        "no candidate shares its set with a retained point": not exposed,
+        "a point kept for sharing a retained point's set says SharedSegment": all(
+            protected.get(e.get("pointId")) in (None, "SharedSegment", "MinUsablePoints")
+            for v in usable.values() for e in v),
+    }
+    if not all(premise.values()):
+        return "NOT-REACHED", {**premise, **clauses}
+    return ("PASS" if all(clauses.values()) else "FAIL"), {**premise, **clauses}
+
+
+def shared_set() -> None:
+    """Two receipts over one set, and what a Report-mode policy plans for it."""
+    evidence: list[str] = []
+    for name in (SHARED_POINT,):
+        if get_opt("backup", name) is not None:
+            run(KN + ["delete", "backup", name, "--wait=true"])
+        for job in (name, f"{name}-again"):
+            if get_opt("job", job) is not None:
+                run(KN + ["delete", "job", job, "--wait=true"])
+    apply(destination(SHARED_DEST, BUCKET_A, prefix=SHARED_PREFIX))
+    wait_for("backupdestination", SHARED_DEST,
+             lambda o: condition(o, "Valid").get("status") == "True",
+             seconds=180, what="Valid=True")
+    first = run_backup(SHARED_POINT, SHARED_DEST, TOPICS[:1])
+    backup_id = first["status"]["backupId"]
+    manifest_key = f"{SHARED_PREFIX}/{backup_id}/manifest.json"
+    manifest_before = hashlib.sha256(cat_bytes(BUCKET_A, manifest_key)).hexdigest()
+    plan_copy = copy_config_map(f"{SHARED_POINT}-plan", f"{SHARED_POINT}-plan-kept")
+    clone_runner_job(SHARED_POINT, f"{SHARED_POINT}-again", plan_copy)
+    manifest_after = hashlib.sha256(cat_bytes(BUCKET_A, manifest_key)).hexdigest()
+    catalog = fresh_catalog(SHARED_CATALOG, SHARED_DEST)
+    entries = view_entries(catalog)
+    if get_opt("retentionpolicy", SHARED_POLICY) is not None:
+        run(KN + ["delete", "retentionpolicy", SHARED_POLICY, "--wait=true"])
+    apply(retention_policy(SHARED_POLICY, SHARED_DEST, SHARED_CATALOG,
+                           rules={"keepLast": 1, "minUsablePoints": 1}, prefix=SHARED_PREFIX))
+    policy = wait_evaluated(SHARED_POLICY)
+    ev = (policy.get("status") or {}).get("lastEvaluation") or {}
+    plan: dict[str, Any] = {}
+    if (ev.get("planRef") or {}).get("name"):
+        try:
+            _ref, plan = plan_document(policy)
+        except (RuntimeError, KeyError, StopIteration, json.JSONDecodeError):
+            plan = {}
+    set_objects = objects(BUCKET_A, f"{SHARED_PREFIX}/{backup_id}/")
+    verdict, clauses = shared_set_is_protected(entries, ev)
+    lines = [{k: ln.get(k) for k in ("point_id", "backup_id", "set_prefix", "enumerate_set")}
+             for ln in (plan.get("lines") or [])]
+    evidence.append(artifact("shared-set/evaluation.json", {
+        "backupId": backup_id, "manifestSha256": {"afterFirstRun": manifest_before,
+                                                  "afterSecondRun": manifest_after},
+        "setObjects": set_objects, "entries": entries, "evaluation": ev,
+        "guarantees": (policy.get("status") or {}).get("guarantees"),
+        "planLines": lines, "verdict": verdict, "clauses": clauses}))
+    record("retention-shared-set-is-never-planned-under-a-retained-point", "PLAT-16.2", verdict,
+           f"{SHARED_POINT}'s Job ran twice from the same frozen inputs, so backup set "
+           f"{SHARED_PREFIX}/{backup_id}/ ({len(set_objects)} objects; manifest sha256 "
+           f"{manifest_before[:12]} -> {manifest_after[:12]}) is named by the view's points "
+           f"{[(e.get('pointId'), e.get('availability'), e.get('verification')) for e in entries if e.get('backupId') == backup_id]}"
+           f"; a Report policy keepLast 1 keeps {ev.get('kept')} and plans "
+           f"{[c.get('pointId') for c in (ev.get('candidates') or [])]} "
+           f"(protected {ev.get('protected')}); plan lines {lines}; guarantees.sharedSegments "
+           f"{((policy.get('status') or {}).get('guarantees') or {}).get('sharedSegments')!r}. "
+           + "; ".join(f"{k}={v}" for k, v in clauses.items()), evidence)
+    run(KN + ["delete", "retentionpolicy", SHARED_POLICY, "--wait=true"], check=False)
+
+
 def control() -> None:
     """A harness that cannot fail proves nothing. This asserts something that is
     false about the same live objects the passing scenarios read, through the
@@ -10598,6 +12255,21 @@ PHASE_PRECONDITIONS: dict[str, tuple[str, ...]] = {
     # reason `rehearsal` does, and after `rehearsal` so neither inherits the
     # other's keys.
     "refused_point": ("setup", "trust", "rehearsal"),
+    # harness-rows-11. Its own KafkaCluster, destination, MinIO user and
+    # LimitRange; dest-a only as the fixture control's full-grant destination.
+    "operation_states": ("setup",),
+    # Its own schedule, point, sink Service and policy — so its alert ledger is
+    # nobody else's — and dest-a for the point.
+    "notify_transport": ("setup",),
+    # The rehearsal family's two fault arms. It rebuilds this namespace's
+    # TrustPolicy exactly as `rehearsal` and `refused_point` do, so it runs
+    # after both (and after `trust`, whose last row leaves the lab signing key
+    # Revoked) and inherits neither's keys.
+    "rehearsal_faults": ("setup", "trust", "rehearsal", "refused_point"),
+    # Its own lock-enabled bucket, destination, catalog and policy.
+    "object_lock": ("setup",),
+    # Its own destination under its own prefix of dest-a's bucket.
+    "shared_set": ("setup",),
 }
 
 
@@ -10641,6 +12313,7 @@ PHASES = [
     "signed_at_probe", "trust_rbac", "old_archive", "multiple_namespaces", "notify", "protection_cases",
     "protection_verdicts",
     "rehearsal", "refused_point",
+    "operation_states", "notify_transport", "rehearsal_faults", "object_lock", "shared_set",
     "control", "report", "cleanup",
 ]
 
