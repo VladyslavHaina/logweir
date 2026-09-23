@@ -51,7 +51,7 @@ install document; this README is the chart's own.
 |---|---|---|
 | the fourteen `CustomResourceDefinition`s under `logweir.dev/v1alpha1` | always — from `crds/`, **once**, on `helm install` | Helm never upgrades or deletes the contents of `crds/`; see *Upgrading the CRDs* below |
 | `ServiceAccount`, `ClusterRole`, `ClusterRoleBinding` `weirkeeper` | always | the one API client in the design; every granted verb has a caller and every call has a grant, no verb on `secrets`, no `update` on anything, and `delete` on **exactly** `topicdiscoveries` and `preflights` — the transient check kinds, whose retention windows nothing else can enforce ([`docs/kubernetes.md`](../../docs/kubernetes.md) §22.3). Status writes are merge `PATCH`es carrying a `metadata.resourceVersion` precondition. Since PLAT-05.2 it also holds `patch` on `backups`, for the one caller that detaches a terminal run from its schedule so that deleting the schedule stops collecting its history: metadata only, never `backups/status` (a separate resource string), and never a CEL-sealed `spec` (see §9 and §13) |
-| `Deployment` `weirkeeper` | always | the control plane. Image `controllerImage`, pull policy `imagePullPolicy`, `LOGWEIR_RUNNER_IMAGE` from `runnerImage`, `LOGWEIR_RUNNER_PULL_POLICY` from `runnerImagePullPolicy`, the archive env from `archive.*`, and `LOGWEIR_POLICY_CONFIGMAP` / `LOGWEIR_INSTALLATION_NAMESPACE` for the policy below, plus `LOGWEIR_NOTIFY_ALLOW_INSECURE_SINKS` when `notify.allowInsecureSinks` is true |
+| `Deployment` `weirkeeper` | always | the control plane. Image `controllerImage`, pull policy `imagePullPolicy`, `LOGWEIR_RUNNER_IMAGE` from `runnerImage`, `LOGWEIR_RUNNER_PULL_POLICY` from `runnerImagePullPolicy`, the archive env from `archive.*`, and `LOGWEIR_POLICY_CONFIGMAP` / `LOGWEIR_INSTALLATION_NAMESPACE` for the policy below, plus `LOGWEIR_NOTIFY_ALLOW_INSECURE_SINKS` when `notify.allowInsecureSinks` is true. **Probed**: `weirkeeper --probe live` / `--probe ready` by exec against the controller's own loopback health listener (`127.0.0.1:8081`, `LOGWEIR_HEALTH_ADDR`; no port is exposed). Liveness fails when the runtime is wedged — the listener shares the reconcilers' thread — or a controller task has ended, and three misses 20 s apart restart the pod; readiness waits for the client and every controller |
 | `ConfigMap` `weirkeeper-policy` | always | the installation policy — check ceilings, retention windows, discovery bounds, completeness attestations, the evidence allowlist and the legacy addressing. Rendered from `checks.*`, `engine.*`, `evidence.*` and `archive.s3.*`; see *The installation policy* below |
 | `ClusterRole`s `logweir-viewer`, `logweir-operator`, `logweir-approver`, `logweir-trust-admin`, `logweir-retention-admin` | always, **unbound** | the five human roles; who may act where is your decision. `logweir-trust-admin` is cluster-scoped and needs a `ClusterRoleBinding`; `logweir-retention-admin` is namespaced and is the only holder of a write verb on `retentionpolicies` — see *`retention.enabled`* below |
 | `ValidatingAdmissionPolicy` + binding `logweir-console-credentials-only` | `admissionPolicy.enabled` | fences the console API's `create secrets` to the two Logweir credential types. **Kubernetes 1.30+ only** — see below |
@@ -67,6 +67,7 @@ install document; this README is the chart's own.
 | `Service` `<release>-api` | `api.console.mode: shared` | the Ingress's backend. The in-cluster administrator mode binds loopback and renders **no Service at all** |
 | `Ingress` `<release>-api` | `api.console.ingress.enabled` | the shared console's public entry point. **Shared mode only, TLS required, host must be `publicBaseUrl`'s authority**; refused in front of the in-cluster administrator mode |
 | `NetworkPolicy` `<release>-api` | `api.console.networkPolicy.enabled` | in shared mode, ingress from the configured ingress-controller pods only; in the in-cluster administrator mode, `ingress: []` — deny. Egress in both: DNS, the Kubernetes API and the configured IdP CIDRs, and **never** a broker or object-store port |
+| `Role` + `RoleBinding` `<release>-api-trusted-proxy`, in the ingress controller's namespace | `api.console.trustedProxyService` (shared mode) | `list` on `discovery.k8s.io/endpointslices` there and nothing else: the console trusts the serving endpoints of the ingress controller's Service (see *`shared` mode* below) |
 
 Nothing optional is on by default. The release gate renders the snapshots with
 the pinned bootstrap digest exactly as shipped; the rest of the default render
@@ -483,19 +484,105 @@ not let you install, each refused at render time with the field named:
 | `controller.watchNamespaces` containing the release namespace | the same authority, put back by name |
 | `shared` with `ui.enabled` | the legacy `kubectl proxy` Service is a second, unauthenticated way to the same objects (PLAT-17.2: remove or isolate the legacy proxy) |
 | a `roles.bindings` namespace outside `controller.watchNamespaces` | the console would create objects no controller reconciles |
-| `requireTrustedProxy` with no `trustedProxyCidrs`, or in `localAdmin` mode | a gate with nothing to trust refuses every request; a loopback listener has no proxy in front of it |
+| `requireTrustedProxy` with neither `trustedProxyService` nor `trustedProxyCidrs`, or in `localAdmin` mode | a gate with nothing to trust refuses every request; a loopback listener has no proxy in front of it |
+| `trustedProxyService` with only one of `namespace`/`name`, or in `localAdmin` mode | half a Service names nothing; a loopback listener has no proxy, and no Role in the ingress namespace should be granted for one |
+| `oidc.caBundle` naming both a ConfigMap and a Secret, or with an empty `key` | the bundle is one object and one file |
+| `oidc.systemRoots: false` without `oidc.caBundle` | the console would trust no certificate and never reach its issuer |
+| a `hostAliases` entry without an `ip` and a hostname, or with a wildcard | `/etc/hosts` has no wildcard; an entry that resolves nothing is a typo |
+| a `networkPolicy.oidcPeers` entry without `namespace`, `podLabels` and `port` | an empty selector would allow egress to every pod in the namespace |
 | `requireTrustedProxy` with a `trustedProxyCidrs` range wider than `/16` (IPv4) or `/48` (IPv6) | a range that wide contains the pods the gate exists to refuse |
 
 **`requireTrustedProxy: true`** makes the console answer `421` to every request
-(the two probes excepted) whose socket peer is outside `trustedProxyCidrs`, or
-that the ingress did not mark `X-Forwarded-Proto: https`. It can only refuse;
-identity stays the OIDC session. It tells the ingress from a pod that dialled
-the Service directly **only when `trustedProxyCidrs` is the ingress controller's
-own pod range and contains no other pod** (kube-proxy keeps the source pod IP
-through a ClusterIP), so the chart and the binary refuse a range wider than
-`/16` (IPv4) or `/48` (IPv6) when it is on, and the example ships the
-placeholder `192.0.2.0/24`. It is defence in depth; an enforcing NetworkPolicy
-remains the network boundary.
+(the two probes excepted) whose socket peer is not a trusted proxy, or that the
+ingress did not mark `X-Forwarded-Proto: https`. It can only refuse; identity
+stays the OIDC session. It is defence in depth; an enforcing NetworkPolicy
+remains the network boundary. There are two ways to say who the proxy is:
+
+- **`trustedProxyService: {namespace, name}` — the ingress controller's
+  Service, and the recommended one.** The console lists that Service's
+  `EndpointSlice`s every five seconds and trusts each **serving** endpoint
+  address as a single host: the ingress pods of the moment, and no other pod.
+  An ingress pod recreated on a new address is trusted after one refresh and
+  its old address distrusted at the same moment, so nothing has to be re-read
+  or patched after an ingress restart (chart gap G6). A refresh that fails keeps
+  the last complete set for at most thirty seconds; past that the console
+  trusts nobody through the Service, answers `421` and reports NotReady — a
+  visible outage, never a silent stale grant. The chart renders one `Role` and
+  `RoleBinding` in **that** namespace granting `list` on
+  `discovery.k8s.io/endpointslices` and nothing else. **Who can add an
+  address:** whoever can edit that Service (its selector) or write an
+  `EndpointSlice` there, and whoever can create or relabel a Pod — or a
+  Deployment — that matches the Service's selector in that namespace, because
+  the EndpointSlice controller then lists it. All of them are the ingress
+  namespace's own administrators, who already terminate the console's TLS.
+  **An ingress controller on `hostNetwork`** publishes the NODE's address as its
+  endpoint: the console then trusts every hostNetwork pod and node process on
+  that node, and anything the CNI masquerades to the node address — not "the
+  ingress pods and no other pod". For such a controller, either accept node
+  trust knowingly or decide a `trustedProxyCidrs` `/32` knowingly. The Service's
+  endpoints must be the ingress controller's own pods (the Traefik chart's
+  `traefik` Service is; an admission-webhook Service that selects the same pods
+  is equivalent).
+- **`trustedProxyCidrs`** — static ranges. It tells the ingress from a pod that
+  dialled the Service directly **only when the range is the ingress
+  controller's own pod range and contains no other pod** (kube-proxy keeps the
+  source pod IP through a ClusterIP), so the chart and the binary refuse a range
+  wider than `/16` (IPv4) or `/48` (IPv6) when the gate is on. A dedicated
+  ingress node pool's pod ranges satisfy it; a single-node cluster's pod range
+  does not (it contains every pod). The example ships the placeholder
+  `192.0.2.0/24` beside the Service.
+
+Both may be set; a peer trusted by either is trusted.
+
+### The identity provider inside the cluster: a private CA, a name, a path
+
+Three values exist for an issuer the console cannot reach with the defaults —
+an IdP whose certificate a private CA issued, or one whose public name does not
+resolve to a reachable address from inside the cluster (split-horizon DNS, a
+laptop cluster where `*.localtest.me` is `127.0.0.1`, a Dex behind the
+cluster's own ingress). None of them changes what the console validates.
+
+- **`oidc.caBundle: {configMap | secret, key}`** (chart gap G1) mounts the
+  issuer CA's **public** certificates from one ConfigMap or Secret in the
+  release namespace — never inline PEM, so no certificate text is in a values
+  file, a rendered manifest or Helm's release history — and the console trusts
+  them **in addition to** the system roots. `oidc.systemRoots: false` drops the
+  system roots and is refused without a bundle. The object must exist before the
+  pod starts (it is not `optional`); an unreadable or empty bundle, or one that
+  carries a private key, stops `logweir-api` at exit 2. The certificate chain,
+  its validity and the host name in the issuer URL are verified exactly as for a
+  public CA.
+- **`hostAliases: [{ip, hostnames}]`** (chart gap G2) adds pod `/etc/hosts`
+  entries, e.g. the issuer's public name mapped to the IdP's own in-cluster
+  Service. **Why this and not a separate back-channel URL.** A
+  back-channel discovery/JWKS URL would either have to rewrite every endpoint
+  the discovery document names — including the token endpoint, which receives
+  the client secret — onto another host, or verify the provider's TLS
+  certificate against a name the browser never uses: a second trust decision
+  the operator would have to get right. A host alias changes only where the
+  name resolves. The URL, the TLS name check, the discovery document's
+  `issuer` and the ID token's `iss` are all still compared with the one
+  configured `oidc.issuer`, exactly. **But that holds only when the alias
+  target is an endpoint that only the IdP's owner can route.** Map the name to
+  the IdP's OWN Service, with TLS terminated by the IdP itself — never to a
+  shared ingress controller. A shared ingress serves Ingresses from other
+  namespaces too: anyone who may create one there can claim the issuer's host
+  (longer path rules outrank the owner's) and answer discovery, JWKS and the
+  token request — which carries the client secret — behind the owner's own
+  certificate, and the console then believes tokens they signed. The CA in
+  `oidc.caBundle` must likewise not issue the issuer's name to anyone who could
+  be on that path. With both conditions met, an alias pointing somewhere wrong
+  is a handshake that fails; without them it is not. A host alias is for a
+  cluster whose DNS does not resolve the issuer (a laptop cluster, split-horizon
+  DNS); a production IdP is resolved through real DNS and needs none. A
+  ClusterIP is stable for the Service's lifetime; recreate the Service and the
+  alias must follow.
+- **`networkPolicy.oidcPeers: [{namespace, podLabels, port}]`** allows the
+  console's egress to an in-cluster provider path by selector. An enforcing CNI
+  matches egress **after** a Service's DNAT, against the backend pod and its
+  port, so an `oidcCIDRs` entry for a ClusterIP matches nothing there; name the
+  pods instead (for the PoC's Dex, which serves the console's TLS itself:
+  namespace `dex`, its pod labels, port `5554`).
 
 **Every object the console creates is attributed.** The rendered configuration
 names `kubernetes.principal: system:serviceaccount:<namespace>:<release>-api`,
@@ -513,7 +600,8 @@ a single pod makes `kubectl drain` block forever on the node carrying it.
 It allows ingress **only** from the configured ingress-controller pods on the
 console port, and egress to DNS, the Kubernetes API (the `kubernetes.default`
 ClusterIP, its visible endpoints and `identity.kubernetesApiCIDRs`) and the
-`networkPolicy.oidcCIDRs` on 443. It lists **no** broker port and **no**
+`networkPolicy.oidcCIDRs` on 443 and the `networkPolicy.oidcPeers` pods on
+their ports. It lists **no** broker port and **no**
 object-store port, which is the structural half of D0's "does not dial Kafka or
 object storage" — the other half is that `logweir-api` links no Kafka client and
 no object-store client at all.
@@ -989,9 +1077,20 @@ read its credential. The password reaches the probe pod as a
 `valueFrom.secretKeyRef` and never enters a status field, a log line or a
 rendered document.
 
-The rendered objects go in the release namespace with the chart's labels, and
-the probe Job runs under the `logweir-runner` ServiceAccount the chart already
-creates there.
+The rendered objects go in **`kubernetes.connectionsNamespace`** (default: the
+release namespace) with the chart's labels, and the probe Job runs under the
+`logweir-runner` ServiceAccount there. `secretRef` must be in that same
+namespace. With `controller.watchNamespaces` set, the chart **refuses to
+render** unless `kubernetes.connectionsNamespace` is one of the watched
+namespaces (chart gap G3): the default, the release namespace, is one a shared
+console's scoped controller may not watch, and a `KafkaCluster` there would be
+one no controller reads and no Backup can use. The same value places
+`minio.enabled`'s `logweir-s3` archive credential, which a Backup's
+`secretRef` names in its own namespace. The namespace must exist before the
+install, like every execution namespace. Changing the value on an upgrade moves
+the objects: Helm deletes them from the old namespace and creates them in the
+new one, where it is probed afresh; Backups in the old namespace lose the
+objects they named, so move them before or with the value.
 
 **Two connection-contract fields have no `kafka:` value, deliberately.** The
 `KafkaCluster` CRD accepts `auth.secretRef.passwordKey` (a password under a key

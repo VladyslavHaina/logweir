@@ -5,10 +5,10 @@
 #   `Dockerfile`             the runner: two binaries, the extracted OSO engine,
 #                            an amd64-only ELF, librdkafka and its SASL/TLS libraries.
 #   `Dockerfile.weirkeeper`  the controller: one binary, `ca-certificates`, nothing else.
-#   `Dockerfile.ui`          the LEGACY LOCAL ADMIN PROXY's page: a `COPY` of twenty-two
+#   `Dockerfile.ui`          the LEGACY LOCAL ADMIN PROXY's page: a `COPY` of twenty-six
 #                            static files over a kubectl the Kubernetes project publishes.
 #                            IT COMPILES NOTHING and this file does not replace it.
-#   this file                `logweir-api` — a Rust binary — PLUS the same twenty-two
+#   this file                `logweir-api` — a Rust binary — PLUS the same twenty-six
 #                            files, served by that binary out of its own process.
 #
 # WHY THE PAGE IS IN THIS IMAGE TOO, AND WHY THAT IS NOT A SECOND COPY OF IT.
@@ -60,7 +60,7 @@
 # NO KEY MATERIAL OF ANY KIND (Global Constraint 28). The session key, the
 # cursor MAC key and the OIDC client secret are mounted from Secrets at paths
 # the configuration names. `scripts/check-image-api.sh` check 1 asserts `/ui`
-# holds exactly the twenty-two shipped files — so `ui/tests/`, which carries a
+# holds exactly the twenty-six shipped files — so `ui/tests/`, which carries a
 # throwaway keypair, is a red — and check 5 asserts the image carries no
 # `*.pem`, `*.key` or kubeconfig anywhere a `COPY` could have put one.
 #
@@ -169,7 +169,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 LABEL org.opencontainers.image.base.name="debian:bookworm-slim"
 LABEL org.opencontainers.image.title="logweir-console"
-LABEL org.opencontainers.image.description="The Logweir product API (logweir-api) and the twenty-two static page files it serves at /ui/. Not a Kubernetes proxy."
+LABEL org.opencontainers.image.description="The Logweir product API (logweir-api) and the twenty-six static page files it serves at /ui/. Not a Kubernetes proxy."
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 
 COPY --from=builder /out/logweir-api /usr/local/bin/logweir-api

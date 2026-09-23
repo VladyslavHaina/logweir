@@ -78,6 +78,25 @@ exits 2 with a field name nobody can act on.
 */ -}}
 {{- define "logweir.api.keyDir" -}}/var/run/logweir/keys{{- end -}}
 {{- define "logweir.api.oidcDir" -}}/var/run/logweir/oidc{{- end -}}
+{{- /*
+CHART GAP G1: the issuer's PRIVATE CA, mounted from the ConfigMap or Secret
+`api.console.oidc.caBundle` names. Public certificates only — `logweir-api`
+refuses a bundle carrying anything else — and the chart never takes PEM
+inline, so no certificate text is in a values file, a rendered manifest or
+Helm's release history. Empty when no bundle is configured.
+*/ -}}
+{{- define "logweir.api.oidcCaDir" -}}/var/run/logweir/oidc-ca{{- end -}}
+{{- define "logweir.api.oidcCaConfigured" -}}
+{{- $b := .Values.api.console.oidc.caBundle | default dict -}}
+{{- if or $b.configMap $b.secret }}true{{ end -}}
+{{- end -}}
+{{- /*
+CHART GAP G6: the ingress controller's Service, when both halves are named.
+*/ -}}
+{{- define "logweir.api.proxyServiceConfigured" -}}
+{{- $s := .Values.api.console.trustedProxyService | default dict -}}
+{{- if and (eq .Values.api.console.mode "shared") $s.name $s.namespace }}true{{ end -}}
+{{- end -}}
 
 {{- /*
 EVERY REFUSAL THIS COMPONENT HAS, IN ONE PLACE, EVALUATED BEFORE ANYTHING
@@ -98,7 +117,7 @@ laptop with no cluster.
 {{- fail "api.console.enabled requires api.enabled: the console runs AS the principal `api.enabled` renders (its ServiceAccount, its two ClusterRoles and its per-namespace RoleBindings). A pod without them holds no grant on any Logweir kind and every route would 403. Set api.enabled=true." -}}
 {{- end -}}
 {{- if not $c.image -}}
-{{- fail "api.console.image is empty. It must name the logweir-console image (Dockerfile.console): `logweir-api` plus the twenty-two page files it serves at /ui/." -}}
+{{- fail "api.console.image is empty. It must name the logweir-console image (Dockerfile.console): `logweir-api` plus the twenty-six page files it serves at /ui/." -}}
 {{- end -}}
 {{- if not $c.keySecret -}}
 {{- fail "api.console.keySecret is empty. The console needs a cursor MAC key of at least 32 bytes (and, in shared mode, a session key), and this chart DELIBERATELY does not generate one: a Helm-generated key changes on every render, which would make the rendered fixtures unstable and the key unrecoverable on upgrade. D0 requires these to be persistent, versioned Secrets created or adopted EXPLICITLY. Create one and name it here; charts/logweir/README.md carries the command." -}}
@@ -115,6 +134,9 @@ laptop with no cluster.
 {{- end -}}
 {{- if $c.requireTrustedProxy -}}
 {{- fail "api.console.requireTrustedProxy belongs to api.console.mode=shared. The in-cluster administrator mode binds loopback and is reached only through kubectl port-forward; there is no proxy in front of it to trust." -}}
+{{- end -}}
+{{- if ($c.trustedProxyService | default dict).name -}}
+{{- fail "api.console.trustedProxyService belongs to api.console.mode=shared. The in-cluster administrator mode binds loopback and is reached only through kubectl port-forward; there is no proxy in front of it to trust, and no Role in the ingress namespace should be granted for one." -}}
 {{- end -}}
 {{- if $c.ingress.enabled -}}
 {{- fail "api.console.ingress.enabled with api.console.mode=localAdmin is refused. D0: the local administrator path \"must not bind 0.0.0.0, get an Ingress, or be described as shared-console mode\" — it authenticates nobody, so an Ingress in front of it is an unauthenticated shared console. Set api.console.mode=shared and configure OIDC and TLS, or reach localAdmin mode with `kubectl port-forward`." -}}
@@ -168,8 +190,30 @@ isolate it. The laptop `kubectl proxy --address=127.0.0.1` path is unaffected.
 {{- if .Values.ui.enabled -}}
 {{- fail "api.console.mode=shared with ui.enabled=true is refused. ui.enabled renders the legacy `kubectl proxy` Service, which acts as its own ServiceAccount for anyone in the cluster who reaches it — no sign-in, no per-user role — so beside a shared console it is an unauthenticated second path to the same objects (PLAT-17.2: remove or isolate the legacy proxy). Set ui.enabled=false; an administrator keeps the laptop `kubectl proxy --www=./ui --address=127.0.0.1` path, or api.console.mode=localAdmin through port-forward." -}}
 {{- end -}}
-{{- if and $c.requireTrustedProxy (not $c.trustedProxyCidrs) -}}
-{{- fail "api.console.requireTrustedProxy needs api.console.trustedProxyCidrs: with no range to trust, the entry point would refuse every request (421) and the console would look like an outage. Name the ingress controller's pod or node ranges." -}}
+{{- $proxySvc := $c.trustedProxyService | default dict -}}
+{{- if or (and $proxySvc.name (not $proxySvc.namespace)) (and $proxySvc.namespace (not $proxySvc.name)) -}}
+{{- fail (printf "api.console.trustedProxyService names only half a Service (namespace %q, name %q). Name both — the ingress controller's Service and the namespace it runs in — or neither." (toString $proxySvc.namespace) (toString $proxySvc.name)) -}}
+{{- end -}}
+{{- if and $c.requireTrustedProxy (not $c.trustedProxyCidrs) (not $proxySvc.name) -}}
+{{- fail "api.console.requireTrustedProxy needs api.console.trustedProxyService (the ingress controller's Service, whose serving pods are then trusted) or api.console.trustedProxyCidrs: with nothing to trust, the entry point would refuse every request (421) and the console would look like an outage." -}}
+{{- end -}}
+{{- $ca := $c.oidc.caBundle | default dict -}}
+{{- if and $ca.configMap $ca.secret -}}
+{{- fail (printf "api.console.oidc.caBundle names both ConfigMap %q and Secret %q. The issuer's CA bundle is ONE object; name the one that holds it." $ca.configMap $ca.secret) -}}
+{{- end -}}
+{{- if and (or $ca.configMap $ca.secret) (not $ca.key) -}}
+{{- fail "api.console.oidc.caBundle.key is empty. It is the key, inside the ConfigMap or Secret, of the PEM file holding the issuer's CA certificates (ca.crt by convention)." -}}
+{{- end -}}
+{{- if and (eq (toString $c.oidc.systemRoots) "false") (not (or $ca.configMap $ca.secret)) -}}
+{{- fail "api.console.oidc.systemRoots=false without api.console.oidc.caBundle: the console would trust no certificate at all and could never reach its issuer. Name the bundle that replaces the system roots, or keep them." -}}
+{{- end -}}
+{{- range $alias := ($c.hostAliases | default list) -}}
+{{- if or (not $alias.ip) (not $alias.hostnames) -}}
+{{- fail "api.console.hostAliases entries need an `ip` and at least one hostname: {ip: <address>, hostnames: [<name>, …]}." -}}
+{{- end -}}
+{{- if contains "*" (toString $alias.hostnames) -}}
+{{- fail (printf "api.console.hostAliases for %s names a wildcard; /etc/hosts has none, so it would resolve nothing." $alias.ip) -}}
+{{- end -}}
 {{- end -}}
 {{- if $c.requireTrustedProxy -}}
 {{- range $cidr := $c.trustedProxyCidrs -}}
@@ -215,6 +259,11 @@ and `logweir-api` refuses to start without it. Refused here first, by name.
 {{- range $ns, $policy := (.Values.approvalPolicy.namespaces | default dict) -}}
 {{- if and (has $ns $served) (not $.Values.approvalPolicy.confirmationKeySecret) -}}
 {{- fail (printf "approvalPolicy.namespaces binds %s, which the console serves, to policy %q and approvalPolicy.confirmationKeySecret is empty. Both ordinary and governed requests carry the console's ConsoleConfirmation signature (D0): create a Secret with key `confirmation.key` (a PKCS#8 PEM private key whose PUBLIC half is on the namespace's TrustPolicy with usage ConsoleConfirmation) and name it, or unbind the namespace." $ns $policy) -}}
+{{- end -}}
+{{- end -}}
+{{- range $peer := ($c.networkPolicy.oidcPeers | default list) -}}
+{{- if or (not $peer.namespace) (not $peer.podLabels) (lt (int $peer.port) 1) -}}
+{{- fail "api.console.networkPolicy.oidcPeers entries need a namespace, non-empty podLabels and a port: an empty selector would admit egress to every pod in the namespace, which is not what `the identity provider's path` means." -}}
 {{- end -}}
 {{- end -}}
 {{- if and $c.networkPolicy.enabled (eq $c.mode "shared") -}}
@@ -296,6 +345,12 @@ oidc:
   issuer: {{ $c.oidc.issuer | quote }}
   clientId: {{ $c.oidc.clientId | quote }}
   clientSecretFile: {{ printf "%s/clientSecret" (include "logweir.api.oidcDir" .) }}
+{{- if include "logweir.api.oidcCaConfigured" . }}
+  caBundleFile: {{ printf "%s/%s" (include "logweir.api.oidcCaDir" .) $c.oidc.caBundle.key }}
+{{- end }}
+{{- if eq (toString $c.oidc.systemRoots) "false" }}
+  systemRoots: false
+{{- end }}
 roles:
   revision: {{ $c.roles.revision | quote }}
   bindings:
@@ -307,6 +362,11 @@ sessionMaxAgeSeconds: {{ int $c.sessionMaxAgeSeconds }}
 {{- with $c.trustedProxyCidrs }}
 trustedProxyCidrs:
 {{ toYaml . | indent 2 }}
+{{- end }}
+{{- if include "logweir.api.proxyServiceConfigured" . }}
+trustedProxyService:
+  namespace: {{ $c.trustedProxyService.namespace | quote }}
+  name: {{ $c.trustedProxyService.name | quote }}
 {{- end }}
 {{- if $c.requireTrustedProxy }}
 requireTrustedProxy: true

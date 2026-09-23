@@ -137,6 +137,133 @@ fn images_are_loaded_and_checked_before_credentials_or_push() {
     );
 }
 
+/// **Chart gap G4: the chart is published from the EXISTING image workflow,
+/// after the images it names, with the existing credentials, versioned with
+/// them, and verified by content.** No workflow file is added for it.
+#[test]
+fn the_chart_is_published_beside_the_images_it_names() {
+    let mut names: Vec<String> = std::fs::read_dir(root().join(".github/workflows"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            "ci.yml",
+            "engine-matrix.yml",
+            "helm-demo.yml",
+            "images.yml",
+            "release-drill.yml",
+            "release.yml"
+        ],
+        "the chart is published by images.yml's promote job; a new workflow is a new \
+         publication path nobody reviewed"
+    );
+    let images = workflow("images.yml");
+    let promote = &images["jobs"]["promote"];
+    let steps = promote["steps"].as_sequence().unwrap();
+    let position = |pred: &dyn Fn(&Value) -> bool, what: &str| {
+        steps
+            .iter()
+            .position(pred)
+            .unwrap_or_else(|| panic!("images.yml promote job has no {what}"))
+    };
+    let login = position(&|s| s["uses"] == "docker/login-action@v3", "docker login");
+    let images_step = position(
+        &|s| s["run"] == "bash scripts/ci-images.sh promote",
+        "image promotion",
+    );
+    // THE ACTION ON THE CREDENTIALED PATH IS PINNED BY COMMIT (review L6):
+    // the Helm it installs receives the Docker Hub token on stdin.
+    let helm = position(
+        &|s| {
+            s["uses"].as_str().is_some_and(|u| {
+                u.strip_prefix("azure/setup-helm@").is_some_and(|sha| {
+                    sha.len() == 40 && sha.chars().all(|c| c.is_ascii_hexdigit())
+                })
+            })
+        },
+        "Helm setup pinned by a 40-hex commit",
+    );
+    let chart = position(
+        &|s| s["run"] == "bash scripts/ci-images.sh chart",
+        "chart publication",
+    );
+    assert!(
+        login < images_step && images_step < chart && helm < chart,
+        "the chart is published after the images it names are public, with Helm set up first"
+    );
+    assert_eq!(steps[helm]["with"]["version"].as_str(), Some("v4.0.1"));
+    assert_eq!(steps[chart]["id"].as_str(), Some("chart"));
+    assert_eq!(
+        steps[chart]["env"]["DOCKERHUB_USERNAME"].as_str(),
+        Some("${{ secrets.DOCKERHUB_USERNAME }}")
+    );
+    assert_eq!(
+        steps[chart]["env"]["DOCKERHUB_TOKEN"].as_str(),
+        Some("${{ secrets.DOCKERHUB_TOKEN }}"),
+        "the chart reuses the image credentials; no new secret"
+    );
+    assert_eq!(
+        promote["outputs"]["chart_version"].as_str(),
+        Some("${{ steps.chart.outputs.chart_version }}")
+    );
+    assert!(images["on"]["workflow_call"]["outputs"]["chart_version"].is_mapping());
+    // Both callers pass the tag the chart is versioned with.
+    let ci = workflow("ci.yml");
+    assert_eq!(
+        ci["jobs"]["publish"]["with"]["tag"].as_str(),
+        Some("sha-${{ github.sha }}")
+    );
+    let release = workflow("release.yml");
+    assert_eq!(
+        release["jobs"]["images"]["with"]["tag"].as_str(),
+        Some("${{ github.ref_name }}")
+    );
+
+    let script = std::fs::read_to_string(root().join("scripts/ci-images.sh")).unwrap();
+    for needle in [
+        "CHART_NAME=logweir-chart",
+        "CHART_REPOSITORY=\"oci://registry-1.docker.io/$NS\"",
+        "echo \"$base-sha-$GITHUB_SHA\"",
+        "--app-version \"$TAG\"",
+        "[[ \"$rewritten\" -eq 4 ]]",
+        "helm registry login registry-1.docker.io",
+        "--password-stdin",
+        "helm push \"$package\" \"$CHART_REPOSITORY\"",
+        "helm pull \"$CHART_REPOSITORY/$CHART_NAME\" --version \"$version\"",
+        "[[ \"$pushed\" == \"$served\" ]]",
+        "docker buildx imagetools inspect \"docker.io/$NS/$product:$TAG\"",
+        // "Public" is asked anonymously (review L5).
+        "DOCKER_CONFIG=\"$anonymous_docker\" docker buildx imagetools inspect",
+        "DOCKER_CONFIG=\"$anonymous_docker\" HELM_REGISTRY_CONFIG=\"$dir/anonymous/config.json\"",
+        "HELM_REGISTRY_CONFIG=\"$dir/login/config.json\" helm push",
+    ] {
+        assert!(
+            script.contains(needle),
+            "scripts/ci-images.sh's chart arm must keep `{needle}`"
+        );
+    }
+    // THE OPERATOR ACTION A FAIL-CLOSED PULL-BACK IMPLIES IS DOCUMENTED (re-check
+    // L-rf1): a chart repository created private makes the step fail until it
+    // is made Public and the job re-run, and both documents say so.
+    for doc in ["docs/install.md", "docs/release-notes.md"] {
+        let text = std::fs::read_to_string(root().join(doc)).unwrap();
+        assert!(
+            text.contains("`vladyslavhaina/logweir-chart` must be Public in Docker Hub")
+                && text.contains("re-run"),
+            "{doc} must say the chart repository must be Public on first publication, or the \
+             chart step fails closed until it is made Public and the job re-run"
+        );
+    }
+    assert!(
+        !script.contains("--password \"$DOCKERHUB_TOKEN\"")
+            && !script.contains("-p \"$DOCKERHUB_TOKEN\""),
+        "the token reaches Helm on stdin, never on a command line"
+    );
+}
+
 #[test]
 fn releases_reuse_checks_and_test_packaged_binary_before_images() {
     let release = workflow("release.yml");

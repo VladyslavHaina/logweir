@@ -102,3 +102,46 @@ async fn a_provider_outage_after_initialisation_keeps_the_console_ready() {
     let session = shared.get("/api/v1/session", &cookie).await;
     assert_eq!(session.status, 200, "{}", session.text());
 }
+
+/// **Chart gap G6: a console whose trusted proxy is a Service it has not read
+/// is not Ready**, because every browser request would be `421`. After one
+/// read of the Service's endpoints it is. NEGATIVE CONTROL: the first row of
+/// this file, the same provider with no Service source, is Ready at once.
+#[tokio::test]
+async fn an_unread_proxy_service_is_not_ready_and_a_read_one_is() {
+    let key = support::idp::TestKey::ec("k1");
+    let idp = support::idp::MockIdp::new(ISSUER, &[&key]);
+    let proxies = std::sync::Arc::new(logweir_api::trusted_proxy::TrustedProxies::new(
+        Vec::new(),
+        Some(logweir_api::config::ServiceRef {
+            namespace: "traefik".into(),
+            name: "traefik".into(),
+        }),
+    ));
+    let unread = SharedApp::new(
+        FakeKube::new(),
+        idp.clone(),
+        SharedOptions {
+            bindings: support::default_bindings(),
+            trusted_proxies: Some(std::sync::Arc::clone(&proxies)),
+            ..SharedOptions::default()
+        },
+    );
+    readyz(&unread)
+        .await
+        .assert_problem(503, "kubernetes_unavailable");
+
+    // A fresh app (readiness is cached per app) over the same set, once read.
+    proxies.replace_at(["10.1.0.7".parse().unwrap()], std::time::Instant::now());
+    let read = SharedApp::new(
+        FakeKube::new(),
+        idp,
+        SharedOptions {
+            bindings: support::default_bindings(),
+            trusted_proxies: Some(proxies),
+            ..SharedOptions::default()
+        },
+    );
+    let response = readyz(&read).await;
+    assert_eq!(response.status, 200, "{}", response.text());
+}

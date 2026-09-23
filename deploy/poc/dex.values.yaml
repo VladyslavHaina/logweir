@@ -34,7 +34,19 @@ config:
     config:
       inCluster: true
   web:
-    http: 0.0.0.0:5556           # TLS terminates at the ingress controller
+    # TWO LISTENERS, TWO CLIENTS. Browsers reach Dex through Traefik, which
+    # terminates TLS and forwards plain HTTP to 5556. The CONSOLE never goes
+    # through Traefik: `dex.localtest.me` is mapped in its pod to THIS
+    # Service's fixed ClusterIP (logweir.values.yaml `hostAliases`), and Dex
+    # terminates that TLS itself on 5554 (Service port 443) with the
+    # `dex-internal-tls` certificate issuers.yaml asks the local CA for. So the
+    # console's discovery, JWKS and token requests — the last carrying its
+    # client secret — reach only pods of this Service in namespace `dex`, and
+    # no Ingress anywhere can answer them (the review's M1).
+    http: 0.0.0.0:5556
+    https: 0.0.0.0:5554
+    tlsCert: /etc/dex/tls/tls.crt
+    tlsKey: /etc/dex/tls/tls.key
   oauth2:
     responseTypes: [code]
     skipApprovalScreen: true
@@ -66,7 +78,7 @@ config:
       hashFromEnv: DEX_HASH_ADMIN
 ingress:
   enabled: true
-  className: nginx
+  className: traefik
   annotations:
     cert-manager.io/cluster-issuer: logweir-poc-ca
   hosts:
@@ -77,6 +89,26 @@ ingress:
   tls:
     - secretName: dex-tls
       hosts: [dex.localtest.me]
+https:
+  enabled: true                  # the console's back-channel listener (config.web.https)
+service:
+  # A FIXED ClusterIP, so the console's `hostAliases` can name it as a
+  # constant. 10.96.0.81 is in docker-desktop's Service range (10.96.0.0/12)
+  # and its lower, static band. PoC-ONLY: a production IdP is resolved through
+  # real DNS, and nothing pins a ClusterIP (README.md, production table).
+  clusterIP: 10.96.0.81
+  ports:
+    https:
+      port: 443                  # the issuer URL names no port
+volumes:
+  - name: tls
+    secret:
+      secretName: dex-internal-tls   # issuers.yaml: a Certificate for dex.localtest.me
+      items:
+        - { key: tls.crt, path: tls.crt }
+        - { key: tls.key, path: tls.key }
+volumeMounts:
+  - { name: tls, mountPath: /etc/dex/tls, readOnly: true }
 resources:
   requests: { cpu: 10m, memory: 32Mi }
   limits: { memory: 128Mi }

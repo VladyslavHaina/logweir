@@ -1,0 +1,26 @@
+# deploy/poc/rehearsals/r1-v0.1.5.values.yaml — the STARTING state of upgrade
+# rehearsal R1 (docs/release-handoff.md): Logweir v0.1.5, installed with
+# v0.1.5's OWN chart (this repository at tag v0.1.5, commit 9cc78a3), before
+# `helm upgrade` to the release versions.env names. README.md, *Upgrade
+# rehearsals*, has the full sequence.
+#
+# What v0.1.5 is, and so what this file can say: six CRDs, no managed
+# identity (the signing Secret and the TrustRoster are provisioned by hand, as
+# that tag's docs/install.md says), no console (there is no
+# `logweir-console:v0.1.5`), no controller scoping. Runs execute in
+# `logweir-poc`, the namespace the release keeps using after the upgrade, so
+# every pre-upgrade schedule is one the upgraded, scoped controller watches.
+controllerImage: docker.io/vladyslavhaina/weirkeeper:v0.1.5
+runnerImage: docker.io/vladyslavhaina/logweir:v0.1.5
+imagePullPolicy: IfNotPresent    # a release tag is not moved
+runnerImagePullPolicy: IfNotPresent
+environment: poc
+kubernetes:
+  namespace: logweir-poc         # only feeds ui.namespaces at this version
+demoKafka:
+  enabled: true
+minio:
+  enabled: true
+  persistence:
+    enabled: true
+    size: 5Gi

@@ -22,6 +22,8 @@ on:
         value: ${{ jobs.promote.outputs.ui_digest }}
       console_digest:
         value: ${{ jobs.promote.outputs.console_digest }}
+      chart_version:
+        value: ${{ jobs.promote.outputs.chart_version }}
 permissions:
   contents: read
 jobs:
@@ -151,7 +153,7 @@ jobs:
       #
       # THE FULL ASSERTION IS `scripts/check-image-api.sh`, which the next step
       # runs on this same tag and `… candidates` runs again on the digest the
-      # registry returns: the twenty-two page files hashed against ui/, the three
+      # registry returns: the twenty-six page files hashed against ui/, the three
       # licences, the three absences, USER 65532, no key-shaped path anywhere,
       # and the version held to the workspace's. This step earns its place by
       # failing in seconds and by naming the defect.
@@ -196,6 +198,7 @@ jobs:
       controller_digest: ${{ steps.promote.outputs.controller_digest }}
       ui_digest: ${{ steps.promote.outputs.ui_digest }}
       console_digest: ${{ steps.promote.outputs.console_digest }}
+      chart_version: ${{ steps.chart.outputs.chart_version }}
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
@@ -211,3 +214,22 @@ jobs:
       - name: Publish complete image set
         id: promote
         run: bash scripts/ci-images.sh promote
+      # CHART GAP G4 — THE CHART, PUBLISHED BESIDE THE IMAGES IT NAMES, and
+      # only after they are public under TAG: `ci-images.sh chart` checks all
+      # four first. It is versioned WITH them (appVersion = TAG; version
+      # `<Chart.yaml version>-sha-<commit>` on main, `<semver>` on a release
+      # tag), its four image defaults are rewritten to `:TAG`, it is pushed to
+      # oci://registry-1.docker.io/$NS/logweir-chart with the same Docker Hub
+      # credentials the login above used, and the bytes the registry serves back
+      # are compared with the bytes pushed. The Helm version is the one CI's
+      # `check` job renders the chart with. PINNED BY COMMIT, not by tag: this
+      # job holds the Docker Hub credentials when it runs, and the Helm it
+      # installs receives the token (v4.3.1 = 1a275c3b…).
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+        with: { version: v4.0.1 }
+      - name: Publish the chart beside the images
+        id: chart
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: bash scripts/ci-images.sh chart

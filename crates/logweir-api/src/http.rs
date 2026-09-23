@@ -103,7 +103,7 @@ pub fn forwarded_client(
 ) -> Option<String> {
     let shared = state.shared()?;
     let peer = peer?;
-    if !shared.trusted_proxy_cidrs.iter().any(|c| c.contains(peer)) {
+    if !shared.trusted_proxies.contains(peer) {
         return None;
     }
     // THE RIGHTMOST HOP THE TRUSTED PROXIES DID NOT ADD. A proxy APPENDS the
@@ -124,9 +124,8 @@ pub fn forwarded_client(
         .iter()
         .rev()
         .find(|hop| {
-            hop.parse::<IpAddr>().map_or(true, |ip| {
-                !shared.trusted_proxy_cidrs.iter().any(|c| c.contains(ip))
-            })
+            hop.parse::<IpAddr>()
+                .map_or(true, |ip| !shared.trusted_proxies.contains(ip))
         })
         .or_else(|| hops.first())?;
     Some(crate::validate::bounded(client, 64))
@@ -408,8 +407,7 @@ pub fn entry_point(
     if !shared.require_trusted_proxy {
         return Ok(());
     }
-    let trusted =
-        peer.is_some_and(|peer| shared.trusted_proxy_cidrs.iter().any(|c| c.contains(peer)));
+    let trusted = peer.is_some_and(|peer| shared.trusted_proxies.contains(peer));
     if !trusted {
         return Err("peerNotTrusted");
     }

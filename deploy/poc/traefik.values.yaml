@@ -1,0 +1,108 @@
+# deploy/poc/traefik.values.yaml — the ingress controller in front of the
+# Logweir console and Dex. Chart traefik 41.6.0 (Traefik v3.7.13), image pinned
+# by digest below (resolved from docker.io/library/traefik:v3.7.13 on
+# 2026-09-23).
+#
+#   helm upgrade --install traefik traefik --repo https://traefik.github.io/charts \
+#     --version 41.6.0 -n traefik --create-namespace -f deploy/poc/traefik.values.yaml --wait
+#
+# WHY TRAEFIK. The Kubernetes project retired ingress-nginx in March 2026: no
+# releases, bug fixes or security patches since. A production-ready profile
+# needs a maintained controller; the owner chose Traefik. Everything Logweir
+# needs from it is the standard `Ingress` the Logweir chart renders
+# (`ingressClassName: traefik`), so Gateway API with the same controller is an
+# option later without a chart change on the Logweir side.
+#
+# WHAT CARRIED OVER FROM THE ingress-nginx PROFILE, AND ITS TRAEFIK SPELLING:
+#   ingress-nginx                         Traefik (this file)
+#   config.hsts / hsts-max-age            the `hsts` headers Middleware below, on the
+#   (+ per-Ingress hsts annotations)      `websecure` entry point for every host
+#   config.ssl-redirect: "true"           ports.web.http.redirections -> websecure, permanent
+#   use-forwarded-headers: "false"        forwardedHeaders.trustedIPs: [] and insecure: false —
+#                                         Traefik overwrites a client's X-Forwarded-* with its own
+#   allowSnippetAnnotations: false        no equivalent needed: Traefik has no configuration
+#                                         snippets; cross-namespace CRD references stay off
+#   ingressClassResource nginx, default   ingressClass traefik, isDefaultClass: false
+#   service.type: LoadBalancer            the same
+#   (watched every namespace)             providers.*.namespaces: the profile's own only (below)
+#   admissionWebhooks                     none: Traefik validates nothing at admission
+#
+# PoC vs production: one replica here (docker-desktop has one node); production
+# runs >= 2 replicas across nodes with a PodDisruptionBudget. The console trusts
+# THIS Service's serving pods as its proxy (`trustedProxyService`), so neither
+# changes when a pod is recreated.
+image:
+  registry: docker.io
+  repository: traefik
+  digest: sha256:24841fe2de7304c149343d877d2923b4c8800a38ba015dea9174c23b20e344a0
+versionOverride: v3.7.13         # the chart cannot read a version from a digest
+deployment:
+  replicas: 1
+podDisruptionBudget:
+  enabled: false                 # one replica; enable with >= 2 (production)
+ingressClass:
+  enabled: true
+  isDefaultClass: false          # the Logweir and Dex Ingresses name the class explicitly
+  name: traefik
+# ONLY THE PROFILE'S OWN NAMESPACES ARE ROUTED (the review's M1, defence in
+# depth). An ingress controller that reads Ingresses from every namespace lets
+# anyone who may create an Ingress anywhere claim `dex.localtest.me` or
+# `logweir.localtest.me` paths — with longer path rules outranking the owner's —
+# behind the owner's own certificate. The console's OIDC back-channel no longer
+# passes through Traefik at all (dex.values.yaml), but browsers do, so Traefik
+# reads Ingresses from `dex` and `logweir-system` only, and its CRDs (the HSTS
+# Middleware, the default TLS store) from `traefik` only.
+providers:
+  kubernetesCRD:
+    enabled: true                # the `hsts` Middleware below is a Traefik CRD
+    allowCrossNamespace: false
+    namespaces: [traefik]
+    defaultTLSResourcesNamespace: traefik
+  kubernetesIngress:
+    enabled: true
+    allowExternalNameServices: false
+    namespaces: [dex, logweir-system]
+ports:
+  web:
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+          permanent: true
+    forwardedHeaders:
+      trustedIPs: []
+      insecure: false
+  websecure:
+    http:
+      middlewares:
+        - traefik-hsts@kubernetescrd   # <namespace>-<name>: the Middleware below
+    forwardedHeaders:
+      trustedIPs: []                   # a client's X-Forwarded-Proto is never believed
+      insecure: false
+service:
+  spec:
+    type: LoadBalancer           # docker-desktop maps this to 127.0.0.1:80/443
+resources:
+  requests: { cpu: 100m, memory: 128Mi }
+  limits: { memory: 512Mi }
+accessLog:
+  enabled: true                  # the edge's own record of who asked for what
+  fields:
+    headers:
+      defaultMode: drop          # no cookie, no Authorization header, ever
+    queryParameters:
+      # `/auth/callback?code=…&state=…` carries a single-use authorization
+      # code; it is useless without the client secret, and still not logged.
+      defaultMode: drop
+extraObjects:
+  # HSTS for every host served on `websecure` (the console and Dex): one year.
+  - apiVersion: traefik.io/v1alpha1
+    kind: Middleware
+    metadata:
+      name: hsts
+      namespace: traefik
+    spec:
+      headers:
+        stsSeconds: 31536000
+        stsIncludeSubdomains: false

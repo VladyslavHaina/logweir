@@ -34,6 +34,9 @@ state_path = pathlib.Path(os.environ["MOCK_REGISTRY"])
 state = json.loads(state_path.read_text())
 if args[:3] == ["buildx", "imagetools", "inspect"]:
     ref = args[3]
+    if os.environ.get("MOCK_DOCKER_ENV_LOG"):
+        with open(os.environ["MOCK_DOCKER_ENV_LOG"], "a") as out:
+            out.write(json.dumps({"ref": ref, "docker_config": os.environ.get("DOCKER_CONFIG")}) + "\n")
     if ref == os.environ.get("MOCK_FAIL_INSPECT_REF") or ref not in state:
         sys.exit(1)
     record = state[ref]
@@ -264,6 +267,193 @@ class PromotionTests(unittest.TestCase):
         promote = publication.index('  promote)')
         self.assertLess(pull, exact_check)
         self.assertLess(exact_check, promote)
+
+
+# A Helm stand-in: `lint`, `template` and `registry login` succeed (login
+# records whether the password came on stdin); `package` writes a real tarball
+# of the chart directory plus the version and appVersion it was given; `push`
+# stores the bytes under repo/name:version; `pull` writes them back, or other
+# bytes under MOCK_CORRUPT_PULL. Every call is logged WITHOUT stdin.
+HELM = r'''#!/usr/bin/env python3
+import json, os, pathlib, sys, tarfile, io
+args = sys.argv[1:]
+with open(os.environ["MOCK_HELM_LOG"], "a") as out:
+    out.write(json.dumps(args) + "\n")
+state_path = pathlib.Path(os.environ["MOCK_CHARTS"])
+state = json.loads(state_path.read_text()) if state_path.exists() else {}
+if args[:1] in (["lint"], ["template"]):
+    sys.exit(0)
+if args[:2] == ["registry", "login"]:
+    secret = sys.stdin.read() if "--password-stdin" in args else ""
+    pathlib.Path(os.environ["MOCK_HELM_LOGIN"]).write_text(json.dumps(
+        {"stdin": secret, "args": args, "registry_config": os.environ.get("HELM_REGISTRY_CONFIG")}))
+    sys.exit(0)
+if args[:1] == ["package"]:
+    chart = pathlib.Path(args[1])
+    version = args[args.index("--version") + 1]
+    app = args[args.index("--app-version") + 1]
+    out = pathlib.Path(args[args.index("-d") + 1])
+    name = [l.split(": ", 1)[1] for l in (chart / "Chart.yaml").read_text().splitlines() if l.startswith("name: ")][0]
+    target = out / f"{name}-{version}.tgz"
+    with tarfile.open(target, "w:gz") as tar:
+        tar.add(chart, arcname=name)
+        meta = json.dumps({"version": version, "appVersion": app}).encode()
+        info = tarfile.TarInfo(f"{name}/__mock_package.json"); info.size = len(meta)
+        tar.addfile(info, io.BytesIO(meta))
+    print(f"Successfully packaged chart and saved it to: {target}")
+    sys.exit(0)
+if args[:1] == ["push"]:
+    package = pathlib.Path(args[1]); repo = args[2]
+    stem = package.name[:-4]
+    state[repo + "/" + stem] = package.read_bytes().hex()
+    state_path.write_text(json.dumps(state))
+    sys.exit(0)
+if args[:1] == ["pull"]:
+    ref = args[1]; version = args[args.index("--version") + 1]; out = pathlib.Path(args[args.index("-d") + 1])
+    docker_config = os.environ.get("DOCKER_CONFIG")
+    pathlib.Path(os.environ["MOCK_HELM_PULL_ENV"]).write_text(json.dumps({
+        "registry_config": os.environ.get("HELM_REGISTRY_CONFIG"),
+        "docker_config": docker_config,
+        "docker_config_entries": sorted(os.listdir(docker_config))
+            if docker_config and os.path.isdir(docker_config) else None}))
+    name = ref.rsplit("/", 1)[1]
+    key = ref.rsplit("/", 1)[0] + "/" + f"{name}-{version}"
+    if key not in state:
+        sys.exit(1)
+    data = bytes.fromhex(state[key])
+    if os.environ.get("MOCK_CORRUPT_PULL"):
+        data = data + b"tampered"
+    (out / f"{name}-{version}.tgz").write_bytes(data)
+    sys.exit(0)
+print("unexpected helm call: " + repr(args), file=sys.stderr)
+sys.exit(2)
+'''
+
+
+class ChartPublicationTests(unittest.TestCase):
+    """Chart gap G4: the chart is published after the images, versioned with
+    them, with the image credentials on stdin, and verified by content. The
+    registry stand-in and the promotion are PromotionTests' own, borrowed rather
+    than inherited so the promotion rows do not run twice."""
+
+    TOKEN = "dckr_pat_" + "x" * 20
+    artifact = PromotionTests.artifact
+    run_promotion = PromotionTests.run_promotion
+
+    def setUp(self):
+        PromotionTests.setUp(self)
+        shutil.copytree(ROOT / "charts/logweir", self.root / "charts/logweir",
+                        ignore=shutil.ignore_patterns("rendered"))
+        helm = self.bin / "helm"
+        helm.write_text(HELM)
+        helm.chmod(0o755)
+        self.helm_log = self.root / "helm.jsonl"
+        self.charts = self.root / "charts.json"
+        self.login = self.root / "login.json"
+        self.docker_env = self.root / "docker-env.jsonl"
+        self.pull_env = self.root / "pull-env.json"
+        self.env.update(
+            MOCK_DOCKER_ENV_LOG=str(self.docker_env), MOCK_HELM_PULL_ENV=str(self.pull_env),
+            MOCK_HELM_LOG=str(self.helm_log), MOCK_CHARTS=str(self.charts),
+            MOCK_HELM_LOGIN=str(self.login), DOCKERHUB_USERNAME="publisher",
+            DOCKERHUB_TOKEN=self.TOKEN,
+        )
+
+    def run_chart(self, success=True):
+        result = subprocess.run(
+            ["bash", str(self.root / "scripts/ci-images.sh"), "chart"],
+            env=self.env, cwd=self.root, capture_output=True, text=True, timeout=60,
+        )
+        if success:
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        else:
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        return result
+
+    def helm_calls(self):
+        if not self.helm_log.exists():
+            return []
+        return [json.loads(line) for line in self.helm_log.read_text().splitlines()]
+
+    def pushed(self):
+        return json.loads(self.charts.read_text()) if self.charts.exists() else {}
+
+    def packaged(self, key):
+        import tarfile, io
+        data = bytes.fromhex(self.pushed()[key])
+        with tarfile.open(fileobj=io.BytesIO(data)) as tar:
+            meta = json.loads(tar.extractfile("logweir-chart/__mock_package.json").read())
+            values = tar.extractfile("logweir-chart/values.yaml").read().decode()
+            chart = tar.extractfile("logweir-chart/Chart.yaml").read().decode()
+        return meta, values, chart
+
+    def test_main_publishes_the_chart_versioned_with_the_images(self):
+        self.run_promotion()
+        self.run_chart()
+        version = "0.1.0-sha-" + SHA
+        key = f"oci://registry-1.docker.io/{NS}/logweir-chart-{version}"
+        meta, values, chart = self.packaged(key)
+        self.assertEqual(meta, {"version": version, "appVersion": "sha-" + SHA})
+        self.assertIn("name: logweir-chart\n", chart)
+        for image in ("weirkeeper", "logweir", "logweir-console", "logweir-ui"):
+            self.assertIn(f"docker.io/{NS}/{image}:sha-{SHA}", values)
+        self.assertNotIn(":latest", values)
+        self.assertIn(f"chart_version={version}\n", Path(self.env["GITHUB_OUTPUT"]).read_text())
+        # The token reached Helm on stdin and on no command line.
+        login = json.loads(self.login.read_text())
+        self.assertEqual(login["stdin"], self.TOKEN)
+        self.assertNotIn(self.TOKEN, self.helm_log.read_text())
+        pull = next(c for c in self.helm_calls() if c[0] == "pull")
+        self.assertEqual(pull[:4], ["pull", f"oci://registry-1.docker.io/{NS}/logweir-chart",
+                                    "--version", version])
+        push = next(i for i, c in enumerate(self.helm_calls()) if c[0] == "push")
+        self.assertLess(push, self.helm_calls().index(pull), "verified after the push")
+        # "Public" is asked anonymously (review L5): the four image inspections
+        # of the chart step run with a fresh Docker config holding no login, and
+        # the pull-back with a Helm registry configuration that does not exist.
+        chart_inspects = [json.loads(line) for line in self.docker_env.read_text().splitlines()]
+        chart_inspects = [i for i in chart_inspects
+                          if i["ref"].endswith(f":sha-{SHA}") and i["docker_config"]]
+        self.assertEqual(len(chart_inspects), 4, chart_inspects)
+        pull_env = json.loads(self.pull_env.read_text())
+        registry_config = pull_env["registry_config"]
+        self.assertTrue(registry_config, "the pull-back must name its own registry config")
+        self.assertFalse(Path(registry_config).exists(), "the pull-back must carry no registry login")
+        # Helm falls back to Docker's stored credentials: the pull-back must
+        # also run with an EMPTY Docker configuration directory (re-check L-rf1).
+        self.assertTrue(pull_env["docker_config"], "the pull-back must name an empty DOCKER_CONFIG")
+        self.assertEqual(pull_env["docker_config_entries"], [],
+                         "the pull-back's DOCKER_CONFIG must be an existing, empty directory")
+        # The login is scoped to its own registry config, not the default one.
+        self.assertTrue(login["registry_config"], "the login must use its own registry config")
+        self.assertNotEqual(login["registry_config"], registry_config)
+
+    def test_a_release_tag_publishes_the_semver_chart(self):
+        self.env.update(TAG="v1.2.3", GITHUB_REF="refs/tags/v1.2.3", PROMOTE_LATEST="false")
+        self.run_promotion()
+        self.run_chart()
+        meta, values, _ = self.packaged(f"oci://registry-1.docker.io/{NS}/logweir-chart-1.2.3")
+        self.assertEqual(meta, {"version": "1.2.3", "appVersion": "v1.2.3"})
+        self.assertIn(f"docker.io/{NS}/weirkeeper:v1.2.3", values)
+
+    def test_no_chart_before_its_images_are_public(self):
+        # Promotion did not run: no image carries TAG yet.
+        self.run_chart(success=False)
+        self.assertEqual(self.pushed(), {})
+        self.assertFalse(any(c[:1] == ["push"] for c in self.helm_calls()))
+
+    def test_a_tag_that_is_not_a_version_publishes_nothing(self):
+        self.run_promotion()
+        self.env["TAG"] = "main"
+        self.run_chart(success=False)
+        self.assertEqual(self.pushed(), {})
+
+    def test_different_bytes_served_back_fail_the_publication(self):
+        self.run_promotion()
+        self.env["MOCK_CORRUPT_PULL"] = "1"
+        result = self.run_chart(success=False)
+        self.assertIn("different chart bytes", result.stderr)
+        self.assertNotIn("chart_version=", Path(self.env["GITHUB_OUTPUT"]).read_text())
 
 
 if __name__ == "__main__":

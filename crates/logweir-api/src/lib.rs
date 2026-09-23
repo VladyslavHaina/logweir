@@ -61,6 +61,7 @@ pub mod problem;
 pub mod projection;
 pub mod routes;
 pub mod status;
+pub mod trusted_proxy;
 pub mod validate;
 
 use std::sync::Arc;
@@ -94,6 +95,10 @@ pub struct SharedPreflight {
     pub session_keys: Arc<CookieKeys>,
     /// The OIDC client secret.
     pub client_secret: auth::oidc::Secret,
+    /// The trust anchors for the provider's TLS certificate: the system roots
+    /// and/or `oidc.caBundleFile`, read and parsed here so an unreadable or
+    /// empty bundle refuses the process before a socket exists (chart gap G1).
+    pub tls_trust: auth::oidc::TlsTrust,
 }
 
 /// Read the keys, the client secret and the static assets.
@@ -134,9 +139,14 @@ pub fn preflight(config: &config::Config) -> Result<Preflight, String> {
                     shared.oidc.client_secret_file.display()
                 ));
             }
+            let tls_trust = auth::oidc::TlsTrust::load(
+                shared.oidc.ca_bundle_file.as_deref(),
+                shared.oidc.system_roots,
+            )?;
             Some(SharedPreflight {
                 session_keys: Arc::new(CookieKeys::new(&session_key)),
                 client_secret: auth::oidc::Secret::new(secret),
+                tls_trust,
             })
         }
     };
@@ -184,7 +194,10 @@ pub fn state_from_parts(
             None,
         ),
         (config::Mode::Shared(settings), Some(material)) => {
-            let http = auth::oidc::HyperHttpClient::new(settings.oidc.insecure_loopback_issuer)?;
+            let http = auth::oidc::HyperHttpClient::new(
+                settings.oidc.insecure_loopback_issuer,
+                &material.tls_trust,
+            )?;
             let provider = auth::oidc::Provider::new(
                 auth::oidc::OidcSettings {
                     issuer: settings.oidc.issuer.clone(),
@@ -214,7 +227,10 @@ pub fn state_from_parts(
                     login_limiter: auth::ratelimit::RateLimiter::for_login(),
                     streams: auth::ratelimit::StreamSlots::new(),
                     session_max_age_seconds: settings.session_max_age_seconds,
-                    trusted_proxy_cidrs: settings.trusted_proxy_cidrs.clone(),
+                    trusted_proxies: Arc::new(trusted_proxy::TrustedProxies::new(
+                        settings.trusted_proxy_cidrs.clone(),
+                        settings.trusted_proxy_service.clone(),
+                    )),
                     require_trusted_proxy: settings.require_trusted_proxy,
                 })),
             )

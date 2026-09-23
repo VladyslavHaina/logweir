@@ -147,6 +147,7 @@ pub mod diagnostics;
 /// D2 §3.9 — the evidence-fetch check Job, for evidence only a pod may read.
 pub mod evidence_fetch;
 pub mod evidence_store;
+pub mod health;
 pub mod identity;
 pub mod job;
 pub mod policy;

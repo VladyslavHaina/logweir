@@ -99,14 +99,46 @@ including a local `registry:2` fallback: it does not prove public pullability.
 
 ### (c) The Helm chart
 
-`identity.bootstrapImage` is pinned in `charts/logweir/values.yaml` to a
-reviewed runner digest that contains the identity CLI, so the clean default
-command needs neither a local key nor an image hash:
+**The published chart.** Every publication of the images publishes the chart
+beside them, as an OCI artifact on Docker Hub, from the same run and after the
+images are public (`scripts/ci-images.sh chart`, in `images.yml`'s promote job):
+
+| images published as | chart | `appVersion` |
+|---|---|---|
+| `sha-<commit>` (every push to `main`) | `oci://registry-1.docker.io/vladyslavhaina/logweir-chart --version 0.1.0-sha-<commit>` | `sha-<commit>` |
+| `v<X.Y.Z>` (a release tag) | `oci://registry-1.docker.io/vladyslavhaina/logweir-chart --version <X.Y.Z>` | `v<X.Y.Z>` |
+
+The packaged chart's four Logweir image defaults (`controllerImage`,
+`runnerImage`, `api.console.image`, `ui.image`) are that same tag, so installing
+it installs exactly the images of that commit — no `--set` for images and no
+checkout of the repository:
+
+```bash
+helm upgrade --install logweir oci://registry-1.docker.io/vladyslavhaina/logweir-chart \
+  --version 0.1.0-sha-<commit> -n logweir-system --create-namespace --wait --timeout 10m
+helm show values oci://registry-1.docker.io/vladyslavhaina/logweir-chart --version 0.1.0-sha-<commit>
+```
+
+A `main` version is a SemVer pre-release, so always pass `--version`. The
+package's name is `logweir-chart` (Docker Hub names a chart's repository after
+the chart, and `vladyslavhaina/logweir` is the runner image); everything it
+installs is named exactly as from the source chart. The publication step
+compares the bytes the registry serves back with the bytes it pushed. [UNVERIFIED — no chart has been pushed yet: the first publication is the first main push after this change merges.]
+
+**On first publication, `vladyslavhaina/logweir-chart` must be Public in Docker Hub.** The publication step pulls the chart back anonymously; if Docker Hub creates the repository private (the namespace's default visibility decides), `main` CI's chart step fails closed until the repository is made Public (Repository → Settings → Visibility) and the job is re-run — the re-push overwrites the same version and is compared again.
+
+**From a checkout.** `identity.bootstrapImage` is pinned in
+`charts/logweir/values.yaml` to a reviewed runner digest that contains the
+identity CLI, so the clean default command needs neither a local key nor an
+image hash:
 
 ```bash
 helm upgrade --install logweir charts/logweir -n logweir-system \
   --create-namespace --wait --timeout 10m
 ```
+
+From a checkout the four image defaults are `:latest`; the published chart
+above is the way to install one commit's images by construction.
 
 That pinned runner, like every runner image, is amd64-only. On an arm64 node
 without amd64 emulation the bootstrap hook fails with `exec format error` and

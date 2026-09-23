@@ -63,9 +63,18 @@ find ui -type f ! -name '*.md' ! -path 'ui/tests/*' | LC_ALL=C sort | xargs shas
   remains a supported legacy view; the destination, discovery, readiness,
   catalog and schedule-policy flows are console-only.
 - **A versioned PoC install profile**, [deploy/poc/](../deploy/poc/README.md):
-  an ingress controller, cert-manager with a local CA, Dex and the shared console, all
-  by Helm and the published `sha-` images, with the chart gaps it had to stand
-  in for listed there (G1–G6). [UNVERIFIED — the profile has been rendered, not yet installed on docker-desktop.]
+  Traefik, cert-manager with a local CA, Dex and the shared console, all by
+  Helm from the published OCI chart and its `sha-` images, with no post-install
+  patch: the six chart gaps it first had to stand in for (G1–G6) are chart
+  values and behaviours now — the issuer CA bundle, host aliases, the
+  connection objects' namespace, the published chart, controller probes and the
+  ingress controller trusted by its Service. [UNVERIFIED — the profile has been rendered, not yet installed on docker-desktop.]
+- **The chart is published** as `oci://registry-1.docker.io/vladyslavhaina/logweir-chart`,
+  beside the images and versioned with them ([install.md](install.md), *(c) The
+  Helm chart*). [UNVERIFIED — the first publication happens on the first main push after this lands.]
+  **On first publication, `vladyslavhaina/logweir-chart` must be Public in Docker Hub**, or `main` CI's
+  chart step fails closed (its anonymous pull-back is refused) until the repository is made Public and
+  the job is re-run.
 - **Fourteen kinds** on `logweir.dev/v1alpha1`, all additive over `v0.1.5`
   ([install.md](install.md), *Upgrade CRDs before upgrading the controller*).
 - **Trust has a lifecycle.** A `TrustPolicy` governs a namespace's keys with
@@ -324,6 +333,14 @@ arriving) and from `sha-f49849d…` (the last build before `ac00819`, which
 crosses all ten items above); [release-handoff.md](release-handoff.md) names
 the images, the state each rehearsal sets up first, and which items it
 exercises. An upgrade from `sha-7b0277b…` crosses items 1–4 only.
+
+**The chart and the images move together.** This chart's controller probes run
+`weirkeeper --probe`, and its console configuration can carry
+`oidc.caBundleFile` and `trustedProxyService`: a controller image older than the
+chart fails its liveness probe (and is restarted), and an older console refuses
+the configuration (exit 2, `unknown field`). The published chart names its own
+commit's images, and `helm rollback` restores the previous chart and images
+together; pin all four images to one build whenever you override them.
 
 Archives, evidence and catalog records are untouched in both directions; old
 signed archives keep verifying as long as their public keys stay in the trust

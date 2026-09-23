@@ -7776,6 +7776,19 @@ spec:
                   name: logweir-evidence-ro
                   key: secret-access-key
                   optional: true
+          livenessProbe:
+            exec:
+              command: ["/usr/local/bin/weirkeeper", "--probe", "live"]
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command: ["/usr/local/bin/weirkeeper", "--probe", "ready"]
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
           resources:
             limits:
               memory: 512Mi

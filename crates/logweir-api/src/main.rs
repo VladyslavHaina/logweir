@@ -95,6 +95,15 @@ async fn run(config: logweir_api::config::Config, preflight: logweir_api::Prefli
             return ExitCode::FAILURE;
         }
     };
+    // What the provider's TLS certificate is verified against (chart gap G1),
+    // read before the preflight is consumed: how many private anchors the
+    // bundle added, and whether the system roots are consulted too.
+    let (oidc_extra_roots, oidc_system_roots) = preflight.shared.as_ref().map_or((0, true), |s| {
+        (
+            s.tls_trust.extra_root_count(),
+            s.tls_trust.uses_system_roots(),
+        )
+    });
     let state = match logweir_api::state_from_parts(&config, preflight, client) {
         Ok(state) => state,
         Err(reason) => {
@@ -102,6 +111,20 @@ async fn run(config: logweir_api::config::Config, preflight: logweir_api::Prefli
             return ExitCode::FAILURE;
         }
     };
+    // CHART GAP G6: the ingress controller's serving endpoints, re-read every
+    // few seconds, are the entry point's trusted peers. The first read happens
+    // before the first request can arrive in practice; until it lands,
+    // `/readyz` is false and a browser request is 421.
+    if let Some(shared) = state.shared() {
+        if let Some(service) = shared.trusted_proxies.service() {
+            tracing::info!(
+                namespace = %service.namespace,
+                service = %service.name,
+                "trusting the serving endpoints of this Service as the entry point's proxy"
+            );
+            tokio::spawn(std::sync::Arc::clone(&shared.trusted_proxies).run(state.kube().clone()));
+        }
+    }
     let listener = match tokio::net::TcpListener::bind(config.listen).await {
         Ok(listener) => listener,
         Err(error) => {
@@ -118,6 +141,8 @@ async fn run(config: logweir_api::config::Config, preflight: logweir_api::Prefli
         role_bindings = config.shared().map_or(0, |s| s.roles.bindings.len()),
         binding_revision = config.shared().map_or("", |s| s.roles.revision.as_str()),
         issuer = config.shared().map_or("", |s| s.oidc.issuer.as_str()),
+        oidc_extra_roots,
+        oidc_system_roots,
         // PLAT-19.2 readiness (D0: "API and controller consume the same content
         // hash and expose it"): the controller logs the same digest at start.
         approval_policy_digest = %state.approval().policies.digest(),

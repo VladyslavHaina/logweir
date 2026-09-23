@@ -67,6 +67,8 @@ struct ConfigFile {
     trusted_proxy_cidrs: Option<Vec<String>>,
     #[serde(default)]
     require_trusted_proxy: Option<bool>,
+    #[serde(default)]
+    trusted_proxy_service: Option<ServiceRefFile>,
     namespaces: Vec<String>,
     kubernetes: KubernetesFile,
     #[serde(default)]
@@ -81,6 +83,13 @@ struct ConfigFile {
     /// PEM, from a mounted Secret.
     #[serde(default)]
     confirmation_key_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ServiceRefFile {
+    namespace: String,
+    name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -116,6 +125,10 @@ struct OidcFile {
     token_auth_method: Option<String>,
     #[serde(default)]
     insecure_loopback_issuer: Option<bool>,
+    #[serde(default)]
+    ca_bundle_file: Option<PathBuf>,
+    #[serde(default)]
+    system_roots: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -215,6 +228,16 @@ pub struct OidcConfig {
     /// Whether a plain-HTTP loopback issuer is permitted. For a local mock
     /// provider in development and tests; refused for any non-loopback host.
     pub insecure_loopback_issuer: bool,
+    /// A PEM bundle of ADDITIONAL trust anchors for the provider's TLS
+    /// certificate — a private CA that issued the issuer's certificate. Read
+    /// before any socket exists (`crate::preflight`); an unreadable file, a
+    /// file with no certificate and a file carrying anything but certificates
+    /// are all refusals, never an empty addition.
+    pub ca_bundle_file: Option<PathBuf>,
+    /// Whether the operating system's trust store is consulted as well.
+    /// `true` unless the administrator says otherwise; `false` requires
+    /// `ca_bundle_file`, because a client with no trust anchor trusts nothing.
+    pub system_roots: bool,
 }
 
 /// The validated role-binding table.
@@ -246,9 +269,22 @@ pub struct SharedConfig {
     /// log. Never an identity input.
     pub trusted_proxy_cidrs: Vec<Cidr>,
     /// Whether every request (the two probes excepted) must arrive from a
-    /// `trustedProxyCidrs` peer that asserts `X-Forwarded-Proto: https`.
+    /// trusted proxy peer that asserts `X-Forwarded-Proto: https`.
     /// See `crate::http::entry_point`.
     pub require_trusted_proxy: bool,
+    /// The ingress controller's Service, whose SERVING endpoint addresses are
+    /// trusted as proxy peers beside `trusted_proxy_cidrs` (chart gap G6).
+    /// See `crate::trusted_proxy`.
+    pub trusted_proxy_service: Option<ServiceRef>,
+}
+
+/// A Service by namespace and name, from the configuration file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServiceRef {
+    /// The Service's namespace.
+    pub namespace: String,
+    /// The Service's name.
+    pub name: String,
 }
 
 /// Which mode the file asked for, with that mode's settings.
@@ -720,14 +756,38 @@ impl Config {
                 ));
             }
         }
+        // THE INGRESS CONTROLLER BY ITS SERVICE, NOT BY AN ADDRESS (chart gap
+        // G6). A `/32` for the ingress pod changes whenever that pod does; a
+        // range wide enough not to change trusts every pod on the node. The
+        // Service's serving endpoints are exactly the ingress pods, today's.
+        let trusted_proxy_service = match file.trusted_proxy_service {
+            None => None,
+            Some(service) => {
+                for (value, what) in [(&service.namespace, "namespace"), (&service.name, "name")] {
+                    if !validate::is_dns_label(value) {
+                        return Err(field(
+                            "trustedProxyService",
+                            format!("the {what} `{value}` is not a DNS-1123 label"),
+                        ));
+                    }
+                }
+                Some(ServiceRef {
+                    namespace: service.namespace,
+                    name: service.name,
+                })
+            }
+        };
         // A GATE WITH NOTHING BEHIND IT IS A REFUSAL OF EVERYTHING. Requiring
-        // the trusted proxy with no range to trust would answer every request
+        // the trusted proxy with nothing to trust would answer every request
         // 421 and look like an outage; it is refused here, by name, instead.
-        if require_trusted_proxy && trusted_proxy_cidrs.is_empty() {
+        if require_trusted_proxy
+            && trusted_proxy_cidrs.is_empty()
+            && trusted_proxy_service.is_none()
+        {
             return Err(field(
                 "requireTrustedProxy",
-                "requires at least one `trustedProxyCidrs` range: the entry point would \
-                 otherwise refuse every request",
+                "requires at least one `trustedProxyCidrs` range or a `trustedProxyService`: \
+                 the entry point would otherwise refuse every request",
             ));
         }
 
@@ -748,6 +808,7 @@ impl Config {
                 roles,
                 trusted_proxy_cidrs,
                 require_trusted_proxy,
+                trusted_proxy_service,
             })),
             namespaces,
             kubernetes,
@@ -774,6 +835,7 @@ fn refuse_shared_only_fields(file: &ConfigFile) -> Result<(), ConfigError> {
         ),
         (file.trusted_proxy_cidrs.is_some(), "trustedProxyCidrs"),
         (file.require_trusted_proxy.is_some(), "requireTrustedProxy"),
+        (file.trusted_proxy_service.is_some(), "trustedProxyService"),
     ] {
         if present {
             return Err(field(
@@ -1111,6 +1173,21 @@ fn parse_oidc(base: &Path, file: OidcFile) -> Result<OidcConfig, ConfigError> {
         }
     };
 
+    // THE PROVIDER'S TLS TRUST (chart gap G1). A private issuer CA is ADDED to
+    // the system roots by default; dropping the system roots is an explicit
+    // second decision, and it is refused without a bundle to put in their
+    // place — a client with no trust anchor would refuse every provider and
+    // look like an outage. The bundle is only a PATH here: it is read, and
+    // every refusal about its CONTENT made, in `crate::preflight`.
+    let system_roots = file.system_roots.unwrap_or(true);
+    if !system_roots && file.ca_bundle_file.is_none() {
+        return Err(field(
+            "oidc.systemRoots",
+            "`false` requires `oidc.caBundleFile`: without the system roots and without a \
+             bundle the console would trust no certificate at all",
+        ));
+    }
+
     Ok(OidcConfig {
         issuer,
         client_id: file.client_id,
@@ -1121,6 +1198,8 @@ fn parse_oidc(base: &Path, file: OidcFile) -> Result<OidcConfig, ConfigError> {
         display_name_claim,
         token_auth_method,
         insecure_loopback_issuer,
+        ca_bundle_file: file.ca_bundle_file.map(|p| resolve(base, &p)),
+        system_roots,
     })
 }
 
@@ -1731,6 +1810,10 @@ mod tests {
             ("publicBaseUrl: \"https://c.example\"\n", "publicBaseUrl"),
             ("sessionMaxAgeSeconds: 600\n", "sessionMaxAgeSeconds"),
             ("trustedProxyCidrs: [\"10.0.0.0/8\"]\n", "trustedProxyCidrs"),
+            (
+                "trustedProxyService: {namespace: traefik, name: traefik}\n",
+                "trustedProxyService",
+            ),
         ] {
             let t = local.clone() + line;
             match Config::parse(&t, Path::new(".")) {
@@ -1805,6 +1888,81 @@ mod tests {
                 other => panic!("`{line}` was accepted in shared mode: {other:?}"),
             }
         }
+    }
+
+    /// Chart gap G6: the ingress controller by its Service satisfies
+    /// `requireTrustedProxy` on its own, names DNS labels, and the OIDC trust
+    /// settings default to "the system roots, plus a bundle if named".
+    #[test]
+    fn the_proxy_service_and_the_issuer_trust_parse_and_refuse() {
+        let doc = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("crates/logweir-api sits two levels under the workspace root")
+            .join("docs/api.md");
+        let text = std::fs::read_to_string(&doc).expect("docs/api.md is readable");
+        let block = text
+            .split("```yaml")
+            .find(|rest| rest.trim_start().starts_with("# console.yaml"))
+            .and_then(|rest| rest.split("```").next())
+            .expect("the console example is present")
+            .to_string();
+        let by_service = block.replacen(
+            "trustedProxyCidrs: [\"192.0.2.0/24\"]",
+            "trustedProxyService: {namespace: traefik, name: traefik}",
+            1,
+        );
+        assert_ne!(by_service, block);
+        let config = Config::parse(&by_service, Path::new("/etc/logweir"))
+            .expect("a Service alone satisfies requireTrustedProxy");
+        let shared = config.shared().unwrap();
+        assert!(shared.trusted_proxy_cidrs.is_empty());
+        assert_eq!(
+            shared.trusted_proxy_service,
+            Some(ServiceRef {
+                namespace: "traefik".into(),
+                name: "traefik".into()
+            })
+        );
+        let bad = by_service.replace("name: traefik}", "name: Traefik_Controller}");
+        assert!(matches!(
+            Config::parse(&bad, Path::new("/etc/logweir")),
+            Err(ConfigError::Field {
+                field: "trustedProxyService",
+                ..
+            })
+        ));
+
+        // The documented example names a bundle and keeps the system roots.
+        let documented = Config::parse(&block, Path::new("/etc/logweir")).unwrap();
+        let oidc = &documented.shared().unwrap().oidc;
+        assert!(oidc.system_roots);
+        assert!(oidc.ca_bundle_file.is_some());
+        // Without the two lines: the system roots alone.
+        let plain = block
+            .lines()
+            .filter(|l| !l.contains("caBundleFile") && !l.contains("systemRoots"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let oidc = Config::parse(&plain, Path::new("/etc/logweir"))
+            .unwrap()
+            .shared()
+            .unwrap()
+            .oidc
+            .clone();
+        assert!(oidc.system_roots && oidc.ca_bundle_file.is_none());
+        // Dropping the system roots needs a bundle to put in their place.
+        let nothing = plain.replace(
+            "  tokenAuthMethod: clientSecretBasic",
+            "  tokenAuthMethod: clientSecretBasic\n  systemRoots: false",
+        );
+        assert!(matches!(
+            Config::parse(&nothing, Path::new("/etc/logweir")),
+            Err(ConfigError::Field {
+                field: "oidc.systemRoots",
+                ..
+            })
+        ));
     }
 
     /// A loopback issuer over plain HTTP is a development affordance, and it is

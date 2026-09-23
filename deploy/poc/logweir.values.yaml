@@ -1,29 +1,29 @@
 # deploy/poc/logweir.values.yaml — Logweir, the shared (SSO) console, for the
-# PoC profile. Install it with the chart from the SAME commit the image tags
-# name (versions.env LOGWEIR_COMMIT) — README.md step 6 has the exact command:
+# PoC profile. README.md step 6 has the exact command; in short:
 #
-#   helm upgrade --install logweir ./charts/logweir -n logweir-system \
-#     -f deploy/poc/logweir.values.yaml \
-#     --set-json "api.console.trustedProxyCidrs=[\"$INGRESS_POD_IP/32\"]" \
-#     --set-json "api.console.networkPolicy.oidcCIDRs=[\"$INGRESS_SVC_IP/32\"]" \
-#     --wait --timeout 10m
+#   helm upgrade --install logweir "$LOGWEIR_CHART" --version "$LOGWEIR_CHART_VERSION" \
+#     -n logweir-system -f deploy/poc/logweir.values.yaml --wait --timeout 15m
 #
-# The two addresses are the cluster's, not constants: the ingress controller's
-# pod IP (the one peer the console trusts to have terminated TLS) and the
-# ingress controller Service's ClusterIP (where the console reaches Dex). The
-# placeholders below are documentation addresses (RFC 5737) so this file
-# renders on its own; installing it WITHOUT the two --set-json lines produces a
-# console that refuses every request, which is the safe failure.
+# THE IMAGES ARE NOT IN THIS FILE. The published chart (versions.env's
+# LOGWEIR_CHART at LOGWEIR_CHART_VERSION) already names the four Logweir images
+# of its own commit by their `sha-<commit>` tag (a tag, which Docker Hub lets
+# the publisher move; the digests are recorded per publication — README.md); the development path from a
+# checkout passes the same four with `--set` from versions.env (README.md,
+# *From a checkout*). One file, versions.env, decides the release.
+#
+# NOTHING IN THIS FILE IS A CLUSTER'S RUNTIME ADDRESS, AND NOTHING IS PATCHED
+# AFTER THE INSTALL. The ingress controller is trusted by its Service
+# (`trustedProxyService`), the issuer's name is mapped to DEX'S OWN Service's
+# fixed ClusterIP (`hostAliases`, dex.values.yaml) — never to the shared
+# ingress — the private CA arrives by reference (`oidc.caBundle`), and the
+# console's egress to Dex is a pod selector (`networkPolicy.oidcPeers`).
 #
 # NOTHING SECRET IS IN THIS FILE: every key and the OIDC client secret are named
-# Secrets created before the install (README.md, step 5).
+# Secrets created before the install (README.md, step 5). The ONE exception in
+# this profile is the demo MinIO's root credential — README.md, *The demo
+# archive*.
 
-# ------------------------------------------------------------------ images
-# The published main images of one commit, by their immutable `sha-` tag. The
-# bootstrap image stays the chart's own reviewed digest pin (identity.*).
-controllerImage: docker.io/vladyslavhaina/weirkeeper:sha-306cebf63adda5d6fd872674ffca5b2c05a2236c
-runnerImage: docker.io/vladyslavhaina/logweir:sha-306cebf63adda5d6fd872674ffca5b2c05a2236c
-imagePullPolicy: IfNotPresent
+imagePullPolicy: IfNotPresent    # `sha-<commit>` tags; Docker Hub tags CAN be moved — see README.md
 runnerImagePullPolicy: IfNotPresent
 
 environment: poc
@@ -35,6 +35,7 @@ environment: poc
 # logweir-system, where the console's keys live.
 kubernetes:
   namespace: logweir-poc
+  connectionsNamespace: logweir-poc   # G3: the demo archive credential lands where Backups run
 identity:
   authorizedRunnerNamespaces: [logweir-poc]
 controller:
@@ -54,7 +55,6 @@ api:
   namespaces: [logweir-poc]
   console:
     enabled: true
-    image: docker.io/vladyslavhaina/logweir-console:sha-306cebf63adda5d6fd872674ffca5b2c05a2236c
     imagePullPolicy: IfNotPresent
     mode: shared
     replicas: 2                  # >= 2 renders the PodDisruptionBudget
@@ -62,14 +62,37 @@ api:
     keyVersion: 1
     publicBaseUrl: https://logweir.localtest.me
     sessionMaxAgeSeconds: 900
-    trustedProxyCidrs: ["192.0.2.10/32"]   # REPLACED at install: the ingress controller pod IP
+    # G6: the Traefik Service's SERVING pods are the one trusted proxy,
+    # re-read every five seconds — a recreated Traefik pod is trusted on its
+    # new address with nothing re-run. The chart grants the console `list
+    # endpointslices` in namespace `traefik` and nowhere else.
+    trustedProxyService: { namespace: traefik, name: traefik }
     requireTrustedProxy: true
+    # G2: inside the cluster `dex.localtest.me` resolves to 127.0.0.1 (the pod
+    # itself). This maps it to DEX'S OWN Service (its fixed ClusterIP,
+    # dex.values.yaml), where Dex terminates TLS itself with a certificate for
+    # that name. It is deliberately NOT the ingress controller: a shared
+    # ingress routes Ingresses from other namespaces too, and one of them could
+    # then answer the console's discovery, JWKS and token requests behind
+    # Dex's real certificate (the review's M1). The console's back-channel
+    # reaches only pods of Service `dex/dex`; browsers still use Traefik.
+    hostAliases:
+      - ip: 10.96.0.81
+        hostnames: [dex.localtest.me]
     oidc:
       issuer: https://dex.localtest.me     # EXACT: Dex's `issuer`, no trailing slash
       clientId: logweir-console
       clientSecret: logweir-console-oidc   # the NAME of a Secret with key `clientSecret`
+      # G1: the PUBLIC certificate of Dex's own back-channel CA — a namespaced
+      # Issuer in `dex` that no other namespace can use (issuers.yaml; README.md
+      # step 5) — and NOTHING ELSE: not the cluster-wide local CA any namespace
+      # can request a `dex.localtest.me` certificate from, and not the system
+      # roots (`localtest.me` is a public domain whose owner could hold a public
+      # certificate for it). Never inline PEM.
+      caBundle: { configMap: logweir-dex-ca, key: ca.crt }
+      systemRoots: false
     roles:
-      revision: "poc-2026-09-23.1"
+      revision: "poc-2026-09-23.2"
       # One Dex user per role, bound by subject (`<issuer>#<sub>`; dex.values.yaml
       # says why). The `groups` entries are what a real connector's groups bind
       # to; they match nobody under Dex's static users.
@@ -92,20 +115,25 @@ api:
           subjects: ["https://dex.localtest.me#CiQxZjBjOWE0ZS0wMDA0LTRhMWUtOWUxYS0wMDAwMDAwMDAwMDQSBWxvY2Fs"]
     ingress:
       enabled: true
-      className: nginx
+      className: traefik
       host: logweir.localtest.me
       tlsSecretName: logweir-console-tls
       annotations:
         cert-manager.io/cluster-issuer: logweir-poc-ca
-        nginx.ingress.kubernetes.io/hsts: "true"
-        nginx.ingress.kubernetes.io/hsts-max-age: "31536000"
+        # HSTS is Traefik's `websecure` entry point's (traefik.values.yaml).
     networkPolicy:
       enabled: true              # rendered; docker-desktop does NOT enforce NetworkPolicy
-      ingressNamespace: ingress-nginx
+      ingressNamespace: traefik
       ingressPodLabels:
-        app.kubernetes.io/name: ingress-nginx
-        app.kubernetes.io/component: controller
-      oidcCIDRs: ["192.0.2.20/32"]         # REPLACED at install: the ingress controller Service ClusterIP
+        app.kubernetes.io/name: traefik
+      # The console reaches Dex's own pods (not Traefik). An enforcing CNI
+      # matches egress after the Service's DNAT — against the Dex pod, on its
+      # HTTPS container port 5554 — so the rule names the pods, not the
+      # ClusterIP (the PLAT-20.2 review's L8).
+      oidcPeers:
+        - namespace: dex
+          podLabels: { app.kubernetes.io/name: dex }
+          port: 5554
     resources:
       requests: { cpu: 25m, memory: 64Mi }
       limits: { memory: 256Mi }
@@ -129,7 +157,7 @@ approvalPolicy:
 # Two throwaway KRaft brokers and a MinIO archive, in logweir-system. They are
 # reached from logweir-poc by Service name; the connection, destination and
 # credentials are created in logweir-poc through the console (README.md,
-# step 8). Remove both for a real installation.
+# step 9). Remove both for a real installation.
 demoKafka:
   enabled: true
 minio:

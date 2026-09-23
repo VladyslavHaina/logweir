@@ -101,6 +101,15 @@ logweir-core = { path = "../logweir-core" }
 logweir-evidence = { path = "../logweir-evidence" }
 ring = "0.17"
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
+# CHART GAP G1 — THE PROVIDER'S TLS TRUST. The OIDC client used to take the
+# system roots through `hyper-rustls`'s `with_native_roots()`, which offers no
+# way to ADD a private CA beside them. `auth::oidc::TlsTrust` builds the root
+# store itself: the system roots through this crate (the exact loader
+# `hyper-rustls`'s `native-tokio` feature already calls), then the operator's
+# bundle. Already resolved in `Cargo.lock` at 0.8.4 through `hyper-rustls`, so
+# declaring it adds no package and leaves `THIRD_PARTY_NOTICES.md` unchanged;
+# `tests/linkage.rs` asserts that.
+rustls-native-certs = "0.8"
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true

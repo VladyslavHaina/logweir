@@ -616,6 +616,35 @@ fn shared_mode_refuses_plain_http_a_rotated_key_and_a_wildcard_binding() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+    write_shared_material(&fixture, 1);
+
+    // 6. Chart gap G1: a CA bundle that cannot be read fails CLOSED, before a
+    //    socket — never a console that starts over the system roots alone and
+    //    then cannot reach the issuer it was told to trust.
+    let unreadable = base("https://console.example").replace(
+        "  clientSecretFile:",
+        &format!(
+            "  caBundleFile: {}\n  clientSecretFile:",
+            fixture.path("absent-ca.crt")
+        ),
+    );
+    let out = run(&fixture.config(&unreadable), "unreadable CA bundle");
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("OIDC CA bundle") && stderr.contains("absent-ca.crt"),
+        "{stderr}"
+    );
+
+    // 7. Dropping the system roots with no bundle would trust nothing at all.
+    let nothing = base("https://console.example").replace(
+        "  clientSecretFile:",
+        "  systemRoots: false\n  clientSecretFile:",
+    );
+    let out = run(&fixture.config(&nothing), "no trust anchor at all");
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("oidc.systemRoots"), "{stderr}");
 }
 
 /// The session key, cursor key and client secret a shared-mode fixture mounts.

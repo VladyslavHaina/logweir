@@ -359,10 +359,29 @@ impl Provider {
         if self.initialised.load(Ordering::Acquire) {
             return true;
         }
-        if self.discovery().await.is_err() {
+        // WHY NOT READY IS LOGGED, because it is the first thing an operator
+        // wiring a private issuer asks: an untrusted certificate, an
+        // unresolvable host and a blocked egress read the same from outside
+        // (chart gaps G1 and G2). A transport error carries no credential.
+        if let Err(error) = self.discovery().await {
+            tracing::warn!(
+                reason = error.code(),
+                detail = %error,
+                "the identity provider has not initialised: discovery failed"
+            );
             return false;
         }
-        let ready = self.jwks(false).await.is_ok_and(|keys| !keys.is_empty());
+        let ready = match self.jwks(false).await {
+            Ok(keys) => !keys.is_empty(),
+            Err(error) => {
+                tracing::warn!(
+                    reason = error.code(),
+                    detail = %error,
+                    "the identity provider has not initialised: the key set is unavailable"
+                );
+                false
+            }
+        };
         if ready {
             self.initialised.store(true, Ordering::Release);
         }
@@ -883,6 +902,160 @@ pub fn authorization_url(
 // The one implementation that opens a socket
 // ======================================================================
 
+/// The trust anchors the provider's TLS certificate is verified against.
+///
+/// CHART GAP G1. An issuer whose certificate a PRIVATE CA issued — a Dex behind
+/// an ingress with an internal certificate, an enterprise IdP on a corporate
+/// PKI — could only be trusted before this by replacing the whole system trust
+/// store (`SSL_CERT_FILE`, which `rustls-native-certs` honours), mounted by a
+/// post-install `kubectl patch`. This is the product answer:
+///
+/// * ADDED, NOT SUBSTITUTED. The bundle's certificates are trust anchors IN
+///   ADDITION to the operating system's, unless the administrator sets
+///   `oidc.systemRoots: false` — a second, explicit decision, refused by
+///   `crate::config` without a bundle to take their place.
+/// * FAIL CLOSED. [`TlsTrust::from_pem`] refuses a bundle with no certificate,
+///   a malformed block, and ANY non-certificate section (a private key mounted
+///   by mistake is a secret in the wrong place, not a harmless extra), and
+///   [`TlsTrust::root_store`] refuses a certificate rustls cannot use as an
+///   anchor rather than skipping it. Nothing is ever silently dropped: a
+///   bundle that would add nothing is an error, because the operator asked for
+///   it to add something.
+/// * VERIFICATION IS UNCHANGED. The anchors feed rustls's ordinary WebPKI
+///   verifier: the certificate chain, its validity window and the host name
+///   in the URL are all checked exactly as for a public CA. The bundle widens
+///   WHO MAY ISSUE the provider's certificate, and nothing else.
+#[derive(Clone, Debug)]
+pub struct TlsTrust {
+    extra_roots: Vec<rustls::pki_types::CertificateDer<'static>>,
+    system_roots: bool,
+}
+
+impl TlsTrust {
+    /// The operating system's roots and nothing else: the behaviour of every
+    /// configuration that names no bundle.
+    #[must_use]
+    pub fn system() -> Self {
+        Self {
+            extra_roots: Vec::new(),
+            system_roots: true,
+        }
+    }
+
+    /// Parse a PEM bundle of trust anchors.
+    ///
+    /// # Errors
+    ///
+    /// A sentence, when the bundle holds no certificate, a malformed block, or
+    /// a section that is not a certificate.
+    pub fn from_pem(bundle: &[u8], system_roots: bool) -> Result<Self, String> {
+        use rustls::pki_types::pem::{PemObject as _, SectionKind};
+        let mut extra_roots = Vec::new();
+        for (index, section) in <(SectionKind, Vec<u8>)>::pem_slice_iter(bundle).enumerate() {
+            let (kind, der) =
+                section.map_err(|e| format!("PEM block {} does not parse: {e}", index + 1))?;
+            if kind != SectionKind::Certificate {
+                return Err(format!(
+                    "PEM block {} is a {kind:?}, not a CERTIFICATE; a CA bundle carries public \
+                     certificates only, and a private key here is a secret in the wrong place",
+                    index + 1
+                ));
+            }
+            extra_roots.push(rustls::pki_types::CertificateDer::from(der));
+        }
+        if extra_roots.is_empty() {
+            return Err(
+                "the bundle holds no PEM CERTIFICATE block; an empty bundle would add no trust \
+                 anchor, which is never what naming one means"
+                    .to_string(),
+            );
+        }
+        // Each certificate must be usable as an anchor NOW, not at the first
+        // login: `root_store` is where rustls says so, and it is cheap.
+        let trust = Self {
+            extra_roots,
+            system_roots: false,
+        };
+        trust.root_store()?;
+        Ok(Self {
+            system_roots,
+            ..trust
+        })
+    }
+
+    /// Read and parse a bundle file, or the system roots alone when there is
+    /// no file.
+    ///
+    /// # Errors
+    ///
+    /// A sentence naming the file.
+    pub fn load(bundle: Option<&std::path::Path>, system_roots: bool) -> Result<Self, String> {
+        let Some(path) = bundle else {
+            return Ok(Self {
+                extra_roots: Vec::new(),
+                system_roots,
+            });
+        };
+        let bytes = std::fs::read(path)
+            .map_err(|e| format!("cannot read the OIDC CA bundle {}: {e}", path.display()))?;
+        Self::from_pem(&bytes, system_roots)
+            .map_err(|reason| format!("the OIDC CA bundle {}: {reason}", path.display()))
+    }
+
+    /// How many anchors the bundle adds.
+    #[must_use]
+    pub fn extra_root_count(&self) -> usize {
+        self.extra_roots.len()
+    }
+
+    /// Whether the operating system's roots are consulted.
+    #[must_use]
+    pub const fn uses_system_roots(&self) -> bool {
+        self.system_roots
+    }
+
+    /// The root store: the system roots when asked for, then every bundle
+    /// certificate.
+    ///
+    /// # Errors
+    ///
+    /// A sentence, when the system roots were asked for and none could be
+    /// read, or a bundle certificate is not a usable trust anchor.
+    pub fn root_store(&self) -> Result<rustls::RootCertStore, String> {
+        let mut roots = rustls::RootCertStore::empty();
+        if self.system_roots {
+            let loaded = rustls_native_certs::load_native_certs();
+            if !loaded.errors.is_empty() {
+                tracing::warn!(
+                    errors = loaded.errors.len(),
+                    "some system root certificates could not be loaded"
+                );
+            }
+            // The rule `hyper_rustls::HttpsConnectorBuilder::with_native_roots`
+            // applied before this existed, kept: asked-for system roots that
+            // are not there are a refusal, and an unparsable individual system
+            // root is skipped, as the platform's own store would skip it.
+            if loaded.certs.is_empty() {
+                return Err(
+                    "the system certificate store could not be read: no root certificate was \
+                     found"
+                        .to_string(),
+                );
+            }
+            let _ = roots.add_parsable_certificates(loaded.certs);
+        }
+        for (index, cert) in self.extra_roots.iter().enumerate() {
+            roots.add(cert.clone()).map_err(|e| {
+                format!(
+                    "certificate {} of the bundle is not a usable trust anchor: {e}",
+                    index + 1
+                )
+            })?;
+        }
+        Ok(roots)
+    }
+}
+
 /// The production HTTP client: hyper over rustls, HTTPS by default.
 ///
 /// PLAIN HTTP IS REACHABLE ONLY FOR A LOOPBACK ISSUER, and only when the
@@ -897,32 +1070,27 @@ pub struct HyperHttpClient {
 }
 
 impl HyperHttpClient {
-    /// Build the client, installing the rustls provider the workspace's two
-    /// enabled providers would otherwise leave ambiguous.
+    /// Build the client over `trust`, installing the rustls provider the
+    /// workspace's two enabled providers would otherwise leave ambiguous.
     ///
     /// # Errors
     ///
     /// A sentence naming what could not be initialised.
-    pub fn new(allow_plain_http: bool) -> Result<Self, String> {
+    pub fn new(allow_plain_http: bool, trust: &TlsTrust) -> Result<Self, String> {
         // The workspace graph enables both `ring` and `aws-lc-rs`; with two
         // installed-by-feature providers rustls picks none and panics on first
         // use. `weirkeeper::install_default_crypto_provider` is the one the
         // controller binary and `crate::kube` already call, so the API and the
         // controller agree on the provider.
         let _ = weirkeeper::install_default_crypto_provider();
-        let builder = hyper_rustls::HttpsConnectorBuilder::new()
-            .with_native_roots()
-            .map_err(|e| format!("the system certificate store could not be read: {e}"))?
-            .https_or_http();
+        let tls = rustls::ClientConfig::builder()
+            .with_root_certificates(trust.root_store()?)
+            .with_no_client_auth();
+        let builder = hyper_rustls::HttpsConnectorBuilder::new().with_tls_config(tls);
         let connector = if allow_plain_http {
-            builder.enable_http1().build()
+            builder.https_or_http().enable_http1().build()
         } else {
-            hyper_rustls::HttpsConnectorBuilder::new()
-                .with_native_roots()
-                .map_err(|e| format!("the system certificate store could not be read: {e}"))?
-                .https_only()
-                .enable_http1()
-                .build()
+            builder.https_only().enable_http1().build()
         };
         Ok(Self {
             http: hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
@@ -938,7 +1106,7 @@ impl HyperHttpClient {
         let response = tokio::time::timeout(PROVIDER_DEADLINE, self.http.request(request))
             .await
             .map_err(|_| "the request exceeded the provider deadline".to_string())?
-            .map_err(|e| crate::validate::bounded(&e.to_string(), 160))?;
+            .map_err(|e| crate::validate::bounded(&error_chain(&e), 320))?;
         let status = response.status();
         let body = http_body_util::Limited::new(response.into_body(), MAX_PROVIDER_BODY)
             .collect()
@@ -953,6 +1121,29 @@ impl HyperHttpClient {
         }
         Ok(body)
     }
+}
+
+/// An error and every `source()` beneath it, joined with `: `.
+///
+/// `hyper_util`'s client error displays as `client error (Connect)` and keeps
+/// the cause — `invalid peer certificate: UnknownIssuer`, a refused connection,
+/// a name that did not resolve — one level down. Those three need three
+/// different fixes (the CA bundle, the NetworkPolicy, `hostAliases`), so the
+/// log line has to say which (chart gaps G1 and G2). Nothing in a transport
+/// error is a credential: the request carrying the client secret is built
+/// after the connection exists, and its body never reaches an error.
+fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut out = error.to_string();
+    let mut cause = error.source();
+    while let Some(next) = cause {
+        let text = next.to_string();
+        if !out.contains(&text) {
+            out.push_str(": ");
+            out.push_str(&text);
+        }
+        cause = next.source();
+    }
+    out
 }
 
 /// Build one provider request.

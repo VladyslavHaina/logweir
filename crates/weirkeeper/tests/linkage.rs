@@ -1011,8 +1011,15 @@ fn the_no_argv_binary_starts_and_exits_zero_on_sigterm() {
     let out_path = fixture.path().with_file_name("stdout.log");
     let err_path = fixture.path().with_file_name("stderr.log");
 
+    // Chart gap G5: this process's loopback health listener, on a port chosen
+    // now so two runs on one host cannot collide on the default.
+    let health_addr = std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|l| l.local_addr())
+        .expect("a free loopback port")
+        .to_string();
     let mut child = Command::new(env!("CARGO_BIN_EXE_weirkeeper"))
         .env("KUBECONFIG", fixture.path())
+        .env("LOGWEIR_HEALTH_ADDR", &health_addr)
         // The subscriber filters from RUST_LOG; `info` is what makes the
         // startup line and the SIGTERM line observable.
         .env("RUST_LOG", "info")
@@ -1095,6 +1102,65 @@ fn the_no_argv_binary_starts_and_exits_zero_on_sigterm() {
          to D3 §14's sequencing, which nothing depends on. A count \
          that is not 14 means `main`'s registration point lost a `controllers.push(…)` line. \
          Got: {stdout:?}"
+    );
+
+    // CHART GAP G5, ON THE SHIPPED BINARY: the kubelet's exec probe is this
+    // same executable with `--probe`, against the running controller's
+    // loopback listener. Both answer ok once `weirkeeper started` is logged
+    // (the fixture's apiserver is unreachable and every controller rides that
+    // out with backoff, which is not a reason to restart). NEGATIVE CONTROLS:
+    // an unknown probe word, and a port nothing listens on, exit 1.
+    // Each probe is a subprocess with its OWN outer bound (the worker rule: no
+    // child without a timeout), independent of the binary's 2 s deadlines: a
+    // probe that hangs is killed at 10 s and fails the row.
+    let probe = |word: &str, addr: &str| {
+        let out_path = fixture.path().with_file_name(format!("probe-{word}.out"));
+        let err_path = fixture.path().with_file_name(format!("probe-{word}.err"));
+        let mut child = Command::new(env!("CARGO_BIN_EXE_weirkeeper"))
+            .args(["--probe", word])
+            .env("LOGWEIR_HEALTH_ADDR", addr)
+            .stdout(std::fs::File::create(&out_path).expect("the log file is creatable"))
+            .stderr(std::fs::File::create(&err_path).expect("the log file is creatable"))
+            .spawn()
+            .expect("the built binary runs");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("the probe is waitable") {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("`weirkeeper --probe {word}` did not exit within 10 s");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        std::process::Output {
+            status,
+            stdout: std::fs::read(&out_path).unwrap_or_default(),
+            stderr: std::fs::read(&err_path).unwrap_or_default(),
+        }
+    };
+    for word in ["live", "ready"] {
+        let out = probe(word, &health_addr);
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "`weirkeeper --probe {word}` against the running controller: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    assert_eq!(probe("healthy", &health_addr).status.code(), Some(1));
+    let nobody = std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|l| l.local_addr())
+        .expect("a free loopback port")
+        .to_string();
+    let out = probe("live", &nobody);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("no health listener"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
     );
 
     // SIGTERM through the shell's builtin rather than a `kill` binary, which is
