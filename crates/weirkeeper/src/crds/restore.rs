@@ -431,7 +431,10 @@ pub struct RestoreStatus {
     pub last_phase_completed: Option<i32>,
     /// `pass`, `fail-objective`, `fail-integrity` or `preflight-failed`. Spec
     /// §8's green badge for a `Restore` needs
-    /// `evidence.verification.result == Valid` **and** `outcome == pass`.
+    /// `evidence.verification.result == Valid` **and** `outcome == pass`, and
+    /// is never green over a recorded non-zero `exitCode`: an exit-2 run
+    /// publishes and verifies its signed failure, and the exit code stays
+    /// authoritative for success.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<String>,
     /// How thoroughly the restore was checked, what that found, and — when the

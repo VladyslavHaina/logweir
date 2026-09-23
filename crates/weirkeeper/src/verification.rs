@@ -35,7 +35,10 @@
 //! * **`Backup` is green ⟺ `verification.result == Valid` AND
 //!   `status.exitCode == 0`** — [`backup_badge`].
 //! * **`Restore` is green ⟺ `verification.result == Valid` AND
-//!   `status.outcome == pass`** — [`restore_badge`].
+//!   `status.outcome == pass`** — [`restore_badge`] — and a RECORDED
+//!   `exitCode` other than `0` is never green (an exit-2 run publishes its
+//!   signed failure since interface I8's amendment, and the exit code stays
+//!   authoritative for success).
 //!
 //! **There is no `outcome` on the `Backup` path at all** (spec §3.2, C95):
 //! `BackupStatus` carries `exitCode` and no `outcome`, [`VerificationResult`]
@@ -1303,7 +1306,8 @@ pub fn backup_badge(status: &Value) -> Badge {
 }
 
 /// **Interface I21, the `Restore` half.** Green ⟺ `verification.result ==
-/// Valid` AND `status.outcome == pass`.
+/// Valid` AND `status.outcome == pass` AND no recorded `exitCode` other than
+/// `0`.
 ///
 /// `outcome` is the scorecard's own string, copied onto the status by Task
 /// 20's reconciler and never re-derived — `pass`, `fail-objective`,
@@ -1311,6 +1315,19 @@ pub fn backup_badge(status: &Value) -> Badge {
 /// `pass` is green: a `fail-integrity` run produced a perfectly valid signed
 /// document SAYING THE RESTORE DID NOT RECONCILE, and a green badge over it
 /// would invert the most valuable thing the tool reports.
+///
+/// # The exit code stays authoritative — FAILED-DRILL-EVIDENCE-UNPUBLISHED
+///
+/// Since interface I8 was amended, an exit-2 run names its signed scorecard
+/// and that scorecard is fetched, verified and its `outcome` copied like a
+/// passing one's. The runner's own contract is that exit 2 is "did not pass",
+/// and the scorecard it signed says so — but a green rule that read ONLY the
+/// document would be one runner defect away from a green badge over a failed
+/// run. So a RECORDED `exitCode` that is not `0` is never green, whatever the
+/// document verifies as. An ABSENT `exitCode` keeps the rule it always had:
+/// every terminal `Restore` this controller writes carries one, and a status
+/// with none is a pre-terminal object or a caller's projection of the verdict
+/// alone, which this rule has always judged on `outcome`.
 #[must_use]
 pub fn restore_badge(status: &Value) -> Badge {
     let (at, key, historical) = match valid_verification(status) {
@@ -1319,6 +1336,12 @@ pub fn restore_badge(status: &Value) -> Badge {
     };
     if status.get("outcome").and_then(Value::as_str) != Some("pass") {
         return Badge::not_green(REASON_OUTCOME_NOT_PASS);
+    }
+    if status
+        .get("exitCode")
+        .is_some_and(|code| code.as_i64() != Some(0))
+    {
+        return Badge::not_green(REASON_EXIT_CODE_NOT_ZERO);
     }
     Badge::green(at, key, historical)
 }

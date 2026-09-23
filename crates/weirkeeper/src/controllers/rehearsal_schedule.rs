@@ -305,16 +305,29 @@ pub fn decide(facts: &Facts<'_>) -> Verdict {
     }
 
     // ---- 4. concurrency, this schedule's then anyone's -------------------
+    //
+    // A run is this schedule's until it is DECIDED, not merely terminal: a
+    // finished rehearsal whose evidence verdict is still owed has not produced
+    // its result yet, and firing over it would replace `activeRestoreRef` and
+    // lose that result (REHEARSAL-PASS-RECORDED-AS-FAILED). The wait is
+    // bounded by `VERDICT_WAIT_SECONDS`.
     if let Some(active) = facts.active {
-        if !super::restore::status_is_terminal(active) {
-            return Verdict::Skipped(Skip::new(
-                SkipReason::ConcurrencyBlocked,
-                format!(
+        let seen = observe(Some(active), facts.now);
+        if !seen.decided {
+            let why = match seen.awaiting {
+                Some(owed) => format!(
+                    "the rehearsal {} from the previous slot finished, but {owed}; its result is \
+                     recorded once the verdict is reached, and spec.bounds.concurrencyPolicy is \
+                     Forbid",
+                    active.name_any()
+                ),
+                None => format!(
                     "the rehearsal {} from the previous slot has not finished, and \
                      spec.bounds.concurrencyPolicy is Forbid",
                     active.name_any()
                 ),
-            ));
+            };
+            return Verdict::Skipped(Skip::new(SkipReason::ConcurrencyBlocked, why));
         }
     }
     if let Some(other) = facts.target_busy.as_deref() {
@@ -905,7 +918,7 @@ pub async fn reconcile_schedule(
     // ---- what the previous slot's child says -----------------------------
     let restores: Api<Restore> = Api::namespaced(ctx.client.clone(), &namespace);
     let previous = previous_child(schedule, &restores).await?;
-    let observation = observe(previous.as_ref());
+    let observation = observe(previous.as_ref(), now);
 
     // ---- the facts -------------------------------------------------------
     let trust = match crate::trust::resolve(&ctx.client, &namespace)
@@ -1751,19 +1764,53 @@ pub fn merge_catalog_entry(
 // Observing the previous slot's result
 // ===========================================================================
 
+/// How long a FINISHED rehearsal may wait for its evidence verdict before the
+/// schedule records it anyway — as NOT passed, with
+/// [`REASON_VERDICT_NOT_REACHED`] when the run itself exited 0.
+///
+/// An hour, and it is a backstop rather than the expected path. A
+/// destination-backed `Restore` owes an evidence-fetch Job after it turns
+/// terminal (D2 §3.9): at most [`crate::evidence_fetch::MAX_ATTEMPTS`]
+/// attempts, retried at +1 m, +5 m and +15 m, each bounded by the fetch's own
+/// deadline — about half an hour in the worst case, and seconds in the usual
+/// one. Once the attempts are spent the `Restore` itself records
+/// `NotAttempted` with no retry scheduled, which this schedule reads as a
+/// REACHED verdict well inside the hour. The bound exists for the verdict that
+/// never arrives at all (a controller that stopped between the terminal patch
+/// and the verdict, a status nobody will write again): the schedule must not
+/// hold its own concurrency slot forever, and it must not call that run a
+/// pass. `tests/rehearsal_controller.rs::the_verdict_wait_outlasts_the_whole_fetch_schedule`
+/// pins the margin.
+pub const VERDICT_WAIT_SECONDS: i64 = 3600;
+
+/// `lastFailed.reason` for an exit-0 rehearsal whose evidence verdict was
+/// still owed [`VERDICT_WAIT_SECONDS`] after it finished.
+pub const REASON_VERDICT_NOT_REACHED: &str = "EvidenceVerdictNotReached";
+
 /// What the previous slot's `Restore` finished as.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Observation {
     /// The object.
     pub restore: Option<String>,
-    /// Whether it is terminal.
+    /// Whether the `Restore` is terminal (`Succeeded` or `Failed`).
     pub terminal: bool,
-    /// Whether it passed.
+    /// Whether this schedule may RECORD the run now: it is terminal AND its
+    /// evidence verdict is reached ([`verdict_owed`] says nothing is owed), or
+    /// the wait for it ran out. Only a decided observation writes
+    /// `lastSucceeded`/`lastFailed`, releases `activeRestoreRef` and moves
+    /// `RehearsalHealthy` (REHEARSAL-PASS-RECORDED-AS-FAILED).
+    pub decided: bool,
+    /// Whether it passed: decided, exit `0`, `outcome: pass`, and a GREEN
+    /// verdict by the shared `Restore` badge rule
+    /// ([`crate::verification::restore_badge`], whose `Valid` half is
+    /// [`logweir_core::trust::ValidBasis`]).
     pub passed: bool,
     /// Its `status.outcome`, verbatim.
     pub outcome: Option<String>,
-    /// The terminal reason, for a failure.
+    /// Why it did not pass, for a failure.
     pub reason: Option<String>,
+    /// Why a terminal run is not decided yet — the verdict still owed.
+    pub awaiting: Option<String>,
     /// The signed evidence key, for a pass.
     pub evidence: Option<String>,
     /// Topics teardown could not remove.
@@ -1772,18 +1819,128 @@ pub struct Observation {
     pub rto_seconds: Option<i64>,
 }
 
-/// Project one `Restore` into [`Observation`].
+/// The evidence verdict a TERMINAL `Restore` still owes, as a sentence — or
+/// `None` when the verdict is reached (or no evidence was ever named, so there
+/// is nothing to reach).
+///
+/// # Why this exists (REHEARSAL-PASS-RECORDED-AS-FAILED)
+///
+/// A destination-backed `Restore` turns terminal FIRST and learns its verdict
+/// LATER: the terminal patch carries the exit code and the evidence keys, and
+/// the evidence-fetch pass writes `outcome` and `evidence.verification` from
+/// the fetched scorecard afterwards (`restore.rs`, D2 §3.9). Reading
+/// "terminal" as "decided" recorded every destination-backed passing
+/// rehearsal as FAILED — measured three times on lab-refresh-9 (L6 step 5:
+/// `lastFailed.reason: ok` 0.4 s after the terminal patch, the verdict `Valid`
+/// eleven seconds later).
+///
+/// Owed, in the `Restore`'s own vocabulary:
+///
+/// * `evidence.verification.result: Pending` — a fetch is queued or running;
+/// * `NotAttempted` with `observation.retryAfter` set and attempts left — a
+///   retry is SCHEDULED, so `NotAttempted` is not yet the answer (the last
+///   attempt writes no `retryAfter`, and that `NotAttempted` IS the answer);
+/// * no verification block while both mandatory keys are named — the window
+///   between the terminal patch and the first verdict write, or a crash
+///   inside it.
+///
+/// Everything else is reached: `Valid`, `Invalid`, `Untrusted`, a spent
+/// `NotAttempted`, or a run that named no evidence at all (exits 1, 3, 4, a
+/// refusal, a crash, or an exit 2 from a runner older than interface I8's
+/// amendment).
 #[must_use]
-pub fn observe(restore: Option<&Restore>) -> Observation {
+pub fn verdict_owed(restore: &Restore) -> Option<String> {
+    let evidence = restore.status.as_ref().and_then(|s| s.evidence.as_ref())?;
+    let verification = evidence.verification.as_ref();
+    let observation = evidence.observation.as_ref();
+    match verification.and_then(|v| v.result.as_deref()) {
+        Some("Pending") => Some(
+            "its evidence verdict is Pending: the evidence-fetch Job has not relayed the signed \
+             scorecard yet"
+                .to_string(),
+        ),
+        Some("NotAttempted") => {
+            let attempt = observation
+                .and_then(|o| o.attempt)
+                .and_then(|a| u32::try_from(a).ok())
+                .unwrap_or(1);
+            let retry = observation.and_then(|o| o.retry_after.as_ref());
+            match retry {
+                Some(at) if attempt < crate::evidence_fetch::MAX_ATTEMPTS => Some(format!(
+                    "its evidence fetch attempt {attempt} did not relay the scorecard and attempt \
+                     {} is scheduled at {}",
+                    attempt + 1,
+                    at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                )),
+                _ => None,
+            }
+        }
+        None if evidence.scorecard_key.is_some() && evidence.sidecar_key.is_some() => Some(
+            "it named its signed scorecard and no evidence verdict is recorded yet".to_string(),
+        ),
+        _ => None,
+    }
+}
+
+/// When the `Restore` finished: the `lastTransitionTime` of its terminal
+/// `Complete`/`Failed` condition, the instant the restore reconciler wrote
+/// the exit — `metadata.creationTimestamp` only as a fallback, which is
+/// EARLIER and so can only shorten a wait, never extend it.
+fn finished_at(restore: &Restore) -> Option<DateTime<Utc>> {
+    restore
+        .status
+        .as_ref()
+        .and_then(|s| s.conditions.as_ref())
+        .and_then(|conditions| {
+            conditions
+                .iter()
+                .filter(|c| {
+                    matches!(c.r#type.as_str(), "Complete" | "Failed") && c.status == "True"
+                })
+                .filter_map(|c| c.last_transition_time)
+                .max()
+        })
+        .or_else(|| restore.metadata.creation_timestamp.as_ref().map(|t| t.0))
+}
+
+/// Project one `Restore` into [`Observation`], as seen at `now`.
+///
+/// # A pass is decided, exit 0, `outcome: pass` AND green — never less
+///
+/// The exit code is the runner's own verdict and stays authoritative: since
+/// interface I8's amendment an exit-2 run publishes a signed scorecard that
+/// verifies `Valid`, and that is a verified FAILURE. `outcome` and the verdict
+/// arrive with the evidence-fetch pass, so a terminal run whose verdict is
+/// still owed ([`verdict_owed`]) is not decided at all — neither pass nor
+/// fail — until it is reached or [`VERDICT_WAIT_SECONDS`] run out. A verdict
+/// that never arrives is recorded as a NON-pass with its reason; it is never
+/// promoted to a pass.
+#[must_use]
+pub fn observe(restore: Option<&Restore>, now: DateTime<Utc>) -> Observation {
     let Some(restore) = restore else {
         return Observation::default();
     };
     let status = restore.status.as_ref();
     let terminal = super::restore::status_is_terminal(restore);
     let outcome = status.and_then(|s| s.outcome.clone());
-    let passed = terminal
+    let exit_code = status.and_then(|s| s.exit_code);
+    let owed = if terminal {
+        verdict_owed(restore)
+    } else {
+        None
+    };
+    let waited_out = owed.is_some()
+        && finished_at(restore).is_none_or(|t| (now - t).num_seconds() >= VERDICT_WAIT_SECONDS);
+    let decided = terminal && (owed.is_none() || waited_out);
+    let status_json = status
+        .and_then(|s| serde_json::to_value(s).ok())
+        .unwrap_or_else(|| json!({}));
+    let badge = crate::verification::restore_badge(&status_json);
+    let passed = decided
+        && owed.is_none()
+        && exit_code == Some(0)
         && outcome.as_deref() == Some("pass")
-        && status.and_then(|s| s.exit_code) == Some(0);
+        && badge.green;
     // **THE PLAT-14.3b HOLD IS GONE.** Until 14.3b the `Restore` reconciler
     // refused every standing `Restore` with `ApprovalNotReceived` before a Job
     // could exist, and this projection had to name that separately so an
@@ -1794,14 +1951,41 @@ pub fn observe(restore: Option<&Restore>) -> Observation {
     // authorization (`StandingAuthorizationRefused`), a preflight refusal, a
     // failed verification — and each is recorded as the failure it is, with
     // the Restore's own terminal reason in the message.
+    let reason = if passed || !decided {
+        None
+    } else if exit_code != Some(0) {
+        // THE RUN SAID "NOT PASSED". Its signed `outcome` names why when the
+        // document verified; otherwise the exit's own reason does, and the
+        // outcome only as the last resort (an unverified claim is not the
+        // first thing an operator should read).
+        let verified_outcome = outcome
+            .clone()
+            .filter(|o| o != "pass")
+            .filter(|_| crate::verification::verification_is_valid(&status_json));
+        verified_outcome
+            .or_else(|| status.and_then(|s| s.exit_reason.clone()))
+            .or_else(|| status.and_then(|s| s.reason.clone()))
+            .or_else(|| outcome.clone())
+    } else if waited_out {
+        Some(REASON_VERDICT_NOT_REACHED.to_string())
+    } else {
+        // EXIT 0, AND STILL NOT A PASS: the verdict was reached and is not
+        // green — `VerificationInvalid`, `VerificationUntrusted`,
+        // `VerificationNotAttempted` (the fetch's attempts were spent) — or
+        // the scorecard's own outcome is not `pass`.
+        outcome
+            .clone()
+            .filter(|o| o != "pass")
+            .or_else(|| Some(badge.reason.to_string()))
+    };
     Observation {
         restore: Some(restore.name_any()),
         terminal,
+        decided,
         passed,
         outcome: outcome.clone(),
-        reason: status
-            .and_then(|s| s.exit_reason.clone())
-            .or_else(|| status.and_then(|s| s.reason.clone())),
+        reason,
+        awaiting: if decided { None } else { owed },
         evidence: status
             .and_then(|s| s.evidence.as_ref())
             .and_then(|e| e.scorecard_key.clone()),
@@ -1876,7 +2060,12 @@ pub fn status_patch(
         }
     }
     let observation = &update.observation;
-    if observation.terminal {
+    // DECIDED, NOT MERELY TERMINAL (REHEARSAL-PASS-RECORDED-AS-FAILED). A
+    // finished run whose evidence verdict is still owed is left exactly where
+    // it is — `activeRestoreRef` kept, nothing recorded, `RehearsalHealthy`
+    // carried — so the next pass reads it again and records it once, with its
+    // verdict. `observe` is the only place that decides.
+    if observation.decided {
         // The run finished, so it is no longer active. `lastSucceeded` and
         // `lastFailed` are never cleared: they are the audit trail.
         if update.created.is_none() {
@@ -1899,7 +2088,10 @@ pub fn status_patch(
                 json!({
                     "restoreRef": { "name": observation.restore },
                     "at": now,
-                    "reason": observation.reason.clone().or_else(|| observation.outcome.clone()),
+                    "reason": observation
+                        .reason
+                        .clone()
+                        .unwrap_or_else(|| "NotPassed".to_string()),
                 }),
             );
         }
@@ -2029,7 +2221,7 @@ pub fn status_patch(
         now,
     ));
 
-    let (health_status, health_reason, health_message) = if observation.terminal {
+    let (health_status, health_reason, health_message) = if observation.decided {
         if observation.passed {
             (
                 "True".to_string(),
@@ -2044,13 +2236,12 @@ pub fn status_patch(
                 "False".to_string(),
                 REASON_FAILED.to_string(),
                 format!(
-                    "the rehearsal {} finished {}",
+                    "the rehearsal {} did not pass: {}",
                     observation.restore.clone().unwrap_or_default(),
                     observation
-                        .outcome
+                        .reason
                         .clone()
-                        .or_else(|| observation.reason.clone())
-                        .unwrap_or_else(|| "without a pass".to_string())
+                        .unwrap_or_else(|| "NotPassed".to_string())
                 ),
             )
         }

@@ -2253,9 +2253,464 @@ fn previous_child_value(phase: &str) -> Value {
         "status": if phase == "Running" {
             json!({"phase": "Running"})
         } else {
-            json!({"phase": phase, "exitCode": 0, "outcome": "pass"})
+            // A REAL PASS: exit 0, `outcome: pass` AND a reached `Valid`
+            // verdict. Before REHEARSAL-PASS-RECORDED-AS-FAILED this fixture
+            // carried no verdict at all and was recorded `lastSucceeded` —
+            // which is the same reading of "terminal" that recorded every
+            // destination-backed pass as failed the instant it finished.
+            passed_status(phase, "Valid")
         }
     })
+}
+
+// ===========================================================================
+// REHEARSAL-PASS-RECORDED-AS-FAILED — decide on the reached verdict
+// ===========================================================================
+
+/// When the fixture rehearsal's runner exited: 03:20, ten minutes before
+/// `now()`.
+const FINISHED_AT: &str = "2026-09-20T03:20:00Z";
+
+/// A terminal rehearsal `Restore`'s status, as the restore reconciler writes
+/// it for a destination-backed run: the terminal patch (phase, exit, the two
+/// evidence keys, the terminal condition) plus whatever `verification` the
+/// evidence-fetch pass has written so far.
+fn terminal_status(
+    phase: &str,
+    exit_code: i32,
+    outcome: Option<&str>,
+    verification: Option<Value>,
+    observation: Option<Value>,
+) -> Value {
+    let mut evidence = json!({
+        "scorecardKey": "logweir/drills/01M37SNQ04DAJK3QEJ7MN45G3N.json",
+        "sidecarKey": "logweir/drills/01M37SNQ04DAJK3QEJ7MN45G3N.sig",
+    });
+    if let Some(v) = verification {
+        evidence["verification"] = v;
+    }
+    if let Some(o) = observation {
+        evidence["observation"] = o;
+    }
+    let mut status = json!({
+        "phase": phase,
+        "exitCode": exit_code,
+        "exitReason": if exit_code == 0 { "ok" } else { "drill-not-pass" },
+        "conditions": [{
+            "type": if exit_code == 0 { "Complete" } else { "Failed" },
+            "status": "True",
+            "reason": if exit_code == 0 { "Ok" } else { "DrillNotPass" },
+            "message": "the runner exited",
+            "lastTransitionTime": FINISHED_AT,
+        }],
+        "measured": {"rtoSeconds": 97},
+        "evidence": evidence,
+    });
+    if let Some(o) = outcome {
+        status["outcome"] = json!(o);
+    }
+    status
+}
+
+/// A reached verdict of `result`, as `VerificationResult::to_status_value`
+/// writes it, on the `Current` basis.
+fn verdict(result: &str) -> Value {
+    json!({
+        "result": result,
+        "payloadType": "application/vnd.logweir.drill-scorecard+json;version=1.0.0",
+        "verifiedAt": "2026-09-20T03:20:11Z",
+        "matchedKeyId": KEY_ID,
+        "signedAt": "2026-09-20T03:19:40Z",
+        "trust": {"basis": "Current", "keyState": "Active"},
+    })
+}
+
+/// The status of a rehearsal that PASSED: exit 0, `outcome: pass`, `result`.
+fn passed_status(phase: &str, result: &str) -> Value {
+    terminal_status(phase, 0, Some("pass"), Some(verdict(result)), None)
+}
+
+fn rehearsal_restore(status: Value) -> weirkeeper::crds::restore::Restore {
+    let mut value = previous_child_value("Running");
+    value["status"] = status;
+    serde_json::from_value(value).expect("the fixture Restore parses")
+}
+
+/// **Terminal, with the evidence verdict still owed: NO DECISION.** The three
+/// shapes the restore reconciler leaves between the terminal patch and the
+/// reached verdict — the keys named and no verdict yet, `Pending` while the
+/// fetch Job runs, and `NotAttempted` with a retry scheduled — are neither a
+/// pass nor a failure.
+///
+/// MUTANT: `decided = terminal` in `observe` (the pre-fix reading). Every arm
+/// fails at `decided`, and the first one is lab-refresh-9's L6 step 5 exactly:
+/// `lastFailed.reason: ok` recorded 0.4 s before the verdict landed `Valid`.
+#[test]
+fn a_terminal_rehearsal_whose_verdict_is_owed_is_not_decided() {
+    let now = at("2026-09-20T03:20:05Z");
+    for (label, status) in [
+        (
+            "keys named, no verdict yet",
+            terminal_status("Succeeded", 0, None, None, None),
+        ),
+        (
+            "Pending while the fetch Job runs",
+            terminal_status(
+                "Succeeded",
+                0,
+                None,
+                Some(json!({"result": "Pending", "payloadType": "x",
+                            "verifiedAt": "2026-09-20T03:20:02Z"})),
+                Some(json!({"attempt": 1, "mode": "SecretKeys",
+                            "jobRef": {"name": "lwc-ev-1", "uid": "u1"}})),
+            ),
+        ),
+        (
+            "NotAttempted with attempt 2 scheduled",
+            terminal_status(
+                "Succeeded",
+                0,
+                None,
+                Some(json!({"result": "NotAttempted", "payloadType": "x",
+                            "verifiedAt": "2026-09-20T03:20:02Z"})),
+                Some(json!({"attempt": 1, "mode": "SecretKeys",
+                            "retryAfter": "2026-09-20T03:21:02Z"})),
+            ),
+        ),
+    ] {
+        let restore = rehearsal_restore(status);
+        let seen = rs::observe(Some(&restore), now);
+        assert!(seen.terminal, "{label}: the Restore IS terminal");
+        assert!(
+            !seen.decided,
+            "{label}: a terminal run whose verdict is owed is not decided: {seen:?}"
+        );
+        assert!(!seen.passed, "{label}");
+        assert!(seen.reason.is_none(), "{label}: no failure reason either");
+        assert!(
+            seen.awaiting.is_some(),
+            "{label}: and it says what it waits for"
+        );
+        assert!(
+            rs::verdict_owed(&restore).is_some(),
+            "{label}: the one predicate says a verdict is owed"
+        );
+    }
+}
+
+/// **Then the verdict lands `Valid` with `outcome: pass`: a PASS.**
+///
+/// MUTANTS: drop `badge.green` from `passed` (the `Invalid` row below then
+/// passes, and a Valid-less exit 0 in `a_terminal_rehearsal_...` would too);
+/// drop `exit_code == Some(0)` (the exit-2 row in
+/// `a_failed_drill_is_never_a_pass_whatever_its_verdict` fails).
+#[test]
+fn a_reached_valid_pass_verdict_is_a_pass() {
+    let now = at("2026-09-20T03:20:15Z");
+    let restore = rehearsal_restore(passed_status("Succeeded", "Valid"));
+    let seen = rs::observe(Some(&restore), now);
+    assert!(seen.decided && seen.passed, "{seen:?}");
+    assert!(seen.reason.is_none());
+    assert_eq!(seen.rto_seconds, Some(97));
+    assert_eq!(
+        seen.evidence.as_deref(),
+        Some("logweir/drills/01M37SNQ04DAJK3QEJ7MN45G3N.json")
+    );
+    // The SHARED `ValidBasis` rule, not "result == Valid": a `Valid` on a
+    // basis nothing has established is not green, so it is not a pass.
+    let mut unestablished = passed_status("Succeeded", "Valid");
+    unestablished["evidence"]["verification"]["trust"]["basis"] = json!("Unverified");
+    let seen = rs::observe(Some(&rehearsal_restore(unestablished)), now);
+    assert!(seen.decided && !seen.passed, "{seen:?}");
+    assert_eq!(seen.reason.as_deref(), Some("VerificationNotAttempted"));
+    let mut revoked = passed_status("Succeeded", "Valid");
+    revoked["evidence"]["verification"]["trust"]["basis"] = json!("RecordedBeforeRevocation");
+    let seen = rs::observe(Some(&rehearsal_restore(revoked)), now);
+    assert!(seen.decided && !seen.passed, "{seen:?}");
+}
+
+/// **A reached verdict that is not green is a FAILURE, with its reason.**
+/// `Invalid`, `Untrusted`, and `NotAttempted` once the fetch's attempts are
+/// spent (no `retryAfter`, attempt 4 of 4) — the verdict that "never
+/// arrived" is recorded honestly as a non-pass, never as a pass.
+///
+/// MUTANT: read a spent `NotAttempted` as still owed (drop the `retryAfter`
+/// arm's condition) — the last row then stays undecided.
+#[test]
+fn a_reached_verdict_that_is_not_green_is_a_failure_with_its_reason() {
+    let now = at("2026-09-20T03:45:00Z");
+    for (label, status, want) in [
+        (
+            "Invalid",
+            passed_status("Succeeded", "Invalid"),
+            "VerificationInvalid",
+        ),
+        (
+            "Untrusted",
+            passed_status("Succeeded", "Untrusted"),
+            "VerificationUntrusted",
+        ),
+        (
+            "NotAttempted after the last retry",
+            terminal_status(
+                "Succeeded",
+                0,
+                None,
+                Some(json!({"result": "NotAttempted", "payloadType": "x",
+                            "verifiedAt": "2026-09-20T03:43:00Z",
+                            "detail": "the fetch Job failed; no attempts remain"})),
+                Some(json!({"attempt": 4, "mode": "SecretKeys"})),
+            ),
+            "VerificationNotAttempted",
+        ),
+    ] {
+        let seen = rs::observe(Some(&rehearsal_restore(status)), now);
+        assert!(seen.decided, "{label}: a reached verdict decides: {seen:?}");
+        assert!(!seen.passed, "{label}: and it is not a pass");
+        assert_eq!(seen.reason.as_deref(), Some(want), "{label}");
+    }
+}
+
+/// **The verdict that never arrives at all** — `Pending` an hour after the
+/// run finished — is recorded as a non-pass naming that, so the schedule does
+/// not hold its own slot forever. Never a pass.
+///
+/// MUTANT: drop `waited_out` from `decided` — the row stays undecided.
+#[test]
+fn a_verdict_still_owed_after_the_wait_is_recorded_as_not_passed() {
+    let status = terminal_status(
+        "Succeeded",
+        0,
+        Some("pass"),
+        Some(json!({"result": "Pending", "payloadType": "x",
+                    "verifiedAt": "2026-09-20T03:20:02Z"})),
+        Some(json!({"attempt": 1})),
+    );
+    let restore = rehearsal_restore(status);
+    let just_inside = at(FINISHED_AT) + chrono::Duration::seconds(rs::VERDICT_WAIT_SECONDS - 1);
+    assert!(!rs::observe(Some(&restore), just_inside).decided);
+    let after = at(FINISHED_AT) + chrono::Duration::seconds(rs::VERDICT_WAIT_SECONDS);
+    let seen = rs::observe(Some(&restore), after);
+    assert!(seen.decided && !seen.passed, "{seen:?}");
+    assert_eq!(seen.reason.as_deref(), Some(rs::REASON_VERDICT_NOT_REACHED));
+}
+
+/// The hour is a backstop that outlasts the whole evidence-fetch schedule —
+/// every attempt at its deadline plus every retry delay — so an ordinary slow
+/// fetch is never cut short into a failure.
+#[test]
+fn the_verdict_wait_outlasts_the_whole_fetch_schedule() {
+    use weirkeeper::evidence_fetch as ef;
+    let attempts = i64::from(ef::MAX_ATTEMPTS)
+        * (i64::from(ef::FETCH_TIMEOUT_SECONDS) + weirkeeper::check::job::DEADLINE_MARGIN_SECONDS);
+    let delays: i64 = ef::RETRY_DELAYS_SECONDS.iter().sum();
+    assert!(
+        rs::VERDICT_WAIT_SECONDS > attempts + delays,
+        "{} s must exceed {} s of fetch attempts and {} s of retry delays",
+        rs::VERDICT_WAIT_SECONDS,
+        attempts,
+        delays
+    );
+}
+
+/// **The exit code stays authoritative.** Since interface I8's amendment an
+/// exit-2 rehearsal names a signed scorecard that verifies `Valid`: it is a
+/// verified FAILURE, recorded with the signed `outcome` as its reason — and a
+/// planted `outcome: pass` at exit 2 is still not a pass.
+///
+/// MUTANT: drop `exit_code == Some(0)` from `passed` AND the badge's exit-code
+/// clause — the second row then passes.
+#[test]
+fn a_failed_drill_is_never_a_pass_whatever_its_verdict() {
+    let now = at("2026-09-20T03:25:00Z");
+    let fail = terminal_status(
+        "Failed",
+        2,
+        Some("fail-integrity"),
+        Some(verdict("Valid")),
+        None,
+    );
+    let seen = rs::observe(Some(&rehearsal_restore(fail)), now);
+    assert!(seen.decided && !seen.passed, "{seen:?}");
+    assert_eq!(
+        seen.reason.as_deref(),
+        Some("fail-integrity"),
+        "the VERIFIED signed outcome names why"
+    );
+    let planted = terminal_status("Failed", 2, Some("pass"), Some(verdict("Valid")), None);
+    let seen = rs::observe(Some(&rehearsal_restore(planted)), now);
+    assert!(
+        seen.decided && !seen.passed,
+        "exit 2 is never a pass: {seen:?}"
+    );
+    // …and an exit 2 whose signed failure is still being fetched waits for it
+    // like a pass would, so its record carries the verified outcome.
+    let owed = terminal_status("Failed", 2, None, None, None);
+    let seen = rs::observe(Some(&rehearsal_restore(owed)), now);
+    assert!(!seen.decided, "{seen:?}");
+    // An OLDER runner's exit 2 names no evidence: nothing is owed, and it is
+    // decided at once as the failure it is (unchanged behaviour).
+    let older = json!({"phase": "Failed", "exitCode": 2, "outcome": "fail-integrity"});
+    let seen = rs::observe(Some(&rehearsal_restore(older)), now);
+    assert!(seen.decided && !seen.passed, "{seen:?}");
+    assert_eq!(seen.reason.as_deref(), Some("fail-integrity"));
+}
+
+/// **L6 step 5, end to end through the reconciler.** Pass 1 sees the finished
+/// rehearsal with its verdict `Pending`: the write keeps `activeRestoreRef`,
+/// records neither `lastSucceeded` nor `lastFailed`, carries
+/// `RehearsalHealthy` and keeps every condition in the array, under the
+/// resourceVersion precondition. Pass 2 sees the verdict `Valid`: it records
+/// `lastSucceeded` once, `RehearsalHealthy=True/Passed`, and releases the ref.
+///
+/// MUTANT: `if observation.terminal` in `status_patch` (the pre-fix gate) —
+/// pass 1 then writes `lastFailed` and nulls `activeRestoreRef`.
+#[tokio::test]
+async fn a_rehearsal_is_recorded_once_its_verdict_is_reached() {
+    let start = json!({
+        "activeRestoreRef": {"name": PREVIOUS_CHILD},
+        "lastScheduledSlot": DUE_SLOT,
+        "conditions": [{
+            "type": "RehearsalHealthy", "status": "Unknown", "reason": "NoResult",
+            "message": "no rehearsal has finished yet",
+            "lastTransitionTime": "2026-09-20T03:00:01Z"
+        }]
+    });
+    let child = |status: Value| {
+        let mut value = previous_child_value("Running");
+        value["status"] = status;
+        let mut table = happy_routes();
+        table.push(Route {
+            method: "GET",
+            path_suffix: "/restores/logweir-rehearsal-weekly-orders-20260913-030000",
+            status: 200,
+            body: value.to_string(),
+        });
+        table
+    };
+
+    // ---- pass 1: finished, verdict Pending -------------------------------
+    let pending = terminal_status(
+        "Succeeded",
+        0,
+        None,
+        Some(json!({"result": "Pending", "payloadType": "x",
+                    "verifiedAt": "2026-09-20T03:20:02Z"})),
+        Some(json!({"attempt": 1})),
+    );
+    let (client, recorder, bodies) = mock_client_recording_bodies(child(pending));
+    let when = at("2026-09-20T03:20:05Z");
+    rs::reconcile_schedule(&schedule_with(start.clone()), &context(client), when)
+        .await
+        .expect("the reconcile answers");
+    assert_eq!(posted(&recorder, RESTORES_PATH), 0);
+    let patch = patch_bodies(&bodies).pop().expect("the pass writes status");
+    assert_eq!(
+        patch["metadata"]["resourceVersion"], "101",
+        "under the compare-and-set precondition (seam S7)"
+    );
+    let st = &patch["status"];
+    assert!(
+        st.get("lastSucceeded").is_none() && st.get("lastFailed").is_none(),
+        "nothing is recorded while the verdict is owed: {st}"
+    );
+    assert!(
+        st.get("activeRestoreRef").is_none(),
+        "the ref is left alone (not nulled), so the next pass reads the run again: {st}"
+    );
+    let types: Vec<&str> = st["conditions"]
+        .as_array()
+        .expect("conditions")
+        .iter()
+        .filter_map(|c| c["type"].as_str())
+        .collect();
+    assert_eq!(
+        types,
+        vec!["Ready", "Authorized", "RehearsalHealthy"],
+        "a merge PATCH replaces the array, so the pass writes the whole set"
+    );
+    let health = st["conditions"]
+        .as_array()
+        .expect("conditions")
+        .iter()
+        .find(|c| c["type"] == "RehearsalHealthy")
+        .expect("RehearsalHealthy")
+        .clone();
+    assert_eq!(
+        health["status"], "Unknown",
+        "carried, not decided: {health}"
+    );
+    assert_eq!(health["reason"], "NoResult");
+
+    // ---- pass 2: the verdict landed Valid --------------------------------
+    let awaiting = after(start, &patch);
+    let (client, recorder, bodies) =
+        mock_client_recording_bodies(child(passed_status("Succeeded", "Valid")));
+    let when = at("2026-09-20T03:20:35Z");
+    rs::reconcile_schedule(&awaiting, &context(client), when)
+        .await
+        .expect("the reconcile answers");
+    assert_eq!(posted(&recorder, RESTORES_PATH), 0);
+    let patch = patch_bodies(&bodies).pop().expect("the pass writes status");
+    let st = &patch["status"];
+    assert_eq!(
+        st["lastSucceeded"]["restoreRef"]["name"], PREVIOUS_CHILD,
+        "{st}"
+    );
+    assert_eq!(st["lastSucceeded"]["rtoSeconds"], 97);
+    assert!(st.get("lastFailed").is_none(), "{st}");
+    assert!(
+        st["activeRestoreRef"].is_null(),
+        "the decided run releases the ref: {st}"
+    );
+    let health = st["conditions"]
+        .as_array()
+        .expect("conditions")
+        .iter()
+        .find(|c| c["type"] == "RehearsalHealthy")
+        .expect("RehearsalHealthy")
+        .clone();
+    assert_eq!(health["status"], "True", "{health}");
+    assert_eq!(health["reason"], "Passed");
+}
+
+/// A slot that comes due while the previous rehearsal's verdict is still owed
+/// is skipped `ConcurrencyBlocked` and creates nothing — firing would replace
+/// `activeRestoreRef` and lose the result being waited for.
+///
+/// MUTANT: `decide` reading `status_is_terminal(active)` again — the slot then
+/// fires and a `Restore` is POSTed.
+#[tokio::test]
+async fn a_slot_due_while_a_verdict_is_owed_is_concurrency_blocked() {
+    let mut value = previous_child_value("Running");
+    value["status"] = terminal_status("Succeeded", 0, None, None, None);
+    let mut table = happy_routes();
+    table.push(Route {
+        method: "GET",
+        path_suffix: "/restores/logweir-rehearsal-weekly-orders-20260913-030000",
+        status: 200,
+        body: value.to_string(),
+    });
+    let (client, recorder, bodies) = mock_client_recording_bodies(table);
+    let schedule = schedule_with(json!({"activeRestoreRef": {"name": PREVIOUS_CHILD}}));
+    let outcome = rs::reconcile_schedule(&schedule, &context(client), now())
+        .await
+        .expect("the reconcile answers");
+    match &outcome.verdict {
+        rs::Verdict::Skipped(s) => {
+            assert_eq!(s.reason, rehearsal::SkipReason::ConcurrencyBlocked);
+            assert!(
+                s.detail.contains("no evidence verdict is recorded yet"),
+                "the skip names the owed verdict: {}",
+                s.detail
+            );
+        }
+        other => panic!("expected a ConcurrencyBlocked skip, got {other:?}"),
+    }
+    assert_eq!(posted(&recorder, RESTORES_PATH), 0);
+    let patch = patch_bodies(&bodies).pop().expect("the skip is written");
+    assert!(patch["status"].get("lastFailed").is_none());
+    assert!(patch["status"].get("lastSucceeded").is_none());
 }
 
 fn routes_with_previous_child(phase: &str) -> Vec<Route> {

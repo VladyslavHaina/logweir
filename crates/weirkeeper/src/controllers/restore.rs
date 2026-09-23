@@ -4501,14 +4501,17 @@ pub fn running_status_patch(
 /// same rule the evidence keys follow — and the gap is recorded in the CRD
 /// field's own description and in the task report.
 ///
-/// # `EvidenceRecorded` exists only at exit 0, and only over the two mandatory
-/// keys
+/// # `EvidenceRecorded` exists at exit 0, and at exit 2 only when the keys
+/// were read, and only over the two mandatory keys
 ///
 /// Errata **E5c**. Global Constraint 11 says exits 1, 3 and 4 write no
 /// artifact, so "no evidence key lines" is the expected shape there and a
 /// condition about it would be a condition about nothing.
 /// [`RestoreEvidenceKeys::mandatory_complete`] is the predicate, and the third
-/// key's absence is recorded as an absence rather than as a failure.
+/// key's absence is recorded as an absence rather than as a failure. Exit 2
+/// (interface I8 as amended for FAILED-DRILL-EVIDENCE-UNPUBLISHED) raises the
+/// POSITIVE arm only: a runner that predates the amendment prints no keys at
+/// exit 2, and its log is not "unreadable".
 /// `#[allow(clippy::too_many_arguments)]`, AND THE REASON IS THE FUNCTION'S
 /// WHOLE POINT. This is a PURE patch builder: every parameter is one
 /// independent OBSERVATION the reconcile made, and the value of the function
@@ -4579,6 +4582,28 @@ pub fn finished_status_patch(
             status,
             reason,
             message,
+            now,
+        ));
+    } else if exit_code == 2 && keys.mandatory_complete() {
+        // **A SIGNED FAILURE, NAMED — FAILED-DRILL-EVIDENCE-UNPUBLISHED.**
+        // Interface I8 as amended: exit 2 is "a drill ran and did not pass; a
+        // SIGNED scorecard was written", and a runner carrying the amendment
+        // prints that scorecard's keys. They are recorded above like exit 0's
+        // and verified by the same flow, so the positive arm is raised here
+        // too. ONLY the positive arm: a runner that predates the amendment
+        // prints no keys at exit 2, and "unreadable" would be a false
+        // statement about a log that is exactly what that runner promised.
+        // `EvidenceRecorded=True` says the evidence is NAMED; whether the run
+        // passed is still `exitCode` (and the badge reads it — see
+        // `verification::restore_badge`), never this condition.
+        conditions.push(condition(
+            restore,
+            CONDITION_EVIDENCE_RECORDED,
+            "True",
+            REASON_EVIDENCE_KEYS_RECORDED,
+            "the drill did not pass (exit 2) and signed its result; both `scorecard-key=` and \
+             `sidecar-key=` were read off the pod log by name and are on status.evidence, so the \
+             signed failure is verified like any other scorecard",
             now,
         ));
     }
