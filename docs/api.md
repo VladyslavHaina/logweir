@@ -443,14 +443,20 @@ controller's own `selectable` conjunction beside them.
 also lists the namespace's `Backup` objects (at most 2 000) and joins their
 `status.evidence.verification.result` to the rows — by the full
 `receiptSha256`, or by `backupId` for a `Backup` that carries no digest. A point
-whose `Backup` the controller refused (`Invalid`, `Untrusted`, or a result this
-build does not recognise) is published `selectable: false` with that result in
-the additive `backupVerdict` field, and `?selectable=true` does not list it —
-however `Available`/`Verified` its row reads, because a view is served until
-`viewExpiresAt` and the row may predate the refusal. `NotAttempted`, `Pending`
-(the evidence fetch is still running), an absent result and `Valid` leave the
-row in charge; `backupVerdict` is absent then, and absent never means
-"verified".
+whose `Backup` the controller refused (`Invalid`, `Untrusted`, a result this
+build does not recognise, or a `Valid` on a trust basis the badge refuses) is
+published `selectable: false` with the refusal in the additive `backupVerdict`
+field, and `?selectable=true` does not list it — however `Available`/`Verified`
+its row reads, because a view is served until `viewExpiresAt` and the row may
+predate the refusal. A `Valid` counts as a pass only beside no `trust` block (or
+`trust: null`) or a `Current`/`Historical` basis, the controller badge's own
+rule (D3 §7.4, §12); a `Valid` on any other basis — `RecordedBeforeRevocation`,
+`None`, a block with no basis, a word this build does not know — is a refusal
+and is published as `backupVerdict: "Untrusted"`, even though the `Backup`
+itself still reads `result: Valid`. `NotAttempted`, `Pending` (the evidence
+fetch is still running), an absent result, a passing `Valid`, and a `Valid` on
+`trust.basis: Unverified` (nothing has been compared yet) leave the row in
+charge; `backupVerdict` is absent then, and absent never means "verified".
 
 **The join degrades per object, never per page.** `Backup` objects are read
 through a lenient projection of the three fields the rule needs, so one object

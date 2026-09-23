@@ -415,12 +415,14 @@ pub struct PointView {
     /// whenever `backupVerdict` is present, because a verdict the
     /// controller reached outranks a view row that may predate it.
     pub selectable: bool,
-    /// The verification result the controller recorded on this point's OWN
-    /// `Backup` — `Invalid`, `Untrusted`, or a result this build does not
-    /// recognise — present ONLY when it is such a reached refusal. It is
-    /// `Unreadable` when the `Backup`'s verdict field is present but is not a
-    /// verdict this build can read: an unreadable verdict refuses like an
-    /// unknown one.
+    /// The refusal the controller reached on this point's OWN `Backup` —
+    /// the recorded result when it is `Invalid`, `Untrusted`, or a result
+    /// this build does not recognise, and `Untrusted` when the recorded
+    /// result is `Valid` on a trust basis the badge refuses (anything but no
+    /// `trust` block, `Current`, `Historical` or `Unverified`) — present ONLY
+    /// when there is such a reached refusal. It is `Unreadable` when the
+    /// `Backup`'s verdict field is present but is not a verdict this build
+    /// can read: an unreadable verdict refuses like an unknown one.
     ///
     /// This is why a row can read `Available`/`Verified` and still be
     /// `selectable: false`: the view is served until `viewExpiresAt`, so the

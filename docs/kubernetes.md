@@ -2142,14 +2142,17 @@ what a timestamp-driven bucket rule does.
 evaluation lists the namespace's `Backup` objects and joins their
 `status.evidence.verification.result` to the rows — by the full
 `receiptSha256`, or by `backupId` for a `Backup` that carries no digest. A point
-whose `Backup` the controller refused (`Invalid`, `Untrusted`, or a result this
-build does not recognise) is skipped with reason `Unreadable` however
+whose `Backup` the controller refused (`Invalid`, `Untrusted`, a result this
+build does not recognise, or a `Valid` on a trust basis the badge refuses —
+anything but no `trust` block, `trust: null`, `Current`, `Historical` or
+`Unverified`) is skipped with reason `Unreadable` however
 `Available`/`Verified` its row reads: a view is served until `viewExpiresAt`,
 so the row may predate the refusal, and counted as usable it would take a
 `keepLast` or `minUsablePoints` rank and push an older good point into the plan.
 `NotAttempted`, `Pending` (the evidence fetch is still running), an absent
-result and `Valid` leave the row in charge, and a point no `Backup` in the
-namespace names is evaluated exactly as before. `Backup` objects are read
+result, a `Valid` beside no `trust` block or a `Current`/`Historical` basis, and
+a `Valid` on `Unverified` (nothing compared yet) leave the row in charge, and a
+point no `Backup` in the namespace names is evaluated exactly as before. `Backup` objects are read
 through a lenient projection of the three fields the rule needs: an object this
 build cannot type does not stop the evaluation, and one whose verdict field is
 present but unreadable refuses its own point like an unknown verdict. The
@@ -2302,10 +2305,13 @@ sorting placeholder and never makes that candidate selectable. Because
 the row's full `receiptSha256` to equal the Backup's captured digest; a colliding
 prefix cannot supply facts for another receipt. The catalog decides only where
 the controller could not look: when the Backup's own verification result is
-`NotAttempted`, `Pending` or absent (or `Valid`, which the catalog may still
-narrow). A
-verdict the controller reached and refused — `Invalid`, `Untrusted`, or a result
-this build does not recognise — is never made selectable by a catalog row, which
+`NotAttempted`, `Pending`, absent, or a `Valid` on `trust.basis: Unverified`
+(nothing compared yet). A `Valid` beside no `trust` block or a
+`Current`/`Historical` basis is a pass the catalog may still narrow. A verdict
+the controller reached and refused — `Invalid`, `Untrusted`, a result this build
+does not recognise, or a `Valid` on any other trust basis
+(`RecordedBeforeRevocation`, `None`, a block with no basis) — is never made
+selectable by a catalog row, which
 may have been harvested before the receipt was replaced or its signer revoked.
 The same holds for a catalog-only candidate — a row no `Backup` of the
 schedule's `scheduleRefs` names, which is all a `catalogRef`-only schedule sees:
