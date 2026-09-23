@@ -2945,6 +2945,20 @@ def test_the_object_lock_row_requires_the_refusal_recorded() -> None:
                                                False).values()))
 
 
+def test_the_latest_version_is_the_highest_ordinal_of_its_key() -> None:
+    rows = d3.mark_latest([
+        {"key": "a/manifest.json", "ordinal": 2, "isDeleteMarker": True},
+        {"key": "a/manifest.json", "ordinal": 1, "isDeleteMarker": False},
+        {"key": "a/seg", "ordinal": 1, "isDeleteMarker": False},
+    ])
+    latest = {(r["key"], r["ordinal"]) for r in rows if r["isLatest"]}
+    row("a delete marker written over a held version is the key's LATEST version",
+        latest == {("a/manifest.json", 2), ("a/seg", 1)}, str(latest))
+    marker = [r for r in rows if r["isLatest"] and r["isDeleteMarker"]]
+    row("PLANTED: reading mc's absent isLatest as False would hide it — mark_latest does not",
+        bool(marker))
+
+
 def test_a_shared_set_must_not_be_planned_under_a_retained_point() -> None:
     entries = [
         {"pointId": "lwp1-a", "backupId": "set-1", "availability": "Available",
