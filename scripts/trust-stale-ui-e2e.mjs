@@ -33,8 +33,9 @@
 //
 //   NODE_PATH="$(npm root -g)" node scripts/trust-stale-ui-e2e.mjs
 //
-// Environment (all optional): UI_E2E_API_BIN, UI_E2E_UI_DIR, UI_E2E_ARTIFACTS,
-// UI_E2E_KEEP ("1" keeps the namespace; the cluster RBAC is always removed).
+// Environment (all optional): UI_E2E_OWNER (trust-stale), UI_E2E_PREFIX (lw-ts-),
+// UI_E2E_API_BIN, UI_E2E_UI_DIR, UI_E2E_ARTIFACTS, UI_E2E_KEEP ("1" keeps the
+// namespace; the cluster RBAC is always removed).
 
 import { spawn, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
@@ -53,9 +54,15 @@ const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const UI_DIR = process.env.UI_E2E_UI_DIR || join(REPO, "ui");
 const API_BIN = process.env.UI_E2E_API_BIN || join(REPO, "target", "debug", "logweir-api");
 const LOCK = "/tmp/logweir-roadmap-run/claude/k8s-lock.sh";
-const TASK = "trust-stale";
-const OWNER = "trust-stale";
-const NAMESPACE_PREFIX = "lw-ts-";
+// The owner label (also the cluster-lock owner) and the namespace prefix, set
+// the way the sibling harnesses let a second worker set them, so a run is
+// provably that worker's own.
+const OWNER = process.env.UI_E2E_OWNER || "trust-stale";
+const TASK = OWNER;
+const NAMESPACE_PREFIX = process.env.UI_E2E_PREFIX || "lw-ts-";
+if (!/^lw-[a-z0-9-]*-$/.test(NAMESPACE_PREFIX)) {
+  throw new Error("UI_E2E_PREFIX must be an lw-*- test prefix, not " + JSON.stringify(NAMESPACE_PREFIX));
+}
 const OWNER_LABEL = "logweir.dev/test-owner=" + OWNER;
 const LABELS = { "logweir.dev/test-owner": OWNER };
 const LAB_NS = "logweir-scram-local";
