@@ -2099,12 +2099,22 @@ Each of `ageExpiry`, `minUsablePoints`, `activeRestoreProtection`,
   exclusion half is real: `status.lastEnforcement.failed[]` carries the closed
   code, and the next evaluation protects that point as `LegalHold`.
 * `sharedSegments` is **`NotEnforced`**, because the guarantee needs a point's
-  segment keys and the catalog view entry has no segment field at all. The
-  evaluation implements the rule — a segment a retained point's manifest names
-  protects the candidate that shares it — and has nothing to apply it to. It
+  segment keys and the catalog view entry has no segment field at all. What
+  **is** enforced is the set half of it. Two receipts can name one backup set
+  — a runner Job re-created from its frozen inputs rewrites the same
+  `<prefix>/<backupId>/` and signs a second receipt over it — and every key a
+  plan line may remove lies under its own set's directory. So the evaluation
+  groups points that share a `backupId`, a manifest key or a segment key
+  (transitively), and a group holding any retained point — kept, protected or
+  skipped — plans none of its candidates: each is protected `SharedSegment`.
+  The `maxDeletionsPerRun` ceiling selects such a group whole or not at all,
+  and the plan writer refuses outright (`Evaluated=False`, no plan) a line
+  whose set a retained point still names. What stays unseen is a manifest that
+  names a segment under *another* set's directory; the engine does not write
+  that layout, but the guarantee as worded covers it, so the value stays
+  `NotEnforced` and the `Evaluated` message says which half is in force. It
   becomes `LogweirEnforced` on its own, with no code change, the day a view
-  entry carries its keys. **Until then, do not read this destination as
-  protected against a shared-segment removal.**
+  entry carries its keys.
 
 **`mode: ExternalLifecycle` is a declaration, not an enforcement.** It records
 that a bucket lifecycle rule exists so a console can stop claiming retention is
@@ -2163,7 +2173,8 @@ removed while the controller's Backup verdicts cannot all be read", with
 The refusal the walk did not reach is exactly the one that would have enlarged
 the plan. `Backup`s in other namespaces writing to the same archive are not
 consulted. A point the evaluation skips is retained, so a segment it shares
-with a candidate protects that candidate as `SharedSegment`.
+with a candidate — or a backup set it names — protects that candidate as
+`SharedSegment`.
 
 And the newest `minUsablePoints` usable
 points are kept whatever the rules say, reported as `MinUsablePoints` in

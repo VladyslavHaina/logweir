@@ -2593,6 +2593,17 @@ impl Pass<'_> {
         // Derived from the POINTS rather than from a constant, so the day a
         // view entry carries its segment keys the value changes with no other
         // edit, and a test that goes through `point_facts` is what observes it.
+        //
+        // SHARED SETS ARE PROTECTED NOW, AND THIS STILL SAYS `NotEnforced`
+        // (defect SHARED-SET-RETENTION). `evaluate` step 4 protects every
+        // candidate that names the same backup set as a retained point, from
+        // the `backupId` every view entry carries, and that is the whole of
+        // the sharing the engine's own layout produces (every key under
+        // `{backup_id}/`). What it cannot see is a manifest naming a segment in
+        // ANOTHER set's directory, and the guarantee as worded — "a segment
+        // two points share is not removed with one of them" — covers that
+        // case. `LogweirEnforced` would claim it; the Evaluated message says
+        // exactly which half is in force instead.
         let segments_visible = points.iter().any(|p| !p.segment_keys.is_empty());
         let guarantees = json!({
             "ageExpiry": if decision.enforcement == ENFORCEMENT_LOGWEIR_WORKER {
@@ -2636,7 +2647,11 @@ impl Pass<'_> {
                     } else {
                         // SAID ON THE OBJECT, not only in a Rust doc comment
                         // (review `d3w9` H1 and M1).
-                        " This catalog view carries no segment keys, so shared-segment                          protection is NotEnforced and the plan names each set's key prefix                          rather than its objects:"
+                        " This catalog view carries no segment keys. Points that name one \
+                         backup set are protected together (SharedSegment, matched on \
+                         backupId), but a segment one set's manifest names under another \
+                         set's directory cannot be seen, so sharedSegments is NotEnforced, \
+                         and the plan names each set's key prefix rather than its objects:"
                     },
                     if segments_visible {
                         String::new()

@@ -573,6 +573,275 @@ fn two_candidates_sharing_only_with_each_other_are_both_removed() {
     assert_eq!(candidate_ids(&evaluation), vec!["p5", "p6"]);
 }
 
+// ---------------------------------------------------------------------------
+// Defect SHARED-SET-RETENTION — two receipts over ONE backup set
+// ---------------------------------------------------------------------------
+
+/// A second receipt over an existing set: same `backupId`, same manifest key,
+/// a different point id. This is what a runner Job re-created from its frozen
+/// inputs produces (live: harness-rows-11, `shared/473fe2d4…/`, both points
+/// `Available`/`Verified`, manifest sha256 unchanged across the two runs).
+fn second_receipt_over(original: &plan::PointFacts, id: &str, age_days: i64) -> plan::PointFacts {
+    plan::PointFacts {
+        point_id: id.to_string(),
+        recovery_point_at_ms: now_ms() - age_days * DAY_MS,
+        ..original.clone()
+    }
+}
+
+/// THE LIVE DEFECT. Two receipts name one set and `keepLast 1` keeps the
+/// newer: the older is the kept point's OWN set, so nothing of it is planned.
+///
+/// MUTANT: link on segment keys only — drop both the `set:` and the manifest
+/// link from `Groups::of`, which is the pre-fix rule. `p-old` is planned
+/// `BeyondKeepLast` and this row fails, with seven others (and
+/// `a_shared_set_never_reaches_an_approvable_plan` fails at the writer's own
+/// rail, which refuses the plan). Each link alone has its own row below.
+#[test]
+fn two_receipts_over_one_set_plan_nothing_of_that_set() {
+    let newer = point("p-new", 1);
+    let older = second_receipt_over(&newer, "p-old", 2);
+    let evaluation = evaluate(&[newer, older], rules(Some(1), None, 1));
+    assert!(
+        candidate_ids(&evaluation).is_empty(),
+        "the older receipt names the kept receipt's set: {:?}",
+        candidate_ids(&evaluation)
+    );
+    assert_eq!(evaluation.kept, vec!["p-new", "p-old"]);
+    assert_eq!(
+        protected_reason(&evaluation, "p-old"),
+        Some("SharedSegment")
+    );
+    assert_eq!(evaluation.truncated_by_cap, 0);
+}
+
+/// The same rule one layer out: the plan the controller would publish for the
+/// live shape has no line at all.
+#[test]
+fn a_shared_set_never_reaches_an_approvable_plan() {
+    let newer = point("p-new", 1);
+    let older = second_receipt_over(&newer, "p-old", 2);
+    let evaluation = evaluate(&[newer, older, point("p3", 3)], rules(Some(1), None, 1));
+    let document = plan::plan_document(
+        &identity(),
+        &destination(),
+        rules(Some(1), None, 1),
+        &evaluation,
+    )
+    .expect("a plan");
+    let lines: Vec<&str> = document.lines.iter().map(|l| l.point_id.as_str()).collect();
+    assert_eq!(lines, vec!["p3"], "only the unshared set is planned");
+    assert!(document.lines.iter().all(|l| l.backup_id != "set-p-new"));
+}
+
+/// NEGATIVE CONTROL for the two rows above: DISTINCT sets behave exactly as
+/// before — the older point is a `BeyondKeepLast` candidate. A rule that
+/// protected everything would pass the rows above and fail this one.
+#[test]
+fn distinct_sets_are_unchanged_by_the_shared_set_rule() {
+    let evaluation = evaluate(
+        &[point("p-new", 1), point("p-old", 2)],
+        rules(Some(1), None, 1),
+    );
+    assert_eq!(candidate_ids(&evaluation), vec!["p-old"]);
+    assert_eq!(protected_reason(&evaluation, "p-old"), None);
+    assert_eq!(evaluation.candidates[0].reason.as_str(), "BeyondKeepLast");
+}
+
+/// The set is matched on `backupId` ALONE when the manifest key differs in
+/// spelling: the set directory is what a line removes.
+///
+/// MUTANT: link on the manifest key only. This row fails.
+#[test]
+fn a_shared_backup_id_protects_even_when_the_manifest_keys_differ() {
+    let newer = point("p-new", 1);
+    let mut older = second_receipt_over(&newer, "p-old", 2);
+    older.manifest_key = Some(format!("{SCOPE}/set-p-new/manifest.json.v0"));
+    let evaluation = evaluate(&[newer, older], rules(Some(1), None, 1));
+    assert!(candidate_ids(&evaluation).is_empty());
+    assert_eq!(
+        protected_reason(&evaluation, "p-old"),
+        Some("SharedSegment")
+    );
+}
+
+/// Two rows naming one MANIFEST KEY name one set whatever their `backupId`
+/// says — a manifest is the first object a line deletes.
+///
+/// MUTANT: drop the manifest-key link from `Groups::of`. This row fails.
+#[test]
+fn a_shared_manifest_key_protects_even_when_the_backup_ids_differ() {
+    let newer = point("p-new", 1);
+    let mut older = point("p-old", 2);
+    older.manifest_key = newer.manifest_key.clone();
+    let evaluation = evaluate(&[newer, older], rules(Some(1), None, 1));
+    assert!(candidate_ids(&evaluation).is_empty());
+    assert_eq!(
+        protected_reason(&evaluation, "p-old"),
+        Some("SharedSegment")
+    );
+}
+
+/// Protection is TRANSITIVE: a candidate that shares a segment with a
+/// candidate that is itself protected (it shares the kept point's set) is
+/// protected too — the protected one is retained, so its objects stay.
+///
+/// MUTANT: a single non-transitive pass (protect only candidates linked
+/// DIRECTLY to a retained point). `p-c2` is planned and this row fails.
+#[test]
+fn shared_set_protection_is_transitive() {
+    let kept = point("p-new", 1);
+    let mut c1 = second_receipt_over(&kept, "p-c1", 2);
+    c1.segment_keys = vec![format!("{SCOPE}/set-p-new/seg-0")];
+    let mut c2 = point("p-c2", 3);
+    c2.segment_keys = vec![format!("{SCOPE}/set-p-new/seg-0")];
+    let evaluation = evaluate(&[kept, c1, c2], rules(Some(1), None, 1));
+    assert!(
+        candidate_ids(&evaluation).is_empty(),
+        "{:?}",
+        candidate_ids(&evaluation)
+    );
+    assert_eq!(protected_reason(&evaluation, "p-c2"), Some("SharedSegment"));
+}
+
+/// A skipped receipt over a set protects a usable receipt over the same set:
+/// the L3 rule, now at set level.
+#[test]
+fn a_skipped_receipt_over_a_set_protects_the_usable_one() {
+    let newest = point("p1", 1);
+    let usable = point("p3", 3);
+    let mut refused = second_receipt_over(&usable, "p2", 2);
+    refused.refused_by_controller = true;
+    let evaluation = evaluate(&[newest, refused, usable], rules(Some(1), None, 1));
+    assert!(candidate_ids(&evaluation).is_empty());
+    assert_eq!(protected_reason(&evaluation, "p3"), Some("SharedSegment"));
+}
+
+/// Two receipts over one set that are BOTH beyond the rules go TOGETHER or not
+/// at all: the deletion ceiling never selects one and keeps its sibling, which
+/// would remove the set a point reported as kept still names.
+///
+/// MUTANT: apply the ceiling per point (the pre-fix loop). With a ceiling of 1
+/// `p2` is selected and `p3` — same set — is kept over the ceiling.
+#[test]
+fn the_deletion_ceiling_never_splits_a_shared_set() {
+    let first = point("p2", 2);
+    let second = second_receipt_over(&first, "p3", 3);
+    let points = vec![point("p1", 1), first, second, point("p4", 4)];
+    let at_cap = |cap: i64| {
+        plan::evaluate(&plan::Input {
+            destination: &destination(),
+            points: &points,
+            rules: rules(Some(1), None, 1),
+            holds: &[],
+            protection: &plan::Protection::default(),
+            now: now(),
+            max_deletions_per_run: cap,
+        })
+    };
+    let one = at_cap(1);
+    assert_eq!(
+        candidate_ids(&one),
+        vec!["p4"],
+        "the shared pair does not fit a ceiling of 1, the next group does"
+    );
+    assert_eq!(
+        one.truncated_by_cap, 2,
+        "both receipts of the pair are counted"
+    );
+    let two = at_cap(2);
+    assert_eq!(candidate_ids(&two), vec!["p2", "p3"]);
+    assert_eq!(two.truncated_by_cap, 1);
+}
+
+/// THE WRITER'S OWN RAIL, independent of the grouping: an evaluation that
+/// names a candidate over a set a retained point still names is refused, and
+/// no plan is written.
+///
+/// Built by hand, because `evaluate` no longer produces one — which is the
+/// point of a second rail. MUTANT: delete the `retained.backup_ids` check in
+/// `plan_document`. This row fails.
+#[test]
+fn the_plan_writer_refuses_a_line_over_a_retained_set() {
+    let evaluation = plan::Evaluation {
+        candidates: vec![plan::Candidate {
+            point_id: "p-old".to_string(),
+            backup_id: "set-shared".to_string(),
+            reason: plan::CandidateReason::BeyondKeepLast,
+            recovery_point_at_ms: now_ms(),
+            manifest_key: format!("{SCOPE}/set-shared/manifest.json"),
+            segment_keys: Vec::new(),
+            bytes: None,
+        }],
+        retained: plan::RetainedObjects {
+            backup_ids: BTreeSet::from(["set-shared".to_string()]),
+            keys: BTreeSet::new(),
+        },
+        ..plan::Evaluation::default()
+    };
+    let refused = plan::plan_document(
+        &identity(),
+        &destination(),
+        rules(Some(1), None, 1),
+        &evaluation,
+    );
+    assert!(
+        matches!(refused, Err(plan::PlanError::SharedWithRetained { ref point_id, .. }) if point_id == "p-old"),
+        "{refused:?}"
+    );
+
+    // The key half: a retained point naming an object UNDER the candidate's
+    // set directory refuses the line too, whatever its own backup id says.
+    let mut by_key = evaluation.clone();
+    by_key.retained = plan::RetainedObjects {
+        backup_ids: BTreeSet::from(["set-other".to_string()]),
+        keys: BTreeSet::from([format!("{SCOPE}/set-shared/topics/t/partition=0/seg-1")]),
+    };
+    assert!(matches!(
+        plan::plan_document(
+            &identity(),
+            &destination(),
+            rules(Some(1), None, 1),
+            &by_key
+        ),
+        Err(plan::PlanError::SharedWithRetained { .. })
+    ));
+
+    // And the negative control: retained objects elsewhere refuse nothing.
+    let mut elsewhere = evaluation;
+    elsewhere.retained = plan::RetainedObjects {
+        backup_ids: BTreeSet::from(["set-other".to_string()]),
+        keys: BTreeSet::from([format!("{SCOPE}/set-other/manifest.json")]),
+    };
+    let document = plan::plan_document(
+        &identity(),
+        &destination(),
+        rules(Some(1), None, 1),
+        &elsewhere,
+    )
+    .expect("nothing retained names this set");
+    assert_eq!(document.lines.len(), 1);
+}
+
+/// `evaluate` publishes what it retained, from its OUTPUT: every non-candidate
+/// point's set — kept, protected, over-cap and skipped alike.
+#[test]
+fn the_evaluation_names_every_retained_set() {
+    let mut skipped = point("p9", 9);
+    skipped.availability = Availability::Unreadable;
+    let points = vec![point("p1", 1), point("p2", 2), point("p3", 3), skipped];
+    let evaluation = evaluate(&points, rules(Some(1), None, 1));
+    assert_eq!(candidate_ids(&evaluation), vec!["p2", "p3"]);
+    assert_eq!(
+        evaluation.retained.backup_ids,
+        BTreeSet::from(["set-p1".to_string(), "set-p9".to_string()])
+    );
+    assert!(evaluation
+        .retained
+        .keys
+        .contains(&format!("{SCOPE}/set-p9/manifest.json")));
+}
+
 /// A point whose manifest key the catalog never established cannot be planned:
 /// the execution order starts by deleting the manifest.
 #[test]
@@ -3545,13 +3814,58 @@ async fn shared_segment_protection_is_reported_not_enforced() {
         "writing LogweirEnforced for a rule that has nothing to apply is the withdrawn-guarantee \
          defect class on a status field"
     );
+    let message = f.condition(ctrl::CONDITION_EVALUATED)["message"]
+        .as_str()
+        .expect("a message")
+        .to_string();
     assert!(
-        f.condition(ctrl::CONDITION_EVALUATED)["message"]
-            .as_str()
-            .expect("a message")
-            .contains("no segment keys"),
-        "and the condition says why: {}",
-        f.condition(ctrl::CONDITION_EVALUATED)["message"]
+        message.contains("no segment keys"),
+        "and the condition says why: {message}"
+    );
+    // SHARED-SET-RETENTION: the half that IS in force is said too, and the
+    // message is one sentence stream — no run of source indentation inside it.
+    assert!(
+        message.contains("protected together (SharedSegment, matched on backupId)"),
+        "{message}"
+    );
+    assert!(!message.contains("  "), "{message:?}");
+}
+
+/// SHARED-SET-RETENTION through the production path: two VIEW ENTRIES naming
+/// one `backupId` (the live shape — a second receipt over the same set) reach
+/// the evaluation through `point_facts`, and the published status protects the
+/// older one `SharedSegment` instead of listing it as a candidate.
+///
+/// MUTANT: `point_facts` drops `backup_id` (an empty string). The two entries
+/// no longer link, `p5` is a candidate, and this row fails.
+#[tokio::test]
+async fn a_second_receipt_over_a_kept_set_is_protected_on_the_object() {
+    let mut entries = six_points();
+    // p5 is a second receipt over p1's set: same backupId, same manifest.
+    entries[4]["backupId"] = json!("set-p1");
+    entries[4]["manifestKey"] = json!(format!("{SCOPE}/set-p1/manifest.json"));
+    let f = fixture(happy_routes(&entries));
+    run(&f, &policy(json!({}), json!({}))).await;
+    let status = f.status();
+    let candidates: Vec<&str> = status["lastEvaluation"]["candidates"]
+        .as_array()
+        .expect("candidates")
+        .iter()
+        .filter_map(|c| c["pointId"].as_str())
+        .collect();
+    assert_eq!(candidates, vec!["p4", "p6"], "{status}");
+    assert!(
+        status["lastEvaluation"]["protected"]
+            .as_array()
+            .expect("protected")
+            .iter()
+            .any(|p| p["pointId"] == "p5" && p["reason"] == "SharedSegment"),
+        "{status}"
+    );
+    assert_eq!(
+        status["guarantees"]["sharedSegments"],
+        ctrl::GUARANTEE_NOT_ENFORCED,
+        "set-level protection is not the segment-level guarantee; it is not claimed as one"
     );
 }
 
