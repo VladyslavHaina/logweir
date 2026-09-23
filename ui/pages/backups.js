@@ -54,6 +54,7 @@ import {
   table,
   triggerBadge,
   unverifiedCaption,
+  summaryBadge,
 } from "../render.js";
 import { itemsOf } from "./clusters.js";
 import { renderCoverageLine } from "./schedules.js";
@@ -135,6 +136,11 @@ export function greenLabel(verifiedAt, matchedKeyId, basis) {
  *  destroyed the only distinction that says what to fix. */
 export function backupBadge(status) {
   const s = status || {};
+  // A CONSOLE LIST ROW carries a summary verdict and no recorded block: read
+  // the summary (render.js `summaryBadge`) rather than calling it unrecorded.
+  if (((s.evidence || {}).verification) === undefined && s.__summary !== undefined) {
+    return summaryBadge(s.__summary);
+  }
   const verification = ((s.evidence || {}).verification) || {};
   const verified = validVerification(s);
   if (verified === null || s.exitCode !== 0) {

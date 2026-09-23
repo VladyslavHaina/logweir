@@ -431,8 +431,25 @@ the adapter records what it cannot supply on every object it projects, under
 |---|---|
 | `KafkaCluster` | `status.conditions` (the reachability observation is projected; the condition list is not exposed); `spec.auth.secretRef.passwordKey` and `spec.auth.tlsCa` (connection contract v1's two references, which `ConnectionAuthView` does not carry) |
 | `BackupSchedule` | the per-manifest `status.retentionReport.skipped` entries (the API reports their **count**); `status.lastSlot`, `status.missedSlots`, `status.pendingRun` and `status.history` (D1 W7: `ScheduleStatusView` carries `policy`, `nextRuns` and `activeRuns` and stops there) |
-| `Backup` | `status.manifestSha256`, `status.jobRef`, `status.selection` and `status.conditions` (D1 W7: the run's coverage label and its `TopicsResolved` condition) |
-| `Restore` | `status.integrity`, `status.jobRef` |
+| `Backup` | `status.manifestSha256`, `status.jobRef`, `status.selection` and `status.conditions` (D1 W7: the run's coverage label and its `TopicsResolved` condition); in a LIST, also `status.exitCode` and `status.evidence` -- the detail view reads both from the operation route and takes them off the list |
+| `Restore` | `status.integrity`, `status.jobRef`; in a LIST, also `status.outcome` and `status.evidence` |
+
+**A list row's verdict in console mode.** A list item carries the API's
+`OperationSummary` -- `verificationState` and `verifiedSuccess`, the latter
+computed with the controller's own green-badge rule -- and no key id, instant
+or exit code. The adapter carries the two under `status.__summary`, and a row
+with no recorded verification block is green exactly when `verifiedSuccess`
+says so, with a caption that says the key and the instant are on the run's
+own page; every other row names its case from `verificationState`. Before
+this (CONSOLE-HISTORY-VALID-SHOWN-UNVERIFIED) every console list row read
+"no verification was recorded", Valid ones included.
+
+**A Restore's scorecard facts are its claim until it verified.** `outcome`,
+`integrity`, `objectives.met` and `measured` are copied from the run's
+scorecard whatever its verdict; wherever they are shown -- the Restore
+detail, the history list's RESULT cell, the operation view's outcome -- they
+carry an "unverified scorecard claim" label unless the verdict is green by the
+badge rule (SCORECARD-FACTS-UNVERIFIED-SHOWN).
 
 Two further differences are worth stating outright, because they are not
 absences:

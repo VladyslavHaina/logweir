@@ -55,6 +55,7 @@ import {
   facts,
   phaseBadge,
   replace,
+  scorecardClaim,
   stateBadge,
   table,
   unverifiedCaption,
@@ -398,13 +399,15 @@ export const RETRY_FRESH_TARGET_SENTENCE =
 /** THE RESULT: what the RUN did. Never the evidence, which is the next block. */
 export function renderResult(v) {
   const r = v.result || {};
+  // A RESTORE'S OUTCOME IS ITS SCORECARD'S, and is the scorecard's claim until
+  // the evidence is green by the same rule the evidence section draws.
   return (
     "<section class=\"result\"><h3>Result</h3>" +
     facts([
       ["result", cell(r.status)],
       ["exit code", cell(r.exitCode)],
       ["exit reason", cell(r.exitReason)],
-      ["outcome", cell(r.outcome)],
+      ["outcome", v.kind === "restore" ? scorecardClaim(cell(r.outcome), evidenceGreen(v)) : cell(r.outcome)],
       ["last phase completed", cell(r.lastPhaseCompleted)],
     ]) +
     "<p class=\"note\">This is what the RUN recorded. Whether the document it produced verifies " +
@@ -419,6 +422,18 @@ export function renderResult(v) {
  *  Three results, three different claims (D3 section 7.4): `Invalid` is about the
  *  DOCUMENT, `NotAttempted` is about the CONTROLLER, and `Untrusted` is about
  *  the SIGNER. They are never flattened into one word here. */
+/** Whether this run's evidence is green, by the evidence section's own rule:
+ *  the API's combined trust word in console mode, `result` + `basis` in
+ *  legacy mode. */
+export function evidenceGreen(v) {
+  const console_ = v.console === true;
+  const trust = (console_ ? v.trust : ((v.evidenceVerification || {}).trust)) || {};
+  const ver = (console_ ? v.verification : v.evidenceVerification) || {};
+  return console_
+    ? GREEN_TRUST_STATES.indexOf(v.trustState) !== -1
+    : (ver.result === "Valid" && basisAllowsGreen(trust.basis));
+}
+
 export function renderEvidence(v) {
   const e = v.evidence || {};
   // TWO DOCUMENTS, TWO RULES, EACH READING WHAT ITS OWN DOCUMENT CARRIES.

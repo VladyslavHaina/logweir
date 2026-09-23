@@ -2098,6 +2098,65 @@ export const VERIFICATION_CASES = Object.freeze({
   RunNotSucceeded: "the document verified and the run itself did not succeed",
 });
 
+/** A FACT COPIED FROM A RUN'S SCORECARD, SHOWN FOR WHAT IT IS
+ *  (SCORECARD-FACTS-UNVERIFIED-SHOWN). A Restore's `outcome`, `integrity` and
+ *  `measured` are copied from its scorecard whatever the scorecard's verdict:
+ *  until that document has verified they are the scorecard's CLAIM, and a page
+ *  that printed them plainly beside an unverified badge would be vouching for
+ *  numbers nobody checked. `verified` is the page's own verdict rule (the
+ *  badge rule); an absent value stays the absent marker, with no caption. */
+export const SCORECARD_CLAIM_CAPTION = "unverified scorecard claim";
+
+export const SCORECARD_CLAIM_SENTENCE =
+  "The outcome, integrity and measured values on this run are copied from its scorecard. The " +
+  "scorecard's signature has not verified, so each is shown as the scorecard's claim, not as a " +
+  "verified fact; the evidence section says why it is not verified.";
+
+export function scorecardClaim(valueHtml, verified) {
+  if (verified === true || valueHtml === ABSENT) {
+    return valueHtml;
+  }
+  return valueHtml + " <span class=\"badge badge-unverified\" data-scorecard-claim=\"true\">" +
+    SCORECARD_CLAIM_CAPTION + "</span>";
+}
+
+/** A CONSOLE LIST ROW'S VERDICT (CONSOLE-HISTORY-VALID-SHOWN-UNVERIFIED).
+ *
+ *  A product-API list item carries `OperationSummary`: `verificationState` and
+ *  `verifiedSuccess` -- the latter computed by the API with the controller's
+ *  own green-badge rule (`weirkeeper::verification::{backup,restore}_badge`,
+ *  trust basis and a Restore's `outcome: pass` included) -- and no key id, no
+ *  verification instant and no exit code. So a list row is green exactly when
+ *  `verifiedSuccess` says so, and the green caption SAYS what the list does not
+ *  carry instead of inventing it; every other row names its case from the
+ *  summary's own word. The run's own page (and legacy mode, which reads the
+ *  custom resource) still shows the full block. */
+export const LIST_VERIFIED_CAPTION =
+  "verified by weirkeeper (this list does not carry the key id or the instant; the run's own " +
+  "page does)";
+
+/** Each non-green `verificationState` of a list summary, in words. */
+export const LIST_VERDICT_CASES = Object.freeze({
+  valid: "the document verified, and the run did not succeed or its signer is not accepted now " +
+    "-- the run's own page says which",
+  invalid: "invalid -- the signature did not verify, or a digest did not match",
+  notAttempted: "not attempted -- the controller could not check this document",
+  noEvidence: "no evidence -- this run recorded no signed document",
+  pending: "pending -- the run has not finished, or its verdict is not written yet",
+  unknown: "unknown -- the controller's verdict could not be read",
+});
+
+/** The badge for a console list row, from its `__summary`. */
+export function summaryBadge(summary) {
+  const s = summary || {};
+  if (s.verifiedSuccess === true && s.verificationState === "valid") {
+    return badge("green", LIST_VERIFIED_CAPTION);
+  }
+  const named = LIST_VERDICT_CASES[s.verificationState];
+  return badge("unverified", UNVERIFIED + ": " +
+    (typeof named === "string" ? named : VERIFICATION_CASES.NotRecorded));
+}
+
 /** THE TWO TRUST STATES A GREEN BADGE MAY CARRY, in the CONSOLE's vocabulary.
  *
  *  `OperationTrust.state` is D3 section 2.5's own word and it arrives ALREADY
