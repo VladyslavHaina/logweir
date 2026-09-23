@@ -554,6 +554,16 @@ fn the_consoles_recorded_before_revocation_restore_projects_untrusted() {
     assert!(!view.operation.verified_success);
 }
 
+/// `(what, result, trust.basis, trust.keyState, expected)`; a row with
+/// neither basis nor key state carries no `trust` block.
+type NotValidRow = (
+    &'static str,
+    &'static str,
+    Option<&'static str>,
+    Option<&'static str>,
+    TrustState,
+);
+
 /// **Every result that is not `Valid`, by the word D3 §2.5 gives it.**
 ///
 /// REGRESSION REASON. `Untrusted` IS a `result` the controller writes
@@ -567,7 +577,7 @@ fn the_consoles_recorded_before_revocation_restore_projects_untrusted() {
 /// `untrusted` beside a revoked key.
 #[test]
 fn each_result_that_is_not_valid_projects_its_own_word() {
-    let rows: [(&str, &str, Option<&str>, Option<&str>, TrustState); 14] = [
+    let rows: [NotValidRow; 14] = [
         (
             "Invalid",
             "Invalid",
