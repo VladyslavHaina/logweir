@@ -672,6 +672,12 @@ fn a_signer_revoked_after_the_sync_makes_the_row_not_ready() {
         message.contains(SIGNER_KEY_ID) && message.contains("Revoked"),
         "the message names the key and why: {message}"
     );
+    // A missing `\` continuation once carried the source indentation into
+    // this operator-facing sentence as runs of 30+ spaces.
+    assert!(
+        !message.contains("  "),
+        "one space between words: {message:?}"
+    );
 }
 
 /// A key RETIRED before the receipt was written refuses it; retired AFTER, it
@@ -775,11 +781,17 @@ fn an_unjudgeable_signer_is_unknown() {
         now() + Duration::hours(1),
     ));
     f.pages = vec![(p.0, Some(p.1))];
+    let row = f.row();
     assert_row(
-        &f.row(),
+        &row,
         CheckState::Unknown,
         CheckCode::CatalogPointSignerUnknown,
         "no signer key id",
+    );
+    assert!(
+        row.message.contains("with no signer key id") && !row.message.contains("  "),
+        "one space between words: {:?}",
+        row.message
     );
 }
 

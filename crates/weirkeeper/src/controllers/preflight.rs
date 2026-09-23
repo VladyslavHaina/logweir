@@ -1890,7 +1890,8 @@ pub fn signer_recheck(
     else {
         return SignerRecheck::Unjudgeable {
             detail: format!(
-                "the catalog lists `{}` with no signer key id, so its signer cannot be judged                  against the current trust",
+                "the catalog lists `{}` with no signer key id, so its signer cannot be judged \
+                 against the current trust",
                 entry.point_id
             ),
         };
@@ -2163,7 +2164,9 @@ pub fn catalog_point_row(facts: &CatalogPointFacts, now: DateTime<Utc>) -> Optio
                         mk(CheckState::NotReady, CheckCode::CatalogPointSignerUntrusted)
                             .with_scope(at)
                             .with_message(&format!(
-                                "the catalog lists `{}` as {}, but its receipt's signer `{key_id}`                                  is refused by this namespace's current trust: {reason} (key                                  state {key_state}); the row predates that change",
+                                "the catalog lists `{}` as {}, but its receipt's signer `{key_id}` \
+                                 is refused by this namespace's current trust: {reason} (key \
+                                 state {key_state}); the row predates that change",
                                 e.point_id,
                                 e.verification.as_str()
                             ))
