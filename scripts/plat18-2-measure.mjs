@@ -6,7 +6,8 @@
 // string functions take to render a large, synthetic but contract-shaped
 // dataset -- 1,000 history rows (500 Backups and 500 Restores), 1,000 backup
 // rows, and a recovery point freezing 2,000 topics rendered through the
-// restore wizard's topic subset and through the whole wizard. It does not
+// restore wizard's topic subset and through the whole wizard. `MEASURE_ROWS`
+// and `MEASURE_TOPICS` change the two sizes (PLAT-20.2 measures 5,000 rows). It does not
 // measure parsing, layout or paint; the browser half of the measurement is
 // `scripts/plat18-2-ui-e2e.mjs`, which times the same datasets in Chromium.
 //
@@ -27,6 +28,11 @@ const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const UI = resolve(process.argv[2] || join(REPO, "ui"));
 const FIXTURES = join(REPO, "ui", "tests", "fixtures");
 const RUNS = Number(process.env.MEASURE_RUNS || "7");
+// PLAT-20.2: the row count is a parameter, so the same harness measures the
+// console's whole list budget (5,000 rows: `ui/client.js`'s LIST_PAGE_SIZE x
+// LIST_PAGE_BUDGET) as well as PLAT-18.2's 1,000. The default is unchanged.
+const ROWS = Number(process.env.MEASURE_ROWS || "1000");
+const TOPICS = Number(process.env.MEASURE_TOPICS || "2000");
 
 function fixture(name) {
   return JSON.parse(readFileSync(join(FIXTURES, name), "utf8"));
@@ -102,23 +108,24 @@ async function main() {
   const backupsPage = await load("pages/backups.js");
   const wizard = await load("pages/restore-wizard.js");
 
-  const b500 = backups(500);
-  const r500 = restores(500);
-  const b1000 = backups(1000);
+  const half = Math.floor(ROWS / 2);
+  const bHalf = backups(half);
+  const rHalf = restores(ROWS - half);
+  const bAll = backups(ROWS);
 
   const point = JSON.parse(JSON.stringify(fixture("wizard-backups.json")));
-  point.items[0].spec.topics = topics(2000);
+  point.items[0].spec.topics = topics(TOPICS);
   const newest = wizard.recoveryPoints(point)[0];
   const selection = { uid: newest.metadata.uid, backup: newest.metadata.name };
   const state = wizard.initialState("logweir-t27", fixture("wizard-clusters.json"), point, selection);
 
   const results = [
-    await time("history list, 1,000 rows (500 Backups + 500 Restores)",
-      () => history.renderHistoryList(r500, b500, "ns")),
-    await time("backups list, 1,000 rows", () => backupsPage.renderBackupList(b1000, "ns")),
-    await time("restore wizard topic subset, 2,000 frozen topics",
+    await time("history list, " + ROWS + " rows (" + half + " Backups + " + (ROWS - half) +
+      " Restores)", () => history.renderHistoryList(rHalf, bHalf, "ns")),
+    await time("backups list, " + ROWS + " rows", () => backupsPage.renderBackupList(bAll, "ns")),
+    await time("restore wizard topic subset, " + TOPICS + " frozen topics",
       () => wizard.renderTopicSubset(state)),
-    await time("whole restore wizard, 2,000 frozen topics (one keystroke re-renders this)",
+    await time("whole restore wizard, " + TOPICS + " frozen topics (one keystroke re-renders this)",
       () => wizard.renderRestoreWizard(state)),
   ];
   process.stdout.write(JSON.stringify({ ui: UI, node: process.version, results: results }, null, 2) +
