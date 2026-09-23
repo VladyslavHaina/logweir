@@ -7,7 +7,7 @@
 //! |---|---|---|
 //! | `archiveRead` | one bounded `list` under the destination's prefix | `destination.archiveListable` |
 //! | `archiveWrite` | none — a write into an adopter's archive is what a RUN does | `destination.archivePrefixWritable` (execution-only) |
-//! | `evidenceRead` | a `get` of a key nobody wrote | `destination.evidenceReadable` (advisory) |
+//! | `evidenceRead` | a `get` of a key nobody wrote, AS the `evidenceRead` principal | `destination.evidenceReadable` (advisory) |
 //! | `evidenceWrite` | the optional create-only marker, AS the `evidenceWrite` principal | `destination.evidenceWritable` |
 //!
 //! **The `archiveWrite` row is execution-only on purpose.** D2 §4.2 permits a
@@ -39,10 +39,24 @@
 //! create-only put and for nothing else — no read, no list, no delete — so the
 //! probe needs `s3:PutObject` on `logweir/readiness/*` and nothing D2 §3.11
 //! does not already grant that principal.
+//!
+//! **`destination.evidenceReadable` is answered by the `evidenceRead` grant
+//! and by no other** (the class sweep of the same defect). A separate grant
+//! arrives as [`DestinationProbe::evidence_read`]; the read handle is built
+//! with it and used for the one `get` of an absent key. A grant no check pod
+//! holds — `ControllerIdentity`, or none configured — is answered `unknown`
+//! (`EvidenceReadNotConfigured`, advisory) with no request at all, never by
+//! the destination grant. Every probed destination row carries the `grant`
+//! fact: `destination` for the plan's own grant, or the role that answered.
+//!
+//! **`destination.archivePrefixWritable` is NEVER probed and never green**,
+//! whatever the plan asks: the one key a check may write is under the evidence
+//! root and proves nothing about the archive prefix (decision on
+//! DESTINATIONACCESS-IGNORES-WRITEPROBE, 2026-09-23).
 
 use logweir_core::check_contract::{
     CheckCode, CheckId, CheckOutcome, CheckPlanKind, CheckResult, DestinationAccessRequest,
-    DestinationPlan, EvidenceWriteGrant, Gating,
+    DestinationPlan, Gating, GrantRef,
 };
 use logweir_core::destination::DestinationRole;
 
@@ -60,7 +74,11 @@ pub struct DestinationProbe<'a> {
     /// The destination's `evidenceWrite` grant, when it is not the grant
     /// `destination.credentials` describes. The marker is written AS this
     /// principal; `None` means the two are one grant.
-    pub evidence_write: Option<&'a EvidenceWriteGrant>,
+    pub evidence_write: Option<&'a GrantRef>,
+    /// The destination's `evidenceRead` grant, when it is not the grant
+    /// `destination.credentials` describes. The read probe runs AS this
+    /// principal, or not at all; `None` means the two are one grant.
+    pub evidence_read: Option<&'a GrantRef>,
 }
 
 /// The `grant` fact on `destination.evidenceWritable`: which principal the
@@ -68,11 +86,21 @@ pub struct DestinationProbe<'a> {
 pub const GRANT_FACT: &str = "grant";
 /// [`GRANT_FACT`] when the plan carried a separate `evidenceWrite` grant.
 pub const GRANT_EVIDENCE_WRITE: &str = "evidenceWrite";
-/// [`GRANT_FACT`] when the `evidenceWrite` grant IS the destination grant.
+/// [`GRANT_FACT`] when the plan carried a separate `evidenceRead` grant.
+pub const GRANT_EVIDENCE_READ: &str = "evidenceRead";
+/// [`GRANT_FACT`] when the row was answered by the plan's destination grant.
 pub const GRANT_DESTINATION: &str = "destination";
 
+/// The principal clause an evidence-read row's message carries.
+fn read_principal_clause(grant: Option<&GrantRef>) -> String {
+    match grant {
+        Some(g) => format!("as the evidence-read grant ({})", g.reference()),
+        None => "as the destination's grant, which is also its evidence-read grant".to_string(),
+    }
+}
+
 /// The principal clause a marker row's message carries.
-fn principal_clause(grant: Option<&EvidenceWriteGrant>) -> String {
+fn principal_clause(grant: Option<&GrantRef>) -> String {
     match grant {
         Some(g) => format!("as the evidence-write grant ({})", g.reference()),
         None => "as the destination's grant, which is also its evidence-write grant".to_string(),
@@ -135,7 +163,10 @@ pub fn destination_checks(
                         }
                     }
                 };
-                out.push(row.with_scope(scope(dest)));
+                out.push(
+                    row.with_fact(GRANT_FACT, GRANT_DESTINATION)
+                        .with_scope(scope(dest)),
+                );
             }
             DestinationRole::ArchiveWrite => {
                 out.push(
@@ -144,16 +175,67 @@ pub fn destination_checks(
                         CheckCode::ArchivePrefixWriteVerifiedOnlyAtExecution,
                         now,
                     )
-                    .with_message(
-                        "a check writes only its own readiness marker under the evidence root, \
-                         so the archive-write grant is verified by the run itself",
-                    )
+                    // NEVER GREEN, AND IT SAYS WHY. The write probe, when the
+                    // destination opts in, is under `logweir/readiness/` — not
+                    // under the archive prefix — so it proves nothing here,
+                    // and Global Constraint 6 forbids a check writing into the
+                    // archive prefix to find out.
+                    .with_message(&format!(
+                        "the archive prefix `{}` is not write-probed: a check writes only its \
+                         own readiness marker under `{}`, which proves nothing about the \
+                         archive prefix, so the archive-write grant is verified by the run \
+                         itself",
+                        store::prefix_for(dest, DestinationRole::ArchiveWrite),
+                        store::MARKER_PREFIX
+                    ))
                     .with_scope(scope(dest)),
                 );
             }
             DestinationRole::EvidenceRead => {
-                let row = match wiring.objects(dest, *role, budget) {
-                    Err(f) => from_store_failure(CheckId::DestinationEvidenceReadable, &f, now),
+                // THE PRINCIPAL IS THE EVIDENCE-READ GRANT'S (class sweep of
+                // PREFLIGHT-EVIDENCEWRITABLE-WRONG-PRINCIPAL). A grant no pod
+                // holds is answered here, with no request: reading as the
+                // destination grant instead is the defect.
+                let grant = probe.evidence_read;
+                let grant_fact = if grant.is_some() {
+                    GRANT_EVIDENCE_READ
+                } else {
+                    GRANT_DESTINATION
+                };
+                if let Some(g) = grant.filter(|g| !g.exercisable_in_pod()) {
+                    out.push(
+                        catalogue::outcome(
+                            CheckId::DestinationEvidenceReadable,
+                            logweir_core::check_contract::CheckState::Unknown,
+                            CheckCode::EvidenceReadNotConfigured,
+                            now,
+                        )
+                        .with_message(&format!(
+                            "the evidence-read grant of destination `{}` is {}, which no check \
+                             pod holds, so this check did not read the evidence root as any \
+                             principal",
+                            dest.name,
+                            g.reference()
+                        ))
+                        .with_remedy(remedy_for(CheckCode::EvidenceReadNotConfigured))
+                        .with_fact(GRANT_FACT, grant_fact)
+                        .with_scope(scope(dest)),
+                    );
+                    continue;
+                }
+                let about = |f: &StoreFailure| {
+                    let message = match grant {
+                        Some(g) if f.message.contains(&g.reference()) => f.message.clone(),
+                        _ => format!("{} {}", f.message, read_principal_clause(grant)),
+                    };
+                    from_store_failure(
+                        CheckId::DestinationEvidenceReadable,
+                        &StoreFailure::new(f.code, message),
+                        now,
+                    )
+                };
+                let row = match wiring.evidence_reader(dest, grant, budget) {
+                    Err(f) => about(&f),
                     Ok(access) => {
                         let key = store::absent_probe_key(&dest.uid);
                         match access.get(&key) {
@@ -165,8 +247,9 @@ pub fn destination_checks(
                             )
                             .with_message(&format!(
                                 "the evidence root on destination `{}` answered a read of an \
-                                     absent key, which is the grant",
-                                dest.name
+                                     absent key {}, which is the grant",
+                                dest.name,
+                                read_principal_clause(grant)
                             )),
                             // It should not exist; if it does, the read still
                             // proves the grant.
@@ -176,8 +259,9 @@ pub fn destination_checks(
                                 now,
                             )
                             .with_message(&format!(
-                                "the evidence root on destination `{}` is readable",
-                                dest.name
+                                "the evidence root on destination `{}` is readable {}",
+                                dest.name,
+                                read_principal_clause(grant)
                             )),
                             // THE KEY FAMILY, NOT THE KEY (reviewer finding
                             // F7). `logweir/readiness/<uid>.absent-probe` is
@@ -192,16 +276,20 @@ pub fn destination_checks(
                                 store::classify(&e),
                                 &format!(
                                     "reading an absent probe key under `{}` on destination `{}` \
-                                     was refused",
+                                     {} was refused",
                                     store::MARKER_PREFIX,
-                                    dest.name
+                                    dest.name,
+                                    read_principal_clause(grant)
                                 ),
                                 now,
                             ),
                         }
                     }
                 };
-                out.push(row.with_scope(scope(dest)));
+                out.push(
+                    row.with_fact(GRANT_FACT, grant_fact)
+                        .with_scope(scope(dest)),
+                );
             }
             DestinationRole::EvidenceWrite => {
                 if !probe.write_probe {
@@ -302,6 +390,7 @@ pub fn run(req: &DestinationAccessRequest, wiring: &dyn Wiring, deadline: Deadli
             roles: &req.roles,
             write_probe: req.write_probe,
             evidence_write: req.evidence_write.as_ref(),
+            evidence_read: req.evidence_read.as_ref(),
         },
         wiring,
         deadline,

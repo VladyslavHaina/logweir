@@ -795,41 +795,72 @@ pub enum CredentialMode {
     Ambient,
 }
 
-/// How a SEPARATE `evidenceWrite` grant's credential reaches the check pod —
-/// D2 §3.5's `LOGWEIR_EVIDENCE_CREDENTIALS`, without its `archive` value.
+/// How a SEPARATE grant's credential reaches the check pod — or why it cannot.
 ///
-/// "The evidence-write grant IS the destination grant" is not a variant: it is
-/// [`EvidenceWriteGrant`] being ABSENT from the request, which is also what
-/// every plan rendered before this type existed says. `ambient` is not a
-/// variant either: no Job ever runs an evidence write on the object_store
-/// chain, so a plan cannot even spell one.
+/// "The grant IS the destination grant" is not a variant: it is the
+/// [`GrantRef`] being ABSENT from the request, which is also what every plan
+/// rendered before this type existed says. `ambient` is not a variant: no
+/// check ever exercises a named grant on the object_store chain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub enum EvidenceWriteCredentials {
-    /// A different Secret, projected by the kubelet as
-    /// `LOGWEIR_EVIDENCE_AWS_ACCESS_KEY_ID`, `LOGWEIR_EVIDENCE_AWS_SECRET_ACCESS_KEY`
-    /// and optionally `LOGWEIR_EVIDENCE_AWS_SESSION_TOKEN` — separately named
-    /// so the destination grant's `AWS_*` cannot shadow them, or they it.
+pub enum GrantCredentials {
+    /// A different Secret, projected by the kubelet under the ROLE's own
+    /// variable names ([`EVIDENCE_WRITE_ENV`] or [`EVIDENCE_READ_ENV`]) —
+    /// separately named so the destination grant's `AWS_*` cannot shadow
+    /// them, or they it.
     Static,
     /// The pod's injected workload identity ONLY. Static keys in the
     /// environment (the destination grant's) are ignored.
     WorkloadIdentity,
+    /// `evidenceRead` only: the controller's own allowlisted identity
+    /// (D2 §3.10). A check pod holds no such credential, so the row is
+    /// answered `unknown` and never by another principal.
+    ControllerIdentity,
+    /// `evidenceRead` only: the destination configures no such grant
+    /// (verification is `NotAttempted`). Answered `unknown`, never by another
+    /// principal.
+    NotConfigured,
 }
 
-/// The `evidenceWrite` grant the create-only readiness marker is written as,
-/// when that grant is NOT the one [`DestinationPlan::credentials`] describes
-/// (defect PREFLIGHT-EVIDENCEWRITABLE-WRONG-PRINCIPAL; D2 W5/W9, §6.3).
+/// The three variable names one separately-projected static grant uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GrantEnv {
+    pub access_key_id: &'static str,
+    pub secret_access_key: &'static str,
+    pub session_token: &'static str,
+}
+
+/// The `evidenceWrite` grant's variables — the SAME spellings the execution
+/// runner's store contract reads for a Restore's evidence store (D2 §3.5), so
+/// a check pod and a Restore pod are projected one way.
+pub const EVIDENCE_WRITE_ENV: GrantEnv = GrantEnv {
+    access_key_id: "LOGWEIR_EVIDENCE_AWS_ACCESS_KEY_ID",
+    secret_access_key: "LOGWEIR_EVIDENCE_AWS_SECRET_ACCESS_KEY",
+    session_token: "LOGWEIR_EVIDENCE_AWS_SESSION_TOKEN",
+};
+
+/// The `evidenceRead` grant's variables in a CHECK pod, which may carry the
+/// destination grant, the `evidenceWrite` grant and this one at once.
+pub const EVIDENCE_READ_ENV: GrantEnv = GrantEnv {
+    access_key_id: "LOGWEIR_EVIDENCE_READ_AWS_ACCESS_KEY_ID",
+    secret_access_key: "LOGWEIR_EVIDENCE_READ_AWS_SECRET_ACCESS_KEY",
+    session_token: "LOGWEIR_EVIDENCE_READ_AWS_SESSION_TOKEN",
+};
+
+/// A destination grant a check row must be answered AS, when it is NOT the
+/// one [`DestinationPlan::credentials`] describes — defects
+/// PREFLIGHT-EVIDENCEWRITABLE-WRONG-PRINCIPAL and its class sweep (the
+/// `evidenceRead` row; D2 W5/W9, §6.3).
 ///
 /// # Why this exists
 ///
 /// A check plan's [`DestinationPlan`] carries ONE credential mode, and every
-/// handle the runner built — including the one writable handle, for the marker
-/// — used it. On a `BackupDestination` whose `spec.access.evidenceWrite` names
-/// a different Secret or ServiceAccount than the grant the plan was resolved
-/// for, `destination.evidenceWritable` was therefore answered by the WRONG
-/// PRINCIPAL: it could say `MarkerWritten` for a destination whose
-/// evidence-write principal could not write at all, and the first run to find
-/// out was the one that failed to store its signed receipt.
+/// handle the runner built used it. On a `BackupDestination` whose
+/// `spec.access.evidenceWrite` or `spec.access.evidenceRead` names a different
+/// Secret or ServiceAccount than the grant the plan was resolved for, the
+/// `destination.evidenceWritable` / `destination.evidenceReadable` rows were
+/// answered by the WRONG PRINCIPAL — a green row about a principal the run
+/// never uses.
 ///
 /// # REFERENCES ONLY
 ///
@@ -840,17 +871,15 @@ pub enum EvidenceWriteCredentials {
 ///
 /// # Absent means "the same grant"
 ///
-/// The controller renders this only when the `evidenceWrite` grant differs
-/// from the plan's destination grant AND the plan asks for the marker probe.
-/// Absent, the runner writes the marker with the destination grant, exactly as
-/// every earlier build did — which is then correct, because the two grants are
-/// the same grant.
+/// The controller renders one only when the role's grant differs from the
+/// plan's destination grant (or cannot be exercised by a check pod at all).
+/// Absent, the runner uses the destination grant, exactly as every earlier
+/// build did — which is then correct, because the two grants are one grant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct EvidenceWriteGrant {
-    pub credentials: EvidenceWriteCredentials,
-    /// `static` only: the Secret the three `LOGWEIR_EVIDENCE_AWS_*` variables
-    /// are projected from.
+pub struct GrantRef {
+    pub credentials: GrantCredentials,
+    /// `static` only: the Secret the role's variables are projected from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secret_name: Option<String>,
     /// `workloadIdentity` only: the ServiceAccount the check pod runs as.
@@ -858,12 +887,12 @@ pub struct EvidenceWriteGrant {
     pub service_account_name: Option<String>,
 }
 
-impl EvidenceWriteGrant {
+impl GrantRef {
     /// A `static` grant projected from `secret`.
     #[must_use]
     pub fn static_secret(secret: impl Into<String>) -> Self {
         Self {
-            credentials: EvidenceWriteCredentials::Static,
+            credentials: GrantCredentials::Static,
             secret_name: Some(secret.into()),
             service_account_name: None,
         }
@@ -873,43 +902,78 @@ impl EvidenceWriteGrant {
     #[must_use]
     pub fn workload_identity(service_account: impl Into<String>) -> Self {
         Self {
-            credentials: EvidenceWriteCredentials::WorkloadIdentity,
+            credentials: GrantCredentials::WorkloadIdentity,
             secret_name: None,
             service_account_name: Some(service_account.into()),
         }
     }
 
-    /// The principal, as a row's message names it: ``Secret `x` `` or
-    /// ``ServiceAccount `y` ``. A reference, never a value.
+    /// A grant no check pod can exercise: `controllerIdentity` or
+    /// `notConfigured`.
     #[must_use]
-    pub fn reference(&self) -> String {
-        match self.credentials {
-            EvidenceWriteCredentials::Static => {
-                format!("Secret `{}`", self.secret_name.as_deref().unwrap_or(""))
-            }
-            EvidenceWriteCredentials::WorkloadIdentity => format!(
-                "ServiceAccount `{}`",
-                self.service_account_name.as_deref().unwrap_or("")
-            ),
+    pub fn without_pod_credential(credentials: GrantCredentials) -> Self {
+        Self {
+            credentials,
+            secret_name: None,
+            service_account_name: None,
         }
     }
 
-    /// The shape rules [`CheckPlan::validate`] holds a plan to: exactly the one
-    /// reference its mode names, and that reference a Kubernetes object name.
+    /// Whether a check pod holds this grant's credential at all.
+    #[must_use]
+    pub fn exercisable_in_pod(&self) -> bool {
+        matches!(
+            self.credentials,
+            GrantCredentials::Static | GrantCredentials::WorkloadIdentity
+        )
+    }
+
+    /// The principal, as a row's message names it: ``Secret `x` ``,
+    /// ``ServiceAccount `y` ``, `the controller's own identity` or `no grant`.
+    /// A reference, never a value.
+    #[must_use]
+    pub fn reference(&self) -> String {
+        match self.credentials {
+            GrantCredentials::Static => {
+                format!("Secret `{}`", self.secret_name.as_deref().unwrap_or(""))
+            }
+            GrantCredentials::WorkloadIdentity => format!(
+                "ServiceAccount `{}`",
+                self.service_account_name.as_deref().unwrap_or("")
+            ),
+            GrantCredentials::ControllerIdentity => {
+                "the controller's own identity (ControllerIdentity)".to_string()
+            }
+            GrantCredentials::NotConfigured => "no grant (not configured)".to_string(),
+        }
+    }
+
+    /// The shape rules [`CheckPlan::validate`] holds a plan to: exactly the
+    /// references its mode names, each a Kubernetes object name.
     fn validate(&self, field: &str) -> Result<(), CheckPlanError> {
         let (want, other, want_name, other_name) = match self.credentials {
-            EvidenceWriteCredentials::Static => (
+            GrantCredentials::Static => (
                 self.secret_name.as_deref(),
                 self.service_account_name.as_deref(),
                 "secretName",
                 "serviceAccountName",
             ),
-            EvidenceWriteCredentials::WorkloadIdentity => (
+            GrantCredentials::WorkloadIdentity => (
                 self.service_account_name.as_deref(),
                 self.secret_name.as_deref(),
                 "serviceAccountName",
                 "secretName",
             ),
+            GrantCredentials::ControllerIdentity | GrantCredentials::NotConfigured => {
+                if self.secret_name.is_some() || self.service_account_name.is_some() {
+                    return Err(CheckPlanError::field(
+                        field,
+                        "a grant no check pod can exercise names no Secret and no \
+                         ServiceAccount",
+                    ));
+                }
+                return Ok(());
+            }
         };
         let Some(name) = want else {
             return Err(CheckPlanError::field(
@@ -947,13 +1011,14 @@ fn is_object_name(s: &str) -> bool {
         })
 }
 
-/// The rules an [`EvidenceWriteGrant`] obeys inside a request: it rides only
-/// on a plan that asks for the marker probe AND names the `EvidenceWrite`
-/// role — a second credential in a pod that will never use it is a wider blast
-/// radius for nothing (least privilege) — and it is well-formed.
+/// The rules an `evidenceWrite` [`GrantRef`] obeys inside a request: it rides
+/// only on a plan that asks for the marker probe AND names the `EvidenceWrite`
+/// role — a second credential in a pod that will never use it is a wider
+/// blast radius for nothing (least privilege) — it is a grant a pod can hold,
+/// and it is well-formed.
 fn validate_evidence_write(
     field: &str,
-    grant: Option<&EvidenceWriteGrant>,
+    grant: Option<&GrantRef>,
     write_probe: bool,
     roles: &[DestinationRole],
 ) -> Result<(), CheckPlanError> {
@@ -971,6 +1036,33 @@ fn validate_evidence_write(
         return Err(CheckPlanError::field(
             field,
             "an evidence-write grant is only projected when the EvidenceWrite role is requested",
+        ));
+    }
+    if !grant.exercisable_in_pod() {
+        return Err(CheckPlanError::field(
+            &format!("{field}.credentials"),
+            "an evidence-write grant is a Secret or a workload identity; nothing else can \
+             write the marker",
+        ));
+    }
+    grant.validate(field)
+}
+
+/// The rules an `evidenceRead` [`GrantRef`] obeys inside a request: it rides
+/// only on a plan that requests the `EvidenceRead` role, and it is
+/// well-formed.
+fn validate_evidence_read(
+    field: &str,
+    grant: Option<&GrantRef>,
+    roles: &[DestinationRole],
+) -> Result<(), CheckPlanError> {
+    let Some(grant) = grant else {
+        return Ok(());
+    };
+    if !roles.contains(&DestinationRole::EvidenceRead) {
+        return Err(CheckPlanError::field(
+            field,
+            "an evidence-read grant is only named when the EvidenceRead role is requested",
         ));
     }
     grant.validate(field)
@@ -1011,10 +1103,14 @@ pub struct OperationReadinessRequest {
     #[serde(default)]
     pub write_probe: bool,
     /// The `evidenceWrite` grant the marker is written as, when it is not the
-    /// destination grant — see [`EvidenceWriteGrant`]. Absent means the same
+    /// destination grant — see [`GrantRef`]. Absent means the same
     /// grant, and is byte-identical to every plan rendered before it existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub evidence_write: Option<EvidenceWriteGrant>,
+    pub evidence_write: Option<GrantRef>,
+    /// The `evidenceRead` grant `destination.evidenceReadable` is answered as,
+    /// when it is not the destination grant — see [`GrantRef`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_read: Option<GrantRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skip_checks: Vec<CheckId>,
 }
@@ -1065,9 +1161,13 @@ pub struct DestinationAccessRequest {
     #[serde(default)]
     pub write_probe: bool,
     /// The `evidenceWrite` grant the marker is written as, when it is not the
-    /// destination grant — see [`EvidenceWriteGrant`].
+    /// destination grant — see [`GrantRef`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub evidence_write: Option<EvidenceWriteGrant>,
+    pub evidence_write: Option<GrantRef>,
+    /// The `evidenceRead` grant `destination.evidenceReadable` is answered as,
+    /// when it is not the destination grant — see [`GrantRef`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_read: Option<GrantRef>,
 }
 
 /// One object an `evidenceFetch` relays.
@@ -1395,6 +1495,11 @@ impl CheckPlan {
                     r.write_probe,
                     &r.roles,
                 )?;
+                validate_evidence_read(
+                    "request.operationReadiness.evidenceRead",
+                    r.evidence_read.as_ref(),
+                    &r.roles,
+                )?;
             }
             CheckRequest::RestorePreflight(r) => {
                 if !is_sha256_prefixed(&r.plan_sha256) {
@@ -1415,6 +1520,11 @@ impl CheckPlan {
                     "request.destinationAccess.evidenceWrite",
                     r.evidence_write.as_ref(),
                     r.write_probe,
+                    &r.roles,
+                )?;
+                validate_evidence_read(
+                    "request.destinationAccess.evidenceRead",
+                    r.evidence_read.as_ref(),
                     &r.roles,
                 )?;
             }

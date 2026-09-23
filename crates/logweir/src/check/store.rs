@@ -10,10 +10,10 @@
 //! defect SEC-ENVHTTP: a forwarded `AWS_ALLOW_HTTP=true` must not be able to
 //! put an approved TLS destination on plaintext. The only thing the
 //! environment ever supplies is the CREDENTIAL, and only through the named
-//! variables [`CredentialMode`] selects — or, for the marker probe on a
-//! destination that separates its `evidenceWrite` grant, the named
-//! `LOGWEIR_EVIDENCE_AWS_*` variables [`EvidenceWriteCredentials`] selects
-//! ([`evidence_write_options`]).
+//! variables [`CredentialMode`] selects — or, for a row whose grant the
+//! destination separates (`evidenceWrite`, `evidenceRead`), the named
+//! `LOGWEIR_EVIDENCE_AWS_*` / `LOGWEIR_EVIDENCE_READ_AWS_*` variables a
+//! [`GrantRef`] selects ([`grant_options`]).
 //!
 //! # The one key a check may write
 //!
@@ -42,7 +42,8 @@
 use std::time::Duration;
 
 use logweir_core::check_contract::{
-    CheckCode, CredentialMode, DestinationPlan, EvidenceWriteCredentials, EvidenceWriteGrant,
+    CheckCode, CredentialMode, DestinationPlan, GrantCredentials, GrantEnv, GrantRef,
+    EVIDENCE_READ_ENV, EVIDENCE_WRITE_ENV,
 };
 use logweir_core::destination::{DestinationRole, EVIDENCE_PREFIX};
 use logweir_core::engine::StorageUrl;
@@ -452,14 +453,15 @@ pub fn open_read(
     })
 }
 
-/// The store options the create-only marker is written with — **the
-/// `evidenceWrite` principal's**, which is the whole point of this function
-/// (defect PREFLIGHT-EVIDENCEWRITABLE-WRONG-PRINCIPAL).
+/// The store options one ROLE's handle is built with, when the plan names a
+/// separate [`GrantRef`] for it — the principal selection shared by the
+/// marker write and the evidence read (defect
+/// PREFLIGHT-EVIDENCEWRITABLE-WRONG-PRINCIPAL and its class sweep).
 ///
-/// * `grant` ABSENT — the plan's `evidenceWrite` grant IS its destination
-///   grant, so [`options_for`] is the right principal. This is also every plan
-///   an older controller renders, and it behaves exactly as before.
-/// * `static` — the three `LOGWEIR_EVIDENCE_AWS_*` variables and NOTHING else:
+/// * `grant` ABSENT — the role's grant IS the plan's destination grant, so
+///   [`options_for`] is the right principal. This is also every plan an older
+///   controller renders, and it behaves exactly as before.
+/// * `static` — the role's own three variables (`vars`) and NOTHING else:
 ///   [`CredentialSource::Static`](logweir_engine_oso::storage::CredentialSource)
 ///   with the values read here, because `StaticFromEnv` would read `AWS_*`,
 ///   which is the DESTINATION grant's and exactly the wrong principal. A
@@ -467,27 +469,34 @@ pub fn open_read(
 ///   variable, never a fall-back to `AWS_*`.
 /// * `workloadIdentity` — the injected identity only; the destination grant's
 ///   static keys in the same environment are ignored (G16).
+/// * `controllerIdentity` / `notConfigured` — no check pod holds such a
+///   credential. A refusal (`EvidenceReadNotConfigured`, an `unknown` code),
+///   never a handle built from some other principal. The access kind answers
+///   these rows before it gets here; this arm is the backstop.
 ///
 /// The location, the trust bundle and the budget are the destination's either
-/// way: it is one destination, written by a second principal.
+/// way: it is one destination, used by a second principal.
 ///
 /// `env` is the environment reader, injected so the principal selection is a
 /// pure function a test can drive without mutating the process environment.
 ///
 /// # Errors
 /// [`StoreFailure`]: `CredentialSecretKeyMissing` for an absent projected
-/// variable, or [`finish_options`]'s CA refusal.
-pub fn evidence_write_options(
+/// variable, `EvidenceReadNotConfigured` for a grant no pod holds, or
+/// [`finish_options`]'s CA refusal.
+pub fn grant_options(
     plan: &DestinationPlan,
-    grant: Option<&EvidenceWriteGrant>,
+    role: DestinationRole,
+    grant: Option<&GrantRef>,
     budget: Duration,
     env: &dyn Fn(&str) -> Option<String>,
 ) -> Result<StoreOptions, StoreFailure> {
     let Some(grant) = grant else {
         return options_for(plan, budget);
     };
+    let vars = grant_env(role);
     let opts = match grant.credentials {
-        EvidenceWriteCredentials::Static => {
+        GrantCredentials::Static => {
             let required = |name: &str| {
                 env(name).filter(|v| !v.is_empty()).ok_or_else(|| {
                     // THE NAME AND NEVER THE VALUE: this closure's whole
@@ -495,32 +504,108 @@ pub fn evidence_write_options(
                     StoreFailure::new(
                         CheckCode::CredentialSecretKeyMissing,
                         format!(
-                            "the evidence-write grant ({}) is projected as `{name}`, and that \
-                             variable is unset in the check pod; the marker was not written \
-                             with any other credential",
+                            "the {} grant ({}) is projected as `{name}`, and that variable is \
+                             unset in the check pod; no other credential was used",
+                            role.as_str(),
                             grant.reference()
                         ),
                     )
                 })
             };
             StoreOptions::static_keys(
-                required(EVIDENCE_ACCESS_KEY_ID_ENV)?,
-                required(EVIDENCE_SECRET_ACCESS_KEY_ENV)?,
-                env(EVIDENCE_SESSION_TOKEN_ENV).filter(|v| !v.is_empty()),
+                required(vars.access_key_id)?,
+                required(vars.secret_access_key)?,
+                env(vars.session_token).filter(|v| !v.is_empty()),
             )
         }
-        EvidenceWriteCredentials::WorkloadIdentity => StoreOptions::workload_identity(),
+        GrantCredentials::WorkloadIdentity => StoreOptions::workload_identity(),
+        GrantCredentials::ControllerIdentity | GrantCredentials::NotConfigured => {
+            return Err(StoreFailure::new(
+                CheckCode::EvidenceReadNotConfigured,
+                format!(
+                    "the {} grant is {}, which no check pod holds; no other credential was used",
+                    role.as_str(),
+                    grant.reference()
+                ),
+            ))
+        }
     };
     finish_options(plan, opts, budget)
 }
 
-/// The evidence-write grant's key variables — the SAME spellings the
-/// execution runner's store contract reads
-/// ([`crate::backup::store_contract`]), so a check pod and a Restore pod are
-/// projected one way.
+/// The variable names a separately-projected grant for `role` arrives under.
+///
+/// Only the two evidence roles are ever separate: the archive roles ARE the
+/// plan's destination grant (see `weirkeeper::controllers::preflight::
+/// access_primary_role`).
+#[must_use]
+pub fn grant_env(role: DestinationRole) -> GrantEnv {
+    match role {
+        DestinationRole::EvidenceRead => EVIDENCE_READ_ENV,
+        DestinationRole::EvidenceWrite
+        | DestinationRole::ArchiveRead
+        | DestinationRole::ArchiveWrite => EVIDENCE_WRITE_ENV,
+    }
+}
+
+/// [`grant_options`] for the create-only marker: the `evidenceWrite`
+/// principal's.
+///
+/// # Errors
+/// As [`grant_options`].
+pub fn evidence_write_options(
+    plan: &DestinationPlan,
+    grant: Option<&GrantRef>,
+    budget: Duration,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<StoreOptions, StoreFailure> {
+    grant_options(plan, DestinationRole::EvidenceWrite, grant, budget, env)
+}
+
+/// [`grant_options`] for the evidence-read probe: the `evidenceRead`
+/// principal's.
+///
+/// # Errors
+/// As [`grant_options`].
+pub fn evidence_read_options(
+    plan: &DestinationPlan,
+    grant: Option<&GrantRef>,
+    budget: Duration,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<StoreOptions, StoreFailure> {
+    grant_options(plan, DestinationRole::EvidenceRead, grant, budget, env)
+}
+
+/// The evidence-write grant's key variables, as the execution runner's store
+/// contract spells them ([`crate::backup::store_contract`]).
+/// `the_check_and_the_restore_runner_read_one_set_of_evidence_variables`
+/// asserts they are [`EVIDENCE_WRITE_ENV`]'s.
 pub use crate::backup::store_contract::{
     EVIDENCE_ACCESS_KEY_ID_ENV, EVIDENCE_SECRET_ACCESS_KEY_ENV, EVIDENCE_SESSION_TOKEN_ENV,
 };
+
+/// A READ-ONLY handle on the evidence root AS the `evidenceRead` principal
+/// ([`evidence_read_options`]).
+///
+/// # Errors
+/// [`StoreFailure`].
+pub fn open_evidence_read(
+    plan: &DestinationPlan,
+    grant: Option<&GrantRef>,
+    budget: Duration,
+) -> Result<Store, StoreFailure> {
+    let opts = evidence_read_options(plan, grant, budget, &|k| std::env::var(k).ok())?;
+    let url = url_for(plan, DestinationRole::EvidenceRead);
+    Store::read_only_with(&url, &opts).map_err(|e| {
+        StoreFailure::new(
+            classify(&e),
+            format!(
+                "an evidence-read handle for destination `{}` could not be built",
+                plan.name
+            ),
+        )
+    })
+}
 
 /// The ONE WRITABLE handle a check may hold: the evidence root, for the
 /// create-only marker, as the `evidenceWrite` principal
@@ -536,7 +621,7 @@ pub use crate::backup::store_contract::{
 /// [`StoreFailure`].
 pub fn open_evidence_write(
     plan: &DestinationPlan,
-    grant: Option<&EvidenceWriteGrant>,
+    grant: Option<&GrantRef>,
     budget: Duration,
 ) -> Result<Store, StoreFailure> {
     let opts = evidence_write_options(plan, grant, budget, &|k| std::env::var(k).ok())?;

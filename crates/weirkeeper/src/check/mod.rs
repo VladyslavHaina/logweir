@@ -315,6 +315,9 @@ pub struct Projections {
     /// (PREFLIGHT-EVIDENCEWRITABLE-WRONG-PRINCIPAL). Still the destination's
     /// credential, so a missing one is `destination.credentialProjected`.
     pub evidence_write_secret: Option<String>,
+    /// The Secret a SEPARATE `evidenceRead` grant's credential comes from, for
+    /// the same reason (the class sweep).
+    pub evidence_read_secret: Option<String>,
     /// The Secret the signing key comes from.
     pub signer_secret: Option<String>,
     /// Every `ConfigMap` projected as trust material.
@@ -347,6 +350,7 @@ pub fn attribute(waiting: &Waiting, projections: &Projections) -> Option<CheckId
                 Some(CheckId::ConnectionCredentialProjected)
             } else if projections.destination_secret.as_deref() == Some(named)
                 || projections.evidence_write_secret.as_deref() == Some(named)
+                || projections.evidence_read_secret.as_deref() == Some(named)
             {
                 Some(CheckId::DestinationCredentialProjected)
             } else if projections.signer_secret.as_deref() == Some(named) {

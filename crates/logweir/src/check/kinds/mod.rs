@@ -31,7 +31,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use logweir_core::check_contract::{CheckCode, CheckId, CheckOutcome, CheckRequest, CheckState};
-use logweir_core::check_contract::{ConnectionPlan, DestinationPlan, EvidenceWriteGrant};
+use logweir_core::check_contract::{ConnectionPlan, DestinationPlan, GrantRef};
 use logweir_core::destination::DestinationRole;
 use logweir_kafka::inventory::{CheckFailure, InventoryProbe};
 
@@ -81,7 +81,23 @@ pub trait Wiring {
     fn evidence_writer(
         &self,
         plan: &DestinationPlan,
-        grant: Option<&EvidenceWriteGrant>,
+        grant: Option<&GrantRef>,
+        budget: Duration,
+    ) -> Result<Box<dyn ObjectAccess>, StoreFailure>;
+
+    /// Build the READ-ONLY evidence-root handle `destination.evidenceReadable`
+    /// probes with — AS THE `evidenceRead` PRINCIPAL.
+    ///
+    /// `grant` is the plan's separate `evidenceRead` grant, or `None` when that
+    /// grant is the destination grant; a parameter for the reason
+    /// [`Wiring::evidence_writer`]'s is.
+    ///
+    /// # Errors
+    /// [`StoreFailure`].
+    fn evidence_reader(
+        &self,
+        plan: &DestinationPlan,
+        grant: Option<&GrantRef>,
         budget: Duration,
     ) -> Result<Box<dyn ObjectAccess>, StoreFailure>;
 
@@ -126,10 +142,21 @@ impl Wiring for Live {
     fn evidence_writer(
         &self,
         plan: &DestinationPlan,
-        grant: Option<&EvidenceWriteGrant>,
+        grant: Option<&GrantRef>,
         budget: Duration,
     ) -> Result<Box<dyn ObjectAccess>, StoreFailure> {
         Ok(Box::new(super::store::open_evidence_write(
+            plan, grant, budget,
+        )?))
+    }
+
+    fn evidence_reader(
+        &self,
+        plan: &DestinationPlan,
+        grant: Option<&GrantRef>,
+        budget: Duration,
+    ) -> Result<Box<dyn ObjectAccess>, StoreFailure> {
+        Ok(Box::new(super::store::open_evidence_read(
             plan, grant, budget,
         )?))
     }
@@ -402,8 +429,10 @@ pub fn remedy_for(code: CheckCode) -> &'static str {
              verified only when a run executes."
         }
         CheckCode::EvidenceReadNotConfigured => {
-            "This destination configures no evidence-read grant, so evidence reads were not \
-             checked."
+            "No evidence-read grant a check pod can hold is configured (none at all, or the \
+             controller's own identity), so evidence reads were not checked by this pod. \
+             Configure spec.access.evidenceRead with a Secret or a workload identity to have \
+             it checked."
         }
         CheckCode::ReadVerifiedOnlyAtExecution
         | CheckCode::ArchivePrefixWriteVerifiedOnlyAtExecution

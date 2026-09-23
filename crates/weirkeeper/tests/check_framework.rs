@@ -1019,6 +1019,7 @@ fn a_waiting_code_belongs_to_the_check_whose_projection_it_names() {
         connection_secret: Some("orders-sasl".to_string()),
         destination_secret: Some("minio-keys".to_string()),
         evidence_write_secret: Some("evidence-writer".to_string()),
+        evidence_read_secret: Some("evidence-reader".to_string()),
         signer_secret: Some("logweir-signing-key".to_string()),
         trust_config_maps: vec!["minio-ca".to_string()],
     };
@@ -1043,6 +1044,10 @@ fn a_waiting_code_belongs_to_the_check_whose_projection_it_names() {
     // cannot start because of it names the destination row, not the pod.
     assert_eq!(
         check::attribute(&secret_not_found("evidence-writer"), &projections),
+        Some(CheckId::DestinationCredentialProjected)
+    );
+    assert_eq!(
+        check::attribute(&secret_not_found("evidence-reader"), &projections),
         Some(CheckId::DestinationCredentialProjected)
     );
     assert_eq!(

@@ -29,9 +29,7 @@ use logweir_core::check_contract::{
     frames, Authority, CheckCode, CheckId, CheckOutcome, CheckPlanKind, CheckResult, CheckState,
     EndFrame, Gating, OverallState, Stream,
 };
-use logweir_core::check_contract::{
-    CheckRequest, EvidenceWriteGrant, Referent, RosterRef, StaleReason,
-};
+use logweir_core::check_contract::{CheckRequest, GrantRef, Referent, RosterRef, StaleReason};
 use logweir_core::destination::DestinationRole;
 use serde_json::{json, Value};
 
@@ -1895,6 +1893,7 @@ fn projections() -> Projections {
         connection_secret: Some("kafka-src".to_string()),
         destination_secret: Some("logweir-s3".to_string()),
         evidence_write_secret: None,
+        evidence_read_secret: None,
         signer_secret: Some("logweir-signing-key".to_string()),
         trust_config_maps: vec!["private-ca".to_string()],
     }
@@ -4871,6 +4870,7 @@ fn runner_readiness_request() -> CheckRequest {
             signer_path: Some("/signing/key.pem".to_string()),
             write_probe: true,
             evidence_write: None,
+            evidence_read: None,
             skip_checks: Vec::new(),
         },
     ))
@@ -5096,6 +5096,7 @@ fn backup_inputs(rich: bool) -> Inputs {
         roles,
         write_probe: facts.write_probe,
         evidence_write_grant: facts.evidence_write_grant,
+        evidence_read_grant: facts.evidence_read_grant,
         topics: vec!["orders".to_string()],
         ..Inputs::default()
     }
@@ -5294,6 +5295,7 @@ fn inputs_for(
         roles,
         write_probe: facts.write_probe,
         evidence_write_grant: facts.evidence_write_grant,
+        evidence_read_grant: facts.evidence_read_grant,
         ..Inputs::default()
     };
     if operation == PreflightOperation::Backup {
@@ -5395,7 +5397,7 @@ fn a_separated_destination_access_plan_carries_and_projects_the_evidence_write_g
     let r = access_request(&shape);
     assert_eq!(
         r.evidence_write,
-        Some(EvidenceWriteGrant::static_secret(EVIDENCE_SECRET)),
+        Some(GrantRef::static_secret(EVIDENCE_SECRET)),
         "the plan names the evidence-write principal"
     );
     assert_eq!(
@@ -5447,7 +5449,7 @@ fn a_separated_backup_readiness_plan_writes_the_marker_as_the_evidence_write_gra
     assert!(r.write_probe);
     assert_eq!(
         r.evidence_write,
-        Some(EvidenceWriteGrant::static_secret(EVIDENCE_SECRET))
+        Some(GrantRef::static_secret(EVIDENCE_SECRET))
     );
     assert_eq!(
         projected(&shape, "LOGWEIR_EVIDENCE_AWS_ACCESS_KEY_ID").as_deref(),
@@ -5505,7 +5507,7 @@ fn a_workload_identity_evidence_grant_runs_the_check_as_its_service_account() {
     let shape = shape_of(&inputs).expect("renders");
     assert_eq!(
         access_request(&shape).evidence_write,
-        Some(EvidenceWriteGrant::workload_identity("evidence-sa"))
+        Some(GrantRef::workload_identity("evidence-sa"))
     );
     assert_eq!(shape.spec.service_account_name, "evidence-sa");
     assert_eq!(

@@ -47,9 +47,9 @@ use logweir_core::backup_receipt::BackupReceipt;
 use logweir_core::check_contract::{
     frames::Decoder, CheckCode, CheckId, CheckPlan, CheckRelay, CheckRequest, CheckResult,
     CheckState, ConnectionPlan, CredentialMode, DestinationAccessRequest, DestinationPlan,
-    EvidenceFetchRequest, EvidenceObjectRequest, EvidenceWriteGrant, FrameExpectations, Gating,
-    OperationReadinessRequest, RestorePreflightRequest, Stream, TopicEntry, TopicInventoryRequest,
-    CHECK_CONTRACT_VERSION, CHECK_PLAN_CONTRACT,
+    EvidenceFetchRequest, EvidenceObjectRequest, FrameExpectations, Gating, GrantCredentials,
+    GrantRef, OperationReadinessRequest, RestorePreflightRequest, Stream, TopicEntry,
+    TopicInventoryRequest, CHECK_CONTRACT_VERSION, CHECK_PLAN_CONTRACT,
 };
 use logweir_core::destination::{
     Addressing, DestinationLocation, DestinationRole, StorageProvider, TransportSecurity,
@@ -533,7 +533,12 @@ struct FakeWiring {
     evidence_principal: Option<FakeObjects>,
     evidence_principal_fault: Option<(CheckCode, String)>,
     /// Every grant `evidence_writer` was handed, in order.
-    writer_grants: Arc<Mutex<Vec<Option<EvidenceWriteGrant>>>>,
+    writer_grants: Arc<Mutex<Vec<Option<GrantRef>>>>,
+    /// The read handle a SEPARATE `evidenceRead` grant opens.
+    evidence_reader: Option<FakeObjects>,
+    evidence_reader_fault: Option<(CheckCode, String)>,
+    /// Every grant `evidence_reader` was handed, in order.
+    reader_grants: Arc<Mutex<Vec<Option<GrantRef>>>>,
     signer: Option<Result<String, String>>,
     files: BTreeMap<String, Vec<u8>>,
 }
@@ -580,8 +585,23 @@ impl FakeWiring {
         self
     }
 
-    fn writer_grants(&self) -> Vec<Option<EvidenceWriteGrant>> {
+    fn writer_grants(&self) -> Vec<Option<GrantRef>> {
         self.writer_grants.lock().unwrap().clone()
+    }
+
+    /// The handle the separate `evidenceRead` principal gets.
+    fn with_evidence_reader(mut self, o: FakeObjects) -> Self {
+        self.evidence_reader = Some(o);
+        self
+    }
+
+    fn evidence_reader_fails(mut self, code: CheckCode, message: &str) -> Self {
+        self.evidence_reader_fault = Some((code, message.to_string()));
+        self
+    }
+
+    fn reader_grants(&self) -> Vec<Option<GrantRef>> {
+        self.reader_grants.lock().unwrap().clone()
     }
 
     fn with_signer(mut self, r: Result<String, String>) -> Self {
@@ -629,7 +649,7 @@ impl Wiring for FakeWiring {
     fn evidence_writer(
         &self,
         _plan: &DestinationPlan,
-        grant: Option<&EvidenceWriteGrant>,
+        grant: Option<&GrantRef>,
         _budget: std::time::Duration,
     ) -> Result<Box<dyn ObjectAccess>, StoreFailure> {
         self.writer_grants.lock().unwrap().push(grant.cloned());
@@ -648,6 +668,24 @@ impl Wiring for FakeWiring {
             return Err(StoreFailure::new(*c, m.clone()));
         }
         Ok(Box::new(self.writer.clone().unwrap_or_default()))
+    }
+
+    fn evidence_reader(
+        &self,
+        plan: &DestinationPlan,
+        grant: Option<&GrantRef>,
+        budget: std::time::Duration,
+    ) -> Result<Box<dyn ObjectAccess>, StoreFailure> {
+        self.reader_grants.lock().unwrap().push(grant.cloned());
+        // No separate grant: the destination grant's read handle, exactly the
+        // one `objects` hands every other read.
+        if grant.is_none() {
+            return self.objects(plan, DestinationRole::EvidenceRead, budget);
+        }
+        if let Some((c, m)) = &self.evidence_reader_fault {
+            return Err(StoreFailure::new(*c, m.clone()));
+        }
+        Ok(Box::new(self.evidence_reader.clone().unwrap_or_default()))
     }
 
     fn signer_key_id(&self, path: &str) -> Result<String, String> {
@@ -1674,6 +1712,7 @@ fn access_plan(roles: Vec<DestinationRole>, write_probe: bool) -> CheckPlan {
         roles,
         write_probe,
         evidence_write: None,
+        evidence_read: None,
     }))
 }
 
@@ -1836,12 +1875,13 @@ fn a_denied_marker_put_is_reported_with_the_store_code() {
 /// The Secret a separated `evidenceWrite` grant names in these rows.
 const EVIDENCE_SECRET: &str = "evidence-writer";
 
-fn separated_access_plan(grant: Option<EvidenceWriteGrant>) -> CheckPlan {
+fn separated_access_plan(grant: Option<GrantRef>) -> CheckPlan {
     plan_of(CheckRequest::DestinationAccess(DestinationAccessRequest {
         destination: destination(),
         roles: vec![DestinationRole::ArchiveRead, DestinationRole::EvidenceWrite],
         write_probe: true,
         evidence_write: grant,
+        evidence_read: None,
     }))
 }
 
@@ -1862,7 +1902,7 @@ fn access_denied() -> Fault {
 /// assertion.
 #[test]
 fn a_separated_evidence_write_principal_that_cannot_write_is_red_for_that_principal() {
-    let grant = EvidenceWriteGrant::static_secret(EVIDENCE_SECRET);
+    let grant = GrantRef::static_secret(EVIDENCE_SECRET);
     let m = mount(&separated_access_plan(Some(grant.clone())));
     let archive_principal = FakeObjects::new();
     let evidence_principal = FakeObjects::new().failing_put(access_denied());
@@ -1918,7 +1958,7 @@ fn a_separated_evidence_write_principal_that_cannot_write_is_red_for_that_princi
 #[test]
 fn a_separated_evidence_write_principal_that_can_write_is_green_whatever_the_archive_grant_may_do()
 {
-    let grant = EvidenceWriteGrant::static_secret(EVIDENCE_SECRET);
+    let grant = GrantRef::static_secret(EVIDENCE_SECRET);
     let m = mount(&separated_access_plan(Some(grant)));
     let archive_principal = FakeObjects::new().failing_put(access_denied());
     let evidence_principal = FakeObjects::new();
@@ -1963,7 +2003,7 @@ fn a_separated_evidence_write_principal_that_can_write_is_green_whatever_the_arc
 /// this test fails.
 #[test]
 fn the_evidence_write_principal_is_asked_for_one_create_only_put_and_nothing_else() {
-    let grant = EvidenceWriteGrant::static_secret(EVIDENCE_SECRET);
+    let grant = GrantRef::static_secret(EVIDENCE_SECRET);
     let m = mount(&plan_of(CheckRequest::DestinationAccess(
         DestinationAccessRequest {
             destination: destination(),
@@ -1975,6 +2015,7 @@ fn the_evidence_write_principal_is_asked_for_one_create_only_put_and_nothing_els
             ],
             write_probe: true,
             evidence_write: Some(grant),
+            evidence_read: None,
         },
     )));
     let evidence_principal = FakeObjects::new();
@@ -2024,7 +2065,7 @@ fn without_a_separate_grant_the_destination_grant_writes_the_marker_as_before() 
 /// destination-access plan does: the one the plan names.
 #[test]
 fn a_backup_readiness_plan_answers_evidence_writable_for_the_evidence_write_principal() {
-    let grant = EvidenceWriteGrant::workload_identity("evidence-writer-sa");
+    let grant = GrantRef::workload_identity("evidence-writer-sa");
     let mut plan = readiness_plan(vec!["orders"], true, Some("/signing/key.pem"));
     if let CheckRequest::OperationReadiness(r) = &mut plan.request {
         r.evidence_write = Some(grant.clone());
@@ -2081,7 +2122,7 @@ fn the_evidence_write_options_are_the_evidence_grants_and_never_fall_back() {
         _ => None,
     };
 
-    let grant = EvidenceWriteGrant::static_secret(EVIDENCE_SECRET);
+    let grant = GrantRef::static_secret(EVIDENCE_SECRET);
     let opts = evidence_write_options(&plan, Some(&grant), budget, &evidence_env)
         .expect("the evidence keys are projected");
     assert_eq!(
@@ -2123,7 +2164,7 @@ fn the_evidence_write_options_are_the_evidence_grants_and_never_fall_back() {
         refused.message
     );
 
-    let wi = EvidenceWriteGrant::workload_identity("evidence-writer-sa");
+    let wi = GrantRef::workload_identity("evidence-writer-sa");
     assert_eq!(
         evidence_write_options(&plan, Some(&wi), budget, &evidence_env)
             .expect("workload identity needs no variable here")
@@ -2140,6 +2181,317 @@ fn the_evidence_write_options_are_the_evidence_grants_and_never_fall_back() {
             .credentials,
         CredentialSource::StaticFromEnv
     );
+}
+
+/// The Secret a separated `evidenceRead` grant names in these rows.
+const EVIDENCE_READ_SECRET: &str = "evidence-reader";
+
+fn read_plan(grant: Option<GrantRef>) -> CheckPlan {
+    plan_of(CheckRequest::DestinationAccess(DestinationAccessRequest {
+        destination: destination(),
+        roles: vec![DestinationRole::ArchiveRead, DestinationRole::EvidenceRead],
+        write_probe: false,
+        evidence_write: None,
+        evidence_read: grant,
+    }))
+}
+
+/// **The class sweep's own shape.** The destination grant may read the
+/// evidence root and the `evidenceRead` principal may not: the row is red,
+/// about the evidence-read principal, and the destination grant's handle was
+/// asked for nothing under the evidence root.
+///
+/// MUTANT RP-10 (`access.rs`): hand `evidence_reader` `None` instead of
+/// `probe.evidence_read`. The destination grant's handle answers, the row reads
+/// `EvidenceReadable`, and this test fails on its first assertion.
+#[test]
+fn a_separated_evidence_read_principal_that_cannot_read_is_red_for_that_principal() {
+    let grant = GrantRef::static_secret(EVIDENCE_READ_SECRET);
+    let m = mount(&read_plan(Some(grant.clone())));
+    let destination_principal = FakeObjects::new();
+    let denied = FakeObjects::new().failing_get(access_denied());
+    let wiring = FakeWiring::default()
+        .with_role(DestinationRole::ArchiveRead, FakeObjects::new())
+        .with_role(DestinationRole::EvidenceRead, destination_principal.clone())
+        .with_evidence_reader(denied.clone());
+    let run = drive(&m, &wiring);
+    let row = run.row(CheckId::DestinationEvidenceReadable);
+    assert_eq!(
+        (row.state, row.code),
+        (CheckState::NotReady, CheckCode::AccessDenied),
+        "{row:?}"
+    );
+    assert_eq!(
+        row.facts.get("grant").map(String::as_str),
+        Some("evidenceRead")
+    );
+    assert!(
+        row.message.contains(EVIDENCE_READ_SECRET),
+        "{}",
+        row.message
+    );
+    assert_eq!(wiring.reader_grants(), vec![Some(grant)]);
+    assert!(
+        destination_principal.calls().is_empty(),
+        "the destination grant read nothing: {:?}",
+        destination_principal.calls()
+    );
+    assert_eq!(
+        denied.calls(),
+        vec![format!("get logweir/readiness/{DEST_UID}.absent-probe")],
+        "the evidence-read principal is asked for one get of an absent key and nothing else"
+    );
+}
+
+/// The mirror image: the evidence-read principal can read, the destination
+/// grant cannot. Green, about the evidence-read principal.
+#[test]
+fn a_separated_evidence_read_principal_that_can_read_is_green_whatever_the_destination_grant_may_do(
+) {
+    let m = mount(&read_plan(Some(GrantRef::static_secret(
+        EVIDENCE_READ_SECRET,
+    ))));
+    let run = drive(
+        &m,
+        &FakeWiring::default()
+            .with_role(DestinationRole::ArchiveRead, FakeObjects::new())
+            .with_role(
+                DestinationRole::EvidenceRead,
+                FakeObjects::new().failing_get(access_denied()),
+            )
+            .with_evidence_reader(FakeObjects::new()),
+    );
+    let row = run.row(CheckId::DestinationEvidenceReadable);
+    assert_eq!(
+        (row.state, row.code),
+        (CheckState::Ready, CheckCode::EvidenceReadable)
+    );
+    assert_eq!(
+        row.facts.get("grant").map(String::as_str),
+        Some("evidenceRead")
+    );
+}
+
+/// A grant no check pod holds — the controller's identity, or none at all —
+/// is answered `unknown` with NO request by anybody.
+///
+/// MUTANT RP-11 (`access.rs`): delete the `!exercisable_in_pod()` early
+/// answer. The row is then built through `evidence_reader` with a grant no pod
+/// holds; the fake's handle answers, the row reads `EvidenceReadable`, and
+/// this test fails.
+#[test]
+fn an_evidence_read_grant_no_pod_holds_is_unknown_and_reads_nothing() {
+    for credentials in [
+        GrantCredentials::ControllerIdentity,
+        GrantCredentials::NotConfigured,
+    ] {
+        let m = mount(&read_plan(Some(GrantRef::without_pod_credential(
+            credentials,
+        ))));
+        let destination_principal = FakeObjects::new();
+        let wiring = FakeWiring::default()
+            .with_role(DestinationRole::ArchiveRead, FakeObjects::new())
+            .with_role(DestinationRole::EvidenceRead, destination_principal.clone())
+            .with_evidence_reader(FakeObjects::new());
+        let run = drive(&m, &wiring);
+        let row = run.row(CheckId::DestinationEvidenceReadable);
+        assert_eq!(
+            (row.state, row.code, row.gating),
+            (
+                CheckState::Unknown,
+                CheckCode::EvidenceReadNotConfigured,
+                Gating::Advisory
+            ),
+            "{credentials:?}: {row:?}"
+        );
+        assert!(!row.remedy.is_empty());
+        assert!(
+            wiring.reader_grants().is_empty() && destination_principal.calls().is_empty(),
+            "{credentials:?}: nobody read anything"
+        );
+    }
+}
+
+/// Unchanged when the grants are one grant: the destination grant reads, and
+/// the row says so.
+#[test]
+fn without_a_separate_read_grant_the_destination_grant_reads_as_before() {
+    let m = mount(&read_plan(None));
+    let destination_principal = FakeObjects::new();
+    let wiring = FakeWiring::default()
+        .with_role(DestinationRole::ArchiveRead, FakeObjects::new())
+        .with_role(DestinationRole::EvidenceRead, destination_principal.clone())
+        .evidence_reader_fails(CheckCode::AccessDenied, "never asked for");
+    let run = drive(&m, &wiring);
+    let row = run.row(CheckId::DestinationEvidenceReadable);
+    assert_eq!(row.code, CheckCode::EvidenceReadable);
+    assert_eq!(
+        row.facts.get("grant").map(String::as_str),
+        Some("destination")
+    );
+    assert_eq!(wiring.reader_grants(), vec![None]);
+    assert_eq!(destination_principal.calls().len(), 1);
+}
+
+/// **Decision 1 (orchestrator, 2026-09-23): the archive-write grant is a
+/// documented limit, and its row can NEVER read green** — not with the marker
+/// probe on, not with a writer that would accept anything, not with a
+/// separate evidence-write grant. It says why, naming the archive prefix, and
+/// nothing is written anywhere but the marker key.
+///
+/// MUTANT RP-12 (`access.rs`): answer the `ArchiveWrite` arm with
+/// `ready(..., MarkerWritten)` when `write_probe` is set (the "reuse the
+/// marker for the archive" shortcut). The first assertion fails.
+#[test]
+fn the_archive_write_row_is_never_green_and_names_the_archive_prefix() {
+    for grant in [None, Some(GrantRef::static_secret(EVIDENCE_SECRET))] {
+        let m = mount(&plan_of(CheckRequest::DestinationAccess(
+            DestinationAccessRequest {
+                destination: destination(),
+                roles: vec![
+                    DestinationRole::ArchiveWrite,
+                    DestinationRole::EvidenceWrite,
+                ],
+                write_probe: true,
+                evidence_write: grant.clone(),
+                evidence_read: None,
+            },
+        )));
+        let writer = FakeObjects::new();
+        let evidence_principal = FakeObjects::new();
+        let run = drive(
+            &m,
+            &FakeWiring::default()
+                .with_role(DestinationRole::ArchiveWrite, writer.clone())
+                .with_writer(writer.clone())
+                .with_evidence_principal(evidence_principal.clone()),
+        );
+        let row = run.row(CheckId::DestinationArchivePrefixWritable);
+        assert_ne!(row.state, CheckState::Ready, "{grant:?}: {row:?}");
+        assert_eq!(
+            (row.state, row.gating, row.code),
+            (
+                CheckState::Unknown,
+                Gating::ExecutionOnly,
+                CheckCode::ArchivePrefixWriteVerifiedOnlyAtExecution
+            )
+        );
+        assert!(
+            row.message.contains("`kafka-backups`") && row.message.contains("not write-probed"),
+            "the row names the archive prefix and says it was not probed: {}",
+            row.message
+        );
+        assert!(!row.remedy.is_empty());
+        // The marker row may be green; it is a DIFFERENT row about a
+        // different key.
+        assert_eq!(
+            run.row(CheckId::DestinationEvidenceWritable).state,
+            CheckState::Ready
+        );
+        let puts: Vec<String> = writer
+            .puts()
+            .into_iter()
+            .chain(evidence_principal.puts())
+            .map(|(k, _)| k)
+            .collect();
+        assert_eq!(
+            puts,
+            vec![format!("logweir/readiness/{DEST_UID}.json")],
+            "nothing is written under the archive prefix"
+        );
+        assert!(
+            logweir_core::check_contract::aggregate(&run.result().checks)
+                != logweir_core::check_contract::OverallState::NotReady
+        );
+    }
+}
+
+/// The evidence-read principal's options: its OWN three variables, never the
+/// destination's `AWS_*` and never the evidence-write grant's.
+///
+/// MUTANT RP-13 (`store.rs`): map `EvidenceRead` to `EVIDENCE_WRITE_ENV` in
+/// `grant_env`. The options then carry the evidence-WRITE keys, and the first
+/// assertion fails.
+#[test]
+fn the_evidence_read_options_are_the_evidence_read_grants_and_never_fall_back() {
+    use logweir::check::store::evidence_read_options;
+    use logweir_core::check_contract::{EVIDENCE_READ_ENV, EVIDENCE_WRITE_ENV};
+    use logweir_engine_oso::storage::CredentialSource;
+    let plan = destination();
+    let budget = std::time::Duration::from_secs(10);
+    let env = |k: &str| match k {
+        k if k == EVIDENCE_READ_ENV.access_key_id => Some("read-key-id-fixture".to_string()),
+        k if k == EVIDENCE_READ_ENV.secret_access_key => Some("read-secret-fixture".to_string()),
+        k if k == EVIDENCE_WRITE_ENV.access_key_id => Some("write-key-id-fixture".to_string()),
+        k if k == EVIDENCE_WRITE_ENV.secret_access_key => Some("write-secret-fixture".to_string()),
+        "AWS_ACCESS_KEY_ID" => Some("destination-key-id-fixture".to_string()),
+        "AWS_SECRET_ACCESS_KEY" => Some("destination-secret-fixture".to_string()),
+        _ => None,
+    };
+    let grant = GrantRef::static_secret(EVIDENCE_READ_SECRET);
+    assert_eq!(
+        evidence_read_options(&plan, Some(&grant), budget, &env)
+            .expect("projected")
+            .credentials,
+        CredentialSource::Static {
+            access_key_id: "read-key-id-fixture".to_string(),
+            secret_access_key: "read-secret-fixture".to_string(),
+            session_token: None,
+        }
+    );
+    let only_others = |k: &str| match k {
+        k if k == EVIDENCE_WRITE_ENV.access_key_id => Some("write-key-id-fixture".to_string()),
+        k if k == EVIDENCE_WRITE_ENV.secret_access_key => Some("write-secret-fixture".to_string()),
+        "AWS_ACCESS_KEY_ID" => Some("destination-key-id-fixture".to_string()),
+        _ => None,
+    };
+    let refused = evidence_read_options(&plan, Some(&grant), budget, &only_others)
+        .expect_err("no read keys, no read");
+    assert_eq!(refused.code, CheckCode::CredentialSecretKeyMissing);
+    assert!(refused.message.contains(EVIDENCE_READ_ENV.access_key_id));
+    assert!(!refused.message.contains("fixture"));
+    for c in [
+        GrantCredentials::ControllerIdentity,
+        GrantCredentials::NotConfigured,
+    ] {
+        assert_eq!(
+            evidence_read_options(
+                &plan,
+                Some(&GrantRef::without_pod_credential(c)),
+                budget,
+                &env
+            )
+            .expect_err("no pod holds it")
+            .code,
+            CheckCode::EvidenceReadNotConfigured
+        );
+    }
+}
+
+/// One set of evidence-WRITE variable names across the check runner and the
+/// Restore runner's store contract.
+#[test]
+fn the_check_and_the_restore_runner_read_one_set_of_evidence_variables() {
+    use logweir::check::store::{
+        EVIDENCE_ACCESS_KEY_ID_ENV, EVIDENCE_SECRET_ACCESS_KEY_ENV, EVIDENCE_SESSION_TOKEN_ENV,
+    };
+    let w = logweir_core::check_contract::EVIDENCE_WRITE_ENV;
+    assert_eq!(
+        (w.access_key_id, w.secret_access_key, w.session_token),
+        (
+            EVIDENCE_ACCESS_KEY_ID_ENV,
+            EVIDENCE_SECRET_ACCESS_KEY_ENV,
+            EVIDENCE_SESSION_TOKEN_ENV
+        )
+    );
+    let r = logweir_core::check_contract::EVIDENCE_READ_ENV;
+    for name in [r.access_key_id, r.secret_access_key, r.session_token] {
+        assert!(
+            ![w.access_key_id, w.secret_access_key, w.session_token].contains(&name)
+                && !name.starts_with("AWS_"),
+            "`{name}` shadows another principal's variable"
+        );
+    }
 }
 
 /// The runner's two handles must never be built from ONE grant when the plan
@@ -2363,6 +2715,7 @@ fn readiness_plan(topics: Vec<&str>, write_probe: bool, signer: Option<&str>) ->
             signer_path: signer.map(ToString::to_string),
             write_probe,
             evidence_write: None,
+            evidence_read: None,
             skip_checks: Vec::new(),
         },
     )))
@@ -4053,6 +4406,7 @@ fn a_check_that_found_problems_still_exits_zero() {
         roles: vec![DestinationRole::ArchiveRead],
         write_probe: false,
         evidence_write: None,
+        evidence_read: None,
     }));
     let bytes = serde_json::to_vec(&plan).unwrap();
     let sha = logweir_core::ids::sha256_prefixed(&bytes);
@@ -4438,6 +4792,7 @@ mod live {
             ],
             write_probe: true,
             evidence_write: None,
+            evidence_read: None,
         }));
         let m = mount(&plan);
         let run = drive_live(&m);
