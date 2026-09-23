@@ -4155,7 +4155,7 @@ spec:
                     type: object
                   startingDeadlineSeconds:
                     default: 3600
-                    description: How late a missed slot may still start.
+                    description: 'How late a missed slot may still start. A slot that came due before this object''s `metadata.creationTimestamp` is never started, however recent, and is neither recorded as a skip nor consumed: the first rehearsal is the first slot at or after creation, as with a Kubernetes CronJob.'
                     format: int32
                     maximum: 86400
                     minimum: 60
@@ -4748,7 +4748,7 @@ spec:
             nullable: true
             properties:
               completion:
-                description: What the run actually restored, copied by JSON pointer from the SIGNED scorecard.
+                description: 'What the run actually restored, copied by JSON pointer from the SIGNED scorecard. Written ONLY beside a `Valid` evidence verdict (basis `Current` or `Historical`) over that same scorecard, in the write that records the verdict: it is absent while verification is pending or `NotAttempted`, and it is never written from a scorecard whose verdict is `Invalid` or `Untrusted`.'
                 nullable: true
                 properties:
                   integrityLevel:

@@ -7903,3 +7903,153 @@ async fn a_schedule_created_before_its_slot_fires_it() {
     assert_eq!(created, vec![name.clone()], "the post-creation slot fires");
     assert_eq!(outcome.created, Some(name));
 }
+
+/// The routes a reconcile that must create nothing needs: the inventory, the
+/// slot's deterministic name (absent), a POST route so ZERO POSTs is a choice,
+/// and the status PATCH.
+fn quiet_routes(name: &str) -> Vec<Route> {
+    vec![
+        no_backups(),
+        absent_backup(name),
+        Route {
+            method: "POST",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 201,
+            body: created_backup_body(name),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/backupschedules/nightly/status",
+            status: 200,
+            body: patched_schedule_body(),
+        },
+    ]
+}
+
+/// A schedule created MID-DAY, whose morning slot is past its starting
+/// deadline, neither fires that slot nor records it as missed — at reconcile
+/// level (review LOW-3). Before the bound this was `SlotMissed`, a
+/// `lastMissedSlot`, a `missedSlots.count` of 1 and a `lastSlot` of `Missed`,
+/// all for a slot the schedule did not exist for. MUTANT: let
+/// `bound_by_creation` pass `Missed` through, and every assertion below on the
+/// missed-slot fields fails.
+#[tokio::test]
+async fn a_schedule_created_mid_day_does_not_record_its_morning_slot_as_missed() {
+    let schedule = created_schedule(
+        BERLIN_NIGHTLY,
+        Some("Europe/Berlin"),
+        at(2026, 9, 23, 9, 0, 0),
+    );
+    let now = at(2026, 9, 23, 9, 0, 30);
+    let name = scheduled_backup_name("nightly", "20260923-003000").expect("the name fits");
+    assert!(
+        matches!(
+            decide("nightly", &schedule.spec, now),
+            SlotDecision::Missed { .. }
+        ),
+        "the fixture reproduces the pre-bound Missed"
+    );
+    let (client, calls, bodies) = mock_client_recording_bodies(quiet_routes(&name));
+    let outcome = reconcile_schedule(&schedule, &client, now)
+        .await
+        .expect("a decision, not an error");
+    let seen = calls.lock().expect("readable").clone();
+    assert_eq!(
+        seen.iter().filter(|c| c.method == "POST").count(),
+        0,
+        "{seen:?}"
+    );
+    assert_eq!(outcome.created, None);
+    let status = patched_status(&bodies.lock().expect("readable"));
+    let condition = &status["conditions"][0];
+    assert_eq!(
+        condition["status"],
+        serde_json::json!("True"),
+        "{condition}"
+    );
+    assert_eq!(
+        condition["reason"],
+        serde_json::json!(REASON_SCHEDULED),
+        "{condition}"
+    );
+    assert!(status.get("lastMissedSlot").is_none(), "{status}");
+    assert!(status.get("lastSlot").is_none(), "{status}");
+    assert!(
+        status.get("missedSlots").is_none() || status["missedSlots"]["count"] == 0,
+        "{status}"
+    );
+    assert_eq!(
+        status["nextFireTime"],
+        serde_json::json!("2026-09-24T00:30:00Z")
+    );
+}
+
+/// THE UPGRADE CASE (review LOW-1). An older controller, which had no creation
+/// bound, fired the pre-creation slot: `status.lastFireTime` records it. This
+/// controller still neither fires nor retries it, but its message says an
+/// earlier controller fired it instead of "never fired".
+#[tokio::test]
+async fn a_pre_creation_slot_an_older_controller_fired_is_not_called_never_fired() {
+    let mut schedule = created_schedule(
+        BERLIN_NIGHTLY,
+        Some("Europe/Berlin"),
+        at(2026, 9, 23, 0, 53, 11),
+    );
+    schedule.status = Some(BackupScheduleStatus {
+        last_fire_time: Some(utc(2026, 9, 23, 0, 30)),
+        ..BackupScheduleStatus::default()
+    });
+    let now = at(2026, 9, 23, 1, 0, 0);
+    // Pure: the refinement fills `fired_at` and keeps the bound.
+    let refined = refine_against_status(
+        bound_by_creation(
+            decide("nightly", &schedule.spec, now),
+            created_at(&schedule),
+        ),
+        Some(utc(2026, 9, 23, 0, 30)),
+        None,
+    );
+    assert!(
+        matches!(
+            refined,
+            SlotDecision::BeforeCreation { fired_at: Some(f), .. } if f == utc(2026, 9, 23, 0, 30)
+        ),
+        "{refined:?}"
+    );
+    // An older lastFireTime (a previous day) is not this slot's fire.
+    let earlier = refine_against_status(
+        bound_by_creation(
+            decide("nightly", &schedule.spec, now),
+            created_at(&schedule),
+        ),
+        Some(utc(2026, 9, 22, 0, 30)),
+        None,
+    );
+    assert!(
+        matches!(earlier, SlotDecision::BeforeCreation { fired_at: None, .. }),
+        "{earlier:?}"
+    );
+
+    let name = scheduled_backup_name("nightly", "20260923-003000").expect("the name fits");
+    let (client, calls, bodies) = mock_client_recording_bodies(quiet_routes(&name));
+    reconcile_schedule(&schedule, &client, now)
+        .await
+        .expect("a decision, not an error");
+    let seen = calls.lock().expect("readable").clone();
+    assert_eq!(
+        seen.iter().filter(|c| c.method == "POST").count(),
+        0,
+        "{seen:?}"
+    );
+    let status = patched_status(&bodies.lock().expect("readable"));
+    assert_eq!(
+        status["conditions"][0]["message"],
+        serde_json::json!(
+            "slot 20260923-003000 came due before this schedule was created at \
+             2026-09-23T00:53:11Z; an earlier controller fired it (status.lastFireTime \
+             2026-09-23T00:30:00Z), and this one neither fires nor retries a slot due before \
+             its schedule existed; the next firing is 2026-09-24T00:30:00Z"
+        ),
+        "{status}"
+    );
+}

@@ -147,7 +147,7 @@ spec:
                     type: object
                   startingDeadlineSeconds:
                     default: 3600
-                    description: How late a missed slot may still start.
+                    description: 'How late a missed slot may still start. A slot that came due before this object''s `metadata.creationTimestamp` is never started, however recent, and is neither recorded as a skip nor consumed: the first rehearsal is the first slot at or after creation, as with a Kubernetes CronJob.'
                     format: int32
                     maximum: 86400
                     minimum: 60

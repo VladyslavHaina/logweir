@@ -267,7 +267,11 @@ pub struct RehearsalBounds {
     #[serde(default = "default_deadline_seconds")]
     #[schemars(range(min = 300, max = 21600))]
     pub deadline_seconds: i32,
-    /// How late a missed slot may still start.
+    /// How late a missed slot may still start. A slot that came due before
+    /// this object's `metadata.creationTimestamp` is never started, however
+    /// recent, and is neither recorded as a skip nor consumed: the first
+    /// rehearsal is the first slot at or after creation, as with a Kubernetes
+    /// CronJob.
     #[serde(default = "default_starting_deadline_seconds")]
     #[schemars(range(min = 60, max = 86400))]
     pub starting_deadline_seconds: i32,

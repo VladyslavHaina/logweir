@@ -373,7 +373,13 @@ pub enum SlotDecision {
         slot: String,
         /// The schedule's `metadata.creationTimestamp`.
         created_at: DateTime<Utc>,
-        /// When it will first fire.
+        /// `status.lastFireTime`, when it is at or after `due`: an OLDER
+        /// controller, which had no creation bound, already fired this slot
+        /// (the upgrade case, review LOW-1). Filled only by
+        /// [`refine_against_status`]; it changes the message, never the
+        /// decision — this controller neither fires nor retries the slot.
+        fired_at: Option<DateTime<Utc>>,
+        /// When it will next fire.
         next_fire_time: Option<DateTime<Utc>>,
     },
     /// A slot came due, is older than [`MISSED_SLOT_HORIZON`], and
@@ -761,12 +767,30 @@ impl SlotDecision {
                  firing is {next}"
             ),
             Self::BeforeCreation {
-                slot, created_at, ..
+                slot,
+                created_at,
+                fired_at: None,
+                ..
             } => format!(
                 "slot {slot} came due before this schedule was created at {}; a slot due \
                  before its schedule existed is never fired and is not counted as missed, and \
                  the first firing is {next}",
                 created_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+            ),
+            // THE UPGRADE CASE (review LOW-1): the slot WAS fired, by a
+            // controller that predates the creation bound, and saying "never
+            // fired" beside a `lastFireTime` that shows it would be false.
+            Self::BeforeCreation {
+                slot,
+                created_at,
+                fired_at: Some(fired),
+                ..
+            } => format!(
+                "slot {slot} came due before this schedule was created at {}; an earlier \
+                 controller fired it (status.lastFireTime {}), and this one neither fires nor \
+                 retries a slot due before its schedule existed; the next firing is {next}",
+                created_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                fired.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
             ),
             // WHAT THE HEALTHY STEADY STATE SAYS, and it says the fired slot
             // and the instant it was fired rather than repeating "nothing is
@@ -1122,6 +1146,10 @@ fn retry_error(problem: &crate::cadence::RetryPolicyProblem) -> FieldError {
 /// 2. A [`SlotDecision::CatchUpDue`] older than `effective_since` becomes
 ///    `Missed` with reason `BeforeRevision` (row 19): a schedule edited at noon
 ///    must not retroactively back up the morning under the new policy.
+/// 3. A [`SlotDecision::BeforeCreation`] whose slot is at or before
+///    `last_fire_time` records that an older controller fired it (`fired_at`),
+///    so its message does not say "never fired" (review LOW-1). It stays
+///    `BeforeCreation`: nothing is fired or retried.
 ///
 /// Every other decision is returned untouched.
 ///
@@ -1199,6 +1227,23 @@ pub fn refine_against_status(
                 },
             }
         }
+        // THE CREATION BOUND STAYS; ONLY ITS WORDING LEARNS THE FIRE. A
+        // pre-creation slot an older controller already fired is still not
+        // this controller's to fire or retry (D1 / PLAT-04.2), but its message
+        // must not say "never fired" beside the `lastFireTime` that records it.
+        SlotDecision::BeforeCreation {
+            due,
+            slot,
+            created_at,
+            next_fire_time,
+            ..
+        } => SlotDecision::BeforeCreation {
+            due,
+            slot,
+            created_at,
+            fired_at: already_fired(due),
+            next_fire_time,
+        },
         other => other,
     }
 }
@@ -1267,6 +1312,7 @@ pub fn bound_by_creation(
             due,
             slot,
             created_at: created,
+            fired_at: None,
             next_fire_time,
         },
         _ => decision,

@@ -3590,6 +3590,17 @@ schedule's own. It applies to creation only: a slot that came due before an
 back-filling a revision). Use "Run first backup now" (a manual `Backup`) for an
 immediate first run.
 
+Upgrading to a controller with this rule changes nothing already recorded. A
+slot an older controller fired before the schedule's creation keeps its
+`Backup`, `status.lastFireTime` and `lastSlot`; until the next slot the
+`Ready` message says an earlier controller fired it, and this controller
+neither fires nor retries it (a failed pre-creation run is not retried). A
+pre-creation slot an older controller counted as missed stays in
+`status.missedSlots.count` and `status.lastMissedSlot`; nothing re-evaluates
+it. Because the bound reads `metadata.creationTimestamp`, deleting and
+recreating a schedule — a GitOps prune and re-apply, a backup-tool restore —
+resets it: the slot just before the recreation is not fired.
+
 What an operator can predict from it: a controller down for a week with
 `catchUpPolicy: None` runs **nothing** until the next slot and records the
 skipped count; with `Latest` it runs **exactly one** `CatchUp`, for the most
