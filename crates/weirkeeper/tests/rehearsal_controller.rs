@@ -3105,6 +3105,29 @@ async fn a_target_whose_connection_is_refused_is_a_recorded_skip() {
     assert_eq!(posted(&recorder, RESTORES_PATH), 0);
     assert_eq!(posted(&recorder, CONFIGMAPS_PATH), 0);
     assert_eq!(last_skip(&bodies).as_deref(), Some("TargetUnavailable"));
+    // THE SLOT IS CONSUMED (review LOW-3; REHEARSAL-SKIP-DEFERS-SLOT): the skip
+    // names the DUE slot and advances `lastScheduledSlot` to it in the same
+    // preconditioned write, so repairing the KafkaCluster inside the starting
+    // deadline does not run this slot late.
+    let skip_patch = patch_bodies(&bodies)
+        .into_iter()
+        .rfind(|b| b.pointer("/status/lastSkipped").is_some())
+        .expect("the skip was written");
+    assert_eq!(
+        skip_patch
+            .pointer("/status/lastSkipped/slot")
+            .and_then(Value::as_str),
+        Some("20260920-030000"),
+        "{skip_patch}"
+    );
+    assert_eq!(
+        skip_patch
+            .pointer("/status/lastScheduledSlot")
+            .and_then(Value::as_str),
+        Some("20260920-030000"),
+        "{skip_patch}"
+    );
+    assert_eq!(skip_patch["metadata"]["resourceVersion"], "101");
 }
 
 /// The target's auth is NOT inside the standing authorization's template
@@ -3119,8 +3142,19 @@ fn the_template_digest_does_not_depend_on_the_targets_auth() {
         spec.pointer("/target/auth").is_none() && !spec.to_string().contains("scramSha512"),
         "the sealed spec carries no connection auth: {spec}"
     );
+    // THE GOLDEN VALUE (review LOW-2). Every standing Approval signed for this
+    // fixture carries this `planHash`; a change to `template_bytes`, to the
+    // spec's serialisation or to a sealed field's rendering changes it and
+    // would invalidate every standing Approval in every cluster on upgrade. The
+    // fix for REHEARSAL-PLAN-AUTH-PLAINTEXT must not move it, and this is what
+    // fails if anything does.
     assert_eq!(
         rehearsal::template_digest(&schedule().spec).expect("digest"),
-        template_digest()
+        STANDING_TEMPLATE_DIGEST_GOLDEN
     );
 }
+
+/// `rehearsal::template_digest` of this file's fixture spec — see
+/// `the_template_digest_does_not_depend_on_the_targets_auth`.
+const STANDING_TEMPLATE_DIGEST_GOLDEN: &str =
+    "sha256:9ba5b07076412c832668ef61b7bd29abfec90218f652659582efe994e093937b";
