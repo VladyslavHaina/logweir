@@ -473,9 +473,47 @@ pub enum DeleteError {
     /// it toward `consecutiveRunFailures` — three bounded runs on a large
     /// archive used to set `EnforcementDegraded` and stop scheduling for good.
     BudgetExhausted,
+    /// The key's current version carries a provider version id: the bucket
+    /// is versioned (every S3 Object Lock bucket is), so a DELETE by key would
+    /// write a DELETE MARKER over the object and remove nothing — and a legal
+    /// hold or retention period on the version is never consulted, because no
+    /// version is being deleted. **Not retried, and nothing is deleted** (defect
+    /// OBJECT-LOCK-DELETE-MARKER): recording `Deleted` for a key that only got a
+    /// marker is the false record this code exists to prevent. See
+    /// [`Deleter::probe_versioning`].
+    VersionedBucket,
+    /// The HEAD that establishes whether a delete would land as a marker was
+    /// refused (typically `AccessDenied`: the credential lacks `s3:GetObject`
+    /// on `<prefix>/*`, which D3 §6.5's documented scope includes). **Not
+    /// retried, and nothing is deleted**: "could not tell" never authorises a
+    /// delete.
+    VersionProbeRefused,
     /// Anything else. **Not retried**: an unclassified failure repeated three
     /// times is still unclassified, and the run should stop and be looked at.
     Unclassified,
+}
+
+/// What a HEAD of one key says about how a delete of it BY KEY would land.
+///
+/// `object_store` 0.14 has no delete-by-version call and discards the DELETE
+/// response's `x-amz-delete-marker` header, so the worker can neither delete a
+/// specific version (where the provider would refuse a held one) nor tell,
+/// after the fact, that it wrote a marker. What it CAN read is
+/// `ObjectMeta::version`, which the S3 client fills from `x-amz-version-id` on
+/// a HEAD. A provider returns that header only for an object stored under
+/// versioning, so it is exactly the signal "a delete by key would be a
+/// marker". Measured on the lab MinIO (`claude/artifacts/ctl-batch-2/
+/// minio-version-header-probe.txt`): present on a versioned bucket, a
+/// `--with-lock` bucket, and an object written while versioning was enabled
+/// in a now-suspended bucket; absent on a plain bucket and on an object written
+/// while versioning was suspended (a null version, which a delete really
+/// removes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Versioning {
+    /// No provider version id: a delete by key removes the object.
+    Unversioned,
+    /// A provider version id: a delete by key would only hide the object.
+    Versioned,
 }
 
 impl DeleteError {
@@ -490,6 +528,8 @@ impl DeleteError {
             Self::ServerError => "ServerError",
             Self::Timeout => "Timeout",
             Self::BudgetExhausted => "BudgetExhausted",
+            Self::VersionedBucket => "VersionedBucket",
+            Self::VersionProbeRefused => "VersionProbeRefused",
             Self::Unclassified => "Unclassified",
         }
     }
@@ -579,6 +619,18 @@ pub trait Deleter {
     ///
     /// [`DeleteError`], classified.
     fn delete_exact(&self, key: &str) -> Result<(), DeleteError>;
+
+    /// Whether a delete of this key BY KEY would remove it, or only write a
+    /// delete marker over it — asked before EVERY delete [`execute`] issues.
+    ///
+    /// **Required, with no default**: a real deleter that forgot to answer
+    /// must not be read as "unversioned", which is the answer that deletes.
+    ///
+    /// # Errors
+    ///
+    /// [`DeleteError`], classified; [`DeleteError::NotFound`] means the key is
+    /// already gone, and no delete is issued for it.
+    fn probe_versioning(&self, key: &str) -> Result<Versioning, DeleteError>;
 }
 
 /// How the executor waits between attempts. Injected so a bounded-retry test
@@ -1045,12 +1097,37 @@ fn write_tombstone<T: TombstoneSink>(
 }
 
 /// One key, with the bounded retry. `true` when the key is gone.
+///
+/// # A delete marker is not a deletion (defect OBJECT-LOCK-DELETE-MARKER)
+///
+/// Every key is probed first ([`Deleter::probe_versioning`]). On a versioned
+/// bucket — and every S3 Object Lock bucket is one — a DELETE with no version
+/// id is ANSWERED 204 and removes nothing: the provider writes a delete marker,
+/// the data survives as a noncurrent version, and a legal hold on it is never
+/// consulted because no version was asked for. The first landing recorded such
+/// a point `Deleted` (live: harness-rows-11 `object-lock`, a held point
+/// `Deleted` with its data intact under markers). `object_store` 0.14 can
+/// neither delete by version (where the provider would refuse a held one) nor
+/// read the marker header off the response, so the worker REFUSES the
+/// combination — PLAT-16.2's "reject unsupported combinations rather than
+/// claiming" — and says so with [`DeleteError::VersionedBucket`], deleting
+/// nothing for that key.
 fn attempt<D: Deleter, S: Sleeper>(
     deleter: &D,
     sleeper: &S,
     key: &str,
     out: &mut Outcome,
 ) -> (bool, Option<DeleteError>) {
+    match probe(deleter, sleeper, key) {
+        Ok(Versioning::Unversioned) => {}
+        Ok(Versioning::Versioned) => return (false, Some(DeleteError::VersionedBucket)),
+        // ALREADY GONE IS DONE, and no delete is sent: on a versioned bucket a
+        // DELETE of an absent key would itself write a marker.
+        Err(DeleteError::NotFound) => return (true, None),
+        // A transport failure that outlived its retries is named as itself.
+        Err(e) if e.retryable() => return (false, Some(e)),
+        Err(_) => return (false, Some(DeleteError::VersionProbeRefused)),
+    }
     let mut last: Option<DeleteError> = None;
     for n in 0..MAX_ATTEMPTS {
         out.attempts = out.attempts.saturating_add(1);
@@ -1072,6 +1149,29 @@ fn attempt<D: Deleter, S: Sleeper>(
         }
     }
     (false, last)
+}
+
+/// The versioning probe, with the same bounded retry a delete gets — and NOT
+/// counted in [`Outcome::attempts`], which counts delete calls.
+fn probe<D: Deleter, S: Sleeper>(
+    deleter: &D,
+    sleeper: &S,
+    key: &str,
+) -> Result<Versioning, DeleteError> {
+    let mut last = DeleteError::Unclassified;
+    for n in 0..MAX_ATTEMPTS {
+        match deleter.probe_versioning(key) {
+            Ok(v) => return Ok(v),
+            Err(e) if e.retryable() => {
+                last = e;
+                if let Some(seconds) = BACKOFF_SECONDS.get(n as usize) {
+                    sleeper.sleep(Duration::from_secs(*seconds));
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last)
 }
 
 // ---------------------------------------------------------------------------

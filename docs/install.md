@@ -502,10 +502,14 @@ this row, or the catalog publishes no view.
 **No role is ever granted `s3:DeleteObject`.** Logweir prints the removal
 commands and an operator runs them; the only component that deletes is
 `logweir-retention`, under its own separate `spec.enforcement.credentialSecretRef`
-(measured minimum: `s3:ListBucket` with `s3:prefix` in `<prefix>/*`, and
-`s3:DeleteObject` on `arn:aws:s3:::<bucket>/<prefix>/*` — it needs no
-`s3:GetObject`, because it deletes the explicit key list its approved plan
-carries and reads nothing).
+(`s3:ListBucket` with `s3:prefix` in `<prefix>/*`, and `s3:GetObject` and
+`s3:DeleteObject` on `arn:aws:s3:::<bucket>/<prefix>/*`). `s3:GetObject` is
+for a HEAD before every delete: on a versioned bucket — every S3 Object Lock
+bucket is one — a delete by key only writes a delete marker and never
+consults a legal hold, so the worker refuses to delete there (code
+`VersionedBucket`), and without the grant it cannot tell and deletes nothing
+(code `VersionProbeRefused`). The measured minimum before that check was
+`s3:ListBucket` and `s3:DeleteObject` alone. [UNVERIFIED — the grant with s3:GetObject is re-measured by U6/retention-enforcer at the next lab refresh.]
 
 **Grant `evidenceRead` its `s3:ListBucket` if you want "absent" to mean absent.**
 It is not in the measured minimum — the `destination.evidenceReadable` probe

@@ -26,7 +26,7 @@ use object_store::{ObjectStore, ObjectStoreExt as _};
 
 use logweir_core::engine::StorageUrl;
 
-use crate::{DeleteError, Deleter};
+use crate::{DeleteError, Deleter, Versioning};
 
 /// The three variables a retention Job projects from its delete-capable Secret.
 pub const ACCESS_KEY_ID_ENV: &str = "AWS_ACCESS_KEY_ID";
@@ -219,6 +219,38 @@ impl Deleter for ArchiveReaper {
         self.rt
             .block_on(async { self.inner.delete(&path).await })
             .map_err(|e| classify(&e))
+    }
+
+    /// A HEAD of the key, read for `ObjectMeta::version`.
+    ///
+    /// The S3 client fills `version` from `x-amz-version-id`, which a provider
+    /// sends only for an object stored under versioning — so `Some` is exactly
+    /// "a delete by key would write a marker" (see [`Versioning`]). The local
+    /// filesystem store never versions. The same normalisation rail as
+    /// [`Deleter::delete_exact`]: the probe asks about the path the delete
+    /// would address, or refuses.
+    fn probe_versioning(&self, key: &str) -> Result<Versioning, DeleteError> {
+        let path = normalise(key)?;
+        let meta = self
+            .rt
+            .block_on(async { self.inner.head(&path).await })
+            .map_err(|e| classify(&e))?;
+        Ok(versioning_of(&meta))
+    }
+}
+
+/// `ObjectMeta` → [`Versioning`], the one rule, separate so a test can drive it
+/// without a bucket.
+///
+/// ANY version id — including the literal `null` some providers send for a
+/// null version in a bucket that has been versioned — counts as versioned: the
+/// conservative reading, since the answer that deletes is the other one.
+#[must_use]
+pub fn versioning_of(meta: &object_store::ObjectMeta) -> Versioning {
+    if meta.version.as_deref().is_some_and(|v| !v.is_empty()) {
+        Versioning::Versioned
+    } else {
+        Versioning::Unversioned
     }
 }
 

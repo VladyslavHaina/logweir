@@ -3940,6 +3940,37 @@ async fn a_recorded_provider_refusal_protects_that_point_on_the_next_pass() {
     );
 }
 
+/// OBJECT-LOCK-DELETE-MARKER: a point the worker refused because the bucket
+/// is VERSIONED is not relabelled a legal hold. Nothing established that it is
+/// held — only that a delete by key would have been a marker — so it stays a
+/// candidate, the next run is refused the same way, and the retry budget
+/// (`EnforcementDegraded` after three) is what stops enforcement on a bucket
+/// this worker does not support. `LegalHold` stays the provider's verdict.
+///
+/// MUTANT: add `VersionedBucket` to `previously_refused`'s codes. `p6` is
+/// protected `LegalHold` and this row fails.
+#[tokio::test]
+async fn a_versioned_bucket_refusal_is_not_recorded_as_a_legal_hold() {
+    let f = fixture(happy_routes(&six_points()));
+    let status = json!({
+        "lastEnforcement": {
+            "runId": "r0", "finishedAt": "2026-09-17T04:00:00Z", "exitCode": 1,
+            "failed": [{"pointId": "p6", "code": "VersionedBucket"}]
+        }
+    });
+    let outcome = run(&f, &policy(json!({}), status)).await;
+    assert_eq!(outcome.candidates, 3, "p6 is still planned: {}", f.status());
+    assert!(!f.status()["lastEvaluation"]["protected"]
+        .as_array()
+        .expect("protected")
+        .iter()
+        .any(|p| p["pointId"] == "p6"));
+    assert_eq!(
+        f.status()["guarantees"]["legalHold"],
+        ctrl::GUARANTEE_PROVIDER_UNVERIFIED
+    );
+}
+
 /// **H4.** An approved plan older than `planMaxAgeSeconds` starts no Job.
 #[tokio::test]
 async fn an_expired_plan_starts_no_job() {
@@ -4756,6 +4787,50 @@ async fn a_policy_already_at_the_ceiling_publishes_the_condition_on_its_next_pas
     );
     // The count is history and this pass must not touch it: the spec has not changed.
     assert_eq!(after_pass["consecutiveRunFailures"], json!(3));
+}
+
+/// OBJECT-LOCK-DELETE-MARKER on the object: a policy stopped by the retry
+/// budget over a VERSIONED bucket says so in words, with the remedy — the
+/// refusal is about the bucket, nothing about it clears on a retry, and an
+/// operator reading "VersionedBucket on 2 point(s)" alone would not know what
+/// to change.
+///
+/// MUTANT: drop the remedy sentence from `failure_detail`. This row fails.
+#[tokio::test]
+async fn a_policy_stopped_on_a_versioned_bucket_says_why_and_what_to_change() {
+    let digest = learned_digest().await;
+    let status = json!({
+        "observedGeneration": 4,
+        "consecutiveRunFailures": 3,
+        "lastEnforcement": {
+            "runId": "r00000000deadbeeb",
+            "startedAt": "2026-09-17T04:00:00Z",
+            "finishedAt": "2026-09-17T04:05:00Z",
+            "exitCode": 1,
+            "failed": [
+                {"pointId": "p5", "code": "VersionedBucket"},
+                {"pointId": "p6", "code": "VersionedBucket"}
+            ]
+        }
+    });
+    let f = quiet_pass(
+        &policy(unattended_enforcing(), status.clone()),
+        now(),
+        &digest,
+    )
+    .await;
+    assert!(f.posted("/jobs").is_empty());
+    let after_pass = after(&status, &f);
+    let degraded =
+        condition_of(&after_pass, ctrl::CONDITION_DEGRADED).expect("EnforcementDegraded");
+    let message = degraded["message"].as_str().expect("a message");
+    assert!(
+        message.contains("VersionedBucket on 2 point(s)"),
+        "{message}"
+    );
+    assert!(message.contains("delete marker"), "{message}");
+    assert!(message.contains("mode: ExternalLifecycle"), "{message}");
+    assert!(!message.contains("  "), "{message:?}");
 }
 
 /// **Review finding G1: a refusal path must not eat the operator's spec edit.**

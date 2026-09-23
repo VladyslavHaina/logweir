@@ -579,6 +579,14 @@ about the **delete** credential and is unchanged by that fix — but its live
 baseline was taken with the record written by the wrong principal, so
 `U6/retention-enforcer` is re-run at the next lab refresh.
 
+**`s3:GetObject` on `<bucket>/<prefix>/*` is now required for the retention
+enforcer** (defect OBJECT-LOCK-DELETE-MARKER): the worker HEADs every key
+before it deletes it, to refuse a versioned bucket where a delete by key would
+only write a delete marker. Rows `u6-ret-058` ("not required") and `u6-ret-060`
+(the minimal set without it) were measured on the build before that change;
+without the grant a run now deletes nothing and records every key `Kept` with
+`code=VersionProbeRefused`. [UNVERIFIED — re-measured by U6/retention-enforcer at the next lab refresh.]
+
 ### 7b. A destination-backed run carries a complete `AWS_*` set, and none of it is the controller's
 
 **IN THIS BUILD**, for `Backup`, `BackupSchedule` and `Restore`. A `Backup`
@@ -2097,7 +2105,31 @@ Each of `ageExpiry`, `minUsablePoints`, `activeRestoreProtection`,
   exactly *a provider refusal is authoritative, recorded, not retried, and
   excluded from the next plan* — never "Logweir knows the hold exists". The
   exclusion half is real: `status.lastEnforcement.failed[]` carries the closed
-  code, and the next evaluation protects that point as `LegalHold`.
+  code `Locked`, and the next evaluation protects that point as `LegalHold`.
+* **A provider can only refuse a delete it is asked to make, and on a
+  versioned bucket a delete by key asks for nothing.** Every S3 Object Lock
+  bucket is versioned, and on a versioned bucket a `DELETE` with no version id
+  is answered success and removes nothing: the provider writes a delete marker,
+  the data stays as a noncurrent version, and a hold on that version is never
+  consulted (measured on the lab MinIO by harness-rows-11's `object-lock` row).
+  `object_store` 0.14 can neither delete a specific version nor read the
+  marker header off the response, so the worker **refuses the combination**
+  rather than record a marker as a deletion: before every delete it HEADs the
+  key, and a key whose current version carries a version id
+  (`x-amz-version-id`) is not deleted — the point is `Kept` (or `Orphaned`, if
+  the manifest had already gone) with code `VersionedBucket`, the run exits 1,
+  and three such runs set `EnforcementDegraded`, whose message names the
+  remedy: enforce on an unversioned bucket, or declare the provider's own
+  lifecycle (`NoncurrentVersionExpiration` honours holds) with
+  `mode: ExternalLifecycle`. `VersionedBucket` is not a hold verdict and does
+  not protect the point as `LegalHold`. On an S3-compatible bucket a legal
+  hold therefore can never be deleted *or hidden* by Logweir; the `Locked`
+  path remains for a provider that refuses a plain `DELETE` itself. The HEAD
+  needs `s3:GetObject` on `<prefix>/*` — the scope D3 §6.5 always documented
+  for the retention credential; without it every key is `Kept` with
+  `VersionProbeRefused` and nothing is deleted. A key whose latest version is
+  *already* a marker (for instance one written by an earlier build) answers the
+  HEAD `404` and is counted gone.
 * `sharedSegments` is **`NotEnforced`**, because the guarantee needs a point's
   segment keys and the catalog view entry has no segment field at all. What
   **is** enforced is the set half of it. Two receipts can name one backup set
@@ -6300,7 +6332,10 @@ digest rather than after.
 `ProviderEnforcedUnverified` as "declared by your provider; Logweir cannot verify
 it", because `object_store` exposes no WORM readback and the guarantee is exactly
 "a provider refusal is authoritative, recorded, not retried and excluded from the
-next plan".
+next plan". On a versioned (and so on every Object Lock) bucket the worker never
+asks the provider at all: it refuses the delete as `VersionedBucket`, because a
+delete by key there writes a marker instead of being refused (§7f, the
+`legalHold` bullet).
 
 **The legacy in-cluster UI ServiceAccount reads none of the four D3 kinds.**
 `charts/logweir/templates/ui/ui.yaml`'s ClusterRole is unchanged by this change,

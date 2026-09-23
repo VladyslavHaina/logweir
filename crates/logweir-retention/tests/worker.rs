@@ -20,7 +20,9 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use logweir_reaper::{DeleteError, Deleter, Lister, PlanLine, SinkError, Sleeper, TombstoneSink};
+use logweir_reaper::{
+    DeleteError, Deleter, Lister, PlanLine, SinkError, Sleeper, TombstoneSink, Versioning,
+};
 use logweir_retention::{
     admit, env_map, execute, parse_args, result_line, Refusal, EXIT_INCOMPLETE, EXIT_OK,
     EXIT_REFUSED,
@@ -136,6 +138,10 @@ impl Deleter for FakeDeleter {
         self.seen.borrow_mut().push(key.to_string());
         Ok(())
     }
+
+    fn probe_versioning(&self, _key: &str) -> Result<Versioning, DeleteError> {
+        Ok(Versioning::Unversioned)
+    }
 }
 
 /// A deleter that PANICS. Used wherever the property is that nothing is
@@ -146,6 +152,10 @@ struct NeverDeletes;
 impl Deleter for NeverDeletes {
     fn delete_exact(&self, key: &str) -> Result<(), DeleteError> {
         panic!("delete_exact({key}) on a path that must delete nothing")
+    }
+
+    fn probe_versioning(&self, _key: &str) -> Result<Versioning, DeleteError> {
+        Ok(Versioning::Unversioned)
     }
 }
 
@@ -578,6 +588,10 @@ fn an_incomplete_run_exits_one_and_names_the_code() {
         fn delete_exact(&self, _key: &str) -> Result<(), DeleteError> {
             Err(DeleteError::AccessDenied)
         }
+
+        fn probe_versioning(&self, _key: &str) -> Result<Versioning, DeleteError> {
+            Ok(Versioning::Unversioned)
+        }
     }
     let bytes = plan_bytes(vec![line("lwp1-a", "set-a", &["seg-0"])]);
     let digest = digest_of(&bytes);
@@ -595,6 +609,47 @@ fn an_incomplete_run_exits_one_and_names_the_code() {
         .iter()
         .any(|l| l.contains("state=Kept") && l.contains("code=AccessDenied")));
     assert!(result_line(&report, false).contains("failed=1"));
+}
+
+/// Defect OBJECT-LOCK-DELETE-MARKER at the process boundary: on a versioned
+/// bucket the run issues no delete, exits 1, and the key line the controller
+/// harvests into `status.lastEnforcement.failed[]` names `VersionedBucket` —
+/// the line that used to read `state=Deleted` over a held point's markers.
+///
+/// MUTANT: skip the probe in `logweir_reaper::attempt`. `NeverDeletes` panics
+/// on the first delete and this row fails.
+#[test]
+fn a_versioned_bucket_exits_one_naming_the_refusal_and_deletes_nothing() {
+    struct Versioned;
+    impl Deleter for Versioned {
+        fn delete_exact(&self, key: &str) -> Result<(), DeleteError> {
+            NeverDeletes.delete_exact(key)
+        }
+
+        fn probe_versioning(&self, _key: &str) -> Result<Versioning, DeleteError> {
+            Ok(Versioning::Versioned)
+        }
+    }
+    let bytes = plan_bytes(vec![line("lwp1-a", "set-a", &["seg-0"])]);
+    let digest = digest_of(&bytes);
+    let admitted = admit_with(&argv(), &full_env(&digest), bytes).expect("admits");
+    let report = execute(
+        &admitted,
+        &Versioned,
+        &NoSleep,
+        &FakeSink::default(),
+        &FakeLister(Vec::new()),
+    );
+    assert_eq!(report.exit_code, EXIT_INCOMPLETE);
+    assert!(
+        report
+            .lines
+            .iter()
+            .any(|l| l == "retention-point=lwp1-a state=Kept objects=0 code=VersionedBucket"),
+        "{:?}",
+        report.lines
+    );
+    assert!(result_line(&report, false).contains("deleted=0 failed=1 objects=0"));
 }
 
 /// An empty plan is a legitimate plan and exits 0 having removed nothing.

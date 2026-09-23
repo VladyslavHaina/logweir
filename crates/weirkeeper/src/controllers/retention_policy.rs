@@ -3539,11 +3539,33 @@ fn failure_detail(exit_code: Option<i32>, codes: &[String]) -> String {
     if counted.is_empty() {
         return format!("{exit} and named no per-point code");
     }
+    let versioned = counted.contains_key("VersionedBucket");
+    let unprobed = counted.contains_key("VersionProbeRefused");
     let named: Vec<String> = counted
         .into_iter()
         .map(|(code, n)| format!("{code} on {n} point(s)"))
         .collect();
-    format!("{exit} with {}", named.join(", "))
+    // THE TWO REFUSALS THAT ARE ABOUT THE BUCKET, NOT THE POINT (defect
+    // OBJECT-LOCK-DELETE-MARKER), said with their remedy: nothing about them
+    // clears on a retry, so the retry budget is what stops the policy, and the
+    // condition that says so must say why.
+    let mut remedy = String::new();
+    if versioned {
+        remedy.push_str(
+            ". VersionedBucket: the bucket is versioned (every S3 Object Lock bucket is), so \
+             a delete by key would only write a delete marker over the data and never consult \
+             a legal hold; the worker deletes nothing there. Enforce on an unversioned bucket, \
+             or declare the provider's own lifecycle with mode: ExternalLifecycle",
+        );
+    }
+    if unprobed {
+        remedy.push_str(
+            ". VersionProbeRefused: the retention credential could not HEAD the object, so \
+             the worker could not establish that a delete would remove it; grant it \
+             s3:GetObject on <prefix>/*",
+        );
+    }
+    format!("{exit} with {}{remedy}", named.join(", "))
 }
 
 /// One view entry, as the evaluation sees it.

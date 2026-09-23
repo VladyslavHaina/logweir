@@ -22,8 +22,8 @@ use chrono::{TimeZone as _, Utc};
 use logweir_reaper::{
     execute, parse_plan, record, record_bytes, record_key, tombstone_key, validate_listed_key,
     validate_plan, DeleteError, Deleter, Limits, Lister, Plan, PlanLine, PointState, RecordContext,
-    Refusal, RunAttribution, RunBinding, SinkError, Sleeper, TombstoneSink, EVIDENCE_ROOT,
-    MAX_ATTEMPTS, PLAN_MEDIA_TYPE, RECORD_MEDIA_TYPE,
+    Refusal, RunAttribution, RunBinding, SinkError, Sleeper, TombstoneSink, Versioning,
+    EVIDENCE_ROOT, MAX_ATTEMPTS, PLAN_MEDIA_TYPE, RECORD_MEDIA_TYPE,
 };
 
 // ===========================================================================
@@ -73,6 +73,12 @@ impl Deleter for FakeDeleter {
             None => Ok(()),
         }
     }
+
+    /// An unversioned bucket: the provider this fake models removes what it
+    /// is asked to remove.
+    fn probe_versioning(&self, _key: &str) -> Result<Versioning, DeleteError> {
+        Ok(Versioning::Unversioned)
+    }
 }
 
 /// A deleter that panics. Used where the property is that NOTHING is deleted.
@@ -84,6 +90,124 @@ impl Deleter for NeverDeletes {
             "delete_exact({key}) was called on a path that must delete nothing. That is the \
              whole property this row exists for."
         )
+    }
+
+    fn probe_versioning(&self, _key: &str) -> Result<Versioning, DeleteError> {
+        Ok(Versioning::Unversioned)
+    }
+}
+
+/// An S3 bucket with VERSIONING, modelled the way the lab MinIO behaves
+/// (harness-rows-11 `object-lock`, `00-provider.json`; ctl-batch-2's own probe):
+///
+/// * a HEAD of a stored key answers its version id (`x-amz-version-id`);
+/// * a DELETE with NO version id is ANSWERED SUCCESS and removes nothing — it
+///   pushes a delete marker onto the key, the data stays as a noncurrent
+///   version, and a legal hold on that version is never consulted;
+/// * a HEAD of a key whose latest version is a marker answers 404.
+///
+/// `held` keys carry a legal hold. The fake cannot be asked to delete a
+/// specific version, because the worker cannot ask that either (`object_store`
+/// 0.14 has no delete-by-version call). What a row can read afterwards is the
+/// truth: which keys are still LATEST, and how many markers were written.
+struct VersionedBucket {
+    /// `key -> versions`, oldest first; `None` is a delete marker.
+    versions: RefCell<BTreeMap<String, Vec<Option<String>>>>,
+    /// Keys whose data version carries a legal hold (the hold never stops a
+    /// marker — that is the defect).
+    held: Vec<String>,
+    /// Keys stored while versioning was suspended: a NULL version, which a
+    /// HEAD answers with no version id and a DELETE really removes.
+    null_versions: Vec<String>,
+}
+
+impl VersionedBucket {
+    fn with(keys: &[String], held: &[String], null_versions: &[String]) -> Self {
+        Self {
+            versions: RefCell::new(
+                keys.iter()
+                    .map(|k| (k.clone(), vec![Some(format!("v-{k}"))]))
+                    .collect(),
+            ),
+            held: held.to_vec(),
+            null_versions: null_versions.to_vec(),
+        }
+    }
+
+    /// Whether the key's LATEST version is still data (not a marker, not gone).
+    fn latest_is_data(&self, key: &str) -> bool {
+        self.versions
+            .borrow()
+            .get(key)
+            .and_then(|v| v.last().cloned())
+            .flatten()
+            .is_some()
+    }
+
+    fn markers(&self) -> usize {
+        self.versions
+            .borrow()
+            .values()
+            .flatten()
+            .filter(|v| v.is_none())
+            .count()
+    }
+}
+
+impl Deleter for VersionedBucket {
+    fn delete_exact(&self, key: &str) -> Result<(), DeleteError> {
+        let mut versions = self.versions.borrow_mut();
+        if self.null_versions.iter().any(|k| k == key) {
+            versions.remove(key);
+            return Ok(());
+        }
+        // THE DEFECT'S MECHANISM: no version id, so a marker, and success.
+        // `held` is not consulted, exactly as S3 does not consult it here.
+        let _ = &self.held;
+        versions.entry(key.to_string()).or_default().push(None);
+        Ok(())
+    }
+
+    fn probe_versioning(&self, key: &str) -> Result<Versioning, DeleteError> {
+        let versions = self.versions.borrow();
+        match versions.get(key).and_then(|v| v.last().cloned()) {
+            None | Some(None) => Err(DeleteError::NotFound),
+            Some(Some(_)) if self.null_versions.iter().any(|k| k == key) => {
+                Ok(Versioning::Unversioned)
+            }
+            Some(Some(_)) => Ok(Versioning::Versioned),
+        }
+    }
+}
+
+/// A deleter whose PROBE answers from a script, and which records deletes.
+struct ScriptedProbe {
+    answers: RefCell<Vec<Result<Versioning, DeleteError>>>,
+    deleted: RefCell<Vec<String>>,
+}
+
+impl ScriptedProbe {
+    fn answering(answers: Vec<Result<Versioning, DeleteError>>) -> Self {
+        Self {
+            answers: RefCell::new(answers),
+            deleted: RefCell::new(Vec::new()),
+        }
+    }
+}
+
+impl Deleter for ScriptedProbe {
+    fn delete_exact(&self, key: &str) -> Result<(), DeleteError> {
+        self.deleted.borrow_mut().push(key.to_string());
+        Ok(())
+    }
+
+    fn probe_versioning(&self, _key: &str) -> Result<Versioning, DeleteError> {
+        let mut answers = self.answers.borrow_mut();
+        if answers.is_empty() {
+            Ok(Versioning::Unversioned)
+        } else {
+            answers.remove(0)
+        }
     }
 }
 
@@ -1256,4 +1380,186 @@ fn a_key_whose_normalised_form_differs_is_refused() {
              deleting a path nothing validated"
         );
     }
+}
+
+// ===========================================================================
+// Defect OBJECT-LOCK-DELETE-MARKER — a delete marker is not a deletion
+// ===========================================================================
+
+fn run_over<D: Deleter>(p: &Plan, deleter: &D, sink: &FakeSink) -> logweir_reaper::Outcome {
+    execute(
+        p,
+        deleter,
+        &FakeSleeper::default(),
+        sink,
+        &FakeLister(Vec::new()),
+        &attribution(),
+        limits(),
+    )
+}
+
+/// THE LIVE DEFECT, on a model of the provider. A lock-enabled (therefore
+/// versioned) bucket, a legal hold on every object of one point, an unheld
+/// control point: the run deletes NOTHING, writes NO marker, and records both
+/// points `Kept` with `VersionedBucket` — never `Deleted`.
+///
+/// MUTANT: skip the probe in `attempt` (delete by key as before). Both points
+/// are recorded `Deleted`, the held keys' latest versions are markers, and
+/// this row fails on every clause.
+#[test]
+fn a_versioned_bucket_is_refused_and_nothing_is_recorded_deleted() {
+    let held = line("lwp1-held", "set-held", &["seg-0"]);
+    let control = line("lwp1-ctl", "set-ctl", &["seg-0"]);
+    let keys: Vec<String> = held
+        .object_keys
+        .iter()
+        .chain(control.object_keys.iter())
+        .cloned()
+        .collect();
+    let bucket = VersionedBucket::with(&keys, &held.object_keys, &[]);
+    let p = plan(vec![held.clone(), control]);
+    let outcome = run_over(&p, &bucket, &FakeSink::default());
+
+    assert!(outcome.deleted().is_empty(), "{:?}", outcome.points);
+    for point in &outcome.points {
+        assert_eq!(point.state, PointState::Kept.as_str(), "{point:?}");
+        assert_eq!(point.code.as_deref(), Some("VersionedBucket"), "{point:?}");
+        assert_eq!(point.objects_deleted, 0);
+    }
+    assert_eq!(bucket.markers(), 0, "no delete marker was written");
+    assert!(keys.iter().all(|k| bucket.latest_is_data(k)));
+    assert_eq!(outcome.objects_deleted, 0);
+    assert_eq!(outcome.attempts, 0, "no delete call was issued at all");
+    assert_eq!(
+        outcome.failed(),
+        vec![
+            ("lwp1-held", "VersionedBucket"),
+            ("lwp1-ctl", "VersionedBucket")
+        ]
+    );
+    assert!(!DeleteError::VersionedBucket.retryable());
+    assert!(
+        !DeleteError::VersionedBucket.is_hold(),
+        "a refusal to delete on a versioned bucket is not a provider's hold verdict"
+    );
+}
+
+/// NEGATIVE CONTROL for the row above: the same fake with every key stored as
+/// a NULL version (written while versioning was suspended — a HEAD answers no
+/// version id and a delete really removes) is deleted normally. A worker that
+/// refused everything would pass the row above and fail this one.
+#[test]
+fn null_versions_are_really_deleted() {
+    let point = line("lwp1-a", "set-a", &["seg-0", "seg-1"]);
+    let bucket = VersionedBucket::with(&point.object_keys, &[], &point.object_keys);
+    let outcome = run_over(&plan(vec![point.clone()]), &bucket, &FakeSink::default());
+    assert_eq!(outcome.deleted(), vec!["lwp1-a"]);
+    assert_eq!(outcome.objects_deleted, 3);
+    assert!(point.object_keys.iter().all(|k| !bucket.latest_is_data(k)));
+    assert_eq!(bucket.markers(), 0);
+}
+
+/// A set written across a suspension: the manifest is a null version and goes,
+/// a segment carries a version id and is NOT deleted. The point is `Orphaned`
+/// with the versioned key named — never `Deleted`.
+#[test]
+fn a_versioned_segment_is_left_and_named() {
+    let point = line("lwp1-a", "set-a", &["seg-0", "seg-1"]);
+    let versioned_segment = point.object_keys[2].clone();
+    let nulls: Vec<String> = point.object_keys[..2].to_vec();
+    let bucket = VersionedBucket::with(&point.object_keys, &[], &nulls);
+    let outcome = run_over(&plan(vec![point]), &bucket, &FakeSink::default());
+    let only = &outcome.points[0];
+    assert_eq!(only.state, PointState::Orphaned.as_str());
+    assert_eq!(only.code.as_deref(), Some("VersionedBucket"));
+    assert_eq!(only.remaining_keys, vec![versioned_segment.clone()]);
+    assert!(bucket.latest_is_data(&versioned_segment));
+    assert_eq!(bucket.markers(), 0);
+}
+
+/// A probe that cannot be answered — `AccessDenied` on the HEAD, a credential
+/// without `s3:GetObject` — deletes nothing: "could not tell" never
+/// authorises a delete.
+///
+/// MUTANT: treat a refused probe as `Unversioned`. The delete is issued and
+/// this row fails.
+#[test]
+fn a_refused_probe_deletes_nothing_and_names_itself() {
+    let deleter = ScriptedProbe::answering(vec![Err(DeleteError::AccessDenied)]);
+    let outcome = run_over(
+        &plan(vec![line("lwp1-a", "set-a", &["seg-0"])]),
+        &deleter,
+        &FakeSink::default(),
+    );
+    assert!(deleter.deleted.borrow().is_empty());
+    assert_eq!(outcome.points[0].state, PointState::Kept.as_str());
+    assert_eq!(
+        outcome.points[0].code.as_deref(),
+        Some("VersionProbeRefused")
+    );
+}
+
+/// The probe gets the bounded retry a delete gets: a 5xx that clears is
+/// retried and the key is then deleted; one that does not is named as itself.
+#[test]
+fn a_probe_server_error_is_retried_and_then_named() {
+    let clears = ScriptedProbe::answering(vec![
+        Err(DeleteError::ServerError),
+        Ok(Versioning::Unversioned),
+    ]);
+    let outcome = run_over(
+        &plan(vec![line("lwp1-a", "set-a", &[])]),
+        &clears,
+        &FakeSink::default(),
+    );
+    assert_eq!(outcome.deleted(), vec!["lwp1-a"]);
+    assert_eq!(
+        outcome.attempts, 1,
+        "probes are not counted as delete calls"
+    );
+
+    let stuck =
+        ScriptedProbe::answering(vec![Err(DeleteError::ServerError); MAX_ATTEMPTS as usize]);
+    let outcome = run_over(
+        &plan(vec![line("lwp1-a", "set-a", &[])]),
+        &stuck,
+        &FakeSink::default(),
+    );
+    assert!(stuck.deleted.borrow().is_empty());
+    assert_eq!(outcome.points[0].code.as_deref(), Some("ServerError"));
+}
+
+/// A key the probe finds gone is done, and NO delete is sent for it: on a
+/// versioned bucket a DELETE of an absent key would itself write a marker.
+#[test]
+fn a_key_the_probe_finds_gone_is_done_without_a_delete() {
+    let deleter = ScriptedProbe::answering(vec![Err(DeleteError::NotFound)]);
+    let point = line("lwp1-a", "set-a", &["seg-0"]);
+    let outcome = run_over(&plan(vec![point.clone()]), &deleter, &FakeSink::default());
+    assert_eq!(outcome.deleted(), vec!["lwp1-a"]);
+    assert_eq!(
+        *deleter.deleted.borrow(),
+        vec![point.object_keys[1].clone()]
+    );
+}
+
+/// The one rule that reads a provider's answer: any version id is versioned,
+/// including a literal `null`; absent (or empty) is not.
+#[test]
+fn a_version_id_on_the_head_is_what_versioned_means() {
+    let meta = |version: Option<&str>| object_store::ObjectMeta {
+        location: object_store::path::Path::from("p/k"),
+        last_modified: Utc.with_ymd_and_hms(2026, 9, 23, 0, 0, 0).unwrap(),
+        size: 5,
+        e_tag: None,
+        version: version.map(str::to_string),
+    };
+    use logweir_reaper::archive::versioning_of;
+    assert_eq!(
+        versioning_of(&meta(Some("54734dd9"))),
+        Versioning::Versioned
+    );
+    assert_eq!(versioning_of(&meta(Some("null"))), Versioning::Versioned);
+    assert_eq!(versioning_of(&meta(None)), Versioning::Unversioned);
+    assert_eq!(versioning_of(&meta(Some(""))), Versioning::Unversioned);
 }
