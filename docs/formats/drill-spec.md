@@ -84,17 +84,58 @@ client is constructed and before anything is written, the runner:
    point id that had to be taken on trust would be a label anyone could
    relabel;
 4. checks the receipt's own `archive.manifest_sha256` equals `manifest_sha256`;
-5. reads the manifest the receipt names and checks its bytes hash to the same
-   value. Steps 2–4 prove the plan and the receipt agree; this one proves the
+5. verifies the receipt's **signature** (its `.sig` sidecar, DSSE, payload
+   type `application/vnd.logweir.backup-receipt+json;version=1.0.0`) against the
+   evidence-signing keyring passed as `--evidence-keys`, and judges the key
+   that verified with `logweir_core::trust::decide` for `EvidenceSigning` at
+   the receipt's own `finished_at` (D3 §5.5 step 6);
+6. reads the manifest the receipt names and checks its bytes hash to the same
+   value. Steps 2–4 prove the plan and the receipt agree; step 5 proves an
+   installation this one trusts wrote the receipt; this one proves the
    *archive* does.
 
-Any mismatch is **exit 3**, with `PointBindingMismatch` at the start of the
-refusal message — the tampered-bundle case, moved to the archive. A receipt or
-manifest that is **missing or unreadable** is **exit 1**: the archive did not
-answer, and that may be a rotated credential or a briefly unavailable bucket,
-so telling an operator to change an approved document would be the wrong
-repair. See [`docs/stability.md`](../stability.md) for the whole stdout and
-exit contract.
+A digest or identity mismatch is **exit 3**, with `PointBindingMismatch` at the
+start of the refusal message — the tampered-bundle case, moved to the archive.
+A signature fault is **exit 3** with `PointUntrusted`: no keyring, a keyring
+holding no key, a receipt with no sidecar, a sidecar that does not parse, a
+signature no key in the keyring verifies, or a key the keyring's lifecycle
+refuses for this receipt. A receipt or manifest that is **missing or
+unreadable** is **exit 1**: the archive did not answer, and that may be a
+rotated credential or a briefly unavailable bucket, so telling an operator to
+change an approved document would be the wrong repair. See
+[`docs/stability.md`](../stability.md) for the whole stdout and exit contract.
+
+**The evidence keyring (`--evidence-keys`).** Inside a cluster the controller
+renders it into the Job's approval bundle as `evidence-keys.json` and pins its
+digest (`LOGWEIR_EXECUTION_EVIDENCE_KEYS_SHA256`); it carries every key of the
+namespace's resolved trust whose public half parses, WITH its lifecycle:
+
+```json
+{
+  "formatVersion": "1.0.0",
+  "keys": [{
+    "publicKeyPem": "-----BEGIN PUBLIC KEY-----\n…\n-----END PUBLIC KEY-----\n",
+    "trust": {
+      "key_id": "f27c7f51…", "principal_id": "install:f27c7f51…",
+      "usages": ["EvidenceSigning"],
+      "not_before": "2026-01-01T00:00:00Z", "not_after": "2027-01-01T00:00:00Z",
+      "state": "Active", "retired_at": null, "revoked_at": null,
+      "revocation_reason": null, "revocation_effective_from": null
+    }
+  }]
+}
+```
+
+The lifecycle is in the file because the runner, not the controller, is the one
+that has read the receipt's claimed signing time. So a key **retired** after
+the receipt was written still verifies it (D3 §7.4: a retired key keeps what it
+signed before `retired_at`), a key **revoked for compromise** verifies nothing
+(a restore Job holds no earlier independent observation of the receipt), a key
+revoked as `Superseded`/`Unspecified` is a retirement at
+`revocation_effective_from`, and a key without `EvidenceSigning` refuses as
+`KeyUsageMismatch`. A standalone `logweir restore run` of a point-bound plan
+(the disaster path, with no cluster) needs the same file, written by hand from
+the installation's public evidence-signing keys.
 
 A plan carrying this block requires **execution contract v2**, and that is
 enforced: a v1 invocation carrying `source.point` is a post-rollout Restore

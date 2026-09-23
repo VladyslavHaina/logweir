@@ -488,7 +488,7 @@ pub fn sync_with(
 /// `…/<run_id>.receipt.json` -> `…/<run_id>.receipt.sig`, which is
 /// `phase_run::receipt_keys`'s pairing read backwards. One derivation, so a
 /// backfill looks for the sidecar the runner actually wrote.
-fn sidecar_key_of(receipt_key: &str) -> String {
+pub(crate) fn sidecar_key_of(receipt_key: &str) -> String {
     format!("{}.sig", receipt_key.trim_end_matches(".json"))
 }
 

@@ -1728,6 +1728,72 @@ fn the_approval_bundle_is_immutable_exact_and_bound_to_the_restore() {
     );
 }
 
+/// **M-1, THE PER-RUN ARM** (D3 §5.5 step 6). A plan that binds a recovery
+/// point renders a fifth bundle member, the evidence keyring, and pins its
+/// digest: the bundle carries exactly [`evidence_keyring_bytes`], the
+/// contract carries `sha256` over those bytes, the argv names the file and
+/// the Job projects it. The Backup-bound fixture above keeps its four
+/// members, so an existing Restore's bundle is byte-unchanged.
+#[test]
+fn a_point_bound_plan_renders_and_pins_the_evidence_keyring() {
+    use logweir_core::execution_contract::EVIDENCE_KEYS_SHA256_ENV;
+    use weirkeeper::controllers::restore::{
+        evidence_keyring_bytes, execution_contract_env, EVIDENCE_KEYS_FILE,
+    };
+    let plan = PLAN_BYTES.replace(
+        "  topics: [orders, payments]\n",
+        &format!(
+            "  topics: [orders, payments]\n  point:\n    point_id: lwp1-{a}\n    receipt_key: \
+             logweir/backups/drill-demo/receipt.json\n    receipt_sha256: sha256:{b}\n    \
+             manifest_sha256: sha256:{b}\n",
+            a = "a".repeat(32),
+            b = "b".repeat(64),
+        ),
+    );
+    let hash = sha256_prefixed(plan.as_bytes());
+    let bound: Restore = serde_json::from_str(&restore_json(&plan, APPROVAL, NAME))
+        .expect("the fixture is a Restore");
+    let bound_approval: weirkeeper::crds::approval::Approval =
+        serde_json::from_str(&approval_json(true, &hash, &hash)).expect("an Approval");
+    let trust = legacy_trust();
+
+    let bundle = approval_bundle_config_map(&bound, &bound_approval, &trust, now())
+        .expect("verified inputs materialize");
+    let data = bundle.data.as_ref().unwrap();
+    assert_eq!(data.len(), 5, "the four members and the keyring: {data:?}");
+    let keyring = evidence_keyring_bytes(&trust).expect("the keyring renders");
+    assert_eq!(data.get(EVIDENCE_KEYS_FILE), Some(&keyring));
+
+    let env = execution_contract_env(&bound, &bound_approval, &trust, now()).expect("the contract");
+    assert!(
+        env.iter().any(
+            |(k, v)| k == EVIDENCE_KEYS_SHA256_ENV && *v == sha256_prefixed(keyring.as_bytes())
+        ),
+        "the contract pins the keyring's digest: {env:?}"
+    );
+    let argv = runner_argv(&bound, &[KEY_ID_LIVE.to_string()]);
+    assert!(
+        argv.windows(2).any(|w| w[0] == "--evidence-keys"
+            && w[1] == format!("{APPROVAL_MOUNT_PATH}/{EVIDENCE_KEYS_FILE}")),
+        "the argv names the mounted keyring: {argv:?}"
+    );
+
+    // CONTROL: the Backup-bound plan renders none of it.
+    let plain = approval_bundle_config_map(&restore(), &approval(true), &trust, now())
+        .expect("verified inputs materialize");
+    assert!(!plain
+        .data
+        .as_ref()
+        .unwrap()
+        .contains_key(EVIDENCE_KEYS_FILE));
+    assert!(
+        !execution_contract_env(&restore(), &approval(true), &trust, now())
+            .expect("the contract")
+            .iter()
+            .any(|(k, _)| k == EVIDENCE_KEYS_SHA256_ENV)
+    );
+}
+
 #[test]
 fn an_existing_bundle_must_match_owner_bindings_immutability_and_every_byte() {
     let desired =

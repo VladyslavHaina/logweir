@@ -654,14 +654,44 @@ exactly the things a Restore created after the rollout has. Let the in-flight le
 | `LOGWEIR_EXECUTION_AUTHORIZATION_SHA256`, `…_AUTHORIZATION_SIDECAR_SHA256`, `…_AUTHORIZATION_KEYS_SHA256`, `…_REHEARSAL_SCHEDULE_UID` | Job environment | no standing authorization; mounted material with no pinned digest is **refused**, never ignored |
 | `LOGWEIR_EXECUTION_POLICY_SNAPSHOT_SHA256` | Job environment | the synthesized `legacy-governed-v1` policy |
 | `LOGWEIR_EXECUTION_CONFIRMATION_KEY_SHA256` | Job environment | the legacy single-key bundle |
+| `LOGWEIR_EXECUTION_EVIDENCE_KEYS_SHA256` | Job environment | no evidence keyring is mounted — which the controller renders exactly when the plan carries `source.point`, so a point-bound plan without it is refused `PointUntrusted` (below) |
 
-The five optional bundle members (`--standing-authorization` and its derived `.sig` sidecar,
-`--authorization-keys`, `--policy-snapshot`, `--confirmation-key`) are digest-pinned in **both**
-directions: a pinned digest with nothing mounted is a lost bundle member, and a mounted member with
-no pinned digest is material the controller never committed to. Both are refused. Supplying any of
-them to a standalone invocation — one with no execution contract at all — is refused too, because
-nothing could make unpinned material trustworthy and silently ignoring it would let an operator
-believe an authorization was enforced when nothing bound it to the run.
+The six optional bundle members (`--standing-authorization` and its derived `.sig` sidecar,
+`--authorization-keys`, `--policy-snapshot`, `--confirmation-key`, `--evidence-keys`) are
+digest-pinned in **both** directions: a pinned digest with nothing mounted is a lost bundle member,
+and a mounted member with no pinned digest is material the controller never committed to. Both are
+refused. Supplying any of the first four to a standalone invocation — one with no execution
+contract at all — is refused too, because nothing could make unpinned material trustworthy and
+silently ignoring it would let an operator believe an authorization was enforced when nothing bound
+it to the run. `--evidence-keys` is the exception, because it only ever NARROWS: it is the anchor a
+point-bound plan's receipt signature must verify against, a standalone run of such a plan (the
+disaster path) cannot proceed without it, and a keyring the operator wrote can refuse a receipt but
+never authorise a run.
+
+### A bound point's receipt signature is verified before any data moves (D3 §5.5 step 6)
+
+Before PLAT-15.2's review fix, the runner's point binding checked digests only — the receipt's
+bytes, its re-derived point id, its manifest digest and the manifest's bytes — so an archive whose
+writer could replace the receipt AND the manifest together would pass. The runner now also verifies
+the receipt's DSSE sidecar (`<receipt>.sig`) against the mounted evidence keyring with the same
+verifier `logweir drill verify` uses (`logweir_evidence::verify::verify_detached`), and judges the
+key that verified with `logweir_core::trust::decide` for `EvidenceSigning` at the receipt's own
+`finished_at`. The check runs after the digest checks and before the manifest is read, so a
+refusal constructs no client and creates no target topic.
+[`docs/formats/drill-spec.md`](formats/drill-spec.md) has the keyring's format and its lifecycle
+semantics (a retired key keeps what it signed before `retired_at`; a key revoked for compromise
+verifies nothing).
+
+**Migration.** A `Restore` or rehearsal whose plan carries `source.point` gets the keyring from a
+controller at this version; one without `source.point` (every Backup-bound restore) renders
+byte-for-byte the bundle it rendered before and is unaffected. Upgrade the controller and the
+runner image together: a runner at this version handed a point-bound plan by an older controller
+refuses it `PointUntrusted` ("no evidence-signing keyring"), and a runner older than this version
+does not know `--evidence-keys` and fails argument parsing (exit 1, a usage error) before any work. A point-bound
+`Restore` admitted by the older controller whose immutable approval bundle was already created but
+whose Job was not yet created when the controller was replaced renders a different bundle now, and
+is refused `ApprovalBundleConflict` (terminal) rather than run without the keyring: delete it and create it
+again. A standalone `logweir restore run` of a point-bound plan now needs `--evidence-keys`.
 
 ### The standing rehearsal authorization is SIGNED, and the runner checks the signature
 
@@ -740,11 +770,12 @@ controller pinned, and that the key may authorise.
 | a standing authorization outside its validity window | 3 | `GuardRefused`, message opens `AuthorizationExpired` |
 | a mounted keyring or sidecar that does not parse | 1 | — (structural corruption of a file, not a statement about authorisation) |
 | a bound point whose receipt or manifest digest differs | 3 | `GuardRefused`, message opens `PointBindingMismatch` |
+| a bound point whose receipt carries no signature, a signature no mounted evidence key verifies, or a key whose lifecycle or usage refuses it — or a point-bound plan with no evidence keyring | 3 | `GuardRefused`, message opens `PointUntrusted` |
 | a bound point whose receipt or manifest is missing or unreadable | 1 | — (no refusal line; nothing about the plan was found wanting) |
 
 `logweir_core::guard::TERMINAL_STATES` is still the closed three-element list, so every refusal
 above classifies as the general `GuardRefused` and carries its state name as the first token of the
-message. Promoting `PointBindingMismatch`, `RehearsalScopeViolation`, `AuthorizationInvalid` and
+message. Promoting `PointBindingMismatch`, `PointUntrusted`, `RehearsalScopeViolation`, `AuthorizationInvalid` and
 `AuthorizationExpired` to declared terminal states is a change to that list and to the controller's
 mapping, and is not made here.
 

@@ -1654,8 +1654,23 @@ pub fn approval_bundle_config_map(
             (ALLOWED_CLUSTERS_FILE.to_string(), allowed_bytes),
         ]
         .into_iter()
+        .chain(evidence_member(restore, trust)?)
         .collect(),
     ))
+}
+
+/// The [`EVIDENCE_KEYS_FILE`] member, when this plan binds a point.
+fn evidence_member(
+    restore: &Restore,
+    trust: &crate::trust::ResolvedTrust,
+) -> Result<Option<(String, String)>, RestoreError> {
+    if !plan_binds_point(restore) {
+        return Ok(None);
+    }
+    Ok(Some((
+        EVIDENCE_KEYS_FILE.to_string(),
+        evidence_keyring_bytes(trust)?,
+    )))
 }
 
 // --------------------------------------------------------------------------
@@ -1700,6 +1715,55 @@ fn bundle_object(
 
 /// The trusted-public-keys member, standing-only — D3 §4.3(e).
 pub const AUTHORIZATION_KEYS_FILE: &str = "authorization-keys.json";
+
+/// The evidence-signing keyring member — D3 §5.5 step 6
+/// (RUNNER-POINT-BINDING-SKIPS-SIGNATURE). Present in either arm's bundle
+/// exactly when the plan binds a recovery point (`source.point`); the runner
+/// verifies that point's receipt signature against it before any client is
+/// constructed, and refuses a point-bound plan without it.
+pub const EVIDENCE_KEYS_FILE: &str = "evidence-keys.json";
+
+/// Whether this `Restore`'s plan binds a recovery point (`source.point`).
+///
+/// ONE PREDICATE decides the bundle member, its pinned digest, the runner
+/// flag and the projected file, so the four cannot disagree. A plan that does
+/// not parse binds nothing here; the runner refuses it on its own terms.
+#[must_use]
+pub fn plan_binds_point(restore: &Restore) -> bool {
+    serde_yaml::from_str::<logweir_core::spec::DrillSpec>(&restore.spec.plan_bytes)
+        .is_ok_and(|plan| plan.source.point.is_some())
+}
+
+/// The [`EVIDENCE_KEYS_FILE`] bytes: every key of the namespace's resolved
+/// trust whose public half parses and whose declared id is its own, with its
+/// whole lifecycle record. The runner, not this function, judges each key --
+/// with `logweir_core::trust::decide` for `EvidenceSigning` against the
+/// receipt's own claimed signing time -- so a revoked key is RENDERED (the
+/// refusal can then name it) and never accepted.
+///
+/// # Errors
+///
+/// [`RestoreError::Materialization`] for a keyring that will not serialise.
+pub fn evidence_keyring_bytes(trust: &crate::trust::ResolvedTrust) -> Result<String, RestoreError> {
+    use logweir_core::execution_contract as wire;
+    let keyring = wire::EvidenceKeyring {
+        format_version: wire::EVIDENCE_KEYRING_FORMAT_VERSION.to_string(),
+        keys: trust
+            .keys
+            .iter()
+            .filter(|k| k.is_usable())
+            .map(|k| wire::EvidenceKey {
+                public_key_pem: k.spki_pem.clone(),
+                trust: k.trust.clone(),
+            })
+            .collect(),
+    };
+    serde_json::to_string_pretty(&keyring).map_err(|error| {
+        RestoreError::Materialization(format!(
+            "the evidence-signing keyring could not be rendered: {error}"
+        ))
+    })
+}
 
 /// The SIGNED standing rehearsal authorization, at
 /// `/approval/standing-authorization.json`.
@@ -1921,6 +1985,9 @@ pub fn standing_bundle_config_map(
             // contract pins no approval digest for it.
         ]
         .into_iter()
+        // A rehearsal's plan ALWAYS binds its point, so it always carries the
+        // evidence keyring too (D3 §5.5 step 6).
+        .chain(evidence_member(restore, trust)?)
         .collect(),
     ))
 }
@@ -2180,7 +2247,22 @@ pub fn standing_execution_contract_env(
             contract::REHEARSAL_SCHEDULE_UID_ENV.to_string(),
             schedule_uid.to_string(),
         ),
-    ])
+    ]
+    .into_iter()
+    .chain(evidence_keys_env(data))
+    .collect())
+}
+
+/// `LOGWEIR_EXECUTION_EVIDENCE_KEYS_SHA256`, exactly when the rendered bundle
+/// carries [`EVIDENCE_KEYS_FILE`] -- computed from the bytes that were
+/// rendered, like every other pinned member.
+fn evidence_keys_env(data: &BTreeMap<String, String>) -> Option<(String, String)> {
+    data.get(EVIDENCE_KEYS_FILE).map(|bytes| {
+        (
+            logweir_core::execution_contract::EVIDENCE_KEYS_SHA256_ENV.to_string(),
+            sha256_prefixed(bytes.as_bytes()),
+        )
+    })
 }
 
 /// Environment contract pinned into every newly rendered Restore Job.
@@ -2268,7 +2350,10 @@ pub fn execution_contract_env(
             contract::ALLOWED_CLUSTERS_SHA256_ENV.to_string(),
             digest(get(ALLOWED_CLUSTERS_FILE)?.as_bytes()),
         ),
-    ])
+    ]
+    .into_iter()
+    .chain(evidence_keys_env(data))
+    .collect())
 }
 
 /// Whether an `AlreadyExists` object is the exact bundle this reconcile
@@ -2504,6 +2589,14 @@ pub fn runner_argv(restore: &Restore, approver_key_ids: &[String]) -> Vec<String
         argv.push("--approver-key-ids".to_string());
         argv.push(id.clone());
     }
+    // D3 §5.5 step 6: a point-bound plan's receipt signature is verified
+    // against the mounted evidence keyring before any client exists.
+    if plan_binds_point(restore) {
+        argv.extend([
+            "--evidence-keys".to_string(),
+            format!("{APPROVAL_MOUNT_PATH}/{EVIDENCE_KEYS_FILE}"),
+        ]);
+    }
     argv.extend([
         "--allowed-clusters".to_string(),
         format!("{APPROVAL_MOUNT_PATH}/{ALLOWED_CLUSTERS_FILE}"),
@@ -2737,36 +2830,45 @@ pub fn runner_job_spec_with_destinations(
                 // sidecar in that slot makes a correctly signed rehearsal look
                 // like a substituted approval. A rehearsal bundle carries no
                 // approval slot at all, so neither per-run member is projected.
-                items: if restore.spec.authorization.is_some() {
-                    vec![
-                        (
-                            STANDING_AUTHORIZATION_FILE.to_string(),
-                            STANDING_AUTHORIZATION_FILE.to_string(),
-                        ),
-                        (
-                            STANDING_AUTHORIZATION_SIG_FILE.to_string(),
-                            STANDING_AUTHORIZATION_SIG_FILE.to_string(),
-                        ),
-                        (
-                            AUTHORIZATION_KEYS_FILE.to_string(),
-                            AUTHORIZATION_KEYS_FILE.to_string(),
-                        ),
-                        (APPROVER_KEY_FILE.to_string(), APPROVER_KEY_FILE.to_string()),
-                        (
-                            ALLOWED_CLUSTERS_FILE.to_string(),
-                            ALLOWED_CLUSTERS_FILE.to_string(),
-                        ),
-                    ]
-                } else {
-                    vec![
-                        (APPROVAL_DOC_FILE.to_string(), APPROVAL_DOC_FILE.to_string()),
-                        (APPROVAL_SIG_FILE.to_string(), APPROVAL_SIG_FILE.to_string()),
-                        (APPROVER_KEY_FILE.to_string(), APPROVER_KEY_FILE.to_string()),
-                        (
-                            ALLOWED_CLUSTERS_FILE.to_string(),
-                            ALLOWED_CLUSTERS_FILE.to_string(),
-                        ),
-                    ]
+                items: {
+                    let mut items = if restore.spec.authorization.is_some() {
+                        vec![
+                            (
+                                STANDING_AUTHORIZATION_FILE.to_string(),
+                                STANDING_AUTHORIZATION_FILE.to_string(),
+                            ),
+                            (
+                                STANDING_AUTHORIZATION_SIG_FILE.to_string(),
+                                STANDING_AUTHORIZATION_SIG_FILE.to_string(),
+                            ),
+                            (
+                                AUTHORIZATION_KEYS_FILE.to_string(),
+                                AUTHORIZATION_KEYS_FILE.to_string(),
+                            ),
+                            (APPROVER_KEY_FILE.to_string(), APPROVER_KEY_FILE.to_string()),
+                            (
+                                ALLOWED_CLUSTERS_FILE.to_string(),
+                                ALLOWED_CLUSTERS_FILE.to_string(),
+                            ),
+                        ]
+                    } else {
+                        vec![
+                            (APPROVAL_DOC_FILE.to_string(), APPROVAL_DOC_FILE.to_string()),
+                            (APPROVAL_SIG_FILE.to_string(), APPROVAL_SIG_FILE.to_string()),
+                            (APPROVER_KEY_FILE.to_string(), APPROVER_KEY_FILE.to_string()),
+                            (
+                                ALLOWED_CLUSTERS_FILE.to_string(),
+                                ALLOWED_CLUSTERS_FILE.to_string(),
+                            ),
+                        ]
+                    };
+                    if plan_binds_point(restore) {
+                        items.push((
+                            EVIDENCE_KEYS_FILE.to_string(),
+                            EVIDENCE_KEYS_FILE.to_string(),
+                        ));
+                    }
+                    items
                 },
             }];
             mounts.extend(projection.config_map_mounts);

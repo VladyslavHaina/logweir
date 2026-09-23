@@ -1563,6 +1563,7 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
             authorization_keys: None,
             policy_snapshot: None,
             confirmation_key: None,
+            evidence_keys: None,
         },
         run_id: logweir::ids::new_run_id(),
         ctx: logweir::drill::Ctx {

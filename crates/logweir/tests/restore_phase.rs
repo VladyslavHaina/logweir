@@ -348,8 +348,10 @@ evidence: {{backend: filesystem, path: {evidence}}}
     }
 
     /// Mount a bundle for `plan_text`, stamp a complete v2 contract over it and
-    /// run the real binary.
-    fn run_bound_restore(plan_text: &str) -> Run {
+    /// run the real binary. `evidence_keys`, when given, is mounted as
+    /// `--evidence-keys` and PINNED by `LOGWEIR_EXECUTION_EVIDENCE_KEYS_SHA256`
+    /// -- the shape the controller renders for a point-bound plan.
+    fn run_bound_restore(plan_text: &str, evidence_keys: Option<&[u8]>) -> Run {
         let dir = tempfile::tempdir().expect("tempdir");
         let approver = SigningKey::generate_ed25519();
         let signing = SigningKey::generate_ed25519();
@@ -403,6 +405,11 @@ evidence: {{backend: filesystem, path: {evidence}}}
             .arg("--signing-key")
             .arg(&signing_path)
             .args(["--triggered-by", "approval/approval-a"]);
+        if let Some(keys) = evidence_keys {
+            let keys_path = dir.path().join("evidence-keys.json");
+            std::fs::write(&keys_path, keys).unwrap();
+            command.arg("--evidence-keys").arg(&keys_path);
+        }
         for name in wire::ALL_ENV_ANY {
             command.env_remove(name);
         }
@@ -426,6 +433,9 @@ evidence: {{backend: filesystem, path: {evidence}}}
         ] {
             command.env(name, value);
         }
+        if let Some(keys) = evidence_keys {
+            command.env(wire::EVIDENCE_KEYS_SHA256_ENV, sha256_prefixed(keys));
+        }
         let output = command.output().expect("run the binary");
         Run {
             code: output.status.code().unwrap_or(-1),
@@ -437,8 +447,36 @@ evidence: {{backend: filesystem, path: {evidence}}}
         }
     }
 
-    /// An archive holding one receipt, and the binding that truthfully names it.
-    fn archive() -> (tempfile::TempDir, String, String) {
+    /// An evidence keyring trusting `key` for `EvidenceSigning`, with `state`.
+    fn evidence_keys(key: &SigningKey, state: logweir_core::trust::KeyState) -> Vec<u8> {
+        let revoked = state == logweir_core::trust::KeyState::Revoked;
+        serde_json::to_vec(&wire::EvidenceKeyring {
+            format_version: wire::EVIDENCE_KEYRING_FORMAT_VERSION.to_string(),
+            keys: vec![wire::EvidenceKey {
+                public_key_pem: key.verifying_key().to_public_key_pem().expect("pem"),
+                trust: logweir_core::trust::TrustedKey {
+                    key_id: key.key_id(),
+                    principal_id: format!("install:{}", key.key_id()),
+                    usages: vec![logweir_core::trust::KeyUsage::EvidenceSigning],
+                    not_before: "2025-01-01T00:00:00Z".parse().unwrap(),
+                    not_after: "2030-01-01T00:00:00Z".parse().unwrap(),
+                    state,
+                    retired_at: None,
+                    revoked_at: revoked.then(Utc::now),
+                    revocation_reason: revoked
+                        .then_some(logweir_core::trust::RevocationReason::KeyCompromise),
+                    revocation_effective_from: revoked
+                        .then(|| "2025-06-01T00:00:00Z".parse().unwrap()),
+                },
+            }],
+        })
+        .expect("the keyring serialises")
+    }
+
+    /// An archive holding one SIGNED receipt (and its `.receipt.sig`), the
+    /// binding that truthfully names it, and the key that signed it. With
+    /// `signed: false` the sidecar is left out -- an unsigned receipt.
+    fn archive_signed(signed: bool) -> (tempfile::TempDir, String, String, SigningKey) {
         let dir = tempfile::tempdir().expect("tempdir");
         let manifest = br#"{"topics":[]}"#.to_vec();
         let manifest_sha256 = sha256_prefixed(&manifest);
@@ -469,10 +507,24 @@ evidence: {{backend: filesystem, path: {evidence}}}
         });
         let receipt_bytes = serde_json::to_vec(&receipt).expect("receipt serialises");
         let receipt_key = "logweir/backups/nightly-7/run-1.receipt.json";
-        for (key, bytes) in [
+        let signer = SigningKey::generate_ed25519();
+        let mut objects = vec![
             (receipt_key, receipt_bytes.clone()),
             (manifest_key, manifest),
-        ] {
+        ];
+        if signed {
+            let sidecar = sign_detached(
+                &signer,
+                logweir_evidence::PAYLOAD_TYPE_BACKUP_RECEIPT,
+                &receipt_bytes,
+            )
+            .expect("sign");
+            objects.push((
+                "logweir/backups/nightly-7/run-1.receipt.sig",
+                serde_json::to_vec(&sidecar).expect("serialises"),
+            ));
+        }
+        for (key, bytes) in objects {
             let path = dir.path().join(key);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, bytes).unwrap();
@@ -487,14 +539,19 @@ evidence: {{backend: filesystem, path: {evidence}}}
              receipt_sha256: {}\n    manifest_sha256: {manifest_sha256}\n",
             sha256_prefixed(&receipt_bytes)
         );
-        (dir, truthful, point_id)
+        (dir, truthful, point_id, signer)
+    }
+
+    fn archive() -> (tempfile::TempDir, String, String, SigningKey) {
+        archive_signed(true)
     }
 
     /// **The ordering claim.** A bound point the archive does not hold is exit
     /// 3, and NO phase has begun when it is refused.
     #[test]
     fn a_point_the_archive_does_not_hold_is_refused_before_phase_zero() {
-        let (archive_dir, truthful, _) = archive();
+        let (archive_dir, truthful, _, signer) = archive();
+        let keys = evidence_keys(&signer, logweir_core::trust::KeyState::Active);
         let evidence = tempfile::tempdir().expect("tempdir");
         let tampered = truthful.replace(
             &truthful
@@ -504,7 +561,10 @@ evidence: {{backend: filesystem, path: {evidence}}}
                 .to_string(),
             &format!("    receipt_sha256: sha256:{}", "0".repeat(64)),
         );
-        let run = run_bound_restore(&plan(archive_dir.path(), evidence.path(), &tampered));
+        let run = run_bound_restore(
+            &plan(archive_dir.path(), evidence.path(), &tampered),
+            Some(&keys),
+        );
         assert_eq!(run.code, 3, "{}", run.transcript);
         assert!(
             run.transcript.contains("PointBindingMismatch"),
@@ -530,18 +590,33 @@ evidence: {{backend: filesystem, path: {evidence}}}
     /// it, the row above would pass for a build that refused every bound plan.
     #[test]
     fn a_truthful_binding_gets_past_the_check_and_fails_later() {
-        let (archive_dir, truthful, point_id) = archive();
+        let (archive_dir, truthful, point_id, signer) = archive();
+        let keys = evidence_keys(&signer, logweir_core::trust::KeyState::Active);
         let evidence = tempfile::tempdir().expect("tempdir");
         // An evidence location that does not exist, so `drill::context` fails
         // FAST once the binding has been proven. Without it this row waits out
         // librdkafka's metadata timeout against a closed port to learn nothing
         // it does not already know: what is being asserted is that the run got
         // PAST the binding, not what it died of afterwards.
-        let run = run_bound_restore(&plan(
-            archive_dir.path(),
-            &evidence.path().join("no-such-evidence-location"),
-            &truthful,
-        ));
+        let run = run_bound_restore(
+            &plan(
+                archive_dir.path(),
+                &evidence.path().join("no-such-evidence-location"),
+                &truthful,
+            ),
+            Some(&keys),
+        );
+        assert!(
+            run.transcript.contains("recovery point binding verified"),
+            "the binding AND its signature are proven, and the run goes on (exit {}):\n{}",
+            run.code,
+            run.transcript
+        );
+        assert!(
+            !run.transcript.contains("PointUntrusted"),
+            "{}",
+            run.transcript
+        );
         assert!(
             !run.transcript.contains("PointBindingMismatch"),
             "the binding is truthful; the run must fail for a LATER reason (exit {}):\n{}",
@@ -554,5 +629,77 @@ evidence: {{backend: filesystem, path: {evidence}}}
             run.transcript
         );
         assert_ne!(run.code, 0, "no broker is running, so it cannot succeed");
+    }
+
+    /// The refusal the ordering claim is about for SIGNATURES (D3 §5.5 step
+    /// 6): exit 3 `PointUntrusted`, before phase 0, the bootstrap never dialled
+    /// -- so the plan's target topic is never created.
+    fn refused_before_phase_zero(run: &Run, needle: &str) {
+        assert_eq!(run.code, 3, "{}", run.transcript);
+        assert!(
+            run.transcript.contains("PointUntrusted"),
+            "{}",
+            run.transcript
+        );
+        assert!(
+            run.transcript.contains(needle),
+            "{needle:?}:\n{}",
+            run.transcript
+        );
+        assert!(
+            !run.transcript.contains("progress-phase=0:admit"),
+            "no restore phase may begin:\n{}",
+            run.transcript
+        );
+        assert!(
+            !run.transcript.contains("19098"),
+            "the plan's bootstrap must never be dialled:\n{}",
+            run.transcript
+        );
+    }
+
+    #[test]
+    fn an_unsigned_receipt_is_refused_before_phase_zero() {
+        let (archive_dir, truthful, _, signer) = archive_signed(false);
+        let keys = evidence_keys(&signer, logweir_core::trust::KeyState::Active);
+        let evidence = tempfile::tempdir().expect("tempdir");
+        let run = run_bound_restore(
+            &plan(archive_dir.path(), evidence.path(), &truthful),
+            Some(&keys),
+        );
+        refused_before_phase_zero(&run, "carries no signature");
+    }
+
+    #[test]
+    fn a_receipt_signed_by_a_revoked_key_is_refused_before_phase_zero() {
+        let (archive_dir, truthful, _, signer) = archive();
+        let keys = evidence_keys(&signer, logweir_core::trust::KeyState::Revoked);
+        let evidence = tempfile::tempdir().expect("tempdir");
+        let run = run_bound_restore(
+            &plan(archive_dir.path(), evidence.path(), &truthful),
+            Some(&keys),
+        );
+        refused_before_phase_zero(&run, "Revoked");
+    }
+
+    #[test]
+    fn a_receipt_signed_by_an_untrusted_key_is_refused_before_phase_zero() {
+        let (archive_dir, truthful, _, _signer) = archive();
+        let stranger = SigningKey::generate_ed25519();
+        let keys = evidence_keys(&stranger, logweir_core::trust::KeyState::Active);
+        let evidence = tempfile::tempdir().expect("tempdir");
+        let run = run_bound_restore(
+            &plan(archive_dir.path(), evidence.path(), &truthful),
+            Some(&keys),
+        );
+        refused_before_phase_zero(&run, "does not verify under any");
+    }
+
+    #[test]
+    fn a_point_bound_restore_with_no_keyring_is_refused_before_phase_zero() {
+        let (archive_dir, truthful, _, _signer) = archive();
+        let evidence = tempfile::tempdir().expect("tempdir");
+        let run = run_bound_restore(&plan(archive_dir.path(), evidence.path(), &truthful), None);
+        refused_before_phase_zero(&run, "no evidence-signing keyring");
     }
 }

@@ -300,6 +300,14 @@ pub struct RunArgs {
     /// `--confirmation-key`. The confirmation issuer's public key — the second
     /// of D0's "both public keys". Digest-pinned here, verified by PLAT-19.2.
     pub confirmation_key: Option<PathBuf>,
+    /// `--evidence-keys`. The evidence-signing keyring
+    /// ([`logweir_core::execution_contract::EvidenceKeyring`]) a plan bound to
+    /// a recovery point (`source.point`) has its receipt's signature checked
+    /// against before any client is constructed — D3 §5.5 step 6. Under an
+    /// execution contract it is pinned by `LOGWEIR_EXECUTION_EVIDENCE_KEYS_SHA256`;
+    /// standalone, it is the operator's own trust anchor. A point-bound plan
+    /// with no keyring is refused (`PointUntrusted`), never run unverified.
+    pub evidence_keys: Option<PathBuf>,
 }
 
 /// Controller-pinned identity and byte digests carried by a new Restore Job's
@@ -355,6 +363,9 @@ pub struct ExecutionContract {
     /// is. **Now a verified binding and not merely a label**: it is compared
     /// against the SIGNED document's `subjectRef.uid`.
     pub rehearsal_schedule_uid: Option<String>,
+    /// v2: the digest of the mounted evidence-signing keyring, pinned exactly
+    /// when the plan carries `source.point` (D3 §5.5 step 6).
+    pub evidence_keys_sha256: Option<String>,
     /// v2, PLAT-19.2's half: the approval-policy snapshot digest. Absent means
     /// the synthesized `legacy-governed-v1` policy, which is what D0 says an
     /// installation with no binding gets.
@@ -430,6 +441,7 @@ pub fn execution_contract_from(
     let rehearsal_schedule_uid = optional(wire::REHEARSAL_SCHEDULE_UID_ENV);
     let policy_snapshot_sha256 = optional(wire::POLICY_SNAPSHOT_SHA256_ENV);
     let confirmation_key_sha256 = optional(wire::CONFIRMATION_KEY_SHA256_ENV);
+    let evidence_keys_sha256 = optional(wire::EVIDENCE_KEYS_SHA256_ENV);
     for (present, what) in [
         (
             authorization_kind_text.as_deref() == Some(wire::AUTHORIZATION_KIND_STANDING),
@@ -458,6 +470,10 @@ pub fn execution_contract_from(
         (
             confirmation_key_sha256.is_some(),
             "a confirmation-issuer public key",
+        ),
+        (
+            evidence_keys_sha256.is_some(),
+            "an evidence-signing keyring",
         ),
     ] {
         if present {
@@ -602,6 +618,7 @@ pub fn execution_contract_from(
         authorization_sidecar_sha256,
         authorization_keys_sha256,
         rehearsal_schedule_uid,
+        evidence_keys_sha256,
         policy_snapshot_sha256,
         confirmation_key_sha256,
     }))
@@ -703,6 +720,8 @@ pub struct ApprovalBundleBytes {
     pub authorization_keys: Option<Vec<u8>>,
     pub policy_snapshot: Option<Vec<u8>>,
     pub confirmation_key: Option<Vec<u8>>,
+    /// The evidence-signing keyring, for a point-bound plan.
+    pub evidence_keys: Option<Vec<u8>>,
 }
 
 /// Independently compare every mounted public input with the immutable Job
@@ -792,7 +811,7 @@ pub fn validate_execution_contract(
     /// One optional bundle-v2 member: its label, the digest the contract pins
     /// for it, and the bytes that were mounted.
     type OptionalMember<'a> = (&'a str, Option<&'a String>, Option<&'a Vec<u8>>);
-    let optional_members: [OptionalMember; 7] = [
+    let optional_members: [OptionalMember; 8] = [
         // **The per-run approval slot is now one of these** — PLAT-14.3b. It
         // is present-and-pinned under `approval` and absent-and-unpinned under
         // `standing`, and BOTH directions are already refused here: a pinned
@@ -835,6 +854,11 @@ pub fn validate_execution_contract(
             "confirmation-issuer public key",
             contract.confirmation_key_sha256.as_ref(),
             bundle.confirmation_key.as_ref(),
+        ),
+        (
+            "trusted evidence keyring",
+            contract.evidence_keys_sha256.as_ref(),
+            bundle.evidence_keys.as_ref(),
         ),
     ];
     for (label, expected, bytes) in optional_members {
@@ -1848,6 +1872,9 @@ struct StartupInputs {
     /// contract by the time this exists — the SIGNATURE is checked later, in
     /// `check_v2_bindings`, because it needs the clock.
     authorization: Option<StandingAuthorizationBytes>,
+    /// The evidence-signing keyring (`--evidence-keys`), digest-checked
+    /// against the contract when there is one. Read by the point binding.
+    evidence_keys: Option<Vec<u8>>,
 }
 
 /// The signed standing authorization as three mounted byte-streams.
@@ -1952,6 +1979,7 @@ fn load_startup_inputs(
             &args.confirmation_key,
             "confirmation-issuer public key",
         )?,
+        evidence_keys: optional_member(&args.evidence_keys, "trusted evidence keyring")?,
     };
     if let Some(contract) = contract {
         validate_execution_contract(contract, args.triggered_by.as_deref(), &bundle)?;
@@ -2019,6 +2047,7 @@ fn load_startup_inputs(
     // that path refuses the material outright above. The explicit `else` is
     // still here because "two of the three arrived" must never silently become
     // "no standing authorization to check".
+    let evidence_keys = bundle.evidence_keys;
     let authorization = match (
         bundle.authorization,
         bundle.authorization_sidecar,
@@ -2045,6 +2074,7 @@ fn load_startup_inputs(
         allowed_text,
         approved,
         authorization,
+        evidence_keys,
     })
 }
 
@@ -2285,7 +2315,14 @@ fn check_v2_bindings(
         // refused.
         let archive = Store::read_only_from_url(&plan.source.storage)
             .map_err(|error| DrillError::Operational(error.to_string()))?;
-        if let Some(point_id) = binding::verify_point_binding(plan, &archive)? {
+        // THE SIGNATURE HALF NEEDS THE CLOCK, read here (Global Constraint 1)
+        // and passed down, like the standing authorization's.
+        if let Some(point_id) = binding::verify_point_binding(
+            plan,
+            &archive,
+            startup.evidence_keys.as_deref(),
+            chrono::Utc::now(),
+        )? {
             tracing::info!(point_id = %point_id, "recovery point binding verified");
         }
     }
@@ -3633,6 +3670,7 @@ mod tests {
             authorization_keys: None,
             policy_snapshot: None,
             confirmation_key: None,
+            evidence_keys: None,
         }
     }
 
@@ -4712,6 +4750,7 @@ mod standing_approved_tests {
             authorization_keys: Some(PathBuf::from("authorization-keys.json")),
             policy_snapshot: None,
             confirmation_key: None,
+            evidence_keys: None,
         }
     }
 

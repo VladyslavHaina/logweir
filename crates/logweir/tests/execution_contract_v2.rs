@@ -197,6 +197,7 @@ fn contract_for(bundle: &ApprovalBundleBytes, version: wire::ContractVersion) ->
         rehearsal_schedule_uid: None,
         policy_snapshot_sha256: None,
         confirmation_key_sha256: None,
+        evidence_keys_sha256: None,
     }
 }
 
@@ -265,6 +266,10 @@ fn env_map(contract: &ExecutionContract) -> BTreeMap<String, String> {
         (
             wire::CONFIRMATION_KEY_SHA256_ENV,
             &contract.confirmation_key_sha256,
+        ),
+        (
+            wire::EVIDENCE_KEYS_SHA256_ENV,
+            &contract.evidence_keys_sha256,
         ),
     ] {
         if let Some(value) = value {
@@ -1275,6 +1280,57 @@ fn a_standing_contract_requires_a_rehearsal_trigger() {
     );
     validate_execution_contract(&contract, Some(STANDING_TRIGGER), &bundle)
         .expect("the rehearsal trigger is accepted");
+}
+
+/// **D3 §5.5 step 6's keyring is pinned in BOTH directions** -- the rule every
+/// other v2 member follows. A keyring the contract never committed to is
+/// never acted on (a controller-independent keyring would be a trust anchor
+/// nobody chose), and a pinned keyring that is not mounted is a lost member.
+/// A v1 contract may not pin one at all.
+#[test]
+fn the_evidence_keyring_is_pinned_both_ways_and_is_v2_material() {
+    let fixture = fixture();
+    let keys = br#"{"formatVersion":"1.0.0","keys":[]}"#.to_vec();
+
+    let mut mounted = fixture.bundle.clone();
+    mounted.evidence_keys = Some(keys.clone());
+    let unpinned = contract_for(&fixture.bundle, wire::ContractVersion::V2);
+    let error = validate_execution_contract(&unpinned, Some("approval/approval-a"), &mounted)
+        .unwrap_err_or_panic("an unpinned keyring is refused");
+    assert!(
+        error.to_string().contains("trusted evidence keyring"),
+        "{error}"
+    );
+    assert!(error.to_string().contains("pins no digest"), "{error}");
+
+    let mut pinned = contract_for(&fixture.bundle, wire::ContractVersion::V2);
+    pinned.evidence_keys_sha256 = Some(sha256_prefixed(&keys));
+    let error = validate_execution_contract(&pinned, Some("approval/approval-a"), &fixture.bundle)
+        .unwrap_err_or_panic("a pinned keyring that is not mounted is refused");
+    assert!(
+        error.to_string().contains("no such bundle member"),
+        "{error}"
+    );
+
+    // CONTROL: pinned and mounted, with the same bytes.
+    validate_execution_contract(&pinned, Some("approval/approval-a"), &mounted)
+        .expect("a pinned, mounted keyring is accepted");
+    let mut altered = mounted.clone();
+    altered.evidence_keys = Some(br#"{"formatVersion":"1.0.0","keys":[{}]}"#.to_vec());
+    assert!(
+        validate_execution_contract(&pinned, Some("approval/approval-a"), &altered).is_err(),
+        "a keyring swapped after the controller pinned it is refused"
+    );
+
+    let mut v1 = contract_for(&fixture.bundle, wire::ContractVersion::V1);
+    v1.evidence_keys_sha256 = Some(sha256_prefixed(&keys));
+    let map = env_map(&v1);
+    let error = execution_contract_for_invocation(Some(wire::VERSION_V1), |n| map.get(n).cloned())
+        .unwrap_err_or_panic("a v1 invocation may not carry a keyring pin");
+    assert!(
+        error.to_string().contains("evidence-signing keyring"),
+        "{error}"
+    );
 }
 
 // ===========================================================================

@@ -119,6 +119,7 @@ fn contract(bundle: &ApprovalBundleBytes) -> ExecutionContract {
         rehearsal_schedule_uid: None,
         policy_snapshot_sha256: None,
         confirmation_key_sha256: None,
+        evidence_keys_sha256: None,
     }
 }
 

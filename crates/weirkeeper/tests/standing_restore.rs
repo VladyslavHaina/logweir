@@ -20,9 +20,10 @@
 
 use chrono::{DateTime, TimeZone, Utc};
 use weirkeeper::controllers::restore::{
-    admit, runner_argv, runner_job_spec, triggered_by, RestoreAdmission, StandingAdmission,
-    ALLOWED_CLUSTERS_FILE, APPROVAL_DOC_FILE, APPROVAL_SIG_FILE, APPROVER_KEY_FILE,
-    AUTHORIZATION_KEYS_FILE, STANDING_AUTHORIZATION_FILE, STANDING_AUTHORIZATION_SIG_FILE,
+    admit, evidence_keyring_bytes, execution_contract_env, plan_binds_point, runner_argv,
+    runner_job_spec, triggered_by, RestoreAdmission, StandingAdmission, ALLOWED_CLUSTERS_FILE,
+    APPROVAL_DOC_FILE, APPROVAL_SIG_FILE, APPROVER_KEY_FILE, AUTHORIZATION_KEYS_FILE,
+    EVIDENCE_KEYS_FILE, STANDING_AUTHORIZATION_FILE, STANDING_AUTHORIZATION_SIG_FILE,
 };
 use weirkeeper::crds::restore::Restore;
 
@@ -1001,4 +1002,180 @@ fn the_minted_standing_authorization_is_admitted_by_the_controller() {
         ) && verdict.is_terminal(),
         "the minted document expires: {verdict:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// D3 §5.5 step 6 — the evidence keyring a point-bound rehearsal carries
+// (RUNNER-POINT-BINDING-SKIPS-SIGNATURE, the PLAT-15.2 review's M-1)
+// ---------------------------------------------------------------------------
+
+/// A second real Ed25519 key, used here as the installation's
+/// EvidenceSigning key (the same fixture key `approval_controller.rs` uses).
+const EVIDENCE_PEM: &str = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAet+vMgdQ3pfWnI6dhsflAD9gPHDHXqakzJIfaFRdAv0=\n-----END PUBLIC KEY-----\n";
+const EVIDENCE_KEY_ID: &str = "fcd34b4ee7e11187164366d9ba1d7dee711ce09f75e0fe2ec9e851a2bb3cf043";
+
+/// The fixture plan, binding a recovery point the way `rehearsal::render_plan`
+/// always does.
+fn point_plan_bytes() -> String {
+    plan_bytes().replace(
+        "  topics: [orders]\n",
+        &format!(
+            "  topics: [orders]\n  point:\n    point_id: lwp1-{hex32}\n    receipt_key: \
+             logweir/backups/nightly-7/receipt.json\n    receipt_sha256: sha256:{hex64}\n    \
+             manifest_sha256: sha256:{hex64}\n",
+            hex32 = "a".repeat(32),
+            hex64 = "b".repeat(64),
+        ),
+    )
+}
+
+fn point_bound_standing_restore() -> Restore {
+    let mut restore = standing_restore();
+    restore.spec.plan_bytes = point_plan_bytes();
+    restore
+}
+
+/// The approver key, an evidence key REVOKED for compromise, and one key
+/// whose PEM does not parse.
+fn evidence_trust() -> weirkeeper::trust::ResolvedTrust {
+    use weirkeeper::crds::trust_policy::{
+        KeyState, KeyUsage, RevocationReason, TrustPolicy, TrustPolicySpec,
+    };
+    let mut evidence = approver_key();
+    evidence.key_id = EVIDENCE_KEY_ID.to_string();
+    evidence.spki_pem = EVIDENCE_PEM.to_string();
+    evidence.usages = vec![KeyUsage::EvidenceSigning];
+    evidence.principal.id = format!("install:{EVIDENCE_KEY_ID}");
+    evidence.state = KeyState::Revoked;
+    evidence.revoked_at = Some(utc(2026, 9, 1));
+    evidence.revocation_reason = Some(RevocationReason::KeyCompromise);
+    let mut broken = approver_key();
+    broken.key_id = "0".repeat(64);
+    broken.spki_pem = "-----BEGIN PUBLIC KEY-----\nnot a key\n-----END PUBLIC KEY-----\n".into();
+    broken.usages = vec![KeyUsage::EvidenceSigning];
+    broken.principal.id = format!("install:{}", "0".repeat(64));
+    weirkeeper::trust::from_policy(&TrustPolicy {
+        metadata: kube::api::ObjectMeta {
+            name: Some("org-default".to_string()),
+            uid: Some("uid-org-default".to_string()),
+            generation: Some(1),
+            ..kube::api::ObjectMeta::default()
+        },
+        spec: TrustPolicySpec {
+            default: false,
+            namespaces: Some(vec![NS.to_string()]),
+            allowed_target_cluster_ids: Some(vec![TARGET_CLUSTER_ID.to_string()]),
+            keys: vec![approver_key(), evidence, broken],
+        },
+        status: None,
+    })
+}
+
+/// **M-1, THE STANDING ARM.** A point-bound rehearsal's Job carries the
+/// evidence keyring: the flag, the projected file and the pinned digest over
+/// exactly the bytes rendered. The keyring carries every usable key with its
+/// lifecycle — a REVOKED key is rendered as revoked (so the runner's refusal
+/// can name it), and a key whose PEM does not parse is not rendered at all.
+///
+/// CONTROL: the Backup-bound fixture plan binds no point and carries none of
+/// the four, so the existing five-member row above is unchanged.
+///
+/// MUTANTS: `plan_binds_point` answering `false`; `evidence_keys_env`
+/// returning `None`; `evidence_keyring_bytes` dropping the `is_usable`
+/// filter.
+#[test]
+fn a_point_bound_rehearsal_carries_the_pinned_evidence_keyring() {
+    use logweir_core::execution_contract::{
+        EvidenceKeyring, EVIDENCE_KEYRING_FORMAT_VERSION, EVIDENCE_KEYS_SHA256_ENV,
+    };
+    let trust = evidence_trust();
+    let restore = point_bound_standing_restore();
+    assert!(plan_binds_point(&restore), "the fixture plan binds a point");
+
+    let argv = runner_argv(&restore, &[KEY_ID.to_string()]);
+    assert!(
+        argv.windows(2)
+            .any(|w| w[0] == "--evidence-keys" && w[1].ends_with(EVIDENCE_KEYS_FILE)),
+        "a point-bound plan's argv names the evidence keyring: {argv:?}"
+    );
+
+    let keyring_bytes = evidence_keyring_bytes(&trust).expect("the keyring renders");
+    let keyring: EvidenceKeyring =
+        serde_json::from_str(&keyring_bytes).expect("the keyring is the wire shape");
+    assert_eq!(keyring.format_version, EVIDENCE_KEYRING_FORMAT_VERSION);
+    let ids: Vec<&str> = keyring
+        .keys
+        .iter()
+        .map(|k| k.trust.key_id.as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        vec![KEY_ID, EVIDENCE_KEY_ID],
+        "every USABLE key, in policy order; the unparseable key is not rendered"
+    );
+    let revoked = &keyring.keys[1];
+    assert_eq!(
+        revoked.trust.state,
+        logweir_core::trust::KeyState::Revoked,
+        "a revoked key is rendered AS revoked, never dropped silently: {revoked:?}"
+    );
+    assert_eq!(revoked.public_key_pem, EVIDENCE_PEM);
+
+    let env =
+        execution_contract_env(&restore, &approval(), &trust, now()).expect("the contract renders");
+    let pinned = env
+        .iter()
+        .find(|(k, _)| k == EVIDENCE_KEYS_SHA256_ENV)
+        .map(|(_, v)| v.clone());
+    assert_eq!(
+        pinned,
+        Some(logweir_core::ids::sha256_prefixed(keyring_bytes.as_bytes())),
+        "the contract pins the digest of the bytes rendered: {env:?}"
+    );
+
+    let spec = runner_job_spec(
+        &restore,
+        &cluster(true),
+        &[KEY_ID.to_string()],
+        &approval(),
+        &trust,
+        now(),
+    )
+    .expect("the Job renders");
+    let mount = spec
+        .config_map_mounts
+        .iter()
+        .find(|m| m.mount_path.ends_with("approval"))
+        .expect("the bundle is mounted");
+    assert!(
+        mount
+            .items
+            .iter()
+            .any(|(k, p)| k == EVIDENCE_KEYS_FILE && p == EVIDENCE_KEYS_FILE),
+        "the Job projects the keyring: {:?}",
+        mount.items
+    );
+    assert_eq!(
+        mount.items.len(),
+        6,
+        "the five standing members and the keyring"
+    );
+    assert!(
+        spec.env_literal
+            .iter()
+            .any(|(k, v)| k == EVIDENCE_KEYS_SHA256_ENV && Some(v) == pinned.as_ref()),
+        "and the Job's environment carries the pin: {:?}",
+        spec.env_literal
+    );
+
+    // ---- CONTROL: no point, none of the four ----------------------------
+    let plain = standing_restore();
+    assert!(!plan_binds_point(&plain));
+    assert!(!runner_argv(&plain, &[KEY_ID.to_string()])
+        .iter()
+        .any(|a| a == "--evidence-keys"));
+    assert!(!execution_contract_env(&plain, &approval(), &trust, now())
+        .expect("the contract renders")
+        .iter()
+        .any(|(k, _)| k == EVIDENCE_KEYS_SHA256_ENV));
 }

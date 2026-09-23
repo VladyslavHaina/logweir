@@ -690,6 +690,12 @@ pub struct RestoreRunArgs {
     /// build pins its digest and verifies no signature with it.
     #[arg(long)]
     pub confirmation_key: Option<PathBuf>,
+    /// **Execution contract v2** (D3 §5.5 step 6): the evidence-signing
+    /// keyring a plan bound to a recovery point (`source.point`) verifies the
+    /// point's receipt signature against, before any client is constructed. A
+    /// point-bound plan without it is refused with exit 3 `PointUntrusted`.
+    #[arg(long)]
+    pub evidence_keys: Option<PathBuf>,
 }
 
 impl From<RestoreRunArgs> for crate::drill::RunArgs {
@@ -713,6 +719,7 @@ impl From<RestoreRunArgs> for crate::drill::RunArgs {
             authorization_keys: a.authorization_keys,
             policy_snapshot: a.policy_snapshot,
             confirmation_key: a.confirmation_key,
+            evidence_keys: a.evidence_keys,
         }
     }
 }

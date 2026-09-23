@@ -145,9 +145,15 @@ pub const POLICY_SNAPSHOT_SHA256_ENV: &str = "LOGWEIR_EXECUTION_POLICY_SNAPSHOT_
 /// of D0's "both public keys". `APPROVER_KEY_SHA256_ENV` is the first.
 pub const CONFIRMATION_KEY_SHA256_ENV: &str = "LOGWEIR_EXECUTION_CONFIRMATION_KEY_SHA256";
 
+/// `sha256:<hex>` over the mounted [`EvidenceKeyring`] — the anchor the
+/// runner verifies a bound recovery point's receipt signature against (D3
+/// §5.5 step 6, RUNNER-POINT-BINDING-SKIPS-SIGNATURE). Pinned exactly when
+/// the plan carries `source.point`.
+pub const EVIDENCE_KEYS_SHA256_ENV: &str = "LOGWEIR_EXECUTION_EVIDENCE_KEYS_SHA256";
+
 /// Every v2-only variable. **Each is optional**, in the blocks
 /// [`ContractVersion`] documents; none of them may appear under v1.
-pub const V2_ENV: [&str; 7] = [
+pub const V2_ENV: [&str; 8] = [
     AUTHORIZATION_KIND_ENV,
     AUTHORIZATION_SHA256_ENV,
     AUTHORIZATION_SIDECAR_SHA256_ENV,
@@ -155,6 +161,7 @@ pub const V2_ENV: [&str; 7] = [
     REHEARSAL_SCHEDULE_UID_ENV,
     POLICY_SNAPSHOT_SHA256_ENV,
     CONFIRMATION_KEY_SHA256_ENV,
+    EVIDENCE_KEYS_SHA256_ENV,
 ];
 
 /// The union, and what a reader uses to answer "is there a contract in this
@@ -164,7 +171,7 @@ pub const V2_ENV: [&str; 7] = [
 /// variables — a controller bug, or a partially applied template — must be
 /// diagnosed as an incomplete contract, not treated as a credential-free
 /// standalone invocation that runs with no contract checks whatsoever.
-pub const ALL_ENV_ANY: [&str; 20] = [
+pub const ALL_ENV_ANY: [&str; 21] = [
     VERSION_ENV,
     SUBJECT_API_VERSION_ENV,
     SUBJECT_KIND_ENV,
@@ -185,6 +192,7 @@ pub const ALL_ENV_ANY: [&str; 20] = [
     REHEARSAL_SCHEDULE_UID_ENV,
     POLICY_SNAPSHOT_SHA256_ENV,
     CONFIRMATION_KEY_SHA256_ENV,
+    EVIDENCE_KEYS_SHA256_ENV,
 ];
 
 /// The `--triggered-by` prefix a standing-authorized rehearsal run carries.
@@ -516,6 +524,45 @@ pub struct AuthorizationKeyring {
     pub format_version: String,
     pub keys: Vec<AuthorizationKey>,
 }
+
+/// The evidence-signing keys a restore Job verifies a bound recovery point's
+/// receipt against — D3 §5.5 step 6's "the mounted trust bundle for
+/// `EvidenceSigning`", as a mounted bundle member.
+///
+/// # Public material and LIFECYCLE, because the runner decides
+///
+/// Unlike [`AuthorizationKeyring`], whose lifecycle the controller evaluates
+/// before it writes the keyring, this one carries each key's whole
+/// [`crate::trust::TrustedKey`] record: the runner judges the receipt with
+/// [`crate::trust::decide`] — the one rule the controller applies to Backup
+/// evidence — against the receipt's OWN claimed signing time, which only the
+/// runner has read. So a retired key still verifies what it signed while it
+/// was valid, a key revoked for compromise verifies nothing, and a key the
+/// namespace's trust does not list is refused by being absent. The controller
+/// renders every key of the namespace's resolved trust whose public half
+/// parses and whose declared id is its own; `decide` checks the usage.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EvidenceKeyring {
+    /// [`EVIDENCE_KEYRING_FORMAT_VERSION`].
+    pub format_version: String,
+    /// The keys, in the trust source's order.
+    pub keys: Vec<EvidenceKey>,
+}
+
+/// One key of an [`EvidenceKeyring`].
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EvidenceKey {
+    /// PEM SPKI. Public material only.
+    pub public_key_pem: String,
+    /// The key's identity, usages and lifecycle, as the namespace's trust
+    /// resolved them when the bundle was rendered.
+    pub trust: crate::trust::TrustedKey,
+}
+
+/// The one format an [`EvidenceKeyring`] is written in.
+pub const EVIDENCE_KEYRING_FORMAT_VERSION: &str = "1.0.0";
 
 /// The token a standing-authorization refusal opens with.
 ///

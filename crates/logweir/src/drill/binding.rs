@@ -43,6 +43,14 @@ use logweir_evidence::{
 pub const POINT_BINDING_MISMATCH: &str = "PointBindingMismatch";
 /// The same arrangement for D3 §4.3's scope refusal.
 pub const REHEARSAL_SCOPE_VIOLATION: &str = "RehearsalScopeViolation";
+/// The token a bound point whose receipt is not signed by a key this run
+/// trusts opens with (D3 §5.5 step 6, RUNNER-POINT-BINDING-SKIPS-SIGNATURE):
+/// no evidence keyring mounted, no signature sidecar in the archive, a
+/// signature under no mounted key, or a key [`logweir_core::trust::decide`]
+/// refuses (revoked, used outside its validity, wrong usage). Exit 3, like
+/// [`POINT_BINDING_MISMATCH`]: it is a refusal of the PLAN's point, and no
+/// retry makes it trustworthy.
+pub const POINT_UNTRUSTED: &str = "PointUntrusted";
 
 fn refuse(message: String) -> DrillError {
     DrillError::Guard(GuardRefusal(message))
@@ -68,11 +76,17 @@ fn refuse(message: String) -> DrillError {
 pub fn verify_point_binding(
     plan: &DrillSpec,
     archive: &Store,
+    evidence_keys: Option<&[u8]>,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> Result<Option<String>, DrillError> {
     let Some(point) = plan.source.point.as_ref() else {
         return Ok(None);
     };
     check_point_shape(point)?;
+    // THE TRUST ANCHOR BEFORE ANY ARCHIVE READ. A point-bound plan with no
+    // evidence keyring could only be run unverified, and that is the run D3
+    // §5.5 step 6 exists to prevent.
+    let keyring = evidence_keyring(evidence_keys, &point.point_id)?;
 
     // **The key is BUCKET-ABSOLUTE and is not qualified against the store's
     // prefix.** Every `logweir/` key in this workspace is: `put_create_only`
@@ -146,6 +160,16 @@ pub fn verify_point_binding(
         )));
     }
 
+    // **THE SIGNATURE, UNDER THE MOUNTED TRUST, BEFORE ANYTHING IS READ ON
+    // THE RECEIPT'S WORD** (D3 §5.5 step 6). The digest above proves these are
+    // the bytes the approver bound; this proves a key the namespace trusts for
+    // `EvidenceSigning` signed them, under the trust the controller rendered
+    // for THIS run -- so a key revoked after the catalog last synced is
+    // refused here, whatever the catalog's view said.
+    // It comes before the manifest read because the manifest key is one of the
+    // receipt's own claims.
+    verify_receipt_signature(point, &qualified, &receipt_bytes, archive, &keyring, now)?;
+
     // **And the manifest the receipt names, read back.** The three checks
     // above prove the plan and the receipt agree; this one proves the ARCHIVE
     // does. Without it a point whose receipt is intact and whose manifest was
@@ -183,6 +207,160 @@ pub fn verify_point_binding(
         )));
     }
     Ok(Some(point.point_id.clone()))
+}
+
+/// The mounted evidence keyring, parsed -- or the refusal that there is none.
+fn evidence_keyring(
+    bytes: Option<&[u8]>,
+    point_id: &str,
+) -> Result<wire::EvidenceKeyring, DrillError> {
+    let Some(bytes) = bytes else {
+        return Err(refuse(format!(
+            "{POINT_UNTRUSTED}. The plan is bound to recovery point {point_id}, and no \
+             evidence-signing keyring (--evidence-keys) is mounted, so the receipt's signature \
+             cannot be checked against anything this installation trusts; a point-bound plan is \
+             never run unverified; no data operation was started."
+        )));
+    };
+    let keyring: wire::EvidenceKeyring = serde_json::from_slice(bytes).map_err(|error| {
+        DrillError::Operational(format!(
+            "the mounted evidence-signing keyring does not parse: {error}"
+        ))
+    })?;
+    if keyring.format_version != wire::EVIDENCE_KEYRING_FORMAT_VERSION {
+        return Err(DrillError::Operational(format!(
+            "the mounted evidence-signing keyring is format {:?}; this build reads {:?}",
+            keyring.format_version,
+            wire::EVIDENCE_KEYRING_FORMAT_VERSION
+        )));
+    }
+    if keyring.keys.is_empty() {
+        return Err(refuse(format!(
+            "{POINT_UNTRUSTED}. The mounted evidence-signing keyring holds no key, so recovery \
+             point {point_id}'s receipt signature could anchor in nothing; no data operation was \
+             started."
+        )));
+    }
+    Ok(keyring)
+}
+
+/// Verify the bound receipt's DSSE sidecar under the mounted keyring, then
+/// judge the key that verified with [`logweir_core::trust::decide`] for
+/// `EvidenceSigning` against the receipt's own claimed signing time -- the
+/// verifier `logweir drill verify` runs (`verify_detached` under
+/// `PAYLOAD_TYPE_BACKUP_RECEIPT`) and the lifecycle rule the controller
+/// applies to Backup evidence.
+///
+/// # The answers
+///
+/// * no sidecar in the archive -- an UNSIGNED receipt: exit 3 `PointUntrusted`;
+/// * the sidecar could not be read for another reason: exit 1, the archive did
+///   not answer;
+/// * a sidecar that does not parse, or signature data that is malformed:
+///   exit 3 -- it signs nothing this run can trust;
+/// * no mounted key verifies it (a stranger's key, or altered bytes): exit 3;
+/// * the key that verified is refused by `decide` -- revoked for compromise,
+///   used outside its validity (a retired key's signature after retirement),
+///   or not an `EvidenceSigning` key: exit 3, naming the reason.
+fn verify_receipt_signature(
+    point: &PointBinding,
+    receipt_key: &str,
+    receipt_bytes: &[u8],
+    archive: &Store,
+    keyring: &wire::EvidenceKeyring,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), DrillError> {
+    use logweir_core::trust::{
+        decide, EvidenceClaim, IndependentObservation, KeyUsage, TrustResult,
+    };
+
+    let sidecar_key = crate::catalog::cli::sidecar_key_of(receipt_key);
+    let sidecar_bytes = match archive.get(&sidecar_key) {
+        Ok((bytes, _)) => bytes,
+        Err(StoreError::NotFound(_)) => {
+            return Err(refuse(format!(
+                "{POINT_UNTRUSTED}. Recovery point {}'s receipt carries no signature: \
+                 {sidecar_key} is not in the archive. An unsigned receipt is evidence of \
+                 nothing; no data operation was started.",
+                point.point_id
+            )))
+        }
+        Err(error) => {
+            return Err(DrillError::Operational(format!(
+                "recovery point {}'s receipt signature {sidecar_key} could not be read: {error}; \
+                 no data operation was started",
+                point.point_id
+            )))
+        }
+    };
+    let sidecar: Sidecar = serde_json::from_slice(&sidecar_bytes).map_err(|error| {
+        refuse(format!(
+            "{POINT_UNTRUSTED}. Recovery point {}'s receipt signature {sidecar_key} is not a \
+             DSSE sidecar ({error}); no data operation was started.",
+            point.point_id
+        ))
+    })?;
+    let payload_type = logweir_evidence::PAYLOAD_TYPE_BACKUP_RECEIPT;
+    let mut verified: Option<&wire::EvidenceKey> = None;
+    for key in &keyring.keys {
+        let Ok(parsed) = VerifyingKey::from_pem_str(&key.public_key_pem) else {
+            continue;
+        };
+        match verify_detached(&parsed, payload_type, receipt_bytes, &sidecar) {
+            Ok(_) => {
+                verified = Some(key);
+                break;
+            }
+            Err(EvidenceError::Malformed(message)) => {
+                return Err(refuse(format!(
+                    "{POINT_UNTRUSTED}. Recovery point {}'s receipt signature data is malformed \
+                     ({message}); no data operation was started.",
+                    point.point_id
+                )))
+            }
+            Err(EvidenceError::Verify(_) | EvidenceError::Key(_)) => {}
+        }
+    }
+    let Some(key) = verified else {
+        return Err(refuse(format!(
+            "{POINT_UNTRUSTED}. Recovery point {}'s receipt signature does not verify under any \
+             of the {} evidence-signing keys this installation trusts (claimed signer: {}). It \
+             was signed by a key the namespace's trust does not list, or the receipt or its \
+             signature was altered; no data operation was started.",
+            point.point_id,
+            keyring.keys.len(),
+            sidecar
+                .signatures
+                .iter()
+                .map(|s| s.keyid.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    };
+    let json: serde_json::Value = serde_json::from_slice(receipt_bytes).unwrap_or_default();
+    let verdict = decide(
+        Some(&key.trust),
+        KeyUsage::EvidenceSigning,
+        &EvidenceClaim::from_document(payload_type, &json),
+        // A restore Job has no local history of this receipt: a key revoked
+        // for compromise therefore verifies nothing (D3 §16).
+        &IndependentObservation::none(),
+        now,
+    );
+    if verdict.result != TrustResult::Valid {
+        return Err(refuse(format!(
+            "{POINT_UNTRUSTED}. Recovery point {}'s receipt verifies under key {}, and this \
+             installation's trust refuses that key for it: {} (key state {}); no data operation \
+             was started.",
+            point.point_id,
+            key.trust.key_id,
+            verdict
+                .reason
+                .map_or("not accepted", logweir_core::trust::UntrustReason::as_str),
+            verdict.key_state.as_str()
+        )));
+    }
+    Ok(())
 }
 
 /// Refuse a binding that is malformed on its face, before the archive is
@@ -504,18 +682,76 @@ mod tests {
     struct Archive {
         store: Store,
         binding: PointBinding,
+        /// The evidence keyring that trusts the key the receipt was signed by.
+        keys: Vec<u8>,
     }
 
-    /// One internally consistent recovery point in a socket-free store.
+    /// An `EvidenceSigning` key's lifecycle record, active for a day either
+    /// side of now -- the fixtures change one field at a time from here.
+    fn trusted(key: &SigningKey) -> logweir_core::trust::TrustedKey {
+        logweir_core::trust::TrustedKey {
+            key_id: key.key_id(),
+            principal_id: format!("install:{}", key.key_id()),
+            usages: vec![KeyUsage::EvidenceSigning],
+            not_before: chrono::Utc::now() - chrono::Duration::days(1),
+            not_after: chrono::Utc::now() + chrono::Duration::days(1),
+            state: logweir_core::trust::KeyState::Active,
+            retired_at: None,
+            revoked_at: None,
+            revocation_reason: None,
+            revocation_effective_from: None,
+        }
+    }
+
+    /// An [`wire::EvidenceKeyring`] over `(key, lifecycle)` pairs.
+    fn evidence_keys(entries: Vec<(&SigningKey, logweir_core::trust::TrustedKey)>) -> Vec<u8> {
+        serde_json::to_vec(&wire::EvidenceKeyring {
+            format_version: wire::EVIDENCE_KEYRING_FORMAT_VERSION.to_string(),
+            keys: entries
+                .into_iter()
+                .map(|(key, trust)| wire::EvidenceKey {
+                    public_key_pem: key.verifying_key().to_public_key_pem().expect("pem"),
+                    trust,
+                })
+                .collect(),
+        })
+        .expect("the keyring serialises")
+    }
+
+    /// Write a receipt AND its DSSE sidecar, signed by `signer`, the way the
+    /// backup runner does (`<run>.receipt.json` beside `<run>.receipt.sig`).
+    fn put_signed_receipt(store: &Store, receipt_bytes: &[u8], signer: &SigningKey) {
+        store
+            .put_create_only(RECEIPT_KEY, receipt_bytes)
+            .expect("the receipt is written");
+        let sidecar = sign_detached(
+            signer,
+            logweir_evidence::PAYLOAD_TYPE_BACKUP_RECEIPT,
+            receipt_bytes,
+        )
+        .expect("sign");
+        store
+            .put_create_only(
+                &crate::catalog::cli::sidecar_key_of(RECEIPT_KEY),
+                &serde_json::to_vec(&sidecar).expect("serialises"),
+            )
+            .expect("the sidecar is written");
+    }
+
+    fn check(plan: &DrillSpec, store: &Store, keys: &[u8]) -> Result<Option<String>, DrillError> {
+        verify_point_binding(plan, store, Some(keys), chrono::Utc::now())
+    }
+
+    /// One internally consistent, SIGNED recovery point in a socket-free
+    /// store, with the keyring that trusts its signer.
     fn archive_with_a_point(prefix: &str, key_in_plan: &str) -> Archive {
         let store = Store::in_memory(prefix);
         let manifest = br#"{"topics":[]}"#.to_vec();
         let manifest_sha256 = logweir_core::ids::sha256_prefixed(&manifest);
         let receipt_bytes =
             serde_json::to_vec(&receipt(MANIFEST_KEY, &manifest_sha256)).expect("serialises");
-        store
-            .put_create_only(RECEIPT_KEY, &receipt_bytes)
-            .expect("the receipt is written");
+        let signer = SigningKey::generate_ed25519();
+        put_signed_receipt(&store, &receipt_bytes, &signer);
         store
             .put_create_only(MANIFEST_KEY, &manifest)
             .expect("the manifest is written");
@@ -527,6 +763,7 @@ mod tests {
                 receipt_sha256: logweir_core::ids::sha256_prefixed(&receipt_bytes),
                 manifest_sha256,
             },
+            keys: evidence_keys(vec![(&signer, trusted(&signer))]),
         }
     }
 
@@ -563,7 +800,7 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
     fn a_plan_with_no_point_binding_is_the_v1_shape_and_checks_nothing() {
         let a = archive();
         assert_eq!(
-            verify_point_binding(&plan_with(None), &a.store).expect("no binding, no check"),
+            check(&plan_with(None), &a.store, &a.keys).expect("no binding, no check"),
             None
         );
     }
@@ -573,7 +810,7 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
         let a = archive();
         let id = a.binding.point_id.clone();
         assert_eq!(
-            verify_point_binding(&plan_with(Some(a.binding)), &a.store)
+            check(&plan_with(Some(a.binding.clone())), &a.store, &a.keys)
                 .expect("the point verifies"),
             Some(id)
         );
@@ -587,7 +824,7 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
     fn a_receipt_key_is_bucket_absolute_and_is_not_requalified() {
         let a = archive_with_a_point("logweir/", RECEIPT_KEY);
         assert!(
-            verify_point_binding(&plan_with(Some(a.binding)), &a.store).is_ok(),
+            check(&plan_with(Some(a.binding.clone())), &a.store, &a.keys).is_ok(),
             "a prefixed destination handle must resolve a bucket-absolute receipt key"
         );
     }
@@ -599,7 +836,7 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
         let a = archive();
         let mut binding = a.binding.clone();
         binding.receipt_sha256 = format!("sha256:{}", "0".repeat(64));
-        let error = verify_point_binding(&plan_with(Some(binding)), &a.store)
+        let error = check(&plan_with(Some(binding)), &a.store, &a.keys)
             .expect_err("a tampered point is refused");
         assert!(
             matches!(error, DrillError::Guard(_)),
@@ -617,7 +854,7 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
         let a = archive();
         let mut binding = a.binding.clone();
         binding.point_id = format!("lwp1-{}", "a".repeat(32));
-        let error = verify_point_binding(&plan_with(Some(binding)), &a.store)
+        let error = check(&plan_with(Some(binding)), &a.store, &a.keys)
             .expect_err("a relabelled point is refused");
         assert_eq!(error.exit_code(), crate::exit::ExitCode::GuardRefused);
         assert!(
@@ -631,7 +868,7 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
         let a = archive();
         let mut binding = a.binding.clone();
         binding.manifest_sha256 = format!("sha256:{}", "1".repeat(64));
-        let error = verify_point_binding(&plan_with(Some(binding)), &a.store)
+        let error = check(&plan_with(Some(binding)), &a.store, &a.keys)
             .expect_err("a contradicted manifest digest is refused");
         assert_eq!(error.exit_code(), crate::exit::ExitCode::GuardRefused);
         assert!(
@@ -649,16 +886,16 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
         let manifest_sha256 = logweir_core::ids::sha256_prefixed(&manifest);
         let receipt_bytes =
             serde_json::to_vec(&receipt(MANIFEST_KEY, &manifest_sha256)).expect("serialises");
-        store
-            .put_create_only(RECEIPT_KEY, &receipt_bytes)
-            .expect("the receipt is written");
+        let signer = SigningKey::generate_ed25519();
+        put_signed_receipt(&store, &receipt_bytes, &signer);
+        let keys = evidence_keys(vec![(&signer, trusted(&signer))]);
         let binding = PointBinding {
             point_id: crate::catalog::record::point_id(&receipt_bytes),
             receipt_key: RECEIPT_KEY.into(),
             receipt_sha256: logweir_core::ids::sha256_prefixed(&receipt_bytes),
             manifest_sha256,
         };
-        let error = verify_point_binding(&plan_with(Some(binding)), &store)
+        let error = check(&plan_with(Some(binding)), &store, &keys)
             .expect_err("a point whose manifest is gone is refused");
         assert_eq!(error.exit_code(), crate::exit::ExitCode::Operational);
         assert!(
@@ -691,9 +928,9 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
         );
         let receipt_bytes =
             serde_json::to_vec(&receipt(MANIFEST_KEY, &attested_sha256)).expect("serialises");
-        store
-            .put_create_only(RECEIPT_KEY, &receipt_bytes)
-            .expect("the receipt is written");
+        let signer = SigningKey::generate_ed25519();
+        put_signed_receipt(&store, &receipt_bytes, &signer);
+        let keys = evidence_keys(vec![(&signer, trusted(&signer))]);
         store
             .put_create_only(MANIFEST_KEY, &substituted)
             .expect("the substituted manifest is written");
@@ -705,7 +942,7 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
             // bucket.
             manifest_sha256: attested_sha256.clone(),
         };
-        let error = verify_point_binding(&plan_with(Some(binding)), &store)
+        let error = check(&plan_with(Some(binding)), &store, &keys)
             .expect_err("a substituted manifest is refused");
         assert_eq!(
             error.exit_code(),
@@ -723,13 +960,15 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
     #[test]
     fn a_missing_receipt_is_operational_and_not_a_plan_refusal() {
         let store = Store::in_memory("");
+        let signer = SigningKey::generate_ed25519();
+        let keys = evidence_keys(vec![(&signer, trusted(&signer))]);
         let binding = PointBinding {
             point_id: format!("lwp1-{}", "c".repeat(32)),
             receipt_key: "logweir/backups/gone/run-1.receipt.json".into(),
             receipt_sha256: format!("sha256:{}", "d".repeat(64)),
             manifest_sha256: format!("sha256:{}", "e".repeat(64)),
         };
-        let error = verify_point_binding(&plan_with(Some(binding)), &store)
+        let error = check(&plan_with(Some(binding)), &store, &keys)
             .expect_err("a missing point is refused");
         assert_eq!(error.exit_code(), crate::exit::ExitCode::Operational);
         assert!(
@@ -741,13 +980,15 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
     #[test]
     fn a_malformed_binding_is_refused_before_the_archive_is_touched() {
         let store = Store::in_memory("");
+        let signer = SigningKey::generate_ed25519();
+        let keys = evidence_keys(vec![(&signer, trusted(&signer))]);
         let binding = PointBinding {
             point_id: "not-a-point".into(),
             receipt_key: "  ".into(),
             receipt_sha256: "nope".into(),
             manifest_sha256: "sha256:short".into(),
         };
-        let error = verify_point_binding(&plan_with(Some(binding)), &store)
+        let error = check(&plan_with(Some(binding)), &store, &keys)
             .expect_err("a malformed binding is refused");
         assert_eq!(error.exit_code(), crate::exit::ExitCode::GuardRefused);
         let rendered = error.to_string();
@@ -766,6 +1007,8 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
     #[test]
     fn bytes_that_are_not_a_receipt_are_a_plan_refusal() {
         let store = Store::in_memory("");
+        let signer = SigningKey::generate_ed25519();
+        let keys = evidence_keys(vec![(&signer, trusted(&signer))]);
         let bytes = b"{\"not\":\"a receipt\"}".to_vec();
         store.put_create_only(RECEIPT_KEY, &bytes).expect("written");
         let binding = PointBinding {
@@ -774,13 +1017,202 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
             receipt_sha256: logweir_core::ids::sha256_prefixed(&bytes),
             manifest_sha256: format!("sha256:{}", "f".repeat(64)),
         };
-        let error = verify_point_binding(&plan_with(Some(binding)), &store)
+        let error = check(&plan_with(Some(binding)), &store, &keys)
             .expect_err("non-receipt bytes are refused");
         assert_eq!(error.exit_code(), crate::exit::ExitCode::GuardRefused);
         assert!(
             error.to_string().contains("are not a backup \nreceipt")
                 || error.to_string().contains("are not a backup receipt"),
             "{error}"
+        );
+    }
+
+    // ---- the bound receipt's SIGNATURE under current trust (D3 §5.5 step 6,
+    // RUNNER-POINT-BINDING-SKIPS-SIGNATURE). Every refusal row has the SAME
+    // point with one fact changed; `a_point_the_archive_holds_is_proven_and_names_itself`
+    // is the control that the untouched point runs.
+
+    fn untrusted(error: &DrillError, needle: &str) {
+        assert_eq!(
+            error.exit_code(),
+            crate::exit::ExitCode::GuardRefused,
+            "exit 3: {error}"
+        );
+        let rendered = error.to_string();
+        assert!(rendered.contains(POINT_UNTRUSTED), "{rendered}");
+        assert!(
+            rendered.contains(needle),
+            "{needle:?} missing from: {rendered}"
+        );
+        assert!(
+            rendered.contains("no data operation was started"),
+            "{rendered}"
+        );
+    }
+
+    /// MUTANT: skip the keyring presence check (and so, the signature).
+    #[test]
+    fn a_point_bound_plan_with_no_evidence_keyring_is_refused() {
+        let a = archive();
+        let error = verify_point_binding(
+            &plan_with(Some(a.binding.clone())),
+            &a.store,
+            None,
+            chrono::Utc::now(),
+        )
+        .expect_err("no keyring, no run");
+        untrusted(&error, "no evidence-signing keyring");
+        // CONTROL: the same point with its keyring runs.
+        assert!(check(&plan_with(Some(a.binding)), &a.store, &a.keys).is_ok());
+        // An EMPTY keyring anchors in nothing either.
+        let a = archive();
+        let empty = serde_json::to_vec(&wire::EvidenceKeyring {
+            format_version: wire::EVIDENCE_KEYRING_FORMAT_VERSION.to_string(),
+            keys: vec![],
+        })
+        .expect("serialises");
+        untrusted(
+            &check(&plan_with(Some(a.binding)), &a.store, &empty).expect_err("empty"),
+            "holds no key",
+        );
+    }
+
+    /// MUTANT: treat a missing sidecar as "nothing to check".
+    #[test]
+    fn an_unsigned_receipt_is_refused() {
+        let store = Store::in_memory("");
+        let manifest = br#"{"topics":[]}"#.to_vec();
+        let manifest_sha256 = logweir_core::ids::sha256_prefixed(&manifest);
+        let receipt_bytes =
+            serde_json::to_vec(&receipt(MANIFEST_KEY, &manifest_sha256)).expect("serialises");
+        store
+            .put_create_only(RECEIPT_KEY, &receipt_bytes)
+            .expect("written");
+        store
+            .put_create_only(MANIFEST_KEY, &manifest)
+            .expect("written");
+        let signer = SigningKey::generate_ed25519();
+        let keys = evidence_keys(vec![(&signer, trusted(&signer))]);
+        let binding = PointBinding {
+            point_id: crate::catalog::record::point_id(&receipt_bytes),
+            receipt_key: RECEIPT_KEY.into(),
+            receipt_sha256: logweir_core::ids::sha256_prefixed(&receipt_bytes),
+            manifest_sha256,
+        };
+        untrusted(
+            &check(&plan_with(Some(binding)), &store, &keys).expect_err("unsigned"),
+            "carries no signature",
+        );
+    }
+
+    /// MUTANT: accept the first key's verdict whatever it says, or skip
+    /// `verify_detached`. A perfectly good signature by a key the namespace's
+    /// trust does not list.
+    #[test]
+    fn a_receipt_signed_by_a_key_the_trust_does_not_list_is_refused() {
+        let a = archive();
+        let stranger = SigningKey::generate_ed25519();
+        let keys = evidence_keys(vec![(&stranger, trusted(&stranger))]);
+        untrusted(
+            &check(&plan_with(Some(a.binding)), &a.store, &keys).expect_err("stranger"),
+            "does not verify under any",
+        );
+    }
+
+    /// MUTANT: drop the `decide` verdict. The signing key is listed -- and was
+    /// revoked for compromise after the catalog synced.
+    #[test]
+    fn a_receipt_signed_by_a_key_revoked_for_compromise_is_refused() {
+        let store = Store::in_memory("");
+        let manifest = br#"{"topics":[]}"#.to_vec();
+        let manifest_sha256 = logweir_core::ids::sha256_prefixed(&manifest);
+        let receipt_bytes =
+            serde_json::to_vec(&receipt(MANIFEST_KEY, &manifest_sha256)).expect("serialises");
+        let signer = SigningKey::generate_ed25519();
+        put_signed_receipt(&store, &receipt_bytes, &signer);
+        store
+            .put_create_only(MANIFEST_KEY, &manifest)
+            .expect("written");
+        let mut revoked = trusted(&signer);
+        revoked.state = logweir_core::trust::KeyState::Revoked;
+        revoked.revoked_at = Some(chrono::Utc::now());
+        revoked.revocation_effective_from = Some(chrono::Utc::now() - chrono::Duration::hours(2));
+        revoked.revocation_reason = Some(logweir_core::trust::RevocationReason::KeyCompromise);
+        let binding = PointBinding {
+            point_id: crate::catalog::record::point_id(&receipt_bytes),
+            receipt_key: RECEIPT_KEY.into(),
+            receipt_sha256: logweir_core::ids::sha256_prefixed(&receipt_bytes),
+            manifest_sha256,
+        };
+        untrusted(
+            &check(
+                &plan_with(Some(binding.clone())),
+                &store,
+                &evidence_keys(vec![(&signer, revoked)]),
+            )
+            .expect_err("revoked"),
+            "Revoked",
+        );
+        // CONTROL: the same key, active, runs.
+        assert!(check(
+            &plan_with(Some(binding)),
+            &store,
+            &evidence_keys(vec![(&signer, trusted(&signer))])
+        )
+        .is_ok());
+    }
+
+    /// A RETIRED key keeps what it signed while it was valid (D3 §7.4) and
+    /// refuses what it "signed" after retirement -- judged against the
+    /// receipt's own `finished_at`, which is the fixture's `now`.
+    #[test]
+    fn a_retired_key_verifies_only_what_it_signed_before_retirement() {
+        let a = archive();
+        let signer_keys: wire::EvidenceKeyring =
+            serde_json::from_slice(&a.keys).expect("the fixture keyring");
+        let mut before = signer_keys.clone();
+        before.keys[0].trust.state = logweir_core::trust::KeyState::Retired;
+        before.keys[0].trust.retired_at = Some(chrono::Utc::now() - chrono::Duration::hours(3));
+        untrusted(
+            &check(
+                &plan_with(Some(a.binding.clone())),
+                &a.store,
+                &serde_json::to_vec(&before).expect("serialises"),
+            )
+            .expect_err("signed after retirement"),
+            "SignedOutsideValidity",
+        );
+        // CONTROL: retired AFTER the receipt was signed -- historically valid,
+        // and judged at a check time AFTER the retirement too, so the instant
+        // judged is the receipt's own `finished_at` and not the check's clock
+        // (a runner that judged "now" would refuse this).
+        let mut after = signer_keys;
+        after.keys[0].trust.state = logweir_core::trust::KeyState::Retired;
+        after.keys[0].trust.retired_at = Some(chrono::Utc::now() + chrono::Duration::hours(3));
+        assert!(verify_point_binding(
+            &plan_with(Some(a.binding)),
+            &a.store,
+            Some(&serde_json::to_vec(&after).expect("serialises")),
+            chrono::Utc::now() + chrono::Duration::days(10),
+        )
+        .is_ok());
+    }
+
+    /// Key-usage separation: a listed key that may only APPROVE never attests.
+    #[test]
+    fn a_receipt_signed_by_a_key_without_evidence_signing_usage_is_refused() {
+        let a = archive();
+        let mut keys: wire::EvidenceKeyring =
+            serde_json::from_slice(&a.keys).expect("the fixture keyring");
+        keys.keys[0].trust.usages = vec![KeyUsage::GovernedApproval];
+        untrusted(
+            &check(
+                &plan_with(Some(a.binding)),
+                &a.store,
+                &serde_json::to_vec(&keys).expect("serialises"),
+            )
+            .expect_err("wrong usage"),
+            "KeyUsageMismatch",
         );
     }
 
