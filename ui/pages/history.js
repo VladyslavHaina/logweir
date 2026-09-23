@@ -3,7 +3,8 @@
 //
 // THE RESTORE HALF OF THE BADGE RULE lives here: green requires
 // `evidence.verification.result == "Valid"` (on a basis `validVerification`
-// admits) AND `status.outcome === "pass"`. Only `pass` is green. A `fail-integrity` run produced a perfectly valid,
+// admits) AND `status.outcome === "pass"` AND no recorded non-zero `status.exitCode`
+// (an exit-2 run publishes a signed failure since interface I8's amendment). Only `pass` is green. A `fail-integrity` run produced a perfectly valid,
 // perfectly signed document SAYING THE RESTORE DID NOT RECONCILE, and a green
 // badge over it would invert the single most valuable thing this product
 // reports. The verification half is shared with the Backup rule and imported
@@ -82,7 +83,11 @@ export const NO_HISTORY_SENTENCE =
 
 /** **The Restore badge rule.** Green if and only if the recorded verification
  *  is `Valid`, its trust basis is one a green badge may carry, AND the run's
- *  own outcome is `pass`.
+ *  own outcome is `pass`, AND no recorded `exitCode` other than 0 -- the
+ *  controller's own rule (`weirkeeper::verification::restore_badge`): since
+ *  interface I8's amendment an exit-2 run publishes a signed failure that
+ *  verifies Valid, and the exit code stays authoritative for success. An
+ *  absent `exitCode` is judged on the outcome, as the controller does.
  *
  *  THE NOT-GREEN CAPTION NAMES ITS CASE, exactly as the Backup rule's does.
  *  `Untrusted` means the bytes are authentic and this installation does not
@@ -97,8 +102,9 @@ export function restoreBadge(status) {
   }
   const verification = ((s.evidence || {}).verification) || {};
   const verified = validVerification(s);
-  if (verified === null || s.outcome !== "pass") {
-    return badge("unverified", unverifiedCaption(verification, s.outcome === "pass"));
+  const succeeded = s.outcome === "pass" && (s.exitCode === undefined || s.exitCode === 0);
+  if (verified === null || !succeeded) {
+    return badge("unverified", unverifiedCaption(verification, succeeded));
   }
   return badge("green", greenLabel(verified[0], verified[1], verified[2]));
 }

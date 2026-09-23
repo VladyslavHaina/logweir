@@ -59,7 +59,7 @@ pub enum DrillError {
     /// 1, no artifact). It mirrors phase 5's `Verdict::Block`: the
     /// orchestrator (Task 21a) must catch this variant at the phase-6 call
     /// site, BEFORE the generic `record(...)?` short-circuit, build and sign
-    /// a scorecard from it, and return `DrillError::NotPass(Box::new(signed))`
+    /// a scorecard from it, and return `DrillError::NotPass(Box::new(signed), keys)`
     /// so it reaches ExitCode::DrillNotPass (2). See `task-21a-addendum.md`
     /// ruling A8 for the required orchestrator wiring — implemented in
     /// `execute_with`'s phase-6 branch. If this variant ever reaches
@@ -71,8 +71,18 @@ pub enum DrillError {
     /// A drill RESULT that is not a pass. The scorecard is carried out so it
     /// is still signed and uploaded — exit 1 here would produce no artifact,
     /// and this signed document is the NIS2 IR 4.2.3 evidence.
+    ///
+    /// **THE SECOND FIELD IS INTERFACE I8's KEYS FOR THAT SIGNED DOCUMENT**
+    /// (FAILED-DRILL-EVIDENCE-UNPUBLISHED, D3 §2.5 and PLAT-14.3's "failed
+    /// verification"). Every orchestrator path that builds this variant has
+    /// just put the document, so it hands out the keys `phase8_score::Signed`
+    /// put at, and `exiting` prints them at exit 2 exactly as it does at exit
+    /// 0. `None` is the shape of a caller that holds no put receipt — a test
+    /// double, or an embedder constructing the error by hand — and prints no
+    /// key line, which is what every runner before this change printed at
+    /// exit 2. Never reconstructed from the run id (see [`EvidenceKeys`]).
     #[error("drill did not pass")]
-    NotPass(Box<Scorecard>),
+    NotPass(Box<Scorecard>, Option<EvidenceKeys>),
     /// The drill RAN, and its result could not be signed or its lock proof
     /// could not be obtained. That is neither a pass nor an operational
     /// failure: "the result exists but is unattested" is its own outcome, and
@@ -109,7 +119,7 @@ impl DrillError {
             // A drill RESULT that is not a pass. A scorecard IS written and
             // signed — `execute_with` does that before ever constructing this
             // variant, which is what makes exit 2's promise true.
-            DrillError::NotPass(_) => ExitCode::DrillNotPass, // 2
+            DrillError::NotPass(..) => ExitCode::DrillNotPass, // 2
             // The drill ran and its result is unattested, or the signing key
             // failed its startup readiness check before anything ran.
             DrillError::SigningOrLock(_) | DrillError::SigningPrerequisite(_) => {
@@ -1160,7 +1170,7 @@ fn report_with(
         Ok(o) => Some(&o.scorecard),
         // A drill RESULT: the scorecard was signed and uploaded by phase 8, so
         // the metrics and the summary line are owed.
-        Err(DrillError::NotPass(sc)) => Some(sc),
+        Err(DrillError::NotPass(sc, _)) => Some(sc),
         Err(_) => None,
     };
     // Task 14: `sc.is_none()` is exactly `Err(non-NotPass)`, which is exactly
@@ -1229,9 +1239,12 @@ fn report_with(
             );
         }
     }
-    // [I8] Only a successful run has three keys to name — see `exiting`.
+    // [I8] Every run that SIGNED a scorecard has keys to name: a pass, and a
+    // drill result that did not pass (exit 2) — see `exiting`. Exits 1, 3 and
+    // 4 wrote no artifact and have none.
     let evidence = match &outcome {
         Ok(o) => Some(&o.evidence),
+        Err(DrillError::NotPass(_, keys)) => keys.as_ref(),
         Err(_) => None,
     };
     // GUARD **G-TS**'s observation, plan erratum **E10(c)**'s producer half.
@@ -1324,16 +1337,24 @@ fn exiting(
     }
     // **[I8] AND THE ORDER IS THE CONTRACT.** `scorecard-key=`, then
     // `sidecar-key=`, then `offset-report-key=`, as the FINAL stdout lines of
-    // a successful run with nothing after them — the same shape `logweir
-    // backup run` uses for interface I7's two keys
+    // a run that signed a scorecard, with nothing after them — the same shape
+    // `logweir backup run` uses for interface I7's two keys
     // (`crate::backup::mod`'s `exiting`), because a controller cannot tell
     // stdout from stderr through the pod log API and reads a bounded tail by
     // KEY NAME (plan erratum E4).
     //
     // AFTER the tracing line and after `finish`'s summary line, both of which
-    // are emitted before `exiting` is reached. Printed only on exit 0: on
-    // every other code there is no set of keys to name, and a line naming a
-    // key nothing was written to would be the worst possible output.
+    // are emitted before `exiting` is reached. Printed on exit 0 AND ON EXIT 2
+    // (I8 as amended for FAILED-DRILL-EVIDENCE-UNPUBLISHED, D3 §2.5): exit 2
+    // is "a drill ran and did not pass; a SIGNED scorecard was written", and a
+    // signed failure nobody can name is evidence lost — the controller could
+    // never record `Restore.status.evidence`, its verification or `outcome`,
+    // and a failed rehearsal would carry no proof of why it failed. The keys
+    // are whatever the orchestrator handed out of the put (`EvidenceKeys::of`),
+    // never derived here. Exits 1, 3 and 4 wrote no artifact, and a line
+    // naming a key nothing was written to would be the worst possible output.
+    // The exit code, not the presence of keys, still says whether the run
+    // passed: a reader that sees keys at exit 2 has a signed FAILURE to verify.
     //
     // The third line is printed only when there IS an offset report — see
     // `phase8_score::Signed::offset_report_key`. Two lines is a truthful
@@ -1371,9 +1392,11 @@ fn exiting(
     // `offset-report-key=` follows: a line naming a key nothing was written to
     // is the worst possible output. It is NOT restricted to exit 0, and that
     // is deliberate — a rehearsal that did not pass (exit 2) is precisely the
-    // run whose leftover topics block the next slot (D3 §4.4), and it prints no
-    // evidence keys at all. The note this reads is pushed after phase 8 signed,
-    // so nothing here can reach the signed document.
+    // run whose leftover topics block the next slot (D3 §4.4). Before
+    // FAILED-DRILL-EVIDENCE-UNPUBLISHED an exit-2 run printed no evidence keys
+    // at all; it now prints them after this line, exactly as exit 0 does. The
+    // note this reads is pushed after phase 8 signed, so nothing here can
+    // reach the signed document.
     //
     // **AND IT IS GATED ON THE EXIT CODE**, because interface I9 states that
     // `refusal-reason=` is the process's FINAL stdout line for exit 3 and
@@ -1390,7 +1413,7 @@ fn exiting(
             );
         }
     }
-    if let (ExitCode::Ok, Some(e)) = (code, evidence) {
+    if let (ExitCode::Ok | ExitCode::DrillNotPass, Some(e)) = (code, evidence) {
         println!("scorecard-key={}", e.scorecard_key);
         println!("sidecar-key={}", e.sidecar_key);
         if let Some(k) = &e.offset_report_key {
@@ -2746,7 +2769,11 @@ fn execute_with_validated_approval(
         // this branch established, and deleting a topic this run did not
         // create, on a plan that never executed, would destroy someone else's
         // data to tidy up after a drill that touched nothing.
-        return Err(DrillError::NotPass(Box::new(signed.scorecard)));
+        // [I8] AT EXIT 2 TOO: the keys of the document just put, so a
+        // controller can fetch and verify the signed `preflight-failed`
+        // finding exactly as it would a pass.
+        let keys = EvidenceKeys::of(&signed);
+        return Err(DrillError::NotPass(Box::new(signed.scorecard), Some(keys)));
     }
 
     // **Guard G-TS**, the creating half — the last thing before the restore,
@@ -2841,6 +2868,7 @@ fn execute_with_validated_approval(
             // its own snippet is explicitly "not prescribed here as final
             // code". A teardown that itself fails is attested honestly by
             // `phase9_teardown` (`topics_failed`), never swallowed.
+            let keys = EvidenceKeys::of(&signed);
             let mut out = signed.scorecard.clone();
             teardown(
                 &mut out,
@@ -2851,7 +2879,7 @@ fn execute_with_validated_approval(
                 &admitted.topic_mapping,
                 &logweir_core::ids::sha256_prefixed(&signed.bytes),
             );
-            return Err(DrillError::NotPass(Box::new(out)));
+            return Err(DrillError::NotPass(Box::new(out), Some(keys)));
         }
         Err(e) => return Err(e),
     };
@@ -2929,11 +2957,7 @@ fn execute_with_validated_approval(
     let signed_bytes_sha256 = logweir_core::ids::sha256_prefixed(&signed.bytes);
     // [I8] The three keys, taken off `Signed` — the value that built each
     // string and put at it — before `signed` is consumed below.
-    let evidence = EvidenceKeys {
-        scorecard_key: signed.key.clone(),
-        sidecar_key: signed.sidecar_key.clone(),
-        offset_report_key: signed.offset_report_key.clone(),
-    };
+    let evidence = EvidenceKeys::of(&signed);
     sc = signed.scorecard.clone();
     // 9
     teardown(
@@ -2953,8 +2977,12 @@ fn execute_with_validated_approval(
     // the two exit-2 paths that were covered both return early from phases 5
     // and 6 and never reach here. Pinned by
     // `a_scored_drill_that_does_not_pass_exits_2_after_running_every_phase`.
+    //
+    // AND IT CARRIES THE KEYS (FAILED-DRILL-EVIDENCE-UNPUBLISHED): the signed
+    // `fail-objective`/`fail-integrity` document is the evidence a failed
+    // rehearsal owes, and a controller can only verify what it can name.
     if sc.outcome != Outcome::Pass {
-        return Err(DrillError::NotPass(Box::new(sc)));
+        return Err(DrillError::NotPass(Box::new(sc), Some(evidence)));
     }
     Ok(RestoreOutcome {
         scorecard: sc,
@@ -2977,8 +3005,9 @@ pub struct RestoreOutcome {
     pub evidence: EvidenceKeys,
 }
 
-/// The three evidence keys a successful restore names on stdout, in the order
-/// interface **I8** fixes: `scorecard-key=`, `sidecar-key=`,
+/// The three evidence keys a run that SIGNED a scorecard names on stdout — a
+/// successful restore at exit 0 and a drill result that did not pass at exit
+/// 2 — in the order interface **I8** fixes: `scorecard-key=`, `sidecar-key=`,
 /// `offset-report-key=`.
 ///
 /// They come out of `phase8_score::Signed`, which built each string once and
@@ -2990,6 +3019,20 @@ pub struct EvidenceKeys {
     pub scorecard_key: String,
     pub sidecar_key: String,
     pub offset_report_key: Option<String>,
+}
+
+impl EvidenceKeys {
+    /// The keys `signed` was ACTUALLY put at — the one constructor, so the
+    /// exit-0 path and the three exit-2 paths cannot name different objects
+    /// for the same kind of put.
+    #[must_use]
+    pub fn of(signed: &phase8_score::Signed) -> Self {
+        Self {
+            scorecard_key: signed.key.clone(),
+            sidecar_key: signed.sidecar_key.clone(),
+            offset_report_key: signed.offset_report_key.clone(),
+        }
+    }
 }
 
 /// Phase 9, in one place, because two paths reach it: the normal end of a run
@@ -4075,7 +4118,7 @@ mod tests {
             (ExitCode::Ok, Ok(an_outcome())),
             (
                 ExitCode::DrillNotPass,
-                Err(DrillError::NotPass(Box::new(notpass))),
+                Err(DrillError::NotPass(Box::new(notpass), None)),
             ),
             (
                 ExitCode::Operational,
@@ -4157,7 +4200,7 @@ mod tests {
         notpass.outcome = Outcome::FailIntegrity;
         for outcome in [
             Ok(an_outcome()),
-            Err(DrillError::NotPass(Box::new(notpass))),
+            Err(DrillError::NotPass(Box::new(notpass), None)),
             Err(DrillError::Operational("x".into())),
             Err(DrillError::Guard(logweir_core::guard::GuardRefusal(
                 "x".into(),
@@ -4234,7 +4277,7 @@ mod tests {
                 &args_with(Some(notpass.clone())),
                 "01TEST",
                 None,
-                Err(DrillError::NotPass(Box::new(sc)))
+                Err(DrillError::NotPass(Box::new(sc), None))
             ),
             ExitCode::DrillNotPass,
             "a drill that ran and did not pass is exit 2, never exit 1: the \
@@ -4373,7 +4416,7 @@ mod tests {
                 ExitCode::DrillNotPass => {
                     let mut sc = a_scorecard();
                     sc.outcome = Outcome::FailIntegrity;
-                    Err(DrillError::NotPass(Box::new(sc)))
+                    Err(DrillError::NotPass(Box::new(sc), None))
                 }
                 ExitCode::Operational => Err(DrillError::Operational("x".into())),
                 ExitCode::GuardRefused => Err(DrillError::Guard(
@@ -4590,7 +4633,7 @@ mod tests {
 
         for outcome in [
             Ok(an_outcome()),
-            Err(DrillError::NotPass(Box::new(a_scorecard()))),
+            Err(DrillError::NotPass(Box::new(a_scorecard()), None)),
         ] {
             let sink = RecordingSink::default();
             report_with(&args_with(None), "01TEST", Some(&spec), outcome, &sink);

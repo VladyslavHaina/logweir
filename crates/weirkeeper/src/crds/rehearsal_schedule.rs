@@ -385,7 +385,11 @@ pub struct RehearsalSuccess {
     /// Which point.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub point_id: Option<String>,
-    /// The evidence verdict for that run.
+    /// The object key of that run's signed scorecard. Written only for a run
+    /// whose verdict was green (exit 0, `outcome: pass`, `Valid` on an
+    /// accepted basis), so the verdict is implied by this record existing;
+    /// the key lets an auditor fetch and re-verify the document after the
+    /// `Restore` is gone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence: Option<String>,
     /// The measured recovery time.

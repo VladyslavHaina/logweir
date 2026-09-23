@@ -4118,11 +4118,12 @@ async fn evidence_fetch_pass(
                                 if let Some(v) = o.last_phase_completed {
                                     facts.insert("lastPhaseCompleted".to_string(), json!(v));
                                 }
-                                // ONLY BESIDE A VALID VERDICT (MEDIUM-1).
+                                // ONLY BESIDE A VALID VERDICT ON A RUN THAT PASSED (MEDIUM-1).
                                 if let Some(c) = completion_patch_value(
                                     &o,
                                     &result,
                                     status.and_then(|s| serde_json::to_value(s).ok()).as_ref(),
+                                    status.and_then(|s| s.exit_code),
                                 ) {
                                     facts.insert("completion".to_string(), c);
                                 }
@@ -4501,14 +4502,17 @@ pub fn running_status_patch(
 /// same rule the evidence keys follow — and the gap is recorded in the CRD
 /// field's own description and in the task report.
 ///
-/// # `EvidenceRecorded` exists only at exit 0, and only over the two mandatory
-/// keys
+/// # `EvidenceRecorded` exists at exit 0, and at exit 2 only when the keys
+/// were read, and only over the two mandatory keys
 ///
 /// Errata **E5c**. Global Constraint 11 says exits 1, 3 and 4 write no
 /// artifact, so "no evidence key lines" is the expected shape there and a
 /// condition about it would be a condition about nothing.
 /// [`RestoreEvidenceKeys::mandatory_complete`] is the predicate, and the third
-/// key's absence is recorded as an absence rather than as a failure.
+/// key's absence is recorded as an absence rather than as a failure. Exit 2
+/// (interface I8 as amended for FAILED-DRILL-EVIDENCE-UNPUBLISHED) raises the
+/// POSITIVE arm only: a runner that predates the amendment prints no keys at
+/// exit 2, and its log is not "unreadable".
 /// `#[allow(clippy::too_many_arguments)]`, AND THE REASON IS THE FUNCTION'S
 /// WHOLE POINT. This is a PURE patch builder: every parameter is one
 /// independent OBSERVATION the reconcile made, and the value of the function
@@ -4579,6 +4583,28 @@ pub fn finished_status_patch(
             status,
             reason,
             message,
+            now,
+        ));
+    } else if exit_code == 2 && keys.mandatory_complete() {
+        // **A SIGNED FAILURE, NAMED — FAILED-DRILL-EVIDENCE-UNPUBLISHED.**
+        // Interface I8 as amended: exit 2 is "a drill ran and did not pass; a
+        // SIGNED scorecard was written", and a runner carrying the amendment
+        // prints that scorecard's keys. They are recorded above like exit 0's
+        // and verified by the same flow, so the positive arm is raised here
+        // too. ONLY the positive arm: a runner that predates the amendment
+        // prints no keys at exit 2, and "unreadable" would be a false
+        // statement about a log that is exactly what that runner promised.
+        // `EvidenceRecorded=True` says the evidence is NAMED; whether the run
+        // passed is still `exitCode` (and the badge reads it — see
+        // `verification::restore_badge`), never this condition.
+        conditions.push(condition(
+            restore,
+            CONDITION_EVIDENCE_RECORDED,
+            "True",
+            REASON_EVIDENCE_KEYS_RECORDED,
+            "the drill did not pass (exit 2) and signed its result; both `scorecard-key=` and \
+             `sidecar-key=` were read off the pod log by name and are on status.evidence, so the \
+             signed failure is verified like any other scorecard",
             now,
         ));
     }
@@ -4795,9 +4821,11 @@ pub fn completion_block(o: &ScorecardObservation) -> serde_json::Map<String, Val
 }
 
 /// `status.completion` for `o`, or `None` when it must not be written: the
-/// verdict reached over the same bytes is not `Valid` on an accepted basis
-/// ([`crate::verification::verification_is_valid`]), or the document carries
-/// nothing to copy.
+/// run did not PASS by the `Restore` badge rule — the verdict reached over the
+/// same bytes is not `Valid` on an accepted basis
+/// ([`crate::verification::verification_is_valid`]), the scorecard's
+/// `outcome` is not `pass`, or the run's `exit_code` is not `0` — or the
+/// document carries nothing to copy.
 ///
 /// THE COMPLETION APPEARS WHEN THE VERIFICATION VERDICT DOES, AND ONLY A VALID
 /// ONE (MEDIUM-1 of the ctl-batch-1 review, orchestrator decision 2026-09-22).
@@ -4809,16 +4837,35 @@ pub fn completion_block(o: &ScorecardObservation) -> serde_json::Map<String, Val
 /// `NotAttempted` or `Pending`, and never beside `Invalid` or `Untrusted`.
 /// `current` is the stored status the verdict block is built over, so the
 /// basis read here is the one the write will store.
+///
+/// AND ONLY FOR A RUN THAT PASSED (MEDIUM-1 of the rehearsal-fix review,
+/// 2026-09-23). Since interface I8's amendment an exit-2 run names its signed
+/// FAILURE, which verifies `Valid` like any document — and the panel renders
+/// "what this restore produced" and cutover guidance ("point applications at
+/// the new names") that must never sit on a restore whose data did not
+/// reconcile. The rule is the badge's own: the status that WILL exist
+/// (`current` with this `exit_code`, this `outcome` and this verdict) must be
+/// green under [`crate::verification::restore_badge`], and `exit_code` must
+/// be `Some(0)` — the badge alone would judge an absent code on `outcome`.
 #[must_use]
 pub fn completion_patch_value(
     o: &ScorecardObservation,
     result: &crate::verification::VerificationResult,
     current: Option<&Value>,
+    exit_code: Option<i32>,
 ) -> Option<Value> {
+    if exit_code != Some(0) {
+        return None;
+    }
     let block = result.to_status_value(stored_verification(current));
-    if !crate::verification::verification_is_valid(&json!({
-        "evidence": { "verification": block }
-    })) {
+    let mut projected = current.cloned().unwrap_or_else(|| json!({}));
+    if !projected.is_object() {
+        projected = json!({});
+    }
+    projected["exitCode"] = json!(0);
+    projected["outcome"] = o.outcome.as_ref().map_or(Value::Null, |v| json!(v));
+    projected["evidence"] = json!({ "verification": block });
+    if !restore_badge(&projected).green {
         return None;
     }
     let completion = completion_block(o);
@@ -6372,9 +6419,9 @@ async fn reconcile_restore_inner(
                     verified,
                     crate::verification::verification_patch_value(block),
                 ),
-                observed
-                    .as_ref()
-                    .and_then(|o| completion_patch_value(o, &result, current.as_ref())),
+                observed.as_ref().and_then(|o| {
+                    completion_patch_value(o, &result, current.as_ref(), Some(exit_code))
+                }),
             ),
         )
         .await?;

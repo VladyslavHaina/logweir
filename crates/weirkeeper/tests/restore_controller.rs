@@ -3658,6 +3658,276 @@ async fn settled_verified_restore() -> (Restore, Vec<Value>) {
     )
 }
 
+/// A scorecard oracle answering a signed, digestible `outcome` of `outcome` —
+/// what the controller copies off the document the runner printed keys for.
+fn scorecard_with_outcome(
+    outcome: &'static str,
+) -> impl Fn(String) -> BoxFuture<'static, Option<ScorecardObservation>> {
+    move |_key| {
+        Box::pin(async move {
+            // REALISTIC COUNTS, as every real scorecard carries — so the
+            // "no completion for a run that did not pass" assertions below
+            // can fail. Without them `completion_block` is empty whatever the
+            // gate says (the rehearsal-fix review's experiment X1).
+            Some(ScorecardObservation {
+                outcome: Some(outcome.to_string()),
+                last_phase_completed: Some(7),
+                scorecard_sha256: Some(
+                    "sha256:2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d"
+                        .to_string(),
+                ),
+                sample_records_expected: Some(100),
+                sample_records_restored: Some(100),
+                integrity_records_sampled: Some(10),
+                integrity_records_sampled_matching: Some(7),
+                integrity_level: Some("byte-fingerprint".to_string()),
+                ..ScorecardObservation::default()
+            })
+        })
+    }
+}
+
+/// One finished pass over `exit_code` with `log`, the scorecard oracle
+/// answering `outcome`, the verifier answering `Valid` — every status patch
+/// sent, and the status the API server would hold afterwards.
+async fn finished_pass(exit_code: i32, log: &str, outcome: &'static str) -> (Vec<Value>, Value) {
+    let condition = if exit_code == 0 { "Complete" } else { "Failed" };
+    let (client, _rec, bodies) = mock_client_recording_bodies(finished_routes(
+        pod_list_terminated(exit_code),
+        log_body(log),
+        condition,
+    ));
+    reconcile_restore(
+        &restore(),
+        &client,
+        &scorecard_with_outcome(outcome),
+        &valid_evidence_at(utc(2026, 9, 10, 12, 0)),
+        now(),
+    )
+    .await
+    .expect("the reconcile completes");
+    let seen = bodies.lock().expect("readable").clone();
+    let patches = patched_statuses(&seen);
+    let mut merged = Value::Object(serde_json::Map::new());
+    for p in &patches {
+        apply_merge_patch(&mut merged, p);
+    }
+    (patches, merged)
+}
+
+/// **FAILED-DRILL-EVIDENCE-UNPUBLISHED, the controller half.** A runner
+/// carrying interface I8's amendment prints its signed scorecard's keys at
+/// exit 2. The controller records them, raises `EvidenceRecorded=True`, copies
+/// the signed `outcome: fail-integrity`, verifies the document with the same
+/// verifier as a pass — and the run is still NOT passed: `Verified=False`, the
+/// badge not green, `phase: Failed`.
+///
+/// Four arms:
+/// 1. exit 2 WITH keys — evidence recorded, verified `Valid`, `fail-integrity`,
+///    not green (`OutcomeNotPass`);
+/// 2. exit 2 with keys and a PLANTED `outcome: pass` — still not green
+///    (`ExitCodeNotZero`): the exit code stays authoritative;
+/// 3. exit 2 WITHOUT keys — an older runner: exactly the pre-amendment status,
+///    one `Failed` condition, no evidence block, no verification patch;
+/// 4. exit 0 with keys — unchanged: `EvidenceRecorded=True`, `Verified=True`.
+///
+/// MUTANTS: drop the exit-2 `EvidenceRecorded` arm (arm 1 fails on the
+/// condition list); raise it without `mandatory_complete()` (arm 3 fails on
+/// the condition count); drop the badge's `exitCode` clause (arm 2 goes
+/// green).
+#[tokio::test]
+async fn an_exit_two_with_keys_records_and_verifies_its_signed_failure() {
+    // ---- arm 1 --------------------------------------------------------------
+    let (patches, status) = finished_pass(2, &i8_tail(), "fail-integrity").await;
+    assert_eq!(patches.len(), 2, "the terminal patch and the verification");
+    let terminal = &patches[0];
+    assert_eq!(terminal["phase"], "Failed");
+    assert_eq!(terminal["exitCode"], 2);
+    assert_eq!(terminal["evidence"]["scorecardKey"], SCORECARD_KEY);
+    assert_eq!(terminal["evidence"]["sidecarKey"], SIDECAR_KEY);
+    assert_eq!(terminal["evidence"]["offsetReportKey"], OFFSET_REPORT_KEY);
+    assert_eq!(terminal["outcome"], "fail-integrity");
+    assert_eq!(
+        conditions_of(terminal),
+        vec![
+            (
+                "Failed".to_string(),
+                "True".to_string(),
+                "DrillNotPass".to_string()
+            ),
+            (
+                "EvidenceRecorded".to_string(),
+                "True".to_string(),
+                "EvidenceKeysRecorded".to_string()
+            ),
+        ]
+    );
+    assert_no_duplicate_condition_types(terminal);
+    assert_eq!(
+        status.pointer("/evidence/verification/result"),
+        Some(&Value::String("Valid".to_string())),
+        "the signed failure is verified like any scorecard: {status}"
+    );
+    let verified = conditions_of(&status)
+        .into_iter()
+        .find(|c| c.0 == "Verified")
+        .expect("the verification patch writes Verified");
+    assert_eq!(
+        (verified.1.as_str(), verified.2.as_str()),
+        ("False", "OutcomeNotPass"),
+        "a VALID signed failure is a verified FAILURE, never green"
+    );
+    assert!(!weirkeeper::verification::restore_badge(&status).green);
+    assert_eq!(status["phase"], "Failed");
+    assert_eq!(status["exitCode"], 2);
+    assert!(
+        status.get("completion").is_none(),
+        "no completion panel — and no cutover guidance — for a run that did not pass, though its \
+         signed failure verified Valid and carries counts: {status}"
+    );
+
+    // ---- arm 2 --------------------------------------------------------------
+    let (_, planted) = finished_pass(2, &i8_tail(), "pass").await;
+    let verified = conditions_of(&planted)
+        .into_iter()
+        .find(|c| c.0 == "Verified")
+        .expect("Verified");
+    assert_eq!(
+        (verified.1.as_str(), verified.2.as_str()),
+        ("False", "ExitCodeNotZero"),
+        "exit 2 is never green, whatever its document says: {planted}"
+    );
+    assert!(!weirkeeper::verification::restore_badge(&planted).green);
+    assert!(
+        planted.get("completion").is_none(),
+        "exit 2 publishes no completion even over a planted pass: {planted}"
+    );
+
+    // ---- arm 3 --------------------------------------------------------------
+    let (patches, older) = finished_pass(2, "", "fail-integrity").await;
+    assert_eq!(
+        patches.len(),
+        1,
+        "no keys, no document, no verification patch — as before the amendment"
+    );
+    assert_eq!(conditions_of(&older).len(), 1, "{older}");
+    assert!(older.get("evidence").is_none(), "{older}");
+    assert!(older.get("outcome").is_none(), "{older}");
+
+    // ---- arm 4 --------------------------------------------------------------
+    let (_, passed) = finished_pass(0, &i8_tail(), "pass").await;
+    assert!(conditions_of(&passed).contains(&(
+        "EvidenceRecorded".to_string(),
+        "True".to_string(),
+        "EvidenceKeysRecorded".to_string()
+    )));
+    assert!(
+        weirkeeper::verification::restore_badge(&passed).green,
+        "exit 0, Valid and pass is green, unchanged: {passed}"
+    );
+    assert_eq!(
+        passed["completion"]["recordsSampledMatching"], 7,
+        "the CONTROL: the same counts DO reach completion on a run that passed, so the \
+         exit-2 absence above is the gate's and not the fixture's: {passed}"
+    );
+}
+
+/// The EVIDENCE-FETCH consumer of the same keys: a destination-backed exit-2
+/// run's verdict arrives with the fetch Job's relay, and `verdict_patch`
+/// computes the badge over the status that WILL exist. A relayed `Valid`
+/// scorecard at exit 2 — even one planting `outcome: pass` — is not green.
+///
+/// MUTANT: drop the badge's `exitCode` clause — the planted row goes green.
+#[test]
+fn a_relayed_valid_scorecard_at_exit_two_is_not_green() {
+    let result = VerificationResult {
+        result: VerificationVerdict::Valid,
+        matched_key_id: Some(
+            "917cf9a299872cbf8b2715999ce457464705bb8f48df0a07e9b1e19bb9f383fd".to_string(),
+        ),
+        payload_type: logweir_verify::PAYLOAD_TYPE_SCORECARD.to_string(),
+        verified_at: utc(2026, 9, 10, 12, 0),
+        detail: None,
+        trust: None,
+    };
+    for (exit_code, outcome, green) in [
+        (2, "fail-integrity", false),
+        (2, "pass", false),
+        (0, "pass", true),
+    ] {
+        let current = serde_json::json!({
+            "phase": if exit_code == 0 { "Succeeded" } else { "Failed" },
+            "exitCode": exit_code,
+            "evidence": {"scorecardKey": SCORECARD_KEY, "sidecarKey": SIDECAR_KEY},
+        });
+        let mut facts = serde_json::Map::new();
+        facts.insert("outcome".to_string(), serde_json::json!(outcome));
+        let (_, badge) = weirkeeper::evidence_fetch::verdict_patch(
+            Some(&current),
+            &[],
+            Some(1),
+            &result,
+            serde_json::json!({"attempt": 1}),
+            serde_json::Map::new(),
+            facts,
+            weirkeeper::verification::restore_badge,
+            now(),
+        );
+        assert_eq!(
+            badge.green, green,
+            "exit {exit_code} with outcome {outcome}: {badge:?}"
+        );
+    }
+}
+
+/// `completion_patch_value` publishes only for a run that PASSED: exit 0,
+/// `outcome: pass`, a Valid verdict. The evidence-fetch writer passes the
+/// stored `exitCode`; the own-handle writer the code it just read.
+///
+/// MUTANTS: drop the `exit_code != Some(0)` early return (the exit-2 `pass`
+/// row publishes); drop the badge check (the `fail-integrity` exit-0 row and
+/// the exit-2 rows publish).
+#[test]
+fn a_completion_is_published_only_for_a_run_that_passed() {
+    let result = VerificationResult {
+        result: VerificationVerdict::Valid,
+        matched_key_id: Some(
+            "917cf9a299872cbf8b2715999ce457464705bb8f48df0a07e9b1e19bb9f383fd".to_string(),
+        ),
+        payload_type: logweir_verify::PAYLOAD_TYPE_SCORECARD.to_string(),
+        verified_at: utc(2026, 9, 10, 12, 0),
+        detail: None,
+        trust: None,
+    };
+    let observed = |outcome: &str| ScorecardObservation {
+        outcome: Some(outcome.to_string()),
+        sample_records_expected: Some(100),
+        sample_records_restored: Some(100),
+        integrity_records_sampled: Some(10),
+        integrity_records_sampled_matching: Some(7),
+        integrity_level: Some("byte-fingerprint".to_string()),
+        ..ScorecardObservation::default()
+    };
+    use weirkeeper::controllers::restore::completion_patch_value as gate;
+    assert!(gate(&observed("pass"), &result, None, Some(0)).is_some());
+    for (label, o, code) in [
+        (
+            "exit 2, fail-integrity",
+            observed("fail-integrity"),
+            Some(2),
+        ),
+        ("exit 2, a planted pass", observed("pass"), Some(2)),
+        (
+            "exit 0, fail-integrity",
+            observed("fail-integrity"),
+            Some(0),
+        ),
+        ("no exit code", observed("pass"), None),
+    ] {
+        assert_eq!(gate(&o, &result, None, code), None, "{label}");
+    }
+}
+
 /// **A VERIFIED `Restore` RECONCILES AGAIN AND SENDS NOTHING** — the twin of
 /// `tests/verification.rs::a_verified_object_reconciles_without_a_patch`,
 /// which had only the `Backup` half.
@@ -7139,9 +7409,13 @@ fn the_completion_is_copied_from_the_signed_scorecard_by_pointer() {
     );
     // Beside a `Valid` verdict it is the value written; the terminal write
     // (before any verdict) never carries it.
-    let written =
-        weirkeeper::controllers::restore::completion_patch_value(&o, &valid_result(), None)
-            .expect("a Valid verdict publishes the completion");
+    let written = weirkeeper::controllers::restore::completion_patch_value(
+        &o,
+        &valid_result(),
+        None,
+        Some(0),
+    )
+    .expect("a Valid verdict publishes the completion");
     assert_eq!(written, fixture_completion());
     let keys = restore_evidence_keys(&i8_tail());
     let patch = finished_status_patch(&restore(), 0, &keys, None, Some(&o), None, None, now());
@@ -7187,7 +7461,12 @@ fn a_completion_fact_the_scorecard_does_not_carry_is_absent() {
     assert!(block_of(&bare).is_empty(), "{:?}", block_of(&bare));
     let o = scorecard_observation(bare.to_string().as_bytes()).expect("object");
     assert_eq!(
-        weirkeeper::controllers::restore::completion_patch_value(&o, &valid_result(), None),
+        weirkeeper::controllers::restore::completion_patch_value(
+            &o,
+            &valid_result(),
+            None,
+            Some(0)
+        ),
         None,
         "an empty completion is not written, even beside a Valid verdict"
     );

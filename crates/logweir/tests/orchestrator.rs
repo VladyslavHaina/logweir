@@ -48,7 +48,10 @@ fn every_drill_error_maps_to_its_contracted_exit_code() {
         ExitCode::SigningOrLock
     );
     assert_eq!(
-        ExitCode::from(DrillError::NotPass(Box::new(fixtures::scorecard_pass()))),
+        ExitCode::from(DrillError::NotPass(
+            Box::new(fixtures::scorecard_pass()),
+            None
+        )),
         ExitCode::DrillNotPass
     );
 }
@@ -424,7 +427,7 @@ fn a_blocked_preflight_exits_2_with_a_signed_scorecard_and_never_reaches_phase_6
     let f = fixtures::orchestrator_fixture(Drill::BlocksAtPreflight);
     let err = execute_with(&f.args, &f.run_id, &f.ctx).unwrap_err();
     let sc = match &err {
-        logweir::drill::DrillError::NotPass(sc) => sc.clone(),
+        logweir::drill::DrillError::NotPass(sc, _) => sc.clone(),
         other => panic!("a blocked preflight is a drill RESULT, got {other:?}"),
     };
     assert_eq!(
@@ -475,7 +478,7 @@ fn a_blocked_preflight_exits_2_with_a_signed_scorecard_and_never_reaches_phase_6
 fn a_blocked_preflight_writes_every_finding_into_the_phase_5_notes() {
     let f = fixtures::orchestrator_fixture(Drill::BlocksAtPreflight);
     let sc = match execute_with(&f.args, &f.run_id, &f.ctx).unwrap_err() {
-        logweir::drill::DrillError::NotPass(sc) => sc,
+        logweir::drill::DrillError::NotPass(sc, _) => sc,
         other => panic!("expected NotPass, got {other:?}"),
     };
     let p5 = sc
@@ -519,7 +522,7 @@ fn a_no_op_restore_is_a_drill_result_at_exit_2_never_an_operational_exit_1() {
     let f = fixtures::orchestrator_fixture(Drill::RestoresNothing);
     let err = execute_with(&f.args, &f.run_id, &f.ctx).unwrap_err();
     let sc = match &err {
-        logweir::drill::DrillError::NotPass(sc) => sc.clone(),
+        logweir::drill::DrillError::NotPass(sc, _) => sc.clone(),
         logweir::drill::DrillError::RestoreNoOp(m) => panic!(
             "RestoreNoOp escaped the phase-6 call site unintercepted; the next \
              `From<DrillError> for ExitCode` would panic: {m}"
@@ -722,7 +725,7 @@ fn a_drill_that_passed_at_byte_fingerprint_level_signs_a_matrix_pass() {
 fn the_stdout_line_quotes_the_artifact_on_the_blocked_preflight_path_too() {
     let f = fixtures::orchestrator_fixture(Drill::BlocksAtPreflight);
     let sc = match execute_with(&f.args, &f.run_id, &f.ctx).unwrap_err() {
-        logweir::drill::DrillError::NotPass(sc) => sc,
+        logweir::drill::DrillError::NotPass(sc, _) => sc,
         other => panic!("a blocked preflight is a drill RESULT: {other:?}"),
     };
     let signed: logweir_core::scorecard::Scorecard =
@@ -1111,7 +1114,7 @@ fn the_metrics_file_distinguishes_a_pass_from_a_signed_non_pass() {
 
     let blocked = fixtures::orchestrator_fixture(Drill::BlocksAtPreflight);
     let sc = match execute_with(&blocked.args, &blocked.run_id, &blocked.ctx).unwrap_err() {
-        logweir::drill::DrillError::NotPass(sc) => *sc,
+        logweir::drill::DrillError::NotPass(sc, _) => *sc,
         other => panic!("{other:?}"),
     };
     logweir::metrics::write_textfile(&blocked.metrics, &sc).unwrap();
@@ -1179,7 +1182,7 @@ fn every_metric_name_is_emitted_as_a_sample_not_only_as_a_help_comment() {
 fn an_ignored_engine_lever_is_reported_as_ignored_and_never_as_a_matrix_pass() {
     let f = fixtures::orchestrator_fixture(Drill::IgnoresTheHeaderLever);
     let sc = match execute_with(&f.args, &f.run_id, &f.ctx).unwrap_err() {
-        logweir::drill::DrillError::NotPass(sc) => sc,
+        logweir::drill::DrillError::NotPass(sc, _) => sc,
         other => panic!("an ignored lever blocks the plan at phase 5: {other:?}"),
     };
     assert_eq!(
@@ -1250,7 +1253,7 @@ fn a_scored_drill_that_does_not_pass_exits_2_after_running_every_phase() {
             .err()
             .unwrap_or_else(|| panic!("{shape:?} must not report success"));
         let sc = match &err {
-            logweir::drill::DrillError::NotPass(sc) => sc.clone(),
+            logweir::drill::DrillError::NotPass(sc, _) => sc.clone(),
             other => panic!("{shape:?} is a drill RESULT, got {other:?}"),
         };
 
@@ -1311,7 +1314,7 @@ fn a_scored_drill_that_does_not_pass_exits_2_after_running_every_phase() {
 fn a_no_op_restore_still_tears_down_its_scratch_topics_but_a_blocked_preflight_does_not() {
     let f = fixtures::orchestrator_fixture(Drill::RestoresNothing);
     let sc = match execute_with(&f.args, &f.run_id, &f.ctx).unwrap_err() {
-        logweir::drill::DrillError::NotPass(sc) => sc,
+        logweir::drill::DrillError::NotPass(sc, _) => sc,
         other => panic!("{other:?}"),
     };
     assert!(
@@ -1338,7 +1341,7 @@ fn a_no_op_restore_still_tears_down_its_scratch_topics_but_a_blocked_preflight_d
     // The other half of the asymmetry.
     let b = fixtures::orchestrator_fixture(Drill::BlocksAtPreflight);
     let sc = match execute_with(&b.args, &b.run_id, &b.ctx).unwrap_err() {
-        logweir::drill::DrillError::NotPass(sc) => sc,
+        logweir::drill::DrillError::NotPass(sc, _) => sc,
         other => panic!("{other:?}"),
     };
     assert!(

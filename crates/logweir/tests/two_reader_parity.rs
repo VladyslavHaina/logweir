@@ -1871,7 +1871,7 @@ fn a_whole_drill_outside_the_manifest_bound_signs_fail_integrity_and_both_reader
     let err = execute_with(&f.args, &f.run_id, &f.ctx)
         .expect_err("a restored count outside the manifest's bound must never report success");
     let sc = match &err {
-        DrillError::NotPass(sc) => sc.clone(),
+        DrillError::NotPass(sc, _) => sc.clone(),
         other => panic!(
             "a count outside the bound is a drill RESULT, never an operational failure: {other:?}"
         ),

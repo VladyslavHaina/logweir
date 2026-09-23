@@ -361,12 +361,19 @@ test("a_restore_green_badge_needs_a_valid_verification_and_a_pass_outcome", () =
   }
 });
 
-test("the_restore_badge_reads_the_outcome_and_not_the_exit_code", () => {
+test("the_restore_badge_reads_the_outcome_and_the_exit_code_is_authoritative", () => {
   // Every checked-in Restore fixture has `outcome == "pass"` exactly when
-  // `exitCode == 0`, so a rule that read the exit code would pass the rows
-  // above unnoticed (Task 26's review, finding M-1). These two objects pull
-  // the fields apart: a Valid scorecard SAYING the restore did not reconcile,
-  // with exit 0, must not be green; a Valid `pass` with a non-zero exit is.
+  // `exitCode == 0`, so a rule that read ONLY the exit code would pass the rows
+  // above unnoticed (Task 26's review, finding M-1). These objects pull the
+  // fields apart: a Valid scorecard SAYING the restore did not reconcile, with
+  // exit 0, must not be green; and a Valid `pass` with NO recorded exit code
+  // is green -- the rule reads `outcome`, not the code.
+  //
+  // AMENDED by the rehearsal-fix review (LOW-4): since interface I8's
+  // amendment an exit-2 run publishes a signed failure that verifies Valid, so
+  // the controller's rule (`weirkeeper::verification::restore_badge`) also
+  // refuses a RECORDED non-zero exit code. A Valid `pass` at exit 2 -- which
+  // this row used to assert green -- is now not green.
   const base = fixture("restore-valid-pass.json");
   assert.equal(base.status.evidence.verification.result, "Valid");
 
@@ -381,13 +388,21 @@ test("the_restore_badge_reads_the_outcome_and_not_the_exit_code", () => {
   );
   assert.ok(notGreen.includes("unverified"), "and it says `unverified`");
 
+  const passedNoCode = JSON.parse(JSON.stringify(base));
+  passedNoCode.status.outcome = "pass";
+  delete passedNoCode.status.exitCode;
+  assert.ok(
+    badgeOf(renderRestoreDetail(passedNoCode)).includes("badge-green"),
+    "Valid + pass with no recorded exit code IS green: the rule reads `outcome`",
+  );
+
   const passedButExitTwo = JSON.parse(JSON.stringify(base));
   passedButExitTwo.status.outcome = "pass";
   passedButExitTwo.status.exitCode = 2;
-  const green = badgeOf(renderRestoreDetail(passedButExitTwo));
-  assert.ok(
-    green.includes("badge-green"),
-    "Valid + pass + exit 2 IS green: the exit code is not part of the Restore rule",
+  assert.equal(
+    badgeOf(renderRestoreDetail(passedButExitTwo)).includes("badge-green"),
+    false,
+    "Valid + pass + exit 2 is NOT green: a recorded non-zero exit code is authoritative",
   );
 });
 

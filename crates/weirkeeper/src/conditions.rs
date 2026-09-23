@@ -610,7 +610,7 @@ pub const REASON_APPROVAL_BUNDLE_MATERIALIZATION_FAILED: &str =
     "ApprovalBundleMaterializationFailed";
 
 /// Whether the run's two evidence keys were recorded — **its own condition
-/// type, and raised only at exit 0**.
+/// type, raised at exit 0 (and, on a `Restore`, at exit 2 when keys were read)**.
 ///
 /// REVIEW FINDING HIGH-2, plan errata **E5c**. This used to be a second
 /// `Failed` condition with `status: "False"` and reason
@@ -634,7 +634,10 @@ pub const REASON_APPROVAL_BUNDLE_MATERIALIZATION_FAILED: &str =
 /// promised an artifact: `status: "True"` with reason
 /// [`REASON_EVIDENCE_KEYS_RECORDED`] when both keys were read, `status:
 /// "False"` with reason [`REASON_EVIDENCE_KEYS_UNREADABLE`] when they were
-/// not, and **no evidence condition at all** at exits 1, 3 and 4.
+/// not, and **no evidence condition at all** at exits 1, 3 and 4. A `Restore`
+/// at exit 2 raises the `True` arm when its runner named the signed failure's
+/// keys (interface I8 as amended, FAILED-DRILL-EVIDENCE-UNPUBLISHED) and no
+/// condition when an older runner printed none.
 pub const CONDITION_EVIDENCE_RECORDED: &str = "EvidenceRecorded";
 
 /// The condition reason for a log body that did not carry both key lines.
