@@ -108,7 +108,16 @@ function defaultPrefix(ms) {
     iso.slice(11, 13) + iso.slice(14, 16) + iso.slice(17, 19) + "Z-";
 }
 
-const OLD_PREFIX = defaultPrefix(OLD_TO_MS);
+// THE LAST INSTANT THE RUNNER ACCEPTS, NOT THE WINDOW'S END
+// (WIZARD-DEFAULT-PIT-EXCLUSIVE, db288cb). `windowCovered.toMs` is EXCLUSIVE --
+// the newest segment's end plus one millisecond -- and the runner's
+// archive.coverage accepts `oldest < pointInTime <= newest`, so the wizard
+// defaults to `toMs - 1` and derives its default prefix from THAT instant.
+// This harness derived the prefix from `toMs` and asserted `toMs` itself was
+// inside the window, both of which the product deliberately stopped doing.
+const OLD_LAST_MS = OLD_TO_MS - 1;
+const NEW_LAST_MS = NEW_TO_MS - 1;
+const OLD_PREFIX = defaultPrefix(OLD_LAST_MS);
 const COLLIDING_TOPIC = OLD_PREFIX + "orders";
 
 const result = {
@@ -650,11 +659,11 @@ async function main() {
 
     // THE NEGATIVE CONTROL: the NEWER point's prefix differs, so a page that
     // had silently followed the newest completion would render other names.
-    check(defaultPrefix(NEW_TO_MS) !== OLD_PREFIX, "the two points' prefixes differ");
-    check(!mapped.includes(defaultPrefix(NEW_TO_MS)),
+    check(defaultPrefix(NEW_LAST_MS) !== OLD_PREFIX, "the two points' prefixes differ");
+    check(!mapped.includes(defaultPrefix(NEW_LAST_MS)),
       "no name from the newer point's plan is on screen");
     control("the newer point's prefix is absent, so the page did not follow the newest run", {
-      newerPrefix: defaultPrefix(NEW_TO_MS),
+      newerPrefix: defaultPrefix(NEW_LAST_MS),
     });
 
     // ------------------------------------------------------------------ 2
@@ -740,7 +749,7 @@ async function main() {
       approvalRef: { name: "apr-mapping-probe" },
       sourceArchive: { url: archiveUrl },
       backupSetRef: "01JB7Z0000000000000000OLD",
-      pointInTime: rfc(OLD_TO_MS),
+      pointInTime: rfc(OLD_LAST_MS),
       target: {
         clusterRef: { name: targetCluster }, mode: "newTopic",
         topicNaming: { prefix: OLD_PREFIX },
@@ -854,16 +863,24 @@ async function main() {
       writesDuring: 0,
     });
 
-    // THE NEGATIVE CONTROL: the boundary instant ITSELF is inside.
+    // THE EXCLUSIVE END ITSELF IS OUTSIDE (WIZARD-DEFAULT-PIT-EXCLUSIVE):
+    // `windowCovered.toMs` is one millisecond past the newest record, and the
+    // runner refuses it, so the page must too.
     await page.fill("#point-in-time", rfc(OLD_TO_MS));
+    await page.dispatchEvent("#point-in-time", "change");
+    await waitFor(page, "#point-in-time-complaint", "the complaint at the exclusive end");
+    control("the window's exclusive end itself is refused by name", { typed: rfc(OLD_TO_MS) });
+
+    // THE NEGATIVE CONTROL: the last instant the runner accepts is inside.
+    await page.fill("#point-in-time", rfc(OLD_LAST_MS));
     await page.dispatchEvent("#point-in-time", "change");
     await pause(1500);
     const stillComplaining = await page.evaluate(() =>
       document.querySelector("#point-in-time-complaint") !== null);
     check(stillComplaining === false,
-      "the window is closed at both ends: the bound itself is inside it");
-    control("the boundary instant itself is accepted, so the window is closed at both ends", {
-      typed: rfc(OLD_TO_MS),
+      "the last instant the runner accepts (toMs - 1 ms) is inside the window");
+    control("the last accepted instant (toMs - 1 ms) is accepted, so the complaint is about the bound", {
+      typed: rfc(OLD_LAST_MS),
     });
 
     // --------------------------------------------------- 5b (the wizard SUBMITS)
@@ -1323,7 +1340,7 @@ async function main() {
         approvalRef: { name: failedApproval },
         sourceArchive: { url: archiveUrl },
         backupSetRef: "01JB7Z0000000000000000OLD",
-        pointInTime: rfc(OLD_TO_MS),
+        pointInTime: rfc(OLD_LAST_MS),
         target: {
           clusterRef: { name: targetCluster }, mode: "newTopic",
           topicNaming: { prefix: OLD_PREFIX },
