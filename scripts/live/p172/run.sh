@@ -18,7 +18,8 @@ export OUT="${OUT:-${P172_ARTIFACTS:-/tmp/logweir-roadmap-run/claude/artifacts/p
 mkdir -p "$OUT" && chmod 700 "$OUT"
 source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 exec > >(tee "$OUT/run.log") 2>&1
-echo "== PLAT-17.2 live run $TS ($mode) at $(git -C "$REPO" rev-parse HEAD), owner $OWNER, prefix $PREFIX =="
+echo "== PLAT-17.2 live run $TS ($mode), owner $OWNER, prefix $PREFIX =="
+echo "harness revision $(git -C "$H" rev-parse HEAD); binaries and ui/ from $REPO at $(git -C "$REPO" rev-parse HEAD)"
 shasum -a 256 "$API_BIN" "$WK_BIN" 2>/dev/null
 echo "lab controller (shared fixture, read-only):"
 $K -n logweir-scram-local get pods -l app.kubernetes.io/component=control-plane -o jsonpath='{range .items[*]}{.metadata.name} {.status.containerStatuses[0].imageID}{"\n"}{end}'
