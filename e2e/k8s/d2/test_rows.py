@@ -548,6 +548,18 @@ def test_only_the_products_own_denial_counts_as_a_denial() -> None:
                           "runnerLogTail": "connection timed out"}))
     row("MUTANT: a catalog sync that simply ran out of time",
         not d2.u6_denied({"counts": {}, "pages": 0, "timedOut": True, "conditions": []}))
+    row("the retention enforcer's own VersionProbeRefused (s3:GetObject withdrawn, 62ef1a1)",
+        d2.u6_denied({"jobSucceeded": False, "pointsDeleted": 0,
+                      "pointCodes": ["VersionProbeRefused"], "runnerLogTail": "state=Kept"}))
+    row("MUTANT: VersionedBucket is a refusal about the bucket, not the grant",
+        not d2.u6_denied({"jobSucceeded": False, "pointsDeleted": 0,
+                          "pointCodes": ["VersionedBucket"], "runnerLogTail": "state=Kept"}))
+    lines = ("retention-point=lwp1-e5c2 state=Kept objects=0 code=VersionProbeRefused\n"
+             "retention-point=lwp1-aaaa state=Deleted objects=2\n")
+    import re as _re
+    row("the enforcer's per-point codes are read from its own lines, Deleted ones carry none",
+        _re.findall(r"retention-point=\S+ state=\S+ objects=\d+ code=(\S+)", lines)
+        == ["VersionProbeRefused"])
 
 
 # --- S22 / S23: APPROVAL-KEY-WINDOW-UNPUBLISHED ------------------------------

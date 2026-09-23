@@ -5548,6 +5548,16 @@ U6_SCOPES = ("bucket", "bucket:archive", "bucket:evidence", "bucket:both",
 #: measurement — it is a broken fixture, and `u6_row_is_proved` says so.
 U6_DENIAL_CODES = {"AccessDenied", "InvalidCredentials"}
 
+#: The retention enforcer's own per-point codes for "the delete credential was
+#: refused a call the enforcer needs" (`retention-point=… state=Kept
+#: code=<code>`). Since ctl-batch-2 (`62ef1a1`) the enforcer HEADs every key
+#: before deleting it and, when the credential lacks `s3:GetObject`, keeps the
+#: point with `VersionProbeRefused` — the product's own name for that refusal,
+#: which carries no `AccessDenied` text of its own. `VersionedBucket` is NOT
+#: here: it is a refusal about the bucket, not about the grant, and a removal
+#: that ended in it measured nothing about the unit removed.
+U6_RETENTION_DENIAL_CODES = {"VersionProbeRefused"}
+
 #: The substrings a denied object-store call leaves in a runner's own output.
 U6_DENIAL_TEXT = ("AccessDenied", "Access Denied", "access denied",
                   "InvalidAccessKeyId", "SignatureDoesNotMatch", "403 Forbidden")
@@ -5649,6 +5659,9 @@ def u6_denied(classified: Any) -> bool:
         # An operation whose product vocabulary is not the check contract's
         # records the sentence it did say, and records nothing when it did not.
         if classified.get("deniedBy"):
+            return True
+        if any(str(c).split(":")[0] in U6_RETENTION_DENIAL_CODES
+               for c in (classified.get("pointCodes") or [])):
             return True
         for key in ("code", "reason", "exitReason"):
             if classified.get(key) in U6_DENIAL_CODES:
@@ -6625,7 +6638,10 @@ def u6_retention_job_op():
         deleted = logs.count("state=Deleted")
         classified = {"jobSucceeded": bool(status.get("succeeded")),
                       "jobFailed": status.get("failed"),
-                      "pointsDeleted": deleted, "runnerLogTail": logs[-2000:]}
+                      "pointsDeleted": deleted,
+                      "pointCodes": re.findall(r"retention-point=\S+ state=\S+ objects=\d+ code=(\S+)",
+                                               logs),
+                      "runnerLogTail": logs[-2000:]}
         return {"ok": ok and deleted >= 1, "object": name, "kind": "Job", "variant": tag,
                 "classified": classified,
                 "unclassified": (not (ok and deleted >= 1)) and not u6_denied(classified)}
