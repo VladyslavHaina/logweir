@@ -72,6 +72,7 @@ import {
   decodeLegacyObject,
   decodeManualBackup,
   decodeOperation,
+  decodeOperationTrust,
   decodePolicyChanged,
   decodeRequest,
   decodeSession,
@@ -923,8 +924,21 @@ const PROJECT = Object.freeze({
 /** Merges one operation's normalized status into a projected object: the
  *  evidence keys, the recorded verification, the exit and the conditions. The
  *  product API keeps these on their own route, so a DETAIL view reads them and
- *  a list does not. */
-function mergeOperation(object, operation) {
+ *  a list does not.
+ *
+ *  THE TRUST BASIS TRAVELS WITH THE VERDICT (CONSOLE-DETAIL-TRUST-BASIS-DROPPED).
+ *  `trust` is the route's decoded `OperationTrust` block, or `null` when the
+ *  body carried none. Its `basis` is written where the custom resource keeps
+ *  it -- `status.evidence.verification.trust.basis`, in the CRD's own spelling,
+ *  which the API passes through untranslated -- so the ONE badge rule
+ *  (`validVerification`, `verificationCase`) judges a console detail exactly
+ *  as it judges the custom resource: `RecordedBeforeRevocation` is not green,
+ *  `Historical` is green with the retired-key qualifier, and an absent block
+ *  keeps the pre-existing rule (D3 sections 7.4 and 12). Without it a `Valid`
+ *  on a compromise-revoked key read green, and so did every scorecard fact
+ *  captioned by the same rule. The basis only ever refines a recorded
+ *  `result`, so it is not written where no result was recorded. */
+function mergeOperation(object, operation, trust) {
   const status = object.status;
   status.phase = PHASE_OF[operation.state];
   if (operation.stateReason !== null) {
@@ -958,6 +972,12 @@ function mergeOperation(object, operation) {
   for (const field of ["payloadType", "matchedKeyId", "verifiedAt", "detail"]) {
     if (operation.verification[field] !== null) {
       verification[field] = operation.verification[field];
+    }
+  }
+  if (verification.result !== undefined && trust !== null && trust !== undefined) {
+    verification.trust = { basis: trust.basis };
+    if (trust.keyState !== null) {
+      verification.trust.keyState = trust.keyState;
     }
   }
   if (Object.keys(verification).length > 0) {
@@ -2383,10 +2403,11 @@ async function enrich(ns, plural, name, object, options) {
       return object;
     }
     try {
-      const decoded = decodeOperation(
-        await consoleOperation(ns, plural === "backups" ? "backup" : "restore", name, options),
+      const body = await consoleOperation(
+        ns, plural === "backups" ? "backup" : "restore", name, options,
       );
-      return mergeOperation(object, decoded.value.item);
+      const decoded = decodeOperation(body);
+      return mergeOperation(object, decoded.value.item, decodeOperationTrust(body));
     } catch (unread) {
       if (isMissingExtra(unread)) {
         return object;

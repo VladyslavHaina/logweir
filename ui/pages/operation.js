@@ -424,14 +424,32 @@ export function renderResult(v) {
  *  the SIGNER. They are never flattened into one word here. */
 /** Whether this run's evidence is green, by the evidence section's own rule:
  *  the API's combined trust word in console mode, `result` + `basis` in
- *  legacy mode. */
+ *  legacy mode.
+ *
+ *  THE BASIS STILL VETOES IN CONSOLE MODE (CONSOLE-DETAIL-TRUST-BASIS-DROPPED).
+ *  `logweir-api` projects a `Valid` verdict on `RecordedBeforeRevocation` as
+ *  `trust.state: verified` (`crates/logweir-api/src/status.rs`, `trust_of`),
+ *  and D3 section 7.4 says that case is "never green". So a green word is
+ *  green only on a basis a green badge may carry -- the SAME
+ *  [`basisAllowsGreen`] legacy mode applies -- and the two modes cannot
+ *  disagree about one run. */
 export function evidenceGreen(v) {
   const console_ = v.console === true;
   const trust = (console_ ? v.trust : ((v.evidenceVerification || {}).trust)) || {};
   const ver = (console_ ? v.verification : v.evidenceVerification) || {};
   return console_
-    ? GREEN_TRUST_STATES.indexOf(v.trustState) !== -1
+    ? (GREEN_TRUST_STATES.indexOf(v.trustState) !== -1 && basisAllowsGreen(trust.basis))
     : (ver.result === "Valid" && basisAllowsGreen(trust.basis));
+}
+
+/** The caption of a console evidence badge that is not green. A green trust
+ *  word the basis vetoed is named by the basis -- the words legacy mode uses
+ *  for the same `Valid` + basis -- and every other word by its own case. */
+function consoleUnverifiedCaption(v, trust) {
+  if (GREEN_TRUST_STATES.indexOf(v.trustState) !== -1 && !basisAllowsGreen(trust.basis)) {
+    return unverifiedCaption({ result: "Valid", trust: trust }, v.verifiedSuccess);
+  }
+  return unverifiedTrustCaption(v.trustState, v.verifiedSuccess);
 }
 
 export function renderEvidence(v) {
@@ -451,9 +469,7 @@ export function renderEvidence(v) {
   const trust = (console_ ? v.trust : ((v.evidenceVerification || {}).trust)) || {};
   const ver = (console_ ? v.verification : v.evidenceVerification) || {};
   const policy = trust.policy || {};
-  const green = console_
-    ? GREEN_TRUST_STATES.indexOf(v.trustState) !== -1
-    : (ver.result === "Valid" && basisAllowsGreen(trust.basis));
+  const green = evidenceGreen(v);
   const historical = console_
     ? v.trustState === "verifiedHistorical"
     : trust.basis === "Historical";
@@ -466,7 +482,7 @@ export function renderEvidence(v) {
     : badge(
       "unverified",
       console_
-        ? unverifiedTrustCaption(v.trustState, v.verifiedSuccess)
+        ? consoleUnverifiedCaption(v, trust)
         : unverifiedCaption(ver, v.verifiedSuccess),
     );
   return (
