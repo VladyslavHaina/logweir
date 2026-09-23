@@ -96,6 +96,24 @@ account** — until then an installation that wants the rest of the console
 without that exposure should decline `api.enabled` rather than assume the grant
 is bounded above it.
 
+---------------------------------------------------------------------------
+THE ONE ROSTER READ — `get` ON `trustrosters/default`, AND NOTHING ELSE
+---------------------------------------------------------------------------
+PREFLIGHT-TRUSTROSTER-STALE. The controller records `TrustRoster/default` as a
+readiness check's referent whenever it exists, and a verdict is applicable only
+while every referent is unchanged. A service that cannot read the roster
+cannot compare it, so it reported every verdict `unverifiable` — stale — and
+the console could not submit a restore after any readiness check on a cluster
+with a roster. `<release>-api-trustroster` is the narrowest grant that closes
+it: `get`, `resourceNames: ["default"]`, no `list`, no other name. The adapter
+matches it exactly: `KubeAdapter::get_trust_roster` takes no name and reads
+`weirkeeper::ROSTER_NAME`, and `TrustRoster` is NOT sealed into
+`ClusterResource` (that would be a list of every roster's key material). A
+refused read is still `unverifiable`, so an installation that removes this
+role gets stale verdicts back, never optimistic ones. The governing
+`TrustPolicy` referent is compared through the `get` the `-trustpolicies`
+role below already carries.
+
 AND NO `/status` SUBRESOURCE IS NAMED, WHICH IS NOT AN OMISSION. `get` on
 `recoverycatalogs` returns the whole object, status included; the status
 subresource exists so a WRITER can be authorised separately, not so a reader
@@ -227,6 +245,40 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: {{ $name }}-trustpolicies
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ .Release.Namespace }}
+---
+{{/*
+The ONE roster, by name, read only. See this file's header, "THE ONE ROSTER
+READ". A separate role and not a rule on `-trustpolicies`, so each object's
+rules stay one shape an auditor can read at a glance.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $name }}-trustroster
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+rules:
+  - apiGroups: ["logweir.dev"]
+    resources: ["trustrosters"]
+    resourceNames: ["default"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $name }}-trustroster
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $name }}-trustroster
 subjects:
   - kind: ServiceAccount
     name: {{ $name }}

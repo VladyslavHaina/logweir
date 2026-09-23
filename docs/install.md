@@ -703,7 +703,8 @@ add a kind, and it spends exactly four Kubernetes verbs:
 | `patch` on `backupschedules`, `backupdestinations`, `topicdiscoveries`, `preflights` | suspension and policy edits, access rotation, and the two checks whose `spec.cancelRequested` may be raised |
 | `get`/`list` on `protectionpolicies`, `recoverycatalogs`, `rehearsalschedules`, `retentionpolicies` | D3's read surfaces |
 | `create` on `recoverycatalogs` | "connect existing archive", D3's one write |
-| `get`/`list` on `trustpolicies` (cluster-scoped, its own `ClusterRoleBinding`) | the keys view |
+| `get`/`list` on `trustpolicies` (cluster-scoped, its own `ClusterRoleBinding`) | the keys view, and comparing a readiness check's governing `TrustPolicy` referent |
+| `get` on `trustrosters` with `resourceNames: ["default"]` (cluster-scoped, `<release>-api-trustroster`) | comparing a readiness check's `TrustRoster/default` referent; without it every readiness verdict on a cluster with a roster is `unverifiable` and served stale. No `list` and no other roster |
 | `get` on `configmaps` | a check's stored result and a catalog view's pages, each verified by owner UID, immutability and digest before a byte is served |
 | `create` on `secrets` | the write-only credential entry |
 

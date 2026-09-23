@@ -1252,7 +1252,14 @@ const POLICY: TrustKind = TrustKind {
 /// A completed restore check whose binding names the bound `KafkaCluster`
 /// (unchanged, seeded here) and ONE trust referent recorded at `uid`/`generation`.
 fn seed_trust_bound(app: &TestApp, id: &str, trust: &TrustKind, uid: &str, generation: i64) {
-    seed_preflight(&app.fake, NS_A, id, "Restore", None, Some(LOCAL_ADMIN_ACTOR));
+    seed_preflight(
+        &app.fake,
+        NS_A,
+        id,
+        "Restore",
+        None,
+        Some(LOCAL_ADMIN_ACTOR),
+    );
     seed_bound_referent(app, "uid-target", 1);
     let mut object = app.fake.object("preflights", NS_A, id).unwrap();
     object["status"]["binding"]["referents"] = json!([

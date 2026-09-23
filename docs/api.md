@@ -1042,14 +1042,22 @@ Each entry is `{reason, kind?, name?, basis?}`, and `reason` is one of seven:
 |---|---|
 | `expired` | the verdict is past `expiresAt`, or recorded no expiry at all |
 | `planHashChanged` | the plan you are looking at is not the plan the check was bound to |
-| `referentChanged` | a named object's UID or generation moved, or it appeared or vanished — a recreated destination, an edited access block, a re-created recovery point, a `TrustRoster` edit, or an `Approval` whose resourceVersion moved when verification landed. `kind` and `name` say **which**; for the single `TrustRoster` and `Approval` a binding names, `name` is the UID, because that is what identifies them there. On a re-read this service compares a referent the binding records **without** a generation (the recovery-point `Backup` and the `Approval`, bound by identity) by UID alone -- the binding records no resourceVersion to compare -- so an unchanged recovery point is not `referentChanged`; before PLAT-08.2 it was reported on every re-read |
+| `referentChanged` | a named object's UID or generation moved, or it appeared or vanished — a recreated destination, an edited access block, a re-created recovery point, an edited or re-created `TrustRoster/default` or governing `TrustPolicy`, or an `Approval` whose resourceVersion moved when verification landed. `kind` and `name` say **which**; `name` is the name the binding recorded (`default` for the cluster's `TrustRoster`). On a re-read this service compares a referent the binding records **without** a generation (the recovery-point `Backup` and the `Approval`, bound by identity) by UID alone -- the binding records no resourceVersion to compare -- so an unchanged recovery point is not `referentChanged`; before PLAT-08.2 it was reported on every re-read |
 | `caBundleChanged` | a destination's CA bundle now digests differently. **RESERVED — nothing emits it.** `status.binding` does not record the CA bundle list, so neither the controller nor this service can compare it; CA drift surfaces through the destination's own `referentChanged`, because editing its `caBundle` reference bumps its generation. Do not branch on it |
 | `policyChanged` | the installation policy `ConfigMap` digests differently, which can change the concurrency ceilings, the engine CA rule, the `ControllerIdentity` allowlist and the visibility attestations the verdict was computed under |
 | `inputsDigestChanged` | the recomputed digest differs and none of the named reasons explains it. **RESERVED on the same grounds:** the recorded digest was taken over a wider document than this service can rebuild, so comparing the two would report an artefact of the narrower recomputation rather than a change in the world |
-| `unverifiable` | **this service could not compare something, so it will not call the verdict applicable.** `basis` says what: a referent whose read failed, a referent of a kind the console has no verb for (`TrustRoster` is cluster-scoped and outside the sealed set), or a result that recorded no binding at all |
+| `unverifiable` | **this service could not compare something, so it will not call the verdict applicable.** `basis` says what: a referent whose read failed (a refused `get` on `trustrosters/default` or `trustpolicies/<name>` included), a `TrustRoster` referent named anything but `default` (the one roster this service may read), a referent of a kind this build does not know, or a result that recorded no binding at all |
 
 **Who compares what.** This service compares the expiry, the `?planHash=` you
-sent, and every referent it can read — the five namespaced product kinds. The
+sent, and every referent the binding records — the six namespaced kinds
+(`KafkaCluster`, `BackupDestination`, `Backup`, `Restore`, `Approval`,
+`BackupSchedule`) and the two cluster-scoped trust referents, `TrustRoster/default`
+and the namespace's governing `TrustPolicy`, each by UID and generation. Before
+PREFLIGHT-TRUSTROSTER-STALE the two trust kinds were `unverifiable`, so every
+verdict on a cluster with a roster was served stale and the restore wizard could
+not submit after any readiness check; the chart's `<release>-api-trustroster`
+(`get`, `resourceNames: ["default"]`) and the existing `<release>-api-trustpolicies`
+`get` are what let it compare them. The
 installation policy it cannot read: that digest is `CheckPolicy::digest()` over
 the parsed `LOGWEIR_POLICY_CONFIGMAP` document (default `weirkeeper-policy`,
 key `policy.json`) in the installation namespace, and this service reads a
@@ -1608,7 +1616,7 @@ The image declares `USER 65532:65532`, no `CMD`, and
 the MODE cannot come from a layer no chart test can see.
 
 **The chart runs it under two switches.** `api.enabled` renders the principal —
-a ServiceAccount, two ClusterRoles and one RoleBinding per configured namespace
+a ServiceAccount, three ClusterRoles and one RoleBinding per configured namespace
 — and starts nothing, which is a state you can interrogate with
 `kubectl auth can-i` before anything runs as it. `api.console.enabled` runs the
 workload as that principal and requires the first; the render refuses the pair

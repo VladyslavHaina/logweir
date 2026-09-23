@@ -219,6 +219,7 @@ console_grants() {
     /^kind: /                             { isrole = 0; inrole = 0; next }
     /^  name: logweir-api$/               { if (isrole) inrole = 1; next }
     /^  name: logweir-api-trustpolicies$/ { if (isrole) inrole = 1; next }
+    /^  name: logweir-api-trustroster$/   { if (isrole) inrole = 1; next }
     inrole && /^    resources: \[/        { inline($0); collecting = 0; next }
     inrole && /^    resources:$/          { n = 0; collecting = 1; next }
     inrole && collecting && /^      - /   { sub(/^      - /, ""); res[++n] = $0; next }
@@ -247,7 +248,9 @@ check_console_grants() {
   # the approver's countersigned Approval on `POST .../restores/{name}/approval`),
   # the two named merge patches plus the two `CancellableCheck`
   # kinds, D3 W11's four namespaced reads and its ONE write, the cluster-scoped
-  # `TrustPolicy` read, and the two core objects with one verb each.
+  # `TrustPolicy` read, the ONE roster read (`get trustrosters`, held to
+  # `resourceNames: ["default"]` by the arm below — PREFLIGHT-TRUSTROSTER-STALE),
+  # and the two core objects with one verb each.
   printf '%s\n' \
     'get approvals'          'list approvals'          'create approvals' \
     'get backupdestinations' 'list backupdestinations' 'create backupdestinations' 'patch backupdestinations' \
@@ -262,6 +265,7 @@ check_console_grants() {
     'get rehearsalschedules' 'list rehearsalschedules' \
     'get retentionpolicies'  'list retentionpolicies' \
     'get trustpolicies'      'list trustpolicies' \
+    'get trustrosters' \
     'get configmaps' \
     'create secrets' \
     > "$dir/expected.raw"
@@ -298,6 +302,28 @@ check_console_grants() {
     sed 's/^/    /' "$dir/extra" >&2
     echo "  Narrow charts/logweir/templates/ui/api-rbac.yaml, or add the pair to the answer" >&2
     echo "  sheet in this function TOGETHER WITH the route that spends it." >&2
+    rm -rf "$dir"
+    exit 1
+  fi
+
+  # THE ROSTER GRANT IS ONE NAME. The pair sheet above cannot see
+  # `resourceNames`, so a `get trustrosters` with the name list dropped — every
+  # roster in the cluster — would pass it. This arm reads the one rule and
+  # requires exactly `resourceNames: ["default"]`, the one roster
+  # `KubeAdapter::get_trust_roster` reads.
+  awk '
+    /^kind: ClusterRole$/                { isrole = 1; inrole = 0; next }
+    /^kind: /                            { isrole = 0; inrole = 0; next }
+    /^  name: logweir-api-trustroster$/  { if (isrole) inrole = 1; next }
+    inrole && /^    resourceNames:/      { print }
+  ' "$render_file" > "$dir/roster-names"
+  printf '%s\n' '    resourceNames: ["default"]' > "$dir/roster-names.want"
+  if ! cmp -s "$dir/roster-names" "$dir/roster-names.want"; then
+    echo "render-install: the console's roster grant is not \`resourceNames: [\"default\"]\`." >&2
+    echo "  ClusterRole logweir-api-trustroster in $render_file carries:" >&2
+    sed 's/^/    /' "$dir/roster-names" >&2
+    echo "  The adapter reads TrustRoster/default and nothing else; a wider name list is a" >&2
+    echo "  read of every roster's key material that no route makes." >&2
     rm -rf "$dir"
     exit 1
   fi

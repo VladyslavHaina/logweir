@@ -12834,7 +12834,7 @@
             ]
           },
           {
-            "description": "A named object's UID or generation moved, or it appeared or vanished, since the verdict was computed — a recreated destination, an edited access block, a re-created recovery point, a `TrustRoster` edit, or an `Approval` whose resourceVersion moved when verification landed. [`StaleReasonView::kind`] and [`StaleReasonView::name`] say which.",
+            "description": "A named object's UID or generation moved, or it appeared or vanished, since the verdict was computed — a recreated destination, an edited access block, a re-created recovery point, an edited or re-created `TrustRoster` or governing `TrustPolicy`, or an `Approval` whose resourceVersion moved when verification landed. [`StaleReasonView::kind`] and [`StaleReasonView::name`] say which.",
             "type": "string",
             "enum": [
               "referentChanged"
@@ -12888,7 +12888,7 @@
             "nullable": true
           },
           "name": {
-            "description": "That object's name — or, for the `TrustRoster` and `Approval` a binding names, its UID, because those two are identified in the binding by UID and a name would add nothing. `referentChanged` and `unverifiable` only.",
+            "description": "That object's name, as the binding recorded it (`default` for the cluster's `TrustRoster`). `referentChanged` and `unverifiable` only.",
             "type": "string",
             "nullable": true
           },

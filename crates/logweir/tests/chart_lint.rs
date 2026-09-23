@@ -1926,6 +1926,39 @@ fn chart_lint_the_console_principal_holds_exactly_what_the_sealed_adapter_spends
         "the cluster-scoped half is `TrustPolicy`, READ ONLY: D3 §10 keeps trust writes off the \
          API in v1 and the supported path is `kubectl apply` under `logweir-trust-admin`"
     );
+    // THE ONE ROSTER READ (PREFLIGHT-TRUSTROSTER-STALE): `get` on
+    // `trustrosters/default` and nothing else — the adapter's
+    // `get_trust_roster` reads that one object by a name it does not take.
+    // Compared as YAML, because `rules_of` refuses `resourceNames` by design
+    // and this is the one rule whose whole point is its name list.
+    let roster_role = find(&docs, "ClusterRole", "logweir-api-trustroster");
+    let roster_rules = roster_role.value["rules"]
+        .as_sequence()
+        .expect("logweir-api-trustroster has rules");
+    assert_eq!(roster_rules.len(), 1, "one rule on the roster role");
+    assert_eq!(
+        serde_yaml::to_string(&roster_rules[0]).unwrap(),
+        "apiGroups:\n- logweir.dev\nresources:\n- trustrosters\nresourceNames:\n- default\nverbs:\n- get\n",
+        "the console reads TrustRoster/default and no other roster, and never lists them: a \
+         list would be every roster's key material, which no route needs"
+    );
+    let adapter = read("crates/logweir-api/src/kube.rs");
+    assert!(
+        adapter
+            .contains("self.bounded(\"get\", \"trustrosters\", api.get(weirkeeper::ROSTER_NAME))"),
+        "the roster grant exists for `KubeAdapter::get_trust_roster`, which reads \
+         `weirkeeper::ROSTER_NAME`; a grant with no such caller is critique B M18"
+    );
+    let roster_binding = find(&docs, "ClusterRoleBinding", "logweir-api-trustroster");
+    assert_eq!(
+        roster_binding.value["roleRef"]["name"],
+        "logweir-api-trustroster"
+    );
+    assert_eq!(roster_binding.value["subjects"][0]["name"], "logweir-api");
+    assert_eq!(
+        roster_binding.value["subjects"][0]["namespace"],
+        "logweir-system"
+    );
 
     // --- direction one: every call has a grant -----------------------------
     let namespaced = console_sealed("ProductResource");

@@ -265,6 +265,7 @@ the namespace that holds the credential.
 | `ServiceAccount` | `<release>-api`, in the release namespace |
 | `ClusterRole` + one `RoleBinding` per `api.namespaces` entry | `<release>-api` |
 | `ClusterRole` + `ClusterRoleBinding` | `<release>-api-trustpolicies` |
+| `ClusterRole` + `ClusterRoleBinding` | `<release>-api-trustroster` |
 
 **No Deployment, no image, no Service and no Ingress.** The console's image and
 its deployment are a separate piece of work; this flag exists so that an
@@ -287,13 +288,17 @@ Approval); `patch` on `backupschedules`, `backupdestinations`,
 `topicdiscoveries` and `preflights`; `get`/`list` on `protectionpolicies`,
 `recoverycatalogs`, `rehearsalschedules` and `retentionpolicies`; `create` on
 `recoverycatalogs` for "connect existing archive"; `get`/`list` on the
-cluster-scoped `trustpolicies`; `get` on `configmaps`; `create` on `secrets`.
+cluster-scoped `trustpolicies`; `get` on the one cluster-scoped `trustrosters/default`
+(`resourceNames: ["default"]`, so a readiness verdict's roster referent can be
+compared rather than reported `unverifiable`); `get` on `configmaps`; `create` on
+`secrets`.
 
 What it does not, each for a reason: **no `watch`** (the service's adapter has
 no watch method, and the operation event stream is server-sent events over its
 own reads), **no `delete`**, **no read verb on `secrets`** — that missing verb
 is what makes a console-written credential write-only — **no `list` on
-`configmaps`**, and **no write verb on `trustpolicies`**.
+`configmaps`**, **no write verb on `trustpolicies`**, and **no `list` on
+`trustrosters`** nor a `get` on any roster but `default`.
 
 Set `admissionPolicy.consoleServiceAccountName` to this account: the fence's
 whole effect is its subject list, and a subject that names nobody is a policy

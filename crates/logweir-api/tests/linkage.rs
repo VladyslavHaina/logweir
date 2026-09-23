@@ -817,15 +817,16 @@ fn the_roster_read_is_one_get_of_the_default_roster() {
         .collect();
     assert_eq!(
         signatures,
-        vec![&"pub async fn get_trust_roster(&self) -> Result<TrustRoster, KubeFailure> {"
-            .to_string()],
+        vec![
+            &"pub async fn get_trust_roster(&self) -> Result<TrustRoster, KubeFailure> {"
+                .to_string()
+        ],
         "the roster is read by one function that takes no name"
     );
     let joined = code.join(" ").replace(" .", ".");
     assert!(
-        joined.contains(
-            "self.bounded(\"get\", \"trustrosters\", api.get(weirkeeper::ROSTER_NAME))"
-        ),
+        joined
+            .contains("self.bounded(\"get\", \"trustrosters\", api.get(weirkeeper::ROSTER_NAME))"),
         "the one roster read is a `get` of `weirkeeper::ROSTER_NAME`"
     );
     // The handle's function spends `get` and nothing else.

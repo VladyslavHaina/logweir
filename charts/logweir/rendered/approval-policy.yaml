@@ -7368,6 +7368,23 @@ rules:
     resources: ["trustpolicies"]
     verbs: ["get", "list"]
 ---
+# Source: logweir/templates/ui/api-rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: logweir-api-trustroster
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: api
+rules:
+  - apiGroups: ["logweir.dev"]
+    resources: ["trustrosters"]
+    resourceNames: ["default"]
+    verbs: ["get"]
+---
 # Source: logweir/templates/clusterrolebinding.yaml
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -7403,6 +7420,26 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: logweir-api-trustpolicies
+subjects:
+  - kind: ServiceAccount
+    name: logweir-api
+    namespace: logweir-system
+---
+# Source: logweir/templates/ui/api-rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: logweir-api-trustroster
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: api
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: logweir-api-trustroster
 subjects:
   - kind: ServiceAccount
     name: logweir-api

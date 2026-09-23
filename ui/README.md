@@ -288,8 +288,10 @@ Its grants come from one sealed adapter, not from a list somebody maintains:
 `get`/`list` on the eight product kinds, `create` on seven of them, `patch` on
 four, `get`/`list` on the four D3 kinds (`protectionpolicies`,
 `recoverycatalogs`, `rehearsalschedules`, `retentionpolicies`) plus the
-cluster-scoped `trustpolicies`, `create` on `recoverycatalogs` for "connect
-existing archive", `get` on `configmaps`, and `create` on `secrets`.
+cluster-scoped `trustpolicies`, `get` on the one cluster-scoped
+`trustrosters/default` (so a readiness verdict's roster referent is compared,
+not reported stale), `create` on `recoverycatalogs` for "connect existing
+archive", `get` on `configmaps`, and `create` on `secrets`.
 
 And four absences that the page depends on:
 
