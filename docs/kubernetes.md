@@ -277,13 +277,19 @@ JSON pointer out of the run's signed scorecard and computes none of it:
 `recordsExpected` and `recordsRestored` from `sample`, `recordsSampled`,
 `recordsSampledMatching` and `integrityLevel` from `integrity`, and
 `sampleWindow` from `sample.window_start`/`window_end`. It is written in the
-same resourceVersion-preconditioned status patch as the other scorecard facts
-(`outcome`, `integrity`, `measured`): the terminal write when the controller
+same resourceVersion-preconditioned status patch that records the evidence
+verdict over that scorecard, and **only when that verdict is `Valid`** (trust
+basis `Current` or `Historical`): the verification write when the controller
 reads the archive itself, or the evidence-fetch verdict write when the
-evidence-fetch Job relays a scorecard bound to this run. It stays **absent**
-while no scorecard has been read — evidence `NotAttempted`, a fetch still
-pending, or a relayed document naming another run — and a field the document
-does not carry is omitted rather than written as zero. `recordsRestored` is
+evidence-fetch Job relays a scorecard bound to this run. It is never on the
+terminal write, which lands before any verification. It stays **absent**
+while verification is pending or `NotAttempted`, when the relayed document
+names another run, and when the verdict is `Invalid` or `Untrusted` — the
+completion panel has no trust caption of its own, so a scorecard whose
+signature did not verify never reaches it. (`outcome`, `integrity` and
+`measured` are still copied from a run-bound scorecard whatever the verdict;
+the badge is what says whether to trust them.) A field the document does not
+carry is omitted rather than written as zero. `recordsRestored` is
 the count consumed back from the target **in the sampled window**, not the
 restore's total record count.
 

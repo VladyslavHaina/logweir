@@ -1171,6 +1171,21 @@ pub fn restore_badge(status: &Value) -> Badge {
     Badge::green(at, key, historical)
 }
 
+/// Whether `status.evidence.verification` is a `Valid` verdict on a basis
+/// the badge accepts (`Current` or `Historical`, or no `trust` block on a
+/// pre-PLAT-19.1 verdict) — the verification half of [`restore_badge`] and
+/// [`backup_badge`], without their run-outcome half.
+///
+/// `Restore.status.completion` is gated on exactly this (D3 §2.2, decided
+/// 2026-09-22 at the ctl-batch-1 review, MEDIUM-1): the completion panel
+/// carries no trust caption of its own, so its facts are published only from
+/// a scorecard whose signature verified. Invalid, Untrusted, NotAttempted,
+/// Pending and a stored `Unverified` basis all answer `false`.
+#[must_use]
+pub fn verification_is_valid(status: &Value) -> bool {
+    valid_verification(status).is_ok()
+}
+
 // ---------------------------------------------------------------------------
 // The SECOND patch
 // ---------------------------------------------------------------------------

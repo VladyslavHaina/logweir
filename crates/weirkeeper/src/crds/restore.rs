@@ -498,7 +498,11 @@ pub struct RestoreStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progress: Option<RunProgress>,
     /// What the run actually restored, copied by JSON pointer from the SIGNED
-    /// scorecard.
+    /// scorecard. Written ONLY beside a `Valid` evidence verdict (basis
+    /// `Current` or `Historical`) over that same scorecard, in the write that
+    /// records the verdict: it is absent while verification is pending or
+    /// `NotAttempted`, and it is never written from a scorecard whose verdict
+    /// is `Invalid` or `Untrusted`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion: Option<RestoreCompletion>,
     /// What phase 9 removed, and what it could not.

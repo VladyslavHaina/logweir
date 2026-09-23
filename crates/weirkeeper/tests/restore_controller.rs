@@ -6984,19 +6984,24 @@ fn the_completion_is_copied_from_the_signed_scorecard_by_pointer() {
             "sampleWindow": {"start": "2026-09-22T23:45:29.256Z", "end": "2026-08-30T02:00:00Z"}
         })
     );
-    // And the terminal write builds it into `status.completion`.
+    // Beside a `Valid` verdict it is the value written; the terminal write
+    // (before any verdict) never carries it.
+    let written =
+        weirkeeper::controllers::restore::completion_patch_value(&o, &valid_result(), None)
+            .expect("a Valid verdict publishes the completion");
+    assert_eq!(written, fixture_completion());
     let keys = restore_evidence_keys(&i8_tail());
     let patch = finished_status_patch(&restore(), 0, &keys, None, Some(&o), None, None, now());
-    assert_eq!(
-        patch["status"]["completion"],
-        fixture_completion(),
-        "{patch}"
+    assert!(
+        patch["status"].get("completion").is_none(),
+        "the terminal write lands before any verdict and carries no completion: {patch}"
     );
     // THE STORED SHAPE PARSES BACK: a status the typed clients (this
     // controller's watcher, `logweir-api`'s operation view) could not read
     // would take the whole object down with it.
     let mut status = serde_json::json!({});
     apply_merge_patch(&mut status, &patch["status"]);
+    apply_merge_patch(&mut status, &serde_json::json!({ "completion": written }));
     let typed: weirkeeper::crds::restore::RestoreStatus =
         serde_json::from_value(status).expect("the written status is a RestoreStatus");
     let completion = typed.completion.expect("completion");
@@ -7027,16 +7032,12 @@ fn a_completion_fact_the_scorecard_does_not_carry_is_absent() {
         bare.as_object_mut().expect("object").remove(key);
     }
     assert!(block_of(&bare).is_empty(), "{:?}", block_of(&bare));
-    let keys = restore_evidence_keys(&i8_tail());
     let o = scorecard_observation(bare.to_string().as_bytes()).expect("object");
-    let patch = finished_status_patch(&restore(), 0, &keys, None, Some(&o), None, None, now());
-    assert!(
-        patch["status"].get("completion").is_none(),
-        "an empty completion is not written: {patch}"
+    assert_eq!(
+        weirkeeper::controllers::restore::completion_patch_value(&o, &valid_result(), None),
+        None,
+        "an empty completion is not written, even beside a Valid verdict"
     );
-    // Not observed at all: no key.
-    let patch = finished_status_patch(&restore(), 0, &keys, None, None, None, None, now());
-    assert!(patch["status"].get("completion").is_none(), "{patch}");
 
     // A malformed `would_create` entry: the list is not copied, the counts are.
     let mut malformed = base.clone();
@@ -7084,11 +7085,44 @@ fn a_completion_fact_the_scorecard_does_not_carry_is_absent() {
     assert_eq!(block.get("recordsSampled"), Some(&serde_json::json!(75)));
 }
 
-/// **THE OWN-HANDLE TERMINAL WRITE CARRIES THE COMPLETION IT OBSERVED**, in the
-/// same resourceVersion-preconditioned PATCH as the exit code. MUTANT: drop the
-/// `completion` insert from `finished_status_patch` and this fails.
-#[tokio::test]
-async fn the_terminal_write_carries_the_completion_it_observed() {
+/// A `Valid` verdict with a matched key and an instant — what the badge rule
+/// requires of every `Valid`.
+fn valid_result() -> VerificationResult {
+    VerificationResult {
+        result: VerificationVerdict::Valid,
+        matched_key_id: Some(
+            "917cf9a299872cbf8b2715999ce457464705bb8f48df0a07e9b1e19bb9f383fd".to_string(),
+        ),
+        payload_type: logweir_verify::PAYLOAD_TYPE_SCORECARD.to_string(),
+        verified_at: utc(2026, 9, 10, 12, 0),
+        detail: None,
+        trust: None,
+    }
+}
+
+/// An evidence oracle answering `verdict` over whatever it is handed.
+fn verdict_oracle(
+    verdict: VerificationVerdict,
+) -> impl Fn(weirkeeper::verification::EvidenceRef) -> BoxFuture<'static, VerificationResult> {
+    move |r| {
+        Box::pin(async move {
+            let mut result = valid_result();
+            result.result = verdict;
+            result.payload_type = r.payload_type.to_string();
+            if verdict != VerificationVerdict::Valid {
+                result.matched_key_id = None;
+                result.detail = Some("the fixture's verdict".to_string());
+            }
+            result
+        })
+    }
+}
+
+/// Every `PATCH …/status` body of one finished pass over [`restore`], whole.
+async fn finished_pass_patches(
+    scorecard: weirkeeper::controllers::restore::ScorecardOracle<'_>,
+    verdict: VerificationVerdict,
+) -> Vec<Value> {
     let (client, _rec, bodies) = mock_client_recording_bodies(finished_routes(
         pod_list_terminated(0),
         log_body(&i8_tail()),
@@ -7097,46 +7131,109 @@ async fn the_terminal_write_carries_the_completion_it_observed() {
     reconcile_restore(
         &restore(),
         &client,
-        &fixture_scorecard_oracle,
-        &unverified_evidence,
+        scorecard,
+        &verdict_oracle(verdict),
         now(),
     )
     .await
     .expect("the reconcile completes");
     let bodies = bodies.lock().expect("readable").clone();
-    let body = patch_body_with_completion(&bodies);
-    assert_eq!(body["status"]["completion"], fixture_completion(), "{body}");
+    bodies
+        .iter()
+        .filter(|b| b.method == "PATCH" && path(&b.uri).ends_with("/status"))
+        .map(|b| serde_json::from_str::<Value>(&b.body).expect("a status patch is JSON"))
+        .collect()
+}
+
+/// **THE COMPLETION APPEARS WITH A `Valid` VERDICT AND WITH NO OTHER** — the
+/// own-handle path (MEDIUM-1 of the ctl-batch-1 review, orchestrator decision).
+///
+/// The terminal write lands before any verification and never carries it; the
+/// verification write carries it only when that verdict is `Valid`, in the same
+/// resourceVersion-preconditioned PATCH. `Invalid`, `Untrusted` and
+/// `NotAttempted` over the very same scorecard write none. MUTANTS: put the
+/// completion back on the terminal write; drop the `Valid` gate in
+/// `completion_patch_value`; drop `with_completion` from the second patch.
+#[tokio::test]
+async fn the_completion_is_written_only_beside_a_valid_verdict() {
+    // VALID: the second write, and only it, carries the completion.
+    let patches =
+        finished_pass_patches(&fixture_scorecard_oracle, VerificationVerdict::Valid).await;
     assert_eq!(
-        body["status"]["exitCode"],
-        serde_json::json!(0),
-        "the terminal write"
+        patches.len(),
+        2,
+        "the terminal write and the verdict: {patches:?}"
     );
+    assert!(
+        patches[0]["status"].get("completion").is_none(),
+        "the terminal write precedes any verdict: {}",
+        patches[0]
+    );
+    assert_eq!(patches[0]["status"]["exitCode"], serde_json::json!(0));
     assert_eq!(
-        body["metadata"]["resourceVersion"],
+        patches[1]["status"]["evidence"]["verification"]["result"],
+        serde_json::json!("Valid")
+    );
+    assert_eq!(patches[1]["status"]["completion"], fixture_completion());
+    assert_eq!(
+        patches[1]["metadata"]["resourceVersion"],
         serde_json::json!(FIXTURE_RESOURCE_VERSION),
-        "preconditioned on the object this pass observed: {body}"
+        "preconditioned like every status write: {}",
+        patches[1]
     );
 
-    // The same run with no archive handle observes nothing and writes none.
-    let (client, _rec, bodies) = mock_client_recording_bodies(finished_routes(
-        pod_list_terminated(0),
-        log_body(&i8_tail()),
-        "Complete",
-    ));
-    reconcile_restore(
-        &restore(),
-        &client,
-        &unobserved_scorecard,
-        &unverified_evidence,
-        now(),
-    )
-    .await
-    .expect("the reconcile completes");
-    let statuses = patched_statuses(&bodies.lock().expect("readable"));
+    // NOT VALID: the same scorecard, no completion anywhere.
+    for verdict in [
+        VerificationVerdict::Invalid,
+        VerificationVerdict::Untrusted,
+        VerificationVerdict::NotAttempted,
+    ] {
+        let patches = finished_pass_patches(&fixture_scorecard_oracle, verdict).await;
+        assert!(
+            patches.len() == 2 && patches.iter().all(|p| p["status"]["completion"].is_null()),
+            "{verdict:?}: {patches:?}"
+        );
+    }
+
+    // No archive handle: nothing observed, nothing written, whatever the oracle.
+    let patches = finished_pass_patches(&unobserved_scorecard, VerificationVerdict::Valid).await;
     assert!(
-        !statuses.is_empty() && statuses.iter().all(|s| s["completion"].is_null()),
-        "{statuses:?}"
+        !patches.is_empty() && patches.iter().all(|p| p["status"]["completion"].is_null()),
+        "{patches:?}"
     );
+}
+
+/// The gate reads the BASIS as the badge does: `Historical` and `Current` (and
+/// a pre-PLAT-19.1 verdict with no trust block) admit the completion; a stored
+/// `Unverified` basis, any basis the badge does not know, and every non-`Valid`
+/// result do not.
+#[test]
+fn the_completion_gate_is_the_badges_verification_rule() {
+    use weirkeeper::verification::verification_is_valid;
+    let with = |verification: Value| {
+        verification_is_valid(&serde_json::json!({ "evidence": { "verification": verification } }))
+    };
+    let base = serde_json::json!({"result": "Valid", "matchedKeyId": "k",
+                                  "verifiedAt": "2026-09-10T12:00:00Z"});
+    assert!(
+        with(base.clone()),
+        "no trust block: a pre-PLAT-19.1 verdict"
+    );
+    for (basis, ok) in [
+        ("Current", true),
+        ("Historical", true),
+        ("Unverified", false),
+        ("SomethingElse", false),
+    ] {
+        let mut v = base.clone();
+        v["trust"] = serde_json::json!({ "basis": basis });
+        assert_eq!(with(v), ok, "{basis}");
+    }
+    for result in ["Invalid", "Untrusted", "NotAttempted", "Pending"] {
+        let mut v = base.clone();
+        v["result"] = serde_json::json!(result);
+        assert!(!with(v), "{result}");
+    }
 }
 
 mod evidence_fetch_job {
@@ -7212,10 +7309,18 @@ mod evidence_fetch_job {
     }
 
     fn relay(payload_key: &str, sidecar_key: &str) -> String {
-        let (p, s) = (
-            read("e2e/fixtures/signed/scorecard.json"),
-            read("e2e/fixtures/signed/scorecard.sig"),
-        );
+        relay_payload(
+            &read("e2e/fixtures/signed/scorecard.json"),
+            payload_key,
+            sidecar_key,
+        )
+    }
+
+    /// [`relay`] of `p` in place of the fixture scorecard, beside the
+    /// fixture's own sidecar — a relayed document the signature no longer
+    /// covers.
+    fn relay_payload(p: &[u8], payload_key: &str, sidecar_key: &str) -> String {
+        let (p, s) = (p.to_vec(), read("e2e/fixtures/signed/scorecard.sig"));
         let mut result = CheckResult::new(CheckPlanKind::EvidenceFetch);
         for (key, stream, bytes) in [
             (payload_key, Stream::EvidencePayload, &p),
@@ -7448,6 +7553,60 @@ mod evidence_fetch_job {
             .find(|(t, ..)| t == "Verified")
             .expect("Verified");
         assert_eq!(verified.1, "True", "{last}");
+    }
+
+    /// **A RUN-BOUND SCORECARD WHOSE SIGNATURE FAILS PUBLISHES NO COMPLETION**
+    /// (MEDIUM-1, orchestrator decision 2026-09-22). The review's scenario:
+    /// someone with write access to the evidence bucket rewrites this run's
+    /// scorecard, keeping its `run_id`, with inflated counts and another topic
+    /// name. The verdict is `Invalid`, and the console's completion panel —
+    /// which carries no trust caption — must not render the forged facts.
+    /// MUTANT: copy `completion_block` into the relayed facts without the
+    /// `Valid` gate, and this fails.
+    #[tokio::test]
+    async fn a_relayed_scorecard_whose_signature_fails_publishes_no_completion() {
+        let mut forged: Value =
+            serde_json::from_slice(&read("e2e/fixtures/signed/scorecard.json")).expect("JSON");
+        forged["sample"]["records_restored"] = serde_json::json!(1_000_000);
+        forged["integrity"]["records_sampled"] = serde_json::json!(1_000_000);
+        forged["integrity"]["records_sampled_matching"] = serde_json::json!(1_000_000);
+        forged["target_diff"]["would_create"] = serde_json::json!([["payments", 3]]);
+        let forged = serde_json::to_vec(&forged).expect("bytes");
+        let mut routes = evidence_routes(
+            Some(ev_job(Some("Complete"))),
+            relay_payload(&forged, FIXTURE_SCORECARD_KEY, FIXTURE_SIDECAR_KEY),
+        );
+        routes.extend(terminal_routes());
+        let (client, _rec, bodies) = mock_client_recording_bodies(routes);
+        reconcile_restore(
+            &terminal_restore(FIXTURE_SCORECARD_KEY, FIXTURE_SIDECAR_KEY),
+            &client,
+            &unobserved_scorecard,
+            &unverified_evidence,
+            now(),
+        )
+        .await
+        .expect("the reconcile succeeds");
+        let bodies = bodies.lock().expect("readable").clone();
+        let last = patched_statuses(&bodies)
+            .last()
+            .cloned()
+            .expect("the verdict");
+        assert_eq!(
+            last["evidence"]["verification"]["result"],
+            serde_json::json!("Invalid"),
+            "the forged document is bound to this run and its signature fails: {last}"
+        );
+        assert!(
+            last["completion"].is_null(),
+            "no completion from a scorecard whose signature failed: {last}"
+        );
+        assert!(
+            patched_statuses(&bodies)
+                .iter()
+                .all(|s| s["completion"].is_null()),
+            "on no write of the pass"
+        );
     }
 
     /// **ANOTHER RUN'S SCORECARD IS NOT THIS RUN'S.** The relayed document's

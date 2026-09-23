@@ -266,7 +266,7 @@ spec:
             nullable: true
             properties:
               completion:
-                description: What the run actually restored, copied by JSON pointer from the SIGNED scorecard.
+                description: 'What the run actually restored, copied by JSON pointer from the SIGNED scorecard. Written ONLY beside a `Valid` evidence verdict (basis `Current` or `Historical`) over that same scorecard, in the write that records the verdict: it is absent while verification is pending or `NotAttempted`, and it is never written from a scorecard whose verdict is `Invalid` or `Untrusted`.'
                 nullable: true
                 properties:
                   integrityLevel:

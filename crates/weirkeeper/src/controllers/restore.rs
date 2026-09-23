@@ -3936,13 +3936,13 @@ async fn write_fetch_verdict(
 ///   scorecard copied to this key — however validly signed — is `Invalid` and
 ///   projects nothing.
 /// * **The facts.** `outcome`, `lastPhaseCompleted`, `objectives`,
-///   `integrity`, `measured`, `completion` and the offset report's digest are
-///   copied out of
+///   `integrity`, `measured` and the offset report's digest are copied out of
 ///   the relayed bytes by JSON pointer (`scorecard_observation`, the one
 ///   reader) — the same facts, the same rule the own-handle path applies on
 ///   its terminal patch: whenever the document was read and is bound to this
 ///   run, whatever the signature verdict. The badge is still green only on
-///   `Valid` with `outcome: pass`.
+///   `Valid` with `outcome: pass`. `completion` is the exception: it is
+///   copied only when this verdict is `Valid` ([`completion_patch_value`]).
 #[allow(clippy::too_many_arguments)]
 async fn evidence_fetch_pass(
     restores: &Api<Restore>,
@@ -4118,11 +4118,18 @@ async fn evidence_fetch_pass(
                                 if let Some(v) = o.last_phase_completed {
                                     facts.insert("lastPhaseCompleted".to_string(), json!(v));
                                 }
+                                // ONLY BESIDE A VALID VERDICT (MEDIUM-1).
+                                if let Some(c) = completion_patch_value(
+                                    &o,
+                                    &result,
+                                    status.and_then(|s| serde_json::to_value(s).ok()).as_ref(),
+                                ) {
+                                    facts.insert("completion".to_string(), c);
+                                }
                                 for (key, block) in [
                                     ("objectives", objectives_block(&o)),
                                     ("integrity", integrity_block(&o)),
                                     ("measured", measured_block(&o)),
-                                    ("completion", completion_block(&o)),
                                 ] {
                                     if !block.is_empty() {
                                         facts.insert(key.to_string(), Value::Object(block));
@@ -4476,8 +4483,8 @@ pub fn running_status_patch(
 /// # What is copied, and what is decided
 ///
 /// `exitCode` and the condition are DECIDED from the pod. Everything else —
-/// `outcome`, `integrity`, `measured`, `objectives`, `completion`,
-/// `lastPhaseCompleted` and the evidence digests — is COPIED VERBATIM out of the scorecard the runner
+/// `outcome`, `integrity`, `measured`, `objectives`, `lastPhaseCompleted` and
+/// the evidence digests — is COPIED VERBATIM out of the scorecard the runner
 /// signed, through [`ScorecardObservation`], and every one of them is OMITTED
 /// when the archive was not observed. A merge patch with no key means "leave
 /// it alone", which is the only honest thing to write about a document that
@@ -4645,10 +4652,9 @@ pub fn finished_status_patch(
         if !measured.is_empty() {
             status.insert("measured".to_string(), Value::Object(measured));
         }
-        let completion = completion_block(o);
-        if !completion.is_empty() {
-            status.insert("completion".to_string(), Value::Object(completion));
-        }
+        // `completion` IS NOT HERE, ON PURPOSE: it is published only beside a
+        // `Valid` verification verdict (`completion_patch_value`), and this
+        // write lands before any verification has run.
     }
 
     if let Some((old, new)) = topics {
@@ -4737,7 +4743,9 @@ pub fn measured_block(o: &ScorecardObservation) -> serde_json::Map<String, Value
 /// empty map — nothing observed — means the caller writes no `completion` at
 /// all, so a run whose scorecard was never read (no archive handle, an
 /// evidence fetch `NotAttempted`, a relayed document bound to another run)
-/// keeps the field absent rather than reporting zeros nobody signed.
+/// keeps the field absent rather than reporting zeros nobody signed. The
+/// writers go through [`completion_patch_value`], which also requires a
+/// `Valid` verdict over the same bytes.
 ///
 /// `newTopics` IS A WHOLE-VALUE COPY. A JSON merge patch replaces an array,
 /// and that is correct here only because the array has exactly one source —
@@ -4784,6 +4792,48 @@ pub fn completion_block(o: &ScorecardObservation) -> serde_json::Map<String, Val
         m.insert("sampleWindow".to_string(), Value::Object(window));
     }
     m
+}
+
+/// `status.completion` for `o`, or `None` when it must not be written: the
+/// verdict reached over the same bytes is not `Valid` on an accepted basis
+/// ([`crate::verification::verification_is_valid`]), or the document carries
+/// nothing to copy.
+///
+/// THE COMPLETION APPEARS WHEN THE VERIFICATION VERDICT DOES, AND ONLY A VALID
+/// ONE (MEDIUM-1 of the ctl-batch-1 review, orchestrator decision 2026-09-22).
+/// The console's completion panel renders topic names and counts with no
+/// trust caption of its own, so a run-bound document whose signature is
+/// Invalid or Untrusted — someone with write access to the evidence bucket
+/// rewriting the counts under the right `run_id` — must not reach it. So it
+/// is never on the terminal write (no verdict yet), never beside
+/// `NotAttempted` or `Pending`, and never beside `Invalid` or `Untrusted`.
+/// `current` is the stored status the verdict block is built over, so the
+/// basis read here is the one the write will store.
+#[must_use]
+pub fn completion_patch_value(
+    o: &ScorecardObservation,
+    result: &crate::verification::VerificationResult,
+    current: Option<&Value>,
+) -> Option<Value> {
+    let block = result.to_status_value(stored_verification(current));
+    if !crate::verification::verification_is_valid(&json!({
+        "evidence": { "verification": block }
+    })) {
+        return None;
+    }
+    let completion = completion_block(o);
+    (!completion.is_empty()).then_some(Value::Object(completion))
+}
+
+/// `patch` with `status.completion` set, when there is one to set.
+fn with_completion(mut patch: Value, completion: Option<Value>) -> Value {
+    if let (Some(c), Some(status)) = (
+        completion,
+        patch.get_mut("status").and_then(Value::as_object_mut),
+    ) {
+        status.insert("completion".to_string(), c);
+    }
+    patch
 }
 
 /// The `/status` merge patch for the crashed-Job case — a Job that finished
@@ -6315,10 +6365,15 @@ async fn reconcile_restore_inner(
             // EXPLICIT NULLS FOR THE FIELDS THIS VERDICT DOES NOT HOLD — see
             // `verification::verification_patch_value`. One rule, one helper,
             // both reconcilers and the re-trust patch.
-            second_patch(
-                &conditions_in(&terminal),
-                verified,
-                crate::verification::verification_patch_value(block),
+            with_completion(
+                second_patch(
+                    &conditions_in(&terminal),
+                    verified,
+                    crate::verification::verification_patch_value(block),
+                ),
+                observed
+                    .as_ref()
+                    .and_then(|o| completion_patch_value(o, &result, current.as_ref())),
             ),
         )
         .await?;
