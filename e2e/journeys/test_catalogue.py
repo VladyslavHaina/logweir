@@ -127,6 +127,34 @@ def test_the_one_suite_that_changes_the_shared_release_is_gated_locked_and_resto
     assert 'out["restored"]' in swap and "the lock stays held" in swap
 
 
+def test_governed_swap_on_ends_on_its_own_before_run_py_kills_the_phase():
+    """plat20-1.review.md M-1: swap-on waited up to 240 min for the lock
+    while run.py timed the phase out at 1800 s, and the orphaned waiter later
+    mounted this run's policy on the shared controller. swap-on's worst case
+    must stay below the phase timeout, and the lock wait it passes must be the
+    bounded one."""
+    import governed
+
+    suite = suites.SUITES["plat19-2"]
+    assert governed.SWAP_ON_BUDGET < suite.timeout, (governed.SWAP_ON_BUDGET, suite.timeout)
+    assert governed.RUN_SECONDS < suite.timeout
+    assert governed.SWAP_SECONDS >= governed.LOCK_WAIT_MINUTES * 60 + 120  # the tool's own acquire timeout
+    text = (ROOT / suite.script).read_text()
+    assert '"--wait-minutes", str(LOCK_WAIT_MINUTES)' in text
+    assert "start_new_session" not in text  # its children stay in the group run.py kills
+    swap = (ROOT / "scripts/live/approval_policy_swap.py").read_text()
+    assert 'str(args.wait_minutes)], timeout=args.wait_minutes * 60 + 120' in swap
+    assert '"240"]' not in swap
+
+
+def test_governed_budget_pin_fails_on_the_old_240_minute_wait(monkeypatch):
+    """The pin's negative control: the pre-fix numbers break it."""
+    import governed
+
+    monkeypatch.setattr(governed, "SWAP_ON_BUDGET", 120 + 240 * 60 + 900)
+    assert not governed.SWAP_ON_BUDGET < suites.SUITES["plat19-2"].timeout
+
+
 def test_plat19_2_rows_are_its_harness_journeys_and_a_crash_without_cleanup_is_no_rows(tmp_path):
     c = ctx(tmp_path)
     row = next(r.name for j in suites.JOURNEYS for r in j.rows if r.suite == "plat19-2")

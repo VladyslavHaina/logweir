@@ -19,6 +19,15 @@ This is the ONE suite that changes the shared release, which is why its
 journey stays behind `requires: PLAT-19.2`: a plain `run.py run` never takes
 the lock. `test_catalogue.py` pins both facts.
 
+DEADLINES. `run.py` gives each phase `suites.SUITES["plat19-2"].timeout`
+seconds and then kills the phase's whole process group. `swap-on` must end on
+its own before that, so it waits at most `LOCK_WAIT_MINUTES` for the lock and
+its worst case (`SWAP_ON_BUDGET`) stays below the phase timeout
+(`test_catalogue.py` pins the inequality): a swap-on still queued for the
+lock when its journey has been judged would later mount this run's policy on
+the shared controller and exit holding the lock. The process-group kill is
+the second fence: nothing this script starts leaves its group.
+
 Environment (from `suites.py`): GOV_STAMP, GOV_OUT, GOV_OWNER, GOV_PREFIX,
 UI_E2E_API_BIN, UI_E2E_LOGWEIR_BIN, NODE_PATH, LOGWEIR_PYTHON, LOGWEIR_K8S_LOCK.
 """
@@ -34,6 +43,15 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 HARNESS = ROOT / "scripts" / "plat19-2-ui-e2e.mjs"
 SWAP = ROOT / "scripts" / "live" / "approval_policy_swap.py"
 LOCK = os.environ.get("LOGWEIR_K8S_LOCK", "/tmp/logweir-roadmap-run/claude/k8s-lock.sh")
+
+# The deadlines (see the module docstring). Children are started WITHOUT a new
+# session, so run.py's process-group kill reaches every one of them.
+POLICY_ONLY_SECONDS = 120        # the harness writing the run's policy document
+LOCK_WAIT_MINUTES = 15           # `k8s-lock.sh acquire` gives up after this
+SWAP_WORK_SECONDS = 600          # the swap itself: patch, rollout, bound-line read
+SWAP_SECONDS = LOCK_WAIT_MINUTES * 60 + SWAP_WORK_SECONDS
+SWAP_ON_BUDGET = POLICY_ONLY_SECONDS + 30 + SWAP_SECONDS  # + the `status` probe
+RUN_SECONDS = 1500
 
 
 def env() -> dict[str, str]:
@@ -56,13 +74,13 @@ def lock_holder() -> str:
 def swap(verb: str, *extra: str) -> int:
     python = os.environ.get("LOGWEIR_PYTHON") or sys.executable
     argv = [python, str(SWAP), verb, "--owner", os.environ["GOV_OWNER"], "--record", str(out() / "swap"), *extra]
-    return subprocess.run(argv, timeout=240 * 60 + 900).returncode
+    return subprocess.run(argv, timeout=SWAP_SECONDS).returncode
 
 
 def swap_on() -> int:
     e = env()
     e["UI_E2E_POLICY_ONLY"] = "1"
-    done = subprocess.run(["node", str(HARNESS)], env=e, timeout=120)
+    done = subprocess.run(["node", str(HARNESS)], env=e, timeout=POLICY_ONLY_SECONDS)
     policy = out() / e["GOV_STAMP"] / "approval-policy.yaml"
     if done.returncode != 0 or not policy.is_file():
         print(f"the harness did not write {policy}", file=sys.stderr)
@@ -71,12 +89,12 @@ def swap_on() -> int:
     extra = ["--policy", str(policy)]
     if lock_holder() != os.environ["GOV_OWNER"]:
         (out() / "swap" / "lock-taken-by-this-suite").write_text(os.environ["GOV_OWNER"] + "\n")
-        extra.append("--acquire")
+        extra += ["--acquire", "--wait-minutes", str(LOCK_WAIT_MINUTES)]
     return swap("on", *extra)
 
 
 def run() -> int:
-    return subprocess.run(["node", str(HARNESS)], env=env(), timeout=1500).returncode
+    return subprocess.run(["node", str(HARNESS)], env=env(), timeout=RUN_SECONDS).returncode
 
 
 def swap_off() -> int:

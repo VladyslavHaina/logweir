@@ -155,10 +155,17 @@ values. The d1 and d2 sweeps have no self-test, and this one covers their output
     and records the Deployment it found;
   - `swap-off` runs in `finally`, fails unless the containers and volumes are
     byte-identical to that record, and releases the lock only after that check holds;
-  - the plat19-2 harness also creates and deletes one owner-labelled TrustPolicy.
+  - the plat19-2 harness also creates and deletes one owner-labelled TrustPolicy;
+  - `swap-on` waits at most 15 minutes for the lock (`governed.LOCK_WAIT_MINUTES`,
+    passed as `--wait-minutes`), so its worst case stays below the 1800 s phase
+    timeout, and run.py starts every phase in its own session and kills the whole
+    process group on a timeout (`lab.run_killing_group`): a lock waiter can no
+    longer outlive its journey and mount the policy on the shared controller later.
 
   `test_catalogue.py::test_the_one_suite_that_changes_the_shared_release_is_gated_locked_and_restored_in_finally`
-  pins all three.
+  pins the first three, `test_governed_swap_on_ends_on_its_own_before_run_py_kills_the_phase`
+  the budget, and `test_lab.py` the process-group kill (with a toy child whose
+  grandchild survives plain `subprocess.run` as the control).
 
 ## The journeys
 
