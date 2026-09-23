@@ -106,6 +106,8 @@ const TAMPERED_PREFIX = "p152-" + suffix + "-forged-";
 // lab-refresh-9's rows (the PLAT-15.2 review's "rows the next lab refresh must run").
 const UNSIGNED_PREFIX = "p152-" + suffix + "-unsigned-";
 const REVOKED_PREFIX = "p152-" + suffix + "-revoked-";
+// harness-rows-12's rows: a Retired signer's catalog point (D3 §7.4 historical).
+const RETIRED_PREFIX = "p152-" + suffix + "-retired-";
 const TRUST_POLICY = "p152-" + suffix;
 
 const result = {
@@ -1328,6 +1330,83 @@ async function main() {
     record("lr9-b. an unsigned receipt: the runner refuses the bound point (exit 3, PointUntrusted, carries no signature) before any data moves", {
       restore: unsigned.name, sidecarMovedAside: sidecarKey, clauses: unsignedClauses });
 
+    // ==== harness-rows-12: an INCOMPLETE point, on the catalog path ==========
+    // D3's PLAT-15.2 row "incomplete point": a point whose record is in the
+    // archive but whose evidence is not whole is listed and NOT selectable,
+    // and the readiness check refuses it by name. Two arms, each a real
+    // archive object moved aside and a real re-sync: the receipt's DSSE
+    // sidecar (the signature, `NoEvidence`) and the receipt itself (the
+    // verification root, `Missing` — catalog_sync.rs `examine`). Both are put
+    // back and a third sync must make the point selectable again: the
+    // control, and the state every later row needs.
+    const resync = async (tag) => {
+      const request = tag + "-" + suffix;
+      kube(["-n", DR, "patch", "recoverycatalog", CATALOG, "--type=merge", "-p",
+        JSON.stringify({ spec: { syncRequest: request } })]);
+      await waitFor("the " + tag + " sync", 180, 2000, () => {
+        const c = kubeJson(["-n", DR, "get", "recoverycatalog", CATALOG]);
+        const st = c.status || {};
+        const synced = (st.conditions || []).find((x) => x.type === "Synced");
+        return st.observedSyncRequest === request && synced && synced.status === "True" ? c : null;
+      });
+      const listed = await apiCall("GET", DR, "/catalogs/" + CATALOG + "/points?limit=200");
+      check(listed.status === 200, tag + ": the points route answered " + listed.status);
+      artifact("dr/hr12-" + tag + "-points.json", listed.body);
+      return (listed.body.items || []).find((p) => p.pointId === point.pointId) || null;
+    };
+    const moveAside = (key, tag) => mcJob(SRC, tag + "-aside", "mc mv \"adm/$S3_BUCKET/$KEY\" \"adm/$S3_BUCKET/$ASIDE\" && " +
+      "! mc stat \"adm/$S3_BUCKET/$KEY\" >/dev/null 2>&1 && echo moved-aside",
+    [{ name: "KEY", value: key }, { name: "ASIDE", value: "hr12-aside/" + key }]);
+    const putBack = (key, tag) => mcJob(SRC, tag + "-back", "mc mv \"adm/$S3_BUCKET/$ASIDE\" \"adm/$S3_BUCKET/$KEY\" && " +
+      "mc stat \"adm/$S3_BUCKET/$KEY\" >/dev/null && echo restored",
+    [{ name: "KEY", value: key }, { name: "ASIDE", value: "hr12-aside/" + key }]);
+    const incomplete = {};
+    for (const arm of [{ tag: "incomplete-sig", key: sidecarKey, availability: "Available", verification: "NoEvidence" },
+      { tag: "incomplete-receipt", key: point.receiptKey, availability: "Missing", verification: null }]) {
+      moveAside(arm.key, arm.tag);
+      let seen;
+      let pf;
+      try {
+        seen = await resync(arm.tag);
+        pf = await catalogCheck(arm.tag);
+      } finally {
+        putBack(arm.key, arm.tag);
+      }
+      const clauses = {
+        "the view still lists the point": seen !== null,
+        ["its availability is " + arm.availability]: seen !== null &&
+          String(seen.availability).toLowerCase() === arm.availability.toLowerCase(),
+        "it is not selectable": seen !== null && seen.selectable === false,
+        "the readiness check is notReady/CatalogPointNotSelectable": pf.row !== null &&
+          pf.row.state === "notReady" && pf.row.code === "CatalogPointNotSelectable",
+        "the refusal names the point and its availability": pf.row !== null &&
+          JSON.stringify(pf.row).indexOf(point.pointId) !== -1 &&
+          JSON.stringify(pf.row).indexOf(arm.availability) !== -1,
+      };
+      if (arm.verification !== null) {
+        clauses["its verification is " + arm.verification] = seen !== null &&
+          String(seen.verification).toLowerCase() === arm.verification.toLowerCase();
+        clauses["the refusal names " + arm.verification] = pf.row !== null &&
+          JSON.stringify(pf.row).indexOf(arm.verification) !== -1;
+      }
+      incomplete[arm.tag] = { movedAside: arm.key, entry: seen, preflight: pf.name, row: pf.row, clauses: clauses };
+      check(Object.values(clauses).every(Boolean), arm.tag + ": " + JSON.stringify({ clauses: clauses, entry: seen, row: pf.row }));
+    }
+    const whole = await resync("complete-again");
+    const wholeCheck = await catalogCheck("complete-again");
+    check(whole !== null && whole.selectable === true && wholeCheck.row !== null &&
+      wholeCheck.row.state === "ready" && wholeCheck.row.code === "CatalogPointSelectable",
+    "incomplete-point control: with both objects back the point is selectable and ready again: " +
+      JSON.stringify({ entry: whole, row: wholeCheck.row }));
+    artifact("dr/hr12-incomplete.json", { arms: incomplete, control: { entry: whole, row: wholeCheck.row } });
+    record("hr12-a. an incomplete point on the catalog path (its receipt's signature missing -> NoEvidence; its receipt missing -> Missing) is listed, not selectable, and refused by the readiness check (notReady CatalogPointNotSelectable, naming it)", {
+      pointId: point.pointId, arms: Object.fromEntries(Object.entries(incomplete).map(([k, v]) =>
+        [k, { availability: (v.entry || {}).availability, verification: (v.entry || {}).verification,
+          selectable: (v.entry || {}).selectable, row: v.row }])) });
+    control("incomplete point: with the receipt and its signature back, the same point is selectable and ready/CatalogPointSelectable",
+      { entry: { availability: whole.availability, verification: whole.verification, selectable: whole.selectable },
+        preflight: wholeCheck.name, row: wholeCheck.row });
+
     // A REVOKED SIGNER. DR gets a TrustPolicy naming the roster's signing key
     // (the point's signer) Active and the lab approver key for approvals; the
     // catalog re-syncs under it (the control: ready/CatalogPointSelectable).
@@ -1361,7 +1440,43 @@ async function main() {
         JSON.stringify(beforeRevoke.row));
     control("revoked-key: before the revocation the catalog point is ready/CatalogPointSelectable under the TrustPolicy",
       { preflight: beforeRevoke.name, row: beforeRevoke.row, trustAvailable: trustCondition });
+    // ==== harness-rows-12: a RETIRED signer's catalog point (D3 §7.4) =======
+    // "Old signer" on the catalog path: the point's signer is Retired (not
+    // revoked) after the point was signed. A retired key authorises nothing
+    // new, and everything it signed before `retiredAt` stays verifiable: the
+    // re-synced view lists the point VerifiedHistorical and selectable, the
+    // readiness check is ready, and a restore of it succeeds with exactly the
+    // source's records. The revocation below is the refusing twin.
     const at = new Date().toISOString().replace(/\.\d+Z$/, "Z");
+    kube(["apply", "-f", "-"], { input: JSON.stringify(trustPolicy("Retired", { retiredAt: at })) });
+    const underRetired = await resync("retired");
+    const retiredCheck = await catalogCheck("retired");
+    const retired = await signedRestore("retired", RETIRED_PREFIX);
+    const retiredSource = topicValues("kafka-source", SOURCE_TOPIC, 100);
+    const retiredValues = retired.done.status.phase === "Succeeded"
+      ? topicValues("kafka-target", RETIRED_PREFIX + SOURCE_TOPIC, retiredSource.length) : [];
+    const retiredClauses = {
+      "the re-synced view lists the point VerifiedHistorical": underRetired !== null &&
+        String(underRetired.verification) === "VerifiedHistorical",
+      "and selectable": underRetired !== null && underRetired.selectable === true,
+      "the readiness check is ready/CatalogPointSelectable": retiredCheck.row !== null &&
+        retiredCheck.row.state === "ready" && retiredCheck.row.code === "CatalogPointSelectable",
+      "the Restore Succeeded, exit 0": retired.done.status.phase === "Succeeded" && retired.done.status.exitCode === 0,
+      "the runner verified the point's binding": retired.log.indexOf("recovery point binding verified") !== -1 &&
+        retired.log.indexOf(point.pointId) !== -1,
+      "the restored records are the source's, in order": retiredSource.length > 0 &&
+        retiredValues.length === retiredSource.length && retiredValues.every((v, i) => v === retiredSource[i]),
+    };
+    artifact("dr/hr12-retired.json", { retiredAt: at, entry: underRetired, row: retiredCheck.row,
+      restore: { name: retired.name, status: retired.done.status }, clauses: retiredClauses,
+      records: { source: retiredSource.length, restored: retiredValues.length,
+        sourceSha256: sha256(retiredSource.join("\n")), restoredSha256: sha256(retiredValues.join("\n")) } });
+    check(Object.values(retiredClauses).every(Boolean), "retired signer: " + JSON.stringify(retiredClauses));
+    record("hr12-b. a catalog point whose signer was Retired after signing stays restorable: VerifiedHistorical and selectable, readiness ready, the Restore Succeeded with exactly the source's records", {
+      signerKeyId: signer.keyId, retiredAt: at, entry: { availability: underRetired.availability,
+        verification: underRetired.verification, selectable: underRetired.selectable },
+      preflight: retiredCheck.name, row: retiredCheck.row, restore: retired.name,
+      records: retiredValues.length, clauses: retiredClauses });
     kube(["apply", "-f", "-"], { input: JSON.stringify(trustPolicy("Revoked", { retiredAt: at, revokedAt: at,
       revocationEffectiveFrom: "2026-09-01T00:00:00Z", revocationReason: "KeyCompromise" })) });
     await pause(5000);
@@ -1453,7 +1568,7 @@ function cleanup() {
     result.cleanup.push({ trustPolicy: TRUST_POLICY, error: String(tpFailed.message).slice(0, 400) });
   }
   for (const topic of [RESTORE_PREFIX + SOURCE_TOPIC, TAMPERED_PREFIX + SOURCE_TOPIC,
-    UNSIGNED_PREFIX + SOURCE_TOPIC, REVOKED_PREFIX + SOURCE_TOPIC]) {
+    UNSIGNED_PREFIX + SOURCE_TOPIC, REVOKED_PREFIX + SOURCE_TOPIC, RETIRED_PREFIX + SOURCE_TOPIC]) {
     try {
       check(topic.startsWith("p152-" + suffix + "-"), "only this run's topics are deleted");
       if (topicExists("kafka-target", topic)) {
