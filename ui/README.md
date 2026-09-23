@@ -1902,6 +1902,19 @@ implemented a second time in a browser. Beside it, and never instead of it,
 under a key this installation does not accept is `verification: valid` and
 `trust: untrusted`, and only the second one decides the badge.
 
+**The basis still vetoes a green word.** `logweir-api` projects a `Valid`
+verdict on `trust.basis: RecordedBeforeRevocation` as `trust.state: verified`,
+and D3 section 7.4 says that case is never green. So the operation view reads
+the word **and** the basis beside it, through the same basis check legacy mode
+applies, and names the case ("recorded before revocation") when the basis
+vetoes. The Backup and Restore **detail** views in console mode read the
+operation route and fold it into the custom-resource shape the pages render;
+`trust.basis` is folded in with the verdict, to
+`status.evidence.verification.trust.basis`, so the badge and the scorecard
+caption judge a console detail exactly as they judge the custom resource. A
+server that answers without a `trust` block gets the pre-existing rule
+(D3 section 12).
+
 **In legacy mode there is no such word**, so the page keeps its own rule over
 the custom resource. Two documents, two rules, each reading what its own
 document carries.

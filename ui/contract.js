@@ -2906,6 +2906,28 @@ export function decodeD3OperationFrame(value) {
   return decodeWith(D3_OPERATION, value);
 }
 
+/** Decodes the `trust` block of `GET .../operations/{kind}/{name}`'s envelope,
+ *  or answers `null` when the body carries none.
+ *
+ *  WHY A DETAIL VIEW NEEDS IT (CONSOLE-DETAIL-TRUST-BASIS-DROPPED). A console
+ *  DETAIL view reads that route through [`decodeOperation`], which keeps the
+ *  frozen sixteen fields of `Operation` and nothing else, so the verdict's
+ *  `trust.basis` never reached the page: a `Valid` verdict on
+ *  `RecordedBeforeRevocation` read green, as if the key were still trusted.
+ *  The block is read here, by the same `OperationTrust` shape the operation
+ *  view decodes, and an ABSENT block is `null` -- D3 section 12's "`trust`
+ *  absent -> the pre-existing rule", which is what a server that predates D3
+ *  and answers the frozen sixteen gets. A block that is present and malformed
+ *  is a contract failure, like any other. */
+export function decodeOperationTrust(value) {
+  const item = (value !== null && typeof value === "object") ? value.item : undefined;
+  if (item === null || typeof item !== "object" || item.trust === undefined ||
+    item.trust === null) {
+    return null;
+  }
+  return readShape(D3_TRUST, item.trust, { unknown: [] }, "OperationViewResponse", "item.trust");
+}
+
 /** Decodes one page of a catalog's points. */
 export function decodeCatalogPoints(value) {
   return decodeListWith(D3_POINT_PAGE, D3_POINT, value);
