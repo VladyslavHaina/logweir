@@ -1674,7 +1674,11 @@ as *no point at all*:
   nothing.
 - `objectives.requireVerifiedEvidence` is satisfied by the **entry's own
   verification axis** where the controller reached no verdict. Only
-  `NotAttempted` defers this way. A verdict a verifier REACHED still decides:
+  `NotAttempted` defers this way — and a `Valid` on `trust.basis: Unverified`,
+  which is the same "nothing compared yet". A `Valid` counts as verified only
+  beside no `trust` block or a `Current`/`Historical` basis, the badge's own
+  rule; on any other basis (`RecordedBeforeRevocation`, `None`, a block with no
+  basis) it is a refusal like `Untrusted`. A verdict a verifier REACHED still decides:
   `Untrusted` is a signature this installation refuses and `Invalid` is a
   document that is not what it claims to be, and neither is overruled by a
   catalog row — otherwise `TrustPolicy` would be decorative and a tampered
