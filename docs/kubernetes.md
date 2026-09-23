@@ -1361,9 +1361,16 @@ no configuration is reconstructed by hand.**
    the point's set, `sourceDestinationRef`/`evidenceDestinationRef` the
    catalog's destination — and waits for its `Approval`. The runner, before it
    constructs any client (execution contract v2), re-reads the receipt the plan
-   names, re-derives the point id from its bytes, compares both digests and
-   reads the manifest back; a mismatch is exit 3 `PointBindingMismatch` and no
-   data moves. The source cluster is never contacted.
+   names, re-derives the point id from its bytes, compares both digests,
+   verifies the receipt's signature against the evidence keyring the
+   controller mounts in the approval bundle (`evidence-keys.json`, every key
+   of the namespace's resolved trust with its lifecycle, digest-pinned) and
+   reads the manifest back. A digest mismatch is exit 3 `PointBindingMismatch`;
+   an unsigned receipt, a signature no trusted key verifies, or a signer the
+   trust refuses (revoked for compromise, retired before the receipt was
+   written, not an `EvidenceSigning` key) is exit 3 `PointUntrusted`. Either
+   way no data moves and no target topic is created. The source cluster is
+   never contacted.
 
 **A run the controller could not verify is restored the same way
 (CONSOLE-RESTORE-IGNORES-CATALOG-WINDOW).** A destination-backed `Backup` whose
@@ -1384,13 +1391,19 @@ is bound to that receipt.
 **Upgrade and rollback.** Everything here is additive. A plan without
 `source.point` is byte-identical to before and restores as before;
 `catalogPointRef` is one optional field and one CEL rule on the `Preflight`
-kind, whose objects are immutable, so no existing object changes; the five new
-check codes are new members of a closed vocabulary. Rolling the controller back
+kind, whose objects are immutable, so no existing object changes; the seven new
+check codes are new members of a closed vocabulary. The runner's receipt
+signature check is a runner-image change with its own migration note in
+[`stability.md`](stability.md#a-bound-points-receipt-signature-is-verified-before-any-data-moves-d3-55-step-6):
+a point-bound plan now needs the evidence keyring a controller at this version
+renders. Rolling the controller back
 leaves a `catalogPointRef` Preflight answering no `recoveryPoint.state` row (an
 older controller ignores the field — the CRD prunes it once the older schema is
 re-applied); rolling the console back removes the catalog-point route and its
 links. Archives, catalog records and the runner's binding check (which predates
-this change) are untouched in both directions.
+this change) are untouched in both directions, except that a runner at this
+version refuses a point-bound plan from an older controller (`PointUntrusted`,
+no keyring).
 
 ### 7e. A `ProtectionPolicy` says whether you can recover, and a green schedule does not
 
@@ -6976,12 +6989,17 @@ so `approval.state` is `skipped` with `SubjectNotCreated` and the verdict is
   | no view yet, an expired view, a page gone, mutable or altered | `unknown`, `CatalogPointViewUnavailable` |
   | a `Backup` of the same receipt digest (set id for a digest-less run) whose own verdict is anything but absent, `NotAttempted` or `Valid` | `notReady`, `CatalogPointRefusedByController` |
   | the row is not `selectable` | `notReady`, `CatalogPointNotSelectable`, both axes named |
+  | the row's signer, judged again against the namespace's CURRENT trust (the `TrustPolicy` resolution the `Approval` controller makes) for `EvidenceSigning` at the row's recovery point, is refused — revoked or retired since the catalog synced, no longer listed, or its public key unusable | `notReady`, `CatalogPointSignerUntrusted`, the key and the reason named |
+  | that trust cannot be resolved (two policies claim the namespace, none does, or the read failed), or the row names no signer | `unknown`, `CatalogPointSignerUnknown` |
   | more `Backup`s than the four pages read | `unknown`, `CatalogPointViewUnavailable` — asked after the refusal it could not rule out |
   | the plan has no `source.point`, or its binding or `source.backup` is not the row's | `notReady`, `CatalogPointBindingMismatch` |
   | otherwise | `ready`, `CatalogPointSelectable` |
 
   The catalog joins the check's referents. A `ready` here authorises nothing:
   the runner re-verifies the binding against the archive before any data moves.
+  The signer row uses the recovery point as the claimed signing time, because
+  the view carries no receipt `finished_at`: a key retired between the two
+  instants passes here and is refused by the runner, which reads the real one.
 - **`gc.rs` IS wired, since D2 W11.** A terminal `Preflight` is collected an
   hour after `result.expiresAt` (or after `observedAt`, when it never produced
   a verdict with an expiry), by the reconciler's own hourly pass, with a UID
