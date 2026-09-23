@@ -2594,6 +2594,27 @@ spec:
                     description: 'The restore block, for `operation: Restore`.'
                     nullable: true
                     properties:
+                      catalogPointRef:
+                        description: 'Or a recovery point read from a `RecoveryCatalog`''s view (PLAT-15.2, D3 §5.5 step 5): the controller re-reads that catalog row when the check runs and reports `recoveryPoint.state` from it — the row''s availability and verification, any reached `Backup` verdict on the same receipt, and whether the plan''s `source.point` is this row''s binding. At most one of this and `recoveryPointRef` (P10). ABSENT on every object written before PLAT-15.2, which therefore behaves exactly as it did.'
+                        nullable: true
+                        properties:
+                          catalogRef:
+                            description: The catalog, in this namespace.
+                            properties:
+                              name:
+                                description: The referenced object's `metadata.name`, in this namespace.
+                                type: string
+                            required:
+                            - name
+                            type: object
+                          pointId:
+                            description: '`lwp1-` plus 32 lowercase hex characters (D3 §5.1).'
+                            pattern: ^lwp1-[0-9a-f]{32}$
+                            type: string
+                        required:
+                        - catalogRef
+                        - pointId
+                        type: object
                       evidenceDestinationRef:
                         description: The destination evidence is written to.
                         nullable: true
@@ -2694,6 +2715,8 @@ spec:
                       rule: has(self.sourceDestinationRef) != has(self.legacySourceArchive)
                     - message: planHash is sha256:<64 lowercase hex>, the form logweir_core::ids::sha256_prefixed produces
                       rule: '!has(self.planHash) || self.planHash.matches(''^sha256:[0-9a-f]{64}$'')'
+                    - message: set at most one of recoveryPointRef (a Backup) or catalogPointRef (a catalog point)
+                      rule: '!(has(self.recoveryPointRef) && has(self.catalogPointRef))'
                   skipChecks:
                     description: 'Checks to leave out. **A skipped blocking check keeps the overall state `unknown`**: skipping a question is not answering it.'
                     items:
@@ -6943,7 +6966,7 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: logweir-api-config-97d7f6e253
+  name: logweir-api-config-49938d6e7d
   namespace: logweir-system
   labels:
     app.kubernetes.io/name: logweir
@@ -6966,6 +6989,7 @@ data:
       - team-b
     kubernetes:
       source: inCluster
+      principal: "system:serviceaccount:logweir-system:logweir-api"
     cursorKeyFile: /var/run/logweir/keys/cursor.key
     approvalPolicyFile: /etc/logweir/approval-policy/approval-policy.yaml
     confirmationKeyFile: /var/run/logweir/confirmation/confirmation.key
@@ -7612,7 +7636,7 @@ spec:
   template:
     metadata:
       annotations:
-        checksum/logweir-api-config: 97d7f6e253a6f166f290c11d79d1b4fe2b4b519b83cdedc2a6c769a6bd55b2b7
+        checksum/logweir-api-config: 49938d6e7d053056e34e65898bd06f2da405d3c46f7dbb07c2f24203a98902f5
       labels:
         app.kubernetes.io/name: logweir
         app.kubernetes.io/instance: logweir
@@ -7666,7 +7690,7 @@ spec:
       volumes:
         - name: config
           configMap:
-            name: logweir-api-config-97d7f6e253
+            name: logweir-api-config-49938d6e7d
             items:
               - key: config.yaml
                 path: config.yaml
