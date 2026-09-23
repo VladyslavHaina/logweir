@@ -699,3 +699,27 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def test_the_namespaces_trust_policy_is_what_readiness_reads() -> None:
+    policy = "o-s-scope"
+    good = {"state": "ready", "code": "SignerRostered",
+            "scope": {"kind": "TrustPolicy", "name": policy}}
+    row("S24: SignerRostered scoped to the policy", all(d2.signer_rostered_by_policy(
+        good, policy).values()))
+    row("S24 MUTANT: the roster's scope (TrustRoster/default) is refused", not all(
+        d2.signer_rostered_by_policy(dict(good, scope={"kind": "TrustRoster", "name": "default"}),
+                                     policy).values()))
+    row("S24 MUTANT: SignerNotRostered is refused", not all(d2.signer_rostered_by_policy(
+        dict(good, state="notReady", code="SignerNotRostered"), policy).values()))
+    tid = "BQ_nM8DNSLeu7u16ySHOQQ"
+    denied = {"state": "notReady", "code": "TargetNotAllowlisted",
+              "message": f"cluster id `{tid}` is not in this namespace's restore allowlist (the "
+                         "governing TrustPolicy's spec.allowedTargetClusterIds, or …)"}
+    allowed = {"state": "ready", "code": "TargetAllowed"}
+    row("S25: denied then allowed on the policy's list", all(
+        d2.allowlist_is_the_policys(denied, allowed, tid).values()))
+    row("S25 MUTANT: a build that ignores the list allows both arms", not all(
+        d2.allowlist_is_the_policys(allowed, allowed, tid).values()))
+    row("S25 MUTANT: a build that never allows (roster-only list) refuses both", not all(
+        d2.allowlist_is_the_policys(denied, denied, tid).values()))

@@ -5135,6 +5135,110 @@ def s22() -> None:
                           "it governs a namespace by exact name and would re-judge a later run")
 
 
+# --- S24 / S25: the namespace's TrustPolicy is what readiness reads ------------
+#
+# rehearsal-catalog-trust's "extra rows for the next lab refresh" (32306a5,
+# 5dda65b): once a TrustPolicy governs the namespace, a Backup check's
+# `signer.rostered` is judged against THAT policy's keys and says so in its
+# scope, and a scratch restore check's `target.clusterIdentity` reads the
+# policy's `spec.allowedTargetClusterIds` — never TrustRoster's list. S25 is a
+# DIFFERENTIAL on one policy: the same plan is refused `TargetNotAllowlisted`
+# while the allowlist names another cluster, and allowed once it names the
+# target, so a build that read the roster (or no list) fails one of the arms.
+
+S24_ID, S24_TITLE = "S24", "signer.rostered is judged by the namespace's TrustPolicy and says so"
+S25_ID, S25_TITLE = ("S25", "a scratch restore's target allowlist is the governing TrustPolicy's "
+                            "allowedTargetClusterIds")
+
+
+def signer_rostered_by_policy(row: dict[str, Any], policy: str) -> dict[str, bool]:
+    scope = row.get("scope") or {}
+    return {
+        "signer.rostered is ready/SignerRostered": row.get("state") == "ready"
+        and row.get("code") == "SignerRostered",
+        f"and its scope is TrustPolicy/{policy}, not the roster":
+            scope.get("kind") == "TrustPolicy" and scope.get("name") == policy,
+    }
+
+
+def allowlist_is_the_policys(denied: dict[str, Any], allowed: dict[str, Any],
+                             target_id: str) -> dict[str, bool]:
+    return {
+        "with the policy's allowlist naming another cluster: notReady/TargetNotAllowlisted":
+            denied.get("state") == "notReady" and denied.get("code") == "TargetNotAllowlisted",
+        "about the observed target cluster id":
+            bool(target_id) and target_id in str(denied.get("message") or ""),
+        "and naming the governing TrustPolicy's list as the source":
+            "allowedTargetClusterIds" in str(denied.get("message") or ""),
+        "with the allowlist naming the target: ready/TargetAllowed": allowed.get("state") == "ready"
+        and allowed.get("code") == "TargetAllowed",
+    }
+
+
+def s24() -> None:
+    """S24 and S25 (CLUSTER LOCK: a TrustPolicy). Needs `setup` and `s6`
+    (`bk-a2`)."""
+    roster = json.loads(run(CTX + ["get", "trustroster", "default", "-o", "json"]).stdout)
+    signer = roster["spec"]["signingKeys"][0]
+    target_id = ((get("kafkacluster", "target").get("status") or {}).get("clusterId") or "")
+    policy_name = f"{OWNER}-{STAMP}-scope"
+    facts = backup_facts("bk-a2", "a", "lw-a")
+    doc = restore_plan(facts["backupId"], facts["pointInTime"], "d2w14-scope-",
+                       topics=facts["manifestTopics"])
+    doc["target"]["mode"] = "scratch"
+    plan = json.dumps(doc, indent=2) + "\n"
+
+    def body(allowed: list[str]) -> dict[str, Any]:
+        obj = trust_policy(policy_name, [NS], [policy_key(
+            signer["keyId"], signer["spkiPem"], usages=["EvidenceSigning"],
+            subject=signer.get("subject") or "signing@scram-local.invalid",
+            display="the lab signing key")])
+        obj["spec"]["allowedTargetClusterIds"] = allowed
+        return obj
+
+    try:
+        for name in ("pf-scope-backup", "pf-scope-deny", "pf-scope-allow"):
+            run(K + ["delete", "preflight", name, "--ignore-not-found=true", "--wait=true"],
+                check=False, timeout=120)
+        apply(body(["lr9-not-this-cluster"]))
+        time.sleep(5)
+        apply(backup_preflight("pf-scope-backup", "source-admin", topics=["payments"],
+                               timeout_seconds=120))
+        backup_obj = wait_preflight("pf-scope-backup", timeout=420)
+        artifact("objects/s24/preflight-backup.json", backup_obj)
+        apply(preflight("pf-scope-deny", restore_preflight_request(plan), timeout_seconds=180))
+        deny_obj = wait_preflight("pf-scope-deny", timeout=600)
+        artifact("objects/s24/preflight-deny.json", deny_obj)
+        apply(body([target_id]))
+        time.sleep(5)
+        apply(preflight("pf-scope-allow", restore_preflight_request(plan), timeout_seconds=180))
+        allow_obj = wait_preflight("pf-scope-allow", timeout=600)
+        artifact("objects/s24/preflight-allow.json", allow_obj)
+        live = json.loads(run(CTX + ["get", "trustpolicy", policy_name, "-o", "json"]).stdout)
+        with Scenario(S24_ID, S24_TITLE) as sc:
+            row = checks_by_id(backup_obj).get("signer.rostered") or {}
+            clauses = signer_rostered_by_policy(row, policy_name)
+            sc.detail.update({"policy": policy_name, "policyUid": live["metadata"]["uid"],
+                              "signerKeyId": signer["keyId"], "row": row,
+                              "clauses": clauses})
+            check(all(clauses.values()), f"signer.rostered under {policy_name}: {row}")
+        with Scenario(S25_ID, S25_TITLE) as sc:
+            denied = checks_by_id(deny_obj).get("target.clusterIdentity") or {}
+            allowed = checks_by_id(allow_obj).get("target.clusterIdentity") or {}
+            clauses = allowlist_is_the_policys(denied, allowed, target_id)
+            sc.detail.update({"policy": policy_name, "targetClusterId": target_id,
+                              "denied": denied, "allowed": allowed, "clauses": clauses})
+            check(all(clauses.values()), f"target.clusterIdentity: denied={denied} "
+                  f"allowed={allowed}")
+    finally:
+        seen = run(CTX + ["get", "trustpolicy", policy_name, "-o", "json"], check=False)
+        if seen.returncode == 0:
+            owner = (json.loads(seen.stdout)["metadata"].get("labels") or {}).get(OWNER_LABEL_KEY)
+            if owner == OWNER:
+                run(CTX + ["delete", "trustpolicy", policy_name, "--wait=true"], check=False,
+                    timeout=120)
+
+
 def s19() -> None:
     with Scenario("S19", "a stale inventory does not stand in for a live topic check") as sc:
         full = get("topicdiscovery", "td-full")
