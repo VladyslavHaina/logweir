@@ -253,7 +253,7 @@ older API server says `verified` again for that pairing.
 
 - **A green badge** means the signed document's signature verified under a key
   the namespace's trust accepts **and** the run's own success field
-  (`exitCode == 0` for a Backup, `outcome == pass` for a Restore). `Historical`
+  (`exitCode == 0` for a Backup, `outcome == pass` and a zero `exitCode` for a Restore). `Historical`
   (signed before the key was retired) is a pass; `RecordedBeforeRevocation` never
   is ([kubernetes.md](kubernetes.md) §15.2–15.2a).
 - **Record checks are samples.** `verificationScope` is `sampled`, `degraded` or

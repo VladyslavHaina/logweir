@@ -2556,8 +2556,39 @@ kubectl --context <ctx> -n <ns> patch rehearsalschedule weekly-orders \
 
 **What the status says, and who reads it.** `lastSucceeded` carries the
 `Restore`, the instant, the evidence key and the measured RTO; `lastFailed`
-carries the terminal reason verbatim; `lastSkipped` carries the slot and one of
-the reasons above. The three conditions are `Ready` (this controller could act),
+carries why the run did not pass; `lastSkipped` carries the slot and one of
+the reasons above.
+
+**A rehearsal is recorded on its REACHED evidence verdict, not when its
+`Restore` turns terminal** (REHEARSAL-PASS-RECORDED-AS-FAILED). A
+destination-backed `Restore` writes its exit code and evidence keys first and
+its `outcome` and `evidence.verification` later, from the evidence-fetch Job.
+While that verdict is owed — the keys are named and no verdict is written yet,
+the verdict is `Pending`, or it is `NotAttempted` with a retry scheduled
+(`observation.retryAfter`) — the schedule records nothing, keeps
+`activeRestoreRef`, leaves `RehearsalHealthy` as it was, and a slot that comes
+due meanwhile is skipped `ConcurrencyBlocked` (firing would lose the result
+being waited for). Once the verdict is reached the run is recorded once:
+
+- `lastSucceeded` only for exit `0`, `outcome: pass` **and** a green verdict
+  (the `Restore` badge rule of §15.2 — `Valid` on the `Current` or
+  `Historical` basis);
+- otherwise `lastFailed`, whose `reason` is the verified signed `outcome`
+  (`fail-integrity`, …) or the exit's own reason for a run that did not exit 0,
+  and the badge's reason (`VerificationInvalid`, `VerificationUntrusted`,
+  `VerificationNotAttempted` once the fetch's attempts are spent) for one that
+  did;
+- a verdict still owed an hour after the run finished (`VERDICT_WAIT_SECONDS`,
+  longer than the whole fetch schedule) is `lastFailed` with reason
+  `EvidenceVerdictNotReached` — never a pass.
+
+`RehearsalHealthy` moves with the same decision (`True/Passed`, or
+`False/Failed` naming the reason). *Upgrade:* nothing to migrate. A schedule
+whose `activeRestoreRef` names a finished run is simply re-read; a run an older
+controller already recorded (including a pass it recorded as `lastFailed`
+reason `ok`) is not revisited — the next rehearsal records correctly.
+*Rollback:* an older controller records the terminal instant again, so a
+destination-backed pass reads as failed until upgraded. The three conditions are `Ready` (this controller could act),
 `Authorized` (the standing document currently admits a slot) and
 `RehearsalHealthy` (the last finished rehearsal passed). A `ProtectionPolicy`
 reads `lastSucceeded.{at,restoreRef}` and `lastFailed.{at,reason}` — the four
@@ -4797,7 +4828,9 @@ leaves **both keys unset**. No key is ever derived from the backup id: a
 guessed key points at an object that may not exist, and a verifier would then
 report `Invalid` for a run whose evidence was merely unread.
 
-**The evidence fact is its own condition, and it exists only at exit 0.**
+**The evidence fact is its own condition, and it exists only at exit 0** (and,
+on a `Restore`, at exit 2 when the runner named its signed failure — §7's
+restore section).
 `EvidenceRecorded` is `True` with reason `EvidenceKeysRecorded` when both lines
 were read, `False` with reason `EvidenceKeysUnreadable` when they were not, and
 **absent at exits 1, 3 and 4** — those runs write no artifact by contract
@@ -5411,6 +5444,16 @@ an offset report, so two lines at exit 0 is a complete, truthful answer;
 the two *mandatory* keys is missing, and only at exit 0, because Global
 Constraint 11 says exits 1, 3 and 4 write no artifact at all.
 
+**Exit 2 names its signed failure (interface I8 as amended,
+`docs/stability.md`).** A runner carrying the amendment prints the same key
+lines at exit 2. The reconciler records them, raises `EvidenceRecorded=True` /
+`EvidenceKeysRecorded`, and fetches and verifies the scorecard exactly as for a
+pass, so `status.outcome` (`fail-objective`, `fail-integrity`,
+`preflight-failed`) and `status.evidence.verification` are written for a failed
+run too. The run is still `phase: Failed`, and `Verified` is never `True` over
+a recorded non-zero `exitCode` (§15.2). An older runner prints no keys at exit
+2: nothing about that status changes, and no `EvidenceKeysUnreadable` is raised.
+
 ### What the status carries, and what it copies
 
 `exitCode` and the condition are decided from the pod. Everything else is
@@ -5737,11 +5780,15 @@ each kind:
 | kind      | green when                                                       |
 |-----------|------------------------------------------------------------------|
 | `Backup`  | `status.evidence.verification.result == Valid` **and** `status.exitCode == 0` |
-| `Restore` | `status.evidence.verification.result == Valid` **and** `status.outcome == pass` |
+| `Restore` | `status.evidence.verification.result == Valid` **and** `status.outcome == pass` **and** no recorded `status.exitCode` other than `0` |
 
 There is **no `outcome` on the `Backup` path at all** — `Backup.status` carries
 `exitCode` and no `outcome` — so a single shared rule would render every
-`Backup` ungreen. Either badge is labelled
+`Backup` ungreen. The `Restore` rule's exit-code clause exists because an exit-2
+run publishes and verifies its signed failure (interface I8 as amended): the
+exit code stays authoritative, so a document that verifies `Valid` at a
+non-zero exit is `ExitCodeNotZero`, never green. A status with no `exitCode` at
+all (nothing terminal wrote one) is judged on `outcome` as before. Either badge is labelled
 
 > verified by weirkeeper at `<verifiedAt>` against key `<matchedKeyId>`
 

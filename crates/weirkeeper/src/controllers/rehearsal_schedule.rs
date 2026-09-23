@@ -40,6 +40,17 @@
 //!    nothing for eleven weeks is indistinguishable, from the outside, from one
 //!    that passed eleven times.
 //!
+//! # A rehearsal is recorded on its REACHED verdict
+//!
+//! A destination-backed `Restore` turns terminal before it knows its
+//! `outcome` and evidence verdict (the evidence-fetch Job writes both later).
+//! [`observe`] therefore separates *terminal* from *decided*: while
+//! [`verdict_owed`] names a verdict still owed, nothing is recorded,
+//! `activeRestoreRef` stays, and the next slot is `ConcurrencyBlocked`. A pass
+//! is exit 0 + `outcome: pass` + a green verdict by the shared `Restore` badge
+//! rule; a verdict still owed after [`VERDICT_WAIT_SECONDS`] is a non-pass,
+//! never a pass (REHEARSAL-PASS-RECORDED-AS-FAILED).
+//!
 //! # What it writes, and what it does not
 //!
 //! It patches `rehearsalschedules/status` with a merge PATCH carrying

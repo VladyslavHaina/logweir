@@ -613,8 +613,9 @@ same topics.
 
 ### Interface I8's third stdout line is CONDITIONAL: `offset-report-key=` is present exactly when the engine wrote a report
 
-A successful `logweir restore run` (or its `drill run` alias) prints its evidence keys as the last
-lines of stdout, in this order:
+A `logweir restore run` (or its `drill run` alias) that signed a scorecard — a pass at exit 0, and
+a drill result that did not pass at exit 2 (see the amendment below) — prints its evidence keys as
+the last lines of stdout, in this order:
 
 ```
 scorecard-key=logweir/drills/<run_id>.json
@@ -628,7 +629,8 @@ completed restore, and its own write failure is a warning rather than an error, 
 finished can legitimately leave nothing at the path. When that happens `phase8_score` records no
 offset-report key or digest in the signed scorecard, uploads nothing, emits a `tracing::warn!`
 naming the run, the path and the error — and the run still **exits 0 with two key lines**. It is
-not a finding: exits 1, 3 and 4 write no artifact at all by contract, and a scorecard whose
+not a finding: exits 1, 3 and 4 write no artifact at all by contract (and print no key line), and a
+scorecard whose
 `evidence.offset_report_*` pair is absent is a well-formed 1.0.0 document that both readers accept
 (the pair is present-or-absent together, never half of one).
 
@@ -641,6 +643,41 @@ until D3 W2 raised it: contract v2's `teardown-key=` line left a passing
 restore at seven of the eight, and because the scan matches by key NAME an
 overrun is a silently absent status field rather than an error. The window is
 now a budget with its margin written down — see `docs/kubernetes.md` §10.
+
+### Interface I8 is amended: exit 2 prints the signed failure's keys too
+
+**Amended 2026-09-23 (FAILED-DRILL-EVIDENCE-UNPUBLISHED, D3 §2.5, PLAT-14.3).** I8 said the three
+key lines are printed *only on exit 0*. It now reads: **the key lines are printed by every run that
+signed and put a scorecard — exit 0 and exit 2 — and by no other.** Exit 2 is "a drill ran and did
+not pass; a SIGNED scorecard was written", and a signed failure nobody can name is evidence lost: a
+controller could never record `Restore.status.evidence`, verify it, or copy its `outcome`, so a
+failed rehearsal carried no proof of why it failed. All three exit-2 paths print them — a scored
+`fail-objective`/`fail-integrity` run, phase 5's `preflight-failed` jump and phase 6's no-op
+interception — with the same order, the same "nothing after them" rule, and the same conditional
+third line (the two paths that completed no restore have no offset report and print two lines).
+
+**The exit code stays authoritative for success.** Keys at exit 2 name a signed FAILURE. The
+controller records them (`EvidenceRecorded=True`), fetches and verifies the document with the same
+verifier as a pass, and copies its `outcome` — and the `Restore` is still `phase: Failed`, its
+`Verified` condition is never `True` over a recorded non-zero `exitCode` (`ExitCodeNotZero`, even if
+the document were to say `pass`), the API's `result.status` is `notPass`, and a rehearsal is recorded
+`lastFailed`. A scorecard that verifies `Valid` at exit 2 is a *verified failure*.
+
+**Mixed versions.**
+
+- *A new runner under an older controller.* The controller this amendment was made against
+  (`7487682`) already reads the key lines by name at any exit code: it records the keys and verifies
+  the document, and nothing becomes a pass — its badge reads `outcome`, which the signed failure's
+  own document says is not `pass`, and its rehearsal projection requires exit 0. It raises no
+  `EvidenceRecorded` condition at exit 2, and its rehearsal projection may record the failure before
+  the verdict lands; the failure is still a failure. A controller that ignored key lines at a
+  non-zero exit would simply leave the evidence unrecorded, which is the pre-amendment state.
+- *An older runner under a newer controller.* The runner prints no keys at exit 2, so the status is
+  exactly what it was: one `Failed` condition, no `status.evidence`, no verification, no `outcome`.
+  No `EvidenceKeysUnreadable` is raised at exit 2 — its absence is what that runner promised.
+- *Readers.* Anything that treated "a `scorecard-key=` line is present" as "the run passed" was
+  already wrong under E4 and is now wrong in practice: read the exit code (or `Restore.status.exitCode`)
+  for success, and the keys only to find the document.
 
 ### The runner progress channel is OPTIONAL, bounded and contract-versioned (D3 §2.4)
 
@@ -714,9 +751,10 @@ front of interface I7's two. I8's contract is "`scorecard-key=`, `sidecar-key=`,
 `offset-report-key=`, as the FINAL stdout lines of a successful run, with nothing after them", and
 that is unchanged.
 
-**It is not restricted to exit 0.** A restore that ran every phase and did not pass exits 2 and
-prints no evidence keys at all — and that is precisely the run whose leftover topics matter, since
-a rehearsal's leftovers block the next scheduled slot. The key is carried on the scorecard's
+**It is not restricted to exit 0.** A restore that ran every phase and did not pass exits 2 — and
+that is precisely the run whose leftover topics matter, since a rehearsal's leftovers block the next
+scheduled slot. (Before I8's amendment above that run printed no evidence keys at all; it now prints
+them after this line, exactly as exit 0 does.) The key is carried on the scorecard's
 phase-9 record, which is pushed after phase 8 froze and signed the document, so nothing that
 delivers it can reach the signed bytes.
 

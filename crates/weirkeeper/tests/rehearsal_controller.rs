@@ -2518,8 +2518,9 @@ fn the_verdict_wait_outlasts_the_whole_fetch_schedule() {
 /// verified FAILURE, recorded with the signed `outcome` as its reason — and a
 /// planted `outcome: pass` at exit 2 is still not a pass.
 ///
-/// MUTANT: drop `exit_code == Some(0)` from `passed` AND the badge's exit-code
-/// clause — the second row then passes.
+/// MUTANTS: drop the badge's exit-code clause AND `exit_code == Some(0)` —
+/// the planted row then passes; drop `exit_code == Some(0)` alone — the
+/// codeless row passes (the badge judges an absent code on `outcome`).
 #[test]
 fn a_failed_drill_is_never_a_pass_whatever_its_verdict() {
     let now = at("2026-09-20T03:25:00Z");
@@ -2542,6 +2543,20 @@ fn a_failed_drill_is_never_a_pass_whatever_its_verdict() {
     assert!(
         seen.decided && !seen.passed,
         "exit 2 is never a pass: {seen:?}"
+    );
+    // …and no exit code at all (a terminal status nothing read a code for) is
+    // not a pass either, even beside a `Valid` pass document: the badge judges
+    // an absent `exitCode` on `outcome` alone, so the schedule's own
+    // `exit_code == Some(0)` is what refuses it.
+    let mut codeless = passed_status("Failed", "Valid");
+    codeless
+        .as_object_mut()
+        .expect("a status")
+        .remove("exitCode");
+    let seen = rs::observe(Some(&rehearsal_restore(codeless)), now);
+    assert!(
+        seen.decided && !seen.passed,
+        "no exit code, no pass: {seen:?}"
     );
     // …and an exit 2 whose signed failure is still being fetched waits for it
     // like a pass would, so its record carries the verified outcome.
