@@ -475,6 +475,80 @@ def test_the_evidence_fetch_phases_are_runnable_by_name() -> None:
         d2.VERDICT_SETTLE_SECONDS >= 240 and "Pending" not in d2.REACHED_VERDICTS)
 
 
+# --- EVF-1.ttl: the observation harness-rows-12's ttl-observer.py recorded live
+# (namespace lw-hr12-d2-hr12ttl20260923t1931z, ttl-collection.json), in the
+# shape `observe_ttl_collection` writes. harness-rows.review.md M-1: the old row
+# passed on any disappearance, including a Job that never existed.
+
+TTL_JOB_UID = "c09c3e75-affc-464f-994f-0643f18bf6d3"
+TTL_OWNER_UID = "0730d7f3-6b07-4433-a5fc-f1f6733cb471"
+TTL_OBSERVED = {
+    "job": "lwc-ev-a903a86d9dbe11e7107b", "expectedUid": TTL_JOB_UID, "ownerUid": TTL_OWNER_UID,
+    "owner": "bk-evf1-1", "uidsSeen": [TTL_JOB_UID],
+    "atStart": {"uid": TTL_JOB_UID, "ttlSecondsAfterFinished": 600,
+                "completionTime": "2026-09-23T19:32:46Z", "controlledByOwner": True,
+                "at": "2026-09-23T19:33:10Z"},
+    "control": {"name": "bk-evf1-1", "uid": "553ab791-f5a6-4ee0-9c8d-aacb742c00a0",
+                "ttlSecondsAfterFinished": 604800, "controlledByOwner": True},
+    "lastSeenAt": "2026-09-23T19:42:43Z", "goneObservedAt": "2026-09-23T19:42:49Z",
+    "ownerUidAtGone": TTL_OWNER_UID, "controlUidAtGone": "553ab791-f5a6-4ee0-9c8d-aacb742c00a0",
+}
+
+
+def _ttl(**changes: Any) -> dict[str, bool]:
+    obs = copy.deepcopy(TTL_OBSERVED)
+    for key, value in changes.items():
+        if key.startswith("start_"):
+            obs["atStart"][key[len("start_"):]] = value
+        else:
+            obs[key] = value
+    return d2.ttl_collection_clauses(obs)
+
+
+@_fails_on_a_recorded_row
+def test_evf1_ttl_needs_the_observed_job_collected_at_its_own_due_time() -> None:
+    ok = _ttl()
+    row("EVF-1.ttl: the live hr12 observation (uid seen, TTL 600, gone 3 s after due, owner and "
+        "runner Job still present) passes", all(ok.values()), json.dumps(ok))
+    never = {"job": "lwc-ev-a903a86d9dbe11e7107b", "expectedUid": TTL_JOB_UID,
+             "ownerUid": TTL_OWNER_UID, "uidsSeen": [], "atStart": None, "control": None}
+    row("NEGATIVE CONTROL: no Job was ever observed (the old row's vacuous pass: the first poll "
+        "is NotFound) is refused", refused(d2.ttl_collection_clauses(never)))
+    row("NEGATIVE CONTROL: EVF-2 found no Job, so no uid was recorded",
+        refused(_ttl(expectedUid="")))
+    row("MUTANT: deleted long before its due time (another deleter)",
+        refused(_ttl(lastSeenAt="2026-09-23T19:35:00Z", goneObservedAt="2026-09-23T19:35:05Z")))
+    row("MUTANT: deleted 20 s early, last seen 25 s before that",
+        refused(_ttl(lastSeenAt="2026-09-23T19:42:01Z", goneObservedAt="2026-09-23T19:42:26Z")))
+    row("MUTANT: never collected inside the window", refused(_ttl(goneObservedAt=None)))
+    row("MUTANT: collected only 5 min late", refused(
+        _ttl(lastSeenAt="2026-09-23T19:47:40Z", goneObservedAt="2026-09-23T19:47:46Z")))
+    row("MUTANT: a replacement Job with the same name (a second uid seen)",
+        refused(_ttl(uidsSeen=[TTL_JOB_UID, "another-uid"])))
+    row("MUTANT: the Job at the start is not the one EVF-2 recorded",
+        refused(_ttl(start_uid="another-uid", uidsSeen=["another-uid"])))
+    row("MUTANT: no ttlSecondsAfterFinished (the patch never landed)",
+        refused(_ttl(start_ttlSecondsAfterFinished=None)))
+    row("MUTANT: an unfinished Job (no completionTime)", refused(_ttl(start_completionTime=None)))
+    row("MUTANT: the owner Backup was gone too (an owner cascade)", refused(_ttl(ownerUidAtGone=None)))
+    row("MUTANT: the long-TTL control Job was gone too (a namespace cleanup)",
+        refused(_ttl(controlUidAtGone=None)))
+    row("MUTANT: no long-TTL control Job was found at all", refused(_ttl(control=None)))
+    row("MUTANT: not controlled by this Backup", refused(_ttl(start_controlledByOwner=False)))
+
+
+@_fails_on_a_recorded_row
+def test_evf1_ttl_the_row_judges_the_observation_not_bare_disappearance() -> None:
+    """The committed row itself: it calls the observer and the clauses, and
+    no longer loops on `get_opt(...) is None` alone."""
+    src = pathlib.Path(d2.__file__).read_text()
+    body = src[src.index('with Scenario("EVF-1.ttl"'):src.index("def evf4() -> None:")]
+    row("the EVF-1.ttl scenario runs observe_ttl_collection with EVF-2's uid",
+        "observe_ttl_collection(job_name, expected, final or {})" in body
+        and "ttl_collection_clauses(observation)" in body)
+    row("the bare `gone = True` loop is gone", "gone = True" not in body)
+
+
 def main() -> int:
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
