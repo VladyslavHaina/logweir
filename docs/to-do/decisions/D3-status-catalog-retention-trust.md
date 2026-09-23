@@ -692,6 +692,8 @@ the required rollback behavior.
   collects its Restore CRs but never the signed evidence; PLAT-05.2's history-retention decision
   applies unchanged.
 
+**Amendment (2026-09-23, PLAT-14.3 `claude/rehearsal-fix` review).** "`status.lastSucceeded.evidence` records the verification verdict" means: it is the **scorecard key** of the drill that passed, written only when the drill passed (runner exit 0, outcome `pass`) **and** the controller's evidence-fetch verdict for that scorecard is green (D2 §3.9 `Valid` with a `ValidBasis`). A failed or unverified drill never writes `lastSucceeded`; it writes `lastFailed` with its reason (`EvidenceVerdictNotReached` when the verdict does not arrive in time) and still publishes its signed evidence. `lastSucceeded.pointId` is declared by this record but not yet written by the controller; that gap is tracked separately (REHEARSAL-LASTSUCCEEDED-POINTID-UNWRITTEN) and is not part of PLAT-14.3's acceptance.
+
 ### 4.5 Small contract additions this needs
 
 - `Restore.spec.runnerResources {requests{cpu,memory}, limits{cpu,memory}}` — optional, immutable,
