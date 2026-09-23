@@ -159,6 +159,29 @@ function check(condition, message) {
   }
 }
 
+// The PLAT-10.2 completion row's clauses, pure so its negative controls run
+// the same code. `completion` is `Restore.status.completion`; `scorecard` the
+// signed document the controller verified; `totalRestored` the records the
+// broker holds on the restored topics; `mapping` the Restore's topic mapping.
+function completionClausesFor(completion, scorecard, totalRestored, mapping) {
+  const c = completion || {};
+  const signedSample = (scorecard || {}).sample || {};
+  const names = (c.newTopics || []).map((t) => t.name);
+  return {
+    "the Restore reports its completion (status.completion)": completion !== undefined &&
+      completion !== null,
+    "its recordsRestored is the signed scorecard's sample.records_restored (the sampled window)":
+      typeof c.recordsRestored === "number" && c.recordsRestored > 0 &&
+      c.recordsRestored === signedSample.records_restored,
+    "and no more than the broker holds on the restored topics":
+      typeof c.recordsRestored === "number" && c.recordsRestored <= totalRestored,
+    "and its sampled comparison": typeof c.recordsSampled === "number" &&
+      c.recordsSampled > 0 && c.recordsSampledMatching === c.recordsSampled,
+    "its newTopics are the mapped target topics": (mapping || []).length > 0 &&
+      names.length === mapping.length && mapping.every((m) => names.indexOf(m.target) !== -1),
+  };
+}
+
 function record(journey, detail) {
   result.journeys.push(Object.assign({ journey: journey }, detail || {}));
   process.stderr.write("== passed: " + journey + "\n");
@@ -1865,11 +1888,9 @@ async function main() {
         doneStatus.outcome === "pass",
       "its evidence is Valid (the evidence-fetch Job read the scorecard)":
         fetchedR.result === "Valid" && verifiedCond.status === "True",
-      // FROM THE SIGNED SCORECARD THE CONTROLLER VERIFIED, not from
-      // `status.completion`: this build declares `completion` and never
-      // writes it (PLAT-14.1's recorded gap), so the comparison the runner
-      // signed is read from the evidence itself; the Restore's own report is
-      // held to its own row below.
+      // FROM THE SIGNED SCORECARD THE CONTROLLER VERIFIED. The Restore's own
+      // report of the same facts (`status.completion`, written only beside a
+      // Valid verdict) is held to its own row below, against these bytes.
       "the sampled comparison matched every sampled record (signed scorecard, integrity pass)":
         (doneStatus.integrity || {}).result === "pass" &&
         typeof scoreIntegrity.records_sampled === "number" && scoreIntegrity.records_sampled > 0 &&
@@ -1881,8 +1902,9 @@ async function main() {
     // --- the restored records, compared with the source --------------------
     ensureKafkaClient(source + "-scram", target + "-scram");
     const mapping = (restore.spec.topicMapping || restoreBody.topicMapping || []);
-    // `status.newTopics` is what the controller publishes (names);
-    // `status.completion.newTopics` is declared and unwritten on this build.
+    // `status.newTopics` is what the controller publishes from the approved
+    // mapping (names); `status.completion.newTopics` is the signed scorecard's
+    // `target_diff.would_create`, held to the completion row below.
     const newTopics = (doneStatus.newTopics || []).map((t) => (typeof t === "string" ? t : t.name));
     result.restoredTopics = newTopics.slice();
     const recordChecks = [];
@@ -1935,18 +1957,54 @@ async function main() {
         recordChecks.every((c) => c.equal),
       "and the count the controller verified for run B": totalRestored === liveBRecords,
     };
-    // THE RESTORE'S OWN REPORT OF WHAT IT DID, held to its own row. The
-    // clause is unchanged from the journey's first version; it is separated
-    // so a build that still leaves `status.completion` unwritten (PLAT-14.1's
-    // recorded gap) fails THIS row by name rather than hiding the restored
-    // records above. Recorded as a failure, never skipped; the run exits 1.
-    const completionClauses = {
-      "the Restore reports its completion (status.completion)": doneStatus.completion !== undefined &&
-        doneStatus.completion !== null,
-      "the restored count is the one the Restore reports": totalRestored === completion.recordsRestored,
-      "and its sampled comparison": typeof completion.recordsSampled === "number" &&
-        completion.recordsSampled > 0 && completion.recordsSampledMatching === completion.recordsSampled,
-    };
+    // THE RESTORE'S OWN REPORT OF WHAT IT DID, held to its own row, so a
+    // build that leaves `status.completion` unwritten fails THIS row by name
+    // rather than hiding the restored records above. Recorded as a failure,
+    // never skipped; the run exits 1.
+    //
+    // `recordsRestored` IS THE SAMPLED-WINDOW COUNT, not the restore's total:
+    // the CRD says "From `sample.records_restored`", D3 §3.5 labels it
+    // "restored in the sampled window", and the runner sets it to the records
+    // consumed back for the sample (`phase7_verify.rs:1056-1057`, capped by the
+    // sample size — 25 of the 100 on lab-refresh-8). So it is compared with the
+    // SIGNED scorecard's own `sample.records_restored`, and bounded above by
+    // what the broker really holds on the restored topics; equating it with the
+    // broker total asserted a claim the contract never makes.
+    const completionClauses = completionClausesFor(doneStatus.completion, scorecard,
+      totalRestored, mapping);
+    // NEGATIVE CONTROLS OF THE COMPARATOR: a completion that claims more than
+    // the broker holds, one that disagrees with the signed count, and one whose
+    // topics are not the mapped targets must each be refused. A comparator
+    // that accepts them proves nothing about the controller's report.
+    const signedRestored = (scorecard.sample || {}).records_restored;
+    const base = doneStatus.completion || {};
+    const refusedOverBroker = !Object.values(completionClausesFor(
+      Object.assign({}, base, { recordsRestored: totalRestored + 1 }),
+      Object.assign({}, scorecard, { sample: Object.assign({}, scorecard.sample || {},
+        { records_restored: totalRestored + 1 }) }), totalRestored, mapping)).every(Boolean);
+    const refusedUnsigned = !Object.values(completionClausesFor(
+      Object.assign({}, base, { recordsRestored: (typeof signedRestored === "number"
+        ? signedRestored : 0) + 1 }), scorecard, totalRestored + 1000, mapping)).every(Boolean);
+    const refusedTopics = !Object.values(completionClausesFor(
+      Object.assign({}, base, { newTopics: [{ name: "not-a-mapped-target", partitions: 1 }] }),
+      scorecard, totalRestored, mapping)).every(Boolean);
+    // AND THE SAME COMPARATOR ACCEPTS the report the signed scorecard itself
+    // implies, so the refusals above are not a comparator that refuses all.
+    const signedIntegrity = scorecard.integrity || {};
+    const acceptsSigned = scorecard.sample === undefined || Object.values(completionClausesFor({
+      recordsRestored: signedRestored, recordsSampled: signedIntegrity.records_sampled,
+      recordsSampledMatching: signedIntegrity.records_sampled_matching,
+      newTopics: ((scorecard.target_diff || {}).would_create || []).map((w) =>
+        ({ name: w[0], partitions: w[1] })),
+    }, scorecard, Math.max(totalRestored, signedRestored || 0), mapping)).every(Boolean);
+    check(refusedOverBroker && refusedUnsigned && refusedTopics && acceptsSigned,
+      "the completion comparator accepted a report it must refuse: " + JSON.stringify({
+        refusedOverBroker: refusedOverBroker, refusedUnsigned: refusedUnsigned,
+        refusedTopics: refusedTopics, acceptsSigned: acceptsSigned }));
+    control("the completion comparator refuses a count above the broker's, a count the " +
+      "signed scorecard does not carry, and topics that are not the mapped targets", {
+      refusedOverBroker: refusedOverBroker, refusedUnsigned: refusedUnsigned,
+      refusedTopics: refusedTopics, acceptsSigned: acceptsSigned });
     const completionRow = { journey: "PLAT-10.2 the approved Restore reports its own completion " +
       "(status.completion: recordsRestored, recordsSampled, newTopics)",
       restore: done.metadata.name, completion: doneStatus.completion === undefined ? null :
