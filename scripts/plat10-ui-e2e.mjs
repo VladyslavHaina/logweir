@@ -2005,16 +2005,16 @@ async function main() {
     // topics are not the mapped targets must each be refused. A comparator
     // that accepts them proves nothing about the controller's report.
     const signedRestored = (scorecard.sample || {}).records_restored;
-    const base = doneStatus.completion || {};
+    const reported = doneStatus.completion || {};
     const refusedOverBroker = !Object.values(completionClausesFor(
-      Object.assign({}, base, { recordsRestored: totalRestored + 1 }),
+      Object.assign({}, reported, { recordsRestored: totalRestored + 1 }),
       Object.assign({}, scorecard, { sample: Object.assign({}, scorecard.sample || {},
         { records_restored: totalRestored + 1 }) }), totalRestored, mapping)).every(Boolean);
     const refusedUnsigned = !Object.values(completionClausesFor(
-      Object.assign({}, base, { recordsRestored: (typeof signedRestored === "number"
+      Object.assign({}, reported, { recordsRestored: (typeof signedRestored === "number"
         ? signedRestored : 0) + 1 }), scorecard, totalRestored + 1000, mapping)).every(Boolean);
     const refusedTopics = !Object.values(completionClausesFor(
-      Object.assign({}, base, { newTopics: [{ name: "not-a-mapped-target", partitions: 1 }] }),
+      Object.assign({}, reported, { newTopics: [{ name: "not-a-mapped-target", partitions: 1 }] }),
       scorecard, totalRestored, mapping)).every(Boolean);
     // AND THE SAME COMPARATOR ACCEPTS the report the signed scorecard itself
     // implies, so the refusals above are not a comparator that refuses all.
