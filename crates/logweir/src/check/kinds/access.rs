@@ -237,12 +237,15 @@ pub fn destination_checks(
                 // the two steps refused: building the handle (a missing
                 // projection, an absent identity) or the put itself.
                 let about = |f: &StoreFailure| {
+                    // A refusal that already names the grant (the principal
+                    // selection's own) is not told its principal twice.
+                    let message = match grant {
+                        Some(g) if f.message.contains(&g.reference()) => f.message.clone(),
+                        _ => format!("{} {}", f.message, principal_clause(grant)),
+                    };
                     from_store_failure(
                         CheckId::DestinationEvidenceWritable,
-                        &StoreFailure::new(
-                            f.code,
-                            format!("{} {}", f.message, principal_clause(grant)),
-                        ),
+                        &StoreFailure::new(f.code, message),
                         now,
                     )
                 };

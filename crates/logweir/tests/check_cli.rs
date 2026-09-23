@@ -2117,6 +2117,11 @@ fn the_evidence_write_options_are_the_evidence_grants_and_never_fall_back() {
         "and never a value: {}",
         refused.message
     );
+    assert!(
+        !refused.message.contains("  "),
+        "and it is one sentence, not a source-indented one: {}",
+        refused.message
+    );
 
     let wi = EvidenceWriteGrant::workload_identity("evidence-writer-sa");
     assert_eq!(

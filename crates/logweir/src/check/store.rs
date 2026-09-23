@@ -495,7 +495,9 @@ pub fn evidence_write_options(
                     StoreFailure::new(
                         CheckCode::CredentialSecretKeyMissing,
                         format!(
-                            "the evidence-write grant ({}) is projected as `{name}`, and that                              variable is unset in the check pod; the marker was not written                              with any other credential",
+                            "the evidence-write grant ({}) is projected as `{name}`, and that \
+                             variable is unset in the check pod; the marker was not written \
+                             with any other credential",
                             grant.reference()
                         ),
                     )
