@@ -453,6 +453,7 @@ async fn run_at(
             policy: &policy,
             runner_image: &image,
             now: when,
+            trust_policies: None,
         },
     )
     .await

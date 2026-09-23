@@ -280,6 +280,13 @@ pub struct SyncContext<'a> {
     pub runner_image: &'a crate::job::RunnerImage,
     /// This pass's instant.
     pub now: DateTime<Utc>,
+    /// Every `TrustPolicy`, from the process-wide store once it has synced
+    /// (`crate::trust::spawn_policy_reflector`, review LOW-5): the namespace's
+    /// trust is then resolved from it with no API call. `None` — the store has
+    /// not synced, or a caller holds none — resolves with one cluster-wide
+    /// `LIST`, as before, because an unsynced store looks like a cluster with
+    /// no policy at all and would hand every namespace to the roster.
+    pub trust_policies: Option<&'a [crate::crds::trust_policy::TrustPolicy]>,
 }
 
 // ---------------------------------------------------------------------------
@@ -321,7 +328,7 @@ pub async fn reconcile_catalog(
         return Ok(refused_outcome(REASON_DESTINATION_UNUSABLE));
     };
 
-    let trust = trust_view(ctx.client, &namespace).await?;
+    let trust = trust_view(ctx.client, &namespace, ctx.trust_policies).await?;
     let mut pass = Pass {
         catalog,
         name,
@@ -365,8 +372,15 @@ fn refused_outcome(reason: &'static str) -> Outcome {
 ///
 /// A failed read is a reconcile error and the pass is retried under
 /// [`error_policy`]'s fixed delay — the same answer a failed roster read gave.
-async fn trust_view(client: &kube::Client, namespace: &str) -> Result<TrustView, ReconcileError> {
-    let resolution = crate::trust::resolve(client, namespace).await?;
+async fn trust_view(
+    client: &kube::Client,
+    namespace: &str,
+    policies: Option<&[crate::crds::trust_policy::TrustPolicy]>,
+) -> Result<TrustView, ReconcileError> {
+    let resolution = match policies {
+        Some(policies) => crate::trust::resolve_with(policies, client, namespace).await?,
+        None => crate::trust::resolve(client, namespace).await?,
+    };
     Ok(TrustView::from_resolution(&resolution))
 }
 
@@ -1778,8 +1792,14 @@ async fn installation_policy(client: &kube::Client) -> check::policy::Policy {
 async fn reconcile(
     catalog: Arc<RecoveryCatalog>,
     ctx: Arc<Context>,
+    shared: crate::trust::SharedPolicies,
 ) -> Result<Action, ReconcileError> {
     let policy = installation_policy(&ctx.client).await;
+    // THE SHARED STORE, ONCE IT HAS SYNCED — no `LIST trustpolicies` per pass.
+    let snapshot: Option<Vec<crate::crds::trust_policy::TrustPolicy>> = shared
+        .synced
+        .load(std::sync::atomic::Ordering::Relaxed)
+        .then(|| shared.store.state().iter().map(|p| (**p).clone()).collect());
     let outcome = reconcile_catalog(
         &catalog,
         &SyncContext {
@@ -1787,6 +1807,7 @@ async fn reconcile(
             policy: &policy,
             runner_image: &ctx.runner_image,
             now: Utc::now(),
+            trust_policies: snapshot.as_deref(),
         },
     )
     .await?;
@@ -1835,8 +1856,9 @@ fn policy_targets(
 /// trigger ([`policy_targets`]); like every trigger watch `Controller` runs it
 /// is backed off (`watcher::default_backoff`), so a refused or failing
 /// `TrustPolicy` LIST is retried with bounded exponential delay rather than in
-/// a tight loop. No reflector of its own: [`trust_view`] resolves trust live on
-/// every pass, so the trigger only has to say WHEN.
+/// a tight loop. The resolution reads the process-wide `TrustPolicy` store
+/// ([`crate::trust::spawn_policy_reflector`], one per reconciler, shared by
+/// every namespace copy) once it has synced, and one `LIST` until then.
 pub fn controller(
     client: kube::Client,
     runner_image: crate::job::RunnerImage,
@@ -1846,9 +1868,26 @@ pub fn controller(
     // namespaces, and then this reconciler runs once per namespace with an
     // `Api::namespaced` watch — the only shape the scoped chart's RoleBindings
     // permit.
-    crate::scope::run_everywhere(move |namespace| {
-        controller_in(client.clone(), runner_image.clone(), namespace)
-    })
+    //
+    // The `TrustPolicy` store is built ONCE here and shared by every copy
+    // (review L3 of PLAT-17.2): the kind is cluster-scoped, so a reflector per
+    // namespace would be N identical cluster-wide watches. `trust_view`
+    // resolves from it once it has synced (review LOW-5).
+    //
+    // Spawned when the future is first POLLED, inside the runtime —
+    // `spawn_policy_reflector` calls `tokio::spawn`.
+    async move {
+        let policies = crate::trust::spawn_policy_reflector(&client);
+        crate::scope::run_everywhere(move |namespace| {
+            controller_in(
+                client.clone(),
+                runner_image.clone(),
+                policies.clone(),
+                namespace,
+            )
+        })
+        .await;
+    }
 }
 
 /// One watch of [`controller`], over `namespace` (`None` is the whole
@@ -1856,6 +1895,7 @@ pub fn controller(
 fn controller_in(
     client: kube::Client,
     runner_image: crate::job::RunnerImage,
+    shared: crate::trust::SharedPolicies,
     namespace: Option<String>,
 ) -> impl std::future::Future<Output = ()> + Send {
     let api: Api<RecoveryCatalog> = crate::scope::api(&client, namespace.as_deref());
@@ -1879,7 +1919,11 @@ fn controller_in(
             .watches(policy_api, watcher::Config::default(), move |policy| {
                 policy_targets(&objects, &scopes, &policy)
             })
-            .run(reconcile, error_policy, ctx)
+            .run(
+                move |object, context| reconcile(object, context, shared.clone()),
+                error_policy,
+                ctx,
+            )
             .for_each(|_| std::future::ready(()))
             .await;
     }

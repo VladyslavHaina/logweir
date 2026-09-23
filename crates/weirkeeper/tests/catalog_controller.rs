@@ -419,6 +419,7 @@ async fn run_at(fixture: &Fixture, catalog: &RecoveryCatalog, at: DateTime<Utc>)
             policy: &policy,
             runner_image: &image,
             now: at,
+            trust_policies: None,
         },
     )
     .await
@@ -4046,5 +4047,53 @@ fn the_policy_projection_agrees_with_the_core_trust_decision() {
             "2026-11-15T00:00:00Z"
         ),
         Verification::Invalid
+    );
+}
+
+/// **A synced store costs no LIST** (review LOW-5). Handed the process-wide
+/// `TrustPolicy` snapshot, the pass resolves the namespace from it: the route
+/// table has NO `/trustpolicies` route, so a pass that listed anyway would
+/// panic the double — and the policy-signed point is still `Verified`.
+///
+/// KILLS: `trust_view` ignoring the snapshot (it LISTs, and the double
+/// refuses the unrecorded route).
+#[tokio::test]
+async fn a_synced_policy_store_resolves_the_catalog_without_a_list() {
+    let plan_sha = format!("sha256:{}", "4".repeat(64));
+    let routes: Vec<Route> = harvest_routes(
+        &plan_sha,
+        framed(&plan_sha, UID, &policy_signed_body()),
+        UID,
+    )
+    .into_iter()
+    .filter(|r| r.path_suffix != "/trustpolicies")
+    .collect();
+    let f = fixture(routes);
+    let policies: Vec<weirkeeper::crds::trust_policy::TrustPolicy> = vec![serde_json::from_value(
+        policy_value(POLICY_NAME, &[NS], vec![policy_key(json!({}))]),
+    )
+    .expect("a policy")];
+    let policy = check::policy::Policy::defaults();
+    let image = RunnerImage::default();
+    ctrl::reconcile_catalog(
+        &catalog(json!({}), tracked_status(&periodic_stem())),
+        &ctrl::SyncContext {
+            client: &f.client,
+            policy: &policy,
+            runner_image: &image,
+            now: now(),
+            trust_policies: Some(&policies),
+        },
+    )
+    .await
+    .expect("the reconcile reaches a verdict");
+    assert!(
+        !f.seen().iter().any(|(_, u)| u.contains("/trustpolicies")),
+        "no TrustPolicy LIST: {:?}",
+        f.seen()
+    );
+    assert_eq!(
+        page_verdicts(&f)["lwp1-cccccccccccccccccccccccccccccccc"],
+        verdict("Verified", true)
     );
 }
