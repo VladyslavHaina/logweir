@@ -9133,6 +9133,21 @@ def unsuspend(kind: str, name: str) -> None:
               json.dumps({"spec": {"suspend": False}})])
 
 
+#: The LimitRange that HOLDS step 7's first rehearsal (lab-refresh-9).
+REHEARSAL_HOLD_LIMIT_RANGE = f"{OWNER}-hold-l6-concurrency"
+
+
+def rehearsal_hold_limit_range() -> dict[str, Any]:
+    """`operation-states`' impossible default request, under its own name."""
+    return {
+        "apiVersion": "v1", "kind": "LimitRange",
+        "metadata": owned(REHEARSAL_HOLD_LIMIT_RANGE),
+        "spec": {"limits": [{"type": "Container",
+                             "defaultRequest": {"memory": OPS_IMPOSSIBLE_MEMORY},
+                             "default": {"memory": OPS_IMPOSSIBLE_MEMORY}}]},
+    }
+
+
 def rehearsal_arm_concurrency(work: pathlib.Path, target_cluster_id: str,
                               approver_key: dict[str, Any], arms: dict[str, str],
                               evidence: list[str]) -> bool:
@@ -9154,9 +9169,33 @@ def rehearsal_arm_concurrency(work: pathlib.Path, target_cluster_id: str,
     schedule, _ = rehearsal_arm(name, cron=REHEARSAL_FAST_CRON,
                                 key=approver_key["private"], work=work,
                                 target_cluster_id=target_cluster_id, arms=arms)
+    # THE FIRST REHEARSAL IS HELD ACTIVE (lab-refresh-9). On this lab a
+    # rehearsal restores and tears down in about eight seconds, so no later
+    # minute slot ever met the first one active and both runs of step 7 were
+    # NOT-REACHED — the row could never judge `ConcurrencyBlocked`. The hold is
+    # `operation-states`' own technique: a namespace LimitRange defaulting an
+    # impossible memory request, present only while the first rehearsal's
+    # runner pod is admitted (the request is written into the pod then), and
+    # deleted at once. The pod stays Unschedulable and the Restore active,
+    # across slot boundaries, with no product object touched. It is released
+    # (the held pod deleted, so the Job re-creates a schedulable one) before
+    # step 7b watches the skipped slot after the first rehearsal's end.
+    held: dict[str, Any] = {"limitRange": REHEARSAL_HOLD_LIMIT_RANGE}
     try:
+        apply(rehearsal_hold_limit_range())
         unsuspend("rehearsalschedule", name)
         first_obj = rehearsal_first_restore(name, seconds=420)
+        if first_obj is not None:
+            job_pods = poll(
+                lambda: {"items": lst("pods", selector="batch.kubernetes.io/job-name="
+                                      + first_obj["metadata"]["name"])},
+                lambda o: bool(o.get("items")), seconds=180)
+            held["heldPods"] = [p["metadata"]["name"] for p in job_pods.get("items") or []]
+            held["podMemoryRequests"] = [
+                ((c.get("resources") or {}).get("requests") or {}).get("memory")
+                for p in job_pods.get("items") or [] for c in p["spec"].get("containers") or []]
+        run(KN + ["delete", "limitrange", REHEARSAL_HOLD_LIMIT_RANGE,
+                  "--ignore-not-found=true"], check=False)
         if first_obj is None:
             live = get("rehearsalschedule", name)
             skip = (live.get("status") or {}).get("lastSkipped") or {}
@@ -9211,7 +9250,13 @@ def rehearsal_arm_concurrency(work: pathlib.Path, target_cluster_id: str,
             time.sleep(5)
         clauses = the_second_slot_is_concurrency_blocked(
             {"status": {"lastSkipped": skipped}}, names_while_active, first)
+        # RELEASE THE HOLD before 7b: the held pod is deleted; the Job
+        # re-creates one without the (now deleted) LimitRange's request.
+        run(KN + ["delete", "pod", "-l", f"batch.kubernetes.io/job-name={first}",
+                  "--wait=false"], check=False)
+        held["releasedAt"] = now()
         evidence.append(artifact("rehearsal/07-concurrency.json", {
+            "hold": held,
             "decision": decision, "firstSlot": first_slot, "baselineSkip": baseline,
             "newSkip": skipped, "overlap": overlap, "firstTerminal": first_terminal,
             "lastActiveAt": last_active_at, "restoresWhileActive": names_while_active,
@@ -9253,6 +9298,9 @@ def rehearsal_arm_concurrency(work: pathlib.Path, target_cluster_id: str,
         rehearsal_row_7b(name, first, first_slot, observations, step7, evidence)
         return step7
     finally:
+        # The hold never outlives the arm, whichever way it ended.
+        run(KN + ["delete", "limitrange", REHEARSAL_HOLD_LIMIT_RANGE,
+                  "--ignore-not-found=true"], check=False)
         quiesce_arm(name, evidence)
 
 

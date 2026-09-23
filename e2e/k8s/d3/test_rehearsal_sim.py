@@ -52,6 +52,7 @@ KINDS = {
     "job": "job", "jobs": "job",
     "pod": "pod", "pods": "pod",
     "configmap": "configmap", "configmaps": "configmap",
+    "limitrange": "limitrange", "limitranges": "limitrange",
 }
 START = dt.datetime(2026, 9, 22, 5, 0, 30, tzinfo=dt.timezone.utc).timestamp()
 
