@@ -1577,7 +1577,10 @@ fn the_release_notes_carry_every_owed_operator_action() {
         ("3, shared backup sets", "co_point_ids"),
         ("4, operation states", "NoExitCode"),
         ("5, point-bound restores", "--evidence-keys"),
-        ("6, the shared console's scope", "controller.watchNamespaces"),
+        (
+            "6, the shared console's scope",
+            "controller.watchNamespaces",
+        ),
         ("7, the approval policy floor", "allowOrdinaryConfirmation"),
         ("8, restore completion", "recordsRestored"),
         ("9, pre-creation slots", "metadata.creationTimestamp"),
