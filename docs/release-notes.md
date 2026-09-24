@@ -68,10 +68,14 @@ find ui -type f ! -name '*.md' ! -path 'ui/tests/*' | LC_ALL=C sort | xargs shas
   patch: the six chart gaps it first had to stand in for (G1–G6) are chart
   values and behaviours now — the issuer CA bundle, host aliases, the
   connection objects' namespace, the published chart, controller probes and the
-  ingress controller trusted by its Service. [UNVERIFIED — the profile has been rendered, not yet installed on docker-desktop.]
+  ingress controller trusted by its Service. Installed, signed into, upgraded from
+  `v0.1.5` and from `sha-f49849d…`, and rolled back on docker-desktop on
+  2026-09-24 ([deploy/poc/](../deploy/poc/README.md), *What the first live round
+  showed*); the fixes that round needed are in the profile.
 - **The chart is published** as `oci://registry-1.docker.io/vladyslavhaina/logweir-chart`,
   beside the images and versioned with them ([install.md](install.md), *(c) The
-  Helm chart*). [UNVERIFIED — the first publication happens on the first main push after this lands.]
+  Helm chart*). Published: `0.1.0-sha-86a554e6…` pulls anonymously (digest
+  `sha256:90b4d41b…`) and names its own commit's four images.
   **On first publication, `vladyslavhaina/logweir-chart` must be Public in Docker Hub**, or `main` CI's
   chart step fails closed (its anonymous pull-back is refused) until the repository is made Public and
   the job is re-run.
@@ -105,14 +109,15 @@ under its item below.
 5. **Bring a shared-console values file in line** (`controller.watchNamespaces`
    and the proxy CIDR bound) before `helm upgrade`, or the render stops
    (item 6).
-6. **Apply the CRDs, wait for all fourteen to be established**, then roll the
+6. **Apply the CRDs** (`kubectl apply --server-side --force-conflicts`), **wait
+   for all fourteen to be established**, then roll the
    controller **and the runner image together** (item 5), with no Backup in
-   flight (item 11), then the console,
+   flight (item 11) and no Restore running (item 12), then the console,
    then any approval-policy binding (item 7). On the Helm path these are one
    release and successive `helm upgrade`s: first the image values (controller,
    runner and console move together), then the `approvalPolicy.*` values.
 
-### The eleven operator-facing changes
+### The thirteen operator-facing changes
 
 Each item names what changed, what to do, what the claim rests on (its
 verification scope), and how to roll it back. Every one of them was collected
@@ -204,9 +209,11 @@ every `roles.bindings` namespace; `ui.enabled` must be off beside it; and
 `requireTrustedProxy` is on. The refused `helm upgrade` changes nothing in the
 cluster. **Do:** follow [install.md](install.md) §5e's migration list, then
 upgrade once. **Scope:** chart lint and render tests; PLAT-17.2 is on `main`
-since `ac00819` and its Done record waits for lab-refresh-9. The browser journey
-against a real identity provider and TLS ingress is not run on docker-desktop
-([api.md](api.md), *What ships today*). [UNVERIFIED — shared mode behind a real OIDC provider and TLS ingress has not been run.]
+since `ac00819`. Shared mode ran behind a TLS ingress (Traefik, cert-manager) and
+an OIDC provider (Dex) on docker-desktop on 2026-09-24 — the PoC profile: sign-in
+per role, the role matrix, CSRF, forged headers, unauthenticated API and stream
+requests, the trusted-entry `421` and the console journey held. Dex with static
+users is the provider that ran; a corporate IdP bound by group has not.
 **Rollback:** reinstall the previous chart version with the previous values;
 the scoping objects go and the cluster-wide binding returns.
 
@@ -234,7 +241,10 @@ is the count read back from the target **in the sampled window** —
 `sample.records_restored`, which the console labels *records verified in the
 sampled window* — never the total the restore wrote. **Do:** nothing; read
 absence as "not yet verified", never as zero. **Scope:** `main` `fa3384e`.
-[UNVERIFIED — the completion panel on a real finished restore is owed by lab-refresh-9.]
+Seen live on 2026-09-24 (PoC install): restores of pre-upgrade points after both
+upgrade rehearsals and the console journey's restore wrote `completion` from a `Valid`
+scorecard (150 of 150 sampled records matching), and a restore whose scorecard the
+controller could not read wrote none.
 **Rollback:** an older controller writes no `completion` at all.
 
 #### 9. A schedule never fires a slot due before it was created
@@ -287,6 +297,42 @@ is owed. [UNVERIFIED — the case-e re-creation row runs at lab-refresh-10.]
 **Rollback:** an older runner ignores the claims and returns to re-running the
 engine over a re-created Job; the claims stay in the bucket, harmless, and are
 honoured again after a re-upgrade.
+
+#### 12. A failed restore's signed scorecard: roll the controller out before the runner
+
+**Changed.** A restore runner at this version names its signed failure at exit 2
+(the scorecard of a run whose data did not reconcile is published and verified
+`Valid`), and this controller writes `Restore.status.completion` — the console's
+completion panel with its cutover guidance — only for a run that PASSED
+(`exitCode 0`, `outcome: pass`, a green verdict). An **older controller** gates
+completion on the verdict alone, so it would write a completion panel over a
+restore that FAILED. **Do:** roll the controller out before (or with) the
+runner, never the runner first, and roll the runner back before the controller;
+let running `Restore`s finish before either. On the Helm path both move in one
+`helm upgrade`, which is safe once nothing is running. **Scope:**
+`claude/rehearsal-fix` (`6b2704d`, Tier-A review), [stability.md](stability.md),
+*Mixed versions*. **Rollback:** runner first, then controller; nothing stored
+needs converting.
+
+#### 13. Readiness rows are answered by the principal they name; an older runner says "upgrade"
+
+**Changed.** A destination readiness check (`DestinationAccess`, and the
+destination rows of a Backup/Restore check) now answers `evidenceWritable` with
+the `evidenceWrite` grant and `evidenceReadable` with the `evidenceRead` grant
+when they differ from the checked one — the row's sentence is about the right
+principal (PREFLIGHT-EVIDENCEWRITABLE-WRONG-PRINCIPAL) — and a `DestinationAccess`
+check on a `writeProbe: CreateOnlyMarker` destination now writes its one
+create-only marker under `logweir/readiness/` (DESTINATIONACCESS-IGNORES-WRITEPROBE).
+**Do:** upgrade the runner image **with** the controller: an older runner handed
+such a plan refuses it at startup — the `Preflight` ends `Failed` /
+`CheckContractMismatch` with a message saying the runner is older than the
+controller — and nothing is written as the wrong principal. Set
+`writeProbe: Disabled` on a destination that must never receive the marker.
+**Scope:** `claude/readiness-principal` (merged `540e3ea`), closed live at
+lab-refresh-10 (rows RP-L1…L15); [kubernetes.md](kubernetes.md) §21,
+*The evidence-write grant in a check plan (mixed versions)*. **Rollback:** an
+older controller renders the old plans again, which a newer runner still
+accepts (the old wrong-principal answer returns until you re-upgrade).
 
 ### Verification scope: what "verified" means in this release
 
@@ -357,7 +403,8 @@ is converted and no stored object is rewritten
    fail-closed, nothing is restored).
 6. Unbind approval policies, or expect not-yet-admitted v2 approvals to be
    refused (item 7).
-7. Roll the controller and runner back together, and leave the CRDs in place.
+7. Roll the controller and runner back together (the runner not after the
+   controller: item 12), with no `Restore` running, and leave the CRDs in place.
 8. **Rolling back to a chart that did not render an object this one adopted
    deletes it.** `helm rollback` to `v0.1.5` removes the runner ServiceAccount
    and the `logweir-s3` Secret the upgrade adopted in each runner namespace
@@ -386,10 +433,11 @@ policy or roster ([keys.md](keys.md)).
 
 ### Limitations and open items
 
-- **The live half of PLAT-20.2 is not yet run**: a clean install on
-  docker-desktop following [quickstart.md](quickstart.md), and upgrades from
-  `v0.1.5` and from `sha-f49849d…` that keep installation identities, schedules
-  and archive readability. [UNVERIFIED — owed by PLAT-20.2's live round after lab-refresh-9 releases the cluster.]
+- **The live half of PLAT-20.2 ran on 2026-09-24** with the PoC profile on
+  docker-desktop: a clean install, upgrades from `v0.1.5` and from
+  `sha-f49849d…` (and a rollback to each) that kept installation identities,
+  schedules and archive readability, a restore of a pre-upgrade point after
+  each, and 1,000+ points in one archive. [UNVERIFIED — R2's pre-upgrade retention, mount-failure and point-bound-restore states were not set up.]
 - **The product API's OpenAPI document is still `1.0.0-alpha.1`**, although the
   console image and the chart now consume it; ship and upgrade the console and
   the API together until the owner freezes it ([stability.md](stability.md)).

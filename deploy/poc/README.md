@@ -629,50 +629,34 @@ documents each one.
 | G5 — the controller had no probes | a wedged controller was never restarted | exec liveness and readiness (`weirkeeper --probe`) against a loopback health listener |
 | G6 — `trustedProxyCidrs` needed the ingress pod's `/32` | re-read and reinstalled after every ingress pod restart | `api.console.trustedProxyService`: the ingress Service's serving pods, re-read every five seconds |
 
-## What this profile has not been run to show
+## What the first live round showed (2026-09-24), and what it did not
 
-It was written and rendered without a cluster: `validate.sh` renders all four
-charts at their pinned versions (Logweir both as published and from a
-checkout, and the two rehearsal baselines with their own charts), checks every
-image is pinned, the cross-file addresses agree and the rendered Dex
-configuration carries no secret.
-[UNVERIFIED — this profile has not been installed, signed into or upgraded on docker-desktop yet; that is PLAT-20.2's live round.]
-The live round must show, on docker-desktop, with `LOGWEIR_COMMIT` set to the
-first publication carrying these chart fixes:
+`validate.sh` renders all four charts at their pinned versions (Logweir both as
+published and from a checkout, and the two rehearsal baselines with their own
+charts), checks every image is pinned, the cross-file addresses agree and the
+rendered Dex configuration carries no secret. On 2026-09-24 the PoC install round
+then ran this profile on docker-desktop (v1.34.1) at `LOGWEIR_COMMIT` `86a554e6`,
+from the published chart and images only, and left the final install running.
+What it found wrong in this directory is fixed here (Dex's writable `/tmp`, the
+CRD apply's `--force-conflicts`, `trustpolicy.sh`'s signer window, the rollback
+and uninstall notes); what it found wrong in the product is listed in its report.
 
-1. **The install is Helm only**: steps 1–8 run as written, from the OCI chart,
-   with no `kubectl patch` and no address read from the cluster; the Traefik,
-   Dex and Logweir releases reach `--wait` Ready.
-2. **G1** — the console reaches `Ready` against Dex's back-channel
-   certificate with `oidc.caBundle` holding only `dex-backchannel-ca` and
-   `systemRoots: false`; a `dex.localtest.me` certificate from the cluster-wide
-   `logweir-poc-ca`, served at `10.96.0.81`, is refused (UnknownIssuer); with the ConfigMap's key renamed the pod
-   stays in `ContainerCreating`, and with an empty `ca.crt` it exits 2 naming
-   the bundle.
-3. **G2** — inside a console pod, `dex.localtest.me` resolves to `10.96.0.81`
-   (`kubectl exec deploy/logweir-api -- getent hosts dex.localtest.me`), Dex's
-   own Service; `curl --cacert poc-secrets/dex-backchannel-ca.crt --resolve dex.localtest.me:443:10.96.0.81`
-   from a pod in `dex` gets Dex's discovery over Dex's own TLS; sign-in
-   completes; and an Ingress for host `dex.localtest.me` created in another
-   namespace (e.g. `logweir-poc`) is NOT routed by Traefik.
-4. **G6** — `/readyz` is `200` and sign-in works; `kubectl rollout restart
-   deploy/traefik`, and within seconds of the new pod serving, requests succeed
-   again with no step re-run; the console log shows the trusted set moving to
-   the new address; a request sent to the console Service from another pod with
-   `X-Forwarded-Proto: https` is answered `421`.
-5. **G5** — the controller Deployment is Ready through `weirkeeper --probe
-   ready`; `kubectl exec deploy/weirkeeper -- weirkeeper --probe live` exits 0.
-6. **G3** — `logweir-s3` is in `logweir-poc`, not `logweir-system`.
-7. **G4** — `helm show chart "$LOGWEIR_CHART" --version "$LOGWEIR_CHART_VERSION"`
-   reads `appVersion: $LOGWEIR_TAG`, and every Logweir pod's image is
-   `…:$LOGWEIR_TAG`.
-8. **The MinIO grants** — the destination's four grants are the three
-   least-privilege users; the backup verifies green; a `DeleteObject` with the
-   writer's key is refused by MinIO.
-9. **Sign-in per role and the first backup and restore** (steps 9–10), and
-   HSTS on both hosts.
-10. **The two upgrade rehearsals** with the checks listed under each, and a
-    rollback to each starting point with the release notes' rollback list.
+| # | What the round had to show | Result |
+|---|---|---|
+| 1 | **Helm only**: steps 1–8 as written, from the OCI chart, no `kubectl patch`, no address read from the cluster; Traefik, Dex and Logweir reach `--wait` Ready | shown (after the Dex `/tmp` fix) |
+| 2 | **G1**: the console Ready against Dex's back-channel certificate with `oidc.caBundle` = `dex-backchannel-ca` only and `systemRoots: false` | shown; the three negatives below were not run |
+| 3 | **G2**: `dex.localtest.me` = `10.96.0.81` in the console pod; Dex's discovery over Dex's own TLS with the back-channel CA (and refused with the browser CA); an Ingress for `dex.localtest.me` in another namespace not routed | shown |
+| 4 | **G6**: `/readyz` 200 within seconds of a Traefik restart with no step re-run, the trusted set moving to the new pod, `421` for a direct request with `X-Forwarded-Proto: https` | shown |
+| 5 | **G5**: Ready through `--probe ready`; `--probe live` exits 0 | shown |
+| 6 | **G3**: `logweir-s3` in `logweir-poc` only | shown |
+| 7 | **G4**: `appVersion` is `$LOGWEIR_TAG`; every Logweir pod runs `…:$LOGWEIR_TAG` | shown |
+| 8 | **MinIO grants**: three least-privilege users; green badge; the writer's `DeleteObject` refused | shown |
+| 9 | **Sign-in per role**, the first backup and restore (steps 9–10), HSTS on both hosts | shown, through the console, with the product defects the report lists (connection and schedule names are minted, not the ones typed) |
+| 10 | **Both upgrade rehearsals** with their checks, and a rollback to each starting point | shown for identity, schedules and archive readability, R2's item-6 refusal and items 7–10; R2's items 1–5 were not set up |
+
+[UNVERIFIED — G1's negatives were not run live: a cluster-CA certificate served at Dex's address, a renamed bundle key and an empty bundle.]
+They would each have changed the running install; the chart's own tests and
+mutants carry them (`claude/chart-poc`).
 
 ---
 
