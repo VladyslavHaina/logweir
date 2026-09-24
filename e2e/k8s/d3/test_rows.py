@@ -3049,6 +3049,31 @@ def test_a_deleted_rehearsal_is_recorded_and_released() -> None:
         not d3.verdict_is_owed(valid) and not d3.verdict_is_owed(running))
 
 
+def test_the_broker_log_records_the_rehearsal_topics_lifecycle() -> None:
+    log = "\n".join([
+        "[2026-09-24 01:50:20,515] INFO Created log for partition rehearsal-d3df6b96-orders-0 in "
+        "/tmp/kraft-combined-logs/rehearsal-d3df6b96-orders-0 with properties {} (kafka.log.LogManager)",
+        "[2026-09-24 01:50:21,451] INFO Log for partition rehearsal-d3df6b96-orders-0 is renamed to "
+        "/tmp/kraft-combined-logs/rehearsal-d3df6b96-orders-0.57915c3f-delete and is scheduled "
+        "for deletion (kafka.log.LogManager)",
+        "[2026-09-24 01:50:22,000] INFO Created log for partition other-topic-0 in /x (kafka.log.LogManager)",
+    ])
+    mapped = {"rehearsal-d3df6b96-orders"}
+    life = d3.broker_topic_lifecycle(log, "rehearsal-d3df6b96-")
+    row("broker log: lab-refresh-10's recorded lifecycle -> created and deleted, nothing else",
+        all(d3.the_broker_created_and_deleted_exactly_the_mapped_topics(life, mapped).values())
+        and set(life) == mapped, str(life))
+    created_only = d3.broker_topic_lifecycle(log.splitlines()[0], "rehearsal-d3df6b96-")
+    row("broker log: a topic created and never torn down -> refused",
+        not all(d3.the_broker_created_and_deleted_exactly_the_mapped_topics(
+            created_only, mapped).values()))
+    row("broker log: no record of the mapped topic -> refused",
+        not all(d3.the_broker_created_and_deleted_exactly_the_mapped_topics({}, mapped).values()))
+    stray = dict(life, **{"rehearsal-d3df6b96-payments": {"created": "x", "deleted": "y"}})
+    row("broker log: a second topic under the prefix -> refused",
+        not all(d3.the_broker_created_and_deleted_exactly_the_mapped_topics(stray, mapped).values()))
+
+
 def _kbak(records: bytes = b"\x00" * 40) -> bytes:
     import zlib
     header = b"KBAK" + bytes([1, 0]) + b"\x00\x00" + (1).to_bytes(8, "little") \

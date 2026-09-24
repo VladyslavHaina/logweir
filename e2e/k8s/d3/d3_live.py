@@ -7912,6 +7912,50 @@ class StatusWatch:
         return list(self.statuses)
 
 
+BROKER_CREATED = re.compile(r"^\[([^\]]+)\].*Created log for partition (\S+)-(\d+) in ")
+BROKER_DELETED = re.compile(
+    r"^\[([^\]]+)\].*Log for partition (\S+)-(\d+) is renamed to \S+-delete and is "
+    r"scheduled for deletion")
+
+
+def broker_topic_lifecycle(log_text: str, prefix: str) -> dict[str, dict[str, str]]:
+    """What the scratch broker's OWN log says about topics under `prefix`: the
+    instant each partition's log was created and the instant it was scheduled
+    for deletion, keyed by topic.
+
+    WHY THE BROKER'S LOG (lab-refresh-10). A rehearsal's mapped topic now lives
+    under a second (measured: created 01:50:20.515, scheduled for deletion
+    01:50:21.451), and one `kafka-topics.sh --list` through `kubectl exec`
+    takes several seconds, so even a back-to-back sampler can miss it
+    entirely — which it did, and the row blamed the product for a topic the
+    broker had created and deleted. The broker logs both events itself; read
+    from the lab's `kafka-target` Deployment (a read, never a write)."""
+    out: dict[str, dict[str, str]] = {}
+    for line in log_text.splitlines():
+        for kind, pattern in (("created", BROKER_CREATED), ("deleted", BROKER_DELETED)):
+            match = pattern.search(line)
+            if match and match.group(2).startswith(prefix):
+                out.setdefault(match.group(2), {}).setdefault(kind, match.group(1))
+    return out
+
+
+def broker_log_since(since: str) -> str:
+    return run(K + ["-n", FIXTURE_NS, "logs", f"deploy/{TARGET_DEPLOY}", f"--since-time={since}"],
+               check=False, timeout=120).stdout
+
+
+def the_broker_created_and_deleted_exactly_the_mapped_topics(
+    lifecycle: dict[str, dict[str, str]], mapped: set[str]
+) -> dict[str, bool]:
+    return {
+        "the broker's own log records the creation of every mapped topic":
+            bool(mapped) and all("created" in lifecycle.get(t, {}) for t in mapped),
+        "and its deletion by teardown": bool(mapped)
+            and all("deleted" in lifecycle.get(t, {}) for t in mapped),
+        "and no other topic under the rendered prefix": set(lifecycle) <= mapped,
+    }
+
+
 def the_target_holds_exactly_the_mapped_topics(
     during: set[str], after: set[str], mapped: set[str], prefix: str, unrelated: str
 ) -> dict[str, bool]:
@@ -9008,11 +9052,21 @@ def rehearsal() -> None:
             after_topics = target_topics()
             prefix = rendered_prefix(schedule_uid)
             mapped = {mapped_topic(schedule_uid, REHEARSAL_TOPIC)}
+            # The broker's own record of the run's topics, from the Restore's
+            # creation on: "during" is what the sampler saw OR what the broker
+            # says existed (a sub-second topic slips between two listings).
+            lifecycle = broker_topic_lifecycle(
+                broker_log_since(restore["metadata"]["creationTimestamp"]), prefix)
+            sampled = set(during)
+            during = sampled | set(lifecycle)
             topics = the_target_holds_exactly_the_mapped_topics(
                 during, after_topics, mapped, prefix, witness)
+            topics.update(the_broker_created_and_deleted_exactly_the_mapped_topics(
+                lifecycle, mapped))
             evidence.append(artifact("rehearsal/06-topics.json", {
                 "prefix": prefix, "mapped": sorted(mapped), "witness": witness,
-                "during": sorted(during), "after": sorted(after_topics),
+                "during": sorted(during), "sampled": sorted(sampled),
+                "brokerLog": lifecycle, "after": sorted(after_topics),
                 "extraRehearsals": extra, "clauses": topics,
             }))
             if extra:
