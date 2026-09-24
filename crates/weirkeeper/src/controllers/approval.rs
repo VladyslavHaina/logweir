@@ -66,7 +66,7 @@ use logweir_core::trust::{KeyUsage, SigningRefusal};
 use logweir_verify::{verify_detached, Sidecar, VerifyingKey};
 use serde::Deserialize;
 use serde_json::json;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::Context;
 use crate::conditions::{current_condition, merge_condition, StatusVersion};
@@ -110,6 +110,32 @@ pub const CONDITION_VERIFIED: &str = "Verified";
 
 /// The `reason` written when every check passed.
 pub const REASON_VERIFIED: &str = "Verified";
+
+/// The condition type recording that the Restore this `Approval` authorises
+/// was ADMITTED under its verdict — defect P9 (poc-install, 2026-09-24).
+///
+/// # Expiry bounds the time to admission, and nothing after it
+///
+/// D0: "Policy changes affect not-yet-admitted requests … Once the controller
+/// has … materialized an immutable v2 bundle and created the Job, that run
+/// continues under its recorded policy snapshot." A document's `expiresAt`,
+/// the policy binding and the keys' windows are questions about a NEW use; an
+/// admitted Restore is not one. Before this condition the controller kept
+/// re-judging a consumed `Approval` on every pass, so 900 s after an Ordinary
+/// confirmation a SUCCEEDED Restore's `Approval` was rewritten
+/// `Verified=False/AuthorizationExpired`, its `status.authorization`, key id
+/// and approver were nulled, and — because the expiry message carried the
+/// clock — every pass wrote a new status, woke its own watch and logged
+/// `approval refused` again, every ~2 s, for ever.
+///
+/// Once `Consumed=True` is on the object the verdict beside it is the AUDIT
+/// RECORD of that admission: it is never re-evaluated, never rewritten, and
+/// binds only the Restore UID `status.verifiedSubjectRef` names — the replay
+/// fence that already refuses every other object.
+pub const CONDITION_CONSUMED: &str = "Consumed";
+
+/// The `reason` on [`CONDITION_CONSUMED`].
+pub const REASON_RESTORE_ADMITTED: &str = "RestoreAdmitted";
 
 /// The message a missing roster produces — interface **I16**, verbatim.
 ///
@@ -723,21 +749,36 @@ pub fn validate_standing_document(
             ),
         });
     }
+    // NO CLOCK IN THE MESSAGE (P9's class). A condition message is compared
+    // byte for byte by the no-write guard; one that names `now` differs on
+    // every pass, so the refused status is rewritten, the write wakes this
+    // controller's own watch, and an expired standing document spins. Which
+    // boundary failed is the stable fact; WHEN it was judged is the condition's
+    // `lastTransitionTime`.
     let lifetime = doc.expires_at - doc.issued_at;
-    if lifetime <= chrono::Duration::zero()
+    let window = format!(
+        "the standing authorization window {}..{}",
+        doc.issued_at.to_rfc3339(),
+        doc.expires_at.to_rfc3339()
+    );
+    let problem = if lifetime <= chrono::Duration::zero()
         || lifetime > chrono::Duration::days(wire::MAX_STANDING_AUTHORIZATION_DAYS)
-        || doc.issued_at > now
-        || doc.expires_at <= now
     {
-        return Err(ApprovalRefusal::WindowInvalid {
-            detail: format!(
-                "the standing authorization window {}..{} is not valid at {} or exceeds {} days",
-                doc.issued_at.to_rfc3339(),
-                doc.expires_at.to_rfc3339(),
-                now.to_rfc3339(),
-                wire::MAX_STANDING_AUTHORIZATION_DAYS
-            ),
-        });
+        Some(format!(
+            "{window} is empty or exceeds {} days",
+            wire::MAX_STANDING_AUTHORIZATION_DAYS
+        ))
+    } else if doc.issued_at > now {
+        Some(format!("{window} has not opened yet"))
+    } else if doc.expires_at <= now {
+        Some(format!(
+            "{window} has closed; an expired standing authorization authorises no new slot"
+        ))
+    } else {
+        None
+    };
+    if let Some(detail) = problem {
+        return Err(ApprovalRefusal::WindowInvalid { detail });
     }
     let scope = &doc.scope;
     let scope_invalid = scope.template_digest.trim().is_empty()
@@ -1494,6 +1535,48 @@ pub enum ApprovalOutcome {
     Refused(ApprovalRefusal),
     /// The referent could not supply the bytes check 7 hashes.
     Referent(ReferentProblem),
+    /// The referent Restore was ADMITTED under this verdict (P9): the verdict
+    /// is a record now, and it is kept rather than judged again. See
+    /// [`CONDITION_CONSUMED`].
+    Consumed(Consumption),
+}
+
+/// The admission that consumed a verified `Approval` — defect P9.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Consumption {
+    /// The exact Restore admitted: the `status.verifiedSubjectRef` the
+    /// verdict was recorded for, matched against the object the API server
+    /// returned (name, namespace AND UID).
+    pub subject: VerifiedSubjectRef,
+    /// When the Restore controller recorded `Admitted=True`, when the Restore
+    /// says (the condition's `lastTransitionTime`).
+    pub admitted_at: Option<DateTime<Utc>>,
+    /// `None` when the stored `Verified=True` status is KEPT VERBATIM — the
+    /// ordinary case. `Some` only when the stored verdict had already been
+    /// withdrawn by an earlier build (the P9 objects themselves) and this pass
+    /// re-established it by verifying AT THE ADMISSION INSTANT, which is the
+    /// one clock an admitted run's authorization was ever about.
+    pub reverified: Option<Box<Verified>>,
+}
+
+impl Consumption {
+    /// The [`CONDITION_CONSUMED`] message. A function of the recorded facts
+    /// and nothing else — no clock — so a second pass computes the same bytes
+    /// and writes nothing.
+    #[must_use]
+    pub fn message(&self) -> String {
+        format!(
+            "Restore {}/{} (UID {}) was admitted under this verdict{}; an authorization's expiry \
+             bounds the time to admission, so the verified record beside this condition is the \
+             audit trail of that admission and is not judged again. It binds only that Restore \
+             UID and authorises nothing else",
+            self.subject.namespace,
+            self.subject.name,
+            self.subject.uid,
+            self.admitted_at
+                .map_or_else(String::new, |at| format!(" at {}", at.to_rfc3339())),
+        )
+    }
 }
 
 impl ApprovalOutcome {
@@ -1501,7 +1584,7 @@ impl ApprovalOutcome {
     #[must_use]
     pub const fn reason(&self) -> &'static str {
         match self {
-            Self::Verified(_) => REASON_VERIFIED,
+            Self::Verified(_) | Self::Consumed(_) => REASON_VERIFIED,
             Self::Refused(r) => r.reason(),
             Self::Referent(p) => p.reason(),
         }
@@ -1510,7 +1593,13 @@ impl ApprovalOutcome {
     /// Whether `status.verified` is `true`.
     #[must_use]
     pub const fn is_verified(&self) -> bool {
-        matches!(self, Self::Verified(_))
+        matches!(self, Self::Verified(_) | Self::Consumed(_))
+    }
+
+    /// Whether this outcome is a consumed verdict, kept as a record (P9).
+    #[must_use]
+    pub const fn is_consumed(&self) -> bool {
+        matches!(self, Self::Consumed(_))
     }
 
     /// **The instant this outcome stops being true on its own** — `None` for an
@@ -1525,18 +1614,37 @@ impl ApprovalOutcome {
     /// late: `KeyNotYetValid` reading refused for a few minutes too long is a
     /// closed door left closed; `KeyIdExpired` reading verified for a few
     /// minutes too long is an expired key authorising a restore.
+    ///
+    /// A CONSUMED verdict has none either, and for the opposite reason: no
+    /// clock can withdraw it, because the only use it ever authorised has
+    /// already happened (P9).
     #[must_use]
     pub fn valid_until(&self) -> Option<DateTime<Utc>> {
         match self {
             Self::Verified(v) => Some(v.valid_until()),
-            Self::Refused(_) | Self::Referent(_) => None,
+            Self::Refused(_) | Self::Referent(_) | Self::Consumed(_) => None,
         }
     }
 
     /// The `message` this outcome writes into the `Verified` condition.
+    ///
+    /// A consumed verdict kept verbatim writes no `Verified` condition of its
+    /// own ([`status_for`] carries the stored one); one re-established at the
+    /// admission instant says so, and names the instant.
     #[must_use]
     pub fn message(&self) -> String {
         match self {
+            Self::Consumed(c) => match c.reverified.as_deref() {
+                Some(v) => format!(
+                    "{} — verified as of the admission at {}, the instant the Restore controller \
+                     recorded Admitted=True (an earlier build had withdrawn this verdict after \
+                     the admission)",
+                    Self::Verified(v.clone()).message(),
+                    c.admitted_at
+                        .map_or_else(|| "an unrecorded instant".to_string(), |t| t.to_rfc3339())
+                ),
+                None => c.message(),
+            },
             Self::Verified(v) if v.authorization.is_some() => {
                 let provenance = v.authorization.as_ref();
                 format!(
@@ -1737,6 +1845,46 @@ pub async fn decide_with_policy_at(
         .namespace()
         .ok_or_else(|| ReconcileError::NoNamespace(name.clone()))?;
 
+    // ---- P9: A CONSUMED VERDICT IS A RECORD, NOT A GATE -------------------
+    //
+    // BEFORE TRUST, and before any other read. An `Approval` whose Restore was
+    // admitted under it has authorised the one thing it will ever authorise;
+    // a document expiry, a key event or a policy edit after that moment is
+    // about NEW uses, and re-judging the record against them is what rewrote
+    // a succeeded Restore's Approval `AuthorizationExpired` 900 s after its
+    // confirmation. Two ways in:
+    //
+    // 1. This build already recorded `Consumed=True` — no API call at all.
+    // 2. The stored verdict is still `Verified=True` and the Restore now says
+    //    it was admitted under it. Checked here, AHEAD of trust resolution, so
+    //    that the pass which first sees the admission cannot be the pass that
+    //    withdraws the verdict (a `TrustPolicy` conflict, an expiry that came
+    //    due while the admission was not yet observed).
+    if let Some(recorded) = recorded_consumption(approval) {
+        return Ok(ApprovalOutcome::Consumed(recorded));
+    }
+    let subject = &approval.spec.subject_ref;
+    let stored = approval.status.as_ref();
+    let mut prefetched: Option<Option<Restore>> = None;
+    if subject.kind == SubjectKind::Restore && stored.and_then(|s| s.verified) == Some(true) {
+        if let Some(previous) = stored.and_then(|s| s.verified_subject_ref.as_ref()) {
+            let restore = get_restore(client, &namespace, &subject.name).await?;
+            if let Some(found) = restore.as_ref() {
+                let current = restore_subject(found, &subject.name, &namespace)?;
+                if &current == previous {
+                    if let Some(admitted_at) = admitted_under(found, approval) {
+                        return Ok(ApprovalOutcome::Consumed(Consumption {
+                            subject: current,
+                            admitted_at,
+                            reverified: None,
+                        }));
+                    }
+                }
+            }
+            prefetched = Some(restore);
+        }
+    }
+
     // THE NAMESPACE'S TRUST FIRST, and an absent or contested one
     // short-circuits everything: without a resolved key set there is no set of
     // keys any signature could be checked against, so fetching the referent
@@ -1765,23 +1913,22 @@ pub async fn decide_with_policy_at(
         }
     };
 
-    let subject = &approval.spec.subject_ref;
     let referent_kind = subject.kind.as_str();
+    // P9's repair: the instant the referent Restore was admitted under this
+    // Approval, when it was and the stored verdict no longer says Verified —
+    // an object an earlier build rewrote after the admission. The verdict is
+    // then asked at THAT instant, the only one an admitted run's
+    // authorization was ever about.
+    let mut consumed_at: Option<DateTime<Utc>> = None;
     let (plan_bytes, verified_subject_ref) = match subject.kind {
         SubjectKind::Restore => {
-            let api: Api<Restore> = Api::namespaced(client.clone(), &namespace);
-            match api.get(&subject.name).await {
-                Ok(restore) => {
-                    let uid = restore
-                        .uid()
-                        .ok_or_else(|| ReconcileError::NoUid(subject.name.clone()))?;
-                    let current = VerifiedSubjectRef {
-                        api_version: Restore::api_version(&()).to_string(),
-                        kind: SubjectKind::Restore,
-                        name: subject.name.clone(),
-                        namespace: namespace.clone(),
-                        uid,
-                    };
+            let restore = match prefetched {
+                Some(restore) => restore,
+                None => get_restore(client, &namespace, &subject.name).await?,
+            };
+            match restore {
+                Some(restore) => {
+                    let current = restore_subject(&restore, &subject.name, &namespace)?;
                     if let Some(previous) = approval
                         .status
                         .as_ref()
@@ -1797,10 +1944,14 @@ pub async fn decide_with_policy_at(
                                 },
                             ));
                         }
+                        // ONLY A VERDICT THAT WAS RECORDED FOR THIS UID can
+                        // have been consumed by its admission: the Restore
+                        // controller admits nothing without that binding.
+                        consumed_at = admitted_under(&restore, approval).flatten();
                     }
                     (restore.spec.plan_bytes, Some(current))
                 }
-                Err(kube::Error::Api(e)) if e.code == 404 => {
+                None => {
                     return Ok(ApprovalOutcome::Referent(
                         ReferentProblem::ReferentNotFound {
                             kind: referent_kind.to_string(),
@@ -1808,7 +1959,6 @@ pub async fn decide_with_policy_at(
                         },
                     ))
                 }
-                Err(e) => return Err(e.into()),
             }
         }
         SubjectKind::Backup => {
@@ -1945,7 +2095,7 @@ pub async fn decide_with_policy_at(
         evaluate_restore_referent(
             approval,
             &trust,
-            now,
+            consumed_at.unwrap_or(now),
             &namespace,
             &plan_bytes,
             verified_subject_ref.as_ref(),
@@ -1996,8 +2146,15 @@ pub async fn decide_with_policy_at(
                     },
                 ));
             }
-            verified.verified_subject_ref = verified_subject_ref;
-            ApprovalOutcome::Verified(verified)
+            verified.verified_subject_ref = verified_subject_ref.clone();
+            match (consumed_at, verified_subject_ref) {
+                (Some(at), Some(subject)) => ApprovalOutcome::Consumed(Consumption {
+                    subject,
+                    admitted_at: Some(at),
+                    reverified: Some(Box::new(verified)),
+                }),
+                _ => ApprovalOutcome::Verified(verified),
+            }
         }
         Err(refusal) => ApprovalOutcome::Refused(refusal),
     })
@@ -2010,6 +2167,9 @@ pub fn status_for(
     outcome: &ApprovalOutcome,
     now: DateTime<Utc>,
 ) -> ApprovalStatus {
+    if let ApprovalOutcome::Consumed(consumption) = outcome {
+        return consumed_status(approval, consumption, now);
+    }
     let verified = outcome.is_verified();
     let (
         matched_key_id,
@@ -2076,6 +2236,153 @@ pub fn status_for(
                 message: Some(outcome.message()),
             },
         )]),
+    }
+}
+
+/// [`status_for`] for a verdict the referent's admission consumed — P9.
+///
+/// # Kept verbatim, plus one condition
+///
+/// `reverified: None` is the ordinary case: the stored `Verified=True` status —
+/// `authorization` (mode, policy, requester, confirmation key), `matchedKeyId`,
+/// `approver`, the key window, the `Verified` condition with its ORIGINAL
+/// `lastTransitionTime` — is copied as it stands, and [`CONDITION_CONSUMED`] is
+/// added beside it. Nothing is recomputed, so nothing a later clock, key event
+/// or policy edit does can reach the record.
+///
+/// `reverified: Some` is the repair of an object an earlier build had already
+/// rewritten: the fields come from the verdict re-established at the
+/// admission instant, and its `Verified` message names that instant.
+///
+/// An existing `Consumed=True` condition is carried VERBATIM rather than
+/// recomputed, so the pass after the one that wrote it computes the same
+/// status byte for byte and the no-write guard sends nothing.
+fn consumed_status(
+    approval: &Approval,
+    consumption: &Consumption,
+    now: DateTime<Utc>,
+) -> ApprovalStatus {
+    let stored = approval.status.as_ref();
+    let stored_conditions = stored.and_then(|s| s.conditions.as_ref());
+    let consumed = match current_condition(stored_conditions, CONDITION_CONSUMED) {
+        Some(existing) if existing.status == "True" => existing.clone(),
+        existing => merge_condition(
+            existing,
+            Condition {
+                r#type: CONDITION_CONSUMED.to_string(),
+                status: "True".to_string(),
+                observed_generation: approval.metadata.generation,
+                last_transition_time: Some(now),
+                reason: Some(REASON_RESTORE_ADMITTED.to_string()),
+                message: Some(consumption.message()),
+            },
+        ),
+    };
+    let upsert = |conditions: &mut Vec<Condition>, next: Condition| match conditions
+        .iter_mut()
+        .find(|c| c.r#type == next.r#type)
+    {
+        Some(slot) => *slot = next,
+        None => conditions.push(next),
+    };
+    match consumption.reverified.as_deref() {
+        None => {
+            let mut status = stored.cloned().unwrap_or_default();
+            let mut conditions = stored_conditions.cloned().unwrap_or_default();
+            upsert(&mut conditions, consumed);
+            status.conditions = Some(conditions);
+            status
+        }
+        Some(verified) => {
+            let mut status =
+                status_for(approval, &ApprovalOutcome::Verified(verified.clone()), now);
+            let message = ApprovalOutcome::Consumed(consumption.clone()).message();
+            let mut conditions = status.conditions.take().unwrap_or_default();
+            for condition in &mut conditions {
+                if condition.r#type == CONDITION_VERIFIED {
+                    condition.message = Some(message.clone());
+                }
+            }
+            upsert(&mut conditions, consumed);
+            status.conditions = Some(conditions);
+            status
+        }
+    }
+}
+
+/// Whether the stored status already records a consumed verdict: `Verified`
+/// true, a subject binding, and `Consumed=True` — the three facts an earlier
+/// pass of THIS build wrote together. Read before any API call, so a consumed
+/// `Approval` costs nothing to reconcile.
+fn recorded_consumption(approval: &Approval) -> Option<Consumption> {
+    let status = approval.status.as_ref()?;
+    if status.verified != Some(true) {
+        return None;
+    }
+    let subject = status.verified_subject_ref.clone()?;
+    let consumed = current_condition(status.conditions.as_ref(), CONDITION_CONSUMED)?;
+    (consumed.status == "True").then(|| Consumption {
+        subject,
+        admitted_at: None,
+        reverified: None,
+    })
+}
+
+/// When `restore` records that it was ADMITTED under `approval`: the Restore
+/// names this `Approval` in `spec.approvalRef` (an ordinary Restore, never a
+/// rehearsal's standing authorization) and carries `Admitted=True`, which the
+/// Restore controller writes on the pass that creates the runner Job and
+/// carries on every later one. `Some(None)` when admitted with no recorded
+/// instant; `None` when not admitted under this `Approval` at all — including
+/// an `Admitted=False` HOLD, which is exactly the not-yet-admitted request an
+/// expiry must still refuse.
+///
+/// `Restore.status` is written only by this controller's service account (the
+/// chart grants `restores/status` to nobody else), which is the same trust the
+/// Restore controller already places in `Approval.status.verified`.
+#[must_use]
+pub fn admitted_under(restore: &Restore, approval: &Approval) -> Option<Option<DateTime<Utc>>> {
+    if restore.spec.authorization.is_some()
+        || restore.spec.approval_ref_name().trim() != approval.name_any()
+    {
+        return None;
+    }
+    let admitted = current_condition(
+        restore.status.as_ref().and_then(|s| s.conditions.as_ref()),
+        crate::conditions::CONDITION_ADMITTED,
+    )?;
+    (admitted.status == "True").then_some(admitted.last_transition_time)
+}
+
+/// The exact subject reference for a `Restore` the API server returned.
+fn restore_subject(
+    restore: &Restore,
+    name: &str,
+    namespace: &str,
+) -> Result<VerifiedSubjectRef, ReconcileError> {
+    let uid = restore
+        .uid()
+        .ok_or_else(|| ReconcileError::NoUid(name.to_string()))?;
+    Ok(VerifiedSubjectRef {
+        api_version: Restore::api_version(&()).to_string(),
+        kind: SubjectKind::Restore,
+        name: name.to_string(),
+        namespace: namespace.to_string(),
+        uid,
+    })
+}
+
+/// `GET` the Restore an `Approval` names; a 404 is `None`.
+async fn get_restore(
+    client: &kube::Client,
+    namespace: &str,
+    name: &str,
+) -> Result<Option<Restore>, ReconcileError> {
+    let api: Api<Restore> = Api::namespaced(client.clone(), namespace);
+    match api.get(name).await {
+        Ok(restore) => Ok(Some(restore)),
+        Err(kube::Error::Api(e)) if e.code == 404 => Ok(None),
+        Err(e) => Err(e.into()),
     }
 }
 
@@ -2159,15 +2466,38 @@ pub async fn reconcile_approval_with_policy(
     client: &kube::Client,
     policies: &ApprovalPolicySet,
 ) -> Result<ApprovalOutcome, ReconcileError> {
+    reconcile_approval_with_policy_at(approval, client, policies, Utc::now()).await
+}
+
+/// [`reconcile_approval_with_policy`] with the clock passed in, so a test can
+/// reconcile one fixed document at two instants and count the writes.
+///
+/// # Errors
+///
+/// [`ReconcileError`] for anything that is not a verdict.
+pub async fn reconcile_approval_with_policy_at(
+    approval: &Approval,
+    client: &kube::Client,
+    policies: &ApprovalPolicySet,
+    now: DateTime<Utc>,
+) -> Result<ApprovalOutcome, ReconcileError> {
     let name = approval.name_any();
     let namespace = approval
         .namespace()
         .ok_or_else(|| ReconcileError::NoNamespace(name.clone()))?;
-    let outcome = decide_with_policy(approval, client, policies).await?;
-    let status = status_for(approval, &outcome, Utc::now());
+    let outcome = decide_with_policy_at(approval, client, policies, now).await?;
+    let status = status_for(approval, &outcome, now);
 
     let api: Api<Approval> = Api::namespaced(client.clone(), &namespace);
     let patch = status_patch_body(&status);
+    let current = approval
+        .status
+        .as_ref()
+        .and_then(|s| serde_json::to_value(s).ok());
+    // P9: THE LOG LINE FOLLOWS THE WRITE. A verdict that did not change is
+    // logged at debug; `WARN approval refused` once per ~2 s per object, for
+    // ever, was half of the defect.
+    let changed = !crate::conditions::status_unchanged(current.as_ref(), &patch);
     // NO WRITE WHEN NOTHING CHANGED — plan erratum E11(d), review finding H-2.
     // An `Approval` is the most steady object this controller holds: its spec
     // is sealed by CEL and its verdict is a function of that spec, the roster
@@ -2186,16 +2516,27 @@ pub async fn reconcile_approval_with_policy(
         "Approval",
         &name,
         &StatusVersion::observed(approval.meta()),
-        approval
-            .status
-            .as_ref()
-            .and_then(|s| serde_json::to_value(s).ok())
-            .as_ref(),
+        current.as_ref(),
         patch,
     )
     .await?;
 
-    if outcome.is_verified() {
+    if !changed {
+        debug!(
+            approval = %name,
+            namespace = %namespace,
+            reason = outcome.reason(),
+            consumed = outcome.is_consumed(),
+            "approval verdict unchanged; nothing written"
+        );
+    } else if outcome.is_consumed() {
+        info!(
+            approval = %name,
+            namespace = %namespace,
+            "approval consumed by its Restore's admission; the verified record is kept and not \
+             judged again"
+        );
+    } else if outcome.is_verified() {
         info!(
             approval = %name,
             namespace = %namespace,
@@ -2237,10 +2578,27 @@ async fn reconcile(
     // verified outcome therefore requeues at its own `notAfter`, and everything
     // else keeps the heartbeat — see `ApprovalOutcome::valid_until` for why the
     // asymmetry is the safe one.
-    Ok(Action::requeue(super::trust_policy::requeue_before(
+    Ok(requeue_for(&outcome, Utc::now()).map_or_else(Action::await_change, Action::requeue))
+}
+
+/// When this outcome is looked at again — `None` is "only when something
+/// changes" (`Action::await_change`).
+///
+/// A CONSUMED verdict (P9) waits for a change: nothing a clock, a key or a
+/// policy does can alter a record of an admission that already happened, and
+/// the heartbeat would only re-read it. Everything else keeps the rule above:
+/// a pass at its own `notAfter`/expiry when verified, the heartbeat otherwise
+/// — never a hot loop, because a refusal's message carries no clock and an
+/// unchanged status is never written (so no write wakes the watch).
+#[must_use]
+pub fn requeue_for(outcome: &ApprovalOutcome, now: DateTime<Utc>) -> Option<std::time::Duration> {
+    if outcome.is_consumed() {
+        return None;
+    }
+    Some(super::trust_policy::requeue_before(
         outcome.valid_until(),
-        Utc::now(),
-    )))
+        now,
+    ))
 }
 
 /// Requeue on an error, naming it. Never a panic and never a drop.

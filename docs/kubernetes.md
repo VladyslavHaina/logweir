@@ -3247,6 +3247,30 @@ The runner does **not** re-check expiry against its own clock: the controller
 admitted the run inside the window, and an admitted run "continues under its
 recorded policy snapshot" (D0) even if its pod waited in `Pending`.
 
+**After admission the `Approval` is a record, not a gate.** Expiry, the policy
+binding and the keys' windows bound the time to **admission**. Once the Restore
+controller has recorded `Admitted=True` on the Restore that `spec.approvalRef`
+names this `Approval` for (the pass that creates the runner Job), the `Approval`
+controller adds `Consumed=True` (reason `RestoreAdmitted`, naming the Restore's
+UID and the admission instant) beside the verdict and never judges it again: its
+`Verified=True` condition, `status.authorization` (mode, policy, requester,
+confirmation key), `matchedKeyId`, `approver` and key window stay as they were
+recorded, whatever the clock, a later key event or a policy edit does. The
+record still binds only the Restore UID in `status.verifiedSubjectRef`. A
+Restore that is only held (`Admitted=False`) or has no Job yet is not
+admitted, and its `Approval` still expires `AuthorizationExpired` as before.
+Defect P9 (the PoC install, 2026-09-24) was the absence of this rule: 900 s
+after an Ordinary confirmation a succeeded Restore's `Approval` was rewritten
+`Verified=False/AuthorizationExpired` with its provenance nulled. **Upgrade:**
+an `Approval` an earlier build rewrote that way is re-verified at the admission
+instant (the Restore's `Admitted` `lastTransitionTime`) on the first pass of this
+build and, when it verifies there, is restored to `Verified=True` with
+`Consumed=True`; a refusal message no longer names the current time, so an
+unchanged refusal is never rewritten and no longer logs `approval refused` on
+every pass. **Rollback:** an older controller ignores `Consumed` and resumes
+re-judging consumed `Approval`s (the P9 behaviour); nothing it writes is
+unreadable by this build.
+
 **Separation of duties and key authority.** Three keys with three usages, one
 usage each (CEL rule G8): the runner's `EvidenceSigning` key, which never
 authorises; the console's `ConsoleConfirmation` key, which attests a requester

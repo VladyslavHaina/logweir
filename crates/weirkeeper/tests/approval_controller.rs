@@ -2001,9 +2001,22 @@ async fn a_steady_approval_issues_no_second_status_patch() {
         .await
         .expect("the second reconcile completes");
     assert!(outcome.is_verified(), "the verdict is still computed");
+    assert!(
+        !outcome.is_consumed(),
+        "the fixture Restore carries no Admitted=True, so nothing consumed the verdict"
+    );
+    // THE REFERENT FIRST, AND STILL ONLY ONCE (P9). A stored `Verified=True`
+    // verdict asks its Restore whether it was ADMITTED under it before
+    // anything is re-judged — an admitted run's authorization is a record, and
+    // the pass that first sees the admission must not be the one that
+    // withdraws it — and the same read is then the referent check 7 hashes.
     assert_eq!(
         seen(&calls),
         vec![
+            (
+                "GET".to_string(),
+                format!("/apis/logweir.dev/v1alpha1/namespaces/{NS}/restores/r1")
+            ),
             (
                 "GET".to_string(),
                 "/apis/logweir.dev/v1alpha1/trustpolicies".to_string()
@@ -2011,10 +2024,6 @@ async fn a_steady_approval_issues_no_second_status_patch() {
             (
                 "GET".to_string(),
                 format!("/apis/logweir.dev/v1alpha1/trustrosters/{ROSTER_NAME}")
-            ),
-            (
-                "GET".to_string(),
-                format!("/apis/logweir.dev/v1alpha1/namespaces/{NS}/restores/r1")
             ),
         ],
         "the second pass STILL READS the roster and the referent — the verdict is recomputed \
