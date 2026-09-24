@@ -419,6 +419,23 @@ surviving. None is fixed yet except where a worker is named.
 | MANUAL-RUN-UNBOUNDED | P10, PoC round. Nothing bounds manual *Back up now*: 100 accepted runs became 100 runner pods, docker-desktop hit its 110-pod limit, the node went NotReady, and MinIO answered SlowDown. Evidence fetches ARE bounded (4 per namespace). Fix on `claude/manual-run-bound` (running): a per-namespace active-Job bound with a visible queue, plus a per-principal API rate limit. | PLAT-04.x / PLAT-17.x |
 | TRUSTPOLICY-DELETE-DROPS-REVOCATION | Observation from the PoC round (R2), to be assessed: deleting a TrustPolicy drops a compromise revocation it recorded while `TrustRoster/default` still lists the key, so the key's evidence may read trusted again under the legacy roster. Security-relevant; severity not yet decided. Open. | PLAT-19.1 / PLAT-08.x |
 | POC-DOC-D1-D11 | PoC round doc and profile defects, D1–D10 **fixed on main `7beb7c8`** (`claude/poc-install`):
+| CONSOLE-MCP-ROUND1 | The human-like console pass through the Playwright MCP (2026-09-24, on the PoC at `86a554e`; report `claude/mcp-ui-test.result.md`, 25 screenshots in `claude/artifacts/mcp-ui-test/shots/`) found 34 layout, flow and copy defects.
+  - **High (5):**
+    - MCP-1: no Sign in affordance when signed out, and the console falls back to legacy mode;
+    - MCP-4: raw problem-JSON shown when signed out;
+    - MCP-5: no signed-in identity and no Sign out;
+    - MCP-25: the restore wizard's primary action "Restore this point" is in a clipped, overflowing table column;
+    - MCP-29: the six-step wizard is one 22,686 px page.
+  - **Medium (11)**, including:
+    - MCP-16: per-row SIGNED note triples row height, 8 lines at 1024 px;
+    - MCP-19: Operations nav dead end;
+    - MCP-27: stepper shows readiness DONE before it ran;
+    - MCP-30: `--context docker-desktop` hard-coded in product copy;
+    - MCP-32: a 403 on Keys shown as "no trust exists";
+    - MCP-26: the wizard takes 12.4 s to become usable at 258 points.
+  - **Low (18)**, including: timestamps wrapping mid-value, nanosecond precision, raw booleans and condition syntax, internal `PLAT-` IDs in UI text, and a role-unaware nav.
+
+  Open. A UI fix batch is queued after `claude/poc-fixes-2`, then round 2 on the next publication. | PLAT-18.2 / PLAT-17.2 / PLAT-11.x |
   - D1: Dex needs a writable `/tmp`.
   - D2: CRD apply needs `--force-conflicts`, now with a `doc_lint` guard.
   - D3: stale NOTES.txt.
