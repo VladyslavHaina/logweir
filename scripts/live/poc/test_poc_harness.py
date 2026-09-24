@@ -1,6 +1,6 @@
 """Offline guards for the PoC install's live harness (scripts/live/poc/).
 
-  python3 -m pytest scripts/live/poc/test_harness.py
+  python3 -m pytest scripts/live/poc/test_poc_harness.py
 
 Every kubectl invocation names `--context docker-desktop`; no file carries a credential-shaped
 literal or a host-specific path; secrets are read from the credentials file or the cluster and
@@ -11,7 +11,7 @@ import pathlib
 import re
 
 HERE = pathlib.Path(__file__).resolve().parent
-FILES = sorted(p for p in HERE.iterdir() if p.suffix in (".py", ".mjs") and p.name != "test_harness.py")
+FILES = sorted(p for p in HERE.iterdir() if p.suffix in (".py", ".mjs") and p.name != "test_poc_harness.py")
 
 PEM = "-----BEGIN " + "PRIVATE KEY"
 JWT = re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}")

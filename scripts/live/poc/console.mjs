@@ -109,7 +109,7 @@ async function setChecked(page, name, on) {
 // until `status.completion` is written or a bound elapses. A legacy (inline-archive) point needs
 // its endpoint, region, addressing and transport typed in (`o.legacy`).
 export async function restoreFromBackup(page, ns, backup, uid, opts, log) {
-  const o = Object.assign({ target: "target", legacy: null, prefix: null, readiness: true, readinessSeconds: 180, runSeconds: 900, shots: null }, opts || {});
+  const o = Object.assign({ target: "target", legacy: null, prefix: null, ticket: null, readiness: true, readinessSeconds: 180, runSeconds: 900, shots: null, follow: true }, opts || {});
   const say = (m) => log && log(m);
   await gotoHash(page, `#/restore?ns=${encodeURIComponent(ns)}&backup=${encodeURIComponent(backup)}&uid=${encodeURIComponent(uid)}`);
   await waitForText(page, /6\. Plan, hash and names/, 60, "the wizard");
@@ -126,6 +126,7 @@ export async function restoreFromBackup(page, ns, backup, uid, opts, log) {
   await page.selectOption('select[name="targetCluster"]', hit[0]);
   await page.selectOption('select[name="mode"]', "newTopic");
   if (o.prefix) { await page.fill('input[name="topicPrefix"]', o.prefix); await page.locator('input[name="topicPrefix"]').blur(); }
+  if (o.ticket) { await page.fill("#change-ticket", o.ticket); await page.locator("#change-ticket").blur(); }
   await page.waitForTimeout(1500);
   const plan = await textOf(page);
   const planHash = (plan.match(/plan hash\n(sha256:[0-9a-f]{64})/) || [])[1];
@@ -155,12 +156,13 @@ export async function restoreFromBackup(page, ns, backup, uid, opts, log) {
   const route = page.url();
   const name = decodeURIComponent((route.match(/[?&]name=([^&]+)/) || [])[1] || "");
   say(`created: ${route}`);
+  if (!o.follow) return { name, route, planHash, readiness, status: {}, operationText: "" };
   let st = {};
   const end = Date.now() + o.runSeconds * 1000;
   let terminalAt = 0;
   while (Date.now() < end && name) {
     await page.waitForTimeout(8000);
-    st = (JSON.parse(execFileSync("kubectl", ["--context", "docker-desktop", "--request-timeout=30s", "-n", ns, "get", "restore", name, "-o", "json"], { timeout: 45000 }).toString()).status) || {};
+    st = (JSON.parse(execFileSync("kubectl", ["--context", "docker-desktop", "--request-timeout=30s", "-n", ns, "get", "restore", name, "-o", "json"], { timeout: 45000, maxBuffer: 256 * 1024 * 1024 }).toString()).status) || {};
     if (st.phase === "Succeeded" || st.phase === "Failed") {
       terminalAt = terminalAt || Date.now();
       if (st.completion || st.phase === "Failed" || Date.now() - terminalAt > 90000) break;
@@ -182,7 +184,7 @@ export async function restoreFromBackup(page, ns, backup, uid, opts, log) {
 // the caller (for a password field); never printed.
 export function secretValue(ns, name, key) {
   const b64 = execFileSync("kubectl", ["--context", "docker-desktop", "--request-timeout=30s", "-n", ns, "get", "secret", name,
-    "-o", `go-template={{index .data "${key}"}}`], { timeout: 45000 }).toString().trim();
+    "-o", `go-template={{index .data "${key}"}}`], { timeout: 45000, maxBuffer: 256 * 1024 * 1024 }).toString().trim();
   return Buffer.from(b64, "base64").toString("utf8");
 }
 

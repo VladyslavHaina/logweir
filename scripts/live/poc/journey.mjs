@@ -29,7 +29,7 @@ function row(id, ok, evidence) {
   log(`${ok ? "PASS" : "FAIL"} ${id} ${JSON.stringify(evidence).slice(0, 400)}`);
   writeFileSync(`${OUT}/rows.json`, JSON.stringify(ROWS, null, 1));
 }
-const kj = (...args) => JSON.parse(execFileSync("kubectl", ["--context", "docker-desktop", "--request-timeout=30s", "-n", NS, ...args, "-o", "json"], { timeout: 45000 }).toString());
+const kj = (...args) => JSON.parse(execFileSync("kubectl", ["--context", "docker-desktop", "--request-timeout=30s", "-n", NS, ...args, "-o", "json"], { timeout: 45000, maxBuffer: 256 * 1024 * 1024 }).toString());
 const byRole = (role) => (kj("get", "kafkaclusters").items.find((i) => i.spec.role === role) || { metadata: {} }).metadata.name;
 const step = (id) => ["J1", "J2", "J3", "J4", "J5", "J6", "J7"].indexOf(id) >= ["J1", "J2", "J3", "J4", "J5", "J6", "J7"].indexOf(FROM);
 async function shot(page, name) { await page.screenshot({ path: `${OUT}/${name}.png`, fullPage: true }); }
