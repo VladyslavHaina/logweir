@@ -433,8 +433,8 @@ def setup() -> None:
                     "containers": [
                         {
                             "name": "mc",
-                            "image": "minio/mc:latest",
-                            "imagePullPolicy": "Never",
+                            "image": "docker.io/vladyslavhaina/mc-mirror@sha256:4824f9b00fd4ca9e3b7d61f66211450cd5d63f5f99d3170654af49568869b77b",
+                            "imagePullPolicy": "IfNotPresent",
                             "command": ["/bin/sh", "-c"],
                             "args": [
                                 "mc alias set local "

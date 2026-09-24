@@ -90,7 +90,7 @@ beforehand ([kubernetes.md §21.5](kubernetes.md)).
 
 | Object store | Status |
 |---|---|
-| MinIO `RELEASE.2025-09-07T16-13-09Z` | **Supported, measured** (private container: the claim, the refused second run, and the readiness probe's double create) |
+| MinIO `RELEASE.2025-09-07T16-13-09Z` | **Supported, measured** (private container: the claim, the refused second run, and the readiness probe's double create). The project's rebuild of this release (`third_party/minio-mirror/`), which the compose stack and the chart's demo MinIO now run, answers a second `If-None-Match: *` create with the same `412 PreconditionFailed` as the upstream image (smoke of 2026-09-24) |
 | older MinIO releases | `[UNVERIFIED — needs a run against an older MinIO release]` |
 | AWS S3 | `[UNVERIFIED — needs a real AWS S3 bucket and a credential source]` |
 | GCS, Azure Blob | `[UNVERIFIED — native conditional create in object_store, not run against either provider]` |

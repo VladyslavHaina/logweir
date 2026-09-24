@@ -7647,7 +7647,7 @@ exits 4 before any data is written.
 
 | Object store | Conditional create (`If-None-Match: *`) |
 |---|---|
-| MinIO `RELEASE.2025-09-07T16-13-09Z` (the compose and lab image) | **Supported, measured** — a private container ran the claim and the probe |
+| MinIO `RELEASE.2025-09-07T16-13-09Z` (the compose and lab image; compose and the chart's demo MinIO now run the project's rebuild of it, `third_party/minio-mirror/`) | **Supported, measured** — a private container ran the claim and the probe; the rebuild answers the second create with the same `412` (smoke of 2026-09-24) |
 | MinIO releases older than that | `[UNVERIFIED — needs a run against an older MinIO release]` |
 | AWS S3 | `[UNVERIFIED — needs a real AWS S3 bucket and a credential source]`; `object_store` sends `If-None-Match: *` by default |
 | GCS, Azure Blob | `[UNVERIFIED — native conditional create in object_store, not run against either provider]` |

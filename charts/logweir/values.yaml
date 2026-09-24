@@ -130,8 +130,8 @@ kafka:
 # Demo-only: the root credential below also mints the runner's logweir-s3.
 minio:
   enabled: false
-  image: quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
-  mcImage: quay.io/minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
+  image: docker.io/vladyslavhaina/minio-mirror@sha256:a707398148b545774fc98264d16e76307f1b3727f77b1cc49c67ccde8998709d
+  mcImage: docker.io/vladyslavhaina/mc-mirror@sha256:4824f9b00fd4ca9e3b7d61f66211450cd5d63f5f99d3170654af49568869b77b
   rootUser: minioadmin
   rootPassword: minioadmin
   persistence:

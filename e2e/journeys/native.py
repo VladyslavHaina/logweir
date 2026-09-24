@@ -163,7 +163,7 @@ class Native:
                   "&& touch /tmp/ready && sleep 10800")
         return {"apiVersion": "v1", "kind": "Pod", "metadata": self.lab.meta("mc", self.ns),
                 "spec": {"restartPolicy": "Never", "automountServiceAccountToken": False,
-                         "containers": [{"name": "mc", "image": "minio/mc:latest", "imagePullPolicy": "Never",
+                         "containers": [{"name": "mc", "image": "docker.io/vladyslavhaina/mc-mirror@sha256:4824f9b00fd4ca9e3b7d61f66211450cd5d63f5f99d3170654af49568869b77b", "imagePullPolicy": "IfNotPresent",
                                          "command": ["/bin/sh", "-c", script],
                                          "env": [env("AWS_ACCESS_KEY_ID", "access-key-id"),
                                                  env("AWS_SECRET_ACCESS_KEY", "secret-access-key")],

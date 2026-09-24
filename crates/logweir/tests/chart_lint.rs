@@ -981,6 +981,138 @@ fn chart_lint_values_name_the_shipped_repositories_at_latest() {
     );
 }
 
+/// **No file names a MinIO image upstream withdrew, and every MinIO image
+/// reference in the tree is the chart's own mirror digest.**
+///
+/// MinIO deleted its server and client images from Docker Hub on 2026-09-11,
+/// and its quay.io repositories began refusing anonymous pulls on 2026-09-24;
+/// CI's `e2e` job then failed at `just e2e-up`. What the compose stack, the
+/// chart's demo MinIO, the PoC grants Job and the live harnesses run is now
+/// the rebuild `third_party/minio-mirror/` publishes, pinned by digest. A
+/// reference that goes back to an upstream name is a stack that cannot pull;
+/// a harness that pins a DIFFERENT mirror digest from the chart's measures a
+/// different server from the one the chart ships. `third_party/minio-mirror/`
+/// and `THIRD_PARTY_NOTICES.md` name the upstream images on purpose — they are
+/// the provenance record — and nothing else is exempt.
+#[test]
+fn chart_lint_every_minio_image_reference_is_the_mirror_digest() {
+    let values: Value =
+        serde_yaml::from_str(&read("charts/logweir/values.yaml")).expect("values.yaml parses");
+    let pins: Vec<(&str, String)> = vec![
+        (
+            "docker.io/vladyslavhaina/minio-mirror",
+            values["minio"]["image"]
+                .as_str()
+                .expect("minio.image")
+                .to_string(),
+        ),
+        (
+            "docker.io/vladyslavhaina/mc-mirror",
+            values["minio"]["mcImage"]
+                .as_str()
+                .expect("minio.mcImage")
+                .to_string(),
+        ),
+    ];
+    let mut offenders = Vec::new();
+    for (repository, pin) in &pins {
+        if !(is_digest_reference(pin) && pin.starts_with(&format!("{repository}@sha256:"))) {
+            offenders.push(format!(
+                "charts/logweir/values.yaml: must pin the MinIO mirror {repository} by digest, got {pin}"
+            ));
+        }
+    }
+    // The withdrawn names, split so that this file does not carry them.
+    let withdrawn = [
+        concat!("quay.io", "/minio/"),
+        concat!("minio/", "minio:"),
+        concat!("minio/", "minio@"),
+        concat!("minio/", "mc:"),
+        concat!("minio/", "mc@"),
+    ];
+    let mut files: Vec<String> = Vec::new();
+    for root in [
+        ".github",
+        "charts",
+        "config",
+        "crates",
+        "dashboards",
+        "deploy",
+        "docs",
+        "e2e",
+        "examples",
+        "schemas",
+        "scripts",
+        "third_party",
+        "ui",
+        "xtask",
+    ] {
+        if repo().join(root).is_dir() {
+            files.extend(files_under(root));
+        }
+    }
+    for entry in std::fs::read_dir(repo()).expect("the repository root lists") {
+        let path = entry.expect("a readable directory entry").path();
+        if path.is_file() {
+            files.push(path.file_name().unwrap().to_string_lossy().to_string());
+        }
+    }
+    let mut mirror_mentions = BTreeSet::new();
+    for file in &files {
+        if file.starts_with("third_party/minio-mirror/") || file == "THIRD_PARTY_NOTICES.md" {
+            continue;
+        }
+        // Binary fixtures are not image references.
+        let Ok(text) = std::fs::read_to_string(repo().join(file)) else {
+            continue;
+        };
+        for (n, line) in text.lines().enumerate() {
+            for name in withdrawn {
+                if line.contains(name) {
+                    offenders.push(format!("{file}:{}: names `{name}`", n + 1));
+                }
+            }
+            for (repository, pin) in &pins {
+                let short = repository.trim_start_matches("docker.io/");
+                let mut rest = line;
+                while let Some(at) = rest.find(short) {
+                    rest = &rest[at + short.len()..];
+                    mirror_mentions.insert(file.clone());
+                    if let Some(digest) = rest.strip_prefix("@sha256:") {
+                        let digest: String = digest.chars().take(64).collect();
+                        if !pin.ends_with(&digest) {
+                            offenders.push(format!(
+                                "{file}:{}: pins {short}@sha256:{digest}, not the chart's {pin}",
+                                n + 1
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "MinIO image references that are not the mirror digest the chart pins \
+         (third_party/minio-mirror/README.md says why):\n  {}",
+        offenders.join("\n  ")
+    );
+    // NOT VACUOUS: the sweep reached the files that run MinIO, so a walker that
+    // listed nothing could not pass this test.
+    for must in [
+        "e2e/compose/docker-compose.yml",
+        "charts/logweir/rendered/demo.yaml",
+        "deploy/poc/minio-grants.yaml",
+        "scripts/test-k8s-scram.py",
+        "e2e/k8s/d2/d2_live.py",
+    ] {
+        assert!(
+            mirror_mentions.contains(must),
+            "{must} names no MinIO mirror image: the sweep did not reach it, or it lost its pin"
+        );
+    }
+}
+
 // ============================================ the three flags, off and on
 
 const SHIPPED_KINDS: [&str; 11] = [

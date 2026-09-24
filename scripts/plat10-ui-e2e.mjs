@@ -613,7 +613,7 @@ function mcJob(step, script) {
           spec: {
             restartPolicy: "Never",
             containers: [{
-              name: "mc", image: "minio/mc:latest", imagePullPolicy: "IfNotPresent",
+              name: "mc", image: "docker.io/vladyslavhaina/mc-mirror@sha256:4824f9b00fd4ca9e3b7d61f66211450cd5d63f5f99d3170654af49568869b77b", imagePullPolicy: "IfNotPresent",
               command: ["/bin/sh", "-ec"],
               args: ["mc alias set p10 \"$S3_ENDPOINT\" \"$AWS_ACCESS_KEY_ID\" " +
                 "\"$AWS_SECRET_ACCESS_KEY\" >/dev/null; " + script],

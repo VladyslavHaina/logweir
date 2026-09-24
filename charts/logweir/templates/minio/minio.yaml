@@ -6,8 +6,9 @@ PersistentVolumeClaim or an emptyDir, the root credential Secret, and the
 (default: the release namespace; a scoped controller must watch it), minted
 from the root pair (demo-only; a production install brings its own archive and
 its own Secret and leaves `minio.enabled` false). The images are the compose
-stack's, pinned by digest at quay.io. Nothing in this file renders unless the
-flag is on.
+stack's: the project's rebuild mirror of the withdrawn upstream MinIO images,
+pinned by digest (third_party/minio-mirror/README.md). Nothing in this file
+renders unless the flag is on.
 */}}
 {{- if .Values.minio.enabled }}
 {{- $name := printf "%s-minio" .Release.Name }}

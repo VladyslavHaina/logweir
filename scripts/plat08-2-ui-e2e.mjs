@@ -352,7 +352,7 @@ function mcJob(step, script, extraEnv) {
         spec: {
           restartPolicy: "Never",
           containers: [{
-            name: "mc", image: "minio/mc:latest", imagePullPolicy: "IfNotPresent",
+            name: "mc", image: "docker.io/vladyslavhaina/mc-mirror@sha256:4824f9b00fd4ca9e3b7d61f66211450cd5d63f5f99d3170654af49568869b77b", imagePullPolicy: "IfNotPresent",
             command: ["/bin/sh", "-ec"],
             args: ["mc alias set p082 \"$S3_ENDPOINT\" \"$ROOT_USER\" \"$ROOT_PASSWORD\" >/dev/null; " +
               script],

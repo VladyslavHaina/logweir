@@ -80,9 +80,9 @@ STATE_PATH = OUT / "state.json"
 
 KAFKA_IMAGE = "apache/kafka:3.7.1"
 KAFKA_BIN = "/opt/kafka/bin"
-MINIO_IMAGE = "minio/minio:latest"
+MINIO_IMAGE = "docker.io/vladyslavhaina/minio-mirror@sha256:a707398148b545774fc98264d16e76307f1b3727f77b1cc49c67ccde8998709d"
 MINIO_ROOT_USER = "d2w14root"
-MC_IMAGE = "minio/mc:latest"
+MC_IMAGE = "docker.io/vladyslavhaina/mc-mirror@sha256:4824f9b00fd4ca9e3b7d61f66211450cd5d63f5f99d3170654af49568869b77b"
 
 state: dict[str, Any] = (
     json.loads(STATE_PATH.read_text()) if STATE_PATH.is_file() else {}
@@ -615,7 +615,7 @@ def minio_objects(name: str, *, tls: bool) -> list[dict[str, Any]]:
     container: dict[str, Any] = {
         "name": "minio",
         "image": MINIO_IMAGE,
-        "imagePullPolicy": "Never",
+        "imagePullPolicy": "IfNotPresent",
         "args": ["server", "/data"],
         "env": [
             {"name": "MINIO_ROOT_USER", "value": MINIO_ROOT_USER},
@@ -708,7 +708,7 @@ def mc_pod() -> dict[str, Any]:
                 {
                     "name": "mc",
                     "image": MC_IMAGE,
-                    "imagePullPolicy": "Never",
+                    "imagePullPolicy": "IfNotPresent",
                     "command": ["/bin/sh", "-c"],
                     "args": [script],
                     "volumeMounts": [{"name": "ca", "mountPath": "/ca", "readOnly": True}],
@@ -6102,7 +6102,7 @@ def u6_mc_pod() -> dict[str, Any]:
         "spec": {
             "restartPolicy": "Never", "automountServiceAccountToken": False,
             "containers": [{
-                "name": "mc", "image": MC_IMAGE, "imagePullPolicy": "Never",
+                "name": "mc", "image": MC_IMAGE, "imagePullPolicy": "IfNotPresent",
                 "command": ["/bin/sh", "-c"], "args": [script],
                 "env": [
                     {"name": "MC_CONFIG_DIR", "value": "/tmp/mcconfig"},

@@ -28,13 +28,29 @@ source, for linux/amd64 and linux/arm64.
 
 | mirror | index digest (amd64 + arm64) |
 |---|---|
-| `docker.io/vladyslavhaina/minio-mirror:RELEASE.2025-09-07T16-13-09Z` | `@@MINIO_INDEX@@` |
-| `docker.io/vladyslavhaina/mc-mirror:RELEASE.2025-08-13T08-35-41Z` | `@@MC_INDEX@@` |
+| `docker.io/vladyslavhaina/minio-mirror:RELEASE.2025-09-07T16-13-09Z` | `sha256:a707398148b545774fc98264d16e76307f1b3727f77b1cc49c67ccde8998709d` |
+| `docker.io/vladyslavhaina/mc-mirror:RELEASE.2025-08-13T08-35-41Z` | `sha256:4824f9b00fd4ca9e3b7d61f66211450cd5d63f5f99d3170654af49568869b77b` |
 
-Both repositories are public; every reference in this tree pins the digest,
-never the tag (`crates/logweir/tests/chart_lint.rs`,
+Every reference in this tree pins these digests, never the tags
+(`crates/logweir/tests/chart_lint.rs`,
 `chart_lint_every_minio_image_reference_is_the_mirror_digest`, refuses any
 other MinIO reference outside this directory and `THIRD_PARTY_NOTICES.md`).
+They are the digests of the images `build.sh` built and loaded on 2026-09-24
+from recipe commit `719b57ce` (the image label
+`io.logweir.mirror.recipe-revision`); the build is not bit-reproducible, so
+those exact images are the ones published, with `build.sh --push-loaded`, which
+refuses to report success unless Docker Hub answers with the same digest.
+
+**Publication status.** [UNVERIFIED — the first push was refused because this build host holds no Docker Hub login; publication and the anonymous-pull check are owed.]
+Until then a host without the two images in its local store cannot pull
+them. After `docker login docker.io` as the repository owner:
+
+```bash
+bash third_party/minio-mirror/build.sh --push-loaded
+# both repositories must then be Public on Docker Hub; check anonymously:
+docker buildx imagetools inspect docker.io/vladyslavhaina/minio-mirror@sha256:a707398148b545774fc98264d16e76307f1b3727f77b1cc49c67ccde8998709d
+docker buildx imagetools inspect docker.io/vladyslavhaina/mc-mirror@sha256:4824f9b00fd4ca9e3b7d61f66211450cd5d63f5f99d3170654af49568869b77b
+```
 
 ## Provenance: how the images are built
 
@@ -127,8 +143,8 @@ The differences, all deliberate:
 ## Verifying an image
 
 ```bash
-docker run --rm --entrypoint minio docker.io/vladyslavhaina/minio-mirror@@@MINIO_INDEX@@ --version
-docker run --rm docker.io/vladyslavhaina/mc-mirror@@@MC_INDEX@@ --version
+docker run --rm --entrypoint minio docker.io/vladyslavhaina/minio-mirror@sha256:a707398148b545774fc98264d16e76307f1b3727f77b1cc49c67ccde8998709d --version
+docker run --rm docker.io/vladyslavhaina/mc-mirror@sha256:4824f9b00fd4ca9e3b7d61f66211450cd5d63f5f99d3170654af49568869b77b --version
 bash third_party/minio-mirror/smoke.sh <minio-image> <mc-image> linux/arm64 /tmp/smoke.tsv
 ```
 
