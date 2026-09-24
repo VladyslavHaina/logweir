@@ -730,6 +730,7 @@ as `system:serviceaccount:<release-namespace>:weirkeeper`, scoped to `team-a`):
 | `get configmaps/weirkeeper-policy -n <release-namespace>` | yes |
 | `get configmaps/<any other> -n <release-namespace>`, `get secrets` anywhere | **no** |
 | `list trustpolicies`, `get trustrosters` (cluster-scoped) | yes |
+| `patch trustpolicies` (cluster-scoped; the `logweir.dev/compromise-revocation` finalizer only, see `docs/keys.md`) | yes |
 
 **Required for `api.console.mode: shared`**, which the chart refuses without a
 list or with one that names the release namespace: the console's session and

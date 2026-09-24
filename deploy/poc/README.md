@@ -338,7 +338,10 @@ first use: `SIGNING_NOT_BEFORE=<RFC 3339 UTC> bash deploy/poc/trustpolicy.sh …
 A window that opens too late turns every earlier receipt `Untrusted
 (SignedOutsideValidity)`, and `notBefore` is immutable on a key (the CRD's CEL
 rule), so the only repair is to delete the `TrustPolicy` and apply a corrected
-one; the controller re-judges the namespace's evidence within seconds.
+one; the controller re-judges the namespace's evidence within seconds. A policy
+that already records a `KeyCompromise` revocation is held on deletion until
+another policy records it, so there apply the corrected policy under a new name
+first ([docs/keys.md](../../docs/keys.md), *Replacing a `TrustPolicy` safely*).
 
 ## 9. First sign-in, per role
 

@@ -117,7 +117,7 @@ under its item below.
    release and successive `helm upgrade`s: first the image values (controller,
    runner and console move together), then the `approvalPolicy.*` values.
 
-### The fifteen operator-facing changes
+### The sixteen operator-facing changes
 
 Each item names what changed, what to do, what the claim rests on (its
 verification scope), and how to roll it back. Every one of them was collected
@@ -432,6 +432,55 @@ refuses its configuration file and does not start. An older controller has no
 pool: it reads `Queued` as an active phase and starts every queued run at
 once. An older console shows a queued run as `unknown` (`UnrecognizedPhase`).
 
+#### 16. A compromise revocation outlives its `TrustPolicy`; deleting one may wait
+
+**Changed.** On the PoC install (rehearsal R2) a `TrustPolicy` revoked the
+installation signer for `KeyCompromise`, every backup it had signed turned
+`Untrusted`, and deleting the policy sent the namespace back to
+`legacy-roster-v1`, whose roster still listed the key: all six backups
+re-verified `Valid` (TRUSTPOLICY-DELETE-DROPS-REVOCATION). A compromise is now
+a fact about the key, not the policy:
+
+- **Every namespace.** A key ANY `TrustPolicy` records as `Revoked` /
+  `KeyCompromise` is revoked for compromise wherever it is listed — the
+  recording policy's namespaces, a namespace re-bound away from it, one that
+  falls to the roster, and one governed by another policy that still lists the
+  key `Active`. Evidence verification and re-trust, the catalog view, the
+  runner's evidence keyring, fresh and consumed approvals, `signer.rostered`,
+  the API's `trust.state` and the keys view all read it; the refusal names the
+  recording policy. A `Superseded` revocation is not carried.
+- **Deleting a recording policy is held.** The controller places the finalizer
+  `logweir.dev/compromise-revocation` on it and releases a `kubectl delete` only
+  when another live policy records the same revocation, or nothing (no other
+  policy, not `TrustRoster/default`) lists the key. Until then the policy stays
+  `Terminating` and keeps governing; `CompromiseGuard=True/DeletionBlocked`
+  names what still lists the key.
+- **CEL rule G9:** a revoked key's `KeyCompromise` reason can no longer be
+  edited to `Superseded` or removed.
+- **The controller now holds `patch` on `trustpolicies`** (the object, beside
+  `/status`) for that finalizer and nothing else; the body is pinned by a test.
+
+**Do:** before this upgrade, nothing. After it, replace a policy that records a
+compromise by applying a successor under a new name first
+([keys.md](keys.md), *Replacing a `TrustPolicy` safely*); the delete-and-re-create
+repair for a mistaken `notBefore` still works unchanged for a policy that
+records no compromise. Wait until a newly revoked policy lists the finalizer
+before deleting it: a policy revoked and deleted before the controller saw it is
+not guarded. **Scope:** `crates/weirkeeper/tests/trust_revocation_consumers.rs`
+(one row per consumer; eight of ten fail on the previous commit),
+`trust_revocation_durable.rs` (the guard table and the finalizer over a route
+table enforcing seam S7), `crd_shape.rs` (G9), `approval_policy.rs`,
+`crates/logweir-api/tests/trust_revocation_durable.rs`, `ui/tests/d3.spec.js`,
+and planted mutants, each killed. [UNVERIFIED — the finalizer, the held delete and G9 have not been applied to a live API server; the live rows run at the next lab refresh.]
+**Rollback:** an older controller never removes the finalizer, so a deletion
+made while it runs is held until this build returns; an older
+`TrustPolicy`-aware controller applies a compromise only in the recording
+policy's own namespaces, and `v0.1.5` reads only the roster and trusts every key
+it lists. So before rolling back, re-create `TrustRoster/default` without every
+compromise-revoked key and record each compromise on every policy that still
+lists the key (rollback step 9 below). G9 stays with the CRDs, which a rollback
+leaves in place.
+
 ### Verification scope: what "verified" means in this release
 
 - **A green badge** means the signed document's signature verified under a key
@@ -509,6 +558,14 @@ is converted and no stored object is rewritten
    (they were hand-provisioned at `v0.1.5`); re-create them before the next run,
    or every run fails `serviceaccount "logweir-runner" not found` (found by the
    PoC install's upgrade rehearsal R1, 2026-09-24).
+9. **Take every compromised key out of the roster first** (item 16). An older
+   controller cannot carry a `KeyCompromise` revocation across policies, and
+   `v0.1.5` cannot express one at all: re-create `TrustRoster/default` without
+   every key any `TrustPolicy` revoked for `KeyCompromise` (a policy's
+   `CompromiseGuard` message says "TrustRoster/default still lists …" while
+   one is there), and record each such revocation on every policy that still
+   lists the key (`CompromiseInherited`). Do not delete a policy to "go back to
+   the roster" before that: it is held until nothing lists the key.
 
 **How this upgrade is rehearsed.** From `v0.1.5` (the last version tag: 6 →
 14 CRDs, the managed identity adopting a hand-provisioned signer, the console

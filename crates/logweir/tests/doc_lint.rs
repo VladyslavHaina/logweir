@@ -1619,9 +1619,9 @@ fn the_release_notes_carry_every_owed_operator_action() {
     let numbers: Vec<u32> = items.iter().map(|(n, _)| *n).collect();
     assert_eq!(
         numbers,
-        (1..=15).collect::<Vec<u32>>(),
-        "the release entry must carry exactly fifteen operator-facing changes, `#### 1.` to \
-         `#### 15.` in order; found {numbers:?}"
+        (1..=16).collect::<Vec<u32>>(),
+        "the release entry must carry exactly sixteen operator-facing changes, `#### 1.` to \
+         `#### 16.` in order; found {numbers:?}"
     );
 
     for ((number, body), (item, token)) in items.iter().zip([
@@ -1645,6 +1645,8 @@ fn the_release_notes_carry_every_owed_operator_action() {
         ("a point with no saved destination", "legacySourceArchive"),
         // P10 (2026-09-24): manual runs may queue, and "Back up now" is limited.
         ("the manual-run pool", "ConcurrencyLimited"),
+        // TRUSTPOLICY-DELETE-DROPS-REVOCATION (2026-09-24): the compromise guard.
+        ("the compromise guard", "logweir.dev/compromise-revocation"),
     ]) {
         assert!(
             body.contains(token),

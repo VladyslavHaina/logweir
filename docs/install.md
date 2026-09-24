@@ -711,7 +711,10 @@ who could edit one could add their own key and then approve their own restore.
 It carries no `delete` — deleting a policy does not retire a key, it removes
 the binding that governs a namespace and sends every namespace it bound back to
 the legacy roster, which is a widening dressed as a cleanup. Withdrawing trust
-is an edit.
+is an edit. A policy that records a `KeyCompromise` revocation is held by the
+controller's `logweir.dev/compromise-revocation` finalizer until the revocation
+is recorded elsewhere ([keys.md](keys.md), *Replacing a `TrustPolicy`
+safely*).
 
 **`logweir-retention-admin` is namespaced and needs a `RoleBinding` per
 namespace.** It is the only holder of a write verb on `retentionpolicies`:
