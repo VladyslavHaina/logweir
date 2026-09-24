@@ -1557,6 +1557,11 @@ PHASES = {
     "case-c": case_c,
     "case-d": case_d,
     "case-e": case_e,
+    # Each arm alone (lab-refresh-10): the receipt-dup negative control runs the
+    # CLAIMED arm under the pre-fix runner, and `case-e` stops at the first arm
+    # that fails, which under that runner is the unclaimed one.
+    "case-e-claimed": case_e_claimed,
+    "case-e-unclaimed": case_e_unclaimed,
     "case-f": case_f,
     "case-g": case_g,
     "report": report,
