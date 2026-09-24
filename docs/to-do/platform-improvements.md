@@ -238,7 +238,7 @@ runner from main with the standing fix, `claude/verdict-precedence`, `claude/evi
 | PLAT-10.1 / 10.2 | Done | plat10, plat10-finish, lab-refresh-8 (+ two reviews) | Completion record under PLAT-10.2; live on docker-desktop 2026-09-23 incl. create → backup → detail → restore. |
 | PLAT-08.2, 12.1, 12.2, 14.1, 14.2, 15.1, 15.2, 16.2, 18.2, 19.2, 20.1 | Done | (see each record) | Completion records under each task; live on docker-desktop 2026-09-23 (lab-refresh-9 and harness-rows-12, main `306cebf`). |
 | PLAT-14.3 | Done | rehearsal-catalog-trust, rehearsal-fix, reserve-commit, lab-refresh-9/10/11 (+ reviews) | Completion record under PLAT-14.3; live on docker-desktop 2026-09-24 (lab-refresh-11, main `86a554e`), every tracker test. |
-| PLAT-17.2 (PLAT-08.2, 12.1, 15.2, 19.2, 20.1 Done 2026-09-23) | In progress (source on main since `ac00819`, 2026-09-23: seven accepted branches integrated in `claude/integration-2`, gate 3,545/0; each passed its own Tier-A or Tier-B review and re-check; live evidence so far is each worker's own journey; Done records wait for lab-refresh-9 on a build that carries them) | plat08-2, plat15-2, plat17-2, plat19-2, plat20-1, integration-2 (+ reviews) | Worker reports `claude/<branch>.result.md` and reviews `claude/<branch>.review.md`. Decisions at integration: the `values.yaml` lint ceiling rises 230→232 (two reviewed option sets); a catalog-point restore writes evidence to the point's own destination. |
+| PLAT-17.2 (PLAT-08.2, 12.1, 15.2, 19.2, 20.1 Done 2026-09-23) | Done 2026-09-24 (see its record; PoC round on the real Traefik + Dex ingress); was: In progress (source on main since `ac00819`, 2026-09-23: seven accepted branches integrated in `claude/integration-2`, gate 3,545/0; each passed its own Tier-A or Tier-B review and re-check; live evidence so far is each worker's own journey; Done records wait for lab-refresh-9 on a build that carries them) | plat08-2, plat15-2, plat17-2, plat19-2, plat20-1, integration-2 (+ reviews) | Worker reports `claude/<branch>.result.md` and reviews `claude/<branch>.review.md`. Decisions at integration: the `values.yaml` lint ceiling rises 230→232 (two reviewed option sets); a catalog-point restore writes evidence to the point's own destination. |
 | PLAT-11.2 | Done | ui-restore-selection, d2w13, d3w12, plat11-2 (+ two reviews) | Completion record under PLAT-11.2; live on docker-desktop 2026-09-22, all eight tests through the console. |
 | PLAT-07.2 | Superseded — Done (see the PLAT-07.2 Done row below) | ui072, ui072-review | Partial record under PLAT-07.2. Integrated into main as `8bbe4d1..b65f23f`. "Test connection" cannot yet force a re-probe (D2 W13). | Saved-cluster selector by UID, probe vocabulary, freshness budget; live 20/20 |
 | PLAT-13.2 | Done | ui-correct, ui-correct-review, ui-correct-fix | Completion record under PLAT-13.2. Integrated into main as `2a34abd..8020876`. |
@@ -411,6 +411,26 @@ surviving. None is fixed yet except where a worker is named.
 | RESTORE-STALE-CACHE-409-WARN | LOW (lab-refresh-11 Class sweep). `controllers/restore.rs:5965`: the `running_status_patch` written right after "created the runner Job" is refused 409 on a stale watch-cache object and logged `WARN restore reconcile failed; requeueing` (33 times in one lab run, rehearsal and console Restores alike). Self-healing: the next pass observes the Job and every run completed correctly. Owed: find what writes the Restore between the watch event and the pass and thread that version, or lower the log. Open. | PLAT-14.1 (follow-up) |
 | REHEARSAL-RECOVERY-LOG-NOISE | INFO (lab-refresh-11). `rehearsal_schedule.rs` `recover_reservation`/`commit`: a pass handed a cache object that predates the fire pass's landed commit runs the recovery arm and logs a 409; nothing is written and the landed commit stands. Compare the handed resourceVersion with `activeRestoreRef` first, or log at debug. Open. | PLAT-14.3 (follow-up) |
 | BACKUP-UNSCHEDULABLE-SAYS-CHECK-POD | LOW (lab-refresh-10/11). `check/waiting.rs:180`: a Backup's unschedulable message says "the check pod". Open. | PLAT-14.1 (follow-up) |
+| MINIO-IMAGES-WITHDRAWN | External. MinIO withdrew its public images: Docker Hub deleted `minio/minio` and `minio/mc` on 2026-09-11, and `quay.io/minio/*` has answered anonymous pulls 401 since ~2026-09-24 12:55 UTC. CI's `e2e` job (`just e2e-up`) went red on `5b019ec` and `3b09059`, which blocked publication; the chart's demo MinIO and the PoC demo archive pin the same images. User decision (2026-09-24): mirror now, replace later. Because only the arm64 halves were cached on the host, the same releases (MinIO `RELEASE.2025-09-07T16-13-09Z` @ `01ce918d`, mc `RELEASE.2025-08-13T08-35-41Z` @ `7394ce0d`) are rebuilt from the archived upstream source for amd64 and arm64 and published as `docker.io/vladyslavhaina/minio-mirror` and `mc-mirror` (AGPL-3.0, with source labels). In progress on `claude/minio-mirror`. | CI / PLAT-20.2 |
+| REPLACE-MINIO | Follow-up task (user decision 2026-09-24). Replace MinIO in the e2e stack, the demo chart and the PoC with a maintained, permissively licensed S3 server. First re-validate everything Logweir relies on: `mc admin` users and policies (least privilege), versioning and Object Lock (retention `VersionedBucket`), conditional create (`If-None-Match`, the execution claim), SlowDown behaviour. Open; not started. | CI / PLAT-20.2 |
+| POC-CONSOLE-SHARED-P1-P2-P4 | Found by the PoC round (2026-09-24, `claude/poc-install.result.md` §5). P4 (high for disaster restore): Catalog → Connect sent no `X-CSRF-Token`, so it was refused 403. P2: the wizard read CR fields the API projection lacks, so every point read "unverified". P1: legacy masthead in the shared console. **Fixed on main `3b09059`** (`claude/console-shared-fix`, plus four more items from the class sweep); live re-proof owed on the next publication. | PLAT-17.2 / PLAT-15.2 / PLAT-18.2 |
+| POC-LEGACY-POINT-P3-P5-P6 | PoC round. For points written before destinations (v0.1.5): P3, readiness refuses them (`ArchiveUrlUnreadable`) and then disables Create; P5, the wizard hard-codes the evidence bucket, so the restore gets no verdict and no completion; P6, the catalog `Full` sync doesn't see pre-catalog archives, and the help text says it does. Fix on `claude/legacy-point-restore` (Tier-A review running). | PLAT-20.2 / PLAT-15.1 |
+| POC-P7-P8-P9 | PoC round. P7: in shared mode, typed connection and schedule names are discarded (the API mints them); D11, README §10 names can't be produced. P8: *Test access* never shows its ready result. P9 (high): after `maxAgeSeconds` the controller re-judges the Approval of an admitted, finished Restore as `AuthorizationExpired`, drops its recorded authorization and hot-loops (~42 WARN/s, apiserver 100%+). Fix on `claude/poc-fixes-2` (running). | PLAT-19.2 / PLAT-12.x / PLAT-07.x |
+| MANUAL-RUN-UNBOUNDED | P10, PoC round. Nothing bounds manual *Back up now*: 100 accepted runs became 100 runner pods, docker-desktop hit its 110-pod limit, the node went NotReady, and MinIO answered SlowDown. Evidence fetches ARE bounded (4 per namespace). Fix on `claude/manual-run-bound` (running): a per-namespace active-Job bound with a visible queue, plus a per-principal API rate limit. | PLAT-04.x / PLAT-17.x |
+| TRUSTPOLICY-DELETE-DROPS-REVOCATION | Observation from the PoC round (R2), to be assessed: deleting a TrustPolicy drops a compromise revocation it recorded while `TrustRoster/default` still lists the key, so the key's evidence may read trusted again under the legacy roster. Security-relevant; severity not yet decided. Open. | PLAT-19.1 / PLAT-08.x |
+| POC-DOC-D1-D11 | PoC round doc and profile defects, D1–D10 **fixed on main `7beb7c8`** (`claude/poc-install`):
+  - D1: Dex needs a writable `/tmp`.
+  - D2: CRD apply needs `--force-conflicts`, now with a `doc_lint` guard.
+  - D3: stale NOTES.txt.
+  - D4: hook logs.
+  - D5: `trustpolicy.sh` signer window.
+  - D6: rollback deletes adopted objects.
+  - D7: uninstall deletes the MinIO PVC.
+  - D8: R2 console "Ready but sign-in 503".
+  - D9: `revokedAt` in `docs/keys.md`.
+  - D10: uninstall "what remains".
+
+  D11 (README §10 names) depends on P7. | PLAT-20.2 |
 | CATALOG-POINT-STATE-NOT-IN-CHECK-INPUTS | LOW, pre-existing (catalog-referent review). A restore check binds its `RecoveryCatalog` by UID, and the catalog's spec is immutable except `syncRequest`, but the chosen point's catalogued state is not among the check's recorded inputs, so a re-sync that changes that point (e.g. its trust or its receipt) does not mark the check stale. Bounded: the runner re-verifies the point's signed receipt and signer at restore time and refuses an untrusted point (exit 3 `PointUntrusted`). Open. | PLAT-08.2 / PLAT-15.2 (follow-up) |
 | TEST-APPROVAL-UNPINNED-TIMING | LOW, test only. `weirkeeper` `approval.rs::an_unpinned_approver…` failed at 15–55 s against its 15 s bound on a loaded host (four agents compiling; seen by the `claude/readiness-principal` worker); it passes on re-run and at base, and no product path changed. Fix: a bound that measures the controller's own work rather than wall time, or a documented larger budget. Open. | — |
 | RECEIPT-DUP-UPGRADE-WINDOW | An execution whose first run was made by a runner without the execution claim, re-created after the upgrade (the runner image is not frozen in the execution inputs), is claimed successfully by the new runner and the engine overwrites the old run's manifest. Mitigation: release notes, "let in-flight Backups finish before upgrading". Fix (follow-up): a pre-engine manifest-exists refusal, after the engine test doubles write the manifest. Open. | PLAT-06.1 / PLAT-20.2 |
@@ -3641,6 +3661,29 @@ no event stream (PLAT-14.1); the legacy direct proxy is neither removed nor
 isolated; revocation is bounded by the ≤ 15-minute expiry; the session key
 bytes and CSRF subkey are not zeroised (only the client secret is).
 
+**Completion record — Done (2026-09-24), PLAT-17.2.**
+- **Where:** the PoC install on docker-desktop (v1.34.1), round `claude/poc-install` (merged `7beb7c8`; report `claude/poc-install.result.md` §7; artifacts `claude/artifacts/poc-install/final/p172/`, `final/governed/`, `final/g6-restart.log`, `final/checks.log`).
+- **What was installed:**
+  - a real TLS ingress: Traefik 41.6.0 with a cert-manager v1.21.2 local CA;
+  - a real OIDC provider: Dex 0.24.1, static users bound by subject;
+  - the scoped chart install from the **published** chart `0.1.0-sha-86a554e6…`, with images `weirkeeper@sha256:7dc60dd7…`, `logweir-console@sha256:5c45eedb…` (2 replicas) and runner `logweir@sha256:0aba7749…`.
+- **Harness:** `scripts/live/poc/p172_ingress.py` — `phase1`, `save`, then `expired` more than 930 s later.
+- **Every tracker test passed on the real entry point:**
+  - phase1 **58/58**: TLS, the redirect and the security headers; sign-in ×4 with a `__Host-`/`Secure`/`HttpOnly`/`Path=/` cookie and no `Domain`; the role matrix, with object counts before and after every denied mutation.
+  - The operator is refused approval submission (403); the trust read is administrator-only.
+  - Unauthorized namespaces answer a byte-identical 404.
+  - Forged `X-Remote-*`, `X-Forwarded-User` and `X-Auth-Request-*` headers are ignored, and `Impersonate-User` is refused.
+  - CSRF ×5, plus a non-JSON content type; no CORS headers; a garbled cookie is refused.
+  - Unauthenticated API ×4 and SSE are refused; SSE across namespaces is 404.
+  - The legacy proxy paths are 404, and no `logweir-ui` is deployed.
+  - Audit attribution is recorded on all four kinds, with 0 secrets in 1.6 MB of console logs.
+  - Expired session **3/3** (refused at 1,205 s; the control accepted at 859 s). No-role user **5/5**.
+  - Negative control: the same refused mutation is admitted WITH the token and the Origin.
+  - G6: the trusted set follows a Traefik rollout, and another namespace's pod gets 421.
+  - Governed separation of duties: requester and approver recorded as different principals.
+- **Known limit, accepted as before:** docker-desktop does not enforce NetworkPolicy. The policies are applied, and the probe records the non-enforcement.
+- **Not PLAT-17.2 acceptance, tracked separately:** console defects P1–P8 and P9 (rows POC-*).
+
 **Live validation (2026-09-23, lab-refresh-9 (lab at main `306cebf`: controller `sha256:f71fdcb4…`, runner `sha256:db8d8ade…`; report `claude/lab-refresh-9.result.md`; artifacts `claude/artifacts/lab-refresh-9/` and `claude/artifacts/{d2,d3}-live/lr9*`)) — stays In progress.** Proven on `306cebf`: role matrix, forged headers, unauthorized namespace, CSRF, unauthenticated API and stream, the trusted-entry 421, audit attribution, denied mutation (32/32), `auth can-i` 77/77, the scoped controller with 0 refused calls. Remaining: a real ingress with TLS and a scoped chart install (both proven by the PoC install on docker-desktop: Traefik + cert-manager + Dex, `claude/chart-poc`), and an expired-session row (`claude/harness-rows-12`). NetworkPolicy deny cannot be measured on Docker Desktop (no enforcing CNI); the policies are rendered and render-tested.
 
 ## PLAT-18 — Strengthen UI structure without a speculative rewrite
@@ -3997,6 +4040,16 @@ unfinished spikes remain explicitly proposed.
 IDs, commit/image identities, tested environments, results, limitations and
 rollback instructions. Update this tracker per task rather than claiming the
 entire roadmap complete after one release.
+
+**Live validation (2026-09-24, the PoC install round, published chart and images at `86a554e`; report `claude/poc-install.result.md` §8) — stays In progress.**
+- **Proven:**
+  - (1) a clean install from an empty cluster;
+  - (2) upgrades R1 (`v0.1.5`) and R2 (`sha-f49849d`), each with its rollback. Identities, schedules and archive readability were retained, and 17/17 receipts were verified independently;
+  - (3) the recovery rehearsal through the console (backup Valid, restore Succeeded with completion, scorecards VALID), a catalog-verified point-bound restore, and a Governed restore approved by a second person;
+  - (4) large-catalog measurements at 258 points (`docs/stability.md`);
+  - (5) release-notes items 12–13 added.
+- **Owed before Done:** re-prove on the next publication — console P2/P3/P4/P5/P8, P7 with D11, P9 and P10 — through the documented upgrade path. That publication is blocked on MINIO-IMAGES-WITHDRAWN.
+- **Not reached:** 1,000 points (host emulation plus P10).
 
 **Release notes owed (collected 2026-09-23 for this task to publish).** Every merged change whose behaviour an operator must know about:
 1. **Retention — required action:** grant the retention delete credential `s3:GetObject` on `<bucket>/<prefix>/*` before upgrading. Without it the enforcer deletes nothing (`VersionProbeRefused`); a policy degraded for that reason re-probes 24 h after its last run, or resumes at once on a spec edit.
