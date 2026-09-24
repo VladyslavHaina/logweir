@@ -53,12 +53,23 @@ HELM = ["helm", "--kube-context", "docker-desktop"]
 LAB_NS = "logweir-scram-local"
 LAB_DEPLOYMENT = "weirkeeper"
 LAB_RELEASE = "scram-local"
-LAB_CLUSTER_OBJECTS = [
-    ("clusterrole", "weirkeeper"),
-    ("clusterrolebinding", "weirkeeper"),
-    ("clusterrole", "logweir-viewer"),
-    ("clusterrole", "logweir-operator"),
-    ("clusterrole", "logweir-approver"),
+# The cluster-scoped objects a test release of this chart adopts with
+# `--take-ownership` and deletes on uninstall are whatever the chart renders:
+# `chart_cluster_objects` reads them from `helm template` at run time. A fixed
+# list here drifted once already (the chart grew `logweir-trust-admin` and
+# `logweir-retention-admin`, which the lab's restore then silently lost).
+CLUSTER_SCOPED_KINDS = {
+    "ClusterRole": "clusterrole",
+    "ClusterRoleBinding": "clusterrolebinding",
+    "ValidatingAdmissionPolicy": "validatingadmissionpolicy",
+    "ValidatingAdmissionPolicyBinding": "validatingadmissionpolicybinding",
+}
+# The value sets the phases install with, so every cluster-scoped object any
+# phase can render is recorded before the lab is touched.
+RENDER_VARIANTS = [
+    [],
+    ["--set-string", "identity.authorizedRunnerNamespaces[0]=lw-render-runner"],
+    ["--set", "identity.externalSecret.name=render-signer", "--set", "identity.externalSecret.key=identity.pem"],
 ]
 SINGLETON = "logweir-identity-singleton"
 SECRET = "logweir-signing-key"
@@ -189,6 +200,7 @@ def delete_exact(kind: str, name: str, uid: str, namespace: Optional[str] = None
         "namespace": ("/api/v1", "namespaces"),
         "job": ("/apis/batch/v1", "jobs"),
         "clusterrole": ("/apis/rbac.authorization.k8s.io/v1", "clusterroles"),
+        "clusterrolebinding": ("/apis/rbac.authorization.k8s.io/v1", "clusterrolebindings"),
         "validatingadmissionpolicy": ("/apis/admissionregistration.k8s.io/v1", "validatingadmissionpolicies"),
         "validatingadmissionpolicybinding": (
             "/apis/admissionregistration.k8s.io/v1",
@@ -642,22 +654,106 @@ def comparable(obj: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def chart_cluster_objects(docs: List[Any]) -> List[Tuple[str, str]]:
+    """The non-hook cluster-scoped objects in a rendered chart, as (kubectl kind, name).
+
+    Hook objects are excluded: the only one, the identity singleton marker, is
+    `keep` and is removed by `delete_singleton` after its release's teardown.
+    A document without a namespace whose kind is not a known cluster-scoped
+    kind is refused, so a new cluster-scoped kind cannot slip past the record.
+    """
+    found = set()
+    for doc in docs:
+        if not doc:
+            continue
+        metadata = doc.get("metadata") or {}
+        if "helm.sh/hook" in (metadata.get("annotations") or {}):
+            continue
+        kind = doc.get("kind")
+        if kind in CLUSTER_SCOPED_KINDS:
+            found.add((CLUSTER_SCOPED_KINDS[kind], metadata["name"]))
+        elif not metadata.get("namespace"):
+            raise RuntimeError(f"rendered {kind}/{metadata.get('name')} has no namespace and no known cluster scope")
+    return sorted(found)
+
+
+def render_cluster_objects() -> List[Tuple[str, str]]:
+    found = set()
+    for variant in RENDER_VARIANTS:
+        text = run(HELM + ["template", LAB_RELEASE, str(CHART), "-n", LAB_NS, *variant]).stdout
+        found.update(chart_cluster_objects(list(yaml.safe_load_all(text))))
+    return sorted(found)
+
+
+def release_annotation(obj: Dict[str, Any]) -> Optional[str]:
+    return (obj["metadata"].get("annotations") or {}).get("meta.helm.sh/release-name")
+
+
+def lab_owned(obj: Dict[str, Any]) -> bool:
+    """True for the lab release's own incarnation of a cluster-scoped object.
+
+    Helm-installed objects carry the release annotation. Objects a lab refresh
+    applied with `kubectl apply` from a later chart render carry no Helm
+    annotation, only the chart's `app.kubernetes.io/instance` label; those are
+    the lab's too. Any other Helm release's annotation wins over the label.
+    """
+    annotation = release_annotation(obj)
+    if annotation is not None:
+        return annotation == LAB_RELEASE
+    return (obj["metadata"].get("labels") or {}).get("app.kubernetes.io/instance") == LAB_RELEASE
+
+
+def test_release_names() -> set:
+    return {release for _namespace, release in NAMES.values() if release}
+
+
+def restore_action(recorded: Dict[str, Any], live: Optional[Dict[str, Any]]) -> str:
+    """What lab-restore must do with one recorded cluster-scoped object.
+
+    `recorded` is the lab_prepare record ({"absent": True} or a present
+    object's uid/comparable). Anything neither the lab's nor a test release's
+    is refused, never deleted.
+    """
+    key = recorded.get("key", "object")
+    if recorded.get("absent"):
+        if live is None:
+            return "absent"
+        if release_annotation(live) in test_release_names():
+            return "delete"
+        raise RuntimeError(f"{key} was absent before the run and is now owned by {release_annotation(live)!r}")
+    if live is None:
+        return "recreate"
+    if lab_owned(live):
+        return "present"
+    if release_annotation(live) in test_release_names():
+        return "reclaim"
+    raise RuntimeError(f"{key} is owned by {release_annotation(live)!r}; refusing to touch it")
+
+
 def lab_prepare() -> None:
     lock_held()
     if STATE.get("lab") is None:
         deployment = get("deployment", LAB_DEPLOYMENT, LAB_NS)
+        rendered = render_cluster_objects()
         objects = {}
-        for kind, name in LAB_CLUSTER_OBJECTS:
-            obj = get(kind, name)
-            annotations = obj["metadata"].get("annotations") or {}
-            if annotations.get("meta.helm.sh/release-name") != LAB_RELEASE:
+        absent = []
+        for kind, name in rendered:
+            obj = get_optional(kind, name)
+            if obj is None:
+                absent.append(f"{kind}/{name}")
+                continue
+            if not lab_owned(obj):
                 raise RuntimeError(f"{kind}/{name} is not owned by the lab release; refusing adoption")
             objects[f"{kind}/{name}"] = obj
         if get_optional("clusterrole", SINGLETON) is not None:
             raise RuntimeError(f"{SINGLETON} already exists; refusing to claim cluster identity")
         STATE["lab"] = {
             "deployment": deployment_identity(deployment),
-            "cluster_objects": {key: {"uid": obj["metadata"]["uid"], "comparable": comparable(obj)} for key, obj in objects.items()},
+            "rendered_cluster_objects": [f"{kind}/{name}" for kind, name in rendered],
+            "cluster_objects": {
+                **{key: {"uid": obj["metadata"]["uid"], "comparable": comparable(obj)} for key, obj in objects.items()},
+                **{key: {"absent": True} for key in absent},
+            },
         }
         save("lab/deployment-before.json", deployment)
         for key, obj in objects.items():
@@ -685,21 +781,24 @@ def lab_restore() -> Dict[str, Any]:
     for key, recorded in lab["cluster_objects"].items():
         kind, name = key.split("/", 1)
         live = get_optional(kind, name)
-        original = json.loads((OUT / f"lab/{kind}-{name}-before.json").read_text())
-        if live is not None:
-            annotations = live["metadata"].get("annotations") or {}
-            owner = annotations.get("meta.helm.sh/release-name")
-            if owner == LAB_RELEASE:
-                action = "present"
-            elif owner in {release for _namespace, release in NAMES.values() if release}:
-                # A test release still holds the adopted object (its teardown did
-                # not run); remove that incarnation and restore the lab's.
+        action = restore_action({"key": key, **recorded}, live)
+        if recorded.get("absent"):
+            if action == "delete":
+                # A test release created it and its teardown did not run.
                 delete_exact(kind, name, live["metadata"]["uid"])
-                run(k("create", "-f", "-"), stdin=json.dumps(stripped(original)))
-                action = "reclaimed"
-            else:
-                raise RuntimeError(f"{key} is owned by {owner!r}; refusing to touch it")
-        else:
+                action = "deleted"
+            if get_optional(kind, name) is not None:
+                raise RuntimeError(f"{key} was absent before the run and is still present")
+            result["cluster_objects"][key] = {"action": action, "absent_as_found": True}
+            continue
+        original = json.loads((OUT / f"lab/{kind}-{name}-before.json").read_text())
+        if action == "reclaim":
+            # A test release still holds the adopted object (its teardown did
+            # not run); remove that incarnation and restore the lab's.
+            delete_exact(kind, name, live["metadata"]["uid"])
+            run(k("create", "-f", "-"), stdin=json.dumps(stripped(original)))
+            action = "reclaimed"
+        elif action == "recreate":
             run(k("create", "-f", "-"), stdin=json.dumps(stripped(original)))
             action = "recreated"
         now_obj = get(kind, name)
@@ -1479,7 +1578,10 @@ def full() -> None:
             ],
             "lab_release_deployed": json.loads(run(HELM + ["status", LAB_RELEASE, "-n", LAB_NS, "-o", "json"]).stdout)["info"]["status"] == "deployed",
             "lab_controller_exact": restore["deployment_exact"],
-            "lab_cluster_rbac_equal": all(item["spec_labels_annotations_equal"] for item in restore["cluster_objects"].values()),
+            "lab_cluster_rbac_equal": all(
+                item.get("spec_labels_annotations_equal") is True or item.get("absent_as_found") is True
+                for item in restore["cluster_objects"].values()
+            ),
         }
         STATE["cleanup_checks"] = checks
         STATE["cases"]["chart_owned_cleanup_and_lab_restore"] = "passed" if all(checks.values()) else "failed"
