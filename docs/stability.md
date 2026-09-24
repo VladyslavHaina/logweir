@@ -546,6 +546,35 @@ largest size the product will page. Two shapes are worth knowing:
 separately), the broker's metadata round trip, and a catalog sync's walk of an
 archive in object storage, which is storage-bound and needs a bucket.
 
+**Measured live, on docker-desktop (2026-09-24, PoC install, main `86a554e6`).**
+The same surfaces through the real path — Traefik, TLS, the console's two
+replicas, the Kubernetes API server, the demo MinIO — over an archive of **258
+real points** (one schedule's runs, two topics each; the host could not sustain
+more, below). One machine, not budgets:
+
+| What | Measured |
+|---|---|
+| Catalog `Full` sync, create → `Synced` | 58.5 s (the sync Job 53 s); 258 of 258 `Available` and `Verified`, one page, not truncated |
+| Topic discovery, start → result | 27.0 s fresh (a check Job); 0.1 s when a fresh identical result is reused |
+| `GET …/backups`, every page (limit 200) | 258 rows in 2 pages, 3.0 s, 276 KB |
+| `GET …/catalogs/{name}/points`, every page | 258 rows in 2 pages, 6.6 s, 228 KB |
+| Schedule detail | p50 123 ms, max 220 ms (10 reads) |
+| Operation status of one run | p50 71 ms / p95 222 ms one at a time; p50 54 ms / p95 116 ms eight at a time (100 reads in 0.8 s) |
+| Session, namespaces, destinations, protection, catalog reads | p50 15–33 ms |
+| Console render in Chromium (viewer) | backups list 1.5–2.0 s, history 0.8–1.4 s, schedule detail 1.8–2.1 s, catalog detail 0.7–1.0 s |
+
+**What limited the archive's size is the host, and one product gap.** Every
+run and every evidence read is its own pod of the `linux/amd64` runner image,
+which docker-desktop on Apple silicon runs under emulation: an evidence fetch
+took 78 s at the median (p90 167 s), four at a time per namespace
+(`checks.maxEvidenceFetchActivePerNamespace`), so verification drained at about
+two runs a minute. **Nothing bounds manual "Back up now"**: a hundred accepted
+requests became a hundred simultaneous runner pods, which hit the node's
+110-pod limit, turned the node `NotReady` and drew MinIO `503 SlowDown` on
+evidence reads; even at sixteen pods in flight the node went `NotReady` again.
+Seed a large archive at a pace the cluster sustains, or on nodes that run
+`amd64` natively. [UNVERIFIED — a 1,000-point archive was not reached live; 258 points were measured, and the offline rows above carry the 5,000-row bounds.]
+
 **The regression checks are on work, not time.** A wall-clock assertion on a
 shared CI host is a flaky test, so `crates/logweir-api/tests/scale.rs` asserts
 the bounds above instead, in the default suite: a point page reads the catalog
