@@ -8,9 +8,20 @@ Every kubectl call names ``--context docker-desktop`` and every helm call names
 are cluster singletons, so the run requires the shared cluster lock, scales the
 lab release's controller to zero, records the lab release's cluster-scoped RBAC
 objects that a second release of this chart must adopt with
-``--take-ownership``, and re-creates them exactly after every test release is
-gone. Private key bytes exist only in this process's memory: evidence records
-SHA-256 digests, public key ids and public verification material.
+``--take-ownership`` (whatever ``helm template`` renders cluster-scoped, not a
+fixed list), and re-creates them exactly after every test release is gone. The
+CRDs the chart ships are recorded too: Helm 4 re-applies ``crds/`` on every
+install and a CRD cannot be re-created without deleting its objects, so the
+cleanup proof requires each to keep its uid and generation. Private key bytes
+exist only in this process's memory: evidence records SHA-256 digests, public
+key ids and public verification material.
+
+Environment: ``LOGWEIR_CHART_LIVE_OUT`` (evidence directory, holds
+``state.json``), ``LOGWEIR_CHART_LIVE_TS`` (namespace suffix; pin it when
+phases run as separate processes), ``LOGWEIR_CHART_LIVE_OWNER`` (must equal the
+owner that holds ``k8s-lock.sh``; also the namespaces' test-owner label).
+Phases: ``selftest``, ``full`` (runs ``report``), ``report``, ``lab-restore``.
+Offline rows: ``scripts/test_plat02_chart_live_rows.py``.
 """
 
 from __future__ import annotations
