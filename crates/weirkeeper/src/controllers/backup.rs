@@ -3079,8 +3079,8 @@ pub fn finished_status_patch(
 /// [`finished_status_patch`] with the runner's `failure-reason=` state
 /// ([`failure_state`]) — RECEIPT-DUP. When present it becomes
 /// `status.exitReason` and is named in the terminal condition's message, so
-/// `kubectl get backup` (the REASON column), the console's exit-reason cell
-/// and its message all say `ExecutionAlreadyClaimed` / `ExecutionClaimUnproven`
+/// `kubectl describe backup`, the console's exit-reason cell and its message
+/// all say `ExecutionAlreadyClaimed` / `ExecutionClaimUnproven`
 /// rather than a bare `operational` / `signing-or-lock` that reads like a
 /// broker or a signing-key problem. The condition's `reason` keeps GC11's
 /// CamelCase code, as it does for exit 3.

@@ -337,7 +337,6 @@ pub struct FrozenDestination {
     status = "BackupStatus",
     printcolumn = r#"{"name":"PHASE","type":"string","jsonPath":".status.phase"}"#,
     printcolumn = r#"{"name":"EXIT","type":"integer","jsonPath":".status.exitCode","description":"0 pass, 1 operational, 2 not-a-pass, 3 refused, 4 signing failed"}"#,
-    printcolumn = r#"{"name":"REASON","type":"string","jsonPath":".status.exitReason","description":"GC11's wire reason, or the more specific terminal state the runner named - GuardRefused, ExecutionAlreadyClaimed, ExecutionClaimUnproven, OrphanedScorecard, ..."}"#,
     printcolumn = r#"{"name":"RECORDS","type":"integer","jsonPath":".status.records"}"#,
     printcolumn = r#"{"name":"SIGNED","type":"string","jsonPath":".status.evidence.verification.result","description":"green needs this Valid AND exitCode 0"}"#,
     printcolumn = r#"{"name":"AGE","type":"date","jsonPath":".metadata.creationTimestamp"}"#

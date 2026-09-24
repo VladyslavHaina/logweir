@@ -4652,8 +4652,9 @@ If the lost Job's pod got that far, the re-created Job finds the claim and exits
 second engine run would have overwritten the manifest the first run's signed
 receipt attests. The `Backup` ends `Failed` with `status.exitReason:
 ExecutionAlreadyClaimed` (the runner's final `failure-reason=` line, lifted by
-the controller; `kubectl get backup` shows it in the `REASON` column and the
-console in the run's exit reason and message). Exit 1 is retryable, so a
+the controller; `kubectl describe backup` shows it on `status.exitReason` and
+the `Failed` condition's message, and the console in the run's exit reason and
+message). Exit 1 is retryable, so a
 schedule **with `spec.retry` configured** starts a **new** execution
 `<uid>-<slot>-r<k>`; without `spec.retry` (the default) the slot is recorded
 `RunFailed` and the next slot runs normally. A manual `Backup` is retried by

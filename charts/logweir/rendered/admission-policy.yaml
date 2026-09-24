@@ -772,10 +772,6 @@ spec:
       jsonPath: .status.exitCode
       name: EXIT
       type: integer
-    - description: GC11's wire reason, or the more specific terminal state the runner named - GuardRefused, ExecutionAlreadyClaimed, ExecutionClaimUnproven, OrphanedScorecard, ...
-      jsonPath: .status.exitReason
-      name: REASON
-      type: string
     - jsonPath: .status.records
       name: RECORDS
       type: integer
