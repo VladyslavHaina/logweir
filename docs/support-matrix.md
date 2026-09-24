@@ -78,6 +78,25 @@ phase 2"*. It needs a provisioned cluster, which Global Constraint 17 forbids,
 so it is recorded as **blocked, never as closed** — and the two `tls: true`
 claims above are deliberately about rendered bytes and not about a handshake.
 
+## Object stores: conditional create is required
+
+Since RECEIPT-DUP was fixed, `logweir backup run` claims each execution with a
+create-only put (`If-None-Match: *`) under `logweir/backups/<backup_id>/`
+before the engine starts, and proves the store refused a second create. A store
+that does not enforce conditional create is **unsupported**: every backup to it
+exits 4 `ExecutionClaimUnproven` before any data is written, and a destination
+with `writeProbe` on reports it `notReady / ConditionalCreateUnsupported`
+beforehand ([kubernetes.md §21.5](kubernetes.md)).
+
+| Object store | Status |
+|---|---|
+| MinIO `RELEASE.2025-09-07T16-13-09Z` | **Supported, measured** (private container: the claim, the refused second run, and the readiness probe's double create) |
+| older MinIO releases | `[UNVERIFIED — needs a run against an older MinIO release]` |
+| AWS S3 | `[UNVERIFIED — needs a real AWS S3 bucket and a credential source]` |
+| GCS, Azure Blob | `[UNVERIFIED — native conditional create in object_store, not run against either provider]` |
+| local filesystem (standalone CLI) | **Supported, measured in process** |
+| `AWS_CONDITIONAL_PUT=disabled`, or an S3-compatible store that ignores `If-None-Match` | **Unsupported** — refused, never silently accepted |
+
 ## What the weekly job will add
 
 `.github/workflows/engine-matrix.yml` runs the full compose drill against each

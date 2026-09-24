@@ -28,7 +28,7 @@ use weirkeeper::conditions::{
     TERMINAL_STATE_NO_EXIT_CODE, TERMINAL_STATE_POD_OWNERSHIP_CONTESTED,
 };
 use weirkeeper::controllers::backup::{
-    covered_from_receipt, crash_terminal_state, crashed_status_patch, evidence_keys,
+    covered_from_receipt, crash_terminal_state, crashed_status_patch, evidence_keys, failure_state,
     observe_archive, orphan_state, plan_backup_id, plan_config_map_name, pod_selectors,
     reconcile_backup, refusal_state, runner_job_spec, terminated_exit_code, unobserved_archive,
     ArchiveObservation, EvidenceKeys, EvidencePresence, JOB_NAME_LABEL, JOB_NAME_LABEL_LEGACY,
@@ -4958,6 +4958,96 @@ async fn exit_three_takes_its_terminal_state_from_the_refusal_reason_line() {
         Some("Expired".to_string())
     );
     assert_eq!(refusal_state("nothing\n"), None);
+}
+
+/// **RECEIPT-DUP (review F2).** An exit-1/4 backup run that names its
+/// execution-claim outcome on a final `failure-reason=` line gets that state on
+/// `status.exitReason` and in the terminal condition's message — not only in
+/// the pod log. Closed and paired with the code: the wrong code, an unknown
+/// value, and an older runner's log (no line) all keep the wire reason.
+#[tokio::test]
+async fn a_claim_outcome_is_lifted_onto_the_backup_status() {
+    async fn terminal(code: i32, tail: &str) -> Value {
+        let (client, _seen, bodies) = mock_client_recording_bodies(finished_routes(
+            &pod_list_terminated(code),
+            log_body(tail),
+            200,
+            "Failed",
+        ));
+        reconcile_backup(
+            &frozen_backup(),
+            &client,
+            &unobserved_archive,
+            &unverified_evidence,
+            utc(2026, 11, 9, 3, 20),
+        )
+        .await
+        .expect("the reconcile succeeds");
+        let status =
+            patched_statuses(&bodies.lock().expect("the body recorder is readable"))[0].clone();
+        status
+    }
+
+    let claimed = terminal(
+        1,
+        "operational: ExecutionAlreadyClaimed: …\nfailure-reason=ExecutionAlreadyClaimed\n",
+    )
+    .await;
+    assert_eq!(claimed["exitCode"].as_i64(), Some(1));
+    assert_eq!(
+        claimed["exitReason"].as_str(),
+        Some("ExecutionAlreadyClaimed")
+    );
+    let message = claimed["conditions"][0]["message"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        message.contains("(operational: ExecutionAlreadyClaimed)"),
+        "the condition names the state too: {message}"
+    );
+    assert_eq!(
+        claimed["conditions"][0]["reason"].as_str(),
+        Some("Operational"),
+        "the condition reason keeps GC11's CamelCase code, as exit 3 does"
+    );
+
+    let unproven = terminal(4, "failure-reason=ExecutionClaimUnproven\n").await;
+    assert_eq!(
+        unproven["exitReason"].as_str(),
+        Some("ExecutionClaimUnproven")
+    );
+
+    // Paired: a claimed state beside exit 4, an unknown value, an older
+    // runner with no line.
+    let mismatched = terminal(4, "failure-reason=ExecutionAlreadyClaimed\n").await;
+    assert_eq!(mismatched["exitReason"].as_str(), Some("signing-or-lock"));
+    let unknown = terminal(1, "failure-reason=SomethingElse\n").await;
+    assert_eq!(unknown["exitReason"].as_str(), Some("operational"));
+    let older = terminal(1, "operational: boom\n").await;
+    assert_eq!(older["exitReason"].as_str(), Some("operational"));
+    assert_eq!(
+        older["conditions"][0]["message"]
+            .as_str()
+            .map(|m| m.contains("failure-reason")),
+        Some(false)
+    );
+
+    // The pure reader: last line wins; exit 0/3 never lift one.
+    assert_eq!(
+        failure_state(
+            1,
+            "failure-reason=Nope\nfailure-reason=ExecutionAlreadyClaimed\n"
+        ),
+        Some("ExecutionAlreadyClaimed")
+    );
+    assert_eq!(
+        failure_state(0, "failure-reason=ExecutionAlreadyClaimed\n"),
+        None
+    );
+    assert_eq!(
+        failure_state(3, "failure-reason=ExecutionClaimUnproven\n"),
+        None
+    );
 }
 
 /// The `Running` pass patches the status, observes the pod, and writes no

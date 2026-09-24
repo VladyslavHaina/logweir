@@ -1212,3 +1212,43 @@ fn an_unread_pre_signedat_verdict_is_never_valid_on_this_api() {
         "and `verifiedSuccess` is the field a caller automates on"
     );
 }
+
+/// **RECEIPT-DUP (review F2).** A backup whose runner named its execution-claim
+/// outcome reaches the product API — and so the console's exit-reason cell and
+/// message — with that state, not with a bare `operational` /
+/// `signing-or-lock`.
+#[test]
+fn a_claim_outcome_reaches_the_operation_model() {
+    let base = base_backup();
+    let (running, _) = patched::<Backup>(
+        base.clone(),
+        &backup_ctl::running_status_patch(&backup_of(&base), "b1", now()),
+    );
+    for (code, state) in [
+        (1, "ExecutionAlreadyClaimed"),
+        (4, "ExecutionClaimUnproven"),
+    ] {
+        let terminal = backup_ctl::finished_status_patch_with_failure(
+            &backup_of(&running),
+            code,
+            &EvidenceKeys::default(),
+            None,
+            None,
+            Some(state),
+            None,
+            None,
+            now(),
+        );
+        let (_, typed) = patched::<Backup>(running.clone(), &terminal);
+        let op = backup_operation(&typed);
+        assert_eq!(op.state, OperationState::Failed, "{state}");
+        assert_eq!(op.result.exit_code, Some(code));
+        assert_eq!(op.result.exit_reason.as_deref(), Some(state));
+        assert!(
+            op.message.as_deref().is_some_and(|m| m.contains(state)),
+            "the operation message names {state}: {:?}",
+            op.message
+        );
+        assert!(!op.verified_success);
+    }
+}

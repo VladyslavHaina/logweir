@@ -446,3 +446,52 @@ fn list_reads_the_newest_points_out_of_a_real_bucket() {
         assert!(evidence.get(&e.record_key).is_ok(), "{}", e.record_key);
     }
 }
+
+/// **RECEIPT-DUP against a real server.** The execution claim is only a lock on
+/// a store that ENFORCES `If-None-Match: *`: the first run here takes the claim
+/// and proves it (its second create is refused), and a second run of the SAME
+/// execution is refused `ExecutionAlreadyClaimed` before its engine — so the
+/// bucket holds exactly one receipt for the execution and the claim names the
+/// first run.
+#[test]
+fn a_second_run_of_one_execution_is_refused_by_a_real_bucket() {
+    use logweir::backup::phase_run::{claim_key, EXECUTION_ALREADY_CLAIMED};
+    let evidence = evidence_store();
+    let f = backup_seam::Fixture::new();
+    let backup_id = unique_id("claim");
+    let first_run = run_id("A");
+    let first = f
+        .execute_as(&evidence, &backup_id, &first_run)
+        .expect("the first run claims the execution and succeeds on MinIO");
+
+    let second = f.execute_as(&evidence, &backup_id, &run_id("B"));
+    match second {
+        Err(logweir::backup::BackupError::ExecutionClaimed(message)) => assert!(
+            message.contains(EXECUTION_ALREADY_CLAIMED),
+            "the second run names the refusal: {message}"
+        ),
+        other => panic!("the second run of one execution must be refused, got {other:?}"),
+    }
+
+    let claim = evidence
+        .get(&claim_key(&backup_id))
+        .expect("the claim is in the bucket")
+        .0;
+    let claim: serde_json::Value = serde_json::from_slice(&claim).unwrap();
+    assert_eq!(
+        claim["run_id"],
+        first_run.as_str(),
+        "the claim names the first run"
+    );
+    let receipts: Vec<String> = evidence
+        .list_keys(&format!("logweir/backups/{backup_id}/"))
+        .unwrap()
+        .into_iter()
+        .filter(|k| k.ends_with(".receipt.json"))
+        .collect();
+    assert_eq!(
+        receipts,
+        vec![first.receipt_key],
+        "exactly one receipt for the execution"
+    );
+}

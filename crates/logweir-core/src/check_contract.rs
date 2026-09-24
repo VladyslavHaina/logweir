@@ -319,6 +319,11 @@ closed_vocabulary! {
         ApprovalSubjectMismatch => "ApprovalSubjectMismatch",
         ApproverKeyExpiresBeforeDeadline => "ApproverKeyExpiresBeforeDeadline",
         ArchiveUrlUnreadable => "ArchiveUrlUnreadable",
+        // RECEIPT-DUP: the evidence store accepted a create-only put without
+        // enforcing it — conditional put unsupported (HEAD-then-PUT), or a
+        // second create of the readiness marker SUCCEEDED. Every backup to
+        // such a store exits 4 `ExecutionClaimUnproven` before its engine.
+        ConditionalCreateUnsupported => "ConditionalCreateUnsupported",
         NotReady => "NotReady",
         // -- unknown / execution-only codes (D2 §6.3) --------------------
         PodNotStarted => "PodNotStarted",

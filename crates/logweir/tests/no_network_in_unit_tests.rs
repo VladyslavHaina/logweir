@@ -115,7 +115,7 @@ const DIAL_TOKENS: [&str; 17] = [
 /// Relative to the workspace root, `/`-separated. Production modules whose
 /// job IS to dial come first; the rest are files where the token is a string
 /// fed to a double, never a client.
-const ALLOWED: [(&str, &str); 28] = [
+const ALLOWED: [(&str, &str); 29] = [
     (
         "crates/logweir/src/check/kafka.rs",
         "production: D2 §4.2's check runner dials BY DESIGN, and this module is the one \
@@ -203,6 +203,15 @@ const ALLOWED: [(&str, &str); 28] = [
          `logweir/backups/` stays writable, which `Store::in_memory` cannot do. Every \
          other row in the file uses `Store::in_memory` (measured: the whole binary runs \
          in 0.3 s)",
+    ),
+    (
+        "crates/logweir/tests/receipt_dup.rs",
+        "RECEIPT-DUP: `Store::from_url` and `Store::read_only_from_url` over a TEMPDIR \
+         filesystem URL — no endpoint and no network. The defect is an engine OVERWRITING \
+         its own manifest, which `Store::in_memory` (create-only puts only) cannot model, \
+         so the engine double writes the manifest with `std::fs::write` and both Logweir \
+         handles read the same tempdir; `kafka-source:9092` is data handed to a \
+         `ClusterReader` double",
     ),
     (
         "crates/logweir/tests/backup_run.rs",

@@ -666,6 +666,11 @@ pub enum MarkerOutcome {
     /// create_only_enforced` is recorded honestly by `logweir-store` for
     /// exactly this reason ("never assumed true"), and this arm is the one
     /// caller in the check runner that reads it.
+    ///
+    /// **Since RECEIPT-DUP, [`put_marker`] no longer returns it**: that case is
+    /// `ConditionalCreateUnsupported`, notReady, because the backup runner's
+    /// execution claim cannot be held on such a store. Kept so the outcome
+    /// vocabulary and its `createOnlyEnforced` fact stay one type.
     WrittenUnconditionally,
     /// The object was already there, and the backend authorised the write
     /// before it evaluated the precondition — so the grant is proved.
@@ -708,12 +713,45 @@ pub fn put_marker(
     destination_uid: &str,
 ) -> Result<MarkerOutcome, StoreFailure> {
     let key = marker_key(destination_uid);
-    match access.put_create_only(&key, &marker_body(destination_uid)) {
-        Ok(o) if o.create_only_enforced => Ok(MarkerOutcome::Written),
-        // Reviewer question Q1: the backend declined the precondition and the
-        // store fell back to HEAD-then-PUT. Reported as a written marker with a
-        // fact that says so, never as an unqualified create-only write.
-        Ok(_) => Ok(MarkerOutcome::WrittenUnconditionally),
+    let body = marker_body(destination_uid);
+    // RECEIPT-DUP: the backup runner's execution claim is a lock only on a
+    // store that ENFORCES `If-None-Match: *`, and a destination that does not
+    // must fail HERE, before its first backup, rather than at every run with
+    // exit 4 `ExecutionClaimUnproven`. So a fresh marker is created a second
+    // time and the second create must be refused — the same two-put proof the
+    // runner makes, on the same key this probe already owns, with the same
+    // `s3:PutObject` on `logweir/readiness/*` and nothing else.
+    let unsupported = |why: &str| {
+        StoreFailure::new(
+            CheckCode::ConditionalCreateUnsupported,
+            format!(
+                "the create-only readiness marker for this destination, under \
+                 `{MARKER_PREFIX}`, was written, but {why}, so this store does not enforce \
+                 conditional create and every backup to it would be refused \
+                 `ExecutionClaimUnproven`"
+            ),
+        )
+    };
+    match access.put_create_only(&key, &body) {
+        Ok(o) if o.create_only_enforced => match access.put_create_only(&key, &body) {
+            Err(StoreError::AlreadyExists(_)) => Ok(MarkerOutcome::Written),
+            Ok(_) => Err(unsupported("a second create of the same key SUCCEEDED")),
+            Err(e) => Err(StoreFailure::new(
+                classify(&e),
+                format!(
+                    "the create-only readiness marker for this destination, under \
+                     `{MARKER_PREFIX}`, was written, but the second create that proves the \
+                     store refuses one over an existing key failed"
+                ),
+            )),
+        },
+        // Reviewer question Q1, and RECEIPT-DUP: the backend declined the
+        // precondition and the store fell back to HEAD-then-PUT. The grant is
+        // proved, but the store cannot hold an execution claim, so the row is
+        // notReady rather than a written marker with a fact.
+        Ok(_) => Err(unsupported(
+            "the store reported conditional put unsupported and fell back to HEAD-then-PUT",
+        )),
         // D2 §4.2 `[VERIFY U7]`: AUTHORISED. Turning this arm into a failure
         // is mutant M5's twin — it would report a healthy destination as
         // unwritable on every check after the first.

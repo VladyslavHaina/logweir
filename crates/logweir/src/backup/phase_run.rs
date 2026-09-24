@@ -23,6 +23,137 @@ use logweir_engine_oso::storage::Store;
 use std::collections::BTreeMap;
 use std::path::Path;
 
+/// **RECEIPT-DUP.** The token a run names when its execution was already
+/// claimed by an earlier run — see [`claim_execution`]. Exit 1: a retry under a
+/// NEW execution id is the remedy, and D1 §4.6's retry policy takes it.
+pub const EXECUTION_ALREADY_CLAIMED: &str =
+    logweir_core::guard::TERMINAL_STATE_EXECUTION_ALREADY_CLAIMED;
+
+/// **RECEIPT-DUP.** The token a run names when the evidence store could not
+/// prove the execution claim is exclusive — it refused the create-only put,
+/// answered it without enforcing it, or accepted a second create of the same
+/// key. Exit 4 (GC11: "lock-proof failed, nothing uploaded"): nothing about
+/// waiting changes a store that does not honour `If-None-Match: *`.
+pub const EXECUTION_CLAIM_UNPROVEN: &str =
+    logweir_core::guard::TERMINAL_STATE_EXECUTION_CLAIM_UNPROVEN;
+
+/// `logweir/backups/<backup_id>/execution.claim.json` — the ONE
+/// execution-scoped object under `logweir/backups/<backup_id>/`. Everything
+/// else there is run-scoped (`<run_id>.receipt.json|.sig`).
+///
+/// Derived in one place, beside [`receipt_keys`], for the same reason.
+#[must_use]
+pub fn claim_key(backup_id: &str) -> String {
+    format!("logweir/backups/{backup_id}/execution.claim.json")
+}
+
+/// **RECEIPT-DUP — one engine run per execution.** Claim `backup_id` with a
+/// create-only put, immediately BEFORE the engine starts, and PROVE the claim
+/// is exclusive; return the claim's key.
+///
+/// # Why a claim, and why here
+///
+/// The engine writes `<prefix>/<backup_id>/manifest.json` with its own,
+/// unconditional store client, so a second engine run over the same set
+/// REPLACES the manifest an earlier run's receipt attests — and when the topic
+/// advanced in between, that earlier signed receipt stops describing what the
+/// archive holds (every archive-reading verifier reports it). Logweir cannot
+/// make the engine's write conditional. What it can do is make sure no second
+/// engine run of the same execution ever starts: a PLAT-06.1 case-e Job
+/// re-created from its frozen inputs carries the same `backup_id`, finds the
+/// claim, and stops here, before the engine, the manifest read-back and any
+/// signature.
+///
+/// The claim lives under the evidence root because that is the one place this
+/// runner may write (GC6), and a create-only put there needs no permission the
+/// runner does not already hold (`s3:PutObject` on `logweir/*`, U6's
+/// `evidenceWrite`). It is NOT read: the runner holds no `s3:GetObject` or
+/// `s3:ListBucket` under `logweir/` and this adds none — existence is learned
+/// from the conditional put's own answer.
+///
+/// # The proof, and why it is two puts
+///
+/// A claim is a lock only on a store that ENFORCES `If-None-Match: *`. Three
+/// stores do not, and each fails closed with [`EXECUTION_CLAIM_UNPROVEN`]:
+///
+/// 1. a store that refuses the put (a missing grant, a transport failure);
+/// 2. a backend that reports conditional put unsupported —
+///    `Store::put_create_only` then falls back to HEAD-then-PUT and says
+///    `create_only_enforced: false`, and a HEAD this runner may not issue under
+///    `logweir/` is no lock at all;
+/// 3. an S3-compatible store that ACCEPTS the header and overwrites anyway.
+///    Nothing in a single successful put distinguishes it, so the claim is
+///    put a SECOND time with the same bytes, and only `AlreadyExists` proves
+///    the store refused a create over an existing key. On a store that
+///    ignored the header, the second put rewrote identical bytes, which
+///    harms nothing.
+///
+/// An `AlreadyExists` on the FIRST put is the case this exists for: an earlier
+/// run of this execution reached the engine, and whether it finished, died or
+/// is still running, a second engine run could only overwrite its manifest.
+/// That is exit 1, [`EXECUTION_ALREADY_CLAIMED`], and D1's rule already says
+/// what happens next: a failed attempt's archive is never appended to, and a
+/// retry is a new Backup under a new execution id.
+pub fn claim_execution(
+    backup_id: &str,
+    run_id: &str,
+    claimed_at: chrono::DateTime<chrono::Utc>,
+    evidence: &Store,
+) -> Result<String, BackupError> {
+    use logweir_engine_oso::storage::StoreError;
+    let key = claim_key(backup_id);
+    // Unsigned on purpose: the claim is a lock, not evidence. Its only meaning
+    // is that it EXISTS; the fields name the run that holds it for an operator
+    // who can read the evidence root.
+    let bytes = logweir_core::det_json::to_deterministic_json(&serde_json::json!({
+        "format_version": "1.0.0",
+        "backup_id": backup_id,
+        "run_id": run_id,
+        "claimed_at": claimed_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+    }))
+    .map_err(|e| BackupError::Operational(format!("the execution claim: {e}")))?;
+    let unproven = |why: String| {
+        BackupError::Lock(format!(
+            "{EXECUTION_CLAIM_UNPROVEN}: execution `{backup_id}` could not be claimed \
+             exclusively at {key}: {why}. A claim the store does not enforce cannot stop a \
+             second run of this execution from overwriting the manifest an earlier signed \
+             receipt attests, so NO engine run was started and nothing was signed. Use an \
+             evidence store that honours conditional create (`If-None-Match: *`) and grant \
+             `s3:PutObject` on `logweir/*`."
+        ))
+    };
+    match evidence.put_create_only(&key, &bytes) {
+        Ok(put) if put.create_only_enforced => {}
+        Ok(_) => {
+            return Err(unproven(
+                "the store does not implement conditional put, so the create fell back to \
+                 HEAD-then-PUT, which is not exclusive"
+                    .to_string(),
+            ))
+        }
+        Err(StoreError::AlreadyExists(_)) => {
+            return Err(BackupError::ExecutionClaimed(format!(
+                "{EXECUTION_ALREADY_CLAIMED}: execution `{backup_id}` was already claimed by an \
+                 earlier run ({key} exists). That run reached the engine; a second engine run \
+                 would overwrite the manifest its receipt attests, so NO engine run was started \
+                 and nothing was signed. Retry under a new execution id (a new Backup)."
+            )))
+        }
+        Err(e) => return Err(unproven(format!("the put was refused: {e}"))),
+    }
+    match evidence.put_create_only(&key, &bytes) {
+        Err(StoreError::AlreadyExists(_)) => Ok(key),
+        Ok(_) => Err(unproven(
+            "a second create-only put of the same key SUCCEEDED, so this store ignores \
+             `If-None-Match: *`"
+                .to_string(),
+        )),
+        Err(e) => Err(unproven(format!(
+            "the exclusivity probe (a second create of the same key) failed: {e}"
+        ))),
+    }
+}
+
 pub fn load_signer(path: &Path) -> Result<ValidatedSigner, BackupError> {
     ValidatedSigner::load(
         path,

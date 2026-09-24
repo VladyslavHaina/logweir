@@ -10,7 +10,7 @@ from this branch (the caller does that, under the cluster lock, and restores it)
     python3 scripts/test-plat06-live.py case-b      # hostile annotation, ignored
     python3 scripts/test-plat06-live.py case-c      # scheduled Backup
     python3 scripts/test-plat06-live.py case-d      # controller restart mid-run
-    python3 scripts/test-plat06-live.py case-e      # deleted Job under Forbid
+    python3 scripts/test-plat06-live.py case-e      # deleted Job under Forbid (both claim arms)
     python3 scripts/test-plat06-live.py case-f      # configuration snapshot equality
     python3 scripts/test-plat06-live.py case-g      # duplicate create is AlreadyExists
     python3 scripts/test-plat06-live.py report
@@ -1058,9 +1058,146 @@ def case_d() -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# Case e — a deleted Job under Forbid, and RECEIPT-DUP's execution claim
+# ---------------------------------------------------------------------------
+#
+# SINCE RECEIPT-DUP (2026-09-23) a re-created Job never runs the engine a second
+# time over one execution. Every runner claims its execution id with a
+# create-only `logweir/backups/<id>/execution.claim.json` before its engine
+# starts, so:
+#
+# * CLAIMED arm — the deleted Job's pod reached the claim (here: deleted with
+#   `--cascade=orphan`, so it runs to completion and signs receipt 1). The
+#   re-created Job exits 1 `ExecutionAlreadyClaimed`, the Backup ends `Failed`
+#   with that `exitReason`, and the execution holds exactly ONE receipt, which
+#   verifies and whose manifest still hashes to the digest it attests.
+# * UNCLAIMED arm — the deleted Job's pod never existed (a `pods: 0` quota was
+#   in place before the schedule fired). The re-created Job runs normally and
+#   the Backup ends `Succeeded` with one receipt, as before.
+#
+# The two judges below are PURE, so `scripts/test_plat06_case_e_rows.py` runs
+# them — and their negative controls, including the pre-fix outcome — with no
+# cluster.
+
+CLAIM_FILE = "execution.claim.json"
+
+
+def _receipt_failures(f: dict[str, Any]) -> list[str]:
+    out: list[str] = []
+    receipts = f.get("receipts") or []
+    if len(receipts) != 1:
+        out.append(f"expected exactly ONE receipt for the execution, found {len(receipts)}")
+        return out
+    r = receipts[0]
+    if not r.get("verifierValid"):
+        out.append(f"the independent verifier did not say VALID for {r.get('key')}")
+    if not r.get("manifestSha256Attested") or (
+        r.get("manifestSha256Attested") != r.get("manifestSha256Actual")
+    ):
+        out.append(
+            f"the manifest hashes to {r.get('manifestSha256Actual')}, the receipt attests "
+            f"{r.get('manifestSha256Attested')}"
+        )
+    claim = f.get("claim")
+    if not claim:
+        out.append(f"no {CLAIM_FILE} for the execution")
+    elif claim.get("run_id") != r.get("runId"):
+        out.append(
+            f"the claim names run {claim.get('run_id')}, the receipt is run {r.get('runId')}"
+        )
+    return out
+
+
+def judge_case_e_claimed(f: dict[str, Any]) -> list[str]:
+    """Every way the CLAIMED arm can be wrong; empty means it held."""
+    out: list[str] = []
+    if f.get("phase") != "Failed" or f.get("exitCode") != 1:
+        out.append(f"the Backup is {f.get('phase')}/exit {f.get('exitCode')}, not Failed/exit 1")
+    if f.get("exitReason") != "ExecutionAlreadyClaimed":
+        out.append(f"status.exitReason is {f.get('exitReason')!r}, not ExecutionAlreadyClaimed")
+    rerun = f.get("rerunLog") or ""
+    if "failure-reason=ExecutionAlreadyClaimed" not in rerun:
+        out.append("the re-created pod's log does not name ExecutionAlreadyClaimed")
+    if "progress-phase=-1:engine" in rerun:
+        out.append("the re-created pod STARTED THE ENGINE over a claimed execution")
+    out.extend(_receipt_failures(f))
+    return out
+
+
+def judge_case_e_unclaimed(f: dict[str, Any]) -> list[str]:
+    """Every way the UNCLAIMED arm can be wrong; empty means it held."""
+    out: list[str] = []
+    if f.get("phase") != "Succeeded" or f.get("exitCode") != 0:
+        out.append(f"the Backup is {f.get('phase')}/exit {f.get('exitCode')}, not Succeeded/exit 0")
+    out.extend(_receipt_failures(f))
+    return out
+
+
+def pods_of_job(job_uid: str, job_name: str) -> list[dict[str, Any]]:
+    """The pods one Job UID owns — never an orphaned pod of an earlier Job
+    that still carries the same job-name label."""
+    pods = json.loads(
+        run(KN + ["get", "pods", "-l", f"batch.kubernetes.io/job-name={job_name}", "-o", "json"]).stdout
+    )["items"]
+    return [
+        p
+        for p in pods
+        if any(o.get("uid") == job_uid for o in p["metadata"].get("ownerReferences") or [])
+    ]
+
+
+def orphaned_pods(job_name: str) -> list[dict[str, Any]]:
+    pods = json.loads(
+        run(KN + ["get", "pods", "-l", f"batch.kubernetes.io/job-name={job_name}", "-o", "json"]).stdout
+    )["items"]
+    return [p for p in pods if not p["metadata"].get("ownerReferences")]
+
+
+def execution_evidence(execution_id: str, tag: str) -> dict[str, Any]:
+    """Every receipt and the claim under `logweir/backups/<id>/`, each receipt
+    verified independently and its manifest re-hashed out of the archive."""
+    keys = [e["key"] for e in archive_objects(f"logweir/backups/{execution_id}")]
+    base = f"logweir/backups/{execution_id}/"
+    claim = None
+    if any(k.endswith(CLAIM_FILE) for k in keys):
+        claim = json.loads(evidence_bytes(base + CLAIM_FILE))
+    receipts = []
+    for k in sorted(k for k in keys if k.endswith(".receipt.json")):
+        key = base + k.rsplit("/", 1)[-1]
+        body = evidence_bytes(key)
+        sidecar = evidence_bytes(key[: -len(".json")] + ".sig")
+        doc = json.loads(body)
+        try:
+            verify_independently(f"{tag}-{doc['run_id']}", body, sidecar)
+            valid = True
+        except RuntimeError:
+            valid = False
+        manifest_key = doc["archive"]["manifest_key"]
+        manifest = mc("cat", f"local/{ARCHIVE_BUCKET}/{manifest_key}", check=False).encode()
+        receipts.append(
+            {
+                "key": key,
+                "runId": doc["run_id"],
+                "verifierValid": valid,
+                "manifestKey": manifest_key,
+                "manifestSha256Attested": doc["archive"]["manifest_sha256"],
+                "manifestSha256Actual": "sha256:" + hashlib.sha256(manifest).hexdigest(),
+            }
+        )
+    return {"evidenceKeys": keys, "claim": claim, "receipts": receipts}
+
+
 def case_e() -> None:
-    """Under Forbid, deleting a running Job re-runs the SAME frozen inputs, the
-    schedule blocks the next slot meanwhile, and it admits the next slot after."""
+    """Under Forbid, a deleted Job is re-created from the SAME frozen inputs and
+    the schedule blocks the next slot meanwhile. RECEIPT-DUP: the re-created Job
+    runs the engine only when the deleted Job's pod never claimed the execution.
+    Both arms run; each is judged by its pure judge."""
+    case_e_unclaimed()
+    case_e_claimed()
+
+
+def case_e_claimed() -> None:
     name = "plat06-forbid"
     schedule = apply(schedule_object(name, "Forbid"))
     child = scheduled_child(name)
@@ -1072,13 +1209,22 @@ def case_e() -> None:
         seconds=300,
     )
     backup = get("backup", child)
+    execution_id = backup["status"]["execution"]["id"]
     first = job_facts(child)
+    # The first pod must EXIST before the hold, or this is the unclaimed arm.
+    deadline = time.time() + 180
+    while not pods_of_job(first["uid"], child):
+        if time.time() > deadline:
+            raise RuntimeError("the first Job never created its pod")
+        time.sleep(2)
     cm = get("configmap", f"{child}-plan")
-    before_keys = archive_keys(backup["status"]["execution"]["id"])
+    before_keys = archive_keys(execution_id)
     schedule_before = get("backupschedule", name)["status"]
 
-    # Hold the namespace at zero pods so the re-created Job cannot start while a
-    # slot comes due: the Backup stays nonterminal and Forbid is observable.
+    # Hold the namespace at zero NEW pods so the re-created Job cannot start
+    # while a slot comes due: the Backup stays nonterminal and Forbid is
+    # observable. The first pod already exists, and `--cascade=orphan` keeps it
+    # running to completion — it claims the execution and signs receipt 1.
     apply(
         {
             "apiVersion": "v1",
@@ -1087,8 +1233,8 @@ def case_e() -> None:
             "spec": {"hard": {"pods": "0"}},
         }
     )
-    run(KN + ["delete", "job", child, "--cascade=background"])
-    log(f"deleted the running Job {child} (uid {first['uid']})")
+    run(KN + ["delete", "job", child, "--cascade=orphan"])
+    log(f"deleted the running Job {child} (uid {first['uid']}) and orphaned its pod")
     second_job = wait_for(
         "job",
         child,
@@ -1108,25 +1254,56 @@ def case_e() -> None:
     )
     if children_while_blocked != [child]:
         raise RuntimeError(f"Forbid admitted a second child: {children_while_blocked}")
+    # The orphaned first pod finishes on its own.
+    deadline = time.time() + 600
+    orphan: dict[str, Any] | None = None
+    while time.time() < deadline:
+        pods = orphaned_pods(child)
+        orphan = pods[0] if pods else None
+        if orphan and orphan["status"].get("phase") in {"Succeeded", "Failed"}:
+            break
+        time.sleep(3)
+    if not orphan or orphan["status"].get("phase") != "Succeeded":
+        raise RuntimeError(f"the orphaned first pod did not succeed: {json.dumps((orphan or {}).get('status'))}")
+    artifact("case-e-claimed-first-pod-log.txt",
+             redact(run(KN + ["logs", orphan["metadata"]["name"], "--tail=40"], check=False).stdout))
     mid = get("backup", child)
     if terminal(mid):
-        raise RuntimeError("the Backup went terminal while its Job was held")
+        raise RuntimeError("the Backup went terminal while its re-created Job was held")
 
     run(KN + ["delete", "resourcequota", "plat06-hold"])
-    backup = verify_succeeded(child, "schedule", "case-e")
+    backup = wait_for("backup", child, terminal, seconds=600)
+    artifact("case-e-claimed-backup.json", backup)
     second = job_facts(child)
-    after_keys = archive_keys(backup["status"]["execution"]["id"])
+    rerun_pods = pods_of_job(second["uid"], child)
+    rerun_log = (
+        redact(run(KN + ["logs", rerun_pods[0]["metadata"]["name"], "--tail=40"], check=False).stdout)
+        if rerun_pods
+        else ""
+    )
+    artifact("case-e-claimed-rerun-pod-log.txt", rerun_log)
+    evidence = execution_evidence(execution_id, "case-e-claimed")
+    status = backup["status"]
+    facts = {
+        "phase": status.get("phase"),
+        "exitCode": status.get("exitCode"),
+        "exitReason": status.get("exitReason"),
+        "conditionMessage": (condition(backup, "Failed") or {}).get("message"),
+        "rerunLog": rerun_log,
+        **evidence,
+    }
+    artifact("case-e-claimed-facts.json", facts)
+    failures = judge_case_e_claimed(facts)
+    if failures:
+        raise RuntimeError("case-e claimed arm: " + "; ".join(failures))
+
     cm_after = get("configmap", f"{child}-plan")
-    if cm_after["metadata"]["uid"] != cm["metadata"]["uid"]:
-        raise RuntimeError("the frozen inputs ConfigMap was replaced")
-    if cm_after["data"] != cm["data"]:
-        raise RuntimeError("the frozen inputs changed")
+    if cm_after["metadata"]["uid"] != cm["metadata"]["uid"] or cm_after["data"] != cm["data"]:
+        raise RuntimeError("the frozen inputs ConfigMap was replaced or changed")
     if second["args"] != first["args"] or second["volumes"] != first["volumes"]:
         raise RuntimeError("the re-created Job is not the same execution")
     if second["annotations"] != first["annotations"]:
         raise RuntimeError("the re-created Job carries different execution annotations")
-    if get("backup", child)["metadata"].get("annotations", {}).get("logweir.dev/runner-argv"):
-        raise RuntimeError("a scheduled Backup grew a runner-argv annotation")
 
     # After the run is terminal the schedule admits the next slot again.
     next_child = None
@@ -1141,39 +1318,73 @@ def case_e() -> None:
             next_child = [n for n in names if n != child][-1]
             break
         time.sleep(3)
+    if next_child is None:
+        raise RuntimeError("the schedule admitted no next slot after the run was terminal")
     schedule_after = get("backupschedule", name)["status"]
-    run(
-        KN
-        + [
-            "patch",
-            "backupschedule",
-            name,
-            "--type=merge",
-            "-p",
-            json.dumps({"spec": {"suspend": True}}),
-        ]
-    )
-    STATE["cases"]["case-e-detail"] = {
+    run(KN + ["patch", "backupschedule", name, "--type=merge", "-p",
+              json.dumps({"spec": {"suspend": True}})])
+    STATE["cases"]["case-e-claimed"] = {
         "scheduleUid": schedule["metadata"]["uid"],
         "backupUid": backup["metadata"]["uid"],
-        "execution": backup["status"]["execution"],
+        "execution": status.get("execution"),
         "configMapUid": cm["metadata"]["uid"],
         "firstJob": first,
         "secondJob": second,
+        "secondJobUid": second_job["metadata"]["uid"],
+        "orphanedFirstPod": orphan["metadata"]["name"],
         "scheduleBefore": schedule_before,
         "scheduleBlocked": blocked["status"],
         "scheduleAfter": schedule_after,
         "nextChild": next_child,
         "archiveKeysBeforeDelete": before_keys,
-        "archiveKeysAfterRerun": after_keys,
-        "secondJobUid": second_job["metadata"]["uid"],
+        "archiveKeysAfterRerun": archive_keys(execution_id),
+        "facts": {k: v for k, v in facts.items() if k != "rerunLog"},
     }
     save()
-    log(
-        f"case-e: same inputs {backup['status']['execution']['inputsSha256']} in both Jobs; "
-        f"data objects {len(before_keys['data'])} -> {len(after_keys['data'])}, "
-        f"evidence objects {len(before_keys['evidence'])} -> {len(after_keys['evidence'])}"
+    log(f"case-e claimed: {child} Failed/ExecutionAlreadyClaimed; one receipt, verified")
+
+
+def case_e_unclaimed() -> None:
+    name = "plat06-forbid-unclaimed"
+    # The hold goes in FIRST: the first Job's pod is never created, so it
+    # never reaches the claim.
+    apply(
+        {
+            "apiVersion": "v1",
+            "kind": "ResourceQuota",
+            "metadata": owned_metadata("plat06-hold-early"),
+            "spec": {"hard": {"pods": "0"}},
+        }
     )
+    apply(schedule_object(name, "Forbid"))
+    child = scheduled_child(name)
+    wait_for(
+        "backup",
+        child,
+        lambda o: o.get("status", {}).get("jobRef") is not None
+        and o.get("status", {}).get("execution") is not None,
+        seconds=300,
+    )
+    first = job_facts(child)
+    if pods_of_job(first["uid"], child):
+        raise RuntimeError("the hold did not stop the first Job's pod; this is not the unclaimed arm")
+    run(KN + ["delete", "job", child, "--cascade=background"])
+    wait_for("job", child, lambda o: o["metadata"]["uid"] != first["uid"], seconds=120)
+    run(KN + ["delete", "resourcequota", "plat06-hold-early"])
+    backup = verify_succeeded(child, "schedule", "case-e-unclaimed")
+    execution_id = backup["status"]["execution"]["id"]
+    evidence = execution_evidence(execution_id, "case-e-unclaimed")
+    status = backup["status"]
+    facts = {"phase": status.get("phase"), "exitCode": status.get("exitCode"), **evidence}
+    artifact("case-e-unclaimed-facts.json", facts)
+    failures = judge_case_e_unclaimed(facts)
+    if failures:
+        raise RuntimeError("case-e unclaimed arm: " + "; ".join(failures))
+    run(KN + ["patch", "backupschedule", name, "--type=merge", "-p",
+              json.dumps({"spec": {"suspend": True}})])
+    STATE["cases"]["case-e-unclaimed"] = {"backupUid": backup["metadata"]["uid"], "facts": facts}
+    save()
+    log(f"case-e unclaimed: {child} Succeeded after a Job deleted before its pod existed")
 
 
 def case_f() -> None:

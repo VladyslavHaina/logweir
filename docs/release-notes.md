@@ -106,12 +106,13 @@ under its item below.
    and the proxy CIDR bound) before `helm upgrade`, or the render stops
    (item 6).
 6. **Apply the CRDs, wait for all fourteen to be established**, then roll the
-   controller **and the runner image together** (item 5), then the console,
+   controller **and the runner image together** (item 5), with no Backup in
+   flight (item 11), then the console,
    then any approval-policy binding (item 7). On the Helm path these are one
    release and successive `helm upgrade`s: first the image values (controller,
    runner and console move together), then the `approvalPolicy.*` values.
 
-### The ten operator-facing changes
+### The eleven operator-facing changes
 
 Each item names what changed, what to do, what the claim rests on (its
 verification scope), and how to roll it back. Every one of them was collected
@@ -257,6 +258,35 @@ where it read `verified`; `Valid` beside `Unverified` (nothing compared yet) is
 checks `trust.basis` as well ([api.md](api.md)). **Scope:** `main` `178cc1c`,
 Tier-A review; the console reads the same word in both modes. **Rollback:** an
 older API server says `verified` again for that pairing.
+
+#### 11. One backup id is one engine run; the evidence store must enforce conditional create
+
+**Changed.** A Backup Job lost and re-created from its frozen inputs used to run
+the engine again under the same execution id, rewrite the manifest the first
+run's signed receipt attests, and leave that receipt describing an archive that
+is no longer there (RECEIPT-DUP). `logweir backup run` now claims its execution
+with a create-only `logweir/backups/<backupId>/execution.claim.json` before the
+engine starts. A second run of one execution exits 1 with `status.exitReason:
+ExecutionAlreadyClaimed` and writes nothing; a schedule retries it under a new
+execution id only when it has `spec.retry`. An evidence store that does not
+enforce `If-None-Match: *` makes every backup exit 4 `ExecutionClaimUnproven`
+before any data is written, and a destination with `writeProbe` on reports it
+`notReady / ConditionalCreateUnsupported` first. No permission is added, and no
+signed format changes. **Do:** confirm the evidence store honours conditional
+create — turn on `writeProbe: CreateOnlyMarker` for one run of the destination
+check, and never set `AWS_CONDITIONAL_PUT=disabled` — see the store table in
+[support-matrix.md](support-matrix.md). A standalone `logweir backup run` that
+reused a fixed `backup_id` must pass a fresh `--backup-id-override` per run.
+**Let in-flight Backups finish before upgrading:** an execution whose first run
+was made by the older runner has no claim, so if its Job is lost and re-created
+after the upgrade the new runner runs the engine again and can still invalidate
+that first receipt — the one window the claim cannot close.
+**Scope:** in-process rows, a private MinIO `RELEASE.2025-09-07T16-13-09Z`
+container, and four planted mutants plus the review's two; the live case-e row
+is owed. [UNVERIFIED — the case-e re-creation row runs at lab-refresh-10.]
+**Rollback:** an older runner ignores the claims and returns to re-running the
+engine over a re-created Job; the claims stay in the bucket, harmless, and are
+honoured again after a re-upgrade.
 
 ### Verification scope: what "verified" means in this release
 

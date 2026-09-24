@@ -66,12 +66,17 @@ all of them wanted:
    installation that never saw the `Backup` object.
 3. **It cannot be forged into another point's identity** without breaking the
    receipt's signature.
-4. **Two receipts under one `backup_id` are two points.** This is the answer to
-   tracker defect `RECEIPT-DUP`: a Backup Job re-created from its frozen inputs
-   writes a second run-id receipt under the same execution id while overwriting
-   the manifest at the same key. Run identity is idempotent; signed evidence is
-   not. An identity taken from the `backup_id` or from the manifest digest would
-   collapse those two runs and silently drop the older receipt's window.
+4. **Two receipts under one `backup_id` are two points.** Tracker defect
+   `RECEIPT-DUP`: a Backup Job re-created from its frozen inputs wrote a second
+   run-id receipt under the same execution id while overwriting the manifest at
+   the same key. Run identity is idempotent; signed evidence is not. An identity
+   taken from the `backup_id` or from the manifest digest would collapse those
+   two runs and silently drop the older receipt's window. The overwrite itself
+   is now prevented at the source — a run must win a create-only
+   [execution claim](backup-receipt.md#the-execution-claim-one-engine-run-per-backup_id)
+   before its engine starts, so a new execution signs one receipt — but sets
+   written by older builds can still hold two receipts, and this rule is what
+   keeps both of them visible.
 
 `backup_id` remains the **archive set** identifier, and `pointId` is the
 **recovery point**. The 128-bit id is a display and lookup key; the full

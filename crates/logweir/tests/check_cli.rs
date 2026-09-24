@@ -1989,10 +1989,10 @@ fn a_separated_evidence_write_principal_that_can_write_is_green_whatever_the_arc
     assert!(archive_principal.puts().is_empty());
 }
 
-/// How many create-only puts of the marker key one probe makes. ONE on this
-/// branch; the conditional-create proof (`claude/receipt-dup`) re-puts the
-/// same key to observe `AlreadyExists`, which makes it TWO — change it here.
-const MARKER_PUTS_PER_PROBE: usize = 1;
+/// How many create-only puts of the marker key one probe makes: TWO — the
+/// marker, then the conditional-create proof (RECEIPT-DUP) re-puts the same key
+/// and must observe `AlreadyExists`. Both are the `evidenceWrite` principal's.
+const MARKER_PUTS_PER_PROBE: usize = 2;
 
 /// **Least privilege, asserted.** The evidence-write principal's handle is
 /// asked for EXACTLY [`MARKER_PUTS_PER_PROBE`] create-only puts of the marker
@@ -5868,10 +5868,10 @@ fn an_evidence_object_may_not_name_a_stream_the_runner_writes() {
 ///
 /// `put_create_only` falls back to HEAD-then-PUT when a backend answers
 /// `NotSupported` / `NotImplemented` to a conditional put — a real,
-/// non-conditional write with a TOCTOU window. The grant is proved either way,
-/// so the code is the same; the difference travels as a fact, because D2 §4.2
-/// spells the guarantee "create-only" and a row claiming it unqualified would
-/// be claiming a property the backend declined to provide.
+/// non-conditional write with a TOCTOU window. An enforced put is
+/// `MarkerWritten` with `createOnlyEnforced=true`; since RECEIPT-DUP the
+/// fallback is `notReady / ConditionalCreateUnsupported` (the backup runner's
+/// execution claim needs the enforcement).
 #[test]
 fn a_marker_row_says_whether_create_only_was_enforced() {
     let m = mount(&access_plan(vec![DestinationRole::EvidenceWrite], true));
@@ -5889,16 +5889,13 @@ fn a_marker_row_says_whether_create_only_was_enforced() {
         &FakeWiring::default().with_writer(FakeObjects::new().unconditional_put()),
     );
     let row = run.row(CheckId::DestinationEvidenceWritable);
-    assert_eq!(
-        row.code,
-        CheckCode::MarkerWritten,
-        "the grant is proved either way"
-    );
-    assert_eq!(
-        row.facts.get("createOnlyEnforced").map(String::as_str),
-        Some("false"),
-        "a best-effort write must not be reported as an unqualified create-only one"
-    );
+    // CHANGED BY RECEIPT-DUP (review F3). The grant is proved, but a store
+    // that falls back to HEAD-then-PUT cannot hold the backup runner's
+    // execution claim, so every backup to it would exit 4
+    // `ExecutionClaimUnproven`. The row says so BEFORE the first backup:
+    // notReady, not a written marker with a fact.
+    assert_eq!(row.code, CheckCode::ConditionalCreateUnsupported);
+    assert_eq!(row.state, CheckState::NotReady);
 }
 
 /// **F7.** The two readiness-marker messages name the key FAMILY rather than

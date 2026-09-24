@@ -509,7 +509,7 @@ spec:
                 type: integer
               exitReason:
                 description: |-
-                  Why the run ended, as one of Global Constraint 11's wire reasons — `ok`, `operational`, `drill-not-pass`, `guard-refused`, `signing-or-lock` — or, when the run reached a **terminal state** more specific than its code, that state: the `refusal-reason=` line the runner printed for exit 3, or `OrphanedScorecard` for an exit-4 run whose payload exists without its sidecar.
+                  Why the run ended, as one of Global Constraint 11's wire reasons — `ok`, `operational`, `drill-not-pass`, `guard-refused`, `signing-or-lock` — or, when the run reached a **terminal state** more specific than its code, that state: the `refusal-reason=` line the runner printed for exit 3, `OrphanedScorecard` for an exit-4 run whose payload exists without its sidecar, or the `failure-reason=` state an exit-1/4 backup run printed for its execution claim (`ExecutionAlreadyClaimed` with exit 1, `ExecutionClaimUnproven` with exit 4 — RECEIPT-DUP).
 
                   `operational` for the crashed-Job case, where `exitCode` is absent: a run whose code is unrecoverable produced no artifact either, and the SUB-CASE (`DisruptedMidDrill`, `PodUnschedulable`, `NoExitCode`) is the condition's `reason`.
                 nullable: true

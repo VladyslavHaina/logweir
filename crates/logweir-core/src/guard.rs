@@ -336,6 +336,45 @@ pub fn refusal_reason_line(message: &str) -> String {
     format!("refusal-reason={}", terminal_state(message))
 }
 
+/// **RECEIPT-DUP.** A backup run whose execution was already claimed by an
+/// earlier run: exit 1, no engine run, nothing signed. Retryable, because a
+/// retry is a NEW execution id.
+pub const TERMINAL_STATE_EXECUTION_ALREADY_CLAIMED: &str = "ExecutionAlreadyClaimed";
+/// **RECEIPT-DUP.** A backup run whose execution claim the evidence store could
+/// not prove exclusive (put refused, conditional create unsupported or
+/// ignored): exit 4, no engine run, nothing signed. Not retryable.
+pub const TERMINAL_STATE_EXECUTION_CLAIM_UNPROVEN: &str = "ExecutionClaimUnproven";
+
+/// The stdout line a runner prints, LAST, when a non-refusal failure (exit 1
+/// or 4) has a state more specific than its code — the exit-1/4 twin of I9's
+/// `refusal-reason=`, and read by the controller the same way: by prefix, off
+/// the log's bounded tail.
+pub const FAILURE_REASON_PREFIX: &str = "failure-reason=";
+
+/// Every state `failure-reason=` may carry, WITH the one exit code it may
+/// accompany. A CLOSED list in both directions: a controller lifts a value
+/// into `status.exitReason` only when the pair is on this list, so a noisy or
+/// newer runner cannot put an arbitrary string on the object, and a claimed
+/// execution can never be reported under the exit code of an unproven one.
+pub const FAILURE_REASONS: [(&str, i32); 2] = [
+    (TERMINAL_STATE_EXECUTION_ALREADY_CLAIMED, 1),
+    (TERMINAL_STATE_EXECUTION_CLAIM_UNPROVEN, 4),
+];
+
+/// `failure-reason=<state>`. Pure, for the reason `refusal_reason_line` is.
+pub fn failure_reason_line(state: &str) -> String {
+    format!("{FAILURE_REASON_PREFIX}{state}")
+}
+
+/// The state a `failure-reason=` VALUE names, if the value is on
+/// [`FAILURE_REASONS`] for THIS exit code; `None` otherwise.
+pub fn failure_reason_for_exit(exit_code: i32, value: &str) -> Option<&'static str> {
+    FAILURE_REASONS
+        .iter()
+        .find(|(state, code)| *code == exit_code && *state == value)
+        .map(|(state, _)| *state)
+}
+
 /// Every selected topic must have a mapping entry whose target DIFFERS from
 /// its source, or the restore would write over the topic it came from.
 pub fn check_topic_mapping_coverage(

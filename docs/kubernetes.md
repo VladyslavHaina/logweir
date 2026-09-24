@@ -516,6 +516,14 @@ The `Harness row` column names the phase that measured the line; the
 | retention enforcer | `s3:GetObject` on `<bucket>/<prefix>/*` | measured before OBJECT-LOCK-DELETE-MARKER: the operation still succeeded — **SUPERSEDED: now required**; without it every key is `Kept` with `code=VersionProbeRefused` and nothing is deleted (see below) | `u6-ret-058` |
 | retention enforcer | `s3:DeleteObject` on `<bucket>/<prefix>/*` | **the operation fails**: `state=Kept`, `code=AccessDenied` and `retention-result=deleted=0 failed=1 objects=0` | `u6-ret-059` |
 
+**Since RECEIPT-DUP's fix, the `s3:PutObject` on `logweir/*` rows
+(`u6-bk-029`, `u6-bk-043`) fail EARLIER, with the same exit code.** The runner's
+first write under `logweir/` is now its create-only execution claim, put before
+the engine starts, so without that grant the Backup exits `4` /
+`signing-or-lock` naming `ExecutionClaimUnproven` with no archive written,
+instead of after the engine. The claim needs no action the table does not
+already grant. [UNVERIFIED — the two rows are re-measured against the claim at lab-refresh-10.]
+
 **A wider grant than this table is not required by anything in this build.**
 Every action outside a role's row was removed and the role's operation still
 succeeded, on the same fixture, in the same run. `s3:ListBucket`'s two
@@ -2146,8 +2154,10 @@ Each of `ageExpiry`, `minUsablePoints`, `activeRestoreProtection`,
 * `sharedSegments` is **`NotEnforced`**, because the guarantee needs a point's
   segment keys and the catalog view entry has no segment field at all. What
   **is** enforced is the set half of it. Two receipts can name one backup set
-  — a runner Job re-created from its frozen inputs rewrites the same
-  `<prefix>/<backupId>/` and signs a second receipt over it — and every key a
+  — before RECEIPT-DUP was fixed a runner Job re-created from its frozen inputs
+  rewrote the same `<prefix>/<backupId>/` and signed a second receipt over it,
+  and such sets, and sets whose first run was made by a build without the
+  execution claim, are still in buckets — and every key a
   plan line may remove lies under its own set's directory. So the evaluation
   groups points that share a `backupId`, a manifest key or a segment key
   (transitively), and a group holding any retained point — kept, protected,
@@ -2219,10 +2229,12 @@ Each of `ageExpiry`, `minUsablePoints`, `activeRestoreProtection`,
   responsibility; `object_store` 0.14 can neither list nor delete them, and
   Logweir does not see them. **Residual, accepted and tracked (it needs a
   version-aware store client):** a bucket whose versioning was Enabled, then
-  *Suspended*, and whose keys were then written again — and re-run backups DO
-  rewrite the same keys: a runner Job re-created from its frozen inputs writes
-  the same `<prefix>/<backupId>/` objects, which is exactly how two receipts
-  come to name one set. There the current version is a null version (no
+  *Suspended*, and whose keys were then written again — and re-run backups
+  DID rewrite the same keys: before RECEIPT-DUP was fixed a runner Job
+  re-created from its frozen inputs wrote the same `<prefix>/<backupId>/`
+  objects, which is exactly how two receipts came to name one set (a build with
+  the execution claim refuses that second engine run; sets written earlier
+  remain). There the current version is a null version (no
   version id on the HEAD, none on a PUT to a Suspended bucket), the delete
   removes it, the point is recorded `Deleted`, and the Enabled-era version
   beneath it survives. No hold is possible on a suspended null version, and an
@@ -2382,7 +2394,9 @@ re-created from frozen inputs between the approval and the deletes — is not
 seen by the worker, whose rails are the approved plan, the prefix and the
 evidence root (D3 §6.5). It needs a re-run over a set old enough to be a
 candidate; the next evaluation reads the new receipt, and a set it names is
-never planned again.
+never planned again. Since RECEIPT-DUP was fixed a runner with the execution
+claim cannot sign that second receipt at all; the residual remains only for a
+set whose first run was made by a build without the claim.
 ### 7g. A `RehearsalSchedule` proves recovery on a cron, under one signed authorization
 
 A backup that has never been restored is a hypothesis. PLAT-14.3's
@@ -4045,10 +4059,10 @@ it and writes it to **`Backup.status.exitCode`**, together with a wire reason on
 | Exit | `status.phase` | `status.exitReason` | Condition | What it means |
 |---|---|---|---|---|
 | **0** | `Succeeded` | `ok` | `Complete=True`, reason `Ok` | The archive was captured and the receipt was signed. |
-| **1** | `Failed` | `operational` | `Failed=True`, reason `Operational` | The run could not be attempted or continued. **No artifact was written.** |
+| **1** | `Failed` | `operational`, or `ExecutionAlreadyClaimed` off a backup runner's final `failure-reason=` line | `Failed=True`, reason `Operational` | The run could not be attempted or continued. **No artifact was written.** `ExecutionAlreadyClaimed`: an earlier run of the same execution reached the engine, so this one did not start it (RECEIPT-DUP). |
 | **2** | `Failed` | `drill-not-pass` | `Failed=True`, reason `DrillNotPass` | A result that is not a pass — **a document WAS written and signed.** Not produced by `backup run`; it is the drill path's code and the row is here because `exitReason`'s vocabulary is one vocabulary across both paths. |
 | **3** | `Failed` | the terminal state off the log's `refusal-reason=` line, or `GuardRefusedUnknownReason` | `Failed=True`, reason `GuardRefused` | A guard refused before anything ran. |
-| **4** | `Failed` | `signing-or-lock`, or `OrphanedScorecard` | `Failed=True`, reason `SigningOrLock` | Signing or the lock proof failed and **nothing was uploaded**. |
+| **4** | `Failed` | `signing-or-lock`, `OrphanedScorecard`, or `ExecutionClaimUnproven` off a backup runner's final `failure-reason=` line | `Failed=True`, reason `SigningOrLock` | Signing or the lock proof failed and **nothing was uploaded**. `ExecutionClaimUnproven`: the evidence store refused the execution claim or does not enforce conditional create; the engine never started. |
 | *(absent)* | `Failed` | `operational` | `Failed=True`, reason `DisruptedMidDrill` / `PodUnschedulable` / `NoExitCode` | The Job finished and no container named `runner` reported a terminated state. See "the crashed Job" below. |
 | *(absent)* | `Failed` | `operational` | `Failed=True`, reason `NameTooLong` | The `Backup`'s own name is longer than 63 characters, so **nothing was created**. See below. |
 | *(absent)* | `Failed` | `operational` | `Failed=True`, reason `ExecutionSpecInvalid` | The typed spec states no runnable run identity (see "Manual backups" below), so **nothing was created**. |
@@ -4640,6 +4654,29 @@ which is what makes deleting a running Job a retry of one run rather than the
 start of another. The Job keeps the `Backup`'s name, so the pod carrying the
 exit code is selected by the job-name label **and** by its owner Job's UID: a
 deleted Job's pod is never read as the new Job's evidence.
+
+**The re-created Job never runs the engine a second time over one execution**
+(tracker defect RECEIPT-DUP). Every runner claims its execution id with a
+create-only `logweir/backups/<backupId>/execution.claim.json` immediately before
+the engine starts ([the execution claim](formats/backup-receipt.md#the-execution-claim-one-engine-run-per-backup_id)).
+If the lost Job's pod got that far, the re-created Job finds the claim and exits
+**1** naming `ExecutionAlreadyClaimed`, with no engine run and no receipt: a
+second engine run would have overwritten the manifest the first run's signed
+receipt attests. The `Backup` ends `Failed` with `status.exitReason:
+ExecutionAlreadyClaimed` (the runner's final `failure-reason=` line, lifted by
+the controller; `kubectl describe backup` shows it on `status.exitReason` and
+the `Failed` condition's message, and the console in the run's exit reason and
+message). Exit 1 is retryable, so a
+schedule **with `spec.retry` configured** starts a **new** execution
+`<uid>-<slot>-r<k>`; without `spec.retry` (the default) the slot is recorded
+`RunFailed` and the next slot runs normally. A manual `Backup` is retried by
+creating a new one. Whatever the lost pod already signed stays in the bucket
+and in the catalog. A Job lost before its pod reached the claim is re-created
+and runs normally. An evidence store that does not honour conditional create
+(`If-None-Match: *`) makes every backup exit **4** with `exitReason:
+ExecutionClaimUnproven` before the engine starts — and a destination whose
+`writeProbe` is on reports that store `notReady / ConditionalCreateUnsupported`
+before the first backup (§21.5).
 
 The source connection is configured once on `KafkaCluster`, and one resolver
 (§20) turns it into every Job: the probe and each backup reuse that object's
@@ -7464,6 +7501,28 @@ is under `logweir/readiness/`, which proves nothing about the archive prefix, an
 a check may not write into the archive prefix to find out. The row's message
 names the archive prefix and says it was not write-probed; the run's own guards
 answer it.
+
+**The probe also proves the store enforces conditional create** (RECEIPT-DUP).
+A backup runner claims each execution with a create-only put before its engine
+starts, and that claim is a lock only on a store that honours
+`If-None-Match: *`. So the probe creates a fresh marker a second time and
+requires the second create to be refused. A store that reports conditional put
+unsupported (the client falls back to HEAD-then-PUT), or that accepts the
+second create, makes the row **`notReady / ConditionalCreateUnsupported`** —
+the grant is there, but every backup to that store would exit 4
+`ExecutionClaimUnproven`. The probe uses the same key, the same principal as the first create (the
+`evidenceWrite` principal, above) and the same `s3:PutObject` on
+`logweir/readiness/*`; nothing else is needed. **Without
+`writeProbe` the requirement is proven at the first backup instead**, which
+exits 4 before any data is written.
+
+| Object store | Conditional create (`If-None-Match: *`) |
+|---|---|
+| MinIO `RELEASE.2025-09-07T16-13-09Z` (the compose and lab image) | **Supported, measured** — a private container ran the claim and the probe |
+| MinIO releases older than that | `[UNVERIFIED — needs a run against an older MinIO release]` |
+| AWS S3 | `[UNVERIFIED — needs a real AWS S3 bucket and a credential source]`; `object_store` sends `If-None-Match: *` by default |
+| GCS, Azure Blob | `[UNVERIFIED — native conditional create in object_store, not run against either provider]` |
+| any S3-compatible store with `AWS_CONDITIONAL_PUT=disabled`, or one that ignores the header | **Unsupported** — `ConditionalCreateUnsupported` at readiness, exit 4 at every backup |
 
 ### 21.6 A restore preflight writes nothing
 

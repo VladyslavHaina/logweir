@@ -214,6 +214,27 @@ pub enum BackupError {
     /// those states one code.
     #[error("signing: {0}")]
     Signing(String),
+    /// **RECEIPT-DUP.** The execution claim could not be PROVEN exclusive —
+    /// the evidence store refused the create-only put, answered it without
+    /// enforcing it, or accepted a second create of the same key
+    /// (`phase_run::claim_execution`). **Exit 4**, GC11's "lock-proof failed,
+    /// nothing uploaded": no engine run was started, so there is no archive
+    /// and no receipt, and a store that does not honour `If-None-Match: *` is
+    /// a configuration no retry changes.
+    ///
+    /// A claim that already EXISTS is not this variant: that is an earlier run
+    /// of the same execution, and it is `Operational` (exit 1) so a schedule's
+    /// retry policy starts a new execution.
+    #[error("lock: {0}")]
+    Lock(String),
+    /// **RECEIPT-DUP.** An earlier run of this execution already holds its
+    /// claim (`phase_run::claim_execution`): no engine run, nothing signed.
+    /// **Exit 1** — retryable under D1 §4.6, because a retry is a NEW
+    /// execution id with its own claim. Its own variant, not `Operational`,
+    /// so the one place that names a failure's state
+    /// ([`BackupError::failure_reason`]) matches a type, not a message.
+    #[error("operational: {0}")]
+    ExecutionClaimed(String),
 }
 
 impl BackupError {
@@ -226,10 +247,26 @@ impl BackupError {
     pub fn exit_code(&self) -> ExitCode {
         match self {
             BackupError::Guard(_) => ExitCode::GuardRefused, // 3
-            BackupError::Signing(_) => ExitCode::SigningOrLock, // 4
-            BackupError::Operational(_) | BackupError::Kafka(_) | BackupError::Engine(_) => {
+            BackupError::Signing(_) | BackupError::Lock(_) => ExitCode::SigningOrLock, // 4
+            BackupError::Operational(_)
+            | BackupError::ExecutionClaimed(_)
+            | BackupError::Kafka(_)
+            | BackupError::Engine(_) => {
                 ExitCode::Operational // 1
             }
+        }
+    }
+
+    /// The state `failure-reason=` names for this failure, when it has one
+    /// more specific than its exit code — RECEIPT-DUP's two claim outcomes,
+    /// and nothing else. The controller lifts it into `status.exitReason`
+    /// only beside the exit code `logweir_core::guard::FAILURE_REASONS`
+    /// pairs it with.
+    pub fn failure_reason(&self) -> Option<&'static str> {
+        match self {
+            BackupError::ExecutionClaimed(_) => Some(phase_run::EXECUTION_ALREADY_CLAIMED),
+            BackupError::Lock(_) => Some(phase_run::EXECUTION_CLAIM_UNPROVEN),
+            _ => None,
         }
     }
 }
@@ -511,6 +548,21 @@ fn execute_with_signer(
         }
     }
 
+    // **RECEIPT-DUP — ONE ENGINE RUN PER EXECUTION.** The last step before
+    // the engine, after every refusal that needs no write: claim `backup_id`
+    // with a create-only put under the evidence root and prove the claim is
+    // exclusive. A run of an execution an earlier run already claimed — a
+    // PLAT-06.1 case-e Job re-created from its frozen inputs — stops HERE,
+    // before the engine could overwrite the manifest the earlier receipt
+    // attests. See `phase_run::claim_execution`.
+    let claim_key = phase_run::claim_execution(&backup_id, run_id, requested_at, evidence)?;
+    tracing::info!(
+        run_id = %run_id,
+        backup_id = %backup_id,
+        claim_key = %claim_key,
+        "execution claimed; starting the engine"
+    );
+
     let mut obs = crate::metrics::PhaseLogger::new(run_id);
     let ran = phase_run::run(&plan, engine, store, &mut obs)?;
 
@@ -620,6 +672,9 @@ fn report(run_id: &str, outcome: Result<BackupOutcome, BackupError>) -> ExitCode
         Err(_) => None,
     };
     let receipt_sha256 = outcome.as_ref().ok().map(|o| o.receipt_sha256.clone());
+    // RECEIPT-DUP: the claim outcome, carried to `exiting` so it is the LAST
+    // stdout line — the only place a controller can read it (I9's argument).
+    let failure_reason = outcome.as_ref().err().and_then(BackupError::failure_reason);
     let code = match &outcome {
         Ok(o) => {
             tracing::info!(
@@ -645,6 +700,7 @@ fn report(run_id: &str, outcome: Result<BackupOutcome, BackupError>) -> ExitCode
         run_id,
         code,
         refusal_message.as_deref(),
+        failure_reason,
         evidence_keys,
         catalog_key,
         receipt_sha256,
@@ -679,6 +735,7 @@ fn exiting(
     run_id: &str,
     code: ExitCode,
     refusal_message: Option<&str>,
+    failure_reason: Option<&str>,
     evidence_keys: Option<(String, String)>,
     catalog_key: Option<String>,
     receipt_sha256: Option<String>,
@@ -715,7 +772,10 @@ fn exiting(
         // validation and the later validate → sign → put order both precede
         // every evidence write. The archive may exist for failures discovered
         // after engine work; a signing-prerequisite error explicitly states
-        // that no engine data operation started.
+        // that no engine data operation started. `BackupError::Lock`
+        // (RECEIPT-DUP's unproven execution claim) reaches this code before
+        // the engine too, and its own message says so; the line below stays
+        // true for it, because "may exist" is not "does exist".
         ExitCode::SigningOrLock => {
             "the backup's result is unattested: no receipt was signed or uploaded, though the \
              archive may exist"
@@ -728,6 +788,13 @@ fn exiting(
     // satisfies GC11 rather than printing nothing.
     if code == ExitCode::GuardRefused {
         crate::exit::print_refusal_reason(refusal_message.unwrap_or(""));
+    }
+    // RECEIPT-DUP: `failure-reason=` as the FINAL stdout line of an exit 1
+    // or 4 whose state is more specific than its code, for the same reason
+    // I9's line is last. Nothing follows it: the key lines below print only
+    // on exit 0.
+    if let (ExitCode::Operational | ExitCode::SigningOrLock, Some(state)) = (code, failure_reason) {
+        println!("{}", logweir_core::guard::failure_reason_line(state));
     }
     // **I7, and the ORDER is the contract.** `receipt-key=` then
     // `sidecar-key=`, as the FINAL two stdout lines of a successful run, with

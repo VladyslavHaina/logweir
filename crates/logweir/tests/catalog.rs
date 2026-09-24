@@ -862,10 +862,17 @@ fn a_successful_backup_writes_its_catalog_point() {
         other => panic!("{other:?}"),
     }
 
-    // Exactly five objects: receipt, sidecar, record, record.sig, log entry.
+    // Exactly six objects: the execution claim (RECEIPT-DUP, taken before the
+    // engine), receipt, sidecar, record, record.sig, log entry.
     let mut keys = evidence.list_keys("logweir/").unwrap();
     keys.retain(|k| !k.starts_with("logweir/archive-fixture/"));
-    assert_eq!(keys.len(), 5, "{keys:?}");
+    assert_eq!(keys.len(), 6, "{keys:?}");
+    assert!(
+        keys.contains(&logweir::backup::phase_run::claim_key(
+            backup_seam::BACKUP_ID
+        )),
+        "{keys:?}"
+    );
 }
 
 #[test]

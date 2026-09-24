@@ -642,6 +642,34 @@ fn an_enumerated_key_outside_the_bound_stops_the_point_with_zero_deletes() {
     assert!(sink.keys().is_empty(), "and no tombstone was written");
 }
 
+/// **RECEIPT-DUP's execution claim** (`logweir/backups/<backupId>/
+/// execution.claim.json`, the one execution-scoped object beside the
+/// run-scoped receipts) is evidence-root material: never a plan key, never a
+/// listed key, whatever set it names. Deleting it would let a later re-created
+/// Job of that execution run the engine again over a set whose manifest a
+/// signed receipt attests — the overwrite the claim exists to prevent.
+#[test]
+fn the_execution_claim_is_never_deletable() {
+    let claim = format!("{EVIDENCE_ROOT}backups/set-a/execution.claim.json");
+    let mut bad = line("lwp1-a", "set-a", &["seg-0"]);
+    bad.object_keys.push(claim.clone());
+    assert!(
+        matches!(
+            validate_plan(&plan(vec![bad]), &binding()),
+            Err(Refusal::EvidenceRoot { .. })
+        ),
+        "a plan naming the execution claim is refused as the evidence root"
+    );
+    let l = line("lwp1-a", "set-a", &[]);
+    assert!(
+        matches!(
+            validate_listed_key(&claim, &l),
+            Err(Refusal::EvidenceRoot { .. })
+        ),
+        "and so is a listing that returned it"
+    );
+}
+
 /// The same rule, as the function the executor calls.
 #[test]
 fn validate_listed_key_refuses_the_evidence_root_and_the_wrong_prefix() {

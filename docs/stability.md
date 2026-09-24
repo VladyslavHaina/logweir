@@ -802,6 +802,43 @@ point-bound plan's receipt signature must verify against, a standalone run of su
 disaster path) cannot proceed without it, and a keyring the operator wrote can refuse a receipt but
 never authorise a run.
 
+### One `backup_id` is one engine run: the execution claim (RECEIPT-DUP)
+
+Before this fix a second `logweir backup run` under a `backup_id` that had already been backed up —
+a Kubernetes Backup Job lost and re-created from its frozen inputs, or a standalone run reusing a
+spec's `backup_id` — ran the engine again, the engine replaced `<prefix>/<backup_id>/manifest.json`,
+and the first run's signed receipt stopped matching the archive whenever the topic had advanced.
+`backup run` now wins a create-only claim, `logweir/backups/<backup_id>/execution.claim.json`,
+immediately before the engine starts ([the format](formats/backup-receipt.md#the-execution-claim-one-engine-run-per-backup_id)).
+What changes for an operator:
+
+- **A second run under one `backup_id` exits 1 naming `ExecutionAlreadyClaimed`** — no engine run,
+  no receipt. It used to exit 0 and append to the set. A standalone `backup run` that reused a fixed
+  `backup_id` on a schedule must now use a fresh id per run (`--backup-id-override`); under
+  Kubernetes every execution already has its own id. Exit 1 is retryable, so a schedule **with
+  `spec.retry` configured** starts a new execution `<uid>-<slot>-r<k>`; without `spec.retry` (the
+  default) the slot is recorded `RunFailed` and the next slot runs normally, and a manual `Backup`
+  is retried by creating a new one.
+- **An evidence store that does not honour conditional create now refuses every backup**, exit 4
+  naming `ExecutionClaimUnproven`, before the engine starts — including a store that accepts
+  `If-None-Match: *` and overwrites anyway, which the runner detects by creating the claim twice.
+  Such a store used to take backups whose receipts were "create-only" only in name. MinIO honours the
+  header; AWS S3 is `[UNVERIFIED — needs a real AWS S3 bucket and a credential source]` like the rest of
+  this document's S3 claims.
+- **No permission is added.** The claim is `s3:PutObject` under `logweir/*`, which the runner already
+  holds; it is never read back, so no `s3:GetObject` or `s3:ListBucket` under `logweir/` is needed.
+  Without that grant the refusal is exit 4 as before, now before the engine instead of after it.
+- **Old archives are untouched and still verify.** Nothing about the receipt, its sidecar, the
+  catalog record or the manifest changed shape; a set written by an older build may hold two
+  receipts, and both stay two catalog points.
+
+**Upgrade.** Nothing to migrate. A Backup Job whose first run was made by the older runner and that
+is lost and re-created after the upgrade finds no claim and runs the engine again — the one window
+the claim cannot close, because the older run never wrote one; let in-flight Backups finish before
+upgrading the controller. **Rollback.** An older runner ignores the claim objects (they are not
+receipts) and returns to the old behaviour; the claims stay in the bucket, harmlessly, and are
+honoured again after a re-upgrade.
+
 ### A bound point's receipt signature is verified before any data moves (D3 §5.5 step 6)
 
 Before PLAT-15.2's review fix, the runner's point binding checked digests only — the receipt's
