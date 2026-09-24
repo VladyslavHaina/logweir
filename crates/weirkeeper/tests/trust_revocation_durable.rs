@@ -192,6 +192,34 @@ fn a_compromise_recorded_anywhere_reaches_every_source() {
     assert!(t.key(SIGNER).is_none());
 }
 
+/// A policy the finalizer is HOLDING is still a record — for every namespace,
+/// not only the ones it still names. The held object is the only record left
+/// (that is why it is held), so ignoring it while it waits would re-trust the
+/// key in a namespace re-bound away before the delete.
+///
+/// KILLS M5 ("`compromise_records` skips a policy with a deletionTimestamp").
+#[test]
+fn a_policy_being_deleted_is_still_a_record_everywhere() {
+    let held = deleting(
+        policy("incident", &[], vec![compromised("2026-09-10T12:00:00Z")]),
+        &[COMPROMISE_FINALIZER],
+    );
+    let t = trust(resolve_in(
+        NS,
+        std::slice::from_ref(&held),
+        Some(&roster_listing(&[(SIGNER, SIGNER_PEM)])),
+    ));
+    assert!(
+        t.source.is_legacy(),
+        "the namespace resolves through the roster now"
+    );
+    assert_eq!(
+        t.key(SIGNER).expect("listed").trust.state,
+        logweir_core::trust::KeyState::Revoked
+    );
+    assert!(compromise_records(std::slice::from_ref(&held)).contains_key(SIGNER));
+}
+
 /// A cluster with ONE record reads byte-for-byte as it did before the overlay
 /// existed — so no object's stored verdict moves on upgrade — and two records
 /// of one compromise take the EARLIEST instant.

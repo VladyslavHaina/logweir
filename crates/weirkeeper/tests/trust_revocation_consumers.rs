@@ -314,6 +314,22 @@ fn rebound() -> Vec<TrustPolicy> {
     vec![p]
 }
 
+/// Both at once: the namespace re-bound away first, then `kubectl delete` on
+/// the recording policy. Whatever the delete leaves behind no longer governs
+/// [`NS`], so the namespace resolves through the roster — and a record that
+/// is only honoured while it GOVERNS would be lost here even with the object
+/// held.
+async fn rebound_then_deleted() -> Vec<TrustPolicy> {
+    list_after_kubectl_delete()
+        .await
+        .into_iter()
+        .map(|mut p| {
+            p.spec.namespaces = None;
+            p
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // The baseline: while the recording policy governs, every consumer refuses
 // ---------------------------------------------------------------------------
@@ -345,6 +361,7 @@ async fn a_backup_verdict_stays_refused_after_the_recording_policy_is_deleted() 
     for (scenario, policies) in [
         ("deleted", list_after_kubectl_delete().await),
         ("re-bound", rebound()),
+        ("re-bound, then deleted", rebound_then_deleted().await),
     ] {
         let res = resolve_in(NS, &policies, Some(&roster()));
         let now_status = after(&refused, &res, backup_badge);
@@ -369,6 +386,7 @@ async fn a_restore_verdict_stays_refused_after_the_recording_policy_is_deleted()
     for (scenario, policies) in [
         ("deleted", list_after_kubectl_delete().await),
         ("re-bound", rebound()),
+        ("re-bound, then deleted", rebound_then_deleted().await),
     ] {
         let res = resolve_in(NS, &policies, Some(&roster()));
         let now_status = after(&refused, &res, restore_badge);
@@ -392,6 +410,7 @@ async fn new_evidence_signed_by_the_key_is_refused_after_deletion() {
     for (scenario, policies) in [
         ("deleted", list_after_kubectl_delete().await),
         ("re-bound", rebound()),
+        ("re-bound, then deleted", rebound_then_deleted().await),
     ] {
         let res = resolve_in(NS, &policies, Some(&roster()));
         let verdict = trust_of(&res).decide_for(
@@ -415,6 +434,7 @@ async fn the_catalog_never_lists_the_keys_points_verified_after_deletion() {
     for (scenario, policies) in [
         ("deleted", list_after_kubectl_delete().await),
         ("re-bound", rebound()),
+        ("re-bound, then deleted", rebound_then_deleted().await),
     ] {
         let view = TrustView::from_resolution(&resolve_in(NS, &policies, Some(&roster())));
         let verdict = classify_verification(
@@ -444,6 +464,7 @@ async fn the_runner_keyring_carries_the_revocation_after_deletion() {
     for (scenario, policies) in [
         ("deleted", list_after_kubectl_delete().await),
         ("re-bound", rebound()),
+        ("re-bound, then deleted", rebound_then_deleted().await),
     ] {
         let res = resolve_in(NS, &policies, Some(&roster()));
         let bytes = weirkeeper::controllers::restore::evidence_keyring_bytes(trust_of(&res))
@@ -473,6 +494,7 @@ async fn a_new_approval_by_the_compromised_approver_is_refused_after_deletion() 
     for (scenario, policies) in [
         ("deleted", list_after_kubectl_delete().await),
         ("re-bound", rebound()),
+        ("re-bound, then deleted", rebound_then_deleted().await),
     ] {
         let res = resolve_in(NS, &policies, Some(&roster()));
         let answer = trust_of(&res).may_sign_new_for(APPROVER, KeyUsage::GovernedApproval, now());
@@ -491,6 +513,7 @@ async fn the_signer_readiness_row_refuses_the_key_after_deletion() {
     for (scenario, policies) in [
         ("deleted", list_after_kubectl_delete().await),
         ("re-bound", rebound()),
+        ("re-bound, then deleted", rebound_then_deleted().await),
     ] {
         let resolution = resolve_in(NS, &policies, Some(&roster()));
         let facts = RosterFacts {
