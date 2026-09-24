@@ -44,13 +44,13 @@ rebase or a merge, where a commit id would not. The build is not
 bit-reproducible, so those exact images are the ones published, with
 `build.sh --push-loaded`, which refuses to report success unless Docker Hub answers with the same digest.
 
-**Publication status.** [UNVERIFIED — the first push was refused because this build host holds no Docker Hub login; publication and the anonymous-pull check are owed.]
-Until then a host without the two images in its local store cannot pull
-them. After `docker login docker.io` as the repository owner:
+**Publication status.** Published on 2026-09-24 with `build.sh --push-loaded`;
+Docker Hub answered with exactly the digests above. Both repositories are public:
+an anonymous `auth.docker.io` token reads both indexes, both platform
+manifests and their blobs, and so does `docker buildx imagetools inspect`
+with an empty `DOCKER_CONFIG`:
 
 ```bash
-bash third_party/minio-mirror/build.sh --push-loaded
-# both repositories must then be Public on Docker Hub; check anonymously:
 docker buildx imagetools inspect docker.io/vladyslavhaina/minio-mirror@sha256:b4c3dc9fb0a82538ac6750eb841b54fb2d4303f4b73fb523ca097918a35c3524
 docker buildx imagetools inspect docker.io/vladyslavhaina/mc-mirror@sha256:9c7cbc3f47b092d52b73124fb9ab12f3266534c23c283b2e984d07408c9ff381
 ```
