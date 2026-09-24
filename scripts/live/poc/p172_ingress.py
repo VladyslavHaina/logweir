@@ -50,6 +50,8 @@ def main():
             phase1()
         elif PHASE == "expired":
             expired()
+        elif PHASE == "save":
+            save()
     except Exception:
         import traceback
         row("harness completed every row", False, {"exception": traceback.format_exc()[-600:]})
@@ -278,9 +280,27 @@ def phase1():
     row("session saved for the expired row is valid now (200)", r.status == 200, {"obtainedAt": time.strftime("%FT%TZ", time.gmtime(started))})
 
 
+def save():
+    """Only the saved session, for an `expired` run sessionMaxAgeSeconds later."""
+    s = poclib.signin("viewer")
+    os.makedirs(os.path.dirname(SAVED), mode=0o700, exist_ok=True)
+    fd = os.open(SAVED, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.write(fd, json.dumps({"session": s["session"], "obtainedAt": time.time()}).encode())
+    os.close(fd)
+    r = poclib.request("GET", poclib.BASE + "/api/v1/session", headers={"Cookie": s["session"]})
+    row("session saved for the expired row is valid now (200)", r.status == 200, {"obtainedAt": time.strftime("%FT%TZ", time.gmtime())})
+
+
 def expired():
     saved = json.load(open(SAVED))
     age = time.time() - saved["obtainedAt"]
+    if age <= 930:
+        # Too early to be a test of expiry: say so, keep the session file, and change nothing.
+        r = poclib.request("GET", poclib.BASE + "/api/v1/session", headers={"Cookie": saved["session"]})
+        row(f"control: the saved session is still accepted at {int(age)} s, inside its 900 s lifetime (200)", r.status == 200,
+            {"ageSeconds": int(age), "status": r.status})
+        print(f"too early for the expired row: {int(age)} s old; run again after {int(930 - age) + 1} s")
+        return
     r = poclib.request("GET", poclib.BASE + "/api/v1/session", headers={"Cookie": saved["session"]})
     row(f"expired session: a session {int(age)} s old (sessionMaxAgeSeconds 900) is refused (401)", age > 900 and r.status == 401,
         {"ageSeconds": int(age), "status": r.status, "code": r.json().get("code")})
