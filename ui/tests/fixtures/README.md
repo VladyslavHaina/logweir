@@ -224,6 +224,17 @@ characters cut in two places -- `(subject: "admin", namespace: "lw-p062-demo")` 
 `(subject: "", namespace: "adminlw-p062-demo")` -- which collide under a naive concatenation and
 must not collide here. All six names are distinct.
 
+## The PoC round's two captures (`claude/console-shared-fix`)
+
+`ui/tests/shared-console.spec.js` reads two objects captured on 2026-09-24 from the PoC install
+(`poc-install`: the published chart in shared mode behind Traefik and Dex, namespace
+`logweir-poc`), both byte for byte apart from key order and indentation:
+
+| fixture | capture | what it is |
+|---|---|---|
+| `console/backup-poc.json` | `artifacts/poc-install/defects/P2-wizard-signed-unverified.api.json`, its `body` | the product API's `GET .../backups/logweir-backup-orders-r1-20260924-134000`: `operation.verificationState: valid`, `verifiedSuccess: true`, and **no `manifestKey`** -- the answer the shared console's restore wizard rendered as "signed: unverified" and "no manifest recorded" (POC-P2). Held to `BackupResponse` by `contract.spec.js`. |
+| `backup-poc-cr.json` | `artifacts/poc-install/r1/backup-133600.json` | the `Backup` custom resource the PoC's controller wrote for the 13:36 slot, as `kubectl get -o json` returned it: `status.evidence.verification.result: Valid` on basis `Current`, exit 0, and -- like every Backup a controller in this tree writes -- no `status.manifestKey`. Legacy mode reads exactly this. |
+
 ## The preview fixtures
 
 `preview/` is what `ui/tests/preview-server.js` answers the page's API reads from, and nothing in

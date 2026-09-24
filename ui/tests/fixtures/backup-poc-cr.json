@@ -1,0 +1,162 @@
+{
+  "apiVersion": "logweir.dev/v1alpha1",
+  "kind": "Backup",
+  "metadata": {
+    "creationTimestamp": "2026-09-24T13:36:00Z",
+    "generation": 1,
+    "labels": {
+      "logweir.dev/attempt": "0",
+      "logweir.dev/schedule": "orders-r1",
+      "logweir.dev/schedule-uid": "fcf2584d-9a36-4196-a704-c889b5bb1dff",
+      "logweir.dev/slot": "20260924-133600",
+      "logweir.dev/trigger": "scheduled"
+    },
+    "name": "logweir-backup-orders-r1-20260924-133600",
+    "namespace": "logweir-poc",
+    "resourceVersion": "6794002",
+    "uid": "d80a9d6e-5a56-41a4-8db7-1d1ae752ff8f"
+  },
+  "spec": {
+    "archive": {
+      "secretRef": {
+        "name": "logweir-s3"
+      },
+      "url": "s3://kafka-backups/poc"
+    },
+    "deadlineSeconds": 3600,
+    "scheduleRef": {
+      "generation": 1,
+      "name": "orders-r1",
+      "runPolicySha256": "sha256:f56c723c1d35a49f2829deba033effc1896785741fb1799db9564e6ca4278769",
+      "uid": "fcf2584d-9a36-4196-a704-c889b5bb1dff"
+    },
+    "slot": "20260924-133600",
+    "sourceRef": {
+      "name": "source"
+    },
+    "topics": [
+      "orders",
+      "payments"
+    ],
+    "trigger": {
+      "attempt": 0,
+      "kind": "Scheduled"
+    },
+    "triggeredBy": "schedule"
+  },
+  "status": {
+    "backupId": "fcf2584d-9a36-4196-a704-c889b5bb1dff-20260924-133600",
+    "capture": {
+      "finishedAt": "2026-09-24T13:36:01.066039218Z",
+      "startedAt": "2026-09-24T13:36:00.825857926Z"
+    },
+    "conditions": [
+      {
+        "lastTransitionTime": "2026-09-24T13:36:04.184994136Z",
+        "message": "the runner exited 0 (ok); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode",
+        "observedGeneration": 1,
+        "reason": "Ok",
+        "status": "True",
+        "type": "Complete"
+      },
+      {
+        "lastTransitionTime": "2026-09-24T13:36:04.184994136Z",
+        "message": "both `receipt-key=` and `sidecar-key=` were read off the pod log and are on status.evidence",
+        "observedGeneration": 1,
+        "reason": "EvidenceKeysRecorded",
+        "status": "True",
+        "type": "EvidenceRecorded"
+      },
+      {
+        "lastTransitionTime": "2026-09-24T13:36:00.008563051Z",
+        "message": "this Backup's referents resolved and its destination is usable",
+        "observedGeneration": 1,
+        "reason": "Admitted",
+        "status": "True",
+        "type": "Admitted"
+      },
+      {
+        "lastTransitionTime": "2026-09-24T13:36:00.008563051Z",
+        "message": "the runner Job logweir-backup-orders-r1-20260924-133600 exists and has not finished",
+        "observedGeneration": 1,
+        "reason": "JobCreated",
+        "status": "True",
+        "type": "JobCreated"
+      },
+      {
+        "lastTransitionTime": "2026-09-24T13:36:01.028997801Z",
+        "message": "the `runner` container has been seen running or terminated",
+        "observedGeneration": 1,
+        "reason": "RunnerStarted",
+        "status": "True",
+        "type": "RunnerReady"
+      },
+      {
+        "lastTransitionTime": "2026-09-24T13:36:04.184994136Z",
+        "message": "verified by weirkeeper at 2026-09-24T13:36:04Z against key 28cf560620b0ea46bc91fd548e4cd28dfc0599daaf5816e0a401180181512a5a",
+        "observedGeneration": 1,
+        "reason": "Verified",
+        "status": "True",
+        "type": "Verified"
+      }
+    ],
+    "evidence": {
+      "receiptKey": "logweir/backups/fcf2584d-9a36-4196-a704-c889b5bb1dff-20260924-133600/01M39T2N5Y1X15587ZFGTY3SRE.receipt.json",
+      "receiptSha256": "sha256:ab81794387e80c888a8887b927d68e59ae0f9b01acd24cefefce21fc9a751d0c",
+      "sidecarKey": "logweir/backups/fcf2584d-9a36-4196-a704-c889b5bb1dff-20260924-133600/01M39T2N5Y1X15587ZFGTY3SRE.receipt.sig",
+      "verification": {
+        "matchedKeyId": "28cf560620b0ea46bc91fd548e4cd28dfc0599daaf5816e0a401180181512a5a",
+        "payloadType": "application/vnd.logweir.backup-receipt+json;version=1.0.0",
+        "result": "Valid",
+        "signedAt": "2026-09-24T13:36:01Z",
+        "trust": {
+          "basis": "Current",
+          "keyState": "Active",
+          "policy": {
+            "name": "legacy-roster-v1"
+          }
+        },
+        "verifiedAt": "2026-09-24T13:36:04Z"
+      }
+    },
+    "execution": {
+      "id": "fcf2584d-9a36-4196-a704-c889b5bb1dff-20260924-133600",
+      "inputsRef": {
+        "name": "logweir-backup-orders-r1-20260924-133600-plan"
+      },
+      "inputsSha256": "sha256:1f4cb09f1b7eb60c3f656ec7fedad3182e30d39f7004cdd008ded6226fcb7af8"
+    },
+    "exitCode": 0,
+    "exitReason": "ok",
+    "jobRef": {
+      "name": "logweir-backup-orders-r1-20260924-133600"
+    },
+    "phase": "Succeeded",
+    "progress": {
+      "lastTransitionTime": "2026-09-24T13:36:04.184994136Z",
+      "message": "the runner exited 0 (ok); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode",
+      "reason": "Ok",
+      "runner": {
+        "containerState": "Terminated",
+        "jobName": "logweir-backup-orders-r1-20260924-133600",
+        "podName": "logweir-backup-orders-r1-20260924-133600-bfhqt",
+        "podPhase": "Succeeded",
+        "scheduled": true,
+        "startedAt": "2026-09-24T13:36:00Z",
+        "waitingReason": "ContainerCreating"
+      },
+      "stage": "Finished"
+    },
+    "records": 400,
+    "selection": {
+      "coverage": "NamedTopics",
+      "mode": "SelectedTopics",
+      "resolvedTopicBytes": 14,
+      "resolvedTopicCount": 2
+    },
+    "windowCovered": {
+      "fromMs": 1790256208165,
+      "toMs": 1790256210511
+    }
+  }
+}

@@ -96,7 +96,6 @@ import {
 import {
   COPY_CAVEAT,
   RESTORE_IMMUTABLE_SENTENCE,
-  UNVERIFIED,
   badge,
   bucketOf,
   cell,
@@ -133,6 +132,7 @@ import {
 import { isObjectName, itemsOf } from "./clusters.js";
 import { listD3, readCatalogPoints, readD3, readOperation } from "../operation-watch.js";
 import { renderPreflight } from "./destinations.js";
+import { backupBadge, validVerification } from "./backups.js";
 import { COUNTERSIGN_COMMAND, approvalAuthorizes, restoreOperationRoute } from "./approvals.js";
 
 const PLURAL = "restores";
@@ -588,31 +588,68 @@ export function matchesQuery(haystack, query) {
   return true;
 }
 
-/** The signed verdict a point carries, in words. `unverified` is a real state
- *  and not a missing value: the controller writes `evidence.verification` only
- *  after it has fetched the receipt and checked it. */
-export function pointVerdict(backup) {
-  const verification = (((backup || {}).status || {}).evidence || {}).verification || {};
-  return typeof verification.result === "string" && verification.result.length > 0
-    ? verification.result
-    : UNVERIFIED;
+/** THE SIGNED VERDICT A POINT CARRIES, by the Backups page's own badge rule
+ *  (`backups.js` `backupBadge`) and in BOTH modes (POC-P2).
+ *
+ *  This used to print `status.evidence.verification.result` as a word. A
+ *  shared-console LIST item carries no `status.evidence` at all -- the product
+ *  API publishes the run's verdict on a list as `OperationSummary`
+ *  (`verificationState`, `verifiedSuccess`), which `ui/client.js` keeps under
+ *  `status.__summary` -- so every point the shared console offered read
+ *  `unverified`, beside an API that said `verificationState: valid,
+ *  verifiedSuccess: true`. The badge rule already reads the summary when the
+ *  object carries no recorded block, and is green exactly when the Backups
+ *  and History tables are: never for a verdict that is not `Valid` on an
+ *  accepted basis with exit 0, and never "unverified" for one that is. */
+export function pointSigned(backup) {
+  return backupBadge(((backup || {}).status) || {});
 }
+
+/** The words a point's archive column carries when its verified receipt
+ *  attests the manifest (see [`archiveAvailability`]). */
+export const MANIFEST_ATTESTED = "manifest attested by its verified receipt";
 
 /** WHAT "ARCHIVE AVAILABILITY" MEANS TODAY, and it is a statement about the
  *  STATUS and not about the bucket. Logweir holds no list capability against
  *  an archive and this page holds no bucket credential at all, so the nearest
  *  thing to availability the cluster can tell it is whether the run that wrote
- *  the set recorded a manifest key for it. A point with no manifest key is a
- *  point whose set the runner will have to find by name alone.
+ *  the set recorded its manifest.
+ *
+ *  TWO RECORDS SAY SO, AND THE SECOND IS THE ONE A CONTROLLER WRITES (POC-P2).
+ *  `status.manifestKey` is a field of the `Backup` CRD that no controller in
+ *  this tree writes (`weirkeeper` records the signed receipt under
+ *  `status.evidence` instead), so reading it alone called every real point
+ *  "no manifest recorded" -- in legacy mode, and in the shared console, where
+ *  the product API projects the same absent field. The receipt IS the record:
+ *  a backup receipt names its manifest key exactly when its run exited 0
+ *  (`logweir-core` `backup_receipt.rs`, "exit_code == 0 iff
+ *  archive.manifest_key is non-empty"), so a receipt the controller verified,
+ *  on a run that exited 0, attests the manifest. That is the badge rule's
+ *  green condition, read the same way in both modes: the recorded block when
+ *  the object carries one, else the list summary's `verifiedSuccess`. A point
+ *  with neither is still offered, and says what is not known.
  *
  *  PLAT-15.1's durable catalog is what turns this into a real answer: it
  *  records, per set, whether the objects are still there. Until then this page
  *  says exactly what it knows and no more. */
 export function archiveAvailability(backup) {
   const status = (backup || {}).status || {};
-  return typeof status.manifestKey === "string" && status.manifestKey.length > 0
-    ? "manifest recorded"
-    : "no manifest recorded";
+  if (typeof status.manifestKey === "string" && status.manifestKey.length > 0) {
+    return "manifest recorded";
+  }
+  return receiptVerified(status) ? MANIFEST_ATTESTED : "no manifest recorded";
+}
+
+/** Whether a run's own receipt verified and the run exited 0: the Backup badge
+ *  rule's green condition, from the recorded block when the object carries
+ *  one and from the console list summary when it carries only that. */
+function receiptVerified(status) {
+  const s = status || {};
+  if (((s.evidence || {}).verification) === undefined && s.__summary !== undefined) {
+    const summary = s.__summary || {};
+    return summary.verifiedSuccess === true && summary.verificationState === "valid";
+  }
+  return validVerification(s) !== null && s.exitCode === 0;
 }
 
 // ------------------------------------ the catalog-verified point (PLAT-15.2)
@@ -1788,7 +1825,7 @@ export function renderRecoveryPointStep(state) {
       ["covered to", cell(rfc3339(covered.toMs))],
       ["topics", topics.length === 0 ? cell(null) : esc(topics.join(", "))],
       ["records", cell(status.records)],
-      ["signed", cell(pointVerdict(point))],
+      ["signed", pointSigned(point)],
       ["archive", cell((spec.archive || {}).url) + " -- " + esc(archiveAvailability(point))],
     ]) +
     "<p class=\"note\">" + POINT_PINNED_SENTENCE + "</p>" +
@@ -1890,7 +1927,7 @@ export function renderPointSelector(state) {
       cell(rfc3339(covered.toMs)),
       topics.length === 0 ? cell(null) : esc(topics.join(", ")),
       cell(status.records),
-      cell(pointVerdict(point)),
+      pointSigned(point),
       cell((spec.archive || {}).url) + " -- " + esc(archiveAvailability(point)),
       // A RETRY ARRIVING HERE KEEPS ITS IDENTITY (PLAT-11.2). The operation
       // view of a failed Restore knows which run failed and not which Backup
