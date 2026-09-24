@@ -514,8 +514,9 @@ Then the three upgrade steps. **The live round must show, after R1:**
 The last publication before PLAT-15.2/17.2/19.2: managed identity and a shared
 console, but no `controller.watchNamespaces`, no `approvalPolicy.*` and none of
 the chart-gap values. Its console cannot trust the local CA (that value did not
-exist) and stays NotReady before the upgrade, which is why the install waits on
-the controller only.
+exist): it reports Ready, but every sign-in answers `503` (`provider_unreachable`
+in its log) until the upgrade, which is why the install waits on the controller
+only.
 
 ```bash
 git archive "$R2_COMMIT" charts/logweir | (mkdir -p poc-baselines/r2 && tar -x -C poc-baselines/r2)
@@ -542,20 +543,44 @@ handoff's table states them — each with the pre-upgrade state it names.
 ## Uninstall
 
 ```bash
-helm uninstall logweir --kube-context "$CTX" -n "$LOGWEIR_NAMESPACE"
-helm uninstall dex --kube-context "$CTX" -n "$DEX_NAMESPACE"
+helm uninstall logweir --kube-context "$CTX" -n "$LOGWEIR_NAMESPACE" --wait
+helm uninstall dex --kube-context "$CTX" -n "$DEX_NAMESPACE" --wait
 kubectl --context "$CTX" delete -f deploy/poc/issuers.yaml
 kubectl --context "$CTX" delete -f deploy/poc/minio-grants.yaml --ignore-not-found
-helm uninstall cert-manager --kube-context "$CTX" -n "$CERT_MANAGER_NAMESPACE"
-helm uninstall traefik --kube-context "$CTX" -n "$INGRESS_NAMESPACE"
+helm uninstall cert-manager --kube-context "$CTX" -n "$CERT_MANAGER_NAMESPACE" --wait
+helm uninstall traefik --kube-context "$CTX" -n "$INGRESS_NAMESPACE" --wait
 ```
 
-What remains on purpose, and how to remove it, is
-[docs/install.md](../../docs/install.md), *Uninstall, and what it leaves behind*:
-the retained signing identity, the fourteen CRDs (with every custom resource,
-including the `TrustPolicy`), the MinIO volume, and cert-manager's and Traefik's
-CRDs. Delete the namespaces last, and remove `poc-secrets/` and the CA from
-your keychain.
+**The demo archive goes with the first line.** The MinIO
+`PersistentVolumeClaim` is an ordinary release object, so `helm uninstall
+logweir` deletes it and, under docker-desktop's `Delete` reclaim policy, every
+backup in it; copy out what you need first.
+
+What remains on purpose ([charts/logweir/README.md](../../charts/logweir/README.md),
+*Uninstall, and what it leaves behind*): the retained signing identity
+(`logweir-signing-key` in both namespaces, `logweir-signing-trust`) and the
+`logweir-identity-singleton` ClusterRole; the fourteen Logweir CRDs with every
+custom resource, the `TrustPolicy` and `TrustRoster/default` included;
+cert-manager's six CRDs (`crds.keep`) and the Secrets it issued; Traefik's CRDs
+(`*.traefik.io`); the ten `*.dex.coreos.com` CRDs Dex's Kubernetes storage
+created at runtime; two cert-manager leader-election `Lease`s in `kube-system`;
+and the namespaces. To retire the PoC for good — this deletes the installation
+identity, so archives it signed can no longer be verified here — remove them,
+namespaces last:
+
+```bash
+for c in $(kubectl --context "$CTX" get crd -o name | grep -E '\.logweir\.dev$|\.traefik\.io$|\.dex\.coreos\.com$'); do
+  kubectl --context "$CTX" delete "$c" --wait --timeout=120s
+done
+kubectl --context "$CTX" delete crd -l app.kubernetes.io/instance=cert-manager
+kubectl --context "$CTX" delete clusterrole logweir-identity-singleton --ignore-not-found
+for ns in "$POC_NAMESPACE" "$LOGWEIR_NAMESPACE" "$DEX_NAMESPACE" "$CERT_MANAGER_NAMESPACE" "$INGRESS_NAMESPACE"; do
+  kubectl --context "$CTX" delete namespace "$ns" --wait --timeout=360s --ignore-not-found
+done
+kubectl --context "$CTX" -n kube-system delete lease cert-manager-controller cert-manager-cainjector-leader-election
+```
+
+Then remove `poc-secrets/` and, if you trusted it, the CA from your keychain.
 
 ## What production keeps, and what the PoC stands in for
 

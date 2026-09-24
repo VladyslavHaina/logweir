@@ -1487,15 +1487,18 @@ helm uninstall logweir -n logweir-system
 
 removes everything the release created **except**: the fourteen CRDs (Helm never
 deletes `crds/`; `kubectl delete crd <name>` removes each and every custom
-resource stored under it), the MinIO `PersistentVolumeClaim` when
-`minio.persistence.enabled` (delete it yourself, or keep the archive), the
+resource stored under it), the
 namespace `--create-namespace` made, the cluster-scoped `TrustRoster`, retained
 `Secret/logweir-signing-key` in the release and authorized runner namespaces,
 retained `ConfigMap/logweir-signing-trust`, the authority-free retained
 `ClusterRole/logweir-identity-singleton`, and any RoleBinding you created by
 hand. Preserve those identity objects for same-installation recovery and old
 archive verification; do not delete the singleton marker merely to install a
-second independent signer. And, as with `kubectl delete -f
+second independent signer. **The demo MinIO's `PersistentVolumeClaim` is NOT
+kept:** it is an ordinary release object, so `helm uninstall` deletes it and,
+under a `Delete` reclaim policy (docker-desktop's `hostpath`), the demo archive
+with it — copy anything you need out of the bucket first (seen live by the PoC
+install, 2026-09-24). And, as with `kubectl delete -f
 logweir.yaml`: no archive object and no evidence object is ever deleted by
 Logweir — Global Constraint 6.
 
