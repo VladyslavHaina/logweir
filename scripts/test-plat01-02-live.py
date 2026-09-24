@@ -699,11 +699,27 @@ def fresh_backup() -> dict[str, Any]:
     verify_signed_document(receipt_path, signature_path, "backup-receipt")
     save_artifact("fresh-backup-job.json", job)
     STATE["backup_id"] = status["backupId"]
+    # Where the backup's records actually lie (`status.windowCovered`, from the
+    # signed receipt): the restore plans' sample window must overlap them.
+    STATE["backup_window_from_ms"] = (status.get("windowCovered") or {}).get("fromMs")
     STATE["backup_name"] = name
     STATE["cases"]["fresh_scram_backup"] = "passed"
     save_state()
     log("fresh current-runner backup passed with exact 100+100 receipt counts")
     return backup
+
+
+def sample_window_start(now: dt.datetime, covered_from_ms: Any) -> str:
+    """The sample window's start: a day back, or earlier when the backup's own
+    records are older (lab-refresh-10). The lab's seed records were produced on
+    2026-09-22 and the harness's fixed "last 24 h" window stopped overlapping
+    them a day later — every restore then failed `operational: no segment in
+    backup … overlaps the window`, a statement about the harness's clock and
+    not about the product. The window still ends at the point in time."""
+    start = now - dt.timedelta(days=1)
+    if isinstance(covered_from_ms, int):
+        start = min(start, dt.datetime.fromtimestamp(covered_from_ms / 1000, dt.timezone.utc))
+    return start.strftime("%Y-%m-%dT%H:%M:%S.") + f"{start.microsecond // 1000:03d}Z"
 
 
 def restore_plan(prefix: str, point_in_time: str) -> str:
@@ -717,8 +733,8 @@ def restore_plan(prefix: str, point_in_time: str) -> str:
         "path_style": True,
         "allow_http": True,
     }
-    start = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=1)).strftime(
-        "%Y-%m-%dT%H:%M:%SZ"
+    start = sample_window_start(
+        dt.datetime.now(dt.timezone.utc), STATE.get("backup_window_from_ms")
     )
     plan = {
         "source": {
@@ -4303,6 +4319,14 @@ def gate_probe() -> None:
 
 def harness_selftest() -> None:
     """Bounded local controls proving the harness can fail; no cluster access."""
+    now = dt.datetime(2026, 9, 24, 3, 0, 0, tzinfo=dt.timezone.utc)
+    seed = 1790120729256  # lab-refresh-10's fresh backup windowCovered.fromMs (2026-09-22)
+    if sample_window_start(now, seed) != "2026-09-22T23:45:29.256Z":
+        raise RuntimeError("the sample window does not reach back to the backup's own records")
+    if sample_window_start(now, None) != "2026-09-23T03:00:00.000Z":
+        raise RuntimeError("without a covered window the sample window is not the last day")
+    if sample_window_start(now, 1790218800000) != "2026-09-23T03:00:00.000Z":
+        raise RuntimeError("fresh records must keep the one-day window")
     probes = {"livenessProbe": {"exec": {"command": ["/usr/local/bin/weirkeeper", "--probe", "live"]}},
               "readinessProbe": {"exec": {"command": ["/usr/local/bin/weirkeeper", "--probe", "ready"]}}}
     if [op["op"] for op in probe_patch(dict(probes), OLD_CONTROLLER, probes)] != ["remove", "remove"]:
