@@ -68,6 +68,12 @@ OLD_COMMIT = os.environ.get(
 # The worker-rules ownership label, carried in addition to the run label.
 TEST_OWNER = os.environ.get("LOGWEIR_BACKEND_LIVE_TEST_OWNER", "")
 KUBECTL = ["kubectl", "--context", "docker-desktop"]
+# The execution contract version the current controller renders, READ from the
+# source under test rather than pinned (it moved 1 -> 2 after 2026-09-15).
+EXECUTION_CONTRACT_VERSION = __import__("re").search(
+    r'pub const VERSION: &str = "([0-9]+)";',
+    (ROOT / "crates/logweir-core/src/execution_contract.rs").read_text(),
+).group(1)
 K = KUBECTL + ["-n", NS]
 KF = KUBECTL + ["-n", FIXTURE_NS]
 DOCKER = ["docker", "--context", "desktop-linux"]
@@ -2896,12 +2902,14 @@ def verify_restore(
     if container["image"] != CURRENT_RUNNER:
         raise RuntimeError(f"restore used stale image {container['image']}")
     args = container["args"]
-    if args[:4] != ["restore", "run", "--execution-contract-version", "1"]:
+    # The CURRENT contract version (`logweir_core::execution_contract::VERSION`,
+    # "2" since the standing-authorization contract; this harness pinned "1").
+    if args[:4] != ["restore", "run", "--execution-contract-version", EXECUTION_CONTRACT_VERSION]:
         raise RuntimeError(f"mandatory execution handshake missing: {args[:6]!r}")
     env = {entry["name"]: entry for entry in container["env"]}
     approval = get("approval", restore["spec"]["approvalRef"]["name"])
     expected_contract = {
-        "LOGWEIR_EXECUTION_CONTRACT_VERSION": "1",
+        "LOGWEIR_EXECUTION_CONTRACT_VERSION": EXECUTION_CONTRACT_VERSION,
         "LOGWEIR_EXECUTION_SUBJECT_API_VERSION": "logweir.dev/v1alpha1",
         "LOGWEIR_EXECUTION_SUBJECT_KIND": "Restore",
         "LOGWEIR_EXECUTION_SUBJECT_NAME": name,
