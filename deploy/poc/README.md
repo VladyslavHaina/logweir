@@ -324,7 +324,19 @@ kubectl --context "$CTX" apply -f poc-secrets/trustpolicy.yaml
 ```
 
 **Check:** `kubectl --context "$CTX" get trustpolicy logweir-poc` reads `LOADED
-True` and `BOUND logweir-poc`.
+True` and `BOUND logweir-poc`, and every existing `Backup` in `logweir-poc`
+still reads `Valid` (`kubectl --context "$CTX" -n logweir-poc get backups`).
+
+**The signer's window must open before its first signature.** The script
+opens it at the earlier of the signing Secret's and the
+`logweir-signing-trust` ConfigMap's creation. That is right for a fresh install
+and for an upgrade that adopted a hand-provisioned key (R1). A key older than
+both — an identity restored from backup into a new cluster — needs its real
+first use: `SIGNING_NOT_BEFORE=<RFC 3339 UTC> bash deploy/poc/trustpolicy.sh …`.
+A window that opens too late turns every earlier receipt `Untrusted
+(SignedOutsideValidity)`, and `notBefore` is immutable on a key (the CRD's CEL
+rule), so the only repair is to delete the `TrustPolicy` and apply a corrected
+one; the controller re-judges the namespace's evidence within seconds.
 
 ## 9. First sign-in, per role
 
@@ -370,10 +382,12 @@ first), then:
 . deploy/poc/versions.env
 # 1. The CRDs, from the NEW chart (Helm never upgrades crds/ itself).
 helm pull "$LOGWEIR_CHART" --version "$LOGWEIR_CHART_VERSION" --untar -d poc-secrets/chart
-kubectl --context "$CTX" apply --server-side -f poc-secrets/chart/logweir-chart/crds/
+kubectl --context "$CTX" apply --server-side --force-conflicts -f poc-secrets/chart/logweir-chart/crds/
 for crd in $(ls poc-secrets/chart/logweir-chart/crds | sed 's/\.yaml$//'); do
   kubectl --context "$CTX" wait --for=condition=Established "crd/$crd.logweir.dev" --timeout=60s
 done
+# Prints nothing when every live CRD is the new chart's:
+kubectl --context "$CTX" diff --server-side --force-conflicts -f poc-secrets/chart/logweir-chart/crds/
 # 2. Controller, runner and console images TOGETHER, approval bindings unchanged.
 helm upgrade logweir "$LOGWEIR_CHART" --version "$LOGWEIR_CHART_VERSION" --kube-context "$CTX" \
   -n "$LOGWEIR_NAMESPACE" -f deploy/poc/logweir.values.yaml \
@@ -466,11 +480,25 @@ for obj in serviceaccount/logweir-runner secret/logweir-s3; do
 done
 ```
 
+**A rollback to `v0.1.5` deletes those two objects again.** `helm rollback
+logweir <v0.1.5 revision>` removes everything the candidate's revision
+rendered and `v0.1.5`'s did not — including the runner ServiceAccount and
+`logweir-s3` it adopted in `logweir-poc` — and the next `v0.1.5` run then fails
+`serviceaccount "logweir-runner" not found`. Re-create both at once after the
+rollback, exactly as before the `v0.1.5` install (the runner ServiceAccount from
+`poc-baselines/r1/runner-sa.yaml`, `logweir-s3` from the demo root pair). The
+retained signing identity (`helm.sh/resource-policy: keep`) is not affected.
+
 Then the three upgrade steps. **The live round must show, after R1:**
 1. all fourteen CRDs `Established`; the six old kinds' objects unchanged;
 2. **identity** — `logweir-signing-trust`'s `key-id` equals the recorded
    `r1-signing` key id, `logweir-signing-key` in both namespaces still holds
-   that key, and the bootstrap and distributor logged `source=existing`;
+   that key (same `uid` and `creationTimestamp`: nothing re-created it), and the
+   bootstrap and distributor logged `source=existing`. Those are Helm hook Jobs
+   deleted as soon as they succeed (`hook-delete-policy: hook-succeeded`), so
+   read their logs WHILE step 2 runs, from a second terminal:
+   `kubectl --context "$CTX" -n logweir-system logs -f -l job-name --prefix`
+   (and `-n logweir-poc` for the distributor);
 3. `TrustRoster/default` resolving as `legacy-roster-v1` for `logweir-poc`
    until the `TrustPolicy` of step 8 governs it;
 4. **schedules** — same UID, `metadata.generation` and history; the next slot

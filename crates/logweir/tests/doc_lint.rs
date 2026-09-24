@@ -1400,7 +1400,7 @@ fn install_md_runs_the_secret_preflight_before_any_custom_resource() {
         "the singleton and same-identity namespace contract must be actionable"
     );
     assert!(
-        install.contains("apply --server-side -f charts/logweir/crds/")
+        install.contains("apply --server-side --force-conflicts -f charts/logweir/crds/")
             && install.contains("--for=condition=Established")
             && install.contains("#upgrade-rollback-and-legacy-jobs"),
         "install docs must order CRD apply/wait before Helm upgrade and cross-link details"

@@ -1466,9 +1466,14 @@ When a release changes a CRD, apply the new definitions yourself before
 `helm upgrade`:
 
 ```bash
-kubectl apply --server-side -f charts/logweir/crds/
+kubectl apply --server-side --force-conflicts -f charts/logweir/crds/
+kubectl diff --server-side --force-conflicts -f charts/logweir/crds/   # prints nothing
 helm upgrade logweir charts/logweir -n logweir-system
 ```
+
+`--force-conflicts` because Helm created these CRDs and owns their fields:
+without it every CRD that already exists is refused (`conflicts with "helm"`)
+and keeps its old schema, while an `Established` wait still passes.
 
 `charts/logweir/crds/*.yaml` is byte-identical to `config/crd/*.yaml`
 (`scripts/check-chart.sh` compares them with `cmp`), so applying either

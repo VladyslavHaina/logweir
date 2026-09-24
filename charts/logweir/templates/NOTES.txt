@@ -1,9 +1,9 @@
 Logweir {{ .Chart.AppVersion }} — release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
 
 INSTALLED (the control plane, the same objects logweir.yaml ships):
-  * the six CustomResourceDefinitions under logweir.dev/v1alpha1 — installed
-    ONCE from crds/ and never upgraded by Helm; the README says how to upgrade
-    them by hand
+  * the fourteen CustomResourceDefinitions under logweir.dev/v1alpha1 —
+    installed ONCE from crds/ and never upgraded by Helm; the README says how
+    to upgrade them by hand (`kubectl apply --server-side --force-conflicts`)
   * ServiceAccount, ClusterRole and ClusterRoleBinding "weirkeeper"
   * Deployment "weirkeeper", image {{ .Values.controllerImage }}
     (imagePullPolicy {{ .Values.imagePullPolicy }}); every runner Job it creates
@@ -17,8 +17,9 @@ INSTALLED (the control plane, the same objects logweir.yaml ships):
       kubectl create rolebinding logweir-approver --clusterrole=logweir-approver --user=<someone-else> -n <namespace>
 
 OPTIONAL COMPONENTS:
-  * minio.enabled={{ .Values.minio.enabled }}{{ if .Values.minio.enabled }} — MinIO at {{ include "logweir.minio.host" . }}:9000, buckets kafka-backups and logweir-evidence, Secret logweir-s3 in this namespace (demo-only root credential){{ else }} — off (bring your own archive; docs/install.md step 3){{ end }}
+  * minio.enabled={{ .Values.minio.enabled }}{{ if .Values.minio.enabled }} — MinIO at {{ include "logweir.minio.host" . }}:9000, buckets kafka-backups and logweir-evidence, Secret logweir-s3 in namespace {{ include "logweir.connectionsNamespace" . }} (demo-only root credential){{ else }} — off (bring your own archive; docs/install.md step 3){{ end }}
   * demoKafka.enabled={{ .Values.demoKafka.enabled }}{{ if .Values.demoKafka.enabled }} — brokers {{ .Release.Name }}-kafka-source and {{ .Release.Name }}-kafka-target on 9092 (PLAINTEXT; the demo's transport, not a recommendation), orders and payments seeded on the source, logweir.scratch on the target{{ else }} — off{{ end }}
+  * api.console.enabled={{ .Values.api.console.enabled }}{{ if .Values.api.console.enabled }} — the product console "{{ .Release.Name }}-api", mode {{ .Values.api.console.mode }}{{ if and .Values.api.console.ingress.enabled .Values.api.console.ingress.host }}, at https://{{ .Values.api.console.ingress.host }}/ (sign in at /auth/login){{ end }}{{ else }} — off{{ end }}
   * ui.enabled={{ .Values.ui.enabled }}{{ if .Values.ui.enabled }} — see below{{ else }} — off (the UI can also be served from a laptop: docs/install.md, "Serving the UI"){{ end }}
 {{- if .Values.ui.enabled }}
 
@@ -41,11 +42,12 @@ THE UI, AND WHOSE AUTHORITY IT ACTS WITH:
 
 {{- if .Values.identity.enabled }}
 BEFORE ANY CUSTOM RESOURCE — wait for the retained installation signer hook,
-publish its ConfigMap material through the cluster-scoped TrustRoster named
-"default", and provision the approver and workload credentials. Additional
-runner namespaces must already exist and be declared in
-identity.authorizedRunnerNamespaces: docs/install.md. Then
-`just check-secrets <namespace>`.
+then put its PUBLIC key (ConfigMap {{ .Values.identity.publicConfigMapName }}) on
+the TrustPolicy that governs each runner namespace (docs/keys.md; the
+cluster-scoped TrustRoster "default" is the deprecated fallback), and provision
+the approver and workload credentials. Additional runner namespaces must
+already exist and be declared in identity.authorizedRunnerNamespaces:
+docs/install.md. Then `just check-secrets <namespace>`.
 {{- else }}
 IDENTITY BOOTSTRAP IS DISABLED. Provision the existing
 `logweir-signing-key/signing.pem` and matching public trust material before any
@@ -53,10 +55,11 @@ workload custom resource. This is the legacy/manual path, not the supported
 clean-install default. See docs/install.md.
 {{- end }}
 
-CONTROLLER AND ORDINARY RUNNER DEFAULTS USE `latest`, but the identity
-bootstrap image is separately digest-pinned because it can read/patch the
-private signer. This pre-publication checkout leaves that value empty and
-refuses to render until compatible reviewed bytes are published and pinned.
-An author-only install uses examples/author-only.values.yaml with local tags,
-pull policy Never and the explicit development exception; it is not evidence
-that anything was published.
+IMAGES: controllerImage and runnerImage above, and api.console.image (a
+chart published by images.yml names its own commit's `sha-` tags; pin them to
+digests if your registry policy needs immutability, and keep all of them on
+ONE build). The identity bootstrap image is digest-pinned separately
+because it can read and patch the private signer. An author-only install uses
+examples/author-only.values.yaml with local tags, pull policy Never and the
+explicit development exception; it is not evidence that anything was
+published.

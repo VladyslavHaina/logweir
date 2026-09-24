@@ -358,6 +358,12 @@ is converted and no stored object is rewritten
 6. Unbind approval policies, or expect not-yet-admitted v2 approvals to be
    refused (item 7).
 7. Roll the controller and runner back together, and leave the CRDs in place.
+8. **Rolling back to a chart that did not render an object this one adopted
+   deletes it.** `helm rollback` to `v0.1.5` removes the runner ServiceAccount
+   and the `logweir-s3` Secret the upgrade adopted in each runner namespace
+   (they were hand-provisioned at `v0.1.5`); re-create them before the next run,
+   or every run fails `serviceaccount "logweir-runner" not found` (found by the
+   PoC install's upgrade rehearsal R1, 2026-09-24).
 
 **How this upgrade is rehearsed.** From `v0.1.5` (the last version tag: 6 →
 14 CRDs, the managed identity adopting a hand-provisioned signer, the console
