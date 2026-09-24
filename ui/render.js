@@ -380,9 +380,12 @@ export const ENGINE_SUBREPORT_LINE =
 
 /** Every list view carries this, verbatim. A custom resource is a cluster's
  *  view of a run; the authoritative index is the evidence bucket, because
- *  deleting the object does not delete the signed document it names. */
+ *  deleting the object does not delete the signed document it names. Said in
+ *  an operator's words since MCP-21: "the authoritative index is the evidence
+ *  bucket" was jargon, repeated on every list. */
 export const BUCKET_FOOTER =
-  "this list is the cluster's view; the authoritative index is the evidence bucket";
+  "This list is what the cluster holds now. The signed evidence each run wrote stays in the " +
+  "archive even if the object listed here is deleted.";
 
 /** The retention panel's sentence. Logweir holds no delete capability of any
  *  kind against an archive (Global Constraint 6): the panel reports, and the
@@ -1238,6 +1241,53 @@ export function badge(kind, text) {
   );
 }
 
+/** A badge with a hover title: the exact recorded value one hover away from
+ *  the words (MCP-14, MCP-22). `title` is plain text and is escaped here. */
+export function titledBadge(kind, text, title) {
+  return (
+    "<span class=\"badge badge-" + esc(kind) + "\" title=\"" + esc(title) + "\">" + esc(text) +
+    "</span>"
+  );
+}
+
+/** A CONDITION AS A BADGE, NOT AS ITS SYNTAX (MCP-22): `Ready=True ViewReady`
+ *  in a table cell becomes the word, in the status colour, with the recorded
+ *  type, status and reason as its title. A `False` carries its reason in the
+ *  words too, because that is what the reader acts on; `Unknown` -- or any
+ *  status this build does not know -- is `unknown` and never the true word.
+ *  [`ABSENT`] when there is no condition. */
+export function conditionBadge(condition, trueWord, falseWord) {
+  if (condition === null || condition === undefined) {
+    return ABSENT;
+  }
+  const c = condition;
+  const reason = typeof c.reason === "string" && c.reason.length > 0 ? c.reason : "";
+  const exact = String(c.type || "") + "=" + String(c.status || "") +
+    (reason.length > 0 ? " " + reason : "") +
+    (typeof c.message === "string" && c.message.length > 0 ? ": " + c.message : "");
+  if (String(c.status) === "True") {
+    return titledBadge("green", trueWord, exact);
+  }
+  if (String(c.status) === "False") {
+    return titledBadge("unverified", falseWord + (reason.length > 0 ? " (" + reason + ")" : ""),
+      exact);
+  }
+  return titledBadge("flat", "unknown" + (reason.length > 0 ? " (" + reason + ")" : ""), exact);
+}
+
+/** A BOOLEAN AS WORDS (MCP-14): `true`/`false` in a cell become the words the
+ *  field means, as a neutral badge -- neither word is a verdict. [`ABSENT`]
+ *  for a value that is not a boolean, never a guess. */
+export function flagBadge(value, trueWords, falseWords) {
+  if (value === true) {
+    return badge("flat", trueWords);
+  }
+  if (value === false) {
+    return badge("flat", falseWords);
+  }
+  return ABSENT;
+}
+
 /** A recorded `status.phase` as a badge whose caption IS the phase, verbatim.
  *
  *  STRUCTURAL, LIKE [`badge`]. The kind is the phase lowercased into a class
@@ -1521,8 +1571,8 @@ export function checkTable(checks, empty) {
     cell(c.message),
     cell(c.remedy),
     checkScope(c.scope),
-    cell(c.observedAt),
-    cell(c.expiresAt),
+    when(c.observedAt),
+    when(c.expiresAt),
   ]);
   return table(
     ["CHECK", "VERDICT", "GATING", "CODE", "MESSAGE", "REMEDY", "SCOPE", "OBSERVED", "EXPIRES"],
@@ -2086,7 +2136,7 @@ export function evidenceBlock(evidence) {
   rows.push(["recorded result", cell(v.result)]);
   rows.push(["matched key id", cell(v.matchedKeyId)]);
   rows.push(["payload type", cell(v.payloadType)]);
-  rows.push(["verified at", cell(v.verifiedAt)]);
+  rows.push(["verified at", when(v.verifiedAt)]);
   rows.push(["detail", cell(v.detail)]);
   return (
     "<section class=\"evidence\"><h3>Evidence</h3>" +
@@ -2171,7 +2221,7 @@ export function nextRunRow(run) {
   const marker = typeof r.adjustment === "string" && ADJUSTMENT_WORDS[r.adjustment] !== undefined
     ? badge("pending", r.adjustment)
     : "";
-  return [cell(r.at), "<code>" + cell(r.localTime) + "</code>", marker];
+  return [when(r.at), "<code>" + when(r.localTime) + "</code>", marker];
 }
 
 /** The next-run panel, over a saved schedule's `status.nextRuns` or a draft's
@@ -2224,11 +2274,11 @@ export function nextRunsPanel(view) {
 
 /** What "no trigger" means on a run, said rather than guessed. */
 export const NO_TRIGGER_SENTENCE =
-  "trigger not recorded (frozen before PLAT-05.1, or not published by this API)";
+  "trigger not recorded (the run predates recorded triggers, or this API does not publish it)";
 
 /** What "no revision" means, said the same way. */
 export const NO_REVISION_SENTENCE =
-  "revision not recorded (frozen before PLAT-05.1, or not published by this API)";
+  "revision not recorded (the run predates recorded revisions, or this API does not publish it)";
 
 /** WHICH KIND OF RUN THIS IS, from `spec.trigger` and from nothing else.
  *

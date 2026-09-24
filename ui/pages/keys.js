@@ -69,6 +69,8 @@ import {
   listFooter,
   replace,
   table,
+  flagBadge,
+  when,
 } from "../render.js";
 import { listD3, serverClock } from "../operation-watch.js";
 import { itemsOf } from "./clusters.js";
@@ -280,7 +282,7 @@ export function lifecycleCell(entry) {
         esc("-- treated as a retirement at that instant: what it signed before still verifies");
   }
   if (e.state === "Retired") {
-    return esc("retired at ") + cell(e.retiredAt) + " " +
+    return esc("retired at ") + when(e.retiredAt) + " " +
       esc("-- it authorises nothing new, and everything it signed before that instant still " +
         "verifies");
   }
@@ -301,17 +303,17 @@ export function renderPolicyFacts(object, now) {
       ["policy", cell(meta.name)],
       ["generation", cell(meta.generation)],
       ["observed generation", cell(status.observedGeneration)],
-      ["evaluated at", cell(status.evaluatedAt)],
+      ["evaluated at", when(status.evaluatedAt)],
       ["evaluation", freshness.fresh
         ? badge("green", "fresh")
         : badge("flat", EVALUATION_UNKNOWN) + " " +
           esc(EVALUATION_UNKNOWN_REASONS[freshness.reason] || "")],
       ["freshness decided by", freshness.decidedBy === "api"
-        ? esc("the product API, against its own clock " + String(freshness.decidedAt || "") +
-          ", within " + String(freshness.freshWithinSeconds || "") + "s")
+        ? esc("the product API, against its own clock ") + when(freshness.decidedAt) +
+          esc(", within " + String(freshness.freshWithinSeconds || "") + "s")
         : esc("this page, against the server instant of the answer that carried this object")],
-      ["loaded", cell(status.loaded)],
-      ["default policy", cell(spec.default)],
+      ["loaded", flagBadge(status.loaded, "loaded", "not loaded")],
+      ["default policy", flagBadge(spec.default, "the default policy", "not the default")],
       ["namespaces it claims", Array.isArray(spec.namespaces) && spec.namespaces.length > 0
         ? esc(spec.namespaces.join(", "))
         : ABSENT],
@@ -423,7 +425,7 @@ export function renderRosterHalf(view) {
   return (
     "<p class=\"note\">" + esc(ROSTER_FALLBACK_SENTENCE) + "</p>" +
     facts([
-      ["loaded", cell(status.loaded)],
+      ["loaded", flagBadge(status.loaded, "loaded", "not loaded")],
       ["allowed cluster ids",
         (Array.isArray(spec.allowedClusterIds) ? spec.allowedClusterIds : []).length === 0
           ? cell(null)

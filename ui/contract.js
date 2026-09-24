@@ -2895,7 +2895,7 @@ const D3_LIST_SHAPES = Object.freeze({
 export function decodeD3Item(plural, value) {
   const shape = D3_ITEM_SHAPES[plural];
   if (shape === undefined) {
-    throw contractFailure("D3Response", plural, "no D3 item shape is declared for this route");
+    throw contractFailure("D3Response", plural, "no item shape is declared for this route");
   }
   return decodeWith(shape, value);
 }
@@ -2904,7 +2904,7 @@ export function decodeD3Item(plural, value) {
 export function decodeD3List(plural, value) {
   const pair = D3_LIST_SHAPES[plural];
   if (pair === undefined) {
-    throw contractFailure("D3List", plural, "no D3 list shape is declared for this route");
+    throw contractFailure("D3List", plural, "no list shape is declared for this route");
   }
   return decodeListWith(pair[0], pair[1], value);
 }

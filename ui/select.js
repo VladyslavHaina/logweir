@@ -43,7 +43,7 @@
 // data KEY's name, and a ConfigMap's name. There is no field on a KafkaCluster
 // a password could be read from, and this module adds none.
 
-import { badge, cell, esc } from "./render.js";
+import { badge, cell, esc, when } from "./render.js";
 
 /** The noun every surface uses for `status.reachable`.
  *
@@ -504,7 +504,7 @@ export function probeLine(state) {
     const age = s.ageSeconds === null ? "" : " (" + ageWords(s.ageSeconds) + ")";
     parts.push(
       (s.verdict === "probing" ? "previously observed " : "observed ") +
-        "<time datetime=\"" + esc(s.observedAt) + "\">" + esc(s.observedAt) + "</time>" + age,
+        when(s.observedAt) + age,
     );
   } else {
     parts.push("no observation recorded");
@@ -525,6 +525,39 @@ export function probeLine(state) {
     );
   }
   return parts.join(" ");
+}
+
+/** The reasons a probe's own verdict carries, which say nothing beside it:
+ *  `Reachable` beside reachable, `ProbeReportedUnreachable` beside not
+ *  reachable. `weirkeeper::controllers::kafka_cluster`'s `REASON_REACHABLE`
+ *  and `REASON_PROBE_REPORTED_UNREACHABLE`. */
+export const VERDICT_OWN_REASONS = Object.freeze(["Reachable", "ProbeReportedUnreachable"]);
+
+/** What a LATER probe's reason means when it stands beside an EARLIER
+ *  reading. A probe Job that crashed writes `observedAt` and its reason and
+ *  leaves `reachable` alone (`crashed_status_patch`), so "reachable" beside
+ *  `NoExitCode` read as a contradiction (MCP-9); it is two facts about two
+ *  probes. */
+export const LATER_PROBE_GLOSS = Object.freeze({
+  NoExitCode: "the latest probe Job ended without an exit code, so it recorded no reading",
+  ProbeOutputUnreadable: "the latest probe's output could not be read",
+});
+
+/** The note a reachable / not-reachable reading carries when the newest probe
+ *  recorded a different reason: that reason, verbatim, and what it means --
+ *  or the empty string. */
+export function laterProbeNote(state) {
+  const s = state || {};
+  if ((s.verdict !== "reachable" && s.verdict !== "unreachable") ||
+    typeof s.reason !== "string" || s.reason.length === 0 ||
+    VERDICT_OWN_REASONS.indexOf(s.reason) !== -1 || s.reason === PROBE_RUNNING_REASON) {
+    return "";
+  }
+  const gloss = LATER_PROBE_GLOSS[s.reason];
+  return "<code>" + esc(s.reason) + "</code><span class=\"cell-sub\">" +
+    esc((gloss === undefined ? "the latest probe recorded this reason" : gloss) +
+      "; the " + (s.verdict === "reachable" ? "reachable" : "not reachable") +
+      " reading is from an earlier probe") + "</span>";
 }
 
 /** THE PROBE AS A CELL (MCP-28): the verdict badge, the stale or never-observed

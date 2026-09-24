@@ -66,6 +66,9 @@ import {
   mutationStatus,
   replace,
   table,
+  conditionBadge,
+  flagBadge,
+  when,
 } from "../render.js";
 import {
   active,
@@ -271,15 +274,13 @@ export function renderCatalogList(collection, ns) {
         ? detailLink("catalog", ns || meta.namespace || "", meta.name)
         : cell(null),
       cell(((object.spec || {}).destinationRef || {}).name),
-      ready === null ? ABSENT : badge(
-        String(ready.status) === "True" ? "green" : "unverified",
-        "Ready=" + String(ready.status) + " " + String(ready.reason || ""),
-      ),
+      // THE WORD, NOT THE SYNTAX (MCP-22): `Ready=True ViewReady` was the cell.
+      conditionBadge(ready, "ready", "not ready"),
       cell(counts.total),
       cell(counts.available),
       cell(counts.untrustedSigner),
-      cell(status.syncedAt),
-      cell(status.viewExpiresAt),
+      when(status.syncedAt),
+      when(status.viewExpiresAt),
     ];
   });
   return (
@@ -310,12 +311,12 @@ export function renderCatalogStatus(object) {
     "<section class=\"catalog-status\"><h3>The view</h3>" +
     (usable ? "" : "<p class=\"complaint\">" + esc(VIEW_EXPIRED_SENTENCE) + "</p>") +
     facts([
-      ["synced at", cell(status.syncedAt)],
-      ["view expires at", cell(status.viewExpiresAt)],
+      ["synced at", when(status.syncedAt)],
+      ["view expires at", when(status.viewExpiresAt)],
       ["points materialised in this view", cell(status.viewPoints)],
-      ["truncated", cell(status.truncated)],
+      ["truncated", flagBadge(status.truncated, "truncated: the archive holds more", "not truncated")],
       ["view expired", cell(status.viewExpired)],
-      ["walk complete", cell(cursor.complete)],
+      ["walk complete", flagBadge(cursor.complete, "complete", "not complete")],
       ["index shard reached", cell(cursor.indexShard)],
       ["last sync job", cell(job.name) + " exit " + cell(job.exitCode) + " " +
         cell(job.refusalReason)],
@@ -419,7 +420,7 @@ export const POINT_BINDING_SENTENCE =
   "This link carries what the point route published for this point: the point id, the receipt " +
   "key and digest, the manifest digest where the catalog has one, and the destination the " +
   "catalog reads. Building the plan around `source.point {point_id, receipt_key, " +
-  "receipt_sha256, manifest_sha256}` is the restore wizard's own step (PLAT-15.2), and the " +
+  "receipt_sha256, manifest_sha256}` is the restore wizard's own step, and the " +
   "runner re-checks that binding before it constructs a client: a mismatch is a refusal, not a " +
   "restore of something else.";
 
@@ -439,7 +440,7 @@ export function pointRow(entry, ns, catalog, destination, page) {
   const offer = catalogPointOffer(e, page || {});
   return [
     "<code>" + cell(e.pointId) + "</code>",
-    cell(e.recoveryPointAt),
+    when(e.recoveryPointAt),
     badge(e.availability === "Available" ? "green" : "unverified", String(e.availability || "")),
     badge(
       e.verification === "Verified" || e.verification === "VerifiedHistorical"

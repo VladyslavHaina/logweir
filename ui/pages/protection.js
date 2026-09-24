@@ -52,6 +52,7 @@ import {
   listFooter,
   replace,
   table,
+  when,
 } from "../render.js";
 import { active, cancelled, readOptions } from "../lifecycle.js";
 import { listD3, readD3 } from "../operation-watch.js";
@@ -197,8 +198,8 @@ export function renderLastPoint(object, ns) {
       ["backup", typeof (point.backupRef || {}).name === "string"
         ? detailLink("backups", String(ns || ""), String(point.backupRef.name))
         : ABSENT],
-      ["recovery point (capture started)", cell(point.recoveryPointAt)],
-      ["newest archived record", cell(point.newestRecordAt)],
+      ["recovery point (capture started)", when(point.recoveryPointAt)],
+      ["newest archived record", when(point.newestRecordAt)],
       ["age at evaluation (s)", cell(point.ageSeconds)],
       ["evidence", cell(point.evidence)],
       ["availability basis", cell(status.availabilityBasis)],
@@ -223,7 +224,7 @@ export function renderScheduleHealth(object, ns) {
         : cell(null),
       cell(entry.ready),
       entry.suspended === true ? badge("pending", "suspended") : "no",
-      cell(entry.nextFireTime),
+      when(entry.nextFireTime),
       cell(entry.lastMissedSlot),
     ];
   });
@@ -251,8 +252,8 @@ export function renderAlerts(object) {
     return [
       cell(alert.kind),
       badge(alert.state === "Open" ? "unverified" : "green", String(alert.state || "")),
-      cell(alert.openedAt),
-      cell(alert.resolvedAt),
+      when(alert.openedAt),
+      when(alert.resolvedAt),
       cell(alert.transition) + " / " + cell(alert.notifiedTransition),
       cell(delivery.state) + " (" + cell(delivery.attempts) + ")",
       cell(delivery.lastError),
@@ -281,12 +282,12 @@ export function renderRehearsal(object, ns) {
   return (
     "<section class=\"rehearsal\"><h3>Rehearsal</h3>" +
     facts([
-      ["last succeeded", cell(rehearsal.lastSucceededAt)],
+      ["last succeeded", when(rehearsal.lastSucceededAt)],
       ["last restore", typeof last.name === "string" && last.name.length > 0
         ? "<a href=\"" + esc(operationRoute(String(ns || ""), "restore", last.name, "")) + "\">" +
           esc(last.name) + "</a>"
         : ABSENT],
-      ["last failed", cell(rehearsal.lastFailedAt)],
+      ["last failed", when(rehearsal.lastFailedAt)],
       ["last reason", cell(rehearsal.lastReason)],
     ]) +
     "</section>"
@@ -309,8 +310,8 @@ export function renderProtectionDetail(object, ns) {
     (evaluated ? "" : "<p class=\"note\">" + esc(NOT_EVALUATED_SENTENCE) + "</p>") +
     facts([
       ["health", cell(status.health)],
-      ["evaluated at", cell(status.evaluatedAt)],
-      ["stale since", cell(status.staleSince)],
+      ["evaluated at", when(status.evaluatedAt)],
+      ["stale since", when(status.staleSince)],
       ["source", cell((protects.sourceRef || {}).name)],
       ["destination", cell((protects.destinationRef || {}).name)],
       ["catalog", cell((protects.catalogRef || {}).name)],
@@ -325,7 +326,7 @@ export function renderProtectionDetail(object, ns) {
       ["last missed slot", cell(missed.lastMissedSlot)],
       ["runs since last fire", cell(missed.sinceLastFire)],
       ["last attempt", cell((attempt.backupRef || {}).name) + " " + cell(attempt.phase) + " " +
-        cell(attempt.reason) + " " + cell(attempt.at)],
+        cell(attempt.reason) + " " + when(attempt.at)],
     ]) +
     renderLastPoint(object, ns) +
     renderScheduleHealth(object, ns) +
@@ -344,7 +345,7 @@ export function renderConditions(conditions) {
       cell(condition.status),
       cell(condition.reason),
       cell(condition.message),
-      cell(condition.lastTransitionTime),
+      when(condition.lastTransitionTime),
     ];
   });
   return (

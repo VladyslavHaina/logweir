@@ -670,15 +670,18 @@ test("sweep_the_latest_point_s_completion_instant_says_when_it_is_the_creation_i
     const html = decode(renderScheduleFacts(schedule, { mine: backups.items }, [],
       "2026-09-24T14:00:00Z"));
     assert.match(factOf(html, "Latest point completed"),
-      /^2026-09-24T13:40:00Z <span class="note" data-completed-from="creation">/,
-      "THE DEFECT: the creation instant, unlabelled, as the completion");
+      /^<time class="ts" datetime="2026-09-24T13:40:00Z" title="2026-09-24T13:40:00Z">2026-09-24 13:40:00 UTC<\/time> <span class="note" data-completed-from="creation">/,
+      "THE DEFECT: the creation instant, unlabelled, as the completion (the instant itself in " +
+        "the shared formatter since MCP-7)");
     assert.ok(html.indexOf(COMPLETION_INSTANT_NOT_PUBLISHED) !== -1);
 
     // CONTROL: legacy mode's custom resource records `Complete` and says that.
     const cr = fixture("backup-poc-cr.json");
     const legacy = decode(renderScheduleFacts(schedule, { mine: [cr] }, [],
       "2026-09-24T14:00:00Z"));
-    assert.equal(factOf(legacy, "Latest point completed"), "2026-09-24T13:36:04.184994136Z",
+    assert.equal(factOf(legacy, "Latest point completed"),
+      "<time class=\"ts\" datetime=\"2026-09-24T13:36:04.184994136Z\" " +
+        "title=\"2026-09-24T13:36:04.184994136Z\">2026-09-24 13:36:04 UTC</time>",
       "the Complete condition's own instant, with no caveat");
   });
 

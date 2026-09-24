@@ -753,7 +753,8 @@ test("MUTANT_the_coverage_labels_are_the_controllers_own_strings_character_for_c
 test("an_empty_topic_list_is_named_and_a_named_allowlist_carries_no_coverage_line", () => {
   const html = renderCoverageLine({ spec: { topics: [] } });
   assert.match(html, /data-coverage="unknown"/);
-  assert.match(html, /Read the object with kubectl/);
+  assert.match(html, /Name its topics, or all user topics, in its policy/,
+    "the repair, in the console's own words and not 'read the object with kubectl'");
   assert.doesNotMatch(html, /All user topics/,
     "guessing 'all user topics' from an empty list would invent the claim the labels bound");
 

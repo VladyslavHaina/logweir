@@ -120,6 +120,7 @@ import {
   TARGET_MODE_MEANING,
   announce,
   listVerifiedNote,
+  flagBadge,
   when,
   windowMessage,
 } from "../render.js";
@@ -1857,8 +1858,8 @@ export function renderRecoveryPointStep(state) {
       ["schedule", cell((spec.scheduleRef || {}).name)],
       ["slot", cell(spec.slot)],
       ["source cluster", cell((spec.sourceRef || {}).name)],
-      ["covered from", cell(rfc3339(covered.fromMs))],
-      ["covered to", cell(rfc3339(covered.toMs))],
+      ["covered from", when(rfc3339(covered.fromMs))],
+      ["covered to", when(rfc3339(covered.toMs))],
       ["topics", topics.length === 0 ? cell(null) : esc(topics.join(", "))],
       ["records", cell(status.records)],
       ["signed", pointSigned(point)],
@@ -1897,9 +1898,9 @@ export function renderCatalogPointStep(state) {
       ["point", "<code id=\"point-name\">" + esc(c.pointId) + "</code>"],
       ["backup set", cell((point.status || {}).backupId)],
       ["run", cell(c.runId)],
-      ["recovery point", cell(c.recoveryPointAt)],
-      ["covered from", cell(rfc3339(covered.fromMs))],
-      ["covered to (exclusive)", cell(rfc3339(covered.toMs))],
+      ["recovery point", when(c.recoveryPointAt)],
+      ["covered from", when(rfc3339(covered.fromMs))],
+      ["covered to (exclusive)", when(rfc3339(covered.toMs))],
       ["availability", badge("green", String(c.availability || ""))],
       ["verification", badge("green", String(c.verification || ""))],
       ["signer key id", "<code>" + cell(c.signerKeyId) + "</code>"],
@@ -2757,9 +2758,9 @@ export function renderPreflightStep(state, prepared) {
     "<h4>Target cluster probe (context, not a verdict)</h4>" +
     facts([
       ["target cluster", cell((((cluster || {}).metadata) || {}).name)],
-      ["reachable", cell(status.reachable)],
+      ["reachable", flagBadge(status.reachable, "reachable", "not reachable")],
       ["cluster id", cell(status.clusterId)],
-      ["observed at", cell(status.observedAt)],
+      ["observed at", when(status.observedAt)],
       ["reason", cell(status.reason)],
     ]) +
     "<p class=\"preflight\">" + preflightSentence(topics.length) + "</p>" +

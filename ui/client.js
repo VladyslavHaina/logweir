@@ -687,11 +687,13 @@ const ABSENT_IN_CONSOLE = Object.freeze({
   // gap and an omission: the page prints the sentence that says which task
   // owes the projection, and legacy mode -- which reads the custom resource
   // itself -- renders all four.
+  // `status.lastSlot` and `status.missedSlots` LEFT THIS LIST with
+  // console-ux-1 (MCP-13): `ScheduleStatusView` publishes both, so an absent
+  // one means the controller has recorded nothing yet -- the console and the
+  // API ship in one image, so there is no older API behind a newer page.
   backupschedules: Object.freeze([
     "status.retentionReport.skipped[].key",
     "status.retentionReport.skipped[].reason",
-    "status.lastSlot",
-    "status.missedSlots",
     "status.pendingRun",
     "status.history",
   ]),
@@ -1933,8 +1935,9 @@ const consoleApi = Object.freeze({
     }
     if (!Object.prototype.hasOwnProperty.call(CREATE_CAPABILITY, route)) {
       throw noRoute(
-        "the product API has no create route for " + KIND_OF[plural] + ". Create it with " +
-          "kubectl or the logweir CLI; this page will read it once it exists.",
+        "the product API has no create route for " + KIND_OF[plural] + ", so this console " +
+          "cannot create one. An administrator with access to the cluster creates it, or the " +
+          "logweir CLI does; this page will read it once it exists.",
       );
     }
     requireGrant(ns, CREATE_CAPABILITY[route]);
@@ -2546,16 +2549,17 @@ function requestBody(plural, object) {
       throw noRoute(
         "the product API's connection create has no field for spec.auth.secretRef.passwordKey " +
           "(saved-connection contract v1), so this connection cannot be created through it " +
-          "without changing which entry of the Secret the controller projects. Create it with " +
-          "kubectl, or use the legacy direct mode.",
+          "without changing which entry of the Secret the controller projects. Leave the field " +
+          "blank to use the Secret's default entry, or ask an administrator with access to the " +
+          "cluster to create this connection.",
       );
     }
     if (spec.auth.tlsCa !== undefined && spec.auth.tlsCa !== null) {
       throw noRoute(
         "the product API's connection create has no field for spec.auth.tlsCa " +
           "(saved-connection contract v1), so this connection cannot be created through it " +
-          "without dropping the private CA it named. Create it with kubectl, or use the legacy " +
-          "direct mode.",
+          "without dropping the private CA it named. Ask an administrator with access to the " +
+          "cluster to create this connection.",
       );
     }
     const auth = { mode: spec.auth.mode, tls: spec.auth.tls === true };
@@ -2766,8 +2770,8 @@ function tooMany(ns, plural, read) {
   const error = new Error(
     "namespace " + String(ns) + " holds more than " + String(read) + " " + String(plural) +
       ", which is more than this page reads in one list. It is not showing you the first " +
-      String(read) + " as if they were all of them. Read them with kubectl, or narrow the " +
-      "namespace.",
+      String(read) + " as if they were all of them. An administrator can read the whole " +
+      "namespace from the cluster, or move some of them to another namespace.",
   );
   error.kind = "refused";
   error.status = 0;

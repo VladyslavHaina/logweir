@@ -626,16 +626,17 @@ test("mcp_13_the_console_shows_what_the_last_slot_did_from_the_api", async () =>
   } finally {
     wire.restore();
   }
-  // AN OLDER API that publishes neither still says so -- without kubectl.
-  const older = con("schedule-last-slot.json");
-  delete older.item.status.lastSlot;
-  delete older.item.status.missedSlots;
-  const again = transport(() => ({ status: 200, body: older }));
+  // A SCHEDULE WITH NO DECIDED SLOT YET publishes neither, and the card says
+  // nothing about a projection that no longer exists -- the fields are in the
+  // contract now, so their absence is "nothing recorded yet".
+  const fresh = con("schedule-last-slot.json");
+  delete fresh.item.status.lastSlot;
+  delete fresh.item.status.missedSlots;
+  const again = transport(() => ({ status: 200, body: fresh }));
   try {
-    const object = await apiClient().get("team-a", "backupschedules", older.item.name);
-    const html = renderLastSlot(object);
-    assert.match(html, /data-last-slot="absent"/);
-    assert.equal(html.indexOf("kubectl"), -1);
+    const object = await apiClient().get("team-a", "backupschedules", fresh.item.name);
+    assert.equal(object.__contract.absent.indexOf("status.lastSlot"), -1);
+    assert.equal(renderLastSlot(object), "", "no slot yet is no panel, and no kubectl");
   } finally {
     again.restore();
   }
@@ -685,6 +686,22 @@ test("mcp_17_a_console_list_row_shows_the_exit_code_and_the_restore_outcome", as
   assert.match(history, /pass/, "the RESULT column carries the outcome");
   assert.match(history, /unverified scorecard claim/,
     "and a restore that did not verify keeps its outcome labelled as a claim");
+  // A VERIFIED row's outcome is not a claim: the SIGNED column says verified.
+  const green = con("restores-list.json");
+  green.items[0].operation.outcome = "pass";
+  green.items[0].operation.verifiedSuccess = true;
+  green.items[0].operation.verificationState = "valid";
+  const w3 = transport(() => ({ status: 200, body: green }));
+  let glist;
+  try {
+    glist = await apiClient().list("team-a", "restores");
+  } finally {
+    w3.restore();
+  }
+  const verified = renderHistoryList(glist, { items: [] }, "team-a");
+  assert.match(verified, /verified by weirkeeper/);
+  assert.doesNotMatch(verified, /unverified scorecard claim/,
+    "a row the SIGNED column calls verified does not call its outcome unverified");
 });
 
 // ===========================================================================
@@ -765,4 +782,222 @@ test("mcp_32_a_403_on_keys_in_the_shared_console_says_only_administrators_may_re
   assert.ok(node.html.includes(KEYS_FORBIDDEN_SENTENCE.slice(0, 40)));
   assert.equal(node.html.indexOf("no approval can verify"), -1,
     "BEFORE: a 403 was shown as 'no trust exists ... no approval can verify'");
+});
+
+// ===========================================================================
+// MCP-24: no internal roadmap reference in user-visible text
+// ===========================================================================
+
+import { readdirSync } from "node:fs";
+
+/** The internal task and design references this repository uses: PLAT-/PROD-
+ *  task ids, the design notes D0 to D3 (and their waves), the global
+ *  constraints (GC n), a bare wave (W n), and the PoC/MCP finding ids. */
+export const ROADMAP_REFERENCE =
+  /\b(?:PLAT|PROD)-\d|\bD[0-3]\b|\bGC\s?\d+\b|\bW\d{1,2}\b|\bPOC-P\d|\bMCP-\d|\bGlobal Constraint\b/;
+
+/** The quoted segments of the CODE on each line of a source file -- comments
+ *  (line, block and HTML) removed -- with the line they are on. What a page can
+ *  put on screen is a string literal; a comment is for the next engineer. */
+export function quotedSegments(text, html) {
+  const out = [];
+  let source = String(text);
+  if (html) {
+    source = source.replace(/<!--[\s\S]*?-->/g, (m) => m.replace(/[^\n]/g, " "));
+    // In the shell the visible text is between tags as well as in attributes.
+    source.split("\n").forEach((line, i) => {
+      const visible = line.replace(/<[^>]*>/g, " ");
+      if (visible.trim().length > 0) {
+        out.push({ line: i + 1, text: visible });
+      }
+    });
+    return out;
+  }
+  let inBlock = false;
+  source.split("\n").forEach((raw, i) => {
+    let line = raw;
+    if (inBlock) {
+      const end = line.indexOf("*/");
+      if (end === -1) {
+        return;
+      }
+      line = line.slice(end + 2);
+      inBlock = false;
+    }
+    let quote = null;
+    let segment = "";
+    for (let k = 0; k < line.length; k += 1) {
+      const c = line[k];
+      if (quote !== null) {
+        if (c === "\\") {
+          segment += line.slice(k, k + 2);
+          k += 1;
+        } else if (c === quote) {
+          out.push({ line: i + 1, text: segment });
+          quote = null;
+          segment = "";
+        } else {
+          segment += c;
+        }
+        continue;
+      }
+      if (c === "/" && line[k + 1] === "/") {
+        break;
+      }
+      if (c === "/" && line[k + 1] === "*") {
+        const end = line.indexOf("*/", k + 2);
+        if (end === -1) {
+          inBlock = true;
+          break;
+        }
+        k = end + 1;
+        continue;
+      }
+      if (c === "\"" || c === "'" || c === "`") {
+        quote = c;
+      }
+    }
+    if (quote !== null && segment.length > 0) {
+      out.push({ line: i + 1, text: segment });
+    }
+  });
+  return out;
+}
+
+test("mcp_24_no_shipped_ui_string_names_an_internal_roadmap_reference", () => {
+  const files = readdirSync(UI).filter((f) => f.endsWith(".js") || f === "index.html")
+    .map((f) => UI + f)
+    .concat(readdirSync(UI + "pages").filter((f) => f.endsWith(".js")).map((f) => UI + "pages/" + f));
+  assert.ok(files.length >= 20, "the lint reads the whole shipped tree (" + String(files.length) + ")");
+  const found = [];
+  let segments = 0;
+  for (const file of files) {
+    const text = readFileSync(file, "utf8");
+    for (const segment of quotedSegments(text, file.endsWith(".html"))) {
+      segments += 1;
+      if (ROADMAP_REFERENCE.test(segment.text)) {
+        found.push(file.slice(UI.length) + ":" + String(segment.line) + ": " + segment.text.slice(0, 120));
+      }
+    }
+  }
+  assert.ok(segments > 2000, "and it read the strings (" + String(segments) + ")");
+  assert.deepEqual(found, [],
+    "BEFORE: 'PLAT-05.1' on Backups and 'PLAT-08.1' on Catalog. Internal task ids belong in " +
+      "comments, not in what an operator reads:\n" + found.join("\n"));
+});
+
+test("mcp_24_the_lint_refuses_a_reference_in_a_string_and_ignores_one_in_a_comment", () => {
+  const code = [
+    "// PLAT-18.2 owns this, and a comment may say so",
+    "/* D3 section 5, W12 */",
+    "const a = \"fine words\"; // PLAT-01 in a trailing comment",
+    "const b = \"frozen before PLAT-05.1\";",
+    " *  GC6 in a block comment continuation",
+    "const c = 'see D2 for why';",
+    "const d = `wave W7`;",
+  ].join("\n");
+  const flagged = quotedSegments(code, false).filter((s) => ROADMAP_REFERENCE.test(s.text))
+    .map((s) => s.line);
+  assert.deepEqual(flagged, [4, 6, 7], "the three strings, and no comment");
+  const shell = "<!-- PLAT-18.2 in a comment -->\n<p>Owned by PLAT-17.1</p>";
+  assert.deepEqual(quotedSegments(shell, true).filter((s) => ROADMAP_REFERENCE.test(s.text))
+    .map((s) => s.line), [2]);
+});
+
+// ===========================================================================
+// The LOW findings: timestamps, booleans, conditions, words
+// ===========================================================================
+
+import { BUCKET_FOOTER, conditionBadge, flagBadge, humanInstant, when } from "../render.js";
+import { renderClusterList } from "../pages/clusters.js";
+import { renderScheduleList, SELECTION_UNKNOWN_SENTENCE, COVERAGE_NOT_PUBLISHED, NO_GENERATION_SENTENCE } from "../pages/schedules.js";
+import { renderCatalogList } from "../pages/catalog.js";
+import { NO_APPROVAL_SENTENCE, noApprovalSentence } from "../pages/approvals.js";
+import { laterProbeNote, probeState } from "../select.js";
+
+test("mcp_7_mcp_15_one_formatter_for_every_instant_whole_seconds_utc_exact_value_in_the_title", () => {
+  assert.equal(humanInstant("2026-09-24T15:21:21.720607463Z"), "2026-09-24 15:21:21 UTC",
+    "BEFORE: `2026-09-24T15:21:21.720607463Z`, nanoseconds and all");
+  assert.equal(humanInstant("2026-09-24T17:26:33Z"), "2026-09-24 17:26:33 UTC");
+  assert.equal(humanInstant("2026-10-25T02:30:00+02:00"), "2026-10-25 00:30:00 UTC",
+    "an offset is converted, and the zone is said");
+  assert.equal(humanInstant(Date.parse("2026-09-24T16:39:04Z")), "2026-09-24 16:39:04 UTC");
+  assert.equal(humanInstant("not a time"), null);
+  const html = when("2026-09-24T15:21:21.720607463Z");
+  assert.equal(html, "<time class=\"ts\" datetime=\"2026-09-24T15:21:21.720607463Z\" " +
+    "title=\"2026-09-24T15:21:21.720607463Z\">2026-09-24 15:21:21 UTC</time>",
+    "the exact recorded value is one hover away, never lost");
+  assert.equal(when(undefined), "-");
+  assert.equal(when("20260918-032200"), "20260918-032200", "a value that is not an instant is not guessed at");
+  const css = readFileSync(UI + "style.css", "utf8");
+  assert.match(css, /\.ts \{\n {2}white-space: nowrap;/, "MCP-7: an instant never wraps mid-value");
+  // And the pages use it: the clusters table's OBSERVED column and the
+  // schedules table's LAST/NEXT columns print the human reading.
+  const cluster = fixture("cluster-scram.json");
+  const clusters = renderClusterList(cluster, "team-a", Date.parse("2026-09-11T20:00:00Z"));
+  assert.match(clusters, /<time class="ts" datetime="[^"]+" title="[^"]+">\d{4}-\d\d-\d\d \d\d:\d\d:\d\d UTC<\/time>/);
+  const schedules = renderScheduleList(fixture("schedule-policy.json"));
+  assert.doesNotMatch(schedules.replace(/"[^"]*"/g, "\"\""), /\d{4}-\d\d-\d\dT\d\d:\d\d/,
+    "no raw ISO instant in the schedules table's visible text");
+});
+
+test("mcp_9_a_reachable_reading_beside_a_later_probes_reason_says_they_are_two_probes", () => {
+  const cluster = JSON.parse(JSON.stringify(fixture("cluster-scram.json")));
+  const object = Array.isArray(cluster.items) ? cluster.items[0] : cluster;
+  object.status = Object.assign({}, object.status, { reachable: true, reason: "NoExitCode" });
+  const note = laterProbeNote(probeState(object, Date.parse("2026-09-11T20:00:00Z")));
+  assert.match(note, /<code>NoExitCode<\/code>/, "the controller's own reason, verbatim");
+  assert.match(note, /the latest probe Job ended without an exit code/);
+  assert.match(note, /the reachable reading is from an earlier probe/,
+    "BEFORE: `reachable` beside a bare `NoExitCode`, which read as a contradiction");
+  const html = renderClusterList(cluster, "team-a", Date.parse("2026-09-11T20:00:00Z"));
+  assert.match(html, /the reachable reading is from an earlier probe/);
+  object.status.reason = "Reachable";
+  assert.equal(laterProbeNote(probeState(object, 0)), "", "a verdict's own reason adds nothing");
+});
+
+test("mcp_14_mcp_22_booleans_and_conditions_are_words_in_badges", () => {
+  assert.equal(flagBadge(true, "loaded", "not loaded"), "<span class=\"badge badge-flat\">loaded</span>");
+  assert.equal(flagBadge(false, "loaded", "not loaded"), "<span class=\"badge badge-flat\">not loaded</span>");
+  assert.equal(flagBadge(undefined, "a", "b"), "-", "absent is absent, never false");
+  const ready = conditionBadge({ type: "Ready", status: "True", reason: "ViewReady" }, "ready", "not ready");
+  assert.equal(ready, "<span class=\"badge badge-green\" title=\"Ready=True ViewReady\">ready</span>",
+    "BEFORE: `Ready=True ViewReady` as the cell's text");
+  assert.match(conditionBadge({ type: "Ready", status: "False", reason: "ViewExpired" }, "ready", "not ready"),
+    /badge-unverified" title="Ready=False ViewExpired">not ready \(ViewExpired\)/);
+  assert.match(conditionBadge({ type: "Ready", status: "Unknown" }, "ready", "not ready"), /badge-flat[^>]*>unknown</,
+    "Unknown is never the true word");
+  const schedules = renderScheduleList(fixture("schedule-policy.json"));
+  assert.doesNotMatch(schedules, /<td>True<\/td>/, "BEFORE: the READY column printed `True`");
+  const catalogs = renderCatalogList({ items: [fixture("d3/catalog-truncated.json")] }, "team-a");
+  assert.doesNotMatch(catalogs, />Ready=True/);
+});
+
+test("mcp_18_mcp_21_the_backups_table_says_created_and_the_footer_speaks_plainly", () => {
+  const html = renderBackupList(fixture("backup-valid-exit0.json"), "team-a");
+  assert.match(html, /<th scope="col">CREATED<\/th>/, "BEFORE: AGE, over a creation instant");
+  assert.doesNotMatch(html, /<th scope="col">AGE<\/th>/);
+  assert.doesNotMatch(html, /The AGE column is/, "and no paragraph explaining the misnomer");
+  assert.doesNotMatch(BUCKET_FOOTER, /authoritative index/, "MCP-21: no jargon");
+  assert.match(BUCKET_FOOTER, /signed evidence each run wrote stays in the archive/);
+});
+
+test("mcp_31_the_approvals_empty_state_follows_the_namespaces_policy", () => {
+  const ordinary = noApprovalSentence({ legacy: false, mode: "ordinary" });
+  assert.doesNotMatch(ordinary, /logweir drill approve/,
+    "BEFORE: an ordinary-confirmation namespace was told to record files from logweir drill approve");
+  assert.match(ordinary, /creating a Restore in the wizard is the confirmation/);
+  assert.match(noApprovalSentence({ legacy: false, mode: "governed" }), /countersignature/);
+  assert.equal(noApprovalSentence(null), NO_APPROVAL_SENTENCE, "unbound or legacy: the files, as before");
+});
+
+test("class_sweep_shared_console_sentences_do_not_send_an_operator_to_kubectl", () => {
+  for (const [name, sentence] of [
+    ["SELECTION_UNKNOWN_SENTENCE", SELECTION_UNKNOWN_SENTENCE],
+    ["COVERAGE_NOT_PUBLISHED", COVERAGE_NOT_PUBLISHED],
+    ["NO_GENERATION_SENTENCE", NO_GENERATION_SENTENCE],
+    ["NO_POLICY_SENTENCE", NO_POLICY_SENTENCE],
+  ]) {
+    assert.doesNotMatch(sentence, /kubectl/, name);
+  }
 });

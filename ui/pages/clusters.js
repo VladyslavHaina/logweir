@@ -79,9 +79,12 @@ import {
   replace,
   table,
   visibilityLine,
+  when,
 } from "../render.js";
 import {
   CONNECTION_REFUSAL_REASONS,
+  VERDICT_OWN_REASONS,
+  laterProbeNote,
   PROBE_SENTENCE,
   REFUSAL_GLOSS,
   TEST_CONNECTION_SENTENCE,
@@ -318,8 +321,13 @@ export function renderClusterList(input, ns, now, freshSeconds) {
       nameCell(object, ns),
       cell(spec.role),
       probeCell(object, now, freshSeconds),
-      cell(status.observedAt),
-      state.reason.length === 0 ? cell(null) : "<code>" + esc(state.reason) + "</code>",
+      when(status.observedAt),
+      // A REACHABLE READING BESIDE `NoExitCode` IS TWO PROBES (MCP-9): the
+      // reason of the newest one, said as that, and nothing beside a verdict
+      // whose own reason merely repeats it.
+      state.reason.length === 0 || VERDICT_OWN_REASONS.indexOf(state.reason) !== -1
+        ? cell(null)
+        : (laterProbeNote(state) || "<code>" + esc(state.reason) + "</code>"),
       cell(status.clusterId),
       authCell(spec),
       renderTestConnection(object, false),
@@ -372,7 +380,7 @@ export function renderClusterDetail(object, now, freshSeconds, pending, discover
       ["TLS", auth.tls === true ? "on" : "off"],
       ["private CA", caWords(auth.tlsCa).length === 0 ? cell(null) : caWords(auth.tlsCa)],
       ["cluster id", cell(status.clusterId)],
-      ["probe observed at", cell(status.observedAt)],
+      ["probe observed at", when(status.observedAt)],
       ["probe reason", cell(status.reason)],
       ["probe freshness", esc(String(state.freshSeconds)) + "s budget"],
       ["uid", "<code id=\"cluster-uid\">" + esc(clusterUid(object)) + "</code>"],
@@ -522,7 +530,7 @@ export function renderLastConnectionCheck(test) {
   return (
     "<div class=\"last-test\" id=\"connection-check-last\">" +
     "<p>Last connectivity check: " + preflightVerdict(t.state) +
-    " <code>" + cell(t.preflightId) + "</code>, observed " + cell(t.observedAt) +
+    " <code>" + cell(t.preflightId) + "</code>, observed " + when(t.observedAt) +
     (t.stale === true
       ? " " + badge("unverified", "stale: this verdict no longer describes the object as it is")
       : "") +
@@ -648,7 +656,7 @@ export function renderDiscoveryFacts(discovery) {
     ["id", "<code>" + cell(d.id) + "</code>"],
     ["state", cell(d.state)],
     ["reason", cell(d.reason)],
-    ["observed at", cell(d.observedAt)],
+    ["observed at", when(d.observedAt)],
     ["fresh until", cell(d.freshUntil)],
     ["cluster id", cell(d.clusterId)],
     ["principal", cell(connection.principal)],

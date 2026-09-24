@@ -86,6 +86,7 @@ import {
   preflightVerdict,
   replace,
   table,
+  when,
 } from "../render.js";
 import {
   connectionNonce,
@@ -370,7 +371,7 @@ export function renderLastTest(lastTest) {
     preflightVerdict(lastTest.state) +
     (lastTest.stale === true ? " " + badge("unverified", "stale: not health") : "") +
     "<p class=\"note\">Recorded by <code>" + cell(lastTest.preflightId) + "</code>, observed " +
-    cell(lastTest.observedAt) + ".</p>" +
+    when(lastTest.observedAt) + ".</p>" +
     (lastTest.truncated === true
       ? "<p class=\"note\">The search for the newest test hit its page bound, so this may not " +
         "be the newest one.</p>"
@@ -468,8 +469,8 @@ export function renderPreflight(preflight) {
     " <code>" + cell(p.id) + "</code> " + cell(p.operation) + "</p>" +
     applicabilityLine(p) +
     facts([
-      ["observed at", cell(p.observedAt)],
-      ["expires at", cell(p.expiresAt)],
+      ["observed at", when(p.observedAt)],
+      ["expires at", when(p.expiresAt)],
       ["reason", cell(p.reason)],
       ["plan hash", cell(binding.planHash)],
       ["inputs digest", cell(binding.inputsDigest)],
@@ -505,8 +506,8 @@ export function renderUsage(usage, error) {
     return "";
   }
   const rows = []
-    .concat((usage.schedules || []).map((u) => [cell(u.kind), cell(u.name), cell(u.createdAt)]))
-    .concat((usage.backups || []).map((u) => [cell(u.kind), cell(u.name), cell(u.createdAt)]));
+    .concat((usage.schedules || []).map((u) => [cell(u.kind), cell(u.name), when(u.createdAt)]))
+    .concat((usage.backups || []).map((u) => [cell(u.kind), cell(u.name), when(u.createdAt)]));
   return (
     "<section class=\"usage\" id=\"destination-usage\"><h3>What uses this</h3>" +
     table(["KIND", "NAME", "CREATED"], rows, "Nothing labelled by this service names it.") +

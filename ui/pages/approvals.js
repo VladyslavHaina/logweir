@@ -80,6 +80,7 @@ import {
   phaseBadge,
   replace,
   table,
+  when,
 } from "../render.js";
 import { planHash } from "../plan.js";
 import { itemsOf } from "./clusters.js";
@@ -254,7 +255,28 @@ export function renderApprovalList(collection, now) {
   );
 }
 
-function approvalTable(collection, now) {
+/** THE EMPTY APPROVALS TABLE, IN THE WORDS OF THE NAMESPACE'S POLICY (MCP-31).
+ *  Under an ordinary policy a Restore's approval is the console's own signed
+ *  confirmation and there is nothing to record from a file; under a governed
+ *  one an approver countersigns in the console; only an unbound namespace (and
+ *  legacy mode, which cannot read the policy) records the two files
+ *  `logweir drill approve` wrote. */
+export function noApprovalSentence(policy) {
+  const mode = policyMode(policy);
+  if (mode === "ordinary") {
+    return "No Approval in this namespace yet. Its approval policy is ordinary confirmation: " +
+      "creating a Restore in the wizard is the confirmation, and nothing is recorded here by " +
+      "hand.";
+  }
+  if (mode === "governed") {
+    return "No Approval in this namespace yet. Its approval policy is governed: an approver " +
+      "other than the requester opens a Restore waiting above and records the " +
+      "countersignature there.";
+  }
+  return NO_APPROVAL_SENTENCE;
+}
+
+function approvalTable(collection, now, policy) {
   const at = typeof now === "number" ? now : Date.now();
   const rows = itemsOf(collection).map((object) => {
     const meta = object.metadata || {};
@@ -271,8 +293,8 @@ function approvalTable(collection, now) {
       cell(ageOf(meta.creationTimestamp, at)),
     ];
   });
-  return table(["SUBJECT", "VERIFIED", "APPROVER", "KEY-ID", "AGE"], rows, NO_APPROVAL_SENTENCE,
-    undefined, { id: "approvals", label: "approvals" });
+  return table(["SUBJECT", "VERIFIED", "APPROVER", "KEY-ID", "AGE"], rows,
+    noApprovalSentence(policy), undefined, { id: "approvals", label: "approvals" });
 }
 
 /** One approval's recorded status, with `selfAttestedRisk` rendered as a
@@ -571,7 +593,8 @@ export function awaitingRestores(restores) {
 /** A standalone visit: the Restores waiting for an approval, each a link to
  *  its own approval page, or a sentence saying there are none -- and the
  *  recorded approvals. No form: an approval is recorded for a chosen Restore. */
-export function renderApprovalsIndex(ns, approvals, restores, now, restoresError, approvalsError) {
+export function renderApprovalsIndex(ns, approvals, restores, now, restoresError, approvalsError,
+  policy) {
   // A MAP, NOT AN OBJECT. The key is a Kubernetes name, and `constructor`,
   // `toString` and `__proto__` are all valid DNS-1123 subdomains: a plain
   // `{}` would answer such a lookup out of `Object.prototype` and this table
@@ -595,7 +618,7 @@ export function renderApprovalsIndex(ns, approvals, restores, now, restoresError
       // recorded" here would be a claim about the cluster this page has no
       // grounds for, so the column says what is true: it could not be read.
       cell(approvalsError ? "unknown -- not readable" : STATE_WORDS[found.state]),
-      cell(meta.creationTimestamp),
+      when(meta.creationTimestamp),
     ];
   });
   const listing = restoresError
@@ -626,7 +649,7 @@ export function renderApprovalsIndex(ns, approvals, restores, now, restoresError
     (approvalsError
       ? "<p class=\"note\">Not listed here: this viewer may not list Approvals in " + esc(ns) +
         " (see above). Nothing is claimed about which exist.</p>"
-      : approvalTable(approvals, now) + listFooter() + panels)
+      : approvalTable(approvals, now, policy) + listFooter() + panels)
   );
 }
 
@@ -1274,15 +1297,25 @@ export async function mountApprovals(node, ns, route, parse, deps, lifecycle) {
       // state and rendered beside the other one, so a viewer who may read only
       // one of the two kinds -- an approver with `create` on approvals and no
       // `list`, the commonest shape of this role -- still gets a usable page.
+      // The namespace's approval policy, read beside the lists, so the empty
+      // table says what approving means HERE (MCP-31). An unread policy is
+      // today's sentence.
       const lists = await Promise.all([
         listOrError(api, ns, PLURAL, lifecycle),
         listOrError(api, ns, RESTORES, lifecycle),
+        readPolicy(api, ns, lifecycle).catch((unread) => {
+          if (cancelled(unread, lifecycle)) {
+            throw unread;
+          }
+          return null;
+        }),
       ]);
       if (!active(lifecycle)) {
         return;
       }
       replace(node, parse(renderApprovalsIndex(
         ns, lists[0].collection, lists[1].collection, undefined, lists[1].error, lists[0].error,
+        lists[2],
       )));
       return;
     }

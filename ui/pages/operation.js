@@ -62,6 +62,8 @@ import {
   unverifiedCaption,
   unverifiedTrustCaption,
   verificationScopeSentence,
+  flagBadge,
+  when,
 } from "../render.js";
 import { active, cancelled } from "../lifecycle.js";
 import { inConsole, readOperation, watchOperation } from "../operation-watch.js";
@@ -278,8 +280,8 @@ export function renderProgress(v) {
     ["stage", cell(p.stage)],
     ["reason", cell(p.reason)],
     ["message", cell(p.message)],
-    ["last transition", cell(p.lastTransitionTime)],
-    ["last observed", cell(p.lastObservedTime)],
+    ["last transition", when(p.lastTransitionTime)],
+    ["last observed", when(p.lastObservedTime)],
     ["runner phase", typeof phase.name === "string" && phase.name.length > 0
       ? cell(phase.number) + " " + cell(phase.name)
       : ABSENT],
@@ -288,7 +290,7 @@ export function renderProgress(v) {
     rows.push(["job", cell(runner.jobName)]);
     rows.push(["pod", cell(runner.podName) + " " + cell(runner.podPhase)]);
     rows.push(["container", cell(runner.containerState) + " " + cell(runner.waitingReason)]);
-    rows.push(["runner started", cell(runner.startedAt)]);
+    rows.push(["runner started", when(runner.startedAt)]);
   }
   return (
     "<section class=\"progress\"><h3>Progress</h3>" +
@@ -502,8 +504,8 @@ export function renderEvidence(v) {
       ["signature result", cell(console_ ? ver.state : null)],
       ["matched key id", cell(ver.matchedKeyId)],
       ["payload type", cell(ver.payloadType)],
-      ["verified at", cell(ver.verifiedAt)],
-      ["signed at (the document's own claim)", cell(trust.signedAt || ver.signedAt)],
+      ["verified at", when(ver.verifiedAt)],
+      ["signed at (the document's own claim)", when(trust.signedAt || ver.signedAt)],
       ["signing time read", cell(trust.signingTimeRead)],
       ["trust basis", cell(trust.basis)],
       ["key state", cell(trust.keyState)],
@@ -692,11 +694,11 @@ export function renderOperation(view) {
       ["reason", cell(f.reason)],
       ["message", cell(f.message)],
       ["last update", cell(f.lastUpdate)],
-      ["created", cell(f.createdAt)],
+      ["created", when(f.createdAt)],
       ["uid", "<code>" + cell(f.uid) + "</code>"],
       ["awaiting approval", f.awaitingApproval ? "yes" : "no"],
       ["stage", cell(f.stage)],
-      ["status too old to believe", f.console ? cell(f.stale) : ABSENT],
+      ["status too old to believe", f.console ? flagBadge(f.stale, "yes -- stale", "no") : ABSENT],
       ["object", f.name.length === 0
         ? ABSENT
         : detailLink(f.kind === "backup" ? "backups" : "history", String(v.ns || ""), f.name)],

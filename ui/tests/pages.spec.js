@@ -472,7 +472,8 @@ test("the_independent_check_command_fetches_before_it_verifies", () => {
 test("every_list_view_carries_the_bucket_footer", () => {
   assert.equal(
     BUCKET_FOOTER,
-    "this list is the cluster's view; the authoritative index is the evidence bucket",
+    "This list is what the cluster holds now. The signed evidence each run wrote stays in the " +
+      "archive even if the object listed here is deleted.",
   );
   const views = [
     ["renderClusterList", renderClusterList(fixture("cluster-scram.json"))],
@@ -485,9 +486,7 @@ test("every_list_view_carries_the_bucket_footer", () => {
   ];
   for (const [label, out] of views) {
     assert.ok(
-      out.includes(
-        "this list is the cluster's view; the authoritative index is the evidence bucket",
-      ),
+      out.includes(BUCKET_FOOTER),
       label + ": a deleted custom resource does not delete a signed document, so no list " +
         "view may present itself as the index",
     );

@@ -59,6 +59,7 @@ import {
   SCORECARD_CLAIM_SENTENCE,
   summaryBadge,
   listVerifiedNote,
+  when,
 } from "../render.js";
 import { planHash } from "../plan.js";
 import { itemsOf } from "./clusters.js";
@@ -191,7 +192,18 @@ function resultCell(object) {
   const status = (object && object.status) || {};
   return kindOf(object) === "Backup"
     ? cell(status.exitCode)
-    : scorecardClaim(cell(status.outcome), validVerification(status) !== null);
+    : scorecardClaim(cell(status.outcome), validVerification(status) !== null ||
+      listRowVerified(status));
+}
+
+// A CONSOLE LIST ROW'S OWN GREEN (MCP-17): it carries no recorded verification
+// block, only the API's summary, whose `verifiedSuccess` is the controller's
+// badge rule computed server side -- the same word the SIGNED column reads. A
+// row whose SIGNED cell says verified must not call its outcome unverified.
+function listRowVerified(status) {
+  const s = status || {};
+  return ((s.evidence || {}).verification) === undefined && s.__summary !== undefined &&
+    s.__summary.verifiedSuccess === true && s.__summary.verificationState === "valid";
 }
 
 /** The badge for a row, per kind. */
@@ -249,16 +261,22 @@ export function renderHistoryList(input, second, ns) {
     })
     .map((entry) => entry.object);
 
-  const rows = ordered.map((object) => [
-    nameCell(object, ns),
-    esc(kindOf(object)),
-    cell(createdAt(object)),
-    runPhaseBadge(object.status),
-    resultCell(object),
-    rowBadge(object),
-    rowOperationCell(object, ns),
-    restorePointCell(object, ns),
-  ]);
+  // The run's own page and its operation view in one cell, as on Backups: one
+  // column fewer, so RESTORE -- the row's action -- stays on screen.
+  const rows = ordered.map((object) => {
+    const follow = rowOperationCell(object, ns);
+    return [
+      nameCell(object, ns) + (follow === cell(null) ? "" : "<span class=\"cell-sub\">" + follow + "</span>"),
+      // THE ROW'S ACTION BESIDE ITS NAME (MCP-25's rule): as the last column
+      // "Restore this point" was what a 1024 px window scrolled out of sight.
+      restorePointCell(object, ns),
+      esc(kindOf(object)),
+      when(createdAt(object)),
+      runPhaseBadge(object.status),
+      resultCell(object),
+      rowBadge(object),
+    ];
+  });
 
   return (
     "<h2>History</h2>" +
@@ -267,7 +285,7 @@ export function renderHistoryList(input, second, ns) {
     "rule, because they do not share a field. A completed Backup carries a link that opens " +
     "the restore wizard on THAT recovery point, by uid.</p>" +
     table(
-      ["NAME", "KIND", "CREATED", "PHASE", "RESULT", "SIGNED", "OPERATION", "RESTORE"],
+      ["NAME", "RESTORE", "KIND", "CREATED", "PHASE", "RESULT", "SIGNED"],
       rows,
       NO_HISTORY_SENTENCE,
       undefined,
@@ -338,7 +356,7 @@ export function renderRestoreDetail(object, operation) {
       ["outcome", claim(status.outcome)],
       ["target mode", cell((spec.target || {}).mode)],
       ["operation", rowOperationCell(object, (object.metadata || {}).namespace)],
-      ["point in time", cell(spec.pointInTime)],
+      ["point in time", when(spec.pointInTime)],
       ["backup set", cell(spec.backupSetRef)],
     ]) +
     (verified
