@@ -8,9 +8,20 @@ Every kubectl call names ``--context docker-desktop`` and every helm call names
 are cluster singletons, so the run requires the shared cluster lock, scales the
 lab release's controller to zero, records the lab release's cluster-scoped RBAC
 objects that a second release of this chart must adopt with
-``--take-ownership``, and re-creates them exactly after every test release is
-gone. Private key bytes exist only in this process's memory: evidence records
-SHA-256 digests, public key ids and public verification material.
+``--take-ownership`` (whatever ``helm template`` renders cluster-scoped, not a
+fixed list), and re-creates them exactly after every test release is gone. The
+CRDs the chart ships are recorded too: Helm 4 re-applies ``crds/`` on every
+install and a CRD cannot be re-created without deleting its objects, so the
+cleanup proof requires each to keep its uid and generation. Private key bytes
+exist only in this process's memory: evidence records SHA-256 digests, public
+key ids and public verification material.
+
+Environment: ``LOGWEIR_CHART_LIVE_OUT`` (evidence directory, holds
+``state.json``), ``LOGWEIR_CHART_LIVE_TS`` (namespace suffix; pin it when
+phases run as separate processes), ``LOGWEIR_CHART_LIVE_OWNER`` (must equal the
+owner that holds ``k8s-lock.sh``; also the namespaces' test-owner label).
+Phases: ``selftest``, ``full`` (runs ``report``), ``report``, ``lab-restore``.
+Offline rows: ``scripts/test_plat02_chart_live_rows.py``.
 """
 
 from __future__ import annotations
@@ -53,12 +64,23 @@ HELM = ["helm", "--kube-context", "docker-desktop"]
 LAB_NS = "logweir-scram-local"
 LAB_DEPLOYMENT = "weirkeeper"
 LAB_RELEASE = "scram-local"
-LAB_CLUSTER_OBJECTS = [
-    ("clusterrole", "weirkeeper"),
-    ("clusterrolebinding", "weirkeeper"),
-    ("clusterrole", "logweir-viewer"),
-    ("clusterrole", "logweir-operator"),
-    ("clusterrole", "logweir-approver"),
+# The cluster-scoped objects a test release of this chart adopts with
+# `--take-ownership` and deletes on uninstall are whatever the chart renders:
+# `chart_cluster_objects` reads them from `helm template` at run time. A fixed
+# list here drifted once already (the chart grew `logweir-trust-admin` and
+# `logweir-retention-admin`, which the lab's restore then silently lost).
+CLUSTER_SCOPED_KINDS = {
+    "ClusterRole": "clusterrole",
+    "ClusterRoleBinding": "clusterrolebinding",
+    "ValidatingAdmissionPolicy": "validatingadmissionpolicy",
+    "ValidatingAdmissionPolicyBinding": "validatingadmissionpolicybinding",
+}
+# The value sets the phases install with, so every cluster-scoped object any
+# phase can render is recorded before the lab is touched.
+RENDER_VARIANTS = [
+    [],
+    ["--set-string", "identity.authorizedRunnerNamespaces[0]=lw-render-runner"],
+    ["--set", "identity.externalSecret.name=render-signer", "--set", "identity.externalSecret.key=identity.pem"],
 ]
 SINGLETON = "logweir-identity-singleton"
 SECRET = "logweir-signing-key"
@@ -182,19 +204,34 @@ def wait_absent(kind: str, name: str, namespace: Optional[str] = None, seconds: 
     raise RuntimeError(f"{kind}/{name} still present after {seconds}s")
 
 
+API_PATHS = {
+    "secret": ("/api/v1", "secrets"),
+    "configmap": ("/api/v1", "configmaps"),
+    "namespace": ("/api/v1", "namespaces"),
+    "job": ("/apis/batch/v1", "jobs"),
+    "clusterrole": ("/apis/rbac.authorization.k8s.io/v1", "clusterroles"),
+    "clusterrolebinding": ("/apis/rbac.authorization.k8s.io/v1", "clusterrolebindings"),
+    "validatingadmissionpolicy": ("/apis/admissionregistration.k8s.io/v1", "validatingadmissionpolicies"),
+    "validatingadmissionpolicybinding": (
+        "/apis/admissionregistration.k8s.io/v1",
+        "validatingadmissionpolicybindings",
+    ),
+}
+
+
+def create_verbatim(kind: str, obj: Dict[str, Any]) -> None:
+    """POST a cluster-scoped object exactly as recorded.
+
+    `kubectl create -f` rewrites `kubectl.kubernetes.io/last-applied-configuration`
+    when the object already carries it (the lab's refresh-applied RBAC does), so
+    a restore through it can never equal the record; a raw POST sends the bytes.
+    """
+    prefix, plural = API_PATHS[kind]
+    run(k("create", "--raw", f"{prefix}/{plural}", "-f", "-"), stdin=json.dumps(obj))
+
+
 def delete_exact(kind: str, name: str, uid: str, namespace: Optional[str] = None) -> None:
-    plural = {
-        "secret": ("/api/v1", "secrets"),
-        "configmap": ("/api/v1", "configmaps"),
-        "namespace": ("/api/v1", "namespaces"),
-        "job": ("/apis/batch/v1", "jobs"),
-        "clusterrole": ("/apis/rbac.authorization.k8s.io/v1", "clusterroles"),
-        "validatingadmissionpolicy": ("/apis/admissionregistration.k8s.io/v1", "validatingadmissionpolicies"),
-        "validatingadmissionpolicybinding": (
-            "/apis/admissionregistration.k8s.io/v1",
-            "validatingadmissionpolicybindings",
-        ),
-    }[kind]
+    plural = API_PATHS[kind]
     scope = f"/namespaces/{namespace}" if namespace else ""
     options = {
         "apiVersion": "v1",
@@ -642,22 +679,149 @@ def comparable(obj: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def chart_cluster_objects(docs: List[Any]) -> List[Tuple[str, str]]:
+    """The non-hook cluster-scoped objects in a rendered chart, as (kubectl kind, name).
+
+    Hook objects are excluded: the only one, the identity singleton marker, is
+    `keep` and is removed by `delete_singleton` after its release's teardown.
+    A document without a namespace whose kind is not a known cluster-scoped
+    kind is refused, so a new cluster-scoped kind cannot slip past the record.
+    """
+    found = set()
+    for doc in docs:
+        if not doc:
+            continue
+        metadata = doc.get("metadata") or {}
+        if "helm.sh/hook" in (metadata.get("annotations") or {}):
+            continue
+        kind = doc.get("kind")
+        if kind in CLUSTER_SCOPED_KINDS:
+            found.add((CLUSTER_SCOPED_KINDS[kind], metadata["name"]))
+        elif not metadata.get("namespace"):
+            raise RuntimeError(f"rendered {kind}/{metadata.get('name')} has no namespace and no known cluster scope")
+    return sorted(found)
+
+
+def render_cluster_objects() -> List[Tuple[str, str]]:
+    found = set()
+    for variant in RENDER_VARIANTS:
+        text = run(HELM + ["template", LAB_RELEASE, str(CHART), "-n", LAB_NS, *variant]).stdout
+        found.update(chart_cluster_objects(list(yaml.safe_load_all(text))))
+    return sorted(found)
+
+
+def chart_crd_names() -> List[str]:
+    names = []
+    for path in sorted((CHART / "crds").glob("*.yaml")):
+        names += [doc["metadata"]["name"] for doc in yaml.safe_load_all(path.read_text()) if doc]
+    return sorted(names)
+
+
+def crd_record(crd: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if crd is None:
+        return {"absent": True}
+    return {"uid": crd["metadata"]["uid"], "generation": crd["metadata"].get("generation")}
+
+
+def crds_as_found(recorded: Dict[str, Dict[str, Any]], live: Dict[str, Dict[str, Any]]) -> List[str]:
+    """Problems with the chart's CRDs after the run, compared with the record.
+
+    Helm 4 server-side applies `crds/` on every install, even over existing
+    CRDs, and never deletes them. A CRD cannot be restored by re-creating it
+    (deleting one deletes every object of its kind), so the harness can only
+    prove the run left them as found: the same object (uid) and no spec change
+    (`metadata.generation` moves on every spec change; resourceVersion also
+    moves when only a field manager is added, so it is not the signal). A CRD
+    the run added is reported, never deleted.
+    """
+    problems = []
+    for name, before in sorted(recorded.items()):
+        after = live.get(name, {"absent": True})
+        if before.get("absent") and not after.get("absent"):
+            problems.append(f"{name}: added by the run")
+        elif not before.get("absent") and after.get("absent"):
+            problems.append(f"{name}: removed by the run")
+        elif not before.get("absent") and before["uid"] != after["uid"]:
+            problems.append(f"{name}: replaced (uid {before['uid']} -> {after['uid']})")
+        elif not before.get("absent") and before["generation"] != after["generation"]:
+            problems.append(f"{name}: spec changed (generation {before['generation']} -> {after['generation']})")
+    return problems
+
+
+def live_crds(names: List[str]) -> Dict[str, Dict[str, Any]]:
+    return {name: crd_record(get_optional("customresourcedefinition", name)) for name in names}
+
+
+def release_annotation(obj: Dict[str, Any]) -> Optional[str]:
+    return (obj["metadata"].get("annotations") or {}).get("meta.helm.sh/release-name")
+
+
+def lab_owned(obj: Dict[str, Any]) -> bool:
+    """True for the lab release's own incarnation of a cluster-scoped object.
+
+    Helm-installed objects carry the release annotation. Objects a lab refresh
+    applied with `kubectl apply` from a later chart render carry no Helm
+    annotation, only the chart's `app.kubernetes.io/instance` label; those are
+    the lab's too. Any other Helm release's annotation wins over the label.
+    """
+    annotation = release_annotation(obj)
+    if annotation is not None:
+        return annotation == LAB_RELEASE
+    return (obj["metadata"].get("labels") or {}).get("app.kubernetes.io/instance") == LAB_RELEASE
+
+
+def test_release_names() -> set:
+    return {release for _namespace, release in NAMES.values() if release}
+
+
+def restore_action(recorded: Dict[str, Any], live: Optional[Dict[str, Any]]) -> str:
+    """What lab-restore must do with one recorded cluster-scoped object.
+
+    `recorded` is the lab_prepare record ({"absent": True} or a present
+    object's uid/comparable). Anything neither the lab's nor a test release's
+    is refused, never deleted.
+    """
+    key = recorded.get("key", "object")
+    if recorded.get("absent"):
+        if live is None:
+            return "absent"
+        if release_annotation(live) in test_release_names():
+            return "delete"
+        raise RuntimeError(f"{key} was absent before the run and is now owned by {release_annotation(live)!r}")
+    if live is None:
+        return "recreate"
+    if lab_owned(live):
+        return "present"
+    if release_annotation(live) in test_release_names():
+        return "reclaim"
+    raise RuntimeError(f"{key} is owned by {release_annotation(live)!r}; refusing to touch it")
+
+
 def lab_prepare() -> None:
     lock_held()
     if STATE.get("lab") is None:
         deployment = get("deployment", LAB_DEPLOYMENT, LAB_NS)
+        rendered = render_cluster_objects()
         objects = {}
-        for kind, name in LAB_CLUSTER_OBJECTS:
-            obj = get(kind, name)
-            annotations = obj["metadata"].get("annotations") or {}
-            if annotations.get("meta.helm.sh/release-name") != LAB_RELEASE:
+        absent = []
+        for kind, name in rendered:
+            obj = get_optional(kind, name)
+            if obj is None:
+                absent.append(f"{kind}/{name}")
+                continue
+            if not lab_owned(obj):
                 raise RuntimeError(f"{kind}/{name} is not owned by the lab release; refusing adoption")
             objects[f"{kind}/{name}"] = obj
         if get_optional("clusterrole", SINGLETON) is not None:
             raise RuntimeError(f"{SINGLETON} already exists; refusing to claim cluster identity")
         STATE["lab"] = {
             "deployment": deployment_identity(deployment),
-            "cluster_objects": {key: {"uid": obj["metadata"]["uid"], "comparable": comparable(obj)} for key, obj in objects.items()},
+            "crds": live_crds(chart_crd_names()),
+            "rendered_cluster_objects": [f"{kind}/{name}" for kind, name in rendered],
+            "cluster_objects": {
+                **{key: {"uid": obj["metadata"]["uid"], "comparable": comparable(obj)} for key, obj in objects.items()},
+                **{key: {"absent": True} for key in absent},
+            },
         }
         save("lab/deployment-before.json", deployment)
         for key, obj in objects.items():
@@ -685,22 +849,25 @@ def lab_restore() -> Dict[str, Any]:
     for key, recorded in lab["cluster_objects"].items():
         kind, name = key.split("/", 1)
         live = get_optional(kind, name)
-        original = json.loads((OUT / f"lab/{kind}-{name}-before.json").read_text())
-        if live is not None:
-            annotations = live["metadata"].get("annotations") or {}
-            owner = annotations.get("meta.helm.sh/release-name")
-            if owner == LAB_RELEASE:
-                action = "present"
-            elif owner in {release for _namespace, release in NAMES.values() if release}:
-                # A test release still holds the adopted object (its teardown did
-                # not run); remove that incarnation and restore the lab's.
+        action = restore_action({"key": key, **recorded}, live)
+        if recorded.get("absent"):
+            if action == "delete":
+                # A test release created it and its teardown did not run.
                 delete_exact(kind, name, live["metadata"]["uid"])
-                run(k("create", "-f", "-"), stdin=json.dumps(stripped(original)))
-                action = "reclaimed"
-            else:
-                raise RuntimeError(f"{key} is owned by {owner!r}; refusing to touch it")
-        else:
-            run(k("create", "-f", "-"), stdin=json.dumps(stripped(original)))
+                action = "deleted"
+            if get_optional(kind, name) is not None:
+                raise RuntimeError(f"{key} was absent before the run and is still present")
+            result["cluster_objects"][key] = {"action": action, "absent_as_found": True}
+            continue
+        original = json.loads((OUT / f"lab/{kind}-{name}-before.json").read_text())
+        if action == "reclaim":
+            # A test release still holds the adopted object (its teardown did
+            # not run); remove that incarnation and restore the lab's.
+            delete_exact(kind, name, live["metadata"]["uid"])
+            create_verbatim(kind, stripped(original))
+            action = "reclaimed"
+        elif action == "recreate":
+            create_verbatim(kind, stripped(original))
             action = "recreated"
         now_obj = get(kind, name)
         equal = comparable(now_obj) == recorded["comparable"]
@@ -1470,6 +1637,13 @@ def full() -> None:
         save_state()
         restore = lab_restore()
         STATE["lab_restore"] = restore
+        recorded_crds = STATE["lab"].get("crds")
+        crd_problems = (
+            crds_as_found(recorded_crds, live_crds(sorted(recorded_crds)))
+            if recorded_crds is not None
+            else ["no CRD record: lab_prepare predates the CRD check"]
+        )
+        STATE["crd_problems"] = crd_problems
         checks = {
             "no_test_namespaces": all(get_optional("namespace", ns) is None for ns, _ in NAMES.values()),
             "no_singleton": get_optional("clusterrole", SINGLETON) is None,
@@ -1479,13 +1653,20 @@ def full() -> None:
             ],
             "lab_release_deployed": json.loads(run(HELM + ["status", LAB_RELEASE, "-n", LAB_NS, "-o", "json"]).stdout)["info"]["status"] == "deployed",
             "lab_controller_exact": restore["deployment_exact"],
-            "lab_cluster_rbac_equal": all(item["spec_labels_annotations_equal"] for item in restore["cluster_objects"].values()),
+            "lab_cluster_rbac_equal": all(
+                item.get("spec_labels_annotations_equal") is True or item.get("absent_as_found") is True
+                for item in restore["cluster_objects"].values()
+            ),
+            "crds_as_found": not crd_problems,
         }
         STATE["cleanup_checks"] = checks
         STATE["cases"]["chart_owned_cleanup_and_lab_restore"] = "passed" if all(checks.values()) else "failed"
         STATE["finished"] = now()
         save_state()
-        save("cleanup-proof.json", {"checks": checks, "restore": restore, "teardown": STATE.get("teardown")})
+        save(
+            "cleanup-proof.json",
+            {"checks": checks, "restore": restore, "teardown": STATE.get("teardown"), "crd_problems": crd_problems},
+        )
 
 
 def report() -> int:
