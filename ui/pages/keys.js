@@ -370,7 +370,7 @@ export function renderKeysPage(view) {
     return head +
       "<div class=\"empty-state\" id=\"keys-forbidden\"><p class=\"note\">" +
       esc(KEYS_FORBIDDEN_SENTENCE) + "</p><p class=\"note\">The product API answered " +
-      "403 to this session's read of the trust policies.</p></div>";
+      "403 to your read of the trust policies.</p></div>";
   }
   if (policies.length === 0) {
     return head + renderRosterHalf(v) + renderFingerprint() + renderPolicySnippet() + listFooter();

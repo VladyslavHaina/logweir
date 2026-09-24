@@ -4435,7 +4435,7 @@ export async function mountRestoreWizard(node, ns, params, parse, deps, lifecycl
     ? readCatalogOffers(ns, catalogReadersOf(api, ns, lifecycle), lifecycle)
     : null;
   // A rejection that is never awaited (the route left first) is not an
-  // unhandled one: both are awaited below on every path that uses them.
+  // unhandled one: both are awaited below wherever they are used.
   policyRead.catch(() => null);
   if (offersRead !== null) {
     offersRead.catch(() => null);
