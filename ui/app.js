@@ -14,7 +14,7 @@
 // address; the seven views arrive with their own tests.
 
 import { GROUP, VERSION, path } from "./api.js";
-import { CONSOLE, applyGrants, grantedNamespaces, selectMode } from "./client.js";
+import { CONSOLE, LEGACY, applyGrants, grantedNamespaces, selectMode } from "./client.js";
 import { el, enhanceDatagrids, markScrollRegions, replace } from "./render.js";
 import { mountClusterDetail, mountClusters } from "./pages/clusters.js";
 import { mountDestinationDetail, mountDestinations } from "./pages/destinations.js";
@@ -301,6 +301,100 @@ function view(route) {
   ];
 }
 
+/** WHAT THE MASTHEAD AND THE COLOPHON SAY ABOUT WHOSE AUTHORITY THIS PAGE
+ *  CARRIES, per mode (POC-P1).
+ *
+ *  The same files are served two ways (`ui/client.js`), and the sentence that
+ *  is true of one is false of the other. Behind `kubectl proxy` (legacy) every
+ *  request carries the kubeconfig that started the proxy, which is the
+ *  residual `ui/README.md` documents and this page must keep saying. Behind
+ *  `logweir-api` (the shared console) no kubeconfig is involved at all: the
+ *  product API authorises every request for the session's own identity and
+ *  namespace grants. The static page used to print the legacy sentence in
+ *  BOTH, so a shared console behind an identity provider told every signed-in
+ *  user that it ran with a proxy's kubeconfig. `index.html` now carries copy
+ *  true of both, and [`applyModeCopy`] writes the decided mode's own.
+ *
+ *  Each value is a list of segments: a string is text, and `["code", text]`
+ *  is a `<code>` element. Nothing here is markup, so nothing is parsed. */
+export const MODE_COPY = Object.freeze({
+  [LEGACY]: Object.freeze({
+    tagline: Object.freeze([
+      "A Kubernetes API client. It runs with the authority of the kubeconfig that started " +
+        "the proxy serving it, and it holds no credential of its own.",
+    ]),
+    colophon: Object.freeze([
+      "Served by ", Object.freeze(["code", "kubectl proxy"]),
+      ", which attaches the viewer's own kubeconfig credential to every request it forwards. " +
+        "See ",
+      Object.freeze(["code", "ui/README.md"]), " for what that costs and how to narrow it.",
+    ]),
+  }),
+  [CONSOLE]: Object.freeze({
+    tagline: Object.freeze([
+      "The Logweir console. Every request goes to the Logweir product API, which authorises " +
+        "it for this session's identity and namespace grants; this page holds no credential " +
+        "of its own.",
+    ]),
+    colophon: Object.freeze([
+      "Served by ", Object.freeze(["code", "logweir-api"]),
+      ", which authorises every request against this session's grants in the namespace it " +
+        "names. The session is a cookie this page never reads. See ",
+      Object.freeze(["code", "ui/README.md"]), " for the two ways this page is served.",
+    ]),
+  }),
+});
+
+/** Writes the decided mode's [`MODE_COPY`] into the masthead tagline and the
+ *  colophon's serving line. A mode it does not know, or a document without the
+ *  two elements, changes nothing -- the neutral copy `index.html` ships is
+ *  still true. Returns whether anything was written. */
+export function applyModeCopy(doc, decidedMode) {
+  const copy = Object.prototype.hasOwnProperty.call(MODE_COPY, decidedMode)
+    ? MODE_COPY[decidedMode]
+    : null;
+  if (copy === null || doc === null || doc === undefined ||
+    typeof doc.getElementById !== "function") {
+    return false;
+  }
+  let wrote = false;
+  for (const [id, segments] of [["masthead-tagline", copy.tagline],
+    ["colophon-serving", copy.colophon]]) {
+    const node = doc.getElementById(id);
+    if (node === null || node === undefined) {
+      continue;
+    }
+    while (node.firstChild) {
+      node.removeChild(node.firstChild);
+    }
+    for (const segment of segments) {
+      if (typeof segment === "string") {
+        node.appendChild(doc.createTextNode(segment));
+      } else {
+        const code = doc.createElement(segment[0]);
+        code.appendChild(doc.createTextNode(segment[1]));
+        node.appendChild(code);
+      }
+    }
+    wrote = true;
+  }
+  return wrote;
+}
+
+/** WHAT THE SHELL DOES ONCE THE MODE IS DECIDED, as a function the suite can
+ *  call (`boot` cannot run under node). The authority sentence follows the
+ *  decided mode in both directions (POC-P1) -- the legacy page keeps saying it
+ *  carries a kubeconfig and the shared console stops saying so -- and in the
+ *  shared console the session's grants replace the runtime namespace list,
+ *  with one more render when that changed anything. */
+export function modeDecided(record, doc, context, rerender) {
+  const decided = (record || {}).mode;
+  applyModeCopy(doc, decided);
+  if (decided === CONSOLE && applyGrants(context, grantedNamespaces())) {
+    rerender();
+  }
+}
+
 export function namespaceContext(root) {
   const runtime = globalThis.LOGWEIR_NAMESPACE_CONTEXT || {};
   const raw = root.getAttribute("data-logweir-namespaces") || "";
@@ -453,19 +547,16 @@ function boot() {
   // stage 6). `ui/client.js` asks `GET /api/v1/session` exactly once, records
   // the answer for the life of the loaded page, and every page read and write
   // goes through that record. The first render above does not wait for it:
-  // in the legacy deployment the answer is a refusal and nothing here changes,
-  // so the page paints exactly as fast as it did before.
+  // in the legacy deployment the answer is a refusal and only the masthead's
+  // authority sentence changes (`modeDecided`), so the page paints exactly as
+  // fast as it did before.
   //
   // IN CONSOLE MODE THE GRANTS REPLACE THE RUNTIME LIST. The namespaces come
   // from the session document -- the server knows what this actor may reach --
   // rather than from the ConfigMap `runtime.js` carries, which is the
   // installation's list and not the viewer's. A change is one more render;
   // no change is none.
-  selectMode().then((record) => {
-    if (record.mode === CONSOLE && applyGrants(context, grantedNamespaces())) {
-      renderCurrent();
-    }
-  }, () => {
+  selectMode().then((record) => modeDecided(record, document, context, renderCurrent), () => {
     // `selectMode` resolves for every answer including a refusal, so this arm
     // is for a throw inside `renderCurrent` above -- which would otherwise be
     // an unhandled rejection with nothing on screen to say a render failed.

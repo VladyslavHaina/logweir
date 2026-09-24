@@ -72,6 +72,7 @@ import {
   decodeLegacyObject,
   decodeManualBackup,
   decodeOperation,
+  decodeOperationScope,
   decodeOperationTrust,
   decodePolicyChanged,
   decodeRequest,
@@ -748,10 +749,24 @@ function projectSchedule(item) {
       awsCli: r.removalCommands.slice(),
       mcCli: r.mcRemovalCommands.slice(),
     };
-    for (const field of ["evaluatedAt", "keepLast", "keepDays"]) {
-      if (r[field] !== null) {
+    // `note` IS THE CRD's OWN FIELD AND THE API PUBLISHES IT (console class
+    // sweep): "why nothing would be removed". It used to be dropped here, so a
+    // shared console printed `note: -` for a report that said why.
+    for (const field of ["evaluatedAt", "keepLast", "keepDays", "note"]) {
+      if (r[field] !== null && r[field] !== undefined) {
         report[field] = r[field];
       }
+    }
+    // AND TWO FACTS THE CUSTOM RESOURCE HAS NO FIELD FOR, carried beside it
+    // under projection names (like `__summary`). The API bounds every list to
+    // 100 entries and says so in `truncated`; it publishes how many manifests
+    // could not be read (`skippedManifests`) and not their keys, which the
+    // CRD keeps in `skipped[]`. Dropping both made a cut list read as the
+    // whole report and a report with unreadable manifests read as one with
+    // none. `schedules.js` `renderRetentionPanel` says each.
+    report.__truncated = r.truncated === true;
+    if (typeof r.skippedManifests === "number") {
+      report.__skippedManifests = r.skippedManifests;
     }
     status.retentionReport = report;
   }
@@ -970,8 +985,26 @@ const PROJECT = Object.freeze({
  *  on a compromise-revoked key read green, and so did every scorecard fact
  *  captioned by the same rule. The basis only ever refines a recorded
  *  `result`, so it is not written where no result was recorded. */
-function mergeOperation(object, operation, trust) {
+function mergeOperation(object, operation, trust, scope) {
   const status = object.status;
+  // HOW MUCH OF A RESTORE WAS COMPARED TRAVELS WITH THE DETAIL (console class
+  // sweep). `scope` is the route's decoded `VerificationScopeView`, or `null`
+  // when the body carried none. It is written under the name the History
+  // detail already reads first (`history.js` `scopeOf`: "the product API's
+  // own block, used verbatim when it is there"); without it that page read
+  // the custom resource's `status.integrity`, which no projection carries, and
+  // said "No verification scope was recorded" about a run the API had scoped.
+  // A Backup has no scope, and a Restore whose route published none keeps the
+  // absent-scope sentence, which is what an absent scope means.
+  if (operation.kind === "restore" && scope !== null && scope !== undefined) {
+    const copied = { level: scope.level };
+    for (const field of ["recordsSampled", "recordsSampledMatching", "recordsExpected"]) {
+      if (scope[field] !== null && scope[field] !== undefined) {
+        copied[field] = scope[field];
+      }
+    }
+    status.verificationScope = copied;
+  }
   status.phase = PHASE_OF[operation.state];
   if (operation.stateReason !== null) {
     status.reason = operation.stateReason;
@@ -2173,6 +2206,22 @@ function tokenNow() {
   return decided === null ? null : decided.token;
 }
 
+/** THE SESSION'S SYNCHRONISER TOKEN, for the one product-API write that is not
+ *  a method of the client object: `ui/operation-watch.js`'s `connectArchive`
+ *  (POC-P4). `null` in legacy mode and before the probe has answered.
+ *
+ *  EVERY UNSAFE REQUEST CARRIES THIS VALUE AND NO OTHER. The product API
+ *  refuses a write whose `X-CSRF-Token` does not match the session that sent
+ *  it (`403 x-csrf-token: the synchronizer token does not match this
+ *  session`), so a write that takes its token from anywhere else -- a caller's
+ *  options bag, a route's `deps` -- is a write that is refused in the shared
+ *  console. The connect-archive form did exactly that: it read `deps.token`,
+ *  which the shell never supplies, and sent no header at all. Like the token
+ *  itself this lives in this module's memory and nowhere else. */
+export function sessionToken() {
+  return tokenNow();
+}
+
 // The roles a destination test exercises, as one stable tag for the
 // idempotency key. Sorted, because `["archiveRead","archiveWrite"]` and
 // `["archiveWrite","archiveRead"]` are the same test and must not be two.
@@ -2446,7 +2495,9 @@ async function enrich(ns, plural, name, object, options) {
         ns, plural === "backups" ? "backup" : "restore", name, options,
       );
       const decoded = decodeOperation(body);
-      return mergeOperation(object, decoded.value.item, decodeOperationTrust(body));
+      return mergeOperation(
+        object, decoded.value.item, decodeOperationTrust(body), decodeOperationScope(body),
+      );
     } catch (unread) {
       if (isMissingExtra(unread)) {
         return object;

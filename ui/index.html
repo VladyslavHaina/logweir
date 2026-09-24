@@ -39,9 +39,16 @@
           </svg>
           <div class="brand-text">
             <h1>Logweir</h1>
-            <p class="tagline">
-              A Kubernetes API client. It runs with the authority of the kubeconfig
-              that started the proxy serving it, and it holds no credential of its own.
+            <!-- WHOSE AUTHORITY THIS PAGE CARRIES DEPENDS ON WHAT SERVES IT
+                 (POC-P1). Behind `kubectl proxy` it is the kubeconfig that
+                 started the proxy; behind `logweir-api` it is the signed-in
+                 session's grants. The page cannot know which until its one
+                 mode probe answers, so the copy below is true of both, and
+                 app.js (`applyModeCopy`) replaces it with the decided mode's
+                 own sentence. -->
+            <p class="tagline" id="masthead-tagline">
+              Kafka backup and restore on Kubernetes. This page holds no credential
+              of its own.
             </p>
           </div>
         </div>
@@ -53,10 +60,9 @@
          waiting on is announced here (render.js `announce`). -->
     <div id="announcer" class="visually-hidden" role="status" aria-live="polite" aria-atomic="true"></div>
     <footer class="colophon">
-      <p>
-        Served by <code>kubectl proxy</code>, which attaches the viewer's own
-        kubeconfig credential to every request it forwards. See
-        <code>ui/README.md</code> for what that costs and how to narrow it.
+      <p id="colophon-serving">
+        See <code>ui/README.md</code> for how this page is served and whose
+        authority its requests carry.
       </p>
       <p>
         Apache Kafka&reg; and Kafka&reg; are registered trademarks of the Apache

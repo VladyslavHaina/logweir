@@ -2928,6 +2928,29 @@ export function decodeOperationTrust(value) {
   return readShape(D3_TRUST, item.trust, { unknown: [] }, "OperationViewResponse", "item.trust");
 }
 
+/** Decodes the `verificationScope` block of `GET .../operations/{kind}/{name}`'s
+ *  envelope, or answers `null` when the body carries none.
+ *
+ *  THE SAME GAP AS THE TRUST BLOCK ABOVE, ONE FIELD OVER (console class
+ *  sweep, POC round). A console Restore DETAIL reads the operation route
+ *  through [`decodeOperation`], which keeps the frozen sixteen fields and
+ *  drops D3's additions -- so the History detail, which reads a Restore's
+ *  scope from `status.verificationScope` or from the custom resource's
+ *  `status.integrity`, found neither in the shared console and said "No
+ *  verification scope was recorded for this run" beside an API that had
+ *  published one. The block is read here by the operation view's own
+ *  `VerificationScopeView` shape; absent is `null`, and present-but-malformed
+ *  is a contract failure. */
+export function decodeOperationScope(value) {
+  const item = (value !== null && typeof value === "object") ? value.item : undefined;
+  if (item === null || typeof item !== "object" || item.verificationScope === undefined ||
+    item.verificationScope === null) {
+    return null;
+  }
+  return readShape(D3_VERIFICATION_SCOPE, item.verificationScope, { unknown: [] },
+    "OperationViewResponse", "item.verificationScope");
+}
+
 /** Decodes one page of a catalog's points. */
 export function decodeCatalogPoints(value) {
   return decodeListWith(D3_POINT_PAGE, D3_POINT, value);

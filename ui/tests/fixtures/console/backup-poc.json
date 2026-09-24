@@ -1,0 +1,50 @@
+{
+  "item": {
+    "archive": {
+      "credentialRef": {
+        "name": "logweir-s3"
+      },
+      "url": "s3://kafka-backups/poc"
+    },
+    "backupId": "fcf2584d-9a36-4196-a704-c889b5bb1dff-20260924-134000",
+    "createdAt": "2026-09-24T13:40:00Z",
+    "deadlineSeconds": 3600,
+    "name": "logweir-backup-orders-r1-20260924-134000",
+    "namespace": "logweir-poc",
+    "operation": {
+      "state": "succeeded",
+      "stateReason": "Ok",
+      "terminal": true,
+      "verificationState": "valid",
+      "verifiedSuccess": true
+    },
+    "records": 400,
+    "resourceVersion": "6845822",
+    "schedule": "orders-r1",
+    "scheduleRef": {
+      "generation": 1,
+      "name": "orders-r1",
+      "runPolicySha256": "sha256:f56c723c1d35a49f2829deba033effc1896785741fb1799db9564e6ca4278769",
+      "uid": "fcf2584d-9a36-4196-a704-c889b5bb1dff"
+    },
+    "slot": "20260924-134000",
+    "sourceRef": {
+      "name": "source"
+    },
+    "topics": [
+      "orders",
+      "payments"
+    ],
+    "trigger": {
+      "attempt": 0,
+      "kind": "Scheduled"
+    },
+    "triggeredBy": "schedule",
+    "uid": "f29d009f-42fe-4c10-9fa5-f0c193f999aa",
+    "windowCovered": {
+      "fromMs": 1790256208165,
+      "toMs": 1790256210511
+    }
+  },
+  "requestId": "01M39TEMC5FMKK1HF4A03XSV18"
+}

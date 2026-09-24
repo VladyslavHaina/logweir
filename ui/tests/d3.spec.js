@@ -2604,14 +2604,15 @@ test("a_finished_restore_without_a_completion_says_not_yet_verified_and_never_ze
   // NEGATIVE CONTROL: no count row and no zero is rendered for the absence.
   assert.equal(html.indexOf("records verified in the sampled window"), -1, "no count row");
   assert.equal(/<dd>0<\/dd>/.test(html), false, "nothing is shown as zero");
-  // Review LOW-3: a restore that FAILED, was refused or was cancelled is not
-  // "not yet verified" -- it will never have counts -- and says so.
+  // Review LOW-3, then CONSOLE-COMPLETION-HEADING-ON-FAILED: a restore that
+  // FAILED, was refused or was cancelled is not "not yet verified" -- it will
+  // never have counts -- and it carries no completion section at all: no
+  // "What this restore produced" heading over a run that produced nothing.
   for (const ended of [{ state: "failed" }, { state: "refused" }, { state: "cancelled" },
+    { state: "unknown" },
     { state: null, phase: "Failed" }, { state: null, phase: "Cancelled" }]) {
-    const failed = decode(renderCompletion(Object.assign({}, finished, ended)));
-    assert.match(failed, /data-completion="none"/, JSON.stringify(ended));
-    assert.match(failed, /No completion was recorded for this run: it did not succeed/);
-    assert.equal(failed.indexOf("not yet verified"), -1, "a failed run is not called pending");
+    assert.equal(renderCompletion(Object.assign({}, finished, ended)), "",
+      "no completion section for " + JSON.stringify(ended));
   }
   // A run still going has no panel at all (the existing rule, unchanged).
   assert.equal(renderCompletion(Object.assign({}, finished, { terminal: false, state: "running" })), "");

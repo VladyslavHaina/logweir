@@ -392,16 +392,34 @@ function removableLine(set) {
  *  removal commands the status carries -- `awsCli` in that archive's own
  *  scheme and `mcCli` in `mc`'s spelling -- printed verbatim in a block a
  *  viewer copies, above the sentence that says who would be running them. */
-export function renderRetentionPanel(object, policy) {
+export function renderRetentionPanel(object, policy, policies) {
   const status = (object && object.status) || {};
   const report = status.retentionReport;
-  const enforcement = renderEnforcement(report, policy);
+  // "LOGWEIR NEVER DELETES" IS NOT PRINTED WHERE THIS PAGE CANNOT PROVE IT
+  // (console class sweep). The covering policy is read from
+  // `status.retentionReport.supersededBy` and from nothing else -- and no
+  // BackupSchedule CRD in this tree has that field, no controller writes it
+  // and the product API does not project it (the D3 W0 fields are still
+  // owed). So `policy` is always null today, and this panel printed the
+  // no-deletion sentence beside a namespace whose RetentionPolicy is deleting
+  // nightly. Where the report names no covering policy and a policy in this
+  // namespace is not recommendation-only, the panel says that it cannot tell,
+  // names the policies, and prints neither the "own recommendation and
+  // nothing else" line nor the no-deletion sentence.
+  const unproven = (policy === null || policy === undefined) &&
+    !(((report || {}).supersededBy || {}).name)
+    ? deletingPolicies(policies)
+    : [];
+  const enforcement = unproven.length > 0
+    ? renderCoverageUnknown(unproven)
+    : renderEnforcement(report, policy);
+  const sentence = unproven.length > 0 ? "" : retentionSentenceFor(report, policy);
   if (!report) {
     return (
       "<section class=\"retention\"><h3>Retention</h3>" +
       "<p class=\"note\">No retention evaluation has been recorded for this schedule.</p>" +
       enforcement +
-      retentionSentenceFor(report, policy) + "</section>"
+      sentence + "</section>"
     );
   }
   const kept = Array.isArray(report.setsKept) ? report.setsKept : [];
@@ -420,13 +438,28 @@ export function renderRetentionPanel(object, policy) {
     : "<ul class=\"sets\">" +
       removable.map((s) => "<li>" + removableLine(s) + "</li>").join("") +
       "</ul>";
+  // THE SHARED CONSOLE HOLDS A COUNT AND NOT THE KEYS (console class sweep).
+  // The product API publishes how many manifests could not be read and not
+  // which, so a projection with a non-zero count and no `skipped[]` says the
+  // count and where the keys are, rather than printing no section at all --
+  // which read as "every manifest was read".
+  const skippedCount = typeof report.__skippedManifests === "number"
+    ? report.__skippedManifests
+    : 0;
   const skippedList = skipped.length === 0
-    ? ""
+    ? (skippedCount > 0
+      ? "<h4>Manifests that could not be read</h4><p class=\"note\" data-skipped-manifests=\"" +
+        esc(String(skippedCount)) + "\">" + esc(skippedCountSentence(skippedCount)) + "</p>"
+      : "")
     : "<h4>Manifests that could not be read</h4><ul class=\"sets\">" +
       skipped
         .map((s) => "<li>" + cell((s || {}).key) + " -- " + cell((s || {}).reason) + "</li>")
         .join("") +
       "</ul>";
+  const truncated = report.__truncated === true
+    ? "<p class=\"note\" data-report-truncated=\"true\">" + esc(REPORT_TRUNCATED_SENTENCE) +
+      "</p>"
+    : "";
 
   return (
     "<section class=\"retention\"><h3>Retention</h3>" +
@@ -441,11 +474,62 @@ export function renderRetentionPanel(object, policy) {
     "<h4>Would be removed -- still in the archive</h4>" + removableList +
     skippedList +
     "<h4>The commands</h4>" +
+    truncated +
     copyBlock(awsCli.concat(mcCli)) +
-    retentionSentenceFor(report, policy) +
+    sentence +
     "</section>"
   );
 }
+
+/** The RetentionPolicies in `policies` whose recorded enforcement is not
+ *  recommendation-only: the ones that delete, or declare that a bucket rule
+ *  does. A policy that has recorded no enforcement is not one of them. */
+export function deletingPolicies(policies) {
+  return (Array.isArray(policies) ? policies : []).filter((p) => {
+    const state = enforcementOf(p);
+    return state !== null && state !== "RecommendationOnly";
+  });
+}
+
+/** The sentence a schedule's retention panel carries in place of both the
+ *  no-deletion sentence and the "own recommendation" line, when a policy in
+ *  its namespace deletes and nothing records which destination it covers. */
+export const RETENTION_COVERAGE_UNKNOWN_SENTENCE =
+  "This schedule's retention report does not record which RetentionPolicy covers its " +
+  "destination (status.retentionReport.supersededBy is not written by this build), and a " +
+  "RetentionPolicy in this namespace is not recommendation-only. So this page does not say " +
+  "that Logweir never deletes from this schedule's archive: check which destination each " +
+  "policy below governs.";
+
+/** The panel's enforcement block when coverage cannot be told: the sentence
+ *  above and each deleting policy with the destination and state it recorded. */
+export function renderCoverageUnknown(policies) {
+  const rows = policies.map((p) => [
+    cell(((p || {}).metadata || {}).name),
+    cell((((p || {}).spec || {}).destinationRef || {}).name),
+    cell(enforcementOf(p)),
+  ]);
+  return (
+    "<div class=\"enforcement\" data-enforcement=\"unknown-coverage\">" +
+    "<p class=\"caveat\">" + esc(RETENTION_COVERAGE_UNKNOWN_SENTENCE) + "</p>" +
+    table(["RETENTION POLICY", "DESTINATION", "ENFORCEMENT"], rows, "") +
+    "</div>"
+  );
+}
+
+/** Why a shared-console retention report shows a count of unreadable
+ *  manifests and not their keys. */
+export function skippedCountSentence(count) {
+  return String(count) + (count === 1 ? " manifest" : " manifests") + " could not be read " +
+    "when this report was evaluated. The product API publishes the count and not the keys; " +
+    "status.retentionReport.skipped on the schedule object names each key and why.";
+}
+
+/** Why a shared-console retention report may not be the whole report. */
+export const REPORT_TRUNCATED_SENTENCE =
+  "The product API cut at least one list in this report at 100 entries, so the sets and " +
+  "commands shown are not all of them. status.retentionReport on the schedule object carries " +
+  "the whole report.";
 
 // ===========================================================================
 // D3 (PLAT-16.1, PLAT-16.2): WHICH SENTENCE THIS PANEL IS ALLOWED TO PRINT
@@ -1714,7 +1798,8 @@ export function renderScheduleCard(ns, object, backups, extra) {
     "<div class=\"policy-slot\" data-policy-slot=\"" + esc(name) + "\">" +
     renderPolicyForm(policyFormView(ns, object, own, e.destinations, e.mayOperate)) + "</div>" +
     renderRecoveryPoints(ns, object, backups) +
-    renderRetentionPanel(object, policyForSchedule(object, e.retentionPolicies)) +
+    renderRetentionPanel(object, policyForSchedule(object, e.retentionPolicies),
+      e.retentionPolicies) +
     "</section>"
   );
 }
@@ -4799,9 +4884,16 @@ export function renderScheduleFacts(object, runs, destinations, now, points, des
   const latest = latestRestorablePoint((runs || {}).mine || [], points).point;
   const latestMeta = (latest || {}).metadata || {};
   const latestStatus = (latest || {}).status || {};
-  const complete = latestStatus.completedAt ||
+  // WHEN THE POINT COMPLETED IS RECORDED ON ITS `Complete` CONDITION, WHICH A
+  // SHARED-CONSOLE LIST DOES NOT CARRY (console class sweep). The product API's
+  // Backup list publishes no conditions, so this row used to fall back to the
+  // run's creation instant and print it as "completed". The fallback stays --
+  // an age from creation is the conservative direction -- and now says what it is.
+  const recordedComplete = latestStatus.completedAt ||
     (((latestStatus.conditions || []).find((c) => c.type === "Complete" && c.status === "True") || {})
-      .lastTransitionTime) || latestMeta.creationTimestamp || "";
+      .lastTransitionTime) || "";
+  const complete = recordedComplete || latestMeta.creationTimestamp || "";
+  const fromCreation = recordedComplete.length === 0 && complete.length > 0;
   const then = Date.parse(complete);
   const reference = now === undefined || now === null ? Date.now() : Date.parse(now);
   const age = isFinite(then) && isFinite(reference) && reference >= then
@@ -4819,11 +4911,21 @@ export function renderScheduleFacts(object, runs, destinations, now, points, des
       ["Destination", destinationCell(object, destinations, destinationsUnavailable)],
       ["Policy revision", policy === undefined ? ABSENT : cell("g" + String(policy))],
       ["Latest restorable point", latest === null ? ABSENT : cell(latestMeta.name)],
-      ["Latest point completed", complete.length === 0 ? ABSENT : cell(complete)],
+      ["Latest point completed", complete.length === 0 ? ABSENT : cell(complete) +
+        (fromCreation
+          ? " <span class=\"note\" data-completed-from=\"creation\">" +
+            esc(COMPLETION_INSTANT_NOT_PUBLISHED) + "</span>"
+          : "")],
       ["Latest point age", ageWords],
     ]) + "</section>"
   );
 }
+
+/** What the schedule facts say when the latest point's completion instant is
+ *  not published and its creation instant stands in for it. */
+export const COMPLETION_INSTANT_NOT_PUBLISHED =
+  "(its creation instant: this view does not publish when the run completed, so the age " +
+  "below is counted from its creation)";
 
 /** ONE SCHEDULE, AS A PAGE. The card's own panels -- the toggle, the revision,
  *  the next runs, the manual-run panel, the policy form, retention -- plus the

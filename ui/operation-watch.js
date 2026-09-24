@@ -86,7 +86,7 @@ import {
   openOperationStream,
   serverTime,
 } from "./api.js";
-import { CONSOLE, apiClient, mode } from "./client.js";
+import { CONSOLE, apiClient, mode, sessionToken } from "./client.js";
 import {
   decodeCatalogPoints,
   decodeCatalogRequest,
@@ -660,9 +660,15 @@ export async function connectArchive(ns, body, key, deps) {
         "input that carries one is a 422 from the product API",
     );
   }
+  // THE TOKEN IS THE SESSION'S, READ FROM THE TYPED CLIENT AT SEND TIME
+  // (POC-P4). This used to be `deps.token`, which no caller supplies -- the
+  // shell mounts the catalog page with no `deps` at all -- so the request
+  // went out without `X-CSRF-Token` and the shared console answered every
+  // "Connect an existing archive" with 403. It is not a `deps` seam any more:
+  // a write whose token can be handed in is a write whose token can be wrong.
   const answer = await (d.consoleCreate || consoleCreate)(ns, "catalogs", body, {
     idempotencyKey: key,
-    token: d.token === undefined ? null : d.token,
+    token: sessionToken(),
   });
   const decoded = decodeD3Item("catalogs", answer);
   const made = projectD3("catalog", decoded.value.item, ns);

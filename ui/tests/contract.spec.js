@@ -223,13 +223,17 @@ const CONSOLE_FIXTURES = [
   ["retention-policies-list.json", "RetentionPolicyList"],
   ["trust-policy.json", "TrustPolicyResponse"],
   ["trust-policies-list.json", "TrustPolicyList"],
+
+  // The PoC round (`claude/console-shared-fix`): the live `GET .../backups/{name}`
+  // answer the shared console's restore wizard misread (POC-P2), byte for byte.
+  ["backup-poc.json", "BackupResponse"],
 ];
 
 test("console_fixtures_are_instances_of_the_published_schema", () => {
   // AN EQUALITY, NOT A FLOOR (review F8). A floor stays green when a fixture is
   // deleted together with the row that used it, which is exactly the change
   // this arm exists to notice.
-  assert.equal(CONSOLE_FIXTURES.length, 70,
+  assert.equal(CONSOLE_FIXTURES.length, 71,
     "the console fixture set covers PLAT-17.1, D1, D2 and D3");
   for (const [name, schema] of CONSOLE_FIXTURES) {
     assert.ok(DEFINITIONS[schema] !== undefined, schema + " is published");
