@@ -1824,3 +1824,26 @@ the enforcement pod on no variable. A destination where neither `evidenceWrite` 
 `archiveWrite` is usable is refused by name (`EvidenceGrantUnusable`) with the policy's
 guarantees downgraded to recommendation-only, exactly as every other destination refusal
 is published.
+
+## Amendment at integration (2026-09-23, RECEIPT-DUP: one engine run per execution)
+
+Landed as `claude/receipt-dup` (Tier-A review REJECT, narrow; fix round read and accepted by the orchestrator).
+
+§5.1's "a set with two runs (upstream append) yields two points sharing a `backup_id`" described a defect, not a feature:
+- the engine does not append: a re-run into an existing `backup_id` leaves a partial archive;
+- it rewrites `<prefix>/<backup_id>/manifest.json` unconditionally, so the second run's receipt attested a partial set while the first run's receipt stopped matching the archive.
+
+**The execution claim.** The backup runner now takes a create-only claim, `logweir/backups/<backup_id>/execution.claim.json`, immediately before the engine starts. It proves the claim exclusive by creating it twice; the second create must return `AlreadyExists`.
+- An existing claim → exit 1 `ExecutionAlreadyClaimed`. It is retryable only where the schedule sets `spec.retry`: D1 §4.6 retries under a new execution id, and otherwise the slot is `RunFailed`.
+- A claim the store cannot prove exclusive (put refused, HEAD-then-PUT fallback, or a second create that succeeds) → exit 4 `ExecutionClaimUnproven`.
+- Neither case starts the engine or signs anything.
+- The runner prints `failure-reason=<state>` as its final line. The controller lifts it onto `status.exitReason` and the Failed condition's message, only beside its paired exit code.
+- A destination readiness probe catches a store that does not enforce conditional create before the first backup: `ConditionalCreateUnsupported`, see D2's amendment of the same date.
+
+**Layout.** §5.2's layout gains that one key. It is unsigned, never read by the runner (no `GetObject`/`ListBucket` under `logweir/` is added), never rewritten, and never deleted: the reaper's evidence-root rail refuses it, and retention plans never name `logweir/…`.
+
+**Identity.** §5.1's identity rule is unchanged and still load-bearing: sets written by builds without the claim can hold two receipts, and each stays its own point. The note at §5.1 about an "upstream append" giving two points now applies only to such sets.
+
+**Residuals.**
+- (a) An execution whose first run was made by a build without the claim, then re-created after the upgrade, is not stopped, because there is no claim to find. The release notes tell operators to let in-flight Backups finish before upgrading. Tracked as RECEIPT-DUP-UPGRADE-WINDOW.
+- (b) A re-created Job whose predecessor's pod went on to sign a valid receipt still ends `Failed`, although the evidence is intact and catalogued. Tracked as CASE-E-PESSIMISTIC-STATUS.

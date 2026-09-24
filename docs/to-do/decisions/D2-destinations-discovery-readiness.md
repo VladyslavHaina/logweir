@@ -2128,3 +2128,25 @@ is authoritative — no role is granted `s3:DeleteObject` except the retention e
 delete principal. The retention enforcement Job's evidence credential is `evidenceWrite`
 (D3 §6.5); the controller projecting `archiveRead` there is the defect
 RET-EVIDENCE-GRANT-IS-ARCHIVEREAD, not a change to this contract.
+
+## Amendment at integration (2026-09-23, PREFLIGHT-EVIDENCEWRITABLE-WRONG-PRINCIPAL, DESTINATIONACCESS-IGNORES-WRITEPROBE, RECEIPT-DUP)
+
+Landed as `claude/readiness-principal` (Tier-A review ACCEPT-with-LOWs, LOW round done) and `claude/receipt-dup` (probe half), merged on main together.
+
+1. **§6.3: each destination row is answered by the principal its role names.** A check plan's destination credential is the grant the check resolved:
+   - for `Backup`: `archiveWrite`. A Backup run lists with it, so `destination.archiveListable` is its answer. This amends §4.2's input list, which said `archiveRead`.
+   - for `DestinationAccess`: `archiveRead` whenever requested, else the first of `archiveWrite`, `evidenceWrite`, `evidenceRead`.
+
+   When the `evidenceWrite` or `evidenceRead` grant differs from it, the plan names that grant by reference: `evidenceWrite` / `evidenceRead: {credentials: static|workloadIdentity|controllerIdentity|notConfigured, secretName|serviceAccountName}`, never a value. The pod is projected the grant: `LOGWEIR_EVIDENCE_AWS_*` for `evidenceWrite`, `LOGWEIR_EVIDENCE_READ_AWS_*` for `evidenceRead`, or the grant's ServiceAccount. The runner never falls back to other keys.
+
+   Each probed row carries the fact `grant` = `destination` | `evidenceWrite` | `evidenceRead`.
+   - **A grant no check pod holds** (`controllerIdentity`, `notConfigured`) answers `destination.evidenceReadable` `unknown`/`EvidenceReadNotConfigured`, and nothing is read.
+   - **A grant the resolver refuses** is answered by the controller as that one advisory row `unknown`, with the refusal in its message; `destination.resolved` stays valid and the other rows run.
+   - **Two workload identities on different ServiceAccounts** give `destination.resolved` → `ExecutionContextConflict` and no Job for a `DestinationAccess` check. For a `Backup` check's advisory `EvidenceRead`, the controller answers the row `unknown`, naming both ServiceAccounts, and the verdict is unchanged.
+
+   The marker probe asks the evidence-write principal for create-only PUTs of the one marker key. The read probe asks the evidence-read principal for one GET of an absent key. Nothing else.
+2. **§6.3: `DestinationAccess` reads `spec.readiness.writeProbe` exactly as `Backup` does.** A requested `EvidenceWrite` is probed and blocking under `CreateOnlyMarker`, and is execution-only `WriteNotProbed` under `Disabled`.
+   - **A requested `ArchiveWrite` is never probed** (accepted limit). `destination.archivePrefixWritable` stays execution-only `ArchivePrefixWriteVerifiedOnlyAtExecution`, and its message names the archive prefix and says it was not write-probed: the one key a check may write lies under the evidence root and proves nothing about the archive prefix.
+3. **§6.3/§4.2: the marker probe proves conditional create** (RECEIPT-DUP). A backup run claims its execution with a create-only put, which is a lock only on a store that enforces `If-None-Match: *`. After a fresh marker, the probe creates the same key again, as the same principal, and requires `AlreadyExists`. A second create that succeeds, or a store that reports conditional put unsupported (HEAD-then-PUT fallback), makes the row `notReady`/`ConditionalCreateUnsupported`. `AlreadyExists` on the first create stays proof. An error on the second create is classified, never proof.
+4. **Mixed version.** A runner older than this contract refuses a plan carrying `evidenceWrite`/`evidenceRead` (exit 3, `CheckContractMismatch`), and the Preflight says to upgrade the runner image, naming the refused field. Roll the controller and the runner together.
+5. **Residual.** `evidenceReadable` for a `Backup` check whose evidence-read identity is a ServiceAccount other than the check pod's is advisory `unknown`, not probed. An evidence-read Job per principal would close it.
