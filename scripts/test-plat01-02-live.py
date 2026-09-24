@@ -702,6 +702,7 @@ def fresh_backup() -> dict[str, Any]:
     # Where the backup's records actually lie (`status.windowCovered`, from the
     # signed receipt): the restore plans' sample window must overlap them.
     STATE["backup_window_from_ms"] = (status.get("windowCovered") or {}).get("fromMs")
+    STATE["backup_window_to_ms"] = (status.get("windowCovered") or {}).get("toMs")
     STATE["backup_name"] = name
     STATE["cases"]["fresh_scram_backup"] = "passed"
     save_state()
@@ -720,6 +721,21 @@ def sample_window_start(now: dt.datetime, covered_from_ms: Any) -> str:
     if isinstance(covered_from_ms, int):
         start = min(start, dt.datetime.fromtimestamp(covered_from_ms / 1000, dt.timezone.utc))
     return start.strftime("%Y-%m-%dT%H:%M:%S.") + f"{start.microsecond // 1000:03d}Z"
+
+
+def rpo_objective_seconds(now: dt.datetime, covered_to_ms: Any) -> int:
+    """The plan's RPO objective: a day, or the age of the backup's newest
+    record plus an hour when that is older (lab-refresh-10). The measured RPO
+    is the age of the newest restored record; with the lab's seed records from
+    2026-09-22 it measured 98206 s against the fixed 86400 and every restore
+    ended `fail-objective` — the product enforcing the objective correctly
+    (a live control of that gate), against an objective written for fresh
+    data. The objective follows the fixture's data, never the measurement."""
+    objective = 86400
+    if isinstance(covered_to_ms, int):
+        age = int(now.timestamp() - covered_to_ms / 1000)
+        objective = max(objective, age + 3600)
+    return objective
 
 
 def restore_plan(prefix: str, point_in_time: str) -> str:
@@ -761,7 +777,10 @@ def restore_plan(prefix: str, point_in_time: str) -> str:
             "records_per_partition": 25,
             "anchor": "head",
         },
-        "objectives": {"rto_seconds": 3600, "rpo_seconds": 86400, "pass_rate": 1.0},
+        "objectives": {"rto_seconds": 3600,
+                       "rpo_seconds": rpo_objective_seconds(
+                           dt.datetime.now(dt.timezone.utc), STATE.get("backup_window_to_ms")),
+                       "pass_rate": 1.0},
         "evidence": {**storage, "prefix": "logweir/"},
         "notifications": {"webhooks": []},
     }
@@ -4321,6 +4340,10 @@ def harness_selftest() -> None:
     """Bounded local controls proving the harness can fail; no cluster access."""
     now = dt.datetime(2026, 9, 24, 3, 0, 0, tzinfo=dt.timezone.utc)
     seed = 1790120729256  # lab-refresh-10's fresh backup windowCovered.fromMs (2026-09-22)
+    if rpo_objective_seconds(now, None) != 86400 or rpo_objective_seconds(now, 1790218800000) != 86400:
+        raise RuntimeError("fresh records must keep the one-day RPO objective")
+    if rpo_objective_seconds(now, 1790120742564) != 98057 + 3600:
+        raise RuntimeError("the RPO objective does not follow the backup's newest record")
     if sample_window_start(now, seed) != "2026-09-22T23:45:29.256Z":
         raise RuntimeError("the sample window does not reach back to the backup's own records")
     if sample_window_start(now, None) != "2026-09-23T03:00:00.000Z":
