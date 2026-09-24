@@ -611,6 +611,8 @@ impl ObjectStore {
     /// object, `status` included) to the object under `target` and bump its
     /// version — another writer landing between two requests of the pass
     /// under test, which is the only way a genuine conflict can be staged.
+    /// When nothing is stored under `target`, the other writer CREATES it and
+    /// `patch` is the whole object.
     pub fn interleave(
         &mut self,
         method: &str,
@@ -648,6 +650,15 @@ impl ObjectStore {
                 body: other.patch,
             });
             self.objects.insert(other.target, Some(object));
+        } else {
+            // THE OTHER WRITER CREATES IT: `patch` is the whole object.
+            self.writes.push(StoreWrite {
+                method: "POST".to_string(),
+                path: format!("{} (another writer)", other.target),
+                status: 201,
+                body: other.patch.clone(),
+            });
+            self.objects.insert(other.target, Some(other.patch));
         }
     }
 

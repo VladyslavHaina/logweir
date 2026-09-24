@@ -3851,8 +3851,17 @@ pub async fn reconcile_backup_with_runner_image(
     now: DateTime<Utc>,
     runner: &job::RunnerImage,
 ) -> Result<BackupOutcome, BackupError> {
-    match reconcile_backup_inner(backup, client, archive, verify, now, runner).await {
+    // WHERE THE OBJECT STANDS WHEN A REFUSAL IS RAISED. The freeze pass writes
+    // the execution record (and `TopicsResolved`) BEFORE the runner Job is
+    // created, and the Job create can still refuse (`JobNameConflict`): the
+    // refusal below is then the pass's second or third write, and seam S7
+    // preconditions it on where those writes left the object — not on the
+    // object this pass was handed, which the API server would answer 409
+    // (REHEARSAL-FIRE-PASS-STATUS-LOST's class sweep).
+    let mut written: Option<Backup> = None;
+    match reconcile_backup_inner(backup, client, archive, verify, now, runner, &mut written).await {
         Err(BackupError::Refused(state, message)) => {
+            let backup = written.as_ref().unwrap_or(backup);
             // THE ONE PLACE A SELF-DECIDED REFUSAL IS WRITTEN. Every refusal
             // inside the reconcile is a `?` on `BackupError::Refused`, so the
             // status write cannot be forgotten at one of them — which is how
@@ -3911,6 +3920,7 @@ async fn reconcile_backup_inner(
     verify: VerifyOracle<'_>,
     now: DateTime<Utc>,
     runner: &job::RunnerImage,
+    written: &mut Option<Backup>,
 ) -> Result<BackupOutcome, BackupError> {
     let name = backup.name_any();
     let namespace = backup
@@ -4304,6 +4314,8 @@ async fn reconcile_backup_inner(
             );
         }
 
+        // A refusal from here on is written by the caller over THIS object.
+        *written = Some(stored.clone());
         let desired_job = runner_job(backup, &cluster, &frozen, runner)?;
         let created = create_runner_job(&jobs, backup, &desired_job).await?;
         info!(
