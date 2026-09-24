@@ -2542,7 +2542,7 @@ fn recorded_consumption(approval: &Approval) -> Option<Consumption> {
     let subject = status.verified_subject_ref.clone()?;
     status.matched_key_id.as_ref()?;
     let consumed = current_condition(status.conditions.as_ref(), CONDITION_CONSUMED)?;
-    (consumed.status == "True").then(|| Consumption {
+    (consumed.status == "True").then_some(Consumption {
         subject,
         admitted_at: consumed.last_transition_time,
         reverified: None,
