@@ -1415,6 +1415,36 @@ PLAT-15.2's connect-an-existing-archive path and **this build creates no sync Jo
 for it**: such a catalog reports `Ready=False/LegacyArchiveUnsupported` and names
 the supported path (a `BackupDestination` with a read-only `archiveRead` grant).
 
+**Points from before the catalog are not in it until they are backfilled.**
+Both sync modes read the durable catalog's signed **records** under
+`logweir/catalog/v1/` — `Full` rescans every `points/<pointId>/record.json`,
+`Index` reads the day shards — and the sync Job is read-only by design, so it
+never writes the record a receipt is missing. A backup written by a release
+before the catalog existed (`v0.1.5` and earlier) has its signed receipt and no
+record, so a connected catalog neither counts nor offers it (no
+`unreadable`/`unsupported` count either: there is nothing it read). Its
+`Backup` object, where it still exists, is restorable as before
+(`#/restore?ns=<ns>&backup=<name>`, §21.8). To make such points part of the
+catalog — a disaster restore from an archive with no `Backup` objects needs
+exactly that — run the operator backfill once, from a workstation with a
+credential that may write under `logweir/catalog/v1/`:
+
+```bash
+logweir catalog sync --url s3://<bucket> [--endpoint <url> --region <r> --path-style --allow-http] \
+  --signing-key <record-signing-key.pem> --public-key <receipt-key.pub.pem> [--public-key …]
+```
+
+It writes a signed record, create-only, for every receipt that verifies under
+one of the `--public-key` values and nothing for any other; it is idempotent
+(point ids are derived from the receipt bytes), resumable with
+`--since <catalog-next>`, bounded by `--max`, and deletes nothing
+([formats/catalog-point.md](formats/catalog-point.md)). Then set
+`spec.syncRequest` on the `RecoveryCatalog` to a new value. Folding the
+backfill into the controller's sync was assessed and rejected for this build:
+it would give a read-only check Job a write grant and a signing key, or publish
+view rows backed by no signed record, and either widens what a `RecoveryCatalog`
+may do.
+
 ### 7d.1 Disaster restore: an archive, and no `Backup` object at all (PLAT-15.2)
 
 A recovery point is a signed receipt in object storage. A cluster that lost every
@@ -5876,6 +5906,51 @@ it that way. The consequence for operators is one line: after creating or
 rotating `logweir-evidence-ro`, **restart the Deployment** — container
 environment is fixed at start.
 
+### 15.1a Where an inline-archive run's evidence is read
+
+A run with no saved destination — a `Backup` with an inline `spec.archive`, a
+`Restore` with no `evidenceDestinationRef`, and every run an older release
+wrote — has exactly ONE evidence reader: the controller's archive handle, the
+read-only store `main` builds from `LOGWEIR_ARCHIVE_URL` with the controller's
+own credential (D2 §3.10: "the global handle serves legacy inline objects
+only"). The runner prints only bucket-relative keys, so **the run is verified
+exactly when its evidence is in that handle's bucket**:
+
+| run | where its evidence is | verified when |
+|---|---|---|
+| inline-archive `Backup` | its archive's own bucket, under `logweir/` (the receipt is written with the archive credential) | the archive URL's bucket is the handle's |
+| inline-archive `Restore` | wherever the approved plan's `evidence:` block says, written with the archive credential | the plan's `evidence.bucket` is the handle's |
+
+Backend and bucket are compared; the prefix is not (a handle over
+`s3://kafka-backups/logweir` reads `s3://kafka-backups/poc`'s receipts) and
+neither is the endpoint, which for the handle comes from the controller's own
+environment.
+
+- **Evidence in another bucket is not read.** The verdict is `NotAttempted`
+  with a detail naming both locations and the `logweir drill verify` route, and
+  a `Restore` gets no `completion` (it is written only beside `Valid`). Before
+  this build the key was looked up in the handle's bucket, where the document
+  never was: a `Backup` read `NotAttempted` with a store "not found" that looked
+  like a missing receipt, and a `Restore` published **no verification block and
+  no completion at all** — the PoC's `v0.1.5` point restored after the upgrade
+  with its evidence in `logweir-evidence` while the handle read `kafka-backups`.
+- **A scorecard the handle read nothing for is `NotAttempted`, named.** When the
+  runner printed both scorecard keys and the controller's read produced no
+  document — no handle configured, the object not in that bucket, or a
+  credential that cannot read it — the verdict names the key and the handle.
+  It is never `Invalid`, and there is no completion.
+- **The console writes such a plan's evidence to the archive's own bucket** —
+  the bucket the archive credential already wrote the point's receipt to, and on
+  the chart's default install the handle's — and its restore readiness check
+  publishes the advisory `destination.evidenceReadable` row when a plan names
+  any other bucket (§21.8). A hand-written plan for `kubectl apply` should do the
+  same.
+- **Upgrade and rollback.** Nothing is converted. A `Restore` that already
+  finished is terminal and is not re-verified, so a run restored before the
+  upgrade with its evidence elsewhere keeps its missing block; verify it with
+  the printed commands (the Restore's detail page fetches the scorecard from
+  the plan's evidence bucket). An older controller reads the wrong bucket again after a rollback.
+
 ### 15.2 The badge is two rules, one per kind
 
 Spec §8's green badge is not one rule, because "passed" is a different field on
@@ -7675,12 +7750,38 @@ readiness check holds the submit*).
 
 ### 21.8 What this build does not do
 
-- **An inline `legacyArchive` / `legacySourceArchive` is not checked.** Turning
-  an `s3://…` URL into the location a check plan needs is the legacy-addressing
-  block of the installation policy, which belongs to the destination resolver.
-  Such a request is reported `phase: Failed` with `ArchiveUrlUnreadable` and a
-  message saying to create a `BackupDestination` and use `destinationRef`. It
-  is never a verdict about the operation.
+- **A backup readiness check over an inline `legacyArchive` is not run.** It
+  would need the archive-WRITE principal a legacy `Backup` Job holds, which no
+  check exercises. Such a request is reported `phase: Failed` with
+  `ArchiveUrlUnreadable` and a message saying to create a `BackupDestination`
+  and use `destinationRef`. It is never a verdict about the operation.
+- **A restore readiness check over a recovery point with no saved destination
+  (`legacySourceArchive`, e.g. a point written by `v0.1.5`) reads the archive as
+  the restore Job will.** The check Job gets a `SecretKeys` grant over
+  `legacySourceArchive.secretRef` with the two keys a legacy restore Job
+  projects (`access-key-id`, `secret-access-key`), and the location of the
+  approved plan's `source.storage` — a region or endpoint the plan leaves out is
+  taken from the installation policy's `legacyArchiveAddressing`, the same
+  values the controller forwards to every legacy runner Job; `path_style` and
+  `allow_http` are the plan's. Transport is `InsecureHTTP` only for
+  `allow_http: true` with an explicit `http://` endpoint, and a custom endpoint
+  is path-style (§15.5's mapping). The `archive.*` rows are that Job's real
+  reads, scoped `InlineArchive/<url>`. It fails closed: a URL that is not
+  `s3://`, a request with no `secretRef`, a plan that does not parse or does not
+  read S3, or a location the destination rules refuse (an `http://` endpoint
+  with `allow_http: false`) is `destination.resolved notReady` and no Job runs.
+  `plan.bindings` holds the plan to the named inline archive and to the
+  recovery point's own `spec.archive.url` (`PlanDestinationMismatch`), and
+  `recoveryPoint.state` does not compare the point with a location derived from
+  its own plan. One advisory row, `destination.evidenceReadable`
+  (`EvidenceReadNotConfigured`), is published when the plan's `evidence:`
+  bucket is not the bucket of the controller's archive handle
+  (`LOGWEIR_ARCHIVE_URL`), or no handle is configured: the restore would run
+  and its verification would read `NotAttempted` with no completion (§15.1a).
+  It is absent — never green
+  — when the buckets match. A controller older than this build answers the same
+  request `Failed`/`ArchiveUrlUnreadable`; nothing in the `Preflight` object
+  changes shape.
 - **`recoveryPoint.state` compares the two locations, and this is what it
   answers.** A recovery point is only restorable from the destination it was
   written to. The point's frozen `locationDigest` (`Backup.status.destination`,

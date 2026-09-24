@@ -123,7 +123,7 @@ export const SYNC_MODES = Object.freeze(["full", "index"]);
  *
  *  It used to say that Full "walks the receipts and manifests in the bucket".
  *  It does not: both modes read the durable catalog's signed RECORDS under
- *  `logweir/catalog/v1/` (`docs/kubernetes.md` §7d), and the sync Job is
+ *  `logweir/catalog/v1/` (`docs/kubernetes.md` section 7d), and the sync Job is
  *  read-only by design, so it can never write the record a receipt is missing.
  *  A point written by a release before the catalog existed (`v0.1.5` and
  *  earlier) has a receipt and no record, and neither mode shows it until the

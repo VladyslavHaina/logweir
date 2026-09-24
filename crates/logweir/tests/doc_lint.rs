@@ -1619,9 +1619,9 @@ fn the_release_notes_carry_every_owed_operator_action() {
     let numbers: Vec<u32> = items.iter().map(|(n, _)| *n).collect();
     assert_eq!(
         numbers,
-        (1..=13).collect::<Vec<u32>>(),
-        "the release entry must carry exactly thirteen operator-facing changes, `#### 1.` to \
-         `#### 13.` in order; found {numbers:?}"
+        (1..=14).collect::<Vec<u32>>(),
+        "the release entry must carry exactly fourteen operator-facing changes, `#### 1.` to \
+         `#### 14.` in order; found {numbers:?}"
     );
 
     for ((number, body), (item, token)) in items.iter().zip([
@@ -1641,6 +1641,8 @@ fn the_release_notes_carry_every_owed_operator_action() {
         // readiness principals with the old-runner refusal.
         ("controller before runner", "roll the controller out before"),
         ("readiness principals", "CheckContractMismatch"),
+        // legacy-point-restore (2026-09-24): P3, P5 and P6 of the PoC round.
+        ("a point with no saved destination", "legacySourceArchive"),
     ]) {
         assert!(
             body.contains(token),
