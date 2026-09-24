@@ -68,6 +68,12 @@ OLD_COMMIT = os.environ.get(
 # The worker-rules ownership label, carried in addition to the run label.
 TEST_OWNER = os.environ.get("LOGWEIR_BACKEND_LIVE_TEST_OWNER", "")
 KUBECTL = ["kubectl", "--context", "docker-desktop"]
+# The execution contract version the current controller renders, READ from the
+# source under test rather than pinned (it moved 1 -> 2 after 2026-09-15).
+EXECUTION_CONTRACT_VERSION = __import__("re").search(
+    r'pub const VERSION: &str = "([0-9]+)";',
+    (ROOT / "crates/logweir-core/src/execution_contract.rs").read_text(),
+).group(1)
 K = KUBECTL + ["-n", NS]
 KF = KUBECTL + ["-n", FIXTURE_NS]
 DOCKER = ["docker", "--context", "desktop-linux"]
@@ -699,11 +705,43 @@ def fresh_backup() -> dict[str, Any]:
     verify_signed_document(receipt_path, signature_path, "backup-receipt")
     save_artifact("fresh-backup-job.json", job)
     STATE["backup_id"] = status["backupId"]
+    # Where the backup's records actually lie (`status.windowCovered`, from the
+    # signed receipt): the restore plans' sample window must overlap them.
+    STATE["backup_window_from_ms"] = (status.get("windowCovered") or {}).get("fromMs")
+    STATE["backup_window_to_ms"] = (status.get("windowCovered") or {}).get("toMs")
     STATE["backup_name"] = name
     STATE["cases"]["fresh_scram_backup"] = "passed"
     save_state()
     log("fresh current-runner backup passed with exact 100+100 receipt counts")
     return backup
+
+
+def sample_window_start(now: dt.datetime, covered_from_ms: Any) -> str:
+    """The sample window's start: a day back, or earlier when the backup's own
+    records are older (lab-refresh-10). The lab's seed records were produced on
+    2026-09-22 and the harness's fixed "last 24 h" window stopped overlapping
+    them a day later — every restore then failed `operational: no segment in
+    backup … overlaps the window`, a statement about the harness's clock and
+    not about the product. The window still ends at the point in time."""
+    start = now - dt.timedelta(days=1)
+    if isinstance(covered_from_ms, int):
+        start = min(start, dt.datetime.fromtimestamp(covered_from_ms / 1000, dt.timezone.utc))
+    return start.strftime("%Y-%m-%dT%H:%M:%S.") + f"{start.microsecond // 1000:03d}Z"
+
+
+def rpo_objective_seconds(now: dt.datetime, covered_to_ms: Any) -> int:
+    """The plan's RPO objective: a day, or the age of the backup's newest
+    record plus an hour when that is older (lab-refresh-10). The measured RPO
+    is the age of the newest restored record; with the lab's seed records from
+    2026-09-22 it measured 98206 s against the fixed 86400 and every restore
+    ended `fail-objective` — the product enforcing the objective correctly
+    (a live control of that gate), against an objective written for fresh
+    data. The objective follows the fixture's data, never the measurement."""
+    objective = 86400
+    if isinstance(covered_to_ms, int):
+        age = int(now.timestamp() - covered_to_ms / 1000)
+        objective = max(objective, age + 3600)
+    return objective
 
 
 def restore_plan(prefix: str, point_in_time: str) -> str:
@@ -717,8 +755,8 @@ def restore_plan(prefix: str, point_in_time: str) -> str:
         "path_style": True,
         "allow_http": True,
     }
-    start = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=1)).strftime(
-        "%Y-%m-%dT%H:%M:%SZ"
+    start = sample_window_start(
+        dt.datetime.now(dt.timezone.utc), STATE.get("backup_window_from_ms")
     )
     plan = {
         "source": {
@@ -745,7 +783,10 @@ def restore_plan(prefix: str, point_in_time: str) -> str:
             "records_per_partition": 25,
             "anchor": "head",
         },
-        "objectives": {"rto_seconds": 3600, "rpo_seconds": 86400, "pass_rate": 1.0},
+        "objectives": {"rto_seconds": 3600,
+                       "rpo_seconds": rpo_objective_seconds(
+                           dt.datetime.now(dt.timezone.utc), STATE.get("backup_window_to_ms")),
+                       "pass_rate": 1.0},
         "evidence": {**storage, "prefix": "logweir/"},
         "notifications": {"webhooks": []},
     }
@@ -1097,7 +1138,41 @@ def set_controller_images(controller_image: str, runner_image: str) -> None:
         raise RuntimeError(f"controller switch did not converge: {current!r}")
 
 
+#: The controller's exec probes (chart gap G5, `weirkeeper --probe live|ready`).
+#: A controller image that predates G5 has no `--probe`, so under the lab's
+#: probes its pod is never Ready and is restarted by liveness: "chart and
+#: images move together" (release notes). The OLD controller therefore runs
+#: WITHOUT them, and every switch back to another image puts back exactly the
+#: probes the lab Deployment had when this run recorded it.
+PROBE_FIELDS = ("livenessProbe", "readinessProbe")
+
+
+def probe_patch(
+    container: dict[str, Any], controller_image: str, original_probes: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """JSON-patch operations that make container 0's probes right for the image."""
+    base = "/spec/template/spec/containers/0/"
+    if controller_image == OLD_CONTROLLER:
+        return [{"op": "remove", "path": base + field}
+                for field in PROBE_FIELDS if field in container]
+    return [{"op": "add", "path": base + field, "value": value}
+            for field, value in original_probes.items() if container.get(field) != value]
+
+
+def original_probes() -> dict[str, Any]:
+    original = STATE.get(LAB_ORIGINAL) or {}
+    containers = original.get("containers") or [{}]
+    return {field: containers[0][field] for field in PROBE_FIELDS if field in containers[0]}
+
+
 def configure_controller_images(controller_image: str, runner_image: str) -> None:
+    patch = probe_patch(
+        controller_deployment()["spec"]["template"]["spec"]["containers"][0],
+        controller_image,
+        original_probes(),
+    )
+    if patch:
+        run(KF + ["patch", "deployment", "weirkeeper", "--type=json", "-p", json.dumps(patch)])
     run(
         KF
         + [
@@ -2827,12 +2902,14 @@ def verify_restore(
     if container["image"] != CURRENT_RUNNER:
         raise RuntimeError(f"restore used stale image {container['image']}")
     args = container["args"]
-    if args[:4] != ["restore", "run", "--execution-contract-version", "1"]:
+    # The CURRENT contract version (`logweir_core::execution_contract::VERSION`,
+    # "2" since the standing-authorization contract; this harness pinned "1").
+    if args[:4] != ["restore", "run", "--execution-contract-version", EXECUTION_CONTRACT_VERSION]:
         raise RuntimeError(f"mandatory execution handshake missing: {args[:6]!r}")
     env = {entry["name"]: entry for entry in container["env"]}
     approval = get("approval", restore["spec"]["approvalRef"]["name"])
     expected_contract = {
-        "LOGWEIR_EXECUTION_CONTRACT_VERSION": "1",
+        "LOGWEIR_EXECUTION_CONTRACT_VERSION": EXECUTION_CONTRACT_VERSION,
         "LOGWEIR_EXECUTION_SUBJECT_API_VERSION": "logweir.dev/v1alpha1",
         "LOGWEIR_EXECUTION_SUBJECT_KIND": "Restore",
         "LOGWEIR_EXECUTION_SUBJECT_NAME": name,
@@ -4269,6 +4346,29 @@ def gate_probe() -> None:
 
 def harness_selftest() -> None:
     """Bounded local controls proving the harness can fail; no cluster access."""
+    now = dt.datetime(2026, 9, 24, 3, 0, 0, tzinfo=dt.timezone.utc)
+    seed = 1790120729256  # lab-refresh-10's fresh backup windowCovered.fromMs (2026-09-22)
+    if rpo_objective_seconds(now, None) != 86400 or rpo_objective_seconds(now, 1790218800000) != 86400:
+        raise RuntimeError("fresh records must keep the one-day RPO objective")
+    if rpo_objective_seconds(now, 1790120742564) != 98057 + 3600:
+        raise RuntimeError("the RPO objective does not follow the backup's newest record")
+    if sample_window_start(now, seed) != "2026-09-22T23:45:29.256Z":
+        raise RuntimeError("the sample window does not reach back to the backup's own records")
+    if sample_window_start(now, None) != "2026-09-23T03:00:00.000Z":
+        raise RuntimeError("without a covered window the sample window is not the last day")
+    if sample_window_start(now, 1790218800000) != "2026-09-23T03:00:00.000Z":
+        raise RuntimeError("fresh records must keep the one-day window")
+    probes = {"livenessProbe": {"exec": {"command": ["/usr/local/bin/weirkeeper", "--probe", "live"]}},
+              "readinessProbe": {"exec": {"command": ["/usr/local/bin/weirkeeper", "--probe", "ready"]}}}
+    if [op["op"] for op in probe_patch(dict(probes), OLD_CONTROLLER, probes)] != ["remove", "remove"]:
+        raise RuntimeError("the old controller would keep probes its binary cannot answer")
+    if probe_patch({}, CURRENT_CONTROLLER, probes) != [
+        {"op": "add", "path": "/spec/template/spec/containers/0/" + k, "value": v}
+        for k, v in probes.items()
+    ]:
+        raise RuntimeError("a switch back would not restore the recorded probes")
+    if probe_patch(dict(probes), CURRENT_CONTROLLER, probes) != []:
+        raise RuntimeError("an unchanged current controller would be patched")
     empty = subprocess.CompletedProcess(["kubectl"], 0, "", "")
     if optional_json_from_result(empty, description="NotFound control") is not None:
         raise RuntimeError("empty exit-0 optional get did not classify as absent")

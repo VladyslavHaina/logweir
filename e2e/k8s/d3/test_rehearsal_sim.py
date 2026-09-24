@@ -86,6 +86,10 @@ class FakeCluster:
         self.last_reconcile: dict[str, float] = {}
         self.runs: dict[str, dict[str, Any]] = {}
         self.target_busy_seen: list[str] = []
+        # The scratch broker's own log (lab-refresh-10's step 6 reads it) and
+        # the schedule watches step 5 opens (`d3.StatusWatch`).
+        self.broker_log: list[str] = []
+        self.watches: list["FakeStatusWatch"] = []
 
     # --- the clock ------------------------------------------------------
     def time(self) -> float:
@@ -194,6 +198,8 @@ class FakeCluster:
             if self.now - self.last_reconcile.get(name, -1e18) >= d3.REHEARSAL_REQUEUE_SECONDS:
                 self.last_reconcile[name] = self.now
                 self.reconcile(self.objs["rehearsalschedule"][name])
+        for watch in self.watches:
+            watch.observe()
 
     def reconcile(self, schedule: dict[str, Any]) -> None:
         spec, status = schedule["spec"], schedule["status"]
@@ -207,7 +213,8 @@ class FakeCluster:
             st = active["status"]
             if st.get("phase") == "Succeeded":
                 status["lastSucceeded"] = {"restoreRef": {"name": active_name},
-                                           "at": self.stamp(), "evidence": "Valid",
+                                           "at": self.stamp(),
+                                           "evidence": (st.get("evidence") or {}).get("scorecardKey"),
                                            "rtoSeconds": self.rehearsal_seconds}
                 set_condition(schedule, "RehearsalHealthy", "True", "Passed")
             else:
@@ -312,6 +319,8 @@ class FakeCluster:
             restore["guardRefused"] = mapped in self.topics
             if not restore["guardRefused"]:
                 self.topics.add(mapped)
+                self.broker_log.append(f"[{self.stamp()}] INFO Created log for partition "
+                                       f"{mapped}-0 in /tmp/kraft/{mapped}-0 with properties {{}}")
             return
         if d3.terminal(restore):
             return
@@ -322,6 +331,9 @@ class FakeCluster:
             self.last_reconcile.pop(schedule, None)
         elif not restore["guardRefused"] and self.now >= restore["startedAt"] + self.rehearsal_seconds:
             self.topics.discard(mapped)
+            self.broker_log.append(f"[{self.stamp()}] INFO Log for partition {mapped}-0 is renamed "
+                                   f"to /tmp/kraft/{mapped}-0.x-delete and is scheduled for "
+                                   f"deletion")
             run_id = f"run-{name}"
             self.runs[f"logweir/drills/{run_id}.json"] = {
                 "run_id": run_id, "triggered_by": f"rehearsal/{schedule}/{slot}",
@@ -330,8 +342,35 @@ class FakeCluster:
                            "evidence": {"scorecardKey": f"logweir/drills/{run_id}.json",
                                         "offsetReportKey": f"logweir/drills/{run_id}.offsets.json",
                                         "verification": {"result": "Valid"}}})
+            for kind in ("Complete", "Verified"):
+                status.setdefault("conditions", []).append(
+                    {"type": kind, "status": "True", "lastTransitionTime": self.stamp()})
             self.objs["job"][name]["finishedAt"] = self.now
             self.last_reconcile.pop(schedule, None)  # `.owns(restores)` wakes the schedule
+
+
+class FakeStatusWatch:
+    """`d3.StatusWatch` over the fake cluster: every change of the schedule's
+    status, sampled on each fake-clock tick."""
+
+    def __init__(self, cluster: "FakeCluster", kind: str, name: str, seconds: int = 0) -> None:
+        self.cluster, self.kind, self.name = cluster, KINDS[kind], name
+        self.statuses: list[dict[str, Any]] = []
+        self.times: list[str] = []
+        cluster.watches.append(self)
+        self.observe()
+
+    def observe(self) -> None:
+        obj = self.cluster.objs[self.kind].get(self.name)
+        status = copy.deepcopy((obj or {}).get("status") or {})
+        if not self.statuses or self.statuses[-1] != status:
+            self.statuses.append(status)
+            self.times.append(self.cluster.stamp())
+
+    def stop(self) -> list[dict[str, Any]]:
+        if self in self.cluster.watches:
+            self.cluster.watches.remove(self)
+        return list(self.statuses)
 
 
 def merge(into: dict[str, Any], patch: dict[str, Any]) -> None:
@@ -381,6 +420,8 @@ def simulate(cluster: FakeCluster, **extra_patches: Any) -> dict[str, str]:
         "mint_standing": lambda *a, **k: ("envelope", "sidecar"),
         "cat": lambda bucket, key: json.dumps(cluster.runs.get(key, {})).encode(),
         "fetchable": lambda bucket, key: bool(key),
+        "StatusWatch": lambda kind, name, seconds=3600: FakeStatusWatch(cluster, kind, name),
+        "broker_log_since": lambda since: "\n".join(cluster.broker_log),
         **extra_patches,
     }
     saved = {name: getattr(d3, name) for name in patches}

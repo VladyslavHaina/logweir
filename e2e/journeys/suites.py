@@ -72,14 +72,20 @@ def _newest(root: pathlib.Path, pattern: str) -> pathlib.Path | None:
     return found[-1] if found else None
 
 
-def cases_adapter(markers: dict[str, str]) -> Callable[[Ctx, dict[str, int]], dict[str, str]]:
+def cases_adapter(
+    markers: dict[str, str | tuple[str, ...]]
+) -> Callable[[Ctx, dict[str, int]], dict[str, str]]:
     """plat06/plat07: a case is PASS only if its PROCESS exited 0 — each case
-    raises on its first failed assertion — AND the key it writes last is in
-    `state.json`, so a phase that exited 0 without running is not a pass."""
+    raises on its first failed assertion — AND the key(s) it writes last are in
+    `state.json`, so a phase that exited 0 without running is not a pass. A
+    tuple needs EVERY key (plat06 case-e writes one per arm since RECEIPT-DUP)."""
 
     def adapt(ctx: Ctx, rcs: dict[str, int], suite: str) -> dict[str, str]:
         cases = _json(ctx.out(suite) / "state.json").get("cases") or {}
-        return {phase: PASS if rcs.get(phase) == 0 and marker in cases else "FAIL"
+        def written(marker: str | tuple[str, ...]) -> bool:
+            keys = (marker,) if isinstance(marker, str) else marker
+            return bool(keys) and all(k in cases for k in keys)
+        return {phase: PASS if rcs.get(phase) == 0 and written(marker) else "FAIL"
                 for phase, marker in markers.items() if phase in rcs}
 
     return adapt
@@ -87,7 +93,11 @@ def cases_adapter(markers: dict[str, str]) -> Callable[[Ctx, dict[str, int]], di
 
 def _plat06_adapter(ctx: Ctx, rcs: dict[str, int]) -> dict[str, str]:
     return cases_adapter({"case-a": "case-a-idempotence", "case-c": "case-c-detail",
-                          "case-e": "case-e-detail", "case-g": "case-g-detail"})(ctx, rcs, "plat06")
+                          # RECEIPT-DUP: case-e runs two arms and records each
+                          # (`case-e-claimed`, `case-e-unclaimed`); the old
+                          # `case-e-detail` is no longer written.
+                          "case-e": ("case-e-claimed", "case-e-unclaimed"),
+                          "case-g": "case-g-detail"})(ctx, rcs, "plat06")
 
 
 def _plat07_adapter(ctx: Ctx, rcs: dict[str, int]) -> dict[str, str]:

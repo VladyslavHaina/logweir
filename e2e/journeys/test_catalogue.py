@@ -187,6 +187,20 @@ def test_cases_adapter_needs_both_a_clean_exit_and_the_final_marker(tmp_path):
     assert rows == {"case-a": PASS, "case-c": FAIL, "case-e": FAIL}
 
 
+def test_plat06_case_e_needs_both_arms_recorded(tmp_path):
+    """RECEIPT-DUP: case-e is PASS only with both arms' keys (lab-refresh-10:
+    the adapter still looked for `case-e-detail` and failed a passing case-e)."""
+    c = ctx(tmp_path)
+    write(tmp_path, "plat06", "state.json",
+          {"cases": {"case-e-claimed": {}, "case-e-unclaimed": {}}})
+    assert suites.SUITES["plat06"].adapter(c, {"case-e": 0}) == {"case-e": PASS}
+    write(tmp_path, "plat06", "state.json", {"cases": {"case-e-unclaimed": {}}})
+    assert suites.SUITES["plat06"].adapter(c, {"case-e": 0}) == {"case-e": FAIL}
+    # PLANTED: the pre-RECEIPT-DUP marker alone is not the current case.
+    write(tmp_path, "plat06", "state.json", {"cases": {"case-e-detail": {}}})
+    assert suites.SUITES["plat06"].adapter(c, {"case-e": 0}) == {"case-e": FAIL}
+
+
 def test_d1_adapter_passes_only_pass(tmp_path):
     write(tmp_path, "d1", "results.json", {"scenarios": {"L-09-1": {"status": "pass"},
                                                          "L-09-2": {"status": "partial"},

@@ -7804,8 +7804,9 @@ def the_scorecard_names_the_schedule_and_the_slot(
     }
 
 
-def the_schedule_records_the_pass(schedule: dict[str, Any],
-                                  restore_name: str) -> dict[str, bool]:
+def the_schedule_records_the_pass(schedule: dict[str, Any], restore_name: str,
+                                  scorecard_key: str, verified_at: str | None,
+                                  watched: list[dict[str, Any]] | None) -> dict[str, bool]:
     """Review §4 step 5: `status.lastSucceeded` with `restoreRef`, `at`,
     `evidence` and `rtoSeconds`; `RehearsalHealthy=True/Passed`;
     `activeRestoreRef` cleared.
@@ -7814,15 +7815,29 @@ def the_schedule_records_the_pass(schedule: dict[str, Any],
     answer the concurrency question, and a schedule that never released it
     would skip every subsequent slot with `ConcurrencyBlocked` for a rehearsal
     that finished.
+
+    DECIDED ON THE REACHED VERDICT (rehearsal-fix, lab-refresh-10). On
+    lab-refresh-9 the schedule recorded a PASSING rehearsal as
+    `lastFailed {reason: ok}` 0.15 s after the terminal patch, eleven seconds
+    before its verdict landed (REHEARSAL-PASS-RECORDED-AS-FAILED). So:
+    `lastSucceeded.evidence` is exactly the rehearsal's signed scorecard KEY
+    (`docs/kubernetes.md`; the CRD's `RehearsalSuccess.evidence`), not merely
+    truthy; `lastSucceeded.at` is not before the Restore's `Verified`
+    transition (the schedule waited for the verdict); and NO status write the
+    schedule made while the rehearsal ran — every one, from a `kubectl get -w`
+    begun before the run went terminal — named it in `lastFailed`.
     """
     status = schedule.get("status") or {}
     last = status.get("lastSucceeded") or {}
     healthy = condition(schedule, "RehearsalHealthy")
+    at = parse_rfc3339(last.get("at"))
+    verified = parse_rfc3339(verified_at)
     return {
         "status.lastSucceeded.restoreRef names the rehearsal that ran":
             (last.get("restoreRef") or {}).get("name") == restore_name,
         "status.lastSucceeded.at is recorded": bool(last.get("at")),
-        "status.lastSucceeded.evidence carries the verdict": bool(last.get("evidence")),
+        "status.lastSucceeded.evidence is the rehearsal's signed scorecard key":
+            bool(scorecard_key) and last.get("evidence") == scorecard_key,
         "status.lastSucceeded.rtoSeconds is the measured recovery time":
             isinstance(last.get("rtoSeconds"), int),
         "RehearsalHealthy is True with reason Passed": (
@@ -7830,6 +7845,114 @@ def the_schedule_records_the_pass(schedule: dict[str, Any],
         ),
         "and status.activeRestoreRef is cleared":
             not (status.get("activeRestoreRef") or {}).get("name"),
+        "lastSucceeded.at is not before the Restore's Verified transition (it waited for "
+        "the verdict)":
+            at is not None and verified is not None and at >= verified,
+        "no status write of the schedule, watched throughout, named it in lastFailed":
+            bool(watched) and not any(
+                (((w or {}).get("lastFailed") or {}).get("restoreRef") or {}).get("name")
+                == restore_name for w in watched),
+    }
+
+
+def parse_rfc3339(value: Any) -> dt.datetime | None:
+    """An RFC 3339 instant as an aware datetime, or None. Kubernetes writes
+    whole seconds (`...Z`); fractional seconds are accepted too."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+class StatusWatch:
+    """Every status one object carried while watched: `kubectl get -w -o json`
+    in the background, decoded object by object. It sees each write the API
+    server serves, which a poll between two writes can miss (lab-refresh-9's
+    wrong `lastFailed` landed 0.15 s after the terminal patch). Bounded by
+    `/tmp/lwtimeout` and stopped in the caller's `finally`."""
+
+    def __init__(self, kind: str, name: str, seconds: int = 3600) -> None:
+        self.statuses: list[dict[str, Any]] = []
+        self.times: list[str] = []
+        self.proc = subprocess.Popen(
+            ["/tmp/lwtimeout", str(seconds)] + KN + ["get", kind, name, "-w", "-o", "json"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, cwd=ROOT)
+        self.thread = threading.Thread(target=self._read, daemon=True)
+        self.thread.start()
+
+    def _read(self) -> None:
+        decoder = json.JSONDecoder()
+        buf = ""
+        assert self.proc.stdout is not None
+        for line in self.proc.stdout:
+            buf += line
+            while True:
+                stripped = buf.lstrip()
+                if not stripped:
+                    buf = ""
+                    break
+                try:
+                    obj, end = decoder.raw_decode(stripped)
+                except ValueError:
+                    break
+                buf = stripped[end:]
+                self.statuses.append((obj or {}).get("status") or {})
+                self.times.append(dt.datetime.now(dt.timezone.utc).isoformat())
+
+    def stop(self) -> list[dict[str, Any]]:
+        if self.proc.poll() is None:
+            self.proc.terminate()
+        try:
+            self.proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+        self.thread.join(timeout=10)
+        return list(self.statuses)
+
+
+BROKER_CREATED = re.compile(r"^\[([^\]]+)\].*Created log for partition (\S+)-(\d+) in ")
+BROKER_DELETED = re.compile(
+    r"^\[([^\]]+)\].*Log for partition (\S+)-(\d+) is renamed to \S+-delete and is "
+    r"scheduled for deletion")
+
+
+def broker_topic_lifecycle(log_text: str, prefix: str) -> dict[str, dict[str, str]]:
+    """What the scratch broker's OWN log says about topics under `prefix`: the
+    instant each partition's log was created and the instant it was scheduled
+    for deletion, keyed by topic.
+
+    WHY THE BROKER'S LOG (lab-refresh-10). A rehearsal's mapped topic now lives
+    under a second (measured: created 01:50:20.515, scheduled for deletion
+    01:50:21.451), and one `kafka-topics.sh --list` through `kubectl exec`
+    takes several seconds, so even a back-to-back sampler can miss it
+    entirely — which it did, and the row blamed the product for a topic the
+    broker had created and deleted. The broker logs both events itself; read
+    from the lab's `kafka-target` Deployment (a read, never a write)."""
+    out: dict[str, dict[str, str]] = {}
+    for line in log_text.splitlines():
+        for kind, pattern in (("created", BROKER_CREATED), ("deleted", BROKER_DELETED)):
+            match = pattern.search(line)
+            if match and match.group(2).startswith(prefix):
+                out.setdefault(match.group(2), {}).setdefault(kind, match.group(1))
+    return out
+
+
+def broker_log_since(since: str) -> str:
+    return run(K + ["-n", FIXTURE_NS, "logs", f"deploy/{TARGET_DEPLOY}", f"--since-time={since}"],
+               check=False, timeout=120).stdout
+
+
+def the_broker_created_and_deleted_exactly_the_mapped_topics(
+    lifecycle: dict[str, dict[str, str]], mapped: set[str]
+) -> dict[str, bool]:
+    return {
+        "the broker's own log records the creation of every mapped topic":
+            bool(mapped) and all("created" in lifecycle.get(t, {}) for t in mapped),
+        "and its deletion by teardown": bool(mapped)
+            and all("deleted" in lifecycle.get(t, {}) for t in mapped),
+        "and no other topic under the rendered prefix": set(lifecycle) <= mapped,
     }
 
 
@@ -8775,6 +8898,9 @@ def rehearsal() -> None:
 
             sampler = threading.Thread(target=sample, daemon=True)
             sampler.start()
+            # step 5 watches EVERY status write of the schedule from here on:
+            # the defect's wrong `lastFailed` lived in one write.
+            schedule_watch = StatusWatch("rehearsalschedule", REHEARSAL_SCHEDULE)
 
             def watch(obj: dict[str, Any]) -> bool:
                 if not facts.get("complete"):
@@ -8811,6 +8937,7 @@ def rehearsal() -> None:
                 or bool(((o.get("status") or {}).get("lastFailed") or {}).get("at")),
                 seconds=420,
             )
+            watched = schedule_watch.stop()
             quiet = quiesce_arm(REHEARSAL_SCHEDULE, evidence)
             # A SECOND SLOT OF THE TEN-MINUTE SCHEDULE. It can fire in the same
             # reconcile that observes the first as finished (a slot that came
@@ -8878,10 +9005,25 @@ def rehearsal() -> None:
                 evidence,
             )
 
-            # step 5 — `rehearsalLast*` on the schedule
-            last = the_schedule_records_the_pass(after_schedule, first_name)
+            # step 5 — `rehearsalLast*` on the schedule, decided on the verdict
+            complete_at = condition(final, "Complete").get("lastTransitionTime")
+            verified_at = condition(final, "Verified").get("lastTransitionTime") \
+                if condition(final, "Verified").get("status") == "True" else None
+            last = the_schedule_records_the_pass(after_schedule, first_name, scorecard_key,
+                                                 verified_at, watched)
             evidence.append(artifact("rehearsal/05-schedule-status.json",
                                      {"status": after_schedule.get("status"),
+                                      "timeline": {
+                                          "restoreComplete": complete_at,
+                                          "restoreVerified": verified_at,
+                                          "scheduleLastSucceededAt": ((after_schedule.get(
+                                              "status") or {}).get("lastSucceeded") or {})
+                                          .get("at")},
+                                      "watchedStatusWrites": [
+                                          {"seen": t, "lastSucceeded": w.get("lastSucceeded"),
+                                           "lastFailed": w.get("lastFailed"),
+                                           "activeRestoreRef": w.get("activeRestoreRef")}
+                                          for t, w in zip(schedule_watch.times, watched)],
                                       "extraRehearsals": extra, "clauses": last}))
             if extra:
                 record("rehearsal-5-schedule-records-the-pass", "PLAT-14.3", "HARNESS-FAULT",
@@ -8910,11 +9052,21 @@ def rehearsal() -> None:
             after_topics = target_topics()
             prefix = rendered_prefix(schedule_uid)
             mapped = {mapped_topic(schedule_uid, REHEARSAL_TOPIC)}
+            # The broker's own record of the run's topics, from the Restore's
+            # creation on: "during" is what the sampler saw OR what the broker
+            # says existed (a sub-second topic slips between two listings).
+            lifecycle = broker_topic_lifecycle(
+                broker_log_since(restore["metadata"]["creationTimestamp"]), prefix)
+            sampled = set(during)
+            during = sampled | set(lifecycle)
             topics = the_target_holds_exactly_the_mapped_topics(
                 during, after_topics, mapped, prefix, witness)
+            topics.update(the_broker_created_and_deleted_exactly_the_mapped_topics(
+                lifecycle, mapped))
             evidence.append(artifact("rehearsal/06-topics.json", {
                 "prefix": prefix, "mapped": sorted(mapped), "witness": witness,
-                "during": sorted(during), "after": sorted(after_topics),
+                "during": sorted(during), "sampled": sorted(sampled),
+                "brokerLog": lifecycle, "after": sorted(after_topics),
                 "extraRehearsals": extra, "clauses": topics,
             }))
             if extra:
@@ -11532,6 +11684,18 @@ def failed_verification_is_a_failed_rehearsal(restore: dict[str, Any],
     code — otherwise the verification never ran and the row is NOT-REACHED
     (on `f49849d`, REHEARSAL-PLAN-AUTH-PLAINTEXT refuses admission with
     `ConnectionPlanMismatch` first).
+
+    THE SIGNED FAILURE IS PUBLISHED (rehearsal-fix; interface I8 amended for
+    exit 2; lab-refresh-10). On lab-refresh-9 the exit-2 runner signed and put
+    its scorecard, sidecar and offset report but printed no key line, so the
+    Restore carried no `status.evidence`, no verdict and no `outcome`
+    (FAILED-DRILL-EVIDENCE-UNPUBLISHED). Now the Restore names all three keys
+    and raises `EvidenceRecorded=True`; its verdict is `Valid` and still NOT
+    green (`Verified` never True over a non-zero exit); it publishes no
+    `status.completion` (review MEDIUM-1: no cutover guidance over a failed
+    restore); and the schedule's `lastFailed.reason` is the VERIFIED signed
+    outcome, `fail-integrity` (`docs/kubernetes.md`, the rehearsal decision
+    rule), not the exit's own reason.
     """
     st = (restore or {}).get("status") or {}
     sst = (schedule or {}).get("status") or {}
@@ -11551,8 +11715,19 @@ def failed_verification_is_a_failed_rehearsal(restore: dict[str, Any],
             and st.get("outcome") == "fail-integrity",
         "the failure is signed evidence that verifies (Valid)":
             ((st.get("evidence") or {}).get("verification") or {}).get("result") == "Valid",
+        "status.evidence names the signed scorecard, sidecar and offset-report keys":
+            all(bool((st.get("evidence") or {}).get(k))
+                for k in ("scorecardKey", "sidecarKey", "offsetReportKey")),
+        "EvidenceRecorded=True": condition(restore or {}, "EvidenceRecorded").get("status")
+            == "True",
+        "the verified failure is never green (Verified is not True)":
+            condition(restore or {}, "Verified").get("status") != "True",
+        "no status.completion is published for the failed restore":
+            "completion" not in st,
         "the schedule records it in lastFailed": ((sst.get("lastFailed") or {}).get("restoreRef")
                                                   or {}).get("name") == name and bool(name),
+        "lastFailed.reason is the verified signed outcome fail-integrity":
+            (sst.get("lastFailed") or {}).get("reason") == "fail-integrity",
         "and never as lastSucceeded": ((sst.get("lastSucceeded") or {}).get("restoreRef")
                                        or {}).get("name") != name,
         "RehearsalHealthy=False/Failed":
@@ -11709,6 +11884,20 @@ def rehearsal_faults() -> None:
             if first is not None:
                 name = first["metadata"]["name"]
                 restore = poll(lambda: get_opt("restore", name), terminal, seconds=1500)
+                # THE VERDICT, NOT THE PHASE (lab-refresh-10): since interface
+                # I8's amendment an exit-2 run publishes its keys, and its
+                # `outcome` and verification arrive with the evidence fetch,
+                # seconds AFTER the terminal patch. Read at the terminal instant
+                # the Restore showed `outcome: None` and no verdict; six seconds
+                # later it was `fail-integrity`/`Valid`. Read once the verdict is
+                # reached, as step 4 does; a verdict that never arrives is read
+                # as it stands and fails the row by name.
+                restore = settle("restore", name,
+                                 lambda o: (((o.get("status") or {}).get("evidence") or {})
+                                            .get("verification") or {}).get("result")
+                                 not in (None, "Pending"),
+                                 seconds=420, what="the failed rehearsal's evidence verdict") \
+                    or get_opt("restore", name) or restore
                 schedule_after = poll(
                     lambda: get_opt("rehearsalschedule", REHEARSAL_VERIFY_SCHEDULE),
                     lambda o: ((o.get("status") or {}).get("lastFailed") or {})
@@ -11768,6 +11957,165 @@ def rehearsal_faults() -> None:
                   f"{len(minted)} minted approver key(s) and the work directory are gone",
                   evidence)
 
+
+
+# ---------------------------------------------------------------------------
+# lab-refresh-10 — PLAT-14.3: a rehearsal Restore deleted while its verdict is
+# owed (rehearsal-fix review LOW-2, `REASON_RESTORE_DELETED`)
+# ---------------------------------------------------------------------------
+
+REHEARSAL_DELETED_SCHEDULE = "l6-deleted"
+REHEARSAL_DELETED_POINT_SCHEDULE = "l6d-points"
+REHEARSAL_DELETED_CATALOG = "l6d-cat"
+REHEARSAL_DELETED_POINT = "l6d-point"
+REHEARSAL_DELETED_ROW = "rehearsal-restore-deleted-while-its-verdict-is-owed-is-a-failure"
+
+
+def verdict_is_owed(restore: dict[str, Any]) -> bool:
+    """Terminal, and the evidence verdict not reached yet: no verification
+    block, or `Pending` (`rehearsal_schedule.rs::verdict_owed`'s first and
+    third arms — the window the defect's fix waits through)."""
+    if not terminal(restore):
+        return False
+    result = (((restore.get("status") or {}).get("evidence") or {})
+              .get("verification") or {}).get("result")
+    return result in (None, "Pending")
+
+
+def deleted_rehearsal_is_recorded(name: str, watched: list[dict[str, Any]],
+                                  deleted_while_owed: bool) -> tuple[str, dict[str, bool]]:
+    """The schedule records the deleted rehearsal as a failure and releases it.
+
+    Judged over EVERY status write the schedule made (a watch), because a fast
+    schedule fires its next slot right after the release and a single read
+    could see only the next rehearsal's reservation."""
+    premise = {"the rehearsal Restore was deleted while its verdict was owed":
+               deleted_while_owed}
+    recorded = [w for w in watched
+                if (((w.get("lastFailed") or {}).get("restoreRef") or {}).get("name") == name)]
+    first = recorded[0] if recorded else {}
+    clauses = {
+        "a status write records it in lastFailed": bool(recorded),
+        "with reason RestoreDeleted": (first.get("lastFailed") or {}).get("reason")
+        == "RestoreDeleted",
+        "and that write releases activeRestoreRef (no longer names it)":
+            bool(recorded) and ((first.get("activeRestoreRef") or {}).get("name") != name),
+        "RehearsalHealthy=False/Failed in that write": any(
+            c.get("type") == "RehearsalHealthy" and c.get("status") == "False"
+            and c.get("reason") == "Failed" for c in first.get("conditions") or []),
+        "no write ever records it as lastSucceeded": not any(
+            (((w.get("lastSucceeded") or {}).get("restoreRef") or {}).get("name") == name)
+            for w in watched),
+    }
+    if not all(premise.values()):
+        return "NOT-REACHED", {**premise, **clauses}
+    return ("PASS" if all(clauses.values()) else "FAIL"), {**premise, **clauses}
+
+
+def rehearsal_deleted() -> None:
+    """PLAT-14.3 / rehearsal-fix LOW-2 live. CLUSTER LOCK (it rebuilds this
+    namespace's TrustPolicy, as `rehearsal` does). A one-minute arm; each of
+    its rehearsals is watched every 0.2 s and deleted the moment it is terminal
+    with its verdict still owed. A run whose verdict landed first is not the
+    case and the next slot is tried (at most four)."""
+    evidence: list[str] = []
+    arms: dict[str, str] = {}
+    work: pathlib.Path | None = None
+    approver_key: dict[str, Any] | None = None
+    retired_key: dict[str, Any] | None = None
+    watch: StatusWatch | None = None
+    try:
+        work = pathlib.Path(tempfile.mkdtemp(prefix=f"{OWNER}-l6d-", dir="/tmp"))
+        work.chmod(0o700)
+        approver_key = mint_signing_key(f"{OWNER}-l6d-approver")
+        retired_key = mint_signing_key(f"{OWNER}-l6d-retired")
+        target_cluster_id = rehearsal_target_cluster()["status"]["clusterId"]
+        rehearsal_trust(target_cluster_id, approver_key, retired_key)
+        rehearsal_point(REHEARSAL_DELETED_POINT_SCHEDULE, REHEARSAL_DELETED_CATALOG,
+                        REHEARSAL_DELETED_POINT)
+        point_spec = rehearsal_point_spec(REHEARSAL_DELETED_POINT_SCHEDULE,
+                                          REHEARSAL_DELETED_CATALOG)
+        rehearsal_arm(REHEARSAL_DELETED_SCHEDULE, cron=REHEARSAL_FAST_CRON,
+                      key=approver_key["private"], work=work,
+                      target_cluster_id=target_cluster_id, arms=arms, point=point_spec)
+        watch = StatusWatch("rehearsalschedule", REHEARSAL_DELETED_SCHEDULE, seconds=2400)
+        unsuspend("rehearsalschedule", REHEARSAL_DELETED_SCHEDULE)
+        attempts: list[dict[str, Any]] = []
+        tried: set[str] = set()
+        deleted: str | None = None
+        deadline = time.time() + 1500
+        while time.time() < deadline and deleted is None and len(attempts) < 4:
+            fresh = [r for r in rehearsal_restores(REHEARSAL_DELETED_SCHEDULE)
+                     if r["metadata"]["name"] not in tried]
+            if not fresh:
+                time.sleep(1)
+                continue
+            name = fresh[0]["metadata"]["name"]
+            tried.add(name)
+            outcome, seen, at = "timeout", {}, None
+            until = time.time() + 900
+            while time.time() < until:
+                obj = get_opt("restore", name)
+                if obj is None:
+                    outcome = "gone-before-delete"
+                    break
+                if terminal(obj):
+                    seen = obj
+                    if verdict_is_owed(obj):
+                        at = dt.datetime.now(dt.timezone.utc).isoformat()
+                        run(KN + ["delete", "restore", name, "--wait=false"])
+                        outcome = "deleted-while-owed"
+                    else:
+                        outcome = "verdict-landed-first"
+                    break
+                time.sleep(0.2)
+            attempts.append({"restore": name, "outcome": outcome, "deletedAt": at,
+                             "statusWhenDeleted": seen.get("status")})
+            if outcome == "deleted-while-owed":
+                deleted = name
+        recorded = None
+        if deleted is not None:
+            recorded = poll(lambda: {"s": list(watch.statuses)},
+                            lambda o: any((((w.get("lastFailed") or {}).get("restoreRef") or {})
+                                           .get("name") == deleted) for w in o["s"]),
+                            seconds=300)
+            time.sleep(5)
+        watched = watch.stop()
+        watch = None
+        verdict, clauses = deleted_rehearsal_is_recorded(
+            deleted or "", watched, deleted is not None)
+        evidence.append(artifact("rehearsal-deleted/01-attempts.json", {
+            "attempts": attempts, "deleted": deleted,
+            "watchedStatusWrites": watched, "verdict": verdict, "clauses": clauses}))
+        record(REHEARSAL_DELETED_ROW, "PLAT-14.3", verdict,
+               f"{REHEARSAL_DELETED_SCHEDULE} (one-minute cron): attempts "
+               f"{[(a['restore'], a['outcome']) for a in attempts]}; deleted {deleted!r}; "
+               + "; ".join(f"{k}={v}" for k, v in clauses.items()), evidence)
+    finally:
+        if watch is not None:
+            watch.stop()
+        try:
+            quiet = {name: quiesce_arm(name, evidence)["quiet"] for name in sorted(arms)}
+            live = {name: get_opt("rehearsalschedule", name) for name in arms}
+            owned_prefixes, not_swept = owned_rehearsal_prefixes(arms, live, quiet)
+            swept = topics_to_sweep(target_topics(), list(owned_prefixes.values()))
+            for topic in swept:
+                target_topic_delete(topic)
+            left = topics_to_sweep(target_topics(),
+                                   [rendered_prefix(uid) for uid in arms.values()])
+            evidence.append(artifact("rehearsal-deleted/98-broker-sweep.json", {
+                "arms": arms, "quiet": quiet, "swept": swept, "notSwept": not_swept,
+                "left": left}))
+            check("rehearsal-deleted-shared-broker-left-as-found", "PLAT-14.3",
+                  all(quiet.values()) and not left,
+                  f"arms {sorted(arms)} quiet={quiet}; swept {swept}; left {left}", evidence)
+        finally:
+            minted = [k for k in (approver_key, retired_key) if k is not None]
+            for key in minted:
+                key["private"].unlink(missing_ok=True)
+                shutil.rmtree(key["dir"], ignore_errors=True)
+            if work is not None:
+                shutil.rmtree(work, ignore_errors=True)
 
 # ---------------------------------------------------------------------------
 # harness-rows-11 — PLAT-16.2: the provider object-lock half of "legal hold/lock"
@@ -12781,7 +13129,8 @@ PHASES = [
     "signed_at_probe", "trust_rbac", "old_archive", "multiple_namespaces", "notify", "protection_cases",
     "protection_verdicts",
     "rehearsal", "refused_point",
-    "operation_states", "notify_transport", "rehearsal_faults", "object_lock", "shared_set",
+    "operation_states", "notify_transport", "rehearsal_faults", "rehearsal_deleted",
+    "object_lock", "shared_set",
     "schedule_creation_bound",
     "control", "report", "cleanup",
 ]
