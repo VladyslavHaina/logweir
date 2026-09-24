@@ -391,9 +391,26 @@ fn an_unpinned_approver_is_refused_without_dialling_the_bootstrap() {
 
     let mut args = base_args_over(&spec);
     pin(&mut args, &["sha256:deadbeef", "sha256:cafebabe"]);
+    // The bound below is on THIS command's own work, not on how long the host
+    // takes to start a process. A `--version` run of the same binary, taken
+    // immediately before and under the same load, is the process start-up
+    // cost (exec, dynamic loading, the OS's first-run scan); it is subtracted
+    // so a loaded host (TEST-APPROVAL-UNPINNED-TIMING: 17.8 s beside three
+    // builds) is not read as a client spinning on a dead broker.
+    let baseline_started = std::time::Instant::now();
+    let baseline = Command::new(env!("CARGO_BIN_EXE_logweir"))
+        .arg("--version")
+        .output()
+        .expect("the compiled logweir binary runs");
+    let startup = baseline_started.elapsed();
+    assert!(
+        baseline.status.success(),
+        "the start-up baseline must itself succeed"
+    );
     let started = std::time::Instant::now();
     let (code, stdout, stderr) = run_restore(&args);
     let elapsed = started.elapsed();
+    let own_work = elapsed.saturating_sub(startup);
 
     // The refusal itself is unchanged by the hoist: same code, same bytes,
     // same final stdout line.
@@ -435,10 +452,11 @@ fn an_unpinned_approver_is_refused_without_dialling_the_bootstrap() {
     }
 
     assert!(
-        elapsed < std::time::Duration::from_secs(15),
-        "Global Constraint 22 bounds a process-level row at 15 s; this took {elapsed:?}. A \
-         closed loopback port refuses instantly, so a slow run here is one whose client \
-         construction is spinning on a dead broker — which is what the hoist prevents"
+        own_work < std::time::Duration::from_secs(15),
+        "Global Constraint 22 bounds a process-level row at 15 s; this took {own_work:?} beyond \
+         the process's own start-up ({elapsed:?} in all, start-up {startup:?}). A closed \
+         loopback port refuses instantly, so a slow run here is one whose client construction \
+         is spinning on a dead broker — which is what the hoist prevents"
     );
 }
 
