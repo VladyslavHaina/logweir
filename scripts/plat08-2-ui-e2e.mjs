@@ -773,12 +773,20 @@ async function main() {
     check(inputsInInherited === 0, "the inherited settings are editable inputs");
     await shot("s1-01-schedule-inherits-default");
 
+    // CONSOLE MODE HAS NO SCHEDULE NAME FIELD (poc-fixes-2 review L5): the
+    // product API names the schedule sch-<26 base32>, so the typed name is
+    // filled only where the form still offers one.
+    async function fillScheduleName(name) {
+      if (await page.locator("#schedule-name").count() > 0) {
+        await page.fill("#schedule-name", name);
+      }
+    }
     async function chooseSource() {
       const uid = kubeJson(["-n", namespace, "get", "kafkacluster", source]).metadata.uid;
       await page.selectOption("#schedule-source", uid);
     }
     async function createSchedule(name, destinationName) {
-      await page.fill("#schedule-name", name);
+      await fillScheduleName(name);
       await chooseSource();
       await page.selectOption("#policy-create-mode", "advanced");
       await waitFor("#policy-create-cron", "the advanced cron input");
@@ -814,7 +822,7 @@ async function main() {
       metadata: { name: DEST_C, labels: LABELS }, spec: cSpec });
     result.created.push({ kind: "BackupDestination", name: DEST_C, uid: c1.metadata.uid, createdBy: "kubectl" });
     await open(schedulesRoute, "#schedule-form", "the schedules page (draft C)");
-    await page.fill("#schedule-name", "draft-c");
+    await fillScheduleName("draft-c");
     await chooseSource();
     await page.selectOption("#policy-create-mode", "advanced");
     await waitFor("#policy-create-cron", "the cron input");
@@ -840,7 +848,7 @@ async function main() {
     // AN EDIT DURING THE DRAFT: dest-b's access is rotated on its own page
     // while the schedule form has it chosen. Same uid, same location.
     await open(schedulesRoute, "#schedule-form", "the schedules page (draft B)");
-    await page.fill("#schedule-name", "nightly-b");
+    await fillScheduleName("nightly-b");
     await chooseSource();
     await page.selectOption("#policy-create-mode", "advanced");
     await waitFor("#policy-create-cron", "the cron input");
@@ -936,7 +944,7 @@ async function main() {
     // ======================================================================= M1
     // CONVERTING AN INLINE SCHEDULE: the location is kept, or the move is said.
     await open(schedulesRoute, "#schedule-form", "the schedules page (inline)");
-    await page.fill("#schedule-name", "inline-a");
+    await fillScheduleName("inline-a");
     await chooseSource();
     await page.selectOption("#policy-create-mode", "advanced");
     await waitFor("#policy-create-cron", "the cron input");

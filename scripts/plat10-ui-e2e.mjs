@@ -990,11 +990,20 @@ async function main() {
     return object.metadata.uid;
   }
 
+  /** CONSOLE MODE HAS NO SCHEDULE NAME FIELD (poc-fixes-2 review L5): the
+   *  product API names the schedule sch-<26 base32>, so a typed name is
+   *  filled only where the form still offers one. */
+  async function fillScheduleName(page, name) {
+    if (await page.locator("#schedule-name").count() > 0) {
+      await page.fill("#schedule-name", name);
+    }
+  }
+
   /** The advanced-cron create path: the form's own fields, one submit. */
   async function createAdvanced(name, cron, topics, destinationName) {
     result.reloads = (result.reloads || 0) +
       await openRoute(page, listRoute, "#schedule-form", "the create form for " + name);
-    await page.fill("#schedule-name", name);
+    await fillScheduleName(page, name);
     await chooseSource(source);
     await page.selectOption("#policy-create-mode", "advanced");
     await waitForSelector(page, "#policy-create-cron", "the advanced cron input");
@@ -1019,7 +1028,7 @@ async function main() {
     // NEGATIVE CONTROL 1a: the submit is refused before the API has compiled
     // the preset, and NOTHING reaches the cluster.
     const beforeAny = schedules().length;
-    await page.fill("#schedule-name", "nightly-" + suffix);
+    await fillScheduleName(page, "nightly-" + suffix);
     await chooseSource(source);
     await page.selectOption("#policy-create-mode", "daily");
     await waitForSelector(page, "#policy-create-hour", "the preset's parameters");
@@ -1088,7 +1097,7 @@ async function main() {
     // =================================================================== 2
     // PLAT-10.1 all-user-topic creation, with exclusions.
     result.reloads = (result.reloads || 0) + await openRoute(page, listRoute, "#schedule-form", "the create form again");
-    await page.fill("#schedule-name", "dynamic-" + suffix);
+    await fillScheduleName(page, "dynamic-" + suffix);
     await chooseSource(source);
     await page.selectOption("#policy-create-mode", "hourly");
     await waitForSelector(page, "#policy-create-minute", "the hourly preset");

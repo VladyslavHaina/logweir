@@ -3283,6 +3283,50 @@ The runner does **not** re-check expiry against its own clock: the controller
 admitted the run inside the window, and an admitted run "continues under its
 recorded policy snapshot" (D0) even if its pod waited in `Pending`.
 
+**After admission the `Approval` is a record, not a gate.** Expiry, the policy
+binding and the keys' windows bound the time to **admission**. Once the Restore
+controller has recorded `Admitted=True` on the Restore that `spec.approvalRef`
+names this `Approval` for (the pass that creates the runner Job), and that
+Restore's own approval bundle (`<restore>-approval-bundle`,
+`logweir.dev/approval-uid`) names **this `Approval` object's UID** — or, for a
+Restore admitted before per-Restore bundles, the `Approval` existed at the
+admission — the `Approval` controller adds `Consumed=True` (reason
+`RestoreAdmitted`; its `lastTransitionTime` is the admission instant) beside the
+verdict. From then on its `Verified=True` condition, `status.authorization`
+(mode, policy, requester, confirmation key), `matchedKeyId`, `approver` and key
+window stay as they were recorded, whatever the clock, a key's `notAfter`, a
+retirement, a `Superseded`/`Unspecified` revocation or a policy edit does. The
+record still binds only the Restore UID in `status.verifiedSubjectRef`; an
+`Approval` deleted and re-created under the same name is another object and was
+admitted under nothing.
+
+**The one key event that still reaches it is a compromise** (D3 §7.4). A
+consumed record reads the namespace's trust on each pass. When
+`status.matchedKeyId` or `status.authorization.confirmationKeyId` is `Revoked`
+with `KeyCompromise`, `status.verified` becomes `false` and the `Verified`
+condition reads `RecordedBeforeRevocation` when the admission instant precedes
+`revocationEffectiveFrom` (else `revokedAt`), and `KeyRevoked` otherwise —
+**never green** either way, in the API and the console ("signer revoked for
+compromise after use"). The authorization, key ids, approver and `Consumed` are
+kept: they are what an incident responder lists runs by. The withdrawal is
+sticky — a revocation is monotonic on a `TrustPolicy`, so a policy deleted or a
+namespace re-bound does not restore the green. A consumed record whose recorded
+key is still in the trust must also still carry a signature that verifies under
+it; one that does not (a planted `Consumed`) is judged again from scratch. A
+Restore that is only held (`Admitted=False`) or has no Job yet is not
+admitted, and its `Approval` still expires `AuthorizationExpired` as before.
+Defect P9 (the PoC install, 2026-09-24) was the absence of this rule: 900 s
+after an Ordinary confirmation a succeeded Restore's `Approval` was rewritten
+`Verified=False/AuthorizationExpired` with its provenance nulled. **Upgrade:**
+an `Approval` an earlier build rewrote that way is re-verified at the admission
+instant (the Restore's `Admitted` `lastTransitionTime`) on the first pass of this
+build and, when it verifies there, is restored to `Verified=True` with
+`Consumed=True`; a refusal message no longer names the current time, so an
+unchanged refusal is never rewritten and no longer logs `approval refused` on
+every pass. **Rollback:** an older controller ignores `Consumed` and resumes
+re-judging consumed `Approval`s (the P9 behaviour); nothing it writes is
+unreadable by this build.
+
 **Separation of duties and key authority.** Three keys with three usages, one
 usage each (CEL rule G8): the runner's `EvidenceSigning` key, which never
 authorises; the console's `ConsoleConfirmation` key, which attests a requester

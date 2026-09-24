@@ -87,6 +87,7 @@ import {
   keepDraft,
   listen,
   mutationFor,
+  owesRead,
   readDraft,
   readOptions,
   refusal,
@@ -5415,7 +5416,14 @@ export const RESTORE_READINESS_INTERVAL_MS = 2000;
  *  `selectEvidenceDestination` made is about a choice the server cannot see
  *  (the check is bound to the referent it was started against, which may be
  *  perfectly unchanged), so a fresher `applicable: true` must not erase it.
- *  Only a NEW check, started for the current choices, does. */
+ *  Only a NEW check, started for the current choices, does.
+ *
+ *  `unverifiable` IS NOT ONE OF THOSE MARKS (defect P8's class). It is the
+ *  SERVER saying what it could not compare in THAT answer -- above all the
+ *  create answer's "this response did not recompute staleness; read the
+ *  preflight itself" -- and a fresher read is exactly the answer it asks for.
+ *  Carrying it one-way left a replayed check reading "could not be checked"
+ *  after the read that did check it. */
 export function mergeReadiness(held, fresh) {
   if (fresh === null || fresh === undefined) {
     return held === undefined ? null : held;
@@ -5423,8 +5431,13 @@ export function mergeReadiness(held, fresh) {
   if (held === null || held === undefined || held.id !== fresh.id || held.stale !== true) {
     return fresh;
   }
+  const marks = (Array.isArray(held.staleReasons) ? held.staleReasons : [])
+    .filter((r) => (r || {}).reason !== "unverifiable");
+  if (marks.length === 0) {
+    return fresh;
+  }
   const reasons = (Array.isArray(fresh.staleReasons) ? fresh.staleReasons : []).slice();
-  for (const r of Array.isArray(held.staleReasons) ? held.staleReasons : []) {
+  for (const r of marks) {
     if (!reasons.some((x) => x.reason === r.reason && x.kind === r.kind && x.name === r.name)) {
       reasons.push(r);
     }
@@ -5447,7 +5460,8 @@ async function followRestoreReadiness(node, state, parse, api, lifecycle) {
     : (ms) => new Promise((done) => { globalThis.setTimeout(done, ms); });
   for (let read = 0; read < RESTORE_READINESS_POLLS; read += 1) {
     const held = (state.readiness || {}).preflight || null;
-    if (held === null || held.id !== id || held.terminal === true) {
+    // THE CREATE ANSWER IS NOT A READ (P8), even when it is terminal.
+    if (held === null || held.id !== id || !owesRead(held, read)) {
       return;
     }
     await wait(RESTORE_READINESS_INTERVAL_MS);

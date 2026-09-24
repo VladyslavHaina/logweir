@@ -1312,7 +1312,9 @@ test("a_double_click_makes_one_preflight_and_a_second_test_makes_a_new_one", asy
       await held;
       return { item: preflightItem("pf-" + started.length, "ready", true), replayed: false };
     },
-    preflight: async () => { throw new Error("terminal on arrival: nothing to follow"); },
+    // A TERMINAL CREATE ANSWER STILL OWES ONE READ (P8): it was projected
+    // without recomputing staleness, so the follower reads it once.
+    preflight: async (ns, id) => ({ item: preflightItem(id, "ready", true) }),
     wait: async () => {},
   };
   const routes = createRouteLifecycle();
@@ -1372,6 +1374,42 @@ test("a_started_check_is_followed_until_it_is_terminal_and_the_rows_are_repainte
   assert.match(last, /pf-f/);
   assert.match(last, /not ready/, "the aggregate the object recorded, not a guess");
   assert.doesNotMatch(last, /id="connection-check-stopped"/);
+});
+
+test("a_replayed_connection_check_is_read_once_before_it_is_believed", async () => {
+  // DEFECT P8's CLASS. A replay is terminal on arrival, and the create answer
+  // says "this response did not recompute staleness; read the preflight
+  // itself". The follower stopped at `terminal === true` before its first read,
+  // so a replayed verdict was painted as "does not apply / could not be
+  // checked" for as long as the page stayed open.
+  const painted = [];
+  let read = 0;
+  const replay = Object.assign(preflightItem("pf-replay", "ready", true), {
+    applicable: false, stale: true,
+    staleReasons: [{ reason: "unverifiable",
+      basis: "this response did not recompute staleness; read the preflight itself for a " +
+        "current verdict" }],
+  });
+  const node = checkNode();
+  const api = {
+    get: async () => clusterObject("replay"),
+    latestDiscoveries: async () => ({ latestAttempt: null, lastSuccessful: null }),
+    startPreflight: async () => ({ item: replay, replayed: true }),
+    preflight: async (ns, id) => {
+      read += 1;
+      return { item: preflightItem(id, "ready", true) };
+    },
+    wait: async () => {},
+  };
+  const routes = createRouteLifecycle();
+  await mountClusterDetail(node, "team-a", "replay", (html) => { painted.push(html); return []; },
+    routes.begin(), api);
+  node.fire("#connection-check-form", "submit");
+  await new Promise((done) => { setTimeout(done, 0); });
+  assert.equal(read, 1, "NEGATIVE CONTROL: one read, although the create answer was terminal");
+  const last = painted[painted.length - 1];
+  assert.doesNotMatch(last, /did not recompute staleness/);
+  assert.match(last, /applies to your current inputs/);
 });
 
 test("a_check_that_never_settles_is_left_alone_and_the_page_says_it_stopped_reading", async () => {

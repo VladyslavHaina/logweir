@@ -248,7 +248,11 @@ export async function createCluster(page, ns, c, log) {
   await gotoHash(page, `#/clusters?ns=${encodeURIComponent(ns)}`);
   await waitForText(page, /Create a KafkaCluster/, 60, "the clusters page");
   const form = page.locator("form", { has: page.locator('input[name="servers"]') }).first();
-  await form.locator('input[name="name"]').fill(c.name);
+  // THE SHARED CONSOLE HAS NO NAME FIELD (P7): the product API names a
+  // connection conn-<26 base32>, and the form says so. Fill it only where the
+  // form still has one (legacy mode, where the typed name IS the object's).
+  const nameInput = form.locator('input[name="name"]');
+  if (await nameInput.count() > 0) await nameInput.fill(c.name);
   await form.locator('input[name="servers"]').fill(c.servers);
   await form.locator('input[name="role"]').fill(c.role);
   await form.locator('select[name="mode"]').selectOption(c.mode || "plaintext");
@@ -256,7 +260,7 @@ export async function createCluster(page, ns, c, log) {
   if ((await tls.isChecked()) !== !!c.tls) await tls.click();
   await form.getByRole("button", { name: /^create$/i }).click();
   await page.waitForTimeout(2500);
-  log && log(`cluster ${c.name}: create submitted`);
+  log && log(`cluster (role ${c.role}): create submitted`);
   return textOf(page);
 }
 

@@ -27,8 +27,11 @@ import {
 } from "../pages/restore-wizard.js";
 import {
   COUNTERSIGN_COMMAND,
+  REVOKED_AFTER_USE_WORDS,
   approvalBody,
   approvalState,
+  renderApprovalState,
+  renderApprovalStatus,
   countersignOffered,
   policyMode,
   renderApprovalSubject,
@@ -206,6 +209,52 @@ test("a_console_approval_verified_for_this_restore_reads_verified_and_an_older_u
       approvalState(read, Object.assign({}, subject, { uid: "uid-of-a-newer-restore" })).state,
       "foreign-execution",
     );
+  } finally {
+    wire.restore();
+  }
+});
+
+test("a_consumed_approval_whose_signer_was_later_compromised_is_never_green", async () => {
+  // REVIEW M1 (poc-fixes-2), the console half. weirkeeper keeps the record of
+  // an admission -- the authorization, the key id, Consumed=True -- and turns
+  // Verified False (RecordedBeforeRevocation) when a key it names is revoked
+  // for KeyCompromise. D3 section 7.4: "never green". The fixture is the SAME
+  // bytes the Rust rows read: `crates/logweir-api/tests/approval_revoked_after_use.rs`
+  // projects a CR into it, and `crates/weirkeeper/tests/approval_policy.rs`
+  // checks the controller writes that shape.
+  await consoleMode();
+  const approval = fixture("console/approval-revoked-after-use.json");
+  const bound = approval.item.verifiedSubject;
+  const packet = fixture("console/approval-packet.json");
+  const wire = transport((u) => {
+    if (u === "/api/v1/namespaces/team-a/approvals/a1") {
+      return { status: 200, body: approval };
+    }
+    if (u === "/api/v1/namespaces/team-a/approvals/a1/packet") {
+      return { status: 200, body: packet };
+    }
+    return undefined;
+  });
+  try {
+    const read = await apiClient().get("team-a", "approvals", "a1");
+    const subject = {
+      ns: bound.namespace, kind: "Restore", name: bound.name, uid: bound.uid,
+      planHash: approval.item.planHash,
+    };
+    const found = approvalState(read, subject);
+    assert.equal(found.state, "revoked-after-use",
+      "NEGATIVE CONTROL: not `verified`, and not a generic refusal either");
+    assert.equal(found.reason, "RecordedBeforeRevocation");
+    assert.equal(found.consumed.at, "2026-09-09T13:01:00Z", "the admission instant is shown");
+    const block = renderApprovalState(found, subject, "a1");
+    assert.doesNotMatch(block, /badge-green/, "never green");
+    assert.match(block, /KeyCompromise/);
+    assert.match(block, /2026-09-09T13:01:00Z/);
+    const card = renderApprovalStatus(read);
+    assert.doesNotMatch(card, /badge-green/);
+    assert.ok(card.includes(REVOKED_AFTER_USE_WORDS), card);
+    assert.equal(read.status.authorization.confirmationKeyId, approval.item.matchedKeyId,
+      "the record survives in the console projection");
   } finally {
     wire.restore();
   }

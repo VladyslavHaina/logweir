@@ -43,7 +43,12 @@
 //    creates a `Preflight` and then renders that object's own recorded state.
 //    It does not dial anything, it does not infer a pass from the absence of a
 //    failure, and a `Preflight` that has not been reconciled reads `pending`
-//    -- which is what it is.
+//    -- which is what it is. AND IT READS THE OBJECT BACK (defect P8): the
+//    create answer is the check before it ran, projected without recomputing
+//    staleness, so the page follows the started check with bounded GETs until
+//    a read answers terminal. Before that it rendered the create answer for
+//    ever -- `pending / does not apply / compared: nothing` four minutes after
+//    the check had recorded `ready`.
 
 import { apiClient, mayOperate } from "../client.js";
 import {
@@ -56,10 +61,10 @@ import {
   keepDraft,
   listen,
   mutationFor,
+  owesRead,
   readDraft,
   readOptions,
   watchMutation,
-  whenLeft,
 } from "../lifecycle.js";
 import {
   ABSENT,
@@ -82,7 +87,13 @@ import {
   replace,
   table,
 } from "../render.js";
-import { focusFirstProblem, isDataKey, isObjectName, readFormValues } from "./clusters.js";
+import {
+  connectionNonce,
+  focusFirstProblem,
+  isDataKey,
+  isObjectName,
+  readFormValues,
+} from "./clusters.js";
 
 const API = apiClient();
 
@@ -332,7 +343,11 @@ export function renderDestinationDetail(item, view) {
       ["controller message", cell((d.status || {}).message)],
     ]) +
     "<section class=\"access\"><h3>Access</h3>" + renderAccessTable(d.access) + "</section>" +
-    renderLastTest(d.lastTest) +
+    // THE SUMMARY STANDS DOWN ONCE THIS PAGE HOLDS A TEST OF ITS OWN (the
+    // rule the connection panel keeps): the summary is what the detail read
+    // found BEFORE the test was started, and "No access test has been
+    // recorded" printed above the test this page just started contradicted it.
+    (v.test ? "" : renderLastTest(d.lastTest)) +
     renderTestPanel(d, v) +
     renderUsage(v.usage, v.usageError) +
     renderRotateForm(d, v)
@@ -395,9 +410,48 @@ export function renderTestPanel(item, view) {
     mutationStatus(v.testState || {}, { kind: "Preflight", name: (test || {}).id || "" }, null) +
     "</div>" +
     (test === null ? "" : renderPreflight(test)) +
+    (test !== null && v.testStopped === true
+      ? "<p class=\"note\" id=\"destination-test-stopped\">" +
+        esc(DESTINATION_TEST_STOPPED_SENTENCE) + "</p>"
+      : "") +
     "</section>"
   );
 }
+
+/** What the follower says when it stops reading. */
+export const DESTINATION_TEST_STOPPED_SENTENCE =
+  "This page stopped following the access test after its read budget, or after a read failed. " +
+  "The test itself was not cancelled and is still the controller's; reload this page to read " +
+  "the newest recorded test, or press Test access again for a new one.";
+
+/** How many times the panel re-reads the test it started, and the gap between
+ *  reads. BOUNDED, as the connection check's follower is: a panel is not a
+ *  watcher. Thirty reads two seconds apart is a minute, which covers one check
+ *  pod scheduled on a busy node (the PoC's took three seconds). */
+export const DESTINATION_TEST_POLLS = 30;
+
+/** The gap between those reads, in milliseconds. */
+export const DESTINATION_TEST_INTERVAL_MS = 2000;
+
+// THE ATTEMPT TOKEN, as the connection check mints it (review F1): this load's
+// nonce and a per-click ordinal, so a DELIBERATE second test is a new
+// `Preflight` rather than a replay of the first one's verdict.
+let testAttempts = 0;
+
+/** The token one accepted Test access click carries. */
+export function nextDestinationTestAttempt(ns, name) {
+  const mint = connectionNonce();
+  testAttempts += 1;
+  return String(ns) + "." + String(name) + ".test." + mint + "-" + String(testAttempts);
+}
+
+// THE STARTED TEST, REMEMBERED PER DESTINATION FOR THE LIFE OF THE LOADED PAGE
+// -- the connection panel's `checkViews`, for the same reason: every other
+// control on this view repaints the whole detail, and without this the first
+// such repaint would wipe the result the operator had just asked for. It also
+// names the ONE test being followed, so an older follower stops painting the
+// moment a newer test replaces it.
+const testViews = new Map();
 
 /** A `Preflight`, rendered from its own recorded fields and from nothing else.
  *
@@ -1128,6 +1182,10 @@ export async function mountDestinationDetail(node, ns, name, parse, lifecycle, d
     if (!active(lifecycle)) {
       return;
     }
+    // A FRESH DETAIL READ STARTS FROM THE SERVER'S ANSWER: its `lastTest` is
+    // the newest recorded test, newer than anything a previous visit to this
+    // view remembered, so nothing remembered is painted over it.
+    testViews.delete(formKey(ns, TEST_FORM, name));
     paintDetail(node, ns, name, parse, lifecycle, api, read.item, {
       usage: usage, usageError: usageError, test: null,
     });
@@ -1141,6 +1199,11 @@ export async function mountDestinationDetail(node, ns, name, parse, lifecycle, d
 function paintDetail(node, ns, name, parse, lifecycle, api, item, extra) {
   const testKey = formKey(ns, TEST_FORM, name);
   const rotateKey = formKey(ns, ROTATE_FORM, name);
+  const given = extra || {};
+  if (given.test !== undefined && given.test !== null) {
+    testViews.set(testKey, { test: given.test, testStopped: given.testStopped === true });
+  }
+  const remembered = testViews.get(testKey) || {};
   const view = Object.assign(
     {
       mayOperate: mayOperate(ns),
@@ -1154,7 +1217,11 @@ function paintDetail(node, ns, name, parse, lifecycle, api, item, extra) {
           : null,
       },
     },
-    extra || {},
+    given,
+    {
+      test: given.test || remembered.test || null,
+      testStopped: given.test ? given.testStopped === true : remembered.testStopped === true,
+    },
   );
   replace(node, parse(renderDestinationDetail(item, view)));
   wireTest(node, ns, name, parse, lifecycle, api, item, view);
@@ -1274,11 +1341,16 @@ function wireTest(node, ns, name, parse, lifecycle, api, item, view) {
     if (!active(lifecycle)) {
       return;
     }
-    const extra = {
+    if (state.phase === "succeeded") {
+      const made = (state.result || {}).item || null;
+      const extra = { usage: view.usage, usageError: view.usageError, test: made, testStopped: false };
+      paintDetail(node, ns, name, parse, lifecycle, api, item, extra);
+      followDestinationTest(node, ns, name, parse, lifecycle, api, item, view, made);
+      return;
+    }
+    paintDetail(node, ns, name, parse, lifecycle, api, item, {
       usage: view.usage, usageError: view.usageError,
-      test: state.phase === "succeeded" ? (state.result || {}).item : view.test,
-    };
-    paintDetail(node, ns, name, parse, lifecycle, api, item, extra);
+    });
   }, lifecycle);
   listen(form, "submit", (event) => {
     event.preventDefault();
@@ -1287,12 +1359,65 @@ function wireTest(node, ns, name, parse, lifecycle, api, item, view) {
     }
     const values = readDestinationValues(form);
     const roles = Array.isArray(values.roles) ? values.roles : [];
-    mutation.run(() => api.testDestination(ns, name, roles.length > 0 ? { roles: roles } : {}));
+    // THE TOKEN IS MINTED INSIDE THE EXECUTOR, as the connection check's is,
+    // so a platform with no random source is a refusal in this form's status
+    // region rather than an exception out of an event handler.
+    mutation.run(() => api.testDestination(ns, name, roles.length > 0 ? { roles: roles } : {}, {
+      attempt: nextDestinationTestAttempt(ns, name),
+    }));
   }, lifecycle);
-  // The started check is polled ONCE per click and never on a timer: a page
-  // that polled would keep reading a namespace after its reader stopped
-  // looking. The re-read control is the button, and it says so.
-  whenLeft(lifecycle, () => {});
+}
+
+/** Re-reads the test this page started until a READ answers terminal, or the
+ *  budget is spent -- defect P8.
+ *
+ *  THE CREATE ANSWER IS NOT A READ (`owesRead`): even a terminal one, which
+ *  is a replay, was projected without recomputing staleness. Every read is
+ *  guarded by the route (PLAT-13.1), the loop is bounded, a failed read is not
+ *  a verdict (the rows on screen stay what the check last recorded and the
+ *  panel says it stopped), and an older follower stops as soon as a newer test
+ *  is the one on screen. */
+async function followDestinationTest(node, ns, name, parse, lifecycle, api, item, view, first) {
+  const key = formKey(ns, TEST_FORM, name);
+  const wait = typeof api.wait === "function"
+    ? api.wait
+    : (ms) => new Promise((done) => { globalThis.setTimeout(done, ms); });
+  let current = first;
+  const mine = () => ((testViews.get(key) || {}).test || {}).id === (first || {}).id;
+  const paint = (stopped) => {
+    if (active(lifecycle) && mine()) {
+      paintDetail(node, ns, name, parse, lifecycle, api, item, {
+        usage: view.usage, usageError: view.usageError, test: current, testStopped: stopped,
+      });
+    }
+  };
+  for (let read = 0; read < DESTINATION_TEST_POLLS; read += 1) {
+    if (!owesRead(current, read)) {
+      return;
+    }
+    await wait(DESTINATION_TEST_INTERVAL_MS);
+    if (!active(lifecycle) || !mine()) {
+      return;
+    }
+    let answer;
+    try {
+      answer = await api.preflight(ns, current.id, readOptions(lifecycle));
+    } catch (error) {
+      if (!cancelled(error, lifecycle)) {
+        paint(true);
+      }
+      return;
+    }
+    if (!active(lifecycle) || !mine()) {
+      return;
+    }
+    current = ((answer || {}).item) || current;
+    paint(false);
+    if (current.terminal === true) {
+      return;
+    }
+  }
+  paint(true);
 }
 
 function wireRotate(node, ns, name, parse, lifecycle, api, item, view) {

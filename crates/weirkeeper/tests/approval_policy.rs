@@ -713,11 +713,19 @@ fn a_v1_payload_type_is_not_a_v2_document() {
 // The reconciler: the binding decides, never the document
 // ---------------------------------------------------------------------------
 
+/// This Approval object's UID — what the Restore's approval bundle records
+/// when the Restore controller admits under it (review L3).
+const APPROVAL_UID: &str = "approval-uid-1";
+
 fn approval_object(doc: &str, sidecar_bytes: &str) -> Approval {
     Approval {
         metadata: ObjectMeta {
             name: Some("a1".to_string()),
             namespace: Some(NS.to_string()),
+            uid: Some(APPROVAL_UID.to_string()),
+            creation_timestamp: Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(at(
+                "2026-09-09T12:55:30Z",
+            ))),
             generation: Some(1),
             resource_version: Some("4071".to_string()),
             ..ObjectMeta::default()
@@ -871,4 +879,840 @@ async fn the_reconciler_verifies_by_the_binding_and_clears_provenance_on_refusal
         "a refusal must null the provenance a merge patch would otherwise leave: {body}"
     );
     assert!(CLEARABLE_STATUS_FIELDS.contains(&"authorization"));
+}
+
+// ---------------------------------------------------------------------------
+// P9 — a verdict its Restore's admission consumed is a record, not a gate
+// ---------------------------------------------------------------------------
+//
+// poc-install, 2026-09-24: 900 s (`maxAgeSeconds`) after an Ordinary
+// confirmation the controller re-judged the Approval of an ALREADY-ADMITTED,
+// SUCCEEDED Restore, rewrote it `Verified=False/AuthorizationExpired`, nulled
+// the `authorization` it had recorded, and — because the expiry message named
+// the clock — wrote a new status every pass and logged `approval refused`
+// every ~2 s for ever. D0: expiry bounds the time to ADMISSION.
+
+/// Past the Ordinary document's `expiresAt` (13:10), so past `maxAgeSeconds`.
+fn after_expiry() -> DateTime<Utc> {
+    at("2026-09-09T13:20:00Z")
+}
+
+/// The Restore `r1`, carrying the status its controller wrote.
+fn restore_with_status(status: serde_json::Value) -> String {
+    let mut value: serde_json::Value =
+        serde_json::from_str(&restore_body()).expect("the fixture Restore parses");
+    value["status"] = status;
+    value.to_string()
+}
+
+/// ADMITTED at `when`: the Job was created under this Approval.
+fn restore_admitted(when: &str) -> String {
+    restore_with_status(serde_json::json!({
+        "phase": "Succeeded",
+        "conditions": [{
+            "type": "Admitted", "status": "True", "reason": "Admitted",
+            "lastTransitionTime": when,
+            "message": "the approval is Verified=True, the recomputed plan hash matches"
+        }]
+    }))
+}
+
+/// HELD, not admitted: `Admitted=False` is a Restore still waiting.
+fn restore_held() -> String {
+    restore_with_status(serde_json::json!({
+        "phase": "Pending",
+        "conditions": [{
+            "type": "Admitted", "status": "False", "reason": "DestinationNotValid",
+            "lastTransitionTime": "2026-09-09T13:01:00Z",
+            "message": "held for the destination"
+        }]
+    }))
+}
+
+/// The Restore's own approval bundle, as the Restore controller writes it
+/// before the Job: controlled by the Restore UID and naming the Approval UID it
+/// admitted under (review L3).
+fn bundle_body(approval_uid: &str) -> String {
+    serde_json::json!({
+        "apiVersion": "v1", "kind": "ConfigMap",
+        "metadata": {
+            "name": "r1-approval-bundle", "namespace": NS, "uid": "bundle-uid",
+            "annotations": {
+                "logweir.dev/restore-uid": RESTORE_UID,
+                "logweir.dev/approval-name": "a1",
+                "logweir.dev/approval-uid": approval_uid,
+            },
+            "ownerReferences": [{
+                "apiVersion": "logweir.dev/v1alpha1", "kind": "Restore", "name": "r1",
+                "uid": RESTORE_UID, "controller": true, "blockOwnerDeletion": true,
+            }],
+        },
+        "immutable": true,
+        "data": {},
+    })
+    .to_string()
+}
+
+/// A Kubernetes `Status` 404.
+fn not_found(message: &str) -> String {
+    format!(
+        r#"{{"kind":"Status","apiVersion":"v1","status":"Failure","message":"{message}",
+             "reason":"NotFound","code":404}}"#
+    )
+}
+
+/// The routes a pass needs: the trust (with `keys`), the Restore, and its
+/// bundle (`None` answers 404 — a Restore admitted before per-Restore bundles).
+fn routes_with(restore: String, keys: Vec<SpecKey>, bundle: Option<String>) -> Vec<Route> {
+    let mut table: Vec<Route> = routes(keys)
+        .into_iter()
+        .map(|mut route| {
+            if route.path_suffix == "/restores/r1" {
+                route.body = restore.clone();
+            }
+            route
+        })
+        .collect();
+    table.push(match bundle {
+        Some(body) => Route {
+            method: "GET",
+            path_suffix: "/configmaps/r1-approval-bundle",
+            status: 200,
+            body,
+        },
+        None => Route {
+            method: "GET",
+            path_suffix: "/configmaps/r1-approval-bundle",
+            status: 404,
+            body: not_found("configmaps r1-approval-bundle not found"),
+        },
+    });
+    table
+}
+
+fn routes_over(restore: String) -> Vec<Route> {
+    routes_with(
+        restore,
+        vec![console(), bob(), v1_approver()],
+        Some(bundle_body(APPROVAL_UID)),
+    )
+}
+
+fn ordinary_object() -> Approval {
+    approval_object(
+        ORDINARY_DOC,
+        &sidecar(V2_PAYLOAD, &[(CONSOLE_KEY_ID, ORDINARY_CONSOLE_SIG)]),
+    )
+}
+
+/// The Ordinary Approval carrying the status this controller wrote when it
+/// verified it at 13:00 — before the Restore was admitted.
+async fn verified_ordinary() -> Approval {
+    let mut object = ordinary_object();
+    let outcome = decide(&object, &bind("team-ordinary")).await;
+    assert!(
+        matches!(outcome, ApprovalOutcome::Verified(_)),
+        "the fixture verifies inside its window: {outcome:?}"
+    );
+    object.status = Some(approval::status_for(&object, &outcome, now()));
+    object
+}
+
+async fn decide_over(
+    approval: &Approval,
+    restore: String,
+    when: DateTime<Utc>,
+) -> (ApprovalOutcome, Vec<String>) {
+    let (client, recorder) = mock_client_recording(routes_over(restore));
+    let outcome = approval::decide_with_policy_at(approval, &client, &bind("team-ordinary"), when)
+        .await
+        .expect("a verdict");
+    let seen = recorder
+        .lock()
+        .expect("the recorder is never poisoned")
+        .iter()
+        .map(|r| format!("{} {}", r.method, r.uri))
+        .collect();
+    (outcome, seen)
+}
+
+fn condition<'a>(
+    status: &'a weirkeeper::crds::approval::ApprovalStatus,
+    kind: &str,
+) -> &'a weirkeeper::crds::Condition {
+    status
+        .conditions
+        .as_ref()
+        .and_then(|cs| cs.iter().find(|c| c.r#type == kind))
+        .unwrap_or_else(|| panic!("no {kind} condition in {status:?}"))
+}
+
+#[tokio::test]
+async fn an_admitted_restore_keeps_its_approval_verified_past_its_expiry() {
+    let object = verified_ordinary().await;
+    let stored = object.status.clone().expect("verified status");
+    assert!(
+        stored.authorization.is_some(),
+        "the fixture recorded provenance"
+    );
+
+    let (outcome, seen) = decide_over(
+        &object,
+        restore_admitted("2026-09-09T13:01:00Z"),
+        after_expiry(),
+    )
+    .await;
+    assert!(
+        outcome.is_consumed() && outcome.is_verified(),
+        "a Restore admitted at 13:01 consumed the verdict; at 13:20 it is kept, not re-judged: \
+         {outcome:?}"
+    );
+    // ONE TRUST READ (review M1): a compromise revocation is the one key event
+    // that still reaches a consumed record, so its keys are looked up — and
+    // nothing about the document's window or the binding is asked again.
+    assert_eq!(
+        seen.iter().filter(|r| r.contains("trustpolicies")).count(),
+        1,
+        "{seen:?}"
+    );
+    assert!(
+        seen.iter()
+            .any(|r| r.contains("/configmaps/r1-approval-bundle")),
+        "the admission is bound to this Approval OBJECT through the Restore's bundle: {seen:?}"
+    );
+
+    // THE RECORD IS KEPT: every field the verdict wrote, and the Verified
+    // condition with its ORIGINAL transition time and message.
+    let status = approval::status_for(&object, &outcome, after_expiry());
+    assert_eq!(status.verified, Some(true));
+    assert_eq!(
+        status.authorization, stored.authorization,
+        "mode, requester, key kept"
+    );
+    assert_eq!(status.matched_key_id, stored.matched_key_id);
+    assert_eq!(status.approver, stored.approver);
+    assert_eq!(status.approver_key_window, stored.approver_key_window);
+    assert_eq!(status.verified_subject_ref, stored.verified_subject_ref);
+    assert_eq!(
+        condition(&status, "Verified"),
+        condition(&stored, "Verified"),
+        "the Verified condition is carried verbatim"
+    );
+    let consumed = condition(&status, approval::CONDITION_CONSUMED);
+    assert_eq!(consumed.status, "True");
+    assert_eq!(
+        consumed.last_transition_time,
+        Some(at("2026-09-09T13:01:00Z")),
+        "Consumed's transition is the ADMISSION instant the Restore controller recorded — the \
+         independent observation a later compromise is compared against"
+    );
+    assert_eq!(
+        consumed.reason.as_deref(),
+        Some(approval::REASON_RESTORE_ADMITTED)
+    );
+    let message = consumed.message.clone().unwrap_or_default();
+    assert!(
+        message.contains(RESTORE_UID) && message.contains("2026-09-09T13:01:00"),
+        "the condition names the Restore UID and the admission instant: {message}"
+    );
+    let body = approval::status_patch_body(&status);
+    assert!(
+        body["status"]["authorization"].is_object(),
+        "the patch keeps the provenance instead of nulling it: {body}"
+    );
+
+    // THE NEXT PASS READS ONLY THE TRUST AND WRITES NOTHING, a day later.
+    let mut written = object.clone();
+    written.status = Some(status.clone());
+    let (client, recorder) = mock_client_recording(routes(vec![console(), bob()]));
+    let later = at("2026-09-10T13:20:00Z");
+    let again = approval::decide_with_policy_at(&written, &client, &bind("prod-governed"), later)
+        .await
+        .expect("a verdict");
+    assert!(
+        again.is_consumed() && again.is_verified(),
+        "even under a changed binding a consumed record stands: {again:?}"
+    );
+    let reads: Vec<String> = recorder
+        .lock()
+        .expect("recorder")
+        .iter()
+        .map(|r| r.uri.clone())
+        .collect();
+    assert!(
+        reads.iter().all(|u| u.contains("trustpolicies")) && reads.len() == 1,
+        "a recorded consumption reads the namespace's trust and nothing else: {reads:?}"
+    );
+    let next = approval::status_patch_body(&approval::status_for(&written, &again, later));
+    assert!(
+        weirkeeper::conditions::status_unchanged(
+            serde_json::to_value(&status).ok().as_ref(),
+            &next
+        ),
+        "the second pass computes the same status byte for byte: {next}"
+    );
+    assert_eq!(
+        approval::requeue_for(&again, later),
+        None,
+        "a consumed record waits for a change; no timer re-reads it"
+    );
+}
+
+#[tokio::test]
+async fn a_not_admitted_restore_still_expires() {
+    // FAIL CLOSED, UNCHANGED: a Restore with no Job yet — never admitted, or
+    // held `Admitted=False` — is a request the expiry still refuses.
+    for (label, restore) in [("absent", restore_body()), ("held", restore_held())] {
+        let object = verified_ordinary().await;
+        let (outcome, _) = decide_over(&object, restore, after_expiry()).await;
+        assert_eq!(
+            outcome.reason(),
+            "AuthorizationExpired",
+            "{label}: an unadmitted request past its expiry authorises nothing"
+        );
+        assert!(!outcome.is_consumed(), "{label}");
+        let status = approval::status_for(&object, &outcome, after_expiry());
+        assert_eq!(status.authorization, None, "{label}");
+        assert_eq!(status.verified, Some(false), "{label}");
+    }
+}
+
+#[tokio::test]
+async fn an_expired_refusal_is_written_once_and_the_requeue_is_the_heartbeat() {
+    let object = verified_ordinary().await;
+    let mut written = object.clone();
+    written.metadata.resource_version = Some("4072".to_string());
+    let mut routes = routes_over(restore_body());
+    routes.push(Route {
+        method: "PATCH",
+        path_suffix: "/approvals/a1/status",
+        status: 200,
+        body: serde_json::to_string(&written).expect("serialises"),
+    });
+    let (client, recorder) = mock_client_recording(routes);
+    let policies = bind("team-ordinary");
+    let first =
+        approval::reconcile_approval_with_policy_at(&object, &client, &policies, after_expiry())
+            .await
+            .expect("a verdict");
+    assert_eq!(first.reason(), "AuthorizationExpired");
+    written.status = Some(approval::status_for(&object, &first, after_expiry()));
+
+    // FIVE MINUTES LATER, over the object the first pass wrote.
+    let later = after_expiry() + Duration::minutes(5);
+    let second = approval::reconcile_approval_with_policy_at(&written, &client, &policies, later)
+        .await
+        .expect("a verdict");
+    assert_eq!(
+        first.message(),
+        second.message(),
+        "the refusal names no clock, so two instants compute one message"
+    );
+    let patches = recorder
+        .lock()
+        .expect("recorder")
+        .iter()
+        .filter(|r| r.method == "PATCH")
+        .count();
+    assert_eq!(
+        patches, 1,
+        "the withdrawal is written once; an unchanged refusal writes nothing, so no write wakes \
+         the watch (the P9 storm was one PATCH per pass)"
+    );
+    let requeue = approval::requeue_for(&second, later).expect("a refusal is re-read on a timer");
+    assert!(
+        requeue >= std::time::Duration::from_secs(300),
+        "a refusal is re-read at the heartbeat, never sooner: {requeue:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_verdict_withdrawn_after_admission_is_re_established_at_the_admission_instant() {
+    // THE P9 OBJECTS THEMSELVES: an earlier build rewrote the Approval of an
+    // admitted Restore `AuthorizationExpired` and nulled its provenance. This
+    // build asks the verdict at the instant the Restore was admitted.
+    let mut object = verified_ordinary().await;
+    let original = object.status.clone().expect("verified");
+    let (withdrawn, _) = decide_over(&object, restore_body(), after_expiry()).await;
+    object.status = Some(approval::status_for(&object, &withdrawn, after_expiry()));
+    assert_eq!(
+        object.status.as_ref().and_then(|s| s.authorization.clone()),
+        None
+    );
+
+    let late = at("2026-09-09T13:40:00Z");
+    let (repaired, _) = decide_over(&object, restore_admitted("2026-09-09T13:01:00Z"), late).await;
+    let ApprovalOutcome::Consumed(consumption) = &repaired else {
+        panic!("admitted at 13:01, inside the window: {repaired:?}");
+    };
+    assert!(
+        consumption.reverified.is_some(),
+        "re-established, not copied"
+    );
+    let status = approval::status_for(&object, &repaired, late);
+    assert_eq!(status.verified, Some(true));
+    assert_eq!(status.authorization, original.authorization);
+    let verified = condition(&status, "Verified");
+    assert_eq!(verified.status, "True");
+    assert!(
+        verified
+            .message
+            .as_deref()
+            .is_some_and(|m| m.contains("as of the admission at 2026-09-09T13:01:00")),
+        "{verified:?}"
+    );
+    assert_eq!(
+        condition(&status, approval::CONDITION_CONSUMED).status,
+        "True"
+    );
+
+    // AND AN ADMISSION THAT CLAIMS AN INSTANT OUTSIDE THE WINDOW RE-ESTABLISHES
+    // NOTHING: the clock moved, the verdict at it is still asked.
+    let (outside, _) = decide_over(&object, restore_admitted("2026-09-09T13:15:00Z"), late).await;
+    assert_eq!(outside.reason(), "AuthorizationExpired", "{outside:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Review round (poc-fixes-2): M1 compromise, I1, L3 and the R1-R5 fences
+// ---------------------------------------------------------------------------
+
+/// The console key, REVOKED with `reason` effective at `effective`.
+fn revoked_console(reason: RevocationReason, effective: &str) -> SpecKey {
+    SpecKey {
+        state: KeyState::Revoked,
+        revoked_at: Some(at("2026-09-10T09:00:00Z")),
+        revocation_reason: Some(reason),
+        revocation_effective_from: Some(at(effective)),
+        ..console()
+    }
+}
+
+/// The Ordinary Approval as it stands after its Restore was admitted at 13:01
+/// and this controller recorded the consumption at 13:20.
+async fn consumed_ordinary() -> Approval {
+    let mut object = verified_ordinary().await;
+    let (outcome, _) = decide_over(
+        &object,
+        restore_admitted("2026-09-09T13:01:00Z"),
+        after_expiry(),
+    )
+    .await;
+    assert!(outcome.is_consumed(), "{outcome:?}");
+    object.status = Some(approval::status_for(&object, &outcome, after_expiry()));
+    object.metadata.resource_version = Some("4080".to_string());
+    object
+}
+
+/// One pass over `object` with the namespace trusting `keys` — the only read
+/// a recorded consumption makes.
+async fn decide_trusting(object: &Approval, keys: Vec<SpecKey>) -> ApprovalOutcome {
+    let (client, _) = mock_client_recording(routes(keys));
+    approval::decide_with_policy_at(
+        object,
+        &client,
+        &bind("team-ordinary"),
+        at("2026-09-11T08:00:00Z"),
+    )
+    .await
+    .expect("a verdict")
+}
+
+/// **M1.** A `KeyCompromise` revocation of the console key that confirmed an
+/// ADMITTED Restore, effective after the admission, turns the consumed
+/// verdict `RecordedBeforeRevocation` — never green — and keeps the record:
+/// the authorization, the key id, the approver and `Consumed`. Before this
+/// round the consumed record stayed `Verified=True` for ever.
+#[tokio::test]
+async fn a_compromise_after_the_admission_is_recorded_before_revocation_and_never_green() {
+    let object = consumed_ordinary().await;
+    let stored = object.status.clone().expect("consumed status");
+    let outcome = decide_trusting(
+        &object,
+        vec![
+            revoked_console(RevocationReason::KeyCompromise, "2026-09-09T13:05:00Z"),
+            bob(),
+        ],
+    )
+    .await;
+    assert!(outcome.is_consumed(), "{outcome:?}");
+    assert!(
+        !outcome.is_verified(),
+        "a compromised signer is never green"
+    );
+    assert_eq!(
+        outcome.reason(),
+        approval::REASON_RECORDED_BEFORE_REVOCATION
+    );
+
+    let t = at("2026-09-11T08:00:00Z");
+    let status = approval::status_for(&object, &outcome, t);
+    assert_eq!(status.verified, Some(false));
+    let verified = condition(&status, "Verified");
+    assert_eq!(verified.status, "False");
+    assert_eq!(verified.reason.as_deref(), Some("RecordedBeforeRevocation"));
+    let message = verified.message.clone().unwrap_or_default();
+    for fact in [
+        CONSOLE_KEY_ID,
+        "KeyCompromise",
+        "2026-09-09T13:05:00",
+        "2026-09-09T13:01:00",
+        RESTORE_UID,
+        "never green",
+    ] {
+        assert!(
+            message.contains(fact),
+            "the message names {fact}: {message}"
+        );
+    }
+    // THE RECORD IS KEPT.
+    assert_eq!(status.authorization, stored.authorization);
+    assert_eq!(status.matched_key_id, stored.matched_key_id);
+    assert_eq!(status.approver, stored.approver);
+    assert_eq!(status.verified_subject_ref, stored.verified_subject_ref);
+    assert_eq!(
+        condition(&status, approval::CONDITION_CONSUMED),
+        condition(&stored, approval::CONDITION_CONSUMED),
+        "Consumed is carried verbatim"
+    );
+    let body = approval::status_patch_body(&status);
+    assert!(body["status"]["authorization"].is_object(), "{body}");
+    assert!(body["status"]["matchedKeyId"].is_string(), "{body}");
+
+    // THE SHARED FIXTURE IS WHAT THIS CONTROLLER WRITES: the console renders
+    // it never green (`ui/tests/approval-policy.spec.js`) and the API projects
+    // into it (`crates/logweir-api/tests/approval_revoked_after_use.rs`).
+    let shared: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../ui/tests/fixtures/console/approval-revoked-after-use.json"
+        ))
+        .expect("the shared fixture is readable"),
+    )
+    .expect("JSON");
+    let written = serde_json::to_value(&status).expect("status");
+    let strip = |conditions: &serde_json::Value| -> Vec<serde_json::Value> {
+        conditions
+            .as_array()
+            .expect("conditions")
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "type": c["type"], "status": c["status"], "reason": c["reason"],
+                    "message": c["message"], "lastTransitionTime": c["lastTransitionTime"],
+                })
+            })
+            .collect()
+    };
+    assert_eq!(
+        strip(&written["conditions"]),
+        strip(&shared["item"]["conditions"]),
+        "the controller's conditions ARE the fixture's"
+    );
+    assert_eq!(written["verified"], shared["item"]["verified"]);
+    assert_eq!(written["matchedKeyId"], shared["item"]["matchedKeyId"]);
+    assert_eq!(
+        written["authorization"]["confirmationKeyId"],
+        shared["item"]["authorization"]["confirmationKeyId"]
+    );
+
+    // WRITTEN ONCE: the next pass over the written object computes the same
+    // bytes (no clock in the message) ...
+    let mut written = object.clone();
+    written.status = Some(status.clone());
+    let again = decide_trusting(
+        &written,
+        vec![
+            revoked_console(RevocationReason::KeyCompromise, "2026-09-09T13:05:00Z"),
+            bob(),
+        ],
+    )
+    .await;
+    let next = approval::status_patch_body(&approval::status_for(
+        &written,
+        &again,
+        t + Duration::hours(1),
+    ));
+    assert!(
+        weirkeeper::conditions::status_unchanged(
+            serde_json::to_value(&status).ok().as_ref(),
+            &next
+        ),
+        "an unchanged compromise is never rewritten: {next}"
+    );
+    // ... AND STICKY: the object recording the revocation disappearing (the
+    // namespace now resolves a policy where the key is Active) exonerates
+    // nothing. NEGATIVE CONTROL for the sticky rule.
+    let lifted = decide_trusting(&written, vec![console(), bob()]).await;
+    assert!(!lifted.is_verified(), "{lifted:?}");
+    assert_eq!(lifted.reason(), approval::REASON_RECORDED_BEFORE_REVOCATION);
+    let kept = approval::status_patch_body(&approval::status_for(&written, &lifted, t));
+    assert!(
+        weirkeeper::conditions::status_unchanged(
+            serde_json::to_value(&status).ok().as_ref(),
+            &kept
+        ),
+        "the withdrawal is kept verbatim: {kept}"
+    );
+}
+
+/// **M1, the other row.** A compromise effective AT or BEFORE the recorded
+/// admission leaves no observation that separates the signature from the
+/// compromise: `KeyRevoked`, never green. The boundary is D3's own (`observed
+/// < effective`), decided by `logweir_core::trust::decide` — the equality case
+/// pins that the approval side calls the same rule.
+#[tokio::test]
+async fn a_compromise_effective_before_the_admission_is_key_revoked() {
+    let object = consumed_ordinary().await;
+    for effective in ["2026-09-09T12:59:00Z", "2026-09-09T13:01:00Z"] {
+        let outcome = decide_trusting(
+            &object,
+            vec![revoked_console(RevocationReason::KeyCompromise, effective)],
+        )
+        .await;
+        assert!(!outcome.is_verified(), "{effective}: {outcome:?}");
+        assert_eq!(outcome.reason(), "KeyRevoked", "{effective}");
+        let key = weirkeeper::trust::from_policy(&trust_policy(vec![revoked_console(
+            RevocationReason::KeyCompromise,
+            effective,
+        )]));
+        let core = logweir_core::trust::decide(
+            key.key(CONSOLE_KEY_ID).map(|k| &k.trust),
+            logweir_core::trust::KeyUsage::ConsoleConfirmation,
+            &logweir_core::trust::EvidenceClaim::absent(
+                logweir_core::trust::ClaimAbsence::FieldAbsent,
+            ),
+            &logweir_core::trust::IndependentObservation::at(at("2026-09-09T13:01:00Z")),
+            at("2026-09-11T08:00:00Z"),
+        );
+        assert_eq!(
+            core.reason,
+            Some(logweir_core::trust::UntrustReason::Revoked),
+            "parity: D3's rule answers the same for {effective}"
+        );
+    }
+}
+
+/// **M1, the freeze it keeps.** A `Superseded` revocation and a retirement are
+/// time-based boundaries on NEW uses: the consumed record stays green. Only a
+/// compromise reaches it.
+#[tokio::test]
+async fn a_superseded_or_retired_key_leaves_a_consumed_record_green() {
+    let object = consumed_ordinary().await;
+    let retired = SpecKey {
+        state: KeyState::Retired,
+        retired_at: Some(at("2026-09-10T09:00:00Z")),
+        ..console()
+    };
+    for keys in [
+        vec![revoked_console(
+            RevocationReason::Superseded,
+            "2026-09-09T12:00:00Z",
+        )],
+        vec![retired],
+    ] {
+        let outcome = decide_trusting(&object, keys).await;
+        assert!(
+            outcome.is_consumed() && outcome.is_verified(),
+            "{outcome:?}"
+        );
+    }
+}
+
+/// **I1's guard.** A `Consumed=True` status planted on an Approval whose
+/// recorded key never signed its bytes is not a record of anything: it is
+/// judged from scratch, refused, and the planted `Consumed` is dropped.
+#[tokio::test]
+async fn a_planted_consumption_over_a_signature_that_does_not_verify_is_judged_again() {
+    let genuine = consumed_ordinary().await;
+    let mut planted = approval_object(
+        ORDINARY_DOC,
+        // bob's signature, filed under the CONSOLE key id: not the console's.
+        &sidecar(V2_PAYLOAD, &[(CONSOLE_KEY_ID, ORDINARY_BOB_SIG)]),
+    );
+    planted.status = genuine.status.clone();
+    let (outcome, _) = decide_over(
+        &planted,
+        restore_admitted("2026-09-09T13:01:00Z"),
+        after_expiry(),
+    )
+    .await;
+    assert!(
+        !outcome.is_consumed() && !outcome.is_verified(),
+        "NEGATIVE CONTROL: the planted record is not kept: {outcome:?}"
+    );
+    let status = approval::status_for(&planted, &outcome, after_expiry());
+    assert!(
+        status
+            .conditions
+            .as_ref()
+            .is_some_and(|cs| cs.iter().all(|c| c.r#type != approval::CONDITION_CONSUMED)),
+        "{status:?}"
+    );
+}
+
+/// **L3.** The admission binds the Approval OBJECT. An Approval deleted and
+/// re-created under the same name is another object: the Restore's bundle
+/// names the old UID, so the new object's verdict was consumed by nothing and
+/// still expires. Without a bundle (a Restore admitted before per-Restore
+/// bundles), the object must have existed at the admission.
+#[tokio::test]
+async fn an_approval_recreated_under_the_same_name_was_admitted_under_nothing() {
+    let mut recreated = verified_ordinary().await;
+    recreated.metadata.uid = Some("approval-uid-2".to_string());
+    let keys = || vec![console(), bob()];
+    let (client, _) = mock_client_recording(routes_with(
+        restore_admitted("2026-09-09T13:01:00Z"),
+        keys(),
+        Some(bundle_body(APPROVAL_UID)),
+    ));
+    let outcome = approval::decide_with_policy_at(
+        &recreated,
+        &client,
+        &bind("team-ordinary"),
+        after_expiry(),
+    )
+    .await
+    .expect("a verdict");
+    assert_eq!(
+        outcome.reason(),
+        "AuthorizationExpired",
+        "the bundle names approval-uid-1: {outcome:?}"
+    );
+
+    // NO BUNDLE: the fallback is "this object existed at the admission".
+    let mut late = verified_ordinary().await;
+    late.metadata.creation_timestamp = Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+        at("2026-09-09T13:02:00Z"),
+    ));
+    let (client, _) = mock_client_recording(routes_with(
+        restore_admitted("2026-09-09T13:01:00Z"),
+        keys(),
+        None,
+    ));
+    let outcome =
+        approval::decide_with_policy_at(&late, &client, &bind("team-ordinary"), after_expiry())
+            .await
+            .expect("a verdict");
+    assert_eq!(outcome.reason(), "AuthorizationExpired", "{outcome:?}");
+    // NEGATIVE CONTROL: the same object, created before the admission.
+    let early = verified_ordinary().await;
+    let (client, _) = mock_client_recording(routes_with(
+        restore_admitted("2026-09-09T13:01:00Z"),
+        keys(),
+        None,
+    ));
+    let outcome =
+        approval::decide_with_policy_at(&early, &client, &bind("team-ordinary"), after_expiry())
+            .await
+            .expect("a verdict");
+    assert!(outcome.is_consumed(), "{outcome:?}");
+}
+
+/// **R2 (pure).** A Restore that names ANOTHER Approval did not consume this
+/// one, whatever its bundle claims.
+#[tokio::test]
+async fn a_restore_naming_another_approval_did_not_consume_this_one() {
+    let object = verified_ordinary().await;
+    let mut restore: weirkeeper::crds::restore::Restore =
+        serde_json::from_str(&restore_admitted("2026-09-09T13:01:00Z")).expect("a Restore");
+    let bundle: k8s_openapi::api::core::v1::ConfigMap =
+        serde_json::from_str(&bundle_body(APPROVAL_UID)).expect("a ConfigMap");
+    assert!(
+        approval::admitted_under(&restore, &object, Some(&bundle)).is_some(),
+        "the fixture itself is admitted under a1"
+    );
+    restore.spec.approval_ref = Some(weirkeeper::crds::LocalRef {
+        name: "a2".to_string(),
+    });
+    assert_eq!(
+        approval::admitted_under(&restore, &object, Some(&bundle)),
+        None
+    );
+    // And a bundle that is not demonstrably this Restore's answers nothing.
+    let mut foreign = bundle.clone();
+    foreign.metadata.owner_references = None;
+    assert_eq!(approval::admitted_approval_uid(&foreign, RESTORE_UID), None);
+}
+
+/// **R1.** The freeze is for the SAME Restore UID. The name now answers with
+/// another object that was admitted: the verdict was recorded for the old
+/// one, so it is `ReferentUidChanged`, never `Consumed`.
+#[tokio::test]
+async fn a_recreated_restore_does_not_consume_the_old_verdict() {
+    let object = verified_ordinary().await;
+    let mut other: serde_json::Value =
+        serde_json::from_str(&restore_admitted("2026-09-09T13:01:00Z")).expect("json");
+    other["metadata"]["uid"] = serde_json::json!("restore-uid-2");
+    let mut bundle: serde_json::Value =
+        serde_json::from_str(&bundle_body(APPROVAL_UID)).expect("json");
+    bundle["metadata"]["annotations"]["logweir.dev/restore-uid"] =
+        serde_json::json!("restore-uid-2");
+    bundle["metadata"]["ownerReferences"][0]["uid"] = serde_json::json!("restore-uid-2");
+    let (client, _) = mock_client_recording(routes_with(
+        other.to_string(),
+        vec![console(), bob()],
+        Some(bundle.to_string()),
+    ));
+    let outcome =
+        approval::decide_with_policy_at(&object, &client, &bind("team-ordinary"), after_expiry())
+            .await
+            .expect("a verdict");
+    assert_eq!(outcome.reason(), "ReferentUidChanged", "{outcome:?}");
+}
+
+/// **R3.** The repair (a verdict asked at the admission instant) is only for a
+/// verdict once BOUND to this Restore UID. A fresh Approval with no status —
+/// re-applied from captured JSON, say — whose document expired is refused at
+/// `now`, even though its Restore was admitted while it was valid.
+#[tokio::test]
+async fn a_never_bound_approval_is_not_repaired_at_the_admission_instant() {
+    let fresh = ordinary_object();
+    let (outcome, _) = decide_over(
+        &fresh,
+        restore_admitted("2026-09-09T13:01:00Z"),
+        after_expiry(),
+    )
+    .await;
+    assert_eq!(outcome.reason(), "AuthorizationExpired", "{outcome:?}");
+}
+
+/// **R4.** A verified, NOT-admitted Approval is re-read AT its own expiry
+/// (TRUST-EXPIRY-LAG's rule), never left to wait for a change.
+#[tokio::test]
+async fn a_verified_unadmitted_approval_requeues_at_its_expiry() {
+    let object = ordinary_object();
+    let (client, _) = mock_client_recording(routes_over(restore_body()));
+    let when = at("2026-09-09T13:08:00Z");
+    let outcome = approval::decide_with_policy_at(&object, &client, &bind("team-ordinary"), when)
+        .await
+        .expect("a verdict");
+    assert!(
+        outcome.is_verified() && !outcome.is_consumed(),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        approval::requeue_for(&outcome, when),
+        Some(std::time::Duration::from_secs(120)),
+        "the document expires at 13:10, 120 s away"
+    );
+}
+
+/// **R5.** A Restore that is gone is not an admission: the stored verdict is
+/// judged, and the referent is reported missing.
+#[tokio::test]
+async fn a_deleted_restore_is_not_an_admission() {
+    let object = verified_ordinary().await;
+    let mut table = routes_over(restore_body());
+    for route in &mut table {
+        if route.path_suffix == "/restores/r1" {
+            route.status = 404;
+            route.body = not_found("restores r1 not found");
+        }
+    }
+    let (client, _) = mock_client_recording(table);
+    let outcome =
+        approval::decide_with_policy_at(&object, &client, &bind("team-ordinary"), after_expiry())
+            .await
+            .expect("a verdict");
+    assert_eq!(outcome.reason(), "ReferentNotFound", "{outcome:?}");
 }

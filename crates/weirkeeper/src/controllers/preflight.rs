@@ -2775,7 +2775,24 @@ pub enum ApprovalFacts {
         approved_plan_hash: Option<String>,
         /// The `Restore` the approval names.
         subject_name: Option<String>,
+        /// The Restore UID the verdict was recorded for
+        /// (`status.verifiedSubjectRef.uid`) beside the UID of the Restore this
+        /// check is about — review L2. A consumed `Approval` is never re-read
+        /// by its controller (P9), so it no longer flips to
+        /// `ReferentUidChanged` when its Restore is deleted and re-created
+        /// under the same name; this row must see the UID itself. BOXED for
+        /// `approver_key_window`'s reason. `None` when either is unknown.
+        uid_binding: Option<Box<UidBinding>>,
     },
+}
+
+/// The two UIDs [`ApprovalFacts::Found`] compares — review L2.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UidBinding {
+    /// `Approval.status.verifiedSubjectRef.uid`.
+    pub verified_uid: String,
+    /// The UID of the `Restore` this preflight is about.
+    pub restore_uid: String,
 }
 
 /// The `Verified` condition reason that means the approver key had passed its
@@ -2876,6 +2893,7 @@ pub fn approval_rows(
             approver_key_window,
             approved_plan_hash,
             subject_name,
+            uid_binding,
             ..
         } => {
             let scope = CheckScope {
@@ -2898,7 +2916,24 @@ pub fn approval_rows(
             let window = matched_window(matched_key_id.as_deref(), approver_key_window.as_deref());
             let not_after = window.map(|w| w.not_after);
             let mut out = Vec::new();
-            let state = if let Some(subject) = subject_name.as_deref() {
+            let foreign = uid_binding
+                .as_deref()
+                .filter(|b| b.verified_uid != b.restore_uid);
+            let state = if let Some(binding) = foreign {
+                // A VERDICT ABOUT ANOTHER OBJECT OF THIS NAME (review L2). The
+                // Restore controller refuses it terminally
+                // (`ApprovalSubjectMismatch`), so `ready` here would be the
+                // only green on the way to that refusal.
+                state_row(CheckState::NotReady, CheckCode::ApprovalSubjectMismatch)
+                    .with_scope(scope.clone())
+                    .with_message(&format!(
+                        "the Approval was verified for Restore UID {} and this Restore is UID {}: \
+                         an object of the same name re-created is another subject, and an \
+                         Approval never rebinds",
+                        binding.verified_uid, binding.restore_uid
+                    ))
+                    .with_remedy("Create a new Approval for this Restore.")
+            } else if let Some(subject) = subject_name.as_deref() {
                 if restore_name.is_some_and(|r| r != subject) {
                     state_row(CheckState::NotReady, CheckCode::ApprovalSubjectMismatch)
                         .with_scope(scope.clone())
@@ -6176,6 +6211,17 @@ pub async fn resolve(
                                         .map(Box::new),
                                     approved_plan_hash: super::restore::approval_plan_hash(&a),
                                     subject_name: Some(a.spec.subject_ref.name.clone()),
+                                    uid_binding: a
+                                        .status
+                                        .as_ref()
+                                        .and_then(|s| s.verified_subject_ref.as_ref())
+                                        .zip(obj.uid())
+                                        .map(|(bound, restore_uid)| {
+                                            Box::new(UidBinding {
+                                                verified_uid: bound.uid.clone(),
+                                                restore_uid,
+                                            })
+                                        }),
                                 }
                             }
                         }

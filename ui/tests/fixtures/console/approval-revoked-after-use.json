@@ -1,0 +1,51 @@
+{
+  "item": {
+    "approvalBytesLength": 537,
+    "approver": "https://idp.example#alice",
+    "authorization": {
+      "confirmationKeyId": "85551a95543b7e54ffd8a7ce17560f6f850c993b7a35e5ab23987f04c946ebd8",
+      "mode": "Ordinary",
+      "policyDigest": "sha256:fcfaf96141cda0c8ec9f856520d6f2989d1eccef73b307dcfdabbc6ac67490a0",
+      "policyName": "team-ordinary",
+      "requester": "https://idp.example#alice"
+    },
+    "conditions": [
+      {
+        "lastTransitionTime": "2026-09-11T08:00:00Z",
+        "message": "the key 85551a95543b7e54ffd8a7ce17560f6f850c993b7a35e5ab23987f04c946ebd8 (status.matchedKeyId) is revoked for KeyCompromise, effective 2026-09-09T13:05:00+00:00. Restore logweir-t16/r1 (UID restore-uid-1) was admitted under this Approval at 2026-09-09T13:01:00+00:00, BEFORE the revocation took effect (RecordedBeforeRevocation: the order of the two recorded facts, not a pass). The authorization, key ids, approver and Consumed record are kept for the investigation; the verdict is never green while the revocation stands",
+        "reason": "RecordedBeforeRevocation",
+        "status": "False",
+        "type": "Verified"
+      },
+      {
+        "lastTransitionTime": "2026-09-09T13:01:00Z",
+        "message": "Restore logweir-t16/r1 (UID restore-uid-1) was admitted under this verdict at 2026-09-09T13:01:00+00:00; an authorization's expiry bounds the time to admission, so the verified record beside this condition is the audit trail of that admission and is not judged again. It binds only that Restore UID and authorises nothing else",
+        "reason": "RestoreAdmitted",
+        "status": "True",
+        "type": "Consumed"
+      }
+    ],
+    "createdAt": "2026-09-09T12:55:30Z",
+    "matchedKeyId": "85551a95543b7e54ffd8a7ce17560f6f850c993b7a35e5ab23987f04c946ebd8",
+    "name": "a1",
+    "namespace": "logweir-t16",
+    "planHash": "sha256:742778e4f9dc02eced0b9d0b9dc35f3a3ab5dbef5a559375b3aec76e73006091",
+    "resourceVersion": "4081",
+    "selfAttestedRisk": false,
+    "sidecarBytesLength": 180,
+    "subjectRef": {
+      "kind": "Restore",
+      "name": "r1"
+    },
+    "ticket": "",
+    "uid": "approval-uid-1",
+    "verified": false,
+    "verifiedSubject": {
+      "kind": "Restore",
+      "name": "r1",
+      "namespace": "logweir-t16",
+      "uid": "restore-uid-1"
+    }
+  },
+  "requestId": "01M3A1REVOKEDAFTERUSE00000"
+}

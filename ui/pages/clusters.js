@@ -41,7 +41,7 @@
 // agree about what an observation means and about what is too old to present as
 // current.
 
-import { LEGACY, apiClient, mayOperate, mode } from "../client.js";
+import { CONSOLE, LEGACY, apiClient, mayOperate, mode } from "../client.js";
 import {
   active,
   cancelled,
@@ -53,6 +53,7 @@ import {
   keepDraft,
   listen,
   mutationFor,
+  owesRead,
   readDraft,
   readOptions,
   refusal,
@@ -106,8 +107,61 @@ export const CLUSTER_FORM = "cluster-form";
  *  be typed into, and a field added later is not kept unless it is named here. */
 export const CLUSTER_DRAFT_FIELDS = Object.freeze([
   "name", "servers", "role", "mode", "username", "secret", "passwordKey",
-  "tls", "tlsCaKind", "tlsCaName", "tlsCaKey",
+  "tls", "tlsCaKind", "tlsCaName", "tlsCaKey", "intent",
 ]);
+
+// ------------------------------------------------ who names the connection
+//
+// DEFECT P7 (poc-install, 2026-09-24). In console (shared) mode this form
+// offered a required "name" field and the product API threw it away: the
+// create route has no name member (`CreateConnectionRequest` is `role`,
+// `bootstrapServers`, `auth`, `markerTopic`, `additionalProperties: false`)
+// and mints `conn-<26 base32>` from the request's idempotency scope, as
+// `docs/api.md` says of every create it serves. An operator who typed
+// `source` got `conn-u5cb27icdjt5vdf6sc4wehb4nb` and was told nothing.
+//
+// The API contract is the one that holds (it names schedules `sch-...`,
+// restores `rst-...` and runs `logweir-manual-...` the same way), so the console
+// stops offering a choice it cannot honour. What the typed name used to do --
+// make a double click, a lost response or a retry ONE connection -- is done by
+// an INTENT held in the draft, exactly as "Back up now" holds its own
+// (`schedules.js`'s `RUN_NOW_DRAFT_FIELDS`): random, minted once per draft,
+// sent as the idempotency seed and never as a name.
+
+/** Whether the server, not this form, names a new connection: console mode. */
+export function connectionNamesMinted() {
+  return mode() === CONSOLE;
+}
+
+/** What the form says where the name field would be, in console mode. */
+export const CONNECTION_NAME_MINTED_SENTENCE =
+  "Through the product API (console mode) a connection is named by the server: conn- followed " +
+  "by 26 characters, derived from this request's idempotency key. There is no name to choose " +
+  "here; the created name is shown below once the connection exists, and the role is how the " +
+  "list, the schedule form and the restore wizard tell a source from a target.";
+
+/** A fresh intent for one connection draft: `logweir-ui.connection.` plus 32
+ *  random hex characters, inside the product API's 8-to-128 key budget.
+ *
+ *  A PLATFORM WITH NO RANDOM SOURCE GETS A REFUSAL, not a counter: a counter
+ *  restarts on every load and would replay one load's create in the next --
+ *  review F1/F3's defect. Called inside the mutation's executor, so the
+ *  refusal lands in the form's status region. */
+export function mintConnectionIntent() {
+  const source = globalThis.crypto;
+  if (source === undefined || source === null || typeof source.getRandomValues !== "function") {
+    throw refusal(
+      "this page will not create a connection here: minting the idempotency key that makes a " +
+        "double click or a retry ONE connection needs the platform's random source, and it is " +
+        "unavailable.",
+    );
+  }
+  let hex = "";
+  for (const byte of source.getRandomValues(new Uint8Array(16))) {
+    hex += byte.toString(16).padStart(2, "0");
+  }
+  return "logweir-ui.connection." + hex;
+}
 
 /** The credential-shaped field names this form must NEVER have, held as data
  *  so `the_cluster_form_has_no_password_input` can assert the rendered bytes
@@ -901,11 +955,16 @@ export function renderClusterForm(view) {
     "controller probes it and records the cluster id it reads from the broker.</p>" +
     "<form id=\"cluster-form\" novalidate" + (pending ? " aria-busy=\"true\"" : "") + ">" +
     "<fieldset class=\"form-body\"" + (pending ? " disabled" : "") + ">" +
-    "<div class=\"field\"><label for=\"cluster-name\">name</label>" +
-    "<input id=\"cluster-name\" name=\"name\" required value=\"" + esc(d.name) + "\"" +
-    field("cluster-name", "name") + ">" +
-    "<p class=\"help\">A Kubernetes object name: lowercase, digits and dashes.</p>" +
-    line("cluster-name", "name") + "</div>" +
+    (v.minted === true
+      // P7: NO FIELD FOR A CHOICE THE SERVER DOES NOT HONOUR.
+      ? "<div class=\"field\" id=\"cluster-name-minted\"><p class=\"label\">name</p>" +
+        "<p class=\"help\">" + esc(CONNECTION_NAME_MINTED_SENTENCE) + "</p>" +
+        line("cluster-name", "name") + "</div>"
+      : "<div class=\"field\"><label for=\"cluster-name\">name</label>" +
+        "<input id=\"cluster-name\" name=\"name\" required value=\"" + esc(d.name) + "\"" +
+        field("cluster-name", "name") + ">" +
+        "<p class=\"help\">A Kubernetes object name: lowercase, digits and dashes.</p>" +
+        line("cluster-name", "name") + "</div>") +
     "<div class=\"field\"><label for=\"cluster-servers\">bootstrap servers, comma separated</label>" +
     "<input id=\"cluster-servers\" name=\"servers\" required value=\"" + esc(d.servers) + "\"" +
     field("cluster-servers", "servers") + ">" +
@@ -1035,11 +1094,21 @@ export function clusterBody(values) {
  *  `invalid` error carrying the field messages, without a request, when the
  *  page's own checks refuse; see `createOnce` for what a retry resolves to. */
 export async function submitCluster(ns, values, deps) {
-  const problems = validateCluster(values);
+  // P7: IN CONSOLE MODE THE SERVER NAMES THE OBJECT, so there is no name to
+  // check, and `metadata.name` carries the draft's INTENT -- the one value
+  // `ui/client.js` composes the idempotency key from. `requestBody` never
+  // sends it: the create body has no name member.
+  const minted = connectionNamesMinted();
+  const v = values || {};
+  const problems = validateCluster(minted ? Object.assign({}, v, { name: "minted" }) : v);
+  if (minted && !(typeof v.intent === "string" && v.intent.length >= 8)) {
+    problems.name = "this draft carries no idempotency intent; reload the page and fill it in again";
+  }
   if (Object.keys(problems).length > 0) {
     throw invalidInput(problems);
   }
-  return createOnce(deps || API, ns, PLURAL, clusterBody(values), CLUSTER_SPEC_RULES);
+  const body = clusterBody(minted ? Object.assign({}, v, { name: v.intent }) : v);
+  return createOnce(deps || API, ns, PLURAL, body, CLUSTER_SPEC_RULES);
 }
 
 /** What the form renders from in namespace `ns`: its draft, its record and the
@@ -1055,6 +1124,7 @@ export function clusterFormView(ns) {
     draft: readDraft(key),
     state: state,
     errors: state.phase === "failed" ? fieldErrors(state.error, CLUSTER_FIELD_PATHS) : null,
+    minted: connectionNamesMinted(),
   };
 }
 
@@ -1361,7 +1431,9 @@ async function followConnectionCheck(node, ns, name, parse, lifecycle, api, obje
     : (ms) => new Promise((done) => { globalThis.setTimeout(done, ms); });
   let current = check.preflight;
   for (let read = 0; read < CONNECTION_CHECK_POLLS; read += 1) {
-    if (current === null || current === undefined || current.terminal === true) {
+    // THE CREATE ANSWER IS NOT A READ (P8): even a terminal one -- a replay --
+    // was projected without recomputing staleness, so one GET is owed.
+    if (!owesRead(current, read)) {
       return;
     }
     await wait(CONNECTION_CHECK_INTERVAL_MS);
@@ -1739,7 +1811,8 @@ export function readFormValues(form) {
 export function readClusterValues(form) {
   const e = form.elements;
   return {
-    name: String(e.name.value).trim(),
+    // ABSENT IN CONSOLE MODE (P7): the server names the connection.
+    name: e.name === undefined ? "" : String(e.name.value).trim(),
     servers: String(e.servers.value),
     role: String(e.role.value).trim(),
     mode: String(e.mode.value),
@@ -1767,7 +1840,9 @@ function wireForm(node, ns, parse, lifecycle, api) {
     if (!active(lifecycle)) {
       return;
     }
-    keepDraft(key, readClusterValues(form), CLUSTER_DRAFT_FIELDS);
+    // THE INTENT SURVIVES EVERY KEYSTROKE: it is minted on the first submit
+    // and belongs to the draft until the connection exists (P7).
+    keepDraft(key, withIntent(readClusterValues(form), readDraft(key)), CLUSTER_DRAFT_FIELDS);
     if (mutation.state.phase === "succeeded") {
       mutation.clear();
       const status = node.querySelector("#cluster-form-status");
@@ -1801,10 +1876,26 @@ function wireForm(node, ns, parse, lifecycle, api) {
     if (!active(lifecycle) || mutation.pending()) {
       return;
     }
-    const values = readClusterValues(form);
+    const values = withIntent(readClusterValues(form), readDraft(key));
     keepDraft(key, values, CLUSTER_DRAFT_FIELDS);
-    mutation.run(() => submitCluster(ns, values, api));
+    mutation.run(async () => {
+      // MINTED INSIDE THE EXECUTOR, once per draft: a double click, a retry
+      // after a timeout and a resend after a refusal all carry the same one.
+      if (connectionNamesMinted() && !values.intent) {
+        values.intent = mintConnectionIntent();
+        keepDraft(key, values, CLUSTER_DRAFT_FIELDS);
+      }
+      return submitCluster(ns, values, api);
+    });
   }, lifecycle);
+}
+
+/** `values` carrying the intent `draft` already holds, if it holds one. */
+function withIntent(values, draft) {
+  const intent = (draft || {}).intent;
+  return typeof intent === "string" && intent.length > 0
+    ? Object.assign(values, { intent: intent })
+    : values;
 }
 
 /** Moves focus to the first field marked invalid, or to the status region, so

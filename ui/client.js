@@ -2075,15 +2075,23 @@ const consoleChecks = Object.freeze({
     const decoded = decodeConsoleItem("destinations", answer);
     return { item: decoded.value.item };
   },
-  async testDestination(ns, name, request) {
+  async testDestination(ns, name, request, options) {
     requireOperator(ns, "destinations", "test destination access");
     const body = sending("destinations:test", request || {});
+    // THE ATTEMPT, WHEN THE PAGE MINTS ONE (P8's class, review F1's rule): a
+    // DELIBERATE second test -- the operator fixed a Secret and presses Test
+    // access again -- is a new check. Without it the key was the destination
+    // and the roles alone, so the second press REPLAYED the first Preflight for
+    // as long as it lived and showed its old verdict as the new one.
+    const attempt = (options || {}).attempt;
+    const subject = name + "." + rolesTag(body.roles) +
+      (typeof attempt === "string" && attempt.length > 0 ? "." + digest32(attempt) : "");
     const answer = await consoleAction(ns, "destinations:test", name, body, {
       // THE KEY IS A FUNCTION OF WHAT IS BEING TESTED AND OF WHICH ROLES, so a
       // double click is one Preflight and a test of a different role set is
       // another. A key that ignored the roles would answer the second request
       // with the first one's result.
-      idempotencyKey: idempotencyKey("destinations:test", ns, name + "." + rolesTag(body.roles)),
+      idempotencyKey: idempotencyKey("destinations:test", ns, subject),
       token: tokenNow(),
     });
     const decoded = decodeConsoleItem("preflights", answer);
@@ -2610,8 +2618,8 @@ export function apiClient() {
     updateDestinationAccess(ns, name, request) {
       return dispatchChecks((api) => api.updateDestinationAccess(ns, name, request));
     },
-    testDestination(ns, name, request) {
-      return dispatchChecks((api) => api.testDestination(ns, name, request));
+    testDestination(ns, name, request, options) {
+      return dispatchChecks((api) => api.testDestination(ns, name, request, options));
     },
     destinationUsage(ns, name, options) {
       return dispatchChecks((api) => api.destinationUsage(ns, name, options));

@@ -137,7 +137,7 @@ anything not listed is `404`.
 | `GET /api/v1/session` | The actor, the explicit namespace grants and the capability flags. |
 | `GET /api/v1/namespaces` | The configured grants. It never lists core `Namespace` objects. |
 | `GET /api/v1/namespaces/{ns}/connections[/{name}]` | `KafkaCluster` projections: role, bootstrap addresses, auth mode, username, TLS, the credential Secret's **name**, and the controller's reachability observation. |
-| `POST /api/v1/namespaces/{ns}/connections` | Create a `KafkaCluster` that references an existing credential Secret by name. |
+| `POST /api/v1/namespaces/{ns}/connections` | Create a `KafkaCluster` that references an existing credential Secret by name. The body has no name member: the object is named `conn-<26 base32>` from the idempotency scope, and the response carries that name. |
 | `GET /api/v1/cadence-previews` | What a cron expression — or a preset — will actually do in a time zone, before anything is saved. No namespace, no Kubernetes call. |
 | `GET /api/v1/namespaces/{ns}/schedules[/{name}]` | `BackupSchedule` projections, with the cadence policy, the revision and the controller's own next runs. |
 | `POST /api/v1/namespaces/{ns}/schedules` | Create a `BackupSchedule` from the whole policy: cadence and zone, a named or dynamic selection, an inline archive **or** a saved destination, deadlines, catch-up, retries and retention. |

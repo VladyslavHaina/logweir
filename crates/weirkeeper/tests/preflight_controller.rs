@@ -1280,6 +1280,7 @@ fn found_approval_with(
         approver_key_window: None,
         approved_plan_hash: approved_hash.map(str::to_string),
         subject_name: Some("r-1".to_string()),
+        uid_binding: None,
     }
 }
 
@@ -1296,6 +1297,7 @@ fn windowed(facts: ApprovalFacts, key_id: &str, not_after: DateTime<Utc>) -> App
         matched_key_id,
         approved_plan_hash,
         subject_name,
+        uid_binding,
         ..
     } = facts
     else {
@@ -1316,6 +1318,7 @@ fn windowed(facts: ApprovalFacts, key_id: &str, not_after: DateTime<Utc>) -> App
         })),
         approved_plan_hash,
         subject_name,
+        uid_binding,
     }
 }
 
@@ -1584,6 +1587,76 @@ fn an_approval_that_names_another_subject_is_a_subject_mismatch() {
         now(),
     );
     assert_eq!(state_row(&rows).code, CheckCode::ApprovalSubjectMismatch);
+}
+
+/// **Review L2 (poc-fixes-2).** A consumed Approval is never re-read by its
+/// controller (P9), so after its Restore is deleted and re-created under the
+/// same name it still says `verified: true` — about the OLD object. The
+/// blocking row must compare the UID the verdict was recorded for with the
+/// Restore this check is about, or it reads `ready` on the way to the Restore
+/// controller's terminal `ApprovalSubjectMismatch`.
+///
+/// NEGATIVE CONTROL: the same facts with matching UIDs are `ready`.
+#[test]
+fn a_verdict_recorded_for_another_restore_uid_is_a_subject_mismatch() {
+    let binding = |verified: &str, restore: &str| {
+        let ApprovalFacts::Found {
+            name,
+            uid,
+            resource_version,
+            verified: v,
+            reason,
+            message,
+            matched_key_id,
+            approver_key_window,
+            approved_plan_hash,
+            subject_name,
+            ..
+        } = found_approval(Some(true), Some("sha256:aa"))
+        else {
+            unreachable!()
+        };
+        ApprovalFacts::Found {
+            name,
+            uid,
+            resource_version,
+            verified: v,
+            reason,
+            message,
+            matched_key_id,
+            approver_key_window,
+            approved_plan_hash,
+            subject_name,
+            uid_binding: Some(Box::new(pf::UidBinding {
+                verified_uid: verified.to_string(),
+                restore_uid: restore.to_string(),
+            })),
+        }
+    };
+    let recreated = pf::approval_rows(
+        &binding("restore-uid-old", "restore-uid-new"),
+        "sha256:aa",
+        Some("r-1"),
+        None,
+        now(),
+    );
+    let state = state_row(&recreated);
+    assert_eq!(state.code, CheckCode::ApprovalSubjectMismatch);
+    assert_eq!(state.state, CheckState::NotReady);
+    assert!(
+        state.message.contains("restore-uid-old") && state.message.contains("restore-uid-new"),
+        "{}",
+        state.message
+    );
+    let same = pf::approval_rows(
+        &binding("restore-uid-new", "restore-uid-new"),
+        "sha256:aa",
+        Some("r-1"),
+        None,
+        now(),
+    );
+    assert_eq!(state_row(&same).code, CheckCode::ApprovalVerified);
+    assert_eq!(state_row(&same).state, CheckState::Ready);
 }
 
 /// **APPROVAL-KEY-WINDOW-UNPUBLISHED, deliverable 2.** The advisory row reads

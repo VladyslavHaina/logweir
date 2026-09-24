@@ -869,20 +869,26 @@ pub fn check_restore_authorization(
 ) -> Result<(), AuthorizationRefusal> {
     check_binding(doc, expected, policy)?;
     check_window_shape(doc, policy)?;
+    // NO CLOCK IN EITHER MESSAGE (defect P9, poc-install 2026-09-24). The
+    // `Approval` controller writes this text into a condition and skips the
+    // write only when the status is byte-for-byte unchanged, so a message that
+    // named `now` was a different status on every pass: each pass wrote, the
+    // write woke the controller's own watch, and one expired `Approval` logged
+    // `approval refused` every ~2 s for ever. The boundary that failed is the
+    // stable fact; the instant it was judged is the condition's
+    // `lastTransitionTime`.
     if doc.issued_at > now + chrono::Duration::seconds(MAX_ISSUED_AT_SKEW_SECONDS) {
         return Err(AuthorizationRefusal::WindowInvalid(format!(
             "the authorization document was issued at {}, more than {MAX_ISSUED_AT_SKEW_SECONDS}s \
-             after this verifier's clock ({})",
+             ahead of this verifier's clock",
             doc.issued_at.to_rfc3339(),
-            now.to_rfc3339()
         )));
     }
     if doc.expires_at <= now {
         return Err(AuthorizationRefusal::Expired(format!(
-            "the authorization expired at {} (it is now {}); an expired confirmation or approval \
-             authorises nothing new — create a new Restore",
+            "the authorization expired at {}; an expired confirmation or approval authorises \
+             nothing new — create a new Restore",
             doc.expires_at.to_rfc3339(),
-            now.to_rfc3339()
         )));
     }
     Ok(())
