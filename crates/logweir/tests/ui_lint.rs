@@ -74,7 +74,7 @@ const VIEWER_AUTHORITY: &str = "viewer's entire cluster authority";
 /// has nothing to do with the `kafka-backup` subcommand GC3 denies. The escape
 /// sits on the element's own line because that gate matches per physical line
 /// -- which is also why this paragraph spells the name without its quotes.
-const API_EXPORTS: [&str; 28] = [
+const API_EXPORTS: [&str; 29] = [
     "GROUP",
     "VERSION",
     "WRITABLE_PLURALS",
@@ -92,6 +92,11 @@ const API_EXPORTS: [&str; 28] = [
     // here is a generic request helper: each names one route.
     "CONSOLE_WRITABLE_PLURALS",
     "session",
+    // MCP-5: sign out. `POST /api/v1/session/logout`, a WRITE like every
+    // other -- the session's synchroniser token, `application/json`, the
+    // exact Origin -- which clears the session cookie server side. It names
+    // one route and takes no identifier from a caller.
+    "consoleLogout",
     "consoleList",
     "consoleGet",
     "consoleSub",

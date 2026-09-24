@@ -243,7 +243,7 @@ test("class_a_every_product_api_write_in_ui_takes_its_token_from_the_session", (
   // or `sessionToken()` in `ui/client.js`'s module memory -- and nothing a
   // caller could hand in. Found by scanning, so a fifth write added later
   // without a token fails here rather than as a 403 in front of an operator.
-  const WRITES = /\b(consoleCreate|consoleAction|consoleSetSuspension|consoleSchedulePolicy)\)?\(/g;
+  const WRITES = /\b(consoleCreate|consoleAction|consoleSetSuspension|consoleSchedulePolicy|consoleLogout)\)?\(/g;
   const SESSION_TOKEN = /\btoken:\s*(tokenNow\(\)|sessionToken\(\)|decided === null \? null : decided\.token)/;
   // EVERY MODULE THE PAGE LOADS, read off the directory so a new one is in
   // scope the day it lands; `api.js` is where the four are defined.

@@ -51,6 +51,11 @@
               of its own.
             </p>
           </div>
+          <!-- WHO IS SIGNED IN, AND SIGN OUT (MCP-5). Empty until the mode
+               probe answers, and empty behind `kubectl proxy`, whose identity
+               is the kubeconfig the tagline names; app.js
+               (`renderIdentity`) fills it from `/api/v1/session`. -->
+          <div class="session" id="session-slot"></div>
         </div>
       </div>
       <div id="nav-slot"></div>

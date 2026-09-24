@@ -230,18 +230,104 @@ export function disableKeepingFocus(control, disabled, fallback) {
   control.disabled = disabled === true;
 }
 
-/** Renders an error from `api.js` as the API server reported it: its own
- *  status code, its own `reason`, its own `message`, and nothing added.
+/** THE TWO PROBLEM CODES THAT MEAN "SIGN IN" (MCP-1, MCP-4): the product API's
+ *  `401` for a request with no session, and for one whose session expired
+ *  (`docs/api.md`, *The session and the CSRF token*). `ui/client.js` reads
+ *  the boot probe's answer against this list, and the error box offers a
+ *  Sign in link for exactly these -- never for a Kubernetes `401`, which is a
+ *  `kubectl proxy` whose own credential failed and which no sign-in fixes. */
+export const SIGN_IN_CODES = Object.freeze(["unauthenticated", "session_expired"]);
+
+/** The console's sign-in route with `next` pointing back at `hash`: the
+ *  product API sends the browser there after the provider round trip
+ *  (`/auth/login?next=`, which it accepts only as a path under `/ui/`). A
+ *  path on this origin, never a URL. */
+export function signInHref(hash) {
+  const h = typeof hash === "string" && hash.charAt(0) === "#" ? hash : "";
+  return "/auth/login?next=" + encodeURIComponent("/ui/" + h);
+}
+
+// The address the reader is on, for the Sign in link's `next`; empty where
+// there is no window (the node suites).
+function hereHash() {
+  return typeof window !== "undefined" && window.location ? String(window.location.hash || "") : "";
+}
+
+// The headline an error box leads with, in words (MCP-4). The server's own
+// status, code and message are still shown, verbatim, underneath: this adds a
+// sentence a person reads first and changes nothing they could search for.
+function errorTitle(status, reason) {
+  if (SIGN_IN_CODES.indexOf(reason) !== -1) {
+    return reason === "session_expired" ? "Your session has ended" : "You are not signed in";
+  }
+  if (status === 401) {
+    return "Not authenticated";
+  }
+  if (status === 403) {
+    return "You do not have permission to do this";
+  }
+  if (status === 404) {
+    return "Not found";
+  }
+  if (status === 409) {
+    return "This conflicts with what already exists";
+  }
+  if (status === 412) {
+    return "This changed since the page read it";
+  }
+  if (status === 400 || status === 422) {
+    return "The request was refused";
+  }
+  if (status === 429) {
+    return "Too many requests";
+  }
+  if (typeof status === "number" && status >= 500) {
+    return "The server could not complete this";
+  }
+  if (reason === "ContractViolation") {
+    return "The server's answer was not what this page expected";
+  }
+  return "This could not be done";
+}
+
+/** What an error box says, in three parts: a headline in words, the server's
+ *  own message, and the status, code and request id a reader can quote --
+ *  plus whether to offer a sign-in. Pure. */
+export function errorParts(error) {
+  const e = error || {};
+  const status = typeof e.status === "number" ? e.status : 0;
+  const reason = typeof e.reason === "string" ? e.reason : "";
+  const message = e.message ? String(e.message) : String(error);
+  const codeLine = status > 0 ? "HTTP " + String(status) : "";
+  const detail = [
+    [codeLine, reason].filter((part) => part.length > 0).join(" "),
+    typeof e.requestId === "string" && e.requestId.length > 0 ? "request " + e.requestId : "",
+  ].filter((part) => part.length > 0).join(" \u00b7 ");
+  return {
+    title: errorTitle(status, reason),
+    message: message,
+    detail: detail,
+    signIn: SIGN_IN_CODES.indexOf(reason) !== -1,
+  };
+}
+
+/** Renders an error from `api.js`: a headline in words, then the API server's
+ *  own message, then its status, code and request id, verbatim (MCP-4).
  *
- *  A 403 here is the API server's 403 about the viewer's own RBAC. This
- *  function neither softens it nor explains it away. */
+ *  A 403 here is still the API server's 403 about the viewer's own authority.
+ *  This function neither softens it nor explains it away; it says in words
+ *  what the number means before it shows the number. A sign-in refusal from
+ *  the product API carries a Sign in link that returns to this address. */
 export function errorBox(error) {
-  const status = error && error.status ? String(error.status) : "error";
-  const reason = error && error.reason ? String(error.reason) : "";
-  const message = error && error.message ? String(error.message) : String(error);
+  const parts = errorParts(error);
   return el("div", { class: "error", role: "alert" }, [
-    el("span", { class: "error-status" }, reason.length > 0 ? status + " " + reason : status),
-    el("p", { class: "error-message" }, message),
+    el("p", { class: "error-title" }, parts.title),
+    el("p", { class: "error-message" }, parts.message),
+    parts.detail.length > 0 ? el("span", { class: "error-status" }, parts.detail) : null,
+    parts.signIn
+      ? el("p", { class: "actions" },
+        el("a", { class: "button primary", href: signInHref(hereHash()) }, "Sign in"))
+      : null,
   ]);
 }
 
@@ -1673,18 +1759,24 @@ export function independentCheck(payloadType, bucket, documentKey, sidecarKey, d
 // the behaviour suite reads exactly what a browser adopts.
 // ---------------------------------------------------------------------------
 
-/** An error from `api.js` as a string: the twin of [`errorBox`], with the API
- *  server's own status, reason and message, escaped and nothing added.
- *  `live` false drops `role="alert"` for an error nested inside a region that
- *  already announces itself. */
+/** An error from `api.js` as a string: the twin of [`errorBox`] -- the same
+ *  headline, the server's own message and its status, code and request id,
+ *  escaped. `live` false drops `role="alert"` for an error nested inside a
+ *  region that already announces itself. */
 export function errorBlock(error, live) {
-  const status = error && error.status ? String(error.status) : "error";
-  const reason = error && error.reason ? String(error.reason) : "";
-  const message = error && error.message ? String(error.message) : String(error);
+  const parts = errorParts(error);
   return (
     "<div class=\"error\"" + (live === false ? "" : " role=\"alert\"") + ">" +
-    "<span class=\"error-status\">" + esc(reason.length > 0 ? status + " " + reason : status) +
-    "</span><p class=\"error-message\">" + esc(message) + "</p></div>"
+    "<p class=\"error-title\">" + esc(parts.title) + "</p>" +
+    "<p class=\"error-message\">" + esc(parts.message) + "</p>" +
+    (parts.detail.length > 0
+      ? "<span class=\"error-status\">" + esc(parts.detail) + "</span>"
+      : "") +
+    (parts.signIn
+      ? "<p class=\"actions\"><a class=\"button primary\" href=\"" + esc(signInHref(hereHash())) +
+        "\">Sign in</a></p>"
+      : "") +
+    "</div>"
   );
 }
 

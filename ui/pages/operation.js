@@ -734,6 +734,30 @@ export function operationAnnouncement(f, name) {
   );
 }
 
+/** WHAT `#/operations` SAYS WHEN THE ADDRESS NAMES NO RUN (MCP-19). This route
+ *  is one run's page and is reached FROM a run, so a visit without one is
+ *  pointed at the two lists every run is listed in, rather than told that
+ *  "the address bar named none". A kind this route does not serve is named.
+ *  Pure. */
+export function renderNoOperation(ns, kind) {
+  const n = encodeURIComponent(String(ns || ""));
+  const k = String(kind || "");
+  return (
+    "<h2>Operation</h2>" +
+    "<div class=\"empty-state\" id=\"no-operation\">" +
+    "<p class=\"note\">" +
+    (k.length === 0
+      ? "This page follows one backup or restore run. Open a run from its list to see where it " +
+        "is, why, what it produced and whether its evidence verified."
+      : "This page follows backup and restore runs, and the link that opened it named " +
+        "&quot;" + esc(k) + "&quot;, which is neither.") +
+    "</p>" +
+    "<p class=\"actions\"><a class=\"button\" href=\"#/backups?ns=" + esc(n) +
+    "\">Backups</a><a class=\"button\" href=\"#/history?ns=" + esc(n) +
+    "\">History</a></p></div>"
+  );
+}
+
 // --------------------------------------------------------------- mount half
 
 /** Reads one operation, renders it, and follows it until it settles. */
@@ -742,11 +766,7 @@ export async function mountOperation(node, ns, params, parse, deps, lifecycle) {
   const kind = String(p.kind || "");
   const d = deps || {};
   if (OPERATION_KINDS.indexOf(kind) === -1) {
-    replace(node, parse(
-      "<h2>Operation</h2><p class=\"complaint\">This route serves " +
-      esc(OPERATION_KINDS.join(" and ")) + " operations. The address bar named " +
-      esc(kind.length === 0 ? "none" : kind) + ".</p>",
-    ));
+    replace(node, parse(renderNoOperation(ns, kind)));
     return null;
   }
   const console_ = inConsole(d.modeOf);

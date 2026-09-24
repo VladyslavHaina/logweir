@@ -533,6 +533,56 @@ ul {
   color: var(--lw-header-text);
 }
 
+/* THE SESSION INDICATOR (MCP-5): who is signed in, their role in the chosen
+ * namespace, and Sign out -- at the right of the app header, as Clarity's
+ * header actions sit. */
+.session {
+  margin-left: auto;
+  align-self: center;
+}
+
+.session-identity {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--cds-global-space-5) var(--cds-global-space-6);
+}
+
+.session-who {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  text-align: right;
+}
+
+.session-name {
+  color: var(--lw-header-text);
+  font-weight: var(--cds-global-typography-font-weight-semibold);
+  overflow-wrap: anywhere;
+}
+
+.session-role {
+  color: var(--lw-header-text-muted);
+  font-size: var(--cds-global-typography-secondary-font-size);
+}
+
+.masthead .session-signout {
+  border-color: var(--lw-header-text-muted);
+  background: transparent;
+  color: var(--lw-header-text);
+}
+
+.masthead .session-signout:hover {
+  border-color: var(--lw-header-text);
+  background: var(--lw-header-background);
+  color: var(--lw-header-text);
+}
+
+.session-error {
+  margin: var(--cds-global-space-5) 0 0;
+}
+
 .tagline {
   margin: var(--cds-global-space-2) 0 0;
   max-width: var(--lw-measure);
@@ -576,9 +626,14 @@ ul {
     background-color var(--cds-global-animation-duration-quickest) ease;
 }
 
-.nav-link:hover {
-  color: var(--cds-alias-object-interaction-color-hover);
-  background: var(--cds-alias-object-interaction-background-hover);
+/* HOVER ONLY WHERE THERE IS A POINTER THAT HOVERS (MCP-34). A touch screen
+ * reports the last tapped element as hovered until the next tap, so on a phone
+ * the tab just left kept its hover background. */
+@media (hover: hover) {
+  .nav-link:hover {
+    color: var(--cds-alias-object-interaction-color-hover);
+    background: var(--cds-alias-object-interaction-background-hover);
+  }
 }
 
 .nav-link-current {
@@ -615,6 +670,17 @@ main {
 
 main:focus {
   outline: none;
+}
+
+/* An instruction the page waits on, with no spinner: nothing is loading
+ * (MCP-2). */
+.prompt {
+  color: var(--cds-alias-typography-color-300);
+}
+
+/* The one page a signed-out visitor sees (MCP-1). */
+.signin {
+  max-width: var(--lw-measure);
 }
 
 main > h2 + .blurb,
@@ -1405,19 +1471,29 @@ main section section,
   max-width: var(--lw-measure);
 }
 
+/* An error box leads with a headline in words, then the server's own message,
+ * then the status, code and request id a reader can quote (MCP-4). */
+.error-title {
+  margin: 0 0 var(--cds-global-space-3);
+  font-weight: var(--cds-global-typography-font-weight-semibold);
+}
+
 .error-status {
   display: block;
+  margin-top: var(--cds-global-space-3);
+  color: var(--cds-alias-typography-color-300);
   font-size: var(--cds-global-typography-font-size-2);
-  font-weight: var(--cds-global-typography-font-weight-bold);
   letter-spacing: var(--cds-global-typography-smallcaption-letter-spacing);
-  text-transform: uppercase;
-  margin-bottom: var(--cds-global-space-3);
 }
 
 .error-message {
   margin: 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.error .actions {
+  margin: var(--cds-global-space-5) 0 0;
 }
 
 .refusal-block code {
@@ -1618,6 +1694,7 @@ button {
   letter-spacing: var(--cds-global-typography-smallcaption-letter-spacing);
   text-transform: uppercase;
   line-height: 1;
+  white-space: nowrap;
   cursor: pointer;
   transition: background-color var(--cds-global-animation-duration-quickest) ease,
     color var(--cds-global-animation-duration-quickest) ease,
@@ -1636,6 +1713,34 @@ button.primary {
 }
 
 button.primary:hover {
+  background: var(--cds-alias-object-interaction-info-hover);
+  border-color: var(--cds-alias-object-interaction-info-hover);
+  color: var(--cds-alias-typography-color-100);
+}
+
+/* A LINK THAT IS AN ACTION looks like the button it is (Sign in). */
+a.button {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--cds-alias-object-interaction-touch-target);
+  padding: var(--lw-button-padding);
+  border: var(--cds-alias-object-border-width-100) solid var(--cds-alias-status-info);
+  border-radius: var(--cds-alias-object-border-radius-100);
+  color: var(--cds-alias-status-info);
+  font-size: var(--cds-global-typography-font-size-2);
+  font-weight: var(--cds-global-typography-font-weight-semibold);
+  letter-spacing: var(--cds-global-typography-smallcaption-letter-spacing);
+  text-transform: uppercase;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+a.button.primary {
+  background: var(--cds-alias-status-info);
+  color: var(--cds-alias-typography-color-100);
+}
+
+a.button.primary:hover {
   background: var(--cds-alias-object-interaction-info-hover);
   border-color: var(--cds-alias-object-interaction-info-hover);
   color: var(--cds-alias-typography-color-100);
@@ -1921,6 +2026,16 @@ input:focus-visible,
 select:focus-visible,
 textarea:focus-visible {
   border-bottom-color: var(--cds-alias-status-info);
+  box-shadow: none;
+}
+
+/* THE VIEW TAKES FOCUS FOR A SCREEN READER, NOT FOR A KEYBOARD (MCP-3). A
+ * route change moves focus to it (`app.js` `focusView`) so the next Tab starts
+ * inside the new page; it is not a control, so it draws no ring -- the
+ * `[tabindex]:focus-visible` rule above would otherwise put a heavy rectangle
+ * around the whole content on every navigation. */
+#view-slot[tabindex]:focus-visible {
+  outline: none;
   box-shadow: none;
 }
 

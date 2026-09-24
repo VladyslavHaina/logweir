@@ -45,6 +45,7 @@ import {
   consoleCreate,
   consoleGet,
   consoleList,
+  consoleLogout,
   consoleOperation,
   consoleSchedulePolicy,
   consoleSetSuspension,
@@ -81,13 +82,31 @@ import {
   isContractFailure,
 } from "./contract.js";
 import { preparedFor } from "./plan.js";
-import { basisAllowsGreen, TRUST_BASIS_NOT_OBSERVED } from "./render.js";
+import { SIGN_IN_CODES, basisAllowsGreen, TRUST_BASIS_NOT_OBSERVED } from "./render.js";
 import { causesFrom, validateRequest } from "./validate.js";
 
 /** The two modes, by name. */
 export const LEGACY = "legacy";
 /** @see LEGACY */
 export const CONSOLE = "console";
+
+/** THE SHARED CONSOLE WITH NOBODY SIGNED IN (MCP-1, MCP-4). Not a third API:
+ *  the page IS behind `logweir-api`, and `GET /api/v1/session` said so by
+ *  answering `401` with its own problem document. Before this the page read
+ *  that refusal as "not the product API" and fell back to legacy mode, so a
+ *  signed-out visitor was asked for a namespace and then shown a raw problem
+ *  document from a `/apis/...` path the console does not serve. In this mode
+ *  the shell renders a sign-in page on every route and no page is mounted;
+ *  every read and write is refused here, by name, before the network. */
+export const SIGNED_OUT = "signedOut";
+
+/** The two problem codes a `401` from `/api/v1/session` carries (`docs/api.md`,
+ *  *The session and the CSRF token*): no session cookie at all, and one that
+ *  expired or no longer authenticates. Anything else -- a Kubernetes `Status`
+ *  from a `kubectl proxy` whose own credential failed, an HTML page, a body
+ *  that is not a problem document -- is NOT the product API asking for a
+ *  sign-in, and stays legacy mode. */
+export const SIGNED_OUT_CODES = SIGN_IN_CODES;
 
 /** How long the boot probe waits before deciding this is legacy mode. A page
  *  behind a proxy that never answers must still render: the refusal IS the
@@ -174,8 +193,11 @@ export function bindingRevision() {
 
 /** Whether `flag` is granted for `ns`. In legacy mode every capability is
  *  "granted" here and the API server's RBAC is the gate, which is the whole
- *  authorisation story of that mode. */
+ *  authorisation story of that mode. Signed out, nothing is. */
 export function granted(ns, flag) {
+  if (decided !== null && decided.mode === SIGNED_OUT) {
+    return false;
+  }
   if (decided === null || decided.mode !== CONSOLE) {
     return true;
   }
@@ -245,6 +267,10 @@ async function probe(deps) {
       }, PROBE_TIMEOUT_MS);
     });
     const answer = await Promise.race([asked, bounded]);
+    if (answer !== null && answer !== undefined && answer.ok !== true &&
+      signedOutCode(answer) !== null) {
+      return signedOutRecord(signedOutCode(answer));
+    }
     if (answer === null || answer === undefined || answer.ok !== true) {
       return legacyRecord();
     }
@@ -262,6 +288,120 @@ async function probe(deps) {
       globalThis.clearTimeout(timer);
     }
   }
+}
+
+/** The problem code of a `401` the PRODUCT API gave `/session`, or `null`.
+ *
+ *  Read narrowly on purpose. A `401` alone is not enough: `kubectl proxy`
+ *  forwards `/api/v1/session` to kube-apiserver, which answers `401` with a
+ *  Kubernetes `Status` when the proxy's own credential has expired -- a legacy
+ *  page with a broken kubeconfig, not a console asking for a sign-in. The
+ *  product API's refusal is a problem document whose `code` is one of
+ *  [`SIGNED_OUT_CODES`]; a `Status` carries a NUMBER in `code`. */
+export function signedOutCode(answer) {
+  const a = answer || {};
+  const body = a.body;
+  if (a.status !== 401 || body === null || typeof body !== "object") {
+    return null;
+  }
+  return typeof body.code === "string" && SIGNED_OUT_CODES.indexOf(body.code) !== -1
+    ? body.code
+    : null;
+}
+
+function signedOutRecord(code) {
+  return Object.freeze({
+    mode: SIGNED_OUT,
+    session: null,
+    namespaces: Object.freeze([]),
+    grants: Object.freeze(Object.create(null)),
+    roles: Object.freeze(Object.create(null)),
+    bindingRevision: "",
+    token: null,
+    unknown: Object.freeze([]),
+    // Which of the two refusals it was, so the sign-in page can say "your
+    // session ended" rather than "you are not signed in" when that is true.
+    signedOut: code,
+  });
+}
+
+/** `unauthenticated` or `session_expired` when the shared console has nobody
+ *  signed in, and `null` in every other mode and before the probe. */
+export function signedOutReason() {
+  return decided === null || decided.mode !== SIGNED_OUT ? null : decided.signedOut;
+}
+
+/** WHO THIS PAGE IS SIGNED IN AS, for the header (MCP-5), or `null` when there
+ *  is no session to describe (legacy mode, signed out, before the probe).
+ *
+ *  Every value is the session document's own: the display claim, the subject,
+ *  the authentication mode and the product roles the binding table granted in
+ *  `ns`. Nothing is inferred from capability flags. */
+export function sessionIdentity(ns) {
+  if (decided === null || decided.mode !== CONSOLE || decided.session === null) {
+    return null;
+  }
+  const actor = decided.session.actor || {};
+  const display = typeof actor.displayName === "string" && actor.displayName.length > 0
+    ? actor.displayName
+    : String(actor.subject || actor.id || "");
+  return Object.freeze({
+    displayName: display,
+    subject: String(actor.subject || ""),
+    authenticationMode: String(decided.session.authenticationMode || ""),
+    roles: Object.freeze(rolesFor(ns)),
+    namespace: typeof ns === "string" ? ns : "",
+    // A localAdmin console has no sign-in and no sign-out: the one actor is the
+    // administrator who started it on loopback (`docs/api.md`).
+    canSignOut: decided.session.authenticationMode === "oidc" && decided.token !== null,
+  });
+}
+
+/** Whether the session publishes `flag` in ANY granted namespace (the
+ *  document's top-level `capabilities`, the union the API computes). `true`
+ *  in legacy mode, where the API server's RBAC is the gate and the page cannot
+ *  know; `false` signed out. For the NAVIGATION only (MCP-33): a hidden tab is
+ *  a convenience, and every route still refuses by name when it is reached. */
+export function grantedAnywhere(flag) {
+  if (decided === null) {
+    return true;
+  }
+  if (decided.mode === SIGNED_OUT) {
+    return false;
+  }
+  if (decided.mode !== CONSOLE) {
+    return true;
+  }
+  const top = (decided.session || {}).capabilities || {};
+  return top[flag] === true;
+}
+
+/** SIGN OUT (MCP-5): `POST /api/v1/session/logout`, an unsafe method, so it
+ *  carries the session's synchroniser token exactly as every other write does
+ *  (`docs/api.md`: "it needs the exact `Origin`, `application/json` and the
+ *  token like any other mutation"). Resolves once the product API has cleared
+ *  the cookie; the caller reloads, and the next probe answers `401`. Refused
+ *  by name in any mode with no session to end. */
+export async function signOut() {
+  if (decided === null || decided.mode !== CONSOLE || decided.token === null) {
+    throw noRoute("there is no signed-in session on this page to sign out of.");
+  }
+  await consoleLogout({ token: tokenNow() });
+  return true;
+}
+
+/** The refusal every call gets while nobody is signed in. `status` is 401, the
+ *  answer the product API would give, and nothing was sent. */
+export function signedOutError() {
+  const error = new Error(
+    "You are not signed in to the Logweir console, so nothing was read or sent. Sign in to " +
+      "continue.",
+  );
+  error.kind = "refused";
+  error.status = 401;
+  error.reason = "unauthenticated";
+  error.code = "unauthenticated";
+  return error;
 }
 
 function legacyRecord() {
@@ -2677,12 +2817,34 @@ export function apiClient() {
 function dispatch(call) {
   if (decided !== null) {
     try {
-      return Promise.resolve(call(decided.mode === CONSOLE ? consoleApi : legacyApi));
+      return Promise.resolve(call(implementation(decided, consoleApi, legacyApi, signedOutApi)));
     } catch (refused) {
       return Promise.reject(refused);
     }
   }
-  return ensure().then((record) => call(record.mode === CONSOLE ? consoleApi : legacyApi));
+  return ensure().then((record) =>
+    call(implementation(record, consoleApi, legacyApi, signedOutApi)));
+}
+
+// WHICH IMPLEMENTATION A DECIDED RECORD USES. Signed out is NOT legacy (MCP-4):
+// the page is behind the product API, so a legacy `/apis/...` read would be
+// answered by a console that does not serve that path.
+function implementation(record, consoleImpl, legacyImpl, signedOutImpl) {
+  if (record.mode === CONSOLE) {
+    return consoleImpl;
+  }
+  return record.mode === SIGNED_OUT ? signedOutImpl : legacyImpl;
+}
+
+// Every method of `impl`, answering the signed-out refusal and sending nothing.
+function refusingAll(impl) {
+  const out = {};
+  for (const key of Object.keys(impl)) {
+    out[key] = () => {
+      throw signedOutError();
+    };
+  }
+  return Object.freeze(out);
 }
 
 // The D2 half dispatches exactly as the five older kinds do, over its own pair
@@ -2692,13 +2854,19 @@ function dispatch(call) {
 function dispatchChecks(call) {
   if (decided !== null) {
     try {
-      return Promise.resolve(call(decided.mode === CONSOLE ? consoleChecks : legacyChecks));
+      return Promise.resolve(call(implementation(decided, consoleChecks, legacyChecks,
+        signedOutChecks)));
     } catch (refused) {
       return Promise.reject(refused);
     }
   }
-  return ensure().then((record) => call(record.mode === CONSOLE ? consoleChecks : legacyChecks));
+  return ensure().then((record) =>
+    call(implementation(record, consoleChecks, legacyChecks, signedOutChecks)));
 }
+
+// The signed-out halves: the same method names, each refusing by name.
+const signedOutApi = refusingAll(consoleApi);
+const signedOutChecks = refusingAll(consoleChecks);
 
 /** The two implementations, by name, for the suite and for a reader who wants
  *  to see one without the other. A page never picks: `apiClient` does. */
