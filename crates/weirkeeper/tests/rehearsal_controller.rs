@@ -3852,8 +3852,9 @@ fn store_routes() -> Vec<Route> {
     happy_routes()
         .into_iter()
         .filter(|r| {
-            !(r.method == "PATCH" && r.path_suffix == SCHEDULE_STATUS_PATH)
-                && !(r.method == "POST" && r.path_suffix == RESTORES_PATH)
+            let stateful = (r.method == "PATCH" && r.path_suffix == SCHEDULE_STATUS_PATH)
+                || (r.method == "POST" && r.path_suffix == RESTORES_PATH);
+            !stateful
         })
         .collect()
 }

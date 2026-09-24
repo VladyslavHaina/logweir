@@ -953,7 +953,7 @@ pub async fn reconcile_schedule(
         (Some(name), _, _) => (deleted_observation(name), None, None),
         (None, Some(child), Reservation::Adopted(adopted)) => (
             observe(Some(child), now),
-            Some(adopted.clone()),
+            Some((**adopted).clone()),
             Some(adopted.name_any()),
         ),
         (None, Some(child), _) => (observe(Some(child), now), Some(child.clone()), None),
@@ -963,7 +963,7 @@ pub async fn reconcile_schedule(
             // releases both refs, so it is NOT promoted to active first — a
             // promotion would have it recorded a second time next pass.
             let recovered = (!seen.decided).then(|| adopted.name_any());
-            (seen, Some(adopted.clone()), recovered)
+            (seen, Some((**adopted).clone()), recovered)
         }
         (None, None, Reservation::Missing(name)) => (deleted_observation(name), None, None),
         (None, None, _) => (Observation::default(), None, None),
@@ -1472,7 +1472,7 @@ enum Reservation {
     None,
     /// The reserved child exists and is this schedule's own: the pass that
     /// created it did not commit, and this pass finishes that commit.
-    Adopted(Restore),
+    Adopted(Box<Restore>),
     /// Nothing holds the reserved name: the child was deleted before any pass
     /// recorded it, or it was never created. Recorded `RestoreDeleted`.
     Missing(String),
@@ -1515,7 +1515,7 @@ async fn recover_reservation(
                 "a reserved rehearsal exists and is this schedule's own; the commit its pass \
                  did not land is finished now"
             );
-            Ok(Reservation::Adopted(child))
+            Ok(Reservation::Adopted(Box::new(child)))
         }
         Some(_) => {
             warn!(
