@@ -3014,6 +3014,76 @@ async fn a_foreign_owner_plan_config_map_is_never_adopted() {
     );
 }
 
+/// **THE PLAN REFUSAL LANDS** — REHEARSAL-FIRE-PASS-STATUS-LOST's class
+/// sweep. This pass writes `/status` TWICE: `Pending` (the binding and the
+/// Job name, recorded before anything is created), then — when the plan
+/// `ConfigMap`'s name is held by a foreign owner — `Failed/CheckPlanConflict`.
+/// The row above asserts the second write's BODY, which a route table records
+/// whether or not the API server would have accepted it. Here the `Preflight`
+/// lives in a store that enforces seam S7: on `b4260960` the refusal carried
+/// the version the pass was HANDED (`100`), which the `Pending` write had
+/// already moved to `101`, so it was answered 409 and dropped, and the object
+/// said `Pending/PodNotStarted "the Job is being created"` for a Job that was
+/// never going to exist.
+///
+/// MUTANT: precondition the refusal on `pf` (the pre-`Pending` object) — the
+/// stored phase stays `Pending` and the write log carries a 409.
+#[tokio::test]
+async fn a_plan_refusal_after_the_pending_write_is_stored() {
+    use weirkeeper::testing::{mock_client_with_store, ObjectStore};
+    let job = job_name(CheckPlanKind::OperationReadiness);
+    let foreign = json!({
+        "apiVersion": "v1", "kind": "ConfigMap",
+        "metadata": {
+            "name": format!("{job}-plan"), "namespace": NS,
+            "annotations": {"logweir.dev/check-plan-sha256": PLAN_DIGEST},
+            "ownerReferences": [{
+                "apiVersion": "logweir.dev/v1alpha1", "kind": "Preflight",
+                "name": "somebody-else", "uid": "another-uid", "controller": true
+            }]
+        },
+        "immutable": true, "data": {"check-plan.json": "{}"}
+    });
+    let mut routes = referent_routes(None, vec![]);
+    routes.push(not_found("GET", leak(job.clone())));
+    routes.push(route("GET", "/apis/batch/v1/jobs", list_of(vec![])));
+    routes.push(Route {
+        method: "POST",
+        path_suffix: "/configmaps",
+        status: 409,
+        body: json!({
+            "kind": "Status", "apiVersion": "v1", "status": "Failure",
+            "reason": "AlreadyExists", "code": 409
+        })
+        .to_string(),
+    });
+    routes.push(route("GET", "-plan", foreign.to_string()));
+    let handed = preflight(backup_request());
+    let store = ObjectStore::shared();
+    store.lock().expect("the store").put(
+        "/preflights/pf-1",
+        serde_json::to_value(&handed).expect("the fixture serialises"),
+    );
+    let (client, _, _) = mock_client_with_store(routes, store.clone());
+    let ctx = context(client);
+    let cache = weirkeeper::check::policy::PolicyCache::new();
+    pf::reconcile_preflight(&handed, &ctx, &cache, now())
+        .await
+        .expect("the reconcile completes");
+
+    let guard = store.lock().expect("the store");
+    let writes = guard.writes();
+    assert_eq!(writes.len(), 2, "Pending, then the refusal: {writes:?}");
+    assert!(
+        writes.iter().all(|w| w.status == 200),
+        "no write of this pass was refused: {writes:?}"
+    );
+    assert_eq!(writes[1].body["metadata"]["resourceVersion"], "101");
+    let stored = guard.get("/preflights/pf-1").expect("the Preflight");
+    assert_eq!(stored["status"]["phase"], "Failed", "{}", stored["status"]);
+    assert_eq!(stored["status"]["reason"], "CheckPlanConflict");
+}
+
 /// D2 §6.6's consequence, from the controller's own side: a verdict whose
 /// expiry has passed stops being `ready`, and the downgrade costs no API call.
 #[tokio::test]

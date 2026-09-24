@@ -5653,12 +5653,20 @@ fn image_id_of(pod: Option<&k8s_openapi::api::core::v1::Pod>) -> Option<String> 
 }
 
 /// Write `/status`, with D-SEAMS **S7** in both halves.
+///
+/// Answers the object as the API server stored it when a patch was sent and
+/// accepted, and `None` when nothing was sent or the precondition failed. A
+/// pass that writes AGAIN must precondition on that answer
+/// ([`written_or`]): the first write moved the object's `resourceVersion`,
+/// and a second write carrying the version this pass was handed is refused
+/// 409 and lost — REHEARSAL-FIRE-PASS-STATUS-LOST's class, found here by its
+/// sweep (the Pending write, then a `CheckPlanConflict` refusal).
 async fn patch_status(
     client: &kube::Client,
     pf: &Preflight,
     namespace: &str,
     status: &PreflightStatus,
-) -> Result<(), ReconcileError> {
+) -> Result<Option<Preflight>, ReconcileError> {
     let name = pf.name_any();
     let mut patch = json!({ "status": status });
     if status_unchanged(
@@ -5673,7 +5681,7 @@ async fn patch_status(
             namespace = %namespace,
             "the computed status equals the one on the object; no patch is sent"
         );
-        return Ok(());
+        return Ok(None);
     }
     let resource_version = pf
         .metadata
@@ -5703,17 +5711,23 @@ async fn patch_status(
         .patch_status(&name, &PatchParams::default(), &Patch::Merge(patch))
         .await
     {
-        Ok(_) => Ok(()),
+        Ok(stored) => Ok(Some(stored)),
         Err(kube::Error::Api(e)) if e.code == 409 => {
             debug!(
                 preflight = %name,
                 namespace = %namespace,
                 "the status changed under this reconcile (409); the next pass reads it"
             );
-            Ok(())
+            Ok(None)
         }
         Err(e) => Err(ReconcileError::Api(e)),
     }
+}
+
+/// The object a LATER write of this pass preconditions on: what the earlier
+/// write stored, or — when it sent nothing or was refused — the object in hand.
+fn written_or<'a>(written: Option<&'a Preflight>, pf: &'a Preflight) -> &'a Preflight {
+    written.unwrap_or(pf)
 }
 
 /// Reconcile one `Preflight`.
@@ -5951,7 +5965,10 @@ pub async fn reconcile_preflight(
             },
             now,
         );
-        patch_status(client, pf, &namespace, &status).await?;
+        // THE FIRST OF TWO WRITES THIS PASS MAY MAKE: a plan refusal below
+        // writes again, preconditioned on where THIS write left the object.
+        let pending_written = patch_status(client, pf, &namespace, &status).await?;
+        let pf_now = written_or(pending_written.as_ref(), pf);
 
         let config_map = check_plan::build(&job_name, &namespace, &owner, &shape.documents)
             .map_err(|e| plan_conflict(e.to_string()))?;
@@ -5961,7 +5978,7 @@ pub async fn reconcile_preflight(
             Err(check_plan::EnsureError::Api(e)) => return Err(ReconcileError::Api(e)),
             Err(check_plan::EnsureError::Plan(e)) => {
                 let status = status_for(
-                    pf,
+                    pf_now,
                     &StatusInput {
                         phase: PHASE_FAILED.to_string(),
                         reason: Some(e.code()),
@@ -5970,7 +5987,7 @@ pub async fn reconcile_preflight(
                     },
                     now,
                 );
-                patch_status(client, pf, &namespace, &status).await?;
+                patch_status(client, pf_now, &namespace, &status).await?;
                 return Ok(Action::await_change());
             }
         }
