@@ -184,7 +184,8 @@ public key merely because the new signer works.
 `TrustPolicy` (cluster-scoped, PLAT-19.1) is what makes a rotation an overlap
 instead of a replacement. A key on it carries a lifecycle — `notBefore`,
 `notAfter`, `state: Active | Retired | Revoked`, `retiredAt`, and for a
-revocation a `revocationReason` and a `revocationEffectiveFrom` — and the spec
+revocation a `revocationReason`, a `revokedAt` and a `revocationEffectiveFrom`
+(the CRD refuses a `Revoked` key without both instants) — and the spec
 is deliberately **mutable and one-way**: keys are append-only, `notAfter` may
 only be brought forward, `state` moves `Active → Retired` and
 `Active | Retired → Revoked` and never backwards, and the revocation instants

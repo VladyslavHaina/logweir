@@ -1466,9 +1466,14 @@ When a release changes a CRD, apply the new definitions yourself before
 `helm upgrade`:
 
 ```bash
-kubectl apply --server-side -f charts/logweir/crds/
+kubectl apply --server-side --force-conflicts -f charts/logweir/crds/
+kubectl diff --server-side --force-conflicts -f charts/logweir/crds/   # prints nothing
 helm upgrade logweir charts/logweir -n logweir-system
 ```
+
+`--force-conflicts` because Helm created these CRDs and owns their fields:
+without it every CRD that already exists is refused (`conflicts with "helm"`)
+and keeps its old schema, while an `Established` wait still passes.
 
 `charts/logweir/crds/*.yaml` is byte-identical to `config/crd/*.yaml`
 (`scripts/check-chart.sh` compares them with `cmp`), so applying either
@@ -1482,15 +1487,18 @@ helm uninstall logweir -n logweir-system
 
 removes everything the release created **except**: the fourteen CRDs (Helm never
 deletes `crds/`; `kubectl delete crd <name>` removes each and every custom
-resource stored under it), the MinIO `PersistentVolumeClaim` when
-`minio.persistence.enabled` (delete it yourself, or keep the archive), the
+resource stored under it), the
 namespace `--create-namespace` made, the cluster-scoped `TrustRoster`, retained
 `Secret/logweir-signing-key` in the release and authorized runner namespaces,
 retained `ConfigMap/logweir-signing-trust`, the authority-free retained
 `ClusterRole/logweir-identity-singleton`, and any RoleBinding you created by
 hand. Preserve those identity objects for same-installation recovery and old
 archive verification; do not delete the singleton marker merely to install a
-second independent signer. And, as with `kubectl delete -f
+second independent signer. **The demo MinIO's `PersistentVolumeClaim` is NOT
+kept:** it is an ordinary release object, so `helm uninstall` deletes it and,
+under a `Delete` reclaim policy (docker-desktop's `hostpath`), the demo archive
+with it — copy anything you need out of the bucket first (seen live by the PoC
+install, 2026-09-24). And, as with `kubectl delete -f
 logweir.yaml`: no archive object and no evidence object is ever deleted by
 Logweir — Global Constraint 6.
 

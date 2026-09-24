@@ -145,14 +145,16 @@ One client secret, shared by Dex and the console, and a password per user:
 
 ```bash
 openssl rand -hex 32 | tr -d '\n' > poc-secrets/client-secret   # no newline: both sides read it verbatim
-for u in viewer operator approver admin; do openssl rand -base64 18 > "poc-secrets/$u.password"; done
-hash() { htpasswd -bnBC 10 "" "$(cat "poc-secrets/$1.password")" | tr -d ':\n'; }
+for u in viewer operator approver admin norole; do openssl rand -base64 18 > "poc-secrets/$u.password"; done
+# -i reads the password on stdin: never on a command line another process can read.
+hash() { htpasswd -niBC 10 "" < "poc-secrets/$1.password" | tr -d ':\n'; }
 kubectl --context "$CTX" -n "$DEX_NAMESPACE" create secret generic dex-poc-secrets \
   --from-file=LOGWEIR_CONSOLE_CLIENT_SECRET=poc-secrets/client-secret \
   --from-literal=DEX_HASH_VIEWER="$(hash viewer)" \
   --from-literal=DEX_HASH_OPERATOR="$(hash operator)" \
   --from-literal=DEX_HASH_APPROVER="$(hash approver)" \
-  --from-literal=DEX_HASH_ADMIN="$(hash admin)"
+  --from-literal=DEX_HASH_ADMIN="$(hash admin)" \
+  --from-literal=DEX_HASH_NOROLE="$(hash norole)"
 helm upgrade --install dex dex --repo "$DEX_REPO" --version "$DEX_CHART_VERSION" \
   --kube-context "$CTX" -n "$DEX_NAMESPACE" -f deploy/poc/dex.values.yaml --wait --timeout 10m
 ```
@@ -324,7 +326,19 @@ kubectl --context "$CTX" apply -f poc-secrets/trustpolicy.yaml
 ```
 
 **Check:** `kubectl --context "$CTX" get trustpolicy logweir-poc` reads `LOADED
-True` and `BOUND logweir-poc`.
+True` and `BOUND logweir-poc`, and every existing `Backup` in `logweir-poc`
+still reads `Valid` (`kubectl --context "$CTX" -n logweir-poc get backups`).
+
+**The signer's window must open before its first signature.** The script
+opens it at the earlier of the signing Secret's and the
+`logweir-signing-trust` ConfigMap's creation. That is right for a fresh install
+and for an upgrade that adopted a hand-provisioned key (R1). A key older than
+both — an identity restored from backup into a new cluster — needs its real
+first use: `SIGNING_NOT_BEFORE=<RFC 3339 UTC> bash deploy/poc/trustpolicy.sh …`.
+A window that opens too late turns every earlier receipt `Untrusted
+(SignedOutsideValidity)`, and `notBefore` is immutable on a key (the CRD's CEL
+rule), so the only repair is to delete the `TrustPolicy` and apply a corrected
+one; the controller re-judges the namespace's evidence within seconds.
 
 ## 9. First sign-in, per role
 
@@ -339,8 +353,10 @@ password in `poc-secrets/<role>.password`, and land on
 | `operator` | operator | connections, destinations, schedules, backups, restore requests — and, under this PoC's Ordinary policy, confirm its own restore request |
 | `approver` | approver | the approvals view; countersigns under a `Governed` namespace (none in this PoC) |
 | `admin` | administrator | everything above, plus the keys view |
+| `norole` | none | signs in, and is granted no namespace: every namespace read answers `404` and every write `404` or `403` — the "authenticated is not authorised" case |
 
-**Check:** each user's session shows `logweir-poc` with exactly its role, and
+**Check:** each user's session shows `logweir-poc` with exactly its role (and
+`norole`'s shows no namespace), and
 the audit line for the sign-in names `https://dex.localtest.me#<subject>`.
 
 ## 10. First backup and restore, in the console
@@ -370,10 +386,12 @@ first), then:
 . deploy/poc/versions.env
 # 1. The CRDs, from the NEW chart (Helm never upgrades crds/ itself).
 helm pull "$LOGWEIR_CHART" --version "$LOGWEIR_CHART_VERSION" --untar -d poc-secrets/chart
-kubectl --context "$CTX" apply --server-side -f poc-secrets/chart/logweir-chart/crds/
+kubectl --context "$CTX" apply --server-side --force-conflicts -f poc-secrets/chart/logweir-chart/crds/
 for crd in $(ls poc-secrets/chart/logweir-chart/crds | sed 's/\.yaml$//'); do
   kubectl --context "$CTX" wait --for=condition=Established "crd/$crd.logweir.dev" --timeout=60s
 done
+# Prints nothing when every live CRD is the new chart's:
+kubectl --context "$CTX" diff --server-side --force-conflicts -f poc-secrets/chart/logweir-chart/crds/
 # 2. Controller, runner and console images TOGETHER, approval bindings unchanged.
 helm upgrade logweir "$LOGWEIR_CHART" --version "$LOGWEIR_CHART_VERSION" --kube-context "$CTX" \
   -n "$LOGWEIR_NAMESPACE" -f deploy/poc/logweir.values.yaml \
@@ -466,11 +484,25 @@ for obj in serviceaccount/logweir-runner secret/logweir-s3; do
 done
 ```
 
+**A rollback to `v0.1.5` deletes those two objects again.** `helm rollback
+logweir <v0.1.5 revision>` removes everything the candidate's revision
+rendered and `v0.1.5`'s did not — including the runner ServiceAccount and
+`logweir-s3` it adopted in `logweir-poc` — and the next `v0.1.5` run then fails
+`serviceaccount "logweir-runner" not found`. Re-create both at once after the
+rollback, exactly as before the `v0.1.5` install (the runner ServiceAccount from
+`poc-baselines/r1/runner-sa.yaml`, `logweir-s3` from the demo root pair). The
+retained signing identity (`helm.sh/resource-policy: keep`) is not affected.
+
 Then the three upgrade steps. **The live round must show, after R1:**
 1. all fourteen CRDs `Established`; the six old kinds' objects unchanged;
 2. **identity** — `logweir-signing-trust`'s `key-id` equals the recorded
    `r1-signing` key id, `logweir-signing-key` in both namespaces still holds
-   that key, and the bootstrap and distributor logged `source=existing`;
+   that key (same `uid` and `creationTimestamp`: nothing re-created it), and the
+   bootstrap and distributor logged `source=existing`. Those are Helm hook Jobs
+   deleted as soon as they succeed (`hook-delete-policy: hook-succeeded`), so
+   read their logs WHILE step 2 runs, from a second terminal:
+   `kubectl --context "$CTX" -n logweir-system logs -f -l job-name --prefix`
+   (and `-n logweir-poc` for the distributor);
 3. `TrustRoster/default` resolving as `legacy-roster-v1` for `logweir-poc`
    until the `TrustPolicy` of step 8 governs it;
 4. **schedules** — same UID, `metadata.generation` and history; the next slot
@@ -486,8 +518,9 @@ Then the three upgrade steps. **The live round must show, after R1:**
 The last publication before PLAT-15.2/17.2/19.2: managed identity and a shared
 console, but no `controller.watchNamespaces`, no `approvalPolicy.*` and none of
 the chart-gap values. Its console cannot trust the local CA (that value did not
-exist) and stays NotReady before the upgrade, which is why the install waits on
-the controller only.
+exist): it reports Ready, but every sign-in answers `503` (`provider_unreachable`
+in its log) until the upgrade, which is why the install waits on the controller
+only.
 
 ```bash
 git archive "$R2_COMMIT" charts/logweir | (mkdir -p poc-baselines/r2 && tar -x -C poc-baselines/r2)
@@ -514,20 +547,44 @@ handoff's table states them — each with the pre-upgrade state it names.
 ## Uninstall
 
 ```bash
-helm uninstall logweir --kube-context "$CTX" -n "$LOGWEIR_NAMESPACE"
-helm uninstall dex --kube-context "$CTX" -n "$DEX_NAMESPACE"
+helm uninstall logweir --kube-context "$CTX" -n "$LOGWEIR_NAMESPACE" --wait
+helm uninstall dex --kube-context "$CTX" -n "$DEX_NAMESPACE" --wait
 kubectl --context "$CTX" delete -f deploy/poc/issuers.yaml
 kubectl --context "$CTX" delete -f deploy/poc/minio-grants.yaml --ignore-not-found
-helm uninstall cert-manager --kube-context "$CTX" -n "$CERT_MANAGER_NAMESPACE"
-helm uninstall traefik --kube-context "$CTX" -n "$INGRESS_NAMESPACE"
+helm uninstall cert-manager --kube-context "$CTX" -n "$CERT_MANAGER_NAMESPACE" --wait
+helm uninstall traefik --kube-context "$CTX" -n "$INGRESS_NAMESPACE" --wait
 ```
 
-What remains on purpose, and how to remove it, is
-[docs/install.md](../../docs/install.md), *Uninstall, and what it leaves behind*:
-the retained signing identity, the fourteen CRDs (with every custom resource,
-including the `TrustPolicy`), the MinIO volume, and cert-manager's and Traefik's
-CRDs. Delete the namespaces last, and remove `poc-secrets/` and the CA from
-your keychain.
+**The demo archive goes with the first line.** The MinIO
+`PersistentVolumeClaim` is an ordinary release object, so `helm uninstall
+logweir` deletes it and, under docker-desktop's `Delete` reclaim policy, every
+backup in it; copy out what you need first.
+
+What remains on purpose ([charts/logweir/README.md](../../charts/logweir/README.md),
+*Uninstall, and what it leaves behind*): the retained signing identity
+(`logweir-signing-key` in both namespaces, `logweir-signing-trust`) and the
+`logweir-identity-singleton` ClusterRole; the fourteen Logweir CRDs with every
+custom resource, the `TrustPolicy` and `TrustRoster/default` included;
+cert-manager's six CRDs (`crds.keep`) and the Secrets it issued; Traefik's CRDs
+(`*.traefik.io`); the ten `*.dex.coreos.com` CRDs Dex's Kubernetes storage
+created at runtime; two cert-manager leader-election `Lease`s in `kube-system`;
+and the namespaces. To retire the PoC for good — this deletes the installation
+identity, so archives it signed can no longer be verified here — remove them,
+namespaces last:
+
+```bash
+for c in $(kubectl --context "$CTX" get crd -o name | grep -E '\.logweir\.dev$|\.traefik\.io$|\.dex\.coreos\.com$'); do
+  kubectl --context "$CTX" delete "$c" --wait --timeout=120s
+done
+kubectl --context "$CTX" delete crd -l app.kubernetes.io/instance=cert-manager
+kubectl --context "$CTX" delete clusterrole logweir-identity-singleton --ignore-not-found
+for ns in "$POC_NAMESPACE" "$LOGWEIR_NAMESPACE" "$DEX_NAMESPACE" "$CERT_MANAGER_NAMESPACE" "$INGRESS_NAMESPACE"; do
+  kubectl --context "$CTX" delete namespace "$ns" --wait --timeout=360s --ignore-not-found
+done
+kubectl --context "$CTX" -n kube-system delete lease cert-manager-controller cert-manager-cainjector-leader-election
+```
+
+Then remove `poc-secrets/` and, if you trusted it, the CA from your keychain.
 
 ## What production keeps, and what the PoC stands in for
 
@@ -576,50 +633,34 @@ documents each one.
 | G5 — the controller had no probes | a wedged controller was never restarted | exec liveness and readiness (`weirkeeper --probe`) against a loopback health listener |
 | G6 — `trustedProxyCidrs` needed the ingress pod's `/32` | re-read and reinstalled after every ingress pod restart | `api.console.trustedProxyService`: the ingress Service's serving pods, re-read every five seconds |
 
-## What this profile has not been run to show
+## What the first live round showed (2026-09-24), and what it did not
 
-It was written and rendered without a cluster: `validate.sh` renders all four
-charts at their pinned versions (Logweir both as published and from a
-checkout, and the two rehearsal baselines with their own charts), checks every
-image is pinned, the cross-file addresses agree and the rendered Dex
-configuration carries no secret.
-[UNVERIFIED — this profile has not been installed, signed into or upgraded on docker-desktop yet; that is PLAT-20.2's live round.]
-The live round must show, on docker-desktop, with `LOGWEIR_COMMIT` set to the
-first publication carrying these chart fixes:
+`validate.sh` renders all four charts at their pinned versions (Logweir both as
+published and from a checkout, and the two rehearsal baselines with their own
+charts), checks every image is pinned, the cross-file addresses agree and the
+rendered Dex configuration carries no secret. On 2026-09-24 the PoC install round
+then ran this profile on docker-desktop (v1.34.1) at `LOGWEIR_COMMIT` `86a554e6`,
+from the published chart and images only, and left the final install running.
+What it found wrong in this directory is fixed here (Dex's writable `/tmp`, the
+CRD apply's `--force-conflicts`, `trustpolicy.sh`'s signer window, the rollback
+and uninstall notes); what it found wrong in the product is listed in its report.
 
-1. **The install is Helm only**: steps 1–8 run as written, from the OCI chart,
-   with no `kubectl patch` and no address read from the cluster; the Traefik,
-   Dex and Logweir releases reach `--wait` Ready.
-2. **G1** — the console reaches `Ready` against Dex's back-channel
-   certificate with `oidc.caBundle` holding only `dex-backchannel-ca` and
-   `systemRoots: false`; a `dex.localtest.me` certificate from the cluster-wide
-   `logweir-poc-ca`, served at `10.96.0.81`, is refused (UnknownIssuer); with the ConfigMap's key renamed the pod
-   stays in `ContainerCreating`, and with an empty `ca.crt` it exits 2 naming
-   the bundle.
-3. **G2** — inside a console pod, `dex.localtest.me` resolves to `10.96.0.81`
-   (`kubectl exec deploy/logweir-api -- getent hosts dex.localtest.me`), Dex's
-   own Service; `curl --cacert poc-secrets/dex-backchannel-ca.crt --resolve dex.localtest.me:443:10.96.0.81`
-   from a pod in `dex` gets Dex's discovery over Dex's own TLS; sign-in
-   completes; and an Ingress for host `dex.localtest.me` created in another
-   namespace (e.g. `logweir-poc`) is NOT routed by Traefik.
-4. **G6** — `/readyz` is `200` and sign-in works; `kubectl rollout restart
-   deploy/traefik`, and within seconds of the new pod serving, requests succeed
-   again with no step re-run; the console log shows the trusted set moving to
-   the new address; a request sent to the console Service from another pod with
-   `X-Forwarded-Proto: https` is answered `421`.
-5. **G5** — the controller Deployment is Ready through `weirkeeper --probe
-   ready`; `kubectl exec deploy/weirkeeper -- weirkeeper --probe live` exits 0.
-6. **G3** — `logweir-s3` is in `logweir-poc`, not `logweir-system`.
-7. **G4** — `helm show chart "$LOGWEIR_CHART" --version "$LOGWEIR_CHART_VERSION"`
-   reads `appVersion: $LOGWEIR_TAG`, and every Logweir pod's image is
-   `…:$LOGWEIR_TAG`.
-8. **The MinIO grants** — the destination's four grants are the three
-   least-privilege users; the backup verifies green; a `DeleteObject` with the
-   writer's key is refused by MinIO.
-9. **Sign-in per role and the first backup and restore** (steps 9–10), and
-   HSTS on both hosts.
-10. **The two upgrade rehearsals** with the checks listed under each, and a
-    rollback to each starting point with the release notes' rollback list.
+| # | What the round had to show | Result |
+|---|---|---|
+| 1 | **Helm only**: steps 1–8 as written, from the OCI chart, no `kubectl patch`, no address read from the cluster; Traefik, Dex and Logweir reach `--wait` Ready | shown (after the Dex `/tmp` fix) |
+| 2 | **G1**: the console Ready against Dex's back-channel certificate with `oidc.caBundle` = `dex-backchannel-ca` only and `systemRoots: false` | shown; the three negatives below were not run |
+| 3 | **G2**: `dex.localtest.me` = `10.96.0.81` in the console pod; Dex's discovery over Dex's own TLS with the back-channel CA (and refused with the browser CA); an Ingress for `dex.localtest.me` in another namespace not routed | shown |
+| 4 | **G6**: `/readyz` 200 within seconds of a Traefik restart with no step re-run, the trusted set moving to the new pod, `421` for a direct request with `X-Forwarded-Proto: https` | shown |
+| 5 | **G5**: Ready through `--probe ready`; `--probe live` exits 0 | shown |
+| 6 | **G3**: `logweir-s3` in `logweir-poc` only | shown |
+| 7 | **G4**: `appVersion` is `$LOGWEIR_TAG`; every Logweir pod runs `…:$LOGWEIR_TAG` | shown |
+| 8 | **MinIO grants**: three least-privilege users; green badge; the writer's `DeleteObject` refused | shown |
+| 9 | **Sign-in per role**, the first backup and restore (steps 9–10), HSTS on both hosts | shown, through the console, with the product defects the report lists (connection and schedule names are minted, not the ones typed) |
+| 10 | **Both upgrade rehearsals** with their checks, and a rollback to each starting point | shown for identity, schedules and archive readability, R2's item-6 refusal and items 7–10; R2's items 1–5 were not set up |
+
+[UNVERIFIED — G1's negatives were not run live: a cluster-CA certificate served at Dex's address, a renamed bundle key and an empty bundle.]
+They would each have changed the running install; the chart's own tests and
+mutants carry them (`claude/chart-poc`).
 
 ---
 

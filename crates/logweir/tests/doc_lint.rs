@@ -1400,7 +1400,7 @@ fn install_md_runs_the_secret_preflight_before_any_custom_resource() {
         "the singleton and same-identity namespace contract must be actionable"
     );
     assert!(
-        install.contains("apply --server-side -f charts/logweir/crds/")
+        install.contains("apply --server-side --force-conflicts -f charts/logweir/crds/")
             && install.contains("--for=condition=Established")
             && install.contains("#upgrade-rollback-and-legacy-jobs"),
         "install docs must order CRD apply/wait before Helm upgrade and cross-link details"
@@ -1619,9 +1619,9 @@ fn the_release_notes_carry_every_owed_operator_action() {
     let numbers: Vec<u32> = items.iter().map(|(n, _)| *n).collect();
     assert_eq!(
         numbers,
-        (1..=11).collect::<Vec<u32>>(),
-        "the release entry must carry exactly eleven operator-facing changes, `#### 1.` to \
-         `#### 11.` in order; found {numbers:?}"
+        (1..=13).collect::<Vec<u32>>(),
+        "the release entry must carry exactly thirteen operator-facing changes, `#### 1.` to \
+         `#### 13.` in order; found {numbers:?}"
     );
 
     for ((number, body), (item, token)) in items.iter().zip([
@@ -1637,6 +1637,10 @@ fn the_release_notes_carry_every_owed_operator_action() {
         ("the API trust state", "RecordedBeforeRevocation"),
         // RECEIPT-DUP (2026-09-23): the execution claim and its store requirement.
         ("one engine run per execution", "ExecutionAlreadyClaimed"),
+        // PLAT-20.2's "later items" (poc-install, 2026-09-24): controller before runner, and the
+        // readiness principals with the old-runner refusal.
+        ("controller before runner", "roll the controller out before"),
+        ("readiness principals", "CheckContractMismatch"),
     ]) {
         assert!(
             body.contains(token),

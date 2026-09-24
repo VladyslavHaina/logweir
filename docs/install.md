@@ -1178,7 +1178,7 @@ back. Apply the new additive schemas, wait for all fourteen Logweir definitions
 to be established, and only then upgrade the release:
 
 ```bash
-kubectl --context docker-desktop apply --server-side -f charts/logweir/crds/
+kubectl --context docker-desktop apply --server-side --force-conflicts -f charts/logweir/crds/
 for crd in approvals backupdestinations backups backupschedules kafkaclusters \
            preflights protectionpolicies recoverycatalogs rehearsalschedules \
            restores retentionpolicies topicdiscoveries trustpolicies trustrosters; do
@@ -1194,7 +1194,16 @@ that starts before its CRDs exist logs a reflector error per missing kind and
 reconciles nothing of that kind; CRDs applied ahead of a controller that does
 not know them are inert, which is the safe half.
 
-Stop before Helm if any apply/wait fails. **Every change in this release is
+**`--force-conflicts` is required, not a convenience.** Helm created these
+CRDs from `crds/` and owns their fields, so a server-side apply without it is
+refused field by field (`Apply failed with 3 conflicts: conflicts with
+"helm"`) for every CRD that already exists — and the `Established` wait still
+passes, on the OLD schemas (the PoC install's upgrade rehearsal R1 found the six
+`v0.1.5` CRDs unchanged that way). Afterwards
+`kubectl --context docker-desktop diff --server-side --force-conflicts -f charts/logweir/crds/`
+prints nothing when the live definitions are the chart's.
+
+Stop before Helm if any apply/wait/diff fails. **Every change in this release is
 additive**: eight new kinds — `BackupDestination`, `TopicDiscovery`,
 `Preflight`, `TrustPolicy`, `ProtectionPolicy`, `RehearsalSchedule`,
 `RecoveryCatalog` and `RetentionPolicy` — plus optional fields and optional

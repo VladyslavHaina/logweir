@@ -224,6 +224,11 @@ if dex="$(pull "$DEX_REPO" dex "$DEX_CHART_VERSION")"; then
   need "the Dex render" "$work/dex.yaml" "ingressClassName: traefik" \
     "clusterIP: $DEX_CLUSTER_IP" "port: 443" "targetPort: https" "- --web-https-addr" \
     "mountPath: /etc/dex/tls" "secretName: dex-internal-tls"
+  # A read-only root filesystem needs a writable /tmp: the image's entrypoint
+  # renders the config into a temporary file first (the live install's D1).
+  if grep -q 'readOnlyRootFilesystem: true' "$work/dex.yaml" && ! grep -q 'mountPath: /tmp$' "$work/dex.yaml"; then
+    echo "FAIL: Dex has a read-only root filesystem and no writable /tmp; its entrypoint cannot render the config" >&2; fail=1
+  fi
   # The Dex config is rendered base64-encoded into a Secret. Decode it: no
   # password hash and no client secret may be in it, only the names of the
   # environment variables that carry them (hashFromEnv, secretEnv).

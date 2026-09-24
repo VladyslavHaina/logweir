@@ -25,10 +25,24 @@ signing_id="$(kubectl --context "$CTX" -n "$LOGWEIR_NAMESPACE" get configmap log
   -o jsonpath='{.data.key-id}')"
 signing_pem="$(kubectl --context "$CTX" -n "$LOGWEIR_NAMESPACE" get configmap logweir-signing-trust \
   -o jsonpath='{.data.signing\.pub\.pem}')"
-# The signer has existed since the bootstrap wrote its public ConfigMap; its
-# window opens then, so evidence signed before this policy existed verifies.
-signing_since="$(kubectl --context "$CTX" -n "$LOGWEIR_NAMESPACE" get configmap logweir-signing-trust \
+# THE SIGNER'S WINDOW MUST OPEN BEFORE ITS FIRST SIGNATURE, or every receipt it
+# signed earlier reads `Untrusted (SignedOutsideValidity)` once this policy
+# governs the namespace. The bootstrap writes the public ConfigMap at install —
+# but ALSO at the upgrade that ADOPTS a key which already existed (upgrade
+# rehearsal R1: a v0.1.5 hand-provisioned key had signed for minutes before the
+# ConfigMap appeared, and the live round saw all four pre-upgrade receipts turn
+# Untrusted). So the window opens at the EARLIER of the ConfigMap's and the
+# signing Secret's creation (only metadata is printed, never the key). A key
+# older than both — an identity restored from backup into a new cluster —
+# needs SIGNING_NOT_BEFORE set to its real first use (RFC 3339, UTC).
+cm_since="$(kubectl --context "$CTX" -n "$LOGWEIR_NAMESPACE" get configmap logweir-signing-trust \
   -o jsonpath='{.metadata.creationTimestamp}')"
+secret_since="$(kubectl --context "$CTX" -n "$LOGWEIR_NAMESPACE" get secret logweir-signing-key \
+  -o jsonpath='{.metadata.creationTimestamp}')"
+signing_since="$cm_since"
+# Both are UTC RFC 3339 with a `Z`, so the string order is the time order.
+if [ -n "$secret_since" ] && [[ "$secret_since" < "$cm_since" ]]; then signing_since="$secret_since"; fi
+signing_since="${SIGNING_NOT_BEFORE:-$signing_since}"
 confirmation_id="$(openssl pkey -pubin -in "$confirmation_pub" -outform DER | openssl dgst -sha256 | awk '{print $NF}')"
 now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 until="$(date -u -v+1y +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '+1 year' +%Y-%m-%dT%H:%M:%SZ)"

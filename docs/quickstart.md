@@ -257,8 +257,15 @@ task's journey; which of those tasks are Done and which still wait for a lab
 run is in [release-handoff.md](release-handoff.md). This
 page as one walk on a fresh install, and an upgrade from the last published
 image that keeps identities, schedules and archive readability, are PLAT-20.2's
-live half. [UNVERIFIED — a clean docker-desktop install following this page end to end is owed by PLAT-20.2's live round.]
-Shared mode behind a real identity provider and TLS ingress, AWS S3, MSK and a
+live half: the PoC profile ran them on docker-desktop on 2026-09-24 — a clean
+install from the published chart, steps 4–9 through the shared console behind
+Traefik (TLS) and Dex (OIDC), and upgrades from `v0.1.5` and `sha-f49849d…`
+([deploy/poc/](../deploy/poc/README.md), *What the first live round showed*). It
+found console defects on the way (among them: the names typed for a connection
+and a schedule are replaced by minted ones, and *Test access* does not show its
+result), which its report lists and which are being fixed.
+[UNVERIFIED — a legacy inline-archive point's restore readiness check and evidence bucket, and Catalog → Connect, failed in the shared console on that round; the fixes are not yet live.]
+A corporate identity provider bound by group, AWS S3, MSK and a
 NetworkPolicy-enforcing CNI have not been run at all
 ([release-notes.md](release-notes.md), *Limitations*).
 

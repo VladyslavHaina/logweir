@@ -145,7 +145,15 @@ cluster:
 3. **A rollback** from the candidate to each starting point with the release
    notes' rollback list, the same three properties kept.
 
-[UNVERIFIED — clean install, upgrade and rollback on docker-desktop are owed by PLAT-20.2's live round.]
+**Run on 2026-09-24** (the PoC install round, `claude/poc-install`), with the
+PoC profile and the published chart and images at `86a554e6`: the clean install
+(item 1, including a restore of a catalog-verified point); both rehearsals
+(item 2) with identity, schedules and archive readability kept at every step,
+R2's item-6 refusal and items 7–10; and a rollback to each starting point
+(item 3). What it did not set up — R2's items 1–5 — and the defects it found are
+in its report and in [deploy/poc/](../deploy/poc/README.md), *What the first
+live round showed*.
+[UNVERIFIED — R2's pre-upgrade states for release-note items 1–5 (retention Enforce, mount failure, point-bound Restore without a Job) were not set up.]
 
 ## Limitations carried by this release
 

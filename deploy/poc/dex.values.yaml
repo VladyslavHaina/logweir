@@ -9,7 +9,7 @@
 # through `envFrom`: `secretEnv` for the client and `hashFromEnv` for each user
 # are Dex's own ways of reading them from the environment.
 #
-# FOUR STATIC USERS, ONE PER LOGWEIR ROLE. Dex v2.44.0's static password
+# FOUR STATIC USERS, ONE PER LOGWEIR ROLE, AND ONE WITH NONE. Dex v2.44.0's static password
 # database carries no groups, so the console binds these four by SUBJECT
 # (`<issuer>#<sub>`, logweir.values.yaml). Dex's `sub` for a local user is the
 # base64url of {userID, "local"}, which is why each userID below is fixed.
@@ -76,6 +76,12 @@ config:
       username: admin
       userID: 1f0c9a4e-0004-4a1e-9e1a-000000000004
       hashFromEnv: DEX_HASH_ADMIN
+    # A fifth user bound to NO console role (logweir.values.yaml names only the
+    # four above): the "signed in, authorised for nothing" case.
+    - email: norole@logweir.localtest.me
+      username: norole
+      userID: 1f0c9a4e-0005-4a1e-9e1a-000000000005
+      hashFromEnv: DEX_HASH_NOROLE
 ingress:
   enabled: true
   className: traefik
@@ -107,8 +113,17 @@ volumes:
       items:
         - { key: tls.crt, path: tls.crt }
         - { key: tls.key, path: tls.key }
+  # The image's entrypoint renders the configuration (the `*FromEnv` values)
+  # into a temporary file before it starts `dex serve`; with a read-only root
+  # filesystem it needs a writable /tmp, or every pod exits with "cannot create
+  # temp file: open /tmp/dex.config.yaml-…: read-only file system" (found by
+  # the first live install, poc-install 2026-09-24).
+  - name: tmp
+    emptyDir:
+      sizeLimit: 16Mi
 volumeMounts:
   - { name: tls, mountPath: /etc/dex/tls, readOnly: true }
+  - { name: tmp, mountPath: /tmp }
 resources:
   requests: { cpu: 10m, memory: 32Mi }
   limits: { memory: 128Mi }
