@@ -537,7 +537,12 @@ the `Enforce` retention policies without `s3:GetObject` and on a versioned
 bucket, the shared backup set, the run whose ConfigMap never mounts, the
 point-bound `Restore` without a Job, and a `Backup` verified under a key then
 revoked for compromise — plus the identity key id, the schedules and the
-receipts recorded as for R1.
+receipts recorded as for R1. **That key is minted for the row, never the
+installation signer.** Swap `logweir-signing-key` for a fresh key for one run,
+list that key on `logweir-poc`'s policy only, then revoke it. A candidate with
+the compromise guard applies a compromise to every namespace and holds the
+policy on deletion while `TrustRoster/default` lists the key
+([release notes](../../docs/release-notes.md), item 16).
 
 Then: first run step 2 of the upgrade with **R2's own values** against the
 candidate chart and see it refused, naming `controller.watchNamespaces`

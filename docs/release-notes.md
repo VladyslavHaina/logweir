@@ -117,6 +117,37 @@ under its item below.
    release and successive `helm upgrade`s: first the image values (controller,
    runner and console move together), then the `approvalPolicy.*` values.
 
+**Pre-upgrade check: which compromise revocations become installation-wide**
+(item 16). This build applies every `KeyCompromise` revocation a `TrustPolicy`
+records to every namespace, not only the ones that policy governs, and holds that
+policy on deletion while anything else lists the key. Before deploying it, list
+the records:
+
+```bash
+kubectl --context <ctx> get trustpolicies -o json \
+  | jq -r '.items[] | .metadata.name as $p | .spec.keys[]
+      | select(.state == "Revoked" and .revocationReason == "KeyCompromise")
+      | "\($p)\t\(.keyId)"'
+```
+
+Each line is a policy and a key id that will read as compromised in EVERY
+namespace after the upgrade. No output means nothing changes. For each line,
+confirm that the key really is compromised for the whole installation. A key
+revoked this way only to test a namespace's trust (a shared installation signer
+revoked in a test policy, for example) turns every document it signed, in every
+namespace, `Untrusted`. It also keeps the policy from being deleted while
+`TrustRoster/default` or another policy still lists the key. Compare with the
+roster's key ids:
+
+```bash
+kubectl --context <ctx> get trustroster default -o json \
+  | jq -r '.spec.signingKeys[].keyId, .spec.approverKeys[].keyId'
+```
+
+A key that must not be compromised everywhere cannot be un-revoked (G3, and G9
+in this build). Either delete that policy before the upgrade, or re-issue the key.
+Do not deploy until every listed record is one you mean installation-wide.
+
 ### The sixteen operator-facing changes
 
 Each item names what changed, what to do, what the claim rests on (its
@@ -460,8 +491,11 @@ a fact about the key, not the policy:
 - **The controller now holds `patch` on `trustpolicies`** (the object, beside
   `/status`) for that finalizer and nothing else; the body is pinned by a test.
 
-**Do:** before this upgrade, nothing. After it, replace a policy that records a
-compromise by applying a successor under a new name first
+**Do:** before this upgrade, run the *Pre-upgrade check* above (the
+`kubectl get trustpolicies -o json | jq …` listing) and confirm every
+`KeyCompromise` record it prints is one you mean installation-wide. After the
+upgrade, replace a policy that records a compromise by applying a successor
+under a new name first
 ([keys.md](keys.md), *Replacing a `TrustPolicy` safely*); the delete-and-re-create
 repair for a mistaken `notBefore` still works unchanged for a policy that
 records no compromise. Wait until a newly revoked policy lists the finalizer

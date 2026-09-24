@@ -60,7 +60,7 @@ import { createServer } from "node:net";
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { randomBytes, createHash } from "node:crypto";
+import { randomBytes, createHash, generateKeyPairSync } from "node:crypto";
 import { homedir } from "node:os";
 
 const require = createRequire(import.meta.url);
@@ -320,6 +320,76 @@ function copyLabSecret(labName, ns, ownName) {
     metadata: owned(ownName, ns), data: source.data });
   result.fixtures.push({ namespace: ns, kind: "Secret", name: ownName,
     copiedFrom: LAB + "/" + labName, note: "value never printed, read or logged" });
+}
+
+/** A P-256 signing key MINTED for the revoked-signer rows alone
+ *  (TRUSTPOLICY-DELETE-DROPS-REVOCATION).
+ *
+ *  WHY A MINTED KEY AND NEVER THE LAB'S. A controller with the compromise
+ *  guard treats a `KeyCompromise` revocation as a fact about the KEY: it
+ *  applies it in every namespace, whichever policy or roster that namespace
+ *  resolves through, and it holds the recording policy's deletion while any
+ *  other trust source still lists the key. Revoking the lab's own signer in
+ *  this run's DR-only policy -- which is what this row first did -- would turn
+ *  every backup the lab signer made, in every namespace, `Untrusted` for as
+ *  long as the policy exists, and `TrustRoster/default` lists that key, so the
+ *  cleanup delete would be held for ever. A key minted here is listed by this
+ *  run's TrustPolicy and by nothing else, so its revocation governs nothing
+ *  outside the run and the policy is released the moment it is deleted.
+ *
+ *  THE PRIVATE HALF NEVER ENTERS AN OBJECT OTHER THAN ONE SECRET IN THIS RUN'S
+ *  OWN `SRC` NAMESPACE, OR AN ARTIFACT. It is written 0600 inside a 0700
+ *  directory under `WORK_DIR`, projected into that Secret, and the directory is
+ *  removed as soon as the Secret exists. What is recorded is the key id: the
+ *  sha256 of the DER SubjectPublicKeyInfo, lowercase hex, the recipe every
+ *  roster and verdict uses. */
+function mintSigner(tag) {
+  const pair = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const dir = join(WORK_DIR, "minted-" + tag);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const privatePath = join(dir, "signing.pem");
+  writeFileSync(privatePath, pair.privateKey.export({ type: "pkcs8", format: "pem" }), { mode: 0o600 });
+  const der = pair.publicKey.export({ type: "spki", format: "der" });
+  return {
+    dir: dir,
+    privatePath: privatePath,
+    spkiPem: pair.publicKey.export({ type: "spki", format: "pem" }),
+    keyId: createHash("sha256").update(der).digest("hex"),
+  };
+}
+
+/** The ids every SHARED trust source lists: `TrustRoster/default`'s two lists
+ *  and every key on a TrustPolicy this run does not own. A key in this set is
+ *  never revoked for compromise by this harness. */
+function sharedKeyIds() {
+  const roster = kube(["get", "trustroster", "default", "-o", "json"], { expected: [0, 1] });
+  const ids = [];
+  if (roster.status === 0) {
+    const spec = JSON.parse(roster.stdout).spec || {};
+    for (const k of [].concat(spec.signingKeys || [], spec.approverKeys || [])) {
+      ids.push(k.keyId);
+    }
+  }
+  for (const tp of kubeJson(["get", "trustpolicies"]).items) {
+    if (((tp.metadata || {}).labels || {})["logweir.dev/test-owner"] === OWNER) {
+      continue;
+    }
+    for (const k of ((tp.spec || {}).keys || [])) {
+      ids.push(k.keyId);
+    }
+  }
+  return ids;
+}
+
+/** Refuse a `KeyCompromise` revocation of any key but a minted one, BEFORE it is
+ *  applied: with the compromise guard, such a revocation reaches the whole
+ *  installation and cannot be deleted away while the key is listed elsewhere. */
+function assertDisposable(keyId, what) {
+  check(typeof keyId === "string" && /^[0-9a-f]{64}$/.test(keyId), what + ": not a key id: " + keyId);
+  check(!sharedKeyIds().includes(keyId),
+    "refusing to revoke " + what + " " + keyId + " for KeyCompromise: a shared trust source lists " +
+    "it, so the revocation would reach every namespace and hold this run's TrustPolicy on deletion " +
+    "(TRUSTPOLICY-DELETE-DROPS-REVOCATION). Revoke a key minted for the row instead.");
 }
 
 function seedConnection(ns, name, servers, role, labSecret) {
@@ -1284,14 +1354,17 @@ async function main() {
     // the real runner image; none can be proved by a fixture. The revoked-key
     // rows create a cluster-scoped TrustPolicy over DR only (owner-labelled,
     // deleted in `cleanup`): run this harness under the cluster lock.
-    const catalogCheckBody = () => ({
+    // `pt` and `plan` default to journey 4's point and plan; the revoked-signer
+    // rows pass the MINTED point and the plan the wizard built for it.
+    const catalogCheckBody = (pt, plan) => ({
       operation: "restore",
-      restore: { planBytes: planBytes, planHash: "sha256:" + sha256(planBytes),
+      restore: { planBytes: plan, planHash: "sha256:" + sha256(plan),
         target: "restore-target", sourceDestination: DESTINATION, evidenceDestination: DESTINATION,
-        catalogPoint: { catalog: CATALOG, pointId: point.pointId } },
+        catalogPoint: { catalog: CATALOG, pointId: pt.pointId } },
     });
-    const catalogCheck = async (label) => {
-      const made = await apiCall("POST", DR, "/preflights", catalogCheckBody(), "p152-" + label + "-" + suffix);
+    const catalogCheck = async (label, pt, plan) => {
+      const made = await apiCall("POST", DR, "/preflights",
+        catalogCheckBody(pt || point, plan || planBytes), "p152-" + label + "-" + suffix);
       check(made.status === 201 || made.status === 200 || made.status === 202,
         label + ": the readiness create answered " + made.status + " " + JSON.stringify(made.body).slice(0, 400));
       const name = ((made.body || {}).item || {}).name || ((made.body || {}).item || {}).id;
@@ -1305,9 +1378,14 @@ async function main() {
       return { name: name, row: ((((pf.status || {}).result || {}).checks) || [])
         .find((c) => c.id === "recoveryPoint.state") || null };
     };
-    const signedRestore = async (label, prefix) => {
-      const plan = planBytes.split("prefix: \"" + RESTORE_PREFIX + "\"").join("prefix: \"" + prefix + "\"");
-      check(plan !== planBytes && plan.indexOf(point.receiptSha256) !== -1,
+    const signedRestore = async (label, prefix, bound) => {
+      // `bound` names another point and the plan the wizard built for it (the
+      // minted signer's); journey 4's point and plan otherwise.
+      const pt = (bound || {}).point || point;
+      const base = (bound || {}).plan || planBytes;
+      const pointInTime = (bound || {}).pointInTime || restore.spec.pointInTime;
+      const plan = base.split("prefix: \"" + RESTORE_PREFIX + "\"").join("prefix: \"" + prefix + "\"");
+      check(plan !== base && plan.indexOf(pt.receiptSha256) !== -1,
         label + ": the plan is the reviewed one, bound to the same receipt, under a new prefix");
       const planPath = join(WORK_DIR, "approval", label + ".yaml");
       writeFileSync(planPath, plan);
@@ -1322,7 +1400,7 @@ async function main() {
         planBytes: plan, planHash: hash, approvalRef: { name: approvalName },
         sourceArchive: { url: "logweir-destination://" + DESTINATION },
         sourceDestinationRef: { name: DESTINATION }, evidenceDestinationRef: { name: DESTINATION },
-        backupSetRef: point.backupId, pointInTime: restore.spec.pointInTime,
+        backupSetRef: pt.backupId, pointInTime: pointInTime,
         target: { clusterRef: { name: "restore-target" }, mode: "newTopic", topicNaming: { prefix: prefix } },
         deadlineSeconds: 1800,
       }, "p152-" + label + "-" + suffix);
@@ -1478,21 +1556,74 @@ async function main() {
       { entry: { availability: whole.availability, verification: whole.verification, selectable: whole.selectable },
         preflight: wholeCheck.name, row: wholeCheck.row });
 
-    // A REVOKED SIGNER. DR gets a TrustPolicy naming the roster's signing key
-    // (the point's signer) Active and the lab approver key for approvals; the
-    // catalog re-syncs under it (the control: ready/CatalogPointSelectable).
-    // The signer is then revoked for compromise WITHOUT a re-sync.
+    // A REVOKED SIGNER -- A MINTED ONE (TRUSTPOLICY-DELETE-DROPS-REVOCATION).
+    // A KeyCompromise revocation is a fact about the KEY: a controller with the
+    // compromise guard applies it in every namespace and holds the recording
+    // policy's deletion while any other trust source lists the key. This row
+    // first revoked the lab's own signer here, which on such a controller makes
+    // every lab backup `Untrusted` cluster-wide and holds this run's policy for
+    // ever (`TrustRoster/default` lists that key). So the revoked-signer rows
+    // (lr9-c, lr9-d) use a key minted for them alone (`mintSigner`): it signs
+    // ONE run of this run's own archive -- SRC's signing Secret is swapped for
+    // that run and put back -- it is listed by this run's TrustPolicy and
+    // nowhere else, and it is the only key revoked. The lab signer stays on the
+    // policy for journey 4's point, Active and then Retired (hr12-b), and is
+    // never revoked. DR's catalog re-syncs under the policy (the control: the
+    // minted point is ready/CatalogPointSelectable); the minted key is then
+    // revoked WITHOUT a re-sync.
     const roster = kubeJson(["get", "trustroster", "default"]);
     const signer = (roster.spec.signingKeys || []).find((k) => k.keyId === point.signerKeyId);
     const approver = (roster.spec.approverKeys || [])[0];
     check(signer !== undefined && approver !== undefined, "the point's signer and the approver key are the roster's");
+    const minted = mintSigner("revoked");
+    check(minted.keyId !== signer.keyId && sharedKeyIds().indexOf(minted.keyId) === -1,
+      "the minted signer is a key no shared trust source lists: " + minted.keyId);
+    let mintedRun = null;
+    try {
+      kube(["-n", SRC, "delete", "secret", "logweir-signing-key", "--wait=true"], { expected: [0, 1] });
+      kube(["-n", SRC, "create", "secret", "generic", "logweir-signing-key",
+        "--from-file=signing.pem=" + minted.privatePath]);
+      kube(["-n", SRC, "label", "secret", "logweir-signing-key", OWNER_LABEL, "--overwrite"]);
+      // THE PRIVATE HALF LEAVES THE DISK AS SOON AS THE SECRET HOLDS IT.
+      rmSync(minted.dir, { recursive: true, force: true });
+      const made = await apiCall("POST", SRC, "/backups", { scheduleRef: { name: scheduleName } },
+        "p152-run-minted-" + suffix);
+      check(made.status === 201, "the minted signer's run create: " + made.status + " " +
+        JSON.stringify(made.body).slice(0, 400));
+      const mintedName = made.body.item.name;
+      mintedRun = await waitFor("the minted signer's run to finish", 300, 2000, () => {
+        const b = kubeJson(["-n", SRC, "get", "backup", mintedName]);
+        return ["Succeeded", "Failed", "Cancelled"].includes(String((b.status || {}).phase || "")) ? b : null;
+      });
+      result.created.push({ namespace: SRC, kind: "Backup", name: mintedName, uid: mintedRun.metadata.uid,
+        createdBy: "product API (the minted signer's run, lab-refresh-9 revoked-signer rows)" });
+    } finally {
+      rmSync(minted.dir, { recursive: true, force: true });
+      kube(["-n", SRC, "delete", "secret", "logweir-signing-key", "--wait=true"], { expected: [0, 1] });
+      copyLabSecret("logweir-signing-key", SRC, "logweir-signing-key");
+    }
+    artifact("src/backup-minted-signer.json", { metadata: mintedRun.metadata, status: mintedRun.status,
+      mintedKeyId: minted.keyId, privateKeyOnDisk: existsSync(minted.privatePath) });
+    check(mintedRun.status.phase === "Succeeded" && !existsSync(minted.privatePath),
+      "the minted signer's run " + mintedRun.status.phase + "; its private half is off the disk");
     const policyKey = (k, usage, state, extra) => Object.assign({ keyId: k.keyId, spkiPem: k.spkiPem,
       algorithm: "p256", principal: { id: k.subject || "lab@scram-local.invalid", display: "lab " + usage },
       usages: [usage], state: state, notBefore: "2026-01-01T00:00:00Z", notAfter: "2027-01-01T00:00:00Z" }, extra || {});
-    const trustPolicy = (signerState, extra) => ({ apiVersion: "logweir.dev/v1alpha1", kind: "TrustPolicy",
-      metadata: { name: TRUST_POLICY, labels: LABELS },
-      spec: { namespaces: [DR], keys: [policyKey(signer, "EvidenceSigning", signerState, extra),
-        policyKey(approver, "GovernedApproval", "Active")] } });
+    const mintedEntry = (state, extra) => Object.assign(policyKey({ keyId: minted.keyId, spkiPem: minted.spkiPem,
+      subject: "p152-minted-" + suffix + "@logweir.invalid" }, "EvidenceSigning", state, extra),
+    { principal: { id: "p152-minted-" + suffix + "@logweir.invalid", display: "this run's minted signer" } });
+    // ONLY THE MINTED ENTRY MAY EVER CARRY A COMPROMISE, and the lab signer's
+    // entry is refused one outright: `mintedState`/`mintedExtra` are the one
+    // place a `revocationReason` can come from.
+    const trustPolicy = (signerState, extra, mintedState, mintedExtra) => {
+      check((extra || {}).revocationReason === undefined,
+        "the lab signer's entry never carries a revocation (TRUSTPOLICY-DELETE-DROPS-REVOCATION)");
+      return { apiVersion: "logweir.dev/v1alpha1", kind: "TrustPolicy",
+        metadata: { name: TRUST_POLICY, labels: LABELS },
+        spec: { namespaces: [DR], keys: [policyKey(signer, "EvidenceSigning", signerState, extra),
+          mintedEntry(mintedState || "Active", mintedExtra),
+          policyKey(approver, "GovernedApproval", "Active")] } };
+    };
     kube(["apply", "-f", "-"], { input: JSON.stringify(trustPolicy("Active")) });
     result.created.push({ kind: "TrustPolicy", name: TRUST_POLICY, createdBy: "kubectl (lab-refresh-9 rows)" });
     kube(["-n", DR, "patch", "recoverycatalog", CATALOG, "--type=merge", "-p",
@@ -1505,12 +1636,43 @@ async function main() {
     });
     const trustCondition = ((underPolicy.status || {}).conditions || []).find((x) => x.type === "TrustAvailable") || null;
     artifact("dr/lr9-catalog-under-policy.json", { status: underPolicy.status });
-    const beforeRevoke = await catalogCheck("revoke-control");
+    const mintedListing = await apiCall("GET", DR, "/catalogs/" + CATALOG + "/points?limit=200");
+    artifact("dr/lr9-minted-points.json", mintedListing.body);
+    const mintedPoint = ((mintedListing.body || {}).items || [])
+      .find((p) => p.backupId === mintedRun.status.backupId) || null;
+    check(mintedPoint !== null && mintedPoint.signerKeyId === minted.keyId && mintedPoint.selectable === true,
+      "the minted signer's point is listed, signed by the minted key and selectable under the policy: " +
+        JSON.stringify(mintedPoint));
+    // THE PLAN FOR THE MINTED POINT IS THE WIZARD'S, exactly as journey 4 builds
+    // one: every bound field (point id, receipt and manifest digests, backup set,
+    // point in time, sample window) is the point's own, so it is never edited in.
+    await openRoute(page, base + "#/restore?ns=" + encodeURIComponent(DR),
+      "#step-catalog-points", "the selector's catalog section (minted point)");
+    await page.click("#step-catalog-points a[href*=\"point=" + mintedPoint.pointId + "\"]");
+    await waitForSelector(page, "#catalog-topics", "the wizard on the minted point");
+    await page.fill("#catalog-topics", SOURCE_TOPIC);
+    await page.dispatchEvent("#catalog-topics", "change");
+    await waitForSelector(page, ".topic-box[data-topic=\"" + SOURCE_TOPIC + "\"]",
+      "the named topic in the minted point's subset");
+    await page.fill("#topic-prefix", RESTORE_PREFIX);
+    await page.dispatchEvent("#topic-prefix", "change");
+    await pause(800);
+    const mintedPlan = await page.$eval("#plan-bytes", (n) => n.textContent);
+    const mintedPit = new Date(Date.parse(mintedPoint.coveredTo) - 1).toISOString();
+    check(mintedPlan.indexOf("point_id: \"" + mintedPoint.pointId + "\"") !== -1 &&
+      mintedPlan.indexOf("receipt_sha256: \"" + mintedPoint.receiptSha256 + "\"") !== -1 &&
+      mintedPlan.indexOf("backup: \"" + mintedPoint.backupId + "\"") !== -1 &&
+      mintedPlan.indexOf("point_in_time: \"" + mintedPit + "\"") !== -1,
+    "the wizard's plan is bound to the minted point");
+    artifact("dr/lr9-minted-plan.yaml", mintedPlan);
+    const mintedBound = { point: mintedPoint, plan: mintedPlan, pointInTime: mintedPit };
+    const beforeRevoke = await catalogCheck("revoke-control", mintedPoint, mintedPlan);
     check(beforeRevoke.row !== null && beforeRevoke.row.state === "ready" && beforeRevoke.row.code === "CatalogPointSelectable",
-      "revoked-key control: before the revocation the point is not ready/CatalogPointSelectable: " +
+      "revoked-key control: before the revocation the minted point is not ready/CatalogPointSelectable: " +
         JSON.stringify(beforeRevoke.row));
-    control("revoked-key: before the revocation the catalog point is ready/CatalogPointSelectable under the TrustPolicy",
-      { preflight: beforeRevoke.name, row: beforeRevoke.row, trustAvailable: trustCondition });
+    control("revoked-key: before the revocation the minted signer's catalog point is ready/CatalogPointSelectable under the TrustPolicy",
+      { preflight: beforeRevoke.name, row: beforeRevoke.row, trustAvailable: trustCondition,
+        mintedKeyId: minted.keyId, pointId: mintedPoint.pointId });
     // ==== harness-rows-12: a RETIRED signer's catalog point (D3 §7.4) =======
     // "Old signer" on the catalog path: the point's signer is Retired (not
     // revoked) after the point was signed. A retired key authorises nothing
@@ -1519,7 +1681,7 @@ async function main() {
     // readiness check is ready, and a restore of it succeeds with exactly the
     // source's records. The revocation below is the refusing twin.
     const at = new Date().toISOString().replace(/\.\d+Z$/, "Z");
-    kube(["apply", "-f", "-"], { input: JSON.stringify(trustPolicy("Retired", { retiredAt: at })) });
+    kube(["apply", "-f", "-"], { input: JSON.stringify(trustPolicy("Retired", { retiredAt: at }, "Active")) });
     const underRetired = await resync("retired");
     const retiredCheck = await catalogCheck("retired");
     const retired = await signedRestore("retired", RETIRED_PREFIX);
@@ -1548,21 +1710,48 @@ async function main() {
         verification: underRetired.verification, selectable: underRetired.selectable },
       preflight: retiredCheck.name, row: retiredCheck.row, restore: retired.name,
       records: retiredValues.length, clauses: retiredClauses });
-    kube(["apply", "-f", "-"], { input: JSON.stringify(trustPolicy("Revoked", { retiredAt: at, revokedAt: at,
-      revocationEffectiveFrom: "2026-09-01T00:00:00Z", revocationReason: "KeyCompromise" })) });
+    // THE REVOCATION: the MINTED key, and only it. `assertDisposable` refuses
+    // any key a shared trust source lists, before anything is applied.
+    assertDisposable(minted.keyId, "the minted signer");
+    kube(["apply", "-f", "-"], { input: JSON.stringify(trustPolicy("Retired", { retiredAt: at }, "Revoked",
+      { revokedAt: at, revocationEffectiveFrom: "2026-09-01T00:00:00Z", revocationReason: "KeyCompromise" })) });
     await pause(5000);
-    const afterRevoke = await catalogCheck("revoked");
+    // lr9-e. THE SHARED SIGNER IS NOT COMPROMISED ANYWHERE. Every TrustPolicy in
+    // the cluster is read; none may record a KeyCompromise revocation of a key
+    // TrustRoster/default lists -- the state that would re-verify nothing and
+    // hold its policy for ever. And this run's policy is what the compromise
+    // guard says it is (its finalizer and CompromiseGuard condition, recorded).
+    const rosterIds = [].concat(roster.spec.signingKeys || [], roster.spec.approverKeys || []).map((k) => k.keyId);
+    const compromisedShared = [];
+    for (const tp of kubeJson(["get", "trustpolicies"]).items) {
+      for (const k of ((tp.spec || {}).keys || [])) {
+        if (k.state === "Revoked" && k.revocationReason === "KeyCompromise" && rosterIds.includes(k.keyId)) {
+          compromisedShared.push(tp.metadata.name + ":" + k.keyId);
+        }
+      }
+    }
+    const ours = kubeJson(["get", "trustpolicy", TRUST_POLICY]);
+    const guard = (((ours.status || {}).conditions) || []).find((c) => c.type === "CompromiseGuard") || null;
+    artifact("dr/lr9-compromise-guard.json", { finalizers: ours.metadata.finalizers || [], guard: guard,
+      compromisedShared: compromisedShared, mintedKeyId: minted.keyId });
+    check(compromisedShared.length === 0,
+      "a TrustPolicy records a KeyCompromise revocation of a key TrustRoster/default lists: " +
+        compromisedShared.join(", "));
+    record("lr9-e. only the minted signer is revoked for compromise: no TrustPolicy compromises a key the roster lists", {
+      mintedKeyId: minted.keyId, finalizers: ours.metadata.finalizers || [],
+      compromiseGuard: guard === null ? null : { status: guard.status, reason: guard.reason } });
+    const afterRevoke = await catalogCheck("revoked", mintedPoint, mintedPlan);
     const revokedPreflight = {
       "recoveryPoint.state is notReady/CatalogPointSignerUntrusted":
         afterRevoke.row !== null && afterRevoke.row.state === "notReady" && afterRevoke.row.code === "CatalogPointSignerUntrusted",
-      "it names the key": afterRevoke.row !== null && JSON.stringify(afterRevoke.row).indexOf(signer.keyId.slice(0, 12)) !== -1,
+      "it names the key": afterRevoke.row !== null && JSON.stringify(afterRevoke.row).indexOf(minted.keyId.slice(0, 12)) !== -1,
       "it names Revoked": afterRevoke.row !== null && JSON.stringify(afterRevoke.row).indexOf("Revoked") !== -1,
     };
     lr9.rows.revokedPreflight = revokedPreflight;
     check(Object.values(revokedPreflight).every(Boolean), "revoked-key Preflight: " + JSON.stringify(afterRevoke.row));
     record("lr9-c. a revoked signer's catalog point is refused by the Preflight (CatalogPointSignerUntrusted, naming the key and Revoked), with no re-sync", {
       preflight: afterRevoke.name, row: afterRevoke.row, clauses: revokedPreflight });
-    const revoked = await signedRestore("revoked", REVOKED_PREFIX);
+    const revoked = await signedRestore("revoked", REVOKED_PREFIX, mintedBound);
     let bundle = null;
     let keysDigestEnv = null;
     if (revoked.job !== null) {
@@ -1585,7 +1774,7 @@ async function main() {
     const revokedRunner = Object.assign(refusedBeforeData(revoked, REVOKED_PREFIX, "PointUntrusted"), {
       "a Job was rendered after the revocation": revoked.job !== null,
       "its bundle's evidence-keys.json lists the signer as Revoked":
-        bundle !== null && listed.indexOf(signer.keyId) !== -1 && listed.indexOf("Revoked") !== -1,
+        bundle !== null && listed.indexOf(minted.keyId) !== -1 && listed.indexOf("Revoked") !== -1,
       "its env carries LOGWEIR_EXECUTION_EVIDENCE_KEYS_SHA256": keysDigestEnv !== null,
       "the refusal names Revoked": revoked.log.indexOf("Revoked") !== -1,
     });
@@ -1631,9 +1820,17 @@ function cleanup() {
       const live = JSON.parse(tp.stdout);
       check((live.metadata.labels || {})["logweir.dev/test-owner"] === OWNER,
         "refusing to delete TrustPolicy " + TRUST_POLICY + ": not this run's");
-      kube(["delete", "trustpolicy", TRUST_POLICY, "--wait=true"]);
-      result.cleanup.push({ trustPolicy: TRUST_POLICY, uid: live.metadata.uid,
-        deleted: kube(["get", "trustpolicy", TRUST_POLICY], { expected: [0, 1] }).status !== 0 });
+      // THE COMPROMISE GUARD RELEASES THIS POLICY AT ONCE: the one key it
+      // revokes is the minted one, which no other trust source lists. A policy
+      // still here after the bounded wait is recorded with its guard, which
+      // names what holds it.
+      kube(["delete", "trustpolicy", TRUST_POLICY, "--wait=true", "--timeout=90s"],
+        { expected: [0, 1], timeout: 120000 });
+      const after = kube(["get", "trustpolicy", TRUST_POLICY, "-o", "json"], { expected: [0, 1] });
+      const held = after.status === 0 ? JSON.parse(after.stdout) : null;
+      result.cleanup.push({ trustPolicy: TRUST_POLICY, uid: live.metadata.uid, deleted: held === null,
+        heldBy: held === null ? null : (((held.status || {}).conditions || [])
+          .find((c) => c.type === "CompromiseGuard") || null) });
     }
   } catch (tpFailed) {
     result.cleanup.push({ trustPolicy: TRUST_POLICY, error: String(tpFailed.message).slice(0, 400) });
