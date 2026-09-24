@@ -1,0 +1,29 @@
+/usr/bin/curl in this image
+===========================
+
+What it is
+  The statically linked curl 8.11.0 that the upstream MinIO image
+  (quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z) carried: the release
+  asset `curl-aarch64` / `curl-amd64` of https://github.com/moparisthebest/static-curl
+  tag v8.11.0, unmodified, pinned by the sha256 in that release's sha256sum.txt.
+  `curl --version` reports:
+    curl 8.11.0 libcurl/8.11.0 OpenSSL/1.1.1t zlib/1.2.12 libssh2/1.9.0 nghttp2/1.43.0
+  linked against musl libc.
+
+Why it is here
+  Upstream's Dockerfile.release installs it (dockerscripts/download-static-curl.sh),
+  so the rebuild does too: a health check written against the upstream image
+  as `curl -f http://localhost:9000/minio/health/live` keeps working. Nothing
+  Logweir runs calls it (its probes use `mc ready local` or HTTP GETs from the
+  kubelet). NOTE: OpenSSL 1.1.1t is past its end of life.
+
+Licences (the texts beside this file)
+  curl            curl licence (MIT/X derivative)   curl.COPYING       (curl tag curl-8_11_0)
+  OpenSSL 1.1.1t  OpenSSL + SSLeay dual licence     openssl.LICENSE    (tag OpenSSL_1_1_1t)
+  zlib 1.2.12     zlib licence                      zlib.LICENSE       (zlib.h of v1.2.12)
+  libssh2 1.9.0   BSD-3-Clause                      libssh2.COPYING    (tag libssh2-1.9.0)
+  nghttp2 1.43.0  MIT                               nghttp2.COPYING    (tag v1.43.0)
+  musl libc       MIT                               musl.COPYRIGHT     (text of musl v1.2.3; the
+                                                                        linked musl version is not
+                                                                        recorded in the binary)
+  static-curl     MIT (the build scripts)           static-curl.LICENSE

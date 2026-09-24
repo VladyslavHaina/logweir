@@ -1,0 +1,156 @@
+# docker.io/vladyslavhaina/minio-mirror:RELEASE.2025-09-07T16-13-09Z
+#
+# An UNMODIFIED rebuild, from upstream source, of the MinIO server image
+# quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z (index sha256:14cea493…),
+# which MinIO withdrew from Docker Hub on 2026-09-11 and from anonymous quay.io
+# pulls on 2026-09-24. README.md beside this file carries the provenance, the
+# licence (AGPL-3.0-only) and how to rebuild it; `build.sh` is the command.
+#
+# Upstream's own recipe (minio@07c3a429, Dockerfile.release) downloads three
+# release binaries onto ubi9/ubi-micro: `minio`, `mc` and a static `curl`.
+# dl.min.io now answers 410 Gone, so this file COMPILES `minio` and `mc` from
+# their tagged sources, the way upstream's Makefiles do (`go build -tags kqueue
+# -trimpath --ldflags "$(go run buildscripts/gen-ldflags.go)"`), and pins the
+# very `curl` upstream's image carried (static-curl v8.11.0) by checksum. Go is
+# cross-compiled on $BUILDPLATFORM for $TARGETARCH: nothing is compiled under
+# emulation.
+#
+#   * `mc` must be BYTE-IDENTICAL to the binary upstream published and signed
+#     for this release and architecture, or the build stops (the sha256 and
+#     MinIO's minisign signature in upstream/ are both checked).
+#   * `minio` is built with upstream's exact toolchain, tags and ldflags —
+#     including the builder's GOPATH and GOROOT, which upstream's gen-ldflags.go
+#     bakes into the binary and which were read back out of upstream's own
+#     binary — and matches upstream's everywhere except the build IDs and one
+#     function's instruction order; README.md records that difference exactly.
+#     Upstream's `minio.minisig` / `minio.sha256sum` are therefore NOT shipped:
+#     they describe upstream's bytes, not these.
+
+ARG GO_IMAGE=docker.io/library/golang:1.24.6-alpine@sha256:c8c5f95d64aa79b6547f3b626eb84b16a7ce18a139e3e9ca19a8c078b85ba80d
+# The exact base layer of the upstream image: ubi9/ubi-micro 9.6, build 1754467928.
+ARG BASE_IMAGE=registry.access.redhat.com/ubi9/ubi-micro:9.6-1754467928@sha256:f5c5213d2969b7b11a6666fc4b849d56b48d9d7979b60a37bb853dff0255c14b
+
+FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS build
+ARG TARGETOS
+ARG TARGETARCH
+ARG MINIO_RELEASE=RELEASE.2025-09-07T16-13-09Z
+ARG MINIO_COMMIT=07c3a429bfed433e49018cb0f78a52145d4bedeb
+ARG MC_RELEASE=RELEASE.2025-08-13T08-35-41Z
+ARG MC_COMMIT=7394ce0dd2a80935aded936b09fa12cbb3cb8096
+ARG MINISIGN_VERSION=v0.2.1
+ARG MINIO_MINISIGN_PUBKEY=RWTx5Zr1tiHQLwG9keckT0c45M3AGeHD6IvimQHpyRywVWGbP1aVSGav
+# Upstream's release builder, read out of its minio binary's string table
+# (`/root/.q/sources/gopath`, `/opt/go`): gen-ldflags.go copies $GOPATH and
+# $GOROOT into cmd.GOPATH / cmd.GOROOT, which the logger uses to trim paths.
+ARG UPSTREAM_GOPATH=/root/.q/sources/gopath
+ARG UPSTREAM_GOROOT=/opt/go
+ARG CURL_VERSION=v8.11.0
+ARG CURL_SHA256_ARM64=1b050abd1669f9a2ac29b34eb022cdeafb271dce5a4fb57d8ef8fadff6d7be1f
+ARG CURL_SHA256_AMD64=d18aa1f4e03b50b649491ca2c401cd8c5e89e72be91ff758952ad2ab5a83135d
+ENV CGO_ENABLED=0 GOTOOLCHAIN=local
+RUN apk add --no-cache git
+RUN git -c advice.detachedHead=false clone --quiet --depth 1 --branch "$MINIO_RELEASE" https://github.com/minio/minio.git /src/minio \
+ && test "$(git -C /src/minio rev-parse HEAD)" = "$MINIO_COMMIT" \
+ && git -c advice.detachedHead=false clone --quiet --depth 1 --branch "$MC_RELEASE" https://github.com/minio/mc.git /src/mc \
+ && test "$(git -C /src/mc rev-parse HEAD)" = "$MC_COMMIT"
+RUN --mount=type=cache,target=/go/pkg/mod GOBIN=/usr/local/bin go install "aead.dev/minisign/cmd/minisign@${MINISIGN_VERSION}"
+COPY upstream/ /upstream/
+# `.mirror-build` is an UNTRACKED file and changes no compiled byte: it makes
+# each VCS stamp read `vcs.modified=true` (module version `+dirty`), exactly as
+# upstream's release binaries' does.
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+    set -eu; \
+    mkdir -p /out; \
+    ln -sfn /usr/local/go "$UPSTREAM_GOROOT"; \
+    cd /src/minio; \
+    touch .mirror-build; \
+    LDFLAGS="$(GOPATH="$UPSTREAM_GOPATH" GOROOT="$UPSTREAM_GOROOT" MINIO_RELEASE=RELEASE go run buildscripts/gen-ldflags.go)"; \
+    echo "minio ldflags: $LDFLAGS"; \
+    GOOS="$TARGETOS" GOARCH="$TARGETARCH" go build -tags kqueue -trimpath -ldflags "$LDFLAGS" -o /out/minio .; \
+    echo "minio linux/$TARGETARCH sha256 $(sha256sum /out/minio | cut -d' ' -f1) (upstream $(cut -d' ' -f1 "/upstream/minio.linux-$TARGETARCH.$MINIO_RELEASE.sha256sum"))"; \
+    cd /src/mc; \
+    touch .mirror-build; \
+    LDFLAGS="$(MC_RELEASE=RELEASE go run buildscripts/gen-ldflags.go)"; \
+    echo "mc ldflags: $LDFLAGS"; \
+    GOOS="$TARGETOS" GOARCH="$TARGETARCH" go build -tags kqueue -trimpath -ldflags "$LDFLAGS" -o /out/mc .; \
+    f="/upstream/mc.linux-$TARGETARCH.$MC_RELEASE"; \
+    got="$(sha256sum /out/mc | cut -d' ' -f1)"; want="$(cut -d' ' -f1 "$f.sha256sum")"; \
+    echo "mc linux/$TARGETARCH sha256 $got (upstream $want)"; \
+    test "$got" = "$want"; \
+    minisign -Vm /out/mc -x "$f.minisig" -P "$MINIO_MINISIGN_PUBKEY"; \
+    cp "$f.minisig" /out/mc.minisig; \
+    cp "$f.sha256sum" /out/mc.sha256sum
+# The static curl upstream's image carried: moparisthebest/static-curl
+# v8.11.0, the release its download-static-curl.sh fetched as `latest` on
+# 2025-09-07 (the arm64 bytes are identical to the upstream image's
+# /usr/bin/curl). Pinned by the release's own sha256sum.txt (upstream/).
+RUN set -eu; \
+    case "$TARGETARCH" in \
+      arm64) asset=curl-aarch64; want="$CURL_SHA256_ARM64" ;; \
+      amd64) asset=curl-amd64; want="$CURL_SHA256_AMD64" ;; \
+      *) echo "no static curl pinned for $TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    grep -q "^$want  ./$asset\$" /upstream/static-curl-$CURL_VERSION.sha256sum.txt; \
+    wget -q -O /out/curl "https://github.com/moparisthebest/static-curl/releases/download/$CURL_VERSION/$asset"; \
+    echo "$want  /out/curl" | sha256sum -c -
+COPY licenses/curl/ /curl-licenses/
+# The final image's files with upstream's modes: binaries 0755, signature and
+# checksum files 0644, the entrypoint 0775, LICENSE and CREDITS 0664.
+RUN set -eu; \
+    install -d -m 0755 /rootfs/usr/bin /rootfs/licenses /rootfs/licenses/curl; \
+    install -m 0755 /out/minio /out/mc /out/curl /rootfs/usr/bin/; \
+    install -m 0644 /out/mc.minisig /out/mc.sha256sum /rootfs/usr/bin/; \
+    install -m 0775 /src/minio/dockerscripts/docker-entrypoint.sh /rootfs/usr/bin/docker-entrypoint.sh; \
+    install -m 0664 /src/minio/CREDITS /src/minio/LICENSE /rootfs/licenses/; \
+    install -m 0644 /curl-licenses/* /rootfs/licenses/curl/; \
+    ls -lR /rootfs
+
+# The CA bundle only, untouched by the apk run above: byte-identical to the
+# upstream image's /etc/ssl/certs/ca-certificates.crt.
+FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS ca
+
+FROM ${BASE_IMAGE}
+ARG MINIO_RELEASE=RELEASE.2025-09-07T16-13-09Z
+ARG MINIO_COMMIT=07c3a429bfed433e49018cb0f78a52145d4bedeb
+ARG MC_RELEASE=RELEASE.2025-08-13T08-35-41Z
+ARG MC_COMMIT=7394ce0dd2a80935aded936b09fa12cbb3cb8096
+# Upstream's labels, unchanged, except `maintainer`: this image is not
+# maintained by MinIO, Inc. and must not route anyone to them.
+LABEL name="MinIO" \
+      vendor="MinIO Inc <dev@min.io>" \
+      maintainer="Logweir project mirror (docker.io/vladyslavhaina), not MinIO, Inc." \
+      version="${MINIO_RELEASE}" \
+      release="${MINIO_RELEASE}" \
+      summary="MinIO is a High Performance Object Storage, API compatible with Amazon S3 cloud storage service." \
+      description="MinIO object storage is fundamentally different. Designed for performance and the S3 API, it is 100% open-source. MinIO is ideal for large, private cloud environments with stringent security requirements and delivers mission-critical availability across a diverse range of workloads." \
+      org.opencontainers.image.title="minio-mirror" \
+      org.opencontainers.image.description="Unmodified rebuild of MinIO ${MINIO_RELEASE} from upstream source (https://github.com/minio/minio, commit ${MINIO_COMMIT}), with the MinIO Client ${MC_RELEASE} (https://github.com/minio/mc, commit ${MC_COMMIT}) and upstream's static curl. Corresponding source: the upstream repositories at those commits. Rebuilt because MinIO withdrew its public images; a stopgap for Logweir's test stacks, not affiliated with MinIO, Inc. Recipe: https://github.com/VladyslavHaina/logweir/tree/main/third_party/minio-mirror" \
+      org.opencontainers.image.source="https://github.com/minio/minio" \
+      org.opencontainers.image.revision="${MINIO_COMMIT}" \
+      org.opencontainers.image.version="${MINIO_RELEASE}" \
+      org.opencontainers.image.licenses="AGPL-3.0-only" \
+      org.opencontainers.image.url="https://github.com/VladyslavHaina/logweir/tree/main/third_party/minio-mirror"
+ENV MINIO_ACCESS_KEY_FILE=access_key \
+    MINIO_SECRET_KEY_FILE=secret_key \
+    MINIO_ROOT_USER_FILE=access_key \
+    MINIO_ROOT_PASSWORD_FILE=secret_key \
+    MINIO_KMS_SECRET_KEY_FILE=kms_master_key \
+    MINIO_UPDATE_MINISIGN_PUBKEY="RWTx5Zr1tiHQLwG9keckT0c45M3AGeHD6IvimQHpyRywVWGbP1aVSGav" \
+    MINIO_CONFIG_ENV_FILE=config.env \
+    MC_CONFIG_DIR=/tmp/.mc
+# Upstream's, verbatim: it makes the base image's /usr/bin world-writable.
+RUN chmod -R 777 /usr/bin
+# NO `COPY --chmod` BELOW, on purpose: BuildKit applies --chmod to the parent
+# directories a COPY creates as well, and a 0644 /licenses/ or /etc/ssl/ is a
+# directory a non-root container cannot enter. Every mode is set in the build
+# stage (/rootfs/, upstream's modes) and COPY carries it; a directory a COPY
+# creates is 0755, as upstream's are.
+COPY --from=ca /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+# File by file, so that /usr/bin itself keeps the 0777 upstream's chmod gave it.
+COPY --from=build /rootfs/usr/bin/minio /rootfs/usr/bin/mc /rootfs/usr/bin/mc.minisig \
+     /rootfs/usr/bin/mc.sha256sum /rootfs/usr/bin/curl /rootfs/usr/bin/docker-entrypoint.sh /usr/bin/
+COPY --from=build /rootfs/licenses/ /licenses/
+EXPOSE 9000
+VOLUME ["/data"]
+ENTRYPOINT ["/usr/bin/docker-entrypoint.sh"]
+CMD ["minio"]
