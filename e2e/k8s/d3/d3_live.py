@@ -7852,6 +7852,23 @@ def the_schedule_records_the_pass(schedule: dict[str, Any], restore_name: str,
             bool(watched) and not any(
                 (((w or {}).get("lastFailed") or {}).get("restoreRef") or {}).get("name")
                 == restore_name for w in watched),
+        # REHEARSAL-FIRE-PASS-STATUS-LOST (lab-refresh-10 row e; reserve-commit).
+        # The fire pass's commit is preconditioned on the reservation's answer,
+        # so it LANDS: while the rehearsal runs the schedule names it in
+        # `activeRestoreRef` with the reservation released. Every d3 artifact of
+        # lab-refresh-9 and -10 carried only `pendingRestoreRef`.
+        "while it ran, a watched write named it in activeRestoreRef with no "
+        "pendingRestoreRef (the fire pass's commit landed)":
+            any(((w or {}).get("activeRestoreRef") or {}).get("name") == restore_name
+                and not (((w or {}).get("pendingRestoreRef") or {}).get("name"))
+                for w in (watched or [])),
+        # The same lost commit kept `Authorized` at `Unknown/NoResult` after
+        # slots fired and passed; the pass that fires evaluates it.
+        "Authorized is True/Authorized, evaluated by the pass that fired (not "
+        "Unknown/NoResult)": (
+            condition(schedule, "Authorized").get("status") == "True"
+            and condition(schedule, "Authorized").get("reason") == "Authorized"
+        ),
     }
 
 
@@ -7876,39 +7893,73 @@ class StatusWatch:
     def __init__(self, kind: str, name: str, seconds: int = 3600) -> None:
         self.statuses: list[dict[str, Any]] = []
         self.times: list[str] = []
-        self.proc = subprocess.Popen(
-            ["/tmp/lwtimeout", str(seconds)] + KN + ["get", kind, name, "-w", "-o", "json"],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, cwd=ROOT)
+        self.kind, self.name = kind, name
+        self.deadline = time.time() + seconds
+        self.stopping = False
+        # How many times the watch was re-opened. THE API SERVER ENDS EVERY
+        # WATCH after a randomised `--min-request-timeout` (30-60 min), and
+        # `kubectl get -w` then exits: lab-refresh-11's first
+        # `rehearsal-verdict-not-reached` run lost its watch before the
+        # hour-long decision it was waiting for. A re-opened watch first
+        # replays the object as it stands, so no write is lost across the gap
+        # that a later write does not also carry.
+        self.restarts = 0
+        self.proc = self._open()
         self.thread = threading.Thread(target=self._read, daemon=True)
         self.thread.start()
 
+    def _open(self) -> subprocess.Popen:
+        left = max(1, int(self.deadline - time.time()))
+        return subprocess.Popen(
+            ["/tmp/lwtimeout", str(left)] + KN + ["get", self.kind, self.name, "-w", "-o",
+                                                   "json"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, cwd=ROOT)
+
     def _read(self) -> None:
         decoder = json.JSONDecoder()
-        buf = ""
-        assert self.proc.stdout is not None
-        for line in self.proc.stdout:
-            buf += line
-            while True:
-                stripped = buf.lstrip()
-                if not stripped:
-                    buf = ""
-                    break
-                try:
-                    obj, end = decoder.raw_decode(stripped)
-                except ValueError:
-                    break
-                buf = stripped[end:]
-                self.statuses.append((obj or {}).get("status") or {})
-                self.times.append(dt.datetime.now(dt.timezone.utc).isoformat())
+        while True:
+            buf = ""
+            assert self.proc.stdout is not None
+            for line in self.proc.stdout:
+                buf += line
+                while True:
+                    stripped = buf.lstrip()
+                    if not stripped:
+                        buf = ""
+                        break
+                    try:
+                        obj, end = decoder.raw_decode(stripped)
+                    except ValueError:
+                        break
+                    buf = stripped[end:]
+                    self.statuses.append((obj or {}).get("status") or {})
+                    self.times.append(dt.datetime.now(dt.timezone.utc).isoformat())
+            self.proc.wait()
+            if self.stopping or time.time() >= self.deadline - 2:
+                return
+            time.sleep(1)
+            if self.stopping:
+                return
+            self.restarts += 1
+            self.proc = self._open()
 
     def stop(self) -> list[dict[str, Any]]:
-        if self.proc.poll() is None:
-            self.proc.terminate()
+        self.stopping = True
+        proc = self.proc
+        if proc.poll() is None:
+            proc.terminate()
         try:
-            self.proc.wait(timeout=10)
+            proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
-            self.proc.kill()
-        self.thread.join(timeout=10)
+            proc.kill()
+        self.thread.join(timeout=15)
+        # a re-open racing the stop
+        if self.proc is not proc and self.proc.poll() is None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
         return list(self.statuses)
 
 
@@ -12006,6 +12057,11 @@ def deleted_rehearsal_is_recorded(name: str, watched: list[dict[str, Any]],
         "no write ever records it as lastSucceeded": not any(
             (((w.get("lastSucceeded") or {}).get("restoreRef") or {}).get("name") == name)
             for w in watched),
+        # lab-refresh-10 row (e): the next slot fired over the deleted rehearsal
+        # before (instead of) recording it. A later slot's child may be named
+        # only in or after the write that records this one.
+        "no later slot is reserved or fired over it before the record (the recording "
+        "pass's own reservation excepted)": not later_child_overtook(name, watched),
     }
     if not all(premise.values()):
         return "NOT-REACHED", {**premise, **clauses}
@@ -12116,6 +12172,681 @@ def rehearsal_deleted() -> None:
                 shutil.rmtree(key["dir"], ignore_errors=True)
             if work is not None:
                 shutil.rmtree(work, ignore_errors=True)
+
+# ---------------------------------------------------------------------------
+# lab-refresh-11 — the reservation protocol live (REHEARSAL-FIRE-PASS-STATUS-LOST)
+# ---------------------------------------------------------------------------
+#
+# `claude/reserve-commit.result.md` "Rows for the next lab round". Three phases:
+#
+# * `rehearsal-verdict-not-reached` — a rehearsal whose evidence verdict stays
+#   `Pending` past `VERDICT_WAIT_SECONDS` (one hour) is recorded
+#   `lastFailed {reason: EvidenceVerdictNotReached}`, never a pass. The verdict
+#   is held `Pending` the way the controller's own documentation names
+#   (`rehearsal_schedule.rs::VERDICT_WAIT_SECONDS`: "a namespace whose fetch
+#   slot stays saturated"): this run's namespace is given
+#   `checks.maxEvidenceFetchActivePerNamespace` SUSPENDED Jobs wearing the
+#   evidence-fetch labels, so `evidence_fetch::advance` answers `Queued` and the
+#   Restore's verification stays `Pending`. Its own namespace — the blockers
+#   would hold every other row's verdict too.
+# * `rehearsal-deleted-active` — review L1: a schedule holding
+#   `activeRestoreRef=<deleted>` and `pendingRestoreRef=<owned, running>`
+#   (staged by patching the status, as the review round prescribes) records the
+#   deleted run `RestoreDeleted` AND makes the running one active, in one write.
+# * `reservation-writes` — the class sweep: a Preflight's `CheckPlanConflict`
+#   after its `Pending` write, and a Backup's `JobNameConflict` over a frozen
+#   run, each recorded without a lost (409) write.
+
+REHEARSAL_NR_SCHEDULE = "l6-not-reached"
+REHEARSAL_NR_POINT_SCHEDULE = "l6n-points"
+REHEARSAL_NR_CATALOG = "l6n-cat"
+REHEARSAL_NR_POINT = "l6n-point"
+REHEARSAL_NR_ROW = "rehearsal-verdict-still-owed-after-the-wait-is-evidence-verdict-not-reached"
+#: `rehearsal_schedule.rs::VERDICT_WAIT_SECONDS`, read from the source by the twin.
+REHEARSAL_VERDICT_WAIT_SECONDS = 3600
+#: How late past the bound the record may land and still be "the bound": the
+#: schedule's own requeue (30 s) plus the minute cron's next pass, twice over.
+REHEARSAL_VERDICT_WAIT_SLACK_SECONDS = 300
+EVIDENCE_SLOT_BLOCKER_PREFIX = f"{OWNER_TAG}-evslot-"
+
+REHEARSAL_L1_SCHEDULE = "l6-deleted-active"
+REHEARSAL_L1_POINT_SCHEDULE = "l6a-points"
+REHEARSAL_L1_CATALOG = "l6a-cat"
+REHEARSAL_L1_POINT = "l6a-point"
+REHEARSAL_L1_ROW = "rehearsal-deleted-active-beside-an-owned-reservation-keeps-the-reservation"
+
+RESERVATION_PREFLIGHT = "pf-plan-conflict"
+RESERVATION_PREFLIGHT_ROW = "preflight-check-plan-conflict-after-pending-is-recorded"
+RESERVATION_BACKUP = "bk-job-name-conflict"
+RESERVATION_BACKUP_ROW = "backup-job-name-conflict-over-a-frozen-run-is-recorded"
+RESERVATION_QUOTA = f"{OWNER_TAG}-hold-jobs"
+CHECK_SLOT_BLOCKER_PREFIX = f"{OWNER_TAG}-chkslot-"
+
+#: The controller's log line for a status commit another writer beat (409).
+COMMIT_CONFLICT_LINE = "the status changed under this reconcile (409)"
+
+
+def controller_log_since(since: str) -> str:
+    """The lab controller's own log from `since` (RFC 3339) on."""
+    result = run(K + ["-n", FIXTURE_NS, "logs", "deploy/weirkeeper", f"--since-time={since}"],
+                 check=False, timeout=120)
+    return result.stdout if result.returncode == 0 else ""
+
+
+def log_lines_naming(log_text: str, name: str, *needles: str) -> list[str]:
+    """Controller log lines that name `name` and carry any of `needles`."""
+    return [line for line in log_text.splitlines()
+            if name in line and any(n in line for n in needles)]
+
+
+def checks_policy() -> dict[str, Any]:
+    """The `checks` block of the controller's mounted policy ConfigMap."""
+    cm = get("configmap", "weirkeeper-policy", namespace=FIXTURE_NS)
+    for value in (cm.get("data") or {}).values():
+        try:
+            doc = json.loads(value)
+        except ValueError:
+            continue
+        if isinstance(doc, dict) and isinstance(doc.get("checks"), dict):
+            return doc["checks"]
+    return {}
+
+
+def slot_blocker_job(name: str, kind: str) -> dict[str, Any]:
+    """A SUSPENDED Job wearing the check-Job labels `check/limits.rs::count`
+    counts: `app.kubernetes.io/component=check` and `logweir.dev/check-kind`.
+    Suspended, so no pod ever exists; not finished, so it occupies a slot."""
+    meta = owned(name)
+    meta["labels"].update({"app.kubernetes.io/component": "check",
+                           "logweir.dev/check-kind": kind})
+    return {
+        "apiVersion": "batch/v1", "kind": "Job", "metadata": meta,
+        "spec": {
+            "suspend": True, "backoffLimit": 0,
+            "template": {"metadata": {"labels": dict(LABEL)}, "spec": {
+                "restartPolicy": "Never", "automountServiceAccountToken": False,
+                "containers": [{"name": "hold", "image": "logweir:scram-local",
+                                "imagePullPolicy": "Never",
+                                "command": ["/bin/false"]}]}},
+        },
+    }
+
+
+def delete_owned_jobs(prefix: str) -> list[str]:
+    """Delete this run's blocker Jobs (owner label AND name prefix)."""
+    gone = []
+    for job in lst("jobs", selector=f"logweir.dev/test-owner={OWNER}"):
+        name = job["metadata"]["name"]
+        if name.startswith(prefix):
+            run(KN + ["delete", "job", name, "--wait=false"], check=False)
+            gone.append(name)
+    return gone
+
+
+def later_child_overtook(name: str, watched: list[dict[str, Any]]) -> list[str]:
+    """How a LATER slot's child appears in the writes before the first write
+    that records `name` (in `lastFailed`/`lastSucceeded`) — [] when it did not.
+
+    THE SAME PASS MAY RESERVE THE NEXT SLOT AND RECORD THIS ONE. The
+    reservation protocol writes `pendingRestoreRef` first, under its own
+    precondition, and the pass's commit then records the decided run AND
+    makes the new child active (`rehearsal_schedule.rs`, reserve-commit's
+    `the_next_slot_records_a_deleted_rehearsal_and_commits_its_own_child`;
+    measured live on lab-refresh-11: reservation, then the commit carrying
+    `lastFailed`). So a later child named ONLY in `pendingRestoreRef` in the
+    ONE write immediately before the record is that pass's reservation. Any
+    other appearance — active, decided, or reserved earlier — is the next slot
+    firing over a run that was not recorded (lab-refresh-10 row e)."""
+    def records(w: dict[str, Any]) -> bool:
+        return name in ((((w.get("lastFailed") or {}).get("restoreRef") or {}).get("name")),
+                        (((w.get("lastSucceeded") or {}).get("restoreRef") or {}).get("name")))
+    until = next((i for i, w in enumerate(watched) if records(w)), len(watched))
+    found = []
+    for i, w in enumerate(watched[:until]):
+        active = (w.get("activeRestoreRef") or {}).get("name") or ""
+        pending = (w.get("pendingRestoreRef") or {}).get("name") or ""
+        decided = [(((w.get(k) or {}).get("restoreRef") or {}).get("name") or "")
+                   for k in ("lastFailed", "lastSucceeded")]
+        if active > name:
+            found.append(f"write {i}: {active} active")
+        for d in decided:
+            if d > name:
+                found.append(f"write {i}: {d} decided")
+        if pending > name and not (i == until - 1 and until < len(watched)):
+            found.append(f"write {i}: {pending} reserved")
+    return found
+
+
+def verdict_not_reached_is_recorded(name: str, restore: dict[str, Any],
+                                    watched: list[dict[str, Any]],
+                                    restore_trail: list[dict[str, Any]]
+                                    ) -> tuple[str, dict[str, bool]]:
+    """The documented rule: an exit-0 rehearsal whose verdict is still owed
+    `VERDICT_WAIT_SECONDS` after it finished is `lastFailed` with reason
+    `EvidenceVerdictNotReached` — never a pass, never earlier, and nothing
+    fires over it while it is owed."""
+    status = restore.get("status") or {}
+    finished = parse_rfc3339(condition(restore, "Complete").get("lastTransitionTime"))
+    results = [(((s.get("evidence") or {}).get("verification") or {}).get("result"))
+               for s in restore_trail]
+    decided_at = next((i for i, w in enumerate(watched)
+                       if (((w.get("lastFailed") or {}).get("restoreRef") or {})
+                           .get("name") == name)), None)
+    first = watched[decided_at] if decided_at is not None else {}
+    before = watched[:decided_at] if decided_at is not None else watched
+    at = parse_rfc3339((first.get("lastFailed") or {}).get("at"))
+    waited = (at - finished).total_seconds() if at and finished else None
+    overtook = later_child_overtook(name, watched)
+    premise = {
+        "the rehearsal finished exit 0 (Succeeded) and named its evidence":
+            status.get("phase") == "Succeeded" and status.get("exitCode") == 0
+            and bool((status.get("evidence") or {}).get("scorecardKey")),
+        "its verification read Pending and never a reached verdict before the decision":
+            bool(results) and "Pending" in results
+            and all(r in (None, "Pending") for r in results),
+    }
+    clauses = {
+        "a status write records it in lastFailed": decided_at is not None,
+        "with reason EvidenceVerdictNotReached":
+            (first.get("lastFailed") or {}).get("reason") == "EvidenceVerdictNotReached",
+        "no earlier than VERDICT_WAIT_SECONDS after it finished":
+            waited is not None and waited >= REHEARSAL_VERDICT_WAIT_SECONDS,
+        "and within the bound's slack (the wait is bounded)":
+            waited is not None
+            and waited <= REHEARSAL_VERDICT_WAIT_SECONDS + REHEARSAL_VERDICT_WAIT_SLACK_SECONDS,
+        "RehearsalHealthy=False/Failed in that write": any(
+            c.get("type") == "RehearsalHealthy" and c.get("status") == "False"
+            and c.get("reason") == "Failed" for c in first.get("conditions") or []),
+        "while owed, activeRestoreRef named it (the fire pass's commit landed)": any(
+            ((w.get("activeRestoreRef") or {}).get("name") == name) for w in before),
+        "while owed, a due slot was skipped ConcurrencyBlocked": any(
+            ((w.get("lastSkipped") or {}).get("reason") == "ConcurrencyBlocked")
+            for w in before),
+        "and no later rehearsal was reserved or fired over it before the decision "
+        "(its own pass's reservation excepted)": not overtook,
+        "no write ever records it as lastSucceeded": not any(
+            (((w.get("lastSucceeded") or {}).get("restoreRef") or {}).get("name") == name)
+            for w in watched),
+    }
+    if not all(premise.values()):
+        return "NOT-REACHED", {**premise, **clauses}
+    return ("PASS" if all(clauses.values()) else "FAIL"), {**premise, **clauses}
+
+
+def rehearsal_verdict_not_reached() -> None:
+    """lab-refresh-11 (e). CLUSTER LOCK (it writes this namespace's
+    TrustPolicy). Its OWN namespace: the evidence-fetch pool it saturates is
+    per namespace, and would hold every other row's verdict. About 70 minutes:
+    the documented bound is one hour past the run's finish."""
+    evidence: list[str] = []
+    arms: dict[str, str] = {}
+    work: pathlib.Path | None = None
+    approver_key: dict[str, Any] | None = None
+    retired_key: dict[str, Any] | None = None
+    watch: StatusWatch | None = None
+    trail: StatusWatch | None = None
+    try:
+        work = pathlib.Path(tempfile.mkdtemp(prefix=f"{OWNER}-l6n-", dir="/tmp"))
+        work.chmod(0o700)
+        approver_key = mint_signing_key(f"{OWNER}-l6n-approver")
+        retired_key = mint_signing_key(f"{OWNER}-l6n-retired")
+        target_cluster_id = rehearsal_target_cluster()["status"]["clusterId"]
+        rehearsal_trust(target_cluster_id, approver_key, retired_key)
+        # The point's own Backup is verified through an evidence fetch in THIS
+        # namespace, so the pool is saturated only after it is decided.
+        rehearsal_point(REHEARSAL_NR_POINT_SCHEDULE, REHEARSAL_NR_CATALOG, REHEARSAL_NR_POINT)
+        point_spec = rehearsal_point_spec(REHEARSAL_NR_POINT_SCHEDULE, REHEARSAL_NR_CATALOG)
+        rehearsal_arm(REHEARSAL_NR_SCHEDULE, cron=REHEARSAL_FAST_CRON,
+                      key=approver_key["private"], work=work,
+                      target_cluster_id=target_cluster_id, arms=arms, point=point_spec)
+        pool = int(checks_policy().get("maxEvidenceFetchActivePerNamespace") or 4)
+        blockers = [f"{EVIDENCE_SLOT_BLOCKER_PREFIX}{i}" for i in range(pool)]
+        for name in blockers:
+            create(slot_blocker_job(name, "evidenceFetch"))
+        evidence.append(artifact("rehearsal-not-reached/00-blockers.json", {
+            "pool": pool, "blockers": [get("job", n) for n in blockers]}))
+        watch = StatusWatch("rehearsalschedule", REHEARSAL_NR_SCHEDULE, seconds=6000)
+        unsuspend("rehearsalschedule", REHEARSAL_NR_SCHEDULE)
+        first = rehearsal_first_restore(REHEARSAL_NR_SCHEDULE, seconds=600)
+        if first is None:
+            record(REHEARSAL_NR_ROW, "PLAT-14.3", "NOT-REACHED",
+                   "no rehearsal Restore within 600 s of unsuspending", evidence)
+            return
+        name = first["metadata"]["name"]
+        trail = StatusWatch("restore", name, seconds=6000)
+        wait_for("restore", name, terminal, seconds=1500, what="a terminal phase")
+        restore = get("restore", name)
+        finished = parse_rfc3339(condition(restore, "Complete").get("lastTransitionTime"))
+        log(f"rehearsal-verdict-not-reached: {name} finished at {finished}; waiting the "
+            f"documented {REHEARSAL_VERDICT_WAIT_SECONDS} s with the fetch pool saturated")
+        budget = REHEARSAL_VERDICT_WAIT_SECONDS + REHEARSAL_VERDICT_WAIT_SLACK_SECONDS + 600
+        poll(lambda: {"s": list(watch.statuses)},
+             lambda o: any((((w.get("lastFailed") or {}).get("restoreRef") or {})
+                            .get("name") == name) for w in o["s"]),
+             seconds=budget)
+        # The decision is taken; stop the arm before the next slot fires into
+        # the still-saturated pool, then read the Restore as it stood.
+        suspend_schedule(REHEARSAL_NR_SCHEDULE)
+        restore_trail = trail.stop()
+        trail = None
+        restore_at_decision = get("restore", name)
+        time.sleep(5)
+        watched = watch.stop()
+        watch = None
+        verdict, clauses = verdict_not_reached_is_recorded(
+            name, restore_at_decision, watched, restore_trail)
+        evidence.append(artifact("rehearsal-not-reached/01-decision.json", {
+            "restore": name, "finished": str(finished),
+            "restoreAtDecision": restore_at_decision.get("status"),
+            "verificationTrail": [((s.get("evidence") or {}).get("verification") or {})
+                                  .get("result") for s in restore_trail],
+            "watchedStatusWrites": watched, "verdict": verdict, "clauses": clauses}))
+        record(REHEARSAL_NR_ROW, "PLAT-14.3", verdict,
+               f"{name}: " + "; ".join(f"{k}={v}" for k, v in clauses.items()), evidence)
+        # THE LATE VERDICT: release the pool; the Restore reaches its verdict,
+        # and the schedule, already decided, never promotes it to a pass.
+        gone = delete_owned_jobs(EVIDENCE_SLOT_BLOCKER_PREFIX)
+        late = poll(lambda: get_opt("restore", name),
+                    lambda o: (((o.get("status") or {}).get("evidence") or {})
+                               .get("verification") or {}).get("result")
+                    not in (None, "Pending"), seconds=600)
+        after = get("rehearsalschedule", REHEARSAL_NR_SCHEDULE)
+        late_clauses = {
+            "the Restore reaches its verdict once the pool frees":
+                (((late.get("status") or {}).get("evidence") or {}).get("verification")
+                 or {}).get("result") not in (None, "Pending"),
+            "and the schedule still records it as lastFailed EvidenceVerdictNotReached":
+                ((after.get("status") or {}).get("lastFailed") or {}).get("reason")
+                == "EvidenceVerdictNotReached"
+                and ((((after.get("status") or {}).get("lastFailed") or {}).get("restoreRef")
+                      or {}).get("name") == name),
+            "never lastSucceeded": ((((after.get("status") or {}).get("lastSucceeded") or {})
+                                     .get("restoreRef") or {}).get("name") != name),
+        }
+        evidence.append(artifact("rehearsal-not-reached/02-late-verdict.json", {
+            "blockersDeleted": gone, "restore": late.get("status"),
+            "schedule": after.get("status"), "clauses": late_clauses}))
+        check(f"{REHEARSAL_NR_ROW}-late-verdict-is-not-promoted", "PLAT-14.3",
+              all(late_clauses.values()),
+              "; ".join(f"{k}={v}" for k, v in late_clauses.items()), evidence)
+    finally:
+        for w in (watch, trail):
+            if w is not None:
+                w.stop()
+        try:
+            delete_owned_jobs(EVIDENCE_SLOT_BLOCKER_PREFIX)
+            quiet = {n: quiesce_arm(n, evidence)["quiet"] for n in sorted(arms)}
+            live = {n: get_opt("rehearsalschedule", n) for n in arms}
+            owned_prefixes, not_swept = owned_rehearsal_prefixes(arms, live, quiet)
+            swept = topics_to_sweep(target_topics(), list(owned_prefixes.values()))
+            for topic in swept:
+                target_topic_delete(topic)
+            left = topics_to_sweep(target_topics(),
+                                   [rendered_prefix(uid) for uid in arms.values()])
+            evidence.append(artifact("rehearsal-not-reached/98-broker-sweep.json", {
+                "arms": arms, "quiet": quiet, "swept": swept, "notSwept": not_swept,
+                "left": left}))
+            check("rehearsal-not-reached-shared-broker-left-as-found", "PLAT-14.3",
+                  all(quiet.values()) and not left,
+                  f"arms {sorted(arms)} quiet={quiet}; swept {swept}; left {left}", evidence)
+        finally:
+            for key in [k for k in (approver_key, retired_key) if k is not None]:
+                key["private"].unlink(missing_ok=True)
+                shutil.rmtree(key["dir"], ignore_errors=True)
+            if work is not None:
+                shutil.rmtree(work, ignore_errors=True)
+
+
+def deleted_active_keeps_the_reservation(deleted: str, running: str,
+                                         watched_after_stage: list[dict[str, Any]],
+                                         staged: bool) -> tuple[str, dict[str, bool]]:
+    """Review L1: the write that records the deleted active run ALSO makes the
+    owned, running reservation active — it is never cleared beside it."""
+    premise = {"the status was staged active=<deleted>, pending=<owned, running>": staged}
+    recorded = [w for w in watched_after_stage
+                if (((w.get("lastFailed") or {}).get("restoreRef") or {}).get("name")
+                    == deleted)]
+    first = recorded[0] if recorded else {}
+    clauses = {
+        "a status write records the deleted run in lastFailed": bool(recorded),
+        "with reason RestoreDeleted":
+            (first.get("lastFailed") or {}).get("reason") == "RestoreDeleted",
+        "and in that same write activeRestoreRef names the running reservation":
+            (first.get("activeRestoreRef") or {}).get("name") == running,
+        "and pendingRestoreRef is released in it": not (first.get("pendingRestoreRef") or {})
+        .get("name"),
+        "no write after the stage leaves the running one unreferenced before it is decided":
+            not any(((w.get("activeRestoreRef") or {}).get("name") != running
+                     and (w.get("pendingRestoreRef") or {}).get("name") != running
+                     and (((w.get("lastSucceeded") or {}).get("restoreRef") or {}).get("name")
+                          != running)
+                     and (((w.get("lastFailed") or {}).get("restoreRef") or {}).get("name")
+                          != running))
+                    for w in watched_after_stage),
+    }
+    if not all(premise.values()):
+        return "NOT-REACHED", {**premise, **clauses}
+    return ("PASS" if all(clauses.values()) else "FAIL"), {**premise, **clauses}
+
+
+def rehearsal_deleted_active() -> None:
+    """lab-refresh-11 (c), review L1. CLUSTER LOCK (TrustPolicy). A one-minute
+    arm: its first rehearsal C1 is allowed to finish and be recorded; the
+    moment the next slot's C2 is committed active and still running, C1 is
+    deleted and the status is staged `activeRestoreRef=C1, pendingRestoreRef=C2`
+    — the state a lost commit followed by a deletion leaves. Up to three slots
+    are tried; a C2 that finished before the stage landed is not the case."""
+    evidence: list[str] = []
+    arms: dict[str, str] = {}
+    work: pathlib.Path | None = None
+    approver_key: dict[str, Any] | None = None
+    retired_key: dict[str, Any] | None = None
+    watch: StatusWatch | None = None
+    try:
+        work = pathlib.Path(tempfile.mkdtemp(prefix=f"{OWNER}-l6a-", dir="/tmp"))
+        work.chmod(0o700)
+        approver_key = mint_signing_key(f"{OWNER}-l6a-approver")
+        retired_key = mint_signing_key(f"{OWNER}-l6a-retired")
+        target_cluster_id = rehearsal_target_cluster()["status"]["clusterId"]
+        rehearsal_trust(target_cluster_id, approver_key, retired_key)
+        rehearsal_point(REHEARSAL_L1_POINT_SCHEDULE, REHEARSAL_L1_CATALOG, REHEARSAL_L1_POINT)
+        point_spec = rehearsal_point_spec(REHEARSAL_L1_POINT_SCHEDULE, REHEARSAL_L1_CATALOG)
+        rehearsal_arm(REHEARSAL_L1_SCHEDULE, cron=REHEARSAL_FAST_CRON,
+                      key=approver_key["private"], work=work,
+                      target_cluster_id=target_cluster_id, arms=arms, point=point_spec)
+        watch = StatusWatch("rehearsalschedule", REHEARSAL_L1_SCHEDULE, seconds=2400)
+        unsuspend("rehearsalschedule", REHEARSAL_L1_SCHEDULE)
+        attempts: list[dict[str, Any]] = []
+        staged: dict[str, Any] | None = None
+        deadline = time.time() + 1200
+        while time.time() < deadline and staged is None and len(attempts) < 3:
+            # the previous run must be decided (recorded) before its successor
+            # is committed; wait for a committed child whose predecessor exists.
+            s = get("rehearsalschedule", REHEARSAL_L1_SCHEDULE).get("status") or {}
+            active = (s.get("activeRestoreRef") or {}).get("name")
+            decided = {((s.get("lastSucceeded") or {}).get("restoreRef") or {}).get("name"),
+                       ((s.get("lastFailed") or {}).get("restoreRef") or {}).get("name")}
+            decided.discard(None)
+            prior = sorted(d for d in decided if active and d < active)
+            if not (active and prior and not (s.get("pendingRestoreRef") or {}).get("name")):
+                time.sleep(0.2)
+                continue
+            running = get_opt("restore", active)
+            if running is None or terminal(running) or active in {a["running"] for a in attempts}:
+                attempts.append({"running": active, "outcome": "finished-before-stage"})
+                time.sleep(1)
+                continue
+            victim = prior[-1]
+            mark = len(watch.statuses)
+            run(KN + ["delete", "restore", victim, "--wait=true"], check=False)
+            patched = run(KN + ["patch", "rehearsalschedule", REHEARSAL_L1_SCHEDULE,
+                                "--subresource=status", "--type=merge", "-p",
+                                json.dumps({"status": {"activeRestoreRef": {"name": victim},
+                                                       "pendingRestoreRef": {"name": active}}})],
+                          check=False)
+            still = get_opt("restore", active)
+            attempt = {"running": active, "deleted": victim, "watchMark": mark,
+                       "patchRc": patched.returncode,
+                       "runningAtStage": (still or {}).get("status", {}).get("phase"),
+                       "stagedAt": now()}
+            attempts.append(attempt)
+            if patched.returncode == 0 and still is not None and not terminal(still):
+                staged = attempt
+        watched: list[dict[str, Any]] = []
+        if staged is not None:
+            poll(lambda: {"s": list(watch.statuses)},
+                 lambda o: any((((w.get("lastFailed") or {}).get("restoreRef") or {})
+                                .get("name") == staged["deleted"]
+                                and ((w.get("lastFailed") or {}).get("reason")
+                                     == "RestoreDeleted"))
+                               for w in o["s"][staged["watchMark"]:]),
+                 seconds=180)
+            # and C2's own verdict, which proves it stayed tracked
+            poll(lambda: {"s": list(watch.statuses)},
+                 lambda o: any((((w.get("lastSucceeded") or {}).get("restoreRef") or {})
+                                .get("name") == staged["running"]
+                                or (((w.get("lastFailed") or {}).get("restoreRef") or {})
+                                    .get("name") == staged["running"]))
+                               for w in o["s"][staged["watchMark"]:]),
+                 seconds=600)
+        suspend_schedule(REHEARSAL_L1_SCHEDULE)
+        time.sleep(5)
+        all_watched = watch.stop()
+        watch = None
+        if staged is not None:
+            # the writes AFTER the harness's own staged write
+            after = all_watched[staged["watchMark"]:]
+            stage_idx = next((i for i, w in enumerate(after)
+                              if (w.get("activeRestoreRef") or {}).get("name")
+                              == staged["deleted"]
+                              and (w.get("pendingRestoreRef") or {}).get("name")
+                              == staged["running"]), None)
+            watched = after[stage_idx + 1:] if stage_idx is not None else after
+            # the running reservation's own decision ends the window judged
+            end = next((i for i, w in enumerate(watched)
+                        if staged["running"] in (
+                            (((w.get("lastSucceeded") or {}).get("restoreRef") or {})
+                             .get("name")),
+                            (((w.get("lastFailed") or {}).get("restoreRef") or {})
+                             .get("name")))), None)
+            judged = watched[:end + 1] if end is not None else watched
+        else:
+            judged = []
+        verdict, clauses = deleted_active_keeps_the_reservation(
+            (staged or {}).get("deleted", ""), (staged or {}).get("running", ""),
+            judged, staged is not None)
+        clauses["the running reservation's own verdict is recorded afterwards"] = any(
+            (((w.get("lastSucceeded") or {}).get("restoreRef") or {}).get("name")
+             == (staged or {}).get("running")) or
+            (((w.get("lastFailed") or {}).get("restoreRef") or {}).get("name")
+             == (staged or {}).get("running")) for w in judged)
+        if verdict == "PASS" and not all(clauses.values()):
+            verdict = "FAIL"
+        evidence.append(artifact("rehearsal-deleted-active/01-stage.json", {
+            "attempts": attempts, "staged": staged, "judgedWrites": judged,
+            "allWatchedStatusWrites": all_watched, "verdict": verdict, "clauses": clauses}))
+        record(REHEARSAL_L1_ROW, "PLAT-14.3", verdict,
+               f"{REHEARSAL_L1_SCHEDULE}: attempts {attempts}; "
+               + "; ".join(f"{k}={v}" for k, v in clauses.items()), evidence)
+    finally:
+        if watch is not None:
+            watch.stop()
+        try:
+            quiet = {n: quiesce_arm(n, evidence)["quiet"] for n in sorted(arms)}
+            live = {n: get_opt("rehearsalschedule", n) for n in arms}
+            owned_prefixes, not_swept = owned_rehearsal_prefixes(arms, live, quiet)
+            swept = topics_to_sweep(target_topics(), list(owned_prefixes.values()))
+            for topic in swept:
+                target_topic_delete(topic)
+            left = topics_to_sweep(target_topics(),
+                                   [rendered_prefix(uid) for uid in arms.values()])
+            evidence.append(artifact("rehearsal-deleted-active/98-broker-sweep.json", {
+                "arms": arms, "quiet": quiet, "swept": swept, "notSwept": not_swept,
+                "left": left}))
+            check("rehearsal-deleted-active-shared-broker-left-as-found", "PLAT-14.3",
+                  all(quiet.values()) and not left,
+                  f"arms {sorted(arms)} quiet={quiet}; swept {swept}; left {left}", evidence)
+        finally:
+            for key in [k for k in (approver_key, retired_key) if k is not None]:
+                key["private"].unlink(missing_ok=True)
+                shutil.rmtree(key["dir"], ignore_errors=True)
+            if work is not None:
+                shutil.rmtree(work, ignore_errors=True)
+
+
+def check_job_name(discriminator: str, owner_uid: str) -> str:
+    """`check/job.rs::check_job_name`: `lwc-<k>-<first 20 hex of sha256(uid)>`."""
+    return f"lwc-{discriminator}-{hashlib.sha256(owner_uid.encode()).hexdigest()[:20]}"
+
+
+def plan_conflict_recorded_in_one_pass(statuses: list[dict[str, Any]], times: list[str],
+                                       conflict_log: list[str],
+                                       job_created: bool) -> tuple[str, dict[str, bool]]:
+    """The Preflight's `Pending` write and its `Failed/CheckPlanConflict` write
+    come from ONE pass: the second lands right after the first (the pass's own
+    latency, not an error requeue), and the controller logged no failed
+    reconcile for it (the stale-precondition 409 of the unfixed build)."""
+    phases = [(s.get("phase"), s.get("reason")) for s in statuses]
+    queued = any(p == "Queued" for p, _ in phases)
+    pending_i = next((i for i, (p, r) in enumerate(phases)
+                      if p == "Pending" and r == "PodNotStarted"), None)
+    failed_i = next((i for i, (p, r) in enumerate(phases)
+                     if p == "Failed" and r == "CheckPlanConflict"), None)
+    gap = None
+    if pending_i is not None and failed_i is not None:
+        a, b = parse_rfc3339(times[pending_i]), parse_rfc3339(times[failed_i])
+        gap = (b - a).total_seconds() if a and b else None
+    premise = {"the Preflight was held Queued while the foreign plan ConfigMap was placed":
+               queued}
+    clauses = {
+        "a Pending/PodNotStarted write (the first of the pass's two)": pending_i is not None,
+        "then Failed/CheckPlanConflict": failed_i is not None
+        and (pending_i is None or failed_i > pending_i),
+        "the refusal lands within 2 s of the Pending write (same pass, no error requeue)":
+            gap is not None and gap <= 2.0,
+        "the terminal state is the last write (it stays Failed)":
+            bool(phases) and phases[-1] == ("Failed", "CheckPlanConflict"),
+        "the controller logged no failed reconcile for it": not conflict_log,
+        "no check Job was created": not job_created,
+    }
+    if not all(premise.values()):
+        return "NOT-REACHED", {**premise, **clauses}
+    return ("PASS" if all(clauses.values()) else "FAIL"), {**premise, **clauses}
+
+
+def job_name_conflict_recorded(backup: dict[str, Any], foreign: dict[str, Any] | None,
+                               conflict_log: list[str], raced: bool
+                               ) -> tuple[str, dict[str, bool]]:
+    """A Backup whose run is FROZEN (`status.execution` recorded) meets a
+    foreign Job holding its name: terminal `JobNameConflict`, the execution
+    record kept, the stranger never adopted, and no lost (409) write."""
+    status = backup.get("status") or {}
+    failed = condition(backup, "Failed")
+    owners = ((foreign or {}).get("metadata") or {}).get("ownerReferences") or []
+    premise = {"the run was frozen before the foreign Job appeared (execution recorded)":
+               raced}
+    clauses = {
+        "the Backup is Failed": status.get("phase") == "Failed",
+        "with the JobNameConflict terminal state":
+            failed.get("status") == "True" and failed.get("reason") == "JobNameConflict",
+        "status.execution is still present": bool(status.get("execution")),
+        "the foreign Job is not adopted (no ownerReference added)":
+            foreign is not None and not owners,
+        "and never run (still suspended)":
+            foreign is not None and (foreign.get("spec") or {}).get("suspend") is True,
+        "the controller logged no 409 for it": not conflict_log,
+    }
+    if not all(premise.values()):
+        return "NOT-REACHED", {**premise, **clauses}
+    return ("PASS" if all(clauses.values()) else "FAIL"), {**premise, **clauses}
+
+
+def reservation_writes() -> None:
+    """lab-refresh-11 (d), reserve-commit's class-sweep rows. Namespaced only:
+    a ResourceQuota and suspended Jobs in THIS run's namespace."""
+    evidence: list[str] = []
+    since = now()
+    # ---- Preflight: CheckPlanConflict after the Pending write -------------
+    watch: StatusWatch | None = None
+    try:
+        policy = checks_policy()
+        per_ns = int(policy.get("maxActivePerNamespace") or 4)
+        blockers = [f"{CHECK_SLOT_BLOCKER_PREFIX}{i}" for i in range(per_ns)]
+        for name in blockers:
+            create(slot_blocker_job(name, "destinationAccess"))
+        pf = create({
+            "apiVersion": "logweir.dev/v1alpha1", "kind": "Preflight",
+            "metadata": owned(RESERVATION_PREFLIGHT),
+            "spec": {"request": {"operation": "DestinationAccess",
+                                 "timeoutSeconds": 120,
+                                 "destinationAccess": {"destinationRef": {"name": "dest-a"},
+                                                       "roles": ["ArchiveRead"]}}},
+        })
+        watch = StatusWatch("preflight", RESERVATION_PREFLIGHT, seconds=900)
+        queued = poll(lambda: get_opt("preflight", RESERVATION_PREFLIGHT),
+                      lambda o: (o.get("status") or {}).get("phase") == "Queued", seconds=120)
+        uid = pf["metadata"]["uid"]
+        job = check_job_name("da", uid)
+        create({"apiVersion": "v1", "kind": "ConfigMap", "metadata": owned(f"{job}-plan"),
+                "data": {"planted": "a plan this Preflight does not own"}})
+        delete_owned_jobs(CHECK_SLOT_BLOCKER_PREFIX)
+        final = poll(lambda: get_opt("preflight", RESERVATION_PREFLIGHT),
+                     lambda o: (o.get("status") or {}).get("phase") in {"Failed", "Completed"},
+                     seconds=240)
+        time.sleep(20)  # one more requeue period: the terminal state must hold
+        statuses = watch.stop()
+        times = list(watch.times)
+        watch = None
+        log_text = controller_log_since(since)
+        failed_lines = log_lines_naming(log_text, RESERVATION_PREFLIGHT, "reconcile failed",
+                                        "409", "has been modified")
+        job_created = get_opt("job", job) is not None
+        verdict, clauses = plan_conflict_recorded_in_one_pass(
+            statuses, times, failed_lines, job_created)
+        evidence.append(artifact("reservation-writes/01-preflight.json", {
+            "preflight": final, "queuedSeen": queued.get("status"), "jobName": job,
+            "watched": [{"seen": t, "phase": s.get("phase"), "reason": s.get("reason")}
+                        for t, s in zip(times, statuses)],
+            "failedReconcileLines": failed_lines, "verdict": verdict, "clauses": clauses}))
+        record(RESERVATION_PREFLIGHT_ROW, "PLAT-14.3", verdict,
+               f"Preflight {RESERVATION_PREFLIGHT} (job {job}): "
+               + "; ".join(f"{k}={v}" for k, v in clauses.items()), evidence)
+    finally:
+        if watch is not None:
+            watch.stop()
+        delete_owned_jobs(CHECK_SLOT_BLOCKER_PREFIX)
+
+    # ---- Backup: JobNameConflict over a frozen run -------------------------
+    try:
+        used = len(lst("jobs"))
+        create({"apiVersion": "v1", "kind": "ResourceQuota", "metadata": owned(RESERVATION_QUOTA),
+                "spec": {"hard": {"count/jobs.batch": str(used)}}})
+        poll(lambda: get_opt("resourcequota", RESERVATION_QUOTA),
+             lambda o: bool((o.get("status") or {}).get("used")), seconds=60)
+        create(backup_object(RESERVATION_BACKUP, "dest-a", topics=[REHEARSAL_TOPIC]))
+        frozen = poll(lambda: get_opt("backup", RESERVATION_BACKUP),
+                      lambda o: bool((o.get("status") or {}).get("execution")), seconds=180)
+        raced = bool((frozen.get("status") or {}).get("execution")) \
+            and get_opt("job", RESERVATION_BACKUP) is None
+        if raced:
+            run(KN + ["patch", "resourcequota", RESERVATION_QUOTA, "--type=merge", "-p",
+                      json.dumps({"spec": {"hard": {"count/jobs.batch": str(used + 1)}}})])
+            stranger = slot_blocker_job(RESERVATION_BACKUP, "none")
+            del stranger["metadata"]["labels"]["app.kubernetes.io/component"]
+            del stranger["metadata"]["labels"]["logweir.dev/check-kind"]
+            made = None
+            for _ in range(20):
+                made = create(stranger, check=False)
+                if isinstance(made, dict):
+                    break
+                time.sleep(0.25)
+            foreign_first = get_opt("job", RESERVATION_BACKUP)
+            raced = foreign_first is not None and not (
+                (foreign_first.get("metadata") or {}).get("ownerReferences"))
+        final = poll(lambda: get_opt("backup", RESERVATION_BACKUP), terminal, seconds=240)
+        foreign = get_opt("job", RESERVATION_BACKUP)
+        log_text = controller_log_since(since)
+        conflict_lines = log_lines_naming(log_text, RESERVATION_BACKUP, "409",
+                                          "has been modified")
+        verdict, clauses = job_name_conflict_recorded(final, foreign, conflict_lines, raced)
+        evidence.append(artifact("reservation-writes/02-backup.json", {
+            "frozenBeforeStranger": (frozen.get("status") or {}).get("execution"),
+            "backup": final, "foreignJob": foreign, "quotaUsedAtStart": used,
+            "reconcileLines": log_lines_naming(log_text, RESERVATION_BACKUP,
+                                               "reconcile failed", "refusing"),
+            "conflictLines": conflict_lines, "verdict": verdict, "clauses": clauses}))
+        record(RESERVATION_BACKUP_ROW, "PLAT-14.3", verdict,
+               f"Backup {RESERVATION_BACKUP}: "
+               + "; ".join(f"{k}={v}" for k, v in clauses.items()), evidence)
+    finally:
+        run(KN + ["delete", "resourcequota", RESERVATION_QUOTA, "--ignore-not-found"],
+            check=False)
+        foreign = get_opt("job", RESERVATION_BACKUP)
+        if foreign is not None and (foreign["metadata"].get("labels") or {}).get(
+                "logweir.dev/test-owner") == OWNER and not foreign["metadata"].get(
+                "ownerReferences"):
+            run(KN + ["delete", "job", RESERVATION_BACKUP, "--wait=false"], check=False)
+
 
 # ---------------------------------------------------------------------------
 # harness-rows-11 — PLAT-16.2: the provider object-lock half of "legal hold/lock"
@@ -13130,6 +13861,7 @@ PHASES = [
     "protection_verdicts",
     "rehearsal", "refused_point",
     "operation_states", "notify_transport", "rehearsal_faults", "rehearsal_deleted",
+    "rehearsal_verdict_not_reached", "rehearsal_deleted_active", "reservation_writes",
     "object_lock", "shared_set",
     "schedule_creation_bound",
     "control", "report", "cleanup",
