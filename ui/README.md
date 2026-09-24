@@ -478,8 +478,21 @@ absences:
   discarded. The form says who names the connection, and an intent minted once
   per draft (`logweir-ui.connection.<32 hex>`, random, never a counter) is the
   idempotency seed instead; legacy mode keeps the field, because behind
-  `kubectl proxy` the typed name is the object's name. The schedule form keeps
-  its field with the help text that says console mode does not use it.
+  `kubectl proxy` the typed name is the object's name. **The schedule form
+  does the same** (review L5): no name field in console mode (the server names
+  it `sch-<26 base32>`), and a random intent per draft
+  (`logweir-ui.schedule.<32 hex>`) as the seed -- before, the typed name was
+  the seed, so two different schedules typed with one name in one window
+  collided as `409 idempotency_conflict`. Destinations and catalogs keep their
+  name fields: their create routes honour the name.
+* **A consumed Approval whose signer was later revoked for compromise is never
+  green.** weirkeeper keeps the record of the admission (`Consumed=True`, the
+  authorization, the key id) and turns `Verified` False with reason
+  `RecordedBeforeRevocation` or `KeyRevoked`. `approvals.js` renders that as
+  its own state, *signer revoked for compromise after use*, with the admission
+  instant -- neither "verified" nor a generic refusal (D3 section 7.4). The
+  fixture `ui/tests/fixtures/console/approval-revoked-after-use.json` is read
+  by this page's suite, by the API's projection row and by the controller's.
 * **Ten normalized operation states, four phases.** `pending`, `running`,
   `succeeded` and `failed` are the resource's own phase words. `queued`,
   `preparing`, `verifying`, `refused`, `cancelled` and `unknown` are

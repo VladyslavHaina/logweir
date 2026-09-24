@@ -31,7 +31,9 @@ import {
   SCHEDULE_FORM,
   READINESS_STALE_SENTENCE,
   SCHEDULE_NAME_HELP,
+  SCHEDULE_NAME_MINTED_SENTENCE,
   guidedValues,
+  mintScheduleIntent,
   mountSchedules,
   readinessKey,
   readinessRequestFor,
@@ -725,18 +727,114 @@ test("the_readiness_panel_follows_its_check_until_a_read_is_terminal", async () 
 });
 
 test("the_name_field_says_what_console_mode_does_with_it", () => {
-  // REVIEW LOW-5: console mode names the object sch-<hash>, and the form did
-  // not say so beside the field.
+  // REVIEW LOW-5 (PLAT-10.1), then poc-fixes-2 review L5: console mode names
+  // the object sch-<26 base32>, so the console form offers NO name field and
+  // says who names it; the legacy form keeps its field and its help.
+  const consoleForm = renderScheduleForm({ draft: draft(), clusters: CLUSTERS, mayOperate: true,
+    minted: true });
+  assert.doesNotMatch(consoleForm, /<input id="schedule-name"/,
+    "NEGATIVE CONTROL: no name input in console mode");
+  assert.match(consoleForm, /id="schedule-name-minted"/);
+  assert.match(consoleForm, /id="schedule-name-help"/);
+  assert.match(SCHEDULE_NAME_MINTED_SENTENCE, /sch- followed by 26 characters/);
   const html = renderScheduleForm({ draft: draft(), clusters: CLUSTERS, mayOperate: true });
   assert.match(html, /id="schedule-name"[^>]*aria-describedby="schedule-name-help"/);
   assert.match(html, /id="schedule-name-help"/);
-  assert.match(SCHEDULE_NAME_HELP, /sch-<hash>/);
+  assert.match(SCHEDULE_NAME_HELP, /object name/);
   // With a name error, both descriptions are referenced from ONE attribute.
   const invalid = renderScheduleForm({ draft: draft({ name: "" }), clusters: CLUSTERS,
     mayOperate: true, errors: { fields: { name: ["a name is required"] }, unmatched: [] } });
   const tag = /<input id="schedule-name"[^>]*>/.exec(invalid)[0];
   assert.equal((tag.match(/aria-describedby=/g) || []).length, 1);
   assert.match(tag, /aria-describedby="schedule-name-error schedule-name-help"/);
+});
+
+test("a_console_schedule_needs_no_name_and_one_intent_keys_one_draft", async () => {
+  // REVIEW L5. The field's value WAS the idempotency seed, so two different
+  // schedules typed with one name in one window collided (same key, different
+  // body: 409 idempotency_conflict), and a blank name was refused although
+  // the server never used it. Now the draft's random intent is the seed.
+  resetMode();
+  await selectMode({
+    probe: async () => ({ ok: true, status: 200, body: fixture("console/session.json") }),
+  });
+  assert.equal((await selectMode()).mode, CONSOLE);
+  const ns = "schedule-intent";
+  const key = formKey(ns, SCHEDULE_FORM);
+  dropDraft(key);
+  try {
+    assert.ok(SCHEDULE_DRAFT_FIELDS.includes("intent"), "the draft keeps the intent");
+    const intent = mintScheduleIntent();
+    assert.match(intent, /^logweir-ui\.schedule\.[0-9a-f]{32}$/);
+    assert.notEqual(mintScheduleIntent(), intent, "random, never a counter");
+    const sent = [];
+    const api = {
+      create: async (namespace, plural, body) => {
+        sent.push(body);
+        return { metadata: { name: "sch-otka7iutedtdssn2h35vkyklox", uid: "u" }, __contract: {} };
+      },
+    };
+    const values = draft({ name: "", mode: "advanced", cron: "0 2 * * *", intent: intent });
+    const made = await submitSchedule(ns, values, api);
+    assert.equal(sent.length, 1, "NEGATIVE CONTROL: a blank name is not refused in console mode");
+    assert.equal(sent[0].metadata.name, intent,
+      "the idempotency seed is the draft's intent, not a word the operator typed");
+    assert.equal(made.object.metadata.name, "sch-otka7iutedtdssn2h35vkyklox");
+    await assert.rejects(() => submitSchedule(ns, draft({ name: "", mode: "advanced",
+      cron: "0 2 * * *" }), api), (error) => error.kind === "invalid",
+    "a console draft with no intent is refused before anything is sent");
+  } finally {
+    dropDraft(key);
+    resetMode();
+  }
+});
+
+test("the_console_schedule_form_mints_one_intent_per_draft_across_a_retry", async () => {
+  // REVIEW L5, mounted: no name input, and the intent minted on the first
+  // submit is the one a retry after an unknown outcome sends again.
+  resetMode();
+  await selectMode({
+    probe: async () => ({ ok: true, status: 200, body: fixture("console/session.json") }),
+  });
+  const ns = "schedule-intent-mounted";
+  const key = formKey(ns, SCHEDULE_FORM);
+  dropDraft(key);
+  keepDraft(key, draft({ name: "", source: "orders-prod", sourceUid: "uid-A", mode: "advanced",
+    cron: "0 2 * * *" }), SCHEDULE_DRAFT_FIELDS);
+  const sent = [];
+  let fail = true;
+  const api = {
+    list(namespace, plural) {
+      return Promise.resolve(plural === "kafkaclusters" ? CLUSTERS : { items: [] });
+    },
+    destinations() { return Promise.resolve({ items: DESTINATIONS }); },
+    async create(namespace, plural, body) {
+      sent.push(body);
+      if (fail) {
+        throw Object.assign(new Error("upstream timeout"), { status: 504, kind: "unknown" });
+      }
+      return { metadata: { name: "sch-otka7iutedtdssn2h35vkyklox", uid: "u" }, __contract: {} };
+    },
+  };
+  const view = fakeView();
+  try {
+    await mountSchedules(view.root, ns, parse, LIFE(), api);
+    assert.equal(view.find("#schedule-name"), null, "no name input in console mode");
+    await view.find("#schedule-form").dispatch("submit");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(sent.length, 1, "the create was sent: " + view.html().slice(-600));
+    const first = sent[0].metadata.name;
+    assert.match(first, /^logweir-ui\.schedule\.[0-9a-f]{32}$/);
+    assert.equal((readDraft(key) || {}).intent, first, "the draft holds the intent");
+    fail = false;
+    await view.find("#schedule-form").dispatch("submit");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(sent.length, 2);
+    assert.equal(sent[1].metadata.name, first, "NEGATIVE CONTROL: one intent per draft");
+  } finally {
+    dropDraft(key);
+    resetMode();
+  }
 });
 
 test("editing_a_checked_field_marks_the_verdict_stale_without_a_repaint", async () => {

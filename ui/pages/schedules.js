@@ -39,7 +39,7 @@
 // cluster renamed since the draft was started is sent correctly rather than
 // under its old name.
 
-import { apiClient, mayOperate } from "../client.js";
+import { CONSOLE, apiClient, mayOperate, mode } from "../client.js";
 import {
   active,
   cancelled,
@@ -139,7 +139,7 @@ export const SCHEDULE_DRAFT_FIELDS = Object.freeze([
   "destination", "destinationUid", "archive", "archiveSecret",
   "concurrencyPolicy", "startingDeadlineSeconds", "catchUpPolicy",
   "maxRetries", "retryDelaySeconds", "activeDeadlineSeconds",
-  "keepLast", "keepDays", "suspended",
+  "keepLast", "keepDays", "suspended", "intent",
 ]);
 
 /** The field paths a refused create names, mapped to this form's inputs.
@@ -1343,15 +1343,22 @@ export function renderScheduleForm(view) {
     "Future policy panel, which is this same form.</p>" +
     "<form id=\"schedule-form\" novalidate" + (pending ? " aria-busy=\"true\"" : "") + ">" +
     "<fieldset class=\"form-body\"" + (pending ? " disabled" : "") + ">" +
-    "<div class=\"field\"><label for=\"schedule-name\">name</label>" +
-    "<input id=\"schedule-name\" name=\"name\" required value=\"" + esc(d.name) + "\"" +
-    (invalidAttributes("schedule-name", errors.name).length > 0
-      ? invalidAttributes("schedule-name", errors.name)
-        .replace("aria-describedby=\"schedule-name-error\"",
-          "aria-describedby=\"schedule-name-error schedule-name-help\"")
-      : " aria-describedby=\"schedule-name-help\"") + ">" +
-    "<p class=\"help\" id=\"schedule-name-help\">" + esc(SCHEDULE_NAME_HELP) + "</p>" +
-    fieldErrorLine("schedule-name", errors.name) + "</div>" +
+    (v.minted === true
+      // REVIEW L5 (P7's class): NO FIELD FOR A CHOICE THE SERVER DOES NOT
+      // HONOUR. The console names the schedule, and the draft's intent is the
+      // idempotency seed that used to be this field's value.
+      ? "<div class=\"field\" id=\"schedule-name-minted\"><p class=\"label\">name</p>" +
+        "<p class=\"help\" id=\"schedule-name-help\">" + esc(SCHEDULE_NAME_MINTED_SENTENCE) +
+        "</p>" + fieldErrorLine("schedule-name", errors.name) + "</div>"
+      : "<div class=\"field\"><label for=\"schedule-name\">name</label>" +
+        "<input id=\"schedule-name\" name=\"name\" required value=\"" + esc(d.name) + "\"" +
+        (invalidAttributes("schedule-name", errors.name).length > 0
+          ? invalidAttributes("schedule-name", errors.name)
+            .replace("aria-describedby=\"schedule-name-error\"",
+              "aria-describedby=\"schedule-name-error schedule-name-help\"")
+          : " aria-describedby=\"schedule-name-help\"") + ">" +
+        "<p class=\"help\" id=\"schedule-name-help\">" + esc(SCHEDULE_NAME_HELP) + "</p>" +
+        fieldErrorLine("schedule-name", errors.name) + "</div>") +
     renderClusterSelector({
       id: "schedule-source",
       name: "source",
@@ -1401,9 +1408,50 @@ export function renderScheduleForm(view) {
 /** Beside the name field (review LOW-5): in console mode the product API names
  *  the object itself, so the typed name is not the object's name there. */
 export const SCHEDULE_NAME_HELP =
-  "Through the product API (console mode) the schedule is named sch-<hash> from this " +
-  "request's idempotency key, and this name is not used; through kubectl proxy it is the " +
-  "object's name. Either way the page opens the created schedule by the name the server gave it.";
+  "The BackupSchedule's object name, which kubectl proxy's API server stores as typed. The " +
+  "page opens the created schedule by the name the server gave it.";
+
+/** What the form says where the name field would be, in console mode (review
+ *  L5). The product API has no name member on a schedule create and names it
+ *  `sch-<26 base32>` from the request's idempotency scope, so a field there
+ *  was a choice the server discarded -- and, since its value WAS the key seed,
+ *  two different schedules typed with one name collided as a 409. */
+export const SCHEDULE_NAME_MINTED_SENTENCE =
+  "Through the product API (console mode) the server names the schedule: sch- followed by 26 " +
+  "characters, derived from this request's idempotency key. There is no name to choose here; " +
+  "the page opens the created schedule by the name the server gave it.";
+
+/** Whether the server, not this form, names a new schedule: console mode. */
+export function scheduleNamesMinted() {
+  return mode() === CONSOLE;
+}
+
+/** A fresh idempotency intent for one schedule draft (review L5): random,
+ *  never a counter, refused rather than weakened without a random source --
+ *  `mintIntent`'s rules for the same reason. */
+export function mintScheduleIntent() {
+  const source = globalThis.crypto;
+  if (source === undefined || source === null || typeof source.getRandomValues !== "function") {
+    throw refusal(
+      "this page will not create a schedule here: minting the idempotency key that makes a " +
+        "double click or a retry ONE schedule needs the platform's random source, and it is " +
+        "unavailable.",
+    );
+  }
+  let hex = "";
+  for (const byte of source.getRandomValues(new Uint8Array(16))) {
+    hex += byte.toString(16).padStart(2, "0");
+  }
+  return "logweir-ui.schedule." + hex;
+}
+
+/** `values` carrying the intent `draft` already holds, if it holds one. */
+function withScheduleIntent(values, draft) {
+  const intent = (draft || {}).intent;
+  return typeof intent === "string" && intent.length > 0
+    ? Object.assign(values, { intent: intent })
+    : values;
+}
 
 /** The panel name the create form's shared field renderers are keyed by, so
  *  every input on it has an id of its own even while the same schedule's Future
@@ -1620,9 +1668,20 @@ export function sourceRefusal(resolved) {
  *  looks like -- it falls back to the typed values, which is the pre-PLAT-07.2
  *  behaviour and is what keeps an existing draft usable. */
 export async function submitSchedule(ns, values, deps, clusters, preview) {
-  const problems = validateSchedule(values);
+  // REVIEW L5: IN CONSOLE MODE THE SERVER NAMES THE OBJECT, so there is no
+  // name to check, and `metadata.name` carries the draft's INTENT -- the one
+  // value `ui/client.js` composes the idempotency key from. `requestBody`
+  // never sends it: the schedule create has no name member.
+  const minted = scheduleNamesMinted();
+  const problems = validateSchedule(minted ? Object.assign({}, values, { name: "minted" }) : values);
+  if (minted && !(typeof (values || {}).intent === "string" && values.intent.length >= 8)) {
+    problems.name = "this draft carries no idempotency intent; reload the page and fill it in again";
+  }
   if (Object.keys(problems).length > 0) {
     throw invalidInput(problems);
+  }
+  if (minted) {
+    values = Object.assign({}, values, { name: values.intent });
   }
   // A PRESET IS CREATED AS THE EXPRESSION THE SERVER COMPILED IT TO, and a
   // reader with no preview of THESE values has nothing to create: the page
@@ -1684,6 +1743,7 @@ export function scheduleFormView(ns, clusters, now, freshSeconds, extra) {
     readinessUnavailable: e.readinessUnavailable === true,
     readinessUnavailableReason: e.readinessUnavailableReason,
     mayOperate: e.mayOperate,
+    minted: scheduleNamesMinted(),
   };
 }
 
@@ -2222,7 +2282,8 @@ export function readScheduleValues(form) {
   const e = form.elements;
   const source = readClusterSelection(form, "schedule-source");
   const values = {
-    name: String(e.name.value).trim(),
+    // ABSENT IN CONSOLE MODE (review L5): the server names the schedule.
+    name: e.name === undefined ? "" : String(e.name.value).trim(),
     source: source.name,
     sourceUid: source.uid,
   };
@@ -2316,7 +2377,8 @@ function wireCreate(node, ns, parse, lifecycle, api, clusters, own) {
     if (!active(lifecycle)) {
       return;
     }
-    const values = readScheduleValues(form);
+    // THE INTENT SURVIVES EVERY KEYSTROKE (review L5).
+    const values = withScheduleIntent(readScheduleValues(form), readDraft(key));
     keepDraft(key, values, SCHEDULE_DRAFT_FIELDS);
     // AN EDIT THAT CHANGES WHAT A CHECK WOULD ASK MAKES ITS VERDICT STALE AT
     // ONCE, without repainting the inputs the reader is typing in.
@@ -2392,7 +2454,7 @@ function wireCreate(node, ns, parse, lifecycle, api, clusters, own) {
       if (!active(lifecycle)) {
         return;
       }
-      const values = readScheduleValues(form);
+      const values = withScheduleIntent(readScheduleValues(form), readDraft(key));
       keepDraft(key, values, SCHEDULE_DRAFT_FIELDS);
       const query = previewQueryFor(values);
       if (query === null) {
@@ -2429,7 +2491,7 @@ function wireCreate(node, ns, parse, lifecycle, api, clusters, own) {
       if (!active(lifecycle)) {
         return;
       }
-      const values = readScheduleValues(form);
+      const values = withScheduleIntent(readScheduleValues(form), readDraft(key));
       keepDraft(key, values, SCHEDULE_DRAFT_FIELDS);
       const request = readinessRequestFor(values);
       if (request === null) {
@@ -2473,7 +2535,7 @@ function wireCreate(node, ns, parse, lifecycle, api, clusters, own) {
     if (!active(lifecycle) || mutation.pending()) {
       return;
     }
-    const values = readScheduleValues(form);
+    const values = withScheduleIntent(readScheduleValues(form), readDraft(key));
     keepDraft(key, values, SCHEDULE_DRAFT_FIELDS);
     // THE CONNECTIONS ARE READ AGAIN, HERE, BEFORE THE CREATE. Resolving the
     // chosen uid against the list this view read at mount would only catch a
@@ -2482,7 +2544,17 @@ function wireCreate(node, ns, parse, lifecycle, api, clusters, own) {
     // exactly when somebody rebuilds a cluster. The read carries NO ROUTE
     // SIGNAL: a submit in flight is a durable operation and navigation must
     // not cancel it (PLAT-13.2), and this read is part of that operation.
-    mutation.run(() => confirmThenCreate(ns, values, api, held.preview));
+    mutation.run(async () => {
+      // MINTED INSIDE THE EXECUTOR, once per draft (review L5): a double
+      // click, a retry after a timeout and a resend after a refusal all carry
+      // the same one, and a platform with no random source is a refusal in
+      // this form's status region.
+      if (scheduleNamesMinted() && !values.intent) {
+        values.intent = mintScheduleIntent();
+        keepDraft(key, values, SCHEDULE_DRAFT_FIELDS);
+      }
+      return confirmThenCreate(ns, values, api, held.preview);
+    });
   }, lifecycle);
 }
 
