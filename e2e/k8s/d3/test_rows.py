@@ -3640,6 +3640,27 @@ def test_a_job_name_conflict_over_a_frozen_backup_is_recorded() -> None:
 
 
 
+def _watch_reopens(module) -> tuple[int, int]:
+    """Drive `module.StatusWatch` over a fake `kubectl` that prints one object
+    and exits — what `kubectl get -w` does when the API server ends the watch."""
+    import time as _time
+    saved = module.KN
+    module.KN = ["sh", "-c", "echo '{\"status\": {\"n\": 1}}'"]
+    try:
+        w = module.StatusWatch("rehearsalschedule", "x", seconds=20)
+        _time.sleep(4)
+        got = w.stop()
+    finally:
+        module.KN = saved
+    return len(got), getattr(w, "restarts", 0)
+
+
+def test_the_status_watch_survives_the_api_servers_watch_timeout() -> None:
+    n, restarts = _watch_reopens(d3)
+    row("StatusWatch re-opens a watch whose kubectl exited (lab-refresh-11 run 1)",
+        n >= 2 and restarts >= 1, f"statuses={n} restarts={restarts}")
+
+
 def test_zz_every_row_in_this_file_passed() -> None:
     """The file's own gate, for `python3 -m pytest e2e/k8s/d3`.
 

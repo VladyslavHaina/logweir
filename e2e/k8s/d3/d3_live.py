@@ -7893,39 +7893,73 @@ class StatusWatch:
     def __init__(self, kind: str, name: str, seconds: int = 3600) -> None:
         self.statuses: list[dict[str, Any]] = []
         self.times: list[str] = []
-        self.proc = subprocess.Popen(
-            ["/tmp/lwtimeout", str(seconds)] + KN + ["get", kind, name, "-w", "-o", "json"],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, cwd=ROOT)
+        self.kind, self.name = kind, name
+        self.deadline = time.time() + seconds
+        self.stopping = False
+        # How many times the watch was re-opened. THE API SERVER ENDS EVERY
+        # WATCH after a randomised `--min-request-timeout` (30-60 min), and
+        # `kubectl get -w` then exits: lab-refresh-11's first
+        # `rehearsal-verdict-not-reached` run lost its watch before the
+        # hour-long decision it was waiting for. A re-opened watch first
+        # replays the object as it stands, so no write is lost across the gap
+        # that a later write does not also carry.
+        self.restarts = 0
+        self.proc = self._open()
         self.thread = threading.Thread(target=self._read, daemon=True)
         self.thread.start()
 
+    def _open(self) -> subprocess.Popen:
+        left = max(1, int(self.deadline - time.time()))
+        return subprocess.Popen(
+            ["/tmp/lwtimeout", str(left)] + KN + ["get", self.kind, self.name, "-w", "-o",
+                                                   "json"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, cwd=ROOT)
+
     def _read(self) -> None:
         decoder = json.JSONDecoder()
-        buf = ""
-        assert self.proc.stdout is not None
-        for line in self.proc.stdout:
-            buf += line
-            while True:
-                stripped = buf.lstrip()
-                if not stripped:
-                    buf = ""
-                    break
-                try:
-                    obj, end = decoder.raw_decode(stripped)
-                except ValueError:
-                    break
-                buf = stripped[end:]
-                self.statuses.append((obj or {}).get("status") or {})
-                self.times.append(dt.datetime.now(dt.timezone.utc).isoformat())
+        while True:
+            buf = ""
+            assert self.proc.stdout is not None
+            for line in self.proc.stdout:
+                buf += line
+                while True:
+                    stripped = buf.lstrip()
+                    if not stripped:
+                        buf = ""
+                        break
+                    try:
+                        obj, end = decoder.raw_decode(stripped)
+                    except ValueError:
+                        break
+                    buf = stripped[end:]
+                    self.statuses.append((obj or {}).get("status") or {})
+                    self.times.append(dt.datetime.now(dt.timezone.utc).isoformat())
+            self.proc.wait()
+            if self.stopping or time.time() >= self.deadline - 2:
+                return
+            time.sleep(1)
+            if self.stopping:
+                return
+            self.restarts += 1
+            self.proc = self._open()
 
     def stop(self) -> list[dict[str, Any]]:
-        if self.proc.poll() is None:
-            self.proc.terminate()
+        self.stopping = True
+        proc = self.proc
+        if proc.poll() is None:
+            proc.terminate()
         try:
-            self.proc.wait(timeout=10)
+            proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
-            self.proc.kill()
-        self.thread.join(timeout=10)
+            proc.kill()
+        self.thread.join(timeout=15)
+        # a re-open racing the stop
+        if self.proc is not proc and self.proc.poll() is None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
         return list(self.statuses)
 
 
