@@ -41,9 +41,9 @@ chart, and [validate.sh](validate.sh) is its render gate.
 publication: `LOGWEIR_TAG` (`sha-<commit>`) for the images and
 `LOGWEIR_CHART_VERSION` (`0.1.0-sha-<commit>`) for the chart, published
 together by `images.yml`. The profile needs a build that carries the chart-gap
-fixes below — the first `main` publication after they merged. Until
-`LOGWEIR_COMMIT` names that publication it is an all-zero placeholder, and
-nothing here can be installed. [UNVERIFIED — LOGWEIR_COMMIT is set when the first main publication with these chart fixes exists.]
+fixes below: `LOGWEIR_COMMIT` names main `86a554e6`, published by CI run
+35957294926 (2026-09-24), the first publication carrying them and every
+platform fix since.
 
 Hostnames: `logweir.localtest.me` (the console) and `dex.localtest.me` (Dex).
 `localtest.me` and all its subdomains resolve to `127.0.0.1` in public DNS, and
