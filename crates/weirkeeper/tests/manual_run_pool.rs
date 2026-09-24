@@ -323,10 +323,11 @@ async fn pooled_pass(
 
 /// Decide `candidate` over `snapshot` with registry `r`, ceiling `limit`.
 fn decide(r: &Reservations, candidate: &Backup, snapshot: &[Backup], limit: u32) -> Decision {
+    let snapshot = arcs(snapshot);
     r.decide(
         PoolKind::Backup,
         candidate,
-        Some(arcs(snapshot)),
+        &move || Some(snapshot.clone()),
         limit,
         backup_standing,
         now(),
@@ -480,7 +481,7 @@ fn a_reservation_ends_when_the_watch_catches_up_or_it_expires() {
         .decide(
             PoolKind::Backup,
             &other,
-            Some(arcs(std::slice::from_ref(&other))),
+            &|| Some(arcs(std::slice::from_ref(&other))),
             4,
             backup_standing,
             now()
@@ -492,7 +493,7 @@ fn a_reservation_ends_when_the_watch_catches_up_or_it_expires() {
     let _ = r.decide(
         PoolKind::Backup,
         &other,
-        Some(arcs(std::slice::from_ref(&other))),
+        &|| Some(arcs(std::slice::from_ref(&other))),
         4,
         backup_standing,
         now(),
@@ -528,7 +529,7 @@ fn a_reservation_ends_when_the_watch_catches_up_or_it_expires() {
     let _ = r.decide(
         PoolKind::Backup,
         &probe,
-        Some(arcs(&with_probe)),
+        &|| Some(arcs(&with_probe)),
         4,
         backup_standing,
         later,
@@ -538,6 +539,120 @@ fn a_reservation_ends_when_the_watch_catches_up_or_it_expires() {
         1,
         "only the fresh re-reservation of the probe remains"
     );
+}
+
+/// A manual `Restore` held on its approval (`phase: Pending`) in this
+/// namespace — the shape three console restores are in before their
+/// approvals verify.
+fn held_restore(name: &str, uid: &str) -> Restore {
+    serde_json::from_value(json!({
+        "apiVersion": "logweir.dev/v1alpha1", "kind": "Restore",
+        "metadata": {"name": name, "namespace": NS, "uid": uid,
+                     "creationTimestamp": utc(16, 0, 0).to_rfc3339()},
+        "spec": {
+            "planBytes": "x", "approvalRef": {"name": "a1"},
+            "sourceArchive": {"url": "s3://kafka-backups/logweir"},
+            "backupSetRef": "set", "pointInTime": "2026-09-07T14:05:00Z",
+            "target": {"clusterRef": {"name": "scratch"}, "mode": "scratch", "topicNaming": {"prefix": "drill-"}},
+            "deadlineSeconds": 1800
+        },
+        "status": {"phase": "Pending"}
+    }))
+    .expect("the fixture is a Restore")
+}
+
+/// **The ONE registry is scoped by kind: a `Backup` pass never releases a
+/// `Restore` reservation** (re-check B1, mutant K1).
+///
+/// Production shares `Reservations::global()` between the `Backup` and
+/// `Restore` reconcilers. A `Backup` pass prunes against a snapshot of
+/// `Backup`s, in which no `Restore` appears — so without the kind check it
+/// would release every restore reservation in the namespace as "gone", and
+/// H1's restore burst would be back: three restores released from their
+/// approval hold together would make three Jobs at ceiling two.
+///
+/// KILLS: dropping `r.kind != kind` from the prune scope.
+#[test]
+fn a_backup_pass_keeps_a_restore_reservation_in_the_shared_registry() {
+    let r = Reservations::new();
+    let restores: Vec<Restore> = (1..=3)
+        .map(|i| held_restore(&format!("rst-{i}"), &format!("u-rst-{i}")))
+        .collect();
+    let snapshot = || Some(restores.iter().cloned().map(Arc::new).collect::<Vec<_>>());
+    let decide_restore = |i: usize| {
+        r.decide(
+            PoolKind::Restore,
+            &restores[i],
+            &snapshot,
+            2,
+            restore_standing,
+            now(),
+        )
+    };
+    assert!(decide_restore(0).is_admitted());
+    // A BACKUP PASS IN THE SAME NAMESPACE, over a snapshot of Backups.
+    let backup = manual(
+        "logweir-manual-b",
+        "b0000000-0000-4000-8000-00000000000b",
+        utc(16, 0, 0),
+    );
+    assert!(r
+        .decide(
+            PoolKind::Backup,
+            &backup,
+            &|| Some(arcs(std::slice::from_ref(&backup))),
+            4,
+            backup_standing,
+            now()
+        )
+        .is_admitted());
+    assert!(decide_restore(1).is_admitted());
+    assert_eq!(
+        decide_restore(2),
+        Decision::Queued {
+            active: 2,
+            ahead: 0,
+            limit: 2
+        },
+        "the third restore is queued at ceiling two: the Backup pass released nothing of theirs"
+    );
+}
+
+/// **A reserved run that is later QUEUED gives its reservation back** (re-check
+/// B2, mutant K3) — so the older run it now waits behind is admitted on its
+/// next pass instead of both stalling until the TTL.
+///
+/// Ceiling one. X is admitted while the older run O is held (X's admission
+/// write then fails, so its status still says waiting). O rejoins and waits
+/// behind X's reservation; X's retry now queues behind O — and must release,
+/// or O's next pass would still count X and the two would block each other.
+///
+/// KILLS: deleting the release in the queued branch.
+#[test]
+fn a_reserved_run_that_is_queued_releases_its_reservation() {
+    let r = Reservations::new();
+    let older = manual(
+        "logweir-manual-o",
+        "a0000000-0000-4000-8000-00000000000a",
+        utc(15, 0, 0),
+    );
+    let x = manual(
+        "logweir-manual-x",
+        "b0000000-0000-4000-8000-00000000000b",
+        utc(16, 0, 0),
+    );
+    assert!(decide(&r, &x, &[held_on_destination(&older), x.clone()], 1).is_admitted());
+    let both = [older.clone(), x.clone()];
+    assert!(
+        !decide(&r, &older, &both, 1).is_admitted(),
+        "O waits behind X's reservation"
+    );
+    assert!(!decide(&r, &x, &both, 1).is_admitted(), "X queues behind O");
+    assert!(
+        decide(&r, &older, &both, 1).is_admitted(),
+        "the older run is admitted once X has queued and released"
+    );
+    assert_eq!(r.len(), 1, "only O is reserved");
 }
 
 /// **A run that is frozen but whose phase has not been written yet still
@@ -838,7 +953,7 @@ fn a_store_that_has_not_synced_is_not_a_snapshot() {
         Reservations::new().decide(
             PoolKind::Backup,
             &runs[1],
-            store_snapshot(&reader),
+            &|| store_snapshot(&reader),
             4,
             backup_standing,
             now()

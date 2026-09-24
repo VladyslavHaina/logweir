@@ -3895,14 +3895,21 @@ when many runs decide in the same instant: a burst, restores released together
 when their approvals verify, runs released together from a destination hold,
 and every run re-enqueued at once by a controller restart or a `TrustPolicy`
 event. The queue is FIFO by arrival — `metadata.creationTimestamp`, then the
-UID; never a name, which a client chose. Nothing is admitted until the watch
-has finished its first list.
+UID; never a name, which a client chose. The timestamp has one-second
+resolution, so within one second the order is the UID's: stable and the same
+in every pass, but not the order of the clicks. Nothing is admitted until the
+watch has finished its first list.
 
 **Every admission is written before anything is created.** The admitting pass
 first writes `Admitted=True` (and clears `status.queue`), and only then
 discovers, freezes and creates. A reservation lives in the process; the record
 does not, so a controller that restarts between the record and the Job counts
-the run from its own status. A failed record creates nothing.
+the run from its own status. A failed record creates nothing. Reservations are
+per controller process: the chart runs one, with `Recreate`, so a rollout never
+overlaps two; a force-deleted or partitioned pod whose replacement starts while
+it still runs can, and then the excess is what both admit within one watch lag
+— at most twice the ceiling, briefly — because each counts the other's
+`Admitted=True` records as soon as its watch delivers them.
 
 **A queued run has nothing.** `phase: Queued`, `Admitted=False` reason
 `ConcurrencyLimited` (the word a queued `Preflight` uses), and

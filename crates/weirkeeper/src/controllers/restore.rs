@@ -4609,7 +4609,7 @@ async fn manual_restore_gate(
     let decision = pool.reservations.decide(
         crate::run_pool::PoolKind::Restore,
         restore,
-        (pool.peers)(),
+        pool.peers,
         limit,
         crate::run_pool::restore_standing,
         now,

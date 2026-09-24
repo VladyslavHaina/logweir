@@ -1280,7 +1280,7 @@ async fn manual_run_gate(
     let decision = pool.reservations.decide(
         crate::run_pool::PoolKind::Backup,
         backup,
-        (pool.peers)(),
+        pool.peers,
         limit,
         crate::run_pool::backup_standing,
         now,

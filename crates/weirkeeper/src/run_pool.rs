@@ -34,7 +34,7 @@
 //! ceiling (probes P1–P3 of the Tier-A review). So admission is now a
 //! check-and-reserve under ONE process-wide lock:
 //!
-//! 1. take the snapshot;
+//! 1. take the snapshot (inside the lock);
 //! 2. forget every reservation the snapshot has caught up with (the run is
 //!    now `Occupying` by its own status, or terminal, or gone) and every one
 //!    older than [`RESERVATION_TTL_SECONDS`];
@@ -76,10 +76,14 @@
 //! # The residual, stated
 //!
 //! Two controller PROCESSES do not share reservations. The chart runs one
-//! replica with `Recreate` and no leader election (Global Constraint 30), so
-//! the only overlap is a rolling replacement, where the old process is killed
-//! before the new one starts. A crash after the admission write is covered by
-//! the write; a crash BEFORE it created nothing.
+//! replica with `Recreate` and no leader election (Global Constraint 30), so a
+//! rollout never overlaps two; the cases that can are a force-deleted or
+//! partitioned pod whose replacement starts while it still runs. Each process
+//! counts the other's durable `Admitted=True` as soon as its own watch
+//! delivers it, so the excess is what both admit within one watch lag — at
+//! most twice the ceiling, briefly, draining as runs finish. A crash after
+//! the admission write is covered by the write; a crash BEFORE it created
+//! nothing.
 //!
 //! # What this module is not
 //!
@@ -380,25 +384,23 @@ impl Reservations {
         self.len() == 0
     }
 
-    /// Forget one run's reservation — a pass that queued it, or that admitted
-    /// it and then created nothing.
-    pub fn release(&self, uid: &str) {
-        if let Ok(mut held) = self.held.lock() {
-            held.remove(uid);
-        }
-    }
-
     /// Decide one candidate and, on admit, RESERVE it — atomically with every
     /// other decision this process makes.
     ///
-    /// `peers` is the snapshot, or `None` while the watch has not synced (then
-    /// nothing is decided and nothing reserved). `standing` is
-    /// [`backup_standing`] or [`restore_standing`].
+    /// `peers` is the SOURCE of the snapshot, and it is called only once the
+    /// lock is held (the re-check's N1): a snapshot taken before the lock could
+    /// predate a reservation another pass makes while this one waits for the
+    /// lock, and pruning against it would release that reservation as "gone".
+    /// On the controller's current-thread runtime no other pass can run
+    /// between the two, but the rule should not depend on the runtime. It
+    /// answers `None` while the watch has not synced (then nothing is decided
+    /// and nothing reserved). `standing` is [`backup_standing`] or
+    /// [`restore_standing`].
     pub fn decide<K, F>(
         &self,
         kind: PoolKind,
         candidate: &K,
-        peers: Option<Vec<Arc<K>>>,
+        peers: &(dyn Fn() -> Option<Vec<Arc<K>>> + Send + Sync),
         limit: u32,
         standing: F,
         now: DateTime<Utc>,
@@ -407,12 +409,13 @@ impl Reservations {
         K: kube::Resource,
         F: Fn(&K) -> Standing,
     {
-        let Some(peers) = peers else {
-            return Decision::Unsynced;
-        };
         let Ok(mut held) = self.held.lock() else {
             // A poisoned lock is a panic elsewhere in this process; admitting
             // nothing is the safe answer.
+            return Decision::Unsynced;
+        };
+        // THE SNAPSHOT, UNDER THE LOCK.
+        let Some(peers) = peers() else {
             return Decision::Unsynced;
         };
         let by_uid: HashMap<&str, &K> = peers
