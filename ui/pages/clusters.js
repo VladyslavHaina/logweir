@@ -120,8 +120,8 @@ export const CLUSTER_DRAFT_FIELDS = Object.freeze([
 // `docs/api.md` says of every create it serves. An operator who typed
 // `source` got `conn-u5cb27icdjt5vdf6sc4wehb4nb` and was told nothing.
 //
-// The API contract is the one that holds (it names schedules `sch-…`,
-// restores `rst-…` and runs `logweir-manual-…` the same way), so the console
+// The API contract is the one that holds (it names schedules `sch-...`,
+// restores `rst-...` and runs `logweir-manual-...` the same way), so the console
 // stops offering a choice it cannot honour. What the typed name used to do --
 // make a double click, a lost response or a retry ONE connection -- is done by
 // an INTENT held in the draft, exactly as "Back up now" holds its own
