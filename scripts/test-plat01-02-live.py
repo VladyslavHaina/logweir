@@ -1097,7 +1097,41 @@ def set_controller_images(controller_image: str, runner_image: str) -> None:
         raise RuntimeError(f"controller switch did not converge: {current!r}")
 
 
+#: The controller's exec probes (chart gap G5, `weirkeeper --probe live|ready`).
+#: A controller image that predates G5 has no `--probe`, so under the lab's
+#: probes its pod is never Ready and is restarted by liveness: "chart and
+#: images move together" (release notes). The OLD controller therefore runs
+#: WITHOUT them, and every switch back to another image puts back exactly the
+#: probes the lab Deployment had when this run recorded it.
+PROBE_FIELDS = ("livenessProbe", "readinessProbe")
+
+
+def probe_patch(
+    container: dict[str, Any], controller_image: str, original_probes: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """JSON-patch operations that make container 0's probes right for the image."""
+    base = "/spec/template/spec/containers/0/"
+    if controller_image == OLD_CONTROLLER:
+        return [{"op": "remove", "path": base + field}
+                for field in PROBE_FIELDS if field in container]
+    return [{"op": "add", "path": base + field, "value": value}
+            for field, value in original_probes.items() if container.get(field) != value]
+
+
+def original_probes() -> dict[str, Any]:
+    original = STATE.get(LAB_ORIGINAL) or {}
+    containers = original.get("containers") or [{}]
+    return {field: containers[0][field] for field in PROBE_FIELDS if field in containers[0]}
+
+
 def configure_controller_images(controller_image: str, runner_image: str) -> None:
+    patch = probe_patch(
+        controller_deployment()["spec"]["template"]["spec"]["containers"][0],
+        controller_image,
+        original_probes(),
+    )
+    if patch:
+        run(KF + ["patch", "deployment", "weirkeeper", "--type=json", "-p", json.dumps(patch)])
     run(
         KF
         + [
@@ -4269,6 +4303,17 @@ def gate_probe() -> None:
 
 def harness_selftest() -> None:
     """Bounded local controls proving the harness can fail; no cluster access."""
+    probes = {"livenessProbe": {"exec": {"command": ["/usr/local/bin/weirkeeper", "--probe", "live"]}},
+              "readinessProbe": {"exec": {"command": ["/usr/local/bin/weirkeeper", "--probe", "ready"]}}}
+    if [op["op"] for op in probe_patch(dict(probes), OLD_CONTROLLER, probes)] != ["remove", "remove"]:
+        raise RuntimeError("the old controller would keep probes its binary cannot answer")
+    if probe_patch({}, CURRENT_CONTROLLER, probes) != [
+        {"op": "add", "path": "/spec/template/spec/containers/0/" + k, "value": v}
+        for k, v in probes.items()
+    ]:
+        raise RuntimeError("a switch back would not restore the recorded probes")
+    if probe_patch(dict(probes), CURRENT_CONTROLLER, probes) != []:
+        raise RuntimeError("an unchanged current controller would be patched")
     empty = subprocess.CompletedProcess(["kubectl"], 0, "", "")
     if optional_json_from_result(empty, description="NotFound control") is not None:
         raise RuntimeError("empty exit-0 optional get did not classify as absent")
