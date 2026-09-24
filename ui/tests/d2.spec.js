@@ -142,7 +142,10 @@ test("a_destination_no_controller_has_judged_reads_not_judged_and_never_invalid"
 
 test("a_judged_destination_carries_the_controllers_own_reason", () => {
   const item = destination("destination.json");
-  assert.match(destinationVerdict(item.status), /valid \(Valid\)/);
+  // MCP-11: "valid (Valid)" repeated itself; the reason is shown when it adds
+  // something the word does not.
+  assert.match(destinationVerdict(item.status), /badge-green">valid<\/span>/);
+  assert.doesNotMatch(destinationVerdict(item.status), /\(Valid\)/);
   assert.match(destinationVerdict({ valid: false, reason: "EndpointNotOrigin" }),
     /not valid \(EndpointNotOrigin\)/);
 });
@@ -155,8 +158,13 @@ test("the_list_separates_transport_from_addressing_and_names_plaintext_as_plaint
   assert.match(html, /insecureHttp \(plaintext\)/,
     "a plaintext destination is named as one and not left as a word in a cell");
   assert.match(html, /badge-green">default/);
-  assert.match(html, /a namespace with two defaults has none/);
   assert.match(html, /id="destinations-unjudged"/, "the list discloses the unjudged row");
+  // MCP-11: the default-destination paragraph is said ONCE on the page, beside
+  // the checkbox it is about, and not a second time under the list.
+  const whole = html + renderDestinationForm({ draft: {}, state: { phase: "idle" } });
+  assert.equal((whole.match(/a namespace with two defaults has none/g) || []).length, 1);
+  assert.match(html, /badge-warn">insecureHttp \(plaintext\)/,
+    "MCP-12: plaintext transport wears the warning style, not the neutral one");
 });
 
 test("the_access_table_shows_references_and_what_each_absent_grant_means", () => {

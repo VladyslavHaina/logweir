@@ -893,6 +893,8 @@ test("a_console_that_cannot_read_the_last_slot_names_the_projection_that_owes_it
   assert.match(html, /status\.lastSlot and status\.missedSlots/);
   assert.match(html, /the console has nothing to render/);
   assert.match(LAST_SLOT_NOT_PUBLISHED, /status\.lastSlot and status\.missedSlots/);
+  assert.doesNotMatch(LAST_SLOT_NOT_PUBLISHED, /kubectl/,
+    "MCP-13: a shared-console operator is not told to use kubectl");
   // AND A SCHEDULE THAT SIMPLY HAS NO SLOT YET SAYS NOTHING AT ALL.
   assert.equal(renderLastSlot({ metadata: { name: "new" }, status: {} }), "");
 });

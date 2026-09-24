@@ -444,9 +444,13 @@ the adapter records what it cannot supply on every object it projects, under
 | kind | absent in console mode |
 |---|---|
 | `KafkaCluster` | `status.conditions` (the reachability observation is projected; the condition list is not exposed); `spec.auth.secretRef.passwordKey` and `spec.auth.tlsCa` (connection contract v1's two references, which `ConnectionAuthView` does not carry) |
-| `BackupSchedule` | the per-manifest `status.retentionReport.skipped` entries (the API reports their **count**, which the retention panel prints with where the keys are, beside a line when the API cut a list at 100 entries); `status.lastSlot`, `status.missedSlots`, `status.pendingRun` and `status.history` (D1 W7: `ScheduleStatusView` carries `policy`, `nextRuns` and `activeRuns` and stops there) |
-| `Backup` | `status.manifestSha256`, `status.jobRef`, `status.selection` and `status.conditions` (D1 W7: the run's coverage label and its `TopicsResolved` condition); in a LIST, also `status.exitCode` and `status.evidence` -- the detail view reads both from the operation route and takes them off the list |
-| `Restore` | `status.integrity`, `status.jobRef`; in a LIST, also `status.outcome` and `status.evidence`. A DETAIL carries the operation route's `verificationScope` under `status.verificationScope`, which is what the History detail's scope sentence reads first |
+| `BackupSchedule` | the per-manifest `status.retentionReport.skipped` entries (the API reports their **count**, which the retention panel prints with where the keys are, beside a line when the API cut a list at 100 entries); `status.pendingRun` and `status.history`. `status.lastSlot` and `status.missedSlots` ARE projected since console-ux-1 (MCP-13); against an older API that omits them the card says the serving API does not publish them |
+| `Backup` | `status.manifestSha256`, `status.jobRef`, `status.selection` and `status.conditions` (D1 W7: the run's coverage label and its `TopicsResolved` condition); in a LIST, also `status.evidence` -- the detail view reads it from the operation route. A list row's `status.exitCode` comes from the summary's `exitCode` since console-ux-1 (MCP-17) |
+| `Restore` | `status.integrity`, `status.jobRef`; in a LIST, also `status.evidence`, and `status.outcome` when an older API omits the summary's `outcome` (MCP-17). A DETAIL carries the operation route's `verificationScope` under `status.verificationScope`, which is what the History detail's scope sentence reads first |
+
+A field that table names is dropped from an object's `__contract.absent` when
+the projection DID supply it, so a page says "not published" only where it was
+not.
 
 **A list row's verdict in console mode.** A list item carries the API's
 `OperationSummary` -- `verificationState` and `verifiedSuccess`, the latter

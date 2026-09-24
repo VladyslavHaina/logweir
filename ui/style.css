@@ -876,6 +876,21 @@ main > h2 + .blurb,
   font-variant-numeric: tabular-nums;
 }
 
+/* Technical details, one disclosure away (MCP-13). */
+.technical {
+  margin: var(--cds-global-space-3) 0 var(--cds-global-space-6);
+  color: var(--cds-alias-typography-color-300);
+  font-size: var(--cds-global-typography-secondary-font-size);
+}
+
+.technical > summary {
+  cursor: pointer;
+}
+
+.technical code {
+  overflow-wrap: anywhere;
+}
+
 /* The first of two stacked lines inside a cell. */
 .cell-sub-first {
   display: block;
@@ -1766,8 +1781,10 @@ button.primary:hover {
   color: var(--cds-alias-typography-color-100);
 }
 
-/* A LINK THAT IS AN ACTION looks like the button it is (Sign in). */
-a.button {
+/* A LINK THAT IS AN ACTION looks like the button it is (Sign in), and so does
+ * the summary that opens a create form (MCP-10). */
+a.button,
+summary.button {
   display: inline-flex;
   align-items: center;
   min-height: var(--cds-alias-object-interaction-touch-target);
@@ -1783,15 +1800,34 @@ a.button {
   white-space: nowrap;
 }
 
-a.button.primary {
+a.button.primary,
+summary.button.primary {
   background: var(--cds-alias-status-info);
   color: var(--cds-alias-typography-color-100);
 }
 
-a.button.primary:hover {
+a.button.primary:hover,
+summary.button.primary:hover {
   background: var(--cds-alias-object-interaction-info-hover);
   border-color: var(--cds-alias-object-interaction-info-hover);
   color: var(--cds-alias-typography-color-100);
+}
+
+summary.button {
+  cursor: pointer;
+  list-style: none;
+}
+
+summary.button::-webkit-details-marker {
+  display: none;
+}
+
+.create-disclosure {
+  margin: var(--cds-global-space-7) 0;
+}
+
+.create-disclosure[open] > summary.button {
+  margin-bottom: var(--cds-global-space-5);
 }
 
 button:disabled,

@@ -364,6 +364,12 @@ export function renderKeysPage(view) {
     "<p class=\"blurb\">The cluster-scoped trust material this installation verifies against: " +
     "which keys exist, what each one is allowed to do, where it is in its lifecycle, and what " +
     "the controller last decided about it. This page reads; it submits nothing.</p>";
+  if (v.forbidden === true) {
+    return head +
+      "<div class=\"empty-state\" id=\"keys-forbidden\"><p class=\"note\">" +
+      esc(KEYS_FORBIDDEN_SENTENCE) + "</p><p class=\"note\">The product API answered " +
+      "403 to this session's read of the trust policies.</p></div>";
+  }
   if (policies.length === 0) {
     return head + renderRosterHalf(v) + renderFingerprint() + renderPolicySnippet() + listFooter();
   }
@@ -457,6 +463,12 @@ export function renderRosterKeys(caption, entries, status) {
   );
 }
 
+/** What a reader who may not read trust material is told (MCP-32). */
+export const KEYS_FORBIDDEN_SENTENCE =
+  "Only administrators can view trust material. Your role does not include reading the " +
+  "installation's TrustPolicy objects; that says nothing about whether approvals and evidence " +
+  "verify, which the runs' own pages show.";
+
 /** The sentence this page carries when neither a policy nor a roster answers. */
 export const NO_TRUST_SENTENCE =
   "No TrustPolicy and no TrustRoster named " + ROSTER_NAME + " could be read from this cluster. " +
@@ -549,7 +561,8 @@ export async function mountKeys(node, parse, deps, lifecycle) {
     ? { api: deps }
     : (deps || {});
   const api = d.api || API;
-  const view = { policies: [], roster: null, now: (d.serverClock || serverClock)(), reason: "" };
+  const view = { policies: [], roster: null, now: (d.serverClock || serverClock)(), reason: "",
+    forbidden: false };
   try {
     const collection = await listD3("trust", "", readOptions(lifecycle), d);
     view.policies = itemsOf(collection);
@@ -557,7 +570,21 @@ export async function mountKeys(node, parse, deps, lifecycle) {
     if (cancelled(error, lifecycle)) {
       return;
     }
+    // A 403 IS "YOU MAY NOT READ THIS", NOT "THERE IS NO TRUST" (MCP-32). The
+    // page used to render it as "No TrustPolicy and no TrustRoster ... could be
+    // read ... no approval can verify", which told an operator that trust was
+    // missing from an installation where it was merely not theirs to read.
+    // In the shared console only: behind `kubectl proxy` a 403 is the page's
+    // own kubeconfig, and the refusal and the document an administrator applies
+    // are what that reader needs.
+    view.forbidden = (error || {}).status === 403 && (d.modeOf || mode)() === CONSOLE;
     view.reason = describeRefusal(error);
+  }
+  if (view.forbidden) {
+    if (active(lifecycle)) {
+      replace(node, parse(renderKeysPage(view)));
+    }
+    return;
   }
   try {
     view.roster = rosterOf(await api.listCluster(PLURAL, readOptions(lifecycle)));

@@ -1403,13 +1403,15 @@ export function visibilityLine(visibility) {
  *  destination. */
 export function destinationVerdict(status) {
   const s = status || {};
+  // THE REASON IS SHOWN WHEN IT SAYS SOMETHING THE WORD DOES NOT (MCP-11):
+  // "valid (Valid)" repeated itself; "not valid (EndpointUnreachable)" does not.
+  const beside = (echo) => (typeof s.reason === "string" && s.reason.length > 0 &&
+    s.reason !== echo ? " (" + s.reason + ")" : "");
   if (s.valid === true) {
-    return badge("green", "valid" + (typeof s.reason === "string" && s.reason.length > 0
-      ? " (" + s.reason + ")" : ""));
+    return badge("green", "valid" + beside("Valid"));
   }
   if (s.valid === false) {
-    return badge("unverified", "not valid" + (typeof s.reason === "string" && s.reason.length > 0
-      ? " (" + s.reason + ")" : ""));
+    return badge("unverified", "not valid" + beside("Invalid"));
   }
   return badge("pending", "not judged yet");
 }
@@ -2201,12 +2203,12 @@ export function nextRunsPanel(view) {
   return (
     "<section class=\"next-runs\" data-next-runs=\"" + String(list.length) + "\">" +
     "<h4>" + esc(heading) + "</h4>" +
-    "<p class=\"note\">Read in <code>" + esc(zone) + "</code>" +
+    "<p class=\"note\">Read in <code>" + esc(zone) + "</code>. The slot identity is always " +
+    "the UTC instant, which is why the names stay unique and monotonic whatever the zone.</p>" +
     (typeof v.tzdb === "string" && v.tzdb.length > 0
-      ? ", against <code>" + esc(v.tzdb) + "</code> compiled into the controller and the API"
+      ? technicalDetails("the time-zone database compiled into the controller and the API: <code>" +
+        esc(v.tzdb) + "</code>")
       : "") +
-    ". The slot identity is always the UTC instant, which is why the names stay unique and " +
-    "monotonic whatever the zone.</p>" +
     (zone === "UTC" ? "<p class=\"note\" data-utc-fallback=\"1\">" + esc(UTC_FALLBACK_NOTE) +
       "</p>" : "") +
     (stale ? "<p class=\"note\" data-stale=\"1\">" + badge("unverified", "out of date") + " " +
@@ -2270,6 +2272,15 @@ export function triggerBadge(trigger, maxRetries) {
  *  is what makes that visible: `generation` counts every spec change including
  *  `suspend`, while `runPolicySha256` is over what a RUN does, so two runs of
  *  different generations with the same digest did the same thing. */
+/** FACTS FOR WHOEVER DEBUGS, NOT FOR WHOEVER OPERATES (MCP-13): a digest, the
+ *  time-zone library's version. They stay on the page, one disclosure away,
+ *  rather than in the sentence an operator reads. `html` is OURS (a caller
+ *  escapes every value in it). */
+export function technicalDetails(html) {
+  return "<details class=\"technical\"><summary>Technical details</summary><p class=\"note\">" +
+    html + "</p></details>";
+}
+
 export function revisionLine(ref) {
   const r = ref || {};
   const parts = [];

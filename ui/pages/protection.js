@@ -61,7 +61,9 @@ import { operationRoute } from "./operation.js";
 export const NO_POLICY_SENTENCE =
   "No ProtectionPolicy exists in this namespace, so nothing here is evaluating whether a " +
   "recoverable backup exists or how old it is. A schedule that runs is not the same as an " +
-  "objective that is met; create a ProtectionPolicy with kubectl to state one.";
+  "objective that is met. A protection objective is set by a cluster administrator -- this " +
+  "console reads ProtectionPolicy objects and does not create them -- so ask the person who " +
+  "administers Logweir for this namespace to state one.";
 
 /** The sentence a policy with no status carries. An absent evaluation is an
  *  ABSENT one and never a healthy one. */

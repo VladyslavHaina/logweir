@@ -647,6 +647,16 @@ function operationStatus(summary) {
     verifiedSuccess: summary.verifiedSuccess === true,
     terminal: summary.terminal === true,
   };
+  // THE RESULT, WHERE THE API PUBLISHES IT ON THE LIST (MCP-17): the EXIT and
+  // RESULT columns read `status.exitCode` and `status.outcome` exactly as they
+  // read the custom resource's, and a Restore's outcome keeps its "unverified
+  // scorecard claim" label unless the summary is green.
+  if (typeof summary.exitCode === "number") {
+    status.exitCode = summary.exitCode;
+  }
+  if (typeof summary.outcome === "string" && summary.outcome.length > 0) {
+    status.outcome = summary.outcome;
+  }
   return status;
 }
 
@@ -715,10 +725,28 @@ const ABSENT_IN_CONSOLE = Object.freeze({
 function note(object, plural, unknown) {
   object.__contract = {
     mode: CONSOLE,
-    absent: ABSENT_IN_CONSOLE[plural] || [],
+    // A FIELD THE PROJECTION DID SUPPLY IS NOT ABSENT. The table above names
+    // what an API of this contract MAY leave out; a newer one that publishes a
+    // field (MCP-13's `lastSlot`/`missedSlots`, MCP-17's list exit code and
+    // outcome) takes it off the list for that object, and an older one leaves
+    // it named -- so the page says "not published" only where it was not.
+    absent: (ABSENT_IN_CONSOLE[plural] || []).filter((path) => valueAt(object, path) === undefined),
     unknown: unknown,
   };
   return object;
+}
+
+// The value at a dotted path, or `undefined`. A path with a list step (`[]`)
+// is never resolved here, so such a field stays named.
+function valueAt(object, path) {
+  let at = object;
+  for (const step of String(path).split(".")) {
+    if (step.indexOf("[") !== -1 || at === null || typeof at !== "object") {
+      return undefined;
+    }
+    at = at[step];
+  }
+  return at;
 }
 
 function projectConnection(item) {
@@ -871,6 +899,32 @@ function projectSchedule(item) {
   }
   if (view.activeRuns !== null) {
     status.activeRuns = view.activeRuns.map(activeRun);
+  }
+  // MCP-13: WHAT THE LAST SLOT DID AND HOW MANY WERE SKIPPED, in the custom
+  // resource's own shape, so `renderLastSlot` reads them in both modes. The
+  // decoder hands an absent optional as `null`; a nested absent one is
+  // dropped rather than rendered as a value.
+  if (view.lastSlot !== null && view.lastSlot !== undefined) {
+    const slot = view.lastSlot;
+    status.lastSlot = {
+      slot: slot.slot, dueAt: slot.dueAt, attempt: slot.attempt,
+      disposition: slot.disposition, reason: slot.reason, decidedAt: slot.decidedAt,
+    };
+    if (slot.backupRef !== null && slot.backupRef !== undefined) {
+      status.lastSlot.backupRef = { name: slot.backupRef.name };
+    }
+  }
+  if (view.missedSlots !== null && view.missedSlots !== undefined) {
+    const missed = view.missedSlots;
+    status.missedSlots = { count: missed.count, countCapped: missed.countCapped === true };
+    if (typeof missed.lastEvaluatedSlot === "string") {
+      status.missedSlots.lastEvaluatedSlot = missed.lastEvaluatedSlot;
+    }
+    if (Array.isArray(missed.recent)) {
+      status.missedSlots.recent = missed.recent.map((r) => ({
+        slot: r.slot, reason: r.reason, recordedAt: r.recordedAt,
+      }));
+    }
   }
   if (view.activeBackup !== null) {
     status.activeBackupRef = { name: view.activeBackup };

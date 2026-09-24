@@ -427,6 +427,8 @@ pub fn summary(operation: &Operation) -> OperationSummary {
         terminal: operation.terminal,
         verification_state: operation.verification.state,
         verified_success: operation.verified_success,
+        exit_code: operation.result.exit_code,
+        outcome: operation.result.outcome.clone(),
     }
 }
 

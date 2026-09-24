@@ -88,12 +88,16 @@ import {
   readD3,
 } from "../operation-watch.js";
 import { FINGERPRINT_COMMAND } from "./keys.js";
+import { apiClient } from "../client.js";
 import {
   REDACTION_MARKER,
   catalogPointOffer,
   isRedacted,
   restoreCatalogPointRoute,
 } from "./restore-wizard.js";
+
+// The product API's reads, for the destinations the connect form offers.
+const API = apiClient();
 
 /** The sentence a namespace with no catalog carries. */
 export const NO_CATALOG_SENTENCE =
@@ -654,13 +658,10 @@ export function renderConnectForm(view) {
     "<input id=\"catalog-name\" name=\"name\" value=\"" + esc(values.name || "") + "\"" +
     invalidAttributes("catalog-name", errors.name) + " required></div>" +
     fieldErrorLine("catalog-name", errors.name) +
-    "<div class=\"field\"><label for=\"catalog-destination\">destination</label>" +
-    "<input id=\"catalog-destination\" name=\"destination\" value=\"" +
-    esc(values.destination || "") + "\"" +
-    invalidAttributes("catalog-destination", errors.destination) + " required></div>" +
+    renderDestinationChoice(v, values, errors) +
     fieldErrorLine("catalog-destination", errors.destination) +
-    "<p class=\"help\">The saved destination (PLAT-08.1) whose bucket holds the archive. Its " +
-    "credential is the one the sync Job uses, and a read-only one is enough.</p>" +
+    "<p class=\"help\">The saved destination whose bucket holds the archive. Its credential is " +
+    "the one the sync Job uses, and a read-only one is enough.</p>" +
     "<div class=\"field\"><label for=\"catalog-mode\">sync mode</label>" +
     "<select id=\"catalog-mode\" name=\"syncMode\">" +
     SYNC_MODES.map((m) =>
@@ -682,6 +683,46 @@ export function renderConnectForm(view) {
     "</form>" +
     (v.result ? renderConnectResult(v.ns, v.result) : "") +
     "</section>"
+  );
+}
+
+/** THE DESTINATION, CHOSEN FROM THE NAMESPACE'S OWN (MCP-23). A pick-list of
+ *  the saved destinations the page read -- name and location -- rather than a
+ *  free-text box a typo turns into a 422; the free-text box stays when the
+ *  list could not be read, so the form never stops working because a read
+ *  failed. An empty list says where a destination is made. */
+export function renderDestinationChoice(view, values, errors) {
+  const v = view || {};
+  const chosen = String((values || {}).destination || "");
+  const invalid = invalidAttributes("catalog-destination", (errors || {}).destination);
+  const list = Array.isArray(v.destinations) ? v.destinations : null;
+  if (list !== null && list.length > 0) {
+    const known = list.some((d) => d.name === chosen);
+    return (
+      "<div class=\"field\"><label for=\"catalog-destination\">destination</label>" +
+      "<select id=\"catalog-destination\" name=\"destination\"" + invalid + " required>" +
+      "<option value=\"\"" + (chosen.length === 0 ? " selected" : "") +
+      ">Choose a saved destination</option>" +
+      list.map((d) =>
+        "<option value=\"" + esc(d.name) + "\"" + (d.name === chosen ? " selected" : "") + ">" +
+        esc(d.name) + (typeof d.canonicalUrl === "string" ? " -- " + esc(d.canonicalUrl) : "") +
+        (d.default === true ? " (default)" : "") + "</option>").join("") +
+      (chosen.length > 0 && !known
+        ? "<option value=\"" + esc(chosen) + "\" selected>" + esc(chosen) +
+          " (not in this namespace's list)</option>"
+        : "") +
+      "</select></div>"
+    );
+  }
+  return (
+    "<div class=\"field\"><label for=\"catalog-destination\">destination</label>" +
+    "<input id=\"catalog-destination\" name=\"destination\" value=\"" + esc(chosen) + "\"" +
+    invalid + " required></div>" +
+    (list !== null && list.length === 0
+      ? "<p class=\"note\" id=\"catalog-no-destination\">No saved destination exists in this " +
+        "namespace yet. <a href=\"#/destinations?ns=" + esc(encodeURIComponent(String(v.ns || ""))) +
+        "\">Create one on Destinations</a> first; it names the bucket this archive is in.</p>"
+      : "")
   );
 }
 
@@ -788,6 +829,23 @@ export function connectBody(values) {
   };
 }
 
+// The destinations the connect form offers: `deps.destinations` for the
+// suite, the client's product-API read otherwise; `null` when unreadable.
+async function readConnectDestinations(ns, deps, lifecycle) {
+  const reader = deps !== undefined && deps !== null
+    ? deps.destinations
+    : (namespace, options) => API.destinations(namespace, options);
+  if (typeof reader !== "function") {
+    return null;
+  }
+  try {
+    const answer = await reader(ns, readOptions(lifecycle));
+    return Array.isArray((answer || {}).items) ? answer.items : null;
+  } catch (unread) {
+    return null;
+  }
+}
+
 export async function mountCatalog(node, ns, parse, lifecycle, deps) {
   const key = connectKey(ns);
   const mutation = mutationFor(key);
@@ -807,8 +865,13 @@ export async function mountCatalog(node, ns, parse, lifecycle, deps) {
     view.state = state;
     paint();
   }, lifecycle);
+  // THE NAMESPACE'S DESTINATIONS, READ BESIDE THE CATALOGS for the pick-list
+  // (MCP-23). A read that fails leaves the free-text box; it is never a reason
+  // the page fails.
+  const destinationsRead = readConnectDestinations(ns, deps, lifecycle);
   try {
     view.collection = await listD3("catalog", ns, readOptions(lifecycle), deps);
+    view.destinations = await destinationsRead;
     view.loaded = true;
     paint();
   } catch (error) {

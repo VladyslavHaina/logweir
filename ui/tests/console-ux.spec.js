@@ -596,3 +596,173 @@ test("mcp_6_only_a_long_token_in_a_table_may_break_mid_word", () => {
     "BEFORE: `.grid td code { overflow-wrap: anywhere }` broke every chip mid-token");
   assert.match(css, /\.grid td code\.long,\n\.grid td \.badge\.long \{\n {2}overflow-wrap: anywhere;/);
 });
+
+// ===========================================================================
+// MCP-13 / MCP-17: two projections the API now publishes
+// ===========================================================================
+
+import { renderLastSlot, renderScheduleRevision } from "../pages/schedules.js";
+import { renderBackupList } from "../pages/backups.js";
+import { renderHistoryList } from "../pages/history.js";
+
+test("mcp_13_the_console_shows_what_the_last_slot_did_from_the_api", async () => {
+  resetMode();
+  await selectMode({ probe: async () => ({ ok: true, status: 200, body: con("session.json") }) });
+  // THE SAME FILE `crates/logweir-api/tests/list_projection_additions.rs`
+  // asserts is the API's projection of `schedule-policy.json`.
+  const golden = con("schedule-last-slot.json");
+  const wire = transport(() => ({ status: 200, body: golden }));
+  try {
+    const object = await apiClient().get("team-a", "backupschedules", golden.item.name);
+    assert.equal(object.status.lastSlot.disposition, "Admitted");
+    assert.equal(object.__contract.absent.indexOf("status.lastSlot"), -1,
+      "a field the API supplied is not named absent");
+    const html = renderLastSlot(object);
+    assert.match(html, /data-last-slot="1"/,
+      "BEFORE: 'read the schedule with kubectl' -- the projection did not exist");
+    assert.match(html, /Admitted/);
+    assert.match(html, /20260918-032200/);
+    assert.equal(html.indexOf("kubectl"), -1);
+  } finally {
+    wire.restore();
+  }
+  // AN OLDER API that publishes neither still says so -- without kubectl.
+  const older = con("schedule-last-slot.json");
+  delete older.item.status.lastSlot;
+  delete older.item.status.missedSlots;
+  const again = transport(() => ({ status: 200, body: older }));
+  try {
+    const object = await apiClient().get("team-a", "backupschedules", older.item.name);
+    const html = renderLastSlot(object);
+    assert.match(html, /data-last-slot="absent"/);
+    assert.equal(html.indexOf("kubectl"), -1);
+  } finally {
+    again.restore();
+  }
+});
+
+test("mcp_13_the_revision_line_keeps_the_digest_and_tz_database_one_disclosure_away", () => {
+  const cr = fixture("schedule-policy.json");
+  const html = renderScheduleRevision(cr);
+  const sentence = html.slice(0, html.indexOf("</p>"));
+  assert.equal(sentence.indexOf("sha256:"), -1, "no digest in the sentence an operator reads");
+  assert.equal(sentence.indexOf("chrono-tz"), -1, "and no library version");
+  assert.match(sentence, /Revision g\d+, in force since <time class="ts"/);
+  const details = html.slice(html.indexOf("<details class=\"technical\">"));
+  assert.match(details, /sha256:/, "the digest is still on the page");
+  assert.match(details, /chrono-tz/);
+});
+
+test("mcp_17_a_console_list_row_shows_the_exit_code_and_the_restore_outcome", async () => {
+  resetMode();
+  await selectMode({ probe: async () => ({ ok: true, status: 200, body: con("session.json") }) });
+  const backups = con("backups-list.json");
+  backups.items[0].operation.exitCode = 2;
+  const wire = transport(() => ({ status: 200, body: backups }));
+  let list;
+  try {
+    list = await apiClient().list("team-a", "backups");
+  } finally {
+    wire.restore();
+  }
+  assert.equal(list.items[0].status.exitCode, 2);
+  const html = renderBackupList(list, "team-a");
+  const row = html.slice(html.indexOf("<tbody>"), html.indexOf("</tr>", html.indexOf("<tbody>")));
+  const cells = row.split("<td").slice(1).map((c) => c.slice(c.indexOf(">") + 1, c.indexOf("</td>")));
+  assert.equal(cells[3], "2", "BEFORE: EXIT read `-` on every console row");
+
+  const restores = con("restores-list.json");
+  restores.items[0].operation.outcome = "pass";
+  restores.items[0].operation.verifiedSuccess = false;
+  const w2 = transport(() => ({ status: 200, body: restores }));
+  let rlist;
+  try {
+    rlist = await apiClient().list("team-a", "restores");
+  } finally {
+    w2.restore();
+  }
+  const history = renderHistoryList(rlist, { items: [] }, "team-a");
+  assert.match(history, /pass/, "the RESULT column carries the outcome");
+  assert.match(history, /unverified scorecard claim/,
+    "and a restore that did not verify keeps its outcome labelled as a claim");
+});
+
+// ===========================================================================
+// MCP-10 / MCP-20 / MCP-23 / MCP-32: forms and empty states that fit the role
+// ===========================================================================
+
+import { SOURCE_INPUTS, renderDestinationForm, sourceShows } from "../pages/destinations.js";
+import { NO_POLICY_SENTENCE } from "../pages/protection.js";
+import { renderConnectForm } from "../pages/catalog.js";
+import { KEYS_FORBIDDEN_SENTENCE, mountKeys } from "../pages/keys.js";
+
+test("mcp_10_the_destination_form_opens_from_a_button_and_shows_only_the_chosen_sources_inputs", () => {
+  const html = renderDestinationForm({ draft: {}, state: { phase: "idle" } });
+  assert.match(html, /^<details class="create-disclosure" id="destination-create-disclosure"><summary class="button primary">Create destination<\/summary>/,
+    "BEFORE: the form was always expanded under the list, a 4,300 px page");
+  // archiveWrite starts on `existing`: its Secret name shows, the new-key and
+  // ServiceAccount inputs do not. archiveRead starts `absent`: nothing shows.
+  const role = (name) => html.slice(html.indexOf("id=\"destination-" + name + "\""),
+    html.indexOf("</fieldset>", html.indexOf("id=\"destination-" + name + "\"")));
+  const write = role("archiveWrite");
+  assert.match(write, /data-grant-inputs="secret">/);
+  assert.match(write, /data-grant-inputs="sa" hidden>/);
+  assert.match(write, /data-grant-inputs="keys" hidden>/);
+  const read = role("archiveRead");
+  for (const group of ["secret", "sa", "keys"]) {
+    assert.match(read, new RegExp("data-grant-inputs=\"" + group + "\" hidden>"),
+      "an absent grant shows no input: " + group);
+  }
+  assert.equal(sourceShows("new", "keys"), true);
+  assert.equal(sourceShows("workloadIdentity", "sa"), true);
+  assert.equal(sourceShows("absent", "secret"), false);
+  assert.deepEqual(Object.keys(SOURCE_INPUTS).sort(),
+    ["absent", "archiveReadGrant", "controllerIdentity", "existing", "new", "workloadIdentity"]);
+  // A draft or a refusal keeps the form OPEN, so no outcome is hidden.
+  assert.match(renderDestinationForm({ draft: { name: "primary" }, state: { phase: "idle" } }),
+    /^<details class="create-disclosure" id="destination-create-disclosure" open>/);
+  assert.match(renderDestinationForm({ draft: {}, state: { phase: "failed", error: {} } }),
+    /^<details [^>]* open>/);
+});
+
+test("mcp_20_the_protection_empty_state_says_who_sets_an_objective_without_kubectl", () => {
+  assert.doesNotMatch(NO_POLICY_SENTENCE, /kubectl/, "BEFORE: 'create a ProtectionPolicy with kubectl'");
+  assert.match(NO_POLICY_SENTENCE, /set by a cluster administrator/);
+  assert.match(NO_POLICY_SENTENCE, /does not create them/);
+});
+
+test("mcp_23_the_connect_form_picks_a_destination_from_the_namespace", () => {
+  const destinations = [
+    { name: "primary", canonicalUrl: "s3://kafka-backups/poc", default: true },
+    { name: "cold", canonicalUrl: "s3://cold/archive" },
+  ];
+  const html = renderConnectForm({ ns: "team-a", values: {}, state: {}, destinations: destinations });
+  assert.match(html, /<select id="catalog-destination" name="destination" required>/,
+    "BEFORE: a free-text box");
+  assert.match(html, /<option value="primary">primary -- s3:\/\/kafka-backups\/poc \(default\)<\/option>/);
+  assert.match(html, /<option value="cold">cold -- s3:\/\/cold\/archive<\/option>/);
+  const unread = renderConnectForm({ ns: "team-a", values: {}, state: {}, destinations: null });
+  assert.match(unread, /<input id="catalog-destination" name="destination"/,
+    "a list that could not be read leaves the free-text box, so the form still works");
+  const none = renderConnectForm({ ns: "team-a", values: {}, state: {}, destinations: [] });
+  assert.match(none, /id="catalog-no-destination"/);
+  assert.match(none, /href="#\/destinations\?ns=team-a"/);
+});
+
+test("mcp_32_a_403_on_keys_in_the_shared_console_says_only_administrators_may_read_trust", async () => {
+  const node = { html: "", firstChild: null, removeChild() {}, appendChild(c) { node.html = c.html; } };
+  const forbidden = new Error("This route requires the action in at least one granted namespace.");
+  forbidden.status = 403;
+  forbidden.reason = "forbidden";
+  await mountKeys(node, (html) => [{ html: html }], {
+    modeOf: () => "console",
+    serverClock: () => null,
+    listD3: undefined,
+    consoleClusterList: async () => { throw forbidden; },
+    api: { listCluster: async () => ({ items: [] }) },
+  }, null);
+  assert.match(node.html, /id="keys-forbidden"/);
+  assert.ok(node.html.includes(KEYS_FORBIDDEN_SENTENCE.slice(0, 40)));
+  assert.equal(node.html.indexOf("no approval can verify"), -1,
+    "BEFORE: a 403 was shown as 'no trust exists ... no approval can verify'");
+});

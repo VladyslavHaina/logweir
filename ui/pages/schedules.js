@@ -87,6 +87,8 @@ import {
   rfc3339,
   table,
   triggerBadge,
+  technicalDetails,
+  when,
 } from "../render.js";
 import {
   clusterName,
@@ -1885,24 +1887,36 @@ export function renderScheduleRevision(object) {
   const behind = typeof meta.generation === "number" &&
     typeof status.observedGeneration === "number" &&
     status.observedGeneration < meta.generation;
+  // THE REVISION, THE INSTANT AND THE ZONE IN THE SENTENCE; THE DIGEST AND THE
+  // tz DATABASE ONE DISCLOSURE AWAY (MCP-13). Both are still printed -- a
+  // suspend flip moves the generation and leaves the digest, which is why the
+  // digest is here at all -- but a `sha256:` and a library version were the
+  // first thing an operator read on every schedule card.
   return (
     "<p class=\"revision\" data-generation=\"" +
     (typeof meta.generation === "number" ? String(meta.generation) : "") + "\">" +
-    revisionLine({
-      generation: meta.generation,
-      runPolicySha256: (policy || {}).runPolicySha256,
-    }) +
+    (typeof meta.generation === "number"
+      ? "Revision g" + String(meta.generation)
+      : revisionLine({ generation: meta.generation, runPolicySha256: (policy || {}).runPolicySha256 })) +
     (policy === undefined || policy === null
-      ? ""
-      : " In force since <code>" + esc(String(policy.effectiveSince)) + "</code>, read in " +
-        "<code>" + esc(String(policy.timeZone)) + "</code> against <code>" +
-        esc(String(policy.tzdb)) + "</code>.") +
+      ? "."
+      : ", in force since " + when(policy.effectiveSince) + ", read in " +
+        "<code>" + esc(String(policy.timeZone)) + "</code>.") +
     (behind
       ? " " + badge("pending", "not yet evaluated") + " <span class=\"note\">The controller has " +
         "evaluated revision g" + String(status.observedGeneration) + "; the policy saved above " +
         "is not yet the policy that schedules.</span>"
       : "") +
-    "</p>"
+    "</p>" +
+    technicalDetails(
+      revisionLine({
+        generation: meta.generation,
+        runPolicySha256: (policy || {}).runPolicySha256,
+      }) +
+      (policy === undefined || policy === null
+        ? ""
+        : " -- the time-zone database <code>" + esc(String(policy.tzdb)) + "</code>"),
+    )
   );
 }
 
@@ -4146,9 +4160,10 @@ export function renderLastSlot(object) {
 export const LAST_SLOT_NOT_PUBLISHED =
   "What happened to this schedule's most recent slot -- whether it was admitted, caught up, " +
   "missed, blocked or exhausted -- and how many slots have been skipped are recorded by the " +
-  "controller in status.lastSlot and status.missedSlots. This build's product API projects " +
-  "neither, so the console has nothing to render; read the schedule with kubectl, or use the " +
-  "kubectl-proxy mode, which reads the object itself.";
+  "controller in status.lastSlot and status.missedSlots. The product API serving this console " +
+  "is a release that does not publish them, so the console has nothing to render; nothing is " +
+  "wrong with the schedule because of it, and a console served by a current logweir-api " +
+  "shows both.";
 
 /** The runs of this schedule that are in flight right now, each with the
  *  revision it FROZE -- which is the point of the panel.

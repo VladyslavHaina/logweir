@@ -495,10 +495,28 @@ const SCHEDULE_POLICY = shapeOf(
   },
 );
 
+/** What happened to a schedule's most recent decided slot, and the skipped
+ *  slots (D1 section 4.8), as the controller recorded them. ADDITIVE (MCP-13):
+ *  both are optional, and an absent one is "not yet recorded". */
+const LAST_SLOT = shapeOf(
+  "LastSlotView",
+  { slot: str, dueAt: str, attempt: int, disposition: str, reason: str, decidedAt: str },
+  { backupRef: objectOf(NAME_REF) },
+);
+
+const MISSED_SLOT = shapeOf("MissedSlotView", { slot: str, reason: str, recordedAt: str });
+
+const MISSED_SLOTS = shapeOf(
+  "MissedSlotsView",
+  { count: int, countCapped: bool },
+  { lastEvaluatedSlot: str, recent: listOf(objectOf(MISSED_SLOT)) },
+);
+
 const SCHEDULE_STATUS = shapeOf(
   "ScheduleStatusView",
   {},
   {
+    lastSlot: objectOf(LAST_SLOT), missedSlots: objectOf(MISSED_SLOTS),
     lastFireTime: str, nextFireTime: str, lastMissedSlot: str,
     activeBackup: str, pendingBackup: str,
     ready: objectOf(CONDITION), retentionReport: objectOf(RETENTION_REPORT),
@@ -605,7 +623,9 @@ const OPERATION_SUMMARY = shapeOf(
     verificationState: oneOf(VERIFICATION_STATES),
     verifiedSuccess: bool,
   },
-  { stateReason: str },
+  // `exitCode` and `outcome` (MCP-17): the operation's own result, carried on
+  // a LIST row. Additive; an absent one is "not recovered".
+  { stateReason: str, exitCode: int, outcome: str },
 );
 
 const WINDOW_COVERED = shapeOf("WindowCoveredView", { fromMs: int, toMs: int });
@@ -1559,6 +1579,9 @@ export const CONSOLE_SHAPES = Object.freeze({
   RemovableSetView: REMOVABLE_SET,
   RetentionReportView: RETENTION_REPORT,
   ScheduleStatusView: SCHEDULE_STATUS,
+  LastSlotView: LAST_SLOT,
+  MissedSlotView: MISSED_SLOT,
+  MissedSlotsView: MISSED_SLOTS,
   TopicExclusions: TOPIC_EXCLUSIONS,
   AllUserTopics: ALL_USER_TOPICS,
   Schedule: SCHEDULE,
