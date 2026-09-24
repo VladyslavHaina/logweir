@@ -34,7 +34,8 @@ source, for linux/amd64 and linux/arm64.
 Every reference in this tree pins these digests, never the tags
 (`crates/logweir/tests/chart_lint.rs`,
 `chart_lint_every_minio_image_reference_is_the_mirror_digest`, refuses any
-other MinIO reference outside this directory and `THIRD_PARTY_NOTICES.md`).
+other MinIO image reference outside this directory, `THIRD_PARTY_NOTICES.md`
+and the trackers under `docs/to-do/`).
 They are the digests of the images `build.sh` built and loaded on 2026-09-24
 from recipe commit `719b57ce` (the image label
 `io.logweir.mirror.recipe-revision`); the build is not bit-reproducible, so

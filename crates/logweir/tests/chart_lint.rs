@@ -993,7 +993,8 @@ fn chart_lint_values_name_the_shipped_repositories_at_latest() {
 /// a harness that pins a DIFFERENT mirror digest from the chart's measures a
 /// different server from the one the chart ships. `third_party/minio-mirror/`
 /// and `THIRD_PARTY_NOTICES.md` name the upstream images on purpose — they are
-/// the provenance record — and nothing else is exempt.
+/// the provenance record — and so do the trackers under `docs/to-do/`, which
+/// are history and are never pulled; nothing else is exempt.
 #[test]
 fn chart_lint_every_minio_image_reference_is_the_mirror_digest() {
     let values: Value =
@@ -1022,9 +1023,12 @@ fn chart_lint_every_minio_image_reference_is_the_mirror_digest() {
             ));
         }
     }
-    // The withdrawn names, split so that this file does not carry them.
+    // The withdrawn images AS REFERENCES — a name with a tag or a digest, which
+    // is what a pull uses (`quay.io/…` and `docker.io/…` spellings contain these
+    // too). Prose that names the upstream repositories without a tag, as the
+    // trackers' history does, is not a reference. Split so that this file does
+    // not carry them.
     let withdrawn = [
-        concat!("quay.io", "/minio/"),
         concat!("minio/", "minio:"),
         concat!("minio/", "minio@"),
         concat!("minio/", "mc:"),
@@ -1059,7 +1063,12 @@ fn chart_lint_every_minio_image_reference_is_the_mirror_digest() {
     }
     let mut mirror_mentions = BTreeSet::new();
     for file in &files {
-        if file.starts_with("third_party/minio-mirror/") || file == "THIRD_PARTY_NOTICES.md" {
+        // The provenance record, the generated notices, and the orchestrator's
+        // trackers (history, never pulled) may name the upstream images.
+        if file.starts_with("third_party/minio-mirror/")
+            || file == "THIRD_PARTY_NOTICES.md"
+            || file.starts_with("docs/to-do/")
+        {
             continue;
         }
         // Binary fixtures are not image references.
