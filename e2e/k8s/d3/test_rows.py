@@ -1925,7 +1925,7 @@ L6_SCHEDULE_PASSED = {
     "status": {
         "lastSucceeded": {"restoreRef": {"name": L6_RESTORE_NAME},
                           "at": "2026-09-21T03:04:05Z", "pointId": "lwp1-" + "a" * 32,
-                          "evidence": "Valid", "rtoSeconds": 137},
+                          "evidence": f"logweir/drills/{L6_RUN}.json", "rtoSeconds": 137},
         "lastScheduledSlot": L6_SLOT,
         "conditions": [{"type": "RehearsalHealthy", "status": "True", "reason": "Passed"}],
     }
@@ -2114,12 +2114,34 @@ def test_the_scorecard_names_a_schedule_and_never_a_person() -> None:
             not_valid, L6_SCORECARD, L6_SCHEDULE, L6_SLOT).values()))
 
 
+L6_SCORECARD_KEY = f"logweir/drills/{L6_RUN}.json"
+L6_VERIFIED_AT = "2026-09-21T03:04:01Z"
+# What `kubectl get -w` saw: the running reservation, then the decided pass.
+L6_WATCHED_PASS = [
+    {"activeRestoreRef": {"name": L6_RESTORE_NAME}},
+    L6_SCHEDULE_PASSED["status"],
+]
+# PLANTED: lab-refresh-9's REHEARSAL-PASS-RECORDED-AS-FAILED — a write that
+# recorded the passing rehearsal in `lastFailed {reason: ok}` at the terminal
+# instant, before its verdict.
+L6_WATCHED_TRANSIENT_FAILURE = [
+    {"activeRestoreRef": {"name": L6_RESTORE_NAME}},
+    {"lastFailed": {"restoreRef": {"name": L6_RESTORE_NAME}, "reason": "ok",
+                    "at": "2026-09-21T03:03:55Z"}},
+    L6_SCHEDULE_PASSED["status"],
+]
+
+
+def _pass(schedule=None, key=L6_SCORECARD_KEY, verified=L6_VERIFIED_AT, watched=None):
+    return d3.the_schedule_records_the_pass(
+        L6_SCHEDULE_PASSED if schedule is None else schedule, L6_RESTORE_NAME, key, verified,
+        L6_WATCHED_PASS if watched is None else watched)
+
+
 def test_the_schedule_publishes_rehearsal_last_star() -> None:
     row("L6 step 5: lastSucceeded, RehearsalHealthy=True/Passed, activeRestoreRef cleared",
-        all(d3.the_schedule_records_the_pass(
-            L6_SCHEDULE_PASSED, L6_RESTORE_NAME).values()))
-    nothing = d3.the_schedule_records_the_pass(
-        L6_SCHEDULE_WITHOUT_LASTSUCCEEDED, L6_RESTORE_NAME)
+        all(_pass().values()), str(_pass()))
+    nothing = _pass(L6_SCHEDULE_WITHOUT_LASTSUCCEEDED)
     row("L6 step 5 refuses a schedule that recorded no lastSucceeded and never released "
         "activeRestoreRef",
         not all(nothing.values())
@@ -2128,7 +2150,33 @@ def test_the_schedule_publishes_rehearsal_last_star() -> None:
     no_rto = json.loads(json.dumps(L6_SCHEDULE_PASSED))
     del no_rto["status"]["lastSucceeded"]["rtoSeconds"]
     row("L6 step 5 refuses a pass with no measured RTO — the objective it exists to measure",
-        not all(d3.the_schedule_records_the_pass(no_rto, L6_RESTORE_NAME).values()))
+        not all(_pass(no_rto).values()))
+    verdict_word = json.loads(json.dumps(L6_SCHEDULE_PASSED))
+    verdict_word["status"]["lastSucceeded"]["evidence"] = "Valid"
+    clauses = _pass(verdict_word)
+    row("L6 step 5 refuses lastSucceeded.evidence that is not the signed scorecard key",
+        not all(clauses.values())
+        and not clauses["status.lastSucceeded.evidence is the rehearsal's signed scorecard key"])
+    early = _pass(verified="2026-09-21T03:04:06Z")
+    row("L6 step 5 refuses a lastSucceeded recorded BEFORE the Restore's Verified transition",
+        not all(early.values()))
+    row("L6 step 5 refuses a Restore that never reached Verified=True",
+        not all(_pass(verified=None).values()))
+    transient = _pass(watched=L6_WATCHED_TRANSIENT_FAILURE)
+    row("L6 step 5 refuses a pass the schedule first wrote as lastFailed (lab-refresh-9)",
+        not all(transient.values())
+        and not transient["no status write of the schedule, watched throughout, named it in "
+                          "lastFailed"])
+    row("L6 step 5 refuses a run whose schedule was never watched",
+        not all(_pass(watched=[]).values()))
+    # THE RECORDED DEFECT: lab-refresh-9's artifact, read as it was written.
+    lr9 = {"status": {"lastFailed": {"restoreRef": {"name": L6_RESTORE_NAME}, "reason": "ok",
+                                     "at": "2026-09-23T18:51:50Z"},
+                      "lastSucceeded": None,
+                      "conditions": [{"type": "RehearsalHealthy", "status": "False",
+                                      "reason": "Failed"}]}}
+    row("L6 step 5 refuses lab-refresh-9's recorded shape (lastFailed reason ok, no "
+        "lastSucceeded)", not all(_pass(lr9, watched=[lr9["status"]]).values()))
 
 
 def test_the_rehearsal_owns_its_topics_and_touches_no_others() -> None:
@@ -2873,11 +2921,29 @@ def test_an_unavailable_target_skip_consumes_its_slot() -> None:
         verdict == "NOT-REACHED")
 
 
-def _restore(phase, *, job="j", exit_code=None, outcome=None, verdict=None, reason=None) -> dict:
+_RUN_KEYS = {"scorecardKey": "logweir/drills/01M37QWBB77DDVJ6414JZWP3PM.json",
+             "sidecarKey": "logweir/drills/01M37QWBB77DDVJ6414JZWP3PM.json.sig",
+             "offsetReportKey": "logweir/drills/01M37QWBB77DDVJ6414JZWP3PM.offsets.json"}
+
+
+def _restore(phase, *, job="j", exit_code=None, outcome=None, verdict=None, reason=None,
+             keys=True, recorded=True, verified="False", completion=False) -> dict:
+    evidence = dict(_RUN_KEYS) if keys else {}
+    if verdict:
+        evidence["verification"] = {"result": verdict}
+    conditions = []
+    if recorded:
+        conditions.append({"type": "EvidenceRecorded", "status": "True",
+                           "reason": "EvidenceKeysRecorded"})
+    if verified:
+        conditions.append({"type": "Verified", "status": verified, "reason": "OutcomeNotPass"})
+    status = {"phase": phase, "jobRef": {"name": job} if job else None,
+              "exitCode": exit_code, "outcome": outcome, "reason": reason,
+              "evidence": evidence, "conditions": conditions}
+    if completion:
+        status["completion"] = {"recordsRestored": 100, "newTopics": ["restore-x-orders"]}
     return {"metadata": {"name": "logweir-rehearsal-l6-failed-verify-20260923-051000"},
-            "status": {"phase": phase, "jobRef": {"name": job} if job else None,
-                       "exitCode": exit_code, "outcome": outcome, "reason": reason,
-                       "evidence": {"verification": {"result": verdict}} if verdict else {}}}
+            "status": status}
 
 
 def test_a_failed_verification_is_a_failed_rehearsal() -> None:
@@ -2905,6 +2971,44 @@ def test_a_failed_verification_is_a_failed_rehearsal() -> None:
     untampered = [dict(tampered[0], sha256After="aa")]
     verdict, _ = d3.failed_verification_is_a_failed_rehearsal(restore, schedule, untampered, view)
     row("failed verification: a segment that still hashes to its manifest -> FAIL", verdict == "FAIL")
+    # PLANTED: lab-refresh-9's FAILED-DRILL-EVIDENCE-UNPUBLISHED — exit 2, no
+    # key line, so no evidence, no verdict, no outcome, no EvidenceRecorded.
+    unpublished = _restore("Failed", exit_code=2, keys=False, recorded=False, verified=None)
+    lr9_schedule = {"status": {"lastFailed": {"restoreRef": {"name": name},
+                                              "reason": "drill-not-pass"},
+                               "conditions": [_cond("RehearsalHealthy", "False", "Failed")]}}
+    verdict, clauses = d3.failed_verification_is_a_failed_rehearsal(
+        unpublished, lr9_schedule, tampered, view)
+    row("failed verification: lab-refresh-9's unpublished signed failure -> FAIL",
+        verdict == "FAIL"
+        and not clauses["status.evidence names the signed scorecard, sidecar and offset-report "
+                        "keys"])
+    no_offsets = _restore("Failed", exit_code=2, outcome="fail-integrity", verdict="Valid")
+    del no_offsets["status"]["evidence"]["offsetReportKey"]
+    verdict, _ = d3.failed_verification_is_a_failed_rehearsal(no_offsets, schedule, tampered, view)
+    row("failed verification: the offset-report key missing -> FAIL", verdict == "FAIL")
+    unrecorded = _restore("Failed", exit_code=2, outcome="fail-integrity", verdict="Valid",
+                          recorded=False)
+    verdict, _ = d3.failed_verification_is_a_failed_rehearsal(unrecorded, schedule, tampered, view)
+    row("failed verification: no EvidenceRecorded=True -> FAIL", verdict == "FAIL")
+    green = _restore("Failed", exit_code=2, outcome="fail-integrity", verdict="Valid",
+                     verified="True")
+    verdict, _ = d3.failed_verification_is_a_failed_rehearsal(green, schedule, tampered, view)
+    row("failed verification: Verified=True over exit 2 -> FAIL", verdict == "FAIL")
+    # PLANTED: review MEDIUM-1 — completion (and so cutover guidance) over a
+    # failed restore.
+    completed = _restore("Failed", exit_code=2, outcome="fail-integrity", verdict="Valid",
+                         completion=True)
+    verdict, clauses = d3.failed_verification_is_a_failed_rehearsal(
+        completed, schedule, tampered, view)
+    row("failed verification: status.completion on the failed restore -> FAIL",
+        verdict == "FAIL"
+        and not clauses["no status.completion is published for the failed restore"])
+    exit_reason = json.loads(json.dumps(schedule))
+    exit_reason["status"]["lastFailed"]["reason"] = "drill-not-pass"
+    verdict, _ = d3.failed_verification_is_a_failed_rehearsal(restore, exit_reason, tampered, view)
+    row("failed verification: lastFailed.reason the exit's reason over a Valid verdict -> FAIL",
+        verdict == "FAIL")
 
 
 def _kbak(records: bytes = b"\x00" * 40) -> bytes:

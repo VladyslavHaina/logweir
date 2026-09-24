@@ -7804,8 +7804,9 @@ def the_scorecard_names_the_schedule_and_the_slot(
     }
 
 
-def the_schedule_records_the_pass(schedule: dict[str, Any],
-                                  restore_name: str) -> dict[str, bool]:
+def the_schedule_records_the_pass(schedule: dict[str, Any], restore_name: str,
+                                  scorecard_key: str, verified_at: str | None,
+                                  watched: list[dict[str, Any]] | None) -> dict[str, bool]:
     """Review §4 step 5: `status.lastSucceeded` with `restoreRef`, `at`,
     `evidence` and `rtoSeconds`; `RehearsalHealthy=True/Passed`;
     `activeRestoreRef` cleared.
@@ -7814,15 +7815,29 @@ def the_schedule_records_the_pass(schedule: dict[str, Any],
     answer the concurrency question, and a schedule that never released it
     would skip every subsequent slot with `ConcurrencyBlocked` for a rehearsal
     that finished.
+
+    DECIDED ON THE REACHED VERDICT (rehearsal-fix, lab-refresh-10). On
+    lab-refresh-9 the schedule recorded a PASSING rehearsal as
+    `lastFailed {reason: ok}` 0.15 s after the terminal patch, eleven seconds
+    before its verdict landed (REHEARSAL-PASS-RECORDED-AS-FAILED). So:
+    `lastSucceeded.evidence` is exactly the rehearsal's signed scorecard KEY
+    (`docs/kubernetes.md`; the CRD's `RehearsalSuccess.evidence`), not merely
+    truthy; `lastSucceeded.at` is not before the Restore's `Verified`
+    transition (the schedule waited for the verdict); and NO status write the
+    schedule made while the rehearsal ran — every one, from a `kubectl get -w`
+    begun before the run went terminal — named it in `lastFailed`.
     """
     status = schedule.get("status") or {}
     last = status.get("lastSucceeded") or {}
     healthy = condition(schedule, "RehearsalHealthy")
+    at = parse_rfc3339(last.get("at"))
+    verified = parse_rfc3339(verified_at)
     return {
         "status.lastSucceeded.restoreRef names the rehearsal that ran":
             (last.get("restoreRef") or {}).get("name") == restore_name,
         "status.lastSucceeded.at is recorded": bool(last.get("at")),
-        "status.lastSucceeded.evidence carries the verdict": bool(last.get("evidence")),
+        "status.lastSucceeded.evidence is the rehearsal's signed scorecard key":
+            bool(scorecard_key) and last.get("evidence") == scorecard_key,
         "status.lastSucceeded.rtoSeconds is the measured recovery time":
             isinstance(last.get("rtoSeconds"), int),
         "RehearsalHealthy is True with reason Passed": (
@@ -7830,7 +7845,71 @@ def the_schedule_records_the_pass(schedule: dict[str, Any],
         ),
         "and status.activeRestoreRef is cleared":
             not (status.get("activeRestoreRef") or {}).get("name"),
+        "lastSucceeded.at is not before the Restore's Verified transition (it waited for "
+        "the verdict)":
+            at is not None and verified is not None and at >= verified,
+        "no status write of the schedule, watched throughout, named it in lastFailed":
+            bool(watched) and not any(
+                (((w or {}).get("lastFailed") or {}).get("restoreRef") or {}).get("name")
+                == restore_name for w in watched),
     }
+
+
+def parse_rfc3339(value: Any) -> dt.datetime | None:
+    """An RFC 3339 instant as an aware datetime, or None. Kubernetes writes
+    whole seconds (`...Z`); fractional seconds are accepted too."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+class StatusWatch:
+    """Every status one object carried while watched: `kubectl get -w -o json`
+    in the background, decoded object by object. It sees each write the API
+    server serves, which a poll between two writes can miss (lab-refresh-9's
+    wrong `lastFailed` landed 0.15 s after the terminal patch). Bounded by
+    `/tmp/lwtimeout` and stopped in the caller's `finally`."""
+
+    def __init__(self, kind: str, name: str, seconds: int = 3600) -> None:
+        self.statuses: list[dict[str, Any]] = []
+        self.times: list[str] = []
+        self.proc = subprocess.Popen(
+            ["/tmp/lwtimeout", str(seconds)] + KN + ["get", kind, name, "-w", "-o", "json"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, cwd=ROOT)
+        self.thread = threading.Thread(target=self._read, daemon=True)
+        self.thread.start()
+
+    def _read(self) -> None:
+        decoder = json.JSONDecoder()
+        buf = ""
+        assert self.proc.stdout is not None
+        for line in self.proc.stdout:
+            buf += line
+            while True:
+                stripped = buf.lstrip()
+                if not stripped:
+                    buf = ""
+                    break
+                try:
+                    obj, end = decoder.raw_decode(stripped)
+                except ValueError:
+                    break
+                buf = stripped[end:]
+                self.statuses.append((obj or {}).get("status") or {})
+                self.times.append(dt.datetime.now(dt.timezone.utc).isoformat())
+
+    def stop(self) -> list[dict[str, Any]]:
+        if self.proc.poll() is None:
+            self.proc.terminate()
+        try:
+            self.proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+        self.thread.join(timeout=10)
+        return list(self.statuses)
 
 
 def the_target_holds_exactly_the_mapped_topics(
@@ -8775,6 +8854,9 @@ def rehearsal() -> None:
 
             sampler = threading.Thread(target=sample, daemon=True)
             sampler.start()
+            # step 5 watches EVERY status write of the schedule from here on:
+            # the defect's wrong `lastFailed` lived in one write.
+            schedule_watch = StatusWatch("rehearsalschedule", REHEARSAL_SCHEDULE)
 
             def watch(obj: dict[str, Any]) -> bool:
                 if not facts.get("complete"):
@@ -8811,6 +8893,7 @@ def rehearsal() -> None:
                 or bool(((o.get("status") or {}).get("lastFailed") or {}).get("at")),
                 seconds=420,
             )
+            watched = schedule_watch.stop()
             quiet = quiesce_arm(REHEARSAL_SCHEDULE, evidence)
             # A SECOND SLOT OF THE TEN-MINUTE SCHEDULE. It can fire in the same
             # reconcile that observes the first as finished (a slot that came
@@ -8878,10 +8961,25 @@ def rehearsal() -> None:
                 evidence,
             )
 
-            # step 5 — `rehearsalLast*` on the schedule
-            last = the_schedule_records_the_pass(after_schedule, first_name)
+            # step 5 — `rehearsalLast*` on the schedule, decided on the verdict
+            complete_at = condition(final, "Complete").get("lastTransitionTime")
+            verified_at = condition(final, "Verified").get("lastTransitionTime") \
+                if condition(final, "Verified").get("status") == "True" else None
+            last = the_schedule_records_the_pass(after_schedule, first_name, scorecard_key,
+                                                 verified_at, watched)
             evidence.append(artifact("rehearsal/05-schedule-status.json",
                                      {"status": after_schedule.get("status"),
+                                      "timeline": {
+                                          "restoreComplete": complete_at,
+                                          "restoreVerified": verified_at,
+                                          "scheduleLastSucceededAt": ((after_schedule.get(
+                                              "status") or {}).get("lastSucceeded") or {})
+                                          .get("at")},
+                                      "watchedStatusWrites": [
+                                          {"seen": t, "lastSucceeded": w.get("lastSucceeded"),
+                                           "lastFailed": w.get("lastFailed"),
+                                           "activeRestoreRef": w.get("activeRestoreRef")}
+                                          for t, w in zip(schedule_watch.times, watched)],
                                       "extraRehearsals": extra, "clauses": last}))
             if extra:
                 record("rehearsal-5-schedule-records-the-pass", "PLAT-14.3", "HARNESS-FAULT",
@@ -11532,6 +11630,18 @@ def failed_verification_is_a_failed_rehearsal(restore: dict[str, Any],
     code — otherwise the verification never ran and the row is NOT-REACHED
     (on `f49849d`, REHEARSAL-PLAN-AUTH-PLAINTEXT refuses admission with
     `ConnectionPlanMismatch` first).
+
+    THE SIGNED FAILURE IS PUBLISHED (rehearsal-fix; interface I8 amended for
+    exit 2; lab-refresh-10). On lab-refresh-9 the exit-2 runner signed and put
+    its scorecard, sidecar and offset report but printed no key line, so the
+    Restore carried no `status.evidence`, no verdict and no `outcome`
+    (FAILED-DRILL-EVIDENCE-UNPUBLISHED). Now the Restore names all three keys
+    and raises `EvidenceRecorded=True`; its verdict is `Valid` and still NOT
+    green (`Verified` never True over a non-zero exit); it publishes no
+    `status.completion` (review MEDIUM-1: no cutover guidance over a failed
+    restore); and the schedule's `lastFailed.reason` is the VERIFIED signed
+    outcome, `fail-integrity` (`docs/kubernetes.md`, the rehearsal decision
+    rule), not the exit's own reason.
     """
     st = (restore or {}).get("status") or {}
     sst = (schedule or {}).get("status") or {}
@@ -11551,8 +11661,19 @@ def failed_verification_is_a_failed_rehearsal(restore: dict[str, Any],
             and st.get("outcome") == "fail-integrity",
         "the failure is signed evidence that verifies (Valid)":
             ((st.get("evidence") or {}).get("verification") or {}).get("result") == "Valid",
+        "status.evidence names the signed scorecard, sidecar and offset-report keys":
+            all(bool((st.get("evidence") or {}).get(k))
+                for k in ("scorecardKey", "sidecarKey", "offsetReportKey")),
+        "EvidenceRecorded=True": condition(restore or {}, "EvidenceRecorded").get("status")
+            == "True",
+        "the verified failure is never green (Verified is not True)":
+            condition(restore or {}, "Verified").get("status") != "True",
+        "no status.completion is published for the failed restore":
+            "completion" not in st,
         "the schedule records it in lastFailed": ((sst.get("lastFailed") or {}).get("restoreRef")
                                                   or {}).get("name") == name and bool(name),
+        "lastFailed.reason is the verified signed outcome fail-integrity":
+            (sst.get("lastFailed") or {}).get("reason") == "fail-integrity",
         "and never as lastSucceeded": ((sst.get("lastSucceeded") or {}).get("restoreRef")
                                        or {}).get("name") != name,
         "RehearsalHealthy=False/Failed":
