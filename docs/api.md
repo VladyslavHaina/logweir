@@ -189,6 +189,16 @@ refusal (exit 2), because both modes carry the console's signature. The full
 contract, the four enforcement points and upgrade/rollback are in
 `docs/kubernetes.md` §8, *Approval policy*.
 
+**A manual restore is limited and may queue** (P10): one person may create
+`rateLimits.manualRestoresPerMinute` (default `5`) per namespace per minute
+(then `429 rate_limited` with `Retry-After`), and once admitted — approved,
+target and destinations resolved — at most
+`runs.maxManualRestoresActivePerNamespace` (default `2`) run at once in a
+namespace; the rest are `queued` / `ConcurrencyLimited` with `queue: {limit}`
+and nothing created. The authorization is re-checked when a restore leaves the
+queue, so an approval with a maximum age can expire while it waits. A
+rehearsal's restores are never counted or queued.
+
 **`POST .../restores` answers where the submission goes next.** After the
 Restore exists (so it has a UID) the response carries `authorization`:
 
@@ -292,6 +302,14 @@ object.** The rules, exactly:
 - `stage` is absent when no stage was written and the phase is one this build
   does not recognise. A `Resolving` backup (D1's dynamic discovery) is
   `preparing`; anything unrecognised is `unknown/UnrecognizedPhase`.
+- **`phase: Queued` is `queued` with reason `ConcurrencyLimited`, and it IS
+  observed** (P10): the controller writes that phase on a manual run waiting for
+  a slot in its namespace's manual-run pool. Its stage is `admission` — no Job
+  exists — never the progress channel's `queued` stage (a Job with no pod yet).
+  The `Backup` and `Restore` items then carry `queue: {limit}`, the ceiling the
+  run waits behind, copied from `status.queue`; the block is published only
+  while the run is queued. An API older than this reads the same object as
+  `unknown/UnrecognizedPhase`.
 - A stage **never overrides a terminal phase.** `phase`, `exitCode` and
   `outcome` own the outcome; the progress channel answers "what is happening
   and why is it taking so long".
@@ -786,6 +804,18 @@ the CronJob "run now" precedent — and the active runs come back as a
 non-blocking notice. A schedule deleted between the request and the freeze still
 produces a run, because the controller does not read a `BackupSchedule` for a
 manual run at all.
+
+**An accepted run may queue** (P10). `201` means the `Backup` exists, not that
+its Job does: the controller lets at most
+`runs.maxManualBackupsActivePerNamespace` (default `4`) manual runs of a
+namespace hold a runner slot at once, and the rest wait with
+`operation.state: queued`, reason `ConcurrencyLimited`, `queue: {limit}` and
+nothing created — no plan, no Job, no execution claim — starting in creation
+order as slots free. Scheduled runs are neither counted nor queued, so this is
+not `concurrencyPolicy` either. And one person may start at most
+`rateLimits.manualBackupsPerMinute` (default `10`) runs per namespace per minute:
+past it the answer is `429 rate_limited` with `Retry-After`, and nothing is
+created (see *Rate limits*).
 
 **`409 policy_changed`** is the one refusal that is about the schedule:
 `expectedGeneration` named a revision that has been superseded. The problem
@@ -1680,6 +1710,22 @@ process**, so two console replicas each permit the configured rate; it is a
 politeness bound on how fast one operator can queue check Jobs, not a security
 control. The real ceiling on concurrent checks is the controller's
 `checks.maxActivePerNamespace`, which no API can talk past.
+
+Starting a **manual run** is bounded the same way (P10), keyed by the same
+`(actor, namespace, route)`: `POST …/backups` ("Back up now") at
+`rateLimits.manualBackupsPerMinute` (default `10`) and `POST …/restores` at
+`rateLimits.manualRestoresPerMinute` (default `5`) per actor, per namespace, per
+minute — both set in the configuration file (`api.console.rateLimits.*` in the
+chart; `logweir-api` refuses `0` and anything above `600` at start). Past it the
+answer is `429 rate_limited` with `Retry-After` (the seconds left in the window)
+and no object is created. The count is taken after authorization and after the
+request's own validation — a `422` does not spend the window — and before the
+create, so an idempotent **replay counts too**: it is answered `200` with the
+original run once the window resets, and can never create a second one. The
+window is per process, as above. How many runs RUN at once is the controller's
+manual-run pool (`runs.maxManual…ActivePerNamespace`), which holds whatever this
+lets through; before P10 one operator's hundred accepted requests became a
+hundred runner pods.
 
 The operation event stream (`…/operations/{kind}/{name}/events`) is declared
 `operation.read` + `operation.stream`, so it answers `401` without a session

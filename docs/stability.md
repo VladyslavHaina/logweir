@@ -489,6 +489,8 @@ machine's measurements and are **not** budgets.
 | Catalog point page (`…/points`) | 200 rows; the verdict join reads at most 2,000 `Backup`s (4 × 500) | `backupVerdictsIncomplete: Truncated`, and the console offers no restore from that page |
 | API list page | 200 objects | follow `nextCursor` |
 | Console lists (history, backups, runs) | 25 pages × 200 = 5,000 rows per kind | the page refuses and says how many it read, rather than showing a prefix as the whole; prune history or use `kubectl` |
+| Manual runs holding a runner slot (P10) | 4 manual `Backup`s and 2 manual `Restore`s per namespace (`runs.*`); scheduled runs and rehearsals not counted | the run waits `Queued` / `ConcurrencyLimited` with nothing created and starts in creation order ([kubernetes.md](kubernetes.md) *Manual runs may queue*) |
+| Manual runs started by one person (P10) | 10 "Back up now" and 5 restores per namespace per minute (`api.console.rateLimits.*`), per console process | `429 rate_limited` with `Retry-After`; nothing is created ([api.md](api.md) *Rate limits*) |
 
 **How it was measured.** Offline and in process, with no cluster: the product
 API's real router over its strict in-process fake API server (so each figure

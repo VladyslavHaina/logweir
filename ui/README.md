@@ -479,7 +479,15 @@ absences:
   `preparing`, `verifying`, `refused`, `cancelled` and `unknown` are
   distinctions `logweir-api` draws that the resource does not record, and the
   page shows the API's own word for them rather than rounding it to a phase the
-  controller never wrote.
+  controller never wrote. **One exception since P10:** a manual run waiting
+  for a slot in its namespace's manual-run pool IS written `phase: Queued` by
+  the controller, and both modes render it through `render.js`'s
+  `runPhaseBadge` as "Queued (limit N active)", `N` being the object's own
+  `status.queue.limit` (console mode: the item's `queue.limit`, projected under
+  the same name) -- copied, never computed. A `Queued` phase with no such block
+  is the plain `Queued` badge. The Backup and Restore details add the fixed
+  `QUEUED_RUN_SENTENCE`: nothing has been created for the run yet, and it starts
+  in creation order when a slot frees.
 
 The `TrustRoster` has **no product route at all**: it is cluster-scoped and
 admin-only, and the `#/keys` page says so by name in console mode instead of
@@ -1569,6 +1577,14 @@ create in this tree the object's NAME is its idempotence, so "submitting again
 reuses the name" is true; for a manual run the server derives the name and the
 KEY is the idempotence, so the unknown-outcome sentence names the key instead
 and no sentence carries an empty name.
+
+**A manual run may queue (P10), and that is not a refusal either.** `201`
+means the `Backup` exists; when its namespace already runs
+`runs.maxManualBackupsActivePerNamespace` manual backups it waits `Queued`
+("Queued (limit N active)") and starts on its own. More than ten "Back up now"
+clicks a minute from one person in one namespace are answered `429` with
+`Retry-After`, which the page shows as the problem's own message; the draft is
+kept.
 
 **Nothing blocks a manual run, and the page reflects that.** A suspended
 schedule and an active run are notices, not refusals: D1 section 8.3 is explicit

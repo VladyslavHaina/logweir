@@ -128,6 +128,32 @@ pub struct LocalRef {
     pub name: String,
 }
 
+/// Why a manual run has no Job yet: it is waiting for a slot in its
+/// namespace's manual-run pool — P10.
+///
+/// Written with `phase: Queued` and an `Admitted=False` condition whose reason
+/// is `ConcurrencyLimited`, and cleared (`null`) on the pass that lets the run
+/// out of the queue. It records the CEILING and nothing that moves: the count
+/// of active runs and this run's place in line change every time a run
+/// finishes, and a field that changed with them would be one status write per
+/// queued run per finished run. The console renders it as "Queued (limit N
+/// active)"; `crate::run_pool` owns the rule.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RunQueue {
+    /// The ceiling this run is queued behind: the installation policy's
+    /// `runs.maxManualBackupsActivePerNamespace` (a `Backup`) or
+    /// `runs.maxManualRestoresActivePerNamespace` (a `Restore`) when the run
+    /// was queued.
+    pub limit: i64,
+    /// A queued `Restore`'s approval deadline (review M2): the signed
+    /// `expires_at` of its authorization. The queue does NOT extend it — a
+    /// restore still queued at this instant is refused `AuthorizationExpired`.
+    /// Absent on a `Backup`, and for an approval that states no expiry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_expires_at: Option<Time>,
+}
+
 /// Where an archive lives, and the credential that reaches it.
 ///
 /// `url` is an object-store URL (`s3://…`, `gs://…`, `az://…`, `http://…` —

@@ -3843,6 +3843,8 @@ the schedule's history view — and it is **not** a schedule-created run. Only
 run neither occupies a `Forbid` slot nor is blocked by one, and it never appears
 in `status.activeRuns`. That follows the CronJob "run now" precedent, and it is
 what makes "Back up now" usable on a schedule whose nightly run is still going.
+Manual runs are bounded by a pool of their own instead (P10, *Manual runs may
+queue* below), which scheduled runs never enter.
 
 Membership and accounting are therefore two different questions asked of the
 same object, and the code asks them with two different predicates. Anything that
@@ -3860,6 +3862,55 @@ one. The slot is reported `Ready=True reason=SlotNameUnavailable`, recorded in
 `status.lastMissedSlot` and `status.lastSlot.disposition: NameUnavailable`, and
 never re-run under a different name — the same answer an object belonging to
 another schedule gets, for the same reason.
+
+### Manual runs may queue (P10)
+
+`concurrencyPolicy` never bounded manual runs, and nothing else did: on the PoC
+install one operator's hundred accepted "Back up now" requests became a hundred
+runner pods at once, the node hit its 110-pod limit and went `NotReady`. Manual
+runs therefore have a pool of their own, **per namespace**, beside — never
+inside — a schedule's policy:
+
+| Run | Pool | Ceiling (installation policy, §22.2) |
+|---|---|---|
+| manual `Backup` (`spec.trigger.kind: Manual`, or no `trigger` and `triggeredBy` ≠ `schedule`) | manual backups | `runs.maxManualBackupsActivePerNamespace`, default `4` |
+| admitted manual `Restore` (no `spec.authorization`) | manual restores | `runs.maxManualRestoresActivePerNamespace`, default `2` |
+| `Scheduled`, `CatchUp`, `Retry` `Backup` | none — `concurrencyPolicy` and `maxActiveRuns` | unchanged |
+| a `RehearsalSchedule`'s `Restore` | none — one active per schedule | unchanged |
+| topic discovery, preflight, evidence fetch | the check pools (`checks.*`) | unchanged |
+
+**The gate is the last check before anything is created.** A manual run is
+refused, or held on a missing destination or approval, under its own reason
+first; only then does the controller count. It admits the run when the manual
+runs of its kind that already hold a slot in the namespace (a recorded
+`status.execution` or `jobRef`, a `Running`/`Resolving` phase, or any phase this
+build does not know), **plus the older manual runs still waiting**, are below
+the ceiling. Counting the older waiting runs is what makes a burst admit exactly
+the ceiling however many of its runs reconcile at once, and what makes the queue
+FIFO by `metadata.creationTimestamp` (then name). The count reads the watch the
+controller already runs — no API call — and admits nothing until that watch has
+finished its first list.
+
+**A queued run has nothing.** `phase: Queued`, `Admitted=False` reason
+`ConcurrencyLimited` (the word a queued `Preflight` uses), and
+`status.queue.limit` — the ceiling, and nothing that moves, so a run that waits
+an hour is written once. No plan `ConfigMap`, no `status.execution`, no Job and
+therefore no execution claim: a queued run freezes its inputs on the pass that
+admits it, exactly as it would have on its first pass (the frozen-inputs
+contract is unchanged, and a run that WAS frozen is never re-queued — its Job is
+re-created from the frozen inputs). A queued run is looked at again on the 15 s
+requeue, so it starts within one requeue of a slot freeing. The admitting pass
+first clears `status.queue` and turns `Admitted` true, then creates.
+
+**A queued `Restore` keeps its approval, and the approval keeps its clock.** Every
+pass re-runs the admission before the gate, so an approval policy with a maximum
+age can expire a restore while it waits (`AuthorizationExpired`), exactly as any
+other wait would. Keep `runs.maxManualRestoresActivePerNamespace` and restore
+bursts small, or re-confirm.
+
+**Rollback.** An older controller has no pool: `Queued` is a phase it does not
+know, so it reads the run as active and starts it — every queued run at once,
+as before. Nothing is stranded.
 
 ### The policy truth table
 
@@ -4510,6 +4561,11 @@ while another run of it is **active**, and after the schedule has been
 **deleted** — a "Back up now" pressed a second before someone deletes the
 schedule still completes. The labels are hints for selection and are never
 authority. Omit `scheduleRef` entirely for an ad-hoc run against a cluster.
+**Allowed is not the same as running at once** (P10): when the namespace's
+manual-run pool is full the run waits `phase: Queued` with nothing created and
+starts in creation order (§9, *Manual runs may queue*). The same object created
+with `kubectl` queues exactly as the console's does — the pool is the
+controller's, not the API's.
 
 **Idempotence, which is what PLAT-06.2's "Back up now" needs.** Creating a
 `Backup` under a **new name** is a new run. Re-creating the same name while the
@@ -8057,7 +8113,9 @@ renders none is a supported install, not a degraded one.
  "engine": {"allowUnverifiedCustomCa": false},
  "evidence": {"controllerIdentityLocations": []},
  "legacyArchiveAddressing": {"endpoint": "", "region": "", "allowHttp": false,
-                             "virtualHostedStyle": false}}
+                             "virtualHostedStyle": false},
+ "runs": {"maxManualBackupsActivePerNamespace": 4,
+          "maxManualRestoresActivePerNamespace": 2}}
 ```
 
 | Block | What it decides |
@@ -8070,6 +8128,7 @@ renders none is a supported install, not a degraded one.
 | `preflight.defaultTimeoutSeconds` / `retentionSeconds` | The default check budget, and the collector's window. |
 | `engine.allowUnverifiedCustomCa` | Whether a `BackupDestination` may carry a private CA the archive engine cannot verify. |
 | `evidence.controllerIdentityLocations` | Where the controller's own identity may read evidence from. An unlisted location is refused with `ControllerIdentityNotAllowlisted`, so the empty default is the closed direction. |
+| `runs` | P10: how many MANUAL runs one namespace may have holding a runner slot at once — "Back up now" `Backup`s and admitted manual `Restore`s. Over a ceiling a run is `phase: Queued` with `Admitted=False` reason `ConcurrencyLimited` and `status.queue.limit`, with nothing created, and starts in creation order as slots free (§ *Manual runs may queue*). Scheduled, catch-up and retry `Backup`s and a `RehearsalSchedule`'s `Restore`s are never counted or queued. Absent is the defaults, so a document written before the block keeps bounding manual runs. |
 | `legacyArchiveAddressing` | The installation's inline-archive addressing, published read-only so `POST …/destinations:from-legacy` can derive a legacy object's location from configuration it has actually read (§15.5). |
 
 **Who may write it is the access-control statement.** `create`/`update` on a
@@ -8099,7 +8158,7 @@ verifies the statement**: the UI renders "attested by *X* at *T*; not verified
 by Logweir".
 
 **A document the controller refuses fails closed.** It is parsed with unknown
-fields rejected and ten range rules applied. A refusal produces empty
+fields rejected and twelve range rules applied (P10 added the two `runs` floors). A refusal produces empty
 attestations and an empty evidence allowlist, plus one advisory
 `configuration.policy notReady PolicyUnreadable` row on a `Preflight`. **It
 also writes one `WARN` line naming the failing rule** —
@@ -8279,6 +8338,14 @@ is simply ignored by an older image.
 does not know the three check kinds, does not call `delete`, and never reads the
 policy document. The human roles are additive grants on kinds an older image
 ignores.
+
+**The `runs` block (P10) is the one addition an older controller refuses.** A
+controller that predates it parses `policy.json` with unknown fields rejected,
+so a chart that renders `runs` makes an older image's policy **fail closed**
+(no attestations, no evidence allowlist, the `WARN` line above). Roll the
+controller image back together with the chart (`helm rollback`), never alone.
+The other direction is safe: this controller reads a document without the block
+as the defaults.
 
 Documentation is licensed [CC-BY-4.0](LICENSE-docs).
 

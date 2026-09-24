@@ -1276,7 +1276,7 @@ spec:
                 nullable: true
                 type: string
               phase:
-                description: 'Where the run is: `Pending`, `Resolving`, `Running`, `Succeeded`, `Failed`, `Refused`. `Resolving` is dynamic topic selection only — the run''s own discovery Job is deciding which topics it covers, and no runner Job exists yet. A free-form string rather than an enum, because Task 17 owns the phase vocabulary and no agreement test in this plan binds it; every terminal predicate treats an unrecognised phase as active, which is what makes adding one safe.'
+                description: 'Where the run is: `Pending`, `Queued`, `Resolving`, `Running`, `Succeeded`, `Failed`, `Refused`. `Queued` is a manual run waiting for a slot in its namespace''s manual-run pool (`status.queue`); nothing has been created for it. `Resolving` is dynamic topic selection only — the run''s own discovery Job is deciding which topics it covers, and no runner Job exists yet. A free-form string rather than an enum, because Task 17 owns the phase vocabulary and no agreement test in this plan binds it; every terminal predicate treats an unrecognised phase as active, which is what makes adding one safe.'
                 nullable: true
                 type: string
               progress:
@@ -1413,6 +1413,17 @@ spec:
                     type: string
                 required:
                 - stage
+                type: object
+              queue:
+                description: 'Present while a MANUAL run waits for a slot in its namespace''s manual-run pool (`phase: Queued`): the ceiling it is queued behind. No plan, no Job and no execution claim exist for a queued run; it starts in creation order when a slot frees. Absent on every other run, and on anything an older controller wrote.'
+                nullable: true
+                properties:
+                  limit:
+                    description: 'The ceiling this run is queued behind: the installation policy''s `runs.maxManualBackupsActivePerNamespace` (a `Backup`) or `runs.maxManualRestoresActivePerNamespace` (a `Restore`) when the run was queued.'
+                    format: int64
+                    type: integer
+                required:
+                - limit
                 type: object
               records:
                 description: How many records the run archived.
@@ -5097,7 +5108,7 @@ spec:
                 nullable: true
                 type: string
               phase:
-                description: 'Where the run is: `Pending`, `Running`, `Succeeded`, `Failed`, `Refused`. Task 20 owns the phase vocabulary.'
+                description: 'Where the run is: `Pending`, `Queued`, `Running`, `Succeeded`, `Failed`, `Refused`. `Queued` is an admitted manual restore waiting for a slot in its namespace''s manual-restore pool (`status.queue`). Task 20 owns the phase vocabulary.'
                 nullable: true
                 type: string
               progress:
@@ -5234,6 +5245,17 @@ spec:
                     type: string
                 required:
                 - stage
+                type: object
+              queue:
+                description: 'Present while a MANUAL restore — admitted, its approval verified — waits for a slot in its namespace''s manual-restore pool (`phase: Queued`): the ceiling it is queued behind. No plan, no bundle and no Job exist for it yet; it starts in creation order when a slot frees. Absent on a rehearsal''s `Restore` (never queued), on every other run, and on anything an older controller wrote.'
+                nullable: true
+                properties:
+                  limit:
+                    description: 'The ceiling this run is queued behind: the installation policy''s `runs.maxManualBackupsActivePerNamespace` (a `Backup`) or `runs.maxManualRestoresActivePerNamespace` (a `Restore`) when the run was queued.'
+                    format: int64
+                    type: integer
+                required:
+                - limit
                 type: object
               reason:
                 description: |-
@@ -6981,6 +7003,10 @@ data:
         "defaultTimeoutSeconds": 120,
         "retentionSeconds": 3600
       },
+      "runs": {
+        "maxManualBackupsActivePerNamespace": 4,
+        "maxManualRestoresActivePerNamespace": 2
+      },
       "version": 1
     }
 ---
@@ -6988,7 +7014,7 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: logweir-api-config-0ff2b603a0
+  name: logweir-api-config-ec9e734e9a
   namespace: logweir-system
   labels:
     app.kubernetes.io/name: logweir
@@ -7005,6 +7031,9 @@ data:
     uiDirectory: /ui
     localAdmin:
       subject: "admin"
+    rateLimits:
+      manualBackupsPerMinute: 10
+      manualRestoresPerMinute: 5
     namespaces:
       - logweir-system
     kubernetes:
@@ -7652,7 +7681,7 @@ spec:
   template:
     metadata:
       annotations:
-        checksum/logweir-api-config: 0ff2b603a076cee8d6da73029187810790054799e3fce3045776494371a1a7b2
+        checksum/logweir-api-config: ec9e734e9a6878937ce4357056a34bb712971b610a52cf05e29ef4951f493049
       labels:
         app.kubernetes.io/name: logweir
         app.kubernetes.io/instance: logweir
@@ -7700,7 +7729,7 @@ spec:
       volumes:
         - name: config
           configMap:
-            name: logweir-api-config-0ff2b603a0
+            name: logweir-api-config-ec9e734e9a
             items:
               - key: config.yaml
                 path: config.yaml

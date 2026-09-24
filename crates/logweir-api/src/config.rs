@@ -83,6 +83,19 @@ struct ConfigFile {
     /// PEM, from a mounted Secret.
     #[serde(default)]
     confirmation_key_file: Option<PathBuf>,
+    /// P10: the manual-run create ceilings. Absent is the documented
+    /// defaults; either key may be omitted and takes its own default.
+    #[serde(default)]
+    rate_limits: Option<RateLimitsFile>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct RateLimitsFile {
+    #[serde(default)]
+    manual_backups_per_minute: Option<u32>,
+    #[serde(default)]
+    manual_restores_per_minute: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -347,6 +360,10 @@ pub struct Config {
     pub approval_policy_file: Option<PathBuf>,
     /// PLAT-19.2: the console confirmation key file, when one is configured.
     pub confirmation_key_file: Option<PathBuf>,
+    /// P10: the manual-run create ceilings, per actor, per namespace, per
+    /// minute. `rateLimits` in the file; absent is
+    /// [`crate::routes::RunRateLimits::default`].
+    pub run_rate_limits: crate::routes::RunRateLimits,
 }
 
 impl Config {
@@ -504,6 +521,7 @@ impl Config {
         let namespaces = check_namespaces(&file.namespaces)?;
         let kubernetes = kube_source(base, &file.kubernetes)?;
         let kubernetes_principal = kubernetes_principal(&file.kubernetes, &kubernetes)?;
+        let run_rate_limits = run_rate_limits(file.rate_limits.as_ref())?;
 
         let config = match file.mode.as_str() {
             "localAdmin" => Config::local_admin_mode(file, base, namespaces, kubernetes),
@@ -518,6 +536,7 @@ impl Config {
         }?;
         Ok(Config {
             kubernetes_principal,
+            run_rate_limits,
             ..config
         })
     }
@@ -601,6 +620,7 @@ impl Config {
             kubernetes_principal: String::new(),
             approval_policy_file: file.approval_policy_file.map(|p| resolve(base, &p)),
             confirmation_key_file: file.confirmation_key_file.map(|p| resolve(base, &p)),
+            run_rate_limits: crate::routes::RunRateLimits::default(),
         })
     }
 
@@ -819,8 +839,49 @@ impl Config {
             kubernetes_principal: String::new(),
             approval_policy_file: file.approval_policy_file.map(|p| resolve(base, &p)),
             confirmation_key_file: file.confirmation_key_file.map(|p| resolve(base, &p)),
+            run_rate_limits: crate::routes::RunRateLimits::default(),
         })
     }
+}
+
+/// P10: `rateLimits`, each key defaulting on its own and each bounded to
+/// `1..=`[`crate::routes::MAX_RUN_CREATES_PER_MINUTE`]. Zero is refused rather
+/// than read as "unlimited" or "never": neither is a rate limit, and the one
+/// that would silently switch "Back up now" off is the worse surprise.
+fn run_rate_limits(
+    file: Option<&RateLimitsFile>,
+) -> Result<crate::routes::RunRateLimits, ConfigError> {
+    let defaults = crate::routes::RunRateLimits::default();
+    let Some(file) = file else {
+        return Ok(defaults);
+    };
+    let bounded = |value: Option<u32>, default: u32, name: &'static str| {
+        let value = value.unwrap_or(default);
+        if (1..=crate::routes::MAX_RUN_CREATES_PER_MINUTE).contains(&value) {
+            Ok(value)
+        } else {
+            Err(field(
+                name,
+                format!(
+                    "{value} is outside 1..={}; a per-minute ceiling of zero would refuse every \
+                     request, and one above that bounds nothing a person could produce by hand",
+                    crate::routes::MAX_RUN_CREATES_PER_MINUTE
+                ),
+            ))
+        }
+    };
+    Ok(crate::routes::RunRateLimits {
+        manual_backups_per_minute: bounded(
+            file.manual_backups_per_minute,
+            defaults.manual_backups_per_minute,
+            "rateLimits.manualBackupsPerMinute",
+        )?,
+        manual_restores_per_minute: bounded(
+            file.manual_restores_per_minute,
+            defaults.manual_restores_per_minute,
+            "rateLimits.manualRestoresPerMinute",
+        )?,
+    })
 }
 
 fn refuse_shared_only_fields(file: &ConfigFile) -> Result<(), ConfigError> {

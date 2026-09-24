@@ -117,7 +117,7 @@ under its item below.
    release and successive `helm upgrade`s: first the image values (controller,
    runner and console move together), then the `approvalPolicy.*` values.
 
-### The fourteen operator-facing changes
+### The fifteen operator-facing changes
 
 Each item names what changed, what to do, what the claim rests on (its
 verification scope), and how to roll it back. Every one of them was collected
@@ -374,6 +374,47 @@ over the preflight, restore and backup controllers and the console suite.
 `Failed/ArchiveUrlUnreadable` again and reads a legacy restore's evidence in the
 handle's bucket whatever the plan names; a plan the new console rendered still
 verifies under it when the archive's bucket is the handle's.
+
+#### 15. Manual runs may queue; "Back up now" is rate limited (P10)
+
+**Changed.** Nothing used to bound manual runs: on the PoC install one
+operator's hundred accepted `POST …/backups` (all `201` within 2.4 s) became a
+hundred simultaneous runner pods, the node hit its 110-pod limit and went
+`NotReady`, and MinIO answered `503 SlowDown`. Now:
+
+- **The controller bounds manual runs per namespace.** At most
+  `runs.maxManualBackupsActivePerNamespace` (default `4`) manual `Backup`s and
+  `runs.maxManualRestoresActivePerNamespace` (default `2`) admitted manual
+  `Restore`s hold a runner slot at once in one namespace. The rest wait with
+  `phase: Queued`, `Admitted=False / ConcurrencyLimited` and
+  `status.queue.limit`, **with nothing created** — no plan, no Job, no
+  execution claim — and start in creation order as slots free (within one
+  requeue, 15 s). The console shows "Queued (limit N active)". Scheduled,
+  catch-up and retry `Backup`s and a `RehearsalSchedule`'s `Restore`s are
+  neither counted nor queued; `concurrencyPolicy` is unchanged. A queued
+  `Restore` re-checks its approval when it leaves the queue, so an approval
+  policy with a maximum age can expire it while it waits
+  (`AuthorizationExpired`); re-confirm and create a new one.
+- **The console limits how fast one person can start runs:** `10`
+  "Back up now" and `5` manual restores per person, per namespace, per minute
+  (`api.console.rateLimits.*`), then `429 rate_limited` with `Retry-After`. A
+  malformed request does not spend the window; a replayed idempotency key does.
+
+**Do:** nothing is required. An automation that starts more than the limits
+above must pace itself, or read `429` and `Retry-After`; one that expects a
+manual run to be `Running` right after `201` must also accept `Queued`. Raise
+`runs.*` for a namespace whose nodes can carry more runner pods at once.
+**Scope:** pure and route-table rows (`crates/weirkeeper/tests/manual_run_pool.rs`,
+`restore_controller.rs`, `crates/logweir-api/tests/manual_run_limits.rs`) and
+four planted mutants, each killed. [UNVERIFIED — the live row (twenty manual runs at once on the PoC install, at most four runner pods) runs at the next PoC re-proof.]
+**Rollback:** an older controller has no pool; it reads `Queued` as an active
+phase and runs every queued Backup at once, exactly as before. **Roll the
+controller back together with the chart** (`helm rollback`): an older
+controller refuses a `weirkeeper-policy` ConfigMap that carries the new `runs`
+block and fails closed (no attestations, no evidence allowlist), and an older
+console refuses a configuration file that carries `rateLimits` and does not
+start. An older console reading a queued run shows it as `unknown`
+(`UnrecognizedPhase`) until the console is upgraded too.
 
 ### Verification scope: what "verified" means in this release
 

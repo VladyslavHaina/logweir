@@ -372,6 +372,15 @@ trustedProxyService:
 requireTrustedProxy: true
 {{- end }}
 {{- end }}
+{{- /*
+P10: the manual-run create ceilings, per person, per namespace, per minute —
+BOTH modes. `config.rs` parses the block with `deny_unknown_fields` and refuses
+0 and anything above 600 by name, so a console image older than the block
+refuses this file at start (exit 2, loud) rather than ignoring the limit.
+*/}}
+rateLimits:
+  manualBackupsPerMinute: {{ int $c.rateLimits.manualBackupsPerMinute }}
+  manualRestoresPerMinute: {{ int $c.rateLimits.manualRestoresPerMinute }}
 namespaces:
 {{ toYaml $ns | indent 2 }}
 kubernetes:

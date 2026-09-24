@@ -372,8 +372,10 @@ pub enum AuthorizationKind {
 #[derive(Deserialize, Serialize, Clone, Debug, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RestoreStatus {
-    /// Where the run is: `Pending`, `Running`, `Succeeded`, `Failed`,
-    /// `Refused`. Task 20 owns the phase vocabulary.
+    /// Where the run is: `Pending`, `Queued`, `Running`, `Succeeded`,
+    /// `Failed`, `Refused`. `Queued` is an admitted manual restore waiting for
+    /// a slot in its namespace's manual-restore pool (`status.queue`). Task 20
+    /// owns the phase vocabulary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
     /// The runner's exit code (Global Constraint 11). `2` is the most valuable
@@ -496,6 +498,14 @@ pub struct RestoreStatus {
     /// The Job that ran, or is running, this restore.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_ref: Option<LocalRef>,
+    /// Present while a MANUAL restore — admitted, its approval verified —
+    /// waits for a slot in its namespace's manual-restore pool
+    /// (`phase: Queued`): the ceiling it is queued behind. No plan, no bundle
+    /// and no Job exist for it yet; it starts in creation order when a slot
+    /// frees. Absent on a rehearsal's `Restore` (never queued), on every other
+    /// run, and on anything an older controller wrote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue: Option<super::RunQueue>,
     /// What this run is doing right now. Absent on a `Restore` an older
     /// controller reconciled.
     #[serde(default, skip_serializing_if = "Option::is_none")]

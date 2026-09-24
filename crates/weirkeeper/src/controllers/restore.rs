@@ -4433,6 +4433,254 @@ pub fn destination_hold_patch(
     })
 }
 
+/// The `/status` patch a MANUAL `Restore` carries while it waits — admitted,
+/// its approval verified — for a slot in its namespace's manual-restore pool:
+/// P10, [`crate::run_pool`].
+///
+/// `phase: Queued`, the scalar `reason` the `REASON` column reads, and
+/// `Admitted=False` with reason
+/// [`crate::conditions::REASON_CONCURRENCY_LIMITED`] — the same shape as the
+/// two admission holds, carried rather than replaced so no stored condition is
+/// dropped. No plan `ConfigMap`, no approval bundle and no Job exist for a
+/// queued restore. Stable for a given ceiling and approval, so it is written
+/// once.
+///
+/// **THE APPROVAL'S DEADLINE IS ON THE OBJECT (review M2).** Every pass runs
+/// the admission first, and the queue does NOT extend an approval's maximum
+/// age: an authorization that expires while the run waits refuses it
+/// `AuthorizationExpired`, exactly as any other wait would. So the instant is
+/// stated where the operator looks — `status.queue.authorizationExpiresAt` and
+/// the condition's message — instead of arriving as a surprise. `None` for an
+/// approval that states no expiry (a legacy governed v1 approval).
+#[must_use]
+pub fn queued_status_patch(
+    restore: &Restore,
+    limit: u32,
+    authorization_expires_at: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> Value {
+    let namespace = restore.namespace().unwrap_or_default();
+    let deadline = match authorization_expires_at {
+        Some(at) => format!(
+            ". Its approval expires at {}: the queue does not extend an approval's maximum age, \
+             so if this Restore is still queued then it is refused `AuthorizationExpired` and \
+             must be confirmed again",
+            at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        ),
+        None => ". Its approval states no expiry".to_string(),
+    };
+    let conditions = crate::conditions::carry_remaining(
+        restore.status.as_ref().and_then(|s| s.conditions.as_ref()),
+        vec![condition(
+            restore,
+            CONDITION_ADMITTED,
+            "False",
+            crate::conditions::REASON_CONCURRENCY_LIMITED,
+            &format!(
+                "{}{deadline}",
+                crate::run_pool::queued_message(
+                    "Restore",
+                    &namespace,
+                    limit,
+                    crate::run_pool::RESTORE_LIMIT_FIELD,
+                )
+            ),
+            now,
+        )],
+    );
+    let mut queue = json!({ "limit": limit });
+    if let Some(at) = authorization_expires_at {
+        queue["authorizationExpiresAt"] =
+            json!(at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+    }
+    json!({
+        "status": {
+            "phase": crate::conditions::PHASE_QUEUED,
+            "reason": crate::conditions::REASON_CONCURRENCY_LIMITED,
+            "queue": queue,
+            "conditions": conditions,
+        }
+    })
+}
+
+/// THE ADMISSION RECORD for a manual `Restore` — the one write every pass that
+/// admits one makes before its trust read, plan, bundle or Job; the `Backup`
+/// twin (`controllers::backup::admitted_status_patch`) carries the reasoning
+/// (review H1). `Admitted=True` is durable: the run is `Occupying` in every
+/// process and after every restart.
+#[must_use]
+pub fn admitted_status_patch(restore: &Restore, limit: u32, now: DateTime<Utc>) -> Value {
+    let namespace = restore.namespace().unwrap_or_default();
+    let conditions = crate::conditions::upsert_conditions(
+        restore.status.as_ref().and_then(|s| s.conditions.as_ref()),
+        vec![condition(
+            restore,
+            CONDITION_ADMITTED,
+            "True",
+            REASON_ADMITTED,
+            &crate::run_pool::admitted_message(
+                "Restore",
+                &namespace,
+                limit,
+                crate::run_pool::RESTORE_LIMIT_FIELD,
+            ),
+            now,
+        )],
+    );
+    json!({
+        "status": {
+            "queue": Value::Null,
+            "reason": REASON_ADMITTED,
+            "conditions": conditions,
+        }
+    })
+}
+
+/// When an approval stops authorising anything new: the signed
+/// `expires_at` of a v2 authorization document, or `None` for a document that
+/// states none (a legacy governed v1 approval) or that does not parse (the
+/// admission refuses that one by itself).
+#[must_use]
+pub fn authorization_deadline(approval: &Approval) -> Option<DateTime<Utc>> {
+    if !is_authorization_v2(approval) {
+        return None;
+    }
+    RestoreAuthorization::from_bytes(approval.spec.approval_bytes.as_bytes())
+        .ok()
+        .map(|doc| doc.expires_at)
+}
+
+/// The refusal a restore that WAITED in the manual-restore pool gets when its
+/// approval expired meanwhile (review M2): the admission's own sentence, plus
+/// how long the line was and that the queue does not extend an approval.
+#[must_use]
+pub fn expired_while_queued_message(expired: &str, behind: u32, limit: Option<i64>) -> String {
+    let ceiling = limit.map_or_else(String::new, |l| format!(" = {l}"));
+    format!(
+        "{expired}. It expired while this Restore was queued behind {behind} manual restore(s) \
+         for a slot (`{}`{ceiling}): the queue does not extend an approval's maximum age. Confirm \
+         (or approve) again and create a new Restore",
+        crate::run_pool::RESTORE_LIMIT_FIELD
+    )
+}
+
+/// What the manual-restore gate decided for one pass.
+enum RestoreGate {
+    /// Go on over THIS object: the admission record moved its status and its
+    /// `resourceVersion` (seam S7).
+    Admitted(Box<Restore>),
+    /// Stop: queued, or the pool's snapshot is not synced yet. Nothing was
+    /// created.
+    Wait,
+}
+
+/// The manual-restore gate — P10; `controllers::backup`'s `manual_run_gate`
+/// is the twin and carries the reasoning. `approval` is the verified approval
+/// the admission just passed, read for its deadline.
+///
+/// # Errors
+///
+/// [`RestoreError::Api`] for the policy read or a status write.
+async fn manual_restore_gate(
+    restore: &Restore,
+    approval: &Approval,
+    client: &kube::Client,
+    namespace: &str,
+    pool: &crate::run_pool::Pool<'_, Restore>,
+    now: DateTime<Utc>,
+) -> Result<RestoreGate, RestoreError> {
+    let name = restore.name_any();
+    let limit = match pool.limit {
+        Some(limit) => limit,
+        None => {
+            crate::check::policy::load(
+                client,
+                crate::run_pool::policy_ref().as_ref(),
+                crate::run_pool::policy_cache(),
+                now,
+            )
+            .await
+            .map_err(RestoreError::Api)?
+            .policy()
+            .runs
+            .max_manual_restores_active_per_namespace
+        }
+    };
+    let decision = pool.reservations.decide(
+        crate::run_pool::PoolKind::Restore,
+        restore,
+        (pool.peers)(),
+        limit,
+        crate::run_pool::restore_standing,
+        now,
+    );
+    let restores: Api<Restore> = Api::namespaced(client.clone(), namespace);
+    match decision {
+        crate::run_pool::Decision::Unsynced => {
+            debug!(
+                restore = %name,
+                namespace = %namespace,
+                "the Restore watch has not finished its first list, so the manual-restore pool \
+                 cannot be counted; nothing is created for this run until it has"
+            );
+            Ok(RestoreGate::Wait)
+        }
+        crate::run_pool::Decision::Queued {
+            active,
+            ahead,
+            limit,
+        } => {
+            let deadline = authorization_deadline(approval);
+            let patch = queued_status_patch(restore, limit, deadline, now);
+            let first = !crate::conditions::status_unchanged(
+                restore
+                    .status
+                    .as_ref()
+                    .and_then(|s| serde_json::to_value(s).ok())
+                    .as_ref(),
+                &patch,
+            );
+            patch_status_if_changed(&restores, restore, &name, patch).await?;
+            if first {
+                info!(
+                    restore = %name,
+                    namespace = %namespace,
+                    active,
+                    ahead,
+                    limit,
+                    authorization_expires_at = ?deadline,
+                    field = crate::run_pool::RESTORE_LIMIT_FIELD,
+                    "queued this admitted manual Restore: the namespace's manual-restore pool is \
+                     full; nothing is created for it until a slot frees"
+                );
+            } else {
+                debug!(restore = %name, namespace = %namespace, active, ahead, limit, "still queued");
+            }
+            Ok(RestoreGate::Wait)
+        }
+        crate::run_pool::Decision::Admit {
+            active,
+            ahead,
+            limit,
+        } => {
+            let patch = admitted_status_patch(restore, limit, now);
+            let at = patch_status_if_changed(&restores, restore, &name, patch.clone()).await?;
+            info!(
+                restore = %name,
+                namespace = %namespace,
+                active,
+                ahead,
+                limit,
+                "admitted this manual Restore to its namespace's manual-restore pool; it holds a \
+                 slot until it finishes"
+            );
+            Ok(RestoreGate::Admitted(Box::new(with_status_written(
+                restore, &patch, &at,
+            ))))
+        }
+    }
+}
+
 /// A retryable status for failure to materialize controller-pinned execution
 /// inputs. The detailed condition message names the plan, approval bundle, or
 /// raced Job operation that will be retried.
@@ -5694,7 +5942,7 @@ pub async fn reconcile_restore_at(
     policies: &ApprovalPolicySet,
     archive_url: Option<&str>,
 ) -> Result<RestoreOutcome, RestoreError> {
-    match reconcile_restore_inner(
+    reconcile_restore_run(
         restore,
         client,
         scorecard,
@@ -5703,9 +5951,83 @@ pub async fn reconcile_restore_at(
         runner,
         policies,
         archive_url,
+        None,
     )
     .await
-    {
+}
+
+/// [`reconcile_restore_at`], THROUGH THE MANUAL-RESTORE POOL — P10.
+///
+/// The entry point the running controller uses
+/// ([`reconcile_in_context_pooled`]). An admitted MANUAL `Restore` that does
+/// not already hold a slot passes `manual_restore_gate` before its trust read,
+/// plan, bundle and Job; a full pool leaves it `phase: Queued` with nothing
+/// created. A rehearsal's `Restore` never reaches the gate. [`reconcile_restore`]
+/// and its siblings do not consult the pool, for the reason
+/// `controllers::backup::reconcile_backup_pooled` gives.
+///
+/// # Errors
+///
+/// [`RestoreError`] for anything that is not an outcome.
+#[allow(clippy::too_many_arguments)]
+pub async fn reconcile_restore_pooled(
+    restore: &Restore,
+    client: &kube::Client,
+    scorecard: ScorecardOracle<'_>,
+    verify: VerifyOracle<'_>,
+    now: DateTime<Utc>,
+    runner: &job::RunnerImage,
+    policies: &ApprovalPolicySet,
+    archive_url: Option<&str>,
+    pool: &crate::run_pool::Pool<'_, Restore>,
+) -> Result<RestoreOutcome, RestoreError> {
+    reconcile_restore_run(
+        restore,
+        client,
+        scorecard,
+        verify,
+        now,
+        runner,
+        policies,
+        archive_url,
+        Some(pool),
+    )
+    .await
+}
+
+/// The entry points' one body.
+#[allow(clippy::too_many_arguments)]
+async fn reconcile_restore_run(
+    restore: &Restore,
+    client: &kube::Client,
+    scorecard: ScorecardOracle<'_>,
+    verify: VerifyOracle<'_>,
+    now: DateTime<Utc>,
+    runner: &job::RunnerImage,
+    policies: &ApprovalPolicySet,
+    archive_url: Option<&str>,
+    pool: Option<&crate::run_pool::Pool<'_, Restore>>,
+) -> Result<RestoreOutcome, RestoreError> {
+    // WHERE THE OBJECT STANDS WHEN A HOLD OR A REFUSAL IS WRITTEN (review L3):
+    // the pool's admission record is this pass's first write, and seam S7
+    // preconditions every later write on where it left the object — the
+    // `Backup` twin's `written` slot, for the same reason.
+    let mut written: Option<Restore> = None;
+    let result = reconcile_restore_inner(
+        restore,
+        client,
+        scorecard,
+        verify,
+        now,
+        runner,
+        policies,
+        archive_url,
+        pool,
+        &mut written,
+    )
+    .await;
+    let restore = written.as_ref().unwrap_or(restore);
+    match result {
         Err(RestoreError::Materialization(message)) => {
             let name = restore.name_any();
             let namespace = restore
@@ -5791,6 +6113,8 @@ async fn reconcile_restore_inner(
     runner: &job::RunnerImage,
     policies: &ApprovalPolicySet,
     archive_url: Option<&str>,
+    pool: Option<&crate::run_pool::Pool<'_, Restore>>,
+    written: &mut Option<Restore>,
 ) -> Result<RestoreOutcome, RestoreError> {
     let name = restore.name_any();
     let namespace = restore
@@ -5894,6 +6218,40 @@ async fn reconcile_restore_inner(
         );
         match &admission {
             RestoreAdmission::Ok => {}
+            // REVIEW M2: AN APPROVAL THAT EXPIRED WHILE THIS RESTORE WAITED IN
+            // THE MANUAL-RESTORE POOL SAYS SO. The refusal is the admission's
+            // own — the queue does not extend an approval's maximum age — and
+            // the sentence adds how long the line was and why.
+            a @ RestoreAdmission::AuthorizationExpired { .. }
+                if restore.status.as_ref().is_some_and(|s| {
+                    crate::run_pool::was_queued(
+                        s.phase.as_deref(),
+                        s.queue.is_some(),
+                        current_condition(s.conditions.as_ref(), CONDITION_ADMITTED)
+                            .and_then(|c| c.reason.as_deref()),
+                    )
+                }) =>
+            {
+                let behind = pool.map_or(0, |p| {
+                    (p.peers)().map_or(0, |peers| {
+                        p.reservations.behind(
+                            crate::run_pool::PoolKind::Restore,
+                            restore,
+                            &peers,
+                            crate::run_pool::restore_standing,
+                        )
+                    })
+                });
+                let limit = restore
+                    .status
+                    .as_ref()
+                    .and_then(|s| s.queue.as_ref())
+                    .map(|q| q.limit);
+                return Err(RestoreError::Refused(
+                    a.reason(),
+                    expired_while_queued_message(&a.to_string(), behind, limit),
+                ));
+            }
             a if a.is_terminal() => {
                 return Err(RestoreError::Refused(a.reason(), a.to_string()));
             }
@@ -6017,6 +6375,44 @@ async fn reconcile_restore_inner(
                     });
                 }
             };
+
+        // === THE MANUAL-RESTORE POOL (P10), THE LAST CHECK BEFORE ANYTHING IS
+        // CREATED ===
+        //
+        // AFTER the admission (approval, target, destinations), so a restore
+        // that is not approved, or whose destination is missing, holds under
+        // THAT reason and never takes a place in line; BEFORE the trust read,
+        // the plan `ConfigMap`, the approval bundle and the Job. A
+        // rehearsal's `Restore` (`spec.authorization`) is bounded by its own
+        // schedule and never reaches the gate.
+        let released: Box<Restore>;
+        let restore: &Restore = match pool {
+            Some(pool) if crate::run_pool::restore_gated(restore) => {
+                match manual_restore_gate(restore, &approval, client, &namespace, pool, now).await?
+                {
+                    RestoreGate::Admitted(object) => {
+                        released = object;
+                        // A hold or refusal from here on is written over the
+                        // admitted object (review L3).
+                        *written = Some((*released).clone());
+                        &released
+                    }
+                    RestoreGate::Wait => {
+                        return Ok(RestoreOutcome {
+                            job_name,
+                            created: false,
+                            admission: None,
+                            exit_code: None,
+                            terminal_state: None,
+                            keys: RestoreEvidenceKeys::default(),
+                            ttl_patched: false,
+                            requeue: Requeue::After(REQUEUE_SECS),
+                        })
+                    }
+                }
+            }
+            _ => restore,
+        };
 
         let trust = resolve_trust(client, &namespace).await?;
         let matched_key_id = approval
@@ -6682,13 +7078,24 @@ async fn reconcile(
     restore: Arc<Restore>,
     ctx: Arc<Context>,
     approval_policies: Arc<ApprovalPolicySet>,
+    objects: reflector::Store<Restore>,
 ) -> Result<Action, RestoreError> {
-    let outcome = reconcile_in_context(
+    // P10: the manual-restore pool counts from the watch this controller
+    // already runs (`run_pool::store_snapshot`: `None` until it has synced),
+    // with the process's one reservation registry.
+    let peers = move || crate::run_pool::store_snapshot(&objects);
+    let pool = crate::run_pool::Pool {
+        peers: &peers,
+        limit: None,
+        reservations: crate::run_pool::Reservations::global(),
+    };
+    let outcome = reconcile_in_context_pooled(
         &restore,
         &ctx,
         &approval_policies,
         Utc::now(),
         &|name: &str| std::env::var(name),
+        Some(&pool),
     )
     .await?;
     Ok(action_for(&outcome))
@@ -6714,6 +7121,23 @@ pub async fn reconcile_in_context(
     now: DateTime<Utc>,
     env: EnvReader<'_>,
 ) -> Result<RestoreOutcome, RestoreError> {
+    reconcile_in_context_pooled(restore, ctx, approval_policies, now, env, None).await
+}
+
+/// [`reconcile_in_context`], through the manual-restore pool when one is given
+/// — what [`reconcile`] runs (P10).
+///
+/// # Errors
+///
+/// As [`reconcile_restore_at`].
+pub async fn reconcile_in_context_pooled(
+    restore: &Restore,
+    ctx: &Context,
+    approval_policies: &ApprovalPolicySet,
+    now: DateTime<Utc>,
+    env: EnvReader<'_>,
+    pool: Option<&crate::run_pool::Pool<'_, Restore>>,
+) -> Result<RestoreOutcome, RestoreError> {
     let archive = ctx.archive.clone();
     let oracle = move |key: String| -> BoxFuture<'static, Option<ScorecardObservation>> {
         let handle = archive.clone();
@@ -6733,7 +7157,7 @@ pub async fn reconcile_in_context(
     // variable; `Store` exposes no accessor for the URL it was built from.
     let archive_url =
         crate::retention::configured_archive_url(env(crate::retention::ARCHIVE_URL_ENV));
-    reconcile_restore_at(
+    reconcile_restore_run(
         restore,
         &ctx.client,
         &oracle,
@@ -6742,6 +7166,7 @@ pub async fn reconcile_in_context(
         &ctx.runner_image,
         approval_policies,
         archive_url.as_deref(),
+        pool,
     )
     .await
 }
@@ -6819,6 +7244,7 @@ async fn reconcile_with_trust(
     policies: reflector::Store<crate::crds::trust_policy::TrustPolicy>,
     synced: Arc<AtomicBool>,
     approval_policies: Arc<ApprovalPolicySet>,
+    objects: reflector::Store<Restore>,
 ) -> Result<Action, RestoreError> {
     if synced.load(Ordering::Relaxed) {
         let value = serde_json::to_value(&*restore).ok();
@@ -6895,7 +7321,7 @@ async fn reconcile_with_trust(
             }
         }
     }
-    reconcile(restore, ctx, approval_policies).await
+    reconcile(restore, ctx, approval_policies, objects).await
 }
 
 /// Run the `Restore` controller until the process ends.
@@ -6975,6 +7401,8 @@ fn controller_in(
     async move {
         let controller = Controller::new(api, watcher::Config::default());
         let objects = controller.store();
+        // P10: THE SAME STORE, FOR THE MANUAL-RESTORE POOL (`run_pool`).
+        let pool_objects = controller.store();
         controller
             .owns(jobs, watcher::Config::default())
             // THE RE-TRUST TRIGGER. A `TrustPolicy` event maps to the objects
@@ -6991,6 +7419,7 @@ fn controller_in(
                         policies.clone(),
                         Arc::clone(&synced),
                         Arc::clone(&approval_policies),
+                        pool_objects.clone(),
                     )
                 },
                 error_policy,

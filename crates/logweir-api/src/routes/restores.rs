@@ -495,6 +495,11 @@ pub async fn create(
     // Canonical form for the request hash: equivalent RFC 3339 spellings of
     // one instant are one request. `planBytes` is NOT canonicalised.
     request.point_in_time = point_in_time.to_rfc3339_opts(SecondsFormat::AutoSi, true);
+    // P10: THE PER-ACTOR CREATE LIMIT, after every refusal that is about the
+    // request itself (a malformed restore does not spend the window) and
+    // before the object exists. The ceiling on how many restores RUN at once
+    // is the controller's manual-restore pool.
+    super::run_create_rate(&state, &actor, &ns, super::ManualRun::Restore)?;
     let created = create_idempotent(
         &state,
         &actor,

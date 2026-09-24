@@ -1146,6 +1146,211 @@ pub fn destination_hold_patch(
 }
 
 // ---------------------------------------------------------------------------
+// The manual-run pool — P10
+// ---------------------------------------------------------------------------
+
+/// The `/status` patch a MANUAL `Backup` carries while it waits for a slot in
+/// its namespace's manual-run pool — P10, [`crate::run_pool`].
+///
+/// `phase: Queued`, `status.queue.limit`, and one `Admitted=False` condition
+/// whose reason is [`crate::conditions::REASON_CONCURRENCY_LIMITED`] — the
+/// spelling a queued `Preflight` already carries. Nothing else: no plan, no
+/// `status.execution`, no Job exists for a queued run, and nothing here claims
+/// one does. STABLE FOR A GIVEN CEILING (see
+/// [`crate::run_pool::queued_message`]), so a run that stays queued for an
+/// hour is written once, not once per pass.
+///
+/// THE OTHER CONDITIONS ARE CARRIED, as the destination hold carries them: a
+/// merge patch REPLACES the array.
+#[must_use]
+pub fn queued_status_patch(backup: &Backup, limit: u32, now: DateTime<Utc>) -> Value {
+    let namespace = backup.namespace().unwrap_or_default();
+    let existing = backup.status.as_ref().and_then(|s| s.conditions.as_ref());
+    let admitted = condition(
+        backup,
+        crate::conditions::CONDITION_ADMITTED,
+        "False",
+        crate::conditions::REASON_CONCURRENCY_LIMITED,
+        &crate::run_pool::queued_message(
+            "Backup",
+            &namespace,
+            limit,
+            crate::run_pool::BACKUP_LIMIT_FIELD,
+        ),
+        now,
+    );
+    json!({
+        "status": {
+            "phase": crate::conditions::PHASE_QUEUED,
+            "queue": { "limit": limit },
+            "conditions": carry_conditions(existing, vec![admitted]),
+        }
+    })
+}
+
+/// THE ADMISSION RECORD — the ONE write every pass that admits a manual run
+/// makes, before anything is created for it (review H1).
+///
+/// `Admitted=True` is the run's own, durable statement that it holds a slot:
+/// [`crate::run_pool::backup_standing`] reads it as occupying in every process
+/// and after every restart, so a controller that restarts between this write
+/// and the Job counts the run. The in-process reservation covers the moment
+/// before the watch shows this write. `status.queue` is cleared (an explicit
+/// `null`: a merge patch that omitted the key would leave it). `phase` is left
+/// for the writes that follow in the same pass (`Resolving`, `Running`) to
+/// move; `running_status_patch` re-asserts `Admitted=True` with its own message
+/// and, the reason being unchanged, keeps this write's `lastTransitionTime`.
+///
+/// A FAILED WRITE CREATES NOTHING: it is `?`-propagated and every create step
+/// is behind it.
+#[must_use]
+pub fn admitted_status_patch(backup: &Backup, limit: u32, now: DateTime<Utc>) -> Value {
+    let namespace = backup.namespace().unwrap_or_default();
+    let conditions = crate::conditions::upsert_conditions(
+        backup.status.as_ref().and_then(|s| s.conditions.as_ref()),
+        vec![condition(
+            backup,
+            crate::conditions::CONDITION_ADMITTED,
+            "True",
+            crate::conditions::REASON_ADMITTED,
+            &crate::run_pool::admitted_message(
+                "Backup",
+                &namespace,
+                limit,
+                crate::run_pool::BACKUP_LIMIT_FIELD,
+            ),
+            now,
+        )],
+    );
+    json!({
+        "status": {
+            "queue": Value::Null,
+            "conditions": conditions,
+        }
+    })
+}
+
+/// What the manual-run gate decided for one pass.
+enum PoolGate {
+    /// Go on over THIS object: the admission record moved its status and its
+    /// `resourceVersion` (seam S7), and every later write of the pass must
+    /// start from it.
+    Admitted(Box<Backup>),
+    /// Stop here: the run is queued (or the pool's snapshot is not synced
+    /// yet). Nothing was created.
+    Wait,
+}
+
+/// The manual-run gate — P10. Called for a MANUAL run with no frozen inputs
+/// that does not already hold a slot ([`crate::run_pool::backup_gated`]),
+/// AFTER every refusal that can be decided without creating anything and
+/// BEFORE the first object is created for it.
+///
+/// Decide-and-reserve under the pool's one lock
+/// ([`crate::run_pool::Reservations::decide`]), then, on admit, the durable
+/// admission record ([`admitted_status_patch`]); on queue, the queued status.
+///
+/// # Errors
+///
+/// [`BackupError::Api`] for the policy read or a status write.
+async fn manual_run_gate(
+    backup: &Backup,
+    client: &kube::Client,
+    namespace: &str,
+    pool: &crate::run_pool::Pool<'_, Backup>,
+    now: DateTime<Utc>,
+) -> Result<PoolGate, BackupError> {
+    let name = backup.name_any();
+    let limit = match pool.limit {
+        Some(limit) => limit,
+        None => {
+            crate::check::policy::load(
+                client,
+                crate::run_pool::policy_ref().as_ref(),
+                crate::run_pool::policy_cache(),
+                now,
+            )
+            .await
+            .map_err(BackupError::Api)?
+            .policy()
+            .runs
+            .max_manual_backups_active_per_namespace
+        }
+    };
+    let decision = pool.reservations.decide(
+        crate::run_pool::PoolKind::Backup,
+        backup,
+        (pool.peers)(),
+        limit,
+        crate::run_pool::backup_standing,
+        now,
+    );
+    let backups: Api<Backup> = Api::namespaced(client.clone(), namespace);
+    match decision {
+        crate::run_pool::Decision::Unsynced => {
+            debug!(
+                backup = %name,
+                namespace = %namespace,
+                "the Backup watch has not finished its first list, so the manual-run pool cannot \
+                 be counted; nothing is created for this run until it has"
+            );
+            Ok(PoolGate::Wait)
+        }
+        crate::run_pool::Decision::Queued {
+            active,
+            ahead,
+            limit,
+        } => {
+            let patch = queued_status_patch(backup, limit, now);
+            let first = !crate::conditions::status_unchanged(
+                backup
+                    .status
+                    .as_ref()
+                    .and_then(|s| serde_json::to_value(s).ok())
+                    .as_ref(),
+                &patch,
+            );
+            patch_status_if_changed(&backups, backup, &name, patch).await?;
+            if first {
+                info!(
+                    backup = %name,
+                    namespace = %namespace,
+                    active,
+                    ahead,
+                    limit,
+                    field = crate::run_pool::BACKUP_LIMIT_FIELD,
+                    "queued this manual Backup: the namespace's manual-run pool is full; nothing \
+                     is created for it until a slot frees, and it starts in creation order"
+                );
+            } else {
+                debug!(backup = %name, namespace = %namespace, active, ahead, limit, "still queued");
+            }
+            Ok(PoolGate::Wait)
+        }
+        crate::run_pool::Decision::Admit {
+            active,
+            ahead,
+            limit,
+        } => {
+            let patch = admitted_status_patch(backup, limit, now);
+            let at = patch_status_if_changed(&backups, backup, &name, patch.clone()).await?;
+            info!(
+                backup = %name,
+                namespace = %namespace,
+                active,
+                ahead,
+                limit,
+                "admitted this manual Backup to its namespace's manual-run pool; it holds a slot \
+                 until it finishes"
+            );
+            Ok(PoolGate::Admitted(Box::new(with_status_written(
+                backup, &patch, &at,
+            ))))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Evidence observation for destination-backed runs — D2 §3.9, §3.10
 // ---------------------------------------------------------------------------
 
@@ -3906,6 +4111,76 @@ pub async fn reconcile_backup_at(
     runner: &job::RunnerImage,
     archive_url: Option<&str>,
 ) -> Result<BackupOutcome, BackupError> {
+    reconcile_backup_run(
+        backup,
+        client,
+        archive,
+        verify,
+        now,
+        runner,
+        archive_url,
+        None,
+    )
+    .await
+}
+
+/// [`reconcile_backup_at`], THROUGH THE MANUAL-RUN POOL — P10.
+///
+/// This is the entry point the running controller uses
+/// ([`reconcile_in_context_pooled`]): a MANUAL `Backup` with no frozen inputs
+/// that does not already hold a slot passes [`manual_run_gate`] after every
+/// refusal that can be decided without creating anything and before the first
+/// object is created for it, and a full pool leaves it `phase: Queued` with
+/// nothing created. Scheduled, catch-up and retry runs never reach the gate.
+///
+/// WHY [`reconcile_backup`] DOES NOT CONSULT THE POOL. The rows in
+/// `tests/backup_controller.rs` and `tests/verification.rs` that are not about
+/// the pool drive a manual fixture through route tables that name exactly the
+/// calls the pass makes, and the pool's admission record is one more write;
+/// the rows that ARE about the pool call this function with the exact snapshot
+/// and reservation registry they are about.
+/// `the_running_controllers_reconcile_through_the_pool` holds `reconcile` to
+/// this entry point.
+///
+/// # Errors
+///
+/// [`BackupError`] for anything that is not an outcome.
+#[allow(clippy::too_many_arguments)]
+pub async fn reconcile_backup_pooled(
+    backup: &Backup,
+    client: &kube::Client,
+    archive: ArchiveOracle<'_>,
+    verify: VerifyOracle<'_>,
+    now: DateTime<Utc>,
+    runner: &job::RunnerImage,
+    archive_url: Option<&str>,
+    pool: &crate::run_pool::Pool<'_, Backup>,
+) -> Result<BackupOutcome, BackupError> {
+    reconcile_backup_run(
+        backup,
+        client,
+        archive,
+        verify,
+        now,
+        runner,
+        archive_url,
+        Some(pool),
+    )
+    .await
+}
+
+/// The entry points' one body.
+#[allow(clippy::too_many_arguments)]
+async fn reconcile_backup_run(
+    backup: &Backup,
+    client: &kube::Client,
+    archive: ArchiveOracle<'_>,
+    verify: VerifyOracle<'_>,
+    now: DateTime<Utc>,
+    runner: &job::RunnerImage,
+    archive_url: Option<&str>,
+    pool: Option<&crate::run_pool::Pool<'_, Backup>>,
+) -> Result<BackupOutcome, BackupError> {
     // WHERE THE OBJECT STANDS WHEN A REFUSAL IS RAISED. The freeze pass writes
     // the execution record (and `TopicsResolved`) BEFORE the runner Job is
     // created, and the Job create can still refuse (`JobNameConflict`): the
@@ -3922,6 +4197,7 @@ pub async fn reconcile_backup_at(
         now,
         runner,
         archive_url,
+        pool,
         &mut written,
     )
     .await
@@ -3988,6 +4264,7 @@ async fn reconcile_backup_inner(
     now: DateTime<Utc>,
     runner: &job::RunnerImage,
     archive_url: Option<&str>,
+    pool: Option<&crate::run_pool::Pool<'_, Backup>>,
     written: &mut Option<Backup>,
 ) -> Result<BackupOutcome, BackupError> {
     let name = backup.name_any();
@@ -4248,6 +4525,53 @@ async fn reconcile_backup_inner(
                     });
                 }
             },
+        };
+
+        // === THE MANUAL-RUN POOL (P10), THE LAST CHECK BEFORE ANYTHING IS
+        // CREATED ===
+        //
+        // AFTER every refusal decidable without creating anything — the name,
+        // the glob rail, the selection shape, the digest, the identity — and
+        // after the destination hold, so a run that cannot start anyway is
+        // refused or held under its own reason rather than queued. BEFORE the
+        // discovery Job, the plan `ConfigMap`, `status.execution` and the
+        // runner Job: a queued run has none of them, and in particular has
+        // taken no execution claim (the runner takes that, and there is no
+        // runner). The frozen-inputs contract is unchanged — a queued run
+        // freezes on the pass that admits it, exactly as it would have on its
+        // first pass.
+        //
+        // ONLY an unfrozen MANUAL run that does not already hold a slot. A
+        // frozen run was admitted by an earlier pass and must never be
+        // re-queued (its Job may be gone and be re-created from the frozen
+        // inputs); a `Resolving` run's discovery Job is already running. A
+        // scheduled, catch-up or retry run is bounded by its schedule's
+        // `concurrencyPolicy` and never waits behind a browser click.
+        let released: Box<Backup>;
+        let (backup, view) = match pool {
+            Some(pool) if crate::run_pool::backup_gated(backup) => {
+                match manual_run_gate(backup, client, &namespace, pool, now).await? {
+                    PoolGate::Admitted(object) => {
+                        released = object;
+                        // A refusal from here on is written over the admitted
+                        // object, not over the one the watch delivered.
+                        *written = Some((*released).clone());
+                        let view = observed_view(&released, JobObservation::Absent, now);
+                        (&*released, view)
+                    }
+                    PoolGate::Wait => {
+                        return Ok(BackupOutcome {
+                            job_name,
+                            created: false,
+                            exit_code: None,
+                            terminal_state: None,
+                            keys: EvidenceKeys::default(),
+                            ttl_patched: false,
+                        })
+                    }
+                }
+            }
+            _ => (backup, view),
         };
 
         let mut discovery_job: Option<String> = None;
@@ -5027,8 +5351,31 @@ async fn reconcile_backup_inner(
 /// omitted and no run is ever called an `OrphanedScorecard` for want of a
 /// credential. See [`ArchiveOracle`] for why `None` is the only honest value
 /// and why the oracle is async.
-async fn reconcile(backup: Arc<Backup>, ctx: Arc<Context>) -> Result<Action, BackupError> {
-    reconcile_in_context(&backup, &ctx, Utc::now(), &|name: &str| std::env::var(name)).await?;
+async fn reconcile(
+    backup: Arc<Backup>,
+    ctx: Arc<Context>,
+    objects: reflector::Store<Backup>,
+) -> Result<Action, BackupError> {
+    // P10: THE MANUAL-RUN POOL COUNTS FROM THE WATCH THIS CONTROLLER ALREADY
+    // RUNS — the same store the re-trust trigger reads, so a queued run costs
+    // no API call to count, and `store_snapshot` answers `None` until that
+    // watch has finished its first list. The ceiling is the installation
+    // policy's (`limit: None`), and the reservations are the process's one
+    // registry, shared with the `Restore` reconciler and every namespace copy.
+    let peers = move || crate::run_pool::store_snapshot(&objects);
+    let pool = crate::run_pool::Pool {
+        peers: &peers,
+        limit: None,
+        reservations: crate::run_pool::Reservations::global(),
+    };
+    reconcile_in_context_pooled(
+        &backup,
+        &ctx,
+        Utc::now(),
+        &|name: &str| std::env::var(name),
+        Some(&pool),
+    )
+    .await?;
     Ok(Action::requeue(std::time::Duration::from_secs(
         REQUEUE_SECS,
     )))
@@ -5048,6 +5395,22 @@ pub async fn reconcile_in_context(
     now: DateTime<Utc>,
     env: crate::controllers::restore::EnvReader<'_>,
 ) -> Result<BackupOutcome, BackupError> {
+    reconcile_in_context_pooled(backup, ctx, now, env, None).await
+}
+
+/// [`reconcile_in_context`], through the manual-run pool when one is given —
+/// what [`reconcile`] runs (P10).
+///
+/// # Errors
+///
+/// As [`reconcile_backup_at`].
+pub async fn reconcile_in_context_pooled(
+    backup: &Backup,
+    ctx: &Context,
+    now: DateTime<Utc>,
+    env: crate::controllers::restore::EnvReader<'_>,
+    pool: Option<&crate::run_pool::Pool<'_, Backup>>,
+) -> Result<BackupOutcome, BackupError> {
     let archive = ctx.archive.clone();
     let oracle = move |keys: EvidenceKeys| -> BoxFuture<'static, Option<ArchiveObservation>> {
         let handle = archive.clone();
@@ -5066,7 +5429,7 @@ pub async fn reconcile_in_context(
     // `reconcile_backup_at`.
     let archive_url =
         crate::retention::configured_archive_url(env(crate::retention::ARCHIVE_URL_ENV));
-    reconcile_backup_at(
+    reconcile_backup_run(
         backup,
         &ctx.client,
         &oracle,
@@ -5074,6 +5437,7 @@ pub async fn reconcile_in_context(
         now,
         &ctx.runner_image,
         archive_url.as_deref(),
+        pool,
     )
     .await
 }
@@ -5150,6 +5514,7 @@ async fn reconcile_with_trust(
     ctx: Arc<Context>,
     policies: reflector::Store<crate::crds::trust_policy::TrustPolicy>,
     synced: Arc<AtomicBool>,
+    objects: reflector::Store<Backup>,
 ) -> Result<Action, BackupError> {
     if synced.load(Ordering::Relaxed) {
         let value = serde_json::to_value(&*backup).ok();
@@ -5224,7 +5589,7 @@ async fn reconcile_with_trust(
             }
         }
     }
-    reconcile(backup, ctx).await
+    reconcile(backup, ctx, objects).await
 }
 
 /// Run the `Backup` controller until the process ends.
@@ -5304,6 +5669,8 @@ fn controller_in(
     async move {
         let controller = Controller::new(api, watcher::Config::default());
         let objects = controller.store();
+        // P10: THE SAME STORE, FOR THE MANUAL-RUN POOL (`run_pool`).
+        let pool_objects = controller.store();
         controller
             .owns(jobs, watcher::Config::default())
             // THE RE-TRUST TRIGGER. A `TrustPolicy` event maps to the objects
@@ -5314,7 +5681,13 @@ fn controller_in(
             })
             .run(
                 move |object, context| {
-                    reconcile_with_trust(object, context, policies.clone(), Arc::clone(&synced))
+                    reconcile_with_trust(
+                        object,
+                        context,
+                        policies.clone(),
+                        Arc::clone(&synced),
+                        pool_objects.clone(),
+                    )
                 },
                 error_policy,
                 ctx,

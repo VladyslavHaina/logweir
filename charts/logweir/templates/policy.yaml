@@ -24,6 +24,15 @@ the advisory `configuration.policy notReady PolicyUnreadable` row. That is why
 `checks.preflight`: a half-written block would render a document the controller
 refuses, and the refusal is silent unless someone reads a Preflight.
 
+THE `runs` BLOCK (P10) is how many MANUAL runs one namespace may have ACTIVE
+at once — `runs.maxManualBackupsActivePerNamespace` "Back up now" runner Jobs
+and `runs.maxManualRestoresActivePerNamespace` manual restores — before the
+rest wait `phase: Queued` (`weirkeeper::run_pool`). An administrator's
+ceiling, in the administrator's ConfigMap, for the same reason the check
+ceilings are. A controller that predates the block refuses the WHOLE document
+(`deny_unknown_fields`) and fails closed, so the controller image is rolled
+back with the chart (`helm rollback`), never alone.
+
 THE `legacyArchiveAddressing` BLOCK IS THE SAME `archive.s3.*` VALUES
 `deployment.yaml` renders as `AWS_ENDPOINT_URL` / `AWS_REGION` /
 `AWS_ALLOW_HTTP` / `AWS_VIRTUAL_HOSTED_STYLE_REQUEST`, and it exists for D2
@@ -100,6 +109,9 @@ both values.
       "preflight" (dict
         "defaultTimeoutSeconds" (.Values.checks.preflight.defaultTimeoutSeconds | int)
         "retentionSeconds" (.Values.checks.preflight.retentionSeconds | int))
+      "runs" (dict
+        "maxManualBackupsActivePerNamespace" (.Values.runs.maxManualBackupsActivePerNamespace | int)
+        "maxManualRestoresActivePerNamespace" (.Values.runs.maxManualRestoresActivePerNamespace | int))
       "engine" (dict "allowUnverifiedCustomCa" .Values.engine.allowUnverifiedCustomCa)
       "evidence" (dict "controllerIdentityLocations" .Values.evidence.controllerIdentityLocations)
       "legacyArchiveAddressing" $legacy -}}

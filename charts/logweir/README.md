@@ -75,7 +75,7 @@ matches the same
 controller, env, security context and RBAC rules as `logweir.yaml`
 (`chart_lint_default_render_agrees_with_the_install_file`).
 
-## The installation policy (`checks.*`, `engine.*`, `evidence.*`)
+## The installation policy (`checks.*`, `runs.*`, `engine.*`, `evidence.*`)
 
 The chart renders one administrator-owned `ConfigMap`, `weirkeeper-policy`, in
 the release namespace. It is what tunes the check framework —
@@ -99,6 +99,8 @@ reference; this is what the values do.
 | `checks.discovery.visibilityAttestations` | `[]` | the **only** route to `visibility.state: attestedComplete` |
 | `checks.preflight.defaultTimeoutSeconds` | `120` | the default check budget |
 | `checks.preflight.retentionSeconds` | `3600` | a terminal `Preflight` is collected after this |
+| `runs.maxManualBackupsActivePerNamespace` | `4` | P10: manual `Backup` runs ("Back up now") holding a runner slot at once in one namespace. Over it a run is `phase: Queued` with nothing created, and starts in creation order as slots free |
+| `runs.maxManualRestoresActivePerNamespace` | `2` | P10: admitted manual `Restore` runs at once in one namespace; the rest wait `Queued`, approval intact |
 | `engine.allowUnverifiedCustomCa` | `false` | whether a destination may carry a CA the archive engine cannot verify |
 | `evidence.controllerIdentityLocations` | `[]` | where the controller's own identity may read evidence from. An unlisted location is refused |
 
@@ -145,6 +147,24 @@ It applies only on an exact match of all four identifiers, only before
 `expiresAt`, and only to a listing that was not truncated. **Logweir never
 verifies the statement** — the UI renders "attested by *X* at *T*; not verified
 by Logweir".
+
+**`runs.*` bounds MANUAL runs only (P10).** Before it, nothing bounded "Back up
+now": one operator's hundred accepted requests became a hundred runner pods on
+one node, which hit its 110-pod limit and went `NotReady`. Scheduled, catch-up
+and retry `Backup`s keep their own `concurrencyPolicy`/`maxActiveRuns` and are
+neither counted nor queued, and a `RehearsalSchedule`'s `Restore`s likewise. A
+queued run has no plan, no Job and no execution claim; it is
+`Admitted=False/ConcurrencyLimited` with `status.queue.limit`, and the console
+shows "Queued (limit N active)". A queued `Restore` still re-checks its
+approval when it leaves the queue, so an authorization with a maximum age can
+expire while it waits (`AuthorizationExpired`). **Upgrade and rollback:** a
+controller that predates the block refuses the whole `policy.json`
+(`deny_unknown_fields`) and fails closed, so roll the controller image back
+together with the chart (`helm rollback`), never on its own; a newer controller
+reading an older document without the block uses the defaults above.
+`api.console.rateLimits` is the console's half: how many runs one person may
+START per namespace per minute (`10` backups, `5` restores; then `429` with
+`Retry-After`).
 
 `legacyArchiveAddressing` is not a value of its own: it is rendered from
 `archive.s3.*`, the same values the Deployment's `AWS_*` env comes from and
@@ -624,6 +644,21 @@ starts NotReady — the honest failure, and not a reason to widen the rule.
 And Docker Desktop commonly has **no enforcing CNI**, so a local install proves
 these objects are well-formed and nothing whatever about deny behaviour. D0 says
 so by name. Production support needs the chosen CNI's own evidence.
+
+### `api.console.rateLimits` — how fast one person can start runs (P10)
+
+| value | default | what it decides |
+|---|---|---|
+| `api.console.rateLimits.manualBackupsPerMinute` | `10` | `POST …/backups` ("Back up now") per person, per namespace, per minute; then `429 rate_limited` with `Retry-After` |
+| `api.console.rateLimits.manualRestoresPerMinute` | `5` | `POST …/restores`, the same way |
+
+Keyed by the stable `issuer#subject` id, so two people are two windows and one
+person in two namespaces is two windows. The window is per console **process**:
+`replicas: 2` permits twice the rate. It bounds how fast runs are QUEUED; how
+many RUN at once is the controller's `runs.*` pool, which holds whatever this
+lets through. `logweir-api` refuses `0` and anything above `600` at start. A
+console image that predates the key refuses the whole configuration file at
+start (exit 2), so roll the console image back with the chart.
 
 ### Upgrade, rollback, and what an existing installation sees
 

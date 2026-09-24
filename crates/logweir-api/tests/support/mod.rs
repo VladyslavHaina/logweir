@@ -1143,6 +1143,9 @@ pub struct Options {
     /// PLAT-19.2: the approval policies and the console key. Default: none —
     /// every namespace on `legacy-governed-v1`.
     pub approval: Arc<logweir_api::approval::ApprovalSettings>,
+    /// P10: the manual-run create ceilings. Default: the documented ten and
+    /// five per actor, per namespace, per minute.
+    pub run_rate_limits: logweir_api::routes::RunRateLimits,
 }
 
 impl Default for Options {
@@ -1163,6 +1166,7 @@ impl Default for Options {
             shared: None,
             kubernetes_principal: KUBERNETES_PRINCIPAL.to_string(),
             approval: Arc::default(),
+            run_rate_limits: logweir_api::routes::RunRateLimits::default(),
         }
     }
 }
@@ -1359,6 +1363,7 @@ pub fn app_state(fake: &FakeKube, options: Options, clock: &Arc<TestClock>) -> A
         shared: options.shared.clone(),
         kubernetes_principal: options.kubernetes_principal.clone(),
         approval: options.approval.clone(),
+        run_rate_limits: options.run_rate_limits,
     })
 }
 
@@ -1885,10 +1890,30 @@ impl SharedApp {
         groups: &[&str],
         lifetime: i64,
     ) -> String {
+        self.session_cookie_named(
+            session_id,
+            subject,
+            &format!("{subject} display"),
+            groups,
+            lifetime,
+        )
+    }
+
+    /// A session for `subject` whose DISPLAY claim is `display_name` — so a
+    /// row can give two different subjects the same display name (P10: the
+    /// run limiter must key on the stable id, never on the display claim).
+    pub fn session_cookie_named(
+        &self,
+        session_id: String,
+        subject: &str,
+        display_name: &str,
+        groups: &[&str],
+        lifetime: i64,
+    ) -> String {
         let identity = logweir_api::auth::oidc::Identity {
             issuer: ISSUER.to_string(),
             subject: subject.to_string(),
-            display_name: format!("{subject} display"),
+            display_name: display_name.to_string(),
             groups: groups.iter().map(|g| (*g).to_string()).collect(),
             auth_time: self.app.clock.now(),
         };

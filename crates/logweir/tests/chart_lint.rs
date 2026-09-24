@@ -4117,6 +4117,8 @@ fn chart_lint_the_policy_config_map_is_the_values_file_and_the_deployment_points
             "engine".to_string(),
             "evidence".to_string(),
             "legacyArchiveAddressing".to_string(),
+            // P10: the manual-run pool ceilings.
+            "runs".to_string(),
         ]),
         "policy.json's top-level keys are `weirkeeper::check::policy::Policy`'s field set, \
          exactly: it is parsed with deny_unknown_fields"
@@ -4204,6 +4206,14 @@ fn chart_lint_the_policy_config_map_is_the_values_file_and_the_deployment_points
         (
             "preflight.retentionSeconds",
             "checks.preflight.retentionSeconds",
+        ),
+        (
+            "runs.maxManualBackupsActivePerNamespace",
+            "runs.maxManualBackupsActivePerNamespace",
+        ),
+        (
+            "runs.maxManualRestoresActivePerNamespace",
+            "runs.maxManualRestoresActivePerNamespace",
         ),
     ] {
         let mut j = &policy;
@@ -5093,6 +5103,9 @@ fn chart_lint_values_yaml_is_short_and_shows_every_option() {
         "checks.discovery.visibilityAttestations",
         "checks.preflight.defaultTimeoutSeconds",
         "checks.preflight.retentionSeconds",
+        // P10 — the manual-run pool, in the same ConfigMap.
+        "runs.maxManualBackupsActivePerNamespace",
+        "runs.maxManualRestoresActivePerNamespace",
         "engine.allowUnverifiedCustomCa",
         "evidence.controllerIdentityLocations",
         // D2 §7.3 — the console credential admission policy.
@@ -5119,6 +5132,9 @@ fn chart_lint_values_yaml_is_short_and_shows_every_option() {
         "api.console.keyVersion",
         "api.console.publicBaseUrl",
         "api.console.sessionMaxAgeSeconds",
+        // P10 — the per-person manual-run create ceilings, both modes.
+        "api.console.rateLimits.manualBackupsPerMinute",
+        "api.console.rateLimits.manualRestoresPerMinute",
         "api.console.trustedProxyCidrs",
         "api.console.trustedProxyService.namespace",
         "api.console.trustedProxyService.name",
@@ -5184,6 +5200,9 @@ fn chart_lint_values_yaml_is_short_and_shows_every_option() {
         ("checks.discovery.hardMaxTopics", 50_000),
         ("checks.preflight.defaultTimeoutSeconds", 120),
         ("checks.preflight.retentionSeconds", 3_600),
+        // P10: `RunsPolicy::default()`'s numbers.
+        ("runs.maxManualBackupsActivePerNamespace", 4),
+        ("runs.maxManualRestoresActivePerNamespace", 2),
     ] {
         let mut node = &values;
         for segment in path.split('.') {

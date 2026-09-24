@@ -654,7 +654,7 @@ Shipped as `config/samples/backup-manual.yaml` (the CLI path is `kubectl --conte
 | Schedule suspended | Allowed; future scheduled runs stay suspended; response and UI say so |
 | Schedule `Ready=False` for cadence/tz reasons | Allowed (run policy valid) |
 | Run policy invalid (empty selection, glob, bad archive URL) | `422`; legacy direct-CR path → controller terminal refusal |
-| Scheduled run active (`Forbid` or `Allow`) | Allowed; not counted and not blocked; UI shows a non-blocking notice |
+| Scheduled run active (`Forbid` or `Allow`) | Allowed; not counted and not blocked; UI shows a non-blocking notice. (Amendment P10, §15: manual runs have their own per-namespace pool and may queue; scheduled runs are never in it.) |
 | Schedule deleted after request, before freeze | Runs (manual runs do not require the schedule, §3.1 rule 2) |
 | Schedule edited after request | Runs the copied generation |
 
@@ -896,6 +896,55 @@ Notation: `get BS` = `kubectl --context docker-desktop -n $NS get backupschedule
 6. **Retention reports** count failed partial sets and retry sets as sets; PLAT-16.1 should classify by receipts.
 7. **tz database updates** ship only with releases.
 8. Not decided here: `TopicDiscovery` kind, readiness resource, destinations, catalog format, signed selection/origin receipt block, automatic pruning, `sourceRef` rebinding after a `KafkaCluster` is deleted and recreated under the same name (runs record `clusterUid` in frozen inputs; PLAT-07.2 should surface identity changes).
+
+---
+
+## 15. Amendment P10 (2026-09-24): manual runs are bounded per namespace
+
+**Defect.** §8.3 keeps manual runs outside `concurrencyPolicy` ("not counted and
+not blocked"), and nothing else bounded them. On the PoC install one operator's
+hundred accepted `POST …/backups` (all `201` in 2.4–12.5 s) became a hundred
+simultaneous runner pods: docker-desktop hit its 110-pod limit, the node went
+`NotReady`, MinIO answered `503 SlowDown`
+(`/tmp/logweir-roadmap-run/claude/poc-install.result.md`, 2026-09-24T16:08:53Z).
+
+**Decision.** §8.3's row stands — a manual run neither occupies a `Forbid` slot
+nor is blocked by one, and a scheduled run is never counted against or queued by
+manual runs — and manual runs get a pool **of their own**, per namespace, in the
+installation policy D2 §4.4 already owns (`runs` block beside `checks`):
+
+| | Manual `Backup` | Manual `Restore` (no `spec.authorization`) |
+|---|---|---|
+| ceiling | `runs.maxManualBackupsActivePerNamespace`, default 4 | `runs.maxManualRestoresActivePerNamespace`, default 2 |
+| gate position | after §3.1's refusals and the destination hold, before discovery, the freeze and the Job | after the admission (approval, target, destinations), before the trust read, plan, bundle and Job |
+| queued state | `phase: Queued`, `Admitted=False/ConcurrencyLimited`, `status.queue.limit` | the same, plus the scalar `reason` |
+| release | one status write (`queue: null`, `Admitted=True`), then creation | the same |
+
+- **FIFO, and bounded under a burst.** A candidate is admitted when the manual
+  runs holding a slot (recorded `status.execution`/`jobRef`, `Running`,
+  `Resolving`, or any unknown phase) plus the OLDER manual runs still waiting
+  (no phase, `Queued`) are below the ceiling, ordered by `creationTimestamp`
+  then name. `Pending` (a destination or approval hold) neither holds a slot
+  nor a place in line. The count reads the Backup/Restore watch the controller
+  already runs, and admits nothing until it has synced.
+- **The frozen-inputs contract (§3.3) and the execution claim are unchanged.**
+  A queued run has no plan, no `status.execution`, no Job and so no claim; it
+  freezes on the admitting pass. A frozen run is never re-queued.
+- **API (D0's `rate_limited`).** `POST …/backups` and `POST …/restores` are
+  limited per `(actor, namespace, route)` like discoveries and preflights:
+  10 and 5 per minute by default (`rateLimits.*`), `429` with `Retry-After`.
+  §8.2's response table gains that row; the rest of §8.2 is unchanged.
+- **Console (§8.5).** A queued run renders "Queued (limit N active)" from
+  `status.queue.limit`; an Accepted banner no longer implies a running Job.
+- **Rollback.** An older controller has no pool and runs a `Queued` object as
+  active; it refuses a policy document that carries `runs` (fail closed), so the
+  controller is rolled back with the chart.
+
+Implementation: `crates/weirkeeper/src/run_pool.rs`, the two gates in
+`controllers/{backup,restore}.rs`, `routes::run_create_rate` in `logweir-api`.
+Rows: `crates/weirkeeper/tests/manual_run_pool.rs`,
+`crates/weirkeeper/tests/restore_controller.rs` (P10 section),
+`crates/logweir-api/tests/manual_run_limits.rs`.
 
 ---
 

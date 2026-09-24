@@ -260,6 +260,37 @@ fn the_schema_bounds_are_the_parsers_own_rules() {
             "`checks.discovery.{field}` must be bounded at >= 1"
         );
     }
+    // P10: the manual-run pool ceilings — `validate()` refuses a zero, so the
+    // schema must, and both are required (a half block is a refused document).
+    let runs = &schema["properties"]["runs"];
+    for field in [
+        "maxManualBackupsActivePerNamespace",
+        "maxManualRestoresActivePerNamespace",
+    ] {
+        assert_eq!(
+            runs["properties"][field]["minimum"].as_u64(),
+            Some(1),
+            "`runs.{field}` must be bounded at >= 1, as `Policy::validate` bounds it"
+        );
+        assert!(
+            runs["required"]
+                .as_array()
+                .is_some_and(|r| r.iter().any(|f| f == field)),
+            "`runs.{field}` is required: `RunsPolicy` has no per-field default"
+        );
+        let mut zero: serde_json::Value = serde_json::json!({
+            "version": 1,
+            "runs": {
+                "maxManualBackupsActivePerNamespace": 4,
+                "maxManualRestoresActivePerNamespace": 2
+            }
+        });
+        zero["runs"][field] = serde_json::json!(0);
+        assert!(
+            policy::parse(zero.to_string().as_bytes()).is_err(),
+            "`runs.{field}: 0` is refused by the parser, as the schema refuses it"
+        );
+    }
 }
 
 /// **A document at every schema extreme is a document the parser accepts.**
@@ -301,7 +332,11 @@ fn the_extremes_the_schema_admits_are_documents_the_parser_accepts() {
             "engine": {"allowUnverifiedCustomCa": false},
             "evidence": {"controllerIdentityLocations": []},
             "legacyArchiveAddressing": {"endpoint": "", "region": "",
-                                        "allowHttp": false, "virtualHostedStyle": false}
+                                        "allowHttp": false, "virtualHostedStyle": false},
+            "runs": {
+                "maxManualBackupsActivePerNamespace": n(1, 1_000_000),
+                "maxManualRestoresActivePerNamespace": n(1, 1_000_000)
+            }
         })
     };
     for maxima in [false, true] {
