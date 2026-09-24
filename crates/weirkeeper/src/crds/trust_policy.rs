@@ -20,7 +20,8 @@
 //!   identical public material (one per-key rule);
 //! - `notAfter` may only move earlier;
 //! - `state` moves `Active → Retired`, `Active|Retired → Revoked`, nowhere else;
-//! - `revokedAt` and `revocationEffectiveFrom` are write-once.
+//! - `revokedAt` and `revocationEffectiveFrom` are write-once;
+//! - a `KeyCompromise` revocation stays a compromise (G9).
 //!
 //! **Public material cannot be edited away**, because old archives still need
 //! it: a receipt signed in March must still verify in December, and a policy
@@ -128,6 +129,28 @@ pub const G4_REVOCATION_IS_WRITE_ONCE_RULE: &str = "(!has(oldSelf.revokedAt) || 
 pub const G4_REVOCATION_IS_WRITE_ONCE_MESSAGE: &str =
     "revokedAt and revocationEffectiveFrom are immutable once written";
 
+/// G9 — a `KeyCompromise` revocation stays a compromise. Per item, like G7.
+///
+/// # The edit G3 and G4 left open (`TRUSTPOLICY-DELETE-DROPS-REVOCATION`)
+///
+/// G3 keeps a revoked key revoked and G4 keeps its instants, but
+/// `revocationReason` was free: editing `KeyCompromise` to `Superseded` in
+/// place turns D3 §7.4's compromise row ("never green", the document's own
+/// claim not accepted) into a retirement at `revocationEffectiveFrom`, and
+/// every document the key signed before that instant re-verifies
+/// `Valid`/`Historical` — the same re-trust as deleting the policy, in one
+/// `kubectl apply`. So once a REVOKED key's reason is `KeyCompromise` it stays
+/// so. The other direction stays open on purpose: a key revoked as
+/// `Superseded` whose private half later turns out to be exposed must be
+/// escalatable.
+///
+/// Guarded on `oldSelf.state == 'Revoked'` because the reason is read only
+/// for a revoked key; a `KeyCompromise` written beside `Active` records
+/// nothing and fixes nothing either way.
+pub const G9_COMPROMISE_IS_STICKY_RULE: &str = "oldSelf.state != 'Revoked' || !has(oldSelf.revocationReason) || oldSelf.revocationReason != 'KeyCompromise' || (has(self.revocationReason) && self.revocationReason == 'KeyCompromise')";
+/// G9's message.
+pub const G9_COMPROMISE_IS_STICKY_MESSAGE: &str = "a key revoked for KeyCompromise stays revoked for KeyCompromise: changing the reason would re-trust every document it signed before revocationEffectiveFrom";
+
 /// G5 — a `Revoked` key carries both revocation instants; a `Retired` one
 /// carries `retiredAt`.
 pub const G5_LIFECYCLE_FIELDS_RULE: &str = "(self.state != 'Revoked' || (has(self.revokedAt) && has(self.revocationEffectiveFrom))) && (self.state != 'Retired' || has(self.retiredAt))";
@@ -209,7 +232,7 @@ pub const NESTED_RULES: [(&[&str], &str, &str); 3] = [
 
 /// The TRANSITION rules attached to one key entry, which the API server
 /// correlates by `keyId` because the list is an associative list.
-pub const KEY_TRANSITION_RULES: [(&[&str], &str, &str); 4] = [
+pub const KEY_TRANSITION_RULES: [(&[&str], &str, &str); 5] = [
     (
         &["keys", "[]"],
         G7_KEY_MATERIAL_IS_IMMUTABLE_RULE,
@@ -229,6 +252,11 @@ pub const KEY_TRANSITION_RULES: [(&[&str], &str, &str); 4] = [
         &["keys", "[]"],
         G4_REVOCATION_IS_WRITE_ONCE_RULE,
         G4_REVOCATION_IS_WRITE_ONCE_MESSAGE,
+    ),
+    (
+        &["keys", "[]"],
+        G9_COMPROMISE_IS_STICKY_RULE,
+        G9_COMPROMISE_IS_STICKY_MESSAGE,
     ),
 ];
 
@@ -365,7 +393,9 @@ pub struct TrustedKey {
     /// When it was revoked. Write-once (G4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revoked_at: Option<Time>,
-    /// Why. Absent is read as `Unspecified`.
+    /// Why. Absent is read as `Unspecified`. Once a revoked key's reason is
+    /// `KeyCompromise` it stays so (G9); a supersession may still be escalated
+    /// to a compromise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revocation_reason: Option<RevocationReason>,
     /// The instant from which the revocation applies to stored evidence.

@@ -7267,7 +7267,9 @@ spec:
                       nullable: true
                       type: string
                     revocationReason:
-                      description: Why. Absent is read as `Unspecified`.
+                      description: Why. Absent is read as `Unspecified`. Once a revoked
+                        key's reason is `KeyCompromise` it stays so (G9); a supersession
+                        may still be escalated to a compromise.
                       enum:
                       - KeyCompromise
                       - Superseded
@@ -7353,6 +7355,12 @@ spec:
                       == oldSelf.revokedAt)) && (!has(oldSelf.revocationEffectiveFrom)
                       || (has(self.revocationEffectiveFrom) && self.revocationEffectiveFrom
                       == oldSelf.revocationEffectiveFrom))
+                  - message: 'a key revoked for KeyCompromise stays revoked for KeyCompromise:
+                      changing the reason would re-trust every document it signed
+                      before revocationEffectiveFrom'
+                    rule: oldSelf.state != 'Revoked' || !has(oldSelf.revocationReason)
+                      || oldSelf.revocationReason != 'KeyCompromise' || (has(self.revocationReason)
+                      && self.revocationReason == 'KeyCompromise')
                 maxItems: 64
                 type: array
                 x-kubernetes-list-map-keys:
@@ -8022,6 +8030,7 @@ rules:
   verbs:
   - list
   - watch
+  - patch
 - apiGroups:
   - logweir.dev
   resources:

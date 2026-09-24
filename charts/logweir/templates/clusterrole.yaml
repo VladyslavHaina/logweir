@@ -100,9 +100,11 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["create", "get"]
+  # `patch` on the object is the compromise-revocation finalizer and nothing
+  # else (TRUSTPOLICY-DELETE-DROPS-REVOCATION). See `config/rbac/role.yaml`.
   - apiGroups: ["logweir.dev"]
     resources: ["trustpolicies"]
-    verbs: ["list", "watch"]
+    verbs: ["list", "watch", "patch"]
   - apiGroups: ["logweir.dev"]
     resources: ["trustpolicies/status"]
     verbs: ["patch"]

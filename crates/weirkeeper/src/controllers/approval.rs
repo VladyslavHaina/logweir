@@ -1384,12 +1384,25 @@ fn signing_refusal(
             // `revocationReason` values (`KeyCompromise`, `Superseded`,
             // `Unspecified`) — the same string an operator reads off the
             // policy they would go and edit.
-            reason: format!(
-                "{:?}",
-                key.map_or(logweir_core::trust::RevocationReason::Unspecified, |k| k
-                    .trust
-                    .reason(),)
-            ),
+            //
+            // …AND THE OBJECT THAT RECORDS IT, when that is not the resolved
+            // trust itself (TRUSTPOLICY-DELETE-DROPS-REVOCATION): a KeyCompromise
+            // revocation on any TrustPolicy applies to every namespace, and
+            // "the resolved trust policy records it" would send an operator to
+            // a `legacy-roster-v1` that cannot express a revocation at all.
+            reason: match key.filter(|k| !k.compromise_inherited_from.is_empty()) {
+                Some(k) => format!(
+                    "{:?}, recorded by TrustPolicy/{}",
+                    k.trust.reason(),
+                    k.compromise_inherited_from.join(", TrustPolicy/")
+                ),
+                None => format!(
+                    "{:?}",
+                    key.map_or(logweir_core::trust::RevocationReason::Unspecified, |k| k
+                        .trust
+                        .reason(),)
+                ),
+            },
             effective_from: key
                 .and_then(|k| k.trust.revocation_effective_from.or(k.trust.revoked_at))
                 .map(|t| t.to_rfc3339()),

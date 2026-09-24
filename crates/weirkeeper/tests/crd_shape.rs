@@ -1363,6 +1363,12 @@ const NAMED_RULES: &[(&str, &str, &str)] = &[
         weirkeeper::crds::trust_policy::G4_REVOCATION_IS_WRITE_ONCE_RULE,
         weirkeeper::crds::trust_policy::G4_REVOCATION_IS_WRITE_ONCE_MESSAGE,
     ),
+    // TRUSTPOLICY-DELETE-DROPS-REVOCATION: a compromise stays a compromise.
+    (
+        "trustpolicies.yaml",
+        weirkeeper::crds::trust_policy::G9_COMPROMISE_IS_STICKY_RULE,
+        weirkeeper::crds::trust_policy::G9_COMPROMISE_IS_STICKY_MESSAGE,
+    ),
     (
         "trustpolicies.yaml",
         weirkeeper::crds::trust_policy::G5_LIFECYCLE_FIELDS_RULE,
@@ -3571,6 +3577,74 @@ fn a_trust_policy_key_is_append_only_and_its_state_is_one_way() {
         tp::G4_REVOCATION_IS_WRITE_ONCE_RULE,
         &revoked,
         &retired,
+        true,
+    );
+
+    // ---- G9: a compromise stays a compromise (TRUSTPOLICY-DELETE-DROPS-
+    // REVOCATION). `revoked` above is `KeyCompromise`.
+    let downgraded = entry(
+        "aa",
+        "PEM-A",
+        "Revoked",
+        "2027-01-01T00:00:00Z",
+        "retiredAt: '2026-05-01T00:00:00Z'\nrevokedAt: '2026-06-01T00:00:00Z'\n\
+         revocationEffectiveFrom: '2026-06-01T00:00:00Z'\nrevocationReason: Superseded\n",
+    );
+    let reason_dropped = entry(
+        "aa",
+        "PEM-A",
+        "Revoked",
+        "2027-01-01T00:00:00Z",
+        "retiredAt: '2026-05-01T00:00:00Z'\nrevokedAt: '2026-06-01T00:00:00Z'\n\
+         revocationEffectiveFrom: '2026-06-01T00:00:00Z'\n",
+    );
+    case(
+        "KeyCompromise -> Superseded: every document the key signed before the instant would \
+         re-verify Historical",
+        tp::G9_COMPROMISE_IS_STICKY_RULE,
+        &downgraded,
+        &revoked,
+        false,
+    );
+    case(
+        "KeyCompromise -> absent (read as Unspecified, a supersession)",
+        tp::G9_COMPROMISE_IS_STICKY_RULE,
+        &reason_dropped,
+        &revoked,
+        false,
+    );
+    case(
+        "KeyCompromise unchanged",
+        tp::G9_COMPROMISE_IS_STICKY_RULE,
+        &revoked,
+        &revoked,
+        true,
+    );
+    case(
+        "Superseded -> KeyCompromise: an exposure found later must be escalatable",
+        tp::G9_COMPROMISE_IS_STICKY_RULE,
+        &revoked,
+        &downgraded,
+        true,
+    );
+    case(
+        "a key never revoked may be revoked for compromise",
+        tp::G9_COMPROMISE_IS_STICKY_RULE,
+        &revoked,
+        &retired,
+        true,
+    );
+    case(
+        "a KeyCompromise reason beside Active records nothing and binds nothing",
+        tp::G9_COMPROMISE_IS_STICKY_RULE,
+        &retired,
+        &entry(
+            "aa",
+            "PEM-A",
+            "Active",
+            "2027-01-01T00:00:00Z",
+            "revocationReason: KeyCompromise\n",
+        ),
         true,
     );
 

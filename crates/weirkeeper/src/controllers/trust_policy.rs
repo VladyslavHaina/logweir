@@ -44,6 +44,35 @@
 //! unchanged (D3 §7.5), and a condition is the one status write that says "you
 //! have moved on" without taking anything away.
 //!
+//! # The one write that is not status: a finalizer on a compromise record
+//!
+//! Defect `TRUSTPOLICY-DELETE-DROPS-REVOCATION`. A `KeyCompromise` revocation
+//! lives on the policy that records it, and [`crate::trust::resolve_in`]
+//! applies it to every namespace — but only while some object still records
+//! it. Deleting the only such policy used to hand every namespace it had
+//! governed back to `legacy-roster-v1`, whose roster still listed the key as
+//! ordinary, and every document the compromised key signed re-verified green.
+//!
+//! So a policy that records a compromise carries [`COMPROMISE_FINALIZER`],
+//! placed by this reconciler, and a deletion is RELEASED only when
+//! [`crate::trust::deletion_guard`] says the record may go: another live
+//! policy records the same revocation, or nothing in the cluster — no other
+//! policy, not the roster — lists the key as trusted any more. Until then the
+//! object stays, carrying its `deletionTimestamp`, and is still resolved
+//! through exactly as before: an older controller reading it after a rollback
+//! honours it too, because a finalizer is data on the object and not
+//! behaviour in this build. `CompromiseGuard` on its status says which key
+//! holds it and what would release it.
+//!
+//! **What this costs.** The finalizer is `metadata`, and Kubernetes RBAC
+//! cannot grant a write narrower than the object, so this controller now holds
+//! `patch` on `trustpolicies` beside `patch` on `trustpolicies/status`. The
+//! ONE call site is [`reconcile_finalizer`], a merge patch whose body is
+//! `metadata.{name, resourceVersion, finalizers}` and nothing else
+//! (`tests/trust_revocation_durable.rs` pins the body), and every spec edit the
+//! verb could make is monotonic under G1–G9 and attributed to this field
+//! manager in `managedFields`. It never edits a key's lifecycle.
+//!
 //! # No private key material, here or anywhere
 //!
 //! `spkiPem` is a public key. This reconciler parses public keys and compares
@@ -70,9 +99,12 @@ use crate::conditions::{current_condition, merge_condition, status_unchanged};
 use crate::crds::trust_policy::{
     KeyVerdict, NamespaceConflict, TrustPolicy, TrustPolicyStatus, TrustedKey,
 };
-use crate::crds::trust_roster::TrustRoster;
+use crate::crds::trust_roster::{TrustRoster, TrustRosterSpec};
 use crate::crds::Condition;
-use crate::trust::{algorithm_agrees, bound_namespaces, conflicts, ResolvedKey, DEFAULT_SENTINEL};
+use crate::trust::{
+    algorithm_agrees, bound_namespaces, conflicts, deletion_guard, DeletionGuard, ResolvedKey,
+    DEFAULT_SENTINEL, ROSTER_SOURCE,
+};
 use logweir_core::trust::{
     effective_state, usable_for_new_signatures, usable_for_verification, EffectiveState,
 };
@@ -211,6 +243,32 @@ pub const REASON_SUPERSEDED_BY_TRUST_POLICY: &str = "SupersededByTrustPolicy";
 /// unbound namespaces resolve to.
 pub const REASON_ROSTER_STILL_CONSULTED: &str = "RosterStillConsulted";
 
+/// The finalizer this reconciler holds on a `TrustPolicy` that records a
+/// `KeyCompromise` revocation — see the module header.
+pub const COMPROMISE_FINALIZER: &str = "logweir.dev/compromise-revocation";
+
+/// How soon a policy HELD for deletion is looked at again.
+///
+/// SHORTER THAN [`HEARTBEAT`], because what releases it — a successor policy
+/// applied, the roster re-created without the key — is an event on ANOTHER
+/// object, which does not wake this one. Fifteen seconds is one `list` and one
+/// roster `get` per held policy, and it writes nothing while nothing changed.
+pub const HOLD_RECHECK: Duration = Duration::from_secs(15);
+
+/// The condition type reporting what a compromise record holds.
+pub const CONDITION_COMPROMISE_GUARD: &str = "CompromiseGuard";
+/// `CompromiseGuard=True`: this policy records a `KeyCompromise` revocation
+/// and the finalizer guards it.
+pub const REASON_COMPROMISE_RECORDED: &str = "CompromiseRecorded";
+/// `CompromiseGuard=True`: this policy lists a key another policy revoked for
+/// compromise, and does not record the revocation itself.
+pub const REASON_COMPROMISE_INHERITED: &str = "CompromiseInherited";
+/// `CompromiseGuard=True`: this policy is being deleted and is held, because
+/// deleting it would lose a compromise record.
+pub const REASON_DELETION_BLOCKED: &str = "DeletionBlocked";
+/// `CompromiseGuard=False`: nothing here records or inherits a compromise.
+pub const REASON_NO_COMPROMISE_RECORDED: &str = "NoCompromiseRecorded";
+
 /// What one policy reconcile decided.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PolicyVerdict {
@@ -223,8 +281,48 @@ pub struct PolicyVerdict {
     pub bound: Vec<String>,
     /// The namespaces two or more policies claim.
     pub conflicts: Vec<NamespaceConflict>,
-    /// The three conditions, ready to merge.
+    /// The four conditions, ready to merge.
     pub conditions: Vec<Condition>,
+    /// What deleting this policy would lose — the finalizer's input.
+    pub guard: DeletionGuard,
+}
+
+/// What [`reconcile_finalizer`] does with [`COMPROMISE_FINALIZER`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FinalizerAction {
+    /// Nothing to do.
+    None,
+    /// Place it: the policy records a compromise and is not being deleted.
+    Add,
+    /// Keep it: the policy is being deleted and a record would be lost.
+    Hold,
+    /// Remove it: the policy is being deleted and every record may go.
+    Release,
+}
+
+/// What to do with the finalizer, given the object and its guard — **pure**.
+///
+/// # No `Add` on a deleting object
+///
+/// The API server refuses a NEW finalizer on an object that carries a
+/// `deletionTimestamp`, so a record revoked and deleted before this controller
+/// saw it cannot be held after the fact. That window is the one residual; see
+/// `docs/keys.md`, *Replacing a TrustPolicy*.
+#[must_use]
+pub fn finalizer_action(policy: &TrustPolicy, guard: &DeletionGuard) -> FinalizerAction {
+    let held = policy
+        .metadata
+        .finalizers
+        .iter()
+        .flatten()
+        .any(|f| f == COMPROMISE_FINALIZER);
+    let deleting = policy.metadata.deletion_timestamp.is_some();
+    match (deleting, held) {
+        (false, false) if guard.guards_anything() => FinalizerAction::Add,
+        (true, true) if guard.releasable() => FinalizerAction::Release,
+        (true, true) => FinalizerAction::Hold,
+        _ => FinalizerAction::None,
+    }
 }
 
 /// Parse and resolve one policy against the whole set and a clock — **pure**.
@@ -241,7 +339,28 @@ pub fn evaluate(
     policies: &[TrustPolicy],
     now: DateTime<Utc>,
 ) -> PolicyVerdict {
-    let resolved = crate::trust::from_policy(policy);
+    evaluate_in(policy, policies, None, now)
+}
+
+/// [`evaluate`], with `TrustRoster/default`'s spec in hand — what the
+/// reconciler calls, because whether a compromise record may be dropped
+/// depends on whether the roster still lists the key
+/// ([`crate::trust::deletion_guard`]).
+///
+/// The per-key verdicts are the policy's own keys WITH every compromise
+/// `policies` records applied ([`crate::trust::from_policy_in`]): a key this
+/// policy declares `Active` that another policy revoked for compromise is
+/// reported `Revoked` here, because that is what this controller decides for
+/// it in this policy's namespaces.
+#[must_use]
+pub fn evaluate_in(
+    policy: &TrustPolicy,
+    policies: &[TrustPolicy],
+    roster: Option<&TrustRosterSpec>,
+    now: DateTime<Utc>,
+) -> PolicyVerdict {
+    let resolved = crate::trust::from_policy_in(policy, policies);
+    let guard = deletion_guard(policy, policies, roster);
 
     // ---- the per-key verdicts -------------------------------------------
     let mut keys = Vec::with_capacity(resolved.keys.len());
@@ -302,6 +421,12 @@ pub fn evaluate(
             expiring_condition(&resolved.keys, now),
             now,
         ),
+        condition(
+            policy,
+            CONDITION_COMPROMISE_GUARD,
+            compromise_condition(policy, &resolved.keys, &guard),
+            now,
+        ),
     ];
 
     PolicyVerdict {
@@ -310,7 +435,119 @@ pub fn evaluate(
         bound,
         conflicts: mine,
         conditions,
+        guard,
     }
+}
+
+/// `CompromiseGuard` — what this policy's compromise records hold, and what
+/// would release them.
+///
+/// ONE CONDITION, FOUR READINGS, most actionable first: a deletion being held,
+/// a record being guarded, a revocation inherited from elsewhere, nothing.
+/// Every message is built from recorded facts only, never the clock, so an
+/// unchanged guard is never rewritten.
+fn compromise_condition(
+    policy: &TrustPolicy,
+    keys: &[ResolvedKey],
+    guard: &DeletionGuard,
+) -> (bool, &'static str, String) {
+    let inherited: Vec<String> = keys
+        .iter()
+        .filter(|k| !k.compromise_inherited_from.is_empty())
+        .map(|k| {
+            format!(
+                "{} (recorded by TrustPolicy/{})",
+                k.trust.key_id,
+                k.compromise_inherited_from.join(", TrustPolicy/")
+            )
+        })
+        .collect();
+    let inherited_clause = if inherited.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " This policy also lists {}, which another TrustPolicy revoked for KeyCompromise: this \
+             controller treats them as revoked in this policy's namespaces as well, and an older \
+             controller would not — record the revocation here too (state: Revoked, \
+             revocationReason: KeyCompromise).",
+            inherited.join("; ")
+        )
+    };
+    let roster_listed: Vec<&str> = guard
+        .held
+        .iter()
+        .filter(|h| h.still_listed_by.iter().any(|s| s == ROSTER_SOURCE))
+        .map(|h| h.key_id.as_str())
+        .collect();
+    let roster_clause = if roster_listed.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " {ROSTER_SOURCE} still lists {}: this controller applies the revocation to every \
+             namespace that resolves to legacy-roster-v1, but an older controller reached by \
+             rollback reads only the roster and would trust them — re-create the roster without \
+             them before any rollback (docs/keys.md).",
+            roster_listed.join(", ")
+        )
+    };
+
+    let blocking: Vec<String> = guard
+        .blocking()
+        .map(|h| {
+            format!(
+                "{} (still listed by {})",
+                h.key_id,
+                h.still_listed_by.join(", ")
+            )
+        })
+        .collect();
+    if policy.metadata.deletion_timestamp.is_some() && !blocking.is_empty() {
+        return (
+            true,
+            REASON_DELETION_BLOCKED,
+            format!(
+                "this policy is being deleted and is HELD by the finalizer {COMPROMISE_FINALIZER}: \
+                 it is the only live record of the KeyCompromise revocation of {}, and deleting \
+                 it would let those sources trust the key again. Apply a TrustPolicy recording \
+                 the same key(s) as state: Revoked, revocationReason: KeyCompromise, or remove the \
+                 key(s) from every source named; the finalizer is released on the next pass \
+                 (docs/keys.md, Replacing a TrustPolicy). Removing the finalizer by hand trusts \
+                 the key(s) again wherever they are still listed.{inherited_clause}",
+                blocking.join("; ")
+            ),
+        );
+    }
+    if guard.guards_anything() {
+        let ids: Vec<&str> = guard.held.iter().map(|h| h.key_id.as_str()).collect();
+        return (
+            true,
+            REASON_COMPROMISE_RECORDED,
+            format!(
+                "this policy records the KeyCompromise revocation of {}. This controller applies \
+                 it to every namespace, whichever policy or roster the namespace resolves \
+                 through, and holds the finalizer {COMPROMISE_FINALIZER}: a deletion waits until \
+                 another TrustPolicy records the same revocation or nothing lists the key any \
+                 more (docs/keys.md, Replacing a TrustPolicy).{roster_clause}{inherited_clause}",
+                ids.join(", ")
+            ),
+        );
+    }
+    if !inherited.is_empty() {
+        return (
+            true,
+            REASON_COMPROMISE_INHERITED,
+            format!(
+                "this policy records no KeyCompromise revocation of its own.{inherited_clause}"
+            ),
+        );
+    }
+    (
+        false,
+        REASON_NO_COMPROMISE_RECORDED,
+        "this policy records no KeyCompromise revocation and lists no key another policy revoked \
+         for compromise"
+            .to_string(),
+    )
 }
 
 /// The key's `effectiveState`, with `Unparseable` overriding the clock.
@@ -590,13 +827,25 @@ pub async fn reconcile_policy(
     let now = Utc::now();
 
     // CLUSTER-SCOPED: `Api::all`, no namespace. The whole set, because the
-    // conflict rule is not answerable from one object.
+    // conflict rule is not answerable from one object — and a LIST from the
+    // API server, not the watch cache, because the finalizer's release below
+    // must see every other policy's `deletionTimestamp` as it is now
+    // (`trust::deletion_guard`).
     let api: Api<TrustPolicy> = Api::all(client.clone());
     let all = api
         .list(&ListParams::default())
         .await
         .map_err(ReconcileError::Api)?;
-    let verdict = evaluate(policy, &all.items, now);
+    // THE ROSTER IS READ BEFORE ANYTHING IS DECIDED, and a failed read fails
+    // the pass: whether a compromise record may be dropped depends on whether
+    // the roster still lists the key, and "could not read it" must never be
+    // mistaken for "it lists nothing".
+    let rosters: Api<TrustRoster> = Api::all(client.clone());
+    let roster = rosters
+        .get_opt(ROSTER_NAME)
+        .await
+        .map_err(ReconcileError::Api)?;
+    let verdict = evaluate_in(policy, &all.items, roster.as_ref().map(|r| &r.spec), now);
     let status = status_for(policy, &verdict, now);
 
     // SEAM S7's precondition (review finding F6): the body carries
@@ -605,7 +854,11 @@ pub async fn reconcile_policy(
     let patch = with_precondition(&policy.metadata, &name, json!({ "status": status }))?;
     // NO WRITE WHEN NOTHING CHANGED — erratum E11(d). With the debounce above,
     // a steady policy reaches this branch on four reconciles out of five.
-    if status_unchanged(
+    //
+    // The object the finalizer patch is preconditioned on is the one the
+    // status patch RETURNED when there was one: that write moved
+    // `resourceVersion`, and the handed copy's would be refused 409.
+    let latest = if status_unchanged(
         policy
             .status
             .as_ref()
@@ -617,13 +870,16 @@ pub async fn reconcile_policy(
             policy = %name,
             "the computed status equals the one on the object; no patch is sent"
         );
+        policy.metadata.clone()
     } else {
         api.patch_status(&name, &PatchParams::default(), &Patch::Merge(patch))
             .await
-            .map_err(ReconcileError::Api)?;
-    }
+            .map_err(ReconcileError::Api)?
+            .metadata
+    };
 
-    supersede_roster(client, &all.items, now).await?;
+    supersede_roster(client, roster.as_ref(), &all.items, now).await?;
+    reconcile_finalizer(policy, &latest, &verdict.guard, &api).await?;
 
     if verdict.loaded {
         info!(
@@ -740,24 +996,21 @@ pub fn superseded_condition(
 ///
 /// # Errors
 ///
-/// A `kube::Error` from the read or the patch. A roster that is **not found**
-/// is not an error: a cluster that never had one has nothing to supersede.
+/// A `kube::Error` from the patch. A roster that was **not found** (`None`,
+/// read once by [`reconcile_policy`]) is not an error: a cluster that never
+/// had one has nothing to supersede.
 async fn supersede_roster(
     client: &kube::Client,
+    roster: Option<&TrustRoster>,
     policies: &[TrustPolicy],
     now: DateTime<Utc>,
 ) -> Result<(), ReconcileError> {
     let api: Api<TrustRoster> = Api::all(client.clone());
-    let roster = match api
-        .get_opt(ROSTER_NAME)
-        .await
-        .map_err(ReconcileError::Api)?
-    {
-        Some(r) => r,
-        None => return Ok(()),
+    let Some(roster) = roster else {
+        return Ok(());
     };
     let existing = roster.status.as_ref().and_then(|s| s.conditions.as_ref());
-    let superseded = superseded_condition(&roster, policies, now);
+    let superseded = superseded_condition(roster, policies, now);
     let mut conditions: Vec<Condition> = existing
         .map(|c| {
             c.iter()
@@ -786,6 +1039,90 @@ async fn supersede_roster(
         .await
         .map_err(ReconcileError::Api)?;
     Ok(())
+}
+
+/// Place, hold or release [`COMPROMISE_FINALIZER`] on `policy`, as
+/// [`finalizer_action`] decides — **the ONE write this reconciler makes to a
+/// `TrustPolicy` that is not `/status`**, and its body is
+/// [`finalizer_patch`]'s: `metadata.{name, resourceVersion, finalizers}` and
+/// nothing else.
+///
+/// `latest` is the metadata the precondition is taken from: the object the
+/// status patch returned, when this pass sent one.
+///
+/// # Errors
+///
+/// A `kube::Error` from the patch — a `409` on a stale copy included, which
+/// requeues and is decided again from a fresh read.
+pub async fn reconcile_finalizer(
+    policy: &TrustPolicy,
+    latest: &kube::api::ObjectMeta,
+    guard: &DeletionGuard,
+    api: &Api<TrustPolicy>,
+) -> Result<FinalizerAction, ReconcileError> {
+    let name = policy.name_any();
+    let action = finalizer_action(policy, guard);
+    let current: Vec<String> = latest
+        .finalizers
+        .clone()
+        .or_else(|| policy.metadata.finalizers.clone())
+        .unwrap_or_default();
+    let next: Vec<String> = match action {
+        FinalizerAction::None => return Ok(action),
+        FinalizerAction::Hold => {
+            let blocking: Vec<&str> = guard.blocking().map(|h| h.key_id.as_str()).collect();
+            info!(
+                policy = %name,
+                keys = %blocking.join(","),
+                "trust policy deletion held: it is the only live record of a KeyCompromise \
+                 revocation that another trust source still lists"
+            );
+            return Ok(action);
+        }
+        FinalizerAction::Add => {
+            let mut next = current.clone();
+            next.push(COMPROMISE_FINALIZER.to_string());
+            next
+        }
+        FinalizerAction::Release => current
+            .iter()
+            .filter(|f| f.as_str() != COMPROMISE_FINALIZER)
+            .cloned()
+            .collect(),
+    };
+    let body = finalizer_patch(latest, &name, &next)?;
+    api.patch(&name, &PatchParams::default(), &Patch::Merge(body))
+        .await
+        .map_err(ReconcileError::Api)?;
+    info!(
+        policy = %name,
+        action = ?action,
+        "trust policy compromise-revocation finalizer updated"
+    );
+    Ok(action)
+}
+
+/// The merge patch [`reconcile_finalizer`] sends: `metadata.name`,
+/// `metadata.resourceVersion` (seam S7's precondition) and the WHOLE
+/// `metadata.finalizers` list — an RFC 7386 merge patch replaces an array, so
+/// the list carries every other controller's finalizer forward.
+///
+/// NOTHING ELSE, and a test pins it: this is the one body this controller
+/// sends to the main `trustpolicies` resource, and a `spec` key here would be
+/// the controller editing trust.
+///
+/// # Errors
+///
+/// [`ReconcileError::NoUid`] naming the object when it carries no
+/// `resourceVersion`.
+pub fn finalizer_patch(
+    meta: &kube::api::ObjectMeta,
+    name: &str,
+    finalizers: &[String],
+) -> Result<serde_json::Value, ReconcileError> {
+    let mut patch = with_precondition(meta, name, json!({}))?;
+    patch["metadata"]["finalizers"] = json!(finalizers);
+    Ok(patch)
 }
 
 /// Add seam **S7**'s optimistic-concurrency precondition to a `/status` merge
@@ -831,7 +1168,13 @@ pub fn with_precondition(
 
 /// The `kube::runtime` reconcile entry point.
 async fn reconcile(policy: Arc<TrustPolicy>, ctx: Arc<Context>) -> Result<Action, ReconcileError> {
-    reconcile_policy(&policy, &ctx.client).await?;
+    let verdict = reconcile_policy(&policy, &ctx.client).await?;
+    // A HELD DELETION IS RELEASED BY ANOTHER OBJECT'S EVENT — a successor
+    // policy applied, the roster re-created — which does not wake this one, so
+    // it is looked at again on a short, bounded timer instead of the heartbeat.
+    if finalizer_action(&policy, &verdict.guard) == FinalizerAction::Hold {
+        return Ok(Action::requeue(HOLD_RECHECK));
+    }
     // A policy's verdict is a function of its spec AND OF THE CLOCK: a key
     // whose `notAfter` passes at 03:00 must become `Expired` without anybody
     // editing the object, and `evaluatedAt` must keep moving for D3 §7.7's

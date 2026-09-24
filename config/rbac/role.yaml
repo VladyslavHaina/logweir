@@ -471,9 +471,19 @@ rules:
   # never names its own trust (D3 §7.1), so there is no name to get and the
   # conflict rule needs the whole set anyway. A granted `get` would be a verb
   # with no caller, which is the defect critique B M18 names.
+  #
+  # `patch` ON THE OBJECT ITSELF, for ONE field (TRUSTPOLICY-DELETE-DROPS-
+  # REVOCATION): the reconciler places and releases the finalizer
+  # `logweir.dev/compromise-revocation` on a policy that records a
+  # `KeyCompromise` revocation, so deleting that policy cannot silently re-trust
+  # the key. A finalizer is `metadata`, and RBAC cannot grant less than the
+  # object; the ONE call site is `trust_policy::reconcile_finalizer`, whose body
+  # is `metadata.{name, resourceVersion, finalizers}` and nothing else
+  # (`tests/trust_revocation_durable.rs` pins it). Still no `update`, no
+  # `create`, no `delete`: the controller never edits a key's lifecycle.
   - apiGroups: ["logweir.dev"]
     resources: ["trustpolicies"]
-    verbs: ["list", "watch"]
+    verbs: ["list", "watch", "patch"]
   # The status subresource, `patch` only, exactly like the six above: every
   # write is `Api::patch_status` with `Patch::Merge`, and no reconciler calls
   # `Api::replace`.

@@ -53,6 +53,33 @@
 //! one bad paste in a 64-key policy stop every restore in every bound
 //! namespace.
 //!
+//! # A compromise revocation is a fact about the KEY, not about a policy
+//!
+//! Defect `TRUSTPOLICY-DELETE-DROPS-REVOCATION` (PoC round, rehearsal R2): a
+//! `TrustPolicy` revoked key K for `KeyCompromise`, every document K signed
+//! turned `Untrusted`, the policy was deleted — and the namespace fell back to
+//! `legacy-roster-v1`, synthesised from a roster that still listed K as an
+//! ordinary key, so all six backups re-verified `Valid`. The revocation had
+//! lived only on the object that was removed.
+//!
+//! A compromise says the private half may be in someone else's hands. That is
+//! true of the key material everywhere, whichever object a namespace happens
+//! to resolve through today. So [`resolve_in`] applies every `KeyCompromise`
+//! revocation ANY `TrustPolicy` in the cluster records — including one being
+//! deleted — to the resolved key with the same id, whatever the source: the
+//! namespace's own policy, another one, the default, or the synthesised roster
+//! ([`compromise_records`], [`ResolvedKey::compromise_inherited_from`]). A
+//! namespace re-bound away from the recording policy, or dropped to the roster,
+//! still reads the key as revoked for compromise. Nothing is widened: the
+//! overlay only ever moves a key to `Revoked`, which G3 forbids undoing, and a
+//! key the resolved source does not list at all stays `UntrustedSigner`.
+//!
+//! The overlay can only honour a record that still exists, which is what the
+//! `TrustPolicy` reconciler's finalizer is for (`controllers::trust_policy`,
+//! [`deletion_guard`]): a policy recording a compromise is not released for
+//! deletion until another live policy records the same revocation, or nothing
+//! in the cluster lists the key any more.
+//!
 //! # No clock here either
 //!
 //! Every function in this module takes the instants it needs. The parsing is
@@ -128,6 +155,15 @@ pub struct ResolvedKey {
     /// whose declared id is not the hash of its own material is not an entry a
     /// signature can be looked up in.
     pub declared_id_matches: Result<(), String>,
+    /// The `TrustPolicy` objects whose `KeyCompromise` revocation of this key
+    /// id was applied to it although the resolved source itself does not
+    /// record one (`TRUSTPOLICY-DELETE-DROPS-REVOCATION`). Sorted; EMPTY for
+    /// every key whose state is its own source's.
+    ///
+    /// It exists so a refusal can name the object that actually records the
+    /// compromise: "the trust policy `legacy-roster-v1` records it as Revoked"
+    /// would send an operator to a roster that cannot express a revocation.
+    pub compromise_inherited_from: Vec<String>,
 }
 
 impl ResolvedKey {
@@ -289,8 +325,32 @@ pub enum Resolution {
 ///
 /// `policies` is every `TrustPolicy` object; `roster` is
 /// `TrustRoster/default`'s spec, or `None` when there is none.
+///
+/// # Every `KeyCompromise` revocation in `policies` applies, whatever answers
+///
+/// The source is chosen by the three steps below; its keys are then passed
+/// through [`apply_compromises`] with the records of EVERY policy in
+/// `policies` — the namespace's own, any other, and one carrying a
+/// `deletionTimestamp`. See the module header for why: a compromise is a fact
+/// about the key material, and a namespace that stops resolving through the
+/// policy that recorded it must not read the key as trusted again.
 #[must_use]
 pub fn resolve_in(
+    namespace: &str,
+    policies: &[TrustPolicy],
+    roster: Option<&TrustRosterSpec>,
+) -> Resolution {
+    match resolve_source(namespace, policies, roster) {
+        Resolution::Trust(mut resolved) => {
+            apply_compromises(&mut resolved, &compromise_records(policies));
+            Resolution::Trust(resolved)
+        }
+        other => other,
+    }
+}
+
+/// [`resolve_in`]'s three steps, before any compromise record is applied.
+fn resolve_source(
     namespace: &str,
     policies: &[TrustPolicy],
     roster: Option<&TrustRosterSpec>,
@@ -428,6 +488,303 @@ pub fn from_policy(policy: &TrustPolicy) -> ResolvedTrust {
     }
 }
 
+/// One `TrustPolicy` object as resolved trust, with every `KeyCompromise`
+/// revocation `policies` records applied to it — the view its own
+/// `status.keys[]` reports (the keys page's `EVALUATION` column).
+///
+/// A key this policy declares `Active` that another policy revoked for
+/// compromise is evaluated `Revoked` HERE TOO, because that is what every
+/// verification and approval in this policy's namespaces now decides; a green
+/// `Active` beside it would be the one surface still disagreeing.
+#[must_use]
+pub fn from_policy_in(policy: &TrustPolicy, policies: &[TrustPolicy]) -> ResolvedTrust {
+    let mut resolved = from_policy(policy);
+    apply_compromises(&mut resolved, &compromise_records(policies));
+    resolved
+}
+
+/// Whether one `spec.keys[]` entry records a `KeyCompromise` revocation.
+///
+/// BOTH FIELDS. The reason is read only for a key whose state is `Revoked`
+/// ([`logweir_core::trust::decide`]), so a `revocationReason: KeyCompromise`
+/// beside `state: Active` records nothing; and an absent reason is
+/// `Unspecified`, which D3 §7.4 treats as a supersession.
+#[must_use]
+pub fn records_compromise(key: &SpecKey) -> bool {
+    key.state == KeyState::Revoked && key.revocation_reason == Some(RevocationReason::KeyCompromise)
+}
+
+/// One key id's `KeyCompromise` revocation, as every `TrustPolicy` in the
+/// cluster records it together.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompromiseRecord {
+    /// The key id.
+    pub key_id: String,
+    /// The instant stored evidence is compared against: the EARLIEST
+    /// `revocationEffectiveFrom` (else `revokedAt`) any record declares —
+    /// or `None` when some record declares neither, which is "no instant
+    /// before which anything was safe" and which `decide` fails closed on.
+    ///
+    /// THE EARLIEST, because two records of one compromise that disagree about
+    /// when it began disagree about which observations still separate a
+    /// document from it, and the one that separates fewer is the one that
+    /// cannot be wrong in the dangerous direction. Both readings are
+    /// `Untrusted` either way; only the basis (`RecordedBeforeRevocation` or
+    /// `Revoked`) can differ.
+    pub effective_from: Option<DateTime<Utc>>,
+    /// The earliest `revokedAt`, for display. `None` whenever `effective_from`
+    /// is, so `decide`'s `revocationEffectiveFrom.or(revokedAt)` cannot find
+    /// an instant the records did not agree on.
+    pub revoked_at: Option<DateTime<Utc>>,
+    /// Every policy recording it, sorted and de-duplicated.
+    pub recorded_by: Vec<String>,
+}
+
+/// Every `KeyCompromise` revocation `policies` record, by key id.
+///
+/// EVERY OBJECT, including one carrying a `deletionTimestamp`: a policy the
+/// finalizer is holding is still a record (it exists precisely because the
+/// record has not been carried anywhere else yet), and ignoring it while it
+/// waits would reopen the window the finalizer closes.
+#[must_use]
+pub fn compromise_records(policies: &[TrustPolicy]) -> BTreeMap<String, CompromiseRecord> {
+    // (every record's bound, every record's revokedAt, every recorder)
+    type Seen = (
+        Vec<Option<DateTime<Utc>>>,
+        Vec<DateTime<Utc>>,
+        BTreeSet<String>,
+    );
+    let mut seen: BTreeMap<String, Seen> = BTreeMap::new();
+    for policy in policies {
+        let name = policy.name_any();
+        for key in policy.spec.keys.iter().filter(|k| records_compromise(k)) {
+            let entry = seen.entry(key.key_id.clone()).or_default();
+            entry
+                .0
+                .push(key.revocation_effective_from.or(key.revoked_at));
+            entry.1.extend(key.revoked_at);
+            entry.2.insert(name.clone());
+        }
+    }
+    seen.into_iter()
+        .map(|(key_id, (bounds, revoked, by))| {
+            let effective_from = earliest_bound(bounds);
+            let revoked_at = effective_from.and_then(|_| revoked.into_iter().min());
+            (
+                key_id.clone(),
+                CompromiseRecord {
+                    key_id,
+                    effective_from,
+                    revoked_at,
+                    recorded_by: by.into_iter().collect(),
+                },
+            )
+        })
+        .collect()
+}
+
+/// The earliest of `bounds`, where an absent bound is earlier than any
+/// instant ("compromised from the start").
+fn earliest_bound(
+    bounds: impl IntoIterator<Item = Option<DateTime<Utc>>>,
+) -> Option<DateTime<Utc>> {
+    let mut out: Option<DateTime<Utc>> = None;
+    for bound in bounds {
+        let at = bound?;
+        out = Some(out.map_or(at, |o| o.min(at)));
+    }
+    out
+}
+
+/// Apply `records` to every key of `resolved` with the same id: `Revoked`,
+/// `KeyCompromise`, the records' instant — see [`resolve_in`].
+///
+/// # A key its own source already records as compromised is left BYTE-FOR-BYTE
+/// alone unless another policy also records it
+///
+/// So a cluster with one policy and one revocation reads exactly as it did
+/// before this overlay existed; only a SECOND record of the same compromise
+/// can move the instant, and only earlier.
+pub fn apply_compromises(
+    resolved: &mut ResolvedTrust,
+    records: &BTreeMap<String, CompromiseRecord>,
+) {
+    let own = match &resolved.source {
+        TrustSource::Policy { name, .. } => Some(name.clone()),
+        TrustSource::LegacyRoster => None,
+    };
+    for key in &mut resolved.keys {
+        let Some(record) = records.get(&key.trust.key_id) else {
+            continue;
+        };
+        let already = key.trust.state == logweir_core::trust::KeyState::Revoked
+            && key.trust.reason() == logweir_core::trust::RevocationReason::KeyCompromise;
+        let others: Vec<String> = record
+            .recorded_by
+            .iter()
+            .filter(|n| Some(*n) != own.as_ref())
+            .cloned()
+            .collect();
+        if already && others.is_empty() {
+            continue;
+        }
+        let own_bound =
+            already.then(|| key.trust.revocation_effective_from.or(key.trust.revoked_at));
+        let effective_from = earliest_bound(own_bound.into_iter().chain([record.effective_from]));
+        let revoked_at = effective_from.and_then(|_| {
+            already
+                .then_some(key.trust.revoked_at)
+                .flatten()
+                .into_iter()
+                .chain(record.revoked_at)
+                .min()
+        });
+        key.trust.state = logweir_core::trust::KeyState::Revoked;
+        key.trust.revocation_reason = Some(logweir_core::trust::RevocationReason::KeyCompromise);
+        key.trust.revocation_effective_from = effective_from;
+        key.trust.revoked_at = revoked_at;
+        if !already {
+            key.compromise_inherited_from = if others.is_empty() {
+                record.recorded_by.clone()
+            } else {
+                others
+            };
+        }
+    }
+}
+
+/// The trust source name a still-listed key is reported under when the roster
+/// lists it.
+pub const ROSTER_SOURCE: &str = "TrustRoster/default";
+
+/// One `KeyCompromise` revocation a policy records, and whether the cluster
+/// would still know about it if the policy went away.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HeldRevocation {
+    /// The revoked key's id.
+    pub key_id: String,
+    /// Every OTHER `TrustPolicy` without a `deletionTimestamp` that records
+    /// the same key revoked for `KeyCompromise`, sorted. One is enough: the
+    /// resolution overlay applies it to every namespace.
+    pub carried_by: Vec<String>,
+    /// Every other trust source that lists the key as anything but revoked
+    /// for compromise — [`ROSTER_SOURCE`], or `TrustPolicy/<name>` (with or
+    /// without a `deletionTimestamp`: a policy being held is still read) —
+    /// sorted. These are what would trust the key again if the record went.
+    pub still_listed_by: Vec<String>,
+}
+
+impl HeldRevocation {
+    /// Whether the record may go: another live policy carries it, or nothing
+    /// in the cluster lists the key as trusted any more (which an older
+    /// controller, reading only the roster, also honours).
+    #[must_use]
+    pub fn may_be_dropped(&self) -> bool {
+        !self.carried_by.is_empty() || self.still_listed_by.is_empty()
+    }
+}
+
+/// What deleting one `TrustPolicy` would lose.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DeletionGuard {
+    /// One entry per `KeyCompromise` revocation the policy records, in spec
+    /// order. EMPTY for a policy recording none, which the reconciler never
+    /// holds.
+    pub held: Vec<HeldRevocation>,
+}
+
+impl DeletionGuard {
+    /// Whether the policy records any compromise at all — the condition under
+    /// which the reconciler places its finalizer.
+    #[must_use]
+    pub fn guards_anything(&self) -> bool {
+        !self.held.is_empty()
+    }
+
+    /// Whether every record may go — the condition under which the
+    /// reconciler releases a policy that is being deleted.
+    #[must_use]
+    pub fn releasable(&self) -> bool {
+        self.held.iter().all(HeldRevocation::may_be_dropped)
+    }
+
+    /// The records that keep the policy.
+    pub fn blocking(&self) -> impl Iterator<Item = &HeldRevocation> {
+        self.held.iter().filter(|h| !h.may_be_dropped())
+    }
+}
+
+/// What deleting `policy` would lose, given every policy in the cluster and
+/// `TrustRoster/default`'s spec — **pure**.
+///
+/// # Why a LIVE carrier, and why the still-listed side counts every object
+///
+/// `carried_by` skips any policy with a `deletionTimestamp`. Two policies
+/// recording the same compromise, deleted together, would otherwise each
+/// release on the strength of the other and the record would vanish with
+/// both. `still_listed_by` counts a held policy too, because a policy that is
+/// waiting is still resolved through and still trusts what it lists.
+///
+/// `policies` must be a CONSISTENT read (a `list` from the API server, not a
+/// watch cache): two passes that each saw the other policy without its
+/// `deletionTimestamp` could otherwise both release. `reconcile_policy`'s own
+/// `list` is that read.
+#[must_use]
+pub fn deletion_guard(
+    policy: &TrustPolicy,
+    policies: &[TrustPolicy],
+    roster: Option<&TrustRosterSpec>,
+) -> DeletionGuard {
+    let me = policy.name_any();
+    let others: Vec<&TrustPolicy> = policies.iter().filter(|p| p.name_any() != me).collect();
+    let held = policy
+        .spec
+        .keys
+        .iter()
+        .filter(|k| records_compromise(k))
+        .map(|revoked| {
+            let id = revoked.key_id.as_str();
+            let mut carried_by: Vec<String> = others
+                .iter()
+                .filter(|p| p.metadata.deletion_timestamp.is_none())
+                .filter(|p| {
+                    p.spec
+                        .keys
+                        .iter()
+                        .any(|k| k.key_id == id && records_compromise(k))
+                })
+                .map(|p| p.name_any())
+                .collect();
+            carried_by.sort();
+            let mut still_listed_by: Vec<String> = others
+                .iter()
+                .filter(|p| {
+                    p.spec
+                        .keys
+                        .iter()
+                        .any(|k| k.key_id == id && !records_compromise(k))
+                })
+                .map(|p| format!("TrustPolicy/{}", p.name_any()))
+                .collect();
+            if roster.is_some_and(|r| {
+                r.approver_keys
+                    .iter()
+                    .chain(r.signing_keys.iter())
+                    .any(|e| e.key_id == id)
+            }) {
+                still_listed_by.push(ROSTER_SOURCE.to_string());
+            }
+            still_listed_by.sort();
+            HeldRevocation {
+                key_id: id.to_string(),
+                carried_by,
+                still_listed_by,
+            }
+        })
+        .collect();
+    DeletionGuard { held }
+}
+
 /// One `spec.keys[]` entry, parsed.
 fn resolve_spec_key(key: &SpecKey) -> ResolvedKey {
     let (parsed, declared_id_matches) = check_material(&key.key_id, &key.spki_pem);
@@ -452,6 +809,7 @@ fn resolve_spec_key(key: &SpecKey) -> ResolvedKey {
         algorithm: key.algorithm,
         parsed,
         declared_id_matches,
+        compromise_inherited_from: Vec::new(),
     }
 }
 
@@ -578,6 +936,7 @@ pub fn synthesize_legacy(roster: &TrustRosterSpec) -> ResolvedTrust {
                 algorithm: algorithm_of(&entry.spki_pem),
                 parsed,
                 declared_id_matches,
+                compromise_inherited_from: Vec::new(),
             }
         })
         .collect();

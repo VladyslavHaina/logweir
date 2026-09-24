@@ -955,6 +955,13 @@ pub struct RosterFacts {
     /// controller, the catalog and the runner's bundles are built from.
     /// `None` is the roster fallback above.
     pub governing: Option<GoverningTrust>,
+    /// On the roster fallback, every roster key a `TrustPolicy` revoked for
+    /// `KeyCompromise`, with the policies recording it
+    /// (`TRUSTPOLICY-DELETE-DROPS-REVOCATION`). The roster fields above carry
+    /// no lifecycle, so without this a namespace re-bound (or dropped) to the
+    /// roster answered `ready/SignerRostered` for a compromised signer that
+    /// every verification in the same namespace refuses.
+    pub compromised_keys: Vec<(String, Vec<String>)>,
 }
 
 /// A namespace's trust when the roster is NOT the answer.
@@ -1001,6 +1008,16 @@ impl RosterFacts {
             }
             _ => None,
         };
+        if let crate::trust::Resolution::Trust(trust) = resolution {
+            if trust.source.is_legacy() {
+                self.compromised_keys = trust
+                    .keys
+                    .iter()
+                    .filter(|k| !k.compromise_inherited_from.is_empty())
+                    .map(|k| (k.trust.key_id.clone(), k.compromise_inherited_from.clone()))
+                    .collect();
+            }
+        }
         self
     }
 
@@ -1212,6 +1229,30 @@ pub fn signer_rostered_row(
         )
         .with_scope(roster_scope);
     };
+    // A KeyCompromise REVOCATION ON ANY TrustPolicy REACHES THE ROSTER
+    // (TRUSTPOLICY-DELETE-DROPS-REVOCATION): the key may not sign anything new,
+    // exactly as `signer_policy_row` answers `KeyRevoked` for a governing
+    // policy, and the row says where the revocation is recorded.
+    if let Some((_, recorded_by)) = roster.compromised_keys.iter().find(|(k, _)| k == key_id) {
+        return outcome(
+            operation,
+            id,
+            CheckState::NotReady,
+            CheckCode::SignerKeyExpired,
+            now,
+        )
+        .with_message(&format!(
+            "the TrustRoster lists signing key `{key_id}`, but TrustPolicy/{} revoked it for \
+             KeyCompromise, which applies to every namespace: it may not sign new evidence \
+             (KeyRevoked)",
+            recorded_by.join(", TrustPolicy/")
+        ))
+        .with_remedy(
+            "Rotate the runner's signing key to a new key trusted by this namespace's trust, and \
+             re-create the TrustRoster without the compromised key.",
+        )
+        .with_scope(roster_scope);
+    }
     if not_after.is_some_and(|t| t <= now) {
         return cap_expiry(
             outcome(
@@ -5395,6 +5436,7 @@ fn roster_facts(load: &super::approval::RosterLoad) -> RosterFacts {
                 .collect(),
             allowed_cluster_ids: r.spec.allowed_cluster_ids.clone(),
             governing: None,
+            compromised_keys: Vec::new(),
         },
     }
 }
