@@ -1716,3 +1716,72 @@ async fn a_deleted_restore_is_not_an_admission() {
             .expect("a verdict");
     assert_eq!(outcome.reason(), "ReferentNotFound", "{outcome:?}");
 }
+
+// ---------------------------------------------------------------------------
+// TRUSTPOLICY-DELETE-DROPS-REVOCATION: a compromise recorded on ANOTHER policy
+// ---------------------------------------------------------------------------
+
+/// **A compromise is a fact about the key, not about the policy.** The
+/// namespace's own policy lists the console key `Active` (a successor applied
+/// from an export taken before the revocation, or the namespace re-bound), and
+/// a DIFFERENT policy records its `KeyCompromise` revocation. A consumed record
+/// whose stored status is still CLEAN — so the sticky rule is not what answers
+/// — reads the compromise all the same: `RecordedBeforeRevocation`, never
+/// green.
+///
+/// NEGATIVE CONTROL beside it: without the recording policy the same pass is
+/// `Verified`, so the refusal is the record's and nothing else's.
+#[tokio::test]
+async fn a_compromise_recorded_on_another_policy_reaches_a_consumed_record() {
+    let object = consumed_ordinary().await;
+    assert_eq!(
+        object.status.as_ref().and_then(|s| s.verified),
+        Some(true),
+        "the stored record is clean: nothing sticky answers this row"
+    );
+    let recorder = TrustPolicy {
+        metadata: ObjectMeta {
+            name: Some("incident-record".to_string()),
+            uid: Some("uid-incident-record".to_string()),
+            generation: Some(1),
+            resource_version: Some("23".to_string()),
+            ..ObjectMeta::default()
+        },
+        spec: TrustPolicySpec {
+            default: false,
+            namespaces: None,
+            allowed_target_cluster_ids: None,
+            keys: vec![revoked_console(
+                RevocationReason::KeyCompromise,
+                "2026-09-09T13:05:00Z",
+            )],
+        },
+        status: None,
+    };
+    let mut table = routes(vec![console(), bob()]);
+    table[0].body = serde_json::json!({
+        "apiVersion": "logweir.dev/v1alpha1",
+        "kind": "TrustPolicyList",
+        "metadata": {"resourceVersion": "1"},
+        "items": [trust_policy(vec![console(), bob()]), recorder],
+    })
+    .to_string();
+    let (client, _) = mock_client_recording(table);
+    let outcome = approval::decide_with_policy_at(
+        &object,
+        &client,
+        &bind("team-ordinary"),
+        at("2026-09-11T08:00:00Z"),
+    )
+    .await
+    .expect("a verdict");
+    assert!(outcome.is_consumed(), "{outcome:?}");
+    assert!(!outcome.is_verified(), "never green: {outcome:?}");
+    assert_eq!(
+        outcome.reason(),
+        approval::REASON_RECORDED_BEFORE_REVOCATION
+    );
+
+    let clean = decide_trusting(&object, vec![console(), bob()]).await;
+    assert!(clean.is_verified(), "{clean:?}");
+}

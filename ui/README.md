@@ -2137,7 +2137,14 @@ this version has -- no function in `render.js` can spell it.
   instant that never expired is a stopped clock, and a clock in the past
   shrinks the measured age, which is the direction that reads fresh. The
   elapsed time is a difference of two monotonic readings and never an absolute
-  one. Retirement and revocation are explained apart.
+  one. Retirement and revocation are explained apart. **A `KeyCompromise`
+  revocation is a fact about the key**: a key this policy declares `Active`
+  that the controller evaluates `Revoked` (another policy records its
+  compromise) reads "revoked for compromise by another TrustPolicy's record",
+  never "active", and the policy's `CompromiseGuard` condition is printed
+  verbatim when it is `True` -- a held deletion and an inherited compromise as
+  complaints, a guarded record as a note (TRUSTPOLICY-DELETE-DROPS-REVOCATION,
+  [`docs/keys.md`](../docs/keys.md)).
 * **`#/schedules`' retention panel.** It reads `status.enforcement`, which is
   what is HAPPENING, and not `spec.mode`, which is what was asked for.
   `RETENTION_SENTENCE` is kept verbatim for a schedule report and for

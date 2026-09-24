@@ -717,3 +717,43 @@ fn the_refusal_names_the_policy_that_records_the_compromise() {
     );
     assert!(inherited.contains("legacy-roster-v1"), "{inherited}");
 }
+
+// ---------------------------------------------------------------------------
+// The shared keys-page fixture: what this controller writes IS what the
+// console renders (`ui/tests/d3.spec.js`)
+// ---------------------------------------------------------------------------
+
+/// `ui/tests/fixtures/d3/trustpolicy-compromise-inherited.json` is a policy
+/// listing the installation signer `Active` while ANOTHER policy records its
+/// `KeyCompromise` revocation. This row reads the fixture's own `spec`,
+/// evaluates it beside the recording policy at the fixture's instant, and
+/// asserts the controller's status IS the fixture's `status` — so the page
+/// test renders exactly what this build writes.
+#[test]
+fn the_shared_keys_fixture_is_what_the_controller_writes() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../ui/tests/fixtures/d3/trustpolicy-compromise-inherited.json"
+    );
+    let fixture: Value =
+        serde_json::from_str(&std::fs::read_to_string(path).expect("the shared fixture"))
+            .expect("JSON");
+    let mut lister: TrustPolicy = serde_json::from_value(fixture.clone()).expect("a TrustPolicy");
+    lister.status = None;
+    let recorder = policy(
+        "incident-2026-09",
+        &[],
+        vec![compromised("2026-09-10T12:00:00Z")],
+    );
+    let evaluated_at = at("2026-09-12T08:00:00Z");
+    let verdict =
+        trust_policy::evaluate_in(&lister, &[recorder, lister.clone()], None, evaluated_at);
+    let status = serde_json::to_value(trust_policy::status_for(&lister, &verdict, evaluated_at))
+        .expect("status");
+    assert_eq!(
+        status,
+        fixture["status"],
+        "the fixture's status must be byte-for-byte what the controller writes; it wrote:\n{}",
+        serde_json::to_string_pretty(&status).unwrap_or_default()
+    );
+}

@@ -462,16 +462,18 @@ fn compromise_condition(
             )
         })
         .collect();
+    // THE SAME SENTENCE whether it stands alone or follows another reading.
+    let inherited_sentence = format!(
+        "this policy lists {}, which another TrustPolicy revoked for KeyCompromise. This \
+         controller treats the key as revoked in this policy's namespaces as well, and an older \
+         controller would not: record the revocation here too (state: Revoked, \
+         revocationReason: KeyCompromise).",
+        inherited.join("; ")
+    );
     let inherited_clause = if inherited.is_empty() {
         String::new()
     } else {
-        format!(
-            " This policy also lists {}, which another TrustPolicy revoked for KeyCompromise: this \
-             controller treats them as revoked in this policy's namespaces as well, and an older \
-             controller would not — record the revocation here too (state: Revoked, \
-             revocationReason: KeyCompromise).",
-            inherited.join("; ")
-        )
+        format!(" Also, {inherited_sentence}")
     };
     let roster_listed: Vec<&str> = guard
         .held
@@ -485,7 +487,7 @@ fn compromise_condition(
         format!(
             " {ROSTER_SOURCE} still lists {}: this controller applies the revocation to every \
              namespace that resolves to legacy-roster-v1, but an older controller reached by \
-             rollback reads only the roster and would trust them — re-create the roster without \
+             rollback reads only the roster and would trust them: re-create the roster without \
              them before any rollback (docs/keys.md).",
             roster_listed.join(", ")
         )
@@ -533,13 +535,11 @@ fn compromise_condition(
         );
     }
     if !inherited.is_empty() {
-        return (
-            true,
-            REASON_COMPROMISE_INHERITED,
-            format!(
-                "this policy records no KeyCompromise revocation of its own.{inherited_clause}"
-            ),
-        );
+        return (true, REASON_COMPROMISE_INHERITED, {
+            let mut first = inherited_sentence;
+            first.replace_range(..1, "T");
+            first
+        });
     }
     (
         false,

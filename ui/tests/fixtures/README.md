@@ -139,7 +139,8 @@ place in the D1 W7 fixtures where a VALUE was not observed; the shape is the CRD
 
 ## The D3 fixtures (`d3/`)
 
-D3 W12's suite (`ui/tests/d3.spec.js`) reads `d3/` and nothing else reads it. **Where a live
+D3 W12's suite (`ui/tests/d3.spec.js`) reads `d3/`, and one Rust row reads one file of it
+(`trustpolicy-compromise-inherited.json`, below). **Where a live
 object exists, the fixture IS that object**, copied whole from the D3 acceptance runs under
 `/tmp/logweir-roadmap-run/claude/artifacts/d3-live/` with only `metadata.annotations`
 (`kubectl.kubernetes.io/last-applied-configuration`, a second copy of the spec) and
@@ -156,7 +157,7 @@ object exists, the fixture IS that object**, copied whole from the D3 acceptance
 | `backup-progress-finished.json` | `lr5.../lifecycle/unrelated-backup.json`: `status.progress {stage: Finished, runner{...}}` and a `NotAttempted` verification with the controller's own detail |
 | `restore-pending-approval.json` | `lr5.../enforce/active-restore-object.json`: `phase: Pending`, `Admitted=False/ApprovalNotVerified` |
 
-**Seven fixtures are CONSTRUCTED, and this is the disclosure.** Each one is a real object above
+**Eight fixtures are CONSTRUCTED, and this is the disclosure.** Each one is a real object above
 with fields the live runs did not reach filled in **from the field set D3 declares** -- section 3.1
 for protection, section 5.4 for a catalog entry, section 6.2 for retention, section 7.1/7.4 for
 trust, section 2.2 for progress and section 3.5 for completion -- and from the landed status the
@@ -170,6 +171,7 @@ D3 controller workers reported. No value in them was invented outside those decl
 | `catalog-signers.json` | the live trusted signer, and an UNTRUSTED one -- PLAT-15.2 step 3's whole case, which a single-installation lab cannot produce |
 | `retention-enforce.json` | `mode: Enforce` with an approved digest, a failed `lastEnforcement` and `EnforcementDegraded=True`. The live runs enforced under an operator-driven plan; three consecutive failures is the row the panel's degraded sentence is about |
 | `trustpolicy-lifecycle.json`, `trustpolicy-stale.json`, `trustpolicy-unevaluated.json` | a retired key, a compromise-revoked key, a superseded one, a generation ahead of its status, a contested namespace, and no status at all -- the six `unknown`/lifecycle rows section 7.7 names |
+| `trustpolicy-compromise-inherited.json` | **written by the controller, not by hand** (TRUSTPOLICY-DELETE-DROPS-REVOCATION): a policy listing the installation signer `Active` while ANOTHER policy records its `KeyCompromise` revocation. `crates/weirkeeper/tests/trust_revocation_durable.rs::the_shared_keys_fixture_is_what_the_controller_writes` evaluates this file's own `spec` beside the recording policy and asserts its `status` byte-for-byte (`effectiveState: Revoked`, `CompromiseGuard=True/CompromiseInherited`); `d3.spec.js` renders it with no `Active` vouching for the key. Two readers of one file. Its `spkiPem` is a PUBLIC half, the same test key the Rust suites use |
 | `backup-progress-waiting.json`, `restore-completed-newtopic.json` and the three `restore-*` verdict rows | a `Preparing` stage with two diagnoses, and the completion/teardown/trust blocks. The lab's runs either finished clean or were refused before a Job existed |
 
 **Two more are live captures, added in fix round 1** for review finding F1 (an explicit
