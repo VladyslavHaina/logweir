@@ -1514,6 +1514,50 @@ export function bucketOf(url) {
   return bucket.length === 0 ? "<your evidence bucket>" : bucket;
 }
 
+/** The bucket a restore PLAN writes its evidence to: `evidence.bucket` of the
+ *  plan bytes, the runner's own `StorageUrl` block. `""` when the bytes carry no
+ *  such block, or none this reader can see.
+ *
+ *  WHY THE PLAN AND NOT THE ARCHIVE. A restore's signed scorecard is written
+ *  where its approved plan's `evidence:` block says -- for a point with no
+ *  saved destination that is whatever bucket the plan named, and for a
+ *  destination-backed one it is the evidence destination's bucket, while
+ *  `spec.sourceArchive.url` is the `logweir-destination://` sentinel whose
+ *  "bucket" is a destination NAME. A fetch command built from the source
+ *  archive therefore pointed at the wrong bucket in both cases (PoC defect P5's
+ *  class sweep). Used only to render a copyable command; nothing here
+ *  addresses a store.
+ *
+ *  A line reader, not a YAML parser: the block is the one the console renders
+ *  (`plan.js`, two-space indentation, JSON-quoted values), and a hand-written
+ *  plan in another shape reads as `""`, which renders the placeholder. */
+export function planEvidenceBucket(planBytes) {
+  if (typeof planBytes !== "string" || planBytes.length === 0) {
+    return "";
+  }
+  let inEvidence = false;
+  for (const raw of planBytes.split("\n")) {
+    const line = raw.replace(/\r$/, "");
+    if (/^\S/.test(line)) {
+      if (inEvidence) {
+        return "";
+      }
+      inEvidence = /^evidence:\s*$/.test(line);
+      continue;
+    }
+    if (!inEvidence) {
+      continue;
+    }
+    const match = /^ {2}bucket:\s*(.*?)\s*$/.exec(line);
+    if (match !== null) {
+      const value = match[1];
+      const quoted = /^"(.*)"$/.exec(value) || /^'(.*)'$/.exec(value);
+      return quoted !== null ? quoted[1] : value;
+    }
+  }
+  return "";
+}
+
 /** The key prefix an object-store URL names: everything after the bucket.
  *  The twin of [`bucketOf`], and built the same way, so a plan document's
  *  `storage.prefix` and the fetch command beside it come from one reading of

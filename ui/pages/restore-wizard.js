@@ -1510,6 +1510,8 @@ export function renderStoreFields(state) {
     esc(evidence.bucket) + "\"" +
     invalidAttributes("evidence-bucket", errors.evidenceBucket) + ">" +
     fieldErrorLine("evidence-bucket", errors.evidenceBucket) +
+    "<p class=\"note\" id=\"legacy-evidence-bucket\">" + esc(LEGACY_EVIDENCE_BUCKET_SENTENCE) +
+    "</p>" +
     "<p class=\"note\">The evidence prefix is fixed at " + esc(EVIDENCE_PREFIX) + " by Global " +
     "Constraint 6 and is not an input: a plan naming another one is refused at phase 0, " +
     "after the approver has already signed it.</p></div>" +
@@ -2606,8 +2608,9 @@ export function readinessSourceSentence(point) {
       (typeof digest === "string" && digest.length > 0 ? "`" + digest + "`" : "not recorded") +
       "; the controller compares that frozen fact with the destination it resolves now.";
   }
-  return "Legacy recovery point: this check reads the inline archive URL recorded on the Backup. " +
-    "Only a point with no destinationRef uses legacySourceArchive.";
+  return "Legacy recovery point: this check reads the inline archive URL recorded on the Backup, " +
+    "with the Secret that Backup named -- the location and the credential the restore Job " +
+    "itself will use. Only a point with no destinationRef uses legacySourceArchive.";
 }
 
 /** Why a readiness result is not a promise about the run. */
@@ -4828,7 +4831,7 @@ export function initialState(ns, clusters, backups, selection, savedDestination,
     evidenceSameAsArchive: true,
     evidenceBucket: savedPoint
       ? (destinationSettings === null ? "" : destinationSettings.bucket)
-      : "logweir-evidence",
+      : legacyEvidenceBucket(archiveUrl),
     targetClusterName: ((target || {}).metadata || {}).name,
     // THE IDENTITY, BESIDE THE NAME. The default is a preselect and nothing
     // more, but it is a preselect BY UID from the first render, so the very
@@ -4887,7 +4890,7 @@ export function initialState(ns, clusters, backups, selection, savedDestination,
       evidence: Object.assign({}, store, {
         bucket: savedPoint
           ? (destinationSettings === null ? "" : destinationSettings.bucket)
-          : "logweir-evidence",
+          : legacyEvidenceBucket(archiveUrl),
         // Evidence never inherits the archive prefix. Global Constraint 6 is
         // the saved-destination evidence location too.
         prefix: EVIDENCE_PREFIX,
@@ -4895,6 +4898,37 @@ export function initialState(ns, clusters, backups, selection, savedDestination,
     },
   };
 }
+
+/** WHERE A POINT WITH NO DESTINATION WRITES ITS EVIDENCE: the archive's own
+ *  bucket (PoC defect P5).
+ *
+ *  This used to be the literal `logweir-evidence`. The controller reads an
+ *  inline-archive run's scorecard ONLY through its own archive handle
+ *  (`LOGWEIR_ARCHIVE_URL`), and only in that handle's bucket; the runner writes
+ *  it with the archive's credential, the one that already wrote this point's
+ *  receipt under `<archive bucket>/logweir/`. A plan naming any other bucket
+ *  restored the data and then published no verification and no completion
+ *  (`weirkeeper` `destination::legacy_evidence_scope`). The archive's bucket is
+ *  the one the archive credential is known to write, and on an installation
+ *  whose handle is over its archive -- the chart's default -- the one the
+ *  controller reads. The field stays editable; the readiness check warns
+ *  (`destination.evidenceReadable`) when the plan names a bucket the
+ *  controller will not read. An archive URL with no bucket leaves the field
+ *  EMPTY, so the plan is refused as incomplete rather than pointed anywhere. */
+export function legacyEvidenceBucket(archiveUrl) {
+  if (typeof archiveUrl !== "string" || archiveUrl.indexOf("://") === -1) {
+    return "";
+  }
+  const bucket = bucketOf(archiveUrl);
+  return bucket === bucketOf("") ? "" : bucket;
+}
+
+/** Said under a legacy point's evidence bucket field. */
+export const LEGACY_EVIDENCE_BUCKET_SENTENCE =
+  "It starts as this recovery point's own archive bucket. Weirkeeper verifies the signed " +
+  "scorecard of a point with no saved destination only through its own archive handle " +
+  "(LOGWEIR_ARCHIVE_URL), in that handle's bucket: name another bucket and the restore still " +
+  "runs, but its verification reads NotAttempted and no completion is written.";
 
 /** The saved destination frozen onto a recovery point, if this is not legacy. */
 function savedDestinationName(state) {
