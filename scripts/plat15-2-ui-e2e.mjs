@@ -986,8 +986,19 @@ async function main() {
       "after a fresh readiness check on an unchanged catalog point Create is still refused " +
         "(a stale RecoveryCatalog referent reads `unverifiable`): " +
         JSON.stringify({ disabled: gate.disabled, blocked: gate.blocked }).slice(0, 800));
-    check(gate.said.indexOf("RecoveryCatalog/" + CATALOG) === -1,
-      "the readiness verdict on screen still names RecoveryCatalog/" + CATALOG);
+    // THE STALE-REASON SPELLING, NOT THE NAME (lab-refresh-10). A fresh page
+    // names `RecoveryCatalog/<catalog>` legitimately twice — in the referents
+    // list and as the `recoveryPoint.state` row's scope — so "the text never
+    // names it" failed a verdict that applied. A stale or uncomparable
+    // referent is rendered by `staleReasonLine` as `<reason> (<Kind>/<name>)`
+    // under "does not apply to your current inputs" (lab-refresh-9's
+    // `gate-after-check.txt:215`: "could not be checked (RecoveryCatalog/
+    // archive): …"), and that is what must be absent.
+    check(gate.said.indexOf("(RecoveryCatalog/" + CATALOG + ")") === -1 &&
+      gate.said.indexOf("applies to your current inputs") !== -1 &&
+      gate.said.indexOf("does not apply to your current inputs") === -1,
+      "the readiness verdict on screen does not apply, or names RecoveryCatalog/" + CATALOG +
+        " as a stale or uncomparable referent");
     record("5b. a fresh check on an unchanged catalog point leaves Create enabled", {
       preflight: pfName, planHash: checkedHash,
       aggregate: ((preflight.status || {}).result || {}).state,
