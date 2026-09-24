@@ -100,11 +100,16 @@ pub struct Settings {
     /// confirmation key. `Default` is every namespace on `legacy-governed-v1`
     /// and no key.
     pub approval: Arc<crate::approval::ApprovalSettings>,
+    /// P10: the manual-run create ceilings (`rateLimits` in the configuration
+    /// file). `Default` is the documented ten backups and five restores per
+    /// actor, per namespace, per minute.
+    pub run_rate_limits: crate::routes::RunRateLimits,
 }
 
 struct Inner {
     settings: Settings,
     readiness: Mutex<Option<(Instant, bool)>>,
+    run_windows: crate::routes::RunCreateWindows,
 }
 
 /// Shared, cheaply cloned state.
@@ -124,6 +129,7 @@ impl AppState {
             inner: Arc::new(Inner {
                 settings,
                 readiness: Mutex::new(None),
+                run_windows: crate::routes::RunCreateWindows::default(),
             }),
         }
     }
@@ -150,6 +156,18 @@ impl AppState {
     #[must_use]
     pub fn cursor_key(&self) -> &CursorKey {
         &self.inner.settings.cursor_key
+    }
+
+    /// P10: the manual-run create ceilings this process was configured with.
+    #[must_use]
+    pub fn run_rate_limits(&self) -> crate::routes::RunRateLimits {
+        self.inner.settings.run_rate_limits
+    }
+
+    /// P10: this state's manual-run create windows.
+    #[must_use]
+    pub fn run_create_windows(&self) -> &crate::routes::RunCreateWindows {
+        &self.inner.run_windows
     }
 
     /// The current time.

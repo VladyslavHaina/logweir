@@ -8438,3 +8438,379 @@ fn the_unread_verdict_is_for_an_inline_archive_run_only() {
          for that source stands"
     );
 }
+
+// ---------------------------------------------------------------------------
+// P10 — the manual-restore pool
+// ---------------------------------------------------------------------------
+
+fn leak(s: String) -> &'static str {
+    Box::leak(s.into_boxed_str())
+}
+
+/// A MANUAL restore in this namespace named `name`, with UID `uid`, created
+/// `created_minute` minutes past 11:00, in whatever state `status` says.
+fn pool_restore(name: &str, uid: &str, created_minute: u32, status: Value) -> Restore {
+    let mut value: Value =
+        serde_json::from_str(&restore_json(PLAN_BYTES, APPROVAL, name)).expect("JSON");
+    value["metadata"]["uid"] = serde_json::json!(uid);
+    value["metadata"]["creationTimestamp"] =
+        serde_json::json!(utc(2026, 9, 10, 11, created_minute).to_rfc3339());
+    if !status.is_null() {
+        value["status"] = status;
+    }
+    serde_json::from_value(value).expect("a Restore")
+}
+
+/// The verified approval `a1`, bound to exactly `restore` (its name and UID).
+fn approval_for(restore: &Restore) -> weirkeeper::crds::approval::Approval {
+    let mut value: Value =
+        serde_json::from_str(&approval_json(true, &plan_hash(), &plan_hash())).expect("JSON");
+    let name = restore.metadata.name.clone().expect("named");
+    let uid = restore.metadata.uid.clone().expect("uid");
+    value["spec"]["subjectRef"]["name"] = serde_json::json!(name);
+    value["status"]["verifiedSubjectRef"]["name"] = serde_json::json!(name);
+    value["status"]["verifiedSubjectRef"]["uid"] = serde_json::json!(uid);
+    serde_json::from_value(value).expect("an Approval")
+}
+
+/// [`admission_routes`] for ANY restore: its own Job, plan, bundle and status
+/// paths, its own approval, and bodies it owns.
+fn pool_routes(restore: &Restore) -> Vec<Route> {
+    let name = restore.metadata.name.clone().expect("named");
+    let approval = approval_for(restore);
+    let plan = plan_config_map(restore).expect("a plan");
+    let bundle =
+        approval_bundle_config_map(restore, &approval, &legacy_trust(), now()).expect("a bundle");
+    let mut job: Value = serde_json::from_str(&running_job_body()).expect("JSON");
+    job["metadata"]["name"] = serde_json::json!(name);
+    job["metadata"]["ownerReferences"][0]["name"] = serde_json::json!(name);
+    job["metadata"]["ownerReferences"][0]["uid"] =
+        serde_json::json!(restore.metadata.uid.clone().expect("uid"));
+    vec![
+        Route {
+            method: "GET",
+            path_suffix: leak(format!("/jobs/{name}")),
+            status: 404,
+            body: not_found_body("jobs.batch", &name),
+        },
+        Route {
+            method: "GET",
+            path_suffix: "/approvals/a1",
+            status: 200,
+            body: serde_json::to_string(&approval).expect("JSON"),
+        },
+        Route {
+            method: "GET",
+            path_suffix: "/kafkaclusters/scratch",
+            status: 200,
+            body: cluster_json(true, PLAINTEXT_AUTH),
+        },
+        Route {
+            method: "GET",
+            path_suffix: "/trustpolicies",
+            status: 200,
+            body: r#"{"apiVersion":"logweir.dev/v1alpha1","kind":"TrustPolicyList",
+                      "metadata":{"resourceVersion":"1"},"items":[]}"#
+                .to_string(),
+        },
+        Route {
+            method: "GET",
+            path_suffix: "/trustrosters/default",
+            status: 200,
+            body: roster_json(),
+        },
+        Route {
+            method: "POST",
+            path_suffix: "/configmaps",
+            status: 201,
+            body: serde_json::to_string(&plan).expect("JSON"),
+        },
+        Route {
+            method: "GET",
+            path_suffix: leak(format!("/configmaps/{name}-plan")),
+            status: 200,
+            body: serde_json::to_string(&plan).expect("JSON"),
+        },
+        Route {
+            method: "GET",
+            path_suffix: leak(format!("/configmaps/{name}-approval-bundle")),
+            status: 200,
+            body: serde_json::to_string(&bundle).expect("JSON"),
+        },
+        Route {
+            method: "POST",
+            path_suffix: "/jobs",
+            status: 201,
+            body: job.to_string(),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: leak(format!("/restores/{name}/status")),
+            status: 200,
+            body: serde_json::to_string(restore).expect("JSON"),
+        },
+    ]
+}
+
+/// One pooled pass of `candidate`, over the snapshot `peers`, with the
+/// installation policy's ceiling (`runs.maxManualRestoresActivePerNamespace`,
+/// default 2) and the reservation registry `reservations`.
+async fn pooled_restore_pass(
+    candidate: &Restore,
+    peers: &[Restore],
+    reservations: &weirkeeper::run_pool::Reservations,
+) -> Vec<SeenBody> {
+    let (client, _rec, bodies) = mock_client_recording_bodies(pool_routes(candidate));
+    let snapshot: Vec<Arc<Restore>> = peers.iter().cloned().map(Arc::new).collect();
+    let source = move || Some(snapshot.clone());
+    let pool = weirkeeper::run_pool::Pool {
+        peers: &source,
+        limit: None,
+        reservations,
+    };
+    weirkeeper::controllers::restore::reconcile_restore_pooled(
+        candidate,
+        &client,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+        &weirkeeper::job::RunnerImage::default(),
+        &logweir_core::approval_policy::ApprovalPolicySet::default(),
+        None,
+        &pool,
+    )
+    .await
+    .expect("the pass reconciles");
+    let seen = bodies.lock().expect("readable").clone();
+    seen
+}
+
+fn running_peer(name: &str, uid: &str, minute: u32) -> Restore {
+    pool_restore(
+        name,
+        uid,
+        minute,
+        serde_json::json!({"phase": "Running", "jobRef": {"name": name}}),
+    )
+}
+
+/// **N+1 admitted manual restores make N Jobs and one queued run** (N = 2,
+/// the default `runs.maxManualRestoresActivePerNamespace`, read from the
+/// installation policy because the row names no ceiling).
+///
+/// Two older manual restores hold both slots: the third — approved, admitted,
+/// its target reachable — writes `phase: Queued`, the scalar `reason`
+/// `ConcurrencyLimited`, `status.queue.limit: 2` and `Admitted=False`, and
+/// creates NO plan, NO approval bundle and NO Job. With one of the two
+/// finished, the next pass writes the ADMISSION RECORD (`queue: null`,
+/// `Admitted=True`) before anything else and creates its Job. A rehearsal's
+/// restore in the namespace spends nothing.
+///
+/// KILLS: gating before the admission (see
+/// `an_unapproved_restore_holds_and_never_queues`); a queued pass that
+/// materializes anything; counting a rehearsal's run; an admission that
+/// creates before it records.
+#[tokio::test]
+async fn n_plus_one_manual_restores_make_n_jobs_and_one_queued_run() {
+    let mut rehearsal = running_peer("rehearsal-weekly-1", "u-rehearsal", 1);
+    rehearsal.spec.authorization = Some(weirkeeper::crds::restore::RestoreAuthorization {
+        kind: weirkeeper::crds::restore::AuthorizationKind::Standing,
+        approval_ref: weirkeeper::crds::LocalRef {
+            name: "standing".into(),
+        },
+        rehearsal_schedule_ref: weirkeeper::crds::LocalRef {
+            name: "weekly".into(),
+        },
+    });
+    let candidate = pool_restore("restore-c", "u-restore-c", 30, Value::Null);
+    let reservations = weirkeeper::run_pool::Reservations::new();
+
+    // FULL: two manual restores run (the rehearsal does not count).
+    let full = pooled_restore_pass(
+        &candidate,
+        &[
+            running_peer("restore-a", "u-restore-a", 5),
+            running_peer("restore-b", "u-restore-b", 6),
+            rehearsal.clone(),
+            candidate.clone(),
+        ],
+        &reservations,
+    )
+    .await;
+    assert_eq!(
+        post_count(&full, "/jobs"),
+        0,
+        "no Job while the pool is full"
+    );
+    assert_eq!(
+        post_count(&full, "/configmaps"),
+        0,
+        "no plan and no bundle either"
+    );
+    let statuses = patched_statuses(&full);
+    assert_eq!(statuses.len(), 1, "one status write: {statuses:?}");
+    let queued = &statuses[0];
+    assert_eq!(queued["phase"], "Queued");
+    assert_eq!(queued["reason"], "ConcurrencyLimited");
+    assert_eq!(queued["queue"], serde_json::json!({"limit": 2}));
+    let admitted = conditions_of(queued)
+        .into_iter()
+        .find(|(t, _, _)| t == "Admitted")
+        .expect("the Admitted condition");
+    assert_eq!(
+        (admitted.1.as_str(), admitted.2.as_str()),
+        ("False", "ConcurrencyLimited")
+    );
+    assert!(reservations.is_empty(), "a queued run reserves nothing");
+
+    // A SLOT FREES: the queued restore is admitted and started.
+    let mut queued_restore = candidate.clone();
+    let mut status_value = serde_json::to_value(&queued_restore.status).expect("serialises");
+    apply_merge_patch(&mut status_value, queued);
+    queued_restore.status = serde_json::from_value(status_value).expect("a RestoreStatus");
+    let freed = pooled_restore_pass(
+        &queued_restore,
+        &[
+            pool_restore(
+                "restore-a",
+                "u-restore-a",
+                5,
+                serde_json::json!({"phase": "Succeeded"}),
+            ),
+            running_peer("restore-b", "u-restore-b", 6),
+            rehearsal,
+            queued_restore.clone(),
+        ],
+        &reservations,
+    )
+    .await;
+    assert_eq!(
+        post_count(&freed, "/jobs"),
+        1,
+        "the admitted restore's Job is created"
+    );
+    let first_write = freed
+        .iter()
+        .position(|b| b.method != "GET")
+        .expect("a write");
+    assert_eq!(
+        freed[first_write].method, "PATCH",
+        "the admission record is written before anything is created"
+    );
+    let writes = patched_statuses(&freed);
+    assert_eq!(
+        writes[0]["queue"],
+        Value::Null,
+        "the record clears the queue: {writes:?}"
+    );
+    assert_eq!(
+        conditions_of(&writes[0])
+            .into_iter()
+            .find(|(t, _, _)| t == "Admitted")
+            .map(|(_, s, r)| (s, r)),
+        Some(("True".to_string(), "Admitted".to_string()))
+    );
+    assert_eq!(
+        writes.last().expect("a running write")["phase"],
+        "Running",
+        "and the pass ends running"
+    );
+}
+
+/// **H1 (Tier-A review), THE PoC's ROW 6: three console restores released
+/// together from their approval hold make exactly TWO Jobs.**
+///
+/// Every console restore goes through `Pending` while its approval is
+/// verified, with its 30-second requeues aligned. When the approvals verify,
+/// the three passes run within milliseconds of each other, and each one's
+/// snapshot still shows the other two `Pending` — the store has not delivered
+/// anybody's admission yet. The first round of the pool counted a `Pending`
+/// peer as nothing and admitted all three (probe P2). Now each admission is
+/// RESERVED under the pool's one lock before the pass creates anything, so the
+/// third pass counts the first two, whatever the store says, and is queued.
+///
+/// KILLS: deciding from the snapshot alone (three Jobs); a reservation that is
+/// not counted for a peer whose snapshot phase is `Pending`.
+#[tokio::test]
+async fn three_restores_released_from_their_approval_hold_together_make_two_jobs() {
+    let held = serde_json::json!({
+        "phase": "Pending",
+        "reason": "ApprovalNotVerified",
+        "conditions": [{"type": "Admitted", "status": "False", "reason": "ApprovalNotVerified",
+                        "lastTransitionTime": "2026-09-10T11:00:05Z"}]
+    });
+    let restores = [
+        pool_restore("restore-1", "u-restore-1", 0, held.clone()),
+        pool_restore("restore-2", "u-restore-2", 0, held.clone()),
+        pool_restore("restore-3", "u-restore-3", 0, held),
+    ];
+    let mut jobs = 0;
+    let mut queued = Vec::new();
+    // THE SAME STALE SNAPSHOT FOR ALL THREE, in two pass orders.
+    for order in [[0, 1, 2], [2, 0, 1]] {
+        let reservations = weirkeeper::run_pool::Reservations::new();
+        let mut order_jobs = 0;
+        for i in order {
+            let seen = pooled_restore_pass(&restores[i], &restores, &reservations).await;
+            order_jobs += post_count(&seen, "/jobs");
+            if patched_statuses(&seen)
+                .iter()
+                .any(|s| s["phase"] == "Queued")
+            {
+                queued.push(restores[i].metadata.name.clone().unwrap());
+            }
+        }
+        assert_eq!(order_jobs, 2, "exactly the ceiling, pass order {order:?}");
+        jobs += order_jobs;
+    }
+    assert_eq!(jobs, 4);
+    assert_eq!(queued.len(), 2, "one queued run per order: {queued:?}");
+}
+
+/// **An unapproved restore holds under ITS OWN reason and never takes a
+/// place in line**, even when the pool is full: the gate comes after the
+/// admission.
+#[tokio::test]
+async fn an_unapproved_restore_holds_and_never_queues() {
+    let (client, _rec, bodies) = mock_client_recording_bodies(admission_routes(
+        200,
+        approval_json(false, &plan_hash(), &plan_hash()),
+        200,
+        cluster_json(true, PLAINTEXT_AUTH),
+    ));
+    let candidate = restore();
+    let full: Vec<Arc<Restore>> = vec![
+        Arc::new(running_peer("restore-a", "u-restore-a", 5)),
+        Arc::new(running_peer("restore-b", "u-restore-b", 6)),
+    ];
+    let source = move || Some(full.clone());
+    let reservations = weirkeeper::run_pool::Reservations::new();
+    let pool = weirkeeper::run_pool::Pool {
+        peers: &source,
+        limit: None,
+        reservations: &reservations,
+    };
+    weirkeeper::controllers::restore::reconcile_restore_pooled(
+        &candidate,
+        &client,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+        &weirkeeper::job::RunnerImage::default(),
+        &logweir_core::approval_policy::ApprovalPolicySet::default(),
+        None,
+        &pool,
+    )
+    .await
+    .expect("reconciles");
+    let seen = bodies.lock().expect("readable").clone();
+    let statuses = patched_statuses(&seen);
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(
+        statuses[0]["phase"], "Pending",
+        "an approval hold: {statuses:?}"
+    );
+    assert_eq!(statuses[0]["reason"], REASON_APPROVAL_NOT_VERIFIED);
+    assert!(statuses[0].get("queue").is_none());
+    assert!(reservations.is_empty(), "a held run reserves nothing");
+}

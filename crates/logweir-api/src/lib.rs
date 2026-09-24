@@ -257,5 +257,6 @@ pub fn state_from_parts(
         shared,
         kubernetes_principal: config.kubernetes_principal.clone(),
         approval: Arc::new(preflight.approval),
+        run_rate_limits: config.run_rate_limits,
     }))
 }

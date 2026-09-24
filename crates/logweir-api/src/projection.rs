@@ -395,8 +395,25 @@ pub fn backup(object: &BackupCr) -> Backup {
                 mode: a.mode.clone(),
                 username: a.username.clone(),
             }),
+        queue: queue_view(operation.state, status.and_then(|s| s.queue.as_ref())),
         operation: summary(&operation),
     }
+}
+
+/// P10's `queue` block, published ONLY while the run is queued: a block the
+/// controller has not cleared yet beside a run that already left the queue is
+/// not a statement about that run any more.
+fn queue_view(
+    state: crate::contract::OperationState,
+    queue: Option<&weirkeeper::crds::RunQueue>,
+) -> Option<crate::contract::RunQueueView> {
+    if state != crate::contract::OperationState::Queued {
+        return None;
+    }
+    queue.map(|q| crate::contract::RunQueueView {
+        limit: q.limit,
+        authorization_expires_at: q.authorization_expires_at,
+    })
 }
 
 /// A `Restore`. `with_plan_bytes` is true on the single-object read only.
@@ -439,6 +456,7 @@ pub fn restore(object: &RestoreCr, with_plan_bytes: bool) -> Restore {
             .into_iter()
             .take(MAX_LIST_ENTRIES)
             .collect(),
+        queue: queue_view(operation.state, status.and_then(|s| s.queue.as_ref())),
         operation: summary(&operation),
     }
 }

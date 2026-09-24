@@ -615,7 +615,7 @@ spec:
                 nullable: true
                 type: string
               phase:
-                description: 'Where the run is: `Pending`, `Running`, `Succeeded`, `Failed`, `Refused`. Task 20 owns the phase vocabulary.'
+                description: 'Where the run is: `Pending`, `Queued`, `Running`, `Succeeded`, `Failed`, `Refused`. `Queued` is an admitted manual restore waiting for a slot in its namespace''s manual-restore pool (`status.queue`). Task 20 owns the phase vocabulary.'
                 nullable: true
                 type: string
               progress:
@@ -752,6 +752,22 @@ spec:
                     type: string
                 required:
                 - stage
+                type: object
+              queue:
+                description: 'Present while a MANUAL restore — admitted, its approval verified — waits for a slot in its namespace''s manual-restore pool (`phase: Queued`): the ceiling it is queued behind. No plan, no bundle and no Job exist for it yet; it starts in creation order when a slot frees. Absent on a rehearsal''s `Restore` (never queued), on every other run, and on anything an older controller wrote.'
+                nullable: true
+                properties:
+                  authorizationExpiresAt:
+                    description: 'A queued `Restore`''s approval deadline: the signed `expires_at` of its authorization. The queue does NOT extend it — a restore still queued at this instant is refused `AuthorizationExpired`. Absent on a `Backup`, and for an approval that states no expiry.'
+                    format: date-time
+                    nullable: true
+                    type: string
+                  limit:
+                    description: 'The ceiling this run is queued behind: the installation policy''s `runs.maxManualBackupsActivePerNamespace` (a `Backup`) or `runs.maxManualRestoresActivePerNamespace` (a `Restore`) when the run was queued.'
+                    format: int64
+                    type: integer
+                required:
+                - limit
                 type: object
               reason:
                 description: |-

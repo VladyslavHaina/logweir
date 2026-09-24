@@ -670,12 +670,88 @@ pub fn check_create_rate(
     route: &str,
     per_window: u32,
 ) -> Result<(), ApiError> {
-    let now = state.now();
-    let key = format!("{}\n{namespace}\n{route}", actor.id());
-    let mut windows = CHECK_WINDOWS
-        .get_or_init(|| std::sync::Mutex::new(BTreeMap::new()))
+    count_in_window(
+        CHECK_WINDOWS.get_or_init(|| std::sync::Mutex::new(BTreeMap::new())),
+        state.now(),
+        format!("{}\n{namespace}\n{route}", actor.id()),
+        per_window,
+        "Too many checks were started in this namespace; wait for the window to reset.",
+    )
+}
+
+// ======================================================================
+// P10: the manual-run create limit
+// ======================================================================
+
+/// P10: the default ceiling on manual `Backup` creates ("Back up now") per
+/// actor, per namespace, per minute.
+///
+/// TEN. A person clicking "Back up now" does it once and waits; a script that
+/// needs more than ten ad-hoc captures a minute in one namespace wants a
+/// schedule. The number is the administrator's (`api.console.rateLimits`); the
+/// controller's `runs.maxManualBackupsActivePerNamespace` is what bounds the
+/// PODS, and it holds whatever this says.
+pub const MANUAL_BACKUP_CREATES_PER_MINUTE: u32 = 10;
+/// P10: the default ceiling on manual `Restore` creates per actor, per
+/// namespace, per minute. Five: a restore is an incident action with a human
+/// approval behind it.
+pub const MANUAL_RESTORE_CREATES_PER_MINUTE: u32 = 5;
+/// The largest per-minute ceiling a configuration may set. Above this the
+/// limit bounds nothing a person could produce by hand.
+pub const MAX_RUN_CREATES_PER_MINUTE: u32 = 600;
+
+/// The two manual-run create ceilings, per actor, per namespace, per minute —
+/// `rateLimits` in the configuration file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RunRateLimits {
+    /// `POST …/backups`.
+    pub manual_backups_per_minute: u32,
+    /// `POST …/restores`.
+    pub manual_restores_per_minute: u32,
+}
+
+impl Default for RunRateLimits {
+    fn default() -> Self {
+        Self {
+            manual_backups_per_minute: MANUAL_BACKUP_CREATES_PER_MINUTE,
+            manual_restores_per_minute: MANUAL_RESTORE_CREATES_PER_MINUTE,
+        }
+    }
+}
+
+/// The manual-run create windows, keyed by `(actor, namespace, route)` — ONE
+/// PER APPLICATION STATE, not a process global.
+///
+/// The check limiter above is a process global only because it could not
+/// widen `Settings`; this one lives in the state it limits, so two test apps
+/// never share a window and nothing needs a reset hook. It is still per
+/// PROCESS in the sense that matters for deployment: two console replicas each
+/// permit the configured rate. That is the trade the check limiter states,
+/// taken for the same reason — this is a bound on how fast one person can
+/// queue runs, and the ceiling on how many run AT ONCE is the controller's
+/// manual-run pool, which no API can talk past.
+#[derive(Default)]
+pub struct RunCreateWindows {
+    windows: std::sync::Mutex<BTreeMap<String, CheckWindow>>,
+}
+
+impl std::fmt::Debug for RunCreateWindows {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RunCreateWindows")
+    }
+}
+
+/// Count one window and decide — the one fixed-window rule both limiters use.
+fn count_in_window(
+    windows: &std::sync::Mutex<BTreeMap<String, CheckWindow>>,
+    now: chrono::DateTime<chrono::Utc>,
+    key: String,
+    per_window: u32,
+    message: &'static str,
+) -> Result<(), ApiError> {
+    let mut windows = windows
         .lock()
-        .expect("the check-window lock is never poisoned");
+        .expect("the rate-window lock is never poisoned");
     if windows.len() > MAX_TRACKED_CHECK_KEYS {
         windows.clear();
     }
@@ -690,15 +766,69 @@ pub fn check_create_rate(
     }
     if window.count >= per_window {
         let remaining = CHECK_RATE_WINDOW_SECONDS - (now - window.started).num_seconds();
-        let mut error = ApiError::new(
-            ProblemCode::RateLimited,
-            "Too many checks were started in this namespace; wait for the window to reset.",
-        );
+        let mut error = ApiError::new(ProblemCode::RateLimited, message);
         error.retry_after_seconds = Some(remaining.clamp(1, CHECK_RATE_WINDOW_SECONDS) as u64);
         return Err(error);
     }
     window.count += 1;
     Ok(())
+}
+
+/// Which manual run a create is for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ManualRun {
+    /// `POST …/backups` ("Back up now", "Run first backup now").
+    Backup,
+    /// `POST …/restores`.
+    Restore,
+}
+
+/// P10: count one manual-run create and decide.
+///
+/// KEYED BY `(actor, namespace, route)`, exactly as the check limiter is: the
+/// actor is the stable `issuer#subject` id, never a display name, so two
+/// people are two windows and one person in two namespaces is two windows. It
+/// counts every create that passed authorization and validation — a replay of
+/// an earlier key included, because telling a replay from a first create
+/// needs the read this check exists to avoid; a replayed request refused here
+/// is answered `200` with the same object once the window resets, and cannot
+/// create a second one either way.
+///
+/// # Errors
+///
+/// `rate_limited` (429) with `Retry-After` when the window is full.
+pub fn run_create_rate(
+    state: &AppState,
+    actor: &Actor,
+    namespace: &str,
+    run: ManualRun,
+) -> Result<(), ApiError> {
+    let limits = state.run_rate_limits();
+    let (route, per_window, message) = match run {
+        ManualRun::Backup => (
+            "POST /api/v1/namespaces/{ns}/backups",
+            limits.manual_backups_per_minute,
+            "Too many backups were started in this namespace in the last minute; wait for the \
+             window to reset. Runs already accepted are queued and start as slots free.",
+        ),
+        ManualRun::Restore => (
+            "POST /api/v1/namespaces/{ns}/restores",
+            limits.manual_restores_per_minute,
+            "Too many restores were started in this namespace in the last minute; wait for the \
+             window to reset.",
+        ),
+    };
+    let result = count_in_window(
+        &state.run_create_windows().windows,
+        state.now(),
+        format!("{}\n{namespace}\n{route}", actor.id()),
+        per_window,
+        message,
+    );
+    if result.is_err() {
+        actor.audit.set_failure("rate_limited");
+    }
+    result
 }
 
 /// Forget every counted window. A test hook: the map is a process global, so

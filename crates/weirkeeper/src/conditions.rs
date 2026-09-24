@@ -592,6 +592,27 @@ pub const CONDITION_ADMITTED: &str = "Admitted";
 /// The `reason` on an [`CONDITION_ADMITTED`] condition that passed.
 pub const REASON_ADMITTED: &str = "Admitted";
 
+/// The `reason` on an `Admitted=False` condition while a MANUAL run waits for
+/// a slot in its namespace's manual-run pool — P10, [`crate::run_pool`].
+///
+/// THE SAME SPELLING AS
+/// [`logweir_core::check_contract::CheckCode::ConcurrencyLimited`], which a
+/// queued `Preflight` and `TopicDiscovery` already carry: from a person's side
+/// "this namespace is busy, this is queued" is one fact, and one word for it is
+/// one remedy a console has to explain. A HOLD, not a verdict — it is not in
+/// [`TERMINAL_STATES`] and it clears itself when a slot frees.
+pub const REASON_CONCURRENCY_LIMITED: &str = "ConcurrencyLimited";
+
+/// `phase` for a manual run waiting in its namespace's manual-run pool — P10.
+///
+/// NONTERMINAL, and safe to add for the reason `PHASE_RESOLVING` states: every
+/// terminal predicate treats a phase it does not recognise as active, so an
+/// older controller handed a `Queued` object simply runs it (it has no pool).
+/// Nothing exists for a queued run — no plan `ConfigMap`, no Job, no execution
+/// claim — which is what separates it from `Pending` (a hold on a missing
+/// destination or approval) and from `Running`.
+pub const PHASE_QUEUED: &str = "Queued";
+
 /// The `reason` while a `Restore` waits for its `Approval` — **interface
 /// I19**, and it is a HOLD and not a verdict.
 ///
@@ -758,6 +779,7 @@ pub const CONDITION_REASONS: &[&str] = &[
     CONDITION_JOB_CREATED,
     REASON_ADMITTED,
     REASON_APPROVAL_NOT_VERIFIED,
+    REASON_CONCURRENCY_LIMITED,
     REASON_APPROVAL_BUNDLE_MATERIALIZATION_FAILED,
     REASON_VERIFIED,
     REASON_VERIFICATION_INVALID,

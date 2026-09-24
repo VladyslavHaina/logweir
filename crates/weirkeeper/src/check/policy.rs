@@ -77,6 +77,60 @@ impl Default for ChecksPolicy {
     }
 }
 
+/// Manual-run concurrency limits — the `runs` block (P10, 2026-09-24).
+///
+/// # Why a manual run has a ceiling at all
+///
+/// A `BackupSchedule` bounds its own runs (`concurrencyPolicy`,
+/// `maxActiveRuns`), and D1 §8.3 keeps manual runs OUTSIDE that on purpose:
+/// "Back up now" must work while the nightly run is still going. Until this
+/// block nothing bounded them at all, and one operator's hundred accepted
+/// `POST …/backups` became a hundred simultaneous runner pods — the PoC node
+/// hit its 110-pod limit and went `NotReady`. This is the same argument
+/// [`ChecksPolicy`] makes for interactive checks, applied to the other
+/// interactive surface: a ceiling on how many runner Jobs a namespace's
+/// operators can have ACTIVE at once, with everything above it queued in
+/// creation order (`crate::run_pool`).
+///
+/// # What it does not touch
+///
+/// Scheduled, catch-up and retry `Backup`s, and a `RehearsalSchedule`'s
+/// `Restore`s, are neither counted nor queued: their own policy bounds them,
+/// and a slot that waited behind a browser click would miss its window. The
+/// ceilings are the administrator's (this `ConfigMap` lives in the release
+/// namespace), never a tenant's.
+///
+/// # Absent is the defaults
+///
+/// A policy document written before this block existed parses with
+/// [`RunsPolicy::default`], so an upgrade that keeps an older `ConfigMap`
+/// still bounds manual runs. Inside the block both fields are required, as in
+/// `checks`: a half-written block is a refused document, not a guessed one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct RunsPolicy {
+    /// Manual `Backup` runs ("Back up now") ACTIVE at once in one namespace.
+    pub max_manual_backups_active_per_namespace: u32,
+    /// Manual `Restore` runs ACTIVE at once in one namespace.
+    pub max_manual_restores_active_per_namespace: u32,
+}
+
+impl Default for RunsPolicy {
+    fn default() -> Self {
+        Self {
+            // FOUR, THE `checks` NUMBER. One namespace's operators rarely
+            // need more than a handful of ad-hoc captures at once, and four
+            // amd64 runner pods is what the smallest supported node carries
+            // beside the controller, the console and the checks.
+            max_manual_backups_active_per_namespace: 4,
+            // TWO. A restore WRITES into a Kafka cluster; two at once is
+            // already more than an incident usually wants, and the rest wait
+            // with their approval intact.
+            max_manual_restores_active_per_namespace: 2,
+        }
+    }
+}
+
 /// Topic-discovery policy — D2 §4.4's `discovery` block.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -204,6 +258,10 @@ pub struct Policy {
     pub evidence: EvidencePolicy,
     #[serde(default)]
     pub legacy_archive_addressing: LegacyArchiveAddressing,
+    /// Manual-run ceilings (P10). Absent in a document written before the
+    /// block existed, which is [`RunsPolicy::default`].
+    #[serde(default)]
+    pub runs: RunsPolicy,
 }
 
 impl Policy {
@@ -222,6 +280,7 @@ impl Policy {
             engine: EnginePolicy::default(),
             evidence: EvidencePolicy::default(),
             legacy_archive_addressing: LegacyArchiveAddressing::default(),
+            runs: RunsPolicy::default(),
         }
     }
 
@@ -296,6 +355,16 @@ impl Policy {
             self.checks.max_evidence_fetch_active_per_namespace >= 1,
             "checks.maxEvidenceFetchActivePerNamespace",
             "must be at least 1",
+        )?;
+        rule(
+            self.runs.max_manual_backups_active_per_namespace >= 1,
+            "runs.maxManualBackupsActivePerNamespace",
+            "must be at least 1; a limit of 0 would queue every manual Backup forever",
+        )?;
+        rule(
+            self.runs.max_manual_restores_active_per_namespace >= 1,
+            "runs.maxManualRestoresActivePerNamespace",
+            "must be at least 1; a limit of 0 would queue every manual Restore forever",
         )?;
         rule(
             self.discovery.default_max_topics >= 1

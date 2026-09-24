@@ -441,6 +441,14 @@ pub async fn create(
         }
     }
 
+    // P10: THE PER-ACTOR CREATE LIMIT — `429 rate_limited` with
+    // `Retry-After` past `rateLimits.manualBackupsPerMinute` per actor, per
+    // namespace, per minute. After every refusal that is about the request
+    // itself (a malformed run does not spend the window), before the object
+    // exists. It bounds how fast one person can QUEUE runs; how many RUN at
+    // once is the controller's manual-run pool, which holds whatever this
+    // lets through.
+    super::run_create_rate(&state, &actor, &ns, super::ManualRun::Backup)?;
     let created = create_idempotent(
         &state,
         &actor,

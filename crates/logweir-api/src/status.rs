@@ -119,6 +119,9 @@ fn current_reason<'a>(o: &Observed<'a>) -> Option<&'a str> {
         Some("Failed") => by_type("Failed"),
         Some("Running") => by_type("JobCreated"),
         Some("Pending") => by_type("Admitted").or_else(|| by_type("ApprovalBundleReady")),
+        // P10: a manual run waiting for a slot. `Admitted=False` carries
+        // `ConcurrencyLimited` and the sentence naming the ceiling.
+        Some("Queued") => by_type("Admitted"),
         _ => None,
     }
 }
@@ -149,6 +152,15 @@ fn state_of(o: &Observed<'_>) -> (OperationState, Option<String>) {
         Some("Running") => (
             OperationState::Running,
             reason.or_else(|| Some("JobCreated".to_string())),
+        ),
+        // P10: THE CONTROLLER'S OWN WORD, NOT AN INFERENCE. A manual run that
+        // waits for a slot in its namespace's manual-run pool is written
+        // `phase: Queued` by `weirkeeper::run_pool`'s gate, so this is the
+        // resource's phase byte for byte — unlike the `queued` STAGE, which
+        // the progress channel alone may draw (a Job with no pod yet).
+        Some("Queued") => (
+            OperationState::Queued,
+            reason.or_else(|| Some("ConcurrencyLimited".to_string())),
         ),
         Some(phase @ ("Succeeded" | "Failed")) => {
             // A `Pending` block is not a verdict (D2 §3.9 step 3): an
@@ -1043,7 +1055,10 @@ fn stage_of(progress: Option<&RunProgress>, phase: Option<&str>) -> Option<Opera
         return Some(stage);
     }
     match phase {
-        None | Some("Pending") => Some(OperationStage::Admission),
+        // A pool-queued run (P10) is at ADMISSION, not at the `Queued` stage:
+        // that stage is "a Job exists and no pod is running yet", and a queued
+        // manual run has no Job at all.
+        None | Some("Pending" | "Queued") => Some(OperationStage::Admission),
         Some("Resolving") => Some(OperationStage::Preparing),
         Some("Running") => Some(OperationStage::Running),
         Some("Succeeded" | "Failed" | "Refused") => Some(OperationStage::Finished),

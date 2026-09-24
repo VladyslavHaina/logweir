@@ -417,8 +417,10 @@ pub struct BackupSpec {
 #[derive(Deserialize, Serialize, Clone, Debug, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct BackupStatus {
-    /// Where the run is: `Pending`, `Resolving`, `Running`, `Succeeded`,
-    /// `Failed`, `Refused`. `Resolving` is dynamic topic selection only — the
+    /// Where the run is: `Pending`, `Queued`, `Resolving`, `Running`,
+    /// `Succeeded`, `Failed`, `Refused`. `Queued` is a manual run waiting for a
+    /// slot in its namespace's manual-run pool (`status.queue`); nothing has
+    /// been created for it. `Resolving` is dynamic topic selection only — the
     /// run's own discovery Job is deciding which topics it covers, and no
     /// runner Job exists yet. A free-form string rather than an enum, because
     /// Task 17 owns the phase vocabulary and no agreement test in this plan
@@ -497,6 +499,13 @@ pub struct BackupStatus {
     /// The Job that ran, or is running, this backup.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_ref: Option<LocalRef>,
+    /// Present while a MANUAL run waits for a slot in its namespace's
+    /// manual-run pool (`phase: Queued`): the ceiling it is queued behind. No
+    /// plan, no Job and no execution claim exist for a queued run; it starts
+    /// in creation order when a slot frees. Absent on every other run, and on
+    /// anything an older controller wrote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue: Option<super::RunQueue>,
     /// What the run's topic resolution found, and what it may claim to have
     /// covered. Absent on a run frozen before dynamic selection existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]

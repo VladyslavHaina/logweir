@@ -1164,6 +1164,38 @@ export function phaseBadge(phase) {
   return badge(kind, phase);
 }
 
+/** A RUN's recorded phase as a badge: [`phaseBadge`], except that a manual run
+ *  waiting for a slot in its namespace's manual-run pool (P10) also says how
+ *  many runs of its kind may be active there at once -- "Queued (limit 4
+ *  active)". The number is the controller's own `status.queue.limit`, COPIED
+ *  and never computed here; a `Queued` phase with no such block (nothing an
+ *  older controller writes has one) is the plain `Queued` badge, and every
+ *  other phase is exactly [`phaseBadge`]'s. */
+export function runPhaseBadge(status) {
+  const s = status || {};
+  const queue = s.queue || {};
+  if (s.phase === "Queued" && Number.isInteger(queue.limit) && queue.limit > 0) {
+    // A QUEUED RESTORE'S APPROVAL KEEPS ITS CLOCK (P10 review M2): the queue
+    // does not extend an approval's maximum age, so the deadline the
+    // controller copied onto the object is part of what "queued" means here.
+    const deadline = typeof queue.authorizationExpiresAt === "string" &&
+      queue.authorizationExpiresAt.length > 0
+      ? "; approval expires " + queue.authorizationExpiresAt
+      : "";
+    return badge("phase-queued", "Queued (limit " + queue.limit + " active" + deadline + ")");
+  }
+  return phaseBadge(s.phase);
+}
+
+/** What a queued manual run is, in the page's own fixed words (P10). */
+export const QUEUED_RUN_SENTENCE =
+  "Queued: this manual run is waiting for a slot. Its namespace lets a fixed number of manual " +
+  "runs of this kind be active at once, and this one starts, in creation order, when one of " +
+  "them finishes. Nothing has been created for it yet -- no plan and no Job. Scheduled runs " +
+  "are not counted and are never queued. A queued restore keeps its approval's deadline: the " +
+  "queue does not extend it, so a restore still waiting when its approval expires is refused " +
+  "and must be confirmed again.";
+
 // ===========================================================================
 // D2 (PLAT-08, PLAT-09.1, PLAT-03): the words for destinations, topic
 // visibility and operation readiness

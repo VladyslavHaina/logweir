@@ -162,6 +162,10 @@ pub mod protection;
 pub mod rehearsal;
 pub mod retention;
 pub mod retention_plan;
+/// P10: the manual-run pool — how many "Back up now" and manual-restore runner
+/// Jobs one namespace may have active at once, and the FIFO order the rest wait
+/// in. Pure; `controllers::{backup,restore}` are the thin halves.
+pub mod run_pool;
 pub mod scope;
 pub mod slot;
 pub mod testing;

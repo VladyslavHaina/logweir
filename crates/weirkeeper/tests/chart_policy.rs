@@ -260,6 +260,37 @@ fn the_schema_bounds_are_the_parsers_own_rules() {
             "`checks.discovery.{field}` must be bounded at >= 1"
         );
     }
+    // P10: the manual-run pool ceilings — `validate()` refuses a zero, so the
+    // schema must, and both are required (a half block is a refused document).
+    let runs = &schema["properties"]["runs"];
+    for field in [
+        "maxManualBackupsActivePerNamespace",
+        "maxManualRestoresActivePerNamespace",
+    ] {
+        assert_eq!(
+            runs["properties"][field]["minimum"].as_u64(),
+            Some(1),
+            "`runs.{field}` must be bounded at >= 1, as `Policy::validate` bounds it"
+        );
+        assert!(
+            runs["required"]
+                .as_array()
+                .is_some_and(|r| r.iter().any(|f| f == field)),
+            "`runs.{field}` is required: `RunsPolicy` has no per-field default"
+        );
+        let mut zero: serde_json::Value = serde_json::json!({
+            "version": 1,
+            "runs": {
+                "maxManualBackupsActivePerNamespace": 4,
+                "maxManualRestoresActivePerNamespace": 2
+            }
+        });
+        zero["runs"][field] = serde_json::json!(0);
+        assert!(
+            policy::parse(zero.to_string().as_bytes()).is_err(),
+            "`runs.{field}: 0` is refused by the parser, as the schema refuses it"
+        );
+    }
 }
 
 /// **A document at every schema extreme is a document the parser accepts.**
@@ -301,7 +332,11 @@ fn the_extremes_the_schema_admits_are_documents_the_parser_accepts() {
             "engine": {"allowUnverifiedCustomCa": false},
             "evidence": {"controllerIdentityLocations": []},
             "legacyArchiveAddressing": {"endpoint": "", "region": "",
-                                        "allowHttp": false, "virtualHostedStyle": false}
+                                        "allowHttp": false, "virtualHostedStyle": false},
+            "runs": {
+                "maxManualBackupsActivePerNamespace": n(1, 1_000_000),
+                "maxManualRestoresActivePerNamespace": n(1, 1_000_000)
+            }
         })
     };
     for maxima in [false, true] {
@@ -408,4 +443,45 @@ fn the_policy_template_names_both_cross_field_rules_in_its_refusals() {
         !code.contains("{{- if false -}}"),
         "a disabled guard in the policy template"
     );
+}
+
+/// **P10 review L2: the numbers the chart renders NOTHING for are the
+/// controller's own defaults.** `templates/policy.yaml` omits the `runs` block
+/// when `runs.*` equals `RunsPolicy::default()` (so an older controller, which
+/// refuses an unknown block, keeps reading a default install's policy), and
+/// the values file ships those same defaults. Three spellings of one pair,
+/// read together here.
+#[test]
+fn the_runs_block_is_omitted_exactly_at_the_controllers_defaults() {
+    let defaults = policy::RunsPolicy::default();
+    let values: serde_yaml::Value = serde_yaml::from_str(
+        &std::fs::read_to_string(repo().join("charts/logweir/values.yaml")).expect("values"),
+    )
+    .expect("YAML");
+    assert_eq!(
+        values["runs"]["maxManualBackupsActivePerNamespace"].as_u64(),
+        Some(u64::from(defaults.max_manual_backups_active_per_namespace))
+    );
+    assert_eq!(
+        values["runs"]["maxManualRestoresActivePerNamespace"].as_u64(),
+        Some(u64::from(defaults.max_manual_restores_active_per_namespace))
+    );
+    let template = std::fs::read_to_string(repo().join("charts/logweir/templates/policy.yaml"))
+        .expect("the template");
+    let guard = format!(
+        "(ne $runsBackups {}) (ne $runsRestores {})",
+        defaults.max_manual_backups_active_per_namespace,
+        defaults.max_manual_restores_active_per_namespace
+    );
+    assert!(
+        template.contains(&guard),
+        "templates/policy.yaml must carry `{guard}`"
+    );
+    // AND THE DEFAULT RENDER HAS NO BLOCK, which the parser reads as defaults.
+    let rendered = rendered_policies("default")
+        .remove("weirkeeper-policy")
+        .expect("the default render carries a policy");
+    let parsed = policy::parse(rendered.as_bytes()).expect("the default render parses");
+    assert!(!rendered.contains("\"runs\""), "{rendered}");
+    assert_eq!(parsed.runs, defaults);
 }

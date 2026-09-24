@@ -860,6 +860,7 @@ function projectBackup(item) {
   if (item.locationDigest !== null) {
     status.locationDigest = item.locationDigest;
   }
+  queueOf(item, status);
   if (item.observedAuth !== null) {
     const auth = {};
     if (item.observedAuth.mode !== null) {
@@ -909,8 +910,21 @@ function projectRestore(item) {
   if (item.newTopics.length > 0) {
     status.newTopics = item.newTopics.slice();
   }
+  queueOf(item, status);
   object.status = status;
   return object;
+}
+
+// P10: THE CEILING A QUEUED MANUAL RUN WAITS BEHIND, under the custom
+// resource's own name (`status.queue.limit`), so one `runPhaseBadge` reads it
+// in both modes. The API publishes the block only while the run is queued.
+function queueOf(item, status) {
+  if (item.queue !== null && item.queue !== undefined) {
+    status.queue = { limit: item.queue.limit };
+    if (item.queue.authorizationExpiresAt !== null && item.queue.authorizationExpiresAt !== undefined) {
+      status.queue.authorizationExpiresAt = item.queue.authorizationExpiresAt;
+    }
+  }
 }
 
 function projectApproval(item) {

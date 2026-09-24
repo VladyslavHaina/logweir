@@ -644,7 +644,7 @@ Shipped as `config/samples/backup-manual.yaml` (the CLI path is `kubectl --conte
 - Body A (from schedule): `{"scheduleRef":{"name":"nightly","expectedGeneration":7}, "readinessAcknowledgement"?:{"preflight":"…","state":"notReady|unknown"}}`. The API reads the schedule and copies sourceRef/selection/archive/deadline and `{uid, generation, runPolicySha256}`. Policy fields in the body are rejected (`422 validation_failed`).
 - Body B (ad-hoc from a cluster): `{"sourceRef":{"name":"source"},"topicSelection":{…},"legacyArchive":{"url":"…","secretRef":{"name":"…"}},"deadlineSeconds"?:3600}` (`destinationRef` replaces `legacyArchive` after PLAT-08).
 - Name: `logweir-manual-` + first 26 chars of lowercase, unpadded RFC 4648 base32 of `sha256` over the length-prefixed fields `(issuer, sub, namespace, "POST /api/v1/namespaces/{ns}/backups", key)`; annotations carry the request hash and key hash (never the key).
-- Responses: `201` created; `200` replay (same key, same request hash) returning the same UID; `409 idempotency_conflict` (same key, different request hash); `409 policy_changed` (`expectedGeneration` ≠ current; body includes the current generation and `runPolicySha256`); `404 not_found` (schedule); `422 validation_failed` with field errors such as `topicSelection: selection_invalid` (the run policy fails `policy::validate_run_policy`, e.g. empty selection); `403 forbidden`. Body: `{backup:{name, uid, phase, trigger, scheduleRef}, schedule?:{name, uid, generation, suspended, activeRuns}}`.
+- Responses: `201` created; `200` replay (same key, same request hash) returning the same UID; `429 rate_limited` with `Retry-After` past `rateLimits.manualBackupsPerMinute` per person and namespace (Amendment P10, §15); `409 idempotency_conflict` (same key, different request hash); `409 policy_changed` (`expectedGeneration` ≠ current; body includes the current generation and `runPolicySha256`); `404 not_found` (schedule); `422 validation_failed` with field errors such as `topicSelection: selection_invalid` (the run policy fails `policy::validate_run_policy`, e.g. empty selection); `403 forbidden`. Body: `{backup:{name, uid, phase, trigger, scheduleRef}, schedule?:{name, uid, generation, suspended, activeRuns}}`.
 - The request hash covers the body as sent (including `expectedGeneration`), so a lost-response replay after a later schedule edit still returns the originally created run.
 
 ### 8.3 Schedule state interactions
@@ -654,7 +654,7 @@ Shipped as `config/samples/backup-manual.yaml` (the CLI path is `kubectl --conte
 | Schedule suspended | Allowed; future scheduled runs stay suspended; response and UI say so |
 | Schedule `Ready=False` for cadence/tz reasons | Allowed (run policy valid) |
 | Run policy invalid (empty selection, glob, bad archive URL) | `422`; legacy direct-CR path → controller terminal refusal |
-| Scheduled run active (`Forbid` or `Allow`) | Allowed; not counted and not blocked; UI shows a non-blocking notice |
+| Scheduled run active (`Forbid` or `Allow`) | Allowed; not counted and not blocked; UI shows a non-blocking notice. (Amendment P10, §15: manual runs have their own per-namespace pool and may queue; scheduled runs are never in it.) |
 | Schedule deleted after request, before freeze | Runs (manual runs do not require the schedule, §3.1 rule 2) |
 | Schedule edited after request | Runs the copied generation |
 
@@ -896,6 +896,85 @@ Notation: `get BS` = `kubectl --context docker-desktop -n $NS get backupschedule
 6. **Retention reports** count failed partial sets and retry sets as sets; PLAT-16.1 should classify by receipts.
 7. **tz database updates** ship only with releases.
 8. Not decided here: `TopicDiscovery` kind, readiness resource, destinations, catalog format, signed selection/origin receipt block, automatic pruning, `sourceRef` rebinding after a `KafkaCluster` is deleted and recreated under the same name (runs record `clusterUid` in frozen inputs; PLAT-07.2 should surface identity changes).
+
+---
+
+## 15. Amendment P10 (2026-09-24): manual runs are bounded per namespace
+
+**Defect.** §8.3 keeps manual runs outside `concurrencyPolicy` ("not counted and
+not blocked"), and nothing else bounded them. On the PoC install one operator's
+hundred accepted `POST …/backups` (all `201` in 2.4–12.5 s) became a hundred
+simultaneous runner pods: docker-desktop hit its 110-pod limit, the node went
+`NotReady`, MinIO answered `503 SlowDown`
+(`/tmp/logweir-roadmap-run/claude/poc-install.result.md`, 2026-09-24T16:08:53Z).
+
+**Decision.** §8.3's row stands — a manual run neither occupies a `Forbid` slot
+nor is blocked by one, and a scheduled run is never counted against or queued by
+manual runs — and manual runs get a pool **of their own**, per namespace, in the
+installation policy D2 §4.4 already owns (`runs` block beside `checks`):
+
+| | Manual `Backup` | Manual `Restore` (no `spec.authorization`) |
+|---|---|---|
+| ceiling | `runs.maxManualBackupsActivePerNamespace`, default 4 | `runs.maxManualRestoresActivePerNamespace`, default 2 |
+| gate position | after §3.1's refusals and the destination hold, before discovery, the freeze and the Job | after the admission (approval, target, destinations), before the trust read, plan, bundle and Job |
+| queued state | `phase: Queued`, `Admitted=False/ConcurrencyLimited`, `status.queue.limit` | the same, plus the scalar `reason` and `status.queue.authorizationExpiresAt` |
+| admission | reserved in-process, then one status write (`Admitted=True`, `queue: null`) before anything is created | the same |
+
+- **Bounded under any burst: decide-and-reserve, then record** (Tier-A review
+  H1/M1). The count reads the controller's own Backup/Restore watch, which lags
+  the controller's writes, so admission is a check-and-reserve under one
+  process-wide lock: a run is counted as holding a slot when its status says so
+  (recorded `status.execution`/`jobRef`, `Admitted=True`, `Running`,
+  `Resolving`, or an unknown phase) **or** when this process admitted it and the
+  watch has not shown it yet. The admitting pass then writes `Admitted=True`
+  before anything is created, so a restarted controller counts the run from its
+  own record. `Pending` (a destination or approval hold) neither holds a slot
+  nor a place in line — a Governed approval may hold for hours — and a held run
+  rejoins at its creation time, reserved from the moment it is admitted.
+  Nothing is admitted until the watch has synced. Residual: two controller
+  processes do not share reservations; the chart runs one, `Recreate`.
+- **FIFO by arrival.** `creationTimestamp`, then UID — never a name a client
+  chose.
+- **The frozen-inputs contract (§3.3) and the execution claim are unchanged.**
+  A queued run has no plan, no `status.execution`, no Job and so no claim; it
+  freezes on the admitting pass. A frozen or admitted run is never re-queued.
+- **A queued restore's approval keeps its clock (decision).** Queue position
+  does NOT extend `maxAgeSeconds`: every pass re-runs the admission, so a
+  restore still queued when its authorization expires is refused
+  `AuthorizationExpired`, the safe default — an authorization is a statement
+  about a moment, and a queue must not stretch it. The deadline is published
+  while it waits (`status.queue.authorizationExpiresAt`, the `Admitted`
+  message, the console badge), and the refusal says "expired while this Restore
+  was queued behind N". Cross-reference: the P9 fix (`poc-fixes-2`, not merged
+  here) keys `Consumed` on `Admitted=True`; a queued restore carries
+  `Admitted=False/ConcurrencyLimited`, so its Approval is not consumed while it
+  waits, and the admission record makes it consumed at the moment it is
+  admitted.
+- **API (D0's `rate_limited`).** `POST …/backups` and `POST …/restores` are
+  limited per `(issuer#subject, namespace, route)` like discoveries and
+  preflights: 10 and 5 per minute by default (`rateLimits.*`), `429` with
+  `Retry-After`. §8.2's response table gains that row.
+- **Console (§8.5).** A queued run renders "Queued (limit N active)" from
+  `status.queue.limit` (and "; approval expires T" for a restore); an Accepted
+  banner no longer implies a running Job.
+- **Known limit (review L1).** Pool membership is the run's self-declared
+  trigger (§3.1 rule 4). A subject who may create `Backup` objects directly can
+  declare a scheduled kind for an existing schedule and a valid slot, and such
+  a run is outside both this pool and `concurrencyPolicy`. This extends §8.7's
+  accepted residual from adoption to pod count; RBAC on `create backups`
+  governs it. A future ValidatingAdmissionPolicy letting only the controller's
+  ServiceAccount create non-`Manual` triggers would close it.
+- **Rollback.** An older controller has no pool and runs a `Queued` object as
+  active; it refuses a policy document that carries `runs` (fail closed), and an
+  older console refuses a configuration that carries `rateLimits` — so the
+  chart renders both only when they differ from the defaults, and a
+  non-default install rolls back with the chart.
+
+Implementation: `crates/weirkeeper/src/run_pool.rs`, the two gates in
+`controllers/{backup,restore}.rs`, `routes::run_create_rate` in `logweir-api`.
+Rows: `crates/weirkeeper/tests/manual_run_pool.rs`,
+`crates/weirkeeper/tests/restore_controller.rs` (P10 section),
+`crates/logweir-api/tests/manual_run_limits.rs`.
 
 ---
 

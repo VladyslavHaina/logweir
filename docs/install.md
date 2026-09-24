@@ -1071,7 +1071,7 @@ ConfigMap in the release namespace is a chart or cluster administrator;
 an attestation an administrator statement rather than a self-assessment.
 
 **A document the controller refuses fails closed.** It is parsed with unknown
-fields rejected and ten range rules applied; a refusal yields empty attestations
+fields rejected and twelve range rules applied (two of them P10's `runs` floors); a refusal yields empty attestations
 and an empty evidence allowlist plus one advisory
 `configuration.policy notReady PolicyUnreadable` row on a `Preflight`. Nothing
 else goes red — but it **does** log, once per 30-second cache miss:

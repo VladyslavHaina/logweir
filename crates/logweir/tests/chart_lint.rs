@@ -5234,6 +5234,9 @@ fn chart_lint_values_yaml_is_short_and_shows_every_option() {
         "checks.discovery.visibilityAttestations",
         "checks.preflight.defaultTimeoutSeconds",
         "checks.preflight.retentionSeconds",
+        // P10 — the manual-run pool, in the same ConfigMap.
+        "runs.maxManualBackupsActivePerNamespace",
+        "runs.maxManualRestoresActivePerNamespace",
         "engine.allowUnverifiedCustomCa",
         "evidence.controllerIdentityLocations",
         // D2 §7.3 — the console credential admission policy.
@@ -5260,6 +5263,9 @@ fn chart_lint_values_yaml_is_short_and_shows_every_option() {
         "api.console.keyVersion",
         "api.console.publicBaseUrl",
         "api.console.sessionMaxAgeSeconds",
+        // P10 — the per-person manual-run create ceilings, both modes.
+        "api.console.rateLimits.manualBackupsPerMinute",
+        "api.console.rateLimits.manualRestoresPerMinute",
         "api.console.trustedProxyCidrs",
         "api.console.trustedProxyService.namespace",
         "api.console.trustedProxyService.name",
@@ -5325,6 +5331,12 @@ fn chart_lint_values_yaml_is_short_and_shows_every_option() {
         ("checks.discovery.hardMaxTopics", 50_000),
         ("checks.preflight.defaultTimeoutSeconds", 120),
         ("checks.preflight.retentionSeconds", 3_600),
+        // P10: `RunsPolicy::default()`'s and `RunRateLimits::default()`'s
+        // numbers — the ones the templates render NOTHING for.
+        ("runs.maxManualBackupsActivePerNamespace", 4),
+        ("runs.maxManualRestoresActivePerNamespace", 2),
+        ("api.console.rateLimits.manualBackupsPerMinute", 10),
+        ("api.console.rateLimits.manualRestoresPerMinute", 5),
     ] {
         let mut node = &values;
         for segment in path.split('.') {
@@ -6024,5 +6036,57 @@ fn chart_lint_the_rendered_approval_policy_is_one_the_binary_accepts() {
         .expect("the example's document"),
         parsed,
         "the rendered ConfigMap is the example's document"
+    );
+}
+
+/// **P10 review L2: a DEFAULT render carries neither manual-run block**, so an
+/// image-only rollback of a default install reads documents an older binary
+/// accepts. An older controller parses `policy.json` with unknown fields
+/// rejected and would refuse the WHOLE policy (failing closed: no attestation,
+/// no evidence allowlist); an older console refuses a configuration file with
+/// an unknown key and does not start. The templates render `runs` and
+/// `rateLimits` only when a value differs from the binaries' defaults — this
+/// row holds the default half on every checked-in render, the values file to
+/// those defaults, and the templates to the same numbers; `check-chart.sh`
+/// holds the non-default half (a changed value IS rendered).
+///
+/// NEGATIVE CONTROL: rendering either block unconditionally fails this row on
+/// `default.yaml` and `console.yaml` respectively.
+#[test]
+fn chart_lint_a_default_render_carries_neither_manual_run_block() {
+    for render in [
+        "default",
+        "minimal",
+        "demo",
+        "msk",
+        "console",
+        "console-shared",
+        "approval-policy",
+        "admission-policy",
+        "identity-external",
+        "identity-multinamespace",
+    ] {
+        let policy = policy_json(render);
+        assert!(
+            policy.get("runs").is_none(),
+            "{render}.yaml: a default install's policy.json must not carry `runs`: {policy}"
+        );
+    }
+    for render in ["console", "console-shared"] {
+        let (text, _) = console_config(render);
+        assert!(
+            !text.contains("rateLimits"),
+            "{render}.yaml: a default console configuration must not carry `rateLimits`:\n{text}"
+        );
+    }
+    let policy = read("charts/logweir/templates/policy.yaml");
+    assert!(
+        policy.contains("(ne $runsBackups 4) (ne $runsRestores 2)"),
+        "templates/policy.yaml renders `runs` only away from RunsPolicy::default() (4, 2)"
+    );
+    let config = read("charts/logweir/templates/ui/api-config.yaml");
+    assert!(
+        config.contains("(ne $rlBackups 10) (ne $rlRestores 5)"),
+        "templates/ui/api-config.yaml renders `rateLimits` only away from RunRateLimits::default() (10, 5)"
     );
 }

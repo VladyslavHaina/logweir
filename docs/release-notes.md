@@ -117,7 +117,7 @@ under its item below.
    release and successive `helm upgrade`s: first the image values (controller,
    runner and console move together), then the `approvalPolicy.*` values.
 
-### The fourteen operator-facing changes
+### The fifteen operator-facing changes
 
 Each item names what changed, what to do, what the claim rests on (its
 verification scope), and how to roll it back. Every one of them was collected
@@ -374,6 +374,63 @@ over the preflight, restore and backup controllers and the console suite.
 `Failed/ArchiveUrlUnreadable` again and reads a legacy restore's evidence in the
 handle's bucket whatever the plan names; a plan the new console rendered still
 verifies under it when the archive's bucket is the handle's.
+
+#### 15. Manual runs may queue; "Back up now" is rate limited (P10)
+
+**Changed.** Nothing used to bound manual runs: on the PoC install one
+operator's hundred accepted `POST …/backups` (all `201` within 2.4 s) became a
+hundred simultaneous runner pods, the node hit its 110-pod limit and went
+`NotReady`, and MinIO answered `503 SlowDown`. Now:
+
+- **The controller bounds manual runs per namespace.** At most
+  `runs.maxManualBackupsActivePerNamespace` (default `4`) manual `Backup`s and
+  `runs.maxManualRestoresActivePerNamespace` (default `2`) admitted manual
+  `Restore`s hold a runner slot at once in one namespace (one installation
+  value each, applied in every namespace). The rest wait with
+  `phase: Queued`, `Admitted=False / ConcurrencyLimited` and
+  `status.queue.limit`, **with nothing created** — no plan, no Job, no
+  execution claim — and start in arrival order as slots free (within one
+  requeue, 15 s). Each admission is reserved in the controller and recorded on
+  the run (`Admitted=True`) before anything is created, so runs released
+  together — restores whose approvals verify at once, runs held on a
+  destination, everything after a controller restart — never pass the
+  ceiling. The console shows "Queued (limit N active)". Scheduled, catch-up
+  and retry `Backup`s and a `RehearsalSchedule`'s `Restore`s are neither
+  counted nor queued; `concurrencyPolicy` is unchanged.
+- **A queued restore keeps its approval's deadline.** The queue does not
+  extend an approval's maximum age: the deadline is on the object
+  (`status.queue.authorizationExpiresAt`, "approval expires T" in the
+  console), and a restore still queued when it passes is refused
+  `AuthorizationExpired` "while queued behind N"; confirm again and create a
+  new one.
+- **The console limits how fast one person can start runs:** `10`
+  "Back up now" and `5` manual restores per person (`issuer#subject`), per
+  namespace, per minute (`api.console.rateLimits.*`), then `429 rate_limited`
+  with `Retry-After`. A malformed request does not spend the window; a
+  replayed idempotency key does.
+- **Known limit:** a subject allowed to create `Backup` objects directly can
+  declare a scheduled kind for an existing schedule and escape both the pool
+  and `concurrencyPolicy`; RBAC on `create backups` governs that path.
+
+**Do:** nothing is required. An automation that starts more than the limits
+above must pace itself, or read `429` and `Retry-After`; one that expects a
+manual run to be `Running` right after `201` must also accept `Queued`. Raise
+`runs.*` where every namespace's nodes can carry more runner pods at once.
+**Scope:** pure and route-table rows (`crates/weirkeeper/tests/manual_run_pool.rs`,
+`restore_controller.rs`, `restore_policy.rs`,
+`crates/logweir-api/tests/manual_run_limits.rs`), chart rows, and twelve
+planted mutants (eight first round, four in the review round, including the
+reviewer's two survivors), each killed. [UNVERIFIED — the live rows (twenty manual runs and three approved restores at once on the PoC install) run at the next PoC re-proof.]
+**Rollback:** in this order, roll the **console** and the **controller** back
+**with the chart** (`helm rollback`). A default install carries neither new
+block — the chart renders `runs` in `weirkeeper-policy` and `rateLimits` in the
+console configuration **only** when a value differs from the defaults — so an
+image-only rollback of a default install keeps working. With a non-default
+value, an older controller refuses the whole `weirkeeper-policy` ConfigMap and
+fails closed (no attestations, no evidence allowlist), and an older console
+refuses its configuration file and does not start. An older controller has no
+pool: it reads `Queued` as an active phase and starts every queued run at
+once. An older console shows a queued run as `unknown` (`UnrecognizedPhase`).
 
 ### Verification scope: what "verified" means in this release
 

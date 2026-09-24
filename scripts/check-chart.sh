@@ -463,6 +463,32 @@ else
   echo "   rc=$rc  (a partial visibility attestation refused, as it must be)"
 fi
 
+# P10 review L2 — THE MANUAL-RUN BLOCKS ARE RENDERED ONLY WHEN THEY DIFFER FROM
+# THE BINARIES' DEFAULTS, so an image-only rollback of a DEFAULT install reads the
+# same documents it always did (an older controller refuses a `policy.json` that
+# carries `runs`; an older console refuses a config that carries `rateLimits`).
+# The default render carrying neither is `chart_lint`'s row; this is the other
+# half: a non-default value IS rendered, or the knob would do nothing.
+helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+  --set 'runs.maxManualBackupsActivePerNamespace=6' > "$tmp/runs-nondefault.yaml" 2> "$tmp/runs-nondefault.err"
+rc=$?
+if [ "$rc" -ne 0 ] || ! grep -q '"maxManualBackupsActivePerNamespace": 6' "$tmp/runs-nondefault.yaml"; then
+  echo "FAIL: runs.maxManualBackupsActivePerNamespace=6 did not render the policy's runs block (rc=$rc)" >&2
+  fail=1
+else
+  echo "   rc=$rc  (a non-default runs.* renders the runs block)"
+fi
+helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+  -f "$CHART/examples/console.values.yaml" --set 'api.console.rateLimits.manualRestoresPerMinute=3' \
+  > "$tmp/ratelimits-nondefault.yaml" 2> "$tmp/ratelimits-nondefault.err"
+rc=$?
+if [ "$rc" -ne 0 ] || ! grep -q 'manualRestoresPerMinute: 3' "$tmp/ratelimits-nondefault.yaml"; then
+  echo "FAIL: api.console.rateLimits.manualRestoresPerMinute=3 did not render the console's rateLimits (rc=$rc)" >&2
+  fail=1
+else
+  echo "   rc=$rc  (a non-default api.console.rateLimits.* renders the rateLimits block)"
+fi
+
 # D2 W11 fix round 1 (review F1) — THE THREE BOUNDS `Policy::validate` ENFORCES
 # THAT AN INSTALL USED TO WALK STRAIGHT PAST.
 #

@@ -927,8 +927,32 @@ pub struct Backup {
     /// The identity the run presented: mode and username, never a password.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub observed_auth: Option<ObservedAuthView>,
+    /// P10: present while this MANUAL run waits for a slot in its namespace's
+    /// manual-run pool (`operation.state: queued`, reason
+    /// `ConcurrencyLimited`) — the ceiling it is queued behind. Absent on
+    /// every other run, and on anything an older controller wrote.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queue: Option<RunQueueView>,
     /// The normalized status summary.
     pub operation: OperationSummary,
+}
+
+/// P10: why a manual run has no Job yet — the per-namespace ceiling of its
+/// manual-run pool, copied from the object's `status.queue`. Nothing that
+/// moves (a count, a place in line) is published: the controller does not
+/// record one.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RunQueueView {
+    /// The ceiling: `runs.maxManualBackupsActivePerNamespace` for a Backup,
+    /// `runs.maxManualRestoresActivePerNamespace` for a Restore.
+    pub limit: i64,
+    /// A queued Restore's approval deadline — the signed `expires_at` of its
+    /// authorization. The queue does not extend it: a restore still queued at
+    /// this instant is refused `AuthorizationExpired`. Absent on a Backup and
+    /// for an approval that states no expiry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authorization_expires_at: Option<DateTime<Utc>>,
 }
 
 /// Which kind of run a `Backup` is (D1 §3.1).
@@ -1188,6 +1212,10 @@ pub struct Restore {
     pub deadline_seconds: i64,
     /// The topics this run created.
     pub new_topics: Vec<String>,
+    /// P10: present while this admitted MANUAL restore waits for a slot in its
+    /// namespace's manual-restore pool (`operation.state: queued`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queue: Option<RunQueueView>,
     /// The normalized status summary.
     pub operation: OperationSummary,
 }

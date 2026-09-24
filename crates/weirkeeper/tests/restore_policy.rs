@@ -865,3 +865,160 @@ async fn an_ordinary_confirmation_creates_a_job_that_pins_the_frozen_policy() {
         "{args}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// P10 review M2 — an approval's deadline, while its restore waits in the
+// manual-restore pool
+// ---------------------------------------------------------------------------
+
+/// A manual restore peer in this namespace, running (it holds a slot).
+fn running_peer(name: &str, uid: &str) -> Restore {
+    let mut value = serde_json::to_value(restore()).expect("json");
+    value["metadata"]["name"] = serde_json::json!(name);
+    value["metadata"]["uid"] = serde_json::json!(uid);
+    value["metadata"]["creationTimestamp"] = serde_json::json!("2026-09-22T11:00:00Z");
+    value["status"] = serde_json::json!({"phase": "Running", "jobRef": {"name": name}});
+    serde_json::from_value(value).expect("a Restore")
+}
+
+/// One pooled pass of `subject` under `team-ordinary`, the pool full with two
+/// running manual restores (the default ceiling is two).
+async fn pooled_under_full_pool(
+    subject: &Restore,
+    approval: &Approval,
+) -> (RestoreOutcome, Vec<SeenBody>) {
+    let (client, _recorder, bodies) = mock_client_recording_bodies(routes(approval));
+    let peers: Vec<std::sync::Arc<Restore>> = vec![
+        std::sync::Arc::new(running_peer("rst-peer-a", "u-peer-a")),
+        std::sync::Arc::new(running_peer("rst-peer-b", "u-peer-b")),
+        std::sync::Arc::new(subject.clone()),
+    ];
+    let source = move || Some(peers.clone());
+    let reservations = weirkeeper::run_pool::Reservations::new();
+    let pool = weirkeeper::run_pool::Pool {
+        peers: &source,
+        limit: None,
+        reservations: &reservations,
+    };
+    let outcome = weirkeeper::controllers::restore::reconcile_restore_pooled(
+        subject,
+        &client,
+        &unobserved_scorecard,
+        &weirkeeper::verification::unverified_evidence,
+        now(),
+        &weirkeeper::job::RunnerImage::default(),
+        &bind("team-ordinary"),
+        None,
+        &pool,
+    )
+    .await
+    .expect("an outcome");
+    let seen = bodies.lock().expect("recorder").clone();
+    (outcome, seen)
+}
+
+fn status_patches(bodies: &[SeenBody]) -> Vec<Value> {
+    bodies
+        .iter()
+        .filter(|b| b.method == "PATCH")
+        .map(|b| serde_json::from_str::<Value>(&b.body).expect("json")["status"].clone())
+        .collect()
+}
+
+/// **A queued restore states its approval's deadline** (review M2). An
+/// Ordinary confirmation expires five minutes after issue; queued behind two
+/// running restores, the object says so — `status.queue.authorizationExpiresAt`
+/// is the signed `expires_at`, and the `Admitted=False` message names the
+/// instant and that the queue does not extend it. Nothing is created.
+///
+/// KILLS: a queued status with no deadline (the defect: the approval expired
+/// in the queue with no earlier word on the object).
+#[tokio::test]
+async fn a_queued_restore_states_its_approvals_deadline() {
+    let doc = document("team-ordinary", ApprovalMode::Ordinary);
+    let approval = v2_approval(&doc, "team-ordinary", CONSOLE_KEY_ID);
+    assert_eq!(
+        weirkeeper::controllers::restore::authorization_deadline(&approval),
+        Some(doc.expires_at),
+        "the deadline is the SIGNED expires_at"
+    );
+    assert_eq!(
+        weirkeeper::controllers::restore::authorization_deadline(&v1_approval()),
+        None,
+        "a legacy approval states no expiry"
+    );
+    let (outcome, seen) = pooled_under_full_pool(&restore(), &approval).await;
+    assert!(!outcome.created);
+    assert!(posts(&seen, "/jobs").is_empty() && posts(&seen, "/configmaps").is_empty());
+    let statuses = status_patches(&seen);
+    assert_eq!(statuses.len(), 1, "{statuses:?}");
+    let expires = doc
+        .expires_at
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    assert_eq!(statuses[0]["phase"], "Queued");
+    assert_eq!(
+        statuses[0]["queue"],
+        serde_json::json!({"limit": 2, "authorizationExpiresAt": expires})
+    );
+    let message = statuses[0]["conditions"]
+        .as_array()
+        .and_then(|cs| cs.iter().find(|c| c["type"] == "Admitted"))
+        .and_then(|c| c["message"].as_str())
+        .expect("the Admitted message")
+        .to_string();
+    assert!(
+        message.contains(&expires) && message.contains("does not extend"),
+        "the message names the instant and the rule: {message}"
+    );
+}
+
+/// **An approval that expires while its restore is queued says so** (review
+/// M2): the refusal is the admission's own `AuthorizationExpired` — the queue
+/// does not extend an approval's maximum age, the safe default — and its
+/// sentence names the wait: "expired while this Restore was queued behind 2".
+/// NEGATIVE CONTROL: the same expired approval on a restore that never queued
+/// is refused with the admission's plain sentence.
+#[tokio::test]
+async fn an_approval_that_expires_in_the_queue_is_refused_saying_so() {
+    let mut doc = document("team-ordinary", ApprovalMode::Ordinary);
+    doc.issued_at = now() - chrono::Duration::minutes(15) - chrono::Duration::seconds(1);
+    doc.expires_at = now() - chrono::Duration::seconds(1);
+    let approval = v2_approval(&doc, "team-ordinary", CONSOLE_KEY_ID);
+
+    let mut queued = serde_json::to_value(restore()).expect("json");
+    queued["status"] = serde_json::json!({
+        "phase": "Queued",
+        "reason": "ConcurrencyLimited",
+        "queue": {"limit": 2},
+        "conditions": [{"type": "Admitted", "status": "False", "reason": "ConcurrencyLimited",
+                        "lastTransitionTime": "2026-09-22T11:50:00Z"}]
+    });
+    let queued: Restore = serde_json::from_value(queued).expect("a Restore");
+
+    for (subject, waited) in [(queued, true), (restore(), false)] {
+        let (outcome, seen) = pooled_under_full_pool(&subject, &approval).await;
+        assert_eq!(
+            outcome.terminal_state.as_deref(),
+            Some("AuthorizationExpired")
+        );
+        assert!(posts(&seen, "/jobs").is_empty());
+        let refused = status_patches(&seen);
+        let message = refused
+            .last()
+            .and_then(|s| s["conditions"].as_array().cloned())
+            .and_then(|cs| cs.into_iter().find(|c| c["type"] == "Failed"))
+            .and_then(|c| c["message"].as_str().map(str::to_string))
+            .expect("the Failed message");
+        assert_eq!(
+            message.contains("expired while this Restore was queued behind 2 manual restore(s)"),
+            waited,
+            "waited={waited}: {message}"
+        );
+        if waited {
+            assert!(
+                message.contains("does not extend") && message.contains("= 2"),
+                "{message}"
+            );
+        }
+    }
+}

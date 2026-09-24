@@ -638,6 +638,10 @@ const BACKUP_DESTINATION_REF = shapeOf(
   { uid: str },
 );
 
+// P10: the ceiling a queued manual run waits behind, published only while the
+// run is queued.
+const RUN_QUEUE = shapeOf("RunQueueView", { limit: int }, { authorizationExpiresAt: str });
+
 const BACKUP = shapeOf(
   "Backup",
   {
@@ -651,6 +655,7 @@ const BACKUP = shapeOf(
     observedAuth: objectOf(OBSERVED_AUTH),
     trigger: objectOf(TRIGGER), scheduleRef: objectOf(SCHEDULE_REF),
     destinationRef: objectOf(BACKUP_DESTINATION_REF), locationDigest: str,
+    queue: objectOf(RUN_QUEUE),
   },
 );
 
@@ -671,6 +676,7 @@ const RESTORE = shapeOf(
   {
     createdAt: str, planBytes: opaque,
     sourceDestinationRef: objectOf(NAME_REF), evidenceDestinationRef: objectOf(NAME_REF),
+    queue: objectOf(RUN_QUEUE),
   },
 );
 

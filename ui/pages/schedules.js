@@ -81,7 +81,7 @@ import {
   listFooter,
   mutationStatus,
   nextRunsPanel,
-  phaseBadge,
+  runPhaseBadge,
   replace,
   revisionLine,
   rfc3339,
@@ -4088,7 +4088,7 @@ export function renderManualRuns(ns, runs, spec) {
       detailLink("backups", String(ns || meta.namespace || ""), String(meta.name || "")),
       triggerBadge(s.trigger, maxRetries),
       revisionLine(s.scheduleRef),
-      phaseBadge((run.status || {}).phase),
+      runPhaseBadge(run.status),
       cell(meta.creationTimestamp),
     ];
   });
@@ -4798,7 +4798,7 @@ export function renderScheduleHistory(ns, object, runs, points, catalogError, se
     return [
       detailLink("backups", String(ns || meta.namespace || ""), String(meta.name || "")),
       triggerBadge(run.spec ? run.spec.trigger : undefined, maxRetries),
-      phaseBadge(status.phase),
+      runPhaseBadge(status),
       cell((run.spec || {}).slot),
       cell(status.backupId) +
         (found.length > 1

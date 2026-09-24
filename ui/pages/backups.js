@@ -52,7 +52,8 @@ import {
   facts,
   independentCheck,
   listFooter,
-  phaseBadge,
+  runPhaseBadge,
+  QUEUED_RUN_SENTENCE,
   replace,
   revisionLine,
   table,
@@ -221,7 +222,7 @@ export function renderBackupList(input, ns) {
     return [
       nameCell(object, ns),
       triggerBadge(spec.trigger),
-      phaseBadge(status.phase),
+      runPhaseBadge(status),
       cell(status.exitCode),
       cell(status.records),
       backupBadge(status),
@@ -257,8 +258,9 @@ export function renderBackupDetail(object) {
   return (
     "<h2>Backup " + nameOf(object) + "</h2>" +
     backupBadge(status) +
+    (status.phase === "Queued" ? "<p class=\"note queued\">" + esc(QUEUED_RUN_SENTENCE) + "</p>" : "") +
     facts([
-      ["phase", phaseBadge(status.phase)],
+      ["phase", runPhaseBadge(status)],
       ["exit code", cell(status.exitCode)],
       ["exit reason", cell(status.exitReason)],
       ["backup id", cell(status.backupId)],

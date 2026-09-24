@@ -5533,6 +5533,11 @@
             "description": "The normalized status summary.",
             "$ref": "#/components/schemas/OperationSummary"
           },
+          "queue": {
+            "description": "P10: present while this MANUAL run waits for a slot in its namespace's manual-run pool (`operation.state: queued`, reason `ConcurrencyLimited`) — the ceiling it is queued behind. Absent on every other run, and on anything an older controller wrote.",
+            "$ref": "#/components/schemas/RunQueueView",
+            "nullable": true
+          },
           "records": {
             "description": "Records archived.",
             "type": "integer",
@@ -11427,6 +11432,11 @@
             "type": "string",
             "format": "date-time"
           },
+          "queue": {
+            "description": "P10: present while this admitted MANUAL restore waits for a slot in its namespace's manual-restore pool (`operation.state: queued`).",
+            "$ref": "#/components/schemas/RunQueueView",
+            "nullable": true
+          },
           "resourceVersion": {
             "description": "The resourceVersion.",
             "type": "string"
@@ -12168,6 +12178,26 @@
             ]
           }
         ]
+      },
+      "RunQueueView": {
+        "description": "P10: why a manual run has no Job yet — the per-namespace ceiling of its manual-run pool, copied from the object's `status.queue`. Nothing that moves (a count, a place in line) is published: the controller does not record one.",
+        "type": "object",
+        "required": [
+          "limit"
+        ],
+        "properties": {
+          "authorizationExpiresAt": {
+            "description": "A queued Restore's approval deadline — the signed `expires_at` of its authorization. The queue does not extend it: a restore still queued at this instant is refused `AuthorizationExpired`. Absent on a Backup and for an approval that states no expiry.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "limit": {
+            "description": "The ceiling: `runs.maxManualBackupsActivePerNamespace` for a Backup, `runs.maxManualRestoresActivePerNamespace` for a Restore.",
+            "type": "integer",
+            "format": "int64"
+          }
+        }
       },
       "RunnerPhaseView": {
         "description": "The runner's own phase, from its `progress-phase=` lines.",

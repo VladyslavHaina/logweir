@@ -372,6 +372,23 @@ trustedProxyService:
 requireTrustedProxy: true
 {{- end }}
 {{- end }}
+{{- /*
+P10: the manual-run create ceilings, per person, per namespace, per minute —
+BOTH modes — RENDERED ONLY WHEN THEY DIFFER FROM THE BINARY'S DEFAULTS (review
+L2). `10` and `5` are `logweir_api::routes::RunRateLimits::default()`, pinned by
+`logweir-api/tests/chart_config.rs`. `config.rs` parses this file with
+`deny_unknown_fields`, so a console image older than the key refuses a file
+that carries it (exit 2); a default install therefore carries none and an
+image-only rollback keeps starting. A non-default value rolls back with the
+chart.
+*/}}
+{{- $rlBackups := int $c.rateLimits.manualBackupsPerMinute }}
+{{- $rlRestores := int $c.rateLimits.manualRestoresPerMinute }}
+{{- if or (ne $rlBackups 10) (ne $rlRestores 5) }}
+rateLimits:
+  manualBackupsPerMinute: {{ $rlBackups }}
+  manualRestoresPerMinute: {{ $rlRestores }}
+{{- end }}
 namespaces:
 {{ toYaml $ns | indent 2 }}
 kubernetes:

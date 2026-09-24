@@ -47,8 +47,9 @@ import {
   facts,
   independentCheck,
   listFooter,
-  phaseBadge,
   planEvidenceBucket,
+  runPhaseBadge,
+  QUEUED_RUN_SENTENCE,
   replace,
   SCOPE_LEVEL_OF_INTEGRITY,
   table,
@@ -251,7 +252,7 @@ export function renderHistoryList(input, second, ns) {
     nameCell(object, ns),
     esc(kindOf(object)),
     cell(createdAt(object)),
-    phaseBadge((object.status || {}).phase),
+    runPhaseBadge(object.status),
     resultCell(object),
     rowBadge(object),
     rowOperationCell(object, ns),
@@ -325,9 +326,10 @@ export function renderRestoreDetail(object, operation) {
   return (
     "<h2>Restore " + nameOf(object) + "</h2>" +
     restoreBadge(status) +
+    (status.phase === "Queued" ? "<p class=\"note queued\">" + esc(QUEUED_RUN_SENTENCE) + "</p>" : "") +
     (operation ? renderRestoreOperation(object, operation) : "") +
     facts([
-      ["phase", phaseBadge(status.phase)],
+      ["phase", runPhaseBadge(status)],
       ["exit code", cell(status.exitCode)],
       ["reason", cell(status.reason)],
       ["last phase completed", cell(status.lastPhaseCompleted)],
