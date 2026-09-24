@@ -209,6 +209,45 @@ def test_create_verbatim_posts_the_recorded_bytes():
     assert json.loads(stdin) == recorded_role()
 
 
+# --------------------------------------------------------------- crds_as_found
+
+CRD_BEFORE = {
+    "backups.logweir.dev": {"uid": "b1", "generation": 9},
+    "topicdiscoveries.logweir.dev": {"uid": "t1", "generation": 1},
+    "newkind.logweir.dev": {"absent": True},
+}
+
+
+def test_crds_as_found_accepts_a_field_manager_only_apply():
+    # Run 2 (2026-09-24): Helm 4 re-applied identical CRD specs; uid and
+    # generation stay, only resourceVersion and managedFields move.
+    assert chart.crds_as_found(CRD_BEFORE, {name: dict(value) for name, value in CRD_BEFORE.items()}) == []
+
+
+def test_negative_control_crds_as_found_refuses_every_change():
+    def after(**changes):
+        live = {name: dict(value) for name, value in CRD_BEFORE.items()}
+        live.update(changes)
+        return chart.crds_as_found(CRD_BEFORE, live)
+
+    assert after(**{"backups.logweir.dev": {"uid": "b1", "generation": 10}}) != []  # spec changed
+    assert after(**{"backups.logweir.dev": {"uid": "b2", "generation": 9}}) != []  # replaced
+    assert after(**{"backups.logweir.dev": {"absent": True}}) != []  # removed
+    assert after(**{"newkind.logweir.dev": {"uid": "n1", "generation": 1}}) != []  # added by the run
+
+
+def test_chart_crd_names_are_the_crds_directory():
+    if not HAVE_YAML:
+        try:
+            import pytest
+        except ImportError:
+            raise RuntimeError("the CRD-name row needs PyYAML")
+        pytest.skip("needs PyYAML")
+    names = chart.chart_crd_names()
+    assert "backups.logweir.dev" in names and "trustrosters.logweir.dev" in names
+    assert len(names) == len(list((ROOT / "charts" / "logweir" / "crds").glob("*.yaml")))
+
+
 def main() -> int:
     failed = []
     for name, fn in sorted(globals().items()):

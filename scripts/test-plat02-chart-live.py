@@ -699,6 +699,48 @@ def render_cluster_objects() -> List[Tuple[str, str]]:
     return sorted(found)
 
 
+def chart_crd_names() -> List[str]:
+    names = []
+    for path in sorted((CHART / "crds").glob("*.yaml")):
+        names += [doc["metadata"]["name"] for doc in yaml.safe_load_all(path.read_text()) if doc]
+    return sorted(names)
+
+
+def crd_record(crd: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if crd is None:
+        return {"absent": True}
+    return {"uid": crd["metadata"]["uid"], "generation": crd["metadata"].get("generation")}
+
+
+def crds_as_found(recorded: Dict[str, Dict[str, Any]], live: Dict[str, Dict[str, Any]]) -> List[str]:
+    """Problems with the chart's CRDs after the run, compared with the record.
+
+    Helm 4 server-side applies `crds/` on every install, even over existing
+    CRDs, and never deletes them. A CRD cannot be restored by re-creating it
+    (deleting one deletes every object of its kind), so the harness can only
+    prove the run left them as found: the same object (uid) and no spec change
+    (`metadata.generation` moves on every spec change; resourceVersion also
+    moves when only a field manager is added, so it is not the signal). A CRD
+    the run added is reported, never deleted.
+    """
+    problems = []
+    for name, before in sorted(recorded.items()):
+        after = live.get(name, {"absent": True})
+        if before.get("absent") and not after.get("absent"):
+            problems.append(f"{name}: added by the run")
+        elif not before.get("absent") and after.get("absent"):
+            problems.append(f"{name}: removed by the run")
+        elif not before.get("absent") and before["uid"] != after["uid"]:
+            problems.append(f"{name}: replaced (uid {before['uid']} -> {after['uid']})")
+        elif not before.get("absent") and before["generation"] != after["generation"]:
+            problems.append(f"{name}: spec changed (generation {before['generation']} -> {after['generation']})")
+    return problems
+
+
+def live_crds(names: List[str]) -> Dict[str, Dict[str, Any]]:
+    return {name: crd_record(get_optional("customresourcedefinition", name)) for name in names}
+
+
 def release_annotation(obj: Dict[str, Any]) -> Optional[str]:
     return (obj["metadata"].get("annotations") or {}).get("meta.helm.sh/release-name")
 
@@ -763,6 +805,7 @@ def lab_prepare() -> None:
             raise RuntimeError(f"{SINGLETON} already exists; refusing to claim cluster identity")
         STATE["lab"] = {
             "deployment": deployment_identity(deployment),
+            "crds": live_crds(chart_crd_names()),
             "rendered_cluster_objects": [f"{kind}/{name}" for kind, name in rendered],
             "cluster_objects": {
                 **{key: {"uid": obj["metadata"]["uid"], "comparable": comparable(obj)} for key, obj in objects.items()},
@@ -1583,6 +1626,13 @@ def full() -> None:
         save_state()
         restore = lab_restore()
         STATE["lab_restore"] = restore
+        recorded_crds = STATE["lab"].get("crds")
+        crd_problems = (
+            crds_as_found(recorded_crds, live_crds(sorted(recorded_crds)))
+            if recorded_crds is not None
+            else ["no CRD record: lab_prepare predates the CRD check"]
+        )
+        STATE["crd_problems"] = crd_problems
         checks = {
             "no_test_namespaces": all(get_optional("namespace", ns) is None for ns, _ in NAMES.values()),
             "no_singleton": get_optional("clusterrole", SINGLETON) is None,
@@ -1596,12 +1646,16 @@ def full() -> None:
                 item.get("spec_labels_annotations_equal") is True or item.get("absent_as_found") is True
                 for item in restore["cluster_objects"].values()
             ),
+            "crds_as_found": not crd_problems,
         }
         STATE["cleanup_checks"] = checks
         STATE["cases"]["chart_owned_cleanup_and_lab_restore"] = "passed" if all(checks.values()) else "failed"
         STATE["finished"] = now()
         save_state()
-        save("cleanup-proof.json", {"checks": checks, "restore": restore, "teardown": STATE.get("teardown")})
+        save(
+            "cleanup-proof.json",
+            {"checks": checks, "restore": restore, "teardown": STATE.get("teardown"), "crd_problems": crd_problems},
+        )
 
 
 def report() -> int:
