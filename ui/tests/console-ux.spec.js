@@ -309,3 +309,290 @@ test("mcp_3_mcp_8_mcp_34_the_frame_draws_no_view_ring_no_wrapped_button_no_stuck
   assert.ok(mediaAt !== -1 && hoverAt - mediaAt < 80,
     "MCP-34: the tab hover background only applies where a pointer hovers");
 });
+
+// ===========================================================================
+// MCP-29 / MCP-27 / MCP-25 / MCP-28 / MCP-26: the restore wizard
+// ===========================================================================
+
+import {
+  STEPS,
+  firstStepWithErrors,
+  initialState,
+  mountRestoreWizard,
+  recoveryPoints,
+  renderArchiveStep,
+  renderPointSelector,
+  renderPreparedWizard,
+  preparePlan,
+  restoreRouteParams,
+  restoreStepRoute,
+  stepStates,
+} from "../pages/restore-wizard.js";
+import { replayWizard } from "../workflow.js";
+import { createRouteLifecycle } from "../app.js";
+import { fakeView, parse as viewParse } from "./fake-view.js";
+
+const BACKUPS = () => fixture("wizard-backups.json");
+const CLUSTERS = () => fixture("wizard-clusters.json");
+
+function newest(list) {
+  const point = recoveryPoints(list)[0];
+  return { uid: point.metadata.uid, backup: point.metadata.name };
+}
+
+/** The pages of a rendered wizard: which step each is, and whether it shows. */
+function pagesOf(html) {
+  return Array.from(html.matchAll(/<div class="wizard-page" data-wizard-step="(\d)"( hidden)?>/g))
+    .map((m) => ({ step: Number(m[1]), shown: m[2] === undefined }));
+}
+
+test("mcp_29_the_wizard_shows_one_step_at_a_time_with_back_and_next", async () => {
+  const state = initialState("team-a", CLUSTERS(), BACKUPS(), newest(BACKUPS()));
+  const html = renderPreparedWizard(state, await preparePlan(state));
+  const pages = pagesOf(html);
+  assert.deepEqual(pages.map((p) => p.step), [0, 1, 2, 3, 4, 5],
+    "all six steps are in the page -- every input is still read, drafted and validated");
+  assert.deepEqual(pages.filter((p) => p.shown).map((p) => p.step), [0],
+    "BEFORE: all six were shown at once, a 22,686 px column; now one is");
+  assert.match(html, /id="wizard-back" data-step="0" disabled>Back<\/button>/, "no Back on step 1");
+  assert.match(html, /id="wizard-next" data-step="1">Next: Recovery point<\/button>/);
+  assert.match(html, /Step 1 of 6: Archive/);
+  assert.equal((html.match(/aria-current="step"/g) || []).length, 1);
+  assert.match(html, /<button type="button" class="stepper-link" data-target="step-archive" data-step="0" aria-current="step">/,
+    "the stepper marks the step on screen");
+
+  state.step = 5;
+  const last = renderPreparedWizard(state, await preparePlan(state));
+  assert.deepEqual(pagesOf(last).filter((p) => p.shown).map((p) => p.step), [5]);
+  assert.equal(last.indexOf("id=\"wizard-next\""), -1, "the last step's action is Create, not Next");
+  assert.ok(last.includes("id=\"create-restore\""));
+});
+
+test("mcp_29_a_deep_link_names_a_step_and_the_uid_pinned_route_is_unchanged", () => {
+  const point = newest(BACKUPS());
+  const hash = "#/restore?ns=team-a&backup=" + point.backup + "&uid=" + point.uid + "&step=3";
+  const params = restoreRouteParams(hash);
+  assert.equal(params.step, 3);
+  assert.equal(params.uid, point.uid, "the identity is read exactly as before");
+  const state = initialState("team-a", CLUSTERS(), BACKUPS(), params);
+  assert.equal(state.step, 2, "step 3 of 6 is the third page");
+  assert.equal(state.pointState, "selected", "and the pinned point still resolves by uid");
+  for (const bad of ["0", "7", "x", "2.5", ""]) {
+    assert.equal(restoreRouteParams("#/restore?step=" + bad).step, 0, "`" + bad + "` names no step");
+  }
+  const moved = restoreStepRoute(hash, 4);
+  assert.equal(moved, "#/restore?ns=team-a&backup=" + point.backup + "&uid=" + point.uid + "&step=5",
+    "the address keeps every parameter and carries the step on screen");
+  assert.equal(restoreStepRoute("#/restore?ns=a", 0), "#/restore?ns=a&step=1");
+});
+
+test("mcp_29_next_back_and_the_stepper_move_between_steps_and_keep_the_address", async () => {
+  const point = newest(BACKUPS());
+  const hash = "#/restore?ns=team-a&backup=" + point.backup + "&uid=" + point.uid;
+  const saved = globalThis.window;
+  const location = { hash: hash };
+  globalThis.window = {
+    location: location,
+    history: { state: null, replaceState(_s, _t, url) { location.hash = url; } },
+  };
+  try {
+    const route = createRouteLifecycle().begin(hash);
+    const view = fakeView();
+    const api = {
+      list: async (_ns, plural) => (plural === "kafkaclusters" ? CLUSTERS() : BACKUPS()),
+      approvalPolicy: async () => null,
+    };
+    await mountRestoreWizard(view.root, "team-a", restoreRouteParams(hash), viewParse, api, route);
+    assert.deepEqual(pagesOf(view.html()).filter((p) => p.shown).map((p) => p.step), [0]);
+    await view.find("#wizard-next").dispatch("click");
+    assert.deepEqual(pagesOf(view.html()).filter((p) => p.shown).map((p) => p.step), [1],
+      "Next shows step 2");
+    assert.match(location.hash, /&step=2$/, "and writes it into the address");
+    assert.equal(route.isCurrent(), true,
+      "the route is still current at its new address, so reads and the submit still run");
+    await view.find("#wizard-back").dispatch("click");
+    assert.deepEqual(pagesOf(view.html()).filter((p) => p.shown).map((p) => p.step), [0], "Back");
+    const toPlan = view.findAll(".stepper-link").find((b) => b.getAttribute("data-step") === "5");
+    await toPlan.dispatch("click");
+    assert.deepEqual(pagesOf(view.html()).filter((p) => p.shown).map((p) => p.step), [5],
+      "a stepper entry shows its own step");
+    assert.match(location.hash, /&step=6$/);
+    // The plan on step 6 is the plan every step contributed to: one hash.
+    assert.equal((view.html().match(/id="plan-hash-value"/g) || []).length, 1);
+  } finally {
+    globalThis.window = saved;
+  }
+});
+
+test("mcp_29_a_route_is_retargeted_only_to_its_own_path_and_only_while_current", () => {
+  const saved = globalThis.window;
+  globalThis.window = { location: { hash: "#/restore?ns=a" } };
+  try {
+    const routes = createRouteLifecycle();
+    const route = routes.begin("#/restore?ns=a");
+    assert.equal(route.retarget("#/backups?ns=a"), false, "another route is a navigation, not a step");
+    assert.equal(route.retarget("#/restore?ns=a&step=2"), true);
+    globalThis.window.location.hash = "#/restore?ns=a&step=2";
+    assert.equal(route.isCurrent(), true);
+    routes.begin("#/history?ns=a");
+    assert.equal(route.retarget("#/restore?ns=a&step=3"), false, "a route that has ended is not moved");
+  } finally {
+    globalThis.window = saved;
+  }
+});
+
+test("mcp_29_a_refused_submit_shows_the_step_its_field_message_is_about", () => {
+  assert.equal(firstStepWithErrors({ topicPrefix: ["prefix refused"] }), 3, "the target step");
+  assert.equal(firstStepWithErrors({ pointInTime: ["outside"], topics: ["none"] }), 2,
+    "the earliest step with a message");
+  assert.equal(firstStepWithErrors({ ticket: ["required"] }), 5);
+  assert.equal(firstStepWithErrors({ archiveSecret: [] }), null, "an empty list is no message");
+  assert.equal(firstStepWithErrors(null), null);
+});
+
+test("mcp_27_readiness_is_done_only_when_a_check_for_this_plan_says_ready", async () => {
+  const state = initialState("team-a", CLUSTERS(), BACKUPS(), newest(BACKUPS()));
+  const prepared = await preparePlan(state);
+  const none = stepStates(state, prepared);
+  assert.equal(none[4].status, "unchecked",
+    "BEFORE: `done` as soon as a point was chosen, beside 'No readiness check has run'");
+  assert.equal(none[5].status, "ready", "an unchecked plan may still be created, with a warning");
+  assert.equal(replayWizard(none).current, "submitted", "and the wizard machine walks past it");
+
+  state.readiness = {
+    boundHash: prepared.hash,
+    preflight: {
+      id: "pf-1", terminal: true, applicable: true, stale: false, state: "ready",
+      binding: { planHash: prepared.hash }, checks: [{ id: "target.mappedTopics", gating: "blocking", state: "ready", code: "Ok" }],
+    },
+  };
+  assert.equal(stepStates(state, prepared)[4].status, "done", "a ready check for this plan is done");
+
+  state.readiness.preflight = Object.assign({}, state.readiness.preflight, {
+    state: "notReady",
+    checks: [{ id: "target.mappedTopics", gating: "blocking", state: "notReady", code: "MappedTopicExists" }],
+  });
+  const refused = stepStates(state, prepared);
+  assert.equal(refused[4].status, "attention", "a check that refuses this plan needs attention");
+  assert.equal(refused[4].current, true, "and it is where the reader is sent");
+  assert.equal(refused[5].status, "todo", "the plan step is not ready while Create refuses");
+  const html = renderPreparedWizard(state, prepared);
+  assert.match(html, /<span class="stepper-status">needs attention<\/span>/);
+});
+
+test("mcp_25_every_recovery_point_row_leads_with_its_action", () => {
+  const state = initialState("team-a", CLUSTERS(), BACKUPS(), {});
+  const html = renderPointSelector(state);
+  const body = html.slice(html.indexOf("<tbody>"), html.indexOf("</tbody>"));
+  const rows = body.split("<tr").slice(1);
+  assert.ok(rows.length >= 1);
+  for (const row of rows) {
+    const first = row.slice(row.indexOf("<td>") + 4, row.indexOf("</td>"));
+    assert.match(first, /^<a class="button" href="#\/restore\?ns=team-a&amp;backup=[^"]+&amp;uid=[^"]+">Restore this point<\/a>$/,
+      "BEFORE: the action was the tenth column and clipped at 1440 px: " + first);
+  }
+  const head = html.slice(html.indexOf("<thead>"), html.indexOf("</thead>"));
+  assert.ok((head.match(/<th /g) || []).length <= 7, "and the table is seven columns, not ten");
+});
+
+test("mcp_28_the_wizard_connection_probe_is_a_cell_not_a_paragraph", () => {
+  const state = initialState("team-a", CLUSTERS(), BACKUPS(), newest(BACKUPS()));
+  state.now = Date.parse("2026-09-11T20:00:00Z");
+  const html = renderArchiveStep(state);
+  const body = html.slice(html.indexOf("<tbody>"), html.indexOf("</tbody>"));
+  assert.match(body, /class="probe-summary"/);
+  const visible = body.replace(/title="[^"]*"/g, "");
+  assert.equal(visible.indexOf("freshness budget"), -1,
+    "BEFORE: 'this observation is older than the 630s freshness budget...' in every cell");
+  assert.ok(body.includes("freshness budget"), "the sentence is one hover away, in the title");
+});
+
+test("mcp_26_the_selector_renders_before_the_catalog_read_answers", async () => {
+  const view = fakeView();
+  const calls = [];
+  let release;
+  const catalogs = new Promise((resolve) => { release = resolve; });
+  let listed = 0;
+  const api = {
+    list: async (_ns, plural) => {
+      calls.push("list:" + plural);
+      listed += 1;
+      return plural === "kafkaclusters" ? CLUSTERS() : BACKUPS();
+    },
+    approvalPolicy: async () => { calls.push("policy"); return null; },
+    catalogReaders: {
+      listCatalogs: async () => {
+        calls.push("catalogs:" + String(listed));
+        await catalogs;
+        throw new Error("the catalogs answered late and refused");
+      },
+      readPoints: async () => ({ items: [], page: {} }),
+      readCatalog: async () => ({}),
+      ownVerdict: async () => ({}),
+    },
+  };
+  const mounted = mountRestoreWizard(view.root, "team-a", {}, viewParse, api,
+    { signal: undefined, isCurrent: () => true });
+  for (let i = 0; i < 10; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  assert.ok(calls.indexOf("catalogs:0") !== -1,
+    "the catalog read starts beside the two lists, not after them: " + calls.join(","));
+  assert.ok(view.html().includes("id=\"step-select-point\""),
+    "BEFORE: nothing rendered until the slowest read answered; the selector is up now");
+  assert.ok(view.html().includes("id=\"catalog-offers-pending\""), "and says the rest is coming");
+  release();
+  await mounted;
+  assert.match(view.html(), /data-catalog-note="true">the connected archives could not be listed here/,
+    "and the catalog section is filled in when its read answers");
+});
+
+test("mcp_26_a_console_list_hands_each_page_to_the_caller_before_the_last", async () => {
+  resetMode();
+  await selectMode({ probe: async () => ({ ok: true, status: 200, body: con("session.json") }) });
+  const first = con("backups-list.json");
+  const pageOne = JSON.parse(JSON.stringify(first));
+  pageOne.page = Object.assign({}, pageOne.page, { nextCursor: "c2" });
+  const wire = transport((u) => ({ status: 200, body: String(u).includes("cursor=c2") ? first : pageOne }));
+  try {
+    const seen = [];
+    const whole = await apiClient().list("team-a", "backups", { onPage: (partial) => seen.push(partial) });
+    assert.equal(seen.length, 1, "one page before the last");
+    assert.equal(seen[0].__page.partial, true, "marked partial, never passed off as the whole");
+    assert.equal(seen[0].items.length, pageOne.items.length);
+    assert.equal(whole.items.length, pageOne.items.length + first.items.length, "the whole list");
+    assert.equal(whole.__page.partial, undefined);
+    assert.ok(wire.seen.every((r) => !String(r.url).includes("onPage")), "the callback is not a query");
+  } finally {
+    wire.restore();
+  }
+});
+
+// ===========================================================================
+// MCP-6: a short chip never breaks mid-token
+// ===========================================================================
+
+import { LONG_TOKEN_CHARS, markLongTokens } from "../app.js";
+import { build } from "./fake-dom.js";
+
+test("mcp_6_only_a_long_token_in_a_table_may_break_mid_word", () => {
+  const doc = fakeDocument();
+  const table = build(doc, ["table", { class: "grid" }, ["tbody", {},
+    ["tr", {},
+      ["td", {}, ["code", {}, "NoExitCode"]],
+      ["td", {}, ["span", { class: "badge badge-green" }, "verified by weirkeeper"]],
+      ["td", {}, ["code", {}, "sha256:c55747f788f30e6923b9a3500b407688499f7e7c1df0af629e6dab86c33e64f4"]],
+      ["td", {}, ["span", { class: "badge badge-green" }, "against key sha256:" + "a".repeat(64)]],
+    ]]]);
+  markLongTokens(table);
+  const chips = table.querySelectorAll("code, .badge");
+  assert.equal(chips[0].getAttribute("class"), null, "NoExitCode stays one token");
+  assert.equal(chips[1].getAttribute("class"), "badge badge-green", "a label of short words too");
+  assert.equal(chips[2].getAttribute("class"), "long", "a digest may break");
+  assert.equal(chips[3].getAttribute("class"), "badge badge-green long");
+  assert.ok(LONG_TOKEN_CHARS >= "NoExitCode".length);
+  const css = readFileSync(UI + "style.css", "utf8");
+  assert.match(css, /\.grid td code,\n\.grid td \.badge \{\n {2}overflow-wrap: normal;/,
+    "BEFORE: `.grid td code { overflow-wrap: anywhere }` broke every chip mid-token");
+  assert.match(css, /\.grid td code\.long,\n\.grid td \.badge\.long \{\n {2}overflow-wrap: anywhere;/);
+});

@@ -162,6 +162,23 @@ export function createRouteLifecycle(AbortControllerClass) {
             !controller.signal.aborted &&
             (token.routeHash === null || typeof window === "undefined" || window.location.hash === token.routeHash);
         },
+        /** THE SAME ROUTE AT ANOTHER ADDRESS (MCP-29). The restore wizard
+         *  writes the step on screen into the address with `replaceState`,
+         *  which is not a navigation: this tells the route which address it is
+         *  now on, so `isCurrent` keeps answering for it. Only the route's own
+         *  path may be kept -- an address for another route is a navigation,
+         *  and is refused -- and only while this route is the current one. */
+        retarget(next) {
+          if (current !== token || controller.signal.aborted || typeof next !== "string") {
+            return false;
+          }
+          const path = (h) => (h.indexOf("?") === -1 ? h : h.slice(0, h.indexOf("?")));
+          if (token.routeHash !== null && path(next) !== path(token.routeHash)) {
+            return false;
+          }
+          token.routeHash = next;
+          return true;
+        },
       };
     },
     dispose() {
@@ -275,6 +292,7 @@ function parseFragment(html) {
 // remains the one place a column's caption is written.
 function labelTableCells(parsed) {
   for (const table of Array.from(parsed.querySelectorAll("table.grid"))) {
+    markLongTokens(table);
     const captions = Array.from(table.querySelectorAll("thead th")).map(
       (th) => th.textContent,
     );
@@ -307,6 +325,22 @@ function nav(current, ns, allowedNamespaces) {
     el("nav", { class: "nav", "aria-label": "Sections" }, links),
     namespaceForm(current, ns, allowedNamespaces),
   ]);
+}
+
+/** THE TOKENS IN A TABLE THAT MAY BREAK ANYWHERE (MCP-6): a code chip or a
+ *  label holding a word longer than [`LONG_TOKEN_CHARS`] -- a digest, a uid, a
+ *  key id -- gains the class `long`, and the stylesheet lets only those break
+ *  mid-word. Every other chip wraps at a space and nowhere else. Exported for
+ *  the suite. */
+export const LONG_TOKEN_CHARS = 24;
+
+export function markLongTokens(root) {
+  for (const chip of Array.from(root.querySelectorAll("td code, td .badge"))) {
+    const words = String(chip.textContent || "").split(/\s+/);
+    if (words.some((word) => word.length > LONG_TOKEN_CHARS)) {
+      chip.setAttribute("class", (String(chip.getAttribute("class") || "") + " long").trim());
+    }
+  }
 }
 
 // The namespace picker. It changes the hash and nothing else -- no request is

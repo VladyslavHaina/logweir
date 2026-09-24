@@ -58,6 +58,7 @@ import {
   scorecardClaim,
   SCORECARD_CLAIM_SENTENCE,
   summaryBadge,
+  listVerifiedNote,
 } from "../render.js";
 import { planHash } from "../plan.js";
 import { itemsOf } from "./clusters.js";
@@ -155,7 +156,7 @@ export function rowOperationCell(object, ns) {
   }
   const kind = kindOf(object) === "Backup" ? "backup" : "restore";
   const target = operationRoute(ns || meta.namespace || "", kind, meta.name, meta.uid || "");
-  return "<a href=\"" + esc(target) + "\">Follow this run</a>";
+  return "<a class=\"action\" href=\"" + esc(target) + "\">Follow this run</a>";
 }
 
 function nameOf(object) {
@@ -218,7 +219,7 @@ export function restorePointCell(object, ns) {
     return cell(null);
   }
   return (
-    "<a href=\"" + esc(restorePointRoute(ns, object)) + "\">Restore this point</a>"
+    "<a class=\"action\" href=\"" + esc(restorePointRoute(ns, object)) + "\">Restore this point</a>"
   );
 }
 
@@ -272,6 +273,7 @@ export function renderHistoryList(input, second, ns) {
       undefined,
       { id: "history", label: "runs", scope: ns },
     ) +
+    listVerifiedNote(ordered) +
     listFooter()
   );
 }

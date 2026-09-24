@@ -527,6 +527,37 @@ export function probeLine(state) {
   return parts.join(" ");
 }
 
+/** THE PROBE AS A CELL (MCP-28): the verdict badge, the stale or never-observed
+ *  badge, and the observation's age -- with [`probeLine`]'s whole sentence, in
+ *  plain text, as the cell's title. The wizard's connection cells used to be
+ *  paragraphs: two badges, an instant, the cluster id a second time and "this
+ *  observation is older than the 630s freshness budget". The reason a
+ *  non-reachable reading carries is still printed, verbatim, because it is
+ *  what an operator greps for. */
+export function probeSummary(state) {
+  const s = state || {};
+  const parts = [probeBadge(s)];
+  const stale = staleBadge(s);
+  if (stale.length > 0) {
+    parts.push(stale);
+  }
+  const never = observedBadge(s);
+  if (never.length > 0) {
+    parts.push(never);
+  }
+  if (s.observedAt) {
+    parts.push("<time class=\"ts\" datetime=\"" + esc(s.observedAt) + "\">" +
+      (s.ageSeconds === null ? esc(s.observedAt) : ageWords(s.ageSeconds)) + "</time>");
+  }
+  if (s.reason && s.verdict !== "reachable" && s.reason !== PROBE_RUNNING_REASON) {
+    parts.push("<code>" + esc(s.reason) + "</code>");
+  }
+  const title = probeLine(s).replace(/<[^>]*>/g, "").replace(/&quot;/g, "\"")
+    .replace(/&#39;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+  return "<span class=\"probe-summary\" title=\"" + esc(title) + "\">" + parts.join(" ") +
+    "</span>";
+}
+
 /** The sentence every probe surface carries once, saying what the reading is
  *  and what it is not. */
 export const PROBE_SENTENCE =

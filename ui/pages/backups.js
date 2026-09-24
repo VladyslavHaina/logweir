@@ -60,6 +60,7 @@ import {
   triggerBadge,
   unverifiedCaption,
   summaryBadge,
+  listVerifiedNote,
 } from "../render.js";
 import { itemsOf } from "./clusters.js";
 import { renderCoverageLine } from "./schedules.js";
@@ -209,7 +210,7 @@ export function operationCell(object, ns) {
   const target = operationRoute(
     ns || meta.namespace || "", "backup", meta.name, meta.uid || "",
   );
-  return "<a href=\"" + esc(target) + "\">Follow this run</a>";
+  return "<a class=\"action\" href=\"" + esc(target) + "\">Follow this run</a>";
 }
 
 /** The backups table. NAME, TRIGGER, PHASE, EXIT, RECORDS, SIGNED, AGE,
@@ -230,11 +231,16 @@ export function renderBackupList(input, ns) {
       operationCell(object, ns),
     ];
   });
+  const partial = ((input || {}).__page || {}).partial === true;
   return (
     "<h2>Backups</h2>" +
     "<p class=\"blurb\">Every Backup run in this namespace. The AGE column is the " +
     "object's own creation instant, not a duration: these views are computed without " +
     "reading a clock.</p>" +
+    (partial
+      ? "<p class=\"pending\" id=\"backups-partial\" role=\"status\">Showing the first " +
+        String(itemsOf(input).length) + " runs while the rest are read...</p>"
+      : "") +
     "<p class=\"note\">" + esc(TRIGGER_COLUMN_SENTENCE) + "</p>" +
     table(
       ["NAME", "TRIGGER", "PHASE", "EXIT", "RECORDS", "SIGNED", "AGE", "OPERATION"],
@@ -243,6 +249,7 @@ export function renderBackupList(input, ns) {
       undefined,
       { id: "backups", label: "backups", scope: ns },
     ) +
+    listVerifiedNote(itemsOf(input)) +
     listFooter()
   );
 }
@@ -303,9 +310,19 @@ export function renderBackupDetail(object) {
 
 // --------------------------------------------------------------- mount half
 
-export async function mountBackups(node, ns, parse, lifecycle) {
+export async function mountBackups(node, ns, parse, lifecycle, deps) {
+  const api = (deps || {}).api || API;
   try {
-    const collection = await API.list(ns, PLURAL, readOptions(lifecycle));
+    // THE FIRST PAGE IS SHOWN WHILE THE REST ARE READ (MCP-26): at 258 runs the
+    // list was a spinner until the last page answered.
+    const options = Object.assign({}, readOptions(lifecycle) || {}, {
+      onPage: (partial) => {
+        if (active(lifecycle)) {
+          replace(node, parse(renderBackupList(partial, ns)));
+        }
+      },
+    });
+    const collection = await api.list(ns, PLURAL, options);
     if (active(lifecycle)) {
       replace(node, parse(renderBackupList(collection, ns)));
     }

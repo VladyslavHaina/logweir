@@ -1810,6 +1810,7 @@ const consoleApi = Object.freeze({
     let cursor = null;
     for (let read = 0; read < LIST_PAGE_BUDGET; read += 1) {
       const query = Object.assign({}, options || {}, { limit: LIST_PAGE_SIZE });
+      delete query.onPage;
       if (cursor !== null) {
         query.cursor = cursor;
       }
@@ -1833,6 +1834,25 @@ const consoleApi = Object.freeze({
           __page: { limit: page.limit, nextCursor: null, snapshot: page.snapshot },
           __unknown: unknown,
         };
+      }
+      // A PAGE CAN BE SHOWN BEFORE THE LAST ONE ARRIVES (MCP-26). A caller that
+      // passes `onPage` is handed the rows read so far, marked `partial`, after
+      // every page but the last, so a list of hundreds renders its first 200
+      // rows while the rest are read. The list it RESOLVES with is still the
+      // whole namespace; a partial one is never returned as if it were.
+      if (typeof (options || {}).onPage === "function") {
+        try {
+          options.onPage({
+            apiVersion: "logweir.dev/v1alpha1",
+            kind: KIND_OF[plural] + "List",
+            metadata: { resourceVersion: page.snapshot || "" },
+            items: items.slice(),
+            __page: { limit: page.limit, nextCursor: cursor, snapshot: page.snapshot, partial: true },
+            __unknown: unknown.slice(),
+          });
+        } catch (painting) {
+          // A caller's paint that failed is not a failed read.
+        }
       }
     }
     throw tooMany(ns, plural, items.length);

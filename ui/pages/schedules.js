@@ -1788,7 +1788,7 @@ export function renderRecoveryPoints(ns, object, backups) {
       cell(rfc3339(covered.fromMs)),
       cell(rfc3339(covered.toMs)),
       cell(status.records),
-      "<a href=\"" + esc(restorePointRoute(ns, point)) + "\">Restore this point</a>",
+      "<a class=\"action\" href=\"" + esc(restorePointRoute(ns, point)) + "\">Restore this point</a>",
     ];
   });
   const running = mine.filter((backup) => !isRecoveryPoint(backup)).length;
@@ -4856,7 +4856,7 @@ export function restoreCell(ns, run, points) {
     // plan is bound to that receipt and the runner re-verifies it.
     const offer = backupCatalogOfferFrom(run, points);
     if (offer.offer) {
-      return "<a href=\"" + esc(restoreCatalogPointRoute(ns, offer.catalog, offer.entry.pointId,
+      return "<a class=\"action\" href=\"" + esc(restoreCatalogPointRoute(ns, offer.catalog, offer.entry.pointId,
         run)) + "\" data-restore-from=\"catalog\">Restore this point (catalog window)</a>";
     }
     return cell("");
@@ -4865,7 +4865,7 @@ export function restoreCell(ns, run, points) {
     return "<span class=\"note\" data-restore-refused=\"catalog\">not restorable: the catalog " +
       "marks this set not selectable</span>";
   }
-  return "<a href=\"" + esc(restorePointRoute(ns, run)) + "\">Restore this point</a>";
+  return "<a class=\"action\" href=\"" + esc(restorePointRoute(ns, run)) + "\">Restore this point</a>";
 }
 
 /** Why there are two verdict columns and what a blank one would have meant. */

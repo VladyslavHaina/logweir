@@ -403,9 +403,9 @@ test("the_wizard_stepper_says_which_step_is_current", async () => {
   );
   assert.deepEqual(
     steps.map((s) => s.status),
-    ["done", "done", "done", "done", "done", "ready"],
-    "with everything prefilled from the cluster, the five input steps are done and the " +
-      "plan step is where you are",
+    ["done", "done", "done", "done", "unchecked", "ready"],
+    "with everything prefilled from the cluster, the four input steps are done, readiness " +
+      "is NOT done because no check has run (MCP-27), and the plan step is where you are",
   );
   assert.deepEqual(steps.map((s) => s.current), [false, false, false, false, false, true]);
 

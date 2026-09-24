@@ -511,8 +511,14 @@ ul {
   margin: 0 auto;
   padding: var(--cds-global-space-6) var(--cds-global-space-9);
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-start;
   gap: var(--cds-global-space-6);
+}
+
+.brand-text {
+  flex: 1 1 var(--lw-field-min);
+  min-width: 0;
 }
 
 .brand-mark {
@@ -832,18 +838,54 @@ main > h2 + .blurb,
   background: var(--cds-alias-object-interaction-background-hover);
 }
 
-/* A short word never breaks mid-word; hashes and key ids, marked up as code,
- * may break anywhere so a 64-hex digest does not force a sideways scroll. */
+/* A SHORT TOKEN NEVER BREAKS MID-WORD (MCP-6). A code chip or a label in a
+ * cell wraps only at a space -- "NoExitCo / de" and "weirkee / per" came from
+ * letting every chip break anywhere, which also let the table squeeze its
+ * column to one character. A LONG token -- a 64-hex digest, a uid, a key id --
+ * is marked `.long` when the page adopts the table (`app.js`), and only that
+ * one may break anywhere, so it cannot force a sideways scroll. */
 .grid td {
   overflow-wrap: break-word;
 }
 
-.grid td code {
+.grid td code,
+.grid td .badge {
+  overflow-wrap: normal;
+}
+
+.grid td code.long,
+.grid td .badge.long {
   overflow-wrap: anywhere;
 }
 
 .grid td a {
   font-weight: var(--cds-global-typography-font-weight-medium);
+}
+
+/* A ROW'S ACTION LINK NEVER WRAPS (MCP-8): "Follow this run" and "Restore this
+ * point" read as one control. A name link still wraps, so a long object name
+ * cannot push a stacked card past a phone's width. */
+.grid td a.action {
+  white-space: nowrap;
+}
+
+/* AN INSTANT NEVER WRAPS MID-VALUE (MCP-7): `render.js` `when` prints it as
+ * one human reading, with the exact recorded value in its title. */
+.ts {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The first of two stacked lines inside a cell. */
+.cell-sub-first {
+  display: block;
+}
+
+/* A second line inside a cell: the facts that used to take a column each. */
+.cell-sub {
+  display: block;
+  color: var(--cds-alias-typography-color-300);
+  font-size: var(--cds-global-typography-secondary-font-size);
 }
 
 .grid td.empty {
@@ -1060,6 +1102,12 @@ th[aria-sort="descending"] .datagrid-sort::after {
   .grid td.empty {
     display: block;
     padding: var(--cds-global-space-5) 0;
+  }
+
+  /* On a phone a stacked card is as wide as the screen and no wider. */
+  .grid td code,
+  .grid td .badge {
+    overflow-wrap: anywhere;
   }
 
   .grid td.empty::before {
@@ -1858,14 +1906,18 @@ button[aria-busy="true"] {
   background: var(--cds-alias-object-container-background);
 }
 
-@media (min-width: 768px) {
+/* SIX EQUAL COLUMNS THAT MAY SHRINK: `minmax(0, 1fr)` lets a long step title
+ * wrap inside its column instead of widening the page past a 1024 px window.
+ * Clarity's `md` width and up; below it the compact stepper further down. */
+@media (min-width: 992px) {
   .stepper {
-    grid-template-columns: repeat(6, 1fr);
+    grid-template-columns: repeat(6, minmax(0, 1fr));
     gap: var(--cds-global-space-5);
   }
 }
 
 .stepper-link {
+  white-space: normal;
   width: 100%;
   display: grid;
   grid-template-columns: auto 1fr;
@@ -1978,6 +2030,81 @@ button[aria-busy="true"] {
 
 .is-ready .stepper-num {
   border-color: var(--cds-alias-status-info);
+}
+
+/* THE WIZARD, ONE STEP AT A TIME (MCP-29): Clarity's wizard footer -- Back at
+ * the start, where you are, Next at the end -- kept in view at the bottom of
+ * the window while a long step scrolls. */
+.wizard-page > .step {
+  margin-top: 0;
+}
+
+.wizard-nav {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--cds-global-space-5) var(--cds-global-space-7);
+  margin: var(--cds-global-space-7) 0 0;
+  padding: var(--cds-global-space-6) var(--cds-global-space-7);
+  border: var(--cds-alias-object-border-width-100) solid var(--cds-alias-object-border-color);
+  border-radius: var(--cds-alias-object-border-radius-100);
+  background: var(--cds-alias-object-container-background);
+  box-shadow: var(--cds-alias-object-shadow-300);
+}
+
+.wizard-position {
+  color: var(--cds-alias-typography-color-300);
+  font-size: var(--cds-global-typography-secondary-font-size);
+}
+
+.is-unchecked .stepper-link {
+  border-top-color: var(--cds-alias-status-warning-shade);
+}
+
+.is-unchecked .stepper-num {
+  border-color: var(--cds-alias-status-warning-shade);
+}
+
+/* THE COMPACT STEPPER, BELOW CLARITY'S `md` WIDTH (MCP-29): one row -- every
+ * step a numbered circle, and the step on screen with its title and state
+ * beside its number. The other steps' words stay in the document for a
+ * screen reader. */
+@media (max-width: 991.98px) {
+  .stepper {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--cds-global-space-3);
+    padding: var(--cds-global-space-5);
+  }
+
+  .stepper-item {
+    flex: none;
+  }
+
+  .stepper-item.is-current {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+
+  .stepper-item:not(.is-current) .stepper-link {
+    grid-template-columns: auto;
+    padding: var(--cds-global-space-3);
+  }
+
+  .stepper-item:not(.is-current) .stepper-title,
+  .stepper-item:not(.is-current) .stepper-status {
+    position: absolute;
+    width: var(--lw-visually-hidden-size);
+    height: var(--lw-visually-hidden-size);
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+
 }
 
 .step-head {

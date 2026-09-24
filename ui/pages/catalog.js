@@ -452,7 +452,7 @@ export function pointRow(entry, ns, catalog, destination, page) {
     e.selectable !== true
       ? ABSENT
       : (offer.offer
-        ? "<a href=\"" + esc(restoreCatalogPointRoute(ns, catalog, e.pointId)) +
+        ? "<a class=\"action\" href=\"" + esc(restoreCatalogPointRoute(ns, catalog, e.pointId)) +
           "\" data-restore-point=\"" + esc(e.pointId) + "\">Restore this point</a>"
         : "<span class=\"note\" data-restore-refused=\"wizard\">not offered: " +
           esc(offer.reason) + "</span>"),

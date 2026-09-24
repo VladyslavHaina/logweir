@@ -419,11 +419,14 @@ export const RESTORE_IMMUTABLE_SENTENCE =
  *  browsers strip trailing whitespace from a clipboard copy of a `<pre>`, and
  *  a plan whose last line ends in spaces is not exotic. So the page offers the
  *  download, and names the `kubectl` route to the same bytes for anyone who
- *  would rather take them from the cluster. */
+ *  would rather take them from the cluster -- under THEIR OWN context: the
+ *  caveat used to hard-code `--context docker-desktop`, this repository's lab
+ *  context, on every installation (MCP-30). */
 export const COPY_CAVEAT =
-  "copy loses trailing whitespace in some browsers; download, or run kubectl " +
-  "--context docker-desktop get restore <name> -o jsonpath='{.spec.planBytes}' > " +
-  "<name>.yaml, and hash exactly what you downloaded.";
+  "copy loses trailing whitespace in some browsers; download, or read the same bytes from " +
+  "the cluster with your own kubectl context -- kubectl get restore <name> --namespace " +
+  "<namespace> -o jsonpath='{.spec.planBytes}' > <name>.yaml -- and hash exactly what you " +
+  "downloaded.";
 
 /** The client-side window lint is a CONVENIENCE and never the gate. The
  *  controller recomputes the hash from the referent's own bytes and phase 0
@@ -1609,6 +1612,65 @@ export function rfc3339(ms) {
     : iso;
 }
 
+// ---------------------------------------------------------------------------
+// THE ONE TIMESTAMP FORMATTER (MCP-7, MCP-15). Every instant a page SHOWS goes
+// through [`when`]: a human-readable UTC reading with whole seconds --
+// `2026-09-24 16:39:04 UTC` -- that never wraps mid-value, inside a `<time>`
+// whose `datetime` and `title` carry the EXACT value the object recorded,
+// nanoseconds and offset included, so nothing is lost and a hover or a copy
+// gets the original. Tables used to print `2026-09-24T15:21:21.720607463Z`,
+// broken across two lines at the `-`.
+//
+// UTC ON PURPOSE. The page reads no clock and no locale for a verdict; a
+// reading in the viewer's own zone would make two people on one incident call
+// read different times off one screen. The suffix says which zone it is.
+// ---------------------------------------------------------------------------
+
+const RFC3339 = /^(\d{4})-(\d{2})-(\d{2})[Tt ](\d{2}):(\d{2}):(\d{2})(\.\d+)?([Zz]|[+-]\d{2}:\d{2})$/;
+
+/** The human reading of one instant: `YYYY-MM-DD HH:MM:SS UTC`, or `null`
+ *  when `value` is not an RFC 3339 instant (or epoch milliseconds) this page
+ *  can read. A value already in UTC is read digit for digit, so a fraction
+ *  finer than JavaScript's milliseconds is never rounded into the seconds. */
+export function humanInstant(value) {
+  if (typeof value === "number") {
+    return isFinite(value) ? humanInstant(new Date(value).toISOString()) : null;
+  }
+  if (typeof value !== "string") {
+    return null;
+  }
+  const m = RFC3339.exec(value.trim());
+  if (m === null) {
+    return null;
+  }
+  if (m[8] === "Z" || m[8] === "z" || m[8] === "+00:00" || m[8] === "-00:00") {
+    return m[1] + "-" + m[2] + "-" + m[3] + " " + m[4] + ":" + m[5] + ":" + m[6] + " UTC";
+  }
+  const at = Date.parse(m[1] + "-" + m[2] + "-" + m[3] + "T" + m[4] + ":" + m[5] + ":" + m[6] + m[8]);
+  if (isNaN(at)) {
+    return null;
+  }
+  const iso = new Date(at).toISOString();
+  return iso.slice(0, 10) + " " + iso.slice(11, 19) + " UTC";
+}
+
+/** AN INSTANT, AS A PAGE SHOWS IT: [`humanInstant`]'s reading in a `<time>`
+ *  carrying the exact recorded value in `datetime` and `title`; [`ABSENT`] for
+ *  no value; and a value that is not an instant escaped as it arrived, never
+ *  guessed at. Epoch milliseconds are accepted and shown the same way. */
+export function when(value) {
+  if (value === null || value === undefined || value === "") {
+    return ABSENT;
+  }
+  const exact = typeof value === "number" ? rfc3339(value) : String(value);
+  const human = humanInstant(value);
+  if (human === null) {
+    return esc(exact);
+  }
+  return "<time class=\"ts\" datetime=\"" + esc(exact) + "\" title=\"" + esc(exact) + "\">" +
+    esc(human) + "</time>";
+}
+
 /** The covered window, both bounds as RFC 3339 and never a bare integer. */
 export function coveredWindow(windowCovered) {
   const w = windowCovered || {};
@@ -2323,9 +2385,24 @@ export function scorecardClaim(valueHtml, verified) {
  *  carry instead of inventing it; every other row names its case from the
  *  summary's own word. The run's own page (and legacy mode, which reads the
  *  custom resource) still shows the full block. */
-export const LIST_VERIFIED_CAPTION =
-  "verified by weirkeeper (this list does not carry the key id or the instant; the run's own " +
-  "page does)";
+export const LIST_VERIFIED_CAPTION = "verified by weirkeeper";
+
+/** WHAT A GREEN LIST BADGE DOES NOT CARRY, said ONCE under the table (MCP-16)
+ *  rather than inside every row's badge, where it tripled the row height at
+ *  1440 px and made a row eight lines tall at 1024 px. */
+export const LIST_VERIFIED_NOTE =
+  "SIGNED: a list row carries weirkeeper's verdict and not the key id or the instant it " +
+  "verified at; the run's own page shows both.";
+
+/** [`LIST_VERIFIED_NOTE`] as the line under a list, when any of `items` is a
+ *  console list row (one carrying the API's summary verdict); the empty string
+ *  otherwise, because a custom resource's own badge names its key and instant. */
+export function listVerifiedNote(items) {
+  const list = Array.isArray(items) ? items : [];
+  return list.some((item) => (((item || {}).status) || {}).__summary !== undefined)
+    ? "<p class=\"note\" id=\"list-verified-note\">" + esc(LIST_VERIFIED_NOTE) + "</p>"
+    : "";
+}
 
 /** Each non-green `verificationState` of a list summary, in words. */
 export const LIST_VERDICT_CASES = Object.freeze({
