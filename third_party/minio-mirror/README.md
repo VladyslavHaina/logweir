@@ -36,11 +36,13 @@ Every reference in this tree pins these digests, never the tags
 `chart_lint_every_minio_image_reference_is_the_mirror_digest`, refuses any
 other MinIO image reference outside this directory, `THIRD_PARTY_NOTICES.md`
 and the trackers under `docs/to-do/`).
-They are the digests of the images `build.sh` built and loaded on 2026-09-24
-from recipe commit `719b57ce` (the image label
-`io.logweir.mirror.recipe-revision`); the build is not bit-reproducible, so
-those exact images are the ones published, with `build.sh --push-loaded`, which
-refuses to report success unless Docker Hub answers with the same digest.
+They are the digests of the images `build.sh` built and loaded on 2026-09-24.
+Each image carries the label `io.logweir.mirror.recipe`, a content hash of the
+committed build inputs (`build.sh`, both Dockerfiles, `upstream/`, `licenses/`)
+that any checkout can recompute (`build.sh`'s header says how); it survives a
+rebase or a merge, where a commit id would not. The build is not
+bit-reproducible, so those exact images are the ones published, with
+`build.sh --push-loaded`, which refuses to report success unless Docker Hub answers with the same digest.
 
 **Publication status.** [UNVERIFIED — the first push was refused because this build host holds no Docker Hub login; publication and the anonymous-pull check are owed.]
 Until then a host without the two images in its local store cannot pull
@@ -134,7 +136,7 @@ The differences, all deliberate:
 |---|---|---|
 | label `maintainer` | `MinIO Inc <dev@min.io>` | `Logweir project mirror (docker.io/vladyslavhaina), not MinIO, Inc.` — MinIO does not maintain this image |
 | `org.opencontainers.image.*` labels | none | `source`, `revision` (upstream commit), `version`, `licenses`, `title`, `description`, `url` |
-| label `io.logweir.mirror.recipe-revision` | — | the Logweir commit this recipe was built from |
+| label `io.logweir.mirror.recipe` | — | the content hash of the recipe this image was built from |
 | `/licenses/curl/` | absent (upstream shipped curl without its notices) | curl, OpenSSL, zlib, libssh2, nghttp2, musl and static-curl licence texts |
 | `/usr/bin/minio.minisig`, `minio.sha256sum` | present | absent (see above) |
 | layers | mc image: `ADD` + `RUN chmod +x` (the binary twice) | one `COPY --chmod=0711` |

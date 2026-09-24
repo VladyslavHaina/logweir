@@ -20,9 +20,12 @@
 # stages are `--platform=$BUILDPLATFORM`); only the final stage's one
 # `chmod -R 777 /usr/bin` runs under emulation for the foreign architecture.
 #
-# A PUSH REFUSES A DIRTY RECIPE: the images carry the Logweir commit their
-# recipe came from (label io.logweir.mirror.recipe-revision), and that label is
-# only true of a committed, unmodified third_party/minio-mirror/.
+# A PUSH REFUSES A DIRTY RECIPE. The images carry label io.logweir.mirror.recipe:
+# the git hash of `git ls-tree -r HEAD -- <the build inputs>` (this script, the two
+# Dockerfiles, upstream/ and licenses/), which names the committed recipe's
+# CONTENT and so survives a rebase or a merge, where a commit id would not. It
+# is only true of committed, unmodified inputs. Recompute it in any checkout:
+#   git -C third_party/minio-mirror ls-tree -r HEAD -- build.sh Dockerfile.minio Dockerfile.mc upstream licenses | git hash-object --stdin
 set -euo pipefail
 
 H="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -41,10 +44,11 @@ case "${1:-}" in
   *) echo "usage: build.sh [--push | --push-loaded]" >&2; exit 2 ;;
 esac
 
-rev="$(git -C "$H" rev-parse HEAD)"
-if ! git -C "$H" diff --quiet HEAD -- . || [ -n "$(git -C "$H" status --porcelain -- .)" ]; then
+INPUTS=(build.sh Dockerfile.minio Dockerfile.mc upstream licenses)
+rev="$(git -C "$H" ls-tree -r HEAD -- "${INPUTS[@]}" | git hash-object --stdin)"
+if [ -n "$(git -C "$H" status --porcelain -- "${INPUTS[@]}")" ]; then
   if [ "$mode" = push ]; then
-    echo "build.sh: third_party/minio-mirror/ has uncommitted changes; commit them before --push" >&2
+    echo "build.sh: the recipe (${INPUTS[*]}) has uncommitted changes; commit them before --push" >&2
     exit 1
   fi
   rev="$rev-dirty"
@@ -56,7 +60,7 @@ registry_digest() {
 
 if [ "$mode" = push-loaded ]; then
   for ref in "${REFS[@]}"; do
-    label="$(docker image inspect "$ref" --format '{{index .Config.Labels "io.logweir.mirror.recipe-revision"}}')"
+    label="$(docker image inspect "$ref" --format '{{index .Config.Labels "io.logweir.mirror.recipe"}}')"
     case "$label" in
       ""|*-dirty) echo "build.sh: $ref was built from an uncommitted recipe ($label); rebuild it" >&2; exit 1 ;;
     esac
@@ -77,7 +81,7 @@ build() {
   echo "build.sh: $ref ($PLATFORMS, recipe $rev)" >&2
   docker buildx build \
     --platform "$PLATFORMS" \
-    --label "io.logweir.mirror.recipe-revision=$rev" \
+    --label "io.logweir.mirror.recipe=$rev" \
     --provenance=false --sbom=false \
     -f "$H/$dockerfile" -t "$ref" "--$mode" "$H"
 }
