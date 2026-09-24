@@ -26,13 +26,18 @@ import {
   legacyEvidenceBucket,
   LEGACY_EVIDENCE_BUCKET_SENTENCE,
   preparePlan,
+  readinessRefusal,
+  readinessSecretOf,
   readinessSourceSentence,
   recoveryPoints,
   renderStoreFields,
+  restoreBody,
+  restoreReadinessRequest,
+  setArchiveSecret,
 } from "../pages/restore-wizard.js";
 import { renderRestoreDetail } from "../pages/history.js";
 import { CATALOG_MODE_HELP, renderConnectForm } from "../pages/catalog.js";
-import { planEvidenceBucket } from "../render.js";
+import { isBucketName, planEvidenceBucket, shellWord } from "../render.js";
 
 const FIXTURES = fileURLToPath(new URL("./fixtures/", import.meta.url));
 
@@ -102,9 +107,10 @@ test("the_plan_evidence_bucket_is_read_from_the_plans_own_evidence_block", () =>
   const plan = fixture("restore-valid-pass.json").spec.planBytes;
   assert.equal(planEvidenceBucket(plan), "logweir-evidence",
     "the evidence block's bucket, not the source block's kafka-backups");
-  assert.equal(planEvidenceBucket("source:\n  storage:\n    bucket: a\nevidence:\n  bucket: b\n"),
-    "b");
-  assert.equal(planEvidenceBucket("evidence:\n  backend: s3\n  bucket: 'c'\n"), "c");
+  assert.equal(
+    planEvidenceBucket("source:\n  storage:\n    bucket: aaa\nevidence:\n  bucket: bbb\n"),
+    "bbb");
+  assert.equal(planEvidenceBucket("evidence:\n  backend: s3\n  bucket: 'ccc'\n"), "ccc");
   assert.equal(planEvidenceBucket("source:\n  storage:\n    bucket: a\n"), "",
     "no evidence block, no bucket");
   assert.equal(planEvidenceBucket(undefined), "");
@@ -137,4 +143,99 @@ test("the_catalog_page_says_a_full_sync_reads_records_and_how_old_points_appear"
   assert.ok(!/walks the receipts and manifests/.test(out),
     "P6's negative control: the false claim is gone");
   assert.ok(out.includes(CATALOG_MODE_HELP.slice(0, 40)));
+});
+
+// ------------------------------------------------ the review round (M1a, L5)
+
+/** A ready verdict for `prepared`, as the product API would hand it back:
+ *  every blocking row ready, bound to this plan's hash. */
+function readyVerdict(prepared) {
+  return {
+    id: "pf-legacy-1",
+    state: "ready",
+    terminal: true,
+    applicable: true,
+    stale: false,
+    staleReasons: [],
+    binding: { planHash: prepared.hash },
+    checks: [{ id: "archive.backupSet", gating: "blocking", state: "ready", code: "ManifestReadable" }],
+  };
+}
+
+/** The state a finished check leaves behind: the verdict, the hash and the
+ *  Secret the check was started with -- recorded exactly as step 5 records
+ *  them (`about: {planHash, archiveSecret}`). */
+async function checkedLegacyState() {
+  const state = legacyState();
+  const prepared = await preparePlan(state);
+  const request = restoreReadinessRequest(state, prepared);
+  state.readiness = {
+    preflight: readyVerdict(prepared),
+    boundHash: prepared.hash,
+    boundSecret: readinessSecretOf(request),
+  };
+  return { state, prepared, request };
+}
+
+test("a_green_check_of_a_legacy_point_is_bound_to_the_secret_the_restore_will_project", async () => {
+  const { state, prepared, request } = await checkedLegacyState();
+  assert.equal(request.restore.legacySourceArchive.credentialRef.name, "logweir-s3",
+    "the premise: the check reads with the Backup's own Secret");
+  assert.equal(readinessRefusal(state, prepared), null, "the premise: Create is allowed");
+
+  setArchiveSecret(state, "some-other-secret");
+  const after = await preparePlan(state);
+  assert.equal(after.hash, prepared.hash, "the Secret is not in the plan: the hash cannot see it");
+  assert.equal(restoreBody(state, after).spec.sourceArchive.secretRef.name, "some-other-secret");
+  const refused = readinessRefusal(state, after);
+  assert.ok(typeof refused === "string" && refused.length > 0,
+    "M1(a): a Secret edit after a green check refuses the Create");
+  assert.equal(state.readiness.preflight.stale, true, "and the held verdict is marked stale");
+  assert.deepEqual(state.readiness.preflight.staleReasons[0],
+    { reason: "referentChanged", kind: "Secret", name: "some-other-secret" });
+});
+
+test("the_bound_secret_refuses_even_without_the_stale_mark", async () => {
+  // The recorded input is the second guard: a Secret set by any path that
+  // bypasses `setArchiveSecret` (a restored draft, a future control) is still
+  // compared with the one the check read with.
+  const { state, prepared } = await checkedLegacyState();
+  state.archiveSecretName = "";
+  const refused = readinessRefusal(state, prepared);
+  assert.match(String(refused), /Secret logweir-s3/);
+  assert.match(String(refused), /no Secret/);
+  state.archiveSecretName = "logweir-s3";
+  assert.equal(readinessRefusal(state, prepared), null, "the same Secret again: allowed");
+});
+
+test("an_unchanged_secret_keeps_the_verdict", async () => {
+  const { state, prepared } = await checkedLegacyState();
+  setArchiveSecret(state, " logweir-s3 ");
+  assert.equal(state.readiness.preflight.stale, false, "re-typing the same name is not a change");
+  state.archiveSecretName = "logweir-s3";
+  assert.equal(readinessRefusal(state, prepared), null);
+});
+
+test("a_plan_bucket_outside_the_s3_grammar_never_reaches_the_shell_command", () => {
+  assert.equal(isBucketName("kafka-backups"), true);
+  for (const bad of ["x$(id)", "Kafka", "a", "-lead", "trail-", "b;rm", "bucket name"]) {
+    assert.equal(isBucketName(bad), false, bad);
+  }
+  assert.equal(planEvidenceBucket("evidence:\n  bucket: \"x$(id)\"\n"), "",
+    "L5: plan text that is not a bucket name is not a bucket");
+  const object = fixture("restore-valid-pass.json");
+  object.spec.planBytes = object.spec.planBytes.replace(
+    'bucket: "logweir-evidence"', 'bucket: "x$(touch pwned)"');
+  const out = renderRestoreDetail(object);
+  assert.ok(!out.includes("$(touch pwned)"), "the crafted bucket is never rendered: " + out);
+  assert.ok(out.includes("aws s3 cp &#39;s3://&lt;your evidence bucket&gt;/") ||
+    out.includes("aws s3 cp 's3://<your evidence bucket>/"),
+    "the placeholder is rendered, quoted, instead");
+});
+
+test("every_fetch_argument_is_one_shell_word", () => {
+  assert.equal(shellWord("s3://kafka-backups/logweir/drills/01JB.json"),
+    "s3://kafka-backups/logweir/drills/01JB.json", "a safe word is unchanged");
+  assert.equal(shellWord("s3://b/k$(id)"), "'s3://b/k$(id)'");
+  assert.equal(shellWord("it's"), "'it'\\''s'");
 });

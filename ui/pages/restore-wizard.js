@@ -2781,6 +2781,20 @@ export function readinessRefusal(state, prepared) {
       "not a verdict about what you are about to submit. Run it again."
     );
   }
+  // THE CREDENTIAL IS NOT IN THE PLAN (review M1(a)): a check of a point with
+  // no saved destination read the archive with the Secret it was started with,
+  // and the Restore projects the one on screen now.
+  const boundSecret = typeof readiness.boundSecret === "string" ? readiness.boundSecret : null;
+  const secretNow = String(s.archiveSecretName || "").trim();
+  if (boundSecret !== null && boundSecret !== secretNow) {
+    return (
+      "the readiness check on screen read the archive with " +
+      (boundSecret.length > 0 ? "Secret " + boundSecret : "no Secret") +
+      ", and this Restore would project " +
+      (secretNow.length > 0 ? "Secret " + secretNow : "no Secret") +
+      ". A check is about the credential the restore will use; run it again."
+    );
+  }
   // STALENESS IS ASKED ABOUT BEFORE COMPLETION, and the order matters. A check
   // that has been INVALIDATED -- by a target swap, an expiry, a referent that
   // moved -- is about inputs that are no longer these, whether or not it has
@@ -5067,6 +5081,53 @@ export function evidenceDestinationOptions(state) {
 }
 
 /** The evidence destination's NAME, or "" for a legacy point. */
+/** The Secret a readiness request names for an inline archive, or `null` for
+ *  a request that names none (a saved destination's check). */
+export function readinessSecretOf(request) {
+  const legacy = ((((request || {}).restore) || {}).legacySourceArchive) || null;
+  if (legacy === null) {
+    return null;
+  }
+  const name = ((legacy.credentialRef || {}).name);
+  return typeof name === "string" ? name : "";
+}
+
+function boundSecretOf(about) {
+  const a = about || {};
+  return typeof a.archiveSecret === "string" ? a.archiveSecret : null;
+}
+
+/** THE ARCHIVE SECRET, AND WHAT A CHANGE OF IT DOES TO A HELD CHECK (review
+ *  M1(a)).
+ *
+ *  For a point with no saved destination the readiness check reads the
+ *  archive with the Secret the Restore will project -- that is P3's whole
+ *  claim -- and the Secret is not in the plan bytes, so a plan-hash
+ *  comparison cannot see it move. A change marks a held verdict stale exactly
+ *  as a change of target or evidence destination does (`referentChanged`,
+ *  kind `Secret`), and `readinessRefusal` also compares the Secret the check
+ *  was started with against the one on screen, so the Create stays refused
+ *  until the check is run again with this Secret. */
+export function setArchiveSecret(state, value) {
+  const next = String(typeof value === "string" ? value : "").trim();
+  const before = String(state.archiveSecretName || "").trim();
+  const held = (state.readiness || {}).preflight || null;
+  if (next !== before && held !== null) {
+    state.readiness = Object.assign({}, state.readiness, {
+      preflight: Object.assign({}, held, {
+        applicable: false,
+        stale: true,
+        staleReasons: [{
+          reason: "referentChanged",
+          kind: "Secret",
+          name: next.length > 0 ? next : "(none)",
+        }],
+      }),
+    });
+  }
+  state.archiveSecretName = typeof value === "string" ? value : "";
+}
+
 export function evidenceDestinationName(state) {
   const pin = (state || {}).evidenceDestination || null;
   return pin !== null && typeof pin.name === "string" ? pin.name : "";
@@ -5293,6 +5354,14 @@ function wireRestoreReadiness(node, state, parse, api, lifecycle, prepared) {
       boundHash: record.phase === "succeeded"
         ? ((record.about || {}).planHash || "")
         : ((state.readiness || {}).boundHash || ""),
+      // THE SECRET THE CHECK READ WITH (review M1(a)). It is not in the plan
+      // bytes, so the hash above cannot see it change; `readinessRefusal`
+      // compares it with the Secret the Restore would project.
+      boundSecret: record.phase === "succeeded"
+        ? boundSecretOf(record.about)
+        : ((state.readiness || {}).boundSecret === undefined
+          ? null
+          : state.readiness.boundSecret),
     });
     renderAndWire(node, state, parse, api, lifecycle);
     if (record.phase === "succeeded") {
@@ -5311,7 +5380,7 @@ function wireRestoreReadiness(node, state, parse, api, lifecycle, prepared) {
     const request = restoreReadinessRequest(state, p);
     mutation.run(() => api.startPreflight(state.ns, request, {
       attempt: nextRestoreReadinessAttempt(state.ns, state.pointUid),
-    }), { about: { planHash: p.hash } });
+    }), { about: { planHash: p.hash, archiveSecret: readinessSecretOf(request) } });
   }, lifecycle);
 
   const cancel = node.querySelector("#restore-readiness-cancel");
@@ -5601,7 +5670,7 @@ function wire(node, state, parse, api, lifecycle, prepared) {
     // signs: the runner takes the credential from its environment, which the
     // controller fills from the named Secret.
     if (archiveSecret !== null) {
-      state.archiveSecretName = valueOf(archiveSecret);
+      setArchiveSecret(state, valueOf(archiveSecret));
     }
     // THE SUBSET, READ FROM THE BOXES THAT ARE ON SCREEN (PLAT-11.2) -- and
     // only when there ARE boxes, so a refusal page or a point with no frozen

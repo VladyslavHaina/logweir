@@ -1552,10 +1552,34 @@ export function planEvidenceBucket(planBytes) {
     if (match !== null) {
       const value = match[1];
       const quoted = /^"(.*)"$/.exec(value) || /^'(.*)'$/.exec(value);
-      return quoted !== null ? quoted[1] : value;
+      const bucket = quoted !== null ? quoted[1] : value;
+      // A BUCKET NAME OR NOTHING (review L5). This value is plan text an
+      // approver signed, not an API-validated URL, and it is pasted into a
+      // shell: anything outside the S3 bucket grammar renders the placeholder.
+      return isBucketName(bucket) ? bucket : "";
     }
   }
   return "";
+}
+
+/** The S3 bucket-name grammar the destination form and the API enforce:
+ *  3-63 characters, lowercase letters, digits, dots and hyphens, beginning and
+ *  ending with a letter or digit. */
+export function isBucketName(value) {
+  return typeof value === "string" && /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(value);
+}
+
+/** One POSIX shell word: unchanged when it is made only of characters no shell
+ *  reads specially, otherwise single-quoted with every `'` closed, escaped and
+ *  reopened (review L5). The fetch commands below are copied into a terminal,
+ *  and their bucket and keys come from a status and a plan, not from this
+ *  page. */
+export function shellWord(value) {
+  const text = String(value);
+  if (/^[A-Za-z0-9._/:=@+%,-]+$/.test(text)) {
+    return text;
+  }
+  return "'" + text.replace(/'/g, "'\\''") + "'";
 }
 
 /** The key prefix an object-store URL names: everything after the bucket.
@@ -1592,8 +1616,8 @@ export function prefixOf(url) {
  *  `Restore`. `document` is the local filename the fetch writes. */
 export function independentCheck(payloadType, bucket, documentKey, sidecarKey, documentFile, sidecarFile) {
   return copyBlock([
-    "aws s3 cp s3://" + bucket + "/" + documentKey + " ./" + documentFile,
-    "aws s3 cp s3://" + bucket + "/" + sidecarKey + " ./" + sidecarFile,
+    "aws s3 cp " + shellWord("s3://" + bucket + "/" + documentKey) + " ./" + documentFile,
+    "aws s3 cp " + shellWord("s3://" + bucket + "/" + sidecarKey) + " ./" + sidecarFile,
     "logweir drill verify --payload-type " +
       payloadType +
       " --scorecard ./" +
