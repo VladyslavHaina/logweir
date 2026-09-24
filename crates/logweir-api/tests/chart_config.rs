@@ -93,7 +93,10 @@ fn rate_limits_are_rendered_only_away_from_the_binarys_defaults() {
         "(ne $rlBackups {}) (ne $rlRestores {})",
         defaults.manual_backups_per_minute, defaults.manual_restores_per_minute
     );
-    assert!(template.contains(&guard), "api-config.yaml must carry `{guard}`");
+    assert!(
+        template.contains(&guard),
+        "api-config.yaml must carry `{guard}`"
+    );
     for render in ["console", "console-shared"] {
         let text = console_config(render);
         assert!(!text.contains("rateLimits"), "{render}: {text}");

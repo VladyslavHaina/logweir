@@ -480,7 +480,7 @@ fn a_reservation_ends_when_the_watch_catches_up_or_it_expires() {
         .decide(
             PoolKind::Backup,
             &other,
-            Some(arcs(&[other.clone()])),
+            Some(arcs(std::slice::from_ref(&other))),
             4,
             backup_standing,
             now()
@@ -492,7 +492,7 @@ fn a_reservation_ends_when_the_watch_catches_up_or_it_expires() {
     let _ = r.decide(
         PoolKind::Backup,
         &other,
-        Some(arcs(&[other.clone()])),
+        Some(arcs(std::slice::from_ref(&other))),
         4,
         backup_standing,
         now(),

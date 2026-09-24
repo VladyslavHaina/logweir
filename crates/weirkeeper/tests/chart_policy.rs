@@ -473,7 +473,10 @@ fn the_runs_block_is_omitted_exactly_at_the_controllers_defaults() {
         defaults.max_manual_backups_active_per_namespace,
         defaults.max_manual_restores_active_per_namespace
     );
-    assert!(template.contains(&guard), "templates/policy.yaml must carry `{guard}`");
+    assert!(
+        template.contains(&guard),
+        "templates/policy.yaml must carry `{guard}`"
+    );
     // AND THE DEFAULT RENDER HAS NO BLOCK, which the parser reads as defaults.
     let rendered = rendered_policies("default")
         .remove("weirkeeper-policy")
