@@ -54,7 +54,9 @@
 //! # What it writes, and what it does not
 //!
 //! It patches `rehearsalschedules/status` with a merge PATCH carrying
-//! `metadata.resourceVersion` as the update precondition (seam **S7**), creates
+//! `metadata.resourceVersion` as the update precondition (seam **S7**) — and a
+//! pass that writes twice (the reservation, then the commit) preconditions the
+//! second write on the first write's answer — creates
 //! `Restore` objects and their approval-bundle `ConfigMap`s, and touches
 //! nothing else. There is no `Api<Restore>::patch_status` anywhere in this
 //! file: the `Restore` reconciler owns that object's status, and a rehearsal
@@ -915,6 +917,7 @@ pub async fn reconcile_schedule(
                 observation: Observation::default(),
                 template_digest,
                 created: None,
+                pending: PendingRef::Unchanged,
             },
             now,
         )
@@ -928,20 +931,63 @@ pub async fn reconcile_schedule(
 
     // ---- what the previous slot's child says -----------------------------
     let restores: Api<Restore> = Api::namespaced(ctx.client.clone(), &namespace);
-    let previous = previous_child(schedule, &restores).await?;
+    let active_child = previous_child(schedule, &restores).await?;
     // AN ACTIVE REF THAT NAMES NOTHING: the child was created (that is what
-    // `activeRestoreRef` means — a `pendingRestoreRef` alone is the
-    // reservation, which the create resumes) and has since been deleted
-    // without its result being recorded.
+    // `activeRestoreRef` means) and has since been deleted without its result
+    // being recorded.
     let deleted_active = schedule
         .status
         .as_ref()
         .and_then(|s| s.active_restore_ref.as_ref())
         .map(|r| r.name.clone())
-        .filter(|_| previous.is_none());
-    let observation = match deleted_active.as_deref() {
-        Some(name) => deleted_observation(name),
-        None => observe(previous.as_ref(), now),
+        .filter(|_| active_child.is_none());
+    // ---- and what a reservation whose commit was lost says ---------------
+    //
+    // REHEARSAL-FIRE-PASS-STATUS-LOST. A `pendingRestoreRef` that is not also
+    // the active ref is a reservation whose pass did not commit — its commit
+    // met another writer's version, or the controller stopped between the two.
+    // The name is a pure function of the slot, so it is recovered by GET and
+    // adopted by PLAT-04.1's rule (see `recover_reservation`).
+    let reservation = recover_reservation(schedule, &restores, &uid).await?;
+    let (observation, previous, recovered) = match (&deleted_active, &active_child, &reservation) {
+        // A DELETED ACTIVE REF BESIDE AN OWNED RESERVATION (review L1): the
+        // deleted run is recorded AND the reserved child — which exists and
+        // is this schedule's own — is promoted to active in the same write.
+        // Recording the deletion alone would clear both refs (the decided arm
+        // of `status_patch`) and drop a running rehearsal unrecorded, with
+        // Forbid blind to it.
+        (Some(name), _, Reservation::Adopted(adopted)) => (
+            deleted_observation(name),
+            Some((**adopted).clone()),
+            Some(adopted.name_any()),
+        ),
+        (Some(name), _, _) => (deleted_observation(name), None, None),
+        (None, Some(child), Reservation::Adopted(adopted)) => (
+            observe(Some(child), now),
+            Some((**adopted).clone()),
+            Some(adopted.name_any()),
+        ),
+        (None, Some(child), _) => (observe(Some(child), now), Some(child.clone()), None),
+        (None, None, Reservation::Adopted(adopted)) => {
+            let seen = observe(Some(adopted), now);
+            // Already decided: the decided arm of `status_patch` records it and
+            // releases both refs, so it is NOT promoted to active first — a
+            // promotion would have it recorded a second time next pass.
+            let recovered = (!seen.decided).then(|| adopted.name_any());
+            (seen, Some((**adopted).clone()), recovered)
+        }
+        (None, None, Reservation::Missing(name)) => (deleted_observation(name), None, None),
+        (None, None, _) => (Observation::default(), None, None),
+    };
+    // A MISSING reservation beside a live active ref waits for the active one
+    // to be recorded first; it is recorded on the pass after, rather than
+    // released unrecorded by the active one's decided write.
+    let pending = match (&reservation, &active_child, &deleted_active) {
+        (Reservation::Foreign, _, _) => PendingRef::Release,
+        (Reservation::Missing(_), Some(_), _) | (Reservation::Missing(_), _, Some(_)) => {
+            PendingRef::Keep
+        }
+        _ => PendingRef::Unchanged,
     };
 
     // ---- the facts -------------------------------------------------------
@@ -964,14 +1010,15 @@ pub async fn reconcile_schedule(
                     next_fire: next_fire(schedule, now),
                     observation,
                     template_digest,
-                    created: None,
+                    created: recovered.clone(),
+                    pending,
                 },
                 now,
             )
             .await
             .map(|()| Outcome {
                 verdict: Verdict::Skipped(skip),
-                created: None,
+                created: recovered,
                 requeue_seconds: REQUEUE_SECONDS,
             });
         }
@@ -989,14 +1036,15 @@ pub async fn reconcile_schedule(
                     next_fire: next_fire(schedule, now),
                     observation,
                     template_digest,
-                    created: None,
+                    created: recovered.clone(),
+                    pending,
                 },
                 now,
             )
             .await
             .map(|()| Outcome {
                 verdict: Verdict::Skipped(skip),
-                created: None,
+                created: recovered,
                 requeue_seconds: REQUEUE_SECONDS,
             });
         }
@@ -1031,17 +1079,34 @@ pub async fn reconcile_schedule(
     };
     let verdict = decide(&facts);
 
-    let mut created = None;
+    let mut created = recovered;
     let mut slot = None;
+    let mut pending = pending;
+    // WHERE THE OBJECT STANDS. A pass that reserved a slot moved the schedule's
+    // resourceVersion, so its commit preconditions on the RESERVATION's answer
+    // — never on the object this pass was handed, which the API server would
+    // refuse with a 409 (REHEARSAL-FIRE-PASS-STATUS-LOST: lab-refresh-10 found
+    // no live schedule had ever carried `activeRestoreRef` or evaluated
+    // `Authorized`, because every fire pass's commit was that 409).
+    let mut write_base = std::borrow::Cow::Borrowed(schedule);
     let verdict = match verdict {
         Verdict::Fire(order) => {
             slot = Some(order.slot.clone());
             match fire(ctx, schedule, &uid, &namespace, &order, &trust, now).await? {
-                Fired::Created(child) => {
+                Fired::Created { child, reserved } => {
                     created = Some(child);
+                    write_base = std::borrow::Cow::Owned(*reserved);
                     Verdict::Fire(order)
                 }
-                Fired::Refused(skip) => Verdict::Skipped(skip),
+                Fired::Refused { skip, reserved } => {
+                    if let Some(reserved) = reserved {
+                        // Reserved, and then refused: the reservation names a
+                        // child this schedule will not own, so it is released.
+                        write_base = std::borrow::Cow::Owned(*reserved);
+                        pending = PendingRef::Release;
+                    }
+                    Verdict::Skipped(skip)
+                }
             }
         }
         // A SKIP NAMES AND CONSUMES THE SLOT IT REFUSED — see `status_patch`.
@@ -1054,7 +1119,7 @@ pub async fn reconcile_schedule(
 
     commit(
         &api,
-        schedule,
+        &write_base,
         &StatusUpdate {
             verdict: verdict.clone(),
             slot,
@@ -1062,6 +1127,7 @@ pub async fn reconcile_schedule(
             observation,
             template_digest,
             created: created.clone(),
+            pending,
         },
         now,
     )
@@ -1085,10 +1151,29 @@ fn has_pending_topics(status: &crate::crds::rehearsal_schedule::RehearsalSchedul
 
 /// What [`fire`] did.
 enum Fired {
-    /// The child exists, by this name.
-    Created(String),
-    /// Something refused after the plan was rendered. NOTHING was created.
-    Refused(Skip),
+    /// The child exists, by this name. `reserved` is the schedule as the
+    /// reservation's write left it: the commit of this pass preconditions on
+    /// its `resourceVersion`.
+    Created {
+        child: String,
+        reserved: Box<RehearsalSchedule>,
+    },
+    /// Something refused. NOTHING of this schedule's was created. `reserved`
+    /// is `Some` only when the refusal came AFTER the reservation landed (the
+    /// deterministic name is held by an object this schedule does not own).
+    Refused {
+        skip: Skip,
+        reserved: Option<Box<RehearsalSchedule>>,
+    },
+}
+
+impl Fired {
+    fn refused(skip: Skip) -> Self {
+        Self::Refused {
+            skip,
+            reserved: None,
+        }
+    }
 }
 
 /// Render, PROVE, reserve, create — in that order, and the order is the rule.
@@ -1109,7 +1194,7 @@ async fn fire(
 ) -> Result<Fired, ReconcileError> {
     // ---- the destination the chosen point lives in ------------------------
     let Some(destination_name) = order.selected.point.destination.clone() else {
-        return Ok(Fired::Refused(Skip::new(
+        return Ok(Fired::refused(Skip::new(
             SkipReason::NoQualifyingPoint,
             "the chosen point names no BackupDestination, and a rehearsal renders its plan's \
              storage block from one; a legacy archive URL is not a rehearsal source in this build"
@@ -1122,7 +1207,7 @@ async fn fire(
         .await
         .map_err(ReconcileError::Api)?
     else {
-        return Ok(Fired::Refused(Skip::new(
+        return Ok(Fired::refused(Skip::new(
             SkipReason::NoQualifyingPoint,
             format!(
                 "the chosen point lives in the BackupDestination `{destination_name}`, which does \
@@ -1145,7 +1230,7 @@ async fn fire(
     let plan_bytes = match rehearsal::plan_bytes(&plan) {
         Ok(bytes) => bytes,
         Err(e) => {
-            return Ok(Fired::Refused(Skip::new(
+            return Ok(Fired::refused(Skip::new(
                 SkipReason::AuthorizationInvalid,
                 format!("the rendered rehearsal plan could not be serialised: {e}"),
             )))
@@ -1164,7 +1249,7 @@ async fn fire(
     };
     let facts = wire::plan_scope_facts(&plan, &allowed);
     if let Err(refusal) = wire::plan_within_scope(&facts, &order.authorization.scope) {
-        return Ok(Fired::Refused(Skip::new(
+        return Ok(Fired::refused(Skip::new(
             SkipReason::AuthorizationInvalid,
             refusal.to_string(),
         )));
@@ -1172,7 +1257,7 @@ async fn fire(
     let child = match child_restore(schedule, uid, order, plan_bytes, &destination_name) {
         Ok(c) => c,
         Err(e) => {
-            return Ok(Fired::Refused(Skip::new(
+            return Ok(Fired::refused(Skip::new(
                 SkipReason::AuthorizationInvalid,
                 e.to_string(),
             )))
@@ -1183,9 +1268,15 @@ async fn fire(
     // ---- PLAT-04.1's reservation, then the deterministic child ------------
     //
     // A merge PATCH with `metadata.resourceVersion` as the precondition, never
-    // `replace_status` (seam S7). A controller that dies between the two finds
-    // the reservation on restart and resumes exactly this name, because the
-    // name is a pure function of the trigger.
+    // `replace_status` (seam S7). The write MOVES the version, so its answer is
+    // returned and the pass commits on it (REHEARSAL-FIRE-PASS-STATUS-LOST).
+    // A pass whose commit does not land — another writer, or a controller that
+    // stops between the two — leaves the reservation, and the next pass reads
+    // it back by this name, which is a pure function of the trigger
+    // ([`recover_reservation`]): it adopts the child when it exists and is this
+    // schedule's own, and records it `RestoreDeleted` when it does not. It does
+    // NOT re-create a reserved child that is gone: its slot is already
+    // consumed, and a rehearsal run late is not the rehearsal that was due.
     let api: Api<RehearsalSchedule> = Api::namespaced(ctx.client.clone(), namespace);
     let body = status_patch_with_preconditions(
         schedule,
@@ -1196,7 +1287,7 @@ async fn fire(
             }
         }),
     )?;
-    match api
+    let reserved = match api
         .patch_status(
             &schedule.name_any(),
             &PatchParams::default(),
@@ -1204,7 +1295,7 @@ async fn fire(
         )
         .await
     {
-        Ok(_) => {}
+        Ok(reserved) => reserved,
         Err(kube::Error::Api(e)) if e.code == 409 => {
             // ANOTHER RECONCILE RESERVED FIRST. Nothing is created: the winner
             // creates the child, and this pass reads it on the next look.
@@ -1212,13 +1303,13 @@ async fn fire(
                 schedule = %schedule.name_any(),
                 "the reservation lost a 409; the winning pass owns this slot"
             );
-            return Ok(Fired::Refused(Skip::new(
+            return Ok(Fired::refused(Skip::new(
                 SkipReason::ConcurrencyBlocked,
                 "another reconcile reserved this slot first".to_string(),
             )));
         }
         Err(e) => return Err(ReconcileError::Api(e)),
-    }
+    };
 
     let restores: Api<Restore> = Api::namespaced(ctx.client.clone(), namespace);
     // THE OBJECT THE API SERVER RETURNED, and not the one this pass composed.
@@ -1228,17 +1319,43 @@ async fn fire(
     let created = match restores.create(&PostParams::default(), &child).await {
         Ok(created) => created,
         Err(kube::Error::Api(e)) if e.code == 409 => {
-            // The deterministic name already exists, which is the reservation
-            // resuming after a crash. It is the same object this pass intended,
-            // and it is re-read so the bundle binds the UID that actually
-            // exists rather than the one this pass would have created.
+            // The deterministic name already exists. A 409 PROVES ONLY THAT
+            // SOMETHING HOLDS THE NAME (PLAT-04.1): it is adopted only when it
+            // is this schedule's own child — the reservation resuming after a
+            // crash — and it is re-read so the bundle binds the UID that
+            // actually exists rather than the one this pass would have
+            // created. A foreign holder is a recorded skip: it is not this
+            // slot's rehearsal, and recording it active would make this
+            // schedule track, and report the verdict of, a run it did not
+            // start. (The bundle is not the security boundary — the `Restore`
+            // reconciler admits a standing child on `spec.authorization` and
+            // the pinned Approval UID, bounded by the signed scope — so this
+            // is about whose result the schedule records.)
             debug!(restore = %child_name, "the deterministic rehearsal Restore already exists");
             match restores
                 .get_opt(&child_name)
                 .await
                 .map_err(ReconcileError::Api)?
             {
-                Some(existing) => existing,
+                Some(existing) if owned_rehearsal(&existing, &schedule.name_any(), uid) => existing,
+                Some(_) => {
+                    warn!(
+                        schedule = %schedule.name_any(),
+                        restore = %child_name,
+                        "the deterministic rehearsal name is held by a Restore this schedule does \
+                         not own; nothing is adopted and no bundle is written"
+                    );
+                    return Ok(Fired::Refused {
+                        skip: Skip::new(
+                            SkipReason::ConcurrencyBlocked,
+                            format!(
+                                "the slot's deterministic Restore name `{child_name}` is held by \
+                                 an object this schedule does not own; it is not adopted"
+                            ),
+                        ),
+                        reserved: Some(Box::new(reserved)),
+                    });
+                }
                 None => return Err(ReconcileError::NoUid(child_name)),
             }
         }
@@ -1256,7 +1373,10 @@ async fn fire(
         point = %order.selected.point.point_id,
         "a rehearsal slot fired"
     );
-    Ok(Fired::Created(child_name))
+    Ok(Fired::Created {
+        child: child_name,
+        reserved: Box::new(reserved),
+    })
 }
 
 /// Write the standing bundle for one rehearsal `Restore`.
@@ -1331,27 +1451,132 @@ async fn write_bundle(
 // Reading the world
 // ===========================================================================
 
-/// The `Restore` this schedule's status names, by GET of its recorded name.
+/// The `Restore` this schedule's `activeRestoreRef` names, by GET of its
+/// recorded name.
 ///
 /// **BY GET AND NEVER BY LIST** (D3 §4.4). A list with a label selector answers
 /// "which objects carry this label", which is a different question from "which
 /// object did this schedule reserve" — and the two differ exactly when it
 /// matters, which is after a crash between the reservation and the create.
+///
+/// ACTIVE ONLY. A `pendingRestoreRef` is a reservation whose pass did not
+/// commit, and [`recover_reservation`] answers for it — with the ownership
+/// check an adoption needs, and with a 404 that is RECORDED rather than read
+/// as "nothing to observe" (REHEARSAL-FIRE-PASS-STATUS-LOST).
 async fn previous_child(
     schedule: &RehearsalSchedule,
     restores: &Api<Restore>,
 ) -> Result<Option<Restore>, ReconcileError> {
-    let status = schedule.status.as_ref();
-    let named = status
+    let Some(reference) = schedule
+        .status
+        .as_ref()
         .and_then(|s| s.active_restore_ref.as_ref())
-        .or_else(|| status.and_then(|s| s.pending_restore_ref.as_ref()));
-    let Some(reference) = named else {
+    else {
         return Ok(None);
     };
     restores
         .get_opt(&reference.name)
         .await
         .map_err(ReconcileError::Api)
+}
+
+/// What a reservation left by an earlier pass says.
+#[derive(Debug, Clone)]
+enum Reservation {
+    /// No `pendingRestoreRef`, or it is the active ref already.
+    None,
+    /// The reserved child exists and is this schedule's own: the pass that
+    /// created it did not commit, and this pass finishes that commit.
+    Adopted(Box<Restore>),
+    /// Nothing holds the reserved name: the child was deleted before any pass
+    /// recorded it, or it was never created. Recorded `RestoreDeleted`.
+    Missing(String),
+    /// Something this schedule does not own holds the name. Never adopted;
+    /// the reservation is released.
+    Foreign,
+}
+
+/// Read the reservation a previous pass left and did not commit.
+///
+/// THE NAME IS A PURE FUNCTION OF THE SLOT, so the child a lost commit would
+/// have named is recovered by one GET of `pendingRestoreRef` — and ADOPTED
+/// only by PLAT-04.1's rule ([`owned_rehearsal`]): a GET that answers proves
+/// only that something holds the name.
+async fn recover_reservation(
+    schedule: &RehearsalSchedule,
+    restores: &Api<Restore>,
+    uid: &str,
+) -> Result<Reservation, ReconcileError> {
+    let status = schedule.status.as_ref();
+    let active = status
+        .and_then(|s| s.active_restore_ref.as_ref())
+        .map(|r| r.name.as_str());
+    let Some(pending) = status
+        .and_then(|s| s.pending_restore_ref.as_ref())
+        .map(|r| r.name.clone())
+        .filter(|p| !p.is_empty() && Some(p.as_str()) != active)
+    else {
+        return Ok(Reservation::None);
+    };
+    match restores
+        .get_opt(&pending)
+        .await
+        .map_err(ReconcileError::Api)?
+    {
+        Some(child) if owned_rehearsal(&child, &schedule.name_any(), uid) => {
+            info!(
+                schedule = %schedule.name_any(),
+                restore = %pending,
+                "a reserved rehearsal exists and is this schedule's own; the commit its pass \
+                 did not land is finished now"
+            );
+            Ok(Reservation::Adopted(Box::new(child)))
+        }
+        Some(_) => {
+            warn!(
+                schedule = %schedule.name_any(),
+                restore = %pending,
+                "the reserved rehearsal name is held by a Restore this schedule does not own; \
+                 it is not adopted and the reservation is released"
+            );
+            Ok(Reservation::Foreign)
+        }
+        // A RESERVED NAME NOTHING HOLDS IS RECORDED AS DELETED — and that
+        // reading has one bounded residual (review L2). Two controllers
+        // overlapping on one schedule — which the chart does not run
+        // (`replicas: 1`, `strategy: Recreate`), so only a force-deleted or
+        // partitioned pod during a rollout can produce it — can have one read
+        // the reservation in the milliseconds between the other's reservation
+        // write and its create, and record `RestoreDeleted` for a child that
+        // is created a moment later. The fail direction is `RehearsalHealthy=
+        // False` (loud, never a false pass); the cost is that one run is not
+        // tracked. A re-read by name would not close it (the create can land
+        // after both reads), and a grace keyed to the reservation needs a
+        // timestamp the status does not carry; `docs/kubernetes.md` records it.
+        // The single-controller crash between the reservation and the create
+        // lands in the same arm, correctly: that child never existed.
+        None => Ok(Reservation::Missing(pending)),
+    }
+}
+
+/// PLAT-04.1's adoption rule for a rehearsal child: the object is CONTROLLED
+/// by this schedule's UID (a deleted-and-recreated schedule of the same name is
+/// a different owner) AND it is standing-authorised by this schedule's name.
+#[must_use]
+pub fn owned_rehearsal(restore: &Restore, schedule_name: &str, uid: &str) -> bool {
+    let controlled = restore
+        .metadata
+        .owner_references
+        .as_ref()
+        .is_some_and(|refs| {
+            refs.iter().any(|r| {
+                r.controller == Some(true) && r.kind == RehearsalSchedule::kind(&()) && r.uid == uid
+            })
+        });
+    let authorised = restore.spec.authorization.as_ref().is_some_and(|a| {
+        a.kind == AuthorizationKind::Standing && a.rehearsal_schedule_ref.name == schedule_name
+    });
+    controlled && authorised
 }
 
 /// How many pages [`busy_target`] follows before it gives up and says so.
@@ -2101,8 +2326,28 @@ pub struct StatusUpdate {
     /// The recomputed digest, published so an operator minting a new
     /// authorization can read it off the object instead of recomputing it.
     pub template_digest: String,
-    /// The child this pass created.
+    /// The child this pass created — or adopted from a reservation whose
+    /// pass did not commit ([`PendingRef`]).
     pub created: Option<String>,
+    /// What happens to `pendingRestoreRef` beyond the rules `created` and a
+    /// decided observation already apply.
+    pub pending: PendingRef,
+}
+
+/// What a pass does with `pendingRestoreRef`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PendingRef {
+    /// The ordinary rules: released by `created` (the child is active now) and
+    /// by a decided observation.
+    #[default]
+    Unchanged,
+    /// Released: the reserved name is held by an object this schedule does
+    /// not own, which is never adopted.
+    Release,
+    /// Kept even by a decided observation: the reservation's child is missing
+    /// and is recorded on the next pass, after the active run this pass
+    /// records.
+    Keep,
 }
 
 /// The `/status` merge patch one pass produces.
@@ -2143,6 +2388,9 @@ pub fn status_patch(
             status.insert("lastScheduledSlot".to_string(), json!(slot));
         }
     }
+    if update.pending == PendingRef::Release && update.created.is_none() {
+        status.insert("pendingRestoreRef".to_string(), Value::Null);
+    }
     let observation = &update.observation;
     // DECIDED, NOT MERELY TERMINAL (REHEARSAL-PASS-RECORDED-AS-FAILED). A
     // finished run whose evidence verdict is still owed is left exactly where
@@ -2154,7 +2402,9 @@ pub fn status_patch(
         // `lastFailed` are never cleared: they are the audit trail.
         if update.created.is_none() {
             status.insert("activeRestoreRef".to_string(), Value::Null);
-            status.insert("pendingRestoreRef".to_string(), Value::Null);
+            if update.pending != PendingRef::Keep {
+                status.insert("pendingRestoreRef".to_string(), Value::Null);
+            }
         }
         if observation.passed {
             status.insert(
@@ -2450,9 +2700,18 @@ async fn commit(
     {
         Ok(_) => Ok(()),
         Err(kube::Error::Api(e)) if e.code == 409 => {
-            debug!(
+            // ANOTHER WRITER, and never this pass's own reservation: the fire
+            // arm commits on the reservation's answer. Nothing of this write
+            // is stored, and it is not retried blind over a status this pass
+            // has not read. The next pass is handed the object as it stands;
+            // a child this write would have made active is still named by
+            // `pendingRestoreRef`, and `recover_reservation` finishes the
+            // commit from it.
+            info!(
                 schedule = %schedule.name_any(),
-                "the status changed under this reconcile (409); the next pass reads it"
+                created = update.created.as_deref().unwrap_or("<none>"),
+                "the status changed under this reconcile (409); nothing was written and the next \
+                 pass reads the object as it stands"
             );
             Ok(())
         }

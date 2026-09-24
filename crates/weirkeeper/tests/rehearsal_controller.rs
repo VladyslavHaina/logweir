@@ -30,7 +30,10 @@ use serde_json::{json, Value};
 use weirkeeper::controllers::rehearsal_schedule as rs;
 use weirkeeper::crds::rehearsal_schedule::RehearsalSchedule;
 use weirkeeper::rehearsal;
-use weirkeeper::testing::{mock_client_recording_bodies, BodyRecorder, Recorder, Route};
+use weirkeeper::testing::{
+    mock_client_recording_bodies, mock_client_with_store, BodyRecorder, ObjectStore, Recorder,
+    Route, SharedStore,
+};
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -2533,50 +2536,57 @@ fn an_unrecorded_verdict_is_decided_after_the_short_grace() {
 /// `RehearsalHealthy=False` — rather than the schedule naming a missing object
 /// until the next slot fires over it.
 ///
-/// MUTANT: `observe(previous.as_ref(), now)` for a missing active child (the
-/// pre-fix reading) — nothing is recorded and the ref stays.
+/// REACHED THROUGH A REAL FIRE PASS (REHEARSAL-FIRE-PASS-STATUS-LOST). The
+/// first landing of this row PLANTED `activeRestoreRef` in the fixture and so
+/// passed while no live controller ever wrote that field: the fire pass's
+/// commit was preconditioned on the pre-reservation version and lost to a 409.
+/// Here pass 1 fires the slot against a server that enforces the
+/// precondition, the child is deleted, and pass 2 is handed the schedule
+/// exactly as the server then holds it.
+///
+/// MUTANTS: `observe(previous.as_ref(), now)` for a missing active child (the
+/// pre-LOW-2 reading) — nothing is recorded and the ref stays; committing the
+/// fire pass on the pre-reservation object — pass 1 stores no
+/// `activeRestoreRef`, pass 2 has nothing to record.
 #[tokio::test]
 async fn a_rehearsal_deleted_before_its_result_is_recorded_as_failed() {
-    let mut table = happy_routes();
-    table.push(Route {
-        method: "GET",
-        path_suffix: "/restores/logweir-rehearsal-weekly-orders-20260913-030000",
-        status: 404,
-        body: json!({
-            "kind": "Status", "apiVersion": "v1", "status": "Failure",
-            "reason": "NotFound", "code": 404,
-            "message": "restores.logweir.dev \"logweir-rehearsal-weekly-orders-20260913-030000\" not found"
-        })
-        .to_string(),
-    });
-    let (client, recorder, bodies) = mock_client_recording_bodies(table);
-    let schedule = schedule_with(json!({
-        "activeRestoreRef": {"name": PREVIOUS_CHILD},
-        "lastScheduledSlot": DUE_SLOT
-    }));
-    rs::reconcile_schedule(&schedule, &context(client), now())
+    let store = fired_store(json!({}));
+    let (client, _, _) = mock_client_with_store(store_routes(), store.clone());
+    rs::reconcile_schedule(&schedule(), &context(client), now())
         .await
-        .expect("the reconcile answers");
-    assert_eq!(posted(&recorder, RESTORES_PATH), 0);
-    let patch = patch_bodies(&bodies).pop().expect("the pass writes status");
-    let st = &patch["status"];
+        .expect("pass 1 answers");
     assert_eq!(
-        st["lastFailed"]["restoreRef"]["name"], PREVIOUS_CHILD,
-        "{st}"
+        stored_status(&store)["activeRestoreRef"]["name"],
+        FIRED_CHILD,
+        "pass 1 committed the child it created: {}",
+        stored_status(&store)
     );
+
+    // The rehearsal is deleted before its result is recorded.
+    store
+        .lock()
+        .expect("the store is not poisoned")
+        .remove(&fired_child_key());
+
+    let (client, recorder, _) = mock_client_with_store(store_routes(), store.clone());
+    rs::reconcile_schedule(
+        &stored_schedule(&store),
+        &context(client),
+        at("2026-09-20T03:31:00Z"),
+    )
+    .await
+    .expect("pass 2 answers");
+    assert_eq!(posted(&recorder, RESTORES_PATH), 0);
+    let st = stored_status(&store);
+    assert_eq!(st["lastFailed"]["restoreRef"]["name"], FIRED_CHILD, "{st}");
     assert_eq!(st["lastFailed"]["reason"], rs::REASON_RESTORE_DELETED);
     assert!(st.get("lastSucceeded").is_none(), "{st}");
     assert!(
-        st["activeRestoreRef"].is_null(),
+        st.get("activeRestoreRef").is_none(),
         "the ref is released: {st}"
     );
-    let health = st["conditions"]
-        .as_array()
-        .expect("conditions")
-        .iter()
-        .find(|c| c["type"] == "RehearsalHealthy")
-        .expect("RehearsalHealthy")
-        .clone();
+    assert!(st.get("pendingRestoreRef").is_none(), "{st}");
+    let health = condition_of(&st, "RehearsalHealthy");
     assert_eq!(health["status"], "False", "{health}");
     assert!(
         health["message"]
@@ -2584,6 +2594,7 @@ async fn a_rehearsal_deleted_before_its_result_is_recorded_as_failed() {
             .is_some_and(|m| m.contains(rs::REASON_RESTORE_DELETED)),
         "{health}"
     );
+    assert_no_lost_writes(&store);
     // A schedule with NO active ref and no child is untouched by this rule.
     assert!(rs::observe(None, now()) == rs::Observation::default());
 }
@@ -2958,6 +2969,7 @@ fn every_skip_reason_names_and_consumes_the_due_slot() {
             observation: rs::Observation::default(),
             template_digest: template_digest(),
             created: None,
+            pending: rs::PendingRef::Unchanged,
         };
         let patch = rs::status_patch(&schedule, &update, now());
         assert_eq!(
@@ -2986,6 +2998,7 @@ fn every_skip_reason_names_and_consumes_the_due_slot() {
         observation: rs::Observation::default(),
         template_digest: template_digest(),
         created: None,
+        pending: rs::PendingRef::Unchanged,
     };
     let patch = rs::status_patch(&decided, &update, now());
     assert!(patch["status"].get("lastSkipped").is_none());
@@ -3807,4 +3820,578 @@ async fn a_schedule_created_before_its_slot_rehearses_it() {
         );
         assert_eq!(posted(&recorder, RESTORES_PATH), 1, "created {created}");
     }
+}
+
+// ===========================================================================
+// REHEARSAL-FIRE-PASS-STATUS-LOST — the fire pass through a server that
+// ENFORCES seam S7
+// ===========================================================================
+//
+// Found live by lab-refresh-10 (`rehearsal-deleted`, 2026-09-24T02:40Z):
+// `fire` reserved the slot with a resourceVersion-preconditioned write, which
+// moved the object, and the same pass then committed `activeRestoreRef`, the
+// verdict and the conditions preconditioned on the version it was HANDED. The
+// API server answered 409, `commit` swallowed it, and no live schedule ever
+// carried `activeRestoreRef` or evaluated `Authorized`. The route-table double
+// answered both writes 200, so every row above passed. These rows run the
+// schedule and its children through `weirkeeper::testing::ObjectStore`, which
+// stores what it accepts and refuses a stale precondition the way the API
+// server does.
+
+const SCHEDULE_KEY: &str = "/rehearsalschedules/weekly-orders";
+const FIRED_CHILD: &str = "logweir-rehearsal-weekly-orders-20260920-030000";
+const FIRED_SLOT: &str = "20260920-030000";
+
+fn fired_child_key() -> String {
+    format!("{RESTORES_PATH}/{FIRED_CHILD}")
+}
+
+/// [`happy_routes`] without the two routes the store answers statefully: the
+/// schedule's `/status` PATCH and the `Restore` POST.
+fn store_routes() -> Vec<Route> {
+    happy_routes()
+        .into_iter()
+        .filter(|r| {
+            let stateful = (r.method == "PATCH" && r.path_suffix == SCHEDULE_STATUS_PATH)
+                || (r.method == "POST" && r.path_suffix == RESTORES_PATH);
+            !stateful
+        })
+        .collect()
+}
+
+/// A store holding the schedule (with `status`) and answering `Restore` POSTs.
+fn fired_store(status: Value) -> SharedStore {
+    let store = ObjectStore::shared();
+    {
+        let mut s = store.lock().expect("the store is not poisoned");
+        s.put(SCHEDULE_KEY, schedule_value(status));
+        s.collection(RESTORES_PATH);
+    }
+    store
+}
+
+fn stored_value(store: &SharedStore) -> Value {
+    store
+        .lock()
+        .expect("the store is not poisoned")
+        .get(SCHEDULE_KEY)
+        .expect("the schedule is stored")
+}
+
+/// The schedule exactly as the server now holds it — what the next watch
+/// event would hand the reconciler.
+fn stored_schedule(store: &SharedStore) -> RehearsalSchedule {
+    serde_json::from_value(stored_value(store)).expect("the stored schedule parses")
+}
+
+fn stored_status(store: &SharedStore) -> Value {
+    stored_value(store)
+        .get("status")
+        .cloned()
+        .unwrap_or_else(|| json!({}))
+}
+
+fn condition_of(status: &Value, kind: &str) -> Value {
+    status["conditions"]
+        .as_array()
+        .expect("conditions")
+        .iter()
+        .find(|c| c["type"] == kind)
+        .unwrap_or_else(|| panic!("no {kind} condition in {status}"))
+        .clone()
+}
+
+/// Every write to the schedule the server answered — method, status, body.
+fn schedule_writes(store: &SharedStore) -> Vec<weirkeeper::testing::StoreWrite> {
+    store
+        .lock()
+        .expect("the store is not poisoned")
+        .writes()
+        .into_iter()
+        .filter(|w| w.path.contains(SCHEDULE_KEY))
+        .collect()
+}
+
+/// No write of the schedule this controller sent was refused.
+fn assert_no_lost_writes(store: &SharedStore) {
+    let refused: Vec<_> = schedule_writes(store)
+        .into_iter()
+        .filter(|w| w.status == 409)
+        .collect();
+    assert!(
+        refused.is_empty(),
+        "a status write of this pass was answered 409 and dropped: {refused:?}"
+    );
+}
+
+/// **THE REPRODUCTION.** One real fire pass — `decide`, `fire`'s reservation,
+/// the deterministic child, the bundle, `commit` — through a server that
+/// enforces the precondition. The pass's commit must LAND: `activeRestoreRef`
+/// names the child, `pendingRestoreRef` is released, the slot is recorded and
+/// `Authorized` is evaluated `True`, and no write of the pass was refused.
+///
+/// On `b4260960` this row fails at the first assertion: the reservation moved
+/// the schedule from `101` to `102`, the commit carried `101`, the server
+/// answered 409, and the stored status is the reservation alone
+/// (`pendingRestoreRef`, `lastScheduledSlot`) — `activeRestoreRef` never
+/// appears and `Authorized` is never written. MUTANT: precondition the commit
+/// on the object the pass was handed (`commit(&api, schedule, …)` in the fire
+/// arm) — same failure.
+#[tokio::test]
+async fn a_fired_slot_commits_its_active_ref_through_an_enforcing_server() {
+    let store = fired_store(json!({}));
+    let (client, recorder, _) = mock_client_with_store(store_routes(), store.clone());
+    let outcome = rs::reconcile_schedule(&schedule(), &context(client), now())
+        .await
+        .expect("the reconcile answers");
+    assert_eq!(outcome.created.as_deref(), Some(FIRED_CHILD));
+    assert_eq!(posted(&recorder, RESTORES_PATH), 1);
+
+    let st = stored_status(&store);
+    assert_eq!(
+        st["activeRestoreRef"]["name"], FIRED_CHILD,
+        "the fire pass's commit landed and names the child it created: {st}"
+    );
+    assert!(
+        st.get("pendingRestoreRef").is_none(),
+        "the reservation is released once the child is active: {st}"
+    );
+    assert_eq!(st["lastScheduledSlot"], FIRED_SLOT, "{st}");
+    let authorized = condition_of(&st, rs::CONDITION_AUTHORIZED);
+    assert_eq!(authorized["status"], "True", "{authorized}");
+    assert_eq!(authorized["reason"], rs::REASON_AUTHORIZED, "{authorized}");
+    let ready = condition_of(&st, rs::CONDITION_READY);
+    assert!(
+        ready["message"]
+            .as_str()
+            .is_some_and(|m| m.contains(FIRED_SLOT)),
+        "Ready names the fired slot: {ready}"
+    );
+
+    // THE ORDER IS THE PROTOCOL: reservation, child, then the commit — and the
+    // commit preconditions on where the RESERVATION left the object.
+    let writes = schedule_writes(&store);
+    assert_eq!(writes.len(), 2, "{writes:?}");
+    assert!(writes[0]
+        .body
+        .pointer("/status/pendingRestoreRef/name")
+        .is_some());
+    assert_eq!(writes[0].body["metadata"]["resourceVersion"], "101");
+    assert_eq!(
+        writes[1].body["metadata"]["resourceVersion"], "102",
+        "the commit preconditions on the reservation's answer, not on the object the pass \
+         was handed"
+    );
+    assert_no_lost_writes(&store);
+}
+
+/// **A slot that fires while the previous rehearsal's record is due** — the
+/// lab's own sequence: last week's child is deleted unrecorded, and the next
+/// slot comes due. Both facts must land in ONE commit: `lastFailed/
+/// RestoreDeleted` for the deleted child AND `activeRestoreRef` for the new
+/// one. On `b4260960` pass 1's commit is lost (no `activeRestoreRef`), so pass
+/// 2 records nothing and fires the next slot over the deleted rehearsal —
+/// exactly what `lr10r320260924t0216z/rehearsal-deleted` recorded live.
+#[tokio::test]
+async fn the_next_slot_records_a_deleted_rehearsal_and_commits_its_own_child() {
+    let store = fired_store(json!({}));
+    let (client, _, _) = mock_client_with_store(store_routes(), store.clone());
+    rs::reconcile_schedule(&schedule(), &context(client), now())
+        .await
+        .expect("pass 1 answers");
+    store
+        .lock()
+        .expect("the store is not poisoned")
+        .remove(&fired_child_key());
+
+    // A week later the next slot is due.
+    let next_week = at("2026-09-27T03:05:00Z");
+    let (client, recorder, _) = mock_client_with_store(store_routes(), store.clone());
+    let outcome = rs::reconcile_schedule(&stored_schedule(&store), &context(client), next_week)
+        .await
+        .expect("pass 2 answers");
+    let next_child = "logweir-rehearsal-weekly-orders-20260927-030000";
+    assert_eq!(outcome.created.as_deref(), Some(next_child));
+    assert_eq!(posted(&recorder, RESTORES_PATH), 1);
+    let st = stored_status(&store);
+    assert_eq!(st["lastFailed"]["restoreRef"]["name"], FIRED_CHILD, "{st}");
+    assert_eq!(
+        st["lastFailed"]["reason"],
+        rs::REASON_RESTORE_DELETED,
+        "{st}"
+    );
+    assert_eq!(st["activeRestoreRef"]["name"], next_child, "{st}");
+    assert!(st.get("pendingRestoreRef").is_none(), "{st}");
+    assert_eq!(condition_of(&st, "RehearsalHealthy")["status"], "False");
+    assert_eq!(
+        condition_of(&st, rs::CONDITION_AUTHORIZED)["status"],
+        "True"
+    );
+    assert_no_lost_writes(&store);
+}
+
+/// **A GENUINE CONFLICT STILL FAILS CLOSED, AND THE NEXT PASS FINISHES THE
+/// COMMIT.** Another writer moves the schedule between the reservation and the
+/// commit. The commit is refused — nothing of it is stored, and the pass does
+/// not retry it blind over a status it has not read — so the schedule holds
+/// the reservation alone. The next pass, handed the object as the server holds
+/// it, RECOVERS `created` from the reserved deterministic name: it GETs the
+/// child, finds it is this schedule's own (controller owner UID and
+/// `spec.authorization.rehearsalScheduleRef`, PLAT-04.1's rule), and commits
+/// `activeRestoreRef` — without creating a second `Restore`.
+///
+/// MUTANT: drop the adoption (`recover_reservation` answering `None`) — pass 2
+/// leaves `pendingRestoreRef` and never writes `activeRestoreRef`.
+#[tokio::test]
+async fn a_commit_lost_to_another_writer_is_finished_by_the_next_pass() {
+    let store = fired_store(json!({}));
+    store.lock().expect("the store is not poisoned").interleave(
+        "POST",
+        RESTORES_PATH,
+        SCHEDULE_KEY,
+        json!({"metadata": {"labels": {"team": "orders"}}}),
+    );
+    let (client, _, _) = mock_client_with_store(store_routes(), store.clone());
+    rs::reconcile_schedule(&schedule(), &context(client), now())
+        .await
+        .expect("pass 1 answers: a lost commit is not an error");
+    let refused = schedule_writes(&store)
+        .into_iter()
+        .filter(|w| w.status == 409)
+        .count();
+    assert_eq!(refused, 1, "the commit met the other writer's version");
+    let st = stored_status(&store);
+    assert_eq!(st["pendingRestoreRef"]["name"], FIRED_CHILD, "{st}");
+    assert!(
+        st.get("activeRestoreRef").is_none(),
+        "fail closed: nothing of the refused commit is stored: {st}"
+    );
+
+    let (client, recorder, _) = mock_client_with_store(store_routes(), store.clone());
+    let outcome = rs::reconcile_schedule(
+        &stored_schedule(&store),
+        &context(client),
+        at("2026-09-20T03:31:00Z"),
+    )
+    .await
+    .expect("pass 2 answers");
+    assert_eq!(
+        posted(&recorder, RESTORES_PATH),
+        0,
+        "adopted, not re-created"
+    );
+    assert_eq!(outcome.created.as_deref(), Some(FIRED_CHILD));
+    let st = stored_status(&store);
+    assert_eq!(st["activeRestoreRef"]["name"], FIRED_CHILD, "{st}");
+    assert!(st.get("pendingRestoreRef").is_none(), "{st}");
+    assert!(st.get("lastFailed").is_none(), "{st}");
+    // The other writer's label survived: the recovery wrote status only.
+    assert_eq!(stored_value(&store)["metadata"]["labels"]["team"], "orders");
+}
+
+/// **A RESERVED NAME HELD BY AN OBJECT THIS SCHEDULE DOES NOT OWN IS NEVER
+/// ADOPTED** (PLAT-04.1: a 409, or a GET that answers, proves only that
+/// something holds the name). The reservation names the deterministic child;
+/// a `Restore` of that name exists but is controlled by another UID. The pass
+/// does not promote it to `activeRestoreRef`, releases the reservation, and
+/// creates nothing.
+///
+/// MUTANT: adopt on name alone (drop `owned_rehearsal`) — the foreign object
+/// becomes `activeRestoreRef`.
+#[tokio::test]
+async fn a_reserved_name_held_by_a_foreign_restore_is_not_adopted() {
+    let store = fired_store(json!({
+        "pendingRestoreRef": {"name": FIRED_CHILD},
+        "lastScheduledSlot": FIRED_SLOT
+    }));
+    store
+        .lock()
+        .expect("the store is not poisoned")
+        .put(&fired_child_key(), foreign_child());
+    let (client, recorder, _) = mock_client_with_store(store_routes(), store.clone());
+    let outcome = rs::reconcile_schedule(
+        &stored_schedule(&store),
+        &context(client),
+        at("2026-09-20T03:31:00Z"),
+    )
+    .await
+    .expect("the reconcile answers");
+    assert_eq!(outcome.created, None);
+    assert_eq!(posted(&recorder, RESTORES_PATH), 0);
+    let st = stored_status(&store);
+    assert!(st.get("activeRestoreRef").is_none(), "{st}");
+    assert!(
+        st.get("pendingRestoreRef").is_none(),
+        "the reservation is released rather than kept forever: {st}"
+    );
+    assert_no_lost_writes(&store);
+}
+
+/// **`fire`'s own 409 on the create adopts only its own child.** The slot is
+/// due and a `Restore` of the deterministic name already exists, controlled by
+/// another UID. The pass creates no bundle for it (a standing bundle owned by
+/// a foreign object would hand that object this schedule's authorization),
+/// does not record it active, and names the refusal as a consumed skip.
+///
+/// MUTANT: accept any existing object on the create's 409 (the pre-fix
+/// reading) — a bundle is POSTed and `activeRestoreRef` names the foreign
+/// object.
+#[tokio::test]
+async fn a_create_conflict_with_a_foreign_restore_is_a_recorded_skip() {
+    let store = fired_store(json!({}));
+    store
+        .lock()
+        .expect("the store is not poisoned")
+        .put(&fired_child_key(), foreign_child());
+    let (client, recorder, _) = mock_client_with_store(store_routes(), store.clone());
+    let outcome = rs::reconcile_schedule(&schedule(), &context(client), now())
+        .await
+        .expect("the reconcile answers");
+    assert_eq!(outcome.created, None);
+    assert_eq!(
+        posted(&recorder, CONFIGMAPS_PATH),
+        0,
+        "no bundle for a foreign object"
+    );
+    let st = stored_status(&store);
+    assert!(st.get("activeRestoreRef").is_none(), "{st}");
+    assert!(st.get("pendingRestoreRef").is_none(), "{st}");
+    assert_eq!(st["lastSkipped"]["slot"], FIRED_SLOT, "{st}");
+    assert_eq!(st["lastSkipped"]["reason"], "ConcurrencyBlocked", "{st}");
+    assert_eq!(st["lastScheduledSlot"], FIRED_SLOT, "{st}");
+    assert_no_lost_writes(&store);
+}
+
+/// **A reservation whose child does not exist is recorded, never silent.** The
+/// schedule holds `pendingRestoreRef` and no `activeRestoreRef` — a pass
+/// reserved the slot and its commit was lost — and the child is gone (deleted
+/// before any pass recorded it, or never created). It is `lastFailed` with
+/// `RestoreDeleted` and the reservation is released; on `b4260960` the pass
+/// GOT the reserved name, read a 404 as "nothing to observe" and left the
+/// reservation standing until the next slot overwrote it.
+#[tokio::test]
+async fn a_reservation_whose_child_is_gone_is_recorded_as_failed() {
+    let store = fired_store(json!({
+        "pendingRestoreRef": {"name": FIRED_CHILD},
+        "lastScheduledSlot": FIRED_SLOT
+    }));
+    // Tracked and absent: the server answers its GET 404.
+    store
+        .lock()
+        .expect("the store is not poisoned")
+        .remove(&fired_child_key());
+    let (client, recorder, _) = mock_client_with_store(store_routes(), store.clone());
+    rs::reconcile_schedule(
+        &stored_schedule(&store),
+        &context(client),
+        at("2026-09-20T03:31:00Z"),
+    )
+    .await
+    .expect("the reconcile answers");
+    assert_eq!(posted(&recorder, RESTORES_PATH), 0);
+    let st = stored_status(&store);
+    assert_eq!(st["lastFailed"]["restoreRef"]["name"], FIRED_CHILD, "{st}");
+    assert_eq!(
+        st["lastFailed"]["reason"],
+        rs::REASON_RESTORE_DELETED,
+        "{st}"
+    );
+    assert!(st.get("pendingRestoreRef").is_none(), "{st}");
+    assert!(st.get("activeRestoreRef").is_none(), "{st}");
+    assert_eq!(condition_of(&st, "RehearsalHealthy")["status"], "False");
+    assert_no_lost_writes(&store);
+}
+
+/// A `Restore` of the deterministic name controlled by ANOTHER schedule UID.
+fn foreign_child() -> Value {
+    json!({
+        "apiVersion": "logweir.dev/v1alpha1",
+        "kind": "Restore",
+        "metadata": {
+            "name": FIRED_CHILD, "namespace": NS, "uid": "foreign-uid", "resourceVersion": "9",
+            "ownerReferences": [{
+                "apiVersion": "logweir.dev/v1alpha1", "kind": "RehearsalSchedule",
+                "name": SCHEDULE, "uid": OTHER_UID, "controller": true,
+                "blockOwnerDeletion": false
+            }]
+        },
+        "spec": {
+            "planBytes": "{}",
+            "authorization": {
+                "kind": "Standing",
+                "approvalRef": {"name": APPROVAL},
+                "rehearsalScheduleRef": {"name": SCHEDULE}
+            },
+            "sourceArchive": {"url": "logweir-destination://primary"},
+            "backupSetRef": "b-20260919",
+            "pointInTime": "2026-09-20T02:00:00Z",
+            "target": {"clusterRef": {"name": TARGET}, "mode": "scratch", "topicNaming": {"prefix": "rehearsal-"}},
+            "deadlineSeconds": 3600
+        }
+    })
+}
+
+/// **REVIEW L1 — a deleted `activeRestoreRef` beside an owned, running
+/// reservation.** The reviewer's counter-example (reserve-commit review): the
+/// status a fire pass leaves when it recorded A, reserved and created P, and
+/// lost its commit to another writer — `activeRestoreRef = A`,
+/// `pendingRestoreRef = P` — after which A is deleted. A is recorded
+/// `RestoreDeleted` AND P, which exists and is this schedule's own, becomes
+/// active in the same write. At `a8f594ec` both refs were cleared and P ran
+/// unrecorded, with Forbid blind to it.
+///
+/// MUTANT M9: drop the `(Some(name), _, Reservation::Adopted(..))` arm.
+#[tokio::test]
+async fn a_deleted_active_ref_beside_an_owned_reservation_keeps_the_reservation() {
+    let store = fired_store(json!({}));
+    let (client, _, _) = mock_client_with_store(store_routes(), store.clone());
+    rs::reconcile_schedule(&schedule(), &context(client), now())
+        .await
+        .expect("pass 1 answers");
+    {
+        let mut s = store.lock().expect("the store is not poisoned");
+        let mut v = s.get(SCHEDULE_KEY).expect("stored");
+        v["status"]["activeRestoreRef"] = json!({"name": PREVIOUS_CHILD});
+        v["status"]["pendingRestoreRef"] = json!({"name": FIRED_CHILD});
+        s.put(SCHEDULE_KEY, v);
+        let gone_key = format!("{RESTORES_PATH}/{PREVIOUS_CHILD}");
+        s.put(&gone_key, json!({}));
+        s.remove(&gone_key);
+    }
+    let (client, recorder, _) = mock_client_with_store(store_routes(), store.clone());
+    rs::reconcile_schedule(
+        &stored_schedule(&store),
+        &context(client),
+        at("2026-09-20T03:31:00Z"),
+    )
+    .await
+    .expect("pass 2 answers");
+    assert_eq!(posted(&recorder, RESTORES_PATH), 0);
+    let st = stored_status(&store);
+    assert_eq!(
+        st["lastFailed"]["restoreRef"]["name"], PREVIOUS_CHILD,
+        "{st}"
+    );
+    assert_eq!(
+        st["lastFailed"]["reason"],
+        rs::REASON_RESTORE_DELETED,
+        "{st}"
+    );
+    assert_eq!(
+        st["activeRestoreRef"]["name"], FIRED_CHILD,
+        "the owned, running reservation is adopted, not dropped: {st}"
+    );
+    assert!(st.get("pendingRestoreRef").is_none(), "{st}");
+    assert_no_lost_writes(&store);
+}
+
+/// A reservation of [`FIRED_CHILD`] whose Restore is `child`, run once.
+async fn recover_against(child: Value) -> Value {
+    let store = fired_store(json!({
+        "pendingRestoreRef": {"name": FIRED_CHILD},
+        "lastScheduledSlot": FIRED_SLOT
+    }));
+    store
+        .lock()
+        .expect("the store is not poisoned")
+        .put(&fired_child_key(), child);
+    let (client, recorder, _) = mock_client_with_store(store_routes(), store.clone());
+    let outcome = rs::reconcile_schedule(
+        &stored_schedule(&store),
+        &context(client),
+        at("2026-09-20T03:31:00Z"),
+    )
+    .await
+    .expect("the reconcile answers");
+    assert_eq!(outcome.created, None, "nothing is adopted");
+    assert_eq!(posted(&recorder, RESTORES_PATH), 0);
+    assert_no_lost_writes(&store);
+    stored_status(&store)
+}
+
+/// **REVIEW L3 / MR1 — the UID alone is not ownership.** A Restore of the
+/// reserved name, controlled by THIS schedule's UID, whose standing
+/// authorization names ANOTHER schedule, is not this schedule's rehearsal
+/// and is never adopted: `owned_rehearsal` is a conjunction.
+///
+/// MUTANT MR1: `owned_rehearsal` answers `controlled` alone.
+#[tokio::test]
+async fn an_own_uid_child_authorised_for_another_schedule_is_not_adopted() {
+    let mut child = foreign_child();
+    child["metadata"]["ownerReferences"][0]["uid"] = json!(SCHEDULE_UID);
+    child["spec"]["authorization"]["rehearsalScheduleRef"]["name"] = json!("another-schedule");
+    let st = recover_against(child).await;
+    assert!(st.get("activeRestoreRef").is_none(), "{st}");
+    assert!(st.get("pendingRestoreRef").is_none(), "released: {st}");
+}
+
+/// **REVIEW L3 / MR2 — an ownerRef is ownership only when it is the
+/// CONTROLLER.** This schedule's UID on a `controller: false` ownerRef (any
+/// client may add one) is not adoption material.
+///
+/// MUTANT MR2: drop `r.controller == Some(true)`.
+#[tokio::test]
+async fn an_own_uid_non_controller_owner_ref_is_not_adopted() {
+    let mut child = foreign_child();
+    child["metadata"]["ownerReferences"][0]["uid"] = json!(SCHEDULE_UID);
+    child["metadata"]["ownerReferences"][0]["controller"] = json!(false);
+    let st = recover_against(child).await;
+    assert!(st.get("activeRestoreRef").is_none(), "{st}");
+    assert!(st.get("pendingRestoreRef").is_none(), "released: {st}");
+}
+
+/// **REVIEW L3 / MR3 — a missing reservation beside a DECIDED active run is
+/// recorded on the pass after, never dropped.** `activeRestoreRef = A`
+/// (finished, passed), `pendingRestoreRef = P` (gone). Pass 1 records A and
+/// KEEPS P (`PendingRef::Keep`) — the decided arm would otherwise clear both
+/// refs and P's `RestoreDeleted` would never be written. Pass 2 records P.
+///
+/// MUTANT MR3: ignore `PendingRef::Keep` in `status_patch`.
+#[tokio::test]
+async fn a_missing_reservation_beside_a_decided_active_run_is_recorded_next() {
+    let store = fired_store(json!({
+        "activeRestoreRef": {"name": PREVIOUS_CHILD},
+        "pendingRestoreRef": {"name": FIRED_CHILD},
+        "lastScheduledSlot": FIRED_SLOT
+    }));
+    {
+        let mut s = store.lock().expect("the store is not poisoned");
+        s.put(
+            &format!("{RESTORES_PATH}/{PREVIOUS_CHILD}"),
+            previous_child_value("Succeeded"),
+        );
+        s.remove(&fired_child_key());
+    }
+    let pass = |t: &'static str| {
+        let store = store.clone();
+        async move {
+            let (client, _, _) = mock_client_with_store(store_routes(), store.clone());
+            rs::reconcile_schedule(&stored_schedule(&store), &context(client), at(t))
+                .await
+                .expect("the reconcile answers");
+        }
+    };
+
+    pass("2026-09-20T03:31:00Z").await;
+    let st = stored_status(&store);
+    assert_eq!(
+        st["lastSucceeded"]["restoreRef"]["name"], PREVIOUS_CHILD,
+        "{st}"
+    );
+    assert!(st.get("activeRestoreRef").is_none(), "{st}");
+    assert_eq!(
+        st["pendingRestoreRef"]["name"], FIRED_CHILD,
+        "kept, to be recorded on the next pass: {st}"
+    );
+
+    pass("2026-09-20T03:32:00Z").await;
+    let st = stored_status(&store);
+    assert_eq!(st["lastFailed"]["restoreRef"]["name"], FIRED_CHILD, "{st}");
+    assert_eq!(
+        st["lastFailed"]["reason"],
+        rs::REASON_RESTORE_DELETED,
+        "{st}"
+    );
+    assert!(st.get("pendingRestoreRef").is_none(), "{st}");
+    assert_no_lost_writes(&store);
 }

@@ -6590,6 +6590,98 @@ async fn a_concurrent_job_create_is_admitted_only_for_this_backups_job() {
     }
 }
 
+/// **THE `JobNameConflict` REFUSAL OF A FREEZE PASS LANDS** —
+/// REHEARSAL-FIRE-PASS-STATUS-LOST's class sweep. The freeze pass writes the
+/// execution record, then creates the runner Job; a foreign Job that won the
+/// name in between is refused, and that refusal is the pass's SECOND write.
+/// The row above runs over a sequenced double that answers every `PATCH` 200;
+/// here the `Backup` lives in a store that enforces seam S7, and a foreign Job
+/// appears (another writer) right after this pass's existence check. On
+/// `b4260960` the refusal carried the handed object's version, which the
+/// execution record had already moved, so the API server answered 409 and the
+/// reconcile failed with it; the terminal state waited for a second pass.
+///
+/// MUTANT: write the refusal over the handed object (drop `written`) — the
+/// reconcile returns the 409 as an error.
+#[tokio::test]
+async fn a_job_name_conflict_after_the_execution_record_is_stored() {
+    use weirkeeper::testing::{mock_client_with_store, ObjectStore};
+    let foreign: Value = serde_json::from_str(
+        &running_job_body().replace(UID, "00000000-dead-4000-8000-00000000beef"),
+    )
+    .expect("the foreign Job parses");
+    let backup_key = format!("/backups/{NAME}");
+    let job_key = format!("/jobs/{NAME}");
+    let store = ObjectStore::shared();
+    {
+        let mut s = store.lock().expect("the store");
+        s.put(
+            &backup_key,
+            serde_json::from_str(&backup_json()).expect("the Backup parses"),
+        );
+        s.remove(&job_key);
+        s.interleave("GET", &job_key, &job_key, foreign);
+    }
+    let conflict = r#"{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"AlreadyExists","code":409}"#;
+    let routes = vec![
+        Route {
+            method: "GET",
+            path_suffix: "/kafkaclusters/prod",
+            status: 200,
+            body: kafka_cluster_json(),
+        },
+        Route {
+            method: "POST",
+            path_suffix: "/configmaps",
+            status: 201,
+            body: existing_plan_config_map(UID),
+        },
+        Route {
+            method: "POST",
+            path_suffix: "/jobs",
+            status: 409,
+            body: conflict.to_string(),
+        },
+    ];
+    let (client, _, _) = mock_client_with_store(routes, store.clone());
+    let outcome = reconcile_backup(
+        &backup(),
+        &client,
+        &unobserved_archive,
+        &unverified_evidence,
+        utc(2026, 11, 9, 3, 17),
+    )
+    .await
+    .expect("the refusal is an outcome, not a 409");
+    assert_eq!(
+        outcome.terminal_state.as_deref(),
+        Some(TERMINAL_STATE_JOB_NAME_CONFLICT)
+    );
+    let guard = store.lock().expect("the store");
+    let writes: Vec<_> = guard
+        .writes()
+        .into_iter()
+        .filter(|w| w.path.ends_with(&format!("{backup_key}/status")))
+        .collect();
+    assert_eq!(
+        writes.len(),
+        2,
+        "the execution record, then the refusal: {writes:?}"
+    );
+    assert!(writes.iter().all(|w| w.status == 200), "{writes:?}");
+    let stored = guard.get(&backup_key).expect("the Backup");
+    assert_eq!(
+        condition_named(&stored["status"], "Failed").map(|c| c.1),
+        Some(TERMINAL_STATE_JOB_NAME_CONFLICT.to_string()),
+        "{}",
+        stored["status"]
+    );
+    assert!(
+        stored["status"].get("execution").is_some(),
+        "the refusal merged over the execution record"
+    );
+}
+
 /// **A JOB THIS BACKUP DOES NOT CONTROL IS NEVER OBSERVED OR ADOPTED** — no
 /// owner, another `Backup` UID, a second owner, or `controller: false`. Its pod
 /// is not listed and its log is not read, so a stranger's exit code and

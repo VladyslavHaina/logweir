@@ -7607,10 +7607,15 @@ async fn the_completion_is_written_only_beside_a_valid_verdict() {
         serde_json::json!("Valid")
     );
     assert_eq!(patches[1]["status"]["completion"], fixture_completion());
+    // THE SECOND WRITE OF THE PASS: preconditioned on where the terminal write
+    // left the object. The double enforces seam S7 now (defect
+    // REHEARSAL-FIRE-PASS-STATUS-LOST), so the terminal write moved the object
+    // from the fixture's version to the next one, and the fixture's own version
+    // here would have been answered 409.
     assert_eq!(
         patches[1]["metadata"]["resourceVersion"],
-        serde_json::json!(FIXTURE_RESOURCE_VERSION),
-        "preconditioned like every status write: {}",
+        serde_json::json!("4072"),
+        "preconditioned on the terminal write's answer: {}",
         patches[1]
     );
 
