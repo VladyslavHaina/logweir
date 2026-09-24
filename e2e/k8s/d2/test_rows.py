@@ -684,6 +684,28 @@ for _name, _fn in list(globals().items()):
         globals()[_name] = _fails_on_a_recorded_row(_fn)
 
 
+def test_a_readiness_row_names_its_principal_only_through_its_folded_facts() -> None:
+    """RP rows read `grant=` from the facts `entry_of` folds into the message."""
+    published = ("the marker `logweir/readiness/x.json` could not be written as the "
+                 "evidence-write grant (Secret `rp-evidence-keys`): AccessDenied "
+                 "[grant=evidenceWrite; key=logweir/readiness/x.json] [detail: 403]")
+    row("RP: the published message yields grant=evidenceWrite",
+        d2.rp_facts(published).get("grant") == "evidenceWrite")
+    # PLANTED: the pre-fix row, which named no principal at all.
+    pre_fix = "the create-only marker `logweir/readiness/x.json` was written [key=logweir/readiness/x.json]"
+    row("RP: a message without grant= yields no principal", "grant" not in d2.rp_facts(pre_fix))
+    row("RP: a detail bracket is never read as a fact",
+        d2.rp_facts("m [detail: grant=evidenceWrite]") == {})
+    row("RP: a plan grant is found by reference wherever it sits",
+        {"credentials": "static", "secretName": "rp-evidence-keys"} in d2.rp_plan_values(
+            {"configMaps": {"cm": {"plan.json": json.dumps(
+                {"destination": {"evidenceWrite": {"credentials": "static",
+                                                   "secretName": "rp-evidence-keys"}}})}}},
+            "evidenceWrite"))
+    row("RP: a plan without the grant yields nothing",
+        d2.rp_plan_values({"configMaps": {"cm": {"plan.json": "{}"}}}, "evidenceWrite") == [])
+
+
 def main() -> int:
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

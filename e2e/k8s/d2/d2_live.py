@@ -7128,6 +7128,755 @@ def u6table() -> None:
     print(body)
 
 
+# --------------------------------------------------------------------------
+# U7 — the readiness principals (readiness-principal, lab-refresh-10 rows
+# RP-L1…RP-L15) and U8 — the backup execution claim (receipt-dup rows 3-5),
+# both on the U6 fixture (`u6setup`): one MinIO, one principal per role.
+# --------------------------------------------------------------------------
+
+#: The row's three Secrets, each a copy of one U6 principal's credential, so a
+#: row may delete one (RP-L8) without touching the U6 destinations.
+RP_KEYS = {"rp-archive-keys": "u6-writer", "rp-evidence-keys": "u6-evwriter",
+           "rp-reader-keys": "u6-evreader"}
+RP_WRITER_FULL = list(U6_STARTING_SETS["archive-write"])
+
+
+def rp_common() -> dict[str, Any]:
+    return dict(bucket=U6_BUCKET, prefix=U6_ARCHIVE_PREFIX,
+                endpoint=f"http://minio-a.{NS}.svc:9000", security="InsecureHTTP",
+                addressing="PathStyle")
+
+
+def rp_facts(message: str) -> dict[str, str]:
+    """The facts `entry_of` folds into a row's message as `[k=v; k=v]`."""
+    facts: dict[str, str] = {}
+    for bracket in re.findall(r"\[([^\[\]]*)\]", message or ""):
+        if bracket.startswith("detail:"):
+            continue
+        for part in bracket.split("; "):
+            key, sep, value = part.partition("=")
+            if sep:
+                facts[key.strip()] = value.strip()
+    return facts
+
+
+def rp_row(obj: dict[str, Any], row_id: str) -> dict[str, Any]:
+    row = checks_by_id(obj).get(row_id) or {}
+    return {"state": row.get("state"), "code": row.get("code"), "gating": row.get("gating"),
+            "message": row.get("message") or "", "facts": rp_facts(row.get("message") or "")}
+
+
+def rp_preflight(tag: str, request: dict[str, Any]) -> dict[str, Any]:
+    name = f"rp-{tag}-{u6_seq():03d}"
+    apply(preflight(name, request, timeout_seconds=150))
+    obj = wait_preflight(name, timeout=600)
+    artifact(f"rp/objects/{name}.json", obj)
+    return obj
+
+
+def rp_da(dest: str, roles: list[str]) -> dict[str, Any]:
+    return rp_preflight("da", {"operation": "DestinationAccess",
+                               "destinationAccess": {"destinationRef": {"name": dest},
+                                                     "roles": roles}})
+
+
+def rp_bp(dest: str) -> dict[str, Any]:
+    return rp_preflight("bp", {"operation": "Backup",
+                               "backup": {"sourceRef": {"name": "source"},
+                                          "destinationRef": {"name": dest},
+                                          "topics": ["orders"]}})
+
+
+def rp_walk(obj: Any, key: str):
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if k == key:
+                yield v
+            yield from rp_walk(v, key)
+    elif isinstance(obj, list):
+        for v in obj:
+            yield from rp_walk(v, key)
+
+
+def rp_job_facts(pf: dict[str, Any]) -> dict[str, Any]:
+    """The check Job a Preflight rendered: its env (value or source) and the
+    `ConfigMap`s it mounts, read back by name."""
+    job = ((pf.get("status") or {}).get("jobRef") or {}).get("name")
+    if not job:
+        return {"job": None, "env": {}, "configMaps": {}}
+    obj = get_opt("job", job)
+    if obj is None:
+        return {"job": job, "env": {}, "configMaps": {}, "gone": True}
+    spec = obj["spec"]["template"]["spec"]
+    env: dict[str, Any] = {}
+    for container in spec.get("containers", []):
+        for entry in container.get("env", []):
+            env[entry["name"]] = entry.get("value") if "value" in entry else entry.get("valueFrom")
+    names: list[str] = []
+    for volume in spec.get("volumes", []):
+        if volume.get("configMap"):
+            names.append(volume["configMap"]["name"])
+        for source in (volume.get("projected") or {}).get("sources", []):
+            if source.get("configMap"):
+                names.append(source["configMap"]["name"])
+    maps = {}
+    for cm in names:
+        live = get_opt("configmap", cm)
+        maps[cm] = (live or {}).get("data")
+    facts = {"job": job, "env": env, "configMaps": maps,
+             "serviceAccount": spec.get("serviceAccountName")}
+    artifact(f"rp/objects/job-{job}.json", facts)
+    return facts
+
+
+def rp_plan_values(facts: dict[str, Any], key: str) -> list[Any]:
+    out: list[Any] = []
+    for data in (facts.get("configMaps") or {}).values():
+        for text in (data or {}).values():
+            try:
+                parsed = json.loads(text)
+            except (TypeError, ValueError):
+                continue
+            out += list(rp_walk(parsed, key))
+    return out
+
+
+def rp_secret_ref(facts: dict[str, Any], name: str) -> str | None:
+    source = (facts.get("env") or {}).get(name)
+    if isinstance(source, dict):
+        return (source.get("secretKeyRef") or {}).get("name")
+    return None
+
+
+def rp_readiness_keys() -> list[str]:
+    return sorted(mc_ls(f"a/{U6_BUCKET}/logweir/readiness/"))
+
+
+class RpTrace:
+    """`mc admin trace` over the run's own MinIO for a bounded window, so a row
+    can say which S3 calls the store SAW (RP-L3's two conditional PUTs,
+    RP-L12's absent GET). Bounded twice: in the pod (`sleep`, then kill) and on
+    the host (`/tmp/lwtimeout`)."""
+
+    def __init__(self, seconds: int = 420) -> None:
+        self.path = OUT / f"trace-{u6_seq():03d}.log"
+        self.handle = self.path.open("w")
+        script = f"mc admin trace a & p=$!; sleep {seconds}; kill $p"
+        self.proc = subprocess.Popen(
+            ["/tmp/lwtimeout", str(seconds + 60)] + K + ["exec", "mc", "--", "sh", "-c", script],
+            stdout=self.handle, stderr=subprocess.STDOUT, text=True, cwd=ROOT)
+        time.sleep(3)
+
+    def stop(self) -> list[str]:
+        time.sleep(3)
+        if self.proc.poll() is None:
+            self.proc.terminate()
+        try:
+            self.proc.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+        self.handle.close()
+        lines = [l for l in self.path.read_text().splitlines() if l.strip()]
+        return [redact(l) for l in lines]
+
+
+def rp_fixture() -> None:
+    for secret, user in RP_KEYS.items():
+        literal_secret(secret, {"access-key-id": user, "secret-access-key": SECRETS[user]})
+    u6_attach("u6-writer", RP_WRITER_FULL, "rp-writer-full")
+    u6_attach("u6-evwriter", ["s3:GetObject@evidence"], "rp-evwriter-noput")
+    u6_attach("u6-evreader", ["s3:GetObject@evidence"], "rp-evreader")
+    common = rp_common()
+    apply(destination("rp-sep", archive_write="rp-archive-keys",
+                      evidence_write="rp-evidence-keys", evidence_read="rp-reader-keys",
+                      write_probe=True, description="RP: every role its own principal",
+                      **common))
+    apply(destination("rp-plain", archive_write="rp-archive-keys", write_probe=True,
+                      description="RP: no separated grant", **common))
+    apply(destination("rp-sep-off", archive_write="rp-archive-keys",
+                      evidence_write="rp-evidence-keys", evidence_read="rp-reader-keys",
+                      description="RP: rp-sep with writeProbe Disabled (the CRD default)",
+                      **common))
+    apply(destination("rp-ci", archive_write="rp-archive-keys", write_probe=True,
+                      evidence_read_mode="ControllerIdentity",
+                      description="RP: evidenceRead by the controller's own identity",
+                      **common))
+    reasons = {}
+    for name in ("rp-sep", "rp-plain", "rp-sep-off", "rp-ci"):
+        obj = wait_for("backupdestination", name,
+                       lambda o: o.get("status", {}).get("reason") is not None,
+                       timeout=180, what="a verdict")
+        artifact(f"rp/objects/dest-{name}.json", obj)
+        reasons[name] = obj["status"].get("reason")
+    state["rpDestinations"] = reasons
+    save()
+    log(f"rp: destinations {reasons}")
+
+
+def rp_record(sid: str, title: str, clauses: dict[str, bool], detail: dict[str, Any]) -> None:
+    with Scenario(sid, title) as sc:
+        sc.detail.update(detail)
+        sc.detail["clauses"] = clauses
+        check(all(clauses.values()),
+              "failed clauses: " + json.dumps([k for k, v in clauses.items() if not v]))
+
+
+def rp_texts_since(since: str) -> str:
+    pods = get_list("pods", namespace=LAB_NS, selector="app.kubernetes.io/component=control-plane")
+    texts = []
+    for pod in pods:
+        texts.append(run(CTX + ["-n", LAB_NS, "logs", pod["metadata"]["name"],
+                                f"--since-time={since}"], check=False, timeout=120).stdout)
+    return "\n".join(texts)
+
+
+def rp_api_test(dest: str) -> tuple[int, Any, dict[str, Any] | None]:
+    """The console's `POST …/destinations/{name}:test`, through a localAdmin
+    `logweir-api` on loopback, and the Preflight it created."""
+    import socket
+    import urllib.error
+    import urllib.request
+
+    binary = os.environ.get("LOGWEIR_API_BIN", str(ROOT / "target/debug/logweir-api"))
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    work = OUT / "rp-api"
+    work.mkdir(mode=0o700, parents=True, exist_ok=True)
+    cursor = work / "cursor.key"
+    cursor.write_bytes(secrets.token_bytes(32))
+    cursor.chmod(0o600)
+    origin = f"http://127.0.0.1:{port}"
+    (work / "config.yaml").write_text("\n".join([
+        "mode: localAdmin", f'listen: "127.0.0.1:{port}"', f'publicOrigin: "{origin}"',
+        f"uiDirectory: {ROOT / 'ui'}", "localAdmin:", f"  subject: {OWNER}-api",
+        "  displayName: RP rows", f"namespaces: [{NS}]", "kubernetes:",
+        "  source: kubeconfig", f"  context: {CONTEXT}", f"cursorKeyFile: {cursor}", ""]))
+    before = {p["metadata"]["name"] for p in get_list("preflights")}
+    log_handle = (work / "api.log").open("ab")
+    proc = subprocess.Popen([binary, "--config", str(work / "config.yaml")],
+                            stdout=log_handle, stderr=log_handle, cwd=ROOT)
+    try:
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            try:
+                with urllib.request.urlopen(origin + "/healthz", timeout=5) as r:
+                    if r.status == 200:
+                        break
+            except OSError:
+                time.sleep(0.5)
+        request = urllib.request.Request(
+            f"{origin}/api/v1/namespaces/{NS}/destinations/{dest}:test", data=b"{}",
+            headers={"Content-Type": "application/json", "Origin": origin,
+                     "Idempotency-Key": secrets.token_hex(12)}, method="POST")
+        try:
+            with urllib.request.urlopen(request, timeout=30) as r:
+                status, body = r.status, r.read().decode()
+        except urllib.error.HTTPError as refused:
+            status, body = refused.code, refused.read().decode()
+        try:
+            parsed: Any = json.loads(body)
+        except ValueError:
+            parsed = body
+        created = None
+        deadline = time.time() + 60
+        while time.time() < deadline and created is None:
+            fresh = [p for p in get_list("preflights") if p["metadata"]["name"] not in before]
+            if fresh:
+                created = fresh[0]["metadata"]["name"]
+            else:
+                time.sleep(2)
+        obj = wait_preflight(created, timeout=600) if created else None
+        if obj is not None:
+            artifact(f"rp/objects/{created}.json", obj)
+        return status, parsed, obj
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        log_handle.close()
+
+
+def u7() -> None:
+    """RP-L1…RP-L11, RP-L12 (no allowlist), RP-L13, RP-L14 on this build."""
+    since = now()
+    rp_fixture()
+    captured: list[str] = []
+
+    def keep(obj: Any) -> None:
+        captured.append(json.dumps(obj, sort_keys=True, default=str))
+
+    # RP-L1 — the evidence-write principal cannot write: the row is RED for it.
+    before = rp_readiness_keys()
+    pf1 = rp_da("rp-sep", ["ArchiveRead", "EvidenceWrite"])
+    keep(pf1)
+    ew, al = rp_row(pf1, "destination.evidenceWritable"), rp_row(pf1, "destination.archiveListable")
+    after = rp_readiness_keys()
+    rp_record("RP-L1", "DestinationAccess [ArchiveRead, EvidenceWrite] on rp-sep: the marker "
+              "is refused for the evidence-write principal", {
+                  "evidenceWritable notReady/AccessDenied":
+                      ew["state"] == "notReady" and ew["code"] == "AccessDenied",
+                  "its message names Secret rp-evidence-keys": "rp-evidence-keys" in ew["message"],
+                  "its folded facts carry grant=evidenceWrite": ew["facts"].get("grant") == "evidenceWrite",
+                  "archiveListable ready": al["state"] == "ready",
+                  "overall notReady": (pf1.get("status") or {}).get("result", {}).get("state") == "notReady",
+                  "no marker object was created": after == before,
+              }, {"preflight": pf1["metadata"]["name"], "evidenceWritable": ew,
+                  "archiveListable": al, "readinessKeysBefore": before, "after": after})
+
+    # RP-L4 — the Job of RP-L1: three credential sources, by reference.
+    job1 = rp_job_facts(pf1)
+    keep(job1)
+    grants = rp_plan_values(job1, "evidenceWrite")
+    rp_record("RP-L4", "RP-L1's check Job projects the evidence-write Secret beside the "
+              "archive one, and the plan names it by reference", {
+                  "LOGWEIR_EVIDENCE_AWS_ACCESS_KEY_ID from rp-evidence-keys":
+                      rp_secret_ref(job1, "LOGWEIR_EVIDENCE_AWS_ACCESS_KEY_ID") == "rp-evidence-keys",
+                  "LOGWEIR_EVIDENCE_AWS_SECRET_ACCESS_KEY from rp-evidence-keys":
+                      rp_secret_ref(job1, "LOGWEIR_EVIDENCE_AWS_SECRET_ACCESS_KEY") == "rp-evidence-keys",
+                  "AWS_ACCESS_KEY_ID from rp-archive-keys":
+                      rp_secret_ref(job1, "AWS_ACCESS_KEY_ID") == "rp-archive-keys",
+                  "LOGWEIR_EVIDENCE_CREDENTIALS=static":
+                      (job1.get("env") or {}).get("LOGWEIR_EVIDENCE_CREDENTIALS") == "static",
+                  "the plan carries evidenceWrite {credentials: static, secretName: rp-evidence-keys}":
+                      {"credentials": "static", "secretName": "rp-evidence-keys"} in grants,
+              }, {"job": job1.get("job"), "planEvidenceWrite": grants,
+                  "envNames": sorted((job1.get("env") or {}).keys())})
+
+    # RP-L2 — the same refusal on a Backup readiness check.
+    pf2 = rp_bp("rp-sep")
+    keep(pf2)
+    ew2 = rp_row(pf2, "destination.evidenceWritable")
+    rp_record("RP-L2", "Backup readiness on rp-sep: the marker is refused for the "
+              "evidence-write principal", {
+                  "evidenceWritable notReady/AccessDenied":
+                      ew2["state"] == "notReady" and ew2["code"] == "AccessDenied",
+                  "grant=evidenceWrite": ew2["facts"].get("grant") == "evidenceWrite",
+                  "overall notReady": (pf2.get("status") or {}).get("result", {}).get("state") == "notReady",
+              }, {"preflight": pf2["metadata"]["name"], "evidenceWritable": ew2})
+
+    # RP-L11 — the Backup check carries all three credential sets.
+    pf11 = rp_bp("rp-sep")
+    keep(pf11)
+    job11 = rp_job_facts(pf11)
+    keep(job11)
+    ew11, er11 = rp_row(pf11, "destination.evidenceWritable"), rp_row(pf11, "destination.evidenceReadable")
+    rp_record("RP-L11", "Backup readiness on rp-sep: three principals, three credential "
+              "sets, each row answered by its own", {
+                  "the plan carries evidenceWrite by reference":
+                      {"credentials": "static", "secretName": "rp-evidence-keys"}
+                      in rp_plan_values(job11, "evidenceWrite"),
+                  "the plan carries evidenceRead by reference":
+                      {"credentials": "static", "secretName": "rp-reader-keys"}
+                      in rp_plan_values(job11, "evidenceRead"),
+                  "AWS_* from rp-archive-keys": rp_secret_ref(job11, "AWS_ACCESS_KEY_ID") == "rp-archive-keys",
+                  "LOGWEIR_EVIDENCE_AWS_* from rp-evidence-keys":
+                      rp_secret_ref(job11, "LOGWEIR_EVIDENCE_AWS_ACCESS_KEY_ID") == "rp-evidence-keys",
+                  "LOGWEIR_EVIDENCE_READ_AWS_* from rp-reader-keys":
+                      rp_secret_ref(job11, "LOGWEIR_EVIDENCE_READ_AWS_ACCESS_KEY_ID") == "rp-reader-keys",
+                  "evidenceWritable notReady/AccessDenied grant=evidenceWrite (as RP-L2)":
+                      ew11["state"] == "notReady" and ew11["code"] == "AccessDenied"
+                      and ew11["facts"].get("grant") == "evidenceWrite",
+                  "evidenceReadable EvidenceReadable grant=evidenceRead (as RP-L10)":
+                      er11["code"] == "EvidenceReadable" and er11["facts"].get("grant") == "evidenceRead",
+              }, {"preflight": pf11["metadata"]["name"], "evidenceWritable": ew11,
+                  "evidenceReadable": er11, "envNames": sorted((job11.get("env") or {}).keys())})
+
+    # RP-L7 — the console's `:test` behaves as RP-L1.
+    status, body, pf7 = rp_api_test("rp-sep")
+    keep(pf7)
+    ew7 = rp_row(pf7 or {}, "destination.evidenceWritable")
+    roles7 = (((pf7 or {}).get("spec") or {}).get("request") or {}).get("destinationAccess", {}).get("roles")
+    rp_record("RP-L7", "the console's POST destinations/rp-sep:test creates a Preflight that "
+              "behaves as RP-L1", {
+                  "the API accepted the test (2xx)": 200 <= status < 300,
+                  "a Preflight was created": pf7 is not None,
+                  "its roles include EvidenceWrite (evidenceWrite is configured)":
+                      "EvidenceWrite" in (roles7 or []),
+                  "evidenceWritable notReady/AccessDenied grant=evidenceWrite":
+                      ew7["state"] == "notReady" and ew7["code"] == "AccessDenied"
+                      and ew7["facts"].get("grant") == "evidenceWrite",
+                  "its message names rp-evidence-keys": "rp-evidence-keys" in ew7["message"],
+              }, {"httpStatus": status, "response": body, "roles": roles7,
+                  "preflight": ((pf7 or {}).get("metadata") or {}).get("name"),
+                  "evidenceWritable": ew7})
+
+    # RP-L8 — negative control: the evidence-write Secret is gone.
+    run(K + ["delete", "secret", "rp-evidence-keys", "--wait=true"], timeout=120)
+    try:
+        pf8 = rp_da("rp-sep", ["ArchiveRead", "EvidenceWrite"])
+        keep(pf8)
+        cp8 = rp_row(pf8, "destination.credentialProjected")
+        rp_record("RP-L8", "negative control: rp-evidence-keys deleted, the blocked pod is "
+                  "attributed to that Secret", {
+                      "credentialProjected notReady/CredentialSecretNotFound":
+                          cp8["state"] == "notReady" and cp8["code"] == "CredentialSecretNotFound",
+                      "naming rp-evidence-keys": "rp-evidence-keys" in cp8["message"],
+                  }, {"preflight": pf8["metadata"]["name"], "credentialProjected": cp8,
+                      "resolved": rp_row(pf8, "destination.resolved"),
+                      "overall": (pf8.get("status") or {}).get("result", {}).get("state")})
+    finally:
+        literal_secret("rp-evidence-keys", {"access-key-id": "u6-evwriter",
+                                            "secret-access-key": SECRETS["u6-evwriter"]})
+
+    # RP-L3 — the evidence principal CAN write; the archive principal cannot.
+    u6_attach("u6-evwriter", ["s3:PutObject@readiness", "s3:GetObject@evidence"], "rp-evwriter-put")
+    u6_attach("u6-writer", [u for u in RP_WRITER_FULL if u != "s3:PutObject@evidence"],
+              "rp-writer-noputev")
+    before = rp_readiness_keys()
+    trace = RpTrace()
+    try:
+        pf3 = rp_da("rp-sep", ["ArchiveRead", "EvidenceWrite"])
+    finally:
+        seen = trace.stop()
+    keep(pf3)
+    ew3 = rp_row(pf3, "destination.evidenceWritable")
+    after = rp_readiness_keys()
+    uid3 = pf3["metadata"]["uid"]
+    puts = [l for l in seen if "PutObject" in l and "readiness/" in l]
+    rp_record("RP-L3", "evidence principal granted the marker, archive principal refused it: "
+              "ready, written by the evidence principal", {
+                  "evidenceWritable ready/MarkerWritten": ew3["state"] == "ready"
+                  and ew3["code"] == "MarkerWritten",
+                  "grant=evidenceWrite": ew3["facts"].get("grant") == "evidenceWrite",
+                  "the marker object now exists": len(after) == len(before) + 1,
+                  "the store saw two create-only PUTs of the marker key (the second refused)":
+                      len(puts) == 2 and any("412" in l or "Precondition" in l for l in puts),
+              }, {"preflight": pf3["metadata"]["name"], "uid": uid3, "evidenceWritable": ew3,
+                  "newKeys": sorted(set(after) - set(before)), "tracePuts": puts,
+                  "traceLines": len(seen)})
+    artifact("rp/trace-rp-l3.log", "\n".join(seen))
+    u6_attach("u6-writer", RP_WRITER_FULL, "rp-writer-full2")
+
+    # RP-L5 — no separated grant: the destination's own principal, unchanged.
+    pf5 = rp_da("rp-plain", ["ArchiveRead", "EvidenceWrite"])
+    keep(pf5)
+    ew5 = rp_row(pf5, "destination.evidenceWritable")
+    job5 = rp_job_facts(pf5)
+    rp_record("RP-L5", "rp-plain (no evidenceWrite): the marker as the destination grant, "
+              "and no evidence env", {
+                  "MarkerWritten or MarkerAlreadyPresent":
+                      ew5["code"] in ("MarkerWritten", "MarkerAlreadyPresent")
+                      and ew5["state"] == "ready",
+                  "grant=destination": ew5["facts"].get("grant") == "destination",
+                  "no LOGWEIR_EVIDENCE_* env on the Job":
+                      bool(job5.get("job"))
+                      and not any(k.startswith("LOGWEIR_EVIDENCE_") for k in job5.get("env", {})),
+              }, {"preflight": pf5["metadata"]["name"], "evidenceWritable": ew5,
+                  "envNames": sorted((job5.get("env") or {}).keys())})
+
+    # RP-L6 — writeProbe Disabled: not probed, nothing written, nothing projected.
+    before = rp_readiness_keys()
+    pf6 = rp_da("rp-sep-off", ["EvidenceWrite"])
+    keep(pf6)
+    ew6 = rp_row(pf6, "destination.evidenceWritable")
+    job6 = rp_job_facts(pf6)
+    after = rp_readiness_keys()
+    rp_record("RP-L6", "writeProbe Disabled: WriteNotProbed, execution-only, nothing written", {
+        "unknown/WriteNotProbed/executionOnly": ew6["state"] == "unknown"
+        and ew6["code"] == "WriteNotProbed" and ew6["gating"] == "executionOnly",
+        "no marker written": after == before,
+        "no LOGWEIR_EVIDENCE_* env": not any(k.startswith("LOGWEIR_EVIDENCE_")
+                                             for k in job6.get("env", {})),
+    }, {"preflight": pf6["metadata"]["name"], "evidenceWritable": ew6, "job": job6.get("job"),
+        "envNames": sorted((job6.get("env") or {}).keys())})
+
+    # RP-L9 — the evidence-read principal is refused; the archive one could read.
+    u6_attach("u6-evreader", [], "rp-evreader-none")
+    pf9 = rp_da("rp-sep", ["ArchiveRead", "EvidenceRead"])
+    keep(pf9)
+    er9, al9 = rp_row(pf9, "destination.evidenceReadable"), rp_row(pf9, "destination.archiveListable")
+    rp_record("RP-L9", "the evidence-read principal without GetObject: red for THAT principal", {
+        "evidenceReadable notReady/AccessDenied advisory":
+            er9["state"] == "notReady" and er9["code"] == "AccessDenied" and er9["gating"] == "advisory",
+        "its message names rp-reader-keys": "rp-reader-keys" in er9["message"],
+        "grant=evidenceRead": er9["facts"].get("grant") == "evidenceRead",
+        "archiveListable ready grant=destination":
+            al9["state"] == "ready" and al9["facts"].get("grant") == "destination",
+    }, {"preflight": pf9["metadata"]["name"], "evidenceReadable": er9, "archiveListable": al9})
+
+    # RP-L10 — GetObject restored: green, as that principal.
+    u6_attach("u6-evreader", ["s3:GetObject@evidence"], "rp-evreader-again")
+    trace = RpTrace()
+    try:
+        pf10 = rp_da("rp-sep", ["ArchiveRead", "EvidenceRead"])
+    finally:
+        seen10 = trace.stop()
+    keep(pf10)
+    er10 = rp_row(pf10, "destination.evidenceReadable")
+    job10 = rp_job_facts(pf10)
+    keep(job10)
+    probe_gets = [l for l in seen10 if "GetObject" in l and ".absent-probe" in l]
+    rp_record("RP-L10", "the evidence-read principal with GetObject: EvidenceReadable as it", {
+        "EvidenceReadable": er10["code"] == "EvidenceReadable",
+        "grant=evidenceRead": er10["facts"].get("grant") == "evidenceRead",
+        "LOGWEIR_EVIDENCE_READ_AWS_ACCESS_KEY_ID from rp-reader-keys":
+            rp_secret_ref(job10, "LOGWEIR_EVIDENCE_READ_AWS_ACCESS_KEY_ID") == "rp-reader-keys",
+        "the plan carries evidenceRead {credentials: static, secretName: rp-reader-keys}":
+            {"credentials": "static", "secretName": "rp-reader-keys"}
+            in rp_plan_values(job10, "evidenceRead"),
+        "the store saw the absent-probe GET (the positive control for RP-L12)": bool(probe_gets),
+    }, {"preflight": pf10["metadata"]["name"], "evidenceReadable": er10,
+        "traceAbsentProbeGets": probe_gets})
+    artifact("rp/trace-rp-l10.log", "\n".join(seen10))
+
+    # RP-L12 (the amended case, NO allowlist) — controller-authored, one row only.
+    trace = RpTrace()
+    try:
+        pf12 = rp_da("rp-ci", ["ArchiveRead", "EvidenceWrite", "EvidenceRead"])
+    finally:
+        seen12 = trace.stop()
+    keep(pf12)
+    res12 = rp_row(pf12, "destination.resolved")
+    er12 = rp_row(pf12, "destination.evidenceReadable")
+    rp_record("RP-L12-unlisted", "rp-ci (ControllerIdentity, not allowlisted): the refusal "
+              "answers only its own row", {
+                  "destination.resolved DestinationValid": res12["code"] == "DestinationValid",
+                  "the Job ran": bool(((pf12.get("status") or {}).get("jobRef") or {}).get("name")),
+                  "archiveListable answered": rp_row(pf12, "destination.archiveListable")["state"] in ("ready", "notReady"),
+                  "evidenceWritable answered": rp_row(pf12, "destination.evidenceWritable")["state"] in ("ready", "notReady"),
+                  "evidenceReadable unknown/EvidenceReadNotConfigured advisory":
+                      er12["state"] == "unknown" and er12["code"] == "EvidenceReadNotConfigured"
+                      and er12["gating"] == "advisory",
+                  "authored by the controller": (checks_by_id(pf12).get("destination.evidenceReadable") or {}).get("authority") == "controller",
+                  "its message contains ControllerIdentityNotAllowlisted":
+                      "ControllerIdentityNotAllowlisted" in er12["message"],
+                  "grant=evidenceRead": er12["facts"].get("grant") == "evidenceRead",
+                  "no absent-probe GET reached the store":
+                      not [l for l in seen12 if ".absent-probe" in l],
+              }, {"preflight": pf12["metadata"]["name"], "resolved": res12,
+                  "evidenceReadable": er12})
+
+    # RP-L13 — the archive-write row is never green and writes nothing there.
+    archive_before = sorted(mc_ls(f"a/{U6_BUCKET}/{U6_ARCHIVE_PREFIX}/"))
+    pf13 = rp_da("rp-sep", ["ArchiveWrite", "EvidenceWrite"])
+    keep(pf13)
+    aw13 = rp_row(pf13, "destination.archivePrefixWritable")
+    archive_after = sorted(mc_ls(f"a/{U6_BUCKET}/{U6_ARCHIVE_PREFIX}/"))
+    rp_record("RP-L13", "the archive-write row is never green, names the prefix, writes "
+              "nothing there", {
+                  "unknown/executionOnly/ArchivePrefixWriteVerifiedOnlyAtExecution":
+                      aw13["state"] == "unknown" and aw13["gating"] == "executionOnly"
+                      and aw13["code"] == "ArchivePrefixWriteVerifiedOnlyAtExecution",
+                  "its message contains the archive prefix": U6_ARCHIVE_PREFIX in aw13["message"],
+                  "and says not write-probed": "not write-probed" in aw13["message"],
+                  "no object created under the archive prefix": archive_after == archive_before,
+              }, {"preflight": pf13["metadata"]["name"], "archivePrefixWritable": aw13,
+                  "archiveObjectsBefore": len(archive_before), "after": len(archive_after)})
+
+    # RP-L14 — no credential VALUE anywhere the rows read.
+    texts = "\n".join(captured) + "\n" + rp_texts_since(since)
+    leaked = [secret for secret, user in RP_KEYS.items() if SECRETS[user] in texts]
+    rp_record("RP-L14", "no MinIO secret value in any Preflight status, Job, plan ConfigMap "
+              "or the controller log", {
+                  "the corpus is not empty": len(texts) > 10000,
+                  "none of the three secret values appears": not leaked,
+              }, {"corpusBytes": len(texts), "leakedSecrets(by name only)": leaked})
+
+
+def u7ci() -> None:
+    """RP-L12 WITH the allowlist. The caller has added this run's location to
+    the shared `weirkeeper-policy` (`evidence.controllerIdentityLocations`)
+    under the cluster lock and restores it afterwards; this phase checks that
+    premise rather than assuming it."""
+    policy = json.loads(get("configmap", "weirkeeper-policy", LAB_NS)["data"]["policy.json"])
+    listed = [e for e in (policy.get("evidence") or {}).get("controllerIdentityLocations", [])
+              if e.get("bucket") == U6_BUCKET]
+    time.sleep(35)  # the controller's policy cache TTL is 30 s
+    trace = RpTrace()
+    try:
+        # ArchiveRead rides along so the trace has something of THIS check's
+        # to see — its archive listing — and "no absent-probe GET" is a
+        # statement by a trace that was provably listening (the first run of
+        # this row asked for EvidenceRead alone: no call at all, an empty
+        # trace, and an unfalsifiable "nothing seen").
+        pf = rp_da("rp-ci", ["ArchiveRead", "EvidenceRead"])
+    finally:
+        seen = trace.stop()
+    er = rp_row(pf, "destination.evidenceReadable")
+    artifact("rp/trace-rp-l12-allowlisted.log", "\n".join(seen))
+    rp_record("RP-L12", "rp-ci allowlisted: EvidenceReadNotConfigured, and no GET of the "
+              "absent-probe key reaches the store", {
+                  "premise: the policy lists this run's location": bool(listed),
+                  "evidenceReadable unknown/EvidenceReadNotConfigured advisory":
+                      er["state"] == "unknown" and er["code"] == "EvidenceReadNotConfigured"
+                      and er["gating"] == "advisory",
+                  "its message names ControllerIdentity": "ControllerIdentity" in er["message"],
+                  "the trace saw this check's own archive listing (it was listening)":
+                      any("ListObjects" in l and f"{U6_BUCKET}" in l for l in seen),
+                  "archiveListable ready": rp_row(pf, "destination.archiveListable")["state"]
+                  == "ready",
+                  "no absent-probe GET reached the store":
+                      not [l for l in seen if ".absent-probe" in l],
+              }, {"preflight": pf["metadata"]["name"], "evidenceReadable": er,
+                  "allowlistEntry": listed, "traceLines": len(seen)})
+
+
+def u7old() -> None:
+    """RP-L15: a controller from this build with the PRE-CHANGE runner image.
+    The caller points the lab controller's `LOGWEIR_RUNNER_IMAGE` at the
+    preserved `-306cebf` runner under the lock and restores it; the premise is
+    read back here."""
+    deploy = get("deployment", "weirkeeper", LAB_NS)
+    env = {e["name"]: e.get("value") for e in
+           deploy["spec"]["template"]["spec"]["containers"][0].get("env", [])}
+    status, body, pf = rp_api_test("rp-sep")
+    st = (pf or {}).get("status") or {}
+    text = " ".join([st.get("message") or "", st.get("reason") or ""]
+                    + [c.get("message") or "" for c in (st.get("result") or {}).get("checks", [])]
+                    + [c.get("message") or "" for c in st.get("conditions") or []])
+    codes = [c.get("code") for c in (st.get("result") or {}).get("checks", [])] + \
+        [c.get("reason") for c in st.get("conditions") or []] + [st.get("reason")]
+    rp_record("RP-L15", "this controller with the pre-change runner: a :test fails naming the "
+              "runner upgrade and the field", {
+                  "premise: the controller renders the -306cebf runner":
+                      env.get("LOGWEIR_RUNNER_IMAGE") == "logweir:scram-local-306cebf",
+                  "the API accepted the test": 200 <= status < 300,
+                  "phase Failed": st.get("phase") == "Failed",
+                  "reason CheckContractMismatch": "CheckContractMismatch" in codes,
+                  "names 'upgrade the runner image to this controller's release'":
+                      "upgrade the runner image to this controller's release" in text,
+                  "names 'it did not know the plan field `evidenceWrite`'":
+                      "it did not know the plan field `evidenceWrite`" in text,
+              }, {"httpStatus": status, "preflight": ((pf or {}).get("metadata") or {}).get("name"),
+                  "status": st, "runnerImage": env.get("LOGWEIR_RUNNER_IMAGE")})
+
+
+def rd_backup(tag: str, dest: str = "u6-dest-write") -> dict[str, Any]:
+    name = f"rd-{tag}-{u6_seq():03d}"
+    apply(backup(name, source="source", topics=["orders"], destination_ref=dest, deadline=420))
+    obj = wait_backup(name, timeout=900)
+    artifact(f"rd/objects/{name}.json", obj)
+    return obj
+
+
+def u8() -> None:
+    """receipt-dup rows 3, 4 and 5 on the U6 fixture."""
+    u6_attach("u6-writer", RP_WRITER_FULL, "rd-writer-full")
+    # Row 4 — a successful Backup takes its claim before the engine, once.
+    point_a = rd_backup("a")
+    points: list[dict[str, Any]] = [point_a]
+    st = point_a.get("status") or {}
+    bid = st.get("backupId") or ""
+    job = (st.get("jobRef") or {}).get("name") or ""
+    logs = pod_logs_for_job(job, tail=5000) if job else ""
+    artifact(f"rd/objects/{point_a['metadata']['name']}.log", redact(logs))
+    claim_at = logs.find("execution claimed; starting the engine")
+    engine_at = logs.find("progress-phase=-1:engine")
+    listing = mc_ls(f"a/{U6_BUCKET}/logweir/backups/{bid}/")
+    claims = [l for l in listing if l.endswith("execution.claim.json")]
+    rp_record("RD-4", "MinIO honours the claim: claimed before the engine, one claim per "
+              "execution", {
+                  "the Backup Succeeded exit 0": st.get("phase") == "Succeeded" and st.get("exitCode") == 0,
+                  "'execution claimed; starting the engine' is logged": claim_at >= 0,
+                  "and precedes progress-phase=-1:engine": 0 <= claim_at < engine_at,
+                  "exactly one claim object for the execution": len(claims) == 1,
+              }, {"backup": point_a["metadata"]["name"], "backupId": bid,
+                  "evidenceListing": listing})
+    points.append(rd_backup("b"))
+
+    # Row 3 — no PutObject under logweir/*: exit 4 before the engine, no archive.
+    u6_attach("u6-writer", [u for u in RP_WRITER_FULL if u != "s3:PutObject@evidence"],
+              "rd-writer-noputev")
+    try:
+        c = rd_backup("c")
+    finally:
+        u6_attach("u6-writer", RP_WRITER_FULL, "rd-writer-full-again")
+    cst = c.get("status") or {}
+    cid = cst.get("backupId") or ""
+    cjob = (cst.get("jobRef") or {}).get("name") or ""
+    clog = pod_logs_for_job(cjob, tail=5000) if cjob else ""
+    artifact(f"rd/objects/{c['metadata']['name']}.log", redact(clog))
+    carchive = mc_ls(f"a/{U6_BUCKET}/{U6_ARCHIVE_PREFIX}/{cid}/") if cid else ["(no backupId)"]
+    cevidence = mc_ls(f"a/{U6_BUCKET}/logweir/backups/{cid}/") if cid else ["(no backupId)"]
+    rp_record("RD-3", "U6 re-measure (u6-bk-029/043): without s3:PutObject on logweir/* the "
+              "run is exit 4 ExecutionClaimUnproven and writes no archive", {
+                  "exit 4": cst.get("exitCode") == 4,
+                  "status.exitReason ExecutionClaimUnproven": cst.get("exitReason") == "ExecutionClaimUnproven",
+                  "the log names ExecutionClaimUnproven": "ExecutionClaimUnproven" in clog,
+                  "the engine never started": "progress-phase=-1:engine" not in clog,
+                  "no object under <prefix>/<backupId>/": cid != "" and carchive == [],
+                  "no claim or receipt under logweir/backups/<backupId>/": cid != "" and cevidence == [],
+              }, {"backup": c["metadata"]["name"], "backupId": cid, "phase": cst.get("phase"),
+                  "exitCode": cst.get("exitCode"), "exitReason": cst.get("exitReason"),
+                  "archiveListing": carchive, "evidenceListing": cevidence})
+
+    # Row 5 — retention deletes the older point and never names logweir/.
+    u6_attach("u6-evwriter", ["s3:PutObject@evidence", "s3:GetObject@evidence"], "rd-evwriter")
+    u6_attach("u6-deleter", U6_STARTING_SETS["retention-enforcer"], "rd-deleter")
+    u6_attach("u6-reader", ["s3:ListBucket@bucket:both", "s3:GetObject@archive",
+                            "s3:GetObject@evidence"], "rd-view")
+    before = {p["metadata"]["name"]: mc_ls(f"a/{U6_BUCKET}/logweir/backups/"
+                                           f"{(p.get('status') or {}).get('backupId')}/")
+              for p in points}
+    catalog = f"rd-cat-{u6_seq():03d}"
+    since = now()
+    apply({"apiVersion": "logweir.dev/v1alpha1", "kind": "RecoveryCatalog",
+           "metadata": owned(catalog),
+           "spec": {"destinationRef": {"name": "u6-dest"},
+                    "sync": {"intervalSeconds": 300, "mode": "Index",
+                             "deepCheck": "ManifestDigest"}, "syncRequest": "rd"}})
+    view = wait_for("recoverycatalog", catalog,
+                    lambda o: bool((o.get("status") or {}).get("pages"))
+                    and ((o.get("status") or {}).get("syncedAt") or "") >= since,
+                    timeout=540, what="a published view")
+    artifact(f"rd/objects/{catalog}.json", view)
+    for old in get_list("retentionpolicies"):
+        run(K + ["delete", "retentionpolicy", old["metadata"]["name"], "--wait=true"],
+            check=False, timeout=120)
+    policy_name = f"rd-ret-{u6_seq():03d}"
+    created = apply(u6_retention_policy(policy_name, catalog=catalog))
+    uid = created["metadata"]["uid"]
+    deadline = time.monotonic() + 1200
+    job_obj = None
+    while time.monotonic() < deadline:
+        jobs = [j for j in get_list("jobs")
+                if any(o.get("uid") == uid for o in (j["metadata"].get("ownerReferences") or []))]
+        done = [j for j in jobs if u6_job_is_terminal(j)]
+        if done:
+            job_obj = done[0]
+            break
+        time.sleep(10)
+    policy = get("retentionpolicy", policy_name)
+    artifact(f"rd/objects/{policy_name}.json", policy)
+    rlog = redact(pod_logs_for_job(job_obj["metadata"]["name"], tail=3000)) if job_obj else ""
+    artifact("rd/retention-job.log", rlog)
+    plan_keys: list[str] = []
+    if job_obj is not None:
+        facts = rp_job_facts({"status": {"jobRef": {"name": job_obj["metadata"]["name"]}}})
+        for key_name in ("object_keys", "objectKeys"):
+            for value in rp_plan_values(facts, key_name):
+                if isinstance(value, list):
+                    plan_keys += [str(v) for v in value]
+    deleted_ids = [(p.get("status") or {}).get("backupId") for p in points
+                   if (p.get("status") or {}).get("backupId")
+                   and not mc_ls(f"a/{U6_BUCKET}/{U6_ARCHIVE_PREFIX}/"
+                                 f"{(p.get('status') or {}).get('backupId')}/")]
+    after = {p["metadata"]["name"]: mc_ls(f"a/{U6_BUCKET}/logweir/backups/"
+                                          f"{(p.get('status') or {}).get('backupId')}/")
+             for p in points}
+    kept_evidence = all(
+        any(l.endswith("execution.claim.json") for l in after[n])
+        and any(l.endswith(".receipt.json") for l in after[n])
+        and any(l.endswith(".receipt.sig") for l in after[n])
+        for n in after)
+    rp_record("RD-5", "retention over sets with a claim deletes the archive point and never "
+              "names logweir/", {
+                  "an enforcement Job ran": job_obj is not None,
+                  "it deleted a point (state=Deleted)": "state=Deleted" in rlog,
+                  "one point's archive set is gone": len(deleted_ids) == 1,
+                  "the plan's object keys were read": bool(plan_keys),
+                  "no plan object key names logweir/": bool(plan_keys)
+                  and not any(k.startswith("logweir/") or "/logweir/" in k for k in plan_keys),
+                  "every point keeps its claim, receipt and sidecar": kept_evidence,
+              }, {"policy": policy_name, "job": (job_obj or {}).get("metadata", {}).get("name"),
+                  "deletedBackupIds": deleted_ids, "planObjectKeys": plan_keys[:50],
+                  "evidenceBefore": before, "evidenceAfter": after})
+
+
 def phase_table() -> dict[str, Callable[[], None]]:
     """Every scenario is a module-level function named exactly as its phase, so
     the list of runnable phases is the list of things this file defines and
