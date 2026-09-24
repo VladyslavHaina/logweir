@@ -11884,6 +11884,20 @@ def rehearsal_faults() -> None:
             if first is not None:
                 name = first["metadata"]["name"]
                 restore = poll(lambda: get_opt("restore", name), terminal, seconds=1500)
+                # THE VERDICT, NOT THE PHASE (lab-refresh-10): since interface
+                # I8's amendment an exit-2 run publishes its keys, and its
+                # `outcome` and verification arrive with the evidence fetch,
+                # seconds AFTER the terminal patch. Read at the terminal instant
+                # the Restore showed `outcome: None` and no verdict; six seconds
+                # later it was `fail-integrity`/`Valid`. Read once the verdict is
+                # reached, as step 4 does; a verdict that never arrives is read
+                # as it stands and fails the row by name.
+                restore = settle("restore", name,
+                                 lambda o: (((o.get("status") or {}).get("evidence") or {})
+                                            .get("verification") or {}).get("result")
+                                 not in (None, "Pending"),
+                                 seconds=420, what="the failed rehearsal's evidence verdict") \
+                    or get_opt("restore", name) or restore
                 schedule_after = poll(
                     lambda: get_opt("rehearsalschedule", REHEARSAL_VERIFY_SCHEDULE),
                     lambda o: ((o.get("status") or {}).get("lastFailed") or {})
