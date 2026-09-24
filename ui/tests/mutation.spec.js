@@ -1885,6 +1885,39 @@ test("a_saved_point_inherits_its_destination_and_can_write_evidence_to_another",
   }
 });
 
+test("a_replayed_restore_readiness_check_is_read_before_the_wizard_believes_it", async () => {
+  // DEFECT P8's CLASS (poc-install, 2026-09-24). A replay is terminal on
+  // arrival and its create answer is not recomputed ("this response did not
+  // recompute staleness"); step 5's follower stopped at `terminal === true`
+  // before its first read and left that answer on screen.
+  const ns = "wizard-replayed-readiness-ns";
+  const primary = destinationItem("primary", "17bc54c4-2e52-4607-b4ac-c31517a6e568");
+  const k8s = savedWizardApi(ns, [primary], {
+    started: (request) => readinessItem("pf-replayed", request.restore.planHash, {
+      applicable: false, stale: true, staleBasis: [],
+      staleReasons: [{ reason: "unverifiable",
+        basis: "this response did not recompute staleness; read the preflight itself for a " +
+          "current verdict" }],
+    }),
+    read: (id, hash) => readinessItem(id, hash),
+  });
+  const view = fakeView();
+  const originalWindow = globalThis.window;
+  globalThis.window = { location: { hash: "#/restore?ns=" + ns } };
+  try {
+    await mountRestoreWizard(view.root, ns, k8s.point, parse, k8s, createRouteLifecycle().begin());
+    await view.find("#restore-readiness-form").dispatch("submit");
+    await settled(20);
+    assert.equal(k8s.started.length, 1);
+    assert.equal(k8s.reads.length, 1,
+      "NEGATIVE CONTROL: the terminal create answer was read once, before any submit");
+    assert.doesNotMatch(view.html().slice(view.html().lastIndexOf("pf-replayed") - 2000),
+      /did not recompute staleness/, "the recomputed read is what step 5 shows");
+  } finally {
+    globalThis.window = originalWindow;
+  }
+});
+
 test("a_destination_edited_during_the_draft_refuses_the_submit_until_the_check_runs_again", async () => {
   // D2 S21, in the console. The destination's access is rotated after the
   // check said ready: its generation moves, the plan bytes do not, and the

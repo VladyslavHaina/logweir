@@ -626,6 +626,104 @@ test("a_refused_readiness_start_keeps_the_button_and_places_its_field_errors", a
   }
 });
 
+test("a_replayed_readiness_check_is_read_before_the_form_believes_it", async () => {
+  // DEFECT P8 (poc-install, 2026-09-24): the "Backup readiness" re-click
+  // showed a REPLAYED check as "ready / does not apply to your current inputs
+  // / could not be checked: this response did not recompute staleness". A
+  // replay is terminal on arrival, the follower stopped at `terminal === true`
+  // before its first read, and the create answer is never recomputed.
+  selectMode(CONSOLE);
+  const ns = "readiness-replayed";
+  const key = formKey(ns, SCHEDULE_FORM);
+  dropDraft(key);
+  keepDraft(key, draft({ source: "uid-A" }), SCHEDULE_DRAFT_FIELDS);
+  const view = fakeView();
+  let reads = 0;
+  const replay = {
+    id: "pf-sgkjlqd3", namespace: ns, uid: "u", resourceVersion: "1", operation: "backup",
+    state: "ready", terminal: true, binding: { referents: [] }, applicable: false, stale: true,
+    staleReasons: [{ reason: "unverifiable",
+      basis: "this response did not recompute staleness; read the preflight itself for a " +
+        "current verdict" }],
+    staleBasis: [], checks: [], warnings: [], executionOnly: [], detailsAvailable: false,
+    conditions: [],
+  };
+  const api = {
+    list(namespace, plural) {
+      return Promise.resolve(plural === "kafkaclusters" ? CLUSTERS : { items: [] });
+    },
+    destinations() { return Promise.resolve({ items: DESTINATIONS }); },
+    startPreflight() { return Promise.resolve({ item: replay, replayed: true }); },
+    preflight(namespace, id) {
+      reads += 1;
+      return Promise.resolve({ item: Object.assign({}, replay, {
+        id: id, applicable: true, stale: false, staleReasons: [], staleBasis: ["expiry"],
+      }) });
+    },
+    wait: async () => {},
+  };
+  try {
+    await mountSchedules(view.root, ns, parse, LIFE(), api);
+    await view.find("#schedule-check-readiness").dispatch("click");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(reads, 1,
+      "NEGATIVE CONTROL: the terminal create answer was read once before it was shown as the " +
+        "verdict");
+    const after = view.chunks[view.chunks.length - 1].html;
+    assert.doesNotMatch(after, /did not recompute staleness/,
+      "the form's newest paint is the recomputed read, not the create answer");
+    assert.match(after, /pf-sgkjlqd3/);
+  } finally {
+    dropDraft(key);
+    resetMode();
+  }
+});
+
+test("the_readiness_panel_follows_its_check_until_a_read_is_terminal", async () => {
+  // P8's CLASS, on the list page's standalone "Backup readiness" panel: it
+  // rendered the create answer -- a check that had not run -- and never read
+  // it again.
+  selectMode(CONSOLE);
+  const ns = "readiness-panel-follow";
+  const view = fakeView();
+  let reads = 0;
+  const pending = {
+    id: "pf-panel", namespace: ns, uid: "u", resourceVersion: "1", operation: "backup",
+    state: "pending", terminal: false, binding: { referents: [] }, applicable: false,
+    stale: false, staleReasons: [], staleBasis: [], checks: [], warnings: [],
+    executionOnly: [], detailsAvailable: false, conditions: [],
+  };
+  const api = {
+    list(namespace, plural) {
+      return Promise.resolve(plural === "kafkaclusters" ? CLUSTERS : { items: [] });
+    },
+    destinations() { return Promise.resolve({ items: DESTINATIONS }); },
+    startPreflight() { return Promise.resolve({ item: pending, replayed: false }); },
+    preflight(namespace, id) {
+      reads += 1;
+      return Promise.resolve({ item: Object.assign({}, pending, reads < 2
+        ? { state: "running" }
+        : { state: "ready", terminal: true, applicable: true, staleBasis: ["expiry"] }) });
+    },
+    wait: async () => {},
+  };
+  try {
+    await mountSchedules(view.root, ns, parse, LIFE(), api);
+    const form = view.find("#readiness-form");
+    assert.ok(form !== null, "the list page offers the readiness panel");
+    await form.dispatch("submit");
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(reads, 2, "NEGATIVE CONTROL: read until terminal (zero reads before P8)");
+    const panel = view.findAll("#backup-readiness");
+    assert.ok(panel.length > 0);
+    const last = view.chunks.filter((c) => c.html.includes("id=\"backup-readiness\"")).pop().html;
+    assert.match(last, /pf-panel/);
+    assert.match(last, /badge-green">ready/, "the verdict the check recorded");
+  } finally {
+    resetMode();
+  }
+});
+
 test("the_name_field_says_what_console_mode_does_with_it", () => {
   // REVIEW LOW-5: console mode names the object sch-<hash>, and the form did
   // not say so beside the field.

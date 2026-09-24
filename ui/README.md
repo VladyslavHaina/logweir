@@ -472,7 +472,14 @@ absences:
   repeatable -- the same name composes the same `Idempotency-Key`, so a double
   click, a lost response and a reload all resolve to the object the first
   request made -- and the object's real name comes back in the response and is
-  what the outcome line shows.
+  what the outcome line shows. **The Clusters form offers no name at all in
+  console mode** (defect P7): the connection create has no name member and the
+  server names it `conn-<26 base32>`, so a typed `source` was silently
+  discarded. The form says who names the connection, and an intent minted once
+  per draft (`logweir-ui.connection.<32 hex>`, random, never a counter) is the
+  idempotency seed instead; legacy mode keeps the field, because behind
+  `kubectl proxy` the typed name is the object's name. The schedule form keeps
+  its field with the help text that says console mode does not use it.
 * **Ten normalized operation states, four phases.** `pending`, `running`,
   `succeeded` and `failed` are the resource's own phase words. `queued`,
   `preparing`, `verifying`, `refused`, `cancelled` and `unknown` are
@@ -1299,6 +1306,34 @@ Five sentences this product must never render, and where each refusal lives:
    could not **compare** something, with a `basis` naming what. It is rendered
    "could not be checked", because a verdict nobody checked reported as merely
    stale is a verdict somebody will act on.
+
+### A started check is read back before anything on screen is a verdict
+
+Every surface that starts a `Preflight` -- *Test access* on a destination,
+*Test connection* on a connection, the list page's *Backup readiness* panel,
+the schedule form's readiness button and restore step 5 -- follows it with
+bounded `GET .../preflights/{id}` reads, and **the first read is owed whatever
+the create answered** (`lifecycle.js`'s `owesRead`). The product API projects a
+create -- and a replay of one, which is already terminal -- without recomputing
+staleness: `applicable: false` with one `unverifiable` reason, "this response did
+not recompute staleness; read the preflight itself". Defect P8 (the PoC install,
+2026-09-24) was two faces of skipping that read: *Test access* rendered the
+create answer and never asked again, so a check that recorded `ready` in three
+seconds read `pending / does not apply / compared: nothing` four minutes later;
+and a readiness re-click replayed an earlier check, whose follower stopped at
+the terminal create answer and showed "could not be checked". After the first
+read a follower stops at the first **terminal read**, stops painting when a
+newer check replaces the one it follows, and says in words when its budget runs
+out (*Test access*: thirty reads two seconds apart). Restore step 5's one-way
+staleness keeps only the page's own marks: an `unverifiable` reason is the
+server's statement about one answer, and a fresher read replaces it.
+
+*Test access* also mints an attempt token per accepted click, as *Test
+connection* does, so a deliberate second test -- after fixing a Secret -- is a
+new check rather than a replay of the first one's verdict, and the pre-test
+summary ("No access test has been recorded") stands down once the page holds a
+test of its own. A reload renders the destination read's `lastTest`, the newest
+recorded test.
 
 ### A short page is not the last page
 

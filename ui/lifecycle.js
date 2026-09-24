@@ -76,6 +76,31 @@ export function listen(target, type, handler, lifecycle) {
   target.addEventListener(type, handler);
 }
 
+/** Whether a followed `Preflight` still owes a READ -- defect P8 (poc-install,
+ *  2026-09-24), and the one rule every page that starts a check follows it by.
+ *
+ *  A CREATE ANSWER IS NEVER THE VERDICT. The product API answers a create --
+ *  and a REPLAY of one, which is already terminal -- with the stored object
+ *  projected WITHOUT recomputing staleness: `applicable: false` and one
+ *  `unverifiable` reason, "this response did not recompute staleness; read the
+ *  preflight itself for a current verdict". A follower that stopped at a
+ *  terminal create answer therefore painted "ready / does not apply to your
+ *  current inputs / could not be checked" for a replayed check, and a page with
+ *  no follower at all (Destinations -> Test access) painted `pending` for a
+ *  check that had been `ready` for minutes. So the first read is owed whatever
+ *  the create said, and after it a follower stops at the first TERMINAL read.
+ *
+ *  @param {object|null|undefined} preflight what the follower holds now
+ *  @param {number} reads how many GETs it has already made for it
+ *  @returns {boolean} */
+export function owesRead(preflight, reads) {
+  if (preflight === null || preflight === undefined || typeof preflight.id !== "string" ||
+    preflight.id.length === 0) {
+    return false;
+  }
+  return reads === 0 || preflight.terminal !== true;
+}
+
 /** Runs `release` when the route token aborts. A view subscribes to a durable
  *  mutation record with this, so the SUBSCRIPTION ends with the view while the
  *  record -- and the request behind it -- carries on. */

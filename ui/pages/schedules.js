@@ -51,6 +51,7 @@ import {
   keepDraft,
   listen,
   mutationFor,
+  owesRead,
   readDraft,
   readOptions,
   refusal,
@@ -1946,30 +1947,79 @@ function readinessView(ns, readiness) {
  *  THE TOPIC OFFER IS READ WHEN THE CONNECTION IS CHOSEN, and not before: a
  *  discovery is about ONE connection, and offering the names observed against
  *  a different one would be worse than offering none. */
+// THE PANEL'S LATEST VIEW, per namespace, so the follower below repaints the
+// panel as it is NOW -- with the source, destination and topic offer the
+// reader chose since the check started -- and knows when a newer check has
+// replaced the one it follows.
+const readinessPanels = new Map();
+
+function paintReadinessPanel(node, ns, parse, lifecycle, api, merged) {
+  if (!active(lifecycle)) {
+    return;
+  }
+  const slot = node.querySelector("#readiness-slot");
+  if (slot === null) {
+    return;
+  }
+  replace(slot, parse(renderReadinessPanel(readinessView(ns, merged))));
+  wireReadiness(node, ns, parse, lifecycle, api, merged);
+}
+
+/** Re-reads the check the readiness panel started until a READ answers
+ *  terminal, or the budget is spent -- defect P8's class. Before this the panel
+ *  rendered the create answer and nothing else: a check that had not run yet,
+ *  or a replayed one whose staleness the create answer never recomputed. */
+async function followReadinessPanel(node, ns, parse, lifecycle, api, first) {
+  const key = formKey(ns, READINESS_FORM);
+  const wait = typeof api.wait === "function"
+    ? api.wait
+    : (ms) => new Promise((done) => { globalThis.setTimeout(done, ms); });
+  const mine = () => (((readinessPanels.get(key) || {}).preflight) || {}).id === (first || {}).id;
+  let current = first;
+  for (let read = 0; read < READINESS_POLLS; read += 1) {
+    if (!owesRead(current, read)) {
+      return;
+    }
+    await wait(READINESS_INTERVAL_MS);
+    if (!active(lifecycle) || !mine()) {
+      return;
+    }
+    let answer;
+    try {
+      answer = await api.preflight(ns, current.id, readOptions(lifecycle));
+    } catch (error) {
+      // A FAILED RE-READ IS NOT A VERDICT: the panel keeps what it shows.
+      return;
+    }
+    if (!active(lifecycle) || !mine()) {
+      return;
+    }
+    current = ((answer || {}).item) || current;
+    paintReadinessPanel(node, ns, parse, lifecycle, api,
+      Object.assign({}, readinessPanels.get(key), { preflight: current }));
+  }
+}
+
 function wireReadiness(node, ns, parse, lifecycle, api, readiness) {
+  const key = formKey(ns, READINESS_FORM);
+  readinessPanels.set(key, readiness);
   const form = node.querySelector("#readiness-form");
   if (form === null) {
     return;
   }
-  const key = formKey(ns, READINESS_FORM);
   const mutation = mutationFor(key);
   const repaint = (extra) => {
-    if (!active(lifecycle)) {
-      return;
-    }
-    const slot = node.querySelector("#readiness-slot");
-    if (slot === null) {
-      return;
-    }
-    const merged = Object.assign({}, readiness, extra || {});
-    replace(slot, parse(renderReadinessPanel(readinessView(ns, merged))));
-    wireReadiness(node, ns, parse, lifecycle, api, merged);
+    paintReadinessPanel(node, ns, parse, lifecycle, api, Object.assign({}, readiness, extra || {}));
   };
 
   watchMutation(node, key, mutation, (state) => {
-    repaint(state.phase === "succeeded"
-      ? { preflight: (state.result || {}).item }
-      : {});
+    if (state.phase !== "succeeded") {
+      repaint({});
+      return;
+    }
+    const made = (state.result || {}).item || null;
+    repaint({ preflight: made });
+    followReadinessPanel(node, ns, parse, lifecycle, api, made);
   }, lifecycle);
 
   const source = node.querySelector("#readiness-source");
@@ -2486,7 +2536,9 @@ async function followCreateReadiness(node, ns, parse, lifecycle, api, clusters, 
   };
   for (let read = 0; read < READINESS_POLLS; read += 1) {
     const current = held.readiness;
-    if (current === null || current === undefined || current.terminal === true) {
+    // A REPLAYED CHECK IS TERMINAL ON ARRIVAL AND STILL OWES A READ (P8): the
+    // create answer says "this response did not recompute staleness".
+    if (!owesRead(current, read)) {
       return;
     }
     await wait(READINESS_INTERVAL_MS);
