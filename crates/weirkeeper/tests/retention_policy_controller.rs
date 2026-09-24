@@ -3897,11 +3897,20 @@ async fn each_status_patch_carries_the_version_the_last_one_returned() {
         versions[0], "4242",
         "the first patch preconditions on what the watcher delivered"
     );
-    assert!(
-        versions[1..].iter().all(|v| v == "9001"),
-        "and every later one on what the API server returned — a reconciler that holds no `get` \
-         on its own kind has no other fresh version. Got: {versions:?}"
-    );
+    // THE DOUBLE ENFORCES SEAM S7 (REHEARSAL-FIRE-PASS-STATUS-LOST): the route
+    // moves the object to 9001 on the first write, and every accepted write
+    // after it moves the object one further, as a real API server does — so
+    // each later patch must carry exactly what the previous one returned.
+    assert_eq!(versions[1], "9001", "Got: {versions:?}");
+    for pair in versions[1..].windows(2) {
+        let previous: u64 = pair[0].parse().expect("a numeric version");
+        assert_eq!(
+            pair[1],
+            (previous + 1).to_string(),
+            "and every later one on what the API server returned — a reconciler that holds no \
+             `get` on its own kind has no other fresh version. Got: {versions:?}"
+        );
+    }
 }
 
 /// **H1.** `sharedSegments` reports `NotEnforced` while the view carries no
