@@ -42,8 +42,10 @@ nothing and it has no fixture mode.
   `LOGWEIR_BIN`, else the more recently built of `target/release/logweir` and
   `target/debug/logweir`. The phase asks the binary for `--standing` first and
   refuses, by name, one that lacks it.
-- `minio/mc:latest` and `busybox:latest` present on the node
-  (`imagePullPolicy: Never`).
+- `busybox:latest` present on the node (`imagePullPolicy: Never`), and the
+  MinIO client mirror `d3_live.py` pins by digest — present, or pullable
+  (`imagePullPolicy: IfNotPresent`; upstream's `mc` images were withdrawn, see
+  `third_party/minio-mirror/README.md`).
 - **An image carrying `logweir-retention`**, for the five enforcement phases
   only. The product runner image now carries it, so the default is the
   `LOGWEIR_RUNNER_IMAGE` the shared controller itself names — see

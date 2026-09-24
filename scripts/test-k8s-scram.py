@@ -293,8 +293,8 @@ def setup():
                         "containers": [
                             {
                                 "name": "minio",
-                                "image": "minio/minio:latest",
-                                "imagePullPolicy": "Never",
+                                "image": "docker.io/vladyslavhaina/minio-mirror@sha256:b4c3dc9fb0a82538ac6750eb841b54fb2d4303f4b73fb523ca097918a35c3524",
+                                "imagePullPolicy": "IfNotPresent",
                                 "args": ["server", "/data"],
                                 "env": [
                                     {
@@ -362,8 +362,8 @@ def setup():
             "containers": [
                 {
                     "name": "mc",
-                    "image": "minio/mc:latest",
-                    "imagePullPolicy": "Never",
+                    "image": "docker.io/vladyslavhaina/mc-mirror@sha256:9c7cbc3f47b092d52b73124fb9ab12f3266534c23c283b2e984d07408c9ff381",
+                    "imagePullPolicy": "IfNotPresent",
                     "command": ["/bin/sh", "-c", "sleep 7200"],
                     "env": [
                         {

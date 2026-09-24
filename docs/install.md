@@ -280,8 +280,15 @@ End users supply neither a key nor an image hash.
 
 With both demo flags disabled, the chart uses only Logweir’s controller,
 runner and optional UI images. The optional MinIO and demo Kafka components
-pull upstream MinIO, mc and Apache Kafka images pinned by digest. Logweir does
-not mirror these images into its own namespace.
+pull third-party images pinned by digest: the upstream Apache Kafka image, and
+for MinIO and mc the project's own rebuild of the upstream releases,
+`docker.io/vladyslavhaina/minio-mirror` and `docker.io/vladyslavhaina/mc-mirror`.
+MinIO withdrew its public images (Docker Hub on 2026-09-11, anonymous quay.io
+pulls on 2026-09-24), so these mirrors are unmodified rebuilds from upstream
+source, licensed AGPL-3.0 like upstream, and a stopgap until the demo MinIO is
+replaced by a maintained S3 server;
+[third_party/minio-mirror/README.md](../third_party/minio-mirror/README.md) has
+the recipe, the provenance and the licence notes.
 
 For a cluster without public registry access, mirror the enabled images into
 your registry and configure their references. The demo images use

@@ -25,8 +25,8 @@ from __future__ import annotations
 from typing import Any
 
 KAFKA_IMAGE = "apache/kafka:3.7.1"
-MINIO_IMAGE = "minio/minio:latest"
-MC_IMAGE = "minio/mc:latest"
+MINIO_IMAGE = "docker.io/vladyslavhaina/minio-mirror@sha256:b4c3dc9fb0a82538ac6750eb841b54fb2d4303f4b73fb523ca097918a35c3524"
+MC_IMAGE = "docker.io/vladyslavhaina/mc-mirror@sha256:9c7cbc3f47b092d52b73124fb9ab12f3266534c23c283b2e984d07408c9ff381"
 FIXTURE_NS = "logweir-scram-local"
 BUCKET = "d1-archive"
 CLUSTER_ID = "d1w8AcceptLabQQ"  # 22 chars, base64url; distinct from the lab's

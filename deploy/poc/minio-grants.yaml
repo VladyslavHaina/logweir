@@ -80,7 +80,7 @@ spec:
       containers:
         - name: mc
           # The chart's own `minio.mcImage` digest (charts/logweir/values.yaml).
-          image: quay.io/minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
+          image: docker.io/vladyslavhaina/mc-mirror@sha256:9c7cbc3f47b092d52b73124fb9ab12f3266534c23c283b2e984d07408c9ff381
           imagePullPolicy: IfNotPresent
           env:
             - { name: MC_CONFIG_DIR, value: /tmp/.mc }

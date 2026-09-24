@@ -524,8 +524,8 @@ def mc_pod() -> dict[str, Any]:
             "containers": [
                 {
                     "name": "mc",
-                    "image": "minio/mc:latest",
-                    "imagePullPolicy": "Never",
+                    "image": "docker.io/vladyslavhaina/mc-mirror@sha256:9c7cbc3f47b092d52b73124fb9ab12f3266534c23c283b2e984d07408c9ff381",
+                    "imagePullPolicy": "IfNotPresent",
                     "command": ["/bin/sh", "-c"],
                     "args": [script],
                     "env": [

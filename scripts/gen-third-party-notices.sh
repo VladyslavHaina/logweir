@@ -464,6 +464,29 @@ def main():
         "SOFTWARE.\n"
         "```\n"
     )
+    # NOT A CARGO PACKAGE, AND NOT IN ANY LOGWEIR IMAGE. The MinIO mirror is a
+    # separate image the project publishes for its compose stack, the chart's
+    # demo MinIO and the live harnesses; it is listed because the project
+    # redistributes it. Written here by hand, like the section above.
+    out(
+        "\n## Images the project redistributes for its test and demo stacks (not in Logweir's images)\n\n"
+        "**MinIO server and client, rebuilt from upstream source.** MinIO withdrew its public\n"
+        "images (Docker Hub on 2026-09-11, anonymous quay.io pulls on 2026-09-24), so the compose\n"
+        "stack, the chart's optional demo MinIO (`minio.enabled`), the PoC grants Job and the live\n"
+        "harnesses run the project's unmodified rebuilds of the releases they were measured on,\n"
+        "`docker.io/vladyslavhaina/minio-mirror:RELEASE.2025-09-07T16-13-09Z` and\n"
+        "`docker.io/vladyslavhaina/mc-mirror:RELEASE.2025-08-13T08-35-41Z`, pinned by digest.\n"
+        "Corresponding source: `https://github.com/minio/minio` at commit\n"
+        "`07c3a429bfed433e49018cb0f78a52145d4bedeb` and `https://github.com/minio/mc` at commit\n"
+        "`7394ce0dd2a80935aded936b09fa12cbb3cb8096`; the recipe is `third_party/minio-mirror/`.\n"
+        "Licence: GNU Affero General Public License v3 (`AGPL-3.0-only` on the image label; most\n"
+        "source files grant \"version 3 or any later version\"), Copyright MinIO, Inc.; the images\n"
+        "carry upstream's `LICENSE` and `CREDITS` under `/licenses/`, and the server image's static\n"
+        "curl carries its own notices under `/licenses/curl/`. The base image is Red Hat UBI 9\n"
+        "micro, freely redistributable under the UBI EULA. None of this code is linked into, or\n"
+        "shipped in, any Logweir image or binary. A stopgap until MinIO is replaced by a maintained\n"
+        "S3 server.\n"
+    )
     out("\n## The inventory\n\n")
 
     for name, version, spdx, lines, arm in entries:

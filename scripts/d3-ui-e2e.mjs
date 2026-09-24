@@ -436,10 +436,11 @@ function setUp() {
       spec: {
         restartPolicy: "Never",
         containers: [{
-          name: "mc", image: "minio/mc:latest",
-          // THE IMAGE IS ALREADY ON THIS NODE and Docker Hub refuses an
-          // anonymous pull of it here; `IfNotPresent` uses the copy the lab
-          // itself runs from rather than dialling out for one.
+          name: "mc", image: "docker.io/vladyslavhaina/mc-mirror@sha256:9c7cbc3f47b092d52b73124fb9ab12f3266534c23c283b2e984d07408c9ff381",
+          // The project's MinIO client mirror, PINNED BY DIGEST
+          // (third_party/minio-mirror/README.md): `IfNotPresent` uses the copy
+          // the node already has and pulls the same bytes when it has none;
+          // upstream's own images were withdrawn.
           imagePullPolicy: "IfNotPresent",
           command: ["/bin/sh", "-c"],
           args: ["mc alias set local http://minio." + LAB + ".svc.cluster.local:9000 " +

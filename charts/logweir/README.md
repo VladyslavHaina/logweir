@@ -1004,9 +1004,22 @@ None of them is part of the `latest` ruling: MinIO, `mc`, `apache/kafka` and
 provenance of each, so nobody has to trust a bare hash.
 
 * **`minio.image` and `minio.mcImage`** are the references
-  `e2e/compose/docker-compose.yml` pins, copied byte for byte and never
-  resolved again. They are **quay.io**, not Docker Hub, because Docker Hub
-  refuses anonymous pulls of `minio/minio` (plan erratum E30(a)).
+  `e2e/compose/docker-compose.yml` pins, copied byte for byte. They are the
+  project's **own rebuild mirror** of the releases the stack was measured on
+  (MinIO `RELEASE.2025-09-07T16-13-09Z`, mc `RELEASE.2025-08-13T08-35-41Z`),
+  `docker.io/vladyslavhaina/minio-mirror` and `docker.io/vladyslavhaina/mc-mirror`,
+  pinned by their multi-arch index digests. The chart first pinned upstream at
+  quay.io because Docker Hub refused anonymous pulls of the upstream name
+  (plan erratum E30(a)); MinIO then withdrew its public images altogether
+  (Docker Hub on 2026-09-11, anonymous quay.io pulls on 2026-09-24).
+  [third_party/minio-mirror/README.md](../../third_party/minio-mirror/README.md)
+  carries the recipe, the provenance, the AGPL-3.0 licence notes and the
+  behaviour smoke; it is a stopgap until the demo MinIO is replaced by a
+  maintained S3 server. The digests are the ones `third_party/minio-mirror/build.sh`
+  printed for the images it built and published on 2026-09-24; both
+  repositories are public, and
+  `docker buildx imagetools inspect docker.io/vladyslavhaina/minio-mirror:RELEASE.2025-09-07T16-13-09Z`
+  (and the same for `mc-mirror:RELEASE.2025-08-13T08-35-41Z`) resolves them.
 * **`demoKafka.image`** — `apache/kafka:3.7.1`, the compose stack's broker,
   pinned by its **manifest-list** digest so the same reference resolves on an
   amd64 CI runner and on an arm64 development host. Resolved once, on
