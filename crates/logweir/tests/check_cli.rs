@@ -2109,6 +2109,7 @@ fn a_backup_readiness_plan_answers_evidence_writable_for_the_evidence_write_prin
 fn the_evidence_write_options_are_the_evidence_grants_and_never_fall_back() {
     use logweir::check::store::{
         evidence_write_options, EVIDENCE_ACCESS_KEY_ID_ENV, EVIDENCE_SECRET_ACCESS_KEY_ENV,
+        EVIDENCE_SESSION_TOKEN_ENV,
     };
     use logweir_engine_oso::storage::CredentialSource;
     let plan = destination();
@@ -2119,6 +2120,9 @@ fn the_evidence_write_options_are_the_evidence_grants_and_never_fall_back() {
         k if k == EVIDENCE_SECRET_ACCESS_KEY_ENV => Some("evidence-secret-fixture".to_string()),
         "AWS_ACCESS_KEY_ID" => Some("destination-key-id-fixture".to_string()),
         "AWS_SECRET_ACCESS_KEY" => Some("destination-secret-fixture".to_string()),
+        // The DESTINATION grant's session token is right there too (review
+        // L5): it must not be paired with the evidence keys.
+        "AWS_SESSION_TOKEN" => Some("destination-token-fixture".to_string()),
         _ => None,
     };
 
@@ -2132,8 +2136,22 @@ fn the_evidence_write_options_are_the_evidence_grants_and_never_fall_back() {
             secret_access_key: "evidence-secret-fixture".to_string(),
             session_token: None,
         },
-        "a `static` evidence-write grant is the LOGWEIR_EVIDENCE_AWS_* keys"
+        "a `static` evidence-write grant is the LOGWEIR_EVIDENCE_AWS_* keys, and the \
+         destination grant's session token is not borrowed"
     );
+    // …and its OWN session token, when the grant configures one.
+    let with_token = |k: &str| match k {
+        k if k == EVIDENCE_SESSION_TOKEN_ENV => Some("evidence-token-fixture".to_string()),
+        other => evidence_env(other),
+    };
+    let CredentialSource::Static { session_token, .. } =
+        evidence_write_options(&plan, Some(&grant), budget, &with_token)
+            .expect("projected")
+            .credentials
+    else {
+        panic!("a static source")
+    };
+    assert_eq!(session_token.as_deref(), Some("evidence-token-fixture"));
     assert_eq!(opts.request_timeout, Some(budget));
     assert_eq!(opts.max_retries, Some(logweir::check::store::RETRIES));
 
@@ -2424,8 +2442,10 @@ fn the_evidence_read_options_are_the_evidence_read_grants_and_never_fall_back() 
         k if k == EVIDENCE_READ_ENV.secret_access_key => Some("read-secret-fixture".to_string()),
         k if k == EVIDENCE_WRITE_ENV.access_key_id => Some("write-key-id-fixture".to_string()),
         k if k == EVIDENCE_WRITE_ENV.secret_access_key => Some("write-secret-fixture".to_string()),
+        k if k == EVIDENCE_WRITE_ENV.session_token => Some("write-token-fixture".to_string()),
         "AWS_ACCESS_KEY_ID" => Some("destination-key-id-fixture".to_string()),
         "AWS_SECRET_ACCESS_KEY" => Some("destination-secret-fixture".to_string()),
+        "AWS_SESSION_TOKEN" => Some("destination-token-fixture".to_string()),
         _ => None,
     };
     let grant = GrantRef::static_secret(EVIDENCE_READ_SECRET);
@@ -2437,8 +2457,21 @@ fn the_evidence_read_options_are_the_evidence_read_grants_and_never_fall_back() 
             access_key_id: "read-key-id-fixture".to_string(),
             secret_access_key: "read-secret-fixture".to_string(),
             session_token: None,
-        }
+        },
+        "no other principal's session token is borrowed (review L5)"
     );
+    let with_token = |k: &str| match k {
+        k if k == EVIDENCE_READ_ENV.session_token => Some("read-token-fixture".to_string()),
+        other => env(other),
+    };
+    let CredentialSource::Static { session_token, .. } =
+        evidence_read_options(&plan, Some(&grant), budget, &with_token)
+            .expect("projected")
+            .credentials
+    else {
+        panic!("a static source")
+    };
+    assert_eq!(session_token.as_deref(), Some("read-token-fixture"));
     let only_others = |k: &str| match k {
         k if k == EVIDENCE_WRITE_ENV.access_key_id => Some("write-key-id-fixture".to_string()),
         k if k == EVIDENCE_WRITE_ENV.secret_access_key => Some("write-secret-fixture".to_string()),

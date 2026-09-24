@@ -724,6 +724,34 @@ fn a_contract_refusal_is_read_by_key_name_and_beats_the_absent_frames() {
         "a correct exit-3 refusal must not be reported as an unreadable result"
     );
     assert_eq!(observation.exit_code, Some(3));
+    // Review L3: the message says what to do.
+    assert!(
+        observation
+            .message
+            .contains("upgrade the runner image to this controller's release"),
+        "{}",
+        observation.message
+    );
+
+    // …and names the field the runner refused, when its stderr line says.
+    let with_field = "{\"fields\":{\"message\":\"check plan does not parse: unknown field \
+                      `evidenceWrite`, expected one of `destination`\"}}\n\
+                      refusal-reason=CheckContractMismatch\n";
+    let observation = check::classify(&Input {
+        job: &job_object(Some("Failed"), None),
+        pod: Some(&pod_object(Some(("Job", JOB_UID, true)), terminated(3))),
+        events: &[],
+        log: Some(with_field),
+        expect: &expectations(),
+        now: now(),
+    });
+    assert!(
+        observation
+            .message
+            .contains("it did not know the plan field `evidenceWrite`"),
+        "{}",
+        observation.message
+    );
 }
 
 // ---------------------------------------------------------------------------

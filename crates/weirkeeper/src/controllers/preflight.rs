@@ -213,6 +213,13 @@ pub const BACKUP_CONTROLLER_ROWS: &[Row] = &[
         Authority::Controller,
         Some(EXPIRY_DEFAULT),
     ),
+    // "J or C" — see `DESTINATION_ACCESS_CONTROLLER_ROWS`.
+    row(
+        CheckId::DestinationEvidenceReadable,
+        Gating::Advisory,
+        Authority::Controller,
+        Some(EXPIRY_DEFAULT),
+    ),
     row(
         CheckId::ConnectionClusterIdentity,
         Gating::Blocking,
@@ -250,6 +257,14 @@ pub const DESTINATION_ACCESS_CONTROLLER_ROWS: &[Row] = &[
     row(
         CheckId::DestinationResolved,
         Gating::Blocking,
+        Authority::Controller,
+        Some(EXPIRY_DEFAULT),
+    ),
+    // "J or C" (D2 §6.3): the controller answers it only when no check pod can
+    // (`EvidenceReadPlan::ControllerAnswers`); the Job answers it otherwise.
+    row(
+        CheckId::DestinationEvidenceReadable,
+        Gating::Advisory,
         Authority::Controller,
         Some(EXPIRY_DEFAULT),
     ),
@@ -3219,6 +3234,13 @@ pub fn remedy_for(code: CheckCode) -> String {
             "This runner image does not implement `logweir check run`. Upgrade the runner image \
              to one that ships the check contract."
         }
+        // Review L3: the runner parsed the plan and refused a field or a bound
+        // this controller wrote — an older runner image than the controller.
+        CheckCode::CheckContractMismatch => {
+            "The runner image is older than this controller and refused the check plan it \
+             rendered (the message names the field when the runner said which). Upgrade the \
+             runner image to this controller's release."
+        }
         CheckCode::CheckPlanConflict => {
             "A plan ConfigMap with this check's name already exists and is not this check's. \
              Delete the stale object, or create a new Preflight."
@@ -4086,19 +4108,28 @@ impl Inputs {
     /// PREFLIGHT-EVIDENCEWRITABLE-WRONG-PRINCIPAL.
     ///
     /// See [`EvidenceReadPlan`] for the answers. The one that is not "the
-    /// principal D2 names" is [`EvidenceReadPlan::Dropped`], and it exists
-    /// only for a Backup check, which ADDS the advisory role itself: a Backup
-    /// run never reads evidence in its own pod, so a workload identity that
-    /// cannot share the check pod's ServiceAccount must not block the
-    /// readiness of a run it does not take part in. A `DestinationAccess`
-    /// check ASKED for the role, and is refused instead.
+    /// principal D2 names" is [`EvidenceReadPlan::ControllerAnswers`]: the
+    /// ADVISORY row is answered `unknown` by the controller, with the reason,
+    /// and every other row still runs (review L1/L2). It covers:
+    ///
+    /// * a grant the resolver REFUSED (e.g. `ControllerIdentityNotAllowlisted`
+    ///   while the installation policy does not list the location yet) — an
+    ///   advisory row's refusal must not stop the archive and marker rows of
+    ///   the same check;
+    /// * a Backup check's workload identity that cannot share the check pod's
+    ///   ServiceAccount — a Backup run never reads evidence in its own pod, so
+    ///   it must not block the readiness of a run it takes no part in.
+    ///
+    /// A `DestinationAccess` check whose evidence-read workload identity
+    /// cannot share the pod is still REFUSED: it asked for that principal, and
+    /// no pod can be it.
     ///
     /// # Errors
     ///
     /// [`destination::DestinationRefusal`] — `ExecutionContextConflict` (a
     /// `DestinationAccess` check whose evidence-read workload identity cannot
-    /// share the pod), `DestinationRoleNotConfigured` (the role is requested
-    /// and its grant was never resolved), or the resolver's own refusal.
+    /// share the pod) or `DestinationRoleNotConfigured` (the role is requested
+    /// and its grant was never resolved — fail closed).
     pub fn evidence_read_plan(&self) -> Result<EvidenceReadPlan, destination::DestinationRefusal> {
         if !matches!(
             self.operation,
@@ -4112,7 +4143,16 @@ impl Inputs {
         };
         let grant = match self.evidence_read_grant.as_ref() {
             Some(Ok(g)) => g,
-            Some(Err(refusal)) => return Err(refusal.clone()),
+            // L1: the ADVISORY row says why, and nothing else is held back.
+            Some(Err(refusal)) => {
+                return Ok(EvidenceReadPlan::ControllerAnswers(format!(
+                    "the evidence-read grant of BackupDestination {} was refused ({}: {}), so \
+                     no principal read the evidence root; the other rows of this check ran",
+                    primary.name,
+                    refusal.code.as_str(),
+                    refusal.message
+                )))
+            }
             // FAIL CLOSED, as for the marker.
             None => {
                 return Err(destination::DestinationRefusal {
@@ -4201,9 +4241,13 @@ impl Inputs {
         .collect();
         if let Some(other) = others.iter().find(|sa| *sa != service_account) {
             if self.operation == PreflightOperation::Backup {
-                return Ok(EvidenceReadPlan::Dropped(format!(
-                    "the evidence-read grant runs as ServiceAccount {service_account} and this \
-                     check pod runs as {other}"
+                return Ok(EvidenceReadPlan::ControllerAnswers(format!(
+                    "the evidence-read grant of BackupDestination {} runs as ServiceAccount \
+                     {service_account} and this check pod runs as {other}; one pod has one \
+                     ServiceAccount, so this check did not read the evidence root as any \
+                     principal (a Backup run never reads evidence in its own pod, so the \
+                     verdict is not held back)",
+                    primary.name
                 )));
             }
             return Err(destination::DestinationRefusal {
@@ -4228,10 +4272,14 @@ impl Inputs {
     }
 
     /// The roles the rendered plan carries: [`Inputs::roles`], minus an
-    /// `EvidenceRead` a Backup check had to drop ([`EvidenceReadPlan::Dropped`]).
+    /// `EvidenceRead` the controller answers itself
+    /// ([`EvidenceReadPlan::ControllerAnswers`]).
     #[must_use]
     pub fn plan_roles(&self) -> Vec<DestinationRole> {
-        let dropped = matches!(self.evidence_read_plan(), Ok(EvidenceReadPlan::Dropped(_)));
+        let dropped = matches!(
+            self.evidence_read_plan(),
+            Ok(EvidenceReadPlan::ControllerAnswers(_))
+        );
         self.roles
             .iter()
             .copied()
@@ -4336,6 +4384,13 @@ impl Inputs {
         // back to the archive when both resolve.
         if let Some(row) = self.destination_verdict_row(now) {
             out.push(row);
+        }
+        // Review L1/L2: an advisory evidence-read row the pod cannot answer is
+        // the controller's, with its reason — never absent, never blocking.
+        if let (Ok(EvidenceReadPlan::ControllerAnswers(reason)), Some(Ok(d))) =
+            (self.evidence_read_plan(), self.archive.as_ref())
+        {
+            out.push(evidence_read_row(op, &d.name, Some(&d.uid), &reason, now));
         }
         if op == PreflightOperation::Restore {
             if let Some(plan) = self.plan.as_ref() {
@@ -4536,7 +4591,7 @@ pub fn build_job_shape(
         EvidenceReadPlan::Separate(g, _) | EvidenceReadPlan::NotInPod(g) => Some(g.clone()),
         EvidenceReadPlan::NotRequested
         | EvidenceReadPlan::SameGrant
-        | EvidenceReadPlan::Dropped(_) => None,
+        | EvidenceReadPlan::ControllerAnswers(_) => None,
     };
     let plan_roles = inputs.plan_roles();
 
@@ -4942,9 +4997,44 @@ pub enum EvidenceReadPlan {
     /// `ControllerIdentity` or not configured: named in the plan so the runner
     /// answers `unknown` and reads as nobody.
     NotInPod(GrantRef),
-    /// A Backup check's ADDED advisory role that cannot share the pod's
-    /// ServiceAccount: not requested, for the reason given.
-    Dropped(String),
+    /// The grant was refused by the resolver, or (Backup only) cannot share
+    /// the pod's ServiceAccount: the role is left out of the rendered plan and
+    /// the CONTROLLER answers the advisory row `unknown` /
+    /// `EvidenceReadNotConfigured` with this reason ([`evidence_read_row`]).
+    /// The verdict is unchanged: the row is advisory.
+    ControllerAnswers(String),
+}
+
+/// `destination.evidenceReadable`, answered by the controller for
+/// [`EvidenceReadPlan::ControllerAnswers`] — D2 §6.3 gives the row authority
+/// "J or C". Advisory `unknown`, so the aggregate is untouched.
+#[must_use]
+pub fn evidence_read_row(
+    operation: PreflightOperation,
+    destination_name: &str,
+    destination_uid: Option<&str>,
+    reason: &str,
+    now: DateTime<Utc>,
+) -> CheckOutcome {
+    outcome(
+        operation,
+        CheckId::DestinationEvidenceReadable,
+        CheckState::Unknown,
+        CheckCode::EvidenceReadNotConfigured,
+        now,
+    )
+    .with_scope(CheckScope {
+        kind: "BackupDestination".to_string(),
+        name: destination_name.to_string(),
+        uid: destination_uid.map(str::to_string),
+    })
+    .with_message(reason)
+    .with_remedy(
+        "Fix the evidence-read grant the message names (the installation policy's \
+         ControllerIdentity allowlist, or a ServiceAccount the check pod can run as); the other \
+         rows of this check are not affected by it.",
+    )
+    .with_fact("grant", "evidenceRead")
 }
 
 /// What a `BackupDestination`'s SPEC says that its resolved form does not
@@ -5003,10 +5093,12 @@ pub fn destination_spec_facts(
     // it is requested is `Inputs::evidence_read_plan`'s business.
     let evidence_read =
         destination::resolve(object, DestinationRole::EvidenceRead, policy).map(|d| d.grant);
-    let evidence_read_configured = !matches!(
-        evidence_read,
-        Ok(destination::ResolvedGrant::NotConfigured) | Err(_)
-    );
+    // A grant that is CONFIGURED and refused (not allowlisted, an
+    // `ArchiveReadGrant` with no `archiveRead`) is still requested: the
+    // controller answers the advisory row with the refusal (review L1) rather
+    // than leave it absent, which would read as "no grant configured".
+    let evidence_read_configured =
+        !matches!(evidence_read, Ok(destination::ResolvedGrant::NotConfigured));
     let request_evidence_read = evidence_read_configured && operation == PreflightOperation::Backup;
     let reads_evidence = match operation {
         PreflightOperation::Backup => request_evidence_read,

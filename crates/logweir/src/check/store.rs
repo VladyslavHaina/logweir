@@ -494,7 +494,18 @@ pub fn grant_options(
     let Some(grant) = grant else {
         return options_for(plan, budget);
     };
-    let vars = grant_env(role);
+    // Review L9: only the two evidence roles are ever separate grants. An
+    // archive role here is a plan this runner must not guess about.
+    let Some(vars) = grant_env(role) else {
+        return Err(StoreFailure::new(
+            CheckCode::CheckContractMismatch,
+            format!(
+                "a separate grant was named for the {} role, and only the two evidence roles \
+                 carry one; no credential was used",
+                role.as_str()
+            ),
+        ));
+    };
     let opts = match grant.credentials {
         GrantCredentials::Static => {
             let required = |name: &str| {
@@ -539,12 +550,11 @@ pub fn grant_options(
 /// plan's destination grant (see `weirkeeper::controllers::preflight::
 /// access_primary_role`).
 #[must_use]
-pub fn grant_env(role: DestinationRole) -> GrantEnv {
+pub fn grant_env(role: DestinationRole) -> Option<GrantEnv> {
     match role {
-        DestinationRole::EvidenceRead => EVIDENCE_READ_ENV,
-        DestinationRole::EvidenceWrite
-        | DestinationRole::ArchiveRead
-        | DestinationRole::ArchiveWrite => EVIDENCE_WRITE_ENV,
+        DestinationRole::EvidenceRead => Some(EVIDENCE_READ_ENV),
+        DestinationRole::EvidenceWrite => Some(EVIDENCE_WRITE_ENV),
+        DestinationRole::ArchiveRead | DestinationRole::ArchiveWrite => None,
     }
 }
 

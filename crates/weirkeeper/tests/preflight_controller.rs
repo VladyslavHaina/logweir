@@ -5764,12 +5764,18 @@ fn an_evidence_read_grant_no_pod_holds_is_named_and_projects_nothing() {
 /// One pod, one ServiceAccount. A `DestinationAccess` check that ASKED for
 /// `EvidenceRead` as a workload identity the pod cannot run as is refused on
 /// `destination.resolved`, with no Job; a Backup check, which only ADDS the
-/// advisory row, drops it rather than block a run that never reads evidence
-/// in its own pod.
+/// advisory row, has the CONTROLLER answer it `unknown` with the reason
+/// (review L2) and keeps its verdict.
 ///
-/// MUTANT RP-15 (`preflight.rs`): return `Dropped` for every operation (drop
-/// the `Backup` condition). The DestinationAccess arm then renders a plan
-/// without the row it was asked for, and the first assertion fails.
+/// MUTANT RP-15 (`preflight.rs`): answer `ControllerAnswers` for every
+/// operation (drop the `Backup` condition). The DestinationAccess arm then
+/// renders a plan without the row it was asked for, and the first assertion
+/// fails.
+///
+/// MUTANT R-2 (review L7): leave the evidence-WRITE principal's
+/// ServiceAccount out of `evidence_read_plan`'s `others`. The write-WI /
+/// read-WI case then reads `DestinationValid` on `destination.resolved` and
+/// is refused only later, when the Job is built.
 #[test]
 fn a_workload_identity_evidence_read_that_cannot_share_the_pod_is_refused_or_dropped() {
     let mut object = reading_destination(
@@ -5791,6 +5797,38 @@ fn a_workload_identity_evidence_read_that_cannot_share_the_pod_is_refused_or_dro
     );
     assert!(row.message.contains("reader-sa") && row.message.contains("archive-sa"));
     assert!(shape_of(&access).is_err());
+
+    // Review L7: a DestinationAccess check whose evidence-WRITE and
+    // evidence-READ grants are two workload identities is refused at RESOLVE
+    // time, on `destination.resolved` — not only when the Job is built.
+    let mut two = separated_destination(
+        "primary",
+        json!({"mode": "WorkloadIdentity", "workloadIdentity": {"serviceAccountName": "writer-sa"}}),
+        true,
+    );
+    two["spec"]["access"].as_object_mut().expect("access").insert(
+        "evidenceRead".to_string(),
+        json!({"mode": "WorkloadIdentity", "workloadIdentity": {"serviceAccountName": "reader-sa"}}),
+    );
+    let both = inputs_for(
+        PreflightOperation::DestinationAccess,
+        &two,
+        vec![
+            DestinationRole::ArchiveRead,
+            DestinationRole::EvidenceWrite,
+            DestinationRole::EvidenceRead,
+        ],
+    );
+    let row = both
+        .destination_verdict_row(now())
+        .expect("a destination row");
+    assert_eq!(
+        (row.state, row.code),
+        (CheckState::NotReady, CheckCode::ExecutionContextConflict),
+        "{row:?}"
+    );
+    assert!(row.message.contains("reader-sa") && row.message.contains("writer-sa"));
+    assert!(!both.plan_blockers(std::slice::from_ref(&row)).is_empty());
 
     // A Backup check pod runs as the connection's ServiceAccount.
     let backup = inputs_for(
@@ -5820,6 +5858,46 @@ fn a_workload_identity_evidence_read_that_cannot_share_the_pod_is_refused_or_dro
         !pf::job_rows(&shape.plan.request, false).contains(&CheckId::DestinationEvidenceReadable)
     );
     assert_ne!(shape.spec.service_account_name, "reader-sa");
+    // Review L2: present, advisory `unknown`, with the reason — never absent.
+    let (rows, _) = backup.controller_outcomes(&pf::RelayFacts::default(), None, true, None, now());
+    let read = rows
+        .iter()
+        .find(|c| c.id == CheckId::DestinationEvidenceReadable)
+        .expect("the controller answers the advisory row");
+    assert_eq!(
+        (read.state, read.gating, read.code, read.authority),
+        (
+            CheckState::Unknown,
+            Gating::Advisory,
+            CheckCode::EvidenceReadNotConfigured,
+            Authority::Controller
+        )
+    );
+    assert!(
+        read.message.contains("reader-sa") && read.message.contains("logweir-runner"),
+        "{}",
+        read.message
+    );
+    assert_eq!(
+        read.facts.get("grant").map(String::as_str),
+        Some("evidenceRead")
+    );
+    let verdict = pf::assemble(
+        rows.clone(),
+        Vec::new(),
+        false,
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+        now(),
+    );
+    assert!(
+        logweir_core::check_contract::advisory_warnings(&verdict).is_empty()
+            && verdict
+                .iter()
+                .filter(|c| c.id == CheckId::DestinationEvidenceReadable)
+                .all(|c| c.gating == Gating::Advisory),
+        "the advisory row cannot move the verdict"
+    );
 
     // And a workload identity that CAN share the pod is projected as such.
     let shared = inputs_for(
@@ -5862,6 +5940,100 @@ fn an_unresolved_evidence_read_grant_refuses_rather_than_guesses() {
         "{row:?}"
     );
     assert!(shape_of(&inputs).is_err());
+}
+
+/// **Review L1.** A `:test` whose evidence-read grant the RESOLVER refuses —
+/// `ControllerIdentity` on a location the installation policy does not list
+/// yet — reports ONLY `destination.evidenceReadable`, advisory `unknown`, with
+/// the refusal; `destination.resolved` is `DestinationValid`, a Job is
+/// rendered, and it still carries the archive and marker rows.
+///
+/// MUTANT RP-17 (`preflight.rs`): answer the resolver refusal with
+/// `Err(refusal)` again (the round-2 behaviour). `destination.resolved` turns
+/// `ControllerIdentityNotAllowlisted`, no Job is rendered, and this test fails.
+#[test]
+fn a_refused_evidence_read_grant_answers_only_its_own_row() {
+    let mut object = separated_destination("primary", evidence_secret_grant(), true);
+    object["spec"]["access"]
+        .as_object_mut()
+        .expect("access")
+        .insert(
+            "evidenceRead".to_string(),
+            json!({"mode": "ControllerIdentity"}),
+        );
+    // The console's `:test` roles for this object (every configured grant).
+    let roles = vec![
+        DestinationRole::ArchiveWrite,
+        DestinationRole::EvidenceWrite,
+        DestinationRole::EvidenceRead,
+    ];
+    for operation in [
+        PreflightOperation::DestinationAccess,
+        PreflightOperation::Backup,
+    ] {
+        let roles = if operation == PreflightOperation::Backup {
+            vec![DestinationRole::ArchiveRead, DestinationRole::EvidenceWrite]
+        } else {
+            roles.clone()
+        };
+        // Policy::defaults() allowlists nothing.
+        let inputs = inputs_for(operation, &object, roles);
+        assert!(
+            inputs.roles.contains(&DestinationRole::EvidenceRead),
+            "{operation:?}: a configured-but-refused grant is still asked about"
+        );
+        let resolved = inputs.destination_verdict_row(now()).expect("row");
+        assert_eq!(
+            (resolved.state, resolved.code),
+            (CheckState::Ready, CheckCode::DestinationValid),
+            "{operation:?}: {resolved:?}"
+        );
+        let shape = shape_of(&inputs).expect("the rest of the check still runs");
+        let expected = pf::job_rows(&shape.plan.request, false);
+        assert!(expected.contains(&CheckId::DestinationEvidenceWritable));
+        assert!(!expected.contains(&CheckId::DestinationEvidenceReadable));
+        let (rows, _) =
+            inputs.controller_outcomes(&pf::RelayFacts::default(), None, true, None, now());
+        let read = rows
+            .iter()
+            .find(|c| c.id == CheckId::DestinationEvidenceReadable)
+            .expect("the row is answered");
+        assert_eq!(
+            (read.state, read.gating, read.code),
+            (
+                CheckState::Unknown,
+                Gating::Advisory,
+                CheckCode::EvidenceReadNotConfigured
+            )
+        );
+        assert!(
+            read.message.contains("ControllerIdentityNotAllowlisted"),
+            "{operation:?}: the reason is carried: {}",
+            read.message
+        );
+    }
+}
+
+/// **Review L3.** An older runner that refuses a plan field gets a `Failed`
+/// Preflight whose message says to upgrade the runner image and names the
+/// field; the helper keeps only a plain identifier from the pod log.
+#[test]
+fn a_refused_plan_names_the_runner_upgrade_and_the_field() {
+    let log = "{\"level\":\"WARN\",\"fields\":{\"message\":\"the check plan was refused before \
+               any client was built: check plan does not parse: unknown field `evidenceRead`, \
+               expected one of `destination`, `roles`, `writeProbe` at line 1 column 569\"}}\n\
+               refusal-reason=CheckContractMismatch\n";
+    assert_eq!(
+        weirkeeper::check::refused_plan_field(log).as_deref(),
+        Some("evidenceRead")
+    );
+    assert_eq!(
+        weirkeeper::check::refused_plan_field("unknown field `a b; rm`"),
+        None,
+        "only a plain identifier is carried into a status message"
+    );
+    assert_eq!(weirkeeper::check::refused_plan_field("no such text"), None);
+    assert!(pf::remedy_for(CheckCode::CheckContractMismatch).contains("Upgrade the runner image"));
 }
 
 /// The spec derivation's other two answers: `EvidenceRead` is added to a

@@ -250,12 +250,26 @@ pub fn classify(input: &Input<'_>) -> Observation {
 
     // 4. The contract refusal, BY KEY NAME from a bounded tail.
     if let Some(code) = relay::refusal_reason(log) {
+        // REVIEW L3: a runner that refuses a plan THIS controller rendered is,
+        // in practice, an older runner image — say so, and name the field it
+        // did not know when its own stderr line says which.
+        let hint = if code == CheckCode::CheckContractMismatch {
+            let field = refused_plan_field(log)
+                .map(|f| format!(" (it did not know the plan field `{f}`)"))
+                .unwrap_or_default();
+            format!(
+                "; the runner image is older than this controller{field} — upgrade the runner \
+                 image to this controller's release"
+            )
+        } else {
+            String::new()
+        };
         return Observation {
             phase: CheckPhase::Failed,
             reason: code,
             message: format!(
                 "the runner refused the check plan and printed `{}{code}` (exit {}); no frames \
-                 were expected and none are required",
+                 were expected and none are required{hint}",
                 crate::controllers::backup::REFUSAL_REASON_PREFIX,
                 exit_code.map_or_else(|| "<none>".to_string(), |c| c.to_string())
             ),
@@ -369,6 +383,23 @@ pub fn attribute(waiting: &Waiting, projections: &Projections) -> Option<CheckId
         }
         _ => None,
     }
+}
+
+/// The plan field an older runner refused, read from its own stderr line
+/// (`… unknown field `evidenceRead`, expected one of …`) — review L3.
+///
+/// A HINT, not a contract: the text is serde's, and a runner that words it
+/// differently simply gets the hint without a field name. The value is kept
+/// only when it is a plain identifier of at most 64 ASCII letters and digits,
+/// so nothing else from a pod log can ride into a status message.
+#[must_use]
+pub fn refused_plan_field(log: &str) -> Option<String> {
+    const MARKER: &str = "unknown field `";
+    let at = log.rfind(MARKER)? + MARKER.len();
+    let rest = &log[at..];
+    let field = &rest[..rest.find('`')?];
+    (!field.is_empty() && field.len() <= 64 && field.bytes().all(|b| b.is_ascii_alphanumeric()))
+        .then(|| field.to_string())
 }
 
 /// The merge patch that sets a finished check Job's TTL — D2 §4.3.
