@@ -429,7 +429,7 @@ A read-only audit of the 38 Done tasks (`claude/done-audit.result.md`) found tha
 | PLAT-13.1 | `/tmp/plat13-*.md`, closure-0413 | `artifacts/ui-harness-drift/plat13/` (2026-09-23); the native stale-namespace journey on lab-refresh-9 |
 | PLAT-13.2 | ui-correct artifacts and review | plat12-13 20/20 on lab-refresh-9 |
 | PLAT-18.1 | ui-typed-client review | the live screenshots and run log in `artifacts/ui-typed-client/after-review-fixes/` |
-| PLAT-01.1, 01.2, 02.1, 02.2 | `artifacts/plat01-02-live/` and its result and review | **01.x re-proved** by lab-refresh-10 at `b426096`: `scripts/test-plat01-02-live.py` 31/31 `accepted` (`artifacts/plat01-02-live-rerun/`). **02.x chart half owed**: `scripts/test-plat02-chart-live.py` scales the shared controller to 0 and takes its ClusterRoles, so it runs on the empty cluster after the lab is deleted and before the PoC install |
+| PLAT-01.1, 01.2, 02.1, 02.2 | `artifacts/plat01-02-live/` and its result and review | **Re-proved in full.** 01.x by lab-refresh-10 at `b426096`: `scripts/test-plat01-02-live.py` 31/31 `accepted` (`artifacts/plat01-02-live-rerun/`). 02.x on 2026-09-24 at main `71edaaa`: `scripts/test-plat02-chart-live.py` 18/18 `accepted`, run 3 at harness `b73aed0`, beside the old lab, which it scaled down and restored exactly (`artifacts/plat01-02-live-rerun/chart-20260924t1224z/`; report `claude/plat02-chart.result.md`). Three harness drifts were fixed with negative controls. |
 
 Also owed from the audit: a Tier-A review of PLAT-08.2 (done: `claude/plat08-2.review.md`, ACCEPT-with-LOWs plus one integration MEDIUM, fixed on `claude/catalog-referent`), a Tier-B review of PLAT-20.1 and of the evidence harnesses, and a closing re-check of PLAT-16.2's last REJECT (in progress).
 
