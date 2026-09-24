@@ -346,9 +346,16 @@ an unreachable plan location is `notReady` and named. **Evidence** — the
 console writes such a restore's evidence to the archive's own bucket (it wrote
 `logweir-evidence`), and the controller reads an inline-archive run's evidence
 only in the bucket of its archive handle (`LOGWEIR_ARCHIVE_URL`): a run whose
-evidence is elsewhere is `NotAttempted` naming both buckets and is never read
-in the wrong one, and a scorecard the handle read nothing for is `NotAttempted`
-naming the key — it used to publish no verification and no completion at all.
+evidence is elsewhere is `NotAttempted` naming its own evidence bucket (the
+handle is named by role; its URL is only in the controller log) and is never
+read in the wrong one, and an inline-archive scorecard the handle read nothing
+for is `NotAttempted` naming the key — it used to publish no verification and
+no completion at all. A rehearsal over such a point records
+`VerificationNotAttempted` at once instead of `EvidenceVerdictNotReached` after
+five minutes; destination-backed runs are unchanged. The readiness verdict is
+bound to the archive Secret: editing it after a green check refuses the Create,
+and a check of an existing `Restore` must name that Restore's own archive and
+Secret.
 **Catalog** — a `Full` or `Index` sync reads catalog records only, so a
 pre-catalog point is not in a connected catalog until its record is backfilled
 ([kubernetes.md](kubernetes.md) §7d, §15.1a, §21.8). **Do:** if your legacy
@@ -357,7 +364,9 @@ schedules write to a bucket other than `LOGWEIR_ARCHIVE_URL`'s (chart
 runs now read `NotAttempted` rather than a misleading store error — verify them
 with the printed commands or move them to a `BackupDestination`; write a
 hand-written legacy restore plan's `evidence:` to the handle's bucket; run
-`logweir catalog sync` once per archive to list `v0.1.5` points in a catalog;
+`logweir catalog sync` once per archive to list `v0.1.5` points in a catalog
+(D3 designs `Full` as a read-only receipt walk that would make this unnecessary;
+this build's `Full` reads records only, a gap tracked for PLAT-15.1);
 re-run any readiness check made before the upgrade. **Scope:** in-process rows
 over the preflight, restore and backup controllers and the console suite.
 [UNVERIFIED — the v0.1.5 point's readiness, verdict and completion are re-proved live by the PoC re-proof round after the upgrade.]

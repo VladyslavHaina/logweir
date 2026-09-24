@@ -1216,6 +1216,14 @@ which refuses the plan as incomplete. A draft kept in this browser before the
 change still carries whatever evidence bucket it held. The Restore detail's
 *Check it yourself* commands fetch the scorecard from the bucket the plan's own
 `evidence:` block names (`planEvidenceBucket`), never from the source archive's.
+**The readiness verdict is bound to the archive Secret.** The Secret a legacy
+restore projects is not in the plan bytes, so the plan hash cannot see it move:
+`setArchiveSecret` marks a held verdict stale (`referentChanged`, kind `Secret`)
+as a change of target or evidence destination does, and step 5 records the
+Secret the check was started with (`readiness.boundSecret`), which
+`readinessRefusal` compares with the one the Restore would project. The fetch
+commands accept only an S3 bucket name from the plan (`isBucketName`) and render
+each `s3://` argument as one shell word (`shellWord`).
 Rows: `ui/tests/legacy-point.spec.js`.
 
 **Readiness follows the check, and the submit asks again.** Step 5 re-reads a

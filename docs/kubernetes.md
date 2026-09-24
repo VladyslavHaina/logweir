@@ -1439,11 +1439,17 @@ one of the `--public-key` values and nothing for any other; it is idempotent
 (point ids are derived from the receipt bytes), resumable with
 `--since <catalog-next>`, bounded by `--max`, and deletes nothing
 ([formats/catalog-point.md](formats/catalog-point.md)). Then set
-`spec.syncRequest` on the `RecoveryCatalog` to a new value. Folding the
-backfill into the controller's sync was assessed and rejected for this build:
-it would give a read-only check Job a write grant and a signing key, or publish
-view rows backed by no signed record, and either widens what a `RecoveryCatalog`
-may do.
+`spec.syncRequest` on the `RecoveryCatalog` to a new value.
+
+**This is a gap against the design, not a limit of it.** D3 §5.3 designs `Full`
+as a read-only rescan of receipts and manifests ("the scanner backfills"): the
+receipt is the verification root, a point's id is derived from the receipt's
+bytes, and no write grant or signing key is needed. This build's `Full` walks
+records only. Closing it is a change to the runner's `catalogSync` kind — a
+second prefix under the resumable cursor, exactly-once counting of a receipt
+that also has a record, the per-point object budget — and it is tracked for
+PLAT-15.1 rather than made on the legacy-restore path. The operator backfill
+above is the supported route until then.
 
 ### 7d.1 Disaster restore: an archive, and no `Backup` object at all (PLAT-15.2)
 
@@ -5927,8 +5933,12 @@ neither is the endpoint, which for the handle comes from the controller's own
 environment.
 
 - **Evidence in another bucket is not read.** The verdict is `NotAttempted`
-  with a detail naming both locations and the `logweir drill verify` route, and
-  a `Restore` gets no `completion` (it is written only beside `Valid`). Before
+  with a detail naming the run's own evidence location, the handle BY ROLE and
+  the `logweir drill verify` route, and a `Restore` gets no `completion` (it is
+  written only beside `Valid`). The handle's URL is installation configuration:
+  it is in the controller's log (`archive_handle=`), and never in a status, a
+  `Preflight` message or an event a namespace operator — in shared mode, any
+  tenant — can read. Before
   this build the key was looked up in the handle's bucket, where the document
   never was: a `Backup` read `NotAttempted` with a store "not found" that looked
   like a missing receipt, and a `Restore` published **no verification block and
@@ -5937,8 +5947,13 @@ environment.
 - **A scorecard the handle read nothing for is `NotAttempted`, named.** When the
   runner printed both scorecard keys and the controller's read produced no
   document — no handle configured, the object not in that bucket, or a
-  credential that cannot read it — the verdict names the key and the handle.
-  It is never `Invalid`, and there is no completion.
+  credential that cannot read it — the verdict names the key and the handle
+  by role. It is never `Invalid`, and there is no completion. This applies to
+  inline-archive runs only: a destination-backed run whose `ControllerIdentity`
+  read fails still writes no block, as recorded for rehearsals (the schedule
+  bounds its wait instead). A rehearsal over a point with no destination
+  therefore records `VerificationNotAttempted` at once, rather than
+  `EvidenceVerdictNotReached` after its five-minute grace.
 - **The console writes such a plan's evidence to the archive's own bucket** —
   the bucket the archive credential already wrote the point's receipt to, and on
   the chart's default install the handle's — and its restore readiness check
@@ -7771,7 +7786,15 @@ readiness check holds the submit*).
   read S3, or a location the destination rules refuse (an `http://` endpoint
   with `allow_http: false`) is `destination.resolved notReady` and no Job runs.
   `plan.bindings` holds the plan to the named inline archive and to the
-  recovery point's own `spec.archive.url` (`PlanDestinationMismatch`), and
+  recovery point's own `spec.archive.url` (`PlanDestinationMismatch`). A check
+  of an EXISTING `Restore` (`restoreRef`) reads with that Restore's own
+  `spec.sourceArchive` — URL and Secret — and a request naming another archive
+  or another Secret is `destination.resolved notReady`,
+  `PlanDestinationMismatch`, with both named and no Job. The console records
+  the Secret a check was started with and refuses the Create when the Secret on
+  screen differs (the Secret is not in the plan bytes, so the plan hash cannot
+  see it change). The advisory evidence row names the handle by role, never its
+  URL. And
   `recoveryPoint.state` does not compare the point with a location derived from
   its own plan. One advisory row, `destination.evidenceReadable`
   (`EvidenceReadNotConfigured`), is published when the plan's `evidence:`
