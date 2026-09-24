@@ -1510,6 +1510,8 @@ export function renderStoreFields(state) {
     esc(evidence.bucket) + "\"" +
     invalidAttributes("evidence-bucket", errors.evidenceBucket) + ">" +
     fieldErrorLine("evidence-bucket", errors.evidenceBucket) +
+    "<p class=\"note\" id=\"legacy-evidence-bucket\">" + esc(LEGACY_EVIDENCE_BUCKET_SENTENCE) +
+    "</p>" +
     "<p class=\"note\">The evidence prefix is fixed at " + esc(EVIDENCE_PREFIX) + " by Global " +
     "Constraint 6 and is not an input: a plan naming another one is refused at phase 0, " +
     "after the approver has already signed it.</p></div>" +
@@ -2606,8 +2608,9 @@ export function readinessSourceSentence(point) {
       (typeof digest === "string" && digest.length > 0 ? "`" + digest + "`" : "not recorded") +
       "; the controller compares that frozen fact with the destination it resolves now.";
   }
-  return "Legacy recovery point: this check reads the inline archive URL recorded on the Backup. " +
-    "Only a point with no destinationRef uses legacySourceArchive.";
+  return "Legacy recovery point: this check reads the inline archive URL recorded on the Backup, " +
+    "with the Secret that Backup named -- the location and the credential the restore Job " +
+    "itself will use. Only a point with no destinationRef uses legacySourceArchive.";
 }
 
 /** Why a readiness result is not a promise about the run. */
@@ -2776,6 +2779,20 @@ export function readinessRefusal(state, prepared) {
       " and this plan hashes to " + hash + ". Something that changes the document -- the " +
       "target, the prefix, the subset, the point in time -- changed since it ran, so it is " +
       "not a verdict about what you are about to submit. Run it again."
+    );
+  }
+  // THE CREDENTIAL IS NOT IN THE PLAN (review M1(a)): a check of a point with
+  // no saved destination read the archive with the Secret it was started with,
+  // and the Restore projects the one on screen now.
+  const boundSecret = typeof readiness.boundSecret === "string" ? readiness.boundSecret : null;
+  const secretNow = String(s.archiveSecretName || "").trim();
+  if (boundSecret !== null && boundSecret !== secretNow) {
+    return (
+      "the readiness check on screen read the archive with " +
+      (boundSecret.length > 0 ? "Secret " + boundSecret : "no Secret") +
+      ", and this Restore would project " +
+      (secretNow.length > 0 ? "Secret " + secretNow : "no Secret") +
+      ". A check is about the credential the restore will use; run it again."
     );
   }
   // STALENESS IS ASKED ABOUT BEFORE COMPLETION, and the order matters. A check
@@ -4828,7 +4845,7 @@ export function initialState(ns, clusters, backups, selection, savedDestination,
     evidenceSameAsArchive: true,
     evidenceBucket: savedPoint
       ? (destinationSettings === null ? "" : destinationSettings.bucket)
-      : "logweir-evidence",
+      : legacyEvidenceBucket(archiveUrl),
     targetClusterName: ((target || {}).metadata || {}).name,
     // THE IDENTITY, BESIDE THE NAME. The default is a preselect and nothing
     // more, but it is a preselect BY UID from the first render, so the very
@@ -4887,7 +4904,7 @@ export function initialState(ns, clusters, backups, selection, savedDestination,
       evidence: Object.assign({}, store, {
         bucket: savedPoint
           ? (destinationSettings === null ? "" : destinationSettings.bucket)
-          : "logweir-evidence",
+          : legacyEvidenceBucket(archiveUrl),
         // Evidence never inherits the archive prefix. Global Constraint 6 is
         // the saved-destination evidence location too.
         prefix: EVIDENCE_PREFIX,
@@ -4895,6 +4912,37 @@ export function initialState(ns, clusters, backups, selection, savedDestination,
     },
   };
 }
+
+/** WHERE A POINT WITH NO DESTINATION WRITES ITS EVIDENCE: the archive's own
+ *  bucket (PoC defect P5).
+ *
+ *  This used to be the literal `logweir-evidence`. The controller reads an
+ *  inline-archive run's scorecard ONLY through its own archive handle
+ *  (`LOGWEIR_ARCHIVE_URL`), and only in that handle's bucket; the runner writes
+ *  it with the archive's credential, the one that already wrote this point's
+ *  receipt under `<archive bucket>/logweir/`. A plan naming any other bucket
+ *  restored the data and then published no verification and no completion
+ *  (`weirkeeper` `destination::legacy_evidence_scope`). The archive's bucket is
+ *  the one the archive credential is known to write, and on an installation
+ *  whose handle is over its archive -- the chart's default -- the one the
+ *  controller reads. The field stays editable; the readiness check warns
+ *  (`destination.evidenceReadable`) when the plan names a bucket the
+ *  controller will not read. An archive URL with no bucket leaves the field
+ *  EMPTY, so the plan is refused as incomplete rather than pointed anywhere. */
+export function legacyEvidenceBucket(archiveUrl) {
+  if (typeof archiveUrl !== "string" || archiveUrl.indexOf("://") === -1) {
+    return "";
+  }
+  const bucket = bucketOf(archiveUrl);
+  return bucket === bucketOf("") ? "" : bucket;
+}
+
+/** Said under a legacy point's evidence bucket field. */
+export const LEGACY_EVIDENCE_BUCKET_SENTENCE =
+  "It starts as this recovery point's own archive bucket. Weirkeeper verifies the signed " +
+  "scorecard of a point with no saved destination only through its own archive handle " +
+  "(LOGWEIR_ARCHIVE_URL), in that handle's bucket: name another bucket and the restore still " +
+  "runs, but its verification reads NotAttempted and no completion is written.";
 
 /** The saved destination frozen onto a recovery point, if this is not legacy. */
 function savedDestinationName(state) {
@@ -5033,6 +5081,53 @@ export function evidenceDestinationOptions(state) {
 }
 
 /** The evidence destination's NAME, or "" for a legacy point. */
+/** The Secret a readiness request names for an inline archive, or `null` for
+ *  a request that names none (a saved destination's check). */
+export function readinessSecretOf(request) {
+  const legacy = ((((request || {}).restore) || {}).legacySourceArchive) || null;
+  if (legacy === null) {
+    return null;
+  }
+  const name = ((legacy.credentialRef || {}).name);
+  return typeof name === "string" ? name : "";
+}
+
+function boundSecretOf(about) {
+  const a = about || {};
+  return typeof a.archiveSecret === "string" ? a.archiveSecret : null;
+}
+
+/** THE ARCHIVE SECRET, AND WHAT A CHANGE OF IT DOES TO A HELD CHECK (review
+ *  M1(a)).
+ *
+ *  For a point with no saved destination the readiness check reads the
+ *  archive with the Secret the Restore will project -- that is P3's whole
+ *  claim -- and the Secret is not in the plan bytes, so a plan-hash
+ *  comparison cannot see it move. A change marks a held verdict stale exactly
+ *  as a change of target or evidence destination does (`referentChanged`,
+ *  kind `Secret`), and `readinessRefusal` also compares the Secret the check
+ *  was started with against the one on screen, so the Create stays refused
+ *  until the check is run again with this Secret. */
+export function setArchiveSecret(state, value) {
+  const next = String(typeof value === "string" ? value : "").trim();
+  const before = String(state.archiveSecretName || "").trim();
+  const held = (state.readiness || {}).preflight || null;
+  if (next !== before && held !== null) {
+    state.readiness = Object.assign({}, state.readiness, {
+      preflight: Object.assign({}, held, {
+        applicable: false,
+        stale: true,
+        staleReasons: [{
+          reason: "referentChanged",
+          kind: "Secret",
+          name: next.length > 0 ? next : "(none)",
+        }],
+      }),
+    });
+  }
+  state.archiveSecretName = typeof value === "string" ? value : "";
+}
+
 export function evidenceDestinationName(state) {
   const pin = (state || {}).evidenceDestination || null;
   return pin !== null && typeof pin.name === "string" ? pin.name : "";
@@ -5259,6 +5354,14 @@ function wireRestoreReadiness(node, state, parse, api, lifecycle, prepared) {
       boundHash: record.phase === "succeeded"
         ? ((record.about || {}).planHash || "")
         : ((state.readiness || {}).boundHash || ""),
+      // THE SECRET THE CHECK READ WITH (review M1(a)). It is not in the plan
+      // bytes, so the hash above cannot see it change; `readinessRefusal`
+      // compares it with the Secret the Restore would project.
+      boundSecret: record.phase === "succeeded"
+        ? boundSecretOf(record.about)
+        : ((state.readiness || {}).boundSecret === undefined
+          ? null
+          : state.readiness.boundSecret),
     });
     renderAndWire(node, state, parse, api, lifecycle);
     if (record.phase === "succeeded") {
@@ -5277,7 +5380,7 @@ function wireRestoreReadiness(node, state, parse, api, lifecycle, prepared) {
     const request = restoreReadinessRequest(state, p);
     mutation.run(() => api.startPreflight(state.ns, request, {
       attempt: nextRestoreReadinessAttempt(state.ns, state.pointUid),
-    }), { about: { planHash: p.hash } });
+    }), { about: { planHash: p.hash, archiveSecret: readinessSecretOf(request) } });
   }, lifecycle);
 
   const cancel = node.querySelector("#restore-readiness-cancel");
@@ -5567,7 +5670,7 @@ function wire(node, state, parse, api, lifecycle, prepared) {
     // signs: the runner takes the credential from its environment, which the
     // controller fills from the named Secret.
     if (archiveSecret !== null) {
-      state.archiveSecretName = valueOf(archiveSecret);
+      setArchiveSecret(state, valueOf(archiveSecret));
     }
     // THE SUBSET, READ FROM THE BOXES THAT ARE ON SCREEN (PLAT-11.2) -- and
     // only when there ARE boxes, so a refusal page or a point with no frozen

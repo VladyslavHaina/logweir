@@ -199,6 +199,7 @@ authorisation story is "the API server evaluated the viewer's RBAC".
 | `tests/d2.spec.js` | **destinations, topic discovery and operation readiness**: every state the product API can put in front of those three surfaces, and the five sentences this product refuses to render. |
 | `tests/d3.spec.js` | **the operation view, protection, the catalog, the keys view, the badge cases and the retention panel**: every state D3 declares, over the objects the D3 live runs recorded, and the five claims this product refuses to make. |
 | `tests/restore-catalog.spec.js` | **PLAT-15.2**: the catalog-point route, the offer rule and every refusal it makes, the catalog-window offer for a run the controller could not verify, the bound plan and its golden, the readiness request, the restore body, drafts per point, and the selector, catalog-table and schedule-detail links -- each with its negative control. |
+| `tests/legacy-point.spec.js` | **a `v0.1.5` point after the upgrade** (PoC P3, P5, P6): the evidence bucket a point with no destination starts in, the readiness sentence, the Restore fetch commands' bucket and the catalog sync-mode help -- each with its negative control. |
 | `tests/preview-server.js` | a development tool, never a test: serves this directory over the fixtures under `tests/fixtures/preview/`. See *Previewing with fixtures*. |
 
 **The design system** lives in `style.css` and nowhere else. It is VMware
@@ -1201,6 +1202,29 @@ own endpoint, region, `path_style` box and **its own "Allow insecure HTTP"** box
 which defaults off. No box on either store sets the other store's flags, and no
 addressing box sets any transport flag. A draft kept before this change (one set
 of values) still means one store.
+
+**A legacy point's evidence bucket starts as its own archive's bucket**
+(`legacyEvidenceBucket`; it was the literal `logweir-evidence`, PoC defect P5).
+The controller reads the scorecard of a run with no saved destination only
+through its own archive handle (`LOGWEIR_ARCHIVE_URL`), in that handle's bucket,
+and the runner writes it with the archive's credential -- the one that already
+wrote this point's receipt there. Another bucket still restores, and its
+verification then reads `NotAttempted` with no completion; the field says so,
+and the readiness check's advisory `destination.evidenceReadable` row warns
+before the approver signs. An archive URL with no bucket leaves the field empty,
+which refuses the plan as incomplete. A draft kept in this browser before the
+change still carries whatever evidence bucket it held. The Restore detail's
+*Check it yourself* commands fetch the scorecard from the bucket the plan's own
+`evidence:` block names (`planEvidenceBucket`), never from the source archive's.
+**The readiness verdict is bound to the archive Secret.** The Secret a legacy
+restore projects is not in the plan bytes, so the plan hash cannot see it move:
+`setArchiveSecret` marks a held verdict stale (`referentChanged`, kind `Secret`)
+as a change of target or evidence destination does, and step 5 records the
+Secret the check was started with (`readiness.boundSecret`), which
+`readinessRefusal` compares with the one the Restore would project. The fetch
+commands accept only an S3 bucket name from the plan (`isBucketName`) and render
+each `s3://` argument as one shell word (`shellWord`).
+Rows: `ui/tests/legacy-point.spec.js`.
 
 **Readiness follows the check, and the submit asks again.** Step 5 re-reads a
 started check until it is terminal (`?planHash=` of the plan on screen). The

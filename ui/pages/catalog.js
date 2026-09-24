@@ -113,10 +113,27 @@ export const NO_POINT_SENTENCE =
  *  same two `index`/`full`; the API translates once. Sending the CRD's
  *  spelling here would be a `422` the form could not place.
  *
- *  `full` is what "connect an existing archive" needs: it walks receipts and
- *  manifests rather than only the catalog index a Logweir writer would have
- *  left behind. */
+ *  `full` is what "connect an existing archive" needs: it rescans every
+ *  catalog record under `logweir/catalog/v1/points/` rather than only the day
+ *  shards of the index -- and it reads RECORDS, not bare receipts (see
+ *  [`CATALOG_MODE_HELP`]). */
 export const SYNC_MODES = Object.freeze(["full", "index"]);
+
+/** What the two sync modes read, said under the selector (PoC defect P6).
+ *
+ *  It used to say that Full "walks the receipts and manifests in the bucket".
+ *  It does not: both modes read the durable catalog's signed RECORDS under
+ *  `logweir/catalog/v1/` (`docs/kubernetes.md` section 7d), and the sync Job is
+ *  read-only by design, so it can never write the record a receipt is missing.
+ *  A point written by a release before the catalog existed (`v0.1.5` and
+ *  earlier) has a receipt and no record, and neither mode shows it until the
+ *  operator backfills the records once with `logweir catalog sync`. */
+export const CATALOG_MODE_HELP =
+  "Full rescans every catalog record under logweir/catalog/v1/points/; Index reads the day " +
+  "shards of the catalog index, newest first. Neither reads a backup receipt that has no " +
+  "catalog record: points written before the catalog existed (v0.1.5 and earlier) appear only " +
+  "after their records are backfilled once with logweir catalog sync, run with a key that may " +
+  "write under logweir/catalog/v1/ and the public keys the receipts must verify under.";
 
 /** What connecting an archive does, and what it does not. */
 export const CONNECT_SENTENCE =
@@ -651,9 +668,7 @@ export function renderConnectForm(view) {
       ((values.syncMode || SYNC_MODES[0]) === m ? " selected" : "") + ">" + esc(m) + "</option>"
     ).join("") +
     "</select></div>" +
-    "<p class=\"help\">Full walks the receipts and manifests in the bucket, which is what an " +
-    "archive Logweir did not write needs. Index reads only the catalog shards a Logweir writer " +
-    "left behind.</p>" +
+    "<p class=\"help\" id=\"catalog-mode-help\">" + esc(CATALOG_MODE_HELP) + "</p>" +
     "<div class=\"actions\"><button type=\"submit\"" + (pending ? " disabled" : "") +
     ">Connect archive</button></div>" +
     "<div class=\"form-status\" data-connect-status=\"true\" tabindex=\"-1\">" +

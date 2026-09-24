@@ -1887,19 +1887,167 @@ pub fn retention_scope(
 /// failure class this guard exists to close.
 fn bucket_of(url: &str) -> String {
     match crate::retention::storage_url_for(url) {
-        Ok(StorageUrl::S3 { bucket, .. } | StorageUrl::Gcs { bucket, .. }) => bucket,
-        Ok(StorageUrl::Azure {
-            account_name,
-            container_name,
-            ..
-        }) => format!("{account_name}/{container_name}"),
-        Ok(StorageUrl::Filesystem { path }) => path.to_string_lossy().into_owned(),
+        Ok(u) => storage_bucket(&u).1,
         // AN UNREADABLE URL IS NOT THE SAME BUCKET AS ANYTHING. Returning the
         // empty string here makes `retention_scope` answer `WrongBucket`, which
         // withholds the report — the safe direction. The `Backup` path reports
         // the URL itself as `ArchiveUrlUnreadable`; a retention REPORT is not
         // the place to raise it a second time.
         Err(_) => String::new(),
+    }
+}
+
+/// `(backend, bucket)` of a parsed location — [`bucket_of`]'s arms, over a
+/// `StorageUrl` a plan already carries.
+///
+/// THE BACKEND IS HALF OF THE ANSWER. `s3://kb` and `gs://kb` are two buckets
+/// that happen to share a name, and a guard comparing names alone would read
+/// one through a handle over the other.
+fn storage_bucket(u: &StorageUrl) -> (&'static str, String) {
+    match u {
+        StorageUrl::S3 { bucket, .. } => ("s3", bucket.clone()),
+        StorageUrl::Gcs { bucket, .. } => ("gs", bucket.clone()),
+        StorageUrl::Azure {
+            account_name,
+            container_name,
+            ..
+        } => ("az", format!("{account_name}/{container_name}")),
+        StorageUrl::Filesystem { path } => ("file", path.to_string_lossy().into_owned()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The evidence guard for inline-archive runs (D2 §3.10, the global handle)
+// ---------------------------------------------------------------------------
+
+/// Whether the controller's ONE global handle can read an inline-archive run's
+/// EVIDENCE — the evidence twin of [`retention_scope`].
+///
+/// # The defect this closes (legacy-point-restore, PoC P5)
+///
+/// An inline-archive `Restore` writes its signed scorecard wherever its
+/// approved plan's `evidence:` block says, with the archive credential (D2
+/// grounding G6), and the runner prints only BUCKET-RELATIVE keys. The
+/// controller reads those keys through the handle `main` built from
+/// `LOGWEIR_ARCHIVE_URL`. A plan whose evidence bucket is not that handle's
+/// bucket was therefore read in the WRONG bucket, found nothing, and the run
+/// ended with no verification block and no completion at all — silently, on
+/// the PoC upgrade (`rst-4y5hcog6vsj5jwrfxj4exrm6f6`: plan evidence
+/// `logweir-evidence`, handle `s3://kafka-backups/logweir`).
+///
+/// A read of a bucket the document is not in is never an answer: it cannot be
+/// `Valid`, and an object that happened to sit at the same key there would be
+/// someone else's. So a run whose evidence location differs from the handle's
+/// is not read at all, and says so.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LegacyEvidenceScope {
+    /// The caller did not state where the handle points — the reconcile entry
+    /// points tests drive with in-memory oracles. Evaluated AS BEFORE, which is
+    /// [`crate::retention_plan::legacy_report_applies`]'s polarity and for its
+    /// reason: in the shipped binary a handle exists only when
+    /// `LOGWEIR_ARCHIVE_URL` names one, and then the caller passes it.
+    HandleLocationUnstated,
+    /// The evidence is in the handle's bucket: read it through the handle.
+    GlobalHandleApplies,
+    /// The evidence is somewhere the handle cannot see.
+    Elsewhere {
+        /// `<backend>://<bucket>` the run's evidence was written to — the
+        /// tenant's own plan, and safe to publish.
+        evidence: String,
+        /// The handle's `LOGWEIR_ARCHIVE_URL`. INSTALLATION CONFIGURATION: it
+        /// goes to the controller's log and never into a status a tenant reads
+        /// (review L4 of the legacy-point-restore round).
+        handle: String,
+    },
+}
+
+/// How a tenant-visible sentence names the controller's archive handle: by
+/// ROLE, never by value. The handle's URL is installation configuration, and a
+/// status, a Preflight message or an event is readable by every operator of the
+/// namespace — in shared mode by every tenant of the console. The value is in
+/// the controller's log, where an administrator reads it.
+pub const ARCHIVE_HANDLE_LABEL: &str = "the controller's archive handle (the installation's \
+     LOGWEIR_ARCHIVE_URL, which an administrator can read in the controller's configuration)";
+
+impl LegacyEvidenceScope {
+    /// The `NotAttempted` detail for [`Self::Elsewhere`]: the run's OWN
+    /// evidence location, the handle by [`ARCHIVE_HANDLE_LABEL`] only, and the
+    /// command that verifies the run without the controller; `None` for every
+    /// scope the handle may read.
+    #[must_use]
+    pub fn not_attempted_detail(&self, document: &str) -> Option<String> {
+        match self {
+            Self::Elsewhere { evidence, .. } => Some(format!(
+                "this run wrote its {document} to {evidence}, which is not the bucket of \
+                 {ARCHIVE_HANDLE_LABEL}; an inline-archive run's evidence is read only through \
+                 that handle, so nothing was read and nothing is verified. Write the evidence \
+                 to the handle's bucket (on the chart's default install, the recovery point's \
+                 own archive bucket, which the console starts the field on), or run the \
+                 printed logweir drill verify command"
+            )),
+            Self::HandleLocationUnstated | Self::GlobalHandleApplies => None,
+        }
+    }
+}
+
+/// Decide [`LegacyEvidenceScope`] for an inline-archive run whose evidence is
+/// at `evidence` — a restore plan's `evidence:` block, or a backup's archive
+/// (its receipt goes under the archive's own bucket, D2 grounding G7).
+///
+/// Compared on the BACKEND AND THE BUCKET, like [`retention_scope`]: every key
+/// a runner prints is bucket-relative, so the bucket is the whole question.
+/// The ENDPOINT is not compared — the handle's comes from the controller's own
+/// environment — so a same-named bucket on another endpoint is read and found
+/// empty, which the unread-evidence verdict then names; the safe direction.
+///
+/// `handle_archive_url` is [`crate::retention::configured_archive_url`]'s
+/// answer, or `None` when the caller does not state it (see
+/// [`LegacyEvidenceScope::HandleLocationUnstated`]).
+#[must_use]
+pub fn legacy_evidence_scope(
+    evidence: &StorageUrl,
+    handle_archive_url: Option<&str>,
+) -> LegacyEvidenceScope {
+    let Some(handle) = handle_archive_url.filter(|u| !u.is_empty()) else {
+        return LegacyEvidenceScope::HandleLocationUnstated;
+    };
+    let (backend, bucket) = storage_bucket(evidence);
+    let evidence_at = format!("{backend}://{bucket}");
+    let handle_at = crate::retention::storage_url_for(handle)
+        .ok()
+        .map(|u| storage_bucket(&u));
+    match handle_at {
+        Some((b, name)) if b == backend && !name.is_empty() && name == bucket => {
+            LegacyEvidenceScope::GlobalHandleApplies
+        }
+        // AN UNREADABLE HANDLE URL IS NOT THE SAME BUCKET AS ANYTHING — the
+        // safe direction, as in `bucket_of`.
+        _ => LegacyEvidenceScope::Elsewhere {
+            evidence: evidence_at,
+            handle: handle.to_string(),
+        },
+    }
+}
+
+/// [`legacy_evidence_scope`] for an inline-archive `Backup`: its receipt is
+/// written under its own archive's bucket, so the archive URL IS the evidence
+/// location. An archive URL that does not parse is `Elsewhere`: the run was
+/// refused as `ArchiveUrlUnreadable` before any Job, and nothing it could have
+/// written is in the handle's bucket.
+#[must_use]
+pub fn legacy_backup_evidence_scope(
+    archive_url: &str,
+    handle_archive_url: Option<&str>,
+) -> LegacyEvidenceScope {
+    match crate::retention::storage_url_for(archive_url) {
+        Ok(location) => legacy_evidence_scope(&location, handle_archive_url),
+        Err(_) => match handle_archive_url.filter(|u| !u.is_empty()) {
+            None => LegacyEvidenceScope::HandleLocationUnstated,
+            Some(handle) => LegacyEvidenceScope::Elsewhere {
+                evidence: archive_url.to_string(),
+                handle: handle.to_string(),
+            },
+        },
     }
 }
 

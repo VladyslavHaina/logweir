@@ -117,7 +117,7 @@ under its item below.
    release and successive `helm upgrade`s: first the image values (controller,
    runner and console move together), then the `approvalPolicy.*` values.
 
-### The thirteen operator-facing changes
+### The fourteen operator-facing changes
 
 Each item names what changed, what to do, what the claim rests on (its
 verification scope), and how to roll it back. Every one of them was collected
@@ -333,6 +333,47 @@ lab-refresh-10 (rows RP-L1…L15); [kubernetes.md](kubernetes.md) §21,
 *The evidence-write grant in a check plan (mixed versions)*. **Rollback:** an
 older controller renders the old plans again, which a newer runner still
 accepts (the old wrong-principal answer returns until you re-upgrade).
+#### 14. A recovery point with no saved destination is checked, verified and completed
+
+**Changed.** Three behaviours for a point written without a `BackupDestination`
+— every point `v0.1.5` wrote — found by the PoC upgrade round (P3, P5, P6):
+**readiness** — a restore readiness check over such a point
+(`legacySourceArchive`) reads the archive with the restore Job's own principal
+(the Backup's Secret, keys `access-key-id` / `secret-access-key`) at the
+approved plan's location, instead of ending `Failed/ArchiveUrlUnreadable` and
+leaving the wizard's Create disabled; no `secretRef`, a non-`s3://` archive or
+an unreachable plan location is `notReady` and named. **Evidence** — the
+console writes such a restore's evidence to the archive's own bucket (it wrote
+`logweir-evidence`), and the controller reads an inline-archive run's evidence
+only in the bucket of its archive handle (`LOGWEIR_ARCHIVE_URL`): a run whose
+evidence is elsewhere is `NotAttempted` naming its own evidence bucket (the
+handle is named by role; its URL is only in the controller log) and is never
+read in the wrong one, and an inline-archive scorecard the handle read nothing
+for is `NotAttempted` naming the key — it used to publish no verification and
+no completion at all. A rehearsal over such a point records
+`VerificationNotAttempted` at once instead of `EvidenceVerdictNotReached` after
+five minutes; destination-backed runs are unchanged. The readiness verdict is
+bound to the archive Secret: editing it after a green check refuses the Create,
+and a check of an existing `Restore` must name that Restore's own archive and
+Secret.
+**Catalog** — a `Full` or `Index` sync reads catalog records only, so a
+pre-catalog point is not in a connected catalog until its record is backfilled
+([kubernetes.md](kubernetes.md) §7d, §15.1a, §21.8). **Do:** if your legacy
+schedules write to a bucket other than `LOGWEIR_ARCHIVE_URL`'s (chart
+`archive.url`; with the bundled MinIO `s3://kafka-backups/<release>`), their
+runs now read `NotAttempted` rather than a misleading store error — verify them
+with the printed commands or move them to a `BackupDestination`; write a
+hand-written legacy restore plan's `evidence:` to the handle's bucket; run
+`logweir catalog sync` once per archive to list `v0.1.5` points in a catalog
+(D3 designs `Full` as a read-only receipt walk that would make this unnecessary;
+this build's `Full` reads records only, a gap tracked for PLAT-15.1);
+re-run any readiness check made before the upgrade. **Scope:** in-process rows
+over the preflight, restore and backup controllers and the console suite.
+[UNVERIFIED — the v0.1.5 point's readiness, verdict and completion are re-proved live by the PoC re-proof round after the upgrade.]
+**Rollback:** an older controller answers a legacy restore readiness check
+`Failed/ArchiveUrlUnreadable` again and reads a legacy restore's evidence in the
+handle's bucket whatever the plan names; a plan the new console rendered still
+verifies under it when the archive's bucket is the handle's.
 
 ### Verification scope: what "verified" means in this release
 

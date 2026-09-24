@@ -157,7 +157,13 @@ always a destination with no `evidenceRead` grant.
 3. The readiness check must pass before *Create the Restore* is enabled: every
    blocking row `ready`, except the approval row, which is `skipped` until the
    Restore exists ([kubernetes.md](kubernetes.md) §21.7; [ui/README.md](../ui/README.md),
-   *The readiness check holds the submit*).
+   *The readiness check holds the submit*). A point with no saved destination —
+   every point `v0.1.5` wrote — is checked the same way: the check reads its
+   inline archive with the Secret its Backup named, as the restore will. Its
+   evidence bucket starts as the archive's own; keep it there, because the
+   controller verifies such a run only in its archive handle's bucket, and an
+   advisory `destination.evidenceReadable` row says when a plan would not be
+   verified ([kubernetes.md](kubernetes.md) §15.1a, §21.8).
 4. Get it approved, by the namespace's policy:
    - `legacy-governed-v1`: download the plan bytes; the approver runs
      `logweir drill approve … --subject-kind Restore` on their machine and
@@ -197,7 +203,10 @@ source connection is needed ([kubernetes.md](kubernetes.md) §7d.1):
    `archiveRead` names it by name (*existing Secret name*). Widen `archiveRead`
    to the catalog row of [install.md](install.md) §3.11, or the catalog will not
    sync.
-2. *Catalog* → *Connect an existing archive* (a `Full` sync).
+2. *Catalog* → *Connect an existing archive* (a `Full` sync). A sync reads the
+   archive's catalog records; points written before the catalog existed
+   (`v0.1.5` and earlier) have none until `logweir catalog sync` backfills them
+   once ([kubernetes.md](kubernetes.md) §7d).
 3. Establish trust for the archive's signing key out of band, then re-sync;
    there is no one-click trust ([keys.md](keys.md)).
 4. Choose a point the catalog marks selectable (`Available` and `Verified` or

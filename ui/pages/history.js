@@ -48,6 +48,7 @@ import {
   independentCheck,
   listFooter,
   phaseBadge,
+  planEvidenceBucket,
   replace,
   SCOPE_LEVEL_OF_INTEGRITY,
   table,
@@ -314,7 +315,6 @@ export function renderRestoreDetail(object, operation) {
   const objectives = status.objectives || {};
   const measured = status.measured || {};
   const preflight = status.topicPreflight || {};
-  const archive = spec.sourceArchive || {};
   const newTopics = Array.isArray(status.newTopics) ? status.newTopics : [];
   const oldTopics = Array.isArray(status.oldTopics) ? status.oldTopics : [];
   // THE SCORECARD'S FACTS ARE ITS CLAIM UNTIL IT VERIFIED -- by the same rule
@@ -376,12 +376,15 @@ export function renderRestoreDetail(object, operation) {
     evidenceBlock(evidence) +
     "<p class=\"engine-subreport\">" + ENGINE_SUBREPORT_LINE + "</p>" +
     "<section class=\"check\"><h3>Check it yourself</h3>" +
-    "<p class=\"note\">The two keys above name objects in your archive; the verifiers " +
-    "take local files. So the first two lines fetch, and the last two verify -- once " +
-    "with the Rust reader and once with the Python one.</p>" +
+    "<p class=\"note\">The two keys above name objects in the evidence bucket this " +
+    "restore's approved plan wrote to; the verifiers take local files. So the first two " +
+    "lines fetch, and the last two verify -- once with the Rust reader and once with the " +
+    "Python one.</p>" +
     independentCheck(
       "scorecard",
-      bucketOf(archive.url),
+      // THE PLAN'S EVIDENCE BUCKET, NEVER THE SOURCE ARCHIVE'S (PoC P5's class
+      // sweep): the scorecard is where the approved plan wrote it.
+      planEvidenceBucket(spec.planBytes) || bucketOf(""),
       evidence.scorecardKey || "",
       evidence.sidecarKey || "",
       "scorecard.json",

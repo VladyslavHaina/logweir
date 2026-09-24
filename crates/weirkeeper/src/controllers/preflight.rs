@@ -290,6 +290,16 @@ pub const RESTORE_CONTROLLER_ROWS: &[Row] = &[
         Authority::Controller,
         Some(EXPIRY_DEFAULT),
     ),
+    // "J or C" (D2 §6.3), and on a Restore only ever C: reported for an
+    // INLINE-ARCHIVE point whose scorecard the controller would not be able
+    // to read (`legacy_evidence_row`), never for a destination-backed one,
+    // and advisory because the restore itself is unaffected.
+    row(
+        CheckId::DestinationEvidenceReadable,
+        Gating::Advisory,
+        Authority::Controller,
+        Some(EXPIRY_DEFAULT),
+    ),
     row(
         CheckId::TargetClusterIdentity,
         Gating::Blocking,
@@ -1843,6 +1853,9 @@ pub struct BindingFacts {
     pub evidence_storage: Option<logweir_core::engine::StorageUrl>,
     /// The topics the recovery point covers, when it is known.
     pub recovery_point_topics: Option<Vec<String>>,
+    /// A legacy inline archive the plan must read — `None` for a
+    /// destination-backed check, whose location `source_storage` pins.
+    pub legacy_source: Option<LegacyBinding>,
 }
 
 /// `plan.bindings` — D2 §6.3.
@@ -1891,6 +1904,11 @@ pub fn plan_bindings_row(
                 );
         }
     }
+    if let Some(legacy) = bindings.legacy_source.as_ref() {
+        if let Some(row) = legacy_binding_mismatch(spec, legacy, now) {
+            return row;
+        }
+    }
     if let Some(expected) = bindings.evidence_storage.as_ref() {
         if &spec.evidence != expected {
             return mk(
@@ -1934,6 +1952,80 @@ pub fn plan_bindings_row(
     mk(CheckState::Ready, CheckCode::PlanMatchesReferences).with_message(
         "the plan names the target, the destinations and the recovery point this check resolved",
     )
+}
+
+/// `plan.bindings`'s legacy half: the plan reads the inline archive the
+/// request names, and that is the archive the recovery point was written to.
+///
+/// Both are compared on scheme, bucket and prefix — everything a legacy
+/// `archive.url` carries. The other four storage fields exist only in the plan,
+/// and [`legacy_source_destination`] reads them from there.
+fn legacy_binding_mismatch(
+    spec: &logweir_core::spec::DrillSpec,
+    legacy: &LegacyBinding,
+    now: DateTime<Utc>,
+) -> Option<CheckOutcome> {
+    let mk = |message: String| {
+        outcome(
+            PreflightOperation::Restore,
+            CheckId::PlanBindings,
+            CheckState::NotReady,
+            CheckCode::PlanDestinationMismatch,
+            now,
+        )
+        .with_scope(CheckScope {
+            kind: LEGACY_ARCHIVE_SCOPE_KIND.to_string(),
+            name: legacy.url.clone(),
+            uid: None,
+        })
+        .with_message(&message)
+        .with_remedy(
+            "Re-render the plan from the recovery point's own archive, or name the archive the \
+             plan already reads.",
+        )
+    };
+    let named = url_location(&legacy.url);
+    let reads = match &spec.source.storage {
+        logweir_core::engine::StorageUrl::S3 { bucket, prefix, .. } => Some((
+            "s3".to_string(),
+            bucket.clone(),
+            prefix.trim_matches('/').to_string(),
+        )),
+        _ => None,
+    };
+    if reads.as_ref() != Some(&named) {
+        return Some(mk(format!(
+            "the plan reads the archive from {} and the inline archive this check names is `{}`",
+            describe_plan_source(&spec.source.storage),
+            legacy.url
+        )));
+    }
+    if let Some(point_url) = legacy.point_url.as_deref() {
+        if url_location(point_url) != named {
+            return Some(mk(format!(
+                "the recovery point `{}` was written to `{point_url}` and this check names `{}`",
+                legacy.point.as_deref().unwrap_or_default(),
+                legacy.url
+            )));
+        }
+    }
+    None
+}
+
+/// A plan's `source.storage`, as the bucket and prefix an operator compares.
+fn describe_plan_source(storage: &logweir_core::engine::StorageUrl) -> String {
+    match storage {
+        logweir_core::engine::StorageUrl::S3 { bucket, prefix, .. } => {
+            if prefix.trim_matches('/').is_empty() {
+                format!("`s3://{bucket}`")
+            } else {
+                format!("`s3://{bucket}/{}`", prefix.trim_matches('/'))
+            }
+        }
+        logweir_core::engine::StorageUrl::Gcs { .. } => "a GCS location".to_string(),
+        logweir_core::engine::StorageUrl::Azure { .. } => "an Azure location".to_string(),
+        logweir_core::engine::StorageUrl::Filesystem { .. } => "a filesystem path".to_string(),
+    }
 }
 
 /// The recovery point, reduced — PLAT-11.1's identity is a `Backup` UID.
@@ -3781,6 +3873,429 @@ pub fn status_for(pf: &Preflight, input: &StatusInput, now: DateTime<Utc>) -> Pr
 }
 
 // ---------------------------------------------------------------------------
+// The legacy inline archive — a v0.1.5 point (legacy-point-restore, PoC P3)
+// ---------------------------------------------------------------------------
+
+/// The name a legacy inline archive carries in the check plan, where a saved
+/// destination's name would be. It is never an object name — no
+/// `BackupDestination` exists — and [`rescope_legacy`] replaces it on every
+/// relayed row before a verdict is published.
+pub const LEGACY_ARCHIVE_PLAN_NAME: &str = "inline-archive";
+
+/// The scope kind of a row about a legacy inline archive: the
+/// `legacySourceArchive` a `Backup` recorded in `spec.archive`, named by its
+/// URL.
+pub const LEGACY_ARCHIVE_SCOPE_KIND: &str = "InlineArchive";
+
+/// A restore readiness check over a recovery point with NO saved destination
+/// — `spec.request.restore.legacySourceArchive`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LegacySource {
+    /// The inline archive URL the request names.
+    pub url: String,
+    /// The Secret it names, when it names one — the Secret the restore Job
+    /// projects as its archive credential.
+    pub secret: Option<String>,
+}
+
+impl LegacySource {
+    /// The scope every row about this archive carries.
+    #[must_use]
+    pub fn scope(&self) -> CheckScope {
+        CheckScope {
+            kind: LEGACY_ARCHIVE_SCOPE_KIND.to_string(),
+            name: self.url.clone(),
+            uid: None,
+        }
+    }
+}
+
+/// What `plan.bindings` holds a legacy plan's location to.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LegacyBinding {
+    /// The inline archive URL the request names.
+    pub url: String,
+    /// The named recovery point's `Backup.spec.archive.url`, when a point is
+    /// named and was found — what the point was WRITTEN to.
+    pub point_url: Option<String>,
+    /// That point's name, for the message.
+    pub point: Option<String>,
+}
+
+/// `(scheme, bucket, prefix)` of an inline archive URL, normalised the way
+/// `retention::bucket_and_prefix` normalises it, so `s3://b/p/` and `s3://b/p`
+/// are one location.
+fn url_location(url: &str) -> (String, String, String) {
+    let scheme = url.split_once("://").map_or("", |(s, _)| s).to_string();
+    let (bucket, prefix) = crate::retention::bucket_and_prefix(url);
+    (scheme, bucket, prefix.trim_matches('/').to_string())
+}
+
+/// The legacy inline archive, resolved into the shape a check plan carries —
+/// **the principal and the location the restore Job itself will use** — PURE.
+///
+/// # Why this is the read the restore will make, and not an approximation
+///
+/// An inline-archive `Restore`'s runner (`restore::runner_job_spec_with_policy`)
+/// projects `spec.sourceArchive.secretRef`'s `access-key-id` and
+/// `secret-access-key` as `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` and
+/// reads the archive at the location the APPROVED PLAN names
+/// (`source.storage`), filling a region or endpoint the plan leaves out from
+/// the controller's forwarded addressing — the same values the installation
+/// policy publishes as `legacyArchiveAddressing` (D2 §4.4). This builds exactly
+/// that: a `SecretKeys` grant on the same Secret and keys, and the plan's
+/// location with the same two fallbacks. `path_style` and `allow_http` always
+/// come from the plan, because the runner's store applies them after the
+/// environment. The check pod therefore reads the manifest and the segments
+/// as the restore Job will — with the restore's credential, at the restore's
+/// location — and a green `archive.*` row is a real read, never a guess.
+///
+/// Addressing follows D2 §3.12's mapping: a custom endpoint is path-style
+/// whatever the plan says, because engine 0.21.0 forces it (G4). Transport is
+/// `InsecureHTTP` only for `allow_http: true` with an explicit `http://`
+/// endpoint, and is never derived from anything else (D-SEAMS S5).
+///
+/// # Fail closed
+///
+/// Everything this cannot establish is a `destination.resolved` refusal, which
+/// holds the Job back and the verdict at `notReady`: a URL that is not
+/// `s3://`, a request that names no Secret (the restore Job would then read
+/// with whatever credential chain its pod finds, which no check pod can
+/// reproduce), a plan that does not parse or does not read S3, and a location
+/// the destination rules refuse — an `http://` endpoint with `allow_http:
+/// false`, for one, which the runner cannot reach either.
+///
+/// # Errors
+///
+/// A [`destination::DestinationRefusal`] naming the field and the reason.
+pub fn legacy_source_destination(
+    namespace: &str,
+    legacy: &LegacySource,
+    plan_source: Option<&logweir_core::engine::StorageUrl>,
+    addressing: &check_policy::LegacyArchiveAddressing,
+) -> Result<ResolvedDestination, destination::DestinationRefusal> {
+    use logweir_core::destination::{
+        engine_compatible, validate, Addressing, DestinationLocation, StorageProvider,
+        TransportSecurity,
+    };
+    use logweir_core::engine::StorageUrl;
+    let refuse = |code: CheckCode, field: &str, message: String| destination::DestinationRefusal {
+        code,
+        field: field.to_string(),
+        message,
+    };
+    let url = &legacy.url;
+    let (scheme, bucket, _) = url_location(url);
+    if scheme != "s3" || bucket.is_empty() {
+        return Err(refuse(
+            CheckCode::DestinationNotValid,
+            "spec.request.restore.legacySourceArchive.url",
+            format!(
+                "the inline archive `{url}` is not an s3:// bucket; a restore readiness check \
+                 reads S3 only, so this recovery point's archive cannot be read before the run"
+            ),
+        ));
+    }
+    let Some(secret) = legacy.secret.as_deref().filter(|s| !s.is_empty()) else {
+        return Err(refuse(
+            CheckCode::DestinationRoleNotConfigured,
+            "spec.request.restore.legacySourceArchive.secretRef",
+            format!(
+                "the inline archive `{url}` names no secretRef, so the restore Job would read it \
+                 with whatever credential chain its pod finds, and no check pod can prove that \
+                 chain; name the Secret the Backup recorded in spec.archive.secretRef"
+            ),
+        ));
+    };
+    let Some(source) = plan_source else {
+        return Err(refuse(
+            CheckCode::PlanUnparseable,
+            "spec.request.restore.planBytes",
+            "the plan does not parse, so the location the restore would read is not known"
+                .to_string(),
+        ));
+    };
+    let StorageUrl::S3 {
+        bucket,
+        prefix,
+        region,
+        endpoint,
+        path_style,
+        allow_http,
+    } = source
+    else {
+        return Err(refuse(
+            CheckCode::DestinationNotValid,
+            "spec.request.restore.planBytes",
+            "the approved plan's source.storage is not S3, so no check pod can read it".to_string(),
+        ));
+    };
+    let present = |v: &Option<String>| v.clone().filter(|s| !s.is_empty());
+    let or_installation = |v: &str| Some(v.to_string()).filter(|s| !s.is_empty());
+    let endpoint = present(endpoint).or_else(|| or_installation(&addressing.endpoint));
+    let region = present(region).or_else(|| or_installation(&addressing.region));
+    let location = DestinationLocation {
+        provider: StorageProvider::S3,
+        bucket: bucket.clone(),
+        prefix: prefix.trim_matches('/').to_string(),
+        region,
+        addressing: if *path_style || endpoint.is_some() {
+            Addressing::PathStyle
+        } else {
+            Addressing::VirtualHosted
+        },
+        transport: if *allow_http
+            && endpoint
+                .as_deref()
+                .is_some_and(|e| e.starts_with("http://"))
+        {
+            TransportSecurity::InsecureHttp
+        } else {
+            TransportSecurity::Tls
+        },
+        endpoint,
+    };
+    if let Err(errors) = validate(&location) {
+        return Err(refuse(
+            CheckCode::DestinationNotValid,
+            "spec.request.restore.planBytes",
+            format!(
+                "the approved plan's source.storage is not a location the restore Job can reach: \
+                 {}",
+                errors
+                    .iter()
+                    .map(|e| e.message.clone())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+        ));
+    }
+    if let Err(why) = engine_compatible(&location) {
+        return Err(refuse(
+            CheckCode::DestinationNotValid,
+            "spec.request.restore.planBytes",
+            why.to_string(),
+        ));
+    }
+    Ok(ResolvedDestination {
+        name: LEGACY_ARCHIVE_PLAN_NAME.to_string(),
+        namespace: namespace.to_string(),
+        uid: String::new(),
+        generation: 0,
+        role: DestinationRole::ArchiveRead,
+        location_digest: location.location_digest(),
+        canonical_url: location.canonical_url(),
+        location,
+        ca_bundle: None,
+        ca_sha256: None,
+        ca_pem: None,
+        grant: destination::ResolvedGrant::SecretKeys {
+            secret: secret.to_string(),
+            access_key_id_key: super::backup::ARCHIVE_ACCESS_KEY.to_string(),
+            secret_access_key_key: super::backup::ARCHIVE_SECRET_KEY.to_string(),
+            session_token_key: None,
+        },
+    })
+}
+
+/// The inline archive an existing `Restore`'s Job reads: its own
+/// `spec.sourceArchive`, URL and Secret.
+#[must_use]
+pub fn restore_legacy_source(restore: &Restore) -> LegacySource {
+    LegacySource {
+        url: restore.spec.source_archive.url.clone(),
+        secret: restore
+            .spec
+            .source_archive
+            .secret_ref
+            .as_ref()
+            .map(|s| s.name.clone()),
+    }
+}
+
+/// A `restoreRef` check whose `legacySourceArchive` is not the `Restore`'s own
+/// — review M1(b). `None` when they agree.
+///
+/// The request's CEL rule P8 requires `legacySourceArchive` beside a
+/// `restoreRef` for a point with no destination, and nothing tied the two
+/// together: a check could read with Secret A while the `Restore` projects
+/// Secret B (or none), and `destination.resolved` would say "the credential
+/// the restore Job projects". A readiness check reads as the restore will, so
+/// a request naming another archive or another Secret is `notReady`, with both
+/// named, and no Job is created.
+#[must_use]
+pub fn legacy_request_conflict(
+    requested: &LegacySource,
+    own: &LegacySource,
+    restore_name: &str,
+) -> Option<destination::DestinationRefusal> {
+    if requested == own {
+        return None;
+    }
+    let secret = |s: &LegacySource| {
+        s.secret
+            .as_deref()
+            .map_or_else(|| "no Secret".to_string(), |n| format!("Secret `{n}`"))
+    };
+    Some(destination::DestinationRefusal {
+        code: CheckCode::PlanDestinationMismatch,
+        field: "spec.request.restore.legacySourceArchive".to_string(),
+        message: format!(
+            "this check names inline archive `{}` read with {}, and Restore `{restore_name}` \
+             reads `{}` with {}; a readiness check reads as the restore Job will, so it must \
+             name the Restore's own spec.sourceArchive",
+            requested.url,
+            secret(requested),
+            own.url,
+            secret(own)
+        ),
+    })
+}
+
+/// `destination.resolved` for a legacy inline archive — what the check reads,
+/// as whom, and that there is no `BackupDestination` behind it.
+#[must_use]
+pub fn legacy_source_row(
+    legacy: &LegacySource,
+    resolved: Option<&DestinationResolution>,
+    now: DateTime<Utc>,
+) -> CheckOutcome {
+    let op = PreflightOperation::Restore;
+    match resolved {
+        Some(Ok(d)) => outcome(
+            op,
+            CheckId::DestinationResolved,
+            CheckState::Ready,
+            CheckCode::DestinationValid,
+            now,
+        )
+        .with_scope(legacy.scope())
+        .with_message(&format!(
+            "no BackupDestination: this recovery point's inline archive is read at {} ({}, {}) \
+             with Secret `{}` (keys access-key-id and secret-access-key) — the location the \
+             approved plan names and the credential the restore Job projects",
+            d.canonical_url,
+            d.location.endpoint.as_deref().unwrap_or("AWS S3"),
+            d.location.transport.as_str(),
+            legacy.secret.as_deref().unwrap_or_default(),
+        )),
+        Some(Err(refusal)) => outcome(
+            op,
+            CheckId::DestinationResolved,
+            CheckState::NotReady,
+            refusal.code,
+            now,
+        )
+        .with_scope(legacy.scope())
+        .with_message(&refusal.message)
+        .with_remedy(&format!(
+            "Fix `{}` and create a new Preflight, or save the archive as a BackupDestination \
+             and restore from it by destinationRef.",
+            refusal.field
+        )),
+        // UNREACHABLE by construction — `resolve` always resolves a legacy
+        // source — and answered as the refusal it would be, never as ready.
+        None => outcome(
+            op,
+            CheckId::DestinationResolved,
+            CheckState::NotReady,
+            CheckCode::DestinationNotValid,
+            now,
+        )
+        .with_scope(legacy.scope())
+        .with_message("the inline archive was not resolved, so nothing can be checked"),
+    }
+}
+
+/// `destination.evidenceReadable` for a legacy restore — ADVISORY, answered by
+/// the controller, and present only when the run's evidence would NOT be
+/// verified.
+///
+/// An inline-archive run's scorecard is read only through the controller's
+/// archive handle, and only in that handle's bucket
+/// (`destination::legacy_evidence_scope`, `restore::legacy_evidence_source`).
+/// A plan writing its evidence anywhere else restores the data and then
+/// publishes `NotAttempted` with no completion (PoC defect P5). The restore
+/// itself is unaffected, so this never blocks; it says so before the approver
+/// signs, which is the only time the plan can still change.
+///
+/// Never `ready`: a comparison of two bucket names is not a read, so the
+/// matching case publishes no row rather than a green one.
+#[must_use]
+pub fn legacy_evidence_row(
+    legacy: &LegacySource,
+    plan_evidence: &logweir_core::engine::StorageUrl,
+    handle_archive_url: Option<&str>,
+    now: DateTime<Utc>,
+) -> Option<CheckOutcome> {
+    use crate::destination::LegacyEvidenceScope;
+    let scope = destination::legacy_evidence_scope(plan_evidence, handle_archive_url);
+    let message = match &scope {
+        LegacyEvidenceScope::GlobalHandleApplies => return None,
+        LegacyEvidenceScope::HandleLocationUnstated => {
+            "this controller holds no archive handle (LOGWEIR_ARCHIVE_URL is not set), and an \
+             inline-archive restore's scorecard is read only through it: this run would publish \
+             verification NotAttempted and no completion"
+                .to_string()
+        }
+        // THE HANDLE BY ROLE, NEVER BY VALUE (review L4): this message is in
+        // a status every operator of the namespace reads.
+        LegacyEvidenceScope::Elsewhere { evidence, .. } => format!(
+            "the plan writes its scorecard to {evidence}, which is not the bucket of {}; an \
+             inline-archive restore's evidence is read only through that handle, so this run \
+             would publish verification NotAttempted and no completion",
+            destination::ARCHIVE_HANDLE_LABEL
+        ),
+    };
+    Some(
+        outcome(
+            PreflightOperation::Restore,
+            CheckId::DestinationEvidenceReadable,
+            CheckState::Unknown,
+            CheckCode::EvidenceReadNotConfigured,
+            now,
+        )
+        .with_scope(legacy.scope())
+        .with_message(&message)
+        .with_remedy(
+            "Write the evidence to the bucket of the controller's archive handle — on the \
+             chart's default install the recovery point's own archive bucket, which the console \
+             starts the field on — and check again; the restore itself is not affected, only its \
+             verification.",
+        )
+        .with_fact("grant", "evidenceRead"),
+    )
+}
+
+/// Every relayed row the runner scoped to the legacy archive's placeholder
+/// name, rescoped to the archive itself. The runner scopes its `archive.*`
+/// rows to `BackupDestination/<plan name>`, and for a legacy source there is
+/// no such object — a scope naming one would send an operator looking for it.
+///
+/// The runner's MESSAGES name the placeholder too ("… on destination
+/// `inline-archive` …", review L7); the same phrase is rewritten to name the
+/// inline archive. Nothing else in a relayed row is touched.
+#[must_use]
+pub fn rescope_legacy(mut checks: Vec<CheckOutcome>, legacy: &LegacySource) -> Vec<CheckOutcome> {
+    let placeholder = format!("destination `{LEGACY_ARCHIVE_PLAN_NAME}`");
+    let named = format!("inline archive `{}`", legacy.url);
+    for c in &mut checks {
+        if c.scope
+            .as_ref()
+            .is_some_and(|s| s.kind == "BackupDestination" && s.name == LEGACY_ARCHIVE_PLAN_NAME)
+        {
+            c.scope = Some(legacy.scope());
+        }
+        if c.message.contains(&placeholder) {
+            // THROUGH THE CHOKEPOINT AGAIN: the URL came from a request, and a
+            // relayed message is only ever published redacted and capped.
+            c.message = redact(&c.message.replace(&placeholder, &named));
+        }
+    }
+    checks
+}
+
+// ---------------------------------------------------------------------------
 // Resolution: everything one pass reads from the API server, reduced
 // ---------------------------------------------------------------------------
 
@@ -3876,8 +4391,16 @@ pub struct Inputs {
     pub referents: Vec<Referent>,
     /// Every CA bundle digest, for the binding.
     pub ca_bundles: Vec<CaBundleRef>,
-    /// An inline archive, which this build cannot render into a check plan.
+    /// A BACKUP check's inline archive, which this build cannot render into
+    /// a check plan (`Failed`/`ArchiveUrlUnreadable`).
     pub legacy_archive: Option<String>,
+    /// A RESTORE check's inline archive — a recovery point with no saved
+    /// destination, read through [`legacy_source_destination`] with the
+    /// restore Job's own principal (legacy-point-restore P3).
+    pub legacy_source: Option<LegacySource>,
+    /// The controller's archive handle location, `LOGWEIR_ARCHIVE_URL` —
+    /// what [`legacy_evidence_row`] compares a legacy plan's evidence with.
+    pub legacy_evidence_handle: Option<String>,
 }
 
 impl Default for Inputs {
@@ -3922,6 +4445,8 @@ impl Default for Inputs {
             referents: Vec::new(),
             ca_bundles: Vec::new(),
             legacy_archive: None,
+            legacy_source: None,
+            legacy_evidence_handle: None,
         }
     }
 }
@@ -4292,6 +4817,9 @@ impl Inputs {
     /// `None` when this operation names no destination at all.
     #[must_use]
     pub fn destination_verdict_row(&self, now: DateTime<Utc>) -> Option<CheckOutcome> {
+        if let Some(legacy) = self.legacy_source.as_ref() {
+            return Some(legacy_source_row(legacy, self.archive.as_ref(), now));
+        }
         let pairs: [(Option<&String>, Option<&DestinationResolution>); 2] = [
             (self.archive_name.as_ref(), self.archive.as_ref()),
             (self.evidence_name.as_ref(), self.evidence.as_ref()),
@@ -4397,6 +4925,16 @@ impl Inputs {
                 out.push(plan_parse_row(plan, now));
                 out.push(plan_names_row(plan, now));
                 out.push(plan_bindings_row(plan, &self.bindings, now));
+                if let (Some(legacy), Ok(spec)) =
+                    (self.legacy_source.as_ref(), plan.parsed.as_ref())
+                {
+                    out.extend(legacy_evidence_row(
+                        legacy,
+                        &spec.evidence,
+                        self.legacy_evidence_handle.as_deref(),
+                        now,
+                    ));
+                }
             }
             // ONE `recoveryPoint.state` ROW: the catalog point's when the
             // request names one (P10 forbids naming both), the Backup's
@@ -5303,7 +5841,10 @@ pub async fn resolve(
                 r.and_then(|r| r.source_destination_ref.as_ref().map(|d| d.name.clone())),
                 r.and_then(|r| r.evidence_destination_ref.as_ref().map(|d| d.name.clone())),
                 vec![DestinationRole::ArchiveRead, DestinationRole::EvidenceWrite],
-                r.and_then(|r| r.legacy_source_archive.as_ref().map(|a| a.url.clone())),
+                // A RESTORE'S INLINE ARCHIVE IS CHECKED, NOT REFUSED — see the
+                // `legacy_source` resolution in the Restore arm below. Only a
+                // BACKUP's inline archive still ends `ArchiveUrlUnreadable`.
+                None,
             )
         }
         PreflightOperation::DestinationAccess => {
@@ -5427,6 +5968,54 @@ pub async fn resolve(
             if let Some(bytes) = bytes {
                 inputs.plan = Some(PlanFacts::of(&bytes, claimed.as_deref()));
             }
+
+            // --- a recovery point with no saved destination (PoC P3) -------
+            //
+            // Read through the principal and at the location the restore Job
+            // will use — `legacy_source_destination`. No referent is added:
+            // the URL and the Secret name are in the immutable request, the
+            // location is in the plan bytes `planHash` binds, and the
+            // installation's legacy addressing is in the policy digest.
+            if let Some(archive) = r.and_then(|r| r.legacy_source_archive.as_ref()) {
+                let requested = LegacySource {
+                    url: archive.url.clone(),
+                    secret: archive.secret_ref.as_ref().map(|s| s.name.clone()),
+                };
+                // A CHECK OF AN EXISTING RESTORE READS AS THAT RESTORE WILL
+                // (review M1(b)). Its Job projects `spec.sourceArchive` — the
+                // URL and the Secret — so the check takes both from there, and
+                // a request naming anything else is refused rather than
+                // answered about a credential the restore will not use.
+                let (legacy, conflict) = match restore_object.as_ref() {
+                    None => (requested, None),
+                    Some(obj) => {
+                        let own = restore_legacy_source(obj);
+                        let conflict = legacy_request_conflict(&requested, &own, &obj.name_any());
+                        (own, conflict)
+                    }
+                };
+                inputs.archive = Some(match conflict {
+                    Some(refusal) => Err(refusal),
+                    None => legacy_source_destination(
+                        namespace,
+                        &legacy,
+                        inputs
+                            .plan
+                            .as_ref()
+                            .and_then(|p| p.parsed.as_ref().ok())
+                            .map(|s| &s.source.storage),
+                        &policy.legacy_archive_addressing,
+                    ),
+                });
+                inputs.bindings.legacy_source = Some(LegacyBinding {
+                    url: legacy.url.clone(),
+                    ..LegacyBinding::default()
+                });
+                inputs.legacy_source = Some(legacy);
+                inputs.legacy_evidence_handle = crate::retention::configured_archive_url(
+                    std::env::var(crate::retention::ARCHIVE_URL_ENV),
+                );
+            }
             inputs.restore_name = restore_object.as_ref().map(kube::ResourceExt::name_any);
             inputs.deadline = restore_object.as_ref().and_then(|r| {
                 now.checked_add_signed(chrono::Duration::seconds(r.spec.deadline_seconds))
@@ -5472,6 +6061,13 @@ pub async fn resolve(
                             ));
                             inputs.bindings.recovery_point_topics =
                                 Some(backup.spec.topics.clone()).filter(|t| !t.is_empty());
+                            // WHAT A LEGACY POINT WAS WRITTEN TO: its own
+                            // immutable `spec.archive.url`, which the legacy
+                            // plan's location is held to in `plan.bindings`.
+                            if let Some(legacy) = inputs.bindings.legacy_source.as_mut() {
+                                legacy.point_url = Some(backup.spec.archive.url.clone());
+                                legacy.point = Some(backup.name_any());
+                            }
                             recovery_point_source = Some(backup.spec.source_ref.name.clone());
                             RecoveryPointFacts::Found {
                                 name: backup.name_any(),
@@ -5493,9 +6089,16 @@ pub async fn resolve(
                                     .as_ref()
                                     .and_then(|s| s.destination.as_ref())
                                     .map(|d| d.location_digest.clone()),
+                                // A SAVED DESTINATION'S DIGEST ONLY. A
+                                // legacy source's location is derived from
+                                // the plan, so comparing it with the point
+                                // would compare the plan with itself; its
+                                // location is held to account by
+                                // `plan.bindings` instead (above).
                                 expected_location_digest: inputs
                                     .archive
                                     .as_ref()
+                                    .filter(|_| inputs.legacy_source.is_none())
                                     .and_then(|r| r.as_ref().ok())
                                     .map(|d| d.location_digest.clone()),
                             }
@@ -5821,12 +6424,13 @@ pub async fn reconcile_preflight(
     let recorded_binding = binding_status(&binding);
 
     if let Some(url) = inputs.legacy_archive.as_deref() {
-        // NAMED, NOT GUESSED. Turning an inline `s3://…` URL into the
-        // `DestinationLocation` a check plan needs is the legacy-addressing
-        // block of D2 §4.4, which belongs to the destination resolver and not
-        // to this controller. `Failed` is D2 §6.2's "the check could not
-        // produce a result", which is exactly true and is NOT a verdict about
-        // the operation.
+        // NAMED, NOT GUESSED — AND A BACKUP'S ONLY. A backup readiness check
+        // over an inline archive would need the ARCHIVE-WRITE principal a
+        // legacy Backup Job holds, and no check exercises that grant; `Failed`
+        // is D2 §6.2's "the check could not produce a result", which is
+        // exactly true and is NOT a verdict about the operation. A RESTORE's
+        // inline archive is read with the restore Job's own principal
+        // (`legacy_source_destination`) and never reaches this arm.
         let status = status_for(
             pf,
             &StatusInput {
@@ -6153,6 +6757,12 @@ pub async fn reconcile_preflight(
         &shape.plan.request,
         inputs.plan.as_ref().is_some_and(PlanFacts::scratch),
     );
+    // A LEGACY SOURCE HAS NO `BackupDestination`: the runner's placeholder
+    // scope is replaced by the inline archive itself.
+    let relayed_checks = match inputs.legacy_source.as_ref() {
+        Some(legacy) => rescope_legacy(relayed_checks, legacy),
+        None => relayed_checks,
+    };
     let mut checks = assemble(
         controller,
         relayed_checks,

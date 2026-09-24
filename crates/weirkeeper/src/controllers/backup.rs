@@ -1400,6 +1400,34 @@ pub async fn evidence_source_for(
     }
 }
 
+/// [`evidence_source`]'s answer for an inline-archive `Backup`, with the global
+/// handle confined to the bucket it can see — PURE, and the `Backup` twin of
+/// `controllers::restore::legacy_evidence_source`.
+///
+/// An inline-archive run writes its receipt under its OWN archive's bucket, at
+/// `logweir/` (D2 grounding G7), and prints bucket-relative keys. The
+/// controller reads them through its one global handle. A `Backup` whose
+/// `archive.url` names another bucket was read where its receipt never was:
+/// `NotAttempted` with a store `NotFound` detail that read as "the receipt is
+/// missing". It is now not read, and the verdict names both buckets. A
+/// destination-backed answer is returned unchanged.
+#[must_use]
+pub fn legacy_receipt_source(
+    from: EvidenceSource,
+    archive_url: &str,
+    handle_archive_url: Option<&str>,
+) -> EvidenceSource {
+    if !matches!(from, EvidenceSource::GlobalHandle) {
+        return from;
+    }
+    match crate::destination::legacy_backup_evidence_scope(archive_url, handle_archive_url)
+        .not_attempted_detail("signed backup receipt")
+    {
+        Some(detail) => EvidenceSource::NotAttempted { detail },
+        None => from,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The evidence-fetch Job's half — D2 §3.9 steps 2–5, `SecretKeys` /
 // `WorkloadIdentity` `evidenceRead`
@@ -3851,6 +3879,33 @@ pub async fn reconcile_backup_with_runner_image(
     now: DateTime<Utc>,
     runner: &job::RunnerImage,
 ) -> Result<BackupOutcome, BackupError> {
+    reconcile_backup_at(backup, client, archive, verify, now, runner, None).await
+}
+
+/// [`reconcile_backup_with_runner_image`], with the controller's archive
+/// handle LOCATION — the `LOGWEIR_ARCHIVE_URL` its one global handle was built
+/// from. A seventh parameter on a new function, for the reason
+/// [`reconcile_backup_with_runner_image`] gives for its sixth.
+///
+/// `None` is "not stated" and evaluates as before; `Some` confines an
+/// inline-archive run's receipt read to the handle's own bucket
+/// ([`crate::destination::legacy_backup_evidence_scope`], the class sweep of
+/// the legacy-point-restore round's defect P5): a receipt written under an
+/// archive in another bucket is `NotAttempted` naming both buckets, never a
+/// read of a bucket it is not in.
+///
+/// # Errors
+///
+/// [`BackupError`] for anything that is not an outcome.
+pub async fn reconcile_backup_at(
+    backup: &Backup,
+    client: &kube::Client,
+    archive: ArchiveOracle<'_>,
+    verify: VerifyOracle<'_>,
+    now: DateTime<Utc>,
+    runner: &job::RunnerImage,
+    archive_url: Option<&str>,
+) -> Result<BackupOutcome, BackupError> {
     // WHERE THE OBJECT STANDS WHEN A REFUSAL IS RAISED. The freeze pass writes
     // the execution record (and `TopicsResolved`) BEFORE the runner Job is
     // created, and the Job create can still refuse (`JobNameConflict`): the
@@ -3859,7 +3914,18 @@ pub async fn reconcile_backup_with_runner_image(
     // object this pass was handed, which the API server would answer 409
     // (REHEARSAL-FIRE-PASS-STATUS-LOST's class sweep).
     let mut written: Option<Backup> = None;
-    match reconcile_backup_inner(backup, client, archive, verify, now, runner, &mut written).await {
+    match reconcile_backup_inner(
+        backup,
+        client,
+        archive,
+        verify,
+        now,
+        runner,
+        archive_url,
+        &mut written,
+    )
+    .await
+    {
         Err(BackupError::Refused(state, message)) => {
             let backup = written.as_ref().unwrap_or(backup);
             // THE ONE PLACE A SELF-DECIDED REFUSAL IS WRITTEN. Every refusal
@@ -3913,6 +3979,7 @@ pub async fn reconcile_backup_with_runner_image(
 /// [`reconcile_backup`]'s body. See that function for the state machine; the
 /// split exists so a `BackupError::Refused` raised anywhere below reaches
 /// exactly one status write.
+#[allow(clippy::too_many_arguments)]
 async fn reconcile_backup_inner(
     backup: &Backup,
     client: &kube::Client,
@@ -3920,6 +3987,7 @@ async fn reconcile_backup_inner(
     verify: VerifyOracle<'_>,
     now: DateTime<Utc>,
     runner: &job::RunnerImage,
+    archive_url: Option<&str>,
     written: &mut Option<Backup>,
 ) -> Result<BackupOutcome, BackupError> {
     let name = backup.name_any();
@@ -4564,9 +4632,22 @@ async fn reconcile_backup_inner(
     // destination-backed run: it holds a different principal over a different
     // bucket, and an answer from it would read as "no evidence" rather than
     // "wrong bucket" (grounding G2).
-    let evidence_from = evidence_source(backup, client, &namespace, now)
+    let routed = evidence_source(backup, client, &namespace, now)
         .await
         .map_err(BackupError::Api)?;
+    let was_global = matches!(routed, EvidenceSource::GlobalHandle);
+    let evidence_from = legacy_receipt_source(routed, &backup.spec.archive.url, archive_url);
+    if was_global && !matches!(evidence_from, EvidenceSource::GlobalHandle) {
+        // The handle's location is named here, in the controller's log, and
+        // never in the status (`destination::ARCHIVE_HANDLE_LABEL`).
+        info!(
+            backup = %name,
+            namespace = %namespace,
+            archive_handle = archive_url.unwrap_or_default(),
+            "this inline-archive run's archive is outside the archive handle's bucket; its \
+             receipt is not read and the verdict is NotAttempted"
+        );
+    }
 
     // STEP 5, and interface I22's window, off ONE observation. AWAITED: the
     // real oracle's two `Store` reads happen inside one `spawn_blocking`
@@ -4947,6 +5028,26 @@ async fn reconcile_backup_inner(
 /// credential. See [`ArchiveOracle`] for why `None` is the only honest value
 /// and why the oracle is async.
 async fn reconcile(backup: Arc<Backup>, ctx: Arc<Context>) -> Result<Action, BackupError> {
+    reconcile_in_context(&backup, &ctx, Utc::now(), &|name: &str| std::env::var(name)).await?;
+    Ok(Action::requeue(std::time::Duration::from_secs(
+        REQUEUE_SECS,
+    )))
+}
+
+/// [`reconcile`]'s body: the oracles over [`Context::archive`] and the handle's
+/// own LOCATION, read from `env` beside it, handed to [`reconcile_backup_at`]
+/// — the `Backup` twin of `restore::reconcile_in_context`, and a parameter for
+/// the same reason (review L2).
+///
+/// # Errors
+///
+/// As [`reconcile_backup_at`].
+pub async fn reconcile_in_context(
+    backup: &Backup,
+    ctx: &Context,
+    now: DateTime<Utc>,
+    env: crate::controllers::restore::EnvReader<'_>,
+) -> Result<BackupOutcome, BackupError> {
     let archive = ctx.archive.clone();
     let oracle = move |keys: EvidenceKeys| -> BoxFuture<'static, Option<ArchiveObservation>> {
         let handle = archive.clone();
@@ -4961,18 +5062,20 @@ async fn reconcile(backup: Arc<Backup>, ctx: Arc<Context>) -> Result<Action, Bac
         })
     };
     let verify = crate::verification::verify_oracle(ctx.archive.clone(), ctx.client.clone());
-    reconcile_backup_with_runner_image(
-        &backup,
+    // THE HANDLE'S OWN LOCATION, read beside the handle — see
+    // `reconcile_backup_at`.
+    let archive_url =
+        crate::retention::configured_archive_url(env(crate::retention::ARCHIVE_URL_ENV));
+    reconcile_backup_at(
+        backup,
         &ctx.client,
         &oracle,
         &verify,
-        Utc::now(),
+        now,
         &ctx.runner_image,
+        archive_url.as_deref(),
     )
-    .await?;
-    Ok(Action::requeue(std::time::Duration::from_secs(
-        REQUEUE_SECS,
-    )))
+    .await
 }
 
 /// Requeue on an error, naming it. Never a panic and never a drop.

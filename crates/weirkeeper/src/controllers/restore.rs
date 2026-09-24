@@ -3683,6 +3683,108 @@ pub fn observe_scorecard(store: &Store, key: &str) -> Option<ScorecardObservatio
 }
 
 // ---------------------------------------------------------------------------
+// Where an inline-archive run's evidence is read (D2 §3.10, PoC defect P5)
+// ---------------------------------------------------------------------------
+
+/// [`backup::evidence_source_for`]'s answer, with the global handle confined to
+/// the bucket it can actually see — PURE.
+///
+/// # The contract this enforces
+///
+/// A `Restore` with no `evidenceDestinationRef` is an inline-archive run. Its
+/// runner writes the signed scorecard to the approved plan's `evidence:` block
+/// with the ARCHIVE credential (D2 grounding G6) and prints bucket-relative
+/// keys; the controller reads them through its ONE global handle, the store
+/// `main` built from `LOGWEIR_ARCHIVE_URL` (D2 §3.10: "the global handle
+/// serves legacy inline objects only"). So an inline-archive run is verified
+/// exactly when its plan writes the evidence to that handle's bucket, and the
+/// console now renders every legacy point's plan that way
+/// (`ui/pages/restore-wizard.js`: the evidence bucket starts as the archive's).
+///
+/// Any other plan used to be READ IN THE WRONG BUCKET — the key looked up where
+/// the document never was — and the run finished with no verification block
+/// and no completion. It is now not read at all, and publishes `NotAttempted`
+/// naming both buckets ([`crate::destination::LegacyEvidenceScope`]).
+///
+/// A destination-backed answer is returned unchanged: its evidence is read
+/// through its own destination and never through this handle. A plan that does
+/// not parse — which admission and the runner both refuse, so no keys exist to
+/// read — keeps the answer it had.
+#[must_use]
+pub fn legacy_evidence_source(
+    from: backup::EvidenceSource,
+    plan_bytes: &str,
+    archive_url: Option<&str>,
+) -> backup::EvidenceSource {
+    if !matches!(from, backup::EvidenceSource::GlobalHandle) {
+        return from;
+    }
+    let Ok(plan) = serde_yaml::from_str::<logweir_core::spec::RestoreSpec>(plan_bytes) else {
+        return from;
+    };
+    match crate::destination::legacy_evidence_scope(&plan.evidence, archive_url)
+        .not_attempted_detail("signed scorecard")
+    {
+        Some(detail) => backup::EvidenceSource::NotAttempted { detail },
+        None => from,
+    }
+}
+
+/// The `NotAttempted` detail for an INLINE-ARCHIVE run whose runner printed
+/// both evidence keys and whose read through the controller's archive handle
+/// produced no document.
+///
+/// It names the key, the handle BY ROLE ([`crate::destination::ARCHIVE_HANDLE_LABEL`])
+/// and the three causes — the handle is not configured, the object is not in
+/// its bucket, or the controller's credential cannot read it — because the
+/// oracle collapses them into one "nothing" and a sentence that picked one
+/// would be a guess. The handle's URL is installation configuration and is NOT
+/// in it: this detail lands in a status every operator of the namespace can
+/// read (review L4). Nothing here is checked for userinfo either, because
+/// nothing from `LOGWEIR_ARCHIVE_URL` is copied into it.
+#[must_use]
+pub fn unread_scorecard_detail(key: &str) -> String {
+    format!(
+        "the runner reported scorecard `{key}` and weirkeeper read no such document through \
+         {}: the handle is not configured, the object is not in the bucket it reads, or the \
+         controller's credential cannot read it. Nothing was verified and no completion is \
+         written; run the printed logweir drill verify command",
+        crate::destination::ARCHIVE_HANDLE_LABEL
+    )
+}
+
+/// The verdict for a finished run whose runner printed both scorecard keys and
+/// whose controller-side read produced NO digest — `Some` only for an
+/// INLINE-ARCHIVE run read through the controller's archive handle — PURE.
+///
+/// # Why only that source (review L3)
+///
+/// `rehearsal_schedule::UNRECORDED_VERDICT_GRACE_SECONDS` records the decision
+/// NOT to write `NotAttempted` on a `Restore` whose own-handle read failed: it
+/// would change the verification record of every restore and still not cover
+/// a lost second patch, so the schedule bounds its wait instead. This amends
+/// that decision for ONE source, the global handle of a point with no saved
+/// destination, because the PoC upgrade round (P5) showed that source
+/// producing a `Succeeded` restore with no verification block at all — the
+/// one shape an operator restoring a `v0.1.5` point cannot tell apart from a
+/// controller that never looked. A destination-backed run whose
+/// `ControllerIdentity` read fails keeps the recorded behaviour (no block,
+/// bounded by the schedule's grace), and so does a lost second patch.
+#[must_use]
+pub fn unread_scorecard_verdict(
+    from: &backup::EvidenceSource,
+    keys_complete: bool,
+    scorecard_key: &str,
+) -> Option<crate::verification::VerificationResult> {
+    (keys_complete && matches!(from, backup::EvidenceSource::GlobalHandle)).then(|| {
+        crate::verification::VerificationResult::not_attempted(
+            logweir_verify::PAYLOAD_TYPE_SCORECARD,
+            unread_scorecard_detail(scorecard_key),
+        )
+    })
+}
+
+// ---------------------------------------------------------------------------
 // The topics, derived from the APPROVED bytes and from nothing else
 // ---------------------------------------------------------------------------
 
@@ -5557,7 +5659,53 @@ pub async fn reconcile_restore_with_policy(
     runner: &job::RunnerImage,
     policies: &ApprovalPolicySet,
 ) -> Result<RestoreOutcome, RestoreError> {
-    match reconcile_restore_inner(restore, client, scorecard, verify, now, runner, policies).await {
+    reconcile_restore_at(
+        restore, client, scorecard, verify, now, runner, policies, None,
+    )
+    .await
+}
+
+/// [`reconcile_restore_with_policy`], with the controller's archive handle
+/// LOCATION — the `LOGWEIR_ARCHIVE_URL` its one global handle was built from.
+///
+/// An eighth parameter on a new function rather than on the old one, for the
+/// reason [`reconcile_restore_with_runner_image`] gives for its sixth, and the
+/// shape `backup_schedule::reconcile_schedule_with_archive_at` already has:
+/// `Store` exposes no accessor for the URL it was built from, so the one read
+/// lives in [`reconcile`], beside the handle, and a test states the location
+/// instead of setting process-global state.
+///
+/// `None` is "not stated" and evaluates as before
+/// ([`crate::destination::LegacyEvidenceScope::HandleLocationUnstated`]);
+/// `Some` confines an inline-archive run's evidence read to the handle's own
+/// bucket (D2 §3.10, defect P5 of the legacy-point-restore round).
+///
+/// # Errors
+///
+/// [`RestoreError`] for anything that is not an outcome.
+#[allow(clippy::too_many_arguments)]
+pub async fn reconcile_restore_at(
+    restore: &Restore,
+    client: &kube::Client,
+    scorecard: ScorecardOracle<'_>,
+    verify: VerifyOracle<'_>,
+    now: DateTime<Utc>,
+    runner: &job::RunnerImage,
+    policies: &ApprovalPolicySet,
+    archive_url: Option<&str>,
+) -> Result<RestoreOutcome, RestoreError> {
+    match reconcile_restore_inner(
+        restore,
+        client,
+        scorecard,
+        verify,
+        now,
+        runner,
+        policies,
+        archive_url,
+    )
+    .await
+    {
         Err(RestoreError::Materialization(message)) => {
             let name = restore.name_any();
             let namespace = restore
@@ -5633,6 +5781,7 @@ pub async fn reconcile_restore_with_policy(
 /// [`reconcile_restore`]'s body. See that function for the state machine; the
 /// split exists so a `RestoreError::Refused` raised anywhere below reaches
 /// exactly one status write.
+#[allow(clippy::too_many_arguments)]
 async fn reconcile_restore_inner(
     restore: &Restore,
     client: &kube::Client,
@@ -5641,6 +5790,7 @@ async fn reconcile_restore_inner(
     now: DateTime<Utc>,
     runner: &job::RunnerImage,
     policies: &ApprovalPolicySet,
+    archive_url: Option<&str>,
 ) -> Result<RestoreOutcome, RestoreError> {
     let name = restore.name_any();
     let namespace = restore
@@ -6190,7 +6340,7 @@ async fn reconcile_restore_inner(
     // written under `evidenceWrite` of the evidence destination; reading it
     // back from the source destination's bucket is the two-destination version
     // of the same defect.
-    let evidence_from = backup::evidence_source_for(
+    let routed = backup::evidence_source_for(
         restore.spec.evidence_destination_ref.as_ref(),
         client,
         &namespace,
@@ -6198,6 +6348,19 @@ async fn reconcile_restore_inner(
     )
     .await
     .map_err(RestoreError::Api)?;
+    let was_global = matches!(routed, backup::EvidenceSource::GlobalHandle);
+    let evidence_from = legacy_evidence_source(routed, &restore.spec.plan_bytes, archive_url);
+    if was_global && !matches!(evidence_from, backup::EvidenceSource::GlobalHandle) {
+        // THE HANDLE'S LOCATION IS NAMED HERE AND NOWHERE A TENANT READS: the
+        // status detail names it by role (`destination::ARCHIVE_HANDLE_LABEL`).
+        info!(
+            restore = %name,
+            namespace = %namespace,
+            archive_handle = archive_url.unwrap_or_default(),
+            "this inline-archive run's plan writes its evidence outside the archive handle's \
+             bucket; the scorecard is not read and the verdict is NotAttempted"
+        );
+    }
     let observed = match (keys.scorecard.as_ref(), &evidence_from) {
         (None, _) => None,
         (Some(key), backup::EvidenceSource::GlobalHandle) => scorecard(key.clone()).await,
@@ -6360,8 +6523,18 @@ async fn reconcile_restore_inner(
             crate::verification::verify_oracle(Some(Arc::clone(store)), client.clone())(reference)
                 .await,
         ),
-        // GC11's no-artifact case, and a fetch that returned no digest: no
-        // document, no opinion, no block.
+        // THE RUNNER SAYS A SCORECARD EXISTS AND THE CONTROLLER'S OWN READ
+        // PRODUCED NO DIGEST — legacy-point-restore P5's silent shape, for an
+        // inline-archive run only (`unread_scorecard_verdict`, which cites the
+        // decision it amends). `NotAttempted` is the only verdict writable
+        // without bytes — never `Invalid`, and never a completion.
+        (from @ backup::EvidenceSource::GlobalHandle, None) => unread_scorecard_verdict(
+            from,
+            keys.mandatory_complete(),
+            keys.scorecard.as_deref().unwrap_or_default(),
+        ),
+        // GC11's no-artifact case, and a destination handle that returned no
+        // digest: no document, no opinion, no block.
         _ => None,
     };
     if let Some(result) = verdict {
@@ -6510,6 +6683,37 @@ async fn reconcile(
     ctx: Arc<Context>,
     approval_policies: Arc<ApprovalPolicySet>,
 ) -> Result<Action, RestoreError> {
+    let outcome = reconcile_in_context(
+        &restore,
+        &ctx,
+        &approval_policies,
+        Utc::now(),
+        &|name: &str| std::env::var(name),
+    )
+    .await?;
+    Ok(action_for(&outcome))
+}
+
+/// How the shipped reconcile reads its process environment — a parameter so a
+/// test can state it (review L2: the wiring of the handle location was
+/// reachable from no row, so passing `None` there put P5 back undetected).
+pub type EnvReader<'a> = &'a (dyn Fn(&str) -> Result<String, std::env::VarError> + Send + Sync);
+
+/// [`reconcile`]'s body: the oracles over [`Context::archive`] and the handle's
+/// own LOCATION, read from `env` beside it, handed to
+/// [`reconcile_restore_at`]. `reconcile` passes the process environment and
+/// the one clock read; a row passes a stated one.
+///
+/// # Errors
+///
+/// As [`reconcile_restore_at`].
+pub async fn reconcile_in_context(
+    restore: &Restore,
+    ctx: &Context,
+    approval_policies: &ApprovalPolicySet,
+    now: DateTime<Utc>,
+    env: EnvReader<'_>,
+) -> Result<RestoreOutcome, RestoreError> {
     let archive = ctx.archive.clone();
     let oracle = move |key: String| -> BoxFuture<'static, Option<ScorecardObservation>> {
         let handle = archive.clone();
@@ -6524,17 +6728,22 @@ async fn reconcile(
         })
     };
     let verify = crate::verification::verify_oracle(ctx.archive.clone(), ctx.client.clone());
-    let outcome = reconcile_restore_with_policy(
-        &restore,
+    // THE HANDLE'S OWN LOCATION, read beside the handle — see
+    // `reconcile_restore_at`. `main` built `ctx.archive` from exactly this
+    // variable; `Store` exposes no accessor for the URL it was built from.
+    let archive_url =
+        crate::retention::configured_archive_url(env(crate::retention::ARCHIVE_URL_ENV));
+    reconcile_restore_at(
+        restore,
         &ctx.client,
         &oracle,
         &verify,
-        Utc::now(),
+        now,
         &ctx.runner_image,
-        &approval_policies,
+        approval_policies,
+        archive_url.as_deref(),
     )
-    .await?;
-    Ok(action_for(&outcome))
+    .await
 }
 
 /// Requeue on an error, naming it. Never a panic and never a drop.

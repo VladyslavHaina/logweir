@@ -1514,6 +1514,74 @@ export function bucketOf(url) {
   return bucket.length === 0 ? "<your evidence bucket>" : bucket;
 }
 
+/** The bucket a restore PLAN writes its evidence to: `evidence.bucket` of the
+ *  plan bytes, the runner's own `StorageUrl` block. `""` when the bytes carry no
+ *  such block, or none this reader can see.
+ *
+ *  WHY THE PLAN AND NOT THE ARCHIVE. A restore's signed scorecard is written
+ *  where its approved plan's `evidence:` block says -- for a point with no
+ *  saved destination that is whatever bucket the plan named, and for a
+ *  destination-backed one it is the evidence destination's bucket, while
+ *  `spec.sourceArchive.url` is the `logweir-destination://` sentinel whose
+ *  "bucket" is a destination NAME. A fetch command built from the source
+ *  archive therefore pointed at the wrong bucket in both cases (PoC defect P5's
+ *  class sweep). Used only to render a copyable command; nothing here
+ *  addresses a store.
+ *
+ *  A line reader, not a YAML parser: the block is the one the console renders
+ *  (`plan.js`, two-space indentation, JSON-quoted values), and a hand-written
+ *  plan in another shape reads as `""`, which renders the placeholder. */
+export function planEvidenceBucket(planBytes) {
+  if (typeof planBytes !== "string" || planBytes.length === 0) {
+    return "";
+  }
+  let inEvidence = false;
+  for (const raw of planBytes.split("\n")) {
+    const line = raw.replace(/\r$/, "");
+    if (/^\S/.test(line)) {
+      if (inEvidence) {
+        return "";
+      }
+      inEvidence = /^evidence:\s*$/.test(line);
+      continue;
+    }
+    if (!inEvidence) {
+      continue;
+    }
+    const match = /^ {2}bucket:\s*(.*?)\s*$/.exec(line);
+    if (match !== null) {
+      const value = match[1];
+      const quoted = /^"(.*)"$/.exec(value) || /^'(.*)'$/.exec(value);
+      const bucket = quoted !== null ? quoted[1] : value;
+      // A BUCKET NAME OR NOTHING (review L5). This value is plan text an
+      // approver signed, not an API-validated URL, and it is pasted into a
+      // shell: anything outside the S3 bucket grammar renders the placeholder.
+      return isBucketName(bucket) ? bucket : "";
+    }
+  }
+  return "";
+}
+
+/** The S3 bucket-name grammar the destination form and the API enforce:
+ *  3-63 characters, lowercase letters, digits, dots and hyphens, beginning and
+ *  ending with a letter or digit. */
+export function isBucketName(value) {
+  return typeof value === "string" && /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(value);
+}
+
+/** One POSIX shell word: unchanged when it is made only of characters no shell
+ *  reads specially, otherwise single-quoted with every `'` closed, escaped and
+ *  reopened (review L5). The fetch commands below are copied into a terminal,
+ *  and their bucket and keys come from a status and a plan, not from this
+ *  page. */
+export function shellWord(value) {
+  const text = String(value);
+  if (/^[A-Za-z0-9._/:=@+%,-]+$/.test(text)) {
+    return text;
+  }
+  return "'" + text.replace(/'/g, "'\\''") + "'";
+}
+
 /** The key prefix an object-store URL names: everything after the bucket.
  *  The twin of [`bucketOf`], and built the same way, so a plan document's
  *  `storage.prefix` and the fetch command beside it come from one reading of
@@ -1548,8 +1616,8 @@ export function prefixOf(url) {
  *  `Restore`. `document` is the local filename the fetch writes. */
 export function independentCheck(payloadType, bucket, documentKey, sidecarKey, documentFile, sidecarFile) {
   return copyBlock([
-    "aws s3 cp s3://" + bucket + "/" + documentKey + " ./" + documentFile,
-    "aws s3 cp s3://" + bucket + "/" + sidecarKey + " ./" + sidecarFile,
+    "aws s3 cp " + shellWord("s3://" + bucket + "/" + documentKey) + " ./" + documentFile,
+    "aws s3 cp " + shellWord("s3://" + bucket + "/" + sidecarKey) + " ./" + sidecarFile,
     "logweir drill verify --payload-type " +
       payloadType +
       " --scorecard ./" +
