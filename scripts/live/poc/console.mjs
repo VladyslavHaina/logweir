@@ -154,7 +154,9 @@ export async function restoreFromBackup(page, ns, backup, uid, opts, log) {
   await page.click("#create-restore");
   await page.waitForURL(/#\/(operations|approvals|history)/, { timeout: 60000 });
   const route = page.url();
-  const name = decodeURIComponent((route.match(/[?&]name=([^&]+)/) || [])[1] || "");
+  // The operation view names the Restore `name=`; the approvals view names it `subject=` (and
+  // its `name=` is the Approval's).
+  const name = decodeURIComponent((route.match(/#\/approvals/) ? route.match(/[?&]subject=([^&]+)/) : route.match(/[?&]name=([^&]+)/) || [])?.[1] || "");
   say(`created: ${route}`);
   if (!o.follow) return { name, route, planHash, readiness, status: {}, operationText: "" };
   let st = {};
