@@ -404,7 +404,20 @@ renders before it returns.
   authenticates with a session cookie the browser attaches by itself; this page
   never reads or writes one. The synchroniser token the session document
   carries lives in `client.js`'s memory for the life of the loaded page and
-  nowhere else -- the same place a draft lives, gone on reload.
+  nowhere else -- the same place a draft lives, gone on reload. **Every
+  product-API write takes its `X-CSRF-Token` from there and from nowhere
+  else** (`client.js` `sessionToken`); `ui/tests/shared-console.spec.js` scans
+  every write call in the tree for it. The one write outside the client
+  object -- "Connect an existing archive", `operation-watch.js`
+  `connectArchive` -- used to read a `deps.token` no caller supplies, and the
+  shared console refused it 403 (POC-P4).
+* **What the masthead says about authority follows the mode.** `index.html`
+  ships copy true of both modes, and once the probe answers `app.js`
+  (`applyModeCopy`) writes the decided mode's own sentence: behind `kubectl
+  proxy`, that the page runs with the kubeconfig that started the proxy;
+  behind `logweir-api`, that the product API authorises every request for the
+  session's grants (POC-P1: the shared console used to print the proxy
+  sentence to every signed-in user).
 * **Navigation cancels reads and never mutations.** A view's read carries the
   route's `AbortSignal` in both modes; a create carries none in either.
 * **The plan bytes.** `plan.js` produces the document once and hands the same
@@ -430,9 +443,9 @@ the adapter records what it cannot supply on every object it projects, under
 | kind | absent in console mode |
 |---|---|
 | `KafkaCluster` | `status.conditions` (the reachability observation is projected; the condition list is not exposed); `spec.auth.secretRef.passwordKey` and `spec.auth.tlsCa` (connection contract v1's two references, which `ConnectionAuthView` does not carry) |
-| `BackupSchedule` | the per-manifest `status.retentionReport.skipped` entries (the API reports their **count**); `status.lastSlot`, `status.missedSlots`, `status.pendingRun` and `status.history` (D1 W7: `ScheduleStatusView` carries `policy`, `nextRuns` and `activeRuns` and stops there) |
+| `BackupSchedule` | the per-manifest `status.retentionReport.skipped` entries (the API reports their **count**, which the retention panel prints with where the keys are, beside a line when the API cut a list at 100 entries); `status.lastSlot`, `status.missedSlots`, `status.pendingRun` and `status.history` (D1 W7: `ScheduleStatusView` carries `policy`, `nextRuns` and `activeRuns` and stops there) |
 | `Backup` | `status.manifestSha256`, `status.jobRef`, `status.selection` and `status.conditions` (D1 W7: the run's coverage label and its `TopicsResolved` condition); in a LIST, also `status.exitCode` and `status.evidence` -- the detail view reads both from the operation route and takes them off the list |
-| `Restore` | `status.integrity`, `status.jobRef`; in a LIST, also `status.outcome` and `status.evidence` |
+| `Restore` | `status.integrity`, `status.jobRef`; in a LIST, also `status.outcome` and `status.evidence`. A DETAIL carries the operation route's `verificationScope` under `status.verificationScope`, which is what the History detail's scope sentence reads first |
 
 **A list row's verdict in console mode.** A list item carries the API's
 `OperationSummary` -- `verificationState` and `verifiedSuccess`, the latter
@@ -711,8 +724,18 @@ keeps every value typed** -- nothing is sent, and the message sits beside the
 input.
 The archive line is a statement about the *status*, not about the bucket: this
 page holds no bucket credential and lists no object storage, so the nearest
-thing to availability the cluster can tell it is whether the run recorded a
-manifest key. **PLAT-15.1** is what turns that into a real answer -- a durable
+thing to availability the cluster can tell it is whether the run recorded its
+manifest. Two records say so: `status.manifestKey` ("manifest recorded"), a CRD
+field no controller in this tree writes, and the run's signed receipt, which
+names its manifest exactly when the run exited 0 -- so a receipt the controller
+verified on a run that exited 0 reads "manifest attested by its verified
+receipt". That is the Backup badge rule's green condition, and the **signed**
+column is that badge (`backups.js` `backupBadge`), in both modes: the recorded
+verification block when the object carries one, the list summary's
+`verifiedSuccess` in the shared console, whose list items carry no
+`status.evidence` (POC-P2: every shared-console point used to read "signed:
+unverified" and "no manifest recorded" beside an API that said `valid`).
+**PLAT-15.1** is what turns that into a real answer -- a durable
 catalog that records, per set, whether the objects are still there, and that
 carries imported points this namespace's `Backup` objects do not.
 
@@ -1888,6 +1911,13 @@ flow -- reconnect jitter -- and for no verdict at all.
 document it signed verifies" are facts about two different things. A succeeded
 run whose evidence is `NotAttempted` is never rendered as a verified success.
 
+**A restore that did not succeed has no completion section.** "What this
+restore produced" is shown for a succeeded run -- with its counts, or saying
+they are not yet verified -- and not at all for a failed, refused, cancelled
+or otherwise unsuccessful one, with or without a `completion` block: such a
+run produced nothing that panel counts, and its result and evidence sections
+say why it ended (CONSOLE-COMPLETION-HEADING-ON-FAILED).
+
 ## What a badge claims after D3
 
 The green rule gained one clause and the not-green caption gained a word.
@@ -2024,7 +2054,12 @@ this version has -- no function in `render.js` can spell it.
   `RecommendationOnly` and is replaced by the mode's own sentence otherwise;
   printing "Logweir never deletes from your archive" beside a policy that
   deletes nightly would be the most consequential false sentence this console
-  could render.
+  could render. **The covering policy is named only by the schedule report's
+  `supersededBy`, which no CRD in this tree carries yet** (the D3 W0 field is
+  owed), so where the report names none and a RetentionPolicy in the namespace
+  is not recommendation-only, the panel says it cannot tell which destination
+  that policy governs, lists the policies, and prints neither the no-deletion
+  sentence nor "this schedule's own recommendation and nothing else".
 
 **The four D3 kinds are not in the legacy in-cluster UI's ClusterRole.** The
 chart's role is unchanged by this change, so under the Helm UI the three D3 tabs
