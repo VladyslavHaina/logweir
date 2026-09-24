@@ -366,11 +366,11 @@ steps 4–8 with these PoC values:
 
 | Step | Value |
 |---|---|
-| Source connection | `source`, role `source`, `logweir-kafka-source.logweir-system.svc.cluster.local:9092`, plaintext |
-| Target connection | `target`, role `target`, `logweir-kafka-target.logweir-system.svc.cluster.local:9092`, plaintext |
-| Destination | `primary`: endpoint `http://logweir-minio.logweir-system.svc:9000` (transport `InsecureHTTP`, the demo MinIO speaks no TLS), region `us-east-1`, path-style, bucket `kafka-backups`, prefix `poc`; each grant the MinIO user in step 7's table, entered once as a new credential (access key = the user name, secret key = its file) |
-| Schedule | `orders-nightly`, source `source`, topics `orders` and `payments` (the demo seeds both), daily, destination `primary`; then *Run first backup now* |
-| Restore | from the schedule's page, *Restore this point*; target `target`, new-topic prefix `restored-`; the readiness check; *Create the Restore*; confirm it (Ordinary) |
+| Source connection | role `source`, `logweir-kafka-source.logweir-system.svc.cluster.local:9092`, plaintext. There is no name to type: the console names a connection `conn-<26 characters>` and shows it once created; the Clusters list's ROLE column is how you tell it from the target |
+| Target connection | role `target`, `logweir-kafka-target.logweir-system.svc.cluster.local:9092`, plaintext (named `conn-…` by the console, like the source) |
+| Destination | `primary` (a destination keeps the name you type): endpoint `http://logweir-minio.logweir-system.svc:9000` (transport `InsecureHTTP`, the demo MinIO speaks no TLS), region `us-east-1`, path-style, bucket `kafka-backups`, prefix `poc`; each grant the MinIO user in step 7's table, entered once as a new credential (access key = the user name, secret key = its file) |
+| Schedule | source = the `conn-…` connection with role `source`, topics `orders` and `payments` (the demo seeds both), daily, destination `primary`; then *Run first backup now*. The form's name field is required but unused in the console: the schedule is named `sch-<26 characters>`, and the page opens it by that name |
+| Restore | from the schedule's page, *Restore this point*; target = the `conn-…` connection with role `target`, new-topic prefix `restored-`; the readiness check; *Create the Restore* (named `rst-…` by the console); confirm it (Ordinary) |
 
 **Check:** the backup's operation page reads `Succeeded` with *verified by
 weirkeeper … against key …*; the restore reaches `Succeeded` with its completion

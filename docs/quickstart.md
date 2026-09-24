@@ -110,7 +110,9 @@ trustpolicy`) reports its keys loaded.
 
 Create the Kafka credential Secret with `kubectl`, then the connection in the
 console's cluster page, naming that Secret — the console never shows or reads a
-credential value. For a private CA set `auth.tls` and `auth.tlsCa` once; both of
+credential value. The console names the connection itself (`conn-` and 26
+characters, shown once it exists); its role is how later steps tell a source
+from a target. For a private CA set `auth.tls` and `auth.tlsCa` once; both of
 the runner's TLS clients use it ([kubernetes.md](kubernetes.md) §20).
 
 **Check:** *Test connection* creates a `SourceConnection` readiness check and
