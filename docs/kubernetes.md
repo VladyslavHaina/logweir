@@ -2641,6 +2641,16 @@ own: controlled by the schedule's UID and standing-authorised by its name. A
 is released, and a create that meets such an object is recorded as a
 `ConcurrencyBlocked` skip for its slot, with no bundle written.
 
+One residual remains, and it is bounded. The controller runs as one replica
+with the `Recreate` strategy, so two controllers overlap only when a pod is
+force-deleted or partitioned during a rollout. If that happens, one of them can
+read a reservation in the moment between the other's reservation write and its
+create. It then records `RestoreDeleted` for a child that is created a moment
+later, and that run is not tracked. The error fails loud:
+`RehearsalHealthy=False`, never a false pass. A controller that stops between
+its reservation and its create leaves the same record, and there it is correct,
+because that child never existed.
+
 `RehearsalHealthy` moves with the same decision (`True/Passed`, or
 `False/Failed` naming the reason). *Upgrade:* nothing to migrate. Builds before REHEARSAL-FIRE-PASS-STATUS-LOST's
 fix never stored a firing pass's commit: that write was preconditioned on the

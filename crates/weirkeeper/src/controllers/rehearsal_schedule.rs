@@ -950,6 +950,17 @@ pub async fn reconcile_schedule(
     // adopted by PLAT-04.1's rule (see `recover_reservation`).
     let reservation = recover_reservation(schedule, &restores, &uid).await?;
     let (observation, previous, recovered) = match (&deleted_active, &active_child, &reservation) {
+        // A DELETED ACTIVE REF BESIDE AN OWNED RESERVATION (review L1): the
+        // deleted run is recorded AND the reserved child — which exists and
+        // is this schedule's own — is promoted to active in the same write.
+        // Recording the deletion alone would clear both refs (the decided arm
+        // of `status_patch`) and drop a running rehearsal unrecorded, with
+        // Forbid blind to it.
+        (Some(name), _, Reservation::Adopted(adopted)) => (
+            deleted_observation(name),
+            Some((**adopted).clone()),
+            Some(adopted.name_any()),
+        ),
         (Some(name), _, _) => (deleted_observation(name), None, None),
         (None, Some(child), Reservation::Adopted(adopted)) => (
             observe(Some(child), now),
@@ -1313,9 +1324,13 @@ async fn fire(
             // is this schedule's own child — the reservation resuming after a
             // crash — and it is re-read so the bundle binds the UID that
             // actually exists rather than the one this pass would have
-            // created. A standing bundle written for an object this schedule
-            // does not own would hand that object this schedule's
-            // authorization, so a foreign holder is a recorded skip.
+            // created. A foreign holder is a recorded skip: it is not this
+            // slot's rehearsal, and recording it active would make this
+            // schedule track, and report the verdict of, a run it did not
+            // start. (The bundle is not the security boundary — the `Restore`
+            // reconciler admits a standing child on `spec.authorization` and
+            // the pinned Approval UID, bounded by the signed scope — so this
+            // is about whose result the schedule records.)
             debug!(restore = %child_name, "the deterministic rehearsal Restore already exists");
             match restores
                 .get_opt(&child_name)
@@ -1526,6 +1541,20 @@ async fn recover_reservation(
             );
             Ok(Reservation::Foreign)
         }
+        // A RESERVED NAME NOTHING HOLDS IS RECORDED AS DELETED — and that
+        // reading has one bounded residual (review L2). Two controllers
+        // overlapping on one schedule — which the chart does not run
+        // (`replicas: 1`, `strategy: Recreate`), so only a force-deleted or
+        // partitioned pod during a rollout can produce it — can have one read
+        // the reservation in the milliseconds between the other's reservation
+        // write and its create, and record `RestoreDeleted` for a child that
+        // is created a moment later. The fail direction is `RehearsalHealthy=
+        // False` (loud, never a false pass); the cost is that one run is not
+        // tracked. A re-read by name would not close it (the create can land
+        // after both reads), and a grace keyed to the reservation needs a
+        // timestamp the status does not carry; `docs/kubernetes.md` records it.
+        // The single-controller crash between the reservation and the create
+        // lands in the same arm, correctly: that child never existed.
         None => Ok(Reservation::Missing(pending)),
     }
 }

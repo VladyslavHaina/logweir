@@ -4230,3 +4230,168 @@ fn foreign_child() -> Value {
         }
     })
 }
+
+/// **REVIEW L1 — a deleted `activeRestoreRef` beside an owned, running
+/// reservation.** The reviewer's counter-example (reserve-commit review): the
+/// status a fire pass leaves when it recorded A, reserved and created P, and
+/// lost its commit to another writer — `activeRestoreRef = A`,
+/// `pendingRestoreRef = P` — after which A is deleted. A is recorded
+/// `RestoreDeleted` AND P, which exists and is this schedule's own, becomes
+/// active in the same write. At `a8f594ec` both refs were cleared and P ran
+/// unrecorded, with Forbid blind to it.
+///
+/// MUTANT M9: drop the `(Some(name), _, Reservation::Adopted(..))` arm.
+#[tokio::test]
+async fn a_deleted_active_ref_beside_an_owned_reservation_keeps_the_reservation() {
+    let store = fired_store(json!({}));
+    let (client, _, _) = mock_client_with_store(store_routes(), store.clone());
+    rs::reconcile_schedule(&schedule(), &context(client), now())
+        .await
+        .expect("pass 1 answers");
+    {
+        let mut s = store.lock().expect("the store is not poisoned");
+        let mut v = s.get(SCHEDULE_KEY).expect("stored");
+        v["status"]["activeRestoreRef"] = json!({"name": PREVIOUS_CHILD});
+        v["status"]["pendingRestoreRef"] = json!({"name": FIRED_CHILD});
+        s.put(SCHEDULE_KEY, v);
+        let gone_key = format!("{RESTORES_PATH}/{PREVIOUS_CHILD}");
+        s.put(&gone_key, json!({}));
+        s.remove(&gone_key);
+    }
+    let (client, recorder, _) = mock_client_with_store(store_routes(), store.clone());
+    rs::reconcile_schedule(
+        &stored_schedule(&store),
+        &context(client),
+        at("2026-09-20T03:31:00Z"),
+    )
+    .await
+    .expect("pass 2 answers");
+    assert_eq!(posted(&recorder, RESTORES_PATH), 0);
+    let st = stored_status(&store);
+    assert_eq!(
+        st["lastFailed"]["restoreRef"]["name"], PREVIOUS_CHILD,
+        "{st}"
+    );
+    assert_eq!(
+        st["lastFailed"]["reason"],
+        rs::REASON_RESTORE_DELETED,
+        "{st}"
+    );
+    assert_eq!(
+        st["activeRestoreRef"]["name"], FIRED_CHILD,
+        "the owned, running reservation is adopted, not dropped: {st}"
+    );
+    assert!(st.get("pendingRestoreRef").is_none(), "{st}");
+    assert_no_lost_writes(&store);
+}
+
+/// A reservation of [`FIRED_CHILD`] whose Restore is `child`, run once.
+async fn recover_against(child: Value) -> Value {
+    let store = fired_store(json!({
+        "pendingRestoreRef": {"name": FIRED_CHILD},
+        "lastScheduledSlot": FIRED_SLOT
+    }));
+    store
+        .lock()
+        .expect("the store is not poisoned")
+        .put(&fired_child_key(), child);
+    let (client, recorder, _) = mock_client_with_store(store_routes(), store.clone());
+    let outcome = rs::reconcile_schedule(
+        &stored_schedule(&store),
+        &context(client),
+        at("2026-09-20T03:31:00Z"),
+    )
+    .await
+    .expect("the reconcile answers");
+    assert_eq!(outcome.created, None, "nothing is adopted");
+    assert_eq!(posted(&recorder, RESTORES_PATH), 0);
+    assert_no_lost_writes(&store);
+    stored_status(&store)
+}
+
+/// **REVIEW L3 / MR1 — the UID alone is not ownership.** A Restore of the
+/// reserved name, controlled by THIS schedule's UID, whose standing
+/// authorization names ANOTHER schedule, is not this schedule's rehearsal
+/// and is never adopted: `owned_rehearsal` is a conjunction.
+///
+/// MUTANT MR1: `owned_rehearsal` answers `controlled` alone.
+#[tokio::test]
+async fn an_own_uid_child_authorised_for_another_schedule_is_not_adopted() {
+    let mut child = foreign_child();
+    child["metadata"]["ownerReferences"][0]["uid"] = json!(SCHEDULE_UID);
+    child["spec"]["authorization"]["rehearsalScheduleRef"]["name"] = json!("another-schedule");
+    let st = recover_against(child).await;
+    assert!(st.get("activeRestoreRef").is_none(), "{st}");
+    assert!(st.get("pendingRestoreRef").is_none(), "released: {st}");
+}
+
+/// **REVIEW L3 / MR2 — an ownerRef is ownership only when it is the
+/// CONTROLLER.** This schedule's UID on a `controller: false` ownerRef (any
+/// client may add one) is not adoption material.
+///
+/// MUTANT MR2: drop `r.controller == Some(true)`.
+#[tokio::test]
+async fn an_own_uid_non_controller_owner_ref_is_not_adopted() {
+    let mut child = foreign_child();
+    child["metadata"]["ownerReferences"][0]["uid"] = json!(SCHEDULE_UID);
+    child["metadata"]["ownerReferences"][0]["controller"] = json!(false);
+    let st = recover_against(child).await;
+    assert!(st.get("activeRestoreRef").is_none(), "{st}");
+    assert!(st.get("pendingRestoreRef").is_none(), "released: {st}");
+}
+
+/// **REVIEW L3 / MR3 — a missing reservation beside a DECIDED active run is
+/// recorded on the pass after, never dropped.** `activeRestoreRef = A`
+/// (finished, passed), `pendingRestoreRef = P` (gone). Pass 1 records A and
+/// KEEPS P (`PendingRef::Keep`) — the decided arm would otherwise clear both
+/// refs and P's `RestoreDeleted` would never be written. Pass 2 records P.
+///
+/// MUTANT MR3: ignore `PendingRef::Keep` in `status_patch`.
+#[tokio::test]
+async fn a_missing_reservation_beside_a_decided_active_run_is_recorded_next() {
+    let store = fired_store(json!({
+        "activeRestoreRef": {"name": PREVIOUS_CHILD},
+        "pendingRestoreRef": {"name": FIRED_CHILD},
+        "lastScheduledSlot": FIRED_SLOT
+    }));
+    {
+        let mut s = store.lock().expect("the store is not poisoned");
+        s.put(
+            &format!("{RESTORES_PATH}/{PREVIOUS_CHILD}"),
+            previous_child_value("Succeeded"),
+        );
+        s.remove(&fired_child_key());
+    }
+    let pass = |t: &'static str| {
+        let store = store.clone();
+        async move {
+            let (client, _, _) = mock_client_with_store(store_routes(), store.clone());
+            rs::reconcile_schedule(&stored_schedule(&store), &context(client), at(t))
+                .await
+                .expect("the reconcile answers");
+        }
+    };
+
+    pass("2026-09-20T03:31:00Z").await;
+    let st = stored_status(&store);
+    assert_eq!(
+        st["lastSucceeded"]["restoreRef"]["name"], PREVIOUS_CHILD,
+        "{st}"
+    );
+    assert!(st.get("activeRestoreRef").is_none(), "{st}");
+    assert_eq!(
+        st["pendingRestoreRef"]["name"], FIRED_CHILD,
+        "kept, to be recorded on the next pass: {st}"
+    );
+
+    pass("2026-09-20T03:32:00Z").await;
+    let st = stored_status(&store);
+    assert_eq!(st["lastFailed"]["restoreRef"]["name"], FIRED_CHILD, "{st}");
+    assert_eq!(
+        st["lastFailed"]["reason"],
+        rs::REASON_RESTORE_DELETED,
+        "{st}"
+    );
+    assert!(st.get("pendingRestoreRef").is_none(), "{st}");
+    assert_no_lost_writes(&store);
+}
