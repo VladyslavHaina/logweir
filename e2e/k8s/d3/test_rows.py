@@ -1927,7 +1927,8 @@ L6_SCHEDULE_PASSED = {
                           "at": "2026-09-21T03:04:05Z", "pointId": "lwp1-" + "a" * 32,
                           "evidence": f"logweir/drills/{L6_RUN}.json", "rtoSeconds": 137},
         "lastScheduledSlot": L6_SLOT,
-        "conditions": [{"type": "RehearsalHealthy", "status": "True", "reason": "Passed"}],
+        "conditions": [{"type": "RehearsalHealthy", "status": "True", "reason": "Passed"},
+                       {"type": "Authorized", "status": "True", "reason": "Authorized"}],
     }
 }
 # PLANTED: the schedule that ran and recorded NOTHING — `RehearsalHealthy` still
@@ -3401,6 +3402,242 @@ def test_no_harness_module_defines_a_top_level_name_twice() -> None:
         '"retentionpolicy"' in retention_body and '"protectionpolicy"' not in retention_body)
     row("and patch_protection_policy patches a ProtectionPolicy",
         '"protectionpolicy"' in protection_body and '"retentionpolicy"' not in protection_body)
+
+
+# --- lab-refresh-11: the reservation protocol (REHEARSAL-FIRE-PASS-STATUS-LOST) ---
+
+# lab-refresh-10's recorded shape (`lr10r2…/rehearsal/05-schedule-status.json`):
+# the fire pass's commit was refused (409), so no write ever carried
+# `activeRestoreRef` — only the reservation — and `Authorized` stayed NoResult.
+L6_WATCHED_LR10 = [
+    {"pendingRestoreRef": {"name": L6_RESTORE_NAME}, "lastScheduledSlot": L6_SLOT},
+    L6_SCHEDULE_PASSED["status"],
+]
+
+
+def test_step5_requires_the_committed_active_ref_and_an_evaluated_authorization() -> None:
+    clauses = _pass()
+    active = ("while it ran, a watched write named it in activeRestoreRef with no "
+              "pendingRestoreRef (the fire pass's commit landed)")
+    authorized = ("Authorized is True/Authorized, evaluated by the pass that fired (not "
+                  "Unknown/NoResult)")
+    row("step 5 (lr11): the fixed shape satisfies both new clauses",
+        clauses[active] and clauses[authorized], str(clauses))
+    lost = _pass(watched=L6_WATCHED_LR10)
+    row("step 5 (lr11) CONTROL: lab-refresh-10's reservation-only writes are refused",
+        not all(lost.values()) and not lost[active])
+    both = _pass(watched=[{"activeRestoreRef": {"name": L6_RESTORE_NAME},
+                           "pendingRestoreRef": {"name": L6_RESTORE_NAME}},
+                          L6_SCHEDULE_PASSED["status"]])
+    row("step 5 (lr11) CONTROL: an active ref beside an unreleased reservation is refused",
+        not both[active])
+    no_result = json.loads(json.dumps(L6_SCHEDULE_PASSED))
+    no_result["status"]["conditions"][1] = {
+        "type": "Authorized", "status": "Unknown", "reason": "NoResult",
+        "message": "no slot has evaluated the standing authorization yet"}
+    stale = _pass(no_result)
+    row("step 5 (lr11) CONTROL: Authorized Unknown/NoResult after a fired slot is refused",
+        not all(stale.values()) and not stale[authorized])
+    missing = json.loads(json.dumps(L6_SCHEDULE_PASSED))
+    missing["status"]["conditions"] = missing["status"]["conditions"][:1]
+    row("step 5 (lr11) CONTROL: no Authorized condition at all is refused",
+        not _pass(missing)[authorized])
+
+
+def test_a_deleted_rehearsal_is_recorded_before_the_next_slot_fires() -> None:
+    name = "logweir-rehearsal-l6-deleted-20260924-022300"
+    nxt = "logweir-rehearsal-l6-deleted-20260924-022400"
+    failed = {"type": "RehearsalHealthy", "status": "False", "reason": "Failed"}
+    clause = "no later slot is reserved or fired before the record"
+    ok = [{"activeRestoreRef": {"name": name}},
+          {"lastFailed": {"restoreRef": {"name": name}, "reason": "RestoreDeleted"},
+           "activeRestoreRef": None, "conditions": [failed]},
+          {"lastFailed": {"restoreRef": {"name": name}, "reason": "RestoreDeleted"},
+           "pendingRestoreRef": {"name": nxt}, "conditions": [failed]}]
+    verdict, clauses = d3.deleted_rehearsal_is_recorded(name, ok, True)
+    row("rehearsal-deleted (lr11): recorded, then the next slot -> PASS",
+        verdict == "PASS" and clauses[clause], str(clauses))
+    # lab-refresh-10 row (e) as recorded: the next slot's reservation, then its
+    # child, with the deleted rehearsal never recorded.
+    lr10 = [{"pendingRestoreRef": {"name": name}, "lastScheduledSlot": "20260924-022300"},
+            {"pendingRestoreRef": {"name": nxt}, "lastScheduledSlot": "20260924-022400"},
+            {"lastSucceeded": {"restoreRef": {"name": nxt}},
+             "conditions": [{"type": "RehearsalHealthy", "status": "True",
+                             "reason": "Passed"}]}]
+    verdict, clauses = d3.deleted_rehearsal_is_recorded(name, lr10, True)
+    row("rehearsal-deleted (lr11) CONTROL: lab-refresh-10's fire-over-it shape -> FAIL",
+        verdict == "FAIL" and not clauses[clause])
+    late = [{"activeRestoreRef": {"name": name}},
+            {"activeRestoreRef": {"name": name}, "pendingRestoreRef": {"name": nxt}},
+            ok[1]]
+    verdict, clauses = d3.deleted_rehearsal_is_recorded(name, late, True)
+    row("rehearsal-deleted (lr11) CONTROL: recorded only AFTER the next reservation -> FAIL",
+        verdict == "FAIL" and not clauses[clause])
+
+
+NR_NAME = "logweir-rehearsal-l6-not-reached-20260924-051000"
+NR_RESTORE = {"status": {"phase": "Succeeded", "exitCode": 0,
+                         "evidence": {"scorecardKey": "logweir/drills/X.json",
+                                      "sidecarKey": "logweir/drills/X.json.dsse",
+                                      "verification": {"result": "Pending"}},
+                         "conditions": [{"type": "Complete", "status": "True",
+                                         "lastTransitionTime": "2026-09-24T05:10:10Z"}]}}
+NR_TRAIL = [{"phase": "Running"},
+            {"phase": "Succeeded", "evidence": {"scorecardKey": "k"}},
+            {"phase": "Succeeded", "evidence": {"verification": {"result": "Pending"}}}]
+NR_FAILED = {"type": "RehearsalHealthy", "status": "False", "reason": "Failed"}
+
+
+def _nr_watched(reason="EvidenceVerdictNotReached", at="2026-09-24T06:10:40Z",
+                extra_child=None, skip=True):
+    held = {"activeRestoreRef": {"name": NR_NAME}}
+    writes = [dict(held)]
+    if skip:
+        writes.append(dict(held, lastSkipped={"slot": "20260924-051100",
+                                              "reason": "ConcurrencyBlocked"}))
+    if extra_child:
+        writes.append(dict(held, pendingRestoreRef={"name": extra_child}))
+    writes.append({"lastFailed": {"restoreRef": {"name": NR_NAME}, "reason": reason,
+                                  "at": at}, "conditions": [NR_FAILED]})
+    return writes
+
+
+def test_a_verdict_still_owed_after_the_wait_is_evidence_verdict_not_reached() -> None:
+    verdict, clauses = d3.verdict_not_reached_is_recorded(
+        NR_NAME, NR_RESTORE, _nr_watched(), NR_TRAIL)
+    row("verdict-not-reached: recorded 3630 s after finishing -> PASS", verdict == "PASS",
+        str(clauses))
+    verdict, _ = d3.verdict_not_reached_is_recorded(
+        NR_NAME, NR_RESTORE, _nr_watched(at="2026-09-24T05:40:10Z"), NR_TRAIL)
+    row("verdict-not-reached CONTROL: recorded 30 min after finishing (early) -> FAIL",
+        verdict == "FAIL")
+    verdict, _ = d3.verdict_not_reached_is_recorded(
+        NR_NAME, NR_RESTORE, _nr_watched(at="2026-09-24T07:10:10Z"), NR_TRAIL)
+    row("verdict-not-reached CONTROL: recorded two hours after (unbounded) -> FAIL",
+        verdict == "FAIL")
+    verdict, _ = d3.verdict_not_reached_is_recorded(
+        NR_NAME, NR_RESTORE, _nr_watched(reason="VerificationNotAttempted"), NR_TRAIL)
+    row("verdict-not-reached CONTROL: another reason -> FAIL", verdict == "FAIL")
+    verdict, _ = d3.verdict_not_reached_is_recorded(
+        NR_NAME, NR_RESTORE, _nr_watched(extra_child=NR_NAME[:-4] + "1100"), NR_TRAIL)
+    row("verdict-not-reached CONTROL: a later slot reserved while it was owed -> FAIL",
+        verdict == "FAIL")
+    verdict, _ = d3.verdict_not_reached_is_recorded(
+        NR_NAME, NR_RESTORE, _nr_watched(skip=False), NR_TRAIL)
+    row("verdict-not-reached CONTROL: no ConcurrencyBlocked skip while owed -> FAIL",
+        verdict == "FAIL")
+    promoted = _nr_watched() + [{"lastSucceeded": {"restoreRef": {"name": NR_NAME}}}]
+    verdict, _ = d3.verdict_not_reached_is_recorded(NR_NAME, NR_RESTORE, promoted, NR_TRAIL)
+    row("verdict-not-reached CONTROL: later promoted to lastSucceeded -> FAIL",
+        verdict == "FAIL")
+    lost = [{"pendingRestoreRef": {"name": NR_NAME}}] + _nr_watched()[1:]
+    for w in lost[:-1]:
+        w.pop("activeRestoreRef", None)
+    verdict, _ = d3.verdict_not_reached_is_recorded(NR_NAME, NR_RESTORE, lost, NR_TRAIL)
+    row("verdict-not-reached CONTROL: never activeRestoreRef (lr10's lost commit) -> FAIL",
+        verdict == "FAIL")
+    verdict, _ = d3.verdict_not_reached_is_recorded(NR_NAME, NR_RESTORE, [], NR_TRAIL)
+    row("verdict-not-reached CONTROL: never recorded -> FAIL", verdict == "FAIL")
+    reached = NR_TRAIL + [{"phase": "Succeeded",
+                           "evidence": {"verification": {"result": "Valid"}}}]
+    verdict, _ = d3.verdict_not_reached_is_recorded(NR_NAME, NR_RESTORE, _nr_watched(), reached)
+    row("verdict-not-reached: a verdict that landed is not the case -> NOT-REACHED",
+        verdict == "NOT-REACHED")
+    schedule_rs = (_REPO / "crates/weirkeeper/src/controllers/rehearsal_schedule.rs").read_text()
+    row("REHEARSAL_VERDICT_WAIT_SECONDS is rehearsal_schedule.rs's VERDICT_WAIT_SECONDS",
+        f"pub const VERDICT_WAIT_SECONDS: i64 = {d3.REHEARSAL_VERDICT_WAIT_SECONDS};"
+        in schedule_rs)
+    row("and EvidenceVerdictNotReached is its REASON_VERDICT_NOT_REACHED",
+        'pub const REASON_VERDICT_NOT_REACHED: &str = "EvidenceVerdictNotReached";'
+        in schedule_rs)
+
+
+def test_a_deleted_active_ref_beside_an_owned_reservation_keeps_it() -> None:
+    a = "logweir-rehearsal-l6-deleted-active-20260924-050100"
+    p = "logweir-rehearsal-l6-deleted-active-20260924-050200"
+    failed = {"type": "RehearsalHealthy", "status": "False", "reason": "Failed"}
+    fixed = [{"lastFailed": {"restoreRef": {"name": a}, "reason": "RestoreDeleted"},
+              "activeRestoreRef": {"name": p}, "conditions": [failed]},
+             {"lastFailed": {"restoreRef": {"name": a}, "reason": "RestoreDeleted"},
+              "activeRestoreRef": {"name": p}, "lastSkipped": {"reason": "ConcurrencyBlocked"}},
+             {"lastSucceeded": {"restoreRef": {"name": p}}, "activeRestoreRef": None}]
+    verdict, clauses = d3.deleted_active_keeps_the_reservation(a, p, fixed, True)
+    row("L1: deleted active recorded, reservation promoted in the same write -> PASS",
+        verdict == "PASS", str(clauses))
+    # PLANTED: the reviewer's counter-example on a8f594ec — both refs cleared.
+    dropped = [{"lastFailed": {"restoreRef": {"name": a}, "reason": "RestoreDeleted"},
+                "activeRestoreRef": None, "pendingRestoreRef": None, "conditions": [failed]}]
+    verdict, clauses = d3.deleted_active_keeps_the_reservation(a, p, dropped, True)
+    row("L1 CONTROL: the a8f594ec shape (reservation dropped) -> FAIL",
+        verdict == "FAIL"
+        and not clauses["and in that same write activeRestoreRef names the running "
+                        "reservation"])
+    later = [{"lastFailed": {"restoreRef": {"name": a}, "reason": "RestoreDeleted"},
+              "pendingRestoreRef": {"name": p}, "conditions": [failed]}] + fixed[1:]
+    verdict, _ = d3.deleted_active_keeps_the_reservation(a, p, later, True)
+    row("L1 CONTROL: promoted only in a later write -> FAIL", verdict == "FAIL")
+    verdict, _ = d3.deleted_active_keeps_the_reservation(a, p, [], True)
+    row("L1 CONTROL: nothing recorded -> FAIL", verdict == "FAIL")
+    verdict, _ = d3.deleted_active_keeps_the_reservation(a, p, fixed, False)
+    row("L1: the stage never landed -> NOT-REACHED", verdict == "NOT-REACHED")
+
+
+def test_a_preflight_plan_conflict_lands_in_the_pass_that_wrote_pending() -> None:
+    q = {"phase": "Queued", "reason": "ConcurrencyLimited"}
+    pend = {"phase": "Pending", "reason": "PodNotStarted"}
+    fail = {"phase": "Failed", "reason": "CheckPlanConflict"}
+    times = ["2026-09-24T05:00:00.000+00:00", "2026-09-24T05:00:20.100+00:00",
+             "2026-09-24T05:00:20.180+00:00"]
+    verdict, clauses = d3.plan_conflict_recorded_in_one_pass([q, pend, fail], times, [], False)
+    row("preflight plan conflict: Pending then Failed 80 ms apart -> PASS", verdict == "PASS",
+        str(clauses))
+    # the unfixed build: the refusal's write is refused 409, the reconcile
+    # fails, and the next pass (15 s later) writes it.
+    old_times = times[:2] + ["2026-09-24T05:00:35.300+00:00"]
+    verdict, clauses = d3.plan_conflict_recorded_in_one_pass(
+        [q, pend, fail], old_times,
+        ['{"message":"preflight reconcile failed; requeueing","preflight":"pf-plan-conflict",'
+         '"error":"… 409 Conflict …"}'], False)
+    row("preflight plan conflict CONTROL: the unfixed build's error requeue -> FAIL",
+        verdict == "FAIL")
+    verdict, _ = d3.plan_conflict_recorded_in_one_pass([q, pend], times[:2], [], False)
+    row("preflight plan conflict CONTROL: left Pending -> FAIL", verdict == "FAIL")
+    verdict, _ = d3.plan_conflict_recorded_in_one_pass([q, pend, fail], times, [], True)
+    row("preflight plan conflict CONTROL: a Job was created -> FAIL", verdict == "FAIL")
+    verdict, _ = d3.plan_conflict_recorded_in_one_pass([pend, fail], times[1:], [], False)
+    row("preflight plan conflict: never Queued -> NOT-REACHED", verdict == "NOT-REACHED")
+    job_rs = (_REPO / "crates/weirkeeper/src/check/job.rs").read_text()
+    name = d3.check_job_name("da", "0b6c1e5e-0000-4000-8000-000000000000")
+    row("check_job_name is job.rs's lwc-<k>-<20 hex of sha256(uid)>",
+        'pub const CHECK_JOB_PREFIX: &str = "lwc-";' in job_rs
+        and "pub const OWNER_UID_HEX_CHARS: usize = 20;" in job_rs
+        and name.startswith("lwc-da-") and len(name) == len("lwc-da-") + 20)
+
+
+def test_a_job_name_conflict_over_a_frozen_backup_is_recorded() -> None:
+    bk = {"status": {"phase": "Failed", "execution": {"id": "x"},
+                     "conditions": [{"type": "Failed", "status": "True",
+                                     "reason": "JobNameConflict"}]}}
+    foreign = {"metadata": {"name": "bk-job-name-conflict"}, "spec": {"suspend": True}}
+    verdict, clauses = d3.job_name_conflict_recorded(bk, foreign, [], True)
+    row("job name conflict: terminal, execution kept, stranger untouched -> PASS",
+        verdict == "PASS", str(clauses))
+    adopted = {"metadata": {"ownerReferences": [{"kind": "Backup", "uid": "u"}]},
+               "spec": {"suspend": True}}
+    row("job name conflict CONTROL: the stranger adopted -> FAIL",
+        d3.job_name_conflict_recorded(bk, adopted, [], True)[0] == "FAIL")
+    lost = json.loads(json.dumps(bk))
+    del lost["status"]["execution"]
+    row("job name conflict CONTROL: execution record lost -> FAIL",
+        d3.job_name_conflict_recorded(lost, foreign, [], True)[0] == "FAIL")
+    row("job name conflict CONTROL: a 409 in the controller log -> FAIL",
+        d3.job_name_conflict_recorded(bk, foreign, ["… 409 …"], True)[0] == "FAIL")
+    running = {"status": {"phase": "Running", "execution": {"id": "x"}}}
+    row("job name conflict CONTROL: the Backup ran -> FAIL",
+        d3.job_name_conflict_recorded(running, foreign, [], True)[0] == "FAIL")
+    row("job name conflict: the stranger never placed -> NOT-REACHED",
+        d3.job_name_conflict_recorded(bk, foreign, [], False)[0] == "NOT-REACHED")
+
 
 
 def test_zz_every_row_in_this_file_passed() -> None:
