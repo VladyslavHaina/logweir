@@ -338,9 +338,15 @@ async function configureJourney(browser, state, route) {
     await open(page, route("clusters"));
     await armPointerCounter(page);
     const trail = [];
-    trail.push(await tabTo(page, "#cluster-name", "connection name"));
-    await page.keyboard.type(typedSource);
-    await tabTo(page, "#cluster-servers", "bootstrap servers");
+    // CONSOLE MODE HAS NO NAME FIELD (P7): the product API names the
+    // connection, so the keyboard walk starts at the servers input there.
+    if (await page.locator("#cluster-name").count() > 0) {
+      trail.push(await tabTo(page, "#cluster-name", "connection name"));
+      await page.keyboard.type(typedSource);
+      await tabTo(page, "#cluster-servers", "bootstrap servers");
+    } else {
+      trail.push(await tabTo(page, "#cluster-servers", "bootstrap servers"));
+    }
     await page.keyboard.type(state.lab.kafka);
     await tabTo(page, "#cluster-mode", "auth mode");
     const modeKeys = await keyboardSelect(page, "#cluster-mode", "scramSha512", "s");
@@ -393,8 +399,11 @@ async function configureJourney(browser, state, route) {
     // The saved connection's probe must exist before the selector offers it.
     const sourceUid = made.metadata.uid;
     const scheduleName = "orders-" + state.suffix;
-    await tabTo(page, "#schedule-name", "schedule name");
-    await page.keyboard.type(scheduleName);
+    // AND NO SCHEDULE NAME FIELD (review L5): sch-<26 base32> is the server's.
+    if (await page.locator("#schedule-name").count() > 0) {
+      await tabTo(page, "#schedule-name", "schedule name");
+      await page.keyboard.type(scheduleName);
+    }
     await tabTo(page, "#schedule-source", "schedule source");
     const sourceKeys = await keyboardSelect(page, "#schedule-source", sourceUid, "c");
     await tabTo(page, "#policy-create-topics", "topics");

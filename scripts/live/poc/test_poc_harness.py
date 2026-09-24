@@ -43,6 +43,32 @@ def prints_a_secret(text: str) -> list[str]:
             if re.search(r"(print|console\.log)\(.*\b(pw|password|secretAccessKey|clientSecret|session\[\"session\"\])\b", line)]
 
 
+def unguarded_minted_name_fills(text: str) -> list[str]:
+    """The shared console has NO name field on the Clusters form (P7) or the schedule form
+    (poc-fixes-2 review L5): the product API names both objects. A harness that fills one
+    unconditionally waits out Playwright's 30 s and fails the journey. Every fill of a
+    connection or schedule name must sit behind a `count() > 0` guard on the same line."""
+    bad = []
+    blocks = []
+    m = re.search(r"export async function createCluster\(.*?\n}\n", text, re.S)
+    if m:
+        blocks.append(m.group(0))
+    m = re.search(r'if \(step\("J4"\)\).*?\n  }\n', text, re.S)
+    if m:
+        blocks.append(m.group(0))
+    for block in blocks:
+        for line in block.splitlines():
+            if ".fill(" in line and ('name="name"' in line or "Name.fill(" in line or "nameInput.fill(" in line):
+                if "count()" not in line:
+                    bad.append(line.strip())
+    return bad
+
+
+def test_a_name_the_console_mints_is_filled_only_where_the_field_exists():
+    for p in FILES:
+        assert not unguarded_minted_name_fills(p.read_text()), (p.name, unguarded_minted_name_fills(p.read_text()))
+
+
 def test_there_are_files_to_guard():
     names = {p.name for p in FILES}
     assert {"poclib.py", "console.mjs", "journey.mjs", "p172_ingress.py"} <= names, names
@@ -75,3 +101,9 @@ def test_the_guards_catch_their_planted_twins():
     assert secret_literals("AKIA" + "ABCDEFGHIJKLMNOP")
     assert HOST_PATH.search("/Users/someone/.kube/config")
     assert prints_a_secret('print(pw)') and prints_a_secret('console.log(secretAccessKey)')
+    planted = ("export async function createCluster(page, ns, c, log) {\n"
+               "  await form.locator('input[name=\"name\"]').fill(c.name);\n}\n")
+    assert unguarded_minted_name_fills(planted)
+    guarded = ("export async function createCluster(page, ns, c, log) {\n"
+               "  if (await nameInput.count() > 0) await nameInput.fill(c.name);\n}\n")
+    assert not unguarded_minted_name_fills(guarded)

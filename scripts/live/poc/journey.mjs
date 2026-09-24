@@ -114,7 +114,10 @@ try {
       await gotoHash(page, `#/schedules?ns=${NS}`);
       await waitForText(page, /CHECK READINESS|Check readiness/, 60, "the schedule form");
       const form = page.locator("form", { has: page.locator('input[name="hour"]') }).first();
-      await form.locator('input[name="name"]').fill("orders-nightly");
+      // THE SHARED CONSOLE HAS NO SCHEDULE NAME FIELD (poc-fixes-2 review L5):
+      // the product API names it sch-<26 base32>. Fill it only where it exists.
+      const scheduleName = form.locator('input[name="name"]');
+      if (await scheduleName.count() > 0) await scheduleName.fill("orders-nightly");
       const opts = await form.locator('select[name="source"] option').evaluateAll((os) => os.map((o) => [o.value, o.textContent]));
       const pick = opts.find((o) => o[1].includes(SRC));
       await form.locator('select[name="source"]').selectOption(pick[0]);
