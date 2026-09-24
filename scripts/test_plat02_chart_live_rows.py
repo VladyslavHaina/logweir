@@ -156,6 +156,59 @@ def test_negative_control_restore_refuses_foreign_objects():
     assert raises(lambda: chart.restore_action(absent, obj("new-role", annotation="someone-else")))
 
 
+# ------------------------------------------------ comparable / create_verbatim
+
+LAST_APPLIED = "kubectl.kubernetes.io/last-applied-configuration"
+
+
+def recorded_role() -> dict:
+    return {
+        "apiVersion": "rbac.authorization.k8s.io/v1",
+        "kind": "ClusterRole",
+        "metadata": {
+            "name": "logweir-approver",
+            "labels": {"app.kubernetes.io/instance": "scram-local"},
+            "annotations": {
+                LAST_APPLIED: '{"metadata":{"annotations":{}},"name":"logweir-approver"}\n',
+                "meta.helm.sh/release-name": "scram-local",
+            },
+        },
+        "rules": [{"apiGroups": ["logweir.dev"], "resources": ["approvals"], "verbs": ["create"]}],
+    }
+
+
+def test_negative_control_comparable_sees_a_rewritten_last_applied_annotation():
+    # Run 1 (2026-09-24) restored `logweir-approver` through `kubectl create -f`,
+    # which rewrote this annotation to include the Helm annotations; the
+    # restore check must refuse exactly that object.
+    restored = recorded_role()
+    restored["metadata"]["annotations"][LAST_APPLIED] = (
+        '{"metadata":{"annotations":{"meta.helm.sh/release-name":"scram-local"}},"name":"logweir-approver"}\n'
+    )
+    assert chart.comparable(restored) != chart.comparable(recorded_role())
+    assert chart.comparable(recorded_role()) == chart.comparable(recorded_role())
+
+
+def test_create_verbatim_posts_the_recorded_bytes():
+    calls = []
+    original_run = chart.run
+    chart.run = lambda argv, **kwargs: calls.append((argv, kwargs.get("stdin")))
+    try:
+        chart.create_verbatim("clusterrole", recorded_role())
+        chart.create_verbatim("clusterrolebinding", {"kind": "ClusterRoleBinding", "metadata": {"name": "weirkeeper"}})
+    finally:
+        chart.run = original_run
+    (argv, stdin), (argv_binding, _stdin) = calls
+    assert argv[:3] == ["kubectl", "--context", "docker-desktop"]
+    # NEGATIVE CONTROL shape: the pre-fix call was `kubectl create -f -`
+    # (no --raw), which rewrites the last-applied annotation.
+    assert argv[3:] == ["create", "--raw", "/apis/rbac.authorization.k8s.io/v1/clusterroles", "-f", "-"]
+    assert argv_binding[5] == "/apis/rbac.authorization.k8s.io/v1/clusterrolebindings"
+    import json
+
+    assert json.loads(stdin) == recorded_role()
+
+
 def main() -> int:
     failed = []
     for name, fn in sorted(globals().items()):

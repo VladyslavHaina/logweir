@@ -193,20 +193,34 @@ def wait_absent(kind: str, name: str, namespace: Optional[str] = None, seconds: 
     raise RuntimeError(f"{kind}/{name} still present after {seconds}s")
 
 
+API_PATHS = {
+    "secret": ("/api/v1", "secrets"),
+    "configmap": ("/api/v1", "configmaps"),
+    "namespace": ("/api/v1", "namespaces"),
+    "job": ("/apis/batch/v1", "jobs"),
+    "clusterrole": ("/apis/rbac.authorization.k8s.io/v1", "clusterroles"),
+    "clusterrolebinding": ("/apis/rbac.authorization.k8s.io/v1", "clusterrolebindings"),
+    "validatingadmissionpolicy": ("/apis/admissionregistration.k8s.io/v1", "validatingadmissionpolicies"),
+    "validatingadmissionpolicybinding": (
+        "/apis/admissionregistration.k8s.io/v1",
+        "validatingadmissionpolicybindings",
+    ),
+}
+
+
+def create_verbatim(kind: str, obj: Dict[str, Any]) -> None:
+    """POST a cluster-scoped object exactly as recorded.
+
+    `kubectl create -f` rewrites `kubectl.kubernetes.io/last-applied-configuration`
+    when the object already carries it (the lab's refresh-applied RBAC does), so
+    a restore through it can never equal the record; a raw POST sends the bytes.
+    """
+    prefix, plural = API_PATHS[kind]
+    run(k("create", "--raw", f"{prefix}/{plural}", "-f", "-"), stdin=json.dumps(obj))
+
+
 def delete_exact(kind: str, name: str, uid: str, namespace: Optional[str] = None) -> None:
-    plural = {
-        "secret": ("/api/v1", "secrets"),
-        "configmap": ("/api/v1", "configmaps"),
-        "namespace": ("/api/v1", "namespaces"),
-        "job": ("/apis/batch/v1", "jobs"),
-        "clusterrole": ("/apis/rbac.authorization.k8s.io/v1", "clusterroles"),
-        "clusterrolebinding": ("/apis/rbac.authorization.k8s.io/v1", "clusterrolebindings"),
-        "validatingadmissionpolicy": ("/apis/admissionregistration.k8s.io/v1", "validatingadmissionpolicies"),
-        "validatingadmissionpolicybinding": (
-            "/apis/admissionregistration.k8s.io/v1",
-            "validatingadmissionpolicybindings",
-        ),
-    }[kind]
+    plural = API_PATHS[kind]
     scope = f"/namespaces/{namespace}" if namespace else ""
     options = {
         "apiVersion": "v1",
@@ -796,10 +810,10 @@ def lab_restore() -> Dict[str, Any]:
             # A test release still holds the adopted object (its teardown did
             # not run); remove that incarnation and restore the lab's.
             delete_exact(kind, name, live["metadata"]["uid"])
-            run(k("create", "-f", "-"), stdin=json.dumps(stripped(original)))
+            create_verbatim(kind, stripped(original))
             action = "reclaimed"
         elif action == "recreate":
-            run(k("create", "-f", "-"), stdin=json.dumps(stripped(original)))
+            create_verbatim(kind, stripped(original))
             action = "recreated"
         now_obj = get(kind, name)
         equal = comparable(now_obj) == recorded["comparable"]
