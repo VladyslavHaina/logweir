@@ -2043,6 +2043,36 @@ async function main() {
       result.failed.push(completionRow);
       process.stderr.write("== FAILED (recorded, run continues): " + completionRow.journey + "\n");
     }
+    // THE CONSOLE'S COMPLETION PANEL over the same passing Restore
+    // (lab-refresh-10, the regression half of CONSOLE-COMPLETION-ON-FAILED-
+    // RESTORE): since that fix completion is published only for a run that
+    // PASSED, so a passing run must still show the block, its counts and the
+    // newTopic cutover guidance. The failed half is read on the d3 rehearsal.
+    await openRoute(page, base + "#/operations?ns=" + encodeURIComponent(namespace) +
+      "&kind=restore&name=" + encodeURIComponent(done.metadata.name) + "&uid=" +
+      encodeURIComponent(done.metadata.uid), "section.completion", "the completion panel");
+    const completionPanel = await page.evaluate(() => {
+      const el = document.querySelector("section.completion");
+      return { text: el === null ? "" : el.innerText,
+        guidance: Array.from(document.querySelectorAll("p.guidance")).map((g) => g.innerText) };
+    });
+    await shot(page, "17c-completion-panel");
+    const panelClauses = {
+      "the operation view shows 'What this restore produced'":
+        completionPanel.text.includes("What this restore produced"),
+      "with the counts (records sampled and matching)": /records sampled and matching/i.test(completionPanel.text),
+      "and the newTopic cutover guidance ('Point applications at the new names')":
+        completionPanel.guidance.some((g) => g.includes("Point applications at the new names")),
+    };
+    const panelRow = { journey: "PLAT-10.2 the passing Restore's operation view shows its " +
+      "completion block and cutover guidance", restore: done.metadata.name, panel: completionPanel,
+      clauses: panelClauses };
+    if (Object.values(panelClauses).every(Boolean)) {
+      record(panelRow.journey, panelRow);
+    } else {
+      result.failed.push(panelRow);
+      process.stderr.write("== FAILED (recorded, run continues): " + panelRow.journey + "\n");
+    }
     const clauses = Object.assign({}, ranClauses, recordClauses);
     await shot(page, "17b-after-restore");
     check(Object.values(clauses).every((v) => v === true),
