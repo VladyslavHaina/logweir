@@ -9,7 +9,7 @@
 # through `envFrom`: `secretEnv` for the client and `hashFromEnv` for each user
 # are Dex's own ways of reading them from the environment.
 #
-# FOUR STATIC USERS, ONE PER LOGWEIR ROLE. Dex v2.44.0's static password
+# FOUR STATIC USERS, ONE PER LOGWEIR ROLE, AND ONE WITH NONE. Dex v2.44.0's static password
 # database carries no groups, so the console binds these four by SUBJECT
 # (`<issuer>#<sub>`, logweir.values.yaml). Dex's `sub` for a local user is the
 # base64url of {userID, "local"}, which is why each userID below is fixed.
@@ -76,6 +76,12 @@ config:
       username: admin
       userID: 1f0c9a4e-0004-4a1e-9e1a-000000000004
       hashFromEnv: DEX_HASH_ADMIN
+    # A fifth user bound to NO console role (logweir.values.yaml names only the
+    # four above): the "signed in, authorised for nothing" case.
+    - email: norole@logweir.localtest.me
+      username: norole
+      userID: 1f0c9a4e-0005-4a1e-9e1a-000000000005
+      hashFromEnv: DEX_HASH_NOROLE
 ingress:
   enabled: true
   className: traefik

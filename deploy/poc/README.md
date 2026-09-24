@@ -145,14 +145,16 @@ One client secret, shared by Dex and the console, and a password per user:
 
 ```bash
 openssl rand -hex 32 | tr -d '\n' > poc-secrets/client-secret   # no newline: both sides read it verbatim
-for u in viewer operator approver admin; do openssl rand -base64 18 > "poc-secrets/$u.password"; done
-hash() { htpasswd -bnBC 10 "" "$(cat "poc-secrets/$1.password")" | tr -d ':\n'; }
+for u in viewer operator approver admin norole; do openssl rand -base64 18 > "poc-secrets/$u.password"; done
+# -i reads the password on stdin: never on a command line another process can read.
+hash() { htpasswd -niBC 10 "" < "poc-secrets/$1.password" | tr -d ':\n'; }
 kubectl --context "$CTX" -n "$DEX_NAMESPACE" create secret generic dex-poc-secrets \
   --from-file=LOGWEIR_CONSOLE_CLIENT_SECRET=poc-secrets/client-secret \
   --from-literal=DEX_HASH_VIEWER="$(hash viewer)" \
   --from-literal=DEX_HASH_OPERATOR="$(hash operator)" \
   --from-literal=DEX_HASH_APPROVER="$(hash approver)" \
-  --from-literal=DEX_HASH_ADMIN="$(hash admin)"
+  --from-literal=DEX_HASH_ADMIN="$(hash admin)" \
+  --from-literal=DEX_HASH_NOROLE="$(hash norole)"
 helm upgrade --install dex dex --repo "$DEX_REPO" --version "$DEX_CHART_VERSION" \
   --kube-context "$CTX" -n "$DEX_NAMESPACE" -f deploy/poc/dex.values.yaml --wait --timeout 10m
 ```
@@ -351,8 +353,10 @@ password in `poc-secrets/<role>.password`, and land on
 | `operator` | operator | connections, destinations, schedules, backups, restore requests — and, under this PoC's Ordinary policy, confirm its own restore request |
 | `approver` | approver | the approvals view; countersigns under a `Governed` namespace (none in this PoC) |
 | `admin` | administrator | everything above, plus the keys view |
+| `norole` | none | signs in, and is granted no namespace: every namespace read answers `404` and every write `404` or `403` — the "authenticated is not authorised" case |
 
-**Check:** each user's session shows `logweir-poc` with exactly its role, and
+**Check:** each user's session shows `logweir-poc` with exactly its role (and
+`norole`'s shows no namespace), and
 the audit line for the sign-in names `https://dex.localtest.me#<subject>`.
 
 ## 10. First backup and restore, in the console
