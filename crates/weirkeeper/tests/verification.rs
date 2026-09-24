@@ -5572,7 +5572,7 @@ async fn the_shipped_backup_reconcile_states_the_handle_location_it_read() {
         .filter(|s| s.method == "PATCH" && s.path.ends_with("/status"))
         .filter_map(|s| serde_json::from_str::<Value>(&s.body).ok())
         .filter_map(|v| v.pointer("/status/evidence/verification").cloned())
-        .last()
+        .next_back()
         .expect("a verdict is published");
     assert_eq!(verification["result"], json!("NotAttempted"));
     assert!(
