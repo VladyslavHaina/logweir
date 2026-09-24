@@ -7444,11 +7444,17 @@ secretName | serviceAccountName}`) and the pod is projected its keys as
 reading evidence back with). A grant no check pod holds — `ControllerIdentity`,
 or none configured on a `DestinationAccess` check that asks for the role anyway
 — is answered `unknown` / `EvidenceReadNotConfigured` (advisory) and nothing is
-read. A workload identity that cannot share the check pod's ServiceAccount
-refuses a `DestinationAccess` check (`destination.resolved` →
-`ExecutionContextConflict`, no Job) and is left out of a `Backup` check, which
-only adds the advisory row for information and whose run never reads evidence
-in its own pod.
+read. A grant the resolver refuses (e.g. `ControllerIdentity` on a location
+the installation policy does not list yet, `ControllerIdentityNotAllowlisted`)
+is answered by the controller: `destination.evidenceReadable` advisory
+`unknown` / `EvidenceReadNotConfigured`, with the refusal in its message —
+and ONLY that row: `destination.resolved` stays `DestinationValid` and the
+archive and marker rows still run. A workload identity that cannot share the
+check pod's ServiceAccount refuses a `DestinationAccess` check
+(`destination.resolved` → `ExecutionContextConflict`, no Job), because the check
+asked for that principal; on a `Backup` check, whose run never reads evidence in
+its own pod, the controller answers the advisory row `unknown` with both
+ServiceAccounts named, and the verdict is unchanged.
 
 **The archive-write grant is never probed, and its row is never green.**
 `destination.archivePrefixWritable` stays execution-only
@@ -7704,9 +7710,10 @@ it, or set `writeProbe: Disabled`. **`evidenceRead` follows the same rules**:
 the field is added only when the `EvidenceRead` role is carried and the grant
 differs from the checked grant or is one no check pod holds; an older runner
 refuses such a plan (exit 3); a newer runner handed an older plan reads with
-the destination grant, as before. A `Backup` check whose `evidenceRead` grant is
-a workload identity other than the pod's no longer carries the advisory
-`destination.evidenceReadable` row.
+the destination grant, as before. **A runner that refuses a plan** reports
+`phase: Failed`, reason `CheckContractMismatch`, with a message saying the runner
+image is older than the controller and should be upgraded, naming the plan field
+it refused (`evidenceWrite`, `evidenceRead`) when its own log line says which.
 
 ## 22. The installation policy, the RBAC rows, and the console admission policy
 
