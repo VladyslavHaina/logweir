@@ -421,7 +421,7 @@ manual run to be `Running` right after `201` must also accept `Queued`. Raise
 `crates/logweir-api/tests/manual_run_limits.rs`), chart rows, and twelve
 planted mutants (eight first round, four in the review round, including the
 reviewer's two survivors), each killed. [UNVERIFIED — the live rows (twenty manual runs and three approved restores at once on the PoC install) run at the next PoC re-proof.]
-**Rollback, in this order:** roll the **console** and the **controller** back
+**Rollback:** in this order, roll the **console** and the **controller** back
 **with the chart** (`helm rollback`). A default install carries neither new
 block — the chart renders `runs` in `weirkeeper-policy` and `rateLimits` in the
 console configuration **only** when a value differs from the defaults — so an
