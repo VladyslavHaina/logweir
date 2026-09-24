@@ -363,6 +363,32 @@ export function routeMismatches(route, subject) {
   return out;
 }
 
+/** The two `Verified` reasons weirkeeper writes on a CONSUMED Approval one of
+ *  whose keys was later revoked for KeyCompromise (review M1). Neither is a
+ *  pass: RecordedBeforeRevocation is the ORDER of two recorded facts (the
+ *  admission was observed before the revocation took effect), and D3 section
+ *  7.4 renders it "with the recorded instant, never green". */
+export const COMPROMISE_REASONS = Object.freeze(["RecordedBeforeRevocation", "KeyRevoked"]);
+
+/** The `Consumed=True` condition -- the Restore was admitted under this
+ *  Approval, and the verdict beside it is the record of that admission -- or
+ *  `null`. Its `lastTransitionTime` is the admission instant. */
+export function consumedBy(status) {
+  const conditions = ((status || {}).conditions);
+  if (!Array.isArray(conditions)) {
+    return null;
+  }
+  for (const condition of conditions) {
+    if ((condition || {}).type === "Consumed" && condition.status === "True") {
+      return {
+        at: typeof condition.lastTransitionTime === "string" ? condition.lastTransitionTime : "",
+        message: typeof condition.message === "string" ? condition.message : "",
+      };
+    }
+  }
+  return null;
+}
+
 function verifiedCondition(status) {
   const conditions = ((status || {}).conditions);
   if (!Array.isArray(conditions)) {
@@ -385,6 +411,11 @@ function verifiedCondition(status) {
  *                              that name (another UID), and never rebinds it;
  *    plan-mismatch          -- its planHash is not this Restore's plan;
  *    verified               -- Verified=True, for exactly this UID;
+ *    revoked-after-use      -- the Restore was admitted under it (Consumed)
+ *                              and a key it names was LATER revoked for
+ *                              KeyCompromise (RecordedBeforeRevocation or
+ *                              KeyRevoked): the record is kept and it is never
+ *                              green (D3 section 7.4, review M1);
  *    expired                -- refused with KeyIdExpired;
  *    refused                -- refused with any other reason;
  *    awaiting-verification  -- recorded, not yet decided.
@@ -415,7 +446,17 @@ export function approvalState(approval, subject) {
   }
   const condition = verifiedCondition(status);
   if (status.verified === true && bound !== null && typeof bound === "object") {
-    return { state: "verified", key: status.matchedKeyId };
+    return { state: "verified", key: status.matchedKeyId, consumed: consumedBy(status) };
+  }
+  if (condition !== null && condition.status === "False" && consumedBy(status) !== null &&
+    COMPROMISE_REASONS.indexOf(condition.reason) !== -1) {
+    return {
+      state: "revoked-after-use",
+      reason: condition.reason,
+      message: typeof condition.message === "string" ? condition.message : "",
+      key: status.matchedKeyId,
+      consumed: consumedBy(status),
+    };
   }
   if (condition !== null && condition.status === "False") {
     return {
@@ -450,7 +491,18 @@ export function renderApprovalState(found, subject, approvalName) {
     case "verified":
       return stateBlock("green", "approved: verified by weirkeeper",
         "weirkeeper verified Approval " + name + " against key " + esc(f.key) + " for Restore " +
-        esc((subject || {}).name) + " (uid " + esc((subject || {}).uid) + ").");
+        esc((subject || {}).name) + " (uid " + esc((subject || {}).uid) + ")." +
+        (f.consumed
+          ? " The Restore was admitted under it at " + esc(f.consumed.at) + "; the verdict is " +
+            "now the record of that admission and authorises nothing else."
+          : ""));
+    case "revoked-after-use":
+      return stateBlock("danger", REVOKED_AFTER_USE_WORDS,
+        "Restore " + esc((subject || {}).name) + " was admitted under Approval " + name +
+        " at " + esc((f.consumed || {}).at) + ", and a key it names was later revoked for " +
+        "KeyCompromise (reason " + esc(f.reason) + "): " + esc(f.message) + " This is never " +
+        "green: the record (key " + esc(f.key) + ", the authorization, the admission) is " +
+        "kept so the run can be investigated.");
     case "expired":
       return stateBlock("danger", "expired",
         "weirkeeper refused Approval " + name + " because the approver key is past its " +
@@ -585,6 +637,7 @@ const STATE_WORDS = Object.freeze(Object.assign(Object.create(null), {
   "absent": "none recorded",
   "awaiting-verification": "awaiting verification",
   "verified": "verified",
+  "revoked-after-use": "signer revoked after use",
   "expired": "expired",
   "refused": "refused",
   "foreign-subject": "bound to another subject",
@@ -907,8 +960,18 @@ function verifiedBadge(status) {
   if (verified === true) {
     return badge("green", "verified by weirkeeper against key " + String((status || {}).matchedKeyId));
   }
+  const condition = verifiedCondition(status);
+  if (condition !== null && consumedBy(status) !== null &&
+    COMPROMISE_REASONS.indexOf(condition.reason) !== -1) {
+    return badge("unverified", REVOKED_AFTER_USE_WORDS);
+  }
   return badge("unverified", UNVERIFIED);
 }
+
+/** The badge words for a consumed Approval whose signer was revoked for
+ *  compromise afterwards. Not "verified", not "refused": the Restore DID run
+ *  under it, and the signer is now distrusted. */
+export const REVOKED_AFTER_USE_WORDS = "signer revoked for compromise after use";
 
 function ageOf(creationTimestamp, now) {
   if (typeof creationTimestamp !== "string" || creationTimestamp.length === 0) {

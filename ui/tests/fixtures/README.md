@@ -235,6 +235,12 @@ must not collide here. All six names are distinct.
 | `console/backup-poc.json` | `artifacts/poc-install/defects/P2-wizard-signed-unverified.api.json`, its `body` | the product API's `GET .../backups/logweir-backup-orders-r1-20260924-134000`: `operation.verificationState: valid`, `verifiedSuccess: true`, and **no `manifestKey`** -- the answer the shared console's restore wizard rendered as "signed: unverified" and "no manifest recorded" (POC-P2). Held to `BackupResponse` by `contract.spec.js`. |
 | `backup-poc-cr.json` | `artifacts/poc-install/r1/backup-133600.json` | the `Backup` custom resource the PoC's controller wrote for the 13:36 slot, as `kubectl get -o json` returned it: `status.evidence.verification.result: Valid` on basis `Current`, exit 0, and -- like every Backup a controller in this tree writes -- no `status.manifestKey`. Legacy mode reads exactly this. |
 
+## A consumed Approval whose signer was later compromised (`claude/poc-fixes-2`, review M1)
+
+| fixture | origin | what it is |
+|---|---|---|
+| `console/approval-revoked-after-use.json` | **constructed**: the `Approval` status `crates/weirkeeper/tests/approval_policy.rs::a_compromise_after_the_admission_is_recorded_before_revocation_and_never_green` computes (that row asserts the controller's conditions ARE this file's), projected as `crates/logweir-api/tests/approval_revoked_after_use.rs` projects it (that row asserts the DTO IS this file's `item`) | `verified: false`, `Verified=False/RecordedBeforeRevocation` naming the compromise-revoked console key and the admission instant, `Consumed=True` whose `lastTransitionTime` is that instant, and the record kept (`authorization`, `matchedKeyId`). `approval-policy.spec.js` renders it never green. Three readers of one file |
+
 ## The preview fixtures
 
 `preview/` is what `ui/tests/preview-server.js` answers the page's API reads from, and nothing in

@@ -3250,13 +3250,33 @@ recorded policy snapshot" (D0) even if its pod waited in `Pending`.
 **After admission the `Approval` is a record, not a gate.** Expiry, the policy
 binding and the keys' windows bound the time to **admission**. Once the Restore
 controller has recorded `Admitted=True` on the Restore that `spec.approvalRef`
-names this `Approval` for (the pass that creates the runner Job), the `Approval`
-controller adds `Consumed=True` (reason `RestoreAdmitted`, naming the Restore's
-UID and the admission instant) beside the verdict and never judges it again: its
-`Verified=True` condition, `status.authorization` (mode, policy, requester,
-confirmation key), `matchedKeyId`, `approver` and key window stay as they were
-recorded, whatever the clock, a later key event or a policy edit does. The
-record still binds only the Restore UID in `status.verifiedSubjectRef`. A
+names this `Approval` for (the pass that creates the runner Job), and that
+Restore's own approval bundle (`<restore>-approval-bundle`,
+`logweir.dev/approval-uid`) names **this `Approval` object's UID** — or, for a
+Restore admitted before per-Restore bundles, the `Approval` existed at the
+admission — the `Approval` controller adds `Consumed=True` (reason
+`RestoreAdmitted`; its `lastTransitionTime` is the admission instant) beside the
+verdict. From then on its `Verified=True` condition, `status.authorization`
+(mode, policy, requester, confirmation key), `matchedKeyId`, `approver` and key
+window stay as they were recorded, whatever the clock, a key's `notAfter`, a
+retirement, a `Superseded`/`Unspecified` revocation or a policy edit does. The
+record still binds only the Restore UID in `status.verifiedSubjectRef`; an
+`Approval` deleted and re-created under the same name is another object and was
+admitted under nothing.
+
+**The one key event that still reaches it is a compromise** (D3 §7.4). A
+consumed record reads the namespace's trust on each pass. When
+`status.matchedKeyId` or `status.authorization.confirmationKeyId` is `Revoked`
+with `KeyCompromise`, `status.verified` becomes `false` and the `Verified`
+condition reads `RecordedBeforeRevocation` when the admission instant precedes
+`revocationEffectiveFrom` (else `revokedAt`), and `KeyRevoked` otherwise —
+**never green** either way, in the API and the console ("signer revoked for
+compromise after use"). The authorization, key ids, approver and `Consumed` are
+kept: they are what an incident responder lists runs by. The withdrawal is
+sticky — a revocation is monotonic on a `TrustPolicy`, so a policy deleted or a
+namespace re-bound does not restore the green. A consumed record whose recorded
+key is still in the trust must also still carry a signature that verifies under
+it; one that does not (a planted `Consumed`) is judged again from scratch. A
 Restore that is only held (`Admitted=False`) or has no Job yet is not
 admitted, and its `Approval` still expires `AuthorizationExpired` as before.
 Defect P9 (the PoC install, 2026-09-24) was the absence of this rule: 900 s

@@ -137,6 +137,23 @@ pub const CONDITION_CONSUMED: &str = "Consumed";
 /// The `reason` on [`CONDITION_CONSUMED`].
 pub const REASON_RESTORE_ADMITTED: &str = "RestoreAdmitted";
 
+/// The `Verified` reason on a consumed `Approval` one of whose keys was
+/// revoked for `KeyCompromise` AFTER this controller recorded the admission
+/// (review M1; D3 §7.4's compromise row with an independent observation).
+///
+/// **NEVER GREEN.** `status.verified` is `false` beside it. What the row
+/// preserves is the ORDER of two recorded facts — the admission was observed
+/// before the revocation took effect — which an investigation needs and a
+/// badge must not turn into a pass. The record (authorization, key id,
+/// approver, `Consumed`) is kept.
+pub const REASON_RECORDED_BEFORE_REVOCATION: &str = "RecordedBeforeRevocation";
+
+/// The `Verified` reason on a consumed `Approval` whose key was revoked for
+/// `KeyCompromise` with an effective instant AT OR BEFORE the recorded
+/// admission — D3 §7.4's compromise row with no usable observation. The same
+/// spelling [`ApprovalRefusal::KeyRevoked`] writes for a fresh approval.
+pub const REASON_KEY_REVOKED: &str = "KeyRevoked";
+
 /// The message a missing roster produces — interface **I16**, verbatim.
 ///
 /// NEVER A SILENT REFUSAL. The single most likely way to reach this is an
@@ -1557,6 +1574,94 @@ pub struct Consumption {
     /// re-established it by verifying AT THE ADMISSION INSTANT, which is the
     /// one clock an admitted run's authorization was ever about.
     pub reverified: Option<Box<Verified>>,
+    /// What the record's verdict is now — review M1. The one key event that
+    /// reaches a consumed record is a `KeyCompromise` revocation: expiry,
+    /// `notAfter`, retirement and a `Superseded`/`Unspecified` revocation are
+    /// time-based boundaries on NEW uses and leave the record as it was; a
+    /// compromise says the signature itself may not be the key holder's, and
+    /// D3 §7.4 makes that "never green" for every document the key signed.
+    pub standing: Standing,
+}
+
+/// The verdict a consumed record carries — review M1.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Standing {
+    /// No key the record names is revoked for compromise in the resolved
+    /// trust: the recorded `Verified=True` stands.
+    Clean,
+    /// A key the record names is revoked for `KeyCompromise`: `Verified`
+    /// False, never green; the record itself is kept.
+    Compromised(Compromise),
+    /// An earlier pass withdrew the verdict for a compromise, and today's
+    /// resolution no longer shows the revocation — a `TrustPolicy` deleted, or
+    /// the namespace re-bound. **STICKY, deliberately.** The CRD makes a
+    /// revocation monotonic (G3: `Active|Retired → Revoked` and nowhere else),
+    /// so the only way it "disappears" is that the object recording it did,
+    /// which exonerates nothing. The withdrawal is kept verbatim.
+    StillWithdrawn {
+        /// The stored `Verified` reason.
+        reason: &'static str,
+    },
+}
+
+/// A `KeyCompromise` revocation of a key a consumed verdict names — review M1.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Compromise {
+    /// The revoked key's id.
+    pub key_id: String,
+    /// Which recorded field names it: `status.matchedKeyId` or
+    /// `status.authorization.confirmationKeyId`.
+    pub field: &'static str,
+    /// `revocationEffectiveFrom`, else `revokedAt` — the instant D3 compares
+    /// an observation against.
+    pub effective_from: Option<DateTime<Utc>>,
+    /// The independent, controller-written observation: the admission instant
+    /// the Restore controller recorded (`Consumed`'s `lastTransitionTime`).
+    pub observed_at: Option<DateTime<Utc>>,
+    /// D3 §7.4, decided by `logweir_core::trust::decide` itself: the
+    /// observation precedes the effective instant.
+    pub recorded_before: bool,
+}
+
+impl Compromise {
+    /// The `Verified` condition's reason for this compromise.
+    #[must_use]
+    pub const fn reason(&self) -> &'static str {
+        if self.recorded_before {
+            REASON_RECORDED_BEFORE_REVOCATION
+        } else {
+            REASON_KEY_REVOKED
+        }
+    }
+
+    /// The `Verified` condition's message. Recorded instants only, never the
+    /// clock, so an unchanged compromise is never rewritten.
+    #[must_use]
+    pub fn message(&self, subject: &VerifiedSubjectRef) -> String {
+        let at = |t: Option<DateTime<Utc>>| {
+            t.map_or_else(|| "an unrecorded instant".to_string(), |t| t.to_rfc3339())
+        };
+        format!(
+            "the key {} ({}) is revoked for KeyCompromise, effective {}. Restore {}/{} (UID {}) \
+             was admitted under this Approval at {}, {}. The authorization, key ids, approver \
+             and Consumed record are kept for the investigation; the verdict is never green \
+             while the revocation stands",
+            self.key_id,
+            self.field,
+            at(self.effective_from),
+            subject.namespace,
+            subject.name,
+            subject.uid,
+            at(self.observed_at),
+            if self.recorded_before {
+                "BEFORE the revocation took effect (RecordedBeforeRevocation: the order of the \
+                 two recorded facts, not a pass)"
+            } else {
+                "not before the revocation took effect, so no recorded observation separates \
+                 this signature from the compromise"
+            }
+        )
+    }
 }
 
 impl Consumption {
@@ -1584,16 +1689,32 @@ impl ApprovalOutcome {
     #[must_use]
     pub const fn reason(&self) -> &'static str {
         match self {
+            Self::Consumed(Consumption {
+                standing: Standing::Compromised(compromise),
+                ..
+            }) => compromise.reason(),
+            Self::Consumed(Consumption {
+                standing: Standing::StillWithdrawn { reason },
+                ..
+            }) => reason,
             Self::Verified(_) | Self::Consumed(_) => REASON_VERIFIED,
             Self::Refused(r) => r.reason(),
             Self::Referent(p) => p.reason(),
         }
     }
 
-    /// Whether `status.verified` is `true`.
+    /// Whether `status.verified` is `true` — never for a consumed record whose
+    /// key was revoked for compromise (review M1).
     #[must_use]
     pub const fn is_verified(&self) -> bool {
-        matches!(self, Self::Verified(_) | Self::Consumed(_))
+        matches!(
+            self,
+            Self::Verified(_)
+                | Self::Consumed(Consumption {
+                    standing: Standing::Clean,
+                    ..
+                })
+        )
     }
 
     /// Whether this outcome is a consumed verdict, kept as a record (P9).
@@ -1634,6 +1755,18 @@ impl ApprovalOutcome {
     #[must_use]
     pub fn message(&self) -> String {
         match self {
+            Self::Consumed(Consumption {
+                standing: Standing::Compromised(compromise),
+                subject,
+                ..
+            }) => compromise.message(subject),
+            Self::Consumed(Consumption {
+                standing: Standing::StillWithdrawn { reason },
+                ..
+            }) => format!(
+                "the verdict stays withdrawn ({reason}): a KeyCompromise revocation is not undone \
+                 by the object that recorded it disappearing"
+            ),
             Self::Consumed(c) => match c.reverified.as_deref() {
                 Some(v) => format!(
                     "{} — verified as of the admission at {}, the instant the Restore controller \
@@ -1847,41 +1980,82 @@ pub async fn decide_with_policy_at(
 
     // ---- P9: A CONSUMED VERDICT IS A RECORD, NOT A GATE -------------------
     //
-    // BEFORE TRUST, and before any other read. An `Approval` whose Restore was
-    // admitted under it has authorised the one thing it will ever authorise;
-    // a document expiry, a key event or a policy edit after that moment is
-    // about NEW uses, and re-judging the record against them is what rewrote
-    // a succeeded Restore's Approval `AuthorizationExpired` 900 s after its
-    // confirmation. Two ways in:
+    // An `Approval` whose Restore was admitted under it has authorised the one
+    // thing it will ever authorise; a document expiry, a key's `notAfter`, a
+    // retirement or a policy edit after that moment is about NEW uses, and
+    // re-judging the record against them is what rewrote a succeeded
+    // Restore's Approval `AuthorizationExpired` 900 s after its confirmation.
+    // Two ways in:
     //
-    // 1. This build already recorded `Consumed=True` — no API call at all.
+    // 1. This build already recorded `Consumed=True` — the stored status alone.
     // 2. The stored verdict is still `Verified=True` and the Restore now says
-    //    it was admitted under it. Checked here, AHEAD of trust resolution, so
-    //    that the pass which first sees the admission cannot be the pass that
-    //    withdraws the verdict (a `TrustPolicy` conflict, an expiry that came
-    //    due while the admission was not yet observed).
-    if let Some(recorded) = recorded_consumption(approval) {
-        return Ok(ApprovalOutcome::Consumed(recorded));
-    }
+    //    it was admitted under THIS Approval object (`admitted_under`, bound by
+    //    UID through the Restore's own approval bundle — review L3). Checked
+    //    AHEAD of the full evaluation, so that the pass which first sees the
+    //    admission cannot be the pass that withdraws the verdict.
+    //
+    // ...AND ONE KEY EVENT STILL REACHES IT (review M1). A `KeyCompromise`
+    // revocation says the signature may not be the key holder's, and D3 §7.4
+    // makes every document such a key signed "never green". So a consumed
+    // record reads the namespace's trust on every pass — one read, which is
+    // what every pass cost before P9 — and a compromise of a key it names
+    // turns `Verified` False (`RecordedBeforeRevocation`, or `KeyRevoked`)
+    // while the record itself is kept.
     let subject = &approval.spec.subject_ref;
     let stored = approval.status.as_ref();
     let mut prefetched: Option<Option<Restore>> = None;
-    if subject.kind == SubjectKind::Restore && stored.and_then(|s| s.verified) == Some(true) {
+    let mut candidate = recorded_consumption(approval);
+    if candidate.is_none()
+        && subject.kind == SubjectKind::Restore
+        && stored.and_then(|s| s.verified) == Some(true)
+    {
         if let Some(previous) = stored.and_then(|s| s.verified_subject_ref.as_ref()) {
             let restore = get_restore(client, &namespace, &subject.name).await?;
             if let Some(found) = restore.as_ref() {
                 let current = restore_subject(found, &subject.name, &namespace)?;
                 if &current == previous {
-                    if let Some(admitted_at) = admitted_under(found, approval) {
-                        return Ok(ApprovalOutcome::Consumed(Consumption {
+                    let bundle = admission_bundle(client, &namespace, found).await?;
+                    if let Some(admitted_at) = admitted_under(found, approval, bundle.as_ref()) {
+                        candidate = Some(Consumption {
                             subject: current,
                             admitted_at,
                             reverified: None,
-                        }));
+                            standing: Standing::Clean,
+                        });
                     }
                 }
             }
             prefetched = Some(restore);
+        }
+    }
+    if let Some(mut consumption) = candidate {
+        let withdrawn = stored_withdrawal(approval);
+        let unchanged = |withdrawn: Option<&'static str>| match withdrawn {
+            Some(reason) => Standing::StillWithdrawn { reason },
+            None => Standing::Clean,
+        };
+        match crate::trust::resolve(client, &namespace).await? {
+            Resolution::Trust(trust) => {
+                // REVIEW I1's GUARD: a record is kept only while the signature
+                // it records still verifies under the key it names (when the
+                // resolved trust carries that key at all). A `Consumed` planted
+                // on an Approval whose bytes were never signed by that key is
+                // not a record of anything, and is judged from scratch below.
+                if record_signature_holds(approval, &trust) {
+                    consumption.standing =
+                        match compromise_of(approval, &trust, consumption.admitted_at, now) {
+                            Some(compromise) => Standing::Compromised(compromise),
+                            None => unchanged(withdrawn),
+                        };
+                    return Ok(ApprovalOutcome::Consumed(consumption));
+                }
+            }
+            // A CONTESTED OR ABSENT TRUST IS NOT A REVOCATION. It says nothing
+            // about the keys this record names, so the record stands as stored.
+            Resolution::Conflict { .. } | Resolution::Unconfigured => {
+                consumption.standing = unchanged(withdrawn);
+                return Ok(ApprovalOutcome::Consumed(consumption));
+            }
         }
     }
 
@@ -1947,7 +2121,8 @@ pub async fn decide_with_policy_at(
                         // ONLY A VERDICT THAT WAS RECORDED FOR THIS UID can
                         // have been consumed by its admission: the Restore
                         // controller admits nothing without that binding.
-                        consumed_at = admitted_under(&restore, approval).flatten();
+                        let bundle = admission_bundle(client, &namespace, &restore).await?;
+                        consumed_at = admitted_under(&restore, approval, bundle.as_ref()).flatten();
                     }
                     (restore.spec.plan_bytes, Some(current))
                 }
@@ -2152,6 +2327,10 @@ pub async fn decide_with_policy_at(
                     subject,
                     admitted_at: Some(at),
                     reverified: Some(Box::new(verified)),
+                    // UNREACHABLE WITH A COMPROMISED KEY: `may_sign_new` refuses
+                    // a revoked key at every instant, so the re-evaluation above
+                    // has already refused. Stated, not assumed.
+                    standing: Standing::Clean,
                 }),
                 _ => ApprovalOutcome::Verified(verified),
             }
@@ -2264,6 +2443,10 @@ fn consumed_status(
 ) -> ApprovalStatus {
     let stored = approval.status.as_ref();
     let stored_conditions = stored.and_then(|s| s.conditions.as_ref());
+    // `lastTransitionTime` IS THE ADMISSION INSTANT the Restore controller
+    // recorded — the moment the verdict was consumed, not the moment this
+    // controller noticed — and it is the independent observation a later
+    // compromise is compared against (review M1). Carried verbatim once set.
     let consumed = match current_condition(stored_conditions, CONDITION_CONSUMED) {
         Some(existing) if existing.status == "True" => existing.clone(),
         existing => merge_condition(
@@ -2272,7 +2455,7 @@ fn consumed_status(
                 r#type: CONDITION_CONSUMED.to_string(),
                 status: "True".to_string(),
                 observed_generation: approval.metadata.generation,
-                last_transition_time: Some(now),
+                last_transition_time: Some(consumption.admitted_at.unwrap_or(now)),
                 reason: Some(REASON_RESTORE_ADMITTED.to_string()),
                 message: Some(consumption.message()),
             },
@@ -2285,63 +2468,174 @@ fn consumed_status(
         Some(slot) => *slot = next,
         None => conditions.push(next),
     };
-    match consumption.reverified.as_deref() {
-        None => {
-            let mut status = stored.cloned().unwrap_or_default();
-            let mut conditions = stored_conditions.cloned().unwrap_or_default();
-            upsert(&mut conditions, consumed);
-            status.conditions = Some(conditions);
-            status
-        }
+    let mut status = match consumption.reverified.as_deref() {
+        None => stored.cloned().unwrap_or_default(),
         Some(verified) => {
             let mut status =
                 status_for(approval, &ApprovalOutcome::Verified(verified.clone()), now);
-            let message = ApprovalOutcome::Consumed(consumption.clone()).message();
-            let mut conditions = status.conditions.take().unwrap_or_default();
-            for condition in &mut conditions {
+            let message = ApprovalOutcome::Consumed(Consumption {
+                standing: Standing::Clean,
+                ..consumption.clone()
+            })
+            .message();
+            for condition in status.conditions.iter_mut().flatten() {
                 if condition.r#type == CONDITION_VERIFIED {
                     condition.message = Some(message.clone());
                 }
             }
-            upsert(&mut conditions, consumed);
-            status.conditions = Some(conditions);
             status
         }
+    };
+    let mut conditions = status.conditions.take().unwrap_or_default();
+    // A COMPROMISE WITHDRAWS THE VERDICT AND NOTHING ELSE (review M1): the
+    // authorization, key ids, approver, ticket, window and subject binding are
+    // the record an investigation starts from, and they stay.
+    if let Standing::Compromised(compromise) = &consumption.standing {
+        let next = merge_condition(
+            current_condition(Some(&conditions), CONDITION_VERIFIED),
+            Condition {
+                r#type: CONDITION_VERIFIED.to_string(),
+                status: "False".to_string(),
+                observed_generation: approval.metadata.generation,
+                last_transition_time: Some(now),
+                reason: Some(compromise.reason().to_string()),
+                message: Some(compromise.message(&consumption.subject)),
+            },
+        );
+        upsert(&mut conditions, next);
+        status.verified = Some(false);
+    }
+    upsert(&mut conditions, consumed);
+    status.conditions = Some(conditions);
+    status
+}
+
+/// The stored `Verified` reason when an earlier pass withdrew a consumed
+/// verdict for a compromise — [`Standing::StillWithdrawn`]'s input.
+fn stored_withdrawal(approval: &Approval) -> Option<&'static str> {
+    let status = approval.status.as_ref()?;
+    if status.verified != Some(false) {
+        return None;
+    }
+    let verified = current_condition(status.conditions.as_ref(), CONDITION_VERIFIED)?;
+    match verified.reason.as_deref() {
+        Some(REASON_RECORDED_BEFORE_REVOCATION) => Some(REASON_RECORDED_BEFORE_REVOCATION),
+        Some(REASON_KEY_REVOKED) => Some(REASON_KEY_REVOKED),
+        _ => None,
     }
 }
 
-/// Whether the stored status already records a consumed verdict: `Verified`
-/// true, a subject binding, and `Consumed=True` — the three facts an earlier
-/// pass of THIS build wrote together. Read before any API call, so a consumed
-/// `Approval` costs nothing to reconcile.
+/// The consumption the stored status already records: `Consumed=True`, a
+/// subject binding and a matched key — the facts an earlier pass of this build
+/// wrote together. Read before any other API call.
+///
+/// NOT CONDITIONED ON `verified == true` (review M1): a consumed record whose
+/// key was later revoked for compromise carries `verified: false` and is STILL
+/// a consumed record — its `Consumed` condition and its authorization must
+/// survive the next pass, which is only possible if this still recognises it.
+///
+/// `admitted_at` is `Consumed`'s `lastTransitionTime`, which [`consumed_status`]
+/// stamps with the ADMISSION instant the Restore controller recorded — the
+/// independent observation D3 §7.4's compromise row compares against.
 fn recorded_consumption(approval: &Approval) -> Option<Consumption> {
     let status = approval.status.as_ref()?;
-    if status.verified != Some(true) {
-        return None;
-    }
     let subject = status.verified_subject_ref.clone()?;
+    status.matched_key_id.as_ref()?;
     let consumed = current_condition(status.conditions.as_ref(), CONDITION_CONSUMED)?;
-    (consumed.status == "True").then_some(Consumption {
+    (consumed.status == "True").then(|| Consumption {
         subject,
-        admitted_at: None,
+        admitted_at: consumed.last_transition_time,
         reverified: None,
+        standing: Standing::Clean,
     })
 }
 
-/// When `restore` records that it was ADMITTED under `approval`: the Restore
-/// names this `Approval` in `spec.approvalRef` (an ordinary Restore, never a
-/// rehearsal's standing authorization) and carries `Admitted=True`, which the
-/// Restore controller writes on the pass that creates the runner Job and
-/// carries on every later one. `Some(None)` when admitted with no recorded
-/// instant; `None` when not admitted under this `Approval` at all — including
-/// an `Admitted=False` HOLD, which is exactly the not-yet-admitted request an
-/// expiry must still refuse.
+/// The per-Restore approval bundle the Restore controller materialised before
+/// the runner Job — the one object that records WHICH `Approval` (by UID) the
+/// Restore was admitted under. `None` when the Restore is not admitted (no
+/// read is made), or when the bundle is absent.
+async fn admission_bundle(
+    client: &kube::Client,
+    namespace: &str,
+    restore: &Restore,
+) -> Result<Option<k8s_openapi::api::core::v1::ConfigMap>, ReconcileError> {
+    let admitted = current_condition(
+        restore.status.as_ref().and_then(|s| s.conditions.as_ref()),
+        crate::conditions::CONDITION_ADMITTED,
+    )
+    .is_some_and(|c| c.status == "True");
+    if !admitted {
+        return Ok(None);
+    }
+    let api: Api<k8s_openapi::api::core::v1::ConfigMap> =
+        Api::namespaced(client.clone(), namespace);
+    Ok(api
+        .get_opt(&super::restore::approval_bundle_config_map_name(
+            &restore.name_any(),
+        ))
+        .await?)
+}
+
+/// The `Approval` UID `bundle` records, when the bundle is this Restore's own:
+/// controlled by exactly this Restore UID, and annotated with it.
+///
+/// A ConfigMap is a namespace tenant's object as much as the controller's, so
+/// one that is not demonstrably the Restore controller's bundle for THIS
+/// Restore answers nothing — never "admitted under whatever it names".
+#[must_use]
+pub fn admitted_approval_uid(
+    bundle: &k8s_openapi::api::core::v1::ConfigMap,
+    restore_uid: &str,
+) -> Option<String> {
+    let meta = &bundle.metadata;
+    let owned = meta.owner_references.as_ref().is_some_and(|refs| {
+        refs.iter().any(|r| {
+            r.controller == Some(true) && r.kind == Restore::kind(&()) && r.uid == restore_uid
+        })
+    });
+    let annotations = meta.annotations.as_ref()?;
+    let annotated = annotations
+        .get(super::restore::BUNDLE_RESTORE_UID_ANNOTATION)
+        .is_some_and(|uid| uid == restore_uid);
+    if !owned || !annotated {
+        return None;
+    }
+    annotations
+        .get(super::restore::BUNDLE_APPROVAL_UID_ANNOTATION)
+        .filter(|uid| !uid.trim().is_empty())
+        .cloned()
+}
+
+/// When `restore` records that it was ADMITTED under `approval` — this
+/// OBJECT, not merely this name (review L3).
+///
+/// * The Restore names this `Approval` in `spec.approvalRef` (an ordinary
+///   Restore, never a rehearsal's standing authorization) and carries
+///   `Admitted=True`, which the Restore controller writes on the pass that
+///   creates the runner Job and carries on every later one. An
+///   `Admitted=False` HOLD is exactly the not-yet-admitted request an expiry
+///   must still refuse.
+/// * **The object.** The Restore's own approval bundle (`bundle`, see
+///   [`admitted_approval_uid`]) records the `Approval` UID the Restore
+///   controller admitted under; it must be this object's UID. A Restore
+///   admitted before per-Restore bundles existed has none, and then the object
+///   must have EXISTED at the admission (`creationTimestamp` at or before it):
+///   an `Approval` deleted and re-created under the same name after the
+///   admission is another object, and its verdict was consumed by nothing.
+///
+/// `Some(None)` is unreachable in practice (the Restore controller always
+/// stamps the condition), and without an instant the creation-time fallback
+/// cannot bind, so it answers `None`.
 ///
 /// `Restore.status` is written only by this controller's service account (the
 /// chart grants `restores/status` to nobody else), which is the same trust the
 /// Restore controller already places in `Approval.status.verified`.
 #[must_use]
-pub fn admitted_under(restore: &Restore, approval: &Approval) -> Option<Option<DateTime<Utc>>> {
+pub fn admitted_under(
+    restore: &Restore,
+    approval: &Approval,
+    bundle: Option<&k8s_openapi::api::core::v1::ConfigMap>,
+) -> Option<Option<DateTime<Utc>>> {
     if restore.spec.authorization.is_some()
         || restore.spec.approval_ref_name().trim() != approval.name_any()
     {
@@ -2351,7 +2645,126 @@ pub fn admitted_under(restore: &Restore, approval: &Approval) -> Option<Option<D
         restore.status.as_ref().and_then(|s| s.conditions.as_ref()),
         crate::conditions::CONDITION_ADMITTED,
     )?;
-    (admitted.status == "True").then_some(admitted.last_transition_time)
+    if admitted.status != "True" {
+        return None;
+    }
+    let restore_uid = restore.uid().unwrap_or_default();
+    let bound = match bundle.and_then(|b| admitted_approval_uid(b, &restore_uid)) {
+        Some(uid) => approval.uid().is_some_and(|mine| mine == uid),
+        None => match (
+            approval.metadata.creation_timestamp.as_ref(),
+            admitted.last_transition_time,
+        ) {
+            (Some(created), Some(at)) => created.0 <= at,
+            _ => false,
+        },
+    };
+    bound.then_some(admitted.last_transition_time)
+}
+
+/// Review I1's guard: whether the signature the stored verdict records still
+/// verifies over `spec.approvalBytes` under the key `status.matchedKeyId`
+/// names. Cryptography only — no clock, no lifecycle — so an expired, retired
+/// or revoked key still answers `true` here (the compromise question is
+/// [`compromise_of`]'s).
+///
+/// A key the resolved trust no longer carries cannot be checked, and the
+/// record then stands: the absence of a key from TODAY'S resolution (a policy
+/// deleted, a namespace re-bound) says nothing about the signature, and a
+/// compromise is an affirmative revocation, not an absence.
+fn record_signature_holds(approval: &Approval, trust: &ResolvedTrust) -> bool {
+    let Some(key_id) = approval
+        .status
+        .as_ref()
+        .and_then(|s| s.matched_key_id.as_deref())
+    else {
+        return false;
+    };
+    let Some(entry) = trust.key(key_id) else {
+        return true;
+    };
+    let Ok(sidecar) = serde_json::from_str::<Sidecar>(&approval.spec.sidecar_bytes) else {
+        return false;
+    };
+    if sidecar.payload_type != PAYLOAD_TYPE_APPROVAL
+        && sidecar.payload_type != PAYLOAD_TYPE_RESTORE_AUTHORIZATION
+    {
+        return false;
+    }
+    let Ok(key) = VerifyingKey::from_pem_str(&entry.spki_pem) else {
+        return false;
+    };
+    let payload_type = sidecar.payload_type.clone();
+    verify_detached(
+        &key,
+        &payload_type,
+        approval.spec.approval_bytes.as_bytes(),
+        &sidecar,
+    )
+    .is_ok_and(|matched| matched == key_id)
+}
+
+/// A `KeyCompromise` revocation of a key the stored verdict names — review M1.
+///
+/// THE RULE IS `logweir_core::trust::decide`'s, CALLED, NOT RE-WRITTEN: its
+/// compromise rows compare the independent observation with
+/// `revocationEffectiveFrom` (else `revokedAt`) and never read the document's
+/// claim, which is exactly this question. Only a `Revoked`/`KeyCompromise` key
+/// is asked; every other key state leaves the record as it was.
+fn compromise_of(
+    approval: &Approval,
+    trust: &ResolvedTrust,
+    observed_at: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> Option<Compromise> {
+    use logweir_core::trust as core;
+    let status = approval.status.as_ref()?;
+    let named = [
+        (status.matched_key_id.as_deref(), "status.matchedKeyId"),
+        (
+            status
+                .authorization
+                .as_ref()
+                .map(|a| a.confirmation_key_id.as_str()),
+            "status.authorization.confirmationKeyId",
+        ),
+    ];
+    for (key_id, field) in named {
+        let Some(key_id) = key_id.filter(|id| !id.is_empty()) else {
+            continue;
+        };
+        let Some(entry) = trust.key(key_id) else {
+            continue;
+        };
+        let key = &entry.trust;
+        if key.state != core::KeyState::Revoked
+            || key.reason() != core::RevocationReason::KeyCompromise
+        {
+            continue;
+        }
+        // A usage the key declares, so `decide` reaches its compromise rows
+        // rather than stopping at the usage row. A key with no usage cannot
+        // have produced the verdict; it fails closed below.
+        let recorded_before = key.usages.first().is_some_and(|usage| {
+            core::decide(
+                Some(key),
+                *usage,
+                &core::EvidenceClaim::absent(core::ClaimAbsence::FieldAbsent),
+                &core::IndependentObservation { observed_at },
+                now,
+            )
+            .reason
+                == Some(core::UntrustReason::RecordedBeforeRevocation)
+        });
+        return Some(Compromise {
+            key_id: key_id.to_string(),
+            field,
+            effective_from: key.revocation_effective_from.or(key.revoked_at),
+            observed_at,
+            recorded_before,
+        });
+    }
+    None
 }
 
 /// The exact subject reference for a `Restore` the API server returned.
