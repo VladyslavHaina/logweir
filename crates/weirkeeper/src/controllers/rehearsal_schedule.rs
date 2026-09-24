@@ -2046,8 +2046,8 @@ pub const VERDICT_WAIT_SECONDS: i64 = 3600;
 /// evidence-fetch path it is the gap between the terminal patch and the fetch
 /// pass's first `Pending` write — milliseconds in the same reconcile, or one
 /// requeue after a crash between the two (`restore.rs`'s `unrecorded` arm
-/// repairs it). On the controller's own read handle (the `GlobalHandle` and
-/// `Destination` sources) it is PERMANENT: a scorecard read that failed leaves
+/// repairs it). On a destination's own `ControllerIdentity` read handle (the
+/// `Destination` source) it is PERMANENT: a scorecard read that failed leaves
 /// no digest and therefore no verdict, and a lost verification patch is not
 /// retried, because a terminal `Restore` otherwise waits for a change. Waiting
 /// the full hour there would consume every slot due in it as
@@ -2058,6 +2058,15 @@ pub const VERDICT_WAIT_SECONDS: i64 = 3600;
 /// record of every restore, not only rehearsals, and still not cover a lost
 /// second patch; bounding the wait here covers both and fails closed. A
 /// verdict that arrives later is still on the `Restore` for anyone reading it.
+///
+/// AMENDED FOR ONE SOURCE (legacy-point-restore, PoC P5): an INLINE-ARCHIVE
+/// run read through the controller's global handle now publishes
+/// `NotAttempted`, naming the key, when that read produced nothing
+/// (`restore::unread_scorecard_verdict`, which states why). A rehearsal over
+/// such a point therefore records `VerificationNotAttempted` at once rather
+/// than `EvidenceVerdictNotReached` after this grace. Everything else above
+/// stands: a `Destination` read that fails still writes no block, and a lost
+/// second patch is still covered only by this grace.
 pub const UNRECORDED_VERDICT_GRACE_SECONDS: i64 = 300;
 
 /// `lastFailed.reason` for an exit-0 rehearsal whose evidence verdict was

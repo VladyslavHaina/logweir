@@ -1951,26 +1951,39 @@ pub enum LegacyEvidenceScope {
     GlobalHandleApplies,
     /// The evidence is somewhere the handle cannot see.
     Elsewhere {
-        /// `<backend>://<bucket>` the run's evidence was written to.
+        /// `<backend>://<bucket>` the run's evidence was written to — the
+        /// tenant's own plan, and safe to publish.
         evidence: String,
-        /// The handle's `LOGWEIR_ARCHIVE_URL`.
+        /// The handle's `LOGWEIR_ARCHIVE_URL`. INSTALLATION CONFIGURATION: it
+        /// goes to the controller's log and never into a status a tenant reads
+        /// (review L4 of the legacy-point-restore round).
         handle: String,
     },
 }
 
+/// How a tenant-visible sentence names the controller's archive handle: by
+/// ROLE, never by value. The handle's URL is installation configuration, and a
+/// status, a Preflight message or an event is readable by every operator of the
+/// namespace — in shared mode by every tenant of the console. The value is in
+/// the controller's log, where an administrator reads it.
+pub const ARCHIVE_HANDLE_LABEL: &str = "the controller's archive handle (the installation's \
+     LOGWEIR_ARCHIVE_URL, which an administrator can read in the controller's configuration)";
+
 impl LegacyEvidenceScope {
-    /// The `NotAttempted` detail for [`Self::Elsewhere`], naming both
-    /// locations and the command that verifies the run without the
-    /// controller; `None` for every scope the handle may read.
+    /// The `NotAttempted` detail for [`Self::Elsewhere`]: the run's OWN
+    /// evidence location, the handle by [`ARCHIVE_HANDLE_LABEL`] only, and the
+    /// command that verifies the run without the controller; `None` for every
+    /// scope the handle may read.
     #[must_use]
     pub fn not_attempted_detail(&self, document: &str) -> Option<String> {
         match self {
-            Self::Elsewhere { evidence, handle } => Some(format!(
-                "this run wrote its {document} to {evidence}, and an inline-archive run's \
-                 evidence is read only through the controller's archive handle, \
-                 LOGWEIR_ARCHIVE_URL = {handle}; nothing was read and nothing is verified. \
-                 Write the evidence to that bucket (the console's default for a point with no \
-                 destination), or run the printed logweir drill verify command"
+            Self::Elsewhere { evidence, .. } => Some(format!(
+                "this run wrote its {document} to {evidence}, which is not the bucket of \
+                 {ARCHIVE_HANDLE_LABEL}; an inline-archive run's evidence is read only through \
+                 that handle, so nothing was read and nothing is verified. Write the evidence \
+                 to the handle's bucket (on the chart's default install, the recovery point's \
+                 own archive bucket, which the console starts the field on), or run the \
+                 printed logweir drill verify command"
             )),
             Self::HandleLocationUnstated | Self::GlobalHandleApplies => None,
         }

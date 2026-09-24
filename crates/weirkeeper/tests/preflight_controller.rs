@@ -7693,8 +7693,14 @@ fn a_legacy_plan_whose_evidence_the_controller_cannot_read_is_warned_about() {
     assert_eq!(row.state, CheckState::Unknown);
     assert!(
         row.message.contains("s3://logweir-evidence")
-            && row.message.contains("s3://kafka-backups/logweir"),
+            && row.message.contains("LOGWEIR_ARCHIVE_URL"),
         "{}",
+        row.message
+    );
+    assert!(
+        !row.message.contains("kafka-backups"),
+        "review L4: the handle's location is installation configuration; a Preflight message \
+         is read by every operator of the namespace: {}",
         row.message
     );
     let unset = pf::legacy_evidence_row(&legacy(), &evidence("kafka-backups"), None, now())
@@ -7900,5 +7906,189 @@ async fn a_legacy_point_with_no_secret_is_not_ready_and_creates_no_job() {
     assert!(
         !seen.iter().any(|r| r.method == "POST"),
         "no plan and no Job for a check that cannot run as the restore's principal"
+    );
+}
+
+// ===========================================================================
+// legacy-point-restore review round: L1 (the location rules), M1(b) (a
+// restoreRef check reads as that Restore will)
+// ===========================================================================
+
+/// **L1 / R1.** The plan's endpoint and region WIN over the installation's
+/// legacy addressing, as they do in the restore Job: its store is
+/// `AmazonS3Builder::from_env()` (the forwarded `AWS_ENDPOINT_URL`,
+/// `AWS_REGION`) followed by `with_endpoint`/`with_region` of the plan's own
+/// values. The installation's are a fallback for what the plan leaves out,
+/// never an override.
+#[test]
+fn the_plans_endpoint_and_region_win_over_the_installations() {
+    let plan = legacy_plan_yaml("kafka-backups");
+    let addressing = weirkeeper::check::policy::LegacyArchiveAddressing {
+        endpoint: "http://minio.installation:9000".to_string(),
+        region: "eu-west-1".to_string(),
+        allow_http: true,
+        virtual_hosted_style: false,
+    };
+    let resolved =
+        pf::legacy_source_destination(NS, &legacy(), Some(&legacy_plan_source(&plan)), &addressing)
+            .expect("it resolves");
+    assert_eq!(
+        resolved.location.endpoint.as_deref(),
+        Some(LEGACY_ENDPOINT),
+        "the check reads where the restore will: the plan's endpoint"
+    );
+    assert_eq!(resolved.location.region.as_deref(), Some("us-east-1"));
+}
+
+/// **L1 / R2 — D-SEAMS S5 and SEC-ENVHTTP on the new path.** The
+/// installation's `allowHttp` never enables plaintext for the check: the
+/// restore Job's store applies the plan's `allow_http` AFTER the environment,
+/// so a plan saying `false` is refused plaintext whatever the installation
+/// forwards. A plan that leaves the endpoint out, says `allow_http: false`,
+/// and falls back to an installation `http://` endpoint therefore cannot be
+/// reached by the restore — and the check says so (`notReady`, R3) instead of
+/// reading over plaintext.
+#[test]
+fn the_installations_plaintext_setting_never_enables_http_for_the_check() {
+    let plan = legacy_plan_yaml("kafka-backups")
+        .replace(&format!("    endpoint: {LEGACY_ENDPOINT}\n"), "")
+        .replace(
+            "    allow_http: true\n  backup:",
+            "    allow_http: false\n  backup:",
+        );
+    let source = legacy_plan_source(&plan);
+    assert!(
+        matches!(
+            &source,
+            logweir_core::engine::StorageUrl::S3 {
+                endpoint: None,
+                allow_http: false,
+                ..
+            }
+        ),
+        "the premise: no plan endpoint, plaintext not allowed by the plan: {source:?}"
+    );
+    let addressing = weirkeeper::check::policy::LegacyArchiveAddressing {
+        endpoint: "http://minio.installation:9000".to_string(),
+        region: String::new(),
+        allow_http: true,
+        virtual_hosted_style: false,
+    };
+    let refusal = pf::legacy_source_destination(NS, &legacy(), Some(&source), &addressing)
+        .expect_err("the installation's allowHttp is not the plan's");
+    assert_eq!(refusal.code, CheckCode::DestinationNotValid);
+
+    // And over TLS the installation's flag changes nothing either.
+    let tls = legacy_plan_source(
+        &legacy_plan_yaml("kafka-backups")
+            .replace(LEGACY_ENDPOINT, "https://minio.tls:9000")
+            .replace("allow_http: true", "allow_http: false"),
+    );
+    let resolved = pf::legacy_source_destination(NS, &legacy(), Some(&tls), &addressing)
+        .expect("an https endpoint resolves");
+    assert!(!resolved.location.transport.allows_plaintext_http());
+}
+
+/// **M1(b).** A check of an EXISTING Restore reads as that Restore will: its
+/// archive and Secret come from `spec.sourceArchive`, and a request naming
+/// another Secret — or a Restore that names none — is a conflict, both named.
+#[test]
+fn a_restore_ref_check_must_name_the_restores_own_archive_and_secret() {
+    let own = pf::LegacySource {
+        url: LEGACY_URL.to_string(),
+        secret: Some(LEGACY_SECRET.to_string()),
+    };
+    assert!(pf::legacy_request_conflict(&own, &own, "r-1").is_none());
+    let other = pf::LegacySource {
+        secret: Some("some-other-secret".to_string()),
+        ..own.clone()
+    };
+    let refusal = pf::legacy_request_conflict(&other, &own, "r-1").expect("another Secret");
+    assert_eq!(refusal.code, CheckCode::PlanDestinationMismatch);
+    assert!(
+        refusal.message.contains("some-other-secret") && refusal.message.contains(LEGACY_SECRET),
+        "{}",
+        refusal.message
+    );
+    let none = pf::LegacySource {
+        secret: None,
+        ..own.clone()
+    };
+    assert!(pf::legacy_request_conflict(&own, &none, "r-1").is_some());
+}
+
+/// **M1(b), through the reconciler.** The Restore projects `logweir-s3`; the
+/// request names `some-other-secret`. The verdict is `notReady` on
+/// `destination.resolved`, and no plan and no Job are created.
+///
+/// FAILS ON THE PREVIOUS ROUND: the request's Secret was taken as given, the
+/// check plan was rendered with it, and nothing compared it with the Restore.
+#[tokio::test]
+async fn a_restore_ref_check_with_another_secret_is_refused_and_runs_nothing() {
+    let plan = legacy_plan_yaml("kafka-backups");
+    let restore_object = json!({
+        "apiVersion": "logweir.dev/v1alpha1", "kind": "Restore",
+        "metadata": {"name": "r-1", "namespace": NS, "uid": "restore-uid", "generation": 1},
+        "spec": {
+            "planBytes": plan,
+            "approvalRef": {"name": "ap-1"},
+            "sourceArchive": {"url": LEGACY_URL, "secretRef": {"name": LEGACY_SECRET}},
+            "backupSetRef": "bk-1",
+            "pointInTime": "2026-09-15T00:00:00Z",
+            "target": {
+                "clusterRef": {"name": "target"}, "mode": "scratch",
+                "topicNaming": {"prefix": "restore-"}
+            },
+            "deadlineSeconds": 3600
+        }
+    });
+    let mut routes = legacy_referent_routes();
+    routes.push(route("GET", "/restores/r-1", restore_object.to_string()));
+    routes.push(not_found("GET", "/approvals/ap-1"));
+    routes.push(route("PATCH", "/pf-1/status", echo("Preflight", "pf-1")));
+    let request = json!({"operation": "Restore", "restore": {
+        "restoreRef": {"name": "r-1"},
+        "legacySourceArchive": {"url": LEGACY_URL, "secretRef": {"name": "some-other-secret"}},
+        "recoveryPointRef": {"name": "nightly-1", "uid": BACKUP_UID}
+    }, "timeoutSeconds": 120});
+    let (status, recorder) = reconcile_with(&preflight(request), routes).await;
+    let row = check_entry(&status, "destination.resolved");
+    assert_eq!(row["state"], "notReady", "{status}");
+    assert_eq!(row["code"], "PlanDestinationMismatch");
+    assert!(
+        row["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("some-other-secret") && m.contains(LEGACY_SECRET)),
+        "{row}"
+    );
+    let seen = recorder.lock().expect("recorder");
+    assert!(
+        !seen.iter().any(|r| r.method == "POST"),
+        "no plan and no Job for a check that would read as another principal"
+    );
+}
+
+/// **L7.** A relayed runner message that names the plan's placeholder
+/// destination names the inline archive instead.
+#[test]
+fn a_relayed_message_names_the_inline_archive_not_the_placeholder() {
+    let row = runner_row(
+        CheckId::ArchiveBackupSet,
+        CheckState::NotReady,
+        CheckCode::BackupSetNotFound,
+        Gating::Blocking,
+    )
+    .with_message(&format!(
+        "the backup manifest `poc/bk-1/manifest.json` on destination `{}` could not be read",
+        pf::LEGACY_ARCHIVE_PLAN_NAME
+    ));
+    let rescoped = pf::rescope_legacy(vec![row], &legacy());
+    assert!(
+        rescoped[0]
+            .message
+            .contains(&format!("inline archive `{LEGACY_URL}`"))
+            && !rescoped[0].message.contains(pf::LEGACY_ARCHIVE_PLAN_NAME),
+        "{}",
+        rescoped[0].message
     );
 }

@@ -8187,10 +8187,16 @@ async fn a_legacy_restore_whose_evidence_the_handle_cannot_see_is_not_read_and_s
     let detail = verification["detail"].as_str().expect("the detail");
     assert!(
         detail.contains("s3://logweir-evidence")
-            && detail.contains(LEGACY_HANDLE)
+            && detail.contains("LOGWEIR_ARCHIVE_URL")
             && detail.contains("logweir drill verify"),
-        "the sentence names where the evidence went, where the handle reads and what to run: \
+        "the sentence names where the evidence went, the handle by role and what to run: \
          {detail}"
+    );
+    // REVIEW L4: the handle's location is installation configuration, and this
+    // detail is in a status every operator of the namespace reads.
+    assert!(
+        !detail.contains(LEGACY_HANDLE) && !detail.contains("kafka-backups"),
+        "the archive handle's URL and bucket never reach a tenant-visible status: {detail}"
     );
     assert!(
         statuses.iter().all(|s| s["completion"].is_null()),
@@ -8255,8 +8261,12 @@ async fn a_scorecard_the_handle_read_nothing_for_is_not_attempted_and_named() {
     assert_eq!(verification["result"], "NotAttempted", "{statuses:?}");
     let detail = verification["detail"].as_str().expect("the detail");
     assert!(
-        detail.contains(SCORECARD_KEY) && detail.contains(LEGACY_HANDLE),
-        "the key and the handle are named: {detail}"
+        detail.contains(SCORECARD_KEY) && detail.contains("LOGWEIR_ARCHIVE_URL"),
+        "the key and the handle (by role) are named: {detail}"
+    );
+    assert!(
+        !detail.contains(LEGACY_HANDLE),
+        "review L4: the handle's URL is not in the status: {detail}"
     );
     assert!(verification["matchedKeyId"].is_null());
     assert!(statuses.iter().all(|s| s["completion"].is_null()));
@@ -8338,4 +8348,93 @@ fn the_legacy_evidence_scope_compares_backend_and_bucket() {
         legacy_backup_evidence_scope("s3://team-b-archive/orders", Some(LEGACY_HANDLE)),
         LegacyEvidenceScope::Elsewhere { .. }
     ));
+}
+
+// ===========================================================================
+// legacy-point-restore review round: L2 (the shipped wiring), L3 (the unread
+// verdict is for inline-archive runs only)
+// ===========================================================================
+
+/// **L2.** The SHIPPED reconcile states the handle's location: it reads
+/// `LOGWEIR_ARCHIVE_URL` from its environment and hands it to the evidence
+/// guard. The reviewer's mutant R3 (passing `None` there) left every row green,
+/// because every row drove `reconcile_restore_at` directly.
+///
+/// Here the environment names the PoC handle and the controller holds no
+/// handle at all (`Context::archive: None`), over the PoC-shaped plan that
+/// writes its evidence to `logweir-evidence`. With the location stated the
+/// verdict is the guard's ("not the bucket of the controller's archive
+/// handle"); with it dropped it would be the unread sentence instead.
+#[tokio::test]
+async fn the_shipped_reconcile_states_the_handle_location_it_read() {
+    let object: Restore = serde_json::from_str(&restore_json(
+        &legacy_plan_with_evidence_in("logweir-evidence"),
+        APPROVAL,
+        NAME,
+    ))
+    .expect("the fixture is a Restore");
+    let (client, _rec, bodies) = mock_client_recording_bodies(finished_routes(
+        pod_list_terminated(0),
+        log_body(&i8_tail()),
+        "Complete",
+    ));
+    let ctx = weirkeeper::controllers::Context {
+        client,
+        archive: None,
+        runner_image: job::RunnerImage::default(),
+    };
+    let env = |name: &str| -> Result<String, std::env::VarError> {
+        if name == "LOGWEIR_ARCHIVE_URL" {
+            Ok(LEGACY_HANDLE.to_string())
+        } else {
+            Err(std::env::VarError::NotPresent)
+        }
+    };
+    weirkeeper::controllers::restore::reconcile_in_context(
+        &object,
+        &ctx,
+        &logweir_core::approval_policy::ApprovalPolicySet::default(),
+        now(),
+        &env,
+    )
+    .await
+    .expect("the reconcile completes");
+    let statuses = patched_statuses(&bodies.lock().expect("readable"));
+    let detail = statuses.last().expect("a verdict")["evidence"]["verification"]["detail"]
+        .as_str()
+        .expect("a NotAttempted detail")
+        .to_string();
+    assert!(
+        detail.contains("s3://logweir-evidence") && detail.contains("is not the bucket of"),
+        "the guard ran on the location the shipped path read from its environment: {detail}"
+    );
+}
+
+/// **L3.** The unread-scorecard verdict is written for an inline-archive run
+/// read through the global handle, and for NO other source: a
+/// destination-backed run whose own `ControllerIdentity` read fails keeps the
+/// recorded behaviour of `rehearsal_schedule::UNRECORDED_VERDICT_GRACE_SECONDS`
+/// (no block; the schedule's grace bounds it), and a run with no keys has no
+/// document to have an opinion about.
+#[test]
+fn the_unread_verdict_is_for_an_inline_archive_run_only() {
+    use weirkeeper::controllers::backup::EvidenceSource;
+    use weirkeeper::controllers::restore::unread_scorecard_verdict;
+    let global = unread_scorecard_verdict(&EvidenceSource::GlobalHandle, true, SCORECARD_KEY)
+        .expect("an inline-archive run that read nothing is NotAttempted");
+    assert_eq!(global.result, VerificationVerdict::NotAttempted);
+    assert!(global
+        .detail
+        .as_deref()
+        .is_some_and(|d| d.contains(SCORECARD_KEY)));
+    assert!(
+        unread_scorecard_verdict(&EvidenceSource::GlobalHandle, false, SCORECARD_KEY).is_none(),
+        "GC11: no keys, no document, no verdict"
+    );
+    let destination = EvidenceSource::Destination(Arc::new(Store::in_memory("logweir/")));
+    assert!(
+        unread_scorecard_verdict(&destination, true, SCORECARD_KEY).is_none(),
+        "a destination's own-handle read that failed writes no block: the recorded decision \
+         for that source stands"
+    );
 }

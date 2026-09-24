@@ -4632,13 +4632,22 @@ async fn reconcile_backup_inner(
     // destination-backed run: it holds a different principal over a different
     // bucket, and an answer from it would read as "no evidence" rather than
     // "wrong bucket" (grounding G2).
-    let evidence_from = legacy_receipt_source(
-        evidence_source(backup, client, &namespace, now)
-            .await
-            .map_err(BackupError::Api)?,
-        &backup.spec.archive.url,
-        archive_url,
-    );
+    let routed = evidence_source(backup, client, &namespace, now)
+        .await
+        .map_err(BackupError::Api)?;
+    let was_global = matches!(routed, EvidenceSource::GlobalHandle);
+    let evidence_from = legacy_receipt_source(routed, &backup.spec.archive.url, archive_url);
+    if was_global && !matches!(evidence_from, EvidenceSource::GlobalHandle) {
+        // The handle's location is named here, in the controller's log, and
+        // never in the status (`destination::ARCHIVE_HANDLE_LABEL`).
+        info!(
+            backup = %name,
+            namespace = %namespace,
+            archive_handle = archive_url.unwrap_or_default(),
+            "this inline-archive run's archive is outside the archive handle's bucket; its \
+             receipt is not read and the verdict is NotAttempted"
+        );
+    }
 
     // STEP 5, and interface I22's window, off ONE observation. AWAITED: the
     // real oracle's two `Store` reads happen inside one `spawn_blocking`
@@ -5019,6 +5028,26 @@ async fn reconcile_backup_inner(
 /// credential. See [`ArchiveOracle`] for why `None` is the only honest value
 /// and why the oracle is async.
 async fn reconcile(backup: Arc<Backup>, ctx: Arc<Context>) -> Result<Action, BackupError> {
+    reconcile_in_context(&backup, &ctx, Utc::now(), &|name: &str| std::env::var(name)).await?;
+    Ok(Action::requeue(std::time::Duration::from_secs(
+        REQUEUE_SECS,
+    )))
+}
+
+/// [`reconcile`]'s body: the oracles over [`Context::archive`] and the handle's
+/// own LOCATION, read from `env` beside it, handed to [`reconcile_backup_at`]
+/// — the `Backup` twin of `restore::reconcile_in_context`, and a parameter for
+/// the same reason (review L2).
+///
+/// # Errors
+///
+/// As [`reconcile_backup_at`].
+pub async fn reconcile_in_context(
+    backup: &Backup,
+    ctx: &Context,
+    now: DateTime<Utc>,
+    env: crate::controllers::restore::EnvReader<'_>,
+) -> Result<BackupOutcome, BackupError> {
     let archive = ctx.archive.clone();
     let oracle = move |keys: EvidenceKeys| -> BoxFuture<'static, Option<ArchiveObservation>> {
         let handle = archive.clone();
@@ -5036,20 +5065,17 @@ async fn reconcile(backup: Arc<Backup>, ctx: Arc<Context>) -> Result<Action, Bac
     // THE HANDLE'S OWN LOCATION, read beside the handle — see
     // `reconcile_backup_at`.
     let archive_url =
-        crate::retention::configured_archive_url(std::env::var(crate::retention::ARCHIVE_URL_ENV));
+        crate::retention::configured_archive_url(env(crate::retention::ARCHIVE_URL_ENV));
     reconcile_backup_at(
-        &backup,
+        backup,
         &ctx.client,
         &oracle,
         &verify,
-        Utc::now(),
+        now,
         &ctx.runner_image,
         archive_url.as_deref(),
     )
-    .await?;
-    Ok(Action::requeue(std::time::Duration::from_secs(
-        REQUEUE_SECS,
-    )))
+    .await
 }
 
 /// Requeue on an error, naming it. Never a panic and never a drop.

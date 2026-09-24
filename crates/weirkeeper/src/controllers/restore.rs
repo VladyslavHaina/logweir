@@ -3730,36 +3730,58 @@ pub fn legacy_evidence_source(
     }
 }
 
-/// The `NotAttempted` detail for a run whose runner printed both evidence keys
-/// and whose controller-side read produced no document.
+/// The `NotAttempted` detail for an INLINE-ARCHIVE run whose runner printed
+/// both evidence keys and whose read through the controller's archive handle
+/// produced no document.
 ///
-/// It names the key, which handle was read and what the three causes are — the
-/// handle is not configured, the object is not in that bucket, or the
-/// controller's credential cannot read it — because the controller's oracle
-/// collapses them into one "nothing" and a sentence that picked one would be a
-/// guess. It never contains a credential: the handle's URL is configuration,
-/// and `LOGWEIR_ARCHIVE_URL` carries none (`storage_url_for` refuses userinfo).
+/// It names the key, the handle BY ROLE ([`crate::destination::ARCHIVE_HANDLE_LABEL`])
+/// and the three causes — the handle is not configured, the object is not in
+/// its bucket, or the controller's credential cannot read it — because the
+/// oracle collapses them into one "nothing" and a sentence that picked one
+/// would be a guess. The handle's URL is installation configuration and is NOT
+/// in it: this detail lands in a status every operator of the namespace can
+/// read (review L4). Nothing here is checked for userinfo either, because
+/// nothing from `LOGWEIR_ARCHIVE_URL` is copied into it.
 #[must_use]
-pub fn unread_scorecard_detail(
-    key: &str,
-    from: &backup::EvidenceSource,
-    archive_url: Option<&str>,
-) -> String {
-    let reader = match from {
-        backup::EvidenceSource::Destination(_) => {
-            "the evidence destination's ControllerIdentity handle".to_string()
-        }
-        _ => match archive_url.filter(|u| !u.is_empty()) {
-            Some(url) => format!("the controller's archive handle (LOGWEIR_ARCHIVE_URL = {url})"),
-            None => "the controller's archive handle (LOGWEIR_ARCHIVE_URL)".to_string(),
-        },
-    };
+pub fn unread_scorecard_detail(key: &str) -> String {
     format!(
         "the runner reported scorecard `{key}` and weirkeeper read no such document through \
-         {reader}: the handle is not configured, the object is not in the bucket it reads, or \
-         the controller's credential cannot read it. Nothing was verified and no completion is \
-         written; run the printed logweir drill verify command"
+         {}: the handle is not configured, the object is not in the bucket it reads, or the \
+         controller's credential cannot read it. Nothing was verified and no completion is \
+         written; run the printed logweir drill verify command",
+        crate::destination::ARCHIVE_HANDLE_LABEL
     )
+}
+
+/// The verdict for a finished run whose runner printed both scorecard keys and
+/// whose controller-side read produced NO digest — `Some` only for an
+/// INLINE-ARCHIVE run read through the controller's archive handle — PURE.
+///
+/// # Why only that source (review L3)
+///
+/// `rehearsal_schedule::UNRECORDED_VERDICT_GRACE_SECONDS` records the decision
+/// NOT to write `NotAttempted` on a `Restore` whose own-handle read failed: it
+/// would change the verification record of every restore and still not cover
+/// a lost second patch, so the schedule bounds its wait instead. This amends
+/// that decision for ONE source, the global handle of a point with no saved
+/// destination, because the PoC upgrade round (P5) showed that source
+/// producing a `Succeeded` restore with no verification block at all — the
+/// one shape an operator restoring a `v0.1.5` point cannot tell apart from a
+/// controller that never looked. A destination-backed run whose
+/// `ControllerIdentity` read fails keeps the recorded behaviour (no block,
+/// bounded by the schedule's grace), and so does a lost second patch.
+#[must_use]
+pub fn unread_scorecard_verdict(
+    from: &backup::EvidenceSource,
+    keys_complete: bool,
+    scorecard_key: &str,
+) -> Option<crate::verification::VerificationResult> {
+    (keys_complete && matches!(from, backup::EvidenceSource::GlobalHandle)).then(|| {
+        crate::verification::VerificationResult::not_attempted(
+            logweir_verify::PAYLOAD_TYPE_SCORECARD,
+            unread_scorecard_detail(scorecard_key),
+        )
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -6318,18 +6340,27 @@ async fn reconcile_restore_inner(
     // written under `evidenceWrite` of the evidence destination; reading it
     // back from the source destination's bucket is the two-destination version
     // of the same defect.
-    let evidence_from = legacy_evidence_source(
-        backup::evidence_source_for(
-            restore.spec.evidence_destination_ref.as_ref(),
-            client,
-            &namespace,
-            now,
-        )
-        .await
-        .map_err(RestoreError::Api)?,
-        &restore.spec.plan_bytes,
-        archive_url,
-    );
+    let routed = backup::evidence_source_for(
+        restore.spec.evidence_destination_ref.as_ref(),
+        client,
+        &namespace,
+        now,
+    )
+    .await
+    .map_err(RestoreError::Api)?;
+    let was_global = matches!(routed, backup::EvidenceSource::GlobalHandle);
+    let evidence_from = legacy_evidence_source(routed, &restore.spec.plan_bytes, archive_url);
+    if was_global && !matches!(evidence_from, backup::EvidenceSource::GlobalHandle) {
+        // THE HANDLE'S LOCATION IS NAMED HERE AND NOWHERE A TENANT READS: the
+        // status detail names it by role (`destination::ARCHIVE_HANDLE_LABEL`).
+        info!(
+            restore = %name,
+            namespace = %namespace,
+            archive_handle = archive_url.unwrap_or_default(),
+            "this inline-archive run's plan writes its evidence outside the archive handle's \
+             bucket; the scorecard is not read and the verdict is NotAttempted"
+        );
+    }
     let observed = match (keys.scorecard.as_ref(), &evidence_from) {
         (None, _) => None,
         (Some(key), backup::EvidenceSource::GlobalHandle) => scorecard(key.clone()).await,
@@ -6493,27 +6524,17 @@ async fn reconcile_restore_inner(
                 .await,
         ),
         // THE RUNNER SAYS A SCORECARD EXISTS AND THE CONTROLLER'S OWN READ
-        // PRODUCED NO DIGEST — legacy-point-restore P5's silent shape. The
-        // keys are the runner's statement that a document was written; a read
-        // that answered nothing (no handle, the object not in the handle's
-        // bucket, a credential that cannot read it) is not "no document", and
-        // publishing nothing made it indistinguishable from a controller that
-        // never looked. `NotAttempted`, naming what was read and where, is
-        // the only verdict writable without bytes — never `Invalid`, and never
-        // a completion (`with_completion` writes one only for `Valid`).
-        (backup::EvidenceSource::GlobalHandle | backup::EvidenceSource::Destination(_), None)
-            if keys.mandatory_complete() =>
-        {
-            Some(crate::verification::VerificationResult::not_attempted(
-                logweir_verify::PAYLOAD_TYPE_SCORECARD,
-                unread_scorecard_detail(
-                    keys.scorecard.as_deref().unwrap_or_default(),
-                    &evidence_from,
-                    archive_url,
-                ),
-            ))
-        }
-        // GC11's no-artifact case: no document, no opinion, no block.
+        // PRODUCED NO DIGEST — legacy-point-restore P5's silent shape, for an
+        // inline-archive run only (`unread_scorecard_verdict`, which cites the
+        // decision it amends). `NotAttempted` is the only verdict writable
+        // without bytes — never `Invalid`, and never a completion.
+        (from @ backup::EvidenceSource::GlobalHandle, None) => unread_scorecard_verdict(
+            from,
+            keys.mandatory_complete(),
+            keys.scorecard.as_deref().unwrap_or_default(),
+        ),
+        // GC11's no-artifact case, and a destination handle that returned no
+        // digest: no document, no opinion, no block.
         _ => None,
     };
     if let Some(result) = verdict {
@@ -6662,6 +6683,37 @@ async fn reconcile(
     ctx: Arc<Context>,
     approval_policies: Arc<ApprovalPolicySet>,
 ) -> Result<Action, RestoreError> {
+    let outcome = reconcile_in_context(
+        &restore,
+        &ctx,
+        &approval_policies,
+        Utc::now(),
+        &|name: &str| std::env::var(name),
+    )
+    .await?;
+    Ok(action_for(&outcome))
+}
+
+/// How the shipped reconcile reads its process environment — a parameter so a
+/// test can state it (review L2: the wiring of the handle location was
+/// reachable from no row, so passing `None` there put P5 back undetected).
+pub type EnvReader<'a> = &'a (dyn Fn(&str) -> Result<String, std::env::VarError> + Send + Sync);
+
+/// [`reconcile`]'s body: the oracles over [`Context::archive`] and the handle's
+/// own LOCATION, read from `env` beside it, handed to
+/// [`reconcile_restore_at`]. `reconcile` passes the process environment and
+/// the one clock read; a row passes a stated one.
+///
+/// # Errors
+///
+/// As [`reconcile_restore_at`].
+pub async fn reconcile_in_context(
+    restore: &Restore,
+    ctx: &Context,
+    approval_policies: &ApprovalPolicySet,
+    now: DateTime<Utc>,
+    env: EnvReader<'_>,
+) -> Result<RestoreOutcome, RestoreError> {
     let archive = ctx.archive.clone();
     let oracle = move |key: String| -> BoxFuture<'static, Option<ScorecardObservation>> {
         let handle = archive.clone();
@@ -6680,19 +6732,18 @@ async fn reconcile(
     // `reconcile_restore_at`. `main` built `ctx.archive` from exactly this
     // variable; `Store` exposes no accessor for the URL it was built from.
     let archive_url =
-        crate::retention::configured_archive_url(std::env::var(crate::retention::ARCHIVE_URL_ENV));
-    let outcome = reconcile_restore_at(
-        &restore,
+        crate::retention::configured_archive_url(env(crate::retention::ARCHIVE_URL_ENV));
+    reconcile_restore_at(
+        restore,
         &ctx.client,
         &oracle,
         &verify,
-        Utc::now(),
+        now,
         &ctx.runner_image,
-        &approval_policies,
+        approval_policies,
         archive_url.as_deref(),
     )
-    .await?;
-    Ok(action_for(&outcome))
+    .await
 }
 
 /// Requeue on an error, naming it. Never a panic and never a drop.

@@ -5527,8 +5527,59 @@ async fn a_legacy_backup_in_another_bucket_is_not_read_through_the_handle() {
     assert_eq!(verification["result"], json!("NotAttempted"), "{patches:?}");
     let detail = verification["detail"].as_str().expect("a detail");
     assert!(
-        detail.contains("s3://kafka-backups") && detail.contains("s3://team-b-archive/logweir"),
-        "both locations are named: {detail}"
+        detail.contains("s3://kafka-backups") && detail.contains("LOGWEIR_ARCHIVE_URL"),
+        "the run's own archive is named, and the handle by role: {detail}"
+    );
+    assert!(
+        !detail.contains("team-b-archive"),
+        "review L4: the handle's location is installation configuration and stays out of the \
+         status: {detail}"
+    );
+}
+
+/// **L2, the `Backup` twin.** The shipped reconcile states the handle location
+/// it read from its environment: a `Backup` under `s3://kafka-backups/…` with
+/// the handle over another bucket is `NotAttempted` by the GUARD, before any
+/// read — with the location dropped it would have been read through a handle
+/// this `Context` does not even hold, and answered `NoCredential`.
+#[tokio::test]
+async fn the_shipped_backup_reconcile_states_the_handle_location_it_read() {
+    let (client, seen) = sequenced_client(vec![200, 200]);
+    let ctx = weirkeeper::controllers::Context {
+        client,
+        archive: None,
+        runner_image: weirkeeper::job::RunnerImage::default(),
+    };
+    let env = |name: &str| -> Result<String, std::env::VarError> {
+        if name == "LOGWEIR_ARCHIVE_URL" {
+            Ok("s3://team-b-archive/logweir".to_string())
+        } else {
+            Err(std::env::VarError::NotPresent)
+        }
+    };
+    weirkeeper::controllers::backup::reconcile_in_context(
+        &backup(),
+        &ctx,
+        Utc.with_ymd_and_hms(2026, 11, 9, 3, 20, 0).unwrap(),
+        &env,
+    )
+    .await
+    .expect("the reconcile succeeds");
+    let verification = seen
+        .lock()
+        .expect("readable")
+        .iter()
+        .filter(|s| s.method == "PATCH" && s.path.ends_with("/status"))
+        .filter_map(|s| serde_json::from_str::<Value>(&s.body).ok())
+        .filter_map(|v| v.pointer("/status/evidence/verification").cloned())
+        .last()
+        .expect("a verdict is published");
+    assert_eq!(verification["result"], json!("NotAttempted"));
+    assert!(
+        verification["detail"]
+            .as_str()
+            .is_some_and(|d| d.contains("is not the bucket of")),
+        "the guard decided, on the location the shipped path read: {verification}"
     );
 }
 

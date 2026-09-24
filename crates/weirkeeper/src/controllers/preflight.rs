@@ -4098,6 +4098,60 @@ pub fn legacy_source_destination(
     })
 }
 
+/// The inline archive an existing `Restore`'s Job reads: its own
+/// `spec.sourceArchive`, URL and Secret.
+#[must_use]
+pub fn restore_legacy_source(restore: &Restore) -> LegacySource {
+    LegacySource {
+        url: restore.spec.source_archive.url.clone(),
+        secret: restore
+            .spec
+            .source_archive
+            .secret_ref
+            .as_ref()
+            .map(|s| s.name.clone()),
+    }
+}
+
+/// A `restoreRef` check whose `legacySourceArchive` is not the `Restore`'s own
+/// — review M1(b). `None` when they agree.
+///
+/// The request's CEL rule P8 requires `legacySourceArchive` beside a
+/// `restoreRef` for a point with no destination, and nothing tied the two
+/// together: a check could read with Secret A while the `Restore` projects
+/// Secret B (or none), and `destination.resolved` would say "the credential
+/// the restore Job projects". A readiness check reads as the restore will, so
+/// a request naming another archive or another Secret is `notReady`, with both
+/// named, and no Job is created.
+#[must_use]
+pub fn legacy_request_conflict(
+    requested: &LegacySource,
+    own: &LegacySource,
+    restore_name: &str,
+) -> Option<destination::DestinationRefusal> {
+    if requested == own {
+        return None;
+    }
+    let secret = |s: &LegacySource| {
+        s.secret
+            .as_deref()
+            .map_or_else(|| "no Secret".to_string(), |n| format!("Secret `{n}`"))
+    };
+    Some(destination::DestinationRefusal {
+        code: CheckCode::PlanDestinationMismatch,
+        field: "spec.request.restore.legacySourceArchive".to_string(),
+        message: format!(
+            "this check names inline archive `{}` read with {}, and Restore `{restore_name}` \
+             reads `{}` with {}; a readiness check reads as the restore Job will, so it must \
+             name the Restore's own spec.sourceArchive",
+            requested.url,
+            secret(requested),
+            own.url,
+            secret(own)
+        ),
+    })
+}
+
 /// `destination.resolved` for a legacy inline archive — what the check reads,
 /// as whom, and that there is no `BackupDestination` behind it.
 #[must_use]
@@ -4184,10 +4238,13 @@ pub fn legacy_evidence_row(
              verification NotAttempted and no completion"
                 .to_string()
         }
-        LegacyEvidenceScope::Elsewhere { evidence, handle } => format!(
-            "the plan writes its scorecard to {evidence}, and an inline-archive restore's \
-             evidence is read only through the controller's archive handle, LOGWEIR_ARCHIVE_URL = \
-             {handle}: this run would publish verification NotAttempted and no completion"
+        // THE HANDLE BY ROLE, NEVER BY VALUE (review L4): this message is in
+        // a status every operator of the namespace reads.
+        LegacyEvidenceScope::Elsewhere { evidence, .. } => format!(
+            "the plan writes its scorecard to {evidence}, which is not the bucket of {}; an \
+             inline-archive restore's evidence is read only through that handle, so this run \
+             would publish verification NotAttempted and no completion",
+            destination::ARCHIVE_HANDLE_LABEL
         ),
     };
     Some(
@@ -4201,9 +4258,10 @@ pub fn legacy_evidence_row(
         .with_scope(legacy.scope())
         .with_message(&message)
         .with_remedy(
-            "Write the evidence to the bucket of the controller's archive handle — the console's \
-             default for a recovery point with no destination — and check again; the restore \
-             itself is not affected, only its verification.",
+            "Write the evidence to the bucket of the controller's archive handle — on the \
+             chart's default install the recovery point's own archive bucket, which the console \
+             starts the field on — and check again; the restore itself is not affected, only its \
+             verification.",
         )
         .with_fact("grant", "evidenceRead"),
     )
@@ -4213,14 +4271,25 @@ pub fn legacy_evidence_row(
 /// name, rescoped to the archive itself. The runner scopes its `archive.*`
 /// rows to `BackupDestination/<plan name>`, and for a legacy source there is
 /// no such object — a scope naming one would send an operator looking for it.
+///
+/// The runner's MESSAGES name the placeholder too ("… on destination
+/// `inline-archive` …", review L7); the same phrase is rewritten to name the
+/// inline archive. Nothing else in a relayed row is touched.
 #[must_use]
 pub fn rescope_legacy(mut checks: Vec<CheckOutcome>, legacy: &LegacySource) -> Vec<CheckOutcome> {
+    let placeholder = format!("destination `{LEGACY_ARCHIVE_PLAN_NAME}`");
+    let named = format!("inline archive `{}`", legacy.url);
     for c in &mut checks {
         if c.scope
             .as_ref()
             .is_some_and(|s| s.kind == "BackupDestination" && s.name == LEGACY_ARCHIVE_PLAN_NAME)
         {
             c.scope = Some(legacy.scope());
+        }
+        if c.message.contains(&placeholder) {
+            // THROUGH THE CHOKEPOINT AGAIN: the URL came from a request, and a
+            // relayed message is only ever published redacted and capped.
+            c.message = redact(&c.message.replace(&placeholder, &named));
         }
     }
     checks
@@ -5908,20 +5977,36 @@ pub async fn resolve(
             // location is in the plan bytes `planHash` binds, and the
             // installation's legacy addressing is in the policy digest.
             if let Some(archive) = r.and_then(|r| r.legacy_source_archive.as_ref()) {
-                let legacy = LegacySource {
+                let requested = LegacySource {
                     url: archive.url.clone(),
                     secret: archive.secret_ref.as_ref().map(|s| s.name.clone()),
                 };
-                inputs.archive = Some(legacy_source_destination(
-                    namespace,
-                    &legacy,
-                    inputs
-                        .plan
-                        .as_ref()
-                        .and_then(|p| p.parsed.as_ref().ok())
-                        .map(|s| &s.source.storage),
-                    &policy.legacy_archive_addressing,
-                ));
+                // A CHECK OF AN EXISTING RESTORE READS AS THAT RESTORE WILL
+                // (review M1(b)). Its Job projects `spec.sourceArchive` — the
+                // URL and the Secret — so the check takes both from there, and
+                // a request naming anything else is refused rather than
+                // answered about a credential the restore will not use.
+                let (legacy, conflict) = match restore_object.as_ref() {
+                    None => (requested, None),
+                    Some(obj) => {
+                        let own = restore_legacy_source(obj);
+                        let conflict = legacy_request_conflict(&requested, &own, &obj.name_any());
+                        (own, conflict)
+                    }
+                };
+                inputs.archive = Some(match conflict {
+                    Some(refusal) => Err(refusal),
+                    None => legacy_source_destination(
+                        namespace,
+                        &legacy,
+                        inputs
+                            .plan
+                            .as_ref()
+                            .and_then(|p| p.parsed.as_ref().ok())
+                            .map(|s| &s.source.storage),
+                        &policy.legacy_archive_addressing,
+                    ),
+                });
                 inputs.bindings.legacy_source = Some(LegacyBinding {
                     url: legacy.url.clone(),
                     ..LegacyBinding::default()
