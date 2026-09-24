@@ -436,7 +436,7 @@ function setUp() {
       spec: {
         restartPolicy: "Never",
         containers: [{
-          name: "mc", image: "docker.io/vladyslavhaina/mc-mirror@sha256:4824f9b00fd4ca9e3b7d61f66211450cd5d63f5f99d3170654af49568869b77b",
+          name: "mc", image: "docker.io/vladyslavhaina/mc-mirror@sha256:9c7cbc3f47b092d52b73124fb9ab12f3266534c23c283b2e984d07408c9ff381",
           // The project's MinIO client mirror, PINNED BY DIGEST
           // (third_party/minio-mirror/README.md): `IfNotPresent` uses the copy
           // the node already has and pulls the same bytes when it has none;

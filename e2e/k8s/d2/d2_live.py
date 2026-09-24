@@ -80,9 +80,9 @@ STATE_PATH = OUT / "state.json"
 
 KAFKA_IMAGE = "apache/kafka:3.7.1"
 KAFKA_BIN = "/opt/kafka/bin"
-MINIO_IMAGE = "docker.io/vladyslavhaina/minio-mirror@sha256:a707398148b545774fc98264d16e76307f1b3727f77b1cc49c67ccde8998709d"
+MINIO_IMAGE = "docker.io/vladyslavhaina/minio-mirror@sha256:b4c3dc9fb0a82538ac6750eb841b54fb2d4303f4b73fb523ca097918a35c3524"
 MINIO_ROOT_USER = "d2w14root"
-MC_IMAGE = "docker.io/vladyslavhaina/mc-mirror@sha256:4824f9b00fd4ca9e3b7d61f66211450cd5d63f5f99d3170654af49568869b77b"
+MC_IMAGE = "docker.io/vladyslavhaina/mc-mirror@sha256:9c7cbc3f47b092d52b73124fb9ab12f3266534c23c283b2e984d07408c9ff381"
 
 state: dict[str, Any] = (
     json.loads(STATE_PATH.read_text()) if STATE_PATH.is_file() else {}

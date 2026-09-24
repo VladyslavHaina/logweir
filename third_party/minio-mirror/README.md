@@ -28,8 +28,8 @@ source, for linux/amd64 and linux/arm64.
 
 | mirror | index digest (amd64 + arm64) |
 |---|---|
-| `docker.io/vladyslavhaina/minio-mirror:RELEASE.2025-09-07T16-13-09Z` | `sha256:a707398148b545774fc98264d16e76307f1b3727f77b1cc49c67ccde8998709d` |
-| `docker.io/vladyslavhaina/mc-mirror:RELEASE.2025-08-13T08-35-41Z` | `sha256:4824f9b00fd4ca9e3b7d61f66211450cd5d63f5f99d3170654af49568869b77b` |
+| `docker.io/vladyslavhaina/minio-mirror:RELEASE.2025-09-07T16-13-09Z` | `sha256:b4c3dc9fb0a82538ac6750eb841b54fb2d4303f4b73fb523ca097918a35c3524` |
+| `docker.io/vladyslavhaina/mc-mirror:RELEASE.2025-08-13T08-35-41Z` | `sha256:9c7cbc3f47b092d52b73124fb9ab12f3266534c23c283b2e984d07408c9ff381` |
 
 Every reference in this tree pins these digests, never the tags
 (`crates/logweir/tests/chart_lint.rs`,
@@ -51,8 +51,8 @@ them. After `docker login docker.io` as the repository owner:
 ```bash
 bash third_party/minio-mirror/build.sh --push-loaded
 # both repositories must then be Public on Docker Hub; check anonymously:
-docker buildx imagetools inspect docker.io/vladyslavhaina/minio-mirror@sha256:a707398148b545774fc98264d16e76307f1b3727f77b1cc49c67ccde8998709d
-docker buildx imagetools inspect docker.io/vladyslavhaina/mc-mirror@sha256:4824f9b00fd4ca9e3b7d61f66211450cd5d63f5f99d3170654af49568869b77b
+docker buildx imagetools inspect docker.io/vladyslavhaina/minio-mirror@sha256:b4c3dc9fb0a82538ac6750eb841b54fb2d4303f4b73fb523ca097918a35c3524
+docker buildx imagetools inspect docker.io/vladyslavhaina/mc-mirror@sha256:9c7cbc3f47b092d52b73124fb9ab12f3266534c23c283b2e984d07408c9ff381
 ```
 
 ## Provenance: how the images are built
@@ -146,8 +146,8 @@ The differences, all deliberate:
 ## Verifying an image
 
 ```bash
-docker run --rm --entrypoint minio docker.io/vladyslavhaina/minio-mirror@sha256:a707398148b545774fc98264d16e76307f1b3727f77b1cc49c67ccde8998709d --version
-docker run --rm docker.io/vladyslavhaina/mc-mirror@sha256:4824f9b00fd4ca9e3b7d61f66211450cd5d63f5f99d3170654af49568869b77b --version
+docker run --rm --entrypoint minio docker.io/vladyslavhaina/minio-mirror@sha256:b4c3dc9fb0a82538ac6750eb841b54fb2d4303f4b73fb523ca097918a35c3524 --version
+docker run --rm docker.io/vladyslavhaina/mc-mirror@sha256:9c7cbc3f47b092d52b73124fb9ab12f3266534c23c283b2e984d07408c9ff381 --version
 bash third_party/minio-mirror/smoke.sh <minio-image> <mc-image> linux/arm64 /tmp/smoke.tsv
 ```
 
