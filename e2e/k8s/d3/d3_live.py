@@ -12060,12 +12060,8 @@ def deleted_rehearsal_is_recorded(name: str, watched: list[dict[str, Any]],
         # lab-refresh-10 row (e): the next slot fired over the deleted rehearsal
         # before (instead of) recording it. A later slot's child may be named
         # only in or after the write that records this one.
-        "no later slot is reserved or fired before the record": not any(
-            ref > name
-            for w in watched[:next((i for i, w in enumerate(watched)
-                                    if w is first), len(watched))]
-            for ref in (((w.get("activeRestoreRef") or {}).get("name") or ""),
-                        ((w.get("pendingRestoreRef") or {}).get("name") or ""))),
+        "no later slot is reserved or fired over it before the record (the recording "
+        "pass's own reservation excepted)": not later_child_overtook(name, watched),
     }
     if not all(premise.values()):
         return "NOT-REACHED", {**premise, **clauses}
@@ -12287,6 +12283,40 @@ def delete_owned_jobs(prefix: str) -> list[str]:
     return gone
 
 
+def later_child_overtook(name: str, watched: list[dict[str, Any]]) -> list[str]:
+    """How a LATER slot's child appears in the writes before the first write
+    that records `name` (in `lastFailed`/`lastSucceeded`) — [] when it did not.
+
+    THE SAME PASS MAY RESERVE THE NEXT SLOT AND RECORD THIS ONE. The
+    reservation protocol writes `pendingRestoreRef` first, under its own
+    precondition, and the pass's commit then records the decided run AND
+    makes the new child active (`rehearsal_schedule.rs`, reserve-commit's
+    `the_next_slot_records_a_deleted_rehearsal_and_commits_its_own_child`;
+    measured live on lab-refresh-11: reservation, then the commit carrying
+    `lastFailed`). So a later child named ONLY in `pendingRestoreRef` in the
+    ONE write immediately before the record is that pass's reservation. Any
+    other appearance — active, decided, or reserved earlier — is the next slot
+    firing over a run that was not recorded (lab-refresh-10 row e)."""
+    def records(w: dict[str, Any]) -> bool:
+        return name in ((((w.get("lastFailed") or {}).get("restoreRef") or {}).get("name")),
+                        (((w.get("lastSucceeded") or {}).get("restoreRef") or {}).get("name")))
+    until = next((i for i, w in enumerate(watched) if records(w)), len(watched))
+    found = []
+    for i, w in enumerate(watched[:until]):
+        active = (w.get("activeRestoreRef") or {}).get("name") or ""
+        pending = (w.get("pendingRestoreRef") or {}).get("name") or ""
+        decided = [(((w.get(k) or {}).get("restoreRef") or {}).get("name") or "")
+                   for k in ("lastFailed", "lastSucceeded")]
+        if active > name:
+            found.append(f"write {i}: {active} active")
+        for d in decided:
+            if d > name:
+                found.append(f"write {i}: {d} decided")
+        if pending > name and not (i == until - 1 and until < len(watched)):
+            found.append(f"write {i}: {pending} reserved")
+    return found
+
+
 def verdict_not_reached_is_recorded(name: str, restore: dict[str, Any],
                                     watched: list[dict[str, Any]],
                                     restore_trail: list[dict[str, Any]]
@@ -12306,10 +12336,7 @@ def verdict_not_reached_is_recorded(name: str, restore: dict[str, Any],
     before = watched[:decided_at] if decided_at is not None else watched
     at = parse_rfc3339((first.get("lastFailed") or {}).get("at"))
     waited = (at - finished).total_seconds() if at and finished else None
-    other_children = {ref for w in before
-                      for ref in (((w.get("activeRestoreRef") or {}).get("name")),
-                                  ((w.get("pendingRestoreRef") or {}).get("name")))
-                      if ref and ref != name}
+    overtook = later_child_overtook(name, watched)
     premise = {
         "the rehearsal finished exit 0 (Succeeded) and named its evidence":
             status.get("phase") == "Succeeded" and status.get("exitCode") == 0
@@ -12335,8 +12362,8 @@ def verdict_not_reached_is_recorded(name: str, restore: dict[str, Any],
         "while owed, a due slot was skipped ConcurrencyBlocked": any(
             ((w.get("lastSkipped") or {}).get("reason") == "ConcurrencyBlocked")
             for w in before),
-        "and no other rehearsal was reserved or fired before the decision":
-            not other_children,
+        "and no later rehearsal was reserved or fired over it before the decision "
+        "(its own pass's reservation excepted)": not overtook,
         "no write ever records it as lastSucceeded": not any(
             (((w.get("lastSucceeded") or {}).get("restoreRef") or {}).get("name") == name)
             for w in watched),

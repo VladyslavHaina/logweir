@@ -3448,7 +3448,8 @@ def test_a_deleted_rehearsal_is_recorded_before_the_next_slot_fires() -> None:
     name = "logweir-rehearsal-l6-deleted-20260924-022300"
     nxt = "logweir-rehearsal-l6-deleted-20260924-022400"
     failed = {"type": "RehearsalHealthy", "status": "False", "reason": "Failed"}
-    clause = "no later slot is reserved or fired before the record"
+    clause = ("no later slot is reserved or fired over it before the record (the recording "
+              "pass's own reservation excepted)")
     ok = [{"activeRestoreRef": {"name": name}},
           {"lastFailed": {"restoreRef": {"name": name}, "reason": "RestoreDeleted"},
            "activeRestoreRef": None, "conditions": [failed]},
@@ -3468,10 +3469,26 @@ def test_a_deleted_rehearsal_is_recorded_before_the_next_slot_fires() -> None:
     row("rehearsal-deleted (lr11) CONTROL: lab-refresh-10's fire-over-it shape -> FAIL",
         verdict == "FAIL" and not clauses[clause])
     late = [{"activeRestoreRef": {"name": name}},
-            {"activeRestoreRef": {"name": name}, "pendingRestoreRef": {"name": nxt}},
+            {"activeRestoreRef": {"name": nxt}},
             ok[1]]
     verdict, clauses = d3.deleted_rehearsal_is_recorded(name, late, True)
-    row("rehearsal-deleted (lr11) CONTROL: recorded only AFTER the next reservation -> FAIL",
+    row("rehearsal-deleted (lr11) CONTROL: the next slot ACTIVE before the record -> FAIL",
+        verdict == "FAIL" and not clauses[clause])
+    # the reserve-commit protocol: one pass reserves the next slot, then its
+    # commit records the deleted run and makes the new child active.
+    same_pass = [{"activeRestoreRef": {"name": name}},
+                 {"activeRestoreRef": {"name": name}, "pendingRestoreRef": {"name": nxt}},
+                 {"lastFailed": {"restoreRef": {"name": name}, "reason": "RestoreDeleted"},
+                  "activeRestoreRef": {"name": nxt}, "conditions": [failed]}]
+    verdict, clauses = d3.deleted_rehearsal_is_recorded(name, same_pass, True)
+    row("rehearsal-deleted (lr11): reserved and recorded by ONE pass -> PASS",
+        verdict == "PASS" and clauses[clause], str(clauses))
+    early = [{"activeRestoreRef": {"name": name}},
+             {"activeRestoreRef": {"name": name}, "pendingRestoreRef": {"name": nxt}},
+             {"activeRestoreRef": {"name": name}, "pendingRestoreRef": {"name": nxt}},
+             same_pass[2]]
+    verdict, clauses = d3.deleted_rehearsal_is_recorded(name, early, True)
+    row("rehearsal-deleted (lr11) CONTROL: reserved a write BEFORE the recording pass -> FAIL",
         verdict == "FAIL" and not clauses[clause])
 
 
@@ -3520,7 +3537,19 @@ def test_a_verdict_still_owed_after_the_wait_is_evidence_verdict_not_reached() -
     row("verdict-not-reached CONTROL: another reason -> FAIL", verdict == "FAIL")
     verdict, _ = d3.verdict_not_reached_is_recorded(
         NR_NAME, NR_RESTORE, _nr_watched(extra_child=NR_NAME[:-4] + "1100"), NR_TRAIL)
-    row("verdict-not-reached CONTROL: a later slot reserved while it was owed -> FAIL",
+    row("verdict-not-reached: the deciding pass's own reservation, then the record -> PASS",
+        verdict == "PASS")
+    nxt = NR_NAME[:-4] + "1100"
+    over = _nr_watched(extra_child=nxt)
+    over.insert(-2, {"activeRestoreRef": {"name": NR_NAME},
+                     "pendingRestoreRef": {"name": nxt}})
+    verdict, _ = d3.verdict_not_reached_is_recorded(NR_NAME, NR_RESTORE, over, NR_TRAIL)
+    row("verdict-not-reached CONTROL: a later slot reserved a write before the deciding "
+        "pass -> FAIL", verdict == "FAIL")
+    fired = _nr_watched()
+    fired.insert(-1, {"activeRestoreRef": {"name": nxt}})
+    verdict, _ = d3.verdict_not_reached_is_recorded(NR_NAME, NR_RESTORE, fired, NR_TRAIL)
+    row("verdict-not-reached CONTROL: a later slot active before the decision -> FAIL",
         verdict == "FAIL")
     verdict, _ = d3.verdict_not_reached_is_recorded(
         NR_NAME, NR_RESTORE, _nr_watched(skip=False), NR_TRAIL)
