@@ -107,8 +107,17 @@ volumes:
       items:
         - { key: tls.crt, path: tls.crt }
         - { key: tls.key, path: tls.key }
+  # The image's entrypoint renders the configuration (the `*FromEnv` values)
+  # into a temporary file before it starts `dex serve`; with a read-only root
+  # filesystem it needs a writable /tmp, or every pod exits with "cannot create
+  # temp file: open /tmp/dex.config.yaml-…: read-only file system" (found by
+  # the first live install, poc-install 2026-09-24).
+  - name: tmp
+    emptyDir:
+      sizeLimit: 16Mi
 volumeMounts:
   - { name: tls, mountPath: /etc/dex/tls, readOnly: true }
+  - { name: tmp, mountPath: /tmp }
 resources:
   requests: { cpu: 10m, memory: 32Mi }
   limits: { memory: 128Mi }
