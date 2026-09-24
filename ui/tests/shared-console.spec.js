@@ -25,7 +25,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { CONSOLE, LEGACY, apiClient, resetMode, selectMode, sessionToken } from "../client.js";
@@ -245,11 +245,13 @@ test("class_a_every_product_api_write_in_ui_takes_its_token_from_the_session", (
   // without a token fails here rather than as a 403 in front of an operator.
   const WRITES = /\b(consoleCreate|consoleAction|consoleSetSuspension|consoleSchedulePolicy)\)?\(/g;
   const SESSION_TOKEN = /\btoken:\s*(tokenNow\(\)|sessionToken\(\)|decided === null \? null : decided\.token)/;
-  const files = ["client.js", "operation-watch.js", "app.js", "workflow.js", "select.js",
-    "lifecycle.js", "render.js"].map((f) => UI + f)
-    .concat(["approvals.js", "backups.js", "catalog.js", "clusters.js", "destinations.js",
-      "history.js", "keys.js", "operation.js", "protection.js", "restore-wizard.js",
-      "schedules.js"].map((f) => UI + "pages/" + f));
+  // EVERY MODULE THE PAGE LOADS, read off the directory so a new one is in
+  // scope the day it lands; `api.js` is where the four are defined.
+  const files = readdirSync(UI).filter((f) => f.endsWith(".js") && f !== "api.js")
+    .map((f) => UI + f)
+    .concat(readdirSync(UI + "pages").filter((f) => f.endsWith(".js"))
+      .map((f) => UI + "pages/" + f));
+  assert.ok(files.length >= 20, "the scan reads the whole tree (" + String(files.length) + ")");
   let calls = 0;
   for (const file of files) {
     const text = readFileSync(file, "utf8");
