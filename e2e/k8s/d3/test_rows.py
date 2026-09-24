@@ -3011,6 +3011,44 @@ def test_a_failed_verification_is_a_failed_rehearsal() -> None:
         verdict == "FAIL")
 
 
+def test_a_deleted_rehearsal_is_recorded_and_released() -> None:
+    name = "logweir-rehearsal-l6-deleted-20260924-020000"
+    failed = {"type": "RehearsalHealthy", "status": "False", "reason": "Failed"}
+    watched = [
+        {"activeRestoreRef": {"name": name}},
+        {"lastFailed": {"restoreRef": {"name": name}, "reason": "RestoreDeleted"},
+         "activeRestoreRef": None, "conditions": [failed]},
+        {"lastFailed": {"restoreRef": {"name": name}, "reason": "RestoreDeleted"},
+         "activeRestoreRef": {"name": "logweir-rehearsal-l6-deleted-20260924-020100"},
+         "conditions": [failed]},
+    ]
+    verdict, clauses = d3.deleted_rehearsal_is_recorded(name, watched, True)
+    row("deleted rehearsal: RestoreDeleted, released, then the next slot -> PASS",
+        verdict == "PASS", str(clauses))
+    # PLANTED: the pre-fix shape — nothing is ever recorded and the ref stays.
+    held = [{"activeRestoreRef": {"name": name}}] * 3
+    verdict, _ = d3.deleted_rehearsal_is_recorded(name, held, True)
+    row("deleted rehearsal: never recorded, ref kept (pre-LOW-2) -> FAIL", verdict == "FAIL")
+    kept = [dict(watched[1], activeRestoreRef={"name": name})]
+    verdict, _ = d3.deleted_rehearsal_is_recorded(name, kept, True)
+    row("deleted rehearsal: recorded but the ref still names it -> FAIL", verdict == "FAIL")
+    other = [{"lastFailed": {"restoreRef": {"name": name}, "reason": "ok"},
+              "activeRestoreRef": None, "conditions": [failed]}]
+    verdict, _ = d3.deleted_rehearsal_is_recorded(name, other, True)
+    row("deleted rehearsal: another reason -> FAIL", verdict == "FAIL")
+    verdict, _ = d3.deleted_rehearsal_is_recorded(name, watched, False)
+    row("deleted rehearsal: the verdict landed before the delete -> NOT-REACHED",
+        verdict == "NOT-REACHED")
+    owed = {"status": {"phase": "Succeeded", "evidence": {"scorecardKey": "k", "sidecarKey": "s"}}}
+    pending = {"status": {"phase": "Succeeded", "evidence": {"verification": {"result": "Pending"}}}}
+    valid = {"status": {"phase": "Succeeded", "evidence": {"verification": {"result": "Valid"}}}}
+    running = {"status": {"phase": "Running"}}
+    row("verdict owed: terminal with no verification, or Pending",
+        d3.verdict_is_owed(owed) and d3.verdict_is_owed(pending))
+    row("verdict not owed: Valid, or not terminal",
+        not d3.verdict_is_owed(valid) and not d3.verdict_is_owed(running))
+
+
 def _kbak(records: bytes = b"\x00" * 40) -> bytes:
     import zlib
     header = b"KBAK" + bytes([1, 0]) + b"\x00\x00" + (1).to_bytes(8, "little") \
