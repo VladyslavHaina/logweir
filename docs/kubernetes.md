@@ -7300,7 +7300,7 @@ exactly one block to it.
 | `operation` | Block | What it needs | What it runs |
 |---|---|---|---|
 | `Backup` | `backup` | a source `KafkaCluster`, a destination or a legacy archive, 1–1000 **named** topics | the whole D2 §6.3 Backup catalogue |
-| `Restore` | `restore` | a draft plan or an existing `Restore`, a target, the source and evidence destinations, the recovery point | the target, plan, archive and approval rows |
+| `Restore` | `restore` | a draft plan or an existing `Restore`, a target, the source and evidence destinations — or, for a point with no saved destination, `legacySourceArchive` (§21.8) — the recovery point | the target, plan, archive and approval rows |
 | `DestinationAccess` | `destinationAccess` | a `BackupDestination` and 1–4 roles | the `destination.*` rows for those roles |
 | `SourceConnection` | `sourceConnection` | one `connectionRef` — and nothing else | `connection.resolved`, `connection.credentialProjected`, `connection.authenticated`, `connection.clusterIdentity`, `runner.*`, `configuration.policy` and `configuration.egress` (execution-only) |
 
@@ -7913,6 +7913,15 @@ the destination grant, as before. **A runner that refuses a plan** reports
 `phase: Failed`, reason `CheckContractMismatch`, with a message saying the runner
 image is older than the controller and should be upgraded, naming the plan field
 it refused (`evidenceWrite`, `evidenceRead`) when its own log line says which.
+
+**A restore check over `legacySourceArchive` (this build).** The plan it renders
+is an ordinary `restorePreflight` plan — no new field — whose source destination
+is the inline archive as the restore Job reads it (§21.8), so a runner of any
+build that knows `restorePreflight` runs it. A controller from before this build
+answers the same request `Failed`/`ArchiveUrlUnreadable`, as it always did;
+after a rollback, re-run the check or restore without it. The one Restore
+controller row added, the advisory `destination.evidenceReadable`, never
+changes the aggregate.
 
 ## 22. The installation policy, the RBAC rows, and the console admission policy
 

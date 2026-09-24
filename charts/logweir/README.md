@@ -149,7 +149,17 @@ by Logweir".
 `legacyArchiveAddressing` is not a value of its own: it is rendered from
 `archive.s3.*`, the same values the Deployment's `AWS_*` env comes from and
 behind the same "only when an endpoint is set" guard. An install with no
-endpoint publishes an empty block rather than `allowHttp: true`.
+endpoint publishes an empty block rather than `allowHttp: true`. A restore
+readiness check over a recovery point with no saved destination fills a region
+or endpoint its plan leaves out from this block, exactly as the legacy restore
+Job fills them from that env.
+
+**`archive.url` is also where a point with no saved destination is verified.**
+The controller reads an inline-archive run's evidence only through its handle
+over `archive.url` (`LOGWEIR_ARCHIVE_URL`), and only in that URL's bucket; a
+legacy schedule writing to another bucket, or a legacy restore plan writing its
+evidence elsewhere, reads `NotAttempted` ([docs/kubernetes.md](../../docs/kubernetes.md)
+§15.1a).
 
 ## `admissionPolicy.enabled` — fencing the console's `create secrets`
 
