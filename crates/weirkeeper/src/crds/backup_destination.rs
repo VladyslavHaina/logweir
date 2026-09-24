@@ -395,8 +395,11 @@ pub enum WriteProbe {
     /// untouched for a destination nobody has opted in.
     #[default]
     Disabled,
-    /// A `Preflight` with `operation: DestinationAccess` may create ONE marker
-    /// object under the destination's own prefix. It is never deleted.
+    /// A readiness `Preflight` — `operation: Backup`, or `DestinationAccess`
+    /// requesting `EvidenceWrite` — may create ONE marker object,
+    /// `logweir/readiness/<destinationUid>.json`, AS the destination's
+    /// `evidenceWrite` grant (which is `archiveWrite` when absent). It is
+    /// never overwritten or deleted.
     CreateOnlyMarker,
 }
 

@@ -1266,6 +1266,74 @@ impl ResolvedDestination {
         Ok(render_evidence_env(&self.grant, &archive.grant, ca_file))
     }
 
+    /// The EVIDENCE-WRITE environment a CHECK Job adds so the create-only
+    /// readiness marker is written as this destination's `evidenceWrite`
+    /// principal — defect PREFLIGHT-EVIDENCEWRITABLE-WRONG-PRINCIPAL.
+    ///
+    /// `self` is the resolution the check plan's destination credential came
+    /// from (the `ArchiveWrite` grant for a Backup readiness check, the
+    /// primary requested role for a `DestinationAccess` check), and
+    /// `evidence_write` is the SAME object's `evidenceWrite` grant.
+    ///
+    /// * `Ok(None)` — the two are one grant. Nothing second is projected, and
+    ///   the plan carries no separate grant: the marker is written with the
+    ///   credential the pod already has, exactly as before this existed.
+    /// * `Ok(Some(env))` — a different Secret (`LOGWEIR_EVIDENCE_AWS_*`
+    ///   `secretKeyRef`s) or a workload identity (`service_account_name`),
+    ///   rendered by the ONE renderer [`ResolvedDestination::evidence_env`]
+    ///   uses, so a check pod and a Restore pod project the evidence-write
+    ///   grant the same way. No `LOGWEIR_EVIDENCE_CA_FILE`: it is one
+    ///   destination, and the check plan names its one trust bundle itself.
+    ///
+    /// # Errors
+    ///
+    /// [`CheckCode::ExecutionContextConflict`] when both grants are workload
+    /// identities on different ServiceAccounts (one pod, one ServiceAccount),
+    /// and [`CheckCode::DestinationRoleNotConfigured`] for a grant no Job can
+    /// use.
+    pub fn check_evidence_write_env(
+        &self,
+        evidence_write: &ResolvedGrant,
+    ) -> Result<Option<DestinationEnv>, DestinationRefusal> {
+        if evidence_write == &self.grant {
+            return Ok(None);
+        }
+        if let (
+            ResolvedGrant::WorkloadIdentity {
+                service_account_name,
+            },
+            Some(primary_sa),
+        ) = (evidence_write, self.grant.service_account_name())
+        {
+            if primary_sa != service_account_name {
+                return Err(DestinationRefusal::new(
+                    CheckCode::ExecutionContextConflict,
+                    "spec.access.evidenceWrite",
+                    format!(
+                        "BackupDestination {}/{} runs its checked grant as ServiceAccount \
+                         {primary_sa} and its evidence-write grant as {service_account_name}; \
+                         one pod has one ServiceAccount, so one check cannot exercise both",
+                        self.namespace, self.name
+                    ),
+                ));
+            }
+        }
+        if matches!(
+            evidence_write,
+            ResolvedGrant::ControllerIdentity | ResolvedGrant::NotConfigured
+        ) {
+            return Err(DestinationRefusal::new(
+                CheckCode::DestinationRoleNotConfigured,
+                "spec.access.evidenceWrite",
+                format!(
+                    "BackupDestination {}/{} has no evidence-write grant a Job could use ({:?})",
+                    self.namespace, self.name, evidence_write
+                ),
+            ));
+        }
+        Ok(Some(render_evidence_env(evidence_write, &self.grant, None)))
+    }
+
     /// The value a run FREEZES — seam **S4**.
     #[must_use]
     pub fn snapshot(&self) -> ResolvedDestinationSnapshot {

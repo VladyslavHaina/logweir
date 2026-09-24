@@ -82,8 +82,9 @@ use logweir_core::check_contract::{
     aggregate, aggregate_expires_at, inputs_digest, redact, ApprovalRef, Authority, BindingInputs,
     CaBundleRef, CheckCode, CheckId, CheckOperation, CheckOutcome, CheckPlan, CheckPlanKind,
     CheckRelay, CheckRequest, CheckScope, CheckState, ConnectionPlan, CredentialMode,
-    DestinationPlan, FrameExpectations, Gating, OperationReadinessRequest, OverallState, Referent,
-    RestorePreflightRequest, RosterRef, Stream, CHECK_CONTRACT_VERSION, CHECK_PLAN_CONTRACT,
+    DestinationPlan, FrameExpectations, Gating, GrantCredentials, GrantRef,
+    OperationReadinessRequest, OverallState, Referent, RestorePreflightRequest, RosterRef, Stream,
+    CHECK_CONTRACT_VERSION, CHECK_PLAN_CONTRACT,
 };
 use logweir_core::destination::DestinationRole;
 
@@ -212,6 +213,13 @@ pub const BACKUP_CONTROLLER_ROWS: &[Row] = &[
         Authority::Controller,
         Some(EXPIRY_DEFAULT),
     ),
+    // "J or C" — see `DESTINATION_ACCESS_CONTROLLER_ROWS`.
+    row(
+        CheckId::DestinationEvidenceReadable,
+        Gating::Advisory,
+        Authority::Controller,
+        Some(EXPIRY_DEFAULT),
+    ),
     row(
         CheckId::ConnectionClusterIdentity,
         Gating::Blocking,
@@ -249,6 +257,14 @@ pub const DESTINATION_ACCESS_CONTROLLER_ROWS: &[Row] = &[
     row(
         CheckId::DestinationResolved,
         Gating::Blocking,
+        Authority::Controller,
+        Some(EXPIRY_DEFAULT),
+    ),
+    // "J or C" (D2 §6.3): the controller answers it only when no check pod can
+    // (`EvidenceReadPlan::ControllerAnswers`); the Job answers it otherwise.
+    row(
+        CheckId::DestinationEvidenceReadable,
+        Gating::Advisory,
         Authority::Controller,
         Some(EXPIRY_DEFAULT),
     ),
@@ -3218,6 +3234,13 @@ pub fn remedy_for(code: CheckCode) -> String {
             "This runner image does not implement `logweir check run`. Upgrade the runner image \
              to one that ships the check contract."
         }
+        // Review L3: the runner parsed the plan and refused a field or a bound
+        // this controller wrote — an older runner image than the controller.
+        CheckCode::CheckContractMismatch => {
+            "The runner image is older than this controller and refused the check plan it \
+             rendered (the message names the field when the runner said which). Upgrade the \
+             runner image to this controller's release."
+        }
         CheckCode::CheckPlanConflict => {
             "A plan ConfigMap with this check's name already exists and is not this check's. \
              Delete the stale object, or create a new Preflight."
@@ -3808,8 +3831,24 @@ pub struct Inputs {
     ///
     /// READ FROM THE OBJECT, never assumed. It used to be hard-`false`, which
     /// gave an operator who had opted in a `WriteNotProbed` row whose message
-    /// was false about their own spec (reviewer finding **F3**).
+    /// was false about their own spec (reviewer finding **F3**) — and for a
+    /// `DestinationAccess` check it stayed hard-`false` until defect
+    /// DESTINATIONACCESS-IGNORES-WRITEPROBE ([`destination_spec_facts`]).
     pub write_probe: bool,
+    /// The archive-side destination's OWN `evidenceWrite` grant, resolved from
+    /// the same object: the principal `destination.evidenceWritable` is about
+    /// (defect PREFLIGHT-EVIDENCEWRITABLE-WRONG-PRINCIPAL). Resolved for a
+    /// Backup or `DestinationAccess` check that requests `EvidenceWrite`;
+    /// `None` otherwise. See [`Inputs::evidence_write_principal`].
+    pub evidence_write_grant:
+        Option<Result<destination::ResolvedGrant, destination::DestinationRefusal>>,
+    /// The same object's OWN `evidenceRead` grant: the principal
+    /// `destination.evidenceReadable` is about (the class sweep of the same
+    /// defect). Resolved for a Backup or `DestinationAccess` check that
+    /// requests `EvidenceRead`; `None` otherwise. See
+    /// [`Inputs::evidence_read_plan`].
+    pub evidence_read_grant:
+        Option<Result<destination::ResolvedGrant, destination::DestinationRefusal>>,
     /// A backup check's topic set.
     pub topics: Vec<String>,
     /// A restore check's plan.
@@ -3867,6 +3906,8 @@ impl Default for Inputs {
             evidence: None,
             roles: Vec::new(),
             write_probe: false,
+            evidence_write_grant: None,
+            evidence_read_grant: None,
             topics: Vec::new(),
             plan: None,
             bindings: BindingFacts::default(),
@@ -3948,6 +3989,14 @@ impl Inputs {
             },
             destination_secret: secret_of(self.archive.as_ref())
                 .or_else(|| secret_of(self.evidence.as_ref())),
+            evidence_write_secret: match self.evidence_write_principal() {
+                Ok(Some((grant, _))) => grant.secret_name,
+                _ => None,
+            },
+            evidence_read_secret: match self.evidence_read_plan() {
+                Ok(EvidenceReadPlan::Separate(grant, _)) => grant.secret_name,
+                _ => None,
+            },
             signer_secret: self
                 .signs()
                 .then(|| super::backup::SIGNING_KEY_SECRET.to_string()),
@@ -3978,6 +4027,266 @@ impl Inputs {
         )
     }
 
+    /// Whether this check writes the create-only readiness marker: the
+    /// destination opted in AND the check requests the `EvidenceWrite` role.
+    #[must_use]
+    pub fn probes_evidence_write(&self) -> bool {
+        self.write_probe && self.roles.contains(&DestinationRole::EvidenceWrite)
+    }
+
+    /// The SEPARATE principal the create-only marker must be written as, and
+    /// the environment that projects it — defect
+    /// PREFLIGHT-EVIDENCEWRITABLE-WRONG-PRINCIPAL.
+    ///
+    /// * `Ok(None)` — no marker is written (no probe, no `EvidenceWrite` role,
+    ///   a Restore or a source-connection check, or a destination that did not
+    ///   resolve and is reported as such), or the destination's `evidenceWrite`
+    ///   grant IS the grant the plan's destination credential came from. The
+    ///   plan then carries no separate grant and renders exactly as before.
+    /// * `Ok(Some(..))` — the grants differ: the plan names the evidence-write
+    ///   grant by reference and the pod is projected its credential beside the
+    ///   destination's.
+    /// * `Err` — a marker would be written and the evidence-write grant cannot
+    ///   be exercised by this pod (two workload identities, or a grant that was
+    ///   not resolved at all). `destination.resolved` reports it and no Job is
+    ///   rendered: a probe that cannot run as the right principal must not run
+    ///   as another one.
+    ///
+    /// # Errors
+    ///
+    /// [`destination::DestinationRefusal`], as above.
+    pub fn evidence_write_principal(
+        &self,
+    ) -> Result<Option<(GrantRef, destination::DestinationEnv)>, destination::DestinationRefusal>
+    {
+        if !matches!(
+            self.operation,
+            PreflightOperation::Backup | PreflightOperation::DestinationAccess
+        ) || !self.probes_evidence_write()
+        {
+            return Ok(None);
+        }
+        let Some(Ok(primary)) = self.archive.as_ref() else {
+            return Ok(None);
+        };
+        let grant = match self.evidence_write_grant.as_ref() {
+            Some(Ok(g)) => g,
+            Some(Err(refusal)) => return Err(refusal.clone()),
+            // FAIL CLOSED. A marker is about to be written and nobody resolved
+            // whose it is; guessing "the destination grant" is the defect.
+            None => {
+                return Err(destination::DestinationRefusal {
+                    code: CheckCode::DestinationRoleNotConfigured,
+                    field: "spec.access.evidenceWrite".to_string(),
+                    message: format!(
+                        "the evidence-write grant of BackupDestination {} was not resolved, so \
+                         the create-only marker has no principal to be written as",
+                        primary.name
+                    ),
+                })
+            }
+        };
+        let Some(env) = primary.check_evidence_write_env(grant)? else {
+            return Ok(None);
+        };
+        let reference = match grant {
+            destination::ResolvedGrant::SecretKeys { secret, .. } => {
+                GrantRef::static_secret(secret.clone())
+            }
+            destination::ResolvedGrant::WorkloadIdentity {
+                service_account_name,
+            } => GrantRef::workload_identity(service_account_name.clone()),
+            // `check_evidence_write_env` refused both already.
+            destination::ResolvedGrant::ControllerIdentity
+            | destination::ResolvedGrant::NotConfigured => return Ok(None),
+        };
+        Ok(Some((reference, env)))
+    }
+
+    /// Which principal `destination.evidenceReadable` is answered as, and what
+    /// the pod needs for it — the class sweep of
+    /// PREFLIGHT-EVIDENCEWRITABLE-WRONG-PRINCIPAL.
+    ///
+    /// See [`EvidenceReadPlan`] for the answers. The one that is not "the
+    /// principal D2 names" is [`EvidenceReadPlan::ControllerAnswers`]: the
+    /// ADVISORY row is answered `unknown` by the controller, with the reason,
+    /// and every other row still runs (review L1/L2). It covers:
+    ///
+    /// * a grant the resolver REFUSED (e.g. `ControllerIdentityNotAllowlisted`
+    ///   while the installation policy does not list the location yet) — an
+    ///   advisory row's refusal must not stop the archive and marker rows of
+    ///   the same check;
+    /// * a Backup check's workload identity that cannot share the check pod's
+    ///   ServiceAccount — a Backup run never reads evidence in its own pod, so
+    ///   it must not block the readiness of a run it takes no part in.
+    ///
+    /// A `DestinationAccess` check whose evidence-read workload identity
+    /// cannot share the pod is still REFUSED: it asked for that principal, and
+    /// no pod can be it.
+    ///
+    /// # Errors
+    ///
+    /// [`destination::DestinationRefusal`] — `ExecutionContextConflict` (a
+    /// `DestinationAccess` check whose evidence-read workload identity cannot
+    /// share the pod) or `DestinationRoleNotConfigured` (the role is requested
+    /// and its grant was never resolved — fail closed).
+    pub fn evidence_read_plan(&self) -> Result<EvidenceReadPlan, destination::DestinationRefusal> {
+        if !matches!(
+            self.operation,
+            PreflightOperation::Backup | PreflightOperation::DestinationAccess
+        ) || !self.roles.contains(&DestinationRole::EvidenceRead)
+        {
+            return Ok(EvidenceReadPlan::NotRequested);
+        }
+        let Some(Ok(primary)) = self.archive.as_ref() else {
+            return Ok(EvidenceReadPlan::NotRequested);
+        };
+        let grant = match self.evidence_read_grant.as_ref() {
+            Some(Ok(g)) => g,
+            // L1: the ADVISORY row says why, and nothing else is held back.
+            Some(Err(refusal)) => {
+                return Ok(EvidenceReadPlan::ControllerAnswers(format!(
+                    "the evidence-read grant of BackupDestination {} was refused ({}: {}), so \
+                     no principal read the evidence root; the other rows of this check ran",
+                    primary.name,
+                    refusal.code.as_str(),
+                    refusal.message
+                )))
+            }
+            // FAIL CLOSED, as for the marker.
+            None => {
+                return Err(destination::DestinationRefusal {
+                    code: CheckCode::DestinationRoleNotConfigured,
+                    field: "spec.access.evidenceRead".to_string(),
+                    message: format!(
+                        "the evidence-read grant of BackupDestination {} was not resolved, so \
+                         destination.evidenceReadable has no principal to be answered as",
+                        primary.name
+                    ),
+                })
+            }
+        };
+        let service_account = match grant {
+            // No pod holds these, whatever the destination grant is — even
+            // when it IS the destination grant (a DestinationAccess check whose
+            // only role is EvidenceRead), because then the plan's credential is
+            // the ambient chain and reading with it is reading as nobody D2
+            // names.
+            destination::ResolvedGrant::ControllerIdentity => {
+                return Ok(EvidenceReadPlan::NotInPod(
+                    GrantRef::without_pod_credential(GrantCredentials::ControllerIdentity),
+                ))
+            }
+            destination::ResolvedGrant::NotConfigured => {
+                return Ok(EvidenceReadPlan::NotInPod(
+                    GrantRef::without_pod_credential(GrantCredentials::NotConfigured),
+                ))
+            }
+            _ if grant == &primary.grant => return Ok(EvidenceReadPlan::SameGrant),
+            destination::ResolvedGrant::SecretKeys {
+                secret,
+                access_key_id_key,
+                secret_access_key_key,
+                session_token_key,
+            } => {
+                let vars = logweir_core::check_contract::EVIDENCE_READ_ENV;
+                let mut from_secret = vec![
+                    crate::job::EnvFromSecret {
+                        name: vars.access_key_id.to_string(),
+                        secret_name: secret.clone(),
+                        key: access_key_id_key.clone(),
+                    },
+                    crate::job::EnvFromSecret {
+                        name: vars.secret_access_key.to_string(),
+                        secret_name: secret.clone(),
+                        key: secret_access_key_key.clone(),
+                    },
+                ];
+                if let Some(token) = session_token_key {
+                    from_secret.push(crate::job::EnvFromSecret {
+                        name: vars.session_token.to_string(),
+                        secret_name: secret.clone(),
+                        key: token.clone(),
+                    });
+                }
+                return Ok(EvidenceReadPlan::Separate(
+                    GrantRef::static_secret(secret.clone()),
+                    destination::DestinationEnv {
+                        literals: Vec::new(),
+                        from_secret,
+                        service_account_name: None,
+                    },
+                ));
+            }
+            destination::ResolvedGrant::WorkloadIdentity {
+                service_account_name,
+            } => service_account_name,
+        };
+        // ONE POD, ONE ServiceAccount: every other principal this pod must
+        // run as.
+        let others: Vec<String> = [
+            match self.connection.as_ref() {
+                Some(Ok(c)) => Some(c.execution.service_account_name.clone()),
+                _ => None,
+            },
+            primary.grant.service_account_name().map(str::to_string),
+            match self.evidence_write_principal() {
+                Ok(Some((_, env))) => env.service_account_name,
+                _ => None,
+            },
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|sa| !sa.is_empty())
+        .collect();
+        if let Some(other) = others.iter().find(|sa| *sa != service_account) {
+            if self.operation == PreflightOperation::Backup {
+                return Ok(EvidenceReadPlan::ControllerAnswers(format!(
+                    "the evidence-read grant of BackupDestination {} runs as ServiceAccount \
+                     {service_account} and this check pod runs as {other}; one pod has one \
+                     ServiceAccount, so this check did not read the evidence root as any \
+                     principal (a Backup run never reads evidence in its own pod, so the \
+                     verdict is not held back)",
+                    primary.name
+                )));
+            }
+            return Err(destination::DestinationRefusal {
+                code: CheckCode::ExecutionContextConflict,
+                field: "spec.access.evidenceRead".to_string(),
+                message: format!(
+                    "BackupDestination {} reads evidence as ServiceAccount {service_account} \
+                     and this check pod must run as {other}; one pod has one ServiceAccount, so \
+                     one check cannot exercise both",
+                    primary.name
+                ),
+            });
+        }
+        Ok(EvidenceReadPlan::Separate(
+            GrantRef::workload_identity(service_account.clone()),
+            destination::DestinationEnv {
+                literals: Vec::new(),
+                from_secret: Vec::new(),
+                service_account_name: Some(service_account.clone()),
+            },
+        ))
+    }
+
+    /// The roles the rendered plan carries: [`Inputs::roles`], minus an
+    /// `EvidenceRead` the controller answers itself
+    /// ([`EvidenceReadPlan::ControllerAnswers`]).
+    #[must_use]
+    pub fn plan_roles(&self) -> Vec<DestinationRole> {
+        let dropped = matches!(
+            self.evidence_read_plan(),
+            Ok(EvidenceReadPlan::ControllerAnswers(_))
+        );
+        self.roles
+            .iter()
+            .copied()
+            .filter(|r| !(dropped && *r == DestinationRole::EvidenceRead))
+            .collect()
+    }
+
     /// `destination.resolved`, over BOTH destinations — see the call site.
     ///
     /// `None` when this operation names no destination at all.
@@ -3997,6 +4306,19 @@ impl Inputs {
                 return Some(row);
             }
             first_ok.get_or_insert(row);
+        }
+        // THE THIRD PRINCIPAL ON THE SAME ROW. A destination that resolves for
+        // the checked grant but whose evidence-write grant cannot be exercised
+        // by this pod is not ready to be checked, and saying `DestinationValid`
+        // would hide why the marker row never ran.
+        if let (Some(name), Err(refusal)) =
+            (self.archive_name.as_ref(), self.evidence_write_principal())
+        {
+            return Some(destination_row(self.operation, &Err(refusal), name, now));
+        }
+        if let (Some(name), Err(refusal)) = (self.archive_name.as_ref(), self.evidence_read_plan())
+        {
+            return Some(destination_row(self.operation, &Err(refusal), name, now));
         }
         first_ok
     }
@@ -4062,6 +4384,13 @@ impl Inputs {
         // back to the archive when both resolve.
         if let Some(row) = self.destination_verdict_row(now) {
             out.push(row);
+        }
+        // Review L1/L2: an advisory evidence-read row the pod cannot answer is
+        // the controller's, with its reason — never absent, never blocking.
+        if let (Ok(EvidenceReadPlan::ControllerAnswers(reason)), Some(Ok(d))) =
+            (self.evidence_read_plan(), self.archive.as_ref())
+        {
+            out.push(evidence_read_row(op, &d.name, Some(&d.uid), &reason, now));
         }
         if op == PreflightOperation::Restore {
             if let Some(plan) = self.plan.as_ref() {
@@ -4246,6 +4575,25 @@ pub fn build_job_shape(
         Some(Ok(d)) => Some(d),
         _ => None,
     };
+    // THE MARKER'S PRINCIPAL (PREFLIGHT-EVIDENCEWRITABLE-WRONG-PRINCIPAL). A
+    // refusal here was already published as `destination.resolved`, which
+    // `plan_blockers` holds the Job back on; reaching it is a caller that
+    // skipped that, and it must not render a plan that writes as someone else.
+    let evidence_write = inputs
+        .evidence_write_principal()
+        .map_err(|refusal| refusal.message)?;
+    let evidence_write_grant = evidence_write.as_ref().map(|(g, _)| g.clone());
+    // THE EVIDENCE READ'S PRINCIPAL — the class sweep, same rule.
+    let evidence_read = inputs
+        .evidence_read_plan()
+        .map_err(|refusal| refusal.message)?;
+    let evidence_read_grant = match &evidence_read {
+        EvidenceReadPlan::Separate(g, _) | EvidenceReadPlan::NotInPod(g) => Some(g.clone()),
+        EvidenceReadPlan::NotRequested
+        | EvidenceReadPlan::SameGrant
+        | EvidenceReadPlan::ControllerAnswers(_) => None,
+    };
+    let plan_roles = inputs.plan_roles();
 
     let request = match operation {
         PreflightOperation::Backup => {
@@ -4255,7 +4603,7 @@ pub fn build_job_shape(
                 operation: CheckOperation::Backup,
                 connection: connection_plan(c),
                 destination: Some(destination_plan(d, Some(ARCHIVE_CA_PATH))),
-                roles: inputs.roles.clone(),
+                roles: plan_roles.clone(),
                 topics: inputs.topics.clone(),
                 signer_path: Some(crate::backup_execution::SIGNING_KEY_PATH.to_string()),
                 // The create-only marker is the ONLY key a check may ever
@@ -4263,6 +4611,8 @@ pub fn build_job_shape(
                 // `spec.readiness.writeProbe`, never assumed (reviewer finding
                 // F3).
                 write_probe: inputs.write_probe,
+                evidence_write: evidence_write_grant.clone(),
+                evidence_read: evidence_read_grant.clone(),
                 skip_checks: skip.clone(),
             }))
         }
@@ -4277,8 +4627,10 @@ pub fn build_job_shape(
             CheckRequest::DestinationAccess(
                 logweir_core::check_contract::DestinationAccessRequest {
                     destination: destination_plan(d, Some(ARCHIVE_CA_PATH)),
-                    roles: inputs.roles.clone(),
+                    roles: plan_roles.clone(),
                     write_probe: inputs.write_probe,
+                    evidence_write: evidence_write_grant.clone(),
+                    evidence_read: evidence_read_grant.clone(),
                 },
             )
         }
@@ -4377,6 +4729,39 @@ pub fn build_job_shape(
                 .map_err(|refusal| refusal.message.clone())?;
             env_literal.extend(env.literals);
             env_from_secret.extend(env.from_secret);
+        }
+        // The evidence-write grant, when it is a second principal: its keys
+        // under `LOGWEIR_EVIDENCE_AWS_*` (never `AWS_*`, which are the
+        // destination grant's), or its ServiceAccount.
+        if let Some((_, env)) = evidence_write {
+            env_literal.extend(env.literals);
+            env_from_secret.extend(env.from_secret);
+            if let Some(sa) = env.service_account_name {
+                if service_account.as_deref().is_some_and(|s| s != sa) {
+                    return Err(format!(
+                        "the check runs as ServiceAccount `{}` and the destination's \
+                         evidence-write grant demands `{sa}`; a check cannot run as both",
+                        service_account.unwrap_or_default()
+                    ));
+                }
+                service_account = Some(sa);
+            }
+        }
+        // The evidence-read grant, when it is a second (or third) principal:
+        // its keys under `LOGWEIR_EVIDENCE_READ_AWS_*`, or its ServiceAccount.
+        if let EvidenceReadPlan::Separate(_, env) = evidence_read {
+            env_literal.extend(env.literals);
+            env_from_secret.extend(env.from_secret);
+            if let Some(sa) = env.service_account_name {
+                if service_account.as_deref().is_some_and(|s| s != sa) {
+                    return Err(format!(
+                        "the check runs as ServiceAccount `{}` and the destination's \
+                         evidence-read grant demands `{sa}`; a check cannot run as both",
+                        service_account.unwrap_or_default()
+                    ));
+                }
+                service_account = Some(sa);
+            }
         }
     }
     env_literal.sort();
@@ -4564,6 +4949,173 @@ fn referent(
         name: name.to_string(),
         uid: uid.to_string(),
         generation,
+    }
+}
+
+/// The grant a `DestinationAccess` check's destination credential is
+/// resolved for — the ONE credential its plan's `DestinationPlan` names.
+///
+/// **`ArchiveRead` first, whenever it is requested.** `archiveWrite` is never
+/// probed by a check (`destination.archivePrefixWritable` is execution-only),
+/// so resolving the plan's credential for it while `ArchiveRead` was also
+/// requested answered `destination.archiveListable` as the archive-WRITE
+/// principal — the same wrong-principal defect as
+/// PREFLIGHT-EVIDENCEWRITABLE-WRONG-PRINCIPAL, on the listing row. After it
+/// the declaration order stands (`ArchiveWrite`, `EvidenceWrite`,
+/// `EvidenceRead`), which is what every earlier build chose; `evidenceWrite`
+/// never needs to be the primary, because the marker is written as its own
+/// principal ([`Inputs::evidence_write_principal`]).
+///
+/// Empty roles cannot reach here (CEL `minItems: 1`); `ArchiveRead` is the
+/// answer anyway, as before.
+#[must_use]
+pub fn access_primary_role(roles: &[DestinationRole]) -> DestinationRole {
+    const ORDER: [DestinationRole; 4] = [
+        DestinationRole::ArchiveRead,
+        DestinationRole::ArchiveWrite,
+        DestinationRole::EvidenceWrite,
+        DestinationRole::EvidenceRead,
+    ];
+    ORDER
+        .into_iter()
+        .find(|r| roles.contains(r))
+        .unwrap_or(DestinationRole::ArchiveRead)
+}
+
+/// How `destination.evidenceReadable` is answered — [`Inputs::evidence_read_plan`].
+#[derive(Clone, Debug)]
+pub enum EvidenceReadPlan {
+    /// The check does not carry the `EvidenceRead` role.
+    NotRequested,
+    /// The `evidenceRead` grant IS the plan's destination grant: nothing
+    /// second is projected and the plan names nothing — byte-identical to the
+    /// plans every earlier controller rendered.
+    SameGrant,
+    /// A different Secret or ServiceAccount: named in the plan, projected into
+    /// the pod.
+    Separate(GrantRef, destination::DestinationEnv),
+    /// `ControllerIdentity` or not configured: named in the plan so the runner
+    /// answers `unknown` and reads as nobody.
+    NotInPod(GrantRef),
+    /// The grant was refused by the resolver, or (Backup only) cannot share
+    /// the pod's ServiceAccount: the role is left out of the rendered plan and
+    /// the CONTROLLER answers the advisory row `unknown` /
+    /// `EvidenceReadNotConfigured` with this reason ([`evidence_read_row`]).
+    /// The verdict is unchanged: the row is advisory.
+    ControllerAnswers(String),
+}
+
+/// `destination.evidenceReadable`, answered by the controller for
+/// [`EvidenceReadPlan::ControllerAnswers`] — D2 §6.3 gives the row authority
+/// "J or C". Advisory `unknown`, so the aggregate is untouched.
+#[must_use]
+pub fn evidence_read_row(
+    operation: PreflightOperation,
+    destination_name: &str,
+    destination_uid: Option<&str>,
+    reason: &str,
+    now: DateTime<Utc>,
+) -> CheckOutcome {
+    outcome(
+        operation,
+        CheckId::DestinationEvidenceReadable,
+        CheckState::Unknown,
+        CheckCode::EvidenceReadNotConfigured,
+        now,
+    )
+    .with_scope(CheckScope {
+        kind: "BackupDestination".to_string(),
+        name: destination_name.to_string(),
+        uid: destination_uid.map(str::to_string),
+    })
+    .with_message(reason)
+    .with_remedy(
+        "Fix the evidence-read grant the message names (the installation policy's \
+         ControllerIdentity allowlist, or a ServiceAccount the check pod can run as); the other \
+         rows of this check are not affected by it.",
+    )
+    .with_fact("grant", "evidenceRead")
+}
+
+/// What a `BackupDestination`'s SPEC says that its resolved form does not
+/// carry, for one check.
+#[derive(Clone, Debug, Default)]
+pub struct DestinationSpecFacts {
+    /// `spec.readiness.writeProbe: CreateOnlyMarker`.
+    pub write_probe: bool,
+    /// Whether a Backup readiness check should ADD the `EvidenceRead` role.
+    pub request_evidence_read: bool,
+    /// The object's own `evidenceWrite` grant, when the check requests the
+    /// `EvidenceWrite` role — see [`Inputs::evidence_write_grant`].
+    pub evidence_write_grant:
+        Option<Result<destination::ResolvedGrant, destination::DestinationRefusal>>,
+    /// The object's own `evidenceRead` grant, when the check requests (or a
+    /// Backup check adds) the `EvidenceRead` role — see
+    /// [`Inputs::evidence_read_grant`].
+    pub evidence_read_grant:
+        Option<Result<destination::ResolvedGrant, destination::DestinationRefusal>>,
+}
+
+/// [`DestinationSpecFacts`] for one check — **pure**.
+///
+/// * **`write_probe` is read for EVERY operation**, `DestinationAccess`
+///   included (defect DESTINATIONACCESS-IGNORES-WRITEPROBE). It used to be
+///   derived for Backup and Restore only, so a `DestinationAccess` check
+///   requesting `EvidenceWrite` answered `WriteNotProbed` on a destination
+///   that had opted in to the marker — a readiness question that was asked and
+///   could never fail. The opt-in stays the destination owner's: `Disabled`
+///   (the default) still writes nothing, and the row is then execution-only as
+///   D2 §6.3 says.
+/// * **`EvidenceRead` is added only to a Backup check, and only when the
+///   destination configures that grant.** A `DestinationAccess` request names
+///   its own roles.
+/// * **The `evidenceWrite` grant is resolved for a Backup or
+///   `DestinationAccess` check that requests `EvidenceWrite`**, so the marker
+///   can be written as that principal (defect
+///   PREFLIGHT-EVIDENCEWRITABLE-WRONG-PRINCIPAL). A Restore preflight's
+///   evidence destination is a second object, resolved for `EvidenceWrite`
+///   already, and its row is execution-only.
+/// * **The `evidenceRead` grant is resolved whenever the check will carry the
+///   `EvidenceRead` role**, so `destination.evidenceReadable` is answered as
+///   that principal or not at all (the class sweep of the same defect).
+#[must_use]
+pub fn destination_spec_facts(
+    operation: PreflightOperation,
+    object: &crate::crds::backup_destination::BackupDestination,
+    roles: &[DestinationRole],
+    policy: &check_policy::Policy,
+) -> DestinationSpecFacts {
+    // `EvidenceRead` is requested ONLY when the destination configures that
+    // grant: probing a role the object leaves unconfigured would report a
+    // refusal about a grant nobody asked for. Absent means verification is
+    // `NotAttempted` (D2 §3.6), and the advisory row is then simply not
+    // requested rather than answered wrongly. WHICH principal answers it when
+    // it is requested is `Inputs::evidence_read_plan`'s business.
+    let evidence_read =
+        destination::resolve(object, DestinationRole::EvidenceRead, policy).map(|d| d.grant);
+    // A grant that is CONFIGURED and refused (not allowlisted, an
+    // `ArchiveReadGrant` with no `archiveRead`) is still requested: the
+    // controller answers the advisory row with the refusal (review L1) rather
+    // than leave it absent, which would read as "no grant configured".
+    let evidence_read_configured =
+        !matches!(evidence_read, Ok(destination::ResolvedGrant::NotConfigured));
+    let request_evidence_read = evidence_read_configured && operation == PreflightOperation::Backup;
+    let reads_evidence = match operation {
+        PreflightOperation::Backup => request_evidence_read,
+        PreflightOperation::DestinationAccess => roles.contains(&DestinationRole::EvidenceRead),
+        PreflightOperation::Restore | PreflightOperation::SourceConnection => false,
+    };
+    let writes_evidence = matches!(
+        operation,
+        PreflightOperation::Backup | PreflightOperation::DestinationAccess
+    ) && roles.contains(&DestinationRole::EvidenceWrite);
+    DestinationSpecFacts {
+        write_probe: destination::write_probe_enabled(object),
+        request_evidence_read,
+        evidence_write_grant: writes_evidence.then(|| {
+            destination::resolve(object, DestinationRole::EvidenceWrite, policy).map(|d| d.grant)
+        }),
+        evidence_read_grant: reads_evidence.then_some(evidence_read),
     }
 }
 
@@ -4772,17 +5324,7 @@ pub async fn resolve(
     inputs.legacy_archive = legacy;
     let archive_role = match request.operation {
         PreflightOperation::Restore => DestinationRole::ArchiveRead,
-        PreflightOperation::DestinationAccess => inputs
-            .roles
-            .iter()
-            .copied()
-            .min_by_key(|r| {
-                DestinationRole::ALL
-                    .iter()
-                    .position(|a| a == r)
-                    .unwrap_or(usize::MAX)
-            })
-            .unwrap_or(DestinationRole::ArchiveRead),
+        PreflightOperation::DestinationAccess => access_primary_role(&inputs.roles),
         PreflightOperation::Backup => DestinationRole::ArchiveWrite,
         // Unreachable in practice: the arm above left `archive_ref` `None`, so
         // nothing is resolved with this role. It is spelled rather than
@@ -4811,28 +5353,18 @@ pub async fn resolve(
             inputs.bindings.source_storage = Some(d.plan_storage());
         }
         // THE SPEC FACTS THE RESOLVED FORM DOES NOT CARRY, read once from the
-        // object itself: whether the destination opted in to the create-only
-        // marker (reviewer finding **F3**) and whether it configures an
-        // `evidenceRead` grant at all. A `DestinationAccess` request names its
-        // own roles, so neither is derived for it.
-        if resolved.is_ok() && request.operation != PreflightOperation::DestinationAccess {
+        // object itself — see `destination_spec_facts`, which is pure so that
+        // the derivation is a unit row and not an API-server fixture.
+        if resolved.is_ok() {
             let api: Api<crate::crds::backup_destination::BackupDestination> =
                 Api::namespaced(client.clone(), namespace);
             if let Some(object) = api.get_opt(&name).await.map_err(ReconcileError::Api)? {
-                inputs.write_probe = destination::write_probe_enabled(&object);
-                // `EvidenceRead` is requested ONLY when the destination
-                // configures that grant. The check plan carries ONE credential
-                // for its destination, so probing a role the object leaves
-                // unconfigured would exercise the wrong credential and report a
-                // refusal about a grant nobody asked for. Absent means
-                // verification is `NotAttempted` (D2 §3.6), and the advisory
-                // row is then simply not requested rather than answered wrongly.
-                let configured = !matches!(
-                    destination::resolve(&object, DestinationRole::EvidenceRead, &policy)
-                        .map(|d| d.grant),
-                    Ok(destination::ResolvedGrant::NotConfigured) | Err(_)
-                );
-                if configured && request.operation == PreflightOperation::Backup {
+                let facts =
+                    destination_spec_facts(request.operation, &object, &inputs.roles, &policy);
+                inputs.write_probe = facts.write_probe;
+                inputs.evidence_write_grant = facts.evidence_write_grant;
+                inputs.evidence_read_grant = facts.evidence_read_grant;
+                if facts.request_evidence_read {
                     inputs.roles.push(DestinationRole::EvidenceRead);
                 }
             }

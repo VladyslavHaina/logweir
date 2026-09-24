@@ -724,6 +724,34 @@ fn a_contract_refusal_is_read_by_key_name_and_beats_the_absent_frames() {
         "a correct exit-3 refusal must not be reported as an unreadable result"
     );
     assert_eq!(observation.exit_code, Some(3));
+    // Review L3: the message says what to do.
+    assert!(
+        observation
+            .message
+            .contains("upgrade the runner image to this controller's release"),
+        "{}",
+        observation.message
+    );
+
+    // …and names the field the runner refused, when its stderr line says.
+    let with_field = "{\"fields\":{\"message\":\"check plan does not parse: unknown field \
+                      `evidenceWrite`, expected one of `destination`\"}}\n\
+                      refusal-reason=CheckContractMismatch\n";
+    let observation = check::classify(&Input {
+        job: &job_object(Some("Failed"), None),
+        pod: Some(&pod_object(Some(("Job", JOB_UID, true)), terminated(3))),
+        events: &[],
+        log: Some(with_field),
+        expect: &expectations(),
+        now: now(),
+    });
+    assert!(
+        observation
+            .message
+            .contains("it did not know the plan field `evidenceWrite`"),
+        "{}",
+        observation.message
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1018,6 +1046,8 @@ fn a_waiting_code_belongs_to_the_check_whose_projection_it_names() {
     let projections = Projections {
         connection_secret: Some("orders-sasl".to_string()),
         destination_secret: Some("minio-keys".to_string()),
+        evidence_write_secret: Some("evidence-writer".to_string()),
+        evidence_read_secret: Some("evidence-reader".to_string()),
         signer_secret: Some("logweir-signing-key".to_string()),
         trust_config_maps: vec!["minio-ca".to_string()],
     };
@@ -1035,6 +1065,17 @@ fn a_waiting_code_belongs_to_the_check_whose_projection_it_names() {
     );
     assert_eq!(
         check::attribute(&secret_not_found("minio-keys"), &projections),
+        Some(CheckId::DestinationCredentialProjected)
+    );
+    // A SEPARATE evidence-write grant's Secret is still the destination's
+    // credential (PREFLIGHT-EVIDENCEWRITABLE-WRONG-PRINCIPAL): a check pod that
+    // cannot start because of it names the destination row, not the pod.
+    assert_eq!(
+        check::attribute(&secret_not_found("evidence-writer"), &projections),
+        Some(CheckId::DestinationCredentialProjected)
+    );
+    assert_eq!(
+        check::attribute(&secret_not_found("evidence-reader"), &projections),
         Some(CheckId::DestinationCredentialProjected)
     );
     assert_eq!(
