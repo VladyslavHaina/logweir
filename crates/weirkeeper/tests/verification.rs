@@ -5452,3 +5452,95 @@ fn a_stored_retry_after_is_clamped_to_one_window() {
     .expect("a compromise revocation always changes a NotAttempted verdict");
     assert_eq!(revoked.to, "Untrusted");
 }
+
+// ===========================================================================
+// legacy-point-restore P5's class sweep — an inline-archive `Backup`'s receipt
+// is read only through the controller's handle, and only in its bucket
+// ===========================================================================
+
+/// One finished pass over [`backup`] (archive `s3://kafka-backups/k8s-demo`)
+/// through `reconcile_backup_at` with the handle at `handle`. Returns the
+/// status patches and how many times each oracle was consulted.
+async fn legacy_backup_pass(handle: Option<&str>) -> (Vec<Value>, usize, usize) {
+    let archive_calls = Arc::new(AtomicUsize::new(0));
+    let verify_calls = Arc::new(AtomicUsize::new(0));
+    let archive = {
+        let calls = Arc::clone(&archive_calls);
+        move |keys: weirkeeper::controllers::backup::EvidenceKeys| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            observed_archive(keys)
+        }
+    };
+    let verify = {
+        let calls = Arc::clone(&verify_calls);
+        move |r: EvidenceRef| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            valid_oracle(r)
+        }
+    };
+    let (client, seen) = sequenced_client(vec![200, 200]);
+    weirkeeper::controllers::backup::reconcile_backup_at(
+        &backup(),
+        &client,
+        &archive,
+        &verify,
+        Utc.with_ymd_and_hms(2026, 11, 9, 3, 20, 0).unwrap(),
+        &weirkeeper::job::RunnerImage::default(),
+        handle,
+    )
+    .await
+    .expect("the reconcile succeeds");
+    let patches = seen
+        .lock()
+        .expect("readable")
+        .iter()
+        .filter(|s| s.method == "PATCH" && s.path.ends_with("/status"))
+        .map(|s| serde_json::from_str::<Value>(&s.body).expect("a status patch is JSON"))
+        .collect();
+    (
+        patches,
+        archive_calls.load(Ordering::SeqCst),
+        verify_calls.load(Ordering::SeqCst),
+    )
+}
+
+/// A `Backup` whose archive is in a bucket the controller's handle does not
+/// read is NOT read through that handle — its receipt is not there — and says
+/// so, naming both buckets. It used to be read where the receipt never was and
+/// publish a store `NotFound`, which reads as "the receipt is missing".
+///
+/// FAILS ON THE OLD CODE: both oracles are consulted.
+#[tokio::test]
+async fn a_legacy_backup_in_another_bucket_is_not_read_through_the_handle() {
+    let (patches, archive_calls, verify_calls) =
+        legacy_backup_pass(Some("s3://team-b-archive/logweir")).await;
+    assert_eq!(
+        (archive_calls, verify_calls),
+        (0, 0),
+        "the handle over team-b-archive was read for a receipt under kafka-backups"
+    );
+    let verification = patches
+        .iter()
+        .rev()
+        .find_map(|p| p.pointer("/status/evidence/verification"))
+        .expect("a verdict is published");
+    assert_eq!(verification["result"], json!("NotAttempted"), "{patches:?}");
+    let detail = verification["detail"].as_str().expect("a detail");
+    assert!(
+        detail.contains("s3://kafka-backups") && detail.contains("s3://team-b-archive/logweir"),
+        "both locations are named: {detail}"
+    );
+}
+
+/// The CONTROL: the same `Backup` under a handle over its own bucket — another
+/// prefix, the same bucket — is read and verified exactly as before.
+#[tokio::test]
+async fn a_legacy_backup_in_the_handles_bucket_is_verified_as_before() {
+    let (patches, archive_calls, verify_calls) =
+        legacy_backup_pass(Some("s3://kafka-backups/logweir")).await;
+    assert_eq!((archive_calls, verify_calls), (1, 1));
+    assert_eq!(
+        patches[1].pointer("/status/evidence/verification/result"),
+        Some(&json!("Valid"))
+    );
+}
