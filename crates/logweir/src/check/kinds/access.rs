@@ -35,8 +35,8 @@
 //! and the marker handle is built with it; the row then carries the fact
 //! `grant=evidenceWrite` and names the Secret or ServiceAccount. When the plan
 //! carries none, the two grants are one grant and the row says
-//! `grant=destination`. The evidence-write handle is used for the ONE
-//! create-only put and for nothing else — no read, no list, no delete — so the
+//! `grant=destination`. The evidence-write handle is used for create-only puts
+//! of the ONE marker key and for nothing else — no read, no list, no delete — so the
 //! probe needs `s3:PutObject` on `logweir/readiness/*` and nothing D2 §3.11
 //! does not already grant that principal.
 //!

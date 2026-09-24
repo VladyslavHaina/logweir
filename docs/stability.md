@@ -1099,8 +1099,8 @@ in the environment: a rollout that upgraded one and not the other is refused rat
   workloadIdentity, secretName | serviceAccountName}` — a reference, never a value — and the
   runner builds the marker handle from `LOGWEIR_EVIDENCE_AWS_*` or the injected identity only,
   never from the destination grant's `AWS_*`; a projected variable that is missing is
-  `CredentialSecretKeyMissing`, not a fall-back. That handle is used for the one put and nothing
-  else. An absent `evidenceWrite` means the two grants are one, and such a plan is byte-identical to
+  `CredentialSecretKeyMissing`, not a fall-back. That handle is used for create-only puts of the
+  one marker key and nothing else. An absent `evidenceWrite` means the two grants are one, and such a plan is byte-identical to
   what earlier controllers rendered; an older runner refuses a plan that carries the field (exit 3,
   `deny_unknown_fields`). **The evidence-read probe follows the same rule**: `evidenceRead` names
   its grant, its keys arrive as `LOGWEIR_EVIDENCE_READ_AWS_*`, and a `controllerIdentity` or

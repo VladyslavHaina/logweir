@@ -546,8 +546,8 @@ ServiceAccount, the check plan names it (`evidenceWrite: {credentials, secretNam
 | serviceAccountName}`, references only) and the check pod is projected its keys
 as `LOGWEIR_EVIDENCE_AWS_*` beside the unprefixed `AWS_*`, or runs as its
 ServiceAccount. The row carries the fact `grant=evidenceWrite` or
-`grant=destination` and names the principal. The probe asks that principal for
-exactly one create-only `PUT` of `logweir/readiness/<destinationUid>.json` — no
+`grant=destination` and names the principal. The probe asks that principal only
+for create-only `PUT`s of the one key `logweir/readiness/<destinationUid>.json` — no
 read, no list, no delete — so the `write probe` row's `s3:PutObject` on
 `logweir/readiness/*` is already inside `evidenceWrite`'s own `s3:PutObject` on
 `logweir/*`. **Builds before this one** projected only the archive grant into a

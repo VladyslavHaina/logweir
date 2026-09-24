@@ -1989,8 +1989,14 @@ fn a_separated_evidence_write_principal_that_can_write_is_green_whatever_the_arc
     assert!(archive_principal.puts().is_empty());
 }
 
+/// How many create-only puts of the marker key one probe makes. ONE on this
+/// branch; the conditional-create proof (`claude/receipt-dup`) re-puts the
+/// same key to observe `AlreadyExists`, which makes it TWO — change it here.
+const MARKER_PUTS_PER_PROBE: usize = 1;
+
 /// **Least privilege, asserted.** The evidence-write principal's handle is
-/// asked for EXACTLY one create-only put of the marker key: no read, no list,
+/// asked for EXACTLY [`MARKER_PUTS_PER_PROBE`] create-only puts of the marker
+/// key: no read, no list,
 /// no delete (the `ObjectAccess` seam has no delete at all, and
 /// `the_only_write_in_the_check_runner_is_create_only` pins that). D2 §3.11
 /// grants `evidenceWrite` `s3:PutObject` (conditional create) and
@@ -2030,9 +2036,9 @@ fn the_evidence_write_principal_is_asked_for_one_create_only_put_and_nothing_els
     assert_eq!(run.code, ExitCode::Ok);
     assert_eq!(
         evidence_principal.calls(),
-        vec![format!("put logweir/readiness/{DEST_UID}.json")],
-        "the evidence-write principal is used for the one create-only marker put and for \
-         nothing else"
+        vec![format!("put logweir/readiness/{DEST_UID}.json"); MARKER_PUTS_PER_PROBE],
+        "the evidence-write principal is used for create-only puts of the one marker key and \
+         for nothing else"
     );
 }
 
