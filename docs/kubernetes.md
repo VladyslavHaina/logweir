@@ -2623,17 +2623,44 @@ being waited for). Once the verdict is reached the run is recorded once:
   scorecard read that failed leaves no digest and so no verdict), and on the
   fetch path it lasts one reconcile;
 - a rehearsal `Restore` deleted while `activeRestoreRef` still names it is
-  `lastFailed` with reason `RestoreDeleted`, and the ref is released.
+  `lastFailed` with reason `RestoreDeleted`, and the ref is released. The same
+  record is written for a reservation (`pendingRestoreRef` with no matching
+  `activeRestoreRef`) whose `Restore` no longer exists, or was never created.
+
+**The reservation protocol, and what a lost write leaves.** A slot that fires
+writes three things in order: `pendingRestoreRef` and `lastScheduledSlot` under
+a resourceVersion-checked status patch, then the deterministic
+`logweir-rehearsal-<schedule>-<slot>` `Restore`, then the pass's commit
+(`activeRestoreRef`, `pendingRestoreRef: null`, the verdict and the three
+conditions). The commit is preconditioned on the version the reservation left,
+so it lands. If another writer changes the schedule in between, the commit is
+refused and nothing of it is stored. The next pass then reads the reserved name
+and adopts that `Restore` as `activeRestoreRef` only when it is this schedule's
+own: controlled by the schedule's UID and standing-authorised by its name. A
+`Restore` of that name owned by anything else is never adopted. The reservation
+is released, and a create that meets such an object is recorded as a
+`ConcurrencyBlocked` skip for its slot, with no bundle written.
 
 `RehearsalHealthy` moves with the same decision (`True/Passed`, or
-`False/Failed` naming the reason). *Upgrade:* nothing to migrate. A schedule
+`False/Failed` naming the reason). *Upgrade:* nothing to migrate. Builds before REHEARSAL-FIRE-PASS-STATUS-LOST's
+fix never stored a firing pass's commit: that write was preconditioned on the
+version the reservation had already moved, and was refused. So a schedule
+whose last-fired run is not yet recorded carries `pendingRestoreRef` and no
+`activeRestoreRef`, and `Authorized` still reads `Unknown/NoResult` after
+rehearsals fired. On upgrade the first pass adopts that pending `Restore`, or
+records it `RestoreDeleted` if it is gone. `Authorized` is evaluated on the next
+slot that fires. Rolling back leaves an older build reading `activeRestoreRef`
+first and `pendingRestoreRef` second, as it always did. A schedule
 whose `activeRestoreRef` names a finished run is simply re-read; a run an older
 controller already recorded (including a pass it recorded as `lastFailed`
 reason `ok`) is not revisited — the next rehearsal records correctly.
 *Rollback:* an older controller records the terminal instant again, so a
 destination-backed pass reads as failed until upgraded. The three conditions are `Ready` (this controller could act),
-`Authorized` (the standing document currently admits a slot) and
-`RehearsalHealthy` (the last finished rehearsal passed). A `ProtectionPolicy`
+`Authorized` (the standing document currently admits a slot: `True` from a
+pass that fired, `False` naming the refusal from a pass that refused the
+authorization, and carried unchanged by a pass that did not evaluate it, such
+as a concurrency skip) and `RehearsalHealthy` (the last finished rehearsal
+passed). A `ProtectionPolicy`
 reads `lastSucceeded.{at,restoreRef}` and `lastFailed.{at,reason}` — the four
 fields its `RehearsalFailure` alert is computed from — and reads nothing else
 here.

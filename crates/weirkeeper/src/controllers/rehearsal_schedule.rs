@@ -54,7 +54,9 @@
 //! # What it writes, and what it does not
 //!
 //! It patches `rehearsalschedules/status` with a merge PATCH carrying
-//! `metadata.resourceVersion` as the update precondition (seam **S7**), creates
+//! `metadata.resourceVersion` as the update precondition (seam **S7**) — and a
+//! pass that writes twice (the reservation, then the commit) preconditions the
+//! second write on the first write's answer — creates
 //! `Restore` objects and their approval-bundle `ConfigMap`s, and touches
 //! nothing else. There is no `Api<Restore>::patch_status` anywhere in this
 //! file: the `Restore` reconciler owns that object's status, and a rehearsal
@@ -1255,9 +1257,15 @@ async fn fire(
     // ---- PLAT-04.1's reservation, then the deterministic child ------------
     //
     // A merge PATCH with `metadata.resourceVersion` as the precondition, never
-    // `replace_status` (seam S7). A controller that dies between the two finds
-    // the reservation on restart and resumes exactly this name, because the
-    // name is a pure function of the trigger.
+    // `replace_status` (seam S7). The write MOVES the version, so its answer is
+    // returned and the pass commits on it (REHEARSAL-FIRE-PASS-STATUS-LOST).
+    // A pass whose commit does not land — another writer, or a controller that
+    // stops between the two — leaves the reservation, and the next pass reads
+    // it back by this name, which is a pure function of the trigger
+    // ([`recover_reservation`]): it adopts the child when it exists and is this
+    // schedule's own, and records it `RestoreDeleted` when it does not. It does
+    // NOT re-create a reserved child that is gone: its slot is already
+    // consumed, and a rehearsal run late is not the rehearsal that was due.
     let api: Api<RehearsalSchedule> = Api::namespaced(ctx.client.clone(), namespace);
     let body = status_patch_with_preconditions(
         schedule,
