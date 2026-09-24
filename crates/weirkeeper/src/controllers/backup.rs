@@ -3979,6 +3979,7 @@ pub async fn reconcile_backup_at(
 /// [`reconcile_backup`]'s body. See that function for the state machine; the
 /// split exists so a `BackupError::Refused` raised anywhere below reaches
 /// exactly one status write.
+#[allow(clippy::too_many_arguments)]
 async fn reconcile_backup_inner(
     backup: &Backup,
     client: &kube::Client,
