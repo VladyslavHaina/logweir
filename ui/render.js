@@ -1175,7 +1175,14 @@ export function runPhaseBadge(status) {
   const s = status || {};
   const queue = s.queue || {};
   if (s.phase === "Queued" && Number.isInteger(queue.limit) && queue.limit > 0) {
-    return badge("phase-queued", "Queued (limit " + queue.limit + " active)");
+    // A QUEUED RESTORE'S APPROVAL KEEPS ITS CLOCK (P10 review M2): the queue
+    // does not extend an approval's maximum age, so the deadline the
+    // controller copied onto the object is part of what "queued" means here.
+    const deadline = typeof queue.authorizationExpiresAt === "string" &&
+      queue.authorizationExpiresAt.length > 0
+      ? "; approval expires " + queue.authorizationExpiresAt
+      : "";
+    return badge("phase-queued", "Queued (limit " + queue.limit + " active" + deadline + ")");
   }
   return phaseBadge(s.phase);
 }
@@ -1185,7 +1192,9 @@ export const QUEUED_RUN_SENTENCE =
   "Queued: this manual run is waiting for a slot. Its namespace lets a fixed number of manual " +
   "runs of this kind be active at once, and this one starts, in creation order, when one of " +
   "them finishes. Nothing has been created for it yet -- no plan and no Job. Scheduled runs " +
-  "are not counted and are never queued.";
+  "are not counted and are never queued. A queued restore keeps its approval's deadline: the " +
+  "queue does not extend it, so a restore still waiting when its approval expires is refused " +
+  "and must be confirmed again.";
 
 // ===========================================================================
 // D2 (PLAT-08, PLAT-09.1, PLAT-03): the words for destinations, topic

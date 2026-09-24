@@ -484,8 +484,10 @@ absences:
   the controller, and both modes render it through `render.js`'s
   `runPhaseBadge` as "Queued (limit N active)", `N` being the object's own
   `status.queue.limit` (console mode: the item's `queue.limit`, projected under
-  the same name) -- copied, never computed. A `Queued` phase with no such block
-  is the plain `Queued` badge. The Backup and Restore details add the fixed
+  the same name) -- copied, never computed; a queued restore adds "; approval
+  expires T" from `status.queue.authorizationExpiresAt`, because the queue does
+  not extend an approval. A `Queued` phase with no such block is the plain
+  `Queued` badge. The Backup and Restore details add the fixed
   `QUEUED_RUN_SENTENCE`: nothing has been created for the run yet, and it starts
   in creation order when a slot frees.
 

@@ -63,3 +63,41 @@ fn the_shared_render_carries_the_issuer_ca_and_the_proxy_service() {
     );
     assert!(shared.require_trusted_proxy);
 }
+
+/// **P10 review L2: the chart renders `rateLimits` only away from THIS
+/// binary's defaults**, so an older console image (which refuses the unknown
+/// key and does not start) keeps starting on a default install. The values
+/// file ships the defaults, the template's guard names them, and the default
+/// console renders carry no block and parse to exactly the defaults.
+#[test]
+fn rate_limits_are_rendered_only_away_from_the_binarys_defaults() {
+    let defaults = logweir_api::routes::RunRateLimits::default();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let values: serde_yaml::Value = serde_yaml::from_str(
+        &std::fs::read_to_string(root.join("charts/logweir/values.yaml")).expect("values"),
+    )
+    .expect("YAML");
+    let rl = &values["api"]["console"]["rateLimits"];
+    assert_eq!(
+        rl["manualBackupsPerMinute"].as_u64(),
+        Some(u64::from(defaults.manual_backups_per_minute))
+    );
+    assert_eq!(
+        rl["manualRestoresPerMinute"].as_u64(),
+        Some(u64::from(defaults.manual_restores_per_minute))
+    );
+    let template =
+        std::fs::read_to_string(root.join("charts/logweir/templates/ui/api-config.yaml"))
+            .expect("the template");
+    let guard = format!(
+        "(ne $rlBackups {}) (ne $rlRestores {})",
+        defaults.manual_backups_per_minute, defaults.manual_restores_per_minute
+    );
+    assert!(template.contains(&guard), "api-config.yaml must carry `{guard}`");
+    for render in ["console", "console-shared"] {
+        let text = console_config(render);
+        assert!(!text.contains("rateLimits"), "{render}: {text}");
+        let config = logweir_api::config::Config::parse(&text, Path::new("/")).expect("parses");
+        assert_eq!(config.run_rate_limits, defaults, "{render}");
+    }
+}

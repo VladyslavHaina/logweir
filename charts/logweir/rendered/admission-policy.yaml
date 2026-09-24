@@ -1418,6 +1418,11 @@ spec:
                 description: 'Present while a MANUAL run waits for a slot in its namespace''s manual-run pool (`phase: Queued`): the ceiling it is queued behind. No plan, no Job and no execution claim exist for a queued run; it starts in creation order when a slot frees. Absent on every other run, and on anything an older controller wrote.'
                 nullable: true
                 properties:
+                  authorizationExpiresAt:
+                    description: 'A queued `Restore`''s approval deadline: the signed `expires_at` of its authorization. The queue does NOT extend it — a restore still queued at this instant is refused `AuthorizationExpired`. Absent on a `Backup`, and for an approval that states no expiry.'
+                    format: date-time
+                    nullable: true
+                    type: string
                   limit:
                     description: 'The ceiling this run is queued behind: the installation policy''s `runs.maxManualBackupsActivePerNamespace` (a `Backup`) or `runs.maxManualRestoresActivePerNamespace` (a `Restore`) when the run was queued.'
                     format: int64
@@ -5250,6 +5255,11 @@ spec:
                 description: 'Present while a MANUAL restore — admitted, its approval verified — waits for a slot in its namespace''s manual-restore pool (`phase: Queued`): the ceiling it is queued behind. No plan, no bundle and no Job exist for it yet; it starts in creation order when a slot frees. Absent on a rehearsal''s `Restore` (never queued), on every other run, and on anything an older controller wrote.'
                 nullable: true
                 properties:
+                  authorizationExpiresAt:
+                    description: 'A queued `Restore`''s approval deadline: the signed `expires_at` of its authorization. The queue does NOT extend it — a restore still queued at this instant is refused `AuthorizationExpired`. Absent on a `Backup`, and for an approval that states no expiry.'
+                    format: date-time
+                    nullable: true
+                    type: string
                   limit:
                     description: 'The ceiling this run is queued behind: the installation policy''s `runs.maxManualBackupsActivePerNamespace` (a `Backup`) or `runs.maxManualRestoresActivePerNamespace` (a `Restore`) when the run was queued.'
                     format: int64
@@ -6957,10 +6967,6 @@ data:
       "preflight": {
         "defaultTimeoutSeconds": 120,
         "retentionSeconds": 3600
-      },
-      "runs": {
-        "maxManualBackupsActivePerNamespace": 4,
-        "maxManualRestoresActivePerNamespace": 2
       },
       "version": 1
     }

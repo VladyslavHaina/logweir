@@ -758,7 +758,7 @@ spec:
                 nullable: true
                 properties:
                   authorizationExpiresAt:
-                    description: 'A queued `Restore`''s approval deadline (review M2): the signed `expires_at` of its authorization. The queue does NOT extend it — a restore still queued at this instant is refused `AuthorizationExpired`. Absent on a `Backup`, and for an approval that states no expiry.'
+                    description: 'A queued `Restore`''s approval deadline: the signed `expires_at` of its authorization. The queue does NOT extend it — a restore still queued at this instant is refused `AuthorizationExpired`. Absent on a `Backup`, and for an approval that states no expiry.'
                     format: date-time
                     nullable: true
                     type: string

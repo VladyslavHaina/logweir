@@ -16,7 +16,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { apiClient, resetMode, selectMode } from "../client.js";
-import { QUEUED_RUN_SENTENCE, phaseBadge, runPhaseBadge } from "../render.js";
+import { QUEUED_RUN_SENTENCE, esc, phaseBadge, runPhaseBadge } from "../render.js";
 import { renderBackupDetail, renderBackupList } from "../pages/backups.js";
 import { renderHistoryList } from "../pages/history.js";
 
@@ -61,6 +61,46 @@ test("a_queued_run_names_its_ceiling_and_every_other_phase_is_unchanged", () => 
   assert.equal(runPhaseBadge(undefined), phaseBadge(undefined));
 });
 
+// P10 review M2: a queued restore's badge carries its approval's deadline,
+// copied from `status.queue.authorizationExpiresAt`. NEGATIVE CONTROL: no
+// deadline, no clause; a non-string one is ignored.
+test("a_queued_restore_names_its_approval_deadline", () => {
+  assert.equal(
+    runPhaseBadge({ phase: "Queued", queue: { limit: 2, authorizationExpiresAt: "2026-09-24T17:00:00Z" } }),
+    "<span class=\"badge badge-phase-queued\">Queued (limit 2 active; approval expires " +
+      "2026-09-24T17:00:00Z)</span>",
+  );
+  assert.equal(
+    runPhaseBadge({ phase: "Queued", queue: { limit: 2 } }),
+    "<span class=\"badge badge-phase-queued\">Queued (limit 2 active)</span>",
+  );
+  assert.equal(
+    runPhaseBadge({ phase: "Queued", queue: { limit: 2, authorizationExpiresAt: 5 } }),
+    "<span class=\"badge badge-phase-queued\">Queued (limit 2 active)</span>",
+  );
+  assert.match(QUEUED_RUN_SENTENCE, /does not extend it/);
+});
+
+test("the_console_projection_carries_a_restores_approval_deadline", async () => {
+  await consoleMode();
+  const list = fixture("console/restores-list.json");
+  const queued = Object.assign(JSON.parse(JSON.stringify(list.items[0])), {
+    name: "rst-queued",
+    queue: { limit: 2, authorizationExpiresAt: "2026-09-24T17:00:00Z" },
+    operation: { state: "queued", stateReason: "ConcurrencyLimited", terminal: false,
+      verificationState: "pending", verifiedSuccess: false },
+  });
+  list.items = [queued];
+  const restore = transport(() => ({ status: 200, body: list }));
+  try {
+    const got = await apiClient().list("team-a", "restores");
+    assert.deepEqual(got.items[0].status.queue,
+      { limit: 2, authorizationExpiresAt: "2026-09-24T17:00:00Z" });
+  } finally {
+    restore();
+  }
+});
+
 test("the_legacy_backups_page_reads_the_custom_resources_own_queue_block", () => {
   const queued = {
     metadata: { name: "logweir-manual-q", namespace: "team-a", uid: "u-q" },
@@ -78,8 +118,8 @@ test("the_legacy_backups_page_reads_the_custom_resources_own_queue_block", () =>
   assert.equal((page.match(/Queued \(limit 4 active\)/g) || []).length, 1, page);
   assert.match(page, /badge-phase-running">Running</);
   // The detail says what a queued run is -- and only for a queued run.
-  assert.ok(renderBackupDetail(queued).indexOf(QUEUED_RUN_SENTENCE) !== -1);
-  assert.equal(renderBackupDetail(running).indexOf(QUEUED_RUN_SENTENCE), -1);
+  assert.ok(renderBackupDetail(queued).indexOf(esc(QUEUED_RUN_SENTENCE)) !== -1);
+  assert.equal(renderBackupDetail(running).indexOf(esc(QUEUED_RUN_SENTENCE)), -1);
 });
 
 test("the_console_projection_carries_the_items_queue_block_under_the_resources_name", async () => {

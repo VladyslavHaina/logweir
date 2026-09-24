@@ -640,7 +640,7 @@ const BACKUP_DESTINATION_REF = shapeOf(
 
 // P10: the ceiling a queued manual run waits behind, published only while the
 // run is queued.
-const RUN_QUEUE = shapeOf("RunQueueView", { limit: int });
+const RUN_QUEUE = shapeOf("RunQueueView", { limit: int }, { authorizationExpiresAt: str });
 
 const BACKUP = shapeOf(
   "Backup",

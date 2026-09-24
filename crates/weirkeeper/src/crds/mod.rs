@@ -146,7 +146,7 @@ pub struct RunQueue {
     /// `runs.maxManualRestoresActivePerNamespace` (a `Restore`) when the run
     /// was queued.
     pub limit: i64,
-    /// A queued `Restore`'s approval deadline (review M2): the signed
+    /// A queued `Restore`'s approval deadline: the signed
     /// `expires_at` of its authorization. The queue does NOT extend it — a
     /// restore still queued at this instant is refused `AuthorizationExpired`.
     /// Absent on a `Backup`, and for an approval that states no expiry.

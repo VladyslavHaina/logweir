@@ -3882,14 +3882,27 @@ inside — a schedule's policy:
 **The gate is the last check before anything is created.** A manual run is
 refused, or held on a missing destination or approval, under its own reason
 first; only then does the controller count. It admits the run when the manual
-runs of its kind that already hold a slot in the namespace (a recorded
-`status.execution` or `jobRef`, a `Running`/`Resolving` phase, or any phase this
-build does not know), **plus the older manual runs still waiting**, are below
-the ceiling. Counting the older waiting runs is what makes a burst admit exactly
-the ceiling however many of its runs reconcile at once, and what makes the queue
-FIFO by `metadata.creationTimestamp` (then name). The count reads the watch the
-controller already runs — no API call — and admits nothing until that watch has
-finished its first list.
+runs of its kind that already hold a slot in the namespace, **plus the older
+manual runs still waiting**, are below the ceiling. A run holds a slot when its
+own status says so — a recorded `status.execution` or `jobRef`, an
+`Admitted=True` condition, a `Running`/`Resolving` phase, or any phase this build
+does not know — **or when this controller admitted it and the watch has not
+shown that yet.** The count reads the watch the controller already runs (no API
+call), and a watch lags the controller's own writes; so the decision and a
+**reservation** are taken together under one lock, and every later decision
+counts a reserved run whatever the watch says. That is what holds the ceiling
+when many runs decide in the same instant: a burst, restores released together
+when their approvals verify, runs released together from a destination hold,
+and every run re-enqueued at once by a controller restart or a `TrustPolicy`
+event. The queue is FIFO by arrival — `metadata.creationTimestamp`, then the
+UID; never a name, which a client chose. Nothing is admitted until the watch
+has finished its first list.
+
+**Every admission is written before anything is created.** The admitting pass
+first writes `Admitted=True` (and clears `status.queue`), and only then
+discovers, freezes and creates. A reservation lives in the process; the record
+does not, so a controller that restarts between the record and the Job counts
+the run from its own status. A failed record creates nothing.
 
 **A queued run has nothing.** `phase: Queued`, `Admitted=False` reason
 `ConcurrencyLimited` (the word a queued `Preflight` uses), and
@@ -3897,16 +3910,28 @@ finished its first list.
 an hour is written once. No plan `ConfigMap`, no `status.execution`, no Job and
 therefore no execution claim: a queued run freezes its inputs on the pass that
 admits it, exactly as it would have on its first pass (the frozen-inputs
-contract is unchanged, and a run that WAS frozen is never re-queued — its Job is
-re-created from the frozen inputs). A queued run is looked at again on the 15 s
-requeue, so it starts within one requeue of a slot freeing. The admitting pass
-first clears `status.queue` and turns `Admitted` true, then creates.
+contract is unchanged, and a run that WAS frozen or admitted is never
+re-queued — its Job is re-created from the frozen inputs). A queued run is
+looked at again on the 15 s requeue, so it starts within one requeue of a slot
+freeing.
 
-**A queued `Restore` keeps its approval, and the approval keeps its clock.** Every
-pass re-runs the admission before the gate, so an approval policy with a maximum
-age can expire a restore while it waits (`AuthorizationExpired`), exactly as any
-other wait would. Keep `runs.maxManualRestoresActivePerNamespace` and restore
-bursts small, or re-confirm.
+**A queued `Restore` keeps its approval, and the approval keeps its clock.** The
+queue does **not** extend an approval's maximum age (`maxAgeSeconds`): every
+pass re-runs the admission before the gate, so a restore still queued when its
+authorization expires is refused `AuthorizationExpired`, exactly as any other
+wait would end it. The deadline is on the object while it waits —
+`status.queue.authorizationExpiresAt` and the `Admitted` message, and the
+console's "Queued (limit N active; approval expires T)" — and the refusal says
+"expired while this Restore was queued behind N manual restore(s)". Keep
+`runs.maxManualRestoresActivePerNamespace` and restore bursts small, or
+re-confirm.
+
+**A known limit: the pool is for runs that DECLARE themselves manual.** A
+subject who may create `Backup` objects directly can declare a scheduled kind
+(`trigger.kind: Scheduled`, an existing schedule's `scheduleRef`, a valid slot
+and the matching name); such a run is bounded by neither this pool nor the
+schedule's `concurrencyPolicy`. RBAC on `create backups` is what governs direct
+object creation; `logweir-operator` has it, as D1 §8.7 already records.
 
 **Rollback.** An older controller has no pool: `Queued` is a phase it does not
 know, so it reads the run as active and starts it — every queued run at once,
@@ -4563,9 +4588,10 @@ schedule still completes. The labels are hints for selection and are never
 authority. Omit `scheduleRef` entirely for an ad-hoc run against a cluster.
 **Allowed is not the same as running at once** (P10): when the namespace's
 manual-run pool is full the run waits `phase: Queued` with nothing created and
-starts in creation order (§9, *Manual runs may queue*). The same object created
-with `kubectl` queues exactly as the console's does — the pool is the
-controller's, not the API's.
+starts in arrival order (§9, *Manual runs may queue*). A MANUAL-kind object
+created with `kubectl` queues exactly as the console's does — the pool is the
+controller's, not the API's. A hand-made scheduled-kind object does not (§9,
+*A known limit*).
 
 **Idempotence, which is what PLAT-06.2's "Back up now" needs.** Creating a
 `Backup` under a **new name** is a new run. Re-creating the same name while the
@@ -8128,7 +8154,7 @@ renders none is a supported install, not a degraded one.
 | `preflight.defaultTimeoutSeconds` / `retentionSeconds` | The default check budget, and the collector's window. |
 | `engine.allowUnverifiedCustomCa` | Whether a `BackupDestination` may carry a private CA the archive engine cannot verify. |
 | `evidence.controllerIdentityLocations` | Where the controller's own identity may read evidence from. An unlisted location is refused with `ControllerIdentityNotAllowlisted`, so the empty default is the closed direction. |
-| `runs` | P10: how many MANUAL runs one namespace may have holding a runner slot at once — "Back up now" `Backup`s and admitted manual `Restore`s. Over a ceiling a run is `phase: Queued` with `Admitted=False` reason `ConcurrencyLimited` and `status.queue.limit`, with nothing created, and starts in creation order as slots free (§ *Manual runs may queue*). Scheduled, catch-up and retry `Backup`s and a `RehearsalSchedule`'s `Restore`s are never counted or queued. Absent is the defaults, so a document written before the block keeps bounding manual runs. |
+| `runs` | P10: how many MANUAL runs one namespace may have holding a runner slot at once — "Back up now" `Backup`s and admitted manual `Restore`s. Over a ceiling a run is `phase: Queued` with `Admitted=False` reason `ConcurrencyLimited` and `status.queue.limit`, with nothing created, and starts in creation order as slots free (§ *Manual runs may queue*). Scheduled, catch-up and retry `Backup`s and a `RehearsalSchedule`'s `Restore`s are never counted or queued. Absent is the defaults (4 and 2), so a document written before the block keeps bounding manual runs — and the chart renders the block **only** when a value differs from those defaults. |
 | `legacyArchiveAddressing` | The installation's inline-archive addressing, published read-only so `POST …/destinations:from-legacy` can derive a legacy object's location from configuration it has actually read (§15.5). |
 
 **Who may write it is the access-control statement.** `create`/`update` on a
@@ -8341,11 +8367,14 @@ ignores.
 
 **The `runs` block (P10) is the one addition an older controller refuses.** A
 controller that predates it parses `policy.json` with unknown fields rejected,
-so a chart that renders `runs` makes an older image's policy **fail closed**
-(no attestations, no evidence allowlist, the `WARN` line above). Roll the
-controller image back together with the chart (`helm rollback`), never alone.
-The other direction is safe: this controller reads a document without the block
-as the defaults.
+so a document that carries `runs` makes an older image's policy **fail closed**
+(no attestations, no evidence allowlist, the `WARN` line above). The chart
+therefore renders the block **only when a value differs from the defaults** (4
+and 2): a default install carries none, and an image-only rollback reads the
+document it always did. An install that set `runs.*` rolls the controller image
+back together with the chart (`helm rollback`), never alone. The other
+direction is safe: this controller reads a document without the block as the
+defaults.
 
 Documentation is licensed [CC-BY-4.0](LICENSE-docs).
 

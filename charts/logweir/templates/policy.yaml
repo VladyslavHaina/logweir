@@ -30,8 +30,9 @@ and `runs.maxManualRestoresActivePerNamespace` manual restores — before the
 rest wait `phase: Queued` (`weirkeeper::run_pool`). An administrator's
 ceiling, in the administrator's ConfigMap, for the same reason the check
 ceilings are. A controller that predates the block refuses the WHOLE document
-(`deny_unknown_fields`) and fails closed, so the controller image is rolled
-back with the chart (`helm rollback`), never alone.
+(`deny_unknown_fields`) and fails closed, so the block is rendered only when a
+value differs from the controller's defaults (below), and a non-default
+install rolls the controller image back with the chart, never alone.
 
 THE `legacyArchiveAddressing` BLOCK IS THE SAME `archive.s3.*` VALUES
 `deployment.yaml` renders as `AWS_ENDPOINT_URL` / `AWS_REGION` /
@@ -109,12 +110,27 @@ both values.
       "preflight" (dict
         "defaultTimeoutSeconds" (.Values.checks.preflight.defaultTimeoutSeconds | int)
         "retentionSeconds" (.Values.checks.preflight.retentionSeconds | int))
-      "runs" (dict
-        "maxManualBackupsActivePerNamespace" (.Values.runs.maxManualBackupsActivePerNamespace | int)
-        "maxManualRestoresActivePerNamespace" (.Values.runs.maxManualRestoresActivePerNamespace | int))
       "engine" (dict "allowUnverifiedCustomCa" .Values.engine.allowUnverifiedCustomCa)
       "evidence" (dict "controllerIdentityLocations" .Values.evidence.controllerIdentityLocations)
       "legacyArchiveAddressing" $legacy -}}
+{{- /*
+THE `runs` BLOCK IS RENDERED ONLY WHEN IT DIFFERS FROM THE CONTROLLER'S OWN
+DEFAULTS (P10 review L2). `4` and `2` are `RunsPolicy::default()`, pinned by
+`weirkeeper/tests/chart_policy.rs`. A controller that predates the block parses
+`policy.json` with `deny_unknown_fields` and would refuse the WHOLE document —
+failing closed: no attestation, no evidence allowlist — so a default install
+must not carry it: then an image-only rollback reads the same document it
+always did, and the newer controller reads the absent block as these defaults.
+A non-default value is rendered, and then the controller is rolled back WITH
+the chart (`helm rollback`), never alone.
+*/ -}}
+{{- $runsBackups := int .Values.runs.maxManualBackupsActivePerNamespace -}}
+{{- $runsRestores := int .Values.runs.maxManualRestoresActivePerNamespace -}}
+{{- if or (ne $runsBackups 4) (ne $runsRestores 2) -}}
+{{- $_ := set $policy "runs" (dict
+      "maxManualBackupsActivePerNamespace" $runsBackups
+      "maxManualRestoresActivePerNamespace" $runsRestores) -}}
+{{- end -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:

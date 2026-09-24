@@ -444,3 +444,41 @@ fn the_policy_template_names_both_cross_field_rules_in_its_refusals() {
         "a disabled guard in the policy template"
     );
 }
+
+/// **P10 review L2: the numbers the chart renders NOTHING for are the
+/// controller's own defaults.** `templates/policy.yaml` omits the `runs` block
+/// when `runs.*` equals `RunsPolicy::default()` (so an older controller, which
+/// refuses an unknown block, keeps reading a default install's policy), and
+/// the values file ships those same defaults. Three spellings of one pair,
+/// read together here.
+#[test]
+fn the_runs_block_is_omitted_exactly_at_the_controllers_defaults() {
+    let defaults = policy::RunsPolicy::default();
+    let values: serde_yaml::Value = serde_yaml::from_str(
+        &std::fs::read_to_string(repo().join("charts/logweir/values.yaml")).expect("values"),
+    )
+    .expect("YAML");
+    assert_eq!(
+        values["runs"]["maxManualBackupsActivePerNamespace"].as_u64(),
+        Some(u64::from(defaults.max_manual_backups_active_per_namespace))
+    );
+    assert_eq!(
+        values["runs"]["maxManualRestoresActivePerNamespace"].as_u64(),
+        Some(u64::from(defaults.max_manual_restores_active_per_namespace))
+    );
+    let template = std::fs::read_to_string(repo().join("charts/logweir/templates/policy.yaml"))
+        .expect("the template");
+    let guard = format!(
+        "(ne $runsBackups {}) (ne $runsRestores {})",
+        defaults.max_manual_backups_active_per_namespace,
+        defaults.max_manual_restores_active_per_namespace
+    );
+    assert!(template.contains(&guard), "templates/policy.yaml must carry `{guard}`");
+    // AND THE DEFAULT RENDER HAS NO BLOCK, which the parser reads as defaults.
+    let rendered = rendered_policies("default")
+        .remove("weirkeeper-policy")
+        .expect("the default render carries a policy");
+    let parsed = policy::parse(rendered.as_bytes()).expect("the default render parses");
+    assert!(!rendered.contains("\"runs\""), "{rendered}");
+    assert_eq!(parsed.runs, defaults);
+}

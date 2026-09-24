@@ -385,36 +385,52 @@ hundred simultaneous runner pods, the node hit its 110-pod limit and went
 - **The controller bounds manual runs per namespace.** At most
   `runs.maxManualBackupsActivePerNamespace` (default `4`) manual `Backup`s and
   `runs.maxManualRestoresActivePerNamespace` (default `2`) admitted manual
-  `Restore`s hold a runner slot at once in one namespace. The rest wait with
+  `Restore`s hold a runner slot at once in one namespace (one installation
+  value each, applied in every namespace). The rest wait with
   `phase: Queued`, `Admitted=False / ConcurrencyLimited` and
   `status.queue.limit`, **with nothing created** — no plan, no Job, no
-  execution claim — and start in creation order as slots free (within one
-  requeue, 15 s). The console shows "Queued (limit N active)". Scheduled,
-  catch-up and retry `Backup`s and a `RehearsalSchedule`'s `Restore`s are
-  neither counted nor queued; `concurrencyPolicy` is unchanged. A queued
-  `Restore` re-checks its approval when it leaves the queue, so an approval
-  policy with a maximum age can expire it while it waits
-  (`AuthorizationExpired`); re-confirm and create a new one.
+  execution claim — and start in arrival order as slots free (within one
+  requeue, 15 s). Each admission is reserved in the controller and recorded on
+  the run (`Admitted=True`) before anything is created, so runs released
+  together — restores whose approvals verify at once, runs held on a
+  destination, everything after a controller restart — never pass the
+  ceiling. The console shows "Queued (limit N active)". Scheduled, catch-up
+  and retry `Backup`s and a `RehearsalSchedule`'s `Restore`s are neither
+  counted nor queued; `concurrencyPolicy` is unchanged.
+- **A queued restore keeps its approval's deadline.** The queue does not
+  extend an approval's maximum age: the deadline is on the object
+  (`status.queue.authorizationExpiresAt`, "approval expires T" in the
+  console), and a restore still queued when it passes is refused
+  `AuthorizationExpired` "while queued behind N"; confirm again and create a
+  new one.
 - **The console limits how fast one person can start runs:** `10`
-  "Back up now" and `5` manual restores per person, per namespace, per minute
-  (`api.console.rateLimits.*`), then `429 rate_limited` with `Retry-After`. A
-  malformed request does not spend the window; a replayed idempotency key does.
+  "Back up now" and `5` manual restores per person (`issuer#subject`), per
+  namespace, per minute (`api.console.rateLimits.*`), then `429 rate_limited`
+  with `Retry-After`. A malformed request does not spend the window; a
+  replayed idempotency key does.
+- **Known limit:** a subject allowed to create `Backup` objects directly can
+  declare a scheduled kind for an existing schedule and escape both the pool
+  and `concurrencyPolicy`; RBAC on `create backups` governs that path.
 
 **Do:** nothing is required. An automation that starts more than the limits
 above must pace itself, or read `429` and `Retry-After`; one that expects a
 manual run to be `Running` right after `201` must also accept `Queued`. Raise
-`runs.*` for a namespace whose nodes can carry more runner pods at once.
+`runs.*` where every namespace's nodes can carry more runner pods at once.
 **Scope:** pure and route-table rows (`crates/weirkeeper/tests/manual_run_pool.rs`,
-`restore_controller.rs`, `crates/logweir-api/tests/manual_run_limits.rs`) and
-four planted mutants, each killed. [UNVERIFIED — the live row (twenty manual runs at once on the PoC install, at most four runner pods) runs at the next PoC re-proof.]
-**Rollback:** an older controller has no pool; it reads `Queued` as an active
-phase and runs every queued Backup at once, exactly as before. **Roll the
-controller back together with the chart** (`helm rollback`): an older
-controller refuses a `weirkeeper-policy` ConfigMap that carries the new `runs`
-block and fails closed (no attestations, no evidence allowlist), and an older
-console refuses a configuration file that carries `rateLimits` and does not
-start. An older console reading a queued run shows it as `unknown`
-(`UnrecognizedPhase`) until the console is upgraded too.
+`restore_controller.rs`, `restore_policy.rs`,
+`crates/logweir-api/tests/manual_run_limits.rs`), chart rows, and twelve
+planted mutants (eight first round, four in the review round, including the
+reviewer's two survivors), each killed. [UNVERIFIED — the live rows (twenty manual runs and three approved restores at once on the PoC install) run at the next PoC re-proof.]
+**Rollback, in this order:** roll the **console** and the **controller** back
+**with the chart** (`helm rollback`). A default install carries neither new
+block — the chart renders `runs` in `weirkeeper-policy` and `rateLimits` in the
+console configuration **only** when a value differs from the defaults — so an
+image-only rollback of a default install keeps working. With a non-default
+value, an older controller refuses the whole `weirkeeper-policy` ConfigMap and
+fails closed (no attestations, no evidence allowlist), and an older console
+refuses its configuration file and does not start. An older controller has no
+pool: it reads `Queued` as an active phase and starts every queued run at
+once. An older console shows a queued run as `unknown` (`UnrecognizedPhase`).
 
 ### Verification scope: what "verified" means in this release
 

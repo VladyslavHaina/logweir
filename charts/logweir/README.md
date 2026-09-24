@@ -157,11 +157,14 @@ queued run has no plan, no Job and no execution claim; it is
 `Admitted=False/ConcurrencyLimited` with `status.queue.limit`, and the console
 shows "Queued (limit N active)". A queued `Restore` still re-checks its
 approval when it leaves the queue, so an authorization with a maximum age can
-expire while it waits (`AuthorizationExpired`). **Upgrade and rollback:** a
-controller that predates the block refuses the whole `policy.json`
-(`deny_unknown_fields`) and fails closed, so roll the controller image back
-together with the chart (`helm rollback`), never on its own; a newer controller
-reading an older document without the block uses the defaults above.
+expire while it waits (`AuthorizationExpired`) — the deadline is shown on the
+queued object. **Upgrade and rollback:** the chart renders the `runs` block
+**only when a value differs from the defaults above**, because a controller
+that predates it refuses the whole `policy.json` (`deny_unknown_fields`) and
+fails closed. A default install therefore carries no block and survives an
+image-only rollback; an install that set `runs.*` rolls the controller back
+together with the chart (`helm rollback`), never on its own. A newer controller
+reading a document without the block uses the defaults.
 `api.console.rateLimits` is the console's half: how many runs one person may
 START per namespace per minute (`10` backups, `5` restores; then `429` with
 `Retry-After`).
@@ -656,9 +659,12 @@ Keyed by the stable `issuer#subject` id, so two people are two windows and one
 person in two namespaces is two windows. The window is per console **process**:
 `replicas: 2` permits twice the rate. It bounds how fast runs are QUEUED; how
 many RUN at once is the controller's `runs.*` pool, which holds whatever this
-lets through. `logweir-api` refuses `0` and anything above `600` at start. A
-console image that predates the key refuses the whole configuration file at
-start (exit 2), so roll the console image back with the chart.
+lets through. `logweir-api` refuses `0` and anything above `600` at start. The
+chart renders `rateLimits` into the configuration **only when a value differs
+from these defaults**, because a console image that predates the key refuses
+the whole file at start (exit 2): a default install survives an image-only
+rollback, and one that set `api.console.rateLimits.*` rolls the console image
+back with the chart.
 
 ### Upgrade, rollback, and what an existing installation sees
 

@@ -194,10 +194,12 @@ contract, the four enforcement points and upgrade/rollback are in
 (then `429 rate_limited` with `Retry-After`), and once admitted — approved,
 target and destinations resolved — at most
 `runs.maxManualRestoresActivePerNamespace` (default `2`) run at once in a
-namespace; the rest are `queued` / `ConcurrencyLimited` with `queue: {limit}`
-and nothing created. The authorization is re-checked when a restore leaves the
-queue, so an approval with a maximum age can expire while it waits. A
-rehearsal's restores are never counted or queued.
+namespace; the rest are `queued` / `ConcurrencyLimited` with `queue: {limit,
+authorizationExpiresAt?}` and nothing created. The queue does not extend an
+approval's maximum age: the authorization is re-checked when a restore leaves
+the queue, and one that expired meanwhile is refused `AuthorizationExpired`
+with a message saying it expired while queued. A rehearsal's restores are never
+counted or queued.
 
 **`POST .../restores` answers where the submission goes next.** After the
 Restore exists (so it has a UID) the response carries `authorization`:
@@ -308,7 +310,9 @@ object.** The rules, exactly:
   exists — never the progress channel's `queued` stage (a Job with no pod yet).
   The `Backup` and `Restore` items then carry `queue: {limit}`, the ceiling the
   run waits behind, copied from `status.queue`; the block is published only
-  while the run is queued. An API older than this reads the same object as
+  while the run is queued. A queued `Restore`'s block also carries
+  `authorizationExpiresAt`, its approval's signed deadline: the queue does not
+  extend it. An API older than this reads the same object as
   `unknown/UnrecognizedPhase`.
 - A stage **never overrides a terminal phase.** `phase`, `exitCode` and
   `outcome` own the outcome; the progress channel answers "what is happening
@@ -1712,11 +1716,14 @@ control. The real ceiling on concurrent checks is the controller's
 `checks.maxActivePerNamespace`, which no API can talk past.
 
 Starting a **manual run** is bounded the same way (P10), keyed by the same
-`(actor, namespace, route)`: `POST …/backups` ("Back up now") at
+`(actor, namespace, route)` — the actor being the authenticated
+`issuer#subject`, never a session or a display name, so a second session or a
+re-login shares the window: `POST …/backups` ("Back up now") at
 `rateLimits.manualBackupsPerMinute` (default `10`) and `POST …/restores` at
 `rateLimits.manualRestoresPerMinute` (default `5`) per actor, per namespace, per
 minute — both set in the configuration file (`api.console.rateLimits.*` in the
-chart; `logweir-api` refuses `0` and anything above `600` at start). Past it the
+chart, which renders the key only when a value differs from those defaults;
+`logweir-api` refuses `0` and anything above `600` at start). Past it the
 answer is `429 rate_limited` with `Retry-After` (the seconds left in the window)
 and no object is created. The count is taken after authorization and after the
 request's own validation — a `422` does not spend the window — and before the

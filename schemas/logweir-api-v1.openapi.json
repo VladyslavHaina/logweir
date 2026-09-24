@@ -12186,6 +12186,12 @@
           "limit"
         ],
         "properties": {
+          "authorizationExpiresAt": {
+            "description": "A queued Restore's approval deadline — the signed `expires_at` of its authorization. The queue does not extend it: a restore still queued at this instant is refused `AuthorizationExpired`. Absent on a Backup and for an approval that states no expiry.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
           "limit": {
             "description": "The ceiling: `runs.maxManualBackupsActivePerNamespace` for a Backup, `runs.maxManualRestoresActivePerNamespace` for a Restore.",
             "type": "integer",

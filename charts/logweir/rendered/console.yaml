@@ -1418,6 +1418,11 @@ spec:
                 description: 'Present while a MANUAL run waits for a slot in its namespace''s manual-run pool (`phase: Queued`): the ceiling it is queued behind. No plan, no Job and no execution claim exist for a queued run; it starts in creation order when a slot frees. Absent on every other run, and on anything an older controller wrote.'
                 nullable: true
                 properties:
+                  authorizationExpiresAt:
+                    description: 'A queued `Restore`''s approval deadline: the signed `expires_at` of its authorization. The queue does NOT extend it — a restore still queued at this instant is refused `AuthorizationExpired`. Absent on a `Backup`, and for an approval that states no expiry.'
+                    format: date-time
+                    nullable: true
+                    type: string
                   limit:
                     description: 'The ceiling this run is queued behind: the installation policy''s `runs.maxManualBackupsActivePerNamespace` (a `Backup`) or `runs.maxManualRestoresActivePerNamespace` (a `Restore`) when the run was queued.'
                     format: int64
@@ -5250,6 +5255,11 @@ spec:
                 description: 'Present while a MANUAL restore — admitted, its approval verified — waits for a slot in its namespace''s manual-restore pool (`phase: Queued`): the ceiling it is queued behind. No plan, no bundle and no Job exist for it yet; it starts in creation order when a slot frees. Absent on a rehearsal''s `Restore` (never queued), on every other run, and on anything an older controller wrote.'
                 nullable: true
                 properties:
+                  authorizationExpiresAt:
+                    description: 'A queued `Restore`''s approval deadline: the signed `expires_at` of its authorization. The queue does NOT extend it — a restore still queued at this instant is refused `AuthorizationExpired`. Absent on a `Backup`, and for an approval that states no expiry.'
+                    format: date-time
+                    nullable: true
+                    type: string
                   limit:
                     description: 'The ceiling this run is queued behind: the installation policy''s `runs.maxManualBackupsActivePerNamespace` (a `Backup`) or `runs.maxManualRestoresActivePerNamespace` (a `Restore`) when the run was queued.'
                     format: int64
@@ -7003,10 +7013,6 @@ data:
         "defaultTimeoutSeconds": 120,
         "retentionSeconds": 3600
       },
-      "runs": {
-        "maxManualBackupsActivePerNamespace": 4,
-        "maxManualRestoresActivePerNamespace": 2
-      },
       "version": 1
     }
 ---
@@ -7014,7 +7020,7 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: logweir-api-config-ec9e734e9a
+  name: logweir-api-config-0ff2b603a0
   namespace: logweir-system
   labels:
     app.kubernetes.io/name: logweir
@@ -7031,9 +7037,6 @@ data:
     uiDirectory: /ui
     localAdmin:
       subject: "admin"
-    rateLimits:
-      manualBackupsPerMinute: 10
-      manualRestoresPerMinute: 5
     namespaces:
       - logweir-system
     kubernetes:
@@ -7681,7 +7684,7 @@ spec:
   template:
     metadata:
       annotations:
-        checksum/logweir-api-config: ec9e734e9a6878937ce4357056a34bb712971b610a52cf05e29ef4951f493049
+        checksum/logweir-api-config: 0ff2b603a076cee8d6da73029187810790054799e3fce3045776494371a1a7b2
       labels:
         app.kubernetes.io/name: logweir
         app.kubernetes.io/instance: logweir
@@ -7729,7 +7732,7 @@ spec:
       volumes:
         - name: config
           configMap:
-            name: logweir-api-config-ec9e734e9a
+            name: logweir-api-config-0ff2b603a0
             items:
               - key: config.yaml
                 path: config.yaml

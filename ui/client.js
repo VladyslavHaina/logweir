@@ -921,6 +921,9 @@ function projectRestore(item) {
 function queueOf(item, status) {
   if (item.queue !== null && item.queue !== undefined) {
     status.queue = { limit: item.queue.limit };
+    if (item.queue.authorizationExpiresAt !== null && item.queue.authorizationExpiresAt !== undefined) {
+      status.queue.authorizationExpiresAt = item.queue.authorizationExpiresAt;
+    }
   }
 }
 
