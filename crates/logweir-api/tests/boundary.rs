@@ -466,6 +466,39 @@ fn shipped_ui_files() -> Vec<String> {
     out
 }
 
+/// THE CONSOLE TELLS ITS PAGE IT IS THE CONSOLE, AND THE LEGACY FILE DOES NOT
+/// (console-ux-1 review L1). The page reads `window.LOGWEIR_CONSOLE` to decide
+/// that a failed session probe is "the service could not be reached" and never
+/// legacy `kubectl proxy` mode; the marker must come from this service and
+/// only from it.
+#[tokio::test]
+async fn the_console_serves_its_own_runtime_marker_and_the_file_carries_none() {
+    let app = TestApp::new();
+    let served = app.get("/ui/runtime.js").await;
+    assert_eq!(served.status, 200);
+    let text = String::from_utf8(served.body.clone()).unwrap();
+    assert!(
+        text.contains("window.LOGWEIR_CONSOLE = Object.freeze({ servedBy: \"logweir-api\" });"),
+        "the served runtime.js names the console: {text}"
+    );
+    assert!(
+        text.contains(
+            "window.LOGWEIR_NAMESPACE_CONTEXT = Object.freeze({ allowed: [], selected: \"\" });"
+        ),
+        "and keeps the empty namespace context app.js reads: {text}"
+    );
+    assert_eq!(
+        served.header("content-type").as_deref(),
+        Some("text/javascript; charset=utf-8")
+    );
+    let file = std::fs::read_to_string(support::repo_root().join("ui/runtime.js")).unwrap();
+    assert!(
+        !file.contains("LOGWEIR_CONSOLE"),
+        "the legacy file never claims to be the console"
+    );
+    assert!(text.is_ascii(), "every served script is plain ASCII");
+}
+
 #[tokio::test]
 async fn every_shipped_asset_is_served_byte_for_byte() {
     let app = TestApp::new();
@@ -482,7 +515,14 @@ async fn every_shipped_asset_is_served_byte_for_byte() {
         "the shipped UI is twenty-six files: {files:?}"
     );
     for rel in &files {
-        let source = std::fs::read(support::repo_root().join(rel)).unwrap();
+        // ONE FILE IS THE SERVICE'S OWN (review L1): `runtime.js` is served
+        // compiled in, carrying the console marker, in place of the legacy
+        // file's empty context. Every other file is its bytes on disk.
+        let source = if rel == "ui/runtime.js" {
+            logweir_api::assets::CONSOLE_RUNTIME_JS.as_bytes().to_vec()
+        } else {
+            std::fs::read(support::repo_root().join(rel)).unwrap()
+        };
         let url = format!("/{rel}");
         let response = app.get(&url).await;
         assert_eq!(response.status, 200, "{url}");

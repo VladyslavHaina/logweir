@@ -623,12 +623,14 @@ with the requeue interval would report a healthy schedule as stale. An absent
 **What the last slot did, and how many were skipped** (added by console-ux-1,
 MCP-13). `status.lastSlot` is the controller's own record of the most recent
 slot it decided about — `slot`, `dueAt`, `attempt`, `disposition` (`Admitted`,
-`CaughtUp`, `Retried`, `Missed`, `Superseded`, `Blocked`, `NameUnavailable`,
-`Released`, `Failed`, `Exhausted`, verbatim), the `Ready` `reason` beside it,
-`decidedAt` and, when there is one, `backupRef` — and `status.missedSlots` is
-the running `count` of slots that came due and were not run, `countCapped`
-when an evaluation stopped at its enumeration cap (the count is then a floor),
-`lastEvaluatedSlot`, and the most `recent` skips. Both are copied, never
+`CaughtUp`, `Retried`, `Missed`, `Blocked`, `NameUnavailable`, `Released`,
+`Failed`, `Exhausted`, verbatim), the `Ready` `reason` beside it, `decidedAt`
+and, when there is one, `backupRef` — and `status.missedSlots` is the running
+`count` of slots that came due and were not run, `countCapped` when an
+evaluation stopped at its enumeration cap (the count is then a floor),
+`lastEvaluatedSlot`, and the most `recent` skips, each with its `reason`
+(`ControllerUnavailable`, `ConcurrencyBlocked`, `PastStartingDeadline`,
+`BeforeRevision`, `NameUnavailable`, verbatim). Both are copied, never
 recomputed, and both are **additive**: absent means the controller has
 recorded nothing yet, and a client written before them reads the schedule
 exactly as before. The `Backup` names in them are names in the same namespace,

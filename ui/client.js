@@ -108,6 +108,29 @@ export const SIGNED_OUT = "signedOut";
  *  sign-in, and stays legacy mode. */
 export const SIGNED_OUT_CODES = SIGN_IN_CODES;
 
+/** THE CONSOLE THAT COULD NOT BE REACHED (console-ux-1 review L1). The page
+ *  knows it is behind `logweir-api` -- the service served its `runtime.js`
+ *  with a marker the legacy file does not carry -- and the session probe did
+ *  not give it a session or a sign-in refusal: it timed out, failed on the
+ *  network, answered a 5xx or a 429, or answered a body this page could not
+ *  decode. That is "the service is not answering right now", and the shell
+ *  says so with a Retry. It is NEVER legacy mode: a console that fell back to
+ *  legacy read `/apis/...` paths it does not serve, on every page. */
+export const UNAVAILABLE = "unavailable";
+
+/** Whether this page was served by `logweir-api`: the marker the service's
+ *  compiled-in `runtime.js` sets (`crates/logweir-api/src/assets.rs`
+ *  `CONSOLE_RUNTIME_JS`). A deterministic fact about the page, not an answer
+ *  from the network. */
+export function servedByConsole(deps) {
+  const d = deps || {};
+  if (typeof d.servedByConsole === "boolean") {
+    return d.servedByConsole;
+  }
+  const marker = globalThis.LOGWEIR_CONSOLE;
+  return marker !== null && typeof marker === "object" && marker.servedBy === "logweir-api";
+}
+
 /** How long the boot probe waits before deciding this is legacy mode. A page
  *  behind a proxy that never answers must still render: the refusal IS the
  *  legacy answer, and a missing refusal cannot be allowed to hang the shell. */
@@ -195,7 +218,7 @@ export function bindingRevision() {
  *  "granted" here and the API server's RBAC is the gate, which is the whole
  *  authorisation story of that mode. Signed out, nothing is. */
 export function granted(ns, flag) {
-  if (decided !== null && decided.mode === SIGNED_OUT) {
+  if (decided !== null && (decided.mode === SIGNED_OUT || decided.mode === UNAVAILABLE)) {
     return false;
   }
   if (decided === null || decided.mode !== CONSOLE) {
@@ -242,6 +265,7 @@ async function ensure() {
 
 async function probe(deps) {
   const ask = typeof deps.probe === "function" ? deps.probe : session;
+  const console_ = servedByConsole(deps);
   const Controller = deps.controller || globalThis.AbortController;
   let controller = null;
   let timer = null;
@@ -264,7 +288,7 @@ async function probe(deps) {
           controller.abort();
         }
         resolve(null);
-      }, PROBE_TIMEOUT_MS);
+      }, typeof deps.timeoutMs === "number" ? deps.timeoutMs : PROBE_TIMEOUT_MS);
     });
     const answer = await Promise.race([asked, bounded]);
     if (answer !== null && answer !== undefined && answer.ok !== true &&
@@ -272,17 +296,21 @@ async function probe(deps) {
       return signedOutRecord(signedOutCode(answer));
     }
     if (answer === null || answer === undefined || answer.ok !== true) {
-      return legacyRecord();
+      // BEHIND THE CONSOLE, A MISSING SESSION IS AN OUTAGE AND NOT A MODE
+      // (review L1). Only a page the console did NOT serve may conclude that
+      // it is behind `kubectl proxy`.
+      return console_ ? unavailableRecord(answer) : legacyRecord();
     }
     const decoded = decodeSession(answer.body);
     return consoleRecord(decoded.value, decoded.unknown);
   } catch (refused) {
-    // EVERY REFUSAL IS THE SAME ANSWER: this is not the product API. A path
-    // filter's 403, a body that is not a session document, a decode that found
-    // a required field missing, an abort at the bound above -- each of them
-    // says the page is not behind `logweir-api`, and legacy mode is what it is
-    // behind instead.
-    return legacyRecord();
+    // EVERY REFUSAL IS THE SAME ANSWER on a page the console did not serve:
+    // this is not the product API. A path filter's 403, a body that is not a
+    // session document, a decode that found a required field missing, an
+    // abort at the bound above -- each says the page is not behind
+    // `logweir-api`, and legacy mode is what it is behind instead. On a page
+    // the console DID serve, each is the service not answering (review L1).
+    return console_ ? unavailableRecord(null, refused) : legacyRecord();
   } finally {
     if (timer !== null) {
       globalThis.clearTimeout(timer);
@@ -323,6 +351,44 @@ function signedOutRecord(code) {
     // session ended" rather than "you are not signed in" when that is true.
     signedOut: code,
   });
+}
+
+// What the probe got instead of a session, in words for the shell's page:
+// the status and the problem document's own code and detail when there was an
+// answer, "did not answer in time" when the bound fired, and the error's own
+// message when the request itself failed. Never a credential: the probe
+// carries none.
+function unavailableRecord(answer, error) {
+  let said;
+  if (answer === null || answer === undefined) {
+    said = error === undefined || error === null
+      ? "the service did not answer within " + String(PROBE_TIMEOUT_MS / 1000) + " seconds"
+      : (error.kind === "contract" || error.contract !== undefined
+        ? "the service answered with a session this page could not read"
+        : "the request failed: " + String(error.message || error));
+  } else {
+    const body = answer.body !== null && typeof answer.body === "object" ? answer.body : {};
+    said = "the service answered " + String(answer.status) +
+      (typeof body.code === "string" ? " " + body.code : "") +
+      (typeof body.detail === "string" && body.detail.length > 0 ? ": " + body.detail : "");
+  }
+  return Object.freeze({
+    mode: UNAVAILABLE,
+    session: null,
+    namespaces: Object.freeze([]),
+    grants: Object.freeze(Object.create(null)),
+    roles: Object.freeze(Object.create(null)),
+    bindingRevision: "",
+    token: null,
+    unknown: Object.freeze([]),
+    unavailable: said,
+  });
+}
+
+/** Why the console could not start, in words, when it could not; `null` in
+ *  every other state. */
+export function unavailableReason() {
+  return decided === null || decided.mode !== UNAVAILABLE ? null : decided.unavailable;
 }
 
 /** `unauthenticated` or `session_expired` when the shared console has nobody
@@ -366,7 +432,7 @@ export function grantedAnywhere(flag) {
   if (decided === null) {
     return true;
   }
-  if (decided.mode === SIGNED_OUT) {
+  if (decided.mode === SIGNED_OUT || decided.mode === UNAVAILABLE) {
     return false;
   }
   if (decided.mode !== CONSOLE) {
@@ -2911,18 +2977,34 @@ function implementation(record, consoleImpl, legacyImpl, signedOutImpl) {
   if (record.mode === CONSOLE) {
     return consoleImpl;
   }
-  return record.mode === SIGNED_OUT ? signedOutImpl : legacyImpl;
+  // A console that could not be reached is not legacy either (review L1).
+  return record.mode === SIGNED_OUT || record.mode === UNAVAILABLE ? signedOutImpl : legacyImpl;
 }
 
-// Every method of `impl`, answering the signed-out refusal and sending nothing.
+// Every method of `impl`, answering the refusal for the decided state --
+// signed out, or the service not reached -- and sending nothing.
 function refusingAll(impl) {
   const out = {};
   for (const key of Object.keys(impl)) {
     out[key] = () => {
-      throw signedOutError();
+      throw decided !== null && decided.mode === UNAVAILABLE
+        ? unavailableError()
+        : signedOutError();
     };
   }
   return Object.freeze(out);
+}
+
+// The refusal while the console could not be reached: nothing was sent.
+function unavailableError() {
+  const error = new Error(
+    "The Logweir service could not be reached when this page loaded, so nothing was read or " +
+      "sent. Retry once it answers.",
+  );
+  error.kind = "refused";
+  error.status = 503;
+  error.reason = "service_unavailable";
+  return error;
 }
 
 // The D2 half dispatches exactly as the five older kinds do, over its own pair

@@ -8794,7 +8794,7 @@
             "format": "date-time"
           },
           "disposition": {
-            "description": "The controller's word: `Admitted`, `CaughtUp`, `Retried`, `Missed`, `Superseded`, `Blocked`, `NameUnavailable`, `Released`, `Failed` or `Exhausted`. A word a newer controller adds is carried verbatim.",
+            "description": "The controller's word (`weirkeeper::controllers::backup_schedule`'s `DISPOSITION_*`): `Admitted`, `CaughtUp`, `Retried`, `Missed`, `Blocked`, `NameUnavailable`, `Released`, `Failed` or `Exhausted`. A word a newer controller adds is carried verbatim.",
             "type": "string"
           },
           "dueAt": {
@@ -8913,7 +8913,7 @@
         ],
         "properties": {
           "reason": {
-            "description": "`ControllerUnavailable`, `ConcurrencyBlocked`, `Superseded` or `BeforeRevision`, verbatim.",
+            "description": "The controller's word (`weirkeeper::controllers::backup_schedule`'s `MISSED_*`), verbatim: `ControllerUnavailable`, `ConcurrencyBlocked`, `PastStartingDeadline`, `BeforeRevision` or `NameUnavailable`.",
             "type": "string"
           },
           "recordedAt": {

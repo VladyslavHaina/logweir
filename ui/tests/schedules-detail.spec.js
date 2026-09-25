@@ -710,7 +710,11 @@ test("the_page_level_restore_skips_a_set_the_catalog_marks_not_selectable", () =
   assert.match(latest, /Missing/);
   // The row of the ruled-out set offers no Restore of its own either.
   const history = renderScheduleHistory(NS, schedule(), runs, POINTS, null);
-  const newestRow = history.slice(history.indexOf(">newest<"), history.indexOf(">older<"));
+  // The whole <tr> of the newest run: its restore cell is the FIRST cell since
+  // the review's L5 (the action leads the row), so the row is cut at its tags.
+  const newestAt = history.indexOf(">newest<");
+  const newestRow = history.slice(history.lastIndexOf("<tr", newestAt),
+    history.indexOf("</tr>", newestAt));
   assert.match(newestRow, /data-restore-refused="catalog"/);
   assert.doesNotMatch(newestRow, /Restore this point/);
   // And the facts' protection age is the offered point's.

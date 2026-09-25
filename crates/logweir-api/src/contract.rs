@@ -3183,9 +3183,10 @@ pub struct LastSlotView {
     pub due_at: DateTime<Utc>,
     /// Which attempt of the slot this disposition is about.
     pub attempt: i32,
-    /// The controller's word: `Admitted`, `CaughtUp`, `Retried`, `Missed`,
-    /// `Superseded`, `Blocked`, `NameUnavailable`, `Released`, `Failed` or
-    /// `Exhausted`. A word a newer controller adds is carried verbatim.
+    /// The controller's word (`weirkeeper::controllers::backup_schedule`'s
+    /// `DISPOSITION_*`): `Admitted`, `CaughtUp`, `Retried`, `Missed`,
+    /// `Blocked`, `NameUnavailable`, `Released`, `Failed` or `Exhausted`. A
+    /// word a newer controller adds is carried verbatim.
     pub disposition: String,
     /// The `Backup` the disposition is about, when there is one — a name in
     /// this namespace, which every reader of the schedule may already list.
@@ -3203,8 +3204,9 @@ pub struct LastSlotView {
 pub struct MissedSlotView {
     /// The slot.
     pub slot: String,
-    /// `ControllerUnavailable`, `ConcurrencyBlocked`, `Superseded` or
-    /// `BeforeRevision`, verbatim.
+    /// The controller's word (`weirkeeper::controllers::backup_schedule`'s
+    /// `MISSED_*`), verbatim: `ControllerUnavailable`, `ConcurrencyBlocked`,
+    /// `PastStartingDeadline`, `BeforeRevision` or `NameUnavailable`.
     pub reason: String,
     /// When the controller noticed.
     pub recorded_at: DateTime<Utc>,

@@ -578,9 +578,14 @@ export function probeSummary(state) {
   if (never.length > 0) {
     parts.push(never);
   }
+  // THE EXACT INSTANT IS THE HOVER (review L4): the cell shows the age, and
+  // the recorded value -- nanoseconds and all -- is its title, as every other
+  // instant on the page carries it. With no age to show, the shared formatter.
   if (s.observedAt) {
-    parts.push("<time class=\"ts\" datetime=\"" + esc(s.observedAt) + "\">" +
-      (s.ageSeconds === null ? esc(s.observedAt) : ageWords(s.ageSeconds)) + "</time>");
+    parts.push(s.ageSeconds === null
+      ? when(s.observedAt)
+      : "<time class=\"ts\" datetime=\"" + esc(s.observedAt) + "\" title=\"" +
+        esc(s.observedAt) + "\">" + ageWords(s.ageSeconds) + "</time>");
   }
   if (s.reason && s.verdict !== "reachable" && s.reason !== PROBE_RUNNING_REASON) {
     parts.push("<code>" + esc(s.reason) + "</code>");

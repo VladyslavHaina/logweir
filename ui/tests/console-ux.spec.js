@@ -796,71 +796,100 @@ import { readdirSync } from "node:fs";
 export const ROADMAP_REFERENCE =
   /\b(?:PLAT|PROD)-\d|\bD[0-3]\b|\bGC\s?\d+\b|\bW\d{1,2}\b|\bPOC-P\d|\bMCP-\d|\bGlobal Constraint\b/;
 
-/** The quoted segments of the CODE on each line of a source file -- comments
- *  (line, block and HTML) removed -- with the line they are on. What a page can
- *  put on screen is a string literal; a comment is for the next engineer. */
+/** The string literals of a source file -- `"..."`, `'...'` and template
+ *  literals, a template across as many lines as it spans -- with the line each
+ *  starts on; comments and regular-expression literals are skipped (review
+ *  L2: a per-line scan lost a multi-line template and was thrown by a quote
+ *  inside a regex). For the shell (`html`), every line with its HTML comments
+ *  removed, TAGS INCLUDED, so an attribute -- a `title`, an `aria-label` -- is
+ *  scanned as well as the text between tags (review L2). */
 export function quotedSegments(text, html) {
   const out = [];
-  let source = String(text);
+  const source = String(text);
   if (html) {
-    source = source.replace(/<!--[\s\S]*?-->/g, (m) => m.replace(/[^\n]/g, " "));
-    // In the shell the visible text is between tags as well as in attributes.
-    source.split("\n").forEach((line, i) => {
-      const visible = line.replace(/<[^>]*>/g, " ");
-      if (visible.trim().length > 0) {
-        out.push({ line: i + 1, text: visible });
+    const stripped = source.replace(/<!--[\s\S]*?-->/g, (m) => m.replace(/[^\n]/g, " "));
+    stripped.split("\n").forEach((line, i) => {
+      if (line.trim().length > 0) {
+        out.push({ line: i + 1, text: line });
       }
     });
     return out;
   }
-  let inBlock = false;
-  source.split("\n").forEach((raw, i) => {
-    let line = raw;
-    if (inBlock) {
-      const end = line.indexOf("*/");
-      if (end === -1) {
-        return;
-      }
-      line = line.slice(end + 2);
-      inBlock = false;
+  let line = 1;
+  let last = "";
+  // The characters after which a `/` opens a regular expression, not a division.
+  const REGEX_AFTER = "(,=:[!&|?{};+-*%<>~^";
+  for (let k = 0; k < source.length; k += 1) {
+    const c = source[k];
+    const n = source[k + 1];
+    if (c === "\n") {
+      line += 1;
+      continue;
     }
-    let quote = null;
-    let segment = "";
-    for (let k = 0; k < line.length; k += 1) {
-      const c = line[k];
-      if (quote !== null) {
-        if (c === "\\") {
-          segment += line.slice(k, k + 2);
-          k += 1;
-        } else if (c === quote) {
-          out.push({ line: i + 1, text: segment });
-          quote = null;
-          segment = "";
-        } else {
-          segment += c;
+    if (c === "/" && n === "/") {
+      while (k < source.length && source[k] !== "\n") {
+        k += 1;
+      }
+      k -= 1;
+      continue;
+    }
+    if (c === "/" && n === "*") {
+      const end = source.indexOf("*/", k + 2);
+      const stop = end === -1 ? source.length : end + 2;
+      for (let m = k; m < stop; m += 1) {
+        if (source[m] === "\n") {
+          line += 1;
         }
-        continue;
       }
-      if (c === "/" && line[k + 1] === "/") {
-        break;
-      }
-      if (c === "/" && line[k + 1] === "*") {
-        const end = line.indexOf("*/", k + 2);
-        if (end === -1) {
-          inBlock = true;
+      k = stop - 1;
+      continue;
+    }
+    if (c === "/" && (last === "" || REGEX_AFTER.indexOf(last) !== -1 ||
+      /\b(?:return|typeof|case)$/.test(source.slice(Math.max(0, k - 8), k).trimEnd()))) {
+      let inClass = false;
+      for (k += 1; k < source.length; k += 1) {
+        const r = source[k];
+        if (r === "\\") {
+          k += 1;
+        } else if (r === "[") {
+          inClass = true;
+        } else if (r === "]") {
+          inClass = false;
+        } else if (r === "/" && !inClass) {
+          break;
+        } else if (r === "\n") {
+          line += 1;
           break;
         }
-        k = end + 1;
-        continue;
       }
-      if (c === "\"" || c === "'" || c === "`") {
-        quote = c;
+      last = "/";
+      continue;
+    }
+    if (c === "\"" || c === "'" || c === "`") {
+      const startLine = line;
+      let segment = "";
+      for (k += 1; k < source.length && source[k] !== c; k += 1) {
+        if (source[k] === "\\") {
+          segment += source.slice(k, k + 2);
+          k += 1;
+          continue;
+        }
+        if (source[k] === "\n") {
+          line += 1;
+          if (c !== "`") {
+            break;
+          }
+        }
+        segment += source[k];
       }
+      out.push({ line: startLine, text: segment });
+      last = c;
+      continue;
     }
-    if (quote !== null && segment.length > 0) {
-      out.push({ line: i + 1, text: segment });
+    if (!/\s/.test(c)) {
+      last = c;
     }
-  });
+  }
   return out;
 }
 
@@ -899,9 +928,21 @@ test("mcp_24_the_lint_refuses_a_reference_in_a_string_and_ignores_one_in_a_comme
   const flagged = quotedSegments(code, false).filter((s) => ROADMAP_REFERENCE.test(s.text))
     .map((s) => s.line);
   assert.deepEqual(flagged, [4, 6, 7], "the three strings, and no comment");
-  const shell = "<!-- PLAT-18.2 in a comment -->\n<p>Owned by PLAT-17.1</p>";
+  // Review L2: a template across lines, a quote inside a regex, a regex that
+  // happens to spell an id (not user-visible), and attributes in the shell.
+  const harder = [
+    "const quote = /[\"']/g; const after = \"frozen before PLAT-05.1\";",
+    "const pattern = /PLAT-\\d/;",
+    "const t = `first line",
+    "  second line names D2 here`;",
+    "const ok = a / b / c; const s = \"fine\";",
+  ].join("\n");
+  assert.deepEqual(quotedSegments(harder, false).filter((s) => ROADMAP_REFERENCE.test(s.text))
+    .map((s) => s.line), [1, 3], "the string after a regex, and a multi-line template");
+  const shell = "<!-- PLAT-18.2 in a comment -->\n<p>Owned by PLAT-17.1</p>\n" +
+    "<button title=\"see PLAT-18.2\" aria-label=\"Retry\">Retry</button>";
   assert.deepEqual(quotedSegments(shell, true).filter((s) => ROADMAP_REFERENCE.test(s.text))
-    .map((s) => s.line), [2]);
+    .map((s) => s.line), [2, 3], "text between tags and an attribute; never a comment");
 });
 
 // ===========================================================================
@@ -1060,4 +1101,129 @@ test("review_m1_a_saved_schedule_s_next_runs_keep_its_zone", () => {
   assert.equal(humanLocal("2026-10-25T00:30:00Z"), "2026-10-25 00:30:00 UTC");
   assert.equal(whenLocal("02:30:00+02:00"), "02:30:00+02:00", "a value that is not an instant passes as written");
   assert.equal(whenLocal(undefined), "-");
+});
+
+// ===========================================================================
+// Review L1: a console whose first request fails is never legacy mode
+// ===========================================================================
+
+import { UNAVAILABLE, servedByConsole, unavailableReason } from "../client.js";
+import { renderUnavailable } from "../app.js";
+
+async function probeServed(answerOrThrow, extra) {
+  resetMode();
+  return selectMode(Object.assign({
+    servedByConsole: true,
+    probe: typeof answerOrThrow === "function" ? answerOrThrow : async () => answerOrThrow,
+  }, extra || {}));
+}
+
+test("review_l1_the_console_marker_is_the_services_runtime_js_and_nothing_else", () => {
+  const saved = globalThis.LOGWEIR_CONSOLE;
+  try {
+    delete globalThis.LOGWEIR_CONSOLE;
+    assert.equal(servedByConsole(), false, "the legacy file sets no marker");
+    globalThis.LOGWEIR_CONSOLE = { servedBy: "logweir-api" };
+    assert.equal(servedByConsole(), true);
+    globalThis.LOGWEIR_CONSOLE = { servedBy: "something-else" };
+    assert.equal(servedByConsole(), false);
+  } finally {
+    if (saved === undefined) {
+      delete globalThis.LOGWEIR_CONSOLE;
+    } else {
+      globalThis.LOGWEIR_CONSOLE = saved;
+    }
+  }
+  const file = readFileSync(UI + "runtime.js", "utf8");
+  assert.doesNotMatch(file.replace(/\/\/.*$/gm, ""), /LOGWEIR_CONSOLE/,
+    "ui/runtime.js -- what kubectl proxy serves -- never claims to be the console");
+});
+
+test("review_l1_a_failed_probe_behind_the_console_is_unavailable_never_legacy", async () => {
+  const problem = (status, code) => ({ ok: false, status: status,
+    body: { type: "x", title: "t", status: status, code: code, detail: "the store is down",
+      requestId: "r", retryable: true } });
+  for (const [said, answer, words] of [
+    ["a 503 problem", problem(503, "kubernetes_unavailable"), /503 kubernetes_unavailable: the store is down/],
+    ["a 429", problem(429, "rate_limited"), /429 rate_limited/],
+    ["a 404 with no body", { ok: false, status: 404, body: null }, /404/],
+    ["a session document that does not decode", { ok: true, status: 200, body: { nope: true } },
+      /could not read/],
+  ]) {
+    const record = await probeServed(answer);
+    assert.equal(record.mode, UNAVAILABLE, said + ": BEFORE, legacy mode behind the console");
+    assert.notEqual(mode(), LEGACY);
+    assert.match(unavailableReason(), words, said);
+  }
+  const failed = await probeServed(async () => { throw new TypeError("Failed to fetch"); });
+  assert.equal(failed.mode, UNAVAILABLE, "a network failure");
+  assert.match(unavailableReason(), /Failed to fetch/);
+  const slow = await probeServed(() => new Promise(() => {}), { timeoutMs: 5 });
+  assert.equal(slow.mode, UNAVAILABLE, "a probe that never answers");
+  assert.match(unavailableReason(), /did not answer within/);
+  // The two answers that DO decide stay what they were.
+  assert.equal((await probeServed({ ok: false, status: 401, body: unauthenticated() })).mode, SIGNED_OUT);
+  assert.equal((await probeServed({ ok: true, status: 200, body: con("session.json") })).mode, CONSOLE);
+});
+
+test("review_l1_a_page_the_console_did_not_serve_still_reads_a_refusal_as_legacy", async () => {
+  // NEGATIVE CONTROL: without the marker -- `kubectl proxy` -- the same answers
+  // are legacy mode, exactly as before.
+  for (const answer of [{ ok: false, status: 404, body: null }, { ok: false, status: 503, body: null }]) {
+    resetMode();
+    const record = await selectMode({ servedByConsole: false, probe: async () => answer });
+    assert.equal(record.mode, LEGACY);
+  }
+});
+
+test("review_l1_unavailable_sends_nothing_and_renders_retry_not_a_namespace_prompt", async () => {
+  await probeServed({ ok: false, status: 503, body: null });
+  const wire = transport(() => ({ status: 200, body: {} }));
+  try {
+    await assert.rejects(apiClient().list("logweir-poc", "backups"), (error) => {
+      assert.equal(error.reason, "service_unavailable");
+      return true;
+    });
+    assert.equal(wire.seen.length, 0, "no legacy /apis/... read is made");
+  } finally {
+    wire.restore();
+  }
+  const html = renderUnavailable("the service answered 503");
+  assert.match(html, /Can't reach the Logweir service/);
+  assert.match(html, /id="console-retry"/);
+  assert.match(html, /the service answered 503/);
+  assert.equal(html.indexOf("Choose a namespace"), -1);
+  assert.equal(renderUnavailable("<img src=x onerror=alert(1)>").indexOf("<img"), -1,
+    "the reason is escaped");
+});
+
+// ===========================================================================
+// Review L4 / L6: the probe cell's exact instant, and the escaped header
+// ===========================================================================
+
+import { probeSummary } from "../select.js";
+
+test("review_l4_the_probe_cell_carries_the_exact_instant_in_its_title", () => {
+  const cluster = { status: { reachable: true, observedAt: "2026-09-24T16:39:04.123456789Z", clusterId: "c" } };
+  const at = Date.parse("2026-09-24T17:20:04Z");
+  const html = probeSummary(probeState(cluster, at));
+  assert.match(html, /<time class="ts" datetime="2026-09-24T16:39:04.123456789Z" title="2026-09-24T16:39:04.123456789Z">40m ago<\/time>/,
+    "BEFORE: the <time> carried the exact value in datetime only, not one hover away");
+});
+
+test("review_l6_the_identity_header_escapes_every_value_the_session_carries", () => {
+  const html = renderIdentity({
+    displayName: "<img src=x onerror=alert(1)>",
+    subject: "\"><script>alert(2)</script>",
+    authenticationMode: "oidc",
+    roles: ["op<b>erator"],
+    namespace: "team-a&co",
+    canSignOut: true,
+  });
+  assert.equal(html.indexOf("<img"), -1, "a hostile display claim is text");
+  assert.equal(html.indexOf("<script>"), -1, "a hostile subject is text, attribute included");
+  assert.equal(html.indexOf("<b>"), -1);
+  assert.match(html, /&lt;img src=x onerror=alert\(1\)&gt;/);
+  assert.match(html, /title="&quot;&gt;&lt;script&gt;/);
+  assert.match(html, /op&lt;b&gt;erator in team-a&amp;co/);
 });

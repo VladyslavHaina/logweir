@@ -18,6 +18,8 @@ import {
   CONSOLE,
   LEGACY,
   SIGNED_OUT,
+  UNAVAILABLE,
+  unavailableReason,
   applyGrants,
   granted,
   grantedAnywhere,
@@ -479,8 +481,9 @@ export function applyModeCopy(doc, decidedMode) {
  *  with one more render when that changed anything. */
 export function modeDecided(record, doc, context, rerender) {
   const decided = (record || {}).mode;
-  // A signed-out visitor is IN the shared console: its copy is the console's.
-  applyModeCopy(doc, decided === SIGNED_OUT ? CONSOLE : decided);
+  // A signed-out visitor, and a console that could not be reached, are IN the
+  // shared console: its copy is the console's.
+  applyModeCopy(doc, decided === SIGNED_OUT || decided === UNAVAILABLE ? CONSOLE : decided);
   if (decided === CONSOLE && applyGrants(context, grantedNamespaces())) {
     rerender();
   }
@@ -535,6 +538,22 @@ export function renderSignIn(reason, hash) {
     esc(signInHref(hash)) + "\">Sign in</a></p>" +
     "<p class=\"note\">You come back to this page once you are signed in. What you may see " +
     "and do depends on the roles your administrator granted you in each namespace.</p>" +
+    "</section>"
+  );
+}
+
+/** THE PAGE A CONSOLE THAT COULD NOT BE REACHED RENDERS (console-ux-1 review
+ *  L1): what the probe got, in words, and Retry -- never the legacy page a
+ *  failed probe used to fall back to. Pure. */
+export function renderUnavailable(reason) {
+  return (
+    "<section class=\"card signin\" id=\"console-unavailable\" role=\"alert\">" +
+    "<h2>Can't reach the Logweir service</h2>" +
+    "<p class=\"blurb\">This is the Logweir console, and its API did not answer the page's " +
+    "first request, so nothing has been read and nothing is shown in its place.</p>" +
+    "<p class=\"note\" id=\"console-unavailable-reason\">" + esc(String(reason || "")) + "</p>" +
+    "<p class=\"actions\"><button type=\"button\" class=\"primary\" id=\"console-retry\">" +
+    "Retry</button></p>" +
     "</section>"
   );
 }
@@ -633,6 +652,23 @@ function render(lifecycle, context, navigated) {
       replace(main, parseFragment(renderSignIn(signedOutReason(), hash)));
     }
     document.title = "Logweir -- Sign in";
+    return;
+  }
+  // THE CONSOLE COULD NOT BE REACHED (review L1): no tabs, no page, and a
+  // Retry that asks again from a clean page.
+  if (decided === UNAVAILABLE) {
+    if (header !== null) {
+      replace(header, []);
+    }
+    renderSession(here.ns);
+    if (main !== null) {
+      replace(main, parseFragment(renderUnavailable(unavailableReason())));
+      const retry = main.querySelector("#console-retry");
+      if (retry !== null) {
+        retry.addEventListener("click", () => window.location.reload());
+      }
+    }
+    document.title = "Logweir -- unavailable";
     return;
   }
   if (header !== null) {

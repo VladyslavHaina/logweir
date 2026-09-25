@@ -439,6 +439,15 @@ export function pointRow(entry, ns, catalog, destination, page) {
   const location = bestLocation(e);
   const offer = catalogPointOffer(e, page || {});
   return [
+    // THE ACTION FIRST (MCP-25's rule, the review's class sweep): the eighth of
+    // eight columns is the one a narrow window scrolls away.
+    e.selectable !== true
+      ? ABSENT
+      : (offer.offer
+        ? "<a class=\"action\" href=\"" + esc(restoreCatalogPointRoute(ns, catalog, e.pointId)) +
+          "\" data-restore-point=\"" + esc(e.pointId) + "\">Restore this point</a>"
+        : "<span class=\"note\" data-restore-refused=\"wizard\">not offered: " +
+          esc(offer.reason) + "</span>"),
     "<code>" + cell(e.pointId) + "</code>",
     when(e.recoveryPointAt),
     badge(e.availability === "Available" ? "green" : "unverified", String(e.availability || "")),
@@ -454,13 +463,6 @@ export function pointRow(entry, ns, catalog, destination, page) {
     location === null ? ABSENT : cell(location.locationId),
     "<code>" + cell(e.signerKeyId) + "</code>",
     cell(e.remedy),
-    e.selectable !== true
-      ? ABSENT
-      : (offer.offer
-        ? "<a class=\"action\" href=\"" + esc(restoreCatalogPointRoute(ns, catalog, e.pointId)) +
-          "\" data-restore-point=\"" + esc(e.pointId) + "\">Restore this point</a>"
-        : "<span class=\"note\" data-restore-refused=\"wizard\">not offered: " +
-          esc(offer.reason) + "</span>"),
   ];
 }
 
@@ -479,8 +481,8 @@ export function renderPoints(page, ns, catalog, destination) {
     "<section class=\"points\"><h3>Recovery points</h3>" +
     "<p class=\"note\">" + esc(TWO_AXES_SENTENCE) + "</p>" +
     table(
-      ["POINT", "RECOVERY POINT", "AVAILABILITY", "VERIFICATION", "LOCATION", "SIGNER", "REMEDY",
-        "RESTORE"],
+      ["RESTORE", "POINT", "RECOVERY POINT", "AVAILABILITY", "VERIFICATION", "LOCATION", "SIGNER",
+        "REMEDY"],
       entries.map((entry) => pointRow(entry, ns, catalog, destination, page)),
       NO_POINT_SENTENCE,
       undefined,

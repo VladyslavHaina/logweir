@@ -4826,6 +4826,9 @@ export function renderScheduleHistory(ns, object, runs, points, catalogError, se
     const found = pointsForRun(run, points);
     const verdicts = verdictCells(found, coverage);
     return [
+      // THE ACTION FIRST (MCP-25's rule; review L5): as the tenth column the
+      // restore link was the one a 1024 px window scrolled out of the card.
+      restoreCell(ns, run, points),
       detailLink("backups", String(ns || meta.namespace || ""), String(meta.name || "")),
       triggerBadge(run.spec ? run.spec.trigger : undefined, maxRetries),
       runPhaseBadge(status),
@@ -4838,7 +4841,6 @@ export function renderScheduleHistory(ns, object, runs, points, catalogError, se
       when(rfc3339(covered.toMs)),
       verdicts[0],
       verdicts[1],
-      restoreCell(ns, run, points),
     ];
   });
   return (
@@ -4858,8 +4860,8 @@ export function renderScheduleHistory(ns, object, runs, points, catalogError, se
         esc(CATALOG_TRUNCATED_SENTENCE) + "</p>"
       : "") +
     table(
-      ["RUN", "TRIGGER", "PHASE", "SLOT", "BACKUP SET", "COVERED FROM", "COVERED TO",
-        "AVAILABILITY", "VERIFICATION", ""],
+      ["", "RUN", "TRIGGER", "PHASE", "SLOT", "BACKUP SET", "COVERED FROM", "COVERED TO",
+        "AVAILABILITY", "VERIFICATION"],
       rows,
       NO_HISTORY_SENTENCE,
       undefined,
