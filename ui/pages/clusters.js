@@ -85,8 +85,8 @@ import {
 } from "../render.js";
 import {
   CONNECTION_REFUSAL_REASONS,
-  VERDICT_OWN_REASONS,
   laterProbeNote,
+  probeSummary,
   PROBE_SENTENCE,
   REFUSAL_GLOSS,
   TEST_CONNECTION_SENTENCE,
@@ -296,6 +296,18 @@ export function probeCell(object, now, freshSeconds) {
   return probeBadge(state) + (stale.length > 0 ? " " + stale : "");
 }
 
+/** The newest probe's own reason, when it differs from the verdict it sits
+ *  beside (MCP-9): its code visible and its meaning one disclosure away. */
+export function laterProbeDisclosure(state) {
+  const note = laterProbeNote(state);
+  if (note.length === 0) {
+    return "";
+  }
+  const code = note.slice(0, note.indexOf("</code>") + "</code>".length);
+  const gloss = note.slice(code.length);
+  return "<details class=\"cell-more\"><summary>" + code + "</summary>" + gloss + "</details>";
+}
+
 /** The sentence the clusters table carries when the namespace holds none. */
 export const NO_CLUSTER_SENTENCE =
   "No KafkaCluster in this namespace yet. Create one with the form below, or pick another " +
@@ -315,21 +327,19 @@ export const NO_CLUSTER_SENTENCE =
  *  `now` is epoch milliseconds, defaulted to the caller's clock by
  *  `probeState`; a test passes one so a freshness verdict is reproducible. */
 export function renderClusterList(input, ns, now, freshSeconds) {
+  // FIVE COLUMNS, NOT EIGHT (MCP round 2, R2-2 / R2-3 / R2-4). The table was
+  // wider than its card at 1440 px -- the Re-read probe button was clipped --
+  // and a NoExitCode gloss made a row 220 px tall in a narrow REASON column.
+  // The role is the name's second line, the observation's age sits in the
+  // probe cell as it does in the wizard (MCP-28), and the newest probe's own
+  // reason is one disclosure away, its code still visible to grep for.
   const rows = itemsOf(input).map((object) => {
     const spec = object.spec || {};
     const status = object.status || {};
     const state = probeState(object, now, freshSeconds);
     return [
-      nameCell(object, ns),
-      cell(spec.role),
-      probeCell(object, now, freshSeconds),
-      when(status.observedAt),
-      // A REACHABLE READING BESIDE `NoExitCode` IS TWO PROBES (MCP-9): the
-      // reason of the newest one, said as that, and nothing beside a verdict
-      // whose own reason merely repeats it.
-      state.reason.length === 0 || VERDICT_OWN_REASONS.indexOf(state.reason) !== -1
-        ? cell(null)
-        : (laterProbeNote(state) || "<code>" + esc(state.reason) + "</code>"),
+      nameCell(object, ns) + "<span class=\"cell-sub\">" + cell(spec.role) + "</span>",
+      "<div class=\"probe-cell\">" + probeSummary(state) + laterProbeDisclosure(state) + "</div>",
       cell(status.clusterId),
       authCell(spec),
       renderTestConnection(object, false),
@@ -344,7 +354,7 @@ export function renderClusterList(input, ns, now, freshSeconds) {
     "<code>clusterId</code> is read from the broker and never from a spec.</p>" +
     "<p class=\"note\">" + PROBE_SENTENCE + "</p>" +
     table(
-      ["NAME", "ROLE", "CONNECTION PROBE", "OBSERVED", "REASON", "CLUSTER-ID", "AUTH", ""],
+      ["NAME", "CONNECTION PROBE", "CLUSTER-ID", "AUTH", ""],
       rows,
       NO_CLUSTER_SENTENCE,
       attributes,
@@ -1801,9 +1811,11 @@ function paintRow(node, parse, uid, html) {
     if (row.getAttribute("data-cluster-uid") !== uid) {
       continue;
     }
-    const cells = row.querySelectorAll("td");
-    if (cells.length > 2) {
-      replace(cells[2], parse(html));
+    // THE PROBE CELL BY ITS CLASS, not by counting columns: the table's
+    // columns changed once (R2-3) and a count would repaint the wrong cell.
+    const probe = row.querySelector(".probe-cell");
+    if (probe !== null) {
+      replace(probe, parse(html));
     }
   }
 }

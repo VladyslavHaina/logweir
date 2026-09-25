@@ -493,7 +493,9 @@ export function preflightSentence(topicCount) {
   return (
     "At execution time Logweir will create " +
     String(topicCount) +
-    " topics with message.timestamp.type=CreateTime and retention.ms=-1 before the " +
+    // ONE TOPIC IS ONE TOPIC (MCP round 2, R2-10: "1 topics").
+    (topicCount === 1 ? " topic" : " topics") +
+    " with message.timestamp.type=CreateTime and retention.ms=-1 before the " +
     "engine runs, and will refuse if the broker is LogAppendTime and rejects the override. " +
     "This says what the run will attempt; it is not a check and nothing above has confirmed it."
   );
@@ -1232,6 +1234,21 @@ export function detailLink(route, ns, name) {
   return "<a href=\"" + esc(target) + "\">" + esc(name) + "</a>";
 }
 
+/** A covered window as ONE cell, both bounds, one per line (MCP round 2,
+ *  R2-3): two instant columns side by side were the widest pair on every
+ *  run table, each `nowrap` by MCP-7's rule. `from` and `to` are RFC 3339
+ *  strings (or anything `when` takes). */
+export function coveredCell(from, to) {
+  return "<span class=\"cell-sub-first\">from " + when(from) + "</span>" +
+    "<span class=\"cell-sub\">to " + when(to) + "</span>";
+}
+
+/** A schedule's last and next firing as ONE cell (R2-3), the same shape. */
+export function firingsCell(last, next) {
+  return "<span class=\"cell-sub-first\">last " + when(last) + "</span>" +
+    "<span class=\"cell-sub\">next " + when(next) + "</span>";
+}
+
 /** A badge. STRUCTURAL ONLY: `kind` becomes a class suffix and `text` becomes
  *  the caption. Which kind a run gets is the calling page's decision, made
  *  from the object's own recorded fields. */
@@ -1632,20 +1649,54 @@ export function checkVerdict(state) {
  *  and an absent field prints [`ABSENT`] rather than a guess: a check with no
  *  `expiresAt` is one whose expiry the producer did not record, which is a
  *  different thing from one that never expires. */
+/** A controller-authored message, escaped, with its backticked spans shown as
+ *  code (MCP round 2, R2-10): the controller writes "`primary`" and
+ *  "`sha256:...`" and the page printed the backticks. Only a PAIRED span
+ *  becomes code; an unpaired backtick stays the character it is. */
+export function messageText(value) {
+  if (typeof value !== "string" || value.length === 0) {
+    return cell(value);
+  }
+  const parts = value.split("`");
+  if (parts.length < 3) {
+    return esc(value);
+  }
+  let out = "";
+  for (let i = 0; i < parts.length; i += 1) {
+    const last = i === parts.length - 1;
+    if (i % 2 === 1 && !last) {
+      out += "<code>" + esc(parts[i]) + "</code>";
+    } else {
+      out += (i % 2 === 1 ? "`" : "") + esc(parts[i]);
+    }
+  }
+  return out;
+}
+
 export function checkTable(checks, empty) {
+  // NINE FIELDS IN FOUR CELLS (MCP round 2, R2-3): nine columns were more
+  // than a thousand pixels wider than step 5's card at 1440 px, because the
+  // messages carry unbroken tokens -- an image digest, a signer key id -- and
+  // two instants sat side by side. Every field is still printed, an absent
+  // one as absent: the code under its check, the gating under the verdict,
+  // the remedy and the scope under the message, and the two instants one per
+  // line. The message and the remedy are prose and may break anywhere.
   const rows = (Array.isArray(checks) ? checks : []).map((c) => [
-    "<code>" + cell(c.id) + "</code>",
-    checkVerdict(c.state),
-    cell(c.gating),
-    cell(c.code),
-    cell(c.message),
-    cell(c.remedy),
-    checkScope(c.scope),
-    when(c.observedAt),
-    when(c.expiresAt),
+    "<code>" + cell(c.id) + "</code>" +
+      "<span class=\"cell-sub prose\" data-field=\"code\">" + cell(c.code) + "</span>",
+    checkVerdict(c.state) +
+      "<span class=\"cell-sub\" data-field=\"gating\">" + cell(c.gating) + "</span>",
+    "<span class=\"cell-sub-first prose\" data-field=\"message\">" + messageText(c.message) +
+      "</span>" +
+      "<span class=\"cell-sub prose\" data-field=\"remedy\">remedy: " + messageText(c.remedy) +
+      "</span>" +
+      "<span class=\"cell-sub prose\" data-field=\"scope\">scope: " + checkScope(c.scope) + "</span>",
+    "<span class=\"cell-sub-first\" data-field=\"observed\">observed " + when(c.observedAt) +
+      "</span><span class=\"cell-sub\" data-field=\"expires\">expires " + when(c.expiresAt) +
+      "</span>",
   ]);
   return table(
-    ["CHECK", "VERDICT", "GATING", "CODE", "MESSAGE", "REMEDY", "SCOPE", "OBSERVED", "EXPIRES"],
+    ["CHECK", "VERDICT", "FINDING", "WHEN"],
     rows,
     empty,
   );

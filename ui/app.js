@@ -401,12 +401,28 @@ export const LONG_TOKEN_CHARS = 24;
 
 export function markLongTokens(root) {
   for (const chip of Array.from(root.querySelectorAll("td code, td .badge"))) {
-    const words = String(chip.textContent || "").split(/\s+/);
-    if (words.some((word) => word.length > LONG_TOKEN_CHARS)) {
+    const text = String(chip.textContent || "");
+    const words = text.split(/\s+/);
+    // A URL IS READ WHOLE (MCP round 2, R2-6): "s3://kafka-backups/orders"
+    // broke as "order / s" once it passed the long-token length. Up to
+    // `URL_CHIP_CHARS` it stays one line; a longer one may break like any
+    // long token, so it still cannot force a sideways scroll.
+    const url = text.indexOf(":" + "//") !== -1 && text.length <= URL_CHIP_CHARS;
+    if (!url && words.some((word) => word.length > LONG_TOKEN_CHARS)) {
       chip.setAttribute("class", (String(chip.getAttribute("class") || "") + " long").trim());
+    } else if (text.trim().length <= SHORT_CHIP_CHARS &&
+      String(chip.getAttribute("class") || "").split(/\s+/).indexOf("badge") !== -1) {
+      // A SHORT LABEL NEVER BREAKS AT ITS SPACE ("not / suspended", R2-6); a
+      // longer one ("verified by weirkeeper") still wraps between its words.
+      chip.setAttribute("class", (String(chip.getAttribute("class") || "") + " short").trim());
     }
   }
 }
+
+/** The longest URL chip kept on one line, and the longest label that never
+ *  wraps (MCP round 2, R2-6). */
+export const URL_CHIP_CHARS = 40;
+export const SHORT_CHIP_CHARS = 16;
 
 // The namespace picker. It changes the hash and nothing else -- no request is
 // issued here, and no value is stored anywhere.
@@ -493,9 +509,10 @@ export const MODE_COPY = Object.freeze({
     ]),
     colophon: Object.freeze([
       "Served by ", Object.freeze(["code", "logweir-api"]),
+      // NO REPOSITORY PATH (MCP round 2, R2-1): a signed-in user has no
+      // checkout to open `ui/README.md` in.
       ", which authorises every request against this session's grants in the namespace it " +
-        "names. The session is a cookie this page never reads. See ",
-      Object.freeze(["code", "ui/README.md"]), " for the two ways this page is served.",
+        "names. The session is a cookie this page never reads.",
     ]),
   }),
 });

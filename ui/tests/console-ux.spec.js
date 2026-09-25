@@ -972,11 +972,15 @@ test("mcp_7_mcp_15_one_formatter_for_every_instant_whole_seconds_utc_exact_value
   assert.equal(when("20260918-032200"), "20260918-032200", "a value that is not an instant is not guessed at");
   const css = readFileSync(UI + "style.css", "utf8");
   assert.match(css, /\.ts \{\n {2}white-space: nowrap;/, "MCP-7: an instant never wraps mid-value");
-  // And the pages use it: the clusters table's OBSERVED column and the
+  // And the pages use it: the clusters table's probe cell (its own OBSERVED
+  // column until MCP round 2's R2-3 folded it in, as the wizard's MCP-28 cell
+  // does) prints the age with the exact instant as the title, and the
   // schedules table's LAST/NEXT columns print the human reading.
   const cluster = fixture("cluster-scram.json");
   const clusters = renderClusterList(cluster, "team-a", Date.parse("2026-09-11T20:00:00Z"));
-  assert.match(clusters, /<time class="ts" datetime="[^"]+" title="[^"]+">\d{4}-\d\d-\d\d \d\d:\d\d:\d\d UTC<\/time>/);
+  assert.match(clusters, /<time class="ts" datetime="[^"]+" title="[^"]+">[^<]* ago<\/time>/);
+  assert.doesNotMatch(clusters.replace(/"[^"]*"/g, "\"\""), /\d{4}-\d\d-\d\dT\d\d:\d\d/,
+    "no raw ISO instant in the clusters table's visible text");
   const schedules = renderScheduleList(fixture("schedule-policy.json"));
   assert.doesNotMatch(schedules.replace(/"[^"]*"/g, "\"\""), /\d{4}-\d\d-\d\dT\d\d:\d\d/,
     "no raw ISO instant in the schedules table's visible text");

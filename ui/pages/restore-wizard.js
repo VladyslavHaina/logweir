@@ -120,6 +120,7 @@ import {
   TARGET_MODE_MEANING,
   announce,
   listVerifiedNote,
+  coveredCell,
   flagBadge,
   isDraftApprovalRow,
   readyButForDraftApproval,
@@ -1808,9 +1809,8 @@ export function renderCatalogTable(backups, chosenName, grid) {
     const covered = status.windowCovered || {};
     const name = (backup.metadata || {}).name;
     return [
-      cell(status.backupId),
-      when(rfc3339(covered.fromMs)),
-      when(rfc3339(covered.toMs)),
+      "<code>" + cell(status.backupId) + "</code>",
+      coveredCell(rfc3339(covered.fromMs), rfc3339(covered.toMs)),
       cell(status.records),
       cell(status.phase),
       cell(name === chosenName && typeof name === "string" ? name + " (chosen)" : name),
@@ -1819,7 +1819,7 @@ export function renderCatalogTable(backups, chosenName, grid) {
   // A DATAGRID WHERE THE CALLER NAMES ONE: 258 runs are 258 rows, and the
   // selector used to lay out every one of them below its own table (MCP-26).
   return table(
-    ["BACKUP SET", "COVERED FROM", "COVERED TO", "RECORDS", "PHASE", "BACKUP"],
+    ["BACKUP SET", "COVERED", "RECORDS", "PHASE", "BACKUP"],
     rows,
     "no Backup names this archive in this namespace",
     undefined,
@@ -1978,19 +1978,20 @@ export function renderPointSelector(state) {
           : "Restore this point") + "</a>",
       // The run, with its schedule and slot beneath it rather than in two
       // columns of their own.
+      // THE ARCHIVE UNDER THE RUN (R2-17): as its own last column it was the
+      // one a 1024 px window clipped, with no sign the table scrolled.
       cell(meta.name) +
         "<span class=\"cell-sub\">" +
         (typeof schedule === "string" && schedule.length > 0 ? "schedule " + esc(schedule) : "no schedule") +
         (typeof spec.slot === "string" && spec.slot.length > 0 ? " &middot; slot " + when(spec.slot) : "") +
-        "</span>",
+        "</span>" +
+        "<span class=\"cell-sub\">" + cell((spec.archive || {}).url) + " &middot; " +
+        esc(archiveAvailability(point)) + "</span>",
       // The covered window, both bounds, one per line.
-      "<span class=\"cell-sub-first\">from " + when(rfc3339(covered.fromMs)) + "</span>" +
-        "<span class=\"cell-sub\">to " + when(rfc3339(covered.toMs)) + "</span>",
+      coveredCell(rfc3339(covered.fromMs), rfc3339(covered.toMs)),
       topics.length === 0 ? cell(null) : esc(topics.join(", ")),
       cell(status.records),
       pointSigned(point),
-      cell((spec.archive || {}).url) +
-        "<span class=\"cell-sub\">" + esc(archiveAvailability(point)) + "</span>",
     ];
   });
   const attributes = points.map(
@@ -2009,7 +2010,7 @@ export function renderPointSelector(state) {
     "<p class=\"help\">Filters the rows below by name, schedule, slot, source cluster, " +
     "archive, backup set or topic. Every word must match.</p></div>" +
     table(
-      ["", "BACKUP", "COVERED", "TOPICS", "RECORDS", "SIGNED", "ARCHIVE"],
+      ["", "BACKUP", "COVERED", "TOPICS", "RECORDS", "SIGNED"],
       rows,
       NO_COMPLETED_BACKUP_SENTENCE,
       attributes,

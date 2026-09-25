@@ -239,10 +239,13 @@ export function renderPolicyKeys(object, now) {
     const usages = Array.isArray(entry.usages) ? entry.usages : [];
     return [
       "<code>" + cell(entry.keyId) + "</code>",
+      // THE USAGES AND THE DECLARED STATE UNDER THE PRINCIPAL (MCP round 2,
+      // R2-3): eight columns were wider than the card at 1024 px, and both
+      // are facts about the entry the principal names.
       cell((entry.principal || {}).display) + " " +
-        "<code>" + cell((entry.principal || {}).id) + "</code>",
-      usages.length === 0 ? ABSENT : esc(usages.join(", ")),
-      cell(entry.state),
+        "<code>" + cell((entry.principal || {}).id) + "</code>" +
+        "<span class=\"cell-sub\">" + (usages.length === 0 ? ABSENT : esc(usages.join(", "))) +
+        " &middot; declared " + cell(entry.state) + "</span>",
       cell(entry.notBefore) + " " + ARROW_TO + " " + cell(entry.notAfter),
       lifecycleCell(entry, freshness, verdict),
       evaluationCell(freshness, verdict),
@@ -254,7 +257,7 @@ export function renderPolicyKeys(object, now) {
     "<p class=\"note\" data-evaluation-fresh=\"" + (freshness.fresh ? "true" : "false") + "\">" +
     esc(UNKNOWN_IS_NOT_VALID_SENTENCE) + "</p>" +
     table(
-      ["KEY ID", "PRINCIPAL", "USAGES", "STATE", "VALIDITY", "LIFECYCLE", "EVALUATION", "MAY"],
+      ["KEY ID", "PRINCIPAL", "VALIDITY", "LIFECYCLE", "EVALUATION", "MAY"],
       rows,
       "This policy carries no key. A policy with no key verifies nothing and authorises nothing.",
       undefined,

@@ -91,6 +91,8 @@ import {
   triggerBadge,
   technicalDetails,
   conditionBadge,
+  coveredCell,
+  firingsCell,
   when,
 } from "../render.js";
 import {
@@ -270,8 +272,7 @@ export function renderScheduleList(input, destinations, destinationsUnavailable)
       "<code>" + cell(spec.schedule) + "</code>",
       destinationCell(object, destinations, destinationsUnavailable === true),
       suspendBadge(spec),
-      when(status.lastFireTime),
-      when(status.nextFireTime),
+      firingsCell(status.lastFireTime, status.nextFireTime),
       conditionStatus(object, "Ready"),
     ];
   });
@@ -281,7 +282,7 @@ export function renderScheduleList(input, destinations, destinationsUnavailable)
     "<code>suspend</code> is the only field of a schedule's spec that THIS PAGE can change " +
     "after it is created.</p>" +
     table(
-      ["NAME", "SCHEDULE", "DESTINATION", "SUSPEND", "LAST", "NEXT", "READY"],
+      ["NAME", "SCHEDULE", "DESTINATION", "SUSPEND", "LAST / NEXT", "READY"],
       rows,
       NO_SCHEDULE_SENTENCE,
       undefined,
@@ -1803,15 +1804,16 @@ export function renderRecoveryPoints(ns, object, backups) {
     return [
       // The action first (MCP-25's rule), so a wide row never hides it.
       "<a class=\"action\" href=\"" + esc(restorePointRoute(ns, point)) + "\">Restore this point</a>",
-      cell(meta.name),
+      // THE SLOT UNDER THE NAME AND THE WINDOW IN ONE CELL (R2-3): nine
+      // columns were 270 px wider than the card at 1440.
+      cell(meta.name) + (typeof spec.slot === "string" && spec.slot.length > 0
+        ? "<span class=\"cell-sub\">slot " + esc(spec.slot) + "</span>" : ""),
       triggerBadge(spec.trigger, ((object || {}).spec || {}).retry === undefined
         ? undefined
         : object.spec.retry.maxRetries),
       coverageCell(point),
-      cell(spec.slot),
-      cell(status.backupId),
-      when(rfc3339(covered.fromMs)),
-      when(rfc3339(covered.toMs)),
+      "<code>" + cell(status.backupId) + "</code>",
+      coveredCell(rfc3339(covered.fromMs), rfc3339(covered.toMs)),
       cell(status.records),
     ];
   });
@@ -1821,8 +1823,7 @@ export function renderRecoveryPoints(ns, object, backups) {
     // A PAGE OF POINTS, NOT ALL OF THEM (MCP-26): 258 points were 258 rows on
     // every schedule card, a 20,000 px table.
     table(
-      ["", "BACKUP", "TRIGGER", "COVERAGE", "SLOT", "BACKUP SET", "COVERED FROM", "COVERED TO",
-        "RECORDS"],
+      ["", "BACKUP", "TRIGGER", "COVERAGE", "BACKUP SET", "COVERED", "RECORDS"],
       rows,
       NO_POINTS_SENTENCE,
       undefined,
@@ -4966,16 +4967,16 @@ export function renderScheduleHistory(ns, object, runs, points, catalogError, se
       // THE ACTION FIRST (MCP-25's rule; review L5): as the tenth column the
       // restore link was the one a 1024 px window scrolled out of the card.
       restoreCell(ns, run, points),
-      detailLink("backups", String(ns || meta.namespace || ""), String(meta.name || "")),
+      detailLink("backups", String(ns || meta.namespace || ""), String(meta.name || "")) +
+        (typeof (run.spec || {}).slot === "string" && run.spec.slot.length > 0
+          ? "<span class=\"cell-sub\">slot " + esc(run.spec.slot) + "</span>" : ""),
       triggerBadge(run.spec ? run.spec.trigger : undefined, maxRetries),
       runPhaseBadge(status),
-      cell((run.spec || {}).slot),
-      cell(status.backupId) +
+      "<code>" + cell(status.backupId) + "</code>" +
         (found.length > 1
           ? " <span class=\"badge badge-flat\">" + String(found.length) + " points</span>"
           : ""),
-      when(rfc3339(covered.fromMs)),
-      when(rfc3339(covered.toMs)),
+      coveredCell(rfc3339(covered.fromMs), rfc3339(covered.toMs)),
       verdicts[0],
       verdicts[1],
     ];
@@ -4997,8 +4998,7 @@ export function renderScheduleHistory(ns, object, runs, points, catalogError, se
         esc(CATALOG_TRUNCATED_SENTENCE) + "</p>"
       : "") +
     table(
-      ["", "RUN", "TRIGGER", "PHASE", "SLOT", "BACKUP SET", "COVERED FROM", "COVERED TO",
-        "AVAILABILITY", "VERIFICATION"],
+      ["", "RUN", "TRIGGER", "PHASE", "BACKUP SET", "COVERED", "AVAILABILITY", "VERIFICATION"],
       rows,
       NO_HISTORY_SENTENCE,
       undefined,
