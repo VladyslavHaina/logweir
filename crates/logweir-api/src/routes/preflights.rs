@@ -572,16 +572,34 @@ fn staleness(
     // function an empty `LiveBinding` would compare nothing and report
     // nothing, which is `applicable: true` for a verdict nobody re-checked —
     // so "I did not recompute" is a distinct, explicit input.
+    //
+    // EXCEPT THE ONE THING THAT NEEDS NO READ (P14, poc-upgrade-2): whether
+    // the check's own validity has passed. That is the recorded `expiresAt`
+    // against the clock, and a replay that left it out answered an expired
+    // check as merely "not recomputed" -- so a client asking the same question
+    // again after the expiry was handed the old check with nothing in the
+    // answer saying it had lapsed. It is core's rule, not a copy of it: the
+    // same `stale_reasons` over the recorded inputs compared with themselves,
+    // which can only ever report `expired`.
     let Some(live) = live else {
-        return (
-            true,
-            vec![StaleReasonView::unverifiable(
-                None,
-                None,
-                BASIS_NOT_RECOMPUTED,
-            )],
+        let operation = core_operation(object.spec.request.operation);
+        let recorded = binding_inputs(
+            operation,
+            binding.plan_hash.clone(),
             Vec::new(),
+            binding.policy_digest.clone().unwrap_or_default(),
         );
+        let mut reasons: Vec<StaleReasonView> =
+            stale_reasons(&recorded, result.expires_at, &recorded, now)
+                .iter()
+                .map(view_of)
+                .collect();
+        reasons.push(StaleReasonView::unverifiable(
+            None,
+            None,
+            BASIS_NOT_RECOMPUTED,
+        ));
+        return (true, reasons, vec![COVERED_EXPIRY.to_string()]);
     };
 
     let mut covered = vec![COVERED_EXPIRY.to_string()];

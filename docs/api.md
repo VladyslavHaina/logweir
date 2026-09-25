@@ -1120,6 +1120,20 @@ for ever — and a control that did that would be a re-read wearing a dial's
 label. Mint a fresh key per click and let the in-flight guard, not the key,
 collapse a double click.
 
+**A readiness key replays only while its check can still be the answer.** One
+key names one `Preflight` for ever — this API never answers a used key with a
+second object — so a key composed from the question alone also replays that
+check *after* its validity has passed. The replay answer says so itself:
+`staleReasons` carries `expired` (computed from the recorded `expiresAt`, which
+needs no read) beside the `unverifiable` "this response did not recompute
+staleness", and `staleBasis` is `["expiry"]`. A client asking again once the
+check is spent — expired, inapplicable on a read, `failed` or `cancelled` —
+sends a new key; the console keeps one intent token per form in the key and
+renews it exactly then, so a retry after a lost response, or a second click
+inside the validity, still replays (`ui/README.md`, *Asking a check again is
+not replaying its last answer*). A topic discovery follows the same rule, with
+`reuseFresh` answering a fresh identical inventory before any key is read.
+
 **`staleReasons` is typed and closed, and it is RECOMPUTED, not reported.**
 On every read of a preflight this service reads back each object
 `status.binding.referents[]` names — `kind`, `name`, `uid`, `generation` are

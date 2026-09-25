@@ -606,6 +606,95 @@ async fn a_duplicate_request_replays_and_a_changed_one_conflicts() {
     app.fake.assert_strict();
 }
 
+/// P14 (poc-upgrade-2): ONE KEY IS STILL ONE CHECK, AND A REPLAY OF A CHECK
+/// WHOSE VALIDITY HAS PASSED SAYS SO ITSELF.
+///
+/// The schedule form's "Check readiness", clicked with unchanged inputs after
+/// its check expired, sent the same content-derived key and was answered
+/// `200 replayed: true` with the expired check, whose answer said only "not
+/// recomputed". D0 does not let this route answer that key with a SECOND
+/// object ("two CRs result from one idempotency key" is a release failure),
+/// so the replay is still the same object, same UID -- and now names `expired`
+/// from the recorded `expiresAt`, which needs no read. That is what lets a
+/// client (the console's `askCheck`) renew its key and ask again, and the last
+/// arm is the other half: a NEW key with the identical body is a new check.
+///
+/// MUTANTS: drop the `stale_reasons` call from `staleness`'s not-recomputed
+/// arm (the expired replay loses `expired`); hand it `None` for the recorded
+/// expiry (the replay inside the window says `expired`); leave its
+/// `staleBasis` empty (the basis no longer names `expiry`).
+#[tokio::test]
+async fn a_replay_names_its_own_expiry_and_a_new_key_asks_afresh() {
+    let app = TestApp::new();
+    let path = format!("/api/v1/namespaces/{NS_A}/preflights");
+    let body = json!({
+        "operation": "backup",
+        "backup": {"sourceConnection": "source", "destination": "primary",
+                   "topics": ["orders", "payments"]}
+    })
+    .to_string();
+    let first = app.post(&path, Some("preflight-p14-00001"), &body).await;
+    assert_eq!(first.status.as_u16(), 202, "{}", first.text());
+    let id = first.json()["item"]["id"].as_str().unwrap().to_string();
+    let uid = first.json()["item"]["uid"].clone();
+    // The controller completes it at 12:00, valid until 12:10.
+    let mut object = app.fake.object("preflights", NS_A, &id).unwrap();
+    object["status"] = json!({
+        "phase": "Completed",
+        "reason": "Ready",
+        "binding": {
+            "operation": "Backup",
+            "inputsDigest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+            "referents": [{"kind": "KafkaCluster", "name": "source", "uid": "uid-source", "generation": 1}]
+        },
+        "observedAt": "2026-09-15T12:00:00Z",
+        "result": {"state": "ready", "expiresAt": "2026-09-15T12:10:00Z", "checks": []},
+        "conditions": [{"type": "Complete", "status": "True", "reason": "Completed"}]
+    });
+    app.fake.seed("preflights", NS_A, object);
+    let reasons = |item: &Value| -> Vec<String> {
+        item["staleReasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["reason"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    // A retry inside the window replays, and nothing in it says expired.
+    app.clock
+        .set("2026-09-15T12:09:59Z".parse().expect("an instant"));
+    let within = app.post(&path, Some("preflight-p14-00001"), &body).await;
+    assert_eq!(within.status.as_u16(), 200, "{}", within.text());
+    let v = within.json();
+    assert_eq!(v["replayed"], true);
+    assert_eq!(v["item"]["uid"], uid);
+    assert_eq!(reasons(&v["item"]), vec!["unverifiable"]);
+    assert_eq!(v["item"]["staleBasis"], json!(["expiry"]));
+
+    // At the recorded expiry: the SAME object (D0), and the answer names it.
+    app.clock
+        .set("2026-09-15T12:10:00Z".parse().expect("an instant"));
+    let after = app.post(&path, Some("preflight-p14-00001"), &body).await;
+    assert_eq!(after.status.as_u16(), 200, "{}", after.text());
+    let v = after.json();
+    assert_eq!(v["replayed"], true);
+    assert_eq!(v["item"]["uid"], uid, "one key, one object (D0)");
+    assert_eq!(reasons(&v["item"]), vec!["expired", "unverifiable"]);
+    assert_eq!(v["item"]["applicable"], false);
+    assert_eq!(v["item"]["staleBasis"], json!(["expiry"]));
+    assert_eq!(app.fake.count("preflights", NS_A), 1);
+
+    // A new key with the identical body is a new check.
+    let fresh = app.post(&path, Some("preflight-p14-00002"), &body).await;
+    assert_eq!(fresh.status.as_u16(), 202, "{}", fresh.text());
+    assert_ne!(fresh.json()["item"]["uid"], uid);
+    assert_eq!(fresh.json()["replayed"], false);
+    assert_eq!(app.fake.count("preflights", NS_A), 2);
+    app.fake.assert_strict();
+    logweir_api::routes::reset_check_rate_limits();
+}
+
 // ======================================================================
 // The result, and what it is a result about
 // ======================================================================
