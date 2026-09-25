@@ -280,14 +280,15 @@ Traefik (TLS) and Dex (OIDC), and upgrades from `v0.1.5` and `sha-f49849d…`
 ([deploy/poc/](../deploy/poc/README.md), *What the first live round showed*). It
 found console defects on the way (among them: the names typed for a connection
 and a schedule are replaced by minted ones, and *Test access* does not show its
-result). The PoC's three in-place upgrades, to `a54fb823` on 2026-09-25, closed
-those defects and the later ones (P1–P14) live: a legacy inline-archive point
-passed its readiness check and restored `Valid`, *Catalog → Connect* connected,
-and the PoC README's §10 walk ran clean end to end in the console as a new user
-([release-handoff.md](release-handoff.md)). One console defect is
-open, with a fix in flight: a readiness check slower than the page's follow is
-left "not finished" (P15; [release-notes.md](release-notes.md), *Limitations*);
-click *Check readiness* again or reload.
+result). The PoC's four in-place upgrades, the last to `815249cb` on
+2026-09-25, closed those defects and the later ones (P1–P15) live: a legacy
+inline-archive point passed its readiness check and restored `Valid`,
+*Catalog → Connect* connected, a readiness check slower than the page's old
+follow is read to its verdict, and the PoC README's §10 walk ran clean end to
+end in the console as a new user ([release-handoff.md](release-handoff.md)).
+One small console defect is open: at restore step 5 on a narrow screen the
+status line scrolls out of view while a check runs (P16;
+[release-notes.md](release-notes.md), *Limitations*).
 A corporate identity provider bound by group, AWS S3, MSK and a
 NetworkPolicy-enforcing CNI have not been run at all
 ([release-notes.md](release-notes.md), *Limitations*).

@@ -42,13 +42,16 @@ publication: `LOGWEIR_TAG` (`sha-<commit>`) for the images and
 `LOGWEIR_CHART_VERSION` (`0.1.0-sha-<commit>`) for the chart, published
 together by `images.yml`. The profile needs a build that carries the chart-gap
 fixes below (every publication since main `86a554e6`): `LOGWEIR_COMMIT` names
-main `a54fb823`, published by CI run 36129705142 (2026-09-25). It carries the
+main `815249cb`, published by CI run 36152835598 (2026-09-25). It carries the
 fixes for the first PoC round's product defects P1–P10 (first published at
 `02dc44b6`), the second round's P11 and P12, the durable compromise
 revocation and the console fixes of the human-like pass (first published at
-`b748fd5f`), and the third round's P13 and P14 with the console's second
-human-pass round. The PoC installed at `86a554e6` was upgraded in place to
-`02dc44b6`, then to `b748fd5f` and then to `a54fb823` with
+`b748fd5f`), the third round's P13 and P14 with the console's second
+human-pass round (first published at `a54fb823`), and P15 — a followed
+readiness check is read until the longest time a check may take — with the
+console's third human-pass round. The PoC installed at `86a554e6` was
+upgraded in place to `02dc44b6`, then to `b748fd5f`, to `a54fb823` and then
+to `815249cb` with
 [*Upgrade to a newer publication*](#upgrade-to-a-newer-publication).
 
 Hostnames: `logweir.localtest.me` (the console) and `dex.localtest.me` (Dex).
