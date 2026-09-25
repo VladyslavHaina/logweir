@@ -6281,7 +6281,9 @@ A fresh verification — a run finishing now, or a `Backup` still being
 reconciled — asks the current policy and gets the current answer.
 
 An object that is **already terminal** is not re-read (that is the rule that
-keeps this controller quiet), so its verdict does not change by itself. When it
+keeps this controller quiet), so its verdict does not change by itself. The one
+exception is a run whose evidence read FAILED and so has no verdict about the
+document yet (§15.1b); a reached verdict is never re-read. When it
 is re-derived, it is re-derived from what is already on the status: the stored
 `matchedKeyId`, `signedAt` and `verifiedAt` are the three facts the decision
 takes, so there is **no storage read, no signature check and no Job** — with
