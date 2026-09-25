@@ -1,8 +1,8 @@
 /# Platform improvements tracker
 
 Status: **all 41 tasks Done (2026-09-25)**, each with its completion record.
-Follow-up rows stay open in the defect ledger: POC-P15 (fix in flight),
-CONSOLE-MCP-ROUND3's low rows and REPLACE-MINIO. Product expansion has not
+Follow-up rows stay open in the defect ledger: POC-P16 (low; fix in flight),
+CONSOLE-MCP-ROUND3's low rows and REPLACE-MINIO. POC-P15 is closed live. Product expansion has not
 started, by the user's decision. Only tasks with explicit completion evidence
 are Done.
 Reviewed against main commit `92e02097540c39ff8565283a38ee592499b95020` on
@@ -241,7 +241,7 @@ runner from main with the standing fix, `claude/verdict-precedence`, `claude/evi
 | PLAT-10.1 / 10.2 | Done | plat10, plat10-finish, lab-refresh-8 (+ two reviews) | Completion record under PLAT-10.2; live on docker-desktop 2026-09-23 incl. create → backup → detail → restore. |
 | PLAT-08.2, 12.1, 12.2, 14.1, 14.2, 15.1, 15.2, 16.2, 18.2, 19.2, 20.1 | Done | (see each record) | Completion records under each task; live on docker-desktop 2026-09-23 (lab-refresh-9 and harness-rows-12, main `306cebf`). |
 | PLAT-14.3 | Done | rehearsal-catalog-trust, rehearsal-fix, reserve-commit, lab-refresh-9/10/11 (+ reviews) | Completion record under PLAT-14.3; live on docker-desktop 2026-09-24 (lab-refresh-11, main `86a554e`), every tracker test. |
-| PLAT-20.2 | Done 2026-09-25 | plat20-2 (offline half), poc-install, poc-upgrade-1/2/3, poc-fixes-1…4, release-docs-final (+ reviews); MCP console rounds 1–3 (orchestrator) | Completion record under PLAT-20.2. Live on docker-desktop 2026-09-24/25, on the PoC profile, from the published chart and images: a clean install, rehearsals R1/R2 with rollbacks, and three in-place upgrades to `a54fb823` (328/328 receipts VALID). README §10 is clean for a new user. Release notes and handoff are true at `4e58d330`. Residue: 258 of 1,000 points, POC-P15 and REPLACE-MINIO. |
+| PLAT-20.2 | Done 2026-09-25 | plat20-2 (offline half), poc-install, poc-upgrade-1/2/3, poc-fixes-1…4, release-docs-final (+ reviews); MCP console rounds 1–3 (orchestrator) | Completion record under PLAT-20.2. Live on docker-desktop 2026-09-24/25, on the PoC profile, from the published chart and images: a clean install, rehearsals R1/R2 with rollbacks, and four in-place upgrades to `815249cb` (344/344 receipts VALID). README §10 is clean for a new user. Release notes and handoff are true at `815249cb`. Residue: 258 of 1,000 points, POC-P16 (low) and REPLACE-MINIO. |
 | PLAT-17.2 (PLAT-08.2, 12.1, 15.2, 19.2, 20.1 Done 2026-09-23) | Done 2026-09-24 (see its record; PoC round on the real Traefik + Dex ingress); was: In progress (source on main since `ac00819`, 2026-09-23: seven accepted branches integrated in `claude/integration-2`, gate 3,545/0; each passed its own Tier-A or Tier-B review and re-check; live evidence so far is each worker's own journey; Done records wait for lab-refresh-9 on a build that carries them) | plat08-2, plat15-2, plat17-2, plat19-2, plat20-1, integration-2 (+ reviews) | Worker reports `claude/<branch>.result.md` and reviews `claude/<branch>.review.md`. Decisions at integration: the `values.yaml` lint ceiling rises 230→232 (two reviewed option sets); a catalog-point restore writes evidence to the point's own destination. |
 | PLAT-11.2 | Done | ui-restore-selection, d2w13, d3w12, plat11-2 (+ two reviews) | Completion record under PLAT-11.2; live on docker-desktop 2026-09-22, all eight tests through the console. |
 | PLAT-07.2 | Superseded — Done (see the PLAT-07.2 Done row below) | ui072, ui072-review | Partial record under PLAT-07.2. Integrated into main as `8bbe4d1..b65f23f`. "Test connection" cannot yet force a re-probe (D2 W13). | Saved-cluster selector by UID, probe vocabulary, freshness budget; live 20/20 |
@@ -525,7 +525,17 @@ surviving. None is fixed yet except where a worker is named.
   - **Mutants:** every one killed.
   - **Follow-up (Tier A, open):** the Preflight and TopicDiscovery views publish no deadline for a check in flight. Publishing `deadlineAt` would let the console stop at about 4 minutes for a default check.
 
-  Live proof is owed by `claude/poc-upgrade-4`. | PLAT-20.2 / PLAT-03.x / PLAT-10.x console |
+  **CLOSED-LIVE (2026-09-25, PoC upgrade round 4 `claude/poc-upgrade-4`, helm rev 11 to the published `sha-815249cb`; merged as `3fff6cde`; report `claude/poc-upgrade-4.result.md` §5).** Every follower past its old budget showed "checking…" throughout, then the verdict with no reload:
+  - Test connection: 137 s, and 156 s after a remount;
+  - the readiness panel: 126 s;
+  - the schedule form: 146 s;
+  - restore step 5: 167 s, with Create gated;
+  - Test access: 105 s;
+  - Discover topics, which had no follower before, settled on the page.
+
+  The API's own log shows the `followGap` cadence within 0.35 s. The 12-minute stop state is covered by unit rows only (P15-6 was not staged).
+
+  **Harness sweep (H8):** a stopped check is not a verdict, and every settle wait ends on the verdict or the stop, with a floor of 150 s. It is guarded; the negative control flags 19 lines of the old harness and 0 at the tip. | PLAT-20.2 / PLAT-03.x / PLAT-10.x console |
 | HARNESS-CHECK-TABLE-READERS | **FIXED (2026-09-25, H7; `claude/poc-upgrade-3` `93140122`, merged as `4e58d330`).**
   - **The defect:** R2-3 prints a check's fields in four cells, but every reader in `scripts/live/poc` took a row from innerText's tab-joined `id verdict gating code`. So every readiness row would have waited out its budget and failed: J2–J4, J6, README10 R8.3/R8.5, restore step 5 and P8.
   - **Fix:** `checkRowsIn`/`settledRows` read cells and `data-field` spans, and settle on rows plus no "checking…".
@@ -546,7 +556,21 @@ surviving. None is fixed yet except where a worker is named.
   - R3-1 now also keeps the verdict above the sticky bar (review L7);
   - R3-2 also covers the Backups list, a schedule's points and detail, and "Retry to a fresh target" (review L6).
 
-  Live proof is owed by `claude/poc-upgrade-4`. R3-4 and R3-5 (low) stay open. | PLAT-18.2 / PLAT-17.2 console |
+  **CLOSED-LIVE (2026-09-25, PoC upgrade round 4 at the published `sha-815249cb`; `claude/poc-upgrade-4.result.md` §5) for R2-10, R3-2 and R3-3:**
+  - R2-10: 0 backtick lines on the six wizard steps.
+  - R3-2, as viewer: the sentence and no link on Catalog, History, a schedule's points and its latest-point line. As operator, the links open the wizard.
+  - R3-3: "no role yet" in the header.
+
+  **R3-1 is CLOSED-LIVE for its two moments:** at 390×844, the status is above the sticky bar after the click, and the verdict head lands above it. Between those moments the page jumps; that is **P16** (below).
+
+  **Open:**
+  - O2, R2-10's class on the Catalog page: `render.js` `CATALOG_WINDOW_SENTENCE` and `catalog.js:543` print raw backticks. The fix is on `claude/poc-fixes-6`.
+  - R3-4 and R3-5 (low). | PLAT-18.2 / PLAT-17.2 console |
+| POC-P16 | LOW, found by the PoC upgrade round 4 (2026-09-25; `claude/poc-upgrade-4.result.md` §6, `console/p15/rows-DISC_R3.json`).
+  - **The defect:** at restore step 5 at 390 px, the first follow read of a running check (pending → running, about 2 s after the click) repaints the step, and the page scrolls to its top. The focused status is left at 943–998 px in an 844 px viewport until the verdict lands.
+  - **Cause:** `restore-wizard.js` `followRestoreReadiness` `show` repaints on a non-terminal change with no scroll or focus keep. Reproduced in three runs.
+  - **Impact:** a few seconds for a normal check, and up to the follow's length for a slow one. No verdict is misstated.
+  - **Fix:** on `claude/poc-fixes-6` (running), with a class sweep over every follower's non-terminal repaint. | PLAT-18.2 console |
 | CATALOG-POINT-STATE-NOT-IN-CHECK-INPUTS | LOW, pre-existing (catalog-referent review). A restore check binds its `RecoveryCatalog` by UID, and the catalog's spec is immutable except `syncRequest`, but the chosen point's catalogued state is not among the check's recorded inputs, so a re-sync that changes that point (e.g. its trust or its receipt) does not mark the check stale. Bounded: the runner re-verifies the point's signed receipt and signer at restore time and refuses an untrusted point (exit 3 `PointUntrusted`). Open. | PLAT-08.2 / PLAT-15.2 (follow-up) |
 | TEST-APPROVAL-UNPINNED-TIMING | **FIXED (2026-09-24):** the bound now subtracts a same-moment `--version` start-up baseline (985 ms vs the command's 8.6 ms warm); a 0 s bound fails as a control. LOW, test only. `weirkeeper` `approval.rs::an_unpinned_approver…` failed at 15–55 s against its 15 s bound on a loaded host (four agents compiling; seen by the `claude/readiness-principal` worker); it passes on re-run and at base, and no product path changed. Fix: a bound that measures the controller's own work rather than wall time, or a documented larger budget. Open. | — |
 | RECEIPT-DUP-UPGRADE-WINDOW | An execution whose first run was made by a runner without the execution claim, re-created after the upgrade (the runner image is not frozen in the execution inputs), is claimed successfully by the new runner and the engine overwrites the old run's manifest. Mitigation: release notes, "let in-flight Backups finish before upgrading". Fix (follow-up): a pre-engine manifest-exists refusal, after the engine test doubles write the manifest. Open. | PLAT-06.1 / PLAT-20.2 |
@@ -4291,6 +4315,19 @@ The offline rows bound 1,000 and 5,000 rows. The P10 bounds were measured live:
    - P12-L5/L6/L7/M1;
    - P14-D1 (not stageable inside the 900 s session);
    - D6/D7/D10 (need a rollback or an uninstall).
+
+**Addendum (2026-09-25): the fourth in-place upgrade** (`claude/poc-upgrade-4`, merged as `3fff6cde`; report `claude/poc-upgrade-4.result.md` §3, §7).
+- **Upgrade:** `a54fb823` → `815249cb`, helm revs 9 → 10 → 11.
+  - Chart digest `sha256:820622f2…`, CI 36152835598.
+  - Images: weirkeeper `70f1f4dc…`, console `de26b7d5…`, runner `1b7e2280…`.
+- **Kept across the upgrade:**
+  - the pre-upgrade check was empty, and no CRD generation moved;
+  - the identity, private digest, Secret uids and signing-trust were unchanged;
+  - a 5-minute schedule fired 15/15 slots across both swaps;
+  - **329 → 332 → 344 receipts VALID.**
+- **Regression:** README §10 is clean end to end in the console as a new user (`rst-qygzs6f5…` 150/150), J1–J7 14/14, and 2/2 restore scorecards are independently `VALID`.
+- **Residue:** POC-P15 is closed live. POC-P16 (low) and O2 are added.
+- **Docs:** the handoff and release notes were updated to five publications and four upgrades; the rollback is now 11 → 9.
 
 **Release notes owed (collected 2026-09-23 for this task to publish).** Every merged change whose behaviour an operator must know about:
 1. **Retention — required action:** grant the retention delete credential `s3:GetObject` on `<bucket>/<prefix>/*` before upgrading. Without it the enforcer deletes nothing (`VersionProbeRefused`); a policy degraded for that reason re-probes 24 h after its last run, or resumes at once on a spec edit.
