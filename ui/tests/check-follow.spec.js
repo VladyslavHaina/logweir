@@ -76,6 +76,12 @@ test("owes_read_is_owed_once_after_any_create_answer_and_then_until_a_terminal_r
   assert.equal(owesRead({ id: "" }, 0), false, "a check with no id cannot be read");
 });
 
+// EACH ROW MOUNTS IN ITS OWN NAMESPACE. A form's mutation record is keyed by
+// namespace, form and name and outlives a mount, and `LIFE()` never leaves:
+// a row mounting where an earlier one did would share its record, and the
+// earlier row's watcher would answer this row's click with the earlier row's
+// API -- whose follow of the same check is THE follow (`followCheck` never
+// starts a second one), so this row's API would see no read.
 function destinationApi(options) {
   const o = options || {};
   const calls = { tests: [], reads: 0 };
@@ -101,7 +107,7 @@ test("destination_test_access_follows_the_started_check_until_a_read_is_terminal
     read: (id, n) => (n < 2 ? created(id, "running", false) : read(id)),
   });
   const view = fakeView();
-  await mountDestinationDetail(view.root, "team-a", "primary", parse, LIFE(), api);
+  await mountDestinationDetail(view.root, "cf-1", "primary", parse, LIFE(), api);
   const form = view.find("#destination-test-form");
   assert.ok(form !== null, "the page offers Test access");
   await form.dispatch("submit");
@@ -128,7 +134,7 @@ test("a_replayed_destination_test_is_read_before_it_is_believed", async () => {
     read: (id) => read(id),
   });
   const view = fakeView();
-  await mountDestinationDetail(view.root, "team-a", "primary", parse, LIFE(), api);
+  await mountDestinationDetail(view.root, "cf-2", "primary", parse, LIFE(), api);
   await view.find("#destination-test-form").dispatch("submit");
   await settled(20);
   assert.equal(api.calls.reads, 1,
@@ -146,7 +152,7 @@ test("two_deliberate_destination_tests_are_two_checks_not_a_replay", async () =>
     read: (id) => read(id),
   });
   const view = fakeView();
-  await mountDestinationDetail(view.root, "team-a", "primary", parse, LIFE(), api);
+  await mountDestinationDetail(view.root, "cf-3", "primary", parse, LIFE(), api);
   await view.find("#destination-test-form").dispatch("submit");
   await settled(20);
   await view.find("#destination-test-form").dispatch("submit");
@@ -168,7 +174,7 @@ test("a_destination_test_that_never_settles_is_followed_to_its_deadline_and_the_
     waited += Math.min(followGap(expected), PREFLIGHT_FOLLOW_MS - waited);
   }
   const view = fakeView();
-  await mountDestinationDetail(view.root, "team-a", "primary", parse, LIFE(), api);
+  await mountDestinationDetail(view.root, "cf-4", "primary", parse, LIFE(), api);
   await view.find("#destination-test-form").dispatch("submit");
   await settled(expected * 4 + 20);
   assert.equal(api.calls.reads, expected, "every read the deadline allows, and not one more");

@@ -2046,6 +2046,50 @@ for (const never of [false, true]) {
   });
 }
 
+test("a_step_5_follow_whose_route_left_reads_nothing_and_paints_nothing", async () => {
+  // REVIEW M2 (poc-fixes-5), for restore step 5: the fake ignores `signal`, so
+  // only the follower's own `active(lifecycle)` can stop a read after the
+  // route left -- which it does during the follow's first wait.
+  const ns = "wizard-p15-leave-ns";
+  const primary = destinationItem("primary", "17bc54c4-2e52-4607-b4ac-c31517a6e568");
+  const k8s = savedWizardApi(ns, [primary], {
+    started: (request) => readinessItem("pf-" + ns, request.restore.planHash,
+      { state: "pending", terminal: false, applicable: false }),
+    read: (id, hash) => readinessItem(id, hash, { state: "running", terminal: false, applicable: false }),
+  });
+  const routes = createRouteLifecycle();
+  const life = routes.begin();
+  const counted = { left: false, waits: 0, paintsAfterLeave: 0 };
+  k8s.wait = async () => {
+    counted.waits += 1;
+    if (!counted.left) {
+      counted.left = true;
+      routes.begin();
+    }
+  };
+  const view = fv2();
+  const parseCounting = (html) => {
+    if (counted.left) {
+      counted.paintsAfterLeave += 1;
+    }
+    return parse2(html);
+  };
+  const originalWindow = globalThis.window;
+  globalThis.window = { location: { hash: "#/restore?ns=" + ns } };
+  try {
+    await mountRestoreWizard(view.root, ns, k8s.point, parseCounting, k8s, life);
+    await view.find("#restore-readiness-form").dispatch("submit");
+    await settled(20);
+    assert.equal(k8s.started.length, 1);
+    assert.equal(counted.waits, 1, "the follow reached its first wait, where the route left");
+    assert.equal(k8s.reads.length, 0,
+      "NEGATIVE CONTROL: no read after the route left (the fake ignores the signal)");
+    assert.equal(counted.paintsAfterLeave, 0, "and nothing painted on the wizard that left");
+  } finally {
+    globalThis.window = originalWindow;
+  }
+});
+
 test("a_destination_edited_during_the_draft_refuses_the_submit_until_the_check_runs_again", async () => {
   // D2 S21, in the console. The destination's access is rotated after the
   // check said ready: its generation moves, the plan bytes do not, and the

@@ -46,6 +46,7 @@ import {
   followCheck,
   followGap,
   formKey,
+  isFollowed,
   keepDraft,
   keepStopMark,
   preflightSpent,
@@ -172,8 +173,16 @@ test("the_follow_deadline_covers_the_longest_check_the_product_accepts", () => {
 });
 
 test("the_follow_backs_off_and_never_hot_loops", () => {
-  const gaps = [0, 1, 2, 3, 4, 5, 50].map(followGap);
-  assert.deepEqual(gaps, [2000, 3000, 4500, 6750, 10000, 10000, 10000]);
+  // THE OLD CADENCE FOR THE FIRST TWENTY SECONDS (review L8): ten reads two
+  // seconds apart, so a check settling in that time is seen as fast as before;
+  // then 3, 4.5, 6.75 and 10 s.
+  const gaps = [0, 1, 5, 9, 10, 11, 12, 13, 50].map(followGap);
+  assert.deepEqual(gaps, [2000, 2000, 2000, 2000, 3000, 4500, 6750, 10000, 10000]);
+  let steady = 0;
+  for (let n = 0; followGap(n) === 2000; n += 1) {
+    steady += 2000;
+  }
+  assert.equal(steady, 20000, "NEGATIVE CONTROL: two-second reads for the first twenty seconds");
   let reads = 0;
   for (let waited = 0; waited < PREFLIGHT_FOLLOW_MS; reads += 1) {
     const gap = followGap(reads);
@@ -617,4 +626,370 @@ test("test_access_says_when_a_check_outlived_its_deadline_and_tests_again", cloc
   await view.find(".check-retry").dispatch("click");
   await flush();
   assert.equal(api.tests.length, 2, "Run the check again is Test access again");
+}));
+
+// ===========================================================================
+// Fix round (review of poc-fixes-5): one follow per check, the route ends it,
+// and the refusals that are not blips
+// ===========================================================================
+
+/** An API whose creates REPLAY by attempt token, as the product API does (D0:
+ *  one key, one object): a second ask with the same token answers the same
+ *  check. Its checks never settle, so a follow reads at its steady cadence.
+ *
+ *  ITS IDS CARRY `prefix`, one per row. A follow is registered by its check's
+ *  id for as long as it lives, and `LIFE()` never leaves, so a follow an
+ *  earlier row left running would BE the follow of a later row's check of the
+ *  same id (`followCheck` never starts a second one). */
+function replayingApi(prefix, settles) {
+  const byToken = new Map();
+  const api = {
+    creates: [],
+    reads: [],
+    slotReads: 0,
+    list(namespace, plural) {
+      return Promise.resolve(plural === "kafkaclusters"
+        ? { items: [{ metadata: { name: "orders-prod", uid: "uid-A" },
+          spec: { role: "source", bootstrapServers: ["kafka:9093"] }, status: {} }] }
+        : { items: [] });
+    },
+    destinations() {
+      return Promise.resolve({ items: [{ name: "primary", uid: "d-1", default: true,
+        canonicalUrl: "s3://kafka-backups/poc" }] });
+    },
+    get() { return Promise.resolve(CONNECTION); },
+    latestDiscoveries() {
+      api.slotReads += 1;
+      return Promise.resolve({ latestAttempt: null, lastSuccessful: null });
+    },
+    discoveryTopics() {
+      return Promise.resolve({ items: [], page: {}, scan: { complete: true, chunksScanned: 1 } });
+    },
+    startPreflight(namespace, request, options) {
+      const token = (options || {}).attempt;
+      api.creates.push(token);
+      const replayed = byToken.has(token);
+      if (!replayed) {
+        byToken.set(token, "pf-" + prefix + "-" + String(byToken.size + 1));
+      }
+      return Promise.resolve({ item: preflight(byToken.get(token), "running", false), replayed });
+    },
+    preflight(namespace, id) {
+      api.reads.push(Date.now());
+      return Promise.resolve({ item: preflight(id, "running", false) });
+    },
+    startDiscovery(namespace, connection, request, options) {
+      const token = (options || {}).attempt;
+      api.creates.push(token);
+      const replayed = byToken.has(token);
+      if (!replayed) {
+        byToken.set(token, "td-" + prefix + "-" + String(byToken.size + 1));
+      }
+      return Promise.resolve({ item: discovery(byToken.get(token), "running", false), replayed,
+        reused: false });
+    },
+    discovery(namespace, id) {
+      api.reads.push(Date.now());
+      return Promise.resolve({ item: settles === true && Date.now() >= SETTLES_AT_MS
+        ? discovery(id, "succeeded", true)
+        : discovery(id, "running", false) });
+    },
+  };
+  return api;
+}
+
+const ASK_TWICE = [
+  ["the readiness panel", async (view) => view.find("#readiness-form").dispatch("submit"),
+    async (ns, api) => {
+      const view = fakeView();
+      await mountSchedules(view.root, ns, parse, LIFE(), api);
+      return view;
+    }],
+  ["the schedule form", async (view) => view.find("#schedule-check-readiness").dispatch("click"),
+    async (ns, api) => {
+      const key = formKey(ns, SCHEDULE_FORM);
+      dropDraft(key);
+      keepDraft(key, scheduleDraft(), SCHEDULE_DRAFT_FIELDS);
+      const view = fakeView();
+      await mountSchedules(view.root, ns, parse, LIFE(), api);
+      return view;
+    }],
+  ["Discover topics", async (view) => view.find("#discovery-form").dispatch("submit"),
+    async (ns, api) => {
+      const view = fakeView();
+      await mountClusterDetail(view.root, ns, "orders-prod", parse, LIFE(), api);
+      return view;
+    }],
+];
+
+for (const [surface, ask, mount] of ASK_TWICE) {
+  test("asking again while the check runs does not start a second follow: " + surface,
+    clocked(async () => {
+      // REVIEW M1. The ask is re-enabled once its create answers, and asking
+      // again while the check runs REPLAYS it (the same intent token, the same
+      // id). Each answer started a follow of its own, and two follows of one
+      // check both stayed "mine": 6 reads a minute became 22 after two more
+      // clicks, for up to twelve minutes.
+      const ns = "m1-" + surface.replace(/[^a-z]/gi, "").toLowerCase();
+      const api = replayingApi(ns);
+      const view = await mount(ns, api);
+      await ask(view);
+      await flush();
+      await advance(60 * 1000);
+      const at = api.reads.length;
+      await advance(60 * 1000);
+      const before = api.reads.length - at;
+      assert.equal(before, 6, "one follow reads six times a minute at its steady ten seconds");
+      await ask(view);
+      await flush();
+      await ask(view);
+      await flush();
+      assert.equal(new Set(api.creates).size, 1, "the asks replayed the same check (one token)");
+      assert.equal(api.creates.length, 3);
+      const since = api.reads.length;
+      await advance(60 * 1000);
+      const after = api.reads.length - since;
+      assert.ok(after <= before + 1,
+        "NEGATIVE CONTROL: the cadence is unchanged after two replayed asks: " + before +
+          " reads a minute before, " + after + " after");
+      dropDraft(formKey(ns, SCHEDULE_FORM));
+    }));
+}
+
+test("a_discovery_asked_again_while_it_runs_rereads_its_slots_once_when_it_finishes", clocked(async () => {
+  // THE PAGE HALF OF M1 for Discover topics: its follow re-reads the two slots
+  // when the discovery finishes, and a second ask that replayed the running
+  // discovery must not chain a second re-read onto the one follow.
+  const api = replayingApi("m1-slots", true);
+  const view = fakeView();
+  await mountClusterDetail(view.root, "m1-slots", "orders-prod", parse, LIFE(), api);
+  await view.find("#discovery-form").dispatch("submit");
+  await flush();
+  await advance(30 * 1000);
+  await view.find("#discovery-form").dispatch("submit");
+  await flush();
+  assert.equal(new Set(api.creates).size, 1, "the second ask replayed the running discovery");
+  const slots = api.slotReads;
+  await advance(SETTLES_AT_MS);
+  assert.equal(api.slotReads - slots, 1,
+    "NEGATIVE CONTROL: the finished discovery's slots are read once, not once per ask");
+}));
+
+test("a_follow_asked_for_a_check_already_followed_is_that_follow", clocked(async () => {
+  let reads = 0;
+  const first = { first: preflight("pf-once", "running", false),
+    read: async (current) => { reads += 1; return readAt(current.id, true); } };
+  const one = followCheck(first);
+  const two = followCheck(Object.assign({}, first));
+  assert.equal(one, two, "the second ask is handed the live follow's promise");
+  assert.equal(isFollowed("pf-once"), true);
+  await advance(20 * 1000);
+  assert.equal(reads, 10, "one follow's ten reads in twenty seconds, not twenty");
+}));
+
+// THE ROUTE ENDS EVERY FOLLOW (review M2). The fake APIs below IGNORE `signal`,
+// so the only thing that can stop a read after the route left is the
+// follower's own `keep` -- `active(lifecycle)` in each of them. The route
+// leaves during the first wait; after it, nothing is read and nothing painted.
+const LEAVERS = [
+  ["the readiness panel", async (ns, parse_, life, api) => {
+    await mountSchedules(parse_.view.root, ns, parse_, life, api);
+    await parse_.view.find("#readiness-form").dispatch("submit");
+  }],
+  ["the schedule form", async (ns, parse_, life, api) => {
+    const key = formKey(ns, SCHEDULE_FORM);
+    dropDraft(key);
+    keepDraft(key, scheduleDraft(), SCHEDULE_DRAFT_FIELDS);
+    await mountSchedules(parse_.view.root, ns, parse_, life, api);
+    await parse_.view.find("#schedule-check-readiness").dispatch("click");
+  }],
+  ["Test access", async (ns, parse_, life, api) => {
+    await mountDestinationDetail(parse_.view.root, ns, "primary", parse_, life, api);
+    await parse_.view.find("#destination-test-form").dispatch("submit");
+  }],
+  ["Discover topics", async (ns, parse_, life, api) => {
+    await mountClusterDetail(parse_.view.root, ns, "orders-prod", parse_, life, api);
+    await parse_.view.find("#discovery-form").dispatch("submit");
+  }],
+];
+
+for (const [surface, start] of LEAVERS) {
+  test("a_follow_whose_route_left_reads_nothing_and_paints_nothing: " + surface, async () => {
+    const routes = createRouteLifecycle();
+    const life = routes.begin();
+    const counted = { reads: 0, paintsAfterLeave: 0, left: false, waits: 0 };
+    const ns = "m2-" + surface.replace(/[^a-z]/gi, "").toLowerCase();
+    const api = Object.assign(replayingApi(ns), destinationApi(false), {
+      testDestination() {
+        return Promise.resolve({ item: preflight("pf-" + ns, "pending", false,
+          { operation: "destinationAccess" }), replayed: false });
+      },
+      preflight(namespace, id) {
+        counted.reads += 1;
+        return Promise.resolve({ item: preflight(id, "running", false) });
+      },
+      discovery(namespace, id) {
+        counted.reads += 1;
+        return Promise.resolve({ item: discovery(id, "running", false) });
+      },
+      // THE ROUTE LEAVES DURING THE FOLLOW'S FIRST WAIT.
+      wait: async () => {
+        counted.waits += 1;
+        if (!counted.left) {
+          counted.left = true;
+          routes.begin();
+        }
+      },
+    });
+    const view = fakeView();
+    const parse_ = (html) => {
+      if (counted.left) {
+        counted.paintsAfterLeave += 1;
+      }
+      return [{ html: html }];
+    };
+    parse_.view = view;
+    try {
+      await start(ns, parse_, life, api);
+      await flush(40);
+      assert.equal(counted.waits, 1, "the follow reached its first wait, where the route left");
+      assert.equal(counted.reads, 0,
+        "NEGATIVE CONTROL: no read after the route left (the fake ignores the signal)");
+      assert.equal(counted.paintsAfterLeave, 0, "and nothing painted on the view that left");
+    } finally {
+      dropDraft(formKey(ns, SCHEDULE_FORM));
+      resetMode();
+      resetCheckIntents();
+    }
+  });
+}
+
+// THE REFUSALS THAT ARE NOT BLIPS (review M3, L3): the session ended (401),
+// the session may not read the check (403), this page refused to ask, and an
+// answer this page cannot read. Each is read ONCE and then said.
+for (const [label, error] of [
+  ["401", Object.assign(new Error("the session ended; sign in again"), { status: 401 })],
+  ["403", Object.assign(new Error("this role may not read preflights here"), { status: 403 })],
+  ["refused", Object.assign(new Error("this page will not ask"), { kind: "refused", status: 0 })],
+  ["contract", Object.assign(new Error("the answer is not a Preflight this page reads"),
+    { kind: "contract" })],
+]) {
+  test("a_read_refused_with_" + label + "_is_read_once_and_stops_the_follow", clocked(async () => {
+    let reads = 0;
+    const ended = followCheck({
+      first: preflight("pf-" + label, "running", false),
+      read: async () => { reads += 1; throw error; },
+    });
+    await advance(60 * 1000);
+    const result = await ended;
+    assert.equal(reads, 1, "NEGATIVE CONTROL: not retried as a blip");
+    assert.equal(result.followStopped, FOLLOW_UNREADABLE);
+    assert.equal(result.followError, error.message);
+  }));
+}
+
+test("a_follow_whose_route_aborts_ends_at_once_and_leaves_no_timer", clocked(async () => {
+  // REVIEW L1: the wait between reads was a plain timer, left running for up
+  // to ten seconds after the route had gone.
+  const route = new AbortController();
+  let reads = 0;
+  let settled = false;
+  const ended = followCheck({
+    first: preflight("pf-leave", "running", false),
+    signal: route.signal,
+    keep: () => !route.signal.aborted,
+    read: async (current) => { reads += 1; return readAt(current.id, true); },
+  });
+  ended.then(() => { settled = true; });
+  await advance(30 * 1000);
+  const count = reads;
+  route.abort();
+  await flush();
+  assert.equal(settled, true,
+    "NEGATIVE CONTROL: the follow ended on the abort, without its timer firing");
+  assert.equal(await ended, null);
+  assert.equal(isFollowed("pf-leave"), false, "and it is no longer registered");
+  await advance(60 * 1000);
+  assert.equal(reads, count);
+}));
+
+test("a_read_the_server_never_answers_ends_at_the_deadline_as_unreadable", clocked(async () => {
+  // REVIEW L2: the deadline was checked only between reads, and a GET the
+  // server accepted and never answered held "checking..." past it.
+  const signals = [];
+  let settled = false;
+  const ended = followCheck({
+    first: preflight("pf-hang", "running", false),
+    read: (current, options) => { signals.push((options || {}).signal); return new Promise(() => {}); },
+  });
+  ended.then(() => { settled = true; });
+  await advance(PREFLIGHT_FOLLOW_MS + 2 * FOLLOW_MAX_GAP_MS);
+  assert.equal(settled, true, "NEGATIVE CONTROL: the follow ended although the read never answered");
+  const result = await ended;
+  assert.equal(result.followStopped, FOLLOW_UNREADABLE,
+    "the page cannot say the check did not finish: it never heard back");
+  assert.match(result.followError, /not answered before the check's deadline/);
+  assert.equal(signals.length, 1);
+  assert.equal(signals[0].aborted, true, "and the read itself was aborted");
+}));
+
+test("a_wall_clock_step_neither_ends_a_follow_nor_stretches_it", clocked(async () => {
+  // REVIEW L4: the deadline ran on Date.now(); an NTP step or a laptop waking
+  // an hour later ended the follow after one read with "did not finish".
+  let reads = 0;
+  const shown = [];
+  const ended = followCheck({
+    first: preflight("pf-clock", "running", false),
+    read: async (current) => { reads += 1; return preflight(current.id, "running", false); },
+    show: (check) => { shown.push(check); },
+  });
+  await advance(30 * 1000);
+  mock.timers.setTime(Date.now() + 3600 * 1000);
+  await advance(30 * 1000);
+  assert.equal(shown.some((c) => c.followStopped !== undefined), false,
+    "NEGATIVE CONTROL: an hour's step on the wall clock did not end the follow");
+  assert.ok(reads > 10, "it is still reading: " + reads);
+  await advance(PREFLIGHT_FOLLOW_MS);
+  assert.equal((await ended).followStopped, FOLLOW_DEADLINE, "and it still ends at its deadline");
+}));
+
+test("a_failed_last_read_says_the_check_could_not_be_read_not_that_it_did_not_finish", clocked(async () => {
+  // REVIEW L5: the read at the deadline failed with a 503, the loop went on,
+  // found the deadline passed, and said "did not finish" -- which the page
+  // did not know: the check may have settled.
+  const unavailable = Object.assign(new Error("service unavailable"), { status: 503 });
+  let reads = 0;
+  const ended = followCheck({
+    first: preflight("pf-last", "running", false),
+    read: async (current) => {
+      reads += 1;
+      if (Date.now() >= PREFLIGHT_FOLLOW_MS - 3000) {
+        throw unavailable;
+      }
+      return preflight(current.id, "running", false);
+    },
+  });
+  await advance(PREFLIGHT_FOLLOW_MS + 2 * FOLLOW_MAX_GAP_MS);
+  const result = await ended;
+  assert.equal(result.followStopped, FOLLOW_UNREADABLE,
+    "NEGATIVE CONTROL: not 'deadline' -- the last read failed");
+  assert.equal(result.followError, "service unavailable");
+}));
+
+test("a_check_settling_within_twenty_seconds_is_seen_within_two", clocked(async () => {
+  // REVIEW L8: backing off from the first read delayed the common case -- a
+  // check settling at 17-26 s was shown at 26 s. The first twenty seconds keep
+  // the old two-second cadence.
+  const shown = [];
+  followCheck({
+    first: preflight("pf-17", "pending", false),
+    read: async (current) => (Date.now() >= 17000
+      ? preflight(current.id, "ready", true)
+      : preflight(current.id, "running", false)),
+    show: (check) => { shown.push([Date.now(), check.terminal]); },
+  });
+  await advance(19 * 1000);
+  const verdict = shown.find((s) => s[1] === true);
+  assert.ok(verdict !== undefined && verdict[0] <= 18000,
+    "NEGATIVE CONTROL: shown by 18 s, not at 26 s: " + JSON.stringify(verdict));
 }));

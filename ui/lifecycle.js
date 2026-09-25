@@ -936,13 +936,26 @@ export function discoverySpent(discovery) {
 // controller settles (a `DeadlineExceeded` Job included) ends the follow at
 // its first terminal read, long before that bound.
 //
-// POLITELY. The gap starts at two seconds and grows by half each read, to ten
-// at most: a check that settles in ten seconds is seen about as fast as
-// before, and one the controller never settles costs about seventy-five reads
-// over twelve minutes -- never a hot loop. A read that fails for a reason that
-// passes (the network, `408`, `429`, a `5xx`) is tried again on the same
-// schedule, inside the same deadline -- up to five times in a row; a sixth
-// is no longer a blip, and the page says it could not read the check.
+// POLITELY. For the first twenty seconds the page reads every two seconds, as
+// every follower always did, so the checks that settle in that time -- most
+// of them -- are seen exactly as fast as before. After that the gap grows by
+// half each read, to ten seconds at most: a check the controller never
+// settles costs about eighty reads over twelve minutes -- never a hot loop.
+// A read that fails for a reason that passes (the network, `408`, `429`, a
+// `5xx`) is tried again on the same schedule, inside the same deadline -- up
+// to five times in a row; a sixth is no longer a blip, and the page says it
+// could not read the check. A read the server never answers is abandoned at
+// the deadline, and a follow whose LAST read failed says it could not read
+// the check, not that the check did not finish: it does not know that.
+//
+// ONE FOLLOW PER CHECK. Asking again while a check runs replays it (that is
+// what the intent token is for), and every page follows what its ask
+// answered; a follow already reading that check IS the follow, so a second
+// one is never started (`isFollowed`). The deadline is measured on a
+// monotonic clock (`performance.now`), so a wall-clock step -- NTP, a laptop
+// waking -- neither ends a follow early nor stretches it. And a follow ends
+// with its route: the wait between reads is cut short and its timer cleared
+// when the route's signal aborts, and each read carries that signal.
 //
 // AND IT ENDS IN WORDS, NEVER ON THE CHECKING SENTENCE. When the deadline
 // passes without a result, or a read is refused outright, the page is handed
@@ -987,11 +1000,21 @@ export const FOLLOW_FAILURES_TOLERATED = 5;
 export const FOLLOW_FIRST_GAP_MS = 2000;
 export const FOLLOW_MAX_GAP_MS = 10000;
 
-/** The wait before read `attempt` (0-based): 2 s, 3 s, 4.5 s, 6.75 s, then
- *  10 s for every read after. */
+/** How long the first gap is kept before the follow backs off: the old
+ *  cadence, for the first twenty seconds. */
+export const FOLLOW_STEADY_MS = 20000;
+
+/** The wait before read `attempt` (0-based): 2 s for the first twenty
+ *  seconds (ten reads), then 3 s, 4.5 s, 6.75 s, and 10 s for every read
+ *  after. */
 export function followGap(attempt) {
   const n = Math.max(0, Math.floor(Number(attempt) || 0));
-  return Math.min(FOLLOW_MAX_GAP_MS, Math.round(FOLLOW_FIRST_GAP_MS * Math.pow(1.5, n)));
+  const steady = Math.round(FOLLOW_STEADY_MS / FOLLOW_FIRST_GAP_MS);
+  if (n < steady) {
+    return FOLLOW_FIRST_GAP_MS;
+  }
+  return Math.min(FOLLOW_MAX_GAP_MS,
+    Math.round(FOLLOW_FIRST_GAP_MS * Math.pow(1.5, n - steady + 1)));
 }
 
 /** Why a page stopped following a check: its deadline passed without a
@@ -1036,11 +1059,12 @@ export function keepStopMark(held, fresh) {
 
 /** Whether a failed read is worth asking again: a network failure (a fetch
  *  rejects with no status), `408`, `429` or a `5xx`. Anything else -- the
- *  check is gone, the session may no longer read it, this page refused to ask
- *  -- will not change by asking again. */
+ *  check is gone, the session may no longer read it, this page refused to ask,
+ *  the answer is not a document this page can read (`kind: "contract"`) --
+ *  will not change by asking again. */
 export function passingReadFailure(error) {
   const e = error || {};
-  if (e.kind === "refused") {
+  if (e.kind === "refused" || e.kind === "contract") {
     return false;
   }
   const status = e.status;
@@ -1050,17 +1074,90 @@ export function passingReadFailure(error) {
   return status === 408 || status === 429 || status >= 500;
 }
 
-// THE FOLLOWS RUNNING NOW, by the id of the check each reads, so a page that
-// mounts again over a check it remembers can tell whether something is still
-// reading it (`isFollowed`). Each entry is the follow's own `keep`, which is
-// the answer to "is this follow still alive": a follow whose route has left
-// is not, even before it wakes up to notice.
+// THE FOLLOWS RUNNING NOW, by the id of the check each reads: one entry per
+// follow, `{keep, promise}`. `keep` answers "is this follow still alive" -- a
+// follow whose route has left is not, even before it wakes up to notice --
+// and `promise` is what a second ask for the same check is handed instead of
+// a second follow (`followCheck`), and what a page mounting again over a
+// check it remembers can tell is still reading it (`isFollowed`).
 const follows = new Map();
 
 /** Whether a live follow is reading the check `id` now. */
 export function isFollowed(id) {
-  const keep = follows.get(String(id || ""));
-  return keep !== undefined && keep() === true;
+  const entry = follows.get(String(id || ""));
+  return entry !== undefined && entry.keep() === true;
+}
+
+/** The page's monotonic clock: `performance.now()`, or `Date.now()` where
+ *  there is none. */
+function monotonicNow() {
+  const perf = globalThis.performance;
+  return perf !== undefined && perf !== null && typeof perf.now === "function"
+    ? perf.now()
+    : Date.now();
+}
+
+/** Waits `ms`, or until `signal` aborts -- and then the timer is cleared, so a
+ *  follow whose route has left leaves nothing running behind it. */
+function waitOrLeave(ms, signal) {
+  return new Promise((done) => {
+    if (signal !== undefined && signal !== null && signal.aborted === true) {
+      done();
+      return;
+    }
+    let timer = null;
+    const finish = () => {
+      globalThis.clearTimeout(timer);
+      if (signal !== undefined && signal !== null) {
+        signal.removeEventListener("abort", finish);
+      }
+      done();
+    };
+    timer = globalThis.setTimeout(finish, ms);
+    if (signal !== undefined && signal !== null) {
+      signal.addEventListener("abort", finish, { once: true });
+    }
+  });
+}
+
+/** What a read answers when it did not answer before its time ran out. */
+const READ_TIMED_OUT = Object.freeze({ timedOut: true });
+
+/** One read, given at most `ms` to answer: `read(current, {signal})`, where
+ *  the signal aborts when the route's does or when the time runs out. A read
+ *  that ignores its signal is still raced, so it cannot hold the follow past
+ *  its deadline. Answers the read's answer, or [`READ_TIMED_OUT`]. */
+function readWithin(read, current, ms, route) {
+  const Controller = globalThis.AbortController;
+  const controller = typeof Controller === "function" ? new Controller() : null;
+  let timer = null;
+  let relay = null;
+  const expired = new Promise((done) => {
+    timer = globalThis.setTimeout(() => {
+      done(READ_TIMED_OUT);
+      if (controller !== null) {
+        controller.abort();
+      }
+    }, ms);
+  });
+  if (controller !== null && route !== undefined && route !== null) {
+    if (route.aborted === true) {
+      controller.abort();
+    } else {
+      relay = () => controller.abort();
+      route.addEventListener("abort", relay, { once: true });
+    }
+  }
+  const options = controller !== null
+    ? { signal: controller.signal }
+    : (route === undefined || route === null ? {} : { signal: route });
+  const answered = Promise.resolve().then(() => read(current, options));
+  return Promise.race([answered, expired]).finally(() => {
+    globalThis.clearTimeout(timer);
+    if (relay !== null) {
+      route.removeEventListener("abort", relay);
+    }
+  });
 }
 
 /** Follows one check until a read answers terminal, the check's deadline
@@ -1069,48 +1166,72 @@ export function isFollowed(id) {
  *  `null` when `keep()` ended it.
  *
  *  `first` is the check the page holds (a create answer owes one read even
- *  when it is terminal: `owesRead`); `read(current)` makes one GET and
- *  answers the check to hold next; `show(check)` paints it; `cancelled(error)`
- *  says a failed read was the route's own abort; `budgetMs` is the deadline
- *  (`PREFLIGHT_FOLLOW_MS` unless given). `wait` and `now` default to this
- *  page's `setTimeout` and `Date.now`. The deadline is measured both on the
- *  clock and as the sum of the gaps waited, whichever is further, so a
- *  `wait` that returns at once still reaches it. */
-export async function followCheck(follow) {
+ *  when it is terminal: `owesRead`); `read(current, {signal})` makes one GET
+ *  with that signal and answers the check to hold next; `show(check)` paints
+ *  it (and may answer a promise, which the next read waits for);
+ *  `cancelled(error)` says a failed read was the route's own abort; `signal`
+ *  is the route's; `budgetMs` is the deadline (`PREFLIGHT_FOLLOW_MS` unless
+ *  given). `wait(ms, signal)` and `now()` default to this page's `setTimeout`
+ *  (cut short by `signal`) and its monotonic clock. The deadline is measured
+ *  both on that clock and as the sum of the gaps waited, whichever is
+ *  further, so a `wait` that returns at once still reaches it.
+ *
+ *  A CHECK ALREADY FOLLOWED IS NOT FOLLOWED TWICE: while a live follow reads
+ *  `first`'s id, this answers that follow's promise and starts nothing. */
+export function followCheck(follow) {
   const f = follow || {};
-  const wait = typeof f.wait === "function"
-    ? f.wait
-    : (ms) => new Promise((done) => { globalThis.setTimeout(done, ms); });
-  const now = typeof f.now === "function" ? f.now : () => Date.now();
+  const id = String(((f.first || {}).id) || "");
+  const live = id.length > 0 ? follows.get(id) : undefined;
+  if (live !== undefined && live.keep() === true) {
+    return live.promise;
+  }
   const keep = typeof f.keep === "function" ? () => f.keep() === true : () => true;
+  const entry = { keep: keep, promise: null };
+  if (id.length > 0) {
+    follows.set(id, entry);
+  }
+  entry.promise = runFollow(f, keep, () => {
+    if (id.length > 0 && follows.get(id) === entry) {
+      follows.delete(id);
+    }
+  });
+  return entry.promise;
+}
+
+async function runFollow(f, keep, release) {
+  const signal = f.signal;
+  const wait = typeof f.wait === "function" ? f.wait : waitOrLeave;
+  const now = typeof f.now === "function" ? f.now : monotonicNow;
   const show = typeof f.show === "function" ? f.show : () => {};
   const budget = typeof f.budgetMs === "number" ? f.budgetMs : PREFLIGHT_FOLLOW_MS;
-  const id = String(((f.first || {}).id) || "");
   const started = now();
   let waited = 0;
   let attempts = 0;
   let reads = 0;
   let failures = 0;
+  let lastFailure = null;
   let current = f.first;
-  if (id.length > 0) {
-    follows.set(id, keep);
-  }
+  const left = () => budget - Math.max(now() - started, waited);
   try {
     for (;;) {
       if (!owesRead(current, reads)) {
         return current;
       }
-      const left = budget - Math.max(now() - started, waited);
-      if (left <= 0) {
-        // THE DEADLINE PASSED WITHOUT A RESULT, after one last read at it.
-        const stopped = stopFollowing(current, FOLLOW_DEADLINE);
+      if (left() <= 0) {
+        // THE DEADLINE PASSED, after one last read at it. Without a result
+        // that is "did not finish" -- unless that last read FAILED, in which
+        // case the page does not know whether the check finished, and says
+        // it could not read it.
+        const stopped = lastFailure === null
+          ? stopFollowing(current, FOLLOW_DEADLINE)
+          : stopFollowing(current, FOLLOW_UNREADABLE, lastFailure);
         if (keep()) {
           await show(stopped);
         }
         return stopped;
       }
-      const gap = Math.min(followGap(attempts), left);
-      await wait(gap);
+      const gap = Math.min(followGap(attempts), left());
+      await wait(gap, signal);
       waited += gap;
       attempts += 1;
       if (!keep()) {
@@ -1118,12 +1239,15 @@ export async function followCheck(follow) {
       }
       let fresh;
       try {
-        fresh = await f.read(current);
+        // A READ GETS WHAT IS LEFT OF THE DEADLINE, and never less than one
+        // gap: the last read, made at the deadline, still has time to answer.
+        fresh = await readWithin(f.read, current, Math.max(left(), FOLLOW_MAX_GAP_MS), signal);
       } catch (error) {
         if (!keep() || (typeof f.cancelled === "function" && f.cancelled(error) === true)) {
           return null;
         }
         failures += 1;
+        lastFailure = error;
         if (passingReadFailure(error) && failures <= FOLLOW_FAILURES_TOLERATED) {
           continue;
         }
@@ -1134,15 +1258,22 @@ export async function followCheck(follow) {
       if (!keep()) {
         return null;
       }
+      if (fresh === READ_TIMED_OUT) {
+        // THE SERVER NEVER ANSWERED, and the deadline has passed while it did
+        // not: the page cannot say what the check did.
+        const stopped = stopFollowing(current, FOLLOW_UNREADABLE,
+          { message: "the read was not answered before the check's deadline" });
+        await show(stopped);
+        return stopped;
+      }
       reads += 1;
       failures = 0;
+      lastFailure = null;
       current = fresh === null || fresh === undefined ? current : fresh;
       await show(current);
     }
   } finally {
-    if (id.length > 0 && follows.get(id) === keep) {
-      follows.delete(id);
-    }
+    release();
   }
 }
 

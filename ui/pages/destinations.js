@@ -1474,8 +1474,9 @@ function followDestinationTest(node, ns, name, parse, lifecycle, api, item, view
     wait: api.wait,
     keep: () => active(lifecycle) && mine(),
     cancelled: (error) => cancelled(error, lifecycle),
-    read: async (current) =>
-      (((await api.preflight(ns, current.id, readOptions(lifecycle))) || {}).item) || current,
+    signal: (readOptions(lifecycle) || {}).signal,
+    read: async (current, options) =>
+      (((await api.preflight(ns, current.id, options)) || {}).item) || current,
     show: (current) => {
       paintTest(node, ns, name, parse, lifecycle, api, item, {
         usage: view.usage, usageError: view.usageError, test: current,

@@ -1450,7 +1450,8 @@ export function resetConnectionAttempts() {
 }
 
 /** The "Test connection" control: create one `sourceConnection` `Preflight`,
- *  then follow it until it is terminal or the read budget is spent.
+ *  then follow it until a read is terminal or the check's own deadline has
+ *  passed (`followConnectionCheck`).
  *
  *  THE DOUBLE-CLICK GUARD IS THE MUTATION RECORD, not a boolean in this
  *  closure: it is the same record every mount of this form in this namespace
@@ -1519,8 +1520,9 @@ function followConnectionCheck(node, ns, name, parse, lifecycle, api, first) {
     wait: api.wait,
     keep: () => active(lifecycle) && mine(),
     cancelled: (error) => cancelled(error, lifecycle),
-    read: async (current) =>
-      (((await api.preflight(ns, current.id, readOptions(lifecycle))) || {}).item) || current,
+    signal: (readOptions(lifecycle) || {}).signal,
+    read: async (current, options) =>
+      (((await api.preflight(ns, current.id, options)) || {}).item) || current,
     show: (current) => {
       const last = detailViews.get(detailKey) || {};
       paintClusterDetail(node, ns, name, parse, lifecycle, api, last.object, last.discovery,
@@ -1541,6 +1543,12 @@ function followConnectionCheck(node, ns, name, parse, lifecycle, api, first) {
  *  at the first terminal read, or at the discovery's own deadline, and it
  *  says in words when it gave up. */
 function followDiscovery(node, ns, name, parse, lifecycle, api, first) {
+  // A DISCOVERY ALREADY FOLLOWED IS LEFT TO ITS FOLLOW, which re-reads the
+  // slots when it ends: a second ask that replayed it adds no second follow
+  // (`followCheck`) and no second re-read here.
+  if (isFollowed((first || {}).id)) {
+    return Promise.resolve(null);
+  }
   const key = formKey(ns, DISCOVERY_FORM, name);
   const mine = () => ((((detailViews.get(key) || {}).discovery) || {}).latestAttempt || {}).id ===
     (first || {}).id;
@@ -1556,8 +1564,9 @@ function followDiscovery(node, ns, name, parse, lifecycle, api, first) {
     wait: api.wait,
     keep: keep,
     cancelled: (error) => cancelled(error, lifecycle),
-    read: async (current) =>
-      (((await api.discovery(ns, current.id, readOptions(lifecycle))) || {}).item) || current,
+    signal: (readOptions(lifecycle) || {}).signal,
+    read: async (current, options) =>
+      (((await api.discovery(ns, current.id, options)) || {}).item) || current,
     show: (current) => paint({ latestAttempt: current }),
   }).then((ended) => {
     if (ended === null || ended === undefined || ended.terminal !== true ||

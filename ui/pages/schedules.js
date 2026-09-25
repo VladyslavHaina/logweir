@@ -2146,8 +2146,9 @@ function followReadinessPanel(node, ns, parse, lifecycle, api, first) {
     wait: api.wait,
     keep: () => active(lifecycle) && mine(),
     cancelled: (error) => cancelled(error, lifecycle),
-    read: async (current) =>
-      (((await api.preflight(ns, current.id, readOptions(lifecycle))) || {}).item) || current,
+    signal: (readOptions(lifecycle) || {}).signal,
+    read: async (current, options) =>
+      (((await api.preflight(ns, current.id, options)) || {}).item) || current,
     show: (current) => {
       paintReadinessPanel(node, ns, parse, lifecycle, api,
         Object.assign({}, readinessPanels.get(key), { preflight: current }));
@@ -2784,8 +2785,9 @@ function followCreateReadiness(node, ns, parse, lifecycle, api, clusters, held) 
     wait: api.wait,
     keep: () => active(lifecycle) && mine(),
     cancelled: (error) => cancelled(error, lifecycle),
-    read: async (current) =>
-      (((await api.preflight(ns, current.id, readOptions(lifecycle))) || {}).item) || current,
+    signal: (readOptions(lifecycle) || {}).signal,
+    read: async (current, options) =>
+      (((await api.preflight(ns, current.id, options)) || {}).item) || current,
     show: (current) => {
       held.readiness = current;
       const slot = node.querySelector("#schedule-form-slot");

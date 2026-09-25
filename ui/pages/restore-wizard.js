@@ -5811,9 +5811,10 @@ function followRestoreReadiness(node, state, parse, api, lifecycle) {
     wait: api.wait,
     keep: () => active(lifecycle) && (held() || {}).id === id,
     cancelled: (error) => cancelled(error, lifecycle),
-    read: async () => {
+    signal: (readOptions(lifecycle) || {}).signal,
+    read: async (checked, options) => {
       const current = await preparePlanOrProblem(state);
-      const answer = await api.preflight(state.ns, id, Object.assign({}, readOptions(lifecycle),
+      const answer = await api.preflight(state.ns, id, Object.assign({}, options,
         typeof current.hash === "string" ? { planHash: current.hash } : {}));
       return mergeReadiness(held(), (answer || {}).item);
     },

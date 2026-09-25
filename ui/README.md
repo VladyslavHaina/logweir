@@ -1523,7 +1523,8 @@ then" on screen for good. *Discover topics* had no follower at all and showed
 serves all six surfaces:
 
 * **The deadline is the longest a check may take**, measured from when the page
-  began to follow, on the page's own clock: the largest `timeoutSeconds` the
+  began to follow, on the page's own monotonic clock (`performance.now`, so a
+  wall-clock step neither ends nor stretches it): the largest `timeoutSeconds` the
   product API accepts (600; a discovery's, 300), plus the Job's start margin
   (`DEADLINE_MARGIN_SECONDS`, 90), plus 30 s for the controller's status write
   -- twelve minutes for a `Preflight`, seven for a discovery. The product API
@@ -1531,11 +1532,21 @@ serves all six surfaces:
   validity and exists only once there is a result), so the page cannot wait for
   less without guessing. A check the controller settles -- a `DeadlineExceeded`
   Job included -- ends the follow at its first terminal read, long before that.
-* **Politely.** Two seconds before the first read, half as long again before
-  each next one, ten seconds at most: about seventy-five reads if a check never
-  settles. A read that fails for a reason that passes (the network, `408`,
-  `429`, a `5xx`) is asked again on the same schedule, five times in a row at
-  most; any other refusal ends the follow.
+* **Politely.** Every two seconds for the first twenty seconds -- the old
+  cadence, so a check that settles in that time is seen exactly as fast as
+  before -- then 3, 4.5 and 6.75 s, and ten seconds at most: about eighty reads
+  if a check never settles. A read that fails for a reason that passes (the
+  network, `408`, `429`, a `5xx`) is asked again on the same schedule, five times
+  in a row at most; any other refusal -- `401`, `403`, `404`, a request this page
+  refused to make, an answer it cannot decode -- ends the follow at once. A read
+  the server never answers is abandoned at the deadline, and a follow whose last
+  read failed says the check *could not be read again* rather than *did not
+  finish*: it does not know which.
+* **One follow per check, and none after the route.** Asking again while a
+  check runs replays it (the intent token), and a follow already reading that
+  check is the follow -- a second is never started (`isFollowed`). Leaving the
+  route ends the wait between reads at once and clears its timer, and each
+  read carries the route's signal.
 * **And never on the checking sentence.** When the deadline passes without a
   result, or a read is refused, the check shows *did not finish* (or *could not
   be read again*, with what the read answered), says it was not cancelled, and
