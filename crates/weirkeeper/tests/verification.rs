@@ -5595,3 +5595,326 @@ async fn a_legacy_backup_in_the_handles_bucket_is_verified_as_before() {
         Some(&json!("Valid"))
     );
 }
+
+// ===========================================================================
+// PoC P12 — every controller-side `NotAttempted` has a retry class, decided
+// from the sentence its producer wrote
+// ===========================================================================
+mod p12_not_attempted_classes {
+    use super::*;
+    use weirkeeper::evidence_fetch::{
+        owed_controller_read, scheduled, ReadMemory, MAX_ATTEMPTS, MODE_ARCHIVE_HANDLE,
+        MODE_CONTROLLER_IDENTITY, READ_MEMORY_CAPACITY,
+    };
+    use weirkeeper::verification::{not_attempted_class, store_detail, NotAttemptedClass};
+
+    /// **EVERY PRODUCER, ITS CLASS.** The retry decides from the sentence, so
+    /// each function that writes a `NotAttempted` is held to the class its
+    /// cause belongs to — through the REAL producer wherever one can run
+    /// without a network: a `NotFound` from a real read-only store is final;
+    /// a store that answered but could not be read (mode `000`, the same
+    /// `StoreError::Io` a missing credential produces) is transient; a
+    /// configuration refusal is final.
+    ///
+    /// KILLS: dropping the `NotFound` arm (an absent receipt would be read on
+    /// the schedule and after every restart); a transient prefix the producer
+    /// no longer writes (the PoC's IMDS failure would be final again).
+    #[test]
+    fn every_not_attempted_producer_has_its_retry_class() {
+        let payload = read("e2e/fixtures/signed/scorecard.json");
+        let sidecar = read("e2e/fixtures/signed/scorecard.sig");
+        let digest = sha256_prefixed(payload.as_bytes());
+        let trust = roster(Vec::new());
+        let run = |tree: &EvidenceTree| {
+            verify_evidence(
+                Some(&tree.handle()),
+                &trust,
+                PAYLOAD_KEY,
+                &digest,
+                SIDECAR_KEY,
+                logweir_verify::PAYLOAD_TYPE_SCORECARD,
+            )
+        };
+
+        let absent = EvidenceTree::new("p12-absent", payload.as_bytes(), sidecar.as_bytes());
+        absent.remove(PAYLOAD_KEY);
+        let r = run(&absent);
+        assert_eq!(r.result, VerificationVerdict::NotAttempted);
+        let detail = r.detail.clone().unwrap_or_default();
+        assert_eq!(
+            not_attempted_class(&detail),
+            NotAttemptedClass::Absent,
+            "{detail}"
+        );
+
+        #[cfg(unix)]
+        {
+            let unreadable =
+                EvidenceTree::new("p12-unreadable", payload.as_bytes(), sidecar.as_bytes());
+            unreadable.chmod(PAYLOAD_KEY, 0o000);
+            let r = run(&unreadable);
+            unreadable.chmod(PAYLOAD_KEY, 0o644);
+            let detail = r.detail.clone().unwrap_or_default();
+            assert_eq!(r.result, VerificationVerdict::NotAttempted);
+            assert_eq!(
+                not_attempted_class(&detail),
+                NotAttemptedClass::Transient,
+                "a read the store refused is read again: {detail}"
+            );
+        }
+
+        // The PoC's own failure, spelled by the producer.
+        let imds = store_detail(&logweir_store::StoreError::Io(
+            "logweir/backups/x.receipt.json: Generic S3 error: error sending request for url \
+             (http://169.254.169.254/latest/api/token)"
+                .to_string(),
+        ));
+        assert_eq!(not_attempted_class(&imds), NotAttemptedClass::Transient);
+
+        for transient in [
+            weirkeeper::verification::ROSTER_UNREADABLE_DETAIL.to_string(),
+            format!(
+                "{}task 7 panicked",
+                weirkeeper::verification::VERIFICATION_TASK_INCOMPLETE_PREFIX
+            ),
+            weirkeeper::controllers::restore::unread_scorecard_detail("logweir/drills/r1.json"),
+            weirkeeper::controllers::restore::unread_destination_scorecard_detail(
+                "logweir/drills/r1.json",
+                "primary",
+            ),
+        ] {
+            assert_eq!(
+                not_attempted_class(&transient),
+                NotAttemptedClass::Transient,
+                "{transient}"
+            );
+        }
+        let elsewhere = weirkeeper::destination::legacy_backup_evidence_scope(
+            "s3://team-b-archive/orders",
+            Some("s3://kafka-backups/logweir"),
+        )
+        .not_attempted_detail("signed backup receipt")
+        .expect("another bucket is refused");
+        for final_detail in [
+            NO_CREDENTIAL_DETAIL.to_string(),
+            NO_SIGNING_KEYS_DETAIL.to_string(),
+            NO_POLICY_KEYS_DETAIL.to_string(),
+            weirkeeper::verification::trust_policy_conflict_detail(
+                "team-a",
+                &["a".into(), "b".into()],
+            ),
+            elsewhere,
+            format!(
+                "{}primary{}",
+                weirkeeper::controllers::backup::EVIDENCE_READ_NOT_CONFIGURED_PREFIX,
+                weirkeeper::controllers::backup::EVIDENCE_READ_NOT_CONFIGURED_SUFFIX
+            ),
+        ] {
+            assert_eq!(
+                not_attempted_class(&final_detail),
+                NotAttemptedClass::Final,
+                "{final_detail}"
+            );
+        }
+    }
+
+    /// A transient failure keeps its class after the schedule is written into
+    /// its sentence — the stored detail is what the NEXT pass classifies — and
+    /// only a transient `NotAttempted` is scheduled at all.
+    #[test]
+    fn only_a_transient_failure_is_scheduled_and_it_stays_transient() {
+        let at = Utc
+            .with_ymd_and_hms(2026, 11, 9, 3, 20, 0)
+            .single()
+            .expect("an instant");
+        let imds = VerificationResult::not_attempted(
+            logweir_verify::PAYLOAD_TYPE_BACKUP_RECEIPT,
+            store_detail(&logweir_store::StoreError::Io("k: denied".to_string())),
+        );
+        for attempt in 1..=MAX_ATTEMPTS {
+            let (written, retry) = scheduled(imds.clone(), attempt, at);
+            assert_eq!(retry.is_some(), attempt < MAX_ATTEMPTS, "attempt {attempt}");
+            let detail = written.detail.unwrap_or_default();
+            assert_eq!(
+                not_attempted_class(&detail),
+                NotAttemptedClass::Transient,
+                "{detail}"
+            );
+        }
+        let absent = VerificationResult::not_attempted(
+            logweir_verify::PAYLOAD_TYPE_BACKUP_RECEIPT,
+            store_detail(&logweir_store::StoreError::NotFound("k".to_string())),
+        );
+        let configured = VerificationResult::not_attempted(
+            logweir_verify::PAYLOAD_TYPE_BACKUP_RECEIPT,
+            NO_SIGNING_KEYS_DETAIL,
+        );
+        for final_result in [absent, configured] {
+            let (written, retry) = scheduled(final_result.clone(), 1, at);
+            assert!(retry.is_none());
+            assert_eq!(
+                written, final_result,
+                "a final verdict is written unchanged"
+            );
+        }
+    }
+
+    /// The owed-read table, over every stored shape — PURE.
+    ///
+    /// KILLS: reading before `retryAfter` (the rate bound); an evidence-fetch
+    /// Job's observation read by the controller; a destination refusal re-read;
+    /// a re-read with no process memory; a spent schedule re-read twice by one
+    /// process.
+    #[test]
+    fn the_owed_controller_read_table() {
+        use weirkeeper::crds::EvidenceObservation;
+        let at = Utc
+            .with_ymd_and_hms(2026, 11, 9, 4, 0, 0)
+            .single()
+            .expect("an instant");
+        let imds = store_detail(&logweir_store::StoreError::Io("k: denied".to_string()));
+        let absent = store_detail(&logweir_store::StoreError::NotFound("k".to_string()));
+        let obs = |mode: &str, attempt: i64, retry: Option<i64>| EvidenceObservation {
+            mode: Some(mode.to_string()),
+            job_ref: None,
+            attempt: Some(attempt),
+            presence: None,
+            retry_after: retry.map(|s| at + chrono::Duration::seconds(s)),
+        };
+        let memory = ReadMemory::new();
+        let fresh = Some((&memory, "uid-1"));
+        let owed = |result: &str, detail: &str, o: Option<&EvidenceObservation>, inline: bool| {
+            owed_controller_read(Some(result), Some(detail), o, inline, at, fresh)
+        };
+        let scheduled_later = obs(MODE_ARCHIVE_HANDLE, 1, Some(30));
+        let scheduled_due = obs(MODE_ARCHIVE_HANDLE, 1, Some(-1));
+        let due_destination = obs(MODE_CONTROLLER_IDENTITY, 2, Some(0));
+        let spent = obs(MODE_ARCHIVE_HANDLE, MAX_ATTEMPTS.into(), None);
+        let job = obs("SecretKeys", 1, Some(-1));
+
+        assert_eq!(
+            owed("NotAttempted", &imds, Some(&scheduled_later), true),
+            None
+        );
+        assert_eq!(
+            owed("NotAttempted", &imds, Some(&scheduled_due), true),
+            Some(2)
+        );
+        assert_eq!(
+            owed("NotAttempted", &imds, Some(&due_destination), false),
+            Some(3)
+        );
+        assert_eq!(owed("NotAttempted", &imds, Some(&spent), true), Some(1));
+        assert_eq!(
+            owed("NotAttempted", &imds, None, true),
+            Some(1),
+            "a pre-fix verdict"
+        );
+        assert_eq!(
+            owed("NotAttempted", &imds, Some(&job), true),
+            None,
+            "a Job's schedule"
+        );
+        assert_eq!(
+            owed("NotAttempted", &absent, None, true),
+            None,
+            "a definite absence"
+        );
+        assert_eq!(owed("NotAttempted", &absent, Some(&spent), true), None);
+        assert_eq!(
+            owed("NotAttempted", NO_SIGNING_KEYS_DETAIL, None, false),
+            None,
+            "a destination-backed configuration refusal is not a read"
+        );
+        assert_eq!(
+            owed("NotAttempted", NO_SIGNING_KEYS_DETAIL, None, true),
+            Some(1)
+        );
+        assert_eq!(
+            owed("NotAttempted", &imds, None, false),
+            Some(1),
+            "a pre-fix ControllerIdentity read failure"
+        );
+        assert_eq!(owed("Valid", "", None, true), None);
+        assert_eq!(owed("Pending", &imds, Some(&scheduled_due), true), None);
+
+        // No memory: only a SCHEDULED retry continues.
+        assert_eq!(
+            owed_controller_read(
+                Some("NotAttempted"),
+                Some(&imds),
+                Some(&scheduled_due),
+                true,
+                at,
+                None
+            ),
+            Some(2)
+        );
+        assert_eq!(
+            owed_controller_read(
+                Some("NotAttempted"),
+                Some(&imds),
+                Some(&spent),
+                true,
+                at,
+                None
+            ),
+            None
+        );
+        // A process that has read it does not read it again.
+        memory.mark("uid-1");
+        assert_eq!(owed("NotAttempted", &imds, Some(&spent), true), None);
+        assert_eq!(
+            owed("NotAttempted", &imds, Some(&scheduled_due), true),
+            Some(2),
+            "the schedule is the object's"
+        );
+    }
+
+    /// The memory is bounded, and a full memory reads NOTHING new rather than
+    /// everything: an object it cannot remember is treated as already read.
+    #[test]
+    fn a_full_read_memory_admits_no_new_re_read() {
+        let memory = ReadMemory::new();
+        for n in 0..READ_MEMORY_CAPACITY {
+            memory.mark(&format!("uid-{n}"));
+        }
+        assert!(!memory.unread("uid-0"), "a remembered object");
+        assert!(
+            !memory.unread("uid-new"),
+            "a full memory cannot remember a new object, so it does not re-read it"
+        );
+        memory.mark("uid-new");
+        assert!(!memory.unread("uid-new"));
+        assert!(
+            ReadMemory::new().unread("uid-0"),
+            "a new process remembers nothing"
+        );
+    }
+
+    /// **THE RUNNING CONTROLLERS HOLD THE PROCESS MEMORY.** Every row above
+    /// passes a memory by hand; this is the one that holds the SHIPPED
+    /// `reconcile` of both kinds to passing the process's own — without it the
+    /// fix would be unreachable in production and every row would stay green.
+    ///
+    /// KILLS: `reconcile` passing `None` (P12 again: a spent or pre-fix
+    /// `NotAttempted` is never read by a restarted controller).
+    #[test]
+    fn the_running_controllers_pass_the_process_read_memory() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        for file in ["src/controllers/backup.rs", "src/controllers/restore.rs"] {
+            let source = std::fs::read_to_string(root.join(file)).expect("the source reads");
+            let start = source
+                .find("\nasync fn reconcile(")
+                .unwrap_or_else(|| panic!("{file}: the kube-runtime entry point"));
+            let end = source[start + 1..]
+                .find("\nfn ")
+                .map_or(source.len(), |i| start + 1 + i);
+            let body = &source[start..end];
+            assert!(
+                body.contains("Some(crate::evidence_fetch::ReadMemory::global())"),
+                "{file}: `reconcile` must pass the process's read memory"
+            );
+        }
+    }
+}

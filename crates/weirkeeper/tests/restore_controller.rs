@@ -8832,3 +8832,197 @@ async fn an_unapproved_restore_holds_and_never_queues() {
     assert!(statuses[0].get("queue").is_none());
     assert!(reservations.is_empty(), "a held run reserves nothing");
 }
+
+// ===========================================================================
+// PoC P12 — a Restore whose scorecard the controller could not read is read
+// again, on the schedule, and completes when the read succeeds
+// ===========================================================================
+mod p12_controller_read_retry {
+    use super::*;
+    use serde_json::json;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use weirkeeper::controllers::rehearsal_schedule::verdict_owed;
+    use weirkeeper::controllers::restore::{reconcile_restore_rereading, RestoreOutcome};
+    use weirkeeper::evidence_fetch::{ReadMemory, MODE_ARCHIVE_HANDLE};
+
+    fn secs(n: i64) -> chrono::Duration {
+        chrono::Duration::seconds(n)
+    }
+
+    fn stamp(t: DateTime<Utc>) -> String {
+        t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    }
+
+    fn terminal_routes() -> Vec<Route> {
+        vec![
+            Route {
+                method: "GET",
+                path_suffix: "/jobs/logweir-restore-incident-4471",
+                status: 404,
+                body: not_found_body("jobs.batch", NAME),
+            },
+            Route {
+                method: "PATCH",
+                path_suffix: "/restores/logweir-restore-incident-4471/status",
+                status: 200,
+                body: restore_json(PLAN_BYTES, APPROVAL, NAME),
+            },
+        ]
+    }
+
+    /// `restore` with every status patch in `statuses` merged onto it.
+    fn fold(restore: &Restore, statuses: &[Value]) -> Restore {
+        let mut status = restore
+            .status
+            .as_ref()
+            .map_or(Value::Null, |s| serde_json::to_value(s).expect("a status"));
+        for patch in statuses {
+            apply_merge_patch(&mut status, patch);
+        }
+        let mut next = restore.clone();
+        next.status = Some(serde_json::from_value(status).expect("the merged status reads"));
+        next
+    }
+
+    /// One pass of the running controller's shape over an inline-archive
+    /// restore whose plan writes its evidence to the handle's bucket; the
+    /// scorecard is readable once `credential` is set.
+    async fn pass(
+        restore: &Restore,
+        credential: &Arc<AtomicBool>,
+        asked: &Arc<AtomicUsize>,
+        memory: &ReadMemory,
+        at: DateTime<Utc>,
+    ) -> (Restore, Vec<Value>, RestoreOutcome) {
+        let terminal = restore
+            .status
+            .as_ref()
+            .and_then(|s| s.phase.as_deref())
+            .is_some_and(|p| p == "Succeeded" || p == "Failed");
+        let routes = if terminal {
+            terminal_routes()
+        } else {
+            finished_routes(pod_list_terminated(0), log_body(&i8_tail()), "Complete")
+        };
+        let readable = Arc::clone(credential);
+        let count = Arc::clone(asked);
+        let oracle = move |_key: String| -> BoxFuture<'static, Option<ScorecardObservation>> {
+            count.fetch_add(1, Ordering::SeqCst);
+            let readable = readable.load(Ordering::SeqCst);
+            Box::pin(async move {
+                if readable {
+                    scorecard_observation(&signed_fixture_scorecard())
+                } else {
+                    None
+                }
+            })
+        };
+        let (client, _rec, bodies) = mock_client_recording_bodies(routes);
+        let outcome = reconcile_restore_rereading(
+            restore,
+            &client,
+            &oracle,
+            &verdict_oracle(VerificationVerdict::Valid),
+            at,
+            &job::RunnerImage::default(),
+            &logweir_core::approval_policy::ApprovalPolicySet::default(),
+            Some(LEGACY_HANDLE),
+            memory,
+        )
+        .await
+        .expect("the reconcile completes");
+        let statuses = patched_statuses(&bodies.lock().expect("readable"));
+        (fold(restore, &statuses), statuses, outcome)
+    }
+
+    fn status_json(r: &Restore) -> Value {
+        serde_json::to_value(r.status.as_ref().expect("a status")).expect("json")
+    }
+
+    /// **THE RESTORE TWIN OF THE PoC ROW.** An inline-archive restore's
+    /// scorecard read through the controller's handle produces nothing (the
+    /// credential is missing): the verdict is `NotAttempted` naming the key —
+    /// P5's rule — AND attempt 1 of a schedule, and the terminal `Restore`,
+    /// which otherwise waits for a change, requeues for the retry. A rehearsal
+    /// schedule reading it sees a verdict still OWED. Before `retryAfter`
+    /// nothing is read or written and the requeue is the time left; once it has
+    /// passed and the scorecard is readable, attempt 2 writes `Valid`, the
+    /// scorecard's outcome and the completion, and the verdict is reached.
+    ///
+    /// FAILS ON THE OLD CODE: pass 1 writes no observation and requeues
+    /// `AwaitChange`, and the run never completes.
+    #[tokio::test]
+    async fn an_unread_scorecard_is_read_again_and_the_restore_completes() {
+        let credential = Arc::new(AtomicBool::new(false));
+        let asked = Arc::new(AtomicUsize::new(0));
+        let memory = ReadMemory::new();
+        let object: Restore = serde_json::from_str(&restore_json(
+            &legacy_plan_with_evidence_in("kafka-backups"),
+            APPROVAL,
+            NAME,
+        ))
+        .expect("the fixture is a Restore");
+
+        // PASS 1 — the terminal pass.
+        let (r, _, outcome) = pass(&object, &credential, &asked, &memory, now()).await;
+        let status = status_json(&r);
+        let v = &status["evidence"]["verification"];
+        assert_eq!(v["result"], json!("NotAttempted"), "{status}");
+        let detail = v["detail"].as_str().unwrap_or_default();
+        assert!(
+            detail.contains(SCORECARD_KEY)
+                && detail.contains(&format!("attempt 2 starts at {}", stamp(now() + secs(60)))),
+            "{detail}"
+        );
+        let o = &status["evidence"]["observation"];
+        assert_eq!(o["mode"], json!(MODE_ARCHIVE_HANDLE), "{o}");
+        assert_eq!(o["attempt"], json!(1), "{o}");
+        assert_eq!(o["retryAfter"], json!(stamp(now() + secs(60))), "{o}");
+        assert_eq!(
+            outcome.requeue,
+            Requeue::After(60),
+            "a terminal Restore waiting for its retry comes back for it"
+        );
+        assert!(
+            verdict_owed(&r).is_some(),
+            "a rehearsal over this Restore waits for the scheduled attempt"
+        );
+        assert!(status["completion"].is_null());
+
+        // PASS 2 — before `retryAfter`.
+        let (same, written, outcome) =
+            pass(&r, &credential, &asked, &memory, now() + secs(20)).await;
+        assert!(written.is_empty(), "{written:?}");
+        assert_eq!(
+            asked.load(Ordering::SeqCst),
+            1,
+            "the scorecard is not read again yet"
+        );
+        assert_eq!(outcome.requeue, Requeue::After(40), "the time left");
+        assert_eq!(status_json(&same), status);
+
+        // The credential appears; PASS 3 — attempt 2.
+        credential.store(true, Ordering::SeqCst);
+        let (done, written, _) = pass(&r, &credential, &asked, &memory, now() + secs(61)).await;
+        assert_eq!(written.len(), 1, "{written:?}");
+        let status = status_json(&done);
+        assert_eq!(
+            status["evidence"]["verification"]["result"],
+            json!("Valid"),
+            "{status}"
+        );
+        assert_eq!(status["completion"], fixture_completion(), "{status}");
+        assert!(!status["outcome"].is_null(), "{status}");
+        assert!(!status["evidence"]["scorecardSha256"].is_null(), "{status}");
+        assert_eq!(status["evidence"]["observation"]["attempt"], json!(2));
+        assert!(status["evidence"]["observation"]["retryAfter"].is_null());
+        assert!(verdict_owed(&done).is_none(), "the verdict is reached");
+
+        // PASS 4 — reached: nothing read, nothing written, waits for a change.
+        let (_, written, outcome) =
+            pass(&done, &credential, &asked, &memory, now() + secs(3_600)).await;
+        assert!(written.is_empty());
+        assert_eq!(outcome.requeue, Requeue::AwaitChange);
+        assert_eq!(asked.load(Ordering::SeqCst), 2);
+    }
+}
