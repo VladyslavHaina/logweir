@@ -393,7 +393,9 @@ try {
       const td = tr.querySelector("td");
       const lines = td ? td.innerText.split("\n").map((x) => x.trim()).filter(Boolean) : [];
       return [lines[0] || "", lines[1] || ""];
-    }).filter((r) => /^conn-/.test(r[0])));
+    }));
+    // EVERY connection's row, by its name -- minted conn-... ones and any made with kubectl (a test
+    // fixture such as poc-upgrade-4's pu4-bh-source is listed by the same page)
     const listed = shown.filter((r) => r[0] in want);
     row("R7.1 the Clusters list shows each connection's role (source/target) under its name, as its spec says",
       listed.length === Object.keys(want).length && listed.every((r) => r[1] === want[r[0]]),
