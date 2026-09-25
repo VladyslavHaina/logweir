@@ -665,7 +665,9 @@ export function renderIdentity(identity) {
   const roleText = local
     ? "local administrator"
     : (roles.length === 0
-      ? (where.length > 0 ? "no role in " + where : "choose a namespace to see your role")
+      ? (identity.noRole === true
+        ? "no role yet"
+        : (where.length > 0 ? "no role in " + where : "choose a namespace to see your role"))
       : roles.join(", ") + (where.length > 0 ? " in " + where : ""));
   return (
     "<div class=\"session-identity\" id=\"session-identity\">" +

@@ -33,7 +33,7 @@
 // state -- read from the objects themselves and never remembered by the page.
 // A refresh reads them again and creates nothing.
 
-import { apiClient } from "../client.js";
+import { apiClient, granted } from "../client.js";
 import { active, cancelled, readOptions } from "../lifecycle.js";
 import {
   ENGINE_SUBREPORT_LINE,
@@ -51,6 +51,7 @@ import {
   runPhaseBadge,
   QUEUED_RUN_SENTENCE,
   replace,
+  restorePointLink,
   SCOPE_LEVEL_OF_INTEGRITY,
   table,
   unverifiedCaption,
@@ -230,9 +231,8 @@ export function restorePointCell(object, ns) {
   if (kindOf(object) !== "Backup" || !isRecoveryPoint(object)) {
     return cell(null);
   }
-  return (
-    "<a class=\"action\" href=\"" + esc(restorePointRoute(ns, object)) + "\">Restore this point</a>"
-  );
+  // A ROLE THAT CANNOT RESTORE HERE IS TOLD WHO CAN (MCP round 3, R3-2).
+  return restorePointLink(restorePointRoute(ns, object), granted(ns, "restoreCreate"));
 }
 
 /** Restores and Backups interleaved, newest first.

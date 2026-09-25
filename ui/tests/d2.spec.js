@@ -39,7 +39,7 @@ import {
   decodeTopicPage,
   isContractFailure,
 } from "../contract.js";
-import { keepDraft, readDraft } from "../lifecycle.js";
+import { PREFLIGHT_FOLLOW_MS, followGap, keepDraft, readDraft } from "../lifecycle.js";
 import { createRouteLifecycle } from "../app.js";
 import { resetMode, selectMode } from "../client.js";
 import {
@@ -80,7 +80,6 @@ import {
 import {
   CONNECTION_CHECK_LEGACY_SENTENCE,
   CONNECTION_CHECK_NO_TOPICS_SENTENCE,
-  CONNECTION_CHECK_POLLS,
   CONNECTION_CHECK_SENTENCE,
   connectionCheckRequest,
   connectionNonce,
@@ -1387,7 +1386,7 @@ test("a_started_check_is_followed_until_it_is_terminal_and_the_rows_are_repainte
   const last = painted[painted.length - 1];
   assert.match(last, /pf-f/);
   assert.match(last, /not ready/, "the aggregate the object recorded, not a guess");
-  assert.doesNotMatch(last, /id="connection-check-stopped"/);
+  assert.doesNotMatch(last, /data-check-stopped=/);
 });
 
 test("a_replayed_connection_check_is_read_once_before_it_is_believed", async () => {
@@ -1426,7 +1425,7 @@ test("a_replayed_connection_check_is_read_once_before_it_is_believed", async () 
   assert.match(last, /applies to your current inputs/);
 });
 
-test("a_check_that_never_settles_is_left_alone_and_the_page_says_it_stopped_reading", async () => {
+test("a_check_that_never_settles_is_followed_to_its_deadline_and_the_page_says_it_stopped", async () => {
   const painted = [];
   let read = 0;
   const node = checkNode();
@@ -1446,12 +1445,25 @@ test("a_check_that_never_settles_is_left_alone_and_the_page_says_it_stopped_read
   node.fire("#connection-check-form", "submit");
   await new Promise((done) => { setTimeout(done, 0); });
 
-  // BOUNDED, AND IT SAYS SO. An unbounded timer would keep reading a namespace
-  // for as long as a tab is open; a spinner that stopped silently would be a
-  // page that looks like it is still watching.
-  assert.equal(read, CONNECTION_CHECK_POLLS, "the read budget, and not one read more");
-  assert.match(painted[painted.length - 1], /id="connection-check-stopped"/);
-  assert.match(painted[painted.length - 1], /was not cancelled/);
+  // BOUNDED BY THE CHECK'S OWN DEADLINE, AND IT SAYS SO (poc-upgrade-3's
+  // P15). An unbounded timer would keep reading a namespace for as long as a
+  // tab is open; a spinner that stopped silently would be a page that looks
+  // like it is still watching; and a budget shorter than the check's own was
+  // a verdict that never arrived. `wait` returns at once here, so the deadline
+  // is reached on the gaps waited: the follow's own backoff, summed.
+  let expected = 0;
+  for (let waited = 0; waited < PREFLIGHT_FOLLOW_MS; expected += 1) {
+    waited += Math.min(followGap(expected), PREFLIGHT_FOLLOW_MS - waited);
+  }
+  assert.equal(read, expected, "every read the deadline allows, and not one read more");
+  assert.ok(read < 100, "a backed-off follow, not a hot loop: " + read + " reads in 12 minutes");
+  const last = painted[painted.length - 1];
+  assert.match(last, /data-check-stopped="deadline"/);
+  assert.match(last, /did not finish/);
+  assert.match(last, /was not cancelled/);
+  assert.match(last, /class="check-retry" data-check="pf-s"/, "and it offers to run it again");
+  assert.doesNotMatch(last, /this page reads it again until then/,
+    "NEGATIVE CONTROL: the checking sentence's promise is not left on screen");
 });
 
 test("a_follow_that_outlives_its_route_paints_nothing", async () => {

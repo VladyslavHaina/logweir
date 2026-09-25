@@ -60,11 +60,13 @@ import {
   invalidInput,
   keepDraft,
   listen,
+  followCheck,
   mutationFor,
-  owesRead,
+  PREFLIGHT_FOLLOW_MS,
   readDraft,
   readOptions,
   watchMutation,
+  wireCheckRetry,
 } from "../lifecycle.js";
 import {
   ABSENT,
@@ -73,6 +75,7 @@ import {
   applicabilityLine,
   badge,
   cell,
+  checkStoppedBlock,
   checkTable,
   destinationVerdict,
   detailLink,
@@ -424,28 +427,9 @@ export function renderTestPanel(item, view) {
     mutationStatus(v.testState || {}, { kind: "Preflight", name: (test || {}).id || "" }, null) +
     "</div>" +
     (test === null ? "" : renderPreflight(test)) +
-    (test !== null && v.testStopped === true
-      ? "<p class=\"note\" id=\"destination-test-stopped\">" +
-        esc(DESTINATION_TEST_STOPPED_SENTENCE) + "</p>"
-      : "") +
     "</section>"
   );
 }
-
-/** What the follower says when it stops reading. */
-export const DESTINATION_TEST_STOPPED_SENTENCE =
-  "This page stopped following the access test after its read budget, or after a read failed. " +
-  "The test itself was not cancelled and is still the controller's; reload this page to read " +
-  "the newest recorded test, or press Test access again for a new one.";
-
-/** How many times the panel re-reads the test it started, and the gap between
- *  reads. BOUNDED, as the connection check's follower is: a panel is not a
- *  watcher. Thirty reads two seconds apart is a minute, which covers one check
- *  pod scheduled on a busy node (the PoC's took three seconds). */
-export const DESTINATION_TEST_POLLS = 30;
-
-/** The gap between those reads, in milliseconds. */
-export const DESTINATION_TEST_INTERVAL_MS = 2000;
 
 // THE ATTEMPT TOKEN, as the connection check mints it (review F1): this load's
 // nonce and a per-click ordinal, so a DELIBERATE second test is a new
@@ -481,6 +465,7 @@ export function renderPreflight(preflight) {
     "<p class=\"preflight-head\">" + readinessHeadline(p) +
     " <code>" + cell(p.id) + "</code> " + cell(p.operation) + "</p>" +
     applicabilityLine(p) +
+    checkStoppedBlock(p) +
     facts([
       ["observed at", when(p.observedAt)],
       ["expires at", when(p.expiresAt)],
@@ -1251,7 +1236,7 @@ function detailView(ns, name, extra) {
   const rotateKey = formKey(ns, ROTATE_FORM, name);
   const given = extra || {};
   if (given.test !== undefined && given.test !== null) {
-    testViews.set(testKey, { test: given.test, testStopped: given.testStopped === true });
+    testViews.set(testKey, { test: given.test });
   }
   const remembered = testViews.get(testKey) || {};
   return Object.assign(
@@ -1268,10 +1253,7 @@ function detailView(ns, name, extra) {
       },
     },
     given,
-    {
-      test: given.test || remembered.test || null,
-      testStopped: given.test ? given.testStopped === true : remembered.testStopped === true,
-    },
+    { test: given.test || remembered.test || null },
   );
 }
 
@@ -1441,7 +1423,7 @@ function wireTest(node, ns, name, parse, lifecycle, api, item, view) {
     }
     if (state.phase === "succeeded") {
       const made = (state.result || {}).item || null;
-      const extra = { usage: view.usage, usageError: view.usageError, test: made, testStopped: false };
+      const extra = { usage: view.usage, usageError: view.usageError, test: made };
       paintTest(node, ns, name, parse, lifecycle, api, item, extra);
       followDestinationTest(node, ns, name, parse, lifecycle, api, item, view, made);
       return;
@@ -1450,8 +1432,7 @@ function wireTest(node, ns, name, parse, lifecycle, api, item, view) {
       usage: view.usage, usageError: view.usageError,
     });
   }, lifecycle);
-  listen(form, "submit", (event) => {
-    event.preventDefault();
+  const start = () => {
     if (!active(lifecycle) || mutation.pending()) {
       return;
     }
@@ -1463,59 +1444,45 @@ function wireTest(node, ns, name, parse, lifecycle, api, item, view) {
     mutation.run(() => api.testDestination(ns, name, roles.length > 0 ? { roles: roles } : {}, {
       attempt: nextDestinationTestAttempt(ns, name),
     }));
+  };
+  listen(form, "submit", (event) => {
+    event.preventDefault();
+    start();
   }, lifecycle);
+  // "RUN THE CHECK AGAIN" IS TEST ACCESS AGAIN, with the roles on the form: a
+  // per-click token, so a new test.
+  wireCheckRetry(node, view.test, start, lifecycle);
 }
 
 /** Re-reads the test this page started until a READ answers terminal, or the
- *  budget is spent -- defect P8.
+ *  longest time a check may take has passed -- defect P8, and poc-upgrade-3's
+ *  P15 (a 60 s budget under a check that may take twelve minutes).
  *
  *  THE CREATE ANSWER IS NOT A READ (`owesRead`): even a terminal one, which
  *  is a replay, was projected without recomputing staleness. Every read is
- *  guarded by the route (PLAT-13.1), the loop is bounded, a failed read is not
- *  a verdict (the rows on screen stay what the check last recorded and the
- *  panel says it stopped), and an older follower stops as soon as a newer test
- *  is the one on screen. */
-async function followDestinationTest(node, ns, name, parse, lifecycle, api, item, view, first) {
+ *  guarded by the route (PLAT-13.1), a failed read is not a verdict (the rows
+ *  on screen stay what the check last recorded), an older follower stops as
+ *  soon as a newer test is the one on screen, and a follow that ends without
+ *  a result says so with "Run the check again" (`lifecycle.js`'s
+ *  `followCheck`). */
+function followDestinationTest(node, ns, name, parse, lifecycle, api, item, view, first) {
   const key = formKey(ns, TEST_FORM, name);
-  const wait = typeof api.wait === "function"
-    ? api.wait
-    : (ms) => new Promise((done) => { globalThis.setTimeout(done, ms); });
-  let current = first;
   const mine = () => ((testViews.get(key) || {}).test || {}).id === (first || {}).id;
-  const paint = (stopped) => {
-    if (active(lifecycle) && mine()) {
+  return followCheck({
+    first: first,
+    budgetMs: PREFLIGHT_FOLLOW_MS,
+    wait: api.wait,
+    keep: () => active(lifecycle) && mine(),
+    cancelled: (error) => cancelled(error, lifecycle),
+    signal: (readOptions(lifecycle) || {}).signal,
+    read: async (current, options) =>
+      (((await api.preflight(ns, current.id, options)) || {}).item) || current,
+    show: (current) => {
       paintTest(node, ns, name, parse, lifecycle, api, item, {
-        usage: view.usage, usageError: view.usageError, test: current, testStopped: stopped,
+        usage: view.usage, usageError: view.usageError, test: current,
       });
-    }
-  };
-  for (let read = 0; read < DESTINATION_TEST_POLLS; read += 1) {
-    if (!owesRead(current, read)) {
-      return;
-    }
-    await wait(DESTINATION_TEST_INTERVAL_MS);
-    if (!active(lifecycle) || !mine()) {
-      return;
-    }
-    let answer;
-    try {
-      answer = await api.preflight(ns, current.id, readOptions(lifecycle));
-    } catch (error) {
-      if (!cancelled(error, lifecycle)) {
-        paint(true);
-      }
-      return;
-    }
-    if (!active(lifecycle) || !mine()) {
-      return;
-    }
-    current = ((answer || {}).item) || current;
-    paint(false);
-    if (current.terminal === true) {
-      return;
-    }
-  }
-  paint(true);
+    },
+  });
 }
 
 function wireRotate(node, ns, name, parse, lifecycle, api, item, view) {

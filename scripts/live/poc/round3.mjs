@@ -404,7 +404,7 @@ try {
       const t3 = nowIso();
       await pageP.locator("#backup-readiness").getByRole("button", { name: /^check readiness$/i }).click();
       await trace("after-expiry click", 60);
-      const v3 = await settle(pageP, "#backup-readiness", 30);
+      const v3 = await settle(pageP, "#backup-readiness", 150);
       const p3 = posts("panel", t3, /preflights$/);
       const fresh = p3.find((n) => n.status === 202);
       const replay = p3.find((n) => n.status === 200);

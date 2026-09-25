@@ -878,6 +878,13 @@ export async function askCheck(ask) {
  *  the answer being waited for. */
 export function preflightSpent(check) {
   const c = check || {};
+  // A CHECK THIS PAGE STOPPED FOLLOWING IS SPENT, finished or not (see
+  // `followCheck`): it did not answer within the longest time a check may
+  // take, or it could not be read again, and "Run the check again" means a
+  // new check -- a replay would hand back the one that did not finish.
+  if (followStopped(c) !== "") {
+    return true;
+  }
   if (c.terminal !== true) {
     return false;
   }
@@ -897,5 +904,396 @@ export function preflightSpent(check) {
  *  terminal and produced no inventory, or its inventory is stale. */
 export function discoverySpent(discovery) {
   const d = discovery || {};
+  if (followStopped(d) !== "") {
+    return true;
+  }
   return d.terminal === true && (d.state !== "succeeded" || d.stale === true);
+}
+
+// ============================================================ following a check
+
+// A CHECK IS FOLLOWED UNTIL IT ANSWERS OR UNTIL IT CAN NO LONGER ANSWER
+// (poc-upgrade-3's P15). Every page that starts a check used to read it back a
+// fixed number of times -- Test connection 30 s, the schedule form and the
+// list page's Backup readiness panel 40 s, Test access 60 s, restore step 5
+// 90 s -- while a `Preflight` may run for its own `timeoutSeconds`, 120 by
+// default and up to 600, plus the 90 s its Job is given to start. A check that
+// took 64 s was left on the panel as "this page reads it again until then" for
+// as long as the page stayed open, and nothing read it again.
+//
+// THE DEADLINE IS THE LONGEST A CHECK MAY TAKE, NOT A GUESS AT A TYPICAL ONE.
+// The product API publishes no deadline for a check in flight: `expiresAt` is
+// its RESULT's validity and exists only once there is a result (by which
+// time the check is terminal and the follow is over), and neither the check's
+// `timeoutSeconds` nor its Job's `activeDeadlineSeconds` is in the view. So a
+// follow reads for the product's documented maximum -- the largest
+// `timeoutSeconds` the product API accepts, plus the Job's start margin
+// (`DEADLINE_MARGIN_SECONDS`, weirkeeper `check/job.rs`), plus a grace for the
+// controller's status write -- measured from when THIS PAGE began to follow,
+// on this page's own clock. A follow starts after its check was created, so
+// it never gives up before the check's own deadline; and no server timestamp
+// is compared with a browser clock that may be minutes off. A check the
+// controller settles (a `DeadlineExceeded` Job included) ends the follow at
+// its first terminal read, long before that bound.
+//
+// POLITELY. For the first twenty seconds the page reads every two seconds, as
+// every follower always did, so the checks that settle in that time -- most
+// of them -- are seen exactly as fast as before. After that the gap grows by
+// half each read, to ten seconds at most: a check the controller never
+// settles costs about eighty reads over twelve minutes -- never a hot loop.
+// A read that fails for a reason that passes (the network, `408`, `429`, a
+// `5xx`) is tried again on the same schedule, inside the same deadline -- up
+// to five times in a row; a sixth is no longer a blip, and the page says it
+// could not read the check. A read the server never answers is abandoned at
+// the deadline, and a follow whose LAST read failed says it could not read
+// the check, not that the check did not finish: it does not know that.
+//
+// ONE FOLLOW PER CHECK. Asking again while a check runs replays it (that is
+// what the intent token is for), and every page follows what its ask
+// answered; a follow already reading that check IS the follow, so a second
+// one is never started (`isFollowed`). The deadline is measured on a
+// monotonic clock (`performance.now`), so a wall-clock step -- NTP, a laptop
+// waking -- neither ends a follow early nor stretches it. And a follow ends
+// with its route: the wait between reads is cut short and its timer cleared
+// when the route's signal aborts, and each read carries that signal.
+//
+// AND IT ENDS IN WORDS, NEVER ON THE CHECKING SENTENCE. When the deadline
+// passes without a result, or a read is refused outright, the page is handed
+// the check marked `followStopped` (`deadline` or `unreadable`). The shared
+// renderer then says the check did not finish -- or could not be read -- and
+// offers "Run the check again", and `preflightSpent`/`discoverySpent` count
+// that check as spent, so the next ask is a NEW check and not a replay of
+// the one that did not finish.
+
+/** The largest `timeoutSeconds` a `Preflight` may ask for: the product API
+ *  refuses anything outside 30..600 (`routes/preflights.rs`) and the CRD's
+ *  schema says the same (`crds/preflight.rs`). */
+export const PREFLIGHT_TIMEOUT_CEILING_SECONDS = 600;
+
+/** The largest `timeoutSeconds` a `TopicDiscovery` may ask for
+ *  (`routes/topic_discoveries.rs`'s `MAX_TIMEOUT_SECONDS`). */
+export const DISCOVERY_TIMEOUT_CEILING_SECONDS = 300;
+
+/** What a check Job is given beyond its own budget to be scheduled, pulled
+ *  and started: `activeDeadlineSeconds = timeoutSeconds + 90` (weirkeeper
+ *  `check/job.rs`'s `DEADLINE_MARGIN_SECONDS`, D2 section 4.3). */
+export const CHECK_JOB_MARGIN_SECONDS = 90;
+
+/** The controller's time to notice a finished or expired Job and write the
+ *  terminal status: the Job is watched, and a running check is requeued every
+ *  ten seconds besides (`REQUEUE_RUNNING_SECS`). */
+export const CHECK_SETTLE_GRACE_SECONDS = 30;
+
+/** How long a page follows a `Preflight` it holds: twelve minutes. */
+export const PREFLIGHT_FOLLOW_MS =
+  (PREFLIGHT_TIMEOUT_CEILING_SECONDS + CHECK_JOB_MARGIN_SECONDS + CHECK_SETTLE_GRACE_SECONDS) * 1000;
+
+/** How long a page follows a `TopicDiscovery` it started: seven minutes. */
+export const DISCOVERY_FOLLOW_MS =
+  (DISCOVERY_TIMEOUT_CEILING_SECONDS + CHECK_JOB_MARGIN_SECONDS + CHECK_SETTLE_GRACE_SECONDS) * 1000;
+
+/** How many failed reads in a row a follow tries past: five is about half a
+ *  minute of an API that does not answer, which covers a restart. */
+export const FOLLOW_FAILURES_TOLERATED = 5;
+
+/** The first gap between reads, and the most any gap grows to. */
+export const FOLLOW_FIRST_GAP_MS = 2000;
+export const FOLLOW_MAX_GAP_MS = 10000;
+
+/** How long the first gap is kept before the follow backs off: the old
+ *  cadence, for the first twenty seconds. */
+export const FOLLOW_STEADY_MS = 20000;
+
+/** The wait before read `attempt` (0-based): 2 s for the first twenty
+ *  seconds (ten reads), then 3 s, 4.5 s, 6.75 s, and 10 s for every read
+ *  after. */
+export function followGap(attempt) {
+  const n = Math.max(0, Math.floor(Number(attempt) || 0));
+  const steady = Math.round(FOLLOW_STEADY_MS / FOLLOW_FIRST_GAP_MS);
+  if (n < steady) {
+    return FOLLOW_FIRST_GAP_MS;
+  }
+  return Math.min(FOLLOW_MAX_GAP_MS,
+    Math.round(FOLLOW_FIRST_GAP_MS * Math.pow(1.5, n - steady + 1)));
+}
+
+/** Why a page stopped following a check: its deadline passed without a
+ *  result, or a read was refused outright. `render.js` spells the same two
+ *  strings (it imports nothing), and the suite holds them together. */
+export const FOLLOW_DEADLINE = "deadline";
+export const FOLLOW_UNREADABLE = "unreadable";
+
+/** Why this page stopped following `check`, or `""` while it has not. */
+export function followStopped(check) {
+  const why = (check || {}).followStopped;
+  return why === FOLLOW_DEADLINE || why === FOLLOW_UNREADABLE ? why : "";
+}
+
+/** `check`, marked as no longer followed and why. The mark is the page's own
+ *  and is never sent anywhere; an `unreadable` one carries the refusal's
+ *  words so the page can say what the read answered. */
+export function stopFollowing(check, why, error) {
+  const marked = Object.assign({}, check || {}, { followStopped: why });
+  if (why === FOLLOW_UNREADABLE) {
+    marked.followError = String(((error || {}).message) || "the read failed");
+  }
+  return marked;
+}
+
+/** A fresher answer for a check the page stopped following KEEPS the mark
+ *  while that answer still has no result: a read the page makes for another
+ *  reason (the restore submit's re-read) is not a follow, and without the mark
+ *  the check would read "this page reads it again until then" once more. A
+ *  terminal answer is a result and replaces the mark. */
+export function keepStopMark(held, fresh) {
+  if (fresh === null || fresh === undefined || held === null || held === undefined ||
+    fresh.id !== held.id || fresh.terminal === true || followStopped(held) === "") {
+    return fresh;
+  }
+  const marked = Object.assign({}, fresh, { followStopped: held.followStopped });
+  if (held.followError !== undefined) {
+    marked.followError = held.followError;
+  }
+  return marked;
+}
+
+/** Whether a failed read is worth asking again: a network failure (a fetch
+ *  rejects with no status), `408`, `429` or a `5xx`. Anything else -- the
+ *  check is gone, the session may no longer read it, this page refused to ask,
+ *  the answer is not a document this page can read (`kind: "contract"`) --
+ *  will not change by asking again. */
+export function passingReadFailure(error) {
+  const e = error || {};
+  if (e.kind === "refused" || e.kind === "contract") {
+    return false;
+  }
+  const status = e.status;
+  if (status === undefined || status === null) {
+    return true;
+  }
+  return status === 408 || status === 429 || status >= 500;
+}
+
+// THE FOLLOWS RUNNING NOW, by the id of the check each reads: one entry per
+// follow, `{keep, promise}`. `keep` answers "is this follow still alive" -- a
+// follow whose route has left is not, even before it wakes up to notice --
+// and `promise` is what a second ask for the same check is handed instead of
+// a second follow (`followCheck`), and what a page mounting again over a
+// check it remembers can tell is still reading it (`isFollowed`).
+const follows = new Map();
+
+/** Whether a live follow is reading the check `id` now. */
+export function isFollowed(id) {
+  const entry = follows.get(String(id || ""));
+  return entry !== undefined && entry.keep() === true;
+}
+
+/** The page's monotonic clock: `performance.now()`, or `Date.now()` where
+ *  there is none. */
+function monotonicNow() {
+  const perf = globalThis.performance;
+  return perf !== undefined && perf !== null && typeof perf.now === "function"
+    ? perf.now()
+    : Date.now();
+}
+
+/** Waits `ms`, or until `signal` aborts -- and then the timer is cleared, so a
+ *  follow whose route has left leaves nothing running behind it. */
+function waitOrLeave(ms, signal) {
+  return new Promise((done) => {
+    if (signal !== undefined && signal !== null && signal.aborted === true) {
+      done();
+      return;
+    }
+    let timer = null;
+    const finish = () => {
+      globalThis.clearTimeout(timer);
+      if (signal !== undefined && signal !== null) {
+        signal.removeEventListener("abort", finish);
+      }
+      done();
+    };
+    timer = globalThis.setTimeout(finish, ms);
+    if (signal !== undefined && signal !== null) {
+      signal.addEventListener("abort", finish, { once: true });
+    }
+  });
+}
+
+/** What a read answers when it did not answer before its time ran out. */
+const READ_TIMED_OUT = Object.freeze({ timedOut: true });
+
+/** One read, given at most `ms` to answer: `read(current, {signal})`, where
+ *  the signal aborts when the route's does or when the time runs out. A read
+ *  that ignores its signal is still raced, so it cannot hold the follow past
+ *  its deadline. Answers the read's answer, or [`READ_TIMED_OUT`]. */
+function readWithin(read, current, ms, route) {
+  const Controller = globalThis.AbortController;
+  const controller = typeof Controller === "function" ? new Controller() : null;
+  let timer = null;
+  let relay = null;
+  const expired = new Promise((done) => {
+    timer = globalThis.setTimeout(() => {
+      done(READ_TIMED_OUT);
+      if (controller !== null) {
+        controller.abort();
+      }
+    }, ms);
+  });
+  if (controller !== null && route !== undefined && route !== null) {
+    if (route.aborted === true) {
+      controller.abort();
+    } else {
+      relay = () => controller.abort();
+      route.addEventListener("abort", relay, { once: true });
+    }
+  }
+  const options = controller !== null
+    ? { signal: controller.signal }
+    : (route === undefined || route === null ? {} : { signal: route });
+  const answered = Promise.resolve().then(() => read(current, options));
+  return Promise.race([answered, expired]).finally(() => {
+    globalThis.clearTimeout(timer);
+    if (relay !== null) {
+      route.removeEventListener("abort", relay);
+    }
+  });
+}
+
+/** Follows one check until a read answers terminal, the check's deadline
+ *  passes, a read is refused outright, or `keep()` says the page no longer
+ *  wants it. Answers the check it ended on (marked when it stopped), or
+ *  `null` when `keep()` ended it.
+ *
+ *  `first` is the check the page holds (a create answer owes one read even
+ *  when it is terminal: `owesRead`); `read(current, {signal})` makes one GET
+ *  with that signal and answers the check to hold next; `show(check)` paints
+ *  it (and may answer a promise, which the next read waits for);
+ *  `cancelled(error)` says a failed read was the route's own abort; `signal`
+ *  is the route's; `budgetMs` is the deadline (`PREFLIGHT_FOLLOW_MS` unless
+ *  given). `wait(ms, signal)` and `now()` default to this page's `setTimeout`
+ *  (cut short by `signal`) and its monotonic clock. The deadline is measured
+ *  both on that clock and as the sum of the gaps waited, whichever is
+ *  further, so a `wait` that returns at once still reaches it.
+ *
+ *  A CHECK ALREADY FOLLOWED IS NOT FOLLOWED TWICE: while a live follow reads
+ *  `first`'s id, this answers that follow's promise and starts nothing. */
+export function followCheck(follow) {
+  const f = follow || {};
+  const id = String(((f.first || {}).id) || "");
+  const live = id.length > 0 ? follows.get(id) : undefined;
+  if (live !== undefined && live.keep() === true) {
+    return live.promise;
+  }
+  const keep = typeof f.keep === "function" ? () => f.keep() === true : () => true;
+  const entry = { keep: keep, promise: null };
+  if (id.length > 0) {
+    follows.set(id, entry);
+  }
+  entry.promise = runFollow(f, keep, () => {
+    if (id.length > 0 && follows.get(id) === entry) {
+      follows.delete(id);
+    }
+  });
+  return entry.promise;
+}
+
+async function runFollow(f, keep, release) {
+  const signal = f.signal;
+  const wait = typeof f.wait === "function" ? f.wait : waitOrLeave;
+  const now = typeof f.now === "function" ? f.now : monotonicNow;
+  const show = typeof f.show === "function" ? f.show : () => {};
+  const budget = typeof f.budgetMs === "number" ? f.budgetMs : PREFLIGHT_FOLLOW_MS;
+  const started = now();
+  let waited = 0;
+  let attempts = 0;
+  let reads = 0;
+  let failures = 0;
+  let lastFailure = null;
+  let current = f.first;
+  const left = () => budget - Math.max(now() - started, waited);
+  try {
+    for (;;) {
+      if (!owesRead(current, reads)) {
+        return current;
+      }
+      if (left() <= 0) {
+        // THE DEADLINE PASSED, after one last read at it. Without a result
+        // that is "did not finish" -- unless that last read FAILED, in which
+        // case the page does not know whether the check finished, and says
+        // it could not read it.
+        const stopped = lastFailure === null
+          ? stopFollowing(current, FOLLOW_DEADLINE)
+          : stopFollowing(current, FOLLOW_UNREADABLE, lastFailure);
+        if (keep()) {
+          await show(stopped);
+        }
+        return stopped;
+      }
+      const gap = Math.min(followGap(attempts), left());
+      await wait(gap, signal);
+      waited += gap;
+      attempts += 1;
+      if (!keep()) {
+        return null;
+      }
+      let fresh;
+      try {
+        // A READ GETS WHAT IS LEFT OF THE DEADLINE, and never less than one
+        // gap: the last read, made at the deadline, still has time to answer.
+        fresh = await readWithin(f.read, current, Math.max(left(), FOLLOW_MAX_GAP_MS), signal);
+      } catch (error) {
+        if (!keep() || (typeof f.cancelled === "function" && f.cancelled(error) === true)) {
+          return null;
+        }
+        failures += 1;
+        lastFailure = error;
+        if (passingReadFailure(error) && failures <= FOLLOW_FAILURES_TOLERATED) {
+          continue;
+        }
+        const stopped = stopFollowing(current, FOLLOW_UNREADABLE, error);
+        await show(stopped);
+        return stopped;
+      }
+      if (!keep()) {
+        return null;
+      }
+      if (fresh === READ_TIMED_OUT) {
+        // THE SERVER NEVER ANSWERED, and the deadline has passed while it did
+        // not: the page cannot say what the check did.
+        const stopped = stopFollowing(current, FOLLOW_UNREADABLE,
+          { message: "the read was not answered before the check's deadline" });
+        await show(stopped);
+        return stopped;
+      }
+      reads += 1;
+      failures = 0;
+      lastFailure = null;
+      current = fresh === null || fresh === undefined ? current : fresh;
+      await show(current);
+    }
+  } finally {
+    release();
+  }
+}
+
+/** Wires every "Run the check again" control rendered for `check` under
+ *  `node` to `again`. The control is `render.js`'s `checkStoppedBlock`; the
+ *  page decides what asking again means (its own start, which now counts the
+ *  stopped check as spent). */
+export function wireCheckRetry(node, check, again, lifecycle) {
+  const id = String(((check || {}).id) || "");
+  if (id.length === 0 || node === null || node === undefined ||
+    typeof node.querySelectorAll !== "function") {
+    return;
+  }
+  for (const button of node.querySelectorAll(".check-retry")) {
+    if (button.getAttribute("data-check") === id) {
+      listen(button, "click", () => {
+        if (active(lifecycle)) {
+          again();
+        }
+      }, lifecycle);
+    }
+  }
 }

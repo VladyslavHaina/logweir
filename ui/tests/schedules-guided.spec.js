@@ -853,6 +853,13 @@ test("editing_a_checked_field_marks_the_verdict_stale_without_a_repaint", async 
     },
     destinations() { return Promise.resolve({ items: DESTINATIONS }); },
     startPreflight() { return Promise.resolve({ item: Object.assign({}, ready, { terminal: true }) }); },
+    // THE FOLLOW'S READ, answered, and its clock handed in: without them the
+    // follow retries a read this fake cannot make, on real timers, after the
+    // row has finished (poc-fixes-5).
+    preflight(namespace, id) {
+      return Promise.resolve({ item: Object.assign({}, ready, { id: id, terminal: true }) });
+    },
+    wait: async () => {},
   };
   try {
     await mountSchedules(view.root, ns, parse, LIFE(), api);

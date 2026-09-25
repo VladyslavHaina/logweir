@@ -84,15 +84,19 @@ import {
   fieldErrors,
   formKey,
   invalidInput,
+  followCheck,
+  followStopped,
   keepDraft,
+  keepStopMark,
   listen,
   mutationFor,
-  owesRead,
+  PREFLIGHT_FOLLOW_MS,
   readDraft,
   readOptions,
   refusal,
   resolveExisting,
   watchMutation,
+  wireCheckRetry,
 } from "../lifecycle.js";
 import {
   COPY_CAVEAT,
@@ -124,6 +128,7 @@ import {
   flagBadge,
   isBlockingRow,
   isDraftApprovalRow,
+  messageText,
   readyButForDraftApproval,
   when,
   windowMessage,
@@ -2434,7 +2439,7 @@ export function renderTopicSubset(state) {
     // send. The window refusal in step 3 works the same way, for the same
     // reason (PLAT-11.1).
     (typeof problems.topics === "string"
-      ? "<p class=\"complaint\" id=\"subset-complaint\">" + esc(problems.topics) + "</p>"
+      ? "<p class=\"complaint\" id=\"subset-complaint\">" + messageText(problems.topics) + "</p>"
       : "") +
     "<h4>The mapping, before you submit</h4>" +
     "<p class=\"blurb\">" + esc(MAPPING_SENTENCE) + "</p>" +
@@ -2632,7 +2637,7 @@ export function renderTargetStep(state) {
     invalidAttributes("topic-prefix", errors.topicPrefix) + ">" +
     fieldErrorLine("topic-prefix", errors.topicPrefix) +
     (typeof mapping.topicPrefix === "string"
-      ? "<p class=\"complaint\" id=\"prefix-complaint\">" + esc(mapping.topicPrefix) + "</p>"
+      ? "<p class=\"complaint\" id=\"prefix-complaint\">" + messageText(mapping.topicPrefix) + "</p>"
       : "") +
     "<p class=\"note\">The prefix defaults to what logweir_core::spec::default_topic_prefix " +
     "produces for this instant, so a topic name says both what it is and what point it was " +
@@ -2758,7 +2763,9 @@ export function renderPreflightStep(state, prepared) {
       : renderPreflight(result)) +
     "<p class=\"note\">" + esc(READINESS_CAVEAT_SENTENCE) + "</p>" +
     "<p class=\"note\" id=\"readiness-source-destination\">" +
-    esc(readinessSourceSentence(s.point)) + "</p>" +
+    // ITS NAMES AND DIGEST AS CODE, not as literal backticks (MCP round 2,
+    // R2-10): the sentence spells them the way every message here does.
+    messageText(readinessSourceSentence(s.point)) + "</p>" +
     "<h4>Target cluster probe (context, not a verdict)</h4>" +
     facts([
       ["target cluster", cell((((cluster || {}).metadata) || {}).name)],
@@ -2876,7 +2883,10 @@ export function readinessRefusal(state, prepared) {
     );
   }
   if (result.terminal === false) {
-    return "the readiness check for this plan has not finished; wait for its verdict.";
+    // A CHECK THIS PAGE STOPPED FOLLOWING has no verdict to wait for.
+    return followStopped(result) === ""
+      ? "the readiness check for this plan has not finished; wait for its verdict."
+      : "the readiness check for this plan did not finish; run it again before submitting.";
   }
   if (result.applicable !== true) {
     return (
@@ -2981,7 +2991,7 @@ export function renderPlanStep(prepared, state) {
   const plan = renderable
     ? "<pre class=\"plan-bytes\" id=\"plan-bytes\">" + esc(p.bytes) + "</pre>"
     : "<p class=\"complaint\" id=\"plan-problem\">The plan cannot be rendered from these values, " +
-      "so there is no hash and nothing to submit: " + esc(p.problem) + "</p>";
+      "so there is no hash and nothing to submit: " + messageText(p.problem) + "</p>";
   return (
     "<section class=\"step\" id=\"step-plan\" tabindex=\"-1\"><h3>6. Plan, hash and names</h3>" +
     "<p class=\"blurb\">The document an approver signs, exactly as it will be sent, with " +
@@ -4762,7 +4772,7 @@ export function renderCatalogPointRefusal(ns, choice) {
     "<h2>Restore wizard</h2>" +
     "<div class=\"refusal-block\" id=\"catalog-point-refusal\" role=\"alert\">" +
     "<p class=\"refusal\">This recovery point is not offered for a restore: " +
-    esc(c.reason) + ". Nothing was sent, and no other point was put in its place.</p>" +
+    messageText(c.reason) + ". Nothing was sent, and no other point was put in its place.</p>" +
     "<p class=\"note\">Asked for: point <code>" + esc(c.pointId) + "</code> in catalog " +
     "<code>" + esc(c.catalog) + "</code>.</p>" +
     "<p class=\"note\"><a href=\"#/catalog?ns=" + esc(encodeURIComponent(n)) + "&name=" +
@@ -5664,14 +5674,17 @@ function wireRestoreReadiness(node, state, parse, api, lifecycle, prepared) {
           ? null
           : state.readiness.boundSecret),
     });
-    renderAndWire(node, state, parse, api, lifecycle, true);
+    renderAndWire(node, state, parse, api, lifecycle, true).then((painted) => {
+      if (painted === true) {
+        keepStatusInView(node, "#restore-readiness-status");
+      }
+    });
     if (record.phase === "succeeded") {
       followRestoreReadiness(node, state, parse, api, lifecycle);
     }
   }, lifecycle);
 
-  listen(form, "submit", (event) => {
-    event.preventDefault();
+  const start = () => {
     if (!active(lifecycle) || mutation.pending()) {
       return;
     }
@@ -5682,7 +5695,14 @@ function wireRestoreReadiness(node, state, parse, api, lifecycle, prepared) {
     mutation.run(() => api.startPreflight(state.ns, request, {
       attempt: nextRestoreReadinessAttempt(state.ns, state.pointUid),
     }), { about: { planHash: p.hash, archiveSecret: readinessSecretOf(request) } });
+  };
+  listen(form, "submit", (event) => {
+    event.preventDefault();
+    start();
   }, lifecycle);
+  // "RUN THE CHECK AGAIN" is "Check this plan again": a per-click token, so a
+  // new check, about the plan on screen now.
+  wireCheckRetry(node, (state.readiness || {}).preflight, start, lifecycle);
 
   const cancel = node.querySelector("#restore-readiness-cancel");
   if (cancel !== null) {
@@ -5706,10 +5726,59 @@ function wireRestoreReadiness(node, state, parse, api, lifecycle, prepared) {
   }
 }
 
-/** How many times step 5 re-reads a started check, and the gap between reads.
- *  Bounded on purpose, as the schedules form is: a form is not a watcher. */
-export const RESTORE_READINESS_POLLS = 45;
-export const RESTORE_READINESS_INTERVAL_MS = 2000;
+/** BRINGS A FOCUSED STATUS LINE INTO VIEW ABOVE THE STICKY FOOTER (MCP round
+ *  3, R3-1). A readiness click disables its button, focus moves to the
+ *  step's status line (`disableKeepingFocus`, `restoreFocus` -- both with
+ *  `preventScroll`), and the repaint left that line, and the verdict under
+ *  it, behind the Back/Next bar at 390 px. So once the step is painted, a
+ *  status that holds focus is scrolled to the NEAREST edge, which honours
+ *  the `scroll-margin-bottom` `style.css` gives every wizard focus target --
+ *  the footer's height. Nothing moves when focus is elsewhere: this never
+ *  takes the page away from what the reader is looking at. Exported for the
+ *  suite. */
+export function keepStatusInView(node, selector) {
+  const status = node === null || node === undefined || typeof node.querySelector !== "function"
+    ? null
+    : node.querySelector(selector);
+  if (status === null || status === undefined || typeof status.scrollIntoView !== "function") {
+    return false;
+  }
+  const doc = status.ownerDocument;
+  if (!doc || doc.activeElement !== status) {
+    return false;
+  }
+  status.scrollIntoView({ block: "nearest" });
+  return true;
+}
+
+/** BRINGS STEP 5'S VERDICT HEAD INTO VIEW ABOVE THE STICKY FOOTER when its
+ *  check turns terminal (review L7 of MCP round 3's R3-1). The status line is
+ *  kept clear at the click ([`keepStatusInView`]); the verdict lands later,
+ *  below it, and at 390 px it landed behind the footer. So when the follow
+ *  paints a terminal check and focus is inside step 5 -- the reader is
+ *  looking at it -- the headline (`.preflight-head` of that check) is scrolled
+ *  to its nearest edge, which honours the footer-high `scroll-margin-bottom`
+ *  `style.css` gives it. Focus anywhere else moves nothing. Exported for the
+ *  suite. */
+export function keepVerdictInView(node, check) {
+  const id = String(((check || {}).id) || "");
+  if (id.length === 0 || node === null || node === undefined ||
+    typeof node.querySelector !== "function") {
+    return false;
+  }
+  const step = node.querySelector("#step-preflight");
+  const head = node.querySelector("#preflight-" + id + " .preflight-head");
+  if (step === null || step === undefined || head === null || head === undefined ||
+    typeof step.contains !== "function" || typeof head.scrollIntoView !== "function") {
+    return false;
+  }
+  const doc = step.ownerDocument;
+  if (!doc || doc.activeElement === null || !step.contains(doc.activeElement)) {
+    return false;
+  }
+  head.scrollIntoView({ block: "nearest" });
+  return true;
+}
 
 /** A held verdict, replaced by a fresher read of the SAME check -- except that
  *  staleness is one-way on this page. A mark `selectTarget` or
@@ -5728,6 +5797,10 @@ export function mergeReadiness(held, fresh) {
   if (fresh === null || fresh === undefined) {
     return held === undefined ? null : held;
   }
+  // A CHECK THIS PAGE STOPPED FOLLOWING STAYS STOPPED while a fresher read of
+  // it still has no result -- the submit's re-read is not a follow, and it
+  // must not bring back "this page reads it again until then".
+  fresh = keepStopMark(held, fresh);
   if (held === null || held === undefined || held.id !== fresh.id || held.stale !== true) {
     return fresh;
   }
@@ -5745,54 +5818,52 @@ export function mergeReadiness(held, fresh) {
   return Object.assign({}, fresh, { applicable: false, stale: true, staleReasons: reasons });
 }
 
-/** Re-reads the check step 5 started until it is terminal, asking the product
- *  API about the plan on screen NOW (`?planHash=`), and repaints when the
- *  answer changes. Before PLAT-08.2 the wizard showed only the create answer
- *  -- a check that had not run yet -- and never learned its verdict. */
-async function followRestoreReadiness(node, state, parse, api, lifecycle) {
+/** Re-reads the check step 5 started until it is terminal, or the longest
+ *  time a check may take has passed (`lifecycle.js`'s `followCheck`; this
+ *  step's 90 s was poc-upgrade-3's P15), asking the product API about the plan
+ *  on screen NOW (`?planHash=`), and repaints when the answer changes. Before
+ *  PLAT-08.2 the wizard showed only the create answer -- a check that had not
+ *  run yet -- and never learned its verdict. THE CREATE ANSWER IS NOT A READ
+ *  (P8), even when it is terminal. A failed re-read is not a verdict: the one
+ *  on screen stays what the check last recorded, and the submit re-reads it
+ *  again anyway. */
+function followRestoreReadiness(node, state, parse, api, lifecycle) {
   const first = (state.readiness || {}).preflight || null;
   if (first === null || typeof first.id !== "string" || typeof api.preflight !== "function") {
-    return;
+    return Promise.resolve(null);
   }
   const id = first.id;
-  const wait = typeof api.wait === "function"
-    ? api.wait
-    : (ms) => new Promise((done) => { globalThis.setTimeout(done, ms); });
-  for (let read = 0; read < RESTORE_READINESS_POLLS; read += 1) {
-    const held = (state.readiness || {}).preflight || null;
-    // THE CREATE ANSWER IS NOT A READ (P8), even when it is terminal.
-    if (held === null || held.id !== id || !owesRead(held, read)) {
-      return;
-    }
-    await wait(RESTORE_READINESS_INTERVAL_MS);
-    if (!active(lifecycle)) {
-      return;
-    }
-    const current = await preparePlanOrProblem(state);
-    let answer;
-    try {
-      answer = await api.preflight(state.ns, id, Object.assign({}, readOptions(lifecycle),
+  const held = () => (state.readiness || {}).preflight || null;
+  return followCheck({
+    first: first,
+    budgetMs: PREFLIGHT_FOLLOW_MS,
+    wait: api.wait,
+    keep: () => active(lifecycle) && (held() || {}).id === id,
+    cancelled: (error) => cancelled(error, lifecycle),
+    signal: (readOptions(lifecycle) || {}).signal,
+    read: async (checked, options) => {
+      const current = await preparePlanOrProblem(state);
+      const answer = await api.preflight(state.ns, id, Object.assign({}, options,
         typeof current.hash === "string" ? { planHash: current.hash } : {}));
-    } catch (error) {
-      // A FAILED RE-READ IS NOT A VERDICT: the one on screen stays what the
-      // check last recorded, and the submit re-reads it again anyway.
-      return;
-    }
-    if (!active(lifecycle)) {
-      return;
-    }
-    const now = (state.readiness || {}).preflight || null;
-    if (now === null || now.id !== id) {
-      return;
-    }
-    const merged = mergeReadiness(now, (answer || {}).item);
-    const moved = merged.state !== now.state || merged.terminal !== now.terminal ||
-      merged.stale !== now.stale || merged.applicable !== now.applicable;
-    state.readiness = Object.assign({}, state.readiness, { preflight: merged });
-    if (moved) {
-      await renderAndWire(node, state, parse, api, lifecycle, true);
-    }
-  }
+      return mergeReadiness(held(), (answer || {}).item);
+    },
+    show: async (next) => {
+      const now = held();
+      const moved = now === null || next.state !== now.state || next.terminal !== now.terminal ||
+        next.stale !== now.stale || next.applicable !== now.applicable ||
+        followStopped(next) !== followStopped(now);
+      state.readiness = Object.assign({}, state.readiness, { preflight: next });
+      if (moved) {
+        const painted = await renderAndWire(node, state, parse, api, lifecycle, true);
+        // THE VERDICT, WHEN IT LANDS, IS BROUGHT ABOVE THE FOOTER TOO (review
+        // L7 of R3-1): the status line was kept clear at the click, and the
+        // verdict under it arrives later, through this repaint.
+        if (painted === true && next.terminal === true && (now === null || now.terminal !== true)) {
+          keepVerdictInView(node, next);
+        }
+      }
+    },
+  });
 }
 
 /** The exact step-5 request for one recovery point.
