@@ -48,3 +48,9 @@ __pycache__/
 
 /.playwright-mcp/
 /image-digests/
+
+# deploy/poc/README.md: the PoC profile generates its secrets (passwords, keys, the OIDC client
+# secret) into ./poc-secrets/ INSIDE the checkout, and the upgrade rehearsals unpack older charts
+# into ./poc-baselines/. Neither may ever be staged.
+/poc-secrets/
+/poc-baselines/
