@@ -68,7 +68,7 @@ try {
       await gotoHash(page, `#/clusters?ns=${NS}&name=${name}`);
       await waitForText(page, /TEST CONNECTION|Test connection/, 60, "the cluster page");
       await page.getByRole("button", { name: /^test connection$/i }).click();
-      const { rows, outcome } = await waitRows(page, "#connection-check", 180);
+      const { rows, outcome } = await waitRows(page, "#connection-check", 240);
       const blocking = rows.filter((r) => r.gating === "blocking");
       row(`J2 Test connection ${name}: every blocking row ready`, blocking.length > 0 && blocking.every((r) => r.verdict === "ready"),
         { outcome, rows: rows.map((r) => `${r.id}=${r.verdict}/${r.code}`) });

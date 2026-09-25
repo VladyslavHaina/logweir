@@ -402,7 +402,7 @@ try {
       const t3 = nowIso();
       await pageP.locator("#backup-readiness").getByRole("button", { name: /^check readiness$/i }).click();
       await trace("after-expiry click", 60);
-      const v3 = await settle(pageP, "#backup-readiness", 150);
+      const v3 = await settle(pageP, "#backup-readiness", 240);
       const p3 = posts("panel", t3, /preflights$/);
       const fresh = p3.find((n) => n.status === 202);
       const replay = p3.find((n) => n.status === 200);
@@ -485,7 +485,7 @@ try {
     const pendingSaysNotApply = /does not apply to your current inputs/.test(pendingText);
     row("R2-11 step 5 while the check is pending reads 'checking...' and not 'does not apply to your current inputs'",
       sawChecking && !pendingSaysNotApply, { excerpt: pendingText.split("\n").filter((l) => /checking|apply|compared/i.test(l)).slice(0, 4) });
-    const settled5 = await settledRows(page, "#step-preflight", 180, 3000);
+    const settled5 = await settledRows(page, "#step-preflight", 240, 3000);
     const s5 = settled5.settled ? settled5.text : await page.locator("#step-preflight").innerText();
     const stepper = await page.evaluate(() => [...document.querySelectorAll("ol.stepper li")].map((li) => li.innerText.replace(/\s+/g, " ").trim()));
     const rows5 = settled5.rows;

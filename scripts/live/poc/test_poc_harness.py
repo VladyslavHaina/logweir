@@ -290,9 +290,10 @@ def test_the_check_row_guard_catches_its_planted_twins():
 # `settledRows` ends on it, returning no rows; (2) no reader turns a non-verdict into one by
 # null-ness (`read === null ? [] : read.rows`, `if (!readiness)`, `(await readinessRows(..)) || {..}`):
 # a settle wait always answers an object whose `settled` decides; (3) every settle budget is at
-# least 150 s (a Preflight's 120 s timeoutSeconds; the staged slow check records notReady at about
-# 120 s), and no reader hand-rolls a settle loop over `checkRowsIn` with its own short count.
-SETTLE_FLOOR = 150
+# least 240 s (a Preflight's 120 s timeoutSeconds plus the 90 s its Job gets to start, plus a follow
+# gap; poc-upgrade-5's J6 check settled 176 s after it was made and a 180 s budget gave up first),
+# and no reader hand-rolls a settle loop over `checkRowsIn` with its own short count.
+SETTLE_FLOOR = 240
 BUDGET_CALL = re.compile(
     r"\b(settledRows|waitRows|settle|checkVerdict)\(\s*[\w.]+\s*,\s*(?:\"[^\"]*\"|'[^']*'|`[^`]*`|[\w.]+)\s*,\s*(\d+)")
 READINESS_CALL = re.compile(r"\breadinessRows\(\s*[\w.]+\s*,\s*(\d+)")
@@ -343,7 +344,7 @@ def null_read_as_verdict(text: str) -> list[str]:
 
 
 def short_settle_waits(text: str) -> list[str]:
-    """A settle budget under 150 s, or a hand-rolled settle loop over checkRowsIn outside the two
+    """A settle budget under SETTLE_FLOOR (240 s), or a hand-rolled settle loop over checkRowsIn outside the two
     helpers that own one (console.mjs settledRows and checkVerdict)."""
     bad = []
     for rx in (BUDGET_CALL, READINESS_CALL, READINESS_OPT):
@@ -373,13 +374,16 @@ def test_a_stopped_check_is_never_read_as_a_verdict():
         assert not null_read_as_verdict(p.read_text()), (p.name, null_read_as_verdict(p.read_text()))
 
 
-def test_every_settle_wait_ends_on_the_verdict_or_the_stop_and_waits_at_least_150_s():
+def test_every_settle_wait_ends_on_the_verdict_or_the_stop_and_waits_at_least_240_s():
     budgets = []
     for p in MJS:
         assert not short_settle_waits(p.read_text()), (p.name, short_settle_waits(p.read_text()))
         budgets += settle_budgets(p.read_text())
     # NOT VACUOUS: the readers of journey, reproof, round3 and restore_burst are the ones read.
     assert len(budgets) >= 15 and min(budgets) >= SETTLE_FLOOR, budgets
+    # and the floor settledRows applies to every caller is the same (poc-upgrade-5: it was 150)
+    floor = re.search(r"export const SETTLE_FLOOR_SECONDS = (\d+);", (HERE / "console.mjs").read_text())
+    assert floor and int(floor.group(1)) >= SETTLE_FLOOR, floor and floor.group(0)
 
 
 def test_the_stop_guards_catch_their_planted_twins():
@@ -398,6 +402,10 @@ def test_the_stop_guards_catch_their_planted_twins():
     assert not null_read_as_verdict('readiness = await readinessRows(page, 240);\nif (!readiness.settled) throw new Error("x");\n')
     # a short budget, and the old P8 / round3 hand-rolled loops
     assert short_settle_waits('const v1 = await settle(pageF, "#schedule-readiness", 120);\n')
+    # the 180 s budgets poc-upgrade-5's J6 gave up on (console.mjs readinessSeconds, journey J2, round3)
+    assert short_settle_waits('const o = Object.assign({ readinessSeconds: 180 }, opts);\n')
+    assert short_settle_waits('const { rows, outcome } = await waitRows(page, "#connection-check", 180);\n')
+    assert not short_settle_waits('const { rows, outcome } = await waitRows(page, "#connection-check", 240);\n')
     assert short_settle_waits('const s = await settledRows(page, "#step-preflight", 90, 3000);\n')
     assert short_settle_waits('await restoreFromBackup(page, NS, b, u, { readinessSeconds: 60 });\n')
     assert short_settle_waits('async function testOnce(label) {\n  for (let i = 0; i < 45; i++) {\n'
