@@ -31,6 +31,11 @@ function row(id, ok, evidence) {
 }
 const kj = (...args) => JSON.parse(execFileSync("kubectl", ["--context", "docker-desktop", "--request-timeout=30s", "-n", NS, ...args, "-o", "json"], { timeout: 45000, maxBuffer: 256 * 1024 * 1024 }).toString());
 const byRole = (role) => (kj("get", "kafkaclusters").items.find((i) => i.spec.role === role) || { metadata: {} }).metadata.name;
+// THE JOURNEY'S SCHEDULE IS THE FIRST ONE MADE ON THE DESTINATION: a namespace that later holds
+// more schedules (a re-run, another round's rows) must not move J4-J6 onto one of them. The
+// list is alphabetical, and minted sch-<26 base32> names sort in no useful order.
+const firstSchedule = () => kj("get", "backupschedules").items.filter((x) => (x.spec.destinationRef || {}).name === "primary")
+  .sort((x, y) => (x.metadata.creationTimestamp < y.metadata.creationTimestamp ? -1 : 1))[0];
 const step = (id) => ["J1", "J2", "J3", "J4", "J5", "J6", "J7"].indexOf(id) >= ["J1", "J2", "J3", "J4", "J5", "J6", "J7"].indexOf(FROM);
 async function shot(page, name) { await page.screenshot({ path: `${OUT}/${name}.png`, fullPage: true }); }
 
@@ -113,7 +118,7 @@ try {
     if (kj("get", "backupschedules").items.length === 0) {
       await gotoHash(page, `#/schedules?ns=${NS}`);
       await waitForText(page, /CHECK READINESS|Check readiness/, 60, "the schedule form");
-      const form = page.locator("form", { has: page.locator('input[name="hour"]') }).first();
+      const form = page.locator("#schedule-form");
       // THE SHARED CONSOLE HAS NO SCHEDULE NAME FIELD (poc-fixes-2 review L5):
       // the product API names it sch-<26 base32>. Fill it only where it exists.
       const scheduleName = form.locator('input[name="name"]');
@@ -144,13 +149,13 @@ try {
       await create.click();
       await page.waitForTimeout(4000);
     }
-    const sch = kj("get", "backupschedules").items[0];
+    const sch = firstSchedule();
     row("J4 schedule created by the console (daily 02:00, orders+payments, destination primary)",
       !!sch && sch.spec.destinationRef && sch.spec.destinationRef.name === "primary",
       { name: sch && sch.metadata.name, schedule: sch && sch.spec.schedule, topics: sch && sch.spec.topics, source: sch && sch.spec.sourceRef });
     await shot(page, "J4-schedule-created");
   }
-  const SCH = (kj("get", "backupschedules").items[0] || { metadata: {} }).metadata.name;
+  const SCH = (firstSchedule() || { metadata: {} }).metadata.name;
   // ---------------------------------------------------------------- J5 first backup
   let BACKUP = null;
   if (step("J5")) {
@@ -183,6 +188,9 @@ try {
   if (step("J6")) {
     const b = BACKUP || kj("get", "backups").items.sort((x, y) => (x.metadata.creationTimestamp < y.metadata.creationTimestamp ? -1 : 1))[0];
     await gotoHash(page, `#/schedules?ns=${NS}&name=${SCH}`);
+    // A SCHEDULE WITH HUNDREDS OF RUNS RENDERS ITS POINTS AFTER "Reading <name>...": wait for them
+    // before counting, or the row fails on a page that has not painted yet (poc-upgrade-1, J6).
+    await waitForText(page, /Restore this point/, 90, "the schedule's points");
     const link = page.locator(`a[href*="backup=${b.metadata.name}"]`, { hasText: /Restore this point/ }).first();
     row("J6 the schedule page offers 'Restore this point' for the run", (await link.count()) > 0, { href: (await link.count()) ? await link.getAttribute("href") : null });
     const r = await restoreFromBackup(page, NS, b.metadata.name, b.metadata.uid, { target: TGT, prefix: process.env.POC_RESTORE_PREFIX || "restored-", shots: `${OUT}/J6` }, log);

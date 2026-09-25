@@ -107,3 +107,27 @@ def test_the_guards_catch_their_planted_twins():
     guarded = ("export async function createCluster(page, ns, c, log) {\n"
                "  if (await nameInput.count() > 0) await nameInput.fill(c.name);\n}\n")
     assert not unguarded_minted_name_fills(guarded)
+
+def keeps_a_csrf_value(text: str) -> list[str]:
+    """A row's evidence must never hold the session's synchronizer token: a captured
+    `x-csrf-token` header or a session's `csrfToken` is only ever COMPARED (`===`/`==`)
+    where it is read, and the boolean is what is kept (poc-upgrade-1's P4 viewer row once
+    stored the header value in its evidence and printed it)."""
+    bad = []
+    for line in text.splitlines():
+        for m in re.finditer(r':\s*[A-Za-z_.]*\(?\)?\[?"?(x-csrf-token"\]|csrfToken)', line):
+            rest = line[m.end():].lstrip()
+            if not (rest.startswith("===") or rest.startswith("==")):
+                bad.append(line.strip())
+    return bad
+
+
+def test_no_row_keeps_a_csrf_value():
+    for p in FILES:
+        assert not keeps_a_csrf_value(p.read_text()), (p.name, keeps_a_csrf_value(p.read_text()))
+
+
+def test_the_csrf_guard_catches_its_planted_twin():
+    assert keeps_a_csrf_value('vposts.push({ csrf: r.headers()["x-csrf-token"] || null });')
+    assert keeps_a_csrf_value('row("x", true, { token: sess.csrfToken });')
+    assert not keeps_a_csrf_value('vposts.push({ sessionToken: r.headers()["x-csrf-token"] === vsess.csrfToken });')
