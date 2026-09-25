@@ -3777,8 +3777,9 @@ pub fn unread_destination_scorecard_detail(key: &str, destination: &str) -> Stri
 /// What the terminal pass does about a finished `Restore`'s evidence — PURE.
 #[derive(Debug)]
 pub enum TerminalEvidence {
-    /// Record this verdict; there is nothing to read.
-    Record(crate::verification::VerificationResult),
+    /// Record this verdict; there is nothing to read. Boxed: the verdict is
+    /// several times the size of the other arms (clippy `large_enum_variant`).
+    Record(Box<crate::verification::VerificationResult>),
     /// Verify this reference through the source's own handle.
     Verify(EvidenceRef),
     /// Write nothing on this pass: an evidence-fetch Job's pass writes the
@@ -3814,9 +3815,11 @@ pub fn terminal_evidence(
 ) -> TerminalEvidence {
     match (from, reference) {
         (backup::EvidenceSource::NotAttempted { detail }, _) if keys_complete => {
-            TerminalEvidence::Record(crate::verification::VerificationResult::not_attempted(
-                logweir_verify::PAYLOAD_TYPE_SCORECARD,
-                detail.clone(),
+            TerminalEvidence::Record(Box::new(
+                crate::verification::VerificationResult::not_attempted(
+                    logweir_verify::PAYLOAD_TYPE_SCORECARD,
+                    detail.clone(),
+                ),
             ))
         }
         (backup::EvidenceSource::FetchJob { .. }, _) => TerminalEvidence::Nothing,
@@ -3828,7 +3831,9 @@ pub fn terminal_evidence(
             from @ (backup::EvidenceSource::GlobalHandle | backup::EvidenceSource::Destination(_)),
             None,
         ) => unread_scorecard_verdict(from, keys_complete, scorecard_key, destination)
-            .map_or(TerminalEvidence::Nothing, TerminalEvidence::Record),
+            .map_or(TerminalEvidence::Nothing, |r| {
+                TerminalEvidence::Record(Box::new(r))
+            }),
         _ => TerminalEvidence::Nothing,
     }
 }
@@ -7414,7 +7419,7 @@ async fn reconcile_restore_inner(
             .as_ref()
             .map(|r| r.name.as_str()),
     ) {
-        TerminalEvidence::Record(result) => Some(result),
+        TerminalEvidence::Record(result) => Some(*result),
         TerminalEvidence::Verify(reference) => {
             Some(read_verdict(&evidence_from, reference, verify, client).await)
         }

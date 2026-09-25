@@ -9164,7 +9164,7 @@ mod p12_controller_read_retry {
             controller_read_mode(&destination),
             Some(MODE_CONTROLLER_IDENTITY)
         );
-        let (_, retry) = scheduled(unread, 1, now());
+        let (_, retry) = scheduled(*unread, 1, now());
         assert_eq!(
             retry,
             Some(now() + secs(60)),
