@@ -696,8 +696,10 @@ async fn a_replay_names_its_own_expiry_and_a_new_key_asks_afresh() {
     assert_ne!(fresh.json()["item"]["uid"], uid);
     assert_eq!(fresh.json()["replayed"], false);
     assert_eq!(app.fake.count("preflights", NS_A), 2);
+    // NO LIMITER RESET HERE: the limiter is process-wide, and a reset from this
+    // row raced `an_over_limit_preflight_performs_no_kubernetes_read` in
+    // another namespace (it read 202 where it counted on 429).
     app.fake.assert_strict();
-    logweir_api::routes::reset_check_rate_limits();
 }
 
 // ======================================================================
