@@ -1639,7 +1639,14 @@ tokens: each of those clicks is a new check by design.
 * **Names in the step texts are code** (R2-10): step 5's source sentence, step
   4's mapping and prefix complaints, step 6's plan problem and the
   catalog-point refusal render their backticked spans with `messageText`,
-  never as literal backticks.
+  never as literal backticks. The same holds across the console (round 4's
+  O2, on the Catalog page's "listed by `logweir catalog list`"): every
+  sentence with a backticked span renders through `messageText`, markup spells
+  `<code>`, and a message -- this page's own refusals included -- shows its
+  spans as code in the error box (`messageNodes`), the field-error line and
+  a panel's "unavailable" note (`codeSpans`, `messageText`). Rows:
+  `ui/tests/code-spans.spec.js`, which also refuse a new markup literal with a
+  backtick and a new such sentence passed to `esc` or `cell`.
 * **"Restore this point" is offered to a role that can restore** (R3-2). The
   catalog's points, the Backups list and a schedule's points and runs render
   `restorePointLink`: the link when the session grants `restoreCreate` in the
@@ -1652,6 +1659,49 @@ tokens: each of those clicks is a new check by design.
   anywhere reads "no role yet", not "choose a namespace to see your role".
 
 Rows: `ui/tests/mcp-round3.spec.js`.
+
+### A repaint keeps the reader's place
+
+Defect P16 (poc-upgrade-4, 2026-09-25): at 390 px, after *Check readiness*, the
+first follow read (`pending -> running`) repainted restore step 5 and the page
+jumped from scrollY 282 to 0, leaving the focused status at 943 px of an 844 px
+viewport until the verdict. Every page repaints through `render.js`'s
+`replace`, which empties the view and fills it again, and the browser moved
+the page during that swap; the click's repaint was followed by
+`keepStatusInView`, the follow's was not. Now:
+
+* **A repaint of the same view keeps the page where it was** (`replaceInPlace`).
+  It reads the window's offset before the swap and puts it back when the swap
+  moved it, and when focus was inside the replaced node on an element that is
+  there again, the page moves by as much as that element moved, so it sits
+  where it sat. A repaint that moved nothing scrolls nothing. Every follower
+  repaints this way -- step 5, *Test connection*, *Discover topics*, *Test
+  access*, the *Backup readiness* panel and the schedule form -- as do their
+  clicks' pending and settled states and an edit re-rendering the wizard step
+  it was made on. Over the real console in Chromium, the clusters page's click
+  moved the page from 1677 px to 93 before this.
+* **New content opens where its page puts it.** Plain `replace` -- a route
+  mount, a detail's first paint, a wizard step that was not the one on screen
+  -- touches no scroll. Next, Back, the stepper and a `&step=` deep link open
+  the step at its heading: when the section's top is above the viewport or its
+  heading is not clear of the footer, the section is scrolled to its start (a
+  first cut kept the offset for every swap, and Next at the bottom of step 1
+  opened step 2 1935 px below its heading).
+* **Step 5 keeps its focused status above the footer after every repaint**, not
+  only the click's -- while the reader has not scrolled since the ask. A reader
+  who scrolled, even to put the status behind the footer, keeps their offset
+  until they ask again. A status inside the viewport but under the footer is
+  moved above it too: `scrollIntoView({block: "nearest"})` does not scroll an
+  element whose box is already in view, whatever its scroll margin.
+* **A focus target the browser refuses is not a landing.** An empty status
+  region is `display: none`, and `focus()` on it does nothing: *Test access*
+  (whose status sat outside its form) and the schedule form's *Check
+  readiness* left focus on the body. `restoreFocus` and `disableKeepingFocus`
+  try the next target when focus did not land; *Test access*'s status is its
+  form's own, and the schedule form's verdict region takes the focus *Check
+  readiness* gives up.
+
+Rows: `ui/tests/reading-place.spec.js`.
 
 ### A repaint keeps what the reader typed
 

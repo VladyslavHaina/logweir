@@ -85,10 +85,12 @@ import {
   facts,
   fieldErrorLine,
   invalidAttributes,
+  messageText,
   mutationStatus,
   preflightVerdict,
   readinessHeadline,
   replace,
+  replaceInPlace,
   table,
   when,
 } from "../render.js";
@@ -265,7 +267,7 @@ export function renderDestinationList(page, ns) {
     ) +
     (defaults.length === 0
       ? "<p class=\"note\">No destination in this namespace is marked default, so a new " +
-        "schedule starts with none chosen. " + esc(DEFAULT_ANNOTATION_RESIDUAL) + "</p>"
+        "schedule starts with none chosen. " + messageText(DEFAULT_ANNOTATION_RESIDUAL) + "</p>"
       : "") +
     (items.some((d) => d.status === null || d.status === undefined ||
       d.status.valid === null || d.status.valid === undefined)
@@ -406,6 +408,13 @@ export function renderTestPanel(item, view) {
   const v = view || {};
   const test = v.test || null;
   const may = v.mayOperate !== false;
+  // THE STATUS IS THE FORM'S OWN (P16's sweep), as every other check form's
+  // is: a click disables the fieldset, focus leaves the button for the status
+  // of the form it was in (`render.js`'s `restoreFocus`), and a status drawn
+  // after `</form>` was not found -- focus fell to the body at the click.
+  const status = "<div class=\"form-status\" id=\"destination-test-status\" tabindex=\"-1\">" +
+    mutationStatus(v.testState || {}, { kind: "Preflight", name: (test || {}).id || "" }, null) +
+    "</div>";
   return (
     "<section class=\"destination-test\" id=\"destination-test\"><h3>Test access</h3>" +
     "<p class=\"note\">" + esc(DESTINATION_TEST_SENTENCE) + "</p>" +
@@ -420,12 +429,9 @@ export function renderTestPanel(item, view) {
         "</select>" +
         "<p class=\"help\">Choose none to exercise every configured role.</p></div>" +
         "<div class=\"actions\"><button type=\"submit\">Test access</button></div>" +
-        "</fieldset></form>"
+        "</fieldset>" + status + "</form>"
       : "<p class=\"note\">This login may read destinations and not test them; the roles it " +
-        "holds here do not include operator or administrator.</p>") +
-    "<div class=\"form-status\" id=\"destination-test-status\" tabindex=\"-1\">" +
-    mutationStatus(v.testState || {}, { kind: "Preflight", name: (test || {}).id || "" }, null) +
-    "</div>" +
+        "holds here do not include operator or administrator.</p>" + status) +
     (test === null ? "" : renderPreflight(test)) +
     "</section>"
   );
@@ -895,7 +901,7 @@ export function renderDestinationForm(view) {
     "<div class=\"field\"><label for=\"destination-prefix\">prefix</label>" +
     "<input id=\"destination-prefix\" name=\"prefix\" value=\"" + esc(d.prefix) + "\"" +
     field("destination-prefix", "prefix") + ">" +
-    "<p class=\"help\">Blank is the bucket root. `logweir` and everything under it is reserved " +
+    "<p class=\"help\">Blank is the bucket root. <code>logweir</code> and everything under it is reserved " +
     "for evidence.</p>" + line("destination-prefix", "prefix") + "</div>" +
     "</div><div class=\"field-row\">" +
     "<div class=\"field\"><label for=\"destination-region\">region</label>" +
@@ -953,7 +959,7 @@ export function renderDestinationForm(view) {
     (d.writeProbe !== "disabled" ? " selected" : "") + ">createOnlyMarker</option>" +
     "<option value=\"disabled\"" + (d.writeProbe === "disabled" ? " selected" : "") +
     ">disabled</option></select>" +
-    "<p class=\"help\">" + esc(WRITE_PROBE_SENTENCE) + "</p></div>" +
+    "<p class=\"help\">" + messageText(WRITE_PROBE_SENTENCE) + "</p></div>" +
     "<label class=\"inline\" for=\"destination-default\">" +
     "<input type=\"checkbox\" id=\"destination-default\" name=\"isDefault\"" +
     (d.isDefault === true ? " checked" : "") + "> make this the namespace default</label>" +
@@ -1221,7 +1227,7 @@ export async function mountDestinationDetail(node, ns, name, parse, lifecycle, d
     testViews.delete(formKey(ns, TEST_FORM, name));
     paintDetail(node, ns, name, parse, lifecycle, api, read.item, {
       usage: usage, usageError: usageError, test: null,
-    });
+    }, true);
   } catch (error) {
     if (!cancelled(error, lifecycle) && active(lifecycle)) {
       replace(node, errorBox(error));
@@ -1257,9 +1263,11 @@ function detailView(ns, name, extra) {
   );
 }
 
-function paintDetail(node, ns, name, parse, lifecycle, api, item, extra) {
+function paintDetail(node, ns, name, parse, lifecycle, api, item, extra, first) {
   const view = detailView(ns, name, extra);
-  replace(node, parse(renderDestinationDetail(item, view)));
+  // THE MOUNT'S FIRST PAINT IS NEW CONTENT; a later one repaints the detail
+  // the reader is on and keeps their place there (P16).
+  (first === true ? replace : replaceInPlace)(node, parse(renderDestinationDetail(item, view)));
   wireTest(node, ns, name, parse, lifecycle, api, item, view);
   wireRotate(node, ns, name, parse, lifecycle, api, item, view);
 }
@@ -1285,7 +1293,7 @@ function paintTest(node, ns, name, parse, lifecycle, api, item, extra) {
   }
   // THE ROLES CHOSEN FOR THE NEXT TEST survive the repaint of this one.
   const view = Object.assign(detailView(ns, name, extra), { testRoles: readTestRoles(node) });
-  replace(slot, parse(renderTestSlot(item, view)));
+  replaceInPlace(slot, parse(renderTestSlot(item, view)));
   wireTest(node, ns, name, parse, lifecycle, api, item, view);
 }
 

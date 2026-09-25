@@ -61,11 +61,21 @@ export class Fake {
     this.disabled = "disabled" in attributes;
   }
   get firstChild() { return this.children.length === 0 ? null : this.children[0]; }
+  // A VIEW HANDED A WINDOW HAS ONE (P16's rows): `render.js`'s `replace` reads
+  // and restores the page's scroll through `ownerDocument.defaultView`. With
+  // none -- every other row -- there is no document, as before.
+  get ownerDocument() { return this.view.document; }
   removeChild(child) { this.children.splice(this.children.indexOf(child), 1); return child; }
   appendChild(child) {
     this.children.push(child);
     if (child && typeof child.html === "string") {
       this.view.adopt(child.html, this.isRoot === true, this);
+      // THE BROWSER MOVES THE PAGE WHEN A VIEW IS SWAPPED: a row's window says
+      // how (Chrome took step 5 from 282 px to 0), and `replace` must undo it.
+      if (this.view.document !== undefined &&
+        typeof this.view.document.defaultView.swapped === "function") {
+        this.view.document.defaultView.swapped();
+      }
     }
     return child;
   }
@@ -84,8 +94,12 @@ export class Fake {
   }
 }
 
-export function fakeView() {
+export function fakeView(options) {
   const view = {
+    // `options.window`: a window with `scrollX`, `scrollY`, `scrollTo`,
+    // `scrollBy` and, optionally, `swapped()` -- what the browser does to the
+    // page when a view's children are replaced.
+    document: options && options.window ? { defaultView: options.window } : undefined,
     chunks: [],
     adopt(html, fromRoot, owner) {
       if (fromRoot) {

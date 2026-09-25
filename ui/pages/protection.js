@@ -185,7 +185,7 @@ export function renderLastPoint(object, ns) {
     return (
       "<section class=\"last-point\"><h3>Newest available recovery point</h3>" +
       "<p class=\"complaint\">There is no available recovery point for this policy. " +
-      "`availabilityBasis` is " + cell(status.availabilityBasis) + ": that is HOW availability " +
+      "<code>availabilityBasis</code> is " + cell(status.availabilityBasis) + ": that is HOW availability " +
       "was established, and a basis of CatalogStale means the catalog could not answer -- " +
       "which is not the same as an archive with nothing in it.</p></section>"
     );

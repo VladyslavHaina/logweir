@@ -289,7 +289,7 @@ export function renderCatalogList(collection, ns) {
     "<h2>Recovery catalog</h2>" +
     "<p class=\"blurb\">Every RecoveryCatalog in this namespace: the durable inventory of " +
     "recovery points in an archive, as this cluster last managed to read it.</p>" +
-    "<p class=\"note\">" + esc(CATALOG_WINDOW_SENTENCE) + "</p>" +
+    "<p class=\"note\">" + messageText(CATALOG_WINDOW_SENTENCE) + "</p>" +
     table(
       ["NAME", "DESTINATION", "READY", "POINTS", "AVAILABLE", "UNTRUSTED SIGNER", "SYNCED", "VIEW EXPIRES"],
       rows,
@@ -334,7 +334,7 @@ export function renderCatalogStatus(object) {
       "This catalog has recorded no counts.",
     ) +
     (status.truncated === true
-      ? "<p class=\"note\">" + esc(CATALOG_WINDOW_SENTENCE) + "</p>"
+      ? "<p class=\"note\">" + messageText(CATALOG_WINDOW_SENTENCE) + "</p>"
       : "") +
     "</section>"
   );
@@ -484,7 +484,7 @@ export function renderPoints(page, ns, catalog, destination) {
   const entries = itemsOf(page);
   return (
     "<section class=\"points\"><h3>Recovery points</h3>" +
-    "<p class=\"note\">" + esc(TWO_AXES_SENTENCE) + "</p>" +
+    "<p class=\"note\">" + messageText(TWO_AXES_SENTENCE) + "</p>" +
     table(
       ["RESTORE", "POINT", "RECOVERY POINT", "AVAILABILITY", "VERIFICATION", "LOCATION", "SIGNER",
         "REMEDY"],
@@ -506,11 +506,11 @@ export function renderPoints(page, ns, catalog, destination) {
     // like the whole window (review F9). This build follows no cursor here.
     (cursorOf(page) === null
       ? ""
-      : "<p class=\"note\" data-more-points=\"true\">" + esc(MORE_POINTS_SENTENCE) + "</p>") +
-    "<p class=\"note\">" + esc(POINT_BINDING_SENTENCE) + "</p>" +
+      : "<p class=\"note\" data-more-points=\"true\">" + messageText(MORE_POINTS_SENTENCE) + "</p>") +
+    "<p class=\"note\">" + messageText(POINT_BINDING_SENTENCE) + "</p>" +
     (entries.some((entry) => isRedacted((entry || {}).receiptKey))
       ? "<p class=\"complaint\" data-redacted-binding=\"true\">" +
-        esc(POINT_BINDING_REDACTED_SENTENCE) + "</p>"
+        messageText(POINT_BINDING_REDACTED_SENTENCE) + "</p>"
       : "") +
     "</section>"
   );
@@ -621,7 +621,7 @@ export function renderTrustSnippet(signers) {
   lines.push("kubectl --context <ctx> apply -f trustpolicy.yml");
   return (
     "<section class=\"check\"><h3>Trusting this key is a cluster-admin step</h3>" +
-    "<p class=\"note\">This page shows the document and does not apply it. `trustpolicies` is " +
+    "<p class=\"note\">This page shows the document and does not apply it. <code>trustpolicies</code> is " +
     "cluster-scoped, no page in this tree may write it, and the product API serves no trust " +
     "write at all in v1.</p>" +
     copyBlock(lines) +

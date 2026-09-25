@@ -118,6 +118,7 @@ import {
   prefixOf,
   preflightSentence,
   replace,
+  replaceInPlace,
   rfc3339,
   staleReasonLine,
   table,
@@ -2735,7 +2736,7 @@ export function renderPreflightStep(state, prepared) {
     "<p class=\"note\">" + esc(READINESS_BINDING_SENTENCE) + "</p>" +
     (readiness.unavailable === true
       ? "<p class=\"note\" id=\"restore-readiness-unavailable\">" +
-        cell(readiness.unavailableReason) + "</p>"
+        messageText(readiness.unavailableReason) + "</p>"
       : "<form id=\"restore-readiness-form\" novalidate" +
         (pending ? " aria-busy=\"true\"" : "") + ">" +
         "<fieldset class=\"form-body\"" + (pending ? " disabled" : "") + ">" +
@@ -4578,6 +4579,7 @@ export async function mountRestoreWizard(node, ns, params, parse, deps, lifecycl
       }
     }
     await renderAndWire(node, state, parse, api, lifecycle);
+    openAtNamedStep(node, state, selection);
   } catch (error) {
     if (!cancelled(error, lifecycle) && active(lifecycle)) {
       replace(node, errorBox(error));
@@ -4760,6 +4762,7 @@ async function mountCatalogPoint(node, ns, selection, parse, api, lifecycle, clu
     }
   }
   await renderAndWire(node, state, parse, api, lifecycle);
+  openAtNamedStep(node, state, selection);
 }
 
 /** THE REFUSAL a catalog point that cannot be offered gets: the catalog and the
@@ -4980,7 +4983,15 @@ async function renderAndWire(node, state, parse, api, lifecycle, landing) {
   if (!active(lifecycle)) {
     return false;
   }
-  replace(node, parse(renderPreparedWizard(state, prepared)));
+  // THE STEP THE READER IS ON, REPAINTED, KEEPS THEIR PLACE (P16): a follow's
+  // answer, a click's pending and settled states, an edit re-rendering its own
+  // step. A step that was not the one on screen -- the first paint, Next,
+  // Back, the stepper, a refused submit jumping to its field -- is new
+  // content, and opens where `showWizardStep` puts it (the P16 review's HIGH).
+  const step = shownStep(state);
+  (state.paintedStep === step ? replaceInPlace : replace)(
+    node, parse(renderPreparedWizard(state, prepared)));
+  state.paintedStep = step;
   wire(node, state, parse, api, lifecycle, prepared);
   return true;
 }
@@ -5001,12 +5012,40 @@ export async function showWizardStep(node, state, parse, api, lifecycle, index) 
   const section = node.querySelector("#" + STEPS[index].id);
   if (section !== null && typeof section.focus === "function") {
     section.focus({ preventScroll: true });
-    if (typeof section.scrollIntoView === "function") {
-      section.scrollIntoView({ block: "nearest" });
-    }
+    showStepStart(section);
   }
   announce("Step " + String(index + 1) + " of " + String(STEPS.length) + ": " +
     STEPS[index].title);
+  return true;
+}
+
+/** A DEEP LINK TO A STEP OPENS AT THAT STEP'S HEADING (`&step=`, MCP-29), by
+ *  the rule Next and Back follow ([`showStepStart`]). Focus is left where the
+ *  route put it. */
+function openAtNamedStep(node, state, selection) {
+  if (stepIndexOf((selection || {}).step) === 0 || !Number.isInteger((state || {}).step)) {
+    return;
+  }
+  const section = node.querySelector("#" + STEPS[shownStep(state)].id);
+  if (section !== null) {
+    showStepStart(section);
+  }
+}
+
+/** THE STEP OPENS AT ITS HEADING (the P16 review's HIGH): Next, Back, the
+ *  stepper and a `&step=` deep link scroll the step's section to the top of
+ *  the viewport, its heading just under it -- explicitly, and never by leaving
+ *  it to the browser. The old `nearest` did nothing for a section taller than
+ *  the viewport that already covered it, which every long step is: once the
+ *  swap stopped moving the page, Next at the bottom of step 1 left step 2
+ *  open 1935 px below its heading, and a swap that clamped the page to 0 left
+ *  the heading at 605 px of an 844 px phone under the masthead and the
+ *  stepper. Exported for the suite. */
+export function showStepStart(section) {
+  if (section === null || section === undefined || typeof section.scrollIntoView !== "function") {
+    return false;
+  }
+  section.scrollIntoView({ block: "start" });
   return true;
 }
 
@@ -5677,6 +5716,9 @@ function wireRestoreReadiness(node, state, parse, api, lifecycle, prepared) {
     renderAndWire(node, state, parse, api, lifecycle, true).then((painted) => {
       if (painted === true) {
         keepStatusInView(node, "#restore-readiness-status");
+        // THE ASK: where the reader is once the status is shown. The follow
+        // keeps the status clear only while the page is still there.
+        state.readinessMark = scrollMark(node);
       }
     });
     if (record.phase === "succeeded") {
@@ -5748,8 +5790,73 @@ export function keepStatusInView(node, selector) {
     return false;
   }
   status.scrollIntoView({ block: "nearest" });
+  clearOfWizardNav(node, status);
   return true;
 }
+
+/** WHAT `nearest` LEAVES UNDER THE BAR IS MOVED ABOVE IT (P16's sweep of R3-1).
+ *  Chrome honours `scroll-margin-bottom` only when `scrollIntoView` scrolls,
+ *  and with `block: "nearest"` it does not scroll an element whose border box
+ *  is already inside the viewport: a focused status at 734-771 px, under the
+ *  sticky bar whose top was at 738, stayed there (measured in Chromium over
+ *  the real console at 390 x 844). So after the nearest edge is honoured, an
+ *  element whose bottom is still below the bar's top is scrolled up until its
+ *  bottom sits where the scroll margin puts it -- never past its own top.
+ *  Nothing moves where the page cannot measure (the suites' fakes, unless a
+ *  row gives them a layout). Exported for the suite. */
+export function clearOfWizardNav(node, element) {
+  const nav = node === null || node === undefined || typeof node.querySelector !== "function"
+    ? null
+    : node.querySelector(".wizard-nav");
+  const doc = element === null || element === undefined ? null : element.ownerDocument;
+  const view = doc ? doc.defaultView : null;
+  if (nav === null || nav === undefined || !view || typeof view.scrollBy !== "function" ||
+    typeof nav.getBoundingClientRect !== "function" ||
+    typeof element.getBoundingClientRect !== "function") {
+    return false;
+  }
+  const bar = nav.getBoundingClientRect();
+  const box = element.getBoundingClientRect();
+  if (box.bottom <= bar.top || box.top <= 0) {
+    return false;
+  }
+  const computed = typeof view.getComputedStyle === "function" ? view.getComputedStyle(element) : null;
+  const margin = parseFloat(computed === null ? "" : computed.scrollMarginBottom) || 0;
+  const height = typeof view.innerHeight === "number" ? view.innerHeight : bar.bottom;
+  const room = Math.min(height - margin, bar.top);
+  const by = Math.min(box.bottom - room, box.top);
+  if (by <= 0) {
+    return false;
+  }
+  view.scrollBy(0, by);
+  return true;
+}
+
+/** Where the page is, as the step-5 follow compares it: the window's
+ *  offset, or `null` where the page has no window (the suites' fakes). */
+function scrollMark(node) {
+  const doc = node === null || node === undefined ? null : node.ownerDocument;
+  const view = doc ? doc.defaultView : null;
+  return view && typeof view.scrollY === "number" ? view.scrollY : null;
+}
+
+/** A READER WHO SCROLLED SINCE THE ASK IS NOT MOVED (the P16 review's
+ *  MEDIUM). The follow keeps the focused status clear of the footer only
+ *  while the page is where the ask -- or the follow's own last repair -- left
+ *  it. Once the reader has scrolled, even to put the status behind the bar,
+ *  their offset is theirs until the next ask: the repaint keeps it
+ *  (`replaceInPlace`) and nothing else moves it. `null` marks are the fakes'
+ *  (no window): the status is asked for, as before. Exported for the suite. */
+export function readerStayed(node, mark) {
+  if (mark === READER_LEFT) {
+    return false;
+  }
+  const now = scrollMark(node);
+  return mark === null || mark === undefined || now === null || Math.abs(now - mark) < 1;
+}
+
+/** The mark a reader who scrolled away leaves, until the next ask. */
+const READER_LEFT = Object.freeze({ left: true });
 
 /** BRINGS STEP 5'S VERDICT HEAD INTO VIEW ABOVE THE STICKY FOOTER when its
  *  check turns terminal (review L7 of MCP round 3's R3-1). The status line is
@@ -5777,6 +5884,7 @@ export function keepVerdictInView(node, check) {
     return false;
   }
   head.scrollIntoView({ block: "nearest" });
+  clearOfWizardNav(node, head);
   return true;
 }
 
@@ -5854,7 +5962,19 @@ function followRestoreReadiness(node, state, parse, api, lifecycle) {
         followStopped(next) !== followStopped(now);
       state.readiness = Object.assign({}, state.readiness, { preflight: next });
       if (moved) {
+        // WHETHER THE READER HAS SCROLLED SINCE THE ASK, before this repaint:
+        // one who has -- away from the status, or behind the bar -- is not
+        // pulled back to it every two seconds (the P16 review's MEDIUM).
+        const stayed = readerStayed(node, state.readinessMark);
         const painted = await renderAndWire(node, state, parse, api, lifecycle, true);
+        // EVERY REPAINT KEEPS THE FOCUSED STATUS ABOVE THE FOOTER (P16), not
+        // only the click's: `pending -> running` repainted step 5 with nothing
+        // after it, and the page the swap had moved stayed moved -- the status
+        // at 943 px of an 844 px viewport until the verdict.
+        if (painted === true && stayed) {
+          keepStatusInView(node, "#restore-readiness-status");
+        }
+        state.readinessMark = stayed ? scrollMark(node) : READER_LEFT;
         // THE VERDICT, WHEN IT LANDS, IS BROUGHT ABOVE THE FOOTER TOO (review
         // L7 of R3-1): the status line was kept clear at the click, and the
         // verdict under it arrives later, through this repaint.

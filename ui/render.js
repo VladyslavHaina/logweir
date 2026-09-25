@@ -59,7 +59,7 @@ export function clear(node) {
   return node;
 }
 
-/** Replaces a node's children in one step -- AND KEEPS THE READER'S PLACE.
+/** Replaces a node's children in one step -- AND KEEPS THE READER'S FOCUS.
  *
  *  FOCUS SURVIVES A RE-RENDER (PLAT-18.2; the PLAT-10 review's LOW). Every
  *  page here re-renders by replacing its whole subtree: the restore wizard on
@@ -74,6 +74,11 @@ export function clear(node) {
  *  `tabindex="-1"`), which is where a screen reader expects a re-read page to
  *  start.
  *
+ *  THE SCROLL IS NOT TOUCHED HERE: this is the swap for NEW content -- a route
+ *  mount, a wizard step, a list -- which opens where its page puts it. A
+ *  repaint of the SAME view, an answer landing under a reader who is reading
+ *  it, is [`replaceInPlace`].
+ *
  *  Nothing here runs without a document: the node suites drive `replace`
  *  through fake nodes that have no `ownerDocument`, and for them this is the
  *  plain replace it always was. */
@@ -84,6 +89,86 @@ export function replace(node, children) {
     restoreFocus(node, kept);
   }
   return node;
+}
+
+/** [`replace`] for a repaint of the SAME view -- AND THE PAGE STAYS WHERE IT
+ *  WAS (poc-upgrade-4's P16). Emptying `node` and filling it again moved the
+ *  page under the reader: the browser lays the emptied view out, or loses the
+ *  scroll anchor it had chosen inside it, and the window's offset came back
+ *  smaller -- restore step 5's first follow read took 282 px to 0 and left the
+ *  focused status below the fold, where no later read brought it back. So the
+ *  offset is read before the swap and put back after it when the swap moved
+ *  it, and when focus was inside `node` on an element that is there again,
+ *  that element is kept where it sat in the viewport ([`readingPlace`],
+ *  [`keepReadingPlace`]).
+ *
+ *  ONLY FOR THE SAME VIEW (the P16 review's HIGH): a follow's repaint, a
+ *  click's pending and settled repaints, an edit re-rendering the step it was
+ *  made in. New content keeps [`replace`] -- the first cut kept the place in
+ *  every swap, and the wizard's Next opened step 2 1935 px below its heading,
+ *  at the offset step 1 had been read to. */
+export function replaceInPlace(node, children) {
+  const kept = focusWithin(node);
+  const place = readingPlace(node, kept);
+  append(clear(node), children);
+  if (kept !== null) {
+    restoreFocus(node, kept);
+  }
+  keepReadingPlace(node, place);
+  return node;
+}
+
+/** Where the reader is, as something that survives a re-render of `node`:
+ *  the window's scroll offset and, when focus is inside `node` on an element
+ *  with an id ([`focusWithin`]'s `kept`), where that element's top sits in the
+ *  viewport. `null` where there is no window to scroll (the node suites'
+ *  fakes). */
+export function readingPlace(node, kept) {
+  const doc = node && node.ownerDocument;
+  const view = doc && doc.defaultView;
+  if (!view || typeof view.scrollTo !== "function" ||
+    typeof view.scrollX !== "number" || typeof view.scrollY !== "number") {
+    return null;
+  }
+  const place = { x: view.scrollX, y: view.scrollY, id: null, top: 0 };
+  const id = kept !== null && kept !== undefined && typeof kept.id === "string" ? kept.id : null;
+  const focused = id === null || typeof doc.getElementById !== "function"
+    ? null
+    : doc.getElementById(id);
+  if (focused !== null && focused !== undefined &&
+    typeof focused.getBoundingClientRect === "function") {
+    place.id = id;
+    place.top = focused.getBoundingClientRect().top;
+  }
+  return place;
+}
+
+/** Puts the reader back where [`readingPlace`] found them, after `node` was
+ *  re-rendered: the window's offset, when the swap moved it, and then -- when
+ *  the element focus was on is in the new subtree -- the page is moved by as
+ *  much as that element moved, so it sits where it sat. Nothing is scrolled
+ *  when nothing moved: a scroll the reader is in the middle of is not
+ *  interrupted by a repaint that left the page alone. */
+export function keepReadingPlace(node, place) {
+  if (place === null || place === undefined) {
+    return false;
+  }
+  const doc = node.ownerDocument;
+  const view = doc.defaultView;
+  if (view.scrollX !== place.x || view.scrollY !== place.y) {
+    view.scrollTo(place.x, place.y);
+  }
+  if (place.id !== null && typeof view.scrollBy === "function") {
+    const again = doc.getElementById(place.id);
+    if (again !== null && again !== undefined && typeof again.getBoundingClientRect === "function" &&
+      (typeof node.contains !== "function" || node.contains(again))) {
+      const moved = again.getBoundingClientRect().top - place.top;
+      if (Math.abs(moved) >= 1) {
+        view.scrollBy(0, moved);
+      }
+    }
+  }
+  return true;
 }
 
 /** Where focus is inside `node`, as something that survives a re-render:
@@ -158,8 +243,16 @@ export function restoreFocus(node, kept) {
   if (!doc || kept === null || kept === undefined) {
     return false;
   }
+  // A TARGET THE BROWSER REFUSES IS NOT A LANDING (P16's sweep): an empty
+  // status region is `display: none` (`.form-status:empty`), and `focus()` on
+  // it does nothing and says nothing -- Test access and the schedule form's
+  // Check readiness left focus on the body that way. So a target counts only
+  // when focus is on it afterwards, and otherwise the next one is tried.
   const take = (target) => {
     target.focus({ preventScroll: true });
+    if (doc.activeElement !== target) {
+      return false;
+    }
     if (kept.selection !== null && typeof target.setSelectionRange === "function") {
       try {
         target.setSelectionRange(kept.selection[0], kept.selection[1]);
@@ -170,8 +263,8 @@ export function restoreFocus(node, kept) {
     return true;
   };
   const byId = kept.id === null ? null : doc.getElementById(kept.id);
-  if (byId !== null && node.contains(byId) && canTakeFocus(byId)) {
-    return take(byId);
+  if (byId !== null && node.contains(byId) && canTakeFocus(byId) && take(byId)) {
+    return true;
   }
   if (kept.formIndex !== -1 && typeof node.querySelectorAll === "function") {
     const form = Array.from(node.querySelectorAll("form"))[kept.formIndex] || null;
@@ -180,12 +273,11 @@ export function restoreFocus(node, kept) {
       if (!kept.onStatus && kept.controlIndex !== -1) {
         const same = Array.from(form.querySelectorAll(FOCUSABLE))[kept.controlIndex] || null;
         if (same !== null && String(same.tagName) === kept.tag && canTakeFocus(same) &&
-          (kept.id === null || same.getAttribute("id") === kept.id)) {
-          return take(same);
+          (kept.id === null || same.getAttribute("id") === kept.id) && take(same)) {
+          return true;
         }
       }
-      if (canTakeFocus(status)) {
-        status.focus({ preventScroll: true });
+      if (canTakeFocus(status) && take(status)) {
         return true;
       }
     }
@@ -223,7 +315,11 @@ export function disableKeepingFocus(control, disabled, fallback) {
       if (candidate !== null && candidate !== undefined && candidate !== control &&
         !control.contains(candidate) && typeof candidate.focus === "function") {
         candidate.focus({ preventScroll: true });
-        break;
+        // A REFUSED TARGET IS NOT A LANDING ([`restoreFocus`]'s rule): the
+        // schedule form's empty status is not rendered, so the next is tried.
+        if (doc.activeElement === candidate) {
+          break;
+        }
       }
     }
   }
@@ -318,11 +414,33 @@ export function errorParts(error) {
  *  This function neither softens it nor explains it away; it says in words
  *  what the number means before it shows the number. A sign-in refusal from
  *  the product API carries a Sign in link that returns to this address. */
+/** [`messageText`]'s rule for the DOM half, which writes no markup: the
+ *  PAIRED backticked spans of `value` as `<code>` elements and the rest as
+ *  text (O2, R2-10's class) -- this page's own refusals say "the console
+ *  (`logweir-api`)", and the error box printed the backticks. */
+export function messageNodes(value) {
+  const text = typeof value === "string" ? value : "";
+  const parts = text.split("`");
+  if (parts.length < 3) {
+    return text;
+  }
+  const out = [];
+  for (let i = 0; i < parts.length; i += 1) {
+    const last = i === parts.length - 1;
+    if (i % 2 === 1 && !last) {
+      out.push(el("code", null, parts[i]));
+    } else if (parts[i].length > 0 || i % 2 === 1) {
+      out.push((i % 2 === 1 ? "`" : "") + parts[i]);
+    }
+  }
+  return out;
+}
+
 export function errorBox(error) {
   const parts = errorParts(error);
   return el("div", { class: "error", role: "alert" }, [
     el("p", { class: "error-title" }, parts.title),
-    el("p", { class: "error-message" }, parts.message),
+    el("p", { class: "error-message" }, messageNodes(parts.message)),
     parts.detail.length > 0 ? el("span", { class: "error-status" }, parts.detail) : null,
     parts.signIn
       ? el("p", { class: "actions" },
@@ -1800,6 +1918,14 @@ export function messageText(value) {
   return out;
 }
 
+/** A message this page or a server wrote, escaped, with its paired
+ *  backticked spans as code -- and the empty string for no message, where
+ *  [`messageText`] would print the absent marker (O2, R2-10's class: the
+ *  error box and the field-error line printed the backticks). */
+export function codeSpans(value) {
+  return typeof value === "string" && value.length > 0 ? messageText(value) : esc(value);
+}
+
 export function checkTable(checks, empty) {
   // NINE FIELDS IN FOUR CELLS (MCP round 2, R2-3): nine columns were more
   // than a thousand pixels wider than step 5's card at 1440 px, because the
@@ -2165,7 +2291,7 @@ export function errorBlock(error, live) {
   return (
     "<div class=\"error\"" + (live === false ? "" : " role=\"alert\"") + ">" +
     "<p class=\"error-title\">" + esc(parts.title) + "</p>" +
-    "<p class=\"error-message\">" + esc(parts.message) + "</p>" +
+    "<p class=\"error-message\">" + codeSpans(parts.message) + "</p>" +
     (parts.detail.length > 0
       ? "<span class=\"error-status\">" + esc(parts.detail) + "</span>"
       : "") +
@@ -2193,7 +2319,7 @@ export function fieldErrorLine(id, messages) {
   }
   return (
     "<p class=\"field-error\" id=\"" + esc(id) + "-error\">" +
-    messages.map((m) => esc(m)).join(" ") + "</p>"
+    messages.map((m) => codeSpans(m)).join(" ") + "</p>"
   );
 }
 

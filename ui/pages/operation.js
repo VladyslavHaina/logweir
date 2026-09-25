@@ -53,6 +53,7 @@ import {
   errorBlock,
   esc,
   facts,
+  messageText,
   phaseBadge,
   replace,
   restoreNeedsRole,
@@ -255,12 +256,12 @@ export const NO_RUNNER_DETAIL_SENTENCE =
 export function renderState(v) {
   if (v.state === null) {
     return "<p class=\"note\" data-no-normalized-state=\"true\">" +
-      esc(LEGACY_OPERATION_SENTENCE) + "</p>" +
+      messageText(LEGACY_OPERATION_SENTENCE) + "</p>" +
       (v.phase ? "<p class=\"phase\">controller phase " + phaseBadge(v.phase) + "</p>" : "");
   }
   return (
     "<p class=\"state\">" + stateBadge(v.state) + "</p>" +
-    (v.state === "unknown" ? "<p class=\"note\">" + esc(STATE_UNKNOWN_SENTENCE) + "</p>" : "")
+    (v.state === "unknown" ? "<p class=\"note\">" + messageText(STATE_UNKNOWN_SENTENCE) + "</p>" : "")
   );
 }
 

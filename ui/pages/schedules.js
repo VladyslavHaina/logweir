@@ -83,10 +83,12 @@ import {
   fieldErrorLine,
   invalidAttributes,
   listFooter,
+  messageText,
   mutationStatus,
   nextRunsPanel,
   runPhaseBadge,
   replace,
+  replaceInPlace,
   restoreNeedsRole,
   restorePointLink,
   revisionLine,
@@ -1179,7 +1181,7 @@ export function renderReadinessPanel(view) {
     "<section class=\"readiness\" id=\"backup-readiness\"><h3>Backup readiness</h3>" +
     "<p class=\"note\">" + esc(READINESS_SENTENCE) + "</p>" +
     (v.unavailable === true
-      ? "<p class=\"note\" id=\"readiness-unavailable\">" + cell(v.unavailableReason) + "</p>"
+      ? "<p class=\"note\" id=\"readiness-unavailable\">" + messageText(v.unavailableReason) + "</p>"
       : (v.mayOperate === false
         ? "<p class=\"note\">This login may read readiness results in this namespace and not " +
           "start one.</p>"
@@ -1510,7 +1512,7 @@ function renderCreateReadiness(view) {
     "<p class=\"help\">" + esc(READINESS_SENTENCE) + "</p>" +
     (v.readinessUnavailable === true
       ? "<p class=\"note\" id=\"schedule-readiness-unavailable\">" +
-        cell(v.readinessUnavailableReason) + "</p>"
+        messageText(v.readinessUnavailableReason) + "</p>"
       : (dynamic
         ? "<p class=\"note\" id=\"schedule-readiness-dynamic\">A backup readiness check " +
           "needs concrete topic names. This schedule discovers all user topics at run time, so " +
@@ -1526,7 +1528,11 @@ function renderCreateReadiness(view) {
           // could each renew the intent and create a Preflight.
           (v.readinessInFlight === true ? " disabled aria-busy=\"true\"" : "") + ">" +
           "Check readiness</button></div>"))) +
-    "<div class=\"readiness-verdict\" id=\"schedule-readiness-verdict\">" +
+    // THE VERDICT'S REGION TAKES FOCUS (P16's sweep): Check readiness is
+    // disabled while its request is in flight, and the form's own status --
+    // the create's, empty then, so not rendered -- could not take the focus
+    // it gave up. Focus moves here, where the answer is written.
+    "<div class=\"readiness-verdict\" id=\"schedule-readiness-verdict\" tabindex=\"-1\">" +
     renderReadinessVerdict(v) +
     "</div></fieldset>"
   );
@@ -2126,7 +2132,7 @@ function paintReadinessPanel(node, ns, parse, lifecycle, api, merged) {
   // be replaced, and carried in the view the next repaint starts from.
   const typed = readReadinessInput(node, merged);
   const next = typed === null ? merged : Object.assign({}, merged, { input: typed });
-  replace(slot, parse(renderReadinessPanel(readinessView(ns, next))));
+  replaceInPlace(slot, parse(renderReadinessPanel(readinessView(ns, next))));
   wireReadiness(node, ns, parse, lifecycle, api, next);
 }
 
@@ -2517,7 +2523,7 @@ function wireCreate(node, ns, parse, lifecycle, api, clusters, own) {
     if (slot === null) {
       return;
     }
-    replace(slot, parse(renderScheduleForm(scheduleFormView(ns, clusters, held.now,
+    replaceInPlace(slot, parse(renderScheduleForm(scheduleFormView(ns, clusters, held.now,
       held.freshSeconds, held))));
     wireCreate(node, ns, parse, lifecycle, api, clusters, held);
   };
@@ -2533,7 +2539,7 @@ function wireCreate(node, ns, parse, lifecycle, api, clusters, own) {
     if ((held.readiness || held.readinessError) && held.readinessRequest !== undefined) {
       const slot = node.querySelector("#schedule-readiness-verdict");
       if (slot !== null) {
-        replace(slot, parse(renderReadinessVerdict({
+        replaceInPlace(slot, parse(renderReadinessVerdict({
           readiness: held.readiness || null, readinessError: held.readinessError || null,
           readinessRequest: held.readinessRequest, draft: values,
         })));
@@ -2650,7 +2656,7 @@ function wireCreate(node, ns, parse, lifecycle, api, clusters, own) {
       repaint();
       return;
     }
-    disableKeepingFocus(check, true);
+    disableKeepingFocus(check, true, node.querySelector("#schedule-readiness-verdict"));
     held.readinessInFlight = true;
     // THE VERDICT IS BOUND TO THE REQUEST THAT PRODUCED IT (review MEDIUM-3):
     // it is shown as current only while the form still describes that
@@ -2795,7 +2801,7 @@ function followCreateReadiness(node, ns, parse, lifecycle, api, clusters, held) 
       if (slot === null) {
         return;
       }
-      replace(slot, parse(renderScheduleForm(scheduleFormView(ns, clusters, held.now,
+      replaceInPlace(slot, parse(renderScheduleForm(scheduleFormView(ns, clusters, held.now,
         held.freshSeconds, held))));
       wireCreate(node, ns, parse, lifecycle, api, clusters, held);
     },
@@ -4148,7 +4154,7 @@ export function renderRunNowPanel(view) {
     "<p class=\"note\">" + esc(RUN_NOW_SENTENCE) + "</p>" +
     (v.unavailable === true
       ? "<p class=\"note\" data-run-now-unavailable=\"" + esc(name) + "\">" +
-        cell(v.unavailableReason) + "</p>"
+        messageText(v.unavailableReason) + "</p>"
       : "<form class=\"run-now-form\" data-name=\"" + esc(name) + "\" novalidate" +
         (pending ? " aria-busy=\"true\"" : "") + ">" +
         (suspended
