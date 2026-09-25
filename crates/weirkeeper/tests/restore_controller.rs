@@ -9025,4 +9025,178 @@ mod p12_controller_read_retry {
         assert_eq!(outcome.requeue, Requeue::AwaitChange);
         assert_eq!(asked.load(Ordering::SeqCst), 2);
     }
+
+    /// **REVIEW M1 — THE REVIEWER'S PROBE A, INVERTED.** An inline restore's
+    /// retry is scheduled (+1 m); the archive handle is then removed, or
+    /// re-pointed at another bucket. The run can no longer be read, so the
+    /// first pass SETTLES it — `NotAttempted` with the handle's own sentence,
+    /// `retryAfter` cleared — and waits for a change. Before this, a past
+    /// `retryAfter` on such a run requeued it every second, for ever, with a
+    /// `GET` of its runner Job each time.
+    ///
+    /// KILLS: the requeue computed from the controller read's observation where
+    /// the read can no longer happen (the `After(1)` loop); a settle that keeps
+    /// `retryAfter` (the next pass would loop again).
+    #[tokio::test]
+    async fn a_scheduled_read_whose_handle_leaves_settles_and_waits_for_a_change() {
+        let credential = Arc::new(AtomicBool::new(false));
+        let asked = Arc::new(AtomicUsize::new(0));
+        let memory = ReadMemory::new();
+        let object: Restore = serde_json::from_str(&restore_json(
+            &legacy_plan_with_evidence_in("kafka-backups"),
+            APPROVAL,
+            NAME,
+        ))
+        .expect("the fixture is a Restore");
+        let (r, _, outcome) = pass(&object, &credential, &asked, &memory, now()).await;
+        assert_eq!(outcome.requeue, Requeue::After(60));
+        let oracle = |_key: String| -> BoxFuture<'static, Option<ScorecardObservation>> {
+            Box::pin(async { None })
+        };
+        let go = |restore: Restore, handle: Option<&'static str>, later: i64| {
+            let fresh = ReadMemory::new();
+            async move {
+                let (client, _rec, bodies) = mock_client_recording_bodies(terminal_routes());
+                let outcome = reconcile_restore_rereading(
+                    &restore,
+                    &client,
+                    &oracle,
+                    &verdict_oracle(VerificationVerdict::Valid),
+                    now() + secs(later),
+                    &job::RunnerImage::default(),
+                    &logweir_core::approval_policy::ApprovalPolicySet::default(),
+                    handle,
+                    &fresh,
+                )
+                .await
+                .expect("the reconcile completes");
+                let written = patched_statuses(&bodies.lock().expect("readable"));
+                (fold(&restore, &written), written, outcome)
+            }
+        };
+        for handle in [None, Some("s3://another-bucket/logweir")] {
+            // The first pass after the handle left — before OR after the
+            // scheduled instant — settles the schedule.
+            for first in [30_i64, 61] {
+                let (settled, written, outcome) = go(r.clone(), handle, first).await;
+                assert_eq!(written.len(), 1, "{handle:?} t+{first}s: {written:?}");
+                assert_eq!(
+                    outcome.requeue,
+                    Requeue::AwaitChange,
+                    "{handle:?} t+{first}s"
+                );
+                let status = status_json(&settled);
+                let v = &status["evidence"]["verification"];
+                assert_eq!(v["result"], json!("NotAttempted"), "{status}");
+                assert!(
+                    !v["detail"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .contains("starts at"),
+                    "{handle:?}: no attempt is advertised: {v}"
+                );
+                assert!(status["evidence"]["observation"]["retryAfter"].is_null());
+                assert!(
+                    verdict_owed(&settled).is_none(),
+                    "a rehearsal over it does not wait an hour for an attempt that cannot come"
+                );
+                // And from then on: no write, no timer.
+                for later in [62_i64, 3_600, 86_400] {
+                    let (_, written, outcome) = go(settled.clone(), handle, later).await;
+                    assert!(written.is_empty(), "{handle:?} t+{later}s: {written:?}");
+                    assert_eq!(
+                        outcome.requeue,
+                        Requeue::AwaitChange,
+                        "{handle:?} t+{later}s: no one-second requeue"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            asked.load(Ordering::SeqCst),
+            1,
+            "nothing was read after the handle left"
+        );
+    }
+
+    /// **REVIEW T1/R1 — THE TERMINAL PASS'S CHOICE, TABLED.** PoC P12's
+    /// class-sweep item: a `ControllerIdentity` evidence destination whose
+    /// scorecard read produced nothing now RECORDS `NotAttempted` naming the
+    /// destination, as a transient failure that the schedule reads again —
+    /// where it used to write no block and could never be retried. Every other
+    /// source keeps its rule.
+    ///
+    /// KILLS: narrowing the unread arm back to the global handle (the
+    /// destination row writes nothing again); verifying without a digest.
+    #[test]
+    fn the_terminal_evidence_choice_for_every_source() {
+        use weirkeeper::controllers::backup::{controller_read_mode, EvidenceSource};
+        use weirkeeper::controllers::restore::{terminal_evidence, TerminalEvidence};
+        use weirkeeper::evidence_fetch::{scheduled, MODE_CONTROLLER_IDENTITY};
+        use weirkeeper::verification::{not_attempted_class, EvidenceRef, NotAttemptedClass};
+        let reference = || EvidenceRef {
+            namespace: NS.to_string(),
+            payload_key: SCORECARD_KEY.to_string(),
+            payload_sha256: format!("sha256:{}", "c".repeat(64)),
+            sidecar_key: SIDECAR_KEY.to_string(),
+            payload_type: logweir_verify::PAYLOAD_TYPE_SCORECARD,
+        };
+        let destination = EvidenceSource::Destination(Arc::new(Store::in_memory("logweir/")));
+
+        // THE DESTINATION'S UNREAD SCORECARD IS RECORDED, AND SCHEDULED.
+        let TerminalEvidence::Record(unread) = terminal_evidence(
+            &destination,
+            None,
+            true,
+            SCORECARD_KEY,
+            Some("evidence-dest"),
+        ) else {
+            panic!("a ControllerIdentity read that produced nothing is recorded");
+        };
+        assert_eq!(unread.result, VerificationVerdict::NotAttempted);
+        let detail = unread.detail.clone().unwrap_or_default();
+        assert!(
+            detail.contains("BackupDestination evidence-dest"),
+            "{detail}"
+        );
+        assert_eq!(not_attempted_class(&detail), NotAttemptedClass::Transient);
+        assert_eq!(
+            controller_read_mode(&destination),
+            Some(MODE_CONTROLLER_IDENTITY)
+        );
+        let (_, retry) = scheduled(unread, 1, now());
+        assert_eq!(
+            retry,
+            Some(now() + secs(60)),
+            "attempt 2 is scheduled at +1 m"
+        );
+
+        // The global handle's twin (P5).
+        assert!(matches!(
+            terminal_evidence(&EvidenceSource::GlobalHandle, None, true, SCORECARD_KEY, None),
+            TerminalEvidence::Record(r) if r.result == VerificationVerdict::NotAttempted
+        ));
+        // A digest is verified through the source's own handle.
+        for source in [&destination, &EvidenceSource::GlobalHandle] {
+            assert!(matches!(
+                terminal_evidence(source, Some(reference()), true, SCORECARD_KEY, None),
+                TerminalEvidence::Verify(_)
+            ));
+        }
+        // A refusal records its own sentence, when a scorecard was written.
+        let refused = EvidenceSource::NotAttempted {
+            detail: "the refusal's own sentence".to_string(),
+        };
+        assert!(matches!(
+            terminal_evidence(&refused, None, true, SCORECARD_KEY, None),
+            TerminalEvidence::Record(r) if r.detail.as_deref() == Some("the refusal's own sentence")
+        ));
+        // GC11: no keys, nothing — whatever the source.
+        for source in [&destination, &EvidenceSource::GlobalHandle, &refused] {
+            assert!(matches!(
+                terminal_evidence(source, None, false, SCORECARD_KEY, None),
+                TerminalEvidence::Nothing
+            ));
+        }
+    }
 }

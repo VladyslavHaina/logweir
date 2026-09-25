@@ -1052,6 +1052,12 @@ pub const VERIFICATION_TASK_INCOMPLETE_PREFIX: &str = "the verification task did
 /// read, so it is read again on the retry schedule and then stops.
 pub const UNREAD_SCORECARD_PREFIX: &str = "the runner reported scorecard `";
 
+/// How a controller read's `NotAttempted` begins when the receipt VERIFIED but
+/// the archive observation that carries its covered window did not answer
+/// (review L1) — transient: a `Valid` without its window would be final and
+/// would never make the run a recovery point, so the attempt is retried.
+pub const RECEIPT_WINDOW_UNREAD_PREFIX: &str = "the receipt verified, but ";
+
 /// How an evidence-fetch Job's relay begins when the store answered its grant
 /// with an error code that is not `NotFound` — a denial, a timeout: transient,
 /// and the Job is retried on D2 §3.9 step 5's schedule (PoC P12's class
@@ -1111,6 +1117,7 @@ pub fn not_attempted_class(detail: &str) -> NotAttemptedClass {
         UNREAD_SCORECARD_PREFIX,
         EVIDENCE_FETCH_UNREADABLE_PREFIX,
         EVIDENCE_FETCH_RELAY_PREFIX,
+        RECEIPT_WINDOW_UNREAD_PREFIX,
     ];
     if transient.iter().any(|prefix| detail.starts_with(prefix)) {
         NotAttemptedClass::Transient

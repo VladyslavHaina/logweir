@@ -5889,6 +5889,57 @@ mod p12_not_attempted_classes {
             ),
             None
         );
+        // REVIEW L4: a destination-backed run whose controller read ended on a
+        // CONFIGURATION refusal is not re-read on every start; a transient
+        // read failure is.
+        let spent_destination = obs(MODE_CONTROLLER_IDENTITY, MAX_ATTEMPTS.into(), None);
+        assert_eq!(
+            owed(
+                "NotAttempted",
+                NO_SIGNING_KEYS_DETAIL,
+                Some(&spent_destination),
+                false
+            ),
+            None
+        );
+        assert_eq!(
+            owed("NotAttempted", &imds, Some(&spent_destination), false),
+            Some(1)
+        );
+
+        // REVIEW M1: the plan's other answers.
+        use weirkeeper::evidence_fetch::{plan_controller_read, ControllerRead};
+        let plan = |o: Option<&EvidenceObservation>, readable: Result<(), String>| {
+            plan_controller_read(
+                Some("NotAttempted"),
+                Some(&imds),
+                o,
+                true,
+                readable,
+                at,
+                fresh,
+            )
+        };
+        assert_eq!(
+            plan(Some(&scheduled_later), Ok(())),
+            ControllerRead::Scheduled(at + chrono::Duration::seconds(30)),
+            "before retryAfter: scheduled, nothing read"
+        );
+        for o in [&scheduled_later, &scheduled_due] {
+            assert_eq!(
+                plan(Some(o), Err("the handle is gone".to_string())),
+                ControllerRead::Settle("the handle is gone".to_string()),
+                "a scheduled read that can no longer happen is settled, early or late"
+            );
+        }
+        for o in [None, Some(&spent)] {
+            assert_eq!(
+                plan(o, Err("the handle is gone".to_string())),
+                ControllerRead::Nothing,
+                "an unscheduled run that cannot be read is left as it is"
+            );
+        }
+
         // A process that has read it does not read it again.
         memory.mark("uid-1");
         assert_eq!(owed("NotAttempted", &imds, Some(&spent), true), None);

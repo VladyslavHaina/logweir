@@ -2162,10 +2162,20 @@ pub fn verdict_owed(restore: &Restore) -> Option<String> {
                 .and_then(|a| u32::try_from(a).ok())
                 .unwrap_or(1);
             let retry = observation.and_then(|o| o.retry_after.as_ref());
+            // THE CONTROLLER'S OWN READ SAYS SO IN ITS OWN WORDS (review I5):
+            // no Job relays anything on that path.
+            let controller_read = crate::evidence_fetch::is_controller_read(
+                observation.and_then(|o| o.mode.as_deref()),
+            );
             match retry {
                 Some(at) if attempt < crate::evidence_fetch::MAX_ATTEMPTS => Some(format!(
-                    "its evidence fetch attempt {attempt} did not relay the scorecard and attempt \
-                     {} is scheduled at {}",
+                    "{} attempt {attempt} did not read the scorecard and attempt {} is \
+                     scheduled at {}",
+                    if controller_read {
+                        "its controller evidence read"
+                    } else {
+                        "its evidence fetch"
+                    },
                     attempt + 1,
                     at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
                 )),

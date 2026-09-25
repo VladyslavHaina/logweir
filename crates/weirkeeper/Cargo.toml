@@ -231,8 +231,12 @@ futures.workspace = true
 # `signal` pulls `signal-hook-registry` and `mio`, both already in
 # `Cargo.lock`, so it adds no package either. `io-util` is the loopback health
 # listener's read/write (`health.rs`, chart gap G5): a feature of the same
-# resolved crate, with no dependency of its own.
-tokio = { workspace = true, features = ["signal", "io-util"] }
+# resolved crate, with no dependency of its own. `sync` is the semaphore that
+# bounds how many controller evidence reads one process runs at once
+# (`evidence_fetch::controller_read_permits`, PoC P12 review L2): a feature of
+# the same crate, already enabled by `hyper`, `kube-client` and `object_store`,
+# adding no package.
+tokio = { workspace = true, features = ["signal", "io-util", "sync"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 

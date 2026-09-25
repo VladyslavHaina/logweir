@@ -1511,6 +1511,16 @@ async fn an_existing_duplicate_withdraws_its_view_and_harvests_nothing() {
         after.get("pages").is_none(),
         "the object lists no page after the write: {after}"
     );
+    // REVIEW L5: `viewExpiresAt` goes with the pages. A `ProtectionPolicy`
+    // gates on it FIRST (`protection_policy::read_catalog`): left behind, the
+    // withdrawn view read as a FRESH, EMPTY one and raised "no available
+    // point"; gone, it reads as `CatalogStale`, which is what it is
+    // (`protection_controller.rs::a_withdrawn_duplicate_catalog_view_is_stale_not_empty`).
+    assert!(
+        patch.get("viewExpiresAt").is_some_and(Value::is_null),
+        "`viewExpiresAt` is withdrawn with an explicit null: {patch}"
+    );
+    assert!(after.get("viewExpiresAt").is_none(), "{after}");
     assert!(
         !f.listed_pods() && !f.read_a_pod_log(),
         "a duplicate's Job is never harvested: {:?}",
@@ -1687,4 +1697,75 @@ fn the_duplicate_rule_is_total_and_filters_what_is_not_a_peer() {
         k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(t(1, 0)),
     );
     assert!(ctrl::duplicate_of(&me, &[renamed_self]).is_none());
+}
+
+/// **REVIEW L6 — THE REVIEWER'S PROBE C, INVERTED: A DUPLICATE THAT TAKES OVER
+/// SYNCS AT ONCE, even inside a slot its own last sync served.** The shape an
+/// upgrade over duplicates leaves: the ex-duplicate's view was withdrawn, its
+/// `Synced` reads `False/DuplicateCatalog`, and its last sync finished inside
+/// the current hour. Its elder is gone. Counting that sync as serving the slot
+/// left it with no view, `Ready=Unknown/NeverSynced` and a `Synced` naming an
+/// elder that no longer exists until the next slot — up to a day, or for ever
+/// at `intervalSeconds: 0`. It starts a sync on this pass instead.
+///
+/// KILLS: `slot_already_served` counting a sync whose view was withdrawn as a
+/// duplicate.
+#[tokio::test]
+async fn a_duplicate_that_takes_over_syncs_at_once_inside_a_served_slot() {
+    let finished = at(2026, 9, 16, 12, 2, 0);
+    let when = at(2026, 9, 16, 12, 30, 0);
+    let stem = leak(request_stem("token-1"));
+    let periodic = leak(slot_stem(when));
+    let mut status = published_status(stem, "token-1", finished);
+    {
+        let obj = status.as_object_mut().expect("an object");
+        obj.remove("pages");
+        obj.remove("indexConfigMap");
+        obj.remove("truncated");
+        obj.remove("viewExpiresAt");
+    }
+    status["conditions"][0] = json!({"type": "Ready", "status": "False",
+        "reason": "DuplicateCatalog", "message": "dup", "observedGeneration": 1,
+        "lastTransitionTime": stamp(finished)});
+    status["conditions"][1] = json!({"type": "Synced", "status": "False",
+        "reason": "DuplicateCatalog",
+        "message": "a duplicate catalog runs no sync; the elder catalog over the same destination syncs it",
+        "observedGeneration": 1, "lastTransitionTime": stamp(finished)});
+    let me = {
+        let mut v =
+            serde_json::to_value(primary_created(at(2026, 9, 16, 11, 0, 0), status)).expect("json");
+        v["spec"]["syncRequest"] = json!("token-1");
+        serde_json::from_value::<RecoveryCatalog>(v).expect("a RecoveryCatalog")
+    };
+    let f = fixture(vec![
+        route("GET", "/trustrosters/default", roster_body()),
+        route("GET", "/trustpolicies", no_trust_policies()),
+        route(
+            "GET",
+            job_path(stem),
+            job_body(
+                stem,
+                JOB_UID_1,
+                "sha256:first",
+                Some((finished - chrono::Duration::seconds(120), finished)),
+            ),
+        ),
+        route("GET", "/backupdestinations/archive", destination_body()),
+        route("POST", "/configmaps", empty_config_map()),
+        route("POST", "/jobs", created_job(periodic, JOB_UID_2)),
+        status_route(),
+    ]);
+    // The elder is gone: only this catalog is left over the destination.
+    let peers = [me.clone()];
+    let outcome = run_with_peers(&f, &me, Some(&peers), when).await;
+    assert_eq!(outcome.phase, ctrl::CatalogPhase::Started, "{:?}", f.seen());
+    let jobs = f.posted("/jobs");
+    assert_eq!(jobs.len(), 1, "one sync, at once");
+    assert_eq!(jobs[0]["metadata"]["name"], periodic);
+    let patch = f.patched_status();
+    assert_ne!(
+        condition(&patch, "Synced")["reason"],
+        json!("DuplicateCatalog"),
+        "the refusal's reason is gone with the refusal: {patch}"
+    );
 }

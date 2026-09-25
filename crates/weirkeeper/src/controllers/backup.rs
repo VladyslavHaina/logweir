@@ -1996,9 +1996,17 @@ async fn continue_evidence_fetch(
     // of its own read, or the one re-read a new controller process gives an
     // unverified run. Decided from the stored status alone, so a run that
     // owes nothing costs this pass nothing.
-    if let Some(attempt) = owed_backup_read(backup, now, reads) {
-        controller_read_pass(backup, client, namespace, now, attempt, reads).await?;
-        return Ok(true);
+    match backup_read_plan(backup, now, reads) {
+        crate::evidence_fetch::ControllerRead::Due(attempt) => {
+            controller_read_pass(backup, client, namespace, now, attempt, reads).await?;
+            return Ok(true);
+        }
+        crate::evidence_fetch::ControllerRead::Settle(why) => {
+            settle_controller_read(backup, client, namespace, now, why).await?;
+            return Ok(true);
+        }
+        crate::evidence_fetch::ControllerRead::Scheduled(_)
+        | crate::evidence_fetch::ControllerRead::Nothing => {}
     }
     let evidence = backup.status.as_ref().and_then(|s| s.evidence.as_ref());
     let result = evidence
@@ -2120,43 +2128,118 @@ async fn read_verdict(
     }
 }
 
-/// Which controller read this TERMINAL `Backup` owes now — PURE, from its
-/// stored status ([`crate::evidence_fetch::owed_controller_read`]), after the
-/// checks that make a read possible at all: a `NotAttempted` verdict, both
+/// What this TERMINAL `Backup`'s controller read calls for now — PURE, from
+/// its stored status ([`crate::evidence_fetch::plan_controller_read`]), after
+/// the checks that make a read possible at all: a `NotAttempted` verdict, both
 /// evidence keys and the runner's own receipt digest on the status (a
 /// legacy-unbound run's `NotAttempted` is final — nothing fetched could be
 /// bound to it), and, for an inline-archive run, a configured archive handle
 /// whose bucket is the run's own (a run outside it is `NotAttempted` naming
-/// both buckets, and reading it would read the wrong bucket).
+/// both buckets, and reading it would read the wrong bucket). A run that fails
+/// the last check while an attempt is SCHEDULED settles on that sentence
+/// instead of advertising an attempt that will never happen (review M1).
 #[must_use]
-pub fn owed_backup_read(backup: &Backup, now: DateTime<Utc>, reads: &Reread<'_>) -> Option<u32> {
-    let evidence = backup.status.as_ref()?.evidence.as_ref()?;
-    let verification = evidence.verification.as_ref()?;
+pub fn backup_read_plan(
+    backup: &Backup,
+    now: DateTime<Utc>,
+    reads: &Reread<'_>,
+) -> crate::evidence_fetch::ControllerRead {
+    use crate::evidence_fetch::ControllerRead;
+    let Some(evidence) = backup.status.as_ref().and_then(|s| s.evidence.as_ref()) else {
+        return ControllerRead::Nothing;
+    };
+    let Some(verification) = evidence.verification.as_ref() else {
+        return ControllerRead::Nothing;
+    };
     if evidence.receipt_key.is_none()
         || evidence.sidecar_key.is_none()
         || evidence.receipt_sha256.is_none()
     {
-        return None;
+        return ControllerRead::Nothing;
     }
     let inline = backup.spec.destination_ref.is_none();
-    if inline {
-        let handle = reads.archive_url?;
-        if crate::destination::legacy_backup_evidence_scope(&backup.spec.archive.url, Some(handle))
+    let readable = if inline {
+        match reads.archive_url {
+            None => Err(crate::evidence_fetch::archive_handle_gone_detail(
+                "signed backup receipt",
+            )),
+            Some(handle) => match crate::destination::legacy_backup_evidence_scope(
+                &backup.spec.archive.url,
+                Some(handle),
+            )
             .not_attempted_detail("signed backup receipt")
-            .is_some()
-        {
-            return None;
+            {
+                Some(elsewhere) => Err(elsewhere),
+                None => Ok(()),
+            },
         }
-    }
+    } else {
+        Ok(())
+    };
     let uid = backup.uid();
-    crate::evidence_fetch::owed_controller_read(
+    crate::evidence_fetch::plan_controller_read(
         verification.result.as_deref(),
         verification.detail.as_deref(),
         evidence.observation.as_ref(),
         inline,
+        readable,
         now,
         reads.memory.zip(uid.as_deref()),
     )
+}
+
+/// [`backup_read_plan`] as the attempt this `Backup` owes now, if any.
+#[must_use]
+pub fn owed_backup_read(backup: &Backup, now: DateTime<Utc>, reads: &Reread<'_>) -> Option<u32> {
+    match backup_read_plan(backup, now, reads) {
+        crate::evidence_fetch::ControllerRead::Due(attempt) => Some(attempt),
+        _ => None,
+    }
+}
+
+/// Record a SCHEDULED controller read that can no longer happen (review M1):
+/// `NotAttempted` with `why`, the attempt count kept, `retryAfter` cleared —
+/// ONE write, after which the run owes nothing in this process.
+async fn settle_controller_read(
+    backup: &Backup,
+    client: &kube::Client,
+    namespace: &str,
+    now: DateTime<Utc>,
+    why: String,
+) -> Result<(), BackupError> {
+    let observation = backup
+        .status
+        .as_ref()
+        .and_then(|s| s.evidence.as_ref())
+        .and_then(|e| e.observation.as_ref());
+    let mode = observation
+        .and_then(|o| o.mode.clone())
+        .unwrap_or_else(|| crate::evidence_fetch::MODE_ARCHIVE_HANDLE.to_string());
+    let attempt = observation
+        .and_then(|o| o.attempt)
+        .and_then(|a| u32::try_from(a).ok())
+        .unwrap_or(1);
+    let name = backup.name_any();
+    info!(
+        backup = %name,
+        namespace = %namespace,
+        attempt,
+        "this finished Backup's scheduled receipt read can no longer be made; recorded, and \
+         no further attempt is scheduled"
+    );
+    let backups: Api<Backup> = Api::namespaced(client.clone(), namespace);
+    write_fetch_verdict(
+        &backups,
+        backup,
+        &name,
+        &StatusVersion::observed(backup.meta()),
+        &VerificationResult::not_attempted(logweir_verify::PAYLOAD_TYPE_BACKUP_RECEIPT, why),
+        crate::evidence_fetch::observation_patch(Some(&mode), None, attempt, None, None),
+        serde_json::Map::new(),
+        now,
+    )
+    .await?;
+    Ok(())
 }
 
 /// One controller read of a TERMINAL `Backup`'s receipt — attempt `attempt` —
@@ -2182,6 +2265,14 @@ async fn controller_read_pass(
     attempt: u32,
     reads: &Reread<'_>,
 ) -> Result<(), BackupError> {
+    // REVIEW L2: at most `CONTROLLER_READ_CONCURRENCY` of these in flight per
+    // process; the rest wait here for a permit. The semaphore is never closed,
+    // so `acquire` cannot fail; a failure would only mean the read is not
+    // throttled, never that it is skipped.
+    let _permit = crate::evidence_fetch::controller_read_permits()
+        .acquire()
+        .await
+        .ok();
     let payload_type = logweir_verify::PAYLOAD_TYPE_BACKUP_RECEIPT;
     let name = backup.name_any();
     let evidence = backup.status.as_ref().and_then(|s| s.evidence.as_ref());
@@ -2255,6 +2346,26 @@ async fn controller_read_pass(
             )
             .await
         }
+    };
+    // A PASS WITH NO WINDOW IS NOT RECORDED AS FINAL (review L1). The window
+    // and the counts come from the archive observation, a separate read from
+    // the verifier's; when that read did not answer, writing `Valid` would
+    // record a run with no `windowCovered` — "not a recovery point" — and a
+    // `Valid` is never read again, so the point would be lost for good. The
+    // attempt is recorded as a TRANSIENT failure instead and the next one
+    // reads both. (A receipt that WAS read and names no window is written as
+    // the terminal pass writes it.)
+    let result = if result.is_pass() && fetched.is_none() {
+        VerificationResult::not_attempted(
+            payload_type,
+            format!(
+                "{}its covered window could not be read on this attempt, and the verdict is not \
+                 recorded without the window that makes this run a recovery point",
+                crate::verification::RECEIPT_WINDOW_UNREAD_PREFIX
+            ),
+        )
+    } else {
+        result
     };
     let (result, retry) = crate::evidence_fetch::scheduled(result, attempt, now);
     // THE TERMINAL PASS'S FACT RULES, VERBATIM: the window whenever the

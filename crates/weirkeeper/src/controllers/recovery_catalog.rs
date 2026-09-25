@@ -577,6 +577,25 @@ impl Pass<'_> {
     /// the retry storm this controller's requeue is designed to avoid. The
     /// failure is on `Synced` for an operator to act on.
     fn slot_already_served(&self, slot: i64) -> bool {
+        // A SLOT SERVED BY A SYNC THIS CATALOG'S VIEW WAS THEN WITHDRAWN FROM IS
+        // NOT SERVED (review L6). A duplicate that takes over after its elder is
+        // deleted has no view — its pages were withdrawn — and its last sync
+        // may have finished inside the current slot; counting that sync would
+        // leave it with no view and `Synced=False/DuplicateCatalog` naming an
+        // elder that no longer exists, until the next slot (up to a day, or
+        // for ever at `intervalSeconds: 0`). Its first pass as the owner syncs.
+        if current_condition(
+            self.catalog
+                .status
+                .as_ref()
+                .and_then(|s| s.conditions.as_ref()),
+            CONDITION_SYNCED,
+        )
+        .and_then(|c| c.reason.as_deref())
+            == Some(REASON_DUPLICATE_CATALOG)
+        {
+            return false;
+        }
         self.catalog
             .status
             .as_ref()
@@ -1420,11 +1439,24 @@ impl Pass<'_> {
                 synced,
             ),
         });
-        if self.has_pages() {
+        // `viewExpiresAt` GOES WITH THE PAGES (review L5). It is the one field
+        // a `ProtectionPolicy` reads before the pages: left behind, a withdrawn
+        // view reads as a FRESH, EMPTY one, and a policy over this catalog
+        // raises "no available point" — the point is gone — when the truth is
+        // that this catalog lists nothing. Without it the view reads as stale,
+        // which is what a withdrawn view is.
+        if self.has_pages()
+            || self
+                .catalog
+                .status
+                .as_ref()
+                .is_some_and(|s| s.view_expires_at.is_some())
+        {
             if let Some(map) = status.as_object_mut() {
                 map.insert("pages".to_string(), Value::Null);
                 map.insert("indexConfigMap".to_string(), Value::Null);
                 map.insert("truncated".to_string(), Value::Null);
+                map.insert("viewExpiresAt".to_string(), Value::Null);
             }
         }
         self.patch_status(status).await?;

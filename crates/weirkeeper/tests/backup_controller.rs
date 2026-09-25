@@ -13387,13 +13387,20 @@ mod evidence_fetch_job {
             vec![b'y'; usize::try_from(MAX_EVIDENCE_SIDECAR_BYTES).expect("fits") + 1];
         let mut lying = entry(RECEIPT_KEY, Stream::EvidencePayload, Some(&r), None);
         lying.bytes = Some(1);
-        /// `(label, relayed entries, payload bytes, sidecar bytes, detail needle)`.
+        // The runner's own truncation flag (review L3): the second producer of
+        // the over-cap sentence.
+        let mut flagged = entry(RECEIPT_KEY, Stream::EvidencePayload, None, None);
+        flagged.present = true;
+        flagged.truncated = true;
+        /// `(label, relayed entries, payload bytes, sidecar bytes, detail
+        /// needle, whether the next Job is scheduled)`.
         type OversizeCase = (
             &'static str,
             Vec<EvidenceObjectResult>,
             Vec<u8>,
             Vec<u8>,
             &'static str,
+            bool,
         );
         let cases: Vec<OversizeCase> = vec![
             (
@@ -13410,6 +13417,7 @@ mod evidence_fetch_job {
                 big_payload.clone(),
                 s.clone(),
                 "cap",
+                false,
             ),
             (
                 "sidecar over the 64 KiB cap",
@@ -13425,6 +13433,7 @@ mod evidence_fetch_job {
                 r.clone(),
                 big_sidecar.clone(),
                 "cap",
+                false,
             ),
             (
                 "declared length is not the relayed length",
@@ -13435,9 +13444,23 @@ mod evidence_fetch_job {
                 r.clone(),
                 s.clone(),
                 "declared",
+                // A relay whose declared length does not describe its bytes is
+                // D2 §3.9 step 5's "relay unreadable": a new Job is tried.
+                true,
+            ),
+            (
+                "the runner flagged the payload truncated",
+                vec![
+                    flagged,
+                    entry(SIDECAR_KEY, Stream::EvidenceSidecar, Some(&s), None),
+                ],
+                r.clone(),
+                s.clone(),
+                "cap",
+                false,
             ),
         ];
-        for (label, entries, payload, side, needle) in cases {
+        for (label, entries, payload, side, needle, retried) in cases {
             let (v, o) = pending(1, Some(&ev_name(1)));
             let backup = terminal_backup(&logweir_core::ids::sha256_prefixed(&r), Some(v), Some(o));
             let log = relay_log(entries, Some(&payload), Some(&side));
@@ -13471,6 +13494,22 @@ mod evidence_fetch_job {
                 last["windowCovered"].is_null(),
                 "{label}: nothing projected"
             );
+            // REVIEW L3/R3: AN OBJECT OVER THE CAP IS A FACT ABOUT THE OBJECT,
+            // read through the REAL producer (`read_relay`) and the real
+            // scheduler: it is final — one Job, not four — and its class says so.
+            let detail = verification["detail"].as_str().unwrap_or_default();
+            assert_eq!(
+                !last["evidence"]["observation"]["retryAfter"].is_null(),
+                retried,
+                "{label}: {last}"
+            );
+            if !retried {
+                assert_eq!(
+                    weirkeeper::verification::not_attempted_class(detail),
+                    weirkeeper::verification::NotAttemptedClass::Final,
+                    "{label}: {detail}"
+                );
+            }
         }
     }
 
@@ -14378,6 +14417,281 @@ mod p12_controller_read_retry {
             owed_backup_read(&owed, at, &no_memory),
             None,
             "without a process memory only a SCHEDULED retry is continued"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Review fix round (`claude/poc-fixes-3.review.md`)
+    // -----------------------------------------------------------------------
+
+    /// A terminal-branch pass with the archive handle at `handle` and an
+    /// archive oracle of the caller's choosing. Returns the object as the API
+    /// server now holds it and the status patches.
+    async fn pass_with(
+        backup: &Backup,
+        archive: &(dyn Fn(EvidenceKeys) -> BoxFuture<'static, Option<ArchiveObservation>>
+              + Send
+              + Sync),
+        verify: &(dyn Fn(EvidenceRef) -> BoxFuture<'static, VerificationResult> + Send + Sync),
+        handle: Option<&str>,
+        memory: &ReadMemory,
+        at: DateTime<Utc>,
+    ) -> (Backup, Vec<Value>) {
+        let (client, _seen, bodies) = mock_client_recording_bodies(terminal_routes());
+        reconcile_backup_rereading(
+            backup,
+            &client,
+            archive,
+            verify,
+            at,
+            &job::RunnerImage::default(),
+            handle,
+            memory,
+        )
+        .await
+        .expect("the reconcile succeeds");
+        let bodies = bodies.lock().expect("the body recorder").clone();
+        (fold(backup, &bodies), patched_statuses(&bodies))
+    }
+
+    /// **REVIEW M1, THE `Backup` TWIN: A SCHEDULE WHOSE HANDLE LEAVES SETTLES.**
+    /// Attempt 2 is scheduled; the archive handle is then removed, or
+    /// re-pointed at another bucket (a restart, so a new process). The run can
+    /// no longer be read, so the first pass records that — `NotAttempted` with
+    /// the handle's own sentence, the attempt count kept, `retryAfter` cleared
+    /// — instead of advertising an attempt at an instant that has passed. Every
+    /// later pass reads and writes nothing.
+    ///
+    /// KILLS: planning with the handle check dropped (a read, or a `retryAfter`
+    /// left in the past); a settle that keeps `retryAfter`.
+    #[tokio::test]
+    async fn a_scheduled_read_whose_handle_leaves_settles_once() {
+        for handle in [None, Some("s3://another-bucket/logweir")] {
+            let world = World::default();
+            let memory = ReadMemory::new();
+            let (b, _) = pass(&frozen_backup(), &world, &memory, t0()).await;
+            assert!(
+                !observation(&b)["retryAfter"].is_null(),
+                "attempt 2 is scheduled"
+            );
+            let archive = world.archive();
+            let verify = world.verify();
+            let fresh = ReadMemory::new();
+            let (settled, written) =
+                pass_with(&b, &archive, &verify, handle, &fresh, t0() + secs(61)).await;
+            assert_eq!(written.len(), 1, "{handle:?}: one write: {written:?}");
+            let v = verification(&settled);
+            assert_eq!(v["result"], json!("NotAttempted"), "{handle:?}: {v}");
+            let detail = v["detail"].as_str().unwrap_or_default();
+            assert!(
+                !detail.contains("starts at"),
+                "{handle:?}: no attempt is advertised: {detail}"
+            );
+            assert_eq!(
+                not_attempted_class(detail),
+                NotAttemptedClass::Final,
+                "{handle:?}: {detail}"
+            );
+            let o = observation(&settled);
+            assert!(o["retryAfter"].is_null(), "{handle:?}: {o}");
+            assert_eq!(o["attempt"], json!(1), "{handle:?}: {o}");
+            assert_eq!(
+                world.verifies.load(Ordering::SeqCst),
+                1,
+                "{handle:?}: nothing read"
+            );
+            for later in [62_i64, 3_600, 86_400] {
+                let (_, written) = pass_with(
+                    &settled,
+                    &archive,
+                    &verify,
+                    handle,
+                    &fresh,
+                    t0() + secs(later),
+                )
+                .await;
+                assert!(written.is_empty(), "{handle:?} t+{later}s: {written:?}");
+            }
+            assert_eq!(world.verifies.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    /// **REVIEW T1/R2: THE RETRY'S DIGEST FENCE.** Attempt 2's archive
+    /// observation reads a receipt whose digest is NOT the runner's — a
+    /// replacement document at the reported key. The attempt is `Invalid`, and
+    /// nothing is copied out of those bytes: no `windowCovered`, no `records`,
+    /// no `capture`.
+    ///
+    /// KILLS: the retry path writing the window from any receipt it read
+    /// (`fetched.is_some()` in place of `fetched == Some(reported)`); a retry
+    /// that verifies a substituted receipt.
+    #[tokio::test]
+    async fn a_retry_that_reads_another_receipt_is_invalid_and_projects_nothing() {
+        let world = World::default();
+        let memory = ReadMemory::new();
+        let (b, _) = pass(&frozen_backup(), &world, &memory, t0()).await;
+        world.credential.store(true, Ordering::SeqCst);
+        let substituted = |_k: EvidenceKeys| -> BoxFuture<'static, Option<ArchiveObservation>> {
+            Box::pin(async {
+                Some(ArchiveObservation {
+                    presence: EvidencePresence {
+                        payload: true,
+                        sidecar: true,
+                    },
+                    covered: Some((1_762_650_000_000, 1_762_658_400_000)),
+                    receipt_sha256: Some(format!("sha256:{}", "b".repeat(64))),
+                    records: Some(75),
+                    capture: Some((utc(2026, 11, 9, 3, 17), utc(2026, 11, 9, 3, 19))),
+                })
+            })
+        };
+        let verify = world.verify();
+        let (after, written) = pass_with(
+            &b,
+            &substituted,
+            &verify,
+            Some(HANDLE),
+            &memory,
+            t0() + secs(61),
+        )
+        .await;
+        assert_eq!(written.len(), 1, "{written:?}");
+        let v = verification(&after);
+        assert_eq!(v["result"], json!("Invalid"), "{v}");
+        let status = status_json(&after);
+        for fact in ["windowCovered", "records", "capture"] {
+            assert!(
+                status[fact].is_null(),
+                "`{fact}` is never copied out of a receipt that is not the runner's: {status}"
+            );
+        }
+        assert_eq!(
+            world.verifies.load(Ordering::SeqCst),
+            1,
+            "the substituted receipt is not even verified"
+        );
+    }
+
+    /// **REVIEW L1: A PASS WITHOUT ITS WINDOW STAYS OWED.** On attempt 2 the
+    /// verifier's read answers and the archive observation that carries the
+    /// receipt's window does not (a flaky credential — the case P12 is about).
+    /// Writing `Valid` there would record a run with no `windowCovered` for
+    /// good: a `Valid` is never read again. The attempt is recorded as a
+    /// transient failure and attempt 3 is scheduled; when both reads answer,
+    /// the run is `Valid` WITH its window.
+    ///
+    /// KILLS: dropping the "pass with no observation" guard.
+    #[tokio::test]
+    async fn a_pass_whose_window_was_not_read_stays_owed_until_it_is() {
+        let world = World::default();
+        let memory = ReadMemory::new();
+        let (b, _) = pass(&frozen_backup(), &world, &memory, t0()).await;
+        world.credential.store(true, Ordering::SeqCst);
+        let blind = |_k: EvidenceKeys| -> BoxFuture<'static, Option<ArchiveObservation>> {
+            Box::pin(async { None })
+        };
+        let verify = world.verify();
+        let (b2, _) = pass_with(&b, &blind, &verify, Some(HANDLE), &memory, t0() + secs(61)).await;
+        let v = verification(&b2);
+        assert_eq!(v["result"], json!("NotAttempted"), "{v}");
+        let detail = v["detail"].as_str().unwrap_or_default();
+        assert!(
+            detail.starts_with(weirkeeper::verification::RECEIPT_WINDOW_UNREAD_PREFIX)
+                && detail.contains("attempt 3 starts at"),
+            "{detail}"
+        );
+        assert!(!observation(&b2)["retryAfter"].is_null());
+        assert!(status_json(&b2)["windowCovered"].is_null());
+
+        // Attempt 3: both reads answer.
+        let archive = world.archive();
+        let (b3, _) = pass_with(
+            &b2,
+            &archive,
+            &verify,
+            Some(HANDLE),
+            &memory,
+            t0() + secs(361),
+        )
+        .await;
+        assert_eq!(verification(&b3)["result"], json!("Valid"));
+        assert!(
+            !status_json(&b3)["windowCovered"].is_null(),
+            "the run is a recovery point: {b3:?}"
+        );
+    }
+
+    /// **REVIEW L2: THE RESTART RE-READ IS THROTTLED.** Twelve unverified runs
+    /// owe a re-read at once (a restart); at most `CONTROLLER_READ_CONCURRENCY`
+    /// of those reads are in flight together, and every one of them still
+    /// happens.
+    ///
+    /// KILLS: reading without the permit (all twelve would be in flight).
+    #[tokio::test]
+    async fn the_restart_re_read_runs_a_bounded_number_at_once() {
+        use weirkeeper::evidence_fetch::CONTROLLER_READ_CONCURRENCY;
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let reads = Arc::new(AtomicUsize::new(0));
+        let archive = {
+            let (in_flight, peak, reads) = (
+                Arc::clone(&in_flight),
+                Arc::clone(&peak),
+                Arc::clone(&reads),
+            );
+            move |_k: EvidenceKeys| -> BoxFuture<'static, Option<ArchiveObservation>> {
+                let (in_flight, peak, reads) = (
+                    Arc::clone(&in_flight),
+                    Arc::clone(&peak),
+                    Arc::clone(&reads),
+                );
+                Box::pin(async move {
+                    let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(now, Ordering::SeqCst);
+                    reads.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                    in_flight.fetch_sub(1, Ordering::SeqCst);
+                    None
+                })
+            }
+        };
+        let world = World::default();
+        let verify = world.verify();
+        let mut b = frozen_backup();
+        b.status = Some(
+            serde_json::from_value(json!({
+                "phase": "Succeeded", "exitCode": 0,
+                "evidence": {
+                    "receiptKey": RECEIPT_KEY, "sidecarKey": SIDECAR_KEY,
+                    "receiptSha256": RUNNER_RECEIPT_SHA256,
+                    "verification": {
+                        "result": "NotAttempted",
+                        "payloadType": logweir_verify::PAYLOAD_TYPE_BACKUP_RECEIPT,
+                        "detail": imds_detail(),
+                        "verifiedAt": "2026-11-09T03:20:00Z"
+                    }
+                }
+            }))
+            .expect("a status"),
+        );
+        let memories: Vec<ReadMemory> = (0..12).map(|_| ReadMemory::new()).collect();
+        let passes = memories.iter().map(|memory| {
+            pass_with(
+                &b,
+                &archive,
+                &verify,
+                Some(HANDLE),
+                memory,
+                t0() + secs(86_400),
+            )
+        });
+        let results = futures::future::join_all(passes).await;
+        assert!(results.iter().all(|(_, written)| written.len() == 1));
+        assert_eq!(reads.load(Ordering::SeqCst), 12, "every run is read");
+        let peak = peak.load(Ordering::SeqCst);
+        assert!(
+            peak <= CONTROLLER_READ_CONCURRENCY,
+            "at most {CONTROLLER_READ_CONCURRENCY} reads in flight at once, saw {peak}"
         );
     }
 }

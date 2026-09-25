@@ -1416,16 +1416,32 @@ destination. "First" is `metadata.creationTimestamp`, then the name for a tie in
 the same second, so every reconcile of either object reaches the same answer. A
 duplicate resolves no destination and runs no sync Job (`Synced=False` with the
 same reason), and it lists no view:
-`status.pages`, `status.indexConfigMap` and `status.truncated` are withdrawn,
-because the API's point listing and a catalog-point restore read `status.pages`
-directly. Its page `ConfigMap`s age out with their sync Job's TTL. Use the
-elder catalog, or delete the one you do not want; if you delete the elder, the
-next one in creation order takes over within a minute. **Upgrade:** a namespace
+`status.pages`, `status.indexConfigMap`, `status.truncated` and
+`status.viewExpiresAt` are withdrawn. The API's point listing and a
+catalog-point restore read `status.pages` directly, and a `ProtectionPolicy`
+reads `viewExpiresAt` first. A policy over a duplicate therefore reads
+`CatalogStale`, never a fresh view with no available point. Its page
+`ConfigMap`s age out with their sync Job's TTL. Use the elder catalog, or
+delete the one you do not want. If you delete the elder, the next one in
+creation order takes over within a minute and syncs at once, even inside an
+interval slot its own earlier sync served. **Upgrade:** a namespace
 that already holds duplicates (an older controller accepted them) keeps its
 first-created catalog syncing, and every other catalog over the same destination
 turns `Ready=False/DuplicateCatalog` on its first reconcile. A sync Job such a
-catalog was running is not harvested. Rolling back to an older controller makes
-the duplicates sync again.
+catalog was running is not harvested. Two consequences to check before
+upgrading over duplicates:
+
+- The survivor is the OLDEST catalog, not the best. If a newer duplicate has
+  better settings (a larger `viewLimit`, `mode: Full`), delete the older one
+  with kubectl; the console holds no delete.
+- A `RetentionPolicy.catalogRef`, a `RehearsalSchedule`'s point `catalogRef` or
+  a `ProtectionPolicy.protects.catalogRef` that names a newer duplicate loses
+  its input. Retention refuses ("published no view"), the rehearsal falls back
+  to `Backup` candidates, and protection reads `CatalogStale`. All three fail
+  closed. Point them at the survivor; the first two are immutable, so re-create
+  them.
+
+Rolling back to an older controller makes the duplicates sync again.
 
 **A failed sync keeps the previous view.** The status patch omits `pages`, which
 an RFC 7386 merge patch reads as "leave it alone", and those pages age out on
@@ -6149,9 +6165,17 @@ A failed read's `NotAttempted` now has one of three classes, decided from its
 
 | class | `detail` | what happens next |
 |---|---|---|
-| transient | `the evidence object could not be read: …` (a denial, a missing credential, a timeout), the trust resolution could not be read, the verification task did not complete, a scorecard read produced nothing | read again on the evidence-fetch Job's schedule: attempt 2 at +1 m, 3 at +5 m after that, 4 at +15 m after that |
+| transient | `the evidence object could not be read: …` (a denial, a missing credential, a timeout), the trust resolution could not be read, the verification task did not complete, a scorecard read produced nothing, a receipt that verified while the read of its window did not answer | read again on the evidence-fetch Job's schedule: attempt 2 at +1 m, 3 at +5 m after that, 4 at +15 m after that |
 | absent | `the evidence object <key> is not in the archive` (the store's own `NotFound`) | never read again: that is a fact about the archive |
 | configuration | no archive handle, no signing key, two policies claiming the namespace, a destination with no `evidenceRead`, evidence outside the handle's bucket | not on the schedule; see "a new controller process" below |
+
+**Absent means the store said `NotFound`, whatever the reason.** The object
+store maps every 404 to `NotFound`, including a bucket that does not exist and
+a path-style or endpoint setting that 404s. A run read through a misconfigured
+handle can therefore be recorded as absent and is not read again after the
+handle is fixed. Verify it with the printed `logweir drill verify` command. A
+`Restore`'s scorecard read cannot tell an absent object from a refused one, so
+an absent scorecard is transient: it costs four reads per controller process.
 
 A scheduled attempt is recorded in the same fields a fetch Job uses:
 `status.evidence.observation = {mode, attempt, retryAfter}`, with `mode`
@@ -6167,9 +6191,26 @@ and verifier. It writes what that pass would have written: the verdict, the
 `records` and `capture`, and for a `Restore` the scorecard's `outcome`,
 `objectives`, `integrity` and `measured`. Those go only beside a passing
 verdict for a `Backup`, and `completion` only beside `Valid` for a `Restore`.
-Nothing here can write `Valid` without a verifier reading the document. After
-the fourth attempt the `detail` says no attempt remains in this process and
-`retryAfter` is absent.
+Nothing here can write `Valid` without a verifier reading the document. For a
+`Backup`, a receipt that verifies while the read that carries its window does
+not answer is recorded as transient and read again, not written `Valid` with no
+`windowCovered`. A reached verdict is never read again, so that write would lose
+the recovery point for good. After the fourth attempt the `detail` says no
+attempt remains in this process and `retryAfter` is absent.
+
+**A scheduled attempt that can no longer happen is settled.** If the archive
+handle is removed, or re-pointed at another bucket, while an inline-archive
+run's attempt is scheduled, the next pass records `NotAttempted` with the
+handle's own sentence. It keeps the attempt count and clears `retryAfter`. A
+`Restore` then waits for a change, and a rehearsal over it stops waiting. The
+run is read again when a controller process with a handle over its bucket
+starts.
+
+**At most four controller reads are in flight at once, per process.** A
+restart re-reads every eligible unverified run together, so a reconcile that
+owes a read waits for one of four permits. The rest follow as permits free.
+Each read resolves the namespace's trust, issues two or three object `GET`s and
+writes one status patch.
 
 **A new controller process reads it once more.** The controller's credential
 comes from its environment, which a running process never re-reads, so a
@@ -6180,6 +6221,12 @@ second pass in the same process never starts another schedule. The memory of
 which runs a process has read is bounded at 100 000 objects; past that it reads
 no new ones. A definite absence, a legacy-unbound run (no runner digest) and a
 run whose evidence is outside the handle's bucket are never re-read.
+
+"Once more" is per process, not once ever. On every start, an inline-archive
+run whose last answer was a configuration refusal is read once, and one whose
+last answer was transient is read up to four times. A destination-backed run is
+re-read only when its last answer was a transient read failure: a destination
+that refuses is not re-read on every start.
 
 **Upgrade.** A `NotAttempted` written by an older controller has no
 `observation`. The first process of this build reads each such inline-archive

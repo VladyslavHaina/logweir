@@ -2801,6 +2801,45 @@ fn a_fresh_catalog_view_answers_availability_and_an_expired_one_does_not() {
     );
 }
 
+/// **P11 REVIEW L5: A WITHDRAWN DUPLICATE'S VIEW IS STALE, NOT EMPTY.** A
+/// `RecoveryCatalog` refused as `DuplicateCatalog` withdraws its pages AND its
+/// `viewExpiresAt`. A policy over it therefore reads `CatalogStale` —
+/// availability unknown — and never the "no available point" a fresh, empty
+/// view would mean. (Before the fix `viewExpiresAt` was left behind, and the
+/// same policy read a fresh view with no entry at all.)
+#[test]
+fn a_withdrawn_duplicate_catalog_view_is_stale_not_empty() {
+    let withdrawn = json!({
+        "apiVersion": "logweir.dev/v1alpha1", "kind": "RecoveryCatalog",
+        "metadata": {"name": CATALOG, "namespace": NS},
+        "spec": {"destinationRef": {"name": DESTINATION}, "sync": {}},
+        "status": {
+            "syncedAt": p::rfc3339(now() - Duration::minutes(10)),
+            "counts": {"total": 1, "available": 1},
+            "conditions": [{"type": "Ready", "status": "False", "reason": "DuplicateCatalog"}]
+        }
+    })
+    .to_string();
+    let with_catalog = {
+        let mut value = spec_value();
+        merge(
+            &mut value,
+            &json!({"protects": {"catalogRef": {"name": CATALOG}}}),
+        );
+        value
+    };
+    let mut routes = read_routes(vec![backup("b-1", 2, json!({}))], json!({}));
+    routes.push(ok(CATALOG_PATH, withdrawn));
+    routes.push(patch(STATUS_PATH));
+    let (outcome, _, bodies) = drive(&policy_with(with_catalog, json!({})), routes);
+    assert_eq!(outcome.health, p::Health::Unknown);
+    assert_eq!(
+        last_status_patch(&bodies)["status"]["availabilityBasis"].as_str(),
+        Some("CatalogStale"),
+        "a withdrawn view cannot answer; it is not an answer of 'nothing'"
+    );
+}
+
 /// The `Backup` shape the live run measured on a `SecretKeys` destination: a
 /// succeeded run, an honest `NotAttempted` verdict, and therefore NO capture
 /// block and NO receipt digest.
