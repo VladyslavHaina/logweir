@@ -25,7 +25,7 @@ import { writeFileSync, mkdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import {
   chromium, newSession, gotoHash, textOf, waitForText, connectCatalog, createCluster, chooseCatalogDestination, BASE, HOST, credential,
-  openWizard, wizardAt, wizardStep, readinessRows, showEveryPoint, listRow, revealInGrid, settledRows, checkRowsIn,
+  openWizard, wizardAt, wizardStep, readinessRows, showEveryPoint, listRow, revealInGrid, settledRows, checkVerdict, outcomeOf,
 } from "./console.mjs";
 
 const OUT = process.argv[2] || "/tmp/poc-reproof";
@@ -427,30 +427,27 @@ try {
       const t0 = Date.now();
       const n0 = calls.length;
       await page.locator("#destination-test").getByRole("button", { name: /test access/i }).click();
-      // SETTLED = rows read from the check table's cells and no "checking..." (`checkRowsIn`). The
-      // text alone cannot say it: since R2-11 a running check's note reads "Whether its result
-      // applies to your current inputs is decided when it has one" (poc-upgrade-3, H7).
-      let t = "", settled = null, read = null;
-      for (let i = 0; i < 45; i++) {
-        await page.waitForTimeout(2000);
-        read = await checkRowsIn(page, "#destination-test");
-        t = read.text;
-        if (read.rows.length > 0 && !read.checking && /applies to your current inputs/.test(t)) { settled = Date.now() - t0; break; }
-      }
+      // SETTLED = rows read from the check table's cells, no "checking..." and no stop mark
+      // (`checkVerdict`). The text alone cannot say it: since R2-11 a running check's note reads
+      // "Whether its result applies to your current inputs is decided when it has one" (poc-upgrade-3,
+      // H7). The wait ends on the verdict or on the page's own stop (P15), not on a 90 s budget.
+      const read = await checkVerdict(page, "#destination-test", 240);
+      const t = read.text;
+      const settled = read.settled && read.applies ? Date.now() - t0 : null;
       const mine = calls.slice(n0);
       const post = mine.find((c) => c.m === "POST");
       const reads = mine.filter((c) => c.m === "GET" && post && c.at >= post.at);
       const pf = ((answers[answers.length - 1] || {}).item || (answers[answers.length - 1] || {}).preflight || {}).name || (t.match(/pf-[a-z2-7]{26}/) || [""])[0];
       const blocking = (read ? read.rows : []).filter((r) => r.gating === "blocking");
       await shot(page, `P8-${label}`);
-      return { settledMs: settled, text: t, reads: reads.length, pf, blocking };
+      return { settledMs: settled, text: t, reads: reads.length, pf, blocking, outcome: read.outcome };
     }
     const r1 = await testOnce("R8.1");
     row("R8.1 Test access settles: 'applies to your current inputs', blocking rows ready, no pending / 'compared: nothing' / 'No access test has been recorded', a GET of the check after the POST",
       r1.settledMs !== null && r1.blocking.length > 0 && r1.blocking.every((r) => r.verdict === "ready") && !/compared: nothing/.test(r1.text) && !/No access test has been recorded/.test(r1.text) && r1.reads > 0,
-      { settledMs: r1.settledMs, pf: r1.pf, readsAfterPost: r1.reads, blocking: r1.blocking.map((r) => `${r.id}/${r.verdict}/${r.code}`) });
+      { outcome: r1.outcome, settledMs: r1.settledMs, pf: r1.pf, readsAfterPost: r1.reads, blocking: r1.blocking.map((r) => `${r.id}/${r.verdict}/${r.code}`) });
     const r2 = await testOnce("R8.2");
-    row("R8.2 a second Test access is a new check (a new pf- id) and settles", r2.settledMs !== null && !!r2.pf && r2.pf !== r1.pf, { first: r1.pf, second: r2.pf, settledMs: r2.settledMs });
+    row("R8.2 a second Test access is a new check (a new pf- id) and settles", r2.settledMs !== null && !!r2.pf && r2.pf !== r1.pf, { first: r1.pf, second: r2.pf, settledMs: r2.settledMs, outcome: r2.outcome });
     await page.reload({ waitUntil: "domcontentloaded" });
     await page.waitForTimeout(3000);
     const rt = await textOf(page);
@@ -495,13 +492,13 @@ try {
       await wizardStep(page, 5);
       const t0 = new Date(Date.now() - 2000).toISOString();
       await page.click("#restore-readiness-start");
-      const read = (await readinessRows(page, 240)) || { rows: [], text: await page.locator("#step-preflight").innerText() };
+      const read = await readinessRows(page, 240);
       const pf = kj("get", "preflights").items.filter((p) => p.metadata.creationTimestamp >= t0.slice(0, 19) + "Z" && ((p.spec.request || {}).operation === "Restore"))
         .sort((a, b) => (a.metadata.creationTimestamp < b.metadata.creationTimestamp ? 1 : -1))[0];
       const checks = (((pf || {}).status || {}).result || {}).checks || [];
       await shot(page, `${label}-readiness`);
       await wizardStep(page, 6);
-      return { rows: read.rows, s5: read.text, pf, checks, createDisabled: await page.isDisabled("#create-restore") };
+      return { rows: read.rows, settled: read.settled, outcome: outcomeOf(read), s5: read.text || await page.locator("#step-preflight").innerText(), pf, checks, createDisabled: await page.isDisabled("#create-restore") };
     };
     const byId = (checks, id) => checks.find((c) => c.id === id) || {};
     const scopeOf = (c) => c.scope ? `${c.scope.kind}/${c.scope.name}` : "";
@@ -603,7 +600,7 @@ try {
     if (!GROUPS.includes("LEGACY-NOCREATE")) {
       const r2 = await readiness("L2");
       const nr = r2.rows.filter((r) => r.gating === "blocking" && r.verdict !== "ready" && r.id !== "approval.state");
-      row("L2 re-checked with the Backup's own Secret: ready again", nr.length === 0 && !r2.createDisabled, { notReady: nr, preflight: r2.pf && r2.pf.metadata.name });
+      row("L2 re-checked with the Backup's own Secret: ready again", r2.settled && r2.rows.some((r) => r.gating === "blocking") && nr.length === 0 && !r2.createDisabled, { outcome: r2.outcome, notReady: nr, preflight: r2.pf && r2.pf.metadata.name });
       await wizardStep(page, 6);
       await page.click("#create-restore");
       await page.waitForURL(/#\/(operations|approvals|history)/, { timeout: 60000 });
@@ -695,25 +692,21 @@ try {
     await form.getByRole("button", { name: /preview next runs/i }).click();
     // The AT (UTC) column in the one timestamp format (console-ux-1, MCP-7): was `…T02:00:00Z`.
     await waitForText(page, /NEXT RUNS[\s\S]*\d{4}-\d{2}-\d{2} 02:00:00 UTC/, 60, "the cadence preview");
-    // The check's rows from the form's own fieldset (`checkRowsIn`: four cells since MCP round 2,
-    // poc-upgrade-3 H7). A replay is terminal on arrival and owes one read (P8), so once the rows
-    // settle the follow's read gets up to 30 s to land before the verdict is taken.
+    // The check's rows from the form's own fieldset (`checkVerdict`: four cells since MCP round 2,
+    // poc-upgrade-3 H7; no rows unless settled, and a check the page stopped following is not, P15).
+    // A replay is terminal on arrival and owes one read (P8), so once the rows settle the follow's
+    // read gets up to 30 s to land before the verdict is taken.
     const verdictOf = async () => {
-      let r = await settledRows(page, "#schedule-readiness", 240, 3000);
-      if (r === null) return { t: await page.locator("#schedule-readiness").innerText(), rows: [] };
-      for (let i = 0; i < 10 && !/applies to your current inputs/.test(r.text); i++) {
-        await page.waitForTimeout(3000);
-        r = await checkRowsIn(page, "#schedule-readiness");
-      }
-      return { t: r.text, rows: r.rows };
+      const r = await checkVerdict(page, "#schedule-readiness", 240);
+      return { t: r.text, rows: r.rows, applies: r.applies, outcome: r.outcome };
     };
     await page.locator("#schedule-check-readiness").click();
     const v1 = await verdictOf();
     await page.locator("#schedule-check-readiness").click();
     const v2 = await verdictOf();
     row("R8.3 the schedule form's Backup readiness clicked twice with unchanged inputs: the second (replayed) answer is read back — 'applies to your current inputs', no 'did not recompute staleness'",
-      v2.rows.length > 0 && /applies to your current inputs/.test(v2.t) && !/did not recompute staleness/.test(v2.t) && !/does not apply to your current inputs/.test(v2.t),
-      { first: v1.rows.map((x) => `${x.id}=${x.verdict}`).slice(0, 8), second: v2.rows.map((x) => `${x.id}=${x.verdict}`).slice(0, 8), secondSays: (v2.t.match(/[^\n]*current inputs[^\n]*/) || [""])[0] });
+      v2.rows.length > 0 && v2.applies && !/did not recompute staleness/.test(v2.t),
+      { first: v1.outcome, second: v2.outcome, firstRows: v1.rows.map((x) => `${x.id}=${x.verdict}`).slice(0, 8), secondRows: v2.rows.map((x) => `${x.id}=${x.verdict}`).slice(0, 8), secondSays: (v2.t.match(/[^\n]*current inputs[^\n]*/) || [""])[0] });
     await shot(page, "README10-schedule-readiness");
     const before = new Set(kj("get", "backupschedules").items.map((s) => s.metadata.name));
     const create = form.getByRole("button", { name: /^create$/i });
@@ -760,7 +753,8 @@ try {
     const r = await restoreFromBackup(page, NS, b.metadata.name, b.metadata.uid, { target: TGT, prefix: PREFIX, shots: `${OUT}/README10-restore` }, log);
     const st = r.status || {};
     const rv = ((st.evidence || {}).verification) || {};
-    row("README10 readiness: every blocking row ready but approval.state", (r.readiness.blockingNotReady || ["x"]).length === 0, { rows: r.readiness.rows.map((x) => `${x.id}=${x.verdict}`) });
+    row("README10 readiness: every blocking row ready but approval.state", r.readiness.settled && r.readiness.rows.some((x) => x.gating === "blocking") && (r.readiness.blockingNotReady || ["x"]).length === 0,
+      { outcome: outcomeOf(r.readiness), rows: r.readiness.rows.map((x) => `${x.id}=${x.verdict}`) });
     row("README10 the Restore (named rst-..., Ordinary) Succeeds with its completion panel", /^rst-/.test(r.name) && st.phase === "Succeeded" && !!st.completion && /records verified in the sampled window/.test(r.operationText || ""),
       { restore: r.name, verification: rv.result, completion: st.completion && { restored: st.completion.recordsRestored, sampledMatching: st.completion.recordsSampledMatching, topics: (st.completion.newTopics || []).map((t) => t.name) } });
     let topics = [];
@@ -780,10 +774,10 @@ try {
     await panel.locator("#readiness-topics").fill("orders, payments");
     await panel.getByRole("button", { name: /^check readiness$/i }).click();
     const read = await settledRows(page, "#backup-readiness", 240, 3000);
-    const settled = read !== null;
-    const pt = settled ? read.text : await panel.innerText();
+    const settled = read.settled;
+    const pt = read.text || await panel.innerText();
     row("R8.5 the schedules list's Backup readiness panel settles to a verdict read back from the check", settled && !/did not recompute staleness/.test(pt),
-      { excerpt: settled ? read.rows.filter((x) => x.gating === "blocking").map((x) => `${x.id}=${x.verdict}`).slice(0, 10) : [] });
+      { outcome: outcomeOf(read), excerpt: read.rows.filter((x) => x.gating === "blocking").map((x) => `${x.id}=${x.verdict}`).slice(0, 10) });
     await shot(page, "README10-R8.5-panel");
     writeFileSync(`${OUT}/README10-facts.json`, JSON.stringify({ SRC, TGT, SCH, backup: b.metadata.name, restore: r.name, prefix: PREFIX }, null, 1));
   }

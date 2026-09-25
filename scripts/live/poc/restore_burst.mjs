@@ -14,7 +14,7 @@
 // window is per console process (docs/api.md, Rate limits). Nothing secret is printed.
 import { writeFileSync, mkdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { chromium, newSession, gotoHash, textOf, openWizard, wizardStep, readinessRows } from "./console.mjs";
+import { chromium, newSession, gotoHash, textOf, openWizard, wizardStep, readinessRows, outcomeOf } from "./console.mjs";
 
 const OUT = process.argv[2] || "/tmp/poc-restore-burst";
 const N = Number(process.argv[3] || 3);
@@ -46,7 +46,8 @@ async function prepare(page, b, target, prefix) {
   await wizardStep(page, 5);
   await page.click("#restore-readiness-start");
   const readiness = await readinessRows(page, 240);
-  if (!readiness) throw new Error(`no readiness verdict for ${b.metadata.name}`);
+  if (!readiness.settled) throw new Error(`no readiness verdict for ${b.metadata.name}: ${outcomeOf(readiness)}`);
+  if (!readiness.rows.some((r) => r.gating === "blocking")) throw new Error(`the readiness verdict for ${b.metadata.name} has no blocking row`);
   await wizardStep(page, 6);
   return readiness.rows.filter((r) => r.gating === "blocking" && r.verdict !== "ready" && r.id !== "approval.state");
 }

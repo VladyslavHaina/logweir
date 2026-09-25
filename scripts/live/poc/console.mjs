@@ -120,10 +120,17 @@ export async function openWizard(page, hash) {
 // `selector` as `{id, verdict, gating, code}` (verdict in the page's words: "ready", "not ready",
 // "unknown", "skipped (never a pass)"), the container's text, and whether the check is still
 // running there: its applicability line reads "checking..." until it has a result (R2-11).
+//
+// A CHECK THE PAGE STOPPED FOLLOWING IS NOT A VERDICT (P15, poc-fixes-5): a follow now reads a check
+// until the longest time a check may take, and a page that gives up marks it `[data-check-stopped]`
+// ("deadline": it did not finish; "unreadable": a read was refused), its applicability line reading
+// "did not finish" or "could not be read again" (`data-applicability="unfinished"`) instead of
+// "checking...". Such a check has no result, whatever rows are on screen: `stopped` names why and
+// `settled` -- rows, not checking, not stopped -- is false. Every reader decides on `settled`.
 export async function checkRowsIn(page, selector) {
   return page.evaluate((sel) => {
     const root = document.querySelector(sel);
-    if (!root) return { rows: [], checking: false, text: "" };
+    if (!root) return { rows: [], checking: false, stopped: "", settled: false, text: "" };
     const rows = [];
     for (const tr of root.querySelectorAll("tr")) {
       const gating = tr.querySelector('[data-field="gating"]');
@@ -139,27 +146,72 @@ export async function checkRowsIn(page, selector) {
       });
     }
     const text = root.innerText;
-    return { rows, checking: !!root.querySelector('[data-applicability="checking"]') || /checking\.\.\./.test(text), text };
+    const mark = root.querySelector("[data-check-stopped]");
+    const stopped = mark ? mark.getAttribute("data-check-stopped") || "stopped"
+      : root.querySelector('[data-applicability="unfinished"]') ? "unfinished" : "";
+    const checking = !!root.querySelector('[data-applicability="checking"]') || /checking\.\.\./.test(text);
+    return { rows, checking, stopped, settled: rows.length > 0 && !checking && !stopped, text };
   }, selector);
 }
 
-// The check under `selector` once it has rows and is no longer running, polled every `interval` ms
-// for at most `seconds`; null when it never settles.
+// THE FLOOR OF EVERY SETTLE WAIT (P15). A Preflight may run its 120 s `timeoutSeconds` (the Job gets
+// 90 s more to start), and poc-upgrade-4's staged slow check records `notReady` after about 120 s,
+// while the page keeps following it: a reader that gives up sooner calls a check the page is still
+// reading "never settled". No reader waits less (test_poc_harness.py holds the literals).
+export const SETTLE_FLOOR_SECONDS = 150;
+
+// The check under `selector`, read every `interval` ms until it has a VERDICT (`settled`) or the page
+// says it STOPPED following it (`stopped`, `[data-check-stopped]`) -- the two ways a follow ends --
+// with `seconds` (never below SETTLE_FLOOR_SECONDS) as the harness's own backstop. Always an object
+// `{settled, stopped, timedOut, rows, text, waitedMs}`, and ONLY a settled read carries rows: a
+// stopped or timed-out one has `rows: []`, so no caller can take it for a verdict. `outcomeOf`
+// names it for a row's evidence.
 export async function settledRows(page, selector, seconds, interval) {
-  const end = Date.now() + seconds * 1000;
+  const t0 = Date.now();
+  const end = t0 + Math.max(seconds || 0, SETTLE_FLOOR_SECONDS) * 1000;
+  let read = { rows: [], checking: false, stopped: "", settled: false, text: "" };
   while (Date.now() < end) {
     await page.waitForTimeout(interval || 3000);
-    const read = await checkRowsIn(page, selector);
-    if (read.rows.length > 0 && !read.checking) return read;
+    read = await checkRowsIn(page, selector);
+    if (read.settled) return Object.assign(read, { timedOut: false, waitedMs: Date.now() - t0 });
+    if (read.stopped) return Object.assign(read, { rows: [], settled: false, timedOut: false, waitedMs: Date.now() - t0 });
   }
-  return null;
+  return Object.assign(read, { rows: [], settled: false, stopped: "", timedOut: true, waitedMs: Date.now() - t0 });
 }
 
-// Step 5's readiness table, read from the step itself once the check has settled: every row
-// `{id, verdict, gating, code}`, and the step's text.
+// What a settle wait ended on, in words, for a row's evidence.
+export function outcomeOf(answer) {
+  const a = answer || {};
+  const s = Math.round((a.waitedMs || 0) / 1000);
+  if (a.settled) return `verdict after ${s} s`;
+  if (a.stopped) return `the page stopped following the check (${a.stopped}) after ${s} s -- not a verdict`;
+  return `no verdict and no stop within the harness's ${s} s`;
+}
+
+const APPLIES = /applies to your current inputs/;
+const NOT_APPLIES = /does not apply to your current inputs/;
+
+// A readiness verdict WITH its applicability (the schedule form, the list panel, Test access): the
+// settled rows (`settledRows`), then -- a replay is terminal on arrival and owes the follow one read
+// (P8) -- up to 30 s more for "applies to your current inputs" to be read back. `applies` is true only
+// on a settled read that says so; `pf` is the check id shown.
+export async function checkVerdict(page, selector, seconds) {
+  let read = await settledRows(page, selector, seconds, 2500);
+  for (let i = 0; i < 10 && read.settled && !APPLIES.test(read.text); i++) {
+    await page.waitForTimeout(3000);
+    const again = await checkRowsIn(page, selector);
+    read = again.settled ? Object.assign(again, { timedOut: false, waitedMs: read.waitedMs })
+      : Object.assign(again, { rows: [], settled: false, timedOut: false, waitedMs: read.waitedMs });
+  }
+  const applies = read.settled && APPLIES.test(read.text) && !NOT_APPLIES.test(read.text);
+  return Object.assign(read, { applies, pf: (read.text.match(/pf-[a-z2-7]{26}/) || [null])[0], outcome: outcomeOf(read) });
+}
+
+// Step 5's readiness table, read from the step itself until the check has a verdict or the page
+// stopped following it: `settledRows`' object (`settled`, `stopped`, every row `{id, verdict,
+// gating, code}` only when settled, and the step's text).
 export async function readinessRows(page, seconds) {
-  const read = await settledRows(page, "#step-preflight", seconds, 4000);
-  return read === null ? null : { rows: read.rows, text: read.text };
+  return settledRows(page, "#step-preflight", seconds, 4000);
 }
 
 // THE SELECTOR SHOWS 20 POINTS AT A TIME (console-ux-1, MCP-26), the rest `hidden` until "Show
@@ -264,8 +316,9 @@ export async function restoreFromBackup(page, ns, backup, uid, opts, log) {
     walked.push(...(await wizardStep(page, 5)).slice(1));
     await page.click("#restore-readiness-start");
     readiness = await readinessRows(page, o.readinessSeconds);
-    if (!readiness) throw new Error("no readiness verdict in time");
+    if (!readiness.settled) throw new Error(`no readiness verdict: ${outcomeOf(readiness)}`);
     const blocking = readiness.rows.filter((r) => r.gating === "blocking");
+    if (blocking.length === 0) throw new Error("the readiness verdict has no blocking row");
     const notReady = blocking.filter((r) => r.verdict !== "ready" && r.id !== "approval.state");
     say(`readiness: ${blocking.length} blocking rows; not ready (besides approval.state): ${JSON.stringify(notReady)}; approval.state=${(blocking.find((r) => r.id === "approval.state") || {}).verdict}`);
     readiness.blockingNotReady = notReady;
