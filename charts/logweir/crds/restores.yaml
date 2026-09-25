@@ -372,7 +372,7 @@ spec:
                     nullable: true
                     properties:
                       attempt:
-                        description: Which attempt this is, from 1. A failed fetch is retried at +1 m, +5 m and +15 m (D2 §3.9 step 5); each attempt is its own Job, `lwc-ev-<20 hex of sha256(uid + ":" + attempt)>`. Retries never re-run the backup or the restore.
+                        description: Which attempt this is, from 1. A failed fetch is retried at +1 m, +5 m and +15 m (D2 §3.9 step 5); each attempt is its own Job, `lwc-ev-<20 hex of sha256(uid + ":" + attempt)>`. A controller read's transient failure takes the same schedule, and a new controller process may start it again at 1. Retries never re-run the backup or the restore.
                         format: int64
                         nullable: true
                         type: integer
@@ -390,7 +390,7 @@ spec:
                             type: string
                         type: object
                       mode:
-                        description: 'The resolved `evidenceRead` credential mode the Job ran with: `SecretKeys` or `WorkloadIdentity`.'
+                        description: 'The resolved `evidenceRead` credential mode the Job ran with: `SecretKeys` or `WorkloadIdentity`. Or the handle the controller read through itself: `ArchiveHandle` (an inline-archive run, its `LOGWEIR_ARCHIVE_URL` handle) or `ControllerIdentity` (a destination''s own handle); such a read has no Job and no `jobRef`.'
                         nullable: true
                         type: string
                       presence:

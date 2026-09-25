@@ -1949,6 +1949,8 @@ async fn evidence_fetch_pass(
                     }
                 }
             };
+            // A TRANSIENT relay failure is retried with the next Job (P12).
+            let (result, retry) = crate::evidence_fetch::relayed_schedule(result, attempt, now);
             write_fetch_verdict(
                 backups,
                 backup,
@@ -1960,7 +1962,7 @@ async fn evidence_fetch_pass(
                     Some(&job_ref),
                     attempt,
                     Some(presence),
-                    None,
+                    retry,
                 ),
                 facts,
                 now,
@@ -1988,12 +1990,33 @@ async fn continue_evidence_fetch(
     namespace: &str,
     now: DateTime<Utc>,
     runner: &job::RunnerImage,
+    reads: &Reread<'_>,
 ) -> Result<bool, BackupError> {
+    // PoC P12 FIRST: a read the CONTROLLER owes this run — a scheduled retry
+    // of its own read, or the one re-read a new controller process gives an
+    // unverified run. Decided from the stored status alone, so a run that
+    // owes nothing costs this pass nothing.
+    match backup_read_plan(backup, now, reads) {
+        crate::evidence_fetch::ControllerRead::Due(attempt) => {
+            controller_read_pass(backup, client, namespace, now, attempt, reads).await?;
+            return Ok(true);
+        }
+        crate::evidence_fetch::ControllerRead::Settle(why) => {
+            settle_controller_read(backup, client, namespace, now, why).await?;
+            return Ok(true);
+        }
+        crate::evidence_fetch::ControllerRead::Scheduled(_)
+        | crate::evidence_fetch::ControllerRead::Nothing => {}
+    }
     let evidence = backup.status.as_ref().and_then(|s| s.evidence.as_ref());
     let result = evidence
         .and_then(|e| e.verification.as_ref())
         .and_then(|v| v.result.as_deref());
-    let observation = evidence.and_then(|e| e.observation.as_ref());
+    // A CONTROLLER READ'S OBSERVATION IS NOT A JOB'S: `owed_attempt` would
+    // start an evidence-fetch Job for a run whose grant no pod holds.
+    let observation = evidence
+        .and_then(|e| e.observation.as_ref())
+        .filter(|o| !crate::evidence_fetch::is_controller_read(o.mode.as_deref()));
     // THE CRASH WINDOW. A pass that wrote the terminal patch and stopped
     // before recording the fetch — before the Job, or after the Job and
     // before its `Pending` — leaves a run with both keys, the runner's digest,
@@ -2049,6 +2072,347 @@ async fn continue_evidence_fetch(
     )
     .await?;
     Ok(true)
+}
+
+// ---------------------------------------------------------------------------
+// The controller's own read, read again — PoC defect P12
+// ---------------------------------------------------------------------------
+
+/// What a terminal pass needs to read a run's evidence AGAIN: the same archive
+/// and verification oracles the terminal pass read it with, the archive
+/// handle's own location, and which runs this controller process has already
+/// read ([`crate::evidence_fetch::ReadMemory`]; `None` — every row that is not
+/// about re-reading — never starts a new schedule, only continues one).
+#[derive(Clone, Copy)]
+pub struct Reread<'a> {
+    /// The terminal pass's archive oracle (`windowCovered`, `records`, `capture`).
+    pub archive: ArchiveOracle<'a>,
+    /// The terminal pass's verification oracle.
+    pub verify: VerifyOracle<'a>,
+    /// `LOGWEIR_ARCHIVE_URL`, the global handle's location.
+    pub archive_url: Option<&'a str>,
+    /// Which runs this process has read.
+    pub memory: Option<&'a crate::evidence_fetch::ReadMemory>,
+}
+
+/// `observation.mode` for a source the CONTROLLER reads through, or `None` for
+/// one it does not read at all (a Job reads it, or nothing may).
+#[must_use]
+pub fn controller_read_mode(source: &EvidenceSource) -> Option<&'static str> {
+    match source {
+        EvidenceSource::GlobalHandle => Some(crate::evidence_fetch::MODE_ARCHIVE_HANDLE),
+        EvidenceSource::Destination(_) => Some(crate::evidence_fetch::MODE_CONTROLLER_IDENTITY),
+        EvidenceSource::FetchJob { .. } | EvidenceSource::NotAttempted { .. } => None,
+    }
+}
+
+/// One verification through the handle `source` names: the injected oracle for
+/// the global handle, and — D2 §3.9's "no second verification path" — THE SAME
+/// `verify_oracle` over the destination's own handle for `ControllerIdentity`.
+/// `verify_oracle` already takes the store it reads through, resolves this
+/// namespace's trust and runs `verify_resolved` inside one `spawn_blocking`;
+/// handing it another handle is the whole difference. Digest, DSSE and the
+/// trust projection are D3 W10's and are not re-decided here.
+async fn read_verdict(
+    source: &EvidenceSource,
+    reference: EvidenceRef,
+    verify: VerifyOracle<'_>,
+    client: &kube::Client,
+) -> VerificationResult {
+    match source {
+        EvidenceSource::Destination(store) => {
+            crate::verification::verify_oracle(Some(Arc::clone(store)), client.clone())(reference)
+                .await
+        }
+        _ => verify(reference).await,
+    }
+}
+
+/// What this TERMINAL `Backup`'s controller read calls for now — PURE, from
+/// its stored status ([`crate::evidence_fetch::plan_controller_read`]), after
+/// the checks that make a read possible at all: a `NotAttempted` verdict, both
+/// evidence keys and the runner's own receipt digest on the status (a
+/// legacy-unbound run's `NotAttempted` is final — nothing fetched could be
+/// bound to it), and, for an inline-archive run, a configured archive handle
+/// whose bucket is the run's own (a run outside it is `NotAttempted` naming
+/// both buckets, and reading it would read the wrong bucket). A run that fails
+/// the last check while an attempt is SCHEDULED settles on that sentence
+/// instead of advertising an attempt that will never happen (review M1).
+#[must_use]
+pub fn backup_read_plan(
+    backup: &Backup,
+    now: DateTime<Utc>,
+    reads: &Reread<'_>,
+) -> crate::evidence_fetch::ControllerRead {
+    use crate::evidence_fetch::ControllerRead;
+    let Some(evidence) = backup.status.as_ref().and_then(|s| s.evidence.as_ref()) else {
+        return ControllerRead::Nothing;
+    };
+    let Some(verification) = evidence.verification.as_ref() else {
+        return ControllerRead::Nothing;
+    };
+    if evidence.receipt_key.is_none()
+        || evidence.sidecar_key.is_none()
+        || evidence.receipt_sha256.is_none()
+    {
+        return ControllerRead::Nothing;
+    }
+    let inline = backup.spec.destination_ref.is_none();
+    let readable = if inline {
+        match reads.archive_url {
+            None => Err(crate::evidence_fetch::archive_handle_gone_detail(
+                "signed backup receipt",
+            )),
+            Some(handle) => match crate::destination::legacy_backup_evidence_scope(
+                &backup.spec.archive.url,
+                Some(handle),
+            )
+            .not_attempted_detail("signed backup receipt")
+            {
+                Some(elsewhere) => Err(elsewhere),
+                None => Ok(()),
+            },
+        }
+    } else {
+        Ok(())
+    };
+    let uid = backup.uid();
+    crate::evidence_fetch::plan_controller_read(
+        verification.result.as_deref(),
+        verification.detail.as_deref(),
+        evidence.observation.as_ref(),
+        inline,
+        readable,
+        now,
+        reads.memory.zip(uid.as_deref()),
+    )
+}
+
+/// [`backup_read_plan`] as the attempt this `Backup` owes now, if any.
+#[must_use]
+pub fn owed_backup_read(backup: &Backup, now: DateTime<Utc>, reads: &Reread<'_>) -> Option<u32> {
+    match backup_read_plan(backup, now, reads) {
+        crate::evidence_fetch::ControllerRead::Due(attempt) => Some(attempt),
+        _ => None,
+    }
+}
+
+/// Record a SCHEDULED controller read that can no longer happen (review M1):
+/// `NotAttempted` with `why`, the attempt count kept, `retryAfter` cleared —
+/// ONE write, after which the run owes nothing in this process.
+async fn settle_controller_read(
+    backup: &Backup,
+    client: &kube::Client,
+    namespace: &str,
+    now: DateTime<Utc>,
+    why: String,
+) -> Result<(), BackupError> {
+    let observation = backup
+        .status
+        .as_ref()
+        .and_then(|s| s.evidence.as_ref())
+        .and_then(|e| e.observation.as_ref());
+    let mode = observation
+        .and_then(|o| o.mode.clone())
+        .unwrap_or_else(|| crate::evidence_fetch::MODE_ARCHIVE_HANDLE.to_string());
+    let attempt = observation
+        .and_then(|o| o.attempt)
+        .and_then(|a| u32::try_from(a).ok())
+        .unwrap_or(1);
+    let name = backup.name_any();
+    info!(
+        backup = %name,
+        namespace = %namespace,
+        attempt,
+        "this finished Backup's scheduled receipt read can no longer be made; recorded, and \
+         no further attempt is scheduled"
+    );
+    let backups: Api<Backup> = Api::namespaced(client.clone(), namespace);
+    write_fetch_verdict(
+        &backups,
+        backup,
+        &name,
+        &StatusVersion::observed(backup.meta()),
+        &VerificationResult::not_attempted(logweir_verify::PAYLOAD_TYPE_BACKUP_RECEIPT, why),
+        crate::evidence_fetch::observation_patch(Some(&mode), None, attempt, None, None),
+        serde_json::Map::new(),
+        now,
+    )
+    .await?;
+    Ok(())
+}
+
+/// One controller read of a TERMINAL `Backup`'s receipt — attempt `attempt` —
+/// and the ONE status write it implies.
+///
+/// It is the terminal pass's evidence half, run again: the same source
+/// resolution ([`evidence_source`], [`legacy_receipt_source`]), the same
+/// archive observation for the receipt's window, the same digest fence
+/// against the runner's own digest, the same verifier. What it writes is what
+/// the terminal pass would have written had the read answered then —
+/// `windowCovered` whenever the fetched receipt is the runner's, `records` and
+/// `capture` only beside a passing verdict — plus the observation that records
+/// the attempt and, for a transient failure, the next one.
+///
+/// A source that is no longer the controller's to read (the destination now
+/// names a pod-only grant, is gone, or is not allowlisted) is recorded as
+/// `NotAttempted` with its own sentence and no retry.
+async fn controller_read_pass(
+    backup: &Backup,
+    client: &kube::Client,
+    namespace: &str,
+    now: DateTime<Utc>,
+    attempt: u32,
+    reads: &Reread<'_>,
+) -> Result<(), BackupError> {
+    // REVIEW L2: at most `CONTROLLER_READ_CONCURRENCY` of these in flight per
+    // process; the rest wait here for a permit. The semaphore is never closed,
+    // so `acquire` cannot fail; a failure would only mean the read is not
+    // throttled, never that it is skipped.
+    let _permit = crate::evidence_fetch::controller_read_permits()
+        .acquire()
+        .await
+        .ok();
+    let payload_type = logweir_verify::PAYLOAD_TYPE_BACKUP_RECEIPT;
+    let name = backup.name_any();
+    let evidence = backup.status.as_ref().and_then(|s| s.evidence.as_ref());
+    let keys = EvidenceKeys {
+        receipt: evidence.and_then(|e| e.receipt_key.clone()),
+        sidecar: evidence.and_then(|e| e.sidecar_key.clone()),
+        receipt_sha256: evidence.and_then(|e| e.receipt_sha256.clone()),
+    };
+    let (Some(payload_key), Some(sidecar_key), Some(reported)) = (
+        keys.receipt.clone(),
+        keys.sidecar.clone(),
+        keys.receipt_sha256.clone(),
+    ) else {
+        return Ok(());
+    };
+    let routed = evidence_source(backup, client, namespace, now)
+        .await
+        .map_err(BackupError::Api)?;
+    let source = legacy_receipt_source(routed, &backup.spec.archive.url, reads.archive_url);
+    let mode = controller_read_mode(&source).unwrap_or(if backup.spec.destination_ref.is_some() {
+        crate::evidence_fetch::MODE_CONTROLLER_IDENTITY
+    } else {
+        crate::evidence_fetch::MODE_ARCHIVE_HANDLE
+    });
+    let observed = match &source {
+        EvidenceSource::GlobalHandle => (reads.archive)(keys.clone()).await,
+        EvidenceSource::Destination(store) => {
+            let handle = Arc::clone(store);
+            let keys = keys.clone();
+            tokio::task::spawn_blocking(move || observe_archive(&handle, &keys))
+                .await
+                .ok()
+                .flatten()
+        }
+        EvidenceSource::FetchJob { .. } | EvidenceSource::NotAttempted { .. } => None,
+    };
+    let fetched = observed.as_ref().and_then(|o| o.receipt_sha256.as_deref());
+    let disagreement = fetched.is_some_and(|f| f != reported);
+    let result = match &source {
+        EvidenceSource::NotAttempted { detail } => {
+            VerificationResult::not_attempted(payload_type, detail.clone())
+        }
+        EvidenceSource::FetchJob { destination, .. } => VerificationResult::not_attempted(
+            payload_type,
+            format!(
+                "BackupDestination {}/{} now reads evidence with a grant only a pod may hold; \
+                 this run's receipt was read by the controller and is not read again here — \
+                 run the printed logweir drill verify command",
+                destination.namespace, destination.name
+            ),
+        ),
+        _ if disagreement => VerificationResult::invalid(
+            payload_type,
+            format!(
+                "the fetched receipt hashes to {}, but the runner reported {reported}",
+                fetched.unwrap_or("<absent>")
+            ),
+        ),
+        source => {
+            read_verdict(
+                source,
+                EvidenceRef {
+                    namespace: namespace.to_string(),
+                    payload_key,
+                    payload_sha256: reported.clone(),
+                    sidecar_key,
+                    payload_type,
+                },
+                reads.verify,
+                client,
+            )
+            .await
+        }
+    };
+    // A PASS WITH NO WINDOW IS NOT RECORDED AS FINAL (review L1). The window
+    // and the counts come from the archive observation, a separate read from
+    // the verifier's; when that read did not answer, writing `Valid` would
+    // record a run with no `windowCovered` — "not a recovery point" — and a
+    // `Valid` is never read again, so the point would be lost for good. The
+    // attempt is recorded as a TRANSIENT failure instead and the next one
+    // reads both. (A receipt that WAS read and names no window is written as
+    // the terminal pass writes it.)
+    let result = if result.is_pass() && fetched.is_none() {
+        VerificationResult::not_attempted(
+            payload_type,
+            format!(
+                "{}its covered window could not be read on this attempt, and the verdict is not \
+                 recorded without the window that makes this run a recovery point",
+                crate::verification::RECEIPT_WINDOW_UNREAD_PREFIX
+            ),
+        )
+    } else {
+        result
+    };
+    let (result, retry) = crate::evidence_fetch::scheduled(result, attempt, now);
+    // THE TERMINAL PASS'S FACT RULES, VERBATIM: the window whenever the
+    // fetched receipt IS the runner's (the digest agrees), the attested counts
+    // only beside a pass.
+    let mut facts = serde_json::Map::new();
+    if fetched == Some(reported.as_str()) {
+        if let Some((from_ms, to_ms)) = observed.as_ref().and_then(|o| o.covered) {
+            facts.insert("windowCovered".to_string(), window_covered(from_ms, to_ms));
+        }
+        if result.is_pass() {
+            if let Some(records) = observed.as_ref().and_then(|o| o.records) {
+                facts.insert("records".to_string(), json!(records));
+            }
+            if let Some((started, finished)) = observed.as_ref().and_then(|o| o.capture) {
+                facts.insert(
+                    "capture".to_string(),
+                    json!({ "startedAt": started, "finishedAt": finished }),
+                );
+            }
+        }
+    }
+    info!(
+        backup = %name,
+        namespace = %namespace,
+        attempt,
+        mode,
+        verification = %result.result,
+        retry_after = ?retry,
+        "weirkeeper read this finished Backup's receipt again"
+    );
+    let backups: Api<Backup> = Api::namespaced(client.clone(), namespace);
+    write_fetch_verdict(
+        &backups,
+        backup,
+        &name,
+        &StatusVersion::observed(backup.meta()),
+        &result,
+        crate::evidence_fetch::observation_patch(Some(mode), None, attempt, None, retry),
+        facts,
+        now,
+    )
+    .await?;
+    if let (Some(memory), Some(uid)) = (reads.memory, backup.uid()) {
+        memory.mark(&uid);
+    }
+    Ok(())
 }
 
 /// The two evidence keys, as read off the log.
@@ -4120,6 +4484,45 @@ pub async fn reconcile_backup_at(
         runner,
         archive_url,
         None,
+        None,
+    )
+    .await
+}
+
+/// [`reconcile_backup_at`], with THIS PROCESS'S memory of which finished runs
+/// it has read — PoC defect P12's re-read. The running controller passes the
+/// process-wide [`crate::evidence_fetch::ReadMemory::global`]; a row passes a
+/// fresh one, which is "a controller that has just started".
+///
+/// Every other entry point passes none: such a pass continues a SCHEDULED
+/// retry of the controller's own read (`observation.retryAfter`) and never
+/// starts a new schedule, so the rows that are not about re-reading see the
+/// routes they always saw.
+///
+/// # Errors
+///
+/// [`BackupError`] for anything that is not an outcome.
+#[allow(clippy::too_many_arguments)]
+pub async fn reconcile_backup_rereading(
+    backup: &Backup,
+    client: &kube::Client,
+    archive: ArchiveOracle<'_>,
+    verify: VerifyOracle<'_>,
+    now: DateTime<Utc>,
+    runner: &job::RunnerImage,
+    archive_url: Option<&str>,
+    memory: &crate::evidence_fetch::ReadMemory,
+) -> Result<BackupOutcome, BackupError> {
+    reconcile_backup_run(
+        backup,
+        client,
+        archive,
+        verify,
+        now,
+        runner,
+        archive_url,
+        None,
+        Some(memory),
     )
     .await
 }
@@ -4165,6 +4568,7 @@ pub async fn reconcile_backup_pooled(
         runner,
         archive_url,
         Some(pool),
+        None,
     )
     .await
 }
@@ -4180,6 +4584,7 @@ async fn reconcile_backup_run(
     runner: &job::RunnerImage,
     archive_url: Option<&str>,
     pool: Option<&crate::run_pool::Pool<'_, Backup>>,
+    memory: Option<&crate::evidence_fetch::ReadMemory>,
 ) -> Result<BackupOutcome, BackupError> {
     // WHERE THE OBJECT STANDS WHEN A REFUSAL IS RAISED. The freeze pass writes
     // the execution record (and `TopicsResolved`) BEFORE the runner Job is
@@ -4198,6 +4603,7 @@ async fn reconcile_backup_run(
         runner,
         archive_url,
         pool,
+        memory,
         &mut written,
     )
     .await
@@ -4265,8 +4671,16 @@ async fn reconcile_backup_inner(
     runner: &job::RunnerImage,
     archive_url: Option<&str>,
     pool: Option<&crate::run_pool::Pool<'_, Backup>>,
+    memory: Option<&crate::evidence_fetch::ReadMemory>,
     written: &mut Option<Backup>,
 ) -> Result<BackupOutcome, BackupError> {
+    // What a terminal pass reads a run's evidence again with (PoC P12).
+    let reads = Reread {
+        archive,
+        verify,
+        archive_url,
+        memory,
+    };
     let name = backup.name_any();
     let namespace = backup
         .namespace()
@@ -4370,7 +4784,7 @@ async fn reconcile_backup_inner(
                 // JOB'S (review LOW-3). The runner Job is not read; a fetch
                 // this run still owes has its own name and its own owner check,
                 // and must not stall `Pending` behind a stranger's object.
-                continue_evidence_fetch(backup, client, &namespace, now, runner).await?;
+                continue_evidence_fetch(backup, client, &namespace, now, runner, &reads).await?;
                 return Ok(BackupOutcome {
                     job_name,
                     created: false,
@@ -4406,7 +4820,7 @@ async fn reconcile_backup_inner(
             // …EXCEPT THE EVIDENCE FETCH IT MAY STILL OWE (D2 §3.9). The
             // runner Job's TTL has nothing to do with the evidence-fetch
             // Job's, and a `Pending` verdict is not a finished one.
-            continue_evidence_fetch(backup, client, &namespace, now, runner).await?;
+            continue_evidence_fetch(backup, client, &namespace, now, runner, &reads).await?;
             return Ok(BackupOutcome {
                 job_name,
                 created: false,
@@ -4854,7 +5268,7 @@ async fn reconcile_backup_inner(
         // runner's pod is still not read and the run's own fields are still
         // not rewritten — this touches `evidence.verification`,
         // `evidence.observation`, `Verified` and the receipt facts only.
-        continue_evidence_fetch(backup, client, &namespace, now, runner).await?;
+        continue_evidence_fetch(backup, client, &namespace, now, runner, &reads).await?;
         return Ok(BackupOutcome {
             job_name,
             created: false,
@@ -5186,23 +5600,37 @@ async fn reconcile_backup_inner(
             // THE JOB'S VERDICT IS WRITTEN BY THE JOB'S PASS, below — never
             // here, where nothing has been read.
             (EvidenceSource::FetchJob { .. }, _) => None,
-            (EvidenceSource::GlobalHandle, Some(reference)) => Some(verify(reference).await),
-            // THE SAME VERIFIER, ON THE DESTINATION'S OWN HANDLE — D2 §3.9's
-            // "no second verification path". `verify_oracle` already takes the
-            // store it reads through, resolves this namespace's trust and runs
-            // `verify_resolved` inside one `spawn_blocking`; handing it another
-            // handle is the whole change. Digest, DSSE and the trust
-            // projection are D3 W10's and are not re-decided here.
-            (EvidenceSource::Destination(store), Some(reference)) => Some(
-                crate::verification::verify_oracle(Some(Arc::clone(store)), client.clone())(
-                    reference,
-                )
-                .await,
-            ),
+            (
+                source @ (EvidenceSource::GlobalHandle | EvidenceSource::Destination(_)),
+                Some(reference),
+            ) => Some(read_verdict(source, reference, verify, client).await),
             // GC11's no-artifact case, and a fetch that returned no digest: no
             // document, no opinion, no block.
             _ => None,
         }
+    };
+    // PoC P12: THE CONTROLLER'S OWN READ IS ATTEMPT 1 OF A SCHEDULE. A
+    // transient failure (no credential, a denial, a timeout, unreadable
+    // trust) records `observation.{mode, attempt: 1, retryAfter}` and names
+    // the next attempt in its sentence; the terminal branches below read it
+    // again (`continue_evidence_fetch`). Every other verdict is written
+    // exactly as before, with no observation.
+    let mut read_observation: Option<Value> = None;
+    let verdict = match (verdict, controller_read_mode(&evidence_from)) {
+        (Some(result), Some(mode)) if !digest_disagreement && !legacy_unbound => {
+            let (result, retry) = crate::evidence_fetch::scheduled(result, 1, now);
+            if retry.is_some() {
+                read_observation = Some(crate::evidence_fetch::observation_patch(
+                    Some(mode),
+                    None,
+                    1,
+                    None,
+                    retry,
+                ));
+            }
+            Some(result)
+        }
+        (verdict, _) => verdict,
     };
     if let Some(result) = verdict {
         let current = backup
@@ -5267,6 +5695,14 @@ async fn reconcile_backup_inner(
             verified,
             crate::verification::verification_patch_value(block),
         );
+        if let Some(observation) = read_observation {
+            if let Some(evidence) = evidence_patch
+                .pointer_mut("/status/evidence")
+                .and_then(Value::as_object_mut)
+            {
+                evidence.insert("observation".to_string(), observation);
+            }
+        }
         if result.is_pass() {
             if let Some(status) = evidence_patch
                 .get_mut("status")
@@ -5284,6 +5720,14 @@ async fn reconcile_backup_inner(
             }
         }
         patch_status_at(&backups, backup, &name, &at, evidence_patch).await?;
+        // THIS PROCESS HAS READ IT: a later terminal pass in this process does
+        // not start a second schedule for it once this one is spent
+        // (`evidence_fetch::ReadMemory`).
+        if controller_read_mode(&evidence_from).is_some() {
+            if let (Some(memory), Some(uid)) = (reads.memory, backup.uid()) {
+                memory.mark(&uid);
+            }
+        }
     }
 
     // D2 §3.9 STEP 2, THE DEFAULT ARM: an evidence-fetch Job reads this run's
@@ -5368,12 +5812,16 @@ async fn reconcile(
         limit: None,
         reservations: crate::run_pool::Reservations::global(),
     };
+    // PoC P12: THE PROCESS'S ONE MEMORY of which finished runs it has read,
+    // so an unverified run is read again once per controller process — the
+    // moment a created or rotated `logweir-evidence-ro` reaches it.
     reconcile_in_context_pooled(
         &backup,
         &ctx,
         Utc::now(),
         &|name: &str| std::env::var(name),
         Some(&pool),
+        Some(crate::evidence_fetch::ReadMemory::global()),
     )
     .await?;
     Ok(Action::requeue(std::time::Duration::from_secs(
@@ -5395,7 +5843,7 @@ pub async fn reconcile_in_context(
     now: DateTime<Utc>,
     env: crate::controllers::restore::EnvReader<'_>,
 ) -> Result<BackupOutcome, BackupError> {
-    reconcile_in_context_pooled(backup, ctx, now, env, None).await
+    reconcile_in_context_pooled(backup, ctx, now, env, None, None).await
 }
 
 /// [`reconcile_in_context`], through the manual-run pool when one is given —
@@ -5410,6 +5858,7 @@ pub async fn reconcile_in_context_pooled(
     now: DateTime<Utc>,
     env: crate::controllers::restore::EnvReader<'_>,
     pool: Option<&crate::run_pool::Pool<'_, Backup>>,
+    memory: Option<&crate::evidence_fetch::ReadMemory>,
 ) -> Result<BackupOutcome, BackupError> {
     let archive = ctx.archive.clone();
     let oracle = move |keys: EvidenceKeys| -> BoxFuture<'static, Option<ArchiveObservation>> {
@@ -5438,6 +5887,7 @@ pub async fn reconcile_in_context_pooled(
         &ctx.runner_image,
         archive_url.as_deref(),
         pool,
+        memory,
     )
     .await
 }

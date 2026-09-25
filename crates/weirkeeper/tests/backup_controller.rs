@@ -13387,13 +13387,20 @@ mod evidence_fetch_job {
             vec![b'y'; usize::try_from(MAX_EVIDENCE_SIDECAR_BYTES).expect("fits") + 1];
         let mut lying = entry(RECEIPT_KEY, Stream::EvidencePayload, Some(&r), None);
         lying.bytes = Some(1);
-        /// `(label, relayed entries, payload bytes, sidecar bytes, detail needle)`.
+        // The runner's own truncation flag (review L3): the second producer of
+        // the over-cap sentence.
+        let mut flagged = entry(RECEIPT_KEY, Stream::EvidencePayload, None, None);
+        flagged.present = true;
+        flagged.truncated = true;
+        /// `(label, relayed entries, payload bytes, sidecar bytes, detail
+        /// needle, whether the next Job is scheduled)`.
         type OversizeCase = (
             &'static str,
             Vec<EvidenceObjectResult>,
             Vec<u8>,
             Vec<u8>,
             &'static str,
+            bool,
         );
         let cases: Vec<OversizeCase> = vec![
             (
@@ -13410,6 +13417,7 @@ mod evidence_fetch_job {
                 big_payload.clone(),
                 s.clone(),
                 "cap",
+                false,
             ),
             (
                 "sidecar over the 64 KiB cap",
@@ -13425,6 +13433,7 @@ mod evidence_fetch_job {
                 r.clone(),
                 big_sidecar.clone(),
                 "cap",
+                false,
             ),
             (
                 "declared length is not the relayed length",
@@ -13435,9 +13444,23 @@ mod evidence_fetch_job {
                 r.clone(),
                 s.clone(),
                 "declared",
+                // A relay whose declared length does not describe its bytes is
+                // D2 §3.9 step 5's "relay unreadable": a new Job is tried.
+                true,
+            ),
+            (
+                "the runner flagged the payload truncated",
+                vec![
+                    flagged,
+                    entry(SIDECAR_KEY, Stream::EvidenceSidecar, Some(&s), None),
+                ],
+                r.clone(),
+                s.clone(),
+                "cap",
+                false,
             ),
         ];
-        for (label, entries, payload, side, needle) in cases {
+        for (label, entries, payload, side, needle, retried) in cases {
             let (v, o) = pending(1, Some(&ev_name(1)));
             let backup = terminal_backup(&logweir_core::ids::sha256_prefixed(&r), Some(v), Some(o));
             let log = relay_log(entries, Some(&payload), Some(&side));
@@ -13471,6 +13494,22 @@ mod evidence_fetch_job {
                 last["windowCovered"].is_null(),
                 "{label}: nothing projected"
             );
+            // REVIEW L3/R3: AN OBJECT OVER THE CAP IS A FACT ABOUT THE OBJECT,
+            // read through the REAL producer (`read_relay`) and the real
+            // scheduler: it is final — one Job, not four — and its class says so.
+            let detail = verification["detail"].as_str().unwrap_or_default();
+            assert_eq!(
+                !last["evidence"]["observation"]["retryAfter"].is_null(),
+                retried,
+                "{label}: {last}"
+            );
+            if !retried {
+                assert_eq!(
+                    weirkeeper::verification::not_attempted_class(detail),
+                    weirkeeper::verification::NotAttemptedClass::Final,
+                    "{label}: {detail}"
+                );
+            }
         }
     }
 
@@ -13733,5 +13772,926 @@ mod evidence_fetch_job {
                 "{code}"
             );
         }
+    }
+
+    /// **PoC P12's CLASS SWEEP, THE JOB PATH: A DENIED RELAY IS RETRIED; AN
+    /// ABSENT DOCUMENT IS NOT.** A relay whose store answered the grant with
+    /// `AccessDenied` (a grant Secret an operator may yet fix) used to be final
+    /// after one Job; it now schedules attempt 2 at +1 m exactly like a Job that
+    /// did not finish. A relay that says the receipt is not there is a fact
+    /// about the archive and schedules nothing.
+    ///
+    /// KILLS: `relayed_schedule` scheduling nothing (the denial stays final);
+    /// scheduling an absence.
+    #[tokio::test]
+    async fn a_denied_relay_is_retried_and_an_absent_one_is_not() {
+        let at = utc(2026, 11, 9, 3, 22);
+        for (code, retried) in [
+            (CheckCode::AccessDenied, true),
+            (CheckCode::ObjectNotFound, false),
+        ] {
+            let (v, o) = pending(1, Some(&ev_name(1)));
+            let backup = terminal_backup(
+                &logweir_core::ids::sha256_prefixed(&receipt()),
+                Some(v),
+                Some(o),
+            );
+            let s = sidecar();
+            let log = relay_log(
+                vec![
+                    entry(RECEIPT_KEY, Stream::EvidencePayload, None, Some(code)),
+                    entry(SIDECAR_KEY, Stream::EvidenceSidecar, Some(&s), None),
+                ],
+                None,
+                Some(&s),
+            );
+            let mut routes = evidence_routes(
+                1,
+                Some(ev_job(&ev_name(1), Some("Complete"), UID)),
+                vec![],
+                vec![ev_pod(EV_JOB_UID, 0)],
+                log,
+            );
+            routes.extend(terminal_runner_routes(secret_backed_destination()));
+            let bodies = run(&backup, routes, at).await;
+            let last = patched_statuses(&bodies)
+                .last()
+                .cloned()
+                .expect("the verdict");
+            let retry = &last["evidence"]["observation"]["retryAfter"];
+            let detail = last["evidence"]["verification"]["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            if retried {
+                assert_eq!(retry, &json!("2026-11-09T03:23:00Z"), "{code}: {last}");
+                assert!(detail.contains("attempt 2 starts at"), "{code}: {detail}");
+            } else {
+                assert!(retry.is_null(), "{code}: {last}");
+                assert!(!detail.contains("attempt 2"), "{code}: {detail}");
+            }
+        }
+    }
+}
+
+// ===========================================================================
+// PoC P12 — the controller's own evidence read is retried, with a bounded
+// schedule, and read again by a new controller process
+// ===========================================================================
+//
+// The PoC upgrade round (`claude/artifacts/poc-upgrade-1/defects/
+// P12-legacy-notattempted-no-retry.txt`): three inline-archive `Backup`s whose
+// receipt read failed — the controller had no credential and the SDK fell back
+// to IMDS — stayed `NotAttempted` with no observation and no retry after
+// `logweir-evidence-ro` was created and the controller restarted twice, and
+// were therefore never recovery points.
+mod p12_controller_read_retry {
+    use super::*;
+    use serde_json::json;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use weirkeeper::controllers::backup::{
+        owed_backup_read, reconcile_backup_at, reconcile_backup_rereading, Reread,
+    };
+    use weirkeeper::evidence_fetch::{ReadMemory, MAX_ATTEMPTS, MODE_ARCHIVE_HANDLE};
+    use weirkeeper::verification::{
+        not_attempted_class, store_detail, EvidenceRef, NotAttemptedClass, VerificationResult,
+        VerificationVerdict,
+    };
+
+    /// The controller's archive handle — the bucket the fixture's archive is in.
+    const HANDLE: &str = "s3://kafka-backups/logweir";
+
+    /// What the PoC's controller wrote for want of a credential, verbatim in
+    /// shape (`defects/P12-…`): a store error that is not `NotFound`.
+    fn imds_detail() -> String {
+        store_detail(&logweir_store::StoreError::Io(format!(
+            "{RECEIPT_KEY}: Generic S3 error: Error after 0 retries: error sending request for \
+             url (http://169.254.169.254/latest/api/token)"
+        )))
+    }
+
+    fn t0() -> DateTime<Utc> {
+        utc(2026, 11, 9, 3, 20)
+    }
+
+    fn secs(n: i64) -> chrono::Duration {
+        chrono::Duration::seconds(n)
+    }
+
+    /// The world one controller lives in: whether its credential can read the
+    /// bucket, whether the receipt is there at all, and how often each oracle
+    /// was asked.
+    #[derive(Clone, Default)]
+    struct World {
+        credential: Arc<AtomicBool>,
+        absent: Arc<AtomicBool>,
+        reads: Arc<AtomicUsize>,
+        verifies: Arc<AtomicUsize>,
+    }
+
+    impl World {
+        fn archive(
+            &self,
+        ) -> impl Fn(EvidenceKeys) -> BoxFuture<'static, Option<ArchiveObservation>> {
+            let world = self.clone();
+            move |_keys: EvidenceKeys| {
+                world.reads.fetch_add(1, Ordering::SeqCst);
+                let readable =
+                    world.credential.load(Ordering::SeqCst) && !world.absent.load(Ordering::SeqCst);
+                Box::pin(async move {
+                    // `observe_archive`'s answer when both gets fail is a
+                    // presence of nothing and no digest — NOT OBSERVED.
+                    Some(ArchiveObservation {
+                        presence: EvidencePresence {
+                            payload: readable,
+                            sidecar: readable,
+                        },
+                        covered: readable.then_some((1_762_650_000_000, 1_762_658_400_000)),
+                        receipt_sha256: readable.then(|| RUNNER_RECEIPT_SHA256.to_string()),
+                        records: readable.then_some(75),
+                        capture: readable
+                            .then(|| (utc(2026, 11, 9, 3, 17), utc(2026, 11, 9, 3, 19))),
+                    })
+                })
+            }
+        }
+
+        fn verify(&self) -> impl Fn(EvidenceRef) -> BoxFuture<'static, VerificationResult> {
+            let world = self.clone();
+            move |r: EvidenceRef| {
+                world.verifies.fetch_add(1, Ordering::SeqCst);
+                let credential = world.credential.load(Ordering::SeqCst);
+                let absent = world.absent.load(Ordering::SeqCst);
+                Box::pin(async move {
+                    if absent {
+                        return VerificationResult::not_attempted(
+                            r.payload_type,
+                            store_detail(&logweir_store::StoreError::NotFound(r.payload_key)),
+                        );
+                    }
+                    if !credential {
+                        return VerificationResult::not_attempted(r.payload_type, imds_detail());
+                    }
+                    VerificationResult {
+                        result: VerificationVerdict::Valid,
+                        matched_key_id: Some("test-key".to_string()),
+                        payload_type: r.payload_type.to_string(),
+                        verified_at: utc(2026, 11, 9, 3, 20),
+                        detail: None,
+                        trust: None,
+                    }
+                })
+            }
+        }
+    }
+
+    /// `backup` with every status patch in `bodies` merged onto it, the way the
+    /// API server's RFC 7386 merge would.
+    fn fold(backup: &Backup, bodies: &[SeenBody]) -> Backup {
+        let mut status = backup
+            .status
+            .as_ref()
+            .map_or(Value::Null, |s| serde_json::to_value(s).expect("a status"));
+        for patch in patched_statuses(bodies) {
+            apply_merge_patch(&mut status, &patch);
+        }
+        let mut next = backup.clone();
+        next.status = Some(serde_json::from_value(status).expect("the merged status reads"));
+        next
+    }
+
+    /// A pass over a TERMINAL `Backup` whose runner Job is gone: the only
+    /// routes are the Job's 404 and the status PATCH, so any other request
+    /// panics in the double.
+    fn terminal_routes() -> Vec<Route> {
+        vec![
+            Route {
+                method: "GET",
+                path_suffix: "/jobs/logweir-backup-nightly-20261109-031700",
+                status: 404,
+                body: not_found_body("jobs.batch", NAME),
+            },
+            Route {
+                method: "PATCH",
+                path_suffix: "/backups/logweir-backup-nightly-20261109-031700/status",
+                status: 200,
+                body: backup_json(),
+            },
+        ]
+    }
+
+    /// One pass of the RUNNING controller's shape (a process memory), over the
+    /// finished Job the first time and the terminal branch after that. Returns
+    /// the object as the API server now holds it, and the status patches.
+    async fn pass(
+        backup: &Backup,
+        world: &World,
+        memory: &ReadMemory,
+        at: DateTime<Utc>,
+    ) -> (Backup, Vec<Value>) {
+        let terminal = backup
+            .status
+            .as_ref()
+            .and_then(|s| s.phase.as_deref())
+            .is_some_and(|p| p == "Succeeded" || p == "Failed");
+        let routes = if terminal {
+            terminal_routes()
+        } else {
+            finished_routes(
+                &pod_list_terminated(0),
+                log_body(&i7_tail_with_digest()),
+                200,
+                "Complete",
+            )
+        };
+        let (client, _seen, bodies) = mock_client_recording_bodies(routes);
+        reconcile_backup_rereading(
+            backup,
+            &client,
+            &world.archive(),
+            &world.verify(),
+            at,
+            &job::RunnerImage::default(),
+            Some(HANDLE),
+            memory,
+        )
+        .await
+        .expect("the reconcile succeeds");
+        let bodies = bodies.lock().expect("the body recorder").clone();
+        (fold(backup, &bodies), patched_statuses(&bodies))
+    }
+
+    fn verification(b: &Backup) -> Value {
+        serde_json::to_value(b.status.as_ref().expect("a status")).expect("json")["evidence"]
+            ["verification"]
+            .clone()
+    }
+
+    fn observation(b: &Backup) -> Value {
+        serde_json::to_value(b.status.as_ref().expect("a status")).expect("json")["evidence"]
+            ["observation"]
+            .clone()
+    }
+
+    fn status_json(b: &Backup) -> Value {
+        serde_json::to_value(b.status.as_ref().expect("a status")).expect("json")
+    }
+
+    fn stamp(t: DateTime<Utc>) -> String {
+        t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    }
+
+    /// **THE ROW THE PoC NEEDED.** The receipt read fails because the
+    /// controller has no credential; the failure is attempt 1 of a schedule
+    /// (`observation.{mode: ArchiveHandle, attempt: 1, retryAfter: +1 m}`, and
+    /// the sentence names attempt 2). Before `retryAfter` a reconcile reads
+    /// nothing and writes nothing. The credential appears; attempt 2 verifies
+    /// the receipt and writes what the terminal pass would have written had
+    /// the read answered then — `Valid`, `windowCovered`, `records`,
+    /// `capture`, `Verified=True` — and the verdict is final after that.
+    ///
+    /// FAILS ON THE OLD CODE: pass 1 writes no observation and pass 3 reads
+    /// nothing, so the run stays `NotAttempted` for good.
+    #[tokio::test]
+    async fn a_failed_receipt_read_is_retried_and_verifies_once_the_credential_exists() {
+        let world = World::default();
+        let memory = ReadMemory::new();
+
+        // PASS 1 — the terminal pass, with no credential.
+        let (b, _) = pass(&frozen_backup(), &world, &memory, t0()).await;
+        let v = verification(&b);
+        assert_eq!(v["result"], json!("NotAttempted"), "{v}");
+        let detail = v["detail"].as_str().expect("a detail");
+        assert!(
+            detail.contains("169.254.169.254")
+                && detail.contains(&format!("attempt 2 starts at {}", stamp(t0() + secs(60)))),
+            "the sentence keeps the cause and names the next attempt: {detail}"
+        );
+        let o = observation(&b);
+        assert_eq!(o["mode"], json!(MODE_ARCHIVE_HANDLE), "{o}");
+        assert_eq!(o["attempt"], json!(1), "{o}");
+        assert_eq!(o["retryAfter"], json!(stamp(t0() + secs(60))), "{o}");
+        assert!(
+            o["jobRef"].is_null(),
+            "no Job read this run's evidence: {o}"
+        );
+        assert!(
+            status_json(&b)["windowCovered"].is_null(),
+            "nothing was read, so no window: {b:?}"
+        );
+        assert_eq!(world.verifies.load(Ordering::SeqCst), 1);
+
+        // PASS 2 — before `retryAfter`: THE RATE BOUND. No read, no write.
+        let (same, written) = pass(&b, &world, &memory, t0() + secs(30)).await;
+        assert!(
+            written.is_empty(),
+            "nothing is written before retryAfter: {written:?}"
+        );
+        assert_eq!(
+            (
+                world.reads.load(Ordering::SeqCst),
+                world.verifies.load(Ordering::SeqCst)
+            ),
+            (1, 1),
+            "and nothing is read"
+        );
+        assert_eq!(verification(&same), v);
+
+        // The credential appears (a created `logweir-evidence-ro`).
+        world.credential.store(true, Ordering::SeqCst);
+
+        // PASS 3 — `retryAfter` has passed: attempt 2 reads and verifies.
+        let (b, written) = pass(&b, &world, &memory, t0() + secs(61)).await;
+        assert_eq!(written.len(), 1, "one status write: {written:?}");
+        let v = verification(&b);
+        assert_eq!(v["result"], json!("Valid"), "{v}");
+        assert!(v["detail"].is_null(), "the failure's sentence is gone: {v}");
+        let status = status_json(&b);
+        assert_eq!(
+            status["windowCovered"],
+            json!({"fromMs": 1_762_650_000_000_i64, "toMs": 1_762_658_400_000_i64}),
+            "the receipt's window — what makes the point a recovery point: {status}"
+        );
+        assert_eq!(status["records"], json!(75), "{status}");
+        assert!(!status["capture"].is_null(), "{status}");
+        let o = observation(&b);
+        assert_eq!(
+            (o["attempt"].clone(), o["retryAfter"].clone()),
+            (json!(2), Value::Null)
+        );
+        let verified = condition_named(&status, "Verified").expect("a Verified condition");
+        assert_eq!(verified.0, "True", "{status}");
+
+        // PASS 4 — a reached verdict is final: no read, no write.
+        let before = (
+            world.reads.load(Ordering::SeqCst),
+            world.verifies.load(Ordering::SeqCst),
+        );
+        let (_, written) = pass(&b, &world, &memory, t0() + secs(3_600)).await;
+        assert!(written.is_empty(), "{written:?}");
+        assert_eq!(
+            (
+                world.reads.load(Ordering::SeqCst),
+                world.verifies.load(Ordering::SeqCst)
+            ),
+            before
+        );
+    }
+
+    /// **THE BOUND ON THE RETRY RATE, over half an hour of a real requeue.** A
+    /// credential that never appears: the terminal Backup is reconciled every
+    /// 15 s (`REQUEUE_SECS`) for 30 minutes and is read EXACTLY four times —
+    /// at +0, +1 m, +6 m and +21 m (D2 §3.9 step 5's schedule) — and after the
+    /// fourth the sentence says no attempt remains in this process and
+    /// `retryAfter` is absent. 121 passes, 4 reads, 4 writes: no hot loop.
+    ///
+    /// KILLS: reading on every pass (the deferral); a schedule with no end.
+    #[tokio::test]
+    async fn a_credential_that_never_appears_is_read_four_times_and_no_more() {
+        let world = World::default();
+        let memory = ReadMemory::new();
+        let (mut b, first) = pass(&frozen_backup(), &world, &memory, t0()).await;
+        assert_eq!(
+            first.len(),
+            2,
+            "the terminal write and attempt 1's verdict: {first:?}"
+        );
+        let mut writes = 0;
+        let mut read_at = vec![0_i64];
+        for n in 1..=120_i64 {
+            let at = t0() + secs(15 * n);
+            let before = world.verifies.load(Ordering::SeqCst);
+            let (next, written) = pass(&b, &world, &memory, at).await;
+            if world.verifies.load(Ordering::SeqCst) > before {
+                read_at.push(15 * n);
+            }
+            writes += written.len();
+            b = next;
+        }
+        assert_eq!(
+            read_at,
+            vec![0, 60, 360, 1_260],
+            "attempts at +0, +1 m, +6 m and +21 m, and never between"
+        );
+        assert_eq!(
+            writes, 3,
+            "one verdict write per later attempt, and nothing else"
+        );
+        let o = observation(&b);
+        assert_eq!(o["attempt"], json!(MAX_ATTEMPTS), "{o}");
+        assert!(o["retryAfter"].is_null(), "the schedule is spent: {o}");
+        let detail = verification(&b)["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            detail.contains("was the last this controller process makes")
+                && detail.contains("logweir-evidence-ro"),
+            "the sentence says what happens next: {detail}"
+        );
+        // A later pass IN THE SAME PROCESS reads nothing.
+        let (_, written) = pass(&b, &world, &memory, t0() + secs(86_400)).await;
+        assert!(written.is_empty());
+        assert_eq!(world.verifies.load(Ordering::SeqCst), 4);
+    }
+
+    /// **THE INPUT CHANGE: A NEW CONTROLLER PROCESS.** `logweir-evidence-ro` is
+    /// projected into the controller's environment, so a created or rotated
+    /// credential arrives with a new process. A run whose schedule was spent is
+    /// read once by the next process (a fresh [`ReadMemory`]) — and if the
+    /// credential still fails, THAT read is attempt 1 of a new schedule, while a
+    /// second pass in the same process reads nothing.
+    ///
+    /// KILLS: a re-read that ignores the memory (every pass would read — the
+    /// hot loop); a re-read that never happens (the run stays unverified after
+    /// the credential exists, which is P12).
+    #[tokio::test]
+    async fn a_spent_schedule_is_read_again_by_the_next_process_and_only_once() {
+        let world = World::default();
+        let first = ReadMemory::new();
+        let mut b = pass(&frozen_backup(), &world, &first, t0()).await.0;
+        for at in [60, 360, 1_260] {
+            b = pass(&b, &world, &first, t0() + secs(at)).await.0;
+        }
+        assert!(observation(&b)["retryAfter"].is_null(), "spent");
+        assert_eq!(world.verifies.load(Ordering::SeqCst), 4);
+
+        // A restart with the credential STILL missing: one read, a new schedule.
+        let second = ReadMemory::new();
+        let (b2, written) = pass(&b, &world, &second, t0() + secs(7_200)).await;
+        assert_eq!(written.len(), 1);
+        assert_eq!(world.verifies.load(Ordering::SeqCst), 5);
+        let o = observation(&b2);
+        assert_eq!(
+            (o["attempt"].clone(), o["retryAfter"].clone()),
+            (json!(1), json!(stamp(t0() + secs(7_260)))),
+            "attempt 1 of the new process's schedule: {o}"
+        );
+
+        // A restart WITH the credential: the run verifies.
+        world.credential.store(true, Ordering::SeqCst);
+        let third = ReadMemory::new();
+        let (b3, _) = pass(&b, &world, &third, t0() + secs(7_200)).await;
+        assert_eq!(verification(&b3)["result"], json!("Valid"));
+        assert!(!status_json(&b3)["windowCovered"].is_null());
+
+        // The same process never starts a second schedule for a spent run.
+        let (_, written) = pass(&b, &world, &first, t0() + secs(7_200)).await;
+        assert!(
+            written.is_empty(),
+            "the first process already read it: {written:?}"
+        );
+    }
+
+    /// **THE UPGRADE: THE PoC'S THREE POINTS, EXACTLY.** A `NotAttempted`
+    /// written by a controller that predates this rule carries the IMDS
+    /// sentence and NO observation. The first process of the fixed controller
+    /// reads it once; with the credential in place it verifies.
+    ///
+    /// An entry point that holds no process memory (every row that is not
+    /// about re-reading) never starts a schedule for it.
+    #[tokio::test]
+    async fn a_not_attempted_written_before_the_fix_is_read_once_after_the_upgrade() {
+        let mut b = frozen_backup();
+        let status = json!({
+            "phase": "Succeeded", "exitCode": 0, "exitReason": "ok",
+            "backupId": "logweir-backup-nightly-20261109-031700",
+            "evidence": {
+                "receiptKey": RECEIPT_KEY, "sidecarKey": SIDECAR_KEY,
+                "receiptSha256": RUNNER_RECEIPT_SHA256,
+                "verification": {
+                    "result": "NotAttempted",
+                    "payloadType": logweir_verify::PAYLOAD_TYPE_BACKUP_RECEIPT,
+                    "detail": imds_detail(),
+                    "verifiedAt": "2026-11-09T03:20:00Z"
+                }
+            }
+        });
+        b.status = Some(serde_json::from_value(status).expect("a status"));
+        let world = World::default();
+        world.credential.store(true, Ordering::SeqCst);
+
+        // No memory: the old behaviour, exactly — nothing is read.
+        let (client, _seen, bodies) = mock_client_recording_bodies(terminal_routes());
+        reconcile_backup_at(
+            &b,
+            &client,
+            &world.archive(),
+            &world.verify(),
+            t0() + secs(86_400),
+            &job::RunnerImage::default(),
+            Some(HANDLE),
+        )
+        .await
+        .expect("the reconcile succeeds");
+        assert!(patched_statuses(&bodies.lock().expect("readable")).is_empty());
+        assert_eq!(world.verifies.load(Ordering::SeqCst), 0);
+
+        // The fixed controller's first process.
+        let memory = ReadMemory::new();
+        let (after, written) = pass(&b, &world, &memory, t0() + secs(86_400)).await;
+        assert_eq!(written.len(), 1, "{written:?}");
+        assert_eq!(verification(&after)["result"], json!("Valid"));
+        assert!(!status_json(&after)["windowCovered"].is_null());
+        assert_eq!(observation(&after)["mode"], json!(MODE_ARCHIVE_HANDLE));
+        assert_eq!(world.verifies.load(Ordering::SeqCst), 1);
+    }
+
+    /// **THE PERMANENT FAILURE.** The store answers `NotFound` for the receipt:
+    /// a fact about the archive. It is `NotAttempted` naming the key, with no
+    /// schedule, and it is never read again — not by this process, not by the
+    /// next one.
+    ///
+    /// KILLS: classifying `NotFound` as transient (a schedule and re-reads).
+    #[tokio::test]
+    async fn a_receipt_the_store_says_is_not_there_is_never_read_again() {
+        let world = World::default();
+        world.credential.store(true, Ordering::SeqCst);
+        world.absent.store(true, Ordering::SeqCst);
+        let memory = ReadMemory::new();
+        let (b, _) = pass(&frozen_backup(), &world, &memory, t0()).await;
+        let v = verification(&b);
+        assert_eq!(v["result"], json!("NotAttempted"));
+        let detail = v["detail"].as_str().unwrap_or_default();
+        assert!(
+            detail.contains(RECEIPT_KEY) && detail.contains("is not in the archive"),
+            "{detail}"
+        );
+        assert_eq!(not_attempted_class(detail), NotAttemptedClass::Absent);
+        assert!(
+            observation(&b).is_null(),
+            "a final verdict is written as before, with no schedule: {b:?}"
+        );
+        for (memory, at) in [(&memory, 3_600), (&ReadMemory::new(), 86_400)] {
+            let (_, written) = pass(&b, &world, memory, t0() + secs(at)).await;
+            assert!(written.is_empty(), "{written:?}");
+        }
+        assert_eq!(
+            world.verifies.load(Ordering::SeqCst),
+            1,
+            "read exactly once, ever"
+        );
+    }
+
+    /// What is never read again whatever the memory says: a legacy-unbound run
+    /// (no runner digest — nothing fetched could be bound to it), a run whose
+    /// archive is outside the handle's bucket (reading it would read the wrong
+    /// bucket), a run with no handle configured, and a reached verdict.
+    #[test]
+    fn what_a_new_process_does_not_read_again() {
+        let world = World::default();
+        let archive = world.archive();
+        let verify = world.verify();
+        let memory = ReadMemory::new();
+        let reads = Reread {
+            archive: &archive,
+            verify: &verify,
+            archive_url: Some(HANDLE),
+            memory: Some(&memory),
+        };
+        let at = t0() + secs(86_400);
+        let spent = |mut s: Value| {
+            let mut b = frozen_backup();
+            s["phase"] = json!("Succeeded");
+            s["exitCode"] = json!(0);
+            b.status = Some(serde_json::from_value(s).expect("a status"));
+            b
+        };
+        let evidence = |digest: Option<&str>, result: &str, detail: &str| {
+            json!({"evidence": {
+                "receiptKey": RECEIPT_KEY, "sidecarKey": SIDECAR_KEY,
+                "receiptSha256": digest,
+                "verification": {"result": result, "detail": detail,
+                                 "payloadType": logweir_verify::PAYLOAD_TYPE_BACKUP_RECEIPT}
+            }})
+        };
+        let owed = spent(evidence(
+            Some(RUNNER_RECEIPT_SHA256),
+            "NotAttempted",
+            &imds_detail(),
+        ));
+        assert_eq!(
+            owed_backup_read(&owed, at, &reads),
+            Some(1),
+            "the control: this one is owed"
+        );
+
+        let unbound = spent(evidence(None, "NotAttempted", &imds_detail()));
+        assert_eq!(
+            owed_backup_read(&unbound, at, &reads),
+            None,
+            "legacy-unbound"
+        );
+
+        let mut elsewhere = owed.clone();
+        elsewhere.spec.archive.url = "s3://team-b-archive/orders".to_string();
+        assert_eq!(
+            owed_backup_read(&elsewhere, at, &reads),
+            None,
+            "another bucket"
+        );
+
+        let unconfigured = Reread {
+            archive_url: None,
+            ..reads
+        };
+        assert_eq!(
+            owed_backup_read(&owed, at, &unconfigured),
+            None,
+            "no archive handle"
+        );
+
+        let valid = spent(evidence(Some(RUNNER_RECEIPT_SHA256), "Valid", ""));
+        assert_eq!(
+            owed_backup_read(&valid, at, &reads),
+            None,
+            "a reached verdict"
+        );
+
+        let no_memory = Reread {
+            memory: None,
+            ..reads
+        };
+        assert_eq!(
+            owed_backup_read(&owed, at, &no_memory),
+            None,
+            "without a process memory only a SCHEDULED retry is continued"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Review fix round (`claude/poc-fixes-3.review.md`)
+    // -----------------------------------------------------------------------
+
+    /// A terminal-branch pass with the archive handle at `handle` and an
+    /// archive oracle of the caller's choosing. Returns the object as the API
+    /// server now holds it and the status patches.
+    async fn pass_with(
+        backup: &Backup,
+        archive: &(dyn Fn(EvidenceKeys) -> BoxFuture<'static, Option<ArchiveObservation>>
+              + Send
+              + Sync),
+        verify: &(dyn Fn(EvidenceRef) -> BoxFuture<'static, VerificationResult> + Send + Sync),
+        handle: Option<&str>,
+        memory: &ReadMemory,
+        at: DateTime<Utc>,
+    ) -> (Backup, Vec<Value>) {
+        let (client, _seen, bodies) = mock_client_recording_bodies(terminal_routes());
+        reconcile_backup_rereading(
+            backup,
+            &client,
+            archive,
+            verify,
+            at,
+            &job::RunnerImage::default(),
+            handle,
+            memory,
+        )
+        .await
+        .expect("the reconcile succeeds");
+        let bodies = bodies.lock().expect("the body recorder").clone();
+        (fold(backup, &bodies), patched_statuses(&bodies))
+    }
+
+    /// **REVIEW M1, THE `Backup` TWIN: A SCHEDULE WHOSE HANDLE LEAVES SETTLES.**
+    /// Attempt 2 is scheduled; the archive handle is then removed, or
+    /// re-pointed at another bucket (a restart, so a new process). The run can
+    /// no longer be read, so the first pass records that — `NotAttempted` with
+    /// the handle's own sentence, the attempt count kept, `retryAfter` cleared
+    /// — instead of advertising an attempt at an instant that has passed. Every
+    /// later pass reads and writes nothing.
+    ///
+    /// KILLS: planning with the handle check dropped (a read, or a `retryAfter`
+    /// left in the past); a settle that keeps `retryAfter`.
+    #[tokio::test]
+    async fn a_scheduled_read_whose_handle_leaves_settles_once() {
+        for handle in [None, Some("s3://another-bucket/logweir")] {
+            let world = World::default();
+            let memory = ReadMemory::new();
+            let (b, _) = pass(&frozen_backup(), &world, &memory, t0()).await;
+            assert!(
+                !observation(&b)["retryAfter"].is_null(),
+                "attempt 2 is scheduled"
+            );
+            let archive = world.archive();
+            let verify = world.verify();
+            let fresh = ReadMemory::new();
+            let (settled, written) =
+                pass_with(&b, &archive, &verify, handle, &fresh, t0() + secs(61)).await;
+            assert_eq!(written.len(), 1, "{handle:?}: one write: {written:?}");
+            let v = verification(&settled);
+            assert_eq!(v["result"], json!("NotAttempted"), "{handle:?}: {v}");
+            let detail = v["detail"].as_str().unwrap_or_default();
+            assert!(
+                !detail.contains("starts at"),
+                "{handle:?}: no attempt is advertised: {detail}"
+            );
+            assert_eq!(
+                not_attempted_class(detail),
+                NotAttemptedClass::Final,
+                "{handle:?}: {detail}"
+            );
+            let o = observation(&settled);
+            assert!(o["retryAfter"].is_null(), "{handle:?}: {o}");
+            assert_eq!(o["attempt"], json!(1), "{handle:?}: {o}");
+            assert_eq!(
+                world.verifies.load(Ordering::SeqCst),
+                1,
+                "{handle:?}: nothing read"
+            );
+            for later in [62_i64, 3_600, 86_400] {
+                let (_, written) = pass_with(
+                    &settled,
+                    &archive,
+                    &verify,
+                    handle,
+                    &fresh,
+                    t0() + secs(later),
+                )
+                .await;
+                assert!(written.is_empty(), "{handle:?} t+{later}s: {written:?}");
+            }
+            assert_eq!(world.verifies.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    /// **REVIEW T1/R2: THE RETRY'S DIGEST FENCE.** Attempt 2's archive
+    /// observation reads a receipt whose digest is NOT the runner's — a
+    /// replacement document at the reported key. The attempt is `Invalid`, and
+    /// nothing is copied out of those bytes: no `windowCovered`, no `records`,
+    /// no `capture`.
+    ///
+    /// KILLS: the retry path writing the window from any receipt it read
+    /// (`fetched.is_some()` in place of `fetched == Some(reported)`); a retry
+    /// that verifies a substituted receipt.
+    #[tokio::test]
+    async fn a_retry_that_reads_another_receipt_is_invalid_and_projects_nothing() {
+        let world = World::default();
+        let memory = ReadMemory::new();
+        let (b, _) = pass(&frozen_backup(), &world, &memory, t0()).await;
+        world.credential.store(true, Ordering::SeqCst);
+        let substituted = |_k: EvidenceKeys| -> BoxFuture<'static, Option<ArchiveObservation>> {
+            Box::pin(async {
+                Some(ArchiveObservation {
+                    presence: EvidencePresence {
+                        payload: true,
+                        sidecar: true,
+                    },
+                    covered: Some((1_762_650_000_000, 1_762_658_400_000)),
+                    receipt_sha256: Some(format!("sha256:{}", "b".repeat(64))),
+                    records: Some(75),
+                    capture: Some((utc(2026, 11, 9, 3, 17), utc(2026, 11, 9, 3, 19))),
+                })
+            })
+        };
+        let verify = world.verify();
+        let (after, written) = pass_with(
+            &b,
+            &substituted,
+            &verify,
+            Some(HANDLE),
+            &memory,
+            t0() + secs(61),
+        )
+        .await;
+        assert_eq!(written.len(), 1, "{written:?}");
+        let v = verification(&after);
+        assert_eq!(v["result"], json!("Invalid"), "{v}");
+        let status = status_json(&after);
+        for fact in ["windowCovered", "records", "capture"] {
+            assert!(
+                status[fact].is_null(),
+                "`{fact}` is never copied out of a receipt that is not the runner's: {status}"
+            );
+        }
+        assert_eq!(
+            world.verifies.load(Ordering::SeqCst),
+            1,
+            "the substituted receipt is not even verified"
+        );
+    }
+
+    /// **REVIEW L1: A PASS WITHOUT ITS WINDOW STAYS OWED.** On attempt 2 the
+    /// verifier's read answers and the archive observation that carries the
+    /// receipt's window does not (a flaky credential — the case P12 is about).
+    /// Writing `Valid` there would record a run with no `windowCovered` for
+    /// good: a `Valid` is never read again. The attempt is recorded as a
+    /// transient failure and attempt 3 is scheduled; when both reads answer,
+    /// the run is `Valid` WITH its window.
+    ///
+    /// KILLS: dropping the "pass with no observation" guard.
+    #[tokio::test]
+    async fn a_pass_whose_window_was_not_read_stays_owed_until_it_is() {
+        let world = World::default();
+        let memory = ReadMemory::new();
+        let (b, _) = pass(&frozen_backup(), &world, &memory, t0()).await;
+        world.credential.store(true, Ordering::SeqCst);
+        let blind = |_k: EvidenceKeys| -> BoxFuture<'static, Option<ArchiveObservation>> {
+            Box::pin(async { None })
+        };
+        let verify = world.verify();
+        let (b2, _) = pass_with(&b, &blind, &verify, Some(HANDLE), &memory, t0() + secs(61)).await;
+        let v = verification(&b2);
+        assert_eq!(v["result"], json!("NotAttempted"), "{v}");
+        let detail = v["detail"].as_str().unwrap_or_default();
+        assert!(
+            detail.starts_with(weirkeeper::verification::RECEIPT_WINDOW_UNREAD_PREFIX)
+                && detail.contains("attempt 3 starts at"),
+            "{detail}"
+        );
+        assert!(!observation(&b2)["retryAfter"].is_null());
+        assert!(status_json(&b2)["windowCovered"].is_null());
+
+        // Attempt 3: both reads answer.
+        let archive = world.archive();
+        let (b3, _) = pass_with(
+            &b2,
+            &archive,
+            &verify,
+            Some(HANDLE),
+            &memory,
+            t0() + secs(361),
+        )
+        .await;
+        assert_eq!(verification(&b3)["result"], json!("Valid"));
+        assert!(
+            !status_json(&b3)["windowCovered"].is_null(),
+            "the run is a recovery point: {b3:?}"
+        );
+    }
+
+    /// **REVIEW L2: THE RESTART RE-READ IS THROTTLED.** Twelve unverified runs
+    /// owe a re-read at once (a restart); at most `CONTROLLER_READ_CONCURRENCY`
+    /// of those reads are in flight together, and every one of them still
+    /// happens.
+    ///
+    /// KILLS: reading without the permit (all twelve would be in flight).
+    #[tokio::test]
+    async fn the_restart_re_read_runs_a_bounded_number_at_once() {
+        use weirkeeper::evidence_fetch::CONTROLLER_READ_CONCURRENCY;
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let reads = Arc::new(AtomicUsize::new(0));
+        let archive = {
+            let (in_flight, peak, reads) = (
+                Arc::clone(&in_flight),
+                Arc::clone(&peak),
+                Arc::clone(&reads),
+            );
+            move |_k: EvidenceKeys| -> BoxFuture<'static, Option<ArchiveObservation>> {
+                let (in_flight, peak, reads) = (
+                    Arc::clone(&in_flight),
+                    Arc::clone(&peak),
+                    Arc::clone(&reads),
+                );
+                Box::pin(async move {
+                    let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(now, Ordering::SeqCst);
+                    reads.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                    in_flight.fetch_sub(1, Ordering::SeqCst);
+                    None
+                })
+            }
+        };
+        let world = World::default();
+        let verify = world.verify();
+        let mut b = frozen_backup();
+        b.status = Some(
+            serde_json::from_value(json!({
+                "phase": "Succeeded", "exitCode": 0,
+                "evidence": {
+                    "receiptKey": RECEIPT_KEY, "sidecarKey": SIDECAR_KEY,
+                    "receiptSha256": RUNNER_RECEIPT_SHA256,
+                    "verification": {
+                        "result": "NotAttempted",
+                        "payloadType": logweir_verify::PAYLOAD_TYPE_BACKUP_RECEIPT,
+                        "detail": imds_detail(),
+                        "verifiedAt": "2026-11-09T03:20:00Z"
+                    }
+                }
+            }))
+            .expect("a status"),
+        );
+        let memories: Vec<ReadMemory> = (0..12).map(|_| ReadMemory::new()).collect();
+        let passes = memories.iter().map(|memory| {
+            pass_with(
+                &b,
+                &archive,
+                &verify,
+                Some(HANDLE),
+                memory,
+                t0() + secs(86_400),
+            )
+        });
+        let results = futures::future::join_all(passes).await;
+        assert!(results.iter().all(|(_, written)| written.len() == 1));
+        assert_eq!(reads.load(Ordering::SeqCst), 12, "every run is read");
+        let peak = peak.load(Ordering::SeqCst);
+        assert!(
+            peak <= CONTROLLER_READ_CONCURRENCY,
+            "at most {CONTROLLER_READ_CONCURRENCY} reads in flight at once, saw {peak}"
+        );
     }
 }

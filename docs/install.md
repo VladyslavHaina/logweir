@@ -501,6 +501,13 @@ kubectl --context docker-desktop -n logweir-system create secret generic \
   --from-literal=secret-access-key="$EVIDENCE_RO_SECRET_ACCESS_KEY"
 ```
 
+The controller reads this Secret from its environment when it starts. If you
+create or rotate it on a running install, restart the controller
+(`kubectl --context docker-desktop -n logweir-system rollout restart deploy/weirkeeper`).
+Every run the controller could not verify for want of it is then read once
+more and verified (`docs/kubernetes.md` §15.1b); nothing needs to be edited or
+re-run.
+
 [../config/samples/secrets.yaml](../config/samples/secrets.yaml) carries the
 same four, beside these commands.
 

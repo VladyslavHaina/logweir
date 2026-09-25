@@ -420,6 +420,7 @@ async fn run_at(fixture: &Fixture, catalog: &RecoveryCatalog, at: DateTime<Utc>)
             runner_image: &image,
             now: at,
             trust_policies: None,
+            peers: Some(&[]),
         },
     )
     .await
@@ -4083,6 +4084,7 @@ async fn a_synced_policy_store_resolves_the_catalog_without_a_list() {
             runner_image: &image,
             now: now(),
             trust_policies: Some(&policies),
+            peers: Some(&[]),
         },
     )
     .await

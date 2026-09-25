@@ -3742,46 +3742,140 @@ pub fn legacy_evidence_source(
 /// in it: this detail lands in a status every operator of the namespace can
 /// read (review L4). Nothing here is checked for userinfo either, because
 /// nothing from `LOGWEIR_ARCHIVE_URL` is copied into it.
+///
+/// It begins with [`crate::verification::UNREAD_SCORECARD_PREFIX`], which is
+/// what makes it a TRANSIENT `NotAttempted` (PoC P12): the read is tried again
+/// on D2 §3.9 step 5's schedule, because the cause may be a credential that
+/// arrives later.
 #[must_use]
 pub fn unread_scorecard_detail(key: &str) -> String {
     format!(
-        "the runner reported scorecard `{key}` and weirkeeper read no such document through \
-         {}: the handle is not configured, the object is not in the bucket it reads, or the \
-         controller's credential cannot read it. Nothing was verified and no completion is \
-         written; run the printed logweir drill verify command",
+        "{}{key}` and weirkeeper read no such document through {}: the handle is not \
+         configured, the object is not in the bucket it reads, or the controller's credential \
+         cannot read it. Nothing was verified and no completion is written; run the printed \
+         logweir drill verify command",
+        crate::verification::UNREAD_SCORECARD_PREFIX,
         crate::destination::ARCHIVE_HANDLE_LABEL
     )
 }
 
+/// [`unread_scorecard_detail`]'s twin for a run whose EVIDENCE destination
+/// reads with `ControllerIdentity`: the read went through that destination's
+/// own handle, so the sentence names the destination (a namespaced object the
+/// reader can open) and not the installation's archive handle.
+#[must_use]
+pub fn unread_destination_scorecard_detail(key: &str, destination: &str) -> String {
+    format!(
+        "{}{key}` and weirkeeper read no such document through BackupDestination \
+         {destination}'s evidenceRead handle: the object is not in its bucket, or the \
+         controller's credential cannot read it. Nothing was verified and no completion is \
+         written; run the printed logweir drill verify command",
+        crate::verification::UNREAD_SCORECARD_PREFIX,
+    )
+}
+
+/// What the terminal pass does about a finished `Restore`'s evidence — PURE.
+#[derive(Debug)]
+pub enum TerminalEvidence {
+    /// Record this verdict; there is nothing to read.
+    Record(crate::verification::VerificationResult),
+    /// Verify this reference through the source's own handle.
+    Verify(EvidenceRef),
+    /// Write nothing on this pass: an evidence-fetch Job's pass writes the
+    /// verdict, or no scorecard was written at all (GC11).
+    Nothing,
+}
+
+/// The terminal pass's evidence choice, from where the evidence is read and
+/// what the controller's own read of the scorecard produced — PURE, so every
+/// source is a table row (review T1: narrowing the unread arm back to the
+/// global handle — PoC P12's `ControllerIdentity` class-sweep item — left
+/// every test green while this lived inline in the reconcile).
+///
+/// * a source that refused (`NotAttempted`), when a scorecard was written:
+///   record the refusal's own sentence — the decision is already made;
+/// * an evidence-fetch Job's source: nothing here; the Job's pass writes it;
+/// * a source the controller reads (its archive handle, or a
+///   `ControllerIdentity` destination) whose read produced a digest: verify it
+///   through the same handle — D2 §3.9's "no second verification path";
+/// * the same with NO digest, when a scorecard was written: record the unread
+///   sentence ([`unread_scorecard_verdict`]) — P5's rule for the global handle,
+///   and P12's for the destination's, which used to write no block and so
+///   could never be read again. `NotAttempted` is the only verdict writable
+///   without bytes;
+/// * no keys (GC11): nothing.
+#[must_use]
+pub fn terminal_evidence(
+    from: &backup::EvidenceSource,
+    reference: Option<EvidenceRef>,
+    keys_complete: bool,
+    scorecard_key: &str,
+    destination: Option<&str>,
+) -> TerminalEvidence {
+    match (from, reference) {
+        (backup::EvidenceSource::NotAttempted { detail }, _) if keys_complete => {
+            TerminalEvidence::Record(crate::verification::VerificationResult::not_attempted(
+                logweir_verify::PAYLOAD_TYPE_SCORECARD,
+                detail.clone(),
+            ))
+        }
+        (backup::EvidenceSource::FetchJob { .. }, _) => TerminalEvidence::Nothing,
+        (
+            backup::EvidenceSource::GlobalHandle | backup::EvidenceSource::Destination(_),
+            Some(reference),
+        ) => TerminalEvidence::Verify(reference),
+        (
+            from @ (backup::EvidenceSource::GlobalHandle | backup::EvidenceSource::Destination(_)),
+            None,
+        ) => unread_scorecard_verdict(from, keys_complete, scorecard_key, destination)
+            .map_or(TerminalEvidence::Nothing, TerminalEvidence::Record),
+        _ => TerminalEvidence::Nothing,
+    }
+}
+
 /// The verdict for a finished run whose runner printed both scorecard keys and
-/// whose controller-side read produced NO digest — `Some` only for an
-/// INLINE-ARCHIVE run read through the controller's archive handle — PURE.
+/// whose controller-side read produced NO digest — `Some` for a run the
+/// CONTROLLER reads (its archive handle, or a `ControllerIdentity` evidence
+/// destination) — PURE.
 ///
-/// # Why only that source (review L3)
+/// # The decision this amends, twice
 ///
-/// `rehearsal_schedule::UNRECORDED_VERDICT_GRACE_SECONDS` records the decision
+/// `rehearsal_schedule::UNRECORDED_VERDICT_GRACE_SECONDS` recorded the decision
 /// NOT to write `NotAttempted` on a `Restore` whose own-handle read failed: it
-/// would change the verification record of every restore and still not cover
-/// a lost second patch, so the schedule bounds its wait instead. This amends
-/// that decision for ONE source, the global handle of a point with no saved
-/// destination, because the PoC upgrade round (P5) showed that source
-/// producing a `Succeeded` restore with no verification block at all — the
-/// one shape an operator restoring a `v0.1.5` point cannot tell apart from a
-/// controller that never looked. A destination-backed run whose
-/// `ControllerIdentity` read fails keeps the recorded behaviour (no block,
-/// bounded by the schedule's grace), and so does a lost second patch.
+/// would change the verification record of every restore and still not cover a
+/// lost second patch, so the schedule bounded its wait instead. The PoC upgrade
+/// round's P5 amended it for the global handle (review L3), because that source
+/// produced a `Succeeded` restore with no verification block at all.
+///
+/// PoC P12 amends it for the destination's `ControllerIdentity` handle too: a
+/// failed read there is the same transient failure the global handle's is, and
+/// it can only be READ AGAIN (D2 §3.9 step 5's schedule, the evidence-fetch
+/// Job's) if the attempt is recorded. The grace still bounds a lost second
+/// patch, which this does not touch. A run with no keys (GC11) and a run whose
+/// evidence a Job or nothing reads get no verdict here.
 #[must_use]
 pub fn unread_scorecard_verdict(
     from: &backup::EvidenceSource,
     keys_complete: bool,
     scorecard_key: &str,
+    destination: Option<&str>,
 ) -> Option<crate::verification::VerificationResult> {
-    (keys_complete && matches!(from, backup::EvidenceSource::GlobalHandle)).then(|| {
-        crate::verification::VerificationResult::not_attempted(
-            logweir_verify::PAYLOAD_TYPE_SCORECARD,
-            unread_scorecard_detail(scorecard_key),
-        )
-    })
+    if !keys_complete {
+        return None;
+    }
+    let detail = match from {
+        backup::EvidenceSource::GlobalHandle => unread_scorecard_detail(scorecard_key),
+        backup::EvidenceSource::Destination(_) => {
+            unread_destination_scorecard_detail(scorecard_key, destination.unwrap_or_default())
+        }
+        backup::EvidenceSource::FetchJob { .. } | backup::EvidenceSource::NotAttempted { .. } => {
+            return None
+        }
+    };
+    Some(crate::verification::VerificationResult::not_attempted(
+        logweir_verify::PAYLOAD_TYPE_SCORECARD,
+        detail,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -4208,42 +4302,7 @@ async fn evidence_fetch_pass(
                             )
                             .await;
                             if let Some(o) = scorecard_observation(&payload) {
-                                evidence_facts
-                                    .insert("scorecardSha256".to_string(), json!(fetched));
-                                if let Some(d) = o.offset_report_sha256.as_ref() {
-                                    evidence_facts
-                                        .insert("offsetReportSha256".to_string(), json!(d));
-                                }
-                                if let Some(v) = o.outcome.as_ref() {
-                                    facts.insert("outcome".to_string(), json!(v));
-                                }
-                                if let Some(v) = o.last_phase_completed {
-                                    facts.insert("lastPhaseCompleted".to_string(), json!(v));
-                                }
-                                // ONLY BESIDE A VALID VERDICT ON A RUN THAT PASSED (MEDIUM-1).
-                                if let Some(c) = completion_patch_value(
-                                    &o,
-                                    &result,
-                                    status.and_then(|s| serde_json::to_value(s).ok()).as_ref(),
-                                    status.and_then(|s| s.exit_code),
-                                ) {
-                                    facts.insert("completion".to_string(), c);
-                                }
-                                for (key, block) in [
-                                    ("objectives", objectives_block(&o)),
-                                    ("integrity", integrity_block(&o)),
-                                    ("measured", measured_block(&o)),
-                                ] {
-                                    if !block.is_empty() {
-                                        facts.insert(key.to_string(), Value::Object(block));
-                                    }
-                                }
-                                if let Some(state) = window_not_covered(
-                                    status.and_then(|s| s.exit_code).unwrap_or(0),
-                                    o.outcome.as_deref(),
-                                ) {
-                                    facts.insert("exitReason".to_string(), json!(state));
-                                }
+                                (evidence_facts, facts) = scorecard_facts(&o, &result, status);
                             }
                             result
                         }
@@ -4263,6 +4322,8 @@ async fn evidence_fetch_pass(
                     }
                 }
             };
+            // A TRANSIENT relay failure is retried with the next Job (P12).
+            let (result, retry) = crate::evidence_fetch::relayed_schedule(result, attempt, now);
             write_fetch_verdict(
                 restores,
                 restore,
@@ -4274,7 +4335,7 @@ async fn evidence_fetch_pass(
                     Some(&job_ref),
                     attempt,
                     Some(presence),
-                    None,
+                    retry,
                 ),
                 evidence_facts,
                 facts,
@@ -4289,6 +4350,65 @@ async fn evidence_fetch_pass(
     Ok(())
 }
 
+/// The facts a READ scorecard puts on a terminal `Restore`'s status, beside
+/// its verdict — the evidence-fetch relay's and the controller read's retry's
+/// one rule (the terminal pass writes the same facts on its terminal patch):
+/// the digest and the offset report's digest under `status.evidence`, and
+/// `outcome`, `lastPhaseCompleted`, `objectives`, `integrity`, `measured` and
+/// the archive-coverage `exitReason` whenever the document was read; and
+/// `completion` ONLY beside a `Valid` verdict on a run that passed (MEDIUM-1,
+/// [`completion_patch_value`]).
+///
+/// Returns `(evidence_facts, facts)`.
+fn scorecard_facts(
+    o: &ScorecardObservation,
+    result: &crate::verification::VerificationResult,
+    status: Option<&crate::crds::restore::RestoreStatus>,
+) -> (
+    serde_json::Map<String, Value>,
+    serde_json::Map<String, Value>,
+) {
+    let mut evidence_facts = serde_json::Map::new();
+    let mut facts = serde_json::Map::new();
+    if let Some(d) = o.scorecard_sha256.as_ref() {
+        evidence_facts.insert("scorecardSha256".to_string(), json!(d));
+    }
+    if let Some(d) = o.offset_report_sha256.as_ref() {
+        evidence_facts.insert("offsetReportSha256".to_string(), json!(d));
+    }
+    if let Some(v) = o.outcome.as_ref() {
+        facts.insert("outcome".to_string(), json!(v));
+    }
+    if let Some(v) = o.last_phase_completed {
+        facts.insert("lastPhaseCompleted".to_string(), json!(v));
+    }
+    // ONLY BESIDE A VALID VERDICT ON A RUN THAT PASSED (MEDIUM-1).
+    if let Some(c) = completion_patch_value(
+        o,
+        result,
+        status.and_then(|s| serde_json::to_value(s).ok()).as_ref(),
+        status.and_then(|s| s.exit_code),
+    ) {
+        facts.insert("completion".to_string(), c);
+    }
+    for (key, block) in [
+        ("objectives", objectives_block(o)),
+        ("integrity", integrity_block(o)),
+        ("measured", measured_block(o)),
+    ] {
+        if !block.is_empty() {
+            facts.insert(key.to_string(), Value::Object(block));
+        }
+    }
+    if let Some(state) = window_not_covered(
+        status.and_then(|s| s.exit_code).unwrap_or(0),
+        o.outcome.as_deref(),
+    ) {
+        facts.insert("exitReason".to_string(), json!(state));
+    }
+    (evidence_facts, facts)
+}
+
 /// The fetch a TERMINAL `Restore` still owes, and when to look again.
 ///
 /// Returns the requeue a terminal pass should use: `After` while a fetch is
@@ -4301,12 +4421,44 @@ async fn continue_evidence_fetch(
     namespace: &str,
     now: DateTime<Utc>,
     runner: &job::RunnerImage,
+    reads: &Reread<'_>,
 ) -> Result<Requeue, RestoreError> {
+    // PoC P12 FIRST: a read the CONTROLLER owes this run (see the `Backup`
+    // twin). Decided from the stored status alone.
+    //
+    // THE CONTROLLER READ'S OWN TIMER, AND ONLY WHILE IT CAN STILL FIRE
+    // (review M1). A terminal `Restore` otherwise waits for a change, so a
+    // scheduled attempt needs a requeue — but only one computed where the read
+    // is still possible: a schedule whose run can no longer be read (the
+    // archive handle was removed or re-pointed) is SETTLED on this pass, never
+    // waited for. Before, a past `retryAfter` on such a run requeued it every
+    // second, for ever.
+    let mut controller_wait = None;
+    match restore_read_plan(restore, now, reads) {
+        crate::evidence_fetch::ControllerRead::Due(attempt) => {
+            controller_read_pass(restore, client, namespace, now, attempt, reads).await?;
+            return Ok(Requeue::After(REQUEUE_SECS));
+        }
+        crate::evidence_fetch::ControllerRead::Settle(why) => {
+            settle_controller_read(restore, client, namespace, now, why).await?;
+            return Ok(Requeue::AwaitChange);
+        }
+        crate::evidence_fetch::ControllerRead::Scheduled(at) => {
+            controller_wait = Some(Requeue::After(crate::evidence_fetch::seconds_until(
+                at, now,
+            )));
+        }
+        crate::evidence_fetch::ControllerRead::Nothing => {}
+    }
     let evidence = restore.status.as_ref().and_then(|s| s.evidence.as_ref());
     let result = evidence
         .and_then(|e| e.verification.as_ref())
         .and_then(|v| v.result.as_deref());
-    let observation = evidence.and_then(|e| e.observation.as_ref());
+    // Only an evidence-fetch Job's observation may make `owed_attempt` start a
+    // Job or `retry_due_in` time one; a controller read's is planned above.
+    let observation = evidence
+        .and_then(|e| e.observation.as_ref())
+        .filter(|o| !crate::evidence_fetch::is_controller_read(o.mode.as_deref()));
     // THE CRASH WINDOW — see the `Backup` twin: a terminal pass that stopped
     // between the terminal patch and the recorded fetch.
     let unrecorded = result.is_none()
@@ -4316,7 +4468,7 @@ async fn continue_evidence_fetch(
     let owed = crate::evidence_fetch::owed_attempt(result, observation, now);
     let waiting = match crate::evidence_fetch::retry_due_in(result, observation, now) {
         Some(secs) => Requeue::After(secs),
-        None => Requeue::AwaitChange,
+        None => controller_wait.unwrap_or(Requeue::AwaitChange),
     };
     if owed.is_none() && !unrecorded {
         // THE VERDICT IS COMMITTED; ITS JOB'S TTL MAY NOT BE (review LOW-4).
@@ -4367,6 +4519,293 @@ async fn continue_evidence_fetch(
     )
     .await?;
     Ok(Requeue::After(REQUEUE_SECS))
+}
+
+// ---------------------------------------------------------------------------
+// The controller's own read, read again — PoC defect P12 (the `Backup` twin)
+// ---------------------------------------------------------------------------
+
+/// What a terminal pass needs to read a run's scorecard AGAIN — the `Backup`
+/// twin's [`backup::Reread`], over the scorecard oracle.
+#[derive(Clone, Copy)]
+pub struct Reread<'a> {
+    /// The terminal pass's scorecard oracle.
+    pub scorecard: ScorecardOracle<'a>,
+    /// The terminal pass's verification oracle.
+    pub verify: VerifyOracle<'a>,
+    /// `LOGWEIR_ARCHIVE_URL`, the global handle's location.
+    pub archive_url: Option<&'a str>,
+    /// Which runs this process has read (`None`: continue a scheduled retry,
+    /// never start a new schedule).
+    pub memory: Option<&'a crate::evidence_fetch::ReadMemory>,
+}
+
+/// One verification through the handle `source` names — the `Backup` twin's
+/// `read_verdict`: the injected oracle for the global handle, and THE SAME
+/// `verify_oracle` over the evidence destination's own handle for
+/// `ControllerIdentity` (D2 §3.9's "no second verification path").
+async fn read_verdict(
+    source: &backup::EvidenceSource,
+    reference: EvidenceRef,
+    verify: VerifyOracle<'_>,
+    client: &kube::Client,
+) -> crate::verification::VerificationResult {
+    match source {
+        backup::EvidenceSource::Destination(store) => {
+            crate::verification::verify_oracle(Some(Arc::clone(store)), client.clone())(reference)
+                .await
+        }
+        _ => verify(reference).await,
+    }
+}
+
+/// What this TERMINAL `Restore`'s controller read calls for now — PURE
+/// ([`crate::evidence_fetch::plan_controller_read`]), after the checks that
+/// make a read possible: a `NotAttempted` verdict, both mandatory evidence keys
+/// on the status, and, for an inline-archive run, a configured archive handle
+/// whose bucket the approved plan writes its evidence to. A run that fails the
+/// last check while an attempt is SCHEDULED settles on that sentence (review
+/// M1) rather than being requeued for an attempt that can never be made.
+#[must_use]
+pub fn restore_read_plan(
+    restore: &Restore,
+    now: DateTime<Utc>,
+    reads: &Reread<'_>,
+) -> crate::evidence_fetch::ControllerRead {
+    use crate::evidence_fetch::ControllerRead;
+    let Some(evidence) = restore.status.as_ref().and_then(|s| s.evidence.as_ref()) else {
+        return ControllerRead::Nothing;
+    };
+    let Some(verification) = evidence.verification.as_ref() else {
+        return ControllerRead::Nothing;
+    };
+    if evidence.scorecard_key.is_none() || evidence.sidecar_key.is_none() {
+        return ControllerRead::Nothing;
+    }
+    let inline = restore.spec.evidence_destination_ref.is_none();
+    let readable = if inline {
+        match reads.archive_url {
+            None => Err(crate::evidence_fetch::archive_handle_gone_detail(
+                "signed scorecard",
+            )),
+            Some(handle) => match legacy_evidence_source(
+                backup::EvidenceSource::GlobalHandle,
+                &restore.spec.plan_bytes,
+                Some(handle),
+            ) {
+                backup::EvidenceSource::NotAttempted { detail } => Err(detail),
+                _ => Ok(()),
+            },
+        }
+    } else {
+        Ok(())
+    };
+    let uid = restore.uid();
+    crate::evidence_fetch::plan_controller_read(
+        verification.result.as_deref(),
+        verification.detail.as_deref(),
+        evidence.observation.as_ref(),
+        inline,
+        readable,
+        now,
+        reads.memory.zip(uid.as_deref()),
+    )
+}
+
+/// [`restore_read_plan`] as the attempt this `Restore` owes now, if any.
+#[must_use]
+pub fn owed_restore_read(restore: &Restore, now: DateTime<Utc>, reads: &Reread<'_>) -> Option<u32> {
+    match restore_read_plan(restore, now, reads) {
+        crate::evidence_fetch::ControllerRead::Due(attempt) => Some(attempt),
+        _ => None,
+    }
+}
+
+/// Record a SCHEDULED controller read that can no longer happen (review M1) —
+/// the `Backup` twin's `settle_controller_read`.
+async fn settle_controller_read(
+    restore: &Restore,
+    client: &kube::Client,
+    namespace: &str,
+    now: DateTime<Utc>,
+    why: String,
+) -> Result<(), RestoreError> {
+    let observation = restore
+        .status
+        .as_ref()
+        .and_then(|s| s.evidence.as_ref())
+        .and_then(|e| e.observation.as_ref());
+    let mode = observation
+        .and_then(|o| o.mode.clone())
+        .unwrap_or_else(|| crate::evidence_fetch::MODE_ARCHIVE_HANDLE.to_string());
+    let attempt = observation
+        .and_then(|o| o.attempt)
+        .and_then(|a| u32::try_from(a).ok())
+        .unwrap_or(1);
+    let name = restore.name_any();
+    info!(
+        restore = %name,
+        namespace = %namespace,
+        attempt,
+        "this finished Restore's scheduled scorecard read can no longer be made; recorded, and \
+         no further attempt is scheduled"
+    );
+    let restores: Api<Restore> = Api::namespaced(client.clone(), namespace);
+    write_fetch_verdict(
+        &restores,
+        restore,
+        &name,
+        &StatusVersion::observed(restore.meta()),
+        &crate::verification::VerificationResult::not_attempted(
+            logweir_verify::PAYLOAD_TYPE_SCORECARD,
+            why,
+        ),
+        crate::evidence_fetch::observation_patch(Some(&mode), None, attempt, None, None),
+        serde_json::Map::new(),
+        serde_json::Map::new(),
+        now,
+    )
+    .await?;
+    Ok(())
+}
+
+/// One controller read of a TERMINAL `Restore`'s scorecard — attempt
+/// `attempt` — and the ONE status write it implies: the terminal pass's
+/// evidence half run again (the same source resolution, the same scorecard
+/// reader, the digest computed over the bytes read, the same verifier), with
+/// the facts the terminal pass would have written had the read answered then
+/// ([`scorecard_facts`]; `completion` only beside `Valid`), plus the
+/// observation recording this attempt and, for a transient failure, the next.
+async fn controller_read_pass(
+    restore: &Restore,
+    client: &kube::Client,
+    namespace: &str,
+    now: DateTime<Utc>,
+    attempt: u32,
+    reads: &Reread<'_>,
+) -> Result<(), RestoreError> {
+    // REVIEW L2: at most `CONTROLLER_READ_CONCURRENCY` of these in flight per
+    // process; the rest wait here for a permit. The semaphore is never closed,
+    // so `acquire` cannot fail; a failure would only mean the read is not
+    // throttled, never that it is skipped.
+    let _permit = crate::evidence_fetch::controller_read_permits()
+        .acquire()
+        .await
+        .ok();
+    use crate::verification::VerificationResult;
+    let payload_type = logweir_verify::PAYLOAD_TYPE_SCORECARD;
+    let name = restore.name_any();
+    let status = restore.status.as_ref();
+    let evidence = status.and_then(|s| s.evidence.as_ref());
+    let (Some(payload_key), Some(sidecar_key)) = (
+        evidence.and_then(|e| e.scorecard_key.clone()),
+        evidence.and_then(|e| e.sidecar_key.clone()),
+    ) else {
+        return Ok(());
+    };
+    let routed = backup::evidence_source_for(
+        restore.spec.evidence_destination_ref.as_ref(),
+        client,
+        namespace,
+        now,
+    )
+    .await
+    .map_err(RestoreError::Api)?;
+    let source = legacy_evidence_source(routed, &restore.spec.plan_bytes, reads.archive_url);
+    let destination = restore
+        .spec
+        .evidence_destination_ref
+        .as_ref()
+        .map(|r| r.name.as_str());
+    let mode = backup::controller_read_mode(&source).unwrap_or(if destination.is_some() {
+        crate::evidence_fetch::MODE_CONTROLLER_IDENTITY
+    } else {
+        crate::evidence_fetch::MODE_ARCHIVE_HANDLE
+    });
+    let observed = match &source {
+        backup::EvidenceSource::GlobalHandle => (reads.scorecard)(payload_key.clone()).await,
+        backup::EvidenceSource::Destination(store) => {
+            let handle = Arc::clone(store);
+            let key = payload_key.clone();
+            tokio::task::spawn_blocking(move || observe_scorecard(&handle, &key))
+                .await
+                .ok()
+                .flatten()
+        }
+        backup::EvidenceSource::FetchJob { .. } | backup::EvidenceSource::NotAttempted { .. } => {
+            None
+        }
+    };
+    let digest = observed.as_ref().and_then(|o| o.scorecard_sha256.clone());
+    let result = match (&source, digest) {
+        (backup::EvidenceSource::NotAttempted { detail }, _) => {
+            VerificationResult::not_attempted(payload_type, detail.clone())
+        }
+        (backup::EvidenceSource::FetchJob { destination, .. }, _) => {
+            VerificationResult::not_attempted(
+                payload_type,
+                format!(
+                    "BackupDestination {}/{} now reads evidence with a grant only a pod may \
+                     hold; this run's scorecard was read by the controller and is not read again \
+                     here — run the printed logweir drill verify command",
+                    destination.namespace, destination.name
+                ),
+            )
+        }
+        (source, Some(digest)) => {
+            read_verdict(
+                source,
+                EvidenceRef {
+                    namespace: namespace.to_string(),
+                    payload_key: payload_key.clone(),
+                    payload_sha256: digest,
+                    sidecar_key,
+                    payload_type,
+                },
+                reads.verify,
+                client,
+            )
+            .await
+        }
+        (source, None) => unread_scorecard_verdict(source, true, &payload_key, destination)
+            .unwrap_or_else(|| {
+                VerificationResult::not_attempted(
+                    payload_type,
+                    unread_scorecard_detail(&payload_key),
+                )
+            }),
+    };
+    let (result, retry) = crate::evidence_fetch::scheduled(result, attempt, now);
+    let (evidence_facts, facts) = match observed.as_ref() {
+        Some(o) => scorecard_facts(o, &result, status),
+        None => (serde_json::Map::new(), serde_json::Map::new()),
+    };
+    info!(
+        restore = %name,
+        namespace = %namespace,
+        attempt,
+        mode,
+        verification = %result.result,
+        retry_after = ?retry,
+        "weirkeeper read this finished Restore's scorecard again"
+    );
+    let restores: Api<Restore> = Api::namespaced(client.clone(), namespace);
+    write_fetch_verdict(
+        &restores,
+        restore,
+        &name,
+        &StatusVersion::observed(restore.meta()),
+        &result,
+        crate::evidence_fetch::observation_patch(Some(mode), None, attempt, None, retry),
+        evidence_facts,
+        facts,
+        now,
+    )
+    .await?;
+    if let (Some(memory), Some(uid)) = (reads.memory, restore.uid()) {
+        memory.mark(&uid);
+    }
+    Ok(())
 }
 
 /// The `/status` merge patch for an admission that is a HOLD rather than a
@@ -5222,6 +5661,20 @@ pub fn completion_patch_value(
     (!completion.is_empty()).then_some(Value::Object(completion))
 }
 
+/// `patch` with `status.evidence.observation` set, when a controller read
+/// scheduled a retry (PoC P12).
+fn with_observation(mut patch: Value, observation: Option<Value>) -> Value {
+    if let (Some(o), Some(evidence)) = (
+        observation,
+        patch
+            .pointer_mut("/status/evidence")
+            .and_then(Value::as_object_mut),
+    ) {
+        evidence.insert("observation".to_string(), o);
+    }
+    patch
+}
+
 /// `patch` with `status.completion` set, when there is one to set.
 fn with_completion(mut patch: Value, completion: Option<Value>) -> Value {
     if let (Some(c), Some(status)) = (
@@ -5952,6 +6405,42 @@ pub async fn reconcile_restore_at(
         policies,
         archive_url,
         None,
+        None,
+    )
+    .await
+}
+
+/// [`reconcile_restore_at`], with THIS PROCESS'S memory of which finished runs
+/// it has read — PoC defect P12's re-read, the `Backup` twin's
+/// `reconcile_backup_rereading`. The running controller passes
+/// [`crate::evidence_fetch::ReadMemory::global`]; a row passes a fresh one.
+///
+/// # Errors
+///
+/// [`RestoreError`] for anything that is not an outcome.
+#[allow(clippy::too_many_arguments)]
+pub async fn reconcile_restore_rereading(
+    restore: &Restore,
+    client: &kube::Client,
+    scorecard: ScorecardOracle<'_>,
+    verify: VerifyOracle<'_>,
+    now: DateTime<Utc>,
+    runner: &job::RunnerImage,
+    policies: &ApprovalPolicySet,
+    archive_url: Option<&str>,
+    memory: &crate::evidence_fetch::ReadMemory,
+) -> Result<RestoreOutcome, RestoreError> {
+    reconcile_restore_run(
+        restore,
+        client,
+        scorecard,
+        verify,
+        now,
+        runner,
+        policies,
+        archive_url,
+        None,
+        Some(memory),
     )
     .await
 }
@@ -5991,6 +6480,7 @@ pub async fn reconcile_restore_pooled(
         policies,
         archive_url,
         Some(pool),
+        None,
     )
     .await
 }
@@ -6007,6 +6497,7 @@ async fn reconcile_restore_run(
     policies: &ApprovalPolicySet,
     archive_url: Option<&str>,
     pool: Option<&crate::run_pool::Pool<'_, Restore>>,
+    memory: Option<&crate::evidence_fetch::ReadMemory>,
 ) -> Result<RestoreOutcome, RestoreError> {
     // WHERE THE OBJECT STANDS WHEN A HOLD OR A REFUSAL IS WRITTEN (review L3):
     // the pool's admission record is this pass's first write, and seam S7
@@ -6023,6 +6514,7 @@ async fn reconcile_restore_run(
         policies,
         archive_url,
         pool,
+        memory,
         &mut written,
     )
     .await;
@@ -6114,8 +6606,16 @@ async fn reconcile_restore_inner(
     policies: &ApprovalPolicySet,
     archive_url: Option<&str>,
     pool: Option<&crate::run_pool::Pool<'_, Restore>>,
+    memory: Option<&crate::evidence_fetch::ReadMemory>,
     written: &mut Option<Restore>,
 ) -> Result<RestoreOutcome, RestoreError> {
+    // What a terminal pass reads a run's scorecard again with (PoC P12).
+    let reads = Reread {
+        scorecard,
+        verify,
+        archive_url,
+        memory,
+    };
     let name = restore.name_any();
     let namespace = restore
         .namespace()
@@ -6169,7 +6669,8 @@ async fn reconcile_restore_inner(
                 "the Job is gone and the status is terminal; nothing to do"
             );
             // …except an evidence fetch it may still owe (D2 §3.9).
-            let requeue = continue_evidence_fetch(restore, client, &namespace, now, runner).await?;
+            let requeue =
+                continue_evidence_fetch(restore, client, &namespace, now, runner, &reads).await?;
             return Ok(RestoreOutcome {
                 job_name,
                 created: false,
@@ -6627,7 +7128,8 @@ async fn reconcile_restore_inner(
         // The other thing a terminal `Restore` may still owe: its evidence
         // verdict, when an evidence-fetch Job reads it (D2 §3.9). The run's
         // own pod is still not read.
-        let requeue = continue_evidence_fetch(restore, client, &namespace, now, runner).await?;
+        let requeue =
+            continue_evidence_fetch(restore, client, &namespace, now, runner, &reads).await?;
         return Ok(RestoreOutcome {
             job_name,
             created: false,
@@ -6898,41 +7400,50 @@ async fn reconcile_restore_inner(
         }),
         _ => None,
     };
-    let verdict = match (&evidence_from, reference) {
-        // THE DECISION IS ALREADY MADE AND IT IS RECORDED. `evidence_source_for`
-        // answered with the reason there is no reader for this run's evidence;
-        // the guard is `keys.mandatory_complete()` and not the digest, because
-        // the question this arm answers is "was a scorecard written", which the
-        // keys say and the digest — which only a fetch produces — cannot.
-        (backup::EvidenceSource::NotAttempted { detail }, _) if keys.mandatory_complete() => {
-            Some(crate::verification::VerificationResult::not_attempted(
-                logweir_verify::PAYLOAD_TYPE_SCORECARD,
-                detail.clone(),
-            ))
+    // THE CHOICE IS PURE AND TABLED (`terminal_evidence`, review T1/R1): which
+    // verdict is recorded without a read, which reference is verified, and
+    // which pass writes nothing.
+    let verdict = match terminal_evidence(
+        &evidence_from,
+        reference,
+        keys.mandatory_complete(),
+        keys.scorecard.as_deref().unwrap_or_default(),
+        restore
+            .spec
+            .evidence_destination_ref
+            .as_ref()
+            .map(|r| r.name.as_str()),
+    ) {
+        TerminalEvidence::Record(result) => Some(result),
+        TerminalEvidence::Verify(reference) => {
+            Some(read_verdict(&evidence_from, reference, verify, client).await)
         }
-        // THE JOB'S VERDICT IS WRITTEN BY THE JOB'S PASS, below.
-        (backup::EvidenceSource::FetchJob { .. }, _) => None,
-        (backup::EvidenceSource::GlobalHandle, Some(reference)) => Some(verify(reference).await),
-        // THE SAME VERIFIER, ON THE EVIDENCE DESTINATION'S HANDLE — D2
-        // §3.9's "no second verification path".
-        (backup::EvidenceSource::Destination(store), Some(reference)) => Some(
-            crate::verification::verify_oracle(Some(Arc::clone(store)), client.clone())(reference)
-                .await,
-        ),
-        // THE RUNNER SAYS A SCORECARD EXISTS AND THE CONTROLLER'S OWN READ
-        // PRODUCED NO DIGEST — legacy-point-restore P5's silent shape, for an
-        // inline-archive run only (`unread_scorecard_verdict`, which cites the
-        // decision it amends). `NotAttempted` is the only verdict writable
-        // without bytes — never `Invalid`, and never a completion.
-        (from @ backup::EvidenceSource::GlobalHandle, None) => unread_scorecard_verdict(
-            from,
-            keys.mandatory_complete(),
-            keys.scorecard.as_deref().unwrap_or_default(),
-        ),
-        // GC11's no-artifact case, and a destination handle that returned no
-        // digest: no document, no opinion, no block.
-        _ => None,
+        TerminalEvidence::Nothing => None,
     };
+    // PoC P12: THE CONTROLLER'S OWN READ IS ATTEMPT 1 OF A SCHEDULE — the
+    // `Backup` twin's rule. A transient failure records
+    // `observation.{mode, attempt: 1, retryAfter}` and names the next attempt;
+    // the terminal branches read it again (`continue_evidence_fetch`), and a
+    // terminal `Restore` waiting for that attempt requeues for it rather than
+    // waiting for a change.
+    let mut read_observation: Option<Value> = None;
+    let verdict = match (verdict, backup::controller_read_mode(&evidence_from)) {
+        (Some(result), Some(mode)) => {
+            let (result, retry) = crate::evidence_fetch::scheduled(result, 1, now);
+            if retry.is_some() {
+                read_observation = Some(crate::evidence_fetch::observation_patch(
+                    Some(mode),
+                    None,
+                    1,
+                    None,
+                    retry,
+                ));
+            }
+            Some(result)
+        }
+        (verdict, _) => verdict,
+    };
+    let read_retry = read_observation.is_some();
     if let Some(result) = verdict {
         let current = restore
             .status
@@ -6982,25 +7493,39 @@ async fn reconcile_restore_inner(
             // EXPLICIT NULLS FOR THE FIELDS THIS VERDICT DOES NOT HOLD — see
             // `verification::verification_patch_value`. One rule, one helper,
             // both reconcilers and the re-trust patch.
-            with_completion(
-                second_patch(
-                    &conditions_in(&terminal),
-                    verified,
-                    crate::verification::verification_patch_value(block),
+            with_observation(
+                with_completion(
+                    second_patch(
+                        &conditions_in(&terminal),
+                        verified,
+                        crate::verification::verification_patch_value(block),
+                    ),
+                    observed.as_ref().and_then(|o| {
+                        completion_patch_value(o, &result, current.as_ref(), Some(exit_code))
+                    }),
                 ),
-                observed.as_ref().and_then(|o| {
-                    completion_patch_value(o, &result, current.as_ref(), Some(exit_code))
-                }),
+                read_observation,
             ),
         )
         .await?;
+        // THIS PROCESS HAS READ IT (`evidence_fetch::ReadMemory`).
+        if backup::controller_read_mode(&evidence_from).is_some() {
+            if let (Some(memory), Some(uid)) = (memory, restore.uid()) {
+                memory.mark(&uid);
+            }
+        }
     }
 
     // D2 §3.9, THE DEFAULT ARM: an evidence-fetch Job reads the scorecard
     // with the EVIDENCE destination's `evidenceRead` grant, after the terminal
     // patch and the runner Job's TTL. A terminal `Restore` otherwise waits for
-    // a change, so while the fetch is owed it is looked at again on a timer.
-    let mut requeue = Requeue::AwaitChange;
+    // a change, so while the fetch is owed it is looked at again on a timer —
+    // and so, since PoC P12, is a controller read whose retry is scheduled.
+    let mut requeue = if read_retry {
+        Requeue::After(crate::evidence_fetch::RETRY_DELAYS_SECONDS[0].unsigned_abs())
+    } else {
+        Requeue::AwaitChange
+    };
     if matches!(evidence_from, backup::EvidenceSource::FetchJob { .. }) && keys.mandatory_complete()
     {
         let stored = with_status_written(restore, &terminal, &at);
@@ -7089,6 +7614,8 @@ async fn reconcile(
         limit: None,
         reservations: crate::run_pool::Reservations::global(),
     };
+    // PoC P12: the process's one memory of which finished runs it has read
+    // (see the `Backup` reconciler's `reconcile`).
     let outcome = reconcile_in_context_pooled(
         &restore,
         &ctx,
@@ -7096,6 +7623,7 @@ async fn reconcile(
         Utc::now(),
         &|name: &str| std::env::var(name),
         Some(&pool),
+        Some(crate::evidence_fetch::ReadMemory::global()),
     )
     .await?;
     Ok(action_for(&outcome))
@@ -7121,7 +7649,7 @@ pub async fn reconcile_in_context(
     now: DateTime<Utc>,
     env: EnvReader<'_>,
 ) -> Result<RestoreOutcome, RestoreError> {
-    reconcile_in_context_pooled(restore, ctx, approval_policies, now, env, None).await
+    reconcile_in_context_pooled(restore, ctx, approval_policies, now, env, None, None).await
 }
 
 /// [`reconcile_in_context`], through the manual-restore pool when one is given
@@ -7137,6 +7665,7 @@ pub async fn reconcile_in_context_pooled(
     now: DateTime<Utc>,
     env: EnvReader<'_>,
     pool: Option<&crate::run_pool::Pool<'_, Restore>>,
+    memory: Option<&crate::evidence_fetch::ReadMemory>,
 ) -> Result<RestoreOutcome, RestoreError> {
     let archive = ctx.archive.clone();
     let oracle = move |key: String| -> BoxFuture<'static, Option<ScorecardObservation>> {
@@ -7167,6 +7696,7 @@ pub async fn reconcile_in_context_pooled(
         approval_policies,
         archive_url.as_deref(),
         pool,
+        memory,
     )
     .await
 }

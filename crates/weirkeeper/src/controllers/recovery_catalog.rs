@@ -51,7 +51,7 @@ use chrono::{DateTime, Utc};
 use futures::StreamExt as _;
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::ConfigMap;
-use kube::api::{Api, Patch, PatchParams, PostParams};
+use kube::api::{Api, ListParams, Patch, PatchParams, PostParams};
 use kube::runtime::controller::Action;
 use kube::runtime::reflector::{self, ObjectRef};
 use kube::runtime::{watcher, Controller};
@@ -112,6 +112,12 @@ pub const REASON_PAGE_CONFLICT: &str = "PageConflict";
 /// `Ready=False`: a Job carrying this sync's name is controlled by something
 /// else. D-SEAMS **S6**: a name is not an identity.
 pub const REASON_JOB_NAME_CONFLICT: &str = "JobNameConflict";
+/// `Ready=False`: an OLDER `RecoveryCatalog` in this namespace already
+/// catalogs the same `BackupDestination` — D3 §5.5 item 1, "two catalogs for
+/// one destination in one namespace are refused (`Ready=False/DuplicateCatalog`
+/// on the newer object)". The newer one runs no sync and publishes no view;
+/// see [`duplicate_of`] for which one is "newer".
+pub const REASON_DUPLICATE_CATALOG: &str = "DuplicateCatalog";
 
 /// `Synced=True`: the walk completed and its result read.
 pub const REASON_SUCCEEDED: &str = "Succeeded";
@@ -149,6 +155,7 @@ pub const CONDITION_REASONS: &[&str] = &[
     REASON_LEGACY_ARCHIVE_UNSUPPORTED,
     REASON_PAGE_CONFLICT,
     REASON_JOB_NAME_CONFLICT,
+    REASON_DUPLICATE_CATALOG,
     REASON_SUCCEEDED,
     REASON_PARTIAL_SCAN,
     REASON_SCAN_INCOMPLETE,
@@ -287,6 +294,15 @@ pub struct SyncContext<'a> {
     /// `LIST`, as before, because an unsynced store looks like a cluster with
     /// no policy at all and would hand every namespace to the roster.
     pub trust_policies: Option<&'a [crate::crds::trust_policy::TrustPolicy]>,
+    /// The `RecoveryCatalog`s this pass compares the catalog with for D3
+    /// §5.5's one-catalog-per-destination rule ([`duplicate_of`]): this
+    /// controller's own store once it has finished its first list (zero API
+    /// calls — it is the index the watch already keeps), and `None` otherwise,
+    /// which reads the namespace with ONE `LIST`. An unsynced store looks like
+    /// a namespace with no other catalog at all, and would let a duplicate run
+    /// the sync its elder already runs. Objects in other namespaces, and the
+    /// catalog itself, may be included: [`duplicate_of`] filters them.
+    pub peers: Option<&'a [RecoveryCatalog]>,
 }
 
 // ---------------------------------------------------------------------------
@@ -450,6 +466,26 @@ impl Pass<'_> {
                 .await;
         }
 
+        // 2b. ONE CATALOG PER DESTINATION PER NAMESPACE — D3 §5.5 item 1 (PoC
+        //     defect P11). BEFORE the tracked Job is harvested or a new one is
+        //     started: a duplicate that was syncing when this rule arrived
+        //     (an upgrade over existing duplicates) reads nothing from its Job
+        //     and starts no other; the Job ages out on its own TTL.
+        let listed;
+        let peers = match self.ctx.peers {
+            Some(peers) => peers,
+            None => {
+                let api: Api<RecoveryCatalog> =
+                    Api::namespaced(self.ctx.client.clone(), &self.namespace);
+                listed = api.list(&ListParams::default()).await?.items;
+                &listed[..]
+            }
+        };
+        if let Some(elder) = duplicate_of(self.catalog, peers) {
+            let message = duplicate_message(&self.namespace, elder);
+            return self.publish_duplicate(&message).await;
+        }
+
         if let Some(job) = tracked_job.as_ref() {
             if !owned_by(job, &self.uid) {
                 return self
@@ -541,6 +577,25 @@ impl Pass<'_> {
     /// the retry storm this controller's requeue is designed to avoid. The
     /// failure is on `Synced` for an operator to act on.
     fn slot_already_served(&self, slot: i64) -> bool {
+        // A SLOT SERVED BY A SYNC THIS CATALOG'S VIEW WAS THEN WITHDRAWN FROM IS
+        // NOT SERVED (review L6). A duplicate that takes over after its elder is
+        // deleted has no view — its pages were withdrawn — and its last sync
+        // may have finished inside the current slot; counting that sync would
+        // leave it with no view and `Synced=False/DuplicateCatalog` naming an
+        // elder that no longer exists, until the next slot (up to a day, or
+        // for ever at `intervalSeconds: 0`). Its first pass as the owner syncs.
+        if current_condition(
+            self.catalog
+                .status
+                .as_ref()
+                .and_then(|s| s.conditions.as_ref()),
+            CONDITION_SYNCED,
+        )
+        .and_then(|c| c.reason.as_deref())
+            == Some(REASON_DUPLICATE_CATALOG)
+        {
+            return false;
+        }
         self.catalog
             .status
             .as_ref()
@@ -1354,6 +1409,74 @@ impl Pass<'_> {
         })
     }
 
+    /// `Ready=False/DuplicateCatalog` — D3 §5.5 item 1 — and NO VIEW.
+    ///
+    /// [`Self::publish_refusal`], plus one thing it does not do: a published
+    /// view is withdrawn even while its pages still exist. The console, the
+    /// API's point listing and a catalog-point restore's preflight all read
+    /// `status.pages[]` and none of them reads `Ready` first, so a refused
+    /// catalog that kept listing pages would still hand out points — which is
+    /// exactly the second, competing index onto one archive the rule exists to
+    /// prevent. The page `ConfigMap`s are left alone (this controller holds no
+    /// `delete`) and age out with their sync Job's TTL; the elder catalog
+    /// indexes the same archive.
+    async fn publish_duplicate(&mut self, message: &str) -> Result<Outcome, ReconcileError> {
+        // `Synced` SAYS SO TOO. Carrying the last sync's condition would leave
+        // an upgraded duplicate reading `Synced=Unknown/SyncInProgress` — "a
+        // sync is running right now" — for a catalog that will never run one,
+        // or `True/Succeeded` beside a withdrawn view.
+        let synced = (
+            "False",
+            REASON_DUPLICATE_CATALOG.to_string(),
+            "a duplicate catalog runs no sync; the elder catalog over the same destination \
+             syncs it"
+                .to_string(),
+        );
+        let mut status = json!({
+            "observedGeneration": self.generation(),
+            "conditions": self.conditions(
+                ("False", REASON_DUPLICATE_CATALOG, message),
+                synced,
+            ),
+        });
+        // `viewExpiresAt` GOES WITH THE PAGES (review L5). It is the one field
+        // a `ProtectionPolicy` reads before the pages: left behind, a withdrawn
+        // view reads as a FRESH, EMPTY one, and a policy over this catalog
+        // raises "no available point" — the point is gone — when the truth is
+        // that this catalog lists nothing. Without it the view reads as stale,
+        // which is what a withdrawn view is.
+        if self.has_pages()
+            || self
+                .catalog
+                .status
+                .as_ref()
+                .is_some_and(|s| s.view_expires_at.is_some())
+        {
+            if let Some(map) = status.as_object_mut() {
+                map.insert("pages".to_string(), Value::Null);
+                map.insert("indexConfigMap".to_string(), Value::Null);
+                map.insert("truncated".to_string(), Value::Null);
+                map.insert("viewExpiresAt".to_string(), Value::Null);
+            }
+        }
+        self.patch_status(status).await?;
+        warn!(
+            catalog = %self.name, namespace = %self.namespace,
+            reason = REASON_DUPLICATE_CATALOG, message = message,
+            "recovery catalog refused: an older catalog indexes the same destination"
+        );
+        Ok(Outcome {
+            phase: CatalogPhase::Refused,
+            ready: "False",
+            ready_reason: REASON_DUPLICATE_CATALOG,
+            synced_reason: REASON_DUPLICATE_CATALOG.to_string(),
+            pages: 0,
+            entries: 0,
+            truncated: false,
+            job_name: None,
+        })
+    }
+
     /// Whether this catalog has any published pages at all.
     fn has_pages(&self) -> bool {
         self.catalog
@@ -1586,6 +1709,114 @@ impl Pass<'_> {
 }
 
 // ---------------------------------------------------------------------------
+// One catalog per destination — D3 §5.5 item 1 (PoC defect P11)
+// ---------------------------------------------------------------------------
+
+/// The catalog that takes precedence over `catalog` for its destination, when
+/// `catalog` is a DUPLICATE — `None` when it is the one that syncs.
+///
+/// # The rule, and why it is total
+///
+/// D3 §5.5 item 1: two catalogs for one destination in one namespace are
+/// refused on the NEWER object. "Newer" is decided on `(creationTimestamp,
+/// name)`: the API server's own creation time first, and the name — unique
+/// within a namespace — for the second-granularity tie, so every pair of
+/// catalogs has exactly one elder and every reconcile of either object,
+/// whichever controller process runs it, reaches the same answer. Existing
+/// duplicates (an upgrade over a namespace that already holds several, as the
+/// PoC's did) therefore keep exactly one syncing catalog — the first one
+/// created — and every other one turns `Ready=False/DuplicateCatalog`.
+///
+/// # What is compared
+///
+/// Only a peer in the SAME namespace whose `spec.destinationRef.name` is the
+/// same (`destinationRef` is immutable, so a catalog cannot move onto or off a
+/// destination). A peer being deleted (`deletionTimestamp` set) is already
+/// leaving and never holds the destination against a live catalog, so the next
+/// one in line takes over as soon as the elder is gone. The catalog itself is
+/// skipped by UID (by name when a UID is missing). A `legacyArchive` catalog
+/// names no destination and is refused on its own arm before this runs.
+///
+/// A catalog with no `creationTimestamp` (never true of an object the API
+/// server returned) sorts after every one that has one — it cannot claim to be
+/// the elder of anything.
+#[must_use]
+pub fn duplicate_of<'a>(
+    catalog: &RecoveryCatalog,
+    peers: &'a [RecoveryCatalog],
+) -> Option<&'a RecoveryCatalog> {
+    let destination = catalog.spec.destination_ref.as_ref()?.name.as_str();
+    let namespace = catalog.namespace();
+    let own_uid = catalog.uid();
+    let own_name = catalog.name_any();
+    let key = |c: &RecoveryCatalog| {
+        (
+            c.metadata.creation_timestamp.as_ref().map(|t| t.0),
+            c.name_any(),
+        )
+    };
+    // `None` sorts BEFORE `Some` in `Option`'s `Ord`, which is the opposite
+    // of what a missing timestamp should mean here.
+    let older = |a: &RecoveryCatalog, b: &RecoveryCatalog| {
+        let (at_a, name_a) = key(a);
+        let (at_b, name_b) = key(b);
+        match (at_a, at_b) {
+            (Some(x), Some(y)) if x != y => x < y,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            _ => name_a < name_b,
+        }
+    };
+    peers
+        .iter()
+        .filter(|p| p.namespace() == namespace)
+        .filter(|p| match (own_uid.as_deref(), p.uid()) {
+            (Some(own), Some(theirs)) => own != theirs,
+            _ => p.name_any() != own_name,
+        })
+        .filter(|p| p.metadata.deletion_timestamp.is_none())
+        .filter(|p| {
+            p.spec
+                .destination_ref
+                .as_ref()
+                .is_some_and(|r| r.name == destination)
+        })
+        .filter(|p| older(p, catalog))
+        .reduce(|eldest, p| if older(p, eldest) { p } else { eldest })
+}
+
+/// `Ready=False/DuplicateCatalog`'s message: which catalog holds the
+/// destination, and the two ways out.
+#[must_use]
+pub fn duplicate_message(namespace: &str, elder: &RecoveryCatalog) -> String {
+    let destination = elder
+        .spec
+        .destination_ref
+        .as_ref()
+        .map(|r| r.name.as_str())
+        .unwrap_or_default();
+    let created = elder
+        .metadata
+        .creation_timestamp
+        .as_ref()
+        .map(|t| {
+            format!(
+                " (created {})",
+                t.0.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+            )
+        })
+        .unwrap_or_default();
+    format!(
+        "RecoveryCatalog {namespace}/{}{created} already catalogs BackupDestination \
+         {namespace}/{destination}, and one destination has one catalog per namespace (D3 §5.5): \
+         this newer catalog runs no sync and publishes no view. Use {}, or delete it and this \
+         catalog takes over within a minute.",
+        elder.name_any(),
+        elder.name_any(),
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Small pure helpers
 // ---------------------------------------------------------------------------
 
@@ -1793,6 +2024,7 @@ async fn reconcile(
     catalog: Arc<RecoveryCatalog>,
     ctx: Arc<Context>,
     shared: crate::trust::SharedPolicies,
+    objects: reflector::Store<RecoveryCatalog>,
 ) -> Result<Action, ReconcileError> {
     let policy = installation_policy(&ctx.client).await;
     // THE SHARED STORE, ONCE IT HAS SYNCED — no `LIST trustpolicies` per pass.
@@ -1800,6 +2032,18 @@ async fn reconcile(
         .synced
         .load(std::sync::atomic::Ordering::Relaxed)
         .then(|| shared.store.state().iter().map(|p| (**p).clone()).collect());
+    // THIS CONTROLLER'S OWN STORE, once its first list is complete, for the
+    // one-catalog-per-destination rule — the same "is it ready yet" the
+    // manual-run pool asks (`run_pool::store_snapshot`). Only this namespace's
+    // catalogs are cloned; `None` makes the pass `LIST` the namespace instead.
+    let namespace = catalog.namespace();
+    let peers: Option<Vec<RecoveryCatalog>> =
+        crate::run_pool::store_snapshot(&objects).map(|all| {
+            all.iter()
+                .filter(|c| c.namespace() == namespace)
+                .map(|c| (**c).clone())
+                .collect()
+        });
     let outcome = reconcile_catalog(
         &catalog,
         &SyncContext {
@@ -1808,6 +2052,7 @@ async fn reconcile(
             runner_image: &ctx.runner_image,
             now: Utc::now(),
             trust_policies: snapshot.as_deref(),
+            peers: peers.as_deref(),
         },
     )
     .await?;
@@ -1908,13 +2153,15 @@ fn controller_in(
     async move {
         let controller = Controller::new(api, watcher::Config::default());
         let objects = controller.store();
+        // The same store, for the one-catalog-per-destination rule (P11).
+        let peers = controller.store();
         controller
             .owns(jobs, watcher::Config::default())
             .watches(policy_api, watcher::Config::default(), move |policy| {
                 policy_targets(&objects, &scopes, &policy)
             })
             .run(
-                move |object, context| reconcile(object, context, shared.clone()),
+                move |object, context| reconcile(object, context, shared.clone(), peers.clone()),
                 error_policy,
                 ctx,
             )

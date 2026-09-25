@@ -892,7 +892,10 @@ chart installs.
 The controller's read-only evidence credential is the `logweir-evidence-ro`
 Secret in the release namespace. It is `optional: true` on the Deployment: the
 controller starts without it and every verification reads `NotAttempted`,
-which is a choice and not a bad document.
+which is a choice and not a bad document. It is read when the controller
+starts: after creating or rotating it, restart the controller, and every run
+whose read failed for want of it is read once more
+([`docs/kubernetes.md`](../../docs/kubernetes.md) §15.1b).
 
 ## Runtime tags and the privileged bootstrap digest
 

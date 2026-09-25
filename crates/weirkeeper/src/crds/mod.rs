@@ -352,15 +352,17 @@ pub struct TrustBasis {
     pub signing_time_read: Option<String>,
 }
 
-/// How a destination-backed run's evidence is being read — D2 §3.9 step 3.
+/// How a run's evidence is being read — D2 §3.9 step 3.
 ///
-/// Written only for a run whose `BackupDestination` reads evidence with a
-/// grant only a pod may hold (`evidenceRead` `SecretKeys`, `WorkloadIdentity`,
-/// or `ArchiveReadGrant` resolving to either): the controller holds no verb on
+/// Written for a run whose `BackupDestination` reads evidence with a grant
+/// only a pod may hold (`evidenceRead` `SecretKeys`, `WorkloadIdentity`, or
+/// `ArchiveReadGrant` resolving to either): the controller holds no verb on
 /// `secrets`, so it asks an evidence-fetch check Job in the object's own
 /// namespace to relay the signed document and its detached sidecar, and then
-/// verifies the relayed bytes itself. Absent on every other run, and on every
-/// object an older controller reconciled.
+/// verifies the relayed bytes itself. And, since PoC P12, for a run the
+/// controller reads ITSELF (`mode` `ArchiveHandle` or `ControllerIdentity`,
+/// no `jobRef`) once a failed read has scheduled another attempt. Absent on
+/// every other run, and on every object an older controller reconciled.
 ///
 /// REFERENCES AND FACTS ONLY. No byte of the document and no credential is
 /// ever copied here; the Job is named so an operator can `kubectl logs` it.
@@ -368,7 +370,10 @@ pub struct TrustBasis {
 #[serde(rename_all = "camelCase")]
 pub struct EvidenceObservation {
     /// The resolved `evidenceRead` credential mode the Job ran with:
-    /// `SecretKeys` or `WorkloadIdentity`.
+    /// `SecretKeys` or `WorkloadIdentity`. Or the handle the controller read
+    /// through itself: `ArchiveHandle` (an inline-archive run, its
+    /// `LOGWEIR_ARCHIVE_URL` handle) or `ControllerIdentity` (a destination's
+    /// own handle); such a read has no Job and no `jobRef`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
     /// The evidence-fetch Job of the current attempt, once it exists. Absent
@@ -378,8 +383,10 @@ pub struct EvidenceObservation {
     pub job_ref: Option<ObservedJobRef>,
     /// Which attempt this is, from 1. A failed fetch is retried at +1 m,
     /// +5 m and +15 m (D2 §3.9 step 5); each attempt is its own Job,
-    /// `lwc-ev-<20 hex of sha256(uid + ":" + attempt)>`. Retries never re-run
-    /// the backup or the restore.
+    /// `lwc-ev-<20 hex of sha256(uid + ":" + attempt)>`. A controller read's
+    /// transient failure takes the same schedule, and a new controller
+    /// process may start it again at 1. Retries never re-run the backup or
+    /// the restore.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt: Option<i64>,
     /// What the relay said about the two objects: `Complete`,

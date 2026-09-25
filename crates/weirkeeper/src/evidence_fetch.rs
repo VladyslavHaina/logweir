@@ -62,6 +62,9 @@ use crate::check::{self, job as cjob, limits, plan as cplan, policy::ChecksPolic
 use crate::crds::ObservedJobRef;
 use crate::destination::{ResolvedDestination, ResolvedGrant};
 use crate::job::{RunnerImage, RunnerOwner};
+use crate::verification::{
+    EVIDENCE_FETCH_RELAY_PREFIX as RELAY, EVIDENCE_FETCH_UNREADABLE_PREFIX as UNREADABLE,
+};
 
 /// How many Jobs one run's evidence may take: the first attempt and the three
 /// retries D2 §3.9 step 5 schedules at +1 m, +5 m and +15 m.
@@ -360,9 +363,7 @@ fn answer<'a>(
     cap: u64,
 ) -> Answer<'a> {
     let Some(entry) = results.iter().find(|e| e.key == key && e.stream == stream) else {
-        return Answer::Unreadable(format!(
-            "the evidence-fetch relay carried no answer for {key}"
-        ));
+        return Answer::Unreadable(format!("{RELAY} carried no answer for {key}"));
     };
     if entry.present {
         // THE CAP IS A REFUSAL, NOT A PREFIX. A truncated object's relayed
@@ -376,7 +377,7 @@ fn answer<'a>(
         }
         let Some(bytes) = relay.stream(stream) else {
             return Answer::Unreadable(format!(
-                "the evidence-fetch relay reported {key} present and relayed no bytes for it"
+                "{RELAY} reported {key} present and relayed no bytes for it"
             ));
         };
         // The end frame's per-stream digest is already verified by the
@@ -384,7 +385,7 @@ fn answer<'a>(
         // relay contradicts itself.
         if entry.sha256.as_deref() != Some(logweir_core::ids::sha256_prefixed(bytes).as_str()) {
             return Answer::Unreadable(format!(
-                "the evidence-fetch relay's digest for {key} does not describe the bytes it \
+                "{RELAY}'s digest for {key} does not describe the bytes it \
                  relayed"
             ));
         }
@@ -403,7 +404,7 @@ fn answer<'a>(
         }
         if entry.bytes != Some(len) {
             return Answer::Unreadable(format!(
-                "the evidence-fetch relay declared {} bytes for {key} and relayed {len}; \
+                "{RELAY} declared {} bytes for {key} and relayed {len}; \
                  nothing was verified",
                 entry
                     .bytes
@@ -415,11 +416,10 @@ fn answer<'a>(
     match entry.code {
         Some(CheckCode::ObjectNotFound) => Answer::NotFound,
         Some(code) => Answer::Unreadable(format!(
-            "the evidence-fetch Job could not read {key} with the evidenceRead grant ({code}); \
-             nothing was verified"
+            "{UNREADABLE}{key} with the evidenceRead grant ({code}); nothing was verified"
         )),
         None => Answer::Unreadable(format!(
-            "the evidence-fetch relay reported {key} absent without a code; nothing was verified"
+            "{RELAY} reported {key} absent without a code; nothing was verified"
         )),
     }
 }
@@ -438,7 +438,7 @@ pub fn read_relay(relay: &CheckRelay, request: &Request) -> (Presence, Relayed) 
                 Presence::Unknown,
                 Relayed::Unread {
                     detail: format!(
-                        "the evidence-fetch relay's result document did not verify ({}); nothing \
+                        "{RELAY}'s result document did not verify ({}); nothing \
                          was verified",
                         e.code()
                     ),
@@ -449,9 +449,7 @@ pub fn read_relay(relay: &CheckRelay, request: &Request) -> (Presence, Relayed) 
             return (
                 Presence::Unknown,
                 Relayed::Unread {
-                    detail: "the evidence-fetch relay carried no result document; nothing was \
-                             verified"
-                        .to_string(),
+                    detail: format!("{RELAY} carried no result document; nothing was verified"),
                 },
             )
         }
@@ -1053,4 +1051,387 @@ pub async fn repair_ttl(
         "the evidence verdict was committed and its Job carried no TTL; the TTL is repaired"
     );
     Ok(true)
+}
+
+// ---------------------------------------------------------------------------
+// The controller's OWN read, retried — PoC defect P12
+// ---------------------------------------------------------------------------
+//
+// A `Backup` or `Restore` whose evidence the CONTROLLER reads — an inline-
+// archive run through the one global handle (D2 §3.10), or a destination whose
+// `evidenceRead` is `ControllerIdentity` (D2 §3.8 option E) — used to get one
+// read, on the pass that made it terminal. When that read failed, the
+// `NotAttempted` it wrote was final: the PoC upgrade round's three pre-upgrade
+// inline-archive points read `NotAttempted` because the controller had no
+// credential (the SDK fell back to IMDS), stayed so after `logweir-evidence-ro`
+// was created and the controller restarted twice, and were therefore never
+// recovery points. A destination-backed run whose evidence a JOB reads was
+// already retried at +1 m, +5 m and +15 m (D2 §3.9 step 5, above).
+//
+// The controller's own read now takes the SAME schedule, recorded in the SAME
+// `status.evidence.observation` fields — `mode`, `attempt`, `retryAfter` — so
+// every reader that already understands a scheduled fetch (the rehearsal
+// schedule's `verdict_owed`, `retry_due_in`) understands this one. Two things
+// differ, and both are about what an input change looks like for a read the
+// controller makes itself:
+//
+// * only a TRANSIENT failure is scheduled (`verification::NotAttemptedClass`):
+//   a definite `NotFound` is a fact about the archive and is never read again,
+//   and a configuration refusal waits for the configuration to change;
+// * the controller's credential reaches it through its own environment
+//   (`logweir-evidence-ro`, projected `optional: true`), so a created or
+//   rotated credential arrives with a new controller PROCESS. Each process
+//   therefore reads every eligible unverified run ONCE more after its
+//   schedule is spent ([`ReadMemory`]) — which is also how a `NotAttempted`
+//   written before this rule existed (no observation at all) is read again
+//   after the upgrade.
+//
+// FAIL-CLOSED THROUGHOUT: a retry runs the terminal pass's own reader and
+// verifier and writes whatever they answer. Nothing here can write `Valid`;
+// only `verify_oracle`/`verify_evidence` over fetched bytes can.
+
+/// `status.evidence.observation.mode` for a read through the controller's own
+/// inline-archive handle (`LOGWEIR_ARCHIVE_URL`, D2 §3.10).
+pub const MODE_ARCHIVE_HANDLE: &str = "ArchiveHandle";
+
+/// `status.evidence.observation.mode` for a read through a destination's
+/// `ControllerIdentity` handle (`evidence_store::StoreCache`, D2 §3.8 E).
+pub const MODE_CONTROLLER_IDENTITY: &str = "ControllerIdentity";
+
+/// Whether a stored observation records a read the CONTROLLER made, rather
+/// than an evidence-fetch Job's — the two schedules must never be confused:
+/// [`owed_attempt`] would otherwise start a Job for a run whose grant no pod
+/// holds.
+#[must_use]
+pub fn is_controller_read(mode: Option<&str>) -> bool {
+    matches!(mode, Some(MODE_ARCHIVE_HANDLE | MODE_CONTROLLER_IDENTITY))
+}
+
+/// The most distinct objects one controller process remembers having read —
+/// [`ReadMemory`]'s bound.
+pub const READ_MEMORY_CAPACITY: usize = 100_000;
+
+/// Which terminal objects THIS controller process has already read (by UID).
+///
+/// # Why process memory, when the retry backoff is on the object
+///
+/// The schedule (`attempt`, `retryAfter`) is on the object, so a restart can
+/// neither shorten nor forget it. What a restart DOES change is the
+/// controller's own credential: `logweir-evidence-ro` is projected into the
+/// controller's environment, which a running process never re-reads. A run
+/// whose schedule was spent under the old credential is therefore worth
+/// exactly one more read under the new one, and "has this process read it
+/// yet" is the exact question — a new process has read nothing, and the
+/// question costs no field on the object and no clock comparison. (A stored
+/// `verifiedAt` cannot answer it: an unchanged verdict keeps its old
+/// `verifiedAt` by design — erratum E11(d) — so a comparison with the process
+/// start would re-read such a run on every pass.)
+///
+/// # Bounded
+///
+/// Remembering is what bounds the re-read to ONE per object per process, so
+/// the memory is never emptied: at [`READ_MEMORY_CAPACITY`] distinct objects
+/// it stops admitting new ones, and an object it cannot remember is treated
+/// as already read (no re-read), never as new. A crash-looping controller
+/// re-reads each eligible run once per start, which is the cost of one
+/// terminal pass and no more.
+#[derive(Debug, Default)]
+pub struct ReadMemory {
+    read: std::sync::Mutex<std::collections::HashSet<String>>,
+}
+
+impl ReadMemory {
+    /// An empty memory — what a new process holds, and what a row passes.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The ONE memory the running controller's `Backup` and `Restore`
+    /// reconcilers share (UIDs do not collide across kinds).
+    pub fn global() -> &'static Self {
+        static MEMORY: std::sync::OnceLock<ReadMemory> = std::sync::OnceLock::new();
+        MEMORY.get_or_init(ReadMemory::new)
+    }
+
+    /// Whether this process has not read `uid` yet — and can still remember
+    /// it once it has. Does not record anything: [`Self::mark`] does, after
+    /// the read's verdict is written.
+    #[must_use]
+    pub fn unread(&self, uid: &str) -> bool {
+        let read = self
+            .read
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        !read.contains(uid) && read.len() < READ_MEMORY_CAPACITY
+    }
+
+    /// Record that this process has read `uid`.
+    pub fn mark(&self, uid: &str) {
+        let mut read = self
+            .read
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if read.len() < READ_MEMORY_CAPACITY {
+            read.insert(uid.to_string());
+        }
+    }
+}
+
+/// How many controller evidence reads one process runs at once — review L2.
+///
+/// A restart re-reads every eligible unverified run at once (the PoC profile's
+/// worst case is 258 inline runs written while the credential was missing),
+/// and each read is a trust resolution, two or three object `GET`s and a
+/// status patch; the schedules those reads start then fire in lockstep at +1,
+/// +6 and +21 minutes. The reads themselves are what is bounded: a reconcile
+/// that owes one waits for a permit, so at most this many are in flight and the
+/// rest follow as permits free. The terminal pass's own first read (one per
+/// finishing run) does not take a permit.
+pub const CONTROLLER_READ_CONCURRENCY: usize = 4;
+
+/// The process's one semaphore of [`CONTROLLER_READ_CONCURRENCY`] permits,
+/// shared by the `Backup` and `Restore` reconcilers and every namespace copy.
+pub fn controller_read_permits() -> &'static tokio::sync::Semaphore {
+    static PERMITS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    PERMITS.get_or_init(|| tokio::sync::Semaphore::new(CONTROLLER_READ_CONCURRENCY))
+}
+
+/// One controller read's verdict, as it is written: a TRANSIENT `NotAttempted`
+/// gains the schedule — the next attempt's instant in its sentence and in
+/// `retryAfter` — and every other verdict is returned unchanged with no retry.
+///
+/// Returns the verdict to write and the `retryAfter` to record.
+#[must_use]
+pub fn scheduled(
+    result: crate::verification::VerificationResult,
+    attempt: u32,
+    now: DateTime<Utc>,
+) -> (
+    crate::verification::VerificationResult,
+    Option<DateTime<Utc>>,
+) {
+    use crate::verification::{not_attempted_class, NotAttemptedClass, VerificationVerdict};
+    let transient = result.result == VerificationVerdict::NotAttempted
+        && result
+            .detail
+            .as_deref()
+            .is_some_and(|d| not_attempted_class(d) == NotAttemptedClass::Transient);
+    if !transient {
+        return (result, None);
+    }
+    let retry = retry_after(attempt, now);
+    let detail =
+        controller_read_detail(result.detail.as_deref().unwrap_or_default(), attempt, retry);
+    (
+        crate::verification::VerificationResult {
+            detail: Some(detail),
+            ..result
+        },
+        retry,
+    )
+}
+
+/// A RELAYED attempt's verdict, with the schedule when it failed transiently —
+/// PoC P12's class sweep of the Job path. A relay the store answered with a
+/// denial or a timeout, or one whose own framing did not hold (D2 §3.9 step
+/// 5's "relay unreadable"), used to be final after one Job; it now takes the
+/// same +1 m, +5 m, +15 m schedule a Job that did not finish takes. A relay
+/// that says the document is not there, or that it is over the relay's cap,
+/// is final as before.
+#[must_use]
+pub fn relayed_schedule(
+    result: crate::verification::VerificationResult,
+    attempt: u32,
+    now: DateTime<Utc>,
+) -> (
+    crate::verification::VerificationResult,
+    Option<DateTime<Utc>>,
+) {
+    use crate::verification::{not_attempted_class, NotAttemptedClass, VerificationVerdict};
+    let transient = result.result == VerificationVerdict::NotAttempted
+        && result
+            .detail
+            .as_deref()
+            .is_some_and(|d| not_attempted_class(d) == NotAttemptedClass::Transient);
+    if !transient {
+        return (result, None);
+    }
+    let retry = retry_after(attempt, now);
+    let detail = failed_detail(result.detail.as_deref().unwrap_or_default(), attempt, retry);
+    (
+        crate::verification::VerificationResult {
+            detail: Some(detail),
+            ..result
+        },
+        retry,
+    )
+}
+
+/// A failed controller read's sentence, naming what happens next — the twin of
+/// [`failed_detail`], whose spent sentence would be wrong here: a controller
+/// read IS tried again, by the next controller process.
+#[must_use]
+pub fn controller_read_detail(detail: &str, attempt: u32, retry: Option<DateTime<Utc>>) -> String {
+    match retry {
+        Some(t) => format!(
+            "{detail}; attempt {} starts at {}",
+            attempt + 1,
+            t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        ),
+        None => format!(
+            "{detail}; attempt {attempt} of {MAX_ATTEMPTS} was the last this controller process \
+             makes. The controller reads it again when it next starts, which is when a created \
+             or rotated logweir-evidence-ro reaches it; or run the printed logweir drill verify \
+             command"
+        ),
+    }
+}
+
+/// What a TERMINAL object's controller read calls for on this pass — the
+/// review round's M1 made this an enum rather than an `Option<u32>`, because
+/// "nothing is owed" and "an attempt is scheduled but can no longer happen"
+/// must end differently: the second has to be RECORDED, or the object keeps
+/// advertising a `retryAfter` in the past and a `Restore` requeues for it
+/// every second, for ever.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ControllerRead {
+    /// Read now: this is the attempt's number.
+    Due(u32),
+    /// An attempt is scheduled at this instant, and nothing happens before it
+    /// — THE RATE BOUND.
+    Scheduled(DateTime<Utc>),
+    /// An attempt is scheduled and can no longer happen: the archive handle
+    /// this inline-archive run is read through was removed, or now points at
+    /// another bucket. Record this sentence as the `NotAttempted` detail and
+    /// clear `retryAfter`; a later controller process re-reads the run when
+    /// the handle is back ([`ReadMemory`]).
+    Settle(String),
+    /// Nothing is owed.
+    Nothing,
+}
+
+/// Which controller read a TERMINAL object calls for now, from its stored
+/// verdict — PURE.
+///
+/// `inline` is whether the object is an inline-archive run (no destination
+/// reference). `readable` is the caller's answer to "can this run be read at
+/// all": `Err(sentence)` for an inline-archive run whose archive handle is not
+/// configured or is in another bucket than the run's evidence; `Ok` otherwise
+/// (a destination-backed run's source is resolved by the read itself, and a
+/// refusal there is recorded as it is found). The caller has already checked
+/// that both evidence keys (and, for a `Backup`, the runner's digest) are on
+/// the status.
+///
+/// * a `NotAttempted` whose observation is a controller read's, with a
+///   `retryAfter` and attempts left: [`ControllerRead::Due`] once `retryAfter`
+///   has passed and [`ControllerRead::Scheduled`] before it — or
+///   [`ControllerRead::Settle`] when the run can no longer be read;
+/// * a controller read's `NotAttempted` with no `retryAfter` (the schedule is
+///   spent, or the failure was not transient), or an inline-archive run's
+///   `NotAttempted` with no observation at all (written before this rule, or a
+///   configuration refusal): attempt 1 of a new schedule, ONCE per controller
+///   process ([`ReadMemory`]) — never for a definite absence, and, for a
+///   destination-backed run, only when its sentence is a transient READ
+///   failure (review L4: a destination that refuses is not a read, and is not
+///   re-read on every start);
+/// * an observation that is an evidence-fetch Job's: nothing here
+///   ([`owed_attempt`] owns it);
+/// * anything that is not `NotAttempted`: nothing — a reached verdict is final.
+#[must_use]
+pub fn plan_controller_read(
+    result: Option<&str>,
+    detail: Option<&str>,
+    observation: Option<&crate::crds::EvidenceObservation>,
+    inline: bool,
+    readable: Result<(), String>,
+    now: DateTime<Utc>,
+    memory: Option<(&ReadMemory, &str)>,
+) -> ControllerRead {
+    use crate::verification::{not_attempted_class, NotAttemptedClass};
+    if result != Some("NotAttempted") {
+        return ControllerRead::Nothing;
+    }
+    let controller = observation.filter(|o| is_controller_read(o.mode.as_deref()));
+    let scheduled = controller.and_then(|o| o.retry_after);
+    if let Err(why) = readable {
+        return match scheduled {
+            Some(_) => ControllerRead::Settle(why),
+            None => ControllerRead::Nothing,
+        };
+    }
+    let class = not_attempted_class(detail.unwrap_or_default());
+    if class == NotAttemptedClass::Absent {
+        return ControllerRead::Nothing;
+    }
+    let reread = || {
+        if memory.is_some_and(|(memory, uid)| memory.unread(uid)) {
+            ControllerRead::Due(1)
+        } else {
+            ControllerRead::Nothing
+        }
+    };
+    let rereadable = inline || class == NotAttemptedClass::Transient;
+    match (controller, observation) {
+        (Some(o), _) => match o.retry_after {
+            Some(at) => {
+                let recorded = o
+                    .attempt
+                    .and_then(|a| u32::try_from(a).ok())
+                    .filter(|a| *a >= 1)
+                    .unwrap_or(1);
+                if recorded >= MAX_ATTEMPTS {
+                    ControllerRead::Nothing
+                } else if now >= at {
+                    ControllerRead::Due(recorded + 1)
+                } else {
+                    ControllerRead::Scheduled(at)
+                }
+            }
+            None if rereadable => reread(),
+            None => ControllerRead::Nothing,
+        },
+        (None, Some(_)) => ControllerRead::Nothing,
+        (None, None) if rereadable => reread(),
+        (None, None) => ControllerRead::Nothing,
+    }
+}
+
+/// [`plan_controller_read`] for a run that CAN be read, as the attempt it
+/// owes now — the pure table's short form.
+#[must_use]
+pub fn owed_controller_read(
+    result: Option<&str>,
+    detail: Option<&str>,
+    observation: Option<&crate::crds::EvidenceObservation>,
+    inline: bool,
+    now: DateTime<Utc>,
+    memory: Option<(&ReadMemory, &str)>,
+) -> Option<u32> {
+    match plan_controller_read(result, detail, observation, inline, Ok(()), now, memory) {
+        ControllerRead::Due(attempt) => Some(attempt),
+        _ => None,
+    }
+}
+
+/// The sentence a scheduled inline-archive read settles on when this
+/// controller has no archive handle at all (review M1). Final: a new process
+/// with a handle reads the run again.
+#[must_use]
+pub fn archive_handle_gone_detail(document: &str) -> String {
+    format!(
+        "this run's {document} is read only through {}, and this controller has no archive \
+         handle configured, so the scheduled attempt was not made and nothing is verified; \
+         configure it and restart the controller, or run the printed logweir drill verify command",
+        crate::destination::ARCHIVE_HANDLE_LABEL
+    )
+}
+
+/// The requeue a terminal `Restore` needs for a scheduled controller read:
+/// the seconds until it, never less than one and never for an instant already
+/// passed (a passed instant is [`ControllerRead::Due`] or
+/// [`ControllerRead::Settle`], both of which act on this pass).
+#[must_use]
+pub fn seconds_until(at: DateTime<Utc>, now: DateTime<Utc>) -> u64 {
+    u64::try_from((at - now).num_seconds().max(1)).unwrap_or(1)
 }

@@ -2062,11 +2062,16 @@ pub const VERDICT_WAIT_SECONDS: i64 = 3600;
 /// AMENDED FOR ONE SOURCE (legacy-point-restore, PoC P5): an INLINE-ARCHIVE
 /// run read through the controller's global handle now publishes
 /// `NotAttempted`, naming the key, when that read produced nothing
-/// (`restore::unread_scorecard_verdict`, which states why). A rehearsal over
-/// such a point therefore records `VerificationNotAttempted` at once rather
-/// than `EvidenceVerdictNotReached` after this grace. Everything else above
-/// stands: a `Destination` read that fails still writes no block, and a lost
-/// second patch is still covered only by this grace.
+/// (`restore::unread_scorecard_verdict`, which states why).
+///
+/// AMENDED AGAIN (PoC P12): so does a `Destination` (`ControllerIdentity`)
+/// read — the "permanent" shape above is gone, because both reads are now
+/// retried on the evidence-fetch schedule and a retry needs a recorded
+/// attempt. Such a `NotAttempted` carries `observation.retryAfter` while an
+/// attempt is scheduled, which [`verdict_owed`] reads as OWED (the whole
+/// schedule is about 21 minutes, inside [`VERDICT_WAIT_SECONDS`]), and the
+/// spent one is the reached verdict (`VerificationNotAttempted`). What is left
+/// for this grace is a lost second patch.
 pub const UNRECORDED_VERDICT_GRACE_SECONDS: i64 = 300;
 
 /// `lastFailed.reason` for an exit-0 rehearsal whose evidence verdict was
@@ -2157,10 +2162,20 @@ pub fn verdict_owed(restore: &Restore) -> Option<String> {
                 .and_then(|a| u32::try_from(a).ok())
                 .unwrap_or(1);
             let retry = observation.and_then(|o| o.retry_after.as_ref());
+            // THE CONTROLLER'S OWN READ SAYS SO IN ITS OWN WORDS (review I5):
+            // no Job relays anything on that path.
+            let controller_read = crate::evidence_fetch::is_controller_read(
+                observation.and_then(|o| o.mode.as_deref()),
+            );
             match retry {
                 Some(at) if attempt < crate::evidence_fetch::MAX_ATTEMPTS => Some(format!(
-                    "its evidence fetch attempt {attempt} did not relay the scorecard and attempt \
-                     {} is scheduled at {}",
+                    "{} attempt {attempt} did not read the scorecard and attempt {} is \
+                     scheduled at {}",
+                    if controller_read {
+                        "its controller evidence read"
+                    } else {
+                        "its evidence fetch"
+                    },
                     attempt + 1,
                     at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
                 )),

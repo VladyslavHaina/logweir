@@ -1019,13 +1019,110 @@ pub async fn verify_relayed(
 ///
 /// `NotFound` gets its own sentence because "the object is not there" and "the
 /// bucket would not answer" are different things for an operator to act on,
-/// and both are `NotAttempted`.
-fn store_detail(e: &StoreError) -> String {
+/// and both are `NotAttempted`. They are also different things for the RETRY
+/// (PoC defect P12, [`not_attempted_class`]): a definite absence is final, and
+/// a store that would not answer — a missing credential, a denial, a timeout —
+/// is read again.
+#[must_use]
+pub fn store_detail(e: &StoreError) -> String {
     match e {
         StoreError::NotFound(key) => {
-            format!("the evidence object {key} is not in the archive; nothing was verified")
+            format!("the evidence object {key}{EVIDENCE_OBJECT_ABSENT_SUFFIX}")
         }
-        other => format!("the evidence object could not be read: {other}"),
+        other => format!("{EVIDENCE_OBJECT_UNREADABLE_PREFIX}{other}"),
+    }
+}
+
+/// How [`store_detail`] begins for every store failure that is NOT a definite
+/// absence — the transient class of [`not_attempted_class`].
+pub const EVIDENCE_OBJECT_UNREADABLE_PREFIX: &str = "the evidence object could not be read: ";
+
+/// How [`store_detail`] ends for the store's own `NotFound` — the one final
+/// read failure of [`not_attempted_class`].
+pub const EVIDENCE_OBJECT_ABSENT_SUFFIX: &str = " is not in the archive; nothing was verified";
+
+/// How [`verify_oracle`]'s `NotAttempted` begins when its blocking task did
+/// not come back — transient.
+pub const VERIFICATION_TASK_INCOMPLETE_PREFIX: &str = "the verification task did not complete: ";
+
+/// How a `Restore`'s `NotAttempted` begins when the controller's own read of
+/// the scorecard the runner reported produced no document
+/// (`controllers::restore::unread_scorecard_detail` and its destination twin)
+/// — transient: the reader cannot tell a missing object from one it may not
+/// read, so it is read again on the retry schedule and then stops.
+pub const UNREAD_SCORECARD_PREFIX: &str = "the runner reported scorecard `";
+
+/// How a controller read's `NotAttempted` begins when the receipt VERIFIED but
+/// the archive observation that carries its covered window did not answer
+/// (review L1) — transient: a `Valid` without its window would be final and
+/// would never make the run a recovery point, so the attempt is retried.
+pub const RECEIPT_WINDOW_UNREAD_PREFIX: &str = "the receipt verified, but ";
+
+/// How an evidence-fetch Job's relay begins when the store answered its grant
+/// with an error code that is not `NotFound` — a denial, a timeout: transient,
+/// and the Job is retried on D2 §3.9 step 5's schedule (PoC P12's class
+/// sweep; it used to be final after one Job).
+pub const EVIDENCE_FETCH_UNREADABLE_PREFIX: &str = "the evidence-fetch Job could not read ";
+
+/// How an evidence-fetch relay's own integrity failures begin — no result
+/// document, one that did not verify, an object present with no bytes, a
+/// length or digest that does not describe the bytes: D2 §3.9 step 5's
+/// "relay unreadable", retried with a new Job. (An object over the relay's
+/// cap is a fact about the object, not the relay, and is final.)
+pub const EVIDENCE_FETCH_RELAY_PREFIX: &str = "the evidence-fetch relay";
+
+/// What a CONTROLLER-SIDE `NotAttempted` says about trying again — PoC defect
+/// P12.
+///
+/// Before this, every `NotAttempted` the controller's own read produced was
+/// final: an inline-archive `Backup` whose receipt read failed for want of a
+/// credential stayed unverified after the credential existed and after two
+/// controller restarts, and was never a recovery point. The class is decided
+/// here, from the sentence the producing function wrote, so the retry and the
+/// sentence cannot disagree: every producer spells its sentence with one of the
+/// constants above, and `tests/verification.rs` holds each producer to its
+/// class.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NotAttemptedClass {
+    /// The read did not happen or did not answer, for a reason a later read
+    /// can outlive without anything on the object changing: a store failure
+    /// that is not `NotFound` (a missing or refused credential, a timeout, a
+    /// 5xx), an unreadable trust resolution, a blocking task that did not come
+    /// back, a scorecard read that produced nothing. Read again on D2 §3.9
+    /// step 5's schedule.
+    Transient,
+    /// The store said `NotFound` for the document: a fact about the ARCHIVE.
+    /// Never read again — not on the schedule and not after a restart.
+    Absent,
+    /// Anything else: a reason that is a fact about this installation's
+    /// configuration (no archive handle, no signing key, two policies
+    /// claiming the namespace, a location outside the handle's bucket) and
+    /// that no second read on its own can change. Not on the schedule; an
+    /// inline-archive run is read once more by the next controller PROCESS,
+    /// which is where a configuration change arrives
+    /// (`evidence_fetch::ReadMemory`).
+    Final,
+}
+
+/// The [`NotAttemptedClass`] of one stored or fresh `NotAttempted` detail.
+#[must_use]
+pub fn not_attempted_class(detail: &str) -> NotAttemptedClass {
+    if detail.contains(EVIDENCE_OBJECT_ABSENT_SUFFIX) {
+        return NotAttemptedClass::Absent;
+    }
+    let transient = [
+        EVIDENCE_OBJECT_UNREADABLE_PREFIX,
+        ROSTER_UNREADABLE_DETAIL,
+        VERIFICATION_TASK_INCOMPLETE_PREFIX,
+        UNREAD_SCORECARD_PREFIX,
+        EVIDENCE_FETCH_UNREADABLE_PREFIX,
+        EVIDENCE_FETCH_RELAY_PREFIX,
+        RECEIPT_WINDOW_UNREAD_PREFIX,
+    ];
+    if transient.iter().any(|prefix| detail.starts_with(prefix)) {
+        NotAttemptedClass::Transient
+    } else {
+        NotAttemptedClass::Final
     }
 }
 
@@ -1668,7 +1765,7 @@ pub fn verify_oracle(
                 Ok(result) => result,
                 Err(e) => VerificationResult::not_attempted(
                     payload_type,
-                    format!("the verification task did not complete: {e}"),
+                    format!("{VERIFICATION_TASK_INCOMPLETE_PREFIX}{e}"),
                 ),
             }
         })

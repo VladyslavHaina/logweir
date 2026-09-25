@@ -828,7 +828,14 @@ same reason.
   relay, a runner refusal, a denial, a missing object or a document over the
   cap is `NotAttempted` naming the cause, never `Valid`. A failed attempt is
   retried with a new Job at +1 m, +5 m and +15 m (`observation.retryAfter`),
-  and the run itself is never re-run. At most
+  and the run itself is never re-run. Since PoC P12 that includes a relay whose
+  store DENIED the grant (or answered with any other error that is not
+  `NotFound`) and a relay whose own framing did not hold. Before, those were
+  final after one Job. A missing document and one over the cap are still final.
+  The controller's own read
+  (`ControllerIdentity`, and the inline-archive handle) takes the same
+  schedule for a transient failure, recorded with `observation.mode`
+  `ControllerIdentity` or `ArchiveHandle` and no `jobRef` (§15.1b). At most
   `checks.maxEvidenceFetchActivePerNamespace` fetches are active per namespace,
   and a run over the limit waits `Pending`. The Job's TTL (10 minutes) is set
   only after the verdict commits. A Job holding the name that this object does
@@ -1400,6 +1407,41 @@ did — `Succeeded`, `PartialScan` when part of the archive could not be read,
 closed check code on a failure), `Stale` (the view is older than two intervals; a
 `intervalSeconds: 0` catalog is manual-only and never stale by the clock) and
 `TrustAvailable`.
+
+**One catalog per destination per namespace.** Two `RecoveryCatalog`s whose
+`spec.destinationRef` names the same `BackupDestination` in one namespace are
+not two indexes: the one created first catalogs the destination, and every later
+one reports `Ready=False/DuplicateCatalog`, naming the catalog that holds the
+destination. "First" is `metadata.creationTimestamp`, then the name for a tie in
+the same second, so every reconcile of either object reaches the same answer. A
+duplicate resolves no destination and runs no sync Job (`Synced=False` with the
+same reason), and it lists no view:
+`status.pages`, `status.indexConfigMap`, `status.truncated` and
+`status.viewExpiresAt` are withdrawn. The API's point listing and a
+catalog-point restore read `status.pages` directly, and a `ProtectionPolicy`
+reads `viewExpiresAt` first. A policy over a duplicate therefore reads
+`CatalogStale`, never a fresh view with no available point. Its page
+`ConfigMap`s age out with their sync Job's TTL. Use the elder catalog, or
+delete the one you do not want. If you delete the elder, the next one in
+creation order takes over within a minute and syncs at once, even inside an
+interval slot its own earlier sync served. **Upgrade:** a namespace
+that already holds duplicates (an older controller accepted them) keeps its
+first-created catalog syncing, and every other catalog over the same destination
+turns `Ready=False/DuplicateCatalog` on its first reconcile. A sync Job such a
+catalog was running is not harvested. Two consequences to check before
+upgrading over duplicates:
+
+- The survivor is the OLDEST catalog, not the best. If a newer duplicate has
+  better settings (a larger `viewLimit`, `mode: Full`), delete the older one
+  with kubectl; the console holds no delete.
+- A `RetentionPolicy.catalogRef`, a `RehearsalSchedule`'s point `catalogRef` or
+  a `ProtectionPolicy.protects.catalogRef` that names a newer duplicate loses
+  its input. Retention refuses ("published no view"), the rehearsal falls back
+  to `Backup` candidates, and protection reads `CatalogStale`. All three fail
+  closed. Point them at the survivor; the first two are immutable, so re-create
+  them.
+
+Rolling back to an older controller makes the duplicates sync again.
 
 **A failed sync keeps the previous view.** The status patch omits `pages`, which
 an RFC 7386 merge patch reads as "leave it alone", and those pages age out on
@@ -6043,7 +6085,9 @@ the API.** The `weirkeeper` ClusterRole grants no verb on `secrets` (§9), and
 `crates/weirkeeper/tests/linkage.rs::the_controller_never_reads_a_secret` keeps
 it that way. The consequence for operators is one line: after creating or
 rotating `logweir-evidence-ro`, **restart the Deployment** — container
-environment is fixed at start.
+environment is fixed at start. The restarted controller reads every
+unverified run whose read failed once more (§15.1b), so points that were
+`NotAttempted` for want of the credential become verified without any edit.
 
 ### 15.1a Where an inline-archive run's evidence is read
 
@@ -6081,11 +6125,13 @@ environment.
   runner printed both scorecard keys and the controller's read produced no
   document — no handle configured, the object not in that bucket, or a
   credential that cannot read it — the verdict names the key and the handle
-  by role. It is never `Invalid`, and there is no completion. This applies to
-  inline-archive runs only: a destination-backed run whose `ControllerIdentity`
-  read fails still writes no block, as recorded for rehearsals (the schedule
-  bounds its wait instead). A rehearsal over a point with no destination
-  therefore records `VerificationNotAttempted` at once, rather than
+  by role. It is never `Invalid`, and there is no completion. Since PoC P12
+  the same holds for a destination-backed run whose evidence destination reads
+  with `ControllerIdentity`: its failed read used to write no block at all
+  (and so could never be read again), and now writes `NotAttempted` naming the
+  destination. Both are read again on the schedule in §15.1b, so a rehearsal
+  waits for that schedule — at most about 21 minutes of attempts, inside its
+  hour — and then records the reached verdict, rather than
   `EvidenceVerdictNotReached` after its five-minute grace.
 - **The console writes such a plan's evidence to the archive's own bucket** —
   the bucket the archive credential already wrote the point's receipt to, and on
@@ -6094,10 +6140,101 @@ environment.
   any other bucket (§21.8). A hand-written plan for `kubectl apply` should do the
   same.
 - **Upgrade and rollback.** Nothing is converted. A `Restore` that already
-  finished is terminal and is not re-verified, so a run restored before the
-  upgrade with its evidence elsewhere keeps its missing block; verify it with
-  the printed commands (the Restore's detail page fetches the scorecard from
-  the plan's evidence bucket). An older controller reads the wrong bucket again after a rollback.
+  finished with its evidence in another bucket is not re-read — reading it
+  would read the wrong bucket — so a run restored before the upgrade with its
+  evidence elsewhere keeps its missing block; verify it with the printed
+  commands (the Restore's detail page fetches the scorecard from the plan's
+  evidence bucket). A run whose evidence IS in the handle's bucket and whose
+  read merely failed is read again (§15.1b). An older controller reads the
+  wrong bucket again after a rollback.
+
+### 15.1b A failed controller read is read again (PoC P12)
+
+The controller reads a run's evidence itself in two cases: an inline-archive
+run, through its archive handle (§15.1a), and a run whose destination's
+`evidenceRead` is `ControllerIdentity`, through that destination's handle.
+Until PoC P12 that read happened once, on the pass that made the run terminal,
+and a failure there was final. On the PoC, three inline-archive `Backup`s read
+`NotAttempted` because the controller had no credential (the SDK fell back to
+the instance metadata endpoint). They stayed that way after
+`logweir-evidence-ro` was created and after two restarts, so they were never
+recovery points: a point needs a verified receipt and its `windowCovered`.
+
+A failed read's `NotAttempted` now has one of three classes, decided from its
+`detail`:
+
+| class | `detail` | what happens next |
+|---|---|---|
+| transient | `the evidence object could not be read: …` (a denial, a missing credential, a timeout), the trust resolution could not be read, the verification task did not complete, a scorecard read produced nothing, a receipt that verified while the read of its window did not answer | read again on the evidence-fetch Job's schedule: attempt 2 at +1 m, 3 at +5 m after that, 4 at +15 m after that |
+| absent | `the evidence object <key> is not in the archive` (the store's own `NotFound`) | never read again: that is a fact about the archive |
+| configuration | no archive handle, no signing key, two policies claiming the namespace, a destination with no `evidenceRead`, evidence outside the handle's bucket | not on the schedule; see "a new controller process" below |
+
+**Absent means the store said `NotFound`, whatever the reason.** The object
+store maps every 404 to `NotFound`, including a bucket that does not exist and
+a path-style or endpoint setting that 404s. A run read through a misconfigured
+handle can therefore be recorded as absent and is not read again after the
+handle is fixed. Verify it with the printed `logweir drill verify` command. A
+`Restore`'s scorecard read cannot tell an absent object from a refused one, so
+an absent scorecard is transient: it costs four reads per controller process.
+
+A scheduled attempt is recorded in the same fields a fetch Job uses:
+`status.evidence.observation = {mode, attempt, retryAfter}`, with `mode`
+`ArchiveHandle` or `ControllerIdentity` and no `jobRef`. The `detail` names
+the next attempt (`…; attempt 2 starts at 2026-09-25T00:06:38Z`). A reconcile
+before `retryAfter` reads nothing and writes nothing. A terminal `Backup`
+reconciles every 15 seconds, so this is the rate bound: at most four reads per
+run per controller process, over about 21 minutes. A terminal `Restore`
+requeues for its next attempt rather than waiting for a change. Each attempt is
+the terminal pass's own evidence step run again: the same handle, digest check
+and verifier. It writes what that pass would have written: the verdict, the
+`Verified` condition and `windowCovered`. For a `Backup` it also writes
+`records` and `capture`, and for a `Restore` the scorecard's `outcome`,
+`objectives`, `integrity` and `measured`. Those go only beside a passing
+verdict for a `Backup`, and `completion` only beside `Valid` for a `Restore`.
+Nothing here can write `Valid` without a verifier reading the document. For a
+`Backup`, a receipt that verifies while the read that carries its window does
+not answer is recorded as transient and read again, not written `Valid` with no
+`windowCovered`. A reached verdict is never read again, so that write would lose
+the recovery point for good. After the fourth attempt the `detail` says no
+attempt remains in this process and `retryAfter` is absent.
+
+**A scheduled attempt that can no longer happen is settled.** If the archive
+handle is removed, or re-pointed at another bucket, while an inline-archive
+run's attempt is scheduled, the next pass records `NotAttempted` with the
+handle's own sentence. It keeps the attempt count and clears `retryAfter`. A
+`Restore` then waits for a change, and a rehearsal over it stops waiting. The
+run is read again when a controller process with a handle over its bucket
+starts.
+
+**At most four controller reads are in flight at once, per process.** A
+restart re-reads every eligible unverified run together, so a reconcile that
+owes a read waits for one of four permits. The rest follow as permits free.
+Each read resolves the namespace's trust, issues two or three object `GET`s and
+writes one status patch.
+
+**A new controller process reads it once more.** The controller's credential
+comes from its environment, which a running process never re-reads, so a
+created or rotated `logweir-evidence-ro` arrives with a restart. Each
+controller process therefore reads every eligible unverified run once. If that
+read fails transiently it starts a new schedule; otherwise it is recorded. A
+second pass in the same process never starts another schedule. The memory of
+which runs a process has read is bounded at 100 000 objects; past that it reads
+no new ones. A definite absence, a legacy-unbound run (no runner digest) and a
+run whose evidence is outside the handle's bucket are never re-read.
+
+"Once more" is per process, not once ever. On every start, an inline-archive
+run whose last answer was a configuration refusal is read once, and one whose
+last answer was transient is read up to four times. A destination-backed run is
+re-read only when its last answer was a transient read failure: a destination
+that refuses is not re-read on every start.
+
+**Upgrade.** A `NotAttempted` written by an older controller has no
+`observation`. The first process of this build reads each such inline-archive
+run once, and each destination-backed one whose `detail` is a transient read
+failure. With the credential in place the PoC's three points verify on the
+first reconcile after the upgrade, and the console offers them for restore.
+**Rollback:** an older controller ignores the observation and reads nothing
+again. A verdict this build reached stays on the object.
 
 ### 15.2 The badge is two rules, one per kind
 
@@ -6192,7 +6329,9 @@ A fresh verification — a run finishing now, or a `Backup` still being
 reconciled — asks the current policy and gets the current answer.
 
 An object that is **already terminal** is not re-read (that is the rule that
-keeps this controller quiet), so its verdict does not change by itself. When it
+keeps this controller quiet), so its verdict does not change by itself. The one
+exception is a run whose evidence read FAILED and so has no verdict about the
+document yet (§15.1b); a reached verdict is never re-read. When it
 is re-derived, it is re-derived from what is already on the status: the stored
 `matchedKeyId`, `signedAt` and `verifiedAt` are the three facts the decision
 takes, so there is **no storage read, no signature check and no Job** — with
