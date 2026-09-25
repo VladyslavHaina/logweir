@@ -2735,7 +2735,7 @@ export function renderPreflightStep(state, prepared) {
     "<p class=\"note\">" + esc(READINESS_BINDING_SENTENCE) + "</p>" +
     (readiness.unavailable === true
       ? "<p class=\"note\" id=\"restore-readiness-unavailable\">" +
-        cell(readiness.unavailableReason) + "</p>"
+        messageText(readiness.unavailableReason) + "</p>"
       : "<form id=\"restore-readiness-form\" novalidate" +
         (pending ? " aria-busy=\"true\"" : "") + ">" +
         "<fieldset class=\"form-body\"" + (pending ? " disabled" : "") + ">" +

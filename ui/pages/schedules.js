@@ -83,6 +83,7 @@ import {
   fieldErrorLine,
   invalidAttributes,
   listFooter,
+  messageText,
   mutationStatus,
   nextRunsPanel,
   runPhaseBadge,
@@ -1179,7 +1180,7 @@ export function renderReadinessPanel(view) {
     "<section class=\"readiness\" id=\"backup-readiness\"><h3>Backup readiness</h3>" +
     "<p class=\"note\">" + esc(READINESS_SENTENCE) + "</p>" +
     (v.unavailable === true
-      ? "<p class=\"note\" id=\"readiness-unavailable\">" + cell(v.unavailableReason) + "</p>"
+      ? "<p class=\"note\" id=\"readiness-unavailable\">" + messageText(v.unavailableReason) + "</p>"
       : (v.mayOperate === false
         ? "<p class=\"note\">This login may read readiness results in this namespace and not " +
           "start one.</p>"
@@ -1510,7 +1511,7 @@ function renderCreateReadiness(view) {
     "<p class=\"help\">" + esc(READINESS_SENTENCE) + "</p>" +
     (v.readinessUnavailable === true
       ? "<p class=\"note\" id=\"schedule-readiness-unavailable\">" +
-        cell(v.readinessUnavailableReason) + "</p>"
+        messageText(v.readinessUnavailableReason) + "</p>"
       : (dynamic
         ? "<p class=\"note\" id=\"schedule-readiness-dynamic\">A backup readiness check " +
           "needs concrete topic names. This schedule discovers all user topics at run time, so " +
@@ -4152,7 +4153,7 @@ export function renderRunNowPanel(view) {
     "<p class=\"note\">" + esc(RUN_NOW_SENTENCE) + "</p>" +
     (v.unavailable === true
       ? "<p class=\"note\" data-run-now-unavailable=\"" + esc(name) + "\">" +
-        cell(v.unavailableReason) + "</p>"
+        messageText(v.unavailableReason) + "</p>"
       : "<form class=\"run-now-form\" data-name=\"" + esc(name) + "\" novalidate" +
         (pending ? " aria-busy=\"true\"" : "") + ">" +
         (suspended

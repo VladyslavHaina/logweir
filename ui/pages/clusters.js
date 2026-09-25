@@ -81,6 +81,7 @@ import {
   fieldErrorLine,
   invalidAttributes,
   listFooter,
+  messageText,
   mutationStatus,
   phaseBadge,
   preflightVerdict,
@@ -560,7 +561,7 @@ export function renderConnectionCheck(view) {
     "<p class=\"note\" id=\"connection-check-no-topics\">" +
     esc(CONNECTION_CHECK_NO_TOPICS_SENTENCE) + "</p>" +
     (v.unavailable === true
-      ? "<p class=\"note\" id=\"connection-check-unavailable\">" + cell(v.unavailableReason) +
+      ? "<p class=\"note\" id=\"connection-check-unavailable\">" + messageText(v.unavailableReason) +
         "</p>"
       : (v.mayOperate === false
         ? "<p class=\"note\" id=\"connection-check-forbidden\">This login may read connection " +
@@ -761,7 +762,7 @@ export function renderDiscoveryPanel(view) {
     "makes anything dial; the connection probe above re-reads what the controller already " +
     "recorded.</p>" +
     (v.unavailable === true
-      ? "<p class=\"note\" id=\"discovery-unavailable\">" + cell(v.unavailableReason) + "</p>"
+      ? "<p class=\"note\" id=\"discovery-unavailable\">" + messageText(v.unavailableReason) + "</p>"
       : "") +
     (may && v.unavailable !== true
       ? "<form id=\"discovery-form\" novalidate" + (pending ? " aria-busy=\"true\"" : "") + ">" +

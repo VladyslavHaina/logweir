@@ -67,6 +67,7 @@ import {
   evaluationWord,
   facts,
   listFooter,
+  messageText,
   replace,
   table,
   flagBadge,
@@ -255,7 +256,7 @@ export function renderPolicyKeys(object, now) {
   return (
     "<h3>Keys</h3>" +
     "<p class=\"note\" data-evaluation-fresh=\"" + (freshness.fresh ? "true" : "false") + "\">" +
-    esc(UNKNOWN_IS_NOT_VALID_SENTENCE) + "</p>" +
+    messageText(UNKNOWN_IS_NOT_VALID_SENTENCE) + "</p>" +
     table(
       ["KEY ID", "PRINCIPAL", "VALIDITY", "LIFECYCLE", "EVALUATION", "MAY"],
       rows,
@@ -466,7 +467,7 @@ export function renderRosterHalf(view) {
   const spec = roster.spec || {};
   const status = roster.status || {};
   return (
-    "<p class=\"note\">" + esc(ROSTER_FALLBACK_SENTENCE) + "</p>" +
+    "<p class=\"note\">" + messageText(ROSTER_FALLBACK_SENTENCE) + "</p>" +
     facts([
       ["loaded", flagBadge(status.loaded, "loaded", "not loaded")],
       ["allowed cluster ids",
@@ -550,11 +551,11 @@ export function renderFingerprint() {
 export function renderPolicySnippet() {
   return (
     "<section class=\"check\"><h3>Editing trust is a cluster-admin step</h3>" +
-    "<p class=\"note\">This page shows the document and does not apply it. `trustpolicies` is " +
+    "<p class=\"note\">This page shows the document and does not apply it. <code>trustpolicies</code> is " +
     "cluster-scoped, its plural is absent from this page's writable set, the product API serves " +
     "no trust write in v1, and the API server would refuse a namespace-scoped viewer in any " +
     "case. Save this as trustpolicy.yml and apply it yourself. Editing is MONOTONIC: a key's " +
-    "public material can never be edited out, `notAfter` may only move earlier, and `state` may " +
+    "public material can never be edited out, <code>notAfter</code> may only move earlier, and <code>state</code> may " +
     "only move Active to Retired to Revoked.</p>" +
     copyBlock([
       "# From an existing roster, the reviewable way across is a migration, not a rewrite:",

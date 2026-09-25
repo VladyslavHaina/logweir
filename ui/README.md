@@ -1639,7 +1639,14 @@ tokens: each of those clicks is a new check by design.
 * **Names in the step texts are code** (R2-10): step 5's source sentence, step
   4's mapping and prefix complaints, step 6's plan problem and the
   catalog-point refusal render their backticked spans with `messageText`,
-  never as literal backticks.
+  never as literal backticks. The same holds across the console (round 4's
+  O2, on the Catalog page's "listed by `logweir catalog list`"): every
+  sentence with a backticked span renders through `messageText`, markup spells
+  `<code>`, and a message -- this page's own refusals included -- shows its
+  spans as code in the error box (`messageNodes`), the field-error line and
+  a panel's "unavailable" note (`codeSpans`, `messageText`). Rows:
+  `ui/tests/code-spans.spec.js`, which also refuse a new markup literal with a
+  backtick and a new such sentence passed to `esc` or `cell`.
 * **"Restore this point" is offered to a role that can restore** (R3-2). The
   catalog's points, the Backups list and a schedule's points and runs render
   `restorePointLink`: the link when the session grants `restoreCreate` in the

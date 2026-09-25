@@ -266,7 +266,8 @@ test("the_operation_view_computes_no_state_in_legacy_mode_and_says_so", () => {
     document: object, console: false, meta: { transport: "poll", attempt: 0 },
   });
   assert.match(html, /data-no-normalized-state="true"/);
-  assert.match(decode(html), /normalized operation state is computed by `logweir-api`/);
+  // ITS NAMES ARE CODE, not literal backticks (O2, R2-10's class).
+  assert.match(decode(html), /normalized operation state is computed by <code>logweir-api<\/code>/);
   assert.doesNotMatch(html, /badge-state-unknown/,
     "and it does NOT render the API's `unknown` word for a fact it simply does not have");
 });
@@ -679,7 +680,7 @@ test("availability_and_verification_are_two_columns_and_selectable_is_read_not_r
   const html = renderPoints(page, "team-a", "primary", "dest-a");
   assert.match(html, /<th scope="col">AVAILABILITY<\/th>/);
   assert.match(html, /<th scope="col">VERIFICATION<\/th>/);
-  assert.match(decode(html), /that judgement is the catalog's own `selectable` field/);
+  assert.match(decode(html), /that judgement is the catalog's own <code>selectable<\/code> field/);
   assert.ok(TWO_AXES_SENTENCE.length > 0);
 
   // THE MUTANT THIS ARM IS FOR. A page that recomputed `Available AND
@@ -878,7 +879,10 @@ test("an_unevaluated_trust_policy_reads_unknown_and_never_valid", () => {
   const html = decode(renderPolicyKeys(object, Date.parse("2026-09-19T02:00:00Z")));
   assert.match(html, /unknown/);
   assert.match(html, /nothing has evaluated these keys yet/);
-  assert.equal(html.indexOf(">valid<"), -1, "and the word `valid` is nowhere in this table");
+  // The sentence above the table names `valid` as code (O2); the word is in
+  // no badge and no cell.
+  assert.equal(html.replace(/<code>[^<]*<\/code>/g, "").indexOf(">valid<"), -1,
+    "and the word `valid` is nowhere in this table");
   assert.ok(UNKNOWN_IS_NOT_VALID_SENTENCE.indexOf("never `valid`") !== -1);
 });
 
@@ -2279,7 +2283,7 @@ test("a_redacted_receipt_key_is_not_carried_into_a_plan", async () => {
   // THE PAGE SAYS SO, and says it as a complaint rather than a note.
   const html = decode(renderPoints({ items: [redacted], page: {} }, "team-a", "c1", "dest"));
   assert.match(html, /data-redacted-binding="true"/);
-  assert.match(html, /published its receipt key as `\[redacted\]`/);
+  assert.match(html, /published its receipt key as <code>\[redacted\]<\/code>/);
   assert.match(html, /nothing in your archive is missing or unreadable because of this/);
 
   // AND THE SENTENCE NO LONGER PROMISES WHAT THE API DOES NOT DELIVER.

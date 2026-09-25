@@ -815,7 +815,7 @@ export function renderApprovalForm(subject, view) {
   const pending = state.phase === "pending";
   return (
     "<section class=\"step\" id=\"approval-form-section\"><h3>Record the approval</h3>" +
-    "<p class=\"blurb\">Paste or upload the two files `logweir drill approve` wrote over this " +
+    "<p class=\"blurb\">Paste or upload the two files <code>logweir drill approve</code> wrote over this " +
     "Restore's plan. They are submitted as text, exactly as they arrived: the controller hashes " +
     "the bytes the approver signed, so anything this page did to them in between would be a " +
     "different document.</p>" +
@@ -1197,7 +1197,7 @@ export function renderCountersignPanel(view) {
     "<div class=\"field\"><label for=\"countersigned-sidecar\">approval.sig (countersigned)" +
     "</label><textarea id=\"countersigned-sidecar\" name=\"sidecarBytes\" rows=\"6\" " +
     "autocomplete=\"off\" spellcheck=\"false\"></textarea>" +
-    "<p class=\"help\">The sidecar `logweir drill countersign` wrote: the console's signature " +
+    "<p class=\"help\">The sidecar <code>logweir drill countersign</code> wrote: the console's signature " +
     "and yours, over the same bytes.</p></div>" +
     "<p class=\"refusal-rule\">" + PRIVATE_KEY_REFUSAL + ".</p>" +
     "<div class=\"actions\"><button type=\"submit\" class=\"primary\" " +

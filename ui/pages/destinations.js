@@ -85,6 +85,7 @@ import {
   facts,
   fieldErrorLine,
   invalidAttributes,
+  messageText,
   mutationStatus,
   preflightVerdict,
   readinessHeadline,
@@ -265,7 +266,7 @@ export function renderDestinationList(page, ns) {
     ) +
     (defaults.length === 0
       ? "<p class=\"note\">No destination in this namespace is marked default, so a new " +
-        "schedule starts with none chosen. " + esc(DEFAULT_ANNOTATION_RESIDUAL) + "</p>"
+        "schedule starts with none chosen. " + messageText(DEFAULT_ANNOTATION_RESIDUAL) + "</p>"
       : "") +
     (items.some((d) => d.status === null || d.status === undefined ||
       d.status.valid === null || d.status.valid === undefined)
@@ -899,7 +900,7 @@ export function renderDestinationForm(view) {
     "<div class=\"field\"><label for=\"destination-prefix\">prefix</label>" +
     "<input id=\"destination-prefix\" name=\"prefix\" value=\"" + esc(d.prefix) + "\"" +
     field("destination-prefix", "prefix") + ">" +
-    "<p class=\"help\">Blank is the bucket root. `logweir` and everything under it is reserved " +
+    "<p class=\"help\">Blank is the bucket root. <code>logweir</code> and everything under it is reserved " +
     "for evidence.</p>" + line("destination-prefix", "prefix") + "</div>" +
     "</div><div class=\"field-row\">" +
     "<div class=\"field\"><label for=\"destination-region\">region</label>" +
@@ -957,7 +958,7 @@ export function renderDestinationForm(view) {
     (d.writeProbe !== "disabled" ? " selected" : "") + ">createOnlyMarker</option>" +
     "<option value=\"disabled\"" + (d.writeProbe === "disabled" ? " selected" : "") +
     ">disabled</option></select>" +
-    "<p class=\"help\">" + esc(WRITE_PROBE_SENTENCE) + "</p></div>" +
+    "<p class=\"help\">" + messageText(WRITE_PROBE_SENTENCE) + "</p></div>" +
     "<label class=\"inline\" for=\"destination-default\">" +
     "<input type=\"checkbox\" id=\"destination-default\" name=\"isDefault\"" +
     (d.isDefault === true ? " checked" : "") + "> make this the namespace default</label>" +

@@ -394,11 +394,33 @@ export function errorParts(error) {
  *  This function neither softens it nor explains it away; it says in words
  *  what the number means before it shows the number. A sign-in refusal from
  *  the product API carries a Sign in link that returns to this address. */
+/** [`messageText`]'s rule for the DOM half, which writes no markup: the
+ *  PAIRED backticked spans of `value` as `<code>` elements and the rest as
+ *  text (O2, R2-10's class) -- this page's own refusals say "the console
+ *  (`logweir-api`)", and the error box printed the backticks. */
+export function messageNodes(value) {
+  const text = typeof value === "string" ? value : "";
+  const parts = text.split("`");
+  if (parts.length < 3) {
+    return text;
+  }
+  const out = [];
+  for (let i = 0; i < parts.length; i += 1) {
+    const last = i === parts.length - 1;
+    if (i % 2 === 1 && !last) {
+      out.push(el("code", null, parts[i]));
+    } else if (parts[i].length > 0 || i % 2 === 1) {
+      out.push((i % 2 === 1 ? "`" : "") + parts[i]);
+    }
+  }
+  return out;
+}
+
 export function errorBox(error) {
   const parts = errorParts(error);
   return el("div", { class: "error", role: "alert" }, [
     el("p", { class: "error-title" }, parts.title),
-    el("p", { class: "error-message" }, parts.message),
+    el("p", { class: "error-message" }, messageNodes(parts.message)),
     parts.detail.length > 0 ? el("span", { class: "error-status" }, parts.detail) : null,
     parts.signIn
       ? el("p", { class: "actions" },
@@ -1876,6 +1898,14 @@ export function messageText(value) {
   return out;
 }
 
+/** A message this page or a server wrote, escaped, with its paired
+ *  backticked spans as code -- and the empty string for no message, where
+ *  [`messageText`] would print the absent marker (O2, R2-10's class: the
+ *  error box and the field-error line printed the backticks). */
+export function codeSpans(value) {
+  return typeof value === "string" && value.length > 0 ? messageText(value) : esc(value);
+}
+
 export function checkTable(checks, empty) {
   // NINE FIELDS IN FOUR CELLS (MCP round 2, R2-3): nine columns were more
   // than a thousand pixels wider than step 5's card at 1440 px, because the
@@ -2241,7 +2271,7 @@ export function errorBlock(error, live) {
   return (
     "<div class=\"error\"" + (live === false ? "" : " role=\"alert\"") + ">" +
     "<p class=\"error-title\">" + esc(parts.title) + "</p>" +
-    "<p class=\"error-message\">" + esc(parts.message) + "</p>" +
+    "<p class=\"error-message\">" + codeSpans(parts.message) + "</p>" +
     (parts.detail.length > 0
       ? "<span class=\"error-status\">" + esc(parts.detail) + "</span>"
       : "") +
@@ -2269,7 +2299,7 @@ export function fieldErrorLine(id, messages) {
   }
   return (
     "<p class=\"field-error\" id=\"" + esc(id) + "-error\">" +
-    messages.map((m) => esc(m)).join(" ") + "</p>"
+    messages.map((m) => codeSpans(m)).join(" ") + "</p>"
   );
 }
 
