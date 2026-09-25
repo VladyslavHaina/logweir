@@ -5,7 +5,7 @@
 // backticks on screen: two sentences (`render.js`'s CATALOG_WINDOW_SENTENCE,
 // `catalog.js`'s MORE_POINTS_SENTENCE) went through `esc`. R2-10 had fixed the
 // same thing in the wizard's step texts. The sweep found the class across the
-// tree: eleven more sentence constants printed through `esc`; seven markup
+// tree: nine more sentence constants printed through `esc`; seven markup
 // literals that spelled code with backticks (the approval form, the countersign
 // panel, both trust snippets, the destination prefix help, the protection
 // page's no-point complaint); and this page's own refusals ("Open the console
