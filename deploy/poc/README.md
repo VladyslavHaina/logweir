@@ -42,9 +42,11 @@ publication: `LOGWEIR_TAG` (`sha-<commit>`) for the images and
 `LOGWEIR_CHART_VERSION` (`0.1.0-sha-<commit>`) for the chart, published
 together by `images.yml`. The profile needs a build that carries the chart-gap
 fixes below (every publication since main `86a554e6`): `LOGWEIR_COMMIT` names
-main `02dc44b6`, published by CI run 36071480985 (2026-09-24), the first
-publication carrying the fixes for the PoC round's product defects P1–P10.
-The PoC installed at `86a554e6` was upgraded to it in place with
+main `b748fd5f`, published by CI run 36100597420 (2026-09-25). It carries the
+fixes for the first PoC round's product defects P1–P10 (first published at
+`02dc44b6`) and the second round's P11 and P12, the durable compromise
+revocation and the console fixes of the human-like pass. The PoC installed at
+`86a554e6` was upgraded in place to `02dc44b6` and then to `b748fd5f` with
 [*Upgrade to a newer publication*](#upgrade-to-a-newer-publication).
 
 Hostnames: `logweir.localtest.me` (the console) and `dex.localtest.me` (Dex).
@@ -240,13 +242,17 @@ chart references it as `optional`, so the controller starts either way, but
 every run with no saved destination -- an inline-archive schedule, every point
 `v0.1.5` wrote -- then reads verification `NotAttempted` ("the evidence object
 could not be read", the SDK falling back to the instance metadata address
-`169.254.169.254`). Such a point has no verified covered window, so the console
-never offers it as a recovery point, and a `NotAttempted` verdict is not
-re-read once the credential exists. Runs through a saved destination (step 10)
-are unaffected: they read their evidence with the destination's own
-`evidenceRead` grant. The controller reads the Secret at start: created or
-rotated later, it takes effect at the next controller rollout (an upgrade's
-step 2 is one).
+`169.254.169.254`). Such a point has no verified covered window, so while it
+reads so the console does not offer it as a recovery point. The failed read is
+not final: the controller reads the run again at +1, +5 and +15 minutes, and
+once more whenever a controller process starts
+([docs/kubernetes.md §15.1b](../../docs/kubernetes.md#151b-a-failed-controller-read-is-read-again-poc-p12));
+only a receipt the store reports absent is never read again. Runs through a
+saved destination (step 10) are unaffected: they read their evidence with the
+destination's own `evidenceRead` grant. The controller reads the Secret at
+start: created or rotated later, it takes effect at the next controller
+rollout (an upgrade's step 2 is one), and that new process is also the one that
+reads the unverified runs again.
 
 ## 6. Logweir, from the published chart
 
@@ -439,8 +445,11 @@ override.
 
 **An install that predates `logweir-evidence-ro` in step 5** (the first PoC
 round's) creates it before step 2, exactly as step 5 now does; step 2's
-controller rollout picks it up. Legacy runs verified `NotAttempted` before it
-existed stay so (see step 5).
+controller rollout picks it up, and on its first pass that controller reads
+the runs that failed without it once more: the three inline-archive points of
+the first round, `NotAttempted` since 2026-09-25 00:05, verified `Valid` three
+seconds after the step-2 controller of the `b748fd5f` upgrade started (see
+step 5).
 
 **What must survive**, and how to check it:
 - the installation identity: `logweir-signing-trust`'s `key-id` is the one
