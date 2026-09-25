@@ -613,3 +613,51 @@ fn a_key_nobody_revoked_still_verifies_everywhere() {
         );
     }
 }
+
+/// **Review finding M1, the reviewer's probe as a row.** A compromise newly
+/// recorded on a policy that governs [`NS`] changes the stored verdict of a
+/// terminal Restore in [`OTHER_NS`] (which resolves through a policy listing
+/// the key `Active`), so the `TrustPolicy` watch mapper — the one every
+/// re-trust trigger shares — must enqueue it. At `9c97f979` the mapper
+/// enqueued only [`NS`] and the Restore kept a green badge until a restart.
+#[test]
+fn a_new_compromise_record_wakes_every_namespace_it_reaches() {
+    use std::sync::Arc;
+    let before = policy(
+        RECORDER,
+        &[NS],
+        vec![active(SIGNER, SIGNER_PEM, SpecUsage::EvidenceSigning)],
+    );
+    let revoked_now = recorder();
+    let memory = weirkeeper::trust::PolicyScopeMemory::default();
+    let _ = memory.observe(&before);
+    let scope = memory.observe(&revoked_now);
+    let cm = |ns: &str, name: &str| {
+        Arc::new(k8s_openapi::api::core::v1::ConfigMap {
+            metadata: ObjectMeta {
+                name: Some(name.to_string()),
+                namespace: Some(ns.to_string()),
+                ..ObjectMeta::default()
+            },
+            ..Default::default()
+        })
+    };
+    let targets = weirkeeper::verification::targets_in_scope(
+        vec![cm(NS, "r-a"), cm(OTHER_NS, "r-b")],
+        &scope,
+    );
+    // The stored verdict in OTHER_NS WOULD change if the object were enqueued.
+    let other = policy(
+        "org-default",
+        &[OTHER_NS],
+        vec![active(SIGNER, SIGNER_PEM, SpecUsage::EvidenceSigning)],
+    );
+    let res = resolve_in(OTHER_NS, &[revoked_now.clone(), other], Some(&roster()));
+    let r = after(&verified_restore(), &res, restore_badge);
+    assert_eq!(r["evidence"]["verification"]["result"], "Untrusted", "{r}");
+    let namespaces: Vec<String> = targets.iter().filter_map(|t| t.namespace.clone()).collect();
+    assert!(
+        namespaces.iter().any(|n| n == OTHER_NS),
+        "the compromise reaches {OTHER_NS}, but the policy event enqueues only {namespaces:?}"
+    );
+}

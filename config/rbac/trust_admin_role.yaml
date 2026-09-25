@@ -8,8 +8,12 @@
 # key and then approve their own restore, which is the single separation
 # `self_attested: false` exists to make possible — so the write lives in a role
 # of its own, bound to somebody who does not hold `logweir-operator`. The
-# controller holds none of it either: `role.yaml` grants `list`/`watch` and
-# `patch` on the STATUS and no write to any spec.
+# controller holds no spec write either: `role.yaml` grants `list`/`watch`,
+# `patch` on the STATUS, and `patch` on the object for ONE field, the
+# `logweir.dev/compromise-revocation` finalizer (a test pins that its only
+# call site writes `metadata.finalizers` and nothing else). A holder of THIS
+# role can also remove that finalizer, which ends the compromise guard's hold
+# on a policy a cluster-admin is deleting (docs/keys.md).
 #
 # CLUSTER-SCOPED, AND THAT IS THE KIND'S OWN SHAPE. `TrustPolicy` is a
 # cluster-scoped resource (D3 §7.1: a namespace never names its own trust —

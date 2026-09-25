@@ -2983,7 +2983,16 @@ recorded `revocationEffectiveFrom`. That covers a namespace removed from the
 recording policy's `spec.namespaces` (it falls to the roster, which cannot
 express a revocation), a second policy that still lists the key `Active`, and
 the `default: true` policy. Only a compromise is carried; a supersession stays
-the recording policy's own. A refusal caused this way names the recording
+the recording policy's own. **The event that records it re-evaluates every
+namespace.** When a policy's compromise records change (added, escalated from a
+supersession, edited away by hand), when a policy carrying one is first seen, or
+when one is being deleted, the policy watch of the `Backup`, `Restore`,
+`Approval` and `RecoveryCatalog` reconcilers enqueues every object they hold,
+not only the policy's own namespaces. The `TrustPolicy` reconciler also
+re-evaluates every other policy. A terminal `Restore` in a namespace on the
+roster therefore turns `RecordedBeforeRevocation` on that event, without
+waiting for a restart. A status heartbeat of an unchanged record fans out
+nothing. A refusal caused this way names the recording
 policy ("recorded by TrustPolicy/…"), and each policy's `status.keys[]`
 reports such a key `Revoked` even where its own spec says `Active`.
 

@@ -510,11 +510,14 @@ fn compromise_condition(
             format!(
                 "this policy is being deleted and is HELD by the finalizer {COMPROMISE_FINALIZER}: \
                  it is the only live record of the KeyCompromise revocation of {}, and deleting \
-                 it would let those sources trust the key again. Apply a TrustPolicy recording \
-                 the same key(s) as state: Revoked, revocationReason: KeyCompromise, or remove the \
-                 key(s) from every source named; the finalizer is released on the next pass \
-                 (docs/keys.md, Replacing a TrustPolicy). Removing the finalizer by hand trusts \
-                 the key(s) again wherever they are still listed.{inherited_clause}",
+                 it would let those sources trust the key again. Any ONE of these releases it on \
+                 the next pass: apply a TrustPolicy recording the same key(s) as state: Revoked, \
+                 revocationReason: KeyCompromise; revoke the key(s) for KeyCompromise on each \
+                 TrustPolicy named (a policy cannot drop a key, so it becomes a carrier), or \
+                 delete it; re-create TrustRoster/default without the key(s) when it is named \
+                 (docs/keys.md, Replacing a TrustPolicy). Removing the finalizer by hand (anyone \
+                 holding patch on trustpolicies can) trusts the key(s) again wherever they are \
+                 still listed.{inherited_clause}",
                 blocking.join("; ")
             ),
         );
@@ -848,17 +851,24 @@ pub async fn reconcile_policy(
     let verdict = evaluate_in(policy, &all.items, roster.as_ref().map(|r| &r.spec), now);
     let status = status_for(policy, &verdict, now);
 
+    // ---- THE FINALIZER FIRST (review finding L2) ---------------------------
+    //
+    // Placing it is what makes a compromise record durable, so it is not
+    // sequenced behind two writes it does not depend on: a persistent failure of
+    // the status patch or of `supersede_roster` used to mean the `Add` was never
+    // sent and the record stayed unguarded. Release stays fail-closed either way.
+    let (action, patched) = reconcile_finalizer(policy, &verdict.guard, &api).await?;
+
     // SEAM S7's precondition (review finding F6): the body carries
     // `metadata.resourceVersion`, so a pass computing from a stale watch-cache
-    // copy gets `409 Conflict` rather than overwriting a newer verdict.
-    let patch = with_precondition(&policy.metadata, &name, json!({ "status": status }))?;
+    // copy gets `409 Conflict` rather than overwriting a newer verdict. When the
+    // finalizer patch above moved `resourceVersion`, the precondition is the
+    // object THAT write returned; the handed copy's would be refused 409.
+    let latest = patched.as_ref().unwrap_or(&policy.metadata);
+    let patch = with_precondition(latest, &name, json!({ "status": status }))?;
     // NO WRITE WHEN NOTHING CHANGED — erratum E11(d). With the debounce above,
     // a steady policy reaches this branch on four reconciles out of five.
-    //
-    // The object the finalizer patch is preconditioned on is the one the
-    // status patch RETURNED when there was one: that write moved
-    // `resourceVersion`, and the handed copy's would be refused 409.
-    let latest = if status_unchanged(
+    if status_unchanged(
         policy
             .status
             .as_ref()
@@ -870,16 +880,21 @@ pub async fn reconcile_policy(
             policy = %name,
             "the computed status equals the one on the object; no patch is sent"
         );
-        policy.metadata.clone()
     } else {
-        api.patch_status(&name, &PatchParams::default(), &Patch::Merge(patch))
+        match api
+            .patch_status(&name, &PatchParams::default(), &Patch::Merge(patch))
             .await
-            .map_err(ReconcileError::Api)?
-            .metadata
-    };
+        {
+            Ok(_) => {}
+            // RELEASING THE LAST FINALIZER OF A TERMINATING OBJECT DELETES IT, so
+            // its status is not there to write. Nothing is lost: the object the
+            // status described is gone.
+            Err(kube::Error::Api(e)) if e.code == 404 && action == FinalizerAction::Release => {}
+            Err(e) => return Err(ReconcileError::Api(e)),
+        }
+    }
 
     supersede_roster(client, roster.as_ref(), &all.items, now).await?;
-    reconcile_finalizer(policy, &latest, &verdict.guard, &api).await?;
 
     if verdict.loaded {
         info!(
@@ -1047,8 +1062,8 @@ async fn supersede_roster(
 /// [`finalizer_patch`]'s: `metadata.{name, resourceVersion, finalizers}` and
 /// nothing else.
 ///
-/// `latest` is the metadata the precondition is taken from: the object the
-/// status patch returned, when this pass sent one.
+/// It runs FIRST in [`reconcile_policy`] (review L2) and returns the patched
+/// object's metadata, which the status patch then takes its precondition from.
 ///
 /// # Errors
 ///
@@ -1056,19 +1071,17 @@ async fn supersede_roster(
 /// requeues and is decided again from a fresh read.
 pub async fn reconcile_finalizer(
     policy: &TrustPolicy,
-    latest: &kube::api::ObjectMeta,
     guard: &DeletionGuard,
     api: &Api<TrustPolicy>,
-) -> Result<FinalizerAction, ReconcileError> {
+) -> Result<(FinalizerAction, Option<kube::api::ObjectMeta>), ReconcileError> {
     let name = policy.name_any();
     let action = finalizer_action(policy, guard);
-    let current: Vec<String> = latest
-        .finalizers
-        .clone()
-        .or_else(|| policy.metadata.finalizers.clone())
-        .unwrap_or_default();
+    // ONE OBJECT, read once: the list carried forward and the precondition come
+    // from the same copy `finalizer_action` decided on, so a lagging cache
+    // cannot make `Add` write the finalizer twice (review NIT).
+    let current: Vec<String> = policy.metadata.finalizers.clone().unwrap_or_default();
     let next: Vec<String> = match action {
-        FinalizerAction::None => return Ok(action),
+        FinalizerAction::None => return Ok((action, None)),
         FinalizerAction::Hold => {
             let blocking: Vec<&str> = guard.blocking().map(|h| h.key_id.as_str()).collect();
             info!(
@@ -1077,11 +1090,16 @@ pub async fn reconcile_finalizer(
                 "trust policy deletion held: it is the only live record of a KeyCompromise \
                  revocation that another trust source still lists"
             );
-            return Ok(action);
+            return Ok((action, None));
         }
+        // EVERY OTHER CONTROLLER'S FINALIZER IS CARRIED FORWARD (review L1,
+        // RM1): an RFC 7386 merge patch REPLACES the list, so a body naming only
+        // this one would strip, say, a GitOps tool's.
         FinalizerAction::Add => {
             let mut next = current.clone();
-            next.push(COMPROMISE_FINALIZER.to_string());
+            if !next.iter().any(|f| f == COMPROMISE_FINALIZER) {
+                next.push(COMPROMISE_FINALIZER.to_string());
+            }
             next
         }
         FinalizerAction::Release => current
@@ -1090,8 +1108,9 @@ pub async fn reconcile_finalizer(
             .cloned()
             .collect(),
     };
-    let body = finalizer_patch(latest, &name, &next)?;
-    api.patch(&name, &PatchParams::default(), &Patch::Merge(body))
+    let body = finalizer_patch(&policy.metadata, &name, &next)?;
+    let patched = api
+        .patch(&name, &PatchParams::default(), &Patch::Merge(body))
         .await
         .map_err(ReconcileError::Api)?;
     info!(
@@ -1099,7 +1118,7 @@ pub async fn reconcile_finalizer(
         action = ?action,
         "trust policy compromise-revocation finalizer updated"
     );
-    Ok(action)
+    Ok((action, Some(patched.metadata)))
 }
 
 /// The merge patch [`reconcile_finalizer`] sends: `metadata.name`,
@@ -1201,9 +1220,38 @@ fn error_policy(policy: Arc<TrustPolicy>, err: &ReconcileError, _ctx: Arc<Contex
     Action::requeue(Duration::from_secs(30))
 }
 
+/// The OTHER policies a policy event must re-evaluate — review finding M1's
+/// class sweep, on this reconciler's own status.
+///
+/// Every policy's `status.keys[]` and `CompromiseGuard` carry the compromise
+/// records of the WHOLE set (`from_policy_in`): a key another policy just
+/// revoked for compromise reads `Revoked` and `CompromiseInherited` there. The
+/// `Controller`'s own watch reconciles only the object that changed, so without
+/// this every other policy kept `Active` for up to a heartbeat. Only an event
+/// that touches a compromise record fans out (`PolicyScopeMemory::observe`
+/// returning [`crate::trust::PolicyScope::Everything`]), so a status heartbeat
+/// costs nothing here.
+#[must_use]
+pub fn others_to_reevaluate(
+    all: Vec<Arc<TrustPolicy>>,
+    scopes: &crate::trust::PolicyScopeMemory,
+    policy: &TrustPolicy,
+) -> Vec<kube::runtime::reflector::ObjectRef<TrustPolicy>> {
+    if scopes.observe(policy) != crate::trust::PolicyScope::Everything {
+        return Vec::new();
+    }
+    let me = policy.name_any();
+    all.iter()
+        .filter(|p| p.name_any() != me)
+        .map(|p| kube::runtime::reflector::ObjectRef::from_obj(&**p))
+        .collect()
+}
+
 /// Run the `TrustPolicy` controller until the process ends.
 pub fn controller(client: kube::Client) -> impl std::future::Future<Output = ()> + Send {
     let api: Api<TrustPolicy> = Api::all(client.clone());
+    let peers: Api<TrustPolicy> = Api::all(client.clone());
+    let scopes = Arc::new(crate::trust::PolicyScopeMemory::default());
     // This reconciler holds NO archive handle and creates no runner Job —
     // spelled out rather than defaulted, so the one context field that is a
     // capability is visible at every construction site (`super::Context`).
@@ -1213,7 +1261,14 @@ pub fn controller(client: kube::Client) -> impl std::future::Future<Output = ()>
         runner_image: crate::job::RunnerImage::default(),
     });
     async move {
-        Controller::new(api, watcher::Config::default())
+        let controller = Controller::new(api, watcher::Config::default());
+        let store = controller.store();
+        controller
+            // A COMPROMISE RECORDED ON ONE POLICY RE-EVALUATES THE OTHERS —
+            // see `others_to_reevaluate`.
+            .watches(peers, watcher::Config::default(), move |policy| {
+                others_to_reevaluate(store.state(), &scopes, &policy)
+            })
             .run(reconcile, error_policy, ctx)
             .for_each(|_| std::future::ready(()))
             .await;

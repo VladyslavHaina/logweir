@@ -1452,6 +1452,23 @@ rotation of the immutable default roster is still an administrator-coordinated
 maintenance window, and rollback must restore the prior roster plus the matching
 private/public identity backup together.
 
+**A `TrustPolicy` that records a `KeyCompromise` revocation carries the
+`logweir.dev/compromise-revocation` finalizer, and only a running controller
+releases it.** Once the controller is gone, deleting that policy (or the
+`trustpolicies` CRD, which `kubectl delete -f logweir.yaml` does) waits for ever.
+When removing Logweir entirely, export each policy first (`logweir trust export`,
+[keys.md](keys.md), *Backing the policy up*), then remove the finalizer before
+the uninstall:
+
+```bash
+kubectl --context docker-desktop get trustpolicies -o json \
+  | jq -r '.items[] | select((.metadata.finalizers // []) | index("logweir.dev/compromise-revocation")) | .metadata.name'
+# for each name printed, with its other finalizers (if any) kept:
+kubectl --context docker-desktop edit trustpolicy <name>   # delete the logweir.dev/compromise-revocation line
+```
+
+This ends the guard. Do it only when the installation is being removed.
+
 ```bash
 # Managed Helm path:
 helm uninstall logweir -n logweir-system

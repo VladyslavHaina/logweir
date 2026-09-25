@@ -321,7 +321,10 @@ still listed the key and all six of its backups re-verified `Valid`):
   the API's `trust.state`, and each policy's own `status.keys[]` — so the keys
   view shows `Revoked` for a key a policy still declares `Active`. A refusal
   caused by a record on another policy names it ("recorded by
-  TrustPolicy/…").
+  TrustPolicy/…"). Stored verdicts are re-derived on the event that records the
+  compromise, in EVERY namespace. A terminal `Restore` in a namespace on the
+  roster does not wait for a restart ([kubernetes.md](kubernetes.md) §8,
+  *Trust resolution*).
 * **The reason is sticky (CEL rule G9).** Once a revoked key's
   `revocationReason` is `KeyCompromise` it stays so; editing it to
   `Superseded` would turn "never green" into a retirement and re-verify every
@@ -344,10 +347,13 @@ controller reconciled it once (or while it was down) was never given the
 finalizer, and the API server refuses a new finalizer on an object already
 being deleted. Wait until `kubectl get trustpolicy <name> -o
 jsonpath='{.metadata.finalizers}'` lists `logweir.dev/compromise-revocation`
-before any further change. And a cluster-admin can remove the finalizer by
-hand (`stability.md` O0: outside the threat boundary); doing so trusts the key
-again wherever it is still listed, which is exactly what the condition's
-message warns.
+before any further change. And anyone holding `patch` or `update` on
+`trustpolicies` can remove the finalizer by hand: a cluster-admin (`stability.md`
+O0, outside the threat boundary), a `logweir-trust-admin` holder, or the
+controller's own ServiceAccount. A trust-admin holds no `delete`, so they
+cannot start a deletion, but they can complete one a cluster-admin started and
+the guard is holding. Removing it trusts the key again wherever it is still
+listed, which is exactly what the condition's message warns.
 
 ### Replacing a `TrustPolicy` safely
 
@@ -380,13 +386,23 @@ altogether): first re-create `TrustRoster/default` without the compromised key
 fall to `RosterNotFound` for that moment, the fail-closed side), then delete
 the policies. The guard releases the last record because nothing lists the
 key any more — which is also the only state a roster-only controller cannot
-re-trust it from.
+re-trust it from. **The release is a point-in-time check, and afterwards the
+cluster keeps no memory of the compromise.** Re-creating the roster from an old
+export, or a GitOps re-sync of an old roster manifest, trusts the key again.
+Remove the key from every roster SOURCE (the file in Git, saved exports), not
+only from the live object, for the same reason as *Export again after every
+revocation* below.
 
 **A policy stuck `Terminating`** reads `CompromiseGuard=True/DeletionBlocked`,
 and its message names the key and every source still listing it
-(`TrustRoster/default` or `TrustPolicy/<name>`). Do one of the two things it
-says; do not remove the finalizer by hand unless you mean to trust the key
-again.
+(`TrustRoster/default` or `TrustPolicy/<name>`). Any one of these releases it:
+- apply a policy recording the same revocation;
+- for each `TrustPolicy/<name>` named, revoke the key there for `KeyCompromise`
+  (a policy cannot drop a key, so that policy becomes a carrier), or delete it
+  (cluster-admin);
+- when the roster is named, re-create it without the key.
+
+Do not remove the finalizer by hand unless you mean to trust the key again.
 
 ### When a verdict is re-derived, and why the boundary is an instant
 

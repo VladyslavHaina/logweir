@@ -1217,17 +1217,67 @@ pub fn declared_scope(policy: &TrustPolicy) -> PolicyScope {
 /// namespaces are still enqueued. The remembered entry is left behind: it is
 /// one small set per policy name, and keeping it means a delete followed by a
 /// re-create under the same name still unions correctly.
+///
+/// # A COMPROMISE RECORD REACHES EVERY NAMESPACE, SO ITS EVENT WAKES EVERY ONE
+///
+/// Review finding M1 (`TRUSTPOLICY-DELETE-DROPS-REVOCATION`). [`resolve_in`]
+/// applies a `KeyCompromise` record to every namespace that lists the key —
+/// a namespace on the roster, one another policy governs — so the declared
+/// scope of the RECORDING policy is no longer the set its event can change. A
+/// compromise newly recorded on `incident` (governing `team-a`) left a
+/// terminal `Restore` in a roster namespace `team-b` on `Action::await_change()`
+/// with a green badge, indefinitely. So the memory also keeps each policy's
+/// compromise records ([`compromise_signature`]), and the event widens to
+/// [`PolicyScope::Everything`] when:
+///
+/// * the records CHANGED — a compromise added, escalated from a supersession,
+///   or (by hand, past G1–G9) edited away;
+/// * it is the policy's FIRST sighting and it carries any — a record applied
+///   while this process was not watching, which start-up re-derives anyway;
+/// * it carries any and is being DELETED (`deletionTimestamp`): the release of
+///   a held record, the finalizer removed by hand, and the final `Delete`
+///   event (which carries the terminating object) all change what other
+///   namespaces resolve to.
+///
+/// Status-only events of a policy with records (the 300 s heartbeat) change
+/// none of these and stay at the declared scope, so the fan-out is paid once
+/// per record change, not once per heartbeat.
 #[derive(Debug, Default)]
 pub struct PolicyScopeMemory {
-    seen: std::sync::Mutex<BTreeMap<String, PolicyScope>>,
+    seen: std::sync::Mutex<BTreeMap<String, (PolicyScope, CompromiseSignature)>>,
+}
+
+/// A policy's `KeyCompromise` records as the trigger compares them: each key
+/// id with the instant it records (`revocationEffectiveFrom`, else
+/// `revokedAt`). EMPTY for a policy recording none.
+pub type CompromiseSignature = BTreeMap<String, Option<DateTime<Utc>>>;
+
+/// [`CompromiseSignature`] of one policy.
+#[must_use]
+pub fn compromise_signature(policy: &TrustPolicy) -> CompromiseSignature {
+    policy
+        .spec
+        .keys
+        .iter()
+        .filter(|k| records_compromise(k))
+        .map(|k| {
+            (
+                k.key_id.clone(),
+                k.revocation_effective_from.or(k.revoked_at),
+            )
+        })
+        .collect()
 }
 
 impl PolicyScopeMemory {
     /// Record `policy`'s current scope and return the union with the previous
-    /// one — every namespace this event could have changed.
+    /// one — every namespace this event could have changed — or
+    /// [`PolicyScope::Everything`] when the event touches a compromise record
+    /// (see the type's header).
     #[must_use]
     pub fn observe(&self, policy: &TrustPolicy) -> PolicyScope {
         let now = declared_scope(policy);
+        let records = compromise_signature(policy);
         let name = policy.name_any();
         let mut seen = match self.seen.lock() {
             Ok(guard) => guard,
@@ -1237,9 +1287,17 @@ impl PolicyScopeMemory {
             // changed", never "only what the new object names".
             Err(_) => return PolicyScope::Everything,
         };
-        let before = seen.insert(name, now.clone());
+        let deleting = policy.metadata.deletion_timestamp.is_some();
+        let before = seen.insert(name, (now.clone(), records.clone()));
+        let widen = match &before {
+            Some((_, was)) => was != &records || (deleting && !records.is_empty()),
+            None => !records.is_empty(),
+        };
+        if widen {
+            return PolicyScope::Everything;
+        }
         match before {
-            Some(before) => now.union(before),
+            Some((before, _)) => now.union(before),
             None => now,
         }
     }

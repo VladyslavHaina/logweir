@@ -534,10 +534,12 @@ fn guard_condition(seen: &[SeenBody]) -> Value {
         .expect("the CompromiseGuard condition")
 }
 
-/// **Placed**: a policy recording a compromise gets the finalizer, in a body
-/// preconditioned on the resourceVersion the status patch RETURNED (the mock
-/// enforces seam S7 exactly as the API server does, so the handed copy's
-/// `17` would be refused 409).
+/// **Placed, FIRST** (review L2): a policy recording a compromise gets the
+/// finalizer before any other write of the pass, preconditioned on the handed
+/// object (`17`); the status patch then takes its precondition from the object
+/// the finalizer patch RETURNED (`18`). The mock enforces seam S7 exactly as
+/// the API server does, so a status patch still carrying `17` would be refused
+/// 409 and the reconcile would fail.
 #[tokio::test]
 async fn the_reconcile_places_the_finalizer_on_a_compromise_record() {
     let p = policy("incident", &[NS], vec![compromised("2026-09-10T12:00:00Z")]);
@@ -548,8 +550,35 @@ async fn the_reconcile_places_the_finalizer_on_a_compromise_record() {
     assert_eq!(patches.len(), 1, "{seen:?}");
     assert_eq!(
         patches[0],
-        json!({"metadata": {"name": "incident", "resourceVersion": "18",
+        json!({"metadata": {"name": "incident", "resourceVersion": "17",
                             "finalizers": [COMPROMISE_FINALIZER]}})
+    );
+    let writes: Vec<&str> = seen
+        .iter()
+        .filter(|b| b.method == "PATCH")
+        .map(|b| b.uri.split('?').next().unwrap_or_default())
+        .collect();
+    assert!(
+        writes
+            .first()
+            .is_some_and(|u| u.ends_with("/trustpolicies/incident")),
+        "the finalizer is the pass's FIRST write, so no unrelated failure can leave the record \
+         unguarded: {writes:?}"
+    );
+    let status: Value = seen
+        .iter()
+        .find(|b| {
+            b.method == "PATCH"
+                && b.uri
+                    .split('?')
+                    .next()
+                    .is_some_and(|u| u.ends_with("/status") && u.contains("/trustpolicies/"))
+        })
+        .map(|b| serde_json::from_str(&b.body).expect("JSON"))
+        .expect("a status patch");
+    assert_eq!(
+        status["metadata"]["resourceVersion"], "18",
+        "the status patch is preconditioned on what the finalizer patch returned"
     );
     let c = guard_condition(&seen);
     assert_eq!(c["status"], "True");
@@ -783,5 +812,354 @@ fn the_shared_keys_fixture_is_what_the_controller_writes() {
         fixture["status"],
         "the fixture's status must be byte-for-byte what the controller writes; it wrote:\n{}",
         serde_json::to_string_pretty(&status).unwrap_or_default()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Review round (L1): the guard and finalizer branches the reviewer's mutants
+// RM1–RM3 showed unpinned
+// ---------------------------------------------------------------------------
+
+/// **RM2.** A roster listing the compromised key ONLY as an approver key
+/// holds the deletion: `legacy-roster-v1` would otherwise admit new approvals
+/// signed by it.
+#[test]
+fn a_roster_approver_listing_holds_the_deletion() {
+    let dying = deleting(
+        policy("incident", &[NS], vec![compromised("2026-09-10T12:00:00Z")]),
+        &[COMPROMISE_FINALIZER],
+    );
+    let approver_only = TrustRosterSpec {
+        approver_keys: vec![KeyEntry {
+            key_id: SIGNER.to_string(),
+            spki_pem: SIGNER_PEM.to_string(),
+            subject: None,
+            not_after: None,
+        }],
+        signing_keys: Vec::new(),
+        allowed_cluster_ids: Vec::new(),
+    };
+    let g = deletion_guard(&dying, std::slice::from_ref(&dying), Some(&approver_only));
+    assert!(!g.releasable(), "{g:?}");
+    assert_eq!(g.held[0].still_listed_by, vec![ROSTER_SOURCE.to_string()]);
+}
+
+/// **RM3.** Another policy listing the key `Retired`, or `Revoked` with
+/// `Superseded`, still LISTS it: releasing would let that policy's namespaces
+/// verify the key's old evidence `Valid/Historical` again. Only a
+/// `KeyCompromise` record there makes it a carrier instead.
+#[test]
+fn a_retired_or_superseded_listing_elsewhere_holds_the_deletion() {
+    let dying = deleting(
+        policy("incident", &[NS], vec![compromised("2026-09-10T12:00:00Z")]),
+        &[COMPROMISE_FINALIZER],
+    );
+    let retired = TrustedKey {
+        state: KeyState::Retired,
+        retired_at: Some(at("2026-09-09T00:00:00Z")),
+        ..active(SIGNER, SIGNER_PEM)
+    };
+    let superseded = revoked(
+        active(SIGNER, SIGNER_PEM),
+        RevocationReason::Superseded,
+        "2026-09-09T00:00:00Z",
+    );
+    for (label, entry) in [("Retired", retired), ("Revoked/Superseded", superseded)] {
+        let other = policy("team-b", &["lw-team-b"], vec![entry]);
+        let g = deletion_guard(&dying, &[dying.clone(), other], None);
+        assert!(!g.releasable(), "{label}: {g:?}");
+        assert!(
+            g.held[0].carried_by.is_empty(),
+            "{label}: a non-compromise listing carries nothing"
+        );
+        assert_eq!(
+            g.held[0].still_listed_by,
+            vec!["TrustPolicy/team-b".to_string()],
+            "{label}"
+        );
+    }
+}
+
+/// **RM1.** Placing the finalizer carries every OTHER finalizer forward — a
+/// merge patch REPLACES the list — and never writes ours twice.
+#[tokio::test]
+async fn placing_the_finalizer_keeps_the_other_finalizers() {
+    let p = with_finalizers(
+        policy("incident", &[NS], vec![compromised("2026-09-10T12:00:00Z")]),
+        &["example.com/keep"],
+    );
+    let (outcome, seen) = reconcile(&p, std::slice::from_ref(&p), None).await;
+    outcome.expect("the reconcile completes");
+    let patches = object_patches(&seen);
+    assert_eq!(patches.len(), 1, "{seen:?}");
+    assert_eq!(
+        patches[0]["metadata"]["finalizers"],
+        json!(["example.com/keep", COMPROMISE_FINALIZER])
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Review round (M1): a compromise record's event wakes every namespace
+// ---------------------------------------------------------------------------
+
+/// The trigger's decision table. A compromise ADDED, a policy first seen with
+/// one, and one being deleted widen to every namespace; a status-only event of
+/// a policy with an unchanged record (the heartbeat) and any event of a policy
+/// with none stay at the declared scope — the fan-out is paid per record
+/// change, not per heartbeat.
+#[test]
+fn a_compromise_record_event_widens_the_trigger_to_every_namespace() {
+    use weirkeeper::trust::{PolicyScope, PolicyScopeMemory};
+    let clean = policy("incident", &[NS], vec![active(SIGNER, SIGNER_PEM)]);
+    let recorded = policy("incident", &[NS], vec![compromised("2026-09-10T12:00:00Z")]);
+
+    let memory = PolicyScopeMemory::default();
+    assert_ne!(
+        memory.observe(&clean),
+        PolicyScope::Everything,
+        "no record, first sighting"
+    );
+    assert_eq!(
+        memory.observe(&recorded),
+        PolicyScope::Everything,
+        "a record ADDED"
+    );
+    assert_ne!(
+        memory.observe(&recorded),
+        PolicyScope::Everything,
+        "the same record again (a status heartbeat): declared scope only"
+    );
+    assert_eq!(
+        memory.observe(&deleting(recorded.clone(), &[COMPROMISE_FINALIZER])),
+        PolicyScope::Everything,
+        "a recording policy being deleted"
+    );
+
+    let fresh = PolicyScopeMemory::default();
+    assert_eq!(
+        fresh.observe(&recorded),
+        PolicyScope::Everything,
+        "first sighting with a record"
+    );
+    let unrelated = policy("other", &["lw-team-b"], vec![active(OTHER, OTHER_PEM)]);
+    assert_eq!(
+        fresh.observe(&unrelated),
+        PolicyScope::Namespaces(std::iter::once("lw-team-b".to_string()).collect()),
+        "a policy with no record is never widened"
+    );
+}
+
+/// **M1, the reviewer's probe as a row.** The mapper every re-trust trigger
+/// uses (`targets_in_scope` over `PolicyScopeMemory::observe`) enqueues the
+/// terminal objects of a ROSTER namespace and of a namespace another policy
+/// governs when a compromise is newly recorded on a policy that governs
+/// neither.
+#[test]
+fn a_new_compromise_record_enqueues_every_namespaces_objects() {
+    use std::sync::Arc;
+    let cm = |ns: &str, name: &str| {
+        Arc::new(k8s_openapi::api::core::v1::ConfigMap {
+            metadata: ObjectMeta {
+                name: Some(name.to_string()),
+                namespace: Some(ns.to_string()),
+                ..ObjectMeta::default()
+            },
+            ..Default::default()
+        })
+    };
+    let memory = weirkeeper::trust::PolicyScopeMemory::default();
+    let _ = memory.observe(&policy("incident", &[NS], vec![active(SIGNER, SIGNER_PEM)]));
+    let scope = memory.observe(&policy(
+        "incident",
+        &[NS],
+        vec![compromised("2026-09-10T12:00:00Z")],
+    ));
+    let targets = weirkeeper::verification::targets_in_scope(
+        vec![
+            cm(NS, "r-a"),
+            cm("lw-team-b", "r-b"),
+            cm("lw-roster-only", "r-c"),
+        ],
+        &scope,
+    );
+    let mut namespaces: Vec<String> = targets.iter().filter_map(|t| t.namespace.clone()).collect();
+    namespaces.sort();
+    assert_eq!(namespaces, vec!["lw-roster-only", "lw-team-a", "lw-team-b"]);
+}
+
+/// **M1's class sweep, on the policies themselves.** A compromise newly
+/// recorded on one policy re-evaluates every OTHER policy (their
+/// `status.keys[]` read the record); a heartbeat of it re-evaluates none.
+#[test]
+fn a_new_compromise_record_re_evaluates_the_other_policies() {
+    use std::sync::Arc;
+    let others = vec![
+        Arc::new(policy(
+            "team-b",
+            &["lw-team-b"],
+            vec![active(SIGNER, SIGNER_PEM)],
+        )),
+        Arc::new(policy(
+            "team-c",
+            &["lw-team-c"],
+            vec![active(OTHER, OTHER_PEM)],
+        )),
+    ];
+    let clean = policy("incident", &[NS], vec![active(SIGNER, SIGNER_PEM)]);
+    let recorded = policy("incident", &[NS], vec![compromised("2026-09-10T12:00:00Z")]);
+    let mut all = others.clone();
+    all.push(Arc::new(recorded.clone()));
+    let memory = weirkeeper::trust::PolicyScopeMemory::default();
+    assert!(trust_policy::others_to_reevaluate(all.clone(), &memory, &clean).is_empty());
+    let mut woken: Vec<String> =
+        trust_policy::others_to_reevaluate(all.clone(), &memory, &recorded)
+            .into_iter()
+            .map(|r| r.name)
+            .collect();
+    woken.sort();
+    assert_eq!(
+        woken,
+        vec!["team-b", "team-c"],
+        "every OTHER policy, not the event's own"
+    );
+    assert!(
+        trust_policy::others_to_reevaluate(all, &memory, &recorded).is_empty(),
+        "an unchanged record (the heartbeat) wakes nobody"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Review round (L3): the one write to `trustpolicies` that is not /status
+// ---------------------------------------------------------------------------
+
+/// Every write call this crate makes on an `Api<TrustPolicy>` handle other than
+/// `patch_status`, as `(file, enclosing fn)` — a source scan, the same shape
+/// `tests/linkage.rs` uses. Pure over the texts handed in, so a planted
+/// violation can be checked too.
+fn trust_policy_writes(files: &[(String, String)]) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for (file, src) in files {
+        // A METHOD CHAIN MAY BREAK BEFORE THE DOT (`api\n    .patch(`), which
+        // rustfmt does for every long call: whitespace before a `.` is dropped
+        // so a call reads as one token wherever it was wrapped.
+        let chars: Vec<char> = src.chars().collect();
+        let mut norm = String::with_capacity(src.len());
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i].is_whitespace() {
+                let mut j = i;
+                while j < chars.len() && chars[j].is_whitespace() {
+                    j += 1;
+                }
+                if j < chars.len() && chars[j] == '.' {
+                    i = j;
+                    continue;
+                }
+            }
+            norm.push(chars[i]);
+            i += 1;
+        }
+        let mut handles: Vec<String> = Vec::new();
+        for marker in [
+            ": Api<TrustPolicy>",
+            ": &Api<TrustPolicy>",
+            ": Api<crate::crds::trust_policy::TrustPolicy>",
+        ] {
+            let mut from = 0;
+            while let Some(rel) = norm[from..].find(marker) {
+                let at = from + rel;
+                from = at + marker.len();
+                let ident: String = norm[..at]
+                    .chars()
+                    .rev()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect();
+                if !ident.is_empty() && !handles.contains(&ident) {
+                    handles.push(ident);
+                }
+            }
+        }
+        for handle in &handles {
+            for verb in [
+                ".patch(",
+                ".replace(",
+                ".create(",
+                ".delete(",
+                ".patch_metadata(",
+                ".delete_collection(",
+                ".replace_status(",
+            ] {
+                let needle = format!("{handle}{verb}");
+                let mut from = 0;
+                while let Some(rel) = norm[from..].find(&needle) {
+                    let at = from + rel;
+                    from = at + needle.len();
+                    let boundary = norm[..at]
+                        .chars()
+                        .next_back()
+                        .is_none_or(|c| !(c.is_alphanumeric() || c == '_'));
+                    if !boundary {
+                        continue;
+                    }
+                    let enclosing = norm[..at]
+                        .rfind("fn ")
+                        .map(|f| {
+                            norm[f + 3..]
+                                .split(['(', '<'])
+                                .next()
+                                .unwrap_or_default()
+                                .trim()
+                                .to_string()
+                        })
+                        .unwrap_or_default();
+                    out.push((file.clone(), enclosing));
+                }
+            }
+        }
+    }
+    out
+}
+
+fn weirkeeper_sources() -> Vec<(String, String)> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut stack = vec![root];
+    let mut out = Vec::new();
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).expect("src is readable") {
+            let path = entry.expect("an entry").path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                out.push((
+                    path.display().to_string(),
+                    std::fs::read_to_string(&path).expect("utf-8"),
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// **L3.** The only non-status write to `trustpolicies` in the controller is
+/// `reconcile_finalizer`'s — a second one would be the controller editing
+/// trust, which RBAC's object-wide `patch` could not stop. NEGATIVE CONTROL: a
+/// planted `api.patch(` in another function is found.
+#[test]
+fn the_finalizer_patch_is_the_only_trust_policy_write() {
+    let writes = trust_policy_writes(&weirkeeper_sources());
+    assert!(
+        !writes.is_empty() && writes.iter().all(|(_, f)| f == "reconcile_finalizer"),
+        "every non-status write on an Api<TrustPolicy> must be reconcile_finalizer's: {writes:?}"
+    );
+    let planted = vec![(
+        "planted.rs".to_string(),
+        "fn sneak(client: kube::Client) {\n    let api: Api<TrustPolicy> = Api::all(client);\n    api.patch(\"x\", &pp, &body);\n}\n".to_string(),
+    )];
+    assert_eq!(
+        trust_policy_writes(&planted),
+        vec![("planted.rs".to_string(), "sneak".to_string())]
     );
 }
