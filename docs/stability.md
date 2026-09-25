@@ -570,7 +570,12 @@ run and every evidence read is its own pod of the `linux/amd64` runner image,
 which docker-desktop on Apple silicon runs under emulation: an evidence fetch
 took 78 s at the median (p90 167 s), four at a time per namespace
 (`checks.maxEvidenceFetchActivePerNamespace`), so verification drained at about
-two runs a minute. **Nothing bounds manual "Back up now"**: a hundred accepted
+two runs a minute. **Nothing bounded manual "Back up now" in that build**
+(`86a554e6`); since release-note item 15 (P10, [release-notes.md](release-notes.md))
+at most `runs.maxManualBackupsActivePerNamespace` (default `4`) manual `Backup`s
+run at once per namespace, the rest wait `Queued`, and the console answers
+`429` past 10 "Back up now" requests per person, per namespace, per minute. On
+that build a hundred accepted
 requests became a hundred simultaneous runner pods, which hit the node's
 110-pod limit, turned the node `NotReady` and drew MinIO `503 SlowDown` on
 evidence reads; even at sixteen pods in flight the node went `NotReady` again.

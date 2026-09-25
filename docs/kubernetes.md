@@ -522,7 +522,10 @@ first write under `logweir/` is now its create-only execution claim, put before
 the engine starts, so without that grant the Backup exits `4` /
 `signing-or-lock` naming `ExecutionClaimUnproven` with no archive written,
 instead of after the engine. The claim needs no action the table does not
-already grant. [UNVERIFIED — the two rows are re-measured against the claim at lab-refresh-10.]
+already grant. Re-measured on lab-refresh-10 (2026-09-24, row RD-3): without
+`s3:PutObject` on `logweir/*` the run exits `4` `ExecutionClaimUnproven`, the
+engine never starts, and nothing is written for that backup, in the archive or
+under `logweir/backups/`.
 
 **A wider grant than this table is not required by anything in this build.**
 Every action outside a role's row was removed and the role's operation still
