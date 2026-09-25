@@ -39,6 +39,7 @@ import { mkdirSync, writeFileSync, rmSync, createWriteStream } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
+import { openDestinationCreate } from "../../scripts/console-steps.mjs";
 
 const require = createRequire(import.meta.url);
 const { chromium } = require("playwright");
@@ -223,7 +224,8 @@ async function registrationAndDiscovery(page, base, port) {
 
   const dest = "dst-" + sfx;
   await page.goto(base + "#/destinations?ns=" + NS_A, { waitUntil: "load" });
-  await page.waitForSelector("#destination-form");
+  // Behind "Create destination" since console-ux-1 (MCP-10): opened by a click.
+  await openDestinationCreate(page);
   await page.fill("#destination-name", dest);
   await page.fill("#destination-bucket", "kafka-backups");
   await page.fill("#destination-prefix", PREFIX + "/console");

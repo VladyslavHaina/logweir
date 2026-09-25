@@ -131,3 +131,89 @@ def test_the_csrf_guard_catches_its_planted_twin():
     assert keeps_a_csrf_value('vposts.push({ csrf: r.headers()["x-csrf-token"] || null });')
     assert keeps_a_csrf_value('row("x", true, { token: sess.csrfToken });')
     assert not keeps_a_csrf_value('vposts.push({ sessionToken: r.headers()["x-csrf-token"] === vsess.csrfToken });')
+
+
+# --------------------------------------------------------------------------------------------
+# THE ONE-STEP WIZARD (console-ux-1, MCP-29) AND THE CREATE-DESTINATION DISCLOSURE (MCP-10).
+# Every control a journey fills or clicks on the restore wizard is on ONE of six steps, hidden
+# while another is on screen; the destination form is hidden until its disclosure is opened.
+# `scripts/live/console_steps.py` reads each flow and requires the walk to the control's step
+# (or the opening) above the action, in the same function -- the offline half of what the next
+# PoC round proves live.
+import sys  # noqa: E402
+
+sys.path.insert(0, str(HERE.parent))
+import console_steps  # noqa: E402
+
+MJS = [p for p in FILES if p.suffix == ".mjs"]
+
+
+def test_every_flow_reaches_the_step_of_each_wizard_control_it_drives():
+    driving = []
+    for p in MJS:
+        text = p.read_text()
+        assert not console_steps.unreached_controls(text), (p.name, console_steps.unreached_controls(text))
+        if console_steps.controls_driven(text) > 0:
+            driving.append(p.name)
+    # NOT VACUOUS: the three files that drive the wizard are the ones read.
+    assert {"console.mjs", "reproof.mjs", "restore_burst.mjs"} <= set(driving), driving
+
+
+def test_the_step_of_each_control_is_the_pages_own():
+    assert console_steps.ui_disagreements() == []
+
+
+def unreached(js: str) -> list[str]:
+    return console_steps.unreached_controls(js)
+
+
+def test_the_wizard_guard_catches_its_planted_twins():
+    opened = 'await openWizard(page, "#/restore?ns=a&uid=u");\n'
+    # a control filled with no walk: the wizard opens on step 1, the prefix is step 4's
+    assert unreached(opened + 'await page.fill("#topic-prefix", "x");\n')
+    assert not unreached(opened + 'await wizardStep(page, 4);\nawait page.fill("#topic-prefix", "x");\n')
+    # a walk to the wrong step, and a wait for a hidden step's element
+    assert unreached(opened + 'await wizardStep(page, 3);\nawait page.fill("#topic-prefix", "x");\n')
+    assert unreached(opened + 'await page.waitForSelector("#create-restore");\n')
+    assert unreached(opened + 'await waitFor(page, "#step-target", "the target");\n')
+    # a deep link opens its own step
+    assert not unreached('await openWizard(page, "#/restore?ns=a&step=6");\nawait page.click("#create-restore");\n')
+    # a navigation after the walk leaves no step known
+    assert unreached(opened + 'await wizardStep(page, 6);\nawait gotoHash(page, "#/history");\n'
+                     'await page.click("#create-restore");\n')
+    # through a locator on the line, and through a variable holding one
+    assert unreached(opened + "await page.locator('input[name=\"topicPrefix\"]').blur();\n")
+    assert unreached('const field = page.locator("#archive-secret");\n' + opened +
+                     'await wizardStep(page, 5);\nawait field.fill("other");\n')
+    # a helper starts with no step; the caller's own step comes back after its body
+    assert unreached('async function helper(page) {\n  await page.click("#create-restore");\n}\n')
+    assert not unreached(opened + 'await wizardStep(page, 6);\n'
+                         'const walk = async (p) => {\n  await wizardStep(p, 4);\n};\n'
+                         'await page.click("#create-restore");\n')
+    # a comment, and a wait for "this field's error OR the page's failure", are not step actions
+    assert not unreached('// await page.click("#create-restore");\n')
+    assert not unreached('await page.waitForSelector("#target-cluster-error, .mutation-failed");\n')
+    # the destination form: filled only after its disclosure is opened
+    assert unreached('await gotoHash(page, "#/destinations?ns=a");\nawait page.fill("#destination-name", "d");\n')
+    assert not unreached('await gotoHash(page, "#/destinations?ns=a");\nawait openDestinationCreate(page);\n'
+                         'await page.fill("#destination-name", "d");\n')
+
+
+def test_the_ui_check_catches_a_page_that_moved_a_control():
+    wizard = console_steps.WIZARD_JS.read_text()
+    assert console_steps.ui_disagreements(wizard=wizard) == []
+    # Create moved out of step 6's renderer.
+    moved = wizard.replace('id=\\"create-restore\\"', 'id=\\"create-restore-moved\\"')
+    assert any("#create-restore" in d for d in console_steps.ui_disagreements(wizard=moved))
+    # FIELD_STEP says the prefix is step 3's.
+    shifted = wizard.replace("  topicPrefix: 3,", "  topicPrefix: 2,")
+    assert shifted != wizard and any("topicPrefix" in d for d in console_steps.ui_disagreements(wizard=shifted))
+    # a step renamed on the page and not in scripts/console-steps.mjs
+    renamed = wizard.replace('{ id: "step-plan", title: "Plan, hash and names" }',
+                             '{ id: "step-plan", title: "Review and create" }')
+    assert renamed != wizard and any("WIZARD_STEPS" in d for d in console_steps.ui_disagreements(wizard=renamed))
+    # the destination form out of its disclosure
+    destinations = console_steps.DESTINATIONS_JS.read_text()
+    loose = destinations.replace('"<details class=\\"create-disclosure\\" id=\\"destination-create-disclosure\\""',
+                                 '"<div class=\\"create-disclosure\\" id=\\"destination-create-disclosure-x\\""')
+    assert loose != destinations and console_steps.ui_disagreements(destinations_js=loose)

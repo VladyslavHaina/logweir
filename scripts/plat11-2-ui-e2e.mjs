@@ -48,6 +48,7 @@ import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
+import { wizardAt, wizardStep, wizardText } from "./console-steps.mjs";
 
 const require = createRequire(import.meta.url);
 const { chromium } = require("playwright");
@@ -602,8 +603,14 @@ async function main() {
   const oldRoute = base + "#/restore?ns=" + namespace + "&backup=" + points.old.name +
     "&uid=" + points.old.uid;
 
+  // ONE STEP AT A TIME (console-ux-1, MCP-29): the wizard opens on step 1 and every control
+  // below is reached on its own step with Next / Back (scripts/console-steps.mjs). This leaves
+  // the wizard on step 4, the target and the topic subset.
   async function openOldPoint() {
     await page.goto(oldRoute, { waitUntil: "load", timeout: 30000 });
+    await waitFor(page, "#wizard-position", "the wizard");
+    await wizardAt(page, 1, 60);
+    await wizardStep(page, 4);
     await waitFor(page, "#step-target", "the wizard's target step");
     await page.selectOption("#target-cluster", targetUid);
     await waitFor(page, ".topic-box", "the topic subset control");
@@ -617,7 +624,8 @@ async function main() {
     // PAGE. The newer point is deliberately ON screen -- the wizard's "what
     // this namespace holds" catalog lists every Backup there is -- so a page
     // scan would assert the wrong thing. What matters is which point the PLAN
-    // is built from.
+    // is built from. Step 2 is read on screen (Back from step 4).
+    await wizardStep(page, 2);
     const step2 = await page.evaluate(() => {
       const section = document.querySelector("#step-backup-set");
       return section === null ? "" : section.innerText;
@@ -639,6 +647,7 @@ async function main() {
       "and the plan carries the older point's backup set");
     check(!planNow.includes("01JB7Z0000000000000000NEW"),
       "and not the newer point's, which exists and completed later");
+    await wizardStep(page, 4);
     await page.uncheck(".topic-box[data-topic=\"shipments\"]");
     await waitForText(page, OLD_PREFIX + "payments", "the mapped name for payments");
     const mapped = await page.evaluate(() => {
@@ -667,8 +676,9 @@ async function main() {
     });
 
     // ------------------------------------------------------------------ 2
-    // THE LIMITS, AND WHAT IS NOT SHOWN.
-    const shown = await text(page);
+    // THE LIMITS, AND WHAT IS NOT SHOWN. Every step's text, walked (the page showed all six
+    // steps at once before console-ux-1): the absence below is about the whole wizard.
+    const shown = (await wizardText(page)).toLowerCase();
     for (const sentence of [
       "consumers are not moved",
       "resume is not implemented",
@@ -703,21 +713,24 @@ async function main() {
     await page.dispatchEvent("#topic-prefix", "change");
     await waitForText(page, "not a name a broker accepts", "the prefix refusal");
     await shot(page, "03-invalid-prefix");
+    await wizardStep(page, 6);
     await page.click("#create-restore");
     await pause(1500);
     check(writesSoFar() === before3,
       "nothing was sent while the prefix is refused: " + JSON.stringify(requests.slice(before3)));
+    // A REFUSED SUBMIT SHOWS THE STEP ITS FIRST FIELD MESSAGE IS ABOUT (MCP-29): the prefix's.
+    await wizardAt(page, 4);
     const blockedText = await text(page);
     check(blockedText.includes("bad prefix!"), "the refusal names the value typed");
     record("an invalid topic prefix is refused by name and nothing is sent", {
       typed: "bad prefix!", writesDuring: 0,
     });
 
-    // THE NEGATIVE CONTROL: a legal prefix clears it.
+    // THE NEGATIVE CONTROL: a legal prefix clears it -- on every step.
     await page.fill("#topic-prefix", OLD_PREFIX);
     await page.dispatchEvent("#topic-prefix", "change");
     await waitForText(page, OLD_PREFIX + "orders", "the mapping back");
-    check(!(await text(page)).includes("not a name a broker accepts"),
+    check(!(await wizardText(page)).toLowerCase().includes("not a name a broker accepts"),
       "a legal prefix clears the refusal");
     control("a legal prefix clears the refusal, so the rule is not always-on", {});
 
@@ -842,6 +855,7 @@ async function main() {
     // THE TIMESTAMP BOUNDARY.
     await openOldPoint();
     const before5 = writesSoFar();
+    await wizardStep(page, 3);
     await page.fill("#point-in-time", rfc(OLD_TO_MS + 1000));
     await page.dispatchEvent("#point-in-time", "change");
     // THE COMPLAINT ELEMENT, not the sentence: the bound is printed beside the
@@ -851,8 +865,11 @@ async function main() {
     await waitFor(page, "#point-in-time-complaint", "the out-of-window complaint");
     // AND THE SUBMIT ITSELF IS REFUSED, which is the half that matters: the
     // complaint is a rendering, `validateRestore` is the refusal, and what is
-    // asserted here is that the click sent nothing.
+    // asserted here is that the click sent nothing. The refusal lands on the point-in-time
+    // step, the step its field message is about (MCP-29).
+    await wizardStep(page, 6);
     await page.click("#create-restore");
+    await wizardAt(page, 3);
     await waitForText(page, "outside the coverage this recovery point discloses",
       "the wizard's own refusal of the submit");
     await shot(page, "05-timestamp-boundary");
@@ -898,8 +915,10 @@ async function main() {
     // which is a WARNING and not a refusal (D2 section 6.6 is about a verdict
     // that has stopped applying, not about the absence of one).
     await openOldPoint();
+    await wizardAt(page, 4);
     await page.uncheck(".topic-box[data-topic=\"shipments\"]");
     await waitForText(page, OLD_PREFIX + "payments", "the mapping before the submit");
+    // The mapped rows are read on step 4, where they are on screen; Create on step 6.
     const previewed = await page.evaluate(() => ({
       bytes: (document.querySelector("#plan-bytes") || {}).textContent,
       hash: (document.querySelector("#plan-hash-value") || {}).textContent,
@@ -913,6 +932,7 @@ async function main() {
       "two mapped rows are previewed: " + JSON.stringify(previewed.rows));
 
     const marker = writesSoFar();
+    await wizardStep(page, 6);
     await page.click("#create-restore");
 
     // THE REQUEST FIRST, BECAUSE IT CARRIES THE IDENTITY THE READBACK NEEDS.
@@ -1038,6 +1058,7 @@ async function main() {
     // from the negative control below: a MappedTopicExists row must never hide
     // a PlanDestinationMismatch in the same aggregate verdict.
     await openOldPoint();
+    await wizardStep(page, 5);
     await waitFor(page, "#restore-readiness-start", "the readiness control");
     const beforeClean = new Set(
       (kubeJson(["-n", namespace, "get", "preflights"]).items || [])
@@ -1108,6 +1129,7 @@ async function main() {
       (kubeJson(["-n", namespace, "get", "preflights"]).items || [])
         .map((p) => p.metadata.uid),
     );
+    await wizardStep(page, 5);
     await waitFor(page, "#restore-readiness-start", "the second readiness control");
     await page.click("#restore-readiness-start");
     await pause(4000);
@@ -1155,6 +1177,8 @@ async function main() {
       collidingTopic: COLLIDING_TOPIC,
     });
 
+    // The refusal is said beside Create, on step 6 (Next from step 5).
+    await wizardStep(page, 6);
     const said = await text(page);
     check(said.includes("nothing is sent"),
       "the wizard refuses the submit over a collision: " + said.slice(0, 2000));
@@ -1177,6 +1201,7 @@ async function main() {
       const code = document.querySelector("#plan-hash-value");
       return code === null ? "" : code.textContent;
     });
+    await wizardStep(page, 4);
     await page.fill("#topic-prefix", "moved-" + suffix + "-");
     await page.dispatchEvent("#topic-prefix", "change");
     await pause(1500);
@@ -1184,7 +1209,8 @@ async function main() {
       const code = document.querySelector("#plan-hash-value");
       return code === null ? "" : code.textContent;
     });
-    const editedText = await text(page);
+    // Every step's text: the stale banner is step 5's, the refusal step 6's.
+    const editedText = (await wizardText(page)).toLowerCase();
     await shot(page, "07-stale-after-edit");
     save("07-stale-after-edit.txt", editedText);
     check(editedHash !== hashBefore, "the edited plan hashes differently");
@@ -1390,7 +1416,10 @@ async function main() {
       await waitForText(page, "retrying to a fresh target", "the retry banner on the selector");
       await shot(page, "10-retry-selector");
       await page.click("a[href*=\"retryOf=\"][href*=\"" + points.old.uid + "\"]");
-      await waitFor(page, "#topic-prefix", "the wizard as a retry");
+      await waitFor(page, "#wizard-position", "the wizard as a retry");
+      await wizardAt(page, 1, 60);
+      await wizardStep(page, 4);
+      await waitFor(page, "#topic-prefix", "the retry's target step");
       await page.selectOption("#target-cluster", targetUid);
       await pause(1000);
       const retryPrefix = await page.evaluate(() => {
@@ -1443,6 +1472,7 @@ async function main() {
       // No value made it fail. Now the button is clicked, the set is non-empty
       // by assertion, and what is checked is the body the WIZARD sent.
       const retryMarker = writesSoFar();
+      await wizardStep(page, 6);
       await page.click("#create-restore");
       let retryCreates = [];
       for (let i = 0; i < 40; i += 1) {
@@ -1556,6 +1586,7 @@ async function main() {
     check(replacement !== null, "the replacement Destination never published a location digest");
 
     const beforeRaceSubmit = writesSoFar();
+    await wizardStep(page, 6);
     await page.click("#create-restore");
     await waitForText(page, "was recreated", "the post-review destination replacement refusal");
     await shot(page, "13-destination-race-refused");
@@ -1568,7 +1599,7 @@ async function main() {
         JSON.stringify(requests.slice(beforeRaceSubmit)));
     check(racePlanAfter === racePlan,
       "the confirming read did not replace or mutate the reviewed plan bytes");
-    check(!(await text(page)).includes(("replacement-" + suffix).toLowerCase()),
+    check(!(await wizardText(page)).toLowerCase().includes(("replacement-" + suffix).toLowerCase()),
       "the replacement bucket was neither rendered nor signed");
     control("a saved destination recreated after review is refused before submit", {
       name: frozenDestination.name,

@@ -86,6 +86,7 @@ import {
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { wizardAt, wizardStep } from "./console-steps.mjs";
 
 const require = createRequire(import.meta.url);
 const { chromium } = require("playwright");
@@ -865,8 +866,14 @@ async function main() {
       "&uid=" + seeded[key].point.uid;
     const since = bodies.length;
     await at.goto(route, { waitUntil: "load", timeout: 30000 });
-    await waitFor(at, "#step-target", "the wizard in " + ns);
+    // ONE STEP AT A TIME (console-ux-1, MCP-29): step 1 on arrival, the target on step 4, the
+    // plan, the ticket and Create on step 6, each reached with Next (scripts/console-steps.mjs).
+    await waitFor(at, "#wizard-position", "the wizard in " + ns);
+    await wizardAt(at, 1, 60);
+    await wizardStep(at, 4);
+    await waitFor(at, "#step-target", "the wizard's target step in " + ns);
     await at.selectOption("#target-cluster", seeded[key].targetUid);
+    await wizardStep(at, 6);
     await waitFor(at, "#plan-bytes", "the plan in " + ns);
     if (typeof ticket === "string") {
       await waitFor(at, "#change-ticket", "the Governed ticket field in " + ns);
@@ -1022,8 +1029,13 @@ async function main() {
     // before anything exists.
     await page.goto(ui + "#/restore?ns=" + NS.ordinary + "&backup=" + seeded.ordinary.point.name +
       "&uid=" + seeded.ordinary.point.uid, { waitUntil: "load", timeout: 30000 });
-    await waitFor(page, "#step-target", "the wizard in the administrator console");
+    await waitFor(page, "#wizard-position", "the wizard in the administrator console");
+    await wizardAt(page, 1, 60);
+    await wizardStep(page, 4);
+    await waitFor(page, "#step-target", "the wizard's target step in the administrator console");
     await page.selectOption("#target-cluster", seeded.ordinary.targetUid);
+    // The policy's sentence and Create are step 6's.
+    await wizardStep(page, 6);
     await waitFor(page, "#approval-policy-ordinary-unavailable", "the unavailable sentence");
     const disabled = await page.evaluate(() => document.querySelector("#create-restore").disabled);
     check(disabled === true, "Create is disabled in the administrator console");
@@ -1244,7 +1256,11 @@ async function main() {
     const rs = seeded.readiness;
     await page.goto(ui + "#/restore?ns=" + r + "&backup=" + rs.point.name + "&uid=" + rs.point.uid,
       { waitUntil: "load", timeout: 30000 });
-    await waitFor(page, "#step-target", "the wizard in " + r);
+    // Walked 1 -> 4 (target, prefix) -> 3 (point in time) -> 6 (the plan) -> 5 (readiness).
+    await waitFor(page, "#wizard-position", "the wizard in " + r);
+    await wizardAt(page, 1, 60);
+    await wizardStep(page, 4);
+    await waitFor(page, "#step-target", "the wizard's target step in " + r);
     await page.selectOption("#target-cluster", rs.targetUid);
     await pause(500);
     const prefix = "p192" + suffix + "-";
@@ -1253,9 +1269,11 @@ async function main() {
     // `windowCovered.toMs` is EXCLUSIVE (WIZ-PIT-EXCLUSIVE-DEFAULT, owned by
     // plat15-2): the last covered millisecond is chosen by hand, and said to be.
     const lastCovered = new Date(rs.window.toMs - 1).toISOString();
+    await wizardStep(page, 3);
     await page.fill("#point-in-time", lastCovered);
     await page.press("#point-in-time", "Tab");
     await pause(1000);
+    await wizardStep(page, 6);
     await waitFor(page, "#plan-bytes", "the plan in " + r);
     const rPlan = await page.evaluate(() => ({
       bytes: document.querySelector("#plan-bytes").textContent,
@@ -1263,6 +1281,7 @@ async function main() {
     }));
     save("04-draft-plan.txt", rPlan.bytes);
     const before = new Set((kubeJson(["-n", r, "get", "preflights"]).items || []).map((x) => x.metadata.uid));
+    await wizardStep(page, 5);
     await page.click("#restore-readiness-start");
     let pf = null;
     for (let i = 0; i < 150 && pf === null; i += 1) {

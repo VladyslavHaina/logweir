@@ -84,7 +84,15 @@ line reads: `archive-data`, `evidence`, `durable-resource` or `rendered-text`.
 
 `test_catalogue.py` re-reads every cited file. It fails when a cite points past the
 end of the file, or when a composed row's name is no longer in the harness that
-should record it.
+should record it. A cite into a composed UI harness must name the line of its row's
+`record()` call.
+
+It also reads every browser harness for the console's hidden-until-reached controls
+(`scripts/live/console_steps.py`). The restore wizard shows one step at a time, and
+the create-destination form sits behind its "Create destination" disclosure. A flow
+that fills or clicks a control must first walk to that control's step with
+`scripts/console-steps.mjs` (Next and Back), or open the disclosure. Otherwise the
+test fails, because the same flow would time out live.
 
 **Failures leave redacted diagnostics.** When a suite has a non-passing row, the
 runner snapshots its namespaces before the suite's own cleanup deletes them:

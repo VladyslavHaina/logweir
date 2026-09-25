@@ -44,6 +44,7 @@ import { randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { wizardAt, wizardStep } from "./console-steps.mjs";
 
 const require = createRequire(import.meta.url);
 const { chromium } = require("playwright");
@@ -446,16 +447,24 @@ async function main() {
       await page.goto(admin + "/ui/#/restore?ns=" + NS + "&backup=" + seeded.point.name + "&uid=" + seeded.point.uid,
         { waitUntil: "load", timeout: 30000 });
       await page.reload({ waitUntil: "load", timeout: 30000 });
-      await waitFor(page, "#step-target", "the wizard");
+      // ONE STEP AT A TIME (console-ux-1, MCP-29): walked 1 -> 4 (target, prefix) -> 3 (point
+      // in time) -> 6 (the plan) -> 5 (readiness) with Next / Back (scripts/console-steps.mjs).
+      await waitFor(page, "#wizard-position", "the wizard");
+      await wizardAt(page, 1, 60);
+      await wizardStep(page, 4);
+      await waitFor(page, "#step-target", "the wizard's target step");
       await page.selectOption("#target-cluster", seeded.targetUid);
       await pause(500);
       await page.fill("#topic-prefix", "ts" + suffix + "-");
       await page.press("#topic-prefix", "Tab");
+      await wizardStep(page, 3);
       await page.fill("#point-in-time", new Date(seeded.window.toMs - 1).toISOString());
       await page.press("#point-in-time", "Tab");
       await pause(1000);
+      await wizardStep(page, 6);
       await waitFor(page, "#plan-bytes", "the plan");
       const hash = await page.evaluate(() => document.querySelector("#plan-hash-value").textContent.trim());
+      await wizardStep(page, 5);
       await page.click("#restore-readiness-start");
       let found = null;
       for (let i = 0; i < 150 && found === null; i += 1) {
@@ -529,6 +538,7 @@ async function main() {
     check(gate.blocked === null && gate.createDisabled === false,
       "the page did not enable Create after the check: " + JSON.stringify(gate));
     const since = bodies.length;
+    await wizardStep(page, 6);
     await page.click("#create-restore");
     let answer = null;
     for (let i = 0; i < 60 && answer === null; i += 1) {

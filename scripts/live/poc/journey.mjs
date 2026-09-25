@@ -138,7 +138,8 @@ try {
       // Create is held until the cadence is previewed: the API compiles the preset and this
       // page shows exactly what will be saved ("Preview this cadence before saving it").
       await form.getByRole("button", { name: /preview next runs/i }).click();
-      await waitForText(page, /NEXT RUNS[\s\S]*T02:00:00Z/, 60, "the cadence preview");
+      // The AT (UTC) column in the one timestamp format (console-ux-1, MCP-7): was `…T02:00:00Z`.
+      await waitForText(page, /NEXT RUNS[\s\S]*\d{4}-\d{2}-\d{2} 02:00:00 UTC/, 60, "the cadence preview");
       await page.locator('button[name="schedule-check-readiness"], #schedule-check-readiness').first().click();
       const rows = await waitRows(page, "READINESS", 240);
       const blocking = rows.filter((r) => r.gating === "blocking");

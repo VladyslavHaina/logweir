@@ -58,6 +58,8 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
 
+import { openDestinationCreate } from "./console-steps.mjs";
+
 const require = createRequire(import.meta.url);
 const { chromium } = require("playwright");
 
@@ -207,14 +209,18 @@ async function waitForText(page, needle, label) {
  *  (`ui/render.js::destinationVerdict` over the API's `status_view`). */
 function expectedDestinationBadge(status) {
   const s = status || {};
-  const reason = typeof s.reason === "string" && s.reason.length > 0 ? " (" + s.reason + ")" : "";
+  // THE REASON IS SHOWN WHEN IT SAYS SOMETHING THE WORD DOES NOT (console-ux-1, MCP-11):
+  // `valid (Valid)` reads `valid`, `not valid (Invalid)` reads `not valid`; any other reason is
+  // still shown, verbatim, in parentheses.
+  const beside = (echo) => (typeof s.reason === "string" && s.reason.length > 0 &&
+    s.reason !== echo ? " (" + s.reason + ")" : "");
   const condition = (Array.isArray(s.conditions) ? s.conditions : [])
     .find((c) => c.type === "Valid");
   if (condition !== undefined && condition.status === "True") {
-    return { kind: "green", caption: "valid" + reason, arm: "valid" };
+    return { kind: "green", caption: "valid" + beside("Valid"), arm: "valid" };
   }
   if (condition !== undefined) {
-    return { kind: "unverified", caption: "not valid" + reason, arm: "notValid" };
+    return { kind: "unverified", caption: "not valid" + beside("Invalid"), arm: "notValid" };
   }
   return { kind: "pending", caption: "not judged yet", arm: "unjudged" };
 }
@@ -396,7 +402,9 @@ async function main() {
     });
 
     // ---------------------------------------------------------------- 2
+    // The form sits behind "Create destination" since console-ux-1 (MCP-10): opened by a click.
     const destination = "primary-" + suffix;
+    await openDestinationCreate(page);
     await page.fill("#destination-name", destination);
     await page.fill("#destination-description", "D2 W13 live journey");
     await page.fill("#destination-bucket", "kafka-backups");
@@ -453,6 +461,8 @@ async function main() {
           }, destination),
           text: await text(page),
           green: await greenClaims(page),
+          badges: await page.evaluate(() => Array.from(document.querySelectorAll("#view-slot .badge"))
+            .map((b) => b.textContent.trim())),
         };
       },
       "the destination detail",
@@ -471,6 +481,9 @@ async function main() {
       check(detail.includes("no controller has recorded a verdict"),
         "the detail says why there is no verdict");
       check(!/\bvalid \(/.test(detail), "and never claims the destination is valid");
+      // A valid badge no longer always carries a reason (MCP-11), so its words are read too.
+      check(!judged.page.badges.some((b) => b === "valid" || b.startsWith("valid (")),
+        "and no badge on the detail says valid: " + JSON.stringify(judged.page.badges));
     } else {
       check(!detail.includes("not judged yet") &&
         !detail.includes("no controller has recorded a verdict"),

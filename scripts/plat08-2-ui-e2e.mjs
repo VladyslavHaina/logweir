@@ -57,6 +57,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash, randomBytes } from "node:crypto";
+import { openDestinationCreate, wizardAt, wizardStep } from "./console-steps.mjs";
 
 const require = createRequire(import.meta.url);
 const { chromium } = require("playwright");
@@ -591,6 +592,7 @@ async function main() {
   /** Fills the destination form; the credential, when given, goes only into
    *  the write-only inputs and nowhere else. */
   async function fillDestination(d) {
+    await openDestinationCreate(page);
     await page.fill("#destination-name", d.name);
     await page.fill("#destination-bucket", d.bucket);
     await page.fill("#destination-prefix", d.prefix);
@@ -624,6 +626,8 @@ async function main() {
 
   async function submitDestinationForm(name, expectPost) {
     const before = postsTo("/destinations").length;
+    // A refused submit keeps the form open (its draft is in flight); required again here.
+    await openDestinationCreate(page);
     await page.click("#destination-form button[type=submit]");
     if (!expectPost) {
       await pause(1500);
@@ -639,7 +643,9 @@ async function main() {
   try {
     // ================================================================= T2 + A2
     // EXPLICITLY CONFIGURED LOCAL HTTP, AND THE TWO CONTROLS ARE INDEPENDENT.
-    await open(destinationsRoute, "#destination-form", "the destinations page");
+    await open(destinationsRoute, "#destination-create-disclosure", "the destinations page");
+    // The form sits behind "Create destination" since console-ux-1 (MCP-10): opened by a click.
+    await openDestinationCreate(page);
     await fillDestination({ name: DEST_A, bucket: BUCKET_A, prefix: PREFIX_A, endpoint: MINIO_HTTP,
       addressing: "pathStyle", security: "tls", accessKeyId: USER_A, secretAccessKey: SECRET_A,
       isDefault: true });
@@ -700,7 +706,9 @@ async function main() {
       transitions: { start: state, afterTransport: afterTransport, afterAddressing: afterAddressing, back: back },
     });
 
-    await open(destinationsRoute, "#destination-form", "the destinations page again");
+    await open(destinationsRoute, "#destination-create-disclosure", "the destinations page again");
+    // The form sits behind "Create destination" since console-ux-1 (MCP-10): opened by a click.
+    await openDestinationCreate(page);
     await fillDestination({ name: DEST_B, bucket: BUCKET_B, prefix: PREFIX_B, endpoint: MINIO_HTTP,
       addressing: "pathStyle", security: "insecureHttp", accessKeyId: USER_B, secretAccessKey: SECRET_B });
     await submitDestinationForm(DEST_B, true);
@@ -712,7 +720,9 @@ async function main() {
 
     // ======================================================================= T1
     // HTTPS WITH PATH-STYLE: a TLS + pathStyle destination on an https origin.
-    await open(destinationsRoute, "#destination-form", "the destinations page (TLS)");
+    await open(destinationsRoute, "#destination-create-disclosure", "the destinations page (TLS)");
+    // The form sits behind "Create destination" since console-ux-1 (MCP-10): opened by a click.
+    await openDestinationCreate(page);
     await fillDestination({ name: DEST_TLS, bucket: BUCKET_A, prefix: "p082-tls", endpoint: MINIO_HTTPS,
       addressing: "pathStyle", security: "insecureHttp", existingSecret: grantA });
     const refusedHttps = await submitDestinationForm(DEST_TLS, false);
@@ -1056,11 +1066,16 @@ async function main() {
 
     const route = base + "#/restore?ns=" + namespace + "&backup=" + encodeURIComponent(pointName) +
       "&uid=" + point.metadata.uid;
-    await open(route, "#plan-bytes", "the wizard on the recovery point");
+    // ONE STEP AT A TIME (console-ux-1, MCP-29): the wizard opens on step 1, and each control
+    // below is reached on its own step with Next / Back (scripts/console-steps.mjs). The storage
+    // inputs are looked for in the whole document, every step's page included.
+    await open(route, "#wizard-position", "the wizard on the recovery point");
+    await wizardAt(page, 1, 60);
     const inputs = await page.evaluate(() => ["#store-endpoint", "#store-region", "#store-pathStyle",
       "#store-allow-insecure", "#evidence-bucket", "#archive-secret"].filter((s) => document.querySelector(s) !== null));
     check(inputs.length === 0, "the saved point offers storage inputs to re-enter: " + inputs.join(", "));
     const targetUid = kubeJson(["-n", namespace, "get", "kafkacluster", target]).metadata.uid;
+    await wizardStep(page, 4);
     await page.selectOption("#target-cluster", targetUid);
     await pause(1000);
     // THE POINT IN TIME, CHOSEN BY HAND AND SAID TO BE. The wizard defaults to
@@ -1070,6 +1085,7 @@ async function main() {
     // one millisecond earlier). That default is recorded as a defect in the
     // result; this journey is about storage, so it picks the last covered ms.
     const lastCovered = new Date(covered.to_ms - 1).toISOString();
+    await wizardStep(page, 3);
     await page.fill("#point-in-time", lastCovered);
     await page.press("#point-in-time", "Tab");
     await pause(1000);
@@ -1101,7 +1117,8 @@ async function main() {
       storageInputsOnPage: inputs,
     });
 
-    // T1 in the plan: the TLS destination as the evidence store.
+    // T1 in the plan: the TLS destination as the evidence store (step 1's control).
+    await wizardStep(page, 1);
     await page.selectOption("#evidence-destination", objTls.metadata.uid);
     await pause(1000);
     const tlsPlan = await planOf();
@@ -1136,6 +1153,7 @@ async function main() {
 
     // READINESS, reconciled by the lab controller, followed by the page.
     async function readiness(label) {
+      await wizardStep(page, 5);
       const beforePf = new Set(kubeJson(["-n", namespace, "get", "preflights"]).items.map((p) => p.metadata.uid));
       await page.click("#restore-readiness-start");
       const pf = await until(label + ": the controller records a terminal readiness check",
@@ -1262,6 +1280,7 @@ async function main() {
         "refusal after it would prove nothing about the re-read: " + JSON.stringify(gateBefore));
     const restoresBeforeClick = kubeJson(["-n", namespace, "get", "restores"]).items.length;
     const postsBeforeClick = postsTo("/restores").length;
+    await wizardStep(page, 6);
     await page.click("#create-restore");
     const refusalText = () => page.evaluate(() => ["#readiness-blocked", "#restore-submit-status"]
       .map((sel) => ((document.querySelector(sel) || {}).innerText || "")).join(" | "));
@@ -1322,7 +1341,9 @@ async function main() {
     await page.evaluate((h) => { window.location.hash = h; }, "#/schedules?ns=" + namespace);
     await waitFor("#schedule-form", "the schedules route in between");
     await page.evaluate((h) => { window.location.hash = h; }, hashRoute);
-    await waitFor("#plan-bytes", "the wizard, re-mounted on the same point");
+    // The route carries no step, so the re-mounted wizard opens on step 1.
+    await waitFor("#wizard-position", "the wizard, re-mounted on the same point");
+    await wizardAt(page, 1, 60);
     await waitForText("Your unsubmitted edits to this plan", "the draft coming back");
     await pause(1500);
     const reloaded = await planOf();
@@ -1331,6 +1352,7 @@ async function main() {
     check(reloaded.hash === heldHash, "the reloaded draft renders another plan: " + reloaded.hash + " vs " + heldHash);
     const restoresBefore = kubeJson(["-n", namespace, "get", "restores"]).items.length;
     const shown = reloaded;
+    await wizardStep(page, 6);
     await page.click("#create-restore");
     const restore = await until("the wizard creates the Restore",
       () => kubeJson(["-n", namespace, "get", "restores"]).items, (items) => items.length === restoresBefore + 1, 60)

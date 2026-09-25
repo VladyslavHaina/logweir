@@ -57,6 +57,7 @@ import { generateKeyPairSync, createHash } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { humanUtc, timeInstants, wizardAt, wizardStep } from "./console-steps.mjs";
 
 const require = createRequire(import.meta.url);
 const { chromium } = require("playwright");
@@ -584,10 +585,15 @@ async function restoreSubmitRoutesToAwaitingApproval(browser, base) {
   const page = await browser.newPage({ viewport: { width: 1280, height: 1200 } });
   const posts = collectPosts(page);
   try {
+    // ONE STEP AT A TIME (console-ux-1, MCP-29): step 1 on arrival, the bound point on step 2,
+    // the plan and Create on step 6, each reached with Next (scripts/console-steps.mjs).
     await page.goto(base + pointRoute(points.old));
-    await page.waitForSelector("#create-restore");
+    await page.waitForSelector("#wizard-position");
+    await wizardAt(page, 1, 60);
+    await wizardStep(page, 2);
     check((await page.locator("#point-uid").innerText()).trim() === points.old.uid,
       "the wizard is bound to the point the route names");
+    await wizardStep(page, 6);
     const planHash = (await page.locator("#plan-hash-value").innerText()).trim();
     const restoreName = "restore-" + planHash.replace("sha256:", "").slice(0, 8);
     check(await page.locator("#request-approval").count() === 0, "the second, independently navigating button is gone");
@@ -623,7 +629,9 @@ async function restoreSubmitRoutesToAwaitingApproval(browser, base) {
 
     // A refresh of the wizard re-derives the same plan and creates nothing new.
     await page.goto(base + pointRoute(points.old));
-    await page.waitForSelector("#create-restore");
+    await page.waitForSelector("#wizard-position");
+    await wizardAt(page, 1, 60);
+    await wizardStep(page, 6);
     check((await page.locator("#plan-hash-value").innerText()).trim() === planHash,
       "the same point rebuilt the same plan after a reload");
     await page.click("#create-restore");
@@ -880,12 +888,18 @@ async function selectorOffersEveryPointAndNoPlan(browser, base) {
     check(await page.locator(restoreLinkTo(points.old.uid)).count() >= 1,
       "and the row links to that point BY UID");
 
-    // The disclosed coverage is on the row, in RFC 3339 and not as an integer.
-    // The section holds two tables -- the points on offer, and the catalog of
-    // everything the namespace holds. This is the first.
+    // The disclosed coverage is on the row, and not as an integer. The section
+    // holds two tables -- the points on offer, and the catalog of everything
+    // the namespace holds. This is the first. Since console-ux-1 (MCP-7) the
+    // row reads the one timestamp format, `from YYYY-MM-DD HH:MM:SS UTC` and
+    // `to ...`, and the exact RFC 3339 instant is the <time>'s `datetime`:
+    // both are required.
     const table = await page.locator("#step-select-point table").first().innerText();
-    check(table.includes(rfc(OLD_FROM_MS)) && table.includes(rfc(OLD_TO_MS)),
+    check(table.includes("from " + humanUtc(rfc(OLD_FROM_MS))) && table.includes("to " + humanUtc(rfc(OLD_TO_MS))),
       "the row discloses the covered window: " + table.slice(0, 400));
+    const instants = await timeInstants(page, "#step-select-point table");
+    check(instants.includes(rfc(OLD_FROM_MS)) && instants.includes(rfc(OLD_TO_MS)),
+      "and carries both bounds exactly, in RFC 3339: " + JSON.stringify(instants));
     check(table.includes("manifest recorded"), "and what is known about its archive");
     await shot(page, "restore-point-selector");
 
@@ -969,14 +983,17 @@ async function historyRowPreselectsThatPoint(browser, base) {
     await shot(page, "history-restore-this-point");
 
     await link.click();
-    await page.waitForSelector("#create-restore");
+    await page.waitForSelector("#wizard-position");
+    await wizardAt(page, 1, 60);
     const hash = await page.evaluate(() => location.hash);
     check(hash.includes("uid=" + points.old.uid), "the click carried the uid: " + hash);
     check(hash.includes("backup=" + points.old.name), "…and the name beside it: " + hash);
+    await wizardStep(page, 2);
     const uid = (await page.locator("#point-uid").innerText()).trim();
     const name = (await page.locator("#point-name").innerText()).trim();
     check(uid === points.old.uid && name === points.old.name,
       "the wizard bound to another point than the row named: " + name + " / " + uid);
+    await wizardStep(page, 6);
     const plan = await page.locator("#plan-bytes").innerText();
     check(plan.includes("backup: \"set-old-" + suffix + "\""),
       "and the plan names THAT point's backup set: " + plan.slice(0, 400));
@@ -1000,7 +1017,9 @@ async function olderPointStaysSelectedWhenANewerArrives(browser, base, reviewedH
   const page = await browser.newPage({ viewport: { width: 1280, height: 1200 } });
   try {
     await page.goto(base + pointRoute(points.old));
-    await page.waitForSelector("#create-restore");
+    await page.waitForSelector("#wizard-position");
+    await wizardAt(page, 1, 60);
+    await wizardStep(page, 6);
     const before = (await page.locator("#plan-hash-value").innerText()).trim();
     check(before === reviewedHash, "the same point rebuilt the same plan: " + before);
 
@@ -1020,9 +1039,13 @@ async function olderPointStaysSelectedWhenANewerArrives(browser, base, reviewedH
     await page.evaluate((ns) => { location.hash = "#/history?ns=" + encodeURIComponent(ns); }, namespace);
     await page.waitForSelector("#view-slot table");
     await page.evaluate((route) => { location.hash = route; }, pointRoute(points.old));
-    await page.waitForSelector("#create-restore");
+    await page.waitForSelector("#wizard-position");
+    await wizardAt(page, 1, 60);
+    await wizardStep(page, 2);
+    const uidAfterNavigation = (await page.locator("#point-uid").innerText()).trim();
+    await wizardStep(page, 6);
     const afterNavigation = {
-      uid: (await page.locator("#point-uid").innerText()).trim(),
+      uid: uidAfterNavigation,
       hash: (await page.locator("#plan-hash-value").innerText()).trim(),
     };
     check(afterNavigation.uid === points.old.uid,
@@ -1031,16 +1054,20 @@ async function olderPointStaysSelectedWhenANewerArrives(browser, base, reviewedH
       "a route change changed the plan: " + before + " -> " + afterNavigation.hash);
 
     // ...and then a RELOAD, which starts the page afresh and has only the
-    // address to go on. That is what makes the identity durable.
+    // address to go on. That is what makes the identity durable. The address
+    // carries the step on screen too (`&step=6`, MCP-29), so the reload is
+    // required to open step 6 again.
     await page.reload({ waitUntil: "load" });
-    await page.waitForSelector("#create-restore");
-    const uid = (await page.locator("#point-uid").innerText()).trim();
-    check(uid === points.old.uid, "the newer backup moved the selection to " + uid);
+    await page.waitForSelector("#wizard-position");
+    await wizardAt(page, 6, 60);
     const after = (await page.locator("#plan-hash-value").innerText()).trim();
     check(after === before, "the plan under review changed: " + before + " -> " + after);
     const plan = await page.locator("#plan-bytes").innerText();
     check(plan.includes("backup: \"set-old-" + suffix + "\""), "and it still names the old set");
     check(!plan.includes("set-new-" + suffix), "and never the new one: " + plan.slice(0, 400));
+    await wizardStep(page, 2);
+    const uid = (await page.locator("#point-uid").innerText()).trim();
+    check(uid === points.old.uid, "the newer backup moved the selection to " + uid);
 
     // AND THE PAGE DID SEE THE NEW RUN: it is in the catalog table beside the
     // chosen point, which is what makes this a re-read and not a stale render.
@@ -1070,7 +1097,9 @@ async function missingPointIsRefused(browser, base) {
     // It resolves first, so the refusal afterwards is about this object going
     // away and not about a link that never worked.
     await page.goto(base + pointRoute(points.doomed));
-    await page.waitForSelector("#create-restore");
+    await page.waitForSelector("#wizard-position");
+    await wizardAt(page, 1, 60);
+    await wizardStep(page, 2);
     check((await page.locator("#point-uid").innerText()).trim() === points.doomed.uid,
       "the doomed point resolves while it exists (control)");
 
@@ -1115,8 +1144,10 @@ async function missingPointIsRefused(browser, base) {
 async function pathStyleDoesNotEnableHttp(browser, base) {
   const page = await browser.newPage({ viewport: { width: 1280, height: 1200 } });
   try {
+    // The inline archive's boxes are step 1's, where the wizard opens; Create is step 6's.
     await page.goto(base + pointRoute(points.old));
-    await page.waitForSelector("#create-restore");
+    await page.waitForSelector("#wizard-position");
+    await wizardAt(page, 1, 60);
     const flag = "allow_" + "http";
     const planText = () => page.locator("#plan-bytes").innerText();
 
@@ -1155,6 +1186,7 @@ async function pathStyleDoesNotEnableHttp(browser, base) {
     const shown = await planText();
     const planHash = (await page.locator("#plan-hash-value").innerText()).trim();
     const restoreName = "restore-" + planHash.replace("sha256:", "").slice(0, 8);
+    await wizardStep(page, 6);
     await page.click("#create-restore");
     await page.waitForFunction(() => location.hash.startsWith("#/approvals?subject="), null,
       { timeout: 20000 });
@@ -1565,7 +1597,11 @@ async function aRotationRefreshesTheObservedTime(browser, base) {
     await page.goto(base + "#/clusters?ns=" + namespace + "&name=" + selectorNames.rotation);
     await page.waitForSelector("#cluster-probe-line");
     const before = await page.locator("#cluster-probe-line").innerText();
-    check(before.includes(firstProbe.observedAt),
+    // THE ONE TIMESTAMP FORMAT (console-ux-1, MCP-7): the line reads the instant as
+    // `YYYY-MM-DD HH:MM:SS UTC` and carries the exact recorded value as its <time>'s
+    // `datetime`; both are required (the line used to print the raw value).
+    check(before.includes(humanUtc(firstProbe.observedAt)) &&
+      (await timeInstants(page, "#cluster-probe-line")).includes(firstProbe.observedAt),
       "the page shows the observed instant the controller recorded: " + before);
     check(before.includes("connection probe:"), "labelled as a probe: " + before);
     await shot(page, "rotation-before");
@@ -1617,11 +1653,19 @@ async function aRotationRefreshesTheObservedTime(browser, base) {
     const readsBefore = reads.length;
     await page.click("form.probe-test button[type=submit]");
     await page.waitForFunction(
-      (instant) => document.querySelector("#cluster-probe-line").innerText.includes(instant),
-      secondProbe.observedAt, { timeout: 20000 });
+      (want) => {
+        const line = document.querySelector("#cluster-probe-line");
+        return line !== null && line.innerText.includes(want.human) &&
+          Array.from(line.querySelectorAll("time")).some((t) => t.getAttribute("datetime") === want.exact);
+      },
+      { human: humanUtc(secondProbe.observedAt), exact: secondProbe.observedAt }, { timeout: 20000 });
     const after = await page.locator("#cluster-probe-line").innerText();
     check(reads.length > readsBefore, "Test connection re-read the object");
-    check(!after.includes(firstProbe.observedAt),
+    // The stale instant is gone, exactly (`datetime`) and as read (the whole-second reading,
+    // unless both probes fell in the same second, where the two readings are one text).
+    check(!(await timeInstants(page, "#cluster-probe-line")).includes(firstProbe.observedAt) &&
+      (humanUtc(firstProbe.observedAt) === humanUtc(secondProbe.observedAt) ||
+        !after.includes(humanUtc(firstProbe.observedAt))),
       "and the stale instant is gone from the panel: " + after);
     const specAfter = kubeJson(["-n", namespace, "get", "kafkacluster", selectorNames.rotation]).spec;
     check(JSON.stringify(specBefore) === JSON.stringify(specAfter),
@@ -1655,7 +1699,9 @@ async function aTargetRecreatedMidWizardIsRefused(browser, base) {
     // A TARGET OF THIS RUN'S OWN, so deleting it disturbs nothing else.
     const first = seedCluster(name, { role: "target" });
     await page.goto(base + pointRoute(points.old));
-    await page.waitForSelector("#create-restore");
+    await page.waitForSelector("#wizard-position");
+    await wizardAt(page, 1, 60);
+    await wizardStep(page, 4);
     await page.selectOption("#target-cluster", first.uid);
     await page.waitForFunction(
       (uid) => (document.querySelector("#target-cluster-uid") || {}).value === uid,
@@ -1676,8 +1722,11 @@ async function aTargetRecreatedMidWizardIsRefused(browser, base) {
     check(second.uid !== first.uid, "the recreated object must have a different uid");
 
     const postsBefore = posts.length;
+    await wizardStep(page, 6);
     await page.click("#create-restore");
     await page.waitForSelector("#target-cluster-error, .mutation-failed", { timeout: 20000 });
+    // A REFUSED SUBMIT SHOWS THE STEP ITS FIELD MESSAGE IS ABOUT (MCP-29): the target's.
+    await wizardAt(page, 4);
     await pause(800);
     check(posts.length === postsBefore,
       "A RESTORE MUST NOT BE WRITTEN INTO A CONNECTION NOBODY CHOSE: " + posts.join(", "));
@@ -1726,7 +1775,9 @@ async function anExpiredApprovalRendersExpiredNeverVerified(browser, base) {
   mkdirSync(work, { recursive: true, mode: 0o700 });
   try {
     await page.goto(base + pointRoute(points.newer));
-    await page.waitForSelector("#create-restore");
+    await page.waitForSelector("#wizard-position");
+    await wizardAt(page, 1, 60);
+    await wizardStep(page, 6);
     const planHash = (await page.locator("#plan-hash-value").innerText()).trim();
     const restoreName = "restore-" + planHash.replace("sha256:", "").slice(0, 8);
     await page.click("#create-restore");

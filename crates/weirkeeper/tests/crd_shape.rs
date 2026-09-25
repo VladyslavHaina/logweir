@@ -4855,3 +4855,133 @@ fn the_crd_mode_enum_and_target_mode_agree() {
             .expect("TopicNaming accepts a bare `prefix` string, like the CRD's block");
     assert_eq!(round_tripped.prefix, "restore-20260907T140500Z-");
 }
+
+// ---------------------------------------------------------------------------
+// The schedule status's two word lists, as the controller writes them
+// ---------------------------------------------------------------------------
+
+/// The values of the `&str` constants named `<prefix>…` in a Rust source, in
+/// file order. Read from the text so the controller's private constants can be
+/// compared without being exported for a test.
+fn str_consts(source: &str, prefix: &str) -> Vec<String> {
+    source
+        .lines()
+        .map(str::trim)
+        .filter_map(|line| {
+            let rest = line
+                .strip_prefix("const ")
+                .or_else(|| line.strip_prefix("pub const "))?;
+            if !rest.starts_with(prefix) {
+                return None;
+            }
+            let (_, value) = rest.split_once(": &str = \"")?;
+            value.strip_suffix("\";").map(str::to_string)
+        })
+        .collect()
+}
+
+/// The backticked CamelCase words of a description: the words a reader is
+/// told the field can hold, without the `path::to::module` and `CONST_*`
+/// spans a description also backticks.
+fn listed_words(description: &str) -> std::collections::BTreeSet<String> {
+    description
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .filter(|word| {
+            word.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+                && word.chars().all(|c| c.is_ascii_alphanumeric())
+                && word.chars().any(|c| c.is_ascii_lowercase())
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+/// `status.lastSlot.disposition` AND `status.missedSlots.recent[].reason` LIST
+/// EXACTLY THE WORDS THE CONTROLLER WRITES — in the CRD a `kubectl explain`
+/// reader sees and in the product API's `LastSlotView` / `MissedSlotView` the
+/// console renders from.
+///
+/// # The drift this exists to catch happened
+///
+/// Both CRD descriptions named `Superseded`, which no path of
+/// `controllers::backup_schedule` writes, and the missed-slot list omitted
+/// `PastStartingDeadline` and `NameUnavailable`, which it does. The API's
+/// descriptions inherited the error until console-ux-1's review (L3) fixed
+/// them and left the CRD's standing. The words are the controller's
+/// `DISPOSITION_*` and `MISSED_*` constants, read out of its source, so a new
+/// word added on either side alone is red here.
+#[test]
+fn the_schedule_status_word_lists_are_the_controllers_own() {
+    let source = std::fs::read_to_string(
+        repo_root().join("crates/weirkeeper/src/controllers/backup_schedule.rs"),
+    )
+    .expect("the schedule controller's source is readable");
+    let dispositions: std::collections::BTreeSet<String> =
+        str_consts(&source, "DISPOSITION_").into_iter().collect();
+    let missed: std::collections::BTreeSet<String> =
+        str_consts(&source, "MISSED_").into_iter().collect();
+    // NOT VACUOUS: the two closed sets as the controller spells them today.
+    assert_eq!(dispositions.len(), 9, "{dispositions:?}");
+    assert_eq!(missed.len(), 5, "{missed:?}");
+
+    let doc = crd("backupschedules.yaml");
+    let status = status_schema(&doc);
+    let crd_disposition = at(
+        status,
+        &[
+            "properties",
+            "lastSlot",
+            "properties",
+            "disposition",
+            "description",
+        ],
+    )
+    .as_str()
+    .expect("lastSlot.disposition carries a description");
+    let crd_reason = at(
+        status,
+        &[
+            "properties",
+            "missedSlots",
+            "properties",
+            "recent",
+            "items",
+            "properties",
+            "reason",
+            "description",
+        ],
+    )
+    .as_str()
+    .expect("missedSlots.recent[].reason carries a description");
+    assert_eq!(
+        listed_words(crd_disposition),
+        dispositions,
+        "the CRD's lastSlot.disposition description: {crd_disposition}"
+    );
+    assert_eq!(
+        listed_words(crd_reason),
+        missed,
+        "the CRD's missedSlots.recent[].reason description: {crd_reason}"
+    );
+
+    let api_path = repo_root().join("schemas/logweir-api-v1.openapi.json");
+    let api: Value = serde_yaml::from_str(
+        &std::fs::read_to_string(&api_path).expect("the checked-in OpenAPI document is readable"),
+    )
+    .expect("the OpenAPI document parses");
+    let schemas = at(&api, &["components", "schemas"]);
+    for (view, field, want) in [
+        ("LastSlotView", "disposition", &dispositions),
+        ("MissedSlotView", "reason", &missed),
+    ] {
+        let description = at(schemas, &[view, "properties", field, "description"])
+            .as_str()
+            .expect("the API field carries a description");
+        assert_eq!(
+            &listed_words(description),
+            want,
+            "the product API's {view}.{field} description: {description}"
+        );
+    }
+}

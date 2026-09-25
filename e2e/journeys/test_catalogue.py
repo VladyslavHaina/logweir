@@ -17,11 +17,14 @@ import pytest
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import core  # noqa: E402
+import governed  # noqa: E402
 import native  # noqa: E402
 import suites  # noqa: E402
 from core import FAIL, PASS, SKIPPED  # noqa: E402
 
 ROOT = HERE.parents[1]
+sys.path.insert(0, str(ROOT / "scripts" / "live"))
+import console_steps  # noqa: E402
 NAMED_TESTS = {"SCRAM rotation", "new topic in dynamic policy", "overlap", "two approvals",
                "source offline", "CR loss", "stale namespace request", "duplicate submit",
                "old-point selection"}
@@ -291,3 +294,60 @@ def test_the_plat19_2_ui_harness_deletes_only_what_this_run_created_by_uid():
     got = json.loads(done.stdout)
     assert got["killed"] is True and got["accepted"] is True
     assert len(got["refused"]) == 6 and all(got["refused"].values())
+
+
+# ---------------------------------------------------------------------------
+# THE ONE-STEP WIZARD (console-ux-1, MCP-29): each UI harness a journey composes
+# drives every restore-wizard control on that control's own step, walked to
+# with Next / Back (scripts/console-steps.mjs), and fills the destination form
+# only once its "Create destination" disclosure is open (MCP-10). A control on a
+# hidden step times out live; this finds the flow offline.
+# ---------------------------------------------------------------------------
+
+def _composed_ui_harnesses() -> list[str]:
+    scripts = {s.script for s in suites.SUITES.values() if s.script.endswith(".mjs")}
+    # plat19-2's suite is its governed.py driver; the harness it runs is this one.
+    scripts.add(str(governed.HARNESS.relative_to(ROOT)))
+    return sorted(scripts)
+
+
+def test_every_composed_ui_harness_reaches_the_step_of_each_wizard_control_it_drives():
+    driving = []
+    for rel in _composed_ui_harnesses():
+        text = (ROOT / rel).read_text()
+        assert console_steps.unreached_controls(text) == [], (rel, console_steps.unreached_controls(text))
+        if console_steps.controls_driven(text) > 0:
+            driving.append(rel)
+    # NOT VACUOUS: the four wizard-driving suites and the console journey are all read.
+    assert {"scripts/plat12-13-ui-e2e.mjs", "scripts/plat11-2-ui-e2e.mjs", "scripts/plat10-ui-e2e.mjs",
+            "scripts/plat19-2-ui-e2e.mjs", "e2e/journeys/console.mjs"} <= set(driving), driving
+
+
+def test_no_live_ui_harness_drives_a_hidden_control_off_its_step():
+    """The class, swept: every browser harness under scripts/, not only the composed ones.
+    scripts/console-steps.mjs is the walk itself and is not a flow."""
+    harnesses = [p for p in sorted((ROOT / "scripts").glob("*.mjs")) if p.name != "console-steps.mjs"]
+    harnesses += sorted((ROOT / "scripts" / "live").rglob("*.mjs"))
+    assert len(harnesses) >= 15, [p.name for p in harnesses]
+    for p in harnesses:
+        text = p.read_text()
+        assert console_steps.unreached_controls(text) == [], (p.name, console_steps.unreached_controls(text))
+
+
+def test_the_harness_step_map_is_the_pages_own():
+    assert console_steps.ui_disagreements() == []
+
+
+@pytest.mark.parametrize("journey", suites.JOURNEYS, ids=lambda j: j.id)
+def test_a_ui_harness_cite_points_at_the_call_that_records_its_row(journey):
+    """The cites into the composed UI harnesses had drifted up to 125 lines from the rows they
+    name (found while shifting them for console-ux-1): each now names the line whose record()
+    call carries the row's own words, as the console and native cites already must."""
+    for r in journey.rows:
+        path, _, line = r.cite.rpartition(":")
+        if not (path.startswith("scripts/plat") and path.endswith("-ui-e2e.mjs")):
+            continue
+        lines = (ROOT / path).read_text().splitlines()
+        at = int(line)
+        window = "\n".join(lines[at - 2:at + 2])
+        assert r.name[:35] in window, f"{r.cite} does not record {r.name!r}: {window!r}"

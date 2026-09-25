@@ -601,8 +601,9 @@ pub struct LastSlot {
     pub due_at: Time,
     /// Which attempt of it this disposition is about.
     pub attempt: i32,
-    /// One of `Admitted`, `CaughtUp`, `Retried`, `Missed`, `Superseded`,
-    /// `Blocked`, `NameUnavailable`, `Released`, `Failed`, `Exhausted`.
+    /// The controller's word for the decision, one of `Admitted`, `CaughtUp`,
+    /// `Retried`, `Missed`, `Blocked`, `NameUnavailable`, `Released`, `Failed`
+    /// or `Exhausted`.
     pub disposition: String,
     /// The `Backup` the disposition is about, when there is one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -619,8 +620,8 @@ pub struct LastSlot {
 pub struct MissedSlot {
     /// The slot.
     pub slot: String,
-    /// `ControllerUnavailable`, `ConcurrencyBlocked`, `Superseded` or
-    /// `BeforeRevision`.
+    /// Why it was not run: `ControllerUnavailable`, `ConcurrencyBlocked`,
+    /// `PastStartingDeadline`, `BeforeRevision` or `NameUnavailable`.
     pub reason: String,
     /// When the controller noticed.
     pub recorded_at: Time,

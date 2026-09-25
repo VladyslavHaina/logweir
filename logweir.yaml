@@ -2274,9 +2274,9 @@ spec:
                     format: date-time
                     type: string
                   disposition:
-                    description: One of `Admitted`, `CaughtUp`, `Retried`, `Missed`,
-                      `Superseded`, `Blocked`, `NameUnavailable`, `Released`, `Failed`,
-                      `Exhausted`.
+                    description: The controller's word for the decision, one of `Admitted`,
+                      `CaughtUp`, `Retried`, `Missed`, `Blocked`, `NameUnavailable`,
+                      `Released`, `Failed` or `Exhausted`.
                     type: string
                   dueAt:
                     description: The instant that name spells.
@@ -2323,8 +2323,9 @@ spec:
                       description: One slot that came due and was not run (D1 §4.8).
                       properties:
                         reason:
-                          description: '`ControllerUnavailable`, `ConcurrencyBlocked`,
-                            `Superseded` or `BeforeRevision`.'
+                          description: 'Why it was not run: `ControllerUnavailable`,
+                            `ConcurrencyBlocked`, `PastStartingDeadline`, `BeforeRevision`
+                            or `NameUnavailable`.'
                           type: string
                         recordedAt:
                           description: When the controller noticed.

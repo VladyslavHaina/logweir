@@ -21,7 +21,10 @@
 // Passwords come from the credentials file and are typed into Dex; nothing secret is printed.
 import { writeFileSync, mkdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { chromium, newSession, gotoHash, textOf, waitForText, connectCatalog, createCluster } from "./console.mjs";
+import {
+  chromium, newSession, gotoHash, textOf, waitForText, connectCatalog, createCluster, chooseCatalogDestination,
+  openWizard, wizardAt, wizardStep, readinessRows, showEveryPoint, listRow, revealInGrid,
+} from "./console.mjs";
 
 const OUT = process.argv[2] || "/tmp/poc-reproof";
 const GROUPS = (process.argv[3] || "P1").split(",");
@@ -86,7 +89,7 @@ try {
     await waitForText(page, /Connect an existing archive/, 60, "the catalog page");
     const form = page.locator("form[data-connect-archive]");
     await form.locator('input[name="name"]').fill(name);
-    await form.locator('input[name="destination"]').fill("primary");
+    const destinationControl = await chooseCatalogDestination(form, "primary");
     await form.locator('select[name="syncMode"]').selectOption("full");
     // a DOUBLE click: the second lands while the first is pending
     await form.getByRole("button", { name: /connect archive/i }).dblclick();
@@ -95,7 +98,7 @@ try {
     const p0 = posts[0] || { headers: {} };
     row("P4 Connect an existing archive: POST carries X-CSRF-Token = the session's csrfToken and an Idempotency-Key, answered 201",
       posts.length >= 1 && p0.headers["x-csrf-token"] === sess.csrfToken && !!p0.headers["idempotency-key"] && (answers[0] || {}).status === 201 && !/does not match this session/.test(t),
-      { posts: posts.length, csrfMatches: p0.headers["x-csrf-token"] === sess.csrfToken, idempotencyKey: !!p0.headers["idempotency-key"], answer: (answers[0] || {}).status, outcome: (t.match(/[^\n]*connected[^\n]*/) || [""])[0] });
+      { posts: posts.length, csrfMatches: p0.headers["x-csrf-token"] === sess.csrfToken, idempotencyKey: !!p0.headers["idempotency-key"], answer: (answers[0] || {}).status, outcome: (t.match(/[^\n]*connected[^\n]*/) || [""])[0], destinationControl });
     row("P4 control: a double click sends one POST", posts.length === 1, { posts: posts.length });
     const cat = kj("get", "recoverycatalogs").items.find((c) => c.metadata.name === name);
     row("P4 the RecoveryCatalog exists", !!cat, { name, uid: cat && cat.metadata.uid });
@@ -116,7 +119,7 @@ try {
     await waitForText(page, /Connect an existing archive/, 60, "the catalog page");
     const f2 = page.locator("form[data-connect-archive]");
     await f2.locator('input[name="name"]').fill(name2);
-    await f2.locator('input[name="destination"]').fill("primary");
+    await chooseCatalogDestination(f2, "primary");
     await f2.locator('select[name="syncMode"]').selectOption("full");
     const n0 = posts.length;
     await f2.getByRole("button", { name: /connect archive/i }).click();
@@ -144,7 +147,7 @@ try {
     let vbtn = "absent", vt = "";
     if (vformShown) {
       await vf.locator('input[name="name"]').fill("viewer-must-not");
-      await vf.locator('input[name="destination"]').fill("primary");
+      await chooseCatalogDestination(vf, "primary");
       const b = vf.getByRole("button", { name: /connect archive/i });
       vbtn = (await b.isDisabled()) ? "disabled" : "enabled";
       if (vbtn === "enabled") { await b.click(); await v.page.waitForTimeout(4000); }
@@ -167,11 +170,12 @@ try {
     const post = api.filter((b) => b.destinationRef && b.operation && b.operation.verifiedSuccess && b.createdAt > (ARG || "2026-09-25T00:19:00Z"))
       .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))[0];
     const pick = post || api.find((b) => b.operation && b.operation.verifiedSuccess);
-    await gotoHash(page, `#/restore?ns=${NS}&backup=${encodeURIComponent(pick.name)}&uid=${encodeURIComponent(pick.uid)}`);
-    await waitForText(page, /6\. Plan, hash and names/, 60, "the wizard");
+    // ONE STEP AT A TIME: the point panel is step 2, reached with Next from step 1.
+    await openWizard(page, `#/restore?ns=${NS}&backup=${encodeURIComponent(pick.name)}&uid=${encodeURIComponent(pick.uid)}`);
+    await wizardStep(page, 2);
     const facts = await page.evaluate(() => {
       const out = {};
-      for (const dt of document.querySelectorAll("dt")) { const dd = dt.nextElementSibling; if (dd) out[dt.innerText.trim()] = dd.innerText.trim(); }
+      for (const dt of document.querySelectorAll("#step-backup-set dt")) { const dd = dt.nextElementSibling; if (dd) out[dt.innerText.trim()] = dd.innerText.trim(); }
       return out;
     });
     row("P2 step 2 of a post-upgrade point: signed is the green 'verified by weirkeeper' badge",
@@ -184,12 +188,19 @@ try {
     await gotoHash(page, `#/restore?ns=${NS}`);
     await waitForText(page, /manifest attested by its verified receipt|no manifest recorded/, 90, "the restore selector");
     await page.waitForTimeout(1500);
+    // 20 points at a time since console-ux-1 (MCP-26): "every selector row" is read once every
+    // point is shown. The action is column 1 and the run's name leads column 2 with its schedule
+    // and slot beneath, so a row is named by its own "Restore this point" link (`backup=`).
+    const selectorCount = await showEveryPoint(page);
     await shot(page, "P2-selector");
-    const tableRows = await page.evaluate(() => [...document.querySelectorAll("tr")].map((tr) => [...tr.querySelectorAll("td,th")].map((c) => c.innerText.trim())));
+    const tableRows = await page.evaluate(() => [...document.querySelectorAll("#step-select-point tr[data-search]")].map((tr) => {
+      const a = tr.querySelector('a[href*="backup="]');
+      return { name: a ? new URLSearchParams(a.getAttribute("href").split("?")[1] || "").get("backup") : null,
+        cells: [...tr.querySelectorAll("td")].map((c) => c.innerText.trim()) };
+    }));
     const checked = [], wrong = [];
-    for (const cells of tableRows) {
-      const name = cells.find((c) => byName[c]);
-      if (!name) continue;
+    for (const { name, cells } of tableRows) {
+      if (!name || !byName[name]) continue;
       const b = byName[name];
       const text = cells.join(" | ");
       // only rows WITH a signed cell (the selector's); the holdings table beside it has none
@@ -204,15 +215,20 @@ try {
     const nonVerified = api.filter((b) => !(b.operation && b.operation.verifiedSuccess === true && b.operation.verificationState === "valid"));
     row("P2 every selector row agrees with the API: green + 'manifest attested' exactly where verifiedSuccess/valid; a point the API did not verify is never green there (refused 'unverified: ...' or not offered at all)",
       checked.length > 0 && wrong.length === 0 && nonVerified.length > 0 && nonVerified.every((b) => !checked.some((c) => c.name === b.name && c.green)),
-      { rowsChecked: checked.length, green: checked.filter((c) => c.green).length, nonVerifiedInApi: nonVerified.map((b) => [b.name, b.operation && b.operation.verificationState]),
+      { rowsChecked: checked.length, selectorCount, green: checked.filter((c) => c.green).length, nonVerifiedInApi: nonVerified.map((b) => [b.name, b.operation && b.operation.verificationState]),
         shownRefused: controls.map((c) => c.name), notOffered: nonVerified.filter((b) => !checked.some((c) => c.name === b.name)).map((b) => b.name), wrong: wrong.slice(0, 5) });
     // the same points on the Backups page: the one badge rule (backupBadge), never green
     await gotoHash(page, `#/backups?ns=${NS}`);
     await page.waitForTimeout(3000);
-    const bl = await textOf(page);
-    const lines = nonVerified.map((b) => [b.name, (bl.split("\n").find((l) => l.startsWith(b.name + "\t")) || "")]);
+    // Each point's own row, found by its NAME cell through the list's filter (console-ux-1: the
+    // name cell carries "Follow this run" beneath it, and the list is paginated).
+    const lines = [];
+    for (const b of nonVerified) {
+      const r = await listRow(page, "backups", b.name);
+      lines.push([b.name, r ? r.text : "", r ? [r.cells.PHASE, r.cells.EXIT, r.cells.RECORDS, r.cells.SIGNED].join(" | ") : "no row"]);
+    }
     row("P2 control: on the Backups page each point the API did not verify reads 'unverified: <case>' and never the green badge",
-      lines.length > 0 && lines.every(([, l]) => /unverified: /.test(l) && !/verified by weirkeeper/.test(l)), { lines: lines.map(([n, l]) => [n, l.split("\t").slice(2, 6).join(" | ")]) });
+      lines.length > 0 && lines.every(([, l]) => /unverified: /.test(l) && !/verified by weirkeeper/.test(l)), { lines: lines.map(([n, , cells]) => [n, cells]) });
     writeFileSync(`${OUT}/P2-table.json`, JSON.stringify({ pick: pick.name, facts, checked }, null, 1));
   }
   // ------------------------------------------------------------------ SWEEP (5, 6, 7)
@@ -358,33 +374,38 @@ try {
     const sched = (point.spec.scheduleRef || {}).name;
     const target = kj("get", "kafkaclusters").items.find((i) => i.spec.role === "target" && (i.status || {}).reachable !== false).metadata.name;
     const stamp = Date.now().toString(36).slice(-4);
-    const legacyFill = async (evidenceBucket) => {
-      await page.fill('input[name="endpoint"]', "http://logweir-minio.logweir-system.svc:9000");
-      await page.fill('input[name="region"]', "us-east-1");
+    // ONE STEP AT A TIME (console-ux-1, MCP-29): the inline archive's fields are step 1's, the
+    // target and prefix step 4's; the evidence bucket and its note are read on step 1, where they
+    // are shown. Walked 1 -> 4 with Next.
+    const legacyFill = async (evidenceBucket, prefix) => {
+      await wizardStep(page, 1);
+      await page.fill("#store-endpoint", "http://logweir-minio.logweir-system.svc:9000");
+      await page.fill("#store-region", "us-east-1");
       await page.check('input[name="pathStyle"]');
       await page.check('input[name="allowHttp"]');
       if (evidenceBucket) { await page.fill('input[name="evidenceBucket"]', evidenceBucket); await page.locator('input[name="evidenceBucket"]').blur(); }
+      const evidence = await page.inputValue('input[name="evidenceBucket"]');
+      const note = (await page.locator("#legacy-evidence-bucket").count()) ? await page.locator("#legacy-evidence-bucket").innerText() : "";
+      await wizardStep(page, 4);
       const opts = await page.$$eval('select[name="targetCluster"] option', (os) => os.map((x) => [x.value, x.textContent]));
       await page.selectOption('select[name="targetCluster"]', opts.find((x) => x[1].startsWith(target + " "))[0]);
-      await page.selectOption('select[name="mode"]', "newTopic");
+      await page.selectOption("#target-mode", "newTopic");
+      await page.fill('input[name="topicPrefix"]', prefix); await page.locator('input[name="topicPrefix"]').blur();
+      await page.waitForTimeout(1500);
+      return { evidence, note };
     };
+    // Step 5's check, then step 6, where Create's state is read.
     const readiness = async (label) => {
+      await wizardStep(page, 5);
       const t0 = new Date(Date.now() - 2000).toISOString();
       await page.click("#restore-readiness-start");
-      let rows = [], s5 = "";
-      const end = Date.now() + 240000;
-      while (Date.now() < end) {
-        await page.waitForTimeout(4000);
-        const t = await textOf(page);
-        s5 = t.slice(t.indexOf("5. Operation readiness"), t.indexOf("6. Plan, hash and names"));
-        rows = [...s5.matchAll(/^([a-zA-Z]+\.[a-zA-Z]+)\t([^\t]+)\t(blocking|advisory|executionOnly)\t([A-Za-z]+)/gm)].map((m) => ({ id: m[1], verdict: m[2], gating: m[3], code: m[4] }));
-        if (rows.length > 0 && !rows.some((r) => /pending|running/i.test(r.verdict))) break;
-      }
+      const read = (await readinessRows(page, 240)) || { rows: [], text: await page.locator("#step-preflight").innerText() };
       const pf = kj("get", "preflights").items.filter((p) => p.metadata.creationTimestamp >= t0.slice(0, 19) + "Z" && ((p.spec.request || {}).operation === "Restore"))
         .sort((a, b) => (a.metadata.creationTimestamp < b.metadata.creationTimestamp ? 1 : -1))[0];
       const checks = (((pf || {}).status || {}).result || {}).checks || [];
       await shot(page, `${label}-readiness`);
-      return { rows, s5, pf, checks, createDisabled: await page.isDisabled("#create-restore") };
+      await wizardStep(page, 6);
+      return { rows: read.rows, s5: read.text, pf, checks, createDisabled: await page.isDisabled("#create-restore") };
     };
     const byId = (checks, id) => checks.find((c) => c.id === id) || {};
     const scopeOf = (c) => c.scope ? `${c.scope.kind}/${c.scope.name}` : "";
@@ -393,14 +414,12 @@ try {
     await waitForText(page, /Restore this point/, 60, "the legacy schedule page");
     const link = page.locator(`a[href*="backup=${point.metadata.name}"]`, { hasText: /Restore this point/ }).first();
     row("L1 the legacy schedule's page offers 'Restore this point' on the pre-upgrade row", (await link.count()) > 0, { schedule: sched, point: point.metadata.name, created: point.metadata.creationTimestamp });
-    if (await link.count()) await link.click();
-    else await gotoHash(page, `#/restore?ns=${NS}&backup=${encodeURIComponent(point.metadata.name)}&uid=${encodeURIComponent(point.metadata.uid)}`);
-    await waitForText(page, /6\. Plan, hash and names/, 60, "the wizard");
-    await legacyFill(null);
-    await page.fill('input[name="topicPrefix"]', `lg${stamp}-`); await page.locator('input[name="topicPrefix"]').blur();
-    await page.waitForTimeout(1500);
-    const evb = await page.inputValue('input[name="evidenceBucket"]');
-    const note = (await page.locator("#legacy-evidence-bucket").count()) ? await page.locator("#legacy-evidence-bucket").innerText() : "";
+    if (await link.count()) {
+      await revealInGrid(page, link, point.metadata.name);
+      await link.click();
+      await wizardAt(page, 1, 60);
+    } else await openWizard(page, `#/restore?ns=${NS}&backup=${encodeURIComponent(point.metadata.name)}&uid=${encodeURIComponent(point.metadata.uid)}`);
+    const { evidence: evb, note } = await legacyFill(null, `lg${stamp}-`);
     row("L1 the evidence bucket starts as the archive's own bucket (kafka-backups, not logweir-evidence), with the note naming LOGWEIR_ARCHIVE_URL",
       evb === "kafka-backups" && /LOGWEIR_ARCHIVE_URL/.test(note), { evidenceBucket: evb, note });
     const r1 = await readiness("L1");
@@ -437,11 +456,17 @@ try {
     row("L1 the check Job's AWS_ACCESS_KEY_ID is a secretKeyRef to logweir-s3/access-key-id", !!env && env.some((e) => e[0] === "AWS_ACCESS_KEY_ID" && /"name":"logweir-s3"/.test(e[1]) && /"key":"access-key-id"/.test(e[1])), { job: jobName, env });
     writeFileSync(`${OUT}/L1-preflight.json`, JSON.stringify(r1.pf, null, 1));
     // ---- L1b: the verdict is bound to the archive Secret
-    const secretField = page.locator('input[name="archiveSecret"]');
+    // The archive Secret is step 1's; the verdict it makes stale is read where the wizard shows
+    // it, steps 5 and 6 (walked with Next), as the whole page carried both before.
+    await wizardStep(page, 1);
+    const secretField = page.locator("#archive-secret");
     const orig = await secretField.inputValue();
     await secretField.fill("logweir-s3-other"); await secretField.blur();
     await page.waitForTimeout(2000);
-    const tb = await textOf(page);
+    await wizardStep(page, 5);
+    const tb5 = await page.locator("#step-preflight").innerText();
+    await wizardStep(page, 6);
+    const tb = tb5 + "\n" + (await page.locator("#step-plan").innerText());
     const staleLine = (tb.match(/[^\n]*referentChanged[^\n]*/) || tb.match(/[^\n]*stale[^\n]*/i) || [""])[0];
     const disabledB = await page.isDisabled("#create-restore");
     let refusedB = disabledB;
@@ -457,12 +482,14 @@ try {
       /referentChanged/.test(tb) && /Secret\//.test(staleLine + tb.slice(tb.indexOf("referentChanged"), tb.indexOf("referentChanged") + 200)) && refusedB,
       { orig, staleLine: staleLine.slice(0, 300), createDisabled: disabledB, createAnswer, restoreMade: !refusedB });
     await shot(page, "L1b-stale");
+    await wizardStep(page, 1);
     await secretField.fill(orig); await secretField.blur();
     // ---- L2: re-check with the original Secret, then Create (Ordinary) -> Succeeded, Valid, completion
     if (!GROUPS.includes("LEGACY-NOCREATE")) {
       const r2 = await readiness("L2");
       const nr = r2.rows.filter((r) => r.gating === "blocking" && r.verdict !== "ready" && r.id !== "approval.state");
       row("L2 re-checked with the Backup's own Secret: ready again", nr.length === 0 && !r2.createDisabled, { notReady: nr, preflight: r2.pf && r2.pf.metadata.name });
+      await wizardStep(page, 6);
       await page.click("#create-restore");
       await page.waitForURL(/#\/(operations|approvals|history)/, { timeout: 60000 });
       const rname = decodeURIComponent((page.url().match(/[?&](?:name|subject)=([^&]+)/) || [])[1] || "");
@@ -489,17 +516,15 @@ try {
     }
     // ---- L3: the same point with evidence bucket logweir-evidence -> an advisory row, Create still enabled
     await gotoHash(page, `#/clusters?ns=${NS}`);
-    await gotoHash(page, `#/restore?ns=${NS}&backup=${encodeURIComponent(point.metadata.name)}&uid=${encodeURIComponent(point.metadata.uid)}`);
-    await waitForText(page, /6\. Plan, hash and names/, 60, "the wizard");
-    await legacyFill("logweir-evidence");
-    await page.fill('input[name="topicPrefix"]', `le${stamp}-`); await page.locator('input[name="topicPrefix"]').blur();
-    await page.waitForTimeout(1500);
+    await openWizard(page, `#/restore?ns=${NS}&backup=${encodeURIComponent(point.metadata.name)}&uid=${encodeURIComponent(point.metadata.uid)}`);
+    await legacyFill("logweir-evidence", `le${stamp}-`);
     const r3 = await readiness("L3");
     const er = byId(r3.checks, "destination.evidenceReadable");
     row("L3 (P5 control) evidence bucket logweir-evidence: an advisory destination.evidenceReadable unknown/EvidenceReadNotConfigured naming s3://logweir-evidence and the handle by role only (no kafka-backups/logweir); Create still enabled",
       er.gating === "advisory" && er.state === "unknown" && er.code === "EvidenceReadNotConfigured" && /s3:\/\/logweir-evidence/.test(er.message || "") && /LOGWEIR_ARCHIVE_URL/.test(er.message || "") && !/kafka-backups\/logweir/.test(er.message || "") && !r3.createDisabled,
       { row: { gating: er.gating, state: er.state, code: er.code, message: er.message }, createDisabled: r3.createDisabled, preflight: r3.pf && r3.pf.metadata.name });
     if (GROUPS.includes("LEGACY-L3CREATE")) {
+      await wizardStep(page, 6);
       await page.click("#create-restore");
       await page.waitForURL(/#\/(operations|approvals|history)/, { timeout: 60000 });
       const rname = decodeURIComponent((page.url().match(/[?&](?:name|subject)=([^&]+)/) || [])[1] || "");
@@ -553,7 +578,8 @@ try {
     await form.locator('select[name="destination"]').selectOption(dopts.find((o) => o[1].startsWith("primary"))[0]);
     await page.waitForTimeout(800);
     await form.getByRole("button", { name: /preview next runs/i }).click();
-    await waitForText(page, /NEXT RUNS[\s\S]*T02:00:00Z/, 60, "the cadence preview");
+    // The AT (UTC) column in the one timestamp format (console-ux-1, MCP-7): was `…T02:00:00Z`.
+    await waitForText(page, /NEXT RUNS[\s\S]*\d{4}-\d{2}-\d{2} 02:00:00 UTC/, 60, "the cadence preview");
     const verdictOf = async () => {
       const end = Date.now() + 240000;
       let t = "";
