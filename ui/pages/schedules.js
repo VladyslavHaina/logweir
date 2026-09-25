@@ -87,6 +87,7 @@ import {
   nextRunsPanel,
   runPhaseBadge,
   replace,
+  restoreNeedsRole,
   restorePointLink,
   revisionLine,
   rfc3339,
@@ -5135,9 +5136,13 @@ export function renderLatestPointAction(ns, runs, points, coverage) {
     "<p class=\"note\" id=\"schedule-latest-point\">Latest recovery point: " +
     cell(meta.name) + ", backup set " + cell((choice.point.status || {}).backupId) +
     " (catalog: " + esc(catalogWordsFor(choice.point, points, coverage)) + "). " +
-    "<a href=\"" + esc(route) + "\" id=\"schedule-restore-latest\"" +
-    (fromCatalog === null ? "" : " data-restore-from=\"catalog\"") + ">" +
-    "Restore from this point</a>" + skipped + "</p>"
+    // A ROLE THAT CANNOT RESTORE READS WHO CAN (MCP round 3, R3-2's sweep).
+    (granted(ns, "restoreCreate")
+      ? "<a href=\"" + esc(route) + "\" id=\"schedule-restore-latest\"" +
+        (fromCatalog === null ? "" : " data-restore-from=\"catalog\"") + ">" +
+        "Restore from this point</a>"
+      : restoreNeedsRole(true)) +
+    skipped + "</p>"
   );
 }
 

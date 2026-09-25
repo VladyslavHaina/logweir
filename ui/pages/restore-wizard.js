@@ -5751,6 +5751,35 @@ export function keepStatusInView(node, selector) {
   return true;
 }
 
+/** BRINGS STEP 5'S VERDICT HEAD INTO VIEW ABOVE THE STICKY FOOTER when its
+ *  check turns terminal (review L7 of MCP round 3's R3-1). The status line is
+ *  kept clear at the click ([`keepStatusInView`]); the verdict lands later,
+ *  below it, and at 390 px it landed behind the footer. So when the follow
+ *  paints a terminal check and focus is inside step 5 -- the reader is
+ *  looking at it -- the headline (`.preflight-head` of that check) is scrolled
+ *  to its nearest edge, which honours the footer-high `scroll-margin-bottom`
+ *  `style.css` gives it. Focus anywhere else moves nothing. Exported for the
+ *  suite. */
+export function keepVerdictInView(node, check) {
+  const id = String(((check || {}).id) || "");
+  if (id.length === 0 || node === null || node === undefined ||
+    typeof node.querySelector !== "function") {
+    return false;
+  }
+  const step = node.querySelector("#step-preflight");
+  const head = node.querySelector("#preflight-" + id + " .preflight-head");
+  if (step === null || step === undefined || head === null || head === undefined ||
+    typeof step.contains !== "function" || typeof head.scrollIntoView !== "function") {
+    return false;
+  }
+  const doc = step.ownerDocument;
+  if (!doc || doc.activeElement === null || !step.contains(doc.activeElement)) {
+    return false;
+  }
+  head.scrollIntoView({ block: "nearest" });
+  return true;
+}
+
 /** A held verdict, replaced by a fresher read of the SAME check -- except that
  *  staleness is one-way on this page. A mark `selectTarget` or
  *  `selectEvidenceDestination` made is about a choice the server cannot see
@@ -5825,7 +5854,13 @@ function followRestoreReadiness(node, state, parse, api, lifecycle) {
         followStopped(next) !== followStopped(now);
       state.readiness = Object.assign({}, state.readiness, { preflight: next });
       if (moved) {
-        await renderAndWire(node, state, parse, api, lifecycle, true);
+        const painted = await renderAndWire(node, state, parse, api, lifecycle, true);
+        // THE VERDICT, WHEN IT LANDS, IS BROUGHT ABOVE THE FOOTER TOO (review
+        // L7 of R3-1): the status line was kept clear at the click, and the
+        // verdict under it arrives later, through this repaint.
+        if (painted === true && next.terminal === true && (now === null || now.terminal !== true)) {
+          keepVerdictInView(node, next);
+        }
       }
     },
   });

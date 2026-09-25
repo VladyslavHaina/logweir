@@ -26,10 +26,12 @@ import { resetMode, selectMode, sessionIdentity } from "../client.js";
 import { RESTORE_NEEDS_ROLE_SENTENCE, restorePointLink } from "../render.js";
 import { pointRow } from "../pages/catalog.js";
 import { restorePointCell } from "../pages/history.js";
-import { restoreCell } from "../pages/schedules.js";
+import { renderLatestPointAction, restoreCell } from "../pages/schedules.js";
+import { renderRetryAction } from "../pages/operation.js";
 import {
   initialState,
   keepStatusInView,
+  keepVerdictInView,
   mappingProblems,
   readinessSourceSentence,
   recoveryPoints,
@@ -75,7 +77,7 @@ test("r3_1_every_wizard_focus_target_keeps_the_footers_height_clear_below_it", (
   assert.ok(token !== null, "the clearance is a token of the console's own layer");
   // The footer wraps to two rows at 390 px: about 110 px, which is 6.9rem.
   assert.ok(Number(token[1]) >= 7, "and it clears the two-row footer: " + token[1] + "rem");
-  const rule = /\.wizard-page \.form-status,\s*\.wizard-page \[tabindex\] \{\s*scroll-margin-bottom: var\(--lw-wizard-nav-clearance\);/;
+  const rule = /\.wizard-page \.form-status,\s*\.wizard-page \[tabindex\],\s*\.wizard-page \.preflight-head \{\s*scroll-margin-bottom: var\(--lw-wizard-nav-clearance\);/;
   assert.match(css, rule,
     "NEGATIVE CONTROL: without it a status scrolled into view lands under the footer");
   assert.match(css, /\.wizard-nav \{\s*position: sticky;\s*bottom: 0;/,
@@ -257,4 +259,90 @@ test("r3_3_a_session_with_no_role_anywhere_reads_no_role_yet_in_the_header", asy
   } finally {
     resetMode();
   }
+});
+
+// ===========================================================================
+// Fix round (review of poc-fixes-5): L6 and L7
+// ===========================================================================
+
+test("r3_2_the_schedules_latest_point_and_a_failed_restores_retry_ask_the_same_grant", async () => {
+  // REVIEW L6: the sweep missed two links a viewer was still offered -- the
+  // schedule detail's "Restore from this point" and the operation page's
+  // "Retry to a fresh target", which opens the wizard for a NEW Restore.
+  const point = fixture("wizard-backups.json").items.find((b) => recoveryPoints({ items: [b] }).length > 0);
+  const failed = { kind: "restore", console: true, terminal: true, state: "failed",
+    name: "rst-failed", result: {} };
+  const viewer = fixture("console/session-viewer.json");
+  const ns = viewer.namespaces[0].namespace;
+  point.metadata.namespace = ns;
+  await signedInAs(viewer);
+  try {
+    const latest = renderLatestPointAction(ns, [point], null, null);
+    assert.match(latest, /id="schedule-latest-point"/, "the latest point is still named");
+    assert.doesNotMatch(latest, /id="schedule-restore-latest"/,
+      "NEGATIVE CONTROL: a viewer is not offered Restore from this point");
+    assert.ok(latest.includes("An operator or administrator can restore this point."), latest);
+    const retry = renderRetryAction(failed, ns);
+    assert.match(retry, /id="restore-retry"/, "the failed restore still says what a retry is");
+    assert.doesNotMatch(retry, /id="retry-fresh-target"/,
+      "NEGATIVE CONTROL: a viewer is not offered Retry to a fresh target");
+    assert.ok(retry.includes("An operator or administrator can restore this point."), retry);
+  } finally {
+    resetMode();
+  }
+  await signedInAs(fixture("console/session.json"));
+  try {
+    assert.match(renderLatestPointAction("team-a", [point], null, null),
+      /id="schedule-restore-latest"/, "an operating role keeps the link");
+    assert.match(renderRetryAction(failed, "team-a"), /id="retry-fresh-target"/);
+  } finally {
+    resetMode();
+  }
+});
+
+/** Step 5 with a verdict head, in the fake document, and a spy on its scroll. */
+function stepWithVerdict() {
+  const doc = fakeDocument();
+  const node = build(doc, ["div", {},
+    ["section", { id: "step-preflight", tabindex: "-1" },
+      ["div", { class: "form-status", id: "restore-readiness-status", tabindex: "-1" }, "Created"],
+      ["div", { class: "preflight-result", id: "preflight-pf-v" },
+        ["p", { class: "preflight-head" }, "ready"]]],
+    ["section", { id: "step-plan", tabindex: "-1" }, "plan"]]);
+  doc.body.appendChild(node);
+  const head = node.querySelector("#preflight-pf-v .preflight-head");
+  const asked = [];
+  head.scrollIntoView = (options) => { asked.push(options); };
+  return { node: node, asked: asked };
+}
+
+test("l7_a_verdict_landing_while_the_reader_is_on_step_5_is_brought_above_the_footer", () => {
+  // REVIEW L7 of R3-1: the status line was kept clear at the click, and the
+  // verdict under it -- which lands later, through the follow -- was left
+  // behind the sticky footer at 390 px.
+  const t = stepWithVerdict();
+  t.node.querySelector("#restore-readiness-status").focus();
+  assert.equal(keepVerdictInView(t.node, { id: "pf-v", terminal: true }), true);
+  assert.deepEqual(t.asked, [{ block: "nearest" }],
+    "NEGATIVE CONTROL: the verdict head is scrolled to its nearest edge, which honours the " +
+      "footer-high scroll margin");
+  const away = stepWithVerdict();
+  away.node.querySelector("#step-plan").focus();
+  assert.equal(keepVerdictInView(away.node, { id: "pf-v", terminal: true }), false,
+    "focus elsewhere: nothing moves under the reader");
+  assert.equal(away.asked.length, 0);
+  const css = readFileSync(UI + "style.css", "utf8");
+  assert.match(css, /\.wizard-page \.preflight-head \{\s*scroll-margin-bottom: var\(--lw-wizard-nav-clearance\);/,
+    "the verdict head keeps the footer's height clear below it");
+});
+
+test("l7_the_step_5_follow_asks_for_the_verdict_when_its_check_turns_terminal", () => {
+  // THE WIRING, read from the source for the same reason as R3-1's: the fake
+  // views the wizard mounts in have no layout.
+  const source = readFileSync(UI + "pages/restore-wizard.js", "utf8");
+  const follow = source.slice(source.indexOf("function followRestoreReadiness("),
+    source.indexOf("/** The exact step-5 request for one recovery point."));
+  assert.match(follow,
+    /const painted = await renderAndWire\(node, state, parse, api, lifecycle, true\);[\s\S]*?if \(painted === true && next\.terminal === true && \(now === null \|\| now\.terminal !== true\)\) \{\s*keepVerdictInView\(node, next\);/,
+    "NEGATIVE CONTROL: the follow's repaint asks for the verdict once the check turns terminal");
 });

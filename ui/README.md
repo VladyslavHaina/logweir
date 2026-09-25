@@ -1633,7 +1633,9 @@ tokens: each of those clicks is a new check by design.
   wizard focus target keeps the footer's height clear below it
   (`scroll-margin-bottom: var(--lw-wizard-nav-clearance)`), and once step 5
   is painted a status that holds focus is scrolled to its nearest edge
-  (`keepStatusInView`); focus anywhere else moves nothing.
+  (`keepStatusInView`). The verdict lands later, through the follow: when the
+  check turns terminal while focus is in step 5, its headline is scrolled the
+  same way (`keepVerdictInView`). Focus anywhere else moves nothing.
 * **Names in the step texts are code** (R2-10): step 5's source sentence, step
   4's mapping and prefix complaints, step 6's plan problem and the
   catalog-point refusal render their backticked spans with `messageText`,
@@ -1643,7 +1645,9 @@ tokens: each of those clicks is a new check by design.
   `restorePointLink`: the link when the session grants `restoreCreate` in the
   namespace, and "an operator or administrator can restore this point"
   otherwise -- the route refuses such a role by name, so the link was an offer
-  already known to fail.
+  already known to fail. The schedule detail's *Restore from this point* and a
+  failed Restore's *Retry to a fresh target* (a new Restore) ask the same grant
+  and say the same words (`restoreNeedsRole`).
 * **The header agrees with the no-role card** (R3-3): a session with no role
   anywhere reads "no role yet", not "choose a namespace to see your role".
 

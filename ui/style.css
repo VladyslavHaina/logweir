@@ -2171,9 +2171,11 @@ button[aria-busy="true"] {
 /* WHAT TAKES FOCUS ON A STEP IS NEVER LEFT UNDER THE FOOTER (MCP round 3,
  * R3-1): at 390 px a readiness click moved focus to its status line, which sat
  * behind the sticky Back/Next bar with the verdict below it. A focus target
- * scrolled into view keeps the footer's height clear beneath it. */
+ * scrolled into view -- and step 5's verdict head, scrolled into view when
+ * the verdict lands -- keeps the footer's height clear beneath it. */
 .wizard-page .form-status,
-.wizard-page [tabindex] {
+.wizard-page [tabindex],
+.wizard-page .preflight-head {
   scroll-margin-bottom: var(--lw-wizard-nav-clearance);
 }
 

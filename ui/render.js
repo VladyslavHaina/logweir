@@ -1425,14 +1425,23 @@ export const CHECKING_SENTENCE =
 export const RESTORE_NEEDS_ROLE_SENTENCE =
   "an operator or administrator can restore this point";
 
+/** Who can restore, in place of a restore link: the words alone for a table
+ *  cell, or -- `asSentence` -- capitalised and closed, for a place where the
+ *  link stood inside a sentence of its own. */
+export function restoreNeedsRole(asSentence) {
+  const words = asSentence === true
+    ? RESTORE_NEEDS_ROLE_SENTENCE.charAt(0).toUpperCase() + RESTORE_NEEDS_ROLE_SENTENCE.slice(1) + "."
+    : RESTORE_NEEDS_ROLE_SENTENCE;
+  return "<span class=\"note\" data-restore-refused=\"role\">" + esc(words) + "</span>";
+}
+
 /** "Restore this point": the link to the wizard, or -- for a role the session
  *  says cannot create a Restore in this namespace (`allowed === false`) -- the
  *  sentence saying who can. `href` is the route (escaped here); `attributes`
  *  is extra markup the caller has already escaped. Pure. */
 export function restorePointLink(href, allowed, label, attributes) {
   if (allowed === false) {
-    return "<span class=\"note\" data-restore-refused=\"role\">" +
-      esc(RESTORE_NEEDS_ROLE_SENTENCE) + "</span>";
+    return restoreNeedsRole(false);
   }
   return "<a class=\"action\" href=\"" + esc(href) + "\"" + (attributes || "") + ">" +
     esc(label || "Restore this point") + "</a>";

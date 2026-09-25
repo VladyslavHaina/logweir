@@ -55,6 +55,7 @@ import {
   facts,
   phaseBadge,
   replace,
+  restoreNeedsRole,
   scorecardClaim,
   stateBadge,
   table,
@@ -65,6 +66,7 @@ import {
   flagBadge,
   when,
 } from "../render.js";
+import { granted } from "../client.js";
 import { active, cancelled } from "../lifecycle.js";
 import { inConsole, readOperation, watchOperation } from "../operation-watch.js";
 
@@ -361,9 +363,14 @@ export function renderRetryAction(v, ns) {
   return (
     "<section class=\"retry\" id=\"restore-retry\"><h3>Retry</h3>" +
     "<p class=\"note\">" + esc(RETRY_FRESH_TARGET_SENTENCE) + "</p>" +
-    "<p class=\"actions\"><a id=\"retry-fresh-target\" href=\"" +
-    esc(retryRoute(String(ns || ""), String(v.name || ""))) +
-    "\">Retry to a fresh target</a></p></section>"
+    // A RETRY IS A NEW RESTORE, and a role that cannot create one reads who
+    // can (MCP round 3, R3-2's sweep): the wizard's route refuses it by name.
+    (granted(String(ns || ""), "restoreCreate")
+      ? "<p class=\"actions\"><a id=\"retry-fresh-target\" href=\"" +
+        esc(retryRoute(String(ns || ""), String(v.name || ""))) +
+        "\">Retry to a fresh target</a></p>"
+      : "<p class=\"actions\">" + restoreNeedsRole(true) + "</p>") +
+    "</section>"
   );
 }
 
