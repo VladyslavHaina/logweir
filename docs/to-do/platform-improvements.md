@@ -512,7 +512,20 @@ surviving. None is fixed yet except where a worker is named.
     - restore step 5: 90 s.
   - **Recovery:** click again, which replays the finished check, or reload.
 
-  Fix on `claude/poc-fixes-5` (running): all four follows, plus a guard that ties every budget to the check's timeout. | PLAT-20.2 / PLAT-03.x / PLAT-10.x console |
+  **FIXED (2026-09-25): `claude/poc-fixes-5` merged as `815249cb`; full gate rc 0, UI 795/795.**
+  - **The fix:** one shared follow (`lifecycle.js` `followCheck`) reads a check until the longest time any check may take: 720 s for a Preflight (`timeoutSeconds` max 600 + the Job's 90 s + 30 s), and 420 s for a discovery.
+    - It reads every 2 s for the first 20 s, then backs off to 10 s.
+    - At the deadline it says "did not finish", and its retry is a new check.
+    - All six followers use it. Discover topics now follows its check, and Clusters resumes after a remount.
+  - **Review:** ACCEPT-WITH-FIXES, and the fix round was read by the orchestrator:
+    - M1: one follow per check;
+    - M2: a route-leave row for every follower;
+    - M3: 401, 403, refused and contract errors end after one read;
+    - plus L1–L9.
+  - **Mutants:** every one killed.
+  - **Follow-up (Tier A, open):** the Preflight and TopicDiscovery views publish no deadline for a check in flight. Publishing `deadlineAt` would let the console stop at about 4 minutes for a default check.
+
+  Live proof is owed by `claude/poc-upgrade-4`. | PLAT-20.2 / PLAT-03.x / PLAT-10.x console |
 | HARNESS-CHECK-TABLE-READERS | **FIXED (2026-09-25, H7; `claude/poc-upgrade-3` `93140122`, merged as `4e58d330`).**
   - **The defect:** R2-3 prints a check's fields in four cells, but every reader in `scripts/live/poc` took a row from innerText's tab-joined `id verdict gating code`. So every readiness row would have waited out its budget and failed: J2–J4, J6, README10 R8.3/R8.5, restore step 5 and P8.
   - **Fix:** `checkRowsIn`/`settledRows` read cells and `data-field` spans, and settle on rows plus no "checking…".
@@ -529,7 +542,11 @@ surviving. None is fixed yet except where a worker is named.
     - R3-4 (low): internal vocabulary in the applicability chip;
     - R3-5 (low): cluster IDs wrap at 1024 px.
 
-  R2-10 and R3-1 to R3-3 are on `claude/poc-fixes-5` as a separate commit (running). R3-4 and R3-5 are open. | PLAT-18.2 / PLAT-17.2 console |
+  **R2-10 and R3-1 to R3-3 are FIXED on `815249cb`.** This landed with `claude/poc-fixes-5`:
+  - R3-1 now also keeps the verdict above the sticky bar (review L7);
+  - R3-2 also covers the Backups list, a schedule's points and detail, and "Retry to a fresh target" (review L6).
+
+  Live proof is owed by `claude/poc-upgrade-4`. R3-4 and R3-5 (low) stay open. | PLAT-18.2 / PLAT-17.2 console |
 | CATALOG-POINT-STATE-NOT-IN-CHECK-INPUTS | LOW, pre-existing (catalog-referent review). A restore check binds its `RecoveryCatalog` by UID, and the catalog's spec is immutable except `syncRequest`, but the chosen point's catalogued state is not among the check's recorded inputs, so a re-sync that changes that point (e.g. its trust or its receipt) does not mark the check stale. Bounded: the runner re-verifies the point's signed receipt and signer at restore time and refuses an untrusted point (exit 3 `PointUntrusted`). Open. | PLAT-08.2 / PLAT-15.2 (follow-up) |
 | TEST-APPROVAL-UNPINNED-TIMING | **FIXED (2026-09-24):** the bound now subtracts a same-moment `--version` start-up baseline (985 ms vs the command's 8.6 ms warm); a 0 s bound fails as a control. LOW, test only. `weirkeeper` `approval.rs::an_unpinned_approver…` failed at 15–55 s against its 15 s bound on a loaded host (four agents compiling; seen by the `claude/readiness-principal` worker); it passes on re-run and at base, and no product path changed. Fix: a bound that measures the controller's own work rather than wall time, or a documented larger budget. Open. | — |
 | RECEIPT-DUP-UPGRADE-WINDOW | An execution whose first run was made by a runner without the execution claim, re-created after the upgrade (the runner image is not frozen in the execution inputs), is claimed successfully by the new runner and the engine overwrites the old run's manifest. Mitigation: release notes, "let in-flight Backups finish before upgrading". Fix (follow-up): a pre-engine manifest-exists refusal, after the engine test doubles write the manifest. Open. | PLAT-06.1 / PLAT-20.2 |
