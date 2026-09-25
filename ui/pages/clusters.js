@@ -44,8 +44,10 @@
 import { CONSOLE, LEGACY, apiClient, mayOperate, mode } from "../client.js";
 import {
   active,
+  askCheck,
   cancelled,
   createOnce,
+  discoverySpent,
   dropDraft,
   fieldErrors,
   formKey,
@@ -744,7 +746,12 @@ export function renderDiscoveryPanel(view) {
   const may = v.mayOperate !== false;
   const latest = v.latestAttempt || null;
   const successful = v.lastSuccessful || null;
-  const filters = v.filters || {};
+  // WHAT THE INPUTS SHOW is what the reader typed (`v.typed`, read off the
+  // live controls before a repaint -- P13's class) over the filters last
+  // APPLIED. The two are kept apart because the applied filters are what
+  // "Show more" pages with: a cursor is bound to them, and typed text nobody
+  // submitted must not become a filter a cursor was never issued for.
+  const filters = Object.assign({}, v.filters || {}, v.typed || {});
   const state = v.state || {};
   const pending = state.phase === "pending";
   const running = latest !== null && latest.terminal === false;
@@ -1231,9 +1238,39 @@ async function readDiscoveries(api, ns, name, lifecycle) {
 // it belongs beside.
 const checkViews = new Map();
 
+/** What the reader has put into the discovery form and the topic filters,
+ *  read off the live controls, or `null` when none is on screen (P13's class).
+ *
+ *  THE WHOLE DETAIL REPAINTS on every answer this view waits for -- each read
+ *  of a followed "Test connection", the probe re-read, the discovery's own
+ *  record, a page of topics -- and it rendered those inputs from the view
+ *  alone, so text typed while a check was being followed was gone when its
+ *  next read landed. Nothing here is a credential: names and filters. */
+export function readDiscoveryTyped(node) {
+  const typed = {};
+  const text = (id, field) => {
+    const control = node.querySelector("#" + id);
+    if (control !== null && control.value !== undefined && control.value !== null) {
+      typed[field] = String(control.value);
+    }
+  };
+  const internal = node.querySelector("#discovery-internal");
+  if (internal !== null) {
+    typed.includeInternal = internal.checked === true;
+  }
+  text("discovery-expected", "expectedTopics");
+  text("topic-q", "q");
+  text("topic-prefix", "prefix");
+  text("topic-internal", "internal");
+  text("topic-errored", "errored");
+  return Object.keys(typed).length === 0 ? null : typed;
+}
+
 function paintClusterDetail(node, ns, name, parse, lifecycle, api, object, discovery, check) {
   const key = formKey(ns, DISCOVERY_FORM, name);
-  const view = Object.assign({ state: mutationFor(key).state }, discovery || {});
+  const typed = readDiscoveryTyped(node);
+  const view = Object.assign({ state: mutationFor(key).state }, discovery || {},
+    typed === null ? {} : { typed: typed });
   const checkKey = formKey(ns, CONNECTION_CHECK_FORM, name);
   const remembered = checkViews.get(checkKey);
   const checkView = Object.assign(
@@ -1522,7 +1559,16 @@ function wireDiscovery(node, ns, name, parse, lifecycle, api, object, view) {
       if (expected.length > 0) {
         request.expectedTopics = expected;
       }
-      mutation.run(() => api.startDiscovery(ns, name, request));
+      // ASKED AGAIN, NOT REPLAYED, once the inventory these parameters made is
+      // spent (P14's class): a failed or stale discovery is a new key's
+      // question, and a fresh identical one is the server's to reuse.
+      mutation.run(() => askCheck({
+        intent: key,
+        question: JSON.stringify(request),
+        held: view.latestAttempt || null,
+        spent: discoverySpent,
+        start: (token) => api.startDiscovery(ns, name, request, { attempt: token }),
+      }));
     }, lifecycle);
 
     const cancel = node.querySelector("#discovery-cancel");

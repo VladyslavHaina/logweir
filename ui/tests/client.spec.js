@@ -1228,6 +1228,34 @@ test("a_connectivity_checks_key_is_per_deliberate_test_and_never_per_subject", a
   }
 });
 
+test("a_discoverys_key_carries_the_pages_intent_token_and_a_retry_keeps_it", async () => {
+  // P14's CLASS (poc-fixes-4): the discovery key was the parameters alone, so a
+  // stale inventory was replayed for as long as the controller kept it. The
+  // page's intent token (`askCheck`) now rides in the key.
+  await console_();
+  const answer = fixture("console/discovery-running.json");
+  const wire = transport((u, init) =>
+    init.method === "POST" ? { status: 202, body: answer } : undefined);
+  try {
+    const api = apiClient();
+    await api.startDiscovery("team-a", "source", {}, { attempt: "intent-1" });
+    await api.startDiscovery("team-a", "source", {}, { attempt: "intent-2" });
+    await api.startDiscovery("team-a", "source", {}, { attempt: "intent-1" });
+    await api.startDiscovery("team-a", "source", {});
+    const keys = wire.seen.map((s) => s.init.headers["Idempotency-Key"]);
+    assert.equal(keys.length, 4);
+    assert.notEqual(keys[0], keys[1],
+      "NEGATIVE CONTROL: a renewed intent is a new key (the parameters alone were one key)");
+    assert.equal(keys[0], keys[2], "a retry under one intent is one key, so it replays");
+    assert.notEqual(keys[0], keys[3]);
+    for (const key of keys) {
+      assert.match(key, /^logweir-ui\.topic-discoveries\.team-a\.source\./);
+    }
+  } finally {
+    wire.restore();
+  }
+});
+
 test("a_console_connection_carries_its_last_connectivity_check", async () => {
   // A CHECK OUTLIVES THE PAGE THAT STARTED IT, so the detail read is where the
   // console learns that one happened. The product API computes `lastTest` from

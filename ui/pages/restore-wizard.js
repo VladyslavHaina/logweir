@@ -4897,7 +4897,49 @@ async function readApprovalPolicy(api, ns, lifecycle) {
 
 /** Renders the wizard over `state` -- with its mutation record and its field
  *  messages -- and wires what was rendered to the plan it shows. */
-async function renderAndWire(node, state, parse, api, lifecycle) {
+/** The wizard's text inputs: each commits its value to the state on `change`
+ *  (blur or Enter), not on every keystroke, because a commit re-renders the
+ *  plan and its hash. */
+export const WIZARD_TEXT_INPUTS = Object.freeze([
+  "point-in-time", "topic-prefix", "store-endpoint", "store-region", "evidence-bucket",
+  "archive-secret", "evidence-endpoint", "evidence-region", "catalog-topics",
+]);
+
+/** Whether a control's value is not the one the last render gave it -- what
+ *  the reader typed and has not committed. A browser keeps the rendered value
+ *  as `defaultValue`; the suites' fakes keep it as the `value` attribute. */
+export function typedSinceRender(control) {
+  if (control === null || control === undefined) {
+    return false;
+  }
+  const rendered = typeof control.defaultValue === "string"
+    ? control.defaultValue
+    : (typeof control.getAttribute === "function" ? (control.getAttribute("value") || "") : "");
+  return String(control.value === undefined || control.value === null ? "" : control.value) !==
+    rendered;
+}
+
+/** Whether the reader is part-way through typing into one of the wizard's
+ *  text inputs. */
+export function editingWizard(node) {
+  return WIZARD_TEXT_INPUTS.some((id) => typedSinceRender(node.querySelector("#" + id)));
+}
+
+/** Renders the wizard from `state` and wires it.
+ *
+ *  `landing` IS AN ANSWER ARRIVING, not the reader acting: a followed check's
+ *  read, a mutation settling, a cancel answered. SUCH A REPAINT WAITS FOR THE
+ *  READER (P13's class): the wizard commits a text input on `change`, so a
+ *  repaint under an input being typed into rendered it from the state and the
+ *  keystrokes since the last commit were gone. The answer is already in
+ *  `state`; the paint is owed, and the reader's own commit -- the `change`
+ *  that ends the edit -- renders it with everything else. */
+async function renderAndWire(node, state, parse, api, lifecycle, landing) {
+  if (landing === true && editingWizard(node)) {
+    state.paintOwed = true;
+    return false;
+  }
+  state.paintOwed = false;
   const record = mutationFor(formKey(state.ns, WIZARD_FORM));
   state.submission = record.state;
   if (record.state.phase === "failed") {
@@ -5616,7 +5658,7 @@ function wireRestoreReadiness(node, state, parse, api, lifecycle, prepared) {
           ? null
           : state.readiness.boundSecret),
     });
-    renderAndWire(node, state, parse, api, lifecycle);
+    renderAndWire(node, state, parse, api, lifecycle, true);
     if (record.phase === "succeeded") {
       followRestoreReadiness(node, state, parse, api, lifecycle);
     }
@@ -5647,7 +5689,7 @@ function wireRestoreReadiness(node, state, parse, api, lifecycle, prepared) {
       api.cancelPreflight(state.ns, current.id).then(
         () => {
           if (active(lifecycle)) {
-            renderAndWire(node, state, parse, api, lifecycle);
+            renderAndWire(node, state, parse, api, lifecycle, true);
           }
         },
         () => {
@@ -5742,7 +5784,7 @@ async function followRestoreReadiness(node, state, parse, api, lifecycle) {
       merged.stale !== now.stale || merged.applicable !== now.applicable;
     state.readiness = Object.assign({}, state.readiness, { preflight: merged });
     if (moved) {
-      await renderAndWire(node, state, parse, api, lifecycle);
+      await renderAndWire(node, state, parse, api, lifecycle, true);
     }
   }
 }
@@ -6001,6 +6043,19 @@ function wire(node, state, parse, api, lifecycle, prepared) {
       listen(field, "change", refresh, lifecycle);
     }
   }
+  // AN OWED PAINT IS PAID WHEN AN EDIT ENDS WITHOUT A COMMIT: the reader typed
+  // and put the text back, so no `change` fires and nothing else would render
+  // the answer that landed meanwhile.
+  for (const id of WIZARD_TEXT_INPUTS) {
+    const field = node.querySelector("#" + id);
+    if (field !== null) {
+      listen(field, "blur", () => {
+        if (active(lifecycle) && state.paintOwed === true && !editingWizard(node)) {
+          renderAndWire(node, state, parse, api, lifecycle);
+        }
+      }, lifecycle);
+    }
+  }
   // THE TICKET IS NOT IN THE PLAN BYTES, so typing it re-renders nothing: it
   // is read into the state and sent beside the create body (PLAT-19.2).
   const ticket = node.querySelector("#change-ticket");
@@ -6141,7 +6196,7 @@ function wire(node, state, parse, api, lifecycle, prepared) {
     if (settled.phase === "failed") {
       state.jumpToErrors = true;
     }
-    renderAndWire(node, state, parse, api, lifecycle).then((rendered) => {
+    renderAndWire(node, state, parse, api, lifecycle, true).then((rendered) => {
       if (rendered && settled.phase === "failed") {
         const target = node.querySelector("[aria-invalid=\"true\"]") ||
           node.querySelector("#restore-submit-status");

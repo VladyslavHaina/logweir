@@ -113,10 +113,16 @@ export function fakeView() {
           element.value = element.attributes.value || "";
           element.checked = "checked" in element.attributes;
         } else if (match[1] === "select") {
+          // THE OPTION MARKED `selected`, wherever the attribute sits in its
+          // tag -- a browser's rule. The first cut matched only `value="x"
+          // selected>`, so an option spelled `value="x" selected data-name=`
+          // (the cluster selector) or `value="x" data-name="n" selected` (the
+          // destination selector) read as the FIRST option (P13's rows).
           const end = chunk.html.indexOf("</select>", match.index);
-          const chosen = /<option value="([^"]*)" selected>/.exec(chunk.html.slice(match.index, end)) ||
-            /<option value="([^"]*)"/.exec(chunk.html.slice(match.index, end));
-          element.value = chosen === null ? "" : chosen[1];
+          const options = chunk.html.slice(match.index, end).match(/<option\b[^>]*>/g) || [];
+          const parsed = options.map((o) => attributesOf(o));
+          const chosen = parsed.find((o) => "selected" in o) || parsed[0];
+          element.value = chosen === undefined ? "" : (chosen.value || "");
         } else if (match[1] === "form") {
           element.end = chunk.html.indexOf("</form>", match.index);
         } else if (match[1] === "div" &&
@@ -124,6 +130,11 @@ export function fakeView() {
           element.slotOf = element.attributes["data-policy-slot"] === undefined
             ? "run:" + element.attributes["data-run-now-slot"]
             : "policy:" + element.attributes["data-policy-slot"];
+        } else if ((match[1] === "div" || match[1] === "section") && element.attributes.id) {
+          // ANY ELEMENT A PAGE REPLACES BY ID is a slot too (a DOM replace
+          // drops what it held): the readiness panel's `#readiness-slot`, the
+          // destination detail's `#destination-test-slot`.
+          element.slotOf = "id:" + element.attributes.id;
         }
         elements.push(element);
       }
