@@ -1,7 +1,10 @@
 /# Platform improvements tracker
 
-Status: **implementation in progress**. Only tasks with explicit completion
-evidence are Done; remaining tasks retain their proposed or recorded state.
+Status: **all 41 tasks Done (2026-09-25)**, each with its completion record.
+Follow-up rows stay open in the defect ledger: POC-P15 (fix in flight),
+CONSOLE-MCP-ROUND3's low rows and REPLACE-MINIO. Product expansion has not
+started, by the user's decision. Only tasks with explicit completion evidence
+are Done.
 Reviewed against main commit `92e02097540c39ff8565283a38ee592499b95020` on
 2026-09-14. This tracker consolidates the operator, product, UI and architecture
 review into 20 implementation spikes and 41 independently assignable tasks.
@@ -238,6 +241,7 @@ runner from main with the standing fix, `claude/verdict-precedence`, `claude/evi
 | PLAT-10.1 / 10.2 | Done | plat10, plat10-finish, lab-refresh-8 (+ two reviews) | Completion record under PLAT-10.2; live on docker-desktop 2026-09-23 incl. create → backup → detail → restore. |
 | PLAT-08.2, 12.1, 12.2, 14.1, 14.2, 15.1, 15.2, 16.2, 18.2, 19.2, 20.1 | Done | (see each record) | Completion records under each task; live on docker-desktop 2026-09-23 (lab-refresh-9 and harness-rows-12, main `306cebf`). |
 | PLAT-14.3 | Done | rehearsal-catalog-trust, rehearsal-fix, reserve-commit, lab-refresh-9/10/11 (+ reviews) | Completion record under PLAT-14.3; live on docker-desktop 2026-09-24 (lab-refresh-11, main `86a554e`), every tracker test. |
+| PLAT-20.2 | Done 2026-09-25 | plat20-2 (offline half), poc-install, poc-upgrade-1/2/3, poc-fixes-1…4, release-docs-final (+ reviews); MCP console rounds 1–3 (orchestrator) | Completion record under PLAT-20.2. Live on docker-desktop 2026-09-24/25, on the PoC profile, from the published chart and images: a clean install, rehearsals R1/R2 with rollbacks, and three in-place upgrades to `a54fb823` (328/328 receipts VALID). README §10 is clean for a new user. Release notes and handoff are true at `4e58d330`. Residue: 258 of 1,000 points, POC-P15 and REPLACE-MINIO. |
 | PLAT-17.2 (PLAT-08.2, 12.1, 15.2, 19.2, 20.1 Done 2026-09-23) | Done 2026-09-24 (see its record; PoC round on the real Traefik + Dex ingress); was: In progress (source on main since `ac00819`, 2026-09-23: seven accepted branches integrated in `claude/integration-2`, gate 3,545/0; each passed its own Tier-A or Tier-B review and re-check; live evidence so far is each worker's own journey; Done records wait for lab-refresh-9 on a build that carries them) | plat08-2, plat15-2, plat17-2, plat19-2, plat20-1, integration-2 (+ reviews) | Worker reports `claude/<branch>.result.md` and reviews `claude/<branch>.review.md`. Decisions at integration: the `values.yaml` lint ceiling rises 230→232 (two reviewed option sets); a catalog-point restore writes evidence to the point's own destination. |
 | PLAT-11.2 | Done | ui-restore-selection, d2w13, d3w12, plat11-2 (+ two reviews) | Completion record under PLAT-11.2; live on docker-desktop 2026-09-22, all eight tests through the console. |
 | PLAT-07.2 | Superseded — Done (see the PLAT-07.2 Done row below) | ui072, ui072-review | Partial record under PLAT-07.2. Integrated into main as `8bbe4d1..b65f23f`. "Test connection" cannot yet force a re-probe (D2 W13). | Saved-cluster selector by UID, probe vocabulary, freshness budget; live 20/20 |
@@ -4173,7 +4177,103 @@ entire roadmap complete after one release.
 - **Rows:** 97 PASS, 1 FAIL (P15, a new row), 8 NOT RUN.
 - **Closed live:** P13/P14 (CLOSED-LIVE). README §10 was run in the console as a new user and is clean end to end; one stale sentence (D14) is fixed. J1–J7: 14/14.
 - **MCP round 3:** verified the round-2 fixes (CONSOLE-MCP-ROUND2).
-- **Owed before Done:** `docs/release-notes.md` still says the PoC reached "1,000+ points in one archive"; 258 were measured. `docs/release-handoff.md` still describes `306cebf`. The done-evidence clause needs both to be true; that fix is on `claude/release-docs-final` (running).
+- **Owed before Done:** `docs/release-notes.md` still says the PoC reached "1,000+ points in one archive"; 258 were measured. `docs/release-handoff.md` still describes `306cebf`. The done-evidence clause needs both to be true. This landed as `claude/release-docs-final`, merged as `567a7b3e`; the record below follows.
+
+**Completion record — Done (2026-09-25), PLAT-20.2.**
+
+**Recorded by** the orchestrator, from `claude/poc-upgrade-3.result.md` §7 and the PoC rounds before it.
+
+**Workers:**
+- poc-install, poc-upgrade-1, poc-upgrade-2, poc-upgrade-3;
+- poc-fixes-1…4;
+- release-docs-final;
+- the plat20-2 offline half;
+- the orchestrator's MCP console rounds 1–3.
+
+**Environment:**
+- docker-desktop Kubernetes v1.34.1: an arm64 host, with the amd64 runner under emulation.
+- Everything was installed with Helm from the **published** OCI chart `oci://registry-1.docker.io/vladyslavhaina/logweir-chart` and the Docker Hub images. There was no local build and no `kubectl patch`.
+- Profile `deploy/poc/`: Traefik 41.6.0, cert-manager v1.21.2, Dex 0.24.1, and the console in shared mode behind Traefik with TLS and Dex SSO.
+
+**Acceptance: "A new user follows one supported setup/recovery guide".**
+- `deploy/poc/README.md` §10 was followed verbatim, in the console, as a new user, in every round.
+- The final run at `a54fb823` is clean end to end:
+  - connections made in the console, then Test connection and the destination's Test access;
+  - a schedule created from the form, with readiness;
+  - *Run first backup now*: `Valid`, with the badge;
+  - *Restore this point* → readiness → Ordinary confirmation → `rst-mlxxlsbd…` `Succeeded`/`Valid` 150/150;
+  - the topics on the target, and the scorecards independently `VALID`.
+- One stale sentence (D14) was fixed on that round.
+- J1–J7: 14/14 in each round.
+
+**Acceptance: "upgrading retains identities, schedules and archive readability".**
+- **Clean install** from an empty cluster at chart `0.1.0-sha-86a554e6…` (`sha256:90b4d41b…`, CI 35957294926).
+- **Rehearsal R1** from `v0.1.5` (6 → 14 CRDs; the hand-provisioned key was adopted):
+  - upgrade → `helm rollback logweir 1` → re-upgrade, with the identity unchanged throughout;
+  - the schedule fired under each controller;
+  - 17/17 receipts VALID;
+  - a `v0.1.5` point restored 150/150.
+- **Rehearsal R2** from `sha-f49849d…`:
+  - release-note item 6 was refused at render;
+  - the identity was adopted (`source=existing`);
+  - rolled back.
+- **Three in-place upgrades of the running install**, each by README *Upgrade to a newer publication* verbatim. Every upgrade kept the identity key id and its private digest:
+
+  | From → to | helm revs | Chart digest | CI run | Result |
+  |---|---|---|---|---|
+  | `86a554e6` → `02dc44b6` | 3 → 5 | `sha256:7f448172…` | 36071480985 | 261 receipts VALID; P1–P10 closed live |
+  | `02dc44b6` → `b748fd5f` | 5 → 7 | `sha256:3bba9455…` | 36100597420 | 314 receipts VALID; the three stuck pre-upgrade legacy points verified 3 s after the controller restart (P12); P11 and trust durability closed live |
+  | `b748fd5f` → `a54fb823` | 7 → 9 | `sha256:5becb4b9…` | 36129705142 | a 5-minute schedule fired 13/13 slots across both controller swaps; **314 → 316 → 328 receipts VALID**; the pre-upgrade KeyCompromise check was empty |
+
+- A legacy-point restore (`Valid` 150/150), a catalog-verified disaster-path restore, and a Governed restore approved by a second person were each proven live.
+
+**Tests: "large-catalog measurements"** (`docs/stability.md`), at 258 real points:
+- catalog Full sync 58.5 s;
+- topic discovery 27.0 s fresh and 0.1 s reused;
+- `GET /backups` of 258 rows 3.0 s;
+- catalog points 6.6 s;
+- operation status p50 71 ms;
+- console render 0.7–2.1 s.
+
+The offline rows bound 1,000 and 5,000 rows. The P10 bounds were measured live:
+- 20 simultaneous manual runs → at most 4 runner pods;
+- 3 restores at once → 2 run and 1 queues;
+- a per-person `429`.
+
+**Documents: supported paths, verification scope, retention authority, migration and rollback.**
+- `docs/release-notes.md`: twenty numbered operator-facing changes, with the required actions in upgrade order and the *Pre-upgrade check*. That check ran empty before upgrade rounds 2 and 3. The notes also carry verification scope, retention authority, *Migration and rollback* and limitations.
+- `docs/release-handoff.md` at `4e58d330`: the 41 tasks, the four publications' chart, image digests and CI runs, the tested environments, results, limitations and rollback. This meets the done-evidence clause.
+- `doc_lint` pins the twenty items. Its negative controls are the sixteen-item notes and each deleted item.
+- The console terminology was reworked by three human-like MCP passes, the last one verifying the round-2 fixes live.
+
+**"Main publication stays the tested existing flow without redundant mandatory workflows":** the existing `ci` workflow (changes, check, e2e, publish amd64+arm64, promote) published every build used here. No workflow was added.
+
+**Gates:**
+- `deploy/poc/validate.sh` rc 0;
+- `check-links.sh` rc 0;
+- `check-unverified-labels.sh` rc 0;
+- `pytest e2e/journeys scripts/live/poc`: 124 passed;
+- `doc_lint`, `label_gate`, `withdrawn_claim` and `gate_lint` pass;
+- `just lint` rc 0 (UI 747/747);
+- the full `scripts/ci-check.sh` rc 0 on main `4e58d330`.
+
+**Rollback (handoff):** `helm rollback logweir <previous revision>` restores the previous chart and its images together, after the checklist in release-notes *Migration and rollback*. The CRDs stay.
+- From rev 9, `helm rollback logweir 7` returns to `b748fd5f`. The CRD change is description-only and the API change is additive.
+- `[UNVERIFIED — rollback of an in-place upgrade was not run on the long-lived install; R1 and R2 rolled back live.]`
+
+**Residue** (open, each with its own row or mark):
+1. The large catalog was measured live at 258 points, not 1,000. It is marked `[UNVERIFIED]` in `stability.md` and the release notes; the offline rows carry 1,000/5,000.
+2. POC-P15: the console's follow budgets are shorter than a check's 120 s. A fix is on `claude/poc-fixes-5`.
+3. CONSOLE-MCP-ROUND3: open low rows.
+4. REPLACE-MINIO: the demo, e2e and PoC MinIO is a rebuilt mirror of the withdrawn images.
+5. Not run live:
+   - R2's pre-upgrade states for items 1–5;
+   - G1's negatives;
+   - a `v0.1.5`-runner point through the legacy path on an upgraded install;
+   - trust L9;
+   - P12-L5/L6/L7/M1;
+   - P14-D1 (not stageable inside the 900 s session);
+   - D6/D7/D10 (need a rollback or an uninstall).
 
 **Release notes owed (collected 2026-09-23 for this task to publish).** Every merged change whose behaviour an operator must know about:
 1. **Retention — required action:** grant the retention delete credential `s3:GetObject` on `<bucket>/<prefix>/*` before upgrading. Without it the enforcer deletes nothing (`VersionProbeRefused`); a policy degraded for that reason re-probes 24 h after its last run, or resumes at once on a spec edit.
