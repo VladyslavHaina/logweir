@@ -840,6 +840,14 @@ policy or roster ([keys.md](keys.md)).
   topics* kept the page, and *Test access* and the schedule form kept focus.
   The same publication prints `logweir catalog list` on the Catalog as code,
   not between backticks (O2).
+- **A followed check stops at the ingress's own `503` (P17, console, open).**
+  A follow tries past five failed reads of the API, which covers a restart,
+  but when no console pod is ready the ingress answers `503` with a plain-text
+  body, which the page reads as a contract failure and stops at once: the
+  check shows "could not be read again" with *Run the check again*, though it
+  goes on to finish in the cluster. Run the check again, or reload once the
+  console answers. Found by the fifth PoC round on `fdb48cd8`, when a loaded
+  host failed both console pods' readiness probes.
 - **The demo MinIO is a rebuilt mirror.** MinIO withdrew its public images
   (Docker Hub on 2026-09-11; `quay.io` refuses anonymous pulls since
   2026-09-24). The chart's demo MinIO, the e2e stack and the PoC run the same

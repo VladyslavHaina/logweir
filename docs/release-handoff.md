@@ -224,8 +224,9 @@ second's were two new console defects, P13 and P14, fixed in `a54fb823`; the
 third's is P15, fixed in `815249cb`; the fourth's are one new console defect,
 P16, which R3-1's stricter row found, fixed in `fdb48cd8`. The fifth round's
 three first-run failures were a transient `503` from the ingress while the
-loaded host failed both console pods' readiness probes, and two harness
-budgets too short for that host; each row passed when re-run.
+loaded host failed both console pods' readiness probes, which ended a
+check's follow (a new console defect, P17, below), and two harness budgets
+too short for that host; each row passed when re-run.
 
 **3. The console as a person uses it** (the orchestrator, through the Playwright
 MCP, clicks only; 2026-09-24/25):
@@ -303,6 +304,11 @@ MCP, clicks only; 2026-09-24/25):
    access* and the schedule form keep focus, and Next, Back and a `&step=` link
    open a step at its heading. **O2 is fixed in the same publication:** the
    Catalog prints `logweir catalog list` as code, not between backticks.
+   **P17, open (console, low):** a followed check stops at the first `503` the
+   ingress answers with its own plain-text body (no console pod ready), which
+   the page reads as a contract failure instead of one of the five failed reads
+   it tries past; the check says "could not be read again" though it finishes
+   in the cluster. Run the check again.
 4. **The MinIO mirror.** MinIO withdrew its public images; the chart's demo
    MinIO, the e2e stack and the PoC run the same releases rebuilt from the
    archived source (`vladyslavhaina/minio-mirror` and `mc-mirror`, AGPL-3.0;

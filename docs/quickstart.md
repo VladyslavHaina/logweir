@@ -287,6 +287,9 @@ inline-archive point passed its readiness check and restored `Valid`,
 follow is read to its verdict, restore step 5 keeps its status line in view on
 a narrow screen while a check runs, and the PoC README's §10 walk ran clean end
 to end in the console as a new user ([release-handoff.md](release-handoff.md)).
+One small console defect is open: a check the page follows stops being followed
+if the ingress answers `503` while no console pod is ready (P17;
+[release-notes.md](release-notes.md), *Limitations*); run the check again.
 A corporate identity provider bound by group, AWS S3, MSK and a
 NetworkPolicy-enforcing CNI have not been run at all
 ([release-notes.md](release-notes.md), *Limitations*).
