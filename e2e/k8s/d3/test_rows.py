@@ -3690,6 +3690,100 @@ def test_the_status_watch_survives_the_api_servers_watch_timeout() -> None:
         n >= 2 and restarts >= 1, f"statuses={n} restarts={restarts}")
 
 
+# --- TRUSTPOLICY-DELETE-DROPS-REVOCATION: the trust row revokes a MINTED key only ---
+
+_LAB = "a" * 64
+_APPROVER = "b" * 64
+_MINTED = {"keyId": "c" * 64, "spkiPem": "-----BEGIN PUBLIC KEY-----\nminted\n-----END PUBLIC KEY-----\n"}
+_ROSTER_SPEC = {"signingKeys": [{"keyId": _LAB}], "approverKeys": [{"keyId": _APPROVER}]}
+_LAB_RETIRED = {"keyId": _LAB, "spkiPem": "lab", "state": "Retired", "retiredAt": "2026-09-24T10:00:00Z",
+                "usages": ["EvidenceSigning"]}
+
+
+def _refused(fn) -> bool:
+    try:
+        fn()
+    except ValueError:
+        return True
+    return False
+
+
+def test_the_trust_row_revokes_only_a_minted_key() -> None:
+    shared = d3.shared_key_ids(_ROSTER_SPEC, [
+        {"metadata": {"labels": {"logweir.dev/test-owner": "someone-else"}},
+         "spec": {"keys": [{"keyId": "d" * 64}]}},
+        {"metadata": {"labels": {"logweir.dev/test-owner": d3.OWNER}},
+         "spec": {"keys": [{"keyId": _MINTED["keyId"]}]}},
+    ])
+    row("shared_key_ids: the roster's two lists and another owner's policy are shared",
+        {_LAB, _APPROVER, "d" * 64} <= shared, f"{sorted(shared)}")
+    row("shared_key_ids: this run's own policy is not a shared source",
+        _MINTED["keyId"] not in shared)
+
+    added = d3.compromise_row_keys([_LAB_RETIRED], _MINTED, shared, revoked=False,
+                                   at="2026-09-24T11:00:00Z")
+    row("the minted key is added Active and the live entry is copied verbatim",
+        added[0] == _LAB_RETIRED and added[1]["keyId"] == _MINTED["keyId"]
+        and added[1]["state"] == "Active" and "revocationReason" not in added[1])
+    revoked = d3.compromise_row_keys(added, _MINTED, shared, revoked=True,
+                                     at="2026-09-24T12:00:00Z")
+    compromised = [e["keyId"] for e in revoked if e.get("revocationReason") == "KeyCompromise"]
+    row("the revocation compromises the minted key and nothing else",
+        compromised == [_MINTED["keyId"]] and revoked[0] == _LAB_RETIRED
+        and revoked[1]["state"] == "Revoked"
+        and revoked[1]["revocationEffectiveFrom"] == revoked[1]["revokedAt"] == "2026-09-24T12:00:00Z",
+        f"{revoked}")
+    row("and the list stays append-only (G1): every live key id is still there",
+        [e["keyId"] for e in revoked] == [e["keyId"] for e in added])
+
+    # MUTANT: the shipped row, which revoked the LAB signer.
+    row("MUTANT: revoking the lab signer (a roster key) is refused",
+        _refused(lambda: d3.compromise_row_keys([_LAB_RETIRED], {"keyId": _LAB, "spkiPem": "lab"},
+                                                shared, revoked=True, at="2026-09-24T12:00:00Z")))
+    row("MUTANT: revoking the roster's approver key is refused",
+        _refused(lambda: d3.compromise_row_keys([_LAB_RETIRED], {"keyId": _APPROVER, "spkiPem": "x"},
+                                                shared, revoked=False, at="2026-09-24T12:00:00Z")))
+    row("MUTANT: a key another run's policy lists is refused",
+        _refused(lambda: d3.compromise_row_keys([_LAB_RETIRED], {"keyId": "d" * 64, "spkiPem": "x"},
+                                                shared, revoked=False, at="2026-09-24T12:00:00Z")))
+    lab_compromised = dict(_LAB_RETIRED, state="Revoked", revocationReason="KeyCompromise",
+                           revokedAt="2026-09-24T09:00:00Z", revocationEffectiveFrom="2026-09-24T09:00:00Z")
+    row("MUTANT: extending a policy that already compromises the lab signer is refused",
+        _refused(lambda: d3.compromise_row_keys([lab_compromised], _MINTED, shared, revoked=False,
+                                                at="2026-09-24T12:00:00Z")))
+    row("MUTANT: revoking a minted key that was never added Active is refused",
+        _refused(lambda: d3.compromise_row_keys([_LAB_RETIRED], _MINTED, shared, revoked=True,
+                                                at="2026-09-24T12:00:00Z")))
+
+
+def test_no_harness_row_revokes_a_roster_key_for_compromise() -> None:
+    """A static twin of the rule for the two harnesses that revoke a key:
+    every `KeyCompromise` literal in `d3_live.py` is inside `compromise_row_keys`
+    or the refused-point row's MINTED signer, and `plat15-2-ui-e2e.mjs`'s only one
+    is the minted entry's, applied after `assertDisposable`. A new row that
+    revokes anything else fails here until it is shown to revoke a minted key."""
+    here = pathlib.Path(__file__).resolve().parent
+    live = (here / "d3_live.py").read_text()
+    sites = [i for i in range(len(live)) if live.startswith('revocationReason="KeyCompromise"', i)]
+    allowed = []
+    for i in sites:
+        head = live[:i]
+        fn = head[head.rfind("\ndef "):]
+        allowed.append(fn.startswith("\ndef compromise_row_keys(")
+                       or fn.startswith("\ndef refused_point_trust("))
+    row("d3_live.py: every KeyCompromise revocation is a minted key's", bool(sites) and all(allowed),
+        f"{len(sites)} site(s), allowed={allowed}")
+    js = (here.parent.parent.parent / "scripts" / "plat15-2-ui-e2e.mjs").read_text()
+    js_sites = [i for i in range(len(js)) if js.startswith('revocationReason: "KeyCompromise"', i)]
+    guarded = [js.rfind("assertDisposable(minted.keyId", 0, i) != -1
+               and js.rfind('"Revoked",', 0, i) > js.rfind("assertDisposable(minted.keyId", 0, i)
+               for i in js_sites]
+    row("plat15-2-ui-e2e.mjs: its one KeyCompromise revocation is the minted entry's, after "
+        "assertDisposable", len(js_sites) == 1 and all(guarded), f"sites={len(js_sites)} guarded={guarded}")
+    row("plat15-2-ui-e2e.mjs: the lab signer's entry refuses a revocation",
+        'the lab signer\'s entry never carries a revocation' in js)
+
+
 def test_zz_every_row_in_this_file_passed() -> None:
     """The file's own gate, for `python3 -m pytest e2e/k8s/d3`.
 

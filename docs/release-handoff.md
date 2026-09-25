@@ -140,7 +140,7 @@ cluster:
    | 7. approval-policy rollout | no | bind a namespace after the upgrade; a Restore submitted mid-rollout may need resubmitting |
    | 8. completion only from a valid scorecard | the first post-upgrade restore | the first post-upgrade restore |
    | 9. no slot before creation | a schedule's next slot under the new controller | the same |
-   | 10. `trust.state` for `RecordedBeforeRevocation` | no (no API) | a Backup verified under a key revoked for compromise: the API reads `untrusted` |
+   | 10. `trust.state` for `RecordedBeforeRevocation` | no (no API) | a Backup verified under a key revoked for compromise: the API reads `untrusted`. The key must be one MINTED for this row: swap one namespace's `logweir-signing-key` for a fresh key for one run, list it on that namespace's policy only, then revoke it. Never revoke the installation signer (release-note item 16: a compromise applies installation-wide, and the policy cannot then be deleted while the roster lists the key) |
 
 3. **A rollback** from the candidate to each starting point with the release
    notes' rollback list, the same three properties kept.

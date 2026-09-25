@@ -718,7 +718,10 @@ who could edit one could add their own key and then approve their own restore.
 It carries no `delete` — deleting a policy does not retire a key, it removes
 the binding that governs a namespace and sends every namespace it bound back to
 the legacy roster, which is a widening dressed as a cleanup. Withdrawing trust
-is an edit.
+is an edit. A policy that records a `KeyCompromise` revocation is held by the
+controller's `logweir.dev/compromise-revocation` finalizer until the revocation
+is recorded elsewhere ([keys.md](keys.md), *Replacing a `TrustPolicy`
+safely*).
 
 **`logweir-retention-admin` is namespaced and needs a `RoleBinding` per
 namespace.** It is the only holder of a write verb on `retentionpolicies`:
@@ -1455,6 +1458,23 @@ beside an archive. The overlap is a `TrustPolicy` edit (PLAT-19.1,
 rotation of the immutable default roster is still an administrator-coordinated
 maintenance window, and rollback must restore the prior roster plus the matching
 private/public identity backup together.
+
+**A `TrustPolicy` that records a `KeyCompromise` revocation carries the
+`logweir.dev/compromise-revocation` finalizer, and only a running controller
+releases it.** Once the controller is gone, deleting that policy (or the
+`trustpolicies` CRD, which `kubectl delete -f logweir.yaml` does) waits for ever.
+When removing Logweir entirely, export each policy first (`logweir trust export`,
+[keys.md](keys.md), *Backing the policy up*), then remove the finalizer before
+the uninstall:
+
+```bash
+kubectl --context docker-desktop get trustpolicies -o json \
+  | jq -r '.items[] | select((.metadata.finalizers // []) | index("logweir.dev/compromise-revocation")) | .metadata.name'
+# for each name printed, with its other finalizers (if any) kept:
+kubectl --context docker-desktop edit trustpolicy <name>   # delete the logweir.dev/compromise-revocation line
+```
+
+This ends the guard. Do it only when the installation is being removed.
 
 ```bash
 # Managed Helm path:

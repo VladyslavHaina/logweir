@@ -192,8 +192,12 @@ only be brought forward, `state` moves `Active → Retired` and
 are write-once. Public material can never be edited out, because a receipt
 signed in March must still verify in December.
 
-The controller holds `list`, `watch` and `patch` on the status subresource and
-nothing else — it never edits a key's lifecycle.
+The controller holds `list`, `watch` and `patch` on the status subresource, and
+`patch` on the object for one field: the `logweir.dev/compromise-revocation`
+finalizer (below, *A compromise revocation outlives the policy that recorded
+it*). It never edits a key's lifecycle — its one write to the object is a merge
+patch of `metadata.finalizers` under a `resourceVersion` precondition, and a
+test pins that body.
 
 ### Who administers a `TrustPolicy`, and through what
 
@@ -203,8 +207,11 @@ unbound, is the only holder of a write verb on `trustpolicies`. It carries
 `create`/`update`/`patch` so a policy can be written and rotated — `patch`
 beside `update` because `kubectl edit` and `kubectl apply` both send one. It
 carries **no `delete`**: deleting a policy does not retire a key, it removes the
-binding that governs a namespace and silently sends every namespace it bound
-back to `legacy-roster-v1`. Withdrawing trust is an edit.
+binding that governs a namespace and sends every namespace it bound back to
+`legacy-roster-v1`. Withdrawing trust is an edit. A policy that records a
+`KeyCompromise` revocation is additionally **held** on deletion until the
+revocation is recorded somewhere else — see *Replacing a `TrustPolicy`
+safely*.
 
 ```bash
 kubectl --context docker-desktop create clusterrolebinding logweir-trust-admin \
@@ -286,6 +293,116 @@ reconcile. **An imported archive with no such history and a compromise-revoked
 signer fails closed.** There is no trusted timestamping service in this
 release; that is future work, and until it exists the honest answer for
 evidence this installation never observed is a refusal.
+
+### A compromise revocation outlives the policy that recorded it
+
+A `KeyCompromise` revocation says the private half may be in someone else's
+hands. That is a fact about the **key material**, not about the policy you
+wrote it on, so this controller applies it everywhere
+(TRUSTPOLICY-DELETE-DROPS-REVOCATION, found by the PoC round's rehearsal R2,
+where deleting the revoking policy sent the namespace back to a roster that
+still listed the key and all six of its backups re-verified `Valid`):
+
+* **Every namespace, whatever it resolves through.** Once any `TrustPolicy`
+  records key `K` as `state: Revoked, revocationReason: KeyCompromise`, `K` is
+  revoked for compromise in every namespace — the recording policy's own, one
+  bound to another policy that still lists `K` as `Active`, the `default: true`
+  policy, and a namespace that falls back to `legacy-roster-v1`. Removing a
+  namespace from the policy's `spec.namespaces` therefore does not re-trust
+  `K` there. Two records of one compromise take the earlier
+  `revocationEffectiveFrom`. A key the answering policy does not list at all
+  stays `UntrustedSigner`; nothing is added, only revoked. A `Superseded` or
+  `Unspecified` revocation is NOT carried: it is a statement about your
+  rotation, not about the key.
+* **What reads it.** Evidence verification and re-trust (`Backup`, `Restore`,
+  rehearsal Restores), the recovery catalog view and its `signers[].trusted`,
+  the runner's evidence keyring, fresh approvals (`KeyRevoked`), consumed
+  approvals (`RecordedBeforeRevocation`), the preflight `signer.rostered` row,
+  the API's `trust.state`, and each policy's own `status.keys[]` — so the keys
+  view shows `Revoked` for a key a policy still declares `Active`. A refusal
+  caused by a record on another policy names it ("recorded by
+  TrustPolicy/…"). Stored verdicts are re-derived on the event that records the
+  compromise, in EVERY namespace. A terminal `Restore` in a namespace on the
+  roster does not wait for a restart ([kubernetes.md](kubernetes.md) §8,
+  *Trust resolution*).
+* **The reason is sticky (CEL rule G9).** Once a revoked key's
+  `revocationReason` is `KeyCompromise` it stays so; editing it to
+  `Superseded` would turn "never green" into a retirement and re-verify every
+  document the key signed before the instant. A supersession may still be
+  escalated to a compromise.
+* **The record cannot silently disappear.** The controller places the
+  finalizer `logweir.dev/compromise-revocation` on every policy that records a
+  compromise, and a `kubectl delete` of such a policy is **held** (the object
+  stays, `Terminating`, and is still resolved through) until either another
+  policy without a `deletionTimestamp` records the same revocation, or nothing
+  in the cluster — no other policy, not `TrustRoster/default` — lists the key
+  any more. The `CompromiseGuard` condition says which: `CompromiseRecorded`
+  (guarded), `DeletionBlocked` (held, naming every source that still lists the
+  key), `CompromiseInherited` (this policy lists a key another policy revoked;
+  record it here too), or `NoCompromiseRecorded`. A held policy is looked at
+  again every 15 s.
+
+**The residuals, said plainly.** A policy revoked and deleted before the
+controller reconciled it once (or while it was down) was never given the
+finalizer, and the API server refuses a new finalizer on an object already
+being deleted. Wait until `kubectl get trustpolicy <name> -o
+jsonpath='{.metadata.finalizers}'` lists `logweir.dev/compromise-revocation`
+before any further change. And anyone holding `patch` or `update` on
+`trustpolicies` can remove the finalizer by hand: a cluster-admin (`stability.md`
+O0, outside the threat boundary), a `logweir-trust-admin` holder, or the
+controller's own ServiceAccount. A trust-admin holds no `delete`, so they
+cannot start a deletion, but they can complete one a cluster-admin started and
+the guard is holding. Removing it trusts the key again wherever it is still
+listed, which is exactly what the condition's message warns.
+
+### Replacing a `TrustPolicy` safely
+
+`notBefore`, `usages` and the public material are immutable, so a policy
+applied with a wrong one is replaced, not edited — and a replacement is the one
+routine operation that deletes a policy. When the policy records a compromise:
+
+1. **Export it as it stands now**, never from an older file:
+   `kubectl --context <ctx> get trustpolicy <old> -o json | logweir trust export
+   --policy <old> --stdin > successor.yaml`. The export carries every key with
+   its current state, so the compromised key comes across as `Revoked,
+   KeyCompromise` with its instants. A file saved before the revocation lists
+   the key `Active`: this controller still refuses it (the old policy's record
+   applies), but an older one would not.
+2. **Give the successor a new name** and make the one correction you need.
+   Apply it. If it names the same namespaces, those namespaces are contested
+   until the old policy is gone — every approval and verification there is
+   refused with `TrustPolicyConflict` for that window, which is the fail-closed
+   side. (To avoid the window, apply the successor with no `spec.namespaces`
+   first and add them after step 3.)
+3. **Delete the old policy.** The finalizer is released on the next pass
+   (within 15 s) because the successor records the same revocation; check with
+   `kubectl --context <ctx> get trustpolicy` that the old one is gone and the
+   successor reads `LOADED True` and its `CompromiseGuard` condition
+   `CompromiseRecorded`.
+
+**Going back to the roster only** (a rollback, or retiring `TrustPolicy`
+altogether): first re-create `TrustRoster/default` without the compromised key
+(its spec is immutable, so delete and re-apply it — namespaces on the roster
+fall to `RosterNotFound` for that moment, the fail-closed side), then delete
+the policies. The guard releases the last record because nothing lists the
+key any more — which is also the only state a roster-only controller cannot
+re-trust it from. **The release is a point-in-time check, and afterwards the
+cluster keeps no memory of the compromise.** Re-creating the roster from an old
+export, or a GitOps re-sync of an old roster manifest, trusts the key again.
+Remove the key from every roster SOURCE (the file in Git, saved exports), not
+only from the live object, for the same reason as *Export again after every
+revocation* below.
+
+**A policy stuck `Terminating`** reads `CompromiseGuard=True/DeletionBlocked`,
+and its message names the key and every source still listing it
+(`TrustRoster/default` or `TrustPolicy/<name>`). Any one of these releases it:
+- apply a policy recording the same revocation;
+- for each `TrustPolicy/<name>` named, revoke the key there for `KeyCompromise`
+  (a policy cannot drop a key, so that policy becomes a carrier), or delete it
+  (cluster-admin);
+- when the roster is named, re-create it without the key.
+
+Do not remove the finalizer by hand unless you mean to trust the key again.
 
 ### When a verdict is re-derived, and why the boundary is an instant
 
@@ -425,6 +542,21 @@ The one thing rollback does not carry is keys added to the `TrustPolicy`
 > `TrustRoster/default` as well** — or accept `NotAttempted` on evidence
 > signed by it. Nothing deletes public material in either direction.
 
+**And the one thing rollback must not carry: a compromised key.** A controller
+without `TrustPolicy` support (`v0.1.5`) reads only the roster and cannot
+express a revocation, so it trusts every key the roster lists — including one a
+policy revoked for `KeyCompromise`. The policy's `CompromiseGuard` message says
+when the roster still lists such a key ("TrustRoster/default still lists …").
+
+> **Before rolling back to a build older than the compromise guard,**
+> re-create `TrustRoster/default` without every key any policy revoked for
+> `KeyCompromise`, and record each such revocation on EVERY policy that still
+> lists the key (a policy reading `CompromiseInherited`): an older
+> `TrustPolicy`-aware build applies a revocation only in the namespaces of the
+> policy that records it. The finalizer stays on the objects across the
+> rollback and an older build never removes it, so a deletion made while it
+> runs is held until this build is back.
+
 ### Backing the policy up
 
 RBAC grants `delete` on `trustpolicies` to no Logweir role, but a
@@ -440,6 +572,12 @@ The output is **public key material only**, rebuilt field by field rather than
 filtered, with `status`, `managedFields`, `resourceVersion` and `uid` absent so
 it re-applies cleanly onto any cluster. Re-applying it never removes a key.
 An input carrying a private-key PEM is refused and nothing is written.
+
+**Export again after every revocation.** An export is a snapshot: one taken
+before a key was revoked lists it `Active`, and re-applying it as a new policy
+(or onto a fresh cluster) lists the key as trusted again. On this cluster the
+compromise record the live policy carries still applies; on a cluster that has
+no such record, nothing does.
 
 ### Which policy governs a namespace
 

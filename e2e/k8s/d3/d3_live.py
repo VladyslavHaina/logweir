@@ -3800,6 +3800,72 @@ def policy_key(key_id: str, spki_pem: str, state: str, *, display: str,
     return entry
 
 
+def shared_key_ids(roster_spec: dict[str, Any], policies: list[dict[str, Any]]) -> set[str]:
+    """Every key id a SHARED trust source lists: `TrustRoster/default`'s two
+    lists and every key on a `TrustPolicy` this run does not own.
+
+    A key in this set is never revoked for compromise by this harness
+    (`compromise_row_keys`). Pure, so the offline rows can drive it."""
+    ids = {k["keyId"] for k in (roster_spec.get("signingKeys") or [])}
+    ids |= {k["keyId"] for k in (roster_spec.get("approverKeys") or [])}
+    for policy in policies:
+        owner = ((policy.get("metadata") or {}).get("labels") or {}).get("logweir.dev/test-owner")
+        if owner == OWNER:
+            continue
+        ids |= {k["keyId"] for k in ((policy.get("spec") or {}).get("keys") or [])}
+    return ids
+
+
+def compromise_row_keys(live_keys: list[dict[str, Any]], minted: dict[str, Any],
+                        shared: set[str], *, revoked: bool, at: str) -> list[dict[str, Any]]:
+    """`spec.keys` for the `trust` phase's revocation row: the policy's live
+    entries VERBATIM, plus the MINTED key — `Active`, or with `revoked=True`
+    `Revoked`/`KeyCompromise` at `at` — and nothing else changed.
+
+    # Why a minted key (TRUSTPOLICY-DELETE-DROPS-REVOCATION)
+
+    A controller with the compromise guard treats a `KeyCompromise` revocation
+    as a fact about the KEY: it applies in every namespace, whichever policy or
+    roster the namespace resolves through, and the recording policy is held on
+    deletion while any other trust source still lists the key. This row first
+    revoked the LAB signing key on this run's policy: on such a controller that
+    makes every backup the lab key ever signed, in every namespace, `Untrusted`,
+    and — `TrustRoster/default` lists it — every later `delete_owned_trust_policy`
+    of this object hangs until its timeout. A key minted for the row is listed by
+    this run's policy alone, so its revocation governs nothing else and the
+    policy is released the moment it is deleted.
+
+    # What is refused, before anything is applied
+
+    * a minted key a shared source lists (`shared`) — that is not a minted key;
+    * a live entry that already records a compromise of a SHARED key — a
+      policy carrying one must not be extended, it is the defect's state;
+    * a live list that does not carry the minted key when revoking it, so the
+      revocation is always an `Active -> Revoked` edit of this row's own entry.
+
+    Entries are copied, never mutated, and the list is append-only (CEL G1).
+    """
+    key_id = minted["keyId"]
+    if key_id in shared:
+        raise ValueError(f"refusing to revoke {key_id} for KeyCompromise: a shared trust source "
+                         f"lists it, so the revocation would reach every namespace")
+    for entry in live_keys:
+        if (entry.get("state") == "Revoked" and entry.get("revocationReason") == "KeyCompromise"
+                and entry.get("keyId") in shared):
+            raise ValueError(f"the live policy already records a KeyCompromise revocation of the "
+                             f"shared key {entry.get('keyId')}; refusing to extend it")
+    kept = [dict(e) for e in live_keys if e.get("keyId") != key_id]
+    if revoked and len(kept) == len(live_keys):
+        raise ValueError(f"the minted key {key_id} is not on the live policy; it is added Active "
+                         f"first, so the revocation is an edit of its own entry")
+    entry = policy_key(key_id, minted["spkiPem"], "Revoked" if revoked else "Active",
+                       display=f"{OWNER}'s minted signer (revoked by the trust row)",
+                       subject=f"{OWNER}-compromised@logweir.invalid")
+    if revoked:
+        entry.update(revokedAt=at, revocationEffectiveFrom=at, revocationReason="KeyCompromise")
+    return kept + [entry]
+
+
 def delete_owned_trust_policy(name: str, *, check: bool = True) -> bool:
     """Delete a cluster-scoped `TrustPolicy` THIS run owns, and refuse any other.
 
@@ -3997,21 +4063,56 @@ def trust() -> None:
         evidence,
     )
 
-    apply(
-        trust_policy(
-            "Revoked",
-            retiredAt=vr.get("trust", {}).get("retiredAt") or now(),
-            revokedAt=now(),
-            revocationEffectiveFrom=now(),
-            revocationReason="KeyCompromise",
+    # --- the revocation: of a key THIS ROW MINTED, never the lab's ------------
+    # TRUSTPOLICY-DELETE-DROPS-REVOCATION: see `compromise_row_keys`. The lab key
+    # stays Retired on this policy; a second signer is minted, added Active, signs
+    # one run (this namespace's `logweir-signing-key` swapped for that run and put
+    # back, as `old_archive` does), and is then revoked for KeyCompromise. The
+    # private half is 0600 in a 0700 directory and gone in the `finally`.
+    original = get("secret", "logweir-signing-key")
+    minted = mint_signing_key(f"{OWNER}-compromised")
+    try:
+        roster_spec = get("trustroster", "default", namespace="default")["spec"]
+        shared = shared_key_ids(roster_spec, json.loads(
+            run(K + ["get", "trustpolicies", "-o", "json"]).stdout)["items"])
+        live_keys = get("trustpolicy", TRUST_POLICY, namespace="default")["spec"]["keys"]
+        body = trust_policy("Active", keys=compromise_row_keys(
+            live_keys, minted, shared, revoked=False, at=now()))
+        apply(body)
+        try:
+            run(KN + ["delete", "secret", "logweir-signing-key", "--wait=true"], check=False)
+            run(KN + ["create", "secret", "generic", "logweir-signing-key",
+                      f"--from-file=signing.pem={minted['private']}"], timeout=120)
+            run(KN + ["label", "secret", "logweir-signing-key",
+                      f"logweir.dev/test-owner={OWNER}", "--overwrite"], timeout=60)
+            legacy_backup("trust-revoke-subject")
+        finally:
+            run(KN + ["delete", "secret", "logweir-signing-key", "--wait=true"], check=False)
+            apply({"apiVersion": "v1", "kind": "Secret", "metadata": owned("logweir-signing-key"),
+                   "data": original.get("data", {}), "type": original.get("type", "Opaque")})
+        signed = await_trust(
+            "trust-revoke-subject",
+            lambda x: x.get("result") == "Valid" and x.get("matchedKeyId") == minted["keyId"],
+            what="the minted signer's run to verify Valid under the policy",
         )
-    )
-    revoked = await_trust(
-        "trust-subject",
-        lambda x: x.get("result") == "Untrusted"
-        or x.get("trust", {}).get("keyState") == "Revoked",
-        what="the revocation to reach the terminal object",
-    )
+        before_fields = {
+            "phase": signed["status"]["phase"],
+            "exitCode": signed["status"]["exitCode"],
+            "complete": condition(signed, "Complete"),
+            "records": signed["status"].get("records"),
+        }
+        live_keys = get("trustpolicy", TRUST_POLICY, namespace="default")["spec"]["keys"]
+        apply(trust_policy("Revoked", keys=compromise_row_keys(
+            live_keys, minted, shared, revoked=True, at=now())))
+        revoked = await_trust(
+            "trust-revoke-subject",
+            lambda x: x.get("result") == "Untrusted"
+            or x.get("trust", {}).get("keyState") == "Revoked",
+            what="the revocation to reach the terminal object",
+        )
+    finally:
+        minted["private"].unlink(missing_ok=True)
+        shutil.rmtree(minted["dir"], ignore_errors=True)
     vv = revoked["status"]["evidence"]["verification"]
     after_fields = {
         "phase": revoked["status"]["phase"],
@@ -4019,21 +4120,33 @@ def trust() -> None:
         "complete": condition(revoked, "Complete"),
         "records": revoked["status"].get("records"),
     }
+    # THE LAB-SIGNED OBJECT IS NOT ABOUT THIS KEY: revoking the minted signer
+    # leaves `trust-subject` (signed by the lab key, now Retired) where the
+    # retirement row put it — the revocation is about ONE key, as a real one is.
+    lab_after = get("backup", "trust-subject")["status"]["evidence"]["verification"]
     evidence.append(artifact("trust/verdict-after-revocation.json",
                              {"verification": vv, "before": before_fields,
-                              "after": after_fields}))
+                              "after": after_fields, "labSignedAfter": lab_after,
+                              "mintedKeyId": minted["keyId"],
+                              "privateKeyGone": not minted["private"].exists()}))
     check(
         "trust-revocation-flips-a-terminal-badge",
         "PLAT-19.1",
         vv.get("result") == "Untrusted"
+        and vv.get("matchedKeyId") == minted["keyId"]
         and before_fields["phase"] == after_fields["phase"]
         and before_fields["exitCode"] == after_fields["exitCode"]
-        and before_fields["complete"].get("reason") == after_fields["complete"].get("reason"),
-        f"revoking the key for KeyCompromise flips the TERMINAL Backup's badge to "
-        f"{vv.get('result')} ({(vv.get('reason') or vv.get('detail') or '')[:110]}) on the "
-        f"next policy event, while phase={after_fields['phase']}, exitCode="
-        f"{after_fields['exitCode']} and conditions[Complete]="
-        f"{after_fields['complete'].get('reason')} are unchanged",
+        and before_fields["complete"].get("reason") == after_fields["complete"].get("reason")
+        and lab_after.get("result") == "Valid"
+        and not minted["private"].exists(),
+        f"revoking a signer THIS ROW MINTED ({minted['keyId'][:16]}…) for KeyCompromise flips "
+        f"the TERMINAL Backup it signed to {vv.get('result')} "
+        f"({(vv.get('reason') or vv.get('detail') or '')[:110]}) on the next policy event, while "
+        f"phase={after_fields['phase']}, exitCode={after_fields['exitCode']} and "
+        f"conditions[Complete]={after_fields['complete'].get('reason')} are unchanged; the "
+        f"lab-signed trust-subject still reads {lab_after.get('result')} "
+        f"({(lab_after.get('trust') or {}).get('basis')}), because a compromise is about one "
+        f"key and the lab key was never revoked; the minted private half is off the disk",
         evidence,
     )
 
@@ -4060,10 +4173,21 @@ def signed_at_probe() -> None:
     """
     evidence: list[str] = []
 
-    # --- first, the CEL lifecycle rules, on the policy `trust` left Revoked --
+    # --- first, the CEL lifecycle rules, on the policy `trust` left behind ---
+    # `trust` leaves the lab key RETIRED and the key it minted REVOKED
+    # (KeyCompromise) — it never revokes the lab's own key any more
+    # (TRUSTPOLICY-DELETE-DROPS-REVOCATION, `compromise_row_keys`). Every live
+    # entry is walked back to `Active` with its lifecycle fields dropped, so the
+    # refusal covers Retired -> Active AND Revoked -> Active.
+    walked_back = []
+    for entry in get("trustpolicy", TRUST_POLICY, namespace="default")["spec"]["keys"]:
+        back = {k: v for k, v in entry.items()
+                if k not in ("retiredAt", "revokedAt", "revocationReason", "revocationEffectiveFrom")}
+        back["state"] = "Active"
+        walked_back.append(back)
     illegal = run(
         K + ["apply", "-f", "-", "-o", "json"],
-        data=json.dumps(trust_policy("Active")),
+        data=json.dumps(trust_policy("Active", keys=walked_back)),
         check=False,
     )
     refusal = redact(illegal.stderr.strip())
@@ -4071,9 +4195,12 @@ def signed_at_probe() -> None:
     check(
         "trust-lifecycle-is-monotonic",
         "PLAT-19.1",
-        illegal.returncode != 0 and "never backwards" in refusal,
-        f"walking the key back from Revoked to Active is refused by the CRD's own CEL rules, "
-        f"with the rules' messages: {refusal.splitlines()[1:] if refusal else '<none>'}",
+        illegal.returncode != 0 and "never backwards" in refusal
+        and any(e.get("state") != "Active" for e in
+                get("trustpolicy", TRUST_POLICY, namespace="default")["spec"]["keys"]),
+        f"walking a Retired and a Revoked key back to Active is refused by the CRD's own CEL "
+        f"rules, and the policy keeps its lifecycle: "
+        f"{refusal.splitlines()[1:] if refusal else '<none>'}",
         evidence,
     )
     # a NEW policy object: the lifecycle rules are per-object history, and this
@@ -8350,10 +8477,12 @@ def rehearsal_trust(target_cluster_id: str, approver_key: dict[str, Any],
 
     # Why it is DELETED and recreated rather than patched
 
-    `trust` leaves the lab signing key **Revoked** on this object — that is its
-    last row's whole point — and `spec.keys` is append-only with no
-    Revoked→Active transition, so a rehearsal that inherited it would fail at
-    the evidence verdict for a reason belonging to the previous phase. Deleting
+    `trust` leaves the lab signing key **Retired** on this object, beside a key
+    it minted and **Revoked** (it never revokes the lab's own key: see
+    `compromise_row_keys`), and `spec.keys` is append-only with no
+    Retired→Active or Revoked→Active transition, so a rehearsal that inherited it
+    would fail at the evidence verdict for a reason belonging to the previous
+    phase. Deleting
     and recreating is the same remedy `old_archive` uses two phases earlier and
     for the same CRD rule, and the object is this run's own (`{OWNER}-{STAMP}`,
     binding only this namespace).
@@ -10282,7 +10411,8 @@ def refused_point_trust(target_cluster_id: str, approver_key: dict[str, Any],
     for `GovernedApproval`, and the scratch broker's cluster id.
 
     Created by delete-and-recreate the first time (`trust` leaves the lab key
-    Revoked; `spec.keys` has no Revoked→Active transition) and APPLIED with
+    Retired beside a minted key it revoked; `spec.keys` has no transition back to
+    Active) and APPLIED with
     `revoked=True` for row 12 — Active→Revoked is the one direction the CRD
     allows, and it is the event the controller re-derives the verdict on.
     """
@@ -13695,10 +13825,11 @@ PHASE_PRECONDITIONS: dict[str, tuple[str, ...]] = {
     # D3 §15 L6. `catalog` is where dest-a's archive and its first view exist, and
     # this phase restores a point out of that destination and writes the rehearsal's
     # evidence back into it. `trust` is an ORDERING and not a convenience: its last
-    # row leaves the lab signing key REVOKED on this namespace's TrustPolicy, and a
-    # rehearsal that inherited that would fail at the point's evidence verdict for a
-    # reason belonging to the previous phase. `rehearsal_trust` rebuilds the object
-    # (the CRD's keys are append-only with no Revoked->Active transition, so it is
+    # rows leave the lab signing key RETIRED (and a key it minted REVOKED) on this
+    # namespace's TrustPolicy, and a rehearsal that inherited that would fail at the
+    # point's evidence verdict for a reason belonging to the previous phase.
+    # `rehearsal_trust` rebuilds the object (the CRD's keys are append-only with no
+    # transition back to Active, so it is
     # deleted and recreated, exactly as `old_archive` does), which is only correct
     # AFTER the phase whose rows are about that revocation.
     "rehearsal": ("catalog", "trust"),
@@ -13716,8 +13847,8 @@ PHASE_PRECONDITIONS: dict[str, tuple[str, ...]] = {
     "notify_transport": ("setup",),
     # The rehearsal family's two fault arms. It rebuilds this namespace's
     # TrustPolicy exactly as `rehearsal` and `refused_point` do, so it runs
-    # after both (and after `trust`, whose last row leaves the lab signing key
-    # Revoked) and inherits neither's keys.
+    # after both (and after `trust`, whose last rows leave the lab signing key
+    # Retired and a minted key Revoked) and inherits neither's keys.
     "rehearsal_faults": ("setup", "trust", "rehearsal", "refused_point"),
     # Its own lock-enabled bucket, destination, catalog and policy.
     "object_lock": ("setup",),

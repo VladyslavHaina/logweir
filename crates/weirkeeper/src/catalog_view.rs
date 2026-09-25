@@ -739,7 +739,20 @@ pub const TRUST_SOURCE_ROSTER: &str = "TrustRoster/default";
 /// roster wrote none (the synthesis fills [`crate::trust::legacy_not_after`]).
 /// The roster's display-only `subject` is not carried by the synthesis and is
 /// read by nothing here.
+///
+/// # …UNLESS A `TrustPolicy` REVOKED IT FOR COMPROMISE
+///
+/// `TRUSTPOLICY-DELETE-DROPS-REVOCATION`. The roster has no lifecycle, so a
+/// synthesised key is `Active` — except that [`crate::trust::resolve_in`]
+/// applies every `KeyCompromise` revocation any policy records to the key
+/// with the same id, whatever the source. This projection used to read the
+/// state as `Active` unconditionally, so a namespace re-bound (or dropped) to
+/// the roster listed a compromised key's points `Verified` here while every
+/// other surface refused them. `Revoked` wins, as it does in
+/// [`classify_verification`]'s step 5.
 fn legacy_trust_key(key: &crate::trust::ResolvedKey) -> TrustKey {
+    let compromised = key.trust.state == logweir_core::trust::KeyState::Revoked
+        && key.trust.reason() == logweir_core::trust::RevocationReason::KeyCompromise;
     TrustKey {
         key_id: key.trust.key_id.clone(),
         spki_pem: key.spki_pem.clone(),
@@ -747,7 +760,11 @@ fn legacy_trust_key(key: &crate::trust::ResolvedKey) -> TrustKey {
         lifecycle: None,
         not_after: (key.trust.not_after != crate::trust::legacy_not_after())
             .then_some(key.trust.not_after),
-        state: TrustKeyState::Active,
+        state: if compromised {
+            TrustKeyState::Revoked
+        } else {
+            TrustKeyState::Active
+        },
     }
 }
 

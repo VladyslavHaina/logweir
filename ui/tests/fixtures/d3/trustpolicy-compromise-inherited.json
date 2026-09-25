@@ -1,0 +1,86 @@
+{
+  "apiVersion": "logweir.dev/v1alpha1",
+  "kind": "TrustPolicy",
+  "metadata": {
+    "creationTimestamp": "2026-09-11T09:00:00Z",
+    "generation": 1,
+    "name": "org-default",
+    "resourceVersion": "4410",
+    "uid": "7d1f2c44-0b8e-4f7a-9d61-3c5e2a8b9f10"
+  },
+  "spec": {
+    "default": false,
+    "keys": [
+      {
+        "algorithm": "ed25519",
+        "keyId": "f27c7f51aad0700db76887b306d413a039156b44ee147c1d82c5e4dc339558f6",
+        "notAfter": "2027-06-01T00:00:00Z",
+        "notBefore": "2026-01-01T00:00:00Z",
+        "principal": {
+          "display": "installation signer, re-applied from an export taken before the revocation",
+          "id": "install:f27c7f51aad0700db76887b306d413a039156b44ee147c1d82c5e4dc339558f6"
+        },
+        "spkiPem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEApFpEU8uY5S8Lv43HL4DcXKKyM8WHurCPZIxvq8ZBfpY=\n-----END PUBLIC KEY-----\n",
+        "state": "Active",
+        "usages": [
+          "EvidenceSigning"
+        ]
+      }
+    ],
+    "namespaces": [
+      "lw-team-b"
+    ]
+  },
+  "status": {
+    "observedGeneration": 1,
+    "evaluatedAt": "2026-09-12T08:00:00Z",
+    "loaded": true,
+    "keyCount": 1,
+    "keys": [
+      {
+        "keyId": "f27c7f51aad0700db76887b306d413a039156b44ee147c1d82c5e4dc339558f6",
+        "effectiveState": "Revoked",
+        "usableForNewSignatures": false,
+        "usableForVerification": "None"
+      }
+    ],
+    "boundNamespaces": [
+      "lw-team-b"
+    ],
+    "conflicts": [],
+    "conditions": [
+      {
+        "type": "Loaded",
+        "status": "True",
+        "observedGeneration": 1,
+        "lastTransitionTime": "2026-09-12T08:00:00Z",
+        "reason": "Loaded",
+        "message": "every spkiPem on this policy parsed, hashes to its own keyId and matches its declared algorithm: 1 keys"
+      },
+      {
+        "type": "Bound",
+        "status": "True",
+        "observedGeneration": 1,
+        "lastTransitionTime": "2026-09-12T08:00:00Z",
+        "reason": "Bound",
+        "message": "this policy governs 1 namespace(s)"
+      },
+      {
+        "type": "ExpiringSoon",
+        "status": "False",
+        "observedGeneration": 1,
+        "lastTransitionTime": "2026-09-12T08:00:00Z",
+        "reason": "NotExpiring",
+        "message": "no Active key reaches its notAfter within 30 days"
+      },
+      {
+        "type": "CompromiseGuard",
+        "status": "True",
+        "observedGeneration": 1,
+        "lastTransitionTime": "2026-09-12T08:00:00Z",
+        "reason": "CompromiseInherited",
+        "message": "This policy lists f27c7f51aad0700db76887b306d413a039156b44ee147c1d82c5e4dc339558f6 (recorded by TrustPolicy/incident-2026-09), which another TrustPolicy revoked for KeyCompromise. This controller treats the key as revoked in this policy's namespaces as well, and an older controller would not: record the revocation here too (state: Revoked, revocationReason: KeyCompromise)."
+      }
+    ]
+  }
+}

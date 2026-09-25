@@ -123,11 +123,24 @@ take about six minutes.
 `rehearsal` is D3 §15's **L6** and PLAT-14.3's live half: ten steps as ten rows, every
 clause named after `claude/plat14-3b.review.md` §4's own words. It needs `catalog` (it
 restores a point out of dest-a and writes the rehearsal's evidence back into it) and
-`trust` — an ORDERING, because `trust`'s last row leaves the lab signing key **Revoked**
-on this namespace's `TrustPolicy` and a rehearsal that inherited that would fail at the
-point's evidence verdict for a reason belonging to the previous phase; `rehearsal_trust`
-deletes and recreates the object (the CRD's `spec.keys` is append-only with no
-Revoked->Active transition), which is only correct after that phase has run. It mints the
+`trust` — an ORDERING, because `trust`'s last rows leave the lab signing key **Retired**
+(and a key the row minted **Revoked**) on this namespace's `TrustPolicy`, and a rehearsal
+that inherited that would fail at the point's evidence verdict for a reason belonging to
+the previous phase; `rehearsal_trust` deletes and recreates the object (the CRD's
+`spec.keys` is append-only with no transition back to Active), which is only correct after
+that phase has run.
+
+**No row revokes a shared key for compromise** (TRUSTPOLICY-DELETE-DROPS-REVOCATION). A
+controller with the compromise guard applies a `KeyCompromise` revocation in every
+namespace and holds the recording policy's deletion while any other trust source lists the
+key, so revoking the lab signer — which `trust`'s revocation row first did — would make
+every lab backup `Untrusted` and leave this run's policy `Terminating` for ever
+(`TrustRoster/default` lists that key). `trust-revocation-flips-a-terminal-badge` therefore
+mints a signer, adds it `Active`, signs one run with it, and revokes it
+(`compromise_row_keys`, which refuses any key `TrustRoster/default` or another run's
+policy lists); `standing-12` revokes the refused-point signer it mints. Both keys are
+listed by this run's policy alone, so the policy is released the moment it is deleted.
+`test_rows.py` pins the refusal offline. It mints the
 standing authorization with the SHIPPED signer, `logweir drill approve --standing`
 (`docs/kubernetes.md` §7g) — never in python — so a `logweir` binary that has that flag
 is required (see "What it needs"). It signs with an approver keypair it MINTS per run

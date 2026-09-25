@@ -242,7 +242,7 @@ export function renderPolicyKeys(object, now) {
       usages.length === 0 ? ABSENT : esc(usages.join(", ")),
       cell(entry.state),
       cell(entry.notBefore) + " " + ARROW_TO + " " + cell(entry.notAfter),
-      lifecycleCell(entry),
+      lifecycleCell(entry, freshness, verdict),
       evaluationCell(freshness, verdict),
       usabilityCell(freshness, verdict),
     ];
@@ -266,9 +266,27 @@ export function renderPolicyKeys(object, now) {
 // non-ASCII byte has a name.
 const ARROW_TO = "->";
 
-/** Retirement and revocation, per key, in the words that distinguish them. */
-export function lifecycleCell(entry) {
+/** Retirement and revocation, per key, in the words that distinguish them.
+ *
+ *  A KEY THIS POLICY DECLARES ALIVE CAN BE EVALUATED `Revoked`
+ *  (TRUSTPOLICY-DELETE-DROPS-REVOCATION): a `KeyCompromise` revocation
+ *  recorded on ANY TrustPolicy applies to the key everywhere, so the
+ *  controller reports it `Revoked` here too. Printing "active -- it may sign
+ *  new documents" beside that verdict would be the one sentence on the page
+ *  still vouching for a compromised key, so a FRESH `Revoked` verdict over a
+ *  declared `Active`/`Retired` key says where the revocation lives instead.
+ *  An unfresh verdict is not read at all: `unknown` is not `valid`, and it is
+ *  not `revoked` either. */
+export function lifecycleCell(entry, freshness, verdict) {
   const e = entry || {};
+  const evaluated = freshness !== undefined && freshness !== null && freshness.fresh === true &&
+    verdict !== undefined && verdict !== null ? verdict.effectiveState : null;
+  if (evaluated === "Revoked" && e.state !== "Revoked") {
+    return esc("revoked for compromise by another TrustPolicy's record -- this policy still " +
+      "declares it " + String(e.state || "") + ", and nothing it signed or authorises is " +
+      "accepted here; record the revocation on this policy too so an older controller agrees " +
+      "(see the compromise guard above)");
+  }
   if (e.state === "Revoked") {
     const reason = String(e.revocationReason || "Unspecified");
     const effective = cell(e.revocationEffectiveFrom);
@@ -336,8 +354,30 @@ export function renderPolicyFacts(object, now) {
         esc(CONFLICT_SENTENCE) + " " +
         esc(conflicts.map((c) => String((c || {}).namespace) + " (" +
           (Array.isArray((c || {}).policies) ? c.policies.join(", ") : "") + ")").join("; ")) +
-        "</p>")
+        "</p>") +
+    renderCompromiseGuard(status)
   );
+}
+
+/** The `CompromiseGuard` condition's type (TRUSTPOLICY-DELETE-DROPS-REVOCATION). */
+export const COMPROMISE_GUARD = "CompromiseGuard";
+
+/** What a `KeyCompromise` record on this policy holds, verbatim from the
+ *  controller: the finalizer that keeps a deletion from re-trusting the key,
+ *  a deletion being held, a key inherited from another policy's record, or a
+ *  roster still listing a compromised key (the rollback hazard). Rendered only
+ *  when the condition is `True`; a held deletion and an inherited compromise
+ *  are complaints, because each asks an administrator to act. */
+export function renderCompromiseGuard(status) {
+  const conditions = Array.isArray((status || {}).conditions) ? status.conditions : [];
+  const guard = conditions.find((c) => (c || {}).type === COMPROMISE_GUARD) || null;
+  if (guard === null || guard.status !== "True") {
+    return "";
+  }
+  const reason = String(guard.reason || "");
+  const kind = reason === "CompromiseRecorded" ? "note" : "complaint";
+  return "<p class=\"" + kind + "\" data-compromise-guard=\"" + esc(reason) + "\">" +
+    esc("Compromise guard (" + reason + "): " + String(guard.message || "")) + "</p>";
 }
 
 /** What a contested namespace means. It resolves to NOTHING -- not to one of

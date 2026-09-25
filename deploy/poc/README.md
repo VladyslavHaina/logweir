@@ -360,7 +360,10 @@ first use: `SIGNING_NOT_BEFORE=<RFC 3339 UTC> bash deploy/poc/trustpolicy.sh …
 A window that opens too late turns every earlier receipt `Untrusted
 (SignedOutsideValidity)`, and `notBefore` is immutable on a key (the CRD's CEL
 rule), so the only repair is to delete the `TrustPolicy` and apply a corrected
-one; the controller re-judges the namespace's evidence within seconds.
+one; the controller re-judges the namespace's evidence within seconds. A policy
+that already records a `KeyCompromise` revocation is held on deletion until
+another policy records it, so there apply the corrected policy under a new name
+first ([docs/keys.md](../../docs/keys.md), *Replacing a `TrustPolicy` safely*).
 
 ## 9. First sign-in, per role
 
@@ -561,7 +564,12 @@ the `Enforce` retention policies without `s3:GetObject` and on a versioned
 bucket, the shared backup set, the run whose ConfigMap never mounts, the
 point-bound `Restore` without a Job, and a `Backup` verified under a key then
 revoked for compromise — plus the identity key id, the schedules and the
-receipts recorded as for R1.
+receipts recorded as for R1. **That key is minted for the row, never the
+installation signer.** Swap `logweir-signing-key` for a fresh key for one run,
+list that key on `logweir-poc`'s policy only, then revoke it. A candidate with
+the compromise guard applies a compromise to every namespace and holds the
+policy on deletion while `TrustRoster/default` lists the key
+([release notes](../../docs/release-notes.md), item 16).
 
 Then: first run step 2 of the upgrade with **R2's own values** against the
 candidate chart and see it refused, naming `controller.watchNamespaces`

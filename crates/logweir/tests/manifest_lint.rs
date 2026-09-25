@@ -1389,10 +1389,16 @@ fn the_six_cluster_roles_are_exactly_as_specified() {
         // ClusterRole, which the wave-4 worker adds. The controller holds
         // none of it: it reads policies and writes their status, and an
         // administrator is the only thing that edits a key's lifecycle.
+        //
+        // `patch` ON THE OBJECT is the compromise-revocation finalizer
+        // (TRUSTPOLICY-DELETE-DROPS-REVOCATION): `metadata.finalizers` under a
+        // resourceVersion precondition, from ONE call site whose body
+        // `trust_revocation_durable.rs` pins. RBAC cannot grant less than the
+        // object, which is why the call site is pinned instead.
         (
             v(&["logweir.dev"]),
             v(&["trustpolicies"]),
-            v(&["list", "watch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
+            v(&["list", "watch", "patch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
         ),
         (
             v(&["logweir.dev"]),

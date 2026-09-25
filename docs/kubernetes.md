@@ -3015,6 +3015,45 @@ an older controller reads only the roster, still present and unchanged. See
 deliberate tightening the synthesis applies, and the one thing rollback does not
 carry.
 
+**A `KeyCompromise` revocation applies to every namespace, and it outlives the
+policy that recorded it** (TRUSTPOLICY-DELETE-DROPS-REVOCATION). Resolution
+picks the answering source by the rules above, and then every key it lists
+that ANY `TrustPolicy` in the cluster records as `Revoked` with
+`revocationReason: KeyCompromise` — a policy with a `deletionTimestamp`
+included — is revoked for compromise in the answer too, with the earliest
+recorded `revocationEffectiveFrom`. That covers a namespace removed from the
+recording policy's `spec.namespaces` (it falls to the roster, which cannot
+express a revocation), a second policy that still lists the key `Active`, and
+the `default: true` policy. Only a compromise is carried; a supersession stays
+the recording policy's own. **The event that records it re-evaluates every
+namespace.** When a policy's compromise records change (added, escalated from a
+supersession, edited away by hand), when a policy carrying one is first seen, or
+when one is being deleted, the policy watch of the `Backup`, `Restore`,
+`Approval` and `RecoveryCatalog` reconcilers enqueues every object they hold,
+not only the policy's own namespaces. The `TrustPolicy` reconciler also
+re-evaluates every other policy. A terminal `Restore` in a namespace on the
+roster therefore turns `RecordedBeforeRevocation` on that event, without
+waiting for a restart. A status heartbeat of an unchanged record fans out
+nothing. A refusal caused this way names the recording
+policy ("recorded by TrustPolicy/…"), and each policy's `status.keys[]`
+reports such a key `Revoked` even where its own spec says `Active`.
+
+The record itself is kept by a finalizer. The controller places
+`logweir.dev/compromise-revocation` on every policy that records a compromise,
+and a deletion is released only when another policy without a
+`deletionTimestamp` records the same revocation, or nothing in the cluster — no
+other policy, not `TrustRoster/default` — lists the key. Until then `kubectl
+delete` leaves the policy `Terminating`, still resolved through by this build
+and by an older one after a rollback, and its `CompromiseGuard` condition reads
+`DeletionBlocked` with every source still listing the key. The other readings
+are `CompromiseRecorded`, `CompromiseInherited` (this policy lists a key
+another policy revoked for compromise) and `NoCompromiseRecorded`. A roster
+read that fails releases nothing. CEL rule G9 keeps a revoked key's
+`KeyCompromise` reason from being edited to anything else. The replacement
+procedure, the roster-only rollback and the residuals are in
+[`keys.md`](keys.md), *A compromise revocation outlives the policy that
+recorded it* and *Replacing a `TrustPolicy` safely*.
+
 
 ### The checks
 
@@ -3352,7 +3391,9 @@ condition reads `RecordedBeforeRevocation` when the admission instant precedes
 compromise after use"). The authorization, key ids, approver and `Consumed` are
 kept: they are what an incident responder lists runs by. The withdrawal is
 sticky — a revocation is monotonic on a `TrustPolicy`, so a policy deleted or a
-namespace re-bound does not restore the green. A consumed record whose recorded
+namespace re-bound does not restore the green (and since
+TRUSTPOLICY-DELETE-DROPS-REVOCATION a compromise recorded on ANY policy reaches
+the record, even one whose stored status is still clean). A consumed record whose recorded
 key is still in the trust must also still carry a signature that verifies under
 it; one that does not (a planted `Consumed`) is judged again from scratch. A
 Restore that is only held (`Admitted=False`) or has no Job yet is not
@@ -5894,7 +5935,7 @@ manifest, the install file and every rendered chart copy.
 | `rehearsalschedules` | `get`, `list`, `watch`; `patch` on `/status` | `get` has a caller here where the others have none — an `Approval` naming a standing authorization is checked against the referent's own sealed spec, so the referent is read |
 | `recoverycatalogs` | `get`, `list`, `watch`; `patch` on `/status` | `get` is the one catalog a `ProtectionPolicy` names, folded into the existing rule rather than given a second one on the same resource |
 | `retentionpolicies` | `list`, `watch`; `patch` on `/status` | `list` is the namespace-wide conflict check (two policies over one destination); no `get`, no `update` |
-| `trustpolicies` | `list`, `watch`; `patch` on `/status` | a namespace never names its own trust, so there is no name to `get`; the write half is `logweir-trust-admin`'s |
+| `trustpolicies` | `list`, `watch`, `patch`; `patch` on `/status` | a namespace never names its own trust, so there is no name to `get`; the write half is `logweir-trust-admin`'s. `patch` on the object is the `logweir.dev/compromise-revocation` finalizer and nothing else (*Trust resolution*, below §8): RBAC cannot grant less than the object, so the one call site's body — `metadata.{name, resourceVersion, finalizers}` — is pinned by a test instead |
 
 Plus `create` on `restores` — one per due rehearsal slot, and nothing in the
 crate updates, replaces or deletes a `Restore` — and `list` on core `events`,
@@ -5911,7 +5952,9 @@ prefix-scoped object-store credential.
 
 **Every status write is `patch` on the `/status` subresource**, never `update`
 and never a verb on the spec. Seam S7: each carries
-`metadata.resourceVersion` as a compare-and-set precondition.
+`metadata.resourceVersion` as a compare-and-set precondition. The one write to
+an object's main resource is the `TrustPolicy` finalizer patch, which carries
+the same precondition and touches `metadata.finalizers` only.
 
 ### Who may write the five, from outside
 

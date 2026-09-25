@@ -2618,13 +2618,16 @@ const API_CLUSTER_GRANTS: [&str; 3] = [
 /// set (D0 stage 5): the two cluster-scoped trust kinds and nothing
 /// namespaced. `chart_lint_the_shared_console_is_outside_the_controllers_job_authority`
 /// explains each.
-const CONTROLLER_SCOPED_CLUSTER_GRANTS: [&str; 7] = [
+const CONTROLLER_SCOPED_CLUSTER_GRANTS: [&str; 8] = [
     "get logweir.dev/trustrosters",
     "list logweir.dev/trustrosters",
     "watch logweir.dev/trustrosters",
     "patch logweir.dev/trustrosters/status",
     "list logweir.dev/trustpolicies",
     "watch logweir.dev/trustpolicies",
+    // The compromise-revocation finalizer (TRUSTPOLICY-DELETE-DROPS-REVOCATION):
+    // `metadata.finalizers` only, from one pinned call site.
+    "patch logweir.dev/trustpolicies",
     "patch logweir.dev/trustpolicies/status",
 ];
 

@@ -1249,6 +1249,7 @@ fn approver_roster(not_after: Option<DateTime<Utc>>) -> RosterFacts {
         approver_keys: vec![("approver-1".to_string(), not_after)],
         allowed_cluster_ids: Vec::new(),
         governing: None,
+        compromised_keys: Vec::new(),
     }
 }
 

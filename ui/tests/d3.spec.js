@@ -968,6 +968,43 @@ test("a_fresh_evaluation_renders_the_controllers_own_verdict_and_the_lifecycle_b
   assert.match(out, /this key has no verdict in status.keys\[\]/);
 });
 
+// TRUSTPOLICY-DELETE-DROPS-REVOCATION. `trustpolicy-compromise-inherited.json`
+// is the status `crates/weirkeeper/tests/trust_revocation_durable.rs::
+// the_shared_keys_fixture_is_what_the_controller_writes` asserts this build
+// WRITES for a policy listing a key another policy revoked for compromise:
+// declared `Active`, evaluated `Revoked`, `CompromiseGuard=True/
+// CompromiseInherited`. Two readers of one file.
+test("COMPROMISE_INHERITED__a_key_another_policy_revoked_is_never_rendered_active", () => {
+  const object = d3("trustpolicy-compromise-inherited.json");
+  assert.equal(object.spec.keys[0].state, "Active", "the policy itself still declares it Active");
+  assert.equal(object.status.keys[0].effectiveState, "Revoked");
+  const now = Date.parse(object.status.evaluatedAt) + 60000;
+  assert.deepEqual(evaluationFreshness(object, now), { fresh: true, reason: null });
+  const html = decode(renderPolicyKeys(object, now));
+  assert.match(html, /revoked for compromise by another TrustPolicy's record/);
+  assert.equal(html.indexOf("active -- it may sign new documents"), -1,
+    "no sentence on the page vouches for a key the cluster knows is compromised");
+  assert.equal(html.indexOf("badge-green\">Active<"), -1, "and no green verdict beside it");
+  assert.match(html, /may not sign anything new; verification: None/);
+
+  const facts = decode(renderPolicyFacts(object, now));
+  assert.match(facts, /data-compromise-guard="CompromiseInherited"/);
+  assert.match(facts, /class="complaint"/);
+  assert.match(facts, /recorded by TrustPolicy\/incident-2026-09/);
+  assert.match(facts, /record the revocation here too/);
+
+  // NEGATIVE CONTROL: the same object with the controller's verdict Active is
+  // the ordinary lifecycle sentence and no guard paragraph -- the new text is
+  // the VERDICT's, not the fixture's.
+  const clean = JSON.parse(JSON.stringify(object));
+  clean.status.keys[0].effectiveState = "Active";
+  clean.status.conditions = clean.status.conditions.filter((c) => c.type !== "CompromiseGuard");
+  const cleanHtml = decode(renderPolicyKeys(clean, now));
+  assert.equal(cleanHtml.indexOf("by another TrustPolicy's record"), -1);
+  assert.match(cleanHtml, /active -- it may sign new documents/);
+  assert.equal(decode(renderPolicyFacts(clean, now)).indexOf("data-compromise-guard"), -1);
+});
+
 test("two_policies_claiming_one_namespace_resolve_to_nothing_and_the_page_says_so", () => {
   const object = d3("trustpolicy-stale.json");
   const html = decode(renderPolicyFacts(object, Date.parse(object.status.evaluatedAt) + 1000));

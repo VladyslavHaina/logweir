@@ -285,6 +285,13 @@ pub struct TrustProjection {
     pub claim: EvidenceClaim,
     /// Which policy answered, with the revision that answered.
     pub policy: crate::crds::PolicyRef,
+    /// The `TrustPolicy` objects whose `KeyCompromise` revocation reached the
+    /// matched key although the answering policy does not record one itself
+    /// ([`crate::trust::ResolvedKey::compromise_inherited_from`]) — so the
+    /// `detail` names the object that records the compromise rather than a
+    /// `legacy-roster-v1` that cannot express one. Empty otherwise, and then
+    /// the `detail` is byte-for-byte what it was before the overlay existed.
+    pub compromise_recorded_by: Vec<String>,
 }
 
 impl TrustProjection {
@@ -673,7 +680,24 @@ fn untrusted_detail(
             reason.as_str()
         ),
     };
-    Some(head + &tail)
+    // THE OBJECT THAT RECORDS THE COMPROMISE, when it is not the one that
+    // answered (TRUSTPOLICY-DELETE-DROPS-REVOCATION): a namespace resolving
+    // through `legacy-roster-v1` or another policy still reads the key as
+    // revoked, and the operator is told where the revocation lives.
+    let compromise_row = matches!(
+        reason,
+        UntrustReason::Revoked | UntrustReason::RecordedBeforeRevocation
+    );
+    let recorded = if !compromise_row || projection.compromise_recorded_by.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "; the revocation is recorded by TrustPolicy/{}, and a KeyCompromise revocation \
+             applies to every namespace whichever trust it resolves through",
+            projection.compromise_recorded_by.join(", TrustPolicy/")
+        )
+    };
+    Some(head + &tail + &recorded)
 }
 
 /// Read the object with the read-only evidence handle, check the digest the
@@ -884,6 +908,7 @@ pub fn verify_fetched(
                         key: Some(entry.trust.clone()),
                         claim,
                         policy: policy_ref(&trust.source),
+                        compromise_recorded_by: entry.compromise_inherited_from.clone(),
                     },
                 );
             }
@@ -2049,6 +2074,10 @@ pub fn retrust_with(
                     | SigningTime::NotAttempted(_) => stored_claim(stored),
                 },
                 policy: policy_ref(&resolved.source),
+                compromise_recorded_by: resolved
+                    .key(matched_key_id)
+                    .map(|k| k.compromise_inherited_from.clone())
+                    .unwrap_or_default(),
             };
             let verdict = projection.verdict(&VerificationResult::observation(Some(stored)), now);
             let trust = Some(projection.to_status_value(&verdict));

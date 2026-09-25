@@ -71,7 +71,9 @@ rules:
   # grants on them — and nothing namespaced. `TrustRoster` is read and its
   # status patched by `controllers::trust_roster`; `TrustPolicy` is watched by
   # the trust, approval, backup and restore reconcilers and its status patched
-  # by `controllers::trust_policy`.
+  # by `controllers::trust_policy`, which also places and releases the
+  # compromise-revocation finalizer — the one `patch` on the object itself
+  # (TRUSTPOLICY-DELETE-DROPS-REVOCATION; see `config/rbac/role.yaml`).
   - apiGroups: ["logweir.dev"]
     resources: ["trustrosters"]
     verbs: ["get", "list", "watch"]
@@ -80,7 +82,7 @@ rules:
     verbs: ["patch"]
   - apiGroups: ["logweir.dev"]
     resources: ["trustpolicies"]
-    verbs: ["list", "watch"]
+    verbs: ["list", "watch", "patch"]
   - apiGroups: ["logweir.dev"]
     resources: ["trustpolicies/status"]
     verbs: ["patch"]

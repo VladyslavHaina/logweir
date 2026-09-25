@@ -6391,7 +6391,7 @@ spec:
                       nullable: true
                       type: string
                     revocationReason:
-                      description: Why. Absent is read as `Unspecified`.
+                      description: Why. Absent is read as `Unspecified`. Once a revoked key's reason is `KeyCompromise` it stays so (G9); a supersession may still be escalated to a compromise.
                       enum:
                       - KeyCompromise
                       - Superseded
@@ -6460,6 +6460,8 @@ spec:
                     rule: 'oldSelf.state == ''Active'' ? true : (oldSelf.state == ''Retired'' ? self.state != ''Active'' : self.state == ''Revoked'')'
                   - message: revokedAt and revocationEffectiveFrom are immutable once written
                     rule: (!has(oldSelf.revokedAt) || (has(self.revokedAt) && self.revokedAt == oldSelf.revokedAt)) && (!has(oldSelf.revocationEffectiveFrom) || (has(self.revocationEffectiveFrom) && self.revocationEffectiveFrom == oldSelf.revocationEffectiveFrom))
+                  - message: 'a key revoked for KeyCompromise stays revoked for KeyCompromise: changing the reason would re-trust every document it signed before revocationEffectiveFrom'
+                    rule: oldSelf.state != 'Revoked' || !has(oldSelf.revocationReason) || oldSelf.revocationReason != 'KeyCompromise' || (has(self.revocationReason) && self.revocationReason == 'KeyCompromise')
                 maxItems: 64
                 type: array
                 x-kubernetes-list-map-keys:
@@ -7210,9 +7212,11 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["create", "get"]
+  # `patch` on the object is the compromise-revocation finalizer and nothing
+  # else (TRUSTPOLICY-DELETE-DROPS-REVOCATION). See `config/rbac/role.yaml`.
   - apiGroups: ["logweir.dev"]
     resources: ["trustpolicies"]
-    verbs: ["list", "watch"]
+    verbs: ["list", "watch", "patch"]
   - apiGroups: ["logweir.dev"]
     resources: ["trustpolicies/status"]
     verbs: ["patch"]
@@ -7267,7 +7271,9 @@ rules:
   # grants on them — and nothing namespaced. `TrustRoster` is read and its
   # status patched by `controllers::trust_roster`; `TrustPolicy` is watched by
   # the trust, approval, backup and restore reconcilers and its status patched
-  # by `controllers::trust_policy`.
+  # by `controllers::trust_policy`, which also places and releases the
+  # compromise-revocation finalizer — the one `patch` on the object itself
+  # (TRUSTPOLICY-DELETE-DROPS-REVOCATION; see `config/rbac/role.yaml`).
   - apiGroups: ["logweir.dev"]
     resources: ["trustrosters"]
     verbs: ["get", "list", "watch"]
@@ -7276,7 +7282,7 @@ rules:
     verbs: ["patch"]
   - apiGroups: ["logweir.dev"]
     resources: ["trustpolicies"]
-    verbs: ["list", "watch"]
+    verbs: ["list", "watch", "patch"]
   - apiGroups: ["logweir.dev"]
     resources: ["trustpolicies/status"]
     verbs: ["patch"]
