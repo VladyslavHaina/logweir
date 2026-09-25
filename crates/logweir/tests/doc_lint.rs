@@ -1653,7 +1653,10 @@ fn the_release_notes_carry_every_owed_operator_action() {
         // TRUSTPOLICY-DELETE-DROPS-REVOCATION (2026-09-24): the compromise guard.
         ("the compromise guard", "logweir.dev/compromise-revocation"),
         // The PoC rounds' later items (release-docs-final, 2026-09-25): P9, P11, P12 and P14.
-        ("an admitted Restore's Approval is a record", "RestoreAdmitted"),
+        (
+            "an admitted Restore's Approval is a record",
+            "RestoreAdmitted",
+        ),
         ("one catalog per destination", "DuplicateCatalog"),
         ("a failed controller read is read again", "retryAfter"),
         ("a readiness replay names its expiry", "staleBasis"),
