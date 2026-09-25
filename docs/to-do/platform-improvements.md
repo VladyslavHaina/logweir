@@ -439,6 +439,18 @@ surviving. None is fixed yet except where a worker is named.
 | TRUST-LOOKUP-CLUSTER-LIST-PER-READ | LOW (poc-fixes-3). The trust lookup does one cluster-wide list per evidence re-read. Owed: a shared cache. Open. | PLAT-19.1 |
 | HARNESS-CSRF-TOKEN-RECORDED | Incident (2026-09-24, PoC upgrade round): one harness row printed a viewer's CSRF synchronizer token into a local artifact. It was redacted in place, and a guard now refuses harness rows that keep token values. No password, key or bearer token was exposed. Closed. | PLAT-20.1 |
 | CONSOLE-MCP-ROUND1 | **Functional half CLOSED-LIVE (2026-09-25, PoC upgrade round 2 `claude/poc-upgrade-2`, helm rev 7 to the published `sha-b748fd5f`; report `claude/poc-upgrade-2.result.md`); the human-like round 2 is the orchestrator's.** **FIXED (2026-09-24): `claude/console-ux-1` merged `ffe7772`,** all 34 findings; review REJECT (narrow), fix round accepted. Round 2 of the human-like pass owed on the next publication. The human-like console pass through the Playwright MCP (2026-09-24, on the PoC at `86a554e`; report `claude/mcp-ui-test.result.md`, 25 screenshots in `claude/artifacts/mcp-ui-test/shots/`) found 34 layout, flow and copy defects.
+| CONSOLE-MCP-ROUND2 | The human-like console pass, round 2 (2026-09-25, on the PoC at the published `sha-b748fd5f`; report `claude/mcp-ui-test-round2.result.md`, 20 screenshots in `claude/artifacts/mcp-ui-test/round2/shots/`).
+  - **Round 1 verified fixed:** the 5 HIGH findings and the rest of round 1's findings; the wizard is usable in 1.3 s (was 12.4 s).
+  - **Open, medium (6):**
+    - R2-3: the Clusters table overflows its card;
+    - R2-12: the readiness headline reads "unknown" when only execution-only rows are unknown;
+    - R2-14: a viewer or norole user reaching the restore route sees the actionable wizard;
+    - R2-14b: the return address survives Sign out;
+    - R2-16: norole gets no landing explanation;
+    - R2-11: a pending check is labelled "does not apply".
+  - **Open, low:** 10 findings.
+
+  Fix on `claude/poc-fixes-4`, together with P13/P14 (running). | PLAT-18.2 / PLAT-17.2 |
   - **High (5):**
     - MCP-1: no Sign in affordance when signed out, and the console falls back to legacy mode;
     - MCP-4: raw problem-JSON shown when signed out;
