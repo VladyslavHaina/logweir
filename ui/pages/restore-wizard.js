@@ -5778,8 +5778,8 @@ export function clearOfWizardNav(node, element) {
   if (box.bottom <= bar.top || box.top <= 0) {
     return false;
   }
-  const style = typeof view.getComputedStyle === "function" ? view.getComputedStyle(element) : null;
-  const margin = parseFloat(style === null ? "" : style.scrollMarginBottom) || 0;
+  const computed = typeof view.getComputedStyle === "function" ? view.getComputedStyle(element) : null;
+  const margin = parseFloat(computed === null ? "" : computed.scrollMarginBottom) || 0;
   const height = typeof view.innerHeight === "number" ? view.innerHeight : bar.bottom;
   const room = Math.min(height - margin, bar.top);
   const by = Math.min(box.bottom - room, box.top);
