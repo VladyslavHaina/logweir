@@ -72,6 +72,24 @@ export async function wizardStep(page, n) {
   return walked;
 }
 
+/** THE WHOLE WIZARD'S TEXT, as a person reads it step by step: the page on step 1 (the chrome,
+ *  the banners above the stepper and step 1), then each of steps 2-6's own page, walked with
+ *  Next, and finally the walk back to the step it started on. For a check that read the whole
+ *  wizard from `body.innerText` when all six steps were on screen at once -- an absence ("no
+ *  sentence claims ...") must still be about every step, not only the one on screen. */
+export async function wizardText(page) {
+  const start = (await wizardShows(page)).position;
+  await wizardStep(page, 1);
+  const parts = [await page.evaluate(() => document.body.innerText)];
+  for (let n = 2; n <= WIZARD_STEPS.length; n += 1) {
+    await wizardStep(page, n);
+    parts.push(await page.evaluate((i) =>
+      document.querySelector("[data-wizard-step=\"" + i + "\"]").innerText, n - 1));
+  }
+  await wizardStep(page, start);
+  return parts.join("\n");
+}
+
 /** The same walk BY KEYBOARD ALONE, for the journeys that prove a keyboard user reaches every
  *  control: Next / Back are reached with `tabTo(selector, label)` -- the caller's own Tab walk,
  *  which records its focus trail -- and pressed with Enter. Returns the walk and the trails. */

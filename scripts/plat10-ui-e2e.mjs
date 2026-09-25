@@ -80,6 +80,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash, randomBytes } from "node:crypto";
 import { homedir } from "node:os";
+import { wizardAt, wizardStep } from "./console-steps.mjs";
 
 const require = createRequire(import.meta.url);
 const { chromium } = require("playwright");
@@ -913,15 +914,18 @@ async function main() {
         clear();
         return null;
       }
-      const cells = Array.from(row.querySelectorAll("td"));
-      const cellText = (i) => (cells[i] === undefined ? "" : cells[i].innerText.trim());
-      const greens = (i) => (cells[i] === undefined ? 0
-        : cells[i].querySelectorAll(".badge-green").length);
+      // BY COLUMN CAPTION, NOT BY POSITION (console-ux-1 review L5): the row's restore action
+      // moved to the first column, so every index shifted by one; `data-label` is the header's
+      // own caption, copied onto each cell by the page.
+      const cell = (caption) => row.querySelector("td[data-label=\"" + caption + "\"]");
+      const cellText = (caption) => (cell(caption) === null ? "" : cell(caption).innerText.trim());
+      const greens = (caption) => (cell(caption) === null ? 0
+        : cell(caption).querySelectorAll(".badge-green").length);
       const restore = row.querySelector("a[href^=\"#/restore\"]");
       const found = {
-        text: row.innerText, phase: cellText(2), backupSet: cellText(4),
-        availability: cellText(7), verification: cellText(8),
-        availabilityGreens: greens(7), verificationGreens: greens(8),
+        text: row.innerText, run: cellText("RUN"), phase: cellText("PHASE"), backupSet: cellText("BACKUP SET"),
+        availability: cellText("AVAILABILITY"), verification: cellText("VERIFICATION"),
+        availabilityGreens: greens("AVAILABILITY"), verificationGreens: greens("VERIFICATION"),
         greens: row.querySelectorAll(".badge-green").length,
         restoreHref: restore === null ? null : restore.getAttribute("href"),
       };
@@ -1586,7 +1590,11 @@ async function main() {
     check(rowAHref !== null && rowAHref.indexOf("uid=" + runA.metadata.uid) !== -1,
       "run A's row Restore is not bound to run A: " + rowAHref);
     await page.click("#schedule-history a[href=\"" + rowAHref + "\"]");
-    await waitForSelector(page, "#point-uid", "the wizard on the older point");
+    // ONE STEP AT A TIME (console-ux-1, MCP-29): the link opens step 1; the point it is bound
+    // to is step 2's panel, reached with Next (scripts/console-steps.mjs).
+    await waitForSelector(page, "#wizard-position", "the wizard on the older point");
+    await wizardAt(page, 1, 60);
+    await wizardStep(page, 2);
     const boundName = (await page.textContent("#point-name")).trim();
     const boundUid = (await page.textContent("#point-uid")).trim();
     const followedTo = await page.evaluate(() => window.location.hash);
@@ -1662,12 +1670,17 @@ async function main() {
     // FOLLOWED FROM THE DETAIL: the page is the schedule detail section 10
     // just re-read, and B's own row link is clicked.
     await page.click("#schedule-history a[href=\"" + rowB2.restoreHref + "\"]");
-    await waitForSelector(page, "#point-uid", "the wizard on the healthy point");
+    // Walked 1 -> 2 (the bound point) -> 4 (the target) -> 6 (the plan and Create).
+    await waitForSelector(page, "#wizard-position", "the wizard on the healthy point");
+    await wizardAt(page, 1, 60);
+    await wizardStep(page, 2);
     check((await page.textContent("#point-uid")).trim() === runB.metadata.uid,
       "the wizard is not bound to run B");
+    await wizardStep(page, 4);
     await waitForSelector(page, "#target-cluster", "the wizard's target step");
     const targetUid = kubeJson(["-n", namespace, "get", "kafkacluster", target]).metadata.uid;
     await page.selectOption("#target-cluster", targetUid);
+    await wizardStep(page, 6);
     await waitForSelector(page, "#plan-bytes", "the plan preview");
     await pause(1000);
     const previewed = await page.evaluate(() => ({
@@ -2196,7 +2209,7 @@ async function main() {
       schedule: selected.metadata.name, pausedSpecSuspend: paused.spec.suspend,
       resumedSpecSuspend: resumed.spec.suspend, saysSuspended: pausedBadge,
       pauseReRenderedInPlace: pausedInPlace, resumeReRenderedInPlace: resumedInPlace,
-      runsListedWhilePaused: [pausedA.text.split("\t")[0], pausedB.text.split("\t")[0]],
+      runsListedWhilePaused: [pausedA.run, pausedB.run],
       restoreLinksBeforePause: [beforePauseA.restoreHref, beforePauseB.restoreHref],
       restoreLinksWhilePaused: [pausedA.restoreHref, pausedB.restoreHref],
     });
