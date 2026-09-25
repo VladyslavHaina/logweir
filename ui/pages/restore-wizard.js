@@ -128,6 +128,7 @@ import {
   flagBadge,
   isBlockingRow,
   isDraftApprovalRow,
+  messageText,
   readyButForDraftApproval,
   when,
   windowMessage,
@@ -2438,7 +2439,7 @@ export function renderTopicSubset(state) {
     // send. The window refusal in step 3 works the same way, for the same
     // reason (PLAT-11.1).
     (typeof problems.topics === "string"
-      ? "<p class=\"complaint\" id=\"subset-complaint\">" + esc(problems.topics) + "</p>"
+      ? "<p class=\"complaint\" id=\"subset-complaint\">" + messageText(problems.topics) + "</p>"
       : "") +
     "<h4>The mapping, before you submit</h4>" +
     "<p class=\"blurb\">" + esc(MAPPING_SENTENCE) + "</p>" +
@@ -2636,7 +2637,7 @@ export function renderTargetStep(state) {
     invalidAttributes("topic-prefix", errors.topicPrefix) + ">" +
     fieldErrorLine("topic-prefix", errors.topicPrefix) +
     (typeof mapping.topicPrefix === "string"
-      ? "<p class=\"complaint\" id=\"prefix-complaint\">" + esc(mapping.topicPrefix) + "</p>"
+      ? "<p class=\"complaint\" id=\"prefix-complaint\">" + messageText(mapping.topicPrefix) + "</p>"
       : "") +
     "<p class=\"note\">The prefix defaults to what logweir_core::spec::default_topic_prefix " +
     "produces for this instant, so a topic name says both what it is and what point it was " +
@@ -2762,7 +2763,9 @@ export function renderPreflightStep(state, prepared) {
       : renderPreflight(result)) +
     "<p class=\"note\">" + esc(READINESS_CAVEAT_SENTENCE) + "</p>" +
     "<p class=\"note\" id=\"readiness-source-destination\">" +
-    esc(readinessSourceSentence(s.point)) + "</p>" +
+    // ITS NAMES AND DIGEST AS CODE, not as literal backticks (MCP round 2,
+    // R2-10): the sentence spells them the way every message here does.
+    messageText(readinessSourceSentence(s.point)) + "</p>" +
     "<h4>Target cluster probe (context, not a verdict)</h4>" +
     facts([
       ["target cluster", cell((((cluster || {}).metadata) || {}).name)],
@@ -2988,7 +2991,7 @@ export function renderPlanStep(prepared, state) {
   const plan = renderable
     ? "<pre class=\"plan-bytes\" id=\"plan-bytes\">" + esc(p.bytes) + "</pre>"
     : "<p class=\"complaint\" id=\"plan-problem\">The plan cannot be rendered from these values, " +
-      "so there is no hash and nothing to submit: " + esc(p.problem) + "</p>";
+      "so there is no hash and nothing to submit: " + messageText(p.problem) + "</p>";
   return (
     "<section class=\"step\" id=\"step-plan\" tabindex=\"-1\"><h3>6. Plan, hash and names</h3>" +
     "<p class=\"blurb\">The document an approver signs, exactly as it will be sent, with " +
@@ -4769,7 +4772,7 @@ export function renderCatalogPointRefusal(ns, choice) {
     "<h2>Restore wizard</h2>" +
     "<div class=\"refusal-block\" id=\"catalog-point-refusal\" role=\"alert\">" +
     "<p class=\"refusal\">This recovery point is not offered for a restore: " +
-    esc(c.reason) + ". Nothing was sent, and no other point was put in its place.</p>" +
+    messageText(c.reason) + ". Nothing was sent, and no other point was put in its place.</p>" +
     "<p class=\"note\">Asked for: point <code>" + esc(c.pointId) + "</code> in catalog " +
     "<code>" + esc(c.catalog) + "</code>.</p>" +
     "<p class=\"note\"><a href=\"#/catalog?ns=" + esc(encodeURIComponent(n)) + "&name=" +
@@ -5671,7 +5674,11 @@ function wireRestoreReadiness(node, state, parse, api, lifecycle, prepared) {
           ? null
           : state.readiness.boundSecret),
     });
-    renderAndWire(node, state, parse, api, lifecycle, true);
+    renderAndWire(node, state, parse, api, lifecycle, true).then((painted) => {
+      if (painted === true) {
+        keepStatusInView(node, "#restore-readiness-status");
+      }
+    });
     if (record.phase === "succeeded") {
       followRestoreReadiness(node, state, parse, api, lifecycle);
     }
@@ -5717,6 +5724,31 @@ function wireRestoreReadiness(node, state, parse, api, lifecycle, prepared) {
       );
     }, lifecycle);
   }
+}
+
+/** BRINGS A FOCUSED STATUS LINE INTO VIEW ABOVE THE STICKY FOOTER (MCP round
+ *  3, R3-1). A readiness click disables its button, focus moves to the
+ *  step's status line (`disableKeepingFocus`, `restoreFocus` -- both with
+ *  `preventScroll`), and the repaint left that line, and the verdict under
+ *  it, behind the Back/Next bar at 390 px. So once the step is painted, a
+ *  status that holds focus is scrolled to the NEAREST edge, which honours
+ *  the `scroll-margin-bottom` `style.css` gives every wizard focus target --
+ *  the footer's height. Nothing moves when focus is elsewhere: this never
+ *  takes the page away from what the reader is looking at. Exported for the
+ *  suite. */
+export function keepStatusInView(node, selector) {
+  const status = node === null || node === undefined || typeof node.querySelector !== "function"
+    ? null
+    : node.querySelector(selector);
+  if (status === null || status === undefined || typeof status.scrollIntoView !== "function") {
+    return false;
+  }
+  const doc = status.ownerDocument;
+  if (!doc || doc.activeElement !== status) {
+    return false;
+  }
+  status.scrollIntoView({ block: "nearest" });
+  return true;
 }
 
 /** A held verdict, replaced by a fresher read of the SAME check -- except that

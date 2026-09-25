@@ -63,8 +63,10 @@ import {
   fieldErrorLine,
   invalidAttributes,
   listFooter,
+  messageText,
   mutationStatus,
   replace,
+  restorePointLink,
   table,
   conditionBadge,
   flagBadge,
@@ -444,10 +446,13 @@ export function pointRow(entry, ns, catalog, destination, page) {
     e.selectable !== true
       ? ABSENT
       : (offer.offer
-        ? "<a class=\"action\" href=\"" + esc(restoreCatalogPointRoute(ns, catalog, e.pointId)) +
-          "\" data-restore-point=\"" + esc(e.pointId) + "\">Restore this point</a>"
+        // A ROLE THAT CANNOT RESTORE IS NOT OFFERED THE LINK (MCP round 3,
+        // R3-2); the route would refuse it by name.
+        ? restorePointLink(restoreCatalogPointRoute(ns, catalog, e.pointId),
+          granted(ns, "restoreCreate"), "Restore this point",
+          " data-restore-point=\"" + esc(e.pointId) + "\"")
         : "<span class=\"note\" data-restore-refused=\"wizard\">not offered: " +
-          esc(offer.reason) + "</span>"),
+          messageText(offer.reason) + "</span>"),
     "<code>" + cell(e.pointId) + "</code>",
     when(e.recoveryPointAt),
     badge(e.availability === "Available" ? "green" : "unverified", String(e.availability || "")),

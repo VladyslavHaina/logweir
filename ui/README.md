@@ -204,6 +204,7 @@ authorisation story is "the API server evaluated the viewer's RBAC".
 | `tests/typed-input.spec.js` | **P13 and its class**: every form that repaints when a read lands keeps what was typed -- the readiness panel, a connection's discovery form and filters, a destination's rotation form -- each row typing first and then letting the read land. |
 | `tests/mcp-round2.spec.js` | **the human-like pass, round 2**: the running check's "checking...", the readiness headline and its one rule with step 5 and Create, the role gate and the no-role landing, sign out forgetting the address, the folded tables, the chips that stay whole, the message code spans, the picker's row and the footer -- each with the behaviour it replaced. |
 | `tests/check-intent.spec.js` | **P14 and its class**: a check asked again replays only while it can still be the answer -- the spent rule, `askCheck`, and the schedule form, the readiness panel and *Discover topics* over D0's replay rule, modelled. |
+| `tests/mcp-round3.spec.js` | **the human-like pass, round 3**: the wizard's focused status kept clear of its sticky footer, step texts that show names as code, "Restore this point" only for a role that can restore, and the no-role header -- each with the behaviour it replaced. |
 | `tests/check-deadline.spec.js` | **P15 and its class**: every follower reads its check until the check's own deadline, backs off while it does, and says so -- with *Run the check again* -- when the deadline passes without a result: the deadline pinned to the product's own numbers, the follow on node's mock timers, and each page (the readiness panel, the schedule form, *Test connection*, *Discover topics*, *Test access*) with a check that settles at 100 s and one that never does. Restore step 5's two rows are in `mutation.spec.js`. |
 | `tests/preview-server.js` | a development tool, never a test: serves this directory over the fixtures under `tests/fixtures/preview/`. See *Previewing with fixtures*. |
 
@@ -1612,6 +1613,30 @@ tokens: each of those clicks is a new check by design.
   instants in one cell, a check's code, gating, remedy, scope and instants
   under its id, verdict and message); every field is still printed. A table
   that still scrolls carries edge shadows.
+
+### Round 3 of the human-like pass
+
+* **A focused status is not left under the wizard's footer** (R3-1). At 390 px
+  a readiness click moved focus to step 5's status line, and the repaint left
+  it -- and the verdict under it -- behind the sticky Back/Next bar. Every
+  wizard focus target keeps the footer's height clear below it
+  (`scroll-margin-bottom: var(--lw-wizard-nav-clearance)`), and once step 5
+  is painted a status that holds focus is scrolled to its nearest edge
+  (`keepStatusInView`); focus anywhere else moves nothing.
+* **Names in the step texts are code** (R2-10): step 5's source sentence, step
+  4's mapping and prefix complaints, step 6's plan problem and the
+  catalog-point refusal render their backticked spans with `messageText`,
+  never as literal backticks.
+* **"Restore this point" is offered to a role that can restore** (R3-2). The
+  catalog's points, the Backups list and a schedule's points and runs render
+  `restorePointLink`: the link when the session grants `restoreCreate` in the
+  namespace, and "an operator or administrator can restore this point"
+  otherwise -- the route refuses such a role by name, so the link was an offer
+  already known to fail.
+* **The header agrees with the no-role card** (R3-3): a session with no role
+  anywhere reads "no role yet", not "choose a namespace to see your role".
+
+Rows: `ui/tests/mcp-round3.spec.js`.
 
 ### A repaint keeps what the reader typed
 

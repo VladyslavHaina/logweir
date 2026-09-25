@@ -289,6 +289,9 @@
   --lw-visually-hidden-size: 1px;
   --lw-list-indent: 1.25rem;
   --lw-subset-max-height: 24rem;
+  /* The sticky wizard footer's height where it wraps to two rows (390 px:
+   * about 110 px), with room to spare -- what a focused status keeps clear. */
+  --lw-wizard-nav-clearance: 8rem;
   --lw-signpost-width: 22rem;
   --lw-signpost-max-width: calc(100vw - 2rem);
   --lw-header-background: var(--cds-global-color-construction-900);
@@ -2163,6 +2166,15 @@ button[aria-busy="true"] {
   border-radius: var(--cds-alias-object-border-radius-100);
   background: var(--cds-alias-object-container-background);
   box-shadow: var(--cds-alias-object-shadow-300);
+}
+
+/* WHAT TAKES FOCUS ON A STEP IS NEVER LEFT UNDER THE FOOTER (MCP round 3,
+ * R3-1): at 390 px a readiness click moved focus to its status line, which sat
+ * behind the sticky Back/Next bar with the verdict below it. A focus target
+ * scrolled into view keeps the footer's height clear beneath it. */
+.wizard-page .form-status,
+.wizard-page [tabindex] {
+  scroll-margin-bottom: var(--lw-wizard-nav-clearance);
 }
 
 /* A MOVE THAT GOES NOWHERE IS NOT SHOWN (MCP round 2, R2-8): Back on the

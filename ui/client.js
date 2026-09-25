@@ -429,6 +429,10 @@ export function sessionIdentity(ns) {
     subject: String(actor.subject || ""),
     authenticationMode: String(decided.session.authenticationMode || ""),
     roles: Object.freeze(rolesFor(ns)),
+    // NO ROLE ANYWHERE (MCP round 3, R3-3): the header says what the no-role
+    // card says, instead of asking for a namespace no choice will give a
+    // role in.
+    noRole: holdsNoRole(),
     namespace: typeof ns === "string" ? ns : "",
     // A localAdmin console has no sign-in and no sign-out: the one actor is the
     // administrator who started it on loopback (`docs/api.md`).

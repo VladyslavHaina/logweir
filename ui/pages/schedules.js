@@ -39,7 +39,7 @@
 // cluster renamed since the draft was started is sent correctly rather than
 // under its old name.
 
-import { CONSOLE, apiClient, mayOperate, mode } from "../client.js";
+import { CONSOLE, apiClient, granted, mayOperate, mode } from "../client.js";
 import {
   active,
   askCheck,
@@ -87,6 +87,7 @@ import {
   nextRunsPanel,
   runPhaseBadge,
   replace,
+  restorePointLink,
   revisionLine,
   rfc3339,
   table,
@@ -1810,8 +1811,9 @@ export function renderRecoveryPoints(ns, object, backups) {
     const status = point.status || {};
     const covered = status.windowCovered || {};
     return [
-      // The action first (MCP-25's rule), so a wide row never hides it.
-      "<a class=\"action\" href=\"" + esc(restorePointRoute(ns, point)) + "\">Restore this point</a>",
+      // The action first (MCP-25's rule), so a wide row never hides it -- and
+      // for a role that cannot restore, who can (MCP round 3, R3-2).
+      restorePointLink(restorePointRoute(ns, point), granted(ns, "restoreCreate")),
       // THE SLOT UNDER THE NAME AND THE WINDOW IN ONE CELL (R2-3): nine
       // columns were 270 px wider than the card at 1440.
       cell(meta.name) + (typeof spec.slot === "string" && spec.slot.length > 0
@@ -5019,8 +5021,9 @@ export function restoreCell(ns, run, points) {
     // plan is bound to that receipt and the runner re-verifies it.
     const offer = backupCatalogOfferFrom(run, points);
     if (offer.offer) {
-      return "<a class=\"action\" href=\"" + esc(restoreCatalogPointRoute(ns, offer.catalog, offer.entry.pointId,
-        run)) + "\" data-restore-from=\"catalog\">Restore this point (catalog window)</a>";
+      return restorePointLink(restoreCatalogPointRoute(ns, offer.catalog, offer.entry.pointId, run),
+        granted(ns, "restoreCreate"), "Restore this point (catalog window)",
+        " data-restore-from=\"catalog\"");
     }
     return cell("");
   }
@@ -5028,7 +5031,7 @@ export function restoreCell(ns, run, points) {
     return "<span class=\"note\" data-restore-refused=\"catalog\">not restorable: the catalog " +
       "marks this set not selectable</span>";
   }
-  return "<a class=\"action\" href=\"" + esc(restorePointRoute(ns, run)) + "\">Restore this point</a>";
+  return restorePointLink(restorePointRoute(ns, run), granted(ns, "restoreCreate"));
 }
 
 /** Why there are two verdict columns and what a blank one would have meant. */

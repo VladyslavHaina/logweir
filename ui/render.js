@@ -1418,6 +1418,26 @@ export const CHECKING_SENTENCE =
   "The check has not finished. Whether its result applies to your current inputs is decided " +
   "when it has one; this page reads it again until then.";
 
+/** THE WORDS A ROLE THAT CANNOT RESTORE READS WHERE A RESTORE LINK WOULD BE
+ *  (MCP round 3, R3-2): the route refuses such a role by name (R2-14), so a
+ *  link to it is an offer the page already knows it will refuse. The same
+ *  words the catalog's Connect panel uses for its own role. */
+export const RESTORE_NEEDS_ROLE_SENTENCE =
+  "an operator or administrator can restore this point";
+
+/** "Restore this point": the link to the wizard, or -- for a role the session
+ *  says cannot create a Restore in this namespace (`allowed === false`) -- the
+ *  sentence saying who can. `href` is the route (escaped here); `attributes`
+ *  is extra markup the caller has already escaped. Pure. */
+export function restorePointLink(href, allowed, label, attributes) {
+  if (allowed === false) {
+    return "<span class=\"note\" data-restore-refused=\"role\">" +
+      esc(RESTORE_NEEDS_ROLE_SENTENCE) + "</span>";
+  }
+  return "<a class=\"action\" href=\"" + esc(href) + "\"" + (attributes || "") + ">" +
+    esc(label || "Restore this point") + "</a>";
+}
+
 /** What a check says when this page stopped following it because the
  *  longest time a check may take has passed without a result (`lifecycle.js`'s
  *  `followCheck`). It replaces [`CHECKING_SENTENCE`], whose promise to read
