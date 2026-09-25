@@ -1680,9 +1680,17 @@ async function main() {
     await openRoute(page, base + "#/restore?ns=" + encodeURIComponent(DR),
       "#step-catalog-points", "the selector's catalog section (minted point)");
     await page.click("#step-catalog-points a[href*=\"point=" + mintedPoint.pointId + "\"]");
-    await waitForSelector(page, "#catalog-topics", "the wizard on the minted point");
+    // WALKED EXACTLY AS JOURNEY 4 WALKS (H5, poc-upgrade-2): the link opens the
+    // one-step wizard on step 1, so the catalog's topics (step 2) and the
+    // subset and prefix (step 4) are hidden until Next reaches them. Filling
+    // them straight after the click waited out Playwright's timeout live.
+    await waitForSelector(page, "#wizard-position", "the wizard on the minted point");
+    await wizardAt(page, 1, 60);
+    await wizardStep(page, 2);
+    await waitForSelector(page, "#catalog-topics", "the minted point's catalog step");
     await page.fill("#catalog-topics", SOURCE_TOPIC);
     await page.dispatchEvent("#catalog-topics", "change");
+    await wizardStep(page, 4);
     await waitForSelector(page, ".topic-box[data-topic=\"" + SOURCE_TOPIC + "\"]",
       "the named topic in the minted point's subset");
     await page.fill("#topic-prefix", RESTORE_PREFIX);
