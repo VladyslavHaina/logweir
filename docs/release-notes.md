@@ -18,10 +18,10 @@ mark without one). The supported path these notes assume is
 ## Unreleased — `main` after `v0.1.5`
 
 The last tag is `v0.1.5` (`9cc78a3`). This entry covers `main` through
-`815249cb` (2026-09-25): the platform tracker's shipped tasks, the operator
+`fdb48cd8` (2026-09-25): the platform tracker's shipped tasks, the operator
 actions collected for PLAT-20.2 and after it, and the upgrade from the last
-published image. No tag is cut at `815249cb`, so the candidate record below
-stays empty. The shipped task list, the five publications the PoC ran, the
+published image. No tag is cut at `fdb48cd8`, so the candidate record below
+stays empty. The shipped task list, the six publications the PoC ran, the
 tested environments and the results are in
 [release-handoff.md](release-handoff.md).
 
@@ -74,14 +74,14 @@ find ui -type f ! -name '*.md' ! -path 'ui/tests/*' | LC_ALL=C sort | xargs shas
   into, upgraded from `v0.1.5` and from `sha-f49849d…`, and rolled back on
   docker-desktop on 2026-09-24 ([deploy/poc/](../deploy/poc/README.md), *What
   the first live round showed*). The running install was then upgraded in place
-  four times by the profile's *Upgrade to a newer publication*, the last to
-  `815249cb` on 2026-09-25 ([release-handoff.md](release-handoff.md)). The
+  five times by the profile's *Upgrade to a newer publication*, the last to
+  `fdb48cd8` on 2026-09-25 ([release-handoff.md](release-handoff.md)). The
   fixes those rounds needed are in the profile.
 - **The chart is published** as `oci://registry-1.docker.io/vladyslavhaina/logweir-chart`,
   beside the images and versioned with them ([install.md](install.md), *(c) The
   Helm chart*). The first publication the PoC ran, `0.1.0-sha-86a554e6…`
-  (digest `sha256:90b4d41b…`), and the last, `0.1.0-sha-815249cb…` (digest
-  `sha256:820622f2…`, CI run 36152835598), pull anonymously and name their own
+  (digest `sha256:90b4d41b…`), and the last, `0.1.0-sha-fdb48cd8…` (digest
+  `sha256:36e65b2a…`, CI run 36183088296), pull anonymously and name their own
   commit's four images.
   **On first publication, `vladyslavhaina/logweir-chart` must be Public in Docker Hub**, or `main` CI's
   chart step fails closed (its anonymous pull-back is refused) until the repository is made Public and
@@ -776,10 +776,11 @@ is converted and no stored object is rewritten
 14 CRDs, the managed identity adopting a hand-provisioned signer, the console
 arriving) and from `sha-f49849d…` (the last build before `ac00819`), each to
 the first PoC publication `86a554e6`, which crosses items 1–13, and each rolled
-back. The running install was then upgraded in place four times: to
+back. The running install was then upgraded in place five times: to
 `02dc44b6` (items 14, 15 and 17), to `b748fd5f` (16, 18 and 19), to
-`a54fb823` (20) and to `815249cb` (no item: a console-only fix, P15, and no
-CRD change). [release-handoff.md](release-handoff.md) names the chart and
+`a54fb823` (20), to `815249cb` (no item: a console-only fix, P15, and no
+CRD change) and to `fdb48cd8` (no item: console-only fixes, P16 and O2, and
+no CRD change). [release-handoff.md](release-handoff.md) names the chart and
 image digests, the state each rehearsal set up first, and what each round
 showed. An upgrade from `sha-7b0277b…` crosses items 1–4 and 11–20.
 
@@ -802,9 +803,10 @@ policy or roster ([keys.md](keys.md)).
   install at `86a554e6`; upgrades to it from `v0.1.5` and from `sha-f49849d…`,
   each with a rollback, that kept installation identities, schedules and
   archive readability, with a restore of a pre-upgrade point after each; then
-  four in-place upgrades of the running install, to `02dc44b6`, `b748fd5f`,
-  `a54fb823` and `815249cb`, after which all 344 of its backup receipts still
-  passed the independent verifier ([release-handoff.md](release-handoff.md)).
+  five in-place upgrades of the running install, to `02dc44b6`, `b748fd5f`,
+  `a54fb823`, `815249cb` and `fdb48cd8`, after which all 356 of its backup
+  receipts still passed the independent verifier
+  ([release-handoff.md](release-handoff.md)).
   [UNVERIFIED — R2's pre-upgrade retention, mount-failure and point-bound-restore states were not set up.]
 - **The large catalog was measured live at 258 real points, not 1,000.** The
   host could not run more runner pods: the `amd64` runner runs under
@@ -825,11 +827,19 @@ policy or roster ([keys.md](keys.md)).
   without a reload on the five readiness followers, *Discover topics* now
   settles on the page, and the product API's request log showed the cadence. The 12-minute "did not finish" state was left to the
   offline rows (`ui/tests/check-deadline.spec.js`).
-- **At restore step 5 the first repaint of a running check scrolls the page
-  to its top (P16, console, open).** On a 390 px screen the focused status
-  line is then off screen until the verdict lands; the verdict itself is
-  brought into view above the Back/Next bar. Scroll back to the status line,
-  or wait for the verdict. Found by the fourth PoC round on `815249cb`.
+- **P16, fixed in `fdb48cd8` and proven live:** at restore step 5 the first
+  repaint of a running check scrolled the page to its top, so on a 390 px
+  screen the focused status line was off screen until the verdict landed.
+  A repaint of the view on screen now keeps the reader's place (scroll and
+  focus), the status is kept above the Back/Next bar, a reader who scrolled
+  away is left where they are, and Next, Back and a `&step=` link open a step
+  at its heading ([ui/README.md](../ui/README.md)). On the PoC
+  (`claude/poc-upgrade-5`, 390×844) the page and the focused status held
+  still through every repaint of a running check, where the same rows on
+  `815249cb` had seen it jump to the top; *Test connection* and *Discover
+  topics* kept the page, and *Test access* and the schedule form kept focus.
+  The same publication prints `logweir catalog list` on the Catalog as code,
+  not between backticks (O2).
 - **The demo MinIO is a rebuilt mirror.** MinIO withdrew its public images
   (Docker Hub on 2026-09-11; `quay.io` refuses anonymous pulls since
   2026-09-24). The chart's demo MinIO, the e2e stack and the PoC run the same

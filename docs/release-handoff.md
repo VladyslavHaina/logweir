@@ -5,14 +5,14 @@ what is still open, and how to roll back. PLAT-20.2's done evidence asks for
 exactly this — "shipped task IDs, commit/image identities, tested
 environments, results, limitations and rollback instructions" — so that a
 person or an agent picking this release up does not have to rebuild it from the
-platform tracker. This file is current at **`main` `815249cb` (2026-09-25)**.
+platform tracker. This file is current at **`main` `fdb48cd8` (2026-09-25)**.
 The tracker ([platform-improvements.md](to-do/platform-improvements.md)) stays
 the authority for each task's full completion record, and this file is updated
 per release rather than claiming the roadmap complete.
 
 **State at this revision.**
 - The last version tag is `v0.1.5` (`9cc78a3`). **No tag is cut at
-  `815249cb`.** Every row of the *Candidate record* in
+  `fdb48cd8`.** Every row of the *Candidate record* in
   [release-notes.md](release-notes.md) therefore stays `—`: a tag needs its own
   CI run, release run and image digests recorded there, and a previous run
   does not validate new bytes.
@@ -21,10 +21,10 @@ per release rather than claiming the roadmap complete.
   (2026-09-25), written from the last PoC round's final draft
   (`claude/poc-upgrade-3.result.md` §7 in the orchestration store).
 - The PoC install is left running on docker-desktop at the published
-  `sha-815249cb…` (CI run 36152835598, chart digest `sha256:820622f2…`): Helm
-  release `logweir`, revision 11, in shared mode behind Traefik and Dex
-  ([deploy/poc/](../deploy/poc/README.md)). Its fourth in-place upgrade, from
-  `a54fb823`, is `claude/poc-upgrade-4.result.md` in the orchestration store.
+  `sha-fdb48cd8…` (CI run 36183088296, chart digest `sha256:36e65b2a…`): Helm
+  release `logweir`, revision 13, in shared mode behind Traefik and Dex
+  ([deploy/poc/](../deploy/poc/README.md)). Its fifth in-place upgrade, from
+  `815249cb`, is `claude/poc-upgrade-5.result.md` in the orchestration store.
 - [product-expansion.md](to-do/product-expansion.md) is not started, by the
   user's decision (2026-09-23): this release carries platform improvements only.
 
@@ -74,7 +74,7 @@ commit (see *Tested environments*).
 | PLAT-19.1 — trust lifecycle | Done 2026-09-21 | `64fcd38..5fc1a72`, `b3aed6f..3eb7897`, `d8d3479`, `532740d`/`efa16b2` | lab builds `d387f87`, `af64073` (harness-rows-4 … 7) | overlap, retirement, revocation, the keys view's `unknown` |
 | PLAT-19.2 — Ordinary confirmation and Governed approval | Done 2026-09-23 | `claude/plat19-2` in `ac00819` | lab-refresh-9; harness-rows-12 at `306cebf` | Ordinary and Governed; eleven kubectl-written failure modes each refused by name |
 | PLAT-20.1 — focused cross-layer journey set | Done 2026-09-23 | `e2e/journeys`, `claude/plat20-1` in `ac00819` | lab-refresh-9; harness-rows-12 at `306cebf` | 12 PASS / 0 FAIL; no new CI gate |
-| PLAT-20.2 — supported behaviour, upgrade proof, limits | Done on the orchestrator's record (2026-09-25) | offline half `74876826` (`claude/plat20-2`); PoC rounds `7beb7c8`, `446fbaf`, `e9bb3894`, `4e58d330` | the PoC profile on docker-desktop, at the four publications below | see *What the live half of PLAT-20.2 showed* |
+| PLAT-20.2 — supported behaviour, upgrade proof, limits | Done on the orchestrator's record (2026-09-25) | offline half `74876826` (`claude/plat20-2`); PoC rounds `7beb7c8`, `446fbaf`, `e9bb3894`, `4e58d330` | the PoC profile on docker-desktop, at the six publications below | see *What the live half of PLAT-20.2 showed* |
 
 ## Tested environments
 
@@ -95,7 +95,7 @@ builds (`imagePullPolicy: Never`); they say nothing about registry digests:
 | lab-refresh-10 | `b426096` | `sha256:0720cd92…` | `sha256:3e5ddaea…` |
 | lab-refresh-11 | `86a554e6` | `sha256:70b06b12…` (arm64) | `sha256:4bb02b04…` (amd64) |
 
-## Commit and image identities: the five publications the PoC ran
+## Commit and image identities: the six publications the PoC ran
 
 Each is one `main` commit published by `ci.yml` as four `sha-<commit>` images
 and the chart `oci://registry-1.docker.io/vladyslavhaina/logweir-chart`
@@ -111,7 +111,8 @@ only.
 | 2 | `02dc44b6` (2026-09-24) | 36071480985 | `sha256:7f448172…` | `sha256:c0d5c826…` | `sha256:90894590…` | `sha256:135c9b4f…` | 4 (images, binding off), 5 (binding) | `claude/poc-upgrade-1`, 2026-09-25 |
 | 3 | `b748fd5f` (2026-09-24) | 36100597420 | `sha256:3bba9455…` | `sha256:f6f10d96…` | `sha256:4911f3a5…` | `sha256:29c78ea0…` | 6, 7 | `claude/poc-upgrade-2`, 2026-09-25 |
 | 4 | `a54fb823` (2026-09-25) | 36129705142 | `sha256:5becb4b9…` | `sha256:61a9116c…` | `sha256:83445db0…` | `sha256:714deedb…` | 8, 9 | `claude/poc-upgrade-3`, 2026-09-25 |
-| 5 | `815249cb` (2026-09-25) | 36152835598 | `sha256:820622f2…` | `sha256:70f1f4dc…` | `sha256:de26b7d5…` | `sha256:1b7e2280…` | 10 (images, binding off), 11 (deployed) | `claude/poc-upgrade-4`, 2026-09-25 |
+| 5 | `815249cb` (2026-09-25) | 36152835598 | `sha256:820622f2…` | `sha256:70f1f4dc…` | `sha256:de26b7d5…` | `sha256:1b7e2280…` | 10 (images, binding off), 11 | `claude/poc-upgrade-4`, 2026-09-25 |
+| 6 | `fdb48cd8` (2026-09-25) | 36183088296 | `sha256:36e65b2a…` | `sha256:ddf2cbf5…` | `sha256:333a996c…` | `sha256:e8350425…` | 12 (images, binding off), 13 (deployed) | `claude/poc-upgrade-5`, 2026-09-25 |
 
 The same, in full, under `docker.io/vladyslavhaina/`:
 
@@ -142,6 +143,12 @@ a54fb82385dc6740ecd0cee291ffb6d7de294e72
   logweir-console   sha256:de26b7d5e4862f557ccd341040ef83fcc977abcc0d569180422abfbe26e029b8
   logweir           sha256:1b7e228030e046977d93129b5f2d5624a378939ba71c5120b3d1e0e6cc15a99c
   logweir-ui        sha256:f3d2c088e57065cdea382bb99eaaf4a64538273583c6d3a637d02e82f39d3529 (pulled; not deployed in shared mode)
+fdb48cd88576c0c5b279e49bcb3e4cdea7fabd92
+  logweir-chart     sha256:36e65b2a10c8a9a74fbc00cd62f76a824e3732179deada3d0d7596097a50a9ee
+  weirkeeper        sha256:ddf2cbf519c909f7b0b833accb7568332994e080242144bc1a06ecba70be0995
+  logweir-console   sha256:333a996c9870037b366778781b519f35c7bc8b3125fb401afbc4b5d2e8f59894
+  logweir           sha256:e835042547aed109250a480d97def218db7bb6555ed246171edc5459eb3c0188
+  logweir-ui        sha256:1b6800d49ad0f383f89b20334c488c94df5d02d00c3e15947c6eb73d4ea63949 (pulled; not deployed in shared mode)
 ```
 
 The demo MinIO ran `minio-mirror@sha256:b4c3dc9f…` from the second publication
@@ -195,7 +202,7 @@ round's report and artifacts are in the orchestration store
   defects (D1–D11). All were fixed; the first upgrade closed P1–P10, D1–D5 and
   D11 live, and D6–D10 stand on this round's own observation.
 
-**2. Four in-place upgrades of the running install**, each by
+**2. Five in-place upgrades of the running install**, each by
 [deploy/poc/](../deploy/poc/README.md) *Upgrade to a newer publication*, verbatim:
 the new chart's CRDs applied `--server-side --force-conflicts` and Established
 with an empty `kubectl diff`; then `helm upgrade` with the approval-policy
@@ -208,13 +215,17 @@ moved, and the identity hooks logged `source=existing` each time.
 | `02dc44b6` → `b748fd5f` (`claude/poc-upgrade-2`) | 5 → 7 | the pre-upgrade `KeyCompromise` check printed nothing; identity unchanged; receipts 294 → 296 → 314, all `VALID` | the three legacy points the first upgrade left `NotAttempted` turned `Valid` 3 s after the new controller started, and one restored 150/150 (P12); duplicate catalogs refused, takeover in 28 s (P11); a compromise recorded on one policy reached another in ≤ 2 s and held the recorder's deletion (minted key only); the console fixes from MCP round 1; 8 of 8 restore scorecards passing | 111 PASS, 2 FAIL, 7 NOT RUN |
 | `b748fd5f` → `a54fb823` (`claude/poc-upgrade-3`) | 7 → 9 | the pre-upgrade check printed nothing; 7 CRD generations moved (descriptions only), UIDs unchanged; identity, private digest, Secret UIDs and `logweir-signing-trust` unchanged; a 5-minute schedule fired 13 of 13 slots across both controller swaps; **receipts 314 → 316 → 328, all `VALID` (328/328)** | P13 and P14 closed live; README §10 clean end to end as a new user, in the console; J1–J7 14/14; 2 of 2 restore scorecards passing | 97 PASS, 1 FAIL, 8 NOT RUN |
 | `a54fb823` → `815249cb` (`claude/poc-upgrade-4`) | 9 → 11 | the pre-upgrade check printed nothing; no CRD generation moved (the two commits change no CRD); identity, private digest, Secret UIDs and `logweir-signing-trust` unchanged; a 5-minute schedule fired 15 of 15 slots across both controller swaps; **receipts 329 → 332 → 344, all `VALID` (344/344)** | P15 closed live on every follower: Test connection, the readiness panel, the schedule form, restore step 5 and Test access each read a 100–170 s check past its old budget to its verdict without a reload, with the read cadence in the product API's own request log, and Discover topics, which had no follower, settles on the page; MCP round 3's R3-1 (at the click and at the verdict), R2-10, R3-2 and R3-3 live; README §10 clean end to end as a new user; J1–J7 14/14; 2 of 2 restore scorecards passing | 100 PASS, 2 FAIL, 2 NOT RUN |
+| `815249cb` → `fdb48cd8` (`claude/poc-upgrade-5`) | 11 → 13 | the pre-upgrade check printed nothing; no CRD generation moved (a console-only change); identity, private digest, Secret UIDs and `logweir-signing-trust` unchanged; a 5-minute schedule fired 12 of 12 slots across both controller swaps; **receipts 346 → 350 → 356, all `VALID` (356/356)** | P16 and O2 closed live at 390×844: restore step 5 keeps the page and the focused status above the Back/Next bar through a running check's repaints (it jumped to the top on `815249cb`, measured again there first), a status under the bar is lifted above it, and a reader who scrolls away is not pulled back; *Test connection* and *Discover topics* keep the page, *Test access* and the schedule form keep focus; Next, Back and a `&step=` link open a step at its heading at 390 and 1440, and route changes open at the top; the Catalog prints `logweir catalog list` as code, with no backtick; J1–J7 14/14; P15-7, R2-10, R3-2 and R3-3 again; 1 of 1 restore scorecard passing | 73 PASS, 0 FAIL (README §10 not re-walked, by the brief) |
 
 The FAILs: the first upgrade's was its `v0.1.5`-era row — no
 `v0.1.5`-written point existed on the install, and the pre-upgrade
 inline-archive points stayed `NotAttempted` (P12, fixed in `b748fd5f`); the
 second's were two new console defects, P13 and P14, fixed in `a54fb823`; the
 third's is P15, fixed in `815249cb`; the fourth's are one new console defect,
-P16 (below), which R3-1's stricter row found.
+P16, which R3-1's stricter row found, fixed in `fdb48cd8`. The fifth round's
+three first-run failures were a transient `503` from the ingress while the
+loaded host failed both console pods' readiness probes, and two harness
+budgets too short for that host; each row passed when re-run.
 
 **3. The console as a person uses it** (the orchestrator, through the Playwright
 MCP, clicks only; 2026-09-24/25):
@@ -252,7 +263,7 @@ MCP, clicks only; 2026-09-24/25):
 
 1. **The large catalog was measured at 258 real points, not the 1,000 PLAT-20.2
    names.** The host could not run more pods of the emulated `amd64` runner,
-   and before item 15 nothing bounded manual runs. The install now holds 344
+   and before item 15 nothing bounded manual runs. The install now holds 356
    backups. [stability.md](stability.md#measured-scale-limits-plat-202) has the
    live timings and the offline rows at 1,000 and 5,000 rows.
    [UNVERIFIED — a 1,000-point archive was not reached live; 258 real points were measured on docker-desktop.]
@@ -282,11 +293,16 @@ MCP, clicks only; 2026-09-24/25):
    checks of 100–170 s — a store endpoint nothing answers, and checks queued
    behind the namespace's four check slots — were read to their verdicts
    without a reload on the five readiness followers, and *Discover topics*,
-   which had no follower, now settles on the page. **P16, open (console, low):** at
-   restore step 5 the first repaint of a running check scrolls the page to its
-   top, so at 390 px the focused status line is off screen until the verdict
-   lands (the verdict itself is brought into view). Scroll back to the status,
-   or wait for the verdict.
+   which had no follower, now settles on the page. **P16 is fixed in
+   `fdb48cd8` and proven live** (`claude/poc-upgrade-5`): a follow's repaint
+   keeps the reader's place. At 390×844 restore step 5 held the page and the
+   focused status above the Back/Next bar through every repaint of a running
+   check, after *Check readiness* and *Check this plan again*; on `815249cb`
+   the same rows, run first, showed the page jumping to its top at the first
+   repaint. *Test connection* and *Discover topics* keep the page, *Test
+   access* and the schedule form keep focus, and Next, Back and a `&step=` link
+   open a step at its heading. **O2 is fixed in the same publication:** the
+   Catalog prints `logweir catalog list` as code, not between backticks.
 4. **The MinIO mirror.** MinIO withdrew its public images; the chart's demo
    MinIO, the e2e stack and the PoC run the same releases rebuilt from the
    archived source (`vladyslavhaina/minio-mirror` and `mc-mirror`, AGPL-3.0;
@@ -321,20 +337,23 @@ installation identity before either direction
 ([install.md](install.md), *Back up and recover the installation identity*).
 Archives, evidence and catalog records are untouched either way.
 
-**The concrete case on the PoC: revision 11 back to revision 9.** Revision 11
-is `815249cb` with the approval-policy binding; revision 9 is `a54fb823` with the
-same binding.
+**The concrete case on the PoC: revision 13 back to revision 11.** Revision 13
+is `fdb48cd8` with the approval-policy binding; revision 11 is `815249cb` with
+the same binding.
 
 ```bash
 . deploy/poc/versions.env; CTX=docker-desktop
-helm rollback logweir 9 --kube-context "$CTX" -n "$LOGWEIR_NAMESPACE" --wait
+helm rollback logweir 11 --kube-context "$CTX" -n "$LOGWEIR_NAMESPACE" --wait
 ```
 
-Helm records it as revision 12. The CRDs stay: `a54fb823` → `815249cb` changed
-no CRD. Going back to revision 9 removes no release-note item; it brings back
-P15 (a check slower than the page's follow is left "not finished") and the
-round-3 console findings, because the console is the only image whose
-behaviour those two commits changed. Going further back crosses items: to
+Helm records it as revision 14. The CRDs stay: `815249cb` → `fdb48cd8` changed
+no CRD. Going back to revision 11 removes no release-note item; it brings back
+P16 (a running check's repaint throws the reader's place away) and the
+Catalog's backticks (O2), because the console is the only image whose
+behaviour that change touched. Going back to revision 9 (`a54fb823`) also
+brings back P15 (a check slower than the page's follow is left "not
+finished") and the round-3 console findings, again with no item and no CRD
+change. Going further back crosses items: to
 revision 7 (`b748fd5f`) item 20, whose CRD change was descriptions only
 (seven generations moved); to revision 5 (`02dc44b6`) also items 16, 18 and
 19; to revision 3 (`86a554e6`) also 14, 15 and 17 — and each item's
