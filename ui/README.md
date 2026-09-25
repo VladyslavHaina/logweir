@@ -1670,19 +1670,29 @@ viewport until the verdict. Every page repaints through `render.js`'s
 the page during that swap; the click's repaint was followed by
 `keepStatusInView`, the follow's was not. Now:
 
-* **`replace` keeps the page where it was.** It reads the window's offset before
-  the swap and puts it back when the swap moved it, and when focus was inside
-  the replaced node on an element that is there again, the page moves by as
-  much as that element moved, so it sits where it sat. A repaint that moved
-  nothing scrolls nothing. This holds for every follower: step 5, *Test
-  connection*, *Discover topics*, *Test access*, the *Backup readiness* panel
-  and the schedule form -- over the real console in Chromium, the clusters
-  page's click moved the page from 1677 px to 93 before this.
+* **A repaint of the same view keeps the page where it was** (`replaceInPlace`).
+  It reads the window's offset before the swap and puts it back when the swap
+  moved it, and when focus was inside the replaced node on an element that is
+  there again, the page moves by as much as that element moved, so it sits
+  where it sat. A repaint that moved nothing scrolls nothing. Every follower
+  repaints this way -- step 5, *Test connection*, *Discover topics*, *Test
+  access*, the *Backup readiness* panel and the schedule form -- as do their
+  clicks' pending and settled states and an edit re-rendering the wizard step
+  it was made on. Over the real console in Chromium, the clusters page's click
+  moved the page from 1677 px to 93 before this.
+* **New content opens where its page puts it.** Plain `replace` -- a route
+  mount, a detail's first paint, a wizard step that was not the one on screen
+  -- touches no scroll. Next, Back, the stepper and a `&step=` deep link open
+  the step at its heading: when the section's top is above the viewport or its
+  heading is not clear of the footer, the section is scrolled to its start (a
+  first cut kept the offset for every swap, and Next at the bottom of step 1
+  opened step 2 1935 px below its heading).
 * **Step 5 keeps its focused status above the footer after every repaint**, not
-  only the click's -- unless the reader had scrolled it out of view, who is
-  not pulled back every two seconds. A status inside the viewport but under the
-  footer is moved above it too: `scrollIntoView({block: "nearest"})` does not
-  scroll an element whose box is already in view, whatever its scroll margin.
+  only the click's -- while the reader has not scrolled since the ask. A reader
+  who scrolled, even to put the status behind the footer, keeps their offset
+  until they ask again. A status inside the viewport but under the footer is
+  moved above it too: `scrollIntoView({block: "nearest"})` does not scroll an
+  element whose box is already in view, whatever its scroll margin.
 * **A focus target the browser refuses is not a landing.** An empty status
   region is `display: none`, and `focus()` on it does nothing: *Test access*
   (whose status sat outside its form) and the schedule form's *Check

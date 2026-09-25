@@ -86,6 +86,7 @@ import {
   phaseBadge,
   preflightVerdict,
   replace,
+  replaceInPlace,
   table,
   visibilityLine,
   when,
@@ -1193,7 +1194,7 @@ export async function mountClusterDetail(node, ns, name, parse, lifecycle, deps)
     if (!active(lifecycle)) {
       return;
     }
-    paintClusterDetail(node, ns, name, parse, lifecycle, api, object, discovery);
+    paintClusterDetail(node, ns, name, parse, lifecycle, api, object, discovery, undefined, true);
     resumeFollows(node, ns, name, parse, lifecycle, api, discovery);
   } catch (error) {
     if (!cancelled(error, lifecycle) && active(lifecycle)) {
@@ -1296,7 +1297,7 @@ export function readDiscoveryTyped(node) {
   return Object.keys(typed).length === 0 ? null : typed;
 }
 
-function paintClusterDetail(node, ns, name, parse, lifecycle, api, object, discovery, check) {
+function paintClusterDetail(node, ns, name, parse, lifecycle, api, object, discovery, check, first) {
   const key = formKey(ns, DISCOVERY_FORM, name);
   const typed = readDiscoveryTyped(node);
   const view = Object.assign({ state: mutationFor(key).state }, discovery || {},
@@ -1332,7 +1333,10 @@ function paintClusterDetail(node, ns, name, parse, lifecycle, api, object, disco
   delete stored.state;
   delete stored.typed;
   detailViews.set(key, { object: object, discovery: stored });
-  replace(
+  // THE MOUNT'S FIRST PAINT IS NEW CONTENT; every later paint -- a check or a
+  // discovery answering, a click's pending and settled states -- repaints the
+  // detail the reader is on, and keeps their place there (P16).
+  (first === true ? replace : replaceInPlace)(
     node,
     parse(renderClusterDetail(object, undefined, undefined, undefined, view, checkView)),
   );

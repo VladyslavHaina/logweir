@@ -88,6 +88,7 @@ import {
   nextRunsPanel,
   runPhaseBadge,
   replace,
+  replaceInPlace,
   restoreNeedsRole,
   restorePointLink,
   revisionLine,
@@ -2131,7 +2132,7 @@ function paintReadinessPanel(node, ns, parse, lifecycle, api, merged) {
   // be replaced, and carried in the view the next repaint starts from.
   const typed = readReadinessInput(node, merged);
   const next = typed === null ? merged : Object.assign({}, merged, { input: typed });
-  replace(slot, parse(renderReadinessPanel(readinessView(ns, next))));
+  replaceInPlace(slot, parse(renderReadinessPanel(readinessView(ns, next))));
   wireReadiness(node, ns, parse, lifecycle, api, next);
 }
 
@@ -2522,7 +2523,7 @@ function wireCreate(node, ns, parse, lifecycle, api, clusters, own) {
     if (slot === null) {
       return;
     }
-    replace(slot, parse(renderScheduleForm(scheduleFormView(ns, clusters, held.now,
+    replaceInPlace(slot, parse(renderScheduleForm(scheduleFormView(ns, clusters, held.now,
       held.freshSeconds, held))));
     wireCreate(node, ns, parse, lifecycle, api, clusters, held);
   };
@@ -2538,7 +2539,7 @@ function wireCreate(node, ns, parse, lifecycle, api, clusters, own) {
     if ((held.readiness || held.readinessError) && held.readinessRequest !== undefined) {
       const slot = node.querySelector("#schedule-readiness-verdict");
       if (slot !== null) {
-        replace(slot, parse(renderReadinessVerdict({
+        replaceInPlace(slot, parse(renderReadinessVerdict({
           readiness: held.readiness || null, readinessError: held.readinessError || null,
           readinessRequest: held.readinessRequest, draft: values,
         })));
@@ -2800,7 +2801,7 @@ function followCreateReadiness(node, ns, parse, lifecycle, api, clusters, held) 
       if (slot === null) {
         return;
       }
-      replace(slot, parse(renderScheduleForm(scheduleFormView(ns, clusters, held.now,
+      replaceInPlace(slot, parse(renderScheduleForm(scheduleFormView(ns, clusters, held.now,
         held.freshSeconds, held))));
       wireCreate(node, ns, parse, lifecycle, api, clusters, held);
     },

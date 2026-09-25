@@ -43,6 +43,7 @@ import {
   keepReadingPlace,
   readingPlace,
   replace,
+  replaceInPlace,
   restoreFocus,
 } from "../render.js";
 import { SCHEDULE_DRAFT_FIELDS, SCHEDULE_FORM, mountSchedules } from "../pages/schedules.js";
@@ -55,7 +56,7 @@ import {
   recoveryPoints,
 } from "../pages/restore-wizard.js";
 import { build, fakeDocument } from "./fake-dom.js";
-import { LIFE, fakeView, parse } from "./fake-view.js";
+import { Fake, LIFE, fakeView, parse } from "./fake-view.js";
 
 const UI = fileURLToPath(new URL("../", import.meta.url));
 const FIXTURES = fileURLToPath(new URL("./fixtures/", import.meta.url));
@@ -131,7 +132,7 @@ test("p16_a_repaint_that_empties_the_view_leaves_the_page_where_the_reader_was",
   const before = view.querySelector("#restore-readiness-status").getBoundingClientRect();
   assert.deepEqual(before, { top: 661, bottom: 716 }, "the live moment: 661-716 at scrollY 282");
 
-  replace(view, step5(doc, win, 300));
+  replaceInPlace(view, step5(doc, win, 300));
   const status = view.querySelector("#restore-readiness-status");
   assert.equal(win.scrollY, 282,
     "NEGATIVE CONTROL: the page is where the reader left it (before: 0, the status at 943)");
@@ -139,15 +140,20 @@ test("p16_a_repaint_that_empties_the_view_leaves_the_page_where_the_reader_was",
   assert.equal(doc.activeElement, status, "focus is on the NEW status element");
   assert.equal(doc.activeElement.getAttribute("id"), "restore-readiness-status");
 
-  // THE MODEL CAN FAIL: the same swap without the place kept ends at 0.
-  const other = fakeDocument();
-  const bare = windowOver(other, 282);
-  const slot = build(other, ["main", { id: "view-slot", tabindex: "-1" }]);
-  other.body.appendChild(slot);
-  append(slot, step5(other, bare, 300));
-  layingOutWhenEmptied(slot, bare);
-  append(clear(slot), step5(other, bare, 300));
-  assert.equal(bare.scrollY, 0, "the bare swap moves the page, as the live one did");
+  // THE MODEL CAN FAIL: the same swap without the place kept ends at 0 --
+  // and that is plain `replace`, the swap for NEW content, which leaves the
+  // scroll to the page that shows it (the P16 review's HIGH).
+  for (const swap of [(n, kids) => append(clear(n), kids), replace]) {
+    const other = fakeDocument();
+    const bare = windowOver(other, 282);
+    const slot = build(other, ["main", { id: "view-slot", tabindex: "-1" }]);
+    other.body.appendChild(slot);
+    append(slot, step5(other, bare, 300));
+    layingOutWhenEmptied(slot, bare);
+    swap(slot, step5(other, bare, 300));
+    assert.equal(bare.scrollY, 0, "the bare swap moves the page, as the live one did");
+    assert.deepEqual(bare.scrolls, [], "and nothing scrolled it back");
+  }
 });
 
 test("p16_the_focused_element_stays_where_it_sat_when_content_above_it_changes", () => {
@@ -161,7 +167,7 @@ test("p16_the_focused_element_stays_where_it_sat_when_content_above_it_changes",
   append(view, step5(doc, win, 300));
   view.querySelector("#restore-readiness-status").focus();
   const top = view.querySelector("#restore-readiness-status").getBoundingClientRect().top;
-  replace(view, step5(doc, win, 208));
+  replaceInPlace(view, step5(doc, win, 208));
   assert.equal(view.querySelector("#restore-readiness-status").getBoundingClientRect().top, top,
     "NEGATIVE CONTROL: the focused status sits where it sat (before: 92 px higher)");
   assert.equal(win.scrollY, 308);
@@ -176,7 +182,7 @@ test("p16_a_repaint_that_moved_nothing_scrolls_nothing", () => {
   doc.body.appendChild(view);
   append(view, step5(doc, win, 300));
   view.querySelector("#restore-readiness-status").focus();
-  replace(view, step5(doc, win, 300));
+  replaceInPlace(view, step5(doc, win, 300));
   assert.deepEqual(win.scrolls, [], "no programmatic scroll at all");
   assert.equal(readingPlace({}, null), null, "no document, no place");
   assert.equal(keepReadingPlace(view, null), false);
@@ -283,13 +289,13 @@ test("p16_the_step_5_follow_keeps_the_status_in_view_after_every_repaint", () =>
   // THE WIRING, read from the source for the reason R3-1's rows give: the
   // fake views the wizard mounts in have no layout. The follow's `show` asks
   // for the status after EVERY painted repaint -- not only the verdict's --
-  // and only when the reader could see it before the repaint, so a reader
+  // and only while the reader has not scrolled since the ask, so a reader
   // who scrolled away while the check runs is not pulled back to it.
   const source = readFileSync(UI + "pages/restore-wizard.js", "utf8");
   const follow = source.slice(source.indexOf("function followRestoreReadiness("),
     source.indexOf("/** The exact step-5 request for one recovery point."));
   assert.match(follow,
-    /const seen = onScreen\(node\.querySelector\("#restore-readiness-status"\)\);\s*const painted = await renderAndWire\(node, state, parse, api, lifecycle, true\);[\s\S]*?if \(painted === true && seen !== false\) \{\s*keepStatusInView\(node, "#restore-readiness-status"\);\s*\}/,
+    /const stayed = readerStayed\(node, state\.readinessMark\);\s*const painted = await renderAndWire\(node, state, parse, api, lifecycle, true\);[\s\S]*?if \(painted === true && stayed\) \{\s*keepStatusInView\(node, "#restore-readiness-status"\);\s*\}/,
     "NEGATIVE CONTROL: a non-terminal repaint asks for the status (before: only the verdict)");
   const verdict = follow.indexOf("keepVerdictInView(node, next);");
   const status = follow.indexOf("keepStatusInView(node, \"#restore-readiness-status\");");
@@ -348,9 +354,13 @@ function preflight(id, state, over) {
  *  must be where it was, the swap having moved it. Then the check settles. */
 async function nonTerminalRepaintKeepsThePage(t) {
   try {
+    // THE READER SCROLLS TO THE CONTROL once the page is up: the mount's own
+    // first paint is new content, and the fake browser put it at 0.
+    t.win.scrollY = 282;
+    const mounted = t.win.swaps;
     await t.start();
     await flush();
-    assert.ok(t.win.swaps >= 1, t.what + ": the create answer was painted");
+    assert.ok(t.win.swaps > mounted, t.what + ": the create answer was painted");
     assert.equal(t.win.scrollY, 282, t.what + ": the pending repaint kept the page");
     assert.equal(t.gate.waiting, 1, t.what + ": the follow waits for its first read");
     const swaps = t.win.swaps;
@@ -372,8 +382,9 @@ async function nonTerminalRepaintKeepsThePage(t) {
   }
 }
 
-test("p16_restore_step_5s_non_terminal_repaint_keeps_the_page", async () => {
-  const ns = "p16-wizard";
+/** A console-shaped api for the wizard over a saved-destination point, with a
+ *  readiness check whose reads answer `running` until `box.settled`. */
+function wizardApi(ns, g, box) {
   const backups = fixture("wizard-backups.json");
   const destination = fixture("console/destination.json").item;
   for (const b of backups.items) {
@@ -383,43 +394,244 @@ test("p16_restore_step_5s_non_terminal_repaint_keeps_the_page", async () => {
     b.status.locationDigest = destination.locationDigest;
   }
   const point = recoveryPoints(backups)[0];
-  let settled = false;
-  let reads = 0;
-  const g = gate();
-  const api = {
-    list: async (_ns, plural) => clone(plural === "backups" ? backups : fixture("wizard-clusters.json")),
-    destinations: async () => ({ items: [{ name: destination.name, uid: destination.uid,
-      generation: destination.generation, canonicalUrl: destination.canonicalUrl, default: true,
-      status: destination.status }] }),
-    destination: async () => ({ item: clone(destination) }),
-    startPreflight: async (_ns, request) => ({ item: preflight("pf-p16w", "pending",
-      { operation: "restore", binding: { planHash: request.restore.planHash } }), replayed: false }),
-    preflight: async (_ns, id, options) => {
-      reads += 1;
-      return { item: preflight(id, settled ? "ready" : "running",
-        { operation: "restore", binding: { planHash: (options || {}).planHash } }) };
+  return {
+    point: { uid: point.metadata.uid, backup: point.metadata.name },
+    api: {
+      list: async (_ns, plural) =>
+        clone(plural === "backups" ? backups : fixture("wizard-clusters.json")),
+      destinations: async () => ({ items: [{ name: destination.name, uid: destination.uid,
+        generation: destination.generation, canonicalUrl: destination.canonicalUrl,
+        default: true, status: destination.status }] }),
+      destination: async () => ({ item: clone(destination) }),
+      startPreflight: async (_ns, request) => ({ item: preflight("pf-p16w", "pending",
+        { operation: "restore", binding: { planHash: request.restore.planHash } }),
+      replayed: false }),
+      preflight: async (_ns, id, options) => {
+        box.reads += 1;
+        return { item: preflight(id, box.settled ? "ready" : "running",
+          { operation: "restore", binding: { planHash: (options || {}).planHash } }) };
+      },
+      wait: g.wait,
     },
-    wait: g.wait,
   };
-  const win = movingWindow();
-  const view = fakeView({ window: win });
+}
+
+/** Mounts the wizard in `view` on `step` (1-6) with the address the rows use. */
+async function mountWizard(view, ns, wizard, step) {
+  await mountRestoreWizard(view.root, ns, Object.assign({}, wizard.point, { step: step }), parse,
+    wizard.api, createRouteLifecycle().begin());
+}
+
+async function withWizardWindow(ns, body) {
   const originalWindow = globalThis.window;
   globalThis.window = { location: { hash: "#/restore?ns=" + ns } };
   try {
-    await mountRestoreWizard(view.root, ns,
-      { uid: point.metadata.uid, backup: point.metadata.name, step: 5 }, parse, api,
-      createRouteLifecycle().begin());
+    await body();
+  } finally {
+    globalThis.window = originalWindow;
+    resetMode();
+    resetCheckIntents();
+  }
+}
+
+test("p16_restore_step_5s_non_terminal_repaint_keeps_the_page", async () => {
+  const ns = "p16-wizard";
+  const g = gate();
+  const box = { reads: 0, settled: false };
+  const wizard = wizardApi(ns, g, box);
+  const win = movingWindow();
+  const view = fakeView({ window: win });
+  await withWizardWindow(ns, async () => {
+    await mountWizard(view, ns, wizard, 5);
     await nonTerminalRepaintKeepsThePage({
       what: "restore step 5", win: win, gate: g,
       start: () => view.find("#restore-readiness-form").dispatch("submit"),
-      reads: () => reads,
+      reads: () => box.reads,
       shown: () => newest(view, "id=\"preflight-pf-p16w\""),
       running: /running/,
-      settle: () => { settled = true; },
+      settle: () => { box.settled = true; },
     });
+  });
+});
+
+// ===========================================================================
+// Fix round (review of poc-fixes-6): new content opens at its start, and a
+// reader who scrolled is not moved
+// ===========================================================================
+
+/** A LAYOUT FOR THE WIZARD'S FAKES, and a browser whose swap moves nothing:
+ *  every step section sits at document position 400 and is 7000 px tall (a
+ *  long step), the status at 943 (55 px), the sticky bar at 738-844. Rects are
+ *  the viewport's, `scrollIntoView` is Chromium's -- `nearest` leaves a box
+ *  that covers the viewport or sits inside it, `start` puts its top at 0 --
+ *  and the suite's `Fake` gets them for the length of `body` only. */
+async function withWizardLayout(win, view, body) {
+  const proto = Fake.prototype;
+  const at = (el) => {
+    const id = el.attributes.id || "";
+    const cls = String(el.attributes.class || "");
+    if (/^step-/.test(id) && el.tagName === "SECTION") {
+      return { y: 400, h: 7000 };
+    }
+    if (id === "restore-readiness-status") {
+      return { y: 943, h: 55 };
+    }
+    return cls.split(/\s+/).indexOf("wizard-nav") !== -1 ? null : { y: 0, h: 0 };
+  };
+  const asked = [];
+  proto.getBoundingClientRect = function () {
+    const p = at(this);
+    if (p === null) {
+      return { top: 738, bottom: 844 };
+    }
+    return { top: p.y - win.scrollY, bottom: p.y + p.h - win.scrollY };
+  };
+  proto.scrollIntoView = function (options) {
+    asked.push([this.attributes.id || this.tagName, options]);
+    const r = this.getBoundingClientRect();
+    if ((options || {}).block === "start") {
+      win.scrollY += r.top;
+    } else if (r.bottom > win.innerHeight && r.top > 0) {
+      win.scrollY += Math.min(r.top, r.bottom + 128 - win.innerHeight);
+    }
+  };
+  win.getComputedStyle = () => ({ scrollMarginBottom: "128px" });
+  // THE STATUS HOLDS FOCUS: the newest one painted, as `restoreFocus` keeps it.
+  Object.defineProperty(view.document, "activeElement", {
+    configurable: true,
+    get: () => view.find("#restore-readiness-status"),
+  });
+  try {
+    await body(asked);
   } finally {
-    globalThis.window = originalWindow;
+    delete proto.getBoundingClientRect;
+    delete proto.scrollIntoView;
   }
+}
+
+/** A window at `y` whose swaps move nothing: the offset a plain `replace`
+ *  leaves is the one the page had -- what the tip before this fix kept. */
+function stillWindow(y) {
+  const win = {
+    scrollX: 0, scrollY: y, innerHeight: 844, swaps: 0,
+    scrollTo(x, to) { win.scrollX = x; win.scrollY = to; },
+    scrollBy(dx, dy) { win.scrollY += dy; },
+    swapped() { win.swaps += 1; },
+  };
+  return win;
+}
+
+for (const [from, control, to] of [[1, "#wizard-next", 2], [3, "#wizard-back", 2]]) {
+  test("p16_review_" + control.slice(1).replace("-", "_") + "_from_step_" + String(from) +
+    "_opens_step_" + String(to) + "_at_its_heading", async () => {
+    // THE REVIEW'S HIGH: at 390 x 844, Next at the bottom of step 1 opened
+    // step 2 with its heading at -1935 px -- `replace` had put the old offset
+    // back, and `nearest` does nothing for a section that covers the viewport.
+    const ns = "p16-steps-" + String(from);
+    const g = gate();
+    const wizard = wizardApi(ns, g, { reads: 0, settled: false });
+    const win = stillWindow(0);
+    const view = fakeView({ window: win });
+    await withWizardWindow(ns, () => withWizardLayout(win, view, async (asked) => {
+      await mountWizard(view, ns, wizard, from);
+      win.scrollY = 2322;
+      const asks = asked.length;
+      await view.find(control).dispatch("click");
+      await flush();
+      const section = view.find("#step-" + ["archive", "backup-set", "point-in-time", "target",
+        "preflight", "plan"][to - 1]);
+      assert.ok(newest(view, "Step " + String(to) + " of 6").length > 0, "step " + String(to) +
+        " is on screen");
+      const top = section.getBoundingClientRect().top;
+      assert.ok(top >= 0 && top < 100,
+        "NEGATIVE CONTROL: step " + String(to) + " opens at its heading (before: at the old " +
+          "offset, its top at " + String(top) + ")");
+      assert.deepEqual(asked.slice(asks).filter(([, o]) => (o || {}).block === "start").length, 1,
+        "the section was scrolled to its start once");
+      assert.equal(top, 0, "its top at the viewport's, the heading just under it");
+    }));
+  });
+}
+
+test("p16_review_a_deep_link_to_a_step_opens_at_its_heading", async () => {
+  // `&step=5` over a page the previous route left at 2322 px.
+  const ns = "p16-deep";
+  const g = gate();
+  const wizard = wizardApi(ns, g, { reads: 0, settled: false });
+  const win = stillWindow(2322);
+  const view = fakeView({ window: win });
+  await withWizardWindow(ns, () => withWizardLayout(win, view, async () => {
+    await mountWizard(view, ns, wizard, 5);
+    const top = view.find("#step-preflight").getBoundingClientRect().top;
+    assert.ok(top >= 0 && top < 100,
+      "NEGATIVE CONTROL: the named step opens at its heading (before: its top at " +
+        String(top) + ")");
+  }));
+});
+
+test("p16_review_a_reader_who_scrolled_the_status_behind_the_bar_is_not_pulled_back", async () => {
+  // THE REVIEW'S MEDIUM: the reader put the status at 793-848, behind the bar
+  // (top 738), after the click; the next repaint pulled the page 132 px back,
+  // 150 -> 282, because the band behind the bar counted as "on screen".
+  const ns = "p16-reader";
+  const g = gate();
+  const box = { reads: 0, settled: false };
+  const wizard = wizardApi(ns, g, box);
+  const win = movingWindow();
+  const view = fakeView({ window: win });
+  await withWizardWindow(ns, () => withWizardLayout(win, view, async (asked) => {
+    await mountWizard(view, ns, wizard, 5);
+    win.scrollY = 282;
+    await view.find("#restore-readiness-form").dispatch("submit");
+    await flush();
+    assert.equal(win.scrollY, 282, "the ask left the status at 661-716, clear of the bar");
+    win.scrollY = 150;
+    const before = asked.length;
+    g.open();
+    await flush();
+    assert.equal(box.reads, 1, "the first read answered running and was painted");
+    assert.equal(win.scrollY, 150,
+      "NEGATIVE CONTROL: the reader stays where they scrolled (before: pulled back to 282)");
+    assert.equal(asked.length, before, "nothing was scrolled into view for them");
+    g.open();
+    await flush();
+    assert.equal(box.reads, 2);
+    assert.equal(win.scrollY, 150, "nor at the next read");
+    box.settled = true;
+    g.open();
+    await flush();
+  }));
+});
+
+test("p16_review_a_route_mount_is_new_content_and_keeps_no_old_offset", async () => {
+  // `replace` is the swap for new content again: a mount's first paint opens
+  // where the browser puts it (here, the fake browser's 0), not at the offset
+  // the previous page was read to (the review's LOW-1: only the "Reading ..."
+  // placeholder's height kept that true on the tip).
+  const g = gate();
+  const mounts = {
+    "the restore wizard": async (view) => {
+      const ns = "p16-mount-w";
+      await withWizardWindow(ns, () => mountWizard(view, ns,
+        wizardApi(ns, g, { reads: 0, settled: false }), undefined));
+    },
+    "a connection's detail": (view) => mountClusterDetail(view.root, "p16-mount-c", "orders-prod",
+      parse, LIFE(), clusterApi(g, { reads: 0, settled: false })),
+    "a destination's detail": (view) => mountDestinationDetail(view.root, "p16-mount-d", "primary",
+      parse, LIFE(), destinationApi(g, { reads: 0, settled: false })),
+  };
+  for (const [what, mount] of Object.entries(mounts)) {
+    const win = movingWindow();
+    win.scrollY = 6994;
+    const view = fakeView({ window: win });
+    await mount(view);
+    await flush();
+    assert.ok(win.swaps >= 1, what + " painted");
+    assert.equal(win.scrollY, 0,
+      "NEGATIVE CONTROL: " + what + " opens where the browser put it, not at 6994");
+  }
+  resetMode();
+  resetCheckIntents();
 });
 
 /** The schedules page's API; `settled` flips the check to ready. */
@@ -571,12 +783,8 @@ test("p16_discover_topics_non_terminal_repaint_keeps_the_page", async () => {
   });
 });
 
-test("p16_test_access_non_terminal_repaint_keeps_the_page", async () => {
-  const g = gate();
-  const box = { reads: 0, settled: false };
-  const win = movingWindow();
-  const view = fakeView({ window: win });
-  const api = {
+function destinationApi(g, box) {
+  return {
     destination: () => Promise.resolve({ item: { name: "primary", uid: "d-1", generation: 1,
       canonicalUrl: "s3://kafka-backups/poc", transport: "insecureHttp", access: {},
       conditions: [] } }),
@@ -590,6 +798,14 @@ test("p16_test_access_non_terminal_repaint_keeps_the_page", async () => {
     },
     wait: g.wait,
   };
+}
+
+test("p16_test_access_non_terminal_repaint_keeps_the_page", async () => {
+  const g = gate();
+  const box = { reads: 0, settled: false };
+  const win = movingWindow();
+  const view = fakeView({ window: win });
+  const api = destinationApi(g, box);
   await mountDestinationDetail(view.root, "p16-d", "primary", parse, LIFE(), api);
   await nonTerminalRepaintKeepsThePage({
     what: "Test access", win: win, gate: g,

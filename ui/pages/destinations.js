@@ -90,6 +90,7 @@ import {
   preflightVerdict,
   readinessHeadline,
   replace,
+  replaceInPlace,
   table,
   when,
 } from "../render.js";
@@ -1226,7 +1227,7 @@ export async function mountDestinationDetail(node, ns, name, parse, lifecycle, d
     testViews.delete(formKey(ns, TEST_FORM, name));
     paintDetail(node, ns, name, parse, lifecycle, api, read.item, {
       usage: usage, usageError: usageError, test: null,
-    });
+    }, true);
   } catch (error) {
     if (!cancelled(error, lifecycle) && active(lifecycle)) {
       replace(node, errorBox(error));
@@ -1262,9 +1263,11 @@ function detailView(ns, name, extra) {
   );
 }
 
-function paintDetail(node, ns, name, parse, lifecycle, api, item, extra) {
+function paintDetail(node, ns, name, parse, lifecycle, api, item, extra, first) {
   const view = detailView(ns, name, extra);
-  replace(node, parse(renderDestinationDetail(item, view)));
+  // THE MOUNT'S FIRST PAINT IS NEW CONTENT; a later one repaints the detail
+  // the reader is on and keeps their place there (P16).
+  (first === true ? replace : replaceInPlace)(node, parse(renderDestinationDetail(item, view)));
   wireTest(node, ns, name, parse, lifecycle, api, item, view);
   wireRotate(node, ns, name, parse, lifecycle, api, item, view);
 }
@@ -1290,7 +1293,7 @@ function paintTest(node, ns, name, parse, lifecycle, api, item, extra) {
   }
   // THE ROLES CHOSEN FOR THE NEXT TEST survive the repaint of this one.
   const view = Object.assign(detailView(ns, name, extra), { testRoles: readTestRoles(node) });
-  replace(slot, parse(renderTestSlot(item, view)));
+  replaceInPlace(slot, parse(renderTestSlot(item, view)));
   wireTest(node, ns, name, parse, lifecycle, api, item, view);
 }
 

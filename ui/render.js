@@ -59,7 +59,7 @@ export function clear(node) {
   return node;
 }
 
-/** Replaces a node's children in one step -- AND KEEPS THE READER'S PLACE.
+/** Replaces a node's children in one step -- AND KEEPS THE READER'S FOCUS.
  *
  *  FOCUS SURVIVES A RE-RENDER (PLAT-18.2; the PLAT-10 review's LOW). Every
  *  page here re-renders by replacing its whole subtree: the restore wizard on
@@ -74,20 +74,40 @@ export function clear(node) {
  *  `tabindex="-1"`), which is where a screen reader expects a re-read page to
  *  start.
  *
- *  THE PAGE STAYS WHERE IT WAS, TOO (poc-upgrade-4's P16). Emptying `node`
- *  and filling it again moved the page under the reader: the browser lays the
- *  emptied view out, or loses the scroll anchor it had chosen inside it, and
- *  the window's offset came back smaller -- restore step 5's first follow
- *  read took 282 px to 0 and left the focused status below the fold, where no
- *  later read brought it back. So the offset is read before the swap and put
- *  back after it when the swap moved it, and when focus was inside `node` on
- *  an element that is there again, that element is kept where it sat in the
- *  viewport ([`readingPlace`], [`keepReadingPlace`]).
+ *  THE SCROLL IS NOT TOUCHED HERE: this is the swap for NEW content -- a route
+ *  mount, a wizard step, a list -- which opens where its page puts it. A
+ *  repaint of the SAME view, an answer landing under a reader who is reading
+ *  it, is [`replaceInPlace`].
  *
  *  Nothing here runs without a document: the node suites drive `replace`
  *  through fake nodes that have no `ownerDocument`, and for them this is the
  *  plain replace it always was. */
 export function replace(node, children) {
+  const kept = focusWithin(node);
+  append(clear(node), children);
+  if (kept !== null) {
+    restoreFocus(node, kept);
+  }
+  return node;
+}
+
+/** [`replace`] for a repaint of the SAME view -- AND THE PAGE STAYS WHERE IT
+ *  WAS (poc-upgrade-4's P16). Emptying `node` and filling it again moved the
+ *  page under the reader: the browser lays the emptied view out, or loses the
+ *  scroll anchor it had chosen inside it, and the window's offset came back
+ *  smaller -- restore step 5's first follow read took 282 px to 0 and left the
+ *  focused status below the fold, where no later read brought it back. So the
+ *  offset is read before the swap and put back after it when the swap moved
+ *  it, and when focus was inside `node` on an element that is there again,
+ *  that element is kept where it sat in the viewport ([`readingPlace`],
+ *  [`keepReadingPlace`]).
+ *
+ *  ONLY FOR THE SAME VIEW (the P16 review's HIGH): a follow's repaint, a
+ *  click's pending and settled repaints, an edit re-rendering the step it was
+ *  made in. New content keeps [`replace`] -- the first cut kept the place in
+ *  every swap, and the wizard's Next opened step 2 1935 px below its heading,
+ *  at the offset step 1 had been read to. */
+export function replaceInPlace(node, children) {
   const kept = focusWithin(node);
   const place = readingPlace(node, kept);
   append(clear(node), children);
