@@ -84,15 +84,19 @@ import {
   fieldErrors,
   formKey,
   invalidInput,
+  followCheck,
+  followStopped,
   keepDraft,
+  keepStopMark,
   listen,
   mutationFor,
-  owesRead,
+  PREFLIGHT_FOLLOW_MS,
   readDraft,
   readOptions,
   refusal,
   resolveExisting,
   watchMutation,
+  wireCheckRetry,
 } from "../lifecycle.js";
 import {
   COPY_CAVEAT,
@@ -2876,7 +2880,10 @@ export function readinessRefusal(state, prepared) {
     );
   }
   if (result.terminal === false) {
-    return "the readiness check for this plan has not finished; wait for its verdict.";
+    // A CHECK THIS PAGE STOPPED FOLLOWING has no verdict to wait for.
+    return followStopped(result) === ""
+      ? "the readiness check for this plan has not finished; wait for its verdict."
+      : "the readiness check for this plan did not finish; run it again before submitting.";
   }
   if (result.applicable !== true) {
     return (
@@ -5670,8 +5677,7 @@ function wireRestoreReadiness(node, state, parse, api, lifecycle, prepared) {
     }
   }, lifecycle);
 
-  listen(form, "submit", (event) => {
-    event.preventDefault();
+  const start = () => {
     if (!active(lifecycle) || mutation.pending()) {
       return;
     }
@@ -5682,7 +5688,14 @@ function wireRestoreReadiness(node, state, parse, api, lifecycle, prepared) {
     mutation.run(() => api.startPreflight(state.ns, request, {
       attempt: nextRestoreReadinessAttempt(state.ns, state.pointUid),
     }), { about: { planHash: p.hash, archiveSecret: readinessSecretOf(request) } });
+  };
+  listen(form, "submit", (event) => {
+    event.preventDefault();
+    start();
   }, lifecycle);
+  // "RUN THE CHECK AGAIN" is "Check this plan again": a per-click token, so a
+  // new check, about the plan on screen now.
+  wireCheckRetry(node, (state.readiness || {}).preflight, start, lifecycle);
 
   const cancel = node.querySelector("#restore-readiness-cancel");
   if (cancel !== null) {
@@ -5706,11 +5719,6 @@ function wireRestoreReadiness(node, state, parse, api, lifecycle, prepared) {
   }
 }
 
-/** How many times step 5 re-reads a started check, and the gap between reads.
- *  Bounded on purpose, as the schedules form is: a form is not a watcher. */
-export const RESTORE_READINESS_POLLS = 45;
-export const RESTORE_READINESS_INTERVAL_MS = 2000;
-
 /** A held verdict, replaced by a fresher read of the SAME check -- except that
  *  staleness is one-way on this page. A mark `selectTarget` or
  *  `selectEvidenceDestination` made is about a choice the server cannot see
@@ -5728,6 +5736,10 @@ export function mergeReadiness(held, fresh) {
   if (fresh === null || fresh === undefined) {
     return held === undefined ? null : held;
   }
+  // A CHECK THIS PAGE STOPPED FOLLOWING STAYS STOPPED while a fresher read of
+  // it still has no result -- the submit's re-read is not a follow, and it
+  // must not bring back "this page reads it again until then".
+  fresh = keepStopMark(held, fresh);
   if (held === null || held === undefined || held.id !== fresh.id || held.stale !== true) {
     return fresh;
   }
@@ -5745,54 +5757,45 @@ export function mergeReadiness(held, fresh) {
   return Object.assign({}, fresh, { applicable: false, stale: true, staleReasons: reasons });
 }
 
-/** Re-reads the check step 5 started until it is terminal, asking the product
- *  API about the plan on screen NOW (`?planHash=`), and repaints when the
- *  answer changes. Before PLAT-08.2 the wizard showed only the create answer
- *  -- a check that had not run yet -- and never learned its verdict. */
-async function followRestoreReadiness(node, state, parse, api, lifecycle) {
+/** Re-reads the check step 5 started until it is terminal, or the longest
+ *  time a check may take has passed (`lifecycle.js`'s `followCheck`; this
+ *  step's 90 s was poc-upgrade-3's P15), asking the product API about the plan
+ *  on screen NOW (`?planHash=`), and repaints when the answer changes. Before
+ *  PLAT-08.2 the wizard showed only the create answer -- a check that had not
+ *  run yet -- and never learned its verdict. THE CREATE ANSWER IS NOT A READ
+ *  (P8), even when it is terminal. A failed re-read is not a verdict: the one
+ *  on screen stays what the check last recorded, and the submit re-reads it
+ *  again anyway. */
+function followRestoreReadiness(node, state, parse, api, lifecycle) {
   const first = (state.readiness || {}).preflight || null;
   if (first === null || typeof first.id !== "string" || typeof api.preflight !== "function") {
-    return;
+    return Promise.resolve(null);
   }
   const id = first.id;
-  const wait = typeof api.wait === "function"
-    ? api.wait
-    : (ms) => new Promise((done) => { globalThis.setTimeout(done, ms); });
-  for (let read = 0; read < RESTORE_READINESS_POLLS; read += 1) {
-    const held = (state.readiness || {}).preflight || null;
-    // THE CREATE ANSWER IS NOT A READ (P8), even when it is terminal.
-    if (held === null || held.id !== id || !owesRead(held, read)) {
-      return;
-    }
-    await wait(RESTORE_READINESS_INTERVAL_MS);
-    if (!active(lifecycle)) {
-      return;
-    }
-    const current = await preparePlanOrProblem(state);
-    let answer;
-    try {
-      answer = await api.preflight(state.ns, id, Object.assign({}, readOptions(lifecycle),
+  const held = () => (state.readiness || {}).preflight || null;
+  return followCheck({
+    first: first,
+    budgetMs: PREFLIGHT_FOLLOW_MS,
+    wait: api.wait,
+    keep: () => active(lifecycle) && (held() || {}).id === id,
+    cancelled: (error) => cancelled(error, lifecycle),
+    read: async () => {
+      const current = await preparePlanOrProblem(state);
+      const answer = await api.preflight(state.ns, id, Object.assign({}, readOptions(lifecycle),
         typeof current.hash === "string" ? { planHash: current.hash } : {}));
-    } catch (error) {
-      // A FAILED RE-READ IS NOT A VERDICT: the one on screen stays what the
-      // check last recorded, and the submit re-reads it again anyway.
-      return;
-    }
-    if (!active(lifecycle)) {
-      return;
-    }
-    const now = (state.readiness || {}).preflight || null;
-    if (now === null || now.id !== id) {
-      return;
-    }
-    const merged = mergeReadiness(now, (answer || {}).item);
-    const moved = merged.state !== now.state || merged.terminal !== now.terminal ||
-      merged.stale !== now.stale || merged.applicable !== now.applicable;
-    state.readiness = Object.assign({}, state.readiness, { preflight: merged });
-    if (moved) {
-      await renderAndWire(node, state, parse, api, lifecycle, true);
-    }
-  }
+      return mergeReadiness(held(), (answer || {}).item);
+    },
+    show: async (next) => {
+      const now = held();
+      const moved = now === null || next.state !== now.state || next.terminal !== now.terminal ||
+        next.stale !== now.stale || next.applicable !== now.applicable ||
+        followStopped(next) !== followStopped(now);
+      state.readiness = Object.assign({}, state.readiness, { preflight: next });
+      if (moved) {
+        await renderAndWire(node, state, parse, api, lifecycle, true);
+      }
+    },
+  });
 }
 
 /** The exact step-5 request for one recovery point.

@@ -17,7 +17,7 @@
 // Every row uses its own namespace, because the draft and mutation registries
 // are module state that lives as long as the loaded page -- which is the point.
 
-import { test } from "node:test";
+import { mock, test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
@@ -32,9 +32,10 @@ import {
   formKey,
   keepDraft,
   mutationFor,
+  PREFLIGHT_FOLLOW_MS,
   readDraft,
 } from "../lifecycle.js";
-import { PRIVATE_KEY_REFUSAL } from "../render.js";
+import { CHECK_UNFINISHED_SENTENCE, PRIVATE_KEY_REFUSAL } from "../render.js";
 import {
   CLUSTER_DRAFT_FIELDS,
   CLUSTER_FORM,
@@ -1955,6 +1956,95 @@ test("a_readiness_read_landing_while_the_prefix_is_typed_does_not_wipe_it", asyn
     globalThis.window = originalWindow;
   }
 });
+
+// STEP 5 FOLLOWS ITS CHECK TO THE CHECK'S OWN DEADLINE (poc-upgrade-3's P15).
+// Its 45 reads two seconds apart gave up at 90 s under a check that may run
+// for its timeoutSeconds (up to 600) plus its Job's 90 s start margin. These
+// two rows run on node:test's mock timers with NO `wait` handed in, so the
+// follow keeps the browser's own timer; `setImmediate` stays real and flushes.
+async function onMockedClock(body) {
+  mock.timers.enable({ apis: ["setTimeout", "Date"], now: 0 });
+  try {
+    await body(async (ms) => {
+      for (let moved = 0; moved < ms; moved += 250) {
+        mock.timers.tick(Math.min(250, ms - moved));
+        for (let i = 0; i < 12; i += 1) {
+          await new Promise((resolve) => { setImmediate(resolve); });
+        }
+      }
+    });
+  } finally {
+    mock.timers.reset();
+  }
+}
+
+async function flushImmediate() {
+  for (let i = 0; i < 40; i += 1) {
+    await new Promise((resolve) => { setImmediate(resolve); });
+  }
+}
+
+for (const never of [false, true]) {
+  test(never
+    ? "a_restore_readiness_check_with_no_result_by_its_deadline_says_so_and_refuses_the_submit"
+    : "a_restore_readiness_check_settling_at_100_s_is_followed_until_it_settles", async () => {
+    await onMockedClock(async (advance) => {
+      const ns = never ? "wizard-p15-late-ns" : "wizard-p15-slow-ns";
+      const primary = destinationItem("primary", "17bc54c4-2e52-4607-b4ac-c31517a6e568");
+      const k8s = savedWizardApi(ns, [primary], {
+        started: (request) => readinessItem("pf-" + ns, request.restore.planHash,
+          { state: "pending", terminal: false, applicable: false }),
+        read: (id, hash) => !never && Date.now() >= 100 * 1000
+          ? readinessItem(id, hash)
+          : readinessItem(id, hash, { state: "running", terminal: false, applicable: false }),
+      });
+      delete k8s.wait;
+      // THE SHARED FAKE (`fake-view.js`, imported below as `fv2`): it answers
+      // class selectors, which "Run the check again" is found by.
+      const view = fv2();
+      const originalWindow = globalThis.window;
+      globalThis.window = { location: { hash: "#/restore?ns=" + ns } };
+      try {
+        await mountRestoreWizard(view.root, ns, k8s.point, parse2, k8s,
+          createRouteLifecycle().begin());
+        await view.find("#restore-readiness-form").dispatch("submit");
+        await flushImmediate();
+        assert.equal(k8s.started.length, 1);
+        await advance(95 * 1000);
+        assert.match(view.html(), /this page reads it again until then/,
+          "at 95 s the check still runs, and the step still follows it");
+        if (!never) {
+          await advance(15 * 1000);
+          const step = view.html().slice(view.html().indexOf("id=\"step-preflight\""));
+          assert.match(step, /badge-green">ready/,
+            "NEGATIVE CONTROL: the verdict is on step 5 (a 90 s budget left it running for good)");
+          assert.doesNotMatch(step, /this page reads it again until then/);
+          return;
+        }
+        await advance(PREFLIGHT_FOLLOW_MS);
+        const step = view.html().slice(view.html().indexOf("id=\"step-preflight\""));
+        assert.match(step, /data-check-stopped="deadline"/);
+        assert.ok(step.includes(CHECK_UNFINISHED_SENTENCE));
+        assert.doesNotMatch(step, /this page reads it again until then/,
+          "NEGATIVE CONTROL: no promise to read again that nothing keeps");
+        // THE SUBMIT RE-READS THE CHECK, finds it still without a result, and
+        // refuses in words that match the step: it did not finish.
+        await view.find("#create-restore").dispatch("click");
+        await flushImmediate();
+        assert.equal(k8s.creates("restores").length, 0, "no restore past a check with no verdict");
+        assert.match(view.html(), /did not finish; run it again before submitting/);
+        assert.match(view.html(), /data-check-stopped="deadline"/,
+          "the submit's own re-read did not bring the checking sentence back");
+        // RUN THE CHECK AGAIN is Check this plan again: a new check.
+        await view.find(".check-retry").dispatch("click");
+        await flushImmediate();
+        assert.equal(k8s.started.length, 2, "the retry started a new check for this plan");
+      } finally {
+        globalThis.window = originalWindow;
+      }
+    });
+  });
+}
 
 test("a_destination_edited_during_the_draft_refuses_the_submit_until_the_check_runs_again", async () => {
   // D2 S21, in the console. The destination's access is rotated after the

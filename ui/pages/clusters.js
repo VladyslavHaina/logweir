@@ -47,24 +47,30 @@ import {
   askCheck,
   cancelled,
   createOnce,
+  DISCOVERY_FOLLOW_MS,
   discoverySpent,
   dropDraft,
   fieldErrors,
+  followCheck,
+  followStopped,
   formKey,
   invalidInput,
+  isFollowed,
   keepDraft,
   listen,
   mutationFor,
-  owesRead,
+  PREFLIGHT_FOLLOW_MS,
   readDraft,
   readOptions,
   refusal,
   watchMutation,
+  wireCheckRetry,
 } from "../lifecycle.js";
 import {
   ABSENT,
   EMPTY_INVENTORY_SENTENCE,
   badge,
+  checkStoppedBlock,
   disableKeepingFocus,
   cell,
   detailLink,
@@ -477,24 +483,6 @@ export const CONNECTION_CHECK_LEGACY_SENTENCE =
   "requests and creates none. A connection check needs the product API; the connection probe " +
   "above is what this mode can show.";
 
-/** What the follower says when it stops reading. */
-export const CONNECTION_CHECK_STOPPED_SENTENCE =
-  "This page stopped following the check after its read budget. The check itself was not " +
-  "cancelled and is still the controller's; press Test connection again for a new one, or " +
-  "reload this page to read this one's result.";
-
-/** How many times the panel re-reads a started check before it stops.
- *
- *  BOUNDED, because an unbounded timer keeps reading a namespace for as long
- *  as a tab is open. Twelve reads at [`CONNECTION_CHECK_INTERVAL_MS`] is about
- *  thirty seconds, which is the upper end of D2 section 6.1's "typically
- *  10-40 s" for one check pod, and the panel says in words when it stops
- *  rather than leaving a spinner that means nothing. */
-export const CONNECTION_CHECK_POLLS = 12;
-
-/** How long between those reads, in milliseconds. */
-export const CONNECTION_CHECK_INTERVAL_MS = 2500;
-
 /** The controller's refusal reason for this connection, or `""`.
  *
  *  READ FROM `status.reason` AND MATCHED AGAINST THE RESOLVER'S OWN LIST. A
@@ -593,10 +581,6 @@ export function renderConnectionCheck(view) {
           "<div class=\"form-status\" id=\"connection-check-status\" tabindex=\"-1\">" +
           mutationStatus(state, { kind: "Preflight", name: (result || {}).id || "" }, null) +
           "</div></form>")) +
-    (v.followStopped === true
-      ? "<p class=\"note\" id=\"connection-check-stopped\">" +
-        esc(CONNECTION_CHECK_STOPPED_SENTENCE) + "</p>"
-      : "") +
     // THE SUMMARY ONLY WHEN THERE ARE NO ROWS. Once this page has started a
     // check, the rows below ARE the newest answer and are richer than the
     // summary; printing both would show one verdict twice and invite a reader
@@ -708,6 +692,10 @@ export function renderDiscovery(discovery, role) {
       : "") +
     (d.stale === true ? "<p class=\"note\">" + esc(DISCOVERY_STALE_SENTENCE) + "</p>" : "") +
     (d.truncated === true ? "<p class=\"note\">" + esc(TRUNCATION_SENTENCE) + "</p>" : "") +
+    // A DISCOVERY THIS PAGE STOPPED FOLLOWING says so, with "Run the discovery
+    // again" (`lifecycle.js`'s `followCheck`); only the latest attempt is ever
+    // followed.
+    (role === "successful" ? "" : checkStoppedBlock(d, "discovery")) +
     visibilityLine(d.visibility) +
     (empty
       ? "<p class=\"note\" id=\"discovery-empty\">" + esc(EMPTY_INVENTORY_SENTENCE) + "</p>"
@@ -1205,6 +1193,7 @@ export async function mountClusterDetail(node, ns, name, parse, lifecycle, deps)
       return;
     }
     paintClusterDetail(node, ns, name, parse, lifecycle, api, object, discovery);
+    resumeFollows(node, ns, name, parse, lifecycle, api, discovery);
   } catch (error) {
     if (!cancelled(error, lifecycle) && active(lifecycle)) {
       replace(node, errorBox(error));
@@ -1238,6 +1227,35 @@ async function readDiscoveries(api, ns, name, lifecycle) {
     });
   }
 }
+
+/** A CHECK ON SCREEN THAT NOTHING READS IS A CHECK LEFT "NOT FINISHED" FOR
+ *  GOOD (poc-upgrade-3's P15, its second face). The started check's rows are
+ *  remembered across visits (`checkViews`), and a follow ends with the route
+ *  that started it: a reader who left while a check ran came back to "this
+ *  page reads it again until then" and nothing did. Likewise a discovery the
+ *  read shows unfinished -- started here before, or by anybody -- used to sit
+ *  at `pending` until a reload. So a mount follows each of them again, unless
+ *  a live follow already reads it or this page already stopped following it;
+ *  the follow is bounded by the check's own deadline as every follow is. */
+function resumeFollows(node, ns, name, parse, lifecycle, api, discovery) {
+  const unfinished = (check) => check !== null && check !== undefined &&
+    typeof check.id === "string" && check.id.length > 0 && check.terminal !== true &&
+    followStopped(check) === "" && !isFollowed(check.id);
+  const held = (checkViews.get(formKey(ns, CONNECTION_CHECK_FORM, name)) || {}).preflight;
+  if (unfinished(held)) {
+    followConnectionCheck(node, ns, name, parse, lifecycle, api, held);
+  }
+  const latest = (discovery || {}).latestAttempt;
+  if (unfinished(latest)) {
+    followDiscovery(node, ns, name, parse, lifecycle, api, latest);
+  }
+}
+
+// WHAT THE DETAIL LAST PAINTED -- the connection object and the discovery
+// view -- per connection, so a follow's answer repaints the view as it is NOW
+// and not as it was when the follow began: a probe re-read or a page of
+// topics landing between two reads is kept.
+const detailViews = new Map();
 
 // THE STARTED CHECK'S OWN RESULT, REMEMBERED PER CLUSTER FOR THE LIFE OF THE
 // LOADED PAGE. Every other control on this view repaints the whole detail --
@@ -1288,7 +1306,6 @@ function paintClusterDetail(node, ns, name, parse, lifecycle, api, object, disco
     {
       mayOperate: mayOperate(ns),
       preflight: null,
-      followStopped: false,
       // THE OBJECT'S OWN, from the read this view already did. `lastTest` is
       // the product API's summary of the newest connectivity check for this
       // connection; in legacy mode it is simply absent, which the panel
@@ -1307,10 +1324,13 @@ function paintClusterDetail(node, ns, name, parse, lifecycle, api, object, disco
       refusedReason: connectionRefusal(object),
     },
   );
-  checkViews.set(checkKey, {
-    preflight: checkView.preflight,
-    followStopped: checkView.followStopped,
-  });
+  checkViews.set(checkKey, { preflight: checkView.preflight });
+  // WITHOUT the mutation state and the typed text: both are read fresh at
+  // every paint, and a stored copy would paint an old one over them.
+  const stored = Object.assign({}, discovery || {});
+  delete stored.state;
+  delete stored.typed;
+  detailViews.set(key, { object: object, discovery: stored });
   replace(
     node,
     parse(renderClusterDetail(object, undefined, undefined, undefined, view, checkView)),
@@ -1449,16 +1469,15 @@ function wireConnectionCheck(node, ns, name, parse, lifecycle, api, object, disc
     }
     if (state.phase === "succeeded") {
       const made = (state.result || {}).item || null;
-      const next = Object.assign({}, check, { preflight: made, followStopped: false });
+      const next = Object.assign({}, check, { preflight: made });
       paintClusterDetail(node, ns, name, parse, lifecycle, api, object, discovery, next);
-      followConnectionCheck(node, ns, name, parse, lifecycle, api, object, discovery, next);
+      followConnectionCheck(node, ns, name, parse, lifecycle, api, made);
       return;
     }
     paintClusterDetail(node, ns, name, parse, lifecycle, api, object, discovery, check);
   }, lifecycle);
 
-  listen(form, "submit", (event) => {
-    event.preventDefault();
+  const start = () => {
     if (!active(lifecycle) || mutation.pending() || connectionRefusal(object).length > 0) {
       return;
     }
@@ -1471,67 +1490,109 @@ function wireConnectionCheck(node, ns, name, parse, lifecycle, api, object, disc
       const made = await api.startPreflight(ns, connectionCheckRequest(name), { attempt: attempt });
       return startedPreflight(made);
     });
+  };
+  listen(form, "submit", (event) => {
+    event.preventDefault();
+    start();
   }, lifecycle);
+  // "RUN THE CHECK AGAIN" IS TEST CONNECTION AGAIN: a per-click token, so a
+  // new check.
+  wireCheckRetry(node, (check || {}).preflight, start, lifecycle);
 }
 
-/** Re-reads a started check until it is terminal or the budget is spent.
+/** Re-reads a started check until a read answers terminal, or the longest time
+ *  a check may take has passed (`lifecycle.js`'s `followCheck`; this panel's
+ *  thirty seconds was poc-upgrade-3's P15).
  *
- *  EVERY READ IS GUARDED BY THE ROUTE (PLAT-13.1) and the loop is BOUNDED. The
- *  wait is `api.wait` when the caller supplies one, so the behaviour suite runs
- *  this without a clock; in a browser it is one `setTimeout` per read and
+ *  EVERY READ IS GUARDED BY THE ROUTE (PLAT-13.1). The wait is `api.wait` when
+ *  the caller supplies one; in a browser it is one `setTimeout` per read and
  *  nothing is left running when the route leaves, because the next read checks
- *  `active` before it issues. */
-async function followConnectionCheck(node, ns, name, parse, lifecycle, api, object, discovery, check) {
-  const wait = typeof api.wait === "function"
-    ? api.wait
-    : (ms) => new Promise((done) => { globalThis.setTimeout(done, ms); });
-  let current = check.preflight;
-  for (let read = 0; read < CONNECTION_CHECK_POLLS; read += 1) {
-    // THE CREATE ANSWER IS NOT A READ (P8): even a terminal one -- a replay --
-    // was projected without recomputing staleness, so one GET is owed.
-    if (!owesRead(current, read)) {
+ *  `active` before it issues. A newer check on this panel ends the follow of
+ *  an older one, and each answer repaints the detail as it was last painted. */
+function followConnectionCheck(node, ns, name, parse, lifecycle, api, first) {
+  const checkKey = formKey(ns, CONNECTION_CHECK_FORM, name);
+  const detailKey = formKey(ns, DISCOVERY_FORM, name);
+  const mine = () => (((checkViews.get(checkKey) || {}).preflight) || {}).id === (first || {}).id;
+  return followCheck({
+    first: first,
+    budgetMs: PREFLIGHT_FOLLOW_MS,
+    wait: api.wait,
+    keep: () => active(lifecycle) && mine(),
+    cancelled: (error) => cancelled(error, lifecycle),
+    read: async (current) =>
+      (((await api.preflight(ns, current.id, readOptions(lifecycle))) || {}).item) || current,
+    show: (current) => {
+      const last = detailViews.get(detailKey) || {};
+      paintClusterDetail(node, ns, name, parse, lifecycle, api, last.object, last.discovery,
+        { preflight: current });
+    },
+  });
+}
+
+/** Re-reads a discovery the panel shows unfinished until a read answers
+ *  terminal, or the longest time a discovery may take has passed; then reads
+ *  the two slots again, because a finished attempt may now be the last
+ *  successful inventory too.
+ *
+ *  THE PANEL USED NOT TO READ A STARTED DISCOVERY AGAIN AT ALL: "Discover
+ *  topics" painted the create answer, `pending`, and it stayed `pending` until
+ *  the reader reloaded. A timer that kept reading after its reader stopped
+ *  looking was the worry, and the follow answers it: it ends with the route,
+ *  at the first terminal read, or at the discovery's own deadline, and it
+ *  says in words when it gave up. */
+function followDiscovery(node, ns, name, parse, lifecycle, api, first) {
+  const key = formKey(ns, DISCOVERY_FORM, name);
+  const mine = () => ((((detailViews.get(key) || {}).discovery) || {}).latestAttempt || {}).id ===
+    (first || {}).id;
+  const keep = () => active(lifecycle) && mine();
+  const paint = (extra) => {
+    const last = detailViews.get(key) || {};
+    paintClusterDetail(node, ns, name, parse, lifecycle, api, last.object,
+      Object.assign({}, last.discovery || {}, extra));
+  };
+  return followCheck({
+    first: first,
+    budgetMs: DISCOVERY_FOLLOW_MS,
+    wait: api.wait,
+    keep: keep,
+    cancelled: (error) => cancelled(error, lifecycle),
+    read: async (current) =>
+      (((await api.discovery(ns, current.id, readOptions(lifecycle))) || {}).item) || current,
+    show: (current) => paint({ latestAttempt: current }),
+  }).then((ended) => {
+    if (ended === null || ended === undefined || ended.terminal !== true ||
+      followStopped(ended) !== "" || !keep()) {
       return;
     }
-    await wait(CONNECTION_CHECK_INTERVAL_MS);
-    if (!active(lifecycle)) {
-      return;
-    }
-    let answer;
-    try {
-      answer = await api.preflight(ns, current.id, readOptions(lifecycle));
-    } catch (error) {
-      if (cancelled(error, lifecycle) || !active(lifecycle)) {
-        return;
-      }
-      // A FAILED RE-READ IS NOT A VERDICT. The rows already on screen are left
-      // exactly as they are and the reader is told the page stopped following.
-      paintClusterDetail(node, ns, name, parse, lifecycle, api, object, discovery,
-        Object.assign({}, check, { preflight: current, followStopped: true }));
-      return;
-    }
-    if (!active(lifecycle)) {
-      return;
-    }
-    current = answer.item;
-    paintClusterDetail(node, ns, name, parse, lifecycle, api, object, discovery,
-      Object.assign({}, check, { preflight: current, followStopped: false }));
-    if (current !== null && current !== undefined && current.terminal === true) {
-      return;
-    }
-  }
-  if (active(lifecycle)) {
-    paintClusterDetail(node, ns, name, parse, lifecycle, api, object, discovery,
-      Object.assign({}, check, { preflight: current, followStopped: true }));
-  }
+    api.latestDiscoveries(ns, name, readOptions(lifecycle)).then(
+      (answer) => {
+        if (!keep()) {
+          return;
+        }
+        const before = ((((detailViews.get(key) || {}).discovery) || {}).lastSuccessful) || {};
+        const best = answer.lastSuccessful || null;
+        paint(Object.assign(
+          { latestAttempt: answer.latestAttempt || ended, lastSuccessful: best },
+          // A NEW LAST INVENTORY IS NOT THE ONE THE TOPIC TABLE PAGED.
+          (best || {}).id === before.id ? {} : { topics: null, topicsError: null },
+        ));
+      },
+      () => {
+        // The finished attempt is on screen already; the slots catch up on the
+        // next visit.
+      },
+    );
+  });
 }
 
 /** The discovery panel's three controls: start, cancel, and read a page of the
  *  stored inventory (with the filters, and following the cursor).
  *
- *  NOTHING HERE POLLS. A started check is read again when the reader asks --
- *  by clicking again, or by reloading the view. A timer would keep reading a
- *  namespace after its reader stopped looking, and this page has no way to
- *  know that they have. */
+ *  A STARTED DISCOVERY IS FOLLOWED (`followDiscovery`), as every check this
+ *  console starts is: until a read answers terminal, the route leaves, or the
+ *  discovery's own deadline passes -- and then the panel says so and offers
+ *  to run it again. It used not to be read again at all, and "Discover
+ *  topics" left `pending` on screen until a reload. */
 function wireDiscovery(node, ns, name, parse, lifecycle, api, object, view) {
   const key = formKey(ns, DISCOVERY_FORM, name);
   const mutation = mutationFor(key);
@@ -1550,13 +1611,17 @@ function wireDiscovery(node, ns, name, parse, lifecycle, api, object, view) {
             reused: made.reused === true,
           },
         ));
+        // A REUSED INVENTORY IS ALREADY AN ANSWER; anything else is followed
+        // until it is one.
+        if (made.reused !== true && made.item) {
+          followDiscovery(node, ns, name, parse, lifecycle, api, made.item);
+        }
         return;
       }
       paintClusterDetail(node, ns, name, parse, lifecycle, api, object, view);
     }, lifecycle);
 
-    listen(form, "submit", (event) => {
-      event.preventDefault();
+    const start = () => {
       if (!active(lifecycle) || mutation.pending()) {
         return;
       }
@@ -1580,7 +1645,14 @@ function wireDiscovery(node, ns, name, parse, lifecycle, api, object, view) {
         spent: discoverySpent,
         start: (token) => api.startDiscovery(ns, name, request, { attempt: token }),
       }));
+    };
+    listen(form, "submit", (event) => {
+      event.preventDefault();
+      start();
     }, lifecycle);
+    // "RUN THE DISCOVERY AGAIN" asks again with the form's parameters; the
+    // stopped attempt is spent (`discoverySpent`), so it is a new discovery.
+    wireCheckRetry(node, view.latestAttempt, start, lifecycle);
 
     const cancel = node.querySelector("#discovery-cancel");
     if (cancel !== null) {

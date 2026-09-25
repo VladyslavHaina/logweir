@@ -22,13 +22,9 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 import { decodeConsoleItem } from "../contract.js";
-import { owesRead } from "../lifecycle.js";
-import {
-  DESTINATION_TEST_POLLS,
-  DESTINATION_TEST_STOPPED_SENTENCE,
-  mountDestinationDetail,
-  renderDestinationDetail,
-} from "../pages/destinations.js";
+import { PREFLIGHT_FOLLOW_MS, followGap, owesRead } from "../lifecycle.js";
+import { CHECK_UNFINISHED_SENTENCE } from "../render.js";
+import { mountDestinationDetail, renderDestinationDetail } from "../pages/destinations.js";
 import { LIFE, fakeView, parse } from "./fake-view.js";
 
 const console_ = (name) =>
@@ -123,7 +119,7 @@ test("destination_test_access_follows_the_started_check_until_a_read_is_terminal
   assert.doesNotMatch(html, /id="destination-no-test"/,
     "the pre-test summary ('No access test has been recorded') stands down once the page holds " +
       "a test of its own");
-  assert.doesNotMatch(html, /id="destination-test-stopped"/);
+  assert.doesNotMatch(html, /data-check-stopped=/);
 });
 
 test("a_replayed_destination_test_is_read_before_it_is_believed", async () => {
@@ -162,19 +158,30 @@ test("two_deliberate_destination_tests_are_two_checks_not_a_replay", async () =>
   assert.match(view.html(), /pf-2/, "the newer test is the one on screen");
 });
 
-test("a_destination_test_that_never_settles_is_left_alone_and_the_panel_says_so", async () => {
+test("a_destination_test_that_never_settles_is_followed_to_its_deadline_and_the_panel_says_so", async () => {
   const api = destinationApi({
-    started: () => created("pf-slow", "pending", false),
+    started: (n) => created("pf-slow-" + n, "pending", false),
     read: (id) => created(id, "running", false),
   });
+  let expected = 0;
+  for (let waited = 0; waited < PREFLIGHT_FOLLOW_MS; expected += 1) {
+    waited += Math.min(followGap(expected), PREFLIGHT_FOLLOW_MS - waited);
+  }
   const view = fakeView();
   await mountDestinationDetail(view.root, "team-a", "primary", parse, LIFE(), api);
   await view.find("#destination-test-form").dispatch("submit");
-  await settled(DESTINATION_TEST_POLLS * 4 + 20);
-  assert.equal(api.calls.reads, DESTINATION_TEST_POLLS, "the budget, and not one read more");
-  assert.match(view.html(), /id="destination-test-stopped"/);
+  await settled(expected * 4 + 20);
+  assert.equal(api.calls.reads, expected, "every read the deadline allows, and not one more");
+  assert.match(view.html(), /data-check-stopped="deadline"/);
+  assert.ok(view.html().includes(CHECK_UNFINISHED_SENTENCE));
   assert.ok(view.html().includes("was not cancelled"));
-  assert.match(DESTINATION_TEST_STOPPED_SENTENCE, /reload this page/);
+  assert.doesNotMatch(view.html(), /this page reads it again until then/);
+
+  // RUN THE CHECK AGAIN is a new test (a per-click token), and it is followed.
+  await view.find(".check-retry").dispatch("click");
+  await settled(20);
+  assert.equal(api.calls.tests.length, 2, "the retry started a second test");
+  assert.notEqual(api.calls.tests[0].attempt, api.calls.tests[1].attempt);
 });
 
 test("a_reload_renders_the_last_test_the_destination_read_carries", () => {

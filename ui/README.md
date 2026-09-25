@@ -204,6 +204,7 @@ authorisation story is "the API server evaluated the viewer's RBAC".
 | `tests/typed-input.spec.js` | **P13 and its class**: every form that repaints when a read lands keeps what was typed -- the readiness panel, a connection's discovery form and filters, a destination's rotation form -- each row typing first and then letting the read land. |
 | `tests/mcp-round2.spec.js` | **the human-like pass, round 2**: the running check's "checking...", the readiness headline and its one rule with step 5 and Create, the role gate and the no-role landing, sign out forgetting the address, the folded tables, the chips that stay whole, the message code spans, the picker's row and the footer -- each with the behaviour it replaced. |
 | `tests/check-intent.spec.js` | **P14 and its class**: a check asked again replays only while it can still be the answer -- the spent rule, `askCheck`, and the schedule form, the readiness panel and *Discover topics* over D0's replay rule, modelled. |
+| `tests/check-deadline.spec.js` | **P15 and its class**: every follower reads its check until the check's own deadline, backs off while it does, and says so -- with *Run the check again* -- when the deadline passes without a result: the deadline pinned to the product's own numbers, the follow on node's mock timers, and each page (the readiness panel, the schedule form, *Test connection*, *Discover topics*, *Test access*) with a check that settles at 100 s and one that never does. Restore step 5's two rows are in `mutation.spec.js`. |
 | `tests/preview-server.js` | a development tool, never a test: serves this directory over the fixtures under `tests/fixtures/preview/`. See *Previewing with fixtures*. |
 
 **The design system** lives in `style.css` and nowhere else. It is VMware
@@ -1269,10 +1270,15 @@ panel says as much, pointing at *Discover topics* instead.
   own reason verbatim beside its gloss. PLAT-07.1's resolver refuses before any
   credential is renderable, so the check would be created, fail to render a
   plan and record no row at all.
-* **The follow is bounded and says when it stops.** The panel re-reads the
-  started check at most twelve times, about thirty seconds, and then says so:
-  the check is still the controller's and was not cancelled. An unbounded timer
-  would keep reading a namespace for as long as a tab is open.
+* **The follow ends at the check's own deadline and says when it stops.** The
+  panel re-reads the started check until a read is terminal or the longest
+  time a check may take has passed (see *A followed check is read until its
+  own deadline* below), and then says so: the check did not finish, it is
+  still the controller's and was not cancelled, and *Run the check again*
+  starts a new one. An unbounded timer would keep reading a namespace for as
+  long as a tab is open; a thirty-second budget (P15) gave up on checks that
+  were still running. A check this panel started is followed again when the
+  reader comes back to the connection while it runs.
 
 A read that answers after the route has left paints nothing (PLAT-13.1), and
 that holds for every read of the follow loop as well.
@@ -1491,8 +1497,8 @@ seconds read `pending / does not apply / compared: nothing` four minutes later;
 and a readiness re-click replayed an earlier check, whose follower stopped at
 the terminal create answer and showed "could not be checked". After the first
 read a follower stops at the first **terminal read**, stops painting when a
-newer check replaces the one it follows, and says in words when its budget runs
-out (*Test access*: thirty reads two seconds apart). Restore step 5's one-way
+newer check replaces the one it follows, and says in words when the check's
+deadline passes without a result (next section). Restore step 5's one-way
 staleness keeps only the page's own marks: an `unverifiable` reason is the
 server's statement about one answer, and a fresher read replaces it.
 
@@ -1502,6 +1508,47 @@ new check rather than a replay of the first one's verdict, and the pre-test
 summary ("No access test has been recorded") stands down once the page holds a
 test of its own. A reload renders the destination read's `lastTest`, the newest
 recorded test.
+
+### A followed check is read until its own deadline
+
+Defect P15 (poc-upgrade-3, 2026-09-25): every follower above had a read budget
+of its own -- *Test connection* 30 s, the schedule form and the list page's
+*Backup readiness* panel 40 s, *Test access* 60 s, restore step 5 90 s -- while
+a `Preflight` may run for its `timeoutSeconds` (120 by default, up to 600) plus
+the 90 s its Job is given to start. A renewed check on the panel took 64 s; the
+panel read it for its 40 s, stopped, and kept "this page reads it again until
+then" on screen for good. *Discover topics* had no follower at all and showed
+`pending` until a reload. Now one follow (`lifecycle.js`'s `followCheck`)
+serves all six surfaces:
+
+* **The deadline is the longest a check may take**, measured from when the page
+  began to follow, on the page's own clock: the largest `timeoutSeconds` the
+  product API accepts (600; a discovery's, 300), plus the Job's start margin
+  (`DEADLINE_MARGIN_SECONDS`, 90), plus 30 s for the controller's status write
+  -- twelve minutes for a `Preflight`, seven for a discovery. The product API
+  publishes no deadline for a check in flight (`expiresAt` is the result's
+  validity and exists only once there is a result), so the page cannot wait for
+  less without guessing. A check the controller settles -- a `DeadlineExceeded`
+  Job included -- ends the follow at its first terminal read, long before that.
+* **Politely.** Two seconds before the first read, half as long again before
+  each next one, ten seconds at most: about seventy-five reads if a check never
+  settles. A read that fails for a reason that passes (the network, `408`,
+  `429`, a `5xx`) is asked again on the same schedule, five times in a row at
+  most; any other refusal ends the follow.
+* **And never on the checking sentence.** When the deadline passes without a
+  result, or a read is refused, the check shows *did not finish* (or *could not
+  be read again*, with what the read answered), says it was not cancelled, and
+  offers **Run the check again** (*Run the discovery again*). A check the page
+  stopped following is **spent** (`preflightSpent`, `discoverySpent`), so the
+  retry is a new check and never a replay of the one that did not finish, and
+  restore step 5's submit refuses it as "did not finish; run it again" rather
+  than "wait for its verdict".
+* *Discover topics* now follows the discovery it started and, when it
+  finishes, reads the two slots again. A connection detail opened while its
+  check or its latest discovery is still running follows it again.
+
+Rows: `ui/tests/check-deadline.spec.js`, restore step 5's in
+`ui/tests/mutation.spec.js`.
 
 ### Asking a check again is not replaying its last answer
 

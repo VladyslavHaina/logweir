@@ -1418,6 +1418,60 @@ export const CHECKING_SENTENCE =
   "The check has not finished. Whether its result applies to your current inputs is decided " +
   "when it has one; this page reads it again until then.";
 
+/** What a check says when this page stopped following it because the
+ *  longest time a check may take has passed without a result (`lifecycle.js`'s
+ *  `followCheck`). It replaces [`CHECKING_SENTENCE`], whose promise to read
+ *  again would no longer be true. */
+export const CHECK_UNFINISHED_SENTENCE =
+  "The check did not finish in the longest time a check may take, so this page stopped " +
+  "reading it. It was not cancelled, and nothing it records later is shown here. Run the " +
+  "check again to start a new one.";
+
+/** What a check says when a read of it was refused outright, so this page
+ *  stopped following it. */
+export const CHECK_UNREADABLE_SENTENCE =
+  "This page could not read the check again, so it stopped following it. The check was not " +
+  "cancelled. Run the check again to start a new one.";
+
+/** The two reasons a page stops following a check, spelled as `lifecycle.js`
+ *  spells them (`FOLLOW_DEADLINE`, `FOLLOW_UNREADABLE`); this module imports
+ *  nothing, and the suite holds the two spellings together. */
+const STOPPED_DEADLINE = "deadline";
+const STOPPED_UNREADABLE = "unreadable";
+
+function stoppedReason(check) {
+  const why = (check || {}).followStopped;
+  return why === STOPPED_DEADLINE || why === STOPPED_UNREADABLE ? why : "";
+}
+
+/** The block a check carries once this page stopped following it: why, in
+ *  words, and "Run the check again" -- a `.check-retry` button naming the
+ *  check it is about, which the page wires to its own start
+ *  (`lifecycle.js`'s `wireCheckRetry`). Empty while the page still follows
+ *  the check or never stopped. `noun` is what the button starts again:
+ *  "check" (a `Preflight`) or "discovery". */
+export function checkStoppedBlock(check, noun) {
+  const c = check || {};
+  const why = stoppedReason(c);
+  if (why === "") {
+    return "";
+  }
+  const what = typeof noun === "string" && noun.length > 0 ? noun : "check";
+  const said = why === STOPPED_DEADLINE ? CHECK_UNFINISHED_SENTENCE : CHECK_UNREADABLE_SENTENCE;
+  const words = what === "check" ? said : said.split("check").join(what);
+  return (
+    "<div class=\"check-stopped\" role=\"status\" data-check-stopped=\"" + esc(why) + "\">" +
+    "<p class=\"note\">" + esc(words) +
+    (why === STOPPED_UNREADABLE && typeof c.followError === "string" && c.followError.length > 0
+      ? " The read answered: " + esc(c.followError)
+      : "") +
+    "</p>" +
+    "<div class=\"actions\"><button type=\"button\" class=\"check-retry\" data-check=\"" +
+    esc(String(c.id || "")) + "\">Run the " + esc(what) + " again</button></div>" +
+    "</div>"
+  );
+}
+
 export const APPLICABILITY_SENTENCE =
   "Applicability is recomputed on every read against the objects as they are now. A result " +
   "that no longer describes your current inputs is shown as out of date, never as a verdict.";
@@ -1634,6 +1688,18 @@ export function applicabilityLine(preflight) {
   // yet. Applicability is a property of a result; until there is one the
   // line says the check is running.
   if (p.terminal !== true && ["pending", "queued", "running"].indexOf(p.state) !== -1) {
+    // AND ONE THIS PAGE STOPPED FOLLOWING says so instead: "this page reads it
+    // again until then" would be a promise nothing keeps. The words and the
+    // way to ask again are `checkStoppedBlock`'s, rendered beside this line.
+    const stopped = stoppedReason(p);
+    if (stopped !== "") {
+      return (
+        "<div class=\"applicability\" role=\"status\" data-applicability=\"unfinished\">" +
+        badge("unverified",
+          stopped === STOPPED_DEADLINE ? "did not finish" : "could not be read again") +
+        "</div>"
+      );
+    }
     return (
       "<div class=\"applicability\" role=\"status\" data-applicability=\"checking\">" +
       badge("pending", "checking...") +

@@ -49,15 +49,17 @@ import {
   fieldErrors,
   formKey,
   invalidInput,
+  followCheck,
   keepDraft,
   listen,
   mutationFor,
-  owesRead,
+  PREFLIGHT_FOLLOW_MS,
   preflightSpent,
   readDraft,
   readOptions,
   refusal,
   watchMutation,
+  wireCheckRetry,
 } from "../lifecycle.js";
 import { INCOMPLETE_DISCOVERY_POLICIES } from "../contract.js";
 import {
@@ -2126,38 +2128,29 @@ function paintReadinessPanel(node, ns, parse, lifecycle, api, merged) {
 }
 
 /** Re-reads the check the readiness panel started until a READ answers
- *  terminal, or the budget is spent -- defect P8's class. Before this the panel
+ *  terminal, or the longest time a check may take has passed -- defect P8's
+ *  class, and poc-upgrade-3's P15: a 40 s budget left a 64 s check reading
+ *  "this page reads it again until then" for good. Before P8 the panel
  *  rendered the create answer and nothing else: a check that had not run yet,
- *  or a replayed one whose staleness the create answer never recomputed. */
-async function followReadinessPanel(node, ns, parse, lifecycle, api, first) {
+ *  or a replayed one whose staleness the create answer never recomputed.
+ *  A failed re-read is not a verdict: the panel keeps what the check last
+ *  recorded, and says so when it stops (`lifecycle.js`'s `followCheck`). */
+function followReadinessPanel(node, ns, parse, lifecycle, api, first) {
   const key = formKey(ns, READINESS_FORM);
-  const wait = typeof api.wait === "function"
-    ? api.wait
-    : (ms) => new Promise((done) => { globalThis.setTimeout(done, ms); });
   const mine = () => (((readinessPanels.get(key) || {}).preflight) || {}).id === (first || {}).id;
-  let current = first;
-  for (let read = 0; read < READINESS_POLLS; read += 1) {
-    if (!owesRead(current, read)) {
-      return;
-    }
-    await wait(READINESS_INTERVAL_MS);
-    if (!active(lifecycle) || !mine()) {
-      return;
-    }
-    let answer;
-    try {
-      answer = await api.preflight(ns, current.id, readOptions(lifecycle));
-    } catch (error) {
-      // A FAILED RE-READ IS NOT A VERDICT: the panel keeps what it shows.
-      return;
-    }
-    if (!active(lifecycle) || !mine()) {
-      return;
-    }
-    current = ((answer || {}).item) || current;
-    paintReadinessPanel(node, ns, parse, lifecycle, api,
-      Object.assign({}, readinessPanels.get(key), { preflight: current }));
-  }
+  return followCheck({
+    first: first,
+    budgetMs: PREFLIGHT_FOLLOW_MS,
+    wait: api.wait,
+    keep: () => active(lifecycle) && mine(),
+    cancelled: (error) => cancelled(error, lifecycle),
+    read: async (current) =>
+      (((await api.preflight(ns, current.id, readOptions(lifecycle))) || {}).item) || current,
+    show: (current) => {
+      paintReadinessPanel(node, ns, parse, lifecycle, api,
+        Object.assign({}, readinessPanels.get(key), { preflight: current }));
+    },
+  });
 }
 
 function wireReadiness(node, ns, parse, lifecycle, api, readiness) {
@@ -2265,8 +2258,7 @@ function wireReadiness(node, ns, parse, lifecycle, api, readiness) {
     }, lifecycle);
   }
 
-  listen(form, "submit", (event) => {
-    event.preventDefault();
+  const start = () => {
     if (!active(lifecycle) || mutation.pending()) {
       return;
     }
@@ -2295,7 +2287,14 @@ function wireReadiness(node, ns, parse, lifecycle, api, readiness) {
     // answer and mints a new one when it cannot.
     mutation.run(() => askReadiness(api, ns, READINESS_FORM, request,
       ((latest() || {}).preflight) || null));
+  };
+  listen(form, "submit", (event) => {
+    event.preventDefault();
+    start();
   }, lifecycle);
+  // "RUN THE CHECK AGAIN" asks with the panel's inputs as they are now; the
+  // stopped check is spent (`preflightSpent`), so it is a new check.
+  wireCheckRetry(node, readiness.preflight, start, lifecycle);
 
   const cancel = node.querySelector("#readiness-cancel");
   if (cancel !== null) {
@@ -2534,6 +2533,8 @@ function wireCreate(node, ns, parse, lifecycle, api, clusters, own) {
           readiness: held.readiness || null, readinessError: held.readinessError || null,
           readinessRequest: held.readinessRequest, draft: values,
         })));
+        // THE SLOT'S "Run the check again" IS A NEW BUTTON, and wired as one.
+        wireCheckRetry(slot, held.readiness, () => checkReadiness(), lifecycle);
       }
     }
     if (mutation.state.phase === "succeeded") {
@@ -2631,54 +2632,58 @@ function wireCreate(node, ns, parse, lifecycle, api, clusters, own) {
   }
 
   const check = node.querySelector("#schedule-check-readiness");
-  if (check !== null) {
-    listen(check, "click", () => {
-      if (!active(lifecycle) || held.readinessInFlight === true) {
-        return;
-      }
-      const values = withScheduleIntent(readScheduleValues(form), readDraft(key));
-      keepDraft(key, values, SCHEDULE_DRAFT_FIELDS);
-      const request = readinessRequestFor(values);
-      if (request === null) {
-        held.readiness = null;
-        held.readinessUnavailable = true;
-        held.readinessUnavailableReason = "This dynamic schedule has no concrete topics before run-time discovery.";
+  const checkReadiness = () => {
+    if (!active(lifecycle) || held.readinessInFlight === true || check === null) {
+      return;
+    }
+    const values = withScheduleIntent(readScheduleValues(form), readDraft(key));
+    keepDraft(key, values, SCHEDULE_DRAFT_FIELDS);
+    const request = readinessRequestFor(values);
+    if (request === null) {
+      held.readiness = null;
+      held.readinessUnavailable = true;
+      held.readinessUnavailableReason = "This dynamic schedule has no concrete topics before run-time discovery.";
+      repaint();
+      return;
+    }
+    disableKeepingFocus(check, true);
+    held.readinessInFlight = true;
+    // THE VERDICT IS BOUND TO THE REQUEST THAT PRODUCED IT (review MEDIUM-3):
+    // it is shown as current only while the form still describes that
+    // request, and marked stale the moment it does not.
+    const asked = readinessKey(request);
+    const shown = held.readinessRequest === asked ? held.readiness : null;
+    held.readinessRequest = asked;
+    held.readinessError = null;
+    askReadiness(api, ns, SCHEDULE_FORM, request, shown).then(
+      (answer) => {
+        held.readinessInFlight = false;
+        if (!active(lifecycle)) {
+          return;
+        }
+        held.readiness = answer.item;
         repaint();
-        return;
-      }
-      disableKeepingFocus(check, true);
-      held.readinessInFlight = true;
-      // THE VERDICT IS BOUND TO THE REQUEST THAT PRODUCED IT (review MEDIUM-3):
-      // it is shown as current only while the form still describes that
-      // request, and marked stale the moment it does not.
-      const asked = readinessKey(request);
-      const shown = held.readinessRequest === asked ? held.readiness : null;
-      held.readinessRequest = asked;
-      held.readinessError = null;
-      askReadiness(api, ns, SCHEDULE_FORM, request, shown).then(
-        (answer) => {
-          held.readinessInFlight = false;
-          if (!active(lifecycle)) {
-            return;
-          }
-          held.readiness = answer.item;
+        followCreateReadiness(node, ns, parse, lifecycle, api, clusters, held);
+      },
+      (error) => {
+        held.readinessInFlight = false;
+        if (!cancelled(error, lifecycle) && active(lifecycle)) {
+          // A REFUSED START IS AN ANSWER TO THIS REQUEST, NOT A STATE OF THE
+          // FORM: the button stays, the refusal is shown beside it and its
+          // field errors are placed on the inputs they name.
+          held.readiness = null;
+          held.readinessError = error;
           repaint();
-          followCreateReadiness(node, ns, parse, lifecycle, api, clusters, held);
-        },
-        (error) => {
-          held.readinessInFlight = false;
-          if (!cancelled(error, lifecycle) && active(lifecycle)) {
-            // A REFUSED START IS AN ANSWER TO THIS REQUEST, NOT A STATE OF THE
-            // FORM: the button stays, the refusal is shown beside it and its
-            // field errors are placed on the inputs they name.
-            held.readiness = null;
-            held.readinessError = error;
-            repaint();
-          }
-        },
-      );
-    }, lifecycle);
+        }
+      },
+    );
+  };
+  if (check !== null) {
+    listen(check, "click", checkReadiness, lifecycle);
   }
+  // "RUN THE CHECK AGAIN" IS "Check readiness" AGAIN, with the form as it is
+  // now; the stopped check is spent (`preflightSpent`), so it is a new check.
+  wireCheckRetry(node, held.readiness, checkReadiness, lifecycle);
 
   listen(form, "submit", (event) => {
     event.preventDefault();
@@ -2760,57 +2765,37 @@ export function askReadiness(api, ns, form, request, held) {
   });
 }
 
-/** Re-reads a started readiness check until it is terminal or the budget is
- *  spent, exactly as the connection check on the clusters page does: every read
- *  is guarded by the route, the loop is bounded, and a failed re-read is not a
- *  verdict -- the verdict on screen stays what the check last recorded. */
-async function followCreateReadiness(node, ns, parse, lifecycle, api, clusters, held) {
-  const wait = typeof api.wait === "function"
-    ? api.wait
-    : (ms) => new Promise((done) => { globalThis.setTimeout(done, ms); });
-  const repaint = () => {
-    const slot = node.querySelector("#schedule-form-slot");
-    if (slot === null) {
-      return;
-    }
-    replace(slot, parse(renderScheduleForm(scheduleFormView(ns, clusters, held.now,
-      held.freshSeconds, held))));
-    wireCreate(node, ns, parse, lifecycle, api, clusters, held);
-  };
-  for (let read = 0; read < READINESS_POLLS; read += 1) {
-    const current = held.readiness;
-    // A REPLAYED CHECK IS TERMINAL ON ARRIVAL AND STILL OWES A READ (P8): the
-    // create answer says "this response did not recompute staleness".
-    if (!owesRead(current, read)) {
-      return;
-    }
-    await wait(READINESS_INTERVAL_MS);
-    if (!active(lifecycle)) {
-      return;
-    }
-    let answer;
-    try {
-      answer = await api.preflight(ns, current.id, readOptions(lifecycle));
-    } catch (error) {
-      if (cancelled(error, lifecycle) || !active(lifecycle)) {
+/** Re-reads a started readiness check until it is terminal or the longest
+ *  time a check may take has passed, exactly as the connection check on the
+ *  clusters page does (`lifecycle.js`'s `followCheck`): every read is guarded
+ *  by the route, the follow ends at the check's own deadline and says so, and
+ *  a failed re-read is not a verdict -- the verdict on screen stays what the
+ *  check last recorded. A REPLAYED CHECK IS TERMINAL ON ARRIVAL AND STILL OWES
+ *  A READ (P8): the create answer says "this response did not recompute
+ *  staleness". A newer check on this form ends the follow of an older one. */
+function followCreateReadiness(node, ns, parse, lifecycle, api, clusters, held) {
+  const first = held.readiness;
+  const mine = () => ((held.readiness || {}).id) === ((first || {}).id);
+  return followCheck({
+    first: first,
+    budgetMs: PREFLIGHT_FOLLOW_MS,
+    wait: api.wait,
+    keep: () => active(lifecycle) && mine(),
+    cancelled: (error) => cancelled(error, lifecycle),
+    read: async (current) =>
+      (((await api.preflight(ns, current.id, readOptions(lifecycle))) || {}).item) || current,
+    show: (current) => {
+      held.readiness = current;
+      const slot = node.querySelector("#schedule-form-slot");
+      if (slot === null) {
         return;
       }
-      return;
-    }
-    if (!active(lifecycle)) {
-      return;
-    }
-    held.readiness = answer.item;
-    repaint();
-  }
+      replace(slot, parse(renderScheduleForm(scheduleFormView(ns, clusters, held.now,
+        held.freshSeconds, held))));
+      wireCreate(node, ns, parse, lifecycle, api, clusters, held);
+    },
+  });
 }
-
-/** How many times a guided form re-reads a readiness check, and how long it
- *  waits between reads. Bounded on purpose: a form is not a watcher. */
-export const READINESS_POLLS = 20;
-
-/** The gap between those reads. */
-export const READINESS_INTERVAL_MS = 2000;
 
 /** Re-reads the namespace's saved connections and creates the schedule against
  *  that list, or refuses.
