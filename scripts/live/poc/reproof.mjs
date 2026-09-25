@@ -12,7 +12,7 @@
 //   P6        the catalog page's sync-mode help (legacy-point-restore L4)
 //   COMPLETION <restore>  a finished-without-success restore has no completion section; a Succeeded one does (4)
 //   P7        Clusters: no name input in console mode, the minted-name sentence, source+target created as
-//             conn-..., ROLE column; a double click creates exactly one (poc-fixes-2 R7.1, R7.2)
+//             conn-..., each one's role under its name (P7LIST re-reads only that); a double click creates exactly one (poc-fixes-2 R7.1, R7.2)
 //   SESSION   signed out = the one Sign in page, the Dex round trip back to the asked address; the header
 //             (name, role in the namespace, Sign out) per role; tabs by role; Sign out (console-ux-1 MCP-1/5/33)
 //   P8        Destinations -> primary -> Test access settles (R8.1), a second test is a new check (R8.2),
@@ -25,7 +25,7 @@ import { writeFileSync, mkdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import {
   chromium, newSession, gotoHash, textOf, waitForText, connectCatalog, createCluster, chooseCatalogDestination, BASE, HOST, credential,
-  openWizard, wizardAt, wizardStep, readinessRows, showEveryPoint, listRow, revealInGrid,
+  openWizard, wizardAt, wizardStep, readinessRows, showEveryPoint, listRow, revealInGrid, settledRows, checkRowsIn,
 } from "./console.mjs";
 
 const OUT = process.argv[2] || "/tmp/poc-reproof";
@@ -380,10 +380,27 @@ try {
     }
     row("R7.1 source and target created: each answers 'Created KafkaCluster conn-...' and exactly one object of that role",
       ["source", "target"].every((r) => made[r].created.length === 1 && /^conn-[a-z2-7]{26}$/.test(made[r].created[0][0]) && made[r].created[0][1] === r && made[r].outcome.endsWith(made[r].created[0][0])), made);
+    writeFileSync(`${OUT}/P7-made.json`, JSON.stringify({ made }, null, 1));
+  }
+  // THE ROLE UNDER EACH NAME (MCP round 2, R2-3 folded the ROLE column into the NAME cell): every
+  // connection's row shows its spec.role on the name's second line -- how section 10 tells a
+  // source from a target. Its own group, so a re-run reads the list without creating objects.
+  if (GROUPS.includes("P7") || GROUPS.includes("P7LIST")) {
     await gotoHash(page, `#/clusters?ns=${NS}`);
-    const lt = await textOf(page);
-    row("R7.1 the Clusters list shows the ROLE column", /ROLE|Role|role/.test(lt.slice(0, lt.indexOf("Create a KafkaCluster") > 0 ? lt.indexOf("Create a KafkaCluster") : lt.length)), {});
+    await waitForText(page, /conn-[a-z2-7]{26}/, 60, "the clusters list");
+    const want = Object.fromEntries(kj("get", "kafkaclusters").items.map((k) => [k.metadata.name, k.spec.role]));
+    const shown = await page.evaluate(() => [...document.querySelectorAll("table tbody tr")].map((tr) => {
+      const td = tr.querySelector("td");
+      const lines = td ? td.innerText.split("\n").map((x) => x.trim()).filter(Boolean) : [];
+      return [lines[0] || "", lines[1] || ""];
+    }).filter((r) => /^conn-/.test(r[0])));
+    const listed = shown.filter((r) => r[0] in want);
+    row("R7.1 the Clusters list shows each connection's role (source/target) under its name, as its spec says",
+      listed.length === Object.keys(want).length && listed.every((r) => r[1] === want[r[0]]),
+      { listed: listed.length, connections: Object.keys(want).length, mismatched: listed.filter((r) => r[1] !== want[r[0]]) });
     await shot(page, "R7-clusters");
+  }
+  if (GROUPS.includes("P7")) {
     // R7.2 double click
     await gotoHash(page, `#/clusters?ns=${NS}`);
     await waitForText(page, /Create a KafkaCluster/, 60, "the clusters page");
@@ -396,7 +413,7 @@ try {
     await page.waitForTimeout(5000);
     const extra = kj("get", "kafkaclusters").items.filter((k) => !before.has(k.metadata.name)).map((k) => k.metadata.name);
     row("R7.2 a double click on Create makes exactly one KafkaCluster", extra.length === 1, { created: extra });
-    writeFileSync(`${OUT}/P7-made.json`, JSON.stringify({ made, doubleClick: extra }, null, 1));
+    writeFileSync(`${OUT}/P7-double-click.json`, JSON.stringify({ doubleClick: extra }, null, 1));
   }
   // ------------------------------------------------------------------ P8
   if (GROUPS.includes("P8")) {
@@ -410,24 +427,28 @@ try {
       const t0 = Date.now();
       const n0 = calls.length;
       await page.locator("#destination-test").getByRole("button", { name: /test access/i }).click();
-      let t = "", settled = null;
+      // SETTLED = rows read from the check table's cells and no "checking..." (`checkRowsIn`). The
+      // text alone cannot say it: since R2-11 a running check's note reads "Whether its result
+      // applies to your current inputs is decided when it has one" (poc-upgrade-3, H7).
+      let t = "", settled = null, read = null;
       for (let i = 0; i < 45; i++) {
         await page.waitForTimeout(2000);
-        t = await page.locator("#destination-test").innerText();
-        if (/applies to your current inputs/.test(t) && !/\tpending\t|\bpending\b/.test(t.split("\n").filter((l) => /\t(blocking|advisory)\t/.test(l)).join("\n"))) { settled = Date.now() - t0; break; }
+        read = await checkRowsIn(page, "#destination-test");
+        t = read.text;
+        if (read.rows.length > 0 && !read.checking && /applies to your current inputs/.test(t)) { settled = Date.now() - t0; break; }
       }
       const mine = calls.slice(n0);
       const post = mine.find((c) => c.m === "POST");
       const reads = mine.filter((c) => c.m === "GET" && post && c.at >= post.at);
       const pf = ((answers[answers.length - 1] || {}).item || (answers[answers.length - 1] || {}).preflight || {}).name || (t.match(/pf-[a-z2-7]{26}/) || [""])[0];
-      const blocking = t.split("\n").filter((l) => /\tblocking\t/.test(l));
+      const blocking = (read ? read.rows : []).filter((r) => r.gating === "blocking");
       await shot(page, `P8-${label}`);
       return { settledMs: settled, text: t, reads: reads.length, pf, blocking };
     }
     const r1 = await testOnce("R8.1");
     row("R8.1 Test access settles: 'applies to your current inputs', blocking rows ready, no pending / 'compared: nothing' / 'No access test has been recorded', a GET of the check after the POST",
-      r1.settledMs !== null && r1.blocking.length > 0 && r1.blocking.every((l) => /\tready\t/.test(l)) && !/compared: nothing/.test(r1.text) && !/No access test has been recorded/.test(r1.text) && r1.reads > 0,
-      { settledMs: r1.settledMs, pf: r1.pf, readsAfterPost: r1.reads, blocking: r1.blocking.map((l) => l.split("\t").slice(0, 3).join("/")) });
+      r1.settledMs !== null && r1.blocking.length > 0 && r1.blocking.every((r) => r.verdict === "ready") && !/compared: nothing/.test(r1.text) && !/No access test has been recorded/.test(r1.text) && r1.reads > 0,
+      { settledMs: r1.settledMs, pf: r1.pf, readsAfterPost: r1.reads, blocking: r1.blocking.map((r) => `${r.id}/${r.verdict}/${r.code}`) });
     const r2 = await testOnce("R8.2");
     row("R8.2 a second Test access is a new check (a new pf- id) and settles", r2.settledMs !== null && !!r2.pf && r2.pf !== r1.pf, { first: r1.pf, second: r2.pf, settledMs: r2.settledMs });
     await page.reload({ waitUntil: "domcontentloaded" });
@@ -674,16 +695,17 @@ try {
     await form.getByRole("button", { name: /preview next runs/i }).click();
     // The AT (UTC) column in the one timestamp format (console-ux-1, MCP-7): was `…T02:00:00Z`.
     await waitForText(page, /NEXT RUNS[\s\S]*\d{4}-\d{2}-\d{2} 02:00:00 UTC/, 60, "the cadence preview");
+    // The check's rows from the form's own fieldset (`checkRowsIn`: four cells since MCP round 2,
+    // poc-upgrade-3 H7). A replay is terminal on arrival and owes one read (P8), so once the rows
+    // settle the follow's read gets up to 30 s to land before the verdict is taken.
     const verdictOf = async () => {
-      const end = Date.now() + 240000;
-      let t = "";
-      while (Date.now() < end) {
+      let r = await settledRows(page, "#schedule-readiness", 240, 3000);
+      if (r === null) return { t: await page.locator("#schedule-readiness").innerText(), rows: [] };
+      for (let i = 0; i < 10 && !/applies to your current inputs/.test(r.text); i++) {
         await page.waitForTimeout(3000);
-        t = await page.locator("#schedule-readiness").innerText();
-        const rows = t.split("\n").filter((l) => /\t(blocking|advisory|executionOnly)\t/.test(l));
-        if (rows.length && !rows.some((l) => /\t(pending|running)\t/i.test(l))) return { t, rows };
+        r = await checkRowsIn(page, "#schedule-readiness");
       }
-      return { t, rows: [] };
+      return { t: r.text, rows: r.rows };
     };
     await page.locator("#schedule-check-readiness").click();
     const v1 = await verdictOf();
@@ -691,7 +713,7 @@ try {
     const v2 = await verdictOf();
     row("R8.3 the schedule form's Backup readiness clicked twice with unchanged inputs: the second (replayed) answer is read back — 'applies to your current inputs', no 'did not recompute staleness'",
       v2.rows.length > 0 && /applies to your current inputs/.test(v2.t) && !/did not recompute staleness/.test(v2.t) && !/does not apply to your current inputs/.test(v2.t),
-      { first: v1.rows.map((l) => l.split("\t").slice(0, 2).join("=")).slice(0, 8), second: v2.rows.map((l) => l.split("\t").slice(0, 2).join("=")).slice(0, 8), secondSays: (v2.t.match(/[^\n]*current inputs[^\n]*/) || [""])[0] });
+      { first: v1.rows.map((x) => `${x.id}=${x.verdict}`).slice(0, 8), second: v2.rows.map((x) => `${x.id}=${x.verdict}`).slice(0, 8), secondSays: (v2.t.match(/[^\n]*current inputs[^\n]*/) || [""])[0] });
     await shot(page, "README10-schedule-readiness");
     const before = new Set(kj("get", "backupschedules").items.map((s) => s.metadata.name));
     const create = form.getByRole("button", { name: /^create$/i });
@@ -757,15 +779,11 @@ try {
     if (await dsel.count()) { const d2 = await dsel.locator("option").evaluateAll((os) => os.map((o) => [o.value, o.textContent])); const hit = d2.find((o) => o[1].startsWith("primary")); if (hit) await dsel.selectOption(hit[0]); }
     await panel.locator("#readiness-topics").fill("orders, payments");
     await panel.getByRole("button", { name: /^check readiness$/i }).click();
-    let pt = "", settled = false;
-    for (let i = 0; i < 80 && !settled; i++) {
-      await page.waitForTimeout(3000);
-      pt = await panel.innerText();
-      const rows = pt.split("\n").filter((l) => /\t(blocking|advisory|executionOnly)\t/.test(l));
-      settled = rows.length > 0 && !rows.some((l) => /\t(pending|running)\t/i.test(l));
-    }
+    const read = await settledRows(page, "#backup-readiness", 240, 3000);
+    const settled = read !== null;
+    const pt = settled ? read.text : await panel.innerText();
     row("R8.5 the schedules list's Backup readiness panel settles to a verdict read back from the check", settled && !/did not recompute staleness/.test(pt),
-      { excerpt: pt.split("\n").filter((l) => /\t(blocking)\t/.test(l)).map((l) => l.split("\t").slice(0, 2).join("=")).slice(0, 10) });
+      { excerpt: settled ? read.rows.filter((x) => x.gating === "blocking").map((x) => `${x.id}=${x.verdict}`).slice(0, 10) : [] });
     await shot(page, "README10-R8.5-panel");
     writeFileSync(`${OUT}/README10-facts.json`, JSON.stringify({ SRC, TGT, SCH, backup: b.metadata.name, restore: r.name, prefix: PREFIX }, null, 1));
   }

@@ -15,7 +15,7 @@ import { writeFileSync, mkdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import {
   chromium, newSession, gotoHash, textOf, waitForText, createCluster, createDestination,
-  restoreFromBackup, secretValue, revealInGrid,
+  restoreFromBackup, secretValue, revealInGrid, settledRows,
 } from "./console.mjs";
 
 const OUT = process.argv[2] || "/tmp/poc-journey";
@@ -39,17 +39,12 @@ const firstSchedule = () => kj("get", "backupschedules").items.filter((x) => (x.
 const step = (id) => ["J1", "J2", "J3", "J4", "J5", "J6", "J7"].indexOf(id) >= ["J1", "J2", "J3", "J4", "J5", "J6", "J7"].indexOf(FROM);
 async function shot(page, name) { await page.screenshot({ path: `${OUT}/${name}.png`, fullPage: true }); }
 
-async function waitRows(page, sectionStart, seconds) {
-  const end = Date.now() + seconds * 1000;
-  let rows = [];
-  while (Date.now() < end) {
-    await page.waitForTimeout(4000);
-    const t = await textOf(page);
-    const s = t.slice(t.indexOf(sectionStart));
-    rows = [...s.matchAll(/^([a-zA-Z]+\.[a-zA-Z]+)\t([^\t]+)\t(blocking|advisory|executionOnly)\t([A-Za-z]+)/gm)].map((m) => ({ id: m[1], verdict: m[2], gating: m[3], code: m[4] }));
-    if (rows.length > 0 && !rows.some((r) => /pending|running/i.test(r.verdict))) return rows;
-  }
-  return rows;
+// A check's rows, read from the DOM of the surface that shows it (`checkRowsIn`: since MCP round 2
+// a check table has four cells, and the old innerText reading matched no row -- poc-upgrade-3, H7),
+// once the check has settled; [] when it never does.
+async function waitRows(page, selector, seconds) {
+  const read = await settledRows(page, selector, seconds, 4000);
+  return read === null ? [] : read.rows;
 }
 
 const browser = await chromium.launch();
@@ -72,7 +67,7 @@ try {
       await gotoHash(page, `#/clusters?ns=${NS}&name=${name}`);
       await waitForText(page, /TEST CONNECTION|Test connection/, 60, "the cluster page");
       await page.getByRole("button", { name: /^test connection$/i }).click();
-      const rows = await waitRows(page, "Test connection", 180);
+      const rows = await waitRows(page, "#connection-check", 180);
       const blocking = rows.filter((r) => r.gating === "blocking");
       row(`J2 Test connection ${name}: every blocking row ready`, blocking.length > 0 && blocking.every((r) => r.verdict === "ready"),
         { rows: rows.map((r) => `${r.id}=${r.verdict}/${r.code}`) });
@@ -107,7 +102,7 @@ try {
     await gotoHash(page, `#/destinations?ns=${NS}&name=primary`);
     await waitForText(page, /Test access/, 60, "the destination page");
     await page.locator("#destination-test").getByRole("button", { name: /test access/i }).click();
-    const rows = await waitRows(page, "Test access", 240);
+    const rows = await waitRows(page, "#destination-test-slot", 240);
     const blocking = rows.filter((r) => r.gating === "blocking");
     row("J3 Test access: every blocking row ready", blocking.length > 0 && blocking.every((r) => r.verdict === "ready"),
       { rows: rows.map((r) => `${r.id}=${r.verdict}/${r.code}`) });
@@ -141,7 +136,7 @@ try {
       // The AT (UTC) column in the one timestamp format (console-ux-1, MCP-7): was `…T02:00:00Z`.
       await waitForText(page, /NEXT RUNS[\s\S]*\d{4}-\d{2}-\d{2} 02:00:00 UTC/, 60, "the cadence preview");
       await page.locator('button[name="schedule-check-readiness"], #schedule-check-readiness').first().click();
-      const rows = await waitRows(page, "READINESS", 240);
+      const rows = await waitRows(page, "#schedule-readiness", 240);
       const blocking = rows.filter((r) => r.gating === "blocking");
       row("J4 schedule readiness: blocking rows", blocking.length > 0, { rows: rows.map((r) => `${r.id}=${r.verdict}/${r.code}`) });
       await shot(page, "J4-schedule-readiness");

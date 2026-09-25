@@ -42,11 +42,13 @@ publication: `LOGWEIR_TAG` (`sha-<commit>`) for the images and
 `LOGWEIR_CHART_VERSION` (`0.1.0-sha-<commit>`) for the chart, published
 together by `images.yml`. The profile needs a build that carries the chart-gap
 fixes below (every publication since main `86a554e6`): `LOGWEIR_COMMIT` names
-main `b748fd5f`, published by CI run 36100597420 (2026-09-25). It carries the
+main `a54fb823`, published by CI run 36129705142 (2026-09-25). It carries the
 fixes for the first PoC round's product defects P1–P10 (first published at
-`02dc44b6`) and the second round's P11 and P12, the durable compromise
-revocation and the console fixes of the human-like pass. The PoC installed at
-`86a554e6` was upgraded in place to `02dc44b6` and then to `b748fd5f` with
+`02dc44b6`), the second round's P11 and P12, the durable compromise
+revocation and the console fixes of the human-like pass (first published at
+`b748fd5f`), and the third round's P13 and P14 with the console's second
+human-pass round. The PoC installed at `86a554e6` was upgraded in place to
+`02dc44b6`, then to `b748fd5f` and then to `a54fb823` with
 [*Upgrade to a newer publication*](#upgrade-to-a-newer-publication).
 
 Hostnames: `logweir.localtest.me` (the console) and `dex.localtest.me` (Dex).
@@ -397,7 +399,7 @@ steps 4–8 with these PoC values:
 
 | Step | Value |
 |---|---|
-| Source connection | role `source`, `logweir-kafka-source.logweir-system.svc.cluster.local:9092`, plaintext. There is no name to type: the console names a connection `conn-<26 characters>` and shows it once created; the Clusters list's ROLE column is how you tell it from the target |
+| Source connection | role `source`, `logweir-kafka-source.logweir-system.svc.cluster.local:9092`, plaintext. There is no name to type: the console names a connection `conn-<26 characters>` and shows it once created; the Clusters list prints each connection's role (`source` or `target`) under its name, which is how you tell it from the target |
 | Target connection | role `target`, `logweir-kafka-target.logweir-system.svc.cluster.local:9092`, plaintext (named `conn-…` by the console, like the source) |
 | Destination | `primary` (a destination keeps the name you type): endpoint `http://logweir-minio.logweir-system.svc:9000` (transport `InsecureHTTP`, the demo MinIO speaks no TLS), region `us-east-1`, path-style, bucket `kafka-backups`, prefix `poc`; each grant the MinIO user in step 7's table, entered once as a new credential (access key = the user name, secret key = its file) |
 | Schedule | source = the `conn-…` connection with role `source`, topics `orders` and `payments` (the demo seeds both), daily, destination `primary`; then *Run first backup now*. There is no name to type: the console names the schedule `sch-<26 characters>` and opens it by that name |
@@ -466,8 +468,10 @@ the CRDs stay.
 
 ## Upgrade rehearsals
 
-[docs/release-handoff.md](../../docs/release-handoff.md) plans two rehearsals
-from published builds to the release in `versions.env`. Neither older build can
+[docs/release-handoff.md](../../docs/release-handoff.md) records the two
+rehearsals run on 2026-09-24, from published builds to the PoC's first
+publication (`86a554e6`); run again, each upgrades to the release in
+`versions.env`. Neither older build can
 install with this profile's values, so each has its own starting values file
 under [rehearsals/](rehearsals/), installed with **that version's own chart**
 from this repository. [validate.sh](validate.sh) renders both against their own
