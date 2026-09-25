@@ -112,17 +112,54 @@ export async function openWizard(page, hash) {
   return wizardAt(page, Number((hash.match(/[?&]step=([1-6])(?:&|$)/) || [])[1] || 1), 60);
 }
 
-// Step 5's readiness table, read from the step itself once no row is pending or running: every
-// row `{id, verdict, gating, code}`, and the step's text.
-export async function readinessRows(page, seconds) {
+// THE CHECK TABLE SINCE MCP ROUND 2 (R2-3, ui/render.js `checkTable`): nine fields in FOUR cells --
+// the check id with its code under it, the verdict with its gating under it, the message, the two
+// instants -- so a row is read from its cells and `data-field` spans. The old reading, a line of
+// innerText `id \t verdict \t gating \t code`, matches no row of this layout, and every readiness
+// row of the harness waited out its budget and failed on it (poc-upgrade-3, H7). Every row under
+// `selector` as `{id, verdict, gating, code}` (verdict in the page's words: "ready", "not ready",
+// "unknown", "skipped (never a pass)"), the container's text, and whether the check is still
+// running there: its applicability line reads "checking..." until it has a result (R2-11).
+export async function checkRowsIn(page, selector) {
+  return page.evaluate((sel) => {
+    const root = document.querySelector(sel);
+    if (!root) return { rows: [], checking: false, text: "" };
+    const rows = [];
+    for (const tr of root.querySelectorAll("tr")) {
+      const gating = tr.querySelector('[data-field="gating"]');
+      const tds = tr.querySelectorAll("td");
+      if (!gating || tds.length < 2) continue;
+      const verdict = tds[1].cloneNode(true);
+      verdict.querySelectorAll("[data-field]").forEach((x) => x.remove());
+      rows.push({
+        id: ((tds[0].querySelector("code") || {}).textContent || "").trim(),
+        verdict: verdict.textContent.trim(),
+        gating: gating.textContent.trim(),
+        code: ((tr.querySelector('[data-field="code"]') || {}).textContent || "").trim(),
+      });
+    }
+    const text = root.innerText;
+    return { rows, checking: !!root.querySelector('[data-applicability="checking"]') || /checking\.\.\./.test(text), text };
+  }, selector);
+}
+
+// The check under `selector` once it has rows and is no longer running, polled every `interval` ms
+// for at most `seconds`; null when it never settles.
+export async function settledRows(page, selector, seconds, interval) {
   const end = Date.now() + seconds * 1000;
   while (Date.now() < end) {
-    await page.waitForTimeout(4000);
-    const s5 = await page.locator("#step-preflight").innerText();
-    const rows = [...s5.matchAll(/^([a-zA-Z]+\.[a-zA-Z]+)\t([^\t]+)\t(blocking|advisory|executionOnly)\t([A-Za-z]+)/gm)].map((m) => ({ id: m[1], verdict: m[2], gating: m[3], code: m[4] }));
-    if (rows.length > 0 && !rows.some((r) => /pending|running/i.test(r.verdict))) return { rows, text: s5 };
+    await page.waitForTimeout(interval || 3000);
+    const read = await checkRowsIn(page, selector);
+    if (read.rows.length > 0 && !read.checking) return read;
   }
   return null;
+}
+
+// Step 5's readiness table, read from the step itself once the check has settled: every row
+// `{id, verdict, gating, code}`, and the step's text.
+export async function readinessRows(page, seconds) {
+  const read = await settledRows(page, "#step-preflight", seconds, 4000);
+  return read === null ? null : { rows: read.rows, text: read.text };
 }
 
 // THE SELECTOR SHOWS 20 POINTS AT A TIME (console-ux-1, MCP-26), the rest `hidden` until "Show

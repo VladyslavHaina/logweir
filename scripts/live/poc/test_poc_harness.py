@@ -251,3 +251,32 @@ def test_the_point_offer_guard_catches_its_planted_twin():
     assert unrevealed_point_offers(planted)
     fixed = planted.replace("    row(", "    await revealInGrid(page, link, b.metadata.name);\n    row(")
     assert not unrevealed_point_offers(fixed)
+
+
+# --------------------------------------------------------------------------------------------
+# A CHECK ROW IS READ FROM ITS CELLS (poc-upgrade-3, H7). Since MCP round 2 (R2-3) the check
+# table prints nine fields in four cells -- the id with its code under it, the verdict with its
+# gating under it -- so a line of innerText `id \t verdict \t gating \t code` matches no row, and
+# every readiness row that read the old layout waited out its budget and failed live. A harness
+# reads rows with console.mjs `checkRowsIn` / `settledRows` (cells and `data-field` spans), and
+# decides "settled" from rows plus no "checking..." (R2-11) -- never from the words "applies to
+# your current inputs" alone, which the running check's own note also contains.
+OLD_ROW_LAYOUT = re.compile(r"\\t\((?:blocking|advisory|executionOnly)[|)]|\\t(?:blocking|ready|pending)\\t")
+
+
+def reads_the_old_check_row_layout(text: str) -> list[str]:
+    return [line.strip()[:160] for line in text.splitlines() if OLD_ROW_LAYOUT.search(line)]
+
+
+def test_no_harness_reads_a_check_row_by_the_old_tab_layout():
+    for p in MJS:
+        assert not reads_the_old_check_row_layout(p.read_text()), (p.name, reads_the_old_check_row_layout(p.read_text()))
+
+
+def test_the_check_row_guard_catches_its_planted_twins():
+    # the readers as they stood at main a54fb823 (console.mjs readinessRows, reproof.mjs README10)
+    assert reads_the_old_check_row_layout(
+        r'const rows = [...s5.matchAll(/^([a-zA-Z]+\.[a-zA-Z]+)\t([^\t]+)\t(blocking|advisory|executionOnly)\t([A-Za-z]+)/gm)]')
+    assert reads_the_old_check_row_layout(r'const rows = t.split("\n").filter((l) => /\t(blocking|advisory|executionOnly)\t/.test(l));')
+    assert reads_the_old_check_row_layout(r'r1.blocking.every((l) => /\tready\t/.test(l))')
+    assert not reads_the_old_check_row_layout('const read = await settledRows(page, "#step-preflight", seconds, 4000);')
