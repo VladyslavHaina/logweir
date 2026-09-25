@@ -5748,7 +5748,59 @@ export function keepStatusInView(node, selector) {
     return false;
   }
   status.scrollIntoView({ block: "nearest" });
+  clearOfWizardNav(node, status);
   return true;
+}
+
+/** WHAT `nearest` LEAVES UNDER THE BAR IS MOVED ABOVE IT (P16's sweep of R3-1).
+ *  Chrome honours `scroll-margin-bottom` only when `scrollIntoView` scrolls,
+ *  and with `block: "nearest"` it does not scroll an element whose border box
+ *  is already inside the viewport: a focused status at 734-771 px, under the
+ *  sticky bar whose top was at 738, stayed there (measured in Chromium over
+ *  the real console at 390 x 844). So after the nearest edge is honoured, an
+ *  element whose bottom is still below the bar's top is scrolled up until its
+ *  bottom sits where the scroll margin puts it -- never past its own top.
+ *  Nothing moves where the page cannot measure (the suites' fakes, unless a
+ *  row gives them a layout). Exported for the suite. */
+export function clearOfWizardNav(node, element) {
+  const nav = node === null || node === undefined || typeof node.querySelector !== "function"
+    ? null
+    : node.querySelector(".wizard-nav");
+  const doc = element === null || element === undefined ? null : element.ownerDocument;
+  const view = doc ? doc.defaultView : null;
+  if (nav === null || nav === undefined || !view || typeof view.scrollBy !== "function" ||
+    typeof nav.getBoundingClientRect !== "function" ||
+    typeof element.getBoundingClientRect !== "function") {
+    return false;
+  }
+  const bar = nav.getBoundingClientRect();
+  const box = element.getBoundingClientRect();
+  if (box.bottom <= bar.top || box.top <= 0) {
+    return false;
+  }
+  const style = typeof view.getComputedStyle === "function" ? view.getComputedStyle(element) : null;
+  const margin = parseFloat(style === null ? "" : style.scrollMarginBottom) || 0;
+  const height = typeof view.innerHeight === "number" ? view.innerHeight : bar.bottom;
+  const room = Math.min(height - margin, bar.top);
+  const by = Math.min(box.bottom - room, box.top);
+  if (by <= 0) {
+    return false;
+  }
+  view.scrollBy(0, by);
+  return true;
+}
+
+/** Whether `element` shows any part of itself in the viewport, or `null`
+ *  where the page cannot measure (the suites' fakes). */
+function onScreen(element) {
+  const doc = element === null || element === undefined ? null : element.ownerDocument;
+  const view = doc ? doc.defaultView : null;
+  if (!view || typeof view.innerHeight !== "number" ||
+    typeof element.getBoundingClientRect !== "function") {
+    return null;
+  }
+  const box = element.getBoundingClientRect();
+  return box.bottom > 0 && box.top < view.innerHeight;
 }
 
 /** BRINGS STEP 5'S VERDICT HEAD INTO VIEW ABOVE THE STICKY FOOTER when its
@@ -5777,6 +5829,7 @@ export function keepVerdictInView(node, check) {
     return false;
   }
   head.scrollIntoView({ block: "nearest" });
+  clearOfWizardNav(node, head);
   return true;
 }
 
@@ -5854,7 +5907,18 @@ function followRestoreReadiness(node, state, parse, api, lifecycle) {
         followStopped(next) !== followStopped(now);
       state.readiness = Object.assign({}, state.readiness, { preflight: next });
       if (moved) {
+        // WHETHER THE READER CAN SEE THE STATUS NOW, before this repaint: a
+        // reader who scrolled away from it while the check runs is not pulled
+        // back to it every two seconds.
+        const seen = onScreen(node.querySelector("#restore-readiness-status"));
         const painted = await renderAndWire(node, state, parse, api, lifecycle, true);
+        // EVERY REPAINT KEEPS THE FOCUSED STATUS ABOVE THE FOOTER (P16), not
+        // only the click's: `pending -> running` repainted step 5 with nothing
+        // after it, and the page the swap had moved stayed moved -- the status
+        // at 943 px of an 844 px viewport until the verdict.
+        if (painted === true && seen !== false) {
+          keepStatusInView(node, "#restore-readiness-status");
+        }
         // THE VERDICT, WHEN IT LANDS, IS BROUGHT ABOVE THE FOOTER TOO (review
         // L7 of R3-1): the status line was kept clear at the click, and the
         // verdict under it arrives later, through this repaint.

@@ -1526,7 +1526,11 @@ function renderCreateReadiness(view) {
           // could each renew the intent and create a Preflight.
           (v.readinessInFlight === true ? " disabled aria-busy=\"true\"" : "") + ">" +
           "Check readiness</button></div>"))) +
-    "<div class=\"readiness-verdict\" id=\"schedule-readiness-verdict\">" +
+    // THE VERDICT'S REGION TAKES FOCUS (P16's sweep): Check readiness is
+    // disabled while its request is in flight, and the form's own status --
+    // the create's, empty then, so not rendered -- could not take the focus
+    // it gave up. Focus moves here, where the answer is written.
+    "<div class=\"readiness-verdict\" id=\"schedule-readiness-verdict\" tabindex=\"-1\">" +
     renderReadinessVerdict(v) +
     "</div></fieldset>"
   );
@@ -2650,7 +2654,7 @@ function wireCreate(node, ns, parse, lifecycle, api, clusters, own) {
       repaint();
       return;
     }
-    disableKeepingFocus(check, true);
+    disableKeepingFocus(check, true, node.querySelector("#schedule-readiness-verdict"));
     held.readinessInFlight = true;
     // THE VERDICT IS BOUND TO THE REQUEST THAT PRODUCED IT (review MEDIUM-3):
     // it is shown as current only while the form still describes that

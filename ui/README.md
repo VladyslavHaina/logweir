@@ -1653,6 +1653,39 @@ tokens: each of those clicks is a new check by design.
 
 Rows: `ui/tests/mcp-round3.spec.js`.
 
+### A repaint keeps the reader's place
+
+Defect P16 (poc-upgrade-4, 2026-09-25): at 390 px, after *Check readiness*, the
+first follow read (`pending -> running`) repainted restore step 5 and the page
+jumped from scrollY 282 to 0, leaving the focused status at 943 px of an 844 px
+viewport until the verdict. Every page repaints through `render.js`'s
+`replace`, which empties the view and fills it again, and the browser moved
+the page during that swap; the click's repaint was followed by
+`keepStatusInView`, the follow's was not. Now:
+
+* **`replace` keeps the page where it was.** It reads the window's offset before
+  the swap and puts it back when the swap moved it, and when focus was inside
+  the replaced node on an element that is there again, the page moves by as
+  much as that element moved, so it sits where it sat. A repaint that moved
+  nothing scrolls nothing. This holds for every follower: step 5, *Test
+  connection*, *Discover topics*, *Test access*, the *Backup readiness* panel
+  and the schedule form -- over the real console in Chromium, the clusters
+  page's click moved the page from 1677 px to 93 before this.
+* **Step 5 keeps its focused status above the footer after every repaint**, not
+  only the click's -- unless the reader had scrolled it out of view, who is
+  not pulled back every two seconds. A status inside the viewport but under the
+  footer is moved above it too: `scrollIntoView({block: "nearest"})` does not
+  scroll an element whose box is already in view, whatever its scroll margin.
+* **A focus target the browser refuses is not a landing.** An empty status
+  region is `display: none`, and `focus()` on it does nothing: *Test access*
+  (whose status sat outside its form) and the schedule form's *Check
+  readiness* left focus on the body. `restoreFocus` and `disableKeepingFocus`
+  try the next target when focus did not land; *Test access*'s status is its
+  form's own, and the schedule form's verdict region takes the focus *Check
+  readiness* gives up.
+
+Rows: `ui/tests/reading-place.spec.js`.
+
 ### A repaint keeps what the reader typed
 
 Every form that repaints when an answer lands keeps what is typed into it

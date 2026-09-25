@@ -406,6 +406,13 @@ export function renderTestPanel(item, view) {
   const v = view || {};
   const test = v.test || null;
   const may = v.mayOperate !== false;
+  // THE STATUS IS THE FORM'S OWN (P16's sweep), as every other check form's
+  // is: a click disables the fieldset, focus leaves the button for the status
+  // of the form it was in (`render.js`'s `restoreFocus`), and a status drawn
+  // after `</form>` was not found -- focus fell to the body at the click.
+  const status = "<div class=\"form-status\" id=\"destination-test-status\" tabindex=\"-1\">" +
+    mutationStatus(v.testState || {}, { kind: "Preflight", name: (test || {}).id || "" }, null) +
+    "</div>";
   return (
     "<section class=\"destination-test\" id=\"destination-test\"><h3>Test access</h3>" +
     "<p class=\"note\">" + esc(DESTINATION_TEST_SENTENCE) + "</p>" +
@@ -420,12 +427,9 @@ export function renderTestPanel(item, view) {
         "</select>" +
         "<p class=\"help\">Choose none to exercise every configured role.</p></div>" +
         "<div class=\"actions\"><button type=\"submit\">Test access</button></div>" +
-        "</fieldset></form>"
+        "</fieldset>" + status + "</form>"
       : "<p class=\"note\">This login may read destinations and not test them; the roles it " +
-        "holds here do not include operator or administrator.</p>") +
-    "<div class=\"form-status\" id=\"destination-test-status\" tabindex=\"-1\">" +
-    mutationStatus(v.testState || {}, { kind: "Preflight", name: (test || {}).id || "" }, null) +
-    "</div>" +
+        "holds here do not include operator or administrator.</p>" + status) +
     (test === null ? "" : renderPreflight(test)) +
     "</section>"
   );
