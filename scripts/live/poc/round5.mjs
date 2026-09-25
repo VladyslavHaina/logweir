@@ -130,7 +130,8 @@ async function clickInPlace(page, selector) {
     if (!el) return null;
     const b = el.getBoundingClientRect();
     const nav = document.querySelector(".wizard-nav");
-    const floor = nav ? nav.getBoundingClientRect().top : window.innerHeight;
+    // a control IN the sticky bar (Next, Back) is on screen whenever the viewport shows it
+    const floor = nav && !nav.contains(el) ? nav.getBoundingClientRect().top : window.innerHeight;
     return { x: b.left + b.width / 2, y: b.top + b.height / 2, onScreen: b.top >= 0 && b.bottom <= floor };
   }, selector);
   if (at && at.onScreen) {
@@ -403,6 +404,8 @@ try {
     // that leaves the page at its maximum offset with the heading lower and on screen (noted).
     const lands = (h) => h.top !== null && ((h.top >= 15 && h.top <= 35) || (h.scrollY >= h.maxOffset - 1 && h.top > 35 && h.top < h.viewport));
     const exact = (h) => h.top !== null && h.top >= 15 && h.top <= 35;
+    // "a scrolled long page": more than 400 px down (the Backups list scrolls about 970 px at 1440x900)
+    const SCROLLED = 400;
     for (const [w, hgt] of [[390, 844], [1440, 900]]) {
       const vp = `${w}x${hgt}`;
       const { page, context } = await newSession(browser, "operator");
@@ -457,7 +460,7 @@ try {
           const hash = await page.evaluate(() => location.hash);
           all[vp][what] = { was, at, hash };
           row(`NAV ${what} at ${vp}, from the bottom of ${from} (scrollY ${was}; the link's own click() while the page stays scrolled): the new page opens at 0`,
-            was > 1000 && toRe.test(hash) && at.every(([, y]) => y === 0), { was, at, hash });
+            was > SCROLLED && toRe.test(hash) && at.every(([, y]) => y === 0), { was, at, hash });
         }
         {
           // a backup's detail link from the bottom row, with the mouse
@@ -475,7 +478,7 @@ try {
           const hash = await page.evaluate(() => location.hash);
           all[vp].detailLink = { was, at, hash };
           row(`NAV a backup's detail link from the bottom row of Backups at ${vp} (scrollY ${was}, a mouse click): the detail opens at 0`,
-            was > 1000 && /name=/.test(hash) && at.every(([, y]) => y === 0), { was, at, hash: hash.slice(0, 120) });
+            was > SCROLLED && /name=/.test(hash) && at.every(([, y]) => y === 0), { was, at, hash: hash.slice(0, 120) });
         }
         {
           // the namespace picker's Go from a scrolled page (every PoC user holds ONE namespace, so
@@ -493,7 +496,7 @@ try {
           const hash = await page.evaluate(() => location.hash);
           all[vp].namespaceGo = { was, at, hash, options: opts };
           row(`NAV the namespace picker's Go at ${vp}, from the bottom of a connection detail (scrollY ${was}; the form's requestSubmit() while the page stays scrolled): the namespace's page opens at 0`,
-            was > 1000 && hash === `#/clusters?ns=${NS}` && at.every(([, y]) => y === 0), { was, at, hash, pickerOptions: opts });
+            was > SCROLLED && hash === `#/clusters?ns=${NS}` && at.every(([, y]) => y === 0), { was, at, hash, pickerOptions: opts });
         }
       } catch (e) { row(`NAV ${vp} completed`, false, { error: String(e.stack || e).slice(0, 700) }); }
       await context.close();
