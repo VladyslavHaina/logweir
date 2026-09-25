@@ -13,6 +13,8 @@
 //   COMPLETION <restore>  a finished-without-success restore has no completion section; a Succeeded one does (4)
 //   P7        Clusters: no name input in console mode, the minted-name sentence, source+target created as
 //             conn-..., ROLE column; a double click creates exactly one (poc-fixes-2 R7.1, R7.2)
+//   SESSION   signed out = the one Sign in page, the Dex round trip back to the asked address; the header
+//             (name, role in the namespace, Sign out) per role; tabs by role; Sign out (console-ux-1 MCP-1/5/33)
 //   P8        Destinations -> primary -> Test access settles (R8.1), a second test is a new check (R8.2),
 //             a reload shows the recorded test (R8.4)
 //
@@ -22,7 +24,7 @@
 import { writeFileSync, mkdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import {
-  chromium, newSession, gotoHash, textOf, waitForText, connectCatalog, createCluster, chooseCatalogDestination,
+  chromium, newSession, gotoHash, textOf, waitForText, connectCatalog, createCluster, chooseCatalogDestination, BASE, HOST, credential,
   openWizard, wizardAt, wizardStep, readinessRows, showEveryPoint, listRow, revealInGrid,
 } from "./console.mjs";
 
@@ -68,6 +70,79 @@ try {
       /Every request goes to the Logweir product API, which authorises it for this session's identity and namespace grants/.test(t) && !/kubeconfig|kubectl proxy/i.test(t), { tagline: t });
     row("P1 the colophon reads 'Served by logweir-api', no 'kubectl proxy'", /^Served by logweir-api, which authorises every request/.test(c) && !/kubeconfig|kubectl proxy/i.test(c), { colophon: c });
     await shot(page, "P1-masthead");
+  }
+  // ------------------------------------------------------------------ SESSION (console-ux-1 MCP-1/4/5/33, its round-2 rows 1-2)
+  // Signed out: every route is the one Sign in page (no tabs, no namespace box, no JSON), whose link
+  // returns to the address asked for through Dex. Signed in: the header names the person, their role
+  // in the namespace, and Sign out; the tabs follow the role. Sign out is a POST carrying the
+  // session's own token (compared at capture, never kept) and leaves the page signed out.
+  if (GROUPS.includes("SESSION")) {
+    const want = `#/backups?ns=${NS}`;
+    const anon = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 1440, height: 1000 } });
+    const ap = await anon.newPage();
+    await ap.goto(`${BASE}/ui/${want}`, { waitUntil: "domcontentloaded" });
+    await ap.waitForSelector("#sign-in", { timeout: 30000 }).catch(() => {});
+    const so = await ap.evaluate(() => ({
+      card: !!document.querySelector("#sign-in"), h2: (document.querySelector("#sign-in h2") || {}).innerText || "",
+      href: (document.querySelector("#sign-in-link") || { getAttribute: () => null }).getAttribute("href"),
+      // textContent, not innerText: the button is styled uppercase, and innerText applies text-transform
+      signInButtons: [...document.querySelectorAll("a, button")].filter((x) => /^\s*sign in\s*$/i.test(x.textContent)).length,
+      tabs: document.querySelectorAll("#nav-slot .nav-link").length, text: document.body.innerText }));
+    row("SESSION signed out: the Sign in page -- one Sign in, no tabs, no namespace prompt, no JSON; its link returns to the asked address",
+      so.card && /^Sign in to Logweir$/.test(so.h2.trim()) && so.signInButtons === 1 && so.tabs === 0 && !/Choose a namespace/.test(so.text) && !/[{]\s*"/.test(so.text)
+        && so.href === "/auth/login?next=" + encodeURIComponent("/ui/" + want),
+      { h2: so.h2, href: so.href, signInButtons: so.signInButtons, tabs: so.tabs });
+    await shot(ap, "SESSION-signed-out");
+    const { user, pw } = credential("operator");
+    await ap.click("#sign-in-link");
+    await ap.waitForSelector('input[name="login"]', { timeout: 30000 });
+    await ap.fill('input[name="login"]', user);
+    await ap.fill('input[name="password"]', pw);
+    await Promise.all([ap.waitForURL((u) => u.hostname === HOST && u.pathname.startsWith("/ui"), { timeout: 30000 }), ap.click('button[type="submit"]')]);
+    await ap.waitForSelector("#session-identity", { timeout: 30000 }).catch(() => {});
+    const back = new URL(ap.url());
+    row("SESSION the Dex round trip returns to the same address", back.pathname === "/ui/" && back.hash === want, { url: back.pathname + back.hash });
+    await anon.close();
+    const TABS = {};
+    for (const role of ["operator", "approver", "viewer", "admin"]) {
+      const s = await newSession(browser, role);
+      await gotoHash(s.page, `#/backups?ns=${NS}`);
+      await s.page.waitForSelector("#session-identity", { timeout: 30000 }).catch(() => {});
+      const h = await s.page.evaluate(() => ({
+        name: (document.querySelector("#session-identity .session-name") || {}).innerText || "",
+        role: (document.querySelector("#session-role") || {}).innerText || "",
+        signOut: !!document.querySelector("#sign-out"),
+        tabs: [...document.querySelectorAll("#nav-slot .nav-link")].map((a) => a.innerText.trim()) }));
+      const sess = await session(s.page);
+      TABS[role] = h.tabs;
+      const shown = (sess.actor || {}).displayName || "";
+      row(`SESSION header (${role}): the person's name, '${role} in ${NS}', and Sign out`,
+        h.name.length > 0 && (!shown || h.name === shown) && new RegExp(`\\b${role === "admin" ? "admin(istrator)?" : role}\\b.* in ${NS}$`).test(h.role) && h.signOut,
+        { name: h.name, apiDisplayName: shown, role: h.role, signOut: h.signOut, tabs: h.tabs });
+      await shot(s.page, `SESSION-header-${role}`);
+      await s.context.close();
+    }
+    row("SESSION tabs follow the role: only admin has Keys; approver has Approvals; operator has Restore; viewer has no Restore",
+      TABS.admin.includes("Keys") && !TABS.operator.includes("Keys") && !TABS.approver.includes("Keys") && !TABS.viewer.includes("Keys")
+        && TABS.approver.includes("Approvals") && TABS.operator.includes("Restore") && !TABS.viewer.includes("Restore"), TABS);
+    // Sign out, as operator
+    const s = await newSession(browser, "operator");
+    await gotoHash(s.page, `#/backups?ns=${NS}`);
+    await s.page.waitForSelector("#sign-out", { timeout: 30000 });
+    const sess = await session(s.page);
+    const outs = [];
+    s.page.on("request", (r) => { if (r.method() === "POST" && /\/api\/v1\/session\/logout$/.test(new URL(r.url()).pathname)) outs.push({ sessionToken: r.headers()["x-csrf-token"] === sess.csrfToken }); });
+    const answers = [];
+    s.page.on("response", (r) => { if (r.request().method() === "POST" && /\/api\/v1\/session\/logout$/.test(new URL(r.url()).pathname)) answers.push(r.status()); });
+    await s.page.click("#sign-out");
+    await s.page.waitForSelector("#sign-in", { timeout: 30000 }).catch(() => {});
+    const after = await s.page.evaluate(async () => (await fetch("/api/v1/session", { credentials: "same-origin" })).status);
+    const card = await s.page.locator("#sign-in").count();
+    row("SESSION Sign out: one POST /api/v1/session/logout with the session's own token, answered 2xx; the page is the Sign in page and the session is gone (401)",
+      outs.length === 1 && outs[0].sessionToken === true && answers.length === 1 && answers[0] >= 200 && answers[0] < 300 && card === 1 && after === 401,
+      { posts: outs, answers, signInCard: card, sessionAfter: after });
+    await shot(s.page, "SESSION-signed-out-after");
+    await s.context.close();
   }
   // ------------------------------------------------------------------ P6 / L4
   if (GROUPS.includes("P6")) {
@@ -410,15 +485,34 @@ try {
     const byId = (checks, id) => checks.find((c) => c.id === id) || {};
     const scopeOf = (c) => c.scope ? `${c.scope.kind}/${c.scope.name}` : "";
     // ---- L1
-    await gotoHash(page, `#/schedules?ns=${NS}&name=${encodeURIComponent(sched)}`);
-    await waitForText(page, /Restore this point/, 60, "the legacy schedule page");
-    const link = page.locator(`a[href*="backup=${point.metadata.name}"]`, { hasText: /Restore this point/ }).first();
-    row("L1 the legacy schedule's page offers 'Restore this point' on the pre-upgrade row", (await link.count()) > 0, { schedule: sched, point: point.metadata.name, created: point.metadata.creationTimestamp });
+    // WHERE A PERSON FINDS THE POINT: its schedule's page while the schedule exists; once the
+    // schedule is deleted (its runs stay, by design) the recovery-point selector, which lists every
+    // point of the namespace. Either way the row REQUIRES the console's own "Restore this point".
+    const schedAlive = !!sched && kj("get", "backupschedules").items.some((s) => s.metadata.name === sched);
+    let link;
+    if (schedAlive) {
+      await gotoHash(page, `#/schedules?ns=${NS}&name=${encodeURIComponent(sched)}`);
+      await waitForText(page, /Restore this point/, 60, "the legacy schedule page");
+      link = page.locator(`a[href*="backup=${point.metadata.name}"]`, { hasText: /Restore this point/ }).first();
+    } else {
+      await gotoHash(page, `#/restore?ns=${NS}`);
+      await waitForText(page, /manifest attested by its verified receipt|no manifest recorded/, 90, "the restore selector");
+      await showEveryPoint(page);
+      link = page.locator(`#step-select-point a[href*="backup=${point.metadata.name}"]`, { hasText: /Restore this point/ }).first();
+    }
+    row(`L1 the console offers 'Restore this point' on the pre-upgrade row (${schedAlive ? "its schedule's page" : "the recovery-point selector: its schedule is deleted"})`,
+      (await link.count()) > 0, { schedule: sched, scheduleExists: schedAlive, point: point.metadata.name, created: point.metadata.creationTimestamp,
+        verification: (((point.status || {}).evidence || {}).verification || {}).result });
     if (await link.count()) {
-      await revealInGrid(page, link, point.metadata.name);
+      if (schedAlive) await revealInGrid(page, link, point.metadata.name);
       await link.click();
       await wizardAt(page, 1, 60);
     } else await openWizard(page, `#/restore?ns=${NS}&backup=${encodeURIComponent(point.metadata.name)}&uid=${encodeURIComponent(point.metadata.uid)}`);
+    // P12 (poc-fixes-3 P12-L1): the wizard no longer refuses the point as "not a recovery point".
+    const opened = await textOf(page);
+    const position = (await page.locator("#wizard-position").count()) ? (await page.locator("#wizard-position").textContent()).trim() : "";
+    row("L1 (P12) the wizard opens the point: no 'is not a recovery point' refusal", !/is not a recovery point/.test(opened) && /^Step 1 of 6: /.test(position),
+      { position, refusal: (opened.match(/[^\n]*is not a recovery point[^\n]*/) || [""])[0].slice(0, 200) });
     const { evidence: evb, note } = await legacyFill(null, `lg${stamp}-`);
     row("L1 the evidence bucket starts as the archive's own bucket (kafka-backups, not logweir-evidence), with the note naming LOGWEIR_ARCHIVE_URL",
       evb === "kafka-backups" && /LOGWEIR_ARCHIVE_URL/.test(note), { evidenceBucket: evb, note });
@@ -638,7 +732,9 @@ try {
     const t0 = Date.now();
     await waitForText(page, /Restore this point/, 90, "the schedule's points");
     const link = page.locator(`a[href*="backup=${b.metadata.name}"]`, { hasText: /Restore this point/ }).first();
-    row("README10 the schedule's page offers 'Restore this point'", (await link.count()) > 0, { renderedAfterMs: Date.now() - t0 });
+    // the schedule card's tables are paginated: a point past page 1 is absent until filtered for
+    const revealed = await revealInGrid(page, link, b.metadata.name).then(() => null, (e) => String(e.message || e));
+    row("README10 the schedule's page offers 'Restore this point'", (await link.count()) > 0 && (await link.isVisible()), { renderedAfterMs: Date.now() - t0, revealError: revealed });
     const r = await restoreFromBackup(page, NS, b.metadata.name, b.metadata.uid, { target: TGT, prefix: PREFIX, shots: `${OUT}/README10-restore` }, log);
     const st = r.status || {};
     const rv = ((st.evidence || {}).verification) || {};

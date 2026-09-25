@@ -145,13 +145,26 @@ export async function showEveryPoint(page) {
 // datagrids of 20): when the row holding `link` is on another page, the list's own filter box is
 // typed into with `name`, as a person would, and the link is REQUIRED visible after.
 export async function revealInGrid(page, link, name) {
-  if (await link.isVisible()) return;
-  const grid = await link.evaluate((a) => { const g = a.closest("[data-datagrid]"); return g ? g.getAttribute("data-datagrid") : null; });
-  if (grid && (await page.locator(`#${grid}-filter`).count())) {
+  const shown = async () => (await link.count()) > 0 && (await link.first().isVisible());
+  if (await shown()) return;
+  // A PAGINATED DATAGRID HOLDS ONLY ITS CURRENT PAGE IN THE DOM ("1-20 of 280 recovery points"): a
+  // row on a later page is not hidden, it is ABSENT, so there is no link to ask for its grid
+  // (poc-upgrade-2, J6). The name goes into the grid's own filter box, as a person would type it:
+  // the grid the link sits in when it is present, else each filterable grid on the page in turn.
+  let grids = [];
+  if (await link.count()) {
+    const g = await link.first().evaluate((a) => { const d = a.closest("[data-datagrid]"); return d ? d.getAttribute("data-datagrid") : null; });
+    if (g) grids = [g];
+  }
+  if (grids.length === 0) grids = await page.$$eval("[data-datagrid]", (gs) => gs.map((g) => g.getAttribute("data-datagrid")));
+  for (const grid of grids) {
+    if (!(await page.locator(`#${grid}-filter`).count())) continue;
     await page.fill(`#${grid}-filter`, name);
     await page.waitForTimeout(500);
+    if (await shown()) return;
+    await page.fill(`#${grid}-filter`, "");
   }
-  if (!(await link.isVisible())) throw new Error(`the link for ${name} is not on screen (list ${grid})`);
+  throw new Error(`the link for ${name} is not on screen (grids ${grids.join(", ") || "none"})`);
 }
 
 // A LIST ROW BY ITS RUN'S NAME (console-ux-1, MCP-25): the NAME cell now carries "Follow this

@@ -15,7 +15,7 @@ import { writeFileSync, mkdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import {
   chromium, newSession, gotoHash, textOf, waitForText, createCluster, createDestination,
-  restoreFromBackup, secretValue,
+  restoreFromBackup, secretValue, revealInGrid,
 } from "./console.mjs";
 
 const OUT = process.argv[2] || "/tmp/poc-journey";
@@ -193,7 +193,11 @@ try {
     // before counting, or the row fails on a page that has not painted yet (poc-upgrade-1, J6).
     await waitForText(page, /Restore this point/, 90, "the schedule's points");
     const link = page.locator(`a[href*="backup=${b.metadata.name}"]`, { hasText: /Restore this point/ }).first();
-    row("J6 the schedule page offers 'Restore this point' for the run", (await link.count()) > 0, { href: (await link.count()) ? await link.getAttribute("href") : null });
+    // THE SCHEDULE CARD'S TABLES ARE PAGINATED (console-ux-1, MCP-26): an older run is on a later
+    // page and not in the DOM at all, so it is looked up through the grid's filter, as a person would.
+    const revealed = await revealInGrid(page, link, b.metadata.name).then(() => null, (e) => String(e.message || e));
+    row("J6 the schedule page offers 'Restore this point' for the run", (await link.count()) > 0 && (await link.isVisible()),
+      { href: (await link.count()) ? await link.getAttribute("href") : null, revealError: revealed });
     const r = await restoreFromBackup(page, NS, b.metadata.name, b.metadata.uid, { target: TGT, prefix: process.env.POC_RESTORE_PREFIX || "restored-", shots: `${OUT}/J6` }, log);
     const notReady = (r.readiness && r.readiness.blockingNotReady) || ["no readiness"];
     row("J6 readiness: every blocking row ready except approval.state (skipped until the Restore exists)", notReady.length === 0,

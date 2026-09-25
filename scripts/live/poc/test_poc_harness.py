@@ -217,3 +217,37 @@ def test_the_ui_check_catches_a_page_that_moved_a_control():
     loose = destinations.replace('"<details class=\\"create-disclosure\\" id=\\"destination-create-disclosure\\""',
                                  '"<div class=\\"create-disclosure\\" id=\\"destination-create-disclosure-x\\""')
     assert loose != destinations and console_steps.ui_disagreements(destinations_js=loose)
+
+
+# --------------------------------------------------------------------------------------------
+# A POINT ON A PAGINATED LIST IS ABSENT, NOT HIDDEN (console-ux-1, MCP-26; poc-upgrade-2 J6).
+# The schedule card's point, run and manual-run tables and the wizard's selector hold only
+# their current page in the DOM ("1-20 of 280 recovery points"), so a row that counts a
+# point's "Restore this point" link right after navigation fails for any point past the first
+# page -- or passes only while the namespace is young. Every row that asserts such an offer
+# must first reveal the point the way a person does: `revealInGrid` (the grid's own filter)
+# or `showEveryPoint` (the selector's "Show more"), within the lines above it.
+def unrevealed_point_offers(text: str, window: int = 14) -> list[str]:
+    lines = text.splitlines()
+    bad = []
+    for i, line in enumerate(lines):
+        if re.search(r"row\(.*offers 'Restore this point'", line):
+            above = "\n".join(lines[max(0, i - window): i])
+            if "revealInGrid(" not in above and "showEveryPoint(" not in above:
+                bad.append(line.strip()[:160])
+    return bad
+
+
+def test_every_point_offer_row_reveals_the_point_first():
+    for p in MJS:
+        assert not unrevealed_point_offers(p.read_text()), (p.name, unrevealed_point_offers(p.read_text()))
+
+
+def test_the_point_offer_guard_catches_its_planted_twin():
+    # the J6 row as it stood before poc-upgrade-2: the link counted straight after navigation
+    planted = ('    await waitForText(page, /Restore this point/, 90, "the schedule\'s points");\n'
+               '    const link = page.locator(`a[href*="backup=${b.metadata.name}"]`, { hasText: /Restore this point/ }).first();\n'
+               '    row("J6 the schedule page offers \'Restore this point\' for the run", (await link.count()) > 0, {});\n')
+    assert unrevealed_point_offers(planted)
+    fixed = planted.replace("    row(", "    await revealInGrid(page, link, b.metadata.name);\n    row(")
+    assert not unrevealed_point_offers(fixed)
