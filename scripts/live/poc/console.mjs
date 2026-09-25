@@ -154,11 +154,13 @@ export async function checkRowsIn(page, selector) {
   }, selector);
 }
 
-// THE FLOOR OF EVERY SETTLE WAIT (P15). A Preflight may run its 120 s `timeoutSeconds` (the Job gets
-// 90 s more to start), and poc-upgrade-4's staged slow check records `notReady` after about 120 s,
-// while the page keeps following it: a reader that gives up sooner calls a check the page is still
-// reading "never settled". No reader waits less (test_poc_harness.py holds the literals).
-export const SETTLE_FLOOR_SECONDS = 150;
+// THE FLOOR OF EVERY SETTLE WAIT (P15). A Preflight may run its 120 s `timeoutSeconds` and its Job
+// gets 90 s more to start, so a check can settle 210 s after it is made, and the page shows it at
+// its next follow read (up to 10 s later), while the page keeps following it: a reader that gives
+// up sooner calls a check the page is still reading "never settled". 150 s was too short: on a
+// loaded docker-desktop (poc-upgrade-5) J6's restore readiness settled 176 s after it was made and
+// the journey gave up at 181 s. No reader waits less (test_poc_harness.py holds the literals).
+export const SETTLE_FLOOR_SECONDS = 240;
 
 // The check under `selector`, read every `interval` ms until it has a VERDICT (`settled`) or the page
 // says it STOPPED following it (`stopped`, `[data-check-stopped]`) -- the two ways a follow ends --
@@ -286,7 +288,7 @@ export async function listRow(page, gridId, name) {
 // 1 (legacy archive fields) -> 4 (target, mode, prefix) -> 6 (ticket; the plan hash and the
 // minted name) -> 5 (readiness) -> 6 (Create).
 export async function restoreFromBackup(page, ns, backup, uid, opts, log) {
-  const o = Object.assign({ target: "target", legacy: null, prefix: null, ticket: null, readiness: true, readinessSeconds: 180, runSeconds: 900, shots: null, follow: true }, opts || {});
+  const o = Object.assign({ target: "target", legacy: null, prefix: null, ticket: null, readiness: true, readinessSeconds: 240, runSeconds: 900, shots: null, follow: true }, opts || {});
   const say = (m) => log && log(m);
   await openWizard(page, `#/restore?ns=${encodeURIComponent(ns)}&backup=${encodeURIComponent(backup)}&uid=${encodeURIComponent(uid)}`);
   if (o.legacy) {
