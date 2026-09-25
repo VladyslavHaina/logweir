@@ -213,3 +213,40 @@ test("o2_a_sentence_with_a_code_span_is_rendered_through_messageText", () => {
     "NEGATIVE CONTROL: before the sweep eleven sentences went through esc, the two Catalog " +
       "ones among them:\n" + wrong.join("\n"));
 });
+
+// ===========================================================================
+// Review LOW-2: a code span is text, whatever it spells
+// ===========================================================================
+
+test("o2_review_a_code_span_carrying_markup_is_escaped_text_in_every_sink", () => {
+  // A problem detail an API server -- or anyone who can write one -- sends,
+  // with markup inside and outside a backticked span. Each sink shows it as
+  // text: `&lt;img` inside `<code>`, and no element or handler made from it.
+  const hostile = "`<img src=x onerror=alert(1)>` and <script>alert(2)</script> a<b";
+  const error = Object.assign(new Error(hostile), { status: 422, reason: "Invalid" });
+  const strings = {
+    codeSpans: codeSpans(hostile),
+    errorBlock: errorBlock(error),
+    fieldErrorLine: fieldErrorLine("x", [hostile]),
+  };
+  for (const [sink, html] of Object.entries(strings)) {
+    assert.ok(html.includes("<code>&lt;img src=x onerror=alert(1)&gt;</code>"),
+      "NEGATIVE CONTROL: " + sink + " escapes the span's markup inside <code>: " + html);
+    assert.ok(!/<img|<script/i.test(html), sink + " makes no element of it");
+    assert.ok(html.includes("&lt;script&gt;") && html.includes("a&lt;b"),
+      sink + " escapes the text outside the span too");
+  }
+  const doc = fakeDocument();
+  const original = globalThis.document;
+  globalThis.document = doc;
+  try {
+    const box = errorBox(error);
+    const message = box.querySelector(".error-message");
+    assert.equal(message.querySelector("code").textContent, "<img src=x onerror=alert(1)>",
+      "NEGATIVE CONTROL: the DOM error box holds the span as the text of a <code> element");
+    assert.equal(box.querySelectorAll("img").length + box.querySelectorAll("script").length, 0,
+      "and builds no element from it");
+  } finally {
+    globalThis.document = original;
+  }
+});
