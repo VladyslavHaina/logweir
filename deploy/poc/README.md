@@ -41,9 +41,11 @@ chart, and [validate.sh](validate.sh) is its render gate.
 publication: `LOGWEIR_TAG` (`sha-<commit>`) for the images and
 `LOGWEIR_CHART_VERSION` (`0.1.0-sha-<commit>`) for the chart, published
 together by `images.yml`. The profile needs a build that carries the chart-gap
-fixes below: `LOGWEIR_COMMIT` names main `86a554e6`, published by CI run
-35957294926 (2026-09-24), the first publication carrying them and every
-platform fix since.
+fixes below (every publication since main `86a554e6`): `LOGWEIR_COMMIT` names
+main `02dc44b6`, published by CI run 36071480985 (2026-09-24), the first
+publication carrying the fixes for the PoC round's product defects P1–P10.
+The PoC installed at `86a554e6` was upgraded to it in place with
+[*Upgrade to a newer publication*](#upgrade-to-a-newer-publication).
 
 Hostnames: `logweir.localtest.me` (the console) and `dex.localtest.me` (Dex).
 `localtest.me` and all its subdomains resolve to `127.0.0.1` in public DNS, and
@@ -224,7 +226,27 @@ for u in writer reader evidence; do openssl rand -hex 20 | tr -d '\n' > "poc-sec
 kubectl --context "$CTX" -n "$LOGWEIR_NAMESPACE" create secret generic logweir-poc-minio-users \
   --from-file=writer=poc-secrets/minio-writer --from-file=reader=poc-secrets/minio-reader \
   --from-file=evidence=poc-secrets/minio-evidence
+# The controller's own read-only evidence credential (docs/install.md section 3, secret 4), as the
+# evidence user above. Its archive handle -- LOGWEIR_ARCHIVE_URL, s3://kafka-backups/logweir with
+# the demo MinIO -- is the only reader of the evidence of a run written WITHOUT a saved destination.
+printf 'logweir-poc-evidence' > poc-secrets/evidence-ro-id
+kubectl --context "$CTX" -n "$LOGWEIR_NAMESPACE" create secret generic logweir-evidence-ro \
+  --from-file=access-key-id=poc-secrets/evidence-ro-id \
+  --from-file=secret-access-key=poc-secrets/minio-evidence
 ```
+
+**Without `logweir-evidence-ro` the archive handle has no credential.** The
+chart references it as `optional`, so the controller starts either way, but
+every run with no saved destination -- an inline-archive schedule, every point
+`v0.1.5` wrote -- then reads verification `NotAttempted` ("the evidence object
+could not be read", the SDK falling back to the instance metadata address
+`169.254.169.254`). Such a point has no verified covered window, so the console
+never offers it as a recovery point, and a `NotAttempted` verdict is not
+re-read once the credential exists. Runs through a saved destination (step 10)
+are unaffected: they read their evidence with the destination's own
+`evidenceRead` grant. The controller reads the Secret at start: created or
+rotated later, it takes effect at the next controller rollout (an upgrade's
+step 2 is one).
 
 ## 6. Logweir, from the published chart
 
@@ -411,6 +433,11 @@ configuration of this chart need images of the same build — while leaving
 under a Restore in flight. Step 3 adds the binding once step 2 is Ready. An
 installation with no binding to add stops after step 2 without the `--set-json`
 override.
+
+**An install that predates `logweir-evidence-ro` in step 5** (the first PoC
+round's) creates it before step 2, exactly as step 5 now does; step 2's
+controller rollout picks it up. Legacy runs verified `NotAttempted` before it
+existed stay so (see step 5).
 
 **What must survive**, and how to check it:
 - the installation identity: `logweir-signing-trust`'s `key-id` is the one
