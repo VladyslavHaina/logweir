@@ -14,7 +14,7 @@
 // window is per console process (docs/api.md, Rate limits). Nothing secret is printed.
 import { writeFileSync, mkdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { chromium, newSession, gotoHash, textOf, waitForText } from "./console.mjs";
+import { chromium, newSession, gotoHash, textOf, openWizard, wizardStep, readinessRows } from "./console.mjs";
 
 const OUT = process.argv[2] || "/tmp/poc-restore-burst";
 const N = Number(process.argv[3] || 3);
@@ -31,28 +31,24 @@ const kj = (...args) => JSON.parse(execFileSync("kubectl", ["--context", "docker
 const cond = (o, t) => (((o.status || {}).conditions) || []).find((c) => c.type === t) || {};
 const TERMINAL = new Set(["Succeeded", "Failed", "Cancelled", "Refused"]);
 
+// One page's wizard for its own point, walked as a person does: step 4 (target, mode, prefix),
+// then step 5 (readiness), then step 6, where Create waits for the burst.
 async function prepare(page, b, target, prefix) {
-  await gotoHash(page, `#/restore?ns=${NS}&backup=${encodeURIComponent(b.metadata.name)}&uid=${encodeURIComponent(b.metadata.uid)}`);
-  await waitForText(page, /6\. Plan, hash and names/, 60, "the wizard");
+  await openWizard(page, `#/restore?ns=${NS}&backup=${encodeURIComponent(b.metadata.name)}&uid=${encodeURIComponent(b.metadata.uid)}`);
+  await wizardStep(page, 4);
   const options = await page.$$eval('select[name="targetCluster"] option', (os) => os.map((x) => [x.value, x.textContent]));
   const hit = options.find((x) => x[1].startsWith(target + " "));
   await page.selectOption('select[name="targetCluster"]', hit[0]);
-  await page.selectOption('select[name="mode"]', "newTopic");
+  await page.selectOption("#target-mode", "newTopic");
   await page.fill('input[name="topicPrefix"]', prefix);
   await page.locator('input[name="topicPrefix"]').blur();
   await page.waitForTimeout(1500);
+  await wizardStep(page, 5);
   await page.click("#restore-readiness-start");
-  const end = Date.now() + 240000;
-  while (Date.now() < end) {
-    await page.waitForTimeout(4000);
-    const t = await textOf(page);
-    const s5 = t.slice(t.indexOf("5. Operation readiness"), t.indexOf("6. Plan, hash and names"));
-    const rows = [...s5.matchAll(/^([a-zA-Z]+\.[a-zA-Z]+)\t([^\t]+)\t(blocking|advisory|executionOnly)\t([A-Za-z]+)/gm)].map((m) => ({ id: m[1], verdict: m[2], gating: m[3] }));
-    if (rows.length > 0 && !rows.some((r) => /pending|running/i.test(r.verdict))) {
-      return rows.filter((r) => r.gating === "blocking" && r.verdict !== "ready" && r.id !== "approval.state");
-    }
-  }
-  throw new Error(`no readiness verdict for ${b.metadata.name}`);
+  const readiness = await readinessRows(page, 240);
+  if (!readiness) throw new Error(`no readiness verdict for ${b.metadata.name}`);
+  await wizardStep(page, 6);
+  return readiness.rows.filter((r) => r.gating === "blocking" && r.verdict !== "ready" && r.id !== "approval.state");
 }
 
 const browser = await chromium.launch();
@@ -77,7 +73,11 @@ try {
   for (let i = 0; i < N; i++) notReady.push(await prepare(pages[i], points[i], target, `q${i + 1}${stamp}-`));
   row(`P10.6 ${N} wizards reach a ready verdict (every blocking row but approval.state)`, notReady.every((x) => x.length === 0),
     { points: points.map((p) => p.metadata.name), notReady });
-  for (const p of pages) if (await p.isDisabled("#create-restore")) throw new Error("Create the Restore is disabled");
+  // Every page is on step 6 (prepare ends there): REQUIRED again right before the burst.
+  for (const p of pages) {
+    await wizardStep(p, 6);
+    if (await p.isDisabled("#create-restore")) throw new Error("Create the Restore is disabled");
+  }
   const before = new Set(kj("get", "restores").items.map((r) => r.metadata.name));
   const clickedAt = new Date().toISOString();
   await Promise.all(pages.map((p) => p.click("#create-restore")));

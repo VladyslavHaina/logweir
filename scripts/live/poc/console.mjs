@@ -12,6 +12,9 @@ import { execFileSync } from "node:child_process";
 import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { WIZARD_STEPS, wizardAt, wizardStep, openDestinationCreate } from "../../console-steps.mjs";
+
+export { WIZARD_STEPS, wizardAt, wizardStep, openDestinationCreate };
 
 const require = createRequire(import.meta.url);
 export const { chromium } = require("playwright");
@@ -97,9 +100,79 @@ export async function waitForText(page, re, seconds, what) {
   throw new Error(`timed out after ${seconds}s waiting for ${what || re}`);
 }
 
-async function setChecked(page, name, on) {
-  const box = page.locator(`input[name="${name}"]`);
-  if ((await box.count()) && (await box.isChecked()) !== on) await box.click();
+// THE RESTORE WIZARD SHOWS ONE STEP AT A TIME (console-ux-1, MCP-29): a control on another
+// step can be neither filled nor clicked, and body.innerText carries only the step on screen.
+// The journeys walk to each step they drive with Next / Back (scripts/console-steps.mjs), and
+// the offline guard (test_poc_harness.py) holds every wizard control in these files behind a
+// walk to its own step.
+//
+// Opens the wizard at `hash` and REQUIRES it on the step the address names (step 1 when none).
+export async function openWizard(page, hash) {
+  await gotoHash(page, hash);
+  return wizardAt(page, Number((hash.match(/[?&]step=([1-6])(?:&|$)/) || [])[1] || 1), 60);
+}
+
+// Step 5's readiness table, read from the step itself once no row is pending or running: every
+// row `{id, verdict, gating, code}`, and the step's text.
+export async function readinessRows(page, seconds) {
+  const end = Date.now() + seconds * 1000;
+  while (Date.now() < end) {
+    await page.waitForTimeout(4000);
+    const s5 = await page.locator("#step-preflight").innerText();
+    const rows = [...s5.matchAll(/^([a-zA-Z]+\.[a-zA-Z]+)\t([^\t]+)\t(blocking|advisory|executionOnly)\t([A-Za-z]+)/gm)].map((m) => ({ id: m[1], verdict: m[2], gating: m[3], code: m[4] }));
+    if (rows.length > 0 && !rows.some((r) => /pending|running/i.test(r.verdict))) return { rows, text: s5 };
+  }
+  return null;
+}
+
+// THE SELECTOR SHOWS 20 POINTS AT A TIME (console-ux-1, MCP-26), the rest `hidden` until "Show
+// more recovery points": a row that reads EVERY point clicks it until nothing is left to show
+// (bounded), and REQUIRES the count line to say every point is shown.
+export async function showEveryPoint(page) {
+  for (let i = 0; i < 200; i++) {
+    const more = page.locator("#point-more");
+    if (!(await more.count()) || !(await more.isVisible()) || (await more.isDisabled())) break;
+    await more.click();
+  }
+  const bar = page.locator("#point-more-bar");
+  const said = (await bar.count()) && (await bar.isVisible()) ? await page.locator("#point-count").innerText() : "";
+  const m = said.match(/^Showing (\d+) of (\d+)/);
+  if (said && !(m && m[1] === m[2])) throw new Error(`the selector still hides points: ${said}`);
+  return said;
+}
+
+// A LINK IN A PAGINATED LIST (console-ux-1, MCP-26: a schedule card's points and runs are
+// datagrids of 20): when the row holding `link` is on another page, the list's own filter box is
+// typed into with `name`, as a person would, and the link is REQUIRED visible after.
+export async function revealInGrid(page, link, name) {
+  if (await link.isVisible()) return;
+  const grid = await link.evaluate((a) => { const g = a.closest("[data-datagrid]"); return g ? g.getAttribute("data-datagrid") : null; });
+  if (grid && (await page.locator(`#${grid}-filter`).count())) {
+    await page.fill(`#${grid}-filter`, name);
+    await page.waitForTimeout(500);
+  }
+  if (!(await link.isVisible())) throw new Error(`the link for ${name} is not on screen (list ${grid})`);
+}
+
+// A LIST ROW BY ITS RUN'S NAME (console-ux-1, MCP-25): the NAME cell now carries "Follow this
+// run" on a second line, so a row is found by its name cell's first line and never by a line of
+// body text. A long list is a paginated datagrid, so its own filter box is typed into first, as a
+// person would. Returns `{ name, cells: { CAPTION: text } , text }` for the one visible row, or
+// null.
+export async function listRow(page, gridId, name) {
+  const filter = page.locator(`#${gridId}-filter`);
+  if (await filter.count()) { await filter.fill(name); await page.waitForTimeout(500); }
+  return page.evaluate(({ gridId, name }) => {
+    const table = document.querySelector(`#${gridId}-grid`) || document.querySelector(`[data-datagrid="${gridId}"] table`);
+    for (const tr of (table ? table.querySelectorAll("tbody tr") : [])) {
+      if (tr.hidden) continue;
+      const tds = [...tr.querySelectorAll("td")];
+      if (tds.length === 0 || tds[0].innerText.split("\n")[0].trim() !== name) continue;
+      const cells = Object.fromEntries(tds.map((td, i) => [td.getAttribute("data-label") || String(i), td.innerText.trim()]));
+      return { name, cells, text: tds.map((td) => td.innerText.trim()).join(" | ") };
+    }
+    return null;
+  }, { gridId, name });
 }
 
 // The restore wizard from a Backup (README step 10 / quickstart step 7), end to end: the target,
@@ -107,12 +180,13 @@ async function setChecked(page, name, on) {
 // is skipped until the Restore exists), Create the Restore -- the operator's Ordinary confirmation
 // -- and then the Restore itself, read with kubectl until it is terminal and, when it succeeded,
 // until `status.completion` is written or a bound elapses. A legacy (inline-archive) point needs
-// its endpoint, region, addressing and transport typed in (`o.legacy`).
+// its endpoint, region, addressing and transport typed in (`o.legacy`). The steps walked:
+// 1 (legacy archive fields) -> 4 (target, mode, prefix) -> 6 (ticket; the plan hash and the
+// minted name) -> 5 (readiness) -> 6 (Create).
 export async function restoreFromBackup(page, ns, backup, uid, opts, log) {
   const o = Object.assign({ target: "target", legacy: null, prefix: null, ticket: null, readiness: true, readinessSeconds: 180, runSeconds: 900, shots: null, follow: true }, opts || {});
   const say = (m) => log && log(m);
-  await gotoHash(page, `#/restore?ns=${encodeURIComponent(ns)}&backup=${encodeURIComponent(backup)}&uid=${encodeURIComponent(uid)}`);
-  await waitForText(page, /6\. Plan, hash and names/, 60, "the wizard");
+  await openWizard(page, `#/restore?ns=${encodeURIComponent(ns)}&backup=${encodeURIComponent(backup)}&uid=${encodeURIComponent(uid)}`);
   if (o.legacy) {
     await page.fill('input[name="endpoint"]', o.legacy.endpoint);
     await page.fill('input[name="region"]', o.legacy.region);
@@ -120,29 +194,26 @@ export async function restoreFromBackup(page, ns, backup, uid, opts, log) {
     if (o.legacy.allowHttp) await page.check('input[name="allowHttp"]');
     if (o.legacy.evidenceBucket) await page.fill('input[name="evidenceBucket"]', o.legacy.evidenceBucket);
   }
+  const walked = await wizardStep(page, 4);
   const options = await page.$$eval('select[name="targetCluster"] option', (os) => os.map((x) => [x.value, x.textContent]));
   const hit = options.find((x) => x[1].startsWith(o.target + " "));
   if (!hit) throw new Error(`no target option ${o.target}: ${JSON.stringify(options)}`);
   await page.selectOption('select[name="targetCluster"]', hit[0]);
-  await page.selectOption('select[name="mode"]', "newTopic");
+  await page.selectOption("#target-mode", "newTopic");
   if (o.prefix) { await page.fill('input[name="topicPrefix"]', o.prefix); await page.locator('input[name="topicPrefix"]').blur(); }
+  const prefix = await page.inputValue('input[name="topicPrefix"]');
+  walked.push(...(await wizardStep(page, 6)).slice(1));
   if (o.ticket) { await page.fill("#change-ticket", o.ticket); await page.locator("#change-ticket").blur(); }
   await page.waitForTimeout(1500);
-  const plan = await textOf(page);
+  const plan = await page.locator("#step-plan").innerText();
   const planHash = (plan.match(/plan hash\n(sha256:[0-9a-f]{64})/) || [])[1];
   const minted = (plan.match(/Restore metadata\.name\n(\S+)/) || [])[1];
-  say(`wizard: target=${o.target} prefix=${await page.inputValue('input[name="topicPrefix"]')} planHash=${planHash} minted=${minted}`);
+  say(`wizard: target=${o.target} prefix=${prefix} planHash=${planHash} minted=${minted}`);
   let readiness = null;
   if (o.readiness) {
+    walked.push(...(await wizardStep(page, 5)).slice(1));
     await page.click("#restore-readiness-start");
-    const end = Date.now() + o.readinessSeconds * 1000;
-    while (Date.now() < end) {
-      await page.waitForTimeout(4000);
-      const t = await textOf(page);
-      const s5 = t.slice(t.indexOf("5. Operation readiness"), t.indexOf("6. Plan, hash and names"));
-      const rows = [...s5.matchAll(/^([a-zA-Z]+\.[a-zA-Z]+)\t([^\t]+)\t(blocking|advisory|executionOnly)\t([A-Za-z]+)/gm)].map((m) => ({ id: m[1], verdict: m[2], gating: m[3], code: m[4] }));
-      if (rows.length > 0 && !rows.some((r) => /pending|running/i.test(r.verdict))) { readiness = { rows, text: s5 }; break; }
-    }
+    readiness = await readinessRows(page, o.readinessSeconds);
     if (!readiness) throw new Error("no readiness verdict in time");
     const blocking = readiness.rows.filter((r) => r.gating === "blocking");
     const notReady = blocking.filter((r) => r.verdict !== "ready" && r.id !== "approval.state");
@@ -150,6 +221,8 @@ export async function restoreFromBackup(page, ns, backup, uid, opts, log) {
     readiness.blockingNotReady = notReady;
     if (o.shots) await page.screenshot({ path: `${o.shots}-readiness.png`, fullPage: true });
   }
+  walked.push(...(await wizardStep(page, 6)).slice(1));
+  say(`wizard steps walked: ${walked.join(" -> ")}`);
   if (await page.isDisabled("#create-restore")) throw new Error("Create the Restore is disabled");
   await page.click("#create-restore");
   await page.waitForURL(/#\/(operations|approvals|history)/, { timeout: 60000 });
@@ -158,7 +231,7 @@ export async function restoreFromBackup(page, ns, backup, uid, opts, log) {
   // its `name=` is the Approval's).
   const name = decodeURIComponent((route.match(/#\/approvals/) ? route.match(/[?&]subject=([^&]+)/) : route.match(/[?&]name=([^&]+)/) || [])?.[1] || "");
   say(`created: ${route}`);
-  if (!o.follow) return { name, route, planHash, readiness, status: {}, operationText: "" };
+  if (!o.follow) return { name, route, planHash, readiness, walked, status: {}, operationText: "" };
   let st = {};
   const end = Date.now() + o.runSeconds * 1000;
   let terminalAt = 0;
@@ -178,7 +251,7 @@ export async function restoreFromBackup(page, ns, backup, uid, opts, log) {
   const opText = await textOf(page);
   if (o.shots) await page.screenshot({ path: `${o.shots}-operation.png`, fullPage: true });
   say(`restore ${name}: phase=${st.phase} verification=${((st.evidence || {}).verification || {}).result} completion=${st.completion ? "written" : "absent"}`);
-  return { name, route, planHash, readiness, status: st, operationText: opText };
+  return { name, route, planHash, readiness, walked, status: st, operationText: opText };
 }
 
 
@@ -203,9 +276,14 @@ async function fillGrant(page, role, grant) {
 
 // README step 10's destination: the demo MinIO, path-style, plaintext, and the three
 // least-privilege users of step 7 entered once as new credentials.
+// THE CREATE FORM SITS BEHIND A "Create destination" DISCLOSURE (console-ux-1, MCP-10): the
+// journey opens it with a click (`openDestinationCreate`). Each credential source then shows only
+// its own inputs, so `fillGrant` picks the source first.
 export async function createDestination(page, ns, d, log) {
   await gotoHash(page, `#/destinations?ns=${encodeURIComponent(ns)}`);
-  await waitForText(page, /Create a destination/, 60, "the destinations page");
+  await waitForText(page, /Create destination/, 60, "the destinations page");
+  await openDestinationCreate(page);
+  await waitForText(page, /Create a destination/, 30, "the opened create form");
   const form = page.locator("form", { has: page.locator('input[name="bucket"]') }).first();
   await form.locator('input[name="name"]').fill(d.name);
   if (d.description) await form.locator('input[name="description"]').fill(d.description);
@@ -234,12 +312,28 @@ export async function connectCatalog(page, ns, name, destination, mode, log) {
   await waitForText(page, /Connect an existing archive/, 60, "the catalog page");
   const form = page.locator("form", { has: page.locator('select[name="syncMode"]') }).first();
   await form.locator('input[name="name"]').fill(name);
-  await form.locator('input[name="destination"]').fill(destination);
+  const control = await chooseCatalogDestination(form, destination);
   await form.locator('select[name="syncMode"]').selectOption(mode || "full");
   await form.getByRole("button", { name: /connect archive/i }).click();
   await page.waitForTimeout(3000);
-  log && log(`catalog ${name} over ${destination}: connect submitted`);
+  log && log(`catalog ${name} over ${destination} (${control}): connect submitted`);
   return textOf(page);
+}
+
+// THE CONNECT FORM'S DESTINATION IS A PICK-LIST of the namespace's saved destinations
+// (console-ux-1, MCP-23); it is a text box only when that list could not be read. The option
+// is chosen by its value, the destination's name, and REQUIRED to exist. Returns which control
+// the page offered ("select" or "input"), for the row's evidence.
+export async function chooseCatalogDestination(form, destination) {
+  const pick = form.locator('[name="destination"]');
+  if ((await pick.evaluate((n) => n.tagName)) === "SELECT") {
+    const values = await pick.locator("option").evaluateAll((os) => os.map((o) => o.value));
+    if (!values.includes(destination)) throw new Error(`the destination pick-list has no ${destination}: ${JSON.stringify(values)}`);
+    await pick.selectOption(destination);
+    return "select";
+  }
+  await pick.fill(destination);
+  return "input";
 }
 
 
