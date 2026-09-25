@@ -50,7 +50,11 @@ import {
 const OUT = process.argv[2] || "/tmp/poc-round4";
 const GROUPS = (process.argv[3] || "CONN").split(",");
 const NS = process.env.POC_NAMESPACE || "logweir-poc";
-const BH_SRC = "pu4-bh-source", BH_TGT = "pu4-bh-target", BH_DEST = "pu4-bh-dest";
+// A later round re-runs these rows over its own fixtures and test schedule: POC_BH_PREFIX names the
+// blackhole fixtures (<prefix>-bh-source/-target/-dest), POC_TEST_SCHEDULE the five-minute schedule.
+const BH_PREFIX = process.env.POC_BH_PREFIX || "pu4";
+const BH_SRC = `${BH_PREFIX}-bh-source`, BH_TGT = `${BH_PREFIX}-bh-target`, BH_DEST = `${BH_PREFIX}-bh-dest`;
+const TEST_SCHEDULE = process.env.POC_TEST_SCHEDULE || "pu4-every5";
 mkdirSync(OUT, { recursive: true });
 const ROWS = [];
 const TAG = GROUPS.join("_");
@@ -406,7 +410,7 @@ try {
     const net = capture(page);
     let slots = null;
     try {
-      const b = kj("get", "backups").items.filter((x) => (x.spec.scheduleRef || {}).name === "pu4-every5" && (((x.status || {}).evidence || {}).verification || {}).result === "Valid")
+      const b = kj("get", "backups").items.filter((x) => (x.spec.scheduleRef || {}).name === TEST_SCHEDULE && (((x.status || {}).evidence || {}).verification || {}).result === "Valid")
         .sort((x, y) => (x.metadata.creationTimestamp < y.metadata.creationTimestamp ? 1 : -1))[0];
       await openWizard(page, `#/restore?ns=${NS}&backup=${b.metadata.name}&uid=${b.metadata.uid}`);
       await wizardStep(page, 4);
@@ -498,7 +502,7 @@ try {
     const above = (g, what) => !!g[what] && !!g.nav && g[what].top >= 0 && g[what].bottom <= g.nav.top;
     const clear = (g, what) => !!g[what] && !!g.nav && g[what].bottom <= g.nav.top;
     try {
-      const b = kj("get", "backups").items.filter((x) => (x.spec.scheduleRef || {}).name === "pu4-every5" && (((x.status || {}).evidence || {}).verification || {}).result === "Valid")
+      const b = kj("get", "backups").items.filter((x) => (x.spec.scheduleRef || {}).name === TEST_SCHEDULE && (((x.status || {}).evidence || {}).verification || {}).result === "Valid")
         .sort((x, y) => (x.metadata.creationTimestamp < y.metadata.creationTimestamp ? 1 : -1))[0];
       const tgt = kj("get", "kafkaclusters").items.filter((k) => k.spec.role === "target" && (k.status || {}).reachable === true)
         .sort((x, y) => (x.metadata.creationTimestamp < y.metadata.creationTimestamp ? 1 : -1))[0].metadata.name;
@@ -565,7 +569,7 @@ try {
 
   // ======================================================================== R3ROLES
   if (GROUPS.includes("R3ROLES")) {
-    const SCH = "pu4-every5";
+    const SCH = TEST_SCHEDULE;
     const offers = (page, scope) => page.evaluate((sel) => {
       const root = document.querySelector(sel) || document.body;
       return { links: [...root.querySelectorAll("a")].filter((a) => /^\s*Restore this point\s*$/i.test(a.textContent)).map((a) => a.getAttribute("href")).slice(0, 3),
