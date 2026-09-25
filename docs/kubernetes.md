@@ -1401,6 +1401,24 @@ closed check code on a failure), `Stale` (the view is older than two intervals; 
 `intervalSeconds: 0` catalog is manual-only and never stale by the clock) and
 `TrustAvailable`.
 
+**One catalog per destination per namespace.** Two `RecoveryCatalog`s whose
+`spec.destinationRef` names the same `BackupDestination` in one namespace are
+not two indexes: the one created first catalogs the destination, and every later
+one reports `Ready=False/DuplicateCatalog`, naming the catalog that holds the
+destination. "First" is `metadata.creationTimestamp`, then the name for a tie in
+the same second, so every reconcile of either object reaches the same answer. A
+duplicate resolves no destination and runs no sync Job, and it lists no view:
+`status.pages`, `status.indexConfigMap` and `status.truncated` are withdrawn,
+because the API's point listing and a catalog-point restore read `status.pages`
+directly. Its page `ConfigMap`s age out with their sync Job's TTL. Use the
+elder catalog, or delete the one you do not want; if you delete the elder, the
+next one in creation order takes over within a minute. **Upgrade:** a namespace
+that already holds duplicates (an older controller accepted them) keeps its
+first-created catalog syncing, and every other catalog over the same destination
+turns `Ready=False/DuplicateCatalog` on its first reconcile. A sync Job such a
+catalog was running is not harvested. Rolling back to an older controller makes
+the duplicates sync again.
+
 **A failed sync keeps the previous view.** The status patch omits `pages`, which
 an RFC 7386 merge patch reads as "leave it alone", and those pages age out on
 their own Job's TTL. A view that is still true is not blanked because the next

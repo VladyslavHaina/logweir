@@ -46,6 +46,7 @@
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, TimeZone as _, Utc};
+use kube::ResourceExt;
 use serde_json::{json, Value};
 
 use logweir_core::check_contract::{frames, Stream};
@@ -454,6 +455,7 @@ async fn run_at(
             runner_image: &image,
             now: when,
             trust_policies: None,
+            peers: Some(&[]),
         },
     )
     .await
@@ -1334,4 +1336,349 @@ fn the_harvest_test_is_about_this_jobs_completion() {
         "a Job with no completionTime is recorded with the harvesting pass's own clock; there \
          is nothing to compare, and answering `false` re-harvests a failed sync forever"
     );
+}
+
+// ===========================================================================
+// 5. One catalog per destination — D3 §5.5 item 1 (PoC defect P11)
+// ===========================================================================
+//
+// The PoC upgrade round found FIVE `RecoveryCatalog`s over one destination in
+// one namespace, every one `Ready=True/ViewReady` and each running its own sync
+// Job (`claude/artifacts/poc-upgrade-1/defects/P11-duplicate-catalogs.txt`),
+// although D3 §5.5 decides that "two catalogs for one destination in one
+// namespace are refused (`Ready=False/DuplicateCatalog` on the newer object)"
+// and the console's own connect flow relies on that refusal
+// (`ui/pages/catalog.js`, the comment after a durable connect).
+
+/// A catalog named `name` over `destination`, created at `created`.
+fn peer(name: &str, uid: &str, destination: &str, created: DateTime<Utc>) -> RecoveryCatalog {
+    let mut value = catalog_value(json!({}), json!({}));
+    value["metadata"]["name"] = json!(name);
+    value["metadata"]["uid"] = json!(uid);
+    value["metadata"]["creationTimestamp"] = json!(stamp(created));
+    value["spec"]["destinationRef"] = json!({ "name": destination });
+    serde_json::from_value(value).expect("the fixture is a RecoveryCatalog")
+}
+
+/// THIS module's catalog (`primary`, UID [`UID`]), created at `created`.
+fn primary_created(created: DateTime<Utc>, status: Value) -> RecoveryCatalog {
+    let mut value = catalog_value(json!({}), status);
+    value["metadata"]["creationTimestamp"] = json!(stamp(created));
+    serde_json::from_value(value).expect("the fixture is a RecoveryCatalog")
+}
+
+async fn run_with_peers(
+    fixture: &Fixture,
+    catalog: &RecoveryCatalog,
+    peers: Option<&[RecoveryCatalog]>,
+    when: DateTime<Utc>,
+) -> ctrl::Outcome {
+    let policy = check::policy::Policy::defaults();
+    let image = RunnerImage::default();
+    ctrl::reconcile_catalog(
+        catalog,
+        &ctrl::SyncContext {
+            client: &fixture.client,
+            policy: &policy,
+            runner_image: &image,
+            now: when,
+            trust_policies: None,
+            peers,
+        },
+    )
+    .await
+    .expect("the reconcile reaches a verdict")
+}
+
+/// **THE NEWER CATALOG IS REFUSED, AND NOTHING RUNS FOR IT.** An elder
+/// `archive-a` catalogs [`DEST`]; this module's `primary`, created an hour
+/// later over the same destination, turns `Ready=False/DuplicateCatalog` naming
+/// the elder, and the pass reads no destination and creates no Job, plan or
+/// page.
+///
+/// KILLS: dropping the `duplicate_of` arm in `run` (a sync Job is POSTed and
+/// the pass needs the destination route this table does not hold); deciding by
+/// `>` instead of `<` (the elder, not the newer one, would be refused — see
+/// `the_elder_of_a_destination_is_the_first_created_and_still_syncs`).
+#[tokio::test]
+async fn a_second_catalog_over_one_destination_is_refused_as_duplicate_catalog() {
+    let elder = peer(
+        "archive-a",
+        "c47a1f00-0000-4000-8000-00000000e1de",
+        DEST,
+        at(2026, 9, 16, 11, 0, 0),
+    );
+    let newer = primary_created(at(2026, 9, 16, 12, 0, 0), json!({}));
+    let f = fixture(vec![
+        route("GET", "/trustrosters/default", roster_body()),
+        route("GET", "/trustpolicies", no_trust_policies()),
+        status_route(),
+    ]);
+    let peers = [elder, newer.clone()];
+    let outcome = run_with_peers(&f, &newer, Some(&peers), now()).await;
+
+    assert_eq!(outcome.phase, ctrl::CatalogPhase::Refused);
+    assert_eq!(
+        (outcome.ready, outcome.ready_reason),
+        ("False", ctrl::REASON_DUPLICATE_CATALOG)
+    );
+    let status = f.patched_status();
+    let ready = condition(&status, "Ready");
+    assert_eq!(ready["status"], "False", "{status}");
+    assert_eq!(ready["reason"], "DuplicateCatalog", "{status}");
+    let message = ready["message"].as_str().expect("a message");
+    assert!(
+        message.contains(&format!("RecoveryCatalog {NS}/archive-a"))
+            && message.contains(&format!("BackupDestination {NS}/{DEST}")),
+        "the message names the catalog that holds the destination, and the destination: \
+         {message}"
+    );
+    assert!(
+        f.posted("/jobs").is_empty() && f.posted("/configmaps").is_empty(),
+        "a duplicate runs no sync: {:?}",
+        f.seen()
+    );
+    assert!(
+        !f.seen()
+            .iter()
+            .any(|(_, u)| u.contains("/backupdestinations/")),
+        "the destination is not even resolved for a duplicate: {:?}",
+        f.seen()
+    );
+    assert_no_delete(&f);
+}
+
+/// **EXISTING DUPLICATES GET A DETERMINISTIC OUTCOME, AND A REFUSED ONE HANDS
+/// OUT NO POINTS.** The upgrade shape: `primary` is the newer of two catalogs
+/// that both synced under the old build — it has a PUBLISHED, unexpired view
+/// and an unharvested finished Job. The pass withdraws the view (`pages`,
+/// `indexConfigMap` and `truncated` sent as `null`, because the API's point
+/// listing and a catalog-point preflight read `status.pages[]` and never
+/// `Ready`), does not read the Job's pod, and writes nothing else of the view.
+///
+/// KILLS: routing the duplicate through `publish_refusal` (which clears only an
+/// EXPIRED view — the pages would survive here); moving the check after the
+/// harvest (the pod list and log routes are absent, so the double panics).
+#[tokio::test]
+async fn an_existing_duplicate_withdraws_its_view_and_harvests_nothing() {
+    let finished = at(2026, 9, 16, 11, 58, 0);
+    let stem = leak(request_stem("token-1"));
+    let mut status = published_status(stem, "token-1", finished);
+    // Its last Job finished and has NOT been harvested — the harvest arm would
+    // read the pod log if it were reached.
+    status["lastSyncJob"]["finishedAt"] = Value::Null;
+    let newer = primary_created(at(2026, 9, 16, 11, 0, 0), status);
+    let elder = peer(
+        "archive-a",
+        "c47a1f00-0000-4000-8000-00000000e1de",
+        DEST,
+        at(2026, 9, 16, 10, 0, 0),
+    );
+    let f = fixture(vec![
+        route("GET", "/trustrosters/default", roster_body()),
+        route("GET", "/trustpolicies", no_trust_policies()),
+        route(
+            "GET",
+            job_path(stem),
+            job_body(
+                stem,
+                JOB_UID_1,
+                "sha256:first",
+                Some((finished - chrono::Duration::seconds(60), finished)),
+            ),
+        ),
+        status_route(),
+    ]);
+    let peers = [elder];
+    let outcome = run_with_peers(&f, &newer, Some(&peers), at(2026, 9, 16, 12, 0, 0)).await;
+
+    assert_eq!(outcome.ready_reason, ctrl::REASON_DUPLICATE_CATALOG);
+    let patch = f.patched_status();
+    for key in ["pages", "indexConfigMap", "truncated"] {
+        assert!(
+            patch.get(key).is_some_and(Value::is_null),
+            "`{key}` is withdrawn with an explicit null, so the merge DELETES it: {patch}"
+        );
+    }
+    let after = merged(&newer, &patch);
+    assert!(
+        after.get("pages").is_none(),
+        "the object lists no page after the write: {after}"
+    );
+    assert!(
+        !f.listed_pods() && !f.read_a_pod_log(),
+        "a duplicate's Job is never harvested: {:?}",
+        f.seen()
+    );
+    assert!(f.posted("/jobs").is_empty() && f.posted("/configmaps").is_empty());
+    assert_no_delete(&f);
+}
+
+/// **WITH NO SYNCED STORE THE NAMESPACE IS LISTED — ONCE.** `peers: None` is
+/// the reconcile that runs before the controller's own watch has finished its
+/// first list; an empty store would look like a namespace with no other
+/// catalog and let the duplicate sync.
+///
+/// KILLS: treating `None` as "no peers" (no LIST, and the pass goes on to
+/// resolve the destination this table does not route).
+#[tokio::test]
+async fn with_no_synced_store_the_namespace_is_listed_once() {
+    let elder = peer(
+        "archive-a",
+        "c47a1f00-0000-4000-8000-00000000e1de",
+        DEST,
+        at(2026, 9, 16, 11, 0, 0),
+    );
+    let newer = primary_created(at(2026, 9, 16, 12, 0, 0), json!({}));
+    let list = json!({
+        "apiVersion": "logweir.dev/v1alpha1", "kind": "RecoveryCatalogList",
+        "metadata": {"resourceVersion": "900"},
+        "items": [serde_json::to_value(&elder).expect("json"), serde_json::to_value(&newer).expect("json")]
+    });
+    let f = fixture(vec![
+        route("GET", "/trustrosters/default", roster_body()),
+        route("GET", "/trustpolicies", no_trust_policies()),
+        route(
+            "GET",
+            leak(format!("/namespaces/{NS}/recoverycatalogs")),
+            list.to_string(),
+        ),
+        status_route(),
+    ]);
+    let outcome = run_with_peers(&f, &newer, None, now()).await;
+    assert_eq!(outcome.ready_reason, ctrl::REASON_DUPLICATE_CATALOG);
+    let lists = f
+        .seen()
+        .iter()
+        .filter(|(m, u)| {
+            m == "GET"
+                && u.split('?')
+                    .next()
+                    .unwrap_or(u)
+                    .ends_with("/recoverycatalogs")
+        })
+        .count();
+    assert_eq!(lists, 1, "one namespaced LIST: {:?}", f.seen());
+}
+
+/// **THE ELDER STILL SYNCS.** The same pair seen from the other side: for the
+/// first-created catalog the rule says nothing, and its pass is the ordinary
+/// idle one (its slot is served, its view is published).
+///
+/// KILLS: refusing both catalogs of a pair; comparing in the wrong direction.
+#[tokio::test]
+async fn the_elder_of_a_destination_is_the_first_created_and_still_syncs() {
+    let finished = at(2026, 9, 16, 12, 2, 0);
+    let stem = leak(request_stem("token-1"));
+    let elder = primary_created(
+        at(2026, 9, 16, 11, 0, 0),
+        published_status(stem, "token-1", finished),
+    );
+    let newer = peer(
+        "archive-z",
+        "c47a1f00-0000-4000-8000-0000000000ff",
+        DEST,
+        at(2026, 9, 16, 11, 30, 0),
+    );
+    let f = fixture(vec![
+        route("GET", "/trustrosters/default", roster_body()),
+        route("GET", "/trustpolicies", no_trust_policies()),
+        route(
+            "GET",
+            job_path(stem),
+            job_body(
+                stem,
+                JOB_UID_1,
+                "sha256:first",
+                Some((finished - chrono::Duration::seconds(120), finished)),
+            ),
+        ),
+        status_route(),
+    ]);
+    let catalog_with_request = {
+        let mut v = serde_json::to_value(&elder).expect("json");
+        v["spec"]["syncRequest"] = json!("token-1");
+        serde_json::from_value::<RecoveryCatalog>(v).expect("a RecoveryCatalog")
+    };
+    let peers = [newer, catalog_with_request.clone()];
+    let outcome = run_with_peers(
+        &f,
+        &catalog_with_request,
+        Some(&peers),
+        at(2026, 9, 16, 12, 30, 0),
+    )
+    .await;
+    assert_eq!(outcome.phase, ctrl::CatalogPhase::Idle, "{:?}", f.seen());
+    assert_eq!(outcome.ready_reason, ctrl::REASON_VIEW_READY);
+}
+
+/// The rule itself, over every shape that decides it. Pure: no API.
+///
+/// KILLS: comparing names before timestamps; letting a missing timestamp be
+/// the elder (`Option<DateTime>` orders `None` first); counting a peer in
+/// another namespace, over another destination, or one being deleted; the
+/// catalog counting itself.
+#[test]
+fn the_duplicate_rule_is_total_and_filters_what_is_not_a_peer() {
+    let t = |h, m| at(2026, 9, 16, h, m, 0);
+    let me = peer("m-catalog", "u-me", DEST, t(12, 0));
+
+    // Older by creation time wins, whatever the names.
+    let older = peer("z-catalog", "u-z", DEST, t(11, 0));
+    assert_eq!(
+        ctrl::duplicate_of(&me, &[older.clone(), me.clone()]).map(ResourceExt::name_any),
+        Some("z-catalog".to_string())
+    );
+    assert!(ctrl::duplicate_of(&older, &[older.clone(), me.clone()]).is_none());
+
+    // Same second: the name decides, and it decides the same way from both sides.
+    let twin = peer("a-catalog", "u-a", DEST, t(12, 0));
+    assert_eq!(
+        ctrl::duplicate_of(&me, std::slice::from_ref(&twin)).map(ResourceExt::name_any),
+        Some("a-catalog".to_string())
+    );
+    assert!(ctrl::duplicate_of(&twin, std::slice::from_ref(&me)).is_none());
+
+    // The eldest of several is the one named.
+    let eldest = peer("q-catalog", "u-q", DEST, t(9, 0));
+    assert_eq!(
+        ctrl::duplicate_of(&me, &[older.clone(), eldest.clone(), twin.clone()])
+            .map(ResourceExt::name_any),
+        Some("q-catalog".to_string())
+    );
+
+    // Not peers: another destination, another namespace, one being deleted.
+    let other_destination = peer("b-catalog", "u-b", "another-destination", t(8, 0));
+    let mut other_namespace = peer("c-catalog", "u-c", DEST, t(8, 0));
+    other_namespace.metadata.namespace = Some("another-namespace".to_string());
+    let mut leaving = peer("d-catalog", "u-d", DEST, t(8, 0));
+    leaving.metadata.deletion_timestamp = Some(
+        k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(t(12, 1)),
+    );
+    assert!(
+        ctrl::duplicate_of(
+            &me,
+            &[other_destination, other_namespace, leaving, me.clone()]
+        )
+        .is_none(),
+        "none of these holds this catalog's destination"
+    );
+
+    // A missing timestamp never claims to be the elder.
+    let mut undated = peer("0-catalog", "u-0", DEST, t(1, 0));
+    undated.metadata.creation_timestamp = None;
+    assert!(ctrl::duplicate_of(&me, std::slice::from_ref(&undated)).is_none());
+    assert_eq!(
+        ctrl::duplicate_of(&undated, std::slice::from_ref(&me)).map(ResourceExt::name_any),
+        Some("m-catalog".to_string())
+    );
+
+    // The catalog is never its own duplicate, even under another name in the
+    // snapshot (the UID is the identity).
+    let mut renamed_self = me.clone();
+    renamed_self.metadata.name = Some("0-first".to_string());
+    renamed_self.metadata.creation_timestamp = Some(
+        k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(t(1, 0)),
+    );
+    assert!(ctrl::duplicate_of(&me, &[renamed_self]).is_none());
 }
