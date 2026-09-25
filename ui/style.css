@@ -623,7 +623,10 @@ ul {
   display: inline-flex;
   align-items: center;
   min-height: var(--cds-alias-object-interaction-touch-target);
-  padding: 0 var(--cds-global-space-6);
+  /* SPACE-5, NOT SPACE-6 (MCP round 2, R2-15): an administrator's ten tabs
+   * and the namespace picker fit one row at 1440 px, as an operator's nine do,
+   * so the picker does not move between roles. */
+  padding: 0 var(--cds-global-space-5);
   border-bottom: var(--cds-alias-object-border-width-300) solid transparent;
   color: var(--cds-alias-object-interaction-color);
   font-weight: var(--cds-global-typography-font-weight-medium);
@@ -653,6 +656,15 @@ ul {
   align-items: center;
   gap: var(--cds-global-space-5);
   padding-bottom: var(--cds-global-space-4);
+}
+
+/* BELOW 1200 PX THE PICKER HAS ITS OWN ROW FOR EVERY ROLE (R2-15): the tabs
+ * no longer fit beside it for some roles and did for others, so the picker
+ * sat in two places depending on who signed in. */
+@media (max-width: 1199.98px) {
+  .ns-form {
+    flex-basis: 100%;
+  }
 }
 
 .ns-form label {
@@ -860,6 +872,67 @@ main > h2 + .blurb,
 
 .grid td a {
   font-weight: var(--cds-global-typography-font-weight-medium);
+}
+
+/* ON A TABLE, NOT A CARD (MCP round 2): a minted name -- `conn-`, `sch-`,
+ * `rst-` and 26 characters -- is read as one token and never breaks at its
+ * hyphen (R2-4), and a short chip -- a URL, a state -- never breaks inside
+ * itself ("s3://kafka- / backups/poc", "not / suspended": R2-6). A LONG
+ * token still breaks anywhere (MCP-6), and on a phone's stacked card every
+ * chip may, as below. */
+@media (min-width: 768px) {
+  .grid td a[href*="name=conn-"],
+  .grid td a[href*="name=sch-"],
+  .grid td a[href*="name=rst-"],
+  .grid td code:not(.long),
+  .grid td .badge.short {
+    white-space: nowrap;
+  }
+
+  /* A LAPTOP'S TABLE IS A LITTLE TIGHTER (R2-3): below 1280 px the cell's
+   * side padding is Clarity's compact 0.5rem, so a seven-column run table
+   * fits its card at 1024 px. */
+  @media (max-width: 1279.98px) {
+    .grid th,
+    .grid td {
+      padding-left: var(--cds-global-space-5);
+      padding-right: var(--cds-global-space-5);
+    }
+  }
+
+  /* A TABLE WIDER THAN ITS CARD SAYS SO (R2-3, R2-17): the edge it scrolls
+   * past carries a shadow, and the shadow goes when the edge is reached.
+   * `markScrollRegions` sets the attribute only while the region overflows. */
+  .table-wrap[data-scroll-region="true"] {
+    background:
+      linear-gradient(to right, var(--cds-alias-object-container-background) 30%, transparent)
+        left center / var(--cds-global-space-10) 100% no-repeat local,
+      linear-gradient(to left, var(--cds-alias-object-container-background) 30%, transparent)
+        right center / var(--cds-global-space-10) 100% no-repeat local,
+      radial-gradient(farthest-side at 0 50%, var(--cds-alias-object-border-color), transparent)
+        left center / var(--cds-global-space-6) 100% no-repeat scroll,
+      radial-gradient(farthest-side at 100% 50%, var(--cds-alias-object-border-color), transparent)
+        right center / var(--cds-global-space-6) 100% no-repeat scroll,
+      var(--cds-alias-object-container-background);
+  }
+}
+
+/* PROSE IN A CELL BREAKS WHERE IT MUST (R2-3): a check's message carries
+ * unbroken tokens -- an image digest, a key id -- that are part of a sentence,
+ * not labels, so they may wrap anywhere rather than widen the table. */
+.grid td .prose {
+  overflow-wrap: anywhere;
+}
+
+/* A CELL'S LONG EXPLANATION, ONE DISCLOSURE AWAY (R2-2): the code stays on
+ * the row, the sentence opens beneath it. */
+.cell-more > summary {
+  cursor: pointer;
+  width: max-content;
+}
+
+.cell-more[open] > summary {
+  margin-bottom: var(--cds-global-space-3);
 }
 
 /* A ROW'S ACTION LINK NEVER WRAPS (MCP-8): "Follow this run" and "Restore this
@@ -2092,15 +2165,24 @@ button[aria-busy="true"] {
   box-shadow: var(--cds-alias-object-shadow-300);
 }
 
+/* A MOVE THAT GOES NOWHERE IS NOT SHOWN (MCP round 2, R2-8): Back on the
+ * first step is disabled, and a disabled button drawn beside Next read as one
+ * that works. It keeps its place, so "Step 1 of 6" does not move. */
+.wizard-nav .wizard-go:disabled {
+  visibility: hidden;
+}
+
 .wizard-position {
   color: var(--cds-alias-typography-color-300);
   font-size: var(--cds-global-typography-secondary-font-size);
 }
 
+.is-approval .stepper-link,
 .is-unchecked .stepper-link {
   border-top-color: var(--cds-alias-status-warning-shade);
 }
 
+.is-approval .stepper-num,
 .is-unchecked .stepper-num {
   border-color: var(--cds-alias-status-warning-shade);
 }

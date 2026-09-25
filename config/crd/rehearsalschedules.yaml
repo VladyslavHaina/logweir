@@ -55,7 +55,7 @@ spec:
                 description: The standing authorization.
                 properties:
                   approvalPolicyRef:
-                    description: The approval policy (PLAT-19.2). Absent means the legacy governed policy.
+                    description: The approval policy. Absent means the legacy governed policy.
                     nullable: true
                     properties:
                       name:
@@ -447,7 +447,7 @@ spec:
                 nullable: true
                 type: integer
               pendingRestoreRef:
-                description: A slot admitted in status whose `Restore` creation is not yet confirmed — the reservation half of the PLAT-04.1 protocol.
+                description: A slot admitted in status whose `Restore` creation is not yet confirmed — the reservation half of the slot-admission protocol.
                 nullable: true
                 properties:
                   name:

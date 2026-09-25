@@ -1145,7 +1145,7 @@ pub fn signer_rostered_row(
              would sign its evidence with is established by the run",
         )
         .with_remedy(
-            "The runner still validates its signer before it writes anything (PLAT-02.2), and \
+            "The runner still validates its signer before it writes anything, and \
              `TrustRoster.spec.signingKeys` is what makes that evidence verifiable.",
         )
         .with_scope(roster_scope);

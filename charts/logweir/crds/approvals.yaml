@@ -121,7 +121,7 @@ spec:
                 - notBefore
                 type: object
               authorization:
-                description: 'PLAT-19.2: the policy, mode and console-attested requester a v2 authorization was verified under — see [`AuthorizationProvenance`]. Absent for a v1 approval document, and cleared by an explicit `null` on every refusal (`controllers::approval::CLEARABLE_STATUS_FIELDS`).'
+                description: The policy, mode and console-attested requester a v2 authorization was verified under — see [`AuthorizationProvenance`]. Absent for a v1 approval document, and cleared by an explicit `null` on every refusal (`controllers::approval::CLEARABLE_STATUS_FIELDS`).
                 nullable: true
                 properties:
                   confirmationKeyId:

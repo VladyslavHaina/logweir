@@ -209,19 +209,21 @@ test("poc_p4_the_catalog_page_mounted_as_the_shell_mounts_it_sends_the_token", a
   // THE WHOLE PATH THE POC DROVE: `app.js` mounts the catalog route as
   // `mount(main, ns, parseFragment, lifecycle)` -- no `deps` -- and the form's
   // submit reaches the product API through `connectArchive`.
+  // IN A NAMESPACE THE SESSION GRANTS `catalogConnect` (team-a): since MCP
+  // round 2's R2-14 a namespace the session does not grant renders no form.
   await sharedConsole("poc-session-token-3");
   const wire = transport((u, init) => {
     if (init.method === "POST") {
-      return { status: 201, body: catalogAnswer("p4-mount", JSON.parse(init.body)) };
+      return { status: 201, body: catalogAnswer("team-a", JSON.parse(init.body)) };
     }
-    return u.indexOf("/api/v1/namespaces/p4-mount/catalogs") === 0
+    return u.indexOf("/api/v1/namespaces/team-a/catalogs") === 0
       ? { status: 200, body: { items: [], page: { limit: 200 }, requestId: "r1" } }
       : undefined;
   });
   try {
     const form = fakeForm({ name: "primary", destination: "dest-a", syncMode: "full" });
     const node = fakeNode(form);
-    await mountCatalog(node, "p4-mount", (html) => [{ html: html }], null);
+    await mountCatalog(node, "team-a", (html) => [{ html: html }], null);
     form.submit();
     for (let i = 0; i < 5; i += 1) {
       await tick();

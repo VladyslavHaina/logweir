@@ -1479,7 +1479,12 @@ async fn console_confirmation_alone_never_fires_a_current_format_schedule() {
     };
     assert_eq!(skip.reason, rehearsal::SkipReason::AuthorizationInvalid);
     assert!(skip.detail.contains("ConsoleConfirmation"), "{skip}");
-    assert!(skip.detail.contains("PLAT-19.2"), "{skip}");
+    // The binding it names in words, not by its tracker task (MCP round 2,
+    // R2-13: `crates/logweir/tests/message_lint.rs`).
+    assert!(
+        skip.detail.contains("immutable policy-mode binding"),
+        "{skip}"
+    );
     assert_eq!(posted(&recorder, RESTORES_PATH), 0);
     assert_eq!(posted(&recorder, CONFIGMAPS_PATH), 0);
     assert_eq!(last_skip(&bodies).as_deref(), Some("AuthorizationInvalid"));

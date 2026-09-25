@@ -1925,8 +1925,8 @@ fn refuse_until_a_source_is_readable(bucket: &str, prefix: &str) -> ApiError {
             "The legacy archive at `{location}` gives its bucket and prefix and nothing else. A \
              BackupDestination also needs the endpoint, the region, the addressing and the \
              transport, and this build can read neither source that records them: the frozen \
-             execution inputs of a succeeded Backup (PLAT-06.1) nor the installation's legacy \
-             addressing in the policy ConfigMap (D2 W11). Those are facts about how the runs \
+             execution inputs of a succeeded Backup nor the installation's legacy \
+             addressing in the policy ConfigMap. Those are facts about how the runs \
              actually reached the store, and guessing them would move the location. Create the \
              destination explicitly with `POST /api/v1/namespaces/{{ns}}/destinations`, naming \
              this bucket and prefix and the endpoint your runs used; adoption from the \

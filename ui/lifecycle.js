@@ -775,3 +775,127 @@ export function watchMutation(owner, key, mutation, listener, lifecycle) {
   whenLeft(lifecycle, release);
   return release;
 }
+
+// ============================================================ asking a check again
+
+// ASKING A CHECK AGAIN IS NOT REPLAYING THE LAST ANSWER (P14, poc-upgrade-2).
+//
+// A check -- a `Preflight`, a `TopicDiscovery` -- answers a question about a
+// moment. The product API names the object it creates from the request's
+// `Idempotency-Key` (D0: one key, one object, for ever), so a key composed
+// from the question alone is the SAME key every time the same inputs are
+// asked about: the schedule form's "Check readiness", clicked with unchanged
+// inputs after its check had expired, came back `200 replayed: true` with that
+// expired check -- "does not apply to your current inputs" -- and no click
+// could make a fresh one until the controller garbage-collected the old
+// object an hour later. D0 does not allow the API to answer that key with a
+// second object, and it says what a client does instead: "a later deliberate
+// operation uses a new key".
+//
+// SO THE KEY CARRIES AN INTENT TOKEN, kept exactly as long as the check it
+// named can still be the answer. Asking again while that check is pending,
+// running or current -- a retry after a lost response, a second click inside
+// its validity -- sends the same token and replays, which is what an
+// idempotent retry is for. Once the check is SPENT (the page read it expired,
+// inapplicable, failed or cancelled; or a replay answers with it already
+// spent), the token is renewed and the next ask is a new check. The page load
+// mints its own tokens, so a reload asks afresh rather than inheriting a key.
+//
+// The token lives in this module's memory with the drafts, and like them it
+// holds nothing but a random string.
+
+const checkIntents = new Map();
+
+function mintIntentToken() {
+  const source = globalThis.crypto;
+  if (source === undefined || source === null || typeof source.getRandomValues !== "function") {
+    throw refusal(
+      "this page will not start a check here: keeping a check's key distinct from an earlier " +
+        "one needs the platform's random source, and it is unavailable",
+    );
+  }
+  const bytes = source.getRandomValues(new Uint8Array(16));
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** The intent under which the form `intent` asks `question` now: the one it
+ *  holds for that question, or a new one. `held` is the check the page shows
+ *  for this form, and when it is the one this intent produced and `spent`
+ *  says it can no longer be the answer, the intent is renewed first. */
+export function checkIntent(intent, question, held, spent) {
+  let entry = checkIntents.get(intent);
+  const heldId = ((held || {}).id) || "";
+  if (entry !== undefined && entry.question === question && heldId.length > 0 &&
+    entry.checkId === heldId && typeof spent === "function" && spent(held)) {
+    entry = undefined;
+  }
+  if (entry === undefined || entry.question !== question) {
+    entry = { question: question, token: mintIntentToken(), checkId: "" };
+    checkIntents.set(intent, entry);
+  }
+  return entry;
+}
+
+/** Forgets every intent. THE SUITE'S SEAM; a page never calls it. */
+export function resetCheckIntents() {
+  checkIntents.clear();
+}
+
+/** Asks a check's question: `start(token)` sends it under the form's intent
+ *  token and answers `{item, replayed}`. A REPLAY THAT IS ALREADY SPENT IS
+ *  NOT AN ANSWER: the intent is renewed and the question asked once more,
+ *  under a new key, and the answer says which check it replaced
+ *  (`renewedFrom`). At most two creates per ask. */
+export async function askCheck(ask) {
+  const a = ask || {};
+  let entry = checkIntent(a.intent, a.question, a.held, a.spent);
+  let answer = await a.start(entry.token);
+  let item = ((answer || {}).item) || null;
+  entry.checkId = ((item || {}).id) || "";
+  if (answer && answer.replayed === true && item !== null && typeof a.spent === "function" &&
+    a.spent(item)) {
+    const spentId = item.id;
+    // COMPARE-AND-SWAP (review L4): renew only while the intent is still the
+    // entry this ask used. An overlapping ask that renewed first has already
+    // started the new check, and this one asks under ITS key -- a replay of
+    // that check, not a second one.
+    if (checkIntents.get(a.intent) === entry) {
+      checkIntents.delete(a.intent);
+    }
+    entry = checkIntent(a.intent, a.question, null, null);
+    answer = await a.start(entry.token);
+    item = ((answer || {}).item) || null;
+    entry.checkId = ((item || {}).id) || "";
+    answer = Object.assign({}, answer, { renewedFrom: spentId });
+  }
+  return answer;
+}
+
+/** Whether a `Preflight` the page holds can no longer answer the same
+ *  question: it is terminal and either produced no verdict (failed,
+ *  cancelled), or says its validity has passed, or -- on a read -- no longer
+ *  applies to the inputs. A pending or running check is never spent: it is
+ *  the answer being waited for. */
+export function preflightSpent(check) {
+  const c = check || {};
+  if (c.terminal !== true) {
+    return false;
+  }
+  if (c.state === "failed" || c.state === "cancelled") {
+    return true;
+  }
+  // EVERY STALE REASON BUT ONE SAYS THE CHECK NO LONGER ANSWERS THE QUESTION:
+  // `expired` (which a replay now names itself), `planHashChanged`,
+  // `referentChanged` and the rest. `unverifiable` is "this answer could not
+  // compare" -- above all a create answer's "not recomputed" -- and is never
+  // a verdict about the check: the follow's read decides whether it applies.
+  const reasons = Array.isArray(c.staleReasons) ? c.staleReasons : [];
+  return reasons.some((r) => (r || {}).reason !== "unverifiable");
+}
+
+/** Whether a `TopicDiscovery` can no longer answer the same question: it is
+ *  terminal and produced no inventory, or its inventory is stale. */
+export function discoverySpent(discovery) {
+  const d = discovery || {};
+  return d.terminal === true && (d.state !== "succeeded" || d.stale === true);
+}

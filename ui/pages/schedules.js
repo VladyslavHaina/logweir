@@ -42,6 +42,7 @@
 import { CONSOLE, apiClient, mayOperate, mode } from "../client.js";
 import {
   active,
+  askCheck,
   cancelled,
   createOnce,
   dropDraft,
@@ -52,6 +53,7 @@ import {
   listen,
   mutationFor,
   owesRead,
+  preflightSpent,
   readDraft,
   readOptions,
   refusal,
@@ -89,6 +91,8 @@ import {
   triggerBadge,
   technicalDetails,
   conditionBadge,
+  coveredCell,
+  firingsCell,
   when,
 } from "../render.js";
 import {
@@ -98,6 +102,7 @@ import {
   readClusterSelection,
   renderClusterSelector,
   resolveClusterSelection,
+  savedClusters,
 } from "../select.js";
 import { focusFirstProblem, isObjectName, itemsOf, readFormValues } from "./clusters.js";
 import { renderPreflight, transportCell } from "./destinations.js";
@@ -267,8 +272,7 @@ export function renderScheduleList(input, destinations, destinationsUnavailable)
       "<code>" + cell(spec.schedule) + "</code>",
       destinationCell(object, destinations, destinationsUnavailable === true),
       suspendBadge(spec),
-      when(status.lastFireTime),
-      when(status.nextFireTime),
+      firingsCell(status.lastFireTime, status.nextFireTime),
       conditionStatus(object, "Ready"),
     ];
   });
@@ -278,7 +282,7 @@ export function renderScheduleList(input, destinations, destinationsUnavailable)
     "<code>suspend</code> is the only field of a schedule's spec that THIS PAGE can change " +
     "after it is created.</p>" +
     table(
-      ["NAME", "SCHEDULE", "DESTINATION", "SUSPEND", "LAST", "NEXT", "READY"],
+      ["NAME", "SCHEDULE", "DESTINATION", "SUSPEND", "LAST / NEXT", "READY"],
       rows,
       NO_SCHEDULE_SENTENCE,
       undefined,
@@ -1149,12 +1153,24 @@ export const READINESS_SENTENCE =
   "a credential can be rotated, a topic created and an ACL changed in the minute after it.";
 
 /** The readiness panel: choose a destination, a source and the topics, start a
- *  `Preflight` of operation `backup`, and render what it recorded. */
+ *  `Preflight` of operation `backup`, and render what it recorded.
+ *
+ *  `v.input` IS WHAT THE READER HAS PUT ON THE FORM (P13, poc-upgrade-2): the
+ *  source `{uid, name}`, the source search, the destination `{uid, name}` and
+ *  the topics exactly as typed. The panel repaints when an ASYNC READ lands --
+ *  the discovery a source change starts, a followed check's next read, the
+ *  mutation's own state -- and a repaint that rendered from the mount's view
+ *  alone emptied the topics, moved the source back to the preferred one and
+ *  the destination back to the default: typing the topics first and then
+ *  choosing the source sent `topics: []`, refused `422`. Every repaint now
+ *  reads the live form into `input` first (`readReadinessInput`), and this
+ *  renders it. An absent `input` is a panel nobody has touched. */
 export function renderReadinessPanel(view) {
   const v = view || {};
   const state = v.state || {};
   const pending = state.phase === "pending";
   const result = v.preflight || null;
+  const input = v.input || {};
   return (
     "<section class=\"readiness\" id=\"backup-readiness\"><h3>Backup readiness</h3>" +
     "<p class=\"note\">" + esc(READINESS_SENTENCE) + "</p>" +
@@ -1172,7 +1188,8 @@ export function renderReadinessPanel(view) {
             help: "The connection the check dials.",
             prefer: "source",
             clusters: v.clusters,
-            selection: { uid: "", name: "" },
+            selection: input.source || { uid: "", name: "" },
+            query: typeof input.sourceQuery === "string" ? input.sourceQuery : "",
             now: v.now,
             freshSeconds: v.freshSeconds,
             errors: {},
@@ -1184,11 +1201,11 @@ export function renderReadinessPanel(view) {
             help: "The archive location the check lists. Chosen by identity: a destination " +
               "deleted and recreated under this name is refused, not followed.",
             destinations: v.destinations,
-            selection: v.destinationSelection,
+            selection: input.destination || v.destinationSelection,
           }) +
           "<div class=\"field\"><label for=\"readiness-topics\">topics, comma separated</label>" +
           "<input id=\"readiness-topics\" name=\"topics\" list=\"topic-options\" value=\"" +
-          esc(String(v.topics || "")) + "\">" +
+          esc(String(typeof input.topics === "string" ? input.topics : (v.topics || ""))) + "\">" +
           "<p class=\"help\">The names the check asks the broker to describe. 1 to 1000.</p>" +
           "</div>" +
           renderTopicPicker(v.picker || {}) +
@@ -1498,7 +1515,12 @@ function renderCreateReadiness(view) {
         : (v.mayOperate === false
         ? "<p class=\"note\">This login may read readiness results in this namespace and not " +
           "start one.</p>"
-        : "<div class=\"actions\"><button type=\"button\" id=\"schedule-check-readiness\">" +
+        : "<div class=\"actions\"><button type=\"button\" id=\"schedule-check-readiness\"" +
+          // DISABLED WHILE ITS REQUEST IS IN FLIGHT, in the markup and not only
+          // on the element (review L4): a repaint for another answer -- a
+          // preview landing -- re-enabled it, and two overlapping clicks
+          // could each renew the intent and create a Preflight.
+          (v.readinessInFlight === true ? " disabled aria-busy=\"true\"" : "") + ">" +
           "Check readiness</button></div>"))) +
     "<div class=\"readiness-verdict\" id=\"schedule-readiness-verdict\">" +
     renderReadinessVerdict(v) +
@@ -1749,6 +1771,7 @@ export function scheduleFormView(ns, clusters, now, freshSeconds, extra) {
     readinessError: e.readinessError || null,
     readinessUnavailable: e.readinessUnavailable === true,
     readinessUnavailableReason: e.readinessUnavailableReason,
+    readinessInFlight: e.readinessInFlight === true,
     mayOperate: e.mayOperate,
     minted: scheduleNamesMinted(),
   };
@@ -1787,15 +1810,16 @@ export function renderRecoveryPoints(ns, object, backups) {
     return [
       // The action first (MCP-25's rule), so a wide row never hides it.
       "<a class=\"action\" href=\"" + esc(restorePointRoute(ns, point)) + "\">Restore this point</a>",
-      cell(meta.name),
+      // THE SLOT UNDER THE NAME AND THE WINDOW IN ONE CELL (R2-3): nine
+      // columns were 270 px wider than the card at 1440.
+      cell(meta.name) + (typeof spec.slot === "string" && spec.slot.length > 0
+        ? "<span class=\"cell-sub\">slot " + esc(spec.slot) + "</span>" : ""),
       triggerBadge(spec.trigger, ((object || {}).spec || {}).retry === undefined
         ? undefined
         : object.spec.retry.maxRetries),
       coverageCell(point),
-      cell(spec.slot),
-      cell(status.backupId),
-      when(rfc3339(covered.fromMs)),
-      when(rfc3339(covered.toMs)),
+      "<code>" + cell(status.backupId) + "</code>",
+      coveredCell(rfc3339(covered.fromMs), rfc3339(covered.toMs)),
       cell(status.records),
     ];
   });
@@ -1805,8 +1829,7 @@ export function renderRecoveryPoints(ns, object, backups) {
     // A PAGE OF POINTS, NOT ALL OF THEM (MCP-26): 258 points were 258 rows on
     // every schedule card, a 20,000 px table.
     table(
-      ["", "BACKUP", "TRIGGER", "COVERAGE", "SLOT", "BACKUP SET", "COVERED FROM", "COVERED TO",
-        "RECORDS"],
+      ["", "BACKUP", "TRIGGER", "COVERAGE", "BACKUP SET", "COVERED", "RECORDS"],
       rows,
       NO_POINTS_SENTENCE,
       undefined,
@@ -2037,6 +2060,55 @@ function readinessView(ns, readiness) {
 // replaced the one it follows.
 const readinessPanels = new Map();
 
+/** What the reader has put on the readiness panel's form -- `{source,
+ *  sourceQuery, destination, topics}` for `renderReadinessPanel`'s `input` --
+ *  or `null` when no form is on screen.
+ *
+ *  READ FROM THE LIVE CONTROLS, NOT FROM A DRAFT: the panel keeps no draft
+ *  (a readiness check is a question, not an object in the making), so what is
+ *  on screen is the only record of what was typed, and it is read at the one
+ *  moment it can be lost -- just before a repaint replaces those controls.
+ *
+ *  NAMES COME FROM THE LISTS THIS MOUNT READ, BY UID. The select carries the
+ *  uid; the hidden `-name` input beside the destination select is written at
+ *  render time and never again, so a submit that read it sent the DEFAULT
+ *  destination whatever was chosen (found with P13). A destination equal to
+ *  the one the renderer would preselect is left `null`, so the panel says
+ *  "Preselected: the namespace default" exactly as before anyone touched it. */
+export function readReadinessInput(node, view) {
+  const form = node.querySelector("#readiness-form");
+  if (form === null) {
+    return null;
+  }
+  const v = view || {};
+  const value = (selector) => {
+    const control = node.querySelector(selector);
+    return control === null || control.value === undefined || control.value === null
+      ? ""
+      : String(control.value);
+  };
+  const sourceUid = value("#readiness-source");
+  const cluster = savedClusters(v.clusters).find((c) => clusterUid(c) === sourceUid) || null;
+  const source = sourceUid.length === 0
+    ? { uid: "", name: "" }
+    : {
+      uid: sourceUid,
+      name: cluster === null ? readClusterSelection(form, "readiness-source").name : clusterName(cluster),
+    };
+  const destinations = Array.isArray(v.destinations) ? v.destinations : [];
+  const destinationUid = value("#readiness-destination");
+  const chosen = destinations.find((d) => d.uid === destinationUid) || null;
+  const preselected = defaultDestination(destinations);
+  return {
+    source: source,
+    sourceQuery: value("#readiness-source-search"),
+    destination: chosen === null || (preselected !== null && preselected.uid === chosen.uid)
+      ? null
+      : { uid: chosen.uid, name: chosen.name },
+    topics: value("#readiness-topics"),
+  };
+}
+
 function paintReadinessPanel(node, ns, parse, lifecycle, api, merged) {
   if (!active(lifecycle)) {
     return;
@@ -2045,8 +2117,12 @@ function paintReadinessPanel(node, ns, parse, lifecycle, api, merged) {
   if (slot === null) {
     return;
   }
-  replace(slot, parse(renderReadinessPanel(readinessView(ns, merged))));
-  wireReadiness(node, ns, parse, lifecycle, api, merged);
+  // WHAT IS TYPED SURVIVES THE REPAINT (P13): read off the controls about to
+  // be replaced, and carried in the view the next repaint starts from.
+  const typed = readReadinessInput(node, merged);
+  const next = typed === null ? merged : Object.assign({}, merged, { input: typed });
+  replace(slot, parse(renderReadinessPanel(readinessView(ns, next))));
+  wireReadiness(node, ns, parse, lifecycle, api, next);
 }
 
 /** Re-reads the check the readiness panel started until a READ answers
@@ -2092,8 +2168,12 @@ function wireReadiness(node, ns, parse, lifecycle, api, readiness) {
     return;
   }
   const mutation = mutationFor(key);
+  // A REPAINT STARTS FROM THE PANEL'S NEWEST VIEW, not from the one this wire
+  // was handed. A discovery answer that lands after a followed check's next
+  // read would otherwise repaint the older check over the newer one.
+  const latest = () => readinessPanels.get(key) || readiness;
   const repaint = (extra) => {
-    paintReadinessPanel(node, ns, parse, lifecycle, api, Object.assign({}, readiness, extra || {}));
+    paintReadinessPanel(node, ns, parse, lifecycle, api, Object.assign({}, latest(), extra || {}));
   };
 
   watchMutation(node, key, mutation, (state) => {
@@ -2107,15 +2187,48 @@ function wireReadiness(node, ns, parse, lifecycle, api, readiness) {
   }, lifecycle);
 
   const source = node.querySelector("#readiness-source");
+  const search = node.querySelector("#readiness-source-search");
+  if (source !== null && search !== null) {
+    // THE SEARCH FILTERS THE OPTIONS AND NOTHING ELSE, as the create form's
+    // does (`wireSourceSelector`). It was rendered here and never wired.
+    const note = node.querySelector("#readiness-source-no-match");
+    const filter = () => {
+      const visible = filterSelectorOptions(source, search.value);
+      if (note !== null) {
+        note.hidden = visible > 0;
+      }
+    };
+    listen(search, "input", () => {
+      if (active(lifecycle)) {
+        filter();
+      }
+    }, lifecycle);
+    if (String(search.value || "").length > 0) {
+      filter();
+    }
+  }
   if (source !== null) {
     listen(source, "change", () => {
-      const selection = readClusterSelection(form, "readiness-source");
+      // THE NAME BY UID, from the list this mount read -- the same reading the
+      // repaint and the submit make, so the three cannot disagree about which
+      // connection is chosen.
+      const selection = ((readReadinessInput(node, latest()) || {}).source) || { uid: "", name: "" };
       if (!active(lifecycle) || selection.name.length === 0) {
         return;
       }
+      // THE OFFER IS ABOUT ONE CONNECTION. The previous connection's names go
+      // at once -- they are worse than none beside a different connection --
+      // and an answer is painted only while the connection it was read for is
+      // still the one selected: a slower read for an earlier choice is dropped.
+      const asked = selection.uid;
+      const stillAsked = () => {
+        const now = node.querySelector("#readiness-source");
+        return now !== null && String(now.value || "") === asked;
+      };
+      repaint({ picker: {} });
       api.latestDiscoveries(ns, selection.name, readOptions(lifecycle)).then(
         (answer) => {
-          if (!active(lifecycle)) {
+          if (!active(lifecycle) || !stillAsked()) {
             return;
           }
           const best = answer.lastSuccessful;
@@ -2125,7 +2238,7 @@ function wireReadiness(node, ns, parse, lifecycle, api, readiness) {
           }
           api.discoveryTopics(ns, best.id, readOptions(lifecycle)).then(
             (page) => {
-              if (active(lifecycle)) {
+              if (active(lifecycle) && stillAsked()) {
                 repaint({
                   picker: {
                     latestAttempt: answer.latestAttempt,
@@ -2136,7 +2249,7 @@ function wireReadiness(node, ns, parse, lifecycle, api, readiness) {
               }
             },
             () => {
-              if (active(lifecycle)) {
+              if (active(lifecycle) && stillAsked()) {
                 repaint({
                   picker: { latestAttempt: answer.latestAttempt, lastSuccessful: best, topics: [] },
                 });
@@ -2157,29 +2270,37 @@ function wireReadiness(node, ns, parse, lifecycle, api, readiness) {
     if (!active(lifecycle) || mutation.pending()) {
       return;
     }
-    const values = readFormValues(form);
-    const selection = readClusterSelection(form, "readiness-source");
-    const destination = node.querySelector("#readiness-destination-name");
-    const topics = String(values.topics || "")
+    const view = latest();
+    const input = readReadinessInput(node, view) || {};
+    const topics = String(input.topics || "")
       .split(",").map((t) => t.trim()).filter((t) => t.length > 0);
     const request = {
       operation: "backup",
       backup: {
-        sourceConnection: selection.name,
+        sourceConnection: ((input.source || {}).name) || "",
         topics: topics,
       },
     };
-    const chosen = destination === null ? "" : String(destination.value || "").trim();
+    // THE DESTINATION THE SELECT SHOWS, by its uid in the list this mount read:
+    // the chosen one, else the one the panel preselected, else none (and the
+    // server resolves the namespace default itself).
+    const destinations = Array.isArray(view.destinations) ? view.destinations : [];
+    const picked = input.destination || defaultDestination(destinations);
+    const chosen = picked === null ? "" : String(picked.name || "").trim();
     if (chosen.length > 0) {
       request.backup.destination = chosen;
     }
-    mutation.run(() => api.startPreflight(ns, request));
+    // ASKED AGAIN, NOT REPLAYED, once the check these inputs made is spent
+    // (P14): `askReadiness` keeps the key while that check can still be the
+    // answer and mints a new one when it cannot.
+    mutation.run(() => askReadiness(api, ns, READINESS_FORM, request,
+      ((latest() || {}).preflight) || null));
   }, lifecycle);
 
   const cancel = node.querySelector("#readiness-cancel");
   if (cancel !== null) {
     listen(cancel, "click", () => {
-      const current = readiness.preflight;
+      const current = (latest() || {}).preflight;
       if (!active(lifecycle) || current === null || current === undefined) {
         return;
       }
@@ -2512,7 +2633,7 @@ function wireCreate(node, ns, parse, lifecycle, api, clusters, own) {
   const check = node.querySelector("#schedule-check-readiness");
   if (check !== null) {
     listen(check, "click", () => {
-      if (!active(lifecycle)) {
+      if (!active(lifecycle) || held.readinessInFlight === true) {
         return;
       }
       const values = withScheduleIntent(readScheduleValues(form), readDraft(key));
@@ -2526,13 +2647,17 @@ function wireCreate(node, ns, parse, lifecycle, api, clusters, own) {
         return;
       }
       disableKeepingFocus(check, true);
+      held.readinessInFlight = true;
       // THE VERDICT IS BOUND TO THE REQUEST THAT PRODUCED IT (review MEDIUM-3):
       // it is shown as current only while the form still describes that
       // request, and marked stale the moment it does not.
-      held.readinessRequest = readinessKey(request);
+      const asked = readinessKey(request);
+      const shown = held.readinessRequest === asked ? held.readiness : null;
+      held.readinessRequest = asked;
       held.readinessError = null;
-      api.startPreflight(ns, request).then(
+      askReadiness(api, ns, SCHEDULE_FORM, request, shown).then(
         (answer) => {
+          held.readinessInFlight = false;
           if (!active(lifecycle)) {
             return;
           }
@@ -2541,6 +2666,7 @@ function wireCreate(node, ns, parse, lifecycle, api, clusters, own) {
           followCreateReadiness(node, ns, parse, lifecycle, api, clusters, held);
         },
         (error) => {
+          held.readinessInFlight = false;
           if (!cancelled(error, lifecycle) && active(lifecycle)) {
             // A REFUSED START IS AN ANSWER TO THIS REQUEST, NOT A STATE OF THE
             // FORM: the button stays, the refusal is shown beside it and its
@@ -2611,6 +2737,27 @@ export function readinessRequestFor(values) {
     }
   }
   return request;
+}
+
+/** Asks a backup readiness question from the form `form` in `ns` (P14).
+ *
+ *  THE SAME QUESTION REPLAYS ONLY WHILE ITS CHECK CAN STILL BE THE ANSWER. The
+ *  key is the request's content plus the form's intent token
+ *  (`lifecycle.js`'s `askCheck`): a retry after a lost response, or a second
+ *  click while the check runs or is current, is the same key and the same
+ *  check; once that check is spent -- `held` read expired, inapplicable,
+ *  failed or cancelled, or a replay that answers already expired -- the token
+ *  is renewed and this is a new check. Before this the key was the content
+ *  alone, and a check clicked again after its ten minutes came back
+ *  `replayed: true` for as long as the controller kept the old object. */
+export function askReadiness(api, ns, form, request, held) {
+  return askCheck({
+    intent: formKey(ns, form),
+    question: JSON.stringify(request),
+    held: held || null,
+    spent: preflightSpent,
+    start: (token) => api.startPreflight(ns, request, { attempt: token }),
+  });
 }
 
 /** Re-reads a started readiness check until it is terminal or the budget is
@@ -4829,16 +4976,16 @@ export function renderScheduleHistory(ns, object, runs, points, catalogError, se
       // THE ACTION FIRST (MCP-25's rule; review L5): as the tenth column the
       // restore link was the one a 1024 px window scrolled out of the card.
       restoreCell(ns, run, points),
-      detailLink("backups", String(ns || meta.namespace || ""), String(meta.name || "")),
+      detailLink("backups", String(ns || meta.namespace || ""), String(meta.name || "")) +
+        (typeof (run.spec || {}).slot === "string" && run.spec.slot.length > 0
+          ? "<span class=\"cell-sub\">slot " + esc(run.spec.slot) + "</span>" : ""),
       triggerBadge(run.spec ? run.spec.trigger : undefined, maxRetries),
       runPhaseBadge(status),
-      cell((run.spec || {}).slot),
-      cell(status.backupId) +
+      "<code>" + cell(status.backupId) + "</code>" +
         (found.length > 1
           ? " <span class=\"badge badge-flat\">" + String(found.length) + " points</span>"
           : ""),
-      when(rfc3339(covered.fromMs)),
-      when(rfc3339(covered.toMs)),
+      coveredCell(rfc3339(covered.fromMs), rfc3339(covered.toMs)),
       verdicts[0],
       verdicts[1],
     ];
@@ -4860,8 +5007,7 @@ export function renderScheduleHistory(ns, object, runs, points, catalogError, se
         esc(CATALOG_TRUNCATED_SENTENCE) + "</p>"
       : "") +
     table(
-      ["", "RUN", "TRIGGER", "PHASE", "SLOT", "BACKUP SET", "COVERED FROM", "COVERED TO",
-        "AVAILABILITY", "VERIFICATION"],
+      ["", "RUN", "TRIGGER", "PHASE", "BACKUP SET", "COVERED", "AVAILABILITY", "VERIFICATION"],
       rows,
       NO_HISTORY_SENTENCE,
       undefined,

@@ -257,17 +257,17 @@ pub struct RestorePreflightRequest {
     /// saved destinations. Exactly one of this and the destination refs (P8).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub legacy_source_archive: Option<ArchiveRef>,
-    /// The recovery point being restored, by the identity PLAT-11.1 fixes.
+    /// The recovery point being restored, by the identity the restore is bound to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery_point_ref: Option<UidRef>,
-    /// Or a recovery point read from a `RecoveryCatalog`'s view (PLAT-15.2,
-    /// D3 §5.5 step 5): the controller re-reads that catalog row when the
+    /// Or a recovery point read from a `RecoveryCatalog`'s view (D3 §5.5
+    /// step 5): the controller re-reads that catalog row when the
     /// check runs and reports `recoveryPoint.state` from it — the row's
     /// availability and verification, any reached `Backup` verdict on the same
     /// receipt, and whether the plan's `source.point` is this row's binding.
     /// At most one of this and `recoveryPointRef` (P10). ABSENT on every
-    /// object written before PLAT-15.2, which therefore behaves exactly as it
-    /// did.
+    /// object written before catalog points existed, which therefore behaves
+    /// exactly as it did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalog_point_ref: Option<CatalogPointRef>,
 }

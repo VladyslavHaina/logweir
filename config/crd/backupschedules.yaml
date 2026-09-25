@@ -308,7 +308,7 @@ spec:
                 type: array
               history:
                 description: |-
-                  What the PLAT-05.2 inventory last found: how much history this schedule has, and how much of it is still owned by the schedule object (D1 §6).
+                  What the history inventory last found: how much history this schedule has, and how much of it is still owned by the schedule object (D1 §6).
 
                   An ABSENT block means the inventory has never run, which is what makes the first reconcile after an upgrade take one.
                 nullable: true

@@ -182,10 +182,10 @@ spec:
                 - notBefore
                 type: object
               authorization:
-                description: 'PLAT-19.2: the policy, mode and console-attested requester
-                  a v2 authorization was verified under — see [`AuthorizationProvenance`].
+                description: The policy, mode and console-attested requester a v2
+                  authorization was verified under — see [`AuthorizationProvenance`].
                   Absent for a v1 approval document, and cleared by an explicit `null`
-                  on every refusal (`controllers::approval::CLEARABLE_STATUS_FIELDS`).'
+                  on every refusal (`controllers::approval::CLEARABLE_STATUS_FIELDS`).
                 nullable: true
                 properties:
                   confirmationKeyId:
@@ -2153,7 +2153,7 @@ spec:
                 type: array
               history:
                 description: |-
-                  What the PLAT-05.2 inventory last found: how much history this schedule has, and how much of it is still owned by the schedule object (D1 §6).
+                  What the history inventory last found: how much history this schedule has, and how much of it is still owned by the schedule object (D1 §6).
 
                   An ABSENT block means the inventory has never run, which is what makes the first reconcile after an upgrade take one.
                 nullable: true
@@ -3044,14 +3044,14 @@ spec:
                     properties:
                       catalogPointRef:
                         description: 'Or a recovery point read from a `RecoveryCatalog`''s
-                          view (PLAT-15.2, D3 §5.5 step 5): the controller re-reads
-                          that catalog row when the check runs and reports `recoveryPoint.state`
+                          view (D3 §5.5 step 5): the controller re-reads that catalog
+                          row when the check runs and reports `recoveryPoint.state`
                           from it — the row''s availability and verification, any
                           reached `Backup` verdict on the same receipt, and whether
                           the plan''s `source.point` is this row''s binding. At most
                           one of this and `recoveryPointRef` (P10). ABSENT on every
-                          object written before PLAT-15.2, which therefore behaves
-                          exactly as it did.'
+                          object written before catalog points existed, which therefore
+                          behaves exactly as it did.'
                         nullable: true
                         properties:
                           catalogRef:
@@ -3125,7 +3125,7 @@ spec:
                         type: string
                       recoveryPointRef:
                         description: The recovery point being restored, by the identity
-                          PLAT-11.1 fixes.
+                          the restore is bound to.
                         nullable: true
                         properties:
                           name:
@@ -3705,7 +3705,7 @@ spec:
                     minimum: 300
                     type: integer
                   maxRehearsalAgeSeconds:
-                    description: How old the newest successful rehearsal may be (PLAT-14.3).
+                    description: How old the newest successful rehearsal may be.
                     format: int32
                     maximum: 31536000
                     minimum: 3600
@@ -4640,8 +4640,8 @@ spec:
                 description: The standing authorization.
                 properties:
                   approvalPolicyRef:
-                    description: The approval policy (PLAT-19.2). Absent means the
-                      legacy governed policy.
+                    description: The approval policy. Absent means the legacy governed
+                      policy.
                     nullable: true
                     properties:
                       name:
@@ -5099,7 +5099,7 @@ spec:
                 type: integer
               pendingRestoreRef:
                 description: A slot admitted in status whose `Restore` creation is
-                  not yet confirmed — the reservation half of the PLAT-04.1 protocol.
+                  not yet confirmed — the reservation half of the slot-admission protocol.
                 nullable: true
                 properties:
                   name:
@@ -5270,7 +5270,7 @@ spec:
                 description: |-
                   What the runner pod asks for and is capped at.
 
-                  ON THE SPEC, NOT ON AN ANNOTATION, because PLAT-06.1's rule is that a Job's shape is a function of the object. It is also what keeps `scratch_mode_and_new_topic_mode_produce_the_same_job_shape` true: resources come from here and never from the target mode.
+                  ON THE SPEC, NOT ON AN ANNOTATION, because the rule is that a Job's shape is a function of the object. It is also what keeps `scratch_mode_and_new_topic_mode_produce_the_same_job_shape` true: resources come from here and never from the target mode.
                 nullable: true
                 properties:
                   limits:
@@ -7320,7 +7320,7 @@ spec:
                         description: |-
                           What a key is allowed to be used for.
 
-                          SEPARATED BECAUSE P17 REQUIRES IT FOR PLAT-19.2. One key that both signs evidence and authorises restores is a key whose holder can approve their own work; the usage set is what makes "the runner's signing identity" and "an approver" different grants.
+                          SEPARATED BECAUSE P17 REQUIRES IT FOR GOVERNED APPROVAL. One key that both signs evidence and authorises restores is a key whose holder can approve their own work; the usage set is what makes "the runner's signing identity" and "an approver" different grants.
                         enum:
                         - EvidenceSigning
                         - GovernedApproval

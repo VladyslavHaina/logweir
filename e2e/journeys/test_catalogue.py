@@ -334,6 +334,29 @@ def test_no_live_ui_harness_drives_a_hidden_control_off_its_step():
         assert console_steps.unreached_controls(text) == [], (p.name, console_steps.unreached_controls(text))
 
 
+def test_a_link_click_into_the_wizard_is_not_a_walk_to_its_steps():
+    """H5 (poc-upgrade-2): plat15-2's minted-point flow clicked a catalog point's link and
+    filled step 2's #catalog-topics and step 4's #topic-prefix at once. The link opens the
+    one-step wizard on step 1, so both waits time out live. NEGATIVE CONTROL: the old
+    shape, verbatim, is flagged on both controls; the walk journey 4 uses is not."""
+    click = ('await page.click("#step-catalog-points a[href*=\\"point=" + p.pointId + "\\"]");\n')
+    old = click + ('await waitForSelector(page, "#catalog-topics", "the wizard on the minted point");\n'
+                   'await page.fill("#catalog-topics", SOURCE_TOPIC);\n'
+                   'await page.fill("#topic-prefix", RESTORE_PREFIX);\n')
+    flagged = console_steps.unreached_controls(old)
+    assert len(flagged) == 3 and all("no step" in f for f in flagged), flagged
+    walked = click + ('await waitForSelector(page, "#wizard-position", "the wizard");\n'
+                      'await wizardAt(page, 1, 60);\nawait wizardStep(page, 2);\n'
+                      'await waitForSelector(page, "#catalog-topics", "the catalog step");\n'
+                      'await page.fill("#catalog-topics", SOURCE_TOPIC);\n'
+                      'await wizardStep(page, 4);\nawait page.fill("#topic-prefix", RESTORE_PREFIX);\n')
+    assert console_steps.unreached_controls(walked) == []
+    # and the harness the finding was about is one this sweep reads and that drives the wizard
+    text = (ROOT / "scripts" / "plat15-2-ui-e2e.mjs").read_text()
+    assert console_steps.controls_driven(text) > 0
+    assert console_steps.unreached_controls(text) == []
+
+
 def test_the_harness_step_map_is_the_pages_own():
     assert console_steps.ui_disagreements() == []
 

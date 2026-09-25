@@ -1918,6 +1918,44 @@ test("a_replayed_restore_readiness_check_is_read_before_the_wizard_believes_it",
   }
 });
 
+test("a_readiness_read_landing_while_the_prefix_is_typed_does_not_wipe_it", async () => {
+  // P13's CLASS in the wizard (poc-fixes-4). A text input commits on
+  // `change`, and step 5's follower repainted the whole wizard from the state
+  // when its read landed: keystrokes typed into the prefix since the last
+  // commit -- the reader went Back to step 4 while the check ran -- were gone.
+  const ns = "wizard-typing-while-a-read-lands-ns";
+  const primary = destinationItem("primary", "17bc54c4-2e52-4607-b4ac-c31517a6e568");
+  const k8s = savedWizardApi(ns, [primary], {
+    started: () => readinessItem("pf-typing", "", { state: "pending", terminal: false }),
+    read: (id, hash) => readinessItem(id, hash),
+  });
+  let open;
+  const gate = new Promise((resolve) => { open = resolve; });
+  k8s.wait = () => gate;
+  const view = fakeView();
+  const originalWindow = globalThis.window;
+  globalThis.window = { location: { hash: "#/restore?ns=" + ns } };
+  try {
+    await mountRestoreWizard(view.root, ns, k8s.point, parse, k8s, createRouteLifecycle().begin());
+    await view.find("#restore-readiness-form").dispatch("submit");
+    await settled(20);
+    assert.equal(k8s.started.length, 1);
+    view.find("#topic-prefix").value = "restore-typed-";
+    open();
+    await settled(20);
+    assert.ok(k8s.reads.length >= 1, "the follower's read landed");
+    assert.equal(view.find("#topic-prefix").value, "restore-typed-",
+      "NEGATIVE CONTROL: the prefix being typed survives the read (the state's prefix came back)");
+    // The reader commits: the owed paint lands with the edit AND the verdict.
+    await view.find("#topic-prefix").dispatch("change");
+    await settled(20);
+    assert.ok(planBytesOf(view.html()).includes("restore-typed-"), "the edit is in the plan");
+    assert.match(view.html(), /pf-typing/, "and the check's verdict is on screen");
+  } finally {
+    globalThis.window = originalWindow;
+  }
+});
+
 test("a_destination_edited_during_the_draft_refuses_the_submit_until_the_check_runs_again", async () => {
   // D2 S21, in the console. The destination's access is rotated after the
   // check said ready: its generation moves, the plan bytes do not, and the

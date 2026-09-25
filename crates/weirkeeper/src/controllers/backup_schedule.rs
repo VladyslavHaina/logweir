@@ -3719,7 +3719,7 @@ async fn finish(
                 namespace = %namespace,
                 "no retention report through the global handle: this schedule is \
                  destination-backed, and that handle is for objects without a destinationRef \
-                 (D2 §3.10). PLAT-16.1's per-destination archive-inventory check reports these"
+                 (D2 §3.10). The per-destination archive-inventory check reports these"
             );
             Some(RetentionReport {
                 evaluated_at: now,

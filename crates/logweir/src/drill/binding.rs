@@ -579,7 +579,7 @@ pub fn verify_standing_authorization(
         return Err(refuse(format!(
             "{}. {}: the standing authorization verifies under key {}, whose usages are [{}]. A \
              rehearsal in the current format may be authorised only by a key carrying {}; \
-             ConsoleConfirmation requires PLAT-19.2's immutable policy-mode binding, and the \
+             ConsoleConfirmation requires the immutable policy-mode binding, and the \
              installation's own evidence-signing identity never authorises (D3 §7.3); no data \
              operation was started.",
             wire::AUTHORIZATION_INVALID,

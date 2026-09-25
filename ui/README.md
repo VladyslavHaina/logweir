@@ -201,6 +201,9 @@ authorisation story is "the API server evaluated the viewer's RBAC".
 | `tests/restore-catalog.spec.js` | **PLAT-15.2**: the catalog-point route, the offer rule and every refusal it makes, the catalog-window offer for a run the controller could not verify, the bound plan and its golden, the readiness request, the restore body, drafts per point, and the selector, catalog-table and schedule-detail links -- each with its negative control. |
 | `tests/console-ux.spec.js` | **the console UX batch** (the human-like pass's MCP-1...MCP-34): the signed-out state, the header, the error box, the one-step wizard and its address, the point tables, the parallel and progressive reads, the two new projections, the forms and empty states, the timestamp formatter, and the lint that keeps internal task ids out of shipped strings -- each row with the behaviour it replaced. |
 | `tests/legacy-point.spec.js` | **a `v0.1.5` point after the upgrade** (PoC P3, P5, P6): the evidence bucket a point with no destination starts in, the readiness sentence, the Restore fetch commands' bucket and the catalog sync-mode help -- each with its negative control. |
+| `tests/typed-input.spec.js` | **P13 and its class**: every form that repaints when a read lands keeps what was typed -- the readiness panel, a connection's discovery form and filters, a destination's rotation form -- each row typing first and then letting the read land. |
+| `tests/mcp-round2.spec.js` | **the human-like pass, round 2**: the running check's "checking...", the readiness headline and its one rule with step 5 and Create, the role gate and the no-role landing, sign out forgetting the address, the folded tables, the chips that stay whole, the message code spans, the picker's row and the footer -- each with the behaviour it replaced. |
+| `tests/check-intent.spec.js` | **P14 and its class**: a check asked again replays only while it can still be the answer -- the spent rule, `askCheck`, and the schedule form, the readiness panel and *Discover topics* over D0's replay rule, modelled. |
 | `tests/preview-server.js` | a development tool, never a test: serves this directory over the fixtures under `tests/fixtures/preview/`. See *Previewing with fixtures*. |
 
 **The design system** lives in `style.css` and nowhere else. It is VMware
@@ -1480,7 +1483,8 @@ bounded `GET .../preflights/{id}` reads, and **the first read is owed whatever
 the create answered** (`lifecycle.js`'s `owesRead`). The product API projects a
 create -- and a replay of one, which is already terminal -- without recomputing
 staleness: `applicable: false` with one `unverifiable` reason, "this response did
-not recompute staleness; read the preflight itself". Defect P8 (the PoC install,
+not recompute staleness; read the preflight itself" -- plus `expired` when the
+check's own validity has passed, which needs no read (P14). Defect P8 (the PoC install,
 2026-09-24) was two faces of skipping that read: *Test access* rendered the
 create answer and never asked again, so a check that recorded `ready` in three
 seconds read `pending / does not apply / compared: nothing` four minutes later;
@@ -1498,6 +1502,85 @@ new check rather than a replay of the first one's verdict, and the pre-test
 summary ("No access test has been recorded") stands down once the page holds a
 test of its own. A reload renders the destination read's `lastTest`, the newest
 recorded test.
+
+### Asking a check again is not replaying its last answer
+
+The schedule form's readiness button, the list page's *Backup readiness* panel
+and *Discover topics* ask the same QUESTION when their inputs are unchanged, and
+D0 gives one `Idempotency-Key` one object for ever. Defect P14 (poc-upgrade-2):
+their keys were the question alone, so a check asked again after its ten
+minutes came back `200 replayed: true` -- "does not apply to your current
+inputs" -- and no click could make a fresh one until the controller collected
+the old object an hour later (a discovery, a day). The key now carries the
+form's **intent token** (`lifecycle.js`'s `askCheck`), and the token is kept
+exactly as long as the check it named can still be the answer:
+
+* a retry after a lost response, and a click while the check is pending,
+  running or current, send the same token and REPLAY -- that is what an
+  idempotent retry is for;
+* once the check is **spent** -- the page read it expired, inapplicable, failed
+  or cancelled (`preflightSpent`, `discoverySpent`), or a replay answers with it
+  already spent (the API's replay names `expired` itself) -- the token is renewed
+  and the question is asked once more, under a new key. At most two creates
+  per click;
+* the token lives in page memory beside the drafts: a reload asks afresh.
+
+Restore step 5, *Test access* and *Test connection* keep their per-click
+tokens: each of those clicks is a new check by design.
+
+### Round 2 of the human-like pass
+
+* **A route the session cannot use says so** (`app.js`'s `routeAllowed`, the
+  tabs' any-of-its-flags rule, asked of the CHOSEN namespace's grant --
+  `routeGateHas` -- and never of the union the tabs use, so an operator
+  elsewhere who is a viewer here is refused here): a viewer who opens the Restore address reads "Your
+  role in <ns> can't start restores" and the role it takes, instead of an
+  actionable wizard the API refuses click by click. The catalog's Connect
+  archive form and the governed countersign submit follow `catalogConnect` and
+  `approvalSubmit` the same way. A session with no role anywhere lands on a
+  sentence saying so and whom to ask.
+* **Sign out leaves the browser on the console's address with no route**, so
+  the next user signs in to the first page, not to the previous user's deep
+  link.
+* **The readiness headline is never `ready` over an unresolved blocking row.**
+  A restore check that is `unknown` only because its draft's `approval.state`
+  is `skipped`/`SubjectNotCreated` -- every other blocking row `ready`, at
+  least one of them, and no execution-only row `notReady` -- reads "needs
+  approval -- every other blocking check is ready, so the Restore can be
+  created; creating it requests the approval it needs before it runs", and
+  step 5 says "needs approval" (passable, like "not checked yet"). A `ready`
+  check adds "N items are confirmed when the ... runs", counting ONLY
+  execution-only rows that are `unknown` or `skipped`. A row whose gating is
+  absent or not recognised counts as blocking (fail-closed). Any other unknown
+  or skipped blocking row keeps the aggregate's own word, and the stepper, the
+  Create gate and the headline read the one predicate (`render.js`'s
+  `readyButForDraftApproval`, `isBlockingRow`). A check still running says
+  "checking...", not "does not apply".
+* **Check readiness on the schedule form is one request at a time**: the
+  button is disabled in its markup while the request is in flight, so a
+  repaint for another answer cannot re-enable it, and `askCheck` renews an
+  intent compare-and-swap, so two overlapping asks make one new check.
+* **Tables fit their card at 1440 and 1024 px.** Columns that described one
+  thing were folded into it (a run's slot under its name, a window's two
+  instants in one cell, a check's code, gating, remedy, scope and instants
+  under its id, verdict and message); every field is still printed. A table
+  that still scrolls carries edge shadows.
+
+### A repaint keeps what the reader typed
+
+Every form that repaints when an answer lands keeps what is typed into it
+(defect P13, poc-upgrade-2: the *Backup readiness* panel emptied its topics when
+the discovery read a source change starts came back, and sent `topics: []`).
+Each surface does it the way its form is built:
+
+| Surface | Repaints on | How the input survives |
+|---|---|---|
+| Schedules -> *Backup readiness* | the discovery read, each followed read, the check's own record, Cancel | read off the live controls into the view first (`readReadinessInput`) -- source, its search, destination, topics -- and rendered from there; the destination sent is the one whose uid the select shows (by its name, resolved from the list this mount read), and a slower discovery answer for an earlier source is dropped |
+| Schedules -> create form, policy form | preview, readiness, each followed read, the record | the draft, kept on every `input`/`change` |
+| Clusters -> a connection | each followed *Test connection* read, the probe re-read, the discovery record, a page of topics | the discovery form and the topic filters read off the live controls (`readDiscoveryTyped`) and rendered over the APPLIED filters, which stay what "Show more" pages with |
+| Destinations -> a destination | each followed *Test access* read, the test's record | only the test's own slot repaints; the rotation form -- whose credential inputs no draft keeps and no render carries -- is never re-rendered under the reader; the roles chosen for the next test are carried |
+| Restore wizard | step 5's followed reads, the check's and the create's records, Cancel | an answer landing while a text input holds an uncommitted edit is not painted: it is in the state, and the reader's own `change` (or leaving the field) paints it with the edit |
+| Destinations, clusters, catalog create forms | the form's own record only | the draft (credentials excepted, by design) |
 
 ### A short page is not the last page
 

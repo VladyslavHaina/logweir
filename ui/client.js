@@ -194,6 +194,19 @@ export function grantedNamespaces() {
   return decided === null ? [] : decided.namespaces.slice();
 }
 
+/** Whether a signed-in console session holds NO product role in any namespace
+ *  (MCP round 2, R2-16). False in legacy mode, before the probe, and for the
+ *  localAdmin actor, who is the administrator by construction. */
+export function holdsNoRole() {
+  if (decided === null || decided.mode !== CONSOLE || decided.session === null) {
+    return false;
+  }
+  if (decided.session.authenticationMode === "localAdmin") {
+    return false;
+  }
+  return Object.keys(decided.roles || {}).every((ns) => (decided.roles[ns] || []).length === 0);
+}
+
 /** The PRODUCT roles the actor holds in `ns`, as the session reported them.
  *
  *  Empty in legacy mode and in localAdmin mode, and empty is not "none of the
@@ -2422,11 +2435,17 @@ const consoleChecks = Object.freeze({
       unknown: decoded.unknown,
     };
   },
-  async startDiscovery(ns, connection, request) {
+  async startDiscovery(ns, connection, request, options) {
     requireOperator(ns, "topic-discoveries", "start a topic discovery");
     const body = sending("connections:topic-discoveries", request || {});
+    // `attempt` IS THE PAGE'S INTENT TOKEN (P14's class): the parameters alone
+    // are the same key every time, and a discovery past its freshness would
+    // be replayed for as long as the controller keeps the object.
+    const attempt = (options || {}).attempt;
+    const subject = connection + "." + discoveryTag(body) +
+      (typeof attempt === "string" && attempt.length > 0 ? "." + digest32(attempt) : "");
     const answer = await consoleAction(ns, "connections:topic-discoveries", connection, body, {
-      idempotencyKey: idempotencyKey("topic-discoveries", ns, connection + "." + discoveryTag(body)),
+      idempotencyKey: idempotencyKey("topic-discoveries", ns, subject),
       token: tokenNow(),
     });
     const decoded = decodeConsoleItem("topic-discoveries", answer);
@@ -2929,8 +2948,8 @@ export function apiClient() {
     latestDiscoveries(ns, connection, options) {
       return dispatchChecks((api) => api.latestDiscoveries(ns, connection, options));
     },
-    startDiscovery(ns, connection, request) {
-      return dispatchChecks((api) => api.startDiscovery(ns, connection, request));
+    startDiscovery(ns, connection, request, options) {
+      return dispatchChecks((api) => api.startDiscovery(ns, connection, request, options));
     },
     discovery(ns, id, options) {
       return dispatchChecks((api) => api.discovery(ns, id, options));

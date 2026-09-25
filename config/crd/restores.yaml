@@ -142,7 +142,7 @@ spec:
                 description: |-
                   What the runner pod asks for and is capped at.
 
-                  ON THE SPEC, NOT ON AN ANNOTATION, because PLAT-06.1's rule is that a Job's shape is a function of the object. It is also what keeps `scratch_mode_and_new_topic_mode_produce_the_same_job_shape` true: resources come from here and never from the target mode.
+                  ON THE SPEC, NOT ON AN ANNOTATION, because the rule is that a Job's shape is a function of the object. It is also what keeps `scratch_mode_and_new_topic_mode_produce_the_same_job_shape` true: resources come from here and never from the target mode.
                 nullable: true
                 properties:
                   limits:

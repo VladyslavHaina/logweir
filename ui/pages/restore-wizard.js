@@ -120,7 +120,11 @@ import {
   TARGET_MODE_MEANING,
   announce,
   listVerifiedNote,
+  coveredCell,
   flagBadge,
+  isBlockingRow,
+  isDraftApprovalRow,
+  readyButForDraftApproval,
   when,
   windowMessage,
 } from "../render.js";
@@ -1806,9 +1810,8 @@ export function renderCatalogTable(backups, chosenName, grid) {
     const covered = status.windowCovered || {};
     const name = (backup.metadata || {}).name;
     return [
-      cell(status.backupId),
-      when(rfc3339(covered.fromMs)),
-      when(rfc3339(covered.toMs)),
+      "<code>" + cell(status.backupId) + "</code>",
+      coveredCell(rfc3339(covered.fromMs), rfc3339(covered.toMs)),
       cell(status.records),
       cell(status.phase),
       cell(name === chosenName && typeof name === "string" ? name + " (chosen)" : name),
@@ -1817,7 +1820,7 @@ export function renderCatalogTable(backups, chosenName, grid) {
   // A DATAGRID WHERE THE CALLER NAMES ONE: 258 runs are 258 rows, and the
   // selector used to lay out every one of them below its own table (MCP-26).
   return table(
-    ["BACKUP SET", "COVERED FROM", "COVERED TO", "RECORDS", "PHASE", "BACKUP"],
+    ["BACKUP SET", "COVERED", "RECORDS", "PHASE", "BACKUP"],
     rows,
     "no Backup names this archive in this namespace",
     undefined,
@@ -1976,19 +1979,20 @@ export function renderPointSelector(state) {
           : "Restore this point") + "</a>",
       // The run, with its schedule and slot beneath it rather than in two
       // columns of their own.
+      // THE ARCHIVE UNDER THE RUN (R2-17): as its own last column it was the
+      // one a 1024 px window clipped, with no sign the table scrolled.
       cell(meta.name) +
         "<span class=\"cell-sub\">" +
         (typeof schedule === "string" && schedule.length > 0 ? "schedule " + esc(schedule) : "no schedule") +
         (typeof spec.slot === "string" && spec.slot.length > 0 ? " &middot; slot " + when(spec.slot) : "") +
-        "</span>",
+        "</span>" +
+        "<span class=\"cell-sub\">" + cell((spec.archive || {}).url) + " &middot; " +
+        esc(archiveAvailability(point)) + "</span>",
       // The covered window, both bounds, one per line.
-      "<span class=\"cell-sub-first\">from " + when(rfc3339(covered.fromMs)) + "</span>" +
-        "<span class=\"cell-sub\">to " + when(rfc3339(covered.toMs)) + "</span>",
+      coveredCell(rfc3339(covered.fromMs), rfc3339(covered.toMs)),
       topics.length === 0 ? cell(null) : esc(topics.join(", ")),
       cell(status.records),
       pointSigned(point),
-      cell((spec.archive || {}).url) +
-        "<span class=\"cell-sub\">" + esc(archiveAvailability(point)) + "</span>",
     ];
   });
   const attributes = points.map(
@@ -2007,7 +2011,7 @@ export function renderPointSelector(state) {
     "<p class=\"help\">Filters the rows below by name, schedule, slot, source cluster, " +
     "archive, backup set or topic. Every word must match.</p></div>" +
     table(
-      ["", "BACKUP", "COVERED", "TOPICS", "RECORDS", "SIGNED", "ARCHIVE"],
+      ["", "BACKUP", "COVERED", "TOPICS", "RECORDS", "SIGNED"],
       rows,
       NO_COMPLETED_BACKUP_SENTENCE,
       attributes,
@@ -2881,22 +2885,21 @@ export function readinessRefusal(state, prepared) {
     );
   }
   if (result.state !== "ready") {
-    const gating = (Array.isArray(result.checks) ? result.checks : [])
-      .filter((c) => (c || {}).gating === "blocking");
+    // FAIL-CLOSED (review L2): a row with a gating this build does not
+    // recognise is blocking.
+    const gating = (Array.isArray(result.checks) ? result.checks : []).filter(isBlockingRow);
     const blocking = gating.filter((c) => (c || {}).state !== "ready");
     const others = blocking.filter((c) => !isDraftApprovalRow(c));
+    // ONE RULE FOR THE GATE, THE STEPPER AND THE HEADLINE (`render.js`'s
+    // `readyButForDraftApproval`), so step 5 cannot read Done under a
+    // headline that says anything but ready (MCP round 2, R2-12).
     // THE ONE ROW A DRAFT CANNOT MAKE READY (DRAFT-PREFLIGHT-NEVER-READY). See
     // [`isDraftApprovalRow`]: every blocking check but that one is `ready`, the
     // aggregate is `unknown` for that reason alone, and the Restore this click
     // creates is exactly what turns the row into a real approval verdict. At
     // least one OTHER blocking check must have come back `ready`, for the
     // aggregate's own reason: nothing checked is not everything passed.
-    if (
-      result.state === "unknown" &&
-      others.length === 0 &&
-      blocking.length > 0 &&
-      gating.some((c) => c.state === "ready")
-    ) {
+    if (readyButForDraftApproval(result)) {
       return null;
     }
     const failing = (others.length > 0 ? others : blocking)
@@ -2938,14 +2941,7 @@ export function readinessRefusal(state, prepared) {
  *  `SubjectNotCreated` code together. `approval.state` `notReady` (an Approval
  *  that exists and does not verify), a `skipped` row with another code, or any
  *  other check that is `unknown` or `skipped` all still refuse by id and code. */
-export function isDraftApprovalRow(check) {
-  const c = check || {};
-  return (
-    c.id === "approval.state" &&
-    c.state === "skipped" &&
-    c.code === "SubjectNotCreated"
-  );
-}
+export { isDraftApprovalRow };
 
 /** Said when no readiness check has run for the plan on screen.
  *
@@ -3326,7 +3322,14 @@ export function stepStates(state, prepared) {
     if (i === 5) {
       status = firstOpen === 5 ? "ready" : "todo";
     } else if (whole[i]) {
-      status = attention[i] ? "attention" : (i === 4 && held === null ? "unchecked" : "done");
+      // STEP 5 SAYS WHAT ITS HEADLINE SAYS (review L1): a check whose one
+      // unresolved blocking row is the draft's approval is passable -- Create
+      // requests the approval -- and it is not `done`.
+      status = attention[i]
+        ? "attention"
+        : (i === 4 && held === null
+          ? "unchecked"
+          : (i === 4 && readyButForDraftApproval(held) ? "approval" : "done"));
     } else {
       status = attention[i] ? "attention" : "todo";
     }
@@ -3355,6 +3358,9 @@ function stepWord(step) {
   }
   if (step.status === "unchecked") {
     return "not checked yet";
+  }
+  if (step.status === "approval") {
+    return "needs approval";
   }
   return step.current ? "to do next" : "to do";
 }
@@ -4897,7 +4903,49 @@ async function readApprovalPolicy(api, ns, lifecycle) {
 
 /** Renders the wizard over `state` -- with its mutation record and its field
  *  messages -- and wires what was rendered to the plan it shows. */
-async function renderAndWire(node, state, parse, api, lifecycle) {
+/** The wizard's text inputs: each commits its value to the state on `change`
+ *  (blur or Enter), not on every keystroke, because a commit re-renders the
+ *  plan and its hash. */
+export const WIZARD_TEXT_INPUTS = Object.freeze([
+  "point-in-time", "topic-prefix", "store-endpoint", "store-region", "evidence-bucket",
+  "archive-secret", "evidence-endpoint", "evidence-region", "catalog-topics",
+]);
+
+/** Whether a control's value is not the one the last render gave it -- what
+ *  the reader typed and has not committed. A browser keeps the rendered value
+ *  as `defaultValue`; the suites' fakes keep it as the `value` attribute. */
+export function typedSinceRender(control) {
+  if (control === null || control === undefined) {
+    return false;
+  }
+  const rendered = typeof control.defaultValue === "string"
+    ? control.defaultValue
+    : (typeof control.getAttribute === "function" ? (control.getAttribute("value") || "") : "");
+  return String(control.value === undefined || control.value === null ? "" : control.value) !==
+    rendered;
+}
+
+/** Whether the reader is part-way through typing into one of the wizard's
+ *  text inputs. */
+export function editingWizard(node) {
+  return WIZARD_TEXT_INPUTS.some((id) => typedSinceRender(node.querySelector("#" + id)));
+}
+
+/** Renders the wizard from `state` and wires it.
+ *
+ *  `landing` IS AN ANSWER ARRIVING, not the reader acting: a followed check's
+ *  read, a mutation settling, a cancel answered. SUCH A REPAINT WAITS FOR THE
+ *  READER (P13's class): the wizard commits a text input on `change`, so a
+ *  repaint under an input being typed into rendered it from the state and the
+ *  keystrokes since the last commit were gone. The answer is already in
+ *  `state`; the paint is owed, and the reader's own commit -- the `change`
+ *  that ends the edit -- renders it with everything else. */
+async function renderAndWire(node, state, parse, api, lifecycle, landing) {
+  if (landing === true && editingWizard(node)) {
+    state.paintOwed = true;
+    return false;
+  }
+  state.paintOwed = false;
   const record = mutationFor(formKey(state.ns, WIZARD_FORM));
   state.submission = record.state;
   if (record.state.phase === "failed") {
@@ -5616,7 +5664,7 @@ function wireRestoreReadiness(node, state, parse, api, lifecycle, prepared) {
           ? null
           : state.readiness.boundSecret),
     });
-    renderAndWire(node, state, parse, api, lifecycle);
+    renderAndWire(node, state, parse, api, lifecycle, true);
     if (record.phase === "succeeded") {
       followRestoreReadiness(node, state, parse, api, lifecycle);
     }
@@ -5647,7 +5695,7 @@ function wireRestoreReadiness(node, state, parse, api, lifecycle, prepared) {
       api.cancelPreflight(state.ns, current.id).then(
         () => {
           if (active(lifecycle)) {
-            renderAndWire(node, state, parse, api, lifecycle);
+            renderAndWire(node, state, parse, api, lifecycle, true);
           }
         },
         () => {
@@ -5742,7 +5790,7 @@ async function followRestoreReadiness(node, state, parse, api, lifecycle) {
       merged.stale !== now.stale || merged.applicable !== now.applicable;
     state.readiness = Object.assign({}, state.readiness, { preflight: merged });
     if (moved) {
-      await renderAndWire(node, state, parse, api, lifecycle);
+      await renderAndWire(node, state, parse, api, lifecycle, true);
     }
   }
 }
@@ -6001,6 +6049,19 @@ function wire(node, state, parse, api, lifecycle, prepared) {
       listen(field, "change", refresh, lifecycle);
     }
   }
+  // AN OWED PAINT IS PAID WHEN AN EDIT ENDS WITHOUT A COMMIT: the reader typed
+  // and put the text back, so no `change` fires and nothing else would render
+  // the answer that landed meanwhile.
+  for (const id of WIZARD_TEXT_INPUTS) {
+    const field = node.querySelector("#" + id);
+    if (field !== null) {
+      listen(field, "blur", () => {
+        if (active(lifecycle) && state.paintOwed === true && !editingWizard(node)) {
+          renderAndWire(node, state, parse, api, lifecycle);
+        }
+      }, lifecycle);
+    }
+  }
   // THE TICKET IS NOT IN THE PLAN BYTES, so typing it re-renders nothing: it
   // is read into the state and sent beside the create body (PLAT-19.2).
   const ticket = node.querySelector("#change-ticket");
@@ -6141,7 +6202,7 @@ function wire(node, state, parse, api, lifecycle, prepared) {
     if (settled.phase === "failed") {
       state.jumpToErrors = true;
     }
-    renderAndWire(node, state, parse, api, lifecycle).then((rendered) => {
+    renderAndWire(node, state, parse, api, lifecycle, true).then((rendered) => {
       if (rendered && settled.phase === "failed") {
         const target = node.querySelector("[aria-invalid=\"true\"]") ||
           node.querySelector("#restore-submit-status");

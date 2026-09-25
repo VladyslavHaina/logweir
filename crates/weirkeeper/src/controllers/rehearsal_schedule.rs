@@ -581,7 +581,7 @@ pub fn authorize(facts: &Facts<'_>) -> Result<Authorization, Skip> {
             format!(
                 "the Approval `{wanted}` verified under key {key_id}, whose usages are [{}]; a \
                  rehearsal in the current format is authorised only by GovernedApproval; \
-                 ConsoleConfirmation requires PLAT-19.2's immutable policy-mode binding and \
+                 ConsoleConfirmation requires the immutable policy-mode binding and \
                  EvidenceSigning never authorises",
                 key.trust
                     .usages

@@ -478,6 +478,22 @@ test("mcp_27_readiness_is_done_only_when_a_check_for_this_plan_says_ready", asyn
   assert.equal(refused[5].status, "todo", "the plan step is not ready while Create refuses");
   const html = renderPreparedWizard(state, prepared);
   assert.match(html, /<span class="stepper-status">needs attention<\/span>/);
+
+  // REVIEW L1: a check owed only its draft's approval is passable -- Create
+  // requests the approval -- and step 5 says "needs approval", not "done".
+  state.readiness.preflight = Object.assign({}, state.readiness.preflight, {
+    state: "unknown",
+    checks: [
+      { id: "target.mappedTopics", gating: "blocking", state: "ready", code: "Ok" },
+      { id: "approval.state", gating: "blocking", state: "skipped", code: "SubjectNotCreated" },
+    ],
+  });
+  const owed = stepStates(state, prepared);
+  assert.equal(owed[4].status, "approval", "NEGATIVE CONTROL: it read `done`");
+  assert.equal(owed[5].status, "ready", "and the plan step is still where Create is");
+  assert.equal(replayWizard(owed).current, "submitted", "and the wizard machine walks past it");
+  assert.match(renderPreparedWizard(state, prepared),
+    /<span class="stepper-status">needs approval<\/span>/);
 });
 
 test("mcp_25_every_recovery_point_row_leads_with_its_action", () => {
@@ -972,11 +988,15 @@ test("mcp_7_mcp_15_one_formatter_for_every_instant_whole_seconds_utc_exact_value
   assert.equal(when("20260918-032200"), "20260918-032200", "a value that is not an instant is not guessed at");
   const css = readFileSync(UI + "style.css", "utf8");
   assert.match(css, /\.ts \{\n {2}white-space: nowrap;/, "MCP-7: an instant never wraps mid-value");
-  // And the pages use it: the clusters table's OBSERVED column and the
+  // And the pages use it: the clusters table's probe cell (its own OBSERVED
+  // column until MCP round 2's R2-3 folded it in, as the wizard's MCP-28 cell
+  // does) prints the age with the exact instant as the title, and the
   // schedules table's LAST/NEXT columns print the human reading.
   const cluster = fixture("cluster-scram.json");
   const clusters = renderClusterList(cluster, "team-a", Date.parse("2026-09-11T20:00:00Z"));
-  assert.match(clusters, /<time class="ts" datetime="[^"]+" title="[^"]+">\d{4}-\d\d-\d\d \d\d:\d\d:\d\d UTC<\/time>/);
+  assert.match(clusters, /<time class="ts" datetime="[^"]+" title="[^"]+">[^<]* ago<\/time>/);
+  assert.doesNotMatch(clusters.replace(/"[^"]*"/g, "\"\""), /\d{4}-\d\d-\d\dT\d\d:\d\d/,
+    "no raw ISO instant in the clusters table's visible text");
   const schedules = renderScheduleList(fixture("schedule-policy.json"));
   assert.doesNotMatch(schedules.replace(/"[^"]*"/g, "\"\""), /\d{4}-\d\d-\d\dT\d\d:\d\d/,
     "no raw ISO instant in the schedules table's visible text");

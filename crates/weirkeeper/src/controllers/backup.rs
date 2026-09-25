@@ -590,7 +590,7 @@ pub fn resolved_selection(backup: &Backup) -> Result<ResolvedSelection, BackupEr
         SelectionShape::AllUserTopics => Err(BackupError::Refused(
             TERMINAL_STATE_INVALID_TOPIC_SELECTION,
             "spec.allUserTopics asks this run to cover every user topic its principal can see, \
-             which is resolved by a per-run topic discovery Job (PLAT-09.2) and not by a pure \
+             which is resolved by a per-run topic discovery Job and not by a pure \
              function of the spec. This entry point resolves a named allowlist only; the \
              reconciler resolves the dynamic shape through \
              `controllers::backup_selection::resolve`"

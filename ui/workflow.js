@@ -262,8 +262,10 @@ export function replayWizard(steps) {
     // `unchecked` is step 5 with no readiness check held (MCP-27): not DONE --
     // nothing checked it -- and not a block either, because the check is
     // advisory and the plan may be created without one, with a warning.
+    // `approval` is step 5 owed only its draft's approval (review L1): the
+    // same passable state, since Create is what requests the approval.
     const done = step.status === "done" || step.status === "ready" ||
-      step.status === "unchecked";
+      step.status === "unchecked" || step.status === "approval";
     if (!done) {
       blocked = i;
       break;

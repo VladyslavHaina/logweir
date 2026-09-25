@@ -44,8 +44,10 @@
 import { CONSOLE, LEGACY, apiClient, mayOperate, mode } from "../client.js";
 import {
   active,
+  askCheck,
   cancelled,
   createOnce,
+  discoverySpent,
   dropDraft,
   fieldErrors,
   formKey,
@@ -83,8 +85,8 @@ import {
 } from "../render.js";
 import {
   CONNECTION_REFUSAL_REASONS,
-  VERDICT_OWN_REASONS,
   laterProbeNote,
+  probeSummary,
   PROBE_SENTENCE,
   REFUSAL_GLOSS,
   TEST_CONNECTION_SENTENCE,
@@ -294,13 +296,26 @@ export function probeCell(object, now, freshSeconds) {
   return probeBadge(state) + (stale.length > 0 ? " " + stale : "");
 }
 
+/** The newest probe's own reason, when it differs from the verdict it sits
+ *  beside (MCP-9): its code visible and its meaning one disclosure away. */
+export function laterProbeDisclosure(state) {
+  const note = laterProbeNote(state);
+  if (note.length === 0) {
+    return "";
+  }
+  const code = note.slice(0, note.indexOf("</code>") + "</code>".length);
+  const gloss = note.slice(code.length);
+  return "<details class=\"cell-more\"><summary>" + code + "</summary>" + gloss + "</details>";
+}
+
 /** The sentence the clusters table carries when the namespace holds none. */
 export const NO_CLUSTER_SENTENCE =
   "No KafkaCluster in this namespace yet. Create one with the form below, or pick another " +
   "namespace above.";
 
-/** The clusters table. NAME, ROLE, CONNECTION PROBE, OBSERVED, CLUSTER-ID,
- *  AUTH, and one Test connection control per row.
+/** The clusters table. NAME (with the role beneath it), CONNECTION PROBE
+ *  (verdict, staleness, age and the newest probe's own reason), CLUSTER-ID,
+ *  AUTH, and one Re-read probe control per row.
  *
  *  THE PROBE COLUMN IS CALLED WHAT IT IS. It was headed REACHABLE and rendered
  *  a bare `reachable` badge with the observed instant two columns away, so a
@@ -313,21 +328,19 @@ export const NO_CLUSTER_SENTENCE =
  *  `now` is epoch milliseconds, defaulted to the caller's clock by
  *  `probeState`; a test passes one so a freshness verdict is reproducible. */
 export function renderClusterList(input, ns, now, freshSeconds) {
+  // FIVE COLUMNS, NOT EIGHT (MCP round 2, R2-2 / R2-3 / R2-4). The table was
+  // wider than its card at 1440 px -- the Re-read probe button was clipped --
+  // and a NoExitCode gloss made a row 220 px tall in a narrow REASON column.
+  // The role is the name's second line, the observation's age sits in the
+  // probe cell as it does in the wizard (MCP-28), and the newest probe's own
+  // reason is one disclosure away, its code still visible to grep for.
   const rows = itemsOf(input).map((object) => {
     const spec = object.spec || {};
     const status = object.status || {};
     const state = probeState(object, now, freshSeconds);
     return [
-      nameCell(object, ns),
-      cell(spec.role),
-      probeCell(object, now, freshSeconds),
-      when(status.observedAt),
-      // A REACHABLE READING BESIDE `NoExitCode` IS TWO PROBES (MCP-9): the
-      // reason of the newest one, said as that, and nothing beside a verdict
-      // whose own reason merely repeats it.
-      state.reason.length === 0 || VERDICT_OWN_REASONS.indexOf(state.reason) !== -1
-        ? cell(null)
-        : (laterProbeNote(state) || "<code>" + esc(state.reason) + "</code>"),
+      nameCell(object, ns) + "<span class=\"cell-sub\">" + cell(spec.role) + "</span>",
+      "<div class=\"probe-cell\">" + probeSummary(state) + laterProbeDisclosure(state) + "</div>",
       cell(status.clusterId),
       authCell(spec),
       renderTestConnection(object, false),
@@ -342,7 +355,7 @@ export function renderClusterList(input, ns, now, freshSeconds) {
     "<code>clusterId</code> is read from the broker and never from a spec.</p>" +
     "<p class=\"note\">" + PROBE_SENTENCE + "</p>" +
     table(
-      ["NAME", "ROLE", "CONNECTION PROBE", "OBSERVED", "REASON", "CLUSTER-ID", "AUTH", ""],
+      ["NAME", "CONNECTION PROBE", "CLUSTER-ID", "AUTH", ""],
       rows,
       NO_CLUSTER_SENTENCE,
       attributes,
@@ -744,7 +757,12 @@ export function renderDiscoveryPanel(view) {
   const may = v.mayOperate !== false;
   const latest = v.latestAttempt || null;
   const successful = v.lastSuccessful || null;
-  const filters = v.filters || {};
+  // WHAT THE INPUTS SHOW is what the reader typed (`v.typed`, read off the
+  // live controls before a repaint -- P13's class) over the filters last
+  // APPLIED. The two are kept apart because the applied filters are what
+  // "Show more" pages with: a cursor is bound to them, and typed text nobody
+  // submitted must not become a filter a cursor was never issued for.
+  const filters = Object.assign({}, v.filters || {}, v.typed || {});
   const state = v.state || {};
   const pending = state.phase === "pending";
   const running = latest !== null && latest.terminal === false;
@@ -1231,9 +1249,39 @@ async function readDiscoveries(api, ns, name, lifecycle) {
 // it belongs beside.
 const checkViews = new Map();
 
+/** What the reader has put into the discovery form and the topic filters,
+ *  read off the live controls, or `null` when none is on screen (P13's class).
+ *
+ *  THE WHOLE DETAIL REPAINTS on every answer this view waits for -- each read
+ *  of a followed "Test connection", the probe re-read, the discovery's own
+ *  record, a page of topics -- and it rendered those inputs from the view
+ *  alone, so text typed while a check was being followed was gone when its
+ *  next read landed. Nothing here is a credential: names and filters. */
+export function readDiscoveryTyped(node) {
+  const typed = {};
+  const text = (id, field) => {
+    const control = node.querySelector("#" + id);
+    if (control !== null && control.value !== undefined && control.value !== null) {
+      typed[field] = String(control.value);
+    }
+  };
+  const internal = node.querySelector("#discovery-internal");
+  if (internal !== null) {
+    typed.includeInternal = internal.checked === true;
+  }
+  text("discovery-expected", "expectedTopics");
+  text("topic-q", "q");
+  text("topic-prefix", "prefix");
+  text("topic-internal", "internal");
+  text("topic-errored", "errored");
+  return Object.keys(typed).length === 0 ? null : typed;
+}
+
 function paintClusterDetail(node, ns, name, parse, lifecycle, api, object, discovery, check) {
   const key = formKey(ns, DISCOVERY_FORM, name);
-  const view = Object.assign({ state: mutationFor(key).state }, discovery || {});
+  const typed = readDiscoveryTyped(node);
+  const view = Object.assign({ state: mutationFor(key).state }, discovery || {},
+    typed === null ? {} : { typed: typed });
   const checkKey = formKey(ns, CONNECTION_CHECK_FORM, name);
   const remembered = checkViews.get(checkKey);
   const checkView = Object.assign(
@@ -1522,7 +1570,16 @@ function wireDiscovery(node, ns, name, parse, lifecycle, api, object, view) {
       if (expected.length > 0) {
         request.expectedTopics = expected;
       }
-      mutation.run(() => api.startDiscovery(ns, name, request));
+      // ASKED AGAIN, NOT REPLAYED, once the inventory these parameters made is
+      // spent (P14's class): a failed or stale discovery is a new key's
+      // question, and a fresh identical one is the server's to reuse.
+      mutation.run(() => askCheck({
+        intent: key,
+        question: JSON.stringify(request),
+        held: view.latestAttempt || null,
+        spent: discoverySpent,
+        start: (token) => api.startDiscovery(ns, name, request, { attempt: token }),
+      }));
     }, lifecycle);
 
     const cancel = node.querySelector("#discovery-cancel");
@@ -1755,9 +1812,11 @@ function paintRow(node, parse, uid, html) {
     if (row.getAttribute("data-cluster-uid") !== uid) {
       continue;
     }
-    const cells = row.querySelectorAll("td");
-    if (cells.length > 2) {
-      replace(cells[2], parse(html));
+    // THE PROBE CELL BY ITS CLASS, not by counting columns: the table's
+    // columns changed once (R2-3) and a count would repaint the wrong cell.
+    const probe = row.querySelector(".probe-cell");
+    if (probe !== null) {
+      replace(probe, parse(html));
     }
   }
 }

@@ -24,6 +24,7 @@ import {
   granted,
   grantedAnywhere,
   grantedNamespaces,
+  holdsNoRole,
   mode,
   selectMode,
   sessionIdentity,
@@ -64,17 +65,17 @@ import { mountCatalog, mountCatalogDetail } from "./pages/catalog.js";
 // there, and in legacy mode `ui/client.js` refuses each call BY NAME, with a
 // sentence saying which API serves the flow.
 const ROUTES = [
-  { hash: "#/clusters", title: "Clusters", blurb: "The KafkaCluster objects this namespace can reach.", mount: mountClusters, detail: mountClusterDetail, needs: ["connectionsRead"] },
-  { hash: "#/destinations", title: "Destinations", blurb: "Saved archive locations: one location, written down once, referenced by name.", mount: mountDestinations, detail: mountDestinationDetail, needs: ["destinations"] },
+  { hash: "#/clusters", title: "Clusters", blurb: "The KafkaCluster objects this namespace can reach.", mount: mountClusters, detail: mountClusterDetail, can: "see its connections", takes: "any role", needs: ["connectionsRead"] },
+  { hash: "#/destinations", title: "Destinations", blurb: "Saved archive locations: one location, written down once, referenced by name.", mount: mountDestinations, detail: mountDestinationDetail, can: "see its saved destinations", takes: "any role", needs: ["destinations"] },
   // PLAT-10.2 gave this route a DETAIL, and the hash it is reached by is the
   // one every other list/detail pair here uses: `?name=` on the list's own
   // route. That is why the migration note is "existing deep links keep
   // working" rather than "are redirected" -- `#/schedules?ns=<ns>` was the
   // only schedules link there had ever been, and a hash with no `name`
   // reaches `mountSchedules` exactly as it always did.
-  { hash: "#/schedules", title: "Schedules", blurb: "BackupSchedule objects, their next slot and their suspend state.", mount: mountSchedules, detail: mountScheduleDetail, needs: ["schedulesRead"] },
-  { hash: "#/backups", title: "Backups", blurb: "Backup runs, each with the evidence weirkeeper recorded for it.", mount: mountBackups, detail: mountBackupDetail, needs: ["backupsRead"] },
-  { hash: "#/history", title: "History", blurb: "Completed runs over time, newest first.", mount: mountHistory, detail: mountRestoreDetail, needs: ["backupsRead", "restoresRead"] },
+  { hash: "#/schedules", title: "Schedules", blurb: "BackupSchedule objects, their next slot and their suspend state.", mount: mountSchedules, detail: mountScheduleDetail, can: "see its schedules", takes: "any role", needs: ["schedulesRead"] },
+  { hash: "#/backups", title: "Backups", blurb: "Backup runs, each with the evidence weirkeeper recorded for it.", mount: mountBackups, detail: mountBackupDetail, can: "see its backups", takes: "any role", needs: ["backupsRead"] },
+  { hash: "#/history", title: "History", blurb: "Completed runs over time, newest first.", mount: mountHistory, detail: mountRestoreDetail, can: "see its run history", takes: "any role", needs: ["backupsRead", "restoresRead"] },
   // `#/operations` CARRIES AN IDENTITY IN THE HASH and has no list: an
   // operation is always reached FROM a run -- a row, or the outcome of a
   // submission -- and a list of operations would be the backups and history
@@ -82,12 +83,12 @@ const ROUTES = [
   // "the address bar named none" is a dead end. The route and every link to
   // one run are unchanged; a visit with no run names the two lists it is
   // reached from.
-  { hash: "#/operations", title: "Operations", blurb: "One durable run: where it is, why, what it produced and whether the evidence verified.", mount: mountOperation, route: true, params: operationRouteParams, nav: false, needs: ["operationsRead"] },
-  { hash: "#/protection", title: "Protection", blurb: "Whether a recoverable backup exists, how old it is, and what was alerted about it.", mount: mountProtection, detail: mountProtectionDetail, needs: ["protection"] },
-  { hash: "#/catalog", title: "Catalog", blurb: "The durable recovery catalog: what is in the archive, whether it is available and whether it verifies.", mount: mountCatalog, detail: mountCatalogDetail, needs: ["catalogs"] },
-  { hash: "#/restore", title: "Restore", blurb: "The restore wizard: a chosen recovery point, archive, point in time, target, preflight, plan.", mount: mountRestoreWizard, route: true, params: restoreRouteParams, needs: ["restoreCreate"] },
-  { hash: "#/approvals", title: "Approvals", blurb: "Approval objects, and which key signed each one.", mount: mountApprovals, route: true, params: approvalRouteParams, needs: ["approvalsRead"] },
-  { hash: "#/keys", title: "Keys", blurb: "The TrustRoster, read-only: it is cluster-scoped and admin-only.", mount: mountKeys, cluster: true, needs: ["trustPoliciesRead"] },
+  { hash: "#/operations", title: "Operations", blurb: "One durable run: where it is, why, what it produced and whether the evidence verified.", mount: mountOperation, route: true, params: operationRouteParams, nav: false, can: "follow its operations", takes: "any role", needs: ["operationsRead"] },
+  { hash: "#/protection", title: "Protection", blurb: "Whether a recoverable backup exists, how old it is, and what was alerted about it.", mount: mountProtection, detail: mountProtectionDetail, can: "see its protection", takes: "any role", needs: ["protection"] },
+  { hash: "#/catalog", title: "Catalog", blurb: "The durable recovery catalog: what is in the archive, whether it is available and whether it verifies.", mount: mountCatalog, detail: mountCatalogDetail, can: "see its recovery catalog", takes: "any role", needs: ["catalogs"] },
+  { hash: "#/restore", title: "Restore", blurb: "The restore wizard: a chosen recovery point, archive, point in time, target, preflight, plan.", mount: mountRestoreWizard, route: true, params: restoreRouteParams, can: "start restores", takes: "the operator or administrator role", needs: ["restoreCreate"] },
+  { hash: "#/approvals", title: "Approvals", blurb: "Approval objects, and which key signed each one.", mount: mountApprovals, route: true, params: approvalRouteParams, can: "see its approvals", takes: "any role", needs: ["approvalsRead"] },
+  { hash: "#/keys", title: "Keys", blurb: "The TrustRoster, read-only: it is cluster-scoped and admin-only.", mount: mountKeys, cluster: true, can: "view trust material", takes: "the administrator role", needs: ["trustPoliciesRead"] },
 ];
 
 /** WHICH TABS THIS SESSION SEES (MCP-33), as a pure function of what the
@@ -117,6 +118,77 @@ export function visibleRoutes(routes, ns, has) {
 // is one, the union across every granted namespace otherwise.
 function sessionHas(flag, ns) {
   return typeof ns === "string" && ns.length > 0 && granted(ns, flag) ? true : grantedAnywhere(flag);
+}
+
+/** WHETHER THIS SESSION MAY USE A ROUTE AT ALL, by the same rule the tabs
+ *  are chosen by (MCP round 2, R2-14): a route is usable when the session holds
+ *  ANY flag it `needs`. The nav hid Restore from a viewer, but the address
+ *  still rendered the whole wizard with Check readiness and Create, which the
+ *  API then refused one click at a time. A route this answers `false` for
+ *  renders `renderRoleRefusal` instead of its page. Pure. */
+export function routeAllowed(route, ns, has) {
+  const ask = typeof has === "function" ? has : () => true;
+  const needs = Array.isArray((route || {}).needs) ? route.needs : [];
+  return needs.length === 0 || needs.some((flag) => ask(flag, route.cluster === true ? "" : ns));
+}
+
+/** THE ROUTE GATE'S QUESTION, PER NAMESPACE (review L5): the chosen
+ *  namespace's own grant, never the union across namespaces the tabs use. An
+ *  operator in team-b who is a viewer in team-a is refused the restore route in
+ *  team-a, which is what the API would do at every click. A cluster-scoped
+ *  route (no namespace) asks "anywhere". */
+export function routeGateHas(flag, ns) {
+  return typeof ns === "string" && ns.length > 0 ? granted(ns, flag) : grantedAnywhere(flag);
+}
+
+/** The state a route renders for a session whose role cannot use it: what the
+ *  page is for, who is signed in with which role, and whom to ask. Pure. */
+export function renderRoleRefusal(route, identity) {
+  const r = route || {};
+  const who = identity || {};
+  const roles = Array.isArray(who.roles) ? who.roles : [];
+  const where = typeof who.namespace === "string" && who.namespace.length > 0
+    ? who.namespace : "";
+  const held = roles.length === 0
+    ? "no role" + (where.length > 0 ? " in " + where : "")
+    : roles.join(", ") + (where.length > 0 ? " in " + where : "");
+  return (
+    "<section class=\"card role-refusal\" id=\"role-refusal\">" +
+    "<h2>" + esc(r.title || "") + "</h2>" +
+    "<p class=\"blurb\" id=\"role-refusal-sentence\">Your role " +
+    (where.length > 0 ? "in " + esc(where) + " " : "") + "can't " + esc(r.can || "use this page") +
+    ".</p>" +
+    "<p class=\"note\">You are signed in as " + esc(who.displayName || "") + " (" + esc(held) +
+    "). This page needs " + esc(r.takes || "a role that includes it") + ". Nothing was read " +
+    "or offered here; ask your Logweir administrator if you need it, or choose another " +
+    "namespace above.</p>" +
+    "</section>"
+  );
+}
+
+/** THE LANDING A SIGNED-IN USER WITH NO ROLE ANYWHERE SEES (MCP round 2,
+ *  R2-16): an empty navigation said nothing about why. Pure. */
+export function renderNoRole(identity) {
+  const who = identity || {};
+  return (
+    "<section class=\"card role-refusal\" id=\"no-role\">" +
+    "<h2>You have no role in any namespace yet</h2>" +
+    "<p class=\"blurb\">You are signed in as " + esc(who.displayName || "") + ", and your " +
+    "administrator has not granted you a role in any namespace, so there is nothing this " +
+    "console can show you.</p>" +
+    "<p class=\"note\">Ask your Logweir administrator for a role in the namespaces you work " +
+    "in: viewer to look, operator to back up and restore, approver to approve restores. " +
+    "Reload this page once it is granted.</p>" +
+    "</section>"
+  );
+}
+
+/** WHERE SIGN OUT LEAVES THE BROWSER (MCP round 2, R2-14b): this page with no
+ *  route. A reload kept the hash, so the sign-in page's return address was the
+ *  previous user's deep link and the next user landed on it. Pure. */
+export function signedOutAddress(location) {
+  const l = location || {};
+  return String(l.pathname || "/") + String(l.search || "");
 }
 
 /** The route list the navigation renders, exported for the suite. */
@@ -338,12 +410,28 @@ export const LONG_TOKEN_CHARS = 24;
 
 export function markLongTokens(root) {
   for (const chip of Array.from(root.querySelectorAll("td code, td .badge"))) {
-    const words = String(chip.textContent || "").split(/\s+/);
-    if (words.some((word) => word.length > LONG_TOKEN_CHARS)) {
+    const text = String(chip.textContent || "");
+    const words = text.split(/\s+/);
+    // A URL IS READ WHOLE (MCP round 2, R2-6): "s3://kafka-backups/orders"
+    // broke as "order / s" once it passed the long-token length. Up to
+    // `URL_CHIP_CHARS` it stays one line; a longer one may break like any
+    // long token, so it still cannot force a sideways scroll.
+    const url = text.indexOf(":" + "//") !== -1 && text.length <= URL_CHIP_CHARS;
+    if (!url && words.some((word) => word.length > LONG_TOKEN_CHARS)) {
       chip.setAttribute("class", (String(chip.getAttribute("class") || "") + " long").trim());
+    } else if (text.trim().length <= SHORT_CHIP_CHARS &&
+      String(chip.getAttribute("class") || "").split(/\s+/).indexOf("badge") !== -1) {
+      // A SHORT LABEL NEVER BREAKS AT ITS SPACE ("not / suspended", R2-6); a
+      // longer one ("verified by weirkeeper") still wraps between its words.
+      chip.setAttribute("class", (String(chip.getAttribute("class") || "") + " short").trim());
     }
   }
 }
+
+/** The longest URL chip kept on one line, and the longest label that never
+ *  wraps (MCP round 2, R2-6). */
+export const URL_CHIP_CHARS = 40;
+export const SHORT_CHIP_CHARS = 16;
 
 // The namespace picker. It changes the hash and nothing else -- no request is
 // issued here, and no value is stored anywhere.
@@ -430,9 +518,10 @@ export const MODE_COPY = Object.freeze({
     ]),
     colophon: Object.freeze([
       "Served by ", Object.freeze(["code", "logweir-api"]),
+      // NO REPOSITORY PATH (MCP round 2, R2-1): a signed-in user has no
+      // checkout to open `ui/README.md` in.
       ", which authorises every request against this session's grants in the namespace it " +
-        "names. The session is a cookie this page never reads. See ",
-      Object.freeze(["code", "ui/README.md"]), " for the two ways this page is served.",
+        "names. The session is a cookie this page never reads.",
     ]),
   }),
 });
@@ -607,7 +696,9 @@ function renderSession(ns) {
   button.addEventListener("click", () => {
     button.disabled = true;
     signOut().then(() => {
-      window.location.reload();
+      // A NAVIGATION WITHOUT THE HASH, not a reload (R2-14b): the next user
+      // signs in to the console's first page, not to this user's last one.
+      window.location.replace(signedOutAddress(window.location));
     }, (error) => {
       button.disabled = false;
       const failed = errorBox(error);
@@ -684,8 +775,12 @@ function render(lifecycle, context, navigated) {
     // ask to sign in (MCP-1). The probe is bounded at five seconds.
     replace(main, el("p", { class: "pending", role: "status" }, "Connecting to Logweir..."));
   } else if (main !== null) {
-    if (!current.cluster && (here.ns.length === 0 || (context.allowed.length > 0 && context.allowed.indexOf(here.ns) === -1))) {
+    if (decided === CONSOLE && holdsNoRole()) {
+      replace(main, parseFragment(renderNoRole(sessionIdentity(here.ns))));
+    } else if (!current.cluster && (here.ns.length === 0 || (context.allowed.length > 0 && context.allowed.indexOf(here.ns) === -1))) {
       replace(main, namespacePrompt(context.allowed));
+    } else if (decided === CONSOLE && !routeAllowed(current, here.ns, routeGateHas)) {
+      replace(main, parseFragment(renderRoleRefusal(current, sessionIdentity(here.ns))));
     } else if (here.name !== "" && typeof current.detail === "function") {
       replace(main, el("p", { class: "pending", role: "status" }, "Reading " + here.name + "..."));
       mounted = current.detail(main, here.ns, here.name, parseFragment, lifecycle);

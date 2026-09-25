@@ -538,8 +538,9 @@ test("a_not_ready_check_carries_its_code_its_message_and_its_remedy", () => {
   assert.match(html, /AccessDenied/);
   assert.match(html, /the object store refused the listing for this prefix/);
   assert.match(html, /Grant s3:ListBucket/);
-  assert.match(html, /<th scope="col">REMEDY<\/th>/);
-  assert.match(html, /<th scope="col">EXPIRES<\/th>/);
+  // Labelled in the cell since MCP round 2's R2-3 folded nine columns into four.
+  assert.match(html, /data-field="remedy">remedy: Grant s3:ListBucket/);
+  assert.match(html, /data-field="expires">expires /);
 });
 
 test("a_skipped_blocking_check_is_labelled_as_never_a_pass", () => {
@@ -627,8 +628,13 @@ test("the_check_table_prints_an_absent_field_rather_than_a_guess", () => {
   const html = checkTable([{ id: "a.b", state: "unknown" }], "none");
   assert.match(html, /<code>a\.b<\/code>/);
   assert.match(html, /badge-pending">unknown/);
-  const cells = html.split("<td").length - 1;
-  assert.equal(cells, 9, "every column is rendered even when the producer recorded nothing");
+  // NINE FIELDS, FOUR CELLS since MCP round 2's R2-3: every field is still
+  // printed, and an unrecorded one as absent.
+  assert.equal(html.split("<td").length - 1, 4);
+  for (const field of ["code", "gating", "message", "remedy", "scope", "observed", "expires"]) {
+    assert.match(html, new RegExp("data-field=\"" + field + "\""),
+      "every field is rendered even when the producer recorded nothing: " + field);
+  }
 });
 
 test("the_check_table_names_what_each_row_is_about", () => {
@@ -641,8 +647,7 @@ test("the_check_table_names_what_each_row_is_about", () => {
     id: "connection.authenticated", state: "notReady", code: "AuthenticationFailed",
     scope: { kind: "KafkaCluster", name: "User:backup" },
   }], "none");
-  assert.match(html, /<th scope="col">SCOPE<\/th>/);
-  assert.match(html, /KafkaCluster\/User:backup/);
+  assert.match(html, /data-field="scope">scope: KafkaCluster\/User:backup/);
 
   // An older controller's verdict carries no scope, and an absent field prints
   // as absent rather than as a guess about which object was checked.

@@ -1603,7 +1603,7 @@ impl Pass<'_> {
                 "namespace {} holds more than {} Backup objects, the most one evaluation reads; \
                  retention cannot establish that the controller refused none of the points it \
                  would count as usable, so it plans nothing. The catalog view is fine: prune \
-                 the Backup history (PLAT-05.2) and retention evaluates again.",
+                 the Backup history and retention evaluates again.",
                 self.namespace,
                 MAX_BACKUP_PAGES * BACKUP_PAGE_LIMIT as usize
             ),

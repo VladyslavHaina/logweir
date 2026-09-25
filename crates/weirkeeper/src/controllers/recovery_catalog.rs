@@ -174,7 +174,7 @@ pub const CONDITION_REASONS: &[&str] = &[
 /// rather than creating a Job it cannot address.
 pub const LEGACY_ARCHIVE_MESSAGE: &str =
     "this build syncs a catalog through spec.destinationRef only; spec.legacyArchive is \
-     PLAT-15.2's connect-an-existing-archive path and no sync Job is created for it. Create a \
+     the connect-an-existing-archive path and no sync Job is created for it. Create a \
      BackupDestination with a read-only archiveRead grant and a RecoveryCatalog that names it.";
 
 // ---------------------------------------------------------------------------

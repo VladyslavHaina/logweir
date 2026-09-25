@@ -493,7 +493,9 @@ export function preflightSentence(topicCount) {
   return (
     "At execution time Logweir will create " +
     String(topicCount) +
-    " topics with message.timestamp.type=CreateTime and retention.ms=-1 before the " +
+    // ONE TOPIC IS ONE TOPIC (MCP round 2, R2-10: "1 topics").
+    (topicCount === 1 ? " topic" : " topics") +
+    " with message.timestamp.type=CreateTime and retention.ms=-1 before the " +
     "engine runs, and will refuse if the broker is LogAppendTime and rejects the override. " +
     "This says what the run will attempt; it is not a check and nothing above has confirmed it."
   );
@@ -1232,6 +1234,21 @@ export function detailLink(route, ns, name) {
   return "<a href=\"" + esc(target) + "\">" + esc(name) + "</a>";
 }
 
+/** A covered window as ONE cell, both bounds, one per line (MCP round 2,
+ *  R2-3): two instant columns side by side were the widest pair on every
+ *  run table, each `nowrap` by MCP-7's rule. `from` and `to` are RFC 3339
+ *  strings (or anything `when` takes). */
+export function coveredCell(from, to) {
+  return "<span class=\"cell-sub-first\">from " + when(from) + "</span>" +
+    "<span class=\"cell-sub\">to " + when(to) + "</span>";
+}
+
+/** A schedule's last and next firing as ONE cell (R2-3), the same shape. */
+export function firingsCell(last, next) {
+  return "<span class=\"cell-sub-first\">last " + when(last) + "</span>" +
+    "<span class=\"cell-sub\">next " + when(next) + "</span>";
+}
+
 /** A badge. STRUCTURAL ONLY: `kind` becomes a class suffix and `text` becomes
  *  the caption. Which kind a run gets is the calling page's decision, made
  *  from the object's own recorded fields. */
@@ -1396,6 +1413,11 @@ export const DESTINATION_TEST_SENTENCE =
   "back from its status -- this page performs no I/O of its own and decides nothing.";
 
 /** The one sentence that says what a readiness result is ABOUT. */
+/** What a check still running says instead of an applicability verdict. */
+export const CHECKING_SENTENCE =
+  "The check has not finished. Whether its result applies to your current inputs is decided " +
+  "when it has one; this page reads it again until then.";
+
 export const APPLICABILITY_SENTENCE =
   "Applicability is recomputed on every read against the objects as they are now. A result " +
   "that no longer describes your current inputs is shown as out of date, never as a verdict.";
@@ -1493,6 +1515,90 @@ export function preflightVerdict(state) {
   return badge("pending", "unknown");
 }
 
+/** The approval row of a readiness check run against a DRAFT plan: `approval.state`,
+ *  `skipped`, `SubjectNotCreated` together and nothing wider -- the one blocking
+ *  row a draft cannot make ready, because no Restore exists yet for an approver
+ *  to sign (DRAFT-PREFLIGHT-NEVER-READY; the wizard's `readinessRefusal` says
+ *  why the console, not the API, applies it). */
+export function isDraftApprovalRow(check) {
+  const c = check || {};
+  return (
+    c.id === "approval.state" &&
+    c.state === "skipped" &&
+    c.code === "SubjectNotCreated"
+  );
+}
+
+/** Whether a check row gates the verdict. FAIL-CLOSED (review L2): only the two
+ *  gatings the contract names as not gating -- `advisory` and `executionOnly`
+ *  -- are left out; `blocking`, an absent gating and one this build does not
+ *  recognise (the API maps an unknown value to `null`) all count as blocking. */
+export function isBlockingRow(check) {
+  const gating = (check || {}).gating;
+  return gating !== "advisory" && gating !== "executionOnly";
+}
+
+/** Whether a row is one only the run itself can answer, and has not: an
+ *  `executionOnly` row that is `unknown` or `skipped`. An execution-only row
+ *  that says `notReady` is an answer, and is never summarised as "confirmed
+ *  later" (review L2). */
+export function answeredAtRun(check) {
+  const c = check || {};
+  return c.gating === "executionOnly" && (c.state === "unknown" || c.state === "skipped");
+}
+
+/** Whether a finished check is `unknown` for ONE reason only: its draft's
+ *  approval row. Every other blocking row is `ready`, and at least one is --
+ *  nothing checked is not everything passed -- and no execution-only row has
+ *  said `notReady`. The wizard's step 5, its Create gate and the headline below
+ *  all read this one rule. */
+export function readyButForDraftApproval(preflight) {
+  const p = preflight || {};
+  if (p.state !== "unknown" || p.terminal !== true) {
+    return false;
+  }
+  const checks = Array.isArray(p.checks) ? p.checks : [];
+  const blocking = checks.filter(isBlockingRow);
+  const others = blocking.filter((c) => !isDraftApprovalRow(c));
+  const refusedAtRun = checks.some((c) => (c || {}).gating === "executionOnly" &&
+    c.state === "notReady");
+  return blocking.some(isDraftApprovalRow) && others.length > 0 &&
+    others.every((c) => c.state === "ready") && !refusedAtRun;
+}
+
+/** A readiness result's headline (MCP round 2, R2-12; review L1).
+ *
+ *  NEVER `ready` OVER AN UNRESOLVED BLOCKING ROW. The aggregate's own badge,
+ *  with two refinements that add words and never a green one:
+ *
+ *   - A restore check `unknown` only for its draft's approval row reads
+ *     "needs approval": every other blocking check is ready, so the Restore
+ *     can be created, and creating it is what asks an approver. That row is
+ *     named for what it is and is NOT counted among the items the run
+ *     confirms.
+ *   - A `ready` check says how many execution-only rows only the run itself
+ *     can answer ("N items are confirmed when ... runs"). Only those rows, and
+ *     only while they are unknown or skipped, are summarised that way. */
+export function readinessHeadline(preflight) {
+  const p = preflight || {};
+  const later = (Array.isArray(p.checks) ? p.checks : []).filter(answeredAtRun).length;
+  const when = p.operation === "restore" ? "the restore runs" : "the run executes";
+  const laterWords = String(later) + (later === 1 ? " item is" : " items are") +
+    " confirmed when " + when;
+  if (readyButForDraftApproval(p)) {
+    return badge("pending", "needs approval") + " <span class=\"headline-qualifier\" " +
+      "data-headline=\"needs-approval\">-- every other blocking check is ready, so the " +
+      "Restore can be created; creating it requests the approval it needs before it runs" +
+      (later > 0 ? ". " + laterWords.charAt(0).toUpperCase() + laterWords.slice(1) : "") +
+      "</span>";
+  }
+  if (p.state === "ready" && later > 0) {
+    return badge("green", "ready") + " <span class=\"headline-qualifier\" " +
+      "data-headline=\"ready\">-- " + laterWords + "</span>";
+  }
+  return preflightVerdict(p.state);
+}
+
 /** One stale reason, in words, with its subject when it has one.
  *
  *  `unverifiable` IS NOT A KIND OF STALENESS and is not rendered as one. It is
@@ -1522,6 +1628,19 @@ export function applicabilityLine(preflight) {
   const p = preflight || {};
   const reasons = Array.isArray(p.staleReasons) ? p.staleReasons : [];
   const basis = Array.isArray(p.staleBasis) ? p.staleBasis : [];
+  // A CHECK STILL RUNNING HAS NO RESULT TO APPLY OR NOT (MCP round 2, R2-11).
+  // It read "does not apply to your current inputs / compared: nothing" until
+  // it settled, which says the check is out of date when it has not answered
+  // yet. Applicability is a property of a result; until there is one the
+  // line says the check is running.
+  if (p.terminal !== true && ["pending", "queued", "running"].indexOf(p.state) !== -1) {
+    return (
+      "<div class=\"applicability\" role=\"status\" data-applicability=\"checking\">" +
+      badge("pending", "checking...") +
+      "<p class=\"note\">" + esc(CHECKING_SENTENCE) + "</p>" +
+      "</div>"
+    );
+  }
   const head = p.applicable === true
     ? badge("green", "applies to your current inputs")
     : badge("unverified", "does not apply to your current inputs");
@@ -1562,20 +1681,54 @@ export function checkVerdict(state) {
  *  and an absent field prints [`ABSENT`] rather than a guess: a check with no
  *  `expiresAt` is one whose expiry the producer did not record, which is a
  *  different thing from one that never expires. */
+/** A controller-authored message, escaped, with its backticked spans shown as
+ *  code (MCP round 2, R2-10): the controller writes "`primary`" and
+ *  "`sha256:...`" and the page printed the backticks. Only a PAIRED span
+ *  becomes code; an unpaired backtick stays the character it is. */
+export function messageText(value) {
+  if (typeof value !== "string" || value.length === 0) {
+    return cell(value);
+  }
+  const parts = value.split("`");
+  if (parts.length < 3) {
+    return esc(value);
+  }
+  let out = "";
+  for (let i = 0; i < parts.length; i += 1) {
+    const last = i === parts.length - 1;
+    if (i % 2 === 1 && !last) {
+      out += "<code>" + esc(parts[i]) + "</code>";
+    } else {
+      out += (i % 2 === 1 ? "`" : "") + esc(parts[i]);
+    }
+  }
+  return out;
+}
+
 export function checkTable(checks, empty) {
+  // NINE FIELDS IN FOUR CELLS (MCP round 2, R2-3): nine columns were more
+  // than a thousand pixels wider than step 5's card at 1440 px, because the
+  // messages carry unbroken tokens -- an image digest, a signer key id -- and
+  // two instants sat side by side. Every field is still printed, an absent
+  // one as absent: the code under its check, the gating under the verdict,
+  // the remedy and the scope under the message, and the two instants one per
+  // line. The message and the remedy are prose and may break anywhere.
   const rows = (Array.isArray(checks) ? checks : []).map((c) => [
-    "<code>" + cell(c.id) + "</code>",
-    checkVerdict(c.state),
-    cell(c.gating),
-    cell(c.code),
-    cell(c.message),
-    cell(c.remedy),
-    checkScope(c.scope),
-    when(c.observedAt),
-    when(c.expiresAt),
+    "<code>" + cell(c.id) + "</code>" +
+      "<span class=\"cell-sub prose\" data-field=\"code\">" + cell(c.code) + "</span>",
+    checkVerdict(c.state) +
+      "<span class=\"cell-sub\" data-field=\"gating\">" + cell(c.gating) + "</span>",
+    "<span class=\"cell-sub-first prose\" data-field=\"message\">" + messageText(c.message) +
+      "</span>" +
+      "<span class=\"cell-sub prose\" data-field=\"remedy\">remedy: " + messageText(c.remedy) +
+      "</span>" +
+      "<span class=\"cell-sub prose\" data-field=\"scope\">scope: " + checkScope(c.scope) + "</span>",
+    "<span class=\"cell-sub-first\" data-field=\"observed\">observed " + when(c.observedAt) +
+      "</span><span class=\"cell-sub\" data-field=\"expires\">expires " + when(c.expiresAt) +
+      "</span>",
   ]);
   return table(
-    ["CHECK", "VERDICT", "GATING", "CODE", "MESSAGE", "REMEDY", "SCOPE", "OBSERVED", "EXPIRES"],
+    ["CHECK", "VERDICT", "FINDING", "WHEN"],
     rows,
     empty,
   );

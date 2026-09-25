@@ -84,6 +84,7 @@ import {
   invalidAttributes,
   mutationStatus,
   preflightVerdict,
+  readinessHeadline,
   replace,
   table,
   when,
@@ -348,11 +349,21 @@ export function renderDestinationDetail(item, view) {
     // rule the connection panel keeps): the summary is what the detail read
     // found BEFORE the test was started, and "No access test has been
     // recorded" printed above the test this page just started contradicted it.
-    (v.test ? "" : renderLastTest(d.lastTest)) +
-    renderTestPanel(d, v) +
+    "<div class=\"test-slot\" id=\"destination-test-slot\">" + renderTestSlot(d, v) + "</div>" +
     renderUsage(v.usage, v.usageError) +
     renderRotateForm(d, v)
   );
+}
+
+/** The test half of the detail: the recorded summary (until this page holds a
+ *  test of its own) and the Test access panel. ITS OWN SLOT (P13's class): a
+ *  followed test repaints this and nothing else, so the rotation form below
+ *  -- whose credential inputs no draft may keep and no re-render may carry --
+ *  is never re-rendered under a reader typing into it. */
+export function renderTestSlot(item, view) {
+  const d = item || {};
+  const v = view || {};
+  return (v.test ? "" : renderLastTest(d.lastTest)) + renderTestPanel(d, v);
 }
 
 /** The recorded `lastTest`, which is a POINTER and not a verdict of its own.
@@ -400,7 +411,9 @@ export function renderTestPanel(item, view) {
         "<fieldset class=\"form-body\"" + (v.testPending ? " disabled" : "") + ">" +
         "<div class=\"field\"><label for=\"test-roles\">roles to exercise</label>" +
         "<select id=\"test-roles\" name=\"roles\" multiple size=\"4\">" +
-        GRANT_ROLES.map((r) => "<option value=\"" + esc(r) + "\">" + esc(r) + "</option>").join("") +
+        GRANT_ROLES.map((r) => "<option value=\"" + esc(r) + "\"" +
+          ((Array.isArray(v.testRoles) ? v.testRoles : []).indexOf(r) !== -1 ? " selected" : "") +
+          ">" + esc(r) + "</option>").join("") +
         "</select>" +
         "<p class=\"help\">Choose none to exercise every configured role.</p></div>" +
         "<div class=\"actions\"><button type=\"submit\">Test access</button></div>" +
@@ -465,7 +478,7 @@ export function renderPreflight(preflight) {
   const binding = p.binding || {};
   return (
     "<div class=\"preflight-result\" id=\"preflight-" + esc(String(p.id || "")) + "\">" +
-    "<p class=\"preflight-head\">" + preflightVerdict(p.state) +
+    "<p class=\"preflight-head\">" + readinessHeadline(p) +
     " <code>" + cell(p.id) + "</code> " + cell(p.operation) + "</p>" +
     applicabilityLine(p) +
     facts([
@@ -1231,7 +1244,9 @@ export async function mountDestinationDetail(node, ns, name, parse, lifecycle, d
   }
 }
 
-function paintDetail(node, ns, name, parse, lifecycle, api, item, extra) {
+/** The detail's view: the page's own records (the test it started, the
+ *  rotation's draft and mutation) under what `extra` carries. */
+function detailView(ns, name, extra) {
   const testKey = formKey(ns, TEST_FORM, name);
   const rotateKey = formKey(ns, ROTATE_FORM, name);
   const given = extra || {};
@@ -1239,7 +1254,7 @@ function paintDetail(node, ns, name, parse, lifecycle, api, item, extra) {
     testViews.set(testKey, { test: given.test, testStopped: given.testStopped === true });
   }
   const remembered = testViews.get(testKey) || {};
-  const view = Object.assign(
+  return Object.assign(
     {
       mayOperate: mayOperate(ns),
       testState: mutationFor(testKey).state,
@@ -1258,9 +1273,38 @@ function paintDetail(node, ns, name, parse, lifecycle, api, item, extra) {
       testStopped: given.test ? given.testStopped === true : remembered.testStopped === true,
     },
   );
+}
+
+function paintDetail(node, ns, name, parse, lifecycle, api, item, extra) {
+  const view = detailView(ns, name, extra);
   replace(node, parse(renderDestinationDetail(item, view)));
   wireTest(node, ns, name, parse, lifecycle, api, item, view);
   wireRotate(node, ns, name, parse, lifecycle, api, item, view);
+}
+
+/** The roles selected on the Test access form, read off the live select. */
+export function readTestRoles(node) {
+  const select = node.querySelector("#test-roles");
+  if (select === null || select.options === undefined || select.options === null) {
+    return [];
+  }
+  return Array.prototype.filter.call(select.options, (o) => o.selected === true)
+    .map((o) => String(o.value));
+}
+
+/** Repaints the test half alone -- the answer a followed test waits for is
+ *  about that half and nothing else -- or the whole detail when the slot is
+ *  not on screen. */
+function paintTest(node, ns, name, parse, lifecycle, api, item, extra) {
+  const slot = node.querySelector("#destination-test-slot");
+  if (slot === null) {
+    paintDetail(node, ns, name, parse, lifecycle, api, item, extra);
+    return;
+  }
+  // THE ROLES CHOSEN FOR THE NEXT TEST survive the repaint of this one.
+  const view = Object.assign(detailView(ns, name, extra), { testRoles: readTestRoles(node) });
+  replace(slot, parse(renderTestSlot(item, view)));
+  wireTest(node, ns, name, parse, lifecycle, api, item, view);
 }
 
 /** A source selector shows its own inputs and hides the rest, as the reader
@@ -1398,11 +1442,11 @@ function wireTest(node, ns, name, parse, lifecycle, api, item, view) {
     if (state.phase === "succeeded") {
       const made = (state.result || {}).item || null;
       const extra = { usage: view.usage, usageError: view.usageError, test: made, testStopped: false };
-      paintDetail(node, ns, name, parse, lifecycle, api, item, extra);
+      paintTest(node, ns, name, parse, lifecycle, api, item, extra);
       followDestinationTest(node, ns, name, parse, lifecycle, api, item, view, made);
       return;
     }
-    paintDetail(node, ns, name, parse, lifecycle, api, item, {
+    paintTest(node, ns, name, parse, lifecycle, api, item, {
       usage: view.usage, usageError: view.usageError,
     });
   }, lifecycle);
@@ -1440,7 +1484,7 @@ async function followDestinationTest(node, ns, name, parse, lifecycle, api, item
   const mine = () => ((testViews.get(key) || {}).test || {}).id === (first || {}).id;
   const paint = (stopped) => {
     if (active(lifecycle) && mine()) {
-      paintDetail(node, ns, name, parse, lifecycle, api, item, {
+      paintTest(node, ns, name, parse, lifecycle, api, item, {
         usage: view.usage, usageError: view.usageError, test: current, testStopped: stopped,
       });
     }
@@ -1503,8 +1547,11 @@ function wireRotate(node, ns, name, parse, lifecycle, api, item, view) {
       mountDestinationDetail(node, ns, name, parse, lifecycle, api);
       return;
     }
+    // THE NEWEST TEST, not the one this wire was handed: a followed test
+    // repaints its own slot and does not re-wire this form, so `view.test`
+    // may be older than the test on screen.
     paintDetail(node, ns, name, parse, lifecycle, api, item, {
-      usage: view.usage, usageError: view.usageError, test: view.test,
+      usage: view.usage, usageError: view.usageError,
     });
     if (state.phase === "failed") {
       focusFirstProblem(node, "#destination-rotate-status");
