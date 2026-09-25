@@ -5689,6 +5689,34 @@ mod p12_not_attempted_classes {
                 "{transient}"
             );
         }
+        // The evidence-fetch Job path (its real producer runs in
+        // `backup_controller.rs::a_denied_relay_is_retried_and_an_absent_one_is_not`):
+        // a denial and a relay's own framing failure are transient; an object
+        // over the relay's cap is a fact about the object.
+        for relay in [
+            format!(
+                "{}logweir/drills/r1.json with the evidenceRead grant (AccessDenied); nothing \
+                 was verified",
+                weirkeeper::verification::EVIDENCE_FETCH_UNREADABLE_PREFIX
+            ),
+            format!(
+                "{} carried no result document; nothing was verified",
+                weirkeeper::verification::EVIDENCE_FETCH_RELAY_PREFIX
+            ),
+        ] {
+            assert_eq!(
+                not_attempted_class(&relay),
+                NotAttemptedClass::Transient,
+                "{relay}"
+            );
+        }
+        assert_eq!(
+            not_attempted_class(
+                "logweir/drills/r1.json is larger than the 1048576-byte cap an evidence fetch \
+                 relays; nothing was verified"
+            ),
+            NotAttemptedClass::Final
+        );
         let elsewhere = weirkeeper::destination::legacy_backup_evidence_scope(
             "s3://team-b-archive/orders",
             Some("s3://kafka-backups/logweir"),

@@ -1949,6 +1949,8 @@ async fn evidence_fetch_pass(
                     }
                 }
             };
+            // A TRANSIENT relay failure is retried with the next Job (P12).
+            let (result, retry) = crate::evidence_fetch::relayed_schedule(result, attempt, now);
             write_fetch_verdict(
                 backups,
                 backup,
@@ -1960,7 +1962,7 @@ async fn evidence_fetch_pass(
                     Some(&job_ref),
                     attempt,
                     Some(presence),
-                    None,
+                    retry,
                 ),
                 facts,
                 now,

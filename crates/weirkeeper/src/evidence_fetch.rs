@@ -62,6 +62,9 @@ use crate::check::{self, job as cjob, limits, plan as cplan, policy::ChecksPolic
 use crate::crds::ObservedJobRef;
 use crate::destination::{ResolvedDestination, ResolvedGrant};
 use crate::job::{RunnerImage, RunnerOwner};
+use crate::verification::{
+    EVIDENCE_FETCH_RELAY_PREFIX as RELAY, EVIDENCE_FETCH_UNREADABLE_PREFIX as UNREADABLE,
+};
 
 /// How many Jobs one run's evidence may take: the first attempt and the three
 /// retries D2 §3.9 step 5 schedules at +1 m, +5 m and +15 m.
@@ -360,9 +363,7 @@ fn answer<'a>(
     cap: u64,
 ) -> Answer<'a> {
     let Some(entry) = results.iter().find(|e| e.key == key && e.stream == stream) else {
-        return Answer::Unreadable(format!(
-            "the evidence-fetch relay carried no answer for {key}"
-        ));
+        return Answer::Unreadable(format!("{RELAY} carried no answer for {key}"));
     };
     if entry.present {
         // THE CAP IS A REFUSAL, NOT A PREFIX. A truncated object's relayed
@@ -376,7 +377,7 @@ fn answer<'a>(
         }
         let Some(bytes) = relay.stream(stream) else {
             return Answer::Unreadable(format!(
-                "the evidence-fetch relay reported {key} present and relayed no bytes for it"
+                "{RELAY} reported {key} present and relayed no bytes for it"
             ));
         };
         // The end frame's per-stream digest is already verified by the
@@ -384,7 +385,7 @@ fn answer<'a>(
         // relay contradicts itself.
         if entry.sha256.as_deref() != Some(logweir_core::ids::sha256_prefixed(bytes).as_str()) {
             return Answer::Unreadable(format!(
-                "the evidence-fetch relay's digest for {key} does not describe the bytes it \
+                "{RELAY}'s digest for {key} does not describe the bytes it \
                  relayed"
             ));
         }
@@ -403,7 +404,7 @@ fn answer<'a>(
         }
         if entry.bytes != Some(len) {
             return Answer::Unreadable(format!(
-                "the evidence-fetch relay declared {} bytes for {key} and relayed {len}; \
+                "{RELAY} declared {} bytes for {key} and relayed {len}; \
                  nothing was verified",
                 entry
                     .bytes
@@ -415,11 +416,10 @@ fn answer<'a>(
     match entry.code {
         Some(CheckCode::ObjectNotFound) => Answer::NotFound,
         Some(code) => Answer::Unreadable(format!(
-            "the evidence-fetch Job could not read {key} with the evidenceRead grant ({code}); \
-             nothing was verified"
+            "{UNREADABLE}{key} with the evidenceRead grant ({code}); nothing was verified"
         )),
         None => Answer::Unreadable(format!(
-            "the evidence-fetch relay reported {key} absent without a code; nothing was verified"
+            "{RELAY} reported {key} absent without a code; nothing was verified"
         )),
     }
 }
@@ -438,7 +438,7 @@ pub fn read_relay(relay: &CheckRelay, request: &Request) -> (Presence, Relayed) 
                 Presence::Unknown,
                 Relayed::Unread {
                     detail: format!(
-                        "the evidence-fetch relay's result document did not verify ({}); nothing \
+                        "{RELAY}'s result document did not verify ({}); nothing \
                          was verified",
                         e.code()
                     ),
@@ -449,9 +449,7 @@ pub fn read_relay(relay: &CheckRelay, request: &Request) -> (Presence, Relayed) 
             return (
                 Presence::Unknown,
                 Relayed::Unread {
-                    detail: "the evidence-fetch relay carried no result document; nothing was \
-                             verified"
-                        .to_string(),
+                    detail: format!("{RELAY} carried no result document; nothing was verified"),
                 },
             )
         }
@@ -1206,6 +1204,42 @@ pub fn scheduled(
     let retry = retry_after(attempt, now);
     let detail =
         controller_read_detail(result.detail.as_deref().unwrap_or_default(), attempt, retry);
+    (
+        crate::verification::VerificationResult {
+            detail: Some(detail),
+            ..result
+        },
+        retry,
+    )
+}
+
+/// A RELAYED attempt's verdict, with the schedule when it failed transiently —
+/// PoC P12's class sweep of the Job path. A relay the store answered with a
+/// denial or a timeout, or one whose own framing did not hold (D2 §3.9 step
+/// 5's "relay unreadable"), used to be final after one Job; it now takes the
+/// same +1 m, +5 m, +15 m schedule a Job that did not finish takes. A relay
+/// that says the document is not there, or that it is over the relay's cap,
+/// is final as before.
+#[must_use]
+pub fn relayed_schedule(
+    result: crate::verification::VerificationResult,
+    attempt: u32,
+    now: DateTime<Utc>,
+) -> (
+    crate::verification::VerificationResult,
+    Option<DateTime<Utc>>,
+) {
+    use crate::verification::{not_attempted_class, NotAttemptedClass, VerificationVerdict};
+    let transient = result.result == VerificationVerdict::NotAttempted
+        && result
+            .detail
+            .as_deref()
+            .is_some_and(|d| not_attempted_class(d) == NotAttemptedClass::Transient);
+    if !transient {
+        return (result, None);
+    }
+    let retry = retry_after(attempt, now);
+    let detail = failed_detail(result.detail.as_deref().unwrap_or_default(), attempt, retry);
     (
         crate::verification::VerificationResult {
             detail: Some(detail),

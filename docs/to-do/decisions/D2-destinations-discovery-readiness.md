@@ -550,6 +550,20 @@ the evidence destination.
 `observe_archive` (`backup.rs:693`), `observe_scorecard` (`restore.rs:1570`) and
 `verify_oracle` (`verification.rs:703`).
 
+**Amended 2026-09-24 (PoC P12): the controller's own read takes step 5's
+schedule.** A read the controller makes itself — the global handle for a
+legacy object, or a `ControllerIdentity` destination's handle — used to have one
+chance, and its `NotAttempted` was final even when the cause was a credential
+that arrived later. A TRANSIENT failure of that read (a store error that is not
+`NotFound`, unreadable trust, a scorecard read that produced nothing) is now
+recorded as attempt 1 with `observation.{mode: ArchiveHandle |
+ControllerIdentity, attempt, retryAfter}` and read again at +1 m, +5 m and
++15 m. A definite `NotFound` is never read again. Because the controller's own
+credential reaches it only through its environment, each controller process
+also reads an eligible unverified run once more after its schedule is spent,
+which is how a created or rotated `logweir-evidence-ro` takes effect. See
+`docs/kubernetes.md` §15.1b.
+
 ### 3.10 Scope of the global handle and the `ControllerIdentity` store cache
 
 - **Global handle limits.** `Context::archive` (`controllers/mod.rs`, the `archive`

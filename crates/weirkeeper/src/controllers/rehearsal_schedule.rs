@@ -2062,11 +2062,16 @@ pub const VERDICT_WAIT_SECONDS: i64 = 3600;
 /// AMENDED FOR ONE SOURCE (legacy-point-restore, PoC P5): an INLINE-ARCHIVE
 /// run read through the controller's global handle now publishes
 /// `NotAttempted`, naming the key, when that read produced nothing
-/// (`restore::unread_scorecard_verdict`, which states why). A rehearsal over
-/// such a point therefore records `VerificationNotAttempted` at once rather
-/// than `EvidenceVerdictNotReached` after this grace. Everything else above
-/// stands: a `Destination` read that fails still writes no block, and a lost
-/// second patch is still covered only by this grace.
+/// (`restore::unread_scorecard_verdict`, which states why).
+///
+/// AMENDED AGAIN (PoC P12): so does a `Destination` (`ControllerIdentity`)
+/// read — the "permanent" shape above is gone, because both reads are now
+/// retried on the evidence-fetch schedule and a retry needs a recorded
+/// attempt. Such a `NotAttempted` carries `observation.retryAfter` while an
+/// attempt is scheduled, which [`verdict_owed`] reads as OWED (the whole
+/// schedule is about 21 minutes, inside [`VERDICT_WAIT_SECONDS`]), and the
+/// spent one is the reached verdict (`VerificationNotAttempted`). What is left
+/// for this grace is a lost second patch.
 pub const UNRECORDED_VERDICT_GRACE_SECONDS: i64 = 300;
 
 /// `lastFailed.reason` for an exit-0 rehearsal whose evidence verdict was

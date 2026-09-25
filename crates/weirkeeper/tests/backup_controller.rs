@@ -13734,6 +13734,65 @@ mod evidence_fetch_job {
             );
         }
     }
+
+    /// **PoC P12's CLASS SWEEP, THE JOB PATH: A DENIED RELAY IS RETRIED; AN
+    /// ABSENT DOCUMENT IS NOT.** A relay whose store answered the grant with
+    /// `AccessDenied` (a grant Secret an operator may yet fix) used to be final
+    /// after one Job; it now schedules attempt 2 at +1 m exactly like a Job that
+    /// did not finish. A relay that says the receipt is not there is a fact
+    /// about the archive and schedules nothing.
+    ///
+    /// KILLS: `relayed_schedule` scheduling nothing (the denial stays final);
+    /// scheduling an absence.
+    #[tokio::test]
+    async fn a_denied_relay_is_retried_and_an_absent_one_is_not() {
+        let at = utc(2026, 11, 9, 3, 22);
+        for (code, retried) in [
+            (CheckCode::AccessDenied, true),
+            (CheckCode::ObjectNotFound, false),
+        ] {
+            let (v, o) = pending(1, Some(&ev_name(1)));
+            let backup = terminal_backup(
+                &logweir_core::ids::sha256_prefixed(&receipt()),
+                Some(v),
+                Some(o),
+            );
+            let s = sidecar();
+            let log = relay_log(
+                vec![
+                    entry(RECEIPT_KEY, Stream::EvidencePayload, None, Some(code)),
+                    entry(SIDECAR_KEY, Stream::EvidenceSidecar, Some(&s), None),
+                ],
+                None,
+                Some(&s),
+            );
+            let mut routes = evidence_routes(
+                1,
+                Some(ev_job(&ev_name(1), Some("Complete"), UID)),
+                vec![],
+                vec![ev_pod(EV_JOB_UID, 0)],
+                log,
+            );
+            routes.extend(terminal_runner_routes(secret_backed_destination()));
+            let bodies = run(&backup, routes, at).await;
+            let last = patched_statuses(&bodies)
+                .last()
+                .cloned()
+                .expect("the verdict");
+            let retry = &last["evidence"]["observation"]["retryAfter"];
+            let detail = last["evidence"]["verification"]["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            if retried {
+                assert_eq!(retry, &json!("2026-11-09T03:23:00Z"), "{code}: {last}");
+                assert!(detail.contains("attempt 2 starts at"), "{code}: {detail}");
+            } else {
+                assert!(retry.is_null(), "{code}: {last}");
+                assert!(!detail.contains("attempt 2"), "{code}: {detail}");
+            }
+        }
+    }
 }
 
 // ===========================================================================

@@ -1052,6 +1052,19 @@ pub const VERIFICATION_TASK_INCOMPLETE_PREFIX: &str = "the verification task did
 /// read, so it is read again on the retry schedule and then stops.
 pub const UNREAD_SCORECARD_PREFIX: &str = "the runner reported scorecard `";
 
+/// How an evidence-fetch Job's relay begins when the store answered its grant
+/// with an error code that is not `NotFound` — a denial, a timeout: transient,
+/// and the Job is retried on D2 §3.9 step 5's schedule (PoC P12's class
+/// sweep; it used to be final after one Job).
+pub const EVIDENCE_FETCH_UNREADABLE_PREFIX: &str = "the evidence-fetch Job could not read ";
+
+/// How an evidence-fetch relay's own integrity failures begin — no result
+/// document, one that did not verify, an object present with no bytes, a
+/// length or digest that does not describe the bytes: D2 §3.9 step 5's
+/// "relay unreadable", retried with a new Job. (An object over the relay's
+/// cap is a fact about the object, not the relay, and is final.)
+pub const EVIDENCE_FETCH_RELAY_PREFIX: &str = "the evidence-fetch relay";
+
 /// What a CONTROLLER-SIDE `NotAttempted` says about trying again — PoC defect
 /// P12.
 ///
@@ -1096,6 +1109,8 @@ pub fn not_attempted_class(detail: &str) -> NotAttemptedClass {
         ROSTER_UNREADABLE_DETAIL,
         VERIFICATION_TASK_INCOMPLETE_PREFIX,
         UNREAD_SCORECARD_PREFIX,
+        EVIDENCE_FETCH_UNREADABLE_PREFIX,
+        EVIDENCE_FETCH_RELAY_PREFIX,
     ];
     if transient.iter().any(|prefix| detail.starts_with(prefix)) {
         NotAttemptedClass::Transient
