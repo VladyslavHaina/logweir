@@ -486,7 +486,7 @@ pub fn migrate_roster(args: &MigrateArgs) -> Result<String, TrustError> {
          # roster records no lifecycle. Each key declares EXACTLY ONE usage (CEL rule G8).\n\
          # No ConsoleConfirmation key is ever synthesised.\n\
          # The roster is NOT deleted: a rollback still reads it, unchanged, and nothing\n\
-         # consults this policy for a verification or an approval until PLAT-19.1's\n\
+         # consults this policy for a verification or an approval until the policy\n\
          # verification worker lands (docs/keys.md).\n",
         object
             .pointer("/metadata/name")

@@ -253,7 +253,7 @@ pub fn mint_standing(args: &ApproveArgs) -> Result<String, String> {
             "--approver and --ticket are not used with --standing: version 1.0.0 of the standing \
              rehearsal authorization carries neither field, so a value given here would NOT be \
              signed and an operator would believe their ticket was bound when it was not. \
-             PLAT-19.2 adds `requester` and `ticket` to the document."
+             Those fields belong to a later version of the document."
                 .to_string(),
         );
     }

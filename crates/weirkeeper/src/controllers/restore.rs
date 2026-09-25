@@ -1163,7 +1163,7 @@ fn admit_standing(
         return refused(format!(
             "it verified under key {key_id}, whose usages are [{}]; a rehearsal in the current \
              format is authorised only by GovernedApproval; ConsoleConfirmation requires \
-             PLAT-19.2's immutable policy-mode binding and EvidenceSigning never authorises",
+             the immutable policy-mode binding and EvidenceSigning never authorises",
             key.trust
                 .usages
                 .iter()
@@ -6074,7 +6074,7 @@ async fn write_plan_config_map(
                     restore = %name,
                     namespace = %namespace,
                     config_map = %cm_name,
-                    "adopting the exact mutable plan left by a pre-PLAT-01 controller crash; \
+                    "adopting the exact mutable plan an earlier controller release left when it crashed; \
                      the new Job independently pins and verifies these bytes before data access"
                 );
                 Ok(())

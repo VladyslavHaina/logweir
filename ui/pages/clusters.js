@@ -313,8 +313,9 @@ export const NO_CLUSTER_SENTENCE =
   "No KafkaCluster in this namespace yet. Create one with the form below, or pick another " +
   "namespace above.";
 
-/** The clusters table. NAME, ROLE, CONNECTION PROBE, OBSERVED, CLUSTER-ID,
- *  AUTH, and one Test connection control per row.
+/** The clusters table. NAME (with the role beneath it), CONNECTION PROBE
+ *  (verdict, staleness, age and the newest probe's own reason), CLUSTER-ID,
+ *  AUTH, and one Re-read probe control per row.
  *
  *  THE PROBE COLUMN IS CALLED WHAT IT IS. It was headed REACHABLE and rendered
  *  a bare `reachable` badge with the observed instant two columns away, so a

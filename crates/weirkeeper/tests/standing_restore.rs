@@ -461,7 +461,10 @@ fn console_confirmation_alone_never_admits_a_current_format_standing_restore() {
     );
     assert!(verdict.is_terminal());
     assert!(verdict.to_string().contains("ConsoleConfirmation"));
-    assert!(verdict.to_string().contains("PLAT-19.2"));
+    // In words, not by tracker task (R2-13).
+    assert!(verdict
+        .to_string()
+        .contains("immutable policy-mode binding"));
 }
 
 /// And a rehearsal whose `spec.authorization` names nothing is terminal, not

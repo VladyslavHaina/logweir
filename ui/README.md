@@ -202,6 +202,7 @@ authorisation story is "the API server evaluated the viewer's RBAC".
 | `tests/console-ux.spec.js` | **the console UX batch** (the human-like pass's MCP-1...MCP-34): the signed-out state, the header, the error box, the one-step wizard and its address, the point tables, the parallel and progressive reads, the two new projections, the forms and empty states, the timestamp formatter, and the lint that keeps internal task ids out of shipped strings -- each row with the behaviour it replaced. |
 | `tests/legacy-point.spec.js` | **a `v0.1.5` point after the upgrade** (PoC P3, P5, P6): the evidence bucket a point with no destination starts in, the readiness sentence, the Restore fetch commands' bucket and the catalog sync-mode help -- each with its negative control. |
 | `tests/typed-input.spec.js` | **P13 and its class**: every form that repaints when a read lands keeps what was typed -- the readiness panel, a connection's discovery form and filters, a destination's rotation form -- each row typing first and then letting the read land. |
+| `tests/mcp-round2.spec.js` | **the human-like pass, round 2**: the running check's "checking...", the readiness headline and its one rule with step 5 and Create, the role gate and the no-role landing, sign out forgetting the address, the folded tables, the chips that stay whole, the message code spans, the picker's row and the footer -- each with the behaviour it replaced. |
 | `tests/check-intent.spec.js` | **P14 and its class**: a check asked again replays only while it can still be the answer -- the spent rule, `askCheck`, and the schedule form, the readiness panel and *Discover topics* over D0's replay rule, modelled. |
 | `tests/preview-server.js` | a development tool, never a test: serves this directory over the fixtures under `tests/fixtures/preview/`. See *Previewing with fixtures*. |
 
@@ -1526,6 +1527,32 @@ exactly as long as the check it named can still be the answer:
 
 Restore step 5, *Test access* and *Test connection* keep their per-click
 tokens: each of those clicks is a new check by design.
+
+### Round 2 of the human-like pass
+
+* **A route the session cannot use says so** (`app.js`'s `routeAllowed`, the
+  same rule the tabs use): a viewer who opens the Restore address reads "Your
+  role in <ns> can't start restores" and the role it takes, instead of an
+  actionable wizard the API refuses click by click. The catalog's Connect
+  archive form and the governed countersign submit follow `catalogConnect` and
+  `approvalSubmit` the same way. A session with no role anywhere lands on a
+  sentence saying so and whom to ask.
+* **Sign out leaves the browser on the console's address with no route**, so
+  the next user signs in to the first page, not to the previous user's deep
+  link.
+* **The readiness headline.** A restore check that is `unknown` only because
+  its draft's `approval.state` is `skipped`/`SubjectNotCreated` -- every other
+  blocking row `ready`, at least one of them -- reads "ready -- N items are
+  confirmed when the restore runs" (that row plus every execution-only row).
+  Any other unknown or skipped blocking row keeps the aggregate's own word, and
+  step 5's Done, the Create gate and the headline read the one predicate
+  (`render.js`'s `readyButForDraftApproval`). A check still running says
+  "checking...", not "does not apply".
+* **Tables fit their card at 1440 and 1024 px.** Columns that described one
+  thing were folded into it (a run's slot under its name, a window's two
+  instants in one cell, a check's code, gating, remedy, scope and instants
+  under its id, verdict and message); every field is still printed. A table
+  that still scrolls carries edge shadows.
 
 ### A repaint keeps what the reader typed
 
