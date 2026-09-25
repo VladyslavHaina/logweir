@@ -1594,6 +1594,11 @@ fn release_note_items(notes: &str) -> Vec<(u32, String)> {
 /// `#### N.` sections in turn fails this test ten times out of ten; so does
 /// pointing row 9 back at `docs/stability.md` alone, and dropping one of the
 /// six required upgrade actions.
+///
+/// The count has since grown to twenty (items 11–16 from the lab and PoC
+/// rounds, 17–20 from the PoC's in-place upgrades: P9, P11, P12, P14). The
+/// notes as they stood at `4e58d330`, with sixteen items, fail the twenty pin,
+/// and so does deleting any one of items 17–20 (release-docs-final, 2026-09-25).
 #[test]
 fn the_release_notes_carry_every_owed_operator_action() {
     let notes = read("docs/release-notes.md");
@@ -1619,9 +1624,9 @@ fn the_release_notes_carry_every_owed_operator_action() {
     let numbers: Vec<u32> = items.iter().map(|(n, _)| *n).collect();
     assert_eq!(
         numbers,
-        (1..=16).collect::<Vec<u32>>(),
-        "the release entry must carry exactly sixteen operator-facing changes, `#### 1.` to \
-         `#### 16.` in order; found {numbers:?}"
+        (1..=20).collect::<Vec<u32>>(),
+        "the release entry must carry exactly twenty operator-facing changes, `#### 1.` to \
+         `#### 20.` in order; found {numbers:?}"
     );
 
     for ((number, body), (item, token)) in items.iter().zip([
@@ -1647,6 +1652,11 @@ fn the_release_notes_carry_every_owed_operator_action() {
         ("the manual-run pool", "ConcurrencyLimited"),
         // TRUSTPOLICY-DELETE-DROPS-REVOCATION (2026-09-24): the compromise guard.
         ("the compromise guard", "logweir.dev/compromise-revocation"),
+        // The PoC rounds' later items (release-docs-final, 2026-09-25): P9, P11, P12 and P14.
+        ("an admitted Restore's Approval is a record", "RestoreAdmitted"),
+        ("one catalog per destination", "DuplicateCatalog"),
+        ("a failed controller read is read again", "retryAfter"),
+        ("a readiness replay names its expiry", "staleBasis"),
     ]) {
         assert!(
             body.contains(token),
