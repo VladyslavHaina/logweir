@@ -84,6 +84,7 @@ import {
   invalidAttributes,
   mutationStatus,
   preflightVerdict,
+  readinessHeadline,
   replace,
   table,
   when,
@@ -477,7 +478,7 @@ export function renderPreflight(preflight) {
   const binding = p.binding || {};
   return (
     "<div class=\"preflight-result\" id=\"preflight-" + esc(String(p.id || "")) + "\">" +
-    "<p class=\"preflight-head\">" + preflightVerdict(p.state) +
+    "<p class=\"preflight-head\">" + readinessHeadline(p) +
     " <code>" + cell(p.id) + "</code> " + cell(p.operation) + "</p>" +
     applicabilityLine(p) +
     facts([

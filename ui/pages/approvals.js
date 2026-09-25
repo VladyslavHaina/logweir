@@ -44,7 +44,7 @@
 // rejected attempt and not a failure of this page -- and this page never offers
 // to reuse an Approval bound to another subject or another execution.
 
-import { apiClient } from "../client.js";
+import { apiClient, granted } from "../client.js";
 import {
   active,
   cancelled,
@@ -1186,7 +1186,13 @@ export function renderCountersignPanel(view) {
         "confirmation's documents (approvalPacketRead). Ask for them, or read them with " +
         "kubectl from Approval <code>" + esc(confirmation.metadata.name) + "</code>.</p>") +
     "<pre class=\"copy\">" + esc(COUNTERSIGN_COMMAND) + "</pre>" +
-    "<form id=\"countersign-form\" novalidate" + (pending ? " aria-busy=\"true\"" : "") + ">" +
+    // A ROLE THAT CANNOT SUBMIT IS NOT OFFERED THE FORM (MCP round 2, R2-14).
+    (v.maySubmit === false
+      ? "<p class=\"note\" id=\"countersign-read-only\">This login may read the governed " +
+        "approval and not submit one: that needs the approver role, held by someone other " +
+        "than the requester.</p></section>"
+      : "") +
+    (v.maySubmit === false ? "" : "<form id=\"countersign-form\" novalidate" + (pending ? " aria-busy=\"true\"" : "") + ">" +
     "<fieldset class=\"form-body\"" + (pending ? " disabled" : "") + ">" +
     "<div class=\"field\"><label for=\"countersigned-sidecar\">approval.sig (countersigned)" +
     "</label><textarea id=\"countersigned-sidecar\" name=\"sidecarBytes\" rows=\"6\" " +
@@ -1199,7 +1205,7 @@ export function renderCountersignPanel(view) {
     "</fieldset>" +
     "<div class=\"form-status\" id=\"countersign-status\" tabindex=\"-1\">" +
     mutationStatus(state, { kind: "Approval", name: s.approvalName }) +
-    "</div></form></section>"
+    "</div></form></section>")
   );
 }
 
@@ -1324,6 +1330,7 @@ export async function mountApprovals(node, ns, route, parse, deps, lifecycle) {
       return;
     }
     const view = approvalFormView(loaded);
+    view.maySubmit = granted(ns, "approvalSubmit");
     replace(node, parse(renderApprovalSubject(view)));
     if (countersignOffered(view)) {
       wireCountersign(node, view, parse, api, lifecycle);

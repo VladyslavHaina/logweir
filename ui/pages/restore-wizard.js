@@ -121,6 +121,8 @@ import {
   announce,
   listVerifiedNote,
   flagBadge,
+  isDraftApprovalRow,
+  readyButForDraftApproval,
   when,
   windowMessage,
 } from "../render.js";
@@ -2885,18 +2887,16 @@ export function readinessRefusal(state, prepared) {
       .filter((c) => (c || {}).gating === "blocking");
     const blocking = gating.filter((c) => (c || {}).state !== "ready");
     const others = blocking.filter((c) => !isDraftApprovalRow(c));
+    // ONE RULE FOR THE GATE, THE STEPPER AND THE HEADLINE (`render.js`'s
+    // `readyButForDraftApproval`), so step 5 cannot read Done under a
+    // headline that says anything but ready (MCP round 2, R2-12).
     // THE ONE ROW A DRAFT CANNOT MAKE READY (DRAFT-PREFLIGHT-NEVER-READY). See
     // [`isDraftApprovalRow`]: every blocking check but that one is `ready`, the
     // aggregate is `unknown` for that reason alone, and the Restore this click
     // creates is exactly what turns the row into a real approval verdict. At
     // least one OTHER blocking check must have come back `ready`, for the
     // aggregate's own reason: nothing checked is not everything passed.
-    if (
-      result.state === "unknown" &&
-      others.length === 0 &&
-      blocking.length > 0 &&
-      gating.some((c) => c.state === "ready")
-    ) {
+    if (readyButForDraftApproval(result)) {
       return null;
     }
     const failing = (others.length > 0 ? others : blocking)
@@ -2938,14 +2938,7 @@ export function readinessRefusal(state, prepared) {
  *  `SubjectNotCreated` code together. `approval.state` `notReady` (an Approval
  *  that exists and does not verify), a `skipped` row with another code, or any
  *  other check that is `unknown` or `skipped` all still refuse by id and code. */
-export function isDraftApprovalRow(check) {
-  const c = check || {};
-  return (
-    c.id === "approval.state" &&
-    c.state === "skipped" &&
-    c.code === "SubjectNotCreated"
-  );
-}
+export { isDraftApprovalRow };
 
 /** Said when no readiness check has run for the plan on screen.
  *

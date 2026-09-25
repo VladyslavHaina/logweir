@@ -91,7 +91,7 @@ import {
   readD3,
 } from "../operation-watch.js";
 import { FINGERPRINT_COMMAND } from "./keys.js";
-import { apiClient } from "../client.js";
+import { apiClient, granted } from "../client.js";
 import {
   REDACTION_MARKER,
   catalogPointOffer,
@@ -653,6 +653,17 @@ export function renderConnectForm(view) {
   const unmatched = (v.errors || {}).unmatched;
   const state = v.state || { phase: "idle" };
   const pending = state.phase === "pending";
+  // A ROLE THAT CANNOT CONNECT AN ARCHIVE IS NOT OFFERED THE FORM (MCP round
+  // 2, R2-14): a viewer saw an enabled Connect archive button that the API
+  // then refused 403.
+  if (v.mayConnect === false) {
+    return (
+      "<section class=\"connect\"><h3>Connect an existing archive</h3>" +
+      "<p class=\"note\" id=\"catalog-connect-read-only\">This login may read the recovery " +
+      "catalog in this namespace and not connect an archive to it: that needs the operator or " +
+      "administrator role.</p></section>"
+    );
+  }
   return (
     "<section class=\"connect\"><h3>Connect an existing archive</h3>" +
     "<p class=\"note\">" + esc(CONNECT_SENTENCE) + "</p>" +
@@ -853,7 +864,7 @@ export async function mountCatalog(node, ns, parse, lifecycle, deps) {
   const key = connectKey(ns);
   const mutation = mutationFor(key);
   const view = {
-    ns: ns, collection: null, loaded: false,
+    ns: ns, collection: null, loaded: false, mayConnect: granted(ns, "catalogConnect"),
     values: readDraft(key) || { syncMode: SYNC_MODES[0] },
     errors: { fields: {}, unmatched: [] }, state: mutation.state, result: null,
   };
@@ -895,6 +906,18 @@ function wire(node, ns, key, mutation, view, paint, deps, lifecycle) {
   if (form === null) {
     return;
   }
+  // WHAT IS TYPED IS THE VIEW'S AS IT IS TYPED (P13's class): a settle of an
+  // earlier submission repaints this form from `view.values`, and those were
+  // otherwise only read at submit.
+  const typed = () => {
+    view.values = Object.assign({}, view.values, {
+      name: String((form.elements.name || {}).value || ""),
+      destination: String((form.elements.destination || {}).value || ""),
+      syncMode: String((form.elements.syncMode || {}).value || SYNC_MODES[0]),
+    });
+  };
+  form.addEventListener("input", typed, lifecycleSignal(lifecycle));
+  form.addEventListener("change", typed, lifecycleSignal(lifecycle));
   form.addEventListener("submit", (event) => {
     event.preventDefault();
     const values = {

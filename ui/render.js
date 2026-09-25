@@ -1396,6 +1396,11 @@ export const DESTINATION_TEST_SENTENCE =
   "back from its status -- this page performs no I/O of its own and decides nothing.";
 
 /** The one sentence that says what a readiness result is ABOUT. */
+/** What a check still running says instead of an applicability verdict. */
+export const CHECKING_SENTENCE =
+  "The check has not finished. Whether its result applies to your current inputs is decided " +
+  "when it has one; this page reads it again until then.";
+
 export const APPLICABILITY_SENTENCE =
   "Applicability is recomputed on every read against the objects as they are now. A result " +
   "that no longer describes your current inputs is shown as out of date, never as a verdict.";
@@ -1493,6 +1498,58 @@ export function preflightVerdict(state) {
   return badge("pending", "unknown");
 }
 
+/** The approval row of a readiness check run against a DRAFT plan: `approval.state`,
+ *  `skipped`, `SubjectNotCreated` together and nothing wider -- the one blocking
+ *  row a draft cannot make ready, because no Restore exists yet for an approver
+ *  to sign (DRAFT-PREFLIGHT-NEVER-READY; the wizard's `readinessRefusal` says
+ *  why the console, not the API, applies it). */
+export function isDraftApprovalRow(check) {
+  const c = check || {};
+  return (
+    c.id === "approval.state" &&
+    c.state === "skipped" &&
+    c.code === "SubjectNotCreated"
+  );
+}
+
+/** Whether a finished check is `unknown` for ONE reason only: its draft's
+ *  approval row. Every other blocking row is `ready`, and at least one is --
+ *  nothing checked is not everything passed. The wizard's step 5 and its
+ *  Create gate, and the headline below, all read this one rule. */
+export function readyButForDraftApproval(preflight) {
+  const p = preflight || {};
+  if (p.state !== "unknown" || p.terminal !== true) {
+    return false;
+  }
+  const blocking = (Array.isArray(p.checks) ? p.checks : [])
+    .filter((c) => (c || {}).gating === "blocking");
+  const others = blocking.filter((c) => !isDraftApprovalRow(c));
+  return blocking.some(isDraftApprovalRow) && others.length > 0 &&
+    others.every((c) => c.state === "ready");
+}
+
+/** A readiness result's headline (MCP round 2, R2-12): the aggregate's own
+ *  badge -- except that a restore check `unknown` only for its draft's approval
+ *  row reads `ready` with what is confirmed later beside it. Every restore
+ *  check headlined `unknown` while the stepper said Done. THE TRUST RULE
+ *  STANDS: any other blocking row not `ready` keeps the aggregate's word, and
+ *  `notReady` is never touched. The count is that row plus every
+ *  execution-only row, which only the run itself can answer. */
+export function readinessHeadline(preflight) {
+  const p = preflight || {};
+  const later = (Array.isArray(p.checks) ? p.checks : [])
+    .filter((c) => (c || {}).gating === "executionOnly" && c.state !== "ready").length;
+  const deferred = readyButForDraftApproval(p);
+  if (!deferred && !(p.state === "ready" && later > 0)) {
+    return preflightVerdict(p.state);
+  }
+  const n = later + (deferred ? 1 : 0);
+  const when = p.operation === "restore" ? "the restore runs" : "the run executes";
+  return badge("green", "ready") + " <span class=\"headline-qualifier\" data-headline=\"" +
+    (deferred ? "ready-but-for-approval" : "ready") + "\">-- " + String(n) +
+    (n === 1 ? " item is" : " items are") + " confirmed when " + when + "</span>";
+}
+
 /** One stale reason, in words, with its subject when it has one.
  *
  *  `unverifiable` IS NOT A KIND OF STALENESS and is not rendered as one. It is
@@ -1522,6 +1579,19 @@ export function applicabilityLine(preflight) {
   const p = preflight || {};
   const reasons = Array.isArray(p.staleReasons) ? p.staleReasons : [];
   const basis = Array.isArray(p.staleBasis) ? p.staleBasis : [];
+  // A CHECK STILL RUNNING HAS NO RESULT TO APPLY OR NOT (MCP round 2, R2-11).
+  // It read "does not apply to your current inputs / compared: nothing" until
+  // it settled, which says the check is out of date when it has not answered
+  // yet. Applicability is a property of a result; until there is one the
+  // line says the check is running.
+  if (p.terminal !== true && ["pending", "queued", "running"].indexOf(p.state) !== -1) {
+    return (
+      "<div class=\"applicability\" role=\"status\" data-applicability=\"checking\">" +
+      badge("pending", "checking...") +
+      "<p class=\"note\">" + esc(CHECKING_SENTENCE) + "</p>" +
+      "</div>"
+    );
+  }
   const head = p.applicable === true
     ? badge("green", "applies to your current inputs")
     : badge("unverified", "does not apply to your current inputs");

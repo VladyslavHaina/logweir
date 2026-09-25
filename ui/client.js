@@ -194,6 +194,19 @@ export function grantedNamespaces() {
   return decided === null ? [] : decided.namespaces.slice();
 }
 
+/** Whether a signed-in console session holds NO product role in any namespace
+ *  (MCP round 2, R2-16). False in legacy mode, before the probe, and for the
+ *  localAdmin actor, who is the administrator by construction. */
+export function holdsNoRole() {
+  if (decided === null || decided.mode !== CONSOLE || decided.session === null) {
+    return false;
+  }
+  if (decided.session.authenticationMode === "localAdmin") {
+    return false;
+  }
+  return Object.keys(decided.roles || {}).every((ns) => (decided.roles[ns] || []).length === 0);
+}
+
 /** The PRODUCT roles the actor holds in `ns`, as the session reported them.
  *
  *  Empty in legacy mode and in localAdmin mode, and empty is not "none of the
