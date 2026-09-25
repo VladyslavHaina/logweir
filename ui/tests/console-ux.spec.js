@@ -1001,3 +1001,63 @@ test("class_sweep_shared_console_sentences_do_not_send_an_operator_to_kubectl", 
     assert.doesNotMatch(sentence, /kubectl/, name);
   }
 });
+
+// ===========================================================================
+// Review M1: the LOCAL TIME column stays local, DST rows included
+// ===========================================================================
+
+import { humanLocal, nextRunsPanel, whenLocal } from "../render.js";
+import { renderScheduleCard } from "../pages/schedules.js";
+import { decodeCadencePreview } from "../contract.js";
+
+/** The rows of the next-runs table: [at, local, dst] cell html. */
+function nextRunCells(html) {
+  const body = html.slice(html.lastIndexOf("<tbody>"), html.lastIndexOf("</tbody>"));
+  return body.split("<tr").slice(1).map((row) =>
+    row.split("<td").slice(1).map((c) => c.slice(c.indexOf(">") + 1, c.indexOf("</td>"))));
+}
+
+test("review_m1_the_fall_back_day_shows_one_wall_time_twice_with_two_offsets", () => {
+  const answer = decodeCadencePreview(con("cadence-preview-repeated.json")).value;
+  const html = nextRunsPanel({ runs: answer.runs, timeZone: answer.timeZone });
+  const rows = nextRunCells(html);
+  assert.equal(rows.length, 3);
+  // AT (UTC): two different instants.
+  assert.match(rows[0][0], />2026-10-25 00:30:00 UTC</);
+  assert.match(rows[1][0], />2026-10-25 01:30:00 UTC</);
+  // LOCAL TIME: the SAME wall time, in the schedule's zone, with the two offsets
+  // that tell them apart -- BEFORE the fix both read "00:30:00 UTC"/"01:30:00 UTC".
+  assert.equal(rows[0][1], "<code><time class=\"ts\" datetime=\"2026-10-25T02:30:00+02:00\" " +
+    "title=\"2026-10-25T02:30:00+02:00\">2026-10-25 02:30:00 +02:00</time></code>");
+  assert.equal(rows[1][1], "<code><time class=\"ts\" datetime=\"2026-10-25T02:30:00+01:00\" " +
+    "title=\"2026-10-25T02:30:00+01:00\">2026-10-25 02:30:00 +01:00</time></code>");
+  assert.match(rows[0][2], /RepeatedLocalTimeFirst/);
+  assert.match(rows[1][2], /RepeatedLocalTimeSecond/);
+  for (const row of rows) {
+    assert.doesNotMatch(row[1], /UTC</, "a local reading is never re-expressed in UTC");
+  }
+});
+
+test("review_m1_the_spring_forward_gap_keeps_the_shifted_local_time", () => {
+  const answer = decodeCadencePreview(con("cadence-preview-gap.json")).value;
+  const rows = nextRunCells(nextRunsPanel({ runs: answer.runs, timeZone: answer.timeZone }));
+  assert.match(rows[0][0], />2027-03-28 01:00:00 UTC</);
+  assert.match(rows[0][1], />2027-03-28 03:00:00 \+02:00</, "the end of the gap, in local time");
+  assert.match(rows[0][2], /NonexistentLocalTimeShifted/);
+});
+
+test("review_m1_a_saved_schedule_s_next_runs_keep_its_zone", () => {
+  const cr = fixture("schedule-policy.json");
+  const html = renderScheduleCard("team-a", cr, { items: [] }, {});
+  const panel = html.slice(html.indexOf("data-next-runs"));
+  const rows = nextRunCells(panel.slice(0, panel.indexOf("</section>")));
+  assert.match(rows[0][0], />2026-09-19 03:22:00 UTC</);
+  assert.match(rows[0][1], />2026-09-19 09:07:00 \+05:45</, "Asia/Kathmandu's own wall time");
+  assert.match(rows[0][1], /title="2026-09-19T09:07:00\+05:45"/, "the exact value one hover away");
+  // The local formatter keeps the reading as written; the instant formatter is
+  // the one that converts, and only for instants shown as UTC.
+  assert.equal(humanLocal("2026-10-25T02:30:00+01:00"), "2026-10-25 02:30:00 +01:00");
+  assert.equal(humanLocal("2026-10-25T00:30:00Z"), "2026-10-25 00:30:00 UTC");
+  assert.equal(whenLocal("02:30:00+02:00"), "02:30:00+02:00", "a value that is not an instant passes as written");
+  assert.equal(whenLocal(undefined), "-");
+});

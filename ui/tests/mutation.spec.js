@@ -2130,3 +2130,156 @@ test("discarding_a_draft_re_reads_the_namespace_without_moving_the_point", async
     globalThis.window = originalWindow;
   }
 });
+
+// ===========================================================================
+// console-ux-1 review M2: step= and step navigation leave the readiness gate,
+// the pre-submit re-read and the plan hash exactly as they were. The reviewer's
+// rows, adopted: each kills one step-conditioned mutant of the gate (U2, U2b,
+// U2c) that the MCP-29 rows alone let through.
+// ===========================================================================
+import { restoreRouteParams as rvParams } from "../pages/restore-wizard.js";
+import { fakeView as fv2, parse as parse2 } from "./fake-view.js";
+
+function rvPages(html) {
+  return Array.from(html.matchAll(/<div class="wizard-page" data-wizard-step="(\d)"( hidden)?>/g))
+    .filter((m) => m[2] === undefined).map((m) => Number(m[1]));
+}
+function rvHash(ns, point, step) {
+  return "#/restore?ns=" + ns + "&backup=" + point.backup + "&uid=" + point.uid +
+    (step ? "&step=" + String(step) : "");
+}
+
+test("review_walk_by_url_each_step_changes_only_what_is_shown", async () => {
+  const ns = "rv-walk-ns";
+  const primary = destinationItem("primary", "17bc54c4-2e52-4607-b4ac-c31517a6e568");
+  const k8s = savedWizardApi(ns, [primary], {
+    started: (r) => readinessItem("pf-w", r.restore.planHash),
+    read: (id, h) => readinessItem(id, h),
+  });
+  const original = globalThis.window;
+  const seen = [];
+  try {
+    for (let n = 1; n <= 6; n += 1) {
+      const hash = rvHash(ns, k8s.point, n);
+      globalThis.window = { location: { hash: hash } };
+      const view = fv2();
+      await mountRestoreWizard(view.root, ns, rvParams(hash), parse2, k8s, createRouteLifecycle().begin(hash));
+      const html = view.html();
+      const create = view.find("#create-restore");
+      seen.push({
+        n: n, shown: rvPages(html), createDisabled: create === null ? "absent" : create.disabled,
+        hash: (/id="plan-hash-value">([^<]+)</.exec(html) || [])[1],
+        warned: html.includes("id=\"readiness-not-run\""),
+      });
+    }
+  } finally {
+    globalThis.window = original;
+  }
+  for (const s of seen) {
+    assert.deepEqual(s.shown, [s.n - 1], "step " + s.n + " shows exactly its own page");
+  }
+  assert.equal(new Set(seen.map((s) => String(s.createDisabled))).size, 1,
+    "the create button's state does not depend on step=: " + JSON.stringify(seen));
+  assert.equal(new Set(seen.map((s) => s.hash)).size, 1, "one plan hash whatever the step");
+  assert.ok(seen.every((s) => s.warned), "every step's plan says no readiness check has run");
+
+});
+
+test("review_a_refusing_check_still_refuses_create_after_next_and_after_a_step_6_link", async () => {
+  const ns = "rv-refuse-ns";
+  const primary = destinationItem("primary", "17bc54c4-2e52-4607-b4ac-c31517a6e568");
+  const refusing = (id, h) => readinessItem(id, h, {
+    state: "notReady",
+    checks: [{ id: "target.mappedTopics", gating: "blocking", state: "notReady", code: "MappedTopicExists" }],
+  });
+  const k8s = savedWizardApi(ns, [primary], {
+    started: (r) => refusing("pf-r", r.restore.planHash),
+    read: (id, h) => refusing(id, h),
+  });
+  const original = globalThis.window;
+  const hash5 = rvHash(ns, k8s.point, 5);
+  const location = { hash: hash5 };
+  globalThis.window = { location: location, history: { state: null, replaceState(_s, _t, u) { location.hash = u; } } };
+  try {
+    const route = createRouteLifecycle().begin(hash5);
+    const view = fv2();
+    await mountRestoreWizard(view.root, ns, rvParams(hash5), parse2, k8s, route);
+    assert.deepEqual(rvPages(view.html()), [4]);
+    await view.find("#restore-readiness-form").dispatch("submit");
+    await settled(20);
+    assert.equal(k8s.started.length, 1);
+    await view.find("#wizard-next").dispatch("click");
+    await settled(20);
+    assert.deepEqual(rvPages(view.html()), [5], "Next shows step 6");
+    assert.match(location.hash, /step=6$/);
+    assert.equal(view.find("#create-restore").disabled, true, "Create is disabled beside a refusing check");
+    // A direct call past the button (a click that raced a re-render).
+    await view.find("#create-restore").dispatch("click");
+    await settled(20);
+    assert.equal(k8s.creates("restores").length, 0, "nothing was created");
+    assert.match(view.html(), /id="readiness-blocked"/);
+  } finally {
+    globalThis.window = original;
+  }
+});
+
+test("review_at_step_6_by_link_a_ready_check_whose_reread_is_stale_refuses_create", async () => {
+  const ns = "rv-reread-ns";
+  const primary = destinationItem("primary", "17bc54c4-2e52-4607-b4ac-c31517a6e568");
+  let moved = false;
+  const k8s = savedWizardApi(ns, [primary], {
+    started: (r) => readinessItem("pf-s", r.restore.planHash),
+    read: (id, h) => moved
+      ? readinessItem(id, h, { applicable: false, stale: true,
+        staleReasons: [{ reason: "referentChanged", kind: "BackupDestination", name: "primary" }] })
+      : readinessItem(id, h),
+  });
+  const original = globalThis.window;
+  const hash6 = rvHash(ns, k8s.point, 6);
+  globalThis.window = { location: { hash: hash6 } };
+  try {
+    const view = fv2();
+    await mountRestoreWizard(view.root, ns, rvParams(hash6), parse2, k8s, createRouteLifecycle().begin(hash6));
+    assert.deepEqual(rvPages(view.html()), [5], "the link opened step 6");
+    await view.find("#restore-readiness-form").dispatch("submit");
+    await settled(20);
+    moved = true;
+    await view.find("#create-restore").dispatch("click");
+    await settled(20);
+    assert.equal(k8s.creates("restores").length, 0, "the submit re-read the check and refused");
+    const last = k8s.reads[k8s.reads.length - 1];
+    assert.equal(last.planHash, k8s.started[0].restore.planHash, "re-read bound to the reviewed plan hash");
+  } finally {
+    globalThis.window = original;
+  }
+});
+
+test("review_step_navigation_keeps_the_held_check", async () => {
+  const ns = "rv-keep-ns";
+  const primary = destinationItem("primary", "17bc54c4-2e52-4607-b4ac-c31517a6e568");
+  const k8s = savedWizardApi(ns, [primary], {
+    started: (r) => readinessItem("pf-k", r.restore.planHash),
+    read: (id, h) => readinessItem(id, h),
+  });
+  const original = globalThis.window;
+  const hash = rvHash(ns, k8s.point, 5);
+  const location = { hash: hash };
+  globalThis.window = { location: location, history: { state: null, replaceState(_s, _t, u) { location.hash = u; } } };
+  try {
+    const view = fv2();
+    await mountRestoreWizard(view.root, ns, rvParams(hash), parse2, k8s, createRouteLifecycle().begin(hash));
+    await view.find("#restore-readiness-form").dispatch("submit");
+    await settled(20);
+    for (const id of ["#wizard-back", "#wizard-next", "#wizard-next"]) {
+      await view.find(id).dispatch("click");
+      await settled(10);
+    }
+    assert.deepEqual(rvPages(view.html()), [5]);
+    assert.equal(view.html().indexOf("id=\"readiness-not-run\""), -1,
+      "moving between steps did not forget the check that ran");
+    assert.match(view.html(), /stepper-status">done</, "step 5 reads done");
+  } finally {
+    globalThis.window = original;
+  }
+});
+

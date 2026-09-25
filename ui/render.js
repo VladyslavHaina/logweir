@@ -1723,6 +1723,41 @@ export function when(value) {
     esc(human) + "</time>";
 }
 
+/** A LOCAL WALL-CLOCK READING, KEPT IN ITS OWN ZONE (console-ux-1 review M1).
+ *  The controller renders a firing in the schedule's zone with its offset --
+ *  `2026-10-25T02:30:00+02:00` -- and that reading IS the fact: on the
+ *  fall-back day two firings share one wall time and differ only in offset.
+ *  So the reading keeps its date, time and offset as written
+ *  (`2026-10-25 02:30:00 +02:00`, `Z` as `UTC`), and is never converted to
+ *  another zone; `null` for a value that is not an RFC 3339 instant. */
+export function humanLocal(value) {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const m = RFC3339.exec(value.trim());
+  if (m === null) {
+    return null;
+  }
+  const zone = m[8] === "Z" || m[8] === "z" ? "UTC" : m[8];
+  return m[1] + "-" + m[2] + "-" + m[3] + " " + m[4] + ":" + m[5] + ":" + m[6] + " " + zone;
+}
+
+/** [`humanLocal`] as a page shows it: the wall time in its own zone inside a
+ *  `<time>` whose `datetime` and `title` carry the exact value; the value
+ *  escaped as it arrived when it is not an instant; [`ABSENT`] for none. */
+export function whenLocal(value) {
+  if (value === null || value === undefined || value === "") {
+    return ABSENT;
+  }
+  const exact = String(value);
+  const human = humanLocal(exact);
+  if (human === null) {
+    return esc(exact);
+  }
+  return "<time class=\"ts\" datetime=\"" + esc(exact) + "\" title=\"" + esc(exact) + "\">" +
+    esc(human) + "</time>";
+}
+
 /** The covered window, both bounds as RFC 3339 and never a bare integer. */
 export function coveredWindow(windowCovered) {
   const w = windowCovered || {};
@@ -2221,7 +2256,11 @@ export function nextRunRow(run) {
   const marker = typeof r.adjustment === "string" && ADJUSTMENT_WORDS[r.adjustment] !== undefined
     ? badge("pending", r.adjustment)
     : "";
-  return [when(r.at), "<code>" + when(r.localTime) + "</code>", marker];
+  // THE LOCAL TIME STAYS LOCAL (review M1): `when` would read it as an
+  // instant and print it in UTC -- the AT (UTC) cell a second time -- and the
+  // wall time the schedule fires at, and the repeated 02:30 of a fall-back
+  // day, would be gone from the page.
+  return [when(r.at), "<code>" + whenLocal(r.localTime) + "</code>", marker];
 }
 
 /** The next-run panel, over a saved schedule's `status.nextRuns` or a draft's
