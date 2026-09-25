@@ -18,9 +18,11 @@ mark without one). The supported path these notes assume is
 ## Unreleased — `main` after `v0.1.5`
 
 The last tag is `v0.1.5` (`9cc78a3`). This entry covers `main` through
-`306cebf` (2026-09-23): the platform tracker's shipped tasks, the operator
-actions collected for PLAT-20.2, and the upgrade from the last published image.
-The shipped task list, commits, tested environments and results are in
+`4e58d330` (2026-09-25): the platform tracker's shipped tasks, the operator
+actions collected for PLAT-20.2 and after it, and the upgrade from the last
+published image. No tag is cut at `4e58d330`, so the candidate record below
+stays empty. The shipped task list, the four publications the PoC ran, the
+tested environments and the results are in
 [release-handoff.md](release-handoff.md).
 
 ### Candidate record
@@ -68,14 +70,19 @@ find ui -type f ! -name '*.md' ! -path 'ui/tests/*' | LC_ALL=C sort | xargs shas
   patch: the six chart gaps it first had to stand in for (G1–G6) are chart
   values and behaviours now — the issuer CA bundle, host aliases, the
   connection objects' namespace, the published chart, controller probes and the
-  ingress controller trusted by its Service. Installed, signed into, upgraded from
-  `v0.1.5` and from `sha-f49849d…`, and rolled back on docker-desktop on
-  2026-09-24 ([deploy/poc/](../deploy/poc/README.md), *What the first live round
-  showed*); the fixes that round needed are in the profile.
+  ingress controller trusted by its Service. Installed at `86a554e6`, signed
+  into, upgraded from `v0.1.5` and from `sha-f49849d…`, and rolled back on
+  docker-desktop on 2026-09-24 ([deploy/poc/](../deploy/poc/README.md), *What
+  the first live round showed*). The running install was then upgraded in place
+  three times by the profile's *Upgrade to a newer publication*, to `a54fb823`
+  on 2026-09-25 ([release-handoff.md](release-handoff.md)). The fixes those
+  rounds needed are in the profile.
 - **The chart is published** as `oci://registry-1.docker.io/vladyslavhaina/logweir-chart`,
   beside the images and versioned with them ([install.md](install.md), *(c) The
-  Helm chart*). Published: `0.1.0-sha-86a554e6…` pulls anonymously (digest
-  `sha256:90b4d41b…`) and names its own commit's four images.
+  Helm chart*). The first publication the PoC ran, `0.1.0-sha-86a554e6…`
+  (digest `sha256:90b4d41b…`), and the last, `0.1.0-sha-a54fb823…` (digest
+  `sha256:5becb4b9…`, CI run 36129705142), pull anonymously and name their own
+  commit's four images.
   **On first publication, `vladyslavhaina/logweir-chart` must be Public in Docker Hub**, or `main` CI's
   chart step fails closed (its anonymous pull-back is refused) until the repository is made Public and
   the job is re-run.
@@ -148,12 +155,14 @@ A key that must not be compromised everywhere cannot be un-revoked (G3, and G9
 in this build). Either delete that policy before the upgrade, or re-issue the key.
 Do not deploy until every listed record is one you mean installation-wide.
 
-### The sixteen operator-facing changes
+### The twenty operator-facing changes
 
 Each item names what changed, what to do, what the claim rests on (its
 verification scope), and how to roll it back. Every one of them was collected
 for PLAT-20.2 from a merged change; the defect names are the platform
-tracker's.
+tracker's. Items 17–20 were found by the PoC rounds and landed after its first
+publication (`86a554e6`); each was proven on the running install by the
+in-place upgrade that carried it.
 
 #### 1. Retention needs `s3:GetObject` — required action
 
@@ -165,7 +174,10 @@ enforcer deletes nothing and records every point `Kept` with
 `VersionProbeRefused`. A policy degraded for that reason re-probes 24 h after
 its last run, or at once on any spec edit. **Scope:** unit and controller tests
 on `main` `b57753b`; the grant is documented in
-[install.md](install.md) §3.11 and [kubernetes.md](kubernetes.md) §7a. [UNVERIFIED — the grant set with s3:GetObject is re-measured by U6/retention-enforcer at lab-refresh-9.]
+[install.md](install.md) §3.11 and [kubernetes.md](kubernetes.md) §7a. Live on
+lab-refresh-9 (`306cebf`, 2026-09-23): the enforcer's grant set measured 9/9
+(U6), and `VersionProbeRefused` without `s3:GetObject` (PLAT-16.2's completion
+record).
 **Rollback:** the extra grant is harmless to an older worker.
 
 #### 2. `Enforce` refuses versioned and Object Lock buckets
@@ -181,7 +193,10 @@ ever enabled and later suspended — there a deletion removes only the newest
 copy while being recorded `Deleted` (accepted residual
 RET-VERSIONED-SUSPENDED-REWRITE; `Deleted` means the current object at each key
 was removed). **Scope:** found live by harness-rows-11 on the lab MinIO; fixed
-on `main` `b57753b` with two review rounds. [UNVERIFIED — the flipped object-lock row runs at lab-refresh-9 and must show nothing deleted.]
+on `main` `b57753b` with two review rounds. Live on lab-refresh-9 (`306cebf`):
+on a versioned or Object Lock bucket `Enforce` deleted nothing, named every
+point `VersionedBucket` and wrote 0 delete markers, including a
+plain-then-versioned arm (PLAT-16.2's completion record).
 **Rollback:** set such policies to `mode: Report` **before** rolling back; the
 older worker records delete markers as deletions.
 
@@ -196,7 +211,9 @@ plan — it changed. Plans with no shared set are byte-identical and their
 approvals hold. A shared set with more receipts than `maxDeletionsPerRun` is
 never selected; raise the ceiling to let it go. **Scope:** found live by
 harness-rows-11 (it was data loss); fixed on `main` `b57753b`, Tier-A review
-with two fix rounds. [UNVERIFIED — the shared-set row runs at lab-refresh-9 against the rebuilt lab.]
+with two fix rounds. Live on lab-refresh-9 (`306cebf`): two receipts over one
+set were both kept `SharedSegment`, with no plan line (PLAT-16.2's completion
+record).
 **Rollback:** set every `RetentionPolicy` to `mode: Report` **before** rolling
 back: an older controller plans without this protection again and could plan
 a set a retained receipt still names (a deletion would still need a fresh
@@ -212,7 +229,9 @@ ended (WARNING-DIAGNOSTICS-NOEXITCODE; [kubernetes.md](kubernetes.md) §10,
 *`RunnerReady`, and the four states a run can reach with no exit code*).
 `exitCode` stays absent. **Do:** review alert rules that match `NoExitCode`.
 **Scope:** controller tests on `main` `b57753b` and `c892650` (a crash-looping
-runner's start is read from `lastState`). [UNVERIFIED — the operation-states rows run at lab-refresh-9.]
+runner's start is read from `lastState`). Live on lab-refresh-9 (`306cebf`,
+2026-09-23): two mount failures ended `VolumeMountFailed` and an unschedulable
+pod `PodUnschedulable` (PLAT-14.1's completion record).
 **Rollback:** an older controller writes `NoExitCode` again; nothing stored
 needs converting.
 
@@ -224,9 +243,12 @@ controller renders into the approval bundle. **Do:** upgrade the controller and
 runner images **together**. A standalone `logweir restore run` of a point-bound
 plan now needs `--evidence-keys`. A point-bound `Restore` whose bundle an older
 controller created ends `ApprovalBundleConflict`: delete it and create it again.
-**Scope:** PLAT-15.2 is on `main` since `ac00819` with its own worker journey;
-its Done record waits for lab-refresh-9 ([kubernetes.md](kubernetes.md)
-§7d.1). [UNVERIFIED — the disaster-restore journey on a rebuilt lab is owed by lab-refresh-9.]
+**Scope:** PLAT-15.2 is on `main` since `ac00819` ([kubernetes.md](kubernetes.md)
+§7d.1), Done 2026-09-23 on lab-refresh-9 (`306cebf`): a restore after the loss
+of every custom resource (0 CRs, 100 records restored), and an untrusted signer
+refused by the Preflight (`CatalogPointSignerUntrusted`) and by the runner
+(exit 3, `PointUntrusted`). On the PoC (2026-09-24, `86a554e6`) a
+catalog-verified point restored `Valid` 150/150 through the console.
 **Rollback:** an older runner refuses `--evidence-keys` and exits 1 before any
 work; a runner at this version refuses a point-bound plan from an older
 controller (`PointUntrusted`). Archives and catalog records are untouched.
@@ -258,8 +280,11 @@ plus an explicit namespace binding, and is refused by the `localAdmin` console;
 approver's `GovernedApproval` key with `principal.id`), then the binding
 ([install.md](install.md) §5f). A `Restore` submitted during a policy rollout
 may need resubmitting once the rollout completes. **Scope:** PLAT-19.2 is on
-`main` since `ac00819`; controller, runner and API tests; Done record waits for
-lab-refresh-9. [UNVERIFIED — the Ordinary and Governed journeys on a rebuilt lab are owed by lab-refresh-9.]
+`main` since `ac00819`; controller, runner and API tests. Done 2026-09-23 on
+lab-refresh-9 (`306cebf`): Ordinary admitted with the frozen policy and the
+console key, Governed needing both signatures, self-approval refused `403`, an
+unbound namespace keeping `legacy-governed-v1`. On the PoC: a Governed restore
+approved by a second person (2026-09-24), and Ordinary restores in every round.
 **Rollback:** unbinding returns the namespace to `legacy-governed-v1`;
 not-yet-admitted v2 approvals are then refused, never admitted as v1. An older
 controller refuses every v2 document as `PayloadTypeMismatch`.
@@ -285,7 +310,10 @@ controller could not read wrote none.
 `RehearsalSchedule` alike (D1 §4.7 row 5a; SCHEDULE-FIRES-SLOT-BEFORE-CREATION).
 Use *Run first backup now* for an immediate first run. **Do:** nothing;
 deleting and recreating a schedule (a GitOps prune and re-apply) resets the
-bound. **Scope:** `main` `fa3384e`, both kinds. [UNVERIFIED — the pre-creation slot row is owed by lab-refresh-9.]
+bound. **Scope:** `main` `fa3384e`, both kinds. Live on lab-refresh-9
+(`306cebf`, SCHEDULE-FIRES-SLOT-BEFORE-CREATION), and on the PoC at
+`86a554e6` (2026-09-25): a schedule created at 00:01:48Z did not fire its 00:00
+slot. `v0.1.5` and `sha-f49849d…` each fired such a slot in the rehearsals.
 **Rollback:** an older controller may fire that slot once.
 
 #### 10. The API's `trust.state` never calls a revoked-key observation green
@@ -323,8 +351,10 @@ was made by the older runner has no claim, so if its Job is lost and re-created
 after the upgrade the new runner runs the engine again and can still invalidate
 that first receipt — the one window the claim cannot close.
 **Scope:** in-process rows, a private MinIO `RELEASE.2025-09-07T16-13-09Z`
-container, and four planted mutants plus the review's two; the live case-e row
-is owed. [UNVERIFIED — the case-e re-creation row runs at lab-refresh-10.]
+container, and four planted mutants plus the review's two. Live on
+lab-refresh-10 (2026-09-24): PLAT-06.1's case e (a lost Job re-created), both
+arms, and the receipt-dup rows 2–5 (RECEIPT-DUP). The upgrade window above
+stays open (RECEIPT-DUP-UPGRADE-WINDOW).
 **Rollback:** an older runner ignores the claims and returns to re-running the
 engine over a re-created Job; the claims stay in the bucket, harmless, and are
 honoured again after a re-upgrade.
@@ -342,8 +372,10 @@ runner, never the runner first, and roll the runner back before the controller;
 let running `Restore`s finish before either. On the Helm path both move in one
 `helm upgrade`, which is safe once nothing is running. **Scope:**
 `claude/rehearsal-fix` (`6b2704d`, Tier-A review), [stability.md](stability.md),
-*Mixed versions*. **Rollback:** runner first, then controller; nothing stored
-needs converting.
+*Mixed versions*. Live on lab-refresh-10 (2026-09-24): the failed Restore got no
+`status.completion`, and the passing one's panel was present
+(CONSOLE-COMPLETION-ON-FAILED-RESTORE). **Rollback:** runner first, then
+controller; nothing stored needs converting.
 
 #### 13. Readiness rows are answered by the principal they name; an older runner says "upgrade"
 
@@ -364,6 +396,7 @@ lab-refresh-10 (rows RP-L1…L15); [kubernetes.md](kubernetes.md) §21,
 *The evidence-write grant in a check plan (mixed versions)*. **Rollback:** an
 older controller renders the old plans again, which a newer runner still
 accepts (the old wrong-principal answer returns until you re-upgrade).
+
 #### 14. A recovery point with no saved destination is checked, verified and completed
 
 **Changed.** Three behaviours for a point written without a `BackupDestination`
@@ -517,6 +550,140 @@ compromise-revoked key and record each compromise on every policy that still
 lists the key (rollback step 9 below). G9 stays with the CRDs, which a rollback
 leaves in place.
 
+#### 17. An `Approval` its Restore was admitted under is kept as a record (P9)
+
+**Changed.** On the PoC install (2026-09-24, `86a554e6`), 900 s after an
+Ordinary confirmation the controller rewrote a succeeded Restore's `Approval`
+to `Verified=False/AuthorizationExpired`, dropped its recorded authorization,
+and rewrote it again every pass: about 42 `approval refused` lines a second,
+with the API server above 100% CPU. Expiry, the policy binding and the key
+windows now bound only the time to admission. Once the Restore it names is
+`Admitted=True` and that Restore's approval bundle names this `Approval`'s UID,
+the controller adds `Consumed=True` (reason
+`RestoreAdmitted`; its `lastTransitionTime` is the admission instant) and keeps
+`Verified=True`, `status.authorization`, the key id and the approver as
+recorded. A compromise revocation of the recorded key still withdraws the green
+(`RecordedBeforeRevocation` or `KeyRevoked`); an `Approval` deleted and
+re-created is never `Consumed`; a refusal message no longer names the current
+time ([kubernetes.md](kubernetes.md) §8, *After admission the `Approval` is a
+record, not a gate*). `Consumed` can land at the `Approval`'s next pass — at
+the latest its expiry, 15 minutes on the PoC — backdated to the admission; the
+API reads `verified: true` meanwhile. **Do:** nothing is required. Drop any
+workaround that deleted `Approval`s after their restore. On the upgrade, an
+`Approval` an earlier build withdrew this way is re-checked at the admission
+instant and, when it verifies there, returns to `Verified=True` with
+`Consumed`; with the approval-policy binding off (the PoC's upgrade step 2) it
+reads `ApprovalPolicyMismatch` until the binding returns. **Scope:**
+`crates/weirkeeper/tests/approval_policy.rs` and `approval_controller.rs`, five
+planted mutants killed, a review round (`claude/poc-fixes-2`, merged
+`7974b43a`). **Live** (`claude/poc-upgrade-1`, the upgrade to `02dc44b6`,
+2026-09-25): an `Approval` the old controller had withdrawn was restored at
+upgrade step 3 with `Consumed` at its admission instant; its resourceVersion
+did not move for ten minutes, across a controller restart, with no refusal
+line; three new Ordinary restores kept `Verified` and `Consumed` past their
+expiry; a deleted and re-applied `Approval` was never `Consumed`. All eight
+`Approval`s of the second round and both of the third ended `Verified` and
+`Consumed`. **Rollback:** an older controller ignores `Consumed` and judges
+consumed `Approval`s again; on `86a554e6`, where P9 was found, that is the
+loop above.
+
+#### 18. One catalog per destination: a second `RecoveryCatalog` over it is refused (P11)
+
+**Changed.** Several `RecoveryCatalog`s whose `spec.destinationRef` names one
+`BackupDestination` in one namespace used to be accepted, each with its own
+sync Job: on the PoC at `02dc44b6`, five over `primary`, all `Ready=True`. The
+one created first now catalogs the destination. Every later one reports
+`Ready=False/DuplicateCatalog` and `Synced=False/DuplicateCatalog`, naming the
+catalog that holds it; it runs no sync Job and withdraws its view
+(`status.pages`, `status.viewExpiresAt`), so a `ProtectionPolicy` over it reads
+`CatalogStale`. If the elder is deleted, the next one in creation order takes
+over within a minute ([kubernetes.md](kubernetes.md) §7d, *One catalog per
+destination per namespace*). **Do:** before upgrading, list the catalogs per
+destination:
+
+```bash
+kubectl --context <ctx> get recoverycatalogs -A -o json \
+  | jq -r '.items[] | select(.spec.destinationRef != null)
+      | "\(.metadata.namespace)\t\(.spec.destinationRef.name)\t\(.metadata.creationTimestamp)\t\(.metadata.name)"' \
+  | sort
+```
+
+Lines with the same namespace and destination are duplicates; the oldest
+survives, not the best. If a newer duplicate has the settings you want (a
+larger `viewLimit`, `mode: Full`), delete the older one first. A
+`RetentionPolicy.catalogRef`, a `RehearsalSchedule`'s point `catalogRef` or a
+`ProtectionPolicy.protects.catalogRef` that names a duplicate loses its input
+and fails closed: point it at the survivor (the first two are immutable, so
+re-create them). **Scope:** `crates/weirkeeper/tests/recovery_catalog_controller.rs`
+and `catalog_controller.rs`, five planted mutants killed, a review round
+(`claude/poc-fixes-3`, merged `56205b1`). **Live** (`claude/poc-upgrade-2`, the
+upgrade to `b748fd5f`, 2026-09-25): a duplicate the old controller had synced
+turned `DuplicateCatalog` on the new controller's first pass; duplicates made in
+the console and with kubectl were refused, with no sync Job; a
+`ProtectionPolicy` over one read `CatalogStale`; after the elder was deleted the
+younger's sync Job started in 28 s and it was `Ready` in 42 s. **Rollback:** an
+older controller syncs the duplicates again.
+
+#### 19. A failed controller evidence read is read again (P12)
+
+**Changed.** The controller reads a run's evidence itself for an inline-archive
+run (through its archive handle) and for a destination whose `evidenceRead` is
+`ControllerIdentity`. A failed read there used to be final: on the PoC three
+inline-archive `Backup`s stayed `NotAttempted`, and so were never recovery
+points, after `logweir-evidence-ro` was created and after two controller
+restarts. Now a transient failure (a denial, a missing credential, a timeout)
+is read again three more times, 1, 5 and 15 minutes apart, recorded in
+`status.evidence.observation` with its `retryAfter`: at most four reads per run
+per controller process, and at most four in flight at once. Each new controller
+process reads every eligible unverified run once more. A store `NotFound` is
+final, and a `Backup` is never written `Valid` without its `windowCovered`
+([kubernetes.md](kubernetes.md) §15.1b). **Do:** a created or rotated
+`logweir-evidence-ro` takes effect only when the controller restarts. A run
+recorded absent through a misconfigured handle is not read again once the
+handle is fixed; check it with its printed `logweir drill verify` command. On
+the upgrade, the first controller process of this build reads once each
+`NotAttempted` inline-archive run an older controller wrote. **Scope:**
+`crates/weirkeeper/tests/backup_controller.rs`, `restore_controller.rs` and
+`verification.rs`, eight planted mutants and the review's, each killed
+(`claude/poc-fixes-3`, merged `56205b1`). **Live** (`claude/poc-upgrade-2`, the
+upgrade to `b748fd5f`, 2026-09-25): the three stuck points turned `Valid` with
+their window 3 s after the new controller started, and one restored `Valid`
+150/150 through the console; a denied read turned `Valid` on its second attempt
+once the denial was lifted; a read denied for 25 minutes was attempted three
+more times, 1, 5 and 15 minutes apart, and then stopped; a controller restart
+read it once more, and it turned `Valid`. **Rollback:** an older controller ignores the observation
+and never reads a failed run again; a verdict this build reached stays.
+
+#### 20. A readiness replay names its own expiry, and the console asks again (P14)
+
+**Changed.** One idempotency key names one `Preflight` for ever, so a key built
+from the question alone replayed that check after its validity had passed. On
+the PoC at `b748fd5f`, the schedule form's *Check readiness* with unchanged
+inputs answered `200 replayed` with an expired check, and no click could make a
+fresh one. The API's replay, cancel and operation projections of a finished
+check now carry `expired` in `staleReasons` once its `expiresAt` has passed,
+beside `unverifiable`, with `staleBasis: ["expiry"]`: the same object, the same
+UID, `200` ([api.md](api.md), *A readiness key replays only while its check
+can still be the answer*). The console keeps one intent token per form in the
+key and renews it once the check is spent (expired, inapplicable, `failed` or
+`cancelled`) on the schedule form, the Schedules list's readiness panel and
+*Discover topics*; a retry after a lost response, or a second click inside the
+validity, still replays. **Do:** a client that builds its own readiness keys
+sends a new key once a replay reads `expired`. Nothing else: the response shape
+is unchanged, and `expired` was already in the closed vocabulary. **Scope:**
+`crates/logweir-api/tests/preflights.rs`
+(`a_replay_names_its_own_expiry_and_a_new_key_asks_afresh`), three API and three
+console mutants killed, `ui/tests/check-intent.spec.js` (`claude/poc-fixes-4`,
+merged `a54fb823`). **Live** (`claude/poc-upgrade-3`, on `a54fb823`,
+2026-09-25): after expiry one click on the schedule form gave a `200` replay
+reading `staleReasons [expired, unverifiable]` and `staleBasis [expiry]`, then a
+`202` under a new key whose check applied; a click inside the window replayed
+the same check; the list panel did the same in two dedicated runs; Cancel then
+Check made a new check. *Discover topics* after its inventory went stale could
+not be staged inside the PoC's 15-minute session. **Rollback:** `helm rollback`
+moves the API and the console together, and the older pair replays a spent
+check again; nothing stored changes.
+
 ### Verification scope: what "verified" means in this release
 
 - **A green badge** means the signed document's signature verified under a key
@@ -533,9 +700,11 @@ leaves in place.
 - **The independent verifier** (`docs/verify_scorecard.py`) checks the same
   signed documents with no Logweir code ([verify-a-scorecard.md](verify-a-scorecard.md)).
 - **Tested environments** are named in [release-handoff.md](release-handoff.md):
-  docker-desktop Kubernetes with a SCRAM (and private-CA TLS) Kafka and MinIO,
-  and the GitHub Actions Compose suite. Nothing here was run against AWS S3,
-  MSK, EKS or a NetworkPolicy-enforcing CNI.
+  docker-desktop Kubernetes with a SCRAM (and private-CA TLS) Kafka and MinIO;
+  the PoC profile on docker-desktop (Traefik, cert-manager, Dex, the shared
+  console) from the published chart and images; and the GitHub Actions Compose
+  suite. Nothing here was run against AWS S3, MSK, EKS, a corporate identity
+  provider or a NetworkPolicy-enforcing CNI.
 
 ### Retention authority
 
@@ -605,10 +774,13 @@ is converted and no stored object is rewritten
 
 **How this upgrade is rehearsed.** From `v0.1.5` (the last version tag: 6 →
 14 CRDs, the managed identity adopting a hand-provisioned signer, the console
-arriving) and from `sha-f49849d…` (the last build before `ac00819`, which
-crosses all ten items above); [release-handoff.md](release-handoff.md) names
-the images, the state each rehearsal sets up first, and which items it
-exercises. An upgrade from `sha-7b0277b…` crosses items 1–4 only.
+arriving) and from `sha-f49849d…` (the last build before `ac00819`), each to
+the first PoC publication `86a554e6`, which crosses items 1–13, and each rolled
+back. The running install was then upgraded in place three times: to
+`02dc44b6` (items 14, 15 and 17), to `b748fd5f` (16, 18 and 19) and to
+`a54fb823` (20). [release-handoff.md](release-handoff.md) names the chart and
+image digests, the state each rehearsal set up first, and what each round
+showed. An upgrade from `sha-7b0277b…` crosses items 1–4 and 11–20.
 
 **The chart and the images move together.** This chart's controller probes run
 `weirkeeper --probe`, and its console configuration can carry
@@ -624,17 +796,41 @@ policy or roster ([keys.md](keys.md)).
 
 ### Limitations and open items
 
-- **The live half of PLAT-20.2 ran on 2026-09-24** with the PoC profile on
-  docker-desktop: a clean install, upgrades from `v0.1.5` and from
-  `sha-f49849d…` (and a rollback to each) that kept installation identities,
-  schedules and archive readability, a restore of a pre-upgrade point after
-  each, and 1,000+ points in one archive. [UNVERIFIED — R2's pre-upgrade retention, mount-failure and point-bound-restore states were not set up.]
+- **The live half of PLAT-20.2 ran on 2026-09-24 and 2026-09-25** with the PoC
+  profile on docker-desktop, from published charts and images only: a clean
+  install at `86a554e6`; upgrades to it from `v0.1.5` and from `sha-f49849d…`,
+  each with a rollback, that kept installation identities, schedules and
+  archive readability, with a restore of a pre-upgrade point after each; then
+  three in-place upgrades of the running install, to `02dc44b6`, `b748fd5f` and
+  `a54fb823`, after which all 328 of its backup receipts still passed the
+  independent verifier ([release-handoff.md](release-handoff.md)).
+  [UNVERIFIED — R2's pre-upgrade retention, mount-failure and point-bound-restore states were not set up.]
+- **The large catalog was measured live at 258 real points, not 1,000.** The
+  host could not run more runner pods: the `amd64` runner runs under
+  emulation there, and manual runs had no bound before item 15. The timings at
+  258 points, and the offline rows at 1,000 and 5,000 rows, are in
+  [stability.md](stability.md#measured-scale-limits-plat-202); the console
+  refuses a list longer than 5,000 rows rather than showing a prefix.
+  [UNVERIFIED — a 1,000-point archive was not reached live; 258 real points were measured on docker-desktop.]
+- **A readiness check slower than the console's follow is left "not
+  finished" (P15).** Each page follows a check for a fixed budget — 40 s on the
+  Schedules page, 30 s for *Test connection*, 60 s for *Test access*, 90 s at
+  restore step 5 — while a check may run for its 120 s `timeoutSeconds`. A
+  check that outlasts the follow keeps saying "The check has not finished …
+  this page reads it again until then", and the page does not read it again.
+  Click *Check readiness* again (inside the validity it replays the finished
+  check) or reload. Found by the third PoC round on `a54fb823` (one check took
+  64 s); a fix is in flight.
+- **The demo MinIO is a rebuilt mirror.** MinIO withdrew its public images
+  (Docker Hub on 2026-09-11; `quay.io` refuses anonymous pulls since
+  2026-09-24). The chart's demo MinIO, the e2e stack and the PoC run the same
+  MinIO and `mc` releases rebuilt from the archived upstream source,
+  `docker.io/vladyslavhaina/minio-mirror` and `mc-mirror` (AGPL-3.0). Replacing
+  MinIO with a maintained, permissively licensed S3 server is an open task
+  (REPLACE-MINIO), not started.
 - **The product API's OpenAPI document is still `1.0.0-alpha.1`**, although the
   console image and the chart now consume it; ship and upgrade the console and
   the API together until the owner freezes it ([stability.md](stability.md)).
-- **Scale limits** are measured offline and recorded in
-  [stability.md](stability.md#measured-scale-limits-plat-202); the console
-  refuses a list longer than 5,000 rows rather than showing a prefix.
 - **No in-place runner signing-key cutover** ([keys.md](keys.md), step 2 of
   *The supported procedure*).
 - **Restore admission does not hold on a retention lease** (above).

@@ -468,8 +468,10 @@ the CRDs stay.
 
 ## Upgrade rehearsals
 
-[docs/release-handoff.md](../../docs/release-handoff.md) plans two rehearsals
-from published builds to the release in `versions.env`. Neither older build can
+[docs/release-handoff.md](../../docs/release-handoff.md) records the two
+rehearsals run on 2026-09-24, from published builds to the PoC's first
+publication (`86a554e6`); run again, each upgrades to the release in
+`versions.env`. Neither older build can
 install with this profile's values, so each has its own starting values file
 under [rehearsals/](rehearsals/), installed with **that version's own chart**
 from this repository. [validate.sh](validate.sh) renders both against their own

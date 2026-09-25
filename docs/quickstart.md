@@ -270,8 +270,8 @@ before upgrading the controller*), with the identity backed up beforehand.
 ### What this path has not yet been shown to do end to end
 
 Every step above is on `main` and was exercised on docker-desktop by its own
-task's journey; which of those tasks are Done and which still wait for a lab
-run is in [release-handoff.md](release-handoff.md). This
+task's journey; every one of those tasks is Done, and
+[release-handoff.md](release-handoff.md) says where each was proven. This
 page as one walk on a fresh install, and an upgrade from the last published
 image that keeps identities, schedules and archive readability, are PLAT-20.2's
 live half: the PoC profile ran them on docker-desktop on 2026-09-24 — a clean
@@ -280,8 +280,14 @@ Traefik (TLS) and Dex (OIDC), and upgrades from `v0.1.5` and `sha-f49849d…`
 ([deploy/poc/](../deploy/poc/README.md), *What the first live round showed*). It
 found console defects on the way (among them: the names typed for a connection
 and a schedule are replaced by minted ones, and *Test access* does not show its
-result), which its report lists and which are being fixed.
-[UNVERIFIED — a legacy inline-archive point's restore readiness check and evidence bucket, and Catalog → Connect, failed in the shared console on that round; the fixes are not yet live.]
+result). The PoC's three in-place upgrades, to `a54fb823` on 2026-09-25, closed
+those defects and the later ones (P1–P14) live: a legacy inline-archive point
+passed its readiness check and restored `Valid`, *Catalog → Connect* connected,
+and the PoC README's §10 walk ran clean end to end in the console as a new user
+([release-handoff.md](release-handoff.md)). One console defect is
+open, with a fix in flight: a readiness check slower than the page's follow is
+left "not finished" (P15; [release-notes.md](release-notes.md), *Limitations*);
+click *Check readiness* again or reload.
 A corporate identity provider bound by group, AWS S3, MSK and a
 NetworkPolicy-enforcing CNI have not been run at all
 ([release-notes.md](release-notes.md), *Limitations*).
