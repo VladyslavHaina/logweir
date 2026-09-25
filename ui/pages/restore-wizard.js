@@ -118,6 +118,10 @@ import {
   staleReasonLine,
   table,
   TARGET_MODE_MEANING,
+  announce,
+  listVerifiedNote,
+  flagBadge,
+  when,
   windowMessage,
 } from "../render.js";
 import { defaultTopicPrefix, TARGET_MODES, preparePlanDocument } from "../plan.js";
@@ -126,6 +130,7 @@ import {
   filterSelectorOptions,
   probeLine,
   probeState,
+  probeSummary,
   readClusterSelection,
   renderClusterSelector,
   resolveClusterSelection,
@@ -257,7 +262,7 @@ const API = apiClient();
  *  suite green. */
 export function restoreRouteParams(hash) {
   const text = typeof hash === "string" ? hash : "";
-  const route = { ns: "", uid: "", backup: "", retryOf: "", catalog: "", point: "" };
+  const route = { ns: "", uid: "", backup: "", retryOf: "", catalog: "", point: "", step: 0 };
   const question = text.indexOf("?");
   if (question === -1) {
     return route;
@@ -289,6 +294,13 @@ export function restoreRouteParams(hash) {
       // PREFIX it derives and for the banner that names it, and for nothing
       // else -- the wizard reads no field of that object and writes to none.
       route.retryOf = value;
+    } else if (key === "step") {
+      // MCP-29: WHICH OF THE SIX STEPS IS ON SCREEN, 1 to 6. A deep link to a
+      // step; `0` -- no step named, or a value that is not one -- opens the
+      // first. It selects what is SHOWN and nothing else: every step's inputs
+      // are on the page whichever one is visible, so the plan, its hash and
+      // the readiness binding do not depend on it.
+      route.step = /^[1-6]$/.test(value) ? Number(value) : 0;
     }
   }
   return route;
@@ -309,6 +321,23 @@ export function restorePointRoute(ns, backup) {
     "backup=" + encodeURIComponent(name) +
     "&uid=" + encodeURIComponent(uid)
   );
+}
+
+/** THE SAME ADDRESS ON ANOTHER STEP (MCP-29): `hash` with `step=` set to the
+ *  1-based `index + 1`, every other parameter kept exactly as it was spelled.
+ *  The wizard writes this into the address as the reader moves between steps,
+ *  so a reload or a copied link opens the step that was on screen. Pure. */
+export function restoreStepRoute(hash, index) {
+  const text = typeof hash === "string" ? hash : "";
+  const question = text.indexOf("?");
+  const route = question === -1 ? text : text.slice(0, question);
+  const pairs = question === -1
+    ? []
+    : text.slice(question + 1).split("&").filter((pair) => pair.length > 0 &&
+      pair.slice(0, pair.indexOf("=") === -1 ? pair.length : pair.indexOf("=")) !== "step");
+  const n = typeof index === "number" && index >= 0 && index < STEPS.length ? index + 1 : 1;
+  pairs.push("step=" + String(n));
+  return route + "?" + pairs.join("&");
 }
 
 /** The wizard with NO point chosen: its selector. */
@@ -1346,10 +1375,12 @@ export function renderArchiveStep(state) {
     const meta = cluster.metadata || {};
     const status = cluster.status || {};
     return [
-      cell(meta.name),
-      cell(((cluster.spec || {}).bootstrapServers || []).join(", ")),
+      cell(meta.name) + "<span class=\"cell-sub\">" +
+        cell(((cluster.spec || {}).bootstrapServers || []).join(", ")) + "</span>",
       cell(status.clusterId),
-      probeLine(probeState(cluster, s.now, s.freshSeconds)),
+      // A CELL, NOT A PARAGRAPH (MCP-28): the badges and the age, with the
+      // explanation one hover away.
+      probeSummary(probeState(cluster, s.now, s.freshSeconds)),
       cell(archiveFor(s, meta.name)),
       cell(archiveSecretFor(s, meta.name)),
     ];
@@ -1366,8 +1397,7 @@ export function renderArchiveStep(state) {
         "credential and lists no object storage.</p>") +
     renderSourceBinding(s) +
     table(
-      ["SOURCE CLUSTER", "BOOTSTRAP", "CLUSTER ID", "CONNECTION PROBE", "ARCHIVE",
-        "ARCHIVE CREDENTIAL"],
+      ["SOURCE CLUSTER", "CLUSTER ID", "CONNECTION PROBE", "ARCHIVE", "ARCHIVE CREDENTIAL"],
       rows,
       "no KafkaCluster in this namespace carries role: source",
     ) +
@@ -1407,9 +1437,9 @@ export function renderSourceBinding(state) {
     );
   }
   return (
-    "<p class=\"note\" id=\"source-binding\">Source connection: <code>" +
-    esc(resolved.name) + "</code>, uid <code>" + esc(resolved.uid) + "</code> (role: " +
-    cell(resolved.role) + "). " + probeLine(probeState(resolved.cluster, s.now, s.freshSeconds)) +
+    "<p class=\"note\" id=\"source-binding\">Source connection: <code title=\"uid " +
+    esc(resolved.uid) + "\">" + esc(resolved.name) + "</code> (role: " + cell(resolved.role) +
+    "). " + probeSummary(probeState(resolved.cluster, s.now, s.freshSeconds)) +
     "</p>"
   );
 }
@@ -1770,24 +1800,28 @@ export const CONNECT_ARCHIVE_HINT =
  *  `1757253900000` learns nothing) and its phase -- and the chosen one, named.
  *  This is the CATALOG, not the selector: it shows the running and failed runs
  *  too, because "what is here" is the question it answers. */
-export function renderCatalogTable(backups, chosenName) {
+export function renderCatalogTable(backups, chosenName, grid) {
   const rows = itemsOf(backups).map((backup) => {
     const status = backup.status || {};
     const covered = status.windowCovered || {};
     const name = (backup.metadata || {}).name;
     return [
       cell(status.backupId),
-      cell(rfc3339(covered.fromMs)),
-      cell(rfc3339(covered.toMs)),
+      when(rfc3339(covered.fromMs)),
+      when(rfc3339(covered.toMs)),
       cell(status.records),
       cell(status.phase),
       cell(name === chosenName && typeof name === "string" ? name + " (chosen)" : name),
     ];
   });
+  // A DATAGRID WHERE THE CALLER NAMES ONE: 258 runs are 258 rows, and the
+  // selector used to lay out every one of them below its own table (MCP-26).
   return table(
     ["BACKUP SET", "COVERED FROM", "COVERED TO", "RECORDS", "PHASE", "BACKUP"],
     rows,
     "no Backup names this archive in this namespace",
+    undefined,
+    grid,
   );
 }
 
@@ -1824,8 +1858,8 @@ export function renderRecoveryPointStep(state) {
       ["schedule", cell((spec.scheduleRef || {}).name)],
       ["slot", cell(spec.slot)],
       ["source cluster", cell((spec.sourceRef || {}).name)],
-      ["covered from", cell(rfc3339(covered.fromMs))],
-      ["covered to", cell(rfc3339(covered.toMs))],
+      ["covered from", when(rfc3339(covered.fromMs))],
+      ["covered to", when(rfc3339(covered.toMs))],
       ["topics", topics.length === 0 ? cell(null) : esc(topics.join(", "))],
       ["records", cell(status.records)],
       ["signed", pointSigned(point)],
@@ -1835,7 +1869,7 @@ export function renderRecoveryPointStep(state) {
     "<div class=\"actions\"><a class=\"nav-link\" id=\"choose-another-point\" href=\"" +
     esc(restoreSelectorRoute(s.ns)) + "\">Choose a different recovery point</a></div>" +
     "<h4>What this namespace holds</h4>" +
-    renderCatalogTable(backupsOf(s), meta.name) +
+    renderCatalogTable(backupsOf(s), meta.name, { id: "restore-point-holds", label: "runs", scope: s.ns }) +
     "</section>"
   );
 }
@@ -1864,9 +1898,9 @@ export function renderCatalogPointStep(state) {
       ["point", "<code id=\"point-name\">" + esc(c.pointId) + "</code>"],
       ["backup set", cell((point.status || {}).backupId)],
       ["run", cell(c.runId)],
-      ["recovery point", cell(c.recoveryPointAt)],
-      ["covered from", cell(rfc3339(covered.fromMs))],
-      ["covered to (exclusive)", cell(rfc3339(covered.toMs))],
+      ["recovery point", when(c.recoveryPointAt)],
+      ["covered from", when(rfc3339(covered.fromMs))],
+      ["covered to (exclusive)", when(rfc3339(covered.toMs))],
       ["availability", badge("green", String(c.availability || ""))],
       ["verification", badge("green", String(c.verification || ""))],
       ["signer key id", "<code>" + cell(c.signerKeyId) + "</code>"],
@@ -1922,28 +1956,39 @@ export function renderPointSelector(state) {
     const status = point.status || {};
     const covered = status.windowCovered || {};
     const topics = Array.isArray(spec.topics) ? spec.topics : [];
+    const schedule = (spec.scheduleRef || {}).name;
     return [
-      cell(meta.name),
-      cell((spec.scheduleRef || {}).name),
-      cell(spec.slot),
-      cell(rfc3339(covered.fromMs)),
-      cell(rfc3339(covered.toMs)),
-      topics.length === 0 ? cell(null) : esc(topics.join(", ")),
-      cell(status.records),
-      pointSigned(point),
-      cell((spec.archive || {}).url) + " -- " + esc(archiveAvailability(point)),
+      // THE ACTION IS THE FIRST COLUMN (MCP-25). It was the tenth, and at
+      // 1440 px the table overflowed its card and clipped exactly that column
+      // -- the one thing the selector is for -- with no visible scrollbar.
+      //
       // A RETRY ARRIVING HERE KEEPS ITS IDENTITY (PLAT-11.2). The operation
       // view of a failed Restore knows which run failed and not which Backup
       // it came from -- `Restore.spec` carries a backup SET id, not the
       // point's name or uid -- so the retry link lands on this selector and
       // the choice of point is made here, with `retryOf` travelling on.
-      "<a href=\"" +
+      "<a class=\"button\" href=\"" +
         esc(typeof s.retryOf === "string" && s.retryOf.length > 0
           ? restoreRetryRoute(s.ns, point, s.retryOf)
           : restorePointRoute(s.ns, point)) +
         "\">" + (typeof s.retryOf === "string" && s.retryOf.length > 0
           ? "Retry to a fresh target from this point"
           : "Restore this point") + "</a>",
+      // The run, with its schedule and slot beneath it rather than in two
+      // columns of their own.
+      cell(meta.name) +
+        "<span class=\"cell-sub\">" +
+        (typeof schedule === "string" && schedule.length > 0 ? "schedule " + esc(schedule) : "no schedule") +
+        (typeof spec.slot === "string" && spec.slot.length > 0 ? " &middot; slot " + when(spec.slot) : "") +
+        "</span>",
+      // The covered window, both bounds, one per line.
+      "<span class=\"cell-sub-first\">from " + when(rfc3339(covered.fromMs)) + "</span>" +
+        "<span class=\"cell-sub\">to " + when(rfc3339(covered.toMs)) + "</span>",
+      topics.length === 0 ? cell(null) : esc(topics.join(", ")),
+      cell(status.records),
+      pointSigned(point),
+      cell((spec.archive || {}).url) +
+        "<span class=\"cell-sub\">" + esc(archiveAvailability(point)) + "</span>",
     ];
   });
   const attributes = points.map(
@@ -1962,17 +2007,29 @@ export function renderPointSelector(state) {
     "<p class=\"help\">Filters the rows below by name, schedule, slot, source cluster, " +
     "archive, backup set or topic. Every word must match.</p></div>" +
     table(
-      ["BACKUP", "SCHEDULE", "SLOT", "COVERED FROM", "COVERED TO", "TOPICS", "RECORDS",
-        "SIGNED", "ARCHIVE", ""],
+      ["", "BACKUP", "COVERED", "TOPICS", "RECORDS", "SIGNED", "ARCHIVE"],
       rows,
       NO_COMPLETED_BACKUP_SENTENCE,
       attributes,
     ) +
     "<p class=\"note\" id=\"no-match\" hidden>" + NO_MATCH_SENTENCE + "</p>" +
+    "<div class=\"actions\" id=\"point-more-bar\" hidden><p class=\"note\" id=\"point-count\" " +
+    "role=\"status\"></p><button type=\"button\" id=\"point-more\">Show more recovery points" +
+    "</button></div>" +
+    listVerifiedNote(points) +
+    // THE CONNECTED ARCHIVES' POINTS ARRIVE LATER (MCP-26): the selector is on
+    // screen as soon as the Backups are read, and this section is filled in
+    // when the catalog read answers, rather than the whole page waiting for
+    // the slowest read it makes.
+    "<div id=\"catalog-offers-slot\">" +
+    (s.catalogOffers === undefined
+      ? "<p class=\"pending\" id=\"catalog-offers-pending\" role=\"status\">Reading the " +
+        "connected archives' recovery points...</p>"
+      : renderCatalogOffers(s.ns, s.catalogOffers)) +
+    "</div>" +
     "<h4>What this namespace holds</h4>" +
-    renderCatalogTable(itemsOf(s.backups), null) +
-    "</section>" +
-    renderCatalogOffers(s.ns, s.catalogOffers)
+    renderCatalogTable(itemsOf(s.backups), null, { id: "restore-holds", label: "runs", scope: s.ns }) +
+    "</section>"
   );
 }
 
@@ -2701,9 +2758,9 @@ export function renderPreflightStep(state, prepared) {
     "<h4>Target cluster probe (context, not a verdict)</h4>" +
     facts([
       ["target cluster", cell((((cluster || {}).metadata) || {}).name)],
-      ["reachable", cell(status.reachable)],
+      ["reachable", flagBadge(status.reachable, "reachable", "not reachable")],
       ["cluster id", cell(status.clusterId)],
-      ["observed at", cell(status.observedAt)],
+      ["observed at", when(status.observedAt)],
       ["reason", cell(status.reason)],
     ]) +
     "<p class=\"preflight\">" + preflightSentence(topics.length) + "</p>" +
@@ -2964,9 +3021,9 @@ export function renderPlanStep(prepared, state) {
       ? ((s.readiness || {}).preflight
         ? ""
         : "<p class=\"note\" id=\"readiness-not-run\">" +
-          esc(READINESS_NOT_RUN_WARNING) + "</p>")
+          esc(READINESS_NOT_RUN_WARNING) + "</p>" + GO_TO_READINESS)
       : "<p class=\"complaint\" id=\"readiness-blocked\" role=\"alert\">Nothing is sent: " +
-        esc(blocked) + "</p>") +
+        esc(blocked) + "</p>" + GO_TO_READINESS) +
     "<p class=\"note\">" + GUIDED_SUBMIT_SENTENCE + "</p>" +
     "<div class=\"form-status\" id=\"restore-submit-status\" tabindex=\"-1\">" +
     submissionStatus(submission, p, beside, s.ns) +
@@ -2974,6 +3031,13 @@ export function renderPlanStep(prepared, state) {
     "</section>"
   );
 }
+
+/** With one step on screen (MCP-29), a sentence about step 5 carries the way
+ *  there. */
+const GO_TO_READINESS =
+  "<p class=\"actions\"><button type=\"button\" class=\"wizard-go\" id=\"go-to-readiness\" " +
+  "data-go-step=\"4\">" +
+  "Go to step 5: Operation readiness</button></p>";
 
 /** What the one submit button does, said beside it. */
 export const GUIDED_SUBMIT_SENTENCE =
@@ -3158,23 +3222,43 @@ export const STEPS = Object.freeze([
   { id: "step-plan", title: "Plan, hash and names" },
 ]);
 
-/** THE STEPPER'S STATE: which steps are done, which one you are on, what is
- *  next, and which one needs attention -- one entry per step, in order.
+/** The 0-based step a route's 1-based `step` names, or 0. */
+export function stepIndexOf(value) {
+  const n = typeof value === "number" ? value : Number(value);
+  return Number.isInteger(n) && n >= 1 && n <= STEPS.length ? n - 1 : 0;
+}
+
+/** The step on screen, clamped to the six. */
+export function shownStep(state) {
+  const n = ((state || {}).step);
+  return Number.isInteger(n) && n >= 0 && n < STEPS.length ? n : 0;
+}
+
+/** THE STEPPER'S STATE: which steps are done, which one needs you next, which
+ *  one is on screen, and which needs attention -- one entry per step, in order.
  *
- *  All six sections are on the page at once, so "the step you are on" is the
- *  FIRST one whose inputs are not yet whole: an archive with no URL, a chosen
- *  run with no backup set, a point outside the covered window, a target with
- *  no mode or no prefix, a target cluster whose recorded status is not
- *  reachable. When the five input steps are whole, the plan step is the
- *  current one and reads `ready`. A step that is not whole because the page
- *  has a complaint about it reads `attention`; one that merely waits its
- *  turn reads `todo`.
+ *  `current` is the FIRST step whose inputs are not yet whole: an archive with
+ *  no URL, a chosen run with no backup set, a point outside the covered
+ *  window, a target with no mode or no prefix, a target cluster whose
+ *  recorded status is not reachable, or a readiness check that refuses this
+ *  plan. When the five input steps are whole, the plan step is the current one
+ *  and reads `ready`. `shown` is the step on screen (MCP-29: the wizard shows
+ *  one step at a time); the two differ whenever the reader goes back to look.
+ *
+ *  STEP 5 IS NOT DONE UNTIL A CHECK SAYS SO (MCP-27). It read `done` as soon as
+ *  the target's recorded probe was reachable, beside "No readiness check has
+ *  run for this plan". Now it is `done` only when a readiness check for THIS
+ *  plan came back applicable and ready (`readinessRefusal` answers `null` for
+ *  a held result); `unchecked` when none has run -- passable, because the
+ *  check is advisory and Create is allowed with a warning -- and `attention`
+ *  when a held check refuses the plan, which Create refuses too.
  *
  *  THIS DECIDES NOTHING THE RUNNER DECIDES. It reads the same state the six
  *  sections read and summarises it; the create button is never gated on it,
  *  because the client-side checks are a convenience and never the gate. Pure:
- *  no DOM, no network, no clock. */
-export function stepStates(state) {
+ *  no DOM, no network, no clock. `prepared` is the plan on screen, when the
+ *  caller has it, so a held check bound to another plan reads as such. */
+export function stepStates(state, prepared) {
   const s = state || {};
   const fields = s.fields || {};
   const targetFields = fields.target || {};
@@ -3201,6 +3285,8 @@ export function stepStates(state) {
   // create button is gated by `validateRestore` and by the readiness check,
   // not by this -- but a step whose mapping is refused must not read "done".
   const mapping = mappingProblems(s);
+  const held = ((s.readiness || {}).preflight) || null;
+  const readinessRefused = held !== null && readinessRefusal(s, prepared) !== null;
   const whole = [
     typeof s.archiveUrl === "string" && s.archiveUrl.length > 0,
     setChosen,
@@ -3210,7 +3296,7 @@ export function stepStates(state) {
       typeof targetFields.topicPrefix === "string" &&
       targetFields.topicPrefix.length > 0 &&
       Object.keys(mapping).length === 0,
-    target !== null && targetStatus.reachable === true,
+    target !== null && targetStatus.reachable === true && !readinessRefused,
   ];
   const attention = [
     false,
@@ -3225,7 +3311,7 @@ export function stepStates(state) {
       targetFields.mode === "scratch" &&
       typeof targetSpec.markerTopic !== "string") ||
       Object.keys(mapping).length > 0,
-    target !== null && !whole[4],
+    (target !== null && !whole[4]) || readinessRefused,
   ];
   let firstOpen = 5;
   for (let i = 0; i < 5; i += 1) {
@@ -3234,12 +3320,13 @@ export function stepStates(state) {
       break;
     }
   }
+  const shown = shownStep(s);
   return STEPS.map((step, i) => {
     let status;
     if (i === 5) {
       status = firstOpen === 5 ? "ready" : "todo";
     } else if (whole[i]) {
-      status = attention[i] ? "attention" : "done";
+      status = attention[i] ? "attention" : (i === 4 && held === null ? "unchecked" : "done");
     } else {
       status = attention[i] ? "attention" : "todo";
     }
@@ -3249,6 +3336,7 @@ export function stepStates(state) {
       title: step.title,
       status: status,
       current: i === firstOpen,
+      shown: i === shown,
     };
   });
 }
@@ -3265,21 +3353,25 @@ function stepWord(step) {
   if (step.status === "ready") {
     return "review and create";
   }
-  return step.current ? "you are here" : "next";
+  if (step.status === "unchecked") {
+    return "not checked yet";
+  }
+  return step.current ? "to do next" : "to do";
 }
 
-/** The stepper: an ordered list of the six steps, each a button that scrolls
- *  to its section, carrying the step's number, its title and its state in
- *  words. The current one is marked `aria-current="step"`. */
-export function renderStepper(state) {
-  const items = stepStates(state)
+/** The stepper: an ordered list of the six steps, each a button that shows its
+ *  step, carrying the step's number, its title and its state in words. The
+ *  step on screen is marked `aria-current="step"` (MCP-29). */
+export function renderStepper(state, prepared) {
+  const items = stepStates(state, prepared)
     .map((step) => {
       const classes =
-        "stepper-item is-" + step.status + (step.current ? " is-current" : "");
+        "stepper-item is-" + step.status + (step.shown ? " is-current" : "");
       return (
         "<li class=\"" + classes + "\">" +
         "<button type=\"button\" class=\"stepper-link\" data-target=\"" + step.id + "\"" +
-        (step.current ? " aria-current=\"step\"" : "") + ">" +
+        " data-step=\"" + String(step.number - 1) + "\"" +
+        (step.shown ? " aria-current=\"step\"" : "") + ">" +
         "<span class=\"stepper-num\">" + String(step.number) + "</span>" +
         "<span class=\"stepper-title\">" + esc(step.title) + "</span>" +
         "<span class=\"stepper-status\">" + stepWord(step) + "</span>" +
@@ -3290,21 +3382,56 @@ export function renderStepper(state) {
   return "<ol class=\"stepper\" aria-label=\"The six steps\">" + items + "</ol>";
 }
 
+/** The wizard's footer (MCP-29, Clarity's wizard anatomy): Back, where you are,
+ *  and Next. The last step has no Next -- its primary action is Create the
+ *  Restore, inside the step. */
+export function renderWizardNav(state) {
+  const shown = shownStep(state);
+  const last = shown === STEPS.length - 1;
+  return (
+    "<div class=\"wizard-nav\" role=\"group\" aria-label=\"Move between the steps\">" +
+    "<button type=\"button\" class=\"wizard-go\" id=\"wizard-back\" data-step=\"" + String(Math.max(0, shown - 1)) +
+    "\"" + (shown === 0 ? " disabled" : "") + ">Back</button>" +
+    "<span class=\"wizard-position\" id=\"wizard-position\">Step " + String(shown + 1) +
+    " of " + String(STEPS.length) + ": " + esc(STEPS[shown].title) + "</span>" +
+    (last
+      ? ""
+      : "<button type=\"button\" class=\"primary wizard-go\" id=\"wizard-next\" data-step=\"" +
+        String(shown + 1) + "\">Next: " + esc(STEPS[shown + 1].title) + "</button>") +
+    "</div>"
+  );
+}
+
+/** One step's page: the section, shown when it is the step on screen and
+ *  `hidden` otherwise. Every step stays IN the document, so its inputs are
+ *  still read, drafted and validated whichever step is visible. */
+function wizardPage(state, index, html) {
+  return (
+    "<div class=\"wizard-page\" data-wizard-step=\"" + String(index) + "\"" +
+    (index === shownStep(state) ? "" : " hidden") + ">" + html + "</div>"
+  );
+}
+
 /** The whole wizard, all six steps, over one state. */
 export async function renderRestoreWizard(state) {
   return renderPreparedWizard(state, await preparePlanOrProblem(state));
 }
 
 /** The same wizard over a plan already prepared -- so the mount half knows the
- *  exact hash it put on screen, and can refuse to submit any other. */
+ *  exact hash it put on screen, and can refuse to submit any other.
+ *
+ *  ONE STEP AT A TIME (MCP-29). All six sections are rendered, and every one
+ *  but the step on screen is `hidden`: the page used to be one 22,686 px
+ *  column. The stepper above and Back / Next below move between them; nothing
+ *  is created until step 6's own button. */
 export function renderPreparedWizard(state, prepared) {
   const s = state || {};
   return (
     "<h2>Restore wizard</h2>" +
-    "<p class=\"blurb\">Six steps, all on this page: the archive, the backup set, the " +
-    "point in time, the target, the preflight, and the plan whose bytes the Restore " +
-    "carries. Every value was read from this namespace's own objects or is editable " +
-    "below.</p>" +
+    "<p class=\"blurb\">Six steps, one at a time: the archive, the recovery point, the point " +
+    "in time, the target, the readiness check, and the plan whose bytes the Restore carries. " +
+    "Every value was read from this namespace's own objects or is editable in its step, and " +
+    "nothing is created until step 6.</p>" +
     renderRetryBanner(state) +
     (s.editing
       ? "<p class=\"immutable-note\">" + RESTORE_IMMUTABLE_SENTENCE + "</p>"
@@ -3313,14 +3440,45 @@ export function renderPreparedWizard(state, prepared) {
       ? "<div class=\"draft-note\"><p class=\"note\">" + DRAFT_RESTORED_SENTENCE + "</p>" +
         "<div class=\"actions\"><button type=\"button\" id=\"discard-draft\">Discard these edits</button></div></div>"
       : "") +
-    renderStepper(state) +
-    renderArchiveStep(state) +
-    renderRecoveryPointStep(state) +
-    renderPointInTimeStep(state) +
-    renderTargetStep(state) +
-    renderPreflightStep(state, prepared) +
-    renderPlanStep(prepared, state)
+    renderStepper(state, prepared) +
+    wizardPage(s, 0, renderArchiveStep(state)) +
+    wizardPage(s, 1, renderRecoveryPointStep(state)) +
+    wizardPage(s, 2, renderPointInTimeStep(state)) +
+    wizardPage(s, 3, renderTargetStep(state)) +
+    wizardPage(s, 4, renderPreflightStep(state, prepared)) +
+    wizardPage(s, 5, renderPlanStep(prepared, state)) +
+    renderWizardNav(s)
   );
+}
+
+/** WHICH STEP A FIELD'S MESSAGE BELONGS TO, so a refused submit shows the step
+ *  that holds the input it is about (MCP-29). A message with no input of its
+ *  own (`archive`, `backupSet`) is shown beside the submit, in step 6. */
+export const FIELD_STEP = Object.freeze({
+  archiveSecret: 0,
+  evidenceDestination: 0,
+  pointInTime: 2,
+  topicPrefix: 3,
+  targetCluster: 3,
+  mode: 3,
+  topics: 3,
+  ticket: 5,
+  archive: 5,
+  backupSet: 5,
+});
+
+/** The first step, in order, carrying a field message, or `null`. */
+export function firstStepWithErrors(errors) {
+  const keys = Object.keys(errors || {}).filter((k) =>
+    Array.isArray(errors[k]) ? errors[k].length > 0 : Boolean(errors[k]));
+  let best = null;
+  for (const key of keys) {
+    const at = Object.prototype.hasOwnProperty.call(FIELD_STEP, key) ? FIELD_STEP[key] : null;
+    if (at !== null && (best === null || at < best)) {
+      best = at;
+    }
+  }
+  return best;
 }
 
 /** Said when the wizard reopens with edits made earlier in this page's life. */
@@ -4261,6 +4419,27 @@ function windowComplaint(value, covered) {
 export async function mountRestoreWizard(node, ns, params, parse, deps, lifecycle) {
   const api = deps || API;
   const selection = params || {};
+  // EVERY READ THAT DOES NOT WAIT ON ANOTHER STARTS NOW, TOGETHER (MCP-26).
+  // At 258 points the wizard was usable after 12.4 s while the API answered
+  // the Backups in 3.0 s and the catalog's points in 6.6 s: the reads were
+  // made one after another -- connections and Backups, then the approval
+  // policy, then the catalogs, then every page of their points -- and the
+  // page rendered nothing until the last one answered. Now the approval
+  // policy and, on the selector, the connected archives' points are read
+  // beside the two lists; the selector renders as soon as the Backups are
+  // in, and the catalog section fills in when its read answers.
+  const selector = !(String(selection.uid || "").length > 0 ||
+    String(selection.backup || "").length > 0 || String(selection.catalog || "").length > 0);
+  const policyRead = readApprovalPolicy(api, ns, lifecycle);
+  const offersRead = selector
+    ? readCatalogOffers(ns, catalogReadersOf(api, ns, lifecycle), lifecycle)
+    : null;
+  // A rejection that is never awaited (the route left first) is not an
+  // unhandled one: both are awaited below wherever they are used.
+  policyRead.catch(() => null);
+  if (offersRead !== null) {
+    offersRead.catch(() => null);
+  }
   try {
     const collections = await Promise.all([
       api.list(ns, CLUSTERS, readOptions(lifecycle)),
@@ -4275,85 +4454,98 @@ export async function mountRestoreWizard(node, ns, params, parse, deps, lifecycl
     // a Backup. A link naming a catalog and a point that do not resolve is a
     // refusal naming them, exactly as a Backup UID that does not resolve is.
     if (typeof selection.catalog === "string" && selection.catalog.length > 0) {
-      await mountCatalogPoint(node, ns, selection, parse, api, lifecycle, clusters, backups);
+      await mountCatalogPoint(node, ns, selection, parse, api, lifecycle, clusters, backups,
+        policyRead);
       return;
     }
     const resolved = resolvePoint(backups, selection);
     const destinationName = savedDestinationName({ point: resolved.point });
+    // THE POINT'S DESTINATION AND THE OTHER SAVED DESTINATIONS, TOGETHER. The
+    // list is for the evidence selector (PLAT-08.2); a read that fails costs
+    // the choice and nothing else: the point's own destination is still
+    // offered, and the page says the others were not read.
+    const kept = readDraft(formKey(ns, WIZARD_FORM));
+    const keptName = kept !== null && typeof kept.evidenceDestination === "string"
+      ? kept.evidenceDestination : "";
     let destination = null;
+    let destinations;
     if (resolved.state === "selected" && destinationName.length > 0) {
+      const listing = typeof api.destinations === "function"
+        ? api.destinations(ns, readOptions(lifecycle)).then((answer) => answer.items, (unread) => {
+          if (cancelled(unread, lifecycle)) {
+            throw unread;
+          }
+          return null;
+        })
+        : Promise.resolve(undefined);
+      // A KEPT EVIDENCE CHOICE IS READ IN FULL BEFORE THE DRAFT IS APPLIED: the
+      // list is summaries, and a summary carries no bucket to sign.
+      const keptRead = typeof api.destinations === "function" && keptName.length > 0 &&
+        keptName !== destinationName
+        ? api.destination(ns, keptName, readOptions(lifecycle)).then(
+          (answer) => (answer || {}).item || null,
+          (unread) => {
+            if (cancelled(unread, lifecycle)) {
+              throw unread;
+            }
+            return null;
+          })
+        : Promise.resolve(null);
+      listing.catch(() => null);
+      keptRead.catch(() => null);
       const read = await api.destination(ns, destinationName, readOptions(lifecycle));
       if (!active(lifecycle)) {
         return;
       }
       destination = requireFrozenDestination(resolved.point, read.item);
-    }
-    // THE OTHER SAVED DESTINATIONS, for the evidence selector (PLAT-08.2). A
-    // read that fails costs the choice and nothing else: the point's own
-    // destination is still offered, and the page says the others were not read.
-    let destinations;
-    if (destination !== null && typeof api.destinations === "function") {
-      try {
-        destinations = (await api.destinations(ns, readOptions(lifecycle))).items;
-      } catch (unread) {
-        if (cancelled(unread, lifecycle)) {
-          throw unread;
-        }
-        destinations = null;
-      }
+      destinations = await listing;
+      const keptItem = await keptRead;
       if (!active(lifecycle)) {
         return;
       }
-    }
-    // A KEPT EVIDENCE CHOICE IS READ IN FULL BEFORE THE DRAFT IS APPLIED: the
-    // list is summaries, and a summary carries no bucket to sign.
-    const kept = readDraft(formKey(ns, WIZARD_FORM));
-    const keptName = kept !== null && typeof kept.evidenceDestination === "string"
-      ? kept.evidenceDestination : "";
-    if (Array.isArray(destinations) && destination !== null && keptName.length > 0 &&
-      keptName !== destination.name) {
-      try {
-        const read = await api.destination(ns, keptName, readOptions(lifecycle));
-        const item = (read || {}).item || null;
-        if (item !== null) {
-          destinations = destinations.filter((d) => d.name !== keptName).concat([item]);
-        }
-      } catch (unread) {
-        if (cancelled(unread, lifecycle)) {
-          throw unread;
-        }
-      }
-      if (!active(lifecycle)) {
-        return;
+      if (Array.isArray(destinations) && keptItem !== null) {
+        destinations = destinations.filter((d) => d.name !== keptName).concat([keptItem]);
       }
     }
     const state = initialState(ns, clusters, backups, selection, destination, destinations);
-    // PLAT-19.2: the namespace's effective approval policy, for the submit
-    // step's words. NOT a gate: routing uses the answer the create returns,
-    // and an unread policy renders today's governed instructions.
-    state.approvalPolicy = await readApprovalPolicy(api, ns, lifecycle);
-    if (!active(lifecycle)) {
-      return;
-    }
     if (state.pointState === "none") {
       // THE CONNECTED ARCHIVES' POINTS, beside the Backups (PLAT-15.2). A
       // namespace that lost every Backup object still has its archive, and the
       // selector is where an operator looks for something to restore.
-      state.catalogOffers = await readCatalogOffers(ns, catalogReadersOf(api, ns, lifecycle),
-        lifecycle);
-      if (!active(lifecycle)) {
-        return;
-      }
       if (completedBackups(backups).length === 0) {
+        state.catalogOffers = await (offersRead || readCatalogOffers(ns,
+          catalogReadersOf(api, ns, lifecycle), lifecycle));
+        if (!active(lifecycle)) {
+          return;
+        }
         replace(node, parse(renderNoCompletedBackup(ns, backups, state.catalogOffers)));
         return;
       }
+      // THE SELECTOR FIRST, THE CATALOG SECTION WHEN IT ANSWERS.
+      state.catalogOffers = undefined;
       replace(node, parse(renderPointSelector(state)));
       wireSelector(node, state, lifecycle);
+      state.catalogOffers = await (offersRead || readCatalogOffers(ns,
+        catalogReadersOf(api, ns, lifecycle), lifecycle));
+      if (!active(lifecycle)) {
+        return;
+      }
+      const slot = node.querySelector("#catalog-offers-slot");
+      if (slot !== null) {
+        replace(slot, parse(renderCatalogOffers(ns, state.catalogOffers)));
+      }
       return;
     }
     if (state.pointState !== "selected") {
       replace(node, parse(renderPointRefusal(state)));
+      return;
+    }
+    // PLAT-19.2: the namespace's effective approval policy, for the submit
+    // step's words. NOT a gate: routing uses the answer the create returns,
+    // and an unread policy renders today's governed instructions. It was
+    // started with the lists.
+    state.approvalPolicy = await policyRead;
+    if (!active(lifecycle)) {
       return;
     }
     const key = formKey(ns, WIZARD_FORM);
@@ -4516,7 +4708,8 @@ export async function resolveCatalogChoice(api, ns, selection, backups, readers,
 
 /** The wizard over one catalog point: resolve it, refuse by name, or build the
  *  six steps over it. */
-async function mountCatalogPoint(node, ns, selection, parse, api, lifecycle, clusters, backups) {
+async function mountCatalogPoint(node, ns, selection, parse, api, lifecycle, clusters, backups,
+  policyRead) {
   const choice = await resolveCatalogChoice(api, ns, selection, backups,
     catalogReadersOf(api, ns, lifecycle), lifecycle);
   if (choice === null || !active(lifecycle)) {
@@ -4532,8 +4725,8 @@ async function mountCatalogPoint(node, ns, selection, parse, api, lifecycle, clu
     choice);
   // PLAT-19.2: the namespace's effective approval policy, read exactly as the
   // Backup-point mount reads it, so a catalog point's submission is routed by
-  // the same policy as any other restore.
-  state.approvalPolicy = await readApprovalPolicy(api, ns, lifecycle);
+  // the same policy as any other restore -- started with the lists (MCP-26).
+  state.approvalPolicy = await (policyRead || readApprovalPolicy(api, ns, lifecycle));
   if (!active(lifecycle)) {
     return;
   }
@@ -4650,16 +4843,16 @@ export function renderCatalogOffers(ns, offers) {
   const rows = list.map((offer) => {
     const e = offer.entry || {};
     return [
-      cell(offer.catalog),
-      "<code>" + cell(e.pointId) + "</code>",
-      cell(e.backupId),
-      cell(e.recoveryPointAt),
-      cell(e.coveredFrom),
-      cell(e.coveredTo),
-      badge("green", String(e.availability || "")),
-      badge("green", String(e.verification || "")),
-      "<a href=\"" + esc(restoreCatalogPointRoute(ns, offer.catalog, e.pointId)) +
+      // The action first, for the selector's reason (MCP-25).
+      "<a class=\"button\" href=\"" + esc(restoreCatalogPointRoute(ns, offer.catalog, e.pointId)) +
         "\">Restore this point</a>",
+      cell(offer.catalog) + "<span class=\"cell-sub\"><code>" + cell(e.pointId) + "</code></span>",
+      cell(e.backupId),
+      when(e.recoveryPointAt),
+      "<span class=\"cell-sub-first\">from " + when(e.coveredFrom) + "</span>" +
+        "<span class=\"cell-sub\">to " + when(e.coveredTo) + "</span>",
+      badge("green", String(e.availability || "")) + " " +
+        badge("green", String(e.verification || "")),
     ];
   });
   return (
@@ -4667,10 +4860,11 @@ export function renderCatalogOffers(ns, offers) {
     "<h3>Recovery points from connected archives</h3>" +
     "<p class=\"blurb\">" + esc(CATALOG_OFFERS_SENTENCE) + "</p>" +
     table(
-      ["CATALOG", "POINT", "BACKUP SET", "RECOVERY POINT", "COVERED FROM", "COVERED TO",
-        "AVAILABILITY", "VERIFICATION", ""],
+      ["", "CATALOG AND POINT", "BACKUP SET", "RECOVERY POINT", "COVERED", "AVAILABLE AND VERIFIED"],
       rows,
       "no connected archive lists a point this page may offer",
+      undefined,
+      { id: "restore-catalog-offers", label: "points", scope: ns },
     ) +
     notes.map((note) => "<p class=\"note\" data-catalog-note=\"true\">" + esc(note) +
       "</p>").join("") +
@@ -4714,6 +4908,16 @@ async function renderAndWire(node, state, parse, api, lifecycle) {
     state.errors = null;
     state.errorsUnmatched = [];
   }
+  if (state.jumpToErrors === true) {
+    state.jumpToErrors = false;
+    const at = firstStepWithErrors(state.errors);
+    if (at !== null) {
+      state.step = at;
+    } else if (record.state.phase === "failed") {
+      // A refusal no input claims is shown beside the submit, in step 6.
+      state.step = STEPS.length - 1;
+    }
+  }
   const prepared = await preparePlanOrProblem(state);
   if (!active(lifecycle)) {
     return false;
@@ -4721,6 +4925,51 @@ async function renderAndWire(node, state, parse, api, lifecycle) {
   replace(node, parse(renderPreparedWizard(state, prepared)));
   wire(node, state, parse, api, lifecycle, prepared);
   return true;
+}
+
+/** SHOW ONE STEP (MCP-29): record it, write it into the address, re-render
+ *  from the same state and move focus to the step. `index` outside the six is
+ *  ignored. Exported for the suite, which drives it over a fake node. */
+export async function showWizardStep(node, state, parse, api, lifecycle, index) {
+  if (!Number.isInteger(index) || index < 0 || index >= STEPS.length || !active(lifecycle)) {
+    return false;
+  }
+  state.step = index;
+  syncStepAddress(lifecycle, index);
+  const rendered = await renderAndWire(node, state, parse, api, lifecycle);
+  if (!rendered) {
+    return false;
+  }
+  const section = node.querySelector("#" + STEPS[index].id);
+  if (section !== null && typeof section.focus === "function") {
+    section.focus({ preventScroll: true });
+    if (typeof section.scrollIntoView === "function") {
+      section.scrollIntoView({ block: "nearest" });
+    }
+  }
+  announce("Step " + String(index + 1) + " of " + String(STEPS.length) + ": " +
+    STEPS[index].title);
+  return true;
+}
+
+// THE STEP GOES INTO THE ADDRESS WITHOUT A NAVIGATION. `replaceState` fires no
+// `hashchange`, so nothing re-mounts and nothing is read again; the route's
+// lifecycle is told the new address in the same synchronous turn, because it
+// judges "is this route still current" by comparing the address it began on.
+// A lifecycle that cannot be retargeted (the suites' fakes) leaves the address
+// alone rather than making every later read look like a stale one.
+function syncStepAddress(lifecycle, index) {
+  if (typeof window === "undefined" || !window.location || !window.history ||
+    typeof window.history.replaceState !== "function" ||
+    lifecycle === null || lifecycle === undefined || typeof lifecycle.retarget !== "function") {
+    return;
+  }
+  const next = restoreStepRoute(window.location.hash, index);
+  if (next === window.location.hash) {
+    return;
+  }
+  window.history.replaceState(window.history.state, "", next);
+  lifecycle.retarget(next);
 }
 
 /** The state the six steps read: the two collections, THE RESOLVED RECOVERY
@@ -4823,6 +5072,9 @@ export function initialState(ns, clusters, backups, selection, savedDestination,
       }
       : { uid: resolved.uid, backup: resolved.name },
     catalogTopicsText: "",
+    // MCP-29: the step on screen, 0-based. The route's `step` (1 to 6) when it
+    // named one, the first step otherwise.
+    step: stepIndexOf((selection || {}).step),
     point: point,
     pointState: resolved.state,
     pointUid: resolved.uid,
@@ -5790,20 +6042,20 @@ function wire(node, state, parse, api, lifecycle, prepared) {
   // the reader's own preference.
   wireTargetSearch(node, lifecycle);
 
-  for (const link of node.querySelectorAll(".stepper-link")) {
-    listen(link, "click", () => {
+  // ONE STEP AT A TIME (MCP-29). The stepper's buttons, Back, Next and every
+  // "go to step" link show THEIR step: the state records it, the address
+  // records it (so a reload or a copied link opens the same step), the wizard
+  // re-renders from the same state -- no read, no new plan -- and focus moves
+  // to the step's own heading, which a screen reader then announces.
+  for (const control of node.querySelectorAll(".stepper-link, .wizard-go")) {
+    listen(control, "click", () => {
       if (!active(lifecycle)) {
         return;
       }
-      const section = node.querySelector("#" + link.getAttribute("data-target"));
-      if (section === null) {
-        return;
-      }
-      const still =
-        typeof window.matchMedia === "function" &&
-        window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-      section.scrollIntoView({ behavior: still ? "auto" : "smooth", block: "start" });
-      section.focus({ preventScroll: true });
+      const raw = control.getAttribute("data-go-step") !== null
+        ? control.getAttribute("data-go-step")
+        : control.getAttribute("data-step");
+      return showWizardStep(node, state, parse, api, lifecycle, Number(raw));
     }, lifecycle);
   }
 
@@ -5845,7 +6097,8 @@ function wire(node, state, parse, api, lifecycle, prepared) {
       // namespace, and a re-read that dropped the route's `uid` would rebuild
       // the page with no point at all -- or, under the behaviour this task
       // replaces, with whichever run happened to be newest by then.
-      mountRestoreWizard(node, state.ns, state.selection, parse, api, lifecycle);
+      mountRestoreWizard(node, state.ns,
+        Object.assign({}, state.selection, { step: shownStep(state) + 1 }), parse, api, lifecycle);
     }, lifecycle);
   }
 
@@ -5880,6 +6133,13 @@ function wire(node, state, parse, api, lifecycle, prepared) {
         replace(status, parse(submissionStatus(settled, prepared, [])));
       }
       return;
+    }
+    // A REFUSED SUBMIT SHOWS THE STEP ITS FIRST FIELD MESSAGE IS ABOUT (MCP-29):
+    // with one step on screen, a message beside an input three steps back is a
+    // message nobody sees. Once, on the settlement -- an edit made afterwards
+    // does not pull the reader back.
+    if (settled.phase === "failed") {
+      state.jumpToErrors = true;
     }
     renderAndWire(node, state, parse, api, lifecycle).then((rendered) => {
       if (rendered && settled.phase === "failed") {
@@ -5946,26 +6206,65 @@ function wireSelector(node, state, lifecycle) {
   }
   const rows = Array.from(node.querySelectorAll("tr[data-search]"));
   const empty = node.querySelector("#no-match");
+  const moreBar = node.querySelector("#point-more-bar");
+  const more = node.querySelector("#point-more");
+  const count = node.querySelector("#point-count");
+  // THE SELECTOR SHOWS A PAGE OF MATCHES, NOT ALL OF THEM (MCP-26). 258 points
+  // were 258 rows laid out at once -- a 50,000 px page at 1440 px and three
+  // times that at 1024. The search still reads EVERY row; what is shown is the
+  // first `limit` that match, and "Show more" adds a page. A row past the
+  // limit is `hidden`, never removed, exactly as a row the search excludes.
+  let limit = SELECTOR_PAGE_SIZE;
   const filter = () => {
     if (!active(lifecycle)) {
       return;
     }
     state.query = String(search.value);
+    let matched = 0;
     let shown = 0;
     for (const row of rows) {
       const matches = matchesQuery(row.getAttribute("data-search"), state.query);
-      row.hidden = !matches;
       if (matches) {
+        matched += 1;
+      }
+      const visible = matches && matched <= limit;
+      row.hidden = !visible;
+      if (visible) {
         shown += 1;
       }
     }
     if (empty !== null) {
-      empty.hidden = shown !== 0 || rows.length === 0;
+      empty.hidden = matched !== 0 || rows.length === 0;
+    }
+    if (moreBar !== null) {
+      moreBar.hidden = matched <= SELECTOR_PAGE_SIZE;
+    }
+    if (count !== null) {
+      count.textContent = "Showing " + String(shown) + " of " + String(matched) +
+        (state.query.trim().length > 0 ? " matching" : "") + " recovery points.";
+    }
+    if (more !== null) {
+      more.disabled = shown >= matched;
     }
   };
-  listen(search, "input", filter, lifecycle);
-  listen(search, "change", filter, lifecycle);
+  const typed = () => {
+    limit = SELECTOR_PAGE_SIZE;
+    filter();
+  };
+  listen(search, "input", typed, lifecycle);
+  listen(search, "change", typed, lifecycle);
+  if (more !== null) {
+    listen(more, "click", () => {
+      limit += SELECTOR_PAGE_SIZE;
+      filter();
+    }, lifecycle);
+  }
+  filter();
 }
+
+/** How many matching recovery points the selector shows at once, and adds per
+ *  "Show more" (MCP-26). Clarity's datagrid default page. */
+export const SELECTOR_PAGE_SIZE = 20;
 
 /** THE TARGET SELECTOR'S SEARCH, filtered in place.
  *

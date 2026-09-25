@@ -677,15 +677,16 @@ test("a_catalog_whose_points_cannot_be_read_is_a_note_never_an_empty_answer", as
 
 test("the_catalog_table_links_through_the_wizards_rule_and_says_why_it_does_not", () => {
   const cells = pointRow(row(), NS, "archive", "primary", page([]));
-  assert.ok(cells[7].indexOf(restoreCatalogPointRoute(NS, "archive", POINT).replace(/&/g, "&amp;")) !== -1);
+  // The RESTORE cell leads the row since the review's class sweep (MCP-25).
+  assert.ok(cells[0].indexOf(restoreCatalogPointRoute(NS, "archive", POINT).replace(/&/g, "&amp;")) !== -1);
   const refused = pointRow(row({ backupVerdict: "Invalid", selectable: false }), NS, "archive",
     "primary", page([]));
-  assert.doesNotMatch(refused[7], /Restore this point/);
-  assert.match(refused[3], /Backup verdict Invalid/);
+  assert.doesNotMatch(refused[0], /Restore this point/);
+  assert.match(refused[4], /Backup verdict Invalid/);
   const incomplete = pointRow(row(), NS, "archive", "primary",
     page([], { backupVerdictsIncomplete: "Unavailable" }));
-  assert.doesNotMatch(incomplete[7], /Restore this point/);
-  assert.match(incomplete[7], /data-restore-refused="wizard"/);
+  assert.doesNotMatch(incomplete[0], /Restore this point/);
+  assert.match(incomplete[0], /data-restore-refused="wizard"/);
   const html = renderPoints(page([row()], { backupVerdictsIncomplete: "Truncated" }), NS,
     "archive", "primary");
   assert.match(html, /data-backup-verdicts-incomplete="Truncated"/);

@@ -86,6 +86,7 @@ import {
   preflightVerdict,
   replace,
   table,
+  when,
 } from "../render.js";
 import {
   connectionNonce,
@@ -258,7 +259,6 @@ export function renderDestinationList(page, ns) {
       undefined,
       { id: "destinations", label: "destinations" },
     ) +
-    "<p class=\"note\">" + esc(DEFAULT_DESTINATION_SENTENCE) + "</p>" +
     (defaults.length === 0
       ? "<p class=\"note\">No destination in this namespace is marked default, so a new " +
         "schedule starts with none chosen. " + esc(DEFAULT_ANNOTATION_RESIDUAL) + "</p>"
@@ -276,7 +276,8 @@ export function renderDestinationList(page, ns) {
  *  refuse it -- it refuses to let it look like the other one. */
 export function transportCell(security) {
   if (security === "insecureHttp") {
-    return badge("unverified", "insecureHttp (plaintext)");
+    // THE WARNING STYLE (MCP-12): a neutral grey pill read as "fine".
+    return badge("warn", "insecureHttp (plaintext)");
   }
   if (security === "tls") {
     return badge("green", "tls");
@@ -370,7 +371,7 @@ export function renderLastTest(lastTest) {
     preflightVerdict(lastTest.state) +
     (lastTest.stale === true ? " " + badge("unverified", "stale: not health") : "") +
     "<p class=\"note\">Recorded by <code>" + cell(lastTest.preflightId) + "</code>, observed " +
-    cell(lastTest.observedAt) + ".</p>" +
+    when(lastTest.observedAt) + ".</p>" +
     (lastTest.truncated === true
       ? "<p class=\"note\">The search for the newest test hit its page bound, so this may not " +
         "be the newest one.</p>"
@@ -468,8 +469,8 @@ export function renderPreflight(preflight) {
     " <code>" + cell(p.id) + "</code> " + cell(p.operation) + "</p>" +
     applicabilityLine(p) +
     facts([
-      ["observed at", cell(p.observedAt)],
-      ["expires at", cell(p.expiresAt)],
+      ["observed at", when(p.observedAt)],
+      ["expires at", when(p.expiresAt)],
       ["reason", cell(p.reason)],
       ["plan hash", cell(binding.planHash)],
       ["inputs digest", cell(binding.inputsDigest)],
@@ -505,8 +506,8 @@ export function renderUsage(usage, error) {
     return "";
   }
   const rows = []
-    .concat((usage.schedules || []).map((u) => [cell(u.kind), cell(u.name), cell(u.createdAt)]))
-    .concat((usage.backups || []).map((u) => [cell(u.kind), cell(u.name), cell(u.createdAt)]));
+    .concat((usage.schedules || []).map((u) => [cell(u.kind), cell(u.name), when(u.createdAt)]))
+    .concat((usage.backups || []).map((u) => [cell(u.kind), cell(u.name), when(u.createdAt)]));
   return (
     "<section class=\"usage\" id=\"destination-usage\"><h3>What uses this</h3>" +
     table(["KIND", "NAME", "CREATED"], rows, "Nothing labelled by this service names it.") +
@@ -787,8 +788,30 @@ export function rotationBody(values, generation) {
   return body;
 }
 
+/** WHICH INPUTS EACH CREDENTIAL SOURCE USES (MCP-10). The form used to show
+ *  the Secret name, the ServiceAccount and both new-key inputs under every
+ *  role whatever its source, `absent` included; now a source shows its own
+ *  inputs and the others are `hidden` -- still in the form, so a draft and a
+ *  re-render keep what was typed, and `grantBody` reads only the ones its
+ *  source names, as it always did. */
+export const SOURCE_INPUTS = Object.freeze({
+  absent: Object.freeze([]),
+  existing: Object.freeze(["secret"]),
+  new: Object.freeze(["keys"]),
+  workloadIdentity: Object.freeze(["sa"]),
+  controllerIdentity: Object.freeze([]),
+  archiveReadGrant: Object.freeze([]),
+});
+
+/** Whether the input group `group` is shown for `source`. */
+export function sourceShows(source, group) {
+  const shown = SOURCE_INPUTS[source];
+  return Array.isArray(shown) && shown.indexOf(group) !== -1;
+}
+
 function grantFieldset(role, d, field, line, prefixId) {
   const source = String(d[role + "Source"] || "absent");
+  const hide = (group) => (sourceShows(source, group) ? "" : " hidden");
   const options = GRANT_SOURCES.filter(
     (s) => EVIDENCE_READ_ONLY_SOURCES.indexOf(s) === -1 || role === "evidenceRead",
   ).filter((s) => !(role === "archiveWrite" && s === "absent"));
@@ -804,12 +827,14 @@ function grantFieldset(role, d, field, line, prefixId) {
       "<option value=\"" + esc(s) + "\"" + (source === s ? " selected" : "") + ">" +
       esc(s) + "</option>").join("") +
     "</select>" + line(id("source"), role + "Source") + "</div>" +
-    "<div class=\"field\"><label for=\"" + esc(id("secret")) + "\">existing Secret name</label>" +
+    "<div class=\"field\" data-grant-inputs=\"secret\"" + hide("secret") + "><label for=\"" +
+    esc(id("secret")) + "\">existing Secret name</label>" +
     "<input id=\"" + esc(id("secret")) + "\" name=\"" + esc(role + "Secret") + "\" value=\"" +
     esc(String(d[role + "Secret"] || "")) + "\"" + field(id("secret"), role + "Secret") + ">" +
     "<p class=\"help\">The NAME only. This page never reads a Secret's contents.</p>" +
     line(id("secret"), role + "Secret") + "</div>" +
-    "<div class=\"field\"><label for=\"" + esc(id("sa")) + "\">ServiceAccount (workloadIdentity)</label>" +
+    "<div class=\"field\" data-grant-inputs=\"sa\"" + hide("sa") + "><label for=\"" + esc(id("sa")) +
+    "\">ServiceAccount (workloadIdentity)</label>" +
     "<input id=\"" + esc(id("sa")) + "\" name=\"" + esc(role + "ServiceAccount") + "\" value=\"" +
     esc(String(d[role + "ServiceAccount"] || "")) + "\"" +
     field(id("sa"), role + "ServiceAccount") + ">" +
@@ -818,7 +843,7 @@ function grantFieldset(role, d, field, line, prefixId) {
     // secret half; no `value` attribute on either, ever, because a value
     // attribute is what a re-render would have to carry -- and a re-render
     // that carried a credential is exactly the failure rule 1 forbids.
-    "<div class=\"field-row\">" +
+    "<div class=\"field-row\" data-grant-inputs=\"keys\"" + hide("keys") + ">" +
     "<div class=\"field\"><label for=\"" + esc(id("akid")) + "\">new access key id</label>" +
     "<input id=\"" + esc(id("akid")) + "\" name=\"" + esc(role + "AccessKeyId") +
     "\" autocomplete=\"off\" spellcheck=\"false\"" + field(id("akid"), role + "AccessKeyId") + ">" +
@@ -842,7 +867,15 @@ export function renderDestinationForm(view) {
   const pending = state.phase === "pending";
   const field = (id, name) => invalidAttributes(id, errors[name]);
   const line = (id, name) => fieldErrorLine(id, errors[name]);
+  // ONE BUTTON, NOT A 4,300 PX PAGE (MCP-10). The form opens from "Create
+  // destination"; it is open already when the reader has something in flight
+  // there -- a draft, a refusal, a pending create -- so no outcome is hidden.
+  const busy = pending || state.phase === "failed" || Object.keys(errors).length > 0 ||
+    Object.keys(v.draft || {}).some((k) => String((v.draft || {})[k] || "") !== "" &&
+      String((v.draft || {})[k]) !== String(DESTINATION_DEFAULTS[k]));
   return (
+    "<details class=\"create-disclosure\" id=\"destination-create-disclosure\"" +
+    (busy ? " open" : "") + "><summary class=\"button primary\">Create destination</summary>" +
     "<section class=\"create\" id=\"destination-create\"><h3>Create a destination</h3>" +
     "<form id=\"destination-form\" novalidate" + (pending ? " aria-busy=\"true\"" : "") + ">" +
     "<fieldset class=\"form-body\"" + (pending ? " disabled" : "") + ">" +
@@ -926,6 +959,8 @@ export function renderDestinationForm(view) {
     "<label class=\"inline\" for=\"destination-default\">" +
     "<input type=\"checkbox\" id=\"destination-default\" name=\"isDefault\"" +
     (d.isDefault === true ? " checked" : "") + "> make this the namespace default</label>" +
+    // MCP-11: the default-destination paragraph is said once, beside the
+    // checkbox it is about, and no longer a second time under the list.
     "<p class=\"help\">" + esc(DEFAULT_DESTINATION_SENTENCE) + "</p>" +
     "<div class=\"actions\"><button type=\"submit\" class=\"primary\">Create</button></div>" +
     "</fieldset>" +
@@ -935,7 +970,7 @@ export function renderDestinationForm(view) {
       { kind: "BackupDestination", name: d.name, clearsCredentials: true },
       ((v.errors || {}).unmatched),
     ) +
-    "</div></form></section>"
+    "</div></form></section></details>"
   );
 }
 
@@ -1228,6 +1263,24 @@ function paintDetail(node, ns, name, parse, lifecycle, api, item, extra) {
   wireRotate(node, ns, name, parse, lifecycle, api, item, view);
 }
 
+/** A source selector shows its own inputs and hides the rest, as the reader
+ *  changes it (MCP-10). Every grant fieldset on the page, create and rotate
+ *  alike: each `<fieldset class="grant">` holds one selector and its groups. */
+function wireGrantSources(node, lifecycle) {
+  for (const set of node.querySelectorAll("fieldset.grant")) {
+    const select = set.querySelector("select");
+    if (select === null) {
+      continue;
+    }
+    const apply = () => {
+      for (const group of set.querySelectorAll("[data-grant-inputs]")) {
+        group.hidden = !sourceShows(String(select.value), group.getAttribute("data-grant-inputs"));
+      }
+    };
+    listen(select, "change", apply, lifecycle);
+  }
+}
+
 function wireCreate(node, ns, parse, lifecycle, api) {
   const form = node.querySelector("#destination-form");
   if (form === null) {
@@ -1249,6 +1302,7 @@ function wireCreate(node, ns, parse, lifecycle, api) {
   };
   listen(form, "input", remember, lifecycle);
   listen(form, "change", remember, lifecycle);
+  wireGrantSources(node, lifecycle);
   watchMutation(node, key, mutation, (state) => {
     if (state.phase === "succeeded") {
       dropDraft(key);
@@ -1421,6 +1475,7 @@ async function followDestinationTest(node, ns, name, parse, lifecycle, api, item
 }
 
 function wireRotate(node, ns, name, parse, lifecycle, api, item, view) {
+  wireGrantSources(node, lifecycle);
   const form = node.querySelector("#destination-rotate-form");
   if (form === null) {
     return;

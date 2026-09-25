@@ -533,6 +533,18 @@ pub struct ScheduleStatusView {
     /// The most recent skipped slot.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_missed_slot: Option<String>,
+    /// What happened to the most recent slot the controller decided about —
+    /// admitted, caught up, retried, missed, blocked, exhausted — copied from
+    /// `status.lastSlot` (D1 §4.8; MCP-13). ADDITIVE: a console built before
+    /// it reads the schedule exactly as before. ABSENT means the controller
+    /// has decided about no slot yet, never that nothing happened.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_slot: Option<LastSlotView>,
+    /// How many slots came due and were not run, with the most recent ones,
+    /// copied from `status.missedSlots` (D1 §4.8; MCP-13). ABSENT means "not
+    /// yet accounted", never "none were missed".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub missed_slots: Option<MissedSlotsView>,
     /// The `Ready` condition.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ready: Option<ConditionView>,
@@ -843,6 +855,16 @@ pub struct OperationSummary {
     pub verification_state: VerificationState,
     /// Result pass AND verification `Valid`.
     pub verified_success: bool,
+    /// The runner's exit code, when one was recovered — the operation's own
+    /// `result.exitCode`, carried on the LIST row so a Backups table can show
+    /// it (MCP-17). ADDITIVE; ABSENT means none was recovered, never `0`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    /// A Restore's scorecard outcome (`pass`, `fail-objective`, ...) — the
+    /// operation's own `result.outcome`. It is the run's CLAIM: a console
+    /// labels it unverified unless `verifiedSuccess` (MCP-17). ADDITIVE.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
 }
 
 // ======================================================================
@@ -3147,6 +3169,65 @@ pub struct SchedulePolicyView {
     /// console must not compare it with the requeue interval. The staleness
     /// signal is `nextRuns[0].at` in the past (D1 §4.9 as amended).
     pub evaluated_at: DateTime<Utc>,
+}
+
+/// What happened to a schedule's most recent decided slot (D1 §4.8), as the
+/// controller recorded it in `BackupSchedule.status.lastSlot`. Every field is
+/// the controller's own; nothing is recomputed here.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LastSlotView {
+    /// The slot, `yyyymmdd-hhmmss` of its UTC instant.
+    pub slot: String,
+    /// The instant that name spells.
+    pub due_at: DateTime<Utc>,
+    /// Which attempt of the slot this disposition is about.
+    pub attempt: i32,
+    /// The controller's word (`weirkeeper::controllers::backup_schedule`'s
+    /// `DISPOSITION_*`): `Admitted`, `CaughtUp`, `Retried`, `Missed`,
+    /// `Blocked`, `NameUnavailable`, `Released`, `Failed` or `Exhausted`. A
+    /// word a newer controller adds is carried verbatim.
+    pub disposition: String,
+    /// The `Backup` the disposition is about, when there is one — a name in
+    /// this namespace, which every reader of the schedule may already list.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backup_ref: Option<NameRef>,
+    /// The `Ready` reason that accompanied the decision.
+    pub reason: String,
+    /// When it was decided.
+    pub decided_at: DateTime<Utc>,
+}
+
+/// One slot that came due and was not run.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MissedSlotView {
+    /// The slot.
+    pub slot: String,
+    /// The controller's word (`weirkeeper::controllers::backup_schedule`'s
+    /// `MISSED_*`), verbatim: `ControllerUnavailable`, `ConcurrencyBlocked`,
+    /// `PastStartingDeadline`, `BeforeRevision` or `NameUnavailable`.
+    pub reason: String,
+    /// When the controller noticed.
+    pub recorded_at: DateTime<Utc>,
+}
+
+/// The running total of skipped slots and the most recent of them (D1 §4.8).
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MissedSlotsView {
+    /// How many slots have been skipped since the schedule was created.
+    pub count: i64,
+    /// Whether the controller's enumeration hit its cap, so `count` is a
+    /// floor rather than a total.
+    pub count_capped: bool,
+    /// The newest slot the accounting has already considered.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_evaluated_slot: Option<String>,
+    /// The most recent skips, newest first, at most ten as the controller
+    /// keeps them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recent: Option<Vec<MissedSlotView>>,
 }
 
 /// One schedule-created run that is not terminal (D1 §4.8).

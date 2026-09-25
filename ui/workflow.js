@@ -259,7 +259,11 @@ export function replayWizard(steps) {
   let blocked = -1;
   for (let i = 0; i < list.length; i += 1) {
     const step = list[i] || {};
-    const done = step.status === "done" || step.status === "ready";
+    // `unchecked` is step 5 with no readiness check held (MCP-27): not DONE --
+    // nothing checked it -- and not a block either, because the check is
+    // advisory and the plan may be created without one, with a warning.
+    const done = step.status === "done" || step.status === "ready" ||
+      step.status === "unchecked";
     if (!done) {
       blocked = i;
       break;

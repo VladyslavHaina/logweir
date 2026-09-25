@@ -8766,6 +8766,52 @@
           }
         }
       },
+      "LastSlotView": {
+        "description": "What happened to a schedule's most recent decided slot (D1 §4.8), as the controller recorded it in `BackupSchedule.status.lastSlot`. Every field is the controller's own; nothing is recomputed here.",
+        "type": "object",
+        "required": [
+          "attempt",
+          "decidedAt",
+          "disposition",
+          "dueAt",
+          "reason",
+          "slot"
+        ],
+        "properties": {
+          "attempt": {
+            "description": "Which attempt of the slot this disposition is about.",
+            "type": "integer",
+            "format": "int32"
+          },
+          "backupRef": {
+            "description": "The `Backup` the disposition is about, when there is one — a name in this namespace, which every reader of the schedule may already list.",
+            "$ref": "#/components/schemas/NameRef",
+            "nullable": true
+          },
+          "decidedAt": {
+            "description": "When it was decided.",
+            "type": "string",
+            "format": "date-time"
+          },
+          "disposition": {
+            "description": "The controller's word (`weirkeeper::controllers::backup_schedule`'s `DISPOSITION_*`): `Admitted`, `CaughtUp`, `Retried`, `Missed`, `Blocked`, `NameUnavailable`, `Released`, `Failed` or `Exhausted`. A word a newer controller adds is carried verbatim.",
+            "type": "string"
+          },
+          "dueAt": {
+            "description": "The instant that name spells.",
+            "type": "string",
+            "format": "date-time"
+          },
+          "reason": {
+            "description": "The `Ready` reason that accompanied the decision.",
+            "type": "string"
+          },
+          "slot": {
+            "description": "The slot, `yyyymmdd-hhmmss` of its UTC instant.",
+            "type": "string"
+          }
+        }
+      },
       "LastSyncView": {
         "description": "The sync Job that produced this view.",
         "type": "object",
@@ -8853,6 +8899,62 @@
           "schedule": {
             "description": "The schedule, when the run was taken from one.",
             "$ref": "#/components/schemas/ScheduleContextView",
+            "nullable": true
+          }
+        }
+      },
+      "MissedSlotView": {
+        "description": "One slot that came due and was not run.",
+        "type": "object",
+        "required": [
+          "reason",
+          "recordedAt",
+          "slot"
+        ],
+        "properties": {
+          "reason": {
+            "description": "The controller's word (`weirkeeper::controllers::backup_schedule`'s `MISSED_*`), verbatim: `ControllerUnavailable`, `ConcurrencyBlocked`, `PastStartingDeadline`, `BeforeRevision` or `NameUnavailable`.",
+            "type": "string"
+          },
+          "recordedAt": {
+            "description": "When the controller noticed.",
+            "type": "string",
+            "format": "date-time"
+          },
+          "slot": {
+            "description": "The slot.",
+            "type": "string"
+          }
+        }
+      },
+      "MissedSlotsView": {
+        "description": "The running total of skipped slots and the most recent of them (D1 §4.8).",
+        "type": "object",
+        "required": [
+          "count",
+          "countCapped"
+        ],
+        "properties": {
+          "count": {
+            "description": "How many slots have been skipped since the schedule was created.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "countCapped": {
+            "description": "Whether the controller's enumeration hit its cap, so `count` is a floor rather than a total.",
+            "type": "boolean"
+          },
+          "lastEvaluatedSlot": {
+            "description": "The newest slot the accounting has already considered.",
+            "type": "string",
+            "nullable": true
+          },
+          "recent": {
+            "description": "The most recent skips, newest first, at most ten as the controller keeps them.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MissedSlotView"
+            },
             "nullable": true
           }
         }
@@ -9430,6 +9532,17 @@
           "verifiedSuccess"
         ],
         "properties": {
+          "exitCode": {
+            "description": "The runner's exit code, when one was recovered — the operation's own `result.exitCode`, carried on the LIST row so a Backups table can show it (MCP-17). ADDITIVE; ABSENT means none was recovered, never `0`.",
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "outcome": {
+            "description": "A Restore's scorecard outcome (`pass`, `fail-objective`, ...) — the operation's own `result.outcome`. It is the run's CLAIM: a console labels it unverified unless `verifiedSuccess` (MCP-17). ADDITIVE.",
+            "type": "string",
+            "nullable": true
+          },
           "state": {
             "description": "The lifecycle state.",
             "$ref": "#/components/schemas/OperationState"
@@ -12598,6 +12711,16 @@
           "lastMissedSlot": {
             "description": "The most recent skipped slot.",
             "type": "string",
+            "nullable": true
+          },
+          "lastSlot": {
+            "description": "What happened to the most recent slot the controller decided about — admitted, caught up, retried, missed, blocked, exhausted — copied from `status.lastSlot` (D1 §4.8; MCP-13). ADDITIVE: a console built before it reads the schedule exactly as before. ABSENT means the controller has decided about no slot yet, never that nothing happened.",
+            "$ref": "#/components/schemas/LastSlotView",
+            "nullable": true
+          },
+          "missedSlots": {
+            "description": "How many slots came due and were not run, with the most recent ones, copied from `status.missedSlots` (D1 §4.8; MCP-13). ABSENT means \"not yet accounted\", never \"none were missed\".",
+            "$ref": "#/components/schemas/MissedSlotsView",
             "nullable": true
           },
           "nextFireTime": {

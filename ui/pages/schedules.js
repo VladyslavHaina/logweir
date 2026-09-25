@@ -87,6 +87,9 @@ import {
   rfc3339,
   table,
   triggerBadge,
+  technicalDetails,
+  conditionBadge,
+  when,
 } from "../render.js";
 import {
   clusterName,
@@ -227,7 +230,10 @@ export function conditionStatus(object, type) {
   const conditions = Array.isArray(status.conditions) ? status.conditions : [];
   for (const condition of conditions) {
     if (condition && condition.type === type) {
-      return cell(condition.status);
+      // A BADGE, NOT `True` (MCP-14): the words, with the recorded condition
+      // as its title.
+      return conditionBadge(condition, type === "Ready" ? "ready" : String(type),
+        type === "Ready" ? "not ready" : "not " + String(type));
     }
   }
   return cell(null);
@@ -261,8 +267,8 @@ export function renderScheduleList(input, destinations, destinationsUnavailable)
       "<code>" + cell(spec.schedule) + "</code>",
       destinationCell(object, destinations, destinationsUnavailable === true),
       suspendBadge(spec),
-      cell(status.lastFireTime),
-      cell(status.nextFireTime),
+      when(status.lastFireTime),
+      when(status.nextFireTime),
       conditionStatus(object, "Ready"),
     ];
   });
@@ -382,7 +388,7 @@ function removableLine(set) {
   }
   return (
     cell(s.backupId) +
-    " (newest record " + cell(s.newestRecordAt) + ")" +
+    " (newest record " + when(s.newestRecordAt) + ")" +
     (why.length === 0 ? "" : " -- " + esc(why.join(", ")))
   );
 }
@@ -466,7 +472,7 @@ export function renderRetentionPanel(object, policy, policies) {
     "<section class=\"retention\"><h3>Retention</h3>" +
     enforcement +
     facts([
-      ["evaluated at", cell(report.evaluatedAt)],
+      ["evaluated at", when(report.evaluatedAt)],
       ["keepLast applied", cell(report.keepLast)],
       ["keepDays applied", cell(report.keepDays)],
       ["note", cell(report.note)],
@@ -667,7 +673,7 @@ export function renderEnforcement(report, policy) {
           ["approval required", cell(enforcement.requireApprovedPlan)],
           ["digest an administrator approved", cell(enforcement.approvedPlanSha256)],
           ["digest of the newest evaluation", cell(evaluation.planSha256)],
-          ["that plan expires at", cell(evaluation.planExpiresAt)],
+          ["that plan expires at", when(evaluation.planExpiresAt)],
           ["points it would remove", cell(evaluation.candidateCount)],
         ]) +
         (enforced === null
@@ -752,7 +758,8 @@ export const DYNAMIC_SELECTION_SENTENCE =
  *  cases are distinguishable and only the genuinely empty one is left. */
 export const SELECTION_UNKNOWN_SENTENCE =
   "This schedule names no topic and carries no dynamic-selection block. No run under it will " +
-  "back anything up: an empty allowlist is not an allowlist. Read the object with kubectl.";
+  "back anything up: an empty allowlist is not an allowlist. Name its topics, or all user " +
+  "topics, in its policy.";
 
 /** Why no run's COVERAGE is rendered, and by whom that is owed.
  *
@@ -769,7 +776,7 @@ export const COVERAGE_NOT_PUBLISHED =
   "legacy mode is every run. What is still missing is the PROJECTION -- logweir-api's Backup " +
   "view publishes trigger and scheduleRef and no status.selection at all -- so in console mode " +
   "there is nothing to read, and this page will not infer a coverage from the mode, the frozen " +
-  "topic list or a successful phase. Read the run with kubectl until that projection lands.";
+  "topic list or a successful phase.";
 
 /** What the create form says about where a NEW schedule writes.
  *
@@ -1122,7 +1129,7 @@ export function renderTopicPicker(view) {
       : "") +
     (discovery !== null && !limited && !stale
       ? "<p class=\"note\" data-picker=\"unknown\">Offered from the inventory observed at " +
-        cell(discovery.observedAt) + ". A successful Kafka listing is not a complete one, so " +
+        when(discovery.observedAt) + ". A successful Kafka listing is not a complete one, so " +
         "this list is an offer and never a bound.</p>"
       : "") +
     "</div>"
@@ -1778,6 +1785,8 @@ export function renderRecoveryPoints(ns, object, backups) {
     const status = point.status || {};
     const covered = status.windowCovered || {};
     return [
+      // The action first (MCP-25's rule), so a wide row never hides it.
+      "<a class=\"action\" href=\"" + esc(restorePointRoute(ns, point)) + "\">Restore this point</a>",
       cell(meta.name),
       triggerBadge(spec.trigger, ((object || {}).spec || {}).retry === undefined
         ? undefined
@@ -1785,20 +1794,23 @@ export function renderRecoveryPoints(ns, object, backups) {
       coverageCell(point),
       cell(spec.slot),
       cell(status.backupId),
-      cell(rfc3339(covered.fromMs)),
-      cell(rfc3339(covered.toMs)),
+      when(rfc3339(covered.fromMs)),
+      when(rfc3339(covered.toMs)),
       cell(status.records),
-      "<a href=\"" + esc(restorePointRoute(ns, point)) + "\">Restore this point</a>",
     ];
   });
   const running = mine.filter((backup) => !isRecoveryPoint(backup)).length;
   return (
     "<section class=\"retention\"><h3>Recovery points</h3>" +
+    // A PAGE OF POINTS, NOT ALL OF THEM (MCP-26): 258 points were 258 rows on
+    // every schedule card, a 20,000 px table.
     table(
-      ["BACKUP", "TRIGGER", "COVERAGE", "SLOT", "BACKUP SET", "COVERED FROM", "COVERED TO",
-        "RECORDS", ""],
+      ["", "BACKUP", "TRIGGER", "COVERAGE", "SLOT", "BACKUP SET", "COVERED FROM", "COVERED TO",
+        "RECORDS"],
       rows,
       NO_POINTS_SENTENCE,
+      undefined,
+      { id: "schedule-points", label: "recovery points", scope: schedule },
     ) +
     (running === 0
       ? ""
@@ -1885,24 +1897,36 @@ export function renderScheduleRevision(object) {
   const behind = typeof meta.generation === "number" &&
     typeof status.observedGeneration === "number" &&
     status.observedGeneration < meta.generation;
+  // THE REVISION, THE INSTANT AND THE ZONE IN THE SENTENCE; THE DIGEST AND THE
+  // tz DATABASE ONE DISCLOSURE AWAY (MCP-13). Both are still printed -- a
+  // suspend flip moves the generation and leaves the digest, which is why the
+  // digest is here at all -- but a `sha256:` and a library version were the
+  // first thing an operator read on every schedule card.
   return (
     "<p class=\"revision\" data-generation=\"" +
     (typeof meta.generation === "number" ? String(meta.generation) : "") + "\">" +
-    revisionLine({
-      generation: meta.generation,
-      runPolicySha256: (policy || {}).runPolicySha256,
-    }) +
+    (typeof meta.generation === "number"
+      ? "Revision g" + String(meta.generation)
+      : revisionLine({ generation: meta.generation, runPolicySha256: (policy || {}).runPolicySha256 })) +
     (policy === undefined || policy === null
-      ? ""
-      : " In force since <code>" + esc(String(policy.effectiveSince)) + "</code>, read in " +
-        "<code>" + esc(String(policy.timeZone)) + "</code> against <code>" +
-        esc(String(policy.tzdb)) + "</code>.") +
+      ? "."
+      : ", in force since " + when(policy.effectiveSince) + ", read in " +
+        "<code>" + esc(String(policy.timeZone)) + "</code>.") +
     (behind
       ? " " + badge("pending", "not yet evaluated") + " <span class=\"note\">The controller has " +
         "evaluated revision g" + String(status.observedGeneration) + "; the policy saved above " +
         "is not yet the policy that schedules.</span>"
       : "") +
-    "</p>"
+    "</p>" +
+    technicalDetails(
+      revisionLine({
+        generation: meta.generation,
+        runPolicySha256: (policy || {}).runPolicySha256,
+      }) +
+      (policy === undefined || policy === null
+        ? ""
+        : " -- the time-zone database <code>" + esc(String(policy.tzdb)) + "</code>"),
+    )
   );
 }
 
@@ -3672,7 +3696,8 @@ export const NO_GENERATION_SENTENCE =
   "the form was opened at as a precondition, and this build is not publishing a generation for " +
   "this object. Without it the request would ask the API to replace whatever revision happens " +
   "to be current when it lands, which is the lost update the precondition exists to prevent. " +
-  "Edit it with kubectl, which carries its own resourceVersion precondition.";
+  "Its policy can be edited from a console served by a current logweir-api, or by an " +
+  "administrator with access to the cluster.";
 
 /** A draft cadence's preview, or the words that say none has been taken. */
 export function renderPolicyPreview(preview, values) {
@@ -4035,7 +4060,7 @@ export function renderRunNowPanel(view) {
         "</form>") +
     renderRunNowResult(v.ns, v.result) +
     "<p class=\"note\">" + esc(AFTER_REFRESH_SENTENCE) + "</p>" +
-    renderManualRuns(v.ns, runs, spec) +
+    renderManualRuns(v.ns, runs, spec, name) +
     "</section>"
   );
 }
@@ -4079,7 +4104,7 @@ export function renderRunNowResult(ns, result) {
 
 /** The manual runs that already exist, so a reload shows the run rather than
  *  inviting a second click. */
-export function renderManualRuns(ns, runs, spec) {
+export function renderManualRuns(ns, runs, spec, schedule) {
   const maxRetries = ((spec || {}).retry || {}).maxRetries;
   const rows = runs.map((run) => {
     const meta = run.metadata || {};
@@ -4089,13 +4114,17 @@ export function renderManualRuns(ns, runs, spec) {
       triggerBadge(s.trigger, maxRetries),
       revisionLine(s.scheduleRef),
       runPhaseBadge(run.status),
-      cell(meta.creationTimestamp),
+      when(meta.creationTimestamp),
     ];
   });
+  // A page of them (MCP-26): a schedule with hundreds of manual runs listed
+  // every one of them under "Back up now".
   return table(
     ["RUN", "TRIGGER", "REVISION", "PHASE", "CREATED"],
     rows,
     "no manual run of this schedule exists in this namespace",
+    undefined,
+    { id: "schedule-manual-runs", label: "manual runs", scope: String(schedule || "") },
   );
 }
 
@@ -4121,11 +4150,11 @@ export function renderLastSlot(object) {
   const rows = [];
   if (slot !== undefined && slot !== null) {
     rows.push(["last slot", "<code>" + cell(slot.slot) + "</code>"]);
-    rows.push(["due at", cell(slot.dueAt)]);
+    rows.push(["due at", when(slot.dueAt)]);
     rows.push(["attempt", cell(slot.attempt)]);
     rows.push(["disposition", badge("pending", String(slot.disposition || ""))]);
     rows.push(["reason", cell(slot.reason)]);
-    rows.push(["decided at", cell(slot.decidedAt)]);
+    rows.push(["decided at", when(slot.decidedAt)]);
     rows.push(["backup", cell((slot.backupRef || {}).name)]);
   }
   if (missed !== undefined && missed !== null) {
@@ -4146,9 +4175,10 @@ export function renderLastSlot(object) {
 export const LAST_SLOT_NOT_PUBLISHED =
   "What happened to this schedule's most recent slot -- whether it was admitted, caught up, " +
   "missed, blocked or exhausted -- and how many slots have been skipped are recorded by the " +
-  "controller in status.lastSlot and status.missedSlots. This build's product API projects " +
-  "neither, so the console has nothing to render; read the schedule with kubectl, or use the " +
-  "kubectl-proxy mode, which reads the object itself.";
+  "controller in status.lastSlot and status.missedSlots. The product API serving this console " +
+  "is a release that does not publish them, so the console has nothing to render; nothing is " +
+  "wrong with the schedule because of it, and a console served by a current logweir-api " +
+  "shows both.";
 
 /** The runs of this schedule that are in flight right now, each with the
  *  revision it FROZE -- which is the point of the panel.
@@ -4796,6 +4826,9 @@ export function renderScheduleHistory(ns, object, runs, points, catalogError, se
     const found = pointsForRun(run, points);
     const verdicts = verdictCells(found, coverage);
     return [
+      // THE ACTION FIRST (MCP-25's rule; review L5): as the tenth column the
+      // restore link was the one a 1024 px window scrolled out of the card.
+      restoreCell(ns, run, points),
       detailLink("backups", String(ns || meta.namespace || ""), String(meta.name || "")),
       triggerBadge(run.spec ? run.spec.trigger : undefined, maxRetries),
       runPhaseBadge(status),
@@ -4804,11 +4837,10 @@ export function renderScheduleHistory(ns, object, runs, points, catalogError, se
         (found.length > 1
           ? " <span class=\"badge badge-flat\">" + String(found.length) + " points</span>"
           : ""),
-      cell(rfc3339(covered.fromMs)),
-      cell(rfc3339(covered.toMs)),
+      when(rfc3339(covered.fromMs)),
+      when(rfc3339(covered.toMs)),
       verdicts[0],
       verdicts[1],
-      restoreCell(ns, run, points),
     ];
   });
   return (
@@ -4828,8 +4860,8 @@ export function renderScheduleHistory(ns, object, runs, points, catalogError, se
         esc(CATALOG_TRUNCATED_SENTENCE) + "</p>"
       : "") +
     table(
-      ["RUN", "TRIGGER", "PHASE", "SLOT", "BACKUP SET", "COVERED FROM", "COVERED TO",
-        "AVAILABILITY", "VERIFICATION", ""],
+      ["", "RUN", "TRIGGER", "PHASE", "SLOT", "BACKUP SET", "COVERED FROM", "COVERED TO",
+        "AVAILABILITY", "VERIFICATION"],
       rows,
       NO_HISTORY_SENTENCE,
       undefined,
@@ -4856,7 +4888,7 @@ export function restoreCell(ns, run, points) {
     // plan is bound to that receipt and the runner re-verifies it.
     const offer = backupCatalogOfferFrom(run, points);
     if (offer.offer) {
-      return "<a href=\"" + esc(restoreCatalogPointRoute(ns, offer.catalog, offer.entry.pointId,
+      return "<a class=\"action\" href=\"" + esc(restoreCatalogPointRoute(ns, offer.catalog, offer.entry.pointId,
         run)) + "\" data-restore-from=\"catalog\">Restore this point (catalog window)</a>";
     }
     return cell("");
@@ -4865,7 +4897,7 @@ export function restoreCell(ns, run, points) {
     return "<span class=\"note\" data-restore-refused=\"catalog\">not restorable: the catalog " +
       "marks this set not selectable</span>";
   }
-  return "<a href=\"" + esc(restorePointRoute(ns, run)) + "\">Restore this point</a>";
+  return "<a class=\"action\" href=\"" + esc(restorePointRoute(ns, run)) + "\">Restore this point</a>";
 }
 
 /** Why there are two verdict columns and what a blank one would have meant. */
@@ -5035,7 +5067,7 @@ export function renderScheduleFacts(object, runs, destinations, now, points, des
       ["Destination", destinationCell(object, destinations, destinationsUnavailable)],
       ["Policy revision", policy === undefined ? ABSENT : cell("g" + String(policy))],
       ["Latest restorable point", latest === null ? ABSENT : cell(latestMeta.name)],
-      ["Latest point completed", complete.length === 0 ? ABSENT : cell(complete) +
+      ["Latest point completed", complete.length === 0 ? ABSENT : when(complete) +
         (fromCreation
           ? " <span class=\"note\" data-completed-from=\"creation\">" +
             esc(COMPLETION_INSTANT_NOT_PUBLISHED) + "</span>"

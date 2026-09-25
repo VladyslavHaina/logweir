@@ -14,4 +14,10 @@
 // the mode is decided. Nothing fetches this file in that mode for its
 // contents; it is still served, because `index.html` asks for it before
 // `app.js` and a missing script is an error in the console.
+//
+// AND THE CONSOLE NEVER SERVES THIS FILE. `logweir-api` serves its own,
+// compiled in (`crates/logweir-api/src/assets.rs` `CONSOLE_RUNTIME_JS`), which
+// also sets `window.LOGWEIR_CONSOLE`: that is how a page knows it is behind the
+// console even when its first request fails, and why this file must never set
+// it.
 window.LOGWEIR_NAMESPACE_CONTEXT = Object.freeze({ allowed: [], selected: "" });

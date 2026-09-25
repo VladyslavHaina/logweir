@@ -45,6 +45,7 @@ import {
   consoleCreate,
   consoleGet,
   consoleList,
+  consoleLogout,
   consoleOperation,
   consoleSchedulePolicy,
   consoleSetSuspension,
@@ -81,13 +82,54 @@ import {
   isContractFailure,
 } from "./contract.js";
 import { preparedFor } from "./plan.js";
-import { basisAllowsGreen, TRUST_BASIS_NOT_OBSERVED } from "./render.js";
+import { SIGN_IN_CODES, basisAllowsGreen, TRUST_BASIS_NOT_OBSERVED } from "./render.js";
 import { causesFrom, validateRequest } from "./validate.js";
 
 /** The two modes, by name. */
 export const LEGACY = "legacy";
 /** @see LEGACY */
 export const CONSOLE = "console";
+
+/** THE SHARED CONSOLE WITH NOBODY SIGNED IN (MCP-1, MCP-4). Not a third API:
+ *  the page IS behind `logweir-api`, and `GET /api/v1/session` said so by
+ *  answering `401` with its own problem document. Before this the page read
+ *  that refusal as "not the product API" and fell back to legacy mode, so a
+ *  signed-out visitor was asked for a namespace and then shown a raw problem
+ *  document from a `/apis/...` path the console does not serve. In this mode
+ *  the shell renders a sign-in page on every route and no page is mounted;
+ *  every read and write is refused here, by name, before the network. */
+export const SIGNED_OUT = "signedOut";
+
+/** The two problem codes a `401` from `/api/v1/session` carries (`docs/api.md`,
+ *  *The session and the CSRF token*): no session cookie at all, and one that
+ *  expired or no longer authenticates. Anything else -- a Kubernetes `Status`
+ *  from a `kubectl proxy` whose own credential failed, an HTML page, a body
+ *  that is not a problem document -- is NOT the product API asking for a
+ *  sign-in, and stays legacy mode. */
+export const SIGNED_OUT_CODES = SIGN_IN_CODES;
+
+/** THE CONSOLE THAT COULD NOT BE REACHED (console-ux-1 review L1). The page
+ *  knows it is behind `logweir-api` -- the service served its `runtime.js`
+ *  with a marker the legacy file does not carry -- and the session probe did
+ *  not give it a session or a sign-in refusal: it timed out, failed on the
+ *  network, answered a 5xx or a 429, or answered a body this page could not
+ *  decode. That is "the service is not answering right now", and the shell
+ *  says so with a Retry. It is NEVER legacy mode: a console that fell back to
+ *  legacy read `/apis/...` paths it does not serve, on every page. */
+export const UNAVAILABLE = "unavailable";
+
+/** Whether this page was served by `logweir-api`: the marker the service's
+ *  compiled-in `runtime.js` sets (`crates/logweir-api/src/assets.rs`
+ *  `CONSOLE_RUNTIME_JS`). A deterministic fact about the page, not an answer
+ *  from the network. */
+export function servedByConsole(deps) {
+  const d = deps || {};
+  if (typeof d.servedByConsole === "boolean") {
+    return d.servedByConsole;
+  }
+  const marker = globalThis.LOGWEIR_CONSOLE;
+  return marker !== null && typeof marker === "object" && marker.servedBy === "logweir-api";
+}
 
 /** How long the boot probe waits before deciding this is legacy mode. A page
  *  behind a proxy that never answers must still render: the refusal IS the
@@ -174,8 +216,11 @@ export function bindingRevision() {
 
 /** Whether `flag` is granted for `ns`. In legacy mode every capability is
  *  "granted" here and the API server's RBAC is the gate, which is the whole
- *  authorisation story of that mode. */
+ *  authorisation story of that mode. Signed out, nothing is. */
 export function granted(ns, flag) {
+  if (decided !== null && (decided.mode === SIGNED_OUT || decided.mode === UNAVAILABLE)) {
+    return false;
+  }
   if (decided === null || decided.mode !== CONSOLE) {
     return true;
   }
@@ -220,6 +265,7 @@ async function ensure() {
 
 async function probe(deps) {
   const ask = typeof deps.probe === "function" ? deps.probe : session;
+  const console_ = servedByConsole(deps);
   const Controller = deps.controller || globalThis.AbortController;
   let controller = null;
   let timer = null;
@@ -242,26 +288,186 @@ async function probe(deps) {
           controller.abort();
         }
         resolve(null);
-      }, PROBE_TIMEOUT_MS);
+      }, typeof deps.timeoutMs === "number" ? deps.timeoutMs : PROBE_TIMEOUT_MS);
     });
     const answer = await Promise.race([asked, bounded]);
+    if (answer !== null && answer !== undefined && answer.ok !== true &&
+      signedOutCode(answer) !== null) {
+      return signedOutRecord(signedOutCode(answer));
+    }
     if (answer === null || answer === undefined || answer.ok !== true) {
-      return legacyRecord();
+      // BEHIND THE CONSOLE, A MISSING SESSION IS AN OUTAGE AND NOT A MODE
+      // (review L1). Only a page the console did NOT serve may conclude that
+      // it is behind `kubectl proxy`.
+      return console_ ? unavailableRecord(answer) : legacyRecord();
     }
     const decoded = decodeSession(answer.body);
     return consoleRecord(decoded.value, decoded.unknown);
   } catch (refused) {
-    // EVERY REFUSAL IS THE SAME ANSWER: this is not the product API. A path
-    // filter's 403, a body that is not a session document, a decode that found
-    // a required field missing, an abort at the bound above -- each of them
-    // says the page is not behind `logweir-api`, and legacy mode is what it is
-    // behind instead.
-    return legacyRecord();
+    // EVERY REFUSAL IS THE SAME ANSWER on a page the console did not serve:
+    // this is not the product API. A path filter's 403, a body that is not a
+    // session document, a decode that found a required field missing, an
+    // abort at the bound above -- each says the page is not behind
+    // `logweir-api`, and legacy mode is what it is behind instead. On a page
+    // the console DID serve, each is the service not answering (review L1).
+    return console_ ? unavailableRecord(null, refused) : legacyRecord();
   } finally {
     if (timer !== null) {
       globalThis.clearTimeout(timer);
     }
   }
+}
+
+/** The problem code of a `401` the PRODUCT API gave `/session`, or `null`.
+ *
+ *  Read narrowly on purpose. A `401` alone is not enough: `kubectl proxy`
+ *  forwards `/api/v1/session` to kube-apiserver, which answers `401` with a
+ *  Kubernetes `Status` when the proxy's own credential has expired -- a legacy
+ *  page with a broken kubeconfig, not a console asking for a sign-in. The
+ *  product API's refusal is a problem document whose `code` is one of
+ *  [`SIGNED_OUT_CODES`]; a `Status` carries a NUMBER in `code`. */
+export function signedOutCode(answer) {
+  const a = answer || {};
+  const body = a.body;
+  if (a.status !== 401 || body === null || typeof body !== "object") {
+    return null;
+  }
+  return typeof body.code === "string" && SIGNED_OUT_CODES.indexOf(body.code) !== -1
+    ? body.code
+    : null;
+}
+
+function signedOutRecord(code) {
+  return Object.freeze({
+    mode: SIGNED_OUT,
+    session: null,
+    namespaces: Object.freeze([]),
+    grants: Object.freeze(Object.create(null)),
+    roles: Object.freeze(Object.create(null)),
+    bindingRevision: "",
+    token: null,
+    unknown: Object.freeze([]),
+    // Which of the two refusals it was, so the sign-in page can say "your
+    // session ended" rather than "you are not signed in" when that is true.
+    signedOut: code,
+  });
+}
+
+// What the probe got instead of a session, in words for the shell's page:
+// the status and the problem document's own code and detail when there was an
+// answer, "did not answer in time" when the bound fired, and the error's own
+// message when the request itself failed. Never a credential: the probe
+// carries none.
+function unavailableRecord(answer, error) {
+  let said;
+  if (answer === null || answer === undefined) {
+    said = error === undefined || error === null
+      ? "the service did not answer within " + String(PROBE_TIMEOUT_MS / 1000) + " seconds"
+      : (error.kind === "contract" || error.contract !== undefined
+        ? "the service answered with a session this page could not read"
+        : "the request failed: " + String(error.message || error));
+  } else {
+    const body = answer.body !== null && typeof answer.body === "object" ? answer.body : {};
+    said = "the service answered " + String(answer.status) +
+      (typeof body.code === "string" ? " " + body.code : "") +
+      (typeof body.detail === "string" && body.detail.length > 0 ? ": " + body.detail : "");
+  }
+  return Object.freeze({
+    mode: UNAVAILABLE,
+    session: null,
+    namespaces: Object.freeze([]),
+    grants: Object.freeze(Object.create(null)),
+    roles: Object.freeze(Object.create(null)),
+    bindingRevision: "",
+    token: null,
+    unknown: Object.freeze([]),
+    unavailable: said,
+  });
+}
+
+/** Why the console could not start, in words, when it could not; `null` in
+ *  every other state. */
+export function unavailableReason() {
+  return decided === null || decided.mode !== UNAVAILABLE ? null : decided.unavailable;
+}
+
+/** `unauthenticated` or `session_expired` when the shared console has nobody
+ *  signed in, and `null` in every other mode and before the probe. */
+export function signedOutReason() {
+  return decided === null || decided.mode !== SIGNED_OUT ? null : decided.signedOut;
+}
+
+/** WHO THIS PAGE IS SIGNED IN AS, for the header (MCP-5), or `null` when there
+ *  is no session to describe (legacy mode, signed out, before the probe).
+ *
+ *  Every value is the session document's own: the display claim, the subject,
+ *  the authentication mode and the product roles the binding table granted in
+ *  `ns`. Nothing is inferred from capability flags. */
+export function sessionIdentity(ns) {
+  if (decided === null || decided.mode !== CONSOLE || decided.session === null) {
+    return null;
+  }
+  const actor = decided.session.actor || {};
+  const display = typeof actor.displayName === "string" && actor.displayName.length > 0
+    ? actor.displayName
+    : String(actor.subject || actor.id || "");
+  return Object.freeze({
+    displayName: display,
+    subject: String(actor.subject || ""),
+    authenticationMode: String(decided.session.authenticationMode || ""),
+    roles: Object.freeze(rolesFor(ns)),
+    namespace: typeof ns === "string" ? ns : "",
+    // A localAdmin console has no sign-in and no sign-out: the one actor is the
+    // administrator who started it on loopback (`docs/api.md`).
+    canSignOut: decided.session.authenticationMode === "oidc" && decided.token !== null,
+  });
+}
+
+/** Whether the session publishes `flag` in ANY granted namespace (the
+ *  document's top-level `capabilities`, the union the API computes). `true`
+ *  in legacy mode, where the API server's RBAC is the gate and the page cannot
+ *  know; `false` signed out. For the NAVIGATION only (MCP-33): a hidden tab is
+ *  a convenience, and every route still refuses by name when it is reached. */
+export function grantedAnywhere(flag) {
+  if (decided === null) {
+    return true;
+  }
+  if (decided.mode === SIGNED_OUT || decided.mode === UNAVAILABLE) {
+    return false;
+  }
+  if (decided.mode !== CONSOLE) {
+    return true;
+  }
+  const top = (decided.session || {}).capabilities || {};
+  return top[flag] === true;
+}
+
+/** SIGN OUT (MCP-5): `POST /api/v1/session/logout`, an unsafe method, so it
+ *  carries the session's synchroniser token exactly as every other write does
+ *  (`docs/api.md`: "it needs the exact `Origin`, `application/json` and the
+ *  token like any other mutation"). Resolves once the product API has cleared
+ *  the cookie; the caller reloads, and the next probe answers `401`. Refused
+ *  by name in any mode with no session to end. */
+export async function signOut() {
+  if (decided === null || decided.mode !== CONSOLE || decided.token === null) {
+    throw noRoute("there is no signed-in session on this page to sign out of.");
+  }
+  await consoleLogout({ token: tokenNow() });
+  return true;
+}
+
+/** The refusal every call gets while nobody is signed in. `status` is 401, the
+ *  answer the product API would give, and nothing was sent. */
+export function signedOutError() {
+  const error = new Error(
+    "You are not signed in to the Logweir console, so nothing was read or sent. Sign in to " +
+      "continue.",
+  );
+  error.kind = "refused";
+  error.status = 401;
+  error.reason = "unauthenticated";
+  error.code = "unauthenticated";
+  return error;
 }
 
 function legacyRecord() {
@@ -507,6 +713,16 @@ function operationStatus(summary) {
     verifiedSuccess: summary.verifiedSuccess === true,
     terminal: summary.terminal === true,
   };
+  // THE RESULT, WHERE THE API PUBLISHES IT ON THE LIST (MCP-17): the EXIT and
+  // RESULT columns read `status.exitCode` and `status.outcome` exactly as they
+  // read the custom resource's, and a Restore's outcome keeps its "unverified
+  // scorecard claim" label unless the summary is green.
+  if (typeof summary.exitCode === "number") {
+    status.exitCode = summary.exitCode;
+  }
+  if (typeof summary.outcome === "string" && summary.outcome.length > 0) {
+    status.outcome = summary.outcome;
+  }
   return status;
 }
 
@@ -537,11 +753,13 @@ const ABSENT_IN_CONSOLE = Object.freeze({
   // gap and an omission: the page prints the sentence that says which task
   // owes the projection, and legacy mode -- which reads the custom resource
   // itself -- renders all four.
+  // `status.lastSlot` and `status.missedSlots` LEFT THIS LIST with
+  // console-ux-1 (MCP-13): `ScheduleStatusView` publishes both, so an absent
+  // one means the controller has recorded nothing yet -- the console and the
+  // API ship in one image, so there is no older API behind a newer page.
   backupschedules: Object.freeze([
     "status.retentionReport.skipped[].key",
     "status.retentionReport.skipped[].reason",
-    "status.lastSlot",
-    "status.missedSlots",
     "status.pendingRun",
     "status.history",
   ]),
@@ -575,10 +793,29 @@ const ABSENT_IN_CONSOLE = Object.freeze({
 function note(object, plural, unknown) {
   object.__contract = {
     mode: CONSOLE,
-    absent: ABSENT_IN_CONSOLE[plural] || [],
+    // A FIELD THE PROJECTION DID SUPPLY IS NOT ABSENT. The table above names
+    // what this contract's projection may leave out; an object that carries
+    // one of them anyway (a list row whose summary published MCP-17's exit
+    // code or outcome) is not said to lack it. `lastSlot`/`missedSlots` are no
+    // longer in the table at all (MCP-13): the projection publishes them, and
+    // the console and the API ship in one image.
+    absent: (ABSENT_IN_CONSOLE[plural] || []).filter((path) => valueAt(object, path) === undefined),
     unknown: unknown,
   };
   return object;
+}
+
+// The value at a dotted path, or `undefined`. A path with a list step (`[]`)
+// is never resolved here, so such a field stays named.
+function valueAt(object, path) {
+  let at = object;
+  for (const step of String(path).split(".")) {
+    if (step.indexOf("[") !== -1 || at === null || typeof at !== "object") {
+      return undefined;
+    }
+    at = at[step];
+  }
+  return at;
 }
 
 function projectConnection(item) {
@@ -731,6 +968,32 @@ function projectSchedule(item) {
   }
   if (view.activeRuns !== null) {
     status.activeRuns = view.activeRuns.map(activeRun);
+  }
+  // MCP-13: WHAT THE LAST SLOT DID AND HOW MANY WERE SKIPPED, in the custom
+  // resource's own shape, so `renderLastSlot` reads them in both modes. The
+  // decoder hands an absent optional as `null`; a nested absent one is
+  // dropped rather than rendered as a value.
+  if (view.lastSlot !== null && view.lastSlot !== undefined) {
+    const slot = view.lastSlot;
+    status.lastSlot = {
+      slot: slot.slot, dueAt: slot.dueAt, attempt: slot.attempt,
+      disposition: slot.disposition, reason: slot.reason, decidedAt: slot.decidedAt,
+    };
+    if (slot.backupRef !== null && slot.backupRef !== undefined) {
+      status.lastSlot.backupRef = { name: slot.backupRef.name };
+    }
+  }
+  if (view.missedSlots !== null && view.missedSlots !== undefined) {
+    const missed = view.missedSlots;
+    status.missedSlots = { count: missed.count, countCapped: missed.countCapped === true };
+    if (typeof missed.lastEvaluatedSlot === "string") {
+      status.missedSlots.lastEvaluatedSlot = missed.lastEvaluatedSlot;
+    }
+    if (Array.isArray(missed.recent)) {
+      status.missedSlots.recent = missed.recent.map((r) => ({
+        slot: r.slot, reason: r.reason, recordedAt: r.recordedAt,
+      }));
+    }
   }
   if (view.activeBackup !== null) {
     status.activeBackupRef = { name: view.activeBackup };
@@ -1670,6 +1933,7 @@ const consoleApi = Object.freeze({
     let cursor = null;
     for (let read = 0; read < LIST_PAGE_BUDGET; read += 1) {
       const query = Object.assign({}, options || {}, { limit: LIST_PAGE_SIZE });
+      delete query.onPage;
       if (cursor !== null) {
         query.cursor = cursor;
       }
@@ -1693,6 +1957,25 @@ const consoleApi = Object.freeze({
           __page: { limit: page.limit, nextCursor: null, snapshot: page.snapshot },
           __unknown: unknown,
         };
+      }
+      // A PAGE CAN BE SHOWN BEFORE THE LAST ONE ARRIVES (MCP-26). A caller that
+      // passes `onPage` is handed the rows read so far, marked `partial`, after
+      // every page but the last, so a list of hundreds renders its first 200
+      // rows while the rest are read. The list it RESOLVES with is still the
+      // whole namespace; a partial one is never returned as if it were.
+      if (typeof (options || {}).onPage === "function") {
+        try {
+          options.onPage({
+            apiVersion: "logweir.dev/v1alpha1",
+            kind: KIND_OF[plural] + "List",
+            metadata: { resourceVersion: page.snapshot || "" },
+            items: items.slice(),
+            __page: { limit: page.limit, nextCursor: cursor, snapshot: page.snapshot, partial: true },
+            __unknown: unknown.slice(),
+          });
+        } catch (painting) {
+          // A caller's paint that failed is not a failed read.
+        }
       }
     }
     throw tooMany(ns, plural, items.length);
@@ -1719,8 +2002,9 @@ const consoleApi = Object.freeze({
     }
     if (!Object.prototype.hasOwnProperty.call(CREATE_CAPABILITY, route)) {
       throw noRoute(
-        "the product API has no create route for " + KIND_OF[plural] + ". Create it with " +
-          "kubectl or the logweir CLI; this page will read it once it exists.",
+        "the product API has no create route for " + KIND_OF[plural] + ", so this console " +
+          "cannot create one. An administrator with access to the cluster creates it, or the " +
+          "logweir CLI does; this page will read it once it exists.",
       );
     }
     requireGrant(ns, CREATE_CAPABILITY[route]);
@@ -2332,16 +2616,17 @@ function requestBody(plural, object) {
       throw noRoute(
         "the product API's connection create has no field for spec.auth.secretRef.passwordKey " +
           "(saved-connection contract v1), so this connection cannot be created through it " +
-          "without changing which entry of the Secret the controller projects. Create it with " +
-          "kubectl, or use the legacy direct mode.",
+          "without changing which entry of the Secret the controller projects. Leave the field " +
+          "blank to use the Secret's default entry, or ask an administrator with access to the " +
+          "cluster to create this connection.",
       );
     }
     if (spec.auth.tlsCa !== undefined && spec.auth.tlsCa !== null) {
       throw noRoute(
         "the product API's connection create has no field for spec.auth.tlsCa " +
           "(saved-connection contract v1), so this connection cannot be created through it " +
-          "without dropping the private CA it named. Create it with kubectl, or use the legacy " +
-          "direct mode.",
+          "without dropping the private CA it named. Ask an administrator with access to the " +
+          "cluster to create this connection.",
       );
     }
     const auth = { mode: spec.auth.mode, tls: spec.auth.tls === true };
@@ -2552,8 +2837,8 @@ function tooMany(ns, plural, read) {
   const error = new Error(
     "namespace " + String(ns) + " holds more than " + String(read) + " " + String(plural) +
       ", which is more than this page reads in one list. It is not showing you the first " +
-      String(read) + " as if they were all of them. Read them with kubectl, or narrow the " +
-      "namespace.",
+      String(read) + " as if they were all of them. An administrator can read the whole " +
+      "namespace from the cluster, or move some of them to another namespace.",
   );
   error.kind = "refused";
   error.status = 0;
@@ -2677,12 +2962,50 @@ export function apiClient() {
 function dispatch(call) {
   if (decided !== null) {
     try {
-      return Promise.resolve(call(decided.mode === CONSOLE ? consoleApi : legacyApi));
+      return Promise.resolve(call(implementation(decided, consoleApi, legacyApi, signedOutApi)));
     } catch (refused) {
       return Promise.reject(refused);
     }
   }
-  return ensure().then((record) => call(record.mode === CONSOLE ? consoleApi : legacyApi));
+  return ensure().then((record) =>
+    call(implementation(record, consoleApi, legacyApi, signedOutApi)));
+}
+
+// WHICH IMPLEMENTATION A DECIDED RECORD USES. Signed out is NOT legacy (MCP-4):
+// the page is behind the product API, so a legacy `/apis/...` read would be
+// answered by a console that does not serve that path.
+function implementation(record, consoleImpl, legacyImpl, signedOutImpl) {
+  if (record.mode === CONSOLE) {
+    return consoleImpl;
+  }
+  // A console that could not be reached is not legacy either (review L1).
+  return record.mode === SIGNED_OUT || record.mode === UNAVAILABLE ? signedOutImpl : legacyImpl;
+}
+
+// Every method of `impl`, answering the refusal for the decided state --
+// signed out, or the service not reached -- and sending nothing.
+function refusingAll(impl) {
+  const out = {};
+  for (const key of Object.keys(impl)) {
+    out[key] = () => {
+      throw decided !== null && decided.mode === UNAVAILABLE
+        ? unavailableError()
+        : signedOutError();
+    };
+  }
+  return Object.freeze(out);
+}
+
+// The refusal while the console could not be reached: nothing was sent.
+function unavailableError() {
+  const error = new Error(
+    "The Logweir service could not be reached when this page loaded, so nothing was read or " +
+      "sent. Retry once it answers.",
+  );
+  error.kind = "refused";
+  error.status = 503;
+  error.reason = "service_unavailable";
+  return error;
 }
 
 // The D2 half dispatches exactly as the five older kinds do, over its own pair
@@ -2692,13 +3015,19 @@ function dispatch(call) {
 function dispatchChecks(call) {
   if (decided !== null) {
     try {
-      return Promise.resolve(call(decided.mode === CONSOLE ? consoleChecks : legacyChecks));
+      return Promise.resolve(call(implementation(decided, consoleChecks, legacyChecks,
+        signedOutChecks)));
     } catch (refused) {
       return Promise.reject(refused);
     }
   }
-  return ensure().then((record) => call(record.mode === CONSOLE ? consoleChecks : legacyChecks));
+  return ensure().then((record) =>
+    call(implementation(record, consoleChecks, legacyChecks, signedOutChecks)));
 }
+
+// The signed-out halves: the same method names, each refusing by name.
+const signedOutApi = refusingAll(consoleApi);
+const signedOutChecks = refusingAll(consoleChecks);
 
 /** The two implementations, by name, for the suite and for a reader who wants
  *  to see one without the other. A page never picks: `apiClient` does. */

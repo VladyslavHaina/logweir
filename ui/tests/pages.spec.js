@@ -472,7 +472,8 @@ test("the_independent_check_command_fetches_before_it_verifies", () => {
 test("every_list_view_carries_the_bucket_footer", () => {
   assert.equal(
     BUCKET_FOOTER,
-    "this list is the cluster's view; the authoritative index is the evidence bucket",
+    "This list is what the cluster holds now. The signed evidence each run wrote stays in the " +
+      "archive even if the object listed here is deleted.",
   );
   const views = [
     ["renderClusterList", renderClusterList(fixture("cluster-scram.json"))],
@@ -485,9 +486,7 @@ test("every_list_view_carries_the_bucket_footer", () => {
   ];
   for (const [label, out] of views) {
     assert.ok(
-      out.includes(
-        "this list is the cluster's view; the authoritative index is the evidence bucket",
-      ),
+      out.includes(BUCKET_FOOTER),
       label + ": a deleted custom resource does not delete a signed document, so no list " +
         "view may present itself as the index",
     );
@@ -1287,12 +1286,15 @@ test("the_plan_step_shows_the_hash_the_names_the_caveat_and_the_command", async 
 
   assert.ok(
     text.includes(
-      "copy loses trailing whitespace in some browsers; download, or run kubectl " +
-        "--context docker-desktop get restore <name> -o jsonpath='{.spec.planBytes}' > " +
-        "<name>.yaml, and hash exactly what you downloaded.",
+      "copy loses trailing whitespace in some browsers; download, or read the same bytes from " +
+        "the cluster with your own kubectl context -- kubectl get restore <name> --namespace " +
+        "<namespace> -o jsonpath='{.spec.planBytes}' > <name>.yaml -- and hash exactly what you " +
+        "downloaded.",
     ),
     "the copy caveat, verbatim, with the kubectl route to the same bytes",
   );
+  assert.equal(text.indexOf("docker-desktop"), -1,
+    "MCP-30: no installation's product copy names this repository's lab context");
   assert.ok(text.includes(COPY_CAVEAT));
   assert.ok(
     text.includes(
@@ -2055,18 +2057,20 @@ test("the_point_route_carries_name_and_uid_and_is_read_back_exactly", () => {
     // are that state for the same reason.
     catalog: "",
     point: "",
+    // MCP-29: a link that names no step opens the first; `0` is that state.
+    step: 0,
   });
   // TWO VALUES THAT MUST NOT BE SWAPPED. A hand-off that read the name into
   // `uid` would leave the whole suite green if only one of them were asserted.
   assert.notEqual(read.uid, read.backup);
   assert.deepEqual(
     restoreRouteParams("#/restore?ns=incident"),
-    { ns: "incident", uid: "", backup: "", retryOf: "", catalog: "", point: "" },
+    { ns: "incident", uid: "", backup: "", retryOf: "", catalog: "", point: "", step: 0 },
     "a visit with no point is the selector",
   );
   assert.deepEqual(
     restoreRouteParams("#/restore"),
-    { ns: "", uid: "", backup: "", retryOf: "", catalog: "", point: "" },
+    { ns: "", uid: "", backup: "", retryOf: "", catalog: "", point: "", step: 0 },
     "and so is a visit with no query at all",
   );
   assert.equal(restoreSelectorRoute("incident"), "#/restore?ns=incident");

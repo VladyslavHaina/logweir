@@ -69,6 +69,8 @@ import {
   listFooter,
   replace,
   table,
+  flagBadge,
+  when,
 } from "../render.js";
 import { listD3, serverClock } from "../operation-watch.js";
 import { itemsOf } from "./clusters.js";
@@ -298,7 +300,7 @@ export function lifecycleCell(entry, freshness, verdict) {
         esc("-- treated as a retirement at that instant: what it signed before still verifies");
   }
   if (e.state === "Retired") {
-    return esc("retired at ") + cell(e.retiredAt) + " " +
+    return esc("retired at ") + when(e.retiredAt) + " " +
       esc("-- it authorises nothing new, and everything it signed before that instant still " +
         "verifies");
   }
@@ -319,17 +321,17 @@ export function renderPolicyFacts(object, now) {
       ["policy", cell(meta.name)],
       ["generation", cell(meta.generation)],
       ["observed generation", cell(status.observedGeneration)],
-      ["evaluated at", cell(status.evaluatedAt)],
+      ["evaluated at", when(status.evaluatedAt)],
       ["evaluation", freshness.fresh
         ? badge("green", "fresh")
         : badge("flat", EVALUATION_UNKNOWN) + " " +
           esc(EVALUATION_UNKNOWN_REASONS[freshness.reason] || "")],
       ["freshness decided by", freshness.decidedBy === "api"
-        ? esc("the product API, against its own clock " + String(freshness.decidedAt || "") +
-          ", within " + String(freshness.freshWithinSeconds || "") + "s")
+        ? esc("the product API, against its own clock ") + when(freshness.decidedAt) +
+          esc(", within " + String(freshness.freshWithinSeconds || "") + "s")
         : esc("this page, against the server instant of the answer that carried this object")],
-      ["loaded", cell(status.loaded)],
-      ["default policy", cell(spec.default)],
+      ["loaded", flagBadge(status.loaded, "loaded", "not loaded")],
+      ["default policy", flagBadge(spec.default, "the default policy", "not the default")],
       ["namespaces it claims", Array.isArray(spec.namespaces) && spec.namespaces.length > 0
         ? esc(spec.namespaces.join(", "))
         : ABSENT],
@@ -404,6 +406,12 @@ export function renderKeysPage(view) {
     "<p class=\"blurb\">The cluster-scoped trust material this installation verifies against: " +
     "which keys exist, what each one is allowed to do, where it is in its lifecycle, and what " +
     "the controller last decided about it. This page reads; it submits nothing.</p>";
+  if (v.forbidden === true) {
+    return head +
+      "<div class=\"empty-state\" id=\"keys-forbidden\"><p class=\"note\">" +
+      esc(KEYS_FORBIDDEN_SENTENCE) + "</p><p class=\"note\">The product API answered " +
+      "403 to your read of the trust policies.</p></div>";
+  }
   if (policies.length === 0) {
     return head + renderRosterHalf(v) + renderFingerprint() + renderPolicySnippet() + listFooter();
   }
@@ -457,7 +465,7 @@ export function renderRosterHalf(view) {
   return (
     "<p class=\"note\">" + esc(ROSTER_FALLBACK_SENTENCE) + "</p>" +
     facts([
-      ["loaded", cell(status.loaded)],
+      ["loaded", flagBadge(status.loaded, "loaded", "not loaded")],
       ["allowed cluster ids",
         (Array.isArray(spec.allowedClusterIds) ? spec.allowedClusterIds : []).length === 0
           ? cell(null)
@@ -496,6 +504,12 @@ export function renderRosterKeys(caption, entries, status) {
     )
   );
 }
+
+/** What a reader who may not read trust material is told (MCP-32). */
+export const KEYS_FORBIDDEN_SENTENCE =
+  "Only administrators can view trust material. Your role does not include reading the " +
+  "installation's TrustPolicy objects; that says nothing about whether approvals and evidence " +
+  "verify, which the runs' own pages show.";
 
 /** The sentence this page carries when neither a policy nor a roster answers. */
 export const NO_TRUST_SENTENCE =
@@ -589,7 +603,8 @@ export async function mountKeys(node, parse, deps, lifecycle) {
     ? { api: deps }
     : (deps || {});
   const api = d.api || API;
-  const view = { policies: [], roster: null, now: (d.serverClock || serverClock)(), reason: "" };
+  const view = { policies: [], roster: null, now: (d.serverClock || serverClock)(), reason: "",
+    forbidden: false };
   try {
     const collection = await listD3("trust", "", readOptions(lifecycle), d);
     view.policies = itemsOf(collection);
@@ -597,7 +612,21 @@ export async function mountKeys(node, parse, deps, lifecycle) {
     if (cancelled(error, lifecycle)) {
       return;
     }
+    // A 403 IS "YOU MAY NOT READ THIS", NOT "THERE IS NO TRUST" (MCP-32). The
+    // page used to render it as "No TrustPolicy and no TrustRoster ... could be
+    // read ... no approval can verify", which told an operator that trust was
+    // missing from an installation where it was merely not theirs to read.
+    // In the shared console only: behind `kubectl proxy` a 403 is the page's
+    // own kubeconfig, and the refusal and the document an administrator applies
+    // are what that reader needs.
+    view.forbidden = (error || {}).status === 403 && (d.modeOf || mode)() === CONSOLE;
     view.reason = describeRefusal(error);
+  }
+  if (view.forbidden) {
+    if (active(lifecycle)) {
+      replace(node, parse(renderKeysPage(view)));
+    }
+    return;
   }
   try {
     view.roster = rosterOf(await api.listCluster(PLURAL, readOptions(lifecycle)));

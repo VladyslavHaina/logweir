@@ -317,6 +317,13 @@ object.** The rules, exactly:
 - A stage **never overrides a terminal phase.** `phase`, `exitCode` and
   `outcome` own the outcome; the progress channel answers "what is happening
   and why is it taking so long".
+- **A list row carries the result too** (added by console-ux-1, MCP-17). The
+  `operation` summary on every `Backup` and `Restore` LIST item carries
+  `exitCode` and `outcome` beside `verificationState` and `verifiedSuccess` —
+  the same values as the operation's own `result`, absent when none was
+  recovered (never `0`). An `outcome` is the run's scorecard CLAIM and is
+  shown as unverified unless `verifiedSuccess`; it grants nothing a reader of
+  the list could not already read from the operation route. Additive.
 - `trust.basis` is `None` when the status carries no `trust` block: nothing has
   been compared with anything. The spelling is the CRD's own
   (`Current`, `Historical`, `RecordedBeforeRevocation`, `Unverified`, `None`),
@@ -612,6 +619,22 @@ and not a liveness probe — the controller re-examines every schedule every 30 
 and deliberately writes nothing when nothing changed, so comparing that instant
 with the requeue interval would report a healthy schedule as stale. An absent
 `status.activeRuns` means "not yet computed", never "none are running".
+
+**What the last slot did, and how many were skipped** (added by console-ux-1,
+MCP-13). `status.lastSlot` is the controller's own record of the most recent
+slot it decided about — `slot`, `dueAt`, `attempt`, `disposition` (`Admitted`,
+`CaughtUp`, `Retried`, `Missed`, `Blocked`, `NameUnavailable`, `Released`,
+`Failed`, `Exhausted`, verbatim), the `Ready` `reason` beside it, `decidedAt`
+and, when there is one, `backupRef` — and `status.missedSlots` is the running
+`count` of slots that came due and were not run, `countCapped` when an
+evaluation stopped at its enumeration cap (the count is then a floor),
+`lastEvaluatedSlot`, and the most `recent` skips, each with its `reason`
+(`ControllerUnavailable`, `ConcurrencyBlocked`, `PastStartingDeadline`,
+`BeforeRevision`, `NameUnavailable`, verbatim). Both are copied, never
+recomputed, and both are **additive**: absent means the controller has
+recorded nothing yet, and a client written before them reads the schedule
+exactly as before. The `Backup` names in them are names in the same namespace,
+which every role that may read the schedule may already list.
 
 ### Creating a schedule
 
@@ -1331,6 +1354,16 @@ in the map. A request path is looked up **exactly**, with no decoding,
 normalisation or directory index, so `/ui/../Cargo.toml` is a `404` rather than
 a traversal to defeat. The bytes a browser receives are the bytes the process
 read at startup; no request performs file-system I/O.
+
+Two entries are the service's own and not files: the page icon
+(`favicon.svg`), and **`runtime.js`**, served compiled in
+(`assets.rs` `CONSOLE_RUNTIME_JS`) in place of the file under `ui/`. It sets the
+empty namespace context the page reads and `window.LOGWEIR_CONSOLE = {servedBy:
+"logweir-api"}`, which is how the page knows it is behind this service even
+when its first `GET /api/v1/session` fails: a failed probe then reads "can't
+reach the service; retry" and never falls back to the legacy `kubectl proxy`
+paths (console-ux-1 review L1). It carries no credential and nothing per
+request. The legacy UI image serves the file, which sets no marker.
 
 ## Shared mode
 

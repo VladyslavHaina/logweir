@@ -204,9 +204,12 @@ export function apiError(response, text) {
   let reason = "";
   let message = "";
   let details = null;
+  let json = false;
+  let requestId = "";
   try {
     const status = JSON.parse(text);
-    if (status !== null && typeof status === "object") {
+    json = status !== null && typeof status === "object";
+    if (json) {
       if (typeof status.reason === "string") {
         reason = status.reason;
       }
@@ -216,19 +219,46 @@ export function apiError(response, text) {
       if (status.details !== null && typeof status.details === "object") {
         details = status.details;
       }
+      // A PROBLEM DOCUMENT IS READ AS ONE, NOT DUMPED (MCP-4). Something that
+      // is not kube-apiserver can answer a Kubernetes path -- the product
+      // API does, when a legacy read reaches the shared console -- and its
+      // refusal carries `detail` and a string `code` rather than `message`
+      // and `reason`. The page used to print the whole document as the
+      // message: `404 {"type":...,"title":...}`.
+      if (message.length === 0 && typeof status.detail === "string") {
+        message = status.detail;
+      }
+      if (message.length === 0 && typeof status.title === "string") {
+        message = status.title;
+      }
+      if (reason.length === 0 && typeof status.code === "string") {
+        reason = status.code;
+      }
+      if (typeof status.requestId === "string") {
+        requestId = status.requestId;
+      }
     }
   } catch (notJson) {
-    // A body that is not a Kubernetes Status is reported as it arrived, below.
+    // A body that is not JSON is reported as it arrived, below, bounded.
     reason = "";
   }
   if (message.length === 0) {
-    message = text;
+    // NEVER A RAW DOCUMENT. JSON this page cannot read as a Status or a
+    // problem is described, not printed; plain text -- a proxy's own one-line
+    // refusal -- is human already and is shown, bounded.
+    message = json
+      ? "the server answered " + String(response.status) + " with a document this page " +
+        "does not recognise as an error it can explain"
+      : (text.length > 300 ? text.slice(0, 300) + "..." : text);
   }
   const error = new Error(message);
   error.status = response.status;
   error.reason = reason;
   if (details !== null) {
     error.details = details;
+  }
+  if (requestId.length > 0) {
+    error.requestId = requestId;
   }
   return error;
 }
@@ -288,6 +318,18 @@ export async function session(options) {
     body = null;
   }
   return { ok: response.ok, status: response.status, body: body };
+}
+
+/** SIGN OUT (MCP-5): `POST /api/v1/session/logout`. An unsafe method, so it is
+ *  a write like every other and carries the session's synchroniser token
+ *  (`docs/api.md`, *The session and the CSRF token*); the body is the empty
+ *  JSON object, because the route requires `application/json` and reads
+ *  nothing from it. `204` resolves `null`: the product API has cleared the
+ *  session cookie, which this page never reads or writes itself. */
+export async function consoleLogout(options) {
+  const response = await request(path("api", "v1", "session", "logout"),
+    writeInit({}, options));
+  return problemBody(response);
 }
 
 /** Lists one product kind in `ns`. `options.limit` and `options.cursor` are

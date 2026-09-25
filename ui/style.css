@@ -511,8 +511,14 @@ ul {
   margin: 0 auto;
   padding: var(--cds-global-space-6) var(--cds-global-space-9);
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-start;
   gap: var(--cds-global-space-6);
+}
+
+.brand-text {
+  flex: 1 1 var(--lw-field-min);
+  min-width: 0;
 }
 
 .brand-mark {
@@ -531,6 +537,56 @@ ul {
 
 .brand h1 {
   color: var(--lw-header-text);
+}
+
+/* THE SESSION INDICATOR (MCP-5): who is signed in, their role in the chosen
+ * namespace, and Sign out -- at the right of the app header, as Clarity's
+ * header actions sit. */
+.session {
+  margin-left: auto;
+  align-self: center;
+}
+
+.session-identity {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--cds-global-space-5) var(--cds-global-space-6);
+}
+
+.session-who {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  text-align: right;
+}
+
+.session-name {
+  color: var(--lw-header-text);
+  font-weight: var(--cds-global-typography-font-weight-semibold);
+  overflow-wrap: anywhere;
+}
+
+.session-role {
+  color: var(--lw-header-text-muted);
+  font-size: var(--cds-global-typography-secondary-font-size);
+}
+
+.masthead .session-signout {
+  border-color: var(--lw-header-text-muted);
+  background: transparent;
+  color: var(--lw-header-text);
+}
+
+.masthead .session-signout:hover {
+  border-color: var(--lw-header-text);
+  background: var(--lw-header-background);
+  color: var(--lw-header-text);
+}
+
+.session-error {
+  margin: var(--cds-global-space-5) 0 0;
 }
 
 .tagline {
@@ -576,9 +632,14 @@ ul {
     background-color var(--cds-global-animation-duration-quickest) ease;
 }
 
-.nav-link:hover {
-  color: var(--cds-alias-object-interaction-color-hover);
-  background: var(--cds-alias-object-interaction-background-hover);
+/* HOVER ONLY WHERE THERE IS A POINTER THAT HOVERS (MCP-34). A touch screen
+ * reports the last tapped element as hovered until the next tap, so on a phone
+ * the tab just left kept its hover background. */
+@media (hover: hover) {
+  .nav-link:hover {
+    color: var(--cds-alias-object-interaction-color-hover);
+    background: var(--cds-alias-object-interaction-background-hover);
+  }
 }
 
 .nav-link-current {
@@ -615,6 +676,17 @@ main {
 
 main:focus {
   outline: none;
+}
+
+/* An instruction the page waits on, with no spinner: nothing is loading
+ * (MCP-2). */
+.prompt {
+  color: var(--cds-alias-typography-color-300);
+}
+
+/* The one page a signed-out visitor sees (MCP-1). */
+.signin {
+  max-width: var(--lw-measure);
 }
 
 main > h2 + .blurb,
@@ -766,18 +838,69 @@ main > h2 + .blurb,
   background: var(--cds-alias-object-interaction-background-hover);
 }
 
-/* A short word never breaks mid-word; hashes and key ids, marked up as code,
- * may break anywhere so a 64-hex digest does not force a sideways scroll. */
+/* A SHORT TOKEN NEVER BREAKS MID-WORD (MCP-6). A code chip or a label in a
+ * cell wraps only at a space -- "NoExitCo / de" and "weirkee / per" came from
+ * letting every chip break anywhere, which also let the table squeeze its
+ * column to one character. A LONG token -- a 64-hex digest, a uid, a key id --
+ * is marked `.long` when the page adopts the table (`app.js`), and only that
+ * one may break anywhere, so it cannot force a sideways scroll. */
 .grid td {
   overflow-wrap: break-word;
 }
 
-.grid td code {
+.grid td code,
+.grid td .badge {
+  overflow-wrap: normal;
+}
+
+.grid td code.long,
+.grid td .badge.long {
   overflow-wrap: anywhere;
 }
 
 .grid td a {
   font-weight: var(--cds-global-typography-font-weight-medium);
+}
+
+/* A ROW'S ACTION LINK NEVER WRAPS (MCP-8): "Follow this run" and "Restore this
+ * point" read as one control. A name link still wraps, so a long object name
+ * cannot push a stacked card past a phone's width. */
+.grid td a.action {
+  white-space: nowrap;
+}
+
+/* AN INSTANT NEVER WRAPS MID-VALUE (MCP-7): `render.js` `when` prints it as
+ * one human reading, with the exact recorded value in its title. */
+.ts {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Technical details, one disclosure away (MCP-13). */
+.technical {
+  margin: var(--cds-global-space-3) 0 var(--cds-global-space-6);
+  color: var(--cds-alias-typography-color-300);
+  font-size: var(--cds-global-typography-secondary-font-size);
+}
+
+.technical > summary {
+  cursor: pointer;
+}
+
+.technical code {
+  overflow-wrap: anywhere;
+}
+
+/* The first of two stacked lines inside a cell. */
+.cell-sub-first {
+  display: block;
+}
+
+/* A second line inside a cell: the facts that used to take a column each. */
+.cell-sub {
+  display: block;
+  color: var(--cds-alias-typography-color-300);
+  font-size: var(--cds-global-typography-secondary-font-size);
 }
 
 .grid td.empty {
@@ -994,6 +1117,12 @@ th[aria-sort="descending"] .datagrid-sort::after {
   .grid td.empty {
     display: block;
     padding: var(--cds-global-space-5) 0;
+  }
+
+  /* On a phone a stacked card is as wide as the screen and no wider. */
+  .grid td code,
+  .grid td .badge {
+    overflow-wrap: anywhere;
   }
 
   .grid td.empty::before {
@@ -1405,19 +1534,29 @@ main section section,
   max-width: var(--lw-measure);
 }
 
+/* An error box leads with a headline in words, then the server's own message,
+ * then the status, code and request id a reader can quote (MCP-4). */
+.error-title {
+  margin: 0 0 var(--cds-global-space-3);
+  font-weight: var(--cds-global-typography-font-weight-semibold);
+}
+
 .error-status {
   display: block;
+  margin-top: var(--cds-global-space-3);
+  color: var(--cds-alias-typography-color-300);
   font-size: var(--cds-global-typography-font-size-2);
-  font-weight: var(--cds-global-typography-font-weight-bold);
   letter-spacing: var(--cds-global-typography-smallcaption-letter-spacing);
-  text-transform: uppercase;
-  margin-bottom: var(--cds-global-space-3);
 }
 
 .error-message {
   margin: 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.error .actions {
+  margin: var(--cds-global-space-5) 0 0;
 }
 
 .refusal-block code {
@@ -1618,6 +1757,7 @@ button {
   letter-spacing: var(--cds-global-typography-smallcaption-letter-spacing);
   text-transform: uppercase;
   line-height: 1;
+  white-space: nowrap;
   cursor: pointer;
   transition: background-color var(--cds-global-animation-duration-quickest) ease,
     color var(--cds-global-animation-duration-quickest) ease,
@@ -1639,6 +1779,55 @@ button.primary:hover {
   background: var(--cds-alias-object-interaction-info-hover);
   border-color: var(--cds-alias-object-interaction-info-hover);
   color: var(--cds-alias-typography-color-100);
+}
+
+/* A LINK THAT IS AN ACTION looks like the button it is (Sign in), and so does
+ * the summary that opens a create form (MCP-10). */
+a.button,
+summary.button {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--cds-alias-object-interaction-touch-target);
+  padding: var(--lw-button-padding);
+  border: var(--cds-alias-object-border-width-100) solid var(--cds-alias-status-info);
+  border-radius: var(--cds-alias-object-border-radius-100);
+  color: var(--cds-alias-status-info);
+  font-size: var(--cds-global-typography-font-size-2);
+  font-weight: var(--cds-global-typography-font-weight-semibold);
+  letter-spacing: var(--cds-global-typography-smallcaption-letter-spacing);
+  text-transform: uppercase;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+a.button.primary,
+summary.button.primary {
+  background: var(--cds-alias-status-info);
+  color: var(--cds-alias-typography-color-100);
+}
+
+a.button.primary:hover,
+summary.button.primary:hover {
+  background: var(--cds-alias-object-interaction-info-hover);
+  border-color: var(--cds-alias-object-interaction-info-hover);
+  color: var(--cds-alias-typography-color-100);
+}
+
+summary.button {
+  cursor: pointer;
+  list-style: none;
+}
+
+summary.button::-webkit-details-marker {
+  display: none;
+}
+
+.create-disclosure {
+  margin: var(--cds-global-space-7) 0;
+}
+
+.create-disclosure[open] > summary.button {
+  margin-bottom: var(--cds-global-space-5);
 }
 
 button:disabled,
@@ -1753,14 +1942,18 @@ button[aria-busy="true"] {
   background: var(--cds-alias-object-container-background);
 }
 
-@media (min-width: 768px) {
+/* SIX EQUAL COLUMNS THAT MAY SHRINK: `minmax(0, 1fr)` lets a long step title
+ * wrap inside its column instead of widening the page past a 1024 px window.
+ * Clarity's `md` width and up; below it the compact stepper further down. */
+@media (min-width: 992px) {
   .stepper {
-    grid-template-columns: repeat(6, 1fr);
+    grid-template-columns: repeat(6, minmax(0, 1fr));
     gap: var(--cds-global-space-5);
   }
 }
 
 .stepper-link {
+  white-space: normal;
   width: 100%;
   display: grid;
   grid-template-columns: auto 1fr;
@@ -1875,6 +2068,81 @@ button[aria-busy="true"] {
   border-color: var(--cds-alias-status-info);
 }
 
+/* THE WIZARD, ONE STEP AT A TIME (MCP-29): Clarity's wizard footer -- Back at
+ * the start, where you are, Next at the end -- kept in view at the bottom of
+ * the window while a long step scrolls. */
+.wizard-page > .step {
+  margin-top: 0;
+}
+
+.wizard-nav {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--cds-global-space-5) var(--cds-global-space-7);
+  margin: var(--cds-global-space-7) 0 0;
+  padding: var(--cds-global-space-6) var(--cds-global-space-7);
+  border: var(--cds-alias-object-border-width-100) solid var(--cds-alias-object-border-color);
+  border-radius: var(--cds-alias-object-border-radius-100);
+  background: var(--cds-alias-object-container-background);
+  box-shadow: var(--cds-alias-object-shadow-300);
+}
+
+.wizard-position {
+  color: var(--cds-alias-typography-color-300);
+  font-size: var(--cds-global-typography-secondary-font-size);
+}
+
+.is-unchecked .stepper-link {
+  border-top-color: var(--cds-alias-status-warning-shade);
+}
+
+.is-unchecked .stepper-num {
+  border-color: var(--cds-alias-status-warning-shade);
+}
+
+/* THE COMPACT STEPPER, BELOW CLARITY'S `md` WIDTH (MCP-29): one row -- every
+ * step a numbered circle, and the step on screen with its title and state
+ * beside its number. The other steps' words stay in the document for a
+ * screen reader. */
+@media (max-width: 991.98px) {
+  .stepper {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--cds-global-space-3);
+    padding: var(--cds-global-space-5);
+  }
+
+  .stepper-item {
+    flex: none;
+  }
+
+  .stepper-item.is-current {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+
+  .stepper-item:not(.is-current) .stepper-link {
+    grid-template-columns: auto;
+    padding: var(--cds-global-space-3);
+  }
+
+  .stepper-item:not(.is-current) .stepper-title,
+  .stepper-item:not(.is-current) .stepper-status {
+    position: absolute;
+    width: var(--lw-visually-hidden-size);
+    height: var(--lw-visually-hidden-size);
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+
+}
+
 .step-head {
   display: flex;
   flex-wrap: wrap;
@@ -1921,6 +2189,16 @@ input:focus-visible,
 select:focus-visible,
 textarea:focus-visible {
   border-bottom-color: var(--cds-alias-status-info);
+  box-shadow: none;
+}
+
+/* THE VIEW TAKES FOCUS FOR A SCREEN READER, NOT FOR A KEYBOARD (MCP-3). A
+ * route change moves focus to it (`app.js` `focusView`) so the next Tab starts
+ * inside the new page; it is not a control, so it draws no ring -- the
+ * `[tabindex]:focus-visible` rule above would otherwise put a heavy rectangle
+ * around the whole content on every navigation. */
+#view-slot[tabindex]:focus-visible {
+  outline: none;
   box-shadow: none;
 }
 

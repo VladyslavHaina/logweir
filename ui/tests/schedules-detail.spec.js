@@ -710,7 +710,11 @@ test("the_page_level_restore_skips_a_set_the_catalog_marks_not_selectable", () =
   assert.match(latest, /Missing/);
   // The row of the ruled-out set offers no Restore of its own either.
   const history = renderScheduleHistory(NS, schedule(), runs, POINTS, null);
-  const newestRow = history.slice(history.indexOf(">newest<"), history.indexOf(">older<"));
+  // The whole <tr> of the newest run: its restore cell is the FIRST cell since
+  // the review's L5 (the action leads the row), so the row is cut at its tags.
+  const newestAt = history.indexOf(">newest<");
+  const newestRow = history.slice(history.lastIndexOf("<tr", newestAt),
+    history.indexOf("</tr>", newestAt));
   assert.match(newestRow, /data-restore-refused="catalog"/);
   assert.doesNotMatch(newestRow, /Restore this point/);
   // And the facts' protection age is the offered point's.
@@ -747,4 +751,17 @@ test("a_failed_destinations_read_is_said_as_such_and_never_as_an_absent_destinat
   // NEGATIVE CONTROL: a SUCCESSFUL read that lacks the name still says it is
   // absent, so the sentence above is the failed read's.
   assert.match(destinationCell(object, [], false), /no destination of that name is in this namespace/);
+});
+
+test("review_l5_a_schedule_s_run_history_leads_every_row_with_its_restore_cell", () => {
+  // MCP-25's rule on the table the first sweep missed: as the tenth column the
+  // restore link was what a 1024 px window scrolled out of the card.
+  const runs = [run("nightly-healthy", "Succeeded", { backupId: "set-healthy" })];
+  const html = renderScheduleHistory(NS, schedule(), runs, POINTS, null);
+  const head = html.slice(html.indexOf("<thead>"), html.indexOf("</thead>"));
+  assert.match(head, /^<thead><tr><th scope="col"><\/th><th scope="col">RUN<\/th>/,
+    "the untitled action column is the first");
+  const row = html.slice(html.indexOf("<tbody>"), html.indexOf("</tr>", html.indexOf("<tbody>")));
+  const first = row.slice(row.indexOf("<td>") + 4, row.indexOf("</td>"));
+  assert.match(first, /Restore this point/, "and the first cell of the row is its restore link");
 });

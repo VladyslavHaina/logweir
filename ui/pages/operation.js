@@ -62,6 +62,8 @@ import {
   unverifiedCaption,
   unverifiedTrustCaption,
   verificationScopeSentence,
+  flagBadge,
+  when,
 } from "../render.js";
 import { active, cancelled } from "../lifecycle.js";
 import { inConsole, readOperation, watchOperation } from "../operation-watch.js";
@@ -278,8 +280,8 @@ export function renderProgress(v) {
     ["stage", cell(p.stage)],
     ["reason", cell(p.reason)],
     ["message", cell(p.message)],
-    ["last transition", cell(p.lastTransitionTime)],
-    ["last observed", cell(p.lastObservedTime)],
+    ["last transition", when(p.lastTransitionTime)],
+    ["last observed", when(p.lastObservedTime)],
     ["runner phase", typeof phase.name === "string" && phase.name.length > 0
       ? cell(phase.number) + " " + cell(phase.name)
       : ABSENT],
@@ -288,7 +290,7 @@ export function renderProgress(v) {
     rows.push(["job", cell(runner.jobName)]);
     rows.push(["pod", cell(runner.podName) + " " + cell(runner.podPhase)]);
     rows.push(["container", cell(runner.containerState) + " " + cell(runner.waitingReason)]);
-    rows.push(["runner started", cell(runner.startedAt)]);
+    rows.push(["runner started", when(runner.startedAt)]);
   }
   return (
     "<section class=\"progress\"><h3>Progress</h3>" +
@@ -502,8 +504,8 @@ export function renderEvidence(v) {
       ["signature result", cell(console_ ? ver.state : null)],
       ["matched key id", cell(ver.matchedKeyId)],
       ["payload type", cell(ver.payloadType)],
-      ["verified at", cell(ver.verifiedAt)],
-      ["signed at (the document's own claim)", cell(trust.signedAt || ver.signedAt)],
+      ["verified at", when(ver.verifiedAt)],
+      ["signed at (the document's own claim)", when(trust.signedAt || ver.signedAt)],
       ["signing time read", cell(trust.signingTimeRead)],
       ["trust basis", cell(trust.basis)],
       ["key state", cell(trust.keyState)],
@@ -692,11 +694,11 @@ export function renderOperation(view) {
       ["reason", cell(f.reason)],
       ["message", cell(f.message)],
       ["last update", cell(f.lastUpdate)],
-      ["created", cell(f.createdAt)],
+      ["created", when(f.createdAt)],
       ["uid", "<code>" + cell(f.uid) + "</code>"],
       ["awaiting approval", f.awaitingApproval ? "yes" : "no"],
       ["stage", cell(f.stage)],
-      ["status too old to believe", f.console ? cell(f.stale) : ABSENT],
+      ["status too old to believe", f.console ? flagBadge(f.stale, "yes -- stale", "no") : ABSENT],
       ["object", f.name.length === 0
         ? ABSENT
         : detailLink(f.kind === "backup" ? "backups" : "history", String(v.ns || ""), f.name)],
@@ -734,6 +736,30 @@ export function operationAnnouncement(f, name) {
   );
 }
 
+/** WHAT `#/operations` SAYS WHEN THE ADDRESS NAMES NO RUN (MCP-19). This route
+ *  is one run's page and is reached FROM a run, so a visit without one is
+ *  pointed at the two lists every run is listed in, rather than told that
+ *  "the address bar named none". A kind this route does not serve is named.
+ *  Pure. */
+export function renderNoOperation(ns, kind) {
+  const n = encodeURIComponent(String(ns || ""));
+  const k = String(kind || "");
+  return (
+    "<h2>Operation</h2>" +
+    "<div class=\"empty-state\" id=\"no-operation\">" +
+    "<p class=\"note\">" +
+    (k.length === 0
+      ? "This page follows one backup or restore run. Open a run from its list to see where it " +
+        "is, why, what it produced and whether its evidence verified."
+      : "This page follows backup and restore runs, and the link that opened it named " +
+        "&quot;" + esc(k) + "&quot;, which is neither.") +
+    "</p>" +
+    "<p class=\"actions\"><a class=\"button\" href=\"#/backups?ns=" + esc(n) +
+    "\">Backups</a><a class=\"button\" href=\"#/history?ns=" + esc(n) +
+    "\">History</a></p></div>"
+  );
+}
+
 // --------------------------------------------------------------- mount half
 
 /** Reads one operation, renders it, and follows it until it settles. */
@@ -742,11 +768,7 @@ export async function mountOperation(node, ns, params, parse, deps, lifecycle) {
   const kind = String(p.kind || "");
   const d = deps || {};
   if (OPERATION_KINDS.indexOf(kind) === -1) {
-    replace(node, parse(
-      "<h2>Operation</h2><p class=\"complaint\">This route serves " +
-      esc(OPERATION_KINDS.join(" and ")) + " operations. The address bar named " +
-      esc(kind.length === 0 ? "none" : kind) + ".</p>",
-    ));
+    replace(node, parse(renderNoOperation(ns, kind)));
     return null;
   }
   const console_ = inConsole(d.modeOf);

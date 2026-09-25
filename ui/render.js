@@ -230,18 +230,104 @@ export function disableKeepingFocus(control, disabled, fallback) {
   control.disabled = disabled === true;
 }
 
-/** Renders an error from `api.js` as the API server reported it: its own
- *  status code, its own `reason`, its own `message`, and nothing added.
+/** THE TWO PROBLEM CODES THAT MEAN "SIGN IN" (MCP-1, MCP-4): the product API's
+ *  `401` for a request with no session, and for one whose session expired
+ *  (`docs/api.md`, *The session and the CSRF token*). `ui/client.js` reads
+ *  the boot probe's answer against this list, and the error box offers a
+ *  Sign in link for exactly these -- never for a Kubernetes `401`, which is a
+ *  `kubectl proxy` whose own credential failed and which no sign-in fixes. */
+export const SIGN_IN_CODES = Object.freeze(["unauthenticated", "session_expired"]);
+
+/** The console's sign-in route with `next` pointing back at `hash`: the
+ *  product API sends the browser there after the provider round trip
+ *  (`/auth/login?next=`, which it accepts only as a path under `/ui/`). A
+ *  path on this origin, never a URL. */
+export function signInHref(hash) {
+  const h = typeof hash === "string" && hash.charAt(0) === "#" ? hash : "";
+  return "/auth/login?next=" + encodeURIComponent("/ui/" + h);
+}
+
+// The address the reader is on, for the Sign in link's `next`; empty where
+// there is no window (the node suites).
+function hereHash() {
+  return typeof window !== "undefined" && window.location ? String(window.location.hash || "") : "";
+}
+
+// The headline an error box leads with, in words (MCP-4). The server's own
+// status, code and message are still shown, verbatim, underneath: this adds a
+// sentence a person reads first and changes nothing they could search for.
+function errorTitle(status, reason) {
+  if (SIGN_IN_CODES.indexOf(reason) !== -1) {
+    return reason === "session_expired" ? "Your session has ended" : "You are not signed in";
+  }
+  if (status === 401) {
+    return "Not authenticated";
+  }
+  if (status === 403) {
+    return "You do not have permission to do this";
+  }
+  if (status === 404) {
+    return "Not found";
+  }
+  if (status === 409) {
+    return "This conflicts with what already exists";
+  }
+  if (status === 412) {
+    return "This changed since the page read it";
+  }
+  if (status === 400 || status === 422) {
+    return "The request was refused";
+  }
+  if (status === 429) {
+    return "Too many requests";
+  }
+  if (typeof status === "number" && status >= 500) {
+    return "The server could not complete this";
+  }
+  if (reason === "ContractViolation") {
+    return "The server's answer was not what this page expected";
+  }
+  return "This could not be done";
+}
+
+/** What an error box says, in three parts: a headline in words, the server's
+ *  own message, and the status, code and request id a reader can quote --
+ *  plus whether to offer a sign-in. Pure. */
+export function errorParts(error) {
+  const e = error || {};
+  const status = typeof e.status === "number" ? e.status : 0;
+  const reason = typeof e.reason === "string" ? e.reason : "";
+  const message = e.message ? String(e.message) : String(error);
+  const codeLine = status > 0 ? "HTTP " + String(status) : "";
+  const detail = [
+    [codeLine, reason].filter((part) => part.length > 0).join(" "),
+    typeof e.requestId === "string" && e.requestId.length > 0 ? "request " + e.requestId : "",
+  ].filter((part) => part.length > 0).join(" \u00b7 ");
+  return {
+    title: errorTitle(status, reason),
+    message: message,
+    detail: detail,
+    signIn: SIGN_IN_CODES.indexOf(reason) !== -1,
+  };
+}
+
+/** Renders an error from `api.js`: a headline in words, then the API server's
+ *  own message, then its status, code and request id, verbatim (MCP-4).
  *
- *  A 403 here is the API server's 403 about the viewer's own RBAC. This
- *  function neither softens it nor explains it away. */
+ *  A 403 here is still the API server's 403 about the viewer's own authority.
+ *  This function neither softens it nor explains it away; it says in words
+ *  what the number means before it shows the number. A sign-in refusal from
+ *  the product API carries a Sign in link that returns to this address. */
 export function errorBox(error) {
-  const status = error && error.status ? String(error.status) : "error";
-  const reason = error && error.reason ? String(error.reason) : "";
-  const message = error && error.message ? String(error.message) : String(error);
+  const parts = errorParts(error);
   return el("div", { class: "error", role: "alert" }, [
-    el("span", { class: "error-status" }, reason.length > 0 ? status + " " + reason : status),
-    el("p", { class: "error-message" }, message),
+    el("p", { class: "error-title" }, parts.title),
+    el("p", { class: "error-message" }, parts.message),
+    parts.detail.length > 0 ? el("span", { class: "error-status" }, parts.detail) : null,
+    parts.signIn
+      ? el("p", { class: "actions" },
+        el("a", { class: "button primary", href: signInHref(hereHash()) }, "Sign in"))
+      : null,
   ]);
 }
 
@@ -294,9 +380,12 @@ export const ENGINE_SUBREPORT_LINE =
 
 /** Every list view carries this, verbatim. A custom resource is a cluster's
  *  view of a run; the authoritative index is the evidence bucket, because
- *  deleting the object does not delete the signed document it names. */
+ *  deleting the object does not delete the signed document it names. Said in
+ *  an operator's words since MCP-21: "the authoritative index is the evidence
+ *  bucket" was jargon, repeated on every list. */
 export const BUCKET_FOOTER =
-  "this list is the cluster's view; the authoritative index is the evidence bucket";
+  "This list is what the cluster holds now. The signed evidence each run wrote stays in the " +
+  "archive even if the object listed here is deleted.";
 
 /** The retention panel's sentence. Logweir holds no delete capability of any
  *  kind against an archive (Global Constraint 6): the panel reports, and the
@@ -333,11 +422,14 @@ export const RESTORE_IMMUTABLE_SENTENCE =
  *  browsers strip trailing whitespace from a clipboard copy of a `<pre>`, and
  *  a plan whose last line ends in spaces is not exotic. So the page offers the
  *  download, and names the `kubectl` route to the same bytes for anyone who
- *  would rather take them from the cluster. */
+ *  would rather take them from the cluster -- under THEIR OWN context: the
+ *  caveat used to hard-code `--context docker-desktop`, this repository's lab
+ *  context, on every installation (MCP-30). */
 export const COPY_CAVEAT =
-  "copy loses trailing whitespace in some browsers; download, or run kubectl " +
-  "--context docker-desktop get restore <name> -o jsonpath='{.spec.planBytes}' > " +
-  "<name>.yaml, and hash exactly what you downloaded.";
+  "copy loses trailing whitespace in some browsers; download, or read the same bytes from " +
+  "the cluster with your own kubectl context -- kubectl get restore <name> --namespace " +
+  "<namespace> -o jsonpath='{.spec.planBytes}' > <name>.yaml -- and hash exactly what you " +
+  "downloaded.";
 
 /** The client-side window lint is a CONVENIENCE and never the gate. The
  *  controller recomputes the hash from the referent's own bytes and phase 0
@@ -1149,6 +1241,53 @@ export function badge(kind, text) {
   );
 }
 
+/** A badge with a hover title: the exact recorded value one hover away from
+ *  the words (MCP-14, MCP-22). `title` is plain text and is escaped here. */
+export function titledBadge(kind, text, title) {
+  return (
+    "<span class=\"badge badge-" + esc(kind) + "\" title=\"" + esc(title) + "\">" + esc(text) +
+    "</span>"
+  );
+}
+
+/** A CONDITION AS A BADGE, NOT AS ITS SYNTAX (MCP-22): `Ready=True ViewReady`
+ *  in a table cell becomes the word, in the status colour, with the recorded
+ *  type, status and reason as its title. A `False` carries its reason in the
+ *  words too, because that is what the reader acts on; `Unknown` -- or any
+ *  status this build does not know -- is `unknown` and never the true word.
+ *  [`ABSENT`] when there is no condition. */
+export function conditionBadge(condition, trueWord, falseWord) {
+  if (condition === null || condition === undefined) {
+    return ABSENT;
+  }
+  const c = condition;
+  const reason = typeof c.reason === "string" && c.reason.length > 0 ? c.reason : "";
+  const exact = String(c.type || "") + "=" + String(c.status || "") +
+    (reason.length > 0 ? " " + reason : "") +
+    (typeof c.message === "string" && c.message.length > 0 ? ": " + c.message : "");
+  if (String(c.status) === "True") {
+    return titledBadge("green", trueWord, exact);
+  }
+  if (String(c.status) === "False") {
+    return titledBadge("unverified", falseWord + (reason.length > 0 ? " (" + reason + ")" : ""),
+      exact);
+  }
+  return titledBadge("flat", "unknown" + (reason.length > 0 ? " (" + reason + ")" : ""), exact);
+}
+
+/** A BOOLEAN AS WORDS (MCP-14): `true`/`false` in a cell become the words the
+ *  field means, as a neutral badge -- neither word is a verdict. [`ABSENT`]
+ *  for a value that is not a boolean, never a guess. */
+export function flagBadge(value, trueWords, falseWords) {
+  if (value === true) {
+    return badge("flat", trueWords);
+  }
+  if (value === false) {
+    return badge("flat", falseWords);
+  }
+  return ABSENT;
+}
+
 /** A recorded `status.phase` as a badge whose caption IS the phase, verbatim.
  *
  *  STRUCTURAL, LIKE [`badge`]. The kind is the phase lowercased into a class
@@ -1314,13 +1453,15 @@ export function visibilityLine(visibility) {
  *  destination. */
 export function destinationVerdict(status) {
   const s = status || {};
+  // THE REASON IS SHOWN WHEN IT SAYS SOMETHING THE WORD DOES NOT (MCP-11):
+  // "valid (Valid)" repeated itself; "not valid (EndpointUnreachable)" does not.
+  const beside = (echo) => (typeof s.reason === "string" && s.reason.length > 0 &&
+    s.reason !== echo ? " (" + s.reason + ")" : "");
   if (s.valid === true) {
-    return badge("green", "valid" + (typeof s.reason === "string" && s.reason.length > 0
-      ? " (" + s.reason + ")" : ""));
+    return badge("green", "valid" + beside("Valid"));
   }
   if (s.valid === false) {
-    return badge("unverified", "not valid" + (typeof s.reason === "string" && s.reason.length > 0
-      ? " (" + s.reason + ")" : ""));
+    return badge("unverified", "not valid" + beside("Invalid"));
   }
   return badge("pending", "not judged yet");
 }
@@ -1430,8 +1571,8 @@ export function checkTable(checks, empty) {
     cell(c.message),
     cell(c.remedy),
     checkScope(c.scope),
-    cell(c.observedAt),
-    cell(c.expiresAt),
+    when(c.observedAt),
+    when(c.expiresAt),
   ]);
   return table(
     ["CHECK", "VERDICT", "GATING", "CODE", "MESSAGE", "REMEDY", "SCOPE", "OBSERVED", "EXPIRES"],
@@ -1521,6 +1662,100 @@ export function rfc3339(ms) {
   return iso.length === 24 && iso.slice(19, 24) === ".000Z"
     ? iso.slice(0, 19) + "Z"
     : iso;
+}
+
+// ---------------------------------------------------------------------------
+// THE ONE TIMESTAMP FORMATTER (MCP-7, MCP-15). Every instant a page SHOWS goes
+// through [`when`]: a human-readable UTC reading with whole seconds --
+// `2026-09-24 16:39:04 UTC` -- that never wraps mid-value, inside a `<time>`
+// whose `datetime` and `title` carry the EXACT value the object recorded,
+// nanoseconds and offset included, so nothing is lost and a hover or a copy
+// gets the original. Tables used to print `2026-09-24T15:21:21.720607463Z`,
+// broken across two lines at the `-`.
+//
+// UTC ON PURPOSE. The page reads no clock and no locale for a verdict; a
+// reading in the viewer's own zone would make two people on one incident call
+// read different times off one screen. The suffix says which zone it is.
+// ---------------------------------------------------------------------------
+
+const RFC3339 = /^(\d{4})-(\d{2})-(\d{2})[Tt ](\d{2}):(\d{2}):(\d{2})(\.\d+)?([Zz]|[+-]\d{2}:\d{2})$/;
+
+/** The human reading of one instant: `YYYY-MM-DD HH:MM:SS UTC`, or `null`
+ *  when `value` is not an RFC 3339 instant (or epoch milliseconds) this page
+ *  can read. A value already in UTC is read digit for digit, so a fraction
+ *  finer than JavaScript's milliseconds is never rounded into the seconds. */
+export function humanInstant(value) {
+  if (typeof value === "number") {
+    return isFinite(value) ? humanInstant(new Date(value).toISOString()) : null;
+  }
+  if (typeof value !== "string") {
+    return null;
+  }
+  const m = RFC3339.exec(value.trim());
+  if (m === null) {
+    return null;
+  }
+  if (m[8] === "Z" || m[8] === "z" || m[8] === "+00:00" || m[8] === "-00:00") {
+    return m[1] + "-" + m[2] + "-" + m[3] + " " + m[4] + ":" + m[5] + ":" + m[6] + " UTC";
+  }
+  const at = Date.parse(m[1] + "-" + m[2] + "-" + m[3] + "T" + m[4] + ":" + m[5] + ":" + m[6] + m[8]);
+  if (isNaN(at)) {
+    return null;
+  }
+  const iso = new Date(at).toISOString();
+  return iso.slice(0, 10) + " " + iso.slice(11, 19) + " UTC";
+}
+
+/** AN INSTANT, AS A PAGE SHOWS IT: [`humanInstant`]'s reading in a `<time>`
+ *  carrying the exact recorded value in `datetime` and `title`; [`ABSENT`] for
+ *  no value; and a value that is not an instant escaped as it arrived, never
+ *  guessed at. Epoch milliseconds are accepted and shown the same way. */
+export function when(value) {
+  if (value === null || value === undefined || value === "") {
+    return ABSENT;
+  }
+  const exact = typeof value === "number" ? rfc3339(value) : String(value);
+  const human = humanInstant(value);
+  if (human === null) {
+    return esc(exact);
+  }
+  return "<time class=\"ts\" datetime=\"" + esc(exact) + "\" title=\"" + esc(exact) + "\">" +
+    esc(human) + "</time>";
+}
+
+/** A LOCAL WALL-CLOCK READING, KEPT IN ITS OWN ZONE (console-ux-1 review M1).
+ *  The controller renders a firing in the schedule's zone with its offset --
+ *  `2026-10-25T02:30:00+02:00` -- and that reading IS the fact: on the
+ *  fall-back day two firings share one wall time and differ only in offset.
+ *  So the reading keeps its date, time and offset as written
+ *  (`2026-10-25 02:30:00 +02:00`, `Z` as `UTC`), and is never converted to
+ *  another zone; `null` for a value that is not an RFC 3339 instant. */
+export function humanLocal(value) {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const m = RFC3339.exec(value.trim());
+  if (m === null) {
+    return null;
+  }
+  const zone = m[8] === "Z" || m[8] === "z" ? "UTC" : m[8];
+  return m[1] + "-" + m[2] + "-" + m[3] + " " + m[4] + ":" + m[5] + ":" + m[6] + " " + zone;
+}
+
+/** [`humanLocal`] as a page shows it: the wall time in its own zone inside a
+ *  `<time>` whose `datetime` and `title` carry the exact value; the value
+ *  escaped as it arrived when it is not an instant; [`ABSENT`] for none. */
+export function whenLocal(value) {
+  if (value === null || value === undefined || value === "") {
+    return ABSENT;
+  }
+  const exact = String(value);
+  const human = humanLocal(exact);
+  if (human === null) {
+    return esc(exact);
+  }
+  return "<time class=\"ts\" datetime=\"" + esc(exact) + "\" title=\"" + esc(exact) + "\">" +
+    esc(human) + "</time>";
 }
 
 /** The covered window, both bounds as RFC 3339 and never a bare integer. */
@@ -1673,18 +1908,24 @@ export function independentCheck(payloadType, bucket, documentKey, sidecarKey, d
 // the behaviour suite reads exactly what a browser adopts.
 // ---------------------------------------------------------------------------
 
-/** An error from `api.js` as a string: the twin of [`errorBox`], with the API
- *  server's own status, reason and message, escaped and nothing added.
- *  `live` false drops `role="alert"` for an error nested inside a region that
- *  already announces itself. */
+/** An error from `api.js` as a string: the twin of [`errorBox`] -- the same
+ *  headline, the server's own message and its status, code and request id,
+ *  escaped. `live` false drops `role="alert"` for an error nested inside a
+ *  region that already announces itself. */
 export function errorBlock(error, live) {
-  const status = error && error.status ? String(error.status) : "error";
-  const reason = error && error.reason ? String(error.reason) : "";
-  const message = error && error.message ? String(error.message) : String(error);
+  const parts = errorParts(error);
   return (
     "<div class=\"error\"" + (live === false ? "" : " role=\"alert\"") + ">" +
-    "<span class=\"error-status\">" + esc(reason.length > 0 ? status + " " + reason : status) +
-    "</span><p class=\"error-message\">" + esc(message) + "</p></div>"
+    "<p class=\"error-title\">" + esc(parts.title) + "</p>" +
+    "<p class=\"error-message\">" + esc(parts.message) + "</p>" +
+    (parts.detail.length > 0
+      ? "<span class=\"error-status\">" + esc(parts.detail) + "</span>"
+      : "") +
+    (parts.signIn
+      ? "<p class=\"actions\"><a class=\"button primary\" href=\"" + esc(signInHref(hereHash())) +
+        "\">Sign in</a></p>"
+      : "") +
+    "</div>"
   );
 }
 
@@ -1930,7 +2171,7 @@ export function evidenceBlock(evidence) {
   rows.push(["recorded result", cell(v.result)]);
   rows.push(["matched key id", cell(v.matchedKeyId)]);
   rows.push(["payload type", cell(v.payloadType)]);
-  rows.push(["verified at", cell(v.verifiedAt)]);
+  rows.push(["verified at", when(v.verifiedAt)]);
   rows.push(["detail", cell(v.detail)]);
   return (
     "<section class=\"evidence\"><h3>Evidence</h3>" +
@@ -2015,7 +2256,11 @@ export function nextRunRow(run) {
   const marker = typeof r.adjustment === "string" && ADJUSTMENT_WORDS[r.adjustment] !== undefined
     ? badge("pending", r.adjustment)
     : "";
-  return [cell(r.at), "<code>" + cell(r.localTime) + "</code>", marker];
+  // THE LOCAL TIME STAYS LOCAL (review M1): `when` would read it as an
+  // instant and print it in UTC -- the AT (UTC) cell a second time -- and the
+  // wall time the schedule fires at, and the repeated 02:30 of a fall-back
+  // day, would be gone from the page.
+  return [when(r.at), "<code>" + whenLocal(r.localTime) + "</code>", marker];
 }
 
 /** The next-run panel, over a saved schedule's `status.nextRuns` or a draft's
@@ -2047,12 +2292,12 @@ export function nextRunsPanel(view) {
   return (
     "<section class=\"next-runs\" data-next-runs=\"" + String(list.length) + "\">" +
     "<h4>" + esc(heading) + "</h4>" +
-    "<p class=\"note\">Read in <code>" + esc(zone) + "</code>" +
+    "<p class=\"note\">Read in <code>" + esc(zone) + "</code>. The slot identity is always " +
+    "the UTC instant, which is why the names stay unique and monotonic whatever the zone.</p>" +
     (typeof v.tzdb === "string" && v.tzdb.length > 0
-      ? ", against <code>" + esc(v.tzdb) + "</code> compiled into the controller and the API"
+      ? technicalDetails("the time-zone database compiled into the controller and the API: <code>" +
+        esc(v.tzdb) + "</code>")
       : "") +
-    ". The slot identity is always the UTC instant, which is why the names stay unique and " +
-    "monotonic whatever the zone.</p>" +
     (zone === "UTC" ? "<p class=\"note\" data-utc-fallback=\"1\">" + esc(UTC_FALLBACK_NOTE) +
       "</p>" : "") +
     (stale ? "<p class=\"note\" data-stale=\"1\">" + badge("unverified", "out of date") + " " +
@@ -2068,11 +2313,11 @@ export function nextRunsPanel(view) {
 
 /** What "no trigger" means on a run, said rather than guessed. */
 export const NO_TRIGGER_SENTENCE =
-  "trigger not recorded (frozen before PLAT-05.1, or not published by this API)";
+  "trigger not recorded (the run predates recorded triggers, or this API does not publish it)";
 
 /** What "no revision" means, said the same way. */
 export const NO_REVISION_SENTENCE =
-  "revision not recorded (frozen before PLAT-05.1, or not published by this API)";
+  "revision not recorded (the run predates recorded revisions, or this API does not publish it)";
 
 /** WHICH KIND OF RUN THIS IS, from `spec.trigger` and from nothing else.
  *
@@ -2116,6 +2361,15 @@ export function triggerBadge(trigger, maxRetries) {
  *  is what makes that visible: `generation` counts every spec change including
  *  `suspend`, while `runPolicySha256` is over what a RUN does, so two runs of
  *  different generations with the same digest did the same thing. */
+/** FACTS FOR WHOEVER DEBUGS, NOT FOR WHOEVER OPERATES (MCP-13): a digest, the
+ *  time-zone library's version. They stay on the page, one disclosure away,
+ *  rather than in the sentence an operator reads. `html` is OURS (a caller
+ *  escapes every value in it). */
+export function technicalDetails(html) {
+  return "<details class=\"technical\"><summary>Technical details</summary><p class=\"note\">" +
+    html + "</p></details>";
+}
+
 export function revisionLine(ref) {
   const r = ref || {};
   const parts = [];
@@ -2231,9 +2485,24 @@ export function scorecardClaim(valueHtml, verified) {
  *  carry instead of inventing it; every other row names its case from the
  *  summary's own word. The run's own page (and legacy mode, which reads the
  *  custom resource) still shows the full block. */
-export const LIST_VERIFIED_CAPTION =
-  "verified by weirkeeper (this list does not carry the key id or the instant; the run's own " +
-  "page does)";
+export const LIST_VERIFIED_CAPTION = "verified by weirkeeper";
+
+/** WHAT A GREEN LIST BADGE DOES NOT CARRY, said ONCE under the table (MCP-16)
+ *  rather than inside every row's badge, where it tripled the row height at
+ *  1440 px and made a row eight lines tall at 1024 px. */
+export const LIST_VERIFIED_NOTE =
+  "SIGNED: a list row carries weirkeeper's verdict and not the key id or the instant it " +
+  "verified at; the run's own page shows both.";
+
+/** [`LIST_VERIFIED_NOTE`] as the line under a list, when any of `items` is a
+ *  console list row (one carrying the API's summary verdict); the empty string
+ *  otherwise, because a custom resource's own badge names its key and instant. */
+export function listVerifiedNote(items) {
+  const list = Array.isArray(items) ? items : [];
+  return list.some((item) => (((item || {}).status) || {}).__summary !== undefined)
+    ? "<p class=\"note\" id=\"list-verified-note\">" + esc(LIST_VERIFIED_NOTE) + "</p>"
+    : "";
+}
 
 /** Each non-green `verificationState` of a list summary, in words. */
 export const LIST_VERDICT_CASES = Object.freeze({

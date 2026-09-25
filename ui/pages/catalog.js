@@ -66,6 +66,9 @@ import {
   mutationStatus,
   replace,
   table,
+  conditionBadge,
+  flagBadge,
+  when,
 } from "../render.js";
 import {
   active,
@@ -88,12 +91,16 @@ import {
   readD3,
 } from "../operation-watch.js";
 import { FINGERPRINT_COMMAND } from "./keys.js";
+import { apiClient } from "../client.js";
 import {
   REDACTION_MARKER,
   catalogPointOffer,
   isRedacted,
   restoreCatalogPointRoute,
 } from "./restore-wizard.js";
+
+// The product API's reads, for the destinations the connect form offers.
+const API = apiClient();
 
 /** The sentence a namespace with no catalog carries. */
 export const NO_CATALOG_SENTENCE =
@@ -267,15 +274,13 @@ export function renderCatalogList(collection, ns) {
         ? detailLink("catalog", ns || meta.namespace || "", meta.name)
         : cell(null),
       cell(((object.spec || {}).destinationRef || {}).name),
-      ready === null ? ABSENT : badge(
-        String(ready.status) === "True" ? "green" : "unverified",
-        "Ready=" + String(ready.status) + " " + String(ready.reason || ""),
-      ),
+      // THE WORD, NOT THE SYNTAX (MCP-22): `Ready=True ViewReady` was the cell.
+      conditionBadge(ready, "ready", "not ready"),
       cell(counts.total),
       cell(counts.available),
       cell(counts.untrustedSigner),
-      cell(status.syncedAt),
-      cell(status.viewExpiresAt),
+      when(status.syncedAt),
+      when(status.viewExpiresAt),
     ];
   });
   return (
@@ -306,12 +311,12 @@ export function renderCatalogStatus(object) {
     "<section class=\"catalog-status\"><h3>The view</h3>" +
     (usable ? "" : "<p class=\"complaint\">" + esc(VIEW_EXPIRED_SENTENCE) + "</p>") +
     facts([
-      ["synced at", cell(status.syncedAt)],
-      ["view expires at", cell(status.viewExpiresAt)],
+      ["synced at", when(status.syncedAt)],
+      ["view expires at", when(status.viewExpiresAt)],
       ["points materialised in this view", cell(status.viewPoints)],
-      ["truncated", cell(status.truncated)],
+      ["truncated", flagBadge(status.truncated, "truncated: the archive holds more", "not truncated")],
       ["view expired", cell(status.viewExpired)],
-      ["walk complete", cell(cursor.complete)],
+      ["walk complete", flagBadge(cursor.complete, "complete", "not complete")],
       ["index shard reached", cell(cursor.indexShard)],
       ["last sync job", cell(job.name) + " exit " + cell(job.exitCode) + " " +
         cell(job.refusalReason)],
@@ -415,7 +420,7 @@ export const POINT_BINDING_SENTENCE =
   "This link carries what the point route published for this point: the point id, the receipt " +
   "key and digest, the manifest digest where the catalog has one, and the destination the " +
   "catalog reads. Building the plan around `source.point {point_id, receipt_key, " +
-  "receipt_sha256, manifest_sha256}` is the restore wizard's own step (PLAT-15.2), and the " +
+  "receipt_sha256, manifest_sha256}` is the restore wizard's own step, and the " +
   "runner re-checks that binding before it constructs a client: a mismatch is a refusal, not a " +
   "restore of something else.";
 
@@ -434,8 +439,17 @@ export function pointRow(entry, ns, catalog, destination, page) {
   const location = bestLocation(e);
   const offer = catalogPointOffer(e, page || {});
   return [
+    // THE ACTION FIRST (MCP-25's rule, the review's class sweep): the eighth of
+    // eight columns is the one a narrow window scrolls away.
+    e.selectable !== true
+      ? ABSENT
+      : (offer.offer
+        ? "<a class=\"action\" href=\"" + esc(restoreCatalogPointRoute(ns, catalog, e.pointId)) +
+          "\" data-restore-point=\"" + esc(e.pointId) + "\">Restore this point</a>"
+        : "<span class=\"note\" data-restore-refused=\"wizard\">not offered: " +
+          esc(offer.reason) + "</span>"),
     "<code>" + cell(e.pointId) + "</code>",
-    cell(e.recoveryPointAt),
+    when(e.recoveryPointAt),
     badge(e.availability === "Available" ? "green" : "unverified", String(e.availability || "")),
     badge(
       e.verification === "Verified" || e.verification === "VerifiedHistorical"
@@ -449,13 +463,6 @@ export function pointRow(entry, ns, catalog, destination, page) {
     location === null ? ABSENT : cell(location.locationId),
     "<code>" + cell(e.signerKeyId) + "</code>",
     cell(e.remedy),
-    e.selectable !== true
-      ? ABSENT
-      : (offer.offer
-        ? "<a href=\"" + esc(restoreCatalogPointRoute(ns, catalog, e.pointId)) +
-          "\" data-restore-point=\"" + esc(e.pointId) + "\">Restore this point</a>"
-        : "<span class=\"note\" data-restore-refused=\"wizard\">not offered: " +
-          esc(offer.reason) + "</span>"),
   ];
 }
 
@@ -474,8 +481,8 @@ export function renderPoints(page, ns, catalog, destination) {
     "<section class=\"points\"><h3>Recovery points</h3>" +
     "<p class=\"note\">" + esc(TWO_AXES_SENTENCE) + "</p>" +
     table(
-      ["POINT", "RECOVERY POINT", "AVAILABILITY", "VERIFICATION", "LOCATION", "SIGNER", "REMEDY",
-        "RESTORE"],
+      ["RESTORE", "POINT", "RECOVERY POINT", "AVAILABILITY", "VERIFICATION", "LOCATION", "SIGNER",
+        "REMEDY"],
       entries.map((entry) => pointRow(entry, ns, catalog, destination, page)),
       NO_POINT_SENTENCE,
       undefined,
@@ -654,13 +661,10 @@ export function renderConnectForm(view) {
     "<input id=\"catalog-name\" name=\"name\" value=\"" + esc(values.name || "") + "\"" +
     invalidAttributes("catalog-name", errors.name) + " required></div>" +
     fieldErrorLine("catalog-name", errors.name) +
-    "<div class=\"field\"><label for=\"catalog-destination\">destination</label>" +
-    "<input id=\"catalog-destination\" name=\"destination\" value=\"" +
-    esc(values.destination || "") + "\"" +
-    invalidAttributes("catalog-destination", errors.destination) + " required></div>" +
+    renderDestinationChoice(v, values, errors) +
     fieldErrorLine("catalog-destination", errors.destination) +
-    "<p class=\"help\">The saved destination (PLAT-08.1) whose bucket holds the archive. Its " +
-    "credential is the one the sync Job uses, and a read-only one is enough.</p>" +
+    "<p class=\"help\">The saved destination whose bucket holds the archive. Its credential is " +
+    "the one the sync Job uses, and a read-only one is enough.</p>" +
     "<div class=\"field\"><label for=\"catalog-mode\">sync mode</label>" +
     "<select id=\"catalog-mode\" name=\"syncMode\">" +
     SYNC_MODES.map((m) =>
@@ -682,6 +686,46 @@ export function renderConnectForm(view) {
     "</form>" +
     (v.result ? renderConnectResult(v.ns, v.result) : "") +
     "</section>"
+  );
+}
+
+/** THE DESTINATION, CHOSEN FROM THE NAMESPACE'S OWN (MCP-23). A pick-list of
+ *  the saved destinations the page read -- name and location -- rather than a
+ *  free-text box a typo turns into a 422; the free-text box stays when the
+ *  list could not be read, so the form never stops working because a read
+ *  failed. An empty list says where a destination is made. */
+export function renderDestinationChoice(view, values, errors) {
+  const v = view || {};
+  const chosen = String((values || {}).destination || "");
+  const invalid = invalidAttributes("catalog-destination", (errors || {}).destination);
+  const list = Array.isArray(v.destinations) ? v.destinations : null;
+  if (list !== null && list.length > 0) {
+    const known = list.some((d) => d.name === chosen);
+    return (
+      "<div class=\"field\"><label for=\"catalog-destination\">destination</label>" +
+      "<select id=\"catalog-destination\" name=\"destination\"" + invalid + " required>" +
+      "<option value=\"\"" + (chosen.length === 0 ? " selected" : "") +
+      ">Choose a saved destination</option>" +
+      list.map((d) =>
+        "<option value=\"" + esc(d.name) + "\"" + (d.name === chosen ? " selected" : "") + ">" +
+        esc(d.name) + (typeof d.canonicalUrl === "string" ? " -- " + esc(d.canonicalUrl) : "") +
+        (d.default === true ? " (default)" : "") + "</option>").join("") +
+      (chosen.length > 0 && !known
+        ? "<option value=\"" + esc(chosen) + "\" selected>" + esc(chosen) +
+          " (not in this namespace's list)</option>"
+        : "") +
+      "</select></div>"
+    );
+  }
+  return (
+    "<div class=\"field\"><label for=\"catalog-destination\">destination</label>" +
+    "<input id=\"catalog-destination\" name=\"destination\" value=\"" + esc(chosen) + "\"" +
+    invalid + " required></div>" +
+    (list !== null && list.length === 0
+      ? "<p class=\"note\" id=\"catalog-no-destination\">No saved destination exists in this " +
+        "namespace yet. <a href=\"#/destinations?ns=" + esc(encodeURIComponent(String(v.ns || ""))) +
+        "\">Create one on Destinations</a> first; it names the bucket this archive is in.</p>"
+      : "")
   );
 }
 
@@ -788,6 +832,23 @@ export function connectBody(values) {
   };
 }
 
+// The destinations the connect form offers: `deps.destinations` for the
+// suite, the client's product-API read otherwise; `null` when unreadable.
+async function readConnectDestinations(ns, deps, lifecycle) {
+  const reader = deps !== undefined && deps !== null
+    ? deps.destinations
+    : (namespace, options) => API.destinations(namespace, options);
+  if (typeof reader !== "function") {
+    return null;
+  }
+  try {
+    const answer = await reader(ns, readOptions(lifecycle));
+    return Array.isArray((answer || {}).items) ? answer.items : null;
+  } catch (unread) {
+    return null;
+  }
+}
+
 export async function mountCatalog(node, ns, parse, lifecycle, deps) {
   const key = connectKey(ns);
   const mutation = mutationFor(key);
@@ -807,8 +868,13 @@ export async function mountCatalog(node, ns, parse, lifecycle, deps) {
     view.state = state;
     paint();
   }, lifecycle);
+  // THE NAMESPACE'S DESTINATIONS, READ BESIDE THE CATALOGS for the pick-list
+  // (MCP-23). A read that fails leaves the free-text box; it is never a reason
+  // the page fails.
+  const destinationsRead = readConnectDestinations(ns, deps, lifecycle);
   try {
     view.collection = await listD3("catalog", ns, readOptions(lifecycle), deps);
+    view.destinations = await destinationsRead;
     view.loaded = true;
     paint();
   } catch (error) {

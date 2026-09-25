@@ -562,7 +562,7 @@ export function inConsole(modeOf) {
 export async function readD3(family, ns, name, options, deps) {
   const route = D3_ROUTES[family];
   if (route === undefined) {
-    throw contractFailure("D3Route", String(family), "no such D3 family");
+    throw contractFailure("D3Route", String(family), "no such route family");
   }
   const d = deps || {};
   if (inConsole(d.modeOf)) {
@@ -581,7 +581,7 @@ export async function readD3(family, ns, name, options, deps) {
 export async function listD3(family, ns, options, deps) {
   const route = D3_ROUTES[family];
   if (route === undefined) {
-    throw contractFailure("D3Route", String(family), "no such D3 family");
+    throw contractFailure("D3Route", String(family), "no such route family");
   }
   const d = deps || {};
   if (inConsole(d.modeOf)) {

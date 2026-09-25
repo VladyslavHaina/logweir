@@ -1797,7 +1797,25 @@ test("the_operation_mount_refuses_a_kind_this_route_does_not_serve", async () =>
     null);
   assert.equal(watch, null);
   assert.equal(reads, 0, "nothing was read for a kind this route does not serve");
-  assert.ok(node.html.indexOf("This route serves backup and restore operations") !== -1);
+  assert.ok(node.html.indexOf("This page follows backup and restore runs") !== -1);
+  assert.ok(node.html.indexOf("named &quot;rehearsal&quot;, which is neither") !== -1,
+    "the kind the link named is named back");
+});
+
+test("mcp_19_an_operations_visit_with_no_run_points_at_the_two_lists_runs_are_in", async () => {
+  // BEFORE (MCP-19): "This route serves backup and restore operations. The
+  // address bar named none." -- a dead end reached from a top-level tab.
+  const node = fakeNode();
+  let reads = 0;
+  const watch = await mountOperation(node, "team-a", { kind: "", name: "", uid: "" },
+    fakeParse, { modeOf: () => "legacy", api: { get: async () => { reads += 1; return {}; } } },
+    null);
+  assert.equal(watch, null);
+  assert.equal(reads, 0, "nothing is read when the address names no run");
+  assert.equal(node.html.indexOf("address bar named"), -1, "no dead-end sentence");
+  assert.ok(node.html.indexOf("id=\"no-operation\"") !== -1);
+  assert.ok(node.html.indexOf("href=\"#/backups?ns=team-a\"") !== -1, "a way to Backups");
+  assert.ok(node.html.indexOf("href=\"#/history?ns=team-a\"") !== -1, "and to History");
 });
 
 test("the_protection_mount_renders_the_list_and_one_policy", async () => {

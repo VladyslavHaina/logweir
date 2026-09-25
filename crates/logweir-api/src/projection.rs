@@ -19,11 +19,12 @@ use weirkeeper::crds::{ArchiveRef, LocalRef};
 use crate::contract::{
     ActiveRunView, AllUserTopics, Approval, ApprovalPacket, ArchiveView, Backup,
     BackupDestinationRefView, CadenceAdjustment, CadencePreset, CatchUpPolicy, ConcurrencyPolicy,
-    Connection, ConnectionAuthMode, ConnectionAuthView, IncompleteDiscoveryPolicy, LastTestView,
-    NameRef, NextRunView, ObservedAuthView, ReachabilityState, ReachabilityView, RemovableSetView,
-    Restore, RestoreMode, RestoreTargetView, RetentionReportView, RetentionView, RetryPolicy,
-    Schedule, SchedulePolicyView, ScheduleRefView, ScheduleStatusView, SubjectRefView,
-    TopicExclusions, TriggerKind, TriggerView, VerifiedSubjectView, WindowCoveredView,
+    Connection, ConnectionAuthMode, ConnectionAuthView, IncompleteDiscoveryPolicy, LastSlotView,
+    LastTestView, MissedSlotView, MissedSlotsView, NameRef, NextRunView, ObservedAuthView,
+    ReachabilityState, ReachabilityView, RemovableSetView, Restore, RestoreMode, RestoreTargetView,
+    RetentionReportView, RetentionView, RetryPolicy, Schedule, SchedulePolicyView, ScheduleRefView,
+    ScheduleStatusView, SubjectRefView, TopicExclusions, TriggerKind, TriggerView,
+    VerifiedSubjectView, WindowCoveredView,
 };
 use crate::status::{backup_operation, condition_view, restore_operation, summary, MAX_CONDITIONS};
 use crate::validate::redact_url_userinfo;
@@ -214,6 +215,35 @@ pub fn schedule(object: &BackupSchedule) -> Schedule {
                 .and_then(|s| s.pending_backup_ref.as_ref())
                 .map(|r| r.name.clone()),
             last_missed_slot: status.and_then(|s| s.last_missed_slot.clone()),
+            last_slot: status
+                .and_then(|s| s.last_slot.as_ref())
+                .map(|l| LastSlotView {
+                    slot: l.slot.clone(),
+                    due_at: l.due_at,
+                    attempt: l.attempt,
+                    disposition: l.disposition.clone(),
+                    backup_ref: l.backup_ref.as_ref().map(name_ref),
+                    reason: l.reason.clone(),
+                    decided_at: l.decided_at,
+                }),
+            missed_slots: status
+                .and_then(|s| s.missed_slots.as_ref())
+                .map(|m| MissedSlotsView {
+                    count: m.count,
+                    count_capped: m.count_capped,
+                    last_evaluated_slot: m.last_evaluated_slot.clone(),
+                    recent: m.recent.as_ref().map(|recent| {
+                        recent
+                            .iter()
+                            .take(MAX_LIST_ENTRIES)
+                            .map(|r| MissedSlotView {
+                                slot: r.slot.clone(),
+                                reason: r.reason.clone(),
+                                recorded_at: r.recorded_at,
+                            })
+                            .collect()
+                    }),
+                }),
             ready: status
                 .and_then(|s| s.conditions.as_ref())
                 .and_then(|cs| cs.iter().find(|c| c.r#type == "Ready"))

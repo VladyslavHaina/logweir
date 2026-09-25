@@ -60,6 +60,8 @@ import {
   triggerBadge,
   unverifiedCaption,
   summaryBadge,
+  listVerifiedNote,
+  when,
 } from "../render.js";
 import { itemsOf } from "./clusters.js";
 import { renderCoverageLine } from "./schedules.js";
@@ -192,7 +194,7 @@ function nameCell(object, ns) {
 export const TRIGGER_COLUMN_SENTENCE =
   "TRIGGER is the run's own spec.trigger: Scheduled for a slot that fired at its instant, " +
   "CatchUp for the same slot started late, Retry for attempt k of it with a new execution id, " +
-  "and Manual for a run a person asked for. A run frozen before PLAT-05.1 carries none and " +
+  "and Manual for a run a person asked for. A run created before triggers were recorded carries none and " +
   "says so; it is never read from triggeredBy, which cannot tell those four apart.";
 
 /** THE LINK EVERY ROW CARRIES TO THE DURABLE OPERATION VIEW (PLAT-12.1).
@@ -209,7 +211,7 @@ export function operationCell(object, ns) {
   const target = operationRoute(
     ns || meta.namespace || "", "backup", meta.name, meta.uid || "",
   );
-  return "<a href=\"" + esc(target) + "\">Follow this run</a>";
+  return "<a class=\"action\" href=\"" + esc(target) + "\">Follow this run</a>";
 }
 
 /** The backups table. NAME, TRIGGER, PHASE, EXIT, RECORDS, SIGNED, AGE,
@@ -219,30 +221,40 @@ export function renderBackupList(input, ns) {
     const status = object.status || {};
     const meta = object.metadata || {};
     const spec = object.spec || {};
+    // THE RUN'S TWO LINKS IN ONE CELL (MCP-25's class, on this table): its
+    // page, and the operation view beneath it. As the eighth column "Follow
+    // this run" was the one a 1024 px window scrolled out of sight.
+    const follow = operationCell(object, ns);
     return [
-      nameCell(object, ns),
+      nameCell(object, ns) + (follow === cell(null) ? "" : "<span class=\"cell-sub\">" + follow + "</span>"),
       triggerBadge(spec.trigger),
       runPhaseBadge(status),
       cell(status.exitCode),
       cell(status.records),
       backupBadge(status),
-      cell(meta.creationTimestamp),
-      operationCell(object, ns),
+      when(meta.creationTimestamp),
     ];
   });
+  const partial = ((input || {}).__page || {}).partial === true;
   return (
     "<h2>Backups</h2>" +
-    "<p class=\"blurb\">Every Backup run in this namespace. The AGE column is the " +
-    "object's own creation instant, not a duration: these views are computed without " +
-    "reading a clock.</p>" +
+    "<p class=\"blurb\">Every Backup run in this namespace, with the evidence weirkeeper " +
+    "recorded for it.</p>" +
+    (partial
+      ? "<p class=\"pending\" id=\"backups-partial\" role=\"status\">Showing the first " +
+        String(itemsOf(input).length) + " runs while the rest are read...</p>"
+      : "") +
     "<p class=\"note\">" + esc(TRIGGER_COLUMN_SENTENCE) + "</p>" +
     table(
-      ["NAME", "TRIGGER", "PHASE", "EXIT", "RECORDS", "SIGNED", "AGE", "OPERATION"],
+      // CREATED, NOT AGE (MCP-18): the column holds the creation instant, and a
+      // column named for a duration needed a paragraph to say it was not one.
+      ["NAME", "TRIGGER", "PHASE", "EXIT", "RECORDS", "SIGNED", "CREATED"],
       rows,
       NO_BACKUP_SENTENCE,
       undefined,
       { id: "backups", label: "backups", scope: ns },
     ) +
+    listVerifiedNote(itemsOf(input)) +
     listFooter()
   );
 }
@@ -303,9 +315,19 @@ export function renderBackupDetail(object) {
 
 // --------------------------------------------------------------- mount half
 
-export async function mountBackups(node, ns, parse, lifecycle) {
+export async function mountBackups(node, ns, parse, lifecycle, deps) {
+  const api = (deps || {}).api || API;
   try {
-    const collection = await API.list(ns, PLURAL, readOptions(lifecycle));
+    // THE FIRST PAGE IS SHOWN WHILE THE REST ARE READ (MCP-26): at 258 runs the
+    // list was a spinner until the last page answered.
+    const options = Object.assign({}, readOptions(lifecycle) || {}, {
+      onPage: (partial) => {
+        if (active(lifecycle)) {
+          replace(node, parse(renderBackupList(partial, ns)));
+        }
+      },
+    });
+    const collection = await api.list(ns, PLURAL, options);
     if (active(lifecycle)) {
       replace(node, parse(renderBackupList(collection, ns)));
     }

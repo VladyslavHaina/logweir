@@ -14,8 +14,31 @@
 // address; the seven views arrive with their own tests.
 
 import { GROUP, VERSION, path } from "./api.js";
-import { CONSOLE, LEGACY, applyGrants, grantedNamespaces, selectMode } from "./client.js";
-import { el, enhanceDatagrids, markScrollRegions, replace } from "./render.js";
+import {
+  CONSOLE,
+  LEGACY,
+  SIGNED_OUT,
+  UNAVAILABLE,
+  unavailableReason,
+  applyGrants,
+  granted,
+  grantedAnywhere,
+  grantedNamespaces,
+  mode,
+  selectMode,
+  sessionIdentity,
+  signOut,
+  signedOutReason,
+} from "./client.js";
+import {
+  el,
+  enhanceDatagrids,
+  errorBox,
+  esc,
+  markScrollRegions,
+  replace,
+  signInHref,
+} from "./render.js";
 import { mountClusterDetail, mountClusters } from "./pages/clusters.js";
 import { mountDestinationDetail, mountDestinations } from "./pages/destinations.js";
 import { mountScheduleDetail, mountSchedules } from "./pages/schedules.js";
@@ -41,28 +64,63 @@ import { mountCatalog, mountCatalogDetail } from "./pages/catalog.js";
 // there, and in legacy mode `ui/client.js` refuses each call BY NAME, with a
 // sentence saying which API serves the flow.
 const ROUTES = [
-  { hash: "#/clusters", title: "Clusters", blurb: "The KafkaCluster objects this namespace can reach.", mount: mountClusters, detail: mountClusterDetail },
-  { hash: "#/destinations", title: "Destinations", blurb: "Saved archive locations: one location, written down once, referenced by name.", mount: mountDestinations, detail: mountDestinationDetail },
+  { hash: "#/clusters", title: "Clusters", blurb: "The KafkaCluster objects this namespace can reach.", mount: mountClusters, detail: mountClusterDetail, needs: ["connectionsRead"] },
+  { hash: "#/destinations", title: "Destinations", blurb: "Saved archive locations: one location, written down once, referenced by name.", mount: mountDestinations, detail: mountDestinationDetail, needs: ["destinations"] },
   // PLAT-10.2 gave this route a DETAIL, and the hash it is reached by is the
   // one every other list/detail pair here uses: `?name=` on the list's own
   // route. That is why the migration note is "existing deep links keep
   // working" rather than "are redirected" -- `#/schedules?ns=<ns>` was the
   // only schedules link there had ever been, and a hash with no `name`
   // reaches `mountSchedules` exactly as it always did.
-  { hash: "#/schedules", title: "Schedules", blurb: "BackupSchedule objects, their next slot and their suspend state.", mount: mountSchedules, detail: mountScheduleDetail },
-  { hash: "#/backups", title: "Backups", blurb: "Backup runs, each with the evidence weirkeeper recorded for it.", mount: mountBackups, detail: mountBackupDetail },
-  { hash: "#/history", title: "History", blurb: "Completed runs over time, newest first.", mount: mountHistory, detail: mountRestoreDetail },
+  { hash: "#/schedules", title: "Schedules", blurb: "BackupSchedule objects, their next slot and their suspend state.", mount: mountSchedules, detail: mountScheduleDetail, needs: ["schedulesRead"] },
+  { hash: "#/backups", title: "Backups", blurb: "Backup runs, each with the evidence weirkeeper recorded for it.", mount: mountBackups, detail: mountBackupDetail, needs: ["backupsRead"] },
+  { hash: "#/history", title: "History", blurb: "Completed runs over time, newest first.", mount: mountHistory, detail: mountRestoreDetail, needs: ["backupsRead", "restoresRead"] },
   // `#/operations` CARRIES AN IDENTITY IN THE HASH and has no list: an
   // operation is always reached FROM a run -- a row, or the outcome of a
   // submission -- and a list of operations would be the backups and history
-  // tables a second time.
-  { hash: "#/operations", title: "Operations", blurb: "One durable run: where it is, why, what it produced and whether the evidence verified.", mount: mountOperation, route: true, params: operationRouteParams },
-  { hash: "#/protection", title: "Protection", blurb: "Whether a recoverable backup exists, how old it is, and what was alerted about it.", mount: mountProtection, detail: mountProtectionDetail },
-  { hash: "#/catalog", title: "Catalog", blurb: "The durable recovery catalog: what is in the archive, whether it is available and whether it verifies.", mount: mountCatalog, detail: mountCatalogDetail },
-  { hash: "#/restore", title: "Restore", blurb: "The restore wizard: a chosen recovery point, archive, point in time, target, preflight, plan.", mount: mountRestoreWizard, route: true, params: restoreRouteParams },
-  { hash: "#/approvals", title: "Approvals", blurb: "Approval objects, and which key signed each one.", mount: mountApprovals, route: true, params: approvalRouteParams },
-  { hash: "#/keys", title: "Keys", blurb: "The TrustRoster, read-only: it is cluster-scoped and admin-only.", mount: mountKeys, cluster: true },
+  // tables a second time. SO IT IS NOT A TAB (MCP-19): a tab that opens on
+  // "the address bar named none" is a dead end. The route and every link to
+  // one run are unchanged; a visit with no run names the two lists it is
+  // reached from.
+  { hash: "#/operations", title: "Operations", blurb: "One durable run: where it is, why, what it produced and whether the evidence verified.", mount: mountOperation, route: true, params: operationRouteParams, nav: false, needs: ["operationsRead"] },
+  { hash: "#/protection", title: "Protection", blurb: "Whether a recoverable backup exists, how old it is, and what was alerted about it.", mount: mountProtection, detail: mountProtectionDetail, needs: ["protection"] },
+  { hash: "#/catalog", title: "Catalog", blurb: "The durable recovery catalog: what is in the archive, whether it is available and whether it verifies.", mount: mountCatalog, detail: mountCatalogDetail, needs: ["catalogs"] },
+  { hash: "#/restore", title: "Restore", blurb: "The restore wizard: a chosen recovery point, archive, point in time, target, preflight, plan.", mount: mountRestoreWizard, route: true, params: restoreRouteParams, needs: ["restoreCreate"] },
+  { hash: "#/approvals", title: "Approvals", blurb: "Approval objects, and which key signed each one.", mount: mountApprovals, route: true, params: approvalRouteParams, needs: ["approvalsRead"] },
+  { hash: "#/keys", title: "Keys", blurb: "The TrustRoster, read-only: it is cluster-scoped and admin-only.", mount: mountKeys, cluster: true, needs: ["trustPoliciesRead"] },
 ];
+
+/** WHICH TABS THIS SESSION SEES (MCP-33), as a pure function of what the
+ *  session publishes: a route is a tab when it is a navigation route at all
+ *  (`nav !== false`) and the session holds ANY of the capability flags it
+ *  `needs` -- in the chosen namespace when one is chosen and granted, and in
+ *  any namespace otherwise (the keys view is cluster-scoped, so always the
+ *  latter). `has(flag, ns)` answers the question; legacy mode answers yes to
+ *  everything, because the API server's RBAC is the gate there and the page
+ *  cannot know it in advance. A hidden tab is a convenience and never a
+ *  control: every route still refuses by name when an address reaches it. */
+export function visibleRoutes(routes, ns, has) {
+  const ask = typeof has === "function" ? has : () => true;
+  return routes.filter((route) => {
+    if (route.nav === false) {
+      return false;
+    }
+    const needs = Array.isArray(route.needs) ? route.needs : [];
+    if (needs.length === 0) {
+      return true;
+    }
+    return needs.some((flag) => ask(flag, route.cluster === true ? "" : ns));
+  });
+}
+
+// The session's answer for one flag: the chosen namespace's grant when there
+// is one, the union across every granted namespace otherwise.
+function sessionHas(flag, ns) {
+  return typeof ns === "string" && ns.length > 0 && granted(ns, flag) ? true : grantedAnywhere(flag);
+}
+
+/** The route list the navigation renders, exported for the suite. */
+export const NAV_ROUTES = ROUTES;
 
 const DEFAULT_HASH = ROUTES[0].hash;
 
@@ -105,6 +163,23 @@ export function createRouteLifecycle(AbortControllerClass) {
           return current === token &&
             !controller.signal.aborted &&
             (token.routeHash === null || typeof window === "undefined" || window.location.hash === token.routeHash);
+        },
+        /** THE SAME ROUTE AT ANOTHER ADDRESS (MCP-29). The restore wizard
+         *  writes the step on screen into the address with `replaceState`,
+         *  which is not a navigation: this tells the route which address it is
+         *  now on, so `isCurrent` keeps answering for it. Only the route's own
+         *  path may be kept -- an address for another route is a navigation,
+         *  and is refused -- and only while this route is the current one. */
+        retarget(next) {
+          if (current !== token || controller.signal.aborted || typeof next !== "string") {
+            return false;
+          }
+          const path = (h) => (h.indexOf("?") === -1 ? h : h.slice(0, h.indexOf("?")));
+          if (token.routeHash !== null && path(next) !== path(token.routeHash)) {
+            return false;
+          }
+          token.routeHash = next;
+          return true;
         },
       };
     },
@@ -219,6 +294,7 @@ function parseFragment(html) {
 // remains the one place a column's caption is written.
 function labelTableCells(parsed) {
   for (const table of Array.from(parsed.querySelectorAll("table.grid"))) {
+    markLongTokens(table);
     const captions = Array.from(table.querySelectorAll("thead th")).map(
       (th) => th.textContent,
     );
@@ -239,7 +315,7 @@ function labelTableCells(parsed) {
 function nav(current, ns, allowedNamespaces) {
   const links = [];
   const suffix = ns === DEFAULT_NAMESPACE ? "" : "?ns=" + encodeURIComponent(ns);
-  for (const route of ROUTES) {
+  for (const route of visibleRoutes(ROUTES, ns, sessionHas)) {
     const attrs = { href: route.hash + suffix, class: "nav-link" };
     if (route.hash === current.hash) {
       attrs["aria-current"] = "page";
@@ -251,6 +327,22 @@ function nav(current, ns, allowedNamespaces) {
     el("nav", { class: "nav", "aria-label": "Sections" }, links),
     namespaceForm(current, ns, allowedNamespaces),
   ]);
+}
+
+/** THE TOKENS IN A TABLE THAT MAY BREAK ANYWHERE (MCP-6): a code chip or a
+ *  label holding a word longer than [`LONG_TOKEN_CHARS`] -- a digest, a uid, a
+ *  key id -- gains the class `long`, and the stylesheet lets only those break
+ *  mid-word. Every other chip wraps at a space and nowhere else. Exported for
+ *  the suite. */
+export const LONG_TOKEN_CHARS = 24;
+
+export function markLongTokens(root) {
+  for (const chip of Array.from(root.querySelectorAll("td code, td .badge"))) {
+    const words = String(chip.textContent || "").split(/\s+/);
+    if (words.some((word) => word.length > LONG_TOKEN_CHARS)) {
+      chip.setAttribute("class", (String(chip.getAttribute("class") || "") + " long").trim());
+    }
+  }
 }
 
 // The namespace picker. It changes the hash and nothing else -- no request is
@@ -389,7 +481,9 @@ export function applyModeCopy(doc, decidedMode) {
  *  with one more render when that changed anything. */
 export function modeDecided(record, doc, context, rerender) {
   const decided = (record || {}).mode;
-  applyModeCopy(doc, decided);
+  // A signed-out visitor, and a console that could not be reached, are IN the
+  // shared console: its copy is the console's.
+  applyModeCopy(doc, decided === SIGNED_OUT || decided === UNAVAILABLE ? CONSOLE : decided);
   if (decided === CONSOLE && applyGrants(context, grantedNamespaces())) {
     rerender();
   }
@@ -414,11 +508,113 @@ export function namespaceContext(root) {
   };
 }
 
-function namespacePrompt(allowed) {
+// AN INSTRUCTION, NOT A LOADING STATE (MCP-2): nothing is being read while the
+// page waits for a namespace, so the prompt carries no spinner.
+export function namespacePrompt(allowed) {
   const sentence = allowed.length === 0
     ? "Choose a namespace above before Logweir reads cluster resources. The page does not list namespaces."
     : "Choose one of the namespaces this installation explicitly authorizes above.";
-  return el("p", { class: "pending", role: "status" }, sentence);
+  return el("p", { class: "prompt", role: "status" }, sentence);
+}
+
+/** THE PAGE A SIGNED-OUT VISITOR GETS, on every route (MCP-1). One action --
+ *  Sign in -- which returns to the address they asked for, and no namespace
+ *  box, no tabs and no read: there is nothing this page may read for someone
+ *  the product API does not know. `reason` is the probe's problem code, so an
+ *  expired session is told so rather than told it never signed in. Pure. */
+export function renderSignIn(reason, hash) {
+  const expired = reason === "session_expired";
+  return (
+    "<section class=\"card signin\" id=\"sign-in\">" +
+    "<h2>" + (expired ? "Your session has ended" : "Sign in to Logweir") + "</h2>" +
+    "<p class=\"blurb\">" +
+    (expired
+      ? "Console sessions are short-lived and this one has expired. Sign in again to carry on " +
+        "where you were."
+      : "This is the Logweir console for Kafka backup and restore. Sign in with your " +
+        "organisation's identity provider to see the namespaces you have been granted.") +
+    "</p>" +
+    "<p class=\"actions\"><a class=\"button primary\" id=\"sign-in-link\" href=\"" +
+    esc(signInHref(hash)) + "\">Sign in</a></p>" +
+    "<p class=\"note\">You come back to this page once you are signed in. What you may see " +
+    "and do depends on the roles your administrator granted you in each namespace.</p>" +
+    "</section>"
+  );
+}
+
+/** THE PAGE A CONSOLE THAT COULD NOT BE REACHED RENDERS (console-ux-1 review
+ *  L1): what the probe got, in words, and Retry -- never the legacy page a
+ *  failed probe used to fall back to. Pure. */
+export function renderUnavailable(reason) {
+  return (
+    "<section class=\"card signin\" id=\"console-unavailable\" role=\"alert\">" +
+    "<h2>Can't reach the Logweir service</h2>" +
+    "<p class=\"blurb\">This is the Logweir console, and its API did not answer the page's " +
+    "first request, so nothing has been read and nothing is shown in its place.</p>" +
+    "<p class=\"note\" id=\"console-unavailable-reason\">" + esc(String(reason || "")) + "</p>" +
+    "<p class=\"actions\"><button type=\"button\" class=\"primary\" id=\"console-retry\">" +
+    "Retry</button></p>" +
+    "</section>"
+  );
+}
+
+/** THE HEADER'S SESSION INDICATOR (MCP-5): who is signed in, in which role
+ *  for the chosen namespace, and Sign out. Pure; `identity` is
+ *  `ui/client.js`'s `sessionIdentity(ns)`, and `null` renders nothing (legacy
+ *  mode, where the kubeconfig that started the proxy is the identity and the
+ *  tagline already says so). A localAdmin console names its one actor and
+ *  offers no Sign out, because it has no sign-in. */
+export function renderIdentity(identity) {
+  if (identity === null || identity === undefined) {
+    return "";
+  }
+  const local = identity.authenticationMode === "localAdmin";
+  const roles = Array.isArray(identity.roles) ? identity.roles : [];
+  const where = typeof identity.namespace === "string" && identity.namespace.length > 0
+    ? identity.namespace
+    : "";
+  const roleText = local
+    ? "local administrator"
+    : (roles.length === 0
+      ? (where.length > 0 ? "no role in " + where : "choose a namespace to see your role")
+      : roles.join(", ") + (where.length > 0 ? " in " + where : ""));
+  return (
+    "<div class=\"session-identity\" id=\"session-identity\">" +
+    "<span class=\"session-who\"><span class=\"visually-hidden\">Signed in as </span>" +
+    "<span class=\"session-name\" title=\"" + esc(identity.subject) + "\">" +
+    esc(local ? "Local administrator" : identity.displayName) + "</span>" +
+    "<span class=\"session-role\" id=\"session-role\">" + esc(roleText) + "</span></span>" +
+    (identity.canSignOut === true
+      ? "<button type=\"button\" class=\"session-signout\" id=\"sign-out\">Sign out</button>"
+      : "") +
+    "</div>"
+  );
+}
+
+// Writes the identity into the masthead and wires Sign out. A failed sign-out
+// is shown beside the button and changes nothing else; a successful one
+// reloads, so the next probe answers 401 and the sign-in page is what renders.
+function renderSession(ns) {
+  const slot = document.getElementById("session-slot");
+  if (slot === null) {
+    return;
+  }
+  replace(slot, parseFragment(renderIdentity(sessionIdentity(ns))));
+  const button = slot.querySelector("#sign-out");
+  if (button === null) {
+    return;
+  }
+  button.addEventListener("click", () => {
+    button.disabled = true;
+    signOut().then(() => {
+      window.location.reload();
+    }, (error) => {
+      button.disabled = false;
+      const failed = errorBox(error);
+      failed.classList.add("session-error");
+      slot.appendChild(failed);
+    });
+  });
 }
 
 /** FOCUS FOLLOWS A NAVIGATION (PLAT-18.2). A route change replaces the
@@ -444,11 +640,50 @@ function render(lifecycle, context, navigated) {
   const current = routeFor(here.route) || routeFor(DEFAULT_HASH);
   const header = document.getElementById("nav-slot");
   const main = document.getElementById("view-slot");
+  const decided = mode();
+  // SIGNED OUT: no tabs, no namespace box and no page (MCP-1). Every route is
+  // the sign-in page, and its link returns to the address that was asked for.
+  if (decided === SIGNED_OUT) {
+    if (header !== null) {
+      replace(header, []);
+    }
+    renderSession(here.ns);
+    if (main !== null) {
+      replace(main, parseFragment(renderSignIn(signedOutReason(), hash)));
+    }
+    document.title = "Logweir -- Sign in";
+    return;
+  }
+  // THE CONSOLE COULD NOT BE REACHED (review L1): no tabs, no page, and a
+  // Retry that asks again from a clean page.
+  if (decided === UNAVAILABLE) {
+    if (header !== null) {
+      replace(header, []);
+    }
+    renderSession(here.ns);
+    if (main !== null) {
+      replace(main, parseFragment(renderUnavailable(unavailableReason())));
+      const retry = main.querySelector("#console-retry");
+      if (retry !== null) {
+        retry.addEventListener("click", () => window.location.reload());
+      }
+    }
+    document.title = "Logweir -- unavailable";
+    return;
+  }
   if (header !== null) {
     replace(header, nav(current, here.ns, context.allowed));
   }
+  renderSession(here.ns);
   let mounted = null;
-  if (main !== null) {
+  if (main !== null && decided === null) {
+    // BEFORE THE ONE PROBE HAS ANSWERED, NOTHING IS MOUNTED. Every page's
+    // first read waits for the mode anyway (`client.js` `ensure`), so this
+    // costs no time; what it prevents is a page painted for the wrong mode --
+    // the legacy namespace prompt shown to a visitor the console is about to
+    // ask to sign in (MCP-1). The probe is bounded at five seconds.
+    replace(main, el("p", { class: "pending", role: "status" }, "Connecting to Logweir..."));
+  } else if (main !== null) {
     if (!current.cluster && (here.ns.length === 0 || (context.allowed.length > 0 && context.allowed.indexOf(here.ns) === -1))) {
       replace(main, namespacePrompt(context.allowed));
     } else if (here.name !== "" && typeof current.detail === "function") {
@@ -556,7 +791,18 @@ function boot() {
   // rather than from the ConfigMap `runtime.js` carries, which is the
   // installation's list and not the viewer's. A change is one more render;
   // no change is none.
-  selectMode().then((record) => modeDecided(record, document, context, renderCurrent), () => {
+  selectMode().then((record) => {
+    // The first render above painted the frame and a "connecting" line; the
+    // decided mode paints the page -- once, whether or not the grants moved.
+    let rendered = false;
+    modeDecided(record, document, context, () => {
+      rendered = true;
+      renderCurrent();
+    });
+    if (!rendered) {
+      renderCurrent();
+    }
+  }, () => {
     // `selectMode` resolves for every answer including a refusal, so this arm
     // is for a throw inside `renderCurrent` above -- which would otherwise be
     // an unhandled rejection with nothing on screen to say a render failed.

@@ -165,7 +165,7 @@ authorisation story is "the API server evaluated the viewer's RBAC".
 | file | what it is |
 |---|---|
 | `index.html` | the shell. Loads `./app.js` as a module; every reference relative. |
-| `app.js` | the hash router and the frame. Eleven routes: `#/clusters`, `#/destinations`, `#/schedules`, `#/backups`, `#/history`, `#/operations`, `#/protection`, `#/catalog`, `#/restore`, `#/approvals`, `#/keys`. Three of them carry an identity in the hash -- see *The restore route, and the point it names* and *The operation route, and the run it names*. |
+| `app.js` | the hash router and the frame. Eleven routes: `#/clusters`, `#/destinations`, `#/schedules`, `#/backups`, `#/history`, `#/operations`, `#/protection`, `#/catalog`, `#/restore`, `#/approvals`, `#/keys`. Three of them carry an identity in the hash -- see *The restore route, and the point it names* and *The operation route, and the run it names*. Ten are tabs: `#/operations` is one run's page and is reached from a run, and the tabs a session sees follow its capability flags (*Signed out, signed in, and the header*). |
 | `api.js` | the **only** module that issues a network request, in either mode. One `fetch`, on one line, and every identifier built by `path(...)`. |
 | `client.js` | **which API is in front of this page**, decided once at boot, and the one object every page reads through. See *Two modes, one page*. |
 | `contract.js` | the typed contract: JSDoc types and strict decoders for every DTO the page consumes, in both modes. A required field that is absent is a **contract failure the page renders**, never an empty cell. |
@@ -199,6 +199,7 @@ authorisation story is "the API server evaluated the viewer's RBAC".
 | `tests/d2.spec.js` | **destinations, topic discovery and operation readiness**: every state the product API can put in front of those three surfaces, and the five sentences this product refuses to render. |
 | `tests/d3.spec.js` | **the operation view, protection, the catalog, the keys view, the badge cases and the retention panel**: every state D3 declares, over the objects the D3 live runs recorded, and the five claims this product refuses to make. |
 | `tests/restore-catalog.spec.js` | **PLAT-15.2**: the catalog-point route, the offer rule and every refusal it makes, the catalog-window offer for a run the controller could not verify, the bound plan and its golden, the readiness request, the restore body, drafts per point, and the selector, catalog-table and schedule-detail links -- each with its negative control. |
+| `tests/console-ux.spec.js` | **the console UX batch** (the human-like pass's MCP-1...MCP-34): the signed-out state, the header, the error box, the one-step wizard and its address, the point tables, the parallel and progressive reads, the two new projections, the forms and empty states, the timestamp formatter, and the lint that keeps internal task ids out of shipped strings -- each row with the behaviour it replaced. |
 | `tests/legacy-point.spec.js` | **a `v0.1.5` point after the upgrade** (PoC P3, P5, P6): the evidence bucket a point with no destination starts in, the readiness sentence, the Restore fetch commands' bucket and the catalog sync-mode help -- each with its negative control. |
 | `tests/preview-server.js` | a development tool, never a test: serves this directory over the fixtures under `tests/fixtures/preview/`. See *Previewing with fixtures*. |
 
@@ -216,11 +217,13 @@ and **stack into cards below 768 px** (Clarity's `sm` width), each cell captione
 caption is copied from the header row into `data-label` by `app.js` when it
 adopts the parsed nodes, so the page modules stay pure functions from a JSON
 object to a string. Status badges carry their state in **words and colour**,
-never colour alone. The restore wizard opens with a **stepper** -- the six
-steps, which are done, which one you are on, which needs attention -- that
-summarises the same state the six sections render and gates nothing: the
-client-side checks are a convenience, and the controller and phase 0 are the
-gate. Every interactive element has a visible focus ring, and
+never colour alone. The restore wizard is **one step at a time** (Clarity's
+wizard): a **stepper** -- the six steps, which are done, which one is on
+screen, which needs attention, and whether readiness has been checked --
+above the step, and Back / Next below it. The stepper summarises the same
+state the six sections render and gates nothing: the client-side checks are
+a convenience, and the controller and phase 0 are the gate. See *One step at
+a time* below. Every interactive element has a visible focus ring, and
 `prefers-reduced-motion` switches off every transition and animation at once.
 `tests/design.spec.js` asserts each of those over the bytes of `style.css` and
 the page modules' own output.
@@ -255,6 +258,11 @@ element. `style.css`'s header lists the four places it deliberately differs
 from Clarity and why (no web font, a 16 px base, the focus ring's colour, and
 a theme that follows `prefers-color-scheme` because the page stores nothing).
 
+**A short chip never breaks mid-token** (MCP-6): a code chip or a label in a
+table cell wraps only at a space; `app.js` marks a chip holding a word longer
+than 24 characters (a digest, a uid, a key id) `long`, and only that one may
+break anywhere.
+
 **The datagrid.** A page declares a table a datagrid by passing `{id, label}`
 as `table()`'s fifth argument; the string gains one `div.datagrid` wrapper and
 nothing else. `app.js` enhances every parsed fragment before the page wires
@@ -270,7 +278,9 @@ the life of the loaded page -- a re-render keeps them, a reload starts clean,
 and nothing is written to browser storage. Declared: connections,
 destinations, schedules, a schedule's runs and earlier runs, backups, history,
 catalogs and their points, protection policies, trust keys, approvals, the
-Restores awaiting one, and the wizard's topic mapping; the wizard's topic
+Restores awaiting one, the wizard's topic mapping, its catalog offers and the
+two "what this namespace holds" inventories, and a schedule card's recovery
+points and manual runs (MCP-26); the wizard's topic
 subset is a list datagrid that hides, never drops, the boxes off its page.
 
 **Why pagination and not virtualisation or a framework.** Measured before
@@ -385,16 +395,84 @@ lands.
 ### How the choice is made
 
 At boot, `client.js` asks `GET /api/v1/session` **once**. An answer that decodes
-as a session document is console mode. Anything else -- the refusal a `kubectl
-proxy` path filter gives, a body that is not JSON, a decode that found a
-required field missing, or no answer within five seconds -- is legacy mode. The
-answer is recorded for the life of the loaded page and never asked again: a
-mode chosen per request is a page that can change APIs between a read and the
-write that follows it.
+as a session document is console mode. A `401` whose body is the product API's
+own problem document with code `unauthenticated` or `session_expired` is the
+shared console with **nobody signed in** (`SIGNED_OUT`, below) -- never legacy
+mode, which is what it used to be read as (MCP-1, MCP-4).
+
+**What a failed probe means depends on who served the page** (review L1). The
+console serves its own `runtime.js`, compiled into `logweir-api`
+(`crates/logweir-api/src/assets.rs` `CONSOLE_RUNTIME_JS`), which sets
+`window.LOGWEIR_CONSOLE`; the file under `ui/` -- what `kubectl proxy` and the
+chart's legacy UI serve -- sets nothing. On a page that carries the marker, any
+other probe outcome -- no answer within five seconds, a network failure, a 5xx
+or a 429, a body that does not decode -- is `UNAVAILABLE`: "Can't reach the
+Logweir service", the probe's own status and code, and Retry, with no tab, no
+page and no request sent. It is never legacy mode, which read `/apis/...`
+paths the console does not serve on every page. On a page without the marker,
+anything else -- the refusal a `kubectl proxy` path filter gives, a
+Kubernetes `401` whose `code` is a number, a body that is not JSON, a decode
+that found a required field missing, or no answer within five seconds -- is
+legacy mode, as before. The answer is recorded for the life of the loaded page
+and never asked again: a mode chosen per request is a page that can change APIs
+between a read and the write that follows it.
 
 That one probe is the only behavioural difference a legacy installation sees.
 It is answered by the proxy's own path filter, it is not retried, and the page
 renders before it returns.
+
+### Signed out, signed in, and the header
+
+**Signed out**, every route renders one page: "Sign in to Logweir" and a Sign
+in action, `/auth/login?next=/ui/#<the address asked for>` (the product API
+accepts `next` only as a path under `/ui/`), with no tabs and no namespace box
+(MCP-1). An expired session says so. Every client call is refused by name
+before the network, so nothing is read from the legacy `/apis/...` paths the
+console does not serve -- which is where the raw `404 {"type":...}` came from
+(MCP-4). The shell mounts no page before the probe has answered ("Connecting
+to Logweir...", bounded by the probe's five seconds); every page's first read
+waited for the probe anyway.
+
+**Signed in**, the header names the actor (the session's display claim, the
+subject one hover away), the product roles the binding table granted in the
+chosen namespace, and **Sign out**, which is `POST /api/v1/session/logout` with
+the session's `X-CSRF-Token` like every other write and then a reload (MCP-5).
+A localAdmin console names its one actor and has no Sign out. Legacy mode
+shows nothing there: its identity is the kubeconfig the tagline names.
+
+**The tabs follow the session** (MCP-33): a route is a tab when the session
+holds any of the capability flags it needs -- in the chosen namespace, or in
+any namespace for the cluster-scoped Keys -- so an operator no longer sees a
+Keys tab that answers 403. Legacy mode shows every tab. A hidden tab is a
+convenience: every route still refuses by name when an address reaches it.
+
+**An error box leads with words** (MCP-4): a headline for the status ("You do
+not have permission to do this", "Not found", "Your session has ended"), then
+the server's own message verbatim, then its status, code and request id; a
+product-API sign-in refusal carries Sign in. A problem document that reaches
+the legacy reader is read as one, and JSON that is neither a `Status` nor a
+problem is described, never printed.
+
+**Instants** are shown by one formatter (`render.js` `when`, MCP-7 and
+MCP-15): `2026-09-24 16:39:04 UTC`, whole seconds, never wrapped, in a `<time>`
+whose `datetime` and `title` carry the exact recorded value.
+
+**A local time stays local.** A schedule's next runs show the controller's
+`localTime` as the wall time it is -- `2026-10-25 02:30:00 +02:00` beside
+`2026-10-25 00:30:00 UTC` -- so the fall-back day's repeated 02:30 is two rows
+with one wall time and two offsets (`render.js` `whenLocal`; review M1). Only
+instants shown as UTC go through `when`, and both carry the exact recorded
+value in their title.
+
+**Migration (console-ux-1).** None for operators. Every route and deep link is
+unchanged; `step=` is a new, optional parameter of `#/restore`, and a link
+without it opens step 1. `#/operations` is no longer a tab and its address is
+unchanged. The product API gained two additive projections (`docs/api.md`:
+a schedule's `lastSlot` and `missedSlots`, and a list row's `exitCode` and
+`outcome`); the console and the API ship in one image, and a client written
+before them reads the same bodies. No asset was added or removed; the console
+serves `runtime.js` from the service instead of the file (review L1), and the
+legacy UI image serves the file unchanged. Rollback is the previous image.
 
 ### What does not change
 
@@ -444,9 +522,13 @@ the adapter records what it cannot supply on every object it projects, under
 | kind | absent in console mode |
 |---|---|
 | `KafkaCluster` | `status.conditions` (the reachability observation is projected; the condition list is not exposed); `spec.auth.secretRef.passwordKey` and `spec.auth.tlsCa` (connection contract v1's two references, which `ConnectionAuthView` does not carry) |
-| `BackupSchedule` | the per-manifest `status.retentionReport.skipped` entries (the API reports their **count**, which the retention panel prints with where the keys are, beside a line when the API cut a list at 100 entries); `status.lastSlot`, `status.missedSlots`, `status.pendingRun` and `status.history` (D1 W7: `ScheduleStatusView` carries `policy`, `nextRuns` and `activeRuns` and stops there) |
-| `Backup` | `status.manifestSha256`, `status.jobRef`, `status.selection` and `status.conditions` (D1 W7: the run's coverage label and its `TopicsResolved` condition); in a LIST, also `status.exitCode` and `status.evidence` -- the detail view reads both from the operation route and takes them off the list |
-| `Restore` | `status.integrity`, `status.jobRef`; in a LIST, also `status.outcome` and `status.evidence`. A DETAIL carries the operation route's `verificationScope` under `status.verificationScope`, which is what the History detail's scope sentence reads first |
+| `BackupSchedule` | the per-manifest `status.retentionReport.skipped` entries (the API reports their **count**, which the retention panel prints with where the keys are, beside a line when the API cut a list at 100 entries); `status.pendingRun` and `status.history`. `status.lastSlot` and `status.missedSlots` ARE projected since console-ux-1 (MCP-13), so an absent one means the controller has recorded nothing yet |
+| `Backup` | `status.manifestSha256`, `status.jobRef`, `status.selection` and `status.conditions` (D1 W7: the run's coverage label and its `TopicsResolved` condition); in a LIST, also `status.evidence` -- the detail view reads it from the operation route. A list row's `status.exitCode` comes from the summary's `exitCode` since console-ux-1 (MCP-17) |
+| `Restore` | `status.integrity`, `status.jobRef`; in a LIST, also `status.evidence`, and `status.outcome` when an older API omits the summary's `outcome` (MCP-17). A DETAIL carries the operation route's `verificationScope` under `status.verificationScope`, which is what the History detail's scope sentence reads first |
+
+A field that table names is dropped from an object's `__contract.absent` when
+the projection DID supply it, so a page says "not published" only where it was
+not.
 
 **A list row's verdict in console mode.** A list item carries the API's
 `OperationSummary` -- `verificationState` and `verifiedSuccess`, the latter
@@ -522,6 +604,41 @@ field for either, so a request that dropped them would create a connection that
 projects a different entry of the Secret, or that dials without the private CA
 the form named. The refusal is `NoConsoleRoute` and it says which field and what
 to do instead (create it with `kubectl`, or use the legacy direct mode).
+
+### One step at a time
+
+The six steps used to be one 22,686 px column (MCP-29). Every step is still
+rendered into the page -- so every input is read, drafted, validated and
+hashed exactly as before, whichever step is visible -- and every one but the
+step on screen is `hidden`. The stepper's buttons, Back and Next show a step;
+the address carries it as `step=1..6` beside the recovery point's identity
+(`#/restore?ns=&backup=&uid=&step=3`), written with `history.replaceState`, so
+a reload or a copied link opens the same step and nothing is read again. The
+route's lifecycle is told the new address in the same turn (`retarget`), which
+is what keeps its reads and the submit running; a route with no `step` opens
+the first. A refused submit shows the step its first field message is about.
+
+**Step 5 is `done` only when a readiness check for this plan is ready**
+(MCP-27). With no check it reads `unchecked` ("not checked yet") -- passable,
+because the check is advisory and the plan may be created with a warning --
+and a held check that refuses the plan reads `needs attention`, which is also
+when Create refuses. It used to read `done` as soon as the target's probe was
+reachable, beside "No readiness check has run for this plan".
+
+**Every row leads with its action** (MCP-25): the recovery-point selector and
+the catalog offers put "Restore this point" in the first column, the History
+table puts RESTORE beside the name, and a run's operation link sits under its
+name. The selector shows 20 matching points at a time with "Show more"; the
+inventory tables under it are paginated datagrids.
+
+**The reads are made together** (MCP-26): the approval policy and, on the
+selector, the connected archives' points are read beside the connections and
+Backups; the selector renders when the Backups are in and the catalog section
+fills in when its read answers; the point's destination, the destination list
+and a kept evidence choice are read together. A console list hands each page
+but the last to an `onPage` caller, and the Backups page renders its first 200
+rows while the rest are read -- the list it resolves with is still the whole
+namespace.
 
 ### The wizard machine is a test-time invariant
 
@@ -1935,7 +2052,9 @@ list.
 `#/operations?ns=&kind=&name=&uid=` is where one durable run lives. It is
 reached FROM a run -- a row in `#/backups` or `#/history`, or the outcome line
 one "Back up now" click produced -- and it has no list of its own, because a
-list of operations would be those two tables a second time.
+list of operations would be those two tables a second time. For the same
+reason it is not a tab (MCP-19): a visit that names no run says what the page
+is for and links to Backups and History.
 
 **The route carries the whole identity, and that is what makes it durable.** A
 refresh, a new tab and a link pasted into an incident channel all open the same
