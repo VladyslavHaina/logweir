@@ -318,7 +318,7 @@ pub struct RehearsalObjectives {
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RehearsalAuthorization {
-    /// The approval policy (PLAT-19.2). Absent means the legacy governed
+    /// The approval policy. Absent means the legacy governed
     /// policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_policy_ref: Option<LocalRef>,
@@ -467,7 +467,7 @@ pub struct RehearsalScheduleStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_restore_ref: Option<LocalRef>,
     /// A slot admitted in status whose `Restore` creation is not yet
-    /// confirmed — the reservation half of the PLAT-04.1 protocol.
+    /// confirmed — the reservation half of the slot-admission protocol.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_restore_ref: Option<LocalRef>,
     /// The last pass.

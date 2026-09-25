@@ -13,6 +13,10 @@
 //! ONE FILE IS OUT OF SCOPE, BY NAME: `crates/logweir-api/src/openapi.rs`. Its
 //! summaries are the published schema's developer documentation, which cites
 //! the task each route belongs to; no operator reads them at runtime.
+//!
+//! THE CRD DESCRIPTIONS ARE IN SCOPE (review L7): they are doc comments, but
+//! `kubectl explain` prints them, so the emitted CRDs are read as text below.
+//! Other doc comments, and the chart templates' YAML comments, are not.
 
 use std::path::{Path, PathBuf};
 
@@ -187,6 +191,61 @@ fn no_string_the_product_says_names_a_tracker_task() {
          instead (MCP round 2, R2-13):\n{}",
         found.join("\n")
     );
+}
+
+/// The task ids in a CRD's text, `file:line: text`, skipping YAML comments.
+fn crd_task_ids(rel: &str, text: &str) -> Vec<String> {
+    text.lines()
+        .enumerate()
+        .filter(|(_, line)| !line.trim_start().starts_with('#') && names_a_task(line))
+        .map(|(i, line)| {
+            format!(
+                "{rel}:{}: {}",
+                i + 1,
+                line.trim().chars().take(120).collect::<String>()
+            )
+        })
+        .collect()
+}
+
+/// THE CRD DESCRIPTIONS TOO (review L7). `kubectl explain` prints every field's
+/// description, and they are generated from the CRD types' doc comments -- the
+/// one place a doc comment IS a message a person reads. The emitted copies
+/// (`config/crd/`) and the chart's byte-identical copies are both read, so a
+/// description is caught wherever it is installed from.
+#[test]
+fn no_crd_description_names_a_tracker_task() {
+    let root = repo_root();
+    let mut found = Vec::new();
+    let mut read = 0usize;
+    for dir in ["config/crd", "charts/logweir/crds"] {
+        for entry in std::fs::read_dir(root.join(dir)).expect("a CRD directory reads") {
+            let path = entry.expect("an entry").path();
+            if path.extension().is_none_or(|e| e != "yaml") {
+                continue;
+            }
+            let rel = format!(
+                "{dir}/{}",
+                path.file_name().expect("a name").to_string_lossy()
+            );
+            let text = std::fs::read_to_string(&path).expect("a CRD reads");
+            if text.contains("kind: CustomResourceDefinition") {
+                read += 1;
+            }
+            found.extend(crd_task_ids(&rel, &text));
+        }
+    }
+    assert!(read >= 20, "only {read} CRDs were read");
+    assert!(
+        found.is_empty(),
+        "a CRD description names a tracker task; say what it means in the type's doc \
+         comment and run `just crds` (review L7):\n{}",
+        found.join("\n")
+    );
+    // NEGATIVE CONTROL: the shape the chart carried before this round is caught,
+    // and a YAML comment is not.
+    let planted = "# PLAT-02.1 is a comment\n  description: The approval policy (PLAT-19.2).\n";
+    assert_eq!(crd_task_ids("x.yaml", planted).len(), 1);
 }
 
 #[test]

@@ -871,7 +871,7 @@ pub struct BackupScheduleStatus {
     /// [`RetentionReport`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retention_report: Option<RetentionReport>,
-    /// What the PLAT-05.2 inventory last found: how much history this schedule
+    /// What the history inventory last found: how much history this schedule
     /// has, and how much of it is still owned by the schedule object (D1 §6).
     ///
     /// An ABSENT block means the inventory has never run, which is what makes

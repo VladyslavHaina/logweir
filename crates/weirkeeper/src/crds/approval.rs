@@ -257,7 +257,7 @@ pub struct ApprovalStatus {
     /// the one shape a reader would read as "this key is good until then".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approver_key_window: Option<ApproverKeyWindow>,
-    /// PLAT-19.2: the policy, mode and console-attested requester a v2
+    /// The policy, mode and console-attested requester a v2
     /// authorization was verified under — see [`AuthorizationProvenance`].
     /// Absent for a v1 approval document, and cleared by an explicit `null`
     /// on every refusal (`controllers::approval::CLEARABLE_STATUS_FIELDS`).

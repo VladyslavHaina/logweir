@@ -265,7 +265,7 @@ pub const KEYS_LIST_MAP: (&[&str], &[&str]) = (&["keys"], &["keyId"]);
 
 /// What a key is allowed to be used for.
 ///
-/// SEPARATED BECAUSE P17 REQUIRES IT FOR PLAT-19.2. One key that both signs
+/// SEPARATED BECAUSE P17 REQUIRES IT FOR GOVERNED APPROVAL. One key that both signs
 /// evidence and authorises restores is a key whose holder can approve their own
 /// work; the usage set is what makes "the runner's signing identity" and "an
 /// approver" different grants.

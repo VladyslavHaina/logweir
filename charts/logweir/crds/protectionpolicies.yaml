@@ -202,7 +202,7 @@ spec:
                     minimum: 300
                     type: integer
                   maxRehearsalAgeSeconds:
-                    description: How old the newest successful rehearsal may be (PLAT-14.3).
+                    description: How old the newest successful rehearsal may be.
                     format: int32
                     maximum: 31536000
                     minimum: 3600

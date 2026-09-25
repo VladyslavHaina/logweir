@@ -159,7 +159,7 @@ pub struct Objectives {
     /// Whether the catalog must say the point is still in storage.
     #[serde(default = "default_true")]
     pub require_catalog_availability: bool,
-    /// How old the newest successful rehearsal may be (PLAT-14.3).
+    /// How old the newest successful rehearsal may be.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 3600, max = 31536000))]
     pub max_rehearsal_age_seconds: Option<i32>,
