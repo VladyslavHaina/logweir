@@ -564,13 +564,23 @@ surviving. None is fixed yet except where a worker is named.
   **R3-1 is CLOSED-LIVE for its two moments:** at 390×844, the status is above the sticky bar after the click, and the verdict head lands above it. Between those moments the page jumps; that is **P16** (below).
 
   **Open:**
-  - O2, R2-10's class on the Catalog page: `render.js` `CATALOG_WINDOW_SENTENCE` and `catalog.js:543` print raw backticks. The fix is on `claude/poc-fixes-6`.
+  - O2, R2-10's class on the Catalog page: `render.js` `CATALOG_WINDOW_SENTENCE` and `catalog.js:543` printed raw backticks. **FIXED on `fdb48cd8`:** those two sentences and 16 more sites render real `<code>` elements, with a guard spec that no page prints a literal backtick. Live proof is owed by `claude/poc-upgrade-5`.
   - R3-4 and R3-5 (low). | PLAT-18.2 / PLAT-17.2 console |
 | POC-P16 | LOW, found by the PoC upgrade round 4 (2026-09-25; `claude/poc-upgrade-4.result.md` §6, `console/p15/rows-DISC_R3.json`).
   - **The defect:** at restore step 5 at 390 px, the first follow read of a running check (pending → running, about 2 s after the click) repaints the step, and the page scrolls to its top. The focused status is left at 943–998 px in an 844 px viewport until the verdict lands.
   - **Cause:** `restore-wizard.js` `followRestoreReadiness` `show` repaints on a non-terminal change with no scroll or focus keep. Reproduced in three runs.
   - **Impact:** a few seconds for a normal check, and up to the follow's length for a slow one. No verdict is misstated.
-  - **Fix:** on `claude/poc-fixes-6` (running), with a class sweep over every follower's non-terminal repaint. | PLAT-18.2 console |
+  - **FIXED (2026-09-25): `claude/poc-fixes-6` merged as `fdb48cd8`; full gate rc 0, UI 818/818.**
+    - **Cause:** `render.js` `replace()` empties and refills the view, and Chromium moves the page during the swap.
+    - **Fix:** a new `replaceInPlace()` keeps the scroll position and focus for same-view repaints only (the follows and the swept same-view paints). Plain `replace()` is unchanged, so routes, steps and namespace changes open at their top. The wizard's Next, Back and `step=` links bring the step heading to the top.
+    - **Class sweep:** the same fix removes page jumps on Test connection and Discover topics, and focus loss on Test access and the schedule form.
+  - **Review:** ACCEPT-WITH-FIXES.
+    - The HIGH regression: the first cut put the step heading at -1935 px on Next.
+    - The MEDIUM: a reader who scrolled was pulled back.
+    - The re-check measured in Chromium and gave ACCEPT: headings at 25 px, the reader left in place, P16 fixed, and routes opening at 0.
+  - **Mutants:** 27 reverted-fix mutants, all caught.
+
+  Live proof is owed by `claude/poc-upgrade-5`. | PLAT-18.2 console |
 | CATALOG-POINT-STATE-NOT-IN-CHECK-INPUTS | LOW, pre-existing (catalog-referent review). A restore check binds its `RecoveryCatalog` by UID, and the catalog's spec is immutable except `syncRequest`, but the chosen point's catalogued state is not among the check's recorded inputs, so a re-sync that changes that point (e.g. its trust or its receipt) does not mark the check stale. Bounded: the runner re-verifies the point's signed receipt and signer at restore time and refuses an untrusted point (exit 3 `PointUntrusted`). Open. | PLAT-08.2 / PLAT-15.2 (follow-up) |
 | TEST-APPROVAL-UNPINNED-TIMING | **FIXED (2026-09-24):** the bound now subtracts a same-moment `--version` start-up baseline (985 ms vs the command's 8.6 ms warm); a 0 s bound fails as a control. LOW, test only. `weirkeeper` `approval.rs::an_unpinned_approver…` failed at 15–55 s against its 15 s bound on a loaded host (four agents compiling; seen by the `claude/readiness-principal` worker); it passes on re-run and at base, and no product path changed. Fix: a bound that measures the controller's own work rather than wall time, or a documented larger budget. Open. | — |
 | RECEIPT-DUP-UPGRADE-WINDOW | An execution whose first run was made by a runner without the execution claim, re-created after the upgrade (the runner image is not frozen in the execution inputs), is claimed successfully by the new runner and the engine overwrites the old run's manifest. Mitigation: release notes, "let in-flight Backups finish before upgrading". Fix (follow-up): a pre-engine manifest-exists refusal, after the engine test doubles write the manifest. Open. | PLAT-06.1 / PLAT-20.2 |
