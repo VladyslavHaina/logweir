@@ -424,7 +424,18 @@ surviving. None is fixed yet except where a worker is named.
 | TRUSTPOLICY-DELETE-DROPS-REVOCATION | **CLOSED-LIVE (2026-09-25, PoC upgrade round 2 `claude/poc-upgrade-2`, helm rev 7 to the published `sha-b748fd5f`; report `claude/poc-upgrade-2.result.md`), minted key only: revocation reached the other policy within 2 s, the recording policy's delete was held, G9 refused the reason change; L9 not stageable on the single-namespace PoC without its own keys.** **FIXED (2026-09-24, HIGH): `claude/trust-revocation-durable` merged `da83834`.** A KeyCompromise record is installation-wide, reaches recorded verdicts in every namespace promptly (roster namespaces included), holds its policy from deletion until recorded elsewhere, and CEL rule G9 makes the reason permanent. Tier-A review REJECT (narrow), fix round, re-check RESOLVED. Live rows L9/L10 owed at the next PoC round. Observation from the PoC round (R2), to be assessed: deleting a TrustPolicy drops a compromise revocation it recorded while `TrustRoster/default` still lists the key, so the key's evidence may read trusted again under the legacy roster. Security-relevant; severity not yet decided. Open. | PLAT-19.1 / PLAT-08.x |
 | POC-DOC-D1-D11 | **CLOSED-LIVE for D1–D5 and D11 (2026-09-24, PoC upgrade round `claude/poc-upgrade-1`, helm rev 5 to the published `sha-02dc44b6`; report `claude/poc-upgrade-1.result.md`); D6–D10 need a rollback, uninstall or the R2 baseline and stand on round 1.** PoC round doc and profile defects, D1–D10 **fixed on main `7beb7c8`** (`claude/poc-install`):
 | POC-P11-P12 | **CLOSED-LIVE (2026-09-25, PoC upgrade round 2 `claude/poc-upgrade-2`, helm rev 7 to the published `sha-b748fd5f`; report `claude/poc-upgrade-2.result.md`): the three stuck pre-upgrade legacy points verified 3 s after the controller restart and one restored Valid 150/150 through the console; duplicate catalogs refused, takeover 28 s.** **FIXED (2026-09-24): `claude/poc-fixes-3` merged `56205b1`** (P12: bounded retries for transient read failures, throttled restart re-read, no windowless Valid; P11: `DuplicateCatalog`). Live re-proof owed at the next PoC round. Found by the PoC upgrade round (2026-09-24).
-| POC-P13-P14 | Found by the PoC upgrade round 2 (2026-09-25) on the README §10 re-run.
+| POC-P13-P14 | **CLOSED-LIVE (2026-09-25, PoC upgrade round 3 `claude/poc-upgrade-3`, helm rev 9 to the published `sha-a54fb823`; report `claude/poc-upgrade-3.result.md` §5).**
+  - **P13:** the topics were typed first, then a source (found by search) and a non-default destination were chosen. All were kept, and the POST carried them (202). An edit made while the panel was followed survived. The class is proven on the connection detail, the destination's Rotate access and the wizard's deferred paint.
+  - **P14:** proven on the schedule form and on the list panel (PANEL14, PANEL14B):
+    - a double click is one check;
+    - a retry inside the window replays the same Preflight;
+    - after expiry, one click gives a 200 replay naming `expired`, then a 202 under a new key that applies;
+    - Cancel then Check is a new check.
+  - **Residue:** Discover-topics-after-stale cannot be staged inside the 900 s shared-mode session. The offline rows in `ui/tests/check-intent.spec.js` cover it.
+
+  **FIXED:** `claude/poc-fixes-4` merged as `a54fb823`.
+
+  Found by the PoC upgrade round 2 (2026-09-25) on the README §10 re-run.
   - **P13:** the Schedules list's Backup readiness panel wipes typed topics when a discovery read repaints it, and the check is then refused 422.
   - **P14:** the schedule form's Check readiness replays an EXPIRED Preflight (content-derived Idempotency-Key), so no fresh verdict is possible for unchanged inputs.
   - **H5:** a plat15-2 harness guard already fails on main.
@@ -439,7 +450,15 @@ surviving. None is fixed yet except where a worker is named.
 | TRUST-LOOKUP-CLUSTER-LIST-PER-READ | LOW (poc-fixes-3). The trust lookup does one cluster-wide list per evidence re-read. Owed: a shared cache. Open. | PLAT-19.1 |
 | HARNESS-CSRF-TOKEN-RECORDED | Incident (2026-09-24, PoC upgrade round): one harness row printed a viewer's CSRF synchronizer token into a local artifact. It was redacted in place, and a guard now refuses harness rows that keep token values. No password, key or bearer token was exposed. Closed. | PLAT-20.1 |
 | CONSOLE-MCP-ROUND1 | **Functional half CLOSED-LIVE (2026-09-25, PoC upgrade round 2 `claude/poc-upgrade-2`, helm rev 7 to the published `sha-b748fd5f`; report `claude/poc-upgrade-2.result.md`); the human-like round 2 is the orchestrator's.** **FIXED (2026-09-24): `claude/console-ux-1` merged `ffe7772`,** all 34 findings; review REJECT (narrow), fix round accepted. Round 2 of the human-like pass owed on the next publication. The human-like console pass through the Playwright MCP (2026-09-24, on the PoC at `86a554e`; report `claude/mcp-ui-test.result.md`, 25 screenshots in `claude/artifacts/mcp-ui-test/shots/`) found 34 layout, flow and copy defects.
-| CONSOLE-MCP-ROUND2 | The human-like console pass, round 2 (2026-09-25, on the PoC at the published `sha-b748fd5f`; report `claude/mcp-ui-test-round2.result.md`, 20 screenshots in `claude/artifacts/mcp-ui-test/round2/shots/`).
+| CONSOLE-MCP-ROUND2 | **VERIFIED LIVE (2026-09-25, the orchestrator's MCP round 3 on the published `sha-a54fb823`, helm rev 9; report `claude/mcp-ui-test-round3.result.md`).**
+  - **Fixed:** all six medium rows (R2-3, R2-11, R2-12, R2-14, R2-14b, R2-16) and the low rows R2-1, R2-2, R2-4, R2-6, R2-8 and R2-13.
+  - **Mitigated:** R2-17, now with a scroll shadow; the action column is always visible.
+  - **Still open:** R2-10, carried to CONSOLE-MCP-ROUND3.
+  - **Not re-checked:** R2-5 and R2-15.
+
+  **FIXED:** `claude/poc-fixes-4` merged as `a54fb823`. The poc-upgrade-3 harness rows passed the same fixes in the browser (13 PASS, 5 NOT RUN).
+
+  The human-like console pass, round 2 (2026-09-25, on the PoC at the published `sha-b748fd5f`; report `claude/mcp-ui-test-round2.result.md`, 20 screenshots in `claude/artifacts/mcp-ui-test/round2/shots/`).
   - **Round 1 verified fixed:** the 5 HIGH findings and the rest of round 1's findings; the wizard is usable in 1.3 s (was 12.4 s).
   - **Open, medium (6):**
     - R2-3: the Clusters table overflows its card;
@@ -479,6 +498,34 @@ surviving. None is fixed yet except where a worker is named.
   - D10: uninstall "what remains".
 
   D11 (README §10 names) depends on P7. | PLAT-20.2 |
+| POC-P15 | LOW–MEDIUM, found by the PoC upgrade round 3 (2026-09-25; `claude/poc-upgrade-3.result.md` §6, `defects/P15-follow-budget.txt`).
+  - **The defect:** a readiness check that runs longer than the page's follow is left "The check has not finished … this page reads it again until then", and the page never reads it again.
+  - **Live instance:** on the Schedules list's Backup readiness panel, a renewed check took 64 s. The panel's follow is `READINESS_POLLS` 20 × 2 s = 40 s, so it read the check 20 times and stopped.
+  - **Class:** every console follow is shorter than a Preflight's own `timeoutSeconds` 120 (`DEFAULT_TIMEOUT_SECONDS`):
+    - Schedules: 40 s;
+    - Test connection: 30 s;
+    - Test access: 60 s;
+    - restore step 5: 90 s.
+  - **Recovery:** click again, which replays the finished check, or reload.
+
+  Fix on `claude/poc-fixes-5` (running): all four follows, plus a guard that ties every budget to the check's timeout. | PLAT-20.2 / PLAT-03.x / PLAT-10.x console |
+| HARNESS-CHECK-TABLE-READERS | **FIXED (2026-09-25, H7; `claude/poc-upgrade-3` `93140122`, merged as `4e58d330`).**
+  - **The defect:** R2-3 prints a check's fields in four cells, but every reader in `scripts/live/poc` took a row from innerText's tab-joined `id verdict gating code`. So every readiness row would have waited out its budget and failed: J2–J4, J6, README10 R8.3/R8.5, restore step 5 and P8.
+  - **Fix:** `checkRowsIn`/`settledRows` read cells and `data-field` spans, and settle on rows plus no "checking…".
+  - **Guard:** in `test_poc_harness.py`, with planted twins. Its negative control flags 8 lines of the `a54fb823` harness, and on the real `checkTable` the old readers find 0 rows.
+  - **Class:** the lab harnesses read the API's JSON, so nothing is owed there. | PLAT-20.2 harness |
+| CONSOLE-MCP-ROUND3 | The human-like console pass, round 3 (2026-09-25, by the orchestrator, on the PoC at the published `sha-a54fb823`, helm rev 9; report `claude/mcp-ui-test-round3.result.md`).
+  - **Evidence:** 17 screenshots in `claude/artifacts/mcp-ui-test/round3/shots/`. A secret scan of 41 artifacts found 0 values.
+  - **Verified:** round 2's fixes (see CONSOLE-MCP-ROUND2).
+  - **Open:**
+    - R2-10 (low): raw Markdown backticks in step-5 copy;
+    - R3-1 (low–medium): at 390 px, after Check readiness, focus lands on the status line behind the sticky Back/Next bar, so the result is hidden until the user scrolls;
+    - R3-2 (low): a viewer is offered Restore this point, and the route then refuses correctly;
+    - R3-3 (low): norole's header subline ("choose a namespace to see your role") contradicts the card;
+    - R3-4 (low): internal vocabulary in the applicability chip;
+    - R3-5 (low): cluster IDs wrap at 1024 px.
+
+  R2-10 and R3-1 to R3-3 are on `claude/poc-fixes-5` as a separate commit (running). R3-4 and R3-5 are open. | PLAT-18.2 / PLAT-17.2 console |
 | CATALOG-POINT-STATE-NOT-IN-CHECK-INPUTS | LOW, pre-existing (catalog-referent review). A restore check binds its `RecoveryCatalog` by UID, and the catalog's spec is immutable except `syncRequest`, but the chosen point's catalogued state is not among the check's recorded inputs, so a re-sync that changes that point (e.g. its trust or its receipt) does not mark the check stale. Bounded: the runner re-verifies the point's signed receipt and signer at restore time and refuses an untrusted point (exit 3 `PointUntrusted`). Open. | PLAT-08.2 / PLAT-15.2 (follow-up) |
 | TEST-APPROVAL-UNPINNED-TIMING | **FIXED (2026-09-24):** the bound now subtracts a same-moment `--version` start-up baseline (985 ms vs the command's 8.6 ms warm); a 0 s bound fails as a control. LOW, test only. `weirkeeper` `approval.rs::an_unpinned_approver…` failed at 15–55 s against its 15 s bound on a loaded host (four agents compiling; seen by the `claude/readiness-principal` worker); it passes on re-run and at base, and no product path changed. Fix: a bound that measures the controller's own work rather than wall time, or a documented larger budget. Open. | — |
 | RECEIPT-DUP-UPGRADE-WINDOW | An execution whose first run was made by a runner without the execution claim, re-created after the upgrade (the runner image is not frozen in the execution inputs), is claimed successfully by the new runner and the engine overwrites the old run's manifest. Mitigation: release notes, "let in-flight Backups finish before upgrading". Fix (follow-up): a pre-engine manifest-exists refusal, after the engine test doubles write the manifest. Open. | PLAT-06.1 / PLAT-20.2 |
@@ -4115,6 +4162,18 @@ entire roadmap complete after one release.
 - **Owed before Done:**
   - P13/P14, found on the README §10 re-run;
   - MCP round 2.
+
+**Live validation (2026-09-25, PoC upgrade round 3 `claude/poc-upgrade-3`, helm rev 7 → 8 → 9 to the published `sha-a54fb82385dc6740ecd0cee291ffb6d7de294e72`; report `claude/poc-upgrade-3.result.md`) — stays In progress.**
+- **Publication:** chart digest `sha256:5becb4b9…`, CI run 36129705142, every job success.
+- **Pre-upgrade KeyCompromise check:** empty.
+- **Upgrade in place,** by README *Upgrade to a newer publication* verbatim:
+  - the identity key, its private digest, the Secret uids and `logweir-signing-trust` were unchanged;
+  - a 5-minute schedule fired 13/13 slots across both controller swaps;
+  - **314 → 316 → 328 receipts, all VALID independently.**
+- **Rows:** 97 PASS, 1 FAIL (P15, a new row), 8 NOT RUN.
+- **Closed live:** P13/P14 (CLOSED-LIVE). README §10 was run in the console as a new user and is clean end to end; one stale sentence (D14) is fixed. J1–J7: 14/14.
+- **MCP round 3:** verified the round-2 fixes (CONSOLE-MCP-ROUND2).
+- **Owed before Done:** `docs/release-notes.md` still says the PoC reached "1,000+ points in one archive"; 258 were measured. `docs/release-handoff.md` still describes `306cebf`. The done-evidence clause needs both to be true; that fix is on `claude/release-docs-final` (running).
 
 **Release notes owed (collected 2026-09-23 for this task to publish).** Every merged change whose behaviour an operator must know about:
 1. **Retention — required action:** grant the retention delete credential `s3:GetObject` on `<bucket>/<prefix>/*` before upgrading. Without it the enforcer deletes nothing (`VersionProbeRefused`); a policy degraded for that reason re-probes 24 h after its last run, or resumes at once on a spec edit.
