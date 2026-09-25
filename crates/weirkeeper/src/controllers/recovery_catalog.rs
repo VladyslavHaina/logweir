@@ -1402,11 +1402,22 @@ impl Pass<'_> {
     /// `delete`) and age out with their sync Job's TTL; the elder catalog
     /// indexes the same archive.
     async fn publish_duplicate(&mut self, message: &str) -> Result<Outcome, ReconcileError> {
+        // `Synced` SAYS SO TOO. Carrying the last sync's condition would leave
+        // an upgraded duplicate reading `Synced=Unknown/SyncInProgress` — "a
+        // sync is running right now" — for a catalog that will never run one,
+        // or `True/Succeeded` beside a withdrawn view.
+        let synced = (
+            "False",
+            REASON_DUPLICATE_CATALOG.to_string(),
+            "a duplicate catalog runs no sync; the elder catalog over the same destination \
+             syncs it"
+                .to_string(),
+        );
         let mut status = json!({
             "observedGeneration": self.generation(),
             "conditions": self.conditions(
                 ("False", REASON_DUPLICATE_CATALOG, message),
-                self.published_synced(),
+                synced,
             ),
         });
         if self.has_pages() {
@@ -1426,7 +1437,7 @@ impl Pass<'_> {
             phase: CatalogPhase::Refused,
             ready: "False",
             ready_reason: REASON_DUPLICATE_CATALOG,
-            synced_reason: self.published_synced().1,
+            synced_reason: REASON_DUPLICATE_CATALOG.to_string(),
             pages: 0,
             entries: 0,
             truncated: false,

@@ -1494,6 +1494,12 @@ async fn an_existing_duplicate_withdraws_its_view_and_harvests_nothing() {
 
     assert_eq!(outcome.ready_reason, ctrl::REASON_DUPLICATE_CATALOG);
     let patch = f.patched_status();
+    let synced = condition(&patch, "Synced");
+    assert_eq!(
+        (synced["status"].clone(), synced["reason"].clone()),
+        (json!("False"), json!("DuplicateCatalog")),
+        "the last sync's `True/Succeeded` is not carried beside a withdrawn view: {patch}"
+    );
     for key in ["pages", "indexConfigMap", "truncated"] {
         assert!(
             patch.get(key).is_some_and(Value::is_null),

@@ -1414,7 +1414,8 @@ not two indexes: the one created first catalogs the destination, and every later
 one reports `Ready=False/DuplicateCatalog`, naming the catalog that holds the
 destination. "First" is `metadata.creationTimestamp`, then the name for a tie in
 the same second, so every reconcile of either object reaches the same answer. A
-duplicate resolves no destination and runs no sync Job, and it lists no view:
+duplicate resolves no destination and runs no sync Job (`Synced=False` with the
+same reason), and it lists no view:
 `status.pages`, `status.indexConfigMap` and `status.truncated` are withdrawn,
 because the API's point listing and a catalog-point restore read `status.pages`
 directly. Its page `ConfigMap`s age out with their sync Job's TTL. Use the
