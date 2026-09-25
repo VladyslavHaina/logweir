@@ -492,8 +492,13 @@ async fn the_console_serves_its_own_runtime_marker_and_the_file_carries_none() {
         Some("text/javascript; charset=utf-8")
     );
     let file = std::fs::read_to_string(support::repo_root().join("ui/runtime.js")).unwrap();
+    // Its comment may NAME the marker (to say it must never set it); no line
+    // of code may.
     assert!(
-        !file.contains("LOGWEIR_CONSOLE"),
+        !file
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .any(|line| line.contains("LOGWEIR_CONSOLE")),
         "the legacy file never claims to be the console"
     );
     assert!(text.is_ascii(), "every served script is plain ASCII");
