@@ -27,6 +27,7 @@ import {
   syncCatalog,
   writeState,
 } from "./plat18-2-ui-e2e.mjs";
+import { openDestinationCreate, wizardAt, wizardStep, wizardStepByKeyboard } from "./console-steps.mjs";
 
 const ONLY = (process.env.UI_E2E_ONLY || "").split(",").filter((s) => s.length > 0);
 const wants = (part) => ONLY.length === 0 || ONLY.indexOf(part) !== -1;
@@ -515,7 +516,9 @@ async function restoreJourney(browser, state, route) {
     const historyTrail = await tabTo(page, link, "Restore this point");
     await shot(page, "k2-01-history");
     await page.keyboard.press("Enter");
-    await waitFor(page, "#target-cluster", "the wizard bound to the point", 45000);
+    // ONE STEP AT A TIME (console-ux-1, MCP-29): the link opens step 1.
+    await waitFor(page, "#wizard-position", "the wizard bound to the point", 45000);
+    await wizardAt(page, 1, 45);
     await settled(page);
     await pause(800);
     const hash = await page.evaluate(() => window.location.hash);
@@ -523,13 +526,14 @@ async function restoreJourney(browser, state, route) {
       hash);
     const focusOnArrival = await activeId(page);
 
-    // 2. The stepper is a keyboard control: step 4's button moves focus to
-    // its section.
+    // 2. The stepper is a keyboard control: step 4's button SHOWS step 4
+    // (MCP-29) and moves focus to its section.
     const stepButton = ".stepper-link[data-target]";
     const steps = await page.evaluate((sel) =>
       Array.from(document.querySelectorAll(sel)).map((b) => b.getAttribute("data-target")), stepButton);
     await tabTo(page, stepButton + "[data-target=\"" + steps[3] + "\"]", "stepper step 4");
     await page.keyboard.press("Enter");
+    await wizardAt(page, 4);
     await pause(600);
     const afterStep = await activeId(page);
     check(afterStep === steps[3], "the stepper did not move focus to its section: " + afterStep);
@@ -588,7 +592,10 @@ async function restoreJourney(browser, state, route) {
       "after ticking it again focus left the box: " + JSON.stringify(afterTick));
     await shot(page, "k2-02-wizard-filled");
 
-    // 5. Create the Restore, by keyboard.
+    // 5. Create the Restore, by keyboard: it is step 6's, reached from step 4
+    // with Tab to Next and Enter, twice (scripts/console-steps.mjs).
+    const toCreate = await wizardStepByKeyboard(page, 6,
+      (selector, label) => tabTo(page, selector, label, 400));
     const restoresBefore = kubeJson(["-n", namespace, "get", "restores"]).items
       .map((r) => r.metadata.uid);
     await tabTo(page, "#create-restore", "Create the Restore", 400);
@@ -630,6 +637,7 @@ async function restoreJourney(browser, state, route) {
     record(name, {
       point: state.backup, pointUid: state.backupUid, backupVerdicts: verdict.seen,
       historyTabs: historyTrail.length, focusOnArrival: focusOnArrival, stepperFocus: afterStep,
+      stepsByKeyboard: toCreate.walked,
       targetPreselected: preselected === targetUid, movedOff: movedOff,
       targetKeys: targetKeys, focusAfterTarget: afterTarget, focusAfterToggle: result.focusAfterToggle,
       restore: restore.metadata.name, restoreUid: restore.metadata.uid, recognised: recognised,
@@ -660,6 +668,9 @@ async function focusProbes(browser, state, route) {
     // A. The wizard: one topic box toggled with Space re-renders everything.
     await open(page, route("restore?backup=" + encodeURIComponent(state.backup) + "&uid=" +
       encodeURIComponent(state.backupUid)));
+    // The topic boxes are step 4's (console-ux-1, MCP-29), reached with Next.
+    await wizardAt(page, 1, 45);
+    await wizardStep(page, 4);
     await waitFor(page, "#topic-0", "the wizard's first topic box");
     await tabTo(page, "#topic-0", "the first topic box", 400);
     await page.keyboard.press("Space");
@@ -729,6 +740,8 @@ function routesOf(state) {
     ["clusters", "clusters"],
     ["cluster-detail", "clusters?name=" + state.target],
     ["destinations", "destinations"],
+    // The create form sits behind "Create destination" (MCP-10): a visit of its own, opened.
+    ["destinations-create", "destinations"],
     ["destination-detail", "destinations?name=" + state.destination],
     ["schedules", "schedules"],
     ["schedule-detail", "schedules?name=" + encodeURIComponent(state.schedule || "")],
@@ -743,6 +756,12 @@ function routesOf(state) {
     ["catalog-detail", "catalog?name=" + encodeURIComponent(state.catalog || "")],
     ["restore-wizard", "restore?backup=" + encodeURIComponent(state.backup || "") + "&uid=" +
       encodeURIComponent(state.backupUid || "")],
+    // ONE STEP AT A TIME (console-ux-1, MCP-29): the wizard's other five steps are hidden on
+    // arrival, so each is its own visit -- by the deep link the page offers (`&step=N`), which
+    // the pass requires to open that step -- and the whole wizard is checked as it was.
+    ...[2, 3, 4, 5, 6].map((n) => ["restore-wizard-step-" + n, "restore?backup=" +
+      encodeURIComponent(state.backup || "") + "&uid=" + encodeURIComponent(state.backupUid || "") +
+      "&step=" + n]),
     ["approvals", "approvals"],
     ["approval-subject", "approvals?subject=" + encodeURIComponent(state.restore || "")],
     ["keys", "keys"],
@@ -875,6 +894,14 @@ async function routePass(browser, state, route) {
       const entry = { route: id, hash: hash, variant: variant.id };
       try {
         await open(page, route(hash));
+        // The wizard is required on the step its address names (step 1 when none).
+        const step = /[?&]step=([1-6])(?:&|$)/.exec(hash);
+        if (id.startsWith("restore-wizard")) {
+          await wizardAt(page, step === null ? 1 : Number(step[1]), 45);
+        }
+        if (id === "destinations-create") {
+          entry.opened = await openDestinationCreate(page);
+        }
         await pause(600);
         entry.screenshot = await shot(page, "route-" + id + "-" + variant.id);
         entry.checks = await ownChecks(page);
@@ -1126,6 +1153,9 @@ async function largePass(browser, state, route) {
       encodeURIComponent(state.backup) + "&uid=" + encodeURIComponent(state.backupUid);
     entry.wizardFirstPaintMs = await timeHash(page2, hash, () =>
       document.querySelectorAll(".topic-box").length >= 2000);
+    // The boxes are step 4's (console-ux-1, MCP-29): measured with that step on screen.
+    await wizardAt(page2, 1, 120);
+    entry.wizardSteps = await wizardStep(page2, 4);
     entry.wizardDom = await page2.evaluate(() => ({
       boxes: document.querySelectorAll(".topic-box").length,
       boxesVisible: Array.from(document.querySelectorAll(".topic-box"))
@@ -1218,6 +1248,10 @@ async function filterProbe(browser, state, route) {
     const wizardOf = (b) => route("restore?backup=" + encodeURIComponent(b.metadata ? b.metadata.name : b.name) +
       "&uid=" + encodeURIComponent(b.metadata ? b.metadata.uid : b.uid));
     await open(page, wizardOf({ name: state.backup, uid: state.backupUid }));
+    // The subset and its filter are step 4's (console-ux-1, MCP-29): reached with Next on each
+    // point the probe opens. A hash navigation opens a point's wizard on step 1.
+    await wizardAt(page, 1, 45);
+    await wizardStep(page, 4);
     await waitFor(page, "#subset-topics-filter", "the topic filter over 15 topics");
     await page.focus("#subset-topics-filter");
     await page.keyboard.type("stream-14");
@@ -1235,6 +1269,8 @@ async function filterProbe(browser, state, route) {
     await page.evaluate((h) => { window.location.hash = h; }, hashOf(wizardOf(other)));
     await page.waitForFunction((uid) => window.location.hash.indexOf(uid) !== -1 &&
       document.querySelectorAll(".topic-box").length > 0, other.metadata.uid, { timeout: 30000 });
+    await wizardAt(page, 1, 45);
+    await wizardStep(page, 4);
     await pause(600);
     const b = await page.evaluate(() => ({
       visible: Array.from(document.querySelectorAll(".topic-box")).filter((x) => x.offsetParent !== null).length,
@@ -1251,6 +1287,8 @@ async function filterProbe(browser, state, route) {
       hashOf(wizardOf({ name: state.backup, uid: state.backupUid })));
     await page.waitForFunction(() => document.getElementById("subset-topics-filter") !== null,
       null, { timeout: 30000 });
+    await wizardAt(page, 1, 45);
+    await wizardStep(page, 4);
     await pause(600);
     const back = await page.evaluate(() => ({
       value: document.getElementById("subset-topics-filter").value,

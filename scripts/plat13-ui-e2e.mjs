@@ -20,6 +20,7 @@
 
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
+import { wizardAt, wizardStep } from "./console-steps.mjs";
 
 const require = createRequire(import.meta.url);
 const { chromium } = require("playwright");
@@ -624,6 +625,11 @@ async function staleRestorePreparation(browser) {
         `&backup=${encodeURIComponent(fixtureA)}` +
         `&uid=${encodeURIComponent(createdIdentity(fixtureA).uid)}`,
     );
+    // ONE STEP AT A TIME (console-ux-1, MCP-29): step 1 on arrival; Create is step 6's,
+    // reached with Next (scripts/console-steps.mjs).
+    await page.waitForSelector("#wizard-position");
+    await wizardAt(page, 1, 60);
+    await wizardStep(page, 6);
     await page.waitForSelector("#create-restore");
     // THE NAVIGATION IS MADE TO HAPPEN DURING THE PREPARATION, not raced
     // against it (measured 2026-09-23). The submit no longer waits on the

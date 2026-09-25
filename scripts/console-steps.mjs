@@ -114,6 +114,30 @@ export async function wizardStepByKeyboard(page, n, tabTo) {
   return { walked: walked, trails: trails };
 }
 
+/** THE ONE TIMESTAMP FORMAT (MCP-7, MCP-15), written here independently of ui/render.js, so a
+ *  row that compares a page with it checks the page rather than the page's own formatter: an
+ *  RFC 3339 instant read as `YYYY-MM-DD HH:MM:SS UTC`, whole seconds, in UTC (a value already
+ *  in UTC digit for digit). The page puts the exact recorded value in the `<time>`'s `datetime`
+ *  and `title`; `timeInstants` reads those. Throws on a value that is not an instant. */
+export function humanUtc(value) {
+  const m = /^(\d{4}-\d{2}-\d{2})[Tt ](\d{2}:\d{2}:\d{2})(\.\d+)?([Zz]|[+-]\d{2}:\d{2})$/
+    .exec(String(value).trim());
+  if (m === null) {
+    throw new Error("not an RFC 3339 instant: " + JSON.stringify(value));
+  }
+  if (/^([Zz]|[+-]00:00)$/.test(m[4])) {
+    return m[1] + " " + m[2] + " UTC";
+  }
+  const iso = new Date(Date.parse(m[1] + "T" + m[2] + m[4])).toISOString();
+  return iso.slice(0, 10) + " " + iso.slice(11, 19) + " UTC";
+}
+
+/** The exact instants (`datetime`) of every `<time>` under `selector`, in document order. */
+export async function timeInstants(page, selector) {
+  return page.locator(selector).first().locator("time")
+    .evaluateAll((ts) => ts.map((t) => t.getAttribute("datetime")));
+}
+
 /** THE CREATE-DESTINATION FORM SITS BEHIND A "Create destination" DISCLOSURE (MCP-10), closed
  *  unless a draft, a refusal or a pending create is in flight. Opens it with a click on its
  *  summary, as a person does, and requires the form on screen after. Returns whether it had to

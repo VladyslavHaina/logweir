@@ -62,6 +62,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes, createHash } from "node:crypto";
 import { homedir } from "node:os";
+import { openDestinationCreate, wizardAt, wizardStep, wizardText } from "./console-steps.mjs";
 
 const require = createRequire(import.meta.url);
 const { chromium } = require("playwright");
@@ -679,7 +680,12 @@ async function main() {
       check(after[0].indexOf("catalog=" + CATALOG) !== -1 &&
         after[0].indexOf("uid=" + done.metadata.uid) !== -1, "the link names the point: " + after[0]);
       await page.click("#schedule-history a[data-restore-from=\"catalog\"]");
-      await waitForSelector(page, "#catalog-topics", "the wizard on the catalog point");
+      // ONE STEP AT A TIME (console-ux-1, MCP-29): step 1 on arrival; the catalog point it
+      // is bound to is step 2's panel, reached with Next (scripts/console-steps.mjs).
+      await waitForSelector(page, "#wizard-position", "the wizard on the catalog point");
+      await wizardAt(page, 1, 60);
+      await wizardStep(page, 2);
+      await waitForSelector(page, "#catalog-topics", "the catalog point's step");
       await shot(page, "02c-wizard-from-catalog-window");
       const offered = await text(page);
       check(offered.indexOf("whose own verdict is absent or notattempted") !== -1,
@@ -731,17 +737,22 @@ async function main() {
           verified.status.phase + ", verdict " + vVerdict + ")",
       });
     } else {
-      const wizardAt = base + "#/restore?ns=" + encodeURIComponent(SRC) + "&backup=" +
+      const wizardRoute = base + "#/restore?ns=" + encodeURIComponent(SRC) + "&backup=" +
         encodeURIComponent(verifiedName) + "&uid=" + encodeURIComponent(verified.metadata.uid);
-      await openRoute(page, wizardAt, "#point-in-time", "the wizard on the verified Backup");
+      // Walked 1 -> 3 (the default point in time) -> 4 (prefix) -> 5 (readiness) -> 3.
+      await openRoute(page, wizardRoute, "#wizard-position", "the wizard on the verified Backup");
+      await wizardAt(page, 1, 60);
+      await wizardStep(page, 3);
       const expected = new Date(vWindow.toMs - 1).toISOString();
       const shown = await page.$eval("#point-in-time", (n) => n.value);
       check(Date.parse(shown) === vWindow.toMs - 1,
         "the default point in time is windowCovered.toMs - 1 ms: " + shown + " vs " + expected);
       check(Date.parse(shown) !== vWindow.toMs, "never the exclusive end");
+      await wizardStep(page, 4);
       await page.fill("#topic-prefix", "p152-" + suffix + "-v-");
       await page.dispatchEvent("#topic-prefix", "change");
       await pause(800);
+      await wizardStep(page, 5);
       await page.click("#restore-readiness-start");
       const vPf = await waitFor("the verified-Backup Preflight", 60, 1000, () => {
         const items = kubeJson(["-n", SRC, "get", "preflights"]).items;
@@ -759,6 +770,7 @@ async function main() {
         "the runner accepts the wizard's default point in time: " + JSON.stringify(vCoverage));
       await shot(page, "02d-verified-backup-default-pit");
       // CONTROL: the exclusive end itself is refused on the field.
+      await wizardStep(page, 3);
       await page.fill("#point-in-time", new Date(vWindow.toMs).toISOString());
       await page.dispatchEvent("#point-in-time", "change");
       await waitForSelector(page, "#point-in-time-complaint", "the exclusive-end refusal");
@@ -781,7 +793,9 @@ async function main() {
       drBefore.sourceConnections === 0, "the disaster namespace must hold no Backup, schedule " +
       "or source connection: " + JSON.stringify(drBefore));
     await openRoute(page, base + "#/destinations?ns=" + encodeURIComponent(DR),
-      "#destination-form", "the destinations page");
+      "#destination-create-disclosure", "the destinations page");
+    // The form sits behind "Create destination" since console-ux-1 (MCP-10): opened by a click.
+    await openDestinationCreate(page);
     await page.fill("#destination-name", DESTINATION);
     await page.fill("#destination-bucket", BUCKET);
     await page.fill("#destination-prefix", ARCHIVE_PREFIX);
@@ -813,7 +827,9 @@ async function main() {
     await openRoute(page, base + "#/catalog?ns=" + encodeURIComponent(DR),
       "form[data-connect-archive]", "the catalog page");
     await page.fill("#catalog-name", CATALOG);
-    await page.fill("#catalog-destination", DESTINATION);
+    // A PICK-LIST OF THE NAMESPACE'S SAVED DESTINATIONS since console-ux-1 (MCP-23), not a
+    // text box: the option is the destination's name, and it must be offered.
+    await page.selectOption("#catalog-destination", DESTINATION);
     await page.selectOption("#catalog-mode", "full");
     await shot(page, "03b-connect-form");
     await page.click("form[data-connect-archive] button[type=submit]");
@@ -858,9 +874,14 @@ async function main() {
       "#step-catalog-points", "the selector's catalog section");
     await shot(page, "04a-selector-connected-archives");
     await page.click("#step-catalog-points a[href*=\"point=" + point.pointId + "\"]");
-    await waitForSelector(page, "#catalog-topics", "the wizard on the catalog point");
+    // Walked 1 -> 2 (the catalog's topics) -> 4 (subset, prefix) -> 3 (point in time) -> 6.
+    await waitForSelector(page, "#wizard-position", "the wizard on the catalog point");
+    await wizardAt(page, 1, 60);
+    await wizardStep(page, 2);
+    await waitForSelector(page, "#catalog-topics", "the catalog point's step");
     await page.fill("#catalog-topics", SOURCE_TOPIC);
     await page.dispatchEvent("#catalog-topics", "change");
+    await wizardStep(page, 4);
     await waitForSelector(page, ".topic-box[data-topic=\"" + SOURCE_TOPIC + "\"]",
       "the named topic in the subset");
     await page.fill("#topic-prefix", RESTORE_PREFIX);
@@ -882,6 +903,7 @@ async function main() {
       "the default point in time is coveredTo - 1 ms (" + lastAccepted + ")");
     // CONTROL: the exclusive end itself is refused on the field, and nothing
     // about the plan moves until it is corrected.
+    await wizardStep(page, 3);
     await page.fill("#point-in-time", new Date(Date.parse(point.coveredTo)).toISOString());
     await page.dispatchEvent("#point-in-time", "change");
     await waitForSelector(page, "#point-in-time-complaint", "the exclusive-end refusal");
@@ -893,12 +915,14 @@ async function main() {
     check(await page.$eval("#plan-bytes", (n) => n.textContent) === planBytes,
       "restoring the default restores the same plan bytes");
     artifact("dr/plan-on-screen.yaml", planBytes);
+    await wizardStep(page, 6);
     await shot(page, "04b-wizard-bound-plan");
     record("4. the wizard builds a plan bound to the catalog point, with no Backup object", {
       planSha256: "sha256:" + sha256(planBytes), prefix: RESTORE_PREFIX,
     });
 
     // ==== journey 5: the normal readiness path ===============================
+    await wizardStep(page, 5);
     await page.click("#restore-readiness-start");
     const pfName = await waitFor("the readiness Preflight", 60, 1000, () => {
       const items = kubeJson(["-n", DR, "get", "preflights"]).items;
@@ -967,12 +991,14 @@ async function main() {
     // admits since DRAFT-PREFLIGHT-NEVER-READY -- and one click must send exactly
     // one Restore (journey 6 below). No fresh load, no unchecked submit.
     const checkedHash = await page.$eval("#plan-hash-value", (n) => n.textContent);
+    // The gate is read off the DOM (the button and the two refusals are on steps 5 and 6,
+    // hidden from each other since console-ux-1); what the page SAYS is every step's text,
+    // walked once the gate has settled -- the page showed all six steps at once before.
     const gateOf = () => page.evaluate(() => {
       const b = document.querySelector("#create-restore");
       const text = (sel) => ((document.querySelector(sel) || {}).innerText || "");
       return { disabled: b === null ? null : b.disabled === true,
-        blocked: text("#readiness-blocked"), staleBanner: text("#readiness-stale"),
-        said: document.body.innerText.slice(0, 20000) };
+        blocked: text("#readiness-blocked"), staleBanner: text("#readiness-stale") };
     });
     let gate = await gateOf();
     // The page re-reads the started check every 2 s until it is terminal; give
@@ -981,6 +1007,7 @@ async function main() {
       await pause(1000);
       gate = await gateOf();
     }
+    gate.said = await wizardText(page);
     artifact("dr/gate-after-check.txt", gate.said);
     check(gate.disabled === false && gate.blocked === "",
       "after a fresh readiness check on an unchanged catalog point Create is still refused " +
@@ -1016,11 +1043,13 @@ async function main() {
     const postsBeforeGate = requests.filter((r) => r.method === "POST" &&
       r.url.indexOf("/restores") !== -1).length;
     const moved = new Date(Date.parse(lastAccepted) - 1).toISOString();
+    await wizardStep(page, 3);
     await page.fill("#point-in-time", moved);
     await page.dispatchEvent("#point-in-time", "change");
     await pause(800);
     const movedHash = await page.$eval("#plan-hash-value", (n) => n.textContent);
     const movedGate = await gateOf();
+    await wizardStep(page, 6);
     await shot(page, "05b-changed-point-refused");
     check(movedHash !== checkedHash, "moving the point in time did not move the plan hash");
     check(movedGate.disabled === true && movedGate.staleBanner !== "",
@@ -1035,6 +1064,7 @@ async function main() {
       "disabled with the out-of-date banner and nothing is sent", {
       checkedHash: checkedHash, movedHash: movedHash, pointInTime: moved,
       blocked: movedGate.blocked, staleBanner: movedGate.staleBanner });
+    await wizardStep(page, 3);
     await page.fill("#point-in-time", lastAccepted);
     await page.dispatchEvent("#point-in-time", "change");
     await pause(800);
@@ -1053,6 +1083,7 @@ async function main() {
     // unchanged, or nothing is sent.
     const postsBeforeSubmit = requests.filter((r) => r.method === "POST" &&
       r.url.indexOf("/restores") !== -1).length;
+    await wizardStep(page, 6);
     await page.click("#create-restore");
     await waitFor("the approvals page", 60, 1000, async () =>
       (await page.url()).indexOf("#/approvals") !== -1 ? true : null);
