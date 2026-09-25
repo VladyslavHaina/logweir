@@ -915,6 +915,7 @@ async function main() {
     // which is a WARNING and not a refusal (D2 section 6.6 is about a verdict
     // that has stopped applying, not about the absence of one).
     await openOldPoint();
+    await wizardAt(page, 4);
     await page.uncheck(".topic-box[data-topic=\"shipments\"]");
     await waitForText(page, OLD_PREFIX + "payments", "the mapping before the submit");
     // The mapped rows are read on step 4, where they are on screen; Create on step 6.

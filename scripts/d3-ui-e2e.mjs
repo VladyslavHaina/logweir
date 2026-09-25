@@ -969,7 +969,9 @@ async function main() {
 
     // (a) ONE REFUSAL, RENDERED VERBATIM. A name the API refuses.
     await page.fill("#catalog-name", "Not A DNS Name");
-    await page.fill("#catalog-destination", "primary");
+    // A PICK-LIST OF THE NAMESPACE'S SAVED DESTINATIONS since console-ux-1 (MCP-23), not a text
+    // box: `primary` (made at setup) is chosen by its name, and must be offered.
+    await page.selectOption("#catalog-destination", "primary");
     await page.selectOption("#catalog-mode", "full");
     await page.click("form[data-connect-archive] button[type=submit]");
     await pause(2500);
@@ -1005,7 +1007,7 @@ async function main() {
     // (b) THE HAPPY PATH.
     const catalogName = "d3ui-catalog-" + suffix;
     await page.fill("#catalog-name", catalogName);
-    await page.fill("#catalog-destination", "primary");
+    await page.selectOption("#catalog-destination", "primary");
     await page.selectOption("#catalog-mode", "full");
     await page.click("form[data-connect-archive] button[type=submit]");
     await waitForText(catalogName, "the created catalog");

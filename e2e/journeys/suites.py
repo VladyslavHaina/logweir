@@ -204,7 +204,7 @@ SUITES: dict[str, Suite] = {s.id: s for s in [
         lambda c: [f"lw-plat20-p1213-{c.stamp}"], timeout=900,
         accept_rcs=frozenset({0, 1}),
         why_rcs="plat12-13 records a journey only after every check in it held and stops at the first "
-                "journey that throws (record() at scripts/plat12-13-ui-e2e.mjs:104), so rows recorded before a later "
+                "journey that throws (record() at scripts/plat12-13-ui-e2e.mjs:106), so rows recorded before a later "
                 "journey's failure are fully asserted; exit 1 is accepted only with a result "
                 "document that records its namespace cleanup, and the failure is kept as a note"),
     Suite(
@@ -214,7 +214,7 @@ SUITES: dict[str, Suite] = {s.id: s for s in [
         lambda c: [f"lw-plat20-p112-{c.stamp}"], timeout=900,
         accept_rcs=frozenset({0, 1}),
         why_rcs="plat11-2 records a journey only after every check in it held and stops at the first "
-                "journey that throws (record() at scripts/plat11-2-ui-e2e.mjs:150), so rows recorded before a later "
+                "journey that throws (record() at scripts/plat11-2-ui-e2e.mjs:151), so rows recorded before a later "
                 "journey's failure are fully asserted; exit 1 is accepted only with a result "
                 "document that records its namespace cleanup, and the failure is kept as a note"),
     Suite(
@@ -224,7 +224,7 @@ SUITES: dict[str, Suite] = {s.id: s for s in [
         lambda c: [f"lw-plat20-p10-{c.stamp}"], timeout=900,
         accept_rcs=frozenset({0, 3}),
         why_rcs="plat10 exits 3 exactly when a row is recorded in `blocked[]` "
-                "(scripts/plat10-ui-e2e.mjs:2396-2400); those rows are adapted as BLOCKED, which "
+                "(scripts/plat10-ui-e2e.mjs:2546-2550); those rows are adapted as BLOCKED, which "
                 "never passes, and only the lab-refresh-8 journey names them"),
     Suite(
         # THE ONE SUITE THAT CHANGES THE SHARED RELEASE, under the cluster lock:
@@ -262,21 +262,21 @@ NAT, CON = "e2e/journeys/native.py", "e2e/journeys/console.mjs"
 
 P10_RESTORE_ROWS = (
     R("plat10", "PLAT-10.2 each real point carries its own Restore, from the controller's own window",
-      (RESOURCE, EVIDENCE), f"{U10}:1472"),
+      (RESOURCE, EVIDENCE), f"{U10}:1536"),
     R("plat10", "PLAT-10.2 navigation to an older real backup opens the wizard bound to it, not the newest",
-      (RESOURCE,), f"{U10}:1538"),
+      (RESOURCE,), f"{U10}:1606"),
     R("plat10", "DONE EVIDENCE create -> backup -> schedule detail -> restore: an approved Restore "
       "Succeeded and restored exactly the source's records",
-      (RESOURCE,), f"{U10}:1967"),
+      (RESOURCE,), f"{U10}:2105"),
 )
 
 JOURNEYS: tuple[Journey, ...] = (
     Journey(
         "registration-and-discovery", "a connection and a destination are registered and a discovery "
         "completes against the real broker", ("journey: registration and discovery",),
-        (R("console", "console-registers-a-connection-the-controller-reaches", (RESOURCE,), f"{CON}:216"),
-         R("console", "console-registers-a-destination-the-controller-validates", (RESOURCE,), f"{CON}:243"),
-         R("console", "console-discovery-completes-and-lists-the-run-topic", (RESOURCE, ARCHIVE), f"{CON}:285"),
+        (R("console", "console-registers-a-connection-the-controller-reaches", (RESOURCE,), f"{CON}:217"),
+         R("console", "console-registers-a-destination-the-controller-validates", (RESOURCE,), f"{CON}:245"),
+         R("console", "console-discovery-completes-and-lists-the-run-topic", (RESOURCE, ARCHIVE), f"{CON}:287"),
          R("d1", "L-09-1", (RESOURCE,), f"{D1}:1279"),
          R("d2", "S1", (RESOURCE, EVIDENCE, ARCHIVE), f"{D2}:1827",
            "two destinations: each run's manifest lands in its own bucket and not the other")),
@@ -295,9 +295,9 @@ JOURNEYS: tuple[Journey, ...] = (
         (R("plat06", "case-c", (RESOURCE, EVIDENCE), f"{P06}:908",
            "reservation seen and cleared, one Backup per slot, trigger schedule, receipt verified"),
          R("plat10", "PLAT-10.1 selected-topic creation through the guided form, and the first-run redirect",
-           (RESOURCE,), f"{U10}:1009"),
+           (RESOURCE,), f"{U10}:1093"),
          R("plat10", "PLAT-10.2 verified runs: the lab controller's catalog says Available/Verified and the "
-           "detail renders exactly that", (ARCHIVE, EVIDENCE, RESOURCE), f"{U10}:1396")),
+           "detail renders exactly that", (ARCHIVE, EVIDENCE, RESOURCE), f"{U10}:1479")),
         data=True),
     Journey(
         "scram-rotation", "a rotated SCRAM credential needs no edit, and the old value is refused",
@@ -324,7 +324,7 @@ JOURNEYS: tuple[Journey, ...] = (
         ("two approvals",),
         (R("plat19-2", "governed in the SHARED console: alice asks with a ticket, is refused approving her own "
            "request, bob approves from his own browser, and the controller admits only on both signatures",
-           (RESOURCE,), f"{U192}:1152",
+           (RESOURCE,), f"{U192}:1183",
            "confirmation alone GovernedApprovalRequired with no Job; alice's own countersignature 403 and no "
            "Approval; bob's recorded 201 with two signatures; Verified=True Governed provenance; the Job carries "
            "--policy-snapshot and --confirmation-key"),),
@@ -347,25 +347,25 @@ JOURNEYS: tuple[Journey, ...] = (
     Journey(
         "stale-namespace-request", "a slow answer for namespace A never renders over B, a form left in A "
         "writes nothing, and a submit after the switch lands in B only", ("stale namespace request",),
-        (R("console", "console-slow-a-response-never-renders-over-b", (RESOURCE, TEXT), f"{CON}:340"),
-         R("console", "console-left-form-in-a-writes-nothing", (RESOURCE,), f"{CON}:382"),
-         R("console", "console-submit-after-switch-lands-in-b-only", (RESOURCE,), f"{CON}:388"))),
+        (R("console", "console-slow-a-response-never-renders-over-b", (RESOURCE, TEXT), f"{CON}:342"),
+         R("console", "console-left-form-in-a-writes-nothing", (RESOURCE,), f"{CON}:384"),
+         R("console", "console-submit-after-switch-lands-in-b-only", (RESOURCE,), f"{CON}:390"))),
     Journey(
         "duplicate-submit", "a double click, a lost response, a resubmitted restore, a duplicate create "
         "and a replayed API create each leave exactly one durable object", ("duplicate submit",),
-        (R("plat12-13", "double click creates exactly one object", (RESOURCE,), f"{U1213}:448"),
-         R("plat12-13", "lost response, retried, resolves to the same object", (RESOURCE,), f"{U1213}:502"),
+        (R("plat12-13", "double click creates exactly one object", (RESOURCE,), f"{U1213}:454"),
+         R("plat12-13", "lost response, retried, resolves to the same object", (RESOURCE,), f"{U1213}:512"),
          R("plat12-13", "restore submission routes to Awaiting approval, and a resubmission creates nothing",
-           (RESOURCE,), f"{U1213}:631"),
+           (RESOURCE,), f"{U1213}:643"),
          R("plat06", "case-g", (RESOURCE, EVIDENCE), f"{P06}:1274"),
          R("native", "api-restore-replay-is-one-object", (RESOURCE,), f"{NAT}:391"))),
     Journey(
         "old-point-selection", "an older point chosen in the console and through the API is the point the "
         "durable Restore names, and the point that is restored", ("old-point selection",),
         (R("plat12-13", "an older point stays selected when a newer Backup completes mid-wizard",
-           (TEXT,), f"{U1213}:1027"),
+           (TEXT,), f"{U1213}:1078"),
          R("plat11-2", "the wizard submits, and the created Restore is the preview byte for byte",
-           (RESOURCE,), f"{U112}:989"),
+           (RESOURCE,), f"{U112}:1036"),
          R("native", "restore-cr-carries-the-selected-older-point", (RESOURCE,), f"{NAT}:401"),
          R("native", "older-point-restore-restores-exactly-its-records", (ARCHIVE, RESOURCE), f"{NAT}:459")),
         data=True),

@@ -1725,6 +1725,8 @@ async function aTargetRecreatedMidWizardIsRefused(browser, base) {
     await wizardStep(page, 6);
     await page.click("#create-restore");
     await page.waitForSelector("#target-cluster-error, .mutation-failed", { timeout: 20000 });
+    // A REFUSED SUBMIT SHOWS THE STEP ITS FIELD MESSAGE IS ABOUT (MCP-29): the target's.
+    await wizardAt(page, 4);
     await pause(800);
     check(posts.length === postsBefore,
       "A RESTORE MUST NOT BE WRITTEN INTO A CONNECTION NOBODY CHOSE: " + posts.join(", "));

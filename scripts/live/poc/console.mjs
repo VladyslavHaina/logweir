@@ -188,8 +188,8 @@ export async function restoreFromBackup(page, ns, backup, uid, opts, log) {
   const say = (m) => log && log(m);
   await openWizard(page, `#/restore?ns=${encodeURIComponent(ns)}&backup=${encodeURIComponent(backup)}&uid=${encodeURIComponent(uid)}`);
   if (o.legacy) {
-    await page.fill('input[name="endpoint"]', o.legacy.endpoint);
-    await page.fill('input[name="region"]', o.legacy.region);
+    await page.fill("#store-endpoint", o.legacy.endpoint);
+    await page.fill("#store-region", o.legacy.region);
     await page.check('input[name="pathStyle"]');
     if (o.legacy.allowHttp) await page.check('input[name="allowHttp"]');
     if (o.legacy.evidenceBucket) await page.fill('input[name="evidenceBucket"]', o.legacy.evidenceBucket);

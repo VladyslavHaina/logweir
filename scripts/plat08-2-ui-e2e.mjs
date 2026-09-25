@@ -592,6 +592,7 @@ async function main() {
   /** Fills the destination form; the credential, when given, goes only into
    *  the write-only inputs and nowhere else. */
   async function fillDestination(d) {
+    await openDestinationCreate(page);
     await page.fill("#destination-name", d.name);
     await page.fill("#destination-bucket", d.bucket);
     await page.fill("#destination-prefix", d.prefix);
@@ -625,6 +626,8 @@ async function main() {
 
   async function submitDestinationForm(name, expectPost) {
     const before = postsTo("/destinations").length;
+    // A refused submit keeps the form open (its draft is in flight); required again here.
+    await openDestinationCreate(page);
     await page.click("#destination-form button[type=submit]");
     if (!expectPost) {
       await pause(1500);

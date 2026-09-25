@@ -379,8 +379,8 @@ try {
     // are shown. Walked 1 -> 4 with Next.
     const legacyFill = async (evidenceBucket, prefix) => {
       await wizardStep(page, 1);
-      await page.fill('input[name="endpoint"]', "http://logweir-minio.logweir-system.svc:9000");
-      await page.fill('input[name="region"]', "us-east-1");
+      await page.fill("#store-endpoint", "http://logweir-minio.logweir-system.svc:9000");
+      await page.fill("#store-region", "us-east-1");
       await page.check('input[name="pathStyle"]');
       await page.check('input[name="allowHttp"]');
       if (evidenceBucket) { await page.fill('input[name="evidenceBucket"]', evidenceBucket); await page.locator('input[name="evidenceBucket"]').blur(); }
@@ -459,7 +459,7 @@ try {
     // The archive Secret is step 1's; the verdict it makes stale is read where the wizard shows
     // it, steps 5 and 6 (walked with Next), as the whole page carried both before.
     await wizardStep(page, 1);
-    const secretField = page.locator('input[name="archiveSecret"]');
+    const secretField = page.locator("#archive-secret");
     const orig = await secretField.inputValue();
     await secretField.fill("logweir-s3-other"); await secretField.blur();
     await page.waitForTimeout(2000);
@@ -489,6 +489,7 @@ try {
       const r2 = await readiness("L2");
       const nr = r2.rows.filter((r) => r.gating === "blocking" && r.verdict !== "ready" && r.id !== "approval.state");
       row("L2 re-checked with the Backup's own Secret: ready again", nr.length === 0 && !r2.createDisabled, { notReady: nr, preflight: r2.pf && r2.pf.metadata.name });
+      await wizardStep(page, 6);
       await page.click("#create-restore");
       await page.waitForURL(/#\/(operations|approvals|history)/, { timeout: 60000 });
       const rname = decodeURIComponent((page.url().match(/[?&](?:name|subject)=([^&]+)/) || [])[1] || "");
@@ -523,6 +524,7 @@ try {
       er.gating === "advisory" && er.state === "unknown" && er.code === "EvidenceReadNotConfigured" && /s3:\/\/logweir-evidence/.test(er.message || "") && /LOGWEIR_ARCHIVE_URL/.test(er.message || "") && !/kafka-backups\/logweir/.test(er.message || "") && !r3.createDisabled,
       { row: { gating: er.gating, state: er.state, code: er.code, message: er.message }, createDisabled: r3.createDisabled, preflight: r3.pf && r3.pf.metadata.name });
     if (GROUPS.includes("LEGACY-L3CREATE")) {
+      await wizardStep(page, 6);
       await page.click("#create-restore");
       await page.waitForURL(/#\/(operations|approvals|history)/, { timeout: 60000 });
       const rname = decodeURIComponent((page.url().match(/[?&](?:name|subject)=([^&]+)/) || [])[1] || "");
