@@ -8410,33 +8410,51 @@ async fn the_shipped_reconcile_states_the_handle_location_it_read() {
     );
 }
 
-/// **L3.** The unread-scorecard verdict is written for an inline-archive run
-/// read through the global handle, and for NO other source: a
-/// destination-backed run whose own `ControllerIdentity` read fails keeps the
-/// recorded behaviour of `rehearsal_schedule::UNRECORDED_VERDICT_GRACE_SECONDS`
-/// (no block; the schedule's grace bounds it), and a run with no keys has no
-/// document to have an opinion about.
+/// **L3, AMENDED BY PoC P12.** The unread-scorecard verdict is written for a
+/// run the CONTROLLER reads — through the global handle (P5) and, since P12,
+/// through an evidence destination's own `ControllerIdentity` handle, whose
+/// failed read used to write no block and so could never be read again. It is
+/// a TRANSIENT `NotAttempted` in both cases (the retry schedule's input), and
+/// the destination's sentence names the destination rather than the
+/// installation's archive handle. A run with no keys still has no document to
+/// have an opinion about, and a run whose evidence a Job reads gets its
+/// verdict from the Job.
 #[test]
-fn the_unread_verdict_is_for_an_inline_archive_run_only() {
+fn the_unread_verdict_is_for_a_run_the_controller_reads() {
     use weirkeeper::controllers::backup::EvidenceSource;
     use weirkeeper::controllers::restore::unread_scorecard_verdict;
-    let global = unread_scorecard_verdict(&EvidenceSource::GlobalHandle, true, SCORECARD_KEY)
+    use weirkeeper::verification::{not_attempted_class, NotAttemptedClass};
+    let global = unread_scorecard_verdict(&EvidenceSource::GlobalHandle, true, SCORECARD_KEY, None)
         .expect("an inline-archive run that read nothing is NotAttempted");
     assert_eq!(global.result, VerificationVerdict::NotAttempted);
-    assert!(global
-        .detail
-        .as_deref()
-        .is_some_and(|d| d.contains(SCORECARD_KEY)));
+    let detail = global.detail.as_deref().unwrap_or_default();
+    assert!(detail.contains(SCORECARD_KEY));
+    assert_eq!(
+        not_attempted_class(detail),
+        NotAttemptedClass::Transient,
+        "the unread sentence is a transient read failure: {detail}"
+    );
     assert!(
-        unread_scorecard_verdict(&EvidenceSource::GlobalHandle, false, SCORECARD_KEY).is_none(),
+        unread_scorecard_verdict(&EvidenceSource::GlobalHandle, false, SCORECARD_KEY, None)
+            .is_none(),
         "GC11: no keys, no document, no verdict"
     );
     let destination = EvidenceSource::Destination(Arc::new(Store::in_memory("logweir/")));
+    let from_destination =
+        unread_scorecard_verdict(&destination, true, SCORECARD_KEY, Some("evidence-dest"))
+            .expect("a ControllerIdentity read that produced nothing is now recorded");
+    let detail = from_destination.detail.as_deref().unwrap_or_default();
+    assert_eq!(from_destination.result, VerificationVerdict::NotAttempted);
     assert!(
-        unread_scorecard_verdict(&destination, true, SCORECARD_KEY).is_none(),
-        "a destination's own-handle read that failed writes no block: the recorded decision \
-         for that source stands"
+        detail.contains("BackupDestination evidence-dest") && detail.contains(SCORECARD_KEY),
+        "the destination's sentence names the destination and the key: {detail}"
     );
+    assert!(
+        !detail.contains(weirkeeper::destination::ARCHIVE_HANDLE_LABEL),
+        "and not the installation's archive handle, which this run was never read through: \
+         {detail}"
+    );
+    assert_eq!(not_attempted_class(detail), NotAttemptedClass::Transient);
 }
 
 // ---------------------------------------------------------------------------
