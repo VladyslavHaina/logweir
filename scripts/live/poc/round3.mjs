@@ -33,7 +33,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chromium, newSession, gotoHash, textOf, waitForText, openWizard, wizardAt, wizardStep, BASE, HOST, credential,
-  checkRowsIn, settledRows,
+  settledRows, checkVerdict, outcomeOf,
 } from "./console.mjs";
 
 const OUT = process.argv[2] || "/tmp/poc-round3";
@@ -81,16 +81,14 @@ const PF = /pf-[a-z2-7]{26}/;
 const TD = /td-[a-z2-7]{26}/;
 
 // A readiness verdict on screen (the schedule form's fieldset or the list panel's section): the
-// check's rows read from the DOM (`checkRowsIn`, four cells since MCP round 2), settled when the
-// check is no longer running ("checking..."); then up to 30 s for the follow's read to land (a
-// replay is terminal on arrival and owes one read, P8), and the check id and applicability.
+// check's rows read from the DOM (`checkVerdict`, four cells since MCP round 2), settled when the
+// check is no longer running ("checking...") and the page has not stopped following it (P15,
+// `[data-check-stopped]`: reported as `outcome`, never as a verdict); then up to 30 s for the
+// follow's read to land (a replay is terminal on arrival and owes one read, P8), and the check id
+// and applicability. The wait ends on the verdict or the stop, the budget being only a backstop.
 async function settle(page, selector, seconds) {
-  let r = await settledRows(page, selector, seconds, 2500);
-  if (r === null) r = await checkRowsIn(page, selector);
-  else for (let i = 0; i < 10 && !/applies to your current inputs/.test(r.text); i++) { await sleep(page, 3000); r = await checkRowsIn(page, selector); }
-  const t = r.text || "";
-  const settled = r.rows.length > 0 && !r.checking;
-  return { t, rows: settled ? r.rows : [], pf: (t.match(PF) || [null])[0], applies: settled && /applies to your current inputs/.test(t) && !/does not apply to your current inputs/.test(t) };
+  const r = await checkVerdict(page, selector, seconds);
+  return { t: r.text || "", rows: r.rows, pf: r.pf, applies: r.applies, settled: r.settled, stopped: r.stopped, outcome: r.outcome };
 }
 // The check's own expiry, as the product API reports it on a read.
 async function expiryOf(page, id) {
@@ -100,7 +98,7 @@ async function expiryOf(page, id) {
     return ((b && (b.item || b)) || {}).expiresAt || null;
   }, [NS, id]);
 }
-const brief = (v) => ({ pf: v.pf, applies: v.applies, rows: v.rows.map((x) => `${x.id}=${x.verdict}/${x.gating}`).slice(0, 12), says: (v.t.match(/[^\n]*current inputs[^\n]*/) || [""])[0] });
+const brief = (v) => ({ outcome: v.outcome, pf: v.pf, applies: v.applies, rows: v.rows.map((x) => `${x.id}=${x.verdict}/${x.gating}`).slice(0, 12), says: (v.t.match(/[^\n]*current inputs[^\n]*/) || [""])[0] });
 
 async function waitUntil(page, iso, extraMs, what) {
   const until = Date.parse(iso) + extraMs;
@@ -156,7 +154,7 @@ try {
       const t1 = nowIso();
       await pageF.locator("#schedule-check-readiness").click();
       await sleep(pageF, 4000);
-      const v1 = await settle(pageF, "#schedule-readiness", 120);
+      const v1 = await settle(pageF, "#schedule-readiness", 240);
       const p1 = posts("form", t1, /preflights$/);
       row("P14-F2 a retry inside the validity replays: one POST, 200 replayed:true, the SAME pf-, and the page reads back 'applies to your current inputs'",
         p1.length === 1 && p1[0].status === 200 && p1[0].replayed === true && p1[0].id === formA.pf && v1.applies && v1.pf === formA.pf,
@@ -226,7 +224,7 @@ try {
       panelA = await settle(pageP, "#backup-readiness", 240);
       panelA.expiresAt = panelA.pf ? await expiryOf(pageP, panelA.pf) : null;
       row("P13-4 (R8.5) the panel settles to a verdict read back from the check (the check the POST made), naming no 'did not recompute staleness'",
-        panelA.rows.length > 0 && panelA.pf === (p2[0] || {}).id && !/did not recompute staleness/.test(panelA.t), Object.assign(brief(panelA), { expiresAt: panelA.expiresAt }));
+        panelA.settled && panelA.rows.length > 0 && panelA.pf === (p2[0] || {}).id && !/did not recompute staleness/.test(panelA.t), Object.assign(brief(panelA), { expiresAt: panelA.expiresAt }));
       await shot(pageP, "P13-4-panel-settled");
     } catch (e) { row("P13 panel phase completed", false, { error: String(e.stack || e).slice(0, 600) }); }
 
@@ -300,7 +298,7 @@ try {
         const fresh = p6.find((n) => n.status === 202);
         const replay = p6.find((n) => n.status === 200);
         row("P14-P3 the list panel's Check readiness after its check EXPIRED gives a FRESH check that applies (same inputs, a new pf-)",
-          !!fresh && fresh.id !== panelA.pf && (!replay || (replay.id === panelA.pf && replay.staleReasons.includes("expired"))) && v6.pf === fresh.id && v6.rows.length > 0 && !/did not recompute staleness/.test(v6.t)
+          !!fresh && fresh.id !== panelA.pf && (!replay || (replay.id === panelA.pf && replay.staleReasons.includes("expired"))) && v6.pf === fresh.id && v6.settled && v6.rows.length > 0 && !/did not recompute staleness/.test(v6.t)
             && JSON.stringify(((fresh.sent || {}).backup || {}).topics) === JSON.stringify(["orders", "payments"]) && ((fresh.sent || {}).backup || {}).destination === "pu3-dest",
           { expired: panelA.pf, expiresAt: panelA.expiresAt, posts: p6.map((n) => [n.status, n.replayed, n.id, n.keyDigest, n.staleReasons]), page: brief(v6) });
         await shot(pageP, "P14-P3-panel-fresh");
@@ -355,7 +353,7 @@ try {
     const shows = async () => pageP.evaluate(() => {
       const s = document.querySelector("#backup-readiness");
       const t = s ? s.innerText : "";
-      return { pf: (t.match(/pf-[a-z2-7]{26}/) || [null])[0], checking: !!(s && s.querySelector('[data-applicability="checking"]')), applies: /applies to your current inputs/.test(t) && !/does not apply/.test(t),
+      return { pf: (t.match(/pf-[a-z2-7]{26}/) || [null])[0], checking: !!(s && s.querySelector('[data-applicability="checking"]')), stopped: (s && s.querySelector("[data-check-stopped]") || { getAttribute: () => "" }).getAttribute("data-check-stopped") || "", applies: /applies to your current inputs/.test(t) && !/does not apply/.test(t),
         busy: !!(s && s.querySelector('#readiness-form[aria-busy="true"]')), disabled: !!(s && s.querySelector("#readiness-form fieldset[disabled]")) };
     });
     const TRACE = [];
@@ -393,7 +391,7 @@ try {
         const t2 = nowIso();
         await pageP.locator("#backup-readiness").getByRole("button", { name: /^check readiness$/i }).click();
         await trace("in-window retry", 20);
-        const v2 = await settle(pageP, "#backup-readiness", 120);
+        const v2 = await settle(pageP, "#backup-readiness", 240);
         const p2 = posts("panel", t2, /preflights$/);
         row("P14-P2 the list panel's retry inside the validity replays (200, same pf-) and reads back 'applies'",
           p2.length === 1 && p2[0].status === 200 && p2[0].replayed === true && p2[0].id === v1.pf && v2.pf === v1.pf && v2.applies,
@@ -449,7 +447,7 @@ try {
       const p8 = posts("panel", t8, /preflights$/);
       const fresh8 = p8.find((n) => n.status === 202);
       row("P14-X1 Cancel a check, then Check again with the same inputs: a new pf-, not the cancelled one",
-        couldCancel && st === "Cancelled" && !!fresh8 && fresh8.id !== pfC && v8.pf === fresh8.id,
+        couldCancel && st === "Cancelled" && !!fresh8 && fresh8.id !== pfC && v8.pf === fresh8.id && v8.settled,
         { cancelled: pfC, cancelledPhase: st, cancelButton: couldCancel, posts: p8.map((n) => [n.status, n.replayed, n.id, n.keyDigest, n.staleReasons, n.state]), page: brief(v8) });
       await shot(pageP, "P14-X1-after-cancel");
     } catch (e) { row("CANCEL completed", false, { error: String(e.stack || e).slice(0, 600) }); }
@@ -488,15 +486,15 @@ try {
     row("R2-11 step 5 while the check is pending reads 'checking...' and not 'does not apply to your current inputs'",
       sawChecking && !pendingSaysNotApply, { excerpt: pendingText.split("\n").filter((l) => /checking|apply|compared/i.test(l)).slice(0, 4) });
     const settled5 = await settledRows(page, "#step-preflight", 180, 3000);
-    const s5 = settled5 === null ? await page.locator("#step-preflight").innerText() : settled5.text;
+    const s5 = settled5.settled ? settled5.text : await page.locator("#step-preflight").innerText();
     const stepper = await page.evaluate(() => [...document.querySelectorAll("ol.stepper li")].map((li) => li.innerText.replace(/\s+/g, " ").trim()));
-    const rows5 = settled5 === null ? [] : settled5.rows;
+    const rows5 = settled5.rows;
     const approvalRow = rows5.find((r) => r.id === "approval.state") || null;
     const otherBlocking = rows5.filter((r) => r.gating === "blocking" && r.id !== "approval.state");
     row("R2-12 settled on a draft, step 5's headline reads 'needs approval' (every other blocking check ready; creating it requests the approval) and not 'ready'",
       /needs approval/.test(s5) && /every other blocking check is ready/.test(s5) && !!approvalRow && approvalRow.verdict !== "ready"
         && otherBlocking.length > 0 && otherBlocking.every((r) => r.verdict === "ready"),
-      { headline: (s5.match(/[^\n]*needs approval[^\n]*/) || [""])[0].slice(0, 300), approvalRow, otherBlocking: otherBlocking.map((r) => `${r.id}=${r.verdict}`) });
+      { outcome: outcomeOf(settled5), headline: (s5.match(/[^\n]*needs approval[^\n]*/) || [""])[0].slice(0, 300), approvalRow, otherBlocking: otherBlocking.map((r) => `${r.id}=${r.verdict}`) });
     row("R2-12 the stepper's step 5 says 'needs approval' (not 'done')", stepper.some((s) => /Operation readiness/i.test(s) && /needs approval/i.test(s)) && !stepper.some((s) => /Operation readiness/i.test(s) && /\bdone\b/i.test(s)), { stepper });
     row("R2-13 step 5 names no tracker task (no PLAT-nn / PROD-nn in its text)", s5.length > 0 && !/\b(PLAT|PROD)-\d/.test(s5), { length: s5.length, hits: s5.match(/\b(PLAT|PROD)-\d[^\s]*/g) || [] });
     await shot(page, "R2-12-step5-needs-approval");

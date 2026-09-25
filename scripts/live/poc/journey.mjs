@@ -15,7 +15,7 @@ import { writeFileSync, mkdirSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import {
   chromium, newSession, gotoHash, textOf, waitForText, createCluster, createDestination,
-  restoreFromBackup, secretValue, revealInGrid, settledRows,
+  restoreFromBackup, secretValue, revealInGrid, settledRows, outcomeOf,
 } from "./console.mjs";
 
 const OUT = process.argv[2] || "/tmp/poc-journey";
@@ -41,10 +41,11 @@ async function shot(page, name) { await page.screenshot({ path: `${OUT}/${name}.
 
 // A check's rows, read from the DOM of the surface that shows it (`checkRowsIn`: since MCP round 2
 // a check table has four cells, and the old innerText reading matched no row -- poc-upgrade-3, H7),
-// once the check has settled; [] when it never does.
+// once the check has a verdict; a check the page stopped following (P15, `[data-check-stopped]`) or
+// one that never settles has NO rows, and `outcome` says which, for the row's evidence.
 async function waitRows(page, selector, seconds) {
   const read = await settledRows(page, selector, seconds, 4000);
-  return read === null ? [] : read.rows;
+  return { rows: read.rows, outcome: outcomeOf(read) };
 }
 
 const browser = await chromium.launch();
@@ -67,10 +68,10 @@ try {
       await gotoHash(page, `#/clusters?ns=${NS}&name=${name}`);
       await waitForText(page, /TEST CONNECTION|Test connection/, 60, "the cluster page");
       await page.getByRole("button", { name: /^test connection$/i }).click();
-      const rows = await waitRows(page, "#connection-check", 180);
+      const { rows, outcome } = await waitRows(page, "#connection-check", 180);
       const blocking = rows.filter((r) => r.gating === "blocking");
       row(`J2 Test connection ${name}: every blocking row ready`, blocking.length > 0 && blocking.every((r) => r.verdict === "ready"),
-        { rows: rows.map((r) => `${r.id}=${r.verdict}/${r.code}`) });
+        { outcome, rows: rows.map((r) => `${r.id}=${r.verdict}/${r.code}`) });
       await shot(page, `J2-test-connection-${name}`);
     }
   }
@@ -102,10 +103,10 @@ try {
     await gotoHash(page, `#/destinations?ns=${NS}&name=primary`);
     await waitForText(page, /Test access/, 60, "the destination page");
     await page.locator("#destination-test").getByRole("button", { name: /test access/i }).click();
-    const rows = await waitRows(page, "#destination-test-slot", 240);
+    const { rows, outcome } = await waitRows(page, "#destination-test-slot", 240);
     const blocking = rows.filter((r) => r.gating === "blocking");
     row("J3 Test access: every blocking row ready", blocking.length > 0 && blocking.every((r) => r.verdict === "ready"),
-      { rows: rows.map((r) => `${r.id}=${r.verdict}/${r.code}`) });
+      { outcome, rows: rows.map((r) => `${r.id}=${r.verdict}/${r.code}`) });
     await shot(page, "J3-test-access");
   }
   // ---------------------------------------------------------------- J4 schedule
@@ -136,9 +137,9 @@ try {
       // The AT (UTC) column in the one timestamp format (console-ux-1, MCP-7): was `…T02:00:00Z`.
       await waitForText(page, /NEXT RUNS[\s\S]*\d{4}-\d{2}-\d{2} 02:00:00 UTC/, 60, "the cadence preview");
       await page.locator('button[name="schedule-check-readiness"], #schedule-check-readiness').first().click();
-      const rows = await waitRows(page, "#schedule-readiness", 240);
+      const { rows, outcome } = await waitRows(page, "#schedule-readiness", 240);
       const blocking = rows.filter((r) => r.gating === "blocking");
-      row("J4 schedule readiness: blocking rows", blocking.length > 0, { rows: rows.map((r) => `${r.id}=${r.verdict}/${r.code}`) });
+      row("J4 schedule readiness: blocking rows", blocking.length > 0, { outcome, rows: rows.map((r) => `${r.id}=${r.verdict}/${r.code}`) });
       await shot(page, "J4-schedule-readiness");
       const create = form.getByRole("button", { name: /^create$/i });
       for (let i = 0; i < 20 && await create.isDisabled(); i++) await page.waitForTimeout(1500);
@@ -194,9 +195,9 @@ try {
     row("J6 the schedule page offers 'Restore this point' for the run", (await link.count()) > 0 && (await link.isVisible()),
       { href: (await link.count()) ? await link.getAttribute("href") : null, revealError: revealed });
     const r = await restoreFromBackup(page, NS, b.metadata.name, b.metadata.uid, { target: TGT, prefix: process.env.POC_RESTORE_PREFIX || "restored-", shots: `${OUT}/J6` }, log);
-    const notReady = (r.readiness && r.readiness.blockingNotReady) || ["no readiness"];
-    row("J6 readiness: every blocking row ready except approval.state (skipped until the Restore exists)", notReady.length === 0,
-      { rows: r.readiness && r.readiness.rows.map((x) => `${x.id}=${x.verdict}`) });
+    const notReady = (r.readiness && r.readiness.settled && r.readiness.blockingNotReady) || ["no readiness verdict"];
+    row("J6 readiness: every blocking row ready except approval.state (skipped until the Restore exists)", notReady.length === 0 && r.readiness.rows.some((x) => x.gating === "blocking"),
+      { outcome: outcomeOf(r.readiness), rows: r.readiness && r.readiness.rows.map((x) => `${x.id}=${x.verdict}`) });
     const st = r.status || {};
     row("J6 the Restore (Ordinary confirmation) reaches Succeeded", st.phase === "Succeeded", { restore: r.name, phase: st.phase, exitReason: st.exitReason });
     writeFileSync(`${OUT}/J6-restore.json`, JSON.stringify({ name: r.name, planHash: r.planHash, status: st }, null, 1));

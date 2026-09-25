@@ -280,3 +280,130 @@ def test_the_check_row_guard_catches_its_planted_twins():
     assert reads_the_old_check_row_layout(r'const rows = t.split("\n").filter((l) => /\t(blocking|advisory|executionOnly)\t/.test(l));')
     assert reads_the_old_check_row_layout(r'r1.blocking.every((l) => /\tready\t/.test(l))')
     assert not reads_the_old_check_row_layout('const read = await settledRows(page, "#step-preflight", seconds, 4000);')
+
+
+# --------------------------------------------------------------------------------------------
+# A CHECK THE PAGE STOPPED FOLLOWING IS NOT A VERDICT, AND A SETTLE WAIT ENDS ON THE VERDICT OR ON
+# THAT STOP (P15, poc-fixes-5; swept in poc-upgrade-4). A console follow now reads a check until
+# the longest time a check may take and then marks it `[data-check-stopped]` ("did not finish" /
+# "could not be read again"). So (1) console.mjs's reader counts a stopped check as NOT settled and
+# `settledRows` ends on it, returning no rows; (2) no reader turns a non-verdict into one by
+# null-ness (`read === null ? [] : read.rows`, `if (!readiness)`, `(await readinessRows(..)) || {..}`):
+# a settle wait always answers an object whose `settled` decides; (3) every settle budget is at
+# least 150 s (a Preflight's 120 s timeoutSeconds; the staged slow check records notReady at about
+# 120 s), and no reader hand-rolls a settle loop over `checkRowsIn` with its own short count.
+SETTLE_FLOOR = 150
+BUDGET_CALL = re.compile(
+    r"\b(settledRows|waitRows|settle|checkVerdict)\(\s*[\w.]+\s*,\s*(?:\"[^\"]*\"|'[^']*'|`[^`]*`|[\w.]+)\s*,\s*(\d+)")
+READINESS_CALL = re.compile(r"\breadinessRows\(\s*[\w.]+\s*,\s*(\d+)")
+READINESS_OPT = re.compile(r"\breadinessSeconds:\s*(\d+)")
+SETTLE_READERS = ("settledRows", "readinessRows", "checkVerdict")
+ASSIGNED_FROM_A_READER = re.compile(r"(?:\b(?:const|let|var)\s+)?\b(\w+)\s*=\s*\(?\s*await\s+(?:" + "|".join(SETTLE_READERS) + r")\(")
+LOOP = re.compile(r"\b(for|while)\s*\(")
+FUNCTION = re.compile(r"^\s*(?:export\s+)?(?:async\s+)?function\s+(\w+)|^\s*(?:const|let)\s+(\w+)\s*=\s*async\b")
+
+
+def _function_body(text: str, name: str) -> str:
+    m = re.search(r"export async function " + name + r"\(.*?\n}\n", text, re.S)
+    return m.group(0) if m else ""
+
+
+def stop_blind_reader(text: str) -> list[str]:
+    """console.mjs's check reader: a `[data-check-stopped]` check is not settled, and the settle
+    wait ends on it with no rows. Empty for a file that defines no reader."""
+    if "export async function checkRowsIn" not in text:
+        return []
+    bad = []
+    rows_in = _function_body(text, "checkRowsIn")
+    if "[data-check-stopped]" not in rows_in:
+        bad.append("checkRowsIn does not read [data-check-stopped]")
+    if not re.search(r"settled:\s*[^,}]*!stopped", rows_in):
+        bad.append("checkRowsIn's `settled` does not exclude a stopped check")
+    wait = _function_body(text, "settledRows")
+    if "read.stopped" not in wait:
+        bad.append("settledRows does not end on a stopped check")
+    if not re.search(r"if \(read\.settled\) return", wait) or re.search(r"\breturn\s+null\b", wait):
+        bad.append("settledRows answers something other than a read whose `settled` decides")
+    return bad
+
+
+def null_read_as_verdict(text: str) -> list[str]:
+    """A settle wait's answer tested by null-ness, where `settled` must decide."""
+    names = set(ASSIGNED_FROM_A_READER.findall(text))
+    bad = []
+    for line in text.splitlines():
+        if re.search(r"\(\s*await\s+(?:" + "|".join(SETTLE_READERS) + r")\([^)]*\)\s*\)\s*\|\|", line):
+            bad.append(line.strip()[:160])
+            continue
+        for n in names:
+            if re.search(r"\b" + n + r"\s*[!=]==?\s*null\b", line) or re.search(r"!\s*" + n + r"\b(?![.\w])", line):
+                bad.append(line.strip()[:160])
+                break
+    return bad
+
+
+def short_settle_waits(text: str) -> list[str]:
+    """A settle budget under 150 s, or a hand-rolled settle loop over checkRowsIn outside the two
+    helpers that own one (console.mjs settledRows and checkVerdict)."""
+    bad = []
+    for rx in (BUDGET_CALL, READINESS_CALL, READINESS_OPT):
+        for m in rx.finditer(text):
+            if int(m.groups()[-1]) < SETTLE_FLOOR:
+                bad.append(m.group(0)[:160])
+    lines = text.splitlines()
+    fn = ""
+    for i, line in enumerate(lines):
+        f = FUNCTION.match(line)
+        if f:
+            fn = f.group(1) or f.group(2) or ""
+        if LOOP.search(line) and fn not in ("settledRows", "checkVerdict") and any("checkRowsIn(" in x for x in lines[i: i + 5]):
+            bad.append(line.strip()[:160])
+    return bad
+
+
+def settle_budgets(text: str) -> list[int]:
+    return [int(m.groups()[-1]) for rx in (BUDGET_CALL, READINESS_CALL, READINESS_OPT) for m in rx.finditer(text)]
+
+
+def test_a_stopped_check_is_never_read_as_a_verdict():
+    console = HERE / "console.mjs"
+    assert "export async function checkRowsIn" in console.read_text()
+    assert not stop_blind_reader(console.read_text()), stop_blind_reader(console.read_text())
+    for p in MJS:
+        assert not null_read_as_verdict(p.read_text()), (p.name, null_read_as_verdict(p.read_text()))
+
+
+def test_every_settle_wait_ends_on_the_verdict_or_the_stop_and_waits_at_least_150_s():
+    budgets = []
+    for p in MJS:
+        assert not short_settle_waits(p.read_text()), (p.name, short_settle_waits(p.read_text()))
+        budgets += settle_budgets(p.read_text())
+    # NOT VACUOUS: the readers of journey, reproof, round3 and restore_burst are the ones read.
+    assert len(budgets) >= 15 and min(budgets) >= SETTLE_FLOOR, budgets
+
+
+def test_the_stop_guards_catch_their_planted_twins():
+    # the reader as it stood at main 815249cb: a stopped check with rows on screen read as settled
+    old_reader = (
+        "export async function checkRowsIn(page, selector) {\n  return page.evaluate((sel) => {\n"
+        "    return { rows, checking: !!root.querySelector('[data-applicability=\"checking\"]'), text };\n  }, selector);\n}\n"
+        "export async function settledRows(page, selector, seconds, interval) {\n"
+        "    const read = await checkRowsIn(page, selector);\n    if (read.rows.length > 0 && !read.checking) return read;\n"
+        "  return null;\n}\n")
+    assert len(stop_blind_reader(old_reader)) == 4
+    # a null-ness verdict, three ways
+    assert null_read_as_verdict('const read = await settledRows(page, "#x", 240, 4000);\nreturn read === null ? [] : read.rows;\n')
+    assert null_read_as_verdict('readiness = await readinessRows(page, 240);\nif (!readiness) throw new Error("x");\n')
+    assert null_read_as_verdict('const read = (await readinessRows(page, 240)) || { rows: [] };\n')
+    assert not null_read_as_verdict('readiness = await readinessRows(page, 240);\nif (!readiness.settled) throw new Error("x");\n')
+    # a short budget, and the old P8 / round3 hand-rolled loops
+    assert short_settle_waits('const v1 = await settle(pageF, "#schedule-readiness", 120);\n')
+    assert short_settle_waits('const s = await settledRows(page, "#step-preflight", 90, 3000);\n')
+    assert short_settle_waits('await restoreFromBackup(page, NS, b, u, { readinessSeconds: 60 });\n')
+    assert short_settle_waits('async function testOnce(label) {\n  for (let i = 0; i < 45; i++) {\n'
+                              '    await page.waitForTimeout(2000);\n    read = await checkRowsIn(page, "#destination-test");\n  }\n}\n')
+    assert short_settle_waits('async function settle(page, selector, seconds) {\n'
+                              '  else for (let i = 0; i < 10; i++) { await sleep(page, 3000); r = await checkRowsIn(page, selector); }\n}\n')
+    assert not short_settle_waits('const v1 = await settle(pageF, "#schedule-readiness", 240);\n'
+                                  'export async function settledRows(page, selector, seconds, interval) {\n'
+                                  '  while (Date.now() < end) {\n    read = await checkRowsIn(page, selector);\n  }\n}\n')
