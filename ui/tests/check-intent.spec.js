@@ -298,3 +298,73 @@ test("a_topic_discovery_asked_again_once_stale_is_a_new_discovery", async () => 
     "NEGATIVE CONTROL: a stale inventory is asked again, not replayed");
   assert.match(view.html(), /td-2/, "and the new discovery is the one on screen");
 });
+
+// ------------------------------------------------ review L4: overlapping asks
+
+test("two_overlapping_asks_of_a_spent_check_renew_once", async () => {
+  // The renewal was not compare-and-swap: two asks that both saw the replay
+  // come back spent each deleted the intent and created a check of their own.
+  resetCheckIntents();
+  const objects = new Map();
+  const spentOld = { id: "pf-old", terminal: true, state: "ready", applicable: false, stale: true,
+    staleReasons: [{ reason: "expired" }, NOT_RECOMPUTED] };
+  let firstToken = null;
+  const start = async (token) => {
+    await flush();
+    if (firstToken === null) {
+      firstToken = token;
+    }
+    if (token === firstToken) {
+      return { item: spentOld, replayed: true };
+    }
+    if (objects.has(token)) {
+      return { item: objects.get(token), replayed: true };
+    }
+    const made = { id: "pf-" + String(objects.size + 1), terminal: false, state: "pending" };
+    objects.set(token, made);
+    return { item: made, replayed: false };
+  };
+  const ask = () => askCheck({ intent: "ns/overlap", question: "q", held: null,
+    spent: preflightSpent, start: start });
+  const both = await Promise.all([ask(), ask()]);
+  assert.equal(objects.size, 1, "NEGATIVE CONTROL: one renewal, one new check (it made two)");
+  assert.equal(both[0].item.id, both[1].item.id);
+});
+
+test("the_schedule_forms_check_is_one_request_at_a_time_even_across_a_repaint", async () => {
+  resetMode();
+  resetCheckIntents();
+  const ns = "p14-inflight";
+  const key = formKey(ns, SCHEDULE_FORM);
+  keepDraft(key, DRAFT, SCHEDULE_DRAFT_FIELDS);
+  let open;
+  const gate = new Promise((resolve) => { open = resolve; });
+  let starts = 0;
+  const server = preflightServer();
+  const api = schedulesApi(server);
+  const inner = api.startPreflight;
+  api.startPreflight = async (...args) => { starts += 1; await gate; return inner(...args); };
+  api.previewCadence = async () => ({ schedule: "0 2 * * *", timeZone: "UTC", next: [] });
+  const view = fakeView();
+  try {
+    await mountSchedules(view.root, ns, parse, LIFE(), api);
+    await view.find("#schedule-check-readiness").dispatch("click");
+    // THE FORM REPAINTS while the check is in flight (a cadence change here;
+    // a preview answer takes the same `repaint`).
+    const before = view.chunks.length;
+    await view.find("select[name=\"mode\"]").dispatch("change");
+    await flush();
+    assert.ok(view.chunks.length > before, "the form was repainted");
+    const button = view.find("#schedule-check-readiness");
+    assert.ok("disabled" in button.attributes,
+      "NEGATIVE CONTROL: the repaint re-enabled the button (the markup has it disabled)");
+    await button.dispatch("click");
+    assert.equal(starts, 1, "a second click while the first is in flight sends nothing");
+    open();
+    await flush();
+    assert.ok(!("disabled" in view.find("#schedule-check-readiness").attributes),
+      "and the answer enables it again");
+  } finally {
+    dropDraft(key);
+  }
+});

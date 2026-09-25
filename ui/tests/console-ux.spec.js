@@ -478,6 +478,22 @@ test("mcp_27_readiness_is_done_only_when_a_check_for_this_plan_says_ready", asyn
   assert.equal(refused[5].status, "todo", "the plan step is not ready while Create refuses");
   const html = renderPreparedWizard(state, prepared);
   assert.match(html, /<span class="stepper-status">needs attention<\/span>/);
+
+  // REVIEW L1: a check owed only its draft's approval is passable -- Create
+  // requests the approval -- and step 5 says "needs approval", not "done".
+  state.readiness.preflight = Object.assign({}, state.readiness.preflight, {
+    state: "unknown",
+    checks: [
+      { id: "target.mappedTopics", gating: "blocking", state: "ready", code: "Ok" },
+      { id: "approval.state", gating: "blocking", state: "skipped", code: "SubjectNotCreated" },
+    ],
+  });
+  const owed = stepStates(state, prepared);
+  assert.equal(owed[4].status, "approval", "NEGATIVE CONTROL: it read `done`");
+  assert.equal(owed[5].status, "ready", "and the plan step is still where Create is");
+  assert.equal(replayWizard(owed).current, "submitted", "and the wizard machine walks past it");
+  assert.match(renderPreparedWizard(state, prepared),
+    /<span class="stepper-status">needs approval<\/span>/);
 });
 
 test("mcp_25_every_recovery_point_row_leads_with_its_action", () => {

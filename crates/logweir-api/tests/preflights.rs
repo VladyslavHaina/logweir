@@ -671,6 +671,11 @@ async fn a_replay_names_its_own_expiry_and_a_new_key_asks_afresh() {
     assert_eq!(v["item"]["uid"], uid);
     assert_eq!(reasons(&v["item"]), vec!["unverifiable"]);
     assert_eq!(v["item"]["staleBasis"], json!(["expiry"]));
+    // AND IT IS NOT A CURRENT VERDICT (review L3, mutant AM1): nothing was
+    // recomputed, so a replay inside the window is stale and applies to
+    // nothing until a read says otherwise.
+    assert_eq!(v["item"]["stale"], true);
+    assert_eq!(v["item"]["applicable"], false);
 
     // At the recorded expiry: the SAME object (D0), and the answer names it.
     app.clock

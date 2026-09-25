@@ -12,6 +12,7 @@ import {
   renderNoRole,
   renderRoleRefusal,
   routeAllowed,
+  routeGateHas,
   signedOutAddress,
   visibleRoutes,
 } from "../app.js";
@@ -64,23 +65,32 @@ function pocRestoreCheck(over) {
   }, over || {});
 }
 
-test("r2_12_a_check_unknown_only_for_its_drafts_approval_headlines_ready", () => {
+test("r2_12_a_check_unknown_only_for_its_drafts_approval_headlines_needs_approval", () => {
+  // REVIEW L1: the first cut read "ready -- 4 items are confirmed when the
+  // restore runs", counting the BLOCKING approval row among the items the run
+  // confirms. Only execution-only rows may be summarised that way; the
+  // approval row is named for what it is, and the badge is never green.
   const html = readinessHeadline(pocRestoreCheck());
-  assert.match(html, /badge-green">ready/,
-    "NEGATIVE CONTROL: every restore check headlined 'unknown' while the stepper said Done");
-  assert.match(html, /4 items are confirmed when the restore runs/);
+  assert.doesNotMatch(html, /badge-green/,
+    "NEGATIVE CONTROL: never ready over an unresolved blocking row (the approval included)");
+  assert.match(html, /badge-pending">needs approval/);
+  assert.match(html, /every other blocking check is ready, so the Restore can be created; creating it requests the approval/);
+  assert.match(html, /3 items are confirmed when the restore runs/,
+    "the three execution-only rows, and not the approval row (it read 4)");
+  assert.doesNotMatch(html, /4 items/);
   // THE TRUST RULE: any other blocking row not ready keeps the aggregate's word.
   const real = pocRestoreCheck();
   real.checks[1] = row("archive.segments", "blocking", "unknown", "SegmentsUnreadable");
-  assert.doesNotMatch(readinessHeadline(real), /badge-green/, "a real unknown blocking row is never green");
+  assert.equal(readinessHeadline(real), readinessHeadline({ state: "unknown" }),
+    "a real unknown blocking row keeps 'unknown'");
   const skipped = pocRestoreCheck();
   skipped.checks[1] = row("archive.segments", "blocking", "skipped", "SkippedByRequest");
-  assert.doesNotMatch(readinessHeadline(skipped), /badge-green/, "a skip the request asked for is not a pass");
-  const refused = pocRestoreCheck({ state: "notReady" });
-  assert.match(readinessHeadline(refused), /not ready/);
+  assert.doesNotMatch(readinessHeadline(skipped), /badge-green|needs approval/,
+    "a skip the request asked for is not a pass");
+  assert.match(readinessHeadline(pocRestoreCheck({ state: "notReady" })), /not ready/);
   const onlyApproval = pocRestoreCheck({ checks: [row("approval.state", "blocking", "skipped",
     "SubjectNotCreated")] });
-  assert.doesNotMatch(readinessHeadline(onlyApproval), /badge-green/,
+  assert.doesNotMatch(readinessHeadline(onlyApproval), /badge-green|needs approval/,
     "nothing checked is not everything passed");
   // A ready check names what the run itself confirms, and a backup says "run".
   const ready = pocRestoreCheck({ state: "ready", operation: "backup", checks: [
@@ -89,20 +99,53 @@ test("r2_12_a_check_unknown_only_for_its_drafts_approval_headlines_ready", () =>
   assert.match(readinessHeadline(ready), /badge-green">ready.*1 item is confirmed when the run executes/);
 });
 
+test("r2_12_a_gating_this_build_does_not_recognise_is_blocking_and_unresolved", () => {
+  // REVIEW L2: only `gating === "blocking"` counted as blocking, so a row the
+  // API mapped to `null` (a gating it did not recognise) could not stop the
+  // headline -- or the Create gate -- from passing. Fail closed.
+  for (const gating of [null, undefined, "blockingV2"]) {
+    const skew = pocRestoreCheck();
+    skew.checks.push(row("future.check", gating, "notReady", "FutureRefusal"));
+    assert.equal(readyButForDraftApproval(skew), false,
+      "NEGATIVE CONTROL: gating " + String(gating) + " is blocking (it was ignored)");
+    assert.doesNotMatch(readinessHeadline(skew), /badge-green|needs approval/);
+    assert.match(String(readinessRefusal({ readiness: { preflight: skew } }, {})),
+      /future\.check \(FutureRefusal\)/, "and Create is refused, naming the row");
+  }
+  // AN EXECUTION-ONLY ROW THAT SAYS notReady IS AN ANSWER, not a later item.
+  const answered = pocRestoreCheck();
+  answered.checks[2] = row("destination.evidenceWritable", "executionOnly", "notReady", "WriteDenied");
+  assert.equal(readyButForDraftApproval(answered), false);
+  const ready = pocRestoreCheck({ state: "ready", checks: [row("a", "blocking", "ready"),
+    row("b", "executionOnly", "notReady"), row("c", "executionOnly", "unknown")] });
+  assert.match(readinessHeadline(ready), /1 item is confirmed/, "only the unknown one is counted");
+  // Advisory rows never gate.
+  const advisory = pocRestoreCheck();
+  advisory.checks.push(row("configuration.policy", "advisory", "notReady", "PolicyOld"));
+  assert.equal(readyButForDraftApproval(advisory), true);
+});
+
 test("r2_12_the_stepper_and_the_create_gate_read_the_same_rule_as_the_headline", () => {
-  // STEP 5 IS `done` EXACTLY WHEN `readinessRefusal` ANSWERS NULL, so the two
-  // must agree with the headline over every shape above.
+  // CREATE IS ALLOWED EXACTLY WHEN THE HEADLINE IS `ready` OR `needs approval`,
+  // and step 5 says the same word (review L1: it read "done" under a check
+  // still owed an approval).
   const shapes = [pocRestoreCheck()];
   const real = pocRestoreCheck();
   real.checks[1] = row("archive.segments", "blocking", "unknown", "SegmentsUnreadable");
-  shapes.push(real, pocRestoreCheck({ state: "notReady" }), pocRestoreCheck({ state: "ready" }),
+  const skew = pocRestoreCheck();
+  skew.checks.push(row("future.check", null, "notReady", "FutureRefusal"));
+  shapes.push(real, skew, pocRestoreCheck({ state: "notReady" }), pocRestoreCheck({ state: "ready" }),
     pocRestoreCheck({ checks: [row("approval.state", "blocking", "skipped", "SubjectNotCreated")] }));
   for (const result of shapes) {
     const passes = readinessRefusal({ readiness: { preflight: result } }, {}) === null;
-    const green = /badge-green">ready/.test(readinessHeadline(result));
-    assert.equal(passes, green, JSON.stringify(result.checks.map((c) => c.state)) + " " + result.state);
+    const allowed = /badge-green">ready|needs approval/.test(readinessHeadline(result));
+    assert.equal(passes, allowed, JSON.stringify(result.checks.map((c) => c.state)) + " " + result.state);
   }
   assert.equal(readyButForDraftApproval(pocRestoreCheck()), true);
+  const wizard = readFileSync(UI + "pages/restore-wizard.js", "utf8");
+  assert.match(wizard, /readyButForDraftApproval\(held\) \? "approval" : "done"/,
+    "step 5's status for that check is `approval`");
+  assert.match(wizard, /if \(step\.status === "approval"\) \{\n {4}return "needs approval";/);
 });
 
 // ------------------------------------ R2-14: a role that cannot use a route
@@ -134,8 +177,43 @@ test("r2_14_a_route_the_session_cannot_use_says_so_instead_of_rendering", () => 
   // every mount arm.
   const app = readFileSync(UI + "app.js", "utf8");
   const body = app.slice(app.indexOf("function render(lifecycle"), app.indexOf("function boot()"));
-  const gate = body.indexOf("!routeAllowed(current, here.ns, sessionHas)");
+  const gate = body.indexOf("!routeAllowed(current, here.ns, routeGateHas)");
   assert.ok(gate > 0 && gate < body.indexOf("current.detail(main"), "the gate precedes the mounts");
+});
+
+test("r2_14_a_route_needing_any_of_its_flags_is_allowed_with_one_of_them", () => {
+  // REVIEW L6 (mutant UM5, `some` -> `every`): History needs backupsRead OR
+  // restoresRead, and a session holding only one of them may use it.
+  const history = NAV_ROUTES.find((r) => r.hash === "#/history");
+  assert.deepEqual(history.needs, ["backupsRead", "restoresRead"]);
+  assert.equal(routeAllowed(history, "team-a", (flag) => flag === "restoresRead"), true,
+    "NEGATIVE CONTROL: one of two flags is enough");
+  assert.equal(routeAllowed(history, "team-a", (flag) => flag === "backupsRead"), true);
+  assert.equal(routeAllowed(history, "team-a", () => false), false);
+});
+
+test("r2_14_the_route_gate_asks_the_chosen_namespace_and_not_the_union", async () => {
+  // REVIEW L5: an operator in team-b who is a viewer in team-a got the whole
+  // wizard in team-a, because the gate asked "in any namespace".
+  const session = con("session-viewer.json");
+  const viewer = session.namespaces[0];
+  const operator = JSON.parse(JSON.stringify(con("session.json").namespaces[0]));
+  operator.name = "team-b";
+  operator.roles = ["operator"];
+  session.namespaces = [viewer, operator];
+  resetMode();
+  await selectMode({ probe: async () => ({ ok: true, status: 200, body: session }) });
+  try {
+    const restore = NAV_ROUTES.find((r) => r.hash === "#/restore");
+    assert.equal(routeAllowed(restore, "team-b", routeGateHas), true);
+    assert.equal(routeAllowed(restore, "team-a", routeGateHas), false,
+      "NEGATIVE CONTROL: the union said yes in the namespace where the role cannot restore");
+    const keys = NAV_ROUTES.find((r) => r.hash === "#/keys");
+    assert.equal(routeAllowed(keys, "team-a", routeGateHas), routeGateHas("trustPoliciesRead", ""),
+      "a cluster-scoped route asks anywhere");
+  } finally {
+    resetMode();
+  }
 });
 
 test("r2_14_the_catalog_connect_form_and_the_governed_submit_follow_the_grant", () => {

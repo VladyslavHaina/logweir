@@ -1529,42 +1529,74 @@ export function isDraftApprovalRow(check) {
   );
 }
 
+/** Whether a check row gates the verdict. FAIL-CLOSED (review L2): only the two
+ *  gatings the contract names as not gating -- `advisory` and `executionOnly`
+ *  -- are left out; `blocking`, an absent gating and one this build does not
+ *  recognise (the API maps an unknown value to `null`) all count as blocking. */
+export function isBlockingRow(check) {
+  const gating = (check || {}).gating;
+  return gating !== "advisory" && gating !== "executionOnly";
+}
+
+/** Whether a row is one only the run itself can answer, and has not: an
+ *  `executionOnly` row that is `unknown` or `skipped`. An execution-only row
+ *  that says `notReady` is an answer, and is never summarised as "confirmed
+ *  later" (review L2). */
+export function answeredAtRun(check) {
+  const c = check || {};
+  return c.gating === "executionOnly" && (c.state === "unknown" || c.state === "skipped");
+}
+
 /** Whether a finished check is `unknown` for ONE reason only: its draft's
  *  approval row. Every other blocking row is `ready`, and at least one is --
- *  nothing checked is not everything passed. The wizard's step 5 and its
- *  Create gate, and the headline below, all read this one rule. */
+ *  nothing checked is not everything passed -- and no execution-only row has
+ *  said `notReady`. The wizard's step 5, its Create gate and the headline below
+ *  all read this one rule. */
 export function readyButForDraftApproval(preflight) {
   const p = preflight || {};
   if (p.state !== "unknown" || p.terminal !== true) {
     return false;
   }
-  const blocking = (Array.isArray(p.checks) ? p.checks : [])
-    .filter((c) => (c || {}).gating === "blocking");
+  const checks = Array.isArray(p.checks) ? p.checks : [];
+  const blocking = checks.filter(isBlockingRow);
   const others = blocking.filter((c) => !isDraftApprovalRow(c));
+  const refusedAtRun = checks.some((c) => (c || {}).gating === "executionOnly" &&
+    c.state === "notReady");
   return blocking.some(isDraftApprovalRow) && others.length > 0 &&
-    others.every((c) => c.state === "ready");
+    others.every((c) => c.state === "ready") && !refusedAtRun;
 }
 
-/** A readiness result's headline (MCP round 2, R2-12): the aggregate's own
- *  badge -- except that a restore check `unknown` only for its draft's approval
- *  row reads `ready` with what is confirmed later beside it. Every restore
- *  check headlined `unknown` while the stepper said Done. THE TRUST RULE
- *  STANDS: any other blocking row not `ready` keeps the aggregate's word, and
- *  `notReady` is never touched. The count is that row plus every
- *  execution-only row, which only the run itself can answer. */
+/** A readiness result's headline (MCP round 2, R2-12; review L1).
+ *
+ *  NEVER `ready` OVER AN UNRESOLVED BLOCKING ROW. The aggregate's own badge,
+ *  with two refinements that add words and never a green one:
+ *
+ *   - A restore check `unknown` only for its draft's approval row reads
+ *     "needs approval": every other blocking check is ready, so the Restore
+ *     can be created, and creating it is what asks an approver. That row is
+ *     named for what it is and is NOT counted among the items the run
+ *     confirms.
+ *   - A `ready` check says how many execution-only rows only the run itself
+ *     can answer ("N items are confirmed when ... runs"). Only those rows, and
+ *     only while they are unknown or skipped, are summarised that way. */
 export function readinessHeadline(preflight) {
   const p = preflight || {};
-  const later = (Array.isArray(p.checks) ? p.checks : [])
-    .filter((c) => (c || {}).gating === "executionOnly" && c.state !== "ready").length;
-  const deferred = readyButForDraftApproval(p);
-  if (!deferred && !(p.state === "ready" && later > 0)) {
-    return preflightVerdict(p.state);
-  }
-  const n = later + (deferred ? 1 : 0);
+  const later = (Array.isArray(p.checks) ? p.checks : []).filter(answeredAtRun).length;
   const when = p.operation === "restore" ? "the restore runs" : "the run executes";
-  return badge("green", "ready") + " <span class=\"headline-qualifier\" data-headline=\"" +
-    (deferred ? "ready-but-for-approval" : "ready") + "\">-- " + String(n) +
-    (n === 1 ? " item is" : " items are") + " confirmed when " + when + "</span>";
+  const laterWords = String(later) + (later === 1 ? " item is" : " items are") +
+    " confirmed when " + when;
+  if (readyButForDraftApproval(p)) {
+    return badge("pending", "needs approval") + " <span class=\"headline-qualifier\" " +
+      "data-headline=\"needs-approval\">-- every other blocking check is ready, so the " +
+      "Restore can be created; creating it requests the approval it needs before it runs" +
+      (later > 0 ? ". " + laterWords.charAt(0).toUpperCase() + laterWords.slice(1) : "") +
+      "</span>";
+  }
+  if (p.state === "ready" && later > 0) {
+    return badge("green", "ready") + " <span class=\"headline-qualifier\" " +
+      "data-headline=\"ready\">-- " + laterWords + "</span>";
+  }
+  return preflightVerdict(p.state);
 }
 
 /** One stale reason, in words, with its subject when it has one.

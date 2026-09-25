@@ -1531,7 +1531,9 @@ tokens: each of those clicks is a new check by design.
 ### Round 2 of the human-like pass
 
 * **A route the session cannot use says so** (`app.js`'s `routeAllowed`, the
-  same rule the tabs use): a viewer who opens the Restore address reads "Your
+  tabs' any-of-its-flags rule, asked of the CHOSEN namespace's grant --
+  `routeGateHas` -- and never of the union the tabs use, so an operator
+  elsewhere who is a viewer here is refused here): a viewer who opens the Restore address reads "Your
   role in <ns> can't start restores" and the role it takes, instead of an
   actionable wizard the API refuses click by click. The catalog's Connect
   archive form and the governed countersign submit follow `catalogConnect` and
@@ -1540,14 +1542,24 @@ tokens: each of those clicks is a new check by design.
 * **Sign out leaves the browser on the console's address with no route**, so
   the next user signs in to the first page, not to the previous user's deep
   link.
-* **The readiness headline.** A restore check that is `unknown` only because
-  its draft's `approval.state` is `skipped`/`SubjectNotCreated` -- every other
-  blocking row `ready`, at least one of them -- reads "ready -- N items are
-  confirmed when the restore runs" (that row plus every execution-only row).
-  Any other unknown or skipped blocking row keeps the aggregate's own word, and
-  step 5's Done, the Create gate and the headline read the one predicate
-  (`render.js`'s `readyButForDraftApproval`). A check still running says
+* **The readiness headline is never `ready` over an unresolved blocking row.**
+  A restore check that is `unknown` only because its draft's `approval.state`
+  is `skipped`/`SubjectNotCreated` -- every other blocking row `ready`, at
+  least one of them, and no execution-only row `notReady` -- reads "needs
+  approval -- every other blocking check is ready, so the Restore can be
+  created; creating it requests the approval it needs before it runs", and
+  step 5 says "needs approval" (passable, like "not checked yet"). A `ready`
+  check adds "N items are confirmed when the ... runs", counting ONLY
+  execution-only rows that are `unknown` or `skipped`. A row whose gating is
+  absent or not recognised counts as blocking (fail-closed). Any other unknown
+  or skipped blocking row keeps the aggregate's own word, and the stepper, the
+  Create gate and the headline read the one predicate (`render.js`'s
+  `readyButForDraftApproval`, `isBlockingRow`). A check still running says
   "checking...", not "does not apply".
+* **Check readiness on the schedule form is one request at a time**: the
+  button is disabled in its markup while the request is in flight, so a
+  repaint for another answer cannot re-enable it, and `askCheck` renews an
+  intent compare-and-swap, so two overlapping asks make one new check.
 * **Tables fit their card at 1440 and 1024 px.** Columns that described one
   thing were folded into it (a run's slot under its name, a window's two
   instants in one cell, a check's code, gating, remedy, scope and instants
@@ -1563,7 +1575,7 @@ Each surface does it the way its form is built:
 
 | Surface | Repaints on | How the input survives |
 |---|---|---|
-| Schedules -> *Backup readiness* | the discovery read, each followed read, the check's own record, Cancel | read off the live controls into the view first (`readReadinessInput`) -- source, its search, destination, topics -- and rendered from there; the destination is sent by the uid the select shows, and a slower discovery answer for an earlier source is dropped |
+| Schedules -> *Backup readiness* | the discovery read, each followed read, the check's own record, Cancel | read off the live controls into the view first (`readReadinessInput`) -- source, its search, destination, topics -- and rendered from there; the destination sent is the one whose uid the select shows (by its name, resolved from the list this mount read), and a slower discovery answer for an earlier source is dropped |
 | Schedules -> create form, policy form | preview, readiness, each followed read, the record | the draft, kept on every `input`/`change` |
 | Clusters -> a connection | each followed *Test connection* read, the probe re-read, the discovery record, a page of topics | the discovery form and the topic filters read off the live controls (`readDiscoveryTyped`) and rendered over the APPLIED filters, which stay what "Show more" pages with |
 | Destinations -> a destination | each followed *Test access* read, the test's record | only the test's own slot repaints; the rotation form -- whose credential inputs no draft keeps and no render carries -- is never re-rendered under the reader; the roles chosen for the next test are carried |

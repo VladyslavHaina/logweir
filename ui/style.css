@@ -2177,10 +2177,12 @@ button[aria-busy="true"] {
   font-size: var(--cds-global-typography-secondary-font-size);
 }
 
+.is-approval .stepper-link,
 .is-unchecked .stepper-link {
   border-top-color: var(--cds-alias-status-warning-shade);
 }
 
+.is-approval .stepper-num,
 .is-unchecked .stepper-num {
   border-color: var(--cds-alias-status-warning-shade);
 }

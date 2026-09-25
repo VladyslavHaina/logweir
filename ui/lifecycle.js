@@ -855,7 +855,13 @@ export async function askCheck(ask) {
   if (answer && answer.replayed === true && item !== null && typeof a.spent === "function" &&
     a.spent(item)) {
     const spentId = item.id;
-    checkIntents.delete(a.intent);
+    // COMPARE-AND-SWAP (review L4): renew only while the intent is still the
+    // entry this ask used. An overlapping ask that renewed first has already
+    // started the new check, and this one asks under ITS key -- a replay of
+    // that check, not a second one.
+    if (checkIntents.get(a.intent) === entry) {
+      checkIntents.delete(a.intent);
+    }
     entry = checkIntent(a.intent, a.question, null, null);
     answer = await a.start(entry.token);
     item = ((answer || {}).item) || null;

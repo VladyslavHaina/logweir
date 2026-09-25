@@ -132,6 +132,15 @@ export function routeAllowed(route, ns, has) {
   return needs.length === 0 || needs.some((flag) => ask(flag, route.cluster === true ? "" : ns));
 }
 
+/** THE ROUTE GATE'S QUESTION, PER NAMESPACE (review L5): the chosen
+ *  namespace's own grant, never the union across namespaces the tabs use. An
+ *  operator in team-b who is a viewer in team-a is refused the restore route in
+ *  team-a, which is what the API would do at every click. A cluster-scoped
+ *  route (no namespace) asks "anywhere". */
+export function routeGateHas(flag, ns) {
+  return typeof ns === "string" && ns.length > 0 ? granted(ns, flag) : grantedAnywhere(flag);
+}
+
 /** The state a route renders for a session whose role cannot use it: what the
  *  page is for, who is signed in with which role, and whom to ask. Pure. */
 export function renderRoleRefusal(route, identity) {
@@ -770,7 +779,7 @@ function render(lifecycle, context, navigated) {
       replace(main, parseFragment(renderNoRole(sessionIdentity(here.ns))));
     } else if (!current.cluster && (here.ns.length === 0 || (context.allowed.length > 0 && context.allowed.indexOf(here.ns) === -1))) {
       replace(main, namespacePrompt(context.allowed));
-    } else if (decided === CONSOLE && !routeAllowed(current, here.ns, sessionHas)) {
+    } else if (decided === CONSOLE && !routeAllowed(current, here.ns, routeGateHas)) {
       replace(main, parseFragment(renderRoleRefusal(current, sessionIdentity(here.ns))));
     } else if (here.name !== "" && typeof current.detail === "function") {
       replace(main, el("p", { class: "pending", role: "status" }, "Reading " + here.name + "..."));

@@ -122,6 +122,7 @@ import {
   listVerifiedNote,
   coveredCell,
   flagBadge,
+  isBlockingRow,
   isDraftApprovalRow,
   readyButForDraftApproval,
   when,
@@ -2884,8 +2885,9 @@ export function readinessRefusal(state, prepared) {
     );
   }
   if (result.state !== "ready") {
-    const gating = (Array.isArray(result.checks) ? result.checks : [])
-      .filter((c) => (c || {}).gating === "blocking");
+    // FAIL-CLOSED (review L2): a row with a gating this build does not
+    // recognise is blocking.
+    const gating = (Array.isArray(result.checks) ? result.checks : []).filter(isBlockingRow);
     const blocking = gating.filter((c) => (c || {}).state !== "ready");
     const others = blocking.filter((c) => !isDraftApprovalRow(c));
     // ONE RULE FOR THE GATE, THE STEPPER AND THE HEADLINE (`render.js`'s
@@ -3320,7 +3322,14 @@ export function stepStates(state, prepared) {
     if (i === 5) {
       status = firstOpen === 5 ? "ready" : "todo";
     } else if (whole[i]) {
-      status = attention[i] ? "attention" : (i === 4 && held === null ? "unchecked" : "done");
+      // STEP 5 SAYS WHAT ITS HEADLINE SAYS (review L1): a check whose one
+      // unresolved blocking row is the draft's approval is passable -- Create
+      // requests the approval -- and it is not `done`.
+      status = attention[i]
+        ? "attention"
+        : (i === 4 && held === null
+          ? "unchecked"
+          : (i === 4 && readyButForDraftApproval(held) ? "approval" : "done"));
     } else {
       status = attention[i] ? "attention" : "todo";
     }
@@ -3349,6 +3358,9 @@ function stepWord(step) {
   }
   if (step.status === "unchecked") {
     return "not checked yet";
+  }
+  if (step.status === "approval") {
+    return "needs approval";
   }
   return step.current ? "to do next" : "to do";
 }

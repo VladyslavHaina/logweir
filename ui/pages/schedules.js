@@ -1515,7 +1515,12 @@ function renderCreateReadiness(view) {
         : (v.mayOperate === false
         ? "<p class=\"note\">This login may read readiness results in this namespace and not " +
           "start one.</p>"
-        : "<div class=\"actions\"><button type=\"button\" id=\"schedule-check-readiness\">" +
+        : "<div class=\"actions\"><button type=\"button\" id=\"schedule-check-readiness\"" +
+          // DISABLED WHILE ITS REQUEST IS IN FLIGHT, in the markup and not only
+          // on the element (review L4): a repaint for another answer -- a
+          // preview landing -- re-enabled it, and two overlapping clicks
+          // could each renew the intent and create a Preflight.
+          (v.readinessInFlight === true ? " disabled aria-busy=\"true\"" : "") + ">" +
           "Check readiness</button></div>"))) +
     "<div class=\"readiness-verdict\" id=\"schedule-readiness-verdict\">" +
     renderReadinessVerdict(v) +
@@ -1766,6 +1771,7 @@ export function scheduleFormView(ns, clusters, now, freshSeconds, extra) {
     readinessError: e.readinessError || null,
     readinessUnavailable: e.readinessUnavailable === true,
     readinessUnavailableReason: e.readinessUnavailableReason,
+    readinessInFlight: e.readinessInFlight === true,
     mayOperate: e.mayOperate,
     minted: scheduleNamesMinted(),
   };
@@ -2627,7 +2633,7 @@ function wireCreate(node, ns, parse, lifecycle, api, clusters, own) {
   const check = node.querySelector("#schedule-check-readiness");
   if (check !== null) {
     listen(check, "click", () => {
-      if (!active(lifecycle)) {
+      if (!active(lifecycle) || held.readinessInFlight === true) {
         return;
       }
       const values = withScheduleIntent(readScheduleValues(form), readDraft(key));
@@ -2641,6 +2647,7 @@ function wireCreate(node, ns, parse, lifecycle, api, clusters, own) {
         return;
       }
       disableKeepingFocus(check, true);
+      held.readinessInFlight = true;
       // THE VERDICT IS BOUND TO THE REQUEST THAT PRODUCED IT (review MEDIUM-3):
       // it is shown as current only while the form still describes that
       // request, and marked stale the moment it does not.
@@ -2650,6 +2657,7 @@ function wireCreate(node, ns, parse, lifecycle, api, clusters, own) {
       held.readinessError = null;
       askReadiness(api, ns, SCHEDULE_FORM, request, shown).then(
         (answer) => {
+          held.readinessInFlight = false;
           if (!active(lifecycle)) {
             return;
           }
@@ -2658,6 +2666,7 @@ function wireCreate(node, ns, parse, lifecycle, api, clusters, own) {
           followCreateReadiness(node, ns, parse, lifecycle, api, clusters, held);
         },
         (error) => {
+          held.readinessInFlight = false;
           if (!cancelled(error, lifecycle) && active(lifecycle)) {
             // A REFUSED START IS AN ANSWER TO THIS REQUEST, NOT A STATE OF THE
             // FORM: the button stays, the refusal is shown beside it and its
