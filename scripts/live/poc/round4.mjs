@@ -579,6 +579,10 @@ try {
     }, scope);
     const latestLine = (page) => page.evaluate(() => { const p = document.querySelector("#schedule-latest-point"); return p ? { text: p.innerText, link: !!p.querySelector("a"), href: (p.querySelector("a") || { getAttribute: () => null }).getAttribute("href") } : null; });
     const SENT = "an operator or administrator can restore this point";
+    // The wizard a link opened is read once its position line is drawn (up to 30 s), not after a fixed
+    // 2.5 s: on a loaded host (poc-upgrade-5) the catalog route still read "Reading Restore..." at 2.5 s
+    // and drew "Step 1 of 6: Archive" by 5 s.
+    const wizardShown = (page) => page.waitForFunction(() => /^Step \d of 6: /.test(((document.querySelector("#wizard-position") || {}).textContent || "").trim()), null, { timeout: 30000 }).catch(() => {});
     const surfaces = [
       ["Catalog", `#/catalog?ns=${NS}&name=archive`, /restore this point/i, "main"],
       ["the History list (history.js restorePointCell, the runs list with a RESTORE column)", `#/history?ns=${NS}`, /restore this point/i, "main"],
@@ -623,7 +627,7 @@ try {
               await revealInGrid(page, link, "");
               await link.click();
               await page.waitForURL(/#\/restore\?/, { timeout: 30000 }).catch(() => {});
-              await sleep(page, 2500);
+              await wizardShown(page);
               opened = await page.evaluate(() => ({ hash: location.hash.slice(0, 120), position: ((document.querySelector("#wizard-position") || {}).textContent || "").trim(), refusal: !!document.querySelector("#role-refusal") }));
             }
             row(`R3-2 as operator, ${what}: the 'Restore this point' links are there, and one opens the wizard`,
@@ -636,7 +640,7 @@ try {
             await waitForText(page, /Latest recovery point/, 90, "the schedule detail");
             await page.locator("#schedule-latest-point a").first().click();
             await page.waitForURL(/#\/restore\?/, { timeout: 30000 }).catch(() => {});
-            await sleep(page, 2500);
+            await wizardShown(page);
             opened = await page.evaluate(() => ({ hash: location.hash.slice(0, 120), position: ((document.querySelector("#wizard-position") || {}).textContent || "").trim() }));
           }
           row("R3-2 as operator, the schedule's latest recovery point line carries the link, and it opens the wizard",
