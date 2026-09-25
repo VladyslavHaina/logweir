@@ -398,13 +398,24 @@ At boot, `client.js` asks `GET /api/v1/session` **once**. An answer that decodes
 as a session document is console mode. A `401` whose body is the product API's
 own problem document with code `unauthenticated` or `session_expired` is the
 shared console with **nobody signed in** (`SIGNED_OUT`, below) -- never legacy
-mode, which is what it used to be read as (MCP-1, MCP-4). Anything else -- the
-refusal a `kubectl proxy` path filter gives, a Kubernetes `401` whose `code` is
-a number, a body that is not JSON, a decode that found a required field
-missing, or no answer within five seconds -- is legacy mode. The
-answer is recorded for the life of the loaded page and never asked again: a
-mode chosen per request is a page that can change APIs between a read and the
-write that follows it.
+mode, which is what it used to be read as (MCP-1, MCP-4).
+
+**What a failed probe means depends on who served the page** (review L1). The
+console serves its own `runtime.js`, compiled into `logweir-api`
+(`crates/logweir-api/src/assets.rs` `CONSOLE_RUNTIME_JS`), which sets
+`window.LOGWEIR_CONSOLE`; the file under `ui/` -- what `kubectl proxy` and the
+chart's legacy UI serve -- sets nothing. On a page that carries the marker, any
+other probe outcome -- no answer within five seconds, a network failure, a 5xx
+or a 429, a body that does not decode -- is `UNAVAILABLE`: "Can't reach the
+Logweir service", the probe's own status and code, and Retry, with no tab, no
+page and no request sent. It is never legacy mode, which read `/apis/...`
+paths the console does not serve on every page. On a page without the marker,
+anything else -- the refusal a `kubectl proxy` path filter gives, a
+Kubernetes `401` whose `code` is a number, a body that is not JSON, a decode
+that found a required field missing, or no answer within five seconds -- is
+legacy mode, as before. The answer is recorded for the life of the loaded page
+and never asked again: a mode chosen per request is a page that can change APIs
+between a read and the write that follows it.
 
 That one probe is the only behavioural difference a legacy installation sees.
 It is answered by the proxy's own path filter, it is not retried, and the page
@@ -446,14 +457,22 @@ problem is described, never printed.
 MCP-15): `2026-09-24 16:39:04 UTC`, whole seconds, never wrapped, in a `<time>`
 whose `datetime` and `title` carry the exact recorded value.
 
+**A local time stays local.** A schedule's next runs show the controller's
+`localTime` as the wall time it is -- `2026-10-25 02:30:00 +02:00` beside
+`2026-10-25 00:30:00 UTC` -- so the fall-back day's repeated 02:30 is two rows
+with one wall time and two offsets (`render.js` `whenLocal`; review M1). Only
+instants shown as UTC go through `when`, and both carry the exact recorded
+value in their title.
+
 **Migration (console-ux-1).** None for operators. Every route and deep link is
 unchanged; `step=` is a new, optional parameter of `#/restore`, and a link
 without it opens step 1. `#/operations` is no longer a tab and its address is
 unchanged. The product API gained two additive projections (`docs/api.md`:
 a schedule's `lastSlot` and `missedSlots`, and a list row's `exitCode` and
 `outcome`); the console and the API ship in one image, and a client written
-before them reads the same bodies. No asset was added or removed. Rollback is
-the previous image.
+before them reads the same bodies. No asset was added or removed; the console
+serves `runtime.js` from the service instead of the file (review L1), and the
+legacy UI image serves the file unchanged. Rollback is the previous image.
 
 ### What does not change
 

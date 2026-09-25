@@ -794,10 +794,11 @@ function note(object, plural, unknown) {
   object.__contract = {
     mode: CONSOLE,
     // A FIELD THE PROJECTION DID SUPPLY IS NOT ABSENT. The table above names
-    // what an API of this contract MAY leave out; a newer one that publishes a
-    // field (MCP-13's `lastSlot`/`missedSlots`, MCP-17's list exit code and
-    // outcome) takes it off the list for that object, and an older one leaves
-    // it named -- so the page says "not published" only where it was not.
+    // what this contract's projection may leave out; an object that carries
+    // one of them anyway (a list row whose summary published MCP-17's exit
+    // code or outcome) is not said to lack it. `lastSlot`/`missedSlots` are no
+    // longer in the table at all (MCP-13): the projection publishes them, and
+    // the console and the API ship in one image.
     absent: (ABSENT_IN_CONSOLE[plural] || []).filter((path) => valueAt(object, path) === undefined),
     unknown: unknown,
   };

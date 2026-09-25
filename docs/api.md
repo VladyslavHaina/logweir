@@ -1355,6 +1355,16 @@ normalisation or directory index, so `/ui/../Cargo.toml` is a `404` rather than
 a traversal to defeat. The bytes a browser receives are the bytes the process
 read at startup; no request performs file-system I/O.
 
+Two entries are the service's own and not files: the page icon
+(`favicon.svg`), and **`runtime.js`**, served compiled in
+(`assets.rs` `CONSOLE_RUNTIME_JS`) in place of the file under `ui/`. It sets the
+empty namespace context the page reads and `window.LOGWEIR_CONSOLE = {servedBy:
+"logweir-api"}`, which is how the page knows it is behind this service even
+when its first `GET /api/v1/session` fails: a failed probe then reads "can't
+reach the service; retry" and never falls back to the legacy `kubectl proxy`
+paths (console-ux-1 review L1). It carries no credential and nothing per
+request. The legacy UI image serves the file, which sets no marker.
+
 ## Shared mode
 
 ### Configuration
