@@ -148,7 +148,7 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 | 0 | PROD-01.5 | Shared fixture profiles and broker versions | P1 | M1 | infra | — | — | compose | B | Done |
 | 0 | PROD-04.0 | Decide the Kafka administrative path | P1 | M2 | research | — | — | compose | B | Done |
 | 0 | PROD-08.4 | Publish a control-evidence mapping | P1 | M2 | docs | — | — | none | B | Proposed |
-| 0 | PROD-14.0 | Ship a working release | P1 | M1 | infra | — | — | none | B | In progress |
+| 0 | PROD-14.0 | Ship a working release | P1 | M1 | infra | — | — | none | B | Proposed |
 | 0 | PROD-14.3 | Positioning and design-partner kit | P1 | M2 | docs | — | OD-5 (publication) | none | C | Proposed |
 | 1 | PROD-00.2 | Build the engine from the vendored source | P1 | M1 | infra | 00.1 | OD-3 | compose | A | Proposed |
 | 1 | PROD-01.3 | Reach managed and mTLS clusters | P1 | M1 | impl | 01.5 | — | k8s | A | Proposed |
