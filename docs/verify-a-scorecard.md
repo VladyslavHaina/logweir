@@ -8,8 +8,10 @@ and interpret its limits using either Logweir or an independent Python verifier.
 A **drill scorecard** records one Kafka restore drill: its archive, measured
 RTO/RPO, sampled-record fingerprints and approval. Restore drills compare the
 restored data with **the archive**, without contacting the source cluster;
-`measured.rpo_source_relative_unmeasured_reason` records that limitation. The
-separate `logweir backup run` command does contact a source cluster.
+`measured.rpo_source_relative_unmeasured_reason` records that limitation, and
+[what the comparison cannot see](#a-pass-compares-the-restored-topic-with-the-archive-not-with-the-source)
+is listed below. The separate `logweir backup run` command does contact a source
+cluster.
 
 The scorecard is a [DSSE statement](https://github.com/secure-systems-lab/dsse).
 Its JSON is never modified to carry a signature: a sidecar signs the exact
@@ -349,6 +351,49 @@ itself cannot be verified.
 
 A signature authenticates the publisher's bytes. Assess the scope and strength
 of the signed claims separately.
+
+### A pass compares the restored topic with the archive, not with the source
+
+Restore drills fingerprint sampled records of the restored topic against the
+same records in the archive. A loss that happened when the archive was written
+is in both, so the comparison cannot see it. With engine 0.21.0:
+
+- **Transactions.** The backup reads uncommitted data. Records of aborted
+  transactions, records of transactions still open when the backup ran, and the
+  transactions' commit and abort markers are archived and restored as ordinary
+  records. A consumer of the restored topic sees all of them, even with
+  `isolation.level=read_committed`, because the restore does not produce
+  transactionally. The drill passes.
+- **`LogAppendTime` topics.** The archive keeps the timestamp each producer set,
+  not the time the broker appended the record, and the restore writes it as
+  `CreateTime`. Restored timestamps therefore differ from what the source topic
+  reported, and a point-in-time restore selects records by the producers'
+  clocks. The drill passes.
+- **Repeated header keys.** When a record carries the same header key more than
+  once, only one copy is archived and restored: at the first copy's position,
+  with the last copy's value. The drill does not detect it. A record that
+  already carried `x-original-offset` (a topic that was itself restored) keeps
+  only the backup's own, and a drill that samples such a record fails.
+- **Out-of-order timestamps.** Recovery-point selection reads each archive
+  segment's first and last record timestamps. When timestamps are not
+  increasing within a segment, a point-in-time restore can omit a record at or
+  before the requested point without the drill noticing; a record older than
+  every segment's first record is dropped from every restore, full or
+  point-in-time — a full restore's drill fails its count check, and a
+  point-in-time drill can pass; and a correct point-in-time restore can fail
+  the count check.
+
+Record order within a partition, keys, values, null versus empty keys, values
+and header values, tombstones, and the records a compacted source held when it
+was backed up are preserved.
+
+A broker outage or a lost produce acknowledgement during a restore can leave
+duplicates and a partial target; in every measured case Logweir exited `1` and
+signed nothing. See
+[stability.md](stability.md#a-broker-outage-during-a-restore-can-leave-a-partial-target-with-duplicates).
+
+[`docs/to-do/decisions/PROD-01.1-record-semantics.md`](to-do/decisions/PROD-01.1-record-semantics.md)
+records how each statement was measured.
 
 ### The sample window is not a claim about the whole archive
 

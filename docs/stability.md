@@ -368,6 +368,69 @@ restore process dies mid-run, there is no checkpoint to resume from: the drill r
 phase 0. The presence of the `checkpoint_state` key in the rendered `restore.yaml` does not
 imply resumability, and Logweir does not offer it in v0.1.
 
+### Transactional topics are restored with aborted records and markers as data
+
+The pinned engine captures with `READ_UNCOMMITTED` and archives transaction control records as
+ordinary records; the restore replays every archived record non-transactionally. A restored
+transactional topic therefore holds aborted records, records of transactions open at backup time,
+and one record per commit or abort marker, all visible to every consumer. Logweir does not claim
+transactional recovery. Measured by
+`e2e/tests/record_semantics.rs::transactional_topic_committed_input_versus_restored_output`
+([decision record §2.1](to-do/decisions/PROD-01.1-record-semantics.md#21-transactions)): seven
+markers and five aborted or open-transaction records came back as data, and the drill was signed
+`pass`.
+
+### Recovery-point selection uses segment first and last timestamps
+
+The archive describes each segment by its first and last record timestamps, not its minimum and
+maximum, and both the engine's segment selection and Logweir's window floor and count bound read
+those. When record timestamps are out of order within a segment: a record older than every
+segment's first record is dropped from every restore of that archive, full or point-in-time — a
+full restore's drill fails its count check, and a point-in-time drill can pass (measured: the same
+archive at a point the affected segment straddles was signed `pass`); a point-in-time restore
+omits a record at or before the point when its segment's first record is after the point, and the
+drill passes; and a correct point-in-time restore fails the count check when a segment whose first
+and last records are inside the window holds a later record. Measured by three rows of
+`e2e/tests/record_semantics.rs`
+([decision record §2.2](to-do/decisions/PROD-01.1-record-semantics.md#22-non-monotonic-and-equal-createtime-within-one-segment)):
+`non_monotonic_create_time_below_the_window_floor` (the dropped record, and both verdicts),
+`non_monotonic_create_time_skipped_at_the_point_in_time` (the omission, signed `pass`) and
+`non_monotonic_create_time_inside_a_wholly_inside_segment` (the correct restore signed
+`fail-integrity`).
+
+### `LogAppendTime` sources are restored with the producers' timestamps
+
+For a topic on `message.timestamp.type=LogAppendTime`, the archive holds the timestamp each
+producer set, not the broker's append time, and the restored topic reports it as `CreateTime`.
+Restored timestamps differ from what the source reported, and a point-in-time restore selects by
+the producers' clocks: in the measured case, a recovery point in 2001 restored records the broker
+appended in 2026. The drill passes in both cases. Measured by
+`e2e/tests/record_semantics.rs::log_append_time_source_versus_restored_output`
+([decision record §2.3](to-do/decisions/PROD-01.1-record-semantics.md#23-a-logappendtime-source)).
+
+### A repeated header key keeps one copy
+
+The pinned engine holds a record's headers as a map, both when it captures and when it restores.
+When a record carries the same header key more than once, only one copy is archived and restored:
+at the first copy's position, with the last copy's value, and the drill does not detect it. A
+record that already carried `x-original-offset` (a topic that was itself restored) keeps only the
+backup's own, so its earlier lineage is lost, and a drill that samples such a record fails.
+Measured by `e2e/tests/record_semantics.rs::keys_nulls_tombstones_and_duplicate_headers`
+([decision record §2.4](to-do/decisions/PROD-01.1-record-semantics.md#24-keys-nulls-tombstones-and-headers)).
+
+### A broker outage during a restore can leave a partial target with duplicates
+
+The engine resends a produce whose acknowledgement it did not receive, and does not produce
+idempotently, so a lost acknowledgement duplicates that batch in the target. An outage long
+enough for the broker to re-register can also end the restore early: Logweir then exits 1 with no
+scorecard, and the partial target — duplicates included — remains. A stall longer than Logweir's
+own 20-second client timeout can also fail a restore whose target is complete. No measured fault
+run was signed `pass`, and none reached the drill's comparison either, so what the drill makes of
+a duplicated target was not measured. Measured by
+`e2e/tests/record_semantics.rs::a_lost_produce_acknowledgement_during_restore`, an `#[ignore]`d
+row that freezes the broker and runs alone with `--ignored`
+([decision record §5.1](to-do/decisions/PROD-01.1-record-semantics.md#51-a-lost-produce-acknowledgement--run)).
+
 ### SASL/SCRAM-SHA-512: two clients, two trust stores, and one password variable
 
 Logweir dials a cluster with **two different clients**, and a SCRAM adopter
@@ -645,7 +708,11 @@ offers `[from_ms + 1 ms, to_ms - 1 ms]` and defaults to its end (WIZARD-DEFAULT-
 while treating `point_in_time` as exclusive would silently drop the boundary record. Both
 documents' floors are the minimum segment start over the topics that document names, so a
 receipt's `covered.from_ms` and a restore's `time_window_start` agree for the same archive and the
-same topics.
+same topics. Both rules apply to the records the engine reads: it selects segments by their first
+and last record timestamps, and a segment's start is its first record's timestamp, not its
+minimum, so with out-of-order timestamps a record at or before the point can sit in a segment that
+is never read, and a record older than every segment's first record is below every floor — see
+[Recovery-point selection uses segment first and last timestamps](#recovery-point-selection-uses-segment-first-and-last-timestamps).
 
 ### Interface I8's third stdout line is CONDITIONAL: `offset-report-key=` is present exactly when the engine wrote a report
 
