@@ -301,7 +301,19 @@ fn verdict(r: &Run) -> Value {
         "summary": pick("run ").into_iter().find(|l| l.starts_with("run ")),
         "count_bound": pick("manifest bounds the window"),
         "selection_verdicts": pick("selection verdict"),
+        // The last lines of each stream, so an exit without a scorecard still
+        // says why.
+        "stdout_tail": tail_lines(&r.out.stdout_utf8(), 25),
+        "stderr_tail": tail_lines(&r.out.stderr_utf8(), 25),
     })
+}
+
+fn tail_lines(text: &str, n: usize) -> Vec<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    lines[lines.len().saturating_sub(n)..]
+        .iter()
+        .map(|l| l.chars().take(800).collect())
+        .collect()
 }
 
 struct Restored {
@@ -1639,7 +1651,14 @@ fn recreated_topic_between_two_backups() {
 /// (`kafka/client.rs RESPONSE_TIMEOUT_SECS`), then thawed. The engine
 /// classifies "timed out" as a connection error and resends the same batch
 /// non-idempotently (`kafka/partition_router.rs:500-551`); whether the first
-/// copy was appended as well is what this row measures.
+/// copy was appended as well is what this row measures, and records.
+///
+/// A single-node KRaft broker frozen that long is also fenced and re-registers
+/// when it thaws, so the resend can meet a partition with no leader. The
+/// outcome therefore varies between runs (PROD-01.1 §5.1 records three), and
+/// the row asserts only what must hold in every one: the fault was injected,
+/// and Logweir never signs `pass` over an output that differs from the
+/// committed input.
 ///
 /// `#[ignore]`: it stops the shared broker for over a minute. Run it alone:
 /// `… --test record_semantics -- --ignored --exact
@@ -1712,7 +1731,27 @@ fn a_lost_produce_acknowledgement_during_restore() {
         (n, p.status.code(), u.status.code())
     });
     let v = handle.join().expect("the restore thread");
-    let observed = kafka::read_topic(&target, PARTS, Isolation::Committed).expect("target");
+    // Logweir's own account first, so a failed read below cannot lose it.
+    kafka::write_json(
+        &demo_dir()
+            .join("record-semantics")
+            .join("ack-fault-logweir.json"),
+        &json!({"paused_after_records": pause_result.map(|x| x.0), "logweir": v}),
+    );
+    // A single-node KRaft broker frozen past its session timeout is fenced
+    // and re-registers when it thaws, so for a moment its partitions have no
+    // leader. Read the target once leadership is back (bounded).
+    let deadline = Instant::now() + Duration::from_secs(180);
+    let observed = loop {
+        match kafka::read_topic(&target, PARTS, Isolation::Committed) {
+            Ok(o) => break o,
+            Err(e) if Instant::now() < deadline => {
+                eprintln!("[recsem] ack-fault: target not readable yet ({e}); retrying");
+                std::thread::sleep(Duration::from_secs(2));
+            }
+            Err(e) => panic!("target unreadable for 180 s after the thaw: {e}"),
+        }
+    };
     let e2e = end_to_end(&source, &source, |_| true, &observed);
     let dups: Vec<&Divergence> = e2e
         .iter()
@@ -1726,6 +1765,39 @@ fn a_lost_produce_acknowledgement_during_restore() {
         })
         .sum();
     let summary = summarize(&e2e);
+    // Per partition: the source-offset range and count of each class, so a
+    // duplicate can be read as whole batches (the engine produces 1,000
+    // records per request).
+    let ranges = |pick: &dyn Fn(&Divergence) -> Option<(i32, i64)>| -> Value {
+        let mut m: std::collections::BTreeMap<i32, (i64, i64, u64)> = Default::default();
+        for d in &e2e {
+            if let Some((p, o)) = pick(d) {
+                let e = m.entry(p).or_insert((i64::MAX, i64::MIN, 0));
+                e.0 = e.0.min(o);
+                e.1 = e.1.max(o);
+                e.2 += 1;
+            }
+        }
+        json!(m
+            .into_iter()
+            .map(|(p, (lo, hi, n))| json!({"partition": p, "from": lo, "to": hi, "count": n}))
+            .collect::<Vec<_>>())
+    };
+    let duplicate_ranges = ranges(&|d| match d {
+        Divergence::Duplicate {
+            partition,
+            source_offset,
+            ..
+        } => Some((*partition, *source_offset)),
+        _ => None,
+    });
+    let missing_ranges = ranges(&|d| match d {
+        Divergence::Missing {
+            partition,
+            source_offset,
+        } => Some((*partition, *source_offset)),
+        _ => None,
+    });
     eprintln!(
         "[recsem] ack-fault: target={} source={} end to end {summary:?}; logweir {v}",
         observed.len(),
@@ -1745,6 +1817,8 @@ fn a_lost_produce_acknowledgement_during_restore() {
             "source_records": source.len(),
             "duplicated_source_offsets": dups.len(),
             "extra_copies": copies_total,
+            "duplicate_ranges": duplicate_ranges,
+            "missing_ranges": missing_ranges,
             "end_to_end": { "by_class": summary, "first": render(&e2e).into_iter().take(40).collect::<Vec<_>>() },
             "logweir": v,
         }),
@@ -1753,22 +1827,37 @@ fn a_lost_produce_acknowledgement_during_restore() {
         pause_result.is_some(),
         "the restore finished before the first records could be observed; raise PER_PARTITION"
     );
-    assert!(
-        !e2e.iter().any(|d| matches!(d, Divergence::Missing { .. })),
-        "no committed record may be lost: {summary:?}"
-    );
+    // What holds in every sample, whatever the timing: Logweir never signs
+    // `pass` over an output that differs from the committed input, and an
+    // operational exit (1) leaves no scorecard claiming anything.
+    if v["outcome"].as_str() == Some("pass") {
+        assert!(
+            e2e.is_empty(),
+            "Logweir signed pass over a divergent output: {summary:?}"
+        );
+    }
+    if v["exit"].as_i64() == Some(1) {
+        assert!(
+            v["outcome"].is_null(),
+            "an operational failure must not come with a scorecard: {}",
+            v["outcome"]
+        );
+    }
 }
 
 /// **Why termination-based fault injection is blocked (`docs/stability.md`
-/// Later #13).** The `logweir restore run` process is killed with SIGKILL while
-/// the engine is producing, and the target is watched afterwards: if it keeps
-/// growing, the writer outlived the process that owned it, and "kill before or
-/// after an acknowledgement" cannot be injected through Logweir until a cancel
-/// reaches the engine.
+/// Later #13).** `logweir restore run` is killed with SIGKILL as soon as the
+/// first restored record lands, and the row then reads, without waiting, which
+/// engine containers are alive and how many records have landed, and keeps
+/// sampling the target for 20 s. If the engine is alive after its parent died
+/// and the target keeps growing, the writer outlived the process that owned
+/// it, and "kill before or after an acknowledgement" cannot be injected
+/// through Logweir until a cancel reaches the engine.
 ///
 /// It finds ONLY this worktree's processes and containers: the `logweir`
-/// command line names this worktree's `.e2e/` spec, and the engine container
-/// is the one bind-mounting this worktree's `harness::engine_mount()`. Both are
+/// command line names this worktree's `.e2e/` spec (resolved BEFORE the engine
+/// starts, so the kill costs one `kill` call), and the engine container is the
+/// one bind-mounting this worktree's `harness::engine_mount()`. Both are
 /// killed before the row ends, whatever it observed.
 #[test]
 #[ignore = "kills a restore mid-run and the engine container it leaves behind; run alone with --ignored"]
@@ -1807,101 +1896,99 @@ fn a_killed_restore_leaves_its_engine_writing() {
             .map(|w| w.iter().map(|(_, h)| h).sum())
             .unwrap_or(0)
     };
+    let run = |program: &str, args: &[&str], secs: u64| -> String {
+        let mut c = std::process::Command::new(program);
+        c.args(args);
+        kafka::output_within(c, secs)
+            .map(|o| o.stdout_utf8())
+            .unwrap_or_default()
+    };
+    let mount = engine_mount().display().to_string();
+    let volume = format!("volume={mount}");
+    let containers = || -> Vec<String> {
+        run("docker", &["ps", "-q", "--filter", &volume], 30)
+            .split_whitespace()
+            .map(str::to_string)
+            .collect()
+    };
+
+    // 1. The logweir PID, found while phases 0-5 run, before the engine
+    //    produces anything.
+    let pattern = format!("logweir restore run --spec {}/drill-", demo_dir().display());
+    let deadline = Instant::now() + Duration::from_secs(300);
+    let mut pids: Vec<String> = Vec::new();
+    while pids.is_empty() && Instant::now() < deadline && !handle.is_finished() {
+        pids = run("pgrep", &["-f", &pattern], 20)
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
+        if pids.is_empty() {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+    // 2. The first landed record, polled every 10 ms once the target exists.
     let deadline = Instant::now() + Duration::from_secs(900);
     let mut at_kill = None;
-    while Instant::now() < deadline && !handle.is_finished() {
-        if topic_exists(&target) {
+    let mut target_seen = false;
+    while Instant::now() < deadline && !handle.is_finished() && !pids.is_empty() {
+        if !target_seen {
+            target_seen = topic_exists(&target);
+        }
+        if target_seen {
             let n = landed(&target);
             if n > 0 && n < total {
                 at_kill = Some(n);
                 break;
             }
         }
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(10));
     }
-    let spec_marker = format!("{}/drill-", demo_dir().display());
-    let pids = kafka::output_within(
-        {
-            let mut c = std::process::Command::new("pgrep");
-            c.args(["-f", &format!("logweir restore run --spec {spec_marker}")]);
-            c
-        },
-        20,
-    )
-    .map(|o| o.stdout_utf8())
-    .unwrap_or_default();
-    let pids: Vec<String> = pids.split_whitespace().map(str::to_string).collect();
+    // 3. Kill, then read the engine's containers and the target at once.
     for pid in &pids {
-        let _ = kafka::output_within(
-            {
-                let mut c = std::process::Command::new("kill");
-                c.args(["-KILL", pid]);
-                c
-            },
-            20,
-        );
+        run("kill", &["-KILL", pid], 20);
     }
     let killed_at = Instant::now();
-    let after_kill = at_kill.map(|_| landed(&target));
-    std::thread::sleep(Duration::from_secs(20));
-    let twenty_s_later = at_kill.map(|_| landed(&target));
-    let mount = engine_mount().display().to_string();
-    let containers = |_: ()| -> Vec<String> {
-        kafka::output_within(
-            {
-                let mut c = std::process::Command::new("docker");
-                c.args(["ps", "-q", "--filter", &format!("volume={mount}")]);
-                c
-            },
-            30,
-        )
-        .map(|o| {
-            o.stdout_utf8()
-                .split_whitespace()
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
-    };
-    let orphans = containers(());
-    for id in &orphans {
-        let _ = kafka::output_within(
-            {
-                let mut c = std::process::Command::new("docker");
-                c.args(["kill", id]);
-                c
-            },
-            60,
-        );
+    let alive_after_kill = containers();
+    let landed_after_kill = landed(&target);
+    // 4. Growth after the parent is gone, once a second for 20 s.
+    let mut samples: Vec<(u64, i64)> = Vec::new();
+    for _ in 0..20 {
+        std::thread::sleep(Duration::from_secs(1));
+        samples.push((killed_at.elapsed().as_millis() as u64, landed(&target)));
     }
-    let left = containers(());
+    let alive_20s_later = containers();
+    for id in &alive_20s_later {
+        run("docker", &["kill", id], 60);
+    }
+    let left = containers();
     let v = handle.join().expect("the restore thread");
     kafka::write_json(
         &demo_dir().join("record-semantics").join("kill.json"),
         &json!({
             "row": "kill",
             "records_total": total,
-            "landed_when_killed": at_kill,
             "logweir_pids_killed": pids,
-            "landed_just_after_kill": after_kill,
-            "landed_20s_after_kill": twenty_s_later,
-            "seconds_watched": killed_at.elapsed().as_secs(),
-            "engine_containers_found_after_kill": orphans,
+            "landed_when_killed": at_kill,
+            "engine_containers_alive_right_after_kill": alive_after_kill,
+            "landed_right_after_kill": landed_after_kill,
+            "landed_samples_ms_after_kill": samples,
+            "engine_containers_alive_20s_after_kill": alive_20s_later,
             "engine_containers_left_after_cleanup": left,
             "logweir": v,
         }),
     );
     eprintln!(
-        "[recsem] kill: landed {at_kill:?} at kill, {twenty_s_later:?} 20 s later; \
-         orphaned engine containers {orphans:?}, left {left:?}"
-    );
-    assert!(
-        at_kill.is_some(),
-        "the restore finished before it could be killed"
+        "[recsem] kill: landed {at_kill:?} at kill, {landed_after_kill} right after, samples \
+         {samples:?}; engine containers alive after kill {alive_after_kill:?}, 20 s later \
+         {alive_20s_later:?}, left {left:?}"
     );
     assert!(
         !pids.is_empty(),
         "no logweir restore process was found to kill"
+    );
+    assert!(
+        at_kill.is_some(),
+        "the restore finished before it could be killed"
     );
     assert!(
         left.is_empty(),
