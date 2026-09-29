@@ -9200,3 +9200,378 @@ mod p12_controller_read_retry {
         }
     }
 }
+
+// ===========================================================================
+// FX-2 — `spec.runnerResources` reaches the runner container, or the Restore
+// is refused. Never dropped, never clamped.
+// ===========================================================================
+
+/// The fixture `Restore` with `spec.runnerResources` set to `resources`.
+fn restore_with_resources(resources: Value) -> Restore {
+    let mut value: Value =
+        serde_json::from_str(&restore_json(PLAN_BYTES, APPROVAL, NAME)).expect("fixture JSON");
+    value["spec"]["runnerResources"] = resources;
+    serde_json::from_value(value).expect("the fixture is a Restore")
+}
+
+/// The block the FX-2 rows apply. EVERY REQUEST DIFFERS FROM ITS LIMIT, so a
+/// swap anywhere between the object and the container is visible.
+fn fx2_resources() -> Value {
+    serde_json::json!({
+        "requests": {"cpu": "250m", "memory": "512Mi"},
+        "limits": {"cpu": "1", "memory": "2Gi"}
+    })
+}
+
+/// The one container of a `POST`ed Job.
+fn only_container(job: &Value) -> Value {
+    let containers = job["spec"]["template"]["spec"]["containers"]
+        .as_array()
+        .expect("the Job has containers");
+    assert_eq!(containers.len(), 1, "exactly one container: {containers:?}");
+    assert_eq!(containers[0]["name"], "runner");
+    containers[0].clone()
+}
+
+/// **FX-2, THE DEFECT'S OWN ROW, THROUGH THE RECONCILER.** An admitted
+/// `Restore` carrying `spec.runnerResources` gets a Job whose one container
+/// carries exactly those requests and limits — the request the reconciler
+/// `POST`s, not a builder called on the side.
+///
+/// Before FX-2 this container had no `resources` key at all.
+///
+/// MUTANTS: `resources: None` in `job::build` (dropped); requests and limits
+/// exchanged (swapped); `resources: None` in `runner_job_spec_with_policy`.
+#[tokio::test]
+async fn the_runner_container_carries_spec_runner_resources_exactly() {
+    let object = restore_with_resources(fx2_resources());
+    let (client, _rec, bodies) = mock_client_recording_bodies(admission_routes(
+        200,
+        approval_json(true, &plan_hash(), &plan_hash()),
+        200,
+        cluster_json(true, PLAINTEXT_AUTH),
+    ));
+    let outcome = reconcile_restore(
+        &object,
+        &client,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("a valid block is admitted");
+    assert!(outcome.created, "the Job was created");
+    let container = only_container(&posted_job(&bodies.lock().expect("readable")));
+    assert_eq!(
+        container["resources"],
+        fx2_resources(),
+        "the runner container asks for and is capped at exactly what spec.runnerResources \
+         says: {container}"
+    );
+}
+
+/// A `Restore` that asks for nothing gets a container with NO `resources`
+/// key — the pre-FX-2 shape, so the namespace's `LimitRange` defaults apply
+/// exactly as they did.
+///
+/// MUTANT: rendering an empty `resources: {}` (or a default) for `None`.
+#[tokio::test]
+async fn a_restore_that_asks_for_nothing_gets_no_resources_key() {
+    let (client, _rec, bodies) = mock_client_recording_bodies(admission_routes(
+        200,
+        approval_json(true, &plan_hash(), &plan_hash()),
+        200,
+        cluster_json(true, PLAINTEXT_AUTH),
+    ));
+    reconcile_restore(
+        &restore(),
+        &client,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("admitted");
+    let container = only_container(&posted_job(&bodies.lock().expect("readable")));
+    assert!(
+        container.get("resources").is_none(),
+        "absent spec.runnerResources renders no key at all: {container}"
+    );
+}
+
+/// **FX-2, THE REFUSAL.** A block the controller will not apply ends the
+/// object `Failed` / `ExecutionSpecInvalid`, naming the field — with ZERO
+/// `POST`s over a route table that HAS them, and BEFORE the approval is read.
+///
+/// THE APPROVAL IS UNVERIFIED ON PURPOSE. A controller that checked the block
+/// only where the Job is built would HOLD this object as
+/// `ApprovalNotVerified`, and an approver would sign a run that could never
+/// start; this row fails on exactly that.
+///
+/// MUTANTS: removing the early `runner_resources_of(restore)?` in STEP 1
+/// (every row becomes a hold); `validate` accepting everything (every row
+/// creates a Job — and the table has the route for it).
+#[tokio::test]
+async fn a_block_the_controller_will_not_apply_is_refused_before_anything_is_read() {
+    for (label, resources, field) in [
+        (
+            "above the memory ceiling",
+            serde_json::json!({"limits": {"memory": "16Gi"}}),
+            "spec.runnerResources.limits.memory",
+        ),
+        (
+            "above the cpu ceiling",
+            serde_json::json!({"requests": {"cpu": "8"}}),
+            "spec.runnerResources.requests.cpu",
+        ),
+        (
+            "a request above its limit",
+            serde_json::json!({"requests": {"memory": "4Gi"}, "limits": {"memory": "2Gi"}}),
+            "spec.runnerResources.requests.memory",
+        ),
+        (
+            "milli-bytes, the slip for Mi",
+            serde_json::json!({"limits": {"memory": "100m"}}),
+            "spec.runnerResources.limits.memory",
+        ),
+        (
+            "a zero limit",
+            serde_json::json!({"limits": {"cpu": "0"}}),
+            "spec.runnerResources.limits.cpu",
+        ),
+    ] {
+        let (client, recorder, bodies) = mock_client_recording_bodies(admission_routes(
+            200,
+            approval_json(false, &plan_hash(), &plan_hash()),
+            200,
+            cluster_json(true, PLAINTEXT_AUTH),
+        ));
+        let outcome = reconcile_restore(
+            &restore_with_resources(resources),
+            &client,
+            &unobserved_scorecard,
+            &unverified_evidence,
+            now(),
+        )
+        .await
+        .expect("a refusal is an answer, not an error");
+        assert_eq!(
+            outcome.terminal_state.as_deref(),
+            Some(weirkeeper::conditions::TERMINAL_STATE_EXECUTION_SPEC_INVALID),
+            "{label}: {outcome:?}"
+        );
+        assert!(!outcome.created, "{label}");
+        assert_eq!(outcome.requeue, Requeue::AwaitChange, "{label}: terminal");
+        let bodies = bodies.lock().expect("readable").clone();
+        assert_eq!(post_count(&bodies, "/jobs"), 0, "{label}: no Job");
+        assert_eq!(
+            post_count(&bodies, "/configmaps"),
+            0,
+            "{label}: no ConfigMap"
+        );
+        let calls = recorder.lock().expect("readable").clone();
+        assert!(
+            calls.iter().all(|c| !path(&c.uri).contains("/approvals/")),
+            "{label}: refused before the approval is even read: {calls:?}"
+        );
+        let status = &patched_statuses(&bodies)[0];
+        assert_eq!(status["phase"], "Failed", "{label}: {status}");
+        assert_eq!(
+            status["reason"], "ExecutionSpecInvalid",
+            "{label}: {status}"
+        );
+        let failed = status["conditions"]
+            .as_array()
+            .and_then(|cs| cs.iter().find(|c| c["type"] == "Failed"))
+            .unwrap_or_else(|| panic!("{label}: a Failed condition: {status}"));
+        assert_eq!(failed["status"], "True");
+        assert_eq!(failed["reason"], "ExecutionSpecInvalid");
+        let message = failed["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains(field) && message.contains("create a new Restore"),
+            "{label}: the message names the field and the remedy: {message}"
+        );
+    }
+}
+
+/// The pure builder refuses exactly what the reconcile refuses and carries
+/// exactly what it admits — ONE function, so the Job can never carry a value
+/// the object would have been refused for.
+///
+/// MUTANT: dropping the validation from `runner_job_spec_with_policy` while
+/// keeping the early refusal.
+#[test]
+fn the_job_builder_refuses_what_the_reconcile_refuses() {
+    let refused = runner_job_spec(
+        &restore_with_resources(serde_json::json!({"limits": {"cpu": "4001m"}})),
+        &cluster(true),
+        &[KEY_ID_LIVE.to_string()],
+        &approval(true),
+        &legacy_trust(),
+        now(),
+    );
+    match refused {
+        Err(weirkeeper::controllers::restore::RestoreError::Refused(state, message)) => {
+            assert_eq!(
+                state,
+                weirkeeper::conditions::TERMINAL_STATE_EXECUTION_SPEC_INVALID
+            );
+            assert!(
+                message.contains("spec.runnerResources.limits.cpu"),
+                "{message}"
+            );
+        }
+        other => panic!("an above-ceiling block renders no Job spec: {other:?}"),
+    }
+    let spec = runner_job_spec(
+        &restore_with_resources(fx2_resources()),
+        &cluster(true),
+        &[KEY_ID_LIVE.to_string()],
+        &approval(true),
+        &legacy_trust(),
+        now(),
+    )
+    .expect("a valid block renders");
+    let rendered = spec.resources.expect("the spec carries the block");
+    let pairs = |m: &std::collections::BTreeMap<String, String>| {
+        m.iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(pairs(&rendered.requests), vec!["cpu=250m", "memory=512Mi"]);
+    assert_eq!(pairs(&rendered.limits), vec!["cpu=1", "memory=2Gi"]);
+}
+
+/// **FX-2, THE QUOTA HALF: never a silent stuck Job.** The Job is created;
+/// the namespace's `ResourceQuota` (or `LimitRange`) then refuses its pod, and
+/// the only trace is the job controller's `FailedCreate` event. The `Restore`
+/// says so — `RunnerReady=False`, reason `PodCreationForbidden`, the scalar
+/// `REASON` column, and a diagnostic carrying the admission's own words — and
+/// once the finding has held for `failFastSeconds` the Job's deadline is
+/// collapsed rather than left to run out.
+#[tokio::test]
+async fn a_runner_pod_the_namespace_quota_rejects_is_reported_and_failed_fast() {
+    let object = restore_with_resources(fx2_resources());
+    let quota = "Error creating: pods \\\"logweir-restore-incident-4471-x2b9c\\\" is forbidden: \
+                 exceeded quota: compute, requested: limits.memory=2Gi, used: \
+                 limits.memory=7Gi, limited: limits.memory=8Gi";
+    let job = format!(
+        r#"{{"apiVersion":"batch/v1","kind":"Job",
+  "metadata":{{"name":"{NAME}","namespace":"{NS}","uid":"{JOB_UID}",
+    "creationTimestamp":"2026-09-10T11:55:00Z",
+    "ownerReferences":[{{"apiVersion":"logweir.dev/v1alpha1","kind":"Restore","name":"{NAME}","uid":"{UID}","controller":true,"blockOwnerDeletion":true}}]}},
+  "spec":{{"template":{{"spec":{{"containers":[],"restartPolicy":"Never"}}}}}},
+  "status":{{}}}}"#
+    );
+    let events = format!(
+        r#"{{"apiVersion":"v1","kind":"EventList","metadata":{{}},"items":[
+  {{"apiVersion":"v1","kind":"Event",
+    "metadata":{{"name":"{NAME}.17f","namespace":"{NS}"}},
+    "involvedObject":{{"apiVersion":"batch/v1","kind":"Job","name":"{NAME}","namespace":"{NS}","uid":"{JOB_UID}"}},
+    "reason":"FailedCreate","type":"Warning","message":"{quota}"}}]}}"#
+    );
+    let routes = |job: &str, events: &str| {
+        let mut table = running_routes_with(
+            r#"{"apiVersion":"v1","kind":"PodList","metadata":{},"items":[]}"#.to_string(),
+            String::new(),
+        );
+        for route in &mut table {
+            match (route.method, route.path_suffix) {
+                ("GET", "/jobs/logweir-restore-incident-4471") => route.body = job.to_string(),
+                ("GET", "/events") => route.body = events.to_string(),
+                _ => {}
+            }
+        }
+        table
+    };
+
+    // ---- the first pass: reported, not yet cancelled ---------------------
+    let (client, _rec, bodies) = mock_client_recording_bodies(routes(&job, &events));
+    reconcile_restore(
+        &object,
+        &client,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("the reconcile succeeds");
+    let seen = bodies.lock().expect("readable").clone();
+    let status = &patched_statuses(&seen)[0];
+    assert!(
+        conditions_of(status).contains(&(
+            "RunnerReady".to_string(),
+            "False".to_string(),
+            "PodCreationForbidden".to_string()
+        )),
+        "the Restore names why its runner cannot start: {status}"
+    );
+    assert_eq!(
+        status["reason"], "PodCreationForbidden",
+        "the REASON column"
+    );
+    assert_eq!(
+        status["progress"]["diagnostics"][0]["code"], "PodCreateRejected",
+        "{status}"
+    );
+    let said = status["progress"]["diagnostics"][0]["message"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        said.contains("exceeded quota") && said.contains("limits.memory=2Gi"),
+        "the admission's own words reach the object: {said}"
+    );
+    assert_eq!(
+        status["phase"], "Running",
+        "nothing is decided yet: {status}"
+    );
+    assert!(
+        !seen
+            .iter()
+            .any(|b| b.method == "PATCH" && path(&b.uri).contains("/jobs/")),
+        "a finding seen for the first time is not failed fast"
+    );
+
+    // ---- failFastSeconds later: the deadline is collapsed ----------------
+    let mut stuck = object.clone();
+    let seen_at = "2026-09-10T11:55:00Z";
+    stuck.status = Some(
+        serde_json::from_value(serde_json::json!({
+            "phase": "Running",
+            "progress": {
+                "stage": "Queued",
+                "reason": "PodCreationForbidden",
+                "lastTransitionTime": seen_at,
+                "lastObservedTime": seen_at,
+                "diagnostics": [{
+                    "code": "PodCreateRejected",
+                    "severity": "Error",
+                    "message": "exceeded quota: compute",
+                    "object": {"kind": "Job", "name": NAME},
+                    "firstSeen": seen_at,
+                    "lastSeen": seen_at,
+                    "count": 20
+                }]
+            }
+        }))
+        .expect("a RestoreStatus"),
+    );
+    let (client, _rec, bodies) = mock_client_recording_bodies(routes(&job, &events));
+    reconcile_restore(
+        &stuck,
+        &client,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        // Exactly the default `failFastSeconds` (300 s) after `firstSeen`.
+        now(),
+    )
+    .await
+    .expect("the reconcile succeeds");
+    let seen = bodies.lock().expect("readable").clone();
+    let cancel = seen
+        .iter()
+        .find(|b| b.method == "PATCH" && path(&b.uri).contains("/jobs/"))
+        .expect("the Job's deadline is collapsed once the finding has held for failFastSeconds");
+    let patch: Value = serde_json::from_str(&cancel.body).expect("JSON");
+    assert_eq!(patch["spec"]["activeDeadlineSeconds"].as_i64(), Some(1));
+}
