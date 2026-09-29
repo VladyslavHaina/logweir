@@ -325,6 +325,59 @@ mod tests {
         );
     }
 
+    /// **The no-misfire direction (FX-4 review M4, mutant K1): the common
+    /// case.** A topic with NO override answers only broker and default
+    /// entries; the engine keeps none of them, so its manifest record is
+    /// empty and EQUAL to what Logweir read — `captured`, with the effective
+    /// timestamp type from the broker's default. It stays `captured` beside a
+    /// denied neighbour, whose refusal emptied every record in the run: the
+    /// empty record is still the accurate one for this topic (measured live
+    /// by the review, `plain` beside `denied`).
+    #[test]
+    fn a_read_with_no_override_beside_an_empty_manifest_record_is_captured() {
+        let observed = observe(
+            &Scripted(Ok(vec![
+                (
+                    "plain".into(),
+                    Ok(vec![
+                        entry("cleanup.policy", "delete", ConfigSourceKind::DefaultConfig),
+                        entry(
+                            "message.timestamp.type",
+                            "CreateTime",
+                            ConfigSourceKind::DefaultConfig,
+                        ),
+                        entry(
+                            "retention.ms",
+                            "604800000",
+                            ConfigSourceKind::DynamicDefaultBrokerConfig,
+                        ),
+                    ]),
+                ),
+                (
+                    "denied".into(),
+                    Err(KafkaError::NotAuthorized(
+                        "denied (DescribeConfigs …)".into(),
+                    )),
+                ),
+            ])),
+            &names(&["plain", "denied"]),
+        );
+        let coverage = classify(&observed, &manifest(&[("plain", &[]), ("denied", &[])]));
+        assert_eq!(
+            coverage["plain"],
+            TopicConfigCoverage {
+                coverage: "captured".into(),
+                reason: None,
+                timestamp_type: Some(EffectiveConfigValue {
+                    value: "CreateTime".into(),
+                    source: "defaultConfig".into(),
+                }),
+            },
+            "a no-override topic whose empty record is accurate is captured"
+        );
+        assert_eq!(coverage["denied"].coverage, "captureDenied");
+    }
+
     #[test]
     fn a_read_the_manifest_agrees_with_is_captured_and_records_the_effective_timestamp_type() {
         let observed = observe(

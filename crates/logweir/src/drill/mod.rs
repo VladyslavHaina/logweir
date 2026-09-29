@@ -1665,7 +1665,15 @@ pub struct Ctx {
     pub source_config_coverage: SourceConfigCoverage,
 }
 
-fn context(spec_text: String, allowed_text: String, contract: bool) -> Result<Ctx, DrillError> {
+/// `source_config_coverage` is what the VERIFIED point binding established
+/// (FX-4): the context is BORN with it, so no later assignment can be dropped
+/// between the binding check and the phases that read it (review L1, X4).
+fn context(
+    spec_text: String,
+    allowed_text: String,
+    contract: bool,
+    source_config_coverage: SourceConfigCoverage,
+) -> Result<Ctx, DrillError> {
     let spec: DrillSpec = serde_yaml::from_str(&spec_text)
         .map_err(|e| DrillError::Operational(format!("drill spec does not parse: {e}")))?;
     let allowed: AllowedClusters = serde_json::from_str(&allowed_text)
@@ -1796,10 +1804,9 @@ fn context(spec_text: String, allowed_text: String, contract: bool) -> Result<Ct
         archive,
         store,
         target_tls_ca_file,
-        // UNKNOWN until the caller sets what a verified point binding
-        // established (`execute_for_reporting`). A plan bound to no point
-        // keeps it: there is no signed capture record to read.
-        source_config_coverage: SourceConfigCoverage::unknown(),
+        // What `check_v2_bindings` verified; UNKNOWN for a plan bound to no
+        // point, because there is then no signed capture record to read.
+        source_config_coverage,
     })
 }
 
@@ -2357,13 +2364,16 @@ fn execute_for_reporting(
                 Some(authenticated_spec),
             ),
         };
-    let outcome = match context(startup.spec_text, startup.allowed_text, store_contract) {
-        Ok(mut c) => {
-            // FX-4: what the VERIFIED point binding established about each
-            // source topic's configuration capture. Unknown for an unbound plan.
-            c.source_config_coverage = bindings.source_config_coverage;
-            execute_with_prevalidated(args, run_id, &c, &signer, approved)
-        }
+    // FX-4: the context is built WITH what the VERIFIED point binding
+    // established about each source topic's configuration capture (unknown for
+    // an unbound plan); `tests::the_run_context_is_built_with_the_verified_coverage`.
+    let outcome = match context(
+        startup.spec_text,
+        startup.allowed_text,
+        store_contract,
+        bindings.source_config_coverage,
+    ) {
+        Ok(c) => execute_with_prevalidated(args, run_id, &c, &signer, approved),
         Err(error) => Err(error),
     };
     (outcome, Some(authenticated_spec))
@@ -3806,6 +3816,62 @@ mod tests {
     //! omission this build keeps shipping — so they are pinned here, inside
     //! the crate, where the private items are nameable.
     use super::*;
+
+    /// The text of the top-level `fn <name>(` in this file, up to its closing
+    /// brace at column 0.
+    fn fn_body<'a>(src: &'a str, name: &str) -> &'a str {
+        let start = src
+            .find(&format!("\nfn {name}("))
+            .unwrap_or_else(|| panic!("drill/mod.rs has no top-level `fn {name}(`"));
+        let rest = &src[start + 1..];
+        let end = rest
+            .find("\n}\n")
+            .unwrap_or_else(|| panic!("`fn {name}` has no closing brace at column 0"));
+        &rest[..end + 2]
+    }
+
+    /// **FX-4 review L1: the glue mutant X4.** The coverage the VERIFIED point
+    /// binding established must reach the context phases 3 and 7 read.
+    /// `execute_for_reporting` is the only path from a verified binding to a
+    /// running phase, and the unit suite cannot drive it past `context`
+    /// without dialling a broker, so this guard reads the source: `context`
+    /// takes the coverage and builds the `Ctx` WITH it, and the one call site
+    /// passes `bindings.source_config_coverage`. Nothing on that path may
+    /// substitute UNKNOWN. X4 (the call site passing
+    /// `SourceConfigCoverage::unknown()`, or `context` storing UNKNOWN whatever
+    /// it is given) fails here. The behavioural twin is the live row
+    /// `e2e/tests/config_coverage.rs::capture_coverage_reaches_the_receipt_the_catalog_and_drill_parity`,
+    /// whose point-bound restore reads `captureDenied`/`notCaptured`, never
+    /// `unknown`.
+    #[test]
+    fn the_run_context_is_built_with_the_verified_coverage() {
+        let src = include_str!("mod.rs");
+        let run = fn_body(src, "execute_for_reporting");
+        let call = run
+            .split("match context(")
+            .nth(1)
+            .and_then(|r| r.split(") {").next())
+            .expect("execute_for_reporting builds its context with `match context(…) {`");
+        assert!(
+            call.contains("bindings.source_config_coverage"),
+            "the run context must be built WITH the verified binding's coverage; the call \
+             passes: {call}"
+        );
+        assert!(
+            !run.contains("SourceConfigCoverage::unknown()"),
+            "execute_for_reporting must not substitute UNKNOWN for the verified coverage"
+        );
+        let ctx = fn_body(src, "context");
+        assert!(
+            ctx.contains("source_config_coverage: SourceConfigCoverage,")
+                && ctx.contains("        source_config_coverage,\n    })"),
+            "context() must take the coverage and store exactly what it is given"
+        );
+        assert!(
+            !ctx.contains("SourceConfigCoverage::unknown()"),
+            "context() must not store UNKNOWN whatever it is given"
+        );
+    }
 
     fn a_scorecard() -> Scorecard {
         serde_json::from_str(include_str!("../../../../e2e/fixtures/scorecard-pass.json"))

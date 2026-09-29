@@ -1174,6 +1174,47 @@ mod tests {
         assert_eq!(got[5].value, None, "a withheld value stays withheld");
     }
 
+    /// **The no-misfire direction (FX-4 review M4, mutant R1).** Most topics
+    /// carry NO override: an authorised describe of one answers every entry
+    /// from the broker or the built-in defaults, and none from the topic (31
+    /// entries on 3.7.1, 33 on 4.3.1, measured). Such an answer is a
+    /// successful read with every entry kept — a refusal keyed on "no
+    /// topic-override entry" instead of "no entry at all" would sign
+    /// `captureDenied` for the common case while every other test passed.
+    #[test]
+    fn an_answer_with_no_topic_override_is_a_successful_read_with_every_entry() {
+        use crate::reader::ConfigSourceKind;
+        use rdkafka::admin::ConfigSource as S;
+        let got = super::RdKafkaReader::topic_answer_with(
+            "plain",
+            topic_resource(
+                "plain",
+                vec![
+                    entry("cleanup.policy", Some("delete"), S::Default),
+                    entry("message.timestamp.type", Some("CreateTime"), S::Default),
+                    entry("min.insync.replicas", Some("1"), S::StaticBroker),
+                    entry("retention.ms", Some("604800000"), S::DynamicDefaultBroker),
+                    entry("segment.bytes", Some("1073741824"), S::DynamicBroker),
+                ],
+            ),
+            || panic!("metadata must not be read for an answer that has entries"),
+        )
+        .expect("an answer with entries and no override is a successful read");
+        assert_eq!(got.len(), 5, "every entry is kept: {got:?}");
+        assert!(
+            got.iter()
+                .all(|e| e.source != ConfigSourceKind::DynamicTopicConfig),
+            "the fixture really carries no topic override: {got:?}"
+        );
+        assert_eq!(
+            got.iter()
+                .find(|e| e.name == "message.timestamp.type")
+                .map(|e| (e.value.as_deref(), e.source)),
+            Some((Some("CreateTime"), ConfigSourceKind::DefaultConfig)),
+            "the effective timestamp type and its source survive"
+        );
+    }
+
     /// A per-resource error code, should a later rdkafka ever report one, is
     /// classified exactly as `classify_topic_error` classifies it.
     #[test]

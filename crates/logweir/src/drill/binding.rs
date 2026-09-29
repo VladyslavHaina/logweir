@@ -224,10 +224,36 @@ pub fn verify_point_binding(
     }
     Ok(Some(VerifiedPoint {
         point_id: point.point_id.clone(),
-        // Read only NOW, after every check above: these bytes are the approved
-        // ones, signed by a trusted key, over the manifest the archive holds.
-        config_coverage: logweir_core::backup_receipt::SourceConfigCoverage::from_receipt(&receipt),
+        config_coverage: verified_coverage(&point.point_id, &receipt),
     }))
+}
+
+/// **FX-4.** The coverage a verified point lends phases 3 and 7 — read only
+/// after every check in [`verify_point_binding`], so these bytes are the
+/// approved ones, signed by a trusted key, over the manifest the archive
+/// holds. A signature proves who wrote them, not that they are coherent: a
+/// receipt that contradicts itself (`validate_invariants`, the eleven arms
+/// both verifiers enforce — e.g. a 1.0.x document carrying `config_coverage`,
+/// arm 6) lends NOTHING, and its coverage reads UNKNOWN rather than being
+/// believed (review L2). The restore itself is not refused on that ground:
+/// the binding's own checks all passed, and UNKNOWN only makes parity report
+/// `notAssessed`.
+fn verified_coverage(
+    point_id: &str,
+    receipt: &logweir_core::backup_receipt::BackupReceipt,
+) -> logweir_core::backup_receipt::SourceConfigCoverage {
+    match receipt.validate_invariants() {
+        Ok(()) => logweir_core::backup_receipt::SourceConfigCoverage::from_receipt(receipt),
+        Err(why) => {
+            tracing::warn!(
+                point_id,
+                why = %why,
+                "the bound point's receipt contradicts itself; its configuration capture \
+                 coverage is read as UNKNOWN"
+            );
+            logweir_core::backup_receipt::SourceConfigCoverage::unknown()
+        }
+    }
 }
 
 /// The mounted evidence keyring, parsed -- or the refusal that there is none.
@@ -866,6 +892,40 @@ mod tests {
             verified.config_coverage.of("orders"),
             ConfigCoverage::Unknown,
             "a 1.0.0 receipt carries no block: unknown, never captured"
+        );
+    }
+
+    /// **FX-4 review L2.** A receipt both verifiers refuse lends no coverage,
+    /// even though a trusted key signed it: here a 1.0.0 document carrying a
+    /// `captured` block (arm 6). The binding still verifies (its own checks
+    /// pass), and the coverage reads UNKNOWN, never `captured`. Mutant: copy
+    /// the block without `validate_invariants` → `Captured`, and this fails.
+    #[test]
+    fn a_signed_receipt_that_contradicts_itself_lends_unknown_coverage() {
+        use logweir_core::backup_receipt::{ConfigCoverage, TopicConfigCoverage};
+        let a = archive_with_receipt(|r| {
+            // format_version stays "1.0.0": arm 6 refuses the block under it.
+            r.config_coverage = Some(BTreeMap::from([(
+                "orders".to_string(),
+                TopicConfigCoverage {
+                    coverage: "captured".into(),
+                    reason: None,
+                    timestamp_type: None,
+                },
+            )]));
+        });
+        let verified = verify_point_binding(
+            &plan_with(Some(a.binding.clone())),
+            &a.store,
+            Some(&a.keys),
+            chrono::Utc::now(),
+        )
+        .expect("the binding's own checks pass: digests, signature, manifest")
+        .expect("a bound plan names its point");
+        assert_eq!(
+            verified.config_coverage.of("orders"),
+            ConfigCoverage::Unknown,
+            "a self-contradicting receipt's `captured` is not believed"
         );
     }
 
