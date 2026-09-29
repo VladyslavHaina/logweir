@@ -145,7 +145,7 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 | 0 | PROD-01.1 | Prove record and transaction behaviour | P1 | M2 | research | — | — | compose | B | Done |
 | 0 | PROD-01.4 | Define topic identity and generations | P1 | M2 | research | — | — | none | B | Done |
 | 0 | PROD-01.5 | Shared fixture profiles and broker versions | P1 | M1 | infra | — | — | compose | B | In progress |
-| 0 | PROD-04.0 | Decide the Kafka administrative path | P1 | M2 | research | — | — | compose | B | In progress |
+| 0 | PROD-04.0 | Decide the Kafka administrative path | P1 | M2 | research | — | — | compose | B | Done |
 | 0 | PROD-08.4 | Publish a control-evidence mapping | P1 | M2 | docs | — | — | none | B | Proposed |
 | 0 | PROD-14.0 | Ship a working release | P1 | M1 | infra | — | — | none | B | Proposed |
 | 0 | PROD-14.3 | Positioning and design-partner kit | P1 | M2 | docs | — | OD-5 (publication) | none | C | Proposed |
@@ -155,13 +155,17 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 | 1 | PROD-14.1 | Simple install and emergency recovery kit | P1 | M1 | impl | 14.0, 01.2 | — | k8s | A | Proposed |
 | 1 | PROD-08.1 | Complete archive integrity and exact counts | P1 | M2 | impl | 01.1 | — | compose | A | Proposed |
 | 1 | PROD-05.1 | Capture topic configuration with coverage | P1 | M2 | impl | FX-4, 01.5 | — | compose | A | Proposed |
-| 1 | PROD-04.1 | Archive consumer position evidence | P1 | M2 | impl | 04.0, 01.4, FX-1 | — | compose | A | Proposed |
+| 1 | PROD-04.1 | Archive consumer position evidence | P1 | M2 | impl | 04.0, 04.0a, 04.0d, 01.4, FX-1 | — | compose | A | Proposed |
 | 1 | PROD-02.1 | Honest coverage for scheduled backups | P1 | M2 | impl | 01.4 | — | k8s | A | Proposed |
 | 1 | PROD-07.1 | Resolve checkpoint and delivery semantics | P2 | M3 | research | 01.1 | — | none | B | Proposed |
 | 1 | PROD-09.3 | Decide archive data protection | P2 | M3 | research | 00.1 | — | none | B | Proposed |
 | 1 | PROD-01.1a | Detect transactional archives; refuse by default, label an approved override | P1 | M2 | impl | 01.1, FX-6 | — | compose | A | Proposed |
 | 1 | PROD-01.1b | Make recovery-point selection safe for out-of-order timestamps | P1 | M2 | impl | 01.1 | — | compose | A | Proposed |
 | 1 | PROD-01.4a | Topic IDs through DescribeTopics (the first wrapper under OD-6's policy) | P1 | M2 | impl | 01.4 | OD-6 | compose | A | Proposed |
+| 1 | PROD-04.0a | Committed positions through the safe consumer API | P1 | M2 | impl | 04.0 | — | compose | A | Proposed |
+| 1 | PROD-04.0b | Group and ACL calls inside OD-6's perimeter | P1 | M2 | impl | 04.0 | OD-6 | compose | A | Proposed |
+| 1 | PROD-04.0c | Amendment D names the engine's group subcommands | P2 | M3 | docs | 04.0 | OD-3; owner sign-off (rule 8) | none | B | Proposed |
+| 1 | PROD-04.0d | Fixtures for groups and ACLs (`acl` profile, `groups` helper, streams-protocol variant, share-state settings) | P1 | M2 | infra | 04.0, 01.5 | — | compose | B | Proposed |
 | 3 | PROD-01.4b | Upstream DescribeTopics in rust-rdkafka (the exit for 01.4a) | P3 | M3 | impl | 01.4a | — | none | B | Proposed |
 | 2 | PROD-02.2 | Capture incrementally | P1 | M2 | impl | 02.1, 00.1 | — | compose | A | Proposed |
 | 2 | PROD-03.0 | Flag schema-dependent topics | P1 | M2 | impl | — | — | compose | A | Proposed |
@@ -179,7 +183,7 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 | 3 | PROD-02.4 | Streaming protection with a coverage timeline | P2 | M3 | impl | 02.3 | — | k8s | A | Proposed |
 | 3 | PROD-03.1 | Capture a usable registry dependency set | P2 | M3 | impl | 03.0, 01.2 | OD-2 | compose | A | Proposed |
 | 3 | PROD-03.2 | Preview and execute schema-aware recovery | P2 | M3 | impl | 03.1, 08.1 | OD-2 | k8s | A | Proposed |
-| 3 | PROD-05.3 | Export access policy for review | P2 | M3 | impl | 04.0, 05.1 | — | compose | A | Proposed |
+| 3 | PROD-05.3 | Export access policy for review | P2 | M3 | impl | 04.0, 04.0b, 04.0d, 05.1 | — | compose | A | Proposed |
 | 3 | PROD-07.2 | Make interruption honest | P2 | M3 | impl | 07.1 | — | k8s | A | Proposed |
 | 3 | PROD-07.3 | Resume within proven semantics | P2 | M3 | impl | 07.2, 00.3 | OD-3 | k8s | A | Proposed |
 | 3 | PROD-08.2 | Measure recovery objectives | P2 | M3 | impl | 08.1 | — | k8s | A | Proposed |
@@ -458,6 +462,36 @@ PLAT prerequisites that must be Done before a task ships. Research and contract 
 - **Acceptance:** A decision record per operation with evidence against the 4.x fixture; group-type handling defined (share and streams groups reported as not captured unless supported).
 - **Tests/evidence:** Prototype calls against PROD-01.5's 4.x profile.
 - **Dependencies:** None. **Handoff:** `decisions/PROD-04.0-admin-path.md` and ADR amendments.
+
+**Completion record — Done (2026-09-29), PROD-04.0.**
+- **Ownership:** worker `prod-04-0` (one run and one fix round), independent Tier-B review `claude/prod-04-0.review.md`. The review was ACCEPT-WITH-FIXES with 1 HIGH, 5 MEDIUM and 11 LOW; the HIGH re-check gave ACCEPT. Merged as `51aeefd2` (branch tip `00cf81fd`). The branch changes docs only; links, labels, `doc_lint` and `just lint` passed with rc 0.
+- **Decision record:** [`decisions/PROD-04.0-admin-path.md`](decisions/PROD-04.0-admin-path.md). The route per operation:
+
+  | Operation | Route |
+  | --- | --- |
+  | List groups by type | librdkafka ListConsumerGroups inside OD-6's perimeter, joined with a name listing |
+  | Describe groups | DescribeConsumerGroups, for ids already classified |
+  | Fetch offsets | the safe consumer API, with RequireStable |
+  | Commit offsets | the safe consumer API, from a non-member; the broker refuses it while the group has members |
+  | Describe ACLs | DescribeAcls, guarded by two positive probes that tell "no authorizer" from "denied" |
+  | Create ACLs | no product route |
+  | DescribeProducers, ListTransactions | unsupported; only a raw-protocol client reaches them |
+
+  The engine route is recommended against for every operation, which feeds OD-3 and OD-6's option (c).
+- **Group types:** classic and consumer groups are captured. Share, streams and other-protocol groups are `excluded: GroupTypeNotCaptured`. An id missing from every listing is `failed: NotVisibleToPrincipal` when a targeted lookup is refused, and `excluded: GroupNotFound` only when one answers. Absence never means offset 0.
+- **Measured traps** (Kafka 4.3.1, and 3.9.2 where it differs):
+  - rdkafka 0.36.2's safe `fetch_group_list` aborts on any member-less group (fixed in 0.37.0);
+  - the classic describe reports every non-classic or absent group as `Dead`;
+  - librdkafka's DescribeAcls reports "no authorizer" and "not authorised" alike as 0 bindings;
+  - ListGroups silently shows a caller only the groups it may Describe;
+  - an empty streams group accepts an outside commit.
+- **Input to OD-6:** four operations need librdkafka calls the safe API lacks (the typed listing, describe, DescribeAcls, DescribeCluster). Measured cost: 117 shared lines, plus 30–45 lines per call. Fetch and commit need no `unsafe` under any option. §7 tabulates what each OD-6 option leaves PROD-04.1, 04.2 and 05.3.
+- **Class sweep:** "denied reads as defaults" (T13) reaches five shipped consumers, including a restore readiness check that reports `ready` on a refused DescribeConfigs. They are handed to FX-4, which is in flight.
+- **Proposed text** for the ADR 0004 amendment (perimeter-neutral) and Amendment D. Neither landed, per rule 8.
+- **Upstream reports proposed (not filed):** librdkafka T9 and T3; rust-rdkafka PR #785's missing wrappers and T13. Filing them publicly needs the owner's OK.
+- **Left for PROD-04.1's brief** (the reviewer's non-blocking LOWs): "no new third-party crate" wording at :135; §0's summary aligned with §5's missing-group rule; ten `examples/` targets that also lack `forbid(unsafe_code)`.
+- **Artifacts:** `claude/artifacts/prod-04-0/`.
+- **Rows added:** PROD-04.0a–d. PROD-04.1 now also depends on 04.0a and 04.0d, and PROD-05.3 on 04.0b and 04.0d.
 
 ### PROD-04.1 — Archive consumer position evidence
 
