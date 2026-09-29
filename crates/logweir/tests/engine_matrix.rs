@@ -299,25 +299,11 @@ fn the_seed_refuses_a_bad_digest_mode_before_any_work() {
         ),
         ("sometimes", Some("0"), "must be `required` or `optional`"),
     ] {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("bin")).unwrap();
-        let marker = dir.path().join("docker-was-called");
-        write_executable(
-            &dir.path().join("bin/docker"),
-            &format!(
-                "#!/usr/bin/env bash\ntouch '{}'\nexit 1\n",
-                marker.display()
-            ),
-        );
-        let mut cmd = Command::new("bash");
-        cmd.arg(root().join("scripts/e2e-seed.sh"))
-            .env("LOGWEIR_SEED_SEGMENT_SHA256", mode)
-            .env_remove("LOGWEIR_SEED_REFRESH_FIXTURES");
+        let mut env = vec![("LOGWEIR_SEED_SEGMENT_SHA256".to_string(), mode.to_string())];
         if let Some(refresh) = refresh {
-            cmd.env("LOGWEIR_SEED_REFRESH_FIXTURES", refresh);
+            env.push(("LOGWEIR_SEED_REFRESH_FIXTURES".into(), refresh.into()));
         }
-        with_path(&mut cmd, &dir.path().join("bin"));
-        let ran = run_bounded(cmd, 60);
+        let (ran, docker_ran) = seed_with(&env);
         assert_eq!(
             ran.status.code(),
             Some(1),
@@ -330,9 +316,127 @@ fn the_seed_refuses_a_bad_digest_mode_before_any_work() {
             ran.transcript()
         );
         assert!(
-            !marker.exists(),
+            !docker_ran,
             "{mode}/{refresh:?}: docker ran before the mode was checked"
         );
+    }
+}
+
+/// Runs `scripts/e2e-seed.sh` in a clean environment holding only `env`
+/// (a stack is chosen by its variables, so an inherited slot must not leak in),
+/// with a `docker` that records being called and fails. Returns the run and
+/// whether docker ran.
+fn seed_with(env: &[(String, String)]) -> (Ran, bool) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("bin")).unwrap();
+    let marker = dir.path().join("docker-was-called");
+    write_executable(
+        &dir.path().join("bin/docker"),
+        &format!(
+            "#!/usr/bin/env bash\ntouch '{}'\nexit 1\n",
+            marker.display()
+        ),
+    );
+    let mut cmd = Command::new("bash");
+    cmd.arg(root().join("scripts/e2e-seed.sh"))
+        .env_clear()
+        .env("HOME", std::env::var("HOME").unwrap_or_default())
+        .envs(env.iter().cloned());
+    with_path(&mut cmd, &dir.path().join("bin"));
+    let ran = run_bounded(cmd, 60);
+    (ran, marker.exists())
+}
+
+/// `export K=V` lines of `e2e/compose/stack-env.sh --slot <n>`, PROD-01.5's
+/// one source of a slot's variables.
+fn slot_env(slot: u32) -> Vec<(String, String)> {
+    let mut cmd = Command::new("bash");
+    cmd.arg(root().join("e2e/compose/stack-env.sh"))
+        .args(["--slot", &slot.to_string()]);
+    let ran = run_bounded(cmd, 60);
+    assert!(ran.status.success(), "{}", ran.transcript());
+    ran.stdout
+        .lines()
+        .filter_map(|l| l.strip_prefix("export "))
+        .filter_map(|kv| kv.split_once('='))
+        .map(|(k, v)| {
+            (
+                k.to_string(),
+                v.trim_matches('\'').trim_matches('"').to_string(),
+            )
+        })
+        .collect()
+}
+
+/// PROD-01.5 made the fixture refresh default to 0 on a slot and refuse 1
+/// there; the digest-mode guard tests that COMPUTED value, not the raw
+/// variable (review L5 of PROD-00.1: a guard reading
+/// `${LOGWEIR_SEED_REFRESH_FIXTURES:-1}` refused `optional` on every slot).
+/// `optional` must pass both stacks' checks and reach the stack; each stack's
+/// own refusal is the negative control.
+#[test]
+fn optional_digests_work_on_a_slot_and_on_the_default_stack() {
+    const MODE_REFUSAL: &str = "optional needs LOGWEIR_SEED_REFRESH_FIXTURES=0";
+    const SLOT_REFUSAL: &str = "refreshed from the DEFAULT stack only";
+    let optional = (
+        "LOGWEIR_SEED_SEGMENT_SHA256".to_string(),
+        "optional".to_string(),
+    );
+    let refresh = |v: &str| ("LOGWEIR_SEED_REFRESH_FIXTURES".to_string(), v.to_string());
+    let slot2 = slot_env(2);
+    assert!(
+        slot2
+            .iter()
+            .any(|(k, v)| k == "COMPOSE_PROJECT_NAME" && v == "logweir-e2e-s2"),
+        "stack-env.sh --slot 2 names project logweir-e2e-s2: {slot2:?}"
+    );
+    let on_slot = |extra: Vec<(String, String)>| {
+        let mut env = slot2.clone();
+        env.extend(extra);
+        env
+    };
+    // Passes the checks: the script goes on to the stack (docker, or the
+    // `.env` precondition when this checkout has none).
+    for (label, env) in [
+        ("slot 2, refresh unset", on_slot(vec![optional.clone()])),
+        (
+            "slot 2, refresh 0",
+            on_slot(vec![optional.clone(), refresh("0")]),
+        ),
+        (
+            "default stack, refresh 0",
+            vec![optional.clone(), refresh("0")],
+        ),
+    ] {
+        let (ran, docker_ran) = seed_with(&env);
+        assert!(
+            !ran.stderr.contains(MODE_REFUSAL) && !ran.stderr.contains(SLOT_REFUSAL),
+            "{label}: optional was refused: {}",
+            ran.transcript()
+        );
+        assert!(
+            docker_ran || ran.stderr.contains("e2e/compose/.env is missing"),
+            "{label}: the seed did not get past its checks: {}",
+            ran.transcript()
+        );
+    }
+    // Refused, before docker: each stack's own rule.
+    for (label, env, needle) in [
+        (
+            "default stack, refresh unset (defaults to 1)",
+            vec![optional.clone()],
+            MODE_REFUSAL,
+        ),
+        (
+            "slot 2, refresh 1",
+            on_slot(vec![optional.clone(), refresh("1")]),
+            SLOT_REFUSAL,
+        ),
+    ] {
+        let (ran, docker_ran) = seed_with(&env);
+        assert_eq!(ran.status.code(), Some(1), "{label}: {}", ran.transcript());
+        assert!(ran.stderr.contains(needle), "{label}: {}", ran.transcript());
+        assert!(!docker_ran, "{label}: docker ran before the refusal");
     }
 }
 
