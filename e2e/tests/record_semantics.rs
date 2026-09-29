@@ -531,6 +531,16 @@ fn summary_json(d: &[Divergence]) -> Value {
     json!({ "count": d.len(), "by_class": summarize(d), "items": render(d) })
 }
 
+/// The manifest's `configurations` block for `topic`: the explicit topic
+/// overrides the engine captured (`manifest.rs:143-146`), or `null`.
+fn manifest_configurations(a: &Archive, topic: &str) -> Value {
+    a.manifest["topics"]
+        .as_array()
+        .and_then(|ts| ts.iter().find(|t| t["name"].as_str() == Some(topic)))
+        .map(|t| t["configurations"].clone())
+        .unwrap_or(Value::Null)
+}
+
 fn segments_json(a: &Archive) -> Value {
     Value::Array(
         a.segments
@@ -602,6 +612,14 @@ fn record_outcome(
         "source_committed_records": committed.len(),
         "archive_records": archive.records.len(),
         "archive_segments": segments_json(archive),
+        "manifest_topic_configurations": archive
+            .manifest["topics"]
+            .as_array()
+            .map(|ts| {
+                ts.iter()
+                    .map(|t| json!({"topic": t["name"], "configurations": t["configurations"]}))
+                    .collect::<Vec<_>>()
+            }),
         "capture": summary_json(capture),
         "restores": rs,
         "notes": extra,
@@ -1054,6 +1072,7 @@ fn log_append_time_source_versus_restored_output() {
         &cap,
         json!({
             "archive_holds_producer_create_time": archived_create_time,
+            "manifest_configurations": manifest_configurations(&archive, &topic),
             "point_in_time": pit,
             "target_timestamp_types": target_ts_types,
             "source_append_times": source.iter().map(|r| r.timestamp).collect::<Vec<_>>(),
@@ -1068,6 +1087,17 @@ fn log_append_time_source_versus_restored_output() {
     assert!(
         archived_create_time,
         "the archive must hold the producers' CreateTime"
+    );
+    // The per-RECORD timestamp type is not in the archive, but the topic's
+    // explicit `message.timestamp.type` override is in the manifest's
+    // `configurations` — the one place a later reader can learn the source
+    // was LogAppendTime (and only when it was a topic override the engine
+    // could describe; FX-4).
+    assert_eq!(
+        manifest_configurations(&archive, &topic)["message.timestamp.type"].as_str(),
+        Some("LogAppendTime"),
+        "the manifest records the topic's timestamp-type override: {}",
+        manifest_configurations(&archive, &topic)
     );
     assert_eq!(keys(&cap), want_cap, "capture: {:#?}", render(&cap));
     assert_eq!(
