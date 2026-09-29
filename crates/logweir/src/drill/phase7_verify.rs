@@ -1249,6 +1249,10 @@ fn classify_parity_all(
         };
         if let Some(why) = why {
             not_assessed.push(format!("{tgt}: configuration ({why})"));
+            // The fail-safe twin in the array every reader already shows
+            // (review M5): a reader that predates `not_assessed` must never
+            // see this topic's silence as parity.
+            unexpected_all.push(not_assessed_marker(tgt, why));
         }
         let unread = BTreeMap::new();
         let (source_cfg, target_cfg) = match &target_cfg {
@@ -1283,6 +1287,26 @@ fn classify_parity_all(
 /// The `not_assessed` reason for a topic whose SOURCE configuration was
 /// captured but whose TARGET configuration read was refused (FX-4, T13).
 pub const NOT_ASSESSED_TARGET_READ_DENIED: &str = "targetReadDenied";
+
+/// The entry phase 7 ALSO writes into `unexpected_divergence` for every topic
+/// it names in `not_assessed` (FX-4 fix round, review M5).
+///
+/// **Why.** `not_assessed` is new in format 1.1.0, so a reader that predates it
+/// — `verify_scorecard.py` 1.14.0, a `logweir drill show` or a person reading
+/// the JSON with a pre-FX-4 guide — sees only the two arrays it always had,
+/// and reads an empty `unexpected_divergence` as configuration parity. For a
+/// topic whose TARGET read was refused, the writer before FX-4 listed every
+/// source override there (it compared against an empty map, T13): noisy but
+/// fail-safe. Without this entry FX-4 would have turned that into silence.
+///
+/// **Shape.** `"<target topic>: configuration not assessed (<why>)"`, where
+/// `<why>` is the `not_assessed` reason. A configuration key never contains a
+/// space, so a reader that parses `"<topic>: <key>"` entries can tell this
+/// one apart; the authoritative list stays `not_assessed`.
+#[must_use]
+pub fn not_assessed_marker(target_topic: &str, why: &str) -> String {
+    format!("{target_topic}: configuration not assessed ({why})")
+}
 
 /// Wraps `DataEngine::validation_run` — see that method's doc comment
 /// (`logweir-core/src/engine.rs`) for why the trait needed a new default

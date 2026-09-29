@@ -1063,14 +1063,14 @@ fn each_phases_result_reaches_the_signed_document() {
          against the target topic: {:?}",
         sc.topic_parity.intentionally_deviated
     );
-    assert!(
-        sc.topic_parity.unexpected_divergence.is_empty(),
-        "{:?}",
-        sc.topic_parity.unexpected_divergence
-    );
     // FX-4: the fixture's plan binds no recovery point, so there is no signed
-    // record of what was captured, and phase 7 says so rather than letting
-    // the empty `unexpected_divergence` above read as configuration parity.
+    // record of what was captured. No key diverged, and phase 7 says so in
+    // `not_assessed` AND leaves its fail-safe marker in `unexpected_divergence`,
+    // so a reader older than `not_assessed` cannot read parity here (M5).
+    assert_eq!(
+        sc.topic_parity.unexpected_divergence,
+        vec!["drill-orders: configuration not assessed (unknown)".to_string()]
+    );
     assert_eq!(
         sc.topic_parity.not_assessed,
         Some(vec!["drill-orders: configuration (unknown)".to_string()])

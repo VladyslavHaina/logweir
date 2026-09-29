@@ -516,7 +516,13 @@ fn a_healthy_drill_reconciles_to_integrity_pass_and_reports_intended_parity_only
     assert_eq!(out.pass_rate(), Some(1.0));
     assert_eq!(out.records_restored, 50);
     assert_eq!(out.newest_restored_ts_ms, MATCHING_PAIR_BASE_TS + 49);
-    assert_eq!(out.topic_parity.unexpected_divergence, Vec::<String>::new());
+    // No key diverged; the one entry is the fail-safe marker of a run whose
+    // coverage is UNKNOWN (no bound receipt), which an older reader must never
+    // read as parity (FX-4 review M5).
+    assert_eq!(
+        out.topic_parity.unexpected_divergence,
+        vec!["drill-orders: configuration not assessed (unknown)".to_string()]
+    );
     assert!(out
         .topic_parity
         .intentionally_deviated
@@ -3240,12 +3246,77 @@ fn configuration_parity_is_not_assessed_unless_the_source_capture_was() {
         )
         .unwrap();
         assert_eq!(out.topic_parity.not_assessed, want);
-        assert_eq!(
-            out.topic_parity.unexpected_divergence,
-            vec!["drill-orders: min.insync.replicas".to_string()],
-            "the archive's own record is compared whatever the coverage"
-        );
+        // The archive's own record is compared whatever the coverage, and a
+        // topic that was not assessed ALSO carries its fail-safe marker there.
+        let mut expected = vec!["drill-orders: min.insync.replicas".to_string()];
+        for entry in want.iter().flatten() {
+            let why = entry
+                .strip_prefix("drill-orders: configuration (")
+                .and_then(|r| r.strip_suffix(')'))
+                .expect("the not_assessed shape");
+            expected.push(format!("drill-orders: configuration not assessed ({why})"));
+        }
+        expected.sort();
+        assert_eq!(out.topic_parity.unexpected_divergence, expected);
     }
+}
+
+/// **FX-4 review M5: what a reader older than `not_assessed` sees.** For
+/// every coverage state, a topic that phase 7 did not assess leaves a
+/// non-empty `unexpected_divergence` — the array `verify_scorecard.py` 1.14.0,
+/// a pre-FX-4 `drill show` and the pre-FX-4 guide all read — so no reader that
+/// ignores `not_assessed` can take its silence for parity. Only `captured` with
+/// a readable target and agreeing keys may leave the array empty.
+///
+/// Negative control: drop the marker from `classify_parity_all` and every
+/// not-assessed row fails, the `targetReadDenied` one included (the case the
+/// writer before FX-4 made noisy and FX-4 had made silent).
+#[test]
+fn a_topic_that_was_not_assessed_is_never_silent_to_an_older_reader() {
+    let quiet = |out: &logweir::drill::phase7_verify::VerifyOutcome, why: &str| {
+        assert!(
+            out.topic_parity.unexpected_divergence.contains(
+                &logweir::drill::phase7_verify::not_assessed_marker("drill-orders", why)
+            ),
+            "{why}: an older reader would read this topic's parity as clean: {:?}",
+            out.topic_parity.unexpected_divergence
+        );
+    };
+    for (why, coverage) in [
+        (
+            "unknown",
+            logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+        ),
+        ("captureDenied", receipt_coverage("captureDenied")),
+        ("notCaptured", receipt_coverage("notCaptured")),
+    ] {
+        let (store, facts, reader, engine) = healthy_parts();
+        let out = run(
+            &engine,
+            &reader,
+            &store,
+            &facts,
+            &sel_orders(),
+            &fixtures::mapping("orders", "drill-orders"),
+            &plan_orders_to_drill_orders(),
+            &coverage,
+        )
+        .unwrap();
+        quiet(&out, why);
+    }
+    let (store, facts, reader, engine) = healthy_parts();
+    let out = run(
+        &engine,
+        &RefusingTargetConfigs(reader),
+        &store,
+        &facts,
+        &sel_orders(),
+        &fixtures::mapping("orders", "drill-orders"),
+        &plan_orders_to_drill_orders(),
+        &receipt_coverage("captured"),
+    )
+    .unwrap();
+    quiet(&out, "targetReadDenied");
 }
 
 /// **FX-4 / T13, consumer 5.** A REFUSED read of the TARGET's configuration
@@ -3276,7 +3347,11 @@ fn a_refused_target_configuration_read_is_not_assessed_never_compared_as_empty()
             "drill-orders: configuration (targetReadDenied)".to_string()
         ])
     );
-    assert_eq!(out.topic_parity.unexpected_divergence, Vec::<String>::new());
+    // No KEY was compared; the one entry is the fail-safe marker (review M5).
+    assert_eq!(
+        out.topic_parity.unexpected_divergence,
+        vec!["drill-orders: configuration not assessed (targetReadDenied)".to_string()]
+    );
     assert!(
         !out.topic_parity
             .intentionally_deviated
