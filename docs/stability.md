@@ -46,22 +46,27 @@ frozen `1.0.0` one:
   topic assessed". A 1.0.0 document is decided exactly as before.
 - **The media types keep `version=1.0.0`.** That names the envelope's major,
   which did not change; the catalog index entry also stays `1.0.0`.
-- **Six receipt arms are added, and they are argued MINOR.** Arms 6–11 read
+- **Six receipt arms are added, and their classification is the owner's
+  decision OD-7, still pending.** The technical reading is MINOR: arms 6–11 read
   only the new block, so no document without it changes verdict, and the
-  corpus and parity gates re-prove that on every `just lint`. That is the
-  reading PROD-01.4 took for its planned `generations` arms. The rule above
-  calls a change to `validate_invariants` MAJOR, so two maintainers confirm or
-  overrule this reading ([MAINTAINERS.md](../MAINTAINERS.md)).
+  corpus and parity gates re-prove that on every `just lint`. The rule above
+  calls a change to `validate_invariants` MAJOR without distinguishing arms
+  that read only a new optional field.
 - **Readers built before FX-4 accept every 1.1.0 document** and ignore the new
   fields (measured: `docs/formats/backup-receipt.md`, "Upgrade, rollback and old
   receipts"). They check none of the six arms and print no coverage.
+- **A topic whose configuration parity was not assessed is never silent to
+  them.** Phase 7 also writes one entry, `"<target topic>: configuration not
+  assessed (<why>)"`, into the scorecard's existing `unexpected_divergence`
+  for every topic it names in `not_assessed`, so a reader that predates
+  `not_assessed` sees a divergence, never a clean list
+  ([the scorecard format](formats/drill-scorecard.md#topic_parity-and-what-its-silence-means)).
+  That widens what an existing array's entries can say. Under the rule above
+  that is a change of an existing field's meaning, so it is part of OD-7 too;
+  it only ever makes an older reader's conclusion weaker, never stronger.
 - **Rollback** is safe in both directions. An older `logweir` writes 1.0.0
   documents again, and their coverage then reads unknown. The 1.1.0 documents
   already written stay valid under both readers.
-- **The next receipt field is 1.2.0.** PROD-01.4's record planned `1.1.0` and
-  arms 6–10 for the receipt's `generations` block (PROD-02.1); those numbers
-  are now taken, so that block is `1.2.0`, its arms start at 12, and the Python
-  reader's version after `1.15.0` is `1.16.0`.
 
 ### The product API's OpenAPI document is pre-release, and says so
 

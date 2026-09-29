@@ -451,6 +451,23 @@ are still real; the SILENCE about it is not a finding. The reasons in
 parentheses are defined in the
 [scorecard format](formats/drill-scorecard.md#topic_parity-and-what-its-silence-means).
 
+Since format 1.1.0 each topic `not_assessed` names ALSO has one entry
+`"<target topic>: configuration not assessed (<why>)"` in
+`unexpected_divergence`, so a reader that predates `not_assessed` (this
+script before 1.15.0, a `logweir drill show` built before FX-4, or a guide
+written for 1.0.0) sees a divergence for it, never a clean list. A
+configuration key never contains a space, which tells such an entry from a key.
+
+**What "assessed" covers.** An assessed topic's parity compares the
+configuration OVERRIDES the engine captured — explicit topic-level settings on
+its 24-key allowlist — with the restored topic's values. A value the source
+topic inherited from a broker default is not in the archive's record and is
+never compared: a source whose `message.timestamp.type` is `LogAppendTime`
+from the broker's default restored as `CreateTime` shows no divergence even
+when every topic was assessed (measured live by FX-4). The backup receipt's
+`config_coverage` records that effective value and its source; comparing it is
+FX-8's, and the other effective values are PROD-05.1's.
+
 ### `engine_subreport` corroborates nothing about Logweir's integrity claim
 
 The current engine wrapper inherits the refusing default for `validation_run`,
@@ -558,7 +575,10 @@ reports `run_id`. Both refuse; this is not an acceptance disagreement.
 A verifier older than `1.15.0`, and a `logweir` built before FX-4, still
 accept a 1.1.0 receipt or scorecard, since they compare majors only; they ignore
 `config_coverage` and `not_assessed`, check none of the six coverage arms and
-print neither line.
+print neither line. A topic whose configuration parity was not assessed still
+reaches them, as its `configuration not assessed (<why>)` entry in
+`unexpected_divergence`, which `logweir drill show` prints in its `topic parity`
+row.
 
 **Rerun the current verifier over retained documents and sidecars checked with
 older versions.** Earlier `VALID` results may reflect weaker consistency or

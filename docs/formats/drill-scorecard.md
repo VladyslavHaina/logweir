@@ -10,6 +10,9 @@ is frozen beside it: format **1.1.0** (FX-4) added the nested optional
 [`topic_parity.not_assessed`](#topic_parity-and-what-its-silence-means), the first
 field added after the v0.1 tags and therefore a MINOR bump with a new schema file
 ([`docs/stability.md`](../stability.md#the-v010-tag-is-the-compatibility-boundary)).
+The fail-safe entries it also writes into the existing
+`topic_parity.unexpected_divergence` widen what that array's entries can say;
+their classification is part of the owner's decision OD-7.
 The payload type keeps `version=1.0.0`, the major-1 envelope. A worked example is
 [`e2e/fixtures/scorecard-pass.json`](../../e2e/fixtures/scorecard-pass.json) —
 read [`e2e/fixtures/README.md`](../../e2e/fixtures/README.md) first, which lists
@@ -370,7 +373,7 @@ fields.
 | `integrity.pass_rate_measured` | float \| null | `matching / sampled`. **Null in three cases**, and a `byte-fingerprint` document with a null rate is well-formed: the level is not `byte-fingerprint`; not every selection reached a conclusion; or `records_sampled` is 0 (a zero denominator is withheld, never published as NaN). |
 | `integrity.restoredPrincipalCouldConsume` | bool \| null | **SP3.** Null, never `false`, until then. The wire name is camelCase deliberately and permanently: renaming it later would be a major bump. |
 | `topic_parity.intentionally_deviated` | string[] | Config keys the drill deliberately set differently on the target. |
-| `topic_parity.unexpected_divergence` | string[] | Config keys that differed and should not have. |
+| `topic_parity.unexpected_divergence` | string[] | Config keys that differed and should not have, as `"<target topic>: <key>"`. Since 1.1.0 also one fail-safe entry `"<target topic>: configuration not assessed (<why>)"` per topic `not_assessed` names ([below](#topic_parity-and-what-its-silence-means)). |
 | `topic_parity.not_assessed` | string[], **optional** (1.1.0) | The mapped target topics whose CONFIGURATION parity was not assessed, as `"<target topic>: configuration (<why>)"`. See [below](#topic_parity-and-what-its-silence-means). ABSENT means not recorded. |
 
 ### `topic_parity`, and what its silence means
@@ -394,7 +397,29 @@ Every other mapped topic is named in `not_assessed` with `<why>`:
 For a listed topic the two arrays above still name every difference the archive's
 own record shows — those are facts — but their SILENCE proves nothing. Partition
 count and replication factor come from metadata, not DescribeConfigs, and are
-classified either way. `not_assessed: []` is the claim that every mapped topic was
+classified either way.
+
+**The fail-safe entry.** For every topic it names in `not_assessed`, phase 7
+also writes `"<target topic>: configuration not assessed (<why>)"` into
+`unexpected_divergence`. `not_assessed` is new in 1.1.0, so a reader that
+predates it — `verify_scorecard.py` before 1.15.0, a `logweir drill show` built
+before FX-4, a person with a 1.0.0 guide — reads only the two arrays it always
+had, and must not see a clean list for a topic nobody assessed. For
+`targetReadDenied` this keeps what the writer before FX-4 produced, which
+compared the source's overrides with an empty map and listed them all. A
+configuration key never contains a space, so a parser of `"<topic>: <key>"`
+entries tells this one apart; `not_assessed` stays the authoritative list.
+Measured with a pre-FX-4 `logweir drill show` and `verify_scorecard.py` 1.14.0
+over a live 1.1.0 scorecard (the FX-4 report's fix round).
+
+**What "assessed" covers.** An assessed topic's parity compares the configuration
+OVERRIDES the engine captured (explicit topic-level settings on its 24-key
+allowlist) with the restored topic's values. A value the source inherited from a
+broker default is not in the archive's record and is never compared: a source
+whose `message.timestamp.type` is `LogAppendTime` from the broker's default,
+restored as `CreateTime`, shows no divergence under `not_assessed: []` (measured
+live by FX-4). The receipt's `config_coverage` records that effective value and
+its source for FX-8; the other effective values are PROD-05.1's. `not_assessed: []` is the claim that every mapped topic was
 assessed, and only phase 7 writes it; ABSENT — every 1.0.0 document, and one
 whose phase 7 never ran — means not recorded and is never read as that claim.
 `logweir drill verify`, `docs/verify_scorecard.py` and `logweir drill show` all

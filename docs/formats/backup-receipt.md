@@ -552,9 +552,10 @@ the_frozen_1_0_0_receipt_schema_is_still_the_1_0_0_schema` keeps it what it was.
   The signed fixture `e2e/fixtures/signed/backup-receipt.json` stays 1.0.0 and
   is that case.
 - **Rollback.** An older `logweir backup run` writes 1.0.0 receipts again: the
-  points it produces read coverage `unknown` and their restores report
-  configuration parity `not assessed`. Receipts already written at 1.1.0 stay
-  valid and verifiable.
+  points it produces read coverage `unknown`, so a restore of them by a runner
+  from FX-4 on reports configuration parity `not assessed` (a restore by an
+  older runner reports parity as it always did). Receipts already written at
+  1.1.0 stay valid and verifiable.
 - **Permissions.** `captured` needs the backup principal to hold
   `DescribeConfigs` on every backed-up topic (beside `Read` and `Describe`).
   Without it on one topic the backup still runs: that topic reads

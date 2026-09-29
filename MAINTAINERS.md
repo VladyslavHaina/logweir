@@ -31,13 +31,9 @@ relicense the whole.
 
 ## Format changes
 
-Changes to the signed formats' schemas (`schemas/logweir-drill-scorecard-*.json`,
-`schemas/logweir-backup-receipt-*.json`, `schemas/logweir-catalog-point-*.json`)
-follow the policy in [docs/stability.md](docs/stability.md): a minor adds optional
-fields only, with a new schema file beside the frozen old one, and a major changes
-an identity rule. A major bump needs two maintainer approvals. The first minor,
-`1.1.0` (FX-4), adds receipt arms that read only its new field and argues them
-MINOR; two maintainers confirm or overrule that reading.
+Changes to `schemas/logweir-drill-scorecard-1.0.0.json` follow the policy in
+[docs/stability.md](docs/stability.md): a minor adds optional fields only, a
+major changes an identity rule. A major bump needs two maintainer approvals.
 
 Documentation is licensed [CC-BY-4.0](docs/LICENSE-docs).
 
