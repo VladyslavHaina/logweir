@@ -769,23 +769,38 @@ mod tests {
         found.into_iter().next().unwrap()
     }
 
-    /// The upstream files `CHECKS` names, extracted ONCE per test process from
-    /// the pinned tarball with `tar` (bounded: killed after 60 s). Returns the
-    /// checkout root and the tag.
-    fn upstream_checkout() -> &'static (PathBuf, String) {
-        static CHECKOUT: std::sync::OnceLock<(PathBuf, String)> = std::sync::OnceLock::new();
-        CHECKOUT.get_or_init(|| {
+    /// The upstream files `CHECKS` names, extracted from the pinned tarball
+    /// with `tar` (bounded: killed after 60 s) into a directory of this
+    /// checkout's own, which is removed when the checkout is dropped -- a
+    /// test run leaves nothing behind in the temp directory.
+    struct Checkout {
+        dir: PathBuf,
+        /// `kafka-backup-<version>` inside `dir`: the upstream checkout root.
+        root: PathBuf,
+        tag: String,
+    }
+
+    impl Checkout {
+        fn extract() -> Checkout {
+            static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
             let (tarball, tag) = pinned_tarball();
             let top = format!("kafka-backup-{}", tag.trim_start_matches('v'));
-            let dest = std::env::temp_dir().join(format!(
-                "logweir-xtask-upstream-{}-{}",
+            let dir = std::env::temp_dir().join(format!(
+                "logweir-xtask-upstream-{}-{}-{}",
                 std::process::id(),
+                SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
                     .as_nanos()
             ));
-            std::fs::create_dir_all(&dest).unwrap();
+            std::fs::create_dir_all(&dir).unwrap();
+            // Constructed before `tar` runs, so a failed extraction is cleaned up too.
+            let checkout = Checkout {
+                root: dir.join(&top),
+                dir,
+                tag,
+            };
             let members: BTreeSet<String> = CHECKS
                 .iter()
                 .map(|c| format!("{top}/{}", c.upstream))
@@ -794,7 +809,7 @@ mod tests {
                 .arg("-xzf")
                 .arg(&tarball)
                 .arg("-C")
-                .arg(&dest)
+                .arg(&checkout.dir)
                 .args(&members)
                 .stdout(Stdio::null())
                 .stderr(Stdio::inherit())
@@ -820,13 +835,18 @@ mod tests {
                 "tar -xzf {} failed: {status}",
                 tarball.display()
             );
-            (dest.join(top), tag)
-        })
+            checkout
+        }
+
+        fn src(&self, rel: &str) -> String {
+            std::fs::read_to_string(self.root.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"))
+        }
     }
 
-    fn upstream_src(rel: &str) -> String {
-        let (root, _) = upstream_checkout();
-        std::fs::read_to_string(root.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"))
+    impl Drop for Checkout {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
     }
 
     fn vendored_src(file: &str) -> String {
@@ -837,16 +857,16 @@ mod tests {
     /// The checks of one vendored file, run against the real upstream sources
     /// with `ours` standing in for the file's text.
     fn run_file_with(file: &str, ours: &str, divergences: &[Divergence]) -> Report {
-        let (_, tag) = upstream_checkout();
+        let up = Checkout::extract();
         let mut report = Report::default();
         let mut used = BTreeSet::new();
         for check in CHECKS.iter().filter(|c| c.vendored == file) {
-            let theirs = upstream_src(check.upstream);
+            let theirs = up.src(check.upstream);
             compare(
                 check,
                 ours,
                 &theirs,
-                tag,
+                &up.tag,
                 divergences,
                 &mut used,
                 &mut report,
@@ -876,8 +896,9 @@ mod tests {
     /// green here compared all of them).
     #[test]
     fn the_vendored_shapes_agree_with_the_pinned_engine_source() {
-        let (up, tag) = upstream_checkout();
-        let r = run(&repo_root(), up, tag, CHECKS, DIVERGENCES).expect("every file reads");
+        let up = Checkout::extract();
+        let r =
+            run(&repo_root(), &up.root, &up.tag, CHECKS, DIVERGENCES).expect("every file reads");
         assert!(!r.drift, "drift at the pin:\n{}", r.lines.join("\n"));
         let pairs: usize = CHECKS.iter().map(|c| c.items.len()).sum();
         assert_eq!(r.compared.len(), pairs, "{:?}", r.compared);
@@ -1020,7 +1041,7 @@ pub struct ConsumerGroupEntry {
     /// difference is DRIFT too.
     #[test]
     fn divergences_are_exact_and_cannot_go_stale() {
-        let (up, tag) = upstream_checkout();
+        let up = Checkout::extract();
         let stale = [Divergence {
             vendored: "manifest.rs",
             item: "SegmentMetadata",
@@ -1029,7 +1050,7 @@ pub struct ConsumerGroupEntry {
             upstream: "String",
             why: "a test entry that describes nothing",
         }];
-        let r = run(&repo_root(), up, tag, CHECKS, &stale).unwrap();
+        let r = run(&repo_root(), &up.root, &up.tag, CHECKS, &stale).unwrap();
         let d = drift_lines(&r).join("\n");
         assert!(
             d.contains("SegmentMetadata.key: the declared divergence"),
