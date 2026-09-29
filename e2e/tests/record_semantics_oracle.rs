@@ -466,6 +466,107 @@ fn a_missing_engine_lineage_header_is_not_tolerated_under_append_lineage() {
     assert!(matches!(d[0], Divergence::HeadersChanged { .. }), "{d:?}");
 }
 
+/// Review L1, mutant B: the source views decide an extra's class BEFORE its
+/// shape does. A committed record that happens to be control-shaped and was
+/// excluded by the window is `OutsideModel`; an uncommitted one is
+/// `Uncommitted`. Neither is a marker.
+#[test]
+fn a_control_shaped_record_in_a_source_view_is_classified_by_the_view() {
+    let shaped = |offset: i64| {
+        src(
+            0,
+            offset,
+            1_000 + offset,
+            Some(&[0, 0, 0, 1]),
+            Some(&[0, 0, 0, 0, 0, 3]),
+        )
+    };
+    let committed: Vec<Rec> = vec![shaped(0), shaped(1)];
+    let raw: Vec<Rec> = vec![shaped(0), shaped(1), shaped(2)];
+    let model: Vec<Rec> = vec![committed[0].clone()];
+    let t = restore_of(&raw);
+    let d = compare(&Comparison {
+        expected: &model,
+        committed: &committed,
+        raw_source: &raw,
+        observed: &t,
+        headers: HeaderModel::AppendLineage,
+        lineage: LineageFrom::Header,
+    });
+    assert_eq!(
+        d,
+        vec![
+            Divergence::Extra {
+                partition: 0,
+                target_offset: 1,
+                lineage: Some(1),
+                kind: ExtraKind::OutsideModel
+            },
+            Divergence::Extra {
+                partition: 0,
+                target_offset: 2,
+                lineage: Some(2),
+                kind: ExtraKind::Uncommitted
+            },
+        ]
+    );
+}
+
+/// Review L1, mutant A: the value's version bytes are part of the shape, and
+/// so is the absence of any header but the two lineage headers.
+#[test]
+fn near_misses_of_the_marker_shape_are_not_markers() {
+    for (what, v) in [
+        ("value version 00 01", &[0u8, 1, 0, 0, 0, 3][..]),
+        ("value version 01 00", &[1, 0, 0, 0, 0, 3][..]),
+    ] {
+        assert!(
+            !is_control_shaped(&src(0, 0, 0, Some(&[0, 0, 0, 1]), Some(v))),
+            "{what}"
+        );
+    }
+    let mut own_header = restored(
+        &src(0, 0, 0, Some(&[0, 0, 0, 1]), Some(&[0, 0, 0, 0, 0, 3])),
+        0,
+    );
+    assert!(
+        is_control_shaped(&own_header),
+        "the two lineage headers alone do not disqualify a marker"
+    );
+    own_header
+        .headers
+        .insert(0, ("trace".into(), Some(b"x".to_vec())));
+    assert!(
+        !is_control_shaped(&own_header),
+        "a record with its own header is not a marker"
+    );
+}
+
+/// Review L8: a later copy of a duplicated record is field-checked, so a
+/// tampered copy is reported, not mistaken for an exact duplicate.
+#[test]
+fn a_tampered_later_copy_is_reported_beside_the_duplicate() {
+    let s = fixture();
+    let mut t = restore_of(&s);
+    let mut again = restored(&s[0], 3);
+    again.value = Some(b"tampered".to_vec());
+    t.push(again);
+    assert_eq!(
+        end_to_end(&s, &s, &t),
+        vec![
+            Divergence::Duplicate {
+                partition: 0,
+                source_offset: 0,
+                copies: 2
+            },
+            Divergence::ValueChanged {
+                partition: 0,
+                source_offset: 0
+            },
+        ]
+    );
+}
+
 // ------------------------------------------------------- the helpers
 
 #[test]

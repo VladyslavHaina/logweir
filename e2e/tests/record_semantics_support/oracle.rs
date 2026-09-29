@@ -120,12 +120,23 @@ pub fn indexmap_collapse(h: &Headers) -> Headers {
 /// A Kafka transaction control record, recognised by shape: key
 /// `ControlRecordType` v0 (`00 00` version, `00 00` abort or `00 01`
 /// commit), value `EndTransactionMarker` v0 (`00 00` version and a 4-byte
-/// coordinator epoch). A consumer never returns one; a restore that writes
-/// one as data is what makes it visible.
+/// coordinator epoch), and no header but the two lineage headers the backup
+/// appends. A consumer never returns one; a restore that writes one as data is
+/// what makes it visible.
+///
+/// **A shape, not a proof.** A user record can have it (an integer key 0 or 1
+/// with a 6-byte value starting `00 00`), and a marker of another encoding
+/// version does not. Inside `compare` it only classifies an extra that is in
+/// NEITHER source view, which is where a control record lives; a product scan
+/// must confirm it against the capture-time offset gap (decision record §6.2).
 pub fn is_control_shaped(r: &Rec) -> bool {
     let key_ok = matches!(r.key.as_deref(), Some([0, 0, 0, 0]) | Some([0, 0, 0, 1]));
     let value_ok = matches!(r.value.as_deref(), Some(v) if v.len() == 6 && v[0] == 0 && v[1] == 0);
-    key_ok && value_ok
+    let headers_ok = r
+        .headers
+        .iter()
+        .all(|(k, _)| k == X_ORIGINAL_OFFSET || k == X_ORIGINAL_TIMESTAMP);
+    key_ok && value_ok && headers_ok
 }
 
 /// `Some(true)` for a commit marker, `Some(false)` for an abort marker.
@@ -335,8 +346,12 @@ pub fn compare(c: &Comparison<'_>) -> Vec<Divergence> {
         };
         let id = (r.partition, l);
         // A later copy of a lineage already seen is the duplicate reported
-        // above, and is neither re-matched nor judged for order.
+        // above. It is not judged for order or re-classified, but its FIELDS
+        // are checked, so a tampered copy is not mistaken for an exact one.
         if !seen.insert(id) {
+            if let Some(want) = expected.get(&id) {
+                check_fields(want, r, c.headers, &mut out);
+            }
             continue;
         }
         let hw = high_water.entry(r.partition).or_insert(i64::MIN);
@@ -385,6 +400,7 @@ pub fn compare(c: &Comparison<'_>) -> Vec<Divergence> {
     }
 
     out.sort();
+    out.dedup();
     out
 }
 
