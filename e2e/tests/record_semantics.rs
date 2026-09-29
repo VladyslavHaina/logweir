@@ -694,6 +694,15 @@ fn transactional_topic_committed_input_versus_restored_output() {
     run_txn(&mut p, &d, "open");
 
     let hwm_at_capture = kafka::high_watermarks(&topic, PARTS).expect("watermarks");
+    // The open-transaction probes, taken while D is open (see
+    // `kafka::watermarks_at` and `kafka::committed_position_at_eof`).
+    let wm_committed =
+        kafka::watermarks_at(&topic, PARTS, Isolation::Committed).expect("committed watermarks");
+    let wm_uncommitted = kafka::watermarks_at(&topic, PARTS, Isolation::Uncommitted)
+        .expect("uncommitted watermarks");
+    let eof_committed: Vec<(i32, Result<i64, String>)> = (0..PARTS)
+        .map(|part| (part, kafka::committed_position_at_eof(&topic, part)))
+        .collect();
     let backup_id = row.backup_id("txn");
     backup_ok(&backup_id, &[&topic], 1000);
     // D ends AFTER the capture, as an abort.
@@ -758,6 +767,15 @@ fn transactional_topic_committed_input_versus_restored_output() {
         &[("full", &r, &rep[..], &e2e[..])],
         &cap,
         json!({
+            "open_transaction_probe": {
+                "read_committed_watermarks": wm_committed,
+                "read_uncommitted_watermarks": wm_uncommitted,
+                "read_committed_position_at_eof": eof_committed
+                    .iter()
+                    .map(|(part, r)| json!({"partition": part, "position": r.as_ref().ok(), "error": r.as_ref().err()}))
+                    .collect::<Vec<_>>(),
+                "open_transaction_partitions": [0, 2],
+            },
             "hwm_at_capture": hwm_at_capture,
             "marker_offsets": markers,
             "uncommitted_offsets": uncommitted,
@@ -1708,5 +1726,155 @@ fn a_lost_produce_acknowledgement_during_restore() {
     assert!(
         !e2e.iter().any(|d| matches!(d, Divergence::Missing { .. })),
         "no committed record may be lost: {summary:?}"
+    );
+}
+
+/// **Why termination-based fault injection is blocked (`docs/stability.md`
+/// Later #13).** The `logweir restore run` process is killed with SIGKILL while
+/// the engine is producing, and the target is watched afterwards: if it keeps
+/// growing, the writer outlived the process that owned it, and "kill before or
+/// after an acknowledgement" cannot be injected through Logweir until a cancel
+/// reaches the engine.
+///
+/// It finds ONLY this worktree's processes and containers: the `logweir`
+/// command line names this worktree's `.e2e/` spec, and the engine container
+/// is the one bind-mounting this worktree's `harness::engine_mount()`. Both are
+/// killed before the row ends, whatever it observed.
+#[test]
+#[ignore = "kills a restore mid-run and the engine container it leaves behind; run alone with --ignored"]
+fn a_killed_restore_leaves_its_engine_writing() {
+    let mut row = Row::new("kill");
+    let topic = row.source_topic("kill", &[("message.timestamp.type", "CreateTime")]);
+    const PER_PARTITION: i64 = 20_000;
+    let pad = "y".repeat(200);
+    let fixture: Vec<Out> = (0..PARTS)
+        .flat_map(|p| {
+            let pad = pad.clone();
+            (0..PER_PARTITION).map(move |i| {
+                Out::kv(
+                    p,
+                    Some(T + i),
+                    &format!("kill-p{p}-{i}"),
+                    &format!("{i} {pad}"),
+                )
+            })
+        })
+        .collect();
+    kafka::produce_plain(&topic, &fixture).expect("produce");
+    let backup_id = row.backup_id("kill");
+    backup_ok(&backup_id, &[&topic], 1000);
+    let archive = kafka::read_archive(&backup_id, &topic).expect("archive");
+    let (prefix, target) = row.target("killed", &topic);
+    let spec = restore_spec(&backup_id, &topic, &prefix, None, archive_span(&archive));
+    let handle = std::thread::spawn(move || {
+        let mut o = RunOpts::new(&spec);
+        o.restore_run = true;
+        verdict(&run_with(o))
+    });
+    let total = PER_PARTITION * PARTS as i64;
+    let landed = |t: &str| -> i64 {
+        kafka::high_watermarks(t, PARTS)
+            .map(|w| w.iter().map(|(_, h)| h).sum())
+            .unwrap_or(0)
+    };
+    let deadline = Instant::now() + Duration::from_secs(900);
+    let mut at_kill = None;
+    while Instant::now() < deadline && !handle.is_finished() {
+        if topic_exists(&target) {
+            let n = landed(&target);
+            if n > 0 && n < total {
+                at_kill = Some(n);
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let spec_marker = format!("{}/drill-", demo_dir().display());
+    let pids = kafka::output_within(
+        {
+            let mut c = std::process::Command::new("pgrep");
+            c.args(["-f", &format!("logweir restore run --spec {spec_marker}")]);
+            c
+        },
+        20,
+    )
+    .map(|o| o.stdout_utf8())
+    .unwrap_or_default();
+    let pids: Vec<String> = pids.split_whitespace().map(str::to_string).collect();
+    for pid in &pids {
+        let _ = kafka::output_within(
+            {
+                let mut c = std::process::Command::new("kill");
+                c.args(["-KILL", pid]);
+                c
+            },
+            20,
+        );
+    }
+    let killed_at = Instant::now();
+    let after_kill = at_kill.map(|_| landed(&target));
+    std::thread::sleep(Duration::from_secs(20));
+    let twenty_s_later = at_kill.map(|_| landed(&target));
+    let mount = engine_mount().display().to_string();
+    let containers = |_: ()| -> Vec<String> {
+        kafka::output_within(
+            {
+                let mut c = std::process::Command::new("docker");
+                c.args(["ps", "-q", "--filter", &format!("volume={mount}")]);
+                c
+            },
+            30,
+        )
+        .map(|o| {
+            o.stdout_utf8()
+                .split_whitespace()
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+    };
+    let orphans = containers(());
+    for id in &orphans {
+        let _ = kafka::output_within(
+            {
+                let mut c = std::process::Command::new("docker");
+                c.args(["kill", id]);
+                c
+            },
+            60,
+        );
+    }
+    let left = containers(());
+    let v = handle.join().expect("the restore thread");
+    kafka::write_json(
+        &demo_dir().join("record-semantics").join("kill.json"),
+        &json!({
+            "row": "kill",
+            "records_total": total,
+            "landed_when_killed": at_kill,
+            "logweir_pids_killed": pids,
+            "landed_just_after_kill": after_kill,
+            "landed_20s_after_kill": twenty_s_later,
+            "seconds_watched": killed_at.elapsed().as_secs(),
+            "engine_containers_found_after_kill": orphans,
+            "engine_containers_left_after_cleanup": left,
+            "logweir": v,
+        }),
+    );
+    eprintln!(
+        "[recsem] kill: landed {at_kill:?} at kill, {twenty_s_later:?} 20 s later; \
+         orphaned engine containers {orphans:?}, left {left:?}"
+    );
+    assert!(
+        at_kill.is_some(),
+        "the restore finished before it could be killed"
+    );
+    assert!(
+        !pids.is_empty(),
+        "no logweir restore process was found to kill"
+    );
+    assert!(
+        left.is_empty(),
+        "engine containers survived cleanup: {left:?}"
     );
 }

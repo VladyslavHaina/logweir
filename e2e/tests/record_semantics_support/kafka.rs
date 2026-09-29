@@ -317,6 +317,77 @@ pub fn high_watermarks(topic: &str, partitions: i32) -> Result<Vec<(i32, i64)>, 
         .collect()
 }
 
+/// `(partition, low, high)` as `rd_kafka_query_watermark_offsets` answers a
+/// consumer configured at `iso`. Measured, not assumed, by the TXN row: if
+/// librdkafka sends its ListOffsets at the consumer's isolation level, the
+/// `read_committed` high mark is the last stable offset, and a gap between
+/// the two readings is an open transaction — a detection route that needs
+/// neither DescribeProducers nor `unsafe`.
+pub fn watermarks_at(
+    topic: &str,
+    partitions: i32,
+    iso: Isolation,
+) -> Result<Vec<(i32, i64, i64)>, String> {
+    let c: BaseConsumer = ClientConfig::new()
+        .set("bootstrap.servers", BOOTSTRAP)
+        .set("group.id", format!("recsem-wm-{}", nonce()))
+        .set("enable.auto.commit", "false")
+        .set(
+            "isolation.level",
+            match iso {
+                Isolation::Committed => "read_committed",
+                Isolation::Uncommitted => "read_uncommitted",
+            },
+        )
+        .create()
+        .map_err(|e| format!("consumer: {e}"))?;
+    (0..partitions)
+        .map(|p| {
+            c.fetch_watermarks(topic, p, Duration::from_secs(5))
+                .map(|(lo, hi)| (p, lo, hi))
+                .map_err(|e| format!("watermarks {topic}/{p}: {e}"))
+        })
+        .collect()
+}
+
+/// The fetch position a `read_committed` consumer holds once it reports
+/// end-of-partition: where an open transaction stops it, if one does. A
+/// second, consumption-based reading of the last stable offset beside
+/// [`watermarks_at`].
+pub fn committed_position_at_eof(topic: &str, partition: i32) -> Result<i64, String> {
+    let c: BaseConsumer = ClientConfig::new()
+        .set("bootstrap.servers", BOOTSTRAP)
+        .set("group.id", format!("recsem-lso-{}", nonce()))
+        .set("enable.auto.commit", "false")
+        .set("enable.auto.offset.store", "false")
+        .set("enable.partition.eof", "true")
+        .set("isolation.level", "read_committed")
+        .create()
+        .map_err(|e| format!("consumer: {e}"))?;
+    let mut tpl = TopicPartitionList::new();
+    tpl.add_partition_offset(topic, partition, Offset::Beginning)
+        .map_err(|e| format!("assign {topic}/{partition}: {e}"))?;
+    c.assign(&tpl)
+        .map_err(|e| format!("assign {topic}/{partition}: {e}"))?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if Instant::now() > deadline {
+            return Err(format!("{topic}/{partition}: no end-of-partition in 30 s"));
+        }
+        match c.poll(Duration::from_millis(500)) {
+            Some(Err(KafkaError::PartitionEOF(p))) if p == partition => break,
+            Some(Err(e)) => return Err(format!("{topic}/{partition}: {e}")),
+            _ => {}
+        }
+    }
+    let pos = c
+        .position()
+        .map_err(|e| format!("position {topic}/{partition}: {e}"))?;
+    pos.find_partition(topic, partition)
+        .and_then(|e| e.offset().to_raw())
+        .ok_or_else(|| format!("{topic}/{partition}: no position"))
+}
+
 /// One manifest segment entry, as the engine wrote it.
 #[derive(Debug, Clone)]
 pub struct Segment {
