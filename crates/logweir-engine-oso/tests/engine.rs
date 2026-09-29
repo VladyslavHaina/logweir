@@ -474,6 +474,14 @@ fn a_real_non_empty_snapshot_is_described_and_read_back_as_the_engine_wrote_it()
         }
         other => panic!("expected Parsed, got {other:?}"),
     }
+    // FX-1 fix round (M1): a snapshot the engine really wrote is nothing to
+    // warn about.
+    let (facts2, notices) = engine.describe_with_notices(&set).unwrap();
+    assert!(notices.is_empty(), "{notices:?}");
+    assert_eq!(
+        facts2.consumer_group_snapshot_sha256,
+        facts.consumer_group_snapshot_sha256
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -485,8 +493,10 @@ fn a_real_non_empty_snapshot_is_described_and_read_back_as_the_engine_wrote_it()
 /// Now `describe()` publishes what it always published — present, with the
 /// digest of the bytes — and the typed read reports the content as
 /// `Unreadable`, with the reason: a VALUE about the archive, never an
-/// `Operational` error. Two such objects: the invented shape that stood in the
-/// vendored file before FX-1 (`offsets` a list), and one that is not JSON.
+/// `Operational` error — and, since the fix round, a NOTICE beside the facts,
+/// which `drill run` and `backup run` print. Two such objects: the invented
+/// shape that stood in the vendored file before FX-1 (`offsets` a list), and
+/// one that is not JSON.
 #[test]
 fn a_snapshot_that_is_not_the_engines_shape_is_reported_unreadable_and_refuses_nothing() {
     use logweir_engine_oso::engine::ConsumerGroupSnapshotRead;
@@ -521,6 +531,33 @@ fn a_snapshot_that_is_not_the_engines_shape_is_reported_unreadable_and_refuses_n
                     "{tag}: {reason}"
                 );
                 assert!(reason.contains(needle), "{tag}: {reason}");
+                // FX-1 fix round (M1): and it is TOLD. `describe_with_notices`
+                // — what `drill run` and `backup run` call — returns exactly
+                // one notice about the same object and the same bytes, with the
+                // same reason, beside the same facts.
+                let (facts2, notices) = engine
+                    .describe_with_notices(&set)
+                    .unwrap_or_else(|e| panic!("{tag}: {e}"));
+                assert_eq!(
+                    facts2.consumer_group_snapshot_sha256.as_deref(),
+                    Some(digest.as_str()),
+                    "{tag}"
+                );
+                assert_eq!(notices.len(), 1, "{tag}: {notices:?}");
+                let n = &notices[0];
+                assert_eq!(
+                    n.kind,
+                    logweir_engine_oso::engine::CONSUMER_GROUP_SNAPSHOT_UNREADABLE,
+                    "{tag}"
+                );
+                assert_eq!(n.key, key, "{tag}");
+                assert_eq!(n.sha256, digest, "{tag}");
+                assert_eq!(n.reason, reason, "{tag}");
+                assert!(
+                    n.message.contains("present but unreadable"),
+                    "{tag}: {}",
+                    n.message
+                );
             }
             other => panic!("{tag}: expected Ok(Unreadable), got {other:?}"),
         }
@@ -542,6 +579,7 @@ fn an_absent_or_empty_snapshot_behaves_as_before() {
         engine.consumer_group_snapshot(&set).unwrap(),
         ConsumerGroupSnapshotRead::Absent
     );
+    assert!(engine.describe_with_notices(&set).unwrap().1.is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 
     let empty = std::fs::read("../../e2e/fixtures/consumer-groups-snapshot-empty.json").unwrap();
@@ -556,6 +594,7 @@ fn an_absent_or_empty_snapshot_behaves_as_before() {
         }
         other => panic!("expected Parsed with zero groups, got {other:?}"),
     }
+    assert!(engine.describe_with_notices(&set).unwrap().1.is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }
 

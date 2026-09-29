@@ -243,7 +243,12 @@ pub fn run(
         .map_err(|e| BackupError::Operational(e.to_string()))?;
     let manifest_sha256 = logweir_core::ids::sha256_prefixed(&manifest_bytes);
 
-    let archive = engine.describe(&set)?;
+    // `describe_with_notices`, not `describe`: what the engine found that no
+    // signed field carries — today an unreadable consumer-groups snapshot
+    // beside this set's manifest — is told to the operator, never dropped. It
+    // changes nothing the receipt says.
+    let (archive, notices) = engine.describe_with_notices(&set)?;
+    crate::drill::surface_archive_notices(&mut std::io::stderr().lock(), &set.backup_id, &notices);
 
     // **ONE ENTRY PER NAMED TOPIC, AND NO OTHERS** — which is
     // `BackupReceipt::validate_invariants`'s arm 3, and which this loop has to
