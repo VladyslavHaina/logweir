@@ -2,7 +2,7 @@
 
 Research date: 2026-09-14. Re-validated and re-prioritized on 2026-09-23 against main `df5333f7`, the pinned engine source (`third_party/kafka-backup-v0.21.0.tar.gz`, read, not run) and the vendor pages in the source register. Current-state claims cite that revision; recheck them before implementing.
 
-Status: **on hold, loop-ready.** No task is dispatched. By the owner's instruction of 2026-09-23 the [platform improvements tracker](platform-improvements.md) finishes first, and expansion starts only on the owner's go-ahead (OD-1). This file owns market-informed expansion; the platform tracker owns the foundation, so complete foundation work there instead of implementing it twice. A loop runs this file through the [Loop contract](#loop-contract-claude-code) and the [Execution ledger](#execution-ledger).
+Status: **in progress.** The owner gave the go-ahead on 2026-09-28 (OD-1 released under option (a): every PLAT task has been Done since 2026-09-25). The loop started the same day. This file owns market-informed expansion; the platform tracker owns the foundation, so complete foundation work there instead of implementing it twice. A loop runs this file through the [Loop contract](#loop-contract-claude-code) and the [Execution ledger](#execution-ledger).
 
 ## Product direction
 
@@ -90,11 +90,11 @@ The loop never decides these. A row gated on an open decision stays Blocked; the
 
 | ID | Decision | Options | Recommendation | Blocks | State |
 | --- | --- | --- | --- | --- | --- |
-| OD-1 | When expansion starts | (a) after every PLAT task is Done and the owner says go; (b) additionally allow Wave 0 rows that need no docker-desktop change before the platform tracker completes; (c) hand FX-1…FX-7 to the platform run's defect table now | (c) now, (a) for the rest; (b) if agent capacity allows | Every row | On hold (owner instruction 2026-09-23) |
-| OD-2 | Product boundaries in `docs/stability.md` "Never" | Per entry: keep, narrow or reverse | Keep #1 (live topics) and allow PROD-15's original-name restore into an absent topic; keep #3 (PROD-12 is cutover verification) and #4 (PROD-13 deferred); decide #2 after PROD-03.0 shows how many protected topics depend on a registry, and if narrowed, allow schema resolution and selective import only (RBAC-MDS and CSFLE stay refused) | 03.1, 03.2, 12.1, 15.1 | Open |
-| OD-3 | Engine route per capability (proposed by PROD-00.1) | Upstream PR (bug-class fixes only); maintained MIT fork built from the vendored source (supersedes or scopes ruling GR6); Logweir-native path; declared unsupported | Build from source regardless (arm64, CVE patching, signed provenance); upstream PRs for bug-class fixes; native paths for offsets, ACLs and verification; fork only what upstream refuses | 00.2, 00.3, 02.3, 07.3, 11.2 | Open |
-| OD-4 | Provider and storage evidence | Accounts and budget for AWS (S3, MSK), Confluent Cloud, Redpanda Cloud, Aiven, Azure Event Hubs, GCS and Azure Blob; whether rule 6 lets a local runner reach remote endpoints | AWS S3 and MSK first (largest managed population; real conditional create and lock readback strengthen the evidence), then Confluent Cloud after PROD-01.3 | Provider rows in 01.2 and 09.2 | Open |
-| OD-5 | Business and legal | Trademark clearance or rename (`TRADEMARKS.md` gates announcing); monetization before external contributions (no CLA, so relicensing closes after the first outside PR); a legal opinion on copyright in AI-assisted code for the chosen model; a contracting entity for regulated buyers | Decide monetization and the name before any public positioning | Publishing 14.3 outputs, public roadmap, outreach beyond NDA | Open |
+| OD-1 | When expansion starts | (a) after every PLAT task is Done and the owner says go; (b) additionally allow Wave 0 rows that need no docker-desktop change before the platform tracker completes; (c) hand FX-1…FX-7 to the platform run's defect table now | (c) now, (a) for the rest; (b) if agent capacity allows | Every row | **Released 2026-09-28** under (a): all 41 PLAT tasks Done 2026-09-25; the owner said go |
+| OD-2 | Product boundaries in `docs/stability.md` "Never" | Per entry: keep, narrow or reverse | Keep #1 (live topics) and allow PROD-15's original-name restore into an absent topic; keep #3 (PROD-12 is cutover verification) and #4 (PROD-13 deferred); decide #2 after PROD-03.0 shows how many protected topics depend on a registry, and if narrowed, allow schema resolution and selective import only (RBAC-MDS and CSFLE stay refused) | 03.1, 03.2, 12.1, 15.1 | Open; asked 2026-09-28 (#1, #3 and #4 now; #2 after PROD-03.0) |
+| OD-3 | Engine route per capability (proposed by PROD-00.1) | Upstream PR (bug-class fixes only); maintained MIT fork built from the vendored source (supersedes or scopes ruling GR6); Logweir-native path; declared unsupported | Build from source regardless (arm64, CVE patching, signed provenance); upstream PRs for bug-class fixes; native paths for offsets, ACLs and verification; fork only what upstream refuses | 00.2, 00.3, 02.3, 07.3, 11.2 | Open; the options come from PROD-00.1 (in progress) |
+| OD-4 | Provider and storage evidence | Accounts and budget for AWS (S3, MSK), Confluent Cloud, Redpanda Cloud, Aiven, Azure Event Hubs, GCS and Azure Blob; whether rule 6 lets a local runner reach remote endpoints | AWS S3 and MSK first (largest managed population; real conditional create and lock readback strengthen the evidence), then Confluent Cloud after PROD-01.3 | Provider rows in 01.2 and 09.2 | Open; asked 2026-09-28 |
+| OD-5 | Business and legal | Trademark clearance or rename (`TRADEMARKS.md` gates announcing); monetization before external contributions (no CLA, so relicensing closes after the first outside PR); a legal opinion on copyright in AI-assisted code for the chosen model; a contracting entity for regulated buyers | Decide monetization and the name before any public positioning | Publishing 14.3 outputs, public roadmap, outreach beyond NDA | Open; asked 2026-09-28 |
 
 ## Loop contract (Claude Code)
 
@@ -139,10 +139,10 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 | 0 | FX-5 | Console replication factor from the source | P1 | M1 | fix | — | — | k8s | B | Proposed |
 | 0 | FX-6 | Disclose transaction and timestamp semantics | P1 | M1 | docs | — | — | none | B | Proposed |
 | 0 | FX-7 | Keep earlier points valid after a manifest rewrite | P1 | M1 | fix | — | — | compose | A | Proposed |
-| 0 | PROD-00.1 | Evaluate the engine; decide a route per capability | P1 | M1 | research | — | — | compose | B | Proposed |
-| 0 | PROD-01.1 | Prove record and transaction behaviour | P1 | M2 | research | — | — | compose | B | Proposed |
-| 0 | PROD-01.4 | Define topic identity and generations | P1 | M2 | research | — | — | none | B | Proposed |
-| 0 | PROD-01.5 | Shared fixture profiles and broker versions | P1 | M1 | infra | — | — | compose | B | Proposed |
+| 0 | PROD-00.1 | Evaluate the engine; decide a route per capability | P1 | M1 | research | — | — | compose | B | In progress |
+| 0 | PROD-01.1 | Prove record and transaction behaviour | P1 | M2 | research | — | — | compose | B | In progress |
+| 0 | PROD-01.4 | Define topic identity and generations | P1 | M2 | research | — | — | none | B | In progress |
+| 0 | PROD-01.5 | Shared fixture profiles and broker versions | P1 | M1 | infra | — | — | compose | B | In progress |
 | 0 | PROD-04.0 | Decide the Kafka administrative path | P1 | M2 | research | — | — | compose | B | Proposed |
 | 0 | PROD-08.4 | Publish a control-evidence mapping | P1 | M2 | docs | — | — | none | B | Proposed |
 | 0 | PROD-14.0 | Ship a working release | P1 | M1 | infra | — | — | none | B | Proposed |
