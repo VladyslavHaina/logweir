@@ -1,15 +1,14 @@
 # PROD-04.0 — The Kafka administrative path
 
-Status: proposed for review. Research row, review tier B. One owner-level choice
-(§7, **AP-OC1**) is presented with options and a recommendation, and is not taken
-here. It merges PROD-01.4's TI-OC1 into a single scoped-`unsafe` policy for
-`logweir-kafka`. Nothing in `crates/`, the ADRs or `docs/stability.md` changes in
-this row: the amendment texts in §8 land with the implementing rows, after the
-owner decision (rule 8).
+Status: proposed for review (fix round 1). Research row, review tier B.
+
+- **The `unsafe` question is OD-6's.** The ledger's owner decision OD-6 (`product-expansion.md`, Owner decisions), proposed by PROD-01.4 §6.4, decides once whether and how Logweir calls librdkafka functions the safe rdkafka API lacks. §7 is this row's **input to OD-6**: the per-operation needs and the measured cost. It takes no option.
+- **The engine route belongs to OD-3.** OD-3 decides the engine route per capability. §2 and §8.2 feed it.
+- **Nothing lands here.** No file in `crates/`, the ADRs or `docs/stability.md` changes in this row. The amendment texts in §8 land with the implementing rows, after their owner decisions (rule 8).
 
 ## 0. Decisions in one page
 
-1. **Per operation** (§4). O1 is the safe consumer API, O2 FFI under a scoped `unsafe` exception, O4 a raw-protocol client, O5 the engine.
+1. **Per operation** (§4). O1 is the safe consumer API. O2 is librdkafka's C admin API behind the FFI perimeter OD-6 chooses: an FFI crate (a2) or a module of `logweir-kafka` (a1). O4 is a raw-protocol client, and O5 the engine.
 
    | Operation | Route |
    | --- | --- |
@@ -21,27 +20,34 @@ owner decision (rule 8).
    | Create ACLs | none in product; no row applies ACLs |
    | DescribeProducers, ListTransactions | unsupported; only O4 reaches them |
 
-   **O5 is rejected for every operation** (§2, E1–E6). O4 is deferred until a row needs share- or streams-group detail.
+   **This row recommends against O5 for every operation** (§2, E1–E6). That recommendation feeds OD-3 (the engine route per capability, whose own recommendation already names native paths for offsets and ACLs) and OD-6's option (c). O4 is deferred until a row needs share- or streams-group detail.
 
 2. **Group types** (§5).
    - Classic and consumer groups are captured.
    - Share groups, streams groups and classic groups of other protocols are `excluded: GroupTypeNotCaptured` (`groupType: other`).
-   - An absent id is `excluded: GroupNotFound`.
+   - An id missing from every listing is classified by a targeted call (T14). If it is refused (GROUP_AUTHORIZATION_FAILED), the group is `failed: NotVisibleToPrincipal`. Only if it is answered is the group `excluded: GroupNotFound`.
    
    No group is dropped, and absence never means offset 0.
 
-3. **The safe route is not trap-free** (§3, §6).
+3. **The safe route is not trap-free, and neither is the listing** (§3, §6).
    - rdkafka 0.36.2's `fetch_group_list` aborts (undefined behaviour) on any member-less group. rust-rdkafka 0.37.0 fixed it.
    - The classic describe it wraps reports every non-classic group, and every absent id, as `Dead`.
    - librdkafka's DescribeAcls, in every release through 2.15.1, reports both "no authorizer" and "not authorised" as "0 bindings".
+   - ListGroups shows a caller without Describe on the cluster only the groups it may Describe, silently (T14, §3.9). An id missing from a listing is not "not found" until a targeted call says so.
 
-4. **One owner choice, AP-OC1** (§7), merged with PROD-01.4's TI-OC1: one scoped-`unsafe` module in `logweir-kafka`. The recommendation is to take it now, with upstream wrappers as the exit. Fetch and commit need no exception either way.
+4. **Input to OD-6** (§7), without a competing recommendation.
+   - Four of this row's operations need librdkafka calls that the safe API lacks: the typed listing, describe, DescribeAcls and DescribeCluster.
+   - Measured cost: 117 shared lines, plus 30–45 lines per call.
+   - Fetch and commit need no `unsafe` under any OD-6 option.
+   - What each OD-6 option leaves PROD-04.1, 04.2 and 05.3 is tabled in §7.
 
-5. **ADR text** (§8): an ADR 0004 amendment for the module, and an Amendment D amendment naming the engine's v0.21.0 group subcommands. Neither lands in this row.
+5. **ADR text** (§8). Neither text lands in this row.
+   - An ADR 0004 amendment for whichever FFI perimeter OD-6 chooses, written perimeter-neutral.
+   - An Amendment D amendment naming the engine's v0.21.0 group subcommands.
 
 6. **Child rows** (§9):
    - 04.0a: positions through the safe API;
-   - 04.0b: the FFI calls, gated on AP-OC1(a);
+   - 04.0b: the group and ACL calls, gated on OD-6 (a1) or (a2);
    - 04.0c: Amendment D, owner sign-off;
    - 04.0d: fixtures (`acl`, `groups`, share-group state).
 
@@ -51,7 +57,7 @@ owner decision (rule 8).
 
 Citation prefixes, used throughout:
 
-- `L/`: Logweir at main `ac6aa00e`.
+- `L/`: Logweir at main `632ea345`. Every `L/` line cited here is unchanged since `ac6aa00e`, where the first round read it.
 - `R/`: rust-rdkafka 0.36.2, the locked crate (checksum `1beea247…`).
 - `S/`: rdkafka-sys 4.10.0+2.12.1 (checksum `e234cf31…`), so librdkafka 2.12.1
   under `S/librdkafka/src/`.
@@ -67,7 +73,7 @@ Citation prefixes, used throughout:
 
 | ID | Finding | Evidence |
 | --- | --- | --- |
-| L1 | `logweir-kafka` is the only broker-dialling crate and forbids `unsafe`. Every other crate root also carries `#![forbid(unsafe_code)]`, and no script checks the attribute. | `L/crates/logweir-kafka/src/lib.rs:3`; the same line in each `crates/*/src/{lib,main}.rs`; no hit for `unsafe_code` under `L/scripts/` |
+| L1 | `logweir-kafka` is the only broker-dialling crate and carries `#![forbid(unsafe_code)]`. Eleven other crate roots carry it too. **Five do not**:<br>`crates/logweir/src/main.rs:1` (the `logweir` binary's own root);<br>`crates/logweir-engine-oso/src/lib.rs:1`;<br>`crates/logweir-store/src/lib.rs:1`;<br>`xtask/src/main.rs:1`;<br>`e2e/src/lib.rs:1`.<br>No `[lints]` table or `clippy.toml` supplies it, and no script checks the attribute. The workspace contains no `unsafe` code today: the word appears only in strings and comments. | `L/crates/logweir-kafka/src/lib.rs:3`; a scan of every member's `src/lib.rs` and `src/main.rs` (members `crates/*`, `xtask`, `e2e`); no `unsafe_code` under `L/scripts/` |
 | L2 | Its admin client is used for DescribeConfigs, CreateTopics and a prefix-fenced DeleteTopics. Nothing reads or writes consumer groups or ACLs. | `L/crates/logweir-kafka/src/rdkafka_reader.rs:127-165`; `reader.rs:257-331` |
 | L3 | Amendment D denies the engine token `offset`. The gate's primary check is an allowlist of argv tokens, so every group subcommand of v0.21.0 is already refused; the secondary scan's literal `"offset"` predates those subcommand names. | `L/docs/architecture.md` Amendment D; `L/scripts/check-no-oso.sh:84-98`, `:298` |
 
@@ -113,10 +119,20 @@ Citation prefixes, used throughout:
 
 ## 2. The five routes, costed once
 
+Mapped to OD-6's options:
+
+| This record | OD-6 |
+| --- | --- |
+| O1 | the safe API, available under every option; under (e) it is all there is |
+| O2 | (a2), an FFI crate, or (a1), a module of `logweir-kafka` |
+| O3 | (b) |
+| O4 | (d) |
+| O5 | (c), and OD-3's engine route |
+
 | Route | What it reaches | Cost | Constraint |
 | --- | --- | --- | --- |
 | **O1** the safe consumer API (rdkafka 0.36.2, no `unsafe`) | OffsetFetch and OffsetCommit for one group, from a consumer that carries that `group.id` and never subscribes (`committed_offsets`, `commit`). ListGroups v0 plus DescribeGroups v0 through `fetch_group_list`. | Tens of lines behind the existing `client` feature. No new dependency and no ADR change. | No group type, epoch, leader epoch or ACL (C1, C3). `fetch_group_list` is unsound on 0.36.2 and misreports non-classic groups (§3.1). The handle carrying the target `group.id` must be unable to subscribe (§4.3). |
-| **O2** FFI with a scoped `unsafe` exception | Everything in C5: a typed listing of classic and consumer groups, describe with members and assignments, an all-partition offset listing with leader epochs and an explicit UNSTABLE code, alter offsets, and Describe/CreateAcls. | Measured prototype (`A/admin-probe/src/main.rs`, FFI leg of 351 lines): about 120 lines of shared helpers (integer-typed error readers, string copy, an options/queue/event runner that destroys everything once), then 32–45 lines per call. No new crate: `rdkafka::bindings` is `rdkafka_sys::bindings`, and librdkafka is already linked and attributed. | The traps of §6. Nothing at all for share or streams groups (C12). |
+| **O2** librdkafka's C admin API behind OD-6's FFI perimeter: a crate (a2) or a module (a1) | Everything in C5: a typed listing of classic and consumer groups, describe with members and assignments, an all-partition offset listing with leader epochs and an explicit UNSTABLE code, alter offsets, DescribeCluster's authorized operations, and Describe/CreateAcls. | Measured prototype (`A/admin-probe/src/main.rs`, FFI leg of 381 lines): 117 lines of shared helpers (integer-typed error readers, string copy, an options/queue/event runner that destroys everything once), then 30–45 lines per call (§7). No new crate: `rdkafka::bindings` is `rdkafka_sys::bindings`, and librdkafka is already linked and attributed. | The traps of §6. Nothing at all for share or streams groups (C12). |
 | **O3** upstream contributions | O2's calls without `unsafe`, once a rust-rdkafka release wraps them. Share and streams types need a **librdkafka** change as well. | Complete and rebase PR #785, add the typed list, alter offsets and ACL wrappers, then bump rdkafka (0.38 has a breaking API change; PROD-01.4 §6.2). Plus librdkafka reports for T3 and T9 (§6); T6 needs only a librdkafka at 2.14.2 or later. | Timeline outside Logweir's control; #785 has had no review in 13 months (C11). |
 | **O4** a raw-protocol client (kafka-protocol 0.18.0) | Every API the broker serves: ListGroups v5 types, ShareGroupDescribe, DescribeShareGroupOffsets, DescribeGroups v6, DescribeAcls v3, DescribeProducers, ListTransactions. StreamsGroupDescribe needs a hand-written codec, since P has no StreamsGroup messages. | A second Kafka client: TCP, TLS with hostname verification and CA pinning, SASL (SCRAM now; PLAIN, mTLS and OAUTHBEARER as PROD-01.3 adds them), coordinator routing, version negotiation and retries. The engine's equivalent is about 4,800 lines (`E/kafka-backup-core/src/kafka/{client,scram,tls,connection_error,partition_router}.rs`, `sasl/`). One new dependency (MIT/Apache-2.0) with notices and `cargo deny`. | ADR 0004 forbids a custom protocol path "for operations an existing client provides", which covers everything in C5. A second TLS/SASL stack must stay in agreement with librdkafka's (PLAT-07.1). |
 | **O5** the engine behind an Amendment D change | `snapshot-groups`: offsets of every group on archived topics. `offset-reset` and `offset-rollback`: non-member commits. No ACL operation exists. | An Amendment D change, a subprocess per operation, and FX-1's parser. | E1–E6: no type, state or epoch; errors swallowed; OffsetFetch without RequireStable (§3.4); fixed old versions; and the supplier gates automatic reset. |
@@ -193,7 +209,7 @@ The first run's control killed only the classic member: its `pkill -f "group pa-
 | Target group | Member live (06:53:48Z) | Member stopped (06:58:35Z) | Readback after the second commit |
 | --- | --- | --- | --- |
 | consumer (`pa-consumer-live`) | `UnknownMemberId` | FFI: Consumer, Empty, 0 members. Commit **ok**. | `pa-orders` 0 → 1, leader epoch −1 |
-| streams (`pa-streams`) | `UnknownMemberId` | ListGroups v5: streams, Empty (FFI describe: "simple, Classic, Dead"). Commit **ok**. | `streams-plaintext-input` 0 → 1 (was 3) |
+| streams (`pa-streams`) | `UnknownMemberId` | ListGroups v5: streams, Empty (FFI describe: "simple, Classic, Dead"). Commit **ok**. | `streams-plaintext-input` 0 → 1, leader epoch −1, metadata null: the probe's commit, not the application's. The application's own commits carry metadata; its repartition topic shows `AgAAAaDr7mxK` in the same readback (`A/live-4.3.1-supplement/evidence.jsonl:45`). |
 
 **An Empty streams group accepts a non-member commit.** Nothing in the broker stops Logweir from overwriting a stopped Streams application's input positions without its state. That is what AP-04.2-2 guards.
 
@@ -227,7 +243,7 @@ A reader without RequireStable returns the pre-transaction position with no sign
 | SCRAM principal `User:logweir`, not a super user, once a cluster ACL exists | DescribeAcls: **0 bindings, no error**. CreateAcls: 31 CLUSTER_AUTHORIZATION_FAILED. | — |
 | control: the same principal, allowed Describe on the cluster | 12 bindings | — |
 
-**Both "0 bindings, no error" rows have one cause.** `rd_kafka_DescribeAclsResponse_parse` reads the response's top-level ErrorCode into a local, then returns NO_ERROR with the (empty) binding list whatever the code was (`S/…/rdkafka_admin.c:5553-5560`, `:5658`). The same function is unchanged in v2.15.1 (`A/librdkafka-v2.15.1-rdkafka_admin.c`, sha256 `8ed0e410…`). A GitHub search on 2026-09-29 found no upstream issue for it.
+**Both "0 bindings, no error" rows have one cause.** `rd_kafka_DescribeAclsResponse_parse` reads the response's top-level ErrorCode into a local, then returns NO_ERROR with the (empty) binding list whatever the code was (`S/…/rdkafka_admin.c:5553-5560`, `:5658`). In v2.15.1 its error handling is unchanged (`A/librdkafka-v2.15.1-rdkafka_admin.c`, sha256 `8ed0e410…`). The function is not byte-identical: 2.15.1 adds two `rd_kafka_buf_skip_tags` calls, but the lines that read and drop the error are the same. A GitHub search on 2026-09-29 found no upstream issue for it.
 
 ### 3.6 What differs on 3.9.2
 
@@ -243,7 +259,7 @@ Same driver, `KAFKA_VERSION=3.9.2` (`A/live-3.9.2/`):
 ### 3.7 PROD-00.1's A-C8-3, answered
 
 - **What the engine sees.** Its ListGroups v2 sees every group of every type on 4.3.1, with the protocol type (`consumer`, `share`, `streams`) and no state or type (§3.1). Its DescribeGroups v0 answers every consumer-protocol, share and streams group, and any absent id, as `Dead` with no members and no error.
-- **What its snapshot keeps**, since it iterates the listing and fetches offsets (E3):
+- **What its snapshot keeps**, since it iterates the listing and fetches offsets (E3). This is **inferred, not run**: it rests on the source (`E/kafka-backup-cli/src/commands/snapshot_groups.rs:81-123`, which has no protocol-type filter) and on the probe replaying the engine's two requests. `snapshot-groups` itself was not run; AP-04.1-7's fixture runs it.
   - share and absent groups are dropped silently (no offsets, K7);
   - a **streams group's offsets are kept with no type at all**, as though a consumer group's (`pa-streams` answered OffsetFetch v5 with its input and repartition positions, §3.2).
 - **What follows for FX-1 and 04.1.** Engine snapshots import as `groupType: unknown` (§5, AP-04.1-7).
@@ -283,13 +299,51 @@ Same driver, `KAFKA_VERSION=3.9.2` (`A/live-3.9.2/`):
 - DescribeCluster gives "no Describe" for "denied".
 - A key that is missing from a refused DescribeConfigs means only "unverified", never "disabled".
 
+### 3.9 Groups hidden from the caller, and the authorizer's settings (4.3.1, fix round)
+
+The setup (`A/live-4.3.1-visibility-rerun/`, `A/live-visibility.sh`):
+
+- slot 0 with `stack-env.sh --kafka 4.3`, plus `A/acl-overlay.yml`, under the compose lock;
+- `pa-visible` and `pa-hidden`, two simple classic groups, each created by a non-member commit (5 and 7 on `pa-orders` 0);
+- ACLs naming only `User:ops`: Describe and Read on group `pa-hidden`, and Describe on the cluster;
+- `User:logweir`, over SCRAM, therefore has neither Describe on the cluster nor Describe on `pa-hidden`.
+
+An earlier run is void (`A/live-4.3.1-visibility/`): its creating commits met `NotCoordinator` on the fresh broker. The rerun retries them until the coordinator is ready.
+
+| Reader | `User:ANONYMOUS` (super user) | `User:logweir` | `User:logweir` after Describe on the cluster (control) |
+| --- | --- | --- | --- |
+| DescribeCluster, authorized operations | — | none | Describe |
+| raw ListGroups v5 | `pa-hidden`, `pa-visible` | — | — |
+| safe `fetch_group_list` (names, no `members()`) | — | **`pa-visible` only** | both; `pa-hidden` with state `""` |
+| FFI ListConsumerGroups | — | **`pa-visible` only** (count 1) | both, Classic, Empty |
+| targeted, `pa-hidden`: FFI DescribeConsumerGroups; FFI ListConsumerGroupOffsets | — | **30** GROUP_AUTHORIZATION_FAILED; **30** | — |
+| targeted, `pa-hidden`: safe `committed_offsets` | — | **timed out after 15 s** ("Meta data fetch error: OperationTimedOut") | still timed out: cluster Describe grants no group access |
+| targeted, `pa-absent` (never created, no ACL, so describable) | — | safe: Invalid on every partition, 86 ms, no error; FFI describe: "simple, Classic, Dead", no error | — |
+| targeted, `pa-visible` | — | safe: 5 on partition 0; FFI describe: Classic, Empty | — |
+
+What the rows show:
+
+- **Filtered silently (T14).** A caller without Describe on the cluster is shown only the groups it may Describe, with no error (`KafkaApis.scala:1350-1374`). A group missing from both listings may therefore exist.
+- **Targeted calls tell the difference.**
+  - FFI DescribeConsumerGroups and ListConsumerGroupOffsets answer an undescribable id with 30 (the source is `KafkaApis.scala:1302-1315` and `:1018-1030`).
+  - The safe `committed_offsets` gives only a timeout. FindCoordinator for that group is refused too (`KafkaApis.scala:1244-1247`), so the consumer never finds a coordinator.
+- **An absent, describable id answers at once with no error** (K7), which is what lets it be called absent.
+- **With Describe on the cluster, the listing is unfiltered.** The safe listing then shows the undescribable group with an empty state and no error: `GroupInfo` exposes no per-group error (C2).
+
+**The authorizer's settings can be seen to be set, but not read.** DescribeConfigs on broker 1001, as `User:ANONYMOUS` (344 entries), returned `super.users` and `allow.everyone.if.no.acl.found` as present, not default, **`is_sensitive: true` and value null**.
+
+- The source: `KafkaConfig.maybeSensitive` treats a key whose type it cannot determine as sensitive, "to be safe" (`kafka-src/4.3.1-KafkaConfig.scala:123-126`, sha256 `1fdcec9c…`), and the broker then returns a null value (`4.3.1-ConfigHelper.scala:246-249`, sha256 `58c22ccf…`). Both keys belong to the authorizer, not to the broker's typed configuration.
+- For `User:logweir` the same read returned no entries at all (T13).
+
+The first run of this session (`A/live-4.3.1-visibility/`) measured the same targeted and configuration rows; only its listings were void.
+
 ## 4. Decision per operation
 
-| # | Operation | Recommended route | Why not the others | Cost | Without AP-OC1(a) |
+| # | Operation | Recommended route | Why not the others | Cost | Under OD-6 (e): no `unsafe` |
 | --- | --- | --- | --- | --- | --- |
-| 1 | List groups with their type | **O2** `ListConsumerGroups` for the typed list of classic and consumer groups, joined by group id with a complete **name** listing (ListGroups) | O1's listing aborts on 0.36.2 and has no type. O2 alone drops share and streams groups silently (C7). O4 would give every type but brings a second client. O5 has no state or type. | ~45 lines in the FFI module, plus the name listing: the safe `fetch_group_list` with `members()` never called (§4.1), or `rd_kafka_list_groups` in the FFI module | Classic groups only, with a guard against `members()`. Consumer (KIP-848) groups cannot be told from streams groups, so they are not captured (§7). |
-| 2 | Describe groups | **O2** `DescribeConsumerGroups`, only for ids the typed list classifies as classic or consumer, and only when its type agrees with the list | O1: unsound and wrong. O2 on any other id returns "simple Classic Dead" with no error (§3.1). O4 would add epochs and share and streams detail that no row needs. | ~42 lines | Membership of classic groups only; consumer groups undescribed |
-| 3 | Fetch committed offsets | **O1** `committed_offsets` from a non-subscribing consumer, over the recovery point's partitions, `read_committed` (RequireStable) | O2 adds discovery of partitions outside the recovery point, leader epochs and an explicit code 88; useful, not required. O5 returns stale positions (§3.4). | ~30 lines, no `unsafe` | Unchanged |
+| 1 | List groups with their type | **O2** `ListConsumerGroups` for the typed list of classic and consumer groups, joined by group id with a **name** listing (ListGroups). DescribeCluster says whether the listing is complete: it is unfiltered only with Describe on the cluster (T14). | O1's listing aborts on 0.36.2 and has no type. O2 alone drops share and streams groups silently (C7). O4 would give every type but brings a second client. O5 has no state or type. | ~45 lines inside OD-6's perimeter, plus the name listing: the safe `fetch_group_list` with `members()` never called (§4.1), or `rd_kafka_list_groups` inside the perimeter | Classic groups only, with a guard against `members()`. Consumer (KIP-848) groups cannot be told from streams groups, so they are not captured (§7.1). An undescribable id reads as a timeout (§5). |
+| 2 | Describe groups | **O2** `DescribeConsumerGroups`, only for ids the typed list classifies as classic or consumer, and only when its type agrees with the list | O1: unsound and wrong. O2 on any other id returns "simple Classic Dead" with no error (§3.1). O4 would add epochs and share and streams detail that no row needs. | ~42 lines | Membership of classic groups only; consumer groups undescribed; no explicit 30 for an undescribable id (§3.9) |
+| 3 | Fetch committed offsets | **O1** `committed_offsets` from a non-subscribing consumer, over the recovery point's partitions, `read_committed` (RequireStable) | O2 adds discovery of partitions outside the recovery point, leader epochs and an explicit code 88; useful, not required. O5 returns stale positions (§3.4). | ~30 lines, no `unsafe` | Unchanged; `PositionsUnstable` per group (§4.2) |
 | 4 | Commit (alter) offsets | **O1** `commit` from a non-subscribing consumer; the broker's refusal is the atomic liveness guard (§3.3) | O2 has the same broker semantics with per-partition codes. O5 is gated upstream and logs only (E2, E6). | ~30 lines, no `unsafe` | The commit is unchanged. The pre-apply type check has only the safe describe, which cannot tell an Empty consumer group from an Empty streams group (§3.1, §3.3), so 04.2 must refuse every existing target group the describe does not prove classic, and Empty consumer groups become unsupported targets. |
 | 5 | Describe ACLs | **O2** `DescribeAcls`, with guards against T9 and T10 (§6) | No safe, upstream or engine call exists. O4 is exact but brings a second client. | ~35 lines, plus T9's two probes: the broker's `authorizer.class.name` through the safe DescribeConfigs, and DescribeCluster's authorized operations (FFI, ~30 lines) | **No route**: PROD-05.3 stays Blocked, or funds O4 |
 | 6 | Create ACLs | **None in product**: no row applies ACLs (PROD-05.3 exports only). Fixtures use `kafka-acls.sh`. O2's CreateAcls is measured for a future apply row. | — | — | — |
@@ -308,7 +362,11 @@ The bump is a dependency decision for the child row: notices, `cargo deny`, and 
 
 - Positions are read per selected group, for exactly the recovery point's partitions.
 - **What the fetch cannot say.** A partition the broker answers as Invalid (librdkafka −1001, wire −1) has **no committed position**, never offset 0. Because an absent group and a share group give the same answer (K7), the listing must classify the group before its positions mean anything.
-- **Pending transactions.** A RequireStable fetch that does not finish inside its bound is `failed: PositionsUnstable`. The safe route cannot tell that from an unreachable coordinator, whose error text is the same timeout, so the label says "pending transactional offsets or coordinator unavailable". O2's code 88 would separate the two.
+- **Pending transactions, and the unit of `PositionsUnstable`.**
+  - The safe route makes one RequireStable fetch per group, covering all its selected partitions. One pending transactional commit anywhere in it makes the whole call time out (§3.4: 15,000 ms, with no partition named).
+  - So under O1 the unit is **the group**. Every selected partition of it is `failed: PositionsUnstable`, and the label says "pending transactional offsets, coordinator unavailable, or group not visible", because the timeout text is the same for all three (§3.4, §3.9).
+  - Naming the affected partitions takes one fetch per partition under O1, or O2's per-partition code 88. The unit is then the partition.
+- **Topics the caller may not Describe.** The explicit-partition fetch O1 makes answers them with TOPIC_AUTHORIZATION_FAILED per partition (`KafkaApis.scala:1148-1152`). The all-partitions form that O2 and the engine use drops them silently (`:1075-1085`). O2's discovery of a group's other topics is therefore itself limited by visibility.
 
 ### 4.3 Commit
 
@@ -317,9 +375,34 @@ The bump is a dependency decision for the child row: notices, `cargo deny`, and 
 - **Error mapping.**
   - UNKNOWN_MEMBER_ID (25) → `GroupActive`;
   - GROUP_ID_NOT_FOUND (69) → `NotAConsumerGroup`;
-  - GROUP_AUTHORIZATION_FAILED → `NotAuthorized`;
+  - GROUP_AUTHORIZATION_FAILED (30) → `NotAuthorized`. OffsetCommit needs Read on the group (`KafkaApis.scala:273-282`).
+  - A principal without Describe on the group never finds its coordinator (`:1244-1247`). The safe commit then times out rather than answering 30. This is inferred from §3.9's fetch, which does exactly that; the commit case was not run.
   - anything else → `failed` with its integer code.
-- **An absent target group** is created as a simple classic group by the commit (§3.3), and the audit says so.
+- **The target group is classified before any commit, by §5's rules.**
+  - An id classified `GroupNotFound` is created as a simple classic group by the commit (§3.3), and the audit says `created`.
+  - An id classified `NotVisibleToPrincipal` or `NotVisibleOrUnreachable` is refused `TargetNotVisible`. It may be a live group this principal cannot see.
+
+### 4.4 ACL coverage, reconciled with D2 §5.4
+
+D2 §5.4 (`decisions/D2-destinations-discovery-readiness.md`, "Visibility and completeness policy") rejects ACL-derived completeness for topic discovery, for four reasons. PROD-05.3 asks something narrower: whether an export holds the broker's ACL bindings, and what they mean. Each reason still applies, and is answered as follows.
+
+1. **"It needs `DescribeAcls` or `DescribeCluster`, which are unavailable without unsafe FFI."** This goes away only if OD-6 takes (a1) or (a2), or (d). Under (e), and under (b) until a release, it stands, and 05.3 has no route (§4, #5).
+2. **"It is authorizer-specific: `super.users` and `allow.everyone.if.no.acl.found` are broker config, not ACLs."** This stands in part.
+   - The DescribeConfigs read that gives `authorizer.class.name` also shows whether each key is set (present, not default), but it withholds the value: the key is sensitive (§3.9).
+   - So the export carries each key as `set, value unreadable`, `default`, or `not reported`.
+   - An ACL set exported beside any `set` key is labelled `semanticsUnverified`. Its bindings are exact, but which requests they allow is not known.
+   - An administrator attestation, D2 §5.4's own pattern, may supply the values. Logweir records it as attested, not verified.
+3. **"It cannot represent non-ACL authorizers such as MSK IAM or RBAC."** This is answered by an allowlist of authorizer classes.
+   - DescribeAcls is trusted only when `authorizer.class.name` is `org.apache.kafka.metadata.authorizer.StandardAuthorizer` (KRaft) or `kafka.security.authorizer.AclAuthorizer` (ZooKeeper-mode 3.x).
+   - Any other class gives `unverified: authorizerNotAclBased`, whatever DescribeAcls answers.
+4. **"A plausible but wrong 'complete' is the worst possible outcome."** The export never states "complete".
+   - Coverage is `captured` only when every guard passes:
+     - a known ACL class;
+     - Describe on the cluster (DescribeCluster);
+     - DescribeAcls answered;
+     - every unrepresentable binding counted (T10).
+   - Every other combination is `unverified`, `captureDenied` or `aclsNotApplicable`, each with its reason.
+   - Even `captured` claims only "the bindings this broker returned", never "the access this cluster allows".
 
 ## 5. Group types: what is captured, and the labels
 
@@ -330,9 +413,13 @@ Every selected group gets exactly one of these outcomes in PROD-04.1's snapshot.
 | Typed list: Classic, with protocol type `consumer` or empty (a simple group) | `captured` | `groupType: classic` | positions per partition, state, member count |
 | Typed list: Consumer | `captured` | `groupType: consumer` | a state librdkafka maps to Unknown (`Assigning`, `Reconciling`: C6) is recorded as `stateUnknownToClient` and treated as **active** by 04.2 |
 | In the name listing, not in the typed list | `excluded` | `GroupTypeNotCaptured`, `groupType: other` ("a share group, a streams group, or a classic group of a non-consumer protocol such as Kafka Connect") | Under O1 and O2 no call names which. With O4 the label carries `share` or `streams`, and a share group can become `captured: startOffsetOnly` (DescribeShareGroupOffsets). |
-| In neither listing | `excluded` | `GroupNotFound` | an FFI describe of it would still answer "simple Classic Dead" (§3.1), so the listing decides |
+| In neither listing, and the listing is complete (DescribeCluster shows Describe on the cluster) | `excluded` | `GroupNotFound` | an unfiltered listing omits only absent ids (T14) |
+| In neither listing; the listing is filtered (no Describe on the cluster), and a targeted FFI DescribeConsumerGroups returns 30 | `failed` | `NotVisibleToPrincipal` | the group may exist, and this principal may not see it (§3.9). Never `GroupNotFound`. |
+| In neither listing; the listing is filtered, and the targeted call answers without error ("simple, Classic, Dead") | `excluded` | `GroupNotFound` | the id is describable, so a filtered listing would have shown it |
+| Under OD-6 (e), no DescribeCluster and no FFI: the targeted safe fetch answers at once without error | `excluded` | `GroupNotFound` | §3.9: 86 ms, every partition Invalid |
+| Under OD-6 (e): the targeted safe fetch times out | `failed` | `NotVisibleOrUnreachable` | the safe route cannot separate the two (§3.9, §4.2) |
 | Imported from an engine snapshot (FX-1) | as found in the archive | `groupType: unknown` | the engine records no type (§3.7); 04.2 applies such positions only after its own target-side classification |
-| Listing or fetch refused or failing | `failed` | `NotAuthorized`, `PositionsUnstable`, `Unreachable` | per group; other groups continue |
+| Listed, but its fetch refused, pending or failing | `failed` | `NotAuthorized` (30 on a listed id, e.g. one shown only through Describe on the cluster: §3.9), `PositionsUnstable` (per group under O1: §4.2), `Unreachable` | per group; other groups continue |
 
 **Streams groups are `excluded` even though their positions are readable** (K5, §3.2). A Kafka Streams application resumes correctly only with its state stores, changelogs and repartition topics recovered consistently, and that is PROD-06's application profile. A share group has no committed offsets at all (K4). Its analogue, the share-partition start offset, is reachable only through O4.
 
@@ -350,36 +437,50 @@ PROD-01.4 found one (its C4: librdkafka's topic-ID text uses the wrong base64 al
 | T6 | Duplicate groups in ListConsumerGroups when several brokers answer for one group (fixed only in v2.14.2) | O2 on 2.12.1 (C12) | de-duplicate by group id; single-broker fixtures cannot show it, so a unit test over the joiner |
 | T7 | "No committed offset" is −1 on the wire, −1001 in librdkafka, `Offset::Invalid` in rust-rdkafka; and a share or absent group answers the same | O1, O2, O4 (§3.2, K7) | an explicit `noCommittedPosition`; classification before interpretation |
 | T8 | A fetch without RequireStable returns the pre-transaction position silently; the safe route's RequireStable failure reads as a metadata timeout | O5 (§3.4), and any OffsetFetch below v7; O1's error text | RequireStable always; the timeout label of §4.2 |
-| T9 | DescribeAcls drops the response's top-level error: "authorizer disabled" and "not authorised" both read as "0 bindings" | O2, every librdkafka through 2.15.1 (§3.5) | trust "0 bindings" only after two positive probes: the broker's `authorizer.class.name` through the safe DescribeConfigs (empty: `authorizerDisabled`), and DescribeCluster's authorized operations for the capturing principal (no Describe: `captureDenied`); a refused probe gives `unverified` (AP-05.3-1, -2). Report the defect upstream (O3). |
+| T9 | DescribeAcls drops the response's top-level error: "authorizer disabled" and "not authorised" both read as "0 bindings" | O2, every librdkafka through 2.15.1 (§3.5) | trust "0 bindings" only after two positive probes: the broker's `authorizer.class.name` through the safe DescribeConfigs (empty: `authorizerDisabled`; outside §4.4's allowlist of ACL authorizers: `unverified: authorizerNotAclBased`), and DescribeCluster's authorized operations for the capturing principal (no Describe: `captureDenied`); a refused probe gives `unverified` (AP-05.3-1, -2, -5). Report the defect upstream (O3). |
 | T10 | ACL resource types above TransactionalId (DelegationToken, User) and operations above IdempotentWrite (CreateTokens, DescribeTokens, TwoPhaseCommit) become Unknown; distinct bindings collapse into identical ones | O2 (C9, §3.5) | count them as `notRepresentable` with principal and name; never export an Unknown field |
 | T11 | Kafka's CLUSTER resource is librdkafka's `BROKER` (4) | O2 (§3.5) | map by number, name it `CLUSTER` in the model |
 | T12 | rdkafka-sys types broker error codes as a Rust enum that stops at 118, 129 and 130 | O2 and parts of O1 (C10) | read codes as C integers through module-local declarations (the prototype does) |
-| T13 | rust-rdkafka's `DescribeConfigsFuture` never reads `rd_kafka_ConfigResource_error`: a refused or unknown resource comes back as `Ok` with no entries. Unfixed through 0.39.0. | O1: `R/src/admin.rs:1121-1159` (no call in 0.37–0.39 either); measured for a denied broker resource (§3.8) | T9's first probe reads a **missing** `authorizer.class.name` as `unverified`, and only a present, empty value as disabled. The same defect reaches `logweir-kafka`'s existing `topic_configs` and `broker_configs`: see the class sweep in §11. |
+| T13 | rust-rdkafka's `DescribeConfigsFuture` never reads `rd_kafka_ConfigResource_error`: a refused or unknown resource comes back as `Ok` with no entries. Unfixed through 0.39.0. | O1: `R/src/admin.rs:1121-1159` (no call in 0.37–0.39 either); measured for a denied broker resource (§3.8) | T9's first probe reads a **missing** `authorizer.class.name` as `unverified`, and only a present, empty value as disabled. The same defect reaches `logweir-kafka`'s existing `topic_configs` and `broker_configs`: see §11's class sweep, which is FX-4's. |
+| T14 | ListGroups filters silently. A caller without Describe on the cluster is shown only the groups it may Describe, with no error; the safe listing, the FFI listing and the engine's all inherit it. With Describe on the cluster the listing is complete, but the safe listing then shows an undescribable group with an empty state and no error (C2). | the broker: `kafka-src/4.3.1-KafkaApis.scala:1350-1374` (sha256 `f93449b5…`); measured, §3.9 | §5: an id missing from every listing is `GroupNotFound` only if the listing is complete (DescribeCluster shows Describe) or a targeted call answers without error. A targeted 30 means `NotVisibleToPrincipal`. D2 §5.4 records the topic analogue. |
+| T15 | OffsetFetch for all partitions (a null topic list) silently drops the topics the caller may not Describe; the explicit form answers them with TOPIC_AUTHORIZATION_FAILED | the broker: `KafkaApis.scala:1075-1085`, `:1148-1152` (source, not run) | O1's explicit fetch shows the refusal; O2's all-partitions discovery and the engine's snapshot do not (§4.2) |
 
-## 7. Owner choice AP-OC1: one scoped-`unsafe` policy for `logweir-kafka`
+## 7. Input to OD-6: what PROD-04.0 needs from the `unsafe` policy
 
-**The question, once for both rows:** may `logweir-kafka` call librdkafka's C API through `rdkafka::bindings` in one fenced module? PROD-01.4 asks it as TI-OC1 (DescribeTopics). This row asks it for the group and ACL calls. The answer should be one policy, one module and one amendment.
+**OD-6 decides the policy once, for PROD-01.4 and this row.** It is the ledger's owner decision (`product-expansion.md`, Owner decisions, row OD-6) on how Logweir calls librdkafka functions the safe rdkafka API lacks. Its options are:
 
-| Option | PROD-01.4 (topic IDs) | PROD-04.1 / 04.2 (groups) | PROD-05.3 (ACLs) | Cost and risk |
-| --- | --- | --- | --- | --- |
-| **(a) One scoped exception now (recommended)** | DescribeTopics | typed listing and describe (O2); fetch and commit stay O1 | DescribeAcls with the T9 and T10 guards | One reviewed module and one gate, no new crate. `forbid` becomes `deny` at the crate root until (c) ships. |
-| (b) Safe API only | heuristic only (TI-OC1 d) | classic groups only; KIP-848 consumer groups `excluded: GroupTypeNotCaptured`; fetch and commit as recommended | **no route**; 05.3 Blocked | No `unsafe`; the listing still needs §4.1's fence |
-| (c) Upstream first (rust-rdkafka PR #721, #785 and the missing wrappers; librdkafka reports for T3 and T9) | when released | when released | when released, still with T9 unless librdkafka fixes it | Unknown date; an rdkafka bump (0.38 is breaking); (b)'s limits meanwhile |
-| (d) A raw-protocol client (O4) | Metadata v10+ | every type, epochs, share start offsets | exact ACLs, no T9 or T10 | A second TLS/SASL client of about 5,000 lines; reverses ADR 0004's central sentence for these operations |
+- **(a2)** one FFI crate for every such call, with `logweir-kafka` and every product crate keeping `forbid(unsafe_code)`;
+- **(a1)** a private module in `logweir-kafka` (`deny` plus one `allow`);
+- **(b)** wait for upstream rust-rdkafka;
+- **(c)** the engine route;
+- **(d)** a raw-protocol client;
+- **(e)** no `unsafe`.
 
-**Scope of (a).**
+PROD-01.4 §6.4 proposed it and recommends (a2). This section adds this row's needs and measurements, and **takes no option**.
 
-- One private module, for example `crates/logweir-kafka/src/native.rs`, compiled only with the `client` feature, so the pure-layer build (`--no-default-features`) is unaffected.
-- Safe methods on `RdKafkaReader`, and trait methods whose defaults return "not supported" for test fakes.
-- The calls:
-  - DescribeTopics (01.4);
-  - ListConsumerGroups, DescribeConsumerGroups, DescribeAcls and DescribeCluster with authorized operations (this row; the last is T9's guard);
-  - ListConsumerGroupOffsets, AlterConsumerGroupOffsets and CreateAcls only when a later row needs them.
+### 7.1 What this row needs, per operation
 
-**The unsafe surface, measured.**
+| Operation | librdkafka call outside the safe API | Needed by | Under (e), without it |
+| --- | --- | --- | --- |
+| List groups with their type | `rd_kafka_ListConsumerGroups` | 04.1, 04.2 | Classic groups only. KIP-848 groups read like share and streams groups (§3.1), so they are not captured. |
+| Describe groups; the targeted visibility probe | `rd_kafka_DescribeConsumerGroups` | 04.1 (state, members), 04.2 (inactivity, target type), T14's explicit 30 | Membership of classic groups only. An undescribable id reads as a timeout (`NotVisibleOrUnreachable`, §5). |
+| Listing completeness; ACL guard | `rd_kafka_DescribeCluster` (authorized operations) | 04.1 (T14), 05.3 (T9) | completeness unknown |
+| Describe ACLs | `rd_kafka_DescribeAcls` | 05.3 | no route: 05.3 Blocked |
+| Fetch committed offsets | none: the safe consumer (O1) | 04.1 | unchanged |
+| Commit offsets | none: the safe consumer (O1) | 04.2 | The commit is unchanged. The pre-apply type check is weaker (§4, #4). |
+| Only when a row needs them | ListConsumerGroupOffsets (discovery, leader epochs, per-partition 88), AlterConsumerGroupOffsets, CreateAcls | no row today | — |
 
-- 01.4's prototype: one block of about 65 lines.
-- This row's: 117 lines of shared code (the integer-typed extern declarations, the string, error and partition-list readers, and one runner that destroys everything once), then one block per call:
+With PROD-01.4a's DescribeTopics, that makes **five calls needed now**, and three later.
+
+### 7.2 The measured cost
+
+This part is the same for any perimeter. The prototype's FFI leg (`A/admin-probe/src/main.rs`, `mod ffi`) is 381 lines:
+
+- **117 lines of shared code:**
+  - the integer-typed extern declarations (T12);
+  - the string, error and partition-list readers;
+  - one runner that creates options, queue and event, polls with a bound, and destroys each exactly once.
+- **One block per call:**
   - ListConsumerGroups, 45 lines;
   - DescribeConsumerGroups, 42;
   - DescribeAcls, 35;
@@ -388,20 +489,9 @@ PROD-01.4 found one (its C4: librdkafka's topic-ID text uses the wrong base64 al
   - AlterConsumerGroupOffsets, 32;
   - CreateAcls, 45.
 
-  That is about 270 lines for the four this row recommends (the first four) and 381 for all seven.
+That is about 270 lines for this row's four calls and 381 for all seven. PROD-01.4's DescribeTopics adds a 56-line block (its §6.1). The shared code exists once per perimeter, whatever shape OD-6 picks.
 
-**The fence.**
-
-1. The crate root becomes `#![deny(unsafe_code)]`. `#![forbid]` cannot be relaxed inside a crate, and a module-level `#[allow(unsafe_code)]` applies to that one module only.
-2. A new gate joins `just lint` (for example `scripts/check-unsafe-scope.sh`). It checks that:
-   - every other crate root keeps `#![forbid(unsafe_code)]`;
-   - `logweir-kafka` has exactly one `allow(unsafe_code)`, on that module;
-   - no `unsafe` token appears elsewhere in the workspace's Rust sources.
-   
-   Today no script checks the attribute at all (L1).
-3. Every `unsafe` block carries a `// SAFETY:` comment naming its obligations.
-
-**The obligations, from both prototypes.**
+**Obligations**, from both prototypes:
 
 - Destroy each options object, queue, event and request object exactly once.
 - Copy every string before its event is destroyed.
@@ -409,39 +499,80 @@ PROD-01.4 found one (its C4: librdkafka's topic-ID text uses the wrong base64 al
 - Every queue poll is bounded.
 - Error codes and C enums are read as integers (T12).
 - Unknown-clamped values are surfaced, never exported (T4, T10).
-- Topic-ID text comes from the two halves (01.4 C4).
+- Topic-ID text comes from the two halves (PROD-01.4 C4).
 - Groups are de-duplicated by id (T6).
 
-**Tests.**
+**Tests:**
 
-- A soak test: thousands of calls with a bounded resident set.
-- Every FFI answer compared with the Java CLIs on 4.3.1 and on 3.9.2.
-- One negative control per trap. For example: a share group must come back `other`; a USER-resource ACL must come back `notRepresentable`; an error code outside the enum must survive as its integer.
-- A Tier A review with mutants.
+- a soak test (thousands of calls with a bounded resident set);
+- every answer compared with the Java CLIs on the 4.3 and 3.9 lines;
+- one negative control per trap, for example: a share group comes back `other`, a USER-resource ACL `notRepresentable`, an error code outside the enum survives as its integer, and an undescribable id `NotVisibleToPrincipal`;
+- a Tier A review with mutants.
 
-**Exit.** Delete the module and restore `forbid` once a released rust-rdkafka wraps every call it makes (c).
+### 7.3 How the needs sit with each OD-6 option
 
-**Recommendation:** take (a), with (c) as its exit. Keep O1 for fetch and commit whatever is chosen: they need no exception. Fund (d) only if a row needs share-group start offsets or streams-group description; none does today.
+| OD-6 option | What PROD-04.1, 04.2 and 05.3 get | How the measured needs fit it |
+| --- | --- | --- |
+| (a2) one FFI crate | All four calls, behind one crate; `logweir-kafka` and every product crate carry `forbid`. | **Fits every call this row needs.** No FFI block in the prototype touches anything of `logweir-kafka`'s: each takes a native client handle and returns owned values, so it can sit behind a crate boundary with a safe API. The shared 117 lines and the eight wrappers (five now) are one perimeter with one gate. Cost: one more workspace package (PROD-01.4 §6.4); no new third-party crate. **Does not fit** share- and streams-group detail, for which librdkafka has no call at all (C12). It cannot remove T9 either, only guard it (§6). |
+| (a1) a module of `logweir-kafka` | The same calls | Also fits, with no new package. But `logweir-kafka` drops to `deny` for as long as any wrapper lives there. This row's measured surface (~270 lines now, 381 for all seven) is about five to seven times DescribeTopics' block. PROD-01.4 §6.4 notes that (a1) "scales worse to PROD-04.0's larger call set". |
+| (b) wait for upstream | Nothing until a rust-rdkafka release wraps the calls. PR #785 would wrap DescribeConsumerGroups and ListConsumerGroupOffsets; nothing wraps ListConsumerGroups, DescribeAcls or DescribeCluster, or is proposed (C11). | Even a released wrapper needs T9's guard, because the defect is in librdkafka itself. |
+| (c) the engine route | Nothing usable: no type, state or ACL call, errors swallowed, reset gated upstream (E1–E6) | This row's recommendation against O5 feeds OD-3 as well (§0). |
+| (d) a raw-protocol client | Every call, including share and streams detail, epochs and exact ACLs (no T9 or T10) | A second TLS/SASL client of about 5,000 lines (§2, O4), and a reversal of ADR 0004's central sentence |
+| (e) no `unsafe` | Fetch and commit only (O1). Classic groups only. Undescribable ids as timeouts. 05.3 has no route. | — |
+
+### 7.4 The fence, for whichever perimeter OD-6 names
+
+1. **Add `#![forbid(unsafe_code)]` to the five crate roots that lack it** (L1): `crates/logweir/src/main.rs:1`, `crates/logweir-engine-oso/src/lib.rs:1`, `crates/logweir-store/src/lib.rs:1`, `xtask/src/main.rs:1` and `e2e/src/lib.rs:1`. This step is free, because no `unsafe` code exists (L1). The implementing child row takes it first.
+2. **Draw the perimeter.**
+   - Under (a2), the FFI crate's root does not carry `forbid`, and every other root does.
+   - Under (a1), `logweir-kafka`'s root carries `#![deny(unsafe_code)]` with `#[allow(unsafe_code)]` on the one module, and every other root carries `forbid`.
+3. **Add a gate to `just lint`**, for example `scripts/check-unsafe-scope.sh`. It checks that:
+   - every crate root outside the perimeter carries `#![forbid(unsafe_code)]`;
+   - the perimeter is exactly the one OD-6 named;
+   - no code-shaped `unsafe` (`unsafe {`, `unsafe fn`, `unsafe impl`, `unsafe extern`) appears outside it.
+   
+   A bare-word scan would hit the API's "unsafe method" comments. Integration-test targets are crates of their own, which a root attribute does not reach. The code-shaped scan covers them, and so would a `[workspace.lints.rust] unsafe_code = "forbid"` table that every member but the perimeter inherits.
+   
+   Before step 1 lands, the gate's first run fails on the five roots, by design.
+4. **Every `unsafe` block carries a `// SAFETY:` comment** naming its obligations.
+
+### 7.5 Exit
+
+This follows OD-6's recommendation text:
+
+- **Per call:** a wrapper leaves the perimeter once a released rust-rdkafka offers it safely.
+- **At the end:** when no wrapper is left, the perimeter goes. Under (a2) that is the crate; under (a1) it is the module, and `forbid` is restored.
 
 ## 8. Proposed ADR amendment text
 
-Both texts are proposals. Neither lands in this row (rule 8). ADR 0004's lands with the child row that ships the module, after AP-OC1(a). Amendment D's is an ADR 0008 amendment, which lands only after its owner decision, with the doc_lint update, in one commit.
+Both texts are proposals. Neither lands in this row (rule 8).
+
+- **ADR 0004's** lands with the first child row that ships a wrapper (PROD-01.4a or PROD-04.0b), once OD-6 has taken (a1) or (a2). It is written for either: the bracketed choices are filled from OD-6's answer.
+- **Amendment D's** is an ADR 0008 amendment. It presumes that OD-3 takes native paths for offsets and ACLs, which OD-3's recommendation already names. It lands only after that owner decision, with the doc_lint update, in one commit.
 
 ### 8.1 ADR 0004
 
-> **Amendment (PROD-01.4 and PROD-04.0).** `logweir-kafka` may call librdkafka's C
-> API through `rdkafka::bindings` in exactly one private module, compiled only with
-> the `client` feature. The crate root is `#![deny(unsafe_code)]`, that module
-> alone carries `#[allow(unsafe_code)]`, every other crate keeps
-> `#![forbid(unsafe_code)]`, and `scripts/check-unsafe-scope.sh` enforces all
-> three. The module wraps DescribeTopics, ListConsumerGroups,
-> DescribeConsumerGroups, DescribeAcls and DescribeCluster, and ListConsumerGroupOffsets,
+> **Amendment (PROD-01.4 and PROD-04.0; OD-6 [(a2) | (a1)]).** Logweir calls
+> librdkafka functions the safe rdkafka API lacks, through `rdkafka::bindings`, in
+> exactly one FFI perimeter: [(a2) the crate `<name>`, which alone does not
+> carry `#![forbid(unsafe_code)]`, and which `logweir-kafka` depends on | (a1)
+> one private module of `logweir-kafka`, compiled only with the `client`
+> feature, whose crate root carries `#![deny(unsafe_code)]` with
+> `#[allow(unsafe_code)]` on that module alone]. Every other crate root carries
+> `#![forbid(unsafe_code)]`; `scripts/check-unsafe-scope.sh` enforces the
+> perimeter and the attribute, and bars code-shaped `unsafe` outside it.
+>
+> The perimeter wraps DescribeTopics, ListConsumerGroups, DescribeConsumerGroups,
+> DescribeCluster and DescribeAcls. It wraps ListConsumerGroupOffsets,
 > AlterConsumerGroupOffsets and CreateAcls only once a row needs them. It reads
-> error codes and C enums as integers and reports every value librdkafka clamps
+> error codes and C enums as integers, and reports every value librdkafka clamps
 > to Unknown as not representable. Consumer positions are read and committed
 > through the safe consumer API, from a consumer that never subscribes, which
-> needs no exception. The exception ends when a released rust-rdkafka wraps
-> every call the module makes: the module is then deleted and `forbid` restored.
+> needs no exception.
+>
+> A wrapper leaves the perimeter once a released rust-rdkafka offers its call
+> safely. When none is left, the perimeter is deleted [(a2) with its crate | (a1)
+> and `forbid` restored].
 >
 > The rule against a custom protocol path for operations an existing client
 > provides stands. Operations no linked client provides (share-group and
@@ -451,30 +582,38 @@ Both texts are proposals. Neither lands in this row (rule 8). ADR 0004's lands w
 
 ### 8.2 ADR 0008 Amendment D
 
-> **Amendment (PROD-04.0).** The engine's consumer-group subcommands of v0.21.0
-> are denied by name: `snapshot-groups`, `offset-reset`, `offset-reset-bulk`,
-> `offset-rollback`, `three-phase-restore` and `show-offset-mapping`, beside the
-> historical `offset`. Consumer positions and ACLs are Logweir-native (ADR 0004).
-> An engine consumer-group snapshot inside a foreign archive is read only as an
-> import source (FX-1), with its group type unknown, and is never applied. The
-> secondary scan of `scripts/check-no-oso.sh` names these tokens; the primary
-> argv allowlist already refuses them.
+> **Amendment (PROD-04.0; after OD-3).** The engine's consumer-group subcommands
+> of v0.21.0 are denied by name: `snapshot-groups`, `offset-reset`,
+> `offset-reset-bulk`, `offset-rollback`, `three-phase-restore` and
+> `show-offset-mapping`, beside the historical `offset`. Consumer positions and
+> ACLs take Logweir-native paths (OD-3; ADR 0004). An engine consumer-group
+> snapshot inside a foreign archive is read only as an import source (FX-1), with
+> its group type unknown, and is never applied. The secondary scan of
+> `scripts/check-no-oso.sh` names these tokens; the primary argv allowlist
+> already refuses them.
 
 ## 9. Proposed child rows
 
-- **PROD-04.0a — Positions through the safe consumer API** (impl, Tier A, no owner gate; lab compose).
-  - `logweir-kafka` gains `committed_positions(group, partitions)` and `commit_positions(group, positions)` on `RdKafkaReader`, behind a handle that cannot subscribe (§4.3). It maps the codes of §4.3 and the timeout of §4.2.
+- **PROD-04.0a — Positions through the safe consumer API** (impl, Tier A, no owner gate; lab: a PROD-01.5 slot, `stack-env.sh --kafka 4.3` and `--kafka 3.9`).
+  - `logweir-kafka` gains `committed_positions(group, partitions)` and `commit_positions(group, positions)` on `RdKafkaReader`, behind a handle that cannot subscribe (§4.3).
+  - It maps the codes of §4.3, and the timeouts of §4.2 and §5 (`PositionsUnstable` per group; `NotVisibleOrUnreachable`).
   - Mutants for the error mapping and for the leader epoch.
-  - PROD-04.1 and 04.2 both consume it. This row owes no FFI.
-- **PROD-04.0b — Group and ACL calls in the scoped FFI module** (impl, Tier A, gated on **AP-OC1(a)**; lab compose).
-  - ListConsumerGroups, DescribeConsumerGroups, DescribeAcls and DescribeCluster (authorized operations), in the module PROD-01.4a creates. Whichever row lands first creates it and the gate; the other extends it.
-  - The traps' guards (T2–T4, T6, T9–T12), the gate script, and ADR 0004's amendment (§8.1) in the same change.
-- **PROD-04.0c — Amendment D names the engine's group subcommands** (docs and gate, Tier B; gate: owner sign-off on §8.2, rule 8). The amendment text, `check-no-oso.sh`'s secondary token list, and the doc_lint update in one commit.
-- **PROD-04.0d — Fixtures for groups and ACLs** (infra, Tier B; extends PROD-01.5's profiles).
-  - An `acl` profile: §3's overlay plus the non-super SCRAM principal.
-  - A `groups` helper that creates one group of each type on 4.3 and the classic groups on 3.9, with members that stop cleanly. Bracketed `pkill` patterns are needed: this row's first control step killed its own `sh -c`.
-  - The `streams` profile's `group.protocol=streams` variant (PROD-01.5's runs the classic protocol).
-  - `share.coordinator.state.topic.replication.factor=1` and `…min.isr=1` on single-broker 4.x profiles. With the defaults (3 and 2) `__share_group_state` is never created (INVALID_REPLICATION_FACTOR on every attempt), so share groups there have members but no share-partition state (§3.8).
+  - PROD-04.1 and 04.2 both consume it. It owes no FFI, so it proceeds under every OD-6 option.
+- **PROD-04.0b — Group and ACL calls inside OD-6's perimeter** (impl, Tier A, gated on **OD-6 (a1) or (a2)**; lab: a slot).
+  - ListConsumerGroups, DescribeConsumerGroups, DescribeCluster (authorized operations) and DescribeAcls.
+  - They go in the FFI crate (a2) or module (a1) that the owner picks and PROD-01.4a creates. Whichever row lands first takes §7.4's steps: the five `forbid` roots, the perimeter and the gate. The other row extends the perimeter.
+  - The traps' guards (T2–T4, T6, T9–T12, T14) and ADR 0004's amendment (§8.1) land in the same change.
+- **PROD-04.0c — Amendment D names the engine's group subcommands** (docs and gate, Tier B; gate: OD-3, and owner sign-off on §8.2 under rule 8). The amendment text, `check-no-oso.sh`'s secondary token list and the doc_lint update go in one commit.
+- **PROD-04.0d — Fixtures for groups and ACLs** (infra, Tier B). It extends PROD-01.5's profiles by `e2e/README.md`'s six "Extending the fixtures" steps, including a smoke function with a negative control in `compose/profile-smoke.sh` and a run of `cargo test -p e2e --test stack_params`. At `632ea345` no profile has an authorizer, the `streams` profile runs the classic protocol, and no profile sets share-state options.
+  - **A new `acl` profile:**
+    - §3's overlay: StandardAuthorizer, `super.users`, `allow.everyone.if.no.acl.found`;
+    - a non-super SCRAM principal;
+    - §3.9's visibility setup: a group whose only ACL names another principal, and a cluster ACL for another principal.
+    
+    Its smoke's negative control is the same principal granted Describe on the cluster (the listing is then unfiltered).
+  - **A `groups` helper:** one group of each type on the 4.3 line and the classic groups on 3.9, with members that stop cleanly. Bracketed `pkill` patterns are needed: this row's first control step killed its own `sh -c`.
+  - **A `group.protocol=streams` variant of the `streams` profile.** PROD-01.5's runs the classic protocol. The profile's owner is PROD-06.1, so this is a new service beside it or a request to its owner (README, "The owner changes a profile's services without asking").
+  - **Share-state settings on single-broker 4.x stacks:** `share.coordinator.state.topic.replication.factor=1` and `…min.isr=1`. With the defaults (3 and 2), `__share_group_state` is never created (INVALID_REPLICATION_FACTOR on every attempt), so share groups there have members but no share-partition state (§3.8).
 - **Upstream reports** (no ledger row; any worker may file them):
   - librdkafka: DescribeAcls drops the response's top-level error (T9);
   - librdkafka: ListConsumerGroups drops non-consumer protocol types without telling the caller (T3);
@@ -483,25 +622,31 @@ Both texts are proposals. Neither lands in this row (rule 8). ADR 0004's lands w
 
 ## 10. Acceptance rows
 
-Fixture names refer to §3's groups and to PROD-04.0d's profiles. "compose 4.3" is the default stack at `KAFKA_VERSION=4.3.1`. Every negative control is a way the implementation could be wrong, and it must make the row fail.
+Fixture names refer to §3's groups and to PROD-04.0d's profiles.
 
-These rows sit beside PROD-01.4's TI-04.1-* and TI-04.2-* and PROD-01.1's 04-1…04-5, and do not replace them:
+- **"compose 4.3"** is a PROD-01.5 slot started with `eval "$(e2e/compose/stack-env.sh --slot <N> --kafka 4.3)"` (the 4.3.1 image pinned by digest). **"compose 3.9"** is the same with `--kafka 3.9`.
+- Every negative control is a way the implementation could be wrong, and it must make the row fail.
+
+These rows sit beside PROD-01.4's TI-04.1-1…4 and TI-04.2-1…3, and PROD-01.1's 04-1…04-5, and do not replace any of them:
 
 - positions still bind to a topic generation;
 - `PositionBeyondEnd` still excludes;
-- translation never lands on a restored marker or aborted record;
-- translation stays within one generation.
+- translation never lands on a restored marker or aborted record (04-1);
+- translation stays within one generation (04-2);
+- the mapping report states the lineage depth it can prove (04-3);
+- duplicate copies map to the first copy (04-4);
+- time-based translation is refused for a `LogAppendTime` source (04-5).
 
 ### PROD-04.1
 
 | # | Pass predicate | Negative control | Fixture |
 | --- | --- | --- | --- |
 | AP-04.1-1 | With one group of each kind selected (classic Empty, classic live, consumer Empty, consumer live, share idle, share live, streams) plus an absent id, the snapshot has exactly one entry per id. Classic and consumer groups are `captured`, with the type and state `kafka-groups.sh --list` shows. Share and streams groups are `excluded: GroupTypeNotCaptured` (`groupType: other`). The absent id is `excluded: GroupNotFound`. | Classifying from ListConsumerGroups alone omits the share and streams groups (4 of 7 listed, §3.1), failing "one entry per id". Classifying from DescribeConsumerGroups alone types them, and the absent id, as simple Classic Dead groups (§3.1), failing the type check. | compose 4.3 + PROD-04.0d `groups` |
-| AP-04.1-2 | Every captured position equals the broker's (`kafka-consumer-groups.sh --describe --offsets`) on every recovery-point partition. A partition without a commit is `noCommittedPosition`. | Mapping `Offset::Invalid` (−1001) to 0 records position 0 where the CLI shows "-". Measured case: `pa-orders` 1 of a group that committed there 0 versus one that never committed. | compose 4.3 and 3.9 |
-| AP-04.1-3 | While a transactional offset commit is pending for a selected group, the affected partitions are `failed: PositionsUnstable` (a bounded RequireStable fetch), and the pre-transaction position is never recorded as captured. | A fetch without RequireStable (the engine's OffsetFetch v5, or `isolation.level=read_uncommitted`) returns 3 while 7 is pending (§3.4) and records it; the row fails. | compose 4.3; §3.4's TxnOffsetCommit held open longer than the capture's bound |
-| AP-04.1-4 | The listing never calls `GroupInfo::members()` on rdkafka 0.36.2: the workspace clippy configuration denies it, or the lock carries rdkafka ≥ 0.37. A capture on a cluster with an Empty group completes. | Deleting the `disallowed-methods` entry and calling `members()` fails `cargo clippy -D warnings`. At run time the same call aborts the debug build on an Empty group (§3.1, §3.6: exit 134 on both lines). | lint; compose 3.9 (an Empty classic group) |
+| AP-04.1-2 | Every captured position equals the broker's (`kafka-consumer-groups.sh --describe --offsets`) on every recovery-point partition. A partition without a commit is `noCommittedPosition`. | Mapping `Offset::Invalid` (−1001) to 0 records position 0 where the CLI shows **no committed offset**. "No committed offset" in the CLI is **no row, or `-`**. For `pa-classic-empty`, `kafka-consumer-groups.sh --describe` printed rows only for its committed `pa-orders` partitions (partition 1 at 0) and none for its never-committed topics (`A/live-4.3.1/java-reference.txt:164-167`). A `-` is the CLI's mark for an assigned partition without a commit. Measured case: `pa-orders` 1 of a group that committed 0 there (CURRENT-OFFSET 0), against a partition that has no row. | compose 4.3 and 3.9 |
+| AP-04.1-3 | While a transactional offset commit is pending for a selected group, the pre-transaction position is never recorded as captured. The unit is stated per route (§4.2). Under O1's single fetch, **every selected partition of the group** is `failed: PositionsUnstable`, because the bounded RequireStable call times out without naming a partition. With per-partition fetches, or O2's code 88, only the affected partitions are. | A fetch without RequireStable (the engine's OffsetFetch v5, or `isolation.level=read_uncommitted`) returns 3 while 7 is pending (§3.4) and records it; the row fails. | compose 4.3; §3.4's TxnOffsetCommit held open longer than the capture's bound |
+| AP-04.1-4 | The listing never calls `GroupInfo::members()` on rdkafka 0.36.2. A workspace `clippy.toml` (none exists yet; the child row adds it) lists it under `disallowed-methods`, or the lock carries rdkafka ≥ 0.37. A capture on a cluster with an Empty group completes. | Two controls:<br>(1) With the entry present, a mutant that calls `GroupInfo::members()` fails `cargo clippy -D warnings` (`clippy::disallowed_methods`).<br>(2) A gate test reads `Cargo.lock` and `clippy.toml`, and fails when the entry is missing while rdkafka < 0.37 is locked. A mutant deleting the entry makes it red.<br>At run time the call aborts the debug build on an Empty group (§3.1, §3.6: exit 134 on both lines). | lint and the gate test; compose 3.9 (an Empty classic group) |
 | AP-04.1-5 | A consumer group whose state librdkafka maps to Unknown is captured with `stateUnknownToClient` and marked active. | A classifier that reads Unknown as Empty marks it inactive; a unit test over the classifier with state code 0 catches it. | unit test over recorded listing rows |
-| AP-04.1-6 | A selected group the capture principal may not describe is `failed: NotAuthorized`; the other groups are captured. | Aborting the whole snapshot fails the row, and so does mapping the refusal to an empty result, which records the group as captured with no positions. | PROD-04.0d `acl`: a principal without Describe on one group |
+| AP-04.1-6 | A selected group that the capture principal may not Describe, and that its filtered listing therefore omits, is `failed: NotVisibleToPrincipal`: a targeted DescribeConsumerGroups returned 30 (§5). Under OD-6 (e) it is `NotVisibleOrUnreachable`, from the targeted fetch's timeout. The other groups are captured. | **Classifying from the listings alone reports it `GroupNotFound`**: measured, `pa-hidden` is missing from both the safe and the FFI listing for `User:logweir` (§3.9). The row fails. So does aborting the whole snapshot, or mapping the refusal to an empty result, which records it captured with no positions. | PROD-04.0d `acl`'s visibility setup (§3.9): a principal without Describe on the cluster or on one group |
 | AP-04.1-7 | Positions imported from an engine consumer-group snapshot (FX-1) carry `groupType: unknown` and are never shown as a consumer group's. | The engine keeps a streams group's positions untyped (§3.7). Importing them as `groupType: consumer` fails the row. | an engine snapshot written by `snapshot-groups` against §3's fixture (FX-1's regression input) |
 
 ### PROD-04.2
@@ -510,12 +655,15 @@ These rows sit beside PROD-01.4's TI-04.1-* and TI-04.2-* and PROD-01.1's 04-1�
 | --- | --- | --- | --- |
 | AP-04.2-1 | Applying positions to a target group with a live member is refused `GroupActive` for the whole group, and the readback is unchanged. After the member stops, the same application succeeds. This holds for classic and consumer groups. | The measured control (§3.3): the same commit succeeds once the member stops, so a row that passes while the member lives has applied nothing. An implementation that commits with the member's own id would pass the broker check and fail the unchanged readback. | compose 4.3; PROD-04.0d `groups` with members that stop cleanly |
 | AP-04.2-2 | A target group that exists but is not classic or consumer (share, streams, Connect) is refused `TargetGroupTypeUnsupported` before any commit. | An **Empty streams group accepts** a non-member commit (K3; §3.3's control). An implementation that relies on the broker's refusal alone overwrites the stopped application's positions, and the readback shows it. | compose 4.3; a stopped streams group |
-| AP-04.2-3 | Prior target positions on the applied partitions are read and recorded before any commit. After a failure part-way through several groups, the audit lists applied, refused and untouched groups; a re-run applies only the untouched ones, under the same approval. | Without the prior read nothing can be restored. A re-run that repeats the refused groups fails the audit comparison. | compose 4.3; three groups, one of them live |
+| AP-04.2-3 | Prior target positions on the applied partitions are read and recorded before any commit. After a failure part-way through several groups, the audit lists applied, refused and untouched groups; a re-run applies only the untouched ones, under the same approval. | A mutant that skips the prior read leaves the audit's prior positions empty for the applied partitions, and the predicate ("recorded before any commit") fails. A re-run that repeats the refused groups fails the audit comparison. | compose 4.3; three groups, one of them live |
 | AP-04.2-4 | Every applied position carries leader epoch −1, never a captured source epoch. | A mutant of the commit builder that copies the captured epoch fails a unit test over it. The safe route has no setter today; the row guards a future switch to O2. | unit test |
 | AP-04.2-5 | A target consumer group in a state librdkafka maps to Unknown is refused `GroupActive` without a commit attempt. | Reading Unknown as inactive attempts the commit (visible in the audit); a unit test over the classifier catches it. | unit test |
-| AP-04.2-6 | A group absent from the target is created by the apply as a simple classic group, and the audit says `created`. | Reporting "applied to an existing group" contradicts the pre-apply listing, and the audit comparison fails. After the apply the id lists as classic, protocol type empty, Empty (§3.3). | compose 4.3 or 3.9 |
+| AP-04.2-6 | A target id that §5's rules classify `GroupNotFound` is created by the apply as a simple classic group, and the audit says `created`. | Reporting "applied to an existing group" contradicts the pre-apply classification, and the audit comparison fails. After the apply the id lists as classic, protocol type empty, Empty (§3.3). | compose 4.3 or 3.9 |
+| AP-04.2-7 | A target id that the applying principal cannot see (a targeted call returns 30, §3.9) is refused `TargetNotVisible` before any commit, and the audit never says `created` for it. | Classifying the target from the listings alone takes the hidden group for absent, and records `created` for a group that exists. The row fails. | PROD-04.0d `acl`'s visibility setup, on the target |
 
 ### PROD-05.3
+
+These rows answer D2 §5.4's objections (§4.4).
 
 | # | Pass predicate | Negative control | Fixture |
 | --- | --- | --- | --- |
@@ -523,6 +671,8 @@ These rows sit beside PROD-01.4's TI-04.1-* and TI-04.2-* and PROD-01.1's 04-1�
 | AP-05.3-2 | A principal without Describe on the cluster gets `captureDenied`, decided from DescribeCluster's authorized operations (Describe absent). After Describe is granted, the capture returns every binding. | Trusting DescribeAcls' "0 bindings, no error" for `User:logweir` (§3.5) reports `captured, 0 bindings`; the row fails. | PROD-04.0d `acl` with its SCRAM principal |
 | AP-05.3-3 | Literal, prefixed, wildcard-name and wildcard-principal bindings, ALLOW and DENY, on TOPIC, GROUP, TRANSACTIONAL_ID and CLUSTER resources round-trip exactly against `kafka-acls.sh --list`, with resource type 4 named CLUSTER. | Dropping the pattern type turns the prefixed `pa-` binding into a literal one; naming resource type 4 `BROKER`. Either fails the round-trip. | `acl`, with §3.5's six bindings and one cluster binding |
 | AP-05.3-4 | Bindings librdkafka cannot represent (USER resources with CreateTokens or DescribeTokens, DELEGATION_TOKEN resources, TwoPhaseCommit) are listed as `notRepresentable`, with principal and resource name, counted in coverage and never exported. | Exporting what librdkafka returns yields two identical `Unknown / User:bob / Unknown` bindings where the broker holds two distinct ones (§3.5); the round-trip against `kafka-acls.sh --list` fails. | `acl`, with §3.5's four Java-created bindings |
+| AP-05.3-5 | With `authorizer.class.name` outside the allowlist of §4.4 item 3, coverage is `unverified: authorizerNotAclBased`, whatever DescribeAcls answers. | A non-ACL authorizer class, Describe allowed on the cluster, and 0 bindings must not report `captured`. A coverage function that checks only for a non-empty class reports `captured, 0 bindings` and fails. | unit test over the pure coverage function with recorded inputs (D2 §5.4's `check_contract::visibility` pattern); no fixture ships a non-ACL authorizer |
+| AP-05.3-6 | When `super.users` or `allow.everyone.if.no.acl.found` is reported set but its value is withheld (sensitive, §3.9), the export records the key as `set, value unreadable` and labels the binding set `semanticsUnverified`. An administrator attestation, if given, is recorded as attested. | Reading the withheld value (null) as "not set" or as `false` exports the §3.9 fixture's bindings with no warning, although `allow.everyone.if.no.acl.found=true` opens every resource that has no binding; the row fails. | `acl` (its overlay sets both keys), read as a principal allowed DescribeConfigs |
 
 ## 11. Limits of this record
 
@@ -532,11 +682,18 @@ These rows sit beside PROD-01.4's TI-04.1-* and TI-04.2-* and PROD-01.1's 04-1�
 - **The raw leg is a prototype over PLAINTEXT only.** Its cost figure (§2, O4) is the engine's code, not a Logweir estimate. StreamsGroupDescribe was not sent: P has no codec for it.
 - **Only local fixtures.** Managed providers (MSK, Confluent Cloud) were not tried; their group and ACL APIs follow OD-4.
 - **Nothing ships.** The prototypes are throwaway, under `A/`. The measured values this record relies on are in its tables.
-- **A class sweep this row does not own (T13).** `L/crates/logweir-kafka/src/rdkafka_reader.rs:293-325` (`topic_configs`) and `:343-386` (`broker_configs`) map a per-resource `Err` that rdkafka 0.36.2 never produces.
-  - A refused or unknown topic therefore reads as a configuration with no overrides, rather than `NotAuthorized` or `TopicNotFound`.
-  - `L/crates/logweir/src/drill/phase7_verify.rs:1209` reads the restore target's configuration through it.
-  - The broker-resource case is measured (§3.8); the topic case is read from source.
-  - It belongs to FX-4 and PROD-05.1.
+- **The engine's snapshot was not run.** §3.7 infers it from source and from the probe replaying its two requests. AP-04.1-7's fixture runs `snapshot-groups`.
+- **Commits by an undescribable principal were not run.** §4.3's timeout for a principal that cannot Describe the target group is inferred from §3.9's fetch.
+- **A class sweep this row does not own (T13): FX-4's.**
+  - `L/crates/logweir-kafka/src/rdkafka_reader.rs:293-325` (`topic_configs`) and `:343-386` (`broker_configs`) map a per-resource `Err` that rdkafka 0.36.2 never produces. A refused or unknown resource therefore reads as a configuration with no entries, rather than `NotAuthorized` or `TopicNotFound`.
+  - The broker-resource case is measured (§3.8, §3.9); the topic case is read from source.
+  - **The orchestrator has sent these five shipped consumers to FX-4** (ledger row FX-4, In progress):
+    - `L/crates/logweir/src/drill/phase7_verify.rs:1209`: the restore target's parity reads "no overrides".
+    - `L/crates/logweir/src/check/kinds/restore.rs:863`: its `Err` arm gives `Unknown`/`BrokerConfigsNotReadable` (`:864-874`), but a refused read arrives as an empty map. It falls through to `ready(TimestampWithinBound)`, "the target declares no record-timestamp bound" (`:883-888`): a false "ready".
+    - `L/crates/logweir/src/drill/phase0_admit.rs:618`: the Guard G-TS preflight defaults a missing `log.message.timestamp.type` to CreateTime (`:620-628`), so its LogAppendTime arm never runs.
+    - `L/crates/logweir/src/drill/phase0_admit.rs:715`: the probe topic's configuration readback gets an empty map, not an error.
+    - `L/crates/logweir/src/drill/phase2_target.rs:59`: the target snapshot records empty configurations.
+  - PROD-05.1 inherits the rule once FX-4 lands it.
 
 ## 12. Reproduction and artifacts
 
@@ -549,9 +706,9 @@ All paths are under `A/`, so `/tmp/logweir-roadmap-run/claude/artifacts/prod-04-
   - `PROBE_SASL_USER` and `PROBE_SASL_PASS` switch it to SCRAM on `localhost:9097`.
 - **Drivers.**
   - `run-all.sh` runs one compose-lock hold, 06:36:10–06:48:42 UTC: 4.3.1 `groups`, 4.3.1 `acls`, `down -v`, 3.9.2 `legacy`, `down -v`. It calls `live-session.sh`.
-  - `live-supplement.sh` and `live-aclguard.sh` each take and release the lock themselves.
+  - `live-supplement.sh`, `live-aclguard.sh` (and its rerun) and `live-visibility.sh` each take and release the lock themselves.
   - The overlays are `acl-overlay.yml` and `share-state-overlay.yml`.
-- **Outputs.** In `live-4.3.1/`, `live-4.3.1-acls/`, `live-3.9.2/`, `live-4.3.1-supplement/` and `live-4.3.1-aclguard/`:
+- **Outputs.** In `live-4.3.1/`, `live-4.3.1-acls/`, `live-3.9.2/`, `live-4.3.1-supplement/`, `live-4.3.1-aclguard/`, `live-4.3.1-aclguard-rerun/`, `live-4.3.1-visibility/` and `live-4.3.1-visibility-rerun/`:
   - `evidence.jsonl`: one JSON line per probe result;
   - `session.log`: probe stderr and exit codes;
   - `java-reference.txt`: the Kafka CLIs' answers.
@@ -565,7 +722,12 @@ All paths are under `A/`, so `/tmp/logweir-roadmap-run/claude/artifacts/prod-04-
   - 06:36:10–06:48:42 (`run-all.sh`);
   - 06:50–06:58:44 (`live-supplement.sh`);
   - 06:58:59–07:00:29 (`live-aclguard.sh`, whose guard probes were invalid);
-  - 07:01:10–07:02:38 (`live-aclguard-rerun.sh`).
+  - 07:01:10–07:02:38 (`live-aclguard-rerun.sh`);
+  - fix round, on slot 0 (the brief names no slot), `stack-env.sh --slot 0 --kafka 4.3`: 07:35:01–07:36:25 (`live-visibility.sh`, void listings) and 07:37:36–07:38:33 (its rerun).
+- **Fix-round sources**, fetched on 2026-09-29 from Kafka tag `4.3.1`, into `kafka-src/`:
+  - `core/…/KafkaApis.scala` (sha256 `f93449b5…`);
+  - `ConfigHelper.scala` (`58c22ccf…`);
+  - `KafkaConfig.scala` (`1fdcec9c…`).
 
 ---
 
