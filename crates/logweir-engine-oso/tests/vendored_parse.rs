@@ -271,6 +271,17 @@ mod snapshot {
                 r#"{"groups":[{"group_id":"g"},{"group_id":"g"}]}"#,
                 "appears twice",
             ),
+            // L1: a repeated partition key within a topic, and a repeated
+            // topic key. serde's own map read would keep the LAST value and
+            // drop `(t, 0) -> 1`, then `(t, 0) -> 1` again, without a word.
+            (
+                r#"{"groups":[{"group_id":"g","offsets":{"t":{"0":1,"0":2}}}]}"#,
+                "key `0` appears twice",
+            ),
+            (
+                r#"{"groups":[{"group_id":"g","offsets":{"t":{"0":1},"t":{"1":5}}}]}"#,
+                "key `t` appears twice",
+            ),
             (r#"{"groups":[{"offsets":{}}]}"#, "group_id"),
             (
                 r#"{"groups":[{"group_id":"g","offsets":{"t":{"0":"5"}}}]}"#,

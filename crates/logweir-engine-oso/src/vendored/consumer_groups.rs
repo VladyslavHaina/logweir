@@ -61,13 +61,19 @@
 //!   upstream's reader skips the first two with a warning. The writer never
 //!   emits any of them, and an import that silently dropped a position would
 //!   read as "no committed offset", which PROD-04.1 forbids.
+//! - **A repeated topic key, or a repeated partition key within a topic, is
+//!   refused** (FX-1 fix round, L1). serde reads a JSON object into a map by
+//!   keeping the LAST value of a repeated key, which would drop the earlier
+//!   position without a word. The writer serialises `HashMap`s, so it never
+//!   repeats a key; only hand-edited or damaged bytes can.
 //!
 //! Refusals are [`SnapshotShapeError`]s from [`parse`], the one entry point.
 //! Logweir restores no consumer offsets (spec §2 non-goals), so nothing on the
-//! drill or backup path consumes a parsed snapshot: see
-//! `OsoCliEngine::consumer_group_snapshot` for what a read reports, and
-//! `OsoCliEngine::describe` for why a refusal here fails neither.
-use serde::{Deserialize, Serialize};
+//! drill or backup path consumes a parsed snapshot. `drill run` and `backup
+//! run` do READ it, through `OsoCliEngine::describe_with_notices`, and print a
+//! refusal as a warning; `OsoCliEngine::describe` says why a refusal fails
+//! neither.
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -95,11 +101,58 @@ pub struct ConsumerGroupEntry {
     pub group_id: String,
     /// topic -> partition id (a decimal string) -> committed offset. A
     /// `BTreeMap` where upstream has a `HashMap`: the same JSON object, read in
-    /// a stable order.
-    #[serde(default)]
+    /// a stable order, and read by `offsets_without_repeated_keys`, which
+    /// refuses a repeated key at either level instead of keeping the last.
+    #[serde(default, deserialize_with = "offsets_without_repeated_keys")]
     pub offsets: BTreeMap<String, BTreeMap<String, i64>>,
     #[serde(flatten)]
     pub extra: HashMap<String, Value>,
+}
+
+/// A JSON object read into a `BTreeMap`, REFUSING a repeated key: serde's own
+/// map deserialisation keeps the last value of a repeated key and drops the
+/// earlier one silently, which would lose a committed position (L1).
+struct UniqueKeys<V>(BTreeMap<String, V>);
+
+impl<'de, V: Deserialize<'de>> Deserialize<'de> for UniqueKeys<V> {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Visit<V>(std::marker::PhantomData<V>);
+        impl<'de, V: Deserialize<'de>> serde::de::Visitor<'de> for Visit<V> {
+            type Value = UniqueKeys<V>;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a map")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut out = BTreeMap::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    if out.contains_key(&key) {
+                        return Err(serde::de::Error::custom(format!(
+                            "key `{key}` appears twice in one object; a repeated key would \
+                             silently drop a committed position"
+                        )));
+                    }
+                    let value = map.next_value::<V>()?;
+                    out.insert(key, value);
+                }
+                Ok(UniqueKeys(out))
+            }
+        }
+        d.deserialize_map(Visit(std::marker::PhantomData))
+    }
+}
+
+/// `offsets`, both levels read through `UniqueKeys`.
+fn offsets_without_repeated_keys<'de, D: Deserializer<'de>>(
+    d: D,
+) -> Result<BTreeMap<String, BTreeMap<String, i64>>, D::Error> {
+    let UniqueKeys(topics) = UniqueKeys::<UniqueKeys<i64>>::deserialize(d)?;
+    Ok(topics
+        .into_iter()
+        .map(|(t, UniqueKeys(p))| (t, p))
+        .collect())
 }
 
 /// A consumer-groups snapshot that is not in the shape the engine writes.
