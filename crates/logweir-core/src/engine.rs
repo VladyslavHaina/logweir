@@ -71,6 +71,27 @@ pub struct BackupSetRef {
     pub manifest_key: String,
 }
 
+/// One finding about an archive that an operator must be told and that NO
+/// signed field records (FX-1 fix round, M1): what
+/// [`DataEngine::describe_with_notices`] returns beside the facts, for the
+/// caller to PRINT — a warning line and a structured log event — and never to
+/// act on. Putting such a finding into signed evidence is PROD-04.1's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchiveNotice {
+    /// A stable, machine-readable name for the kind of finding, and the value
+    /// of the structured log's `notice` field:
+    /// `consumer-groups-snapshot-unreadable` is the one kind today.
+    pub kind: String,
+    /// The object the finding is about, as the store names it.
+    pub key: String,
+    /// `sha256:<hex>` of that object's bytes.
+    pub sha256: String,
+    /// What was found and what it means for the run, in one phrase.
+    pub message: String,
+    /// The detail behind it, e.g. the parser's own error.
+    pub reason: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct BackupSetFacts {
     pub backup_id: String,
@@ -652,5 +673,25 @@ pub trait DataEngine {
         Err(EngineError::Operational(
             "backup is not implemented by this engine".into(),
         ))
+    }
+
+    /// FX-1 fix round (M1). `describe`, plus what the engine found about the
+    /// set that no signed field carries and an operator must still be told.
+    /// Today that is one thing: the set's consumer-groups snapshot is present
+    /// but not in the shape the engine writes. A drill restores data and a
+    /// receipt records data, so such a run proceeds and signs nothing about
+    /// the snapshot; the notice is how the operator learns that the object
+    /// beside the manifest cannot be read. `drill run` and `backup run` print
+    /// every notice (`logweir::drill::surface_archive_notices`).
+    ///
+    /// The default is `describe` and no notice, so every existing double keeps
+    /// compiling unchanged — the `validation_run` pattern above.
+    /// `default_describe_with_notices_is_describe_with_no_notice`
+    /// (`logweir-core/tests/engine_trait.rs`) pins it.
+    fn describe_with_notices(
+        &self,
+        set: &BackupSetRef,
+    ) -> Result<(BackupSetFacts, Vec<ArchiveNotice>), EngineError> {
+        Ok((self.describe(set)?, Vec::new()))
     }
 }
