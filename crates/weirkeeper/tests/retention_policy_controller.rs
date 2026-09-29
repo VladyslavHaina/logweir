@@ -6453,3 +6453,38 @@ fn a_skipped_points_segments_protect_a_candidate_that_shares_them() {
     );
     assert_eq!(protected_reason(&evaluation, "p3"), Some("SharedSegment"));
 }
+
+/// **FX-2's class sweep: `RetentionPolicy.spec.enforcement.deadlineSeconds`**,
+/// documented as "the Job's `activeDeadlineSeconds`". Every enforcing row used
+/// 1800 — the field's own default — so a Job built from the default instead of
+/// the field passed them all. A non-default deadline reaches the Job.
+///
+/// MUTANT: `let deadline = 1800;` in the enforcement Job builder.
+#[tokio::test]
+async fn the_enforcement_jobs_deadline_is_the_policys_own() {
+    let mut policy_block = enforcing(None);
+    policy_block["enforcement"]["deadlineSeconds"] = json!(2700);
+    let f = fixture(happy_routes(&six_points()));
+    run(&f, &policy(policy_block.clone(), json!({}))).await;
+    let digest = f.status()["lastEvaluation"]["planSha256"]
+        .as_str()
+        .expect("a digest")
+        .to_string();
+
+    let mut routes = happy_routes(&six_points());
+    routes.push(plan_config_map_route(&digest));
+    routes.push(route("POST", "/configmaps", "{}".to_string()));
+    routes.extend(absent_job_routes(&digest, now()));
+    routes.push(route("POST", "/jobs", "{}".to_string()));
+    let g = fixture(routes);
+    policy_block["enforcement"]["approvedPlanSha256"] = json!(digest);
+    run(&g, &policy(policy_block, json!({}))).await;
+
+    let job = g.posted("/jobs").remove(0);
+    assert_eq!(
+        job["spec"]["activeDeadlineSeconds"],
+        json!(2700),
+        "{}",
+        job["spec"]
+    );
+}

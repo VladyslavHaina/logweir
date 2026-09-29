@@ -4589,3 +4589,69 @@ async fn a_bounds_block_the_controller_will_not_apply_skips_the_slot_and_creates
         );
     }
 }
+
+/// **FX-2's class sweep: `bounds.deadlineSeconds`**, documented as "the Job's
+/// `activeDeadlineSeconds`". Every earlier row used 3600 — the field's own
+/// default — so a projection that ignored the field and wrote the default
+/// passed them all. A non-default value reaches the child `Restore` and, from
+/// it, the runner Job.
+///
+/// MUTANT: `deadline_seconds: 3600` in `child_restore`.
+#[tokio::test]
+async fn bounds_deadline_seconds_reaches_the_child_restore_and_its_runner_job() {
+    let mut value = schedule_value(json!({}));
+    value["spec"]["bounds"]["deadlineSeconds"] = json!(1800);
+    let schedule: RehearsalSchedule =
+        serde_json::from_value(value).expect("the fixture schedule parses");
+    // The signed scope permits 3600, so a SHORTER bound is inside it.
+    let (table, approval) = routes_authorizing(&schedule);
+    let (client, recorder, bodies) = mock_client_recording_bodies(table);
+    let outcome = rs::reconcile_schedule(&schedule, &context(client), now())
+        .await
+        .expect("the reconcile answers");
+    assert!(
+        matches!(&outcome.verdict, rs::Verdict::Fire(_)),
+        "{:?}",
+        outcome.verdict
+    );
+    assert_eq!(posted(&recorder, RESTORES_PATH), 1);
+    let child = bodies
+        .lock()
+        .expect("the body recorder is not poisoned")
+        .iter()
+        .find(|seen| is_post_to(&seen.method, &seen.uri, RESTORES_PATH))
+        .map(|seen| serde_json::from_str::<Value>(&seen.body).expect("the child parses"))
+        .expect("the child was posted");
+    assert_eq!(child["spec"]["deadlineSeconds"], json!(1800), "{child}");
+
+    let mut child: weirkeeper::crds::restore::Restore =
+        serde_json::from_value(child).expect("the child is a Restore");
+    child.metadata.uid = Some("child-uid".to_string());
+    let cluster: weirkeeper::crds::kafka_cluster::KafkaCluster =
+        serde_json::from_value(cluster_value(true, Some(TARGET_CLUSTER_ID)))
+            .expect("a KafkaCluster");
+    let approval: weirkeeper::crds::approval::Approval =
+        serde_json::from_value(approval).expect("an Approval");
+    let policies: kube::core::ObjectList<weirkeeper::crds::trust_policy::TrustPolicy> =
+        serde_json::from_value(trust_policy_value("Active", None)).expect("the list parses");
+    let weirkeeper::trust::Resolution::Trust(trust) =
+        weirkeeper::trust::resolve_in(NS, &policies.items, None)
+    else {
+        panic!("the default policy governs every namespace")
+    };
+    let spec = weirkeeper::controllers::restore::runner_job_spec(
+        &child,
+        &cluster,
+        &[KEY_ID.to_string()],
+        &approval,
+        &trust,
+        now(),
+    )
+    .expect("the child's Job renders");
+    let job = weirkeeper::job::build(&spec);
+    assert_eq!(
+        job.spec.and_then(|s| s.active_deadline_seconds),
+        Some(1800),
+        "the rehearsal's runner Job is bounded by the schedule's own deadline"
+    );
+}

@@ -3179,3 +3179,34 @@ fn the_reconciler_reads_one_clock_in_one_place() {
         assert!(!code.contains(forbidden));
     }
 }
+
+/// **FX-2's class sweep: `TopicDiscovery.spec.request.timeoutSeconds`**, "the
+/// in-Job Kafka budget". The Job-shape row above uses 60 — the field's own
+/// default — so a controller that ignored the request and used the default
+/// passed it. A non-default budget reaches the plan the runner enforces AND
+/// the Job's `activeDeadlineSeconds` (budget plus the pod-start margin).
+///
+/// MUTANTS: the Job's `timeout_seconds` or the plan's `timeout_seconds` set
+/// from `DEFAULT_TIMEOUT_SECONDS` instead of the request.
+#[tokio::test]
+async fn a_discoverys_own_budget_reaches_its_plan_and_its_job_deadline() {
+    let (client, _recorder, bodies) = mock_client_recording_bodies(start_routes(vec![]));
+    let request = discovery(json!({}), json!({"timeoutSeconds": 200}));
+    assert_eq!(request.spec.request.timeout_seconds, 200);
+    td::reconcile_discovery(&request, &context(client, None))
+        .await
+        .expect("the reconcile answers");
+    let cm = body_of(&bodies, "POST", "/configmaps");
+    let raw = cm["data"][cjob::CHECK_PLAN_KEY]
+        .as_str()
+        .expect("the plan document is a string in `data`")
+        .to_string();
+    let document: CheckPlan = serde_json::from_str(&raw).expect("the plan parses strictly");
+    assert_eq!(document.timeout_seconds, 200, "the runner's own budget");
+    let job = body_of(&bodies, "POST", "/jobs");
+    assert_eq!(
+        job["spec"]["activeDeadlineSeconds"],
+        json!(200 + cjob::DEADLINE_MARGIN_SECONDS),
+        "the Job's bound is the request's budget plus the pod-start margin"
+    );
+}
