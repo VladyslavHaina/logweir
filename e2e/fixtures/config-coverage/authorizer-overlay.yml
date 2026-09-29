@@ -1,0 +1,25 @@
+# FX-4's live rows (`e2e/tests/config_coverage.rs`): the default e2e stack with
+# KRaft's StandardAuthorizer. NOT an edit of `e2e/compose/**`: it is passed as a
+# SECOND `-f` after the default file, and only for those rows. The same overlay
+# PROD-04.0 used for its ACL rows (`claude/artifacts/prod-04-0/acl-overlay.yml`).
+#
+# Every PLAINTEXT client — the harness, the broker's own controller listener,
+# the admin CLIs run through `docker compose exec` — is User:ANONYMOUS and a
+# SUPER USER, so nothing that worked on the default stack stops working. The
+# SCRAM user `logweir` (created by `scram-setup`) is NOT a super user: it is the
+# restricted principal whose DescribeConfigs the rows deny with ACLs.
+# `allow.everyone.if.no.acl.found` keeps every resource without an ACL open to
+# it, so a row restricts exactly the resources it names.
+#
+# Use it for `up`, for the setup profile AND for `down`, so compose never sees a
+# service definition that differs from the running container (a `run` or `up`
+# with the default file alone would recreate the broker without the authorizer):
+#
+#   docker compose -f e2e/compose/docker-compose.yml \
+#     -f e2e/fixtures/config-coverage/authorizer-overlay.yml up -d --wait
+services:
+  kafka-broker-1:
+    environment:
+      KAFKA_AUTHORIZER_CLASS_NAME: org.apache.kafka.metadata.authorizer.StandardAuthorizer
+      KAFKA_SUPER_USERS: "User:ANONYMOUS"
+      KAFKA_ALLOW_EVERYONE_IF_NO_ACL_FOUND: "true"
