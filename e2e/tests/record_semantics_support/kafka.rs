@@ -300,21 +300,15 @@ pub fn read_topic(topic: &str, partitions: i32, iso: Isolation) -> Result<Vec<Re
     Ok(all)
 }
 
-/// `(partition, high watermark)` for every partition of `topic`.
+/// `(partition, high watermark)` for every partition of `topic`, read at
+/// `read_uncommitted`: librdkafka answers a watermark query at the consumer's
+/// isolation level, and its default (`read_committed`) would return the last
+/// stable offset instead whenever a transaction is open.
 pub fn high_watermarks(topic: &str, partitions: i32) -> Result<Vec<(i32, i64)>, String> {
-    let c: BaseConsumer = ClientConfig::new()
-        .set("bootstrap.servers", BOOTSTRAP)
-        .set("group.id", format!("recsem-wm-{}", nonce()))
-        .set("enable.auto.commit", "false")
-        .create()
-        .map_err(|e| format!("consumer: {e}"))?;
-    (0..partitions)
-        .map(|p| {
-            c.fetch_watermarks(topic, p, Duration::from_secs(5))
-                .map(|(_, hi)| (p, hi))
-                .map_err(|e| format!("watermarks {topic}/{p}: {e}"))
-        })
-        .collect()
+    Ok(watermarks_at(topic, partitions, Isolation::Uncommitted)?
+        .into_iter()
+        .map(|(p, _, hi)| (p, hi))
+        .collect())
 }
 
 /// `(partition, low, high)` as `rd_kafka_query_watermark_offsets` answers a
