@@ -81,7 +81,73 @@ pub const CORE_PORTS: [PortParam; 5] = [KAFKA_PORT, K8S_PORT, SASL_PORT, S3_PORT
 
 /// Every port an OPTIONAL profile publishes (`COMPOSE_PROFILES`). Published
 /// only while that profile is active, and moved by a slot like the rest.
-pub const PROFILE_PORTS: [PortParam; 0] = [];
+pub const PROFILE_PORTS: [PortParam; 8] = [
+    AUTH_PLAIN_PORT,
+    AUTH_SCRAM256_PORT,
+    AUTH_MTLS_PORT,
+    C3_1_PORT,
+    C3_2_PORT,
+    C3_3_PORT,
+    CLUSTER2_PORT,
+    OBJSTORE_PORT,
+];
+
+/// `auth`: SASL_SSL with PLAIN on `kafka-auth`. Published AND advertised.
+pub const AUTH_PLAIN_PORT: PortParam = PortParam {
+    var: "LOGWEIR_E2E_AUTH_PLAIN_PORT",
+    default: 9102,
+    profile: Some("auth"),
+    what: "kafka-auth PLAINTLS (SASL_SSL, PLAIN)",
+};
+/// `auth`: SASL_PLAINTEXT with SCRAM-SHA-256 on `kafka-auth`.
+pub const AUTH_SCRAM256_PORT: PortParam = PortParam {
+    var: "LOGWEIR_E2E_AUTH_SCRAM256_PORT",
+    default: 9103,
+    profile: Some("auth"),
+    what: "kafka-auth SCRAM256 (SASL_PLAINTEXT, SCRAM-SHA-256)",
+};
+/// `auth`: SSL with a required client certificate on `kafka-auth`.
+pub const AUTH_MTLS_PORT: PortParam = PortParam {
+    var: "LOGWEIR_E2E_AUTH_MTLS_PORT",
+    default: 9104,
+    profile: Some("auth"),
+    what: "kafka-auth MTLS (SSL, client certificate required)",
+};
+/// `cluster3`: node 1's host-side plaintext listener.
+pub const C3_1_PORT: PortParam = PortParam {
+    var: "LOGWEIR_E2E_C3_1_PORT",
+    default: 9112,
+    profile: Some("cluster3"),
+    what: "kafka-c3-1 EXTERNAL (plaintext)",
+};
+/// `cluster3`: node 2's host-side plaintext listener.
+pub const C3_2_PORT: PortParam = PortParam {
+    var: "LOGWEIR_E2E_C3_2_PORT",
+    default: 9113,
+    profile: Some("cluster3"),
+    what: "kafka-c3-2 EXTERNAL (plaintext)",
+};
+/// `cluster3`: node 3's host-side plaintext listener.
+pub const C3_3_PORT: PortParam = PortParam {
+    var: "LOGWEIR_E2E_C3_3_PORT",
+    default: 9114,
+    profile: Some("cluster3"),
+    what: "kafka-c3-3 EXTERNAL (plaintext)",
+};
+/// `objectstore`: SeaweedFS's S3 API (container port 8333).
+pub const OBJSTORE_PORT: PortParam = PortParam {
+    var: "LOGWEIR_E2E_OBJSTORE_PORT",
+    default: 9130,
+    profile: Some("objectstore"),
+    what: "objectstore S3 API (SeaweedFS)",
+};
+/// `cluster2`: the second cluster's host-side plaintext listener.
+pub const CLUSTER2_PORT: PortParam = PortParam {
+    var: "LOGWEIR_E2E_CLUSTER2_PORT",
+    default: 9122,
+    profile: Some("cluster2"),
+    what: "kafka-cluster2 EXTERNAL (plaintext)",
+};
 
 /// The whole port table, in the order `e2e/compose/stack-env.sh` lists it.
 pub fn all_ports() -> Vec<PortParam> {

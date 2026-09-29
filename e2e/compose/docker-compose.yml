@@ -32,6 +32,7 @@ networks:
   kafka-net: { driver: bridge }
 volumes:
   minio-data:
+  objectstore-data:
 
 services:
   kafka-broker-1:
@@ -282,3 +283,338 @@ services:
       minio: { condition: service_healthy }
     volumes: ["./config:/config"]
     profiles: [tools]
+
+  # ===========================================================================
+  # OPTIONAL PROFILES (PROD-01.5). Nothing below starts unless its profile is
+  # named in COMPOSE_PROFILES (`e2e/compose/stack-env.sh --profiles …`), so the
+  # default stack above is exactly what it was. Each profile's setup is a
+  # dependency of — or is itself — a LONG-RUNNING service with a healthcheck,
+  # so `just e2e-up`'s `up -d --wait` brings a profile up ready or fails; a bare
+  # one-shot in the up set makes `--wait` exit 1 (measured, compose v5.0.2).
+  # Every published port is a LOGWEIR_E2E_*_PORT parameter that a slot moves,
+  # and every host-facing advertisement carries the same variable
+  # (e2e/tests/stack_params.rs checks both). Profile owners and the extension
+  # rule are in e2e/README.md: later tasks EXTEND these services.
+  # ===========================================================================
+
+  # --- profile `auth`: PLAIN over TLS, SCRAM-SHA-256 and mTLS listeners -------
+  # A SEPARATE single-node cluster (its own CLUSTER_ID) so the default broker's
+  # five listeners, which the whole suite depends on, never change. Clients
+  # reach it from the HOST (or through e2e/fixtures/engine-docker.sh, which
+  # maps `localhost` to the host gateway): each listener is advertised as
+  # `localhost:<published port>`. The TLS material is generated once per
+  # project into `.e2e/auth/<project>/` (profiles/auth/gen-certs.sh says what
+  # each file is); credentials are the fixture user `logweir` with the fixture
+  # password `logweir-e2e-not-a-secret`, as on the SCRAM-SHA-512 listener.
+  kafka-auth-certs:
+    image: ${KAFKA_CLI_IMAGE:-confluentinc/cp-kafka:7.6.0}
+    profiles: [auth]
+    networks: [kafka-net]
+    entrypoint: ["bash", "/gen-certs.sh"]
+    volumes:
+      - ./profiles/auth/gen-certs.sh:/gen-certs.sh:ro
+      - ../../.e2e/auth/${COMPOSE_PROJECT_NAME}:/certs
+
+  kafka-auth:
+    image: apache/kafka:${KAFKA_VERSION:-3.7.1}
+    hostname: kafka-auth
+    profiles: [auth]
+    networks: [kafka-net]
+    depends_on:
+      kafka-auth-certs: { condition: service_completed_successfully }
+    volumes:
+      - ../../.e2e/auth/${COMPOSE_PROJECT_NAME}:/certs:ro
+    ports:
+      - "${LOGWEIR_E2E_AUTH_PLAIN_PORT:-9102}:9102"
+      - "${LOGWEIR_E2E_AUTH_SCRAM256_PORT:-9103}:9103"
+      - "${LOGWEIR_E2E_AUTH_MTLS_PORT:-9104}:9104"
+    environment:
+      CLUSTER_ID: OofTYol1VE2Jm3oa8rkrCw
+      KAFKA_NODE_ID: 2001
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 2001@kafka-auth:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      # Listener NAMES avoid `SSL://` and `SASL_`: the apache/kafka image's
+      # configure script demands its own keystore-credential files when an
+      # advertised listener name contains either, and these listeners are
+      # configured directly instead.
+      KAFKA_LISTENERS: PLAINTEXT://kafka-auth:9094,CONTROLLER://kafka-auth:9093,PLAINTLS://kafka-auth:9102,SCRAM256://kafka-auth:9103,MTLS://kafka-auth:9104
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-auth:9094,PLAINTLS://localhost:${LOGWEIR_E2E_AUTH_PLAIN_PORT:-9102},SCRAM256://localhost:${LOGWEIR_E2E_AUTH_SCRAM256_PORT:-9103},MTLS://localhost:${LOGWEIR_E2E_AUTH_MTLS_PORT:-9104}
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTLS:SASL_SSL,SCRAM256:SASL_PLAINTEXT,MTLS:SSL
+      KAFKA_SASL_ENABLED_MECHANISMS: PLAIN,SCRAM-SHA-256
+      KAFKA_LISTENER_NAME_PLAINTLS_SASL_ENABLED_MECHANISMS: PLAIN
+      KAFKA_LISTENER_NAME_SCRAM256_SASL_ENABLED_MECHANISMS: SCRAM-SHA-256
+      KAFKA_LISTENER_NAME_PLAINTLS_PLAIN_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.plain.PlainLoginModule required user_logweir="logweir-e2e-not-a-secret";'
+      KAFKA_LISTENER_NAME_SCRAM256_SCRAM___SHA___256_SASL_JAAS_CONFIG: 'org.apache.kafka.common.security.scram.ScramLoginModule required;'
+      # PEM stores (KIP-651): the key+chain file and the test CA, no passwords.
+      KAFKA_SSL_KEYSTORE_TYPE: PEM
+      KAFKA_SSL_KEYSTORE_LOCATION: /certs/broker.keystore.pem
+      KAFKA_SSL_TRUSTSTORE_TYPE: PEM
+      KAFKA_SSL_TRUSTSTORE_LOCATION: /certs/ca.pem
+      # Client certificates are REQUIRED on the mTLS listener only.
+      KAFKA_LISTENER_NAME_MTLS_SSL_CLIENT_AUTH: required
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'false'
+      KAFKA_LOG_DIRS: /tmp/kafka-logs
+    healthcheck:
+      test: ["CMD", "/opt/kafka/bin/kafka-topics.sh", "--bootstrap-server", "kafka-auth:9094", "--list"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+
+  # SCRAM-SHA-256 credentials are metadata records a client writes once the
+  # quorum serves (the same reason `scram-setup` exists), over the in-network
+  # PLAINTEXT listener. Long-running with a readiness marker, so `up --wait`
+  # waits for the credential and fails if the alter fails.
+  kafka-auth-setup:
+    image: apache/kafka:${KAFKA_VERSION:-3.7.1}
+    profiles: [auth]
+    networks: [kafka-net]
+    depends_on:
+      kafka-auth: { condition: service_healthy }
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - >-
+        /opt/kafka/bin/kafka-configs.sh --bootstrap-server kafka-auth:9094 --alter
+        --add-config 'SCRAM-SHA-256=[password=logweir-e2e-not-a-secret]'
+        --entity-type users --entity-name logweir
+        && /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-auth:9094 --create
+        --if-not-exists --topic orders --partitions 3 --replication-factor 1
+        && touch /tmp/ready && exec sleep 2147483647
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/ready"]
+      interval: 2s
+      timeout: 5s
+      retries: 90
+
+  # --- profile `cluster3`: a three-node KRaft cluster -------------------------
+  # Three combined broker+controller nodes, one quorum, replication factor 3 and
+  # min.insync.replicas 2 by default: the shape replication-factor, ISR and
+  # leader-movement behaviour needs (FX-5, PROD-10.1). Its own CLUSTER_ID.
+  kafka-c3-1:
+    image: apache/kafka:${KAFKA_VERSION:-3.7.1}
+    hostname: kafka-c3-1
+    profiles: [cluster3]
+    networks: [kafka-net]
+    ports:
+      - "${LOGWEIR_E2E_C3_1_PORT:-9112}:9092"
+    environment: &c3-env
+      CLUSTER_ID: 7vacnhubVwqdN1WQ_ERT8g
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-c3-1:9093,2@kafka-c3-2:9093,3@kafka-c3-3:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_LISTENERS: PLAINTEXT://kafka-c3-1:9094,CONTROLLER://kafka-c3-1:9093,EXTERNAL://kafka-c3-1:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-c3-1:9094,EXTERNAL://localhost:${LOGWEIR_E2E_C3_1_PORT:-9112}
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+      KAFKA_MIN_INSYNC_REPLICAS: 2
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'false'
+      KAFKA_LOG_DIRS: /tmp/kafka-logs
+    healthcheck:
+      test: ["CMD", "/opt/kafka/bin/kafka-topics.sh", "--bootstrap-server", "kafka-c3-1:9094", "--list"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+
+  kafka-c3-2:
+    image: apache/kafka:${KAFKA_VERSION:-3.7.1}
+    hostname: kafka-c3-2
+    profiles: [cluster3]
+    networks: [kafka-net]
+    ports:
+      - "${LOGWEIR_E2E_C3_2_PORT:-9113}:9092"
+    environment:
+      <<: *c3-env
+      KAFKA_NODE_ID: 2
+      KAFKA_LISTENERS: PLAINTEXT://kafka-c3-2:9094,CONTROLLER://kafka-c3-2:9093,EXTERNAL://kafka-c3-2:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-c3-2:9094,EXTERNAL://localhost:${LOGWEIR_E2E_C3_2_PORT:-9113}
+    healthcheck:
+      test: ["CMD", "/opt/kafka/bin/kafka-topics.sh", "--bootstrap-server", "kafka-c3-2:9094", "--list"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+
+  kafka-c3-3:
+    image: apache/kafka:${KAFKA_VERSION:-3.7.1}
+    hostname: kafka-c3-3
+    profiles: [cluster3]
+    networks: [kafka-net]
+    ports:
+      - "${LOGWEIR_E2E_C3_3_PORT:-9114}:9092"
+    environment:
+      <<: *c3-env
+      KAFKA_NODE_ID: 3
+      KAFKA_LISTENERS: PLAINTEXT://kafka-c3-3:9094,CONTROLLER://kafka-c3-3:9093,EXTERNAL://kafka-c3-3:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-c3-3:9094,EXTERNAL://localhost:${LOGWEIR_E2E_C3_3_PORT:-9114}
+    healthcheck:
+      test: ["CMD", "/opt/kafka/bin/kafka-topics.sh", "--bootstrap-server", "kafka-c3-3:9094", "--list"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+
+  # --- profile `cluster2`: a second, independent cluster ----------------------
+  # Its own CLUSTER_ID — the image's default (5L6g3nShT-eMCtK--X86sw) is what
+  # kafka-broker-1 and every slot's broker answer, so without an override the
+  # two clusters would be indistinguishable to the cluster-id allowlist. The
+  # marker topic exists, so the second cluster can be a `scratch` drill target.
+  kafka-cluster2:
+    image: apache/kafka:${KAFKA_VERSION:-3.7.1}
+    hostname: kafka-cluster2
+    profiles: [cluster2]
+    networks: [kafka-net]
+    ports:
+      - "${LOGWEIR_E2E_CLUSTER2_PORT:-9122}:9092"
+    environment:
+      CLUSTER_ID: R66XfW-OXGqtWwdG7Kc7zg
+      KAFKA_NODE_ID: 3001
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 3001@kafka-cluster2:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_LISTENERS: PLAINTEXT://kafka-cluster2:9094,CONTROLLER://kafka-cluster2:9093,EXTERNAL://kafka-cluster2:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-cluster2:9094,EXTERNAL://localhost:${LOGWEIR_E2E_CLUSTER2_PORT:-9122}
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'false'
+      KAFKA_LOG_DIRS: /tmp/kafka-logs
+    healthcheck:
+      test: ["CMD", "/opt/kafka/bin/kafka-topics.sh", "--bootstrap-server", "kafka-cluster2:9094", "--list"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+
+  kafka-cluster2-setup:
+    image: apache/kafka:${KAFKA_VERSION:-3.7.1}
+    profiles: [cluster2]
+    networks: [kafka-net]
+    depends_on:
+      kafka-cluster2: { condition: service_healthy }
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - >-
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-cluster2:9094 --create
+        --if-not-exists --topic logweir.scratch --partitions 1 --replication-factor 1
+        && touch /tmp/ready && exec sleep 2147483647
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/ready"]
+      interval: 2s
+      timeout: 5s
+      retries: 90
+
+  # --- profile `streams`: a pinned minimal Kafka Streams application ----------
+  # Apache Kafka's own WordCountDemo, from the SAME apache/kafka image as the
+  # broker (kafka-streams-examples-<KAFKA_VERSION>.jar), so the application's
+  # version is the broker line's. It reads `streams-plaintext-input` and writes
+  # word counts to `streams-wordcount-output` on kafka-broker-1, with a
+  # consumer group, internal repartition/changelog topics and local state —
+  # what PROD-06's application-recovery rows need. Topics are created first
+  # because the broker refuses auto-creation.
+  streams-topics:
+    image: apache/kafka:${KAFKA_VERSION:-3.7.1}
+    profiles: [streams]
+    networks: [kafka-net]
+    depends_on:
+      kafka-broker-1: { condition: service_healthy }
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - >-
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-broker-1:9094 --create
+        --if-not-exists --topic streams-plaintext-input --partitions 1 --replication-factor 1
+        && /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-broker-1:9094 --create
+        --if-not-exists --topic streams-wordcount-output --partitions 1 --replication-factor 1
+        --config cleanup.policy=compact
+
+  streams-wordcount:
+    image: apache/kafka:${KAFKA_VERSION:-3.7.1}
+    profiles: [streams]
+    networks: [kafka-net]
+    depends_on:
+      streams-topics: { condition: service_completed_successfully }
+    volumes:
+      - ./profiles/streams/wordcount.properties:/streams/wordcount.properties:ro
+    entrypoint: ["/opt/kafka/bin/kafka-run-class.sh"]
+    command: ["org.apache.kafka.streams.examples.wordcount.WordCountDemo", "/streams/wordcount.properties"]
+    healthcheck:
+      # RUNNING is not observable from outside without JMX; the application's
+      # group being STABLE is — a client that died (the RocksDB failure above
+      # left the JVM alive and the group Empty) never gets there. The smoke run
+      # proves the counts.
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server kafka-broker-1:9094 --describe --group logweir-e2e-wordcount --state | grep -q -w Stable"]
+      interval: 10s
+      timeout: 20s
+      retries: 18
+      start_period: 30s
+
+  # --- profile `objectstore`: a maintained, lock-capable S3 server -------------
+  # SeaweedFS 4.48 (Apache-2.0), the object store PROD-01.5 chose over the
+  # archived MinIO: docs/to-do/decisions/PROD-01.5-fixture-profiles.md has the
+  # evidence (19/19 protocol checks and Logweir's own store and receipt paths).
+  # It runs BESIDE the default MinIO, which stays the stack's default store
+  # until REPLACE-MINIO. Buckets: `kafka-backups` and `logweir-evidence` (the
+  # names every example uses, so a spec needs only its endpoint changed),
+  # `kafka-backups-locked` (Object Lock, hence versioning) and
+  # `kafka-backups-2` (a second archive bucket, e.g. a secondary copy).
+  # Credentials are the stack's fixture pair; per-prefix identities go in
+  # profiles/objectstore/s3.json (`"actions": ["Write:bucket/prefix/*"]`).
+  objectstore:
+    image: chrislusf/seaweedfs:4.48@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d
+    hostname: objectstore
+    profiles: [objectstore]
+    networks: [kafka-net]
+    command: ["mini", "-dir=/data", "-s3.config=/etc/seaweedfs/s3.json"]
+    volumes:
+      - objectstore-data:/data
+      - ./profiles/objectstore/s3.json:/etc/seaweedfs/s3.json:ro
+    ports:
+      - "${LOGWEIR_E2E_OBJSTORE_PORT:-9130}:8333"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8333/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+
+  objectstore-setup:
+    image: amazon/aws-cli:2.37.5@sha256:fb7ccfc7b4e3a05017e6c9ded4ba959b99af622130e211fb976c68c2f4d3f224
+    profiles: [objectstore]
+    networks: [kafka-net]
+    depends_on:
+      objectstore: { condition: service_healthy }
+    environment:
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_EC2_METADATA_DISABLED: "true"
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - >-
+        set -e;
+        mk() { aws --endpoint-url http://objectstore:8333 s3api head-bucket --bucket "$$1" 2>/dev/null
+        || aws --endpoint-url http://objectstore:8333 s3api create-bucket --bucket "$$@"; };
+        mk kafka-backups; mk logweir-evidence; mk kafka-backups-2;
+        mk kafka-backups-locked --object-lock-enabled-for-bucket;
+        aws --endpoint-url http://objectstore:8333 s3api get-object-lock-configuration --bucket kafka-backups-locked;
+        touch /tmp/ready; exec sleep 2147483647
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/ready"]
+      interval: 2s
+      timeout: 5s
+      retries: 90

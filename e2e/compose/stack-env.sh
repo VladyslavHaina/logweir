@@ -34,6 +34,14 @@ LOGWEIR_E2E_K8S_PORT 9095
 LOGWEIR_E2E_SASL_PORT 9097
 LOGWEIR_E2E_S3_PORT 9000
 LOGWEIR_E2E_S3_CONSOLE_PORT 9001
+LOGWEIR_E2E_AUTH_PLAIN_PORT 9102
+LOGWEIR_E2E_AUTH_SCRAM256_PORT 9103
+LOGWEIR_E2E_AUTH_MTLS_PORT 9104
+LOGWEIR_E2E_C3_1_PORT 9112
+LOGWEIR_E2E_C3_2_PORT 9113
+LOGWEIR_E2E_C3_3_PORT 9114
+LOGWEIR_E2E_CLUSTER2_PORT 9122
+LOGWEIR_E2E_OBJSTORE_PORT 9130
 "
 STRIDE=10000
 MAX_SLOT=4
@@ -51,6 +59,11 @@ LINES="
 # THE OPTIONAL PROFILES: NAME DESCRIPTION. `setup` and `tools` are internal
 # (one-shot services `just e2e-up` runs itself) and are not listed.
 PROFILES_LIST="
+auth      kafka-auth: SASL_SSL/PLAIN :9102, SASL_PLAINTEXT/SCRAM-SHA-256 :9103, SSL+client-cert :9104 (certs in .e2e/auth/<project>/)
+cluster3  kafka-c3-1..3: a three-node KRaft cluster, RF 3 / min ISR 2 by default, :9112-:9114
+cluster2  kafka-cluster2: a second single-node cluster with its own cluster id and the marker topic, :9122
+streams   streams-wordcount: Apache Kafka's WordCountDemo on kafka-broker-1 (group logweir-e2e-wordcount)
+objectstore  objectstore: SeaweedFS 4.48 S3 :9130 with kafka-backups, logweir-evidence, kafka-backups-locked (Object Lock), kafka-backups-2
 "
 
 die() { echo "stack-env: $*" >&2; exit 2; }
