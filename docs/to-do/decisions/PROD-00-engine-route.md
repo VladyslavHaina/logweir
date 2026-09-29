@@ -7,7 +7,7 @@
 
 ## 0. Decision summary
 
-1. **Stay on the 0.21.0 pin until OD-3 is recorded, then move to 0.22.0 (proposed child row PROD-00.3f).** 0.22.0 is one squash commit over 0.21.0. It does not change the segment format, the three subcommands Logweir runs (`backup`, `restore`, `validate-restore`), or any key Logweir renders. On the compose stack it passes the demo drill, G-PITR, the receipt path and the full CI e2e command (64 of 64), and both verifiers accept its evidence (§4, §5.4). Run 36542777892 recorded one red row: 0.22.0's full row, which since the merge also runs PROD-01.1's record-semantics suite. The broker's time retention deleted one of those rows' source records before the capture. The pin does the same under the same conditions, so this is a fixture race, not the engine (§4.4). 00.3f carries it as precondition P-3f-1. Two of 0.22.0's changes need Logweir work before a bump:
+1. **Stay on the 0.21.0 pin until OD-3 is recorded, then move to 0.22.0 (proposed child row PROD-00.3f).** 0.22.0 is one squash commit over 0.21.0. It does not change the segment format, the three subcommands Logweir runs (`backup`, `restore`, `validate-restore`), or any key Logweir renders. On the compose stack it passes the demo drill, G-PITR, the receipt path and the full CI e2e command (64 of 64), and both verifiers accept its evidence (§4, §5.4). Run 36542777892 recorded one red row: 0.22.0's full row, which since the merge also runs PROD-01.1's record-semantics suite. The broker's time retention deleted one of those rows' source records before the capture. The pin does the same under the same conditions, so this is a fixture race, not the engine (§4.4). 00.3f carries it as precondition P-3f-1. The fixture fix is on this branch (§4.5). Two of 0.22.0's changes need Logweir work before a bump:
    - its `path_style` fix does **not** lift ENGINE-PATHSTYLE, because a custom endpoint still forces path-style;
    - it newly derives plaintext HTTP from an `http://` endpoint even when `allow_http: false` is rendered.
 2. **Every capability gap has a route** (§3). The engine's Kafka and archive correctness defects go **upstream first**; this is bug-class work that `docs/OSO_Feature_Gate_PRD.md` does not gate. Each one is carried as a patch on the PROD-00.2 source build when upstream declines or stalls. The engine's gated seams go to a **patch or a Logweir-native path**, never to an upstream feature PR: the programmatic record filter, and SASL plugins for OAUTHBEARER and MSK IAM. Offsets, ACLs, verification and transport safety stay **Logweir-native**. MSK IAM, the engine's own evidence reports and its continuous/offset-store modes are **declared unsupported** for now.
@@ -441,7 +441,7 @@ The runner copies the binary out of OSO's amd64-only image (ruling GR6, `L/scrip
 - **Route.** Nothing is needed upstream: skipping an empty range is intended, and backing up an empty topic is not an engine error. A per-topic "captured nothing" warning would be a feature rather than a bug-class fix, so it is not a PR candidate under §2. Logweir's guard is the N route, and it already exists.
 - **Acceptance.**
   - **A-C20-1.** A topic that the broker's time retention emptied before the capture is refused by `logweir backup run` with the "captured nothing" message, on the pin and on 0.22.0 alike. Measured in §4.4: three topics, two engines.
-  - **A-C20-2 (the fixtures; owners PROD-01.1 and G-PITR).** A source topic that holds records stamped older than the broker's retention is created with `retention.ms=-1`, as Logweir creates its restore targets (`L/crates/logweir-kafka/src/reader.rs:349-355`). Pass: the topic survives a retention check, and its capture archives every record (§4.4, the fix verification). Negative control: the same topic on cluster-default retention is emptied by the check and refused (A-C20-1).
+  - **A-C20-2 (the fixtures; applied on this branch in `d795bae4`, round 4).** A source topic that holds records stamped older than the broker's retention is created with `retention.ms=-1`, as Logweir creates its restore targets (`L/crates/logweir-kafka/src/reader.rs:349-355`). Pass: the topic survives a retention check, and its capture archives every record (§4.4, the fix verification; §4.5, live). Negative control: the same topic on cluster-default retention is emptied by the check and refused (A-C20-1).
 
 ## 4. The 0.22.0 evaluation
 
@@ -528,16 +528,52 @@ The broker deleted A and B at its checks at 09:10:38.7 and 09:15:38.6, 300 s apa
 
 - **No record shape triggers it.** A single plain record at `T` is lost the same way, and both engines capture the full shapes fixture when it is stamped now.
 - **It is not the engine.** Both versions handle an emptied topic identically, by the same code (C20).
-- **It is a latent race in the test fixtures, on every full row.** The source topics that hold `T`-stamped records are created without `retention.ms`. In run 36542777892, six of them lived about 77 s in total:
+- **It is a latent race in the test fixtures, on every full row.** The source topics that hold `T`-stamped records are created without `retention.ms`. In run 36542777892 there were seven such lifetimes, totalling about 100 s; the recreate row creates its topic twice:
   - `pitr-src`: 16.9 s;
   - `shapes`: 6.1 s;
   - `ts-floor`: 21.4 s;
   - `ts-bound`: 13.4 s;
   - `ts-pit`: 13.5 s;
-  - `recreate`: 6.0 s.
+  - `recreate`: 6.0 s, then 22.5 s for its second generation.
 
-  With a check every 300 s, a check lands inside one of those lifetimes about one run in four. It lands inside the narrower window between a produce and its capture less often. The pin rows and main's CI e2e job carry the same exposure.
-- **The fix belongs to the fixtures** (A-C20-2, §11). It is one config pair per source topic, proved above.
+  With a check every 300 s, a check lands inside one of those lifetimes about one run in three. It lands inside the narrower window between a produce and its capture less often. The pin rows and main's CI e2e job carry the same exposure.
+- **The fix is in the fixtures** (A-C20-2). Round 4 applied it on this branch (§4.5).
+
+### 4.5 Round 4: the fixture fix on this branch, and the race gone live
+
+The orchestrator authorized the fix on this branch as an out-of-ownership edit (`d795bae4`).
+
+- **The helper.** `harness::create_topic_for_fixed_timestamps` (`e2e/tests/harness/mod.rs`) is `create_topic_with_configs` with `retention.ms=-1` added. It refuses a caller that states `retention.ms` itself.
+- **The class, swept once** (`e2e/tests/**` and `crates/*/tests`). Three sites stamp a fixed past instant into a topic they create, and all three now use the helper:
+  - `record_semantics.rs`'s `Row::source_topic`, which every record-semantics row uses;
+  - the recreate row's second generation, a direct re-creation in `record_semantics.rs`;
+  - `pitr_boundary.rs`'s `pitr-src`.
+
+  The support module creates no topics. These are outside the class:
+  - `topic_identity.rs` (PROD-01.4) stamps a minute ago, and already starts every row on `retention.ms=-1`. Its row c10 lowers retention on purpose and keeps it.
+  - `mvp_demo.rs` stamps at the live seed's newest instant.
+  - No `crates/*/tests` live row sets a record timestamp; `check_cli.rs`'s console producer stamps now.
+- **The guard.** `e2e/tests/fixture_retention.rs` is a text scan in the default test set, so CI's `cargo test --workspace` runs it. A file under `e2e/tests/` that holds a fixed epoch-milliseconds literal older than seven days must create its topics through the helper.
+  - It asserts that the walk descends, that it sees the two known suites, and that the helper adds the override.
+  - Negative controls: a planted configs-path creation and a raw `--create`, in memory and on disk in a nested directory; relative, recent and comment-only stamps stay outside.
+  - Seven mutants are caught (`round3/fixture-guard-mutants.log`).
+- **Live, on slot 2 with Kafka 3.7.1** (`round4/`). The broker's `kafka.log.LogManager` logger was set to DEBUG at run time, so every retention check logs "Beginning log cleanup". `keys_nulls_tombstones_and_duplicate_headers` then ran ten times with each engine:
+
+  | Measure | Result |
+  |---|---|
+  | Shapes row, v0.22.0 | 10 of 10 passed |
+  | Shapes row, v0.21.0 | 10 of 10 passed |
+  | Retention checks logged | 6, every 300 s (09:53:23 to 10:18:23) |
+  | Fixed-stamp source topics | 22 lifetimes (20 shapes, 2 `pitr-src`), every one created with `retention.ms=-1` |
+  | Checks inside a lifetime | 5. Three fell after the source was created and before its first restore target existed, the window in which run 36542777892 lost its records: 09:58:23 and 10:03:23 on 0.22.0, 10:18:23 on 0.21.0 |
+  | Segments deleted "due to log retention time" | 0 |
+
+  `record_semantics` and `pitr_boundary` then ran in full on a fresh stack, per engine, with the second verifier's interpreter set (`LOGWEIR_E2E_PYTHON`). The first attempt had stopped earlier, before any retention question arose, because this host's `python3` has no `cryptography`.
+  - **Both engines:** `pitr_boundary` 1 passed, and `record_semantics` 8 passed with 2 ignored.
+  - **That session:** 4 checks, and 14 fixed-stamp lifetimes, all on `retention.ms=-1`. They cover every source of every row, both generations of the recreated topic, and both `pitr-src`.
+  - **Checks inside a lifetime:** two. At 10:27:20 a check fell inside `ts-bound`'s produce-to-restore window on 0.22.0; at 10:32:20 one fell inside `pitr-src`'s lifetime on 0.21.0. No segment was deleted by retention.
+
+  Across both sessions that makes 10 checks and 36 lifetimes. Seven lifetimes had a check inside, four of them in the window that failed CI, and nothing was deleted.
 
 ## 5. engine-matrix
 
@@ -705,7 +741,7 @@ The rest of the full drill, 64 tests, passed on the three full rows at `7e4cd0b1
 
 An expected-failure declaration naming a 0.22.0 defect would be false, because no such defect exists. It would also turn the row red whenever the race misses, which is most runs.
 
-Nothing is hidden. PROD-01.1's assertion is untouched, a failed suite still records `fail(e2e suite)`, and the verdict step still fails the job. Until A-C20-2 lands in the fixtures, any full row can go red this way.
+Nothing is hidden. PROD-01.1's assertion is untouched, a failed suite still records `fail(e2e suite)`, and the verdict step still fails the job. A-C20-2 has landed (§4.5). The readback stays, so a future retention loss names itself.
 
 **What changed: the red now names its cause.**
 
@@ -887,8 +923,8 @@ Proposed new rows, lettered from **f**:
   - Negative control: the old constant (`"0.21.0"`) on the new pin fails the guard test. Without the guard, every contract row on 0.22.0 would record its outcome, assert nothing, and stay green.
   - Fixture: `e2e/tests/record_semantics.rs` and its rows.
 - **P-3f-1 (PROD-00.3f precondition, from run 36542777892).** The bump waits for two things:
-  - the fixture race is closed: A-C20-2 has landed in PROD-01.1's and G-PITR's source topics;
-  - the matrix's `v0.22.0 | 3.7.1 | full` row has recorded `pass` on GitHub with PROD-01.1's rows included.
+  - the fixture race is closed: A-C20-2 has landed in PROD-01.1's and G-PITR's source topics. This is met on this branch (`d795bae4`, §4.5);
+  - the matrix's `v0.22.0 | 3.7.1 | full` row has recorded `pass` on GitHub with PROD-01.1's rows included. This is pending the re-dispatch at this branch's tip.
 
   The red row is not an engine finding (§4.4, C20), so this does not block 0.22.0 on a defect. It makes the bump's CI evidence attributable: until the race is closed, a red 0.22.0 row cannot be told apart from an engine regression without the broker log. Pass: both conditions hold. Negative control: a 0.22.0 row that is red on a record-semantics row without deletions named in its reason is an engine finding, and it blocks the bump until it is explained.
 
@@ -898,7 +934,7 @@ Proposed new rows, lettered from **f**:
 - **One broker, and no transactional fixture here.** The compose stack is one combined KRaft broker, and no run in this record produces transactionally, duplicates headers or writes non-monotonic timestamps. PROD-01.1 has since measured C1, C5, C6, C13 and C14 (its record §2 and §5).
 - **The fix round and the merge have not yet run on GitHub.** Run 36531786341 was green on all six rows at `7e4cd0b1`. The fix round changes how rows are recorded (`ff9aa14a`). The merge adds three suites to the full rows and changes the generated `.env` (§5.5). Their CI evidence is therefore the re-dispatch at the final tip. `crates/logweir/tests/engine_matrix.rs` pins the changes by executing the recording and verdict steps' own text, and §5.5's cycles ran the new rows locally.
 - **This record's 4.3.1 evidence uses the pinned engine only.** Kafka 4.3.1 was probed (ApiVersions) and run with the pin: the demo drill, G-PITR and the full CI e2e command before the merge (§4.3), and the merged suite's new rows after it (§5.5, c9). All of it ran on one combined broker, and 0.22.0 ran on 3.7.1 only. PROD-01.5 owns the 3.9, 4.1 and 4.3 lines and has measured them with the pin (`docs/support-matrix.md`, "Broker versions").
-- **§4.4's reproduction ran the engine through the docker route under emulation; CI runs it natively.** The mechanism is the broker's, not the engine's, and the CI broker log shows the same deletion before the engine ran. The run-level exposure (about one run in four) is estimated from one CI run's topic lifetimes, not measured over many runs.
+- **§4.4's reproduction ran the engine through the docker route under emulation; CI runs it natively.** The mechanism is the broker's, not the engine's, and the CI broker log shows the same deletion before the engine ran. The run-level exposure before the fix (about one run in three) is estimated from one CI run's topic lifetimes, not measured over many runs.
 - **The upstream forecasts are forecasts.** Whether upstream accepts a given PR, and the cost estimates, are forecasts from the code and the release history, not measurements.
 - **Operator archives were reproduced, not collected.** They were reproduced by seeding with the same engine images the operators use; no archive was taken from a running operator. FX-1's snapshot failure is cited from the tracker, not re-run.
 
@@ -908,7 +944,7 @@ Proposed new rows, lettered from **f**:
 - `L/crates/logweir-core/src/destination.rs:462-477`, `L/crates/weirkeeper/src/destination.rs:531-535` and `L/crates/logweir-api/src/routes/destinations.rs:756-763` name "engine 0.21.0" in the ENGINE-PATHSTYLE refusal. On a bump, the message should not name a version (PROD-00.3f).
 - `L/crates/logweir-engine-oso/src/render_restore.rs:147` renders `checkpoint_interval_secs`, a key the engine never reads (C4, A-C4-3).
 - FX-6's disclosure (in `docs/verify-a-scorecard.md`, `docs/stability.md` and the restore review screen) should add C13 (duplicate header keys collapse) and C14 (LogAppendTime topics are archived with producer timestamps) beside the transaction and non-monotonic-timestamp hazards it already names.
-- **The source-fixture retention race (§4.4, A-C20-2).** Two places create source topics that hold records stamped at `T` = 2025-10-09 on cluster-default retention (7 days): `e2e/tests/record_semantics.rs:129-134` (`Row::source_topic`, which every record-semantics row uses) and `e2e/tests/pitr_boundary.rs:638-641` (`pitr-src`). The broker's retention check can empty them before the capture. The proposal is one config pair in each place, `("retention.ms", "-1")`, as Logweir's restore targets already have (`L/crates/logweir-kafka/src/reader.rs:349-355`); the compacted row's own configs stay as they are. The owners are PROD-01.1 and G-PITR; the coordinator decides. PROD-01.1's precondition assertion should not be engine-gated: a capture that returns nothing is exactly what it exists to catch.
+- **The source-fixture retention race (§4.4, A-C20-2) is done on this branch** (`d795bae4`), as an out-of-ownership edit the orchestrator authorized in round 4 (§4.5). It stays listed because the files belong to PROD-01.1 and G-PITR: `e2e/tests/harness/mod.rs` (the helper), `e2e/tests/record_semantics.rs` (`Row::source_topic` and the recreate row), `e2e/tests/pitr_boundary.rs`, and the new guard `e2e/tests/fixture_retention.rs`. PROD-01.1's precondition assertion is not engine-gated; that was the orchestrator's ruling.
 - `docs/quickstart.md` Path 3 invited any compatible producer's archive without saying that a pre-0.21 archive drills as `fail-integrity`/`partial` (exit 2). The fix round added one sentence there and a link to `support-matrix.md`, an out-of-ownership edit (review L8).
 
 ---
