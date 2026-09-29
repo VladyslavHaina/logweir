@@ -18,7 +18,10 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-SPEC="${1:-.demo/drill.yaml}"
+# The demo's scratch directory: `.demo` unless `scripts/demo.sh` runs against a
+# non-default compose stack and exports `.demo/<project>` (PROD-01.5).
+DEMO="${LOGWEIR_DEMO_DIR:-.demo}"
+SPEC="${1:-$DEMO/drill.yaml}"
 [ -f "$SPEC" ] || { echo "demo-approve: no such spec: $SPEC" >&2; exit 1; }
 
 # `logweir drill approve` — the SHIPPED command, not a cargo example. It hashes
@@ -34,7 +37,7 @@ fi
 
 "$LOGWEIR_BIN" drill approve \
   --spec "$SPEC" \
-  --key .demo/approver.pem \
+  --key "$DEMO/approver.pem" \
   --approver demo@example.com \
   --ticket DEMO-1 \
-  --out .demo/approval.json
+  --out "$DEMO/approval.json"

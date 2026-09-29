@@ -95,6 +95,7 @@ The loop never decides these. A row gated on an open decision stays Blocked; the
 | OD-3 | Engine route per capability (proposed by PROD-00.1) | Upstream PR (bug-class fixes only); maintained MIT fork built from the vendored source (supersedes or scopes ruling GR6); Logweir-native path; declared unsupported | Build from source regardless (arm64, CVE patching, signed provenance); upstream PRs for bug-class fixes; native paths for offsets, ACLs and verification; fork only what upstream refuses | 00.2, 00.3, 02.3, 07.3, 11.2 | Open; the options come from PROD-00.1 (in progress) |
 | OD-4 | Provider and storage evidence | Accounts and budget for AWS (S3, MSK), Confluent Cloud, Redpanda Cloud, Aiven, Azure Event Hubs, GCS and Azure Blob; whether rule 6 lets a local runner reach remote endpoints | AWS S3 and MSK first (largest managed population; real conditional create and lock readback strengthen the evidence), then Confluent Cloud after PROD-01.3 | Provider rows in 01.2 and 09.2 | Open; asked 2026-09-28 |
 | OD-5 | Business and legal | Trademark clearance or rename (`TRADEMARKS.md` gates announcing); monetization before external contributions (no CLA, so relicensing closes after the first outside PR); a legal opinion on copyright in AI-assisted code for the chosen model; a contracting entity for regulated buyers | Decide monetization and the name before any public positioning | Publishing 14.3 outputs, public roadmap, outreach beyond NDA | Open; asked 2026-09-28 |
+| OD-6 | A scoped `unsafe` policy for librdkafka calls the safe rdkafka API lacks (PROD-01.4's TI-OC1; it also covers PROD-04.0's group, offset and ACL calls, so `unsafe` is decided once) | (a2) one FFI crate for every such call, with `logweir-kafka` and every product crate keeping `forbid(unsafe_code)`; (a1) a private module in `logweir-kafka` (`deny` plus one `allow`); (b) wait for upstream rust-rdkafka (PR #721, stalled since 2024-09); (c) the engine route (PROD-00.3, and Amendment D for offsets); (d) a raw-protocol client; (e) no `unsafe`: the heuristic only, and PROD-04.0 limited to the safe consumer API | (a2), with (b) as the per-call exit and the PROD-01.4 heuristic as the fallback for `null` IDs and truncation (`decisions/PROD-01.4-topic-identity.md` §6.4) | 01.4a; PROD-04.0's FFI paths | Open; asked 2026-09-29 |
 
 ## Loop contract (Claude Code)
 
@@ -135,15 +136,16 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 | 0 | FX-1 | Parse the engine's consumer-group snapshot | P1 | M1 | fix | — | — | compose | A | Proposed |
 | 0 | FX-2 | Apply or refuse `runnerResources` | P1 | M1 | fix | — | — | k8s | A | Proposed |
 | 0 | FX-3 | Stop labelling new-topic deviations "intended" | P1 | M1 | fix | — | — | compose | A | Proposed |
-| 0 | FX-4 | Record topic-configuration capture coverage | P1 | M1 | fix | — | — | compose | A | Proposed |
+| 0 | FX-4 | Record topic-configuration capture coverage | P1 | M1 | fix | — | — | compose | A | In progress |
 | 0 | FX-5 | Console replication factor from the source | P1 | M1 | fix | — | — | k8s | B | Proposed |
 | 0 | FX-6 | Disclose transaction and timestamp semantics | P1 | M1 | docs | — | — | none | B | Proposed |
 | 0 | FX-7 | Keep earlier points valid after a manifest rewrite | P1 | M1 | fix | — | — | compose | A | Proposed |
+| 0 | FX-8 | Refuse or label point-in-time selection over `LogAppendTime` sources | P1 | M1 | fix | 01.1; FX-4 for the broker-default arm | — | compose | A | Proposed |
 | 0 | PROD-00.1 | Evaluate the engine; decide a route per capability | P1 | M1 | research | — | — | compose | B | In progress |
-| 0 | PROD-01.1 | Prove record and transaction behaviour | P1 | M2 | research | — | — | compose | B | In progress |
-| 0 | PROD-01.4 | Define topic identity and generations | P1 | M2 | research | — | — | none | B | In progress |
+| 0 | PROD-01.1 | Prove record and transaction behaviour | P1 | M2 | research | — | — | compose | B | Done |
+| 0 | PROD-01.4 | Define topic identity and generations | P1 | M2 | research | — | — | none | B | Done |
 | 0 | PROD-01.5 | Shared fixture profiles and broker versions | P1 | M1 | infra | — | — | compose | B | In progress |
-| 0 | PROD-04.0 | Decide the Kafka administrative path | P1 | M2 | research | — | — | compose | B | Proposed |
+| 0 | PROD-04.0 | Decide the Kafka administrative path | P1 | M2 | research | — | — | compose | B | In progress |
 | 0 | PROD-08.4 | Publish a control-evidence mapping | P1 | M2 | docs | — | — | none | B | Proposed |
 | 0 | PROD-14.0 | Ship a working release | P1 | M1 | infra | — | — | none | B | Proposed |
 | 0 | PROD-14.3 | Positioning and design-partner kit | P1 | M2 | docs | — | OD-5 (publication) | none | C | Proposed |
@@ -157,6 +159,10 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 | 1 | PROD-02.1 | Honest coverage for scheduled backups | P1 | M2 | impl | 01.4 | — | k8s | A | Proposed |
 | 1 | PROD-07.1 | Resolve checkpoint and delivery semantics | P2 | M3 | research | 01.1 | — | none | B | Proposed |
 | 1 | PROD-09.3 | Decide archive data protection | P2 | M3 | research | 00.1 | — | none | B | Proposed |
+| 1 | PROD-01.1a | Detect transactional archives; refuse by default, label an approved override | P1 | M2 | impl | 01.1, FX-6 | — | compose | A | Proposed |
+| 1 | PROD-01.1b | Make recovery-point selection safe for out-of-order timestamps | P1 | M2 | impl | 01.1 | — | compose | A | Proposed |
+| 1 | PROD-01.4a | Topic IDs through DescribeTopics (the first wrapper under OD-6's policy) | P1 | M2 | impl | 01.4 | OD-6 | compose | A | Proposed |
+| 3 | PROD-01.4b | Upstream DescribeTopics in rust-rdkafka (the exit for 01.4a) | P3 | M3 | impl | 01.4a | — | none | B | Proposed |
 | 2 | PROD-02.2 | Capture incrementally | P1 | M2 | impl | 02.1, 00.1 | — | compose | A | Proposed |
 | 2 | PROD-03.0 | Flag schema-dependent topics | P1 | M2 | impl | — | — | compose | A | Proposed |
 | 2 | PROD-04.2 | Translate positions; reviewed cutover | P1 | M2 | impl | 04.1, 08.1 | — | k8s | A | Proposed |
@@ -164,6 +170,11 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 | 2 | PROD-11.1 | Replay selection and safe clones | P1 | M2 | impl | 01.1, 08.1 | — | k8s | A | Proposed |
 | 2 | PROD-15.1 | Restore under the original name into an absent topic | P1 | M2 | impl | 01.4 | OD-2 | k8s | A | Proposed |
 | 3 | PROD-00.3 | Engine capabilities by route (child rows) | P2 | M3 | impl | 00.1, 00.2 | OD-3 | compose | A | Proposed |
+| 3 | PROD-00.3a | Committed-only capture (control records and READ_COMMITTED) | P2 | M3 | impl | 00.1; 00.2 for a patch route | OD-3 | compose | A | Proposed |
+| 3 | PROD-00.3b | Segment min/max record timestamps | P2 | M3 | impl | 00.1; 00.2 for a patch route | OD-3 | compose | A | Proposed |
+| 3 | PROD-00.3c | Keep `LogAppendTime` through capture | P2 | M3 | impl | 00.1; 00.2 for a patch route | OD-3 | compose | A | Proposed |
+| 3 | PROD-00.3d | Idempotent (or sequence-checked) restore produce | P2 | M3 | impl | 00.1; 00.2 for a patch route | OD-3 | compose | A | Proposed |
+| 3 | PROD-00.3e | Keep repeated header keys through capture and replay | P2 | M3 | impl | 00.1; 00.2 for a patch route | OD-3 | compose | A | Proposed |
 | 3 | PROD-02.3 | Decide the continuous capture protocol | P2 | M3 | research | 02.2, 01.4, 00.3 | OD-3 | compose | B | Proposed |
 | 3 | PROD-02.4 | Streaming protection with a coverage timeline | P2 | M3 | impl | 02.3 | — | k8s | A | Proposed |
 | 3 | PROD-03.1 | Capture a usable registry dependency set | P2 | M3 | impl | 03.0, 01.2 | OD-2 | compose | A | Proposed |
@@ -200,6 +211,7 @@ Found by the 2026-09-23 review. They do not depend on any expansion feature. Evi
 | FX-5 | Every console restore creates replication-factor-1 topics. | `ui/pages/restore-wizard.js` hard-codes `replicationFactor: 1` (shown read-only in review); the plan grammar has `target.default_replication_factor` (default 1); nothing derives it from the source. | Default to min(source RF from the manifest, target broker count) with an input and the existing `ReplicationFactorExceedsBrokers` check; Playwright journey. |
 | FX-6 | Two restore semantics are undisclosed. Transactional topics probably come back with aborted records and commit/abort markers as ordinary data. With non-monotonic timestamps, the point-in-time end can omit an in-window record without detection. Drills pass in both cases because phase 7 compares the target with the archive. | Engine `kafka/fetch.rs` READ_UNCOMMITTED with no control-record filter; `BackupRecord` has no transaction fields; `kafka/produce.rs` non-transactional; `segment/writer.rs` first/last timestamps used by every selector. Read from source, not run; no test produces transactionally. | Disclose both in `docs/verify-a-scorecard.md`, `docs/stability.md` and the restore review screen; PROD-01.1 decides the product rails. |
 | FX-7 | A second run under an existing `backup_id` rewrites the manifest in place, so an earlier signed point no longer verifies. This is the residue of platform defect RECEIPT-DUP, which gives each receipt its own point but not its own manifest. | Engine rewrites `{backup_id}/manifest.json` (get-merge-put); the CLI takes `spec.backup_id`; `crates/logweir/src/backup/phase_run.rs` reads the manifest's version id and discards it. | On versioned buckets pin the manifest version id in receipt and catalog and read by version; otherwise refuse a second run under an existing `backup_id`. Skip if the platform run closed RECEIPT-DUP completely. |
+| FX-8 | A point-in-time restore over a `LogAppendTime` source selects records by the producers' CreateTime (what the archive holds) and is signed `pass`. Found by PROD-01.1 on 2026-09-29. | PROD-01.1 `lat` row: a point in 2001 restored six records the broker appended in 2026, `pass` 6/6 (`decisions/PROD-01.1-record-semantics.md` §2.3); the engine archives CreateTime (S3); the manifest's `configurations` carries a topic override of `message.timestamp.type`. | Refuse point-in-time selection for `LogAppendTime` topics before any target is created (`PointInTimeByProducerTime`), unless the approved plan says `restore.timeBasis: producerTime`, which labels the scorecard, receipt and console. The topic-override arm lands now; the broker-default arm lands with FX-4. Full specification: the record's §9. |
 
 ## Foundation dependency map
 
@@ -275,6 +287,46 @@ PLAT prerequisites that must be Done before a task ships. Research and contract 
 - **Tests/evidence:** Deterministic records across several partitions; committed input (read with read_committed) compared with observed output; equal and non-monotonic timestamps, duplicate headers and tombstones. Record actual outcomes, not engine exit status.
 - **Dependencies:** None. **Handoff:** `decisions/PROD-01.1-record-semantics.md`, fixtures, rail rows and constraints for PROD-02, 04, 07 and 08.
 
+**Completion record — Done (2026-09-29), PROD-01.1.**
+- **Ownership:** worker `prod-01-1` (one run and one fix round), independent Tier-B review `claude/prod-01-1.review.md`. The review was ACCEPT-WITH-FIXES (5 MEDIUM, 9 LOW, no HIGH), and the orchestrator read the fix round. Merged as `ac6aa00e` (branch tip `f47c675a`); the full `scripts/ci-check.sh` passed with rc 0 on `ac6aa00e`.
+- **Decision record:** [`decisions/PROD-01.1-record-semantics.md`](decisions/PROD-01.1-record-semantics.md). It contains:
+  - the capability contract for capture, replay and verification (§3);
+  - what the archive cannot represent (§4);
+  - fault injection (§5);
+  - the transactional rail (§6);
+  - acceptance rows 02-1…08-7 for PROD-02, 04, 07 and 08 (§7);
+  - the FX-6 wording (§8);
+  - the new rows (§9).
+- **Evidence** comes from the compose fixture: Kafka 3.7.1 single-node KRaft and the pinned engine v0.21.0. Two full passes and the fix-round pass at `44838f31` agree row for row. Every "signed" verdict below is Logweir's own scorecard.
+  - **Transactions:** 7 commit/abort markers and the aborted and open-transaction records are restored as ordinary data, and signed `pass` (19/19).
+  - **`LogAppendTime`:** the source is archived with the producers' CreateTime. A point in 2001 restored six records appended in 2026, signed `pass`.
+  - **Non-monotonic CreateTime:**
+    - an in-window record is skipped, signed `pass` (16/16);
+    - a correct point-in-time restore is signed `fail` (it misses the count bound);
+    - a record below the window floor is dropped: a full restore fails, and a point-in-time restore passes (10/10).
+  - **Headers:** a repeated header key keeps one copy, and a record's own `x-original-offset` is lost.
+  - **Compaction and topic recreation** restore exactly.
+  - **Fault injection:**
+    - a lost produce acknowledgement resends batches: 3,000 and 2,000 duplicates, and the engine exited 0 over the second;
+    - a broker outage leaves a partial target;
+    - no fault run was ever signed `pass`.
+  - **Termination injection** stays blocked on subprocess cancellation: a killed `logweir` leaves its engine running to completion (`docs/stability.md` Later #13).
+- **Decisions:**
+  - **No product claim** may say transactional, exactly-once, `read_committed` or source-faithful recovery; FX-6 publishes the limits.
+  - **The transactional rail** is refuse by default, detect, and label an approved override (PROD-01.1a). Committed-only capture comes through PROD-00.3a.
+  - **Detection without DescribeProducers** uses three measured signals: control-shaped archive records confirmed by the offset gap, the last-stable-offset gap at the probe, and a tail reconciliation after the engine. Only the third sees a transaction opened after the probe.
+- **Tests:**
+  - `e2e/tests/record_semantics_oracle.rs`: 22/22. The reviewer's mutants and 20 oracle mutants are all killed.
+  - Live rows in `e2e/tests/record_semantics.rs` run under `--features e2e`; contract assertions are gated to engine 0.21.0, and other engine releases only record their outcomes.
+  - Support is in `e2e/tests/record_semantics_support/`, with one address place at `kafka.rs:42-68` for PROD-01.5's sweep.
+- **Migration:** none for this row, which is evidence and tests. Each new rail carries its own migration notes.
+- **Artifacts:** `claude/artifacts/prod-01-1/`.
+- **Limits:**
+  - one broker line (3.7.1; PROD-01.5 re-runs the rows on 3.9, 4.1 and 4.3);
+  - one producer library;
+  - the deterministic PROD-07 fixtures are named, not built.
+- **Rows added:** FX-8 (also in the fix-now table), PROD-01.1a, PROD-01.1b, and PROD-00.3a–e. The routes for 00.3a–e are PROD-00.1's to propose and OD-3's to decide.
+
 ### PROD-01.2 — Publish a tested compatibility contract
 
 - **Issue:** Kafka-compatible endpoints vary in authentication, metadata permissions and administrative operations, and a connection test cannot certify recovery. Confluent Cloud and Azure Event Hubs are unreachable today (they need SASL/PLAIN or OAUTHBEARER), not merely untested.
@@ -298,6 +350,26 @@ PLAT prerequisites that must be Done before a task ships. Research and contract 
 - **Acceptance:** A decision record with the field, its absent-value behaviour, the detection rule with known false positives and negatives, and numbered acceptance rows for PROD-02.1, 04.1, 04.2, 07.1, 11.1 and 15.1.
 - **Tests/evidence:** Recreate a topic between runs; delete records; compaction; the heuristic's outcome on each.
 - **Dependencies:** None. **Handoff:** `decisions/PROD-01.4-topic-identity.md`.
+
+**Completion record — Done (2026-09-29), PROD-01.4.**
+- **Ownership:** worker `prod-01-4` (one run and one fix round), independent Tier-B review `claude/prod-01-4.review.md`. The review was ACCEPT-WITH-FIXES with 1 HIGH, 6 MEDIUM and 9 LOW; the HIGH re-check gave ACCEPT. Merged as `ac76cd0d` (branch tip `e6045f46`); the full `scripts/ci-check.sh` passed with rc 0 on `ac76cd0d`.
+- **Decision record:** [`decisions/PROD-01.4-topic-identity.md`](decisions/PROD-01.4-topic-identity.md).
+  - **Identity:** the identity of recoverable history is (source cluster ID, topic name, generation). A break is any pair of observations that cannot belong to one continuous history.
+  - **Field:** a nullable `topic_id` (Kafka's URL-safe text form, built from the UUID's two 64-bit halves) in receipt 1.1.0, catalog point 1.1.0 and the API. It is captured before and after the engine (`topic_id`, `topic_id_after`), with arms for both verifiers and the parity script. `null` means unknown, never "same", and every existing archive reads unknown.
+  - **Heuristic usable now:** five verdicts (`continuous`, `unverified`, `suspected`, `break`, `unknown`). It compares partition counts, READ_UNCOMMITTED log start and end, and the predecessor's archived tail against the same offsets in the current capture's own archive, never against a live read.
+- **Evidence:** 19 live rows with broker topic-ID ground truth, identical on Kafka 3.7.1 and 4.3.1.
+  - **8 recreations:** the heuristic detects 6 (5 `break`, 1 `suspected`), with 2 known misses; the ID path detects all 8.
+  - **11 same-topic rows:** no false `break`. There is one known false positive, a `suspected` after partitions were added and every old tail deleted, and the ID path clears it.
+  - **The rejected source-read variant** falsely breaks on `LogAppendTime` and repeated-header rows (c17, c18). That was review H1, fixed at the root; a mutant reverting to a live read fails exactly those rows.
+  - **Oracle:** `e2e/tests/topic_identity.rs`, with 25/25 mutants killed and 52/52 at the reviewer's re-check. There is one address place for PROD-01.5's sweep.
+- **Finding for every ID consumer:** librdkafka's `rd_kafka_Uuid_base64str` uses the standard base64 alphabet, and Kafka uses the URL-safe one. Build the text from the two halves.
+- **Decisions:** each consumer's reaction is in §7, with numbered acceptance rows for PROD-02.1, 04.1, 04.2, 07.1, 11.1 and 15.1 in §8.
+  - **Owner choice:** OD-6, one scoped-`unsafe` policy, presented and not taken.
+  - **Carried to PROD-02.1's brief** (re-check): line ~414 must not let PROD-02.1 read only each archive's last segment, and a fixture must span segments. Four minor items go to the PROD-02.1 and PROD-00.3c/00.3e briefs.
+- **Migration:** none for this row, which is evidence and tests. The receipt and catalog 1.1.0 field ships with PROD-02.1.
+- **Artifacts:** `claude/artifacts/prod-01-4/`.
+- **Limits:** two broker lines; the byte-identical replay miss (§4.7) stays until IDs exist.
+- **Rows added:** PROD-01.4a (gated on OD-6), PROD-01.4b, and OD-6.
 
 ### PROD-01.5 — Shared fixture profiles and supported broker versions
 

@@ -1,0 +1,9 @@
+{
+  "identities": [
+    {
+      "name": "fixture-root",
+      "credentials": [{ "accessKey": "minioadmin", "secretKey": "minioadmin" }],
+      "actions": ["Admin", "Read", "List", "Tagging", "Write"]
+    }
+  ]
+}
