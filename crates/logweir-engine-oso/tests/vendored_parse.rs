@@ -95,7 +95,7 @@ mod snapshot {
                 kept.entry(group).or_default().push(Position {
                     topic,
                     partition: row["partition"].as_i64().unwrap() as i32,
-                    offset: row["offset"].as_i64().unwrap(),
+                    offset: row["offset"].as_i64().unwrap(), // engine-token-ok: a JSON field name of the committed-offsets oracle, not an engine subcommand
                 });
             } else {
                 left_out.insert((group, topic));
