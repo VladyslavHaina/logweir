@@ -76,7 +76,10 @@ mod snapshot {
     /// group -> positions, as the broker reported them, restricted to the
     /// topics the backup archived (the only ones the engine keeps), plus the
     /// positions it reported on topics the backup did NOT archive.
-    fn committed() -> (BTreeMap<String, Vec<Position>>, BTreeSet<(String, String)>) {
+    type ByGroup = BTreeMap<String, Vec<Position>>;
+    type LeftOut = BTreeSet<(String, String)>;
+
+    fn committed() -> (ByGroup, LeftOut) {
         let doc: serde_json::Value = serde_json::from_slice(&bytes(COMMITTED)).unwrap();
         let archived: BTreeSet<&str> = doc["archived_topics"]
             .as_array()
@@ -84,7 +87,7 @@ mod snapshot {
             .iter()
             .map(|t| t.as_str().unwrap())
             .collect();
-        let (mut kept, mut left_out) = (BTreeMap::<String, Vec<Position>>::new(), BTreeSet::new());
+        let (mut kept, mut left_out) = (ByGroup::new(), LeftOut::new());
         for row in doc["committed"].as_array().unwrap() {
             let group = row["group_id"].as_str().unwrap().to_string();
             let topic = row["topic"].as_str().unwrap().to_string();
@@ -120,7 +123,7 @@ mod snapshot {
             "the engine writes no other top-level field"
         );
 
-        let got: BTreeMap<String, Vec<Position>> = s
+        let got: ByGroup = s
             .groups
             .iter()
             .map(|g| {
@@ -150,6 +153,56 @@ mod snapshot {
                 ("fx1-unarchived-only".to_string(), "test-topic".to_string()),
             ])
         );
+    }
+
+    /// **The negative control: the old parser fails on these bytes.** The
+    /// structs that stood in `vendored/consumer_groups.rs` before FX-1,
+    /// verbatim (at `632ea345`), refuse the committed fixture with the exact
+    /// error the drill reported on the compose stack. If the fixture ever
+    /// stopped discriminating — replaced by an empty snapshot, say, which the
+    /// old parser read happily — this fails, and the regression row above
+    /// would no longer be a regression row.
+    #[test]
+    fn the_parser_that_stood_here_before_fx1_refuses_the_engines_bytes() {
+        use serde::Deserialize;
+        use serde_json::Value;
+        use std::collections::HashMap;
+
+        #[allow(dead_code)]
+        #[derive(Debug, Deserialize)]
+        struct ConsumerGroupsSnapshot {
+            #[serde(default)]
+            backup_id: String,
+            #[serde(default)]
+            captured_at: i64,
+            #[serde(default)]
+            groups: Vec<ConsumerGroupEntry>,
+            #[serde(flatten)]
+            extra: HashMap<String, Value>,
+        }
+        #[allow(dead_code)]
+        #[derive(Debug, Deserialize)]
+        struct ConsumerGroupEntry {
+            #[serde(default)]
+            group_id: String,
+            #[serde(default)]
+            state: String,
+            #[serde(default)]
+            offsets: Vec<Value>,
+            #[serde(flatten)]
+            extra: HashMap<String, Value>,
+        }
+
+        let e = serde_json::from_slice::<ConsumerGroupsSnapshot>(&bytes(FIXTURE))
+            .expect_err("the invented shape cannot read what the engine writes");
+        assert!(
+            e.to_string()
+                .starts_with("invalid type: map, expected a sequence"),
+            "{e}"
+        );
+        // …while the EMPTY snapshot never exposed it: it has no `offsets`.
+        serde_json::from_slice::<ConsumerGroupsSnapshot>(&bytes(EMPTY_FIXTURE))
+            .expect("the old parser read an empty snapshot");
     }
 
     /// Absent-or-empty behaves as it always did: zero groups, never an error.
