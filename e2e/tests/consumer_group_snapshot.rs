@@ -39,12 +39,25 @@
 //! `crates/logweir-engine-oso/tests/vendored_parse.rs` keeps that old parser
 //! as a standing control over the committed fixture.
 //!
+//! # The second row (FX-1 fix round, M1)
+//!
+//! Since FX-1 a snapshot that is NOT the engine's shape no longer refuses the
+//! archive, and it must not vanish either: `backup run` and `drill run` each
+//! print a `warning:` line on stderr naming the backup set, the object, its
+//! digest and the reason, and a WARN event with those fields on the
+//! structured log. The row plants the shape that stood in the vendored file
+//! before FX-1 beside a real archive and requires both, from the shipped
+//! binary, while the backup and the drill still succeed and nothing they sign
+//! mentions the snapshot (signed surfacing belongs to PROD-04.1).
+//!
 //! # Hygiene
 //!
-//! Every archive, topic and group this row makes is named `cgsnap-…`, which
-//! nothing else uses, and a `Drop` guard sweeps them on every exit path, as
-//! `pitr_boundary.rs` does for its archive. Each subprocess this file starts
-//! is bounded.
+//! Every archive, receipt, topic and group a row makes is named with that
+//! row's own prefix (`cgsnap-r-…`, `cgsnap-u-…`), which nothing else uses, and
+//! a `Drop` guard sweeps them on every exit path, as `pitr_boundary.rs` does
+//! for its archive. The two rows hold one lock, so they never run at once even
+//! without `--test-threads=1`. Catalog records are left, as in
+//! `pitr_boundary.rs`. Each subprocess this file starts is bounded.
 mod harness;
 use harness::*;
 
@@ -59,9 +72,20 @@ use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-/// Every archive prefix, topic and group this row creates starts with this,
-/// and nothing else in the tree does, so the sweep is exact.
+/// Every archive prefix, receipt, topic and group this file creates starts
+/// with this, and nothing else in the tree does, so the sweep is exact.
 const ID_PREFIX: &str = "cgsnap-";
+/// The first row's names: a real snapshot.
+const REAL: &str = "cgsnap-r-";
+/// The second row's names: an unreadable one.
+const UNREADABLE: &str = "cgsnap-u-";
+
+/// The two rows share one stack and one bucket, and each sweeps its own
+/// prefix at its start: they must never run at once.
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 const PARTITIONS: i32 = 3;
 const RECORDS: usize = 36;
 /// A topic the stack always has and this row's backup never archives.
@@ -79,13 +103,33 @@ fn minio_env() {
 // ---------------------------------------------------------------------------
 
 /// Runs `cmd`, killing it after `secs` and then calling `on_timeout`.
-fn run_bounded(mut cmd: Command, secs: u64, what: &str, on_timeout: &dyn Fn()) -> Output {
-    use std::io::Read;
+fn run_bounded(cmd: Command, secs: u64, what: &str, on_timeout: &dyn Fn()) -> Output {
+    run_bounded_with_input(cmd, None, secs, what, on_timeout)
+}
+
+/// `run_bounded`, feeding `input` to the child's stdin when there is one.
+fn run_bounded_with_input(
+    mut cmd: Command,
+    input: Option<Vec<u8>>,
+    secs: u64,
+    what: &str,
+    on_timeout: &dyn Fn(),
+) -> Output {
+    use std::io::{Read, Write};
+    if input.is_some() {
+        cmd.stdin(Stdio::piped());
+    }
     let mut child = cmd
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap_or_else(|e| panic!("{what}: could not start: {e}"));
+    if let Some(bytes) = input {
+        let mut stdin = child.stdin.take().expect("piped stdin");
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(&bytes);
+        });
+    }
     let mut out = child.stdout.take().expect("piped stdout");
     let mut err = child.stderr.take().expect("piped stderr");
     let t_out = std::thread::spawn(move || {
@@ -148,6 +192,24 @@ fn mc_bounded(args: &[&str], what: &str) -> Output {
     compose(&all, 120, what)
 }
 
+/// Writes `bytes` to the object `local/<bucket>/<key>` with `mc pipe`.
+fn mc_put(target: &str, bytes: &[u8]) {
+    stack::ensure_coherent();
+    let mut c = Command::new("docker");
+    c.args(["compose", "-f", "e2e/compose/docker-compose.yml"])
+        .args(["run", "--rm", "-T", "--entrypoint", "mc", "minio-setup"])
+        .args(["pipe", target])
+        .current_dir(root());
+    let o = run_bounded_with_input(c, Some(bytes.to_vec()), 120, "mc pipe", &|| {});
+    assert!(
+        o.status.success(),
+        "mc pipe {target} exited {:?}\n{}\n{}",
+        o.status.code(),
+        o.stdout_utf8(),
+        o.stderr_utf8()
+    );
+}
+
 /// Running containers whose arguments name `cfg` (the engine's docker route
 /// passes the config path through, and each config path here is unique).
 fn kill_engine_containers(cfg: &Path) {
@@ -175,10 +237,12 @@ fn kill_engine_containers(cfg: &Path) {
 // The sweep.
 // ---------------------------------------------------------------------------
 
-/// Removes every `cgsnap-` archive prefix, source topic and consumer group,
-/// and returns what survived. The scratch `drill-` topics are the drill's own
-/// (`teardown: delete`) and `harness::run_with` empties them first anyway.
-fn sweep() -> Vec<String> {
+/// Removes every archive prefix, receipt directory, source topic and consumer
+/// group whose name starts with `prefix` (one row's own), and returns what
+/// survived. The scratch `drill-` topics are the drill's own (`teardown:
+/// delete`) and `harness::run_with` empties them first anyway.
+fn sweep(prefix: &str) -> Vec<String> {
+    assert!(prefix.starts_with(ID_PREFIX), "{prefix}");
     let mut left = Vec::new();
 
     let keys = |o: Output| -> Vec<String> {
@@ -186,24 +250,32 @@ fn sweep() -> Vec<String> {
             .lines()
             .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
             .filter_map(|v| v["key"].as_str().map(str::to_string))
-            .filter(|k| k.starts_with(ID_PREFIX))
+            .filter(|k| k.starts_with(prefix))
             .collect()
     };
-    let list_arg = format!("local/{ARCHIVE_BUCKET}");
-    let listing = || mc_bounded(&["--json", "ls", &list_arg], "mc ls");
-    for k in keys(listing()) {
-        let prefix = k.split('/').next().unwrap_or(&k).trim_end_matches('/');
-        let _ = mc_bounded(
-            &[
-                "rm",
-                "--recursive",
-                "--force",
-                &format!("local/{ARCHIVE_BUCKET}/{prefix}/"),
-            ],
-            "mc rm",
+    // The archives, at the bucket's root, and the receipts `backup run`
+    // writes under `logweir/backups/<backup_id>/`.
+    for dir in ["", "logweir/backups/"] {
+        let list_arg = format!("local/{ARCHIVE_BUCKET}/{dir}");
+        let listing = || mc_bounded(&["--json", "ls", &list_arg], "mc ls");
+        for k in keys(listing()) {
+            let name = k.split('/').next().unwrap_or(&k).trim_end_matches('/');
+            let _ = mc_bounded(
+                &[
+                    "rm",
+                    "--recursive",
+                    "--force",
+                    &format!("local/{ARCHIVE_BUCKET}/{dir}{name}/"),
+                ],
+                "mc rm",
+            );
+        }
+        left.extend(
+            keys(listing())
+                .into_iter()
+                .map(|k| format!("object {dir}{k}")),
         );
     }
-    left.extend(keys(listing()).into_iter().map(|k| format!("archive {k}")));
 
     let topics = broker_tool(
         "kafka-topics.sh",
@@ -214,7 +286,7 @@ fn sweep() -> Vec<String> {
     for t in topics
         .lines()
         .map(str::trim)
-        .filter(|t| t.starts_with(ID_PREFIX))
+        .filter(|t| t.starts_with(prefix))
     {
         let _ = broker_tool(
             "kafka-topics.sh",
@@ -238,7 +310,7 @@ fn sweep() -> Vec<String> {
         .stdout_utf8()
         .lines()
         .map(str::trim)
-        .filter(|g| g.starts_with(ID_PREFIX))
+        .filter(|g| g.starts_with(prefix))
         .map(str::to_string)
         .collect::<Vec<_>>()
     };
@@ -262,11 +334,11 @@ fn sweep() -> Vec<String> {
 /// Sweeps on every exit path. On the panicking path it only reports what it
 /// could not remove: a second panic while unwinding would abort the process
 /// and destroy the row's own failure message.
-struct Swept;
+struct Swept(&'static str);
 
 impl Drop for Swept {
     fn drop(&mut self) {
-        let left = sweep();
+        let left = sweep(self.0);
         if std::thread::panicking() {
             if !left.is_empty() {
                 eprintln!("[cgsnap] SWEEP INCOMPLETE on the panicking path: {left:?}");
@@ -422,18 +494,19 @@ fn drill_spec(backup_id: &str, topic: &str, from_ms: i64, to_ms: i64) -> serde_y
 /// into a red that says nothing about FX-1.
 #[test]
 fn a_drill_over_an_archive_with_a_real_consumer_group_snapshot_passes() {
+    let _serial = serial();
     minio_env();
-    let left = sweep();
+    let left = sweep(REAL);
     assert!(left.is_empty(), "an earlier run left {left:?}");
-    let _swept = Swept;
+    let _swept = Swept(REAL);
 
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("a clock after 1970")
         .as_millis();
-    let backup_id = format!("{ID_PREFIX}{nonce}");
-    let topic = format!("{ID_PREFIX}src-{nonce}");
-    let group = |s: &str| format!("{ID_PREFIX}{nonce}-{s}");
+    let backup_id = format!("{REAL}{nonce}");
+    let topic = format!("{REAL}src-{nonce}");
+    let group = |s: &str| format!("{REAL}{nonce}-{s}");
 
     // ------------------------------------------------ 1. the source records
     create_topic(&topic, PARTITIONS);
@@ -612,6 +685,204 @@ fn a_drill_over_an_archive_with_a_real_consumer_group_snapshot_passes() {
         sc["integrity"]
     );
     assert_eq!(sc["source"]["backup_id"].as_str(), Some(backup_id.as_str()));
+    assert!(logweir_verify(&r).success(), "logweir drill verify");
+    assert!(python_verify(&r).success(), "docs/verify_scorecard.py");
+}
+
+// ---------------------------------------------------------------------------
+// The second row: an unreadable snapshot is TOLD (FX-1 fix round, M1).
+// ---------------------------------------------------------------------------
+
+/// The `notice` field and the `[kind]` of the warning line.
+const NOTICE_KIND: &str = "consumer-groups-snapshot-unreadable";
+
+/// `logweir backup run`'s spec for this row's topic, under its own
+/// `backup_id` and prefix, on this stack's host-side addresses.
+fn backup_spec(backup_id: &str, topic: &str) -> std::path::PathBuf {
+    let p = demo_dir().join(format!("{backup_id}.backup.yaml"));
+    std::fs::write(
+        &p,
+        format!(
+            "backup_id: {backup_id}\n\
+             source:\n\
+             \x20 bootstrap_servers: [{bootstrap}]\n\
+             \x20 topics: [{topic}]\n\
+             storage:\n\
+             \x20 backend: s3\n\
+             \x20 bucket: {ARCHIVE_BUCKET}\n\
+             \x20 prefix: {backup_id}\n\
+             \x20 region: us-east-1\n\
+             \x20 endpoint: {s3}\n\
+             \x20 path_style: true\n\
+             \x20 allow_http: true\n\
+             backup:\n\
+             \x20 compression: zstd\n\
+             \x20 segment_max_records: 1000\n\
+             \x20 segment_max_bytes: 10485760\n\
+             \x20 max_concurrent_partitions: 3\n",
+            bootstrap = bootstrap(),
+            s3 = s3_endpoint(),
+        ),
+    )
+    .expect("the backup spec");
+    p
+}
+
+/// `logweir backup run` with the digest-pinned engine, as `pitr_boundary.rs`
+/// runs it. The allowlist names no live cluster: a backup's SOURCE must not be
+/// a permitted scratch target (GC18(c) rail 4).
+fn backup_run(spec: &Path, receipt: &Path) -> Output {
+    let allow = demo_dir().join("cgsnap-backup-allowed-clusters.json");
+    std::fs::write(
+        &allow,
+        "{\"allowed_cluster_ids\": [\"SCRATCH-CLUSTER-NOT-THE-SOURCE\"]}\n",
+    )
+    .expect("the backup allowlist");
+    let mut c = Command::new(bin());
+    c.args(["backup", "run", "--spec"])
+        .arg(spec)
+        .arg("--allowed-clusters")
+        .arg(&allow)
+        .arg("--signing-key")
+        .arg(root().join("e2e/fixtures/signed/signing.pem"))
+        .arg("--triggered-by")
+        .arg("fx-1 e2e")
+        .arg("--receipt-out")
+        .arg(receipt)
+        .env("AWS_ACCESS_KEY_ID", "minioadmin")
+        .env("AWS_SECRET_ACCESS_KEY", "minioadmin")
+        .env("AWS_REGION", "us-east-1")
+        .env("LOGWEIR_ENGINE_BIN", engine_bin())
+        .env("LOGWEIR_ENGINE_VERSION", engine_version())
+        .env("LOGWEIR_ENGINE_DIGEST", engine_digest())
+        .env("LOGWEIR_E2E_ENGINE_MOUNT", engine_mount())
+        .env("TMPDIR", engine_mount());
+    run_bounded(c, 900, "logweir backup run", &|| {})
+}
+
+/// `o` told the unreadable snapshot at `key` of `backup_id`: one `warning:`
+/// line on stderr and one WARN event with the notice's fields, in the run's
+/// span, on the structured log (stdout).
+fn assert_told(o: &Output, backup_id: &str, key: &str, what: &str) {
+    let stderr = o.stderr_utf8();
+    let line = stderr
+        .lines()
+        .find(|l| l.starts_with("warning: ") && l.contains(key))
+        .unwrap_or_else(|| panic!("{what}: no warning line names {key} on stderr:\n{stderr}"));
+    for needle in [
+        format!("warning: backup set {backup_id}: "),
+        "the consumer-groups snapshot is present but unreadable".to_string(),
+        "not the consumer-groups snapshot shape kafka-backup writes".to_string(),
+        format!("[{NOTICE_KIND}]"),
+    ] {
+        assert!(
+            line.contains(&needle),
+            "{what}: `{needle}` missing from: {line}"
+        );
+    }
+    let stdout = o.stdout_utf8();
+    let event = stdout
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .find(|v| v["level"] == "WARN" && v["fields"]["notice"] == NOTICE_KIND)
+        .unwrap_or_else(|| panic!("{what}: no WARN event told the notice on stdout:\n{stdout}"));
+    assert_eq!(event["fields"]["key"], key, "{what}: {event}");
+    assert_eq!(event["fields"]["backup_id"], backup_id, "{what}: {event}");
+    assert!(
+        event["fields"]["reason"]
+            .as_str()
+            .is_some_and(|r| r.contains("expected a map")),
+        "{what}: {event}"
+    );
+    assert!(
+        event["span"]["run_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty()),
+        "{what}: the event must carry the run's id: {event}"
+    );
+    eprintln!("[cgsnap] {what} told it: {line}");
+}
+
+/// **FX-1 fix round (M1), live.** An archive whose consumer-groups snapshot
+/// is NOT the engine's shape — the one that stood in the vendored file before
+/// FX-1 — is backed up and then drilled by the shipped binary. Both succeed,
+/// both TELL the snapshot (a stderr line and a structured event), and neither
+/// signed document mentions it. At `978450d6`, before the fix round, both ran
+/// green and said nothing: the row fails there.
+#[test]
+fn an_unreadable_snapshot_is_told_by_backup_run_and_drill_run() {
+    let _serial = serial();
+    minio_env();
+    let left = sweep(UNREADABLE);
+    assert!(left.is_empty(), "an earlier run left {left:?}");
+    let _swept = Swept(UNREADABLE);
+
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("a clock after 1970")
+        .as_millis();
+    let backup_id = format!("{UNREADABLE}{nonce}");
+    let topic = format!("{UNREADABLE}src-{nonce}");
+    create_topic(&topic, PARTITIONS);
+    let t0 = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("a clock after 1970")
+        .as_millis() as i64
+        - 2_000;
+    let payloads: Vec<String> = (0..RECORDS).map(|i| format!("cgsnap-u-{i:03}")).collect();
+    let records: Vec<(i64, &str)> = payloads
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (t0 + i as i64, p.as_str()))
+        .collect();
+    produce_with_timestamps(&topic, &records).unwrap_or_else(|e| panic!("{e}"));
+
+    // The object where the engine keeps it, in a shape no engine writes.
+    let key = format!("{backup_id}/{backup_id}/consumer-groups-snapshot.json");
+    let invented = format!(
+        "{{\"backup_id\":\"{backup_id}\",\"captured_at\":1,\
+         \"groups\":[{{\"group_id\":\"g\",\"state\":\"Stable\",\"offsets\":[]}}]}}"
+    );
+    mc_put(
+        &format!("local/{ARCHIVE_BUCKET}/{key}"),
+        invented.as_bytes(),
+    );
+
+    // ------------------------------------------------ backup run tells it
+    let receipt = demo_dir().join(format!("{backup_id}.receipt.json"));
+    let o = backup_run(&backup_spec(&backup_id, &topic), &receipt);
+    assert_eq!(
+        o.status.code(),
+        Some(0),
+        "logweir backup run over a set holding an unreadable snapshot must succeed\n\
+         stdout:\n{}\nstderr:\n{}",
+        o.stdout_utf8(),
+        o.stderr_utf8()
+    );
+    assert_told(&o, &backup_id, &key, "backup run");
+    let receipt_text = std::fs::read_to_string(&receipt).expect("the receipt was written");
+    assert!(
+        !receipt_text.contains("consumer-groups"),
+        "the receipt signs nothing about the snapshot: {receipt_text}"
+    );
+
+    // ------------------------------------------------- drill run tells it
+    let spec = drill_spec(&backup_id, &topic, t0, t0 + RECORDS as i64);
+    let r = drill_run(&spec);
+    assert_eq!(
+        r.out.status.code(),
+        Some(0),
+        "a drill over an archive with an unreadable snapshot must pass\nstdout:\n{}\nstderr:\n{}",
+        r.out.stdout_utf8(),
+        r.out.stderr_utf8()
+    );
+    assert_told(&r.out, &backup_id, &key, "drill run");
+    let sc = read_scorecard(&r);
+    assert_eq!(sc["outcome"].as_str(), Some("pass"), "{}", sc["measured"]);
+    assert!(
+        !sc.to_string().contains("consumer-groups"),
+        "the scorecard signs nothing about the snapshot"
+    );
     assert!(logweir_verify(&r).success(), "logweir drill verify");
     assert!(python_verify(&r).success(), "docs/verify_scorecard.py");
 }
