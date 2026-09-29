@@ -2966,6 +2966,28 @@ export const READINESS_NOT_RUN_WARNING =
   "already exists and nothing is overwritten either way. Run the check in step 5 to find out " +
   "before an approver signs rather than after.";
 
+/** What a restore copies, said where the plan is reviewed, above Create (FX-6).
+ *
+ *  THE DRILL CANNOT SAY IT FOR US. Phase 7 compares the restored topic with the
+ *  ARCHIVE, so a difference that was already in the archive passes: the pinned
+ *  engine captures with `READ_UNCOMMITTED` and keeps commit and abort markers as
+ *  records, archives the producers' timestamps for a `LogAppendTime` topic,
+ *  holds headers in a map, and selects a point in time by each segment's first
+ *  and last timestamps. PROD-01.1 measured every clause (its decision record,
+ *  section 2) and wrote this sentence (section 8.3); `docs/stability.md` and
+ *  `docs/verify-a-scorecard.md` carry the long form with the evidence rows.
+ *
+ *  ON EVERY REVIEW STEP, NOT A CHOSEN ONE. The console cannot tell which of a
+ *  plan's topics are transactional or out of order -- the archive records
+ *  neither -- so the sentence is not narrowed to any topic, and every plan names
+ *  at least one. A later detection of transactional archives is what may narrow
+ *  it. Code spans render through `messageText`, never as backticks (O2). */
+export const RESTORE_SEMANTICS_SENTENCE =
+  "Restores copy the archive as written: aborted transactions and transaction markers are " +
+  "restored as ordinary records, `LogAppendTime` timestamps come back as producer `CreateTime`, " +
+  "repeated header keys keep one copy, and when timestamps are out of order a full or " +
+  "point-in-time restore can miss records.";
+
 /** Step 6 -- the rendered plan, its hash, the two minted names, and the one
  *  guided submit.
  *
@@ -3013,6 +3035,8 @@ export function renderPlanStep(prepared, state) {
     "</div>" +
     "<p class=\"caveat\">" + esc(COPY_CAVEAT) + "</p>" +
     approvalPolicyBlock(s.approvalPolicy, s.ticket, errors.ticket) +
+    "<p class=\"note\" id=\"restore-semantics\">" + messageText(RESTORE_SEMANTICS_SENTENCE) +
+    "</p>" +
     "<div class=\"actions actions-final\">" +
     "<button type=\"button\" id=\"create-restore\" class=\"primary\"" +
     (pending || !renderable || blocked !== null || policyRefusal(s) !== null ? " disabled" : "") +
