@@ -1769,3 +1769,53 @@ async fn a_duplicate_that_takes_over_syncs_at_once_inside_a_served_slot() {
         "the refusal's reason is gone with the refusal: {patch}"
     );
 }
+
+/// **FX-2's class sweep: `RecoveryCatalog.spec.sync.maxObjectsPerRun` and
+/// `viewLimit`**, "the object budget for one Job" and the newest points the
+/// runner relays. Both reach the sync Job's plan; every row used the fields'
+/// own defaults (100,000 and 2,000), so a plan rendered from the defaults
+/// instead of the spec passed them all.
+///
+/// MUTANTS: `max_objects_per_run: 100_000` / `view_limit: 2000` where the
+/// sync request is built.
+#[tokio::test]
+async fn a_catalogs_own_sync_budget_reaches_its_plan() {
+    let stem = leak(request_stem("token-1"));
+    let f = fixture(vec![
+        route("GET", "/trustrosters/default", roster_body()),
+        route("GET", "/trustpolicies", no_trust_policies()),
+        route("GET", "/backupdestinations/archive", destination_body()),
+        route("POST", "/configmaps", empty_config_map()),
+        route("POST", "/jobs", created_job(stem, JOB_UID_1)),
+        status_route(),
+    ]);
+    let sync = json!({
+        "intervalSeconds": INTERVAL, "mode": "Index", "maxObjectsPerRun": 250000,
+        "deepCheck": "ManifestDigest", "viewLimit": 300
+    });
+    let outcome = run_at(
+        &f,
+        &catalog(json!({"syncRequest": "token-1", "sync": sync}), json!({})),
+        now(),
+    )
+    .await;
+    assert_eq!(outcome.phase, ctrl::CatalogPhase::Started);
+    let plan: logweir_core::check_contract::CheckPlan = f
+        .posted("/configmaps")
+        .iter()
+        .filter_map(|cm| cm["data"].as_object().cloned())
+        .flat_map(|data| data.into_iter().map(|(_, v)| v))
+        .find_map(|v| v.as_str().and_then(|s| serde_json::from_str(s).ok()))
+        .expect("a posted ConfigMap carries the sync plan");
+    let logweir_core::check_contract::CheckRequest::CatalogSync(request) = &plan.request else {
+        panic!("a catalog sync renders a catalogSync request, got {plan:?}");
+    };
+    assert_eq!(
+        request.max_objects_per_run, 250_000,
+        "the Job's object budget"
+    );
+    assert_eq!(
+        request.view_limit, 300,
+        "the newest points the runner relays"
+    );
+}

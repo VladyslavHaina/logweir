@@ -9261,7 +9261,17 @@ async fn the_runner_container_carries_spec_runner_resources_exactly() {
     .await
     .expect("a valid block is admitted");
     assert!(outcome.created, "the Job was created");
-    let container = only_container(&posted_job(&bodies.lock().expect("readable")));
+    let job = posted_job(&bodies.lock().expect("readable"));
+    // AN AFFORDANCE, NOT AN ASSERTION — the `Backup` twin's
+    // `LOGWEIR_DUMP_RUNNER_JOB`, for this Job. `LOGWEIR_DUMP_RESTORE_JOB=<path>`
+    // writes the exact Job this reconcile POSTed as YAML, which is what the
+    // FX-2 live row hands to `kubectl create --dry-run=server` so the API
+    // server itself judges these bytes. Unset in every ordinary run.
+    if let Ok(path) = std::env::var("LOGWEIR_DUMP_RESTORE_JOB") {
+        let yaml = serde_yaml::to_string(&job).expect("the Job serialises as YAML");
+        std::fs::write(&path, yaml).unwrap_or_else(|e| panic!("{path}: {e}"));
+    }
+    let container = only_container(&job);
     assert_eq!(
         container["resources"],
         fx2_resources(),
@@ -9308,36 +9318,53 @@ async fn a_restore_that_asks_for_nothing_gets_no_resources_key() {
 /// `ApprovalNotVerified`, and an approver would sign a run that could never
 /// start; this row fails on exactly that.
 ///
+/// EACH ROW BREAKS EXACTLY ONE RULE, and its message must name that rule.
+/// The first form of the milli-bytes row put `100m` on a LIMIT, where the
+/// memory floor refuses it too, so removing the unit rule left the row green
+/// (mutant round 1, M7); it is a REQUEST now, which has no floor.
+///
 /// MUTANTS: removing the early `runner_resources_of(restore)?` in STEP 1
 /// (every row becomes a hold); `validate` accepting everything (every row
-/// creates a Job — and the table has the route for it).
+/// creates a Job — and the table has the route for it); removing any one rule
+/// (its row is admitted, or refused for a reason it does not name).
 #[tokio::test]
 async fn a_block_the_controller_will_not_apply_is_refused_before_anything_is_read() {
-    for (label, resources, field) in [
+    for (label, resources, field, rule) in [
         (
             "above the memory ceiling",
             serde_json::json!({"limits": {"memory": "16Gi"}}),
             "spec.runnerResources.limits.memory",
+            "ceiling of 8Gi",
         ),
         (
             "above the cpu ceiling",
             serde_json::json!({"requests": {"cpu": "8"}}),
             "spec.runnerResources.requests.cpu",
+            "ceiling of 4",
         ),
         (
             "a request above its limit",
             serde_json::json!({"requests": {"memory": "4Gi"}, "limits": {"memory": "2Gi"}}),
             "spec.runnerResources.requests.memory",
+            "a request is at most its limit",
         ),
         (
             "milli-bytes, the slip for Mi",
-            serde_json::json!({"limits": {"memory": "100m"}}),
-            "spec.runnerResources.limits.memory",
+            serde_json::json!({"requests": {"memory": "100m"}}),
+            "spec.runnerResources.requests.memory",
+            "not a whole number of bytes",
         ),
         (
             "a zero limit",
             serde_json::json!({"limits": {"cpu": "0"}}),
             "spec.runnerResources.limits.cpu",
+            "no limit",
+        ),
+        (
+            "a memory limit below the floor",
+            serde_json::json!({"limits": {"memory": "512"}}),
+            "spec.runnerResources.limits.memory",
+            "below the 32Mi floor",
         ),
     ] {
         let (client, recorder, bodies) = mock_client_recording_bodies(admission_routes(
@@ -9390,6 +9417,10 @@ async fn a_block_the_controller_will_not_apply_is_refused_before_anything_is_rea
         assert!(
             message.contains(field) && message.contains("create a new Restore"),
             "{label}: the message names the field and the remedy: {message}"
+        );
+        assert!(
+            message.contains(rule),
+            "{label}: the message names the rule that refused (`{rule}`): {message}"
         );
     }
 }
