@@ -13,19 +13,22 @@ concurrency:
 # The rows are DECLARED, not discovered, and each one states the outcome it is
 # expected to record. A job is green exactly when the outcome it recorded
 # equals `expect`; a row that records anything else turns red and says what it
-# got. Rows below the 0.21.0 full-drill floor (docs/support-matrix.md) record
-# `unsupported(lever-absent)`, which is never a fault, with what the reduced row
-# and the positive control observed as evidence.
+# got. The outcome is derived from what every step did
+# (scripts/engine-matrix-outcome.sh). A row below the 0.21.0 full-drill floor
+# (docs/support-matrix.md) records `unsupported(lever-absent)`, never a fault,
+# only when Logweir is seen refusing that engine in the reduced row and the
+# control; an engine a drill accepted records `fail(floor-not-enforced)`.
 #
-# `kafka` is the broker the compose stack runs, through `KAFKA_VERSION`
-# (e2e/compose/docker-compose.yml, `apache/kafka:${KAFKA_VERSION}`; PROD-01.5
-# owns the broker lines). The pinned engine is also run on the newest supported
+# `kafka` is the broker the row declares and asks the compose stack for,
+# through `KAFKA_VERSION` (e2e/compose/docker-compose.yml; PROD-01.5 owns the
+# broker lines). The row records the version the running broker logged, and
+# fails when it differs. The pinned engine is also run on the newest supported
 # Apache Kafka line, because the engine sends fixed protocol versions and never
 # negotiates (kafka-backup-core `kafka/client.rs:587-611`).
 #
 # The window is the newest four engine minors plus every version an OSO
-# operator still defaults to: v0.19.1 (strimzi-backup-operator v0.2.25) and
-# v0.19.2 (kafka-backup-operator 1.3.0 links kafka-backup-core 0.19.2).
+# operator still defaults to: v0.19.1 (strimzi-backup-operator v0.2.22-v0.2.25)
+# and v0.19.2 (kafka-backup-operator 1.3.0 links kafka-backup-core 0.19.2).
 # docs/to-do/decisions/PROD-00-engine-route.md records the evidence.
 jobs:
   matrix:
@@ -94,7 +97,20 @@ jobs:
 
       # The CI e2e job's own setup (gate_lint `ci_uses_the_complete_compose_setup`
       # pins what `e2e-up` must contain, SCRAM credentials included).
-      - run: just e2e-up
+      - name: Bring the stack up
+        id: up
+        run: just e2e-up
+
+      # The row records the broker the stack actually ran, read back from the
+      # container, not the one it declares; a difference fails the row.
+      - name: Read back the broker the stack runs
+        id: broker
+        if: steps.up.outcome == 'success'
+        continue-on-error: true
+        run: |
+          out=$(./scripts/engine-matrix-broker.sh)
+          printf '%s\n' "$out"
+          printf '%s\n' "$out" >> "$GITHUB_OUTPUT"
 
       # The seed never refreshes the tracked fixtures here, and below the floor
       # it accepts segments without a sha256 (those engines write none) while
@@ -107,7 +123,9 @@ jobs:
           LOGWEIR_SEED_SEGMENT_SHA256: ${{ matrix.floor == 'full' && 'required' || 'optional' }}
         run: ./scripts/e2e-seed.sh
 
-      - run: cargo build --locked -p logweir
+      - name: Build logweir
+        id: build
+        run: cargo build --locked -p logweir
 
       - name: Full drill (at or above the floor), exactly as the CI e2e job runs it
         id: full
@@ -115,13 +133,21 @@ jobs:
         continue-on-error: true
         run: cargo test --locked -p e2e --features e2e -- --test-threads=1 --skip a_pod_really_reaches_the_k8s_listener
 
+      # The reduced row and the control keep their transcripts: a below-floor
+      # row is `unsupported(lever-absent)` only when both show Logweir's floor
+      # refusal (scripts/engine-matrix-outcome.sh).
       - name: Reduced row set (below the floor)
         id: reduced
         if: matrix.floor == 'below' && steps.seed.outcome == 'success'
         continue-on-error: true
         env:
           CARGO_TEST_ARGS: --locked -p e2e --features e2e
-        run: ./scripts/run-named-tests.sh a_restore_into_an_empty_scratch_target_succeeds
+        run: |
+          mkdir -p matrix-logs
+          rc=0
+          ./scripts/run-named-tests.sh a_restore_into_an_empty_scratch_target_succeeds > matrix-logs/reduced.log 2>&1 || rc=$?
+          cat matrix-logs/reduced.log
+          exit "$rc"
 
       - name: Deleted-segment positive control
         id: control
@@ -129,47 +155,53 @@ jobs:
         continue-on-error: true
         env:
           CARGO_TEST_ARGS: --locked -p e2e --features e2e
-        run: ./scripts/run-named-tests.sh a_corrupted_segment_yields_exit_2_and_a_signed_preflight_failed_scorecard
+        run: |
+          mkdir -p matrix-logs
+          rc=0
+          ./scripts/run-named-tests.sh a_corrupted_segment_yields_exit_2_and_a_signed_preflight_failed_scorecard > matrix-logs/control.log 2>&1 || rc=$?
+          cat matrix-logs/control.log
+          exit "$rc"
 
+      # The outcome is derived from what every step did
+      # (scripts/engine-matrix-outcome.sh; crates/logweir/tests/engine_matrix.rs
+      # runs this step's own text over the step-outcome table).
       - name: Record this row
         id: record
         if: always()
         env:
           TAG: ${{ matrix.tag }}
           FLOOR: ${{ matrix.floor }}
+          KAFKA_DECLARED: ${{ matrix.kafka }}
           DIGEST: ${{ steps.pin.outputs.digest }}
+          UP: ${{ steps.up.outcome }}
+          BROKER_IMAGE: ${{ steps.broker.outputs.image }}
+          BROKER_IMAGE_ID: ${{ steps.broker.outputs.image_id }}
+          BROKER_VERSION: ${{ steps.broker.outputs.version }}
           SEED: ${{ steps.seed.outcome }}
+          BUILD: ${{ steps.build.outcome }}
           FULL: ${{ steps.full.outcome }}
           REDUCED: ${{ steps.reduced.outcome }}
           CONTROL: ${{ steps.control.outcome }}
+          REDUCED_LOG: matrix-logs/reduced.log
+          CONTROL_LOG: matrix-logs/control.log
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -u
-          if [ -z "$DIGEST" ]; then
-            outcome="fail(setup)"
-            reason="the tag did not resolve to a digest whose revision is the tag's commit"
-          elif [ "$FLOOR" = "below" ]; then
-            outcome="unsupported(lever-absent)"
-            reason="below the 0.21.0 full-drill floor; seed ${SEED:-not run}, reduced row ${REDUCED:-not run}, deleted-segment control ${CONTROL:-not run}"
-          elif [ "$SEED" != "success" ]; then
-            outcome="fail(seed)"
-            reason="the seed did not produce a verifiable archive with this engine (seed step: ${SEED:-not run})"
-          elif [ "$CONTROL" != "success" ]; then
-            outcome="fail(lever-not-honoured)"
-            reason="the deleted-segment positive control did not block the restore at preflight"
-          elif [ "$FULL" = "success" ]; then
-            outcome="pass"
-            reason="full e2e suite and the deleted-segment positive control passed"
-          else
-            outcome="fail(e2e suite)"
-            reason="the full e2e suite failed; see the job log"
+          result=$(./scripts/engine-matrix-outcome.sh)
+          outcome=$(sed -n 's/^outcome=//p' <<<"$result")
+          reason=$(sed -n 's/^reason=//p' <<<"$result")
+          [ -n "$outcome" ] || { echo "the outcome script produced no outcome" >&2; exit 1; }
+          broker="broker not read back"
+          if [ -n "$BROKER_VERSION" ]; then
+            broker="broker ${BROKER_IMAGE} (${BROKER_IMAGE_ID:0:19}) logged Kafka ${BROKER_VERSION}"
           fi
           mkdir -p matrix-rows
+          row="matrix-rows/${TAG}-kafka-${KAFKA_DECLARED}.row"
           # shellcheck disable=SC2016
-          printf '| %s | %s | `%s` | `%s` | %s ([run](%s)) |\n' \
-            "$TAG" "$KAFKA_VERSION" "${DIGEST:-unresolved}" "$outcome" "$reason" "$RUN_URL" \
-            > "matrix-rows/${TAG}-kafka-${KAFKA_VERSION}.row"
-          cat "matrix-rows/${TAG}-kafka-${KAFKA_VERSION}.row"
+          printf '| %s | %s | `%s` | `%s` | %s; %s ([run](%s)) |\n' \
+            "$TAG" "${BROKER_VERSION:-unmeasured}" "${DIGEST:-unresolved}" "$outcome" "$reason" "$broker" "$RUN_URL" \
+            > "$row"
+          cat "$row"
           echo "outcome=$outcome" >> "$GITHUB_OUTPUT"
 
       # Not a hidden directory: upload-artifact@v4 skips hidden files by

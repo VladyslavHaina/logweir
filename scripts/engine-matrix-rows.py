@@ -8,7 +8,8 @@
 
     | v0.22.0 | 3.7.1 | `sha256:<64 hex>` | `pass` | evidence text |
 
-(engine tag, Kafka broker version, image digest, outcome, evidence).
+(engine tag, the Kafka version the running broker logged, or `unmeasured` when
+it could not be read back, image digest, outcome, evidence).
 
 It rewrites ONLY the text between `<!-- engine-matrix:rows:begin -->` and
 `<!-- engine-matrix:rows:end -->`. The job it replaces rewrote the whole
@@ -36,12 +37,14 @@ OUTCOMES = {
     "unsupported(lever-absent)",
 }
 ROW = re.compile(
-    r"^\| (?P<tag>v\d+\.\d+\.\d+) \| (?P<kafka>\d+\.\d+\.\d+) \| `(?P<digest>sha256:[0-9a-f]{64}|unresolved)` "
+    r"^\| (?P<tag>v\d+\.\d+\.\d+) \| (?P<kafka>\d+\.\d+\.\d+|unmeasured) \| `(?P<digest>sha256:[0-9a-f]{64}|unresolved)` "
     r"\| `(?P<outcome>[a-z-]+(?:\([a-z0-9 -]+\))?)` \| (?P<evidence>[^|\n]*) \|$"
 )
 
 
 def version_key(text):
+    if text == "unmeasured":
+        return (-1,)
     return tuple(int(part) for part in text.lstrip("v").split("."))
 
 
@@ -67,7 +70,10 @@ def render(doc_text, rows, note=None, expect=None):
             f"{len(rows)} row(s) were produced but the workflow declares {expect}; "
             "refusing to publish a table with a row missing"
         )
-    keys = [(m["tag"], m["kafka"]) for m in rows]
+    lines = [m.group(0) for m in rows]
+    if len(set(lines)) != len(lines):
+        raise SystemExit("a row was recorded twice")
+    keys = [(m["tag"], m["kafka"]) for m in rows if m["kafka"] != "unmeasured"]
     if len(set(keys)) != len(keys):
         raise SystemExit(f"a (tag, broker) pair was recorded twice: {sorted(keys)}")
     ordered = sorted(

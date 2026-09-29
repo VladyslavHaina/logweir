@@ -15,6 +15,18 @@
 //! 4. `upload-artifact@v4` skips hidden paths, so the rows written to
 //!    `.matrix/` were never uploaded and `publish` found none.
 //! 5. `publish` would have rewritten the whole hand-written `## Rows` table.
+//!
+//! The review of PROD-00.1 (M1, M2, L6) added the steps that decide whether a
+//! green job means anything:
+//!
+//! 6. the row's outcome is derived from what every step did
+//!    (`scripts/engine-matrix-outcome.sh`), never assumed from the floor;
+//! 7. the last verdict step fails a row that records anything but its
+//!    declaration;
+//! 8. the seed's digest mode follows the row's floor;
+//! 9. a pull request is opened only from `main`, and only when opted in;
+//! 10. the broker is read back from the running container
+//!     (`scripts/engine-matrix-broker.sh`), and the row records that version.
 use serde_yaml::Value;
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -525,10 +537,16 @@ fn every_test_the_matrix_names_exists() {
         }
     }
     let lines = run_lines(&workflow("engine-matrix.yml")["jobs"]["matrix"]);
+    // The names end at the first shell token (a redirection, `||`, ...).
     let named: Vec<&str> = lines
         .iter()
         .filter_map(|l| l.split_once("run-named-tests.sh "))
-        .flat_map(|(_, names)| names.split_whitespace())
+        .flat_map(|(_, names)| {
+            names.split_whitespace().take_while(|w| {
+                w.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+            })
+        })
         .collect();
     assert!(
         named.len() >= 2,
@@ -680,4 +698,648 @@ fn the_matrix_seed_never_refreshes_the_tracked_fixtures() {
         seed["env"]["LOGWEIR_SEED_REFRESH_FIXTURES"].as_str(),
         Some("0")
     );
+}
+
+// ---------------------------------------------------------------------------
+// 6-10. The steps that decide whether a green job means anything (review M1,
+// M2 and L6 of PROD-00.1)
+// ---------------------------------------------------------------------------
+
+const REFUSAL_LOG: &str = "engine: operational: engine 0.19.2 ignored the config key \
+     `restore.header_preflight` that logweir rendered; this tag is below the declared floor";
+
+/// The step outcomes of one row, as the "Record this row" step passes them.
+#[derive(Clone)]
+struct Steps {
+    floor: &'static str,
+    digest: &'static str,
+    up: &'static str,
+    declared: &'static str,
+    measured: &'static str,
+    seed: &'static str,
+    build: &'static str,
+    full: &'static str,
+    reduced: &'static str,
+    control: &'static str,
+    reduced_log: Option<&'static str>,
+    control_log: Option<&'static str>,
+}
+
+impl Steps {
+    /// A full row whose every step succeeded.
+    fn full() -> Steps {
+        Steps {
+            floor: "full",
+            digest: "sha256:8ff5be71f92a118cde64c082a86d188a4187d8f8f64311458081b8727e99c317",
+            up: "success",
+            declared: "3.7.1",
+            measured: "3.7.1",
+            seed: "success",
+            build: "success",
+            full: "success",
+            reduced: "skipped",
+            control: "success",
+            reduced_log: None,
+            control_log: None,
+        }
+    }
+
+    /// A below-floor row where Logweir refused the engine in both drills.
+    fn below() -> Steps {
+        Steps {
+            floor: "below",
+            full: "skipped",
+            reduced: "failure",
+            control: "failure",
+            reduced_log: Some(REFUSAL_LOG),
+            control_log: Some(REFUSAL_LOG),
+            ..Steps::full()
+        }
+    }
+
+    /// The environment the Record step and the outcome script read, with the
+    /// two transcripts written under `dir/matrix-logs/`.
+    fn env(&self, dir: &Path) -> Vec<(String, String)> {
+        let logs = dir.join("matrix-logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        for (name, text) in [("reduced", self.reduced_log), ("control", self.control_log)] {
+            if let Some(text) = text {
+                std::fs::write(logs.join(format!("{name}.log")), text).unwrap();
+            }
+        }
+        [
+            ("FLOOR", self.floor),
+            ("DIGEST", self.digest),
+            ("UP", self.up),
+            ("KAFKA_DECLARED", self.declared),
+            ("BROKER_VERSION", self.measured),
+            ("SEED", self.seed),
+            ("BUILD", self.build),
+            ("FULL", self.full),
+            ("REDUCED", self.reduced),
+            ("CONTROL", self.control),
+            ("REDUCED_LOG", "matrix-logs/reduced.log"),
+            ("CONTROL_LOG", "matrix-logs/control.log"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect()
+    }
+}
+
+/// `(outcome, reason)` from `scripts/engine-matrix-outcome.sh`, run in a clean
+/// environment holding only `steps`.
+fn classify(steps: &Steps) -> (String, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut cmd = Command::new("bash");
+    cmd.arg(root().join("scripts/engine-matrix-outcome.sh"))
+        .current_dir(dir.path())
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .envs(steps.env(dir.path()));
+    let ran = run_bounded(cmd, 60);
+    assert!(ran.status.success(), "{}", ran.transcript());
+    let field = |key: &str| {
+        ran.stdout
+            .lines()
+            .find_map(|l| l.strip_prefix(&format!("{key}=")))
+            .unwrap_or_else(|| panic!("no {key}= line: {}", ran.transcript()))
+            .to_string()
+    };
+    (field("outcome"), field("reason"))
+}
+
+/// Review M1: the outcome follows what ran. A, B and C are the reviewer's
+/// three combinations the old inline classifier got wrong.
+#[test]
+fn the_outcome_is_derived_from_what_every_step_did() {
+    let s = Steps::full;
+    let b = Steps::below;
+    let cases: Vec<(&str, Steps, &str)> = vec![
+        ("full row, every step green", s(), "pass"),
+        (
+            "full row, the suite failed",
+            Steps {
+                full: "failure",
+                ..s()
+            },
+            "fail(e2e suite)",
+        ),
+        (
+            "full row, the control failed",
+            Steps {
+                control: "failure",
+                ..s()
+            },
+            "fail(lever-not-honoured)",
+        ),
+        (
+            "A: the build failed, so the suite and the control were skipped",
+            Steps {
+                build: "failure",
+                full: "skipped",
+                control: "skipped",
+                ..s()
+            },
+            "fail(build)",
+        ),
+        (
+            "full row, the control was cancelled",
+            Steps {
+                control: "cancelled",
+                ..s()
+            },
+            "fail(setup)",
+        ),
+        (
+            "full row, the suite was skipped",
+            Steps {
+                full: "skipped",
+                ..s()
+            },
+            "fail(setup)",
+        ),
+        (
+            "full row, the seed failed",
+            Steps {
+                seed: "failure",
+                full: "skipped",
+                control: "skipped",
+                ..s()
+            },
+            "fail(seed)",
+        ),
+        (
+            "the tag did not resolve",
+            Steps { digest: "", ..s() },
+            "fail(setup)",
+        ),
+        (
+            "the stack did not come up",
+            Steps {
+                up: "failure",
+                ..s()
+            },
+            "fail(setup)",
+        ),
+        (
+            "the broker was not read back",
+            Steps {
+                measured: "",
+                ..s()
+            },
+            "fail(setup)",
+        ),
+        (
+            "the stack ran another broker than declared",
+            Steps {
+                declared: "4.3.1",
+                measured: "3.7.1",
+                ..s()
+            },
+            "fail(setup)",
+        ),
+        (
+            "below row, refused in both drills",
+            b(),
+            "unsupported(lever-absent)",
+        ),
+        (
+            "B: below row, the seed failed",
+            Steps {
+                seed: "failure",
+                reduced: "skipped",
+                control: "skipped",
+                ..b()
+            },
+            "fail(seed)",
+        ),
+        (
+            "C: below row, both drills passed",
+            Steps {
+                reduced: "success",
+                control: "success",
+                ..b()
+            },
+            "fail(floor-not-enforced)",
+        ),
+        (
+            "below row, the reduced row passed",
+            Steps {
+                reduced: "success",
+                ..b()
+            },
+            "fail(floor-not-enforced)",
+        ),
+        (
+            "below row, both failed without the floor refusal",
+            Steps {
+                reduced_log: Some("connection refused"),
+                ..b()
+            },
+            "fail(floor-not-enforced)",
+        ),
+        (
+            "below row, the control's transcript is missing",
+            Steps {
+                control_log: None,
+                ..b()
+            },
+            "fail(floor-not-enforced)",
+        ),
+        (
+            "below row, the control did not run",
+            Steps {
+                control: "skipped",
+                ..b()
+            },
+            "fail(setup)",
+        ),
+        (
+            "below row, the build failed",
+            Steps {
+                build: "failure",
+                reduced: "skipped",
+                control: "skipped",
+                ..b()
+            },
+            "fail(build)",
+        ),
+        (
+            "an unknown floor",
+            Steps {
+                floor: "sideways",
+                ..s()
+            },
+            "fail(setup)",
+        ),
+    ];
+    for (label, steps, want) in cases {
+        let (got, reason) = classify(&steps);
+        assert_eq!(got, want, "{label}: recorded `{got}` ({reason})");
+        assert!(
+            !reason.contains('|'),
+            "{label}: a `|` would break the row: {reason}"
+        );
+    }
+}
+
+fn matrix_step<'a>(job: &'a Value, name: &str) -> (usize, &'a Value) {
+    steps(job)
+        .into_iter()
+        .enumerate()
+        .find(|(_, s)| s["name"].as_str() == Some(name))
+        .unwrap_or_else(|| panic!("the matrix job has no step named {name:?}"))
+}
+
+fn step_by_id<'a>(job: &'a Value, id: &str) -> (usize, &'a Value) {
+    steps(job)
+        .into_iter()
+        .enumerate()
+        .find(|(_, s)| s["id"].as_str() == Some(id))
+        .unwrap_or_else(|| panic!("the matrix job has no step with id {id:?}"))
+}
+
+/// Runs a step's `run:` text the way GitHub's default shell does (`bash -e`),
+/// in `dir`, with `env`.
+fn run_step_text(step: &Value, dir: &Path, env: &[(String, String)]) -> Ran {
+    let script = dir.join("step.sh");
+    std::fs::write(&script, step["run"].as_str().expect("a run: block")).unwrap();
+    let mut cmd = Command::new("bash");
+    cmd.arg("-e")
+        .arg(&script)
+        .current_dir(dir)
+        .env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .envs(env.iter().cloned());
+    run_bounded(cmd, 60)
+}
+
+/// Review M2, R3: the Record step classifies through the outcome script, fed
+/// by the steps that actually ran, and writes the row from its answer, with
+/// the MEASURED broker in the Kafka column (L6).
+#[test]
+fn the_record_step_writes_the_row_the_steps_earned() {
+    let doc = workflow("engine-matrix.yml");
+    let job = &doc["jobs"]["matrix"];
+    let (_, record) = matrix_step(job, "Record this row");
+    assert_eq!(record["id"].as_str(), Some("record"));
+    assert_eq!(record["if"].as_str(), Some("always()"));
+    let wired = [
+        ("TAG", "${{ matrix.tag }}"),
+        ("FLOOR", "${{ matrix.floor }}"),
+        ("KAFKA_DECLARED", "${{ matrix.kafka }}"),
+        ("DIGEST", "${{ steps.pin.outputs.digest }}"),
+        ("UP", "${{ steps.up.outcome }}"),
+        ("BROKER_IMAGE", "${{ steps.broker.outputs.image }}"),
+        ("BROKER_IMAGE_ID", "${{ steps.broker.outputs.image_id }}"),
+        ("BROKER_VERSION", "${{ steps.broker.outputs.version }}"),
+        ("SEED", "${{ steps.seed.outcome }}"),
+        ("BUILD", "${{ steps.build.outcome }}"),
+        ("FULL", "${{ steps.full.outcome }}"),
+        ("REDUCED", "${{ steps.reduced.outcome }}"),
+        ("CONTROL", "${{ steps.control.outcome }}"),
+        ("REDUCED_LOG", "matrix-logs/reduced.log"),
+        ("CONTROL_LOG", "matrix-logs/control.log"),
+    ];
+    for (key, value) in wired {
+        assert_eq!(
+            record["env"][key].as_str(),
+            Some(value),
+            "the Record step's {key} must be {value}"
+        );
+    }
+    for id in [
+        "pin", "up", "broker", "seed", "build", "full", "reduced", "control",
+    ] {
+        step_by_id(job, id);
+    }
+
+    let cases: Vec<(Steps, &str, &str)> = vec![
+        (Steps::full(), "pass", "3.7.1"),
+        (
+            Steps {
+                build: "failure",
+                full: "skipped",
+                control: "skipped",
+                ..Steps::full()
+            },
+            "fail(build)",
+            "3.7.1",
+        ),
+        (
+            Steps {
+                reduced: "success",
+                control: "success",
+                ..Steps::below()
+            },
+            "fail(floor-not-enforced)",
+            "3.7.1",
+        ),
+        (Steps::below(), "unsupported(lever-absent)", "3.7.1"),
+        (
+            Steps {
+                declared: "4.3.1",
+                measured: "4.3.1",
+                ..Steps::full()
+            },
+            "pass",
+            "4.3.1",
+        ),
+        (
+            Steps {
+                measured: "",
+                ..Steps::full()
+            },
+            "fail(setup)",
+            "unmeasured",
+        ),
+    ];
+    for (steps, want, kafka_column) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("scripts")).unwrap();
+        std::fs::copy(
+            root().join("scripts/engine-matrix-outcome.sh"),
+            dir.path().join("scripts/engine-matrix-outcome.sh"),
+        )
+        .unwrap();
+        let output = dir.path().join("github-output");
+        let mut env = steps.env(dir.path());
+        env.extend(
+            [
+                ("TAG", "v0.21.0"),
+                ("BROKER_IMAGE", "apache/kafka:4.3.1"),
+                (
+                    "BROKER_IMAGE_ID",
+                    "sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837",
+                ),
+                ("RUN_URL", "https://github.com/o/r/actions/runs/1"),
+            ]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string())),
+        );
+        env.push(("GITHUB_OUTPUT".into(), output.display().to_string()));
+        let ran = run_step_text(record, dir.path(), &env);
+        assert!(ran.status.success(), "{want}: {}", ran.transcript());
+        let row_file = dir
+            .path()
+            .join(format!("matrix-rows/v0.21.0-kafka-{}.row", steps.declared));
+        let row = std::fs::read_to_string(&row_file).unwrap_or_else(|e| panic!("{want}: {e}"));
+        assert!(
+            row.starts_with(&format!("| v0.21.0 | {kafka_column} | `")),
+            "{want}: the Kafka column must be the measured broker: {row}"
+        );
+        assert!(row.contains(&format!("| `{want}` |")), "{want}: {row}");
+        assert_eq!(
+            std::fs::read_to_string(&output).unwrap(),
+            format!("outcome={want}\n")
+        );
+        if !steps.measured.is_empty() {
+            assert!(
+                row.contains(&format!("logged Kafka {}", steps.measured)),
+                "the evidence names the measured broker: {row}"
+            );
+        }
+    }
+}
+
+/// Review M2, R2: the verdict step exists, always runs after the Record step,
+/// compares what the row recorded with what it declares, and fails the job on
+/// a mismatch. Every test step is `continue-on-error`, so without it every row
+/// would be green whatever it recorded.
+#[test]
+fn the_verdict_step_fails_a_row_that_records_other_than_it_declares() {
+    let doc = workflow("engine-matrix.yml");
+    let job = &doc["jobs"]["matrix"];
+    let (record_at, _) = step_by_id(job, "record");
+    let (verdict_at, verdict) = steps(job)
+        .into_iter()
+        .enumerate()
+        .find(|(_, s)| {
+            s["env"]["GOT"].as_str() == Some("${{ steps.record.outputs.outcome }}")
+                && s["env"]["WANT"].as_str() == Some("${{ matrix.expect }}")
+        })
+        .expect("a step compares steps.record.outputs.outcome with matrix.expect");
+    assert!(
+        verdict_at > record_at,
+        "the verdict runs after the row is recorded"
+    );
+    assert_eq!(verdict["if"].as_str(), Some("always()"));
+    assert!(
+        verdict["continue-on-error"].is_null(),
+        "the verdict may not be softened"
+    );
+    for (got, want, ok) in [
+        ("pass", "pass", true),
+        (
+            "unsupported(lever-absent)",
+            "unsupported(lever-absent)",
+            true,
+        ),
+        ("fail(e2e suite)", "pass", false),
+        ("unsupported(lever-absent)", "pass", false),
+        ("", "pass", false),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let env = [
+            ("GOT", got),
+            ("WANT", want),
+            ("TAG", "v0.21.0"),
+            ("KAFKA_VERSION", "3.7.1"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect::<Vec<_>>();
+        let ran = run_step_text(verdict, dir.path(), &env);
+        assert_eq!(
+            ran.status.success(),
+            ok,
+            "recorded {got:?}, declared {want:?}: {}",
+            ran.transcript()
+        );
+    }
+}
+
+/// Review M2, R4: below the floor the seed accepts segments without a digest,
+/// at or above it the seed requires them.
+#[test]
+fn the_seed_digest_mode_follows_the_row_floor() {
+    let job = &workflow("engine-matrix.yml")["jobs"]["matrix"];
+    let (_, seed) = step_by_id(job, "seed");
+    assert_eq!(seed["run"].as_str(), Some("./scripts/e2e-seed.sh"));
+    assert_eq!(
+        seed["env"]["LOGWEIR_SEED_SEGMENT_SHA256"].as_str(),
+        Some("${{ matrix.floor == 'full' && 'required' || 'optional' }}")
+    );
+}
+
+/// Review M2, R6: a pull request is opened only from `main`, and only when the
+/// repository opts in.
+#[test]
+fn a_pull_request_is_opened_only_from_main_and_only_when_opted_in() {
+    let open_pr = &workflow("engine-matrix.yml")["jobs"]["open-pr"];
+    let condition = open_pr["if"].as_str().expect("open-pr is conditional");
+    assert_eq!(
+        condition,
+        "github.ref == 'refs/heads/main' && vars.ENGINE_MATRIX_OPEN_PR == 'true'"
+    );
+}
+
+/// The reduced row and the control keep their transcripts for the classifier
+/// and do not mask their own exit status.
+#[test]
+fn the_drill_steps_keep_their_transcript_and_their_exit_status() {
+    let job = &workflow("engine-matrix.yml")["jobs"]["matrix"];
+    for (id, log) in [
+        ("reduced", "matrix-logs/reduced.log"),
+        ("control", "matrix-logs/control.log"),
+    ] {
+        let (_, step) = step_by_id(job, id);
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("scripts")).unwrap();
+        write_executable(
+            &dir.path().join("scripts/run-named-tests.sh"),
+            &format!("#!/usr/bin/env bash\necho '{REFUSAL_LOG}'\nexit 101\n"),
+        );
+        let ran = run_step_text(step, dir.path(), &[]);
+        assert_eq!(
+            ran.status.code(),
+            Some(101),
+            "{id}: the step must exit with the test runner's status: {}",
+            ran.transcript()
+        );
+        let kept = std::fs::read_to_string(dir.path().join(log)).unwrap_or_default();
+        assert!(
+            kept.contains("below the declared floor"),
+            "{id}: transcript not kept"
+        );
+        assert!(
+            ran.stdout.contains("below the declared floor"),
+            "{id}: transcript not shown"
+        );
+    }
+}
+
+/// A `docker` that answers the three questions the readback asks, with the
+/// broker's log given by `log`.
+fn fake_docker(log: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("bin")).unwrap();
+    std::fs::write(dir.path().join("broker.log"), log).unwrap();
+    write_executable(
+        &dir.path().join("bin/docker"),
+        &format!(
+            r#"#!/usr/bin/env bash
+case "$*" in
+  "compose -f e2e/compose/docker-compose.yml ps -q kafka-broker-1") echo cid-broker ;;
+  "inspect --format {{{{.Config.Image}}}} cid-broker") echo apache/kafka:4.3.1 ;;
+  "inspect --format {{{{.Image}}}} cid-broker") echo sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837 ;;
+  "logs cid-broker") cat '{}' ;;
+  *) echo "unexpected docker $*" >&2; exit 2 ;;
+esac
+"#,
+            dir.path().join("broker.log").display()
+        ),
+    );
+    dir
+}
+
+fn broker_readback(fake: &tempfile::TempDir) -> Ran {
+    let mut cmd = Command::new("bash");
+    cmd.arg(root().join("scripts/engine-matrix-broker.sh"));
+    with_path(&mut cmd, &fake.path().join("bin"));
+    run_bounded(cmd, 60)
+}
+
+/// Review L6: the row records the broker the stack actually runs.
+#[test]
+fn the_broker_is_read_back_from_the_running_container() {
+    let fake = fake_docker(
+        "[2026-09-29 06:12:36,205] INFO Kafka version: 4.3.1 (org.apache.kafka.common.utils.AppInfoParser)\n\
+         [2026-09-29 06:12:36,206] INFO Kafka commitId: 26b251a451ce941d (org.apache.kafka.common.utils.AppInfoParser)\n\
+         [2026-09-29 06:12:37,001] INFO Kafka version: 4.3.1 (org.apache.kafka.common.utils.AppInfoParser)\n",
+    );
+    let ran = broker_readback(&fake);
+    assert!(ran.status.success(), "{}", ran.transcript());
+    assert_eq!(
+        ran.stdout,
+        "image=apache/kafka:4.3.1\n\
+         image_id=sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837\n\
+         version=4.3.1\n"
+    );
+    // A broker that logged no version is not a measurement.
+    let silent = fake_docker("[2026-09-29 06:12:36,205] INFO starting\n");
+    let ran = broker_readback(&silent);
+    assert_eq!(ran.status.code(), Some(1), "{}", ran.transcript());
+    assert!(
+        ran.stdout.is_empty(),
+        "nothing may be reported: {}",
+        ran.stdout
+    );
+    assert!(ran.stderr.contains("no 'INFO Kafka version:' line"));
+
+    // The workflow reads it back after the stack is up and feeds the Record
+    // step with it (wiring pinned in the_record_step_writes_the_row_the_steps_earned).
+    let job = &workflow("engine-matrix.yml")["jobs"]["matrix"];
+    let (up_at, _) = step_by_id(job, "up");
+    let (broker_at, broker) = step_by_id(job, "broker");
+    let (seed_at, _) = step_by_id(job, "seed");
+    assert!(up_at < broker_at && broker_at < seed_at);
+    assert_eq!(broker["if"].as_str(), Some("steps.up.outcome == 'success'"));
+    assert!(broker["run"].as_str().is_some_and(|r| r
+        .contains("./scripts/engine-matrix-broker.sh")
+        && r.contains("\"$GITHUB_OUTPUT\"")));
+}
+
+/// A row whose broker could not be read back still renders, as `unmeasured`.
+#[test]
+fn the_renderer_accepts_an_unmeasured_broker() {
+    let doc = format!("# page\n\n{BEGIN}\nold\n{END}\n");
+    let rows = [
+        row("v0.21.0", "unmeasured", "fail(setup)"),
+        row("v0.21.0", "3.7.1", "pass"),
+    ];
+    let (ran, after) = render(&doc, &rows, Some(2));
+    assert!(ran.status.success(), "{}", ran.transcript());
+    assert!(after.contains("| v0.21.0 | unmeasured |"), "{after}");
 }

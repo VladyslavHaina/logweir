@@ -30,7 +30,7 @@ raises against that engine or against an operator that defaults to it.**
 |---|---|
 | `pass` | The full drill ran and passed. |
 | `pass-degraded` | The drill passed at a reduced integrity level (e.g. `consume-only`, because the KBAK decoder returned `Unsupported`). |
-| `fail(reason)` | The drill ran and did not pass, for the stated reason. The weekly job also records `fail(seed)` when the stack could not be seeded with that engine, and `fail(setup)` when the tag did not resolve to a digest whose revision label is the tag's commit. |
+| `fail(reason)` | The drill ran and did not pass, for the stated reason. The weekly job also records these reasons, each derived from what ran (`scripts/engine-matrix-outcome.sh`): `fail(seed)` when the stack could not be seeded with that engine; `fail(build)` when `logweir` did not build; `fail(floor-not-enforced)` when a drill accepted an engine below the full-drill floor, or failed without Logweir's floor refusal; and `fail(setup)` when a step did not run, the tag did not resolve to a digest whose revision label is the tag's commit, or the broker the stack ran is not the one the row declares. |
 | `fail(lever-not-honoured)` | The engine accepted a lever and did not act on it. The deleted-segment positive control catches this: a **non-oldest** segment is removed from the live archive, so `validate-restore` must report it unrestorable and the drill must block at phase 5 with `outcome: preflight-failed` and exit 2. A version where the drill sails past lands here. The control is the e2e test `a_corrupted_segment_yields_exit_2_and_a_signed_preflight_failed_scorecard`. |
 | `unsupported(lever-absent)` | The engine predates a lever Logweir needs. Reported, never treated as a fault. |
 
@@ -109,15 +109,22 @@ beforehand ([kubernetes.md §21.5](kubernetes.md)).
 `.github/workflows/engine-matrix.yml` runs every Monday, and on demand, over a
 declared set of rows: the newest four engine minors (`v0.22.0`, `v0.21.0`,
 `v0.20.0`, `v0.19.2`), `v0.19.1` (the default of `strimzi-backup-operator`
-v0.2.25 and earlier), and the pinned engine once more on the newest supported
-Apache Kafka line (`KAFKA_VERSION`). Each row pins the tag to a digest whose
-revision label is the tag's commit, sets the stack up and runs the suite
-exactly as the CI e2e job does (`just e2e-up`, then
-`cargo test --locked -p e2e --features e2e`), runs the deleted-segment positive
-control, and records one of the outcomes above. A row is green only when it
-records the outcome it declares. Rows below the full-drill floor seed with
-segment digests optional, because those engines write none, and record
-`unsupported(lever-absent)` with what the reduced row and the control observed.
+v0.2.22–v0.2.25), and the pinned engine once more on the newest supported
+Apache Kafka line (`KAFKA_VERSION`). Each row does the following:
+
+- pins the tag to a digest whose revision label is the tag's commit;
+- sets the stack up and runs the suite exactly as the CI e2e job does
+  (`just e2e-up`, then `cargo test --locked -p e2e --features e2e`);
+- reads back the version the running broker logged, which is what the Kafka
+  broker column records;
+- runs the deleted-segment positive control;
+- records one of the outcomes above.
+
+A row is green only when it records the outcome it declares, and a row whose
+broker differs from its declaration fails. Rows below the full-drill floor seed
+with segment digests optional, because those engines write none. They record
+`unsupported(lever-absent)` only when Logweir is seen refusing the engine
+("below the declared floor") in both the reduced row and the control.
 
 The job renders its rows between the two markers below and changes nothing else
 in this file. It publishes the page as the `support-matrix` artifact and in the
