@@ -1616,8 +1616,19 @@ spend).
   Older archive-manifest fixtures exercise parsing compatibility, not full
   runtime support. The old two-minor support table conflicted with the stated
   full-drill floor and is superseded by the [support matrix](support-matrix.md).
-  A Strimzi installation using its historical `v0.19.1` default requires an
-  engine upgrade before it meets that floor.
+  Upstream's current release is 0.22.0 (2026-09-07). It was evaluated against
+  this pin in [PROD-00.1](to-do/decisions/PROD-00-engine-route.md). Moving the
+  pin is a recorded decision (OD-3), not a routine bump: `doctor` accepts only
+  0.21.0.
+
+  What OSO's operators run:
+
+  - `strimzi-backup-operator` has defaulted to engine v0.22.0 since its v0.3.0
+    (2026-09-07). Its v0.2.22–v0.2.25 default to v0.19.1.
+  - `kafka-backup-operator` 1.3.0 links `kafka-backup-core` 0.19.2 as a library.
+
+  Archives written by engines before 0.21 carry no segment sha256, so a drill
+  over one reports `integrity.result: partial`, never `pass`.
 
 - **Explicit non-contracts.** The Rust crates in this workspace
   (`logweir-core`, `logweir-engine-oso`, `logweir-evidence`, `logweir-kafka`,
@@ -1672,7 +1683,7 @@ The separate **Never** list records product boundaries, not scheduled work.
 | # | Item | Reason | Citation |
 |---|---|---|---|
 | 1 | **MSK IAM auth** | The `TokenProvider` seam exists and is empty; nothing mints an IAM token. | `crates/logweir-kafka/src/token.rs:1-9` |
-| 2 | **Strimzi as a source** | That population's default engine is `v0.19.1`, **below the `0.21.0` floor**. Supporting it would mean supporting an engine that lacks levers Logweir needs, which is why it is reported `unsupported (lever-absent)` and never as a fault. | spec §13; `docs/support-matrix.md` |
+| 2 | **Strimzi as a source** | `strimzi-backup-operator` has defaulted to engine v0.22.0 since its v0.3.0 (2026-09-07); its v0.2.22–v0.2.25 default to `v0.19.1`, **below the `0.21.0` floor**, which the matrix reports `unsupported (lever-absent)` and never as a fault. The drill always restores with Logweir's pinned engine, so what matters is the archive. The CLI drill reads 0.21 and 0.22 archives in full, and reads older ones as `partial` (no segment sha256). A non-empty consumer-group snapshot fails the drill until FX-1. No operator-written archive carries a Logweir receipt, so none can enter the catalog. | spec §13; `docs/support-matrix.md`; [PROD-00.1](to-do/decisions/PROD-00-engine-route.md) §7 |
 | 3 | **The in-browser WASM verifier** | Tag 1's UI ships no build step and no bundler, so there is nothing to compile a verifier into; verification is the CLI and `docs/verify_scorecard.py`. | spec §8 |
 | 4 | **`OsoCliEngine::validation_run`** | The trait method is not overridden, so the engine's own validation run is never executed and `engine_subreport` is `null` in every document tag 1 produces. The subcommand is on the allowlist as a ceiling, not as a description. | spec §13; `docs/platform/find-engine.md` |
 | 5 | **Retention deletion — delivered, opt-in** | ADR 0008 **Amendment H** took the amendment deletion needed, and the worker exists: a `RetentionPolicy` in `mode: Enforce` runs the separately linked `logweir-retention` binary under its own delete-capable credential, only against an administrator-approved plan digest, and writes create-only (unsigned) tombstones and a record under `logweir/retention/`. `mode: Report` is the default and deletes nothing; a schedule's `spec.retention` still only reports; the controller, `logweir-store`, `logweir` and `logweir-api` link no delete path (`scripts/check-no-archive-write.sh` check 3). Versioned and Object Lock buckets are refused (`VersionedBucket`). | [kubernetes.md](kubernetes.md) §7f; [release-notes.md](release-notes.md) |
