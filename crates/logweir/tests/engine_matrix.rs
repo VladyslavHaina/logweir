@@ -717,13 +717,34 @@ fn the_declared_rows_follow_the_documented_floor() {
         .and_then(|l| l.strip_suffix("}\""))
         .expect("extract-engine.sh names the pinned tag")
         .to_string();
-    let compose = read("e2e/compose/docker-compose.yml");
-    let default_broker = compose
-        .split("apache/kafka:${KAFKA_VERSION:-")
-        .nth(1)
-        .and_then(|rest| rest.split('}').next())
-        .expect("the compose stack names its default broker")
+    // The broker a row's `KAFKA_VERSION` selects is kafka-broker-1's image
+    // (the container scripts/engine-matrix-broker.sh reads back). PROD-01.5
+    // wrapped it in `${KAFKA_IMAGE:-…}`, a digest-pinned line that wins over
+    // `KAFKA_VERSION` when set, so the matrix sets the one and never the other.
+    let compose: Value = serde_yaml::from_str(&read("e2e/compose/docker-compose.yml")).unwrap();
+    let image = compose["services"]["kafka-broker-1"]["image"]
+        .as_str()
+        .expect("kafka-broker-1 names its image");
+    let default_broker = image
+        .strip_prefix("${KAFKA_IMAGE:-")
+        .and_then(|inner| inner.strip_suffix('}'))
+        .unwrap_or(image)
+        .strip_prefix("apache/kafka:${KAFKA_VERSION:-")
+        .and_then(|v| v.strip_suffix('}'))
+        .unwrap_or_else(|| {
+            panic!("kafka-broker-1's image `{image}` is not chosen by KAFKA_VERSION")
+        })
         .to_string();
+    let job = &workflow("engine-matrix.yml")["jobs"]["matrix"];
+    assert_eq!(
+        job["env"]["KAFKA_VERSION"].as_str(),
+        Some("${{ matrix.kafka }}"),
+        "each row asks the stack for its broker through KAFKA_VERSION"
+    );
+    assert!(
+        !serde_yaml::to_string(job).unwrap().contains("KAFKA_IMAGE"),
+        "the matrix sets KAFKA_IMAGE, which would override every row's KAFKA_VERSION"
+    );
 
     let rows = matrix_rows();
     let mut pin_on_default = false;
@@ -753,6 +774,36 @@ fn the_declared_rows_follow_the_documented_floor() {
     assert!(
         newer_broker,
         "no row runs a broker newer than {default_broker}"
+    );
+}
+
+/// The `.env` the matrix generates names the engine and never the broker; the
+/// row's broker is the job's `KAFKA_VERSION` alone. The full drill runs
+/// PROD-01.5's `a_slot_moves_every_host_port_and_the_default_render_does_not`,
+/// which renders the stack with every stack variable removed and requires the
+/// compose file's own default broker. A `.env` that carried the row's
+/// `KAFKA_VERSION` turned that row red on the 4.3.1 row (reproduced locally
+/// after the merge of PROD-01.5).
+#[test]
+fn the_generated_env_names_the_engine_and_leaves_the_broker_to_the_row() {
+    let writes: Vec<String> = run_lines(&workflow("engine-matrix.yml")["jobs"]["matrix"])
+        .into_iter()
+        .filter(|l| l.contains("> e2e/compose/.env"))
+        .collect();
+    assert_eq!(
+        writes.len(),
+        1,
+        "exactly one line writes e2e/compose/.env: {writes:?}"
+    );
+    assert!(
+        writes[0].contains("OSO_DIGEST="),
+        "the generated .env names the row's engine: {}",
+        writes[0]
+    );
+    assert!(
+        !writes[0].contains("KAFKA_VERSION") && !writes[0].contains("KAFKA_IMAGE"),
+        "the generated .env pins the broker, which the default render then inherits: {}",
+        writes[0]
     );
 }
 

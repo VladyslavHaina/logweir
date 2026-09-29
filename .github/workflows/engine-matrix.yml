@@ -92,7 +92,12 @@ jobs:
           docker rm "$cid" >/dev/null
           chmod +x .engine/kafka-backup
           .engine/kafka-backup --version
-          printf 'KAFKA_VERSION=%s\nOSO_DIGEST=%s\n' "$KAFKA_VERSION" "$DIGEST" > e2e/compose/.env
+          # `.env` names this row's engine and nothing else. The row's broker
+          # is the job's KAFKA_VERSION, which compose takes over `.env`. The
+          # full drill renders the stack with every stack variable removed
+          # and expects the compose file's own default broker
+          # (e2e/tests/stack_params.rs, PROD-01.5), so `.env` must not pin it.
+          printf 'OSO_DIGEST=%s\n' "$DIGEST" > e2e/compose/.env
           echo "$DIGEST" > third_party/kafka-backup-binary.digest
 
       # The CI e2e job's own setup (gate_lint `ci_uses_the_complete_compose_setup`
