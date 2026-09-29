@@ -1551,8 +1551,8 @@ def _coverage_lines(block):
     coverage_lines`, in the same words (FX-4)."""
     if block is None:
         return [
-            "config_coverage: not recorded (a receipt before format 1.1.0): every topic's "
-            "configuration capture is UNKNOWN, never captured"
+            "config_coverage: not recorded, so every topic's configuration capture is "
+            "UNKNOWN, never captured"
         ]
     lines = []
     for topic in sorted(block):
@@ -1572,11 +1572,12 @@ def _coverage_lines(block):
 def _parity_line(not_assessed):
     """`topic_parity.not_assessed` as one sentence, or "" when every topic was
     assessed — the twin of `crates/logweir/src/verify.rs::parity_line` (FX-4).
-    ABSENT is NOT RECORDED (a 1.0.0 scorecard), never "every topic assessed"."""
+    ABSENT is NOT RECORDED (every 1.0.0 scorecard, and a 1.1.0 one whose drill
+    stopped before phase 7), never "every topic assessed"."""
     if not_assessed is None:
         return (
-            "configuration parity: not recorded (a scorecard before format 1.1.0), so an "
-            "empty unexpected_divergence proves nothing"
+            "configuration parity: not recorded, so an empty unexpected_divergence proves "
+            "nothing"
         )
     if not not_assessed:
         return ""

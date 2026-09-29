@@ -145,8 +145,8 @@ pub struct VerifyReport {
 pub fn parity_line(not_assessed: Option<&[String]>) -> Option<String> {
     match not_assessed {
         None => Some(
-            "configuration parity: not recorded (a scorecard before format 1.1.0), so an \
-             empty unexpected_divergence proves nothing"
+            "configuration parity: not recorded, so an empty unexpected_divergence proves \
+             nothing"
                 .to_string(),
         ),
         Some([]) => None,
@@ -167,8 +167,8 @@ pub fn coverage_lines(
 ) -> Vec<String> {
     let Some(block) = block else {
         return vec![
-            "config_coverage: not recorded (a receipt before format 1.1.0): every topic's \
-             configuration capture is UNKNOWN, never captured"
+            "config_coverage: not recorded, so every topic's configuration capture is \
+             UNKNOWN, never captured"
                 .to_string(),
         ];
     };

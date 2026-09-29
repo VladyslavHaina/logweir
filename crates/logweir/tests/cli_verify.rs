@@ -9,7 +9,13 @@ fn schema_scorecard_prints_the_schema() {
     let out = bin().args(["schema", "scorecard"]).output().unwrap();
     assert!(out.status.success());
     let s = String::from_utf8(out.stdout).unwrap();
-    assert!(s.contains("logweir-drill-scorecard-1.0.0.json"));
+    // The `$id`, not a bare file name: the 1.1.0 schema's descriptions still
+    // NAME the frozen 1.0.0 file, so `contains("…-1.0.0.json")` stayed true
+    // after FX-4 moved the printed schema to 1.1.0.
+    assert!(
+        s.contains(r#""$id": "https://logweir.dev/schemas/logweir-drill-scorecard-1.1.0.json""#),
+        "{s}"
+    );
 }
 
 #[test]
@@ -526,7 +532,10 @@ fn the_signed_receipt_fixture_verifies() {
     // configuration capture coverage is UNKNOWN — and the verdict says so
     // rather than letting the exit 0 read as "captured".
     assert!(
-        stdout.contains("config_coverage: not recorded (a receipt before format 1.1.0)"),
+        stdout.contains(
+            "config_coverage: not recorded, so every topic's configuration capture is \
+             UNKNOWN, never captured"
+        ),
         "a 1.0.0 receipt must print that its configuration coverage was not recorded, got: \
          {stdout}"
     );

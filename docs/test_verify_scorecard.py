@@ -2401,8 +2401,8 @@ def test_a_config_coverage_block_serde_would_refuse_is_refused_at_the_shape_laye
 def test_the_receipt_verdict_prints_config_coverage_and_never_calls_absent_captured():
     mod = _verifier_module()
     assert mod._coverage_lines(None) == [
-        "config_coverage: not recorded (a receipt before format 1.1.0): every topic's "
-        "configuration capture is UNKNOWN, never captured"
+        "config_coverage: not recorded, so every topic's configuration capture is "
+        "UNKNOWN, never captured"
     ]
     assert mod._coverage_lines(
         dict(
