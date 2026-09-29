@@ -1513,6 +1513,19 @@ demo_run() {
   esac
 
   step_01
+  # WHICH compose stack (PROD-01.5): this walk knows only the DEFAULT stack's
+  # addresses (the pods dial host.docker.internal:9095 and :9000), so a slot,
+  # or a half-set environment, is refused HERE — after the context check,
+  # before the teardown trap and the stack: a slot would take the slot's stack
+  # and then reach whoever owns the default one. Only a copied-out overlay of
+  # scripts/ (the lint tests' stub runs) lacks the list; it says so.
+  if [ -f e2e/compose/stack-lib.sh ]; then
+    # shellcheck source=e2e/compose/stack-lib.sh
+    . e2e/compose/stack-lib.sh
+    lw_e2e_require_default "the Kubernetes demo walk" || die "refusing: this walk addresses the default compose stack only"
+  else
+    echo "$(basename "$0" .sh): e2e/compose/stack-lib.sh is absent, so which compose stack this shell addresses is NOT checked" >&2
+  fi
   trap on_exit EXIT
   step_02
   step_03

@@ -361,6 +361,7 @@ const PROBE_TOPIC: &str = "drill-logweir-t8-timestamp-override-probe";
 /// (Task 7 is the only editor of `docker-compose.yml`) is untouched, and the
 /// plan names it as the sanctioned way to probe a broker setting.
 fn kafka_configs(args: &[&str]) -> std::process::Output {
+    stack::ensure_coherent();
     let mut c = std::process::Command::new("docker");
     c.args([
         "compose",

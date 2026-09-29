@@ -81,8 +81,11 @@ const SEED_RESTORE_PAYLOADS: [&str; 3] = [
     "mvp-demo-restored-source-2",
 ];
 
+/// Where `scripts/mvp-demo.sh` writes: `.demo/mvp` on the default stack and
+/// `.demo/<project>/mvp` on any other — the same rule the script takes from
+/// `e2e/compose/stack-lib.sh` (PROD-01.5).
 fn demo_out() -> PathBuf {
-    root().join(".demo/mvp")
+    root().join(stack::scratch_dir(".demo")).join("mvp")
 }
 
 /// MinIO's compose credentials, for the in-process `Store` handles below.
@@ -114,7 +117,7 @@ fn archive_facts(prefix: &str) -> logweir_core::engine::BackupSetFacts {
         bucket: ARCHIVE_BUCKET.to_string(),
         prefix: prefix.to_string(),
         region: Some("us-east-1".to_string()),
-        endpoint: Some("http://localhost:9000".to_string()),
+        endpoint: Some(s3_endpoint()),
         path_style: true,
         allow_http: true,
     };
@@ -470,7 +473,7 @@ fn mvp_demo_backs_up_restores_at_a_point_in_time_and_verifies() {
         bucket: ARCHIVE_BUCKET.to_string(),
         prefix: DEMO_BACKUP_ID.to_string(),
         region: Some("us-east-1".to_string()),
-        endpoint: Some("http://localhost:9000".to_string()),
+        endpoint: Some(s3_endpoint()),
         path_style: true,
         allow_http: true,
     };
