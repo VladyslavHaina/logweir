@@ -468,39 +468,66 @@ fn literal_addresses(rel: &str, text: &str, comment: &str) -> Vec<String> {
         .collect()
 }
 
-/// **The sweep's guard.** No e2e suite, and none of the scripts that address
-/// the stack, spells a default-stack host address in CODE: every one goes
-/// through `harness/stack.rs` or `stack-lib.sh`, so a slot reaches its own
-/// stack and never the default one. (Comments may still name the defaults.)
-///
-/// Mutant: put `"http://localhost:9000"` back into `pitr_boundary.rs`'s
-/// restore spec → fails naming the file and line.
-#[test]
-fn no_stack_reader_hard_codes_a_default_host_address() {
-    let mut found = Vec::new();
-    let dir = root().join("e2e/tests");
-    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
-        .expect("e2e/tests is readable")
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|x| x == "rs"))
-        .collect();
-    files.push(dir.join("harness/mod.rs"));
-    files.push(dir.join("harness/stack.rs"));
+/// Every `.rs` file under `dir`, at ANY depth, sorted. Recursive on purpose: a
+/// support module in a subdirectory (`e2e/tests/<suite>_support/…`) is as much
+/// a stack reader as a top-level suite, and a flat `read_dir` walked past one.
+fn rs_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            rs_files_recursive(&p, out);
+        } else if p.extension().is_some_and(|x| x == "rs") {
+            out.push(p);
+        }
+    }
+}
+
+/// Scans every `.rs` under each of `dirs` (relative to `base`, recursively)
+/// except the paths in `skip`, and returns (files scanned, findings), each
+/// finding naming the file relative to `base`.
+fn scan_rust_readers(base: &Path, dirs: &[&str], skip: &[&str]) -> (usize, Vec<String>) {
+    let mut files = Vec::new();
+    for d in dirs {
+        rs_files_recursive(&base.join(d), &mut files);
+    }
     files.sort();
     let mut scanned = 0;
+    let mut found = Vec::new();
     for f in &files {
         let rel = f
-            .strip_prefix(root())
-            .unwrap()
+            .strip_prefix(base)
+            .expect("under the base")
             .to_string_lossy()
             .replace('\\', "/");
-        if rel == "e2e/tests/stack_params.rs" {
+        if skip.contains(&rel.as_str()) {
             continue;
         }
         scanned += 1;
-        found.extend(literal_addresses(&rel, &read(&rel), "//"));
+        let text = std::fs::read_to_string(f).unwrap_or_else(|e| panic!("read {rel}: {e}"));
+        found.extend(literal_addresses(&rel, &text, "//"));
     }
+    (scanned, found)
+}
+
+/// **The sweep's guard.** No e2e suite or support module (at any depth under
+/// `e2e/tests/` or `e2e/src/`), and none of the scripts that address the stack,
+/// spells a default-stack host address in CODE: every one goes through
+/// `harness/stack.rs` or `stack-lib.sh`, so a slot reaches its own stack and
+/// never the default one. (Comments may still name the defaults.)
+///
+/// Mutant: put `"http://localhost:9000"` back into `pitr_boundary.rs`'s
+/// restore spec → fails naming the file and line. A planted twin in a
+/// SUBDIRECTORY is `the_sweep_reaches_support_modules_in_subdirectories`.
+#[test]
+fn no_stack_reader_hard_codes_a_default_host_address() {
+    let (mut scanned, mut found) = scan_rust_readers(
+        &root(),
+        &["e2e/tests", "e2e/src"],
+        &["e2e/tests/stack_params.rs"],
+    );
     for rel in [
         "scripts/demo.sh",
         "scripts/demo-approve.sh",
@@ -510,7 +537,7 @@ fn no_stack_reader_hard_codes_a_default_host_address() {
         scanned += 1;
         found.extend(literal_addresses(rel, &read(rel), "#"));
     }
-    assert!(scanned >= 12, "scanned only {scanned} files");
+    assert!(scanned >= 14, "scanned only {scanned} files");
     assert!(
         found.is_empty(),
         "{} code line(s) hard-code a DEFAULT-stack host address, so on another slot they \
@@ -518,6 +545,50 @@ fn no_stack_reader_hard_codes_a_default_host_address() {
          stack-lib.sh's LW_E2E_* instead:\n  {}",
         found.len(),
         found.join("\n  ")
+    );
+}
+
+/// **The planted twin.** The same scan over a throwaway tree: a support module
+/// two levels down that spells `http://localhost:9000` in code must be found,
+/// and its twin — the same file reading `s3_endpoint()`, with the default named
+/// only in a comment — must not. A non-recursive walk finds neither, and fails
+/// the first assertion.
+#[test]
+fn the_sweep_reaches_support_modules_in_subdirectories() {
+    let base = std::env::temp_dir().join(format!(
+        "lw-stack-params-twin-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let sub = base.join("e2e/tests/some_suite_support/nested");
+    std::fs::create_dir_all(&sub).unwrap();
+    std::fs::write(
+        sub.join("planted.rs"),
+        "pub fn endpoint() -> String {\n    \"http://localhost:9000\".to_string()\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        sub.join("twin.rs"),
+        "// the default stack answers on http://localhost:9000\npub fn endpoint() -> String {\n    s3_endpoint()\n}\n",
+    )
+    .unwrap();
+    let (scanned, found) = scan_rust_readers(&base, &["e2e/tests"], &[]);
+    let _ = std::fs::remove_dir_all(&base);
+    assert_eq!(
+        scanned, 2,
+        "the walk did not reach both files two levels down"
+    );
+    assert_eq!(
+        found.len(),
+        1,
+        "exactly the planted file must be found, not its twin: {found:?}"
+    );
+    assert!(
+        found[0].starts_with("e2e/tests/some_suite_support/nested/planted.rs:2:"),
+        "the finding names the planted file and line: {found:?}"
     );
 }
 
