@@ -76,8 +76,16 @@ pub fn from_receipt(
             records: *records,
         })
         .collect();
+    // FX-7: the pin travels from the receipt, and the record's minor version
+    // says whether it carries one.
+    let manifest_version_id = receipt.archive.manifest_version_id.clone();
+    let format_version = if manifest_version_id.is_some() {
+        FORMAT_VERSION_WITH_MANIFEST_VERSION
+    } else {
+        FORMAT_VERSION
+    };
     Ok(CatalogPoint {
-        format_version: FORMAT_VERSION.to_string(),
+        format_version: format_version.to_string(),
         point_id: point_id(receipt_bytes),
         recorded_at: inputs.recorded_at,
         receipt: RecordReceipt {
@@ -92,6 +100,7 @@ pub fn from_receipt(
             location_id: inputs.location_id.clone(),
             manifest_key: receipt.archive.manifest_key.clone(),
             manifest_sha256: receipt.archive.manifest_sha256.clone(),
+            manifest_version_id,
             prefix: receipt.archive.prefix.clone(),
         },
         covered: RecordCovered {

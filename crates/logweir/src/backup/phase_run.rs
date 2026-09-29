@@ -202,8 +202,21 @@ pub fn claim_execution(
 /// that FAILS proves nothing about the set, so it fails closed as exit 4
 /// [`EXECUTION_CLAIM_UNPROVEN`], exactly as a claim put the store refused
 /// does: no engine run, nothing signed.
-pub fn refuse_an_existing_set(backup_id: &str, archive: &Store) -> Result<(), BackupError> {
-    let directory = archive.qualify(&format!("{backup_id}/"));
+pub fn refuse_an_existing_set(
+    backup_id: &str,
+    storage: &logweir_core::engine::StorageUrl,
+    archive: &Store,
+) -> Result<(), BackupError> {
+    // The directory is taken from the PLAN's storage prefix — the prefix the
+    // engine writes under and `run`'s read-back lists (`list_manifests` over
+    // `plan.storage`) — so the three agree by construction, whatever prefix
+    // the archive handle itself was built with.
+    let prefix = storage.prefix().trim_end_matches('/');
+    let directory = if prefix.is_empty() {
+        format!("{backup_id}/")
+    } else {
+        format!("{prefix}/{backup_id}/")
+    };
     match archive.list_page(&directory, None, 1) {
         Ok((keys, _)) => match keys.first() {
             None => Ok(()),
@@ -244,6 +257,10 @@ pub struct Ran {
     /// `logweir_core::ids::sha256_prefixed` (`ids.rs:11-13`) — never over a
     /// re-serialisation of anything.
     pub manifest_sha256: String,
+    /// **FX-7.** The version id the store answered the SAME read with — the
+    /// version those exact bytes are — or `None` on a bucket that keeps no
+    /// versions (`logweir_core::backup_receipt::pinnable_version_id`).
+    pub manifest_version_id: Option<String>,
     pub records_per_topic: BTreeMap<String, u64>,
     /// INCLUSIVE start of the covered window, epoch milliseconds: the oldest
     /// `start_timestamp` any segment of this backup set declares.
@@ -309,10 +326,19 @@ pub fn run(
     // they are read here anyway: `describe` reaches the archive through the
     // engine's OWN store handle, so a receipt quoting only the engine's
     // number would be attesting bytes this process never saw.
-    let (manifest_bytes, _version_id) = store
+    //
+    // **And the version id that same read was answered with (FX-7).** It is
+    // the version of exactly these bytes — one response carries both — so a
+    // receipt that pins it names the object version its digest is over. The
+    // engine rewrites `<backup_id>/manifest.json` with its own unconditional
+    // put, several times in one run; what is pinned is the version this run
+    // read back AFTER the engine exited, i.e. the one the receipt attests.
+    let (manifest_bytes, answered_version) = store
         .get(&set.manifest_key)
         .map_err(|e| BackupError::Operational(e.to_string()))?;
     let manifest_sha256 = logweir_core::ids::sha256_prefixed(&manifest_bytes);
+    let manifest_version_id =
+        logweir_core::backup_receipt::pinnable_version_id(answered_version.as_deref());
 
     // `describe_with_notices`, not `describe`: what the engine found that no
     // signed field carries — today an unreadable consumer-groups snapshot
@@ -402,6 +428,7 @@ pub fn run(
         facts,
         manifest_key: set.manifest_key,
         manifest_sha256,
+        manifest_version_id,
         records_per_topic,
         covered_from_ms,
         covered_to_ms,
@@ -459,13 +486,21 @@ pub fn receipt_keys(backup_id: &str, run_id: &str) -> Persisted {
 /// `BackupOutcome` -> the document. A pure projection: every field is a value
 /// the outcome already carries, and nothing here measures anything.
 ///
-/// `format_version` is the pinned `1.0.0` of THIS document type (independent
-/// of the scorecard's), and `source.auth` is `BackupOutcome::source_auth`
+/// `format_version` is `1.0.0` of THIS document type (independent of the
+/// scorecard's), or `1.1.0` exactly when the receipt pins the manifest's
+/// version id (FX-7) — `logweir_core::backup_receipt::format_version_for`, the
+/// one place that decides it. `source.auth` is `BackupOutcome::source_auth`
 /// rendered as the two strings `ReceiptAuth` holds — **never a password, and
 /// no field that could hold one**.
 pub fn build_receipt(outcome: &crate::backup::BackupOutcome) -> BackupReceipt {
+    let archive = ReceiptArchive {
+        manifest_key: outcome.manifest_key.clone(),
+        manifest_sha256: outcome.manifest_sha256.clone(),
+        manifest_version_id: outcome.manifest_version_id.clone(),
+        prefix: outcome.archive_prefix.clone(),
+    };
     BackupReceipt {
-        format_version: "1.0.0".to_string(),
+        format_version: logweir_core::backup_receipt::format_version_for(&archive).to_string(),
         run_id: outcome.run_id.clone(),
         backup_id: outcome.backup_id.clone(),
         requested_at: outcome.requested_at,
@@ -487,11 +522,7 @@ pub fn build_receipt(outcome: &crate::backup::BackupOutcome) -> BackupReceipt {
             version: outcome.engine.version.clone(),
             digest: outcome.engine.digest.clone(),
         },
-        archive: ReceiptArchive {
-            manifest_key: outcome.manifest_key.clone(),
-            manifest_sha256: outcome.manifest_sha256.clone(),
-            prefix: outcome.archive_prefix.clone(),
-        },
+        archive,
         records: outcome.records_per_topic.clone(),
         covered: ReceiptCovered {
             from_ms: outcome.covered_from_ms,

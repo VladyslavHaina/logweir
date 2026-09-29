@@ -164,6 +164,9 @@ pub enum Verdict {
         backup_id: String,
         run_id: String,
         manifest_key: String,
+        /// **FX-7.** `archive.manifest_version_id`, when the receipt pins one:
+        /// the object version the manifest digest is over.
+        manifest_version_id: Option<String>,
     },
     /// The signature verified over these exact bytes under this key, and the
     /// sidecar's `payloadType` is the one asked for. **Nothing about the
@@ -324,6 +327,7 @@ pub fn verify_scorecard(
             backup_id: receipt.backup_id,
             run_id: receipt.run_id,
             manifest_key: receipt.archive.manifest_key,
+            manifest_version_id: receipt.archive.manifest_version_id,
         });
     }
     if payload_type != PAYLOAD_TYPE_SCORECARD {
@@ -440,6 +444,7 @@ fn print_backup_receipt(
     backup_id: &str,
     run_id: &str,
     manifest_key: &str,
+    manifest_version_id: Option<&str>,
 ) {
     println!("signature: VALID  key {key_id}");
     println!("payload:   {payload_type}");
@@ -456,6 +461,13 @@ fn print_backup_receipt(
             manifest_key
         }
     );
+    // FX-7: on a versioned bucket, WHICH version of that key the digest is
+    // over — the second thing an auditor goes looking with
+    // (`?versionId=`). Absent means no version was pinned, and nothing is
+    // printed rather than a placeholder that could be read as one.
+    if let Some(version) = manifest_version_id {
+        println!("manifest version: {version} (the object version the manifest digest is over)");
+    }
     println!(
         "checked:   the signature AND all five backup-receipt invariants \
          (format_version, exit_code/manifest_key, records/topics, covered window, \
@@ -499,8 +511,16 @@ pub fn run(scorecard: &Path, signature: &Path, public_key: &Path, payload_type: 
             backup_id,
             run_id,
             manifest_key,
+            manifest_version_id,
         }) => {
-            print_backup_receipt(&payload_type, &key_id, &backup_id, &run_id, &manifest_key);
+            print_backup_receipt(
+                &payload_type,
+                &key_id,
+                &backup_id,
+                &run_id,
+                &manifest_key,
+                manifest_version_id.as_deref(),
+            );
             ExitCode::Ok
         }
         Ok(Verdict::SignatureOnly {

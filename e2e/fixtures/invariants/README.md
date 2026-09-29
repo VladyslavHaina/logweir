@@ -431,10 +431,17 @@ messages in FULL and which such an edit does not touch — plus
 which reads the function's own source text, so an arm deleted from both readers
 and from this corpus still fails a named test.
 
-The two-reader walk over these eight documents is
+The two-reader walk over these nine documents is
 `crates/logweir/tests/two_reader_parity_receipt.rs` — its **own test binary**,
 because Global Constraint 22's 15 s bound is per `#[test]` and
 `two_reader_parity.rs` already measures 5–12 s.
+
+**Two accept cases (FX-7).** `unmodified_receipt_pinned.json` is
+`unmodified_receipt.json` at `format_version` `1.1.0` with the optional
+`archive.manifest_version_id` a receipt taken on a versioned bucket carries.
+Both readers must accept it, and `scripts/check-verifier-parity.sh` asserts that
+both PRINT the pin: an absent field keeps `unmodified_receipt.json` the
+byte-identical `1.0.0` document it always was, and a present one is no new arm.
 
 ## The three `target.auth` cases in `index.json` (Task 5b, +1 in fix round 1)
 

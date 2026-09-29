@@ -179,6 +179,13 @@ pub struct Store {
     /// store that errors where it should have refused. The backup runner's
     /// exclusivity probe must not read that error as proof (RECEIPT-DUP).
     errors_on_existing_key: bool,
+    /// TEST DOUBLE ONLY — `Some` for [`Store::in_memory_versioned`] and `None`
+    /// for every production constructor, which read version ids from the
+    /// backend itself. `object_store`'s `InMemory` reports no version id and
+    /// IGNORES a request for one, so a versioned bucket (FX-7: the backup
+    /// runner pins the manifest's version id, and readers read by it) has to
+    /// be modelled beside it. See [`VersionedBucket`].
+    versions: Option<Arc<VersionLog>>,
 }
 
 impl Store {
@@ -279,6 +286,7 @@ impl Store {
             read_only: false,
             ignores_create_mode: false,
             errors_on_existing_key: false,
+            versions: None,
         })
     }
 
@@ -306,6 +314,7 @@ impl Store {
             read_only: true,
             ignores_create_mode: false,
             errors_on_existing_key: false,
+            versions: None,
         })
     }
 
@@ -326,6 +335,7 @@ impl Store {
             read_only: false,
             ignores_create_mode: false,
             errors_on_existing_key: false,
+            versions: None,
         })
     }
 
@@ -348,6 +358,7 @@ impl Store {
             read_only: true,
             ignores_create_mode: false,
             errors_on_existing_key: false,
+            versions: None,
         })
     }
 
@@ -543,6 +554,7 @@ impl Store {
             read_only: false,
             ignores_create_mode: false,
             errors_on_existing_key: false,
+            versions: None,
         }
     }
 
@@ -575,6 +587,34 @@ impl Store {
             errors_on_existing_key: true,
             ..Self::in_memory(prefix)
         }
+    }
+
+    /// A TEST DOUBLE of a VERSIONED bucket (FX-7), and the handle a test uses
+    /// to act on it the way a writer OTHER than this store would: overwrite a
+    /// key unconditionally (the engine's own manifest put), or delete it (a
+    /// delete marker). No production path builds it.
+    ///
+    /// Every successful put through the STORE, and every write through the
+    /// handle, becomes a new version with a fresh id; [`Store::get`] reports
+    /// the current one, and [`Store::get_version`] reads any retained one —
+    /// which is what S3, MinIO and SeaweedFS do for a bucket with versioning
+    /// enabled.
+    #[doc(hidden)]
+    pub fn in_memory_versioned(prefix: &str) -> (Self, VersionedBucket) {
+        let backend = Arc::new(object_store::memory::InMemory::new());
+        let log = Arc::new(VersionLog::default());
+        let rt = Self::new_rt();
+        let store = Self {
+            inner: backend.clone(),
+            prefix: prefix.to_string(),
+            conditional_put: true,
+            rt: rt.clone(),
+            read_only: false,
+            ignores_create_mode: false,
+            errors_on_existing_key: false,
+            versions: Some(log.clone()),
+        };
+        (store, VersionedBucket { backend, log, rt })
     }
 
     /// ONE runtime for the life of the store, built in every constructor and
@@ -613,12 +653,73 @@ impl Store {
                     object_store::Error::NotFound { .. } => StoreError::NotFound(key.to_string()),
                     other => StoreError::Io(format!("{key}: {other}")),
                 })?;
-            let vid = r.meta.version.clone();
+            let vid = match &self.versions {
+                // The test double's version log: see `versions`.
+                Some(log) => log.current(key),
+                None => r.meta.version.clone(),
+            };
             let b = r
                 .bytes()
                 .await
                 .map_err(|e| StoreError::Io(format!("{key}: {e}")))?;
             Ok((b.to_vec(), vid))
+        })
+    }
+
+    /// **FX-7 — read ONE VERSION of an object**, by the version id a signed
+    /// document pinned. Returns the bytes and the version id the store
+    /// answered with.
+    ///
+    /// `NotFound` when the store holds no such version of the key (never
+    /// written, or that version deleted). **A store that does not read by
+    /// version is an ERROR here, never an answer**: `object_store` 0.14 sends
+    /// `?versionId=` to S3 and S3-compatible stores, but its in-memory and
+    /// local-filesystem backends ignore the option and return the CURRENT
+    /// object — so a reply whose version id is not the one asked for is
+    /// refused as [`StoreError::Backend`] rather than handed back as the
+    /// pinned bytes. A reader that took the current object for the pinned one
+    /// would verify exactly the rewrite the pin exists to detect.
+    pub fn get_version(
+        &self,
+        key: &str,
+        version: &str,
+    ) -> Result<(Vec<u8>, Option<String>), StoreError> {
+        if let Some(log) = &self.versions {
+            // The test double's version log: see `versions`.
+            return log
+                .read(key, version)
+                .map(|bytes| (bytes, Some(version.to_string())))
+                .ok_or_else(|| StoreError::NotFound(format!("{key}?versionId={version}")));
+        }
+        let rt = &self.rt;
+        rt.block_on(async {
+            let options = object_store::GetOptions {
+                version: Some(version.to_string()),
+                ..Default::default()
+            };
+            let r = self
+                .inner
+                .get_opts(&OPath::from(key), options)
+                .await
+                .map_err(|e| match e {
+                    object_store::Error::NotFound { .. } => {
+                        StoreError::NotFound(format!("{key}?versionId={version}"))
+                    }
+                    other => StoreError::Io(format!("{key}?versionId={version}: {other}")),
+                })?;
+            let answered = r.meta.version.clone();
+            if answered.as_deref() != Some(version) {
+                return Err(StoreError::Backend(format!(
+                    "a read of version {version} of {key} was answered with version {}; this \
+                     store does not read objects by version",
+                    answered.as_deref().unwrap_or("none")
+                )));
+            }
+            let b = r
+                .bytes()
+                .await
+                .map_err(|e| StoreError::Io(format!("{key}?versionId={version}: {e}")))?;
+            Ok((b.to_vec(), answered))
         })
     }
 
@@ -1086,10 +1187,15 @@ impl Store {
                 };
                 match self.inner.put_opts(&p, payload.clone(), opts).await {
                     Ok(r) => {
+                        let version_id = match &self.versions {
+                            // The test double's version log: see `versions`.
+                            Some(log) => Some(log.record(key, bytes)),
+                            None => r.version,
+                        };
                         return Ok(PutOutcome {
-                            version_id: r.version,
+                            version_id,
                             create_only_enforced: true,
-                        })
+                        });
                     }
                     Err(object_store::Error::AlreadyExists { .. }) => {
                         if self.errors_on_existing_key {
@@ -1137,6 +1243,115 @@ impl Store {
                 create_only_enforced: false,
             })
         })
+    }
+}
+
+/// One key's history in a [`VersionLog`]: `(version id, bytes)`, oldest first;
+/// `None` bytes are a delete MARKER.
+type VersionHistory = Vec<(String, Option<Vec<u8>>)>;
+
+/// TEST DOUBLE ONLY (FX-7): the version history of [`Store::in_memory_versioned`].
+///
+/// Every write appends `(version id, bytes)` to its key's history; a delete
+/// appends a MARKER (`None`). The current version is the last entry, unless
+/// that entry is a marker — which is S3's model of a versioned bucket.
+#[doc(hidden)]
+#[derive(Debug, Default)]
+pub struct VersionLog {
+    /// The last id issued, and every key's history.
+    state: std::sync::Mutex<(u64, std::collections::BTreeMap<String, VersionHistory>)>,
+}
+
+impl VersionLog {
+    fn next(&self, key: &str, bytes: Option<&[u8]>) -> String {
+        let mut state = self
+            .state
+            .lock()
+            .expect("the version log is never poisoned");
+        state.0 += 1;
+        let id = format!("fx7v{:06}", state.0);
+        state
+            .1
+            .entry(key.to_string())
+            .or_default()
+            .push((id.clone(), bytes.map(<[u8]>::to_vec)));
+        id
+    }
+
+    fn record(&self, key: &str, bytes: &[u8]) -> String {
+        self.next(key, Some(bytes))
+    }
+
+    fn current(&self, key: &str) -> Option<String> {
+        let state = self
+            .state
+            .lock()
+            .expect("the version log is never poisoned");
+        match state.1.get(key).and_then(|h| h.last()) {
+            Some((id, Some(_))) => Some(id.clone()),
+            _ => None,
+        }
+    }
+
+    fn read(&self, key: &str, version: &str) -> Option<Vec<u8>> {
+        let state = self
+            .state
+            .lock()
+            .expect("the version log is never poisoned");
+        state
+            .1
+            .get(key)?
+            .iter()
+            .find(|(id, _)| id == version)
+            .and_then(|(_, bytes)| bytes.clone())
+    }
+
+    fn history(&self, key: &str) -> Vec<String> {
+        let state = self
+            .state
+            .lock()
+            .expect("the version log is never poisoned");
+        state
+            .1
+            .get(key)
+            .map(|h| h.iter().map(|(id, _)| id.clone()).collect())
+            .unwrap_or_default()
+    }
+}
+
+/// TEST DOUBLE ONLY (FX-7): a second writer on a [`Store::in_memory_versioned`]
+/// bucket — the engine's unconditional manifest put, or an operator's delete —
+/// which the `Store` itself, being create-only, cannot be.
+#[doc(hidden)]
+pub struct VersionedBucket {
+    backend: Arc<object_store::memory::InMemory>,
+    log: Arc<VersionLog>,
+    rt: Arc<tokio::runtime::Runtime>,
+}
+
+impl VersionedBucket {
+    /// An unconditional put: a NEW current version of `key`. Returns its id.
+    pub fn overwrite(&self, key: &str, bytes: &[u8]) -> String {
+        self.rt
+            .block_on(self.backend.put(
+                &OPath::from(key),
+                object_store::PutPayload::from(bytes.to_vec()),
+            ))
+            .expect("the in-memory backend accepts every put");
+        self.log.record(key, bytes)
+    }
+
+    /// A delete: a delete MARKER becomes the current version of `key`, and
+    /// every earlier version stays readable by its id.
+    pub fn delete(&self, key: &str) {
+        let _ = self.rt.block_on(self.backend.delete(&OPath::from(key)));
+        self.log.next(key, None);
+    }
+
+    /// Every version id `key` has had, oldest first, markers included.
+    #[must_use]
+    pub fn versions(&self, key: &str) -> Vec<String> {
+        self.log.history(key)
     }
 }
 

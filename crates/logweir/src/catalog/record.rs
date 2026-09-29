@@ -13,6 +13,12 @@ use serde::{Deserialize, Serialize};
 /// reading rule 1).
 pub const FORMAT_VERSION: &str = "1.0.0";
 
+/// **FX-7.** The format of a record that carries `archive.manifest_version_id`
+/// — a MINOR bump (reading rule 2: a `1.0.0` reader ignores the field and
+/// reads the rest). Written only when the pin is present, so a record for a
+/// point on an unversioned bucket is exactly the `1.0.0` document.
+pub const FORMAT_VERSION_WITH_MANIFEST_VERSION: &str = "1.1.0";
+
 /// `lwp1-`: the identity scheme's own version, inside the identifier.
 ///
 /// It is part of the id and not metadata beside it, so a future scheme cannot
@@ -119,7 +125,8 @@ pub fn log_key(recovery_point_at: DateTime<Utc>, point_id: &str) -> String {
 /// bulk, and a principal name is not a fact a recovery point needs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct CatalogPoint {
-    /// Semver of THIS format. Major `1`; a higher major is
+    /// Semver of THIS format: `1.0.0`, or `1.1.0` for a record that carries
+    /// `archive.manifest_version_id` (FX-7). Major `1`; a higher major is
     /// [`crate::catalog::reader::PointState::UnsupportedFormat`] per entry,
     /// never fatal for the sync (D3 §5.2 rule 1).
     #[schemars(regex(pattern = r"^1\.[0-9]+\.[0-9]+$"))]
@@ -196,6 +203,17 @@ pub struct RecordArchive {
     pub manifest_key: String,
     /// Receipt-derived (rule 3). `sha256:<hex>`.
     pub manifest_sha256: String,
+    /// **FX-7, format `1.1.0`.** Receipt-derived: the version id of the
+    /// manifest bytes the receipt attests, copied from the receipt's own
+    /// `archive.manifest_version_id` and present exactly when it is.
+    ///
+    /// ABSENT means UNKNOWN here (rule 2) — an unversioned bucket, a receipt
+    /// from before the field, or a record an older writer produced — and a
+    /// reader then takes the pin from the verified RECEIPT, which is the
+    /// authority. A record that carries a pin the receipt does not, or a
+    /// different one, contradicts its receipt (`reader::cross_check`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_version_id: Option<String>,
     /// The archive's own key prefix, as the receipt records it.
     pub prefix: String,
 }

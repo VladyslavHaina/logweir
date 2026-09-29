@@ -52,7 +52,7 @@
       "nullable": true
     },
     "format_version": {
-      "description": "Semver of THIS format. Major `1`; a higher major is [`crate::catalog::reader::PointState::UnsupportedFormat`] per entry, never fatal for the sync (D3 §5.2 rule 1).",
+      "description": "Semver of THIS format: `1.0.0`, or `1.1.0` for a record that carries `archive.manifest_version_id` (FX-7). Major `1`; a higher major is [`crate::catalog::reader::PointState::UnsupportedFormat`] per entry, never fatal for the sync (D3 §5.2 rule 1).",
       "type": "string",
       "pattern": "^1\\.[0-9]+\\.[0-9]+$"
     },
@@ -122,6 +122,11 @@
         "manifest_sha256": {
           "description": "Receipt-derived (rule 3). `sha256:<hex>`.",
           "type": "string"
+        },
+        "manifest_version_id": {
+          "description": "**FX-7, format `1.1.0`.** Receipt-derived: the version id of the manifest bytes the receipt attests, copied from the receipt's own `archive.manifest_version_id` and present exactly when it is.\n\nABSENT means UNKNOWN here (rule 2) — an unversioned bucket, a receipt from before the field, or a record an older writer produced — and a reader then takes the pin from the verified RECEIPT, which is the authority. A record that carries a pin the receipt does not, or a different one, contradicts its receipt (`reader::cross_check`).",
+          "type": "string",
+          "nullable": true
         },
         "prefix": {
           "description": "The archive's own key prefix, as the receipt records it.",

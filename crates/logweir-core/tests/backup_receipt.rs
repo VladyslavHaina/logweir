@@ -73,6 +73,7 @@ fn pristine() -> BackupReceipt {
         archive: ReceiptArchive {
             manifest_key: "logweir/backups/b/manifest.json".to_string(),
             manifest_sha256: "sha256:11".to_string(),
+            manifest_version_id: None,
             prefix: "logweir/backups/b/".to_string(),
         },
         records,

@@ -341,7 +341,13 @@ FORMAT_VERSION = "1.0.0"
 # writes — `integrity.result: fail` with a reason PRESENT, and the same
 # document with it ABSENT — so `index.json` gains both as ACCEPT cases. No new
 # field, no new arm, and no change to the frozen top-level shape.
-SCRIPT_VERSION = "1.14.0"
+#
+# 1.15.0 (FX-7) reads the backup receipt's `archive.manifest_version_id` — the
+# object version a receipt taken on a versioned bucket pins (receipt format
+# 1.1.0) — refuses it at the SHAPE layer when it is present and not a string,
+# and prints it, and prints a catalog point record's copy of it. No invariant
+# arm and no payload type is added.
+SCRIPT_VERSION = "1.15.0"
 
 # The FIVE payload types Logweir signs. Keep byte-for-byte in step with
 # `crates/logweir-verify/src/lib.rs`'s PAYLOAD_TYPE_SCORECARD,
@@ -1282,6 +1288,14 @@ def _receipt_shape(doc) -> str:
             return f"covered.{name} is not an integer"
     if "manifest_key" not in doc["archive"]:
         return "the document has no archive.manifest_key field; it is not a backup receipt"
+    # FX-7 (receipt format 1.1.0): `archive.manifest_version_id` is OPTIONAL and,
+    # when present, a string — `ReceiptArchive::manifest_version_id` is an
+    # `Option<String>`, so Rust accepts it absent or null and refuses any other
+    # JSON type at deserialisation. Refused here at the same layer, so a
+    # document the Rust reader never parsed is never VALID here.
+    version_id = doc["archive"].get("manifest_version_id")
+    if version_id is not None and not isinstance(version_id, str):
+        return "archive.manifest_version_id is not a string"
     return ""
 
 
@@ -1691,6 +1705,14 @@ def main(
         if str(archive.get("manifest_key") or "").strip():
             print(f"       manifest {archive.get('manifest_key')}")
             print(f"       manifest_sha256={archive.get('manifest_sha256')}")
+            # FX-7: on a versioned bucket, WHICH version of that key the digest
+            # is over — read it back with `?versionId=`. Absent means no version
+            # was pinned, and nothing is printed rather than a placeholder.
+            if archive.get("manifest_version_id") is not None:
+                print(
+                    f"       manifest_version_id={archive.get('manifest_version_id')} "
+                    "(the object version the manifest digest is over)"
+                )
         else:
             print("       manifest: none — this receipt is for a backup that did not exit 0")
         print(
@@ -1767,6 +1789,15 @@ def main(
                 # point_id is its display form; this digest is the thing.
                 print(f"       receipt {receipt.get('key')}")
                 print(f"       receipt_sha256={receipt.get('sha256')}")
+            archive = doc.get("archive")
+            if isinstance(archive, dict) and archive.get("manifest_version_id") is not None:
+                # FX-7 (record format 1.1.0): a COPY of the receipt's pin, and
+                # informational like every copied fact — the receipt is the
+                # authority.
+                print(
+                    f"       manifest_version_id={archive.get('manifest_version_id')} "
+                    "(copied from the receipt)"
+                )
         print(
             "       This signature covers the record only. It is NOT a claim that the point "
             "is available, that its archive is readable, or that its copied facts are true: "

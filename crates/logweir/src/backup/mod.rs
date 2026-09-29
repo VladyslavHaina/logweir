@@ -145,6 +145,9 @@ pub struct BackupOutcome {
     pub manifest_key: String,
     /// `"sha256:<hex>"`, over the exact manifest bytes this run READ back.
     pub manifest_sha256: String,
+    /// **FX-7.** The version id of those exact bytes, when the store keeps
+    /// versions; `None` otherwise. Becomes `archive.manifest_version_id`.
+    pub manifest_version_id: Option<String>,
     pub records_per_topic: BTreeMap<String, u64>,
     pub covered_from_ms: i64,
     /// **EXCLUSIVE** (interface I22) — see `phase_run::Ran::covered_to_ms`,
@@ -566,7 +569,7 @@ fn execute_with_signer(
     // answered by the claim, and last before the engine, so the window before
     // the engine's first write is as short as it can be. See
     // `phase_run::refuse_an_existing_set`.
-    phase_run::refuse_an_existing_set(&backup_id, store)?;
+    phase_run::refuse_an_existing_set(&backup_id, &plan.storage, store)?;
     tracing::info!(
         run_id = %run_id,
         backup_id = %backup_id,
@@ -594,6 +597,7 @@ fn execute_with_signer(
         source_auth: source_auth_render(&inputs.spec.source.auth),
         manifest_key: ran.manifest_key,
         manifest_sha256: ran.manifest_sha256,
+        manifest_version_id: ran.manifest_version_id,
         records_per_topic: ran.records_per_topic,
         covered_from_ms: ran.covered_from_ms,
         covered_to_ms: ran.covered_to_ms,

@@ -78,6 +78,7 @@ fn receipt(backup_id: &str, run_id: &str) -> BackupReceipt {
         archive: ReceiptArchive {
             manifest_key: format!("prod/{backup_id}/manifest.json"),
             manifest_sha256: "sha256:".to_string() + &"b".repeat(64),
+            manifest_version_id: None,
             prefix: "prod".into(),
         },
         records: BTreeMap::from([("orders".to_string(), 1234u64)]),

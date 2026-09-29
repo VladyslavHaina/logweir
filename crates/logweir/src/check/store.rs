@@ -152,11 +152,50 @@ pub trait ObjectAccess {
 
     /// A manifest-relative key, qualified into this handle's key space.
     fn qualify(&self, relative_key: &str) -> String;
+
+    /// **FX-7.** [`ObjectAccess::get`], together with the VERSION id the store
+    /// answered the read with — `None` for a store that keeps no versions.
+    ///
+    /// A PROVIDED method answering `None`, which is the unversioned store's
+    /// true answer, so a double that models one needs nothing more. `Store`,
+    /// the one live implementation, overrides it with the backend's own
+    /// answer; `catalog_sync_reads_the_version_the_live_store_reports` holds
+    /// that override in place.
+    ///
+    /// # Errors
+    /// As [`ObjectAccess::get`].
+    fn get_with_version(&self, key: &str) -> Result<(Vec<u8>, Option<String>), StoreError> {
+        self.get(key).map(|bytes| (bytes, None))
+    }
+
+    /// **FX-7.** Read ONE VERSION of an object by the id a signed document
+    /// pinned.
+    ///
+    /// The provided method REFUSES, as [`StoreError::Backend`]: a handle that
+    /// cannot read by version must never be taken to have read one, and an
+    /// answer with the current bytes would verify exactly the rewrite a pin
+    /// exists to catch (`Store::get_version`'s own argument).
+    ///
+    /// # Errors
+    /// [`StoreError`]; `NotFound` when the store retains no such version.
+    fn get_version(&self, key: &str, version: &str) -> Result<Vec<u8>, StoreError> {
+        Err(StoreError::Backend(format!(
+            "this handle does not read objects by version ({key}?versionId={version})"
+        )))
+    }
 }
 
 impl ObjectAccess for Store {
     fn get(&self, key: &str) -> Result<Vec<u8>, StoreError> {
         Store::get(self, key).map(|(bytes, _)| bytes)
+    }
+
+    fn get_with_version(&self, key: &str) -> Result<(Vec<u8>, Option<String>), StoreError> {
+        Store::get(self, key)
+    }
+
+    fn get_version(&self, key: &str, version: &str) -> Result<Vec<u8>, StoreError> {
+        Store::get_version(self, key, version).map(|(bytes, _)| bytes)
     }
 
     fn list_page(

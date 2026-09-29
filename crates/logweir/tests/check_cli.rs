@@ -217,6 +217,10 @@ struct ObjectState {
     /// not a reading of the code.
     calls: Vec<String>,
     prefix: String,
+    /// FX-7: a key's VERSION history, oldest first; the last entry is the
+    /// current version, and its bytes are also the key's entry in `objects`.
+    /// A key with no history is an object on an unversioned bucket.
+    versions: BTreeMap<String, Vec<(String, Vec<u8>)>>,
 }
 
 #[derive(Clone, Default)]
@@ -245,6 +249,23 @@ impl FakeObjects {
 
     fn failing_get(self, f: Fault) -> Self {
         self.state.lock().unwrap().get_fault = Some(f);
+        self
+    }
+
+    /// FX-7: make `key` an object on a VERSIONED bucket with this history,
+    /// oldest first. Its current bytes become the last version's.
+    fn with_versions(self, key: &str, history: &[(&str, &[u8])]) -> Self {
+        let mut s = self.state.lock().unwrap();
+        let (_, current) = history.last().expect("a history has a current version");
+        s.objects.insert(key.to_string(), current.to_vec());
+        s.versions.insert(
+            key.to_string(),
+            history
+                .iter()
+                .map(|(id, bytes)| ((*id).to_string(), bytes.to_vec()))
+                .collect(),
+        );
+        drop(s);
         self
     }
 
@@ -365,6 +386,69 @@ impl ObjectAccess for FakeObjects {
         } else {
             format!("{}/{}", s.prefix.trim_end_matches('/'), relative_key)
         }
+    }
+
+    /// FX-7: the current version, when the key has a history.
+    fn get_with_version(&self, key: &str) -> Result<(Vec<u8>, Option<String>), StoreError> {
+        let bytes = self.get(key)?;
+        let s = self.state.lock().unwrap();
+        let current = s
+            .versions
+            .get(key)
+            .and_then(|h| h.last())
+            .map(|(id, _)| id.clone());
+        Ok((bytes, current))
+    }
+
+    /// FX-7: one retained version by id; an unversioned key cannot be read by
+    /// version at all, which is an error and never the current bytes.
+    fn get_version(&self, key: &str, version: &str) -> Result<Vec<u8>, StoreError> {
+        let mut s = self.state.lock().unwrap();
+        s.calls.push(format!("get {key}?versionId={version}"));
+        match s.versions.get(key) {
+            None => Err(StoreError::Backend(format!(
+                "{key} is not versioned; it cannot be read by version"
+            ))),
+            Some(history) => history
+                .iter()
+                .find(|(id, _)| id == version)
+                .map(|(_, bytes)| bytes.clone())
+                .ok_or_else(|| StoreError::NotFound(format!("{key}?versionId={version}"))),
+        }
+    }
+}
+
+/// FX-7: a REAL `Store` behind the check's object trait, shared across the
+/// handles a wiring hands out — so a row can hold the live implementation's
+/// `get_with_version` override in place. Every method delegates to `Store`'s
+/// OWN trait implementation, including the two FX-7 methods: were `Store` to
+/// lose its override, it would answer the trait's default (no version) here
+/// too, and the row reading it would fail.
+struct SharedStore(Arc<logweir_engine_oso::storage::Store>);
+
+impl ObjectAccess for SharedStore {
+    fn get(&self, key: &str) -> Result<Vec<u8>, StoreError> {
+        ObjectAccess::get(&*self.0, key)
+    }
+    fn list_page(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+        max: usize,
+    ) -> Result<Vec<String>, StoreError> {
+        ObjectAccess::list_page(&*self.0, prefix, start_after, max)
+    }
+    fn put_create_only(&self, key: &str, bytes: &[u8]) -> Result<PutOutcome, StoreError> {
+        ObjectAccess::put_create_only(&*self.0, key, bytes)
+    }
+    fn qualify(&self, relative_key: &str) -> String {
+        ObjectAccess::qualify(&*self.0, relative_key)
+    }
+    fn get_with_version(&self, key: &str) -> Result<(Vec<u8>, Option<String>), StoreError> {
+        ObjectAccess::get_with_version(&*self.0, key)
+    }
+    fn get_version(&self, key: &str, version: &str) -> Result<Vec<u8>, StoreError> {
+        ObjectAccess::get_version(&*self.0, key, version)
     }
 }
 
@@ -541,6 +625,9 @@ struct FakeWiring {
     reader_grants: Arc<Mutex<Vec<Option<GrantRef>>>>,
     signer: Option<Result<String, String>>,
     files: BTreeMap<String, Vec<u8>>,
+    /// FX-7: when set, EVERY `objects` handle is this real `Store` (see
+    /// [`SharedStore`]) instead of a `FakeObjects`.
+    shared_store: Option<Arc<logweir_engine_oso::storage::Store>>,
 }
 
 fn role_key(role: DestinationRole) -> &'static str {
@@ -637,6 +724,9 @@ impl Wiring for FakeWiring {
     ) -> Result<Box<dyn ObjectAccess>, StoreFailure> {
         if let Some((c, m)) = self.role_faults.get(role_key(role)) {
             return Err(StoreFailure::new(*c, m.clone()));
+        }
+        if let Some(store) = &self.shared_store {
+            return Ok(Box::new(SharedStore(store.clone())));
         }
         Ok(Box::new(
             self.role_objects
@@ -6217,6 +6307,7 @@ fn catalog_receipt(backup_id: &str, run_id: &str, started: &str) -> BackupReceip
         archive: logweir_core::backup_receipt::ReceiptArchive {
             manifest_key: format!("kafka-backups/{backup_id}/manifest.json"),
             manifest_sha256: logweir_core::ids::sha256_prefixed(CATALOG_MANIFEST),
+            manifest_version_id: None,
             prefix: "kafka-backups".to_string(),
         },
         records: BTreeMap::from([("orders".to_string(), 1234u64)]),
@@ -6386,6 +6477,161 @@ fn drive_sync(
     wiring: &FakeWiring,
 ) -> Run {
     drive(&mount(&catalog_plan(request)), wiring)
+}
+
+// ---------------------------------------------------------------------------
+// FX-7: points pinned to a manifest VERSION
+// ---------------------------------------------------------------------------
+
+/// A receipt taken on a VERSIONED bucket: format `1.1.0`, pinning `version`.
+fn pinned_catalog_receipt(version: &str) -> BackupReceipt {
+    let mut r = catalog_receipt("set-a", "run-a", "2026-09-16T03:00:00Z");
+    r.format_version = "1.1.0".to_string();
+    r.archive.manifest_version_id = Some(version.to_string());
+    r
+}
+
+/// One pinned point whose manifest has `history` (oldest first).
+fn versioned_objects(
+    receipt: &BackupReceipt,
+    history: &[(&str, &[u8])],
+) -> (FakeObjects, CatalogFixture) {
+    let f = catalog_fixture(
+        receipt,
+        "s3://lw-archive/kafka-backups",
+        &claimed_sidecar(CATALOG_CLAIMED_KEY_ID),
+        CATALOG_CLAIMED_KEY_ID,
+    );
+    let objects = place(FakeObjects::new(), &f).with_versions(&f.manifest_key, history);
+    (objects, f)
+}
+
+fn only_entry(objects: FakeObjects) -> serde_json::Value {
+    let run = drive_sync(
+        sync_request(),
+        &FakeWiring::default().with_role(DestinationRole::ArchiveRead, objects),
+    );
+    let entries = entries_of(&body_of(&run));
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    entries[0].clone()
+}
+
+/// A pinned point whose pinned version IS the current one is `Available`,
+/// with the record's own 1.1.0 format reported.
+#[test]
+fn a_pinned_point_whose_version_is_current_is_available() {
+    let (objects, _) =
+        versioned_objects(&pinned_catalog_receipt("v1"), &[("v1", CATALOG_MANIFEST)]);
+    let entry = only_entry(objects);
+    assert_eq!(entry["availability"], "Available", "{entry}");
+    assert_eq!(entry["formatVersion"], "1.1.0", "{entry}");
+}
+
+/// **The pin's whole point, in the catalog.** Engine 0.21.0 re-running over a
+/// set can put a manifest whose bytes are IDENTICAL while it rewrites the
+/// segments under it (measured, FX-7). The digest cannot see that; the version
+/// can: the point is `Conflict`, not selectable, with a remedy that says the
+/// set was written again. The control is the same history under a point that
+/// pins nothing — `Available`, which is exactly the blindness the pin closes.
+#[test]
+fn a_pinned_point_whose_manifest_was_written_again_is_a_conflict_that_says_so() {
+    let history: &[(&str, &[u8])] = &[("v1", CATALOG_MANIFEST), ("v2", CATALOG_MANIFEST)];
+    let (objects, _) = versioned_objects(&pinned_catalog_receipt("v1"), history);
+    let entry = only_entry(objects);
+    assert_eq!(entry["availability"], "Conflict", "{entry}");
+    assert_eq!(
+        entry["remedy"],
+        logweir::check::kinds::catalog_sync::SUPERSEDED_REMEDY,
+        "{entry}"
+    );
+
+    let (control, _) = versioned_objects(
+        &catalog_receipt("set-a", "run-a", "2026-09-16T03:00:00Z"),
+        history,
+    );
+    assert_eq!(
+        only_entry(control)["availability"],
+        "Available",
+        "a point that pins nothing cannot see an identical rewrite — the control"
+    );
+}
+
+/// **The receipt is the authority.** A record an OLDER writer produced carries
+/// no pin (absent means unknown) while its receipt does: the deep check takes
+/// the pin from the RECEIPT, so the rewrite is still seen.
+#[test]
+fn the_deep_check_takes_the_pin_from_the_receipt_not_from_the_record() {
+    let receipt = pinned_catalog_receipt("v1");
+    let (_, pinned) = versioned_objects(&receipt, &[("v1", CATALOG_MANIFEST)]);
+    // The record an older writer would have written: the same point, no pin.
+    let mut record = pinned.point.clone();
+    record.archive.manifest_version_id = None;
+    record.format_version = "1.0.0".to_string();
+    let record_bytes = record.canonical_bytes().expect("the record serialises");
+    let objects = FakeObjects::new()
+        .with_object(&pinned.log_key, &pinned.log_bytes)
+        .with_object(&pinned.record_key, &record_bytes)
+        .with_object(&pinned.receipt_key, &pinned.receipt_bytes)
+        .with_object(&pinned.sidecar_key, &pinned.sidecar_bytes)
+        .with_versions(
+            &pinned.manifest_key,
+            &[("v1", CATALOG_MANIFEST), ("v2", CATALOG_MANIFEST)],
+        );
+    let entry = only_entry(objects);
+    assert_eq!(
+        entry["availability"], "Conflict",
+        "the pin was read from the record, which an older writer left out: {entry}"
+    );
+}
+
+/// The LIVE object handle — a real `Store`, here the versioned in-memory
+/// double — reports the version it read: a pinned point whose version is
+/// current is `Available` through it, and the same point after a rewrite is
+/// `Conflict`. Were `Store`'s `ObjectAccess` implementation to fall back to the
+/// trait's default (no version), the first half would read `Conflict`.
+#[test]
+fn catalog_sync_reads_the_version_the_live_store_reports() {
+    for rewritten in [false, true] {
+        let (store, bucket) = logweir_engine_oso::storage::Store::in_memory_versioned("");
+        let manifest_key = "logweir/archive/set-a/manifest.json";
+        let version = store
+            .put_create_only(manifest_key, CATALOG_MANIFEST)
+            .unwrap()
+            .version_id
+            .unwrap();
+        let mut receipt = pinned_catalog_receipt(&version);
+        receipt.archive.manifest_key = manifest_key.to_string();
+        let f = catalog_fixture(
+            &receipt,
+            "s3://lw-archive/kafka-backups",
+            &claimed_sidecar(CATALOG_CLAIMED_KEY_ID),
+            CATALOG_CLAIMED_KEY_ID,
+        );
+        for (key, bytes) in [
+            (&f.log_key, &f.log_bytes),
+            (&f.record_key, &f.record_bytes),
+            (&f.receipt_key, &f.receipt_bytes),
+            (&f.sidecar_key, &f.sidecar_bytes),
+        ] {
+            store.put_create_only(key, bytes).unwrap();
+        }
+        if rewritten {
+            bucket.overwrite(manifest_key, CATALOG_MANIFEST);
+        }
+        let wiring = FakeWiring {
+            shared_store: Some(Arc::new(store)),
+            ..FakeWiring::default()
+        };
+        let run = drive_sync(sync_request(), &wiring);
+        let entries = entries_of(&body_of(&run));
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert_eq!(
+            entries[0]["availability"],
+            if rewritten { "Conflict" } else { "Available" },
+            "rewritten={rewritten}: {}",
+            entries[0]
+        );
+    }
 }
 
 /// The happy path: the grammar, in order, with the fence last.

@@ -546,6 +546,11 @@ struct Observation {
     signer_key_id: Option<String>,
     point: Option<Box<CatalogPoint>>,
     format_version: Option<String>,
+    /// **FX-7.** The receipt pins a manifest VERSION and the key's current
+    /// version is another one: the backup set was written again after the
+    /// point was signed. Always `Conflict`; carried separately so the entry's
+    /// remedy says so rather than the generic one.
+    superseded: bool,
 }
 
 impl Observation {
@@ -556,9 +561,18 @@ impl Observation {
             signer_key_id: None,
             point: None,
             format_version: None,
+            superseded: false,
         }
     }
 }
+
+/// **FX-7.** The remedy of a point whose pinned manifest version is no longer
+/// the current one. A fixed sentence, like every remedy in [`remedy_for`].
+pub const SUPERSEDED_REMEDY: &str =
+    "This point's manifest was written again after the point was signed: its current \
+     version is not the one the signed receipt pins, so a restore would read a manifest \
+     this point does not describe, and the set's segments may have been rewritten. \
+     Restore from another point; the attested version may remain in the bucket's history.";
 
 /// Why a walk ended.
 ///
@@ -1219,6 +1233,7 @@ fn examine(
         signer_key_id: None,
         format_version: Some(point.format_version.clone()),
         point: Some(point),
+        superseded: false,
     };
     let point = observation
         .point
@@ -1273,15 +1288,36 @@ fn examine(
         && req.deep_check != CatalogDeepCheck::None
     {
         walk.objects = walk.objects.saturating_add(1);
-        match access.get(&point.archive.manifest_key) {
-            Ok(bytes) => {
-                let got = logweir_core::ids::sha256_prefixed(&bytes);
-                if got != point.archive.manifest_sha256 {
-                    // The bytes in the bucket are not the bytes the signed
-                    // receipt describes. The receipt is the authority, so this
-                    // is a contradiction about the point and not a fact about
-                    // the record.
+        // **FX-7 — the pinned version.** Taken from the RECEIPT, the
+        // verification root, and never from the record, whose copy an older
+        // writer may have left out (`reader::cross_check` has already refused a
+        // record whose copy differs).
+        let pinned = receipt.archive.manifest_version_id.as_deref();
+        match access.get_with_version(&point.archive.manifest_key) {
+            Ok((bytes, answered)) => {
+                let current =
+                    logweir_core::backup_receipt::pinnable_version_id(answered.as_deref());
+                if pinned.is_some() && current.as_deref() != pinned {
+                    // The key's current version is not the one the receipt
+                    // attests: the set was written again after the point was
+                    // signed. The digest cannot always see it — engine 0.21.0
+                    // rewrites a set's segments in place and can leave the
+                    // manifest bytes IDENTICAL under a new version — and a
+                    // restore reads only the current version, so the point is
+                    // not selectable whatever the bytes hash to. No second read
+                    // here: the walk affords [`OBJECTS_PER_POINT`] objects a
+                    // point, and the version comparison needs none.
                     observation.availability = Availability::Conflict;
+                    observation.superseded = true;
+                } else {
+                    let got = logweir_core::ids::sha256_prefixed(&bytes);
+                    if got != point.archive.manifest_sha256 {
+                        // The bytes in the bucket are not the bytes the signed
+                        // receipt describes. The receipt is the authority, so
+                        // this is a contradiction about the point and not a
+                        // fact about the record.
+                        observation.availability = Availability::Conflict;
+                    }
                 }
             }
             Err(StoreError::NotFound(_)) => observation.availability = Availability::Missing,
@@ -1435,9 +1471,13 @@ fn build_entry(observation: &Observation) -> Option<CatalogEntry> {
         availability,
         signature: observation.signature,
         signer_key_id: observation.signer_key_id.as_deref().map(redact_digest),
-        remedy: remedy_for(availability, observation.signature)
-            .map(redact)
-            .filter(|r| !r.is_empty()),
+        remedy: (if observation.superseded {
+            Some(SUPERSEDED_REMEDY)
+        } else {
+            remedy_for(availability, observation.signature)
+        })
+        .map(redact)
+        .filter(|r| !r.is_empty()),
     };
     // One sync contributes one location, so this can only ever be a no-op —
     // and it is written down so the cap is enforced on the side that renders

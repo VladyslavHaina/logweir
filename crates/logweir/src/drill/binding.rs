@@ -181,8 +181,8 @@ pub fn verify_point_binding(
     // `store.get(&set.manifest_key)` on the value `list_manifests` returned),
     // so it is already in the same space.
     let manifest_key = receipt.archive.manifest_key.clone();
-    let manifest_bytes = match archive.get(&manifest_key) {
-        Ok((bytes, _)) => bytes,
+    let (manifest_bytes, current_version) = match archive.get(&manifest_key) {
+        Ok(read) => read,
         Err(StoreError::NotFound(_)) => {
             return Err(DrillError::Operational(format!(
                 "recovery point {}'s manifest {manifest_key} is not in the archive; no data \
@@ -198,6 +198,41 @@ pub fn verify_point_binding(
             )))
         }
     };
+    // **FX-7 — THE PINNED VERSION MUST BE THE CURRENT ONE.** A receipt taken
+    // on a versioned bucket names the version of the manifest it attests. The
+    // engine restores from the key's CURRENT version and knows no other, so a
+    // different current version means this restore would read a manifest the
+    // point does not describe. The digest below cannot always see that:
+    // engine 0.21.0 re-running over a set rewrites its segments in place and
+    // can leave the manifest bytes IDENTICAL, with a new version id. So the
+    // version is compared first, and the pinned version is then read BY ID to
+    // tell the operator whether the attested manifest is still retained.
+    // Exit 3: the archive no longer holds the point as approved.
+    if let Some(pinned) = receipt.archive.manifest_version_id.as_deref() {
+        let current = logweir_core::backup_receipt::pinnable_version_id(current_version.as_deref());
+        if current.as_deref() != Some(pinned) {
+            let retained = match archive.get_version(&manifest_key, pinned) {
+                Ok((bytes, _))
+                    if logweir_core::ids::sha256_prefixed(&bytes) == point.manifest_sha256 =>
+                {
+                    "is still retained at that version, but a restore reads only the current \
+                     one"
+                }
+                Ok(_) => "is at that version but no longer hashes to the attested digest",
+                Err(StoreError::NotFound(_)) => "is no longer in the bucket at that version",
+                Err(_) => "could not be read by its version id",
+            };
+            return Err(refuse(format!(
+                "{POINT_BINDING_MISMATCH}. Recovery point {}'s manifest {manifest_key} was written \
+                 again after the point was signed: the point pins version {pinned}, the current \
+                 version is {}. The backup set may have been rewritten under it (its segments \
+                 are rewritten in place), and the manifest the point attests {retained}; no \
+                 data operation was started.",
+                point.point_id,
+                current.as_deref().unwrap_or("unversioned")
+            )));
+        }
+    }
     let manifest_digest = logweir_core::ids::sha256_prefixed(&manifest_bytes);
     if manifest_digest != point.manifest_sha256 {
         return Err(refuse(format!(
@@ -660,6 +695,7 @@ mod tests {
             archive: ReceiptArchive {
                 manifest_key: manifest_key.into(),
                 manifest_sha256: manifest_sha256.into(),
+                manifest_version_id: None,
                 prefix: "logweir/backups/nightly-7/".into(),
             },
             records: BTreeMap::from([("orders".to_string(), 3u64)]),
@@ -957,6 +993,111 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
         assert!(rendered.contains("hashes to"), "{rendered}");
         assert!(rendered.contains(POINT_BINDING_MISMATCH), "{rendered}");
         assert!(rendered.contains(&attested_sha256), "{rendered}");
+    }
+
+    // -----------------------------------------------------------------------
+    // FX-7: a point on a VERSIONED bucket pins its manifest's version
+    // -----------------------------------------------------------------------
+
+    /// A SIGNED point on a versioned bucket whose receipt pins the manifest's
+    /// version id — or, with `pin == false`, the same point written by a build
+    /// that pinned nothing — and the handle that can rewrite the manifest the
+    /// way the engine's own unconditional put does.
+    fn versioned_point(pin: bool) -> (Archive, logweir_engine_oso::storage::VersionedBucket) {
+        let (store, bucket) = Store::in_memory_versioned("");
+        let manifest = br#"{"topics":[]}"#.to_vec();
+        let manifest_sha256 = logweir_core::ids::sha256_prefixed(&manifest);
+        let version = store
+            .put_create_only(MANIFEST_KEY, &manifest)
+            .expect("the manifest is written")
+            .version_id
+            .expect("a versioned bucket names the version");
+        let mut r = receipt(MANIFEST_KEY, &manifest_sha256);
+        if pin {
+            r.archive.manifest_version_id = Some(version);
+            r.format_version = "1.1.0".into();
+        }
+        let receipt_bytes = serde_json::to_vec(&r).expect("serialises");
+        let signer = SigningKey::generate_ed25519();
+        put_signed_receipt(&store, &receipt_bytes, &signer);
+        let archive = Archive {
+            store,
+            binding: PointBinding {
+                point_id: crate::catalog::record::point_id(&receipt_bytes),
+                receipt_key: RECEIPT_KEY.into(),
+                receipt_sha256: logweir_core::ids::sha256_prefixed(&receipt_bytes),
+                manifest_sha256,
+            },
+            keys: evidence_keys(vec![(&signer, trusted(&signer))]),
+        };
+        (archive, bucket)
+    }
+
+    /// A pinned point whose pinned version IS the current one is proven — the
+    /// pin refuses nothing a point without one would have admitted.
+    #[test]
+    fn a_pinned_point_whose_version_is_current_is_proven() {
+        let (a, _bucket) = versioned_point(true);
+        let id = a.binding.point_id.clone();
+        assert_eq!(
+            check(&plan_with(Some(a.binding.clone())), &a.store, &a.keys)
+                .expect("the pinned version is the current one"),
+            Some(id)
+        );
+    }
+
+    /// **THE PIN'S WHOLE POINT.** Engine 0.21.0 re-running over a set rewrites
+    /// its segments in place and can put a manifest whose bytes are IDENTICAL
+    /// (measured, FX-7): the digest cannot see it, the version can. A pinned
+    /// point is refused, exit 3, with the pinned version read BY ID to say the
+    /// attested manifest is still retained; the same rewrite under a point
+    /// that pins nothing passes the digest check, which is the limit the pin
+    /// exists to close on a versioned bucket.
+    #[test]
+    fn a_pinned_point_whose_manifest_was_rewritten_with_identical_bytes_is_refused() {
+        let (a, bucket) = versioned_point(true);
+        bucket.overwrite(MANIFEST_KEY, br#"{"topics":[]}"#);
+        let error = check(&plan_with(Some(a.binding.clone())), &a.store, &a.keys)
+            .expect_err("a set written again after its point was signed is not that point");
+        assert_eq!(error.exit_code(), crate::exit::ExitCode::GuardRefused);
+        let rendered = error.to_string();
+        assert!(rendered.contains(POINT_BINDING_MISMATCH), "{rendered}");
+        assert!(
+            rendered.contains("was written again after the point was signed"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("is still retained at that version"),
+            "the pinned version was read by id: {rendered}"
+        );
+
+        let (unpinned, bucket) = versioned_point(false);
+        bucket.overwrite(MANIFEST_KEY, br#"{"topics":[]}"#);
+        assert!(
+            check(
+                &plan_with(Some(unpinned.binding.clone())),
+                &unpinned.store,
+                &unpinned.keys
+            )
+            .is_ok(),
+            "without a pin the identical rewrite is invisible to the digest — the control that \
+             shows what the pin adds"
+        );
+    }
+
+    /// A rewrite with DIFFERENT bytes is refused by the version comparison
+    /// first, before the digest, and says so.
+    #[test]
+    fn a_pinned_point_whose_manifest_changed_is_refused_as_rewritten() {
+        let (a, bucket) = versioned_point(true);
+        bucket.overwrite(MANIFEST_KEY, br#"{"topics":["orders"]}"#);
+        let rendered = check(&plan_with(Some(a.binding.clone())), &a.store, &a.keys)
+            .expect_err("a changed manifest is refused")
+            .to_string();
+        assert!(
+            rendered.contains("was written again after the point was signed"),
+            "{rendered}"
+        );
     }
 
     /// A missing point is exit 1, NOT exit 3: the archive did not answer, and

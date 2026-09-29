@@ -101,6 +101,10 @@ fn receipt() -> BackupReceipt {
             manifest_sha256:
                 "sha256:1111111111111111111111111111111111111111111111111111111111111111"
                     .to_string(),
+            // The committed fixture is the UNVERSIONED `1.0.0` document, and
+            // must stay byte-identical: FX-7's pin is absent here, so it writes
+            // nothing.
+            manifest_version_id: None,
             prefix: "logweir/backups/logweir-backup-01J8Z9QK7V/".to_string(),
         },
         records,

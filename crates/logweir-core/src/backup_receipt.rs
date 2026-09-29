@@ -52,7 +52,9 @@ use std::collections::BTreeMap;
 /// `e2e/fixtures/signed/backup-receipt.json`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct BackupReceipt {
-    /// Semver of THIS format — `1.0.0`, and independent of the scorecard's.
+    /// Semver of THIS format — `1.0.0`, or `1.1.0` for a receipt that pins
+    /// `archive.manifest_version_id` (FX-7) — and independent of the
+    /// scorecard's.
     ///
     /// The schema PINS the major with a pattern rather than leaving the field
     /// an unconstrained string, for the reason
@@ -165,16 +167,71 @@ pub struct ReceiptEngine {
 
 /// What was written, and where. The two fields an auditor needs in order to
 /// go and look: the manifest's key, and a digest over the exact manifest
-/// bytes THIS RUN READ BACK (not over bytes Logweir remembers writing).
+/// bytes THIS RUN READ BACK (not over bytes Logweir remembers writing) — and,
+/// on a versioned bucket, WHICH VERSION of that key those bytes were.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ReceiptArchive {
     /// Empty **if and only if** the backup did not exit 0 — invariant 2.
     pub manifest_key: String,
     /// `"sha256:<hex>"` over the manifest bytes read back after the run.
     pub manifest_sha256: String,
+    /// **FX-7, format `1.1.0`.** The object store's VERSION id for the
+    /// manifest bytes this run read back — present only when the store
+    /// answered that read with one, i.e. on a bucket with versioning enabled.
+    ///
+    /// **ABSENT means "no version was pinned"**: an unversioned bucket (whose
+    /// objects carry no version id, or S3's literal `null`, which names an
+    /// object an overwrite replaces in place), or a receipt written before
+    /// this field existed. Never read as "version zero" and never inferred.
+    ///
+    /// A reader that finds it compares the key's CURRENT version with it: a
+    /// different current version means the backup set was written again after
+    /// this receipt was signed, which the manifest digest alone cannot see —
+    /// engine 0.21.0 rewrites a set's segments in place and can leave the
+    /// manifest bytes identical. And it can read THIS version by id, which a
+    /// versioned bucket retains whatever the current one is.
+    ///
+    /// Absent when `None`, and that is the compatibility argument: declaration
+    /// order is byte order, and an absent field writes nothing, so a receipt
+    /// without a pin is byte-for-byte the `1.0.0` document it always was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_version_id: Option<String>,
     /// The object-store prefix everything this run wrote lives under. GC6:
     /// Logweir writes only under its own `logweir/` prefix.
     pub prefix: String,
+}
+
+/// The `format_version` a receipt carries when it pins no manifest version.
+pub const FORMAT_VERSION: &str = "1.0.0";
+
+/// **FX-7.** The `format_version` a receipt carries when it pins
+/// `archive.manifest_version_id`: a MINOR bump, because the field is optional
+/// and a `1.0.0` reader, which ignores unknown fields inside major 1, still
+/// reads it (reading rule 1). Written only when the pin is present, so every
+/// receipt on an unversioned bucket is exactly the `1.0.0` document.
+pub const FORMAT_VERSION_WITH_MANIFEST_VERSION: &str = "1.1.0";
+
+/// The version id a reader may PIN, out of what a store answered.
+///
+/// `None` for no answer, for a blank one, and for S3's literal `"null"` — the
+/// id of an object written while versioning was never enabled or suspended,
+/// which the next write REPLACES in place, so it identifies no retained bytes.
+#[must_use]
+pub fn pinnable_version_id(answered: Option<&str>) -> Option<String> {
+    match answered.map(str::trim) {
+        None | Some("") | Some("null") => None,
+        Some(id) => Some(id.to_string()),
+    }
+}
+
+/// The `format_version` a receipt with this `archive` block is written with.
+#[must_use]
+pub fn format_version_for(archive: &ReceiptArchive) -> &'static str {
+    if archive.manifest_version_id.is_some() {
+        FORMAT_VERSION_WITH_MANIFEST_VERSION
+    } else {
+        FORMAT_VERSION
+    }
 }
 
 /// The time range the archive covers, in **EPOCH MILLISECONDS**, as a
