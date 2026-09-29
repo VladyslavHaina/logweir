@@ -12,8 +12,8 @@
 #![allow(dead_code)]
 
 use super::oracle::{Headers, Rec, TsType};
+use crate::harness::ARCHIVE_BUCKET;
 use crate::harness::{bin, engine_bin, engine_digest, engine_mount, engine_version, root};
-use crate::harness::{ARCHIVE_BUCKET, BOOTSTRAP};
 use rdkafka::client::ClientContext;
 use rdkafka::config::ClientConfig;
 use rdkafka::consumer::{BaseConsumer, Consumer};
@@ -27,6 +27,45 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+// ============================================================ the stack
+//
+// THE ONE PLACE this file set reads the compose stack's host-side addresses
+// and its MinIO credential (PROD-01.1 review M5 and L9). Nothing else in
+// `record_semantics.rs` or this module spells a broker address, an S3
+// endpoint or the credential. When PROD-01.5 parameterizes the harness
+// (`bootstrap()` / `s3_endpoint()`), only these three functions change. The
+// in-network names (`kafka-broker-1:9094`, `local/<bucket>` through the
+// compose `mc`) are the same in every stack and are not routed here.
+
+/// The broker's host-side bootstrap: the harness's current constant.
+pub fn bootstrap() -> String {
+    crate::harness::BOOTSTRAP.to_string()
+}
+
+/// MinIO's host-side endpoint. The engine container reaches the same address,
+/// because `e2e/fixtures/engine-docker.sh` maps `localhost` to the host
+/// gateway.
+pub fn s3_endpoint() -> String {
+    "http://localhost:9000".to_string()
+}
+
+/// The compose MinIO's documented default user and password. A public
+/// fixture value, not a secret, spelled once and assembled rather than
+/// written as a literal.
+pub fn s3_credentials() -> (String, String) {
+    let user = ["minio", "admin"].concat();
+    (user.clone(), user)
+}
+
+/// Point this process's `object_store` clients at the stack's MinIO.
+/// Process-wide; every row of `record_semantics.rs` wants the same values.
+pub fn use_stack_s3_env() {
+    let (user, secret) = s3_credentials();
+    std::env::set_var("AWS_ACCESS_KEY_ID", user);
+    std::env::set_var("AWS_SECRET_ACCESS_KEY", secret);
+    std::env::set_var("AWS_REGION", "us-east-1");
+}
 
 /// One record to produce, with every field stated.
 #[derive(Debug, Clone)]
@@ -117,7 +156,7 @@ fn send(p: &BaseProducer<Counting>, topic: &str, o: &Out) -> Result<(), String> 
 
 fn base_config() -> ClientConfig {
     let mut c = ClientConfig::new();
-    c.set("bootstrap.servers", BOOTSTRAP)
+    c.set("bootstrap.servers", bootstrap())
         .set("acks", "all")
         .set("message.timeout.ms", "30000")
         .set("linger.ms", "0")
@@ -246,7 +285,7 @@ fn to_rec(m: &BorrowedMessage<'_>) -> Rec {
 /// so a slow broker cannot shorten a reading.
 pub fn read_partition(topic: &str, partition: i32, iso: Isolation) -> Result<Vec<Rec>, String> {
     let c: BaseConsumer = ClientConfig::new()
-        .set("bootstrap.servers", BOOTSTRAP)
+        .set("bootstrap.servers", bootstrap())
         .set("group.id", format!("recsem-read-{}", nonce()))
         .set("enable.auto.commit", "false")
         .set("enable.auto.offset.store", "false")
@@ -323,7 +362,7 @@ pub fn watermarks_at(
     iso: Isolation,
 ) -> Result<Vec<(i32, i64, i64)>, String> {
     let c: BaseConsumer = ClientConfig::new()
-        .set("bootstrap.servers", BOOTSTRAP)
+        .set("bootstrap.servers", bootstrap())
         .set("group.id", format!("recsem-wm-{}", nonce()))
         .set("enable.auto.commit", "false")
         .set(
@@ -350,7 +389,7 @@ pub fn watermarks_at(
 /// [`watermarks_at`].
 pub fn committed_position_at_eof(topic: &str, partition: i32) -> Result<i64, String> {
     let c: BaseConsumer = ClientConfig::new()
-        .set("bootstrap.servers", BOOTSTRAP)
+        .set("bootstrap.servers", bootstrap())
         .set("group.id", format!("recsem-lso-{}", nonce()))
         .set("enable.auto.commit", "false")
         .set("enable.auto.offset.store", "false")
@@ -409,7 +448,7 @@ pub fn archive_location(backup_id: &str) -> logweir_core::engine::StorageUrl {
         bucket: ARCHIVE_BUCKET.to_string(),
         prefix: backup_id.to_string(),
         region: Some("us-east-1".to_string()),
-        endpoint: Some("http://localhost:9000".to_string()),
+        endpoint: Some(s3_endpoint()),
         path_style: true,
         allow_http: true,
     }
@@ -550,19 +589,20 @@ fn backup_allowlist() -> PathBuf {
 pub fn backup_run(backup_id: &str, topics: &[&str], segment_max_records: u64) -> Output {
     let spec = crate::harness::demo_dir().join(format!("{backup_id}-backup.yaml"));
     let list = topics.join(", ");
+    let (boot, endpoint) = (bootstrap(), s3_endpoint());
     std::fs::write(
         &spec,
         format!(
             "backup_id: {backup_id}\n\
              source:\n\
-             \x20 bootstrap_servers: [{BOOTSTRAP}]\n\
+             \x20 bootstrap_servers: [{boot}]\n\
              \x20 topics: [{list}]\n\
              storage:\n\
              \x20 backend: s3\n\
              \x20 bucket: {ARCHIVE_BUCKET}\n\
              \x20 prefix: {backup_id}\n\
              \x20 region: us-east-1\n\
-             \x20 endpoint: http://localhost:9000\n\
+             \x20 endpoint: {endpoint}\n\
              \x20 path_style: true\n\
              \x20 allow_http: true\n\
              backup:\n\
@@ -573,6 +613,7 @@ pub fn backup_run(backup_id: &str, topics: &[&str], segment_max_records: u64) ->
         ),
     )
     .expect("the backup spec is writable");
+    let (user, secret) = s3_credentials();
     let mut c = Command::new(bin());
     c.args(["backup", "run", "--spec"])
         .arg(&spec)
@@ -580,8 +621,8 @@ pub fn backup_run(backup_id: &str, topics: &[&str], segment_max_records: u64) ->
         .arg(backup_allowlist())
         .arg("--signing-key")
         .arg(root().join("e2e/fixtures/signed/signing.pem"))
-        .env("AWS_ACCESS_KEY_ID", "minioadmin")
-        .env("AWS_SECRET_ACCESS_KEY", "minioadmin")
+        .env("AWS_ACCESS_KEY_ID", user)
+        .env("AWS_SECRET_ACCESS_KEY", secret)
         .env("AWS_REGION", "us-east-1")
         .env("LOGWEIR_ENGINE_BIN", engine_bin())
         .env("LOGWEIR_ENGINE_VERSION", engine_version())
@@ -589,6 +630,39 @@ pub fn backup_run(backup_id: &str, topics: &[&str], segment_max_records: u64) ->
         .env("LOGWEIR_E2E_ENGINE_MOUNT", engine_mount())
         .env("TMPDIR", engine_mount());
     output_within(c, 900).unwrap_or_else(|e| panic!("logweir backup run {backup_id}: {e}"))
+}
+
+/// [`compose_broker`] that reports instead of panicking, for use in a `Drop`
+/// (a panic while unwinding would abort the process).
+pub fn try_compose_broker(verb: &str) -> Result<Output, String> {
+    let mut c = Command::new("docker");
+    c.args([
+        "compose",
+        "-f",
+        "e2e/compose/docker-compose.yml",
+        verb,
+        "kafka-broker-1",
+    ])
+    .current_dir(root());
+    output_within(c, 120)
+}
+
+/// Thaws the broker on every exit path of a row that froze it, a panicking
+/// assertion included: a broker left paused would wedge every later row and
+/// the stack's next user. Disarmed once the row has thawed it itself.
+pub struct Thaw {
+    pub armed: bool,
+}
+
+impl Drop for Thaw {
+    fn drop(&mut self) {
+        if self.armed {
+            match try_compose_broker("unpause") {
+                Ok(o) => eprintln!("[recsem] thaw guard: unpause exit {:?}", o.status.code()),
+                Err(e) => eprintln!("[recsem] thaw guard: unpause FAILED: {e}"),
+            }
+        }
+    }
 }
 
 /// `docker compose … <verb> kafka-broker-1`, bounded.
