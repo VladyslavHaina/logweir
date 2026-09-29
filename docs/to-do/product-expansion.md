@@ -95,6 +95,7 @@ The loop never decides these. A row gated on an open decision stays Blocked; the
 | OD-3 | Engine route per capability (proposed by PROD-00.1) | Upstream PR (bug-class fixes only); maintained MIT fork built from the vendored source (supersedes or scopes ruling GR6); Logweir-native path; declared unsupported | Build from source regardless (arm64, CVE patching, signed provenance); upstream PRs for bug-class fixes; native paths for offsets, ACLs and verification; fork only what upstream refuses | 00.2, 00.3, 02.3, 07.3, 11.2 | Open; the options come from PROD-00.1 (in progress) |
 | OD-4 | Provider and storage evidence | Accounts and budget for AWS (S3, MSK), Confluent Cloud, Redpanda Cloud, Aiven, Azure Event Hubs, GCS and Azure Blob; whether rule 6 lets a local runner reach remote endpoints | AWS S3 and MSK first (largest managed population; real conditional create and lock readback strengthen the evidence), then Confluent Cloud after PROD-01.3 | Provider rows in 01.2 and 09.2 | Open; asked 2026-09-28 |
 | OD-5 | Business and legal | Trademark clearance or rename (`TRADEMARKS.md` gates announcing); monetization before external contributions (no CLA, so relicensing closes after the first outside PR); a legal opinion on copyright in AI-assisted code for the chosen model; a contracting entity for regulated buyers | Decide monetization and the name before any public positioning | Publishing 14.3 outputs, public roadmap, outreach beyond NDA | Open; asked 2026-09-28 |
+| OD-6 | A scoped `unsafe` policy for librdkafka calls the safe rdkafka API lacks (PROD-01.4's TI-OC1; it also covers PROD-04.0's group, offset and ACL calls, so `unsafe` is decided once) | (a2) one FFI crate for every such call, with `logweir-kafka` and every product crate keeping `forbid(unsafe_code)`; (a1) a private module in `logweir-kafka` (`deny` plus one `allow`); (b) wait for upstream rust-rdkafka (PR #721, stalled since 2024-09); (c) the engine route (PROD-00.3, and Amendment D for offsets); (d) a raw-protocol client; (e) no `unsafe`: the heuristic only, and PROD-04.0 limited to the safe consumer API | (a2), with (b) as the per-call exit and the PROD-01.4 heuristic as the fallback for `null` IDs and truncation (`decisions/PROD-01.4-topic-identity.md` §6.4) | 01.4a; PROD-04.0's FFI paths | Open; asked 2026-09-29 |
 
 ## Loop contract (Claude Code)
 
@@ -135,14 +136,14 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 | 0 | FX-1 | Parse the engine's consumer-group snapshot | P1 | M1 | fix | — | — | compose | A | Proposed |
 | 0 | FX-2 | Apply or refuse `runnerResources` | P1 | M1 | fix | — | — | k8s | A | Proposed |
 | 0 | FX-3 | Stop labelling new-topic deviations "intended" | P1 | M1 | fix | — | — | compose | A | Proposed |
-| 0 | FX-4 | Record topic-configuration capture coverage | P1 | M1 | fix | — | — | compose | A | Proposed |
+| 0 | FX-4 | Record topic-configuration capture coverage | P1 | M1 | fix | — | — | compose | A | In progress |
 | 0 | FX-5 | Console replication factor from the source | P1 | M1 | fix | — | — | k8s | B | Proposed |
 | 0 | FX-6 | Disclose transaction and timestamp semantics | P1 | M1 | docs | — | — | none | B | Proposed |
 | 0 | FX-7 | Keep earlier points valid after a manifest rewrite | P1 | M1 | fix | — | — | compose | A | Proposed |
 | 0 | FX-8 | Refuse or label point-in-time selection over `LogAppendTime` sources | P1 | M1 | fix | 01.1; FX-4 for the broker-default arm | — | compose | A | Proposed |
 | 0 | PROD-00.1 | Evaluate the engine; decide a route per capability | P1 | M1 | research | — | — | compose | B | In progress |
 | 0 | PROD-01.1 | Prove record and transaction behaviour | P1 | M2 | research | — | — | compose | B | Done |
-| 0 | PROD-01.4 | Define topic identity and generations | P1 | M2 | research | — | — | none | B | In progress |
+| 0 | PROD-01.4 | Define topic identity and generations | P1 | M2 | research | — | — | none | B | Done |
 | 0 | PROD-01.5 | Shared fixture profiles and broker versions | P1 | M1 | infra | — | — | compose | B | In progress |
 | 0 | PROD-04.0 | Decide the Kafka administrative path | P1 | M2 | research | — | — | compose | B | In progress |
 | 0 | PROD-08.4 | Publish a control-evidence mapping | P1 | M2 | docs | — | — | none | B | Proposed |
@@ -160,6 +161,8 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 | 1 | PROD-09.3 | Decide archive data protection | P2 | M3 | research | 00.1 | — | none | B | Proposed |
 | 1 | PROD-01.1a | Detect transactional archives; refuse by default, label an approved override | P1 | M2 | impl | 01.1, FX-6 | — | compose | A | Proposed |
 | 1 | PROD-01.1b | Make recovery-point selection safe for out-of-order timestamps | P1 | M2 | impl | 01.1 | — | compose | A | Proposed |
+| 1 | PROD-01.4a | Topic IDs through DescribeTopics (the first wrapper under OD-6's policy) | P1 | M2 | impl | 01.4 | OD-6 | compose | A | Proposed |
+| 3 | PROD-01.4b | Upstream DescribeTopics in rust-rdkafka (the exit for 01.4a) | P3 | M3 | impl | 01.4a | — | none | B | Proposed |
 | 2 | PROD-02.2 | Capture incrementally | P1 | M2 | impl | 02.1, 00.1 | — | compose | A | Proposed |
 | 2 | PROD-03.0 | Flag schema-dependent topics | P1 | M2 | impl | — | — | compose | A | Proposed |
 | 2 | PROD-04.2 | Translate positions; reviewed cutover | P1 | M2 | impl | 04.1, 08.1 | — | k8s | A | Proposed |
@@ -347,6 +350,26 @@ PLAT prerequisites that must be Done before a task ships. Research and contract 
 - **Acceptance:** A decision record with the field, its absent-value behaviour, the detection rule with known false positives and negatives, and numbered acceptance rows for PROD-02.1, 04.1, 04.2, 07.1, 11.1 and 15.1.
 - **Tests/evidence:** Recreate a topic between runs; delete records; compaction; the heuristic's outcome on each.
 - **Dependencies:** None. **Handoff:** `decisions/PROD-01.4-topic-identity.md`.
+
+**Completion record — Done (2026-09-29), PROD-01.4.**
+- **Ownership:** worker `prod-01-4` (one run and one fix round), independent Tier-B review `claude/prod-01-4.review.md`. The review was ACCEPT-WITH-FIXES with 1 HIGH, 6 MEDIUM and 9 LOW; the HIGH re-check gave ACCEPT. Merged as `ac76cd0d` (branch tip `e6045f46`); the full `scripts/ci-check.sh` passed with rc 0 on `ac76cd0d`.
+- **Decision record:** [`decisions/PROD-01.4-topic-identity.md`](decisions/PROD-01.4-topic-identity.md).
+  - **Identity:** the identity of recoverable history is (source cluster ID, topic name, generation). A break is any pair of observations that cannot belong to one continuous history.
+  - **Field:** a nullable `topic_id` (Kafka's URL-safe text form, built from the UUID's two 64-bit halves) in receipt 1.1.0, catalog point 1.1.0 and the API. It is captured before and after the engine (`topic_id`, `topic_id_after`), with arms for both verifiers and the parity script. `null` means unknown, never "same", and every existing archive reads unknown.
+  - **Heuristic usable now:** five verdicts (`continuous`, `unverified`, `suspected`, `break`, `unknown`). It compares partition counts, READ_UNCOMMITTED log start and end, and the predecessor's archived tail against the same offsets in the current capture's own archive, never against a live read.
+- **Evidence:** 19 live rows with broker topic-ID ground truth, identical on Kafka 3.7.1 and 4.3.1.
+  - **8 recreations:** the heuristic detects 6 (5 `break`, 1 `suspected`), with 2 known misses; the ID path detects all 8.
+  - **11 same-topic rows:** no false `break`. There is one known false positive, a `suspected` after partitions were added and every old tail deleted, and the ID path clears it.
+  - **The rejected source-read variant** falsely breaks on `LogAppendTime` and repeated-header rows (c17, c18). That was review H1, fixed at the root; a mutant reverting to a live read fails exactly those rows.
+  - **Oracle:** `e2e/tests/topic_identity.rs`, with 25/25 mutants killed and 52/52 at the reviewer's re-check. There is one address place for PROD-01.5's sweep.
+- **Finding for every ID consumer:** librdkafka's `rd_kafka_Uuid_base64str` uses the standard base64 alphabet, and Kafka uses the URL-safe one. Build the text from the two halves.
+- **Decisions:** each consumer's reaction is in §7, with numbered acceptance rows for PROD-02.1, 04.1, 04.2, 07.1, 11.1 and 15.1 in §8.
+  - **Owner choice:** OD-6, one scoped-`unsafe` policy, presented and not taken.
+  - **Carried to PROD-02.1's brief** (re-check): line ~414 must not let PROD-02.1 read only each archive's last segment, and a fixture must span segments. Four minor items go to the PROD-02.1 and PROD-00.3c/00.3e briefs.
+- **Migration:** none for this row, which is evidence and tests. The receipt and catalog 1.1.0 field ships with PROD-02.1.
+- **Artifacts:** `claude/artifacts/prod-01-4/`.
+- **Limits:** two broker lines; the byte-identical replay miss (§4.7) stays until IDs exist.
+- **Rows added:** PROD-01.4a (gated on OD-6), PROD-01.4b, and OD-6.
 
 ### PROD-01.5 — Shared fixture profiles and supported broker versions
 
