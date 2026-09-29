@@ -3,6 +3,12 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+// Which stack `docker compose` reaches is the environment's (PROD-01.5): this
+// file runs compose directly, so it applies the harness's coherence check.
+#[allow(dead_code)]
+#[path = "harness/stack.rs"]
+mod stack;
+
 /// Cargo runs an integration test with cwd = the owning package root (`e2e/`),
 /// not the repo root, so the compose file is resolved from CARGO_MANIFEST_DIR.
 fn compose_file() -> PathBuf {
@@ -13,6 +19,7 @@ fn compose_file() -> PathBuf {
 /// two buckets exist. No Logweir code is exercised — there is none yet.
 #[test]
 fn the_compose_stack_answers_and_the_buckets_exist() {
+    stack::ensure_coherent();
     let cf = compose_file();
     let cf = cf.to_str().expect("compose path is utf-8");
 

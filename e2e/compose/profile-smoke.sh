@@ -24,13 +24,31 @@ cd "$(dirname "$0")/../.."
 . e2e/compose/stack-lib.sh
 lw_e2e_check_coherent || exit 1
 
+# The client image is the broker's: the pinned KAFKA_IMAGE when
+# `stack-env.sh --kafka` set one, else `apache/kafka:<KAFKA_VERSION>` with
+# `.env`'s pin, exactly as the compose file resolves it.
 KV=${KAFKA_VERSION:-$(sed -n 's/^KAFKA_VERSION=//p' e2e/compose/.env 2>/dev/null)}
 KV=${KV:-3.7.1}
-IMG="apache/kafka:$KV"
+IMG="${KAFKA_IMAGE:-apache/kafka:$KV}"
 NET="${LW_E2E_PROJECT}_kafka-net"
 CERTS="$PWD/.e2e/auth/$LW_E2E_PROJECT"
-port() { local v=$1 d=$2; eval "printf '%s' \"\${$v:-$d}\""; }
+DC="docker compose -f e2e/compose/docker-compose.yml"
 PASSWORD=logweir-e2e-not-a-secret
+
+# Every container and request a check starts is BOUNDED: `timeout` (GNU) or
+# `gtimeout` (Homebrew coreutils) when present, this host's /tmp/lwtimeout
+# otherwise. With none of them the checks run unbounded, and say so once.
+if command -v timeout >/dev/null 2>&1; then BOUND=timeout
+elif command -v gtimeout >/dev/null 2>&1; then BOUND=gtimeout
+elif [ -x /tmp/lwtimeout ]; then BOUND=/tmp/lwtimeout
+else
+  BOUND=""
+  echo "profile-smoke: WARNING: no timeout, gtimeout or /tmp/lwtimeout; the checks run UNBOUNDED" >&2
+fi
+bounded() { # seconds command...
+  local s=$1; shift
+  if [ -n "$BOUND" ]; then "$BOUND" "$s" "$@"; else "$@"; fi
+}
 
 fails=0
 # A nonce per run: every topic, key and subject a check creates carries it,
@@ -42,12 +60,12 @@ fail() { printf 'FAIL  %-44s %s\n' "$1" "$2"; fails=$((fails + 1)); }
 
 # in-network client: innet CMD...   (stdout+stderr captured by the caller)
 innet() {
-  /tmp/lwtimeout 120 docker run --rm --network "$NET" -v "$CERTS:/certs:ro" \
+  bounded 120 docker run --rm --network "$NET" -v "$CERTS:/certs:ro" \
     --entrypoint bash "$IMG" -c "$*" 2>&1
 }
 # host-side client: hostside CMD...
 hostside() {
-  /tmp/lwtimeout 120 docker run --rm --user 0:0 -v "$CERTS:/certs:ro" \
+  bounded 120 docker run --rm --user 0:0 -v "$CERTS:/certs:ro" \
     --entrypoint bash "$IMG" -c '
       gw=$(getent hosts host.docker.internal | cut -d" " -f1 | head -1)
       [ -n "$gw" ] || { echo "no host.docker.internal" >&2; exit 97; }
@@ -59,9 +77,9 @@ FAST="request.timeout.ms=10000\ndefault.api.timeout.ms=15000\nsocket.connection.
 
 smoke_auth() {
   local plain scram mtls
-  plain=$(port LOGWEIR_E2E_AUTH_PLAIN_PORT 9102)
-  scram=$(port LOGWEIR_E2E_AUTH_SCRAM256_PORT 9103)
-  mtls=$(port LOGWEIR_E2E_AUTH_MTLS_PORT 9104)
+  plain=$(lw_e2e_port LOGWEIR_E2E_AUTH_PLAIN_PORT)
+  scram=$(lw_e2e_port LOGWEIR_E2E_AUTH_SCRAM256_PORT)
+  mtls=$(lw_e2e_port LOGWEIR_E2E_AUTH_MTLS_PORT)
   [ -s "$CERTS/ca.pem" ] || { fail auth.certs "no $CERTS/ca.pem — is the auth profile up?"; return; }
   pass auth.certs "$(ls "$CERTS" | tr '\n' ' ')"
   local cfg out
@@ -89,7 +107,7 @@ smoke_auth() {
 
 smoke_cluster3() {
   local out p1
-  p1=$(port LOGWEIR_E2E_C3_1_PORT 9112)
+  p1=$(lw_e2e_port LOGWEIR_E2E_C3_1_PORT)
   out=$(innet "$T/kafka-metadata-quorum.sh --bootstrap-server kafka-c3-1:9094 describe --status")
   if printf '%s' "$out" | grep -q 'CurrentVoters:.*"id": *1.*"id": *2.*"id": *3\|CurrentVoters:.*\[1,2,3\]'; then pass cluster3.quorum "$(printf '%s' "$out" | grep -E 'LeaderId|CurrentVoters' | tr -s ' ' | tr '\n' ' ' | cut -c1-160)"; else fail cluster3.quorum "$(printf '%s' "$out" | tail -3 | tr '\n' ' ')"; fi
   out=$(innet "$T/kafka-topics.sh --bootstrap-server kafka-c3-1:9094 --create --topic $RUN-rf3 --partitions 3 && $T/kafka-topics.sh --bootstrap-server kafka-c3-2:9094 --describe --topic $RUN-rf3")
@@ -108,7 +126,7 @@ smoke_cluster3() {
 
 smoke_cluster2() {
   local out id1 id2 p2
-  p2=$(port LOGWEIR_E2E_CLUSTER2_PORT 9122)
+  p2=$(lw_e2e_port LOGWEIR_E2E_CLUSTER2_PORT)
   id1=$(innet "$T/kafka-cluster.sh cluster-id --bootstrap-server kafka-broker-1:9094" | sed -n 's/^Cluster ID: *//p')
   id2=$(innet "$T/kafka-cluster.sh cluster-id --bootstrap-server kafka-cluster2:9094" | sed -n 's/^Cluster ID: *//p')
   if [ -n "$id1" ] && [ -n "$id2" ] && [ "$id1" != "$id2" ]; then pass cluster2.distinct-cluster-id "kafka-broker-1 $id1, kafka-cluster2 $id2"; else fail cluster2.distinct-cluster-id "ids '$id1' / '$id2'"; fi
@@ -117,15 +135,43 @@ smoke_cluster2() {
 }
 
 smoke_streams() {
-  local out n last2 last1 ghost
-  # A word no earlier run produced, so the counts below are THIS run's.
+  local out n last
+  # A word no earlier run produced, so every count below is THIS run's.
   n="$RUN"
-  out=$(innet "printf '$n alpha\n$n alpha beta\n' | $T/kafka-console-producer.sh --bootstrap-server kafka-broker-1:9094 --topic streams-plaintext-input && $T/kafka-console-consumer.sh --bootstrap-server kafka-broker-1:9094 --topic streams-wordcount-output --from-beginning --timeout-ms 30000 --property print.key=true --property key.separator== --value-deserializer org.apache.kafka.common.serialization.LongDeserializer 2>/dev/null")
-  # The output is a changelog: the LAST value per key is the count.
-  last2=$(printf '%s\n' "$out" | grep "^$n=" | tail -1)
-  last1=$(printf '%s\n' "$out" | grep "^beta=" | tail -1)
-  ghost=$(printf '%s\n' "$out" | grep -c "^${n}x=")
-  if [ "$last2" = "$n=2" ] && [ -n "$last1" ] && [ "$ghost" = 0 ]; then pass streams.wordcount "$last2 (latest), $last1; no count for the never-produced ${n}x"; else fail streams.wordcount "latest '$last2', beta '$last1', ghost $ghost: $(printf '%s' "$out" | tail -3 | tr '\n' ' ')"; fi
+  consume() { # the output topic from the start, waiting up to $1 ms for more
+    innet "$T/kafka-console-consumer.sh --bootstrap-server kafka-broker-1:9094 --topic streams-wordcount-output --from-beginning --timeout-ms $1 --property print.key=true --property key.separator== --value-deserializer org.apache.kafka.common.serialization.LongDeserializer 2>/dev/null"
+  }
+  produce() { # lines...
+    innet "printf '%s\\n' $* | $T/kafka-console-producer.sh --bootstrap-server kafka-broker-1:9094 --topic streams-plaintext-input"
+  }
+  # The output is a changelog: the LAST record per key is the count.
+  latest() { printf '%s\n' "$1" | grep "^$n=" | tail -1; }
+
+  # 1. Two lines through the RUNNING application: exactly 2 — a dead app says
+  #    nothing, one that double-counts says more.
+  produce "'$n alpha'" "'$n beta'" > /dev/null
+  last=$(latest "$(consume 30000)")
+  if [ "$last" = "$n=2" ]; then pass streams.wordcount "$last, exactly the two lines produced"; else fail streams.wordcount "latest '$last', want $n=2"; fi
+
+  # 2. NEGATIVE CONTROL: the application STOPPED, a third line counts NOTHING.
+  #    Were the counts written by anything but the application, the third line
+  #    would still be counted here, and this fails.
+  bounded 120 $DC --profile streams stop streams-wordcount > /dev/null 2>&1
+  produce "'$n gamma'" > /dev/null
+  last=$(latest "$(consume 10000)")
+  if [ "$last" = "$n=2" ]; then pass streams.stopped-app-counts-nothing "a line produced while the app was stopped left the count at $last"; else fail streams.stopped-app-counts-nothing "latest '$last' with the app stopped, want $n=2"; fi
+
+  # 3. Restarted, the application catches up on the line it missed: 3. (An
+  #    app that lost its committed position under auto.offset.reset=latest, or
+  #    never came back, stays at 2.)
+  bounded 120 $DC --profile streams start streams-wordcount > /dev/null 2>&1
+  for _ in $(seq 1 30); do
+    [ "$(bounded 30 $DC --profile streams ps --format '{{.Health}}' streams-wordcount 2>/dev/null)" = healthy ] && break
+    sleep 5
+  done
+  last=$(latest "$(consume 30000)")
+  if [ "$last" = "$n=3" ]; then pass streams.restart-catches-up "after a restart the missed line is counted: $last"; else fail streams.restart-catches-up "latest '$last' after the restart, want $n=3"; fi
+
   out=$(innet "$T/kafka-consumer-groups.sh --bootstrap-server kafka-broker-1:9094 --describe --group logweir-e2e-wordcount --state; $T/kafka-topics.sh --bootstrap-server kafka-broker-1:9094 --list | grep '^logweir-e2e-wordcount-'")
   if printf '%s' "$out" | grep -q -w 'Stable' && printf '%s' "$out" | grep -q 'changelog' && printf '%s' "$out" | grep -q 'repartition'; then pass streams.group-and-state "group Stable; internal topics: $(printf '%s' "$out" | grep '^logweir-e2e-wordcount-' | tr '\n' ' ')"; else fail streams.group-and-state "$(printf '%s' "$out" | tail -3 | tr '\n' ' ')"; fi
 }
@@ -136,14 +182,14 @@ AWSCLI=amazon/aws-cli:2.37.5@sha256:fb7ccfc7b4e3a05017e6c9ded4ba959b99af622130e2
 # both resolve.
 s3() {
   local ep=$1 sk=$2; shift 2
-  /tmp/lwtimeout 60 docker run --rm --network "$NET" -e AWS_ACCESS_KEY_ID=minioadmin -e AWS_SECRET_ACCESS_KEY="$sk" \
+  bounded 60 docker run --rm --network "$NET" -e AWS_ACCESS_KEY_ID=minioadmin -e AWS_SECRET_ACCESS_KEY="$sk" \
     -e AWS_DEFAULT_REGION=us-east-1 -e AWS_EC2_METADATA_DISABLED=true -e AWS_MAX_ATTEMPTS=1 \
     --entrypoint bash "$AWSCLI" -c "printf 'first\\n' > /tmp/a; printf 'second\\n' > /tmp/b; aws --endpoint-url $ep s3api $*" 2>&1
 }
 
 smoke_objectstore() {
   local out in="http://objectstore:8333" host until vid md5
-  host="http://host.docker.internal:$(port LOGWEIR_E2E_OBJSTORE_PORT 9130)"
+  host="http://host.docker.internal:$(lw_e2e_port LOGWEIR_E2E_OBJSTORE_PORT)"
   out=$(s3 "$host" minioadmin list-buckets --query 'Buckets[].Name' --output text)
   if printf '%s' "$out" | grep -q kafka-backups-locked && printf '%s' "$out" | grep -q kafka-backups-2 && printf '%s' "$out" | grep -q logweir-evidence; then pass objectstore.buckets "via the PUBLISHED port ($host): $(printf '%s' "$out" | tr -s '\t\n' ' ')"; else fail objectstore.buckets "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; fi
   out=$(s3 "$in" not-the-secret list-objects-v2 --bucket kafka-backups)
@@ -168,18 +214,18 @@ smoke_objectstore() {
 
 smoke_registry() {
   local out n base id
-  base="http://localhost:$(port LOGWEIR_E2E_REGISTRY_PORT 9141)"
+  base="http://localhost:$(lw_e2e_port LOGWEIR_E2E_REGISTRY_PORT)"
   n="$RUN"
   # Host side, straight at the PUBLISHED port.
-  out=$(/tmp/lwtimeout 30 curl -s -X POST -H 'Content-Type: application/vnd.schemaregistry.v1+json' \
+  out=$(bounded 30 curl -s -X POST -H 'Content-Type: application/vnd.schemaregistry.v1+json' \
     --data '{"schema":"{\"type\":\"record\",\"name\":\"Order\",\"fields\":[{\"name\":\"id\",\"type\":\"int\"}]}"}' \
     "$base/subjects/$n-value/versions" 2>&1)
   id=$(printf '%s' "$out" | sed -n 's/.*"id": *\([0-9]*\).*/\1/p')
   if [ -n "$id" ]; then pass registry.register "$n-value -> schema id $id at $base"; else fail registry.register "$out"; fi
-  out=$(/tmp/lwtimeout 30 curl -s "$base/schemas/ids/$id" 2>&1)
+  out=$(bounded 30 curl -s "$base/schemas/ids/$id" 2>&1)
   if printf '%s' "$out" | grep -q 'Order'; then pass registry.read-by-id "GET /schemas/ids/$id returns the schema"; else fail registry.read-by-id "$out"; fi
   # Negative control: BACKWARD refuses changing id's type.
-  out=$(/tmp/lwtimeout 30 curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/vnd.schemaregistry.v1+json' \
+  out=$(bounded 30 curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/vnd.schemaregistry.v1+json' \
     --data '{"schema":"{\"type\":\"record\",\"name\":\"Order\",\"fields\":[{\"name\":\"id\",\"type\":\"string\"}]}"}' \
     "$base/subjects/$n-value/versions" 2>&1)
   if [ "$out" = 409 ]; then pass registry.incompatible-refused "HTTP 409 for an incompatible second version"; else fail registry.incompatible-refused "HTTP $out"; fi

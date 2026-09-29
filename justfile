@@ -162,8 +162,9 @@ fixtures-sign-bogus:
 # PROD-01.5: WHICH stack is the environment's (`e2e/README.md`). With nothing
 # set it is the default one, exactly as before; after
 # `eval "$(e2e/compose/stack-env.sh --slot N)"` it is slot N's own project and
-# ports, and two slots run at once. The first line REFUSES an environment
-# whose project and ports disagree, because `up` on the DEFAULT project with a
+# ports, and two slots run at once. The first line REFUSES any environment that
+# is not exactly one slot — every port in e2e/compose/stack-lib.sh's one list,
+# the project, cross-slot mixes — because `up` on the DEFAULT project with any
 # moved port would recreate the default stack under whoever is using it. An
 # optional profile in `COMPOSE_PROFILES` comes up in the same `--wait` (each
 # one's setup is a dependency of a long-running service, never a bare
@@ -186,8 +187,9 @@ e2e-up:
 # same reason — `--profile` flags REPLACE `COMPOSE_PROFILES` (measured on
 # compose v5.0.2), so a profile left off this line would outlive `down`.
 # `e2e/tests/stack_params.rs` fails when the compose file declares a profile
-# this line does not name. The check refuses a half-set environment, which
-# would otherwise take down the DEFAULT stack from under its user.
+# this line does not name. The check refuses any incoherent environment (one
+# profile port moved is enough), which would otherwise take down the DEFAULT
+# stack — or another slot — from under its user.
 e2e-down:
     ./e2e/compose/stack-env.sh --check
     docker compose -f e2e/compose/docker-compose.yml --profile setup --profile tools --profile auth --profile cluster3 --profile cluster2 --profile streams --profile objectstore --profile registry down -v --remove-orphans
@@ -248,7 +250,9 @@ e2e:
 # `scripts/demo.sh` seeds with LOGWEIR_SEED_REFRESH_FIXTURES=0, which does
 # everything except the fixture refresh and leaves the tree clean — the
 # quickstart must not hand a stranger two modified tracked files. THIS recipe
-# is the maintainer form and refreshes them on purpose.
+# is the maintainer form and refreshes them on purpose — on the DEFAULT stack
+# only: on a slot (PROD-01.5) it never touches them, and refuses an explicit
+# LOGWEIR_SEED_REFRESH_FIXTURES=1, so parallel slots cannot race on them.
 e2e-seed:
     ./scripts/e2e-seed.sh
 

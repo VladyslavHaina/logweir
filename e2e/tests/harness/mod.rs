@@ -275,6 +275,7 @@ fn read_engine_version() -> String {
 // ---------------------------------------------------------------------------
 
 fn compose(service: &str, entrypoint: &str, args: &[&str]) -> Output {
+    stack::ensure_coherent();
     let mut c = Command::new("docker");
     c.args([
         "compose",
@@ -315,6 +316,7 @@ pub fn kafka_topics(args: &[&str]) -> Output {
 /// The `Output`'s status is handed back untouched so a caller can read the
 /// exit code DIRECTLY (STANDING RULE 20); nothing here pipes it.
 pub fn compose_exec_broker(args: &[&str]) -> Output {
+    stack::ensure_coherent();
     let mut c = Command::new("docker");
     c.args([
         "compose",
@@ -356,6 +358,7 @@ pub fn broker_server_properties() -> String {
 /// `expand_env_vars` gets a value for a `${…}` placeholder inside the
 /// container.
 pub fn compose_engine_innet(envs: &[(&str, &str)], args: &[&str]) -> Output {
+    stack::ensure_coherent();
     let mut c = Command::new("docker");
     c.args([
         "compose",

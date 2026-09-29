@@ -5,56 +5,43 @@
 #   just e2e-up && ./scripts/e2e-seed.sh && just e2e && just e2e-down
 #
 #   --slot N       0 = the default stack (project logweir-e2e, ports 9092,
-#                  9095, 9097, 9000, 9001 — every variable is UNSET, so the
-#                  compose file's own defaults apply). 1..4 = project
-#                  logweir-e2e-sN with every host port moved by N*10000.
-#   --kafka LINE   a broker line (see --lines) or an exact Apache Kafka
-#                  version; exported as KAFKA_VERSION. Omitted: KAFKA_VERSION
-#                  is left alone, so e2e/compose/.env's pin applies.
+#                  9095, 9097, 9000, 9001 — every stack variable is UNSET, so
+#                  the compose file's own defaults apply). 1..4 = project
+#                  logweir-e2e-sN with EVERY host port moved by N*10000.
+#   --kafka LINE   a broker line (see --lines): KAFKA_VERSION and KAFKA_IMAGE
+#                  (the line's image pinned by digest). An exact version X.Y.Z
+#                  exports KAFKA_VERSION only (the image is then by tag).
+#                  Omitted: BOTH are UNSET, so e2e/compose/.env's pin applies —
+#                  a line chosen for one slot never carries over to the next.
 #   --profiles P   comma-separated optional profiles (see --profiles-list),
-#                  exported as COMPOSE_PROFILES. Omitted: none.
-#   --check        exit 1, saying why, when the CURRENT environment's project
-#                  and ports disagree (`just e2e-up` / `e2e-down` run this).
-#   --lines        print the broker lines and their pinned versions.
+#                  exported as COMPOSE_PROFILES. Omitted: UNSET.
+#   --check        exit 1, saying why, unless the CURRENT environment is one
+#                  coherent stack (`just e2e-up` / `e2e-down` run this).
+#   --lines        print the broker lines, their pins and status.
 #   --profiles-list  print the optional profiles and what each provides.
 #
-# Slots never share a project, a host port, a volume or a network, so two
-# slots run at once with no lock. Slot 0 is the stack other people use: hold
-# `claude/compose-lock.sh` for it as before. The guide is e2e/README.md.
+# The variables and their defaults are e2e/compose/stack-lib.sh's ONE list;
+# this script only prints them. Every variable it can export it also unsets
+# when not asked for it, so switching slots never inherits the last one.
+# Slots never share a project, a host port, a cluster id, a volume or a
+# network, so two slots run at once with no lock. Slot 0 is the stack other
+# people use: hold `claude/compose-lock.sh` for it as before. The guide is
+# e2e/README.md.
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=e2e/compose/stack-lib.sh
+. "$here/stack-lib.sh"
 
-# THE PORT TABLE: every published host port of docker-compose.yml, as
-# VARIABLE DEFAULT. `e2e/tests/stack_params.rs` checks it against the compose
-# file's `${VARIABLE:-DEFAULT}` spellings and against e2e/tests/harness/stack.rs.
-PORTS="
-LOGWEIR_E2E_KAFKA_PORT 9092
-LOGWEIR_E2E_K8S_PORT 9095
-LOGWEIR_E2E_SASL_PORT 9097
-LOGWEIR_E2E_S3_PORT 9000
-LOGWEIR_E2E_S3_CONSOLE_PORT 9001
-LOGWEIR_E2E_AUTH_PLAIN_PORT 9102
-LOGWEIR_E2E_AUTH_SCRAM256_PORT 9103
-LOGWEIR_E2E_AUTH_MTLS_PORT 9104
-LOGWEIR_E2E_C3_1_PORT 9112
-LOGWEIR_E2E_C3_2_PORT 9113
-LOGWEIR_E2E_C3_3_PORT 9114
-LOGWEIR_E2E_CLUSTER2_PORT 9122
-LOGWEIR_E2E_OBJSTORE_PORT 9130
-LOGWEIR_E2E_REGISTRY_PORT 9141
-"
-STRIDE=10000
-MAX_SLOT=4
-
-# THE BROKER LINES: LINE PINNED-VERSION STATUS. The pins are the newest patch
-# of each line on Docker Hub's apache/kafka on 2026-09-28; the support matrix
-# (docs/support-matrix.md, "Broker versions") records what each one proved.
+# THE BROKER LINES: LINE PINNED-VERSION IMAGE-DIGEST STATUS. The newest patch
+# of each line on Docker Hub's apache/kafka on 2026-09-28, pinned by the index
+# digest measured then; docs/support-matrix.md, "Broker versions", records
+# what each one proved (and stack_params.rs checks the two agree).
 LINES="
-3.7 3.7.1 legacy
-3.9 3.9.2 supported
-4.1 4.1.2 supported
-4.3 4.3.1 supported
+3.7 3.7.1 sha256:ed74d7d115968d5e8b00ba6822ac6a384cbaaf54ca38991828647000d7089b68 legacy
+3.9 3.9.2 sha256:05b4616e0702ef2729327705d54ad6b50ea70b271c4b730fabd2320789fb7b02 supported
+4.1 4.1.2 sha256:5cc2a2fd93fa2687b44015eee04fb2c3edd9e526bd64bf8bec5ff1e268772e0e supported
+4.3 4.3.1 sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837 supported
 "
 
 # THE OPTIONAL PROFILES: NAME DESCRIPTION. `setup` and `tools` are internal
@@ -79,15 +66,13 @@ while [ $# -gt 0 ]; do
     --check) mode=check; shift ;;
     --lines) mode=lines; shift ;;
     --profiles-list) mode=profiles; shift ;;
-    -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,29p' "$0"; exit 0 ;;
     *) die "unknown argument: $1 (see --help)" ;;
   esac
 done
 
 case "$mode" in
   check)
-    # shellcheck source=e2e/compose/stack-lib.sh
-    . "$here/stack-lib.sh"
     lw_e2e_check_coherent || exit 1
     echo "e2e stack: project $LW_E2E_PROJECT, bootstrap $LW_E2E_BOOTSTRAP, S3 $LW_E2E_S3_ENDPOINT (coherent)"
     exit 0 ;;
@@ -98,13 +83,15 @@ esac
 # EVERYTHING IS VALIDATED BEFORE ANYTHING IS PRINTED: `eval "$(...)"` runs
 # whatever reached stdout even when this script fails, so a half-printed set
 # (a slot's ports without its project, say) must never exist.
-case "$slot" in ''|*[!0-9]*) die "--slot takes 0..$MAX_SLOT, not '$slot'" ;; esac
-[ "$slot" -le "$MAX_SLOT" ] || die "--slot takes 0..$MAX_SLOT, not $slot (slot 5 would reach macOS's ephemeral ports)"
+case "$slot" in ''|*[!0-9]*) die "--slot takes 0..$LW_E2E_MAX_SLOT, not '$slot'" ;; esac
+[ "$slot" -le "$LW_E2E_MAX_SLOT" ] || die "--slot takes 0..$LW_E2E_MAX_SLOT, not $slot (slot 5 would reach macOS's ephemeral ports)"
 
-version=""
+version="" image=""
 if [ -n "$kafka" ]; then
   version=$(printf '%s\n' "$LINES" | awk -v l="$kafka" '$1 == l { print $2 }')
-  if [ -z "$version" ]; then
+  if [ -n "$version" ]; then
+    image="apache/kafka:$version@$(printf '%s\n' "$LINES" | awk -v l="$kafka" '$1 == l { print $3 }')"
+  else
     case "$kafka" in
       [0-9]*.[0-9]*.[0-9]*) version=$kafka ;;
       *) die "--kafka takes a line ($(printf '%s\n' "$LINES" | awk 'NF{printf "%s ", $1}')) or an exact version X.Y.Z, not '$kafka'" ;;
@@ -122,23 +109,27 @@ fi
 out=""
 if [ "$slot" -eq 0 ]; then
   out="unset COMPOSE_PROJECT_NAME"
-  while read -r var def; do
+  while read -r var def prof; do
     if [ -n "$var" ]; then out="$out
 unset $var"; fi
   done <<EOF_PORTS
-$PORTS
+$(lw_e2e_ports)
 EOF_PORTS
 else
-  out="export COMPOSE_PROJECT_NAME=logweir-e2e-s$slot"
-  while read -r var def; do
+  out="export COMPOSE_PROJECT_NAME=$LW_E2E_DEFAULT_PROJECT-s$slot"
+  while read -r var def prof; do
     if [ -n "$var" ]; then out="$out
-export $var=$((def + STRIDE * slot))"; fi
+export $var=$((def + LW_E2E_STRIDE * slot))"; fi
   done <<EOF_PORTS
-$PORTS
+$(lw_e2e_ports)
 EOF_PORTS
 fi
 if [ -n "$version" ]; then out="$out
-export KAFKA_VERSION=$version"; fi
+export KAFKA_VERSION=$version"; else out="$out
+unset KAFKA_VERSION"; fi
+if [ -n "$image" ]; then out="$out
+export KAFKA_IMAGE=$image"; else out="$out
+unset KAFKA_IMAGE"; fi
 if [ -n "$profiles" ]; then out="$out
 export COMPOSE_PROFILES=$profiles"; else out="$out
 unset COMPOSE_PROFILES"; fi

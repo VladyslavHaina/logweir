@@ -848,7 +848,7 @@ fn the_k8s_advertised_host_is_a_parameter() {
         // addresses (PROD-01.5): the slot's own variables would move the three
         // host-facing ports, which `stack_params.rs` tests separately.
         for c in [&mut quiet, &mut full] {
-            for v in stack::CORE_PORTS {
+            for v in stack::all_ports() {
                 c.env_remove(v.var);
             }
             c.env_remove(stack::PROJECT_VAR);
@@ -879,7 +879,7 @@ fn the_k8s_advertised_host_is_a_parameter() {
 
     // The file's DEFAULT ports, from the one registry `stack_params.rs` checks
     // the compose file against (PROD-01.5) — 9095, 9092 and 9097.
-    let k8s_default = stack::K8S_PORT.default;
+    let k8s_default = stack::default_of(stack::K8S_PORT);
     let (rc, line) = render(None);
     assert_eq!(rc, Some(0), "`docker compose config -q` failed: {line}");
     assert!(
@@ -903,9 +903,15 @@ fn the_k8s_advertised_host_is_a_parameter() {
     // this render leaves them at their defaults).
     for fixed in [
         "PLAINTEXT://kafka-broker-1:9094".to_string(),
-        format!("EXTERNAL://localhost:{}", stack::KAFKA_PORT.default),
+        format!(
+            "EXTERNAL://localhost:{}",
+            stack::default_of(stack::KAFKA_PORT)
+        ),
         "SASL://kafka-broker-1:9096".to_string(),
-        format!("SASLEXT://localhost:{}", stack::SASL_PORT.default),
+        format!(
+            "SASLEXT://localhost:{}",
+            stack::default_of(stack::SASL_PORT)
+        ),
     ] {
         assert!(
             line.contains(&fixed),
@@ -934,14 +940,15 @@ fn a_pod_reachable_listener_is_published() {
     // `nc -z localhost 9095` as a TCP connect, so the assertion is on a
     // syscall rather than on a tool this repository does not pin. The port is
     // this stack's published K8S port (9095 on the default stack, PROD-01.5).
-    let k8s_port = stack::port(&stack::K8S_PORT);
+    let k8s_port = stack::port(stack::K8S_PORT);
     let sock: std::net::SocketAddr = format!("127.0.0.1:{k8s_port}").parse().unwrap();
     let conn = std::net::TcpStream::connect_timeout(&sock, std::time::Duration::from_secs(5));
     assert!(
         conn.is_ok(),
         "nothing answers on localhost:{k8s_port} ({:?}) — the K8S listener is not published; \
-         `ports:` must carry \"${{LOGWEIR_E2E_K8S_PORT:-9095}}:9095\"",
-        conn.err()
+         `ports:` must carry the {} parameter",
+        conn.err(),
+        stack::K8S_PORT
     );
 
     // The advertised name, read from the broker's metadata by a client ON
@@ -962,6 +969,7 @@ fn a_pod_reachable_listener_is_published() {
 /// endpoint — which is the string this file needs and the one a pod will be
 /// handed.
 fn metadata_from_kafka_net() -> String {
+    stack::ensure_coherent();
     let mut c = Command::new("docker");
     c.args([
         "compose",

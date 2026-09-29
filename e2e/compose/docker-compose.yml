@@ -21,10 +21,19 @@
 # Container-side ports never change; only the host side and the host-facing
 # advertised names move. `e2e/compose/stack-env.sh --slot N` prints one
 # coherent set (slot N adds N*10000 to every default port), and the optional
-# profiles below (`COMPOSE_PROFILES`) follow the same rule. Every consumer of
-# the stack reads the SAME variables: `e2e/compose/stack-lib.sh` for the
-# scripts, `e2e/tests/harness/stack.rs` for the Rust harness, and
-# `e2e/tests/stack_params.rs` checks that all three agree with this file.
+# profiles below (`COMPOSE_PROFILES`) follow the same rule. THE list of these
+# variables is `e2e/compose/stack-lib.sh`: the scripts source it, the Rust
+# harness compiles it in (`e2e/tests/harness/stack.rs`), and
+# `e2e/tests/stack_params.rs` checks every `${VAR:-N}` below against it.
+# Two more per-stack inputs, neither changing the default render:
+#   KAFKA_IMAGE    the broker image, pinned by digest by `stack-env.sh
+#                  --kafka LINE`; unset, `apache/kafka:${KAFKA_VERSION}` as
+#                  always (KAFKA_VERSION comes from `.env`)
+#   slots/<project>/<cluster>.env  each Kafka cluster's CLUSTER_ID on that
+#                  stack, so no two stacks share one: kafka-broker-1's on slots
+#                  1..4 only (the default broker keeps the image's id), and the
+#                  auth, cluster3 and cluster2 profiles' on every stack
+#                  (slots/logweir-e2e/ holds the ids they always had)
 # The guide is `e2e/README.md`.
 name: logweir-e2e
 
@@ -36,10 +45,19 @@ volumes:
 
 services:
   kafka-broker-1:
-    image: apache/kafka:${KAFKA_VERSION:-3.7.1}
+    image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-3.7.1}}
     hostname: kafka-broker-1
     restart: always
     networks: [kafka-net]
+    # A SLOT's broker gets its own KRaft cluster id (PROD-01.5): every broker
+    # would otherwise answer the image's default `5L6g3nShT-eMCtK--X86sw`, and
+    # the cluster-id allowlist could not tell one slot's cluster from another's.
+    # There is deliberately NO slots/logweir-e2e/kafka-broker-1.env: for the
+    # default project `required: false` then loads nothing, and the default
+    # stack renders exactly as before.
+    env_file:
+      - path: ./slots/${COMPOSE_PROJECT_NAME:-logweir-e2e}/kafka-broker-1.env
+        required: false
     # THREE published ports, and each one is published for a client that
     # cannot reach the broker any other way (Task 7, spec §10):
     #   9092  EXTERNAL — the host-side harness (`harness::BOOTSTRAP`).
@@ -178,7 +196,7 @@ services:
   # image's own entrypoint is the broker's `run` script, and the argv is a LIST
   # so no shell stands between `kafka-configs.sh` and its exit code.
   scram-setup:
-    image: apache/kafka:${KAFKA_VERSION:-3.7.1}
+    image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-3.7.1}}
     networks: [kafka-net]
     depends_on:
       kafka-broker-1: { condition: service_healthy }
@@ -316,7 +334,7 @@ services:
       - ../../.e2e/auth/${COMPOSE_PROJECT_NAME}:/certs
 
   kafka-auth:
-    image: apache/kafka:${KAFKA_VERSION:-3.7.1}
+    image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-3.7.1}}
     hostname: kafka-auth
     profiles: [auth]
     networks: [kafka-net]
@@ -328,8 +346,13 @@ services:
       - "${LOGWEIR_E2E_AUTH_PLAIN_PORT:-9102}:9102"
       - "${LOGWEIR_E2E_AUTH_SCRAM256_PORT:-9103}:9103"
       - "${LOGWEIR_E2E_AUTH_MTLS_PORT:-9104}:9104"
+    # Its CLUSTER_ID, one per stack (PROD-01.5): never in `environment:`, which
+    # would override the file. REQUIRED, so a project with no ids of its own
+    # fails to start instead of sharing another stack's.
+    env_file:
+      - path: ./slots/${COMPOSE_PROJECT_NAME:-logweir-e2e}/kafka-auth.env
+        required: true
     environment:
-      CLUSTER_ID: OofTYol1VE2Jm3oa8rkrCw
       KAFKA_NODE_ID: 2001
       KAFKA_PROCESS_ROLES: broker,controller
       KAFKA_CONTROLLER_QUORUM_VOTERS: 2001@kafka-auth:9093
@@ -372,7 +395,7 @@ services:
   # PLAINTEXT listener. Long-running with a readiness marker, so `up --wait`
   # waits for the credential and fails if the alter fails.
   kafka-auth-setup:
-    image: apache/kafka:${KAFKA_VERSION:-3.7.1}
+    image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-3.7.1}}
     profiles: [auth]
     networks: [kafka-net]
     depends_on:
@@ -395,16 +418,19 @@ services:
   # --- profile `cluster3`: a three-node KRaft cluster -------------------------
   # Three combined broker+controller nodes, one quorum, replication factor 3 and
   # min.insync.replicas 2 by default: the shape replication-factor, ISR and
-  # leader-movement behaviour needs (FX-5, PROD-10.1). Its own CLUSTER_ID.
+  # leader-movement behaviour needs (FX-5, PROD-10.1). Its own CLUSTER_ID,
+  # one per stack and shared by the three nodes, loaded like kafka-auth's.
   kafka-c3-1:
-    image: apache/kafka:${KAFKA_VERSION:-3.7.1}
+    image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-3.7.1}}
     hostname: kafka-c3-1
     profiles: [cluster3]
     networks: [kafka-net]
     ports:
       - "${LOGWEIR_E2E_C3_1_PORT:-9112}:9092"
+    env_file: &c3-id
+      - path: ./slots/${COMPOSE_PROJECT_NAME:-logweir-e2e}/kafka-c3.env
+        required: true
     environment: &c3-env
-      CLUSTER_ID: 7vacnhubVwqdN1WQ_ERT8g
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-c3-1:9093,2@kafka-c3-2:9093,3@kafka-c3-3:9093
@@ -429,12 +455,13 @@ services:
       start_period: 20s
 
   kafka-c3-2:
-    image: apache/kafka:${KAFKA_VERSION:-3.7.1}
+    image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-3.7.1}}
     hostname: kafka-c3-2
     profiles: [cluster3]
     networks: [kafka-net]
     ports:
       - "${LOGWEIR_E2E_C3_2_PORT:-9113}:9092"
+    env_file: *c3-id
     environment:
       <<: *c3-env
       KAFKA_NODE_ID: 2
@@ -448,12 +475,13 @@ services:
       start_period: 20s
 
   kafka-c3-3:
-    image: apache/kafka:${KAFKA_VERSION:-3.7.1}
+    image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-3.7.1}}
     hostname: kafka-c3-3
     profiles: [cluster3]
     networks: [kafka-net]
     ports:
       - "${LOGWEIR_E2E_C3_3_PORT:-9114}:9092"
+    env_file: *c3-id
     environment:
       <<: *c3-env
       KAFKA_NODE_ID: 3
@@ -467,19 +495,22 @@ services:
       start_period: 20s
 
   # --- profile `cluster2`: a second, independent cluster ----------------------
-  # Its own CLUSTER_ID — the image's default (5L6g3nShT-eMCtK--X86sw) is what
-  # kafka-broker-1 and every slot's broker answer, so without an override the
-  # two clusters would be indistinguishable to the cluster-id allowlist. The
-  # marker topic exists, so the second cluster can be a `scratch` drill target.
+  # Its own CLUSTER_ID, one per stack and loaded like kafka-auth's: the
+  # default kafka-broker-1 answers the image's default (5L6g3nShT-eMCtK--X86sw),
+  # so without an override the two clusters would be indistinguishable to the
+  # cluster-id allowlist. The marker topic exists, so the second cluster can
+  # be a `scratch` drill target.
   kafka-cluster2:
-    image: apache/kafka:${KAFKA_VERSION:-3.7.1}
+    image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-3.7.1}}
     hostname: kafka-cluster2
     profiles: [cluster2]
     networks: [kafka-net]
     ports:
       - "${LOGWEIR_E2E_CLUSTER2_PORT:-9122}:9092"
+    env_file:
+      - path: ./slots/${COMPOSE_PROJECT_NAME:-logweir-e2e}/kafka-cluster2.env
+        required: true
     environment:
-      CLUSTER_ID: R66XfW-OXGqtWwdG7Kc7zg
       KAFKA_NODE_ID: 3001
       KAFKA_PROCESS_ROLES: broker,controller
       KAFKA_CONTROLLER_QUORUM_VOTERS: 3001@kafka-cluster2:9093
@@ -502,7 +533,7 @@ services:
       start_period: 20s
 
   kafka-cluster2-setup:
-    image: apache/kafka:${KAFKA_VERSION:-3.7.1}
+    image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-3.7.1}}
     profiles: [cluster2]
     networks: [kafka-net]
     depends_on:
@@ -528,7 +559,7 @@ services:
   # what PROD-06's application-recovery rows need. Topics are created first
   # because the broker refuses auto-creation.
   streams-topics:
-    image: apache/kafka:${KAFKA_VERSION:-3.7.1}
+    image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-3.7.1}}
     profiles: [streams]
     networks: [kafka-net]
     depends_on:
@@ -543,7 +574,7 @@ services:
         --config cleanup.policy=compact
 
   streams-wordcount:
-    image: apache/kafka:${KAFKA_VERSION:-3.7.1}
+    image: ${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-3.7.1}}
     profiles: [streams]
     networks: [kafka-net]
     depends_on:

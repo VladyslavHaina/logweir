@@ -167,6 +167,14 @@ echo "    rc=$rc  (just lint)"
 # ---------------------------------------------------------------------------
 step "3/12 check-then-take the compose stack, then just e2e-up"
 
+# WHICH compose stack (PROD-01.5): this demo knows only the DEFAULT stack's
+# addresses (its pods dial host.docker.internal:9095 and :9000), so a slot, or
+# a half-set environment, is refused here — before the stack is taken and
+# before the cleanup trap exists.
+# shellcheck source=e2e/compose/stack-lib.sh
+. e2e/compose/stack-lib.sh
+lw_e2e_require_default "scripts/k8s-demo.sh" || die "refusing: this demo addresses the default compose stack only"
+
 set +e
 docker ps --filter "name=logweir-" --format "{{.Names}}" > "$OUT/docker-ps.txt"
 rc=$?
