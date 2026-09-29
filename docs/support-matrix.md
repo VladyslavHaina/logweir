@@ -97,12 +97,33 @@ beforehand ([kubernetes.md §21.5](kubernetes.md)).
 | local filesystem (standalone CLI) | **Supported, measured in process** |
 | `AWS_CONDITIONAL_PUT=disabled`, or an S3-compatible store that ignores `If-None-Match` | **Unsupported** — refused, never silently accepted |
 
-## What the weekly job will add
+## The weekly engine-matrix job
 
-`.github/workflows/engine-matrix.yml` runs the full compose drill against each
-tag in the declared window — the newest four minors plus `v0.19.1` — records one
-of the five outcomes, and opens a PR when this file changes. It also carries the
-deleted-segment positive control described above.
+`.github/workflows/engine-matrix.yml` runs every Monday, and on demand, over a
+declared set of rows: the newest four engine minors (`v0.22.0`, `v0.21.0`,
+`v0.20.0`, `v0.19.2`), `v0.19.1` (the default of `strimzi-backup-operator`
+v0.2.25 and earlier), and the pinned engine once more on the newest supported
+Apache Kafka line (`KAFKA_VERSION`). Each row pins the tag to a digest whose
+revision label is the tag's commit, sets the stack up and runs the suite
+exactly as the CI e2e job does (`just e2e-up`, then
+`cargo test --locked -p e2e --features e2e`), runs the deleted-segment positive
+control, and records one of the outcomes above. A row is green only when it
+records the outcome it declares. Rows below the full-drill floor seed with
+segment digests optional, because those engines write none, and record
+`unsupported(lever-absent)` with what the reduced row and the control observed.
+
+The job renders its rows between the two markers below and changes nothing else
+in this file. It publishes the page as the `support-matrix` artifact and in the
+run summary, and opens a pull request only when the repository variable
+`ENGINE_MATRIX_OPEN_PR` is `true`: GitHub Actions may not create pull requests
+in this repository (checked 2026-09-28).
+
+<!-- engine-matrix:rows:begin -->
+No repaired run has been published here yet. The three scheduled runs before
+the repair (2026-09-14, 2026-09-21 and 2026-09-28) produced no usable row; the
+[engine route decision record](to-do/decisions/PROD-00-engine-route.md) says
+why.
+<!-- engine-matrix:rows:end -->
 
 Filter-based checks use `scripts/run-named-tests.sh`, which resolves test
 names against `--list` and fails if a requested test does not exist. A bare

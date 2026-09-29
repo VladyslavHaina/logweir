@@ -41,6 +41,21 @@ ARCHIVE="local/kafka-backups/drill-demo"
 
 die() { echo "e2e-seed: $*" >&2; exit 1; }
 
+# Segment digests: REQUIRED by default, because the pinned engine writes one for
+# every segment (kafka-backup >=0.21). `optional` exists ONLY for engine-matrix
+# rows below the 0.21.0 full-drill floor, whose engines write none; it relaxes
+# nothing else (scripts/seed-manifest-check.py). Checked here, before any work,
+# and never combined with a fixture refresh: the tracked fixtures must come from
+# an archive whose every segment carries a sha256.
+SEGMENT_SHA256_MODE="${LOGWEIR_SEED_SEGMENT_SHA256:-required}"
+case "$SEGMENT_SHA256_MODE" in
+  required|optional) ;;
+  *) die "LOGWEIR_SEED_SEGMENT_SHA256 must be \`required\` or \`optional\`, not \`${SEGMENT_SHA256_MODE}\`" ;;
+esac
+if [ "$SEGMENT_SHA256_MODE" = optional ] && [ "${LOGWEIR_SEED_REFRESH_FIXTURES:-1}" != 0 ]; then
+  die "LOGWEIR_SEED_SEGMENT_SHA256=optional needs LOGWEIR_SEED_REFRESH_FIXTURES=0: the tracked fixtures must come from a >=0.21 archive, whose every segment carries a sha256"
+fi
+
 # ---------------------------------------------------------------------------
 # 0. The digest must be resolved AND must agree with the one source of truth.
 # ---------------------------------------------------------------------------
@@ -205,30 +220,8 @@ $MC cat "${ARCHIVE}/${SEGMENT_KEY}" 2>/dev/null > "$stage/segment.kbak"
 # empty topics, a truncated download and a manifest with placeholder hashes all
 # fail here; none of them would fail an exit-status check.
 segment_sha=$(shasum -a 256 "$stage/segment.kbak" | cut -d' ' -f1)
-python3 - "$stage/manifest.json" "$broker_records" "$SEGMENT_KEY" "$segment_sha" <<'PY'
-import json, sys
-manifest_path, broker_records = sys.argv[1], int(sys.argv[2])
-segment_key, segment_sha = sys.argv[3], sys.argv[4]
-m = json.load(open(manifest_path))
-segs = [s for t in m["topics"] for p in t["partitions"] for s in p["segments"]]
-if not segs:
-    sys.exit("manifest lists no segments: the archive is empty")
-total = sum(s["record_count"] for s in segs)
-if total != broker_records:
-    sys.exit(f"manifest holds {total} records but the broker holds {broker_records}")
-missing = [s["key"] for s in segs if not s.get("sha256")]
-if missing:
-    sys.exit(f"segments with an empty sha256 (not a v0.21.0 manifest): {missing}")
-recorded = {s["key"]: s["sha256"] for s in segs}
-if segment_key not in recorded:
-    sys.exit(f"copied segment {segment_key} is not listed in the manifest")
-if recorded[segment_key] != segment_sha:
-    sys.exit(f"copied segment sha256 {segment_sha} != manifest's {recorded[segment_key]}")
-print(f"    manifest: {len(m['topics'])} topics, {len(segs)} segments, "
-      f"{total} records, every sha256 present")
-print(f"    segment:  {segment_key}")
-print(f"              sha256 {segment_sha} matches the manifest byte for byte")
-PY
+python3 scripts/seed-manifest-check.py --segment-sha256 "$SEGMENT_SHA256_MODE" \
+  "$stage/manifest.json" "$broker_records" "$SEGMENT_KEY" "$segment_sha"
 
 # A KBAK container, not a JSON blob or an HTML error page. This is NOT a
 # truncation guard: a file cut to 100 bytes still starts with these four
