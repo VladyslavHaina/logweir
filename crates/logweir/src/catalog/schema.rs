@@ -30,8 +30,10 @@ pub fn catalog_point_schema() -> String {
     let mut root = settings
         .into_generator()
         .into_root_schema_for::<CatalogPoint>();
-    root.schema.metadata().id =
-        Some("https://logweir.dev/schemas/logweir-catalog-point-1.1.0.json".to_string());
+    root.schema.metadata().id = Some(format!(
+        "https://logweir.dev/schemas/logweir-catalog-point-{}.json",
+        super::record::FORMAT_VERSION
+    ));
     let mut out = serde_json::to_string_pretty(&root).expect("schema serialises");
     out.push('\n');
     out

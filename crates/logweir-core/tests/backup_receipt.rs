@@ -859,6 +859,26 @@ fn the_1_0_0_arms_are_evaluated_before_the_config_coverage_arms() {
     );
 }
 
+/// **The version pair a renumber must move together.** The receipt this build
+/// WRITES must be one that may carry `config_coverage` (its minor is at least
+/// `CONFIG_COVERAGE_SINCE_MINOR`), or every receipt the backup signs would be
+/// refused by its own arm 6. Should another 1.1.0 field merge first, FX-4
+/// becomes 1.2.0: both constants move, and this keeps them coherent.
+#[test]
+fn the_written_version_defines_config_coverage() {
+    let mut parts = logweir_core::backup_receipt::RECEIPT_FORMAT_VERSION
+        .split('.')
+        .map(|p| p.parse::<u64>().expect("a numeric semver part"));
+    let (major, minor) = (parts.next().unwrap(), parts.next().unwrap());
+    assert_eq!(major, 1);
+    assert!(
+        minor >= logweir_core::backup_receipt::CONFIG_COVERAGE_SINCE_MINOR,
+        "RECEIPT_FORMAT_VERSION {} predates CONFIG_COVERAGE_SINCE_MINOR {}",
+        logweir_core::backup_receipt::RECEIPT_FORMAT_VERSION,
+        logweir_core::backup_receipt::CONFIG_COVERAGE_SINCE_MINOR
+    );
+}
+
 /// **The reader's half of "absent is unknown, never captured"** — the mutant
 /// the FX-4 brief names "an absent field read as `captured`".
 #[test]

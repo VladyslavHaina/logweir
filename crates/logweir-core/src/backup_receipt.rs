@@ -138,7 +138,12 @@ pub struct BackupReceipt {
 /// at least [`CONFIG_COVERAGE_SINCE_MINOR`] (arm 6).
 pub const RECEIPT_FORMAT_VERSION: &str = "1.1.0";
 
-/// The first minor of format 1 that defines `config_coverage`.
+/// The first minor of format 1 that defines `config_coverage`. **A renumber
+/// (for instance to 1.2.0, should another 1.1.0 field merge first) changes
+/// this and [`RECEIPT_FORMAT_VERSION`] together**; arm 6's message and
+/// `docs/verify_scorecard.py`'s `RECEIPT_CONFIG_COVERAGE_SINCE_MINOR` follow
+/// it, and `tests/backup_receipt.rs::the_written_version_defines_config_coverage`
+/// keeps the pair coherent.
 pub const CONFIG_COVERAGE_SINCE_MINOR: u64 = 1;
 
 /// `TopicConfigCoverage::coverage`'s closed set (arm 8), in the order the
@@ -616,7 +621,7 @@ impl BackupReceipt {
             if minor < CONFIG_COVERAGE_SINCE_MINOR {
                 return Err(format!(
                     "config_coverage is present but format_version {:?} predates it: the field \
-                     is defined from 1.1.0",
+                     is defined from 1.{CONFIG_COVERAGE_SINCE_MINOR}.0",
                     self.format_version
                 ));
             }

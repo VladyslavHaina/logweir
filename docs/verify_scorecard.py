@@ -363,6 +363,13 @@ FORMAT_VERSION = "1.1.0"
 # document does not claim.
 SCRIPT_VERSION = "1.15.0"
 
+# The first minor of the BACKUP RECEIPT's format 1 that defines
+# `config_coverage` (arm 6) — `CONFIG_COVERAGE_SINCE_MINOR` in
+# `crates/logweir-core/src/backup_receipt.rs`, which it must equal
+# (`docs/test_verify_scorecard.py::test_the_config_coverage_minor_is_the_rust_readers`).
+# A renumber (for instance to 1.2.0) changes both, and SCRIPT_VERSION.
+RECEIPT_CONFIG_COVERAGE_SINCE_MINOR = 1
+
 # The FIVE payload types Logweir signs. Keep byte-for-byte in step with
 # `crates/logweir-verify/src/lib.rs`'s PAYLOAD_TYPE_SCORECARD,
 # PAYLOAD_TYPE_BACKUP_RECEIPT, PAYLOAD_TYPE_PUT_RECEIPT, PAYLOAD_TYPE_TEARDOWN
@@ -1478,10 +1485,10 @@ def check_backup_receipt_invariants(doc) -> str:
     if coverage is not None:
         # ARM 6. A document declaring 1.0.x cannot carry a 1.1 field. Arm 1 has
         # established the version parses and its major is 1.
-        if parsed[1] < 1:
+        if parsed[1] < RECEIPT_CONFIG_COVERAGE_SINCE_MINOR:
             return (
                 f"config_coverage is present but format_version {_rust_debug_str(version)} "
-                "predates it: the field is defined from 1.1.0"
+                f"predates it: the field is defined from 1.{RECEIPT_CONFIG_COVERAGE_SINCE_MINOR}.0"
             )
         # ARM 7. The covered set is the named set — arm 3's twin.
         covered = list(coverage.keys())

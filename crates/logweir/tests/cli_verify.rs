@@ -13,7 +13,10 @@ fn schema_scorecard_prints_the_schema() {
     // NAME the frozen 1.0.0 file, so `contains("…-1.0.0.json")` stayed true
     // after FX-4 moved the printed schema to 1.1.0.
     assert!(
-        s.contains(r#""$id": "https://logweir.dev/schemas/logweir-drill-scorecard-1.1.0.json""#),
+        s.contains(&format!(
+            r#""$id": "https://logweir.dev/schemas/logweir-drill-scorecard-{}.json""#,
+            logweir_core::FORMAT_VERSION
+        )),
         "{s}"
     );
 }

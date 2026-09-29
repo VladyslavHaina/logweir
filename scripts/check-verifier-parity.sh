@@ -363,13 +363,19 @@ echo "check-verifier-parity: both readers agree, on FULL refusal text, on all $r
 # Every exit code is captured into a variable on its own line, never through a
 # pipe, for the reason the header states.
 CATALOG_PT="application/vnd.logweir.catalog-point+json;version=1.0.0"
+# FX-4: the catalog point format that carries `topics[].config_coverage` —
+# `crates/logweir/src/catalog/record.rs`'s FORMAT_VERSION. A renumber (for
+# instance to 1.2.0) moves that constant, the justfile's
+# `catalog_schema_version` and this line together.
+CATALOG_COVERAGE_VERSION="1.1.0"
 mkdir -p "$tmp/catalog"
-"$PY" - "$FIX" "$tmp/catalog" "$CATALOG_PT" <<'PYEOF'
+"$PY" - "$FIX" "$tmp/catalog" "$CATALOG_PT" "$CATALOG_COVERAGE_VERSION" <<'PYEOF'
 import base64, hashlib, json, pathlib, sys
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
 fix, out, pt = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
+coverage_version = sys.argv[4]
 key = serialization.load_pem_private_key((fix / "signing.pem").read_bytes(), password=None)
 der = key.public_key().public_bytes(
     serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
@@ -432,7 +438,7 @@ tampered[tampered.index(b"nightly")] = ord("N")
 # format-compatibility half of rule 3; its FACTS are the Rust catalog reader's
 # rule-3 cross-check (`reader::cross_check`), not this gate's.
 doc11 = json.loads(json.dumps(doc))
-doc11["format_version"] = "1.1.0"
+doc11["format_version"] = coverage_version
 doc11["topics"][0]["config_coverage"] = {
     "coverage": "captureDenied",
 }
@@ -522,7 +528,7 @@ grep -q "sha256:aaaaaaaa" "$tmp/py.all" \
     || fail "verify_scorecard.py no longer prints the receipt digest that BINDS a catalog
 point; the short point_id is a display key and the digest is the binding (D3 §5.1)"
 
-echo "check-verifier-parity: both readers agree on all four catalog-point documents (1.0.0 and 1.1.0), and both report SIGNATURE-ONLY"
+echo "check-verifier-parity: both readers agree on all four catalog-point documents (1.0.0 and $CATALOG_COVERAGE_VERSION), and both report SIGNATURE-ONLY"
 
 # ---------------------------------------------------------------------------
 # FOURTH LOOP (FX-4): the scorecard at format 1.1.0, and what its exit 0 says
@@ -537,13 +543,18 @@ echo "check-verifier-parity: both readers agree on all four catalog-point docume
 # nothing at all when every topic was assessed. Generated and signed here with
 # the throwaway fixture key, like the catalog loop's documents.
 SC_PT="application/vnd.logweir.drill-scorecard+json;version=1.0.0"
+# The scorecard format that carries `topic_parity.not_assessed` —
+# `logweir_core::FORMAT_VERSION`; a renumber moves both. The case NAMES below
+# keep saying 1.1.0 and are only names.
+SCORECARD_NOT_ASSESSED_VERSION="1.1.0"
 mkdir -p "$tmp/scorecard11"
-"$PY" - "$ROOT" "$tmp/scorecard11" "$SC_PT" <<'PYEOF'
+"$PY" - "$ROOT" "$tmp/scorecard11" "$SC_PT" "$SCORECARD_NOT_ASSESSED_VERSION" <<'PYEOF'
 import base64, hashlib, json, pathlib, sys
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
 root, out, pt = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
+current = sys.argv[4]
 fix = root / "e2e" / "fixtures" / "signed"
 key = serialization.load_pem_private_key((fix / "signing.pem").read_bytes(), password=None)
 der = key.public_key().public_bytes(
@@ -552,8 +563,8 @@ keyid = hashlib.sha256(der).hexdigest()
 base = json.loads((root / "e2e" / "fixtures" / "scorecard-pass.json").read_text())
 cases = {
     "absent-1.0.0": ("1.0.0", None),
-    "not-assessed-1.1.0": ("1.1.0", ["drill-orders: configuration (captureDenied)"]),
-    "all-assessed-1.1.0": ("1.1.0", []),
+    "not-assessed-1.1.0": (current, ["drill-orders: configuration (captureDenied)"]),
+    "all-assessed-1.1.0": (current, []),
 }
 for name, (version, not_assessed) in cases.items():
     doc = json.loads(json.dumps(base))

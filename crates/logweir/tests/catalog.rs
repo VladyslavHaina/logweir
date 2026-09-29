@@ -1527,15 +1527,29 @@ fn the_checked_in_catalog_point_schema_is_the_one_the_type_generates() {
     // The drift arm, IN PROCESS, so the gate holds with no subprocess — the
     // shape `crates/logweir-api/tests/contract.rs` uses for the OpenAPI
     // document. `just schema` is the only sanctioned way to change the file.
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../schemas/logweir-catalog-point-1.1.0.json");
+    // The CURRENT file is named by the writer's constant (FX-4), so a renumber
+    // moves `record::FORMAT_VERSION` and the justfile, not this test.
+    let version = logweir::catalog::record::FORMAT_VERSION;
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+        "../../schemas/logweir-catalog-point-{version}.json"
+    ));
     let checked_in = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("{} is readable: {e}", path.display()));
     assert_eq!(
         checked_in,
         logweir::catalog::schema::catalog_point_schema(),
-        "schemas/logweir-catalog-point-1.1.0.json no longer describes CatalogPoint. Run \
+        "schemas/logweir-catalog-point-{version}.json no longer describes CatalogPoint. Run \
          `just schema` and commit the diff."
+    );
+    let justfile =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../justfile"))
+            .expect("read the justfile");
+    assert!(
+        justfile
+            .lines()
+            .any(|l| l == format!("catalog_schema_version := \"{version}\"")),
+        "the justfile's catalog_schema_version must be record::FORMAT_VERSION ({version}): \
+         `just schema` writes the file that variable names"
     );
     // The major is pinned by a PATTERN as well as by the reader, so a
     // schema-only validator — the one route that does not go through

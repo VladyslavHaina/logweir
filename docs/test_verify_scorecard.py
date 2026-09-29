@@ -1,4 +1,4 @@
-import json, os, pathlib, subprocess, sys, tempfile
+import json, os, pathlib, re, subprocess, sys, tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 FIX = ROOT / "e2e" / "fixtures" / "signed"
@@ -2187,6 +2187,18 @@ def test_script_version_was_bumped_with_the_payload_type_map():
     assert "backup-receipt" in mod.PAYLOAD_TYPES
     assert mod.PAYLOAD_TYPES["backup-receipt"] == BACKUP_RECEIPT_TYPE
     assert mod.PAYLOAD_TYPES["catalog-point"] == CATALOG_POINT_TYPE
+
+
+def test_the_config_coverage_minor_is_the_rust_readers():
+    # Arm 6's minor is ONE number in each reader; a renumber (for instance to
+    # 1.2.0) must move both, and the arm's message is built from it on both
+    # sides, so the corpus and the parity script then compare the new text.
+    mod = _verifier_module()
+    rust = (pathlib.Path(__file__).resolve().parent.parent
+            / "crates/logweir-core/src/backup_receipt.rs").read_text()
+    m = re.search(r"pub const CONFIG_COVERAGE_SINCE_MINOR: u64 = (\d+);", rust)
+    assert m, "backup_receipt.rs no longer declares CONFIG_COVERAGE_SINCE_MINOR"
+    assert mod.RECEIPT_CONFIG_COVERAGE_SINCE_MINOR == int(m.group(1))
 
 
 def test_the_payload_type_resolver_accepts_every_short_name_and_media_type():
