@@ -36,10 +36,33 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 COMPOSE="docker compose -f e2e/compose/docker-compose.yml"
+# WHICH STACK (PROD-01.5): the environment's — the default one when nothing is
+# set, slot N's after `eval "$(e2e/compose/stack-env.sh --slot N)"`. Every
+# address below is in-network (`kafka-broker-1:9094`, `minio:9000`), so only
+# the project moves; an environment whose project and ports disagree is
+# refused, because `run` would start the DEFAULT project's services with a
+# slot's ports.
+# shellcheck source=e2e/compose/stack-lib.sh
+. e2e/compose/stack-lib.sh
+lw_e2e_check_coherent
+
 RECORDS_PER_TOPIC="${RECORDS_PER_TOPIC:-1000}"
 ARCHIVE="local/kafka-backups/drill-demo"
 
 die() { echo "e2e-seed: $*" >&2; exit 1; }
+
+# Whether this run refreshes the two TRACKED fixtures (see "REFRESHING THE
+# TRACKED FIXTURES" below) is decided HERE, before anything touches a stack.
+# On a SLOT it is off by default and an explicit 1 is REFUSED: two slots seeding
+# from one checkout would interleave the two `mv`s at the bottom into a pair
+# taken from DIFFERENT archives, which
+# crates/logweir-engine-oso/tests/kbak.rs rejects. The maintainer refresh runs
+# on the default stack (PROD-01.5, review L2).
+if lw_e2e_is_default; then REFRESH_DEFAULT=1; else REFRESH_DEFAULT=0; fi
+REFRESH_FIXTURES="${LOGWEIR_SEED_REFRESH_FIXTURES:-$REFRESH_DEFAULT}"
+if [ "$REFRESH_FIXTURES" != "0" ] && ! lw_e2e_is_default; then
+  die "LOGWEIR_SEED_REFRESH_FIXTURES=$REFRESH_FIXTURES on $LW_E2E_PROJECT: the tracked fixtures are refreshed from the DEFAULT stack only (two slots would interleave the refresh); seed a slot with LOGWEIR_SEED_REFRESH_FIXTURES=0 or unset"
+fi
 
 # ---------------------------------------------------------------------------
 # 0. The digest must be resolved AND must agree with the one source of truth.
@@ -179,9 +202,9 @@ trap 'rm -rf "$stage"' EXIT
 # and broke the clean-tree precondition the release gate (`just`, addendum A3)
 # depends on.
 #
-# The DEFAULT is still 1, so `just e2e-seed` and the CI job behave exactly as
-# they did: refreshing those fixtures is a deliberate maintainer action.
-REFRESH_FIXTURES="${LOGWEIR_SEED_REFRESH_FIXTURES:-1}"
+# The DEFAULT is still 1 on the default stack, so `just e2e-seed` and the CI
+# job behave exactly as they did: refreshing those fixtures is a deliberate
+# maintainer action. On a slot it is 0 (decided, with the refusal, at the top).
 FIXTURE_MANIFEST=e2e/fixtures/manifests/0.21.json
 FIXTURE_SEGMENT=e2e/fixtures/segments/upstream-0.21.0.kbak
 # Recorded unconditionally, because the no-refresh path ASSERTS them at the end
@@ -256,7 +279,8 @@ head -c 4 "$stage/segment.kbak" | grep -q '^KBAK' \
 # publishing one without the other is the inconsistent pair this ordering
 # exists to prevent.
 if [ "$REFRESH_FIXTURES" = "0" ]; then
-  echo "==> seeded. Tracked fixtures NOT refreshed (LOGWEIR_SEED_REFRESH_FIXTURES=0)."
+  if lw_e2e_is_default; then why="LOGWEIR_SEED_REFRESH_FIXTURES=0"; else why="$LW_E2E_PROJECT is a slot: they are refreshed from the default stack only"; fi
+  echo "==> seeded. Tracked fixtures NOT refreshed ($why)."
   echo "    The archive is live in MinIO, which is all a drill needs; the freshly"
   echo "    downloaded copies stay in the scratch directory and are discarded."
   # ASSERTED, not assumed: the whole point of this mode is that a quickstart

@@ -28,6 +28,18 @@ cd "$(dirname "$0")/.."
 
 COMPOSE="docker compose -f e2e/compose/docker-compose.yml"
 
+# WHICH STACK (PROD-01.5). With no stack variable set this is the default
+# stack and everything below is exactly what it always was: `.demo/`, the
+# example's `localhost:9092` and `http://localhost:9000`. After
+# `eval "$(e2e/compose/stack-env.sh --slot N)"` it is slot N's project, its
+# ports and `.demo/<project>/`, so two demos run at once. An environment whose
+# project and ports disagree is refused before anything starts.
+# shellcheck source=e2e/compose/stack-lib.sh
+. e2e/compose/stack-lib.sh
+lw_e2e_check_coherent
+DEMO=$(lw_e2e_scratch .demo)
+export LOGWEIR_DEMO_DIR="$DEMO"
+
 # `jq` is no longer here: the only step that used it was the approval, which
 # is now `logweir drill approve`. A prerequisite check that demands a tool
 # nothing runs is the same shape as a check that reports ok having run
@@ -87,11 +99,11 @@ echo "==> 3/6 producing records and taking a backup with the pinned engine"
 LOGWEIR_SEED_REFRESH_FIXTURES=0 ./scripts/e2e-seed.sh
 
 echo "==> 4/6 minting a signing key and an APPROVER key (two different keys)"
-mkdir -p .demo
-openssl ecparam -genkey -name prime256v1 -noout | openssl pkcs8 -topk8 -nocrypt -out .demo/signer.pem
-openssl ec -in .demo/signer.pem   -pubout -out .demo/signer.pub.pem
-openssl ecparam -genkey -name prime256v1 -noout | openssl pkcs8 -topk8 -nocrypt -out .demo/approver.pem
-openssl ec -in .demo/approver.pem -pubout -out .demo/approver.pub.pem
+mkdir -p "$DEMO"
+openssl ecparam -genkey -name prime256v1 -noout | openssl pkcs8 -topk8 -nocrypt -out "$DEMO/signer.pem"
+openssl ec -in "$DEMO/signer.pem"   -pubout -out "$DEMO/signer.pub.pem"
+openssl ecparam -genkey -name prime256v1 -noout | openssl pkcs8 -topk8 -nocrypt -out "$DEMO/approver.pem"
+openssl ec -in "$DEMO/approver.pem" -pubout -out "$DEMO/approver.pub.pem"
 
 # The allowlist is DERIVED from the running broker, never hand-written: an
 # allowlist that does not name this cluster makes phase 0 refuse with exit 3,
@@ -100,7 +112,7 @@ CLUSTER_ID=$($COMPOSE run --rm -T --entrypoint kafka-cluster -e KAFKA_OPTS= topi
   cluster-id --bootstrap-server kafka-broker-1:9094 | awk -F': *' '/Cluster ID/{print $2}' | tr -d '\r')
 [ -n "$CLUSTER_ID" ] || { echo "demo: could not read the broker's cluster id" >&2; exit 1; }
 printf '{"allowed_cluster_ids":["%s"],"source_cluster_id":null}\n' "$CLUSTER_ID" \
-  > .demo/allowed-clusters.json
+  > "$DEMO/allowed-clusters.json"
 echo "    target cluster: $CLUSTER_ID"
 
 # The engine ROUTE is probed, never assumed. Upstream publishes
@@ -113,7 +125,7 @@ echo "    target cluster: $CLUSTER_ID"
 #
 # The choice is PRINTED. A demo that quietly swapped its engine would be
 # showing you a result about something other than what it claims to run.
-export LOGWEIR_E2E_ENGINE_MOUNT="$PWD/.demo/tmp"
+export LOGWEIR_E2E_ENGINE_MOUNT="$PWD/$DEMO/tmp"
 mkdir -p "$LOGWEIR_E2E_ENGINE_MOUNT"
 if .engine/kafka-backup --version >/dev/null 2>&1; then
   export LOGWEIR_ENGINE_BIN="$PWD/.engine/kafka-backup"
@@ -140,43 +152,47 @@ echo "    engine: $LOGWEIR_ENGINE_VERSION $LOGWEIR_ENGINE_DIGEST"
 # just ran the seed. So the demo rebinds the window to the last 24 hours, which
 # is where step 3 just put the records, and prints what it bound. This mirrors
 # what `e2e/tests/harness/mod.rs::spec_example_with_only_the_window_bound` does
-# for the e2e suite; it is the ONE field the demo overrides.
+# for the e2e suite; it is the ONE field the demo overrides. (`lw_e2e_rebind`
+# also points the example's host-side addresses at this stack's ports; on the
+# default stack it rewrites nothing.)
 WINDOW_END=$("$PYTHON" -c 'import datetime;print(datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))')
 WINDOW_START=$("$PYTHON" -c 'import datetime;print((datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"))')
 sed -e "s|^\( *window_start:\).*|\1 \"$WINDOW_START\"|" \
     -e "s|^\( *window_end:\).*|\1   \"$WINDOW_END\"|" \
-    examples/drill.yaml > .demo/drill.yaml
-grep -q "$WINDOW_START" .demo/drill.yaml && grep -q "$WINDOW_END" .demo/drill.yaml || {
-  echo "demo: failed to bind the sample window into .demo/drill.yaml" >&2; exit 1; }
+    examples/drill.yaml | lw_e2e_rebind > "$DEMO/drill.yaml"
+grep -q "$WINDOW_START" "$DEMO/drill.yaml" && grep -q "$WINDOW_END" "$DEMO/drill.yaml" || {
+  echo "demo: failed to bind the sample window into $DEMO/drill.yaml" >&2; exit 1; }
+grep -q "$LW_E2E_BOOTSTRAP" "$DEMO/drill.yaml" && grep -q "$LW_E2E_S3_ENDPOINT" "$DEMO/drill.yaml" || {
+  echo "demo: failed to bind this stack's addresses into $DEMO/drill.yaml" >&2; exit 1; }
 echo "    sample window: $WINDOW_START .. $WINDOW_END  (the only field the demo overrides)"
 
 cargo run --release -p logweir -- doctor \
-  --spec .demo/drill.yaml --allowed-clusters .demo/allowed-clusters.json \
-  --approver-key .demo/approver.pub.pem
+  --spec "$DEMO/drill.yaml" --allowed-clusters "$DEMO/allowed-clusters.json" \
+  --approver-key "$DEMO/approver.pub.pem"
 
 echo "==> 5/6 approving the exact plan, then running the drill"
 # The approval binds to the sha256 of the EXACT spec file `drill run` is given,
-# so it hashes .demo/drill.yaml — the one with the bound window — never
+# so it hashes $DEMO/drill.yaml — the one with the bound window — never
 # examples/drill.yaml. Approving one document and running another is precisely
 # what plan_hash exists to catch, and it would be refused at phase 1 (exit 3).
-./scripts/demo-approve.sh .demo/drill.yaml
+./scripts/demo-approve.sh "$DEMO/drill.yaml"
 cargo run --release -p logweir -- drill run \
-  --spec .demo/drill.yaml \
-  --approval .demo/approval.json --approver-key .demo/approver.pub.pem \
-  --allowed-clusters .demo/allowed-clusters.json \
-  --signing-key .demo/signer.pem \
-  --out .demo/scorecard.json \
-  --metrics-file .demo/logweir.prom \
+  --spec "$DEMO/drill.yaml" \
+  --approval "$DEMO/approval.json" --approver-key "$DEMO/approver.pub.pem" \
+  --allowed-clusters "$DEMO/allowed-clusters.json" \
+  --signing-key "$DEMO/signer.pem" \
+  --out "$DEMO/scorecard.json" \
+  --metrics-file "$DEMO/logweir.prom" \
   --triggered-by "logweir demo"
 
 echo "==> 6/6 showing and verifying the scorecard, twice"
-# --out writes .demo/scorecard.json and its DSSE sidecar beside it as
-# .demo/scorecard.sig (Task 21a's --out + .sig rule).
-cargo run --release -p logweir -- drill show .demo/scorecard.json
+# --out writes $DEMO/scorecard.json and its DSSE sidecar beside it as
+# $DEMO/scorecard.sig (Task 21a's --out + .sig rule).
+cargo run --release -p logweir -- drill show "$DEMO/scorecard.json"
 cargo run --release -p logweir -- drill verify \
-  --scorecard .demo/scorecard.json --signature .demo/scorecard.sig \
-  --public-key .demo/signer.pub.pem
-"$PYTHON" docs/verify_scorecard.py .demo/scorecard.json .demo/scorecard.sig .demo/signer.pub.pem
+  --scorecard "$DEMO/scorecard.json" --signature "$DEMO/scorecard.sig" \
+  --public-key "$DEMO/signer.pub.pem"
+"$PYTHON" docs/verify_scorecard.py "$DEMO/scorecard.json" "$DEMO/scorecard.sig" "$DEMO/signer.pub.pem"
 
 # THE QUICKSTART MUST NOT MODIFY THE REPOSITORY. Everything this script writes
 # goes to `.demo/` or `.engine/`, both gitignored. This checks it rather than
@@ -198,6 +214,6 @@ if git -C . rev-parse --is-inside-work-tree >/dev/null 2>&1; then
 fi
 
 echo
-echo "Done. measured.rto_seconds and measured.rpo_seconds in .demo/scorecard.json are real numbers."
-echo "The Prometheus textfile is at .demo/logweir.prom."
+echo "Done. measured.rto_seconds and measured.rpo_seconds in $DEMO/scorecard.json are real numbers."
+echo "The Prometheus textfile is at $DEMO/logweir.prom."
 echo "Tear the stack down with: just e2e-down"

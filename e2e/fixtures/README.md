@@ -75,6 +75,70 @@ The committed pair is checked instead by the Docker-free default test set, in
 The other segment files (`lz4.kbak`, `none.kbak`, `zstd.kbak`) are
 codec-coverage fixtures.
 
+## `consumer-groups-snapshot*.json` — the engine's own bytes (FX-1)
+
+`consumer-groups-snapshot.json` and `consumer-groups-snapshot-empty.json` are
+the object `<backup_id>/consumer-groups-snapshot.json` exactly as the
+digest-pinned engine wrote it, copied out of the bucket unchanged (the engine
+writes no trailing newline). They replace a hand-authored file whose shape no
+engine writes (`captured_at`, a per-group `state`, `offsets` as a list).
+`consumer-groups-snapshot.committed.json` is the oracle: the broker's own
+account of what the groups had committed.
+
+| File | sha256 | What it is |
+| --- | --- | --- |
+| `consumer-groups-snapshot.json` | `fbc05fcfb607e116e79c3ea82cffec9235be5938250f2b5f604da1f8d574231a` | four groups, ten positions |
+| `consumer-groups-snapshot-empty.json` | `79ee9b577d2d9be42f5f5bc3799af5f1197d6070759d86c58a39bbaf281b0e31` | the snapshot the engine writes when no group has committed |
+| `consumer-groups-snapshot.committed.json` | — | `kafka-consumer-groups --describe --all-groups --offsets`, distilled |
+
+**Engine.** `kafka-backup 0.21.0` (`kafka-backup --version`), image
+`osodevops/kafka-backup@sha256:8ff5be71f92a118cde64c082a86d188a4187d8f8f64311458081b8727e99c317`,
+the pin in `third_party/kafka-backup-binary.digest`. The writer is
+`snapshot_consumer_groups` in `crates/kafka-backup-core/src/backup/engine.rs`
+of `third_party/kafka-backup-v0.21.0.tar.gz` (lines 846-933).
+
+**How they were made** (2026-09-29, on compose slot 1, `logweir-e2e-s1`:
+`apache/kafka:3.7.1` in KRaft mode, the `confluentinc/cp-kafka:7.6.0` tools and
+the MinIO mirror):
+
+1. `just e2e-up` on a fresh stack, then 1000 records into each of `orders` and
+   `payments` with `kafka-console-producer`, as `scripts/e2e-seed.sh` does.
+2. With no consumer group on the cluster, one backup under
+   `backup_id: fx1-empty`. That wrote `consumer-groups-snapshot-empty.json`.
+3. Five groups committed, each a case the snapshot must get right:
+   - `fx1-orders-reader`: a real consumer (`kafka-console-consumer --group
+     fx1-orders-reader --from-beginning --max-messages 300`), committing on
+     close;
+   - `fx1-payments-set`: `kafka-consumer-groups --reset-offsets --execute` to
+     11, 22 and 33 on `payments` partitions 0, 1 and 2;
+   - `fx1-two-topics`: 42 on `orders` 0 and 1, and 9 on `payments` 2;
+   - `fx1-unarchived-only`: 0 on `test-topic` 0 only, a topic the backup does
+     not archive;
+   - `fx1-mixed`: 17 on `orders` 2, and 0 on `test-topic` 1.
+4. One backup under `backup_id: drill-demo`. That wrote
+   `consumer-groups-snapshot.json`. The engine left out `fx1-unarchived-only`
+   and `fx1-mixed`'s `test-topic` position: it keeps only committed offsets
+   `>= 0` on archived topics.
+
+Both backups used `e2e/compose/config/backup-drill.yaml` with one key added,
+`backup.consumer_group_snapshot: true` (the prefix and `backup_id` set as
+named above), and ran as
+`docker run --rm --platform linux/amd64 --network logweir-e2e-s1_kafka-net -e AWS_ACCESS_KEY_ID=minioadmin -e AWS_SECRET_ACCESS_KEY=minioadmin -v <config dir>:/fx1:ro --entrypoint kafka-backup osodevops/kafka-backup@sha256:8ff5be71… backup --config /fx1/<backup_id>.yaml`.
+The bytes were copied with
+`mc cat local/kafka-backups/<prefix>/<backup_id>/consumer-groups-snapshot.json`.
+`kafka-consumer-groups --describe --all-groups --offsets` was read before and
+after step 4, and the two agree.
+
+**Not byte-reproducible.** `snapshot_time` is the wall clock, and the writer
+serialises `HashMap`s, so group and key order change between runs. The tests
+therefore compare parsed values, never bytes:
+`crates/logweir-engine-oso/tests/vendored_parse.rs` checks every position
+against the oracle, and `crates/logweir-engine-oso/tests/engine.rs` reads both
+files through `OsoCliEngine`. `e2e/tests/consumer_group_snapshot.rs` repeats
+the capture live on every e2e run: it commits its own groups, takes the
+snapshot with the pinned engine, compares it with the broker's account, and
+drills the archive.
+
 ## `fake-engine*.sh`, `engine-docker.sh`, `dryrun/`, `drill-*.yaml`
 
 Harness scripts and specs that drive named failure paths — an engine that exits

@@ -78,6 +78,74 @@ phase 2"*. It needs a provisioned cluster, which Global Constraint 17 forbids,
 so it is recorded as **blocked, never as closed** — and the two `tls: true`
 claims above are deliberately about rendered bytes and not about a handshake.
 
+## Broker versions (Apache Kafka)
+
+The engine rows above were run against Apache Kafka **3.7.1**, a line Apache
+no longer supports and MSK stopped supporting on 2026-09-01. Each row below
+names its broker line. All were run on 2026-09-29 against the compose stack's
+single-node KRaft broker, engine 0.21.0 (the pinned digest), plaintext, MinIO,
+each line on its own compose slot (`e2e/compose/stack-env.sh --slot N --kafka
+LINE`, [`e2e/README.md`](../e2e/README.md)). Three paths per line: the demo
+drill (`scripts/demo.sh`), `just pitr` (the G-PITR boundary row) and the
+receipt path (`just mvp-demo`: `logweir backup run`, the receipt verified by
+both readers, a point-in-time `restore run` into new topics, the scorecard
+verified by both readers).
+
+| Broker (Apache Kafka) | Image digest | Engine | Demo drill | `just pitr` | Receipt path | Status |
+|---|---|---|---|---|---|---|
+| **3.7.1** | `sha256:ed74d7d115968d5e8b00ba6822ac6a384cbaaf54ca38991828647000d7089b68` | 0.21.0 | `pass`, VALID ×2 | 1 passed | `pass`, 2000 records, VALID ×2 | **legacy** — still the default fixture (`e2e/compose/.env`) |
+| **3.9.2** | `sha256:05b4616e0702ef2729327705d54ad6b50ea70b271c4b730fabd2320789fb7b02` | 0.21.0 | `pass`, VALID ×2 | 1 passed | `pass`, 2000 records, VALID ×2 | supported line, measured |
+| **4.1.2** | `sha256:5cc2a2fd93fa2687b44015eee04fb2c3edd9e526bd64bf8bec5ff1e268772e0e` | 0.21.0 | `pass`, VALID ×2 | 1 passed | `pass`, 2000 records, VALID ×2 | supported line, measured |
+| **4.3.1** | `sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837` | 0.21.0 | `pass`, VALID ×2 | 1 passed | `pass`, 2000 records, VALID ×2 | supported line, measured |
+
+The digests are the pins: `stack-env.sh --kafka LINE` runs exactly these
+images (`KAFKA_IMAGE`), and a test fails if the two disagree.
+
+No row yet: **4.0.x** and **4.2.x** (supported by Apache, not run), and
+anything with authentication, several brokers or another object store — the
+optional profiles in [`e2e/README.md`](../e2e/README.md) provide those fixtures;
+their rows belong to the tasks that use them.
+
+**The engine does not negotiate protocol versions, and 4.x accepts what it
+sends.** `kafka-backup` 0.21.0 sends every request at a fixed version and never
+sends ApiVersions (`crates/kafka-backup-core/src/kafka/client.rs:588-611` in the
+pinned source tarball; any API not in that table goes out at version 0). Kafka
+4.0 removed old versions (KIP-896). Measured on each line with
+`kafka-broker-api-versions.sh`, every version the engine can send is inside the
+broker's range; 4.x raised the floors below them:
+
+| API | Engine sends | 3.7.1 | 3.9.2 | 4.1.2 | 4.3.1 |
+|---|---|---|---|---|---|
+| Produce | v8 | v0–v10 | v0–v11 | v0–v13 | v0–v13 |
+| Fetch | v11 | v0–v16 | v0–v17 | v4–v18 | v4–v18 |
+| ListOffsets | v5 | v0–v8 | v0–v9 | v1–v10 | v1–v11 |
+| Metadata | v9 | v0–v12 | v0–v12 | v0–v13 | v0–v13 |
+| OffsetCommit | v5 | v0–v9 | v0–v9 | v2–v9 | v2–v10 |
+| OffsetFetch | v5 | v0–v9 | v0–v9 | v1–v9 | v1–v10 |
+| FindCoordinator | v2 | v0–v4 | v0–v6 | v0–v6 | v0–v6 |
+| DescribeGroups | **v0** (the `_ => 0` fallback) | v0–v5 | v0–v5 | v0–v6 | v0–v6 |
+| ListGroups | v2 | v0–v4 | v0–v5 | v0–v5 | v0–v5 |
+| CreateTopics | v5 | v0–v7 | v0–v7 | v2–v7 | v2–v7 |
+| DeleteRecords | v1 | v0–v2 | v0–v2 | v0–v2 | v0–v2 |
+| DescribeConfigs | **v1** (the 4.x floor) | v0–v4 | v0–v4 | v1–v4 | v1–v4 |
+| IncrementalAlterConfigs | v1 | v0–v1 | v0–v1 | v0–v1 | v0–v1 |
+| SaslHandshake / SaslAuthenticate | v1 / v2 | v0–v1 / v0–v2 | same | same | same |
+
+On 4.3.1 the broker's own request log (`kafka.request.logger` at DEBUG) showed
+the engine (client id `kafka-backup`) sending exactly Metadata v9, ListOffsets
+v5, Fetch v11, DescribeConfigs v1 and Produce v8 on both the demo drill and the
+receipt path, all accepted, and no ApiVersions; Logweir's own client negotiated
+(ApiVersions v3, then Fetch v16, Metadata v13) and created the target topics
+itself. The engine's CreateTopics, consumer-group APIs (FindCoordinator,
+OffsetFetch, OffsetCommit, ListGroups, DescribeGroups), DeleteRecords,
+IncrementalAlterConfigs and, on these plaintext runs, SASL requests were never
+sent, so they are in range but unexercised. **The risk is structural:**
+DescribeConfigs already sits on the 4.x floor and DescribeGroups on v0, and a
+future release that raises either floor fails the engine with an unsupported
+version instead of a downgrade. So do the table's DescribeAcls, CreateAcls and
+DeleteAcls entries (v1, the 4.x floor), which 0.21.0 never sends. That route
+(negotiate, or pin higher) belongs to PROD-00.1's capability table.
+
 ## Object stores: conditional create is required
 
 Since RECEIPT-DUP was fixed, `logweir backup run` claims each execution with a

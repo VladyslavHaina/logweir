@@ -1037,6 +1037,56 @@ pub fn print_deprecation_to<W: std::io::Write>(
     }
 }
 
+/// The one `warning:` line for an archive notice, verbatim: the backup set,
+/// what was found, the object and its digest, the reason, and the notice's
+/// kind. A function rather than a `format!` at each call site so the line a
+/// test asserts and the line an operator reads are the same bytes.
+pub fn archive_notice_line(
+    backup_id: &str,
+    notice: &logweir_core::engine::ArchiveNotice,
+) -> String {
+    format!(
+        "warning: backup set {backup_id}: {}: {} ({}): {} [{}]",
+        notice.message, notice.key, notice.sha256, notice.reason, notice.kind
+    )
+}
+
+/// Tells the operator every notice `DataEngine::describe_with_notices`
+/// returned about the backup set this run reads: one WARN event each on the
+/// structured log, carrying the notice's fields (`notice`, `backup_id`, `key`,
+/// `sha256`, `reason`), and one [`archive_notice_line`] each on `w`.
+///
+/// `drill run` / `restore run` and `backup run` pass stderr. Stdout carries
+/// interface I8's keys and the `progress-phase=` / `refusal-reason=` lines a
+/// controller parses, so a human line does not belong there; the WARN event
+/// goes where every log line goes and inherits the run's span, so it carries
+/// the `run_id`.
+///
+/// A notice changes nothing the run does or signs: the run proceeds, and no
+/// scorecard, receipt or catalog field records it. The one kind today is an
+/// unreadable consumer-groups snapshot, which Logweir never reads for a restore
+/// or a backup; it is told here so that it is not silently dropped.
+pub fn surface_archive_notices<W: std::io::Write>(
+    w: &mut W,
+    backup_id: &str,
+    notices: &[logweir_core::engine::ArchiveNotice],
+) {
+    for notice in notices {
+        tracing::warn!(
+            notice = %notice.kind,
+            backup_id = %backup_id,
+            key = %notice.key,
+            sha256 = %notice.sha256,
+            reason = %notice.reason,
+            "{}",
+            notice.message
+        );
+        // A closed stderr is not a reason to fail a run the notice does not
+        // affect; the structured event above has already been emitted.
+        let _ = writeln!(w, "{}", archive_notice_line(backup_id, notice));
+    }
+}
+
 pub fn run(args: RunArgs) -> ExitCode {
     run_named(args, InvokedAs::Restore)
 }
@@ -2660,7 +2710,12 @@ fn execute_with_validated_approval(
     // `Selection::bind_backup_set` needs below — `BackupSetFacts` does not
     // carry a manifest key, so this is the only binding of it the drill has.
     let set = pick_backup_set(c.engine.as_ref(), &c.spec)?;
-    let facts = c.engine.describe(&set)?;
+    // `describe_with_notices`, not `describe`: what the engine found that no
+    // signed field carries — today an unreadable consumer-groups snapshot — is
+    // told to the operator here, before any target is touched, rather than
+    // dropped. It changes nothing this run does or signs.
+    let (facts, notices) = c.engine.describe_with_notices(&set)?;
+    surface_archive_notices(&mut std::io::stderr().lock(), &set.backup_id, &notices);
     sc.source = source_info(&facts);
 
     // 2
