@@ -433,6 +433,15 @@ impl FakeProbe {
         self
     }
 
+    /// FX-4 / T13: the broker configuration read is REFUSED — what
+    /// `KafkaInventory::broker_configs` now returns for the empty answer
+    /// rdkafka 0.36.2 hands back when the principal lacks DescribeConfigs on
+    /// the cluster (`ClusterAuthorizationFailed`), instead of an empty map.
+    fn failing_broker_configs(self, code: CheckCode, message: &str) -> Self {
+        self.state.lock().unwrap().broker_configs_fault = Some((code, message.to_string()));
+        self
+    }
+
     fn failing_listing(self, code: CheckCode, message: &str) -> Self {
         self.state.lock().unwrap().listing_fault = Some((code, message.to_string()));
         self
@@ -3752,6 +3761,38 @@ fn the_timestamp_bound_is_the_execution_guards_arithmetic() {
     assert_eq!(
         run.row(CheckId::TargetTimestampBound).code,
         CheckCode::TimestampBoundExceeded
+    );
+}
+
+/// **FX-4 / T13, consumer 1 — the false-green readiness row.** A principal
+/// without DescribeConfigs on the cluster used to get an EMPTY broker
+/// configuration back (rdkafka 0.36.2 never reads the per-resource error), and
+/// this row read "no bound declared" as READY. The inventory now returns the
+/// refusal; this row must take its `Err` arm and say UNKNOWN.
+///
+/// Negative control: make the row read a refused configuration as an empty
+/// map (`probe.broker_configs().unwrap_or_default()`) and this test fails with
+/// `TimestampWithinBound` — the pre-fix behaviour.
+#[test]
+fn a_refused_broker_configuration_read_is_unknown_never_within_bound() {
+    let yaml = restore_yaml(&ms_to_rfc3339(INSIDE_MS), &["orders"], "scratch");
+    let m = mount(&restore_plan(&yaml, None));
+    let run = drive(
+        &m,
+        &restore_wiring(
+            &yaml,
+            &manifest_json(),
+            FakeProbe::new().failing_broker_configs(
+                CheckCode::ClusterAuthorizationFailed,
+                "DescribeConfigs on broker 1001 answered with no configuration",
+            ),
+        ),
+    );
+    let row = run.row(CheckId::TargetTimestampBound);
+    assert_eq!(
+        (row.state, row.code),
+        (CheckState::Unknown, CheckCode::BrokerConfigsNotReadable),
+        "a refused broker configuration is UNKNOWN, never a green \"no bound declared\": {row:?}"
     );
 }
 

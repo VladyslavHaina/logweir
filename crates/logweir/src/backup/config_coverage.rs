@@ -229,3 +229,312 @@ pub fn log(observations: &BTreeMap<String, Observation>) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use logweir_kafka::reader::{ConsumedRecord, TopicMeta};
+
+    fn entry(name: &str, value: &str, source: ConfigSourceKind) -> ConfigEntryObservation {
+        ConfigEntryObservation {
+            name: name.to_string(),
+            value: Some(value.to_string()),
+            source,
+            read_only: false,
+            sensitive: false,
+        }
+    }
+
+    /// A reader whose DescribeConfigs answer per topic is scripted.
+    struct Scripted(Result<Vec<(String, TopicConfigRead)>, KafkaError>);
+
+    impl ClusterReader for Scripted {
+        fn cluster_id(&self) -> Result<String, KafkaError> {
+            unimplemented!()
+        }
+        fn list_topics(&self) -> Result<Vec<TopicMeta>, KafkaError> {
+            unimplemented!()
+        }
+        fn end_offsets(&self, _t: &str) -> Result<Vec<(i32, i64)>, KafkaError> {
+            unimplemented!()
+        }
+        fn topic_configs(&self, _t: &str) -> Result<BTreeMap<String, String>, KafkaError> {
+            unimplemented!()
+        }
+        fn broker_configs(&self) -> Result<BTreeMap<String, String>, KafkaError> {
+            unimplemented!()
+        }
+        fn consume_range(
+            &self,
+            _t: &str,
+            _p: i32,
+            _f: i64,
+            _m: usize,
+        ) -> Result<Vec<ConsumedRecord>, KafkaError> {
+            unimplemented!()
+        }
+        fn describe_topic_configs(
+            &self,
+            _topics: &[String],
+        ) -> Result<Vec<(String, TopicConfigRead)>, KafkaError> {
+            self.0.clone()
+        }
+    }
+
+    fn names(topics: &[&str]) -> Vec<String> {
+        topics.iter().map(|t| (*t).to_string()).collect()
+    }
+
+    fn manifest(rows: &[(&str, &[(&str, &str)])]) -> BTreeMap<String, BTreeMap<String, String>> {
+        rows.iter()
+            .map(|(topic, cfg)| {
+                (
+                    (*topic).to_string(),
+                    cfg.iter()
+                        .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                        .collect(),
+                )
+            })
+            .collect()
+    }
+
+    /// **The FX-4 defect, and the mutant the brief names first: "coverage
+    /// forced to `captured` on a denied read".** A refused read is
+    /// `captureDenied` whatever the manifest says — including an EMPTY
+    /// manifest record, which is exactly what the engine writes for a denied
+    /// topic and exactly what used to compare as "no overrides".
+    #[test]
+    fn a_denied_read_is_capture_denied_even_beside_an_empty_manifest_record() {
+        let observed = observe(
+            &Scripted(Ok(vec![(
+                "orders".into(),
+                Err(KafkaError::NotAuthorized(
+                    "orders (DescribeConfigs …)".into(),
+                )),
+            )])),
+            &names(&["orders"]),
+        );
+        let coverage = classify(&observed, &manifest(&[("orders", &[])]));
+        assert_eq!(
+            coverage["orders"],
+            TopicConfigCoverage {
+                coverage: "captureDenied".into(),
+                reason: None,
+                timestamp_type: None,
+            }
+        );
+    }
+
+    #[test]
+    fn a_read_the_manifest_agrees_with_is_captured_and_records_the_effective_timestamp_type() {
+        let observed = observe(
+            &Scripted(Ok(vec![(
+                "orders".into(),
+                Ok(vec![
+                    entry(
+                        "retention.ms",
+                        "3600000",
+                        ConfigSourceKind::DynamicTopicConfig,
+                    ),
+                    // A broker default: the engine does not keep it, so the
+                    // manifest cannot hold it either and equality ignores it.
+                    entry("cleanup.policy", "delete", ConfigSourceKind::DefaultConfig),
+                    entry(
+                        TIMESTAMP_TYPE_KEY,
+                        "LogAppendTime",
+                        ConfigSourceKind::DynamicDefaultBrokerConfig,
+                    ),
+                ]),
+            )])),
+            &names(&["orders"]),
+        );
+        let coverage = classify(
+            &observed,
+            &manifest(&[("orders", &[("retention.ms", "3600000")])]),
+        );
+        assert_eq!(
+            coverage["orders"],
+            TopicConfigCoverage {
+                coverage: "captured".into(),
+                reason: None,
+                timestamp_type: Some(EffectiveConfigValue {
+                    value: "LogAppendTime".into(),
+                    source: "dynamicDefaultBrokerConfig".into(),
+                }),
+            },
+            "FX-8's broker-default arm: the value AND its source are recorded"
+        );
+    }
+
+    /// The engine's all-or-nothing capture: one denied topic empties EVERY
+    /// topic's record. A topic Logweir read fine but whose manifest record is
+    /// empty while it has overrides is NOT captured.
+    #[test]
+    fn a_manifest_record_that_disagrees_with_the_read_is_not_captured() {
+        let observed = observe(
+            &Scripted(Ok(vec![
+                (
+                    "orders".into(),
+                    Ok(vec![
+                        entry(
+                            "retention.ms",
+                            "3600000",
+                            ConfigSourceKind::DynamicTopicConfig,
+                        ),
+                        entry(
+                            TIMESTAMP_TYPE_KEY,
+                            "CreateTime",
+                            ConfigSourceKind::DefaultConfig,
+                        ),
+                    ]),
+                ),
+                (
+                    "payments".into(),
+                    Ok(vec![entry(
+                        "retention.ms",
+                        "1",
+                        ConfigSourceKind::DynamicTopicConfig,
+                    )]),
+                ),
+            ])),
+            &names(&["orders", "payments"]),
+        );
+        // `orders` is in the manifest with nothing; `payments` is not in it.
+        let coverage = classify(&observed, &manifest(&[("orders", &[])]));
+        for topic in ["orders", "payments"] {
+            assert_eq!(coverage[topic].coverage, "notCaptured", "{topic}");
+            assert_eq!(coverage[topic].reason.as_deref(), Some("manifestDiffers"));
+        }
+        assert_eq!(
+            coverage["orders"].timestamp_type,
+            Some(EffectiveConfigValue {
+                value: "CreateTime".into(),
+                source: "defaultConfig".into(),
+            }),
+            "Logweir's own observation stands even where the engine's did not"
+        );
+    }
+
+    /// Every other failure — the call itself, a topic the answer does not
+    /// name, an unknown topic, a reader that cannot answer — is
+    /// `notCaptured`/`describeFailed`, never absent and never captured.
+    #[test]
+    fn every_other_failure_is_not_captured_describe_failed_and_every_topic_is_answered() {
+        let failed = TopicConfigCoverage {
+            coverage: "notCaptured".into(),
+            reason: Some("describeFailed".into()),
+            timestamp_type: None,
+        };
+        let call_failed = observe(
+            &Scripted(Err(KafkaError::Unreachable("no broker".into()))),
+            &names(&["a", "b"]),
+        );
+        let coverage = classify(&call_failed, &BTreeMap::new());
+        assert_eq!(coverage.len(), 2);
+        assert!(coverage.values().all(|c| *c == failed));
+
+        let partial = observe(
+            &Scripted(Ok(vec![(
+                "a".into(),
+                Err(KafkaError::TopicNotFound("a".into())),
+            )])),
+            &names(&["a", "b"]),
+        );
+        let coverage = classify(&partial, &BTreeMap::new());
+        assert_eq!(coverage["a"], failed, "an unknown topic");
+        assert_eq!(coverage["b"], failed, "a topic the answer did not name");
+    }
+
+    /// A value the receipt does not define is NOT RECORDED rather than
+    /// written — arm 11 would otherwise make the run refuse its own receipt
+    /// after the archive exists.
+    #[test]
+    fn a_timestamp_value_outside_the_two_is_not_recorded() {
+        let observed = observe(
+            &Scripted(Ok(vec![(
+                "orders".into(),
+                Ok(vec![entry(
+                    TIMESTAMP_TYPE_KEY,
+                    "BrokerTime",
+                    ConfigSourceKind::DynamicTopicConfig,
+                )]),
+            )])),
+            &names(&["orders"]),
+        );
+        let coverage = classify(&observed, &manifest(&[("orders", &[])]));
+        assert_eq!(coverage["orders"].timestamp_type, None);
+    }
+
+    /// Whatever `classify` writes, a receipt carrying it satisfies arms 6-11:
+    /// a writer that could produce a block its own reader refuses would exit 4
+    /// after the archive exists.
+    #[test]
+    fn every_shape_classify_produces_satisfies_the_receipts_arms() {
+        let observed = observe(
+            &Scripted(Ok(vec![
+                ("a".into(), Err(KafkaError::NotAuthorized("a".into()))),
+                ("b".into(), Err(KafkaError::Client("x".into()))),
+                (
+                    "c".into(),
+                    Ok(vec![entry(
+                        TIMESTAMP_TYPE_KEY,
+                        "CreateTime",
+                        ConfigSourceKind::Unknown,
+                    )]),
+                ),
+                (
+                    "d".into(),
+                    Ok(vec![entry(
+                        "retention.ms",
+                        "5",
+                        ConfigSourceKind::DynamicTopicConfig,
+                    )]),
+                ),
+            ])),
+            &names(&["a", "b", "c", "d"]),
+        );
+        let block = classify(
+            &observed,
+            &manifest(&[("c", &[]), ("d", &[("retention.ms", "5")])]),
+        );
+        let receipt = logweir_core::backup_receipt::BackupReceipt {
+            format_version: logweir_core::backup_receipt::RECEIPT_FORMAT_VERSION.into(),
+            run_id: "r".into(),
+            backup_id: "b".into(),
+            requested_at: chrono::Utc::now(),
+            started_at: chrono::Utc::now(),
+            finished_at: chrono::Utc::now(),
+            exit_code: 0,
+            triggered_by: String::new(),
+            source: logweir_core::backup_receipt::ReceiptSource {
+                cluster_id: "c".into(),
+                bootstrap_servers: vec![],
+                auth: logweir_core::backup_receipt::ReceiptAuth {
+                    mode: "plaintext".into(),
+                    username: None,
+                },
+                topics: names(&["a", "b", "c", "d"]),
+            },
+            engine: logweir_core::backup_receipt::ReceiptEngine {
+                id: "e".into(),
+                version: "v".into(),
+                digest: "d".into(),
+            },
+            archive: logweir_core::backup_receipt::ReceiptArchive {
+                manifest_key: "k".into(),
+                manifest_sha256: "s".into(),
+                prefix: "p".into(),
+            },
+            records: names(&["a", "b", "c", "d"])
+                .into_iter()
+                .map(|t| (t, 1))
+                .collect(),
+            covered: logweir_core::backup_receipt::ReceiptCovered {
+                from_ms: 1,
+                to_ms: 2,
+            },
+            config_coverage: Some(block),
+        };
+        assert_eq!(receipt.validate_invariants(), Ok(()));
+    }
+}

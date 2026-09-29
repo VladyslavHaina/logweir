@@ -798,6 +798,77 @@ mod tests {
         archive_with_a_point("", RECEIPT_KEY)
     }
 
+    /// [`archive_with_a_point`] whose receipt is edited by `edit` before it is
+    /// serialised and signed — how FX-4's rows get a 1.1.0 receipt.
+    fn archive_with_receipt(edit: impl FnOnce(&mut BackupReceipt)) -> Archive {
+        let store = Store::in_memory("");
+        let manifest = br#"{"topics":[]}"#.to_vec();
+        let manifest_sha256 = logweir_core::ids::sha256_prefixed(&manifest);
+        let mut doc = receipt(MANIFEST_KEY, &manifest_sha256);
+        edit(&mut doc);
+        let receipt_bytes = serde_json::to_vec(&doc).expect("serialises");
+        let signer = SigningKey::generate_ed25519();
+        put_signed_receipt(&store, &receipt_bytes, &signer);
+        store
+            .put_create_only(MANIFEST_KEY, &manifest)
+            .expect("the manifest is written");
+        Archive {
+            store,
+            binding: PointBinding {
+                point_id: crate::catalog::record::point_id(&receipt_bytes),
+                receipt_key: RECEIPT_KEY.into(),
+                receipt_sha256: logweir_core::ids::sha256_prefixed(&receipt_bytes),
+                manifest_sha256,
+            },
+            keys: evidence_keys(vec![(&signer, trusted(&signer))]),
+        }
+    }
+
+    /// **FX-4.** A verified binding hands the drill its receipt's
+    /// configuration capture coverage — the ONLY source phases 3 and 7 read it
+    /// from — and a 1.0.0 receipt hands over UNKNOWN for every topic.
+    #[test]
+    fn a_verified_binding_carries_the_receipts_config_coverage_and_a_1_0_0_one_carries_unknown() {
+        use logweir_core::backup_receipt::{ConfigCoverage, TopicConfigCoverage};
+        let a = archive_with_receipt(|r| {
+            r.format_version = "1.1.0".into();
+            r.config_coverage = Some(BTreeMap::from([(
+                "orders".to_string(),
+                TopicConfigCoverage {
+                    coverage: "captureDenied".into(),
+                    reason: None,
+                    timestamp_type: None,
+                },
+            )]));
+        });
+        let verified = verify_point_binding(
+            &plan_with(Some(a.binding.clone())),
+            &a.store,
+            Some(&a.keys),
+            chrono::Utc::now(),
+        )
+        .expect("the point verifies")
+        .expect("a bound plan names its point");
+        assert_eq!(
+            verified.config_coverage.of("orders"),
+            ConfigCoverage::CaptureDenied
+        );
+        let old = archive();
+        let verified = verify_point_binding(
+            &plan_with(Some(old.binding.clone())),
+            &old.store,
+            Some(&old.keys),
+            chrono::Utc::now(),
+        )
+        .expect("the point verifies")
+        .expect("a bound plan names its point");
+        assert_eq!(
+            verified.config_coverage.of("orders"),
+            ConfigCoverage::Unknown,
+            "a 1.0.0 receipt carries no block: unknown, never captured"
+        );
+    }
+
     const PLAN_YAML: &str = r#"
 source:
   storage: {backend: filesystem, path: /tmp/logweir-binding-fixture}

@@ -3099,3 +3099,197 @@ fn the_signed_document_carries_no_pass_rate_beside_a_partial_verdict() {
          field along"
     );
 }
+
+// ---------------------------------------------------------------------------
+// FX-4: configuration parity is ASSESSED only where the capture was, and a
+// refused TARGET read (T13, consumer 5) is recorded, not compared as empty.
+// ---------------------------------------------------------------------------
+
+/// The healthy baseline's reader, wrapped so the TARGET's DescribeConfigs is
+/// REFUSED — what `RdKafkaReader::topic_configs` now returns instead of the
+/// empty map rdkafka 0.36.2 used to hand back.
+struct RefusingTargetConfigs(MapReader);
+
+impl ClusterReader for RefusingTargetConfigs {
+    fn cluster_id(&self) -> Result<String, KafkaError> {
+        self.0.cluster_id()
+    }
+    fn list_topics(&self) -> Result<Vec<TopicMeta>, KafkaError> {
+        self.0.list_topics()
+    }
+    fn end_offsets(&self, topic: &str) -> Result<Vec<(i32, i64)>, KafkaError> {
+        self.0.end_offsets(topic)
+    }
+    fn topic_configs(&self, topic: &str) -> Result<BTreeMap<String, String>, KafkaError> {
+        Err(logweir_kafka::reader::empty_topic_config_answer(
+            topic,
+            &logweir_kafka::reader::TopicVisibility::Visible,
+        ))
+    }
+    fn broker_configs(&self) -> Result<BTreeMap<String, String>, KafkaError> {
+        self.0.broker_configs()
+    }
+    fn consume_range(
+        &self,
+        topic: &str,
+        partition: i32,
+        from: i64,
+        max: usize,
+    ) -> Result<Vec<ConsumedRecord>, KafkaError> {
+        self.0.consume_range(topic, partition, from, max)
+    }
+}
+
+/// The healthy baseline's target, with a target configuration that DIFFERS
+/// from the source's on a key that is not intended (`min.insync.replicas`),
+/// so a comparison that ran is visible in `unexpected_divergence`.
+fn healthy_parts() -> (
+    logweir_engine_oso::storage::Store,
+    BackupSetFacts,
+    MapReader,
+    VerifyEngine,
+) {
+    let (store, sha) = store_with_matching_segment();
+    let mut facts = facts_with_segment(&sha);
+    facts.topics[0]
+        .configurations
+        .insert("min.insync.replicas".into(), "2".into());
+    let (archive, cons) = fixtures::matching_pair(50);
+    let mut topics = BTreeMap::new();
+    topics.insert(
+        "drill-orders".to_string(),
+        TopicData {
+            end_offsets: vec![(0, 50)],
+            configs: fixtures::target_configs(&[
+                ("cleanup.policy", "delete"),
+                ("retention.ms", "-1"),
+                ("min.insync.replicas", "1"),
+            ]),
+            records: cons,
+        },
+    );
+    let engine = VerifyEngine {
+        facts: facts.clone(),
+        fingerprints: archive,
+        unsupported: None,
+        validation: ValidationBehavior::Success(0),
+    };
+    (store, facts, MapReader { topics }, engine)
+}
+
+/// A `SourceConfigCoverage` as a verified 1.1.0 receipt naming `orders` reads.
+fn receipt_coverage(coverage: &str) -> logweir_core::backup_receipt::SourceConfigCoverage {
+    let mut receipt: logweir_core::backup_receipt::BackupReceipt = serde_json::from_slice(
+        &std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../e2e/fixtures/signed/backup-receipt.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    receipt.format_version = "1.1.0".into();
+    receipt.config_coverage = Some(BTreeMap::from([(
+        "orders".to_string(),
+        logweir_core::backup_receipt::TopicConfigCoverage {
+            coverage: coverage.to_string(),
+            reason: (coverage == "notCaptured").then(|| "manifestDiffers".to_string()),
+            timestamp_type: None,
+        },
+    )]));
+    logweir_core::backup_receipt::SourceConfigCoverage::from_receipt(&receipt)
+}
+
+/// **FX-4: the parity arm that ignores coverage.** Every coverage that is not
+/// `captured` — no receipt (`unknown`), a denied capture, a manifest that
+/// disagreed — names the topic in `not_assessed`; `captured` is the only state
+/// that yields `Some([])`, the "every topic assessed" claim. The archive's own
+/// record is still compared either way: the difference it shows stays
+/// reported, only its SILENCE is withdrawn.
+///
+/// Negative control: a `classify_parity_all` that stopped consulting
+/// `coverage` (always `Some(vec![])`) fails every non-captured row below.
+#[test]
+fn configuration_parity_is_not_assessed_unless_the_source_capture_was() {
+    for (coverage, want) in [
+        (
+            logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+            Some(vec!["drill-orders: configuration (unknown)".to_string()]),
+        ),
+        (
+            receipt_coverage("captureDenied"),
+            Some(vec![
+                "drill-orders: configuration (captureDenied)".to_string()
+            ]),
+        ),
+        (
+            receipt_coverage("notCaptured"),
+            Some(vec!["drill-orders: configuration (notCaptured)".to_string()]),
+        ),
+        (receipt_coverage("captured"), Some(vec![])),
+    ] {
+        let (store, facts, reader, engine) = healthy_parts();
+        let out = run(
+            &engine,
+            &reader,
+            &store,
+            &facts,
+            &sel_orders(),
+            &fixtures::mapping("orders", "drill-orders"),
+            &plan_orders_to_drill_orders(),
+            &coverage,
+        )
+        .unwrap();
+        assert_eq!(out.topic_parity.not_assessed, want);
+        assert_eq!(
+            out.topic_parity.unexpected_divergence,
+            vec!["drill-orders: min.insync.replicas".to_string()],
+            "the archive's own record is compared whatever the coverage"
+        );
+    }
+}
+
+/// **FX-4 / T13, consumer 5.** A REFUSED read of the TARGET's configuration
+/// used to be an empty map, so every source key compared as different. It is
+/// now named `targetReadDenied` and the topic's keys are not compared at all;
+/// partition count and replication factor still are.
+///
+/// Negative control: `reader.topic_configs(tgt).unwrap_or_default()` in phase
+/// 7 reports `min.insync.replicas` as an unexpected divergence and names no
+/// `not_assessed` entry, and this test fails.
+#[test]
+fn a_refused_target_configuration_read_is_not_assessed_never_compared_as_empty() {
+    let (store, facts, reader, engine) = healthy_parts();
+    let out = run(
+        &engine,
+        &RefusingTargetConfigs(reader),
+        &store,
+        &facts,
+        &sel_orders(),
+        &fixtures::mapping("orders", "drill-orders"),
+        &plan_orders_to_drill_orders(),
+        &receipt_coverage("captured"),
+    )
+    .expect("a refused TARGET configuration read is a recorded fact, not an aborted drill");
+    assert_eq!(
+        out.topic_parity.not_assessed,
+        Some(vec![
+            "drill-orders: configuration (targetReadDenied)".to_string()
+        ])
+    );
+    assert_eq!(out.topic_parity.unexpected_divergence, Vec::<String>::new());
+    assert!(
+        !out.topic_parity
+            .intentionally_deviated
+            .iter()
+            .any(|d| d.contains("cleanup.policy") || d.contains("retention.ms")),
+        "no configuration key was compared: {:?}",
+        out.topic_parity.intentionally_deviated
+    );
+    assert!(
+        out.topic_parity
+            .intentionally_deviated
+            .contains(&"drill-orders: replication_factor".to_string()),
+        "metadata-derived parity is still assessed: {:?}",
+        out.topic_parity.intentionally_deviated
+    );
+}

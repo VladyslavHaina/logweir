@@ -422,3 +422,132 @@ fn selection_set_arrives_empty_and_bind_backup_set_patches_every_entry() {
         .all(|p| p.set.manifest_key == real_ref.manifest_key
             && p.set.backup_id == real_ref.backup_id));
 }
+
+// ---------------------------------------------------------------------------
+// FX-4 / T13: consumer 4 (phase 2's target state) and phase 3's collision diff.
+// ---------------------------------------------------------------------------
+
+/// A target that HAS `drill-orders` (healthy metadata) but refuses its
+/// DescribeConfigs — what `RdKafkaReader::topic_configs` returns now instead
+/// of the empty map rdkafka 0.36.2 used to hand back for a refused resource.
+struct RefusedConfigsReader;
+
+impl ClusterReader for RefusedConfigsReader {
+    fn cluster_id(&self) -> Result<String, KafkaError> {
+        Ok(TARGET_CLUSTER_ID.to_string())
+    }
+    fn list_topics(&self) -> Result<Vec<TopicMeta>, KafkaError> {
+        Ok(vec![TopicMeta::new("drill-orders", 3)])
+    }
+    fn end_offsets(&self, _topic: &str) -> Result<Vec<(i32, i64)>, KafkaError> {
+        Ok(vec![(0, 10), (1, 10), (2, 10)])
+    }
+    fn topic_configs(&self, topic: &str) -> Result<BTreeMap<String, String>, KafkaError> {
+        Err(logweir_kafka::reader::empty_topic_config_answer(
+            topic,
+            &logweir_kafka::reader::TopicVisibility::Visible,
+        ))
+    }
+    fn broker_configs(&self) -> Result<BTreeMap<String, String>, KafkaError> {
+        Ok(BTreeMap::new())
+    }
+    fn consume_range(
+        &self,
+        _topic: &str,
+        _partition: i32,
+        _from: i64,
+        _max: usize,
+    ) -> Result<Vec<ConsumedRecord>, KafkaError> {
+        Ok(vec![])
+    }
+}
+
+/// **FX-4 / T13, consumer 4.** An existing target topic whose configuration
+/// read is REFUSED is never recorded with an empty configuration: phase 3
+/// would then report "differing config: []" about a topic it never read.
+///
+/// Negative control: `configs: reader.topic_configs(name).unwrap_or_default()`
+/// in phase 2 makes this `Ok` with an empty map, and this test fails.
+#[test]
+fn a_target_topic_whose_configuration_is_refused_is_never_recorded_as_empty() {
+    let err = phase2_target::run(&RefusedConfigsReader, &["drill-orders".to_string()])
+        .expect_err("a refused configuration read is not an empty configuration");
+    match err {
+        DrillError::Kafka(KafkaError::NotAuthorized(m)) => {
+            assert!(m.starts_with("drill-orders"), "{m}")
+        }
+        other => panic!("expected the refusal, not {other:?}"),
+    }
+}
+
+/// **FX-4, phase 3.** A collision's configuration difference is ASSESSED only
+/// where the source topic's capture coverage is `captured`; otherwise the
+/// scorecard line says so beside the list, and an empty `[]` is never read
+/// as "no difference".
+#[test]
+fn a_collision_says_its_configuration_was_not_assessed_unless_the_capture_was() {
+    let target = fixtures::target_with(
+        TARGET_CLUSTER_ID,
+        "drill-orders",
+        3,
+        1_200,
+        &[("cleanup.policy", "delete")],
+    );
+    let facts = fixtures::backup_facts_orders(3);
+    let mapping = fixtures::mapping("orders", "drill-orders");
+
+    // Unbound plan: coverage UNKNOWN.
+    let d = phase3_diff::run(
+        &target,
+        &facts,
+        &mapping,
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+    );
+    assert_eq!(d.collisions[0].configuration_not_assessed, Some("unknown"));
+    assert!(
+        d.summarise().collisions[0].ends_with("(configuration not assessed: unknown)"),
+        "{:?}",
+        d.summarise().collisions
+    );
+
+    // A verified receipt that says the capture was DENIED.
+    let denied = coverage_for("orders", "captureDenied");
+    let d = phase3_diff::run(&target, &facts, &mapping, &denied);
+    assert_eq!(
+        d.collisions[0].configuration_not_assessed,
+        Some("captureDenied")
+    );
+
+    // …and one that says it was captured: assessed, and the line carries no
+    // qualifier.
+    let captured = coverage_for("orders", "captured");
+    let d = phase3_diff::run(&target, &facts, &mapping, &captured);
+    assert_eq!(d.collisions[0].configuration_not_assessed, None);
+    assert!(
+        !d.summarise().collisions[0].contains("not assessed"),
+        "{:?}",
+        d.summarise().collisions
+    );
+}
+
+/// A `SourceConfigCoverage` as a VERIFIED receipt carrying one entry reads.
+fn coverage_for(topic: &str, coverage: &str) -> logweir_core::backup_receipt::SourceConfigCoverage {
+    let mut receipt: logweir_core::backup_receipt::BackupReceipt = serde_json::from_slice(
+        &std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../e2e/fixtures/signed/backup-receipt.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    receipt.format_version = "1.1.0".into();
+    receipt.config_coverage = Some(BTreeMap::from([(
+        topic.to_string(),
+        logweir_core::backup_receipt::TopicConfigCoverage {
+            coverage: coverage.to_string(),
+            reason: None,
+            timestamp_type: None,
+        },
+    )]));
+    logweir_core::backup_receipt::SourceConfigCoverage::from_receipt(&receipt)
+}
