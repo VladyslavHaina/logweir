@@ -3,9 +3,17 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+// Which stack `docker compose` reaches is the environment's (PROD-01.5): this
+// file runs compose directly, so it applies the harness's coherence check.
+#[allow(dead_code)]
+#[path = "harness/stack.rs"]
+mod stack;
+
 /// Cargo runs an integration test with cwd = the owning package root (`e2e/`),
 /// not the repo root, so the compose file is resolved from CARGO_MANIFEST_DIR.
+/// Every caller runs `docker compose` with it, so it checks coherence first.
 fn compose_file() -> PathBuf {
+    stack::ensure_coherent();
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("compose/docker-compose.yml")
 }
 

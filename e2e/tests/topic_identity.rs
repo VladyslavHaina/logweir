@@ -1152,13 +1152,13 @@ mod live {
     }
 
     /// EVERY broker address this file dials, in ONE place (review M1).
-    /// PROD-01.5 parameterises the stack's ports and project name; its sweep
-    /// changes this function and nothing else here. `InNetwork` is the
-    /// listener tools inside the broker container use, the same on every
-    /// slot.
+    /// `Host` is the harness's `bootstrap()` (PROD-01.5): the stack this
+    /// process addresses, default or slot, checked coherent first.
+    /// `InNetwork` is the listener tools inside the broker container use, the
+    /// same on every slot.
     fn broker_address(side: Side) -> String {
         match side {
-            Side::Host => BOOTSTRAP.to_string(),
+            Side::Host => bootstrap(),
             Side::InNetwork => "kafka-broker-1:9094".to_string(),
             Side::Loopback(port) => format!("localhost:{port}"),
         }
@@ -1349,6 +1349,9 @@ mod live {
     /// the `docker` client on a timeout leaves the tool running inside the
     /// broker; `just e2e-down` ends it with the container.
     fn broker_cli(args: &[&str], what: &str) -> String {
+        // The project is COMPOSE_PROJECT_NAME's: refuse an environment that
+        // is not one coherent stack before reaching one (PROD-01.5).
+        stack::ensure_coherent();
         let mut c = Command::new("docker");
         c.args([
             "compose",

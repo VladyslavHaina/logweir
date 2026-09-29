@@ -77,6 +77,8 @@ fn backup_spec_with_id(
     bootstrap: &str,
 ) -> PathBuf {
     let p = demo_dir().join(name);
+    // The slot's S3 endpoint (PROD-01.5); `http://localhost:9000` by default.
+    let s3 = s3_endpoint();
     std::fs::write(
         &p,
         format!(
@@ -90,7 +92,7 @@ fn backup_spec_with_id(
              \x20 bucket: {ARCHIVE_BUCKET}\n\
              \x20 prefix: {backup_id}\n\
              \x20 region: us-east-1\n\
-             \x20 endpoint: http://localhost:9000\n\
+             \x20 endpoint: {s3}\n\
              \x20 path_style: true\n\
              \x20 allow_http: true\n\
              backup:\n\
@@ -192,7 +194,7 @@ fn backup_run_renders_and_invokes_the_engine_backup_command() {
     sweep_seeded_receipts();
     let log = demo_dir().join("backup-argv.log");
     let _ = std::fs::remove_file(&log);
-    let spec = backup_spec("backup.yaml", "[orders, payments]", "", BOOTSTRAP);
+    let spec = backup_spec("backup.yaml", "[orders, payments]", "", &bootstrap());
 
     let status = backup_run(&spec, Some(&log)).status().expect("logweir");
     assert_eq!(
@@ -324,7 +326,7 @@ fn a_scram_backup_spec_renders_and_refuses_only_for_a_credential_reason() {
         "backup-scram.yaml",
         "[orders]",
         "  auth:\n    mode: scramSha512\n    username: logweir\n",
-        BOOTSTRAP,
+        &bootstrap(),
     );
 
     // ---- unset: exit 1, naming the variable, no refusal-reason line ----
@@ -418,7 +420,7 @@ fn the_real_engine_accepts_the_rendered_sasl_block() {
         "backup-scram-real-engine.yaml",
         "[orders]",
         "  auth:\n    mode: scramSha512\n    username: logweir\n",
-        BOOTSTRAP,
+        &bootstrap(),
     );
     let out = backup_run_real_engine(&spec)
         .env("LOGWEIR_SOURCE_PASSWORD", "not-a-real-secret-Aa1")
@@ -576,7 +578,7 @@ fn two_receipt_paths_are_refused_without_opening_a_socket() {
 #[test]
 fn backup_run_writes_and_prints_its_receipt_keys() {
     sweep_seeded_receipts();
-    let spec = backup_spec("backup-i7.yaml", "[orders, payments]", "", BOOTSTRAP);
+    let spec = backup_spec("backup-i7.yaml", "[orders, payments]", "", &bootstrap());
     let local = demo_dir().join("t5b-receipt.json");
     let local_sig = demo_dir().join("t5b-receipt.sig");
     for f in [&local, &local_sig] {
@@ -752,7 +754,7 @@ fn the_real_engine_accepts_the_rendered_backup_document() {
         &backup_id,
         "[orders, payments]",
         "",
-        BOOTSTRAP,
+        &bootstrap(),
     );
 
     let out = backup_run_real_engine(&spec).output().expect("logweir");

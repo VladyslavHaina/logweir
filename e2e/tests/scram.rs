@@ -97,7 +97,7 @@ const KUBE_CONTEXT: &str = "docker-desktop";
 ///
 /// Two independent reads, because they answer different questions:
 ///
-/// * a metadata read over `BOOTSTRAP` proves the broker is serving at all, so
+/// * a metadata read over `bootstrap()` proves the broker is serving at all, so
 ///   a failure below is about the listeners and not about a dead stack;
 /// * `grep -q` inside the broker container over
 ///   `/opt/kafka/config/server.properties` proves the listener-scoped JAAS
@@ -172,18 +172,22 @@ fn the_broker_advertises_five_listeners() {
         );
     }
 
+    // The three HOST-FACING advertisements carry this stack's published ports
+    // (PROD-01.5): `localhost:9092`, `localhost:9097` and
+    // `host.docker.internal:9095` on the default stack, the slot's otherwise.
     let advertised = line("advertised.listeners");
     for endpoint in [
-        "EXTERNAL://localhost:9092",
-        "SASL://kafka-broker-1:9096",
+        format!("EXTERNAL://{}", bootstrap()),
+        "SASL://kafka-broker-1:9096".to_string(),
         // ONE listener advertised TWICE: the host-side arm below cannot
         // resolve `kafka-broker-1`.
-        "SASLEXT://localhost:9097",
-        // The parameter's DEFAULT, which is what every local gate uses.
-        "K8S://host.docker.internal:9095",
+        format!("SASLEXT://{}", bootstrap_sasl()),
+        // The parameter's value — its DEFAULT, `host.docker.internal`, is what
+        // every local gate uses.
+        format!("K8S://{}", bootstrap_k8s()),
     ] {
         assert!(
-            advertised.contains(endpoint),
+            advertised.contains(&endpoint),
             "{endpoint} missing: {advertised}"
         );
     }
@@ -225,7 +229,8 @@ fn scram_auth(password: &str) -> AuthConfig {
 }
 
 /// **THE HOST-SIDE rdkafka ARM.** `RdKafkaReader::connect` over
-/// `BOOTSTRAP_SASL` (`localhost:9097`, the published `SASLEXT` advertisement)
+/// `bootstrap_sasl()` (`localhost:9097` on the default stack, the published
+/// `SASLEXT` advertisement)
 /// with the credential `scram-setup` created, and then the two reads every
 /// phase of this product makes: `cluster_id()` and `list_topics()`.
 ///
@@ -256,14 +261,15 @@ fn scram_auth(password: &str) -> AuthConfig {
 fn scram_authenticates_through_the_rdkafka_client() {
     let plaintext_id = cluster_id();
 
-    let r = RdKafkaReader::connect(&[BOOTSTRAP_SASL.to_string()], scram_auth(SCRAM_PASSWORD))
+    let sasl = bootstrap_sasl();
+    let r = RdKafkaReader::connect(std::slice::from_ref(&sasl), scram_auth(SCRAM_PASSWORD))
         .expect("RdKafkaReader::connect builds a client");
 
     let id = r.cluster_id().unwrap_or_else(|e| {
         panic!(
-            "SCRAM over {BOOTSTRAP_SASL} could not read the cluster id: {e}\n\
+            "SCRAM over {sasl} could not read the cluster id: {e}\n\
              Three things this is: (a) `SASLEXT` is not advertised as \
-             `localhost:9097` or its port is not published, so the client was redirected to \
+             {sasl} or its port is not published, so the client was redirected to \
              a name the host cannot resolve; (b) `scram-setup` did not exit 0, so the \
              credential does not exist; (c) the listener-scoped JAAS property is absent, so \
              the broker cannot serve SCRAM on this listener."
@@ -335,7 +341,7 @@ fn scram_authenticates_through_the_rdkafka_client() {
 #[test]
 fn scram_refuses_a_wrong_password_through_the_rdkafka_client() {
     let r = RdKafkaReader::connect(
-        &[BOOTSTRAP_SASL.to_string()],
+        &[bootstrap_sasl()],
         scram_auth("definitely-not-the-password"),
     )
     .expect("connect is lazy and does not authenticate");
@@ -380,6 +386,8 @@ fn backup_allowlist() -> PathBuf {
 /// the caller names.
 fn scram_backup_spec(name: &str, backup_id: &str, bootstrap: &str) -> PathBuf {
     let p = demo_dir().join(name);
+    // The slot's S3 endpoint (PROD-01.5); `http://localhost:9000` by default.
+    let s3 = s3_endpoint();
     std::fs::write(
         &p,
         format!(
@@ -395,7 +403,7 @@ fn scram_backup_spec(name: &str, backup_id: &str, bootstrap: &str) -> PathBuf {
              \x20 bucket: {ARCHIVE_BUCKET}\n\
              \x20 prefix: {backup_id}\n\
              \x20 region: us-east-1\n\
-             \x20 endpoint: http://localhost:9000\n\
+             \x20 endpoint: {s3}\n\
              \x20 path_style: true\n\
              \x20 allow_http: true\n\
              backup:\n\
@@ -465,7 +473,8 @@ fn scram_backup_run(spec: &Path, receipt_out: &Path) -> Command {
 #[test]
 fn scram_authenticates_through_the_engines_own_client() {
     sweep_scram_archives();
-    let spec = scram_backup_spec("backup-scram-e2e.yaml", SCRAM_BACKUP_ID, BOOTSTRAP_SASL);
+    let sasl = bootstrap_sasl();
+    let spec = scram_backup_spec("backup-scram-e2e.yaml", SCRAM_BACKUP_ID, &sasl);
     let receipt = demo_dir().join("t7-scram-receipt.json");
     let receipt_sig = demo_dir().join("t7-scram-receipt.sig");
     for f in [&receipt, &receipt_sig] {
@@ -481,7 +490,7 @@ fn scram_authenticates_through_the_engines_own_client() {
     assert_eq!(
         out.status.code(),
         Some(0),
-        "a SCRAM backup against {BOOTSTRAP_SASL} did not exit 0.\n\
+        "a SCRAM backup against {sasl} did not exit 0.\n\
          `No available brokers` here means a silent PLAINTEXT downgrade or an unresolvable \
          advertised name; a SCRAM/authentication failure means the credential or the \
          mechanism spelling.\nstdout:\n{stdout}\nstderr:\n{stderr}"
@@ -564,7 +573,7 @@ fn scram_authenticates_through_the_engines_own_client() {
 /// `BOOTSTRAP_SASL_INNET`.
 ///
 /// `harness::BOOTSTRAP_SASL_INNET` is `kafka-broker-1:9096` — the SAME SCRAM
-/// credential store as `BOOTSTRAP_SASL`, advertised for clients on
+/// credential store as `bootstrap_sasl()`, advertised for clients on
 /// `kafka-net`. Nothing Logweir drives on this host can reach it:
 /// `e2e/fixtures/engine-docker.sh` deliberately does not join `kafka-net` (it
 /// rewrites `localhost` to the Docker host gateway so the rendered document's
@@ -645,7 +654,7 @@ fn scram_authenticates_through_the_engines_own_client_in_network() {
 fn scram_drill_spec() -> serde_yaml::Value {
     let mut v = spec_default();
     v["target"]["bootstrap_servers"] =
-        serde_yaml::from_str(&format!("[{BOOTSTRAP_SASL}]")).unwrap();
+        serde_yaml::from_str(&format!("[{}]", bootstrap_sasl())).unwrap();
     v["target"]["auth"] =
         serde_yaml::from_str(&format!("{{mode: scramSha512, username: {SCRAM_USER}}}")).unwrap();
     v
@@ -835,6 +844,15 @@ fn the_k8s_advertised_host_is_a_parameter() {
         ]);
         let mut full = Command::new("docker");
         full.args(["compose", "-f", "e2e/compose/docker-compose.yml", "config"]);
+        // A pure render of the FILE's defaults, whichever slot this process
+        // addresses (PROD-01.5): the slot's own variables would move the three
+        // host-facing ports, which `stack_params.rs` tests separately.
+        for c in [&mut quiet, &mut full] {
+            for v in stack::all_ports() {
+                c.env_remove(v.var);
+            }
+            c.env_remove(stack::PROJECT_VAR);
+        }
         if let Some(h) = host {
             quiet.env("LOGWEIR_K8S_ADVERTISED_HOST", h);
             full.env("LOGWEIR_K8S_ADVERTISED_HOST", h);
@@ -859,10 +877,13 @@ fn the_k8s_advertised_host_is_a_parameter() {
         (rc, line)
     };
 
+    // The file's DEFAULT ports, from the one registry `stack_params.rs` checks
+    // the compose file against (PROD-01.5) — 9095, 9092 and 9097.
+    let k8s_default = stack::default_of(stack::K8S_PORT);
     let (rc, line) = render(None);
     assert_eq!(rc, Some(0), "`docker compose config -q` failed: {line}");
     assert!(
-        line.contains("K8S://host.docker.internal:9095"),
+        line.contains(&format!("K8S://host.docker.internal:{k8s_default}")),
         "the DEFAULT must be the docker-desktop name every local gate uses: {line}"
     );
 
@@ -873,20 +894,27 @@ fn the_k8s_advertised_host_is_a_parameter() {
         "`docker compose config -q` failed under the override: {line}"
     );
     assert!(
-        line.contains("K8S://172.18.0.1:9095"),
+        line.contains(&format!("K8S://172.18.0.1:{k8s_default}")),
         "LOGWEIR_K8S_ADVERTISED_HOST was IGNORED — the advertised K8S name is hard-coded, so \
          Task 31 has no override and would have to edit this file (STANDING RULE 15): {line}"
     );
-    // And the override touches NOTHING else: the other four advertisements are
-    // fixed strings, not parameters that a CI runner could bend by accident.
+    // And the override touches NOTHING else: the other four advertisements do
+    // not move with the K8S host (their ports are PROD-01.5's parameters, and
+    // this render leaves them at their defaults).
     for fixed in [
-        "PLAINTEXT://kafka-broker-1:9094",
-        "EXTERNAL://localhost:9092",
-        "SASL://kafka-broker-1:9096",
-        "SASLEXT://localhost:9097",
+        "PLAINTEXT://kafka-broker-1:9094".to_string(),
+        format!(
+            "EXTERNAL://localhost:{}",
+            stack::default_of(stack::KAFKA_PORT)
+        ),
+        "SASL://kafka-broker-1:9096".to_string(),
+        format!(
+            "SASLEXT://localhost:{}",
+            stack::default_of(stack::SASL_PORT)
+        ),
     ] {
         assert!(
-            line.contains(fixed),
+            line.contains(&fixed),
             "{fixed} changed under the override: {line}"
         );
     }
@@ -910,25 +938,29 @@ fn the_k8s_advertised_host_is_a_parameter() {
 #[test]
 fn a_pod_reachable_listener_is_published() {
     // `nc -z localhost 9095` as a TCP connect, so the assertion is on a
-    // syscall rather than on a tool this repository does not pin.
-    let sock: std::net::SocketAddr = "127.0.0.1:9095".parse().unwrap();
+    // syscall rather than on a tool this repository does not pin. The port is
+    // this stack's published K8S port (9095 on the default stack, PROD-01.5).
+    let k8s_port = stack::port(stack::K8S_PORT);
+    let sock: std::net::SocketAddr = format!("127.0.0.1:{k8s_port}").parse().unwrap();
     let conn = std::net::TcpStream::connect_timeout(&sock, std::time::Duration::from_secs(5));
     assert!(
         conn.is_ok(),
-        "nothing answers on localhost:9095 ({:?}) — the K8S listener is not published; \
-         `ports:` must carry \"9095:9095\"",
-        conn.err()
+        "nothing answers on localhost:{k8s_port} ({:?}) — the K8S listener is not published; \
+         `ports:` must carry the {} parameter",
+        conn.err(),
+        stack::K8S_PORT
     );
 
     // The advertised name, read from the broker's metadata by a client ON
     // `kafka-net`.
+    let k8s = bootstrap_k8s();
     let md = metadata_from_kafka_net();
     assert!(
-        md.contains(&format!("{BOOTSTRAP_K8S} (id:")),
-        "the broker's metadata over the K8S listener does not advertise {BOOTSTRAP_K8S}; \
+        md.contains(&format!("{k8s} (id:")),
+        "the broker's metadata over the K8S listener does not advertise {k8s}; \
          it said:\n{md}"
     );
-    eprintln!("[t7] K8S advertised name, from kafka-net: {BOOTSTRAP_K8S}");
+    eprintln!("[t7] K8S advertised name, from kafka-net: {k8s}");
 }
 
 /// `kafka-broker-api-versions.sh --bootstrap-server kafka-broker-1:9095` run
@@ -937,6 +969,7 @@ fn a_pod_reachable_listener_is_published() {
 /// endpoint — which is the string this file needs and the one a pod will be
 /// handed.
 fn metadata_from_kafka_net() -> String {
+    stack::ensure_coherent();
     let mut c = Command::new("docker");
     c.args([
         "compose",
@@ -973,13 +1006,17 @@ fn metadata_from_kafka_net() -> String {
 /// and deletes (STANDING RULE 13), against the context `docker-desktop` and no
 /// other (STANDING RULE 12).
 ///
-/// The probe is `nc -z host.docker.internal 9095` and the exit code is read
+/// The probe is `nc -z host.docker.internal 9095` (this stack's K8S
+/// advertisement, `bootstrap_k8s()`; PROD-01.5) and the exit code is read
 /// DIRECTLY off the `kubectl run` status (`--restart=Never` makes `kubectl
 /// run` exit with the container's own code).
 ///
 /// Mutant 4 — drop `K8S` from `ports:` — fails this at assertion time too.
 #[test]
 fn a_pod_really_reaches_the_k8s_listener() {
+    let k8s = bootstrap_k8s();
+    let (host, port) = k8s.rsplit_once(':').expect("host:port");
+    let probe = format!("nc -z {host} {port}");
     kubectl(&["delete", "ns", NAMESPACE, "--ignore-not-found"]);
     let created = kubectl(&["create", "ns", NAMESPACE]);
     assert!(
@@ -1000,7 +1037,7 @@ fn a_pod_really_reaches_the_k8s_listener() {
         "--",
         "sh",
         "-c",
-        "nc -z host.docker.internal 9095",
+        &probe,
     ]);
     let rc = out.status.code();
     let text = format!("{}{}", out.stdout_utf8(), out.stderr_utf8());
@@ -1016,12 +1053,12 @@ fn a_pod_really_reaches_the_k8s_listener() {
     assert_eq!(
         rc,
         Some(0),
-        "a pod could not reach {BOOTSTRAP_K8S}. If the NAME did not resolve inside the pod \
+        "a pod could not reach {k8s}. If the NAME did not resolve inside the pod \
          this is a controller decision and not an implementer's: the fallback is \
          `hostNetwork` or the host's LAN address in \
          `KafkaCluster.spec.bootstrapServers` (spec §10). STOP AND REPORT.\n{text}"
     );
-    eprintln!("[t7] pod reached {BOOTSTRAP_K8S} · rc=0");
+    eprintln!("[t7] pod reached {k8s} · rc=0");
 }
 
 /// `kubectl`, always with the context named explicitly (STANDING RULE 12).
