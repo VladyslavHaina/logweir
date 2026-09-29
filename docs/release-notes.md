@@ -349,8 +349,8 @@ reused a fixed `backup_id` must pass a fresh `--backup-id-override` per run.
 **The upgrade window is closed since FX-7:** an execution whose first run was
 made by the older runner has no claim, so if its Job is lost and re-created
 after the upgrade the new runner wins a claim — and then finds the older run's
-set under `<prefix>/<backup_id>/` and stops, exit 1 `ExecutionAlreadyClaimed`,
-before the engine. Only an older runner that is still RUNNING when its Job is
+manifest or segments under `<prefix>/<backup_id>/` and stops, exit 1
+`ExecutionAlreadyClaimed`, before the engine. Only an older runner that is still RUNNING when its Job is
 re-created, and has written nothing yet, escapes both checks; let such a Job
 finish before upgrading. On a versioned bucket a receipt also pins its
 manifest's version (`archive.manifest_version_id`, receipt format `1.1.0`), so a

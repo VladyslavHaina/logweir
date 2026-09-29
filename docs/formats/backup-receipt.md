@@ -348,8 +348,8 @@ second put must be refused as `AlreadyExists`. Only then does the engine start.
 | the first create is refused for any other reason (a missing `s3:PutObject` on `logweir/*`, a transport error) | **4** | `ExecutionClaimUnproven` | lock-proof failed, nothing uploaded — the engine never started |
 | the backend reports conditional put unsupported (the store falls back to HEAD-then-PUT) | **4** | `ExecutionClaimUnproven` | a HEAD-then-PUT is not exclusive, so the claim is no lock |
 | the **second** create succeeds | **4** | `ExecutionClaimUnproven` | the store accepts `If-None-Match: *` and overwrites anyway; a claim on it is no lock |
-| the claim is won, but the archive already holds an object under `<prefix>/<backup_id>/` (FX-7) | **1** | `ExecutionAlreadyClaimed` | an earlier run of this `backup_id` — by a build **without** the claim — wrote this set (or wrote a segment of it and died, or is still running). **No engine run, no receipt.** The same state and remedy as a claim that exists: a new `backup_id` |
-| the claim is won, but the archive could not be listed to prove the set is new | **4** | `ExecutionClaimUnproven` | nothing is proven about the set, so the engine never started; grant `s3:ListBucket` on the archive prefix (the read-back needs it too) |
+| the claim is won, but the archive already holds `<prefix>/<backup_id>/manifest.json` or a segment under `<prefix>/<backup_id>/topics/` (FX-7) | **1** | `ExecutionAlreadyClaimed` | an earlier run of this `backup_id` — by a build **without** the claim — wrote this set (or wrote a segment of it and died, or is still running). **No engine run, no receipt.** The same state and remedy as a claim that exists: a new `backup_id` |
+| the claim is won, but the archive could not be read to prove the set is new | **4** | `ExecutionClaimUnproven` | nothing is proven about the set, so the engine never started; grant `s3:ListBucket` and `s3:GetObject` on the archive prefix (the read-back needs both too) |
 
 Both refusals end with a final stdout line `failure-reason=ExecutionAlreadyClaimed` (exit 1) or
 `failure-reason=ExecutionClaimUnproven` (exit 4), the exit-1/4 twin of exit 3's `refusal-reason=`.
@@ -387,12 +387,17 @@ build without the claim carries none, so the claim alone let a later run of that
 upgraded, re-created with the new runner image) and for a standalone
 `backup run` re-using a `backup_id` an older build wrote to
 (RECEIPT-DUP-UPGRADE-WINDOW). So after winning the claim, and immediately
-before the engine, the runner LISTS `<prefix>/<backup_id>/` through its
-read-only archive handle and refuses when it holds any object at all — a
-finished set, or the segments of a run that died or is still running. The
-listing is under the prefix the run's read-back already lists, so no permission
-is added. Between two runs of this build the claim still answers first, with its
-own message.
+before the engine, the runner reads the set through its read-only archive
+handle — a one-key LIST of `<prefix>/<backup_id>/topics/` and a GET of
+`<prefix>/<backup_id>/manifest.json` — and refuses when either exists: a
+finished set, or the segments of a run that died or is still running. Anything
+else under the directory is not the engine's output in the configuration
+Logweir renders (`offsets.db` and `consumer-groups-snapshot.json` are written
+only by continuous backups and an enabled snapshot, which `render_backup` never
+turns on), so an upstream archive's snapshot planted beside a new set does not
+refuse it. Both reads are under the prefix the run's read-back already reads, so
+no permission is added. Between two runs of this build the claim still answers
+first, with its own message.
 
 **What it still does not cover.** A runner that ignores the claim and the set
 check — a build from before them, after a ROLLBACK — can still run the engine

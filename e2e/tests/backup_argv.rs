@@ -297,7 +297,7 @@ fn backup_run_renders_and_invokes_the_engine_backup_command() {
 /// RECEIPT-DUP's claim cannot see. A second engine run over it would rewrite
 /// its segments in place under an unchanged manifest (measured on engine
 /// 0.21.0, `docs/formats/backup-receipt.md`). So the run wins a fresh claim,
-/// lists the set directory, finds the seed, and stops: exit 1, the final stdout
+/// finds the seed's segments and manifest, and stops: exit 1, the final stdout
 /// line `failure-reason=ExecutionAlreadyClaimed`, the engine never spawned
 /// (the argv stub recorded nothing), and the seeded manifest byte-identical.
 #[test]

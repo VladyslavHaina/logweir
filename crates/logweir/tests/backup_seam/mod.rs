@@ -120,7 +120,7 @@ impl Fixture {
     ) -> Result<BackupOutcome, BackupError> {
         // EMPTY: the engine double writes the manifest DURING the run, as the
         // real engine does. A run refuses an execution whose set directory
-        // already holds anything (FX-7, `phase_run::refuse_an_existing_set`),
+        // already holds its manifest or a segment (FX-7, `phase_run::refuse_an_existing_set`),
         // so seeding it first would be refused before the engine.
         let archive = Store::in_memory(ARCHIVE_PREFIX);
         // Rebuilt rather than cloned: `BackupRunArgs` derives no `Clone`, and

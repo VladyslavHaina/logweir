@@ -155,8 +155,10 @@ pub fn claim_execution(
 }
 
 /// **FX-7 — one engine run per backup SET, whoever made the first one.**
-/// Refuse the engine when the archive already holds ANY object under this
-/// execution's set directory, `<prefix>/<backup_id>/`.
+/// Refuse the engine when the archive already holds what the engine writes
+/// for this execution and a signed receipt attests: its manifest,
+/// `<prefix>/<backup_id>/manifest.json`, or any segment under
+/// `<prefix>/<backup_id>/topics/`.
 ///
 /// # Why the claim alone is not enough
 ///
@@ -176,30 +178,36 @@ pub fn claim_execution(
 /// not. No manifest check can see that afterwards, so the only fix is that
 /// the second engine run never starts.
 ///
-/// # Why "any object" and not "the manifest"
+/// # Why the segments and not only the manifest — and why not "any object"
 ///
 /// The engine writes segments before its final manifest, so an older run
 /// that is still running, or that died after its first segment, leaves a
-/// set with objects and no manifest. Starting the engine there writes into
-/// the same keys again. Listing the directory sees every such state; a GET
-/// of the manifest would see only the finished one.
+/// set with segments and no manifest; starting the engine there writes into
+/// the same keys again. So both are looked for.
+///
+/// Anything ELSE under the set's directory is not the engine's output in the
+/// configuration Logweir renders: `offsets.db` is written only by continuous
+/// or configured offset storage, and `consumer-groups-snapshot.json` only
+/// when the snapshot is enabled — neither of which `render_backup` does. A
+/// run beside such an object (an upstream archive's snapshot, say, which
+/// FX-1's rows plant on purpose) writes none of its keys and invalidates
+/// nothing, so it is not refused.
 ///
 /// # Where it runs, and what it costs
 ///
 /// AFTER the claim and immediately before the engine, so between two runs
 /// of this build the claim still answers first (the same refusal, with its
-/// own message), and the window between this listing and the engine's first
-/// write is as short as it can be. It is a LIST through the read-only
-/// archive handle, under the prefix `phase_run::run` already lists after
-/// the engine (`Store::list_manifests`), so it needs no permission the
-/// runner does not already hold; for a new execution the directory is empty
-/// and the listing returns nothing.
+/// own message), and the window between these reads and the engine's first
+/// write is as short as it can be. Two reads through the read-only archive
+/// handle — a one-key LIST of `topics/` and a GET of the manifest — under
+/// the prefix `run` already lists and reads after the engine, so no
+/// permission is added. For a new execution both answer "nothing".
 ///
 /// An existing set is exit 1 [`EXECUTION_ALREADY_CLAIMED`] — the same state
 /// as a claim that already exists, because it is the same fact (an earlier
 /// run of this `backup_id` reached the engine) with a different witness, and
-/// the same remedy (a new execution id; D1 §4.6's retry is one). A listing
-/// that FAILS proves nothing about the set, so it fails closed as exit 4
+/// the same remedy (a new execution id; D1 §4.6's retry is one). A read that
+/// FAILS proves nothing about the set, so it fails closed as exit 4
 /// [`EXECUTION_CLAIM_UNPROVEN`], exactly as a claim put the store refused
 /// does: no engine run, nothing signed.
 pub fn refuse_an_existing_set(
@@ -207,6 +215,7 @@ pub fn refuse_an_existing_set(
     storage: &logweir_core::engine::StorageUrl,
     archive: &Store,
 ) -> Result<(), BackupError> {
+    use logweir_engine_oso::storage::StoreError;
     // The directory is taken from the PLAN's storage prefix — the prefix the
     // engine writes under and `run`'s read-back lists (`list_manifests` over
     // `plan.storage`) — so the three agree by construction, whatever prefix
@@ -217,23 +226,39 @@ pub fn refuse_an_existing_set(
     } else {
         format!("{prefix}/{backup_id}/")
     };
-    match archive.list_page(&directory, None, 1) {
-        Ok((keys, _)) => match keys.first() {
-            None => Ok(()),
-            Some(first) => Err(BackupError::ExecutionClaimed(format!(
-                "{EXECUTION_ALREADY_CLAIMED}: execution `{backup_id}`'s backup set already exists \
-                 in the archive ({first} is in it) although it carries no execution claim this \
-                 run could see — an earlier run of this backup_id, by a build without the claim, \
-                 wrote it. A second engine run would rewrite that run's segments in place, and \
-                 its signed receipt would no longer describe the archive, so NO engine run was \
-                 started and nothing was signed. Retry under a new execution id (a new Backup)."
-            ))),
-        },
-        Err(e) => Err(BackupError::Lock(format!(
-            "{EXECUTION_CLAIM_UNPROVEN}: execution `{backup_id}`: the archive could not be listed \
-             under {directory} to prove the backup set is new: {e}. An existing set would be \
-             rewritten by the engine, so NO engine run was started and nothing was signed. Grant \
-             `s3:ListBucket` on the archive prefix and retry."
+    let unproven = |what: &str, e: String| {
+        BackupError::Lock(format!(
+            "{EXECUTION_CLAIM_UNPROVEN}: execution `{backup_id}`: {what} could not be read to \
+             prove the backup set is new: {e}. An existing set would be rewritten by the engine, \
+             so NO engine run was started and nothing was signed. Grant `s3:ListBucket` and \
+             `s3:GetObject` on the archive prefix and retry."
+        ))
+    };
+    let segments = format!("{directory}topics/");
+    let found = match archive.list_page(&segments, None, 1) {
+        Ok((keys, _)) => keys.into_iter().next(),
+        Err(e) => return Err(unproven(&segments, e.to_string())),
+    };
+    let found = match found {
+        Some(segment) => Some(segment),
+        None => {
+            let manifest = format!("{directory}manifest.json");
+            match archive.get(&manifest) {
+                Ok(_) => Some(manifest),
+                Err(StoreError::NotFound(_)) => None,
+                Err(e) => return Err(unproven(&manifest, e.to_string())),
+            }
+        }
+    };
+    match found {
+        None => Ok(()),
+        Some(key) => Err(BackupError::ExecutionClaimed(format!(
+            "{EXECUTION_ALREADY_CLAIMED}: execution `{backup_id}`'s backup set already exists in \
+             the archive ({key} is in it) although it carries no execution claim this run could \
+             see — an earlier run of this backup_id, by a build without the claim, wrote it. A \
+             second engine run would rewrite that run's segments in place, and its signed \
+             receipt would no longer describe the archive, so NO engine run was started and \
+             nothing was signed. Retry under a new execution id (a new Backup)."
         ))),
     }
 }

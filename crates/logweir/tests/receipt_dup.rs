@@ -882,8 +882,8 @@ fn a_set_an_older_build_wrote_is_refused_before_the_engine() {
 }
 
 /// An older run that DIED after its first segment — or is still running —
-/// left objects and no manifest. The engine would write those keys again, so
-/// "any object under the set directory" is the test, not "a manifest".
+/// left segments and no manifest. The engine would write those keys again, so
+/// a segment is looked for as well as the manifest.
 #[test]
 fn a_set_with_segments_and_no_manifest_is_refused_too() {
     let f = Fixture::new();
@@ -896,7 +896,7 @@ fn a_set_with_segments_and_no_manifest_is_refused_too() {
 
     let err = f
         .run("01K5RUN0000000000000000001", &engine)
-        .expect_err("a set with any object in it is not new");
+        .expect_err("a set holding a segment is not new");
     assert!(matches!(err, BackupError::ExecutionClaimed(_)), "{err:?}");
     assert!(
         err.to_string().contains("segment-00000000000000000000"),
@@ -904,6 +904,27 @@ fn a_set_with_segments_and_no_manifest_is_refused_too() {
     );
     assert_eq!(engine.runs.get(), 0, "no engine run over a partial set");
     assert!(f.receipts().is_empty(), "nothing signed");
+}
+
+/// An object the engine does NOT write in the configuration Logweir renders —
+/// an upstream archive's consumer-groups snapshot beside the set, which FX-1's
+/// rows plant on purpose — is not the set: the run writes none of its keys and
+/// invalidates nothing, so it is admitted, and its receipt is signed.
+#[test]
+fn an_object_the_engine_does_not_write_is_not_an_existing_set() {
+    let f = Fixture::new();
+    let engine = AdvancingEngine::new(&f.root());
+    let snapshot = f
+        .root()
+        .join(format!("{EXECUTION_ID}/consumer-groups-snapshot.json"));
+    std::fs::create_dir_all(snapshot.parent().unwrap()).unwrap();
+    std::fs::write(&snapshot, b"{\"groups\":[]}").unwrap();
+
+    let outcome = f
+        .run("01K5RUN0000000000000000001", &engine)
+        .expect("a set directory holding only a foreign object is still a new set");
+    assert_eq!(engine.runs.get(), 1);
+    assert_eq!(f.receipts(), vec![outcome.receipt_key]);
 }
 
 /// **Ordering.** Between two runs of THIS build the CLAIM still answers first:
@@ -926,9 +947,10 @@ fn between_two_runs_of_this_build_the_claim_answers_first() {
     );
 }
 
-/// An archive that cannot be LISTED proves nothing about the set, so the run
-/// fails closed: exit 4 `ExecutionClaimUnproven`, no engine run, nothing
-/// signed — never "no objects, so the set is new".
+/// An archive that cannot be READ (its set directory unlistable here) proves
+/// nothing about the set, so the run fails closed: exit 4
+/// `ExecutionClaimUnproven`, no engine run, nothing signed — never "no
+/// objects, so the set is new".
 #[cfg(unix)]
 #[test]
 fn an_archive_that_cannot_be_listed_fails_closed() {
@@ -956,7 +978,11 @@ fn an_archive_that_cannot_be_listed_fails_closed() {
         err.failure_reason(),
         Some(logweir::backup::phase_run::EXECUTION_CLAIM_UNPROVEN)
     );
-    assert!(err.to_string().contains("could not be listed"), "{err}");
+    assert!(
+        err.to_string()
+            .contains("could not be read to prove the backup set is new"),
+        "{err}"
+    );
     assert_eq!(engine.runs.get(), 0, "no engine run on an unproven set");
     assert!(f.receipts().is_empty(), "nothing signed");
 }

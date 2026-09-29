@@ -938,9 +938,9 @@ What changes for an operator:
 
 **Upgrade.** Nothing to migrate. A Backup Job whose first run was made by the older runner and that
 is lost and re-created after the upgrade finds no claim — the older run never wrote one — and,
-**since FX-7, is refused anyway**: after winning its claim the runner lists `<prefix>/<backup_id>/`
-and refuses a set that already holds any object, exit 1 `ExecutionAlreadyClaimed`, before the engine
-starts (the next section). **Rollback.** An older runner ignores the claim objects (they are not
+**since FX-7, is refused anyway**: after winning its claim the runner refuses a set that already
+holds its manifest or a segment, exit 1 `ExecutionAlreadyClaimed`, before the engine starts (the
+next section). **Rollback.** An older runner ignores the claim objects (they are not
 receipts) and the set check, and returns to the old behaviour; the claims stay in the bucket,
 harmlessly, and are honoured again after a re-upgrade.
 
@@ -959,11 +959,13 @@ What changes for an operator:
 
 - **A run over a set that already exists exits 1 naming `ExecutionAlreadyClaimed`**, with no engine
   run and no receipt, whoever wrote the set — the same state, message class and remedy (a new
-  `backup_id`) as a claim that exists. The runner lists the set's directory after winning its claim
-  and immediately before the engine; any object there — a finished set, or segments of a run that
-  died or is still running — refuses the run. A listing that fails is exit 4
-  `ExecutionClaimUnproven`. **No permission is added**: the run's read-back already lists the
-  archive prefix.
+  `backup_id`) as a claim that exists. After winning its claim and immediately before the engine,
+  the runner looks for the set's manifest (`<prefix>/<backup_id>/manifest.json`) and for any segment
+  under `<prefix>/<backup_id>/topics/` — a finished set, or segments of a run that died or is still
+  running — and either refuses the run. Other objects there (an upstream archive's consumer-groups
+  snapshot, say) are not the engine's output in Logweir's configuration and do not refuse it. A read
+  that fails is exit 4 `ExecutionClaimUnproven`. **No permission is added**: the run's read-back
+  already lists and reads the archive prefix.
 - **On a versioned bucket a receipt pins its manifest's version** —
   `archive.manifest_version_id`, receipt and catalog record format `1.1.0`
   ([why](formats/backup-receipt.md#the-pinned-manifest-version-versioned-buckets)). A point-bound

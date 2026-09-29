@@ -564,8 +564,8 @@ fn execute_with_signer(
     // attests. See `phase_run::claim_execution`.
     let claim_key = phase_run::claim_execution(&backup_id, run_id, requested_at, evidence)?;
     // **FX-7 — AND THE SET MUST BE NEW.** A set an OLDER build wrote carries
-    // no claim, so the claim above admits a second run of it; this listing
-    // does not. After the claim, so a second run of THIS build is still
+    // no claim, so the claim above admits a second run of it; this check of
+    // the set's manifest and segments does not. After the claim, so a second run of THIS build is still
     // answered by the claim, and last before the engine, so the window before
     // the engine's first write is as short as it can be. See
     // `phase_run::refuse_an_existing_set`.

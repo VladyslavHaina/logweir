@@ -142,7 +142,7 @@ fn manifest_of(backup_id: &str) -> (String, Vec<u8>) {
 /// write into it for `backup_id` when a run reaches the engine.
 ///
 /// **Empty, and that is FX-7.** A backup run refuses an execution whose set
-/// directory already holds anything (`phase_run::refuse_an_existing_set`), so
+/// directory already holds its manifest or a segment (`phase_run::refuse_an_existing_set`), so
 /// a fixture may no longer seed the manifest BEFORE the run: the engine double
 /// writes it DURING the run, through [`run`] / [`exec`], exactly as the real
 /// engine does.
@@ -389,7 +389,7 @@ impl DataEngine for RecordingEngine {
 /// **FX-7.** Any `DataEngine` double, made to WRITE its manifest into the
 /// archive when its `backup` succeeds — which is when the real engine writes
 /// it. A backup run now refuses an execution whose set directory already
-/// holds anything, so the manifest can no longer be seeded before the run.
+/// holds its manifest or a segment, so the manifest can no longer be seeded before the run.
 ///
 /// It writes the manifest of `plan.backup_id`, the id the run actually handed
 /// the engine, via [`manifest_of`]: a row that seeded manifests for several

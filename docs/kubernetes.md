@@ -4958,10 +4958,12 @@ If the lost Job's pod got that far, the re-created Job finds the claim and exits
 **1** naming `ExecutionAlreadyClaimed`, with no engine run and no receipt: a
 second engine run would have overwritten the manifest the first run's signed
 receipt attests. **The same holds for a Job whose lost pod was an OLDER runner
-without the claim** (FX-7): the re-created Job wins a fresh claim, lists
-`<prefix>/<backupId>/`, finds the older run's objects there and stops with the
-same exit and reason — the engine would otherwise rewrite that run's segments
-in place ([the format](formats/backup-receipt.md#the-execution-claim-one-engine-run-per-backup_id)). The `Backup` ends `Failed` with `status.exitReason:
+without the claim** (FX-7): the re-created Job wins a fresh claim, reads
+`<prefix>/<backupId>/`, finds the older run's manifest or segments there and
+stops with the same exit and reason — the engine would otherwise rewrite that
+run's segments in place
+([the format](formats/backup-receipt.md#the-execution-claim-one-engine-run-per-backup_id)).
+The `Backup` ends `Failed` with `status.exitReason:
 ExecutionAlreadyClaimed` (the runner's final `failure-reason=` line, lifted by
 the controller; `kubectl describe backup` shows it on `status.exitReason` and
 the `Failed` condition's message, and the console in the run's exit reason and
