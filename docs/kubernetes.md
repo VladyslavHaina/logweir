@@ -2531,12 +2531,22 @@ skip with no `Restore`:
 | the slot is inside `spec.bounds.startingDeadlineSeconds` | `ConcurrencyBlocked` |
 | this schedule's own previous rehearsal finished | `ConcurrencyBlocked` |
 | no other schedule is rehearsing against the same target cluster | `TargetBusy` |
+| `spec.bounds.runnerResources` is one the controller applies: whole millicores and bytes, at most 4 CPUs and 8Gi, no zero limit, a memory limit of at least 32Mi, no request above its limit (FX-2, §12) | `AuthorizationInvalid` |
 | the `Approval` is `Verified=True`, bound to **this object's UID**, its `planHash` is the recomputed digest, its key may still authorise and carries an approver usage | `AuthorizationInvalid` |
 | the signed document has not expired and was not minted for more than 90 days | `AuthorizationExpired` |
 | the target `KafkaCluster` reports `reachable: true` and a `clusterId`, and its saved connection resolves (the same `RestoreTarget` resolution the `Restore` admission makes — a SCRAM connection with no `secretRef`, say, is refused here by field) | `TargetUnavailable` |
 | the signed scope's `templateDigest`, `targetClusterId` and `deadlineSeconds` agree with the sealed spec | `AuthorizationInvalid` |
 | a point qualifies: covered by `spec.point.topics`, old enough, with a non-empty window, inside `maxPartitions`, not captured from the target cluster, not inside a retention lease | `NoQualifyingPoint`, `TargetUnavailable` or `PointRetentionInProgress` |
 | the RENDERED plan falls inside the signed scope | `AuthorizationInvalid` |
+
+**`spec.bounds.runnerResources` reaches the runner container.** It is copied
+verbatim onto each child `Restore`'s `spec.runnerResources`, and from there
+onto the runner container (§12, *The runner's requests and limits*). A block
+outside the bounds can never run under the authorization that binds it, so
+every slot is skipped as `AuthorizationInvalid` — the `Authorized` condition's
+message names the field — and no child is created; the spec is sealed, so the
+remedy is a new schedule under a new authorization. Before FX-2 the block was
+copied onto the child and then dropped at the Job.
 
 **A slot that came due before the `RehearsalSchedule` was created is not its
 slot.** The controller never rehearses a slot whose due time is before the
@@ -4434,6 +4444,12 @@ Four things about it are worth knowing before you debug one:
   lives on the pod, so a TTL that existed earlier would be a race pod garbage
   collection can win.
 
+There is **no `resources` block**: `Backup.spec` has no requests-or-limits
+field, so a backup's runner states none and the namespace's `LimitRange`
+supplies them or nothing does. A `ResourceQuota` that requires limits rejects
+the pod, and the `Backup` reports `RunnerReady=False`, `PodCreationForbidden`.
+(`Restore.spec.runnerResources` is the `Restore`'s field — §12.)
+
 ### Manual backups: the typed contract, and no annotation anywhere
 
 A `Backup` is an ordinary object. This is the whole of what a person, a script
@@ -5763,6 +5779,117 @@ A `scramSha512` target additionally gets `LOGWEIR_TARGET_PASSWORD` from that
 the same connection the `clusterRef` resolves to, or the Restore is refused
 with `ConnectionPlanMismatch` before any Job exists: the runner dials the
 PLAN's address with THIS connection's credential.
+
+### The runner's requests and limits: `spec.runnerResources` (FX-2)
+
+`spec.runnerResources` is what the runner pod asks for and is capped at. It
+reaches the one `runner` container's `resources` **exactly as written** —
+requests as requests, limits as limits, in the spelling the object carries (the
+API server stores the canonical form, so `0.5` reads back as `500m`). Absent,
+or with no quantity in it, the container states no `resources` at all, which is
+the Job every `Restore` had before FX-2, and the namespace's `LimitRange`
+defaults apply unchanged. A `RehearsalSchedule`'s `spec.bounds.runnerResources`
+is copied onto each child `Restore` verbatim and arrives the same way (§7g).
+The console never sets the field; it is set with `kubectl` or by a
+`RehearsalSchedule`.
+
+Before FX-2 the field was accepted, documented and **dropped**: the container
+carried no `resources` whatever the object said, so every runner pod was
+`BestEffort`.
+
+**The decision: apply it, and refuse rather than clamp.** D3 §4.5 designed the
+field and the CRD documented it. Withdrawing it would have left every runner
+pod `BestEffort` — the first pod the kubelet evicts under node pressure, and a
+restore evicted mid-write leaves a half-written target — and unable to run at
+all in a namespace whose `ResourceQuota` requires limits. A clamped value would
+be a Job nobody asked for, and a run OOM-killed at a limit the controller chose
+would read as a runner defect, so a value the controller will not apply is
+refused, never adjusted. Every quantity is checked before anything else about
+the object is read:
+
+| Rule | Refused, for example |
+|---|---|
+| a Kubernetes quantity in the grammar the schema's pattern admits | `abc`; `1K` (the decimal kilo is `k`) |
+| memory is a whole number of bytes, CPU a whole number of millicores | `memory: 100m` (a tenth of a byte — `Mi` was meant); `cpu: 100u` |
+| nothing above the ceiling, requests included: **4** CPUs and **8Gi** of memory | `limits.memory: 16Gi`; `requests.cpu: "8"`; `cpu: 5Gi` |
+| a limit is a cap: never zero, and a memory limit is at least **32Mi** | `limits.cpu: "0"` (a runtime reads zero as "no limit"); `limits.memory: "512"` (512 bytes) |
+| a request is at most its limit, per resource | `requests.memory: 4Gi` beside `limits.memory: 2Gi` |
+
+The ceilings are D3 §4.1's and are compiled in: no chart value configures them,
+and the schema cannot state them because comparing quantities in CEL needs a
+library the 1.29 floor cannot be relied on to have. The memory floor is not a
+measured minimum for a working run (PROD-10.1 measures that); it stops a
+missing unit before it becomes a pod the runtime cannot create. A `Restore`
+that breaks any rule ends `phase: Failed` with `reason: ExecutionSpecInvalid`
+(`Failed=True`, same reason) **before its approval is read, a manual-run pool
+slot is taken, or anything is created**, and the message names every refused
+field at once, because `spec` is immutable and the remedy is a new `Restore`. A
+`RehearsalSchedule` skips each slot as `AuthorizationInvalid` instead and
+creates no child (§7g).
+
+**`LimitRange`, `ResourceQuota` and the scheduler decide the rest, and each
+answer lands on the `Restore`.** The Job is created with the values above; what
+happens next is the namespace's:
+
+- a `LimitRange` fills in what the block leaves out. With only
+  `requests.memory` set its default limit applies, and a default below the
+  request gets the pod rejected;
+- a `LimitRange` minimum or maximum, or a `ResourceQuota` (including one that
+  requires every pod to state limits), rejects the pod at creation. The Job
+  controller's only trace is a `FailedCreate` event on the Job, and the
+  `Restore` reports it: `RunnerReady=False` with reason `PodCreationForbidden`,
+  the same value in `status.reason` (the `REASON` column), and a
+  `status.progress.diagnostics[]` entry `PodCreateRejected` carrying the
+  admission's own words (`exceeded quota: …`). Once that has held for
+  `failFastSeconds` (§10, *Failing fast, and what it costs*) the Job's deadline
+  is collapsed and the run ends `PodCreationForbidden` — never a Job silently
+  waiting out its deadline;
+- requests no node can hold leave the pod `Pending`: `RunnerReady=False` with
+  `PodUnschedulable`, left to `activeDeadlineSeconds` because a node can still
+  join.
+
+A namespace whose `ResourceQuota` covers compute and which has no `LimitRange`
+defaults refuses every pod that states no limits, and `spec.runnerResources` is
+how a `Restore` runs there. `Backup`, check, probe and delivery Jobs have no
+such field and state no resources; their requests and limits come from the
+namespace's `LimitRange` or not at all.
+
+**What binds it.** `spec.runnerResources` is not part of `planBytes` and not a
+member of the approval bundle, so an approver signs the data operation and not
+its container bounds — the same position as `deadlineSeconds`. `spec` is
+immutable, so the value cannot change after the object is created, and a Job's
+pod template is immutable too: nothing changes it after admission. For a
+rehearsal the value is inside the sealed spec whose digest the standing
+authorization signs, so a different value is a different schedule under a
+different authorization.
+
+**Upgrade and rollback.** The CRD change is descriptions only; the field and its
+pattern have been served since the D3 W0 schemas.
+
+- A `Restore` that already has a Job keeps it: the pod template is immutable,
+  and the upgraded controller observes the run and never refuses it
+  mid-flight. That pod has no `resources`.
+- A terminal `Restore` is untouched.
+- A `Restore` with no Job yet (held for approval, queued, or created during
+  the upgrade) is checked on its next pass. A valid block gives it a Job whose
+  container carries it, which is a behaviour change: the pod now asks for, and
+  is capped at, what the object said, so it can meet a quota or an OOM limit it
+  never met before. A block outside the bounds ends it
+  `Failed`/`ExecutionSpecInvalid`.
+- A `RehearsalSchedule` with the block set applies it from its next slot, or
+  skips every slot as `AuthorizationInvalid` when it is outside the bounds.
+- **Rolling back** to a controller from before FX-2 ignores the field again:
+  the Jobs it creates carry no `resources`. A `Restore` this build refused stays
+  `Failed` (no controller acts on a terminal `Restore`); a schedule's next slot
+  fires under the older controller and drops the block, as it always did.
+  Nothing has to be deleted in either direction.
+
+What a runner Job actually carries:
+
+```bash
+kubectl --context "$LOGWEIR_CONTEXT" -n <namespace> get job <restore-name> \
+  -o jsonpath='{.spec.template.spec.containers[?(@.name=="runner")].resources}'
+```
 
 ### The credential is validated by the RUNNER, and the controller checks nothing
 

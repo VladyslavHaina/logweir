@@ -1191,6 +1191,14 @@ named rather than silent:
   affinity path to a runner Job today. On a cluster whose only Kafka-adjacent
   nodes are tainted, a runner Job will not schedule there. Implementing it is
   an operator change and is out of this chart's scope.
+* Requests and limits reach them **per object, not from a chart value**:
+  `Restore.spec.runnerResources`, and a `RehearsalSchedule`'s
+  `spec.bounds.runnerResources` through the `Restore` it creates. The
+  controller refuses a value above its compiled-in ceilings (4 CPUs, 8Gi) or
+  otherwise unrunnable, and never clamps one (`docs/kubernetes.md` §12).
+  `Backup`, check, probe and delivery Jobs state no resources, so in a
+  namespace whose `ResourceQuota` requires limits they need a `LimitRange`
+  default, or their pods are rejected (`PodCreationForbidden` on the object).
 
 `kubernetes.namespace` does **not** move the install. `helm -n` / `--namespace`
 decides that, and every object carries `Release.Namespace`; the key exists for
