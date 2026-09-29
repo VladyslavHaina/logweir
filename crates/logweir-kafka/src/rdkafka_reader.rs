@@ -1,6 +1,7 @@
 use crate::reader::{
-    AuthConfig, ClusterReader, ConsumedRecord, KafkaError, NewTopicSpec, TopicCreator,
-    TopicDeleter, TopicMeta,
+    empty_broker_config_answer, empty_topic_config_answer, AuthConfig, ClusterReader,
+    ConfigEntryObservation, ConfigSourceKind, ConsumedRecord, KafkaError, NewTopicSpec,
+    TopicConfigRead, TopicCreator, TopicDeleter, TopicMeta, TopicVisibility,
 };
 use rdkafka::admin::AdminClient;
 use rdkafka::client::DefaultClientContext;
@@ -211,6 +212,96 @@ impl RdKafkaReader {
             other => KafkaError::Client(format!("{topic}: {other}")),
         }
     }
+
+    /// What this principal's METADATA says about one topic — the evidence
+    /// [`empty_topic_config_answer`] names an empty DescribeConfigs answer
+    /// by (T13). Read only for a topic whose answer came back empty.
+    fn topic_visibility(&self, topic: &str) -> TopicVisibility {
+        use rdkafka::error::RDKafkaErrorCode as Code;
+        let md = match self.consumer.fetch_metadata(Some(topic), T) {
+            Ok(md) => md,
+            Err(e) => return TopicVisibility::Unread(e.to_string()),
+        };
+        let Some(t) = md.topics().first() else {
+            return TopicVisibility::Unread("metadata named no topic".to_string());
+        };
+        match t.error().map(Code::from) {
+            None => TopicVisibility::Visible,
+            Some(Code::TopicAuthorizationFailed) => TopicVisibility::NotAuthorized,
+            Some(Code::UnknownTopicOrPartition) => TopicVisibility::NotFound,
+            Some(other) => TopicVisibility::Unread(other.to_string()),
+        }
+    }
+
+    /// One BROKER resource's answer under T13, flattened: an empty entry list
+    /// is the cluster authorizer's refusal, never an empty configuration.
+    fn broker_answer(
+        broker_id: i32,
+        cfg: rdkafka::admin::ConfigResource,
+    ) -> Result<BTreeMap<String, String>, KafkaError> {
+        if cfg.entries.is_empty() {
+            return Err(empty_broker_config_answer(broker_id));
+        }
+        Ok(cfg
+            .entries
+            .into_iter()
+            .filter_map(|e| e.value.map(|v| (e.name, v)))
+            .collect())
+    }
+
+    /// rdkafka's per-entry source, in this crate's vocabulary.
+    fn source_kind(source: &rdkafka::admin::ConfigSource) -> ConfigSourceKind {
+        use rdkafka::admin::ConfigSource as S;
+        match source {
+            S::DynamicTopic => ConfigSourceKind::DynamicTopicConfig,
+            S::DynamicBroker => ConfigSourceKind::DynamicBrokerConfig,
+            S::DynamicDefaultBroker => ConfigSourceKind::DynamicDefaultBrokerConfig,
+            S::StaticBroker => ConfigSourceKind::StaticBrokerConfig,
+            S::Default => ConfigSourceKind::DefaultConfig,
+            S::Unknown => ConfigSourceKind::Unknown,
+        }
+    }
+
+    /// One topic resource's answer under T13: an empty entry list is a
+    /// FAILED read, named from the topic's metadata; never an empty set of
+    /// overrides. Shared by [`ClusterReader::topic_configs`] and
+    /// [`ClusterReader::describe_topic_configs`], so the two cannot disagree.
+    fn topic_answer(
+        &self,
+        topic: &str,
+        result: rdkafka::admin::ConfigResourceResult,
+    ) -> TopicConfigRead {
+        Self::topic_answer_with(topic, result, || self.topic_visibility(topic))
+    }
+
+    /// [`Self::topic_answer`] with the metadata read INJECTED, so the T13
+    /// decision is testable over a constructed rdkafka result with no broker
+    /// (`tests::an_empty_topic_answer_is_a_refusal_never_an_empty_override_set`).
+    /// `visibility` is called only for an empty answer.
+    fn topic_answer_with(
+        topic: &str,
+        result: rdkafka::admin::ConfigResourceResult,
+        visibility: impl FnOnce() -> TopicVisibility,
+    ) -> TopicConfigRead {
+        // The `Err` arm is what the TYPE promises and rdkafka 0.36.2 never
+        // produces (T13): kept, because a later rdkafka that reads the
+        // per-resource error would hand it here, and it classifies exactly.
+        let cfg = result.map_err(|code| Self::classify_topic_error(topic, code))?;
+        if cfg.entries.is_empty() {
+            return Err(empty_topic_config_answer(topic, &visibility()));
+        }
+        Ok(cfg
+            .entries
+            .into_iter()
+            .map(|e| ConfigEntryObservation {
+                source: Self::source_kind(&e.source),
+                name: e.name,
+                value: e.value,
+                read_only: e.is_read_only,
+                sensitive: e.is_sensitive,
+            })
+            .collect())
+    }
 }
 
 impl ClusterReader for RdKafkaReader {
@@ -314,14 +405,66 @@ impl ClusterReader for RdKafkaReader {
             // `tests/reader.rs`'s
             // `the_broker_resource_is_spelled_the_rdkafka_way`, which is why
             // it is a file:line here.)
-            let cfg = r.map_err(|e| Self::classify_topic_error(topic, e))?;
-            for e in cfg.entries {
+            //
+            // **AND THAT `Err` NEVER ARRIVES (FX-4, T13).** rdkafka 0.36.2's
+            // future pushes `Ok` for every resource and never reads the
+            // per-resource error (`src/admin.rs:1121-1159`), so a DENIED topic
+            // used to come back here as an empty entry list and leave this
+            // function as `Ok({})` — "no overrides". `topic_answer` turns the
+            // empty list into the refusal it stands for.
+            for e in self.topic_answer(topic, r)? {
                 if let Some(v) = e.value {
                     out.insert(e.name, v);
                 }
             }
         }
         Ok(out)
+    }
+
+    /// FX-4. One DescribeConfigs request for every named topic.
+    ///
+    /// librdkafka returns the resources IN REQUEST ORDER — "As a convenience to
+    /// the application we insert result in the same order as they were
+    /// requested. The broker does not maintain ordering"
+    /// (`rdkafka-sys-4.10.0+2.12.1/librdkafka/src/rdkafka_admin.c:3832-3856`) —
+    /// which is what makes the zip below sound: rdkafka 0.36.2's per-resource
+    /// `Err` would carry no name. A count that disagrees is refused rather
+    /// than zipped short.
+    fn describe_topic_configs(
+        &self,
+        topics: &[String],
+    ) -> Result<Vec<(String, TopicConfigRead)>, KafkaError> {
+        use rdkafka::admin::{AdminOptions, ResourceSpecifier};
+        if topics.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| KafkaError::Client(e.to_string()))?;
+        let specs: Vec<ResourceSpecifier<'_>> = topics
+            .iter()
+            .map(|t| ResourceSpecifier::Topic(t.as_str()))
+            .collect();
+        let res = rt
+            .block_on(
+                self.admin
+                    .describe_configs(&specs, &AdminOptions::new().request_timeout(Some(T))),
+            )
+            .map_err(|e| KafkaError::Unreachable(e.to_string()))?;
+        if res.len() != topics.len() {
+            return Err(KafkaError::Client(format!(
+                "DescribeConfigs for {} topic(s) returned {} result(s); a short or long answer \
+                 cannot be matched to the topics it describes",
+                topics.len(),
+                res.len()
+            )));
+        }
+        Ok(topics
+            .iter()
+            .zip(res)
+            .map(|(topic, r)| (topic.clone(), self.topic_answer(topic, r)))
+            .collect())
     }
 
     /// **Guard G-TS.** DescribeConfigs on `ResourceSpecifier::Broker(<the
@@ -376,11 +519,11 @@ impl ClusterReader for RdKafkaReader {
             let cfg = r.map_err(|e| {
                 KafkaError::Client(format!("DescribeConfigs on broker {broker_id}: {e}"))
             })?;
-            for e in cfg.entries {
-                if let Some(v) = e.value {
-                    out.insert(e.name, v);
-                }
-            }
+            // FX-4, T13: an EMPTY answer is the refusal rdkafka 0.36.2 does
+            // not report (PROD-04.0 §3.8 measured it for a principal refused
+            // on the cluster). Read as `Ok({})` it made phase 0's G-TS assume
+            // the Apache default `CreateTime` and skip the timestamp bound.
+            out.extend(Self::broker_answer(broker_id, cfg)?);
         }
         Ok(out)
     }
@@ -915,5 +1058,165 @@ mod tests {
         )
         .unwrap();
         assert!(reader.with_scratch_prefix("drill-20260903-").is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // FX-4 / T13: an empty DescribeConfigs answer is a REFUSAL, never "no
+    // overrides". Constructed rdkafka results, no broker: the result structs
+    // `rdkafka::admin::ConfigResource` and `ConfigEntry` have public fields
+    // (rdkafka-0.36.2/src/admin.rs:1000-1024).
+    // -----------------------------------------------------------------------
+
+    fn entry(
+        name: &str,
+        value: Option<&str>,
+        source: rdkafka::admin::ConfigSource,
+    ) -> rdkafka::admin::ConfigEntry {
+        rdkafka::admin::ConfigEntry {
+            name: name.to_string(),
+            value: value.map(str::to_string),
+            source,
+            is_read_only: false,
+            is_default: false,
+            is_sensitive: false,
+        }
+    }
+
+    fn topic_resource(
+        name: &str,
+        entries: Vec<rdkafka::admin::ConfigEntry>,
+    ) -> rdkafka::admin::ConfigResourceResult {
+        Ok(rdkafka::admin::ConfigResource {
+            specifier: rdkafka::admin::OwnedResourceSpecifier::Topic(name.to_string()),
+            entries,
+        })
+    }
+
+    /// **The mutant the orchestrator named for FX-4: "a denied resource read
+    /// back as 'no overrides'".** rdkafka 0.36.2 hands a refused topic back
+    /// as `Ok` with NO entries; the reader must turn that into the refusal it
+    /// stands for, whatever the metadata says, and never into `Ok`.
+    #[test]
+    fn an_empty_topic_answer_is_a_refusal_never_an_empty_override_set() {
+        use crate::reader::{KafkaError, TopicVisibility};
+        for (visibility, want) in [
+            (TopicVisibility::Visible, "NotAuthorized"),
+            (TopicVisibility::NotAuthorized, "NotAuthorized"),
+            (TopicVisibility::NotFound, "TopicNotFound"),
+            (TopicVisibility::Unread("timed out".into()), "Client"),
+        ] {
+            let got = super::RdKafkaReader::topic_answer_with(
+                "orders",
+                topic_resource("orders", vec![]),
+                || visibility.clone(),
+            );
+            let kind = match &got {
+                Ok(entries) => panic!(
+                    "an EMPTY DescribeConfigs answer (metadata {visibility:?}) came back Ok \
+                     with {} entr(y/ies) — that is the defect: a refused read as no overrides",
+                    entries.len()
+                ),
+                Err(KafkaError::NotAuthorized(_)) => "NotAuthorized",
+                Err(KafkaError::TopicNotFound(_)) => "TopicNotFound",
+                Err(KafkaError::Client(_)) => "Client",
+                Err(other) => panic!("unexpected {other:?}"),
+            };
+            assert_eq!(kind, want, "metadata {visibility:?}");
+        }
+    }
+
+    /// The metadata read is spent ONLY on an empty answer, and a real answer
+    /// keeps every entry with its source — the flags the capture filter reads.
+    #[test]
+    fn a_non_empty_topic_answer_keeps_every_entry_and_its_source() {
+        use crate::reader::ConfigSourceKind;
+        use rdkafka::admin::ConfigSource as S;
+        let got = super::RdKafkaReader::topic_answer_with(
+            "orders",
+            topic_resource(
+                "orders",
+                vec![
+                    entry("retention.ms", Some("3600000"), S::DynamicTopic),
+                    entry(
+                        "message.timestamp.type",
+                        Some("LogAppendTime"),
+                        S::DynamicDefaultBroker,
+                    ),
+                    entry("cleanup.policy", Some("delete"), S::Default),
+                    entry("min.insync.replicas", Some("1"), S::StaticBroker),
+                    entry("segment.ms", Some("1"), S::DynamicBroker),
+                    entry("ssl.secret", None, S::Unknown),
+                ],
+            ),
+            || panic!("metadata must not be read for an answer that has entries"),
+        )
+        .expect("a non-empty answer is a successful read");
+        let sources: Vec<(String, ConfigSourceKind)> =
+            got.iter().map(|e| (e.name.clone(), e.source)).collect();
+        assert_eq!(
+            sources,
+            vec![
+                ("retention.ms".into(), ConfigSourceKind::DynamicTopicConfig),
+                (
+                    "message.timestamp.type".into(),
+                    ConfigSourceKind::DynamicDefaultBrokerConfig
+                ),
+                ("cleanup.policy".into(), ConfigSourceKind::DefaultConfig),
+                (
+                    "min.insync.replicas".into(),
+                    ConfigSourceKind::StaticBrokerConfig
+                ),
+                ("segment.ms".into(), ConfigSourceKind::DynamicBrokerConfig),
+                ("ssl.secret".into(), ConfigSourceKind::Unknown),
+            ],
+            "the source of every entry is kept: FX-8's broker-default arm reads it"
+        );
+        assert_eq!(got[5].value, None, "a withheld value stays withheld");
+    }
+
+    /// A per-resource error code, should a later rdkafka ever report one, is
+    /// classified exactly as `classify_topic_error` classifies it.
+    #[test]
+    fn a_reported_per_resource_code_is_classified() {
+        use crate::reader::KafkaError;
+        use rdkafka::error::RDKafkaErrorCode as Code;
+        let got = super::RdKafkaReader::topic_answer_with(
+            "orders",
+            Err(Code::TopicAuthorizationFailed),
+            || panic!("a reported code needs no metadata"),
+        );
+        assert!(matches!(got, Err(KafkaError::NotAuthorized(_))), "{got:?}");
+    }
+
+    /// The broker twin: an empty broker answer is the cluster authorizer's
+    /// refusal (measured by PROD-04.0 §3.8), never an empty configuration —
+    /// which phase 0's G-TS read as "the Apache default, CreateTime".
+    #[test]
+    fn an_empty_broker_answer_is_a_refusal_never_an_empty_configuration() {
+        use crate::reader::KafkaError;
+        let empty = rdkafka::admin::ConfigResource {
+            specifier: rdkafka::admin::OwnedResourceSpecifier::Broker(1001),
+            entries: vec![],
+        };
+        let got = super::RdKafkaReader::broker_answer(1001, empty);
+        assert!(
+            matches!(got, Err(KafkaError::NotAuthorized(ref m)) if m.contains("broker 1001")),
+            "{got:?}"
+        );
+        let full = rdkafka::admin::ConfigResource {
+            specifier: rdkafka::admin::OwnedResourceSpecifier::Broker(1001),
+            entries: vec![entry(
+                "log.message.timestamp.type",
+                Some("LogAppendTime"),
+                rdkafka::admin::ConfigSource::DynamicDefaultBroker,
+            )],
+        };
+        assert_eq!(
+            super::RdKafkaReader::broker_answer(1001, full)
+                .unwrap()
+                .get("log.message.timestamp.type")
+                .map(String::as_str),
+            Some("LogAppendTime")
+        );
     }
 }
