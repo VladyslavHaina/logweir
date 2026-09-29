@@ -17,7 +17,7 @@
    - PROD-07.3 a resume point.
 
    That makes it the cheapest route to all three (C10/C11).
-4. **`engine-matrix` is repaired** (commits `d5d0be9b` and `ff9aa14a`). It failed all three scheduled runs for seven independent reasons (§5.1). It now declares six rows, each with an expected outcome, and is green only when every row records what it declares. Each row's outcome is derived from what its steps did, and the broker is read back from the running container. Run 36531786341 was green on all six rows at `7e4cd0b1`; the fix round is re-dispatched at the final tip (§5.4).
+4. **`engine-matrix` is repaired** (commits `d5d0be9b` and `ff9aa14a`). It failed all three scheduled runs for seven independent reasons (§5.1). It now declares six rows, each with an expected outcome, and is green only when every row records what it declares. Each row's outcome is derived from what its steps did, and the broker is read back from the running container. Run 36531786341 was green on all six rows at `7e4cd0b1`. The fix round and the merge of PROD-01.5 (§5.5) are re-dispatched at the final tip (§5.4).
 5. **The support docs were wrong about the operators.** `strimzi-backup-operator` has defaulted to engine v0.22.0 since its v0.3.0 (2026-09-07). `kafka-backup-operator` 1.3.0 links `kafka-backup-core` 0.19.2 as a library. [support-matrix.md](../../support-matrix.md) and [stability.md](../../stability.md) now say so (§6).
 6. **OSO-operator archives:**
    - 0.21 and 0.22 archives drill fully;
@@ -501,7 +501,7 @@ The three scheduled runs (34830737064 on 2026-09-14, 35586616823 on 2026-09-21, 
 **Steps.**
 
 - The matrix job sets the stack up and runs the suite exactly as the CI e2e job does: `just e2e-up`, then `cargo test --locked -p e2e --features e2e -- --test-threads=1 --skip a_pod_really_reaches_the_k8s_listener`.
-- `KAFKA_VERSION` comes from the row, in the environment and in the generated `.env`. That is the variable `e2e/compose/docker-compose.yml` reads (`apache/kafka:${KAFKA_VERSION:-3.7.1}`) and PROD-01.5 parameterizes.
+- `KAFKA_VERSION` comes from the row, and only through the job's environment. PROD-01.5 parameterizes that variable, and `e2e/compose/docker-compose.yml` reads it: `${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-3.7.1}}` since PROD-01.5. The generated `.env` names the engine (`OSO_DIGEST`) and nothing else, and the matrix never sets `KAFKA_IMAGE`, which would win over the row (§5.5).
 - Each tag resolves to a digest whose `org.opencontainers.image.revision` must equal the tag's commit (`git ls-remote`), the digest-to-commit binding `extract-engine.sh` asserts for the pin.
 
 **Seed and lookup.**
@@ -526,7 +526,7 @@ The three scheduled runs (34830737064 on 2026-09-14, 35586616823 on 2026-09-21, 
 - `publish` is read-only. `scripts/engine-matrix-rows.py` renders the rows between `<!-- engine-matrix:rows:begin -->` and `<!-- engine-matrix:rows:end -->` and touches nothing else. It refuses missing or repeated markers, zero rows, a malformed row, a repeated (tag, broker) pair, or fewer rows than `--expect 6`. The page goes out as the `support-matrix` artifact and in the run summary.
 - `open-pr` opens the pull request only on `main` and only when the repository variable `ENGINE_MATRIX_OPEN_PR` is `true`.
 
-**Guards.** `crates/logweir/tests/engine_matrix.rs` holds 24 tests since the fix round. Beyond the first round's sixteen, they:
+**Guards.** `crates/logweir/tests/engine_matrix.rs` holds 26 tests: 24 from the fix round, and two from the merge of PROD-01.5 (§5.5). Beyond the first round's sixteen, the fix round's tests:
 
 - run the outcome script over a table of step outcomes, including the reviewer's cases A (a build failure), B (a failed below-floor seed) and C (a below-floor engine the drills accepted);
 - execute the Record step's and the verdict step's own `run:` text, with the Record step's wiring asserted;
@@ -547,9 +547,9 @@ The reviewer planted eight regressions, and four survived the first round's test
 | v0.19.2 | 3.7.1 | below | `unsupported(lever-absent)` | `kafka-backup-operator` 1.3.0's library version |
 | v0.19.1 | 3.7.1 | below | `unsupported(lever-absent)` | `strimzi-backup-operator` v0.2.22–v0.2.25 default |
 
-v0.18.0 left the window: it is the fifth-newest minor, and no operator defaults to it. When PROD-01.5 settles its 4.3 patch release, the broker row should name the same one.
+v0.18.0 left the window: it is the fifth-newest minor, and no operator defaults to it. PROD-01.5 has since pinned its 4.3 line to 4.3.1 (`e2e/compose/stack-env.sh`), the release this row declares.
 
-After integration onto main (`0cd7cca0` and later), the full rows also run PROD-01.1's `e2e/tests/record_semantics.rs`. Its contract assertions are gated on engine 0.21.0 (`CONTRACT_ENGINE`), so the v0.22.0 row records outcomes from it without red cells, while both pin rows assert the contract. On Kafka 4.3.1 those assertions have not run: this branch predates them, and PROD-01.1 measured on 3.7.1. If they fail there, the 4.3.1 row records `fail(e2e suite)`. That is real broker-line evidence for PROD-01.5, and the row's declaration should then follow the evidence.
+The full rows run the whole CI e2e command. Since the merge of main (`632ea345`), that includes PROD-01.1's `e2e/tests/record_semantics.rs`, PROD-01.4's `e2e/tests/topic_identity.rs` live rows and PROD-01.5's `e2e/tests/stack_params.rs`. The record-semantics contract is asserted only on engine 0.21.0 (`CONTRACT_ENGINE`): the v0.22.0 row records those outcomes without asserting them, and both pin rows assert them. §5.5 runs these rows locally on the three matrix rows that no earlier run had combined them with. A failure on GitHub makes a row record `fail(e2e suite)`. That is real evidence, for PROD-01.5 when the broker is the cause and for PROD-00.3 when the engine is, and the row's declaration then follows the evidence.
 
 ### 5.4 Local validation and the dispatch command
 
@@ -583,6 +583,60 @@ Expected result:
 - `open-pr` skipped, because the run is not on `main`.
 
 A red row names what it recorded against what it declared.
+
+### 5.5 After the merge of PROD-01.5 (main `632ea345`)
+
+This branch merged main at `632ea345` with a merge commit (`2af7f62e`, no rebase). The merge brought in PROD-01.1, PROD-01.4 and PROD-01.5, and it changed three things for the matrix.
+
+**The seed keeps both behaviours (review L5; `5818feea`).**
+
+- `scripts/e2e-seed.sh` conflicted, because both branches added a check before any work.
+- PROD-01.5's check comes first. It computes `REFRESH_FIXTURES`, which is 1 on the default stack and 0 on a slot, and it refuses 1 on a slot.
+- The digest-mode guard follows and tests that computed value. It no longer reads the raw `${LOGWEIR_SEED_REFRESH_FIXTURES:-1}`, which refused `optional` on every slot.
+- `optional_digests_work_on_a_slot_and_on_the_default_stack` runs the seed in a clean environment built from `e2e/compose/stack-env.sh --slot 2`, with a `docker` that records whether it was called.
+  - Three cases pass the checks and reach the stack: slot 2 with the refresh unset, slot 2 with it at 0, and the default stack with it at 0.
+  - Two cases are refused before docker runs, each by its own stack's rule: the default stack with the refresh unset, and slot 2 with it at 1.
+- Two mutants of the merge turn the test red: a guard that reads the raw variable, and PROD-01.5's slot refusal dropped (artifact `fix-round-l5-mutants.log`).
+- The matrix still seeds on the default stack with the refresh at 0.
+
+**The generated `.env` no longer names the broker (`545bc8bb`).**
+
+- The full drill now runs PROD-01.5's `a_slot_moves_every_host_port_and_the_default_render_does_not`. It renders the stack with every stack variable removed, and it requires the compose file's own default broker, `apache/kafka:3.7.1` (`e2e/tests/stack_params.rs:1246`).
+- The matrix wrote the row's `KAFKA_VERSION` into `e2e/compose/.env`, and that render reads `.env`. The 4.3.1 row would therefore have recorded `fail(e2e suite)`.
+- This was reproduced with `docker compose config` alone (artifact `merge-env-render.log`). A `.env` holding `KAFKA_VERSION=4.3.1` fails at `:1246`; CI's shape (`KAFKA_VERSION=3.7.1`) and a digest-only `.env` both pass.
+- The generated `.env` now holds `OSO_DIGEST` alone. The row's broker is the job's `KAFKA_VERSION`, which compose prefers over `.env`.
+- `the_generated_env_names_the_engine_and_leaves_the_broker_to_the_row` pins this. In cycle c9 (the table below), the render row passed while the stack ran 4.3.1.
+
+**The broker line.**
+
+- `kafka-broker-1`'s image is now `${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-3.7.1}}`.
+- `the_declared_rows_follow_the_documented_floor` reads that image as YAML and accepts both this form and the unwrapped one. Before, it split the whole file on a substring.
+- The test also asserts that the job sets `KAFKA_VERSION` from the row. Nothing in the job, `.env` included, may set `KAFKA_IMAGE`, which would win over every row.
+- The matrix asks for 4.3.1 by tag, and PROD-01.5's `--kafka 4.3` pins the same release by digest. On slot 2 the running broker's image id read back as that digest (`sha256:77e3df90…`); 3.7.1's read back as `sha256:ed74d7d1…`.
+- Six mutants are caught:
+  - `KAFKA_VERSION` dropped from the image line;
+  - `KAFKA_IMAGE` set in the job;
+  - `KAFKA_IMAGE` written into `.env`;
+  - `KAFKA_VERSION` not taken from the row;
+  - the old `.env` line restored;
+  - the `.env` write removed.
+- The pre-01.5 form of the image line is still read. The compose mutants ran in a scratch copy with its own target directory, and `e2e/compose` was not edited (artifacts `fix-round-parser-mutants.log` and `merge-env-render.log`).
+
+**The merged suite on the rows at risk.** No earlier run had combined the new rows with three of the matrix's rows:
+
+- PROD-01.1 measured its record-semantics rows on 3.7.1 only;
+- PROD-01.4 ran its live rows with the pin, on 3.7.1 and 4.3.1;
+- PROD-01.5 ran one row of each on 4.3.1.
+
+Cycles c9 to c11 ran on compose slot 2 (PROD-01.5; a slot needs no lock). Each was set up exactly as the workflow now sets up a row: a digest-only `.env`, `KAFKA_VERSION` in the environment, and the broker read back by `scripts/engine-matrix-broker.sh`. The engine digest was overridden in this worktree only, and restored afterwards.
+
+| Cycle | Row | Steps | Result |
+|---|---|---|---|
+| c9 | v0.21.0 × 4.3.1 | `just e2e-up` (broker read back as `apache/kafka:4.3.1`, Kafka 4.3.1); seed (`required`); `cargo build`; `cargo test --locked -p e2e --features e2e --test record_semantics --test topic_identity --test stack_params -- --test-threads=1` | Exit 0 in 905 s. `record_semantics`: 8 passed, 2 ignored, with the contract asserted (engine 0.21.0). `stack_params`: 17 passed, including the default render. `topic_identity`: 52 passed, 1 ignored (its retention row) |
+| c10 | v0.22.0 × 3.7.1 | the same (broker `apache/kafka:3.7.1`, Kafka 3.7.1; engine `kafka-backup 0.22.0`) | Exit 0 in 980 s. `record_semantics`: 8 passed, 2 ignored; on 0.22.0 the contract is not asserted, by design. `stack_params`: 17 passed. `topic_identity`: 52 passed, 1 ignored. Its rows capture with the engine under test, so the rule's asserted known misses (c13, c14) and false positive (c19) hold on 0.22.0 |
+| c11 | v0.19.2 × 3.7.1 (below) | seed (`optional`), exit 0; `cargo build`; reduced row, exit 101; control, exit 101 | Both refused with "below the declared floor", so the row records `unsupported(lever-absent)`, as declared |
+
+The rest of the full drill, 64 tests, passed on the three full rows at `7e4cd0b1` (run 36531786341). On main, the CI e2e job runs the pin on 3.7.1, and it passed at `632ea345` (run 36536046039).
 
 ## 6. Support documents corrected
 
@@ -732,7 +786,7 @@ Proposed new rows, lettered from **f**:
 | PROD-00.3n | Unattested import of operator-written archives | §7 | N (catalog). A catalog trust-model change, not an engine capability: the catalog admits only receipts verified against a trusted key. It needs its own owner decision, and it belongs with the PLAT-15.2 import and the PROD-09 lineage; it is listed here only because §7 found it | ~3 days | none | FX-1, PLAT-15.2 | a trust-model decision (owner) | compose | A | A-OSO-3; points marked unattested, never `Verified` |
 | PROD-00.3o | Weekly archive-compatibility rows | §7 | N (CI) | ~1 day | none | FX-1 | — | compose | B | A-OSO-1, A-OSO-2, A-OSO-4 |
 
-- **A-3f-1 (PROD-00.3f: the contract moves with the pin).** PROD-01.1 asserts its record-semantics contract only when the engine is `CONTRACT_ENGINE`. That constant is `e2e/tests/record_semantics.rs:412` on main. On any other engine a row prints "outcome recorded, contract not asserted" (`:414-421`) and stays green.
+- **A-3f-1 (PROD-00.3f: the contract moves with the pin).** PROD-01.1 asserts its record-semantics contract only when the engine is `CONTRACT_ENGINE`. That constant is `e2e/tests/record_semantics.rs:413` on main at `632ea345`. On any other engine a row prints "outcome recorded, contract not asserted" (`contract_applies`, `:415-424`) and stays green.
   - Pass: the bump moves `CONTRACT_ENGINE` to 0.22.0, and a guard test asserts it equals the pinned engine version (the tag `scripts/extract-engine.sh` pins, which is also `doctor`'s pin). PROD-01.1's rows re-run on 0.22.0 with the contract asserted. Any difference from their 0.21.0 outcomes is recorded as a contract change in PROD-01.1's record, not absorbed.
   - Negative control: the old constant (`"0.21.0"`) on the new pin fails the guard test. Without the guard, every contract row on 0.22.0 would record its outcome, assert nothing, and stay green.
   - Fixture: `e2e/tests/record_semantics.rs` and its rows.
@@ -741,8 +795,8 @@ Proposed new rows, lettered from **f**:
 
 - **Local runs used amd64 emulation.** Every local run was on an arm64 host, with the engine running as the linux/amd64 image under emulation (`e2e/fixtures/engine-docker.sh`). Durations are not performance evidence.
 - **One broker, and no transactional fixture here.** The compose stack is one combined KRaft broker, and no run in this record produces transactionally, duplicates headers or writes non-monotonic timestamps. PROD-01.1 has since measured C1, C5, C6, C13 and C14 (its record §2 and §5).
-- **The fix round has not yet run on GitHub.** Run 36531786341 was green on all six rows at `7e4cd0b1`. The fix round changes how rows are recorded (`ff9aa14a`), so its CI evidence is the re-dispatch at the final tip. The changes are pinned by `crates/logweir/tests/engine_matrix.rs`, which executes the recording and verdict steps' own text.
-- **The 4.3.1 evidence is one broker line.** Kafka 4.3.1 was probed (ApiVersions) and run (demo drill, G-PITR, the full CI e2e command) with the pinned engine only, on one combined broker, before PROD-01.1's `record_semantics.rs` existed on this branch. PROD-01.5 owns the 3.9, 4.1 and 4.3 lines and their profiles.
+- **The fix round and the merge have not yet run on GitHub.** Run 36531786341 was green on all six rows at `7e4cd0b1`. The fix round changes how rows are recorded (`ff9aa14a`). The merge adds three suites to the full rows and changes the generated `.env` (§5.5). Their CI evidence is therefore the re-dispatch at the final tip. `crates/logweir/tests/engine_matrix.rs` pins the changes by executing the recording and verdict steps' own text, and §5.5's cycles ran the new rows locally.
+- **This record's 4.3.1 evidence uses the pinned engine only.** Kafka 4.3.1 was probed (ApiVersions) and run with the pin: the demo drill, G-PITR and the full CI e2e command before the merge (§4.3), and the merged suite's new rows after it (§5.5, c9). All of it ran on one combined broker, and 0.22.0 ran on 3.7.1 only. PROD-01.5 owns the 3.9, 4.1 and 4.3 lines and has measured them with the pin (`docs/support-matrix.md`, "Broker versions").
 - **The upstream forecasts are forecasts.** Whether upstream accepts a given PR, and the cost estimates, are forecasts from the code and the release history, not measurements.
 - **Operator archives were reproduced, not collected.** They were reproduced by seeding with the same engine images the operators use; no archive was taken from a running operator. FX-1's snapshot failure is cited from the tracker, not re-run.
 
