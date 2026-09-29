@@ -591,8 +591,9 @@ impl Store {
 
     /// A TEST DOUBLE of a VERSIONED bucket (FX-7), and the handle a test uses
     /// to act on it the way a writer OTHER than this store would: overwrite a
-    /// key unconditionally (the engine's own manifest put), or delete it (a
-    /// delete marker). No production path builds it.
+    /// key unconditionally, as the engine's own manifest put does. No
+    /// production path builds it, and it offers no delete (G-RET: this crate
+    /// names no object-store delete).
     ///
     /// Every successful put through the STORE, and every write through the
     /// handle, becomes a new version with a fresh id; [`Store::get`] reports
@@ -1246,15 +1247,15 @@ impl Store {
     }
 }
 
-/// One key's history in a [`VersionLog`]: `(version id, bytes)`, oldest first;
-/// `None` bytes are a delete MARKER.
-type VersionHistory = Vec<(String, Option<Vec<u8>>)>;
+/// One key's history in a [`VersionLog`]: `(version id, bytes)`, oldest first.
+type VersionHistory = Vec<(String, Vec<u8>)>;
 
 /// TEST DOUBLE ONLY (FX-7): the version history of [`Store::in_memory_versioned`].
 ///
-/// Every write appends `(version id, bytes)` to its key's history; a delete
-/// appends a MARKER (`None`). The current version is the last entry, unless
-/// that entry is a marker — which is S3's model of a versioned bucket.
+/// Every write appends `(version id, bytes)` to its key's history, and the
+/// current version is the last entry — S3's model of a versioned bucket, less
+/// the delete marker, which this crate does not model because it names no
+/// object-store delete at all (G-RET, `scripts/check-no-archive-write.sh`).
 #[doc(hidden)]
 #[derive(Debug, Default)]
 pub struct VersionLog {
@@ -1263,7 +1264,7 @@ pub struct VersionLog {
 }
 
 impl VersionLog {
-    fn next(&self, key: &str, bytes: Option<&[u8]>) -> String {
+    fn record(&self, key: &str, bytes: &[u8]) -> String {
         let mut state = self
             .state
             .lock()
@@ -1274,12 +1275,8 @@ impl VersionLog {
             .1
             .entry(key.to_string())
             .or_default()
-            .push((id.clone(), bytes.map(<[u8]>::to_vec)));
+            .push((id.clone(), bytes.to_vec()));
         id
-    }
-
-    fn record(&self, key: &str, bytes: &[u8]) -> String {
-        self.next(key, Some(bytes))
     }
 
     fn current(&self, key: &str) -> Option<String> {
@@ -1287,10 +1284,11 @@ impl VersionLog {
             .state
             .lock()
             .expect("the version log is never poisoned");
-        match state.1.get(key).and_then(|h| h.last()) {
-            Some((id, Some(_))) => Some(id.clone()),
-            _ => None,
-        }
+        state
+            .1
+            .get(key)
+            .and_then(|h| h.last())
+            .map(|(id, _)| id.clone())
     }
 
     fn read(&self, key: &str, version: &str) -> Option<Vec<u8>> {
@@ -1303,7 +1301,7 @@ impl VersionLog {
             .get(key)?
             .iter()
             .find(|(id, _)| id == version)
-            .and_then(|(_, bytes)| bytes.clone())
+            .map(|(_, bytes)| bytes.clone())
     }
 
     fn history(&self, key: &str) -> Vec<String> {
@@ -1320,8 +1318,8 @@ impl VersionLog {
 }
 
 /// TEST DOUBLE ONLY (FX-7): a second writer on a [`Store::in_memory_versioned`]
-/// bucket — the engine's unconditional manifest put, or an operator's delete —
-/// which the `Store` itself, being create-only, cannot be.
+/// bucket — the engine's unconditional manifest put — which the `Store`
+/// itself, being create-only, cannot be.
 #[doc(hidden)]
 pub struct VersionedBucket {
     backend: Arc<object_store::memory::InMemory>,
@@ -1331,7 +1329,16 @@ pub struct VersionedBucket {
 
 impl VersionedBucket {
     /// An unconditional put: a NEW current version of `key`. Returns its id.
+    ///
+    /// Held to Global Constraint 6's root like every write this crate makes:
+    /// a key outside `logweir/` panics here, as it does in `put_create_only`,
+    /// so the double cannot become a way to model writes anywhere else.
     pub fn overwrite(&self, key: &str, bytes: &[u8]) -> String {
+        assert!(
+            key.starts_with(LOGWEIR_ROOT),
+            "Global Constraint 6: the versioned double writes only under `{LOGWEIR_ROOT}`, got \
+             `{key}`"
+        );
         self.rt
             .block_on(self.backend.put(
                 &OPath::from(key),
@@ -1341,14 +1348,7 @@ impl VersionedBucket {
         self.log.record(key, bytes)
     }
 
-    /// A delete: a delete MARKER becomes the current version of `key`, and
-    /// every earlier version stays readable by its id.
-    pub fn delete(&self, key: &str) {
-        let _ = self.rt.block_on(self.backend.delete(&OPath::from(key)));
-        self.log.next(key, None);
-    }
-
-    /// Every version id `key` has had, oldest first, markers included.
+    /// Every version id `key` has had, oldest first.
     #[must_use]
     pub fn versions(&self, key: &str) -> Vec<String> {
         self.log.history(key)

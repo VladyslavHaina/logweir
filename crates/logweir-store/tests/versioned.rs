@@ -11,8 +11,8 @@
 //!    answer with the current object; a reader that believed that answer would
 //!    "verify" exactly the rewrite the pin exists to catch.
 //! 2. The test double of a versioned bucket (`Store::in_memory_versioned`)
-//!    behaves as S3 does: every write is a new current version, earlier
-//!    versions stay readable by id, and a delete leaves a marker.
+//!    behaves as S3 does: every write is a new current version, and earlier
+//!    versions stay readable by id.
 //!
 //! In process, no endpoint: the S3 half (the `?versionId=` query and the
 //! `x-amz-version-id` header) is `object_store`'s own and is exercised live on
@@ -73,19 +73,11 @@ fn a_versioned_bucket_keeps_every_version_readable_by_id() {
     assert_eq!(bucket.versions(KEY), vec![first, second]);
 }
 
-/// A delete leaves a MARKER: the key reads as absent, the earlier version is
-/// still readable by its id, and an id that never existed is `NotFound`.
+/// An id the key never had is `NotFound` — never the current bytes.
 #[test]
-fn a_delete_marker_hides_the_key_and_not_its_versions() {
-    let (store, bucket) = Store::in_memory_versioned("logweir/");
-    let first = store
-        .put_create_only(KEY, b"first")
-        .unwrap()
-        .version_id
-        .unwrap();
-    bucket.delete(KEY);
-    assert!(matches!(store.get(KEY), Err(StoreError::NotFound(_))));
-    assert_eq!(store.get_version(KEY, &first).unwrap().0, b"first");
+fn an_unknown_version_id_is_not_found() {
+    let (store, _bucket) = Store::in_memory_versioned("logweir/");
+    store.put_create_only(KEY, b"first").unwrap();
     assert!(matches!(
         store.get_version(KEY, "no-such-version"),
         Err(StoreError::NotFound(_))
