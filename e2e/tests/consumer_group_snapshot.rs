@@ -801,6 +801,7 @@ fn assert_told(o: &Output, backup_id: &str, key: &str, what: &str) {
         "{what}: the event must carry the run's id: {event}"
     );
     eprintln!("[cgsnap] {what} told it: {line}");
+    eprintln!("[cgsnap] {what} logged: {event}");
 }
 
 /// **FX-1 fix round (M1), live.** An archive whose consumer-groups snapshot
