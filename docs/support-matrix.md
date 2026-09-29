@@ -186,6 +186,10 @@ Apache Kafka line (`KAFKA_VERSION`). Each row does the following:
 - reads back the version the running broker logged, which is what the Kafka
   broker column records;
 - runs the deleted-segment positive control;
+- reads back what the broker's time-retention check deleted during the run.
+  A failed suite's evidence names it, because a test fixture stamped older
+  than the broker's retention can lose its records to that check before the
+  capture;
 - records one of the outcomes above.
 
 A row is green only when it records the outcome it declares, and a row whose

@@ -7,7 +7,7 @@
 
 ## 0. Decision summary
 
-1. **Stay on the 0.21.0 pin until OD-3 is recorded, then move to 0.22.0 (proposed child row PROD-00.3f).** 0.22.0 is one squash commit over 0.21.0. It does not change the segment format, the three subcommands Logweir runs (`backup`, `restore`, `validate-restore`), or any key Logweir renders. On the compose stack it passes the demo drill, G-PITR, the receipt path and the full CI e2e command (64 of 64), and both verifiers accept its evidence (§4, §5.4). Two of its changes need Logweir work before a bump:
+1. **Stay on the 0.21.0 pin until OD-3 is recorded, then move to 0.22.0 (proposed child row PROD-00.3f).** 0.22.0 is one squash commit over 0.21.0. It does not change the segment format, the three subcommands Logweir runs (`backup`, `restore`, `validate-restore`), or any key Logweir renders. On the compose stack it passes the demo drill, G-PITR, the receipt path and the full CI e2e command (64 of 64), and both verifiers accept its evidence (§4, §5.4). Run 36542777892 recorded one red row: 0.22.0's full row, which since the merge also runs PROD-01.1's record-semantics suite. The broker's time retention deleted one of those rows' source records before the capture. The pin does the same under the same conditions, so this is a fixture race, not the engine (§4.4). 00.3f carries it as precondition P-3f-1. Two of 0.22.0's changes need Logweir work before a bump:
    - its `path_style` fix does **not** lift ENGINE-PATHSTYLE, because a custom endpoint still forces path-style;
    - it newly derives plaintext HTTP from an `http://` endpoint even when `allow_http: false` is rendered.
 2. **Every capability gap has a route** (§3). The engine's Kafka and archive correctness defects go **upstream first**; this is bug-class work that `docs/OSO_Feature_Gate_PRD.md` does not gate. Each one is carried as a patch on the PROD-00.2 source build when upstream declines or stalls. The engine's gated seams go to a **patch or a Logweir-native path**, never to an upstream feature PR: the programmatic record filter, and SASL plugins for OAUTHBEARER and MSK IAM. Offsets, ACLs, verification and transport safety stay **Logweir-native**. MSK IAM, the engine's own evidence reports and its continuous/offset-store modes are **declared unsupported** for now.
@@ -17,7 +17,7 @@
    - PROD-07.3 a resume point.
 
    That makes it the cheapest route to all three (C10/C11).
-4. **`engine-matrix` is repaired** (commits `d5d0be9b` and `ff9aa14a`). It failed all three scheduled runs for seven independent reasons (§5.1). It now declares six rows, each with an expected outcome, and is green only when every row records what it declares. Each row's outcome is derived from what its steps did, and the broker is read back from the running container. Run 36531786341 was green on all six rows at `7e4cd0b1`. The fix round and the merge of PROD-01.5 (§5.5) are re-dispatched at the final tip (§5.4).
+4. **`engine-matrix` is repaired** (commits `d5d0be9b` and `ff9aa14a`). It failed all three scheduled runs for seven independent reasons (§5.1). It now declares six rows, each with an expected outcome, and is green only when every row records what it declares. Each row's outcome is derived from what its steps did, and the broker is read back from the running container. Run 36531786341 was green on all six rows at `7e4cd0b1`. Run 36542777892 ran at `4861e03a`, after the merge of PROD-01.5 (§5.5). It recorded five rows as declared, and the v0.22.0 row as `fail(e2e suite)` from §4.4's fixture race. A failed suite's row now names what the broker's time retention deleted (§5.6).
 5. **The support docs were wrong about the operators.** `strimzi-backup-operator` has defaulted to engine v0.22.0 since its v0.3.0 (2026-09-07). `kafka-backup-operator` 1.3.0 links `kafka-backup-core` 0.19.2 as a library. [support-matrix.md](../../support-matrix.md) and [stability.md](../../stability.md) now say so (§6).
 6. **OSO-operator archives:**
    - 0.21 and 0.22 archives drill fully;
@@ -89,6 +89,7 @@ Routes: **U** upstream PR (bug-class only), carried as a patch on the PROD-00.2 
 | C17 | Engine evidence reports | `checksums_valid: true` is set unconditionally | **X** never consumed; verification stays N (PROD-08) | — | validation runs are Part 2 | PROD-08.x |
 | C18 | Consumer-group snapshot | Written as `snapshot_time` + topic → partition → offset; drops groups without offsets on archived topics; Logweir's vendored shape differs (FX-1) | **N** (FX-1 parses it as an import source; PROD-04.1 captures natively) | FX-1 as scoped | automatic offset reset is Part 2 | FX-1, PROD-04.1, 04.2 |
 | C19 | Build and architecture | Logweir copies OSO's amd64-only image binary (GR6) | **F** build from the vendored source (PROD-00.2) | PROD-00.2 as scoped | MIT permits it; GR6 amendment | PROD-00.2, every F row |
+| C20 | Capture of a topic that retention emptied (found by run 36542777892) | Each partition starts at its earliest offset. A partition whose earliest offset has reached its high watermark is skipped with a debug-level line and no segment. With every partition empty, the engine writes no segment and exits 0. The code is identical in 0.21.0 and 0.22.0 | **None upstream** (intended: an empty source is not an engine error); **N** exists: Logweir refuses the run, and nothing is signed | — | none | PROD-01.1 and G-PITR fixtures (A-C20-2), engine-matrix (§5.6) |
 
 ### 3.1 C1 — Control records and READ_COMMITTED
 
@@ -429,6 +430,19 @@ SaslAuthenticate v2 and IncrementalAlterConfigs v1 sit at the ceiling, which a f
 
 The runner copies the binary out of OSO's amd64-only image (ruling GR6, `L/scripts/extract-engine.sh`). Every F route above presupposes PROD-00.2: building the vendored source for amd64 and arm64, with the patch queue applied, SBOM and provenance. **Its acceptance is PROD-00.2's own.** One addition: the build applies F patches in a fixed order from a checked-in directory, and each patch has the upstream PR link or the refusal that justifies carrying it.
 
+### 3.20 C20 — Capture of a topic that retention emptied (found by run 36542777892)
+
+- **Behaviour, both versions.** Logweir renders neither `start_offset` nor `stop_at_current_offsets`, so each partition starts at its earliest offset:
+  - `StartOffset::Earliest` is the default (`config.rs:680-681` in 0.21.0, `:710-711` in 0.22.0);
+  - `stop_at_current_offsets` defaults to `false` (`:476-477` and `:505-506`).
+
+  A partition whose earliest offset has reached its high watermark is skipped: `if start_offset >= end_offset { debug!("… no new data to back up"); return Ok(()) }` (`backup/engine.rs:1191-1199` in 0.21.0, `:1247-1255` in 0.22.0). From offset resolution to that skip, the path is byte-identical in the two versions (61 lines: `:1147-1207` and `:1203-1263`). With every partition skipped, the engine writes no segment and exits 0.
+- **What Logweir does.** The backup's readback refuses a set that names no segment for any named topic (`L/crates/logweir/src/backup/phase_run.rs:290-300`). It exits 1 with no receipt, and nothing is signed. Run 36542777892 printed exactly that refusal.
+- **Route.** Nothing is needed upstream: skipping an empty range is intended, and backing up an empty topic is not an engine error. A per-topic "captured nothing" warning would be a feature rather than a bug-class fix, so it is not a PR candidate under §2. Logweir's guard is the N route, and it already exists.
+- **Acceptance.**
+  - **A-C20-1.** A topic that the broker's time retention emptied before the capture is refused by `logweir backup run` with the "captured nothing" message, on the pin and on 0.22.0 alike. Measured in §4.4: three topics, two engines.
+  - **A-C20-2 (the fixtures; owners PROD-01.1 and G-PITR).** A source topic that holds records stamped older than the broker's retention is created with `retention.ms=-1`, as Logweir creates its restore targets (`L/crates/logweir-kafka/src/reader.rs:349-355`). Pass: the topic survives a retention check, and its capture archives every record (§4.4, the fix verification). Negative control: the same topic on cluster-default retention is emptied by the check and refused (A-C20-1).
+
 ## 4. The 0.22.0 evaluation
 
 ### 4.1 What changed, and what it means for Logweir
@@ -478,6 +492,53 @@ The engine's fixed protocol versions (C8) were exercised on the newest supported
 
 c7 set `KAFKA_VERSION=4.3.1` exactly as c8 did, but recorded no broker probe. c8's probe is the direct evidence that this mechanism selects `apache/kafka:4.3.1`, and c5's probe on 3.7.1 read back `apache/kafka:3.7.1` and "Kafka version: 3.7.1". Nothing in the engine's fixed protocol versions failed on 4.3.1, which confirms §3.8's reading from source.
 
+### 4.4 Run 36542777892: the red v0.22.0 row is a fixture race, not the engine
+
+Run 36542777892, at `4861e03a`, recorded five rows as declared and `v0.22.0 | 3.7.1 | full` as `fail(e2e suite)`. One test failed: PROD-01.1's `keys_nulls_tombstones_and_duplicate_headers` (`e2e/tests/record_semantics.rs:1609`). Its backup `recsem-1463674564-shapes-b` exited 1 with "declares no segment for any of the named topics … the engine exited 0 having captured nothing". The other seven record-semantics rows passed on 0.22.0.
+
+**What happened.** This is the job's broker log, uploaded as `compose-logs-v0.22.0-kafka-3.7.1` (artifact `round3/ci-36542777892/compose.log`):
+
+| Time (UTC) | Event |
+|---|---|
+| 08:39:53.2 | The source topic is created with `message.timestamp.type=CreateTime` and cluster-default retention |
+| 08:39:54.3 | The fixture lands: 15 records, stamped around `T` = 2025-10-09 |
+| 08:39:55.755–.760 | The broker's retention check deletes the only segment of all three partitions "due to log retention time 604800000ms breach based on the largest record timestamp" (`largestRecordTimestamp=1760000000070`). The log start reaches the log end (8, 4 and 3) |
+| 08:39:57.32–.35 | Engine 0.22.0 runs for 27 ms, finds every partition empty and exits 0. Logweir refuses |
+
+The check is periodic. The broker started at 08:29:25.7, and it checks 30 s after starting and then every 300 s: 08:29:55.7, 08:34:55.7 and 08:39:55.7. The fixture's records are about 355 days old, far past the default 7-day retention, so the first check after the produce deletes them. The row fails when that check falls between the produce and the engine's capture.
+
+**Reproduced with both engines.** The runs used compose slot 2 and Kafka 3.7.1, from a scratch copy of the worktree with one scratch test that was never committed (artifacts `round3/`). The test creates three topics the way PROD-01.1 creates its sources:
+
+- A: the shapes fixture at `T`;
+- B: one plain record at `T`, with no nulls, tombstones or headers;
+- C: the shapes fixture, stamped with the current time.
+
+It waits for the broker's retention check, then backs each topic up.
+
+| Engine | Wait for the check | A (shapes at `T`) | B (plain record at `T`) | C (shapes, stamped now) |
+|---|---|---|---|---|
+| v0.22.0 | 208 s | emptied (log start 8/4/3 = end); exit 1, "captured nothing" | emptied; exit 1, "captured nothing" | untouched; exit 0, captured |
+| v0.21.0 (pin) | 116 s | the same | the same | the same |
+
+The broker deleted A and B at its checks at 09:10:38.7 and 09:15:38.6, 300 s apart, and nothing else (`round3/broker-retention-deletions.txt`). Without the forced wait, `keys_nulls_tombstones_and_duplicate_headers` passed on both engines in the same session: 74.7 s on 0.22.0 and 65.0 s on 0.21.0. It also passed in c10 (§5.5).
+
+**The fix, verified.** A second scratch test used the same two old-stamped topics, created with `retention.ms=-1`, plus a canary on cluster-default retention. The canary was emptied at the check at 09:25:13.4, 244 s in, which proves the check ran. A and B were untouched, and engine 0.22.0 archived 15 of 15 and 1 of 1 records (`round3/fix-summary.txt`).
+
+**So:**
+
+- **No record shape triggers it.** A single plain record at `T` is lost the same way, and both engines capture the full shapes fixture when it is stamped now.
+- **It is not the engine.** Both versions handle an emptied topic identically, by the same code (C20).
+- **It is a latent race in the test fixtures, on every full row.** The source topics that hold `T`-stamped records are created without `retention.ms`. In run 36542777892, six of them lived about 77 s in total:
+  - `pitr-src`: 16.9 s;
+  - `shapes`: 6.1 s;
+  - `ts-floor`: 21.4 s;
+  - `ts-bound`: 13.4 s;
+  - `ts-pit`: 13.5 s;
+  - `recreate`: 6.0 s.
+
+  With a check every 300 s, a check lands inside one of those lifetimes about one run in four. It lands inside the narrower window between a produce and its capture less often. The pin rows and main's CI e2e job carry the same exposure.
+- **The fix belongs to the fixtures** (A-C20-2, §11). It is one config pair per source topic, proved above.
+
 ## 5. engine-matrix
 
 ### 5.1 Why every scheduled run failed
@@ -526,7 +587,7 @@ The three scheduled runs (34830737064 on 2026-09-14, 35586616823 on 2026-09-21, 
 - `publish` is read-only. `scripts/engine-matrix-rows.py` renders the rows between `<!-- engine-matrix:rows:begin -->` and `<!-- engine-matrix:rows:end -->` and touches nothing else. It refuses missing or repeated markers, zero rows, a malformed row, a repeated (tag, broker) pair, or fewer rows than `--expect 6`. The page goes out as the `support-matrix` artifact and in the run summary.
 - `open-pr` opens the pull request only on `main` and only when the repository variable `ENGINE_MATRIX_OPEN_PR` is `true`.
 
-**Guards.** `crates/logweir/tests/engine_matrix.rs` holds 26 tests: 24 from the fix round, and two from the merge of PROD-01.5 (§5.5). Beyond the first round's sixteen, the fix round's tests:
+**Guards.** `crates/logweir/tests/engine_matrix.rs` holds 28 tests: 24 from the fix round, two from the merge of PROD-01.5 (§5.5) and two from run 36542777892 (§5.6). Beyond the first round's sixteen, the fix round's tests:
 
 - run the outcome script over a table of step outcomes, including the reviewer's cases A (a build failure), B (a failed below-floor seed) and C (a below-floor engine the drills accepted);
 - execute the Record step's and the verdict step's own `run:` text, with the Record step's wiring asserted;
@@ -637,6 +698,41 @@ Cycles c9 to c11 ran on compose slot 2 (PROD-01.5; a slot needs no lock). Each w
 | c11 | v0.19.2 × 3.7.1 (below) | seed (`optional`), exit 0; `cargo build`; reduced row, exit 101; control, exit 101 | Both refused with "below the declared floor", so the row records `unsupported(lever-absent)`, as declared |
 
 The rest of the full drill, 64 tests, passed on the three full rows at `7e4cd0b1` (run 36531786341). On main, the CI e2e job runs the pin on 3.7.1, and it passed at `632ea345` (run 36536046039).
+
+### 5.6 After run 36542777892: the declaration, and the retention readback (`f3eb390a`)
+
+**The v0.22.0 row still declares `pass`.** That is what the engine earns. The row passed in c10, and in §4.4's unforced runs, and the red was a fixture race that hits the pin too.
+
+An expected-failure declaration naming a 0.22.0 defect would be false, because no such defect exists. It would also turn the row red whenever the race misses, which is most runs.
+
+Nothing is hidden. PROD-01.1's assertion is untouched, a failed suite still records `fail(e2e suite)`, and the verdict step still fails the job. Until A-C20-2 lands in the fixtures, any full row can go red this way.
+
+**What changed: the red now names its cause.**
+
+- A step after the drills, "Read back what the broker's time retention deleted" (`if: always()` once the stack is up; `continue-on-error`), runs `scripts/engine-matrix-broker.sh --retention`.
+- The script counts the segments the broker deleted "due to log retention time" and names their topics. It names five and counts the rest. It ignores the other deletion lines: the log start moving, a topic deleted by a test's cleanup, and the files removed later.
+- `scripts/engine-matrix-outcome.sh` adds them to a failed suite's reason, for example: "the full e2e suite failed; during the run the broker's time-retention check deleted 3 segment(s) of recsem-1463674564-shapes …". It never changes an outcome.
+
+**Guards.**
+
+- `the_brokers_retention_deletions_are_read_back` covers:
+  - CI's three lines, among the other deletion lines, giving `retention_deletions=3` and `retention_topics=recsem-1463674564-shapes`;
+  - the five-topic cap;
+  - zero deletions;
+  - a refused option;
+  - the step's place and flags.
+- `a_failed_suite_names_what_the_brokers_retention_deleted` checks that the reason names deletions only for a failed suite, and never changes a `pass`, a below-floor refusal or a control failure.
+- Ten mutants are caught (artifact `round3/retention-attribution-mutants.log`):
+  - counting every deletion line;
+  - keeping partition suffixes;
+  - no cap;
+  - zero deletions made an error;
+  - never naming the deletions;
+  - zero counted as a deletion;
+  - deletions changing the outcome;
+  - the readback skipped after a failed drill;
+  - the readback made fatal;
+  - the Record step not wired to the readback.
 
 ## 6. Support documents corrected
 
@@ -775,7 +871,7 @@ Proposed new rows, lettered from **f**:
 
 | Row | Title | Capability | Route | Cost | Supplier constraint | Depends on | Gate | Lab | Tier | Acceptance |
 |---|---|---|---|---|---|---|---|---|---|---|
-| PROD-00.3f | Move the pin to 0.22.0 | C15, C16, §4 | N (+ refresh): `OSO_REFRESH=1 OSO_TAG=v0.22.0` with `EXPECTED_REVISION` `cc10aa4a…` (digest, tarball, `.env`, Dockerfile); `doctor`'s pin; PROD-01.1's `CONTRACT_ENGINE`; the refusal of `http://` with `allow_http: false` in `render_storage_block` (every engine document), plus the phase-0 rule; a version-neutral ENGINE-PATHSTYLE message; the matrix pin rows | ~1–2 days | none | 00.1 | OD-3 | compose | A | A-C15-1, A-C16-1, A-3f-1; §4.2's runs on the new pin |
+| PROD-00.3f | Move the pin to 0.22.0 | C15, C16, §4 | N (+ refresh): `OSO_REFRESH=1 OSO_TAG=v0.22.0` with `EXPECTED_REVISION` `cc10aa4a…` (digest, tarball, `.env`, Dockerfile); `doctor`'s pin; PROD-01.1's `CONTRACT_ENGINE`; the refusal of `http://` with `allow_http: false` in `render_storage_block` (every engine document), plus the phase-0 rule; a version-neutral ENGINE-PATHSTYLE message; the matrix pin rows | ~1–2 days | none | 00.1 | OD-3; P-3f-1 | compose | A | A-C15-1, A-C16-1, A-3f-1, P-3f-1; §4.2's runs on the new pin |
 | PROD-00.3g | Engine-side restore checkpoint: honour `checkpoint_interval_secs`, hash without file paths, keep skipped segments' mappings | C4 | U (F fallback). The Logweir-side N part is not this row: per-execution paths and dropping the unread key are PROD-07.1's (A-C4-1, A-C4-3), and carrying the checkpoint between attempts is PROD-07.3's (A-C4-2) | ~2 days | none (defect) | 00.1; 00.2 for a patch route | OD-3 | compose | A | A-C4-4 |
 | PROD-00.3h | Enforce the byte-rate limit | C12 | U | ~1 day | none (defect) | 00.1 | OD-3 | compose | B | A-C12-1 |
 | PROD-00.3i | YAML record-filter rules (erasure, offset ranges, resume point) | C10, C11 | F | ~3 days + ~1 day | the seam is "for a commercial distribution"; masking and erasure are Part 2 | 00.1, 00.2 | OD-3 | compose | A | A-C10-1, A-C11-1, A-C11-2 |
@@ -790,6 +886,11 @@ Proposed new rows, lettered from **f**:
   - Pass: the bump moves `CONTRACT_ENGINE` to 0.22.0, and a guard test asserts it equals the pinned engine version (the tag `scripts/extract-engine.sh` pins, which is also `doctor`'s pin). PROD-01.1's rows re-run on 0.22.0 with the contract asserted. Any difference from their 0.21.0 outcomes is recorded as a contract change in PROD-01.1's record, not absorbed.
   - Negative control: the old constant (`"0.21.0"`) on the new pin fails the guard test. Without the guard, every contract row on 0.22.0 would record its outcome, assert nothing, and stay green.
   - Fixture: `e2e/tests/record_semantics.rs` and its rows.
+- **P-3f-1 (PROD-00.3f precondition, from run 36542777892).** The bump waits for two things:
+  - the fixture race is closed: A-C20-2 has landed in PROD-01.1's and G-PITR's source topics;
+  - the matrix's `v0.22.0 | 3.7.1 | full` row has recorded `pass` on GitHub with PROD-01.1's rows included.
+
+  The red row is not an engine finding (§4.4, C20), so this does not block 0.22.0 on a defect. It makes the bump's CI evidence attributable: until the race is closed, a red 0.22.0 row cannot be told apart from an engine regression without the broker log. Pass: both conditions hold. Negative control: a 0.22.0 row that is red on a record-semantics row without deletions named in its reason is an engine finding, and it blocks the bump until it is explained.
 
 ## 10. Limits of this record
 
@@ -797,6 +898,7 @@ Proposed new rows, lettered from **f**:
 - **One broker, and no transactional fixture here.** The compose stack is one combined KRaft broker, and no run in this record produces transactionally, duplicates headers or writes non-monotonic timestamps. PROD-01.1 has since measured C1, C5, C6, C13 and C14 (its record §2 and §5).
 - **The fix round and the merge have not yet run on GitHub.** Run 36531786341 was green on all six rows at `7e4cd0b1`. The fix round changes how rows are recorded (`ff9aa14a`). The merge adds three suites to the full rows and changes the generated `.env` (§5.5). Their CI evidence is therefore the re-dispatch at the final tip. `crates/logweir/tests/engine_matrix.rs` pins the changes by executing the recording and verdict steps' own text, and §5.5's cycles ran the new rows locally.
 - **This record's 4.3.1 evidence uses the pinned engine only.** Kafka 4.3.1 was probed (ApiVersions) and run with the pin: the demo drill, G-PITR and the full CI e2e command before the merge (§4.3), and the merged suite's new rows after it (§5.5, c9). All of it ran on one combined broker, and 0.22.0 ran on 3.7.1 only. PROD-01.5 owns the 3.9, 4.1 and 4.3 lines and has measured them with the pin (`docs/support-matrix.md`, "Broker versions").
+- **§4.4's reproduction ran the engine through the docker route under emulation; CI runs it natively.** The mechanism is the broker's, not the engine's, and the CI broker log shows the same deletion before the engine ran. The run-level exposure (about one run in four) is estimated from one CI run's topic lifetimes, not measured over many runs.
 - **The upstream forecasts are forecasts.** Whether upstream accepts a given PR, and the cost estimates, are forecasts from the code and the release history, not measurements.
 - **Operator archives were reproduced, not collected.** They were reproduced by seeding with the same engine images the operators use; no archive was taken from a running operator. FX-1's snapshot failure is cited from the tracker, not re-run.
 
@@ -806,6 +908,7 @@ Proposed new rows, lettered from **f**:
 - `L/crates/logweir-core/src/destination.rs:462-477`, `L/crates/weirkeeper/src/destination.rs:531-535` and `L/crates/logweir-api/src/routes/destinations.rs:756-763` name "engine 0.21.0" in the ENGINE-PATHSTYLE refusal. On a bump, the message should not name a version (PROD-00.3f).
 - `L/crates/logweir-engine-oso/src/render_restore.rs:147` renders `checkpoint_interval_secs`, a key the engine never reads (C4, A-C4-3).
 - FX-6's disclosure (in `docs/verify-a-scorecard.md`, `docs/stability.md` and the restore review screen) should add C13 (duplicate header keys collapse) and C14 (LogAppendTime topics are archived with producer timestamps) beside the transaction and non-monotonic-timestamp hazards it already names.
+- **The source-fixture retention race (§4.4, A-C20-2).** Two places create source topics that hold records stamped at `T` = 2025-10-09 on cluster-default retention (7 days): `e2e/tests/record_semantics.rs:129-134` (`Row::source_topic`, which every record-semantics row uses) and `e2e/tests/pitr_boundary.rs:638-641` (`pitr-src`). The broker's retention check can empty them before the capture. The proposal is one config pair in each place, `("retention.ms", "-1")`, as Logweir's restore targets already have (`L/crates/logweir-kafka/src/reader.rs:349-355`); the compacted row's own configs stay as they are. The owners are PROD-01.1 and G-PITR; the coordinator decides. PROD-01.1's precondition assertion should not be engine-gated: a capture that returns nothing is exactly what it exists to catch.
 - `docs/quickstart.md` Path 3 invited any compatible producer's archive without saying that a pre-0.21 archive drills as `fail-integrity`/`partial` (exit 2). The fix round added one sentence there and a link to `support-matrix.md`, an out-of-ownership edit (review L8).
 
 ---
