@@ -167,6 +167,21 @@ jobs:
           cat matrix-logs/control.log
           exit "$rc"
 
+      # What the broker's time-retention check deleted while the row ran. A
+      # fixture stamped older than the broker's retention (7 days, checked
+      # every 5 minutes) loses its records if the check runs between its
+      # produce and the engine's capture: run 36542777892's v0.22.0 row
+      # (decision record 5.6). A failed suite's reason names it; the outcome
+      # is unchanged.
+      - name: Read back what the broker's time retention deleted
+        id: retention
+        if: always() && steps.up.outcome == 'success'
+        continue-on-error: true
+        run: |
+          out=$(./scripts/engine-matrix-broker.sh --retention)
+          printf '%s\n' "$out"
+          printf '%s\n' "$out" >> "$GITHUB_OUTPUT"
+
       # The outcome is derived from what every step did
       # (scripts/engine-matrix-outcome.sh; crates/logweir/tests/engine_matrix.rs
       # runs this step's own text over the step-outcome table).
@@ -189,6 +204,8 @@ jobs:
           CONTROL: ${{ steps.control.outcome }}
           REDUCED_LOG: matrix-logs/reduced.log
           CONTROL_LOG: matrix-logs/control.log
+          RETENTION_DELETIONS: ${{ steps.retention.outputs.retention_deletions }}
+          RETENTION_TOPICS: ${{ steps.retention.outputs.retention_topics }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -u

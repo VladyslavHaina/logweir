@@ -878,6 +878,8 @@ struct Steps {
     control: &'static str,
     reduced_log: Option<&'static str>,
     control_log: Option<&'static str>,
+    retention_deletions: &'static str,
+    retention_topics: &'static str,
 }
 
 impl Steps {
@@ -896,6 +898,8 @@ impl Steps {
             control: "success",
             reduced_log: None,
             control_log: None,
+            retention_deletions: "0",
+            retention_topics: "",
         }
     }
 
@@ -935,6 +939,8 @@ impl Steps {
             ("CONTROL", self.control),
             ("REDUCED_LOG", "matrix-logs/reduced.log"),
             ("CONTROL_LOG", "matrix-logs/control.log"),
+            ("RETENTION_DELETIONS", self.retention_deletions),
+            ("RETENTION_TOPICS", self.retention_topics),
         ]
         .into_iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -1196,6 +1202,14 @@ fn the_record_step_writes_the_row_the_steps_earned() {
         ("CONTROL", "${{ steps.control.outcome }}"),
         ("REDUCED_LOG", "matrix-logs/reduced.log"),
         ("CONTROL_LOG", "matrix-logs/control.log"),
+        (
+            "RETENTION_DELETIONS",
+            "${{ steps.retention.outputs.retention_deletions }}",
+        ),
+        (
+            "RETENTION_TOPICS",
+            "${{ steps.retention.outputs.retention_topics }}",
+        ),
     ];
     for (key, value) in wired {
         assert_eq!(
@@ -1205,7 +1219,15 @@ fn the_record_step_writes_the_row_the_steps_earned() {
         );
     }
     for id in [
-        "pin", "up", "broker", "seed", "build", "full", "reduced", "control",
+        "pin",
+        "up",
+        "broker",
+        "seed",
+        "build",
+        "full",
+        "reduced",
+        "control",
+        "retention",
     ] {
         step_by_id(job, id);
     }
@@ -1440,8 +1462,13 @@ esac
 }
 
 fn broker_readback(fake: &tempfile::TempDir) -> Ran {
+    broker_readback_with(fake, &[])
+}
+
+fn broker_readback_with(fake: &tempfile::TempDir, args: &[&str]) -> Ran {
     let mut cmd = Command::new("bash");
-    cmd.arg(root().join("scripts/engine-matrix-broker.sh"));
+    cmd.arg(root().join("scripts/engine-matrix-broker.sh"))
+        .args(args);
     with_path(&mut cmd, &fake.path().join("bin"));
     run_bounded(cmd, 60)
 }
@@ -1484,6 +1511,134 @@ fn the_broker_is_read_back_from_the_running_container() {
     assert!(broker["run"].as_str().is_some_and(|r| r
         .contains("./scripts/engine-matrix-broker.sh")
         && r.contains("\"$GITHUB_OUTPUT\"")));
+}
+
+/// Run 36542777892: a fixture stamped older than the broker's retention lost
+/// its records to the broker's time-retention check between its produce and
+/// the engine's capture. The row reads back what that check deleted.
+#[test]
+fn the_brokers_retention_deletions_are_read_back() {
+    // The three retention lines run 36542777892's broker logged, among the
+    // lines a broker also logs for other deletions: the log start moving,
+    // a topic deleted by the test's cleanup, the files removed later.
+    const CI_LINES: &str = "\
+[2026-09-29 09:07:21,152] INFO [LocalLog partition=other-topic-1, dir=/tmp/kafka-logs] Deleting segments as the log has been deleted: LogSegment(baseOffset=0, size=121, lastModifiedTime=1790672745429, largestRecordTimestamp=1760000000030) (kafka.log.LocalLog)
+[2026-09-29 09:07:21,164] INFO [LocalLog partition=other-topic-1, dir=/tmp/kafka-logs] Deleting segment files LogSegment(baseOffset=0, size=121, lastModifiedTime=1790672745429, largestRecordTimestamp=1760000000030) (kafka.log.LocalLog$)
+[2026-09-29 08:39:55,756] INFO [UnifiedLog partition=recsem-1463674564-shapes-0, dir=/tmp/kafka-logs] Incremented log start offset to 8 due to segment deletion (kafka.log.UnifiedLog)
+[2026-09-29 08:39:55,757] INFO [UnifiedLog partition=recsem-1463674564-shapes-0, dir=/tmp/kafka-logs] Deleting segment LogSegment(baseOffset=0, size=253, lastModifiedTime=1790671194338, largestRecordTimestamp=1760000000070) due to log retention time 604800000ms breach based on the largest record timestamp in the segment (kafka.log.UnifiedLog)
+[2026-09-29 08:39:55,759] INFO [UnifiedLog partition=recsem-1463674564-shapes-1, dir=/tmp/kafka-logs] Deleting segment LogSegment(baseOffset=0, size=121, lastModifiedTime=1790671194337, largestRecordTimestamp=1760000000030) due to log retention time 604800000ms breach based on the largest record timestamp in the segment (kafka.log.UnifiedLog)
+[2026-09-29 08:39:55,760] INFO [UnifiedLog partition=recsem-1463674564-shapes-2, dir=/tmp/kafka-logs] Deleting segment LogSegment(baseOffset=0, size=154, lastModifiedTime=1790671194337, largestRecordTimestamp=1760000000500) due to log retention time 604800000ms breach based on the largest record timestamp in the segment (kafka.log.UnifiedLog)
+";
+    let ran = broker_readback_with(&fake_docker(CI_LINES), &["--retention"]);
+    assert!(ran.status.success(), "{}", ran.transcript());
+    assert_eq!(
+        ran.stdout,
+        "retention_deletions=3\nretention_topics=recsem-1463674564-shapes\n"
+    );
+
+    // Many topics: five are named and the rest counted, so the row stays one line.
+    let many: String = (1..=7)
+        .map(|i| {
+            format!(
+                "[t] INFO [UnifiedLog partition=t{i}-0, dir=/d] Deleting segment LogSegment(baseOffset=0) \
+                 due to log retention time 604800000ms breach based on the largest record timestamp \
+                 in the segment (kafka.log.UnifiedLog)\n"
+            )
+        })
+        .collect();
+    let ran = broker_readback_with(&fake_docker(&many), &["--retention"]);
+    assert!(ran.status.success(), "{}", ran.transcript());
+    assert_eq!(
+        ran.stdout,
+        "retention_deletions=7\nretention_topics=t1 t2 t3 t4 t5 (+2 more)\n"
+    );
+
+    // No deletion is a measurement of zero, not a failure.
+    let ran = broker_readback_with(
+        &fake_docker("[t] INFO Kafka version: 3.7.1 (x)\n"),
+        &["--retention"],
+    );
+    assert!(ran.status.success(), "{}", ran.transcript());
+    assert_eq!(ran.stdout, "retention_deletions=0\nretention_topics=\n");
+
+    // An unknown option is refused before docker runs.
+    let ran = broker_readback_with(&fake_docker(""), &["--retain"]);
+    assert_eq!(ran.status.code(), Some(1), "{}", ran.transcript());
+    assert!(ran.stdout.is_empty(), "{}", ran.stdout);
+
+    // Read after every drill, before the row is recorded, and never fatal.
+    let job = &workflow("engine-matrix.yml")["jobs"]["matrix"];
+    let (retention_at, retention) = step_by_id(job, "retention");
+    for id in ["full", "reduced", "control"] {
+        let (at, _) = step_by_id(job, id);
+        assert!(
+            at < retention_at,
+            "{id} must run before the retention readback"
+        );
+    }
+    let (record_at, _) = step_by_id(job, "record");
+    assert!(
+        retention_at < record_at,
+        "the readback feeds the Record step"
+    );
+    assert_eq!(
+        retention["if"].as_str(),
+        Some("always() && steps.up.outcome == 'success'")
+    );
+    assert_eq!(retention["continue-on-error"].as_bool(), Some(true));
+    assert!(retention["run"].as_str().is_some_and(|r| r
+        .contains("./scripts/engine-matrix-broker.sh --retention")
+        && r.contains("\"$GITHUB_OUTPUT\"")));
+}
+
+/// What the broker's retention deleted is named in a failed suite's reason,
+/// and never changes an outcome: the suite's failure stays a failure.
+#[test]
+fn a_failed_suite_names_what_the_brokers_retention_deleted() {
+    let failed = |deletions: &'static str, topics: &'static str| Steps {
+        full: "failure",
+        retention_deletions: deletions,
+        retention_topics: topics,
+        ..Steps::full()
+    };
+    let (outcome, reason) = classify(&failed("3", "recsem-1463674564-shapes"));
+    assert_eq!(outcome, "fail(e2e suite)");
+    assert!(
+        reason.contains("time-retention check deleted 3 segment(s) of recsem-1463674564-shapes"),
+        "{reason}"
+    );
+    assert!(!reason.contains('|'), "a row is one table line: {reason}");
+    for (deletions, why) in [
+        ("0", "none deleted"),
+        ("", "not read back"),
+        ("3x", "not a count"),
+    ] {
+        let (outcome, reason) = classify(&failed(deletions, "t"));
+        assert_eq!(outcome, "fail(e2e suite)", "{why}");
+        assert_eq!(
+            reason, "the full e2e suite failed; see the job log",
+            "{why}"
+        );
+    }
+    let deleted = |s: Steps| Steps {
+        retention_deletions: "3",
+        retention_topics: "t",
+        ..s
+    };
+    for (steps, want) in [
+        (deleted(Steps::full()), "pass"),
+        (deleted(Steps::below()), "unsupported(lever-absent)"),
+        (
+            deleted(Steps {
+                control: "failure",
+                ..Steps::full()
+            }),
+            "fail(lever-not-honoured)",
+        ),
+    ] {
+        let (got, reason) = classify(&steps);
+        assert_eq!(got, want, "{reason}");
+    }
 }
 
 /// A row whose broker could not be read back still renders, as `unmeasured`.

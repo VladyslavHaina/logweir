@@ -16,6 +16,11 @@
 #   BROKER_VERSION  the "Kafka version" the running broker logged (read back)
 #   SEED BUILD FULL REDUCED CONTROL   step outcomes
 #   REDUCED_LOG CONTROL_LOG           transcripts of the reduced row and control
+#   RETENTION_DELETIONS RETENTION_TOPICS
+#                   what the broker's time-retention check deleted during the
+#                   run (scripts/engine-matrix-broker.sh --retention). A failed
+#                   suite's reason names it; it never changes an outcome
+#                   (run 36542777892, the engine route decision record 5.6).
 #
 # Every outcome is derived from what ran; nothing is assumed from the floor.
 # The previous inline classifier recorded `unsupported(lever-absent)` for a
@@ -50,6 +55,7 @@ BUILD=${BUILD:-}
 FULL=${FULL:-}
 REDUCED=${REDUCED:-}
 CONTROL=${CONTROL:-}
+RETENTION_DELETIONS=${RETENTION_DELETIONS:-}
 
 # --- setup: what the row ran on --------------------------------------------
 [ -n "$DIGEST" ] ||
@@ -85,7 +91,12 @@ case "$FLOOR" in
       emit "fail(setup)" "the deleted-segment positive control did not run (control: ${CONTROL:-not run})"
     case "$FULL" in
       success) emit "pass" "full e2e suite and the deleted-segment positive control passed" ;;
-      failure) emit "fail(e2e suite)" "the full e2e suite failed; see the job log" ;;
+      failure)
+        case "$RETENTION_DELETIONS" in
+          ''|0|*[!0-9]*) ;;
+          *) emit "fail(e2e suite)" "the full e2e suite failed; during the run the broker's time-retention check deleted ${RETENTION_DELETIONS} segment(s) of ${RETENTION_TOPICS:-unnamed topics} (a fixture stamped older than the retention loses its records so; engine route decision record 5.6); see the job log" ;;
+        esac
+        emit "fail(e2e suite)" "the full e2e suite failed; see the job log" ;;
       *) emit "fail(setup)" "the full e2e suite did not run (full: ${FULL:-not run})" ;;
     esac
     ;;
