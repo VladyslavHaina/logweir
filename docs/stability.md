@@ -697,7 +697,8 @@ sentence is the record of it.
 
 A `Restore`'s window is a closed interval: the engine's PITR filter is `timestamp >= start &&
 timestamp <= end`, so a record whose timestamp equals `restore.point_in_time` exactly **is**
-restored. The `BackupReceipt`'s covered range is half-open in the other direction: `covered.from_ms`
+restored when the engine reads its segment (see the end of this ruling).
+The `BackupReceipt`'s covered range is half-open in the other direction: `covered.from_ms`
 is the oldest segment's inclusive start and `covered.to_ms` is the newest segment's end **plus one
 millisecond** (`backup/phase_run.rs`), so it is the first instant the archive does *not* cover.
 Copying a `covered.to_ms` into a `restore.point_in_time` therefore names an instant the archive

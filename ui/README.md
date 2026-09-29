@@ -206,7 +206,7 @@ authorisation story is "the API server evaluated the viewer's RBAC".
 | `tests/check-intent.spec.js` | **P14 and its class**: a check asked again replays only while it can still be the answer -- the spent rule, `askCheck`, and the schedule form, the readiness panel and *Discover topics* over D0's replay rule, modelled. |
 | `tests/mcp-round3.spec.js` | **the human-like pass, round 3**: the wizard's focused status kept clear of its sticky footer, step texts that show names as code, "Restore this point" only for a role that can restore, and the no-role header -- each with the behaviour it replaced. |
 | `tests/check-deadline.spec.js` | **P15 and its class**: every follower reads its check until the check's own deadline, backs off while it does, and says so -- with *Run the check again* -- when the deadline passes without a result: the deadline pinned to the product's own numbers, the follow on node's mock timers, and each page (the readiness panel, the schedule form, *Test connection*, *Discover topics*, *Test access*) with a check that settles at 100 s and one that never does. Restore step 5's two rows are in `mutation.spec.js`. |
-| `tests/restore-semantics.spec.js` | **FX-6**: step 6 says what a restore copies, above Create -- the decision record's sentence word for word, its two identifiers as code, under every approval-policy block and on the step on screen -- each row with its negative control. |
+| `tests/restore-semantics.spec.js` | **FX-6**: step 6 says what a restore copies, above Create -- the decision record's sentence word for word, its two identifiers as code, visible (a direct child of step 6, never folded into a wrapper) with each of the four approval-policy blocks, and on the step on screen -- each row with its negative control. |
 | `tests/preview-server.js` | a development tool, never a test: serves this directory over the fixtures under `tests/fixtures/preview/`. See *Previewing with fixtures*. |
 
 **The design system** lives in `style.css` and nowhere else. It is VMware
@@ -1074,10 +1074,22 @@ the approval block's heading it read as part of the approval:
 > as producer `CreateTime`, repeated header keys keep one copy, and when
 > timestamps are out of order a full or point-in-time restore can miss records.
 
-A drill cannot report any of these, because it compares the restored topic with
-the archive and each difference is already in the archive. PROD-01.1 measured
-every clause on the pinned engine, and its
-[decision record](../docs/to-do/decisions/PROD-01.1-record-semantics.md),
+**A passing drill does not rule these out.** The drill compares the restored
+topic with the archive, never with the source, and PROD-01.1 measured what that
+means on the pinned engine:
+
+* a difference made when the archive was written is on both sides and passes --
+  transaction records and markers, `LogAppendTime` timestamps, and a repeated
+  header key's lost copies;
+* a record that point-in-time selection skips, because its segment's first
+  record is after the point, is outside both sides of the check and passes too;
+* a record older than every segment's first record is dropped from every
+  restore: a full restore's drill fails its count check, and a point-in-time
+  drill can pass;
+* a correct point-in-time restore can fail the count check, and a drill that
+  samples a record whose own `x-original-offset` the restore replaced fails.
+
+The [decision record](../docs/to-do/decisions/PROD-01.1-record-semantics.md),
 section 8.3, wrote the sentence; the page shows it word for word, with the two
 identifiers as code. It is not narrowed to some topics, because nothing the
 console reads says which topics are transactional or carry out-of-order

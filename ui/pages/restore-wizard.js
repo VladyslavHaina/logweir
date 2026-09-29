@@ -2972,14 +2972,19 @@ export const READINESS_NOT_RUN_WARNING =
  *  before the approval-policy block: directly above Create it sat under that
  *  block's heading in the same style, and read as part of the approval.
  *
- *  THE DRILL CANNOT SAY IT FOR US. Phase 7 compares the restored topic with the
- *  ARCHIVE, so a difference that was already in the archive passes: the pinned
- *  engine captures with `READ_UNCOMMITTED` and keeps commit and abort markers as
- *  records, archives the producers' timestamps for a `LogAppendTime` topic,
- *  holds headers in a map, and selects a point in time by each segment's first
- *  and last timestamps. PROD-01.1 measured every clause (its decision record,
- *  section 2) and wrote this sentence (section 8.3); `docs/stability.md` and
- *  `docs/verify-a-scorecard.md` carry the long form with the evidence rows.
+ *  A PASSING DRILL DOES NOT RULE IT OUT. Phase 7 compares the restored topic with
+ *  the ARCHIVE, never with the source. What the pinned engine changes while it
+ *  writes the archive is on both sides and passes: it captures with
+ *  `READ_UNCOMMITTED` and keeps commit and abort markers as records, archives
+ *  the producers' timestamps for a `LogAppendTime` topic, and keeps one copy of
+ *  a repeated header key. A record that selection by each segment's first and
+ *  last timestamps skips is outside both sides, and passes too. The rest can
+ *  fail a drill: a full restore that drops a record below the floor fails its
+ *  count check, so can a correct point-in-time restore, and so does a sampled
+ *  record whose own `x-original-offset` the restore replaced. PROD-01.1
+ *  measured every clause (its decision record, section 2) and wrote this
+ *  sentence (section 8.3); `docs/stability.md` and `docs/verify-a-scorecard.md`
+ *  carry the long form with the evidence rows.
  *
  *  ON EVERY REVIEW STEP, NOT A CHOSEN ONE. The console cannot tell which of a
  *  plan's topics are transactional or out of order -- the archive records

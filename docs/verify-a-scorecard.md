@@ -9,7 +9,7 @@ A **drill scorecard** records one Kafka restore drill: its archive, measured
 RTO/RPO, sampled-record fingerprints and approval. Restore drills compare the
 restored data with **the archive**, without contacting the source cluster;
 `measured.rpo_source_relative_unmeasured_reason` records that limitation, and
-[what the comparison cannot see](#a-pass-compares-the-restored-topic-with-the-archive-not-with-the-source)
+[what a pass does not rule out](#a-pass-compares-the-restored-topic-with-the-archive-not-with-the-source)
 is listed below. The separate `logweir backup run` command does contact a source
 cluster.
 
@@ -389,7 +389,8 @@ was backed up are preserved.
 
 A broker outage or a lost produce acknowledgement during a restore can leave
 duplicates and a partial target; in every measured case Logweir exited `1` and
-signed nothing. See
+signed nothing, and none reached the drill's comparison, so whether a drill that
+completes would catch the duplicates was not measured. See
 [stability.md](stability.md#a-broker-outage-during-a-restore-can-leave-a-partial-target-with-duplicates).
 
 [`docs/to-do/decisions/PROD-01.1-record-semantics.md`](to-do/decisions/PROD-01.1-record-semantics.md)
