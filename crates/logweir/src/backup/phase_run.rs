@@ -154,6 +154,77 @@ pub fn claim_execution(
     }
 }
 
+/// **FX-7 — one engine run per backup SET, whoever made the first one.**
+/// Refuse the engine when the archive already holds ANY object under this
+/// execution's set directory, `<prefix>/<backup_id>/`.
+///
+/// # Why the claim alone is not enough
+///
+/// [`claim_execution`] stops a second run of an execution whose first run
+/// took a claim. A set written by a build WITHOUT the claim (a runner from
+/// before RECEIPT-DUP) carries none, so a later run of the same `backup_id`
+/// — a Backup Job lost and re-created across the upgrade, or a standalone
+/// `backup run` re-using a fixed `backup_id` — wins a fresh claim and starts
+/// the engine over the older run's archive. Measured on engine 0.21.0
+/// (FX-7, `docs/formats/backup-receipt.md`): the engine writes each segment
+/// at `<backup_id>/topics/<topic>/partition=<n>/segment-<start offset>…`, so
+/// the second run REWRITES the first run's segment objects in place, and its
+/// get-merge-put keeps the first run's manifest entry for every key it
+/// already had ("existing wins"). The manifest bytes can therefore come out
+/// IDENTICAL while the segment under them now holds different records: the
+/// first signed receipt's manifest digest still matches and its data does
+/// not. No manifest check can see that afterwards, so the only fix is that
+/// the second engine run never starts.
+///
+/// # Why "any object" and not "the manifest"
+///
+/// The engine writes segments before its final manifest, so an older run
+/// that is still running, or that died after its first segment, leaves a
+/// set with objects and no manifest. Starting the engine there writes into
+/// the same keys again. Listing the directory sees every such state; a GET
+/// of the manifest would see only the finished one.
+///
+/// # Where it runs, and what it costs
+///
+/// AFTER the claim and immediately before the engine, so between two runs
+/// of this build the claim still answers first (the same refusal, with its
+/// own message), and the window between this listing and the engine's first
+/// write is as short as it can be. It is a LIST through the read-only
+/// archive handle, under the prefix `phase_run::run` already lists after
+/// the engine (`Store::list_manifests`), so it needs no permission the
+/// runner does not already hold; for a new execution the directory is empty
+/// and the listing returns nothing.
+///
+/// An existing set is exit 1 [`EXECUTION_ALREADY_CLAIMED`] — the same state
+/// as a claim that already exists, because it is the same fact (an earlier
+/// run of this `backup_id` reached the engine) with a different witness, and
+/// the same remedy (a new execution id; D1 §4.6's retry is one). A listing
+/// that FAILS proves nothing about the set, so it fails closed as exit 4
+/// [`EXECUTION_CLAIM_UNPROVEN`], exactly as a claim put the store refused
+/// does: no engine run, nothing signed.
+pub fn refuse_an_existing_set(backup_id: &str, archive: &Store) -> Result<(), BackupError> {
+    let directory = archive.qualify(&format!("{backup_id}/"));
+    match archive.list_page(&directory, None, 1) {
+        Ok((keys, _)) => match keys.first() {
+            None => Ok(()),
+            Some(first) => Err(BackupError::ExecutionClaimed(format!(
+                "{EXECUTION_ALREADY_CLAIMED}: execution `{backup_id}`'s backup set already exists \
+                 in the archive ({first} is in it) although it carries no execution claim this \
+                 run could see — an earlier run of this backup_id, by a build without the claim, \
+                 wrote it. A second engine run would rewrite that run's segments in place, and \
+                 its signed receipt would no longer describe the archive, so NO engine run was \
+                 started and nothing was signed. Retry under a new execution id (a new Backup)."
+            ))),
+        },
+        Err(e) => Err(BackupError::Lock(format!(
+            "{EXECUTION_CLAIM_UNPROVEN}: execution `{backup_id}`: the archive could not be listed \
+             under {directory} to prove the backup set is new: {e}. An existing set would be \
+             rewritten by the engine, so NO engine run was started and nothing was signed. Grant \
+             `s3:ListBucket` on the archive prefix and retry."
+        ))),
+    }
+}
+
 pub fn load_signer(path: &Path) -> Result<ValidatedSigner, BackupError> {
     ValidatedSigner::load(
         path,

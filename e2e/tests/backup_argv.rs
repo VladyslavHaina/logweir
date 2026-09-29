@@ -22,12 +22,21 @@
 //! 5. **that the REAL, digest-pinned engine accepts the document this product
 //!    renders** and the whole command exits 0 (fix round 1, review F-1).
 //!
+//! 6. **that a backup set an earlier engine run wrote is never written again**
+//!    (FX-7): the seed's `drill-demo`, which the raw engine wrote with no
+//!    execution claim, is refused before the engine starts and left
+//!    byte-identical.
+//!
 //! Requires `just e2e` (the stack up, and `LOGWEIR_SEED_REFRESH_FIXTURES=0
-//! ./scripts/e2e-seed.sh` already run). Rows 1–4 use the argv-recording stub,
-//! which writes no archive, so their read-back reads the archive the seed put
-//! in MinIO — a stub that fabricated a manifest would be testing itself. Row 5
-//! uses `harness::engine_bin()`, i.e. the pinned `kafka-backup` itself, and
-//! captures a FRESH archive of its own: a stub accepts any document carrying
+//! ./scripts/e2e-seed.sh` already run). The argv rows use the argv-recording
+//! stub, which writes no archive. They used to run over the seeded
+//! `drill-demo` so the read-back found the seed's archive; since FX-7 a run
+//! over an existing set is refused before its engine, so they run under a
+//! FRESH `backup_id` and assert that the stub exited 0 by the read-back's own
+//! "holds no backup set" answer (a stub that fabricated a manifest would be
+//! testing itself). The receipt row and the real-engine rows use
+//! `harness::engine_bin()`, i.e. the pinned `kafka-backup` itself, and capture
+//! a FRESH archive of their own: a stub accepts any document carrying
 //! `mode: backup` and therefore **structurally cannot** reject one, which is
 //! exactly how a rendered key the engine drops as unknown reached a shipped
 //! commit (review F-1).
@@ -37,11 +46,24 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-/// `scripts/e2e-seed.sh`'s `backup_id`, and therefore the archive prefix the
-/// read-back finds. Deliberately the SEEDED set: this suite proves the argv
-/// and the read-back wiring, not the engine's ability to produce an archive
-/// (the stub produces none).
+/// `scripts/e2e-seed.sh`'s `backup_id`: a set the RAW engine wrote, with no
+/// execution claim — exactly what a build without the claim leaves behind.
+/// The FX-7 row runs over it and must be refused; every other row that reaches
+/// the engine uses a [`fresh_backup_id`].
 const SEEDED_BACKUP_ID: &str = "drill-demo";
+
+/// A `backup_id` no earlier run has used, under [`REAL_ENGINE_ID_PREFIX`] so
+/// `sweep_real_engine_archives` removes whatever the run left — the archive a
+/// real engine wrote, and the claim and receipts under `logweir/backups/`.
+fn fresh_backup_id() -> String {
+    format!(
+        "{REAL_ENGINE_ID_PREFIX}{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    )
+}
 
 /// An allowlist that does NOT name the live cluster. `--allowed-clusters` is
 /// the restore-TARGET allowlist, and GC18(c) rail 4 refuses a SOURCE cluster
@@ -187,21 +209,39 @@ fn backup_run_real_engine(spec: &Path) -> Command {
 /// pipe (STANDING RULE 20).
 #[test]
 fn backup_run_renders_and_invokes_the_engine_backup_command() {
-    // RECEIPT-DUP: every run claims `logweir/backups/drill-demo/
-    // execution.claim.json` before its engine, so a claim an earlier row (or an
-    // earlier `just e2e`) left would refuse this run with exit 1. Swept first
-    // and last, like the receipt row.
-    sweep_seeded_receipts();
+    // A FRESH `backup_id` (FX-7): a run over an existing set — the seed's
+    // `drill-demo` — is refused before its engine, so this row could never
+    // reach the stub there. Every run also claims `logweir/backups/<id>/`
+    // (RECEIPT-DUP); both are swept first and last.
+    sweep_real_engine_archives();
+    let backup_id = fresh_backup_id();
     let log = demo_dir().join("backup-argv.log");
     let _ = std::fs::remove_file(&log);
-    let spec = backup_spec("backup.yaml", "[orders, payments]", "", &bootstrap());
+    let spec = backup_spec_with_id(
+        "backup.yaml",
+        &backup_id,
+        "[orders, payments]",
+        "",
+        &bootstrap(),
+    );
 
-    let status = backup_run(&spec, Some(&log)).status().expect("logweir");
+    let out = backup_run(&spec, Some(&log)).output().expect("logweir");
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    // THE STUB WRITES NO ARCHIVE, so a run whose engine exited 0 reaches the
+    // read-back and finds no set: exit 1 with exactly that message. A stub
+    // that exited 42 (the --config path did not resolve to the rendered
+    // document) or 64 (the subcommand was not `backup`) is an ENGINE failure,
+    // and never reaches the read-back that prints this.
     assert_eq!(
-        status.code(),
-        Some(0),
-        "backup run did not exit 0; if the stub exited 42 the --config path did not resolve to \
-         the rendered document, and if it exited 64 the subcommand was not `backup`"
+        out.status.code(),
+        Some(1),
+        "the stub writes no archive, so the run must end at its read-back:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(&format!("holds no backup set `{backup_id}`")),
+        "the run did not reach the read-back, so the stub did not exit 0: if it exited 42 the \
+         --config path did not resolve to the rendered document, and if it exited 64 the \
+         subcommand was not `backup`:\n{stderr}"
     );
 
     let argv: Vec<String> = std::fs::read_to_string(&log)
@@ -239,13 +279,78 @@ fn backup_run_renders_and_invokes_the_engine_backup_command() {
     let doc = std::fs::read_to_string(cfg).expect("the rendered backup.yaml is on disk");
     assert!(doc.contains("\nmode: backup\n"), "{doc}");
     assert!(
-        doc.contains(&format!("backup_id: \"{SEEDED_BACKUP_ID}\"")),
+        doc.contains(&format!("backup_id: \"{backup_id}\"")),
         "{doc}"
     );
     // GC18(c) rail 3 / Global Constraint 4, in the bytes that actually ran.
     for forbidden in ["purge_topics", "dry_run", "header_preflight_external"] {
         assert!(!doc.contains(forbidden), "{forbidden} in:\n{doc}");
     }
+    sweep_real_engine_archives();
+}
+
+/// **FX-7 — A SET AN EARLIER ENGINE RUN WROTE IS NEVER WRITTEN AGAIN.**
+///
+/// The seed's `drill-demo` was written by the RAW engine (`scripts/e2e-seed.sh`
+/// runs the compose `kafka-backup` service), so it carries no execution claim
+/// — the state a build without the claim leaves behind, and the one
+/// RECEIPT-DUP's claim cannot see. A second engine run over it would rewrite
+/// its segments in place under an unchanged manifest (measured on engine
+/// 0.21.0, `docs/formats/backup-receipt.md`). So the run wins a fresh claim,
+/// lists the set directory, finds the seed, and stops: exit 1, the final stdout
+/// line `failure-reason=ExecutionAlreadyClaimed`, the engine never spawned
+/// (the argv stub recorded nothing), and the seeded manifest byte-identical.
+#[test]
+fn a_backup_over_a_set_an_earlier_engine_run_wrote_is_refused_before_the_engine() {
+    sweep_seeded_receipts();
+    let manifest =
+        format!("local/{ARCHIVE_BUCKET}/{SEEDED_BACKUP_ID}/{SEEDED_BACKUP_ID}/manifest.json");
+    let before = mc(&["cat", &manifest]).stdout_utf8();
+    assert!(
+        before.contains("\"topics\""),
+        "the seeded manifest must exist for this row to mean anything — run \
+         ./scripts/e2e-seed.sh first:\n{before}"
+    );
+    let log = demo_dir().join("backup-argv-fx7.log");
+    let _ = std::fs::remove_file(&log);
+    let spec = backup_spec("backup-fx7.yaml", "[orders, payments]", "", &bootstrap());
+
+    let out = backup_run(&spec, Some(&log)).output().expect("logweir");
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a run over an existing set is exit 1 (retryable under a new execution id):\n\
+         stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_eq!(
+        stdout
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .next_back()
+            .unwrap_or(""),
+        "failure-reason=ExecutionAlreadyClaimed",
+        "stdout:\n{stdout}"
+    );
+    assert!(
+        stderr.contains(&format!("{SEEDED_BACKUP_ID}/{SEEDED_BACKUP_ID}/"))
+            && stderr.contains("already exists in the archive"),
+        "the refusal names the existing set:\n{stderr}"
+    );
+    assert!(
+        !log.exists(),
+        "the engine was spawned over an existing set — the stub recorded its argv"
+    );
+    assert!(
+        !stdout.contains("receipt-key="),
+        "a refused run signs nothing:\n{stdout}"
+    );
+    assert_eq!(
+        mc(&["cat", &manifest]).stdout_utf8(),
+        before,
+        "the seeded manifest changed"
+    );
     sweep_seeded_receipts();
 }
 
@@ -411,13 +516,14 @@ fn a_scram_backup_spec_renders_and_refuses_only_for_a_credential_reason() {
 /// stack and not about the document.
 #[test]
 fn the_real_engine_accepts_the_rendered_sasl_block() {
-    // RECEIPT-DUP: a claim left under `drill-demo` would stop this run BEFORE
-    // the engine, and every assertion below is an absence — the row would
-    // pass without the engine ever reading the document. Swept first, and the
-    // refusal is asserted absent.
-    sweep_seeded_receipts();
-    let spec = backup_spec(
+    // A FRESH `backup_id`: a claim (RECEIPT-DUP) or an existing set (FX-7)
+    // would stop this run BEFORE the engine, and every assertion below is an
+    // absence — the row would pass without the engine ever reading the
+    // document. Swept first and last, and the refusal is asserted absent.
+    sweep_real_engine_archives();
+    let spec = backup_spec_with_id(
         "backup-scram-real-engine.yaml",
+        &fresh_backup_id(),
         "[orders]",
         "  auth:\n    mode: scramSha512\n    username: logweir\n",
         &bootstrap(),
@@ -465,7 +571,7 @@ fn the_real_engine_accepts_the_rendered_sasl_block() {
         "the run was stopped at its execution claim, so the engine never read the document \
          and every absence above is vacuous:\n{both}"
     );
-    sweep_seeded_receipts();
+    sweep_real_engine_archives();
 }
 
 /// **Fix round 1, review F-3, carried forward by Task 5b.** A flag
@@ -577,15 +683,25 @@ fn two_receipt_paths_are_refused_without_opening_a_socket() {
 /// at both ends, so the shared bucket is left as it was found.
 #[test]
 fn backup_run_writes_and_prints_its_receipt_keys() {
-    sweep_seeded_receipts();
-    let spec = backup_spec("backup-i7.yaml", "[orders, payments]", "", &bootstrap());
+    // THE REAL ENGINE, under a FRESH `backup_id` (FX-7): this row needs a run
+    // that SUCCEEDS, the argv stub writes no archive, and a run over the
+    // seed's existing set is refused before its engine.
+    sweep_real_engine_archives();
+    let backup_id = fresh_backup_id();
+    let spec = backup_spec_with_id(
+        "backup-i7.yaml",
+        &backup_id,
+        "[orders, payments]",
+        "",
+        &bootstrap(),
+    );
     let local = demo_dir().join("t5b-receipt.json");
     let local_sig = demo_dir().join("t5b-receipt.sig");
     for f in [&local, &local_sig] {
         let _ = std::fs::remove_file(f);
     }
 
-    let out = backup_run(&spec, None)
+    let out = backup_run_real_engine(&spec)
         .arg("--receipt-out")
         .arg(&local)
         .output()
@@ -605,13 +721,13 @@ fn backup_run_writes_and_prints_its_receipt_keys() {
     let receipt_line = lines[n - 2];
     let sidecar_line = lines[n - 1];
     assert!(
-        receipt_line.starts_with("receipt-key=logweir/backups/drill-demo/")
+        receipt_line.starts_with(&format!("receipt-key=logweir/backups/{backup_id}/"))
             && receipt_line.ends_with(".receipt.json"),
         "the PENULTIMATE stdout line is `receipt-key=<key>`, got {receipt_line:?} \
          in:\n{stdout}"
     );
     assert!(
-        sidecar_line.starts_with("sidecar-key=logweir/backups/drill-demo/")
+        sidecar_line.starts_with(&format!("sidecar-key=logweir/backups/{backup_id}/"))
             && sidecar_line.ends_with(".receipt.sig"),
         "the FINAL stdout line is `sidecar-key=<key>`, got {sidecar_line:?} in:\n{stdout}"
     );
@@ -661,15 +777,15 @@ fn backup_run_writes_and_prints_its_receipt_keys() {
         String::from_utf8_lossy(&verify.stderr)
     );
 
-    sweep_seeded_receipts();
+    sweep_real_engine_archives();
 }
 
 /// Everything `logweir backup run` puts lives under this, and nothing an
 /// archive contains does (Global Constraint 6).
 const RECEIPT_PREFIX: &str = "logweir/";
 
-/// Remove the evidence objects the two seeded-archive rows leave behind, and
-/// prove they are gone.
+/// Remove the evidence objects a run over the seeded set leaves behind — the
+/// FX-7 row's refused run leaves its execution claim — and prove they are gone.
 ///
 /// `logweir/backups/drill-demo/` only — never the archive, and never another
 /// row's prefix. The keys are unique per run (`<run_id>.receipt.json`), so

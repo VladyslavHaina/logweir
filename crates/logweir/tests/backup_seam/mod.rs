@@ -118,13 +118,11 @@ impl Fixture {
         backup_id: &str,
         run_id: &str,
     ) -> Result<BackupOutcome, BackupError> {
+        // EMPTY: the engine double writes the manifest DURING the run, as the
+        // real engine does. A run refuses an execution whose set directory
+        // already holds anything (FX-7, `phase_run::refuse_an_existing_set`),
+        // so seeding it first would be refused before the engine.
         let archive = Store::in_memory(ARCHIVE_PREFIX);
-        archive
-            .put_create_only(
-                &format!("{ARCHIVE_PREFIX}{backup_id}/manifest.json"),
-                format!("{{\"backup_id\":\"{backup_id}\",\"topics\":[]}}").as_bytes(),
-            )
-            .unwrap();
         // Rebuilt rather than cloned: `BackupRunArgs` derives no `Clone`, and
         // adding one to production code to serve a test fixture is the wrong
         // way round.
@@ -143,7 +141,7 @@ impl Fixture {
             &args,
             run_id,
             &StubReader,
-            &OneTopicEngine,
+            &OneTopicEngine { archive: &archive },
             &archive,
             evidence,
         )
@@ -181,14 +179,18 @@ impl ClusterReader for StubReader {
     }
 }
 
-/// A `DataEngine` that reports one topic with one segment and spawns nothing.
-struct OneTopicEngine;
+/// A `DataEngine` that reports one topic with one segment, spawns nothing, and
+/// writes its manifest into `archive` when it runs — which is when the real
+/// engine writes it.
+struct OneTopicEngine<'a> {
+    archive: &'a Store,
+}
 
 fn ts(s: &str) -> chrono::DateTime<chrono::Utc> {
     s.parse().unwrap()
 }
 
-impl DataEngine for OneTopicEngine {
+impl DataEngine for OneTopicEngine<'_> {
     fn id(&self) -> EngineId {
         EngineId {
             id: "double".into(),
@@ -245,9 +247,16 @@ impl DataEngine for OneTopicEngine {
     }
     fn backup(
         &self,
-        _plan: &BackupPlan,
+        plan: &BackupPlan,
         _obs: &mut dyn PhaseObserver,
     ) -> Result<BackupFacts, EngineError> {
+        let backup_id = &plan.backup_id;
+        self.archive
+            .put_create_only(
+                &format!("{ARCHIVE_PREFIX}{backup_id}/manifest.json"),
+                format!("{{\"backup_id\":\"{backup_id}\",\"topics\":[]}}").as_bytes(),
+            )
+            .map_err(|e| EngineError::Operational(format!("the double's manifest write: {e}")))?;
         Ok(BackupFacts {
             started_at: ts("2026-09-15T03:00:00Z"),
             finished_at: ts("2026-09-15T03:04:00Z"),

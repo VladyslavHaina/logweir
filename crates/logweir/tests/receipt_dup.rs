@@ -811,6 +811,156 @@ fn the_python_verifier_agrees_the_first_receipt_still_verifies() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// FX-7: a set an OLDER build wrote carries no claim
+// ---------------------------------------------------------------------------
+
+/// **FX-7 — the upgrade window.** An execution whose first run was made by a
+/// build WITHOUT the execution claim (a runner from before RECEIPT-DUP) leaves
+/// its archive, its receipt and NO claim. A Job re-created after the upgrade
+/// runs this build under the same execution id: it wins a fresh claim, so the
+/// claim alone would start the engine over the older run's set. The set
+/// directory is not empty, so the run is refused before the engine — exit 1,
+/// the same state as a claim that exists, with its own message — and the first
+/// receipt still verifies.
+///
+/// The older build is modelled by exactly what it leaves in the bucket: this
+/// build's first run, with its claim removed.
+#[test]
+fn a_set_an_older_build_wrote_is_refused_before_the_engine() {
+    let f = Fixture::new();
+    let engine = AdvancingEngine::new(&f.root());
+    let first = f
+        .run("01K5RUN0000000000000000001", &engine)
+        .expect("the first run succeeds");
+    std::fs::remove_file(
+        f.root()
+            .join(logweir::backup::phase_run::claim_key(EXECUTION_ID)),
+    )
+    .expect("the first run's claim is removed: the older build never wrote one");
+
+    let second = f.run("01K5RUN0000000000000000002", &engine);
+
+    match second {
+        Err(ref err @ BackupError::ExecutionClaimed(ref message)) => {
+            assert_eq!(err.exit_code(), ExitCode::Operational, "exit 1: retryable");
+            assert_eq!(
+                err.failure_reason(),
+                Some(logweir::backup::phase_run::EXECUTION_ALREADY_CLAIMED)
+            );
+            assert!(
+                message.contains("already exists in the archive")
+                    && message.contains(&format!("{EXECUTION_ID}/manifest.json")),
+                "the refusal names the existing set, not a claim: {message}"
+            );
+        }
+        other => panic!(
+            "a run over a set an older build wrote must be refused with exit 1 before the \
+             engine, got {other:?}"
+        ),
+    }
+    assert_eq!(
+        engine.runs.get(),
+        1,
+        "the engine never started over the existing set"
+    );
+    assert_eq!(
+        verdict(
+            &f.evidence(),
+            &f.archive(),
+            &first.receipt_key,
+            &f.public_key()
+        ),
+        Verdict::Valid,
+        "FX-7: a second run over a set an older build wrote invalidated its signed receipt"
+    );
+    assert_eq!(
+        f.receipts(),
+        vec![first.receipt_key.clone()],
+        "the refused run signed nothing"
+    );
+}
+
+/// An older run that DIED after its first segment — or is still running —
+/// left objects and no manifest. The engine would write those keys again, so
+/// "any object under the set directory" is the test, not "a manifest".
+#[test]
+fn a_set_with_segments_and_no_manifest_is_refused_too() {
+    let f = Fixture::new();
+    let engine = AdvancingEngine::new(&f.root());
+    let segment = f.root().join(format!(
+        "{EXECUTION_ID}/topics/orders/partition=0/segment-00000000000000000000.bin.zst"
+    ));
+    std::fs::create_dir_all(segment.parent().unwrap()).unwrap();
+    std::fs::write(&segment, b"a segment an interrupted older run wrote").unwrap();
+
+    let err = f
+        .run("01K5RUN0000000000000000001", &engine)
+        .expect_err("a set with any object in it is not new");
+    assert!(matches!(err, BackupError::ExecutionClaimed(_)), "{err:?}");
+    assert!(
+        err.to_string().contains("segment-00000000000000000000"),
+        "{err}"
+    );
+    assert_eq!(engine.runs.get(), 0, "no engine run over a partial set");
+    assert!(f.receipts().is_empty(), "nothing signed");
+}
+
+/// **Ordering.** Between two runs of THIS build the CLAIM still answers first:
+/// the set check comes after it, so the second run's refusal names the claim.
+/// With the two swapped the second run would be refused by the set's manifest
+/// instead, which is the same exit and a less exact message.
+#[test]
+fn between_two_runs_of_this_build_the_claim_answers_first() {
+    let f = Fixture::new();
+    let engine = AdvancingEngine::new(&f.root());
+    f.run("01K5RUN0000000000000000001", &engine).unwrap();
+    let err = f
+        .run("01K5RUN0000000000000000002", &engine)
+        .expect_err("the second run of one execution is refused");
+    let message = err.to_string();
+    assert!(
+        message.contains("was already claimed by an earlier run")
+            && message.contains("execution.claim.json exists"),
+        "the claim answers before the set listing: {message}"
+    );
+}
+
+/// An archive that cannot be LISTED proves nothing about the set, so the run
+/// fails closed: exit 4 `ExecutionClaimUnproven`, no engine run, nothing
+/// signed — never "no objects, so the set is new".
+#[cfg(unix)]
+#[test]
+fn an_archive_that_cannot_be_listed_fails_closed() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let f = Fixture::new();
+    let engine = AdvancingEngine::new(&f.root());
+    let set = f.root().join(EXECUTION_ID);
+    std::fs::create_dir_all(&set).unwrap();
+    std::fs::write(set.join("hidden"), b"x").unwrap();
+    std::fs::set_permissions(&set, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let readable = std::fs::read_dir(&set).is_ok();
+
+    let result = f.run("01K5RUN0000000000000000001", &engine);
+    std::fs::set_permissions(&set, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    if readable {
+        // A superuser reads a mode-000 directory anyway, so there is no
+        // listing failure to provoke; the row then says so instead of passing.
+        eprintln!("skipped: this process can read a mode-000 directory (running as root?)");
+        return;
+    }
+    let err = result.expect_err("an unlistable archive must refuse the run");
+    assert_eq!(err.exit_code(), ExitCode::SigningOrLock, "{err}");
+    assert_eq!(
+        err.failure_reason(),
+        Some(logweir::backup::phase_run::EXECUTION_CLAIM_UNPROVEN)
+    );
+    assert!(err.to_string().contains("could not be listed"), "{err}");
+    assert_eq!(engine.runs.get(), 0, "no engine run on an unproven set");
+    assert!(f.receipts().is_empty(), "nothing signed");
+}
+
 /// The interpreter that can run the auditor's verifier — the same resolution
 /// order every parity gate uses (`two_reader_parity.rs::python`).
 fn python() -> PathBuf {

@@ -271,8 +271,11 @@ fn auth_mode_and_username_land_in_the_receipt_and_the_scorecard() {
     // ---- the receipt's source: a real run, over doubles ----
     let f = backup_fixture("  auth:\n    mode: scramSha512\n    username: logweir\n");
     let reader = StubReader;
-    let engine = StubEngine::new();
-    let store = archive_with_one_manifest("mvp-demo");
+    // EMPTY: the engine double writes the manifest when it runs, as the real
+    // engine does — a run refuses an execution whose backup set already
+    // exists (FX-7, `phase_run::refuse_an_existing_set`).
+    let store = std::sync::Arc::new(Store::in_memory(ARCHIVE_PREFIX));
+    let engine = StubEngine::writing_into(store.clone());
     // Six arguments since Task 5b: the ARCHIVE store and the EVIDENCE
     // store are separate parameters (`backup::execute_with`), and this row
     // cares about neither destination — one in-memory store plays both.
@@ -827,17 +830,6 @@ fn backup_fixture(auth_block: &str) -> BackupFixture {
     }
 }
 
-fn archive_with_one_manifest(backup_id: &str) -> Store {
-    let store = Store::in_memory(ARCHIVE_PREFIX);
-    store
-        .put_create_only(
-            &format!("{ARCHIVE_PREFIX}{backup_id}/manifest.json"),
-            format!("{{\"backup_id\":\"{backup_id}\"}}").as_bytes(),
-        )
-        .unwrap();
-    store
-}
-
 struct StubReader;
 
 impl ClusterReader for StubReader {
@@ -879,12 +871,16 @@ impl ClusterReader for StubReader {
 /// proved in `e2e/tests/backup_argv.rs`.
 struct StubEngine {
     plans: std::sync::Mutex<Vec<logweir_core::engine::BackupPlan>>,
+    /// Where `backup` writes its manifest, as the real engine does DURING the
+    /// run (FX-7: a set that exists before the engine starts is refused).
+    archive: std::sync::Arc<Store>,
 }
 
 impl StubEngine {
-    fn new() -> Self {
+    fn writing_into(archive: std::sync::Arc<Store>) -> Self {
         Self {
             plans: std::sync::Mutex::new(Vec::new()),
+            archive,
         }
     }
     fn recorded_plan(&self) -> logweir_core::engine::BackupPlan {
@@ -964,6 +960,13 @@ impl DataEngine for StubEngine {
         _obs: &mut dyn PhaseObserver,
     ) -> Result<logweir_core::engine::BackupFacts, EngineError> {
         self.plans.lock().unwrap().push(plan.clone());
+        let backup_id = &plan.backup_id;
+        self.archive
+            .put_create_only(
+                &format!("{ARCHIVE_PREFIX}{backup_id}/manifest.json"),
+                format!("{{\"backup_id\":\"{backup_id}\"}}").as_bytes(),
+            )
+            .map_err(|e| EngineError::Operational(format!("the double's manifest write: {e}")))?;
         Ok(logweir_core::engine::BackupFacts {
             started_at: "2026-09-09T00:00:00Z".parse().unwrap(),
             finished_at: "2026-09-09T00:01:00Z".parse().unwrap(),

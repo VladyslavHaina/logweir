@@ -217,7 +217,9 @@ pub enum BackupError {
     /// **RECEIPT-DUP.** The execution claim could not be PROVEN exclusive —
     /// the evidence store refused the create-only put, answered it without
     /// enforcing it, or accepted a second create of the same key
-    /// (`phase_run::claim_execution`). **Exit 4**, GC11's "lock-proof failed,
+    /// (`phase_run::claim_execution`) — or (**FX-7**) the archive could not be
+    /// listed to prove the backup set is new
+    /// (`phase_run::refuse_an_existing_set`). **Exit 4**, GC11's "lock-proof failed,
     /// nothing uploaded": no engine run was started, so there is no archive
     /// and no receipt, and a store that does not honour `If-None-Match: *` is
     /// a configuration no retry changes.
@@ -228,7 +230,9 @@ pub enum BackupError {
     #[error("lock: {0}")]
     Lock(String),
     /// **RECEIPT-DUP.** An earlier run of this execution already holds its
-    /// claim (`phase_run::claim_execution`): no engine run, nothing signed.
+    /// claim (`phase_run::claim_execution`) — or (**FX-7**) already wrote its
+    /// backup set without one (`phase_run::refuse_an_existing_set`, a set an
+    /// older build wrote): no engine run, nothing signed.
     /// **Exit 1** — retryable under D1 §4.6, because a retry is a NEW
     /// execution id with its own claim. Its own variant, not `Operational`,
     /// so the one place that names a failure's state
@@ -556,11 +560,18 @@ fn execute_with_signer(
     // before the engine could overwrite the manifest the earlier receipt
     // attests. See `phase_run::claim_execution`.
     let claim_key = phase_run::claim_execution(&backup_id, run_id, requested_at, evidence)?;
+    // **FX-7 — AND THE SET MUST BE NEW.** A set an OLDER build wrote carries
+    // no claim, so the claim above admits a second run of it; this listing
+    // does not. After the claim, so a second run of THIS build is still
+    // answered by the claim, and last before the engine, so the window before
+    // the engine's first write is as short as it can be. See
+    // `phase_run::refuse_an_existing_set`.
+    phase_run::refuse_an_existing_set(&backup_id, store)?;
     tracing::info!(
         run_id = %run_id,
         backup_id = %backup_id,
         claim_key = %claim_key,
-        "execution claimed; starting the engine"
+        "execution claimed and its backup set is new; starting the engine"
     );
 
     let mut obs = crate::metrics::PhaseLogger::new(run_id);
