@@ -114,6 +114,92 @@ impl OsoCliEngine {
         }
         Ok(())
     }
+
+    /// The key and bytes of `set`'s consumer-groups snapshot, or `None` when
+    /// the store says there is no such object. The ONE reader of the object:
+    /// `describe` hashes what it returns and `consumer_group_snapshot` parses
+    /// it, so the two can never look at different keys.
+    ///
+    /// Only `StoreError::NotFound` is absence. Any other read failure is an
+    /// error (Task 12): neither presence nor a digest can be stated then.
+    fn consumer_group_snapshot_object(
+        &self,
+        set: &BackupSetRef,
+    ) -> Result<Option<(String, Vec<u8>)>, EngineError> {
+        let name = vendored::consumer_groups::OBJECT_NAME;
+        let key = set
+            .manifest_key
+            .rsplit_once('/')
+            .map(|(dir, _)| format!("{dir}/{name}"))
+            .unwrap_or_else(|| name.to_string());
+        match self.store.get(&key) {
+            Ok((bytes, _)) => Ok(Some((key, bytes))),
+            Err(crate::storage::StoreError::NotFound(_)) => Ok(None),
+            Err(other) => Err(other.into()),
+        }
+    }
+
+    /// FX-1. `set`'s consumer-groups snapshot, read the way the engine writes
+    /// it (`vendored::consumer_groups`).
+    ///
+    /// **A snapshot that is not in the engine's shape is a VALUE here,
+    /// [`ConsumerGroupSnapshotRead::Unreadable`], not an error.** It is a fact
+    /// about the archive — the object exists, it hashes to this digest, and
+    /// this build cannot read its content — so it is reported as one, with the
+    /// reason. It is never `EngineError::Operational`, which the drill and the
+    /// backup define as a failure that says nothing about the archive (exit
+    /// 1, "fix the environment and re-run"), and it is not an `Err` a caller
+    /// can propagate with `?` by reflex: a caller that needs the positions
+    /// matches on the outcome and must say what an unreadable snapshot means
+    /// for it (PROD-04.1: "not captured", never zero groups). The only `Err`
+    /// is a read failure that leaves presence unknown.
+    ///
+    /// Nothing on the drill or backup path calls this: Logweir restores no
+    /// consumer offsets (spec §2 non-goals). It is the reader PROD-04.1's
+    /// import of foreign archives builds on, and what the FX-1 tests read.
+    pub fn consumer_group_snapshot(
+        &self,
+        set: &BackupSetRef,
+    ) -> Result<ConsumerGroupSnapshotRead, EngineError> {
+        let Some((key, bytes)) = self.consumer_group_snapshot_object(set)? else {
+            return Ok(ConsumerGroupSnapshotRead::Absent);
+        };
+        let sha256 = logweir_core::ids::sha256_prefixed(&bytes);
+        Ok(match vendored::consumer_groups::parse(&bytes) {
+            Ok(snapshot) => ConsumerGroupSnapshotRead::Parsed {
+                key,
+                sha256,
+                snapshot,
+            },
+            Err(e) => ConsumerGroupSnapshotRead::Unreadable {
+                key,
+                sha256,
+                reason: e.to_string(),
+            },
+        })
+    }
+}
+
+/// What `OsoCliEngine::consumer_group_snapshot` found for one backup set.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConsumerGroupSnapshotRead {
+    /// No object: the engine's snapshot was off when the set was written. It
+    /// is off by default upstream, and Logweir's own backups never enable it.
+    Absent,
+    /// The object, in the shape the engine writes. `sha256` is over its bytes,
+    /// the same value `describe` publishes.
+    Parsed {
+        key: String,
+        sha256: String,
+        snapshot: vendored::consumer_groups::ConsumerGroupsSnapshot,
+    },
+    /// The object exists and hashes to `sha256`, but is not in the shape the
+    /// engine writes; `reason` says where it departs from it.
+    Unreadable {
+        key: String,
+        sha256: String,
+        reason: String,
+    },
 }
 
 impl DataEngine for OsoCliEngine {
@@ -147,36 +233,31 @@ impl DataEngine for OsoCliEngine {
             manifest_version_id: version_id,
             // Spec §14 SP1b names consumer-groups-snapshot.json in scope and
             // §10/GT-10 treat it as part of the artifact set a reader must
-            // handle. v0.1 records that it EXISTS and what it hashes to; it
-            // never restores offsets (spec §2 non-goals), so nothing else is
-            // read out of it. Absent is normal, not an error.
+            // handle. `describe` publishes two facts about it: that it EXISTS
+            // and what it HASHES to. Absent is normal, not an error.
+            //
             // Task 12 fix: `Err(_) => None` used to map EVERY read failure —
             // a 403, a timeout, a truncated read, genuine absence — onto the
-            // same `None`, so `consumer_group_snapshot_sha256: None` then
-            // flowed into the signed scorecard as a positive claim ("this
-            // artefact was never uploaded") the store never actually
-            // established. Only `StoreError::NotFound` means that; every
-            // other error propagates as `Operational`, matching the
-            // malformed-snapshot arm just below it, which already propagated.
-            consumer_group_snapshot_sha256: {
-                let sibling = set
-                    .manifest_key
-                    .rsplit_once('/')
-                    .map(|(dir, _)| format!("{dir}/consumer-groups-snapshot.json"))
-                    .unwrap_or_else(|| "consumer-groups-snapshot.json".to_string());
-                match self.store.get(&sibling) {
-                    Ok((b, _)) => {
-                        // Parse it so a reshaped object is a warning we can see
-                        // rather than an opaque blob; the value is discarded.
-                        let _: vendored::consumer_groups::ConsumerGroupsSnapshot =
-                            serde_json::from_slice(&b)
-                                .map_err(|e| EngineError::Operational(format!("{sibling}: {e}")))?;
-                        Some(logweir_core::ids::sha256_prefixed(&b))
-                    }
-                    Err(crate::storage::StoreError::NotFound(_)) => None,
-                    Err(other) => return Err(other.into()),
-                }
-            },
+            // same `None`, a positive claim ("this artefact was never
+            // uploaded") the store never established. Only
+            // `StoreError::NotFound` means that; any other read error still
+            // propagates, because then neither fact can be stated.
+            //
+            // FX-1: its CONTENT is not a fact `describe` publishes, and it is
+            // no longer a reason to refuse the archive. The content used to be
+            // parsed here against an invented shape and a mismatch returned
+            // `Operational` — "says nothing about the archive; fix the
+            // environment and re-run" (exit 1, no artifact) — so every drill
+            // and every backup receipt of an archive holding a real, non-empty
+            // snapshot failed, and no re-run could ever succeed. Neither
+            // caller reads the content: a drill restores data with
+            // `auto_consumer_groups: false` (`render_restore.rs`) and signs no
+            // snapshot fact, and a receipt carries none. What the content IS
+            // — the engine's shape, or not — is `consumer_group_snapshot`'s
+            // answer below, as a value.
+            consumer_group_snapshot_sha256: self
+                .consumer_group_snapshot_object(set)?
+                .map(|(_, bytes)| logweir_core::ids::sha256_prefixed(&bytes)),
             topics: m
                 .topics
                 .iter()

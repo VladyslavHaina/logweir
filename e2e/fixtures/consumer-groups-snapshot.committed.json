@@ -1,0 +1,81 @@
+{
+  "what": "The broker's own account of every committed consumer-group position when e2e/fixtures/consumer-groups-snapshot.json was taken: `kafka-consumer-groups --bootstrap-server kafka-broker-1:9094 --describe --all-groups --offsets` (cp-kafka 7.6.0 CLI, apache/kafka 3.7.1 broker), identical before and after the backup. The oracle the snapshot is checked against; see e2e/fixtures/README.md.",
+  "archived_topics": [
+    "orders",
+    "payments"
+  ],
+  "committed": [
+    {
+      "group_id": "fx1-mixed",
+      "topic": "orders",
+      "partition": 2,
+      "offset": 17
+    },
+    {
+      "group_id": "fx1-mixed",
+      "topic": "test-topic",
+      "partition": 1,
+      "offset": 0
+    },
+    {
+      "group_id": "fx1-orders-reader",
+      "topic": "orders",
+      "partition": 0,
+      "offset": 300
+    },
+    {
+      "group_id": "fx1-orders-reader",
+      "topic": "orders",
+      "partition": 1,
+      "offset": 0
+    },
+    {
+      "group_id": "fx1-orders-reader",
+      "topic": "orders",
+      "partition": 2,
+      "offset": 0
+    },
+    {
+      "group_id": "fx1-payments-set",
+      "topic": "payments",
+      "partition": 0,
+      "offset": 11
+    },
+    {
+      "group_id": "fx1-payments-set",
+      "topic": "payments",
+      "partition": 1,
+      "offset": 22
+    },
+    {
+      "group_id": "fx1-payments-set",
+      "topic": "payments",
+      "partition": 2,
+      "offset": 33
+    },
+    {
+      "group_id": "fx1-two-topics",
+      "topic": "orders",
+      "partition": 0,
+      "offset": 42
+    },
+    {
+      "group_id": "fx1-two-topics",
+      "topic": "orders",
+      "partition": 1,
+      "offset": 42
+    },
+    {
+      "group_id": "fx1-two-topics",
+      "topic": "payments",
+      "partition": 2,
+      "offset": 9
+    },
+    {
+      "group_id": "fx1-unarchived-only",
+      "topic": "test-topic",
+      "partition": 0,
+      "offset": 0
+    }
+  ]
+}
