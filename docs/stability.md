@@ -29,6 +29,40 @@ after a release is the one most likely to be treated as if the release had not
 happened. It has. **Do not let the first post-release addition inherit a
 pre-release ruling by accident.**
 
+### The first post-tag addition: format 1.1.0 (FX-4)
+
+FX-4 is that first addition, and it takes the rule above, not a pre-release
+ruling. Three documents move to `1.1.0`, each with a new schema file beside its
+frozen `1.0.0` one:
+
+| Document | New optional field | Schema |
+|---|---|---|
+| Drill scorecard | `topic_parity.not_assessed` | `schemas/logweir-drill-scorecard-1.1.0.json` |
+| Backup receipt | `config_coverage` | `schemas/logweir-backup-receipt-1.1.0.json` |
+| Catalog point record | `topics[].config_coverage` | `schemas/logweir-catalog-point-1.1.0.json` |
+
+- **Absent means unknown.** A missing `config_coverage` is UNKNOWN coverage and
+  never `captured`; a missing `not_assessed` is "not recorded" and never "every
+  topic assessed". A 1.0.0 document is decided exactly as before.
+- **The media types keep `version=1.0.0`.** That names the envelope's major,
+  which did not change; the catalog index entry also stays `1.0.0`.
+- **Six receipt arms are added, and they are argued MINOR.** Arms 6–11 read
+  only the new block, so no document without it changes verdict, and the
+  corpus and parity gates re-prove that on every `just lint`. That is the
+  reading PROD-01.4 took for its planned `generations` arms. The rule above
+  calls a change to `validate_invariants` MAJOR, so two maintainers confirm or
+  overrule this reading ([MAINTAINERS.md](../MAINTAINERS.md)).
+- **Readers built before FX-4 accept every 1.1.0 document** and ignore the new
+  fields (measured: `docs/formats/backup-receipt.md`, "Upgrade, rollback and old
+  receipts"). They check none of the six arms and print no coverage.
+- **Rollback** is safe in both directions. An older `logweir` writes 1.0.0
+  documents again, and their coverage then reads unknown. The 1.1.0 documents
+  already written stay valid under both readers.
+- **The next receipt field is 1.2.0.** PROD-01.4's record planned `1.1.0` and
+  arms 6–10 for the receipt's `generations` block (PROD-02.1); those numbers
+  are now taken, so that block is `1.2.0`, its arms start at 12, and the Python
+  reader's version after `1.15.0` is `1.16.0`.
+
 ### The product API's OpenAPI document is pre-release, and says so
 
 `schemas/logweir-api-v1.openapi.json` is the third checked-in schema and the
@@ -630,6 +664,11 @@ topic exists, so the name it creates was free, and it is deleted before any verd
 but on a `LogAppendTime` broker an exit-3 run has therefore created and deleted one topic, and this
 sentence is the record of it.
 
+Since FX-4 a target whose broker configuration phase 0 may not read is exit 1 before the probe.
+Before, rust-rdkafka answered the refused read as an empty configuration, phase 0 took the Apache
+default `CreateTime`, and the probe was skipped
+([the ruling](#an-empty-configuration-answer-is-a-refused-read-never-no-overrides-prod-040-t13-fx-4)).
+
 ### The restore window's end is inclusive; the backup receipt's `covered.to_ms` is exclusive
 
 A `Restore`'s window is a closed interval: the engine's PITR filter is `timestamp >= start &&
@@ -874,6 +913,50 @@ the claim cannot close, because the older run never wrote one; let in-flight Bac
 upgrading the controller. **Rollback.** An older runner ignores the claim objects (they are not
 receipts) and returns to the old behaviour; the claims stay in the bucket, harmlessly, and are
 honoured again after a re-upgrade.
+
+### An empty configuration answer is a refused read, never "no overrides" (PROD-04.0 T13, FX-4)
+
+rust-rdkafka 0.36.2 never reads librdkafka's per-resource DescribeConfigs error
+(`src/admin.rs:1121-1159`). A topic or broker the principal may not
+DescribeConfigs comes back as a SUCCESS with ZERO entries, which every caller
+used to read as a resource with no configuration. Kafka never answers a
+successful describe that way: an authorised resource gets every config entry,
+and an empty list comes only beside a per-resource error
+(`ConfigHelper.scala:54-98` at 4.3.1). `logweir-kafka` now turns an empty
+answer into an error. For a topic the error is NotAuthorized, or unknown topic
+when the principal's metadata says so; for the broker it is NotAuthorized.
+Measured on the compose stack
+(`e2e/tests/config_coverage.rs::a_denied_describe_configs_is_a_refusal_at_every_reader`).
+librdkafka answered the denied principal with 0 entries, against 31 for a
+topic and 289 for the broker under the super user.
+
+What changes for an operator:
+
+- **Phase 0 exits 1** when the restore identity may not read the target's
+  broker configuration. It used to assume `CreateTime` and skip the
+  `LogAppendTime` probe. Grant the restore identity DescribeConfigs on the
+  Cluster resource; Describe does not imply it.
+- **Readiness check `target.timestampBound` reads `unknown`
+  (`BrokerConfigsNotReadable`)** for the same identity. It used to read
+  `ready` (`TimestampWithinBound`) because it found no bound.
+- **Phase 2 exits 1** when an EXISTING mapped target topic's configuration may
+  not be read, instead of recording it as empty. So does phase 0's probe
+  readback.
+- **Phase 7 never compares a refused target read as empty.** The topic is
+  named in `topic_parity.not_assessed` with `targetReadDenied`, and its
+  partition count and replication factor are still classified.
+- **A backup never fails for it.** The topic's `config_coverage` reads
+  `captureDenied` ([the format](formats/backup-receipt.md#config_coverage--topic-configuration-capture-coverage-format-110)).
+
+**The limit.** Which error it was is read from the principal's metadata for
+the topic, not from the per-resource code, which the binding does not expose.
+For a visible topic `captureDenied` is therefore an inference: the only
+per-resource errors Kafka returns for an existing, validly named topic are the
+authorizer's and an internal broker error. Reading the code (owner choice
+AP-OC1) turns it into an observation; it never makes the answer `captured`.
+One behaviour is unchanged on purpose. A broker that ANSWERS but lacks the
+`log.message.timestamp.type` key is still read as the Apache default,
+because that is an answer and not a refused read.
 
 ### A bound point's receipt signature is verified before any data moves (D3 §5.5 step 6)
 

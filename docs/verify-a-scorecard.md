@@ -111,10 +111,11 @@ venv/bin/pip install cryptography
 venv/bin/python3 verify_scorecard.py scorecard.json scorecard.sig public.pem
 ```
 
-`--payload-type scorecard|backup-receipt|receipt|teardown` selects the signed
-document type; the default is `scorecard`. `backup-receipt` records a
+`--payload-type scorecard|backup-receipt|receipt|teardown|catalog-point` selects
+the signed document type; the default is `scorecard`. `backup-receipt` records a
 [backup run](formats/backup-receipt.md); `receipt` records a scorecard's storage
-readback. See [receipt verification](#verifying-the-receipts-signature).
+readback; `catalog-point` is a [recovery catalog point](formats/catalog-point.md),
+checked for its signature only. See [receipt verification](#verifying-the-receipts-signature).
 
 | Exit/output | Meaning |
 | --- | --- |
@@ -128,6 +129,9 @@ Both routes check the sidecar's expected `payloadType`, the signature over DSSE
 PAE of the type and raw payload bytes, then the applicable document rules.
 Scorecards use `application/vnd.logweir.drill-scorecard+json;version=1.0.0`.
 A signature for another document type cannot serve as a scorecard signature.
+The media type's `version=1.0.0` names the envelope and stays the same for a
+document whose `format_version` is `1.1.0`; the document's own version is the
+field inside it.
 
 The current scorecard checks include:
 
@@ -154,8 +158,33 @@ The current scorecard checks include:
 - The claimed `approval.self_attested` agrees with a derivation from the key
   that actually verified the signature; see [approval](#reading-approvalself_attested).
 
-Backup receipts have their own shape and invariants. Receipt and teardown
-verification do not apply scorecard-specific integrity rules.
+Both readers also print one line about configuration parity for a scorecard
+whose `topic_parity.not_assessed` is not `[]`:
+
+```
+configuration parity: NOT ASSESSED for drill-orders: configuration (captureDenied)
+configuration parity: not recorded, so an empty unexpected_divergence proves nothing
+```
+
+The first is a format 1.1.0 document naming the topics whose configuration
+parity was not assessed; the second is every 1.0.0 document, and a 1.1.0 one
+whose drill stopped before phase 7. Neither is a refusal and neither changes the
+exit code. No line is printed when every topic was assessed (`not_assessed: []`).
+See [what an empty divergence list does not prove](#an-empty-unexpected_divergence-is-not-configuration-parity).
+
+Backup receipts have their own shape and invariants — eleven arms since format
+1.1.0 ([the list](formats/backup-receipt.md#the-eleven-arms)). For an accepted
+receipt both readers print its configuration capture coverage in the same words:
+
+```
+config_coverage["orders"]: captured, message.timestamp.type LogAppendTime from dynamicDefaultBrokerConfig
+config_coverage["payments"]: captureDenied, message.timestamp.type not recorded
+config_coverage: not recorded, so every topic's configuration capture is UNKNOWN, never captured
+```
+
+The last line is printed instead of per-topic lines for every receipt without
+the block, including every receipt written before format 1.1.0. Receipt and
+teardown verification do not apply scorecard-specific integrity rules.
 
 `logweir drill show` renders a document without verifying its signature. It
 refuses an unsupported newer major with exit `1`, but it does not perform the
@@ -364,6 +393,18 @@ The four post-put fields are zeroed before signing. Storage facts belong in the
 [separate receipt](#the-storage-receipt-a-second-signed-document); false values
 in the scorecard do not establish that the bucket is mutable or unprotected.
 
+### An empty `unexpected_divergence` is not configuration parity
+
+`topic_parity` compares each restored topic's configuration with the archive
+manifest's record of the source's. That record is empty whenever the backup
+could not read the source's configuration, so an empty
+`unexpected_divergence` is evidence of configuration parity only for a topic
+that `topic_parity.not_assessed` does NOT name, and only in a format 1.1.0
+document whose `not_assessed` is present. Differences listed for a named topic
+are still real; the SILENCE about it is not a finding. The reasons in
+parentheses are defined in the
+[scorecard format](formats/drill-scorecard.md#topic_parity-and-what-its-silence-means).
+
 ### `engine_subreport` corroborates nothing about Logweir's integrity claim
 
 The current engine wrapper inherits the refusing default for `validation_run`,
@@ -440,10 +481,11 @@ weaker governance signal, not by itself a defect in the signed artifact.
 
 ### What the `verifier:` line means, and why its version moves
 
-The Python report ends with `verifier: verify_scorecard.py 1.13.0` followed by
+The Python report ends with `verifier: verify_scorecard.py 1.15.0` followed by
 the checks it applied. This is the **verifier's version**, not the document's
-`format_version` (`1.0.0`). It changes when the reader's accepted-document set
-changes. The compatibility history is:
+`format_version` (`1.0.0`, or `1.1.0` for a scorecard signed since FX-4). It
+changes when the reader's accepted-document set changes. The compatibility
+history is:
 
 | Version | Changed checks |
 | --- | --- |
@@ -460,10 +502,17 @@ changes. The compatibility history is:
 | `1.11.0` | Requires offset-report key and digest to be present or absent together. |
 | `1.12.0` | Requires a marker topic unless target mode is `newTopic`. |
 | `1.13.0` | Rejects present target modes other than `scratch` or `newTopic`, including null; retains acceptance of failed integrity results with or without a partial reason. |
+| `1.14.0` | Adds `--payload-type catalog-point`, a signature-only check of a recovery catalog point record. |
+| `1.15.0` | Knows scorecard and backup-receipt format `1.1.0`. Adds the backup receipt's six `config_coverage` arms (6–11) and prints its per-topic coverage; checks that a scorecard's `topic_parity.not_assessed` is an array of strings and prints the configuration-parity line. Every document without the new fields is decided exactly as before. |
 
 A known diagnostic-order difference remains: Python checks blocks before plain
 fields. If both `run_id` and `engine` are absent, it reports `engine`, while Rust
 reports `run_id`. Both refuse; this is not an acceptance disagreement.
+
+A verifier older than `1.15.0`, and a `logweir` built before FX-4, still
+accept a 1.1.0 receipt or scorecard, since they compare majors only; they ignore
+`config_coverage` and `not_assessed`, check none of the six coverage arms and
+print neither line.
 
 **Rerun the current verifier over retained documents and sidecars checked with
 older versions.** Earlier `VALID` results may reflect weaker consistency or
