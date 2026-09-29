@@ -2432,8 +2432,9 @@ mod live {
             "{:?}",
             m.archive.signals
         );
-        // The strip is what makes verification possible at all: the archived
-        // bytes verbatim never match the source record.
+        // The strip keeps a tail fingerprint a fact about the SOURCE record:
+        // the archived bytes verbatim carry the engine's two headers, so they
+        // never equal it (and a live read could never match them).
         for p in &run1.capture.partitions {
             let a = p.archived.as_ref().expect("archived");
             assert!(a.tail.iter().all(|t| t.raw_fingerprint != t.fingerprint));
