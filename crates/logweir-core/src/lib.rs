@@ -3,7 +3,18 @@
 
 /// Semver of the scorecard document format (spec §6.1). A minor adds optional
 /// fields only; a major changes an identity rule.
-pub const FORMAT_VERSION: &str = "1.0.0";
+///
+/// `1.1.0` since FX-4, which added `topic_parity.not_assessed` — the first
+/// field added after the v0.1 tags, so a MINOR bump with a new schema file
+/// beside the old one, as `docs/stability.md`'s "The v0.1.0 tag is the
+/// compatibility boundary" requires. The payload type stays
+/// `…drill-scorecard+json;version=1.0.0`: it names the major-1 envelope, and
+/// changing it would make every existing reader refuse every new scorecard at
+/// the payload-type comparison. A reader compares MAJORS only
+/// (`Scorecard::refuse_unreadable_major`), so a 1.0.0 reader reads a 1.1.0
+/// document and ignores the field; the signed 1.0.0 fixtures under
+/// `e2e/fixtures/signed/` stay 1.0.0 and keep verifying.
+pub const FORMAT_VERSION: &str = "1.1.0";
 
 /// PLAT-19.2 / decision D0: ordinary confirmation and governed approval —
 /// the installation policy set, the policy snapshot and authorization
@@ -33,7 +44,7 @@ pub mod trust;
 #[cfg(test)]
 mod tests {
     #[test]
-    fn format_version_is_one_zero_zero() {
-        assert_eq!(crate::FORMAT_VERSION, "1.0.0");
+    fn format_version_is_one_one_zero() {
+        assert_eq!(crate::FORMAT_VERSION, "1.1.0");
     }
 }

@@ -430,6 +430,27 @@ pub struct TargetDiffSummary {
 pub struct TopicParity {
     pub intentionally_deviated: Vec<String>,
     pub unexpected_divergence: Vec<String>,
+    /// **Format 1.1.0 (FX-4).** The mapped target topics whose CONFIGURATION
+    /// parity was not assessed, each as `"<target topic>: configuration
+    /// (<why>)"`. `<why>` is the SOURCE topic's capture coverage from the
+    /// verified backup receipt — `unknown` (the restore was bound to no
+    /// receipt, or to one that predates 1.1.0), `notCaptured` or
+    /// `captureDenied` — or `targetReadDenied` when the source was captured
+    /// but the TARGET topic's configuration could not be read (its keys are
+    /// then not compared at all).
+    ///
+    /// For a topic listed here, the two lists above still name every
+    /// configuration difference the archive's OWN record shows, but their
+    /// silence proves nothing: a denied DescribeConfigs at capture leaves the
+    /// manifest's configuration empty, which compares as "no divergence".
+    /// Partition count and replication factor do not depend on that capture
+    /// and are assessed either way.
+    ///
+    /// ABSENT means NOT RECORDED — every 1.0.0 document, and a document whose
+    /// phase 7 never ran — and is never read as "every topic assessed";
+    /// `Some([])` is that claim, and only phase 7 writes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_assessed: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1181,6 +1202,7 @@ mod tests {
             topic_parity: TopicParity {
                 intentionally_deviated: vec![],
                 unexpected_divergence: vec![],
+                not_assessed: None,
             },
             engine_subreport: None,
             evidence: EvidenceInfo {
@@ -1781,7 +1803,7 @@ mod tests {
         assert_eq!(
             err.0,
             "format_version 9.9.9 has a major version newer than this reader understands \
-             (this build knows 1.0.0)"
+             (this build knows 1.1.0)"
         );
     }
 
@@ -1824,7 +1846,7 @@ mod tests {
             .expect_err("v0.1 has no writer that can produce a redaction");
         assert_eq!(
             err.0,
-            "redactions is non-empty but format_version 1.0.0 has no way to produce one; \
+            "redactions is non-empty but format_version 1.1.0 has no way to produce one; \
              --redact is a v0.1.1 feature"
         );
     }

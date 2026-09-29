@@ -18,10 +18,25 @@
 //!
 //! So this is its own media type
 //! (`logweir_verify::PAYLOAD_TYPE_BACKUP_RECEIPT`), its own schema
-//! (`schemas/logweir-backup-receipt-1.0.0.json`), its own
-//! `format_version: "1.0.0"` and its own five arms — four
-//! self-contradiction invariants and one closed value set. Spec §7: "new
-//! payload types, not new scorecard fields."
+//! (`schemas/logweir-backup-receipt-1.0.0.json`, and
+//! `schemas/logweir-backup-receipt-1.1.0.json` beside it since FX-4), its own
+//! `format_version` and its own arms — four self-contradiction invariants and
+//! one closed value set in 1.0.0, and six more (arms 6-11) that read only the
+//! 1.1.0 `config_coverage` block. Spec §7: "new payload types, not new
+//! scorecard fields."
+//!
+//! # 1.1.0: topic-configuration capture coverage (FX-4)
+//!
+//! The engine captures topic configuration non-fatally (`backup/engine.rs:
+//! 382-393` in the pinned source): a denied DescribeConfigs leaves the
+//! manifest's `configurations` EMPTY, which reads exactly like "this topic has
+//! no overrides", and one denied topic empties every topic of the run
+//! (`kafka/admin.rs:476-487` fails the whole call on the first per-resource
+//! error). `config_coverage` records, per named topic, what Logweir's OWN
+//! DescribeConfigs read established about that manifest record — see
+//! [`TopicConfigCoverage`]. ABSENT (every 1.0.0 receipt) means UNKNOWN for
+//! every topic, never `captured`; [`SourceConfigCoverage`] is the one reader
+//! of the block and cannot answer anything stronger for an absent entry.
 //!
 //! # A backup that produces no verifiable evidence is a backup an auditor has
 //! # to take Logweir's word for
@@ -48,11 +63,12 @@ use std::collections::BTreeMap;
 /// Field order is the document's own serialisation order (`serde_json` is
 /// built with `preserve_order`, so declaration order IS byte order through
 /// `crate::det_json::to_deterministic_json`). Do not reorder without
-/// regenerating `schemas/logweir-backup-receipt-1.0.0.json` and re-minting
-/// `e2e/fixtures/signed/backup-receipt.json`.
+/// regenerating `schemas/logweir-backup-receipt-1.1.0.json` (the 1.0.0 file is
+/// frozen) and re-minting `e2e/fixtures/signed/backup-receipt.json`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct BackupReceipt {
-    /// Semver of THIS format — `1.0.0`, and independent of the scorecard's.
+    /// Semver of THIS format — [`RECEIPT_FORMAT_VERSION`] (`1.1.0`) since
+    /// FX-4, `1.0.0` before it, and independent of the scorecard's.
     ///
     /// The schema PINS the major with a pattern rather than leaving the field
     /// an unconstrained string, for the reason
@@ -102,6 +118,193 @@ pub struct BackupReceipt {
     /// runs over the same topic set produce byte-identical bytes here.
     pub records: BTreeMap<String, u64>,
     pub covered: ReceiptCovered,
+    /// **Format 1.1.0 (FX-4).** Per named topic, whether the archive's record
+    /// of the topic's configuration was captured, and the topic's EFFECTIVE
+    /// `message.timestamp.type` with where that value came from. One entry per
+    /// `source.topics` entry and no others (arm 7).
+    ///
+    /// ABSENT means UNKNOWN for every topic — the state of every receipt
+    /// written before 1.1.0 — and is never read as `captured`: a reader goes
+    /// through [`SourceConfigCoverage`], whose answer for an absent block is
+    /// [`ConfigCoverage::Unknown`]. Appended LAST (declaration order is byte
+    /// order) and skipped when absent, so a 1.0.0 document round-trips
+    /// byte-for-byte.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_coverage: Option<BTreeMap<String, TopicConfigCoverage>>,
+}
+
+/// The `format_version` this build WRITES. A reader accepts any `1.x.y`
+/// (arm 1); a document that carries `config_coverage` must declare a minor of
+/// at least [`CONFIG_COVERAGE_SINCE_MINOR`] (arm 6).
+pub const RECEIPT_FORMAT_VERSION: &str = "1.1.0";
+
+/// The first minor of format 1 that defines `config_coverage`.
+pub const CONFIG_COVERAGE_SINCE_MINOR: u64 = 1;
+
+/// `TopicConfigCoverage::coverage`'s closed set (arm 8), in the order the
+/// refusal names them.
+pub const COVERAGE_VALUES: [&str; 3] = ["captured", "notCaptured", "captureDenied"];
+
+/// `TopicConfigCoverage::reason`'s closed set (arm 9). Present exactly when
+/// `coverage` is `notCaptured`.
+pub const NOT_CAPTURED_REASONS: [&str; 2] = ["describeFailed", "manifestDiffers"];
+
+/// `EffectiveConfigValue::value`'s closed set for `message.timestamp.type`
+/// (arm 11) — Kafka's own two values.
+pub const TIMESTAMP_TYPES: [&str; 2] = ["CreateTime", "LogAppendTime"];
+
+/// `EffectiveConfigValue::source`'s closed set (arm 11): Kafka's
+/// `DescribeConfigsResponse` `ConfigSource`, camel-cased, and `unknown` for a
+/// source the broker did not report (Kafka before 1.1, or a code this client
+/// does not map). `dynamicTopicConfig` is the TOPIC OVERRIDE; the other four
+/// named sources are the broker's (a per-broker or cluster-wide dynamic
+/// default, the broker's static `server.properties`, or the built-in default).
+pub const CONFIG_SOURCES: [&str; 6] = [
+    "dynamicTopicConfig",
+    "dynamicBrokerConfig",
+    "dynamicDefaultBrokerConfig",
+    "staticBrokerConfig",
+    "defaultConfig",
+    "unknown",
+];
+
+/// What Logweir established about ONE topic's configuration at capture
+/// (receipt 1.1.0, FX-4).
+///
+/// # Where the answer comes from
+///
+/// Logweir's OWN DescribeConfigs read of the topic, taken by `logweir backup
+/// run` immediately before the engine starts, through the same principal the
+/// engine uses — NOT the engine's capture, which is non-fatal, all-or-nothing
+/// across the run's topics and invisible in the manifest. That read is then
+/// compared with the manifest the engine wrote:
+///
+/// | `coverage` | `reason` | meaning |
+/// |---|---|---|
+/// | `captured` | — | the read succeeded AND the manifest's `configurations` for this topic equal the explicit overrides the engine captures (its own filter: topic-override source, not read-only, not sensitive, on its allowlist). The manifest is a complete record of them, so a configuration parity check may compare against it. |
+/// | `captureDenied` | — | the broker's authorizer refused the read (`TOPIC_AUTHORIZATION_FAILED`). The engine runs as the same principal, so an empty manifest record says nothing. |
+/// | `notCaptured` | `describeFailed` | the read failed for any other reason (a timeout, an unknown topic, a broker error). |
+/// | `notCaptured` | `manifestDiffers` | the read succeeded but the manifest does not record the same overrides — the engine's own capture failed (one denied topic empties them all), or the configuration changed between the two reads. |
+///
+/// Overrides outside the engine's allowlist are never part of the claim:
+/// `captured` says the ARCHIVE's configuration record is complete, not that
+/// every setting of the topic was archived (that is PROD-05.1's portability
+/// table).
+///
+/// Strings on the wire, not enums, for the reason `ReceiptAuth::mode` gives:
+/// a reader must be able to REPORT a value it refuses. The closed sets are
+/// enforced by arms 8, 9 and 11 in both readers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TopicConfigCoverage {
+    /// `captured`, `notCaptured` or `captureDenied` — [`COVERAGE_VALUES`].
+    pub coverage: String,
+    /// `describeFailed` or `manifestDiffers` — [`NOT_CAPTURED_REASONS`] —
+    /// present exactly when `coverage` is `notCaptured` (arm 9).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// The topic's EFFECTIVE `message.timestamp.type` as Logweir's read
+    /// returned it, and where that value came from — the broker-default arm
+    /// of FX-8, which the manifest cannot carry (the engine keeps explicit
+    /// overrides only). ABSENT when the read did not succeed (arm 10) or the
+    /// broker returned no such entry: the timestamp type is then NOT
+    /// RECORDED, never assumed `CreateTime`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp_type: Option<EffectiveConfigValue>,
+}
+
+/// One configuration value as the broker reported it: the value in force and
+/// where it came from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct EffectiveConfigValue {
+    /// For `timestamp_type`: `CreateTime` or `LogAppendTime`
+    /// ([`TIMESTAMP_TYPES`]).
+    pub value: String,
+    /// One of [`CONFIG_SOURCES`]. `dynamicTopicConfig` is a topic override;
+    /// every other named source is the broker's.
+    pub source: String,
+}
+
+/// A topic's configuration capture coverage as a READER uses it.
+///
+/// `Unknown` is not a wire value: it is what an absent `config_coverage`
+/// block, an absent entry, or a value this build does not recognise means.
+/// It is never `Captured`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigCoverage {
+    Captured,
+    NotCaptured,
+    CaptureDenied,
+    Unknown,
+}
+
+impl ConfigCoverage {
+    /// The receipt's spelling, and `unknown` for [`ConfigCoverage::Unknown`]
+    /// (which no receipt carries; a report uses it).
+    #[must_use]
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::Captured => "captured",
+            Self::NotCaptured => "notCaptured",
+            Self::CaptureDenied => "captureDenied",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// The reader's side of the wire: anything outside the closed set is
+    /// `Unknown`, never `Captured`.
+    #[must_use]
+    pub fn from_wire(value: &str) -> Self {
+        match value {
+            "captured" => Self::Captured,
+            "notCaptured" => Self::NotCaptured,
+            "captureDenied" => Self::CaptureDenied,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+/// What a restore knows about each SOURCE topic's configuration capture —
+/// read from a VERIFIED receipt, or from nothing.
+///
+/// The one way a parity check asks "may I compare against the manifest's
+/// configuration?". [`SourceConfigCoverage::unknown`] (no receipt: a plan not
+/// bound to a recovery point) and a receipt without the 1.1.0 block both
+/// answer [`ConfigCoverage::Unknown`] for every topic.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SourceConfigCoverage {
+    recorded: Option<BTreeMap<String, TopicConfigCoverage>>,
+}
+
+impl SourceConfigCoverage {
+    /// Nothing recorded: every topic is [`ConfigCoverage::Unknown`].
+    #[must_use]
+    pub fn unknown() -> Self {
+        Self::default()
+    }
+
+    /// The receipt's own block, copied. The caller must have VERIFIED the
+    /// receipt's signature: this type trusts what it is handed.
+    #[must_use]
+    pub fn from_receipt(receipt: &BackupReceipt) -> Self {
+        Self {
+            recorded: receipt.config_coverage.clone(),
+        }
+    }
+
+    /// `topic`'s coverage; `Unknown` for anything not recorded.
+    #[must_use]
+    pub fn of(&self, topic: &str) -> ConfigCoverage {
+        self.entry(topic).map_or(ConfigCoverage::Unknown, |e| {
+            ConfigCoverage::from_wire(&e.coverage)
+        })
+    }
+
+    /// `topic`'s recorded entry, when there is one — how FX-8 reads the
+    /// effective `timestamp_type`.
+    #[must_use]
+    pub fn entry(&self, topic: &str) -> Option<&TopicConfigCoverage> {
+        self.recorded.as_ref().and_then(|m| m.get(topic))
+    }
 }
 
 /// The SOURCE cluster, as measured — never as a spec claimed it.
@@ -258,9 +461,29 @@ impl BackupReceipt {
     /// 5. `source.auth.mode` is one of the two values this format defines.
     ///    The first arm that is not a self-contradiction check: the document
     ///    does not disagree with itself, it names a mechanism the format has
-    ///    no spelling for. LAST on purpose — the four consistency arms are
-    ///    what an auditor reads first, and a receipt that contradicts itself
-    ///    should say so before it is told its auth mode is unknown.
+    ///    no spelling for. LAST of the 1.0.0 arms on purpose — the four
+    ///    consistency arms are what an auditor reads first, and a receipt that
+    ///    contradicts itself should say so before it is told its auth mode is
+    ///    unknown.
+    ///
+    /// Arms 6-11 (format 1.1.0, FX-4) read `config_coverage` and NOTHING ELSE,
+    /// and run only when it is present — so every document without it, which
+    /// is every receipt written before 1.1.0, is accepted or refused exactly
+    /// as before. Within the block, topics are visited in name order (the
+    /// map's own order) and arms 8-11 run per topic, in order.
+    ///
+    /// 6. `config_coverage` is present only under a `format_version` whose
+    ///    minor is at least 1 — a 1.0.x document cannot carry a 1.1 field.
+    /// 7. `config_coverage` covers exactly `source.topics`, as arm 3 does for
+    ///    `records`.
+    /// 8. every `coverage` is one of [`COVERAGE_VALUES`].
+    /// 9. `reason` is present exactly when `coverage` is `notCaptured`, and
+    ///    is one of [`NOT_CAPTURED_REASONS`].
+    /// 10. a `timestamp_type` is recorded only where the read succeeded: a
+    ///     `captureDenied` topic, or a `notCaptured` one whose reason is
+    ///     `describeFailed`, cannot have observed one.
+    /// 11. a `timestamp_type`'s `value` is one of [`TIMESTAMP_TYPES`] and its
+    ///     `source` one of [`CONFIG_SOURCES`].
     pub fn validate_invariants(&self) -> Result<(), String> {
         // ARM 1. GC12 for this document: a reader refuses a major it has
         // never seen rather than guessing at a shape.
@@ -379,6 +602,91 @@ impl BackupReceipt {
                  \"plaintext\" or \"scramSha512\"",
                 self.source.auth.mode
             ));
+        }
+        // ARMS 6-11 (format 1.1.0, FX-4): the `config_coverage` block, and
+        // only when it is present. Nothing below reads a field a 1.0.0
+        // document has, so every earlier receipt is decided exactly as before.
+        if let Some(coverage) = &self.config_coverage {
+            // ARM 6. A document that declares 1.0.x cannot carry a 1.1 field:
+            // either the version or the block is not what the writer produced.
+            // Arm 1 has already established that the version parses and that
+            // its major is 1, so the minor is read without a fallback path
+            // that could matter.
+            let minor = parse_semver(&self.format_version).map_or(0, |(_, minor, _)| minor);
+            if minor < CONFIG_COVERAGE_SINCE_MINOR {
+                return Err(format!(
+                    "config_coverage is present but format_version {:?} predates it: the field \
+                     is defined from 1.1.0",
+                    self.format_version
+                ));
+            }
+            // ARM 7. The covered set and the named set are the same set — the
+            // twin of arm 3, rendered the same way.
+            let covered: std::collections::BTreeSet<&str> =
+                coverage.keys().map(String::as_str).collect();
+            if covered != named_topics {
+                return Err(format!(
+                    "config_coverage covers {} but the named topic set is {}",
+                    render_set(&covered),
+                    render_set(&named_topics)
+                ));
+            }
+            for (topic, entry) in coverage {
+                // ARM 8. The coverage vocabulary is closed.
+                if !COVERAGE_VALUES.contains(&entry.coverage.as_str()) {
+                    return Err(format!(
+                        "config_coverage[{topic:?}].coverage {:?} is not one of the three values \
+                         this format defines: \"captured\", \"notCaptured\" or \"captureDenied\"",
+                        entry.coverage
+                    ));
+                }
+                // ARM 9. A reason exactly when the coverage is `notCaptured`,
+                // from a closed set. An absent reason is spelled `absent`, the
+                // way arm 2 spells an absent manifest key.
+                let reason_fits = match entry.reason.as_deref() {
+                    Some(reason) => {
+                        entry.coverage == "notCaptured" && NOT_CAPTURED_REASONS.contains(&reason)
+                    }
+                    None => entry.coverage != "notCaptured",
+                };
+                if !reason_fits {
+                    let rendered = match &entry.reason {
+                        Some(reason) => format!("{reason:?}"),
+                        None => "absent".to_string(),
+                    };
+                    return Err(format!(
+                        "config_coverage[{topic:?}].reason {rendered} does not fit coverage {:?}: \
+                         a reason is present exactly when coverage is \"notCaptured\", and is \
+                         \"describeFailed\" or \"manifestDiffers\"",
+                        entry.coverage
+                    ));
+                }
+                // ARM 10. A timestamp type is an OBSERVATION, so it exists only
+                // where the read succeeded.
+                let read_failed = entry.coverage == "captureDenied"
+                    || entry.reason.as_deref() == Some("describeFailed");
+                if read_failed && entry.timestamp_type.is_some() {
+                    return Err(format!(
+                        "config_coverage[{topic:?}] records a timestamp_type, but a topic whose \
+                         configuration read was denied or failed cannot have observed one"
+                    ));
+                }
+                // ARM 11. The observed value and its source, from closed sets.
+                if let Some(ts) = &entry.timestamp_type {
+                    if !TIMESTAMP_TYPES.contains(&ts.value.as_str())
+                        || !CONFIG_SOURCES.contains(&ts.source.as_str())
+                    {
+                        return Err(format!(
+                            "config_coverage[{topic:?}].timestamp_type {:?} from {:?} is not a \
+                             value and source this format defines: the value is \"CreateTime\" \
+                             or \"LogAppendTime\", and the source is \"dynamicTopicConfig\", \
+                             \"dynamicBrokerConfig\", \"dynamicDefaultBrokerConfig\", \
+                             \"staticBrokerConfig\", \"defaultConfig\" or \"unknown\"",
+                            ts.value, ts.source
+                        ));
+                    }
+                }
+            }
         }
         Ok(())
     }

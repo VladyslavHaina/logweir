@@ -1,4 +1,5 @@
 use super::phase2_target::TargetState;
+use logweir_core::backup_receipt::{ConfigCoverage, SourceConfigCoverage};
 use logweir_core::engine::BackupSetFacts;
 use std::collections::BTreeMap;
 
@@ -8,6 +9,11 @@ pub struct Collision {
     pub existing_partitions: i32,
     pub existing_end_offsets: i64,
     pub existing_configs_differing: Vec<String>,
+    /// **FX-4.** `Some(<coverage>)` when the SOURCE topic's configuration was
+    /// not captured (`unknown`, `notCaptured` or `captureDenied`): the keys
+    /// above are the differences the archive's own record shows, and their
+    /// ABSENCE proves nothing. `None` only for `captured`.
+    pub configuration_not_assessed: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -50,8 +56,15 @@ impl TargetDiff {
                 .collisions
                 .iter()
                 .map(|c| {
+                    // FX-4: an unassessed configuration says so beside the
+                    // list, so an empty `[]` is never read as "no divergence".
+                    let not_assessed = c
+                        .configuration_not_assessed
+                        .map(|why| format!(" (configuration not assessed: {why})"))
+                        .unwrap_or_default();
                     format!(
-                        "{}: {} partition(s), {} record(s) already present, differing config: [{}]",
+                        "{}: {} partition(s), {} record(s) already present, differing config: \
+                         [{}]{not_assessed}",
                         c.topic,
                         c.existing_partitions,
                         c.existing_end_offsets,
@@ -93,10 +106,15 @@ pub fn restore_partition_count(t: &logweir_core::engine::TopicFacts) -> i32 {
 
 /// A diff against ACTUAL TARGET STATE, which OSO's dry run never performs and
 /// which the operator's dry run fakes with an unconditional DryRunPassed.
+///
+/// `coverage` is the SOURCE topics' configuration capture coverage from the
+/// verified backup receipt (FX-4): a collision's configuration difference is
+/// assessed only where it is `captured`.
 pub fn run(
     target: &TargetState,
     facts: &BackupSetFacts,
     mapping: &BTreeMap<String, String>,
+    coverage: &SourceConfigCoverage,
 ) -> TargetDiff {
     let mut d = TargetDiff::default();
     for t in &facts.topics {
@@ -117,11 +135,16 @@ pub fn run(
                     .filter(|(k, v)| st.configs.get(*k).map(|cur| cur != *v).unwrap_or(false))
                     .map(|(k, _)| k.clone())
                     .collect();
+                let configuration_not_assessed = match coverage.of(&t.name) {
+                    ConfigCoverage::Captured => None,
+                    other => Some(other.wire_name()),
+                };
                 d.collisions.push(Collision {
                     topic: dst.clone(),
                     existing_partitions: st.partitions,
                     existing_end_offsets: total,
                     existing_configs_differing: differing,
+                    configuration_not_assessed,
                 });
             }
         }

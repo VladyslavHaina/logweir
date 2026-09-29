@@ -21,6 +21,7 @@ pub mod phase9_teardown;
 
 use crate::exit::ExitCode;
 use crate::signer::ValidatedSigner;
+use logweir_core::backup_receipt::SourceConfigCoverage;
 use logweir_core::engine::{
     BackupSetFacts, BackupSetRef, DataEngine, RestorePlan, WindowFloorSource,
 };
@@ -1604,6 +1605,14 @@ pub struct Ctx {
     /// the engine renders, so both TLS clients trust one file. `None` for a
     /// connection that names no CA.
     pub target_tls_ca_file: Option<String>,
+    /// **FX-4.** Each SOURCE topic's configuration capture coverage, from the
+    /// backup receipt the plan's recovery point binds — VERIFIED (signature,
+    /// digest, manifest) by `binding::verify_point_binding` before this
+    /// context existed. [`SourceConfigCoverage::unknown`] for a plan bound to
+    /// no point: there is then no signed record of what was captured, and
+    /// phases 3 and 7 report every topic's configuration parity `notAssessed`
+    /// rather than comparing against a manifest record nobody vouched for.
+    pub source_config_coverage: SourceConfigCoverage,
 }
 
 fn context(spec_text: String, allowed_text: String, contract: bool) -> Result<Ctx, DrillError> {
@@ -1737,6 +1746,10 @@ fn context(spec_text: String, allowed_text: String, contract: bool) -> Result<Ct
         archive,
         store,
         target_tls_ca_file,
+        // UNKNOWN until the caller sets what a verified point binding
+        // established (`execute_for_reporting`). A plan bound to no point
+        // keeps it: there is no signed capture record to read.
+        source_config_coverage: SourceConfigCoverage::unknown(),
     })
 }
 
@@ -2248,16 +2261,17 @@ fn execute_for_reporting(
     // measurement is in `execute_for_reporting`'s own comment above). That is
     // what makes "refused before any data-plane work" true at the socket
     // layer, which is the claim D3 §4.3 and §5.5 both make.
-    let standing_approved = match check_v2_bindings(
+    let bindings = match check_v2_bindings(
         args,
         &startup,
         &authenticated_spec,
         contract.as_ref(),
         &signer.verifying_key(),
     ) {
-        Ok(approved) => approved,
+        Ok(bindings) => bindings,
         Err(error) => return (Err(error), Some(authenticated_spec)),
     };
+    let standing_approved = bindings.standing_approved;
     // **EXACTLY ONE authorization produced this run's `Approved`** —
     // PLAT-14.3b. The per-run approval path fills `startup.approved` in
     // `load_startup_inputs`; the standing path fills the value above, after the
@@ -2294,10 +2308,25 @@ fn execute_for_reporting(
             ),
         };
     let outcome = match context(startup.spec_text, startup.allowed_text, store_contract) {
-        Ok(c) => execute_with_prevalidated(args, run_id, &c, &signer, approved),
+        Ok(mut c) => {
+            // FX-4: what the VERIFIED point binding established about each
+            // source topic's configuration capture. Unknown for an unbound plan.
+            c.source_config_coverage = bindings.source_config_coverage;
+            execute_with_prevalidated(args, run_id, &c, &signer, approved)
+        }
         Err(error) => Err(error),
     };
     (outcome, Some(authenticated_spec))
+}
+
+/// What the two execution-contract-v2 bindings established.
+struct V2Bindings {
+    /// The `Approved` minted from a verified standing authorization, when one
+    /// authorized this run.
+    standing_approved: Option<phase1_approval::Approved>,
+    /// **FX-4.** The verified recovery point's configuration capture coverage;
+    /// [`SourceConfigCoverage::unknown`] when the plan binds no point.
+    source_config_coverage: SourceConfigCoverage,
 }
 
 /// The standing-authorization scope check and the recovery-point binding
@@ -2314,7 +2343,7 @@ fn check_v2_bindings(
     plan: &DrillSpec,
     contract: Option<&ExecutionContract>,
     signing_key: &logweir_evidence::keys::VerifyingKey,
-) -> Result<Option<phase1_approval::Approved>, DrillError> {
+) -> Result<V2Bindings, DrillError> {
     use logweir_core::execution_contract::AuthorizationKind;
 
     let mut standing_approved = None;
@@ -2375,6 +2404,7 @@ fn check_v2_bindings(
         }
     }
 
+    let mut source_config_coverage = SourceConfigCoverage::unknown();
     if plan.source.point.is_some() {
         // A READ-ONLY handle, built here and dropped here. `Store` is not
         // `Clone` and `context` builds its own; a read-only handle cannot put
@@ -2385,16 +2415,20 @@ fn check_v2_bindings(
             .map_err(|error| DrillError::Operational(error.to_string()))?;
         // THE SIGNATURE HALF NEEDS THE CLOCK, read here (Global Constraint 1)
         // and passed down, like the standing authorization's.
-        if let Some(point_id) = binding::verify_point_binding(
+        if let Some(verified) = binding::verify_point_binding(
             plan,
             &archive,
             startup.evidence_keys.as_deref(),
             chrono::Utc::now(),
         )? {
-            tracing::info!(point_id = %point_id, "recovery point binding verified");
+            tracing::info!(point_id = %verified.point_id, "recovery point binding verified");
+            source_config_coverage = verified.config_coverage;
         }
     }
-    Ok(standing_approved)
+    Ok(V2Bindings {
+        standing_approved,
+        source_config_coverage,
+    })
 }
 
 /// The run's [`phase1_approval::Approved`], minted from the SIGNED standing
@@ -2636,7 +2670,12 @@ fn execute_with_validated_approval(
     })?;
     // 3 — the diff REACHES A READER, which is the whole point of phase 3
     let diff = record(&mut sc, 3, "target-diff", || {
-        Ok(phase3_diff::run(&target, &facts, &admitted.topic_mapping))
+        Ok(phase3_diff::run(
+            &target,
+            &facts,
+            &admitted.topic_mapping,
+            &c.source_config_coverage,
+        ))
     })?;
     sc.target_diff = diff.summarise();
     // 4
@@ -2901,6 +2940,7 @@ fn execute_with_validated_approval(
             &sel.per_partition,
             &admitted.topic_mapping,
             &plan,
+            &c.source_config_coverage,
         )
     })?;
     sc.integrity = verified.integrity.clone();
@@ -3555,6 +3595,10 @@ fn new_scorecard(run_id: &str, args: &RunArgs, c: &Ctx) -> Scorecard {
         topic_parity: TopicParity {
             intentionally_deviated: Vec::new(),
             unexpected_divergence: Vec::new(),
+            // NOT RECORDED until phase 7 runs (FX-4): a scorecard signed after
+            // an earlier phase failed has not assessed any configuration, and
+            // `Some(vec![])` would claim it had assessed every topic.
+            not_assessed: None,
         },
         engine_subreport: None,
         // All four zeroed; `phase8_score::run` zeroes them again immediately

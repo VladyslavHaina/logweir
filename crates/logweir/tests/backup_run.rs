@@ -918,7 +918,22 @@ fn backup_run_writes_a_signed_receipt() {
     // The document says what the run measured — spot-checked on the fields an
     // auditor reads first, so a receipt full of defaults cannot pass this row.
     let receipt: BackupReceipt = serde_json::from_slice(&doc).unwrap();
-    assert_eq!(receipt.format_version, "1.0.0");
+    assert_eq!(receipt.format_version, "1.1.0");
+    // FX-4: the block is ALWAYS written, one entry per named topic. This
+    // file's `StubReader` implements no configuration read at all, so the
+    // coverage it can establish is the WEAKEST: `notCaptured` because the read
+    // failed — never `captured`, and never absent.
+    let coverage = receipt
+        .config_coverage
+        .as_ref()
+        .expect("a 1.1.0 receipt this build signs carries config_coverage");
+    assert_eq!(
+        coverage.keys().cloned().collect::<Vec<_>>(),
+        vec!["orders".to_string()]
+    );
+    assert_eq!(coverage["orders"].coverage, "notCaptured");
+    assert_eq!(coverage["orders"].reason.as_deref(), Some("describeFailed"));
+    assert_eq!(coverage["orders"].timestamp_type, None);
     assert_eq!(receipt.run_id, "run-1");
     assert_eq!(receipt.backup_id, "mvp-demo");
     assert_eq!(receipt.source.cluster_id, "SOURCE-CLUSTER-00000001");

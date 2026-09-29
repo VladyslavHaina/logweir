@@ -74,6 +74,14 @@ pub fn from_receipt(
             // no partition count at all. See `RecordTopic::partitions`.
             partitions: None,
             records: *records,
+            // FX-4: the receipt's own entry, copied — absent (UNKNOWN) for a
+            // receipt that predates format 1.1.0. Arm 7 has established the
+            // block names exactly the topics `records` does.
+            config_coverage: receipt
+                .config_coverage
+                .as_ref()
+                .and_then(|block| block.get(name))
+                .cloned(),
         })
         .collect();
     Ok(CatalogPoint {

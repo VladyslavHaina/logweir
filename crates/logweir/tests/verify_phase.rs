@@ -504,6 +504,7 @@ fn a_healthy_drill_reconciles_to_integrity_pass_and_reports_intended_parity_only
         &sel_orders(),
         &mapping,
         &plan,
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
     )
     .unwrap();
 
@@ -588,6 +589,7 @@ fn a_manifest_sha256_in_the_engines_bare_hex_form_still_verifies() {
         &sel_orders(),
         &fixtures::mapping("orders", "drill-orders"),
         &plan_orders_to_drill_orders(),
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
     )
     .unwrap();
 
@@ -642,6 +644,7 @@ fn a_sha256_mismatch_against_the_manifest_fails_integrity_even_when_the_canary_m
         &sel_orders(),
         &mapping,
         &plan,
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
     )
     .unwrap();
 
@@ -695,6 +698,7 @@ fn a_canary_fingerprint_mismatch_fails_integrity_and_is_counted_precisely() {
         &sel_orders(),
         &mapping,
         &plan,
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
     )
     .unwrap();
 
@@ -759,6 +763,7 @@ fn an_unsupported_engine_degrades_to_consume_only_through_the_full_run() {
         &sel_orders(),
         &mapping,
         &plan,
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
     )
     .unwrap();
 
@@ -810,7 +815,17 @@ fn run_rejects_a_verify_request_with_zero_sample_selections() {
     let mapping = fixtures::mapping("orders", "drill-orders");
     let plan = plan_orders_to_drill_orders();
 
-    let err = run(&engine, &reader, &store, &facts, &[], &mapping, &plan).unwrap_err();
+    let err = run(
+        &engine,
+        &reader,
+        &store,
+        &facts,
+        &[],
+        &mapping,
+        &plan,
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+    )
+    .unwrap_err();
     assert!(matches!(err, DrillError::Operational(_)));
     assert!(err.to_string().contains("zero sample selections"));
 }
@@ -869,6 +884,7 @@ fn verdict_for_selection_reads_the_mapped_target_topic_never_the_archive_name() 
         &sel_orders(),
         &mapping,
         &plan,
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
     )
     .unwrap();
 
@@ -931,6 +947,7 @@ fn classify_parity_all_reads_the_mapped_target_topic_never_the_archive_name() {
         &sel_orders(),
         &mapping,
         &plan,
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
     )
     .unwrap();
 
@@ -993,6 +1010,7 @@ fn a_failing_engine_validation_run_never_fails_or_aborts_the_drill() {
         &sel_orders(),
         &mapping,
         &plan,
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
     )
     .expect("an engine-side validation-run failure must never abort phase 7");
 
@@ -1225,7 +1243,17 @@ fn run_aggregates_across_every_selection_and_mapped_topic_not_just_the_first() {
     let mut plan = plan_orders_to_drill_orders();
     plan.topic_mapping = mapping.clone();
 
-    let out = run(&engine, &reader, &store, &facts, &sel, &mapping, &plan).unwrap();
+    let out = run(
+        &engine,
+        &reader,
+        &store,
+        &facts,
+        &sel,
+        &mapping,
+        &plan,
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+    )
+    .unwrap();
 
     assert_eq!(out.integrity.result, IntegrityResult::Pass);
     // 25 + 25: wrong (25) if either `probe_archive_modes` or `run`'s own
@@ -1411,7 +1439,17 @@ fn a_topic_restored_to_zero_records_must_fail_not_pass_even_when_pooled_with_a_h
     let mut plan = plan_orders_to_drill_orders();
     plan.topic_mapping = mapping.clone();
 
-    let out = run(&engine, &reader, &store, &facts, &sel, &mapping, &plan).unwrap();
+    let out = run(
+        &engine,
+        &reader,
+        &store,
+        &facts,
+        &sel,
+        &mapping,
+        &plan,
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+    )
+    .unwrap();
 
     assert_eq!(
         out.integrity.result,
@@ -1532,7 +1570,17 @@ fn a_selection_that_sampled_zero_archive_fingerprints_cannot_hide_inside_a_passi
     let mut plan = with_pit_inside_the_segment(plan_orders_to_drill_orders());
     plan.topic_mapping = mapping.clone();
 
-    let out = run(&engine, &reader, &store, &facts, &sel, &mapping, &plan).unwrap();
+    let out = run(
+        &engine,
+        &reader,
+        &store,
+        &facts,
+        &sel,
+        &mapping,
+        &plan,
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+    )
+    .unwrap();
 
     assert_ne!(
         out.integrity.result,
@@ -1604,6 +1652,7 @@ fn a_byte_fingerprint_comparison_that_samples_zero_records_is_partial_never_pass
         &sel_orders(),
         &mapping,
         &plan,
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
     )
     .unwrap();
 
@@ -1673,6 +1722,7 @@ fn a_short_read_back_on_the_consume_only_lane_is_unverified_not_a_smaller_succes
         // Task 10: the count bound is deliberately non-binding here — see
         // `with_pit_inside_the_segment`.
         &with_pit_inside_the_segment(plan_orders_to_drill_orders()),
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
     )
     .expect("an under-delivering target is a DRILL RESULT, never an Err");
 
@@ -1783,7 +1833,17 @@ fn verdict_for_selection_caps_the_read_at_the_selections_own_count() {
     let mut sel = sel_orders();
     sel[0].count = 7;
 
-    let out = run(&engine, &reader, &store, &facts, &sel, &mapping, &plan).unwrap();
+    let out = run(
+        &engine,
+        &reader,
+        &store,
+        &facts,
+        &sel,
+        &mapping,
+        &plan,
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+    )
+    .unwrap();
 
     // `newest_ts` (run at the very end of `run`, for the RPO input) makes
     // its OWN trailing `consume_range` call with `max = 1` — that call is
@@ -1850,7 +1910,17 @@ fn records_restored_is_the_consumed_count_not_matched_plus_mismatched() {
     let mut sel = sel_orders();
     sel[0].count = 8;
 
-    let out = run(&engine, &reader, &store, &facts, &sel, &mapping, &plan).unwrap();
+    let out = run(
+        &engine,
+        &reader,
+        &store,
+        &facts,
+        &sel,
+        &mapping,
+        &plan,
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+    )
+    .unwrap();
 
     assert_eq!(out.integrity.records_sampled, 5);
     assert_eq!(out.integrity.records_sampled_matching, 5);
@@ -2064,7 +2134,17 @@ fn run_reconciles_two_partitions_of_one_topic_independently_not_pooled() {
     let mut plan = plan_orders_to_drill_orders();
     plan.topic_mapping = mapping.clone();
 
-    let out = run(&engine, &reader, &store, &facts, &sel, &mapping, &plan).unwrap();
+    let out = run(
+        &engine,
+        &reader,
+        &store,
+        &facts,
+        &sel,
+        &mapping,
+        &plan,
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+    )
+    .unwrap();
 
     assert_eq!(
         out.integrity.result,
@@ -2305,6 +2385,7 @@ fn one_of_two_topics_restored_to_zero_records_cannot_pass_on_the_consume_only_la
         // Task 10: the count bound is deliberately non-binding here — see
         // `with_pit_inside_the_segment`.
         &with_pit_inside_the_segment(two_topic_plan()),
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
     )
     .expect("an un-restored topic is a DRILL RESULT (exit 2, signed), never an Err (exit 1)");
 
@@ -2402,6 +2483,7 @@ fn a_wholly_corrupt_topic_beside_an_unrestored_one_fails_and_never_reconciles_ag
         &[sel_for("orders", 0, 25), sel_for("payments", 0, 25)],
         &two_topic_mapping(),
         &two_topic_plan(),
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
     )
     .expect("a failed reconciliation is a DRILL RESULT, never an Err");
 
@@ -2474,6 +2556,7 @@ fn zero_records_consumed_from_a_sampled_partition_is_never_a_pass() {
         // Task 10: the count bound is deliberately non-binding here — see
         // `with_pit_inside_the_segment`.
         &with_pit_inside_the_segment(plan_orders_to_drill_orders()),
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
     )
     .expect("a partition that gave back nothing is a DRILL RESULT, never an Err");
 
@@ -2554,6 +2637,7 @@ fn a_short_archive_fingerprint_list_is_unverified_coverage_not_a_smaller_success
         // Task 10: the count bound is deliberately non-binding here — see
         // `with_pit_inside_the_segment`.
         &with_pit_inside_the_segment(two_topic_plan()),
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
     )
     .expect("an under-delivering archive is a DRILL RESULT, never an Err");
 
@@ -2649,6 +2733,7 @@ fn one_selections_unsupported_archive_never_erases_another_selections_byte_level
         &[sel_for("orders", 0, 25), sel_for("payments", 0, 25)],
         &two_topic_mapping(),
         &two_topic_plan(),
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
     )
     .unwrap();
 
@@ -2733,6 +2818,7 @@ fn a_selection_matching_no_archive_segment_is_a_signed_partial_not_an_operationa
         &sel,
         &fixtures::mapping("orders", "drill-orders"),
         &plan_orders_to_drill_orders(),
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
     )
     .expect(
         "round 3: an archive holding no segment in the window is a DRILL RESULT (exit 2, \
@@ -2781,6 +2867,7 @@ fn a_pre_0_21_segment_with_no_sha256_is_partial_never_a_silent_pass() {
         &sel_orders(),
         &fixtures::mapping("orders", "drill-orders"),
         &plan_orders_to_drill_orders(),
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
     )
     .unwrap();
 
@@ -2845,6 +2932,7 @@ fn a_consume_only_selection_with_a_corrupt_segment_fails_the_drill_never_merely_
         &sel_orders(),
         &fixtures::mapping("orders", "drill-orders"),
         &plan_orders_to_drill_orders(),
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
     )
     .expect("a corrupt archive segment is a DRILL RESULT, never an Err");
 
@@ -2931,6 +3019,7 @@ fn a_partial_verdict_over_a_partly_reconciled_sample() -> logweir_core::scorecar
         &[sel_for("orders", 0, 25), sel_for("payments", 0, 25)],
         &two_topic_mapping(),
         &two_topic_plan(),
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
     )
     .expect("a partly-reconciled sample is a DRILL RESULT, never an Err");
 

@@ -6224,6 +6224,7 @@ fn catalog_receipt(backup_id: &str, run_id: &str, started: &str) -> BackupReceip
             from_ms: started_at.timestamp_millis() - 3_600_000,
             to_ms: started_at.timestamp_millis(),
         },
+        config_coverage: None,
     }
 }
 
@@ -8005,8 +8006,8 @@ fn the_grammar_this_runner_writes_is_the_grammar_the_controller_parses() {
 /// test pins runner ⟷ literal; the controller test pins literal ⟷ parser; and
 /// neither crate had to grow a dependency on the other.
 const PINNED_SYNC_BODY: &str = r#"catalog-format=1
-catalog-page=1/1 count=1 sha256=9198b1b1f3c4a77fd1788aa8ec661b8c1b2fbf585405d84c80210b484eb52376
-catalog-entry={"pointId":"lwp1-0e02dc33bf63349ec262a62043d9bd04","backupId":"set-a","runId":"run-a","recoveryPointAtMs":1789527600000,"coveredFromMs":1789524000000,"coveredToMs":1789527600000,"locations":[{"locationId":"s3://lw-archive/kafka-backups","availability":"Available"}],"receiptKey":"logweir/backups/set-a/run-a.receipt.json","receiptSha256":"sha256:0e02dc33bf63349ec262a62043d9bd0441fb867c72aa2d5b4ce8a085b05469db","manifestKey":"kafka-backups/set-a/manifest.json","manifestSha256":"sha256:d5eea23a2f7ca3f36d2a5dbf3ab2532a3de3a797ded388afb816068c2863a152","recordedAt":"2026-09-16T06:00:00Z","formatVersion":"1.0.0","availability":"Available","signature":"notAttempted","signerKeyId":"0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0","remedy":"No signature verdict was reached: this installation holds no key that signed this point. Add the signing key to the trust source if you accept evidence from it."}
+catalog-page=1/1 count=1 sha256=95250c908736a87d14285e68202b9ab0a1326896a0a4fbaa30bc3f79ad31353d
+catalog-entry={"pointId":"lwp1-0e02dc33bf63349ec262a62043d9bd04","backupId":"set-a","runId":"run-a","recoveryPointAtMs":1789527600000,"coveredFromMs":1789524000000,"coveredToMs":1789527600000,"locations":[{"locationId":"s3://lw-archive/kafka-backups","availability":"Available"}],"receiptKey":"logweir/backups/set-a/run-a.receipt.json","receiptSha256":"sha256:0e02dc33bf63349ec262a62043d9bd0441fb867c72aa2d5b4ce8a085b05469db","manifestKey":"kafka-backups/set-a/manifest.json","manifestSha256":"sha256:d5eea23a2f7ca3f36d2a5dbf3ab2532a3de3a797ded388afb816068c2863a152","recordedAt":"2026-09-16T06:00:00Z","formatVersion":"1.1.0","availability":"Available","signature":"notAttempted","signerKeyId":"0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0","remedy":"No signature verdict was reached: this installation holds no key that signed this point. Add the signing key to the trust source if you accept evidence from it."}
 catalog-counts={"total":1,"available":1,"missing":0,"unreadable":0,"deleted":0,"conflict":0,"unsupportedFormat":0,"partial":0,"signature":{"verified":0,"invalid":0,"noEvidence":0,"notAttempted":1},"byDay":[{"day":"2026-09-16","points":1}]}
 catalog-signers=[{"keyId":"0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0","points":1}]
 catalog-cursor={"indexShard":"2026-09-16","complete":true}

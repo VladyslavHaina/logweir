@@ -38,6 +38,7 @@ fn the_diff_reports_an_existing_target_topic_as_a_collision_with_its_current_sta
         &target,
         &facts,
         &fixtures::mapping("orders", "drill-orders"),
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
     );
     assert_eq!(d.collisions.len(), 1);
     let c = &d.collisions[0];
@@ -68,6 +69,7 @@ fn an_absent_target_topic_becomes_a_would_create_entry_at_the_manifest_partition
         &target,
         &facts,
         &fixtures::mapping("orders", "drill-orders"),
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
     );
     assert!(d.collisions.is_empty());
     assert_eq!(d.would_create, vec![("drill-orders".to_string(), 3)]);
@@ -87,6 +89,7 @@ fn the_summary_carries_absent_topics_not_only_would_create() {
         &target,
         &facts,
         &fixtures::mapping("orders", "drill-orders"),
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
     );
     assert_eq!(d.absent, vec!["drill-orders".to_string()]);
     let sum = d.summarise();
@@ -112,6 +115,7 @@ fn the_diff_summarises_into_the_scorecard_block_that_drill_show_renders() {
         &target,
         &fixtures::backup_facts_orders(3),
         &fixtures::mapping("orders", "drill-orders"),
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
     );
     let sum = d.summarise();
     assert_eq!(sum.level, "full");
@@ -130,6 +134,7 @@ fn the_partition_count_falls_back_to_max_partition_id_plus_one() {
         &fixtures::empty_target(TARGET_CLUSTER_ID),
         &facts,
         &fixtures::mapping("orders", "drill-orders"),
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
     );
     assert_eq!(d.would_create, vec![("drill-orders".to_string(), 3)]);
 }

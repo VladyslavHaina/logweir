@@ -85,6 +85,7 @@ fn receipt(backup_id: &str, run_id: &str) -> BackupReceipt {
             from_ms: 1_757_980_800_000,
             to_ms: 1_757_984_400_000,
         },
+        config_coverage: None,
     }
 }
 
@@ -1527,13 +1528,13 @@ fn the_checked_in_catalog_point_schema_is_the_one_the_type_generates() {
     // shape `crates/logweir-api/tests/contract.rs` uses for the OpenAPI
     // document. `just schema` is the only sanctioned way to change the file.
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../schemas/logweir-catalog-point-1.0.0.json");
+        .join("../../schemas/logweir-catalog-point-1.1.0.json");
     let checked_in = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("{} is readable: {e}", path.display()));
     assert_eq!(
         checked_in,
         logweir::catalog::schema::catalog_point_schema(),
-        "schemas/logweir-catalog-point-1.0.0.json no longer describes CatalogPoint. Run \
+        "schemas/logweir-catalog-point-1.1.0.json no longer describes CatalogPoint. Run \
          `just schema` and commit the diff."
     );
     // The major is pinned by a PATTERN as well as by the reader, so a
@@ -1892,5 +1893,29 @@ fn a_listing_walks_days_backwards_and_stops_once_the_page_is_full() {
     assert_eq!(
         after.days_searched, 2,
         "the backward walk stops at the cursor's own day: {after:?}"
+    );
+}
+
+/// FX-4: the 1.0.0 catalog-point schema is FROZEN beside the 1.1.0 one and
+/// still describes every record written before the bump: it names itself
+/// 1.0.0, and its `RecordTopic` has no `config_coverage`.
+#[test]
+fn the_frozen_1_0_0_catalog_point_schema_is_still_the_1_0_0_schema() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../schemas/logweir-catalog-point-1.0.0.json");
+    let frozen: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("{} is readable: {e}", path.display())),
+    )
+    .expect("the frozen schema parses");
+    assert_eq!(
+        frozen["$id"],
+        "https://logweir.dev/schemas/logweir-catalog-point-1.0.0.json"
+    );
+    let topic = &frozen["definitions"]["RecordTopic"]["properties"];
+    assert!(topic["records"].is_object());
+    assert!(
+        topic.get("config_coverage").is_none(),
+        "the frozen 1.0.0 schema must not describe the 1.1.0 field"
     );
 }

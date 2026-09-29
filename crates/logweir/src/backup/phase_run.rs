@@ -187,6 +187,13 @@ pub struct Ran {
     /// converted HERE, once, where the window is measured — see the argument
     /// in `run` below.
     pub covered_to_ms: i64,
+    /// **FX-4.** The manifest's `configurations` for each NAMED topic the
+    /// manifest mentions — read back through the same `describe` as the
+    /// counts, so the coverage comparison is against the bytes this run read.
+    /// A named topic the manifest does not mention is ABSENT here, which
+    /// `config_coverage::classify` reads as `manifestDiffers`, never as "no
+    /// overrides".
+    pub manifest_configurations: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 pub fn run(
@@ -265,12 +272,14 @@ pub fn run(
     // that is a different claim: nothing was captured for ANY named topic.)
     let mut records_per_topic: BTreeMap<String, u64> =
         plan.topics.iter().map(|t| (t.clone(), 0u64)).collect();
+    let mut manifest_configurations: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     let mut oldest: Option<i64> = None;
     let mut newest: Option<i64> = None;
     for topic in &archive.topics {
         let Some(entry) = records_per_topic.get_mut(&topic.name) else {
             continue;
         };
+        manifest_configurations.insert(topic.name.clone(), topic.configurations.clone());
         for partition in &topic.partitions {
             for segment in &partition.segments {
                 // `record_count` is `i64` on the wire. A negative count is
@@ -329,6 +338,7 @@ pub fn run(
         records_per_topic,
         covered_from_ms,
         covered_to_ms,
+        manifest_configurations,
     })
 }
 
@@ -383,13 +393,17 @@ pub fn receipt_keys(backup_id: &str, run_id: &str) -> Persisted {
 /// `BackupOutcome` -> the document. A pure projection: every field is a value
 /// the outcome already carries, and nothing here measures anything.
 ///
-/// `format_version` is the pinned `1.0.0` of THIS document type (independent
-/// of the scorecard's), and `source.auth` is `BackupOutcome::source_auth`
-/// rendered as the two strings `ReceiptAuth` holds — **never a password, and
-/// no field that could hold one**.
+/// `format_version` is `RECEIPT_FORMAT_VERSION` (`1.1.0` since FX-4) of THIS
+/// document type (independent of the scorecard's), and `source.auth` is
+/// `BackupOutcome::source_auth` rendered as the two strings `ReceiptAuth`
+/// holds — **never a password, and no field that could hold one**.
+///
+/// `config_coverage` is ALWAYS written (FX-4): a receipt this build signs
+/// never leaves a topic's configuration coverage to be read as unknown by
+/// omission when it was measured.
 pub fn build_receipt(outcome: &crate::backup::BackupOutcome) -> BackupReceipt {
     BackupReceipt {
-        format_version: "1.0.0".to_string(),
+        format_version: logweir_core::backup_receipt::RECEIPT_FORMAT_VERSION.to_string(),
         run_id: outcome.run_id.clone(),
         backup_id: outcome.backup_id.clone(),
         requested_at: outcome.requested_at,
@@ -422,6 +436,7 @@ pub fn build_receipt(outcome: &crate::backup::BackupOutcome) -> BackupReceipt {
             // EXCLUSIVE (I22). The conversion happened in `run` above, once.
             to_ms: outcome.covered_to_ms,
         },
+        config_coverage: Some(outcome.config_coverage.clone()),
     }
 }
 

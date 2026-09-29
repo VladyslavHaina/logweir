@@ -16,8 +16,11 @@ use crate::catalog::record::CatalogPoint;
 /// The `format_version` pattern (`^1\.[0-9]+\.[0-9]+$`) is on the type, not
 /// added here: a schema-only validator — the one route that does not go
 /// through [`crate::catalog::reader::read_record`] — must refuse a `9.9.9`
-/// document against a file called `logweir-catalog-point-1.0.0.json` for the
+/// document against a file called `logweir-catalog-point-1.1.0.json` for the
 /// same reason the scorecard and the receipt pin theirs.
+///
+/// **1.1.0 since FX-4** (`topics[].config_coverage`); the 1.0.0 file is frozen
+/// beside it and describes every record written before the bump.
 #[must_use]
 pub fn catalog_point_schema() -> String {
     let settings = schemars::gen::SchemaSettings::draft07().with(|s| {
@@ -28,7 +31,7 @@ pub fn catalog_point_schema() -> String {
         .into_generator()
         .into_root_schema_for::<CatalogPoint>();
     root.schema.metadata().id =
-        Some("https://logweir.dev/schemas/logweir-catalog-point-1.0.0.json".to_string());
+        Some("https://logweir.dev/schemas/logweir-catalog-point-1.1.0.json".to_string());
     let mut out = serde_json::to_string_pretty(&root).expect("schema serialises");
     out.push('\n');
     out

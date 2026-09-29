@@ -56,11 +56,27 @@ fn refuse(message: String) -> DrillError {
     DrillError::Guard(GuardRefusal(message))
 }
 
+/// What a VERIFIED recovery-point binding established, beyond "it holds".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedPoint {
+    /// The point this run proved, for the log line.
+    pub point_id: String,
+    /// **FX-4.** The bound receipt's per-topic configuration capture coverage,
+    /// read from bytes whose digest, identity, signature and manifest were all
+    /// checked above it — so phases 3 and 7 may compare a restored topic's
+    /// configuration against the manifest's record exactly where this says the
+    /// record was `captured`, and say `notAssessed` everywhere else. A receipt
+    /// that predates format 1.1.0 carries no block and reads UNKNOWN for every
+    /// topic.
+    pub config_coverage: logweir_core::backup_receipt::SourceConfigCoverage,
+}
+
 /// Re-verify the recovery point the plan is bound to, against the archive.
 ///
 /// `Ok(None)` when the plan carries no `source.point` — a v1-shaped plan, and
-/// the only shape a pre-catalog archive can be restored from. `Ok(Some(id))`
-/// names the point this run proved, for the log line.
+/// the only shape a pre-catalog archive can be restored from. `Ok(Some(point))`
+/// names the point this run proved, for the log line, and carries its verified
+/// receipt's configuration capture coverage (FX-4).
 ///
 /// # The three answers, and why they are not one code
 ///
@@ -78,7 +94,7 @@ pub fn verify_point_binding(
     archive: &Store,
     evidence_keys: Option<&[u8]>,
     now: chrono::DateTime<chrono::Utc>,
-) -> Result<Option<String>, DrillError> {
+) -> Result<Option<VerifiedPoint>, DrillError> {
     let Some(point) = plan.source.point.as_ref() else {
         return Ok(None);
     };
@@ -206,7 +222,12 @@ pub fn verify_point_binding(
             point.point_id, point.manifest_sha256
         )));
     }
-    Ok(Some(point.point_id.clone()))
+    Ok(Some(VerifiedPoint {
+        point_id: point.point_id.clone(),
+        // Read only NOW, after every check above: these bytes are the approved
+        // ones, signed by a trusted key, over the manifest the archive holds.
+        config_coverage: logweir_core::backup_receipt::SourceConfigCoverage::from_receipt(&receipt),
+    }))
 }
 
 /// The mounted evidence keyring, parsed -- or the refusal that there is none.
@@ -667,6 +688,7 @@ mod tests {
                 from_ms: 1,
                 to_ms: 2,
             },
+            config_coverage: None,
         }
     }
 
@@ -744,6 +766,7 @@ mod tests {
 
     fn check(plan: &DrillSpec, store: &Store, keys: &[u8]) -> Result<Option<String>, DrillError> {
         verify_point_binding(plan, store, Some(keys), chrono::Utc::now())
+            .map(|verified| verified.map(|point| point.point_id))
     }
 
     /// One internally consistent, SIGNED recovery point in a socket-free
