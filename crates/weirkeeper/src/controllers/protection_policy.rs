@@ -1451,6 +1451,8 @@ pub fn delivery_job_spec(
         plan_config_map: None,
         image: image.image.clone(),
         image_pull_policy: image.image_pull_policy.clone(),
+        // `ProtectionPolicy` states no resources for its delivery Job (FX-2).
+        resources: None,
     }
 }
 
