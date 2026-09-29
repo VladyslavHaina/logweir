@@ -20,13 +20,30 @@
 //!   exactly that pair, with its reason, and a declaration no comparison uses
 //!   is DRIFT too, so the list cannot go stale.
 //!
-//! An item that cannot be located at all, or that resolves to an empty
-//! field/variant set, is ALSO an error -- never agreement. A rename or typo in
-//! either the vendored file or upstream must not silently produce "zero fields
-//! to disagree about", which a naive checker would report as a clean pass.
+//! - SERDE WIRE ATTRIBUTES (FX-1 fix round, L2), on the item and on every
+//!   field or variant both sides declare: the items in `WIRE` -- `rename`,
+//!   `rename_all`, `alias`, `flatten`, `tag`/`content`/`untagged`,
+//!   `transparent`, `from`/`into`, the `with` and `skip` families. A
+//!   `#[serde(rename = "time")]` upstream changes the key while every Rust name
+//!   still matches, so unequal sets are DRIFT unless `DIVERGENCES` declares
+//!   them.
+//! - PRESENCE: a field upstream may leave out (`skip_serializing_if`,
+//!   `skip_serializing`, `skip`) must be one we can do without -- `default` on
+//!   it or on the item, an `Option`, or never read.
 //!
-//! What it does not compare: serde attributes (a `rename` upstream would pass
-//! it) and the bodies of enum variants.
+//! An item that cannot be located at all, that resolves to an empty
+//! field/variant set, or that is declared MORE THAN ONCE in one file (L3) is
+//! ALSO an error -- never agreement. A rename or typo in either the vendored
+//! file or upstream must not silently produce "zero fields to disagree about",
+//! which a naive checker would report as a clean pass; and with two
+//! declarations of one name the gate cannot know which one to compare.
+//!
+//! What it does not compare: the payloads of enum variants; attributes that
+//! do not change which JSON is read (`default`, `deny_unknown_fields`,
+//! `bound`, …) outside the presence rule; the semantics behind an attribute's
+//! text -- two spellings that happen to name the same keys (`rename_all` on the
+//! item against a `rename` on each field) are reported as drift, which errs on
+//! the safe side; and anything a macro generates.
 //!
 //! The unit tests at the bottom run the gate against the pinned source tarball
 //! (`third_party/kafka-backup-v*.tar.gz`), so `cargo test --workspace` runs it
@@ -101,13 +118,25 @@ const CHECKS: &[Check] = &[
     },
 ];
 
-/// A vendored field whose type deliberately differs from upstream's in a way
-/// `compatible` does not accept, and why. `ours`/`upstream` are the types as
-/// `render` prints them.
+/// What a declared divergence is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum On {
+    /// A field's type, as `render` prints it.
+    Type,
+    /// The WIRE serde items of a field, or of the item itself when `field` is
+    /// empty, as `render_wire` prints them.
+    Serde,
+}
+
+/// A vendored item or field that deliberately differs from upstream in a way
+/// the rules do not accept, and why. A declaration no comparison uses is
+/// itself DRIFT, so the list cannot go stale.
 struct Divergence {
     vendored: &'static str,
     item: &'static str,
+    /// Empty for the item itself (only with `On::Serde`).
     field: &'static str,
+    on: On,
     ours: &'static str,
     upstream: &'static str,
     #[allow(dead_code)] // read by people: the reason is the point of the entry
@@ -119,6 +148,7 @@ const DIVERGENCES: &[Divergence] = &[
         vendored: "manifest.rs",
         item: "OffsetGap",
         field: "reason",
+        on: On::Type,
         ours: "String",
         upstream: "OffsetGapReason",
         why: "a string-serialising enum (rename_all = snake_case) read as its string, so a \
@@ -128,10 +158,33 @@ const DIVERGENCES: &[Divergence] = &[
         vendored: "manifest.rs",
         item: "PrunedRange",
         field: "reason",
+        on: On::Type,
         ours: "String",
         upstream: "PruneReason",
         why: "a string-serialising enum (rename_all = snake_case) read as its string, so a \
               reason this build does not know never fails the parse",
+    },
+    Divergence {
+        vendored: "preflight.rs",
+        item: "PartitionCoverageState",
+        field: "",
+        on: On::Serde,
+        ours: "from=\"String\", into=\"String\"",
+        upstream: "rename_all=\"snake_case\"",
+        why: "ours reads and writes the state through its string and spells every snake_case \
+              name by hand (`PartitionCoverageState::as_str`), so a state this build does not \
+              know degrades to `Unknown` instead of failing the parse (spec §11); the variant \
+              names are still compared",
+    },
+    Divergence {
+        vendored: "consumer_groups.rs",
+        item: "ConsumerGroupEntry",
+        field: "offsets",
+        on: On::Serde,
+        ours: "deserialize_with=\"offsets_without_repeated_keys\"",
+        upstream: "none",
+        why: "reads the same JSON object, refusing a repeated topic or partition key instead \
+              of keeping the last value (FX-1 fix round, L1)",
     },
 ];
 
@@ -286,31 +339,94 @@ enum Kind {
     Enum,
 }
 
-/// The kind and the brace-delimited body of `struct <item>` or `enum <item>`,
-/// declared at the start of a line of `src` (comments already stripped), at
-/// any visibility and at any nesting -- the snapshot writer's structs are
-/// declared inside a function. `None` when there is no such declaration.
-fn find_item<'a>(src: &'a str, item: &str) -> Option<(Kind, &'a str)> {
-    let mut offset = 0;
-    for line in src.split_inclusive('\n') {
+/// One declaration of an item: its kind, the attributes written above it
+/// (`#[derive(…)]`, `#[serde(…)]`, …, as source text) and its brace-delimited
+/// body.
+struct Found<'a> {
+    kind: Kind,
+    attrs: Vec<String>,
+    body: &'a str,
+}
+
+/// The index just past the `#[…]` (or `#![…]`) attribute starting at `at`,
+/// skipping literals.
+fn attribute_end(src: &str, at: usize) -> Option<usize> {
+    let b = src.as_bytes();
+    let open = at + src[at..].find('[')?;
+    let (mut depth, mut i) = (0usize, open);
+    while i < b.len() {
+        if let Some(end) = literal_end(src, i) {
+            i = end;
+            continue;
+        }
+        match b[i] {
+            b'[' => depth += 1,
+            b']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i + 1);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// EVERY declaration of `struct <item>` or `enum <item>` in `src` (comments
+/// already stripped) that begins a line, at any visibility and at any nesting
+/// -- the snapshot writer's structs are declared inside a function -- with the
+/// attributes written above it. All of them, not the first: a second
+/// declaration of the same name makes the pairing ambiguous, and `resolve`
+/// refuses that (L3) rather than silently comparing whichever came first.
+fn find_items<'a>(src: &'a str, item: &str) -> Vec<Found<'a>> {
+    let mut found = Vec::new();
+    let mut pending: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < src.len() {
+        let rest = &src[i..];
+        let at = i + (rest.len() - rest.trim_start_matches([' ', '\t']).len());
+        let from_at = &src[at..];
+        if from_at.starts_with("#[") || from_at.starts_with("#![") {
+            if let Some(end) = attribute_end(src, at) {
+                pending.push(src[at..end].to_string());
+                i = end;
+                continue;
+            }
+        }
+        let line_end = from_at.find('\n').map(|n| at + n + 1).unwrap_or(src.len());
+        let line = &src[at..line_end];
+        if line.trim().is_empty() {
+            // A blank line between an item's attributes and the item is legal.
+            i = line_end;
+            continue;
+        }
         let decl = strip_visibility(line);
         for (keyword, kind) in [("struct ", Kind::Struct), ("enum ", Kind::Enum)] {
-            let Some(rest) = decl.strip_prefix(keyword) else {
+            let Some(r) = decl.strip_prefix(keyword) else {
                 continue;
             };
-            let rest = rest.trim_start();
-            let Some(after) = rest.strip_prefix(item) else {
+            let Some(after) = r.trim_start().strip_prefix(item) else {
                 continue;
             };
             if after.starts_with(|c: char| c.is_alphanumeric() || c == '_') {
                 continue; // `struct SnapshotRange` is not `struct Snapshot`
             }
-            let start = offset + (line.len() - decl.len());
-            return brace_body(&src[start..]).map(|body| (kind, body));
+            let start = at + (line.len() - decl.len());
+            if let Some(body) = brace_body(&src[start..]) {
+                found.push(Found {
+                    kind,
+                    attrs: pending.clone(),
+                    body,
+                });
+            }
         }
-        offset += line.len();
+        // Attributes belong to the next item only.
+        pending.clear();
+        i = line_end;
     }
-    None
+    found
 }
 
 /// The text between the first `{` of `s` and its matching `}`, skipping
@@ -342,45 +458,16 @@ fn brace_body(s: &str) -> Option<&str> {
     None
 }
 
-/// `body` with every `#[…]` attribute removed, skipping literals.
-fn strip_attributes(body: &str) -> String {
-    let b = body.as_bytes();
-    let mut out = String::with_capacity(body.len());
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'#' && b.get(i + 1) == Some(&b'[') {
-            let mut depth = 0usize;
-            while i < b.len() {
-                if let Some(end) = literal_end(body, i) {
-                    i = end;
-                    continue;
-                }
-                match b[i] {
-                    b'[' => depth += 1,
-                    b']' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            i += 1;
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-                i += 1;
-            }
+/// `s` split on `sep` where no `<>`, `()`, `[]` or `{}` is open and outside
+/// every literal: `rename = "a,b"` is one serde item, not two.
+fn split_top_level(s: &str, sep: char) -> Vec<&str> {
+    let (mut parts, mut depth, mut start, mut i) = (Vec::new(), 0i32, 0, 0);
+    while i < s.len() {
+        if let Some(end) = literal_end(s, i) {
+            i = end;
             continue;
         }
-        let c = body[i..].chars().next().expect("a char at a char boundary");
-        out.push(c);
-        i += c.len_utf8();
-    }
-    out
-}
-
-/// `s` split on `sep` where no `<>`, `()`, `[]` or `{}` is open.
-fn split_top_level(s: &str, sep: char) -> Vec<&str> {
-    let (mut parts, mut depth, mut start) = (Vec::new(), 0i32, 0);
-    for (i, c) in s.char_indices() {
+        let c = s[i..].chars().next().expect("a char at a char boundary");
         match c {
             '<' | '(' | '[' | '{' => depth += 1,
             '>' | ')' | ']' | '}' => depth -= 1,
@@ -390,23 +477,33 @@ fn split_top_level(s: &str, sep: char) -> Vec<&str> {
             }
             _ => {}
         }
+        i += c.len_utf8();
     }
     parts.push(&s[start..]);
     parts
 }
 
-/// The members of an item's body: `(field, Some(type))` for a struct,
-/// `(variant, None)` for an enum.
-type Members = Vec<(String, Option<String>)>;
+/// One member of an item's body: a struct field (`ty` is its type) or an enum
+/// variant (`ty` is `None`), with the attributes written on it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Member {
+    name: String,
+    ty: Option<String>,
+    attrs: Vec<String>,
+}
 
-fn members(kind: Kind, body: &str) -> Members {
-    let body = strip_attributes(body);
-    split_top_level(&body, ',')
+fn members(kind: Kind, body: &str) -> Vec<Member> {
+    split_top_level(body, ',')
         .into_iter()
-        .map(str::trim)
-        .filter(|m| !m.is_empty())
-        .filter_map(|m| {
-            let m = strip_visibility(m);
+        .filter_map(|piece| {
+            let mut rest = piece.trim_start();
+            let mut attrs = Vec::new();
+            while rest.starts_with("#[") {
+                let end = attribute_end(rest, 0)?;
+                attrs.push(rest[..end].to_string());
+                rest = rest[end..].trim_start();
+            }
+            let m = strip_visibility(rest);
             let name: String = m
                 .chars()
                 .take_while(|c| c.is_alphanumeric() || *c == '_')
@@ -414,15 +511,124 @@ fn members(kind: Kind, body: &str) -> Members {
             if name.is_empty() {
                 return None;
             }
-            match kind {
-                Kind::Enum => Some((name, None)),
-                Kind::Struct => {
-                    let ty = m[name.len()..].trim_start().strip_prefix(':')?.trim();
-                    Some((name, Some(ty.to_string())))
-                }
-            }
+            let ty = match kind {
+                Kind::Enum => None,
+                Kind::Struct => Some(
+                    m[name.len()..]
+                        .trim_start()
+                        .strip_prefix(':')?
+                        .trim()
+                        .to_string(),
+                ),
+            };
+            Some(Member { name, ty, attrs })
         })
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// serde attributes.
+// ---------------------------------------------------------------------------
+
+/// The serde attribute items that decide WHICH JSON a field or an item reads
+/// or writes: its names (`rename`, `rename_all`, `alias`), its nesting and
+/// representation (`flatten`, `tag`, `content`, `untagged`, `transparent`,
+/// `from`/`into`, the `with` family) and whether it is on the wire at all (the
+/// `skip` family). `default` and `skip_serializing_if` are not here: they
+/// change whether a key may be ABSENT, which `compare`'s presence rule checks.
+const WIRE: &[&str] = &[
+    "rename",
+    "rename_all",
+    "rename_all_fields",
+    "alias",
+    "flatten",
+    "tag",
+    "content",
+    "untagged",
+    "transparent",
+    "remote",
+    "from",
+    "try_from",
+    "into",
+    "with",
+    "serialize_with",
+    "deserialize_with",
+    "skip",
+    "skip_serializing",
+    "skip_deserializing",
+];
+
+/// Every item of every `#[serde(…)]` attribute in `attrs`, whitespace removed
+/// outside string literals: `rename = "a"` becomes `rename="a"`.
+fn serde_items(attrs: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for a in attrs {
+        let inner = a
+            .trim()
+            .trim_start_matches("#[")
+            .trim_start_matches("#![")
+            .trim_end_matches(']')
+            .trim();
+        let Some(args) = inner
+            .strip_prefix("serde")
+            .map(str::trim_start)
+            .and_then(|r| r.strip_prefix('('))
+            .and_then(|r| r.strip_suffix(')'))
+        else {
+            continue;
+        };
+        for item in split_top_level(args, ',') {
+            let mut norm = String::new();
+            let mut i = 0;
+            while i < item.len() {
+                if let Some(end) = literal_end(item, i) {
+                    norm.push_str(&item[i..end]);
+                    i = end;
+                    continue;
+                }
+                let c = item[i..].chars().next().expect("a char at a char boundary");
+                if !c.is_whitespace() {
+                    norm.push(c);
+                }
+                i += c.len_utf8();
+            }
+            if !norm.is_empty() {
+                out.push(norm);
+            }
+        }
+    }
+    out
+}
+
+/// The leading identifier of a serde item: `rename` of `rename="a"`.
+fn item_key(item: &str) -> &str {
+    let end = item
+        .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .unwrap_or(item.len());
+    &item[..end]
+}
+
+/// The WIRE items of `attrs`, sorted.
+fn wire(attrs: &[String]) -> BTreeSet<String> {
+    serde_items(attrs)
+        .into_iter()
+        .filter(|i| WIRE.contains(&item_key(i)))
+        .collect()
+}
+
+fn has_serde(attrs: &[String], keys: &[&str]) -> bool {
+    serde_items(attrs)
+        .iter()
+        .any(|i| keys.contains(&item_key(i)))
+}
+
+/// How a set of wire items prints in a diagnostic and in `DIVERGENCES`.
+fn render_wire(set: &BTreeSet<String>) -> String {
+    if set.is_empty() {
+        "none".to_string()
+    } else {
+        set.iter().cloned().collect::<Vec<_>>().join(", ")
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -519,10 +725,12 @@ fn compatible(ours: &Ty, theirs: &Ty, rename: &dyn Fn(&str) -> String) -> bool {
 // The gate.
 // ---------------------------------------------------------------------------
 
-/// Resolves `item`'s members on one side (`side` is "ours" or "upstream",
-/// `path` is the file it lives in). A missing item or an empty set is a hard
-/// DRIFT, not agreement: a rename or typo in either file must never be read as
-/// "nothing to disagree about".
+/// Resolves `item` on one side (`side` is "ours" or "upstream", `path` is the
+/// file it lives in): its kind, the attributes above it and its members. A
+/// missing item, an empty set, and an item declared MORE THAN ONCE are hard
+/// DRIFT, never agreement: a rename or typo in either file must never be read
+/// as "nothing to disagree about", and with two declarations of one name the
+/// gate cannot know which one the vendored shape mirrors (L3).
 fn resolve(
     src: &str,
     item: &str,
@@ -530,25 +738,53 @@ fn resolve(
     path: &str,
     tag: &str,
     report: &mut Report,
-) -> Option<(Kind, Members)> {
-    match find_item(src, item) {
-        None => {
+) -> Option<(Kind, Vec<String>, Vec<Member>)> {
+    let found = find_items(src, item);
+    match found.as_slice() {
+        [] => {
             report.drift(format!(
                 "DRIFT  {tag} {item}: not found in {side} ({path}) -- a rename or typo must never read as agreement"
             ));
             None
         }
-        Some((kind, body)) => {
-            let m = members(kind, body);
+        [one] => {
+            let m = members(one.kind, one.body);
             if m.is_empty() {
                 report.drift(format!(
                     "DRIFT  {tag} {item}: found in {side} ({path}) but declares zero fields/variants -- treating as drift, not agreement"
                 ));
                 return None;
             }
-            Some((kind, m))
+            Some((one.kind, one.attrs.clone(), m))
+        }
+        many => {
+            report.drift(format!(
+                "DRIFT  {tag} {item}: declared {} times in {side} ({path}) -- the gate cannot tell \
+                 which one the vendored shape mirrors; pair it by an unambiguous name",
+                many.len()
+            ));
+            None
         }
     }
+}
+
+/// Looks up a declared divergence, marking it used. `None` when there is none.
+fn declared(
+    divergences: &[Divergence],
+    used: &mut BTreeSet<usize>,
+    want: (&str, &str, &str, On, &str, &str),
+) -> Option<usize> {
+    let (vendored, item, field, on, ours, upstream) = want;
+    let i = divergences.iter().position(|d| {
+        d.vendored == vendored
+            && d.item == item
+            && d.field == field
+            && d.on == on
+            && d.ours == ours
+            && d.upstream == upstream
+    })?;
+    used.insert(i);
+    Some(i)
 }
 
 /// Compares one vendored file's text with one upstream file's text, for the
@@ -579,7 +815,7 @@ fn compare(
         };
         let a = resolve(&ours, our_item, "ours", check.vendored, tag, report);
         let b = resolve(&theirs, their_item, "upstream", check.upstream, tag, report);
-        let (Some((ka, a)), Some((kb, b))) = (a, b) else {
+        let (Some((ka, attrs_a, a)), Some((kb, attrs_b, b))) = (a, b) else {
             continue;
         };
         if ka != kb {
@@ -595,8 +831,31 @@ fn compare(
             check.upstream.to_string(),
             their_item.to_string(),
         ));
+
+        // The item's own wire attributes: `rename_all`, `tag`, `untagged`, …
+        let (wa, wb) = (wire(&attrs_a), wire(&attrs_b));
+        if wa != wb {
+            let (ra, rb) = (render_wire(&wa), render_wire(&wb));
+            let want = (
+                check.vendored,
+                our_item,
+                "",
+                On::Serde,
+                ra.as_str(),
+                rb.as_str(),
+            );
+            if declared(divergences, used, want).is_none() {
+                report.drift(format!(
+                    "DRIFT  {tag} {label}: our serde attributes are `{ra}`, upstream ({}) has \
+                     `{rb}` -- a renamed or re-shaped wire reads no real bytes however well \
+                     the Rust names match",
+                    check.upstream
+                ));
+            }
+        }
+
         let names =
-            |m: &Members| -> BTreeSet<String> { m.iter().map(|(n, _)| n.clone()).collect() };
+            |m: &[Member]| -> BTreeSet<String> { m.iter().map(|x| x.name.clone()).collect() };
         let (na, nb) = (names(&a), names(&b));
         for gone in nb.difference(&na) {
             report.lines.push(format!(
@@ -618,32 +877,77 @@ fn compare(
                 check.upstream
             ));
         }
-        for (field, ty_a) in &a {
-            let Some(ty_a) = ty_a else { continue };
-            let Some((_, Some(ty_b))) = b.iter().find(|(n, _)| n == field) else {
+        let ours_defaults_all = has_serde(&attrs_a, &["default"]);
+        for ma in &a {
+            let Some(mb) = b.iter().find(|x| x.name == ma.name) else {
                 continue;
             };
-            let (pa, pb) = (parse_ty(ty_a), parse_ty(ty_b));
-            if compatible(&pa, &pb, &rename) {
-                continue;
-            }
-            let (ra, rb) = (render(&pa), render(&pb));
-            let declared = divergences.iter().position(|d| {
-                d.vendored == check.vendored
-                    && d.item == our_item
-                    && d.field == field
-                    && d.ours == ra
-                    && d.upstream == rb
-            });
-            match declared {
-                Some(i) => {
-                    used.insert(i);
+            let field = ma.name.as_str();
+
+            // TYPES.
+            if let (Some(ty_a), Some(ty_b)) = (&ma.ty, &mb.ty) {
+                let (pa, pb) = (parse_ty(ty_a), parse_ty(ty_b));
+                if !compatible(&pa, &pb, &rename) {
+                    let (ra, rb) = (render(&pa), render(&pb));
+                    let want = (
+                        check.vendored,
+                        our_item,
+                        field,
+                        On::Type,
+                        ra.as_str(),
+                        rb.as_str(),
+                    );
+                    if declared(divergences, used, want).is_none() {
+                        report.drift(format!(
+                            "DRIFT  {tag} {label}.{field}: we read `{ra}`, upstream ({}) declares \
+                             `{rb}` -- a retyped field reads no real bytes however well its name \
+                             matches",
+                            check.upstream
+                        ));
+                    }
                 }
-                None => report.drift(format!(
-                    "DRIFT  {tag} {label}.{field}: we read `{ra}`, upstream ({}) declares `{rb}` -- \
-                     a retyped field reads no real bytes however well its name matches",
-                    check.upstream
-                )),
+            }
+
+            // WIRE ATTRIBUTES of the field or variant (L2): a `rename` or an
+            // `alias` upstream changes the key while every Rust name matches.
+            let (wa, wb) = (wire(&ma.attrs), wire(&mb.attrs));
+            if wa != wb {
+                let (ra, rb) = (render_wire(&wa), render_wire(&wb));
+                let want = (
+                    check.vendored,
+                    our_item,
+                    field,
+                    On::Serde,
+                    ra.as_str(),
+                    rb.as_str(),
+                );
+                if declared(divergences, used, want).is_none() {
+                    report.drift(format!(
+                        "DRIFT  {tag} {label}.{field}: our serde attributes are `{ra}`, upstream \
+                         ({}) has `{rb}` -- a renamed key reads no real bytes however well the \
+                         Rust name matches",
+                        check.upstream
+                    ));
+                }
+            }
+
+            // PRESENCE: a field upstream may leave out must be one we can do
+            // without -- `default` on it or on the item, an `Option`, or never
+            // read at all.
+            let upstream_may_omit = has_serde(
+                &mb.attrs,
+                &["skip_serializing_if", "skip_serializing", "skip"],
+            );
+            let ours_tolerates_absence = ours_defaults_all
+                || has_serde(&ma.attrs, &["default", "skip", "skip_deserializing"])
+                || matches!(ma.ty.as_deref().map(parse_ty), Some(Ty::Named(n, _)) if n == "Option");
+            if upstream_may_omit && !ours_tolerates_absence {
+                report.drift(format!(
+                    "DRIFT  {tag} {label}.{field}: upstream ({}) may leave it out (`{}`), and we \
+                     require it -- give it `#[serde(default)]` or make it an `Option`",
+                    check.upstream,
+                    render_wire(&serde_items(&mb.attrs).into_iter().collect())
+                ));
             }
         }
     }
@@ -686,10 +990,15 @@ fn run(
     }
     for (i, d) in divergences.iter().enumerate() {
         if !used.contains(&i) && checks.iter().any(|c| c.vendored == d.vendored) {
+            let what = if d.field.is_empty() {
+                d.item.to_string()
+            } else {
+                format!("{}.{}", d.item, d.field)
+            };
             report.drift(format!(
-                "DRIFT  {tag} {}.{}: the declared divergence `{}` vs upstream `{}` no longer \
-                 describes the code -- remove or correct it",
-                d.item, d.field, d.ours, d.upstream
+                "DRIFT  {tag} {what}: the declared {:?} divergence `{}` vs upstream `{}` no \
+                 longer describes the code -- remove or correct it",
+                d.on, d.ours, d.upstream
             ));
         }
     }
@@ -728,7 +1037,7 @@ fn main() {
         std::process::exit(1);
     }
     println!(
-        "vendored structs agree with {tag} ({} item pairs, names and types)",
+        "vendored structs agree with {tag} ({} item pairs: names, types and serde wire attributes)",
         report.compared.len()
     );
 }
@@ -857,11 +1166,27 @@ mod tests {
     /// The checks of one vendored file, run against the real upstream sources
     /// with `ours` standing in for the file's text.
     fn run_file_with(file: &str, ours: &str, divergences: &[Divergence]) -> Report {
+        run_file_with_upstream(file, ours, divergences, None)
+    }
+
+    /// `run_file_with`, with ONE upstream file's text replaced by
+    /// `mutate(<its text>, from, to)`: `(upstream path, from, to)`.
+    fn run_file_with_upstream(
+        file: &str,
+        ours: &str,
+        divergences: &[Divergence],
+        upstream_mutation: Option<(&str, &str, &str)>,
+    ) -> Report {
         let up = Checkout::extract();
         let mut report = Report::default();
         let mut used = BTreeSet::new();
         for check in CHECKS.iter().filter(|c| c.vendored == file) {
-            let theirs = up.src(check.upstream);
+            let mut theirs = up.src(check.upstream);
+            if let Some((path, from, to)) = upstream_mutation {
+                if path == check.upstream {
+                    theirs = mutate(&theirs, from, to);
+                }
+            }
             compare(
                 check,
                 ours,
@@ -1046,6 +1371,7 @@ pub struct ConsumerGroupEntry {
             vendored: "manifest.rs",
             item: "SegmentMetadata",
             field: "key",
+            on: On::Type,
             ours: "Vec<u8>",
             upstream: "String",
             why: "a test entry that describes nothing",
@@ -1053,7 +1379,7 @@ pub struct ConsumerGroupEntry {
         let r = run(&repo_root(), &up.root, &up.tag, CHECKS, &stale).unwrap();
         let d = drift_lines(&r).join("\n");
         assert!(
-            d.contains("SegmentMetadata.key: the declared divergence"),
+            d.contains("SegmentMetadata.key: the declared Type divergence"),
             "{d}"
         );
         assert!(d.contains("OffsetGap.reason: we read `String`"), "{d}");
@@ -1086,24 +1412,195 @@ pub struct ConsumerGroupEntry {
              groups: Vec<GroupEntry>,\n        }\n}\n\
              pub(crate) struct Other { pub(crate) x: std::collections::HashMap<String, (i64, i64)> }\n",
         );
-        let (kind, body) = find_item(&src, "Snapshot").expect("the fn-local struct");
-        assert_eq!(kind, Kind::Struct);
+        let named = |m: Vec<Member>| -> Vec<(String, Option<String>)> {
+            m.into_iter().map(|x| (x.name, x.ty)).collect()
+        };
+        let found = find_items(&src, "Snapshot");
+        assert_eq!(found.len(), 1, "the fn-local struct, once");
+        assert_eq!(found[0].kind, Kind::Struct);
         assert_eq!(
-            members(kind, body),
+            found[0].attrs,
+            vec!["#[derive(serde::Serialize)]".to_string()]
+        );
+        assert_eq!(
+            named(members(found[0].kind, found[0].body)),
             vec![
                 ("snapshot_time".to_string(), Some("i64".to_string())),
                 ("groups".to_string(), Some("Vec<GroupEntry>".to_string())),
             ]
         );
-        let (kind, body) = find_item(&src, "Other").expect("a pub(crate) struct");
+        let found = find_items(&src, "Other");
+        assert_eq!(found.len(), 1, "a pub(crate) struct");
+        assert!(found[0].attrs.is_empty(), "{:?}", found[0].attrs);
         assert_eq!(
-            members(kind, body),
+            named(members(found[0].kind, found[0].body)),
             vec![(
                 "x".to_string(),
                 Some("std::collections::HashMap<String, (i64, i64)>".to_string())
             )]
         );
-        assert!(find_item(&src, "Snap").is_none(), "a prefix is not a name");
+        assert!(
+            find_items(&src, "Snap").is_empty(),
+            "a prefix is not a name"
+        );
+    }
+
+    /// Attributes are read where serde reads them: on the item (across lines,
+    /// through a blank line) and on each field, with literals intact; and they
+    /// attach to the NEXT item only.
+    #[test]
+    fn serde_attributes_are_read_on_items_and_fields() {
+        let src = strip_comments(
+            "#[derive(Debug)]\n\
+             #[serde(\n    rename_all = \"camelCase\",\n    tag = \"t\"\n)]\n\n\
+             pub struct A {\n\
+                 #[serde(default, rename = \"x,y\")]\n    pub a: i64,\n\
+                 #[serde(alias = \"old\")] #[serde(skip_serializing_if = \"Option::is_none\")]\n    b: Option<i64>,\n\
+             }\n\
+             struct B { c: u8 }\n",
+        );
+        let a = &find_items(&src, "A")[0];
+        assert_eq!(
+            render_wire(&wire(&a.attrs)),
+            "rename_all=\"camelCase\", tag=\"t\""
+        );
+        let m = members(a.kind, a.body);
+        assert_eq!(render_wire(&wire(&m[0].attrs)), "rename=\"x,y\"");
+        assert!(has_serde(&m[0].attrs, &["default"]));
+        assert_eq!(render_wire(&wire(&m[1].attrs)), "alias=\"old\"");
+        assert!(has_serde(&m[1].attrs, &["skip_serializing_if"]));
+        let b = &find_items(&src, "B")[0];
+        assert!(
+            b.attrs.is_empty(),
+            "A's attributes leaked onto B: {:?}",
+            b.attrs
+        );
+    }
+
+    /// L3: a name declared twice in one file is DRIFT, never "the first one".
+    #[test]
+    fn an_item_declared_twice_is_drift_not_the_first_match() {
+        let r = run_file_with_upstream(
+            "consumer_groups.rs",
+            &vendored_src("consumer_groups.rs"),
+            DIVERGENCES,
+            Some((
+                "crates/kafka-backup-core/src/backup/engine.rs",
+                "async fn snapshot_consumer_groups(&self) -> Result<()> {",
+                "async fn snapshot_consumer_groups(&self) -> Result<()> {\n        \
+                 struct GroupEntry {\n            group_id: String,\n        }",
+            )),
+        );
+        let d = drift_lines(&r).join("\n");
+        assert!(
+            d.contains("GroupEntry: declared 2 times in upstream (crates/kafka-backup-core/src/backup/engine.rs)"),
+            "{d}"
+        );
+    }
+
+    /// L2: a wire rename upstream, on a field and on the item, is DRIFT --
+    /// the two plants the review found passing (D10, D11).
+    #[test]
+    fn an_upstream_serde_rename_is_drift() {
+        let engine_rs = "crates/kafka-backup-core/src/backup/engine.rs";
+        let ours = vendored_src("consumer_groups.rs");
+        let r = run_file_with_upstream(
+            "consumer_groups.rs",
+            &ours,
+            DIVERGENCES,
+            Some((
+                engine_rs,
+                "            snapshot_time: i64,\n",
+                "            #[serde(rename = \"time\")]\n            snapshot_time: i64,\n",
+            )),
+        );
+        let d = drift_lines(&r).join("\n");
+        assert!(
+            d.contains("ConsumerGroupsSnapshot (upstream Snapshot).snapshot_time: our serde attributes are `none`, upstream (crates/kafka-backup-core/src/backup/engine.rs) has `rename=\"time\"`"),
+            "{d}"
+        );
+        let r = run_file_with_upstream(
+            "consumer_groups.rs",
+            &ours,
+            DIVERGENCES,
+            Some((
+                engine_rs,
+                "        #[derive(serde::Serialize)]\n        struct GroupEntry {",
+                "        #[derive(serde::Serialize)]\n        #[serde(rename_all = \"camelCase\")]\n        struct GroupEntry {",
+            )),
+        );
+        let d = drift_lines(&r).join("\n");
+        assert!(
+            d.contains("ConsumerGroupEntry (upstream GroupEntry): our serde attributes are `none`, upstream (crates/kafka-backup-core/src/backup/engine.rs) has `rename_all=\"camelCase\"`"),
+            "{d}"
+        );
+    }
+
+    /// L2, our side: an `alias` we add changes which key we read, so it is
+    /// DRIFT unless declared.
+    #[test]
+    fn our_serde_alias_is_drift_unless_declared() {
+        let m = mutate(
+            &vendored_src("consumer_groups.rs"),
+            "    #[serde(default)]\n    pub snapshot_time: Option<i64>,",
+            "    #[serde(default, alias = \"captured_at\")]\n    pub snapshot_time: Option<i64>,",
+        );
+        let d = drift_lines(&run_file_with("consumer_groups.rs", &m, DIVERGENCES)).join("\n");
+        assert!(
+            d.contains(".snapshot_time: our serde attributes are `alias=\"captured_at\"`"),
+            "{d}"
+        );
+    }
+
+    /// Presence: a field upstream may leave out must be one we can do without.
+    #[test]
+    fn a_field_upstream_may_omit_and_we_require_is_drift() {
+        let r = run_file_with_upstream(
+            "consumer_groups.rs",
+            &vendored_src("consumer_groups.rs"),
+            DIVERGENCES,
+            Some((
+                "crates/kafka-backup-cli/src/commands/snapshot_groups.rs",
+                "struct GroupEntry {\n    group_id: String,",
+                "struct GroupEntry {\n    #[serde(skip_serializing_if = \"String::is_empty\")]\n    group_id: String,",
+            )),
+        );
+        let d = drift_lines(&r).join("\n");
+        assert!(
+            d.contains("ConsumerGroupEntry (upstream GroupEntry).group_id: upstream (crates/kafka-backup-cli/src/commands/snapshot_groups.rs) may leave it out"),
+            "{d}"
+        );
+    }
+
+    /// A serde divergence that no longer describes the code is DRIFT, and the
+    /// real difference it covered is DRIFT without it.
+    #[test]
+    fn serde_divergences_are_exact_and_cannot_go_stale() {
+        let up = Checkout::extract();
+        let without: Vec<Divergence> = DIVERGENCES
+            .iter()
+            .filter(|d| d.on == On::Type)
+            .map(|d| Divergence { ..*d })
+            .collect();
+        let r = run(&repo_root(), &up.root, &up.tag, CHECKS, &without).unwrap();
+        let d = drift_lines(&r).join("\n");
+        assert!(d.contains("PartitionCoverageState: our serde attributes are `from=\"String\", into=\"String\"`"), "{d}");
+        assert!(d.contains("ConsumerGroupEntry (upstream GroupEntry).offsets: our serde attributes are `deserialize_with="), "{d}");
+        let stale = [Divergence {
+            vendored: "consumer_groups.rs",
+            item: "ConsumerGroupsSnapshot",
+            field: "groups",
+            on: On::Serde,
+            ours: "flatten",
+            upstream: "none",
+            why: "a test entry that describes nothing",
+        }];
+        let r = run(&repo_root(), &up.root, &up.tag, CHECKS, &stale).unwrap();
+        let d = drift_lines(&r).join("\n");
+        assert!(
+            d.contains("ConsumerGroupsSnapshot.groups: the declared Serde divergence"),
+            "{d}"
+        );
     }
 
     #[test]
