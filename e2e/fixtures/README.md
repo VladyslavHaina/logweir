@@ -134,7 +134,10 @@ serialises `HashMap`s, so group and key order change between runs. The tests
 therefore compare parsed values, never bytes:
 `crates/logweir-engine-oso/tests/vendored_parse.rs` checks every position
 against the oracle, and `crates/logweir-engine-oso/tests/engine.rs` reads both
-files through `OsoCliEngine`.
+files through `OsoCliEngine`. `e2e/tests/consumer_group_snapshot.rs` repeats
+the capture live on every e2e run: it commits its own groups, takes the
+snapshot with the pinned engine, compares it with the broker's account, and
+drills the archive.
 
 ## `fake-engine*.sh`, `engine-docker.sh`, `dryrun/`, `drill-*.yaml`
 
