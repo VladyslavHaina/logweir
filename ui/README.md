@@ -1065,8 +1065,9 @@ languages: the node suite asserts the page renders them, and
 `crates/logweir-api/tests/resources.rs` asserts they are `logweir_core`'s own.
 
 **What a restore copies, said above Create** (FX-6). Step 6 prints one more
-limit under the approval block and directly above *Create the Restore*, on every
-plan (`RESTORE_SEMANTICS_SENTENCE`):
+limit with the plan, after its copy caveat and before the approval-policy block
+and *Create the Restore*, on every plan (`RESTORE_SEMANTICS_SENTENCE`); under
+the approval block's heading it read as part of the approval:
 
 > Restores copy the archive as written: aborted transactions and transaction
 > markers are restored as ordinary records, `LogAppendTime` timestamps come back

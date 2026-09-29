@@ -13,14 +13,16 @@
 // 8.2 are the long form in docs/verify-a-scorecard.md and docs/stability.md.
 //
 // THE ROWS. The sentence is on step 6, once, as the record words it, with its
-// two identifiers as <code> and no backtick on screen, after the plan and
-// above Create under every approval-policy block step 6 can show -- and on the
-// step that is on screen when the wizard opens at step 6.
+// two identifiers as <code> and no backtick on screen; it follows the plan and
+// comes before the approval-policy block and Create, under every block step 6
+// can show -- and it is on the step that is on screen when the wizard opens at
+// step 6. (Placed under the approval block's heading, in the same style, it
+// read as part of the approval in the 1440 px screenshot.)
 //
 // NEGATIVE CONTROL: deleting the paragraph from `renderPlanStep`, printing the
-// constant through `esc`, moving the paragraph below Create, or rewording one
-// clause each fails a row here. The FX-6 report records the four mutants and
-// the command that ran them.
+// constant through `esc`, moving the paragraph below Create or under the
+// approval block, or rewording one clause each fails a row here. The FX-6
+// report records the five mutants and the command that ran them.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -114,10 +116,13 @@ test("fx6_the_review_step_says_what_a_restore_copies_above_create", async () => 
     assert.equal(paragraph.indexOf("`"), -1,
       "NEGATIVE CONTROL: " + label + ": no literal backtick (through `esc` it prints two pairs)");
 
-    // WHERE THE OPERATOR REVIEWS THE PLAN, BEFORE CREATE: after the plan bytes
-    // and the approval block, above the one button that creates the Restore.
+    // WHERE THE OPERATOR REVIEWS THE PLAN, BEFORE CREATE: after the plan bytes,
+    // with the plan's own notes, and above the approval-policy block (its <h4>
+    // is the step's first) and the one button that creates the Restore.
     const at = step.indexOf(paragraph);
     assert.ok(step.indexOf("id=\"plan-bytes\"") < at, label + ": below the plan it describes");
+    assert.ok(at < step.indexOf("<h4"),
+      "NEGATIVE CONTROL: " + label + ": with the plan, not under the approval block's heading");
     assert.ok(at < step.indexOf("id=\"create-restore\""),
       "NEGATIVE CONTROL: " + label + ": above Create, not after it");
   }

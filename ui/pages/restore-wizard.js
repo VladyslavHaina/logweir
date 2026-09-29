@@ -2968,6 +2968,10 @@ export const READINESS_NOT_RUN_WARNING =
 
 /** What a restore copies, said where the plan is reviewed, above Create (FX-6).
  *
+ *  WITH THE PLAN, NOT THE APPROVAL. It follows the plan's own notes and comes
+ *  before the approval-policy block: directly above Create it sat under that
+ *  block's heading in the same style, and read as part of the approval.
+ *
  *  THE DRILL CANNOT SAY IT FOR US. Phase 7 compares the restored topic with the
  *  ARCHIVE, so a difference that was already in the archive passes: the pinned
  *  engine captures with `READ_UNCOMMITTED` and keeps commit and abort markers as
@@ -3034,9 +3038,9 @@ export function renderPlanStep(prepared, state) {
     "<button type=\"button\" id=\"download-plan\"" + (renderable ? "" : " disabled") + ">Download plan</button>" +
     "</div>" +
     "<p class=\"caveat\">" + esc(COPY_CAVEAT) + "</p>" +
-    approvalPolicyBlock(s.approvalPolicy, s.ticket, errors.ticket) +
     "<p class=\"note\" id=\"restore-semantics\">" + messageText(RESTORE_SEMANTICS_SENTENCE) +
     "</p>" +
+    approvalPolicyBlock(s.approvalPolicy, s.ticket, errors.ticket) +
     "<div class=\"actions actions-final\">" +
     "<button type=\"button\" id=\"create-restore\" class=\"primary\"" +
     (pending || !renderable || blocked !== null || policyRefusal(s) !== null ? " disabled" : "") +
