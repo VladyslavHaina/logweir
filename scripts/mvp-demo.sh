@@ -56,14 +56,24 @@
 #   `cargo build -p logweir` first, exactly as `just pitr` does. Set
 #   `LOGWEIR_BIN=/path/to/logweir` to run a different build.
 #
-# WHAT IT WRITES: `.demo/mvp/` only, which is gitignored (`.demo/`).
+# WHAT IT WRITES: `.demo/mvp/` only, which is gitignored (`.demo/`) — or
+# `.demo/<project>/mvp/` when it addresses a non-default compose stack.
+#
+# WHICH STACK (PROD-01.5): the environment's. With no stack variable set it is
+# the default stack and every address below is the checked-in examples'
+# (`localhost:9092`, `http://localhost:9000`). After
+# `eval "$(e2e/compose/stack-env.sh --slot N)"` the examples are rebound to
+# slot N's ports (`lw_e2e_rebind`), and two demos run at once.
 #
 # Zero cloud spend (Global Constraint 17): a local `docker compose` stack and
 # nothing else.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-OUT=.demo/mvp
+# shellcheck source=e2e/compose/stack-lib.sh
+. e2e/compose/stack-lib.sh
+lw_e2e_check_coherent
+OUT="$(lw_e2e_scratch .demo)/mvp"
 COMPOSE_FILE=e2e/compose/docker-compose.yml
 BOOTSTRAP_INNET=kafka-broker-1:9094
 ARCHIVE_BUCKET=kafka-backups
@@ -368,9 +378,17 @@ step "3/8 backing up orders and payments with \`logweir backup run\`"
 
 # examples/backup.yaml is the HOST-SIDE shape: `logweir` and the engine both
 # run on the host here, so the compose SERVICE name for MinIO would not
-# resolve — only the published localhost port does (critique A F23).
+# resolve — only the published localhost port does (critique A F23). On a
+# non-default stack those published ports are the slot's, so the example is
+# rebound into $OUT first; on the default stack it is used verbatim.
+BACKUP_SPEC=examples/backup.yaml
+if ! lw_e2e_is_default; then
+  lw_e2e_rebind < examples/backup.yaml > "$OUT/backup.yaml"
+  BACKUP_SPEC="$OUT/backup.yaml"
+  grep -q "$LW_E2E_BOOTSTRAP" "$BACKUP_SPEC" || die "failed to bind $LW_E2E_BOOTSTRAP into $BACKUP_SPEC"
+fi
 set +e
-logweir backup run --spec examples/backup.yaml --allowed-clusters "$OUT/allowed-clusters.json" --signing-key "$OUT/signing.pem" --triggered-by mvp-demo --receipt-out "$OUT/receipt.json" > "$OUT/backup.stdout"
+logweir backup run --spec "$BACKUP_SPEC" --allowed-clusters "$OUT/allowed-clusters.json" --signing-key "$OUT/signing.pem" --triggered-by mvp-demo --receipt-out "$OUT/receipt.json" > "$OUT/backup.stdout"
 rc=$?
 set -e
 echo "    rc=$rc  (logweir backup run)"
@@ -415,7 +433,8 @@ step "5/8 binding the recovery point into the restore plan, then approving those
 
 # examples/restore.yaml IS the plan document (RestoreSpec, interface I20) and
 # is used verbatim except for FOUR fields, each of which is deployment-specific
-# and cannot be carried in a checked-in example:
+# and cannot be carried in a checked-in example (plus, on a non-default stack,
+# the host-side addresses — `lw_e2e_rebind` is a no-op on the default one):
 #
 #   source.storage.prefix   this run's archive, not the seeded drill-demo one
 #   restore.point_in_time   the recovery point, five seconds after the records
@@ -431,7 +450,7 @@ sed -e "/^source:/,/^target:/ s|^\( *prefix:\).*|\1 $BACKUP_ID|" \
     -e "s|^\( *point_in_time:\).*|\1 \"$PIT_RFC3339\"|" \
     -e "s|^\( *window_start:\).*|\1 \"$SAMPLE_START_RFC3339\"|" \
     -e "s|^\( *window_end:\).*|\1   \"$PIT_RFC3339\"|" \
-    examples/restore.yaml > "$OUT/restore.yaml"
+    examples/restore.yaml | lw_e2e_rebind > "$OUT/restore.yaml"
 
 # CHECKED, not assumed: a sed that matched nothing exits 0 and leaves the
 # illustrative dates in place, which would be refused at phase 0 as a window

@@ -328,19 +328,23 @@ fn backup_allowlist() -> PathBuf {
 /// The host-side backup spec, over THIS row's topic and `backup_id`.
 fn backup_spec(backup_id: &str) -> PathBuf {
     let p = demo_dir().join("pitr-backup.yaml");
+    // This stack's host-side addresses (PROD-01.5): `localhost:9092` and
+    // `http://localhost:9000` on the default stack, the slot's otherwise.
+    let bootstrap = bootstrap();
+    let s3 = s3_endpoint();
     std::fs::write(
         &p,
         format!(
             "backup_id: {backup_id}\n\
              source:\n\
-             \x20 bootstrap_servers: [{BOOTSTRAP}]\n\
+             \x20 bootstrap_servers: [{bootstrap}]\n\
              \x20 topics: [{SRC_TOPIC}]\n\
              storage:\n\
              \x20 backend: s3\n\
              \x20 bucket: {ARCHIVE_BUCKET}\n\
              \x20 prefix: {backup_id}\n\
              \x20 region: us-east-1\n\
-             \x20 endpoint: http://localhost:9000\n\
+             \x20 endpoint: {s3}\n\
              \x20 path_style: true\n\
              \x20 allow_http: true\n\
              backup:\n\
@@ -380,6 +384,8 @@ fn backup_run_real_engine(spec: &Path) -> Command {
 /// `topic_naming` block (so the default `restore-<YYYYmmddTHHMMSSZ>-` prefix
 /// is exercised), over the archive this row just wrote.
 fn restore_spec(backup_id: &str) -> serde_yaml::Value {
+    let bootstrap = bootstrap();
+    let s3 = s3_endpoint();
     serde_yaml::from_str(&format!(
         "source:\n\
          \x20 storage:\n\
@@ -387,13 +393,13 @@ fn restore_spec(backup_id: &str) -> serde_yaml::Value {
          \x20   bucket: {ARCHIVE_BUCKET}\n\
          \x20   prefix: {backup_id}\n\
          \x20   region: us-east-1\n\
-         \x20   endpoint: http://localhost:9000\n\
+         \x20   endpoint: {s3}\n\
          \x20   path_style: true\n\
          \x20   allow_http: true\n\
          \x20 backup: {backup_id}\n\
          \x20 topics: [{SRC_TOPIC}]\n\
          target:\n\
-         \x20 bootstrap_servers: [{BOOTSTRAP}]\n\
+         \x20 bootstrap_servers: [{bootstrap}]\n\
          \x20 mode: newTopic\n\
          \x20 topic_mapping_prefix: \"drill-\"\n\
          \x20 default_replication_factor: 1\n\
@@ -413,7 +419,7 @@ fn restore_spec(backup_id: &str) -> serde_yaml::Value {
          \x20 bucket: {EVIDENCE_BUCKET}\n\
          \x20 prefix: {RECEIPT_PREFIX}\n\
          \x20 region: us-east-1\n\
-         \x20 endpoint: http://localhost:9000\n\
+         \x20 endpoint: {s3}\n\
          \x20 path_style: true\n\
          \x20 allow_http: true\n"
     ))
@@ -942,7 +948,7 @@ fn pitr_boundary_includes_the_record_whose_timestamp_equals_point_in_time() {
         bucket: ARCHIVE_BUCKET.to_string(),
         prefix: backup_id.clone(),
         region: Some("us-east-1".to_string()),
-        endpoint: Some("http://localhost:9000".to_string()),
+        endpoint: Some(s3_endpoint()),
         path_style: true,
         allow_http: true,
     };

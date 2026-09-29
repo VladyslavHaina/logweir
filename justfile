@@ -158,7 +158,18 @@ fixtures-sign-bogus:
 # twenty minutes later. It runs LAST of the three because it is the only one
 # that needs the broker to be answering client requests, and `topic-setup`
 # already proves that.
+#
+# PROD-01.5: WHICH stack is the environment's (`e2e/README.md`). With nothing
+# set it is the default one, exactly as before; after
+# `eval "$(e2e/compose/stack-env.sh --slot N)"` it is slot N's own project and
+# ports, and two slots run at once. The first line REFUSES an environment
+# whose project and ports disagree, because `up` on the DEFAULT project with a
+# moved port would recreate the default stack under whoever is using it. An
+# optional profile in `COMPOSE_PROFILES` comes up in the same `--wait` (each
+# one's setup is a dependency of a long-running service, never a bare
+# one-shot).
 e2e-up:
+    ./e2e/compose/stack-env.sh --check
     docker compose -f e2e/compose/docker-compose.yml up -d --wait
     docker compose -f e2e/compose/docker-compose.yml --profile setup run --rm minio-setup
     docker compose -f e2e/compose/docker-compose.yml --profile setup run --rm topic-setup
@@ -170,7 +181,15 @@ e2e-up:
 # earlier `up`, and the next `down` walks past it again — verified: it survived
 # a full `down -v` on this machine. `--remove-orphans` additionally clears
 # containers for services this file no longer defines.
+#
+# PROD-01.5: EVERY profile the compose file declares is named here, for the
+# same reason — `--profile` flags REPLACE `COMPOSE_PROFILES` (measured on
+# compose v5.0.2), so a profile left off this line would outlive `down`.
+# `e2e/tests/stack_params.rs` fails when the compose file declares a profile
+# this line does not name. The check refuses a half-set environment, which
+# would otherwise take down the DEFAULT stack from under its user.
 e2e-down:
+    ./e2e/compose/stack-env.sh --check
     docker compose -f e2e/compose/docker-compose.yml --profile setup --profile tools down -v --remove-orphans
 
 # AWS_EC2_METADATA_DISABLED (fix round 1, review F7): with no AWS credentials
@@ -192,8 +211,29 @@ e2e-down:
 # `--test-threads=1` still serialises them, so running all of them and
 # reporting every failure is both safe and the only way the run is diagnostic.
 # cargo's own exit code is unchanged: non-zero if any binary failed.
+#
+# PROD-01.5: on a NON-default slot only the `e2e` package runs. Its harness
+# reads the slot's ports (`e2e/tests/harness/stack.rs`); the `--features e2e`
+# rows under `crates/` still dial the default ports (9092, 9000) and would
+# reach whoever owns the default stack, so they are refused there and named
+# instead. `cargo build -p logweir` first for the reason `pitr` gives (a
+# `-p e2e` run does not rebuild the binary). The default stack runs exactly
+# the command it always ran.
 e2e:
-    AWS_EC2_METADATA_DISABLED=true cargo test --workspace --features e2e --no-fail-fast -- --test-threads=1 --nocapture
+    #!/usr/bin/env bash
+    set -euo pipefail
+    . e2e/compose/stack-lib.sh
+    lw_e2e_check_coherent
+    if lw_e2e_is_default; then
+      AWS_EC2_METADATA_DISABLED=true cargo test --workspace --features e2e --no-fail-fast -- --test-threads=1 --nocapture
+    else
+      echo "e2e: stack $LW_E2E_PROJECT is not the default one; running the e2e package only."
+      echo "e2e: NOT run here (they dial localhost:9092 / :9000): the --features e2e rows of"
+      echo "e2e: logweir-kafka, logweir-store, logweir-engine-oso and logweir. Run those on the"
+      echo "e2e: default stack, under claude/compose-lock.sh."
+      cargo build -p logweir
+      AWS_EC2_METADATA_DISABLED=true cargo test -p e2e --features e2e --no-fail-fast -- --test-threads=1 --nocapture
+    fi
 
 # Produce, back up with the pinned engine, and refresh the two fixtures that
 # must come from a REAL archive. Needs a FRESH stack (`e2e-down` then `e2e-up`);

@@ -8,6 +8,24 @@
 # with every other repo on the machine that keeps its stack in a `compose/`
 # directory. `just e2e-down`'s `down -v` deletes volumes by project, so a
 # generic name is also a footgun.
+#
+# PARALLEL STACKS (PROD-01.5). The project name and every published host port
+# are parameters whose defaults are the values above and below, so an
+# unparameterized `docker compose` renders exactly what it always rendered:
+#   COMPOSE_PROJECT_NAME          compose's own override of `name:` below
+#   LOGWEIR_E2E_KAFKA_PORT        9092  EXTERNAL  (host port AND advertisement)
+#   LOGWEIR_E2E_K8S_PORT          9095  K8S       (host port AND advertisement)
+#   LOGWEIR_E2E_SASL_PORT         9097  SASLEXT   (host port AND advertisement)
+#   LOGWEIR_E2E_S3_PORT           9000  MinIO S3 API
+#   LOGWEIR_E2E_S3_CONSOLE_PORT   9001  MinIO console
+# Container-side ports never change; only the host side and the host-facing
+# advertised names move. `e2e/compose/stack-env.sh --slot N` prints one
+# coherent set (slot N adds N*10000 to every default port), and the optional
+# profiles below (`COMPOSE_PROFILES`) follow the same rule. Every consumer of
+# the stack reads the SAME variables: `e2e/compose/stack-lib.sh` for the
+# scripts, `e2e/tests/harness/stack.rs` for the Rust harness, and
+# `e2e/tests/stack_params.rs` checks that all three agree with this file.
+# The guide is `e2e/README.md`.
 name: logweir-e2e
 
 networks:
@@ -34,7 +52,13 @@ services:
     #                    advertised twice rather than once.
     # 9096 is deliberately NOT published: it is the in-network advertisement of
     # the same SCRAM credential store, reached over `kafka-net`.
-    ports: ["9092:9092", "9095:9095", "9097:9097"]
+    # The HOST side of each mapping is a parameter (PROD-01.5, see the header);
+    # the advertised names below move with it, so a client on a non-default
+    # slot is redirected to that slot's port and never to 9092.
+    ports:
+      - "${LOGWEIR_E2E_KAFKA_PORT:-9092}:9092"
+      - "${LOGWEIR_E2E_K8S_PORT:-9095}:9095"
+      - "${LOGWEIR_E2E_SASL_PORT:-9097}:9097"
     environment:
       KAFKA_NODE_ID: 1001
       KAFKA_MIN_INSYNC_REPLICAS: 1
@@ -49,7 +73,9 @@ services:
       # has to exist here or a later task has to break that rule to get one.
       # The default is the docker-desktop name every local gate uses.
       # Documented in `docs/kubernetes.md`, "Task 7 — the five-listener stack".
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-broker-1:9094,EXTERNAL://localhost:9092,SASL://kafka-broker-1:9096,SASLEXT://localhost:9097,K8S://${LOGWEIR_K8S_ADVERTISED_HOST:-host.docker.internal}:9095
+      # The three HOST-FACING advertisements carry the published host port
+      # (PROD-01.5); the two in-network ones name container ports and never move.
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-broker-1:9094,EXTERNAL://localhost:${LOGWEIR_E2E_KAFKA_PORT:-9092},SASL://kafka-broker-1:9096,SASLEXT://localhost:${LOGWEIR_E2E_SASL_PORT:-9097},K8S://${LOGWEIR_K8S_ADVERTISED_HOST:-host.docker.internal}:${LOGWEIR_E2E_K8S_PORT:-9095}
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT,SASL:SASL_PLAINTEXT,SASLEXT:SASL_PLAINTEXT,K8S:PLAINTEXT
@@ -184,7 +210,9 @@ services:
     image: docker.io/vladyslavhaina/minio-mirror@sha256:b4c3dc9fb0a82538ac6750eb841b54fb2d4303f4b73fb523ca097918a35c3524
     hostname: minio
     networks: [kafka-net]
-    ports: ["9000:9000", "9001:9001"]
+    ports:
+      - "${LOGWEIR_E2E_S3_PORT:-9000}:9000"
+      - "${LOGWEIR_E2E_S3_CONSOLE_PORT:-9001}:9001"
     environment:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin

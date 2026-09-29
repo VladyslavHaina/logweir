@@ -36,6 +36,15 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 COMPOSE="docker compose -f e2e/compose/docker-compose.yml"
+# WHICH STACK (PROD-01.5): the environment's — the default one when nothing is
+# set, slot N's after `eval "$(e2e/compose/stack-env.sh --slot N)"`. Every
+# address below is in-network (`kafka-broker-1:9094`, `minio:9000`), so only
+# the project moves; an environment whose project and ports disagree is
+# refused, because `run` would start the DEFAULT project's services with a
+# slot's ports.
+# shellcheck source=e2e/compose/stack-lib.sh
+. e2e/compose/stack-lib.sh
+lw_e2e_check_coherent
 RECORDS_PER_TOPIC="${RECORDS_PER_TOPIC:-1000}"
 ARCHIVE="local/kafka-backups/drill-demo"
 

@@ -4,16 +4,29 @@
 //! `localhost:9092` (the EXTERNAL listener); container-side is
 //! `kafka-broker-1:9094`.
 //!
+//! # WHICH stack: `stack.rs` (PROD-01.5)
+//!
+//! The host-side addresses below are FUNCTIONS of the environment, not
+//! constants: `bootstrap()`, `bootstrap_sasl()`, `bootstrap_k8s()` and
+//! `s3_endpoint()` read the same `LOGWEIR_E2E_*_PORT` variables the compose
+//! file publishes its ports from, and `docker compose` itself reads
+//! `COMPOSE_PROJECT_NAME`. With none of them set every value is the one the
+//! table below shows, so the default stack is addressed exactly as before;
+//! after `eval "$(e2e/compose/stack-env.sh --slot N)"` every address is slot
+//! N's, the scratch directory is `.e2e/<project>/`, and two suites run at
+//! once. In-network addresses (`kafka-broker-1:9094`, `minio:9000`) never
+//! move: each stack has its own network.
+//!
 //! # The broker has FIVE listeners from Task 7 onward (STANDING RULE 15)
 //!
 //! | listener | address | protocol | who reaches it |
 //! |---|---|---|---|
 //! | `PLAINTEXT` | `kafka-broker-1:9094` | PLAINTEXT | inter-broker, and every in-network setup step |
-//! | `EXTERNAL` | `localhost:9092` | PLAINTEXT | this harness, host-side (`BOOTSTRAP`) |
+//! | `EXTERNAL` | `localhost:9092` | PLAINTEXT | this harness, host-side (`bootstrap()`) |
 //! | `CONTROLLER` | `kafka-broker-1:9093` | PLAINTEXT | the KRaft quorum |
 //! | `SASL` | `kafka-broker-1:9096` | SASL_PLAINTEXT | in-network SCRAM (`BOOTSTRAP_SASL_INNET`) |
-//! | `SASLEXT` | `localhost:9097` | SASL_PLAINTEXT | host-side SCRAM (`BOOTSTRAP_SASL`) |
-//! | `K8S` | `host.docker.internal:9095` | PLAINTEXT | a POD on docker-desktop (`BOOTSTRAP_K8S`) |
+//! | `SASLEXT` | `localhost:9097` | SASL_PLAINTEXT | host-side SCRAM (`bootstrap_sasl()`) |
+//! | `K8S` | `host.docker.internal:9095` | PLAINTEXT | a POD on docker-desktop (`bootstrap_k8s()`) |
 //!
 //! `SASL` and `SASLEXT` are ONE credential store advertised twice, because a
 //! host-side client cannot resolve `kafka-broker-1` and a pod cannot use
@@ -55,29 +68,39 @@ use std::process::{Command, Output};
 use logweir_kafka::rdkafka_reader::RdKafkaReader;
 use logweir_kafka::reader::{AuthConfig, ClusterReader, TopicDeleter};
 
-/// The EXTERNAL listener, as published by `e2e/compose/docker-compose.yml`.
-pub const BOOTSTRAP: &str = "localhost:9092";
-/// The `SASLEXT` listener — SASL_PLAINTEXT, published on 9097 and advertised as
-/// `localhost:9097`. **The host-side SCRAM bootstrap**, and also the one the
-/// containerised engine uses: `e2e/fixtures/engine-docker.sh` rewrites
-/// `localhost` to the Docker host gateway inside the engine container, so a
-/// `localhost:9097` bootstrap resolves to this published port from both sides
-/// of that boundary. The native (linux/amd64) engine route runs on the host
-/// and resolves it directly.
-pub const BOOTSTRAP_SASL: &str = "localhost:9097";
-/// The `SASL` listener — the SAME SCRAM credential store as `BOOTSTRAP_SASL`,
+pub mod stack;
+// `bootstrap()` — the EXTERNAL listener, `localhost:9092` on the default stack.
+//
+// `bootstrap_sasl()` — the `SASLEXT` listener, SASL_PLAINTEXT, published on
+// 9097 and advertised as `localhost:9097` on the default stack. **The
+// host-side SCRAM bootstrap**, and also the one the containerised engine
+// uses: `e2e/fixtures/engine-docker.sh` rewrites `localhost` to the Docker
+// host gateway inside the engine container, so a `localhost:<port>` bootstrap
+// resolves to this published port from both sides of that boundary. The
+// native (linux/amd64) engine route runs on the host and resolves it directly.
+//
+// `bootstrap_k8s()` — the `K8S` listener, PLAINTEXT, published on 9095 and
+// advertised as `${LOGWEIR_K8S_ADVERTISED_HOST:-host.docker.internal}:9095`
+// on the default stack. **The bootstrap a POD uses**, and the literal value
+// of `KafkaCluster.spec.bootstrapServers` in Demo 1. `host.docker.internal`
+// resolution inside a pod is a Docker Desktop behaviour and not a Kubernetes
+// one, which is why Task 7 probes it with a real pod rather than with a
+// host-side port check.
+//
+// `s3_endpoint()` — MinIO's S3 API, `http://localhost:9000` on the default
+// stack.
+//
+// Re-exported for every test binary; not every binary uses all four, and the
+// module-level `allow(dead_code)` does not cover an unused `use`.
+#[allow(unused_imports)]
+pub use stack::{bootstrap, bootstrap_k8s, bootstrap_sasl, s3_endpoint};
+
+/// The `SASL` listener — the SAME SCRAM credential store as `bootstrap_sasl()`,
 /// advertised for clients ON `kafka-net`. Unresolvable from the host by
 /// design; used by the `kafka-backup` compose service, which is the only
 /// engine invocation in this repository that really runs inside the compose
-/// network.
+/// network. In-network, so it is the same on every slot.
 pub const BOOTSTRAP_SASL_INNET: &str = "kafka-broker-1:9096";
-/// The `K8S` listener — PLAINTEXT, published on 9095 and advertised as
-/// `${LOGWEIR_K8S_ADVERTISED_HOST:-host.docker.internal}:9095`. **The bootstrap
-/// a POD uses**, and the literal value of `KafkaCluster.spec.bootstrapServers`
-/// in Demo 1. `host.docker.internal` resolution inside a pod is a Docker
-/// Desktop behaviour and not a Kubernetes one, which is why Task 7 probes it
-/// with a real pod rather than with a host-side port check.
-pub const BOOTSTRAP_K8S: &str = "host.docker.internal:9095";
 /// The SCRAM principal `scram-setup` creates, and the `sasl_username` every
 /// SCRAM spec in this suite names (**G-ID**: the plan binds the principal).
 pub const SCRAM_USER: &str = "logweir";
@@ -135,8 +158,11 @@ pub fn bin() -> PathBuf {
     p
 }
 
+/// The suite's scratch directory: `.e2e/` on the default stack, and
+/// `.e2e/<project>/` on any other, so two stacks driven from one checkout never
+/// share an approval, an allowlist or a scorecard (PROD-01.5).
 pub fn demo_dir() -> PathBuf {
-    let d = root().join(".e2e");
+    let d = root().join(stack::scratch_dir(".e2e"));
     std::fs::create_dir_all(&d).unwrap();
     d
 }
@@ -362,8 +388,9 @@ fn ok(o: Output, what: &str) -> Output {
 // ---------------------------------------------------------------------------
 
 pub fn reader() -> RdKafkaReader {
-    RdKafkaReader::connect(&[BOOTSTRAP.to_string()], AuthConfig::Plaintext)
-        .expect("the compose broker answers on localhost:9092 — run `just e2e-up`")
+    let b = bootstrap();
+    RdKafkaReader::connect(std::slice::from_ref(&b), AuthConfig::Plaintext)
+        .unwrap_or_else(|e| panic!("the compose broker answers on {b} — run `just e2e-up`: {e}"))
 }
 
 pub fn cluster_id() -> String {
@@ -583,15 +610,16 @@ pub fn produce_with_timestamps(topic: &str, records: &[(i64, &str)]) -> Result<(
         return Err(format!("topic {topic} reports {partitions} partitions"));
     }
 
+    let bootstrap = bootstrap();
     let producer: BaseProducer = rdkafka::config::ClientConfig::new()
-        .set("bootstrap.servers", BOOTSTRAP)
+        .set("bootstrap.servers", &bootstrap)
         .set("message.timeout.ms", "10000")
         // `acks=all` is librdkafka's default and is stated anyway: a fixture
         // whose records are only on the leader's page cache is a fixture whose
         // end offsets can move after this function returns.
         .set("acks", "all")
         .create()
-        .map_err(|e| format!("producer for {topic} at {BOOTSTRAP}: {e}"))?;
+        .map_err(|e| format!("producer for {topic} at {bootstrap}: {e}"))?;
 
     for (i, (ts, payload)) in records.iter().enumerate() {
         let partition = (i % partitions as usize) as i32;
@@ -707,6 +735,7 @@ pub fn spec_default() -> serde_yaml::Value {
     let mut v: serde_yaml::Value =
         serde_yaml::from_str(&std::fs::read_to_string(root().join("examples/drill.yaml")).unwrap())
             .unwrap();
+    rebind_addresses(&mut v);
     let newest = newest_source_record_ts_ms();
     let start = rfc3339(newest - 24 * 3600 * 1000);
     let end = rfc3339(newest + 1000);
@@ -729,14 +758,51 @@ pub fn spec_default() -> serde_yaml::Value {
 /// The shipped example, with NOTHING overridden except the one field that is
 /// necessarily data-dependent. Used by the regression test for the defect
 /// `spec_default`'s note describes.
+///
+/// (And the stack's addresses, which are deployment data too: on the default
+/// stack `rebind_addresses` rewrites nothing, so this is still the example
+/// byte for byte apart from the window; on another slot it points the example
+/// at THAT slot instead of at whoever owns ports 9092 and 9000.)
 pub fn spec_example_with_only_the_window_bound() -> serde_yaml::Value {
     let mut v: serde_yaml::Value =
         serde_yaml::from_str(&std::fs::read_to_string(root().join("examples/drill.yaml")).unwrap())
             .unwrap();
+    rebind_addresses(&mut v);
     let newest = newest_source_record_ts_ms();
     v["sample"]["window_start"] = rfc3339(newest - 24 * 3600 * 1000).into();
     v["sample"]["window_end"] = rfc3339(newest + 1000).into();
     v
+}
+
+/// Points a checked-in spec at THIS stack (PROD-01.5): every string scalar that
+/// is exactly a default-stack host address (`localhost:9092`,
+/// `http://localhost:9000`) becomes this stack's (`bootstrap()`,
+/// `s3_endpoint()`), wherever it sits in the document. Anything else — an
+/// in-network name, a deliberately unreachable port — is left alone. On the
+/// default stack the two pairs are identities, so nothing changes.
+pub fn rebind_addresses(v: &mut serde_yaml::Value) {
+    let pairs = stack::address_rebinds();
+    fn walk(v: &mut serde_yaml::Value, pairs: &[(String, String)]) {
+        match v {
+            serde_yaml::Value::String(s) => {
+                if let Some((_, to)) = pairs.iter().find(|(from, _)| from == s) {
+                    *s = to.clone();
+                }
+            }
+            serde_yaml::Value::Sequence(items) => {
+                for i in items {
+                    walk(i, pairs);
+                }
+            }
+            serde_yaml::Value::Mapping(m) => {
+                for (_, val) in m.iter_mut() {
+                    walk(val, pairs);
+                }
+            }
+            _ => {}
+        }
+    }
+    walk(v, &pairs);
 }
 
 /// `sample.anchor` exactly as `examples/drill.yaml` spells it, for a test that
