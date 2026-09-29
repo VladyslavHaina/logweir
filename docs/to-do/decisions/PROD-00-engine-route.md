@@ -7,7 +7,7 @@
 
 ## 0. Decision summary
 
-1. **Stay on the 0.21.0 pin until OD-3 is recorded, then move to 0.22.0 (proposed child row PROD-00.3a).** 0.22.0 is one squash commit over 0.21.0. It does not change the segment format, the three subcommands Logweir runs (`backup`, `restore`, `validate-restore`), or any key Logweir renders. On the compose stack it passes the demo drill, G-PITR and the receipt path, and both verifiers accept its evidence (§4). Two of its changes need Logweir work before a bump:
+1. **Stay on the 0.21.0 pin until OD-3 is recorded, then move to 0.22.0 (proposed child row PROD-00.3f).** 0.22.0 is one squash commit over 0.21.0. It does not change the segment format, the three subcommands Logweir runs (`backup`, `restore`, `validate-restore`), or any key Logweir renders. On the compose stack it passes the demo drill, G-PITR, the receipt path and the full CI e2e command (64 of 64), and both verifiers accept its evidence (§4, §5.4). Two of its changes need Logweir work before a bump:
    - its `path_style` fix does **not** lift ENGINE-PATHSTYLE, because a custom endpoint still forces path-style;
    - it newly derives plaintext HTTP from an `http://` endpoint even when `allow_http: false` is rendered.
 2. **Every capability gap has a route** (§3). The engine's Kafka and archive correctness defects go **upstream first**; this is bug-class work that `docs/OSO_Feature_Gate_PRD.md` does not gate. Each one is carried as a patch on the PROD-00.2 source build when upstream declines or stalls. The engine's gated seams go to a **patch or a Logweir-native path**, never to an upstream feature PR: the programmatic record filter, and SASL plugins for OAUTHBEARER and MSK IAM. Offsets, ACLs, verification and transport safety stay **Logweir-native**. MSK IAM, the engine's own evidence reports and its continuous/offset-store modes are **declared unsupported** for now.
@@ -30,7 +30,7 @@
    - a repeated header key keeps only its last value (C13);
    - a LogAppendTime batch is archived with the producer's timestamps rather than the append times consumers read (C14).
 
-   Both are small upstream fixes, and both belong in PROD-01.1's record-semantics contract.
+   PROD-01.1 has since measured the second (FX-8), and the ledger carries both as PROD-00.3c and 00.3e. C14 is a small engine fix; C13 needs a `kafka-protocol-rs` change.
 
 ## 1. Evidence base
 
@@ -70,21 +70,21 @@ Routes: **U** upstream PR (bug-class only), carried as a patch on the PROD-00.2 
 
 | ID | Capability | Current behaviour (0.21.0; same in 0.22.0 unless noted) | Proposed route | Cost | Policy constraint | Dependents |
 |---|---|---|---|---|---|---|
-| C1 | Control records and READ_COMMITTED | Fetch and ListOffsets use READ_UNCOMMITTED; commit/abort markers and aborted records are archived as ordinary records; no transaction fields archived | **U** (drop control batches; READ_COMMITTED with aborted-transaction filtering and an LSO end), N rail until released | ~2–4 days + PROD-01.1 fixture | none (defect) | FX-6, PROD-01.1, 08.1, 02.2, 02.3, 12.1 |
+| C1 | Control records and READ_COMMITTED | Fetch and ListOffsets use READ_UNCOMMITTED; commit/abort markers and aborted records are archived as ordinary records; no transaction fields archived | **U** (drop control batches; READ_COMMITTED with aborted-transaction filtering and an LSO end), N rail until released | ~2–4 days + PROD-01.1 fixture | none (defect) | PROD-00.3a, FX-6, PROD-01.1, 01.1a, 08.1, 02.2, 02.3, 12.1 |
 | C2 | Offset-after-upload ordering | In offset-store mode the offset checkpoint covers records still buffered or in an in-flight upload | **U**; **X** for Logweir until released (Logweir renders neither mode) | ~1–2 days | none (defect) | PROD-02.2, 02.3 |
 | C3 | Conditional manifest publication | `{backup_id}/manifest.json` is get-merge-put with an unconditional PUT; an unparseable manifest is overwritten | **N** now (FX-7), **U** when PROD-02.3 needs the engine writer | ~1–2 days upstream; FX-7 as scoped | none (defect) | FX-7, PROD-02.3, 09.1, 09.2 |
 | C4 | Restore checkpoint cadence and hash scope | Checkpoint saved once per topic; `restore.checkpoint_interval_secs` parsed, never read; hash covers every option, including Logweir's per-run paths; shutdown seen only between topics | **N** (stable per-execution paths) + **U** (per-segment cadence honouring the key; path-free hash) | N ~1 day; U ~2 days | none (defect: a documented key does nothing) | PROD-07.1, 07.2, 07.3 |
-| C5 | Idempotent produce | Restore produces with no producer id and retries connection errors (up to 5 + 1) with no idempotence, so a lost acknowledgement duplicates a batch | **U** (InitProducerId + per-partition sequences), N duplicate detection meanwhile | ~3–5 days | none (defect) | PROD-07.1, 07.3, 01.1, 08.1 |
-| C6 | Min/max segment timestamps | Segment bounds are the first and last record timestamps, used as min/max by every selector | **U** (additive `min_timestamp`/`max_timestamp`, selectors prefer them), N exact filter in PROD-08.1 | ~1–2 days | none (defect) | FX-6, PROD-01.1, 08.1, 11.1 |
+| C5 | Idempotent produce | Restore produces with no producer id and retries connection errors (up to 5 + 1) with no idempotence, so a lost acknowledgement duplicates a batch | **U** (InitProducerId + per-partition sequences), N duplicate detection meanwhile | ~3–5 days | none (defect) | PROD-00.3d, 07.1, 07.3, 01.1, 08.1 |
+| C6 | Min/max segment timestamps | Segment bounds are the first and last record timestamps, used as min/max by every selector | **U** (additive `min_timestamp`/`max_timestamp`, selectors prefer them), N exact filter in PROD-08.1 | ~1–2 days | none (defect) | PROD-00.3b, FX-6, PROD-01.1, 01.1b, 08.1, 11.1 |
 | C7 | Topic IDs | None anywhere; Metadata is sent at v9, which predates topic IDs (v10+) | **N** first (PROD-01.4 heuristic + nullable field); **F** capture via Metadata v10+ only if PROD-01.4 picks the engine | F ~2 days | a feature, so not an upstream PR under this row's rule | PROD-01.4, 02.1, 04.1, 04.2, 07.1, 11.1, 15.1 |
 | C8 | ApiVersions negotiation | Never sends ApiVersions; fixed versions per key, `_ => 0` for the rest. Every version it sends lies inside Kafka 4.3.1's ranges; the three ACL APIs sit at the 4.x floor (v1) | **X** today (not needed on 4.3); **U** when a broker line raises a floor; the matrix broker row is the tripwire | U ~2 days | none (robustness defect) | PROD-01.5, 01.2, 04.0 |
 | C9 | OAUTHBEARER and MSK IAM | YAML offers PLAIN, SCRAM-SHA-256/512 and GSSAPI; other mechanisms only through a programmatic plugin factory | **F** for OAUTHBEARER (static token file and OIDC client credentials); **X** for MSK IAM until OD-4 | F ~3–4 days; MSK IAM +3 days and a SigV4 dependency | seam marked "not YAML-configurable"; SSO/OIDC and secrets managers are Part 2 | PROD-01.3, 01.2 |
 | C10 | YAML filter or transform action | Keep/Drop/Tombstone filter exists; settable only by embedding code (`#[serde(skip)]`); no transform action | **F** filter rules in YAML (Keep/Drop/Tombstone by partition, offset range, key); **N** for any transform (masking) | F ~3 days; N producer path is PROD-11.2's | masking and GDPR erasure are Part 2; the seam is "for a commercial distribution" | PROD-09.3, 11.2, 11.1, 07.3 |
 | C11 | Offset-range restore | Time window and source partitions only | **F** through C10's rule set (Drop outside `[start, end)` per partition) | +~1 day on C10 | none directly; rides the C10 seam | PROD-11.1, 07.3, 04.2 |
 | C12 | Byte-rate limits | `rate_limit_bytes_per_sec` parsed, never read; per-partition records/sec enforced on restore; no backup-side limit | **U** (enforce the documented key); N exposes only records/sec until then | ~1 day | none (defect) | PROD-10.1 |
-| C13 | Duplicate header keys (found here) | `kafka-protocol` 0.18 decodes headers into an `IndexMap`, so a repeated key keeps only its last value, on capture and again on produce | **U** to `kafka-protocol-rs` (header list) + engine bump; **X** disclosed until then | ~2–3 days upstream, crate API change | none | PROD-01.1, 08.1, 08.3 |
-| C14 | LogAppendTime timestamps and producer metadata (found here) | For a LogAppendTime batch the decoder ignores the batch's max timestamp, so the archive keeps the producer's timestamps, not the append times consumers read; timestamp type, producer id/epoch, sequence and the transactional flag are dropped; restore always produces CreateTime | **U** to `kafka-protocol-rs` for LogAppendTime (a decoder defect), then an engine bump; **X** disclosed for producer metadata | ~1 day upstream | none (defect) | PROD-01.1, FX-6, 08.1, 11.1 |
-| C15 | Transport derived from the endpoint (0.22.0) | 0.22.0 treats an `http://` endpoint as `allow_http: true` even when `false` is rendered | **N** guard before the bump (PROD-00.3a) | ~0.5 day | none | PROD-00.3a, PLAT-08 seam S5 |
+| C13 | Duplicate header keys (found here) | `kafka-protocol` 0.18 decodes headers into an `IndexMap`, so a repeated key keeps only its last value, on capture and again on produce | **U** to `kafka-protocol-rs` (header list) + engine bump; **X** disclosed until then | ~2–3 days upstream, crate API change | none | PROD-00.3e, PROD-01.1, 08.1, 08.3 |
+| C14 | LogAppendTime timestamps and producer metadata (found here) | For a LogAppendTime batch the decoder ignores the batch's max timestamp, so the archive keeps the producer's timestamps, not the append times consumers read; timestamp type, producer id/epoch, sequence and the transactional flag are dropped; restore always produces CreateTime | **U** to `kafka-backup` for LogAppendTime (the engine parses batch headers itself); **X** disclosed for producer metadata | ~1 day | none (defect) | PROD-00.3c, PROD-01.1, FX-6, FX-8, 08.1, 11.1 |
+| C15 | Transport derived from the endpoint (0.22.0) | 0.22.0 treats an `http://` endpoint as `allow_http: true` even when `false` is rendered | **N** guard before the bump (PROD-00.3f) | ~0.5 day | none | PROD-00.3f, PLAT-08 seam S5 |
 | C16 | `path_style` (ENGINE-PATHSTYLE) | 0.21.0 ignores `path_style`; 0.22.0 honours `path_style: true`, but any custom endpoint still forces path-style | **N** keep the refusal of VirtualHosted plus endpoint; U only if demanded | — | none | PLAT-08.1, PROD-09.2 |
 | C17 | Engine evidence reports | `checksums_valid: true` is set unconditionally | **X** never consumed; verification stays N (PROD-08) | — | validation runs are Part 2 | PROD-08.x |
 | C18 | Consumer-group snapshot | Written as `snapshot_time` + topic → partition → offset; drops groups without offsets on archived topics; Logweir's vendored shape differs (FX-1) | **N** (FX-1 parses it as an import source; PROD-04.1 captures natively) | FX-1 as scoped | automatic offset reset is Part 2 | FX-1, PROD-04.1, 04.2 |
@@ -99,7 +99,7 @@ Routes: **U** upstream PR (bug-class only), carried as a patch on the PROD-00.2 
 - `kafka-protocol` 0.18 keeps control records and flags them (`KP/records.rs:155-184`, `control` at `:160`), so commit and abort markers reach the archive.
 - `convert_record` keeps only key, value, headers, timestamp and offset (`C/kafka/fetch.rs:200-218`). `BackupRecord` has no transaction fields (`C/manifest.rs:406` → `:413`).
 
-**Effect** (read from source; A-C1-1 measures it). A transactional source restores with its aborted records, and with its markers as ordinary records. A marker has a 4-byte key and a 6-byte value. The drill compares target with archive, so it cannot see either. The archive keeps no flag, so detection from the archive alone is a shape heuristic: a key of `00 00 00 00` or `00 00 00 01` with a 6-byte value. A user record can have that shape, so the heuristic has false positives. PROD-01.1 owns the rail.
+**Effect** (read from source, then measured by PROD-01.1, whose record, `docs/to-do/decisions/PROD-01.1-record-semantics.md` §2.1, found aborted records, open transactions and every marker archived as ordinary records). A transactional source restores with its aborted records, and with its markers as ordinary records. A marker has a 4-byte key and a 6-byte value. The drill compares target with archive, so it cannot see either. The archive keeps no flag, so detection from the archive alone is a shape heuristic: a key of `00 00 00 00` or `00 00 00 01` with a 6-byte value. A user record can have that shape, so the heuristic has false positives. PROD-01.1 owns the rail.
 
 **Route.** U: the correction is small and uncontroversial.
 
@@ -115,7 +115,7 @@ Until it is released, PROD-01.1's rail applies (refuse or label transactional to
 - **A-C1-2 (PROD-01.1, rail).** Until C1 is released, a restore plan whose archive contains control-marker-shaped records is refused or labelled "transactional semantics not preserved", as PROD-01.1 decides. It happens before the approval is minted and in the signed evidence. Negative control: the non-transactional demo archive carries no such label.
 - **A-C1-3 (PROD-08.1).** Complete-mode verification over the A-C1-1 archive reports the aborted and control records as excluded or not reconstructed, never as a silent pass. Negative control: switch the exclusion off and complete mode must report the mismatch.
 - **A-C1-4 (PROD-02.2 / 02.3).** An incremental or continuous capture chained over a topic with an open transaction never records a point beyond the LSO while READ_COMMITTED is in force. Negative control: under READ_UNCOMMITTED the recorded end offset exceeds the LSO.
-- **A-C1-5 (PROD-00.3b).** The released engine, or the carried patch, passes A-C1-1, and the 0.21.0 pin still fails it (the same fixture, both ways).
+- **A-C1-5 (PROD-00.3a).** The released engine, or the carried patch, passes A-C1-1, and the 0.21.0 pin still fails it (the same fixture, both ways).
 
 ### 3.2 C2 — Offset-after-upload ordering
 
@@ -172,7 +172,7 @@ Until it is released, PROD-01.1's rail applies (refuse or label transactional to
 - **A-C4-1 (PROD-07.1).** Two attempts of one execution render byte-identical restore documents. A test diffs the two renders, and a mutant that re-inserts the run id turns it red.
 - **A-C4-2 (PROD-07.3).** Kill the runner after topic 1 of 2 completes. Pass: the resumed attempt skips topic 1 (the loaded checkpoint lists its segments), and the target holds each source record of topic 1 exactly once. Negative control: with per-attempt paths the resumed attempt re-produces topic 1, and the duplicate count equals topic 1's record count.
 - **A-C4-3 (PROD-07.1).** The rendered document never carries a key the engine does not read. `checkpoint_interval_secs` is removed from the render until C4's U part is released, or kept and labelled as having no effect.
-- **A-C4-4 (PROD-00.3d).** With the released engine, killing mid-topic loses at most one segment of progress per partition. A fault-injected kill after the N-th segment PUT shows the checkpoint listing N segments. The 0.21.0 pin lists 0.
+- **A-C4-4 (PROD-00.3g).** With the released engine, killing mid-topic loses at most one segment of progress per partition. A fault-injected kill after the N-th segment PUT shows the checkpoint listing N segments. The 0.21.0 pin lists 0.
 
 ### 3.5 C5 — Idempotent produce
 
@@ -183,7 +183,7 @@ Until it is released, PROD-01.1's rail applies (refuse or label transactional to
 - The router retries connection errors up to five times with linear back-off (`C/kafka/partition_router.rs:500-552`). The client reconnects and retries once more (`C/kafka/client.rs:459-492`).
 - There is no InitProducerId anywhere.
 
-**Effect.** A produce whose acknowledgement is lost after the broker appended it is sent again and appended twice. The drill compares by `x-original-offset` and collapses duplicates (PROD-08.1's gap), so it cannot see this.
+**Effect** (measured by PROD-01.1 §5.1: 3,000 duplicates after three resent requests, with the engine exiting 0). A produce whose acknowledgement is lost after the broker appended it is sent again and appended twice. The drill compares by `x-original-offset` and collapses duplicates (PROD-08.1's gap), so it cannot see this.
 
 **Route.** **U**: InitProducerId, then per-partition sequence numbers and epoch handling. The protocol crate already models both, and 4.3.1 serves InitProducerId v0–v5. Meanwhile **N**: PROD-08.1 detects duplicates on `x-original-offset`, and PROD-07.1's contract labels the replay ambiguity window. A native producer is not proposed for this alone.
 
@@ -196,7 +196,7 @@ Until it is released, PROD-01.1's rail applies (refuse or label transactional to
 
 **Behaviour.** The writer sets `start_timestamp` from the first record and `end_timestamp` from the last (`C/segment/writer.rs:236-242`). `SegmentMetadata::overlaps_time_window` treats them as min and max (`C/manifest.rs:391-401` → `:398-408`). Every restore selection uses it: restore and dry run (`C/restore/engine.rs:547`, `:1961`), the header preflight (`C/restore/preflight.rs:263`) and repartitioning (`C/restore/repartition.rs:300`).
 
-**Effect.** With non-monotonic CreateTime, a record inside the window can sit in a segment whose first and last timestamps are both outside it. That segment is skipped silently, which is FX-6's second hazard.
+**Effect** (measured by PROD-01.1 §2.2). With non-monotonic CreateTime, a record inside the window can sit in a segment whose first and last timestamps are both outside it. That segment is skipped silently, which is FX-6's second hazard.
 
 **Route.** **U**: record `min_timestamp` and `max_timestamp` additively, and have the selectors prefer them when present. Existing archives keep first/last and stay correct to read. **N**: PROD-08.1 already plans exact per-record filtering on the archive side. **X**: archives written before the fix remain first/last-bounded, and their evidence must say so.
 
@@ -320,7 +320,7 @@ Until it is released, PROD-01.1's rail applies (refuse or label transactional to
 
 ### 3.14 C14 — LogAppendTime timestamps and producer metadata (found here)
 
-**Behaviour** (read from source; A-C14-1 measures it).
+**Behaviour** (read from source, then measured by PROD-01.1 §2.3: a point in 2001 restored six records the broker appended in 2026, signed `pass`; FX-8 rails it).
 
 - `kafka-protocol` 0.18 reads the batch's timestamp type (`KP/records.rs:572-573`) but decodes the batch's max timestamp into a discarded `_max_timestamp` (`:585`).
 - It stamps every record `base + delta` (`:861-862`), whatever the type.
@@ -334,7 +334,7 @@ Until it is released, PROD-01.1's rail applies (refuse or label transactional to
 
 **Route.**
 
-- **U** to `kafka-protocol-rs`: use the batch's max timestamp for records of a LogAppendTime batch, as the Kafka client does. This is a small decoder defect. Then bump the engine.
+- **U** to `kafka-backup`. The engine already parses each batch header by hand (`C/kafka/fetch.rs:156-191`), and the max timestamp (bytes 35–43) and the timestamp-type bit (attributes, bytes 21–23) sit in the same header. It can therefore stamp a LogAppendTime batch's records with the batch max timestamp, as the Kafka client does, without any `kafka-protocol` change (PROD-01.1's review L2). A matching fix to `kafka-protocol-rs`'s decoder is optional hygiene, not a prerequisite.
 - **X** disclosed for the producer metadata, revisited with C1 if transactional support needs producer identity.
 
 **Acceptance row.**
@@ -354,7 +354,7 @@ Until it is released, PROD-01.1's rail applies (refuse or label transactional to
 
 **Acceptance row.**
 
-- **A-C15-1 (PROD-00.3a).** A drill spec with `endpoint: http://…` and `allow_http: false` is refused at phase 0, exit 3, before any engine start. A unit test covers it, and the mutant that deletes the rule turns it red.
+- **A-C15-1 (PROD-00.3f).** A drill spec with `endpoint: http://…` and `allow_http: false` is refused at phase 0, exit 3, before any engine start. A unit test covers it, and the mutant that deletes the rule turns it red.
 
 ### 3.16 C16 — `path_style` and ENGINE-PATHSTYLE
 
@@ -369,7 +369,7 @@ Until it is released, PROD-01.1's rail applies (refuse or label transactional to
 
 **Acceptance row.**
 
-- **A-C16-1 (PROD-00.3a).** On the bumped pin, a destination with `addressing: VirtualHosted` and a custom endpoint is still refused with `addressing_unsupported_by_engine`, and the message names no engine version.
+- **A-C16-1 (PROD-00.3f).** On the bumped pin, a destination with `addressing: VirtualHosted` and a custom endpoint is still refused with `addressing_unsupported_by_engine`, and the message names no engine version.
 
 ### 3.17 C17 — Engine evidence reports
 
@@ -406,7 +406,7 @@ The runner copies the binary out of OSO's amd64-only image (ruling GR6, `L/scrip
 | `offset_storage.sync_interval_secs` optional; deprecation warnings from `validate()` | `config.rs:1139-1172` | None: Logweir renders no `offset_storage` and no `backup.checkpoint_interval_secs`, and the warning text does not match the `Ignoring unknown config key` needle (`L/crates/logweir-engine-oso/src/subprocess.rs:164`) |
 | `describe` and `validate` accept `--config` | `crates/kafka-backup-cli/src/main.rs` | None: Logweir runs `backup`, `restore` and `validate-restore` only (`L/crates/logweir-engine-oso/src/engine.rs:268-273,422-423,593-594`), whose arguments are unchanged |
 | Segment container | `segment/format.rs`, `segment/reader.rs` unchanged since 0.18.0; `writer.rs` last changed in 0.21.0 (segment sha256) | `.kbak` decoding is unaffected (§4.2, cycle c3) |
-| `doctor` | `L/crates/logweir/src/doctor.rs:194-230` accepts exactly `0.21.0` | A bump must move this pin with the digest (PROD-00.3a) |
+| `doctor` | `L/crates/logweir/src/doctor.rs:194-230` accepts exactly `0.21.0` | A bump must move this pin with the digest (PROD-00.3f) |
 
 ### 4.2 Runs: 0.22.0 against the pin
 
@@ -437,9 +437,9 @@ The engine's fixed protocol versions (C8) were exercised on the newest supported
 |---|---|---|
 | c7 | demo drill on `apache/kafka:4.3.1`, engine v0.21.0 | `outcome: pass`, `integrity: byte-fingerprint/pass` 150/150, `matrix_verdict: pass`, `header_preflight: honoured`, both verifiers VALID. The engine's backup (the seed), its `validate-restore` and its restore all completed against the 4.3.1 broker with the fixed versions listed in §3.8 |
 | c7 | `just pitr` on 4.3.1 | 1/1: six of nine records restored, bound [0, 9] |
-| c8 | CI's full e2e command on 4.3.1, engine v0.21.0 | queued behind other workers' use of the compose lock when this checkpoint was written; see §5.4 |
+| c8 | CI's full e2e command on 4.3.1, engine v0.21.0 | exit 0 in 831 s, 64 passed and 0 failed (including `mvp_demo.rs`, the receipt path, and nine SCRAM tests). The deleted-segment control passed. A read-only probe of the running broker container read `apache/kafka:4.3.1` (image `sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837`) and `Kafka version: 4.3.1` |
 
-c7 set `KAFKA_VERSION=4.3.1` exactly as c8 did, but recorded no broker probe. c8's probe of the running broker container is the direct evidence that this mechanism selects `apache/kafka:4.3.1`. c5's probe on 3.7.1 read back `apache/kafka:3.7.1` and "Kafka version: 3.7.1".
+c7 set `KAFKA_VERSION=4.3.1` exactly as c8 did, but recorded no broker probe. c8's probe is the direct evidence that this mechanism selects `apache/kafka:4.3.1`, and c5's probe on 3.7.1 read back `apache/kafka:3.7.1` and "Kafka version: 3.7.1". Nothing in the engine's fixed protocol versions failed on 4.3.1, which confirms §3.8's reading from source.
 
 ## 5. engine-matrix
 
@@ -487,7 +487,7 @@ The three scheduled runs (34830737064 on 2026-09-14, 35586616823 on 2026-09-21, 
 
 | Engine | Kafka | Floor | Declared outcome | Why this row |
 |---|---|---|---|---|
-| v0.22.0 | 3.7.1 | full | `pass` | Upstream's current release; the proposed pin (PROD-00.3a) |
+| v0.22.0 | 3.7.1 | full | `pass` | Upstream's current release; the proposed pin (PROD-00.3f) |
 | v0.21.0 | 3.7.1 | full | `pass` | The pin, on the compose stack's default broker |
 | v0.21.0 | 4.3.1 | full | `pass` | The pin on the newest supported Apache Kafka line (the `latest` image on 2026-09-28): the C8 tripwire |
 | v0.20.0 | 3.7.1 | below | `unsupported(lever-absent)` | Newest four minors |
@@ -495,6 +495,8 @@ The three scheduled runs (34830737064 on 2026-09-14, 35586616823 on 2026-09-21, 
 | v0.19.1 | 3.7.1 | below | `unsupported(lever-absent)` | `strimzi-backup-operator` v0.2.22–v0.2.25 default |
 
 v0.18.0 left the window: it is the fifth-newest minor, and no operator defaults to it. When PROD-01.5 settles its 4.3 patch release, the broker row should name the same one.
+
+After integration onto main (`0cd7cca0` and later), the full rows also run PROD-01.1's `e2e/tests/record_semantics.rs`. Its contract assertions are gated on engine 0.21.0 (`CONTRACT_ENGINE`), so the v0.22.0 row records outcomes from it without red cells, while both pin rows assert the contract. On Kafka 4.3.1 those assertions have not run: this branch predates them, and PROD-01.1 measured on 3.7.1. If they fail there, the 4.3.1 row records `fail(e2e suite)`. That is real broker-line evidence for PROD-01.5, and the row's declaration should then follow the evidence.
 
 ### 5.4 Local validation and the dispatch command
 
@@ -504,7 +506,7 @@ The workflow's matrix steps were run locally, under the compose lock, with the s
 |---|---|---|---|
 | c6 | v0.19.2 × 3.7.1 (below) | `just e2e-up`; seed with `LOGWEIR_SEED_SEGMENT_SHA256=optional`, exit 0 (6 segments, 2000 records, 0 digests: the step every earlier run failed); `cargo build`; reduced row, exit 101; control, exit 101 | `unsupported(lever-absent)`, as declared. Both test failures are the floor at work: Logweir refused the engine with "engine 0.19.2 ignored the config key `restore.header_preflight` that logweir rendered; this tag is below the declared floor" (exit 1) |
 | c5 | v0.22.0 × 3.7.1 (full) | `just e2e-up`; seed (`required`), exit 0; `cargo build --locked -p logweir`; `cargo test --locked -p e2e --features e2e -- --test-threads=1 --skip a_pod_really_reaches_the_k8s_listener`, exit 0 in 1006 s: `backup_argv` 7, `check_image` 2 (12 ignored), `full_drill` 15, `guards` 22, `mvp_demo` 3, `offset_side` 4, `pitr_boundary` 1, `scram` 9 (1 filtered), `smoke` 1. That is 64 passed, 0 failed. The deleted-segment control passed | `pass`, as declared |
-| c8 | v0.21.0 × 4.3.1 (full) | queued when this checkpoint was written | — |
+| c8 | v0.21.0 × 4.3.1 (full) | the same steps on `apache/kafka:4.3.1` (probed). Seed exit 0; the CI e2e command exit 0 in 831 s: `backup_argv` 7, `check_image` 2 (12 ignored), `full_drill` 15, `guards` 22, `mvp_demo` 3, `offset_side` 4, `pitr_boundary` 1, `scram` 9 (1 filtered), `smoke` 1. That is 64 passed, 0 failed. The control passed | `pass`, as declared |
 
 The orchestrator dispatches the workflow on this branch. `workflow_dispatch` takes no inputs:
 
@@ -577,7 +579,7 @@ Only engine-version and operator-default statements changed. The broker-version 
 FX-1 makes the snapshot parse. After it:
 
 1. 0.19.x and 0.20.x archives still drill as `fail-integrity` with `integrity.result: partial`: upstream wrote no segment digests before 0.21, so Logweir can decode and count their segments but cannot authenticate the bytes. PROD-08.1's complete mode could hash segments itself, but with no reference digest it states "decoded, not authenticated".
-2. Foreign archives still cannot enter the catalog. That needs an "unattested foreign point" import (proposed row §9, `PROD-00.3m`), not an engine change.
+2. Foreign archives still cannot enter the catalog. That needs an "unattested foreign point" import (proposed row §9, `PROD-00.3n`), not an engine change.
 3. The snapshot remains import-only evidence: it has no group type, state or generation, it omits groups without offsets on archived topics (C18), and PROD-04.1's native capture supersedes it.
 4. 0.19.x archives keep FX-4's parity gap until capture coverage is recorded.
 
@@ -590,7 +592,7 @@ FX-1 makes the snapshot parse. After it:
 
   Pass: for E ≥ 0.21, `outcome: pass` with `integrity: byte-fingerprint/pass`; for E < 0.21, a signed `outcome: fail-integrity` scorecard (exit 2) whose `integrity.result` is `partial` with a `partial_reason` naming the segments without sha256. This is what v0.19.2 produced on 2026-09-29. Every scorecard verifies with both readers, and no run exits 1. Negative control: deleting a non-oldest segment of the E < 0.21 archive yields `preflight-failed`, exit 2.
 - **A-OSO-2 (FX-1).** As A-OSO-1, with `consumer_group_snapshot: true` in the backup and one committed consumer group on `orders`. Before FX-1 the drill exits 1 with no scorecard. After it the drill completes as in A-OSO-1, and the snapshot parses to exactly the committed group. Negative control: a snapshot with no groups parses to zero groups, not an error.
-- **A-OSO-3 (PLAT-15.2 / PROD-00.3m).** A bucket holding only an operator-written archive: `logweir catalog sync` reports zero points and says why (no Logweir receipt), never a phantom point and never an error. Negative control: a Logweir-written point in the same bucket syncs as one point.
+- **A-OSO-3 (PLAT-15.2 / PROD-00.3n).** A bucket holding only an operator-written archive: `logweir catalog sync` reports zero points and says why (no Logweir receipt), never a phantom point and never an error. Negative control: a Logweir-written point in the same bucket syncs as one point.
 - **A-OSO-4 (engine-matrix, after FX-1).** Add an "archive" row kind, seeded with E and drilled with the pin, for the operator engines. A-OSO-1 then runs weekly.
 
 ## 8. OD-3 — options and recommendation for the owner
@@ -617,7 +619,7 @@ OD-3's four options per capability are:
 | C11 offset-range restore | a feature | via C10's rules | — | — | **F** via C10 |
 | C12 byte-rate limit | viable | carry if refused | expose records/sec only | — | **U** |
 | C13 duplicate headers | viable in `kafka-protocol-rs` | carry if refused | source-side detection | disclosed meanwhile | **U** + **X** disclosed |
-| C14 LogAppendTime timestamps, producer metadata | viable in `kafka-protocol-rs` (a decoder defect) | carry if refused | the rail | producer metadata disclosed | **U** for LogAppendTime; **X** disclosed for producer metadata |
+| C14 LogAppendTime timestamps, producer metadata | viable in `kafka-backup` (a defect; the engine parses batch headers itself) | carry if refused | FX-8's rail | producer metadata disclosed | **U** for LogAppendTime; **X** disclosed for producer metadata |
 | C15 transport derivation | — | — | CLI rule R3 | — | **N**, before the bump |
 | C16 ENGINE-PATHSTYLE | — | — | keep the refusal | — | **N** |
 | C17 engine evidence | — | — | Logweir verification | unconsumed | **X** |
@@ -628,14 +630,14 @@ OD-3's four options per capability are:
 
 1. **Build from source (PROD-00.2) and allow a patch queue.** Amend GR6 from "unmodified upstream image" to "upstream source plus a recorded patch queue". Each patch cites its upstream PR, or the refusal that justifies carrying it. This agrees with OD-3's current recommendation.
 2. **Upstream first for defects.**
-   - Open PRs for C1, C4 (cadence and hash), C5, C6 and C12; to `kafka-protocol-rs` for C13 and C14; for C2 and C3 when PROD-02.3 needs them; and for C8 on its trigger.
+   - Open PRs to `kafka-backup` for C1, C4 (cadence and hash), C5, C6, C12 and C14; to `kafka-protocol-rs` for C13; for C2 and C3 when PROD-02.3 needs them; and for C8 on its trigger.
    - Carry a patch when a PR is declined, or not released within **30 days**.
    - Evidence that this is realistic: an outside contributor's three bug-fix PRs (#145, #147, #149) were merged the day after they were opened (2026-08-17 → 2026-08-18). The maintainer's own issues #161 and #166–#168 (filed 2026-08-30) shipped eight days later in 0.22.0. Upstream tagged seven releases between 2026-08-29 and 2026-09-07.
    - Its limits: outside PR #172, which adds `--config` to `describe` and `validate`, is still open, while the maintainer shipped the same change himself in 0.22.0 (#186). Outside PRs #198 and #199 (2026-09-24) are open. One maintainer accounts for 157 of the repository's contributions (GitHub contributors API, 2026-09-28).
 3. **Patches, not upstream PRs, for the commercial seams:** C9's OAUTHBEARER, C10's filter rules (which also give C11) and, only if PROD-01.4 asks, C7.
 4. **Native** for offsets and groups (C18, PROD-04), verification (C17, PROD-08), transport and addressing (C15, C16), resume paths (C4) and masking (C10's transform).
 5. **Declared unsupported** until evidence or demand: MSK IAM (OD-4), the engine's continuous and offset-store modes (C2/C3), the engine's evidence reports (C17), producer metadata (C14), and LogAppendTime timestamps and duplicate header keys until C14 and C13 are released.
-6. **Move the pin to 0.22.0** as PROD-00.3a, after its two guards (C15, C16) and the `doctor` pin. It does not wait for PROD-00.2.
+6. **Move the pin to 0.22.0** as PROD-00.3f, after its two guards (C15, C16) and the `doctor` pin. It does not wait for PROD-00.2.
 
 **What only the owner can decide:**
 
@@ -644,40 +646,46 @@ OD-3's four options per capability are:
 - whether Logweir sends fixes to a supplier that sells the competing product (recommended: every accepted fix removes a patch Logweir would otherwise carry);
 - MSK IAM's place under OD-4.
 
-## 9. Proposed PROD-00.3 child rows
+## 9. PROD-00.3 child rows: routes for the ledger's rows, and proposed rows
 
-Each row follows its route and ships a Logweir-owned oracle test. The acceptance rows are §3's and §7's.
+PROD-01.1 (Done, main `0cd7cca0`) added **PROD-00.3a–e** to the ledger. Their oracles are in `docs/to-do/decisions/PROD-01.1-record-semantics.md` §9, which measured each defect on the compose stack. This record gives each one a route, a cost and the supplier constraint. The route is a proposal, and OD-3 decides it. Their ledger dependency is "00.1; 00.2 for a patch route".
 
-| Row | Title | Route | Depends on | Gate | Lab | Tier | Acceptance |
-|---|---|---|---|---|---|---|---|
-| PROD-00.3a | Move the pin to 0.22.0 | N (+ refresh) | 00.1 | OD-3 | compose | A | Refresh the pin: `OSO_REFRESH=1 OSO_TAG=v0.22.0` with `EXPECTED_REVISION` `cc10aa4a…`, which updates the digest, the tarball, `.env` and the Dockerfile. Move `doctor`'s pin. A-C15-1, A-C16-1. §4.2's runs on the new pin. The matrix pin rows move with it |
-| PROD-00.3b | Transaction-correct capture | U (F fallback) | 00.1, 01.1 (fixture); 00.2 for F | OD-3 | compose | A | A-C1-1…A-C1-5 |
-| PROD-00.3c | Idempotent restore produce | U (F fallback) | 00.1; 00.2 for F | OD-3 | compose | A | A-C5-1, A-C5-2 |
-| PROD-00.3d | Resumable restore checkpoint | N + U | 00.1, 07.1 | OD-3 | compose | A | A-C4-1…A-C4-4 |
-| PROD-00.3e | Segment min/max timestamps | U | 00.1 | OD-3 | compose | A | A-C6-1…A-C6-3 |
-| PROD-00.3f | Protocol-crate fidelity: duplicate header keys and LogAppendTime timestamps | U (`kafka-protocol-rs`, then engine) | 00.1, 01.1 (fixtures) | OD-3 | compose | A | A-C13-1, A-C13-2, A-C14-1 |
-| PROD-00.3g | Enforce the byte-rate limit | U | 00.1 | OD-3 | compose | B | A-C12-1 |
-| PROD-00.3h | YAML record-filter rules (erasure, offset ranges, resume point) | F | 00.1, 00.2 | OD-3 | compose | A | A-C10-1, A-C11-1, A-C11-2 |
-| PROD-00.3i | OAUTHBEARER from YAML | F | 00.2, 01.5 (listener) | OD-3 | compose | A | A-C9-1, A-C9-2 |
-| PROD-00.3j | Engine-side manifest and offset ordering for continuous capture | U | 02.3 choosing the engine | OD-3 | compose | A | A-C2-2, A-C3-2, A-C3-3 |
-| PROD-00.3k | Topic ID capture in the manifest | F | 01.4 choosing the engine route, 00.2 | OD-3 | compose | A | A-C7-1 |
-| PROD-00.3l | ApiVersions negotiation | U | a matrix broker row failing on a floor | — | compose | B | A-C8-1, A-C8-2 |
-| PROD-00.3m | Unattested import of operator-written archives | N (catalog) | FX-1, PLAT-15.2 | — | compose | A | A-OSO-3; points marked unattested, never `Verified` |
-| PROD-00.3n | Weekly archive-compatibility rows | N (CI) | FX-1 | — | compose | B | A-OSO-1, A-OSO-2, A-OSO-4 |
+| Row (ledger) | Capability | Proposed route | Cost | Supplier constraint | Acceptance |
+|---|---|---|---|---|---|
+| PROD-00.3a Committed-only capture | C1 | **U** to `kafka-backup`: skip control batches, `isolation_level=1` on fetch and ListOffsets, drop aborted transactions; **F** if declined or not released within 30 days | ~2–4 days | none: a defect, not a Part-2 feature | PROD-01.1 §9 (the TXN row); A-C1-1…A-C1-5 |
+| PROD-00.3b Segment min/max record timestamps | C6 | **U**: additive `min_timestamp`/`max_timestamp`, selectors prefer them; F fallback | ~1–2 days | none (defect) | PROD-01.1 §9 (ts-pit); A-C6-1…A-C6-3 |
+| PROD-00.3c Keep `LogAppendTime` through capture | C14 | **U** to `kafka-backup`: the engine already parses each batch header by hand (`C/kafka/fetch.rs:156-191`), so it can take the max timestamp and the type bit from the same header, with no `kafka-protocol` change (PROD-01.1's review L2). Upstream to `kafka-protocol-rs` is an alternative, not a prerequisite. F fallback | ~1 day | none (defect) | PROD-01.1 §9 (the LAT row; FX-8 stops triggering); A-C14-1 |
+| PROD-00.3d Idempotent (or sequence-checked) restore produce | C5 | **U**: InitProducerId, per-partition sequences and epochs; F fallback | ~3–5 days | none (defect) | PROD-01.1 §9 (the ack-fault row); A-C5-1, A-C5-2 |
+| PROD-00.3e Keep repeated header keys through capture and replay | C13 | **U** to `kafka-protocol-rs` (`Record.headers` becomes a list, a breaking change for that crate), then an engine bump; F (a vendored `kafka-protocol` patch) if declined. Also a Logweir change: phase 7 keys by the LAST `x-original-offset` (PROD-01.1 §9) | ~2–3 days + the crate's release | none (defect) | PROD-01.1 §9 (the shapes row); A-C13-1, A-C13-2 |
+
+Proposed new rows, lettered from **f**:
+
+| Row | Title | Capability | Route | Cost | Supplier constraint | Depends on | Gate | Lab | Tier | Acceptance |
+|---|---|---|---|---|---|---|---|---|---|---|
+| PROD-00.3f | Move the pin to 0.22.0 | C15, C16, §4 | N (+ refresh): `OSO_REFRESH=1 OSO_TAG=v0.22.0` with `EXPECTED_REVISION` `cc10aa4a…` (digest, tarball, `.env`, Dockerfile); `doctor`'s pin; the CLI rule refusing `http://` with `allow_http: false`; a version-neutral ENGINE-PATHSTYLE message; the matrix pin rows | ~1–2 days | none | 00.1 | OD-3 | compose | A | A-C15-1, A-C16-1; §4.2's runs on the new pin |
+| PROD-00.3g | Resumable restore checkpoint | C4 | N (per-execution paths, the checkpoint carried between attempts) + U (cadence, path-free hash) | N ~1 day; U ~2 days | none (defect) | 00.1, 07.1 | OD-3 | compose | A | A-C4-1…A-C4-4 |
+| PROD-00.3h | Enforce the byte-rate limit | C12 | U | ~1 day | none (defect) | 00.1 | OD-3 | compose | B | A-C12-1 |
+| PROD-00.3i | YAML record-filter rules (erasure, offset ranges, resume point) | C10, C11 | F | ~3 days + ~1 day | the seam is "for a commercial distribution"; masking and erasure are Part 2 | 00.1, 00.2 | OD-3 | compose | A | A-C10-1, A-C11-1, A-C11-2 |
+| PROD-00.3j | OAUTHBEARER from YAML | C9 | F; MSK IAM X until OD-4 | ~3–4 days | plugin seam "not YAML-configurable"; SSO/OIDC is Part 2 | 00.2, 01.5 (listener) | OD-3 | compose | A | A-C9-1, A-C9-2 |
+| PROD-00.3k | Engine-side manifest and offset ordering for continuous capture | C2, C3 | U | ~2–4 days | none (defect) | 02.3 choosing the engine | OD-3 | compose | A | A-C2-2, A-C3-2, A-C3-3 |
+| PROD-00.3l | Topic ID capture in the manifest | C7 | F | ~2 days | a feature under this row's rule | 01.4 choosing the engine route, 00.2 | OD-3 | compose | A | A-C7-1 |
+| PROD-00.3m | ApiVersions negotiation | C8 | U | ~2 days | none (robustness defect) | a matrix broker row failing on a floor | — | compose | B | A-C8-1, A-C8-2 |
+| PROD-00.3n | Unattested import of operator-written archives | §7 | N (catalog) | ~3 days | none | FX-1, PLAT-15.2 | — | compose | A | A-OSO-3; points marked unattested, never `Verified` |
+| PROD-00.3o | Weekly archive-compatibility rows | §7 | N (CI) | ~1 day | none | FX-1 | — | compose | B | A-OSO-1, A-OSO-2, A-OSO-4 |
 
 ## 10. Limits of this record
 
 - **Local runs used amd64 emulation.** Every local run was on an arm64 host, with the engine running as the linux/amd64 image under emulation (`e2e/fixtures/engine-docker.sh`). Durations are not performance evidence.
-- **One broker, and no transactional fixture.** The compose stack is one combined KRaft broker. No run here produces transactionally, duplicates headers or writes non-monotonic timestamps, so C1, C6, C13 and C14 are source-level findings until PROD-01.1's fixtures run them.
+- **One broker, and no transactional fixture here.** The compose stack is one combined KRaft broker, and no run in this record produces transactionally, duplicates headers or writes non-monotonic timestamps. PROD-01.1 has since measured C1, C5, C6 and C14 (its record §2 and §5). C13's duplicate-collapse half remains a source reading in both records.
 - **The CI rows are not yet run on GitHub.** The engine-matrix repair was validated by running the workflow's steps locally (§5.4) and with `actionlint`. The first dispatched run on this branch is the CI evidence.
-- **The 4.3.1 evidence is one broker line.** The probe is one broker version. PROD-01.5 owns the 3.9/4.1/4.3 lines.
+- **The 4.3.1 evidence is one broker line.** Kafka 4.3.1 was probed (ApiVersions) and run (demo drill, G-PITR, the full CI e2e command) with the pinned engine only, on one combined broker, before PROD-01.1's `record_semantics.rs` existed on this branch. PROD-01.5 owns the 3.9, 4.1 and 4.3 lines and their profiles.
 - **The upstream forecasts are forecasts.** Whether upstream accepts a given PR, and the cost estimates, are forecasts from the code and the release history, not measurements.
 - **Operator archives were reproduced, not collected.** They were reproduced by seeding with the same engine images the operators use; no archive was taken from a running operator. FX-1's snapshot failure is cited from the tracker, not re-run.
 
 ## 11. Class sweep owed (outside this row's ownership)
 
 - `e2e/fixtures/manifests/0.19.2.json` carries `source_replication_factor`, `configurations` and `pruned`. Engine 0.19.2 never writes those: they were added in 0.20.0 and 0.21.0 (`git diff v0.19.2 v0.20.0` and `v0.20.0 v0.21.0 -- crates/kafka-backup-core/src/manifest.rs`). The fixture is therefore not writer bytes, the same provenance defect FX-1 names for the snapshot fixture. The real 0.19.2 manifest from cycle c6 confirms it: its topics carry only `name`, `original_partition_count` and `partitions`, and its segments no `sha256`. It is saved at `runs/c6-v0.19.2-k3.7.1-below/archive-manifest.json` to replace the fixture.
-- `L/crates/logweir-core/src/destination.rs:462-477`, `L/crates/weirkeeper/src/destination.rs:531-535` and `L/crates/logweir-api/src/routes/destinations.rs:756-763` name "engine 0.21.0" in the ENGINE-PATHSTYLE refusal. On a bump, the message should not name a version (PROD-00.3a).
+- `L/crates/logweir-core/src/destination.rs:462-477`, `L/crates/weirkeeper/src/destination.rs:531-535` and `L/crates/logweir-api/src/routes/destinations.rs:756-763` name "engine 0.21.0" in the ENGINE-PATHSTYLE refusal. On a bump, the message should not name a version (PROD-00.3f).
 - `L/crates/logweir-engine-oso/src/render_restore.rs:147` renders `checkpoint_interval_secs`, a key the engine never reads (C4, A-C4-3).
 - FX-6's disclosure (in `docs/verify-a-scorecard.md`, `docs/stability.md` and the restore review screen) should add C13 (duplicate header keys collapse) and C14 (LogAppendTime topics are archived with producer timestamps) beside the transaction and non-monotonic-timestamp hazards it already names.
 
