@@ -12,10 +12,14 @@
 //! `DYNAMIC_TOPIC_CONFIG` (`kafka/admin.rs:90-92`).
 //!
 //! Ported, not linked (Global Constraint 2), and NOT a serde shape, so the
-//! xtask struct-drift gate does not cover it: a change upstream reaches this
-//! list only through the next engine pin bump, which re-reads this file
-//! against the new tag. `the_allowlist_is_the_pinned_engines_twenty_four_keys`
-//! pins the list as data, so an edit here is a visible diff.
+//! xtask gate pairs it as a LIST (`LIST_CHECKS` in `xtask/src/main.rs`): the
+//! allowlist below must name exactly the keys of the pinned tarball's
+//! `is_recovery_topic_config`, on every `cargo test --workspace`, and
+//! `cargo xtask sync-upstream --tag <new>` reports a key a new engine adds or
+//! drops before the pin moves. The PREDICATE ([`engine_captures`]) is not
+//! text the gate can compare: a pin bump re-reads `capture_topic_configs`.
+//! `the_allowlist_is_the_pinned_engines_twenty_four_keys` pins the list as
+//! data, so an edit here is a visible diff.
 //!
 //! # Why Logweir needs the engine's filter at all
 //!
