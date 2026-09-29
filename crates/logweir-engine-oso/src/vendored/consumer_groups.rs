@@ -36,8 +36,10 @@
 //! The shape that stood here before (`captured_at`, a per-group `state`, and
 //! `offsets` as a LIST) was invented, not ported. Every non-empty snapshot the
 //! engine writes failed it with "invalid type: map, expected a sequence", and
-//! `describe()` turned that into `EngineError::Operational`: every drill and
-//! every backup receipt of such an archive exited 1 with no artifact.
+//! `describe()` turned that into `EngineError::Operational`. Every drill of
+//! such an archive exited 1 with no scorecard, and every `logweir backup run`
+//! into such a backup set exited 1 with no receipt, leaving the archive it had
+//! just written without evidence (both measured on the compose stack).
 //!
 //! # Compatibility choices
 //!
