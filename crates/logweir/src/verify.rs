@@ -7,6 +7,7 @@ use logweir_evidence::{
     PAYLOAD_TYPE_BACKUP_RECEIPT, PAYLOAD_TYPE_CATALOG_POINT, PAYLOAD_TYPE_PUT_RECEIPT,
     PAYLOAD_TYPE_SCORECARD, PAYLOAD_TYPE_TEARDOWN,
 };
+use std::collections::BTreeMap;
 use std::path::Path;
 
 /// `--payload-type <name>` to the media type the sidecar must carry.
@@ -131,6 +132,60 @@ pub struct VerifyReport {
     /// "one without the other" is unrepresentable, and a type that could
     /// represent it would invite a printer to render half of it.
     pub offset_report: Option<(String, String)>,
+    /// `topic_parity.not_assessed` (scorecard 1.1.0, FX-4), carried as read:
+    /// `None` is NOT RECORDED (a 1.0.0 document), never "every topic assessed".
+    pub not_assessed: Option<Vec<String>>,
+}
+
+/// The configuration-parity line both readers print for a scorecard (FX-4),
+/// or `None` when every topic was assessed. `docs/verify_scorecard.py` prints
+/// the same sentence from the same three cases, and
+/// `scripts/check-verifier-parity.sh` compares the two.
+#[must_use]
+pub fn parity_line(not_assessed: Option<&[String]>) -> Option<String> {
+    match not_assessed {
+        None => Some(
+            "configuration parity: not recorded (a scorecard before format 1.1.0), so an \
+             empty unexpected_divergence proves nothing"
+                .to_string(),
+        ),
+        Some([]) => None,
+        Some(topics) => Some(format!(
+            "configuration parity: NOT ASSESSED for {}",
+            topics.join("; ")
+        )),
+    }
+}
+
+/// One line per topic of a backup receipt's `config_coverage` (FX-4), or the
+/// one line that says it is absent. `docs/verify_scorecard.py` prints the same
+/// lines, and `scripts/check-verifier-parity.sh` compares every line starting
+/// `config_coverage` between the two readers.
+#[must_use]
+pub fn coverage_lines(
+    block: Option<&BTreeMap<String, logweir_core::backup_receipt::TopicConfigCoverage>>,
+) -> Vec<String> {
+    let Some(block) = block else {
+        return vec![
+            "config_coverage: not recorded (a receipt before format 1.1.0): every topic's \
+             configuration capture is UNKNOWN, never captured"
+                .to_string(),
+        ];
+    };
+    block
+        .iter()
+        .map(|(topic, entry)| {
+            let coverage = match &entry.reason {
+                Some(reason) => format!("{} ({reason})", entry.coverage),
+                None => entry.coverage.clone(),
+            };
+            let timestamp = match &entry.timestamp_type {
+                Some(t) => format!("message.timestamp.type {} from {}", t.value, t.source),
+                None => "message.timestamp.type not recorded".to_string(),
+            };
+            format!("config_coverage[{topic:?}]: {coverage}, {timestamp}")
+        })
+        .collect()
 }
 
 /// What a verification actually established.
@@ -164,6 +219,9 @@ pub enum Verdict {
         backup_id: String,
         run_id: String,
         manifest_key: String,
+        /// The 1.1.0 block (FX-4), as read; `None` is UNKNOWN coverage.
+        config_coverage:
+            Option<BTreeMap<String, logweir_core::backup_receipt::TopicConfigCoverage>>,
     },
     /// The signature verified over these exact bytes under this key, and the
     /// sidecar's `payloadType` is the one asked for. **Nothing about the
@@ -324,6 +382,7 @@ pub fn verify_scorecard(
             backup_id: receipt.backup_id,
             run_id: receipt.run_id,
             manifest_key: receipt.archive.manifest_key,
+            config_coverage: receipt.config_coverage,
         });
     }
     if payload_type != PAYLOAD_TYPE_SCORECARD {
@@ -396,6 +455,7 @@ pub fn verify_scorecard(
         ticket: sc.approval.ticket.clone(),
         key_id: matched_key_id,
         offset_report,
+        not_assessed: sc.topic_parity.not_assessed.clone(),
     }))
 }
 
@@ -426,6 +486,10 @@ fn print_report(r: &VerifyReport) {
              and applied to nothing"
         );
     }
+    // FX-4: an exit 0 is not configuration parity the document does not claim.
+    if let Some(line) = parity_line(r.not_assessed.as_deref()) {
+        println!("parity:    {line}");
+    }
 }
 
 /// What a `BackupReceipt` verdict prints.
@@ -440,6 +504,7 @@ fn print_backup_receipt(
     backup_id: &str,
     run_id: &str,
     manifest_key: &str,
+    config_coverage: Option<&BTreeMap<String, logweir_core::backup_receipt::TopicConfigCoverage>>,
 ) {
     println!("signature: VALID  key {key_id}");
     println!("payload:   {payload_type}");
@@ -456,10 +521,16 @@ fn print_backup_receipt(
             manifest_key
         }
     );
+    // FX-4: the configuration capture coverage, one line per topic — or the
+    // line that says it was not recorded, which is UNKNOWN and never captured.
+    for line in coverage_lines(config_coverage) {
+        println!("coverage:  {line}");
+    }
     println!(
-        "checked:   the signature AND all five backup-receipt invariants \
+        "checked:   the signature AND all eleven backup-receipt invariants \
          (format_version, exit_code/manifest_key, records/topics, covered window, \
-         source.auth.mode)"
+         source.auth.mode, and config_coverage's six: its version, its topic set, \
+         coverage, reason, timestamp-after-a-read, timestamp value and source)"
     );
 }
 
@@ -499,8 +570,16 @@ pub fn run(scorecard: &Path, signature: &Path, public_key: &Path, payload_type: 
             backup_id,
             run_id,
             manifest_key,
+            config_coverage,
         }) => {
-            print_backup_receipt(&payload_type, &key_id, &backup_id, &run_id, &manifest_key);
+            print_backup_receipt(
+                &payload_type,
+                &key_id,
+                &backup_id,
+                &run_id,
+                &manifest_key,
+                config_coverage.as_ref(),
+            );
             ExitCode::Ok
         }
         Ok(Verdict::SignatureOnly {

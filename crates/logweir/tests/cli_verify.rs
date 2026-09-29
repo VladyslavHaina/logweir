@@ -518,8 +518,17 @@ fn the_signed_receipt_fixture_verifies() {
     // below keeps the weaker sentence honest for the two document types that
     // still get it.
     assert!(
-        stdout.contains("the signature AND all five backup-receipt invariants"),
-        "an exit 0 that checked the invariants must say so on stdout, got: {stdout}"
+        stdout.contains("the signature AND all eleven backup-receipt invariants"),
+        "an exit 0 that checked the invariants must say so on stdout (eleven since FX-4's \
+         six config_coverage arms), got: {stdout}"
+    );
+    // FX-4: the checked-in signed receipt is a 1.0.0 document, so its
+    // configuration capture coverage is UNKNOWN — and the verdict says so
+    // rather than letting the exit 0 read as "captured".
+    assert!(
+        stdout.contains("config_coverage: not recorded (a receipt before format 1.1.0)"),
+        "a 1.0.0 receipt must print that its configuration coverage was not recorded, got: \
+         {stdout}"
     );
     assert!(
         !stdout.contains("the SIGNATURE only"),
