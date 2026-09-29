@@ -33,21 +33,23 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 // THE ONE PLACE this file set reads the compose stack's host-side addresses
 // and its MinIO credential (PROD-01.1 review M5 and L9). Nothing else in
 // `record_semantics.rs` or this module spells a broker address, an S3
-// endpoint or the credential. When PROD-01.5 parameterizes the harness
-// (`bootstrap()` / `s3_endpoint()`), only these three functions change. The
-// in-network names (`kafka-broker-1:9094`, `local/<bucket>` through the
-// compose `mc`) are the same in every stack and are not routed here.
+// endpoint or the credential. The addresses are the harness's (PROD-01.5):
+// the stack this process addresses — the default one, or the slot
+// `e2e/compose/stack-env.sh` set — checked coherent before the first one is
+// handed out. The in-network names (`kafka-broker-1:9094`, `local/<bucket>`
+// through the compose `mc`) are the same in every stack and are not routed
+// here.
 
-/// The broker's host-side bootstrap: the harness's current constant.
+/// The broker's host-side bootstrap on this process's stack.
 pub fn bootstrap() -> String {
-    crate::harness::BOOTSTRAP.to_string()
+    crate::harness::bootstrap()
 }
 
-/// MinIO's host-side endpoint. The engine container reaches the same address,
-/// because `e2e/fixtures/engine-docker.sh` maps `localhost` to the host
-/// gateway.
+/// MinIO's host-side endpoint on this process's stack. The engine container
+/// reaches the same address, because `e2e/fixtures/engine-docker.sh` maps
+/// `localhost` to the host gateway.
 pub fn s3_endpoint() -> String {
-    "http://localhost:9000".to_string()
+    crate::harness::s3_endpoint()
 }
 
 /// The compose MinIO's documented default user and password. A public
@@ -633,8 +635,13 @@ pub fn backup_run(backup_id: &str, topics: &[&str], segment_max_records: u64) ->
 }
 
 /// [`compose_broker`] that reports instead of panicking, for use in a `Drop`
-/// (a panic while unwinding would abort the process).
+/// (a panic while unwinding would abort the process). Like every compose call
+/// it first refuses an environment that is not one coherent stack
+/// (PROD-01.5) — here as an `Err`, not the panic `ensure_coherent()` raises.
 pub fn try_compose_broker(verb: &str) -> Result<Output, String> {
+    if let Some(why) = crate::harness::stack::incoherence() {
+        return Err(format!("not one coherent stack: {why}"));
+    }
     let mut c = Command::new("docker");
     c.args([
         "compose",
@@ -665,8 +672,10 @@ impl Drop for Thaw {
     }
 }
 
-/// `docker compose … <verb> kafka-broker-1`, bounded.
+/// `docker compose … <verb> kafka-broker-1`, bounded, on this process's
+/// stack (`COMPOSE_PROJECT_NAME`), checked coherent first (PROD-01.5).
 pub fn compose_broker(verb: &str) -> Output {
+    crate::harness::stack::ensure_coherent();
     let mut c = Command::new("docker");
     c.args([
         "compose",

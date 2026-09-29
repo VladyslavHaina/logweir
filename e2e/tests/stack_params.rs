@@ -1074,19 +1074,32 @@ fn the_sweep_reaches_support_modules_in_subdirectories() {
     );
 }
 
-/// **Every file that runs `docker compose` itself checks coherence first**
-/// (review M1): the compose file path in a CODE line of an e2e test or support
-/// module means the file reaches the stack without the harness's accessors,
-/// so it must call `stack::ensure_coherent()` too.
+/// Whether a trimmed code line opens a function.
+fn opens_fn(t: &str) -> bool {
+    let t = t
+        .strip_prefix("pub(crate) ")
+        .or_else(|| t.strip_prefix("pub "))
+        .unwrap_or(t);
+    t.strip_prefix("async ").unwrap_or(t).starts_with("fn ")
+}
+
+/// **Every `docker compose` call checks coherence first, in its own
+/// function** (review M1). Each CODE line of an e2e test or support module
+/// that names the compose file must sit in a function that, BEFORE that line,
+/// calls `ensure_coherent()` or tests `incoherence()` — unless the function
+/// renders the file's own defaults with the project variable removed
+/// (`env_remove(stack::PROJECT_VAR)`), which reaches no stack. Comment lines
+/// count for nothing, so a doc comment naming the check does not pass.
 ///
-/// Mutant: remove the call from `guards.rs::kafka_configs` → fails naming
-/// `e2e/tests/guards.rs`.
+/// Mutants: remove the call from `guards.rs::kafka_configs`, or from
+/// `record_semantics_support/kafka.rs::compose_broker` while its sibling
+/// `try_compose_broker` keeps its own → fails naming the file and line.
 #[test]
 fn every_direct_compose_call_checks_coherence() {
     let mut files = Vec::new();
     rs_files_recursive(&root().join("e2e/tests"), &mut files);
-    let mut missing = Vec::new();
-    let mut callers = 0;
+    let mut unchecked = Vec::new();
+    let mut calls = 0;
     for f in &files {
         let rel = f
             .strip_prefix(root())
@@ -1097,24 +1110,36 @@ fn every_direct_compose_call_checks_coherence() {
             continue;
         }
         let text = read(&rel);
-        let calls_compose = text
-            .lines()
-            .filter(|l| !l.trim_start().starts_with("//"))
-            .any(|l| l.contains("docker-compose.yml"));
-        if calls_compose {
-            callers += 1;
-            if !text.contains("ensure_coherent()") {
-                missing.push(rel);
+        let lines: Vec<&str> = text.lines().collect();
+        let code = |i: usize| !lines[i].trim_start().starts_with("//");
+        let fn_at = |i: usize| code(i) && opens_fn(lines[i].trim_start());
+        for i in (0..lines.len()).filter(|&i| code(i) && lines[i].contains("docker-compose.yml")) {
+            calls += 1;
+            let Some(start) = (0..=i).rev().find(|&j| fn_at(j)) else {
+                unchecked.push(format!("{rel}:{}: outside any function", i + 1));
+                continue;
+            };
+            let end = (i + 1..lines.len())
+                .find(|&j| fn_at(j))
+                .unwrap_or(lines.len());
+            let checked = (start..i).any(|j| {
+                code(j)
+                    && (lines[j].contains("ensure_coherent()")
+                        || lines[j].contains("incoherence()"))
+            });
+            let stack_free = (start..end)
+                .any(|j| code(j) && lines[j].contains("env_remove(stack::PROJECT_VAR)"));
+            if !(checked || stack_free) {
+                unchecked.push(format!("{rel}:{}: in `{}`", i + 1, lines[start].trim()));
             }
         }
     }
+    assert!(calls >= 8, "found only {calls} compose call(s)");
     assert!(
-        callers >= 4,
-        "found only {callers} direct compose caller(s)"
-    );
-    assert!(
-        missing.is_empty(),
-        "these files run `docker compose` without `stack::ensure_coherent()`: {missing:?}"
+        unchecked.is_empty(),
+        "these `docker compose` calls run without a coherence check first in their function \
+         (call stack::ensure_coherent()):\n  {}",
+        unchecked.join("\n  ")
     );
 }
 

@@ -56,7 +56,8 @@
 //! broker for longer than the engine's 60 s response timeout. Run it alone
 //! with `--ignored`.
 //!
-//! Each row writes its outcome to `.e2e/record-semantics/<row>.json`.
+//! Each row writes its outcome to `.e2e/record-semantics/<row>.json`
+//! (`.e2e/<project>/record-semantics/` on a PROD-01.5 slot: `demo_dir()`).
 mod harness;
 mod record_semantics_support;
 

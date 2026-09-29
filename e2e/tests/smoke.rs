@@ -11,7 +11,9 @@ mod stack;
 
 /// Cargo runs an integration test with cwd = the owning package root (`e2e/`),
 /// not the repo root, so the compose file is resolved from CARGO_MANIFEST_DIR.
+/// Every caller runs `docker compose` with it, so it checks coherence first.
 fn compose_file() -> PathBuf {
+    stack::ensure_coherent();
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("compose/docker-compose.yml")
 }
 
@@ -19,7 +21,6 @@ fn compose_file() -> PathBuf {
 /// two buckets exist. No Logweir code is exercised — there is none yet.
 #[test]
 fn the_compose_stack_answers_and_the_buckets_exist() {
-    stack::ensure_coherent();
     let cf = compose_file();
     let cf = cf.to_str().expect("compose path is utf-8");
 
