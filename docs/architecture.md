@@ -39,9 +39,27 @@ licensing provenance separate from Logweir's Apache-2.0 code.
 
 Upstream data shapes are vendored under
 `crates/logweir-engine-oso/src/vendored/`, with upstream source citations.
-`cargo xtask sync-upstream --tag <tag> --upstream /path/to/kafka-backup`
-checks them against a local upstream checkout. Check out the requested tag
-first; `--tag` labels diagnostics and does not select or fetch that revision.
+The drift gate in `xtask/src/main.rs` compares every vendored item with the
+upstream item it mirrors, as the pairs listed in `CHECKS`:
+
+- field and variant names;
+- field types;
+- the serde attributes that decide which JSON is read (`rename`, `rename_all`,
+  `alias`, `flatten`, tagging, `from`/`into`, and the `with` and `skip`
+  families);
+- whether a field upstream may leave out is one the vendored shape can do
+  without.
+
+A deliberate difference is declared, with its reason, in `DIVERGENCES`. An
+item that is missing, empty or declared twice is drift, never agreement.
+`cargo test --workspace`, and therefore CI's `check` job
+(`scripts/ci-check.sh`), runs the gate against the pinned source tarball
+`third_party/kafka-backup-v*.tar.gz` and fails on a vendored file the gate does
+not cover, so a pin bump must satisfy it.
+`cargo xtask sync-upstream --tag <tag> --upstream /path/to/kafka-backup` runs
+the same checks against any local upstream checkout: exit 0 when they agree, 1
+on drift, 2 when a file cannot be read. Check out the requested tag first;
+`--tag` labels diagnostics and does not select or fetch that revision.
 `scripts/check-no-oso.sh` checks the dependency graph, all-feature metadata and
 source imports; source-text agreement alone is not proof of absent linkage.
 
