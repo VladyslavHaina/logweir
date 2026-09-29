@@ -618,3 +618,39 @@ services:
       interval: 2s
       timeout: 5s
       retries: 90
+
+  # --- profile `registry`: a Confluent-Schema-Registry-compatible service ----
+  # Karapace 6.2.3 (Apache-2.0, Aiven), which keeps its schemas in the Kafka
+  # topic `_schemas` on kafka-broker-1 exactly as Confluent Schema Registry
+  # does — so a backup of the cluster can carry the registry's state, which is
+  # what PROD-03's schema rows need. Confluent's own image is not used: its
+  # Community License is not OSI-approved. BACKWARD compatibility (the
+  # registry default) so an incompatible schema is refused.
+  registry:
+    image: ghcr.io/aiven-open/karapace:6.2.3@sha256:6d5b1ff1b77c497108be8be8359c9072294847cba5aa0767fc168ec70632d78f
+    hostname: registry
+    profiles: [registry]
+    networks: [kafka-net]
+    depends_on:
+      kafka-broker-1: { condition: service_healthy }
+    entrypoint: ["python3", "-m", "karapace"]
+    ports:
+      - "${LOGWEIR_E2E_REGISTRY_PORT:-9141}:8081"
+    environment:
+      KARAPACE_KARAPACE_REGISTRY: "true"
+      KARAPACE_ADVERTISED_HOSTNAME: registry
+      KARAPACE_BOOTSTRAP_URI: kafka-broker-1:9094
+      KARAPACE_HOST: 0.0.0.0
+      KARAPACE_PORT: 8081
+      KARAPACE_CLIENT_ID: logweir-e2e-registry
+      KARAPACE_GROUP_ID: logweir-e2e-registry
+      KARAPACE_MASTER_ELIGIBILITY: "true"
+      KARAPACE_TOPIC_NAME: _schemas
+      KARAPACE_COMPATIBILITY: BACKWARD
+      KARAPACE_LOG_LEVEL: WARNING
+    healthcheck:
+      test: ["CMD", "python3", "/opt/karapace/healthcheck.py", "http://localhost:8081/_health"]
+      interval: 10s
+      timeout: 30s
+      retries: 18
+      start_period: 20s

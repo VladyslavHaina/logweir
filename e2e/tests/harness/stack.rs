@@ -81,7 +81,7 @@ pub const CORE_PORTS: [PortParam; 5] = [KAFKA_PORT, K8S_PORT, SASL_PORT, S3_PORT
 
 /// Every port an OPTIONAL profile publishes (`COMPOSE_PROFILES`). Published
 /// only while that profile is active, and moved by a slot like the rest.
-pub const PROFILE_PORTS: [PortParam; 8] = [
+pub const PROFILE_PORTS: [PortParam; 9] = [
     AUTH_PLAIN_PORT,
     AUTH_SCRAM256_PORT,
     AUTH_MTLS_PORT,
@@ -90,6 +90,7 @@ pub const PROFILE_PORTS: [PortParam; 8] = [
     C3_3_PORT,
     CLUSTER2_PORT,
     OBJSTORE_PORT,
+    REGISTRY_PORT,
 ];
 
 /// `auth`: SASL_SSL with PLAIN on `kafka-auth`. Published AND advertised.
@@ -140,6 +141,13 @@ pub const OBJSTORE_PORT: PortParam = PortParam {
     default: 9130,
     profile: Some("objectstore"),
     what: "objectstore S3 API (SeaweedFS)",
+};
+/// `registry`: Karapace's Schema Registry API (container port 8081).
+pub const REGISTRY_PORT: PortParam = PortParam {
+    var: "LOGWEIR_E2E_REGISTRY_PORT",
+    default: 9141,
+    profile: Some("registry"),
+    what: "registry Schema Registry API (Karapace)",
 };
 /// `cluster2`: the second cluster's host-side plaintext listener.
 pub const CLUSTER2_PORT: PortParam = PortParam {

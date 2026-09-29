@@ -33,6 +33,10 @@ port() { local v=$1 d=$2; eval "printf '%s' \"\${$v:-$d}\""; }
 PASSWORD=logweir-e2e-not-a-secret
 
 fails=0
+# A nonce per run: every topic, key and subject a check creates carries it,
+# so a second run on the same stack starts from nothing and a check can never
+# pass on what an earlier run left behind.
+RUN="smoke$(date +%s)"
 pass() { printf 'PASS  %-44s %s\n' "$1" "$2"; }
 fail() { printf 'FAIL  %-44s %s\n' "$1" "$2"; fails=$((fails + 1)); }
 
@@ -51,7 +55,7 @@ hostside() {
       '"$*" 2>&1
 }
 T=/opt/kafka/bin
-FAST="request.timeout.ms=10000\ndefault.api.timeout.ms=15000\nsocket.connection.setup.timeout.max.ms=5000"
+FAST="request.timeout.ms=10000\ndefault.api.timeout.ms=15000\nsocket.connection.setup.timeout.ms=5000\nsocket.connection.setup.timeout.max.ms=5000"
 
 smoke_auth() {
   local plain scram mtls
@@ -88,17 +92,17 @@ smoke_cluster3() {
   p1=$(port LOGWEIR_E2E_C3_1_PORT 9112)
   out=$(innet "$T/kafka-metadata-quorum.sh --bootstrap-server kafka-c3-1:9094 describe --status")
   if printf '%s' "$out" | grep -q 'CurrentVoters:.*"id": *1.*"id": *2.*"id": *3\|CurrentVoters:.*\[1,2,3\]'; then pass cluster3.quorum "$(printf '%s' "$out" | grep -E 'LeaderId|CurrentVoters' | tr -s ' ' | tr '\n' ' ' | cut -c1-160)"; else fail cluster3.quorum "$(printf '%s' "$out" | tail -3 | tr '\n' ' ')"; fi
-  out=$(innet "$T/kafka-topics.sh --bootstrap-server kafka-c3-1:9094 --create --if-not-exists --topic smoke-rf3 --partitions 3 && $T/kafka-topics.sh --bootstrap-server kafka-c3-2:9094 --describe --topic smoke-rf3")
+  out=$(innet "$T/kafka-topics.sh --bootstrap-server kafka-c3-1:9094 --create --topic $RUN-rf3 --partitions 3 && $T/kafka-topics.sh --bootstrap-server kafka-c3-2:9094 --describe --topic $RUN-rf3")
   if printf '%s' "$out" | grep -q 'ReplicationFactor: 3' && [ "$(printf '%s' "$out" | grep -c 'Isr: [0-9],[0-9],[0-9]')" = 3 ]; then pass cluster3.rf3-isr3 "default RF 3, every partition's ISR has 3 replicas"; else fail cluster3.rf3-isr3 "$(printf '%s' "$out" | tail -4 | tr '\n' ' ')"; fi
   out=$(innet "$T/kafka-topics.sh --bootstrap-server kafka-c3-1:9094 --describe --topic __consumer_offsets 2>/dev/null | head -1; $T/kafka-configs.sh --bootstrap-server kafka-c3-1:9094 --entity-type brokers --entity-name 1 --describe --all | grep -E 'min.insync.replicas='")
   if printf '%s' "$out" | grep -q 'min.insync.replicas=2'; then pass cluster3.min-isr-2 "broker default min.insync.replicas=2"; else fail cluster3.min-isr-2 "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; fi
   # Host side: bootstrap on node 1's published port; the produce goes to every
   # partition leader through ITS advertised localhost:<port>, acks=all.
-  out=$(hostside "seq 1 30 | $T/kafka-console-producer.sh --bootstrap-server localhost:$p1 --topic smoke-rf3 --producer-property acks=all && $T/kafka-get-offsets.sh --bootstrap-server localhost:$p1 --topic smoke-rf3")
-  total=$(printf '%s' "$out" | awk -F: '/^smoke-rf3:/{s+=$3} END{print s+0}')
+  out=$(hostside "seq 1 30 | $T/kafka-console-producer.sh --bootstrap-server localhost:$p1 --topic $RUN-rf3 --producer-property acks=all && $T/kafka-get-offsets.sh --bootstrap-server localhost:$p1 --topic $RUN-rf3")
+  total=$(printf '%s' "$out" | awk -F: -v t="$RUN-rf3" '$1 == t {s+=$3} END{print s+0}')
   if [ "$total" = 30 ]; then pass cluster3.host-produce "30 records acked by all ISRs via localhost:$p1 and the two other advertised ports"; else fail cluster3.host-produce "end offsets sum $total: $(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; fi
   # Negative control: a topic with RF 4 cannot exist on three brokers.
-  out=$(innet "$T/kafka-topics.sh --bootstrap-server kafka-c3-1:9094 --create --topic smoke-rf4 --replication-factor 4 --partitions 1")
+  out=$(innet "$T/kafka-topics.sh --bootstrap-server kafka-c3-1:9094 --create --topic $RUN-rf4 --replication-factor 4 --partitions 1")
   if printf '%s' "$out" | grep -q -i 'InvalidReplicationFactor\|larger than available brokers\|Replication factor: 4 larger'; then pass cluster3.rf4-refused "three brokers refuse RF 4"; else fail cluster3.rf4-refused "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; fi
 }
 
@@ -115,7 +119,7 @@ smoke_cluster2() {
 smoke_streams() {
   local out n last2 last1 ghost
   # A word no earlier run produced, so the counts below are THIS run's.
-  n="smoke$(date +%s)"
+  n="$RUN"
   out=$(innet "printf '$n alpha\n$n alpha beta\n' | $T/kafka-console-producer.sh --bootstrap-server kafka-broker-1:9094 --topic streams-plaintext-input && $T/kafka-console-consumer.sh --bootstrap-server kafka-broker-1:9094 --topic streams-wordcount-output --from-beginning --timeout-ms 30000 --property print.key=true --property key.separator== --value-deserializer org.apache.kafka.common.serialization.LongDeserializer 2>/dev/null")
   # The output is a changelog: the LAST value per key is the count.
   last2=$(printf '%s\n' "$out" | grep "^$n=" | tail -1)
@@ -144,20 +148,44 @@ smoke_objectstore() {
   if printf '%s' "$out" | grep -q kafka-backups-locked && printf '%s' "$out" | grep -q kafka-backups-2 && printf '%s' "$out" | grep -q logweir-evidence; then pass objectstore.buckets "via the PUBLISHED port ($host): $(printf '%s' "$out" | tr -s '\t\n' ' ')"; else fail objectstore.buckets "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; fi
   out=$(s3 "$in" not-the-secret list-objects-v2 --bucket kafka-backups)
   if printf '%s' "$out" | grep -q 'SignatureDoesNotMatch\|AccessDenied'; then pass objectstore.wrong-secret-refused "$(printf '%s' "$out" | grep -o 'SignatureDoesNotMatch\|AccessDenied' | head -1)"; else fail objectstore.wrong-secret-refused "$(printf '%s' "$out" | tail -1)"; fi
-  out=$(s3 "$in" minioadmin "put-object --bucket kafka-backups --key smoke/claim --body /tmp/a --if-none-match '*' && aws --endpoint-url $in s3api put-object --bucket kafka-backups --key smoke/claim --body /tmp/b --if-none-match '*'")
-  if printf '%s' "$out" | grep -q 'PreconditionFailed'; then pass objectstore.if-none-match "second create refused 412 PreconditionFailed"; else fail objectstore.if-none-match "$(printf '%s' "$out" | tail -1)"; fi
+  # First create must SUCCEED (ETag) and the second be refused: a store that
+  # refused everything, or a key an earlier run left, would not pass.
+  out=$(s3 "$in" minioadmin "put-object --bucket kafka-backups --key $RUN/claim --body /tmp/a --if-none-match '*' && echo FIRST-CREATED && aws --endpoint-url $in s3api put-object --bucket kafka-backups --key $RUN/claim --body /tmp/b --if-none-match '*'")
+  if printf '%s' "$out" | grep -q 'FIRST-CREATED' && printf '%s' "$out" | grep -q 'PreconditionFailed'; then pass objectstore.if-none-match "first create 200, second 412 PreconditionFailed"; else fail objectstore.if-none-match "$(printf '%s' "$out" | tail -1)"; fi
   until=$(date -u -v+1d +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d '+1 day' +%Y-%m-%dT%H:%M:%SZ)
   # Object Lock puts need Content-MD5; /tmp/a inside s3() holds "first\n".
   md5=$(printf 'first\n' | openssl dgst -md5 -binary | openssl base64)
-  out=$(s3 "$in" minioadmin "put-object --bucket kafka-backups-locked --key smoke/locked --body /tmp/a --content-md5 $md5 --object-lock-mode GOVERNANCE --object-lock-retain-until-date $until --query VersionId --output text")
+  out=$(s3 "$in" minioadmin "put-object --bucket kafka-backups-locked --key $RUN/locked --body /tmp/a --content-md5 $md5 --object-lock-mode GOVERNANCE --object-lock-retain-until-date $until --query VersionId --output text")
   vid=$(printf '%s' "$out" | tail -1 | tr -d '[:space:]')
-  out=$(s3 "$in" minioadmin get-object-retention --bucket kafka-backups-locked --key smoke/locked --output text)
+  out=$(s3 "$in" minioadmin get-object-retention --bucket kafka-backups-locked --key "$RUN/locked" --output text)
   if printf '%s' "$out" | grep -q GOVERNANCE && printf '%s' "$out" | grep -q "${until%Z}"; then pass objectstore.lock-retention-readback "$(printf '%s' "$out" | tr -s '\t' ' ')"; else fail objectstore.lock-retention-readback "vid '$vid': $(printf '%s' "$out" | tail -1)"; fi
-  out=$(s3 "$in" minioadmin delete-object --bucket kafka-backups-locked --key smoke/locked --version-id "$vid")
+  out=$(s3 "$in" minioadmin delete-object --bucket kafka-backups-locked --key "$RUN/locked" --version-id "$vid")
   if printf '%s' "$out" | grep -q 'AccessDenied\|ObjectLocked\|InvalidRequest'; then pass objectstore.lock-delete-refused "a retained version is not deletable"; else fail objectstore.lock-delete-refused "$(printf '%s' "$out" | tail -1)"; fi
-  out=$(s3 "$in" minioadmin get-object --bucket kafka-backups-locked --key smoke/locked --version-id "$vid" /tmp/got --query VersionId --output text)
+  out=$(s3 "$in" minioadmin get-object --bucket kafka-backups-locked --key "$RUN/locked" --version-id "$vid" /tmp/got --query VersionId --output text)
   if [ "$(printf '%s' "$out" | tail -1 | tr -d '[:space:]')" = "$vid" ]; then pass objectstore.read-by-version-id "GET ?versionId=$vid"; else fail objectstore.read-by-version-id "$(printf '%s' "$out" | tail -1)"; fi
-  s3 "$in" minioadmin delete-object --bucket kafka-backups-locked --key smoke/locked --version-id "$vid" --bypass-governance-retention > /dev/null
+  s3 "$in" minioadmin delete-object --bucket kafka-backups-locked --key "$RUN/locked" --version-id "$vid" --bypass-governance-retention > /dev/null
+}
+
+smoke_registry() {
+  local out n base id
+  base="http://localhost:$(port LOGWEIR_E2E_REGISTRY_PORT 9141)"
+  n="$RUN"
+  # Host side, straight at the PUBLISHED port.
+  out=$(/tmp/lwtimeout 30 curl -s -X POST -H 'Content-Type: application/vnd.schemaregistry.v1+json' \
+    --data '{"schema":"{\"type\":\"record\",\"name\":\"Order\",\"fields\":[{\"name\":\"id\",\"type\":\"int\"}]}"}' \
+    "$base/subjects/$n-value/versions" 2>&1)
+  id=$(printf '%s' "$out" | sed -n 's/.*"id": *\([0-9]*\).*/\1/p')
+  if [ -n "$id" ]; then pass registry.register "$n-value -> schema id $id at $base"; else fail registry.register "$out"; fi
+  out=$(/tmp/lwtimeout 30 curl -s "$base/schemas/ids/$id" 2>&1)
+  if printf '%s' "$out" | grep -q 'Order'; then pass registry.read-by-id "GET /schemas/ids/$id returns the schema"; else fail registry.read-by-id "$out"; fi
+  # Negative control: BACKWARD refuses changing id's type.
+  out=$(/tmp/lwtimeout 30 curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/vnd.schemaregistry.v1+json' \
+    --data '{"schema":"{\"type\":\"record\",\"name\":\"Order\",\"fields\":[{\"name\":\"id\",\"type\":\"string\"}]}"}' \
+    "$base/subjects/$n-value/versions" 2>&1)
+  if [ "$out" = 409 ]; then pass registry.incompatible-refused "HTTP 409 for an incompatible second version"; else fail registry.incompatible-refused "HTTP $out"; fi
+  # The state lives in Kafka: the registration is a record in `_schemas`.
+  out=$(innet "$T/kafka-console-consumer.sh --bootstrap-server kafka-broker-1:9094 --topic _schemas --from-beginning --timeout-ms 15000 --property print.key=true 2>/dev/null")
+  if printf '%s' "$out" | grep -q "$n-value"; then pass registry.state-in-kafka "_schemas holds the $n-value registration"; else fail registry.state-in-kafka "$(printf '%s' "$out" | tail -2 | tr '\n' ' ')"; fi
 }
 
 profiles=${*:-$(printf '%s' "${COMPOSE_PROFILES:-}" | tr ',' ' ')}
@@ -170,6 +198,7 @@ for p in $profiles; do
     cluster2) smoke_cluster2 ;;
     streams) smoke_streams ;;
     objectstore) smoke_objectstore ;;
+    registry) smoke_registry ;;
     *) fail "$p" "no smoke defined for profile $p" ;;
   esac
 done
