@@ -144,7 +144,7 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 | 0 | PROD-00.1 | Evaluate the engine; decide a route per capability | P1 | M1 | research | — | — | compose | B | In progress |
 | 0 | PROD-01.1 | Prove record and transaction behaviour | P1 | M2 | research | — | — | compose | B | Done |
 | 0 | PROD-01.4 | Define topic identity and generations | P1 | M2 | research | — | — | none | B | Done |
-| 0 | PROD-01.5 | Shared fixture profiles and broker versions | P1 | M1 | infra | — | — | compose | B | In progress |
+| 0 | PROD-01.5 | Shared fixture profiles and broker versions | P1 | M1 | infra | — | — | compose | B | Done |
 | 0 | PROD-04.0 | Decide the Kafka administrative path | P1 | M2 | research | — | — | compose | B | Done |
 | 0 | PROD-08.4 | Publish a control-evidence mapping | P1 | M2 | docs | — | — | none | B | Proposed |
 | 0 | PROD-14.0 | Ship a working release | P1 | M1 | infra | — | — | none | B | Proposed |
@@ -163,6 +163,9 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 | 1 | PROD-01.1b | Make recovery-point selection safe for out-of-order timestamps | P1 | M2 | impl | 01.1 | — | compose | A | Proposed |
 | 1 | PROD-01.4a | Topic IDs through DescribeTopics (the first wrapper under OD-6's policy) | P1 | M2 | impl | 01.4 | OD-6 | compose | A | Proposed |
 | 1 | PROD-04.0a | Committed positions through the safe consumer API | P1 | M2 | impl | 04.0 | — | compose | A | Proposed |
+| 1 | PROD-01.5a | Move the default broker line off 3.7.1 | P1 | M1 | infra | 01.5, 00.1 | — | compose | B | Proposed |
+| 1 | PROD-01.5c | Run PROD-01.1's and 01.4's suites on the 3.9, 4.1 and 4.3 lines | P1 | M2 | infra | 01.5 | — | compose | C | Proposed |
+| 3 | PROD-01.5b | Put the `crates/` e2e rows on the per-stack variables | P2 | M3 | infra | 01.5 | — | compose | B | Proposed |
 | 1 | PROD-04.0b | Group and ACL calls inside OD-6's perimeter | P1 | M2 | impl | 04.0 | OD-6 | compose | A | Proposed |
 | 1 | PROD-04.0c | Amendment D names the engine's group subcommands | P2 | M3 | docs | 04.0 | OD-3; owner sign-off (rule 8) | none | B | Proposed |
 | 1 | PROD-04.0d | Fixtures for groups and ACLs (`acl` profile, `groups` helper, streams-protocol variant, share-state settings) | P1 | M2 | infra | 04.0, 01.5 | — | compose | B | Proposed |
@@ -382,6 +385,29 @@ PLAT prerequisites that must be Done before a task ships. Research and contract 
 - **Acceptance:** Two fixture runs execute concurrently; the drill passes, or its failures are recorded, on 3.9, 4.1 and 4.3; 3.7.1 becomes a legacy row; the maintained object-store choice is recorded.
 - **Tests/evidence:** Profile smoke runs, support-matrix rows, and the engine's unnegotiated protocol versions exercised on 4.x.
 - **Dependencies:** None. **Handoff:** profile names and ownership, broker rows.
+
+**Completion record — Done (2026-09-29), PROD-01.5.**
+- **Ownership:** worker `prod-01-5` (one run, one fix round, and the reader sweep after PROD-01.1 and 01.4 merged), independent Tier-B review `claude/prod-01-5.review.md`. The review was ACCEPT-WITH-FIXES (2 MEDIUM, 8 LOW, no HIGH), and the orchestrator read the fix round. Merged as `632ea345` (branch tip `856219da`). The full `scripts/ci-check.sh` passed with rc 0 on `632ea345`, and CI run 36536046039 was green, including the `e2e` job on the default stack.
+- **Decision record:** [`decisions/PROD-01.5-fixture-profiles.md`](decisions/PROD-01.5-fixture-profiles.md).
+- **Parallel stacks:**
+  - `e2e/compose/stack-env.sh --slot N` gives project `logweir-e2e-s<N>`, host ports +N×10000, and its own network, volumes and KRaft cluster ids.
+  - The default render is byte-identical to before; the reviewer diffed it.
+  - One variable list (`stack-lib.sh`) is checked at every entry point, including the Rust harness. Incoherent environments were refused 55/55 before any docker call.
+  - Two slots ran drills side by side and tore down only their own projects.
+- **Broker lines:** Kafka 3.9.2, 4.1.2 and 4.3.1 (pinned by digest), with 3.7.1 kept as the legacy default. Each passed the demo drill, `just pitr` and the receipt path, and the e2e package passed 75/0 on 4.3.1.
+  - The engine's 15 sendable fixed request versions sit inside every line's supported range. Two sit at the 4.x minimum; that headroom is PROD-00.1's ApiVersions row.
+  - `docs/support-matrix.md` gains the broker-version column.
+- **Object store:** SeaweedFS 4.48 (Apache-2.0) is the maintained choice. It passed conditional create, versioning with version-id reads, Object Lock readback, path-style and SigV4. RustFS 1.0.0 is the runner-up. versitygw v1.8.0 was not chosen: its unknown-key `404 XAdminUserNotFound` misleads Logweir's classifier. MinIO in `charts/` and `deploy/poc/` is untouched; that is REPLACE-MINIO.
+- **Profiles:** `auth` (PLAIN, SCRAM-SHA-256 and mTLS listeners), `cluster3`, `cluster2`, `objectstore` (lock-capable, with a second bucket), `registry` and `streams` (classic protocol). The smoke passed 29/29 on slot 2 (4.3.1), with a real negative control for Streams. The `txn` hook is reserved for PROD-01.1's fixture.
+- **Guards:** `e2e/tests/stack_params.rs` walks every reader directory recursively and fails on a default-stack address. PROD-01.1's and 01.4's readers were swept onto `bootstrap()`/`s3_endpoint()` with five negative controls, and their live rows ran on slot 3.
+- **Migration:** none for users. Workers use slots (the WORKER-RULES "Compose stacks are parallel" section).
+- **Artifacts:** `claude/artifacts/prod-01-5/`.
+- **Rows added:** PROD-01.5a (move the default broker line; after PROD-00.1), 01.5b (the `crates/` `--features e2e` readers and `just links` over `e2e/README.md`), and 01.5c (PROD-01.1's and 01.4's suites on 3.9, 4.1 and 4.3, which both handoffs owed).
+- **Notes for other rows:**
+  - C3, a RocksDB Streams variant: PROD-06 if it needs on-disk state.
+  - C4, the object-store rows: PROD-01.2.
+  - C5: PROD-00.1's ApiVersions row.
+  - C6, `logweir-store`'s `StoreErrorClass::classify` mapping versitygw's `404 XAdminUserNotFound` to not-found: PROD-01.2's archive-backend rows.
 
 ## PROD-02 — Continuous protection and recoverable history
 
