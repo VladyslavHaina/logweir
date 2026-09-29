@@ -73,8 +73,12 @@ fn restore_of(s: &[Rec]) -> Vec<Rec> {
 }
 
 fn end_to_end(expected: &[Rec], raw: &[Rec], observed: &[Rec]) -> Vec<Divergence> {
+    // Unfiltered models: every committed record is expected, so `committed`
+    // is `expected`; only an uncommitted-vs-outside-window row needs them
+    // apart, and it calls `compare` directly.
     compare(&Comparison {
         expected,
+        committed: expected,
         raw_source: raw,
         observed,
         headers: HeaderModel::AppendLineage,
@@ -106,6 +110,7 @@ fn an_identical_archive_has_no_divergence_under_either_lineage_source() {
         .collect();
     let capture = compare(&Comparison {
         expected: &s,
+        committed: &s,
         raw_source: &s,
         observed: &archive,
         headers: HeaderModel::AppendLineage,
@@ -114,6 +119,7 @@ fn an_identical_archive_has_no_divergence_under_either_lineage_source() {
     assert_eq!(capture, vec![]);
     let replay = compare(&Comparison {
         expected: &archive,
+        committed: &archive,
         raw_source: &archive,
         observed: &restore_of(&s),
         headers: HeaderModel::Identity,
@@ -155,6 +161,40 @@ fn an_aborted_record_restored_as_data_is_an_uncommitted_extra() {
             target_offset: 3,
             lineage: Some(3),
             kind: ExtraKind::Uncommitted
+        }]
+    );
+}
+
+#[test]
+fn a_committed_record_outside_a_windowed_model_is_outside_model_not_uncommitted() {
+    // The model is "p0 at or before ts 1_001"; offset 2 (ts 1_002) is
+    // committed, so restoring it is a WINDOW divergence, never a transaction
+    // one — the distinction the LogAppendTime point-in-time row depends on.
+    let committed = fixture();
+    let model: Vec<Rec> = committed
+        .iter()
+        .filter(|r| r.partition == 0 && r.timestamp <= 1_001)
+        .cloned()
+        .collect();
+    let t: Vec<Rec> = restore_of(&committed)
+        .into_iter()
+        .filter(|r| r.partition == 0)
+        .collect();
+    let d = compare(&Comparison {
+        expected: &model,
+        committed: &committed,
+        raw_source: &committed,
+        observed: &t,
+        headers: HeaderModel::AppendLineage,
+        lineage: LineageFrom::Header,
+    });
+    assert_eq!(
+        d,
+        vec![Divergence::Extra {
+            partition: 0,
+            target_offset: 2,
+            lineage: Some(2),
+            kind: ExtraKind::OutsideModel
         }]
     );
 }
@@ -416,6 +456,7 @@ fn a_missing_engine_lineage_header_is_not_tolerated_under_append_lineage() {
     archive[0].headers.pop();
     let d = compare(&Comparison {
         expected: &s,
+        committed: &s,
         raw_source: &s,
         observed: &archive,
         headers: HeaderModel::AppendLineage,

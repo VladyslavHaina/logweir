@@ -161,8 +161,12 @@ pub enum LineageFrom {
 /// Why an observed record has no model counterpart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ExtraKind {
+    /// Its source offset holds a COMMITTED source record the model excluded:
+    /// for a point-in-time model, a record outside the requested window.
+    OutsideModel,
     /// Its source offset holds a record the raw (`read_uncommitted`) source
-    /// view returns and the model does not: aborted, or open when captured.
+    /// view returns and the committed view does not: aborted, or open when
+    /// captured.
     Uncommitted,
     /// Its source offset is in neither source view and it has the shape of a
     /// transaction control record.
@@ -238,6 +242,7 @@ impl Divergence {
         match self {
             Divergence::Missing { .. } => "missing",
             Divergence::Extra { kind, .. } => match kind {
+                ExtraKind::OutsideModel => "extra:outside-model",
                 ExtraKind::Uncommitted => "extra:uncommitted",
                 ExtraKind::ControlMarker => "extra:control-marker",
                 ExtraKind::NoLineage => "extra:no-lineage",
@@ -259,8 +264,12 @@ impl Divergence {
 pub struct Comparison<'a> {
     /// The model: what the output SHOULD hold, offsets are source offsets.
     pub expected: &'a [Rec],
+    /// Every committed source record, before any window was applied; used
+    /// only to classify extras. The same slice as `expected` when the model
+    /// is unfiltered.
+    pub committed: &'a [Rec],
     /// The raw source (`read_uncommitted`), used only to classify extras. May
-    /// be the same slice as `expected`.
+    /// be the same slice as `committed`.
     pub raw_source: &'a [Rec],
     /// What was read back, in any order; it is sorted by `(partition,
     /// offset)` before anything is checked.
@@ -277,6 +286,11 @@ pub fn compare(c: &Comparison<'_>) -> Vec<Divergence> {
         .expected
         .iter()
         .map(|r| ((r.partition, r.offset), r))
+        .collect();
+    let committed: BTreeSet<(i32, i64)> = c
+        .committed
+        .iter()
+        .map(|r| (r.partition, r.offset))
         .collect();
     let raw: BTreeSet<(i32, i64)> = c
         .raw_source
@@ -342,7 +356,9 @@ pub fn compare(c: &Comparison<'_>) -> Vec<Divergence> {
                 check_fields(want, r, c.headers, &mut out);
             }
             None => {
-                let kind = if raw.contains(&id) {
+                let kind = if committed.contains(&id) {
+                    ExtraKind::OutsideModel
+                } else if raw.contains(&id) {
                     ExtraKind::Uncommitted
                 } else if is_control_shaped(r) {
                     ExtraKind::ControlMarker
