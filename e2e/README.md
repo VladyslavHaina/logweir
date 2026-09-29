@@ -78,7 +78,9 @@ tracked fixtures on a slot (it refuses `LOGWEIR_SEED_REFRESH_FIXTURES=1` there).
 anything else keeps a copy of it, if the shell and the harness refuse different
 environments, if a slot switch leaves a variable behind, if a published port or
 a host-facing advertisement is a literal, if `just e2e-down` misses a profile,
-or if an e2e suite or stack script spells a default-stack address in code.
+if an e2e suite or stack script spells a default-stack address (any of the 14
+ports) in code, or if a function runs `docker compose` without checking
+coherence first (`stack::ensure_coherent()`).
 
 **What does not move yet.** On a non-default slot `just e2e` runs only the `e2e`
 package: the `--features e2e` rows under `crates/` still dial

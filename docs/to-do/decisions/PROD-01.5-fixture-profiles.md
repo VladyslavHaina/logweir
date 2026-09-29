@@ -141,14 +141,16 @@ directory); the orchestrator keeps them.
   and ZERO docker calls; the only two `guards` rows that pass run
   `logweir schema` and touch no stack.
 - **Guards.** `stack_params.rs`: 16 rows in the default test set, 1 Docker
-  render row under `e2e`. Ten fix-round mutants, each killed
+  render row under `e2e`. Eleven fix-round mutants, each killed
   (`fix-round/mutants/summary.txt`): the shell rule back to the core ports,
   the harness rule skipping profile ports, the harness blind to cross-slot
   values, `unset KAFKA_VERSION` dropped, `ensure_coherent()` removed from a
   direct compose caller, two slots' brokers sharing a cluster id, two slots'
   `cluster3` sharing one, a `CLUSTER_ID` put back inline in `kafka-cluster2`,
-  a line digest the support matrix does not record, and a port table copied
-  back into `stack-env.sh`. Fourteen earlier mutants, each killed (`mutants/summary.txt`):
+  a line digest the support matrix does not record, a port table copied
+  back into `stack-env.sh`, and a profile-port literal (`localhost:9130`)
+  planted in a reader (the sweep's literal set covers all 14 ports).
+  Fourteen earlier mutants, each killed (`mutants/summary.txt`):
   a literal published port, a literal advertisement, a drifted default in the
   compose file, in `stack-lib.sh` (assignment and coherence tuple), in
   `stack-env.sh`, a profile missing from `e2e-down` or from `PROFILES_LIST`, a
@@ -156,6 +158,29 @@ directory); the orchestrator keeps them.
   a fifth slot reaching ephemeral ports, a literal `SASLEXT` advertisement in
   the render, a non-recursive walk (the planted-twin row fails) and a support
   module planted two directories down in `e2e/tests/` (the sweep fails).
+- **PROD-01.1 and PROD-01.4 swept after they merged** (merge `23cf86ad`,
+  sweep `8eb5ef93`). Their one address places —
+  `record_semantics_support/kafka.rs` `bootstrap()`/`s3_endpoint()` and
+  `topic_identity.rs` `broker_address(Host)` — delegate to the harness, and
+  their own `docker compose` calls check coherence first. At the pure merge the
+  guards named exactly those readers (the literal MinIO endpoint; both files'
+  unchecked compose calls) and the `e2e` build refused the removed `BOOTSTRAP`
+  constant. The compose-call guard is per function now: each code line naming
+  the compose file needs a coherence call earlier in its function (a doc
+  comment does not count). Five negative controls, each killed
+  (`fix-round/merge/mutants/summary.txt`): each swept line reverted to main's,
+  and each coherence call dropped. Live on slot 3 while the default stack was
+  left alone: PROD-01.1's `keys_nulls_tombstones_and_duplicate_headers`
+  (41.6 s) and its `#[ignore]`d `a_lost_produce_acknowledgement_during_restore`
+  (177.9 s; `compose_broker` paused slot 3's broker, not the default one:
+  `docker ps` showed `logweir-e2e-s3-kafka-broker-1-1 … (Paused)`), and
+  PROD-01.4's `live::c01_recreate_same_partition_count_shorter` (19.7 s), all
+  passed; every spec they wrote names `localhost:39092` / `:39000` and the
+  allowlist names slot 3's own cluster id (`fix-round/live/slot3-*`). The
+  default project had no container before or after, so a row that reached it
+  would have failed. Under a lone `LOGWEIR_E2E_OBJSTORE_PORT=19130`, all 10
+  `record_semantics` rows and all 20 `topic_identity` live rows fail with the
+  coherence panic and ZERO docker calls; its 33 pure rows pass.
 
 ---
 
