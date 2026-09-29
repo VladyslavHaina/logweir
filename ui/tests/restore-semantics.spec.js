@@ -1,28 +1,38 @@
 // restore-semantics.spec.js -- FX-6: the restore review step says what a
 // restore copies, above Create.
 //
-// WHY THE PAGE HAS TO SAY IT. A restore drill compares the restored topic with
-// the ARCHIVE, never with the source, so a difference the archive already holds
-// passes. PROD-01.1 measured four of them on the pinned engine: aborted and
-// open transactions and their commit and abort markers come back as ordinary
-// records; a `LogAppendTime` topic comes back with the producers' `CreateTime`;
-// a repeated header key keeps one copy; and with out-of-order timestamps a full
-// or point-in-time restore can miss records. Its decision record
-// (docs/to-do/decisions/PROD-01.1-record-semantics.md, section 8.3) wrote the
-// one sentence the console shows where the plan is reviewed; section 8.1 and
-// 8.2 are the long form in docs/verify-a-scorecard.md and docs/stability.md.
+// WHY THE PAGE HAS TO SAY IT. PROD-01.1 measured four ways a restored topic
+// differs from its source on the pinned engine: aborted and open transactions
+// and their commit and abort markers come back as ordinary records; a
+// `LogAppendTime` topic comes back with the producers' `CreateTime`; a repeated
+// header key keeps one copy; and with out-of-order timestamps a full or
+// point-in-time restore can miss records. A passing drill rules none of them
+// out. It compares the restored topic with the ARCHIVE, never with the source,
+// so what is changed when the archive is written is on both sides and passes,
+// and a record that point-in-time selection skips is outside both sides. Some
+// do fail a drill -- a full restore that drops a below-floor record fails its
+// count check, and so does a sampled record whose own `x-original-offset` the
+// restore replaced -- but a pass is not evidence of their absence. The decision
+// record (docs/to-do/decisions/PROD-01.1-record-semantics.md, section 8.3)
+// wrote the one sentence the console shows where the plan is reviewed; sections
+// 8.1 and 8.2 are the long form in docs/verify-a-scorecard.md and
+// docs/stability.md.
 //
 // THE ROWS. The sentence is on step 6, once, as the record words it, with its
-// two identifiers as <code> and no backtick on screen; it follows the plan and
-// comes before the approval-policy block and Create, under every block step 6
-// can show -- and it is on the step that is on screen when the wizard opens at
-// step 6. (Placed under the approval block's heading, in the same style, it
-// read as part of the approval in the 1440 px screenshot.)
+// two identifiers as <code> and no backtick on screen. It follows the plan and
+// comes before the approval-policy block and Create, with each of the four
+// approval-policy blocks step 6 can show. It is VISIBLE, not merely present: a
+// direct child of step 6's section, so no wrapper (a `hidden` element, a
+// `<details>`) can fold it away, and on the step that is on screen when the
+// wizard opens at step 6. (Placed under the approval block's heading, in the
+// same style, it read as part of the approval in the 1440 px screenshot.)
 //
 // NEGATIVE CONTROL: deleting the paragraph from `renderPlanStep`, printing the
-// constant through `esc`, moving the paragraph below Create or under the
-// approval block, or rewording one clause each fails a row here. The FX-6
-// report records the five mutants and the command that ran them.
+// constant through `esc` or `cell`, stripping its code spans, moving it below
+// Create, under the approval block or above the plan, wrapping it in a hidden
+// element or a `<details>`, showing it only when a policy was read, or
+// rewording one clause each fails a row here. The FX-6 report records the
+// mutants and the command that ran them.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -50,6 +60,8 @@ const SHOWN =
   "restored as ordinary records, LogAppendTime timestamps come back as producer CreateTime, " +
   "repeated header keys keep one copy, and when timestamps are out of order a full or " +
   "point-in-time restore can miss records.";
+
+const PARAGRAPH_OPEN = "<p class=\"note\" id=\"restore-semantics\">";
 
 /** A step-6 state over the newest recovery point of the wizard fixtures. */
 function wizardState(policy) {
@@ -82,16 +94,46 @@ const POLICIES = Object.freeze({
 
 /** The one paragraph carrying the sentence, by its id. */
 function semanticsParagraph(html) {
-  const open = "<p class=\"note\" id=\"restore-semantics\">";
-  const at = html.indexOf(open);
+  const at = html.indexOf(PARAGRAPH_OPEN);
   assert.ok(at !== -1,
     "NEGATIVE CONTROL: the review step carries the restore-semantics paragraph:\n" +
       html.slice(0, 600));
-  assert.equal(html.indexOf(open, at + open.length), -1, "said once, not twice");
+  assert.equal(html.indexOf(PARAGRAPH_OPEN, at + PARAGRAPH_OPEN.length), -1,
+    "said once, not twice");
   return html.slice(at, html.indexOf("</p>", at) + "</p>".length);
 }
 
 const visible = (html) => html.replace(/<[^>]*>/g, "");
+
+const VOID = new Set(["area", "base", "br", "col", "embed", "hr", "img", "input", "link",
+  "meta", "param", "source", "track", "wbr"]);
+
+/** The elements still open at `index` in rendered `html`, outermost first, each
+ *  as its name and its whole opening tag -- the ancestors, within that markup,
+ *  of whatever starts at `index`. The pages escape every value they print, so
+ *  a `<` in their output always opens or closes a tag. */
+function ancestorsAt(html, index) {
+  const open = [];
+  const tag = /<(\/?)([a-zA-Z][\w-]*)\b([^>]*)>/g;
+  let m;
+  while ((m = tag.exec(html)) !== null && m.index < index) {
+    const name = m[2].toLowerCase();
+    if (m[1] === "/") {
+      const at = open.map((e) => e.name).lastIndexOf(name);
+      if (at !== -1) {
+        open.length = at;
+      }
+    } else if (!VOID.has(name) && !m[3].endsWith("/")) {
+      open.push({ name: name, tag: m[0] });
+    }
+  }
+  return open;
+}
+
+/** An ancestor that takes the sentence off the screen or out of the
+ *  accessibility tree: `hidden` (attribute or class), `aria-hidden`, an inline
+ *  style, or a `<details>` that folds it away until somebody opens it. */
+const folds = (e) => e.name === "details" || /\s(hidden|aria-hidden|style)\b/.test(e.tag);
 
 test("fx6_the_review_step_says_what_a_restore_copies_above_create", async () => {
   for (const [label, policy] of Object.entries(POLICIES)) {
@@ -125,6 +167,26 @@ test("fx6_the_review_step_says_what_a_restore_copies_above_create", async () => 
       "NEGATIVE CONTROL: " + label + ": with the plan, not under the approval block's heading");
     assert.ok(at < step.indexOf("id=\"create-restore\""),
       "NEGATIVE CONTROL: " + label + ": above Create, not after it");
+
+    // VISIBLE, NOT MERELY PRESENT: a direct child of step 6's section. A
+    // wrapper -- a `hidden` element, a `<details>` -- would fold the disclosure
+    // away, and a disclosure nobody sees is not one.
+    const chain = ancestorsAt(step, at);
+    assert.deepEqual(chain.map((e) => e.name), ["section"],
+      "NEGATIVE CONTROL: " + label + ": a direct child of step 6's section, in no wrapper: " +
+        JSON.stringify(chain.map((e) => e.tag)));
+    assert.deepEqual(chain.filter(folds), [], label + ": and the section itself is shown");
+
+    // THE CHECK SEES A WRAPPER (its own control): the same step with the
+    // paragraph folded into a `<details>`, or into a hidden div, fails both
+    // assertions above.
+    for (const [wrap, close] of [["<details><summary>More</summary>", "</details>"],
+      ["<div hidden>", "</div>"]]) {
+      const folded = step.replace(paragraph, wrap + paragraph + close);
+      const around = ancestorsAt(folded, folded.indexOf(paragraph));
+      assert.notDeepEqual(around.map((e) => e.name), ["section"], label + ": sees " + wrap);
+      assert.equal(around.filter(folds).length, 1, label + ": and names it as folding: " + wrap);
+    }
   }
 });
 
@@ -150,16 +212,21 @@ test("fx6_the_sentence_is_the_decision_records_own_words_in_one_sentence", () =>
 
 test("fx6_the_mounted_wizard_shows_it_on_the_step_on_screen", async () => {
   // THE WHOLE WIZARD renders all six pages and hides every one but the step on
-  // screen (one step at a time): at step 6 the sentence is on the visible page
-  // and nowhere else.
+  // screen (one step at a time): at step 6 the sentence is on the visible page,
+  // with nothing between that page and it but step 6's own section, and it is
+  // nowhere else.
   const state = wizardState(null);
   state.step = 5;
   const html = await renderRestoreWizard(state);
-  const open = "<div class=\"wizard-page\" data-wizard-step=\"5\"";
-  const page = html.slice(html.indexOf(open), html.indexOf("</section>", html.indexOf(open)));
-  assert.ok(page.startsWith(open + ">"), "step 6's page is the one not hidden: " +
-    page.slice(0, 120));
-  assert.ok(page.includes("id=\"restore-semantics\""),
-    "NEGATIVE CONTROL: the sentence is on the page an operator is looking at");
+  const at = html.indexOf(PARAGRAPH_OPEN);
+  assert.ok(at !== -1, "NEGATIVE CONTROL: the whole wizard carries the sentence");
+  const chain = ancestorsAt(html, at);
+  assert.equal(chain.length, 2,
+    "NEGATIVE CONTROL: the page, then step 6's section, and no wrapper: " +
+      JSON.stringify(chain.map((e) => e.tag)));
+  assert.equal(chain[0].tag, "<div class=\"wizard-page\" data-wizard-step=\"5\">",
+    "NEGATIVE CONTROL: on step 6's page, and that page is the one not hidden");
+  assert.ok(chain[1].tag.startsWith("<section class=\"step\" id=\"step-plan\""), chain[1].tag);
+  assert.deepEqual(chain.filter(folds), [], "nothing above it folds it away");
   assert.equal(html.split("id=\"restore-semantics\"").length, 2, "and only there");
 });
