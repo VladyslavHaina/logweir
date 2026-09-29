@@ -134,7 +134,7 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 
 | Wave | Row | Title | P | M | Kind | Depends on | Gate | Lab | Tier | Status |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 0 | FX-1 | Parse the engine's consumer-group snapshot | P1 | M1 | fix | — | — | compose | A | Proposed |
+| 0 | FX-1 | Parse the engine's consumer-group snapshot | P1 | M1 | fix | — | — | compose | A | Done |
 | 0 | FX-2 | Apply or refuse `runnerResources` | P1 | M1 | fix | — | — | k8s | A | Proposed |
 | 0 | FX-3 | Stop labelling new-topic deviations "intended" | P1 | M1 | fix | — | — | compose | A | Proposed |
 | 0 | FX-4 | Record topic-configuration capture coverage | P1 | M1 | fix | — | — | compose | A | In progress |
@@ -220,6 +220,21 @@ Found by the 2026-09-23 review. They do not depend on any expansion feature. Evi
 | FX-6 | Two restore semantics are undisclosed. Transactional topics probably come back with aborted records and commit/abort markers as ordinary data. With non-monotonic timestamps, the point-in-time end can omit an in-window record without detection. Drills pass in both cases because phase 7 compares the target with the archive. | Engine `kafka/fetch.rs` READ_UNCOMMITTED with no control-record filter; `BackupRecord` has no transaction fields; `kafka/produce.rs` non-transactional; `segment/writer.rs` first/last timestamps used by every selector. Read from source, not run; no test produces transactionally. | Disclose both in `docs/verify-a-scorecard.md`, `docs/stability.md` and the restore review screen; PROD-01.1 decides the product rails. |
 | FX-7 | A second run under an existing `backup_id` rewrites the manifest in place, so an earlier signed point no longer verifies. This is the residue of platform defect RECEIPT-DUP, which gives each receipt its own point but not its own manifest. | Engine rewrites `{backup_id}/manifest.json` (get-merge-put); the CLI takes `spec.backup_id`; `crates/logweir/src/backup/phase_run.rs` reads the manifest's version id and discards it. | On versioned buckets pin the manifest version id in receipt and catalog and read by version; otherwise refuse a second run under an existing `backup_id`. Skip if the platform run closed RECEIPT-DUP completely. |
 | FX-8 | A point-in-time restore over a `LogAppendTime` source selects records by the producers' CreateTime (what the archive holds) and is signed `pass`. Found by PROD-01.1 on 2026-09-29. | PROD-01.1 `lat` row: a point in 2001 restored six records the broker appended in 2026, `pass` 6/6 (`decisions/PROD-01.1-record-semantics.md` §2.3); the engine archives CreateTime (S3); the manifest's `configurations` carries a topic override of `message.timestamp.type`. | Refuse point-in-time selection for `LogAppendTime` topics before any target is created (`PointInTimeByProducerTime`), unless the approved plan says `restore.timeBasis: producerTime`, which labels the scorecard, receipt and console. The topic-override arm lands now; the broker-default arm lands with FX-4. Full specification: the record's §9. |
+
+### Fix-now completion records
+
+**FX-1 — Done (2026-09-29).**
+- **Ownership:** worker `fx-1` (one run and one fix round), independent Tier-A review `claude/fx-1.review.md`. The review was ACCEPT-WITH-FIXES (1 MEDIUM, 5 LOW, no HIGH), with 11 mutants killed including 8 of the reviewer's own. The orchestrator read the fix round. Merged as `b4103221` (branch tip `54e8c892`); the full `scripts/ci-check.sh` passed with rc 0 on `b4103221`.
+- **Fix:**
+  - `crates/logweir-engine-oso/src/vendored/consumer_groups.rs` parses what the engine writes: `snapshot_time`, and `offsets` as topic → partition → offset. The writer is identical from engine 0.19.1 to 0.22.0.
+  - Unknown fields are kept. Values the engine never writes are refused: a bad partition key, a negative offset, a repeated group, a repeated topic or partition key.
+  - A snapshot Logweir cannot read is a value (`Unreadable`), never an `Operational` failure. `drill run`, `restore run` and `backup run` now tell the operator: a `warning:` line on stderr and a WARN log event (`ArchiveNotice`), with nothing signed changed.
+- **Fixture:** `e2e/fixtures/consumer-groups-snapshot.json` is now the pinned engine's real bytes, with the broker's committed offsets as the oracle. Provenance is in `e2e/fixtures/README.md`.
+- **Drift gate:** the xtask gate covers `consumer_groups.rs`, compares field types and serde wire attributes, refuses an ambiguous struct name, and runs in `cargo test`.
+- **Evidence** (compose slot 1, and the reviewer's slot 4): before the fix, a drill or `backup run` over an archive with a non-empty snapshot exited 1 with no scorecard and no receipt. After it, snapshots from engines 0.19.1–0.22.0 parse exactly. Archives from 0.21 and 0.22 pass, with both verifiers VALID. Archives from 0.19 and 0.20 end signed `fail-integrity`/`partial`, because they carry no segment digests; that part belongs to PROD-00.1, not this row.
+- **Migration:** none. Archives without a snapshot behave as before.
+- **Left for PROD-04.1:** carrying the snapshot's state into signed evidence.
+- **Artifacts:** `claude/artifacts/fx-1/`.
 
 ## Foundation dependency map
 
