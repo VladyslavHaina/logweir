@@ -9575,3 +9575,94 @@ async fn a_runner_pod_the_namespace_quota_rejects_is_reported_and_failed_fast() 
     let patch: Value = serde_json::from_str(&cancel.body).expect("JSON");
     assert_eq!(patch["spec"]["activeDeadlineSeconds"].as_i64(), Some(1));
 }
+
+/// **FX-2's class sweep: `spec.sourceArchive.secretRef`**, documented
+/// (`docs/kubernetes.md` §12) as reaching the pod as `secretKeyRef` env. It
+/// did, and no row said so at the Job: a projection that dropped it passed
+/// every test here, and the runner would have read the archive with whatever
+/// credential the pod happened to have.
+///
+/// MUTANT: skipping the two `EnvFromSecret` pushes for the inline Secret.
+#[tokio::test]
+async fn the_inline_archive_credential_reaches_the_runner_by_reference_only() {
+    let (client, _rec, bodies) = mock_client_recording_bodies(admission_routes(
+        200,
+        approval_json(true, &plan_hash(), &plan_hash()),
+        200,
+        cluster_json(true, PLAINTEXT_AUTH),
+    ));
+    reconcile_restore(
+        &restore(),
+        &client,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("admitted");
+    let container = only_container(&posted_job(&bodies.lock().expect("readable")));
+    let env = container["env"].as_array().expect("env");
+    for (name, key) in [
+        (
+            weirkeeper::controllers::backup::ARCHIVE_ACCESS_KEY_ENV,
+            weirkeeper::controllers::backup::ARCHIVE_ACCESS_KEY,
+        ),
+        (
+            weirkeeper::controllers::backup::ARCHIVE_SECRET_KEY_ENV,
+            weirkeeper::controllers::backup::ARCHIVE_SECRET_KEY,
+        ),
+    ] {
+        let entry = env
+            .iter()
+            .find(|e| e["name"] == name)
+            .unwrap_or_else(|| panic!("{name} is projected: {env:?}"));
+        assert_eq!(
+            entry["valueFrom"]["secretKeyRef"],
+            serde_json::json!({"name": "logweir-s3", "key": key}),
+            "from spec.sourceArchive.secretRef, by reference: {entry}"
+        );
+        assert!(entry.get("value").is_none(), "never a literal: {entry}");
+    }
+}
+
+/// **FX-2's class sweep: a `BackupDestination`'s
+/// `workloadIdentity.serviceAccountName`**, documented as "the pod's own
+/// ServiceAccount identity". A destination-backed `Restore` whose archive
+/// grant is a workload identity runs AS that ServiceAccount — the Job-level
+/// row the resolver's own test stops short of.
+///
+/// MUTANT: `service_account_name` taken from the connection alone, ignoring
+/// the destination's identity.
+#[test]
+fn a_workload_identity_archive_grant_is_the_runner_pods_service_account() {
+    let mut source = source_destination_value();
+    source["spec"]["access"]["archiveRead"] = serde_json::json!({
+        "mode": "WorkloadIdentity",
+        "workloadIdentity": {"serviceAccountName": "lw-archive-reader"}
+    });
+    let pair = RestoreDestinations {
+        source: resolve(
+            &built(source),
+            DestinationRole::ArchiveRead,
+            &InstallationPolicy::defaults(),
+        )
+        .expect("the source resolves"),
+        evidence: destinations().evidence,
+    };
+    let spec = runner_job_spec_with_destinations(
+        &destination_backed_restore(),
+        &cluster(true),
+        &[KEY_ID_LIVE.to_string()],
+        &approval(true),
+        &legacy_trust(),
+        now(),
+        Some(&pair),
+    )
+    .expect("the destination-backed Job renders");
+    assert_eq!(spec.service_account_name, "lw-archive-reader");
+    let job = serde_json::to_value(job::build(&spec)).expect("the Job serialises");
+    assert_eq!(
+        job["spec"]["template"]["spec"]["serviceAccountName"], "lw-archive-reader",
+        "the object store authenticates the POD's identity, and a pod has exactly one"
+    );
+}
