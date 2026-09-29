@@ -279,7 +279,8 @@ head -c 4 "$stage/segment.kbak" | grep -q '^KBAK' \
 # publishing one without the other is the inconsistent pair this ordering
 # exists to prevent.
 if [ "$REFRESH_FIXTURES" = "0" ]; then
-  echo "==> seeded. Tracked fixtures NOT refreshed (LOGWEIR_SEED_REFRESH_FIXTURES=0)."
+  if lw_e2e_is_default; then why="LOGWEIR_SEED_REFRESH_FIXTURES=0"; else why="$LW_E2E_PROJECT is a slot: they are refreshed from the default stack only"; fi
+  echo "==> seeded. Tracked fixtures NOT refreshed ($why)."
   echo "    The archive is live in MinIO, which is all a drill needs; the freshly"
   echo "    downloaded copies stay in the scratch directory and are discarded."
   # ASSERTED, not assumed: the whole point of this mode is that a quickstart

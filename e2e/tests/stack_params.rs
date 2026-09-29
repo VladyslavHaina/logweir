@@ -923,7 +923,10 @@ fn the_slot_helper_lists_exactly_the_user_facing_profiles() {
 /// hard-code them.
 fn default_address_literals() -> Vec<String> {
     let mut v = Vec::new();
-    for p in stack::core_ports() {
+    // EVERY published port — the profile ports move with a slot exactly like
+    // the core ones (review M1), so a reader spelling `localhost:9130` would
+    // reach the default stack's object store from a slot.
+    for p in stack::all_ports() {
         for host in ["localhost", "127.0.0.1", "host.docker.internal"] {
             v.push(format!("{host}:{}", p.default));
         }
