@@ -346,18 +346,27 @@ create — turn on `writeProbe: CreateOnlyMarker` for one run of the destination
 check, and never set `AWS_CONDITIONAL_PUT=disabled` — see the store table in
 [support-matrix.md](support-matrix.md). A standalone `logweir backup run` that
 reused a fixed `backup_id` must pass a fresh `--backup-id-override` per run.
-**Let in-flight Backups finish before upgrading:** an execution whose first run
-was made by the older runner has no claim, so if its Job is lost and re-created
-after the upgrade the new runner runs the engine again and can still invalidate
-that first receipt — the one window the claim cannot close.
+**The upgrade window is closed since FX-7:** an execution whose first run was
+made by the older runner has no claim, so if its Job is lost and re-created
+after the upgrade the new runner wins a claim — and then finds the older run's
+set under `<prefix>/<backup_id>/` and stops, exit 1 `ExecutionAlreadyClaimed`,
+before the engine. Only an older runner that is still RUNNING when its Job is
+re-created, and has written nothing yet, escapes both checks; let such a Job
+finish before upgrading. On a versioned bucket a receipt also pins its
+manifest's version (`archive.manifest_version_id`, receipt format `1.1.0`), so a
+set written again after the point was signed — by an older runner after a
+rollback, say — is refused by a point-bound restore (`PointBindingMismatch`) and
+reported `Conflict` by the catalog even when the manifest bytes came out
+identical ([backup-receipt.md](formats/backup-receipt.md#the-pinned-manifest-version-versioned-buckets)).
 **Scope:** in-process rows, a private MinIO `RELEASE.2025-09-07T16-13-09Z`
 container, and four planted mutants plus the review's two. Live on
 lab-refresh-10 (2026-09-24): PLAT-06.1's case e (a lost Job re-created), both
-arms, and the receipt-dup rows 2–5 (RECEIPT-DUP). The upgrade window above
-stays open (RECEIPT-DUP-UPGRADE-WINDOW).
-**Rollback:** an older runner ignores the claims and returns to re-running the
-engine over a re-created Job; the claims stay in the bucket, harmless, and are
-honoured again after a re-upgrade.
+arms, and the receipt-dup rows 2–5 (RECEIPT-DUP). FX-7 (2026-09-29): compose
+slot 3, MinIO unversioned and SeaweedFS versioned buckets, a `v0.1.5` runner
+for the older build's run.
+**Rollback:** an older runner ignores the claims, the set check and the pin,
+and returns to re-running the engine over a re-created Job; the claims stay in
+the bucket, harmless, and are honoured again after a re-upgrade.
 
 #### 12. A failed restore's signed scorecard: roll the controller out before the runner
 

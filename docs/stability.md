@@ -937,11 +937,52 @@ What changes for an operator:
   receipts, and both stay two catalog points.
 
 **Upgrade.** Nothing to migrate. A Backup Job whose first run was made by the older runner and that
-is lost and re-created after the upgrade finds no claim and runs the engine again — the one window
-the claim cannot close, because the older run never wrote one; let in-flight Backups finish before
-upgrading the controller. **Rollback.** An older runner ignores the claim objects (they are not
-receipts) and returns to the old behaviour; the claims stay in the bucket, harmlessly, and are
-honoured again after a re-upgrade.
+is lost and re-created after the upgrade finds no claim — the older run never wrote one — and,
+**since FX-7, is refused anyway**: after winning its claim the runner lists `<prefix>/<backup_id>/`
+and refuses a set that already holds any object, exit 1 `ExecutionAlreadyClaimed`, before the engine
+starts (the next section). **Rollback.** An older runner ignores the claim objects (they are not
+receipts) and the set check, and returns to the old behaviour; the claims stay in the bucket,
+harmlessly, and are honoured again after a re-upgrade.
+
+### A backup set that already exists is never written again; versioned buckets pin the manifest (FX-7)
+
+The execution claim stops a second run of an execution that took a claim. A set written by a build
+without the claim carries none, so the claim alone let a later run of the same `backup_id` start —
+a Backup Job lost across the upgrade and re-created with the new runner image, or a standalone
+`backup run` reusing a `backup_id` an older build wrote to (RECEIPT-DUP-UPGRADE-WINDOW). Measured on
+engine 0.21.0 (compose slot 3; a `v0.1.5` runner for the first run), such a second run exited 0,
+signed a second receipt, rewrote the first run's segment objects in place (segments are keyed by
+start offset) and — because its manifest merge keeps the first run's entry for every existing key —
+could leave the manifest bytes IDENTICAL: the first receipt's manifest digest still matched while
+the data under it had changed ([the format](formats/backup-receipt.md#the-execution-claim-one-engine-run-per-backup_id)).
+What changes for an operator:
+
+- **A run over a set that already exists exits 1 naming `ExecutionAlreadyClaimed`**, with no engine
+  run and no receipt, whoever wrote the set — the same state, message class and remedy (a new
+  `backup_id`) as a claim that exists. The runner lists the set's directory after winning its claim
+  and immediately before the engine; any object there — a finished set, or segments of a run that
+  died or is still running — refuses the run. A listing that fails is exit 4
+  `ExecutionClaimUnproven`. **No permission is added**: the run's read-back already lists the
+  archive prefix.
+- **On a versioned bucket a receipt pins its manifest's version** —
+  `archive.manifest_version_id`, receipt and catalog record format `1.1.0`
+  ([why](formats/backup-receipt.md#the-pinned-manifest-version-versioned-buckets)). A point-bound
+  restore refuses, exit 3 `PointBindingMismatch`, a point whose pinned version is no longer the
+  current one, and the catalog reports it `Conflict`: the set was written again after the point was
+  signed (by a runner from before these checks, after a rollback, or by anything else), which the
+  digest alone cannot see when the manifest bytes came out identical. Only the manifest is pinned —
+  a rewrite is detected, not undone.
+- **Unversioned buckets pin nothing**, and their receipts are the byte-identical `1.0.0` document.
+  There, a rewrite by a writer that ignores the claim and the set check is visible only to a check of
+  the segment digests the manifest records.
+- **Old receipts are never reinterpreted.** A receipt without a pin is read exactly as before, and
+  `logweir catalog sync` never infers a pin for one.
+
+**Upgrade.** Nothing to migrate; readers of either major-1 format ignore the new field. An older
+runner that is still RUNNING when its Job is re-created, and has written nothing yet, is seen by
+neither the claim nor the set check: let such a Job finish before upgrading the runner. **Rollback.**
+An older runner ignores the pin (its reader ignores unknown fields inside major 1) and no longer
+refuses an existing set; an older catalog reader reports a superseded point by its digest alone.
 
 ### A bound point's receipt signature is verified before any data moves (D3 §5.5 step 6)
 

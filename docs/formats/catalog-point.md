@@ -74,9 +74,10 @@ all of them wanted:
    two runs and silently drop the older receipt's window. The overwrite itself
    is now prevented at the source — a run must win a create-only
    [execution claim](backup-receipt.md#the-execution-claim-one-engine-run-per-backup_id)
-   before its engine starts, so a new execution signs one receipt — but sets
-   written by older builds can still hold two receipts, and this rule is what
-   keeps both of them visible.
+   before its engine starts, and (FX-7) must find the set's directory empty,
+   so a new execution signs one receipt and never writes into a set an older
+   build wrote — but sets written by older builds can still hold two receipts,
+   and this rule is what keeps both of them visible.
 
 `backup_id` remains the **archive set** identifier, and `pointId` is the
 **recovery point**. The 128-bit id is a display and lookup key; the full
@@ -123,7 +124,7 @@ all of them wanted:
 
 | Field | Type | Meaning |
 |---|---|---|
-| `format_version` | string | Semver of THIS format, independent of the receipt's and the scorecard's. Major `1`. |
+| `format_version` | string | Semver of THIS format, independent of the receipt's and the scorecard's: `1.0.0`, or `1.1.0` for a record that carries `archive.manifest_version_id`. Major `1`. |
 | `point_id` | string | `lwp1-` + 32 lowercase hex. See [Point identity](#point-identity). |
 | `recorded_at` | RFC 3339 | When the RECORD was written. **Not** a fact about the backup. |
 | `receipt.key` / `.sidecar_key` | string | Where the signed backup receipt and its sidecar are, in this archive's evidence root. |
@@ -141,6 +142,7 @@ all of them wanted:
 | `archive.location_id` | string | `s3://<bucket>/<prefix>`, `gs://…`, `az://<account>/<container>/…` or `file://<path>` — **bucket and prefix only**. Never an endpoint, never a region, never a credential. It is deliberately NOT part of the identity, which is what makes one archive in two buckets one point in two places. |
 | `archive.manifest_key` | string | Receipt-derived. |
 | `archive.manifest_sha256` | `sha256:<hex>` | Receipt-derived. |
+| `archive.manifest_version_id` | string, **optional** (format `1.1.0`) | Receipt-derived: the receipt's pinned manifest version ([backup-receipt.md](backup-receipt.md#the-pinned-manifest-version-versioned-buckets)), present exactly when the receipt carries one — a point taken on a versioned bucket. Absent means unknown. A reader takes the pin from the verified RECEIPT, never from this copy; a record whose copy differs from the receipt's, or that carries one the receipt does not, is a mismatch (`Conflict`), while a record without one (an older writer) is not. |
 | `archive.prefix` | string | The archive's own key prefix, as the receipt records it. |
 
 ### What was captured
@@ -248,8 +250,9 @@ Availability and verification are separate axes and both are separate from this
 signature:
 
 * *availability* — can the receipt, sidecar and manifest still be fetched, and
-  does the manifest's digest still equal the receipt's? Only a fetch answers
-  that, and this document is not one.
+  does the manifest's digest still equal the receipt's — and, for a point that
+  pins a manifest version, is that version still the current one? Only a fetch
+  answers that, and this document is not one.
 * *verification* — does the backup receipt's DSSE signature verify under a key
   you trust for evidence signing? That is the receipt's signature, not this one.
 

@@ -165,6 +165,19 @@ beforehand ([kubernetes.md §21.5](kubernetes.md)).
 | local filesystem (standalone CLI) | **Supported, measured in process** |
 | `AWS_CONDITIONAL_PUT=disabled`, or an S3-compatible store that ignores `If-None-Match` | **Unsupported** — refused, never silently accepted |
 
+**Versioned buckets pin the manifest (FX-7).** On a bucket with versioning
+enabled, a backup receipt records the version id of the manifest it attests
+(`archive.manifest_version_id`, receipt format `1.1.0`), and a point-bound
+restore and the catalog compare it with the manifest's current version
+([backup-receipt.md](formats/backup-receipt.md#the-pinned-manifest-version-versioned-buckets)).
+
+| Object store | Manifest version pinned |
+|---|---|
+| SeaweedFS 4.48, bucket with versioning (Object Lock) enabled | **Yes, measured** (compose slot 3, 2026-09-29): the receipt pins the version the read-back was answered with; after a `v0.1.5` runner rewrote the set (identical manifest bytes, a rewritten segment), the catalog's deep check reported the point `Conflict` by version. The point-bound restore's refusal is measured in process |
+| MinIO `RELEASE.2025-09-07T16-13-09Z` and SeaweedFS 4.48, unversioned buckets | **No pin, measured**: the store answers no version id, and the receipt is the `1.0.0` document |
+| AWS S3 with versioning | `[UNVERIFIED — needs a real AWS S3 bucket and a credential source]` |
+| Versioning suspended (S3's `null` version) | no pin by design: a `null` version is replaced in place |
+
 ## What the weekly job will add
 
 `.github/workflows/engine-matrix.yml` runs the full compose drill against each

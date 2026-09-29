@@ -1192,11 +1192,11 @@ list` still reads the durable catalog.
 
 | `availability` | meaning |
 |---|---|
-| `Available` | receipt, sidecar and manifest readable; the manifest digest equals the receipt's |
+| `Available` | receipt, sidecar and manifest readable; the manifest digest equals the receipt's, and — for a point whose receipt pins a manifest version (FX-7, versioned buckets) — the manifest's current version is the pinned one |
 | `Missing` | a definite `NotFound` |
 | `Unreadable` | any other storage error — 403, timeout, truncated. **"Could not tell", never "is not there".** |
 | `Deleted` | a completed retention tombstone exists |
-| `Conflict` | two records disagree for one identity, or a record's facts contradict the receipt |
+| `Conflict` | two records disagree for one identity, a record's facts contradict the receipt, or the receipt pins a manifest version that is no longer the current one — the set was written again after the point was signed (FX-7; the entry's remedy says so) |
 | `UnsupportedFormat` | the record's major version is above this build's |
 | `Partial` | a sampled segment the manifest lists is missing |
 
@@ -1557,7 +1557,10 @@ no configuration is reconstructed by hand.**
    verifies the receipt's signature against the evidence keyring the
    controller mounts in the approval bundle (`evidence-keys.json`, every key
    of the namespace's resolved trust with its lifecycle, digest-pinned) and
-   reads the manifest back. A digest mismatch is exit 3 `PointBindingMismatch`;
+   reads the manifest back — and, when the receipt pins the manifest's version
+   (FX-7, a versioned bucket), requires that version to be the current one,
+   since the engine restores only the current one. A digest mismatch, or a
+   pinned version that is no longer current, is exit 3 `PointBindingMismatch`;
    an unsigned receipt, a signature no trusted key verifies, or a signer the
    trust refuses (revoked for compromise, retired before the receipt was
    written, not an `EvidenceSigning` key) is exit 3 `PointUntrusted`. Either
@@ -4345,7 +4348,7 @@ it and writes it to **`Backup.status.exitCode`**, together with a wire reason on
 | Exit | `status.phase` | `status.exitReason` | Condition | What it means |
 |---|---|---|---|---|
 | **0** | `Succeeded` | `ok` | `Complete=True`, reason `Ok` | The archive was captured and the receipt was signed. |
-| **1** | `Failed` | `operational`, or `ExecutionAlreadyClaimed` off a backup runner's final `failure-reason=` line | `Failed=True`, reason `Operational` | The run could not be attempted or continued. **No artifact was written.** `ExecutionAlreadyClaimed`: an earlier run of the same execution reached the engine, so this one did not start it (RECEIPT-DUP). |
+| **1** | `Failed` | `operational`, or `ExecutionAlreadyClaimed` off a backup runner's final `failure-reason=` line | `Failed=True`, reason `Operational` | The run could not be attempted or continued. **No artifact was written.** `ExecutionAlreadyClaimed`: an earlier run of the same execution reached the engine — it holds the claim (RECEIPT-DUP), or, with no claim, its backup set already exists in the archive (FX-7) — so this one did not start it. |
 | **2** | `Failed` | `drill-not-pass` | `Failed=True`, reason `DrillNotPass` | A result that is not a pass — **a document WAS written and signed.** Not produced by `backup run`; it is the drill path's code and the row is here because `exitReason`'s vocabulary is one vocabulary across both paths. |
 | **3** | `Failed` | the terminal state off the log's `refusal-reason=` line, or `GuardRefusedUnknownReason` | `Failed=True`, reason `GuardRefused` | A guard refused before anything ran. |
 | **4** | `Failed` | `signing-or-lock`, `OrphanedScorecard`, or `ExecutionClaimUnproven` off a backup runner's final `failure-reason=` line | `Failed=True`, reason `SigningOrLock` | Signing or the lock proof failed and **nothing was uploaded**. `ExecutionClaimUnproven`: the evidence store refused the execution claim or does not enforce conditional create; the engine never started. |
@@ -4954,7 +4957,11 @@ the engine starts ([the execution claim](formats/backup-receipt.md#the-execution
 If the lost Job's pod got that far, the re-created Job finds the claim and exits
 **1** naming `ExecutionAlreadyClaimed`, with no engine run and no receipt: a
 second engine run would have overwritten the manifest the first run's signed
-receipt attests. The `Backup` ends `Failed` with `status.exitReason:
+receipt attests. **The same holds for a Job whose lost pod was an OLDER runner
+without the claim** (FX-7): the re-created Job wins a fresh claim, lists
+`<prefix>/<backupId>/`, finds the older run's objects there and stops with the
+same exit and reason — the engine would otherwise rewrite that run's segments
+in place ([the format](formats/backup-receipt.md#the-execution-claim-one-engine-run-per-backup_id)). The `Backup` ends `Failed` with `status.exitReason:
 ExecutionAlreadyClaimed` (the runner's final `failure-reason=` line, lifted by
 the controller; `kubectl describe backup` shows it on `status.exitReason` and
 the `Failed` condition's message, and the console in the run's exit reason and
