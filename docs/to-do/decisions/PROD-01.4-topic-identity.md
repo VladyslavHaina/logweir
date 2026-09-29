@@ -226,7 +226,8 @@ Such a topic's verdict in that point is `break`, and the point is not selectable
 Run with `LOGWEIR_TOPIC_IDENTITY_EVIDENCE=<file> cargo test --locked -p e2e --features e2e --test topic_identity -- --include-ignored --test-threads=1` against `just e2e-up`'s broker. The two runs were made on 2026-09-29 (UTC):
 
 - 3.7.1: image `sha256:ed74d7d1…9b68`, 29 of 29 tests in 435 s;
-- 4.3.1: image `sha256:77e3df90…2837`, 29 of 29 in 430 s.
+- 4.3.1: image `sha256:77e3df90…2837`, 29 of 29 in 430 s;
+- 3.7.1 again, at the committed oracle (`0b987fda`, three more pure tests): 32 of 32 in 730 s, every row equal to the first run.
 
 Every column below is identical on both lines. Evidence files are listed in §11.
 
@@ -241,7 +242,7 @@ Every column below is identical on both lines. Evidence files are listed in §11
 | c07 | produced 10 more, DeleteRecords to 15 | same | no break | unverified | CaptureGap [10,15) ×3, BoundaryDeleted ×3 | correct, gap reported |
 | c08 | DeleteRecords to the end (log start = end) | same | no break | unverified | BoundaryDeleted ×3 | correct |
 | c09 | compaction removed offsets 17–19 | same | no break | unverified | BoundaryRecordAbsent ×3 | correct |
-| c10 | retention expiry (wait 101 s and 105 s) | same | no break | unverified | CaptureGap [10,15), BoundaryDeleted | correct, gap reported |
+| c10 | retention expiry (the retention check came after 101–286 s across the three runs) | same | no break | unverified | CaptureGap [10,15), BoundaryDeleted | correct, gap reported |
 | c11 | open transaction during and after the capture | same | no break | continuous | BoundaryRecordVerified | correct; READ_COMMITTED marks: false `break` |
 | c12 | later records carry older timestamps | same | no break | continuous | BoundaryRecordVerified | correct |
 | c13 | recreated, refilled, DeleteRecords past the old tail | changed | no break | unverified | CaptureGap [10,12), BoundaryDeleted | **known miss (FN1)** |
@@ -351,7 +352,7 @@ Common to all six rows:
 ### PROD-04.1 — Archive consumer position evidence
 
 - **Binding.** Every captured position records the topic's generation token, `topic_id` (nullable) and the marks read at group-capture time, in the same run as the data.
-- **`PositionBeyondEnd`.** A committed offset above that partition's end at capture is excluded with reason `PositionBeyondEnd`. This is the state a consumer leaves when it commits its old position after its topic is recreated underneath it.
+- **`PositionBeyondEnd`.** A committed offset above that partition's end at capture is excluded with reason `PositionBeyondEnd`. This is the state a consumer leaves when it commits its old position after its topic is recreated underneath it. The broker accepts such a commit. Measured on 3.7.1: offset 10 on a partition ending at 4 was committed, and the broker's group view then showed lag −6 (`artifacts/prod-01-4/commit-above-end-evidence.txt`). From source, neither version's commit path compares the offset with the log end (`GroupMetadataManager.scala:453-475` at Kafka 3.7.1; `OffsetMetadataManager.java:617-660` at 4.3.1).
 - **`GenerationChangedDuringCapture`.** When the topic shows `ChangedDuringCapture`, or its group-capture marks regress against the post-run marks, the affected groups are `failed` with that reason.
 - **Old snapshots.** A snapshot taken from an old point relates to "generation unknown". Absence is still never offset zero.
 
@@ -482,7 +483,9 @@ Artifacts are in the run directory, `artifacts/prod-01-4/`:
 
 - `oracle-run-1.log`, `topic-identity-evidence.jsonl` and `oracle-run-1-summary.txt` (3.7.1);
 - `oracle-run-2-kafka-4.3.1.log`, `topic-identity-evidence-4.3.1.jsonl` and `oracle-run-2-kafka-4.3.1-summary.txt`;
+- `oracle-run-3-tip.log`, `topic-identity-evidence-tip.jsonl` and `oracle-run-3-tip-summary.txt` (3.7.1, at the committed oracle);
 - `ffi-route-evidence.txt` and `ffi-probe/` (the prototype's source only);
+- `commit-above-end-evidence.txt` and `kafka-src/` (the two Kafka commit-path source files, fetched at tags 3.7.1 and 4.3.1);
 - `rule-mutants.py` and `rule-mutants.log`;
 - `upstream/` (the rdkafka 0.37.0–0.39.0 crates and the PR #721 diff, sha256 `ba214e48…`).
 
