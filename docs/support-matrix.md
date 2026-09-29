@@ -98,6 +98,9 @@ verified by both readers).
 | **4.1.2** | `sha256:5cc2a2fd93fa2687b44015eee04fb2c3edd9e526bd64bf8bec5ff1e268772e0e` | 0.21.0 | `pass`, VALID ×2 | 1 passed | `pass`, 2000 records, VALID ×2 | supported line, measured |
 | **4.3.1** | `sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837` | 0.21.0 | `pass`, VALID ×2 | 1 passed | `pass`, 2000 records, VALID ×2 | supported line, measured |
 
+The digests are the pins: `stack-env.sh --kafka LINE` runs exactly these
+images (`KAFKA_IMAGE`), and a test fails if the two disagree.
+
 No row yet: **4.0.x** and **4.2.x** (supported by Apache, not run), and
 anything with authentication, several brokers or another object store — the
 optional profiles in [`e2e/README.md`](../e2e/README.md) provide those fixtures;
@@ -139,8 +142,9 @@ IncrementalAlterConfigs and, on these plaintext runs, SASL requests were never
 sent, so they are in range but unexercised. **The risk is structural:**
 DescribeConfigs already sits on the 4.x floor and DescribeGroups on v0, and a
 future release that raises either floor fails the engine with an unsupported
-version instead of a downgrade. That route (negotiate, or pin higher) belongs to
-PROD-00.1's capability table.
+version instead of a downgrade. So do the table's DescribeAcls, CreateAcls and
+DeleteAcls entries (v1, the 4.x floor), which 0.21.0 never sends. That route
+(negotiate, or pin higher) belongs to PROD-00.1's capability table.
 
 ## Object stores: conditional create is required
 

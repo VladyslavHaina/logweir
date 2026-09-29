@@ -19,9 +19,11 @@ directory); the orchestrator keeps them.
    (default `logweir-e2e`) and every published host port is a
    `LOGWEIR_E2E_*_PORT` variable (defaults 9092, 9095, 9097, 9000, 9001), with
    each host-facing advertised listener carrying its port's variable. A **slot**
-   N (1–4) is project `logweir-e2e-sN` with every port plus N×10000;
-   `e2e/compose/stack-env.sh` prints one. The default render is byte-identical
-   to `adee0a16`'s.
+   N (1–4) is project `logweir-e2e-sN` with every port plus N×10000 and its own
+   broker cluster id; `e2e/compose/stack-env.sh` prints one. The variables have
+   ONE list (`e2e/compose/stack-lib.sh`), and every entry point refuses an
+   environment that is not exactly one slot. The default render is
+   byte-identical to `adee0a16`'s.
 2. **Broker lines.** 3.9.2, 4.1.2 and 4.3.1 pass the demo drill, `just pitr`
    and the receipt path with engine 0.21.0; 3.7.1 passes too and is recorded
    **legacy**. The default fixture stays 3.7.1 in this branch (child row C1).
@@ -52,31 +54,68 @@ directory); the orchestrator keeps them.
 | `LOGWEIR_E2E_SASL_PORT` | 9097 | host port of `SASLEXT`, and `localhost:<port>` |
 | `LOGWEIR_E2E_S3_PORT` | 9000 | MinIO S3 API host port |
 | `LOGWEIR_E2E_S3_CONSOLE_PORT` | 9001 | MinIO console host port |
+| `LOGWEIR_E2E_{AUTH_PLAIN,AUTH_SCRAM256,AUTH_MTLS,C3_1,C3_2,C3_3,CLUSTER2,OBJSTORE,REGISTRY}_PORT` | 9102, 9103, 9104, 9112, 9113, 9114, 9122, 9130, 9141 | the optional profiles' host ports (§4) |
+| `KAFKA_IMAGE` | unset (`apache/kafka:${KAFKA_VERSION}`) | the broker image; `--kafka LINE` pins it by digest |
 
+- **One list.** `e2e/compose/stack-lib.sh` (`LW_E2E_PORT_TABLE`, the default
+  project, the stride, the slot cap) is the only copy: the scripts and
+  `stack-env.sh` source it, the harness compiles it in (`include_str!`), and
+  `stack_params.rs` fails on any other file that spells a port variable with a
+  number (the compose file's `${VAR:-N}` excepted, and checked against it).
 - **Absent variable:** the default; the stack is the one CI and every doc
   describe.
-- **Coherence rule:** the project is the default if and only if every port is
-  its default. `stack-env.sh --check` (run by `just e2e-up`, `just e2e-down`,
-  `scripts/demo.sh`, `scripts/mvp-demo.sh`, `scripts/e2e-seed.sh`) refuses
-  anything else: the default project with a moved port would make `up`
-  recreate the default stack under its user, and `down` remove it.
+- **Coherence rule:** the project is `logweir-e2e` (or unset) or
+  `logweir-e2e-sN` (N = 1..4), and EVERY port in the list is exactly that
+  slot's (unset counts as the default, so only on slot 0); no other
+  `LOGWEIR_E2E_*_PORT` is set. The shell (`lw_e2e_check_coherent`, behind
+  `stack-env.sh --check`) and the harness (`stack::incoherence_in`) implement
+  it and are run over one matrix. Refusing: `just e2e-up`, `just e2e-down`,
+  `just e2e`, `scripts/demo.sh`, `scripts/mvp-demo.sh`, `scripts/e2e-seed.sh`,
+  `e2e/compose/profile-smoke.sh`, and the harness (`ensure_coherent()` before
+  its first address, scratch path or `docker compose` call; every e2e file that
+  runs compose itself calls it too). The Kubernetes demos (`k8s-demo.sh`,
+  `demo-steps.sh`) additionally refuse any slot. Reason: the default project
+  with any moved port makes `up` recreate, and `down -v` remove, the shared
+  default stack; one slot's project with another's ports recreates that slot.
+- **Switching slots** unsets everything the helper can export (project, the 14
+  ports, `KAFKA_VERSION`, `KAFKA_IMAGE`, `COMPOSE_PROFILES`) unless asked for.
+- **Cluster ids:** every Kafka cluster on every stack has its own
+  `CLUSTER_ID`, loaded from `e2e/compose/slots/<project>/<cluster>.env`
+  (`kafka-broker-1`, `kafka-auth`, `kafka-c3` for the three nodes,
+  `kafka-cluster2`), and none is set in `environment:`, which would override
+  the file. The default project has no `kafka-broker-1.env`
+  (`required: false`), so the default broker keeps the image's
+  `5L6g3nShT-eMCtK--X86sw` and the default render is unchanged;
+  `slots/logweir-e2e/` holds the ids the profile clusters always had, so their
+  slot-0 render is unchanged too. The profile clusters' files are
+  `required: true`: a project with no directory of its own fails to start
+  (measured: "env file …/slots/someone-else/kafka-auth.env not found") instead
+  of borrowing another stack's ids. So the cluster-id allowlist tells any two
+  clusters on any two stacks apart; slot isolation no longer rests on the
+  address sweep alone.
+- **Tracked fixtures:** `scripts/e2e-seed.sh` never refreshes
+  `e2e/fixtures/manifests/0.21.json` / `segments/upstream-0.21.0.kbak` on a slot
+  and refuses an explicit request there.
 - **Scratch:** `.e2e/<project>/` and `.demo/<project>/` off the default stack
   (unchanged `.e2e/` and `.demo/` on it). The harness and the demo scripts
   rebind the examples' `localhost:9092` and `http://localhost:9000` to the
   slot's ports; in-network names never move.
-- **Readers:** `e2e/compose/stack-lib.sh` (scripts) and
-  `e2e/tests/harness/stack.rs` (harness); `e2e/tests/stack_params.rs` holds
-  them, the slot helper and the compose file to one set of names and defaults.
 - **Not moved:** the `crates/` `--features e2e` rows (they dial
   `localhost:9092` / `:9000`), so `just e2e` on a non-default slot runs the `e2e`
   package only and says so; and the Kubernetes demos (`k8s-demo.sh`,
-  `kind-demo.sh`, `laptop-demo.sh`, `demo-steps.sh`). Child row C2.
+  `kind-demo.sh`, `laptop-demo.sh`, `demo-steps.sh`), which refuse a slot.
+  Child row C2.
 
 ### 1.2 Evidence
 
 - **Byte-identical default.** `docker compose config` with no variable set,
   and with `--profile setup --profile tools`, before and after:
-  `cmp` identical (`baseline-config-*.yaml` vs `after-config-*.yaml`).
+  `cmp` identical (`baseline-config-*.yaml` vs `after-config-*.yaml`, and again
+  after the fix round's `KAFKA_IMAGE` and `env_file`: `fix-config-*.yaml`,
+  `fix-round/config-*.final.yaml`). With EVERY profile active, slot 0's render
+  after the cluster ids moved to `slots/` is identical to the branch tip's
+  before the fix round (`fix-round/render-allprofiles-slot0.*.yaml`); slot 2's
+  shows its four own ids (`render-allprofiles-slot2.after.yaml`).
 - **Two stacks, two drills (2026-09-29T03:27–03:33Z).** Slots 1 and 2 up
   together (19092/19000 and 29092/29000; `concurrency/snapshot-both-up.txt`).
   `scripts/demo.sh` passed on both (runs `01M3NKA3AM6TEPRE71PTGXGAZR`,
@@ -88,8 +127,28 @@ directory); the orchestrator keeps them.
   stack untouched (`concurrency/after-teardown.txt`).
 - **Four broker lines at once** (§2) on slots 1–4, and the whole `e2e` package
   on a 4.3.1 slot (§2.3).
-- **Guards.** `stack_params.rs`: 10 rows in the default test set, 1 Docker
-  render row under `e2e`. Fourteen mutants, each killed (`mutants/summary.txt`):
+- **Refusal matrix** (fix round, `fix-round/refusal-matrix.sh` with a
+  recording `docker` shim, so no stack was touched; `fix-round/matrix.txt`):
+  55/55. `just e2e-up` and `just e2e-down` each refuse, before any docker call
+  and for the stated reason, every one of the 14 ports set alone, a slot's
+  project alone, a foreign project, an unknown port variable, slot 2's project
+  with slot 1's ports, slot 1 missing a profile port, and slot 1 with slot 2's
+  registry port; both pass a coherent slot 1 and the default. demo.sh,
+  mvp-demo.sh, e2e-seed.sh and profile-smoke.sh refuse the same way; e2e-seed
+  refuses a fixture refresh on a slot; the demos' default-only guard refuses a
+  slot. The harness: `pitr_boundary`, `smoke` and `guards` under a lone
+  `LOGWEIR_E2E_OBJSTORE_PORT=19130` fail with the coherence panic (22 panics)
+  and ZERO docker calls; the only two `guards` rows that pass run
+  `logweir schema` and touch no stack.
+- **Guards.** `stack_params.rs`: 16 rows in the default test set, 1 Docker
+  render row under `e2e`. Ten fix-round mutants, each killed
+  (`fix-round/mutants/summary.txt`): the shell rule back to the core ports,
+  the harness rule skipping profile ports, the harness blind to cross-slot
+  values, `unset KAFKA_VERSION` dropped, `ensure_coherent()` removed from a
+  direct compose caller, two slots' brokers sharing a cluster id, two slots'
+  `cluster3` sharing one, a `CLUSTER_ID` put back inline in `kafka-cluster2`,
+  a line digest the support matrix does not record, and a port table copied
+  back into `stack-env.sh`. Fourteen earlier mutants, each killed (`mutants/summary.txt`):
   a literal published port, a literal advertisement, a drifted default in the
   compose file, in `stack-lib.sh` (assignment and coherence tuple), in
   `stack-env.sh`, a profile missing from `e2e-down` or from `PROFILES_LIST`, a
@@ -111,8 +170,13 @@ directory); the orchestrator keeps them.
 | 4.1 → 4.1.2 | `apache/kafka@sha256:5cc2a2fd93fa2687b44015eee04fb2c3edd9e526bd64bf8bec5ff1e268772e0e` | supported |
 | 4.3 → 4.3.1 | `apache/kafka@sha256:77e3df9054047a88b520d0cc46e16696d3b22022e1d580aeccd2632df6532837` | supported |
 
-The newest patch of each line on Docker Hub on 2026-09-28. 4.0 and 4.2 are
-supported upstream and not run here.
+The newest patch of each line on Docker Hub on 2026-09-28. The pins are
+ENFORCED: `stack-env.sh --kafka LINE` exports
+`KAFKA_IMAGE=apache/kafka:<patch>@<digest>`, which every broker service in the
+compose file uses (`${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-3.7.1}}`), and
+`stack_params.rs` fails if a line's digest differs from the support matrix's.
+The default fixture (no `--kafka`) stays tag-based on `.env`'s 3.7.1. 4.0 and
+4.2 are supported upstream and not run here.
 
 ### 2.2 Results (2026-09-29T03:33–03:45Z, `lines/<line>/steps.txt`)
 
@@ -159,7 +223,12 @@ column. Limits: one broker, plaintext, MinIO, engine 0.21.0 only.
 - **Limit and risk.** Unexercised on these paths: the engine's CreateTopics,
   consumer-group APIs, DeleteRecords, IncrementalAlterConfigs. DescribeConfigs
   v1 and DescribeGroups v0 have no headroom: a release that raises either floor
-  fails the engine with an unsupported version, not a downgrade.
+  fails the engine with an unsupported version, not a downgrade. The same holds
+  for the table's three ACL entries — DescribeAcls, CreateAcls and DeleteAcls
+  pinned at v1, which is the 4.x floor (`DescribeAcls(29): 1 to 3` on 4.3.1,
+  likewise Create/Delete) — although 0.21.0 has no call site for them. The
+  table has 18 fixed entries; 15 are sendable (14 with call sites, DescribeGroups
+  through the fallback).
 
 ---
 
@@ -194,10 +263,18 @@ Each candidate ran on its own private network and volume, then was removed.
 | RustFS 1.0.0 `sha256:8cc98017…58f4d1ff` | Apache-2.0; since 2023, 181 contributors, 1.0.0 GA 2026-09-16 | 19/19 | 6/6 | pass (9 s, 12 s) | `mc admin user add / policy create / attach` work; the prefix policy is enforced |
 | versitygw v1.8.0 `sha256:30292fc2…a2499` | Apache-2.0; smaller community | 19/19 | **5/6** | pass (11 s, 11 s) | not run |
 
-**versitygw is rejected** on a Logweir-visible defect: an unknown access key
-is answered `404 XAdminUserNotFound`, which Logweir's store layer classifies as
-`ObjectNotFound`, not `InvalidCredentials` (`minio_options.rs:158`), so an
-operator would be sent to the wrong remedy.
+**versitygw is not chosen, as a preference — not an incompatibility.** An
+unknown access key is answered `404 XAdminUserNotFound`, which Logweir's store
+layer classifies as `ObjectNotFound`, not `InvalidCredentials`
+(`minio_options.rs:158`), so `logweir check` and weirkeeper would send an
+operator to the wrong remedy. The gap is Logweir's to close:
+`StoreErrorClass::classify`'s credential tokens
+(`crates/logweir-store/src/lib.rs:1844-1854`) do not include
+`xadminusernotfound`, so the 404 falls through to `NOT_FOUND` (`:1884-1887`) —
+a class of non-standard S3 error codes the classifier does not know (child row
+C6). With that closed, versitygw would pass Logweir's store layer too; it stays
+behind SeaweedFS on community size and on least privilege, which was not run
+against it.
 
 **Not run, with the reason:** Garage (AGPL-3.0, not permissive; no versioning
 or Object Lock in its documentation); Ceph RGW (LGPL, and a cluster rather than
@@ -226,14 +303,18 @@ Object Lock enforcement was checked in GOVERNANCE mode only.
 
 ## 4. Profiles: names, ownership, evidence
 
-| Profile | Owner (first consumers) | Smoke at tip `a81a2c34` (3.7.1 and 4.3.1) |
+Smoke at tip `a81a2c34` on 3.7.1 and 4.3.1 (27/27 each), and again in the fix
+round on slot 2 with every profile, the digest-pinned 4.3.1 line and the
+slot's own cluster ids (29/29, `fix-round/live/slot2-up-smoke.log`):
+
+| Profile | Owner (first consumers) | Smoke |
 |---|---|---|
 | `auth` | PROD-01.3 | 8/8: PLAIN over TLS, SCRAM-SHA-256 and mTLS list topics from the host side; wrong password (PLAIN, SCRAM), wrong CA and missing client certificate refused |
-| `cluster3` | PROD-10.1 (FX-5, PROD-05.x) | 5/5: three voters, RF 3 with ISR 3, `min.insync.replicas=2`, 30 records acked via three advertised ports; RF 4 refused |
-| `cluster2` | PROD-11.1 (PROD-04.2, PROD-12.1) | 2/2: its own cluster id; serves its own topics from the host side |
+| `cluster3` | the orchestrator until PROD-10.1 starts (FX-5 and PROD-05.1 use it first) | 5/5: three voters, RF 3 with ISR 3, `min.insync.replicas=2`, 30 records acked via three advertised ports; RF 4 refused |
+| `cluster2` | PROD-11.1 (PROD-04.2, PROD-12.1) | 2/2: its own cluster id (on slot 2, `aWJU5TcuiI8b_OOhIWQL3Q` against the broker's `uCzUzs6QXUyPYC1O9M5csA`); serves its own topics from the host side |
 | `objectstore` | PROD-09.1 (PROD-09.2, REPLACE-MINIO) | 6/6: four buckets via the published port; wrong secret refused; first create 200 and second 412; retention readback; retained version not deletable; read by version id |
 | `registry` | PROD-03.0 (PROD-03.1, 03.2) | 4/4: register, read by id, incompatible version 409, the registration in `_schemas` |
-| `streams` | PROD-06.1 (PROD-04.x, 06.2) | 2/2: exact counts for a per-run word, a never-produced word absent; group Stable with changelog and repartition topics |
+| `streams` | PROD-06.1 (PROD-04.x, 06.2) | 4/4 (fix round; 2/2 at `a81a2c34`): two lines through the running app count exactly 2; the NEGATIVE CONTROL stops the app, produces a third line and requires the count to stay 2; restarted, the app counts the missed line (3); group Stable with changelog and repartition topics. (The earlier "never-produced word absent" check could not fail and is gone, review L5.) |
 | `txn` | PROD-01.1 | reserved, not built here |
 
 27/27 on each line (`profiles/tip-smoke-3.7.log`, `tip-smoke-4.3.log`); the
@@ -241,7 +322,11 @@ checks use a per-run nonce, so a second run on the same stack cannot pass on
 leftovers. Two live mutants on 4.3.1 were killed and restored
 (`mutants/live-*.log`): the mTLS listener without `ssl.client.auth=required`
 (the missing-certificate check failed), and `kafka-cluster2` without its own
-`CLUSTER_ID` (the distinct-id check failed).
+`CLUSTER_ID` (the distinct-id check failed). The smoke no longer needs this
+host's helper (review L1): with a recording `timeout` first on `PATH`, every
+container and request of the registry checks went through it (4 calls); with
+no `timeout`, `gtimeout` or helper, it warned once and the same checks ran
+unbounded and passed (`fix-round/live/l1-bound.log`).
 
 **Owner** means the row that changes the profile's services next without
 coordinating; any other row extends it with a new service or asks.
@@ -280,8 +365,11 @@ coordinating; any other row extends it with a new service or asks.
 - **C1 — Move the default broker line off 3.7.1.** Scope: `KAFKA_VERSION` in
   `scripts/extract-engine.sh`'s generated `.env` and in
   `.github/workflows/engine-matrix.yml` (neither is this row's), after PROD-00.1
-  settles the engine matrix. Acceptance: CI's e2e job green on the new default;
-  3.7.1 stays runnable with `--kafka 3.7`.
+  settles the engine matrix; plus the eleven
+  `${KAFKA_IMAGE:-apache/kafka:${KAFKA_VERSION:-3.7.1}}` fallbacks in
+  `e2e/compose/docker-compose.yml` and the `KV=${KV:-3.7.1}` fallback in
+  `e2e/compose/profile-smoke.sh`. Acceptance: CI's e2e job green on the new
+  default; 3.7.1 stays runnable with `--kafka 3.7`.
 - **C2 — The rest of the stack readers.** Scope: the `crates/` `--features e2e`
   rows that dial `localhost:9092` / `localhost:9000`
   (`crates/logweir-kafka/tests/live.rs`, `crates/logweir-store/tests/minio_options.rs`,
@@ -295,7 +383,19 @@ coordinating; any other row extends it with a new service or asks.
 - **C4 — Object-store rows in `docs/support-matrix.md`** for SeaweedFS 4.48,
   RustFS 1.0.0 and versitygw v1.8.0 from §3 (that section is not this row's).
 - **C5 — Engine protocol headroom** is PROD-00.1's "ApiVersions negotiation"
-  capability row; §2.3 is its evidence.
+  capability row; §2.3 is its evidence. It covers DescribeConfigs v1 and
+  DescribeGroups v0, and the three ACL entries (DescribeAcls, CreateAcls,
+  DeleteAcls at v1, the 4.x floor), which have no call site in 0.21.0 but would
+  fail the same way once one is added.
+- **C6 — Classify non-standard S3 credential errors** (class sweep, product
+  code): `StoreErrorClass::classify` (`crates/logweir-store/src/lib.rs:1844-1854`,
+  `:1884-1887`) maps versitygw's `404 XAdminUserNotFound` to not-found.
+  Acceptance: `minio_options.rs` 6/6 against versitygw v1.8.0; a store-layer
+  unit row per known non-standard credential code, and a negative control where
+  a genuine `NoSuchKey` stays not-found.
+- **C7 — `just links` covers `e2e/README.md`** (class sweep, `justfile:280`):
+  the new guide sits outside the standing link gate's path list. Acceptance:
+  the recipe names it, and a broken link in it fails `just links`.
 
 ---
 
