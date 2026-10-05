@@ -5564,11 +5564,12 @@ the same spec exits `1` — so a UI that maps exit 3 to *"your approval does not
 match this spec"* mislabels that case every time the scratch cluster is down.
 
 The controller removes the ambiguity **at the source**. Before any pod exists
-it runs four checks, in this order:
+it runs these six checks, in this order:
 
 | # | Check | `reason`, and what happens |
 |---|---|---|
 | 0 | The object's own name is at most 63 characters | `NameTooLong`, terminal. Nothing is created |
+| 0b | `spec.runnerResources`, when set, is a block the controller applies (*The runner's requests and limits*, below) | `ExecutionSpecInvalid`, **terminal**, naming every refused field. Nothing is created, and the `Approval` is not read |
 | 1 | `spec.approvalRef` names something | `ApprovalNotReceived`, **terminal** |
 | 2 | That `Approval` exists and is `Verified=True` | `ApprovalNotVerified`, **held and retried in 30 s** |
 | 3 | `sha256(spec.planBytes)` equals the `plan_hash` **inside** `Approval.spec.approvalBytes` | `PlanHashMismatch`, terminal, naming both hashes |
@@ -5791,7 +5792,10 @@ the Job every `Restore` had before FX-2, and the namespace's `LimitRange`
 defaults apply unchanged. A `RehearsalSchedule`'s `spec.bounds.runnerResources`
 is copied onto each child `Restore` verbatim and arrives the same way (§7g).
 The console never sets the field; it is set with `kubectl` or by a
-`RehearsalSchedule`.
+`RehearsalSchedule`. Neither the console nor the product API shows it yet, so an
+approver does not see it beside the plan: read it with the `kubectl` line at the
+end of this section. Showing it on the `Restore` view is owed to PROD-10.1,
+which exposes the control.
 
 Before FX-2 the field was accepted, documented and **dropped**: the container
 carried no `resources` whatever the object said, so every runner pod was
@@ -5850,21 +5854,44 @@ happens next is the namespace's:
 
 A namespace whose `ResourceQuota` covers compute and which has no `LimitRange`
 defaults refuses every pod that states no limits, and `spec.runnerResources` is
-how a `Restore` runs there. `Backup`, check, probe and delivery Jobs have no
-such field and state no resources; their requests and limits come from the
-namespace's `LimitRange` or not at all.
+how a `Restore` runs there. `Backup`, check, probe, delivery and retention Jobs
+have no such field and state no resources; their requests and limits come from
+the namespace's `LimitRange` or not at all. When such a Job's pod is rejected
+at creation, what its object reports depends on whether that controller reads
+the Job's `FailedCreate` event:
+
+| The Job | What the object reports for a pod rejected at creation |
+|---|---|
+| A `Backup`'s runner, and a `Restore`'s (with a block or without) | `RunnerReady=False` / `PodCreationForbidden`, a `PodCreateRejected` diagnostic quoting the admission, then terminal `PodCreationForbidden` after `failFastSeconds` |
+| A `Preflight`, and a run's evidence-fetch Job | `PodCreateRejected` once the Job has had no pod for 30 seconds, and the Job is cancelled |
+| A `TopicDiscovery`, a `RecoveryCatalog` sync, and a dynamic `Backup`'s topic discovery | These read no Events. `PodNotStarted` (on the `Backup`, `Resolving`) until the Job's own deadline, then `DeadlineExceeded`: `Synced=False` on the catalog, and the `Backup` ends `DiscoveryFailed` |
+| A `KafkaCluster` probe | `Reachable=Unknown` / `ProbeRunning` until the probe's 120-second deadline, then `Reachable=Unknown` / `NoExitCode`; `reachable` and `clusterId` keep their last values |
+| A `ProtectionPolicy` delivery | After the delivery Job's 120-second deadline the attempt is recorded `Failed` ("the delivery Job finished with no exit code") and `NotificationsDelivered=False` / `DeliveryFailed`; it is retried, three attempts in all |
+| A `RetentionPolicy` enforcement run | `Enforced=True` / `RunInProgress` until `enforcement.deadlineSeconds`, then `Enforced=False` / `RunFailed` ("produced no exit code"); three failed runs in a row turn `Degraded=True` |
 
 **What binds it.** `spec.runnerResources` is not part of `planBytes` and not a
-member of the approval bundle, so an approver signs the data operation and not
-its container bounds — the same position as `deadlineSeconds`. `spec` is
-immutable, so the value cannot change after the object is created, and a Job's
-pod template is immutable too: nothing changes it after admission. For a
-rehearsal the value is inside the sealed spec whose digest the standing
-authorization signs, so a different value is a different schedule under a
-different authorization.
+member of the approval bundle, so a per-run approver signs the data operation
+and not its container bounds — the same position as a per-run `Restore`'s
+`deadlineSeconds`. `spec` is immutable, so the value cannot change after the
+object is created, and a Job's pod template is immutable too: nothing changes it
+after admission. For a rehearsal the value is inside the `RehearsalSchedule`'s
+sealed spec, whose digest (`templateDigest`) the standing authorization signs,
+so a different value is a different schedule under a different authorization.
+
+**That binds the schedule, not every `Restore` the authorization admits.** The
+signed `RehearsalScope` carries no `runnerResources`. The `Restore` controller's
+standing admission checks a `Restore`'s plan and its `deadlineSeconds` against
+the signed scope, and the schedule's digest is out of its reach. So a standing
+`Restore` written by hand (anyone with `create` on `restores` may name the
+authorization) is held only to the controller's compiled-in bounds above, not to
+the schedule's sealed value; the `Restore`s the schedule creates carry that value
+verbatim. Carrying `runnerResources` in the signed `RehearsalScope`, a versioned
+change to a signed document, is owed to PROD-10.1.
 
 **Upgrade and rollback.** The CRD change is descriptions only; the field and its
-pattern have been served since the D3 W0 schemas.
+pattern have been served since the D3 W0 schemas. Before the upgrade, list the
+objects it changes, those that already carry a block, with the inventory in
+[the release notes](release-notes.md), item 21.
 
 - A `Restore` that already has a Job keeps it: the pod template is immutable,
   and the upgraded controller observes the run and never refuses it
@@ -5881,7 +5908,9 @@ pattern have been served since the D3 W0 schemas.
 - **Rolling back** to a controller from before FX-2 ignores the field again:
   the Jobs it creates carry no `resources`. A `Restore` this build refused stays
   `Failed` (no controller acts on a terminal `Restore`); a schedule's next slot
-  fires under the older controller and drops the block, as it always did.
+  fires under the older controller and drops the block, as it always did. A
+  schedule this build skipped for its block therefore runs again, uncapped:
+  suspend it first (`spec.suspend`, its one mutable field) if it must not.
   Nothing has to be deleted in either direction.
 
 What a runner Job actually carries:
