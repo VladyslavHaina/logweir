@@ -397,7 +397,7 @@ Every other mapped topic is named in `not_assessed` with `<why>`:
 | `unknown` | the restore is bound to no recovery point (a v1-shaped plan), or to one whose receipt has no `config_coverage` (every receipt before format 1.1.0) |
 | `notCaptured` | the receipt says the capture was not complete (`describeFailed` or `manifestDiffers`) |
 | `captureDenied` | the receipt says the source broker refused the configuration read |
-| `targetReadDenied` | the source was captured, but the restore identity may not DescribeConfigs the TARGET topic; that topic's keys are then not compared at all |
+| `targetReadDenied` | the source was captured, but the restore identity may not DescribeConfigs the TARGET topic; that topic's keys are then not compared at all. Only a topic whose backup recorded no overrides gets here: for one that did, the pinned engine's restore describes the target itself and phase 6 exits 1 first, with no scorecard |
 
 For a listed topic the two arrays above still name every difference the archive's
 own record shows — those are facts — but their SILENCE proves nothing. Partition
@@ -410,15 +410,18 @@ also writes `"<target topic>: configuration not assessed (<why>)"` into
 predates it — `verify_scorecard.py` before 1.15.0, a `logweir drill show` built
 before FX-4, a person with a 1.0.0 guide — reads only the two arrays it always
 had, and must not see a clean list for a topic nobody assessed. For
-`targetReadDenied` the entry keeps the one property of the writer before FX-4
-that mattered, a list that is not empty, without that writer's false per-key
-entries. That writer compared the source's overrides with an empty map and
-listed every one of them: the INTENDED keys under `intentionally_deviated` and
-the rest under `unexpected_divergence`. A configuration key never contains a
-space, so a parser of `"<topic>: <key>"` entries tells this one apart;
-`not_assessed` stays the authoritative list.
-Measured with a pre-FX-4 `logweir drill show` and `verify_scorecard.py` 1.14.0
-over a live 1.1.0 scorecard (the FX-4 report's fix round).
+`targetReadDenied` the writer before FX-4 compared the source's record with
+the refused read as an empty map. That listed the source's overrides, but with
+the pinned engine a topic with overrides never reaches phase 7 under such an
+identity (the table above), so for the topics that do, which recorded none,
+its list was empty: the entry ends that silence. A configuration key never
+contains a space, so a parser of `"<topic>: <key>"` entries tells this one
+apart; `not_assessed` stays the authoritative list.
+Measured on the live 1.1.0 scorecards of FX-4's fix round with readers built
+before FX-4 (main `804c5b2f`): `logweir drill show` prints the entry in its
+`topic parity` row, and `logweir drill verify` and `verify_scorecard.py` 1.14.0
+accept each document; the 1.0.0 scorecard the pre-FX-4 writer signed for the
+same `targetReadDenied` restore says nothing about the topic.
 
 **What "assessed" covers.** An assessed topic's parity compares the configuration
 OVERRIDES the engine captured (explicit topic-level settings on its 24-key

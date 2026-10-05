@@ -12,7 +12,7 @@
 //! |---|---|
 //! | `a_denied_describe_configs_is_a_refusal_at_every_reader` | T13 at the reader: rdkafka 0.36.2 answers a refused topic or broker with ZERO entries and no error; `RdKafkaReader` and `KafkaInventory` now return the refusal; the restore readiness row `target.timestampBound` goes from READY (the pre-fix flattening of that live answer) to UNKNOWN |
 //! | `phase_0_never_assumes_create_time_for_a_refused_broker_read` | T13 at phase 0, by PROCESS: on a `LogAppendTime` broker, a restore identity without cluster DescribeConfigs is admitted as `CreateTime` by the pre-FX-4 binary (`FX4_BEFORE_BIN`) and stopped at phase 0 by this build |
-//! | `capture_coverage_reaches_the_receipt_the_catalog_and_drill_parity` | FX-4 itself: a DENIED DescribeConfigs is `captureDenied` (and empties its neighbour's manifest record: `notCaptured`); overrides and a broker-default and a topic-override `LogAppendTime` are `captured` with their timestamp type and source; the catalog point copies them; a point-bound restore's parity is `notAssessed` exactly where the capture was not, and a restore identity that may not DescribeConfigs its TARGET topics gets `targetReadDenied`; every not-assessed topic also leaves its fail-safe entry in `unexpected_divergence` (review M5), and the signed scorecards are kept for the old-reader check |
+//! | `capture_coverage_reaches_the_receipt_the_catalog_and_drill_parity` | FX-4 itself: a DENIED DescribeConfigs is `captureDenied` (and empties its neighbour's manifest record: `notCaptured`); overrides and a broker-default and a topic-override `LogAppendTime` are `captured` with their timestamp type and source; the catalog point copies them; a point-bound restore's parity is `notAssessed` exactly where the capture was not; a restore identity that may not DescribeConfigs its TARGET topics gets `targetReadDenied` for a topic whose backup recorded no overrides, and exit 1 in phase 6 with no scorecard for one that did (the pinned engine describes such a target itself); every not-assessed topic also leaves its fail-safe entry in `unexpected_divergence` (review M5), and the signed scorecards are kept for the old-reader check |
 //!
 //! # Running them
 //!
@@ -1543,9 +1543,18 @@ fn phase_0_never_assumes_create_time_for_a_refused_broker_read() {
 /// - point-bound restores of A and B: `not_assessed` names exactly A's two
 ///   topics and none of B's; an unbound restore of B names its topic
 ///   `unknown`;
-/// - a point-bound restore of B by the RESTRICTED principal, which may do what
-///   a restore does on its target prefix but not DescribeConfigs: every topic
-///   is `targetReadDenied` (review M5);
+/// - point-bound restores of B by the RESTRICTED principal, which may do what
+///   a restore does on its target prefix but not DescribeConfigs (review M5):
+///   the no-override topic `latdef` is `targetReadDenied` — its backup record
+///   is empty, so the pinned engine never describes the target and phase 7's
+///   own read is the refused one — while the overrides topic `ovr` stops in
+///   phase 6 with exit 1 and NO scorecard, because the engine's restore
+///   (`restore_topic_configs`, on by default) describes every target whose
+///   backup recorded overrides (measured on 3.7.1 on 2026-10-05);
+/// - with `FX4_BEFORE_BIN` (as row 2), the same restricted restore of `latdef`
+///   under the writer before FX-4: a 1.0.0 scorecard whose
+///   `unexpected_divergence` says nothing about the topic — the silence the
+///   fail-safe entry ends;
 /// - every topic a restore did not assess also has its fail-safe entry in
 ///   `unexpected_divergence`, and the signed scorecards are kept under
 ///   `config-coverage/old-reader/` for a reader built before FX-4.
@@ -1641,21 +1650,53 @@ fn capture_coverage_reaches_the_receipt_the_catalog_and_drill_parity() {
         false,
         false,
     );
-    // Restore T (review M5, live): the restricted principal restores B and may
-    // not DescribeConfigs its own target topics.
+    // Restores T (review M5, live): the restricted principal restores B and
+    // may not DescribeConfigs its own target topics. `rt` takes the topic
+    // whose backup record is EMPTY, so phase 7's read is the refused one;
+    // `rto` takes the overrides topic, which the engine's restore describes
+    // itself (`restore_topic_configs`), so phase 6 stops first.
     let pt = format!("fx4-{n}-rt-");
-    for t in [&ovr, &lat_default, &lat_override] {
-        guard.topics.push(format!("{pt}{t}"));
-    }
+    guard.topics.push(format!("{pt}{lat_default}"));
     guard.prefixed_acls.push(pt.clone());
     let restore_acl = allow_restore_without_describe_configs(&pt);
     let rt = restore(
         &bin(),
-        &restore_spec(&bb, &[&ovr, &lat_default, &lat_override], &pt, true, true),
+        &restore_spec(&bb, &[&lat_default], &pt, true, true),
         &format!("{n}-rt"),
         true,
         true,
     );
+    let pto = format!("fx4-{n}-rto-");
+    guard.topics.push(format!("{pto}{ovr}"));
+    guard.prefixed_acls.push(pto.clone());
+    let restore_acl_ovr = allow_restore_without_describe_configs(&pto);
+    let rto = restore(
+        &bin(),
+        &restore_spec(&bb, &[&ovr], &pto, true, true),
+        &format!("{n}-rto"),
+        true,
+        true,
+    );
+    let engine_refusal = format!("DescribeConfigs failed for 2/{pto}{ovr}: error_code=29");
+    // BEFORE FX-4 (only with FX4_BEFORE_BIN, as row 2): the same identity and
+    // the same no-override topic under the writer before FX-4, which read the
+    // refused target configuration as EMPTY and compared it with the topic's
+    // empty record — a clean `unexpected_divergence`. The marker in `rt` is what
+    // ends that silence (review M5).
+    let before_rt = std::env::var_os("FX4_BEFORE_BIN").map(|before_bin| {
+        let pbt = format!("fx4-{n}-rtb-");
+        guard.topics.push(format!("{pbt}{lat_default}"));
+        guard.prefixed_acls.push(pbt.clone());
+        allow_restore_without_describe_configs(&pbt);
+        let r = restore(
+            &PathBuf::from(before_bin),
+            &restore_spec(&bb, &[&lat_default], &pbt, false, true),
+            &format!("{n}-rtb"),
+            false,
+            true,
+        );
+        (pbt, r)
+    });
     // The signed documents, kept for the old-reader check (review M5).
     let keep = evidence_dir().join("old-reader");
     std::fs::create_dir_all(&keep).expect("the old-reader directory");
@@ -1707,6 +1748,25 @@ fn capture_coverage_reaches_the_receipt_the_catalog_and_drill_parity() {
         "restore_b_point_bound_target_read_denied": {
             "acl": restore_acl,
             "parity": parity(&rt),
+        },
+        "restore_b_target_read_denied_before_fx4": match &before_rt {
+            Some((pbt, r)) => json!({
+                "binary": std::env::var("FX4_BEFORE_BIN").unwrap_or_default(),
+                "prefix": pbt,
+                "exit": r.out.status.code(),
+                "format_version": r.scorecard["format_version"],
+                "topic_parity": r.scorecard["topic_parity"],
+            }),
+            None => json!("skipped: FX4_BEFORE_BIN unset"),
+        },
+        "restore_b_overrides_topic_without_target_describe_configs": {
+            "acl": restore_acl_ovr,
+            "exit": rto.out.status.code(),
+            "scorecard_written": !rto.scorecard.is_null(),
+            "engine_refusal": text(&rto.out)
+                .lines()
+                .find(|l| l.contains(&engine_refusal))
+                .map(|l| l.chars().take(400).collect::<String>()),
         },
         "old_reader_documents": keep.display().to_string(),
     });
@@ -1794,14 +1854,52 @@ fn capture_coverage_reaches_the_receipt_the_catalog_and_drill_parity() {
     assert_eq!(rt.out.status.code(), Some(0), "{}", parity(&rt));
     assert_eq!(
         na(&rt),
-        json!([
-            format!("{pt}{lat_default}: configuration (targetReadDenied)"),
-            format!("{pt}{lat_override}: configuration (targetReadDenied)"),
-            format!("{pt}{ovr}: configuration (targetReadDenied)"),
-        ]),
+        json!([format!(
+            "{pt}{lat_default}: configuration (targetReadDenied)"
+        )]),
         "{}",
         parity(&rt)
     );
+    // The overrides topic never reaches phase 7 under that identity: the
+    // engine's own DescribeConfigs of the target is refused (29 is
+    // TOPIC_AUTHORIZATION_FAILED), phase 6 exits 1 and no scorecard exists to
+    // read as parity.
+    assert_eq!(rto.out.status.code(), Some(1), "{}", text(&rto.out));
+    assert!(
+        rto.scorecard.is_null(),
+        "no scorecard may be written: {}",
+        rto.scorecard
+    );
+    assert!(
+        text(&rto.out).contains(&engine_refusal),
+        "the engine's refused DescribeConfigs of {pto}{ovr}: {}",
+        tail(&rto.out, 6).join("\n")
+    );
+    // Before FX-4 that same restore was SILENT about the topic: a 1.0.0
+    // scorecard, no `not_assessed`, and nothing in `unexpected_divergence`.
+    if let Some((pbt, r)) = &before_rt {
+        assert_eq!(
+            r.out.status.code(),
+            Some(0),
+            "{}",
+            tail(&r.out, 8).join("\n")
+        );
+        assert!(
+            r.scorecard["topic_parity"].get("not_assessed").is_none(),
+            "{}",
+            r.scorecard["topic_parity"]
+        );
+        let named = format!("{pbt}{lat_default}:");
+        assert!(
+            !r.scorecard["topic_parity"]["unexpected_divergence"]
+                .as_array()
+                .expect("unexpected_divergence")
+                .iter()
+                .any(|u| u.as_str().is_some_and(|u| u.starts_with(&named))),
+            "the writer before FX-4 was expected to be silent here: {}",
+            r.scorecard["topic_parity"]
+        );
+    }
     // Review M5: a topic nobody assessed is never silent to a reader that
     // predates `not_assessed` — its fail-safe entry is in the array such a
     // reader shows.

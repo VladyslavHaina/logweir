@@ -1033,7 +1033,11 @@ What changes for an operator:
   readback.
 - **Phase 7 never compares a refused target read as empty.** The topic is
   named in `topic_parity.not_assessed` with `targetReadDenied`, and its
-  partition count and replication factor are still classified.
+  partition count and replication factor are still classified. Phase 7 meets
+  this only for a topic whose backup recorded no configuration overrides: for
+  one that did, the pinned engine's restore describes the target topic itself
+  (`restore_topic_configs`, on by default) and phase 6 exits 1 with no
+  scorecard (measured on the compose stack, 2026-10-05).
 - **A backup never fails for it.** The topic's `config_coverage` reads
   `captureDenied` ([the format](formats/backup-receipt.md#config_coverage--topic-configuration-capture-coverage-format-110)).
 

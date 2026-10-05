@@ -1251,8 +1251,10 @@ the facts it does not have room for, measured 2026-09-12:
     broker's timestamp settings and exits 1 without it, and readiness check
     `target.timestampBound` reads `unknown`. **DescribeConfigs on the target
     topics** too: phase 0's probe readback and phase 2 (an existing mapped
-    topic) exit 1 without it, and phase 7 reports the topic's configuration
-    parity as `targetReadDenied`.
+    topic) exit 1 without it; so does phase 6 for a topic whose backup
+    recorded configuration overrides, because the engine's restore describes
+    that target topic itself; and phase 7 reports a topic without overrides
+    as `targetReadDenied` (measured on the compose stack, 2026-10-05).
   * **Delete on the scratch prefix** (`target.topic_mapping_prefix`): phase 9
     deletes the topics a `scratch` restore created, and on a broker whose
     `log.message.timestamp.type` is `LogAppendTime` phase 0 creates one probe
