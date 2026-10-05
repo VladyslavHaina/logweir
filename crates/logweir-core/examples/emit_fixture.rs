@@ -133,6 +133,9 @@ fn main() {
             absent: vec![],
             would_create: vec![("drill-orders".to_string(), 3)],
             level: "full".into(),
+            // FX-4's 1.1.0 field stays absent: this fixture is the frozen
+            // 1.0.0 document.
+            not_assessed: None,
         },
         integrity: Integrity {
             level: IntegrityLevel::ByteFingerprint,

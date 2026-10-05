@@ -1041,6 +1041,14 @@ fn each_phases_result_reaches_the_signed_document() {
         "the diff must report what it actually READ off the target"
     );
     assert_eq!(sc.target_diff.level, "full");
+    // FX-4: phase 3 ran and found no collision, so its 1.1.0 `not_assessed`
+    // reaches the signed document as the claim `[]`, never absent ("not
+    // recorded"), and the collision strings carry no qualifier of their own.
+    assert_eq!(
+        sc.target_diff.not_assessed,
+        Some(vec![]),
+        "phase 3's not_assessed must reach the signed document"
+    );
     // 5 — the lever readback
     assert_eq!(
         sc.engine.levers.header_preflight,

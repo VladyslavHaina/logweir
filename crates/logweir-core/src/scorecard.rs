@@ -424,6 +424,28 @@ pub struct TargetDiffSummary {
     pub would_create: Vec<(String, i32)>,
     /// "full" in v0.1. Becomes "shallow" only if spec §15 cut 0d is ever taken.
     pub level: String,
+    /// **Format 1.1.0 (FX-4).** The `collisions` whose CONFIGURATION
+    /// difference was not assessed, each as `"<target topic>:
+    /// configuration (<why>)"`, the shape of `topic_parity.not_assessed`.
+    /// `<why>` is the SOURCE topic's capture coverage from the verified
+    /// backup receipt: `unknown` (the restore was bound to no receipt, or to
+    /// one that predates 1.1.0), `notCaptured` or `captureDenied`.
+    ///
+    /// For a collision listed here, its `differing config: […]` names every
+    /// difference the archive's OWN record shows, but an empty list proves
+    /// nothing: a denied DescribeConfigs at capture leaves that record empty.
+    /// The collision strings themselves stay byte for byte what a writer
+    /// before FX-4 produced: a qualifier inside them would change an
+    /// existing field's content, which `docs/stability.md` calls MAJOR and
+    /// the owner's OD-7 rulings of 2026-10-05 did not make MINOR. This new
+    /// optional field carries it instead.
+    ///
+    /// ABSENT means NOT RECORDED — every 1.0.0 document, and a document whose
+    /// phase 3 never ran. `Some([])` is the claim that every collision's
+    /// configuration difference was assessed (vacuously, when there is no
+    /// collision); only phase 3 writes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_assessed: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1188,6 +1210,7 @@ mod tests {
                 absent: vec![],
                 would_create: vec![],
                 level: "full".into(),
+                not_assessed: None,
             },
             integrity: Integrity {
                 level: IntegrityLevel::ByteFingerprint,

@@ -2180,7 +2180,8 @@ def test_script_version_was_bumped_with_the_payload_type_map():
     # scorecard and backup-receipt invariant sets unchanged.
     #
     # 1.15.0 (FX-4) adds the backup receipt's six `config_coverage` arms and the
-    # scorecard's `topic_parity.not_assessed` shape check. Map still five.
+    # scorecard's `topic_parity.not_assessed` and `target_diff.not_assessed`
+    # shape checks. Map still five.
     mod = _verifier_module()
     assert len(mod.PAYLOAD_TYPES) == 5, sorted(mod.PAYLOAD_TYPES)
     assert mod.SCRIPT_VERSION == "1.15.0", mod.SCRIPT_VERSION
@@ -2451,4 +2452,23 @@ def test_a_not_assessed_value_serde_would_refuse_is_refused_here_too():
         doc = json.loads(json.dumps(base))
         doc["format_version"] = "1.1.0"
         doc["topic_parity"]["not_assessed"] = good
+        assert mod.check_invariants(doc) == "", good
+
+
+def test_a_target_diff_not_assessed_value_serde_would_refuse_is_refused_here_too():
+    # FX-4 fix round: phase 3's qualifier moved out of the collision strings
+    # (which stay byte for byte what a pre-FX-4 writer produced) into
+    # `target_diff.not_assessed`, the same `Option<Vec<String>>` as above.
+    mod = _verifier_module()
+    base = json.loads((ROOT / "e2e/fixtures/scorecard-pass.json").read_text())
+    for bad in ["x", [1], {"a": 1}]:
+        doc = json.loads(json.dumps(base))
+        doc["target_diff"]["not_assessed"] = bad
+        assert mod.check_invariants(doc) == (
+            "target_diff.not_assessed is not an array of strings"
+        ), bad
+    for good in [None, [], ["drill-orders: configuration (captureDenied)"]]:
+        doc = json.loads(json.dumps(base))
+        doc["format_version"] = "1.1.0"
+        doc["target_diff"]["not_assessed"] = good
         assert mod.check_invariants(doc) == "", good

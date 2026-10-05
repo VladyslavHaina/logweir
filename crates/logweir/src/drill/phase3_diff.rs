@@ -12,7 +12,9 @@ pub struct Collision {
     /// **FX-4.** `Some(<coverage>)` when the SOURCE topic's configuration was
     /// not captured (`unknown`, `notCaptured` or `captureDenied`): the keys
     /// above are the differences the archive's own record shows, and their
-    /// ABSENCE proves nothing. `None` only for `captured`.
+    /// ABSENCE proves nothing. `None` only for `captured`. It reaches the
+    /// signed document as a `target_diff.not_assessed` entry, never inside
+    /// the collision string.
     pub configuration_not_assessed: Option<&'static str>,
 }
 
@@ -50,21 +52,34 @@ impl TargetDiff {
     /// first-order fact about whether the restore can work, and belongs in
     /// the signed document a reader actually sees, not only in an
     /// in-process struct nothing consumes.
+    ///
+    /// **FX-4.** A collision whose SOURCE configuration was not captured is
+    /// named in `not_assessed` (`"<target topic>: configuration (<why>)"`),
+    /// so its `differing config: []` is never read as "no divergence". The
+    /// collision string itself is byte for byte what the writer before FX-4
+    /// produced: an existing field's content does not change format (the
+    /// owner's OD-7 rulings of 2026-10-05 made only the new arms and phase
+    /// 7's `unexpected_divergence` entry MINOR). `Some`, always, from here:
+    /// phase 3 ran, so "every collision assessed" (`Some([])`) is a claim
+    /// this function can make, and absent stays the spelling of "not
+    /// recorded".
     pub fn summarise(&self) -> logweir_core::scorecard::TargetDiffSummary {
+        let mut not_assessed: Vec<String> = self
+            .collisions
+            .iter()
+            .filter_map(|c| {
+                c.configuration_not_assessed
+                    .map(|why| format!("{}: configuration ({why})", c.topic))
+            })
+            .collect();
+        not_assessed.sort();
         logweir_core::scorecard::TargetDiffSummary {
             collisions: self
                 .collisions
                 .iter()
                 .map(|c| {
-                    // FX-4: an unassessed configuration says so beside the
-                    // list, so an empty `[]` is never read as "no divergence".
-                    let not_assessed = c
-                        .configuration_not_assessed
-                        .map(|why| format!(" (configuration not assessed: {why})"))
-                        .unwrap_or_default();
                     format!(
-                        "{}: {} partition(s), {} record(s) already present, differing config: \
-                         [{}]{not_assessed}",
+                        "{}: {} partition(s), {} record(s) already present, differing config: [{}]",
                         c.topic,
                         c.existing_partitions,
                         c.existing_end_offsets,
@@ -77,6 +92,7 @@ impl TargetDiff {
             // "shallow" only if spec §15 cut 0d is ever taken; v0.1 always
             // reads the target's real state, so this is "full".
             level: "full".into(),
+            not_assessed: Some(not_assessed),
         }
     }
 }

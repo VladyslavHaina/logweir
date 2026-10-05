@@ -3319,6 +3319,72 @@ fn a_topic_that_was_not_assessed_is_never_silent_to_an_older_reader() {
     quiet(&out, "targetReadDenied");
 }
 
+/// **OD-7, as the owner ruled it on 2026-10-05.** `docs/stability.md` states
+/// both rulings beside the MINOR/MAJOR rule, and the entry the follow-up
+/// ruling covers is EXACTLY the shape phase 7 writes: the ruling names that
+/// string, so a different marker would be an unruled change to an existing
+/// field's content again. No doc still calls the classification pending.
+///
+/// Negative controls: the 2026-09-29 "OD-7, still pending" text restored in
+/// `docs/stability.md`, a rule that loses either ruling, or a
+/// `not_assessed_marker` of another shape, fails this test.
+#[test]
+fn the_stability_rule_carries_the_owners_od_7_rulings_for_the_entry_phase_7_writes() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let flat = |rel: &str| -> String {
+        std::fs::read_to_string(root.join(rel))
+            .unwrap_or_else(|e| panic!("{rel}: {e}"))
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let stability = flat("docs/stability.md");
+    let rule = stability
+        .split("### The first post-tag addition")
+        .next()
+        .expect("docs/stability.md states the rule before FX-4's section");
+    for ruled in [
+        "The owner's decision [OD-7](to-do/product-expansion.md#owner-decisions), taken on \
+         2026-10-05, rules two cases MINOR",
+        "**A `validate_invariants` arm that reads ONLY a new optional block is MINOR.** An arm \
+         that changes how an existing field is judged stays MAJOR.",
+        "Nothing else is ruled: any other change to an existing field's content is still a \
+         MAJOR bump.",
+    ] {
+        assert!(
+            rule.contains(ruled),
+            "docs/stability.md's MINOR/MAJOR rule no longer says: {ruled}"
+        );
+    }
+    let marker = logweir::drill::phase7_verify::not_assessed_marker("<target topic>", "<why>");
+    let entry = format!(
+        "**FX-4's entry `\"{marker}\"` in the existing `topic_parity.unexpected_divergence` is \
+         MINOR**"
+    );
+    assert!(
+        rule.contains(&entry),
+        "OD-7's follow-up ruling covers the entry phase 7 writes, `{marker}`; \
+         docs/stability.md's rule must name exactly that shape"
+    );
+    for doc in [
+        "docs/stability.md",
+        "docs/formats/drill-scorecard.md",
+        "docs/formats/backup-receipt.md",
+        "docs/formats/catalog-point.md",
+        "docs/verify-a-scorecard.md",
+        "MAINTAINERS.md",
+    ] {
+        let text = flat(doc);
+        for stale in [
+            "OD-7, still pending",
+            "part of the owner's decision OD-7",
+            "part of OD-7 too",
+        ] {
+            assert!(!text.contains(stale), "{doc} still says {stale:?}");
+        }
+    }
+}
+
 /// **FX-4 / T13, consumer 5.** A REFUSED read of the TARGET's configuration
 /// used to be an empty map, so every source key compared as different. It is
 /// now named `targetReadDenied` and the topic's keys are not compared at all;

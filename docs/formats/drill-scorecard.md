@@ -7,12 +7,16 @@ The machine-readable schema is
 and CI diffs it against the code on every build, so this document and the
 schema cannot drift apart silently. [`schemas/logweir-drill-scorecard-1.0.0.json`](../../schemas/logweir-drill-scorecard-1.0.0.json)
 is frozen beside it: format **1.1.0** (FX-4) added the nested optional
-[`topic_parity.not_assessed`](#topic_parity-and-what-its-silence-means), the first
-field added after the v0.1 tags and therefore a MINOR bump with a new schema file
+[`topic_parity.not_assessed` and `target_diff.not_assessed`](#topic_parity-and-what-its-silence-means),
+the first fields added after the v0.1 tags and therefore a MINOR bump with a new
+schema file
 ([`docs/stability.md`](../stability.md#the-v010-tag-is-the-compatibility-boundary)).
 The fail-safe entries it also writes into the existing
 `topic_parity.unexpected_divergence` widen what that array's entries can say;
-their classification is part of the owner's decision OD-7.
+the owner ruled them MINOR on 2026-10-05
+([OD-7](../to-do/product-expansion.md#owner-decisions)'s follow-up ruling),
+because they can only weaken an older reader's verdict. Each
+`target_diff.collisions` string is written exactly as before.
 The payload type keeps `version=1.0.0`, the major-1 envelope. A worked example is
 [`e2e/fixtures/scorecard-pass.json`](../../e2e/fixtures/scorecard-pass.json) —
 read [`e2e/fixtures/README.md`](../../e2e/fixtures/README.md) first, which lists
@@ -364,6 +368,7 @@ fields.
 | `target_diff.absent` | array | Mapped target topics that do not exist — the normal case on a scratch cluster. Omitted from the JSON when empty. |
 | `target_diff.would_create` | array of `[name, partitions]` | Topics the restore will create, at the partition count it will build. |
 | `target_diff.level` | string | `full` in v0.1. Becomes `shallow` only if spec §15 cut 0d is ever taken. |
+| `target_diff.not_assessed` | string[], **optional** (1.1.0) | The `collisions` whose CONFIGURATION difference was not assessed, as `"<target topic>: configuration (<why>)"`. See [below](#topic_parity-and-what-its-silence-means). ABSENT means not recorded. |
 | `integrity.level` | enum | `byte-fingerprint` (full per-record check), `consume-only` (degraded), `not-attempted` (**no check ran** — an absence of evidence, never a pass). |
 | `integrity.result` | enum | `pass`, `fail`, `partial`. |
 | `integrity.partial_reason` | string \| null | **Required and non-BLANK when `result` is `partial`** — null, `""` and whitespace-only are all refused, by **both** readers, with the same message. See [`partial_reason` must SAY something](#partial_reason-must-say-something). The `drill show` footer renders it. |
@@ -405,10 +410,13 @@ also writes `"<target topic>: configuration not assessed (<why>)"` into
 predates it — `verify_scorecard.py` before 1.15.0, a `logweir drill show` built
 before FX-4, a person with a 1.0.0 guide — reads only the two arrays it always
 had, and must not see a clean list for a topic nobody assessed. For
-`targetReadDenied` this keeps what the writer before FX-4 produced, which
-compared the source's overrides with an empty map and listed them all. A
-configuration key never contains a space, so a parser of `"<topic>: <key>"`
-entries tells this one apart; `not_assessed` stays the authoritative list.
+`targetReadDenied` the entry keeps the one property of the writer before FX-4
+that mattered, a list that is not empty, without that writer's false per-key
+entries. That writer compared the source's overrides with an empty map and
+listed every one of them: the INTENDED keys under `intentionally_deviated` and
+the rest under `unexpected_divergence`. A configuration key never contains a
+space, so a parser of `"<topic>: <key>"` entries tells this one apart;
+`not_assessed` stays the authoritative list.
 Measured with a pre-FX-4 `logweir drill show` and `verify_scorecard.py` 1.14.0
 over a live 1.1.0 scorecard (the FX-4 report's fix round).
 
@@ -424,12 +432,22 @@ assessed, and only phase 7 writes it; ABSENT — every 1.0.0 document, and one
 whose phase 7 never ran — means not recorded and is never read as that claim.
 `logweir drill verify`, `docs/verify_scorecard.py` and `logweir drill show` all
 say so in words (`configuration parity: NOT ASSESSED for …` / `not recorded`).
-Phase 3's `target_diff.collisions` carries the same qualifier:
-`differing config: […] (configuration not assessed: <why>)`.
+Phase 3 qualifies its collisions the same way, in its own optional
+`target_diff.not_assessed`: one `"<target topic>: configuration (<why>)"` entry,
+with `<why>` one of the first three reasons above, for every collision whose
+SOURCE configuration was not captured. Such a collision's
+`differing config: […]` names only what the archive's own record shows, and an
+empty list there proves nothing. The collision strings themselves are byte for
+byte what a writer before FX-4 produced. `[]` is the claim that every
+collision's difference was assessed (vacuously, with no collision), and only
+phase 3 writes it; ABSENT means not recorded. Phase 0 refuses a mapped target
+topic that already exists, so a collision reaches a scorecard only when one
+appears between phase 0 and phase 3.
 
-Neither reader adds an invariant for the field — it is informational — but both
-refuse a value serde cannot read as an array of strings (`drill verify` exit 1,
-the script exit 1; `shape-index.json` records both).
+Neither reader adds an invariant for either field — they are informational —
+but both refuse a value serde cannot read as an array of strings
+(`drill verify` exit 1, the script exit 1; `shape-index.json` records both
+fields).
 
 ### `partial_reason` must SAY something
 

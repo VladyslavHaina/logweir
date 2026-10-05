@@ -61,8 +61,8 @@ fn checked_in_schema_matches_the_types() {
 /// FX-4: the 1.0.0 scorecard schema is FROZEN beside the 1.1.0 one, and still
 /// describes the documents written before the bump — `docs/stability.md`'s "a
 /// new schema file beside the old one". It is no longer regenerated, so this is
-/// the gate that it stays what it was: it names itself 1.0.0 and it has no
-/// `topic_parity.not_assessed`.
+/// the gate that it stays what it was: it names itself 1.0.0 and it has neither
+/// `topic_parity.not_assessed` nor `target_diff.not_assessed`.
 #[test]
 fn the_frozen_1_0_0_scorecard_schema_is_still_the_1_0_0_schema() {
     let frozen: serde_json::Value = serde_json::from_str(include_str!(
@@ -78,6 +78,12 @@ fn the_frozen_1_0_0_scorecard_schema_is_still_the_1_0_0_schema() {
     assert!(
         parity.get("not_assessed").is_none(),
         "the frozen 1.0.0 schema must not describe the 1.1.0 field"
+    );
+    let diff = &frozen["definitions"]["TargetDiffSummary"]["properties"];
+    assert!(diff["collisions"].is_object());
+    assert!(
+        diff.get("not_assessed").is_none(),
+        "the frozen 1.0.0 schema must not describe the 1.1.0 target_diff field"
     );
     let current: serde_json::Value =
         serde_json::from_str(&logweir_core::schema::scorecard_schema()).unwrap();
@@ -97,6 +103,16 @@ fn the_frozen_1_0_0_scorecard_schema_is_still_the_1_0_0_schema() {
             .iter()
             .any(|r| r == "not_assessed"),
         "not_assessed is OPTIONAL: a 1.0.0 document without it must still validate"
+    );
+    let diff = &current["definitions"]["TargetDiffSummary"];
+    assert!(diff["properties"]["not_assessed"].is_object());
+    assert!(
+        !diff["required"]
+            .as_array()
+            .expect("TargetDiffSummary has required fields")
+            .iter()
+            .any(|r| r == "not_assessed"),
+        "target_diff.not_assessed is OPTIONAL: a 1.0.0 document without it must still validate"
     );
 }
 

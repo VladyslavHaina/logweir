@@ -18,7 +18,18 @@ adopter's evidence bucket is a document some reader may already parse, so:
   file beside the old one. It is not a free edit and it is not "still 1.0.0".
 - **Changing a field's type, its meaning, or an identity rule
   (`validate_invariants`) is a MAJOR bump** — `2.0.0` — and needs two maintainer
-  approvals ([MAINTAINERS.md](../MAINTAINERS.md)).
+  approvals ([MAINTAINERS.md](../MAINTAINERS.md)). The owner's decision
+  [OD-7](to-do/product-expansion.md#owner-decisions), taken on 2026-10-05,
+  rules two cases MINOR:
+  - **A `validate_invariants` arm that reads ONLY a new optional block is
+    MINOR.** An arm that changes how an existing field is judged stays MAJOR.
+  - **FX-4's entry `"<target topic>: configuration not assessed (<why>)"` in
+    the existing `topic_parity.unexpected_divergence` is MINOR** (OD-7's
+    follow-up ruling, the same day), because it can only weaken an older
+    reader's verdict.
+
+  Nothing else is ruled: any other change to an existing field's content is
+  still a MAJOR bump.
 - **Removing or renaming a field is a MAJOR bump**, including a rename that
   merely fixes a spelling. `integrity.restoredPrincipalCouldConsume` is
   camelCase on the wire *permanently* for exactly this reason: it was frozen
@@ -37,21 +48,19 @@ frozen `1.0.0` one:
 
 | Document | New optional field | Schema |
 |---|---|---|
-| Drill scorecard | `topic_parity.not_assessed` | `schemas/logweir-drill-scorecard-1.1.0.json` |
+| Drill scorecard | `topic_parity.not_assessed`, `target_diff.not_assessed` | `schemas/logweir-drill-scorecard-1.1.0.json` |
 | Backup receipt | `config_coverage` | `schemas/logweir-backup-receipt-1.1.0.json` |
 | Catalog point record | `topics[].config_coverage` | `schemas/logweir-catalog-point-1.1.0.json` |
 
 - **Absent means unknown.** A missing `config_coverage` is UNKNOWN coverage and
-  never `captured`; a missing `not_assessed` is "not recorded" and never "every
-  topic assessed". A 1.0.0 document is decided exactly as before.
+  never `captured`; a missing `not_assessed` (either one) is "not recorded" and
+  never "every topic assessed". A 1.0.0 document is decided exactly as before.
 - **The media types keep `version=1.0.0`.** That names the envelope's major,
   which did not change; the catalog index entry also stays `1.0.0`.
-- **Six receipt arms are added, and their classification is the owner's
-  decision OD-7, still pending.** The technical reading is MINOR: arms 6–11 read
-  only the new block, so no document without it changes verdict, and the
-  corpus and parity gates re-prove that on every `just lint`. The rule above
-  calls a change to `validate_invariants` MAJOR without distinguishing arms
-  that read only a new optional field.
+- **Six receipt arms are added, and they are MINOR** under the owner's decision
+  OD-7 of 2026-10-05 (the rule above): arms 6–11 read only the new block, so no
+  document without it changes verdict, and the corpus and parity gates re-prove
+  that on every `just lint`.
 - **Readers built before FX-4 accept every 1.1.0 document** and ignore the new
   fields (measured: `docs/formats/backup-receipt.md`, "Upgrade, rollback and old
   receipts"). They check none of the six arms and print no coverage.
@@ -61,9 +70,16 @@ frozen `1.0.0` one:
   for every topic it names in `not_assessed`, so a reader that predates
   `not_assessed` sees a divergence, never a clean list
   ([the scorecard format](formats/drill-scorecard.md#topic_parity-and-what-its-silence-means)).
-  That widens what an existing array's entries can say. Under the rule above
-  that is a change of an existing field's meaning, so it is part of OD-7 too;
-  it only ever makes an older reader's conclusion weaker, never stronger.
+  That widens what an existing array's entries can say, and OD-7's follow-up
+  ruling of 2026-10-05 makes it MINOR (the rule above): it can only weaken an
+  older reader's verdict.
+- **The collision strings are unchanged.** Each `target_diff.collisions[]`
+  entry is byte for byte what a writer before FX-4 produced. Phase 3 names a
+  collision whose configuration difference it could not assess in the new
+  optional `target_diff.not_assessed` instead
+  ([the scorecard format](formats/drill-scorecard.md#topic_parity-and-what-its-silence-means)),
+  because a qualifier inside the existing string would be a change to an
+  existing field's content, which OD-7 did not rule.
 - **Rollback** is safe in both directions. An older `logweir` writes 1.0.0
   documents again, and their coverage then reads unknown. The 1.1.0 documents
   already written stay valid under both readers.

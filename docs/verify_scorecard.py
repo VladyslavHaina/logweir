@@ -156,8 +156,9 @@ PAYLOAD_TYPE = "application/vnd.logweir.drill-scorecard+json;version=1.0.0"
 # (crates/logweir-core/src/lib.rs); `docs/test_verify_scorecard.py::
 # test_the_format_version_matches_the_rust_constant` fails if they drift.
 #
-# `1.1.0` since FX-4 (`topic_parity.not_assessed`, the first scorecard field
-# added after the v0.1 tags — a MINOR bump, docs/stability.md). Only the MAJOR
+# `1.1.0` since FX-4 (`topic_parity.not_assessed` and `target_diff.not_assessed`,
+# the first scorecard fields added after the v0.1 tags — a MINOR bump,
+# docs/stability.md). Only the MAJOR
 # is ever compared, so a 1.0.0 document still verifies and a reader built
 # before the bump still reads a 1.1.0 one.
 FORMAT_VERSION = "1.1.0"
@@ -360,7 +361,9 @@ FORMAT_VERSION = "1.1.0"
 # an ABSENT block is UNKNOWN coverage, never `captured`. The scorecard's
 # FORMAT_VERSION moves to 1.1.0 for `topic_parity.not_assessed`, which gets no
 # arm: it is printed, so an exit 0 is never read as configuration parity the
-# document does not claim.
+# document does not claim. `target_diff.not_assessed` (phase 3's collisions
+# whose configuration was not assessed) is shape-checked like it and not
+# printed: the collisions themselves are not printed either.
 SCRIPT_VERSION = "1.15.0"
 
 # The first minor of the BACKUP RECEIPT's format 1 that defines
@@ -890,6 +893,19 @@ def check_invariants(doc) -> str:
     expected = sample.get("records_expected")
     if not isinstance(expected, int) or isinstance(expected, bool):
         return "sample.records_expected is not an integer"
+
+    # Also shape (FX-4 fix round, scorecard 1.1.0): `target_diff.not_assessed`
+    # is the same `Option<Vec<String>>` as `topic_parity.not_assessed` below —
+    # phase 3's collisions whose configuration difference was not assessed,
+    # which FX-4 records in this new field instead of changing the existing
+    # collision strings. Checked first because serde meets `target_diff`
+    # first. Both bad shapes are cases in `shape-index.json`.
+    target_not_assessed = doc["target_diff"].get("not_assessed")
+    if target_not_assessed is not None and (
+        not isinstance(target_not_assessed, list)
+        or not all(isinstance(t, str) for t in target_not_assessed)
+    ):
+        return "target_diff.not_assessed is not an array of strings"
 
     # Also shape (FX-4, scorecard 1.1.0): `topic_parity.not_assessed` is an
     # `Option<Vec<String>>` over there, so `null` is ABSENT and anything that

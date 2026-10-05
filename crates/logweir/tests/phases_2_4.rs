@@ -482,8 +482,19 @@ fn a_target_topic_whose_configuration_is_refused_is_never_recorded_as_empty() {
 
 /// **FX-4, phase 3.** A collision's configuration difference is ASSESSED only
 /// where the source topic's capture coverage is `captured`; otherwise the
-/// scorecard line says so beside the list, and an empty `[]` is never read
-/// as "no difference".
+/// collision is named in the scorecard's `target_diff.not_assessed`, and an
+/// empty `differing config: []` is never read as "no difference".
+///
+/// The collision STRING is byte for byte what the writer before FX-4 produced,
+/// whatever the coverage: the qualifier lives in the new optional field, never
+/// inside an existing string (the owner's OD-7 rulings of 2026-10-05 made only
+/// the new receipt arms and phase 7's fail-safe entry MINOR). The expected
+/// lines are LITERALS of main's `summarise` format, not rebuilt from it.
+///
+/// Negative controls: a qualifier appended to the string fails the
+/// exact-string asserts; dropping the entry for an uncaptured source, or
+/// writing one for a captured source, fails the `not_assessed` asserts; a
+/// `summarise` that leaves the field absent fails every `Some(..)`.
 #[test]
 fn a_collision_says_its_configuration_was_not_assessed_unless_the_capture_was() {
     let target = fixtures::target_with(
@@ -495,6 +506,8 @@ fn a_collision_says_its_configuration_was_not_assessed_unless_the_capture_was() 
     );
     let facts = fixtures::backup_facts_orders(3);
     let mapping = fixtures::mapping("orders", "drill-orders");
+    let line = "drill-orders: 3 partition(s), 1200 record(s) already present, \
+                differing config: [cleanup.policy]";
 
     // Unbound plan: coverage UNKNOWN.
     let d = phase3_diff::run(
@@ -504,30 +517,60 @@ fn a_collision_says_its_configuration_was_not_assessed_unless_the_capture_was() 
         &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
     );
     assert_eq!(d.collisions[0].configuration_not_assessed, Some("unknown"));
-    assert!(
-        d.summarise().collisions[0].ends_with("(configuration not assessed: unknown)"),
-        "{:?}",
-        d.summarise().collisions
+    let s = d.summarise();
+    assert_eq!(s.collisions, vec![line.to_string()]);
+    assert_eq!(
+        s.not_assessed,
+        Some(vec!["drill-orders: configuration (unknown)".to_string()])
     );
 
-    // A verified receipt that says the capture was DENIED.
+    // A verified receipt that says the capture was DENIED. The archive's
+    // record is then EMPTY, so the line reads `differing config: []` — the
+    // silence the `not_assessed` entry withdraws.
+    let mut denied_facts = fixtures::backup_facts_orders(3);
+    denied_facts.topics[0].configurations.clear();
     let denied = coverage_for("orders", "captureDenied");
-    let d = phase3_diff::run(&target, &facts, &mapping, &denied);
+    let d = phase3_diff::run(&target, &denied_facts, &mapping, &denied);
     assert_eq!(
         d.collisions[0].configuration_not_assessed,
         Some("captureDenied")
     );
+    let s = d.summarise();
+    assert_eq!(
+        s.collisions,
+        vec![
+            "drill-orders: 3 partition(s), 1200 record(s) already present, differing config: []"
+                .to_string()
+        ]
+    );
+    assert_eq!(
+        s.not_assessed,
+        Some(vec![
+            "drill-orders: configuration (captureDenied)".to_string()
+        ])
+    );
 
-    // …and one that says it was captured: assessed, and the line carries no
-    // qualifier.
+    // …and one that says it was captured: assessed, the same line, and an
+    // empty list that IS the claim.
     let captured = coverage_for("orders", "captured");
     let d = phase3_diff::run(&target, &facts, &mapping, &captured);
     assert_eq!(d.collisions[0].configuration_not_assessed, None);
-    assert!(
-        !d.summarise().collisions[0].contains("not assessed"),
-        "{:?}",
-        d.summarise().collisions
+    let s = d.summarise();
+    assert_eq!(s.collisions, vec![line.to_string()]);
+    assert_eq!(s.not_assessed, Some(vec![]));
+
+    // No collision at all — the normal case, since phase 0 refuses a mapped
+    // target topic that already exists: phase 3 ran, so the field is the
+    // claim `[]`, never absent.
+    let d = phase3_diff::run(
+        &fixtures::empty_target(TARGET_CLUSTER_ID),
+        &facts,
+        &mapping,
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
     );
+    let s = d.summarise();
+    assert!(s.collisions.is_empty(), "{:?}", s.collisions);
+    assert_eq!(s.not_assessed, Some(vec![]));
 }
 
 /// A `SourceConfigCoverage` as a VERIFIED receipt carrying one entry reads.

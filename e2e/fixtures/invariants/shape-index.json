@@ -331,5 +331,23 @@
   "python_exit": 1,
   "rust_reason": "signature verified but the payload is not a scorecard: invalid type: integer `1`, expected a string",
   "python_reason": "topic_parity.not_assessed is not an array of strings"
+ },
+ {
+  "id": "target_diff_not_assessed_not_an_array",
+  "file": "target_diff_not_assessed_not_an_array.json",
+  "check": "message:target_diff.not_assessed is not an array of strings",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: invalid type: string \"x\", expected a sequence",
+  "python_reason": "target_diff.not_assessed is not an array of strings"
+ },
+ {
+  "id": "target_diff_not_assessed_item_not_a_string",
+  "file": "target_diff_not_assessed_item_not_a_string.json",
+  "check": "message:target_diff.not_assessed is not an array of strings",
+  "rust_exit": 1,
+  "python_exit": 1,
+  "rust_reason": "signature verified but the payload is not a scorecard: invalid type: integer `1`, expected a string",
+  "python_reason": "target_diff.not_assessed is not an array of strings"
  }
 ]
