@@ -12,9 +12,11 @@
 # LINUX ARCHIVES ARE BUILT INSIDE rust:1.89-bookworm, the runner image's own
 # builder base (`Dockerfile`, `FROM … rust:1.89-bookworm AS builder`), with the
 # packages that stage installs, minus the cross toolchain. A Linux archive
-# therefore has the runner image's ABI: Debian 12's glibc, `libssl.so.3` and
-# `libsasl2.so.2`. Built on the ubuntu-24.04 runner itself it would need the
-# runner's newer glibc instead. release.yml starts it as
+# therefore has the runner image's ABI: it needs a glibc at least as new as the
+# version measured below, never above Debian 12's 2.36, and `libssl.so.3`,
+# `libcrypto.so.3`, `libsasl2.so.2` and `libz.so.1`. Built on the ubuntu-24.04
+# runner itself it would need the runner's newer glibc instead. release.yml
+# starts it as
 #
 #   docker run --rm -e RELEASE_TAG -v "$PWD:/src" -w /src rust:1.89-bookworm \
 #     bash scripts/release-build.sh <target>

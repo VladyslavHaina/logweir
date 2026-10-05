@@ -31,8 +31,13 @@ Fill every row for the exact candidate; a row left as `—` is an unrecorded
 fact, not a pass. A previous run does not validate new bytes. A tag does not
 rebuild the images — it gives the `sha-<commit>` publication `main` CI already
 made the version tag, unchanged — so the release dry run's `release.json`
-(workflow artifact `release-assets`) gives the image, chart and archive rows
-**before** the tag, and the release run's rows are added after it
+(workflow artifact `release-assets`) gives the publication commit and the four
+image digests **before** the tag. Nothing else carries over: the tag run
+packages the chart and builds the three CLI archives again. The chart package
+is not byte-reproducible (`helm package` records each file's modification
+time, which is its checkout time), and nothing shows the archives to be. The
+chart and archive rows therefore come from the **tag run's** `release.json`,
+the GitHub Release asset, after the tag, together with the run rows
 ([the release checklist](tag1-checklist.md), *Cutting a release candidate*).
 
 | What | Value |
@@ -47,8 +52,8 @@ made the version tag, unchanged — so the release dry run's `release.json`
 | Controller image digest (manifest list; amd64 and arm64) | — |
 | Console image digest (`logweir-console`) | — |
 | UI image digest (`logweir-ui`) | — |
-| Chart (`logweir-chart` version, package sha256, OCI digest) | — |
-| CLI archives (three; `release.json` `.archives`, each with its sha256 and run-time needs) | — |
+| Chart (`logweir-chart` version and package sha256 from the tag run's `release.json` `.chart`; OCI digest from the release's notes, as an anonymous `helm pull` reports it) | — |
+| CLI archives (three; the tag run's `release.json` `.archives`, each with its sha256 and run-time needs) | — |
 | `ui/` bundle, file by file | the output of the command below, which the release asset `ui-files.sha256` also carries |
 | Kubernetes exercises run on this candidate (context, auth mode, storage, limits) | — |
 | Checks deliberately deferred, each with its reason | — |
@@ -864,12 +869,26 @@ policy or roster ([keys.md](keys.md)).
   `docker.io/vladyslavhaina/minio-mirror` and `mc-mirror` (AGPL-3.0). Replacing
   MinIO with a maintained, permissively licensed S3 server is an open task
   (REPLACE-MINIO), not started.
+- **The `v0.1.1`–`v0.1.5` image tags on Docker Hub are leftovers of failed
+  runs, not releases.** Those tag runs pushed version-tagged images before
+  they failed — `logweir:v0.1.1`–`v0.1.5`, `weirkeeper:v0.1.2`–`v0.1.5` and
+  `logweir-ui:v0.1.3`–`v0.1.5`; no console image and no chart — and none of
+  them published a chart, a GitHub Release or a release drill. Every run
+  failed in the CLI build matrix; `v0.1.1`'s image job also failed its own
+  repository-digest check after pushing, and the pull-back jobs of `v0.1.2`
+  and `v0.1.3` failed with "cannot overwrite digest". Do not install or pin
+  them. Whether to delete them is the owner's decision. The repaired pipeline
+  never builds an image under a version tag: it tags main CI's `sha-<commit>`
+  images.
 - **The CLI archives' run-time needs.** The Linux archives are built in the
   runner image's builder base (`rust:1.89-bookworm`), so they need what the
-  runner image installs: a glibc no newer than Debian 12's 2.36 by
-  construction (2.34 measured on the Linux arm64 archive built locally on
-  2026-10-05; each release's notes give its own), `libssl.so.3` and
-  `libsasl2.so.2`. A distribution whose SASL library has another soname
+  runner image installs: a glibc at least as new as the version measured on
+  each binary — 2.34 on the Linux arm64 archive built locally on 2026-10-05;
+  each release's notes give its own — which is never above the Debian 12
+  glibc (2.36) they are built against, so Debian 12's glibc or newer always
+  suffices; and `libssl.so.3`, `libcrypto.so.3`, `libsasl2.so.2` and
+  `libz.so.1` (Debian and Ubuntu: `libssl3`, `libsasl2-2`, `zlib1g`). A
+  distribution whose SASL library has another soname
   (`libsasl2.so.3` on RHEL and Fedora) builds from the checkout. The macOS
   archive needs Homebrew's `openssl@3`. `logweir --version` prints the
   workspace version (`0.1.0`), not the tag; `release.json` ties each archive

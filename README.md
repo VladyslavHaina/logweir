@@ -40,11 +40,14 @@ chart with its managed installation identity: [quickstart](docs/quickstart.md),
 [the chart reference](charts/logweir/README.md). The low-level manifests and
 locally built images remain in the installation guide.
 
-**What is published.** Every successful `main` CI run publishes the controller
-(`weirkeeper`), runner (`logweir`), console (`logweir-console`) and UI
-(`logweir-ui`) images under `sha-<commit>` (and moves `main` and `latest`), and
-the chart `oci://registry-1.docker.io/vladyslavhaina/logweir-chart --version
-0.1.0-sha-<commit>`, whose image defaults are those four tags. A version tag
+**What is published.** A push to `main` that changes something outside
+`docs/` and passes CI publishes the controller (`weirkeeper`), runner
+(`logweir`), console (`logweir-console`) and UI (`logweir-ui`) images under
+`sha-<commit>` (and moves `main` and `latest`), and the chart
+`oci://registry-1.docker.io/vladyslavhaina/logweir-chart --version
+0.1.0-sha-<commit>`, whose image defaults are those four tags; a push that
+changes only `docs/` publishes nothing
+([gates.md](docs/gates.md#pull-requests-and-main)). A version tag
 (`v<X.Y.Z>`, or a pre-release such as `v0.2.0-rc.1`) runs
 [the release pipeline](docs/gates.md#versioned-releases), which does not
 rebuild the images: it gives the tagged commit's `sha-<commit>` images the
@@ -54,7 +57,11 @@ archives, the independent verifier (`verify_scorecard.py`), `LICENSE`, `NOTICE`,
 `THIRD_PARTY_NOTICES.md`, the engine's licence, the chart package,
 `release.json` and `SHA256SUMS`. No tag has done so yet: the runs for
 `v0.1.1`–`v0.1.5` failed before publishing a release, and the pipeline was
-repaired after them. [UNVERIFIED — no version tag has run the repaired pipeline yet; the first is the owner-approved release candidate.]
+repaired after them. The image tags those runs pushed before failing —
+`logweir:v0.1.1`–`v0.1.5`, `weirkeeper:v0.1.2`–`v0.1.5` and
+`logweir-ui:v0.1.3`–`v0.1.5` on Docker Hub — are leftovers of failed runs, not
+releases: no chart, GitHub Release or release drill goes with them, so do not
+install or pin them. [UNVERIFIED — no version tag has run the repaired pipeline yet; the first is the owner-approved release candidate.]
 
 ```bash
 helm upgrade --install logweir oci://registry-1.docker.io/vladyslavhaina/logweir-chart \
@@ -73,7 +80,7 @@ cargo install --path crates/logweir --locked
 
 | Archive | Runs on |
 |---|---|
-| `logweir-x86_64-unknown-linux-gnu.tar.xz` | Linux x86-64 with Debian 12's glibc or newer, `libssl.so.3` and `libsasl2.so.2` (Debian and Ubuntu: `libssl3`, `libsasl2-2`) |
+| `logweir-x86_64-unknown-linux-gnu.tar.xz` | Linux x86-64 with Debian 12's glibc or newer, `libssl.so.3`, `libcrypto.so.3`, `libsasl2.so.2` and `libz.so.1` (Debian and Ubuntu: `libssl3`, `libsasl2-2`, `zlib1g`) |
 | `logweir-aarch64-unknown-linux-gnu.tar.xz` | the same, on Linux arm64 |
 | `logweir-aarch64-apple-darwin.tar.xz` | macOS 11 or newer on Apple silicon, with Homebrew's `openssl@3` |
 

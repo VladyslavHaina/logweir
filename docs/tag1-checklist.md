@@ -67,10 +67,14 @@ artifacts.
    bash scripts/release.sh verify rc-dry-run/release/assets
    ```
 
-3. **The record.** The dry run's `release.json` names the publication commit,
-   the four image digests and the chart's package digest the tag will
-   publish; fill the [candidate record](release-notes.md) from it before the
-   tag, and its run rows after step 4.
+3. **The record, before the tag.** The dry run's `release.json` names the
+   publication commit and the four image digests. The tag promotes exactly
+   those, so fill their rows of the [candidate record](release-notes.md) from
+   it. Nothing else carries over: the tag run packages the chart and builds the
+   archives again. The chart package is not byte-reproducible (`helm package`
+   records each file's modification time, its checkout time), and nothing
+   shows the archives to be, so the dry run's chart and archive digests are
+   not the release's (step 5 records those).
 4. **The tag**, with the owner's approval, then watch the run:
 
    ```bash
@@ -79,10 +83,15 @@ artifacts.
    gh run list --workflow release.yml --event push --limit 1
    ```
 
-   A failed `publish-images` or `github-release` job can be re-run: a version
-   tag that already names the release's digests, a chart version already
+   A failed `publish-images` or `github-release` job can be re-run with
+   *Re-run failed jobs*, which keeps the run's assembled assets: a version tag
+   that already names the release's digests, a chart version already
    published as the same bytes and an existing GitHub Release are verified,
-   not written again; anything else is refused.
+   not written again. Anything else is refused, and so is every existence
+   read that the registry or GitHub does not answer with "not found".
+   *Re-run all jobs* packages the chart again, so once the chart is published
+   such a run stops at `chart-push` ("never replaced"). A deleted tag, or a
+   re-run after the tag was moved, publishes nothing (`validate`).
 5. **Verify as a user would**, from another machine:
 
    ```bash
@@ -94,6 +103,12 @@ artifacts.
      docker buildx imagetools inspect "docker.io/vladyslavhaina/$image:v0.2.0-rc.1" --format '{{json .Manifest}}' | jq -r .digest
    done                                      # each equals release.json's .images.refs[<image>].digest
    ```
+
+   **Then the rest of the record**, from the tag run's `release.json` (now
+   `rc/release.json`, the GitHub Release asset): the chart's version and
+   package sha256 (`.chart`), its OCI digest (the release's notes give it as
+   an anonymous `helm pull` reports it), the three archives (`.archives`), the
+   candidate commit, the tag and the run rows.
 
 6. **The countersigning step.** A Governed approval needs an approver's
    `logweir drill countersign` on their own machine ([kubernetes.md](kubernetes.md),

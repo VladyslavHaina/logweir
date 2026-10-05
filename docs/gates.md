@@ -77,14 +77,14 @@ that holds a credential or `contents: write` to that gate.
 
 | Job | What it does | Writes |
 |---|---|---|
-| `validate` | the tag (a dry run's `rehearsal_tag` input), its version and pre-release flag, and whether this run may publish | — |
+| `validate` | the tag (a dry run's `rehearsal_tag` input), its version and pre-release flag, and whether this run may publish: a tag push that did not delete the tag, whose tag origin still points at the run's commit | — |
 | `tests` | `ci.yml`: the same checks and Compose suite as `main` | — |
 | `plan` | `dist plan` must announce exactly the three CLI archives | artifact `dist-manifest` |
 | `build` (three) | [scripts/release-build.sh](../scripts/release-build.sh) on one native runner per target — Linux inside `rust:1.89-bookworm`, the runner image's own builder base, macOS on the runner; checks the archive's contents and notices, that no engine is inside, that the binary starts and performs `drill countersign`, and measures what it needs at run time | artifact `binary-<target>` |
 | `drill` | [release-drill.yml](../.github/workflows/release-drill.yml): a backup, an approved drill and both verifiers, driven by the packaged Linux x86-64 binary against Compose Kafka and MinIO | artifact `release-drill-evidence` |
 | `images` | finds the `sha-<commit>` publication the release ships, anonymously: the tagged commit's own, or its newest ancestor that differs from it only under `docs/`; checks each image's platforms and revision label | artifact `release-images` |
 | `assemble` | checks every asset again, packages the chart once with its four images pinned by digest, and writes `release.json`, `ui-files.sha256`, `SHA256SUMS` and the release notes | artifact `release-assets` |
-| `publish-images` | tag push only, after `tests`: the version tag on the publication's own digests (an existing tag is never moved), then the chart package pushed as those bytes (a published version is never replaced) | Docker Hub |
+| `publish-images` | tag push only, after `tests`: the version tag on the publication's own digests (an existing tag is never moved), then the chart package pushed as those bytes (a published version is never replaced); "absent" is only the registry's own "not found", and a read that cannot tell refuses before any write | Docker Hub |
 | `github-release` | tag push only: the GitHub Release from the verified assets, downloaded back and verified | the GitHub Release |
 
 A version's images are therefore never rebuilt: the version tag and the
