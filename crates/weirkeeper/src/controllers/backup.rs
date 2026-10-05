@@ -1263,7 +1263,8 @@ async fn manual_run_gate(
     let name = backup.name_any();
     let limit = match pool.limit {
         Some(limit) => limit,
-        None => {
+        None => crate::run_pool::ceiling(
+            crate::run_pool::PoolKind::Backup,
             crate::check::policy::load(
                 client,
                 crate::run_pool::policy_ref().as_ref(),
@@ -1272,10 +1273,8 @@ async fn manual_run_gate(
             )
             .await
             .map_err(BackupError::Api)?
-            .policy()
-            .runs
-            .max_manual_backups_active_per_namespace
-        }
+            .policy(),
+        ),
     };
     let decision = pool.reservations.decide(
         crate::run_pool::PoolKind::Backup,

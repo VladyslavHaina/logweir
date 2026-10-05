@@ -2236,6 +2236,114 @@ fn limits_queues_over_namespace_cap() {
     );
 }
 
+/// **FX-10: every check ceiling is the policy's own, at a value its default
+/// cannot imitate.**
+///
+/// The rows above drive `limits::admit` with `ChecksPolicy::default()` (4 / 20
+/// / 1 / 4) — so an `admit` that compared against a constant equal to the
+/// default passed them for three of the four ceilings (`maxActiveTotal` alone
+/// had a non-default row, at 7). Here each ceiling moves on its own, and the
+/// counts that sit exactly at the moved ceiling are queued while the default
+/// would admit them (or the reverse), so a constant cannot pass:
+///
+/// | ceiling | default | here | counts | default says | here |
+/// |---|---|---|---|---|---|
+/// | `maxActivePerNamespace` | 4 | 2 | 2 in the namespace | admit | queue |
+/// | `maxActiveDiscoveriesPerConnection` | 1 | 3 | 1 on the connection | queue | admit |
+/// | `maxEvidenceFetchActivePerNamespace` | 4 | 1 | 1 fetch | admit | queue |
+/// | `maxActiveTotal` | 20 | 25 | 20 in total | queue | admit |
+#[test]
+fn every_check_ceiling_is_the_policys_own_at_a_non_default_value() {
+    let defaults = policy::ChecksPolicy::default();
+    let counts =
+        |namespace: u32, total: u32, per_connection: u32, evidence: u32| limits::ActiveCounts {
+            namespace,
+            total,
+            per_connection,
+            evidence_namespace: evidence,
+        };
+    let queued = limits::Admission::Queued(CheckCode::ConcurrencyLimited);
+
+    // maxActivePerNamespace: 2.
+    let two_here = counts(2, 2, 0, 0);
+    let tight_ns = policy::ChecksPolicy {
+        max_active_per_namespace: 2,
+        ..defaults
+    };
+    assert!(limits::admit(&two_here, &defaults, CheckPlanKind::OperationReadiness).is_admitted());
+    assert_eq!(
+        limits::admit(&two_here, &tight_ns, CheckPlanKind::OperationReadiness),
+        queued
+    );
+
+    // maxActiveDiscoveriesPerConnection: 3.
+    let one_on_connection = counts(0, 0, 1, 0);
+    let wide_connection = policy::ChecksPolicy {
+        max_active_discoveries_per_connection: 3,
+        ..defaults
+    };
+    assert_eq!(
+        limits::admit(&one_on_connection, &defaults, CheckPlanKind::TopicInventory),
+        queued
+    );
+    assert!(limits::admit(
+        &one_on_connection,
+        &wide_connection,
+        CheckPlanKind::TopicInventory
+    )
+    .is_admitted());
+
+    // maxEvidenceFetchActivePerNamespace: 1.
+    let one_fetch = counts(0, 0, 0, 1);
+    let tight_evidence = policy::ChecksPolicy {
+        max_evidence_fetch_active_per_namespace: 1,
+        ..defaults
+    };
+    assert!(limits::admit(&one_fetch, &defaults, CheckPlanKind::EvidenceFetch).is_admitted());
+    assert_eq!(
+        limits::admit(&one_fetch, &tight_evidence, CheckPlanKind::EvidenceFetch),
+        queued
+    );
+
+    // maxActiveTotal: 25 — the other direction, a RAISED ceiling.
+    let twenty_elsewhere = counts(0, 20, 0, 0);
+    let wide_total = policy::ChecksPolicy {
+        max_active_total: 25,
+        ..defaults
+    };
+    assert_eq!(
+        limits::admit(
+            &twenty_elsewhere,
+            &defaults,
+            CheckPlanKind::OperationReadiness
+        ),
+        queued
+    );
+    assert!(limits::admit(
+        &twenty_elsewhere,
+        &wide_total,
+        CheckPlanKind::OperationReadiness
+    )
+    .is_admitted());
+}
+
+/// **FX-10: `freshUntil` is the observation plus the window it is GIVEN.** The
+/// row above uses the default 900 s only.
+#[test]
+fn fresh_until_is_the_observation_plus_a_non_default_window() {
+    use weirkeeper::controllers::topic_discovery as td;
+    let observed = Utc
+        .with_ymd_and_hms(2026, 9, 16, 11, 59, 0)
+        .single()
+        .unwrap();
+    assert_eq!(
+        td::fresh_until(observed, 60),
+        Utc.with_ymd_and_hms(2026, 9, 16, 12, 0, 0)
+            .single()
+            .unwrap()
+    );
+}
+
 #[test]
 fn one_discovery_per_connection_and_a_separate_evidence_pool() {
     let policy = policy::ChecksPolicy::default();

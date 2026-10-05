@@ -191,7 +191,7 @@ api:
     port: 8484                  # container port and ClusterIP Service port
     localAdminSubject: admin    # localAdmin: the one actor every request is recorded as
     keySecret: ""               # REQUIRED Secret: cursor.key, plus session.key when shared
-    keyVersion: 1               # the `version:` those key files must declare
+    keyVersion: 1               # shared: the `version:` those key files must declare
     publicBaseUrl: ""           # shared: EXACT https:// URL, no path, no trailing slash
     sessionMaxAgeSeconds: 900   # shared: 60..900; a stateless session cannot be revoked
     trustedProxyCidrs: []       # shared: the ingress's ranges; never an identity

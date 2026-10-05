@@ -505,3 +505,561 @@ fn the_runs_block_is_omitted_exactly_at_the_controllers_defaults() {
     assert!(!rendered.contains("\"runs\""), "{rendered}");
     assert_eq!(parsed.runs, defaults);
 }
+
+// ======================================================================
+// FX-10 — configured values that reach nothing
+// ======================================================================
+
+/// `values.yaml`, parsed.
+fn values() -> serde_yaml::Value {
+    serde_yaml::from_str(
+        &std::fs::read_to_string(repo().join("charts/logweir/values.yaml")).expect("values"),
+    )
+    .expect("values.yaml is YAML")
+}
+
+/// One example values file, parsed.
+fn example(name: &str) -> serde_yaml::Value {
+    let path = repo().join(format!("charts/logweir/examples/{name}.values.yaml"));
+    serde_yaml::from_str(
+        &std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display())),
+    )
+    .expect("the example is YAML")
+}
+
+fn yaml_at<'a>(node: &'a serde_yaml::Value, dotted: &str) -> &'a serde_yaml::Value {
+    dotted.split('.').fold(node, |n, segment| &n[segment])
+}
+
+fn json_at<'a>(node: &'a serde_json::Value, dotted: &str) -> &'a serde_json::Value {
+    dotted.split('.').fold(node, |n, segment| &n[segment])
+}
+
+/// Every leaf path under `node`: a mapping that is empty, and every sequence
+/// and scalar, is one leaf.
+fn yaml_leaves(node: &serde_yaml::Value, prefix: &str, out: &mut Vec<String>) {
+    match node.as_mapping() {
+        Some(map) if !map.is_empty() => {
+            for (k, v) in map {
+                let k = k.as_str().expect("a string key");
+                let path = if prefix.is_empty() {
+                    k.to_string()
+                } else {
+                    format!("{prefix}.{k}")
+                };
+                yaml_leaves(v, &path, out);
+            }
+        }
+        _ => out.push(prefix.to_string()),
+    }
+}
+
+fn json_leaves(node: &serde_json::Value, prefix: &str, out: &mut Vec<String>) {
+    match node.as_object() {
+        Some(map) if !map.is_empty() => {
+            for (k, v) in map {
+                let path = if prefix.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{prefix}.{k}")
+                };
+                json_leaves(v, &path, out);
+            }
+        }
+        _ => out.push(prefix.to_string()),
+    }
+}
+
+/// The template's executable text: every `{{/* … */}}` comment removed, so a
+/// value NAMED in prose is not mistaken for a value READ.
+fn template_code(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("/*") {
+        out.push_str(&rest[..start]);
+        rest = rest[start..]
+            .find("*/")
+            .map_or("", |end| &rest[start + end + 2..]);
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Every `.rs` file under `dir`, recursively.
+fn rust_files(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display())) {
+        let path = entry.expect("a directory entry").path();
+        if path.is_dir() {
+            rust_files(&path, out);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+            out.push(path);
+        }
+    }
+}
+
+/// **FX-10: the two withdrawn fields are rendered at the parser's fixed
+/// compatibility values, never from a value, and nothing reads them.**
+///
+/// * The template reads neither withdrawn value (its comments may name them).
+/// * It renders `defaultMaxTopics` as `min(WITHDRAWN_DEFAULT_MAX_TOPICS,
+///   hardMaxTopics)` and `defaultTimeoutSeconds` as
+///   `WITHDRAWN_DEFAULT_TIMEOUT_SECONDS` — the two constants the parser's
+///   serde defaults use, so the digest of a document with and without them is
+///   one digest.
+/// * Every committed render carries both keys inside the range a controller
+///   older than FX-10 requires (`1 <= defaultMaxTopics <= hardMaxTopics`,
+///   `1..=600`): such a controller refuses a document without them, and a
+///   refused document fails CLOSED. That is what keeps an image-only rollback
+///   of an install safe.
+/// * No source in any crate outside the parser reads either field.
+///
+/// MUTANTS: render `.Values.checks.discovery.defaultMaxTopics` again; drop
+/// either key from the template; read `withdrawn_default_max_topics` anywhere.
+#[test]
+fn the_withdrawn_fields_are_rendered_at_the_parsers_compatibility_values_and_read_by_nothing() {
+    let template = std::fs::read_to_string(repo().join("charts/logweir/templates/policy.yaml"))
+        .expect("the policy template");
+    let code = template_code(&template);
+    for withdrawn in [
+        ".Values.checks.discovery.defaultMaxTopics",
+        ".Values.checks.preflight.defaultTimeoutSeconds",
+    ] {
+        assert!(
+            !code.contains(withdrawn),
+            "templates/policy.yaml reads `{withdrawn}` again; it is withdrawn (FX-10)"
+        );
+    }
+    let compat_topics = format!(
+        "$compatMaxTopics := min {} (int .Values.checks.discovery.hardMaxTopics)",
+        policy::WITHDRAWN_DEFAULT_MAX_TOPICS
+    );
+    assert!(code.contains(&compat_topics), "missing `{compat_topics}`");
+    assert!(code.contains("\"defaultMaxTopics\" $compatMaxTopics"));
+    let compat_timeout = format!(
+        "\"defaultTimeoutSeconds\" {}",
+        policy::WITHDRAWN_DEFAULT_TIMEOUT_SECONDS
+    );
+    assert!(code.contains(&compat_timeout), "missing `{compat_timeout}`");
+
+    let dir = repo().join("charts/logweir/rendered");
+    let mut checked = 0usize;
+    for entry in std::fs::read_dir(&dir).expect("the rendered directory") {
+        let path = entry.expect("an entry").path();
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        for (name, raw) in rendered_policies(stem) {
+            let doc: serde_json::Value = serde_json::from_str(&raw).expect("JSON");
+            let hard = doc["discovery"]["hardMaxTopics"]
+                .as_u64()
+                .expect("hardMaxTopics");
+            let topics = doc["discovery"]["defaultMaxTopics"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("{stem}.yaml's {name} lost discovery.defaultMaxTopics"));
+            let timeout = doc["preflight"]["defaultTimeoutSeconds"]
+                .as_u64()
+                .unwrap_or_else(|| {
+                    panic!("{stem}.yaml's {name} lost preflight.defaultTimeoutSeconds")
+                });
+            assert!(
+                (1..=hard).contains(&topics),
+                "{stem}.yaml: defaultMaxTopics {topics} is outside the 1..={hard} a pre-FX-10 \
+                 controller requires"
+            );
+            assert_eq!(
+                topics,
+                hard.min(u64::from(policy::WITHDRAWN_DEFAULT_MAX_TOPICS)),
+                "{stem}.yaml"
+            );
+            assert_eq!(
+                timeout,
+                u64::from(policy::WITHDRAWN_DEFAULT_TIMEOUT_SECONDS),
+                "{stem}.yaml"
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked >= 8, "only {checked} rendered documents were read");
+
+    let mut sources = Vec::new();
+    rust_files(&repo().join("crates"), &mut sources);
+    let parser = repo().join("crates/weirkeeper/src/check/policy.rs");
+    for path in sources
+        .iter()
+        .filter(|p| **p != parser && p.components().any(|c| c.as_os_str() == "src"))
+    {
+        let text = std::fs::read_to_string(path).expect("a source file");
+        for field in [
+            "withdrawn_default_max_topics",
+            "withdrawn_default_timeout_seconds",
+        ] {
+            assert!(
+                !text.contains(field),
+                "{} reads `{field}`. It is withdrawn (FX-10): wiring it up again is a contract \
+                 change (the CRD defaults, the console's canonical form) that needs its own row",
+                path.display()
+            );
+        }
+    }
+}
+
+/// One installation-policy value, followed end to end.
+struct Followed {
+    /// The dotted `values.yaml` path an administrator sets.
+    value: &'static str,
+    /// The dotted path in the parsed `Policy`'s JSON (its wire names).
+    field: &'static str,
+    /// The controller source (under `crates/weirkeeper/src/`) that reads the
+    /// parsed field, and a needle in it — or `None` with the reason no reader
+    /// exists yet.
+    reader: Result<(&'static str, &'static str), &'static str>,
+    /// The test file (under `crates/weirkeeper/tests/`) and the `fn` that
+    /// drives the reader at a NON-default value and asserts the effect.
+    proof: Option<(&'static str, &'static str)>,
+}
+
+/// The table [`every_installation_policy_value_reaches_its_field_and_a_reader_at_a_non_default_value`]
+/// holds complete: every `values.yaml` leaf the policy document is rendered
+/// from, and every field the parser keeps.
+const FOLLOWED: &[Followed] = &[
+    Followed {
+        value: "checks.maxActivePerNamespace",
+        field: "checks.maxActivePerNamespace",
+        reader: Ok(("check/limits.rs", "policy.max_active_per_namespace")),
+        proof: Some((
+            "topic_discovery_controller.rs",
+            "the_installation_policys_ceilings_reach_discovery_admission_and_the_plan",
+        )),
+    },
+    Followed {
+        value: "checks.maxActiveTotal",
+        field: "checks.maxActiveTotal",
+        reader: Ok(("check/limits.rs", "policy.max_active_total")),
+        proof: Some(("check_framework.rs", "limits_queues_over_namespace_cap")),
+    },
+    Followed {
+        value: "checks.maxActiveDiscoveriesPerConnection",
+        field: "checks.maxActiveDiscoveriesPerConnection",
+        reader: Ok((
+            "check/limits.rs",
+            "policy.max_active_discoveries_per_connection",
+        )),
+        proof: Some((
+            "topic_discovery_controller.rs",
+            "the_installation_policys_ceilings_reach_discovery_admission_and_the_plan",
+        )),
+    },
+    Followed {
+        value: "checks.maxEvidenceFetchActivePerNamespace",
+        field: "checks.maxEvidenceFetchActivePerNamespace",
+        reader: Ok((
+            "check/limits.rs",
+            "policy.max_evidence_fetch_active_per_namespace",
+        )),
+        proof: Some((
+            "check_framework.rs",
+            "every_check_ceiling_is_the_policys_own_at_a_non_default_value",
+        )),
+    },
+    Followed {
+        value: "checks.discovery.freshSeconds",
+        field: "discovery.freshSeconds",
+        reader: Ok((
+            "controllers/topic_discovery.rs",
+            "load.policy().discovery.fresh_seconds",
+        )),
+        proof: Some((
+            "topic_discovery_controller.rs",
+            "the_installation_policys_fresh_window_reaches_fresh_until",
+        )),
+    },
+    Followed {
+        value: "checks.discovery.retentionSeconds",
+        field: "discovery.retentionSeconds",
+        reader: Ok((
+            "controllers/topic_discovery.rs",
+            "discovery_policy.retention_seconds",
+        )),
+        proof: Some((
+            "topic_discovery_controller.rs",
+            "the_installation_policys_collector_rules_reach_the_collector",
+        )),
+    },
+    Followed {
+        value: "checks.discovery.keepPerConnection",
+        field: "discovery.keepPerConnection",
+        reader: Ok((
+            "controllers/topic_discovery.rs",
+            "discovery_policy.keep_per_connection",
+        )),
+        proof: Some((
+            "topic_discovery_controller.rs",
+            "the_installation_policys_collector_rules_reach_the_collector",
+        )),
+    },
+    Followed {
+        value: "checks.discovery.hardMaxTopics",
+        field: "discovery.hardMaxTopics",
+        reader: Ok((
+            "controllers/topic_discovery.rs",
+            "load.policy().discovery.hard_max_topics",
+        )),
+        proof: Some((
+            "topic_discovery_controller.rs",
+            "the_installation_policys_ceilings_reach_discovery_admission_and_the_plan",
+        )),
+    },
+    Followed {
+        value: "checks.discovery.visibilityAttestations",
+        field: "discovery.visibilityAttestations",
+        reader: Ok((
+            "controllers/topic_discovery.rs",
+            "load.policy().discovery.visibility_attestations",
+        )),
+        proof: Some((
+            "topic_discovery_controller.rs",
+            "an_administrator_attestation_is_the_only_route_to_attested_complete",
+        )),
+    },
+    Followed {
+        value: "checks.preflight.retentionSeconds",
+        field: "preflight.retentionSeconds",
+        reader: Ok((
+            "controllers/preflight.rs",
+            "policy.policy().preflight.retention_seconds",
+        )),
+        proof: Some((
+            "configured_values.rs",
+            "the_installation_policys_preflight_window_reaches_the_preflight_collector",
+        )),
+    },
+    Followed {
+        value: "runs.maxManualBackupsActivePerNamespace",
+        field: "runs.maxManualBackupsActivePerNamespace",
+        reader: Ok((
+            "run_pool.rs",
+            "PoolKind::Backup => policy.runs.max_manual_backups_active_per_namespace",
+        )),
+        proof: Some((
+            "configured_values.rs",
+            "the_installation_policys_manual_backup_ceiling_queues_the_second_run",
+        )),
+    },
+    Followed {
+        value: "runs.maxManualRestoresActivePerNamespace",
+        field: "runs.maxManualRestoresActivePerNamespace",
+        reader: Ok((
+            "run_pool.rs",
+            "PoolKind::Restore => policy.runs.max_manual_restores_active_per_namespace",
+        )),
+        proof: Some((
+            "configured_values.rs",
+            "the_installation_policys_manual_restore_ceiling_is_the_one_the_pool_applies",
+        )),
+    },
+    Followed {
+        value: "engine.allowUnverifiedCustomCa",
+        field: "engine.allowUnverifiedCustomCa",
+        reader: Ok((
+            "controllers/backup.rs",
+            "policy.engine.allow_unverified_custom_ca",
+        )),
+        proof: Some((
+            "configured_values.rs",
+            "the_installation_policys_custom_ca_switch_reaches_backup_admission",
+        )),
+    },
+    Followed {
+        value: "evidence.controllerIdentityLocations",
+        field: "evidence.controllerIdentityLocations",
+        reader: Ok(("destination.rs", ".controller_identity_locations")),
+        proof: Some((
+            "preflight_controller.rs",
+            "an_evidence_read_grant_no_pod_holds_is_named_and_projects_nothing",
+        )),
+    },
+    Followed {
+        value: "archive.s3.endpoint",
+        field: "legacyArchiveAddressing.endpoint",
+        reader: Ok((
+            "controllers/preflight.rs",
+            "or_installation(&addressing.endpoint)",
+        )),
+        proof: Some((
+            "preflight_controller.rs",
+            "a_legacy_plan_without_an_endpoint_takes_the_installations_legacy_addressing",
+        )),
+    },
+    Followed {
+        value: "archive.s3.region",
+        field: "legacyArchiveAddressing.region",
+        reader: Ok((
+            "controllers/preflight.rs",
+            "or_installation(&addressing.region)",
+        )),
+        proof: Some((
+            "preflight_controller.rs",
+            "a_legacy_plan_without_an_endpoint_takes_the_installations_legacy_addressing",
+        )),
+    },
+    // PUBLISHED, READ BY NOTHING YET — listed, not hidden. Both values DO reach
+    // a reader through the Deployment's env (`AWS_ALLOW_HTTP`,
+    // `AWS_VIRTUAL_HOSTED_STYLE_REQUEST` → `retention::storage_url_for`,
+    // `configured_values.rs`); it is their copy in this document that nothing
+    // reads.
+    Followed {
+        value: "archive.s3.allowHttp",
+        field: "legacyArchiveAddressing.allowHttp",
+        reader: Err(
+            "D2 §3.12 (b): `POST …/destinations:from-legacy` is to read it, and refuses with \
+             branch (c) today; the restore readiness check takes transport from the PLAN \
+             (D-SEAMS S5). FX-10 report, Class sweep owed.",
+        ),
+        proof: None,
+    },
+    Followed {
+        value: "archive.s3.virtualHostedStyle",
+        field: "legacyArchiveAddressing.virtualHostedStyle",
+        reader: Err(
+            "D2 §3.12 (b), as allowHttp; the readiness check derives addressing from the \
+             plan and the endpoint (engine G4). FX-10 report, Class sweep owed.",
+        ),
+        proof: None,
+    },
+];
+
+/// **FX-10's guard: every installation-policy value reaches its own parsed
+/// field at a NON-default value, and a controller site reads that field —
+/// with the row that proves the reader acts on it named, and present.**
+///
+/// The defect this row exists for: `checks.discovery.defaultMaxTopics` and
+/// `checks.preflight.defaultTimeoutSeconds` were documented, typed, rendered,
+/// parsed and range-checked, and READ BY NOTHING — and every gate passed,
+/// because every gate rendered every value at its default. So:
+///
+/// 1. the table is complete both ways: its `value`s are exactly the
+///    `values.yaml` leaves the policy document is rendered from (`checks`,
+///    `runs`, `engine`, `evidence`, and the four `archive.s3` values behind
+///    `legacyArchiveAddressing`), and its `field`s plus the two withdrawn ones
+///    and `version` are exactly the parser's fields — a new knob, or a new
+///    parsed field, fails here until it is followed;
+/// 2. `examples/tuned.values.yaml` sets every one OFF its default;
+/// 3. its committed render, through the REAL `check::policy::parse`, carries
+///    each at that value in its own field (a swap of two values with equal
+///    defaults — `maxActivePerNamespace` and
+///    `maxEvidenceFetchActivePerNamespace` are both 4 — fails here, where the
+///    default renders could not tell);
+/// 4. the named reader site exists, and so does the named proof row, which
+///    drives that reader at a non-default value.
+///
+/// A field with no reader is listed with its reason (`reader: Err`), never
+/// dropped: that is how `legacyArchiveAddressing.allowHttp` stays visible.
+#[test]
+fn every_installation_policy_value_reaches_its_field_and_a_reader_at_a_non_default_value() {
+    let values = values();
+    let tuned = example("tuned");
+
+    // 1a. The values side is complete.
+    let mut leaves = Vec::new();
+    for block in ["checks", "runs", "engine", "evidence"] {
+        yaml_leaves(&values[block], block, &mut leaves);
+    }
+    for key in ["endpoint", "region", "allowHttp", "virtualHostedStyle"] {
+        leaves.push(format!("archive.s3.{key}"));
+    }
+    let leaves: std::collections::BTreeSet<String> = leaves.into_iter().collect();
+    let followed: std::collections::BTreeSet<String> =
+        FOLLOWED.iter().map(|f| f.value.to_string()).collect();
+    assert_eq!(
+        followed, leaves,
+        "every values.yaml leaf the policy document is rendered from must be followed in \
+         FOLLOWED, and nothing else"
+    );
+
+    // 1b. The parser side is complete.
+    let mut fields = Vec::new();
+    json_leaves(
+        &serde_json::to_value(Policy::defaults()).expect("the policy serialises"),
+        "",
+        &mut fields,
+    );
+    let fields: std::collections::BTreeSet<String> = fields.into_iter().collect();
+    let mut accounted: std::collections::BTreeSet<String> =
+        FOLLOWED.iter().map(|f| f.field.to_string()).collect();
+    for extra in [
+        "version",
+        "discovery.defaultMaxTopics",
+        "preflight.defaultTimeoutSeconds",
+    ] {
+        accounted.insert(extra.to_string());
+    }
+    assert_eq!(
+        accounted, fields,
+        "every field check::policy::Policy parses must be followed in FOLLOWED (or be one of \
+         the two withdrawn ones, which the row above holds to no reader)"
+    );
+
+    // 2–3. Off its default in the example, and in its own field after the parse.
+    let raw = rendered_policies("tuned")
+        .remove("weirkeeper-policy")
+        .expect("the tuned render carries weirkeeper-policy");
+    let parsed = serde_json::to_value(
+        policy::parse(raw.as_bytes())
+            .unwrap_or_else(|e| panic!("the tuned document is refused: {e}")),
+    )
+    .expect("serialises");
+    for f in FOLLOWED {
+        let default = yaml_at(&values, f.value);
+        let set = yaml_at(&tuned, f.value);
+        assert!(
+            !set.is_null(),
+            "examples/tuned.values.yaml does not set `{}`",
+            f.value
+        );
+        assert_ne!(
+            set, default,
+            "examples/tuned.values.yaml sets `{}` to its default, which proves nothing",
+            f.value
+        );
+        let want: serde_json::Value = serde_json::to_value(set).expect("YAML to JSON");
+        assert_eq!(
+            json_at(&parsed, f.field),
+            &want,
+            "`{}` set to {want} did not land in the parsed `{}`",
+            f.value,
+            f.field
+        );
+    }
+
+    // 4. The reader site and the proof row exist.
+    for f in FOLLOWED {
+        match f.reader {
+            Ok((file, needle)) => {
+                let path = repo().join("crates/weirkeeper/src").join(file);
+                let text = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+                assert!(
+                    text.contains(needle),
+                    "`{}` names reader `{needle}` in {file}, and it is not there",
+                    f.field
+                );
+                let (test_file, test_fn) = f
+                    .proof
+                    .unwrap_or_else(|| panic!("`{}` has a reader and no proof row", f.field));
+                let path = repo().join("crates/weirkeeper/tests").join(test_file);
+                let text = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+                assert!(
+                    text.contains(&format!("fn {test_fn}(")),
+                    "`{}`'s proof row `{test_fn}` is not in {test_file}",
+                    f.field
+                );
+            }
+            Err(reason) => assert!(
+                f.proof.is_none() && reason.contains("FX-10 report"),
+                "`{}` is listed as unread; its reason must point at the report",
+                f.field
+            ),
+        }
+    }
+}

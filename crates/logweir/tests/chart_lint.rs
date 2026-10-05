@@ -4862,12 +4862,13 @@ fn chart_lint_the_gate_script_carries_every_arm() {
         "'checks.discovery.hardMaxTopics=100000'",
         "'checks.maxActiveTotal=2'",
         // FX-10: the withdrawn values are accepted, ignored and named in the
-        // notes.
+        // notes; and every chart value, changed alone, changes the render.
         "'checks.discovery.defaultMaxTopics=60000'",
         "'checks.preflight.defaultTimeoutSeconds=900'",
         "cmp -s \"$tmp/withdrawn-base.yaml\" \"$tmp/withdrawn-set.yaml\"",
         "KUBECONFIG=/dev/null helm install \"$RELEASE\" \"$CHART\" -n \"$NAMESPACE\" --dry-run=client",
         "WITHDRAWN VALUES ARE SET AND IGNORED",
+        "bash scripts/check-chart-values.sh",
         "--set 'admissionPolicy.consoleServiceAccountName=null'",
         "--set-string 'admissionPolicy.consoleServiceAccountName='",
     ] {
@@ -6149,5 +6150,99 @@ fn chart_lint_a_default_render_carries_neither_manual_run_block() {
     assert!(
         config.contains("(ne $rlBackups 10) (ne $rlRestores 5)"),
         "templates/ui/api-config.yaml renders `rateLimits` only away from RunRateLimits::default() (10, 5)"
+    );
+}
+
+// ============================================= FX-10 — values that reach nothing
+
+/// Every leaf path of a `values.yaml`-shaped document: a mapping that is
+/// EMPTY, and every sequence and scalar, is one leaf — the same rule
+/// `scripts/check-chart-values.sh`'s header states.
+fn value_leaves(node: &Value, prefix: &str, out: &mut BTreeSet<String>) {
+    match node.as_mapping() {
+        Some(map) if !map.is_empty() => {
+            for (k, v) in map {
+                let k = k.as_str().expect("values.yaml keys are strings");
+                let path = if prefix.is_empty() {
+                    k.to_string()
+                } else {
+                    format!("{prefix}.{k}")
+                };
+                value_leaves(v, &path, out);
+            }
+        }
+        _ => {
+            out.insert(prefix.to_string());
+        }
+    }
+}
+
+/// **FX-10: every chart value has a row in `scripts/check-chart-values.sh`,
+/// which renders it ALONE at a non-default value and fails unless the render
+/// changes.**
+///
+/// The defect: `checks.discovery.defaultMaxTopics` and
+/// `checks.preflight.defaultTimeoutSeconds` were documented, rendered and
+/// parsed for weeks and changed nothing, and no gate could see it — every
+/// committed render carries every value at its default, which is also what a
+/// template that ignores the value renders. The script is the probe (it needs
+/// `helm`, so it lives in the gate script, GC22); this row is what keeps it
+/// complete: its table must name EXACTLY the leaves `values.yaml` has, so a new
+/// value cannot be added without a row, and a row cannot outlive its value.
+///
+/// MUTANT: delete any row (or add a value to `values.yaml`) and this names it;
+/// make a template ignore a value and the script fails that row.
+#[test]
+fn chart_lint_every_chart_value_has_a_probe_row_that_must_change_the_render() {
+    let script = read("scripts/check-chart-values.sh");
+    let start = script
+        .find("<<'ROWS'\n")
+        .expect("the table opens with <<'ROWS'")
+        + "<<'ROWS'\n".len();
+    let end = start
+        + script[start..]
+            .find("\nROWS\n")
+            .expect("the table closes with ROWS");
+    let mut rows = BTreeSet::new();
+    let mut seen = 0usize;
+    for line in script[start..end].lines() {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let fields: Vec<&str> = line.splitn(5, '|').collect();
+        assert_eq!(fields.len(), 5, "a malformed row: `{line}`");
+        let (leaf, base, flag) = (fields[0], fields[1], fields[3]);
+        assert!(
+            base == "default"
+                || repo()
+                    .join(format!("charts/logweir/examples/{base}.values.yaml"))
+                    .is_file(),
+            "row `{leaf}` names base `{base}`, which is not an example"
+        );
+        assert!(
+            ["--set", "--set-string", "--set-json"].contains(&flag.trim_start_matches('!')),
+            "row `{leaf}` uses flag `{flag}`"
+        );
+        assert!(rows.insert(leaf.to_string()), "two rows for `{leaf}`");
+        seen += 1;
+    }
+    let values: Value =
+        serde_yaml::from_str(&read("charts/logweir/values.yaml")).expect("values.yaml parses");
+    let mut leaves = BTreeSet::new();
+    value_leaves(&values, "", &mut leaves);
+    let missing: Vec<&String> = leaves.difference(&rows).collect();
+    let stale: Vec<&String> = rows.difference(&leaves).collect();
+    assert!(
+        missing.is_empty() && stale.is_empty(),
+        "scripts/check-chart-values.sh must have exactly one row per values.yaml leaf.\n  \
+         values with no row: {missing:?}\n  rows with no value: {stale:?}"
+    );
+    assert!(seen >= 150, "only {seen} rows: the table has gone quiet");
+    // AND THE GATE RUNS IT, with the bootstrap override every other render gets.
+    assert!(
+        read("scripts/check-chart.sh").contains(
+            "bash scripts/check-chart-values.sh ${bootstrap_render_args[@]+\"${bootstrap_render_args[@]}\"}"
+        ),
+        "scripts/check-chart.sh must run scripts/check-chart-values.sh"
     );
 }

@@ -567,6 +567,23 @@ where
     }
 }
 
+/// The installation policy's ceiling for `kind`: the ONE place a manual-run
+/// gate maps its pool to its `runs` field (FX-10).
+///
+/// A pure function of the LOADED policy. The backup gate's whole path — the
+/// process environment, the `ConfigMap`, this mapping, the queue — has a row at
+/// a non-default value in `weirkeeper/tests/configured_values.rs`; the restore
+/// gate's cannot be driven end to end in a binary of its own (its approval and
+/// signing fixtures live in `restore_controller.rs`), so its half of the
+/// mapping is held here, where a row can reach it.
+#[must_use]
+pub fn ceiling(kind: PoolKind, policy: &crate::check::policy::Policy) -> u32 {
+    match kind {
+        PoolKind::Backup => policy.runs.max_manual_backups_active_per_namespace,
+        PoolKind::Restore => policy.runs.max_manual_restores_active_per_namespace,
+    }
+}
+
 /// The ONE installation-policy cache the two gates share.
 ///
 /// A process-wide `OnceLock` for the reason `controllers::backup` gives for

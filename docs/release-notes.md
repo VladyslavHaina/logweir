@@ -727,6 +727,7 @@ refusal.
 - `crates/weirkeeper/tests/chart_policy.rs`;
 - `crates/logweir/tests/chart_lint.rs`;
 - `scripts/check-chart.sh`, its withdrawn-values arm;
+- `scripts/check-chart-values.sh`, one render per chart value;
 - `crates/logweir-retention/tests/worker.rs`, the caps at 7 and 1234 and the
   refusals;
 - the mutants in the FX-10 report.

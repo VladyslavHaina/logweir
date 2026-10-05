@@ -579,6 +579,19 @@ else
   echo "   rc=$rc  (the install notes name both withdrawn values as ignored, and are silent without them)"
 fi
 
+# FX-10 — EVERY CHART VALUE, CHANGED ON ITS OWN, CHANGES THE RENDER. A value
+# whose non-default setting renders exactly what its default does reaches
+# nothing; `scripts/check-chart-values.sh` holds one row per `values.yaml` leaf
+# and `chart_lint` holds that table to the values file.
+bash scripts/check-chart-values.sh ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"}
+rc=$?
+if [ "$rc" -ne 0 ]; then
+  echo "FAIL: scripts/check-chart-values.sh found a chart value that reaches nothing (rc=$rc)" >&2
+  fail=1
+else
+  echo "   rc=$rc  (every chart value, changed alone, changes the render)"
+fi
+
 # AND THE ADMISSION POLICY'S SUBJECT, WHICH IS ITS WHOLE EFFECT (review F4). A
 # null name used to render `%!s(<nil>)`: the fence installed, read as enabled,
 # and matched no principal at all.
