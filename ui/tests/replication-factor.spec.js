@@ -148,6 +148,11 @@ test("fx5_the_default_rule_source_capped_by_brokers_brokers_capped_at_three_else
   assert.deepEqual(replicationDefault(null, 2), { value: 2, basis: "brokers", source: null, brokers: 2 },
     "NEGATIVE CONTROL: 1 (the old literal) or 3 (the ceiling, above two brokers) fails this");
   assert.deepEqual(replicationDefault(null, 3), { value: 3, basis: "brokers", source: null, brokers: 3 });
+  // THE CEILING'S BOUNDARY (FX-5 review L1): the FIRST count above it is
+  // capped, not only a count well above it.
+  assert.deepEqual(replicationDefault(null, 4),
+    { value: DEFAULT_REPLICATION_CEILING, basis: "ceiling", source: null, brokers: 4 },
+    "NEGATIVE CONTROL: 4 -- the ceiling one broker late (`count > CEILING + 1`) -- fails this");
   assert.deepEqual(replicationDefault([], 5),
     { value: DEFAULT_REPLICATION_CEILING, basis: "ceiling", source: null, brokers: 5 },
     "NEGATIVE CONTROL: 5 -- every broker of a larger cluster -- fails this");
@@ -317,6 +322,14 @@ test("fx5_a_larger_target_is_capped_at_three_and_a_single_broker_at_one", async 
   assert.equal(visible(byId(renderPlanStep(await preparePlan(big), big), "review-replication")),
     "3 (at most 3 by default, of the target's 5 brokers; the source's replication factor is " +
     "not published to this console)");
+  // THE BOUNDARY, through a state and the plan (review L1): four brokers is
+  // the first count the ceiling caps.
+  const four = withBrokers(wizardState(), 4);
+  assert.equal(replicationFactorOf(four), 3,
+    "NEGATIVE CONTROL: 4 -- the ceiling one broker late -- fails this");
+  assert.ok((await preparePlan(four)).bytes.includes("\n  default_replication_factor: 3\n"),
+    "the plan an approver signs asks for 3, not 4");
+  assert.equal(replicationChoice(four).basis, "ceiling");
   const one = withBrokers(wizardState(), 1);
   assert.equal(replicationFactorOf(one), 1);
   assert.equal(replicationChoice(one).basis, "brokers",
@@ -575,26 +588,74 @@ test("fx5_legacy_mode_has_no_discovery_and_says_so_with_the_grammar_default", as
 
 import { catalogRecoveryPoint, selectedTopics, setCatalogTopics } from "../pages/restore-wizard.js";
 
+/** The catalog point's id: a point with no Backup behind it. */
+function catalogPointId() {
+  return "lwp1-0123456789abcdef0123456789abcdef";
+}
+
+/** The `RecoveryCatalog` the point is read from, over the shared destination. */
+function catalogObject(ns) {
+  return {
+    apiVersion: "logweir.dev/v1alpha1", kind: "RecoveryCatalog",
+    metadata: { name: "archive", namespace: ns, uid: "cat-uid" },
+    spec: { destinationRef: { name: fixture("console/destination.json").item.name } },
+    status: {},
+  };
+}
+
+/** The point, as `GET .../catalogs/{name}/points` publishes it. */
+function catalogPointEntry() {
+  return {
+    pointId: catalogPointId(), backupId: "set-fx5", runId: "01JB7Z00000000000000000000",
+    recoveryPointAt: "2026-09-22T14:00:00Z", coveredFrom: "2026-09-22T13:00:00Z",
+    coveredTo: "2026-09-22T14:00:00Z", availability: "Available", verification: "Verified",
+    selectable: true, signerKeyId: "c".repeat(64),
+    receiptKey: "logweir/backups/set-fx5/01JB7Z00000000000000000000.receipt.json",
+    receiptSha256: "sha256:" + "a1".repeat(32), manifestKey: "set-fx5/manifest.json",
+    manifestSha256: "sha256:" + "b2".repeat(32),
+    locations: [{ locationId: "s3://kafka-backups/team-a/prod", availability: "Available" }],
+  };
+}
+
 /** A catalog point the wizard restores from, with no Backup behind it. */
 function catalogPointState(ns) {
   const destination = fixture("console/destination.json").item;
-  const pointId = "lwp1-0123456789abcdef0123456789abcdef";
-  const point = catalogRecoveryPoint(
-    { apiVersion: "logweir.dev/v1alpha1", kind: "RecoveryCatalog",
-      metadata: { name: "archive", namespace: ns, uid: "cat-uid" },
-      spec: { destinationRef: { name: destination.name } }, status: {} },
-    { pointId: pointId, backupId: "set-fx5", runId: "01JB7Z00000000000000000000",
-      recoveryPointAt: "2026-09-22T14:00:00Z", coveredFrom: "2026-09-22T13:00:00Z",
-      coveredTo: "2026-09-22T14:00:00Z", availability: "Available", verification: "Verified",
-      selectable: true, signerKeyId: "c".repeat(64),
-      receiptKey: "logweir/backups/set-fx5/01JB7Z00000000000000000000.receipt.json",
-      receiptSha256: "sha256:" + "a1".repeat(32), manifestKey: "set-fx5/manifest.json",
-      manifestSha256: "sha256:" + "b2".repeat(32),
-      locations: [{ locationId: "s3://kafka-backups/team-a/prod", availability: "Available" }] },
-    destination, null);
-  return initialState(ns, clusters(), { items: [] }, { catalog: "archive", point: pointId },
-    destination, undefined, { point: point });
+  const point = catalogRecoveryPoint(catalogObject(ns), catalogPointEntry(), destination, null);
+  return initialState(ns, clusters(), { items: [] },
+    { catalog: "archive", point: catalogPointId() }, destination, undefined, { point: point });
 }
+
+test("fx5_a_catalog_point_mount_reads_the_targets_discovery_before_the_first_paint", async () => {
+  // THE CATALOG HALF (FX-5 review L2). A catalog point with no Backup behind
+  // it (PLAT-15.2) is mounted by its own path, `mountCatalogPoint`, which must
+  // read the TARGET's broker count before its first paint exactly as the
+  // Backup mount does -- or every restore from a catalog point shows the
+  // grammar's 1 and "the target's topic discoveries have not been read".
+  const asked = [];
+  const view = fakeView();
+  const ns = "team-fx5-cat-mount";
+  const api = Object.assign(mountApi({ "orders-scratch": DISCOVERY() }, asked), {
+    destination: async () => ({ item: fixture("console/destination.json").item }),
+    catalogReaders: {
+      listCatalogs: async () => ({ items: [catalogObject(ns)] }),
+      readCatalog: async () => catalogObject(ns),
+      readPoints: async () => ({
+        requestId: "r", items: [catalogPointEntry()], truncated: false, viewExpired: false,
+        page: { limit: 200, nextCursor: null },
+      }),
+      ownVerdict: async () => ({ verdict: null }),
+    },
+  });
+  await mountRestoreWizard(view.root, ns, { catalog: "archive", point: catalogPointId() },
+    viewParse, api);
+  assert.ok(view.find("#catalog-topics") !== null,
+    "the six steps over the catalog point, not a refusal: " + visible(view.html()).slice(0, 400));
+  assert.deepEqual(asked, [ns + "/orders-scratch"],
+    "NEGATIVE CONTROL: [] -- the catalog mount never reading the target -- fails this");
+  assert.equal(view.find("#replication-factor").getAttribute("value"), "2",
+    "NEGATIVE CONTROL: 1 -- the catalog mount's first paint before the count -- fails this");
+  assert.match(visible(view.html()), /This plan asks for 2 \(the target's 2 brokers;/);
+});
 
 test("fx5_class_every_wizard_draft_value_is_one_the_draft_store_keeps", () => {
   // THE CLASS (FX-5's sweep). `keepDraft` keeps strings and booleans and DROPS
