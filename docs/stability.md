@@ -1168,11 +1168,28 @@ The document is canonical JSON with the DSSE payload type
   "kind": "StandingRehearsalAuthorization",
   "subjectRef": {"apiVersion": "logweir.dev/v1alpha1", "kind": "RehearsalSchedule",
                  "namespace": "team-a", "name": "weekly-orders", "uid": "…"},
-  "scope": { …D3 §4.3's RehearsalScope, camelCase… },
+  "scope": {"templateDigest": "sha256:…", "targetClusterId": "…",
+            "topicPrefix": "rehearsal-3f2a91c7-", "topics": ["orders"],
+            "maxPartitions": 200, "recordsPerPartition": 25,
+            "deadlineSeconds": 3600, "modes": ["scratch"]},
   "issuedAt": "2026-06-01T00:00:00Z",
   "expiresAt": "2026-07-01T00:00:00Z"
 }
 ```
+
+The scope is D3 §4.3's `RehearsalScope` (`logweir_core::rehearsal_scope`). Each field bounds the plan
+a slot may run:
+
+| Field | What it bounds |
+|---|---|
+| `templateDigest` | `sha256` over the canonical JSON of the schedule's `spec` minus `suspend`: the binding to one schedule template. The controller recomputes it each slot; the runner does not check it (below). |
+| `targetClusterId` | The one cluster a rehearsal may restore into, compared with the id the cluster itself reports. |
+| `topicPrefix` | The prefix every restored topic name carries, rendered per schedule as `<prefix><schedule-uid-first-8>-`. |
+| `topics` | The source topics the authorization covers, by exact name. |
+| `maxPartitions` | The partition ceiling: each slot's plan carries the schedule's own bound as `sample.max_partitions`, which may not exceed it. |
+| `recordsPerPartition` | The most records per partition the plan may sample and verify. It does not bound how many records the restore writes, which is every archived record in the window. |
+| `deadlineSeconds` | The wall-clock bound on one run, the Job's `activeDeadlineSeconds`. The controller checks it; the runner does not. |
+| `modes` | The target modes permitted: `["scratch"]`, and nothing else in this build. A scope naming any other mode is refused. |
 
 Unknown fields are ignored on read. They cannot widen authority: the standing format carries no
 approval-policy mode (PLAT-19.2 carries one end to end for per-run Restores only, through
