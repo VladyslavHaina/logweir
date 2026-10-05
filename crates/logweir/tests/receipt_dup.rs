@@ -811,6 +811,471 @@ fn the_python_verifier_agrees_the_first_receipt_still_verifies() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// FX-7: a set an OLDER build wrote carries no claim
+// ---------------------------------------------------------------------------
+
+/// **FX-7 — the upgrade window.** An execution whose first run was made by a
+/// build WITHOUT the execution claim (a runner from before RECEIPT-DUP) leaves
+/// its archive, its receipt and NO claim. A Job re-created after the upgrade
+/// runs this build under the same execution id: it wins a fresh claim, so the
+/// claim alone would start the engine over the older run's set. The set
+/// directory is not empty, so the run is refused before the engine — exit 1,
+/// the same state as a claim that exists, with its own message — and the first
+/// receipt still verifies.
+///
+/// The older build is modelled by exactly what it leaves in the bucket: this
+/// build's first run, with its claim removed.
+#[test]
+fn a_set_an_older_build_wrote_is_refused_before_the_engine() {
+    let f = Fixture::new();
+    let engine = AdvancingEngine::new(&f.root());
+    let first = f
+        .run("01K5RUN0000000000000000001", &engine)
+        .expect("the first run succeeds");
+    std::fs::remove_file(
+        f.root()
+            .join(logweir::backup::phase_run::claim_key(EXECUTION_ID)),
+    )
+    .expect("the first run's claim is removed: the older build never wrote one");
+
+    let second = f.run("01K5RUN0000000000000000002", &engine);
+
+    match second {
+        Err(ref err @ BackupError::ExecutionClaimed(ref message)) => {
+            assert_eq!(err.exit_code(), ExitCode::Operational, "exit 1: retryable");
+            assert_eq!(
+                err.failure_reason(),
+                Some(logweir::backup::phase_run::EXECUTION_ALREADY_CLAIMED)
+            );
+            assert!(
+                message.contains("already exists in the archive")
+                    && message.contains(&format!("{EXECUTION_ID}/manifest.json")),
+                "the refusal names the existing set, not a claim: {message}"
+            );
+        }
+        other => panic!(
+            "a run over a set an older build wrote must be refused with exit 1 before the \
+             engine, got {other:?}"
+        ),
+    }
+    assert_eq!(
+        engine.runs.get(),
+        1,
+        "the engine never started over the existing set"
+    );
+    assert_eq!(
+        verdict(
+            &f.evidence(),
+            &f.archive(),
+            &first.receipt_key,
+            &f.public_key()
+        ),
+        Verdict::Valid,
+        "FX-7: a second run over a set an older build wrote invalidated its signed receipt"
+    );
+    assert_eq!(
+        f.receipts(),
+        vec![first.receipt_key.clone()],
+        "the refused run signed nothing"
+    );
+}
+
+/// An older run that DIED after its first segment — or is still running —
+/// left segments and no manifest. The engine would write those keys again, so
+/// a segment is looked for as well as the manifest.
+#[test]
+fn a_set_with_segments_and_no_manifest_is_refused_too() {
+    let f = Fixture::new();
+    let engine = AdvancingEngine::new(&f.root());
+    let segment = f.root().join(format!(
+        "{EXECUTION_ID}/topics/orders/partition=0/segment-00000000000000000000.bin.zst"
+    ));
+    std::fs::create_dir_all(segment.parent().unwrap()).unwrap();
+    std::fs::write(&segment, b"a segment an interrupted older run wrote").unwrap();
+
+    let err = f
+        .run("01K5RUN0000000000000000001", &engine)
+        .expect_err("a set holding a segment is not new");
+    assert!(matches!(err, BackupError::ExecutionClaimed(_)), "{err:?}");
+    assert!(
+        err.to_string().contains("segment-00000000000000000000"),
+        "{err}"
+    );
+    assert_eq!(engine.runs.get(), 0, "no engine run over a partial set");
+    assert!(f.receipts().is_empty(), "nothing signed");
+}
+
+/// An object the engine does NOT write in the configuration Logweir renders —
+/// an upstream archive's consumer-groups snapshot beside the set, which FX-1's
+/// rows plant on purpose — is not the set: the run writes none of its keys and
+/// invalidates nothing, so it is admitted, and its receipt is signed.
+#[test]
+fn an_object_the_engine_does_not_write_is_not_an_existing_set() {
+    let f = Fixture::new();
+    let engine = AdvancingEngine::new(&f.root());
+    let snapshot = f
+        .root()
+        .join(format!("{EXECUTION_ID}/consumer-groups-snapshot.json"));
+    std::fs::create_dir_all(snapshot.parent().unwrap()).unwrap();
+    std::fs::write(&snapshot, b"{\"groups\":[]}").unwrap();
+
+    let outcome = f
+        .run("01K5RUN0000000000000000001", &engine)
+        .expect("a set directory holding only a foreign object is still a new set");
+    assert_eq!(engine.runs.get(), 1);
+    assert_eq!(f.receipts(), vec![outcome.receipt_key]);
+}
+
+/// **Ordering.** Between two runs of THIS build the CLAIM still answers first:
+/// the set check comes after it, so the second run's refusal names the claim.
+/// With the two swapped the second run would be refused by the set's manifest
+/// instead, which is the same exit and a less exact message.
+#[test]
+fn between_two_runs_of_this_build_the_claim_answers_first() {
+    let f = Fixture::new();
+    let engine = AdvancingEngine::new(&f.root());
+    f.run("01K5RUN0000000000000000001", &engine).unwrap();
+    let err = f
+        .run("01K5RUN0000000000000000002", &engine)
+        .expect_err("the second run of one execution is refused");
+    let message = err.to_string();
+    assert!(
+        message.contains("was already claimed by an earlier run")
+            && message.contains("execution.claim.json exists"),
+        "the claim answers before the set listing: {message}"
+    );
+}
+
+/// An archive that cannot be READ (its set directory unlistable here) proves
+/// nothing about the set, so the run fails closed: exit 4
+/// `ExecutionClaimUnproven`, no engine run, nothing signed — never "no
+/// objects, so the set is new".
+#[cfg(unix)]
+#[test]
+fn an_archive_that_cannot_be_listed_fails_closed() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let f = Fixture::new();
+    let engine = AdvancingEngine::new(&f.root());
+    let set = f.root().join(EXECUTION_ID);
+    std::fs::create_dir_all(&set).unwrap();
+    std::fs::write(set.join("hidden"), b"x").unwrap();
+    std::fs::set_permissions(&set, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let readable = std::fs::read_dir(&set).is_ok();
+
+    let result = f.run("01K5RUN0000000000000000001", &engine);
+    std::fs::set_permissions(&set, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    if readable {
+        // A superuser reads a mode-000 directory anyway, so there is no
+        // listing failure to provoke; the row then says so instead of passing.
+        eprintln!("skipped: this process can read a mode-000 directory (running as root?)");
+        return;
+    }
+    let err = result.expect_err("an unlistable archive must refuse the run");
+    assert_eq!(err.exit_code(), ExitCode::SigningOrLock, "{err}");
+    assert_eq!(
+        err.failure_reason(),
+        Some(logweir::backup::phase_run::EXECUTION_CLAIM_UNPROVEN)
+    );
+    assert!(
+        err.to_string()
+            .contains("could not be read to prove the backup set is new"),
+        "{err}"
+    );
+    assert_eq!(engine.runs.get(), 0, "no engine run on an unproven set");
+    assert!(f.receipts().is_empty(), "nothing signed");
+}
+
+// ---------------------------------------------------------------------------
+// FX-7 fix round: the set check's two reads, answered on demand (review L-1
+// K1/K2, review L-3)
+// ---------------------------------------------------------------------------
+
+/// An archive whose two set-check reads answer what a row chooses, through the
+/// `ObjectAccess` seam `phase_run::refuse_an_existing_set` reads by. Keys are
+/// bucket-absolute, as the store's are; an error text is a REAL
+/// `object_store` message shape, so the classifier reads what it would read.
+#[derive(Default)]
+struct SetReads {
+    keys: Vec<String>,
+    list_error: Option<&'static str>,
+    get_error: Option<&'static str>,
+    asked: std::cell::RefCell<Vec<String>>,
+}
+
+impl logweir::check::store::ObjectAccess for SetReads {
+    fn get(&self, key: &str) -> Result<Vec<u8>, logweir_engine_oso::storage::StoreError> {
+        use logweir_engine_oso::storage::StoreError;
+        self.asked.borrow_mut().push(format!("get {key}"));
+        if let Some(text) = self.get_error {
+            return Err(StoreError::Io(format!("{key}: {text}")));
+        }
+        if self.keys.iter().any(|k| k == key) {
+            Ok(b"{}".to_vec())
+        } else {
+            Err(StoreError::NotFound(key.to_string()))
+        }
+    }
+
+    fn list_page(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+        max: usize,
+    ) -> Result<Vec<String>, logweir_engine_oso::storage::StoreError> {
+        self.asked.borrow_mut().push(format!("list {prefix}"));
+        if let Some(text) = self.list_error {
+            return Err(logweir_engine_oso::storage::StoreError::Io(format!(
+                "{prefix}: {text}"
+            )));
+        }
+        let mut keys: Vec<String> = self
+            .keys
+            .iter()
+            .filter(|k| k.starts_with(prefix))
+            .filter(|k| start_after.is_none_or(|after| k.as_str() > after))
+            .cloned()
+            .collect();
+        keys.sort();
+        keys.truncate(max);
+        Ok(keys)
+    }
+
+    fn put_create_only(
+        &self,
+        key: &str,
+        _bytes: &[u8],
+    ) -> Result<logweir_engine_oso::storage::PutOutcome, logweir_engine_oso::storage::StoreError>
+    {
+        panic!("the set check never writes, and was asked to put {key}")
+    }
+
+    fn qualify(&self, relative_key: &str) -> String {
+        relative_key.to_string()
+    }
+}
+
+/// An S3 archive whose objects live under `prefix`.
+fn s3_storage(prefix: &str) -> StorageUrl {
+    StorageUrl::S3 {
+        bucket: "lw-archive".to_string(),
+        prefix: prefix.to_string(),
+        region: Some("us-east-1".to_string()),
+        endpoint: None,
+        path_style: false,
+        allow_http: false,
+    }
+}
+
+const SET_SEGMENT: &str = "topics/orders/partition=0/segment-00000000000000000000.bin";
+
+/// The shapes `object_store` 0.14.1 prints (`RetryError`'s Display, then
+/// `RequestError`'s). **A failure it RETRIED prints `retry_timeout: …`**, which
+/// the classifier's `timeout` token reads as `Timeout`: every retried failure
+/// (a 5xx, a 429, a transport error) is transient, correctly. The SINGLE-
+/// ATTEMPT shapes — a 5xx or a 429 whose first answer already exhausted the
+/// retry budget, an unreachable endpoint on its only try — carry no such
+/// clause, and are what the status arm and the `EndpointUnreachable` arm of
+/// `a_retry_can_change` exist for (review L-3's mutants L3c and L3d).
+const A_503: &str =
+    "Generic S3 error: Error performing GET http://minio:9000/lw-archive?list-type=2 \
+     in 180.2s, after 10 retries, max_retries: 10, retry_timeout: 180s  - Server returned \
+     non-2xx status code: 503 Service Unavailable: <Error><Code>SlowDown</Code></Error>";
+const A_503_ON_ITS_ONLY_TRY: &str = "Generic S3 error: Error performing GET \
+     http://minio:9000/lw-archive?list-type=2 in 181.3s - Server returned non-2xx status code: \
+     503 Service Unavailable: <Error><Code>SlowDown</Code></Error>";
+const A_429_ON_ITS_ONLY_TRY: &str = "Generic S3 error: Error performing GET \
+     http://minio:9000/lw-archive?list-type=2 in 181.3s - Server returned non-2xx status code: \
+     429 Too Many Requests: <Error><Code>SlowDown</Code></Error>";
+const A_403: &str =
+    "Generic S3 error: Error performing GET http://minio:9000/lw-archive?list-type=2 \
+     in 3ms - Server returned non-2xx status code: 403 Forbidden: <Error><Code>AccessDenied</Code>\
+     <Message>Access Denied.</Message></Error>";
+const UNREACHABLE: &str = "Generic S3 error: Error performing GET http://minio:9000/lw-archive in \
+     2.0ms - HTTP error: error sending request";
+const A_400: &str = "Generic S3 error: Error performing GET http://minio:9000/lw-archive in 2ms - \
+     Server returned non-2xx status code: 400 Bad Request: <Error><Code>InvalidRequest</Code></Error>";
+
+/// **Review L-1, K1: the set directory is the PLAN's prefix joined to the
+/// `backup_id`.** Every other in-process fixture is a filesystem store, whose
+/// prefix is `""`, so only the e2e row guarded this join. Here the set a
+/// claim-less older build wrote sits under `lw-archive/<id>/` on an S3-shaped
+/// archive: it is refused, and the reads asked for exactly that directory. The
+/// control: the same objects under ANOTHER prefix are not this set.
+#[test]
+fn a_set_under_the_plans_storage_prefix_is_found() {
+    let reads = SetReads {
+        keys: vec![format!("lw-archive/{EXECUTION_ID}/{SET_SEGMENT}")],
+        ..SetReads::default()
+    };
+    let err = logweir::backup::phase_run::refuse_an_existing_set(
+        EXECUTION_ID,
+        &s3_storage("lw-archive"),
+        &reads,
+    )
+    .expect_err("the set under the plan's prefix exists");
+    assert_eq!(err.exit_code(), ExitCode::Operational, "{err}");
+    assert_eq!(
+        err.failure_reason(),
+        Some(logweir::backup::phase_run::EXECUTION_ALREADY_CLAIMED)
+    );
+    assert!(
+        err.to_string()
+            .contains(&format!("lw-archive/{EXECUTION_ID}/{SET_SEGMENT}")),
+        "{err}"
+    );
+    assert_eq!(
+        reads.asked.borrow()[0],
+        format!("list lw-archive/{EXECUTION_ID}/topics/"),
+        "the LIST is of the plan's prefix, the execution, then `topics/`"
+    );
+
+    let elsewhere = SetReads {
+        keys: vec![format!("lw-archive/{EXECUTION_ID}/{SET_SEGMENT}")],
+        ..SetReads::default()
+    };
+    logweir::backup::phase_run::refuse_an_existing_set(
+        EXECUTION_ID,
+        &s3_storage("another-prefix"),
+        &elsewhere,
+    )
+    .expect("objects under another prefix are not this plan's set");
+    assert_eq!(
+        *elsewhere.asked.borrow(),
+        vec![
+            format!("list another-prefix/{EXECUTION_ID}/topics/"),
+            format!("get another-prefix/{EXECUTION_ID}/manifest.json"),
+        ]
+    );
+}
+
+/// **Review L-1, K2: a manifest GET that fails with anything but `NotFound`
+/// proves nothing** — the LIST answered "no segments", and a denied GET must
+/// not be read as "no manifest, so the set is new". Exit 4: a 403 is a grant to
+/// fix, not something a retry changes.
+#[test]
+fn a_manifest_read_that_is_denied_fails_closed_as_exit_4() {
+    let reads = SetReads {
+        get_error: Some(A_403),
+        ..SetReads::default()
+    };
+    let err =
+        logweir::backup::phase_run::refuse_an_existing_set(EXECUTION_ID, &s3_storage(""), &reads)
+            .expect_err("a denied manifest read is not a new set");
+    assert_eq!(err.exit_code(), ExitCode::SigningOrLock, "{err}");
+    assert_eq!(
+        err.failure_reason(),
+        Some(logweir::backup::phase_run::EXECUTION_CLAIM_UNPROVEN)
+    );
+    assert!(
+        err.to_string()
+            .contains(&format!("{EXECUTION_ID}/manifest.json could not be read")),
+        "{err}"
+    );
+    assert!(err.to_string().contains("s3:GetObject"), "{err}");
+}
+
+/// **Review L-3, option (a): WHICH failure decides the code.** A transient one
+/// (a 5xx the client already retried, an unreachable endpoint) is exit 1
+/// `Operational` — no failure-reason, retried by a schedule with `spec.retry`
+/// under a NEW execution id, which is a different set and therefore safe; a
+/// configuration one (a 403, an unclassified 400) stays exit 4
+/// `ExecutionClaimUnproven`, a decision `cadence::is_retryable` never retries.
+/// Both reads, both ways.
+#[test]
+fn a_transient_archive_failure_is_retryable_and_a_configuration_one_is_not() {
+    for (what, reads, transient) in [
+        (
+            "a LIST answered 503 after the client's retries",
+            SetReads {
+                list_error: Some(A_503),
+                ..SetReads::default()
+            },
+            true,
+        ),
+        (
+            "a LIST that could not reach the endpoint",
+            SetReads {
+                list_error: Some(UNREACHABLE),
+                ..SetReads::default()
+            },
+            true,
+        ),
+        (
+            "a LIST answered 503 on its only try",
+            SetReads {
+                list_error: Some(A_503_ON_ITS_ONLY_TRY),
+                ..SetReads::default()
+            },
+            true,
+        ),
+        (
+            "a manifest GET answered 429 on its only try",
+            SetReads {
+                get_error: Some(A_429_ON_ITS_ONLY_TRY),
+                ..SetReads::default()
+            },
+            true,
+        ),
+        (
+            "a manifest GET answered 503",
+            SetReads {
+                get_error: Some(A_503),
+                ..SetReads::default()
+            },
+            true,
+        ),
+        (
+            "a LIST answered 403",
+            SetReads {
+                list_error: Some(A_403),
+                ..SetReads::default()
+            },
+            false,
+        ),
+        (
+            "a LIST answered an unclassified 400",
+            SetReads {
+                list_error: Some(A_400),
+                ..SetReads::default()
+            },
+            false,
+        ),
+    ] {
+        let err = logweir::backup::phase_run::refuse_an_existing_set(
+            EXECUTION_ID,
+            &s3_storage("lw-archive"),
+            &reads,
+        )
+        .expect_err("a failed read never proves the set is new");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("could not be read to prove the backup set is new"),
+            "{what}: {rendered}"
+        );
+        assert!(
+            rendered.contains("new execution id"),
+            "{what}: the claim is taken, so the remedy names a NEW id: {rendered}"
+        );
+        if transient {
+            assert_eq!(err.exit_code(), ExitCode::Operational, "{what}: {rendered}");
+            assert_eq!(err.failure_reason(), None, "{what}");
+        } else {
+            assert_eq!(
+                err.exit_code(),
+                ExitCode::SigningOrLock,
+                "{what}: {rendered}"
+            );
+            assert_eq!(
+                err.failure_reason(),
+                Some(logweir::backup::phase_run::EXECUTION_CLAIM_UNPROVEN),
+                "{what}"
+            );
+        }
+    }
+}
+
 /// The interpreter that can run the auditor's verifier — the same resolution
 /// order every parity gate uses (`two_reader_parity.rs::python`).
 fn python() -> PathBuf {

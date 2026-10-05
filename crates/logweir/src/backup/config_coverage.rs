@@ -576,6 +576,7 @@ mod tests {
             archive: logweir_core::backup_receipt::ReceiptArchive {
                 manifest_key: "k".into(),
                 manifest_sha256: "s".into(),
+                manifest_version_id: None,
                 prefix: "p".into(),
             },
             records: names(&["a", "b", "c", "d"])

@@ -172,6 +172,23 @@ beforehand ([kubernetes.md §21.5](kubernetes.md)).
 | local filesystem (standalone CLI) | **Supported, measured in process** |
 | `AWS_CONDITIONAL_PUT=disabled`, or an S3-compatible store that ignores `If-None-Match` | **Unsupported** — refused, never silently accepted |
 
+**Versioned buckets pin the manifest (FX-7).** On a bucket with versioning
+enabled, a backup receipt records the version id of the manifest it attests
+(`archive.manifest_version_id`, receipt format `1.2.0`), and a point-bound
+restore and the catalog compare it with the manifest's current version; when
+they differ they read the pinned version by id, so a byte-for-byte copy of the
+archive in another bucket — which carries the pin and not the version — is
+checked by its digest and says the pin could not be checked there
+([backup-receipt.md](formats/backup-receipt.md#the-pinned-manifest-version-versioned-buckets)).
+
+| Object store | Manifest version pinned |
+|---|---|
+| SeaweedFS 4.48, bucket with versioning (Object Lock) enabled | **Yes, measured** (compose slot 3, 2026-09-29; again on slot 2, 2026-10-05, and at receipt format `1.2.0` after FX-4 merged): the receipt pins the version the read-back was answered with; after a `v0.1.5` runner rewrote the set (identical manifest bytes, a rewritten segment), the catalog's deep check reported the point `Conflict` by version, and a point-bound `restore run` of it exited 3 `PointBindingMismatch` (2026-10-05) |
+| A byte-for-byte copy of a pinned point (`aws s3 cp`) into a MinIO unversioned bucket, and into a SeaweedFS 4.48 versioned bucket with its own version ids | **The same point, measured** (slot 2, 2026-10-05): the deep check reports it `Available` with the note that the pin could not be checked in that bucket, and a point-bound `restore run` gets past the binding and logs `PointPinUnchecked`. Each store answered the foreign version id `404 NoSuchVersion`, or MinIO `400 InvalidArgument` for an id that is not a UUID |
+| MinIO `RELEASE.2025-09-07T16-13-09Z` and SeaweedFS 4.48, unversioned buckets | **No pin, measured**: the store answers no version id, and the receipt is the document without the pin (format `1.1.0` since FX-4) |
+| AWS S3 with versioning | `[UNVERIFIED — needs a real AWS S3 bucket and a credential source]` |
+| Versioning suspended (S3's `null` version) | no pin by design: a `null` version is replaced in place. A point pinned BEFORE versioning was suspended is still checked: a write after the suspension, over a pinned version the bucket still holds, is `Conflict` (in process) |
+
 ## The weekly engine-matrix job
 
 `.github/workflows/engine-matrix.yml` runs every Monday, and on demand, over a

@@ -997,11 +997,79 @@ What changes for an operator:
   receipts, and both stay two catalog points.
 
 **Upgrade.** Nothing to migrate. A Backup Job whose first run was made by the older runner and that
-is lost and re-created after the upgrade finds no claim and runs the engine again — the one window
-the claim cannot close, because the older run never wrote one; let in-flight Backups finish before
-upgrading the controller. **Rollback.** An older runner ignores the claim objects (they are not
-receipts) and returns to the old behaviour; the claims stay in the bucket, harmlessly, and are
-honoured again after a re-upgrade.
+is lost and re-created after the upgrade finds no claim — the older run never wrote one — and,
+**since FX-7, is refused anyway**: after winning its claim the runner refuses a set that already
+holds its manifest or a segment, exit 1 `ExecutionAlreadyClaimed`, before the engine starts (the
+next section). **Rollback.** An older runner ignores the claim objects (they are not
+receipts) and the set check, and returns to the old behaviour; the claims stay in the bucket,
+harmlessly, and are honoured again after a re-upgrade.
+
+### A backup set that already exists is never written again; versioned buckets pin the manifest (FX-7)
+
+The execution claim stops a second run of an execution that took a claim. A set written by a build
+without the claim carries none, so the claim alone let a later run of the same `backup_id` start —
+a Backup Job lost across the upgrade and re-created with the new runner image, or a standalone
+`backup run` reusing a `backup_id` an older build wrote to (RECEIPT-DUP-UPGRADE-WINDOW). Measured on
+engine 0.21.0 (compose slot 3; a `v0.1.5` runner for the first run), such a second run exited 0,
+signed a second receipt, rewrote the first run's segment objects in place (segments are keyed by
+start offset) and — because its manifest merge keeps the first run's entry for every existing key —
+could leave the manifest bytes IDENTICAL: the first receipt's manifest digest still matched while
+the data under it had changed ([the format](formats/backup-receipt.md#the-execution-claim-one-engine-run-per-backup_id)).
+What changes for an operator:
+
+- **A run over a set that already exists exits 1 naming `ExecutionAlreadyClaimed`**, with no engine
+  run and no receipt, whoever wrote the set — the same state, message class and remedy (a new
+  `backup_id`) as a claim that exists. After winning its claim, as the last refusal before the engine,
+  the runner looks for the set's manifest (`<prefix>/<backup_id>/manifest.json`) and for any segment
+  under `<prefix>/<backup_id>/topics/` — a finished set, or segments of a run that died or is still
+  running — and either refuses the run. Other objects there (an upstream archive's consumer-groups
+  snapshot, say) are not the engine's output in Logweir's configuration and do not refuse it. A read
+  that fails transiently (a transport error, a timeout, a 5xx the client already retried) is exit 1,
+  retried by a schedule under a new execution id; any other failed read (a 403, a wrong bucket) is
+  exit 4 `ExecutionClaimUnproven`. **No permission is added**: the run's read-back
+  already lists and reads the archive prefix.
+- **On a versioned bucket a receipt pins its manifest's version** —
+  `archive.manifest_version_id`, receipt and catalog record format `1.2.0`, the MINOR after FX-4's `1.1.0`
+  ([why](formats/backup-receipt.md#the-pinned-manifest-version-versioned-buckets)). When the
+  current version is not the pin, a point-bound restore and the catalog read the pinned version BY
+  ID. If the bucket still holds it, the set was written again there after the point was signed (by
+  a runner from before these checks, after a rollback, or by anything else), which the digest alone
+  cannot see when the manifest bytes came out identical: exit 3 `PointBindingMismatch`, and
+  `Conflict` in the catalog. If the bucket does not hold it — a version id belongs to one bucket, so
+  every byte-for-byte copy of the archive, an unversioned bucket, and a version that was expired or
+  deleted are this case — the digest decides, as for a point without a pin, and the runner's log and
+  the entry's remedy say the pin could not be checked in this bucket. A read of the pinned version
+  that fails otherwise (a 403 without `s3:GetObjectVersion`) is exit 1 / `Unreadable`. Only the
+  manifest is pinned — a rewrite is detected, not undone — and the detection covers the points THIS
+  build signed: an older runner's own receipt over a set it rewrote pins nothing and stays
+  selectable.
+- **The pin is checked only where the bucket still holds the pinned version and serves it by id.**
+  A version that was expired or DELETED, a copy synced after the set was written again, or a store
+  that cannot read by version leaves the digest alone, which an identical manifest over rewritten
+  segments passes ([the three routes](formats/backup-receipt.md#the-pinned-manifest-version-versioned-buckets)).
+  Object Lock retention covering a point's lifetime keeps its pinned version, and a `Conflict` in
+  the signing bucket outranks a copy's `Available`.
+- **Unversioned buckets pin nothing**, and their receipts are FX-4's `1.1.0` document, byte for byte (no `manifest_version_id` key).
+  There, a rewrite by a writer that ignores the claim and the set check is visible only to a check of
+  the segment digests the manifest records.
+- **Old receipts are never reinterpreted.** A receipt without a pin is read exactly as before, and
+  `logweir catalog sync` never infers a pin for one.
+- **One change awaits the owner's ruling (FX-7 review, V3).** `availability: Conflict` gains a cause:
+  a pinned manifest version this bucket still holds that is no longer the current one. Only a point
+  whose receipt carries the new optional `archive.manifest_version_id` can reach it, but it widens
+  what an existing value means, and OD-7 does not cover it. Whether it is MINOR or MAJOR under the
+  rule above is **pending the owner's ruling**; the cause is `crates/logweir/src/catalog/pin.rs`
+  (`judge`'s `Superseded` arm and `SUPERSEDED_CAUSE`), so either ruling is a change there.
+
+**Upgrade.** Nothing to migrate; readers of either major-1 format ignore the new field. An older
+runner that is still RUNNING when its Job is re-created, and has written nothing yet, is seen by
+neither the claim nor the set check: let such a Job finish before upgrading the runner. **Rollback.**
+An older runner ignores the pin (its reader ignores unknown fields inside major 1) and no longer
+refuses an existing set; an older catalog reader reports a superseded point by its digest alone.
+Rolled back while a `Backup` is in flight, an older runner whose Job is re-created re-runs the
+engine over the set: on a versioned bucket this build's point is then `Conflict`, and on an
+unversioned bucket nothing reports it (the first point keeps verifying over rewritten segments).
+Let in-flight `Backup`s finish before rolling the runner back.
 
 ### An empty configuration answer is a refused read, never "no overrides" (PROD-04.0 T13, FX-4)
 
