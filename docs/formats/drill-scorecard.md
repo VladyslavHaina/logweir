@@ -3,9 +3,21 @@
 `application/vnd.logweir.drill-scorecard+json;version=1.0.0`
 
 The machine-readable schema is
-[`schemas/logweir-drill-scorecard-1.0.0.json`](../../schemas/logweir-drill-scorecard-1.0.0.json)
+[`schemas/logweir-drill-scorecard-1.1.0.json`](../../schemas/logweir-drill-scorecard-1.1.0.json)
 and CI diffs it against the code on every build, so this document and the
-schema cannot drift apart silently. A worked example is
+schema cannot drift apart silently. [`schemas/logweir-drill-scorecard-1.0.0.json`](../../schemas/logweir-drill-scorecard-1.0.0.json)
+is frozen beside it: format **1.1.0** (FX-4) added the nested optional
+[`topic_parity.not_assessed` and `target_diff.not_assessed`](#topic_parity-and-what-its-silence-means),
+the first fields added after the v0.1 tags and therefore a MINOR bump with a new
+schema file
+([`docs/stability.md`](../stability.md#the-v010-tag-is-the-compatibility-boundary)).
+The fail-safe entries it also writes into the existing
+`topic_parity.unexpected_divergence` widen what that array's entries can say;
+the owner ruled them MINOR on 2026-10-05
+([OD-7](../to-do/product-expansion.md#owner-decisions)'s follow-up ruling),
+because they can only weaken an older reader's verdict. Each
+`target_diff.collisions` string is written exactly as before.
+The payload type keeps `version=1.0.0`, the major-1 envelope. A worked example is
 [`e2e/fixtures/scorecard-pass.json`](../../e2e/fixtures/scorecard-pass.json) —
 read [`e2e/fixtures/README.md`](../../e2e/fixtures/README.md) first, which lists
 the one field in it that v0.1's code cannot emit and why it is still there.
@@ -35,7 +47,7 @@ that reader and this one is a reference.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `format_version` | string | Semver of this format. `1.0.0` in v0.1. |
+| `format_version` | string | Semver of this format. `1.0.0` in v0.1; `1.1.0` since FX-4. |
 | `run_id` | string | ULID. Also the object key stem in the evidence bucket. |
 | `outcome` | enum | Exactly four values: `pass`, `fail-objective`, `fail-integrity`, `preflight-failed`. There is **no `refused` and no `error` outcome** — a refused plan and an operational failure produce **no scorecard at all** (exit 3 and exit 1); an outcome value for them would imply a signed document that does not exist. `drift` is not a v0.1 value either: v0.1 collects no metadata, so nothing could produce it. |
 | `last_phase_completed` | integer | Domain `-1..=9` (eleven phase slots). `-1` is the `--from-cluster` source-capture phase, which is in v0.1's scope but whose code lands in a follow-up — see [ADR 0007](../architecture.md#adr-0007-source-capture-scope) — so **v0.1.0 never emits `-1`**. **A v0.1.0 SIGNED document reads 5, 6 or 7 and never 8 or 9** — see the note below. |
@@ -356,6 +368,7 @@ fields.
 | `target_diff.absent` | array | Mapped target topics that do not exist — the normal case on a scratch cluster. Omitted from the JSON when empty. |
 | `target_diff.would_create` | array of `[name, partitions]` | Topics the restore will create, at the partition count it will build. |
 | `target_diff.level` | string | `full` in v0.1. Becomes `shallow` only if spec §15 cut 0d is ever taken. |
+| `target_diff.not_assessed` | string[], **optional** (1.1.0) | The `collisions` whose CONFIGURATION difference was not assessed, as `"<target topic>: configuration (<why>)"`. See [below](#topic_parity-and-what-its-silence-means). ABSENT means not recorded. |
 | `integrity.level` | enum | `byte-fingerprint` (full per-record check), `consume-only` (degraded), `not-attempted` (**no check ran** — an absence of evidence, never a pass). |
 | `integrity.result` | enum | `pass`, `fail`, `partial`. |
 | `integrity.partial_reason` | string \| null | **Required and non-BLANK when `result` is `partial`** — null, `""` and whitespace-only are all refused, by **both** readers, with the same message. See [`partial_reason` must SAY something](#partial_reason-must-say-something). The `drill show` footer renders it. |
@@ -365,7 +378,79 @@ fields.
 | `integrity.pass_rate_measured` | float \| null | `matching / sampled`. **Null in three cases**, and a `byte-fingerprint` document with a null rate is well-formed: the level is not `byte-fingerprint`; not every selection reached a conclusion; or `records_sampled` is 0 (a zero denominator is withheld, never published as NaN). |
 | `integrity.restoredPrincipalCouldConsume` | bool \| null | **SP3.** Null, never `false`, until then. The wire name is camelCase deliberately and permanently: renaming it later would be a major bump. |
 | `topic_parity.intentionally_deviated` | string[] | Config keys the drill deliberately set differently on the target. |
-| `topic_parity.unexpected_divergence` | string[] | Config keys that differed and should not have. |
+| `topic_parity.unexpected_divergence` | string[] | Config keys that differed and should not have, as `"<target topic>: <key>"`. Since 1.1.0 also one fail-safe entry `"<target topic>: configuration not assessed (<why>)"` per topic `not_assessed` names ([below](#topic_parity-and-what-its-silence-means)). |
+| `topic_parity.not_assessed` | string[], **optional** (1.1.0) | The mapped target topics whose CONFIGURATION parity was not assessed, as `"<target topic>: configuration (<why>)"`. See [below](#topic_parity-and-what-its-silence-means). ABSENT means not recorded. |
+
+### `topic_parity`, and what its silence means
+
+Before format 1.1.0 an empty `unexpected_divergence` was the whole parity claim,
+and it could be empty for the wrong reason: the source's configuration is compared
+from the archive MANIFEST's record, which the engine leaves EMPTY when its
+DescribeConfigs was denied — and "no overrides recorded" compared as "no
+divergence". Since 1.1.0 (FX-4) phase 7 assesses a topic's configuration only
+where the backup receipt the restore is BOUND to, verified before phase 0, says
+the capture was `captured` ([`config_coverage`](backup-receipt.md#config_coverage--topic-configuration-capture-coverage-format-110)).
+Every other mapped topic is named in `not_assessed` with `<why>`:
+
+| `<why>` | when |
+|---|---|
+| `unknown` | the restore is bound to no recovery point (a v1-shaped plan), or to one whose receipt has no `config_coverage` (every receipt before format 1.1.0) |
+| `notCaptured` | the receipt says the capture was not complete (`describeFailed` or `manifestDiffers`) |
+| `captureDenied` | the receipt says the source broker refused the configuration read |
+| `targetReadDenied` | the source was captured, but the restore identity may not DescribeConfigs the TARGET topic; that topic's keys are then not compared at all. Only a topic whose backup recorded no overrides gets here: for one that did, the pinned engine's restore describes the target itself and phase 6 exits 1 first, with no scorecard |
+
+For a listed topic the two arrays above still name every difference the archive's
+own record shows — those are facts — but their SILENCE proves nothing. Partition
+count and replication factor come from metadata, not DescribeConfigs, and are
+classified either way.
+
+**The fail-safe entry.** For every topic it names in `not_assessed`, phase 7
+also writes `"<target topic>: configuration not assessed (<why>)"` into
+`unexpected_divergence`. `not_assessed` is new in 1.1.0, so a reader that
+predates it — `verify_scorecard.py` before 1.15.0, a `logweir drill show` built
+before FX-4, a person with a 1.0.0 guide — reads only the two arrays it always
+had, and must not see a clean list for a topic nobody assessed. For
+`targetReadDenied` the writer before FX-4 compared the source's record with
+the refused read as an empty map. That listed the source's overrides, but with
+the pinned engine a topic with overrides never reaches phase 7 under such an
+identity (the table above), so for the topics that do, which recorded none,
+its list was empty: the entry ends that silence. A configuration key never
+contains a space, so a parser of `"<topic>: <key>"` entries tells this one
+apart; `not_assessed` stays the authoritative list.
+Measured on the live 1.1.0 scorecards of FX-4's fix round with readers built
+before FX-4 (main `804c5b2f`): `logweir drill show` prints the entry in its
+`topic parity` row, and `logweir drill verify` and `verify_scorecard.py` 1.14.0
+accept each document; the 1.0.0 scorecard the pre-FX-4 writer signed for the
+same `targetReadDenied` restore says nothing about the topic.
+
+**What "assessed" covers.** An assessed topic's parity compares the configuration
+OVERRIDES the engine captured (explicit topic-level settings on its 24-key
+allowlist) with the restored topic's values. A value the source inherited from a
+broker default is not in the archive's record and is never compared: a source
+whose `message.timestamp.type` is `LogAppendTime` from the broker's default,
+restored as `CreateTime`, shows no divergence under `not_assessed: []` (measured
+live by FX-4). The receipt's `config_coverage` records that effective value and
+its source for FX-8; the other effective values are PROD-05.1's. `not_assessed: []` is the claim that every mapped topic was
+assessed, and only phase 7 writes it; ABSENT — every 1.0.0 document, and one
+whose phase 7 never ran — means not recorded and is never read as that claim.
+`logweir drill verify`, `docs/verify_scorecard.py` and `logweir drill show` all
+say so in words (`configuration parity: NOT ASSESSED for …` / `not recorded`).
+Phase 3 qualifies its collisions the same way, in its own optional
+`target_diff.not_assessed`: one `"<target topic>: configuration (<why>)"` entry,
+with `<why>` one of the first three reasons above, for every collision whose
+SOURCE configuration was not captured. Such a collision's
+`differing config: […]` names only what the archive's own record shows, and an
+empty list there proves nothing. The collision strings themselves are byte for
+byte what a writer before FX-4 produced. `[]` is the claim that every
+collision's difference was assessed (vacuously, with no collision), and only
+phase 3 writes it; ABSENT means not recorded. Phase 0 refuses a mapped target
+topic that already exists, so a collision reaches a scorecard only when one
+appears between phase 0 and phase 3.
+
+Neither reader adds an invariant for either field — they are informational —
+but both refuse a value serde cannot read as an array of strings
+(`drill verify` exit 1, the script exit 1; `shape-index.json` records both
+fields).
 
 ### `partial_reason` must SAY something
 

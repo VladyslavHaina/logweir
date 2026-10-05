@@ -155,7 +155,13 @@ PAYLOAD_TYPE = "application/vnd.logweir.drill-scorecard+json;version=1.0.0"
 # refusal is measured against. Keep in step with `logweir_core::FORMAT_VERSION`
 # (crates/logweir-core/src/lib.rs); `docs/test_verify_scorecard.py::
 # test_the_format_version_matches_the_rust_constant` fails if they drift.
-FORMAT_VERSION = "1.0.0"
+#
+# `1.1.0` since FX-4 (`topic_parity.not_assessed` and `target_diff.not_assessed`,
+# the first scorecard fields added after the v0.1 tags — a MINOR bump,
+# docs/stability.md). Only the MAJOR
+# is ever compared, so a 1.0.0 document still verifies and a reader built
+# before the bump still reads a 1.1.0 one.
+FORMAT_VERSION = "1.1.0"
 
 # This SCRIPT's own version — NOT the format version (GC12: FORMAT_VERSION stays
 # "1.0.0"). Bumped whenever this script's VERDICT RULE changes: when there is a
@@ -341,7 +347,31 @@ FORMAT_VERSION = "1.0.0"
 # writes — `integrity.result: fail` with a reason PRESENT, and the same
 # document with it ABSENT — so `index.json` gains both as ACCEPT cases. No new
 # field, no new arm, and no change to the frozen top-level shape.
-SCRIPT_VERSION = "1.14.0"
+#
+# 1.15.0 (FX-4) reads the BACKUP RECEIPT's format 1.1.0 block
+# `config_coverage` — per named topic, whether the archive's record of the
+# topic configuration was captured (`captured`, `notCaptured` with a reason,
+# `captureDenied`), and the EFFECTIVE `message.timestamp.type` with its source.
+# Six arms, 6-11, mirrored byte for byte from `BackupReceipt::
+# validate_invariants`: the block only under a minor of at least 1, covering
+# exactly `source.topics`, closed sets for the coverage, the reason (present
+# exactly when `notCaptured`) and the timestamp value and source, and no
+# timestamp type recorded by a read that did not succeed. They read the new
+# block and nothing else, so every 1.0.0 receipt is decided exactly as before;
+# an ABSENT block is UNKNOWN coverage, never `captured`. The scorecard's
+# FORMAT_VERSION moves to 1.1.0 for `topic_parity.not_assessed`, which gets no
+# arm: it is printed, so an exit 0 is never read as configuration parity the
+# document does not claim. `target_diff.not_assessed` (phase 3's collisions
+# whose configuration was not assessed) is shape-checked like it and not
+# printed: the collisions themselves are not printed either.
+SCRIPT_VERSION = "1.15.0"
+
+# The first minor of the BACKUP RECEIPT's format 1 that defines
+# `config_coverage` (arm 6) — `CONFIG_COVERAGE_SINCE_MINOR` in
+# `crates/logweir-core/src/backup_receipt.rs`, which it must equal
+# (`docs/test_verify_scorecard.py::test_the_config_coverage_minor_is_the_rust_readers`).
+# A renumber (for instance to 1.2.0) changes both, and SCRIPT_VERSION.
+RECEIPT_CONFIG_COVERAGE_SINCE_MINOR = 1
 
 # The FIVE payload types Logweir signs. Keep byte-for-byte in step with
 # `crates/logweir-verify/src/lib.rs`'s PAYLOAD_TYPE_SCORECARD,
@@ -864,6 +894,32 @@ def check_invariants(doc) -> str:
     if not isinstance(expected, int) or isinstance(expected, bool):
         return "sample.records_expected is not an integer"
 
+    # Also shape (FX-4 fix round, scorecard 1.1.0): `target_diff.not_assessed`
+    # is the same `Option<Vec<String>>` as `topic_parity.not_assessed` below —
+    # phase 3's collisions whose configuration difference was not assessed,
+    # which FX-4 records in this new field instead of changing the existing
+    # collision strings. Checked first because serde meets `target_diff`
+    # first. Both bad shapes are cases in `shape-index.json`.
+    target_not_assessed = doc["target_diff"].get("not_assessed")
+    if target_not_assessed is not None and (
+        not isinstance(target_not_assessed, list)
+        or not all(isinstance(t, str) for t in target_not_assessed)
+    ):
+        return "target_diff.not_assessed is not an array of strings"
+
+    # Also shape (FX-4, scorecard 1.1.0): `topic_parity.not_assessed` is an
+    # `Option<Vec<String>>` over there, so `null` is ABSENT and anything that
+    # is not an array of strings is refused at DESERIALISATION. Without this a
+    # document carrying `"not_assessed": "x"` or `[1]` printed VALID here while
+    # `drill verify` exited 1 — measured on this branch before this check
+    # existed, not argued. Both are cases in `shape-index.json`.
+    not_assessed = doc["topic_parity"].get("not_assessed")
+    if not_assessed is not None and (
+        not isinstance(not_assessed, list)
+        or not all(isinstance(t, str) for t in not_assessed)
+    ):
+        return "topic_parity.not_assessed is not an array of strings"
+
     # THE u64 DOMAIN, not merely the JSON type (Task 5d, from Task 5c's review
     # finding F1). `isinstance(v, int)` mirrors serde's TYPE and not `u64`'s
     # DOMAIN, and the gap was a live two-reader disagreement of exactly the
@@ -1282,6 +1338,31 @@ def _receipt_shape(doc) -> str:
             return f"covered.{name} is not an integer"
     if "manifest_key" not in doc["archive"]:
         return "the document has no archive.manifest_key field; it is not a backup receipt"
+    # FX-4, format 1.1.0: `config_coverage` is `Option<BTreeMap<String,
+    # TopicConfigCoverage>>` over there, so every one of these is refused at
+    # DESERIALISATION by the Rust reader before arm 6 runs; they belong in the
+    # shape layer here for the reason `source.auth` above does. `null` is
+    # absent on both sides.
+    coverage = doc.get("config_coverage")
+    if coverage is not None:
+        if not isinstance(coverage, dict):
+            return "config_coverage is not an object"
+        for topic in sorted(coverage):
+            entry = coverage[topic]
+            where = f"config_coverage[{_rust_debug_str(topic)}]"
+            if not isinstance(entry, dict):
+                return f"{where} is not an object"
+            if not isinstance(entry.get("coverage"), str):
+                return f"{where}.coverage is not a string"
+            if entry.get("reason") is not None and not isinstance(entry["reason"], str):
+                return f"{where}.reason is not a string"
+            observed = entry.get("timestamp_type")
+            if observed is not None:
+                if not isinstance(observed, dict):
+                    return f"{where}.timestamp_type is not an object"
+                for name in ("value", "source"):
+                    if not isinstance(observed.get(name), str):
+                        return f"{where}.timestamp_type.{name} is not a string"
     return ""
 
 
@@ -1412,7 +1493,118 @@ def check_backup_receipt_invariants(doc) -> str:
             "format defines: \"plaintext\" or \"scramSha512\""
         )
 
+    # ARMS 6-11 (format 1.1.0, FX-4): the `config_coverage` block, and ONLY
+    # when it is present, so every 1.0.0 receipt is decided exactly as before.
+    # Topics in NAME order — the Rust block is a BTreeMap — and arms 8-11 per
+    # topic, in order.
+    coverage = doc.get("config_coverage")
+    if coverage is not None:
+        # ARM 6. A document declaring 1.0.x cannot carry a 1.1 field. Arm 1 has
+        # established the version parses and its major is 1.
+        if parsed[1] < RECEIPT_CONFIG_COVERAGE_SINCE_MINOR:
+            return (
+                f"config_coverage is present but format_version {_rust_debug_str(version)} "
+                f"predates it: the field is defined from 1.{RECEIPT_CONFIG_COVERAGE_SINCE_MINOR}.0"
+            )
+        # ARM 7. The covered set is the named set — arm 3's twin.
+        covered = list(coverage.keys())
+        if sorted(set(covered)) != sorted(set(named_topics)):
+            return (
+                f"config_coverage covers {_render_topic_set(covered)} but the named topic set "
+                f"is {_render_topic_set(named_topics)}"
+            )
+        for topic in sorted(coverage):
+            entry = coverage[topic]
+            value = entry["coverage"]
+            reason = entry.get("reason")
+            observed = entry.get("timestamp_type")
+            # ARM 8. The coverage vocabulary is closed.
+            if value not in ("captured", "notCaptured", "captureDenied"):
+                return (
+                    f"config_coverage[{_rust_debug_str(topic)}].coverage "
+                    f"{_rust_debug_str(value)} is not one of the three values this format "
+                    "defines: \"captured\", \"notCaptured\" or \"captureDenied\""
+                )
+            # ARM 9. A reason exactly when `notCaptured`, from a closed set.
+            if reason is not None:
+                fits = value == "notCaptured" and reason in ("describeFailed", "manifestDiffers")
+            else:
+                fits = value != "notCaptured"
+            if not fits:
+                rendered = _rust_debug_str(reason) if reason is not None else "absent"
+                return (
+                    f"config_coverage[{_rust_debug_str(topic)}].reason {rendered} does not fit "
+                    f"coverage {_rust_debug_str(value)}: a reason is present exactly when coverage "
+                    "is \"notCaptured\", and is \"describeFailed\" or \"manifestDiffers\""
+                )
+            # ARM 10. An observation only where the read succeeded.
+            if (value == "captureDenied" or reason == "describeFailed") and observed is not None:
+                return (
+                    f"config_coverage[{_rust_debug_str(topic)}] records a timestamp_type, but a topic "
+                    "whose configuration read was denied or failed cannot have observed one"
+                )
+            # ARM 11. The observed value and its source, from closed sets.
+            if observed is not None and (
+                observed["value"] not in ("CreateTime", "LogAppendTime")
+                or observed["source"] not in (
+                    "dynamicTopicConfig",
+                    "dynamicBrokerConfig",
+                    "dynamicDefaultBrokerConfig",
+                    "staticBrokerConfig",
+                    "defaultConfig",
+                    "unknown",
+                )
+            ):
+                return (
+                    f"config_coverage[{_rust_debug_str(topic)}].timestamp_type "
+                    f"{_rust_debug_str(observed['value'])} from "
+                    f"{_rust_debug_str(observed['source'])} is not a value and source this format "
+                    "defines: the value is \"CreateTime\" or \"LogAppendTime\", and the source is "
+                    "\"dynamicTopicConfig\", \"dynamicBrokerConfig\", "
+                    "\"dynamicDefaultBrokerConfig\", \"staticBrokerConfig\", \"defaultConfig\" "
+                    "or \"unknown\""
+                )
+
     return ""
+
+
+def _coverage_lines(block):
+    """The receipt's `config_coverage`, one line per topic in NAME order, or the
+    line that says it is absent — the twin of `crates/logweir/src/verify.rs::
+    coverage_lines`, in the same words (FX-4)."""
+    if block is None:
+        return [
+            "config_coverage: not recorded, so every topic's configuration capture is "
+            "UNKNOWN, never captured"
+        ]
+    lines = []
+    for topic in sorted(block):
+        entry = block[topic]
+        coverage = entry["coverage"]
+        if entry.get("reason") is not None:
+            coverage = f"{coverage} ({entry['reason']})"
+        observed = entry.get("timestamp_type")
+        if observed is not None:
+            timestamp = f"message.timestamp.type {observed['value']} from {observed['source']}"
+        else:
+            timestamp = "message.timestamp.type not recorded"
+        lines.append(f"config_coverage[{_rust_debug_str(topic)}]: {coverage}, {timestamp}")
+    return lines
+
+
+def _parity_line(not_assessed):
+    """`topic_parity.not_assessed` as one sentence, or "" when every topic was
+    assessed — the twin of `crates/logweir/src/verify.rs::parity_line` (FX-4).
+    ABSENT is NOT RECORDED (every 1.0.0 scorecard, and a 1.1.0 one whose drill
+    stopped before phase 7), never "every topic assessed"."""
+    if not_assessed is None:
+        return (
+            "configuration parity: not recorded, so an empty unexpected_divergence proves "
+            "nothing"
+        )
+    if not not_assessed:
+        return ""
+    return "configuration parity: NOT ASSESSED for " + "; ".join(str(t) for t in not_assessed)
 
 
 def main(
@@ -1624,6 +1816,12 @@ def main(
                 f"                 {doc['evidence'].get('offset_report_sha256')} "
                 "— the engine's offset MAPPING, uploaded as evidence and applied to nothing"
             )
+        # FX-4: an exit 0 is not configuration parity the document does not
+        # claim. The same sentence `logweir drill verify` prints
+        # (`crates/logweir/src/verify.rs::parity_line`).
+        parity = _parity_line(doc["topic_parity"].get("not_assessed"))
+        if parity:
+            print(f"       parity:   {parity}")
         # Which checks actually produced this verdict. The sentence above is a
         # GUARANTEE, and until SCRIPT_VERSION 1.1.0 nothing enforced it — an
         # auditor reading an older run's output cannot tell the two apart
@@ -1704,6 +1902,12 @@ def main(
             f"       covered [{covered.get('from_ms')}, {covered.get('to_ms')}) "
             "epoch ms — the end is EXCLUSIVE"
         )
+        # FX-4: the configuration capture coverage, one line per topic, in the
+        # same words `logweir drill verify` prints (`crates/logweir/src/
+        # verify.rs::coverage_lines`); `scripts/check-verifier-parity.sh`
+        # compares every line starting `config_coverage` between the two.
+        for line in _coverage_lines(doc.get("config_coverage")):
+            print(f"       {line}")
         print(
             "       This signature covers the receipt only. It says what THIS run "
             "captured; it is not a claim about any other backup of the same topics."
@@ -1713,8 +1917,10 @@ def main(
             "(backup-receipt invariant set: format_version's major, the "
             "exit_code/manifest_key biconditional with trimmed-empty counted as absent, "
             "records covering exactly the named topic set, a covered window whose "
-            "EXCLUSIVE end is after its start, and source.auth.mode inside the closed "
-            "two-value set)"
+            "EXCLUSIVE end is after its start, source.auth.mode inside the closed "
+            "two-value set, and config_coverage's six: present only from 1.1.0, covering "
+            "exactly the named topic set, closed coverage and reason sets, no timestamp "
+            "type from a read that did not succeed, and a closed timestamp value and source)"
         )
         return 0
 

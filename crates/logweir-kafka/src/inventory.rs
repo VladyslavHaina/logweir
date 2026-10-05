@@ -319,6 +319,24 @@ impl TopicPresence {
         }
     }
 
+    /// FX-4, T13: the code an EMPTY DescribeConfigs answer for this topic
+    /// stands for, given what the same principal's metadata said — **pure**,
+    /// the inventory's twin of `crate::reader::empty_topic_config_answer`.
+    ///
+    /// rdkafka 0.36.2 never reads the per-resource error of a DescribeConfigs
+    /// answer, so a refused topic arrives as an empty entry list; Kafka
+    /// answers a visible, authorised topic with every config it has, so the
+    /// empty list is the authorizer's refusal (see that function for the
+    /// broker source). NEVER a ready code, and never an empty override set.
+    #[must_use]
+    pub fn empty_config_answer_code(self) -> CheckCode {
+        match self {
+            Self::Present { .. } | Self::NotAuthorized => CheckCode::TopicAuthorizationFailed,
+            Self::NotFound => CheckCode::UnknownTopicOrPartition,
+            Self::Unknown => CheckCode::MetadataTimeout,
+        }
+    }
+
     /// The contract's spelling of this answer.
     #[must_use]
     pub fn expected_state(self) -> ExpectedTopicState {
@@ -1301,10 +1319,21 @@ mod client {
 
         fn topic_configs(&self, name: &str) -> Result<BTreeMap<String, String>, CheckFailure> {
             use rdkafka::admin::{AdminOptions, ResourceSpecifier};
+            let what = format!("DescribeConfigs on topic {name}");
             self.describe(
                 &[ResourceSpecifier::Topic(name)],
                 &AdminOptions::new().request_timeout(Some(self.timeouts.describe_configs)),
-                &format!("DescribeConfigs on topic {name}"),
+                &what,
+                // FX-4, T13: an EMPTY answer is a refused or failed read,
+                // named from this principal's metadata for the same name —
+                // never an empty set of overrides.
+                &|| {
+                    let code = match self.describe_topic(name) {
+                        Ok(presence) => presence.empty_config_answer_code(),
+                        Err(failure) => failure.code,
+                    };
+                    self.fail(code, &format!("{what} answered with no configuration"))
+                },
             )
         }
 
@@ -1327,10 +1356,22 @@ mod client {
                         "cluster metadata listed no broker, so there is no broker id to describe",
                     )
                 })?;
+            let what = format!("DescribeConfigs on broker {broker_id}");
             self.describe(
                 &[ResourceSpecifier::Broker(broker_id)],
                 &AdminOptions::new().request_timeout(Some(self.timeouts.describe_configs)),
-                &format!("DescribeConfigs on broker {broker_id}"),
+                &what,
+                // FX-4, T13: Kafka answers a broker resource with no
+                // configuration only beside CLUSTER_AUTHORIZATION_FAILED (the
+                // id is this broker's own, from metadata). Read as an empty
+                // map, `target.timestampBound` reported READY: "the target
+                // declares no record-timestamp bound".
+                &|| {
+                    self.fail(
+                        CheckCode::ClusterAuthorizationFailed,
+                        &format!("{what} answered with no configuration"),
+                    )
+                },
             )
         }
 
@@ -1379,6 +1420,36 @@ mod client {
         }
     }
 
+    /// A DescribeConfigs answer, flattened to `name -> value` — **pure**, so
+    /// the T13 rule below is testable over constructed rdkafka results with no
+    /// broker (`the_empty_describe_answer_is_never_an_empty_configuration`).
+    ///
+    /// T13 (PROD-04.0 §6): rdkafka 0.36.2 hands a refused resource back as
+    /// `Ok` with NO entries and never reads the per-resource error; a broker
+    /// never answers a successful describe that way (Kafka 4.3.1
+    /// `ConfigHelper.scala:54-79`, `:88-98`). So an empty resource is
+    /// `on_empty`'s failure, and a reported code (which 0.36.2 never produces)
+    /// is `on_code`'s. Nothing here returns an empty map for a refused read.
+    pub fn flatten_config_answer(
+        res: Vec<rdkafka::admin::ConfigResourceResult>,
+        on_code: &dyn Fn(RDKafkaErrorCode) -> CheckFailure,
+        on_empty: &dyn Fn() -> CheckFailure,
+    ) -> Result<BTreeMap<String, String>, CheckFailure> {
+        let mut out = BTreeMap::new();
+        for r in res {
+            let cfg = r.map_err(on_code)?;
+            if cfg.entries.is_empty() {
+                return Err(on_empty());
+            }
+            for e in cfg.entries {
+                if let Some(v) = e.value {
+                    out.insert(e.name, v);
+                }
+            }
+        }
+        Ok(out)
+    }
+
     impl KafkaInventory {
         /// The shared `DescribeConfigs` body: one resource, flattened, with the
         /// fault log applied to a failure.
@@ -1387,6 +1458,7 @@ mod client {
             resources: &[rdkafka::admin::ResourceSpecifier<'_>],
             options: &rdkafka::admin::AdminOptions,
             what: &str,
+            on_empty: &dyn Fn() -> CheckFailure,
         ) -> Result<BTreeMap<String, String>, CheckFailure> {
             let rt = self.admin_runtime()?;
             let res = rt
@@ -1397,23 +1469,18 @@ mod client {
                         .map_or(CheckCode::BrokerUnreachable, |c| classify_error_code(c, ""));
                     self.fail(base, what)
                 })?;
-            let mut out = BTreeMap::new();
-            for r in res {
-                let cfg = r.map_err(|code| self.fail(classify_error_code(code, ""), what))?;
-                for e in cfg.entries {
-                    if let Some(v) = e.value {
-                        out.insert(e.name, v);
-                    }
-                }
-            }
-            Ok(out)
+            flatten_config_answer(
+                res,
+                &|code| self.fail(classify_error_code(code, ""), what),
+                on_empty,
+            )
         }
     }
 }
 
 #[cfg(feature = "client")]
 pub use client::{
-    classification_codes, classify_create_code, classify_error_code, is_certificate_trust_reason,
-    CapturingContext, ClientConfig, ConnectionSettings, KafkaInventory, RDKafkaErrorCode,
-    CHECK_CLIENT_ID, CHECK_GROUP_ID,
+    classification_codes, classify_create_code, classify_error_code, flatten_config_answer,
+    is_certificate_trust_reason, CapturingContext, ClientConfig, ConnectionSettings,
+    KafkaInventory, RDKafkaErrorCode, CHECK_CLIENT_ID, CHECK_GROUP_ID,
 };

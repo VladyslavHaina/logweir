@@ -21,6 +21,7 @@ pub mod phase9_teardown;
 
 use crate::exit::ExitCode;
 use crate::signer::ValidatedSigner;
+use logweir_core::backup_receipt::SourceConfigCoverage;
 use logweir_core::engine::{
     BackupSetFacts, BackupSetRef, DataEngine, RestorePlan, WindowFloorSource,
 };
@@ -1654,9 +1655,25 @@ pub struct Ctx {
     /// the engine renders, so both TLS clients trust one file. `None` for a
     /// connection that names no CA.
     pub target_tls_ca_file: Option<String>,
+    /// **FX-4.** Each SOURCE topic's configuration capture coverage, from the
+    /// backup receipt the plan's recovery point binds — VERIFIED (signature,
+    /// digest, manifest) by `binding::verify_point_binding` before this
+    /// context existed. [`SourceConfigCoverage::unknown`] for a plan bound to
+    /// no point: there is then no signed record of what was captured, and
+    /// phases 3 and 7 report every topic's configuration parity `notAssessed`
+    /// rather than comparing against a manifest record nobody vouched for.
+    pub source_config_coverage: SourceConfigCoverage,
 }
 
-fn context(spec_text: String, allowed_text: String, contract: bool) -> Result<Ctx, DrillError> {
+/// `source_config_coverage` is what the VERIFIED point binding established
+/// (FX-4): the context is BORN with it, so no later assignment can be dropped
+/// between the binding check and the phases that read it (review L1, X4).
+fn context(
+    spec_text: String,
+    allowed_text: String,
+    contract: bool,
+    source_config_coverage: SourceConfigCoverage,
+) -> Result<Ctx, DrillError> {
     let spec: DrillSpec = serde_yaml::from_str(&spec_text)
         .map_err(|e| DrillError::Operational(format!("drill spec does not parse: {e}")))?;
     let allowed: AllowedClusters = serde_json::from_str(&allowed_text)
@@ -1787,6 +1804,9 @@ fn context(spec_text: String, allowed_text: String, contract: bool) -> Result<Ct
         archive,
         store,
         target_tls_ca_file,
+        // What `check_v2_bindings` verified; UNKNOWN for a plan bound to no
+        // point, because there is then no signed capture record to read.
+        source_config_coverage,
     })
 }
 
@@ -2298,16 +2318,17 @@ fn execute_for_reporting(
     // measurement is in `execute_for_reporting`'s own comment above). That is
     // what makes "refused before any data-plane work" true at the socket
     // layer, which is the claim D3 §4.3 and §5.5 both make.
-    let standing_approved = match check_v2_bindings(
+    let bindings = match check_v2_bindings(
         args,
         &startup,
         &authenticated_spec,
         contract.as_ref(),
         &signer.verifying_key(),
     ) {
-        Ok(approved) => approved,
+        Ok(bindings) => bindings,
         Err(error) => return (Err(error), Some(authenticated_spec)),
     };
+    let standing_approved = bindings.standing_approved;
     // **EXACTLY ONE authorization produced this run's `Approved`** —
     // PLAT-14.3b. The per-run approval path fills `startup.approved` in
     // `load_startup_inputs`; the standing path fills the value above, after the
@@ -2343,11 +2364,29 @@ fn execute_for_reporting(
                 Some(authenticated_spec),
             ),
         };
-    let outcome = match context(startup.spec_text, startup.allowed_text, store_contract) {
+    // FX-4: the context is built WITH what the VERIFIED point binding
+    // established about each source topic's configuration capture (unknown for
+    // an unbound plan); `tests::the_run_context_is_built_with_the_verified_coverage`.
+    let outcome = match context(
+        startup.spec_text,
+        startup.allowed_text,
+        store_contract,
+        bindings.source_config_coverage,
+    ) {
         Ok(c) => execute_with_prevalidated(args, run_id, &c, &signer, approved),
         Err(error) => Err(error),
     };
     (outcome, Some(authenticated_spec))
+}
+
+/// What the two execution-contract-v2 bindings established.
+struct V2Bindings {
+    /// The `Approved` minted from a verified standing authorization, when one
+    /// authorized this run.
+    standing_approved: Option<phase1_approval::Approved>,
+    /// **FX-4.** The verified recovery point's configuration capture coverage;
+    /// [`SourceConfigCoverage::unknown`] when the plan binds no point.
+    source_config_coverage: SourceConfigCoverage,
 }
 
 /// The standing-authorization scope check and the recovery-point binding
@@ -2364,7 +2403,7 @@ fn check_v2_bindings(
     plan: &DrillSpec,
     contract: Option<&ExecutionContract>,
     signing_key: &logweir_evidence::keys::VerifyingKey,
-) -> Result<Option<phase1_approval::Approved>, DrillError> {
+) -> Result<V2Bindings, DrillError> {
     use logweir_core::execution_contract::AuthorizationKind;
 
     let mut standing_approved = None;
@@ -2425,6 +2464,7 @@ fn check_v2_bindings(
         }
     }
 
+    let mut source_config_coverage = SourceConfigCoverage::unknown();
     if plan.source.point.is_some() {
         // A READ-ONLY handle, built here and dropped here. `Store` is not
         // `Clone` and `context` builds its own; a read-only handle cannot put
@@ -2435,16 +2475,20 @@ fn check_v2_bindings(
             .map_err(|error| DrillError::Operational(error.to_string()))?;
         // THE SIGNATURE HALF NEEDS THE CLOCK, read here (Global Constraint 1)
         // and passed down, like the standing authorization's.
-        if let Some(point_id) = binding::verify_point_binding(
+        if let Some(verified) = binding::verify_point_binding(
             plan,
             &archive,
             startup.evidence_keys.as_deref(),
             chrono::Utc::now(),
         )? {
-            tracing::info!(point_id = %point_id, "recovery point binding verified");
+            tracing::info!(point_id = %verified.point_id, "recovery point binding verified");
+            source_config_coverage = verified.config_coverage;
         }
     }
-    Ok(standing_approved)
+    Ok(V2Bindings {
+        standing_approved,
+        source_config_coverage,
+    })
 }
 
 /// The run's [`phase1_approval::Approved`], minted from the SIGNED standing
@@ -2691,7 +2735,12 @@ fn execute_with_validated_approval(
     })?;
     // 3 — the diff REACHES A READER, which is the whole point of phase 3
     let diff = record(&mut sc, 3, "target-diff", || {
-        Ok(phase3_diff::run(&target, &facts, &admitted.topic_mapping))
+        Ok(phase3_diff::run(
+            &target,
+            &facts,
+            &admitted.topic_mapping,
+            &c.source_config_coverage,
+        ))
     })?;
     sc.target_diff = diff.summarise();
     // 4
@@ -2956,6 +3005,7 @@ fn execute_with_validated_approval(
             &sel.per_partition,
             &admitted.topic_mapping,
             &plan,
+            &c.source_config_coverage,
         )
     })?;
     sc.integrity = verified.integrity.clone();
@@ -3610,6 +3660,10 @@ fn new_scorecard(run_id: &str, args: &RunArgs, c: &Ctx) -> Scorecard {
         topic_parity: TopicParity {
             intentionally_deviated: Vec::new(),
             unexpected_divergence: Vec::new(),
+            // NOT RECORDED until phase 7 runs (FX-4): a scorecard signed after
+            // an earlier phase failed has not assessed any configuration, and
+            // `Some(vec![])` would claim it had assessed every topic.
+            not_assessed: None,
         },
         engine_subreport: None,
         // All four zeroed; `phase8_score::run` zeroes them again immediately
@@ -3762,6 +3816,100 @@ mod tests {
     //! omission this build keeps shipping — so they are pinned here, inside
     //! the crate, where the private items are nameable.
     use super::*;
+
+    /// The text of the top-level `fn <name>(` in this file, up to its closing
+    /// brace at column 0.
+    fn fn_body<'a>(src: &'a str, name: &str) -> &'a str {
+        let start = src
+            .find(&format!("\nfn {name}("))
+            .unwrap_or_else(|| panic!("drill/mod.rs has no top-level `fn {name}(`"));
+        let rest = &src[start + 1..];
+        let end = rest
+            .find("\n}\n")
+            .unwrap_or_else(|| panic!("`fn {name}` has no closing brace at column 0"));
+        &rest[..end + 2]
+    }
+
+    /// **FX-4 review L1: the glue mutant X4.** The coverage the VERIFIED point
+    /// binding established must reach the context phases 3 and 7 read.
+    /// `execute_for_reporting` is the only path from a verified binding to a
+    /// running phase, and the unit suite cannot drive it past `context`
+    /// without dialling a broker, so this guard reads the source: `context`
+    /// takes the coverage and builds the `Ctx` WITH it, and the one call site
+    /// passes `bindings.source_config_coverage`. Nothing on that path may
+    /// substitute UNKNOWN. X4 (the call site passing
+    /// `SourceConfigCoverage::unknown()`, or `context` storing UNKNOWN whatever
+    /// it is given) fails here. The behavioural twin is the live row
+    /// `e2e/tests/config_coverage.rs::capture_coverage_reaches_the_receipt_the_catalog_and_drill_parity`,
+    /// whose point-bound restore reads `captureDenied`/`notCaptured`, never
+    /// `unknown`.
+    /// **FX-4 fix round: the glue's FIRST half (mutant X6).** The test below
+    /// guards `execute_for_reporting` → `context` → `Ctx`; this one guards
+    /// where the coverage enters the run. `check_v2_bindings` must keep what
+    /// `binding::verify_point_binding` returned and hand it out in
+    /// `V2Bindings`, and nothing may reset it in between. X6 (the assignment
+    /// dropped, so every bound run reads UNKNOWN) survived every unit and
+    /// integration suite of `logweir` (measured 2026-10-05); like the test
+    /// below, this reads the source, and the same live row is its
+    /// behavioural twin.
+    #[test]
+    fn the_verified_binding_hands_its_coverage_to_the_run() {
+        let src = include_str!("mod.rs");
+        let body = fn_body(src, "check_v2_bindings");
+        let after_verify = body
+            .split("binding::verify_point_binding(")
+            .nth(1)
+            .expect("check_v2_bindings verifies the point binding");
+        assert!(
+            after_verify.contains("source_config_coverage = verified.config_coverage;"),
+            "check_v2_bindings must keep the verified binding's coverage: {after_verify}"
+        );
+        assert_eq!(
+            body.matches("source_config_coverage = ").count(),
+            2,
+            "exactly the UNKNOWN default and the verified assignment; nothing may reset it"
+        );
+        assert!(
+            body.contains("let mut source_config_coverage = SourceConfigCoverage::unknown();"),
+            "an unbound plan reads UNKNOWN"
+        );
+        assert!(
+            body.contains(
+                "Ok(V2Bindings {\n        standing_approved,\n        source_config_coverage,\n    })"
+            ),
+            "check_v2_bindings must return the coverage it kept"
+        );
+    }
+
+    #[test]
+    fn the_run_context_is_built_with_the_verified_coverage() {
+        let src = include_str!("mod.rs");
+        let run = fn_body(src, "execute_for_reporting");
+        let call = run
+            .split("match context(")
+            .nth(1)
+            .and_then(|r| r.split(") {").next())
+            .expect("execute_for_reporting builds its context with `match context(…) {`");
+        assert!(
+            call.contains("bindings.source_config_coverage"),
+            "the run context must be built WITH the verified binding's coverage; the call \
+             passes: {call}"
+        );
+        assert!(
+            !run.contains("SourceConfigCoverage::unknown()"),
+            "execute_for_reporting must not substitute UNKNOWN for the verified coverage"
+        );
+        let ctx = fn_body(src, "context");
+        assert!(
+            ctx.contains("source_config_coverage: SourceConfigCoverage,")
+                && ctx.contains("        source_config_coverage,\n    })"),
+            "context() must take the coverage and store exactly what it is given"
+        );
+        assert!(
+            !ctx.contains("SourceConfigCoverage::unknown()"),
+            "context() must not store UNKNOWN whatever it is given"
+        );
+    }
 
     fn a_scorecard() -> Scorecard {
         serde_json::from_str(include_str!("../../../../e2e/fixtures/scorecard-pass.json"))

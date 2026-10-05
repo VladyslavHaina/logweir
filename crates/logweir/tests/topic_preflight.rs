@@ -121,6 +121,13 @@ struct BrokerDouble {
     /// reports them. Empty for every test but the one that proves spec §6.1's
     /// "a `Restore` refuses if any mapped target topic already exists".
     already_there: Vec<TopicMeta>,
+    /// FX-4 / T13: the principal lacks DescribeConfigs on the cluster, so the
+    /// broker configuration read is REFUSED — what `RdKafkaReader::
+    /// broker_configs` returns now instead of the empty map rdkafka 0.36.2
+    /// used to hand back.
+    broker_refused: bool,
+    /// FX-4 / T13: the probe topic's configuration read is REFUSED.
+    readback_refused: bool,
 }
 
 impl BrokerDouble {
@@ -132,7 +139,19 @@ impl BrokerDouble {
                 .collect(),
             readable_after_creation: Mutex::new(BTreeMap::new()),
             already_there: Vec::new(),
+            broker_refused: false,
+            readback_refused: false,
         }
+    }
+
+    fn refusing_broker_configs(mut self) -> Self {
+        self.broker_refused = true;
+        self
+    }
+
+    fn refusing_readback(mut self) -> Self {
+        self.readback_refused = true;
+        self
     }
 
     /// The target already has this topic — healthy metadata, so its presence
@@ -171,6 +190,11 @@ impl ClusterReader for BrokerDouble {
         Ok(vec![])
     }
     fn topic_configs(&self, topic: &str) -> Result<BTreeMap<String, String>, KafkaError> {
+        if self.readback_refused {
+            return Err(KafkaError::NotAuthorized(format!(
+                "{topic} (DescribeConfigs answered this visible topic with no configuration)"
+            )));
+        }
         match self.readable_after_creation.lock().unwrap().get(topic) {
             Some(c) => Ok(c.clone()),
             None => panic!(
@@ -182,6 +206,9 @@ impl ClusterReader for BrokerDouble {
         }
     }
     fn broker_configs(&self) -> Result<BTreeMap<String, String>, KafkaError> {
+        if self.broker_refused {
+            return Err(logweir_kafka::reader::empty_broker_config_answer(1001));
+        }
         Ok(self.broker.clone())
     }
     fn consume_range(
@@ -710,6 +737,78 @@ fn a_broker_configs_read_failure_is_operational_not_a_guard_refusal() {
     )
     .expect_err("an unreachable broker is an error");
     assert_eq!(err.exit_code(), ExitCode::Operational, "{err:?}");
+}
+
+/// **FX-4 / T13, consumer 2.** A principal without DescribeConfigs on the
+/// cluster used to get an EMPTY broker configuration back, and G-TS read the
+/// missing `log.message.timestamp.type` as the Apache default `CreateTime` —
+/// so on a `LogAppendTime` target the override probe never ran and the
+/// timestamp bound was never checked. The read now REFUSES, and phase 0 stops
+/// on it (exit 1, a `KafkaError`: the plan may be fine; the principal is not),
+/// before writing anything.
+///
+/// Negative control: make phase 0 swallow the refusal as an empty map
+/// (`reader.broker_configs().unwrap_or_default()`) and this test fails: the
+/// plan is admitted as `CreateTime` with the probe skipped.
+#[test]
+fn a_refused_broker_configuration_read_is_never_read_as_the_apache_default() {
+    // The broker IS on LogAppendTime — the principal simply may not read it.
+    let reader = BrokerDouble::new(&[("log.message.timestamp.type", "LogAppendTime")])
+        .refusing_broker_configs();
+    let creator = RecordingCreator::default();
+    let deleter = RecordingDeleter::default();
+    let err = phase0_admit::run(
+        &a_recent_spec(),
+        "restore: {}\n",
+        &allowed(),
+        &reader,
+        &creator,
+        &deleter,
+    )
+    .expect_err("a refused broker configuration read must not admit the plan as CreateTime");
+    assert_eq!(err.exit_code(), ExitCode::Operational, "{err:?}");
+    assert!(err.to_string().contains("not authorized"), "{err}");
+    assert!(
+        creator.calls.lock().unwrap().is_empty() && deleter.calls.lock().unwrap().is_empty(),
+        "nothing is written on the target when its configuration cannot be read"
+    );
+}
+
+/// **FX-4 / T13, consumer 3.** On a `LogAppendTime` broker the override probe
+/// creates a topic and reads its configuration back. A REFUSED readback used
+/// to be an empty map, which G-TS then read as the BROKER's type and refused
+/// with exit 3 claiming the broker "REFUSED a per-topic override" — a finding
+/// about the broker that nothing observed. It is now operational (exit 1),
+/// naming the refusal, and the probe topic is still deleted.
+///
+/// Negative control: `readback.unwrap_or_default()` in phase 0 turns this back
+/// into the exit-3 override verdict, and this test fails.
+#[test]
+fn a_refused_probe_readback_is_operational_never_an_override_verdict() {
+    let reader =
+        BrokerDouble::new(&[("log.message.timestamp.type", "LogAppendTime")]).refusing_readback();
+    let creator = RecordingCreator::default();
+    let deleter = RecordingDeleter::default();
+    let err = phase0_admit::run(
+        &a_recent_spec(),
+        "restore: {}\n",
+        &allowed(),
+        &reader,
+        &creator,
+        &deleter,
+    )
+    .expect_err("a refused readback proves nothing about the override");
+    assert_eq!(
+        err.exit_code(),
+        ExitCode::Operational,
+        "the override was never read, so no guard verdict about it may be issued: {err:?}"
+    );
+    assert!(err.to_string().contains("not authorized"), "{err}");
+    assert_eq!(
+        *deleter.calls.lock().unwrap(),
+        vec!["drill-orders".to_string()],
+        "the probe topic is deleted on this path too"
+    );
 }
 
 // ---------------------------------------------------------------------------

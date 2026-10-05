@@ -93,7 +93,9 @@ pub mod stack;
 // Re-exported for every test binary; not every binary uses all four, and the
 // module-level `allow(dead_code)` does not cover an unused `use`.
 #[allow(unused_imports)]
-pub use stack::{bootstrap, bootstrap_k8s, bootstrap_sasl, s3_endpoint};
+pub use stack::{
+    bootstrap, bootstrap_acl, bootstrap_acl_sasl, bootstrap_k8s, bootstrap_sasl, s3_endpoint,
+};
 
 /// The `SASL` listener — the SAME SCRAM credential store as `bootstrap_sasl()`,
 /// advertised for clients ON `kafka-net`. Unresolvable from the host by

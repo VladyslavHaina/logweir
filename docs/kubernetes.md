@@ -8067,6 +8067,24 @@ conversion: the field appears on the next reconcile of each one, which the
 five-minute heartbeat guarantees. Nothing reads the window to decide
 authorisation, so a cluster that never publishes one keeps working.
 
+### 21.6b A refused configuration read is `unknown`, never `ready` (FX-4)
+
+`target.timestampBound` reads the target's broker configuration with the
+restore's own credential. A credential without DescribeConfigs on the Cluster
+resource (Describe does not imply it) now gets `unknown` with code
+`BrokerConfigsNotReadable`. Builds before FX-4 answered `ready` with
+`TimestampWithinBound`: rust-rdkafka returned the refused read as an EMPTY
+configuration, and an empty configuration declares no bound (PROD-04.0 T13,
+[the ruling](stability.md#an-empty-configuration-answer-is-a-refused-read-never-no-overrides-prod-040-t13-fx-4)).
+The Restore itself needs the same grant: phase 0 of a run with that credential
+exits 1 instead of assuming the broker is on `CreateTime`.
+
+A `Backup`'s source credential needs DescribeConfigs on every backed-up topic
+for the receipt to record the topic's configuration as `captured`. Without it
+the backup still succeeds, the topic reads `captureDenied`, and a later
+restore's configuration parity names that topic as not assessed
+([the receipt field](formats/backup-receipt.md#config_coverage--topic-configuration-capture-coverage-format-110)).
+
 ### 21.7 Skipping a check is not answering it
 
 `spec.request.skipChecks` leaves a row out of the run. The row is still
@@ -8263,6 +8281,12 @@ answers the same request `Failed`/`ArchiveUrlUnreadable`, as it always did;
 after a rollback, re-run the check or restore without it. The one Restore
 controller row added, the advisory `destination.evidenceReadable`, never
 changes the aggregate.
+
+**A refused broker-configuration read (FX-4).** A runner image from FX-4 on
+answers `target.timestampBound` `unknown` (`BrokerConfigsNotReadable`) where an
+older one answered `ready` (§21.6b). No code, field or plan shape is new, so
+the controller and runner may be upgraded in either order. Rolling back the
+runner brings back the old `ready` answer.
 
 ## 22. The installation policy, the RBAC rows, and the console admission policy
 

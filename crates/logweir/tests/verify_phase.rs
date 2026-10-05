@@ -504,6 +504,7 @@ fn a_healthy_drill_reconciles_to_integrity_pass_and_reports_intended_parity_only
         &sel_orders(),
         &mapping,
         &plan,
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
     )
     .unwrap();
 
@@ -515,7 +516,13 @@ fn a_healthy_drill_reconciles_to_integrity_pass_and_reports_intended_parity_only
     assert_eq!(out.pass_rate(), Some(1.0));
     assert_eq!(out.records_restored, 50);
     assert_eq!(out.newest_restored_ts_ms, MATCHING_PAIR_BASE_TS + 49);
-    assert_eq!(out.topic_parity.unexpected_divergence, Vec::<String>::new());
+    // No key diverged; the one entry is the fail-safe marker of a run whose
+    // coverage is UNKNOWN (no bound receipt), which an older reader must never
+    // read as parity (FX-4 review M5).
+    assert_eq!(
+        out.topic_parity.unexpected_divergence,
+        vec!["drill-orders: configuration not assessed (unknown)".to_string()]
+    );
     assert!(out
         .topic_parity
         .intentionally_deviated
@@ -588,6 +595,7 @@ fn a_manifest_sha256_in_the_engines_bare_hex_form_still_verifies() {
         &sel_orders(),
         &fixtures::mapping("orders", "drill-orders"),
         &plan_orders_to_drill_orders(),
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
     )
     .unwrap();
 
@@ -642,6 +650,7 @@ fn a_sha256_mismatch_against_the_manifest_fails_integrity_even_when_the_canary_m
         &sel_orders(),
         &mapping,
         &plan,
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
     )
     .unwrap();
 
@@ -695,6 +704,7 @@ fn a_canary_fingerprint_mismatch_fails_integrity_and_is_counted_precisely() {
         &sel_orders(),
         &mapping,
         &plan,
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
     )
     .unwrap();
 
@@ -759,6 +769,7 @@ fn an_unsupported_engine_degrades_to_consume_only_through_the_full_run() {
         &sel_orders(),
         &mapping,
         &plan,
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
     )
     .unwrap();
 
@@ -810,7 +821,17 @@ fn run_rejects_a_verify_request_with_zero_sample_selections() {
     let mapping = fixtures::mapping("orders", "drill-orders");
     let plan = plan_orders_to_drill_orders();
 
-    let err = run(&engine, &reader, &store, &facts, &[], &mapping, &plan).unwrap_err();
+    let err = run(
+        &engine,
+        &reader,
+        &store,
+        &facts,
+        &[],
+        &mapping,
+        &plan,
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+    )
+    .unwrap_err();
     assert!(matches!(err, DrillError::Operational(_)));
     assert!(err.to_string().contains("zero sample selections"));
 }
@@ -869,6 +890,7 @@ fn verdict_for_selection_reads_the_mapped_target_topic_never_the_archive_name() 
         &sel_orders(),
         &mapping,
         &plan,
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
     )
     .unwrap();
 
@@ -931,6 +953,7 @@ fn classify_parity_all_reads_the_mapped_target_topic_never_the_archive_name() {
         &sel_orders(),
         &mapping,
         &plan,
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
     )
     .unwrap();
 
@@ -993,6 +1016,7 @@ fn a_failing_engine_validation_run_never_fails_or_aborts_the_drill() {
         &sel_orders(),
         &mapping,
         &plan,
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
     )
     .expect("an engine-side validation-run failure must never abort phase 7");
 
@@ -1225,7 +1249,17 @@ fn run_aggregates_across_every_selection_and_mapped_topic_not_just_the_first() {
     let mut plan = plan_orders_to_drill_orders();
     plan.topic_mapping = mapping.clone();
 
-    let out = run(&engine, &reader, &store, &facts, &sel, &mapping, &plan).unwrap();
+    let out = run(
+        &engine,
+        &reader,
+        &store,
+        &facts,
+        &sel,
+        &mapping,
+        &plan,
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+    )
+    .unwrap();
 
     assert_eq!(out.integrity.result, IntegrityResult::Pass);
     // 25 + 25: wrong (25) if either `probe_archive_modes` or `run`'s own
@@ -1411,7 +1445,17 @@ fn a_topic_restored_to_zero_records_must_fail_not_pass_even_when_pooled_with_a_h
     let mut plan = plan_orders_to_drill_orders();
     plan.topic_mapping = mapping.clone();
 
-    let out = run(&engine, &reader, &store, &facts, &sel, &mapping, &plan).unwrap();
+    let out = run(
+        &engine,
+        &reader,
+        &store,
+        &facts,
+        &sel,
+        &mapping,
+        &plan,
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+    )
+    .unwrap();
 
     assert_eq!(
         out.integrity.result,
@@ -1532,7 +1576,17 @@ fn a_selection_that_sampled_zero_archive_fingerprints_cannot_hide_inside_a_passi
     let mut plan = with_pit_inside_the_segment(plan_orders_to_drill_orders());
     plan.topic_mapping = mapping.clone();
 
-    let out = run(&engine, &reader, &store, &facts, &sel, &mapping, &plan).unwrap();
+    let out = run(
+        &engine,
+        &reader,
+        &store,
+        &facts,
+        &sel,
+        &mapping,
+        &plan,
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+    )
+    .unwrap();
 
     assert_ne!(
         out.integrity.result,
@@ -1604,6 +1658,7 @@ fn a_byte_fingerprint_comparison_that_samples_zero_records_is_partial_never_pass
         &sel_orders(),
         &mapping,
         &plan,
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
     )
     .unwrap();
 
@@ -1673,6 +1728,7 @@ fn a_short_read_back_on_the_consume_only_lane_is_unverified_not_a_smaller_succes
         // Task 10: the count bound is deliberately non-binding here — see
         // `with_pit_inside_the_segment`.
         &with_pit_inside_the_segment(plan_orders_to_drill_orders()),
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
     )
     .expect("an under-delivering target is a DRILL RESULT, never an Err");
 
@@ -1783,7 +1839,17 @@ fn verdict_for_selection_caps_the_read_at_the_selections_own_count() {
     let mut sel = sel_orders();
     sel[0].count = 7;
 
-    let out = run(&engine, &reader, &store, &facts, &sel, &mapping, &plan).unwrap();
+    let out = run(
+        &engine,
+        &reader,
+        &store,
+        &facts,
+        &sel,
+        &mapping,
+        &plan,
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+    )
+    .unwrap();
 
     // `newest_ts` (run at the very end of `run`, for the RPO input) makes
     // its OWN trailing `consume_range` call with `max = 1` — that call is
@@ -1850,7 +1916,17 @@ fn records_restored_is_the_consumed_count_not_matched_plus_mismatched() {
     let mut sel = sel_orders();
     sel[0].count = 8;
 
-    let out = run(&engine, &reader, &store, &facts, &sel, &mapping, &plan).unwrap();
+    let out = run(
+        &engine,
+        &reader,
+        &store,
+        &facts,
+        &sel,
+        &mapping,
+        &plan,
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+    )
+    .unwrap();
 
     assert_eq!(out.integrity.records_sampled, 5);
     assert_eq!(out.integrity.records_sampled_matching, 5);
@@ -2064,7 +2140,17 @@ fn run_reconciles_two_partitions_of_one_topic_independently_not_pooled() {
     let mut plan = plan_orders_to_drill_orders();
     plan.topic_mapping = mapping.clone();
 
-    let out = run(&engine, &reader, &store, &facts, &sel, &mapping, &plan).unwrap();
+    let out = run(
+        &engine,
+        &reader,
+        &store,
+        &facts,
+        &sel,
+        &mapping,
+        &plan,
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+    )
+    .unwrap();
 
     assert_eq!(
         out.integrity.result,
@@ -2305,6 +2391,7 @@ fn one_of_two_topics_restored_to_zero_records_cannot_pass_on_the_consume_only_la
         // Task 10: the count bound is deliberately non-binding here — see
         // `with_pit_inside_the_segment`.
         &with_pit_inside_the_segment(two_topic_plan()),
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
     )
     .expect("an un-restored topic is a DRILL RESULT (exit 2, signed), never an Err (exit 1)");
 
@@ -2402,6 +2489,7 @@ fn a_wholly_corrupt_topic_beside_an_unrestored_one_fails_and_never_reconciles_ag
         &[sel_for("orders", 0, 25), sel_for("payments", 0, 25)],
         &two_topic_mapping(),
         &two_topic_plan(),
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
     )
     .expect("a failed reconciliation is a DRILL RESULT, never an Err");
 
@@ -2474,6 +2562,7 @@ fn zero_records_consumed_from_a_sampled_partition_is_never_a_pass() {
         // Task 10: the count bound is deliberately non-binding here — see
         // `with_pit_inside_the_segment`.
         &with_pit_inside_the_segment(plan_orders_to_drill_orders()),
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
     )
     .expect("a partition that gave back nothing is a DRILL RESULT, never an Err");
 
@@ -2554,6 +2643,7 @@ fn a_short_archive_fingerprint_list_is_unverified_coverage_not_a_smaller_success
         // Task 10: the count bound is deliberately non-binding here — see
         // `with_pit_inside_the_segment`.
         &with_pit_inside_the_segment(two_topic_plan()),
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
     )
     .expect("an under-delivering archive is a DRILL RESULT, never an Err");
 
@@ -2649,6 +2739,7 @@ fn one_selections_unsupported_archive_never_erases_another_selections_byte_level
         &[sel_for("orders", 0, 25), sel_for("payments", 0, 25)],
         &two_topic_mapping(),
         &two_topic_plan(),
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
     )
     .unwrap();
 
@@ -2733,6 +2824,7 @@ fn a_selection_matching_no_archive_segment_is_a_signed_partial_not_an_operationa
         &sel,
         &fixtures::mapping("orders", "drill-orders"),
         &plan_orders_to_drill_orders(),
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
     )
     .expect(
         "round 3: an archive holding no segment in the window is a DRILL RESULT (exit 2, \
@@ -2781,6 +2873,7 @@ fn a_pre_0_21_segment_with_no_sha256_is_partial_never_a_silent_pass() {
         &sel_orders(),
         &fixtures::mapping("orders", "drill-orders"),
         &plan_orders_to_drill_orders(),
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
     )
     .unwrap();
 
@@ -2845,6 +2938,7 @@ fn a_consume_only_selection_with_a_corrupt_segment_fails_the_drill_never_merely_
         &sel_orders(),
         &fixtures::mapping("orders", "drill-orders"),
         &plan_orders_to_drill_orders(),
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
     )
     .expect("a corrupt archive segment is a DRILL RESULT, never an Err");
 
@@ -2931,6 +3025,7 @@ fn a_partial_verdict_over_a_partly_reconciled_sample() -> logweir_core::scorecar
         &[sel_for("orders", 0, 25), sel_for("payments", 0, 25)],
         &two_topic_mapping(),
         &two_topic_plan(),
+        &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
     )
     .expect("a partly-reconciled sample is a DRILL RESULT, never an Err");
 
@@ -3008,5 +3103,334 @@ fn the_signed_document_carries_no_pass_rate_beside_a_partial_verdict() {
         serde_json::Value::Null,
         "`met: true` beside a partial integrity result is the same overstatement one \
          field along"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// FX-4: configuration parity is ASSESSED only where the capture was, and a
+// refused TARGET read (T13, consumer 5) is recorded, not compared as empty.
+// ---------------------------------------------------------------------------
+
+/// The healthy baseline's reader, wrapped so the TARGET's DescribeConfigs is
+/// REFUSED — what `RdKafkaReader::topic_configs` now returns instead of the
+/// empty map rdkafka 0.36.2 used to hand back.
+struct RefusingTargetConfigs(MapReader);
+
+impl ClusterReader for RefusingTargetConfigs {
+    fn cluster_id(&self) -> Result<String, KafkaError> {
+        self.0.cluster_id()
+    }
+    fn list_topics(&self) -> Result<Vec<TopicMeta>, KafkaError> {
+        self.0.list_topics()
+    }
+    fn end_offsets(&self, topic: &str) -> Result<Vec<(i32, i64)>, KafkaError> {
+        self.0.end_offsets(topic)
+    }
+    fn topic_configs(&self, topic: &str) -> Result<BTreeMap<String, String>, KafkaError> {
+        Err(logweir_kafka::reader::empty_topic_config_answer(
+            topic,
+            &logweir_kafka::reader::TopicVisibility::Visible,
+        ))
+    }
+    fn broker_configs(&self) -> Result<BTreeMap<String, String>, KafkaError> {
+        self.0.broker_configs()
+    }
+    fn consume_range(
+        &self,
+        topic: &str,
+        partition: i32,
+        from: i64,
+        max: usize,
+    ) -> Result<Vec<ConsumedRecord>, KafkaError> {
+        self.0.consume_range(topic, partition, from, max)
+    }
+}
+
+/// The healthy baseline's target, with a target configuration that DIFFERS
+/// from the source's on a key that is not intended (`min.insync.replicas`),
+/// so a comparison that ran is visible in `unexpected_divergence`.
+fn healthy_parts() -> (
+    logweir_engine_oso::storage::Store,
+    BackupSetFacts,
+    MapReader,
+    VerifyEngine,
+) {
+    let (store, sha) = store_with_matching_segment();
+    let mut facts = facts_with_segment(&sha);
+    facts.topics[0]
+        .configurations
+        .insert("min.insync.replicas".into(), "2".into());
+    let (archive, cons) = fixtures::matching_pair(50);
+    let mut topics = BTreeMap::new();
+    topics.insert(
+        "drill-orders".to_string(),
+        TopicData {
+            end_offsets: vec![(0, 50)],
+            configs: fixtures::target_configs(&[
+                ("cleanup.policy", "delete"),
+                ("retention.ms", "-1"),
+                ("min.insync.replicas", "1"),
+            ]),
+            records: cons,
+        },
+    );
+    let engine = VerifyEngine {
+        facts: facts.clone(),
+        fingerprints: archive,
+        unsupported: None,
+        validation: ValidationBehavior::Success(0),
+    };
+    (store, facts, MapReader { topics }, engine)
+}
+
+/// A `SourceConfigCoverage` as a verified 1.1.0 receipt naming `orders` reads.
+fn receipt_coverage(coverage: &str) -> logweir_core::backup_receipt::SourceConfigCoverage {
+    let mut receipt: logweir_core::backup_receipt::BackupReceipt = serde_json::from_slice(
+        &std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../e2e/fixtures/signed/backup-receipt.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    receipt.format_version = "1.1.0".into();
+    receipt.config_coverage = Some(BTreeMap::from([(
+        "orders".to_string(),
+        logweir_core::backup_receipt::TopicConfigCoverage {
+            coverage: coverage.to_string(),
+            reason: (coverage == "notCaptured").then(|| "manifestDiffers".to_string()),
+            timestamp_type: None,
+        },
+    )]));
+    logweir_core::backup_receipt::SourceConfigCoverage::from_receipt(&receipt)
+}
+
+/// **FX-4: the parity arm that ignores coverage.** Every coverage that is not
+/// `captured` — no receipt (`unknown`), a denied capture, a manifest that
+/// disagreed — names the topic in `not_assessed`; `captured` is the only state
+/// that yields `Some([])`, the "every topic assessed" claim. The archive's own
+/// record is still compared either way: the difference it shows stays
+/// reported, only its SILENCE is withdrawn.
+///
+/// Negative control: a `classify_parity_all` that stopped consulting
+/// `coverage` (always `Some(vec![])`) fails every non-captured row below.
+#[test]
+fn configuration_parity_is_not_assessed_unless_the_source_capture_was() {
+    for (coverage, want) in [
+        (
+            logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+            Some(vec!["drill-orders: configuration (unknown)".to_string()]),
+        ),
+        (
+            receipt_coverage("captureDenied"),
+            Some(vec![
+                "drill-orders: configuration (captureDenied)".to_string()
+            ]),
+        ),
+        (
+            receipt_coverage("notCaptured"),
+            Some(vec!["drill-orders: configuration (notCaptured)".to_string()]),
+        ),
+        (receipt_coverage("captured"), Some(vec![])),
+    ] {
+        let (store, facts, reader, engine) = healthy_parts();
+        let out = run(
+            &engine,
+            &reader,
+            &store,
+            &facts,
+            &sel_orders(),
+            &fixtures::mapping("orders", "drill-orders"),
+            &plan_orders_to_drill_orders(),
+            &coverage,
+        )
+        .unwrap();
+        assert_eq!(out.topic_parity.not_assessed, want);
+        // The archive's own record is compared whatever the coverage, and a
+        // topic that was not assessed ALSO carries its fail-safe marker there.
+        let mut expected = vec!["drill-orders: min.insync.replicas".to_string()];
+        for entry in want.iter().flatten() {
+            let why = entry
+                .strip_prefix("drill-orders: configuration (")
+                .and_then(|r| r.strip_suffix(')'))
+                .expect("the not_assessed shape");
+            expected.push(format!("drill-orders: configuration not assessed ({why})"));
+        }
+        expected.sort();
+        assert_eq!(out.topic_parity.unexpected_divergence, expected);
+    }
+}
+
+/// **FX-4 review M5: what a reader older than `not_assessed` sees.** For
+/// every coverage state, a topic that phase 7 did not assess leaves a
+/// non-empty `unexpected_divergence` — the array `verify_scorecard.py` 1.14.0,
+/// a pre-FX-4 `drill show` and the pre-FX-4 guide all read — so no reader that
+/// ignores `not_assessed` can take its silence for parity. Only `captured` with
+/// a readable target and agreeing keys may leave the array empty.
+///
+/// Negative control: drop the marker from `classify_parity_all` and every
+/// not-assessed row fails, the `targetReadDenied` one included (the case the
+/// writer before FX-4 made noisy and FX-4 had made silent).
+#[test]
+fn a_topic_that_was_not_assessed_is_never_silent_to_an_older_reader() {
+    let quiet = |out: &logweir::drill::phase7_verify::VerifyOutcome, why: &str| {
+        assert!(
+            out.topic_parity.unexpected_divergence.contains(
+                &logweir::drill::phase7_verify::not_assessed_marker("drill-orders", why)
+            ),
+            "{why}: an older reader would read this topic's parity as clean: {:?}",
+            out.topic_parity.unexpected_divergence
+        );
+    };
+    for (why, coverage) in [
+        (
+            "unknown",
+            logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+        ),
+        ("captureDenied", receipt_coverage("captureDenied")),
+        ("notCaptured", receipt_coverage("notCaptured")),
+    ] {
+        let (store, facts, reader, engine) = healthy_parts();
+        let out = run(
+            &engine,
+            &reader,
+            &store,
+            &facts,
+            &sel_orders(),
+            &fixtures::mapping("orders", "drill-orders"),
+            &plan_orders_to_drill_orders(),
+            &coverage,
+        )
+        .unwrap();
+        quiet(&out, why);
+    }
+    let (store, facts, reader, engine) = healthy_parts();
+    let out = run(
+        &engine,
+        &RefusingTargetConfigs(reader),
+        &store,
+        &facts,
+        &sel_orders(),
+        &fixtures::mapping("orders", "drill-orders"),
+        &plan_orders_to_drill_orders(),
+        &receipt_coverage("captured"),
+    )
+    .unwrap();
+    quiet(&out, "targetReadDenied");
+}
+
+/// **OD-7, as the owner ruled it on 2026-10-05.** `docs/stability.md` states
+/// both rulings beside the MINOR/MAJOR rule, and the entry the follow-up
+/// ruling covers is EXACTLY the shape phase 7 writes: the ruling names that
+/// string, so a different marker would be an unruled change to an existing
+/// field's content again. No doc still calls the classification pending.
+///
+/// Negative controls: the 2026-09-29 "OD-7, still pending" text restored in
+/// `docs/stability.md`, a rule that loses either ruling, or a
+/// `not_assessed_marker` of another shape, fails this test.
+#[test]
+fn the_stability_rule_carries_the_owners_od_7_rulings_for_the_entry_phase_7_writes() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let flat = |rel: &str| -> String {
+        std::fs::read_to_string(root.join(rel))
+            .unwrap_or_else(|e| panic!("{rel}: {e}"))
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let stability = flat("docs/stability.md");
+    let rule = stability
+        .split("### The first post-tag addition")
+        .next()
+        .expect("docs/stability.md states the rule before FX-4's section");
+    for ruled in [
+        "The owner's decision [OD-7](to-do/product-expansion.md#owner-decisions), taken on \
+         2026-10-05, rules two cases MINOR",
+        "**A `validate_invariants` arm that reads ONLY a new optional block is MINOR.** An arm \
+         that changes how an existing field is judged stays MAJOR.",
+        "Nothing else is ruled: any other change to an existing field's content is still a \
+         MAJOR bump.",
+    ] {
+        assert!(
+            rule.contains(ruled),
+            "docs/stability.md's MINOR/MAJOR rule no longer says: {ruled}"
+        );
+    }
+    let marker = logweir::drill::phase7_verify::not_assessed_marker("<target topic>", "<why>");
+    let entry = format!(
+        "**FX-4's entry `\"{marker}\"` in the existing `topic_parity.unexpected_divergence` is \
+         MINOR**"
+    );
+    assert!(
+        rule.contains(&entry),
+        "OD-7's follow-up ruling covers the entry phase 7 writes, `{marker}`; \
+         docs/stability.md's rule must name exactly that shape"
+    );
+    for doc in [
+        "docs/stability.md",
+        "docs/formats/drill-scorecard.md",
+        "docs/formats/backup-receipt.md",
+        "docs/formats/catalog-point.md",
+        "docs/verify-a-scorecard.md",
+        "MAINTAINERS.md",
+    ] {
+        let text = flat(doc);
+        for stale in [
+            "OD-7, still pending",
+            "part of the owner's decision OD-7",
+            "part of OD-7 too",
+        ] {
+            assert!(!text.contains(stale), "{doc} still says {stale:?}");
+        }
+    }
+}
+
+/// **FX-4 / T13, consumer 5.** A REFUSED read of the TARGET's configuration
+/// used to be an empty map, so every source key compared as different. It is
+/// now named `targetReadDenied` and the topic's keys are not compared at all;
+/// partition count and replication factor still are.
+///
+/// Negative control: `reader.topic_configs(tgt).unwrap_or_default()` in phase
+/// 7 reports `min.insync.replicas` as an unexpected divergence and names no
+/// `not_assessed` entry, and this test fails.
+#[test]
+fn a_refused_target_configuration_read_is_not_assessed_never_compared_as_empty() {
+    let (store, facts, reader, engine) = healthy_parts();
+    let out = run(
+        &engine,
+        &RefusingTargetConfigs(reader),
+        &store,
+        &facts,
+        &sel_orders(),
+        &fixtures::mapping("orders", "drill-orders"),
+        &plan_orders_to_drill_orders(),
+        &receipt_coverage("captured"),
+    )
+    .expect("a refused TARGET configuration read is a recorded fact, not an aborted drill");
+    assert_eq!(
+        out.topic_parity.not_assessed,
+        Some(vec![
+            "drill-orders: configuration (targetReadDenied)".to_string()
+        ])
+    );
+    // No KEY was compared; the one entry is the fail-safe marker (review M5).
+    assert_eq!(
+        out.topic_parity.unexpected_divergence,
+        vec!["drill-orders: configuration not assessed (targetReadDenied)".to_string()]
+    );
+    assert!(
+        !out.topic_parity
+            .intentionally_deviated
+            .iter()
+            .any(|d| d.contains("cleanup.policy") || d.contains("retention.ms")),
+        "no configuration key was compared: {:?}",
+        out.topic_parity.intentionally_deviated
+    );
+    assert!(
+        out.topic_parity
+            .intentionally_deviated
+            .contains(&"drill-orders: replication_factor".to_string()),
+        "metadata-derived parity is still assessed: {:?}",
+        out.topic_parity.intentionally_deviated
     );
 }
