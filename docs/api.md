@@ -1050,9 +1050,11 @@ different inventory. **A successful list is never called complete**:
 connection, a changed principal — and a failed attempt never hides the last
 successful inventory: `?latest=true` returns both slots separately.
 
-A discovery also carries **`brokerCount`**: how many brokers answered the
-metadata read the inventory came from (`status.result.brokerCount`, beside
-`clusterId`). It is **additive**: absent means the result recorded none — a
+A discovery also carries **`brokerCount`**: how many brokers the cluster's
+metadata response listed when the inventory was read, which is its live brokers
+at `observedAt` (`status.result.brokerCount`, beside `clusterId`). One broker
+answers a metadata request; the count is the brokers its answer names, so a
+broker that is down then is not counted. It is **additive**: absent means the result recorded none — a
 failed or unfinished attempt — and is never sent as `0`, and a client written
 before it reads the discovery exactly as before. The console's restore wizard
 reads it from the target connection's newest successful discovery (FX-5): when

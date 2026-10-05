@@ -13281,7 +13281,7 @@
         ],
         "properties": {
           "brokerCount": {
-            "description": "How many brokers answered the metadata request this inventory came from (`status.result.brokerCount`, from the same read as `clusterId`).\n\nADDITIVE (FX-5). The restore wizard caps its default replication factor at it, and refuses a factor above it, when the discovery of the TARGET connection is fresh; nothing else in this product published the target's broker count to the console. Absent means the result recorded none -- a failed or unfinished attempt, or a controller older than the field -- and is never read as zero brokers. It counts the brokers that answered at `observedAt`, not the brokers the cluster is meant to have.",
+            "description": "How many brokers the cluster's metadata response listed when this inventory was read: its live brokers at `observedAt` (`status.result.brokerCount`, from the same read as `clusterId`). One broker answers a metadata request; the count is the brokers its answer names, so a broker that is down then is not counted.\n\nADDITIVE (FX-5). The restore wizard sets its default replication factor from it, at most 3, and refuses a factor above it while the discovery of the TARGET connection is fresh; past its freshness alone (`expired` the only stale reason) the count still sets the default and refuses nothing. Nothing else in this product published the target's broker count to the console. Absent means the result recorded none -- a failed or unfinished attempt, or a controller older than the field -- and is never read as zero brokers. It is not the brokers the cluster is meant to have.",
             "type": "integer",
             "format": "int64",
             "nullable": true
