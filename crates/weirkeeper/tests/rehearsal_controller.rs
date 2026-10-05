@@ -4400,3 +4400,330 @@ async fn a_missing_reservation_beside_a_decided_active_run_is_recorded_next() {
     assert!(st.get("pendingRestoreRef").is_none(), "{st}");
     assert_no_lost_writes(&store);
 }
+
+// ===========================================================================
+// FX-2 — `bounds.runnerResources` reaches the child `Restore` and its runner
+// container, or the slot is refused. Never dropped, never clamped.
+// ===========================================================================
+
+/// The fixture schedule with `spec.bounds.runnerResources` set.
+fn schedule_with_resources(resources: Value) -> RehearsalSchedule {
+    let mut value = schedule_value(json!({}));
+    value["spec"]["bounds"]["runnerResources"] = resources;
+    serde_json::from_value(value).expect("the fixture schedule parses")
+}
+
+/// The happy table, with a standing authorization signed over THIS
+/// schedule's digest, and the `Approval` it serves.
+///
+/// `runnerResources` is inside the sealed spec, so a schedule that sets it has
+/// its own `templateDigest` and needs its own authorization — which is also
+/// why a refused block can only be fixed by a NEW schedule.
+fn routes_authorizing(schedule: &RehearsalSchedule) -> (Vec<Route>, Value) {
+    let digest = rehearsal::template_digest(&schedule.spec).expect("the spec canonicalises");
+    assert_ne!(
+        digest,
+        template_digest(),
+        "runnerResources is inside the digest the standing authorization binds"
+    );
+    let mut scope = scope_value();
+    scope["templateDigest"] = json!(digest);
+    let mut envelope: Value =
+        serde_json::from_str(&envelope_with(SCHEDULE_UID, scope, "2026-11-01T00:00:00Z"))
+            .expect("the envelope is JSON");
+    envelope["plan_hash"] = json!(digest);
+    let envelope = serde_json::to_string_pretty(&envelope).expect("the envelope serialises");
+    let mut approval = approval_value(&envelope);
+    approval["spec"]["planHash"] = json!(digest);
+    let table = routes(
+        approval.clone(),
+        trust_policy_value("Active", None),
+        cluster_value(true, Some(TARGET_CLUSTER_ID)),
+        backup_list(vec![backup_value(
+            "logweir-backup-nightly-20260919-020000",
+            "2026-09-19T02:00:00Z",
+            json!(["orders", "payments"]),
+            true,
+        )]),
+        restore_list(vec![]),
+    );
+    (table, approval)
+}
+
+/// **FX-2, THE SCHEDULE'S HALF OF THE DEFECT.** `bounds.runnerResources`
+/// reaches the child `Restore` VERBATIM, and from the child the `Restore`
+/// controller's own pure builder puts exactly that on the runner container —
+/// the whole path the field travels, schedule to pod spec, in one row.
+///
+/// Every request differs from its limit, so a swap anywhere is visible. The
+/// two ONE-SIDED shapes run the same path (review L7's class sweep): a copy
+/// that kept only a block that caps something would drop a requests-only
+/// block at the schedule's copy just as mutant C1 did at the `Restore`'s.
+///
+/// MUTANTS: `runner_resources: None` in `child_restore` (the projection);
+/// `resources: None` in `job::build` (the container); a requests-only block
+/// dropped in `child_restore` (C1r).
+#[tokio::test]
+async fn bounds_runner_resources_reach_the_child_restore_and_its_runner_container() {
+    for resources in [
+        json!({
+            "requests": {"cpu": "250m", "memory": "512Mi"},
+            "limits": {"cpu": "1", "memory": "2Gi"}
+        }),
+        json!({"requests": {"cpu": "250m", "memory": "512Mi"}}),
+        json!({"limits": {"cpu": "1", "memory": "2Gi"}}),
+    ] {
+        bounds_reach_the_child_and_its_container(resources).await;
+    }
+}
+
+/// One block, schedule to child `Restore` to runner container.
+async fn bounds_reach_the_child_and_its_container(resources: Value) {
+    let schedule = schedule_with_resources(resources.clone());
+    let (table, approval) = routes_authorizing(&schedule);
+    let (client, recorder, bodies) = mock_client_recording_bodies(table);
+    let outcome = rs::reconcile_schedule(&schedule, &context(client), now())
+        .await
+        .expect("the reconcile answers");
+    assert!(
+        matches!(&outcome.verdict, rs::Verdict::Fire(_)),
+        "a valid block fires the slot ({resources}): {:?}",
+        outcome.verdict
+    );
+    assert_eq!(
+        posted(&recorder, RESTORES_PATH),
+        1,
+        "exactly one child ({resources})"
+    );
+    let child = bodies
+        .lock()
+        .expect("the body recorder is not poisoned")
+        .iter()
+        .find(|seen| is_post_to(&seen.method, &seen.uri, RESTORES_PATH))
+        .map(|seen| serde_json::from_str::<Value>(&seen.body).expect("the child parses"))
+        .expect("the child was posted");
+    assert_eq!(
+        child["spec"]["runnerResources"], resources,
+        "the child carries the sealed bounds verbatim: {child}"
+    );
+
+    // …and from the child onto its runner container.
+    let mut child: weirkeeper::crds::restore::Restore =
+        serde_json::from_value(child).expect("the child is a Restore");
+    child.metadata.uid = Some("child-uid".to_string());
+    let cluster: weirkeeper::crds::kafka_cluster::KafkaCluster =
+        serde_json::from_value(cluster_value(true, Some(TARGET_CLUSTER_ID)))
+            .expect("a KafkaCluster");
+    let approval: weirkeeper::crds::approval::Approval =
+        serde_json::from_value(approval).expect("an Approval");
+    let policies: kube::core::ObjectList<weirkeeper::crds::trust_policy::TrustPolicy> =
+        serde_json::from_value(trust_policy_value("Active", None)).expect("the list parses");
+    let weirkeeper::trust::Resolution::Trust(trust) =
+        weirkeeper::trust::resolve_in(NS, &policies.items, None)
+    else {
+        panic!("the default policy governs every namespace")
+    };
+    let spec = weirkeeper::controllers::restore::runner_job_spec(
+        &child,
+        &cluster,
+        &[KEY_ID.to_string()],
+        &approval,
+        &trust,
+        now(),
+    )
+    .expect("the child's Job renders");
+    let job = serde_json::to_value(weirkeeper::job::build(&spec)).expect("the Job serialises");
+    assert_eq!(
+        job["spec"]["template"]["spec"]["containers"][0]["resources"], resources,
+        "the rehearsal's runner container asks for and is capped at exactly the schedule's \
+         bounds: {}",
+        job["spec"]["template"]["spec"]["containers"][0]
+    );
+}
+
+/// **FX-2, THE SCHEDULE'S REFUSAL.** A block the controller will not apply
+/// skips the slot as `AuthorizationInvalid`, names the field and the remedy,
+/// and creates NO child and NO bundle — over a table that has both routes and
+/// a standing authorization that is otherwise perfectly valid.
+///
+/// MUTANT: removing `decide`'s step 4b (the slot fires and posts a child
+/// carrying the refused block).
+#[tokio::test]
+async fn a_bounds_block_the_controller_will_not_apply_skips_the_slot_and_creates_nothing() {
+    for (label, resources, field) in [
+        (
+            "above the memory ceiling",
+            json!({"limits": {"memory": "16Gi"}}),
+            "spec.bounds.runnerResources.limits.memory",
+        ),
+        (
+            "a request above its limit",
+            json!({"requests": {"cpu": "2"}, "limits": {"cpu": "1"}}),
+            "spec.bounds.runnerResources.requests.cpu",
+        ),
+        (
+            "milli-bytes",
+            json!({"requests": {"memory": "512m"}}),
+            "spec.bounds.runnerResources.requests.memory",
+        ),
+    ] {
+        let schedule = schedule_with_resources(resources);
+        let (table, _) = routes_authorizing(&schedule);
+        let (client, recorder, bodies) = mock_client_recording_bodies(table);
+        let outcome = rs::reconcile_schedule(&schedule, &context(client), now())
+            .await
+            .expect("the reconcile answers");
+        let rs::Verdict::Skipped(skip) = &outcome.verdict else {
+            panic!("{label}: {:?}", outcome.verdict)
+        };
+        assert_eq!(
+            skip.reason,
+            rehearsal::SkipReason::AuthorizationInvalid,
+            "{label}"
+        );
+        assert!(
+            skip.detail.contains(field) && skip.detail.contains("new RehearsalSchedule"),
+            "{label}: the detail names the field and the remedy: {skip}"
+        );
+        assert_eq!(posted(&recorder, RESTORES_PATH), 0, "{label}: no child");
+        assert_eq!(posted(&recorder, CONFIGMAPS_PATH), 0, "{label}: no bundle");
+        assert_eq!(
+            last_skip(&bodies).as_deref(),
+            Some("AuthorizationInvalid"),
+            "{label}"
+        );
+        let authorized = patch_bodies(&bodies)
+            .into_iter()
+            .filter_map(|b| b.pointer("/status/conditions").cloned())
+            .flat_map(|cs| cs.as_array().cloned().unwrap_or_default())
+            .find(|c| c["type"] == rs::CONDITION_AUTHORIZED)
+            .unwrap_or_else(|| panic!("{label}: an Authorized condition"));
+        assert_eq!(authorized["status"], "False", "{label}: {authorized}");
+        assert!(
+            authorized["message"]
+                .as_str()
+                .is_some_and(|m| m.contains(field)),
+            "{label}: {authorized}"
+        );
+    }
+}
+
+/// **FX-2's class sweep: `bounds.deadlineSeconds`**, documented as "the Job's
+/// `activeDeadlineSeconds`". Every earlier row used 3600 — the field's own
+/// default — so a projection that ignored the field and wrote the default
+/// passed them all. A non-default value reaches the child `Restore` and, from
+/// it, the runner Job.
+///
+/// MUTANT: `deadline_seconds: 3600` in `child_restore`.
+#[tokio::test]
+async fn bounds_deadline_seconds_reaches_the_child_restore_and_its_runner_job() {
+    let mut value = schedule_value(json!({}));
+    value["spec"]["bounds"]["deadlineSeconds"] = json!(1800);
+    let schedule: RehearsalSchedule =
+        serde_json::from_value(value).expect("the fixture schedule parses");
+    // The signed scope permits 3600, so a SHORTER bound is inside it.
+    let (table, approval) = routes_authorizing(&schedule);
+    let (client, recorder, bodies) = mock_client_recording_bodies(table);
+    let outcome = rs::reconcile_schedule(&schedule, &context(client), now())
+        .await
+        .expect("the reconcile answers");
+    assert!(
+        matches!(&outcome.verdict, rs::Verdict::Fire(_)),
+        "{:?}",
+        outcome.verdict
+    );
+    assert_eq!(posted(&recorder, RESTORES_PATH), 1);
+    let child = bodies
+        .lock()
+        .expect("the body recorder is not poisoned")
+        .iter()
+        .find(|seen| is_post_to(&seen.method, &seen.uri, RESTORES_PATH))
+        .map(|seen| serde_json::from_str::<Value>(&seen.body).expect("the child parses"))
+        .expect("the child was posted");
+    assert_eq!(child["spec"]["deadlineSeconds"], json!(1800), "{child}");
+
+    let mut child: weirkeeper::crds::restore::Restore =
+        serde_json::from_value(child).expect("the child is a Restore");
+    child.metadata.uid = Some("child-uid".to_string());
+    let cluster: weirkeeper::crds::kafka_cluster::KafkaCluster =
+        serde_json::from_value(cluster_value(true, Some(TARGET_CLUSTER_ID)))
+            .expect("a KafkaCluster");
+    let approval: weirkeeper::crds::approval::Approval =
+        serde_json::from_value(approval).expect("an Approval");
+    let policies: kube::core::ObjectList<weirkeeper::crds::trust_policy::TrustPolicy> =
+        serde_json::from_value(trust_policy_value("Active", None)).expect("the list parses");
+    let weirkeeper::trust::Resolution::Trust(trust) =
+        weirkeeper::trust::resolve_in(NS, &policies.items, None)
+    else {
+        panic!("the default policy governs every namespace")
+    };
+    let spec = weirkeeper::controllers::restore::runner_job_spec(
+        &child,
+        &cluster,
+        &[KEY_ID.to_string()],
+        &approval,
+        &trust,
+        now(),
+    )
+    .expect("the child's Job renders");
+    let job = weirkeeper::job::build(&spec);
+    assert_eq!(
+        job.spec.and_then(|s| s.active_deadline_seconds),
+        Some(1800),
+        "the rehearsal's runner Job is bounded by the schedule's own deadline"
+    );
+}
+
+/// **FX-2's class sweep: `bounds.maxPartitions`, `bounds.recordsPerPartition`
+/// and `target.replicationFactor`**, which the controller renders into the
+/// child `Restore`'s plan — the bytes the runner executes: `sample.max_partitions`,
+/// `sample.records_per_partition` and `target.default_replication_factor`.
+/// Every row used the fields' own defaults (200, 25, 1), and the one assertion
+/// on the rendered sample is `Some(200)`, so a plan rendered from the defaults
+/// instead of the sealed spec passed them all. Smaller bounds are inside the
+/// signed scope, which caps both from above.
+///
+/// MUTANTS: `Some(200)`, `25` or `1` where `render_plan` reads the spec.
+#[tokio::test]
+async fn the_rehearsal_plan_carries_the_schedules_own_sample_bounds_and_replication() {
+    let mut value = schedule_value(json!({}));
+    value["spec"]["bounds"]["maxPartitions"] = json!(50);
+    value["spec"]["bounds"]["recordsPerPartition"] = json!(10);
+    value["spec"]["target"]["replicationFactor"] = json!(3);
+    let schedule: RehearsalSchedule =
+        serde_json::from_value(value).expect("the fixture schedule parses");
+    let (table, _) = routes_authorizing(&schedule);
+    let (client, recorder, bodies) = mock_client_recording_bodies(table);
+    let outcome = rs::reconcile_schedule(&schedule, &context(client), now())
+        .await
+        .expect("the reconcile answers");
+    assert!(
+        matches!(&outcome.verdict, rs::Verdict::Fire(_)),
+        "{:?}",
+        outcome.verdict
+    );
+    assert_eq!(posted(&recorder, RESTORES_PATH), 1);
+    let child = bodies
+        .lock()
+        .expect("the body recorder is not poisoned")
+        .iter()
+        .find(|seen| is_post_to(&seen.method, &seen.uri, RESTORES_PATH))
+        .map(|seen| serde_json::from_str::<Value>(&seen.body).expect("the child parses"))
+        .expect("the child was posted");
+    let plan: logweir_core::spec::DrillSpec =
+        serde_yaml::from_str(child["spec"]["planBytes"].as_str().expect("a string"))
+            .expect("the frozen plan is a document the runner parses");
+    assert_eq!(
+        plan.sample.max_partitions,
+        Some(50),
+        "the runner's partition bound is the schedule's own"
+    );
+    assert_eq!(
+        plan.sample.records_per_partition, 10,
+        "the runner's per-partition sample is the schedule's own"
+    );
+    assert_eq!(
+        plan.target.default_replication_factor, 3,
+        "the scratch topics are created at the schedule's own replication factor"
+    );
+}

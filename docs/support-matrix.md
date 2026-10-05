@@ -1,11 +1,13 @@
 # Engine support matrix
 
 <!--
-HAND-WRITTEN. `.github/workflows/engine-matrix.yml` regenerates this file weekly
-and opens a PR when it changes. Until that workflow has run for the first time,
-this file carries exactly the rows that were ACTUALLY EXERCISED, and says so for
-every other version rather than projecting a result. A matrix that lists an
-untested version with a verdict is worse than a short matrix.
+HAND-WRITTEN, except the section between the `engine-matrix:rows` markers,
+which `.github/workflows/engine-matrix.yml` renders weekly and publishes as the
+`support-matrix` artifact (a pull request only when the `ENGINE_MATRIX_OPEN_PR`
+repository variable is `true`). Everything else carries exactly the rows that
+were ACTUALLY EXERCISED, and says so for every other version rather than
+projecting a result. A matrix that lists an untested version with a verdict is
+worse than a short matrix.
 -->
 
 **Installing Logweir is [install.md](install.md)**, which leads with the engine
@@ -28,7 +30,7 @@ raises against that engine or against an operator that defaults to it.**
 |---|---|
 | `pass` | The full drill ran and passed. |
 | `pass-degraded` | The drill passed at a reduced integrity level (e.g. `consume-only`, because the KBAK decoder returned `Unsupported`). |
-| `fail(reason)` | The drill ran and did not pass, for the stated reason. |
+| `fail(reason)` | The drill ran and did not pass, for the stated reason. The weekly job also records these reasons, each derived from what ran (`scripts/engine-matrix-outcome.sh`): `fail(seed)` when the stack could not be seeded with that engine; `fail(build)` when `logweir` did not build; `fail(floor-not-enforced)` when a drill accepted an engine below the full-drill floor, or failed without Logweir's floor refusal; and `fail(setup)` when a step did not run, the tag did not resolve to a digest whose revision label is the tag's commit, or the broker the stack ran is not the one the row declares. |
 | `fail(lever-not-honoured)` | The engine accepted a lever and did not act on it. The deleted-segment positive control catches this: a **non-oldest** segment is removed from the live archive, so `validate-restore` must report it unrestorable and the drill must block at phase 5 with `outcome: preflight-failed` and exit 2. A version where the drill sails past lands here. The control is the e2e test `a_corrupted_segment_yields_exit_2_and_a_signed_preflight_failed_scorecard`. |
 | `unsupported(lever-absent)` | The engine predates a lever Logweir needs. Reported, never treated as a fault. |
 
@@ -48,11 +50,16 @@ so nobody quotes a projected verdict as a tested one.
 
 | Engine version | Status | Note |
 |---|---|---|
-| 0.20.x | **unsupported by the full-drill floor; no recorded run** | Matrix compatibility probes do not override the 0.21.0 runtime floor. |
-| 0.19.x (except v0.19.1, below) | **unsupported by the full-drill floor; no recorded run** | Same floor as 0.20.x. |
-| **v0.19.1** | **`unsupported (lever-absent)`, by inspection — not by a run** | This is `strimzi-backup-operator`'s hard-coded `DEFAULT_BACKUP_IMAGE` [VERIFIED-SPEC `U/strimzi-backup-operator/src/engine.rs:17`]. It predates **both** levers and is **below** the 0.21.0 full-drill floor, so it **can never be green** and the matrix job runs it against a reduced row set (restore succeeds, `pass-degraded`, `integrity.level: consume-only`) rather than the full one. An operator whose default has not caught up — not a fault. |
+| **0.22.0** | **evaluated, not the shipped pin; no weekly row recorded yet** | Upstream's current release (2026-09-07). PROD-00.1 ran it against the compose stack (Kafka 3.7.1, the `linux/amd64` image `sha256:1c3432c9399dbdd59fea7b6cf386135656a73bb6dd60841212ddbfe5ba26b1fe` under emulation, 2026-09-29). The demo drill scored `outcome: pass` and `integrity: byte-fingerprint/pass` (150/150), and both verifiers returned VALID. `just pitr` passed (six of nine records, boundary included). The `.kbak` fixture tests passed on 0.22.0 bytes. `doctor` refuses it, because it accepts exactly 0.21.0. Moving the pin is proposed as PROD-00.3f, subject to OD-3 ([decision record](to-do/decisions/PROD-00-engine-route.md) §4). Its `path_style` change does **not** make VirtualHosted addressing with a custom endpoint possible, so that refusal stays. It also newly treats an `http://` endpoint as `allow_http: true`. |
+| 0.20.x | **unsupported by the full-drill floor** | Matrix compatibility probes do not override the 0.21.0 runtime floor. The weekly job runs v0.20.0 as a below-floor row. |
+| 0.19.x | **unsupported by the full-drill floor** | Same floor as 0.20.x. v0.19.2 is the `kafka-backup-core` that `kafka-backup-operator` 1.3.0 links as a library (its `Cargo.lock`). v0.19.1 is the default of `strimzi-backup-operator` v0.2.22–v0.2.25; v0.2.21 defaulted to v0.19.0. Engines before 0.21 write no segment sha256, so a drill over an archive one of them wrote reports `integrity.result: partial`, never `pass`. Measured on 2026-09-29 over a v0.19.2 archive, drilled with the pinned engine: `outcome: fail-integrity`, `integrity: byte-fingerprint/partial`, exit 2, and both verifiers VALID. Logweir refuses to drive a below-floor engine itself: v0.19.2 as the restore engine exits 1 with "ignored the config key `restore.header_preflight` that logweir rendered; this tag is below the declared floor". The weekly job runs v0.19.2 and v0.19.1 as below-floor rows, which record `unsupported (lever-absent)` and are never a fault. |
 | 0.16.0 – 0.18.x | **unsupported**, by floor | Below the full-drill floor; only the unknown-key warning mechanism works. |
 | < 0.16.0 | **unsupported (lever-absent)**, by floor | The warning mechanism this project depends on does not exist. |
+
+`strimzi-backup-operator` has defaulted to engine **v0.22.0** since its v0.3.0
+(2026-09-07, `DEFAULT_BACKUP_IMAGE` in its `src/engine.rs`). An earlier
+revision of this page said its default was v0.19.1, which is true only of its
+v0.2.22–v0.2.25 releases.
 
 ## Authentication modes, and what each one has actually been run against
 
@@ -66,7 +73,7 @@ brokers when the `e2e` feature and its infrastructure are enabled.
 | `plaintext` (default) | `security.protocol: PLAINTEXT` | no `security:` block rendered — the engine's own default | **Yes**, by the 0.21.0 row above and by every e2e drill. |
 | `scramSha512`, `tls: false` | `security.protocol: SASL_PLAINTEXT`, `sasl.mechanism: SCRAM-SHA-512` | `security_protocol: SASL_PLAINTEXT`, `sasl_mechanism: SCRAM-SHA512` | **Automated e2e coverage exists.** `e2e/tests/scram.rs` exercises Logweir's librdkafka client and engine-backed backups against the Compose SCRAM listeners, plus an in-cluster pod. It requires the live stack and Kubernetes; it is not part of the default unit suite or an additional result row above. |
 | `scramSha512`, `tls: true` | `security.protocol: SASL_SSL` | `security_protocol: SASL_SSL` | **Exercised on docker-desktop, not in CI.** The compose stack speaks no TLS, so no automated e2e row covers it; PLAT-07.1's live run (2026-09-16, an in-namespace broker with a private CA) succeeded with `KafkaCluster.spec.auth.tlsCa` and failed at the handshake — never a plaintext dial — without the CA or with the wrong one. `auth.tlsCa` hands one CA file to both trust stores (Global Constraint 29; [kubernetes.md](kubernetes.md) §20.2). |
-| OAUTHBEARER / MSK IAM | `AuthConfig::Token` — constructing it returns an error | not rendered | **Not in tag 1.** |
+| OAUTHBEARER / MSK IAM | `AuthConfig::Token` — constructing it returns an error | not rendered. The engine's YAML offers only PLAIN, SCRAM-SHA-256/512 and GSSAPI; other mechanisms need a programmatic plugin its CLI does not expose ([PROD-00.1](to-do/decisions/PROD-00-engine-route.md) C9) | **Not in tag 1.** |
 
 **Nothing here is an MSK row.** `[UNVERIFIED — needs an MSK cluster]`: MSK
 holds SCRAM credentials in AWS Secrets Manager and requires TLS on its
@@ -165,12 +172,44 @@ beforehand ([kubernetes.md §21.5](kubernetes.md)).
 | local filesystem (standalone CLI) | **Supported, measured in process** |
 | `AWS_CONDITIONAL_PUT=disabled`, or an S3-compatible store that ignores `If-None-Match` | **Unsupported** — refused, never silently accepted |
 
-## What the weekly job will add
+## The weekly engine-matrix job
 
-`.github/workflows/engine-matrix.yml` runs the full compose drill against each
-tag in the declared window — the newest four minors plus `v0.19.1` — records one
-of the five outcomes, and opens a PR when this file changes. It also carries the
-deleted-segment positive control described above.
+`.github/workflows/engine-matrix.yml` runs every Monday, and on demand, over a
+declared set of rows: the newest four engine minors (`v0.22.0`, `v0.21.0`,
+`v0.20.0`, `v0.19.2`), `v0.19.1` (the default of `strimzi-backup-operator`
+v0.2.22–v0.2.25), and the pinned engine once more on the newest supported
+Apache Kafka line (`KAFKA_VERSION`). Each row does the following:
+
+- pins the tag to a digest whose revision label is the tag's commit;
+- sets the stack up and runs the suite exactly as the CI e2e job does
+  (`just e2e-up`, then `cargo test --locked -p e2e --features e2e`);
+- reads back the version the running broker logged, which is what the Kafka
+  broker column records;
+- runs the deleted-segment positive control;
+- reads back what the broker's time-retention check deleted during the run.
+  A failed suite's evidence names it, because a test fixture stamped older
+  than the broker's retention can lose its records to that check before the
+  capture;
+- records one of the outcomes above.
+
+A row is green only when it records the outcome it declares, and a row whose
+broker differs from its declaration fails. Rows below the full-drill floor seed
+with segment digests optional, because those engines write none. They record
+`unsupported(lever-absent)` only when Logweir is seen refusing the engine
+("below the declared floor") in both the reduced row and the control.
+
+The job renders its rows between the two markers below and changes nothing else
+in this file. It publishes the page as the `support-matrix` artifact and in the
+run summary, and opens a pull request only when the repository variable
+`ENGINE_MATRIX_OPEN_PR` is `true`: GitHub Actions may not create pull requests
+in this repository (checked 2026-09-28).
+
+<!-- engine-matrix:rows:begin -->
+No repaired run has been published here yet. The three scheduled runs before
+the repair (2026-09-14, 2026-09-21 and 2026-09-28) produced no usable row; the
+[engine route decision record](to-do/decisions/PROD-00-engine-route.md) says
+why.
+<!-- engine-matrix:rows:end -->
 
 Filter-based checks use `scripts/run-named-tests.sh`, which resolves test
 names against `--list` and fails if a requested test does not exist. A bare

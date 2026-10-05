@@ -215,6 +215,7 @@
 //! by `a_failing_engine_validation_run_never_fails_or_aborts_the_drill`
 //! (`verify_phase.rs`).
 use crate::drill::DrillError;
+use logweir_core::backup_receipt::{ConfigCoverage, SourceConfigCoverage};
 use logweir_core::engine::{
     expected_restored_count, BackupSetFacts, DataEngine, EngineError, EngineRun, RecordFingerprint,
     RestorePlan, SampleSelection, SegmentFacts,
@@ -1185,11 +1186,34 @@ fn verdict_for_selection(
 /// topic and found no divergence" — this build has already shipped that
 /// exact bug once (a drift checker that reported agreement having compared
 /// nothing) and must not ship it again here.
+///
+/// # FX-4: parity is ASSESSED only where the capture was
+///
+/// The same "agreement over nothing", one layer down: a source whose
+/// DescribeConfigs was DENIED at capture has `configurations: {}` in the
+/// manifest, and comparing a restored topic against that empty record
+/// reported no divergence. So every mapped topic whose source coverage (from
+/// the verified receipt, `coverage`) is not `captured` is named in
+/// `not_assessed` as `"<target>: configuration (<coverage>)"` — `unknown`
+/// when the plan binds no recovery point or the receipt predates 1.1.0.
+///
+/// A refused read of the TARGET's configuration is the same defect on the
+/// other side (rdkafka 0.36.2 used to hand it back as an empty map, T13): it
+/// is named `"<target>: configuration (targetReadDenied)"` and the topic's
+/// configuration keys are not compared at all, instead of every source key
+/// being reported as an unexpected divergence.
+///
+/// The archive's OWN record is still compared wherever the target was read:
+/// a difference it shows is a fact whatever the coverage. What a `not_assessed`
+/// entry withdraws is the SILENCE — "no divergence" for that topic proves
+/// nothing. Partition count and replication factor come from metadata, not
+/// from DescribeConfigs, and are classified either way.
 fn classify_parity_all(
     facts: &BackupSetFacts,
     reader: &dyn ClusterReader,
     mapping: &BTreeMap<String, String>,
     plan: &RestorePlan,
+    coverage: &SourceConfigCoverage,
 ) -> Result<TopicParity, DrillError> {
     if mapping.is_empty() {
         return Err(DrillError::Operational(
@@ -1200,20 +1224,45 @@ fn classify_parity_all(
     }
     let mut intended_all = Vec::new();
     let mut unexpected_all = Vec::new();
+    let mut not_assessed = Vec::new();
     for (src, tgt) in mapping {
         let Some(t) = facts.topics.iter().find(|t| &t.name == src) else {
             return Err(DrillError::Operational(format!(
                 "topic parity check: no archive facts for mapped source topic `{src}`"
             )));
         };
-        let target_cfg = reader.topic_configs(tgt)?;
+        // A REFUSED target read is a recorded fact, not an empty configuration
+        // and not an aborted drill; any other failure is operational as before.
+        let target_cfg = match reader.topic_configs(tgt) {
+            Ok(cfg) => Some(cfg),
+            Err(logweir_kafka::reader::KafkaError::NotAuthorized(_)) => None,
+            Err(other) => return Err(other.into()),
+        };
         let tgt_partitions = reader.end_offsets(tgt)?.len() as i32;
         let tgt_rf = plan.default_replication_factor;
         let src_partitions = t.original_partition_count.unwrap_or(tgt_partitions);
         let src_rf = t.source_replication_factor.unwrap_or(tgt_rf);
+        let why = match (coverage.of(src), &target_cfg) {
+            (ConfigCoverage::Captured, Some(_)) => None,
+            (ConfigCoverage::Captured, None) => Some(NOT_ASSESSED_TARGET_READ_DENIED),
+            (source, _) => Some(source.wire_name()),
+        };
+        if let Some(why) = why {
+            not_assessed.push(format!("{tgt}: configuration ({why})"));
+            // The fail-safe twin in the array every reader already shows
+            // (review M5): a reader that predates `not_assessed` must never
+            // see this topic's silence as parity.
+            unexpected_all.push(not_assessed_marker(tgt, why));
+        }
+        let unread = BTreeMap::new();
+        let (source_cfg, target_cfg) = match &target_cfg {
+            Some(cfg) => (&t.configurations, cfg),
+            // Nothing to compare the archive's record against.
+            None => (&unread, &unread),
+        };
         let (intended, unexpected) = classify_parity(
-            &t.configurations,
-            &target_cfg,
+            source_cfg,
+            target_cfg,
             src_partitions,
             tgt_partitions,
             src_rf,
@@ -1224,10 +1273,39 @@ fn classify_parity_all(
     }
     intended_all.sort();
     unexpected_all.sort();
+    not_assessed.sort();
     Ok(TopicParity {
         intentionally_deviated: intended_all,
         unexpected_divergence: unexpected_all,
+        // `Some`, always, from here: phase 7 RAN, so "every topic assessed"
+        // (`Some([])`) is a claim this function can make, and absent stays the
+        // spelling of "not recorded".
+        not_assessed: Some(not_assessed),
     })
+}
+
+/// The `not_assessed` reason for a topic whose SOURCE configuration was
+/// captured but whose TARGET configuration read was refused (FX-4, T13).
+pub const NOT_ASSESSED_TARGET_READ_DENIED: &str = "targetReadDenied";
+
+/// The entry phase 7 ALSO writes into `unexpected_divergence` for every topic
+/// it names in `not_assessed` (FX-4 fix round, review M5).
+///
+/// **Why.** `not_assessed` is new in format 1.1.0, so a reader that predates it
+/// — `verify_scorecard.py` 1.14.0, a `logweir drill show` or a person reading
+/// the JSON with a pre-FX-4 guide — sees only the two arrays it always had,
+/// and reads an empty `unexpected_divergence` as configuration parity. For a
+/// topic whose TARGET read was refused, the writer before FX-4 listed every
+/// source override there (it compared against an empty map, T13): noisy but
+/// fail-safe. Without this entry FX-4 would have turned that into silence.
+///
+/// **Shape.** `"<target topic>: configuration not assessed (<why>)"`, where
+/// `<why>` is the `not_assessed` reason. A configuration key never contains a
+/// space, so a reader that parses `"<topic>: <key>"` entries can tell this
+/// one apart; the authoritative list stays `not_assessed`.
+#[must_use]
+pub fn not_assessed_marker(target_topic: &str, why: &str) -> String {
+    format!("{target_topic}: configuration not assessed ({why})")
 }
 
 /// Wraps `DataEngine::validation_run` — see that method's doc comment
@@ -1424,6 +1502,7 @@ fn check_restored_count(
 /// the whole ledger to `roll_up`, which is the single place `IntegrityResult`
 /// is decided. There is no `result` variable here to initialise to `Pass` and
 /// forget to move.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     engine: &dyn DataEngine,
     reader: &dyn ClusterReader,
@@ -1432,6 +1511,7 @@ pub fn run(
     sel: &[SampleSelection],
     mapping: &BTreeMap<String, String>,
     plan: &RestorePlan,
+    coverage: &SourceConfigCoverage,
 ) -> Result<VerifyOutcome, DrillError> {
     // OSO's own rule, adopted throughout this codebase (phase4_sample's own
     // empty-candidates guard is the precedent): zero selections scanned is
@@ -1528,8 +1608,9 @@ pub fn run(
     // `records_restored_is_the_consumed_count_not_matched_plus_mismatched`.
     let records_restored: u64 = verdicts.iter().map(|v| v.records_restored).sum();
 
-    // (d) Topic-config parity.
-    let topic_parity = classify_parity_all(facts, reader, mapping, plan)?;
+    // (d) Topic-config parity — ASSESSED only where the verified receipt says
+    // the source configuration was captured (FX-4).
+    let topic_parity = classify_parity_all(facts, reader, mapping, plan, coverage)?;
 
     Ok(VerifyOutcome {
         integrity,
@@ -2938,7 +3019,14 @@ mod tests {
         }
         let facts = facts_one_segment();
         let plan = test_plan();
-        let err = classify_parity_all(&facts, &Unreachable, &BTreeMap::new(), &plan).unwrap_err();
+        let err = classify_parity_all(
+            &facts,
+            &Unreachable,
+            &BTreeMap::new(),
+            &plan,
+            &SourceConfigCoverage::unknown(),
+        )
+        .unwrap_err();
         assert!(matches!(err, DrillError::Operational(_)));
         assert!(err.to_string().contains("zero mapped topics"));
     }
@@ -3005,7 +3093,14 @@ mod tests {
         let plan = test_plan();
         let mut mapping = BTreeMap::new();
         mapping.insert("payments".to_string(), "drill-payments".to_string());
-        let err = classify_parity_all(&facts, &Unreachable, &mapping, &plan).unwrap_err();
+        let err = classify_parity_all(
+            &facts,
+            &Unreachable,
+            &mapping,
+            &plan,
+            &SourceConfigCoverage::unknown(),
+        )
+        .unwrap_err();
         assert!(matches!(err, DrillError::Operational(_)));
         assert!(err.to_string().contains("no archive facts"));
     }

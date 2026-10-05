@@ -3187,3 +3187,101 @@ fn the_reconciler_reads_one_clock_in_one_place() {
         assert!(!code.contains(forbidden));
     }
 }
+
+/// **FX-2's class sweep: `TopicDiscovery.spec.request.timeoutSeconds`**, "the
+/// in-Job Kafka budget". The Job-shape row above uses 60 — the field's own
+/// default — so a controller that ignored the request and used the default
+/// passed it. A non-default budget reaches the plan the runner enforces AND
+/// the Job's `activeDeadlineSeconds` (budget plus the pod-start margin).
+///
+/// MUTANTS: the Job's `timeout_seconds` or the plan's `timeout_seconds` set
+/// from `DEFAULT_TIMEOUT_SECONDS` instead of the request.
+#[tokio::test]
+async fn a_discoverys_own_budget_reaches_its_plan_and_its_job_deadline() {
+    let (client, _recorder, bodies) = mock_client_recording_bodies(start_routes(vec![]));
+    let request = discovery(json!({}), json!({"timeoutSeconds": 200}));
+    assert_eq!(request.spec.request.timeout_seconds, 200);
+    td::reconcile_discovery(&request, &context(client, None))
+        .await
+        .expect("the reconcile answers");
+    let cm = body_of(&bodies, "POST", "/configmaps");
+    let raw = cm["data"][cjob::CHECK_PLAN_KEY]
+        .as_str()
+        .expect("the plan document is a string in `data`")
+        .to_string();
+    let document: CheckPlan = serde_json::from_str(&raw).expect("the plan parses strictly");
+    assert_eq!(document.timeout_seconds, 200, "the runner's own budget");
+    let job = body_of(&bodies, "POST", "/jobs");
+    assert_eq!(
+        job["spec"]["activeDeadlineSeconds"],
+        json!(200 + cjob::DEADLINE_MARGIN_SECONDS),
+        "the Job's bound is the request's budget plus the pod-start margin"
+    );
+}
+
+/// **FX-2's class sweep: `TopicDiscovery.spec.request.maxTopics`**, "the
+/// ceiling on returned entries", which reaches the plan the runner enforces.
+/// Every reconcile row used 20,000 — the field's own default — so a plan
+/// rendered from the default instead of the request passed them all.
+///
+/// MUTANT: `effective_max_topics(DEFAULT_MAX_TOPICS, …)` where the plan is
+/// rendered, ignoring the request.
+#[tokio::test]
+async fn a_discoverys_own_topic_ceiling_reaches_its_plan() {
+    let (client, _recorder, bodies) = mock_client_recording_bodies(start_routes(vec![]));
+    let request = discovery(json!({}), json!({"maxTopics": 500}));
+    td::reconcile_discovery(&request, &context(client, None))
+        .await
+        .expect("the reconcile answers");
+    let cm = body_of(&bodies, "POST", "/configmaps");
+    let raw = cm["data"][cjob::CHECK_PLAN_KEY]
+        .as_str()
+        .expect("the plan document is a string in `data`")
+        .to_string();
+    let document: CheckPlan = serde_json::from_str(&raw).expect("the plan parses strictly");
+    let CheckRequest::TopicInventory(inventory) = &document.request else {
+        panic!("a discovery renders a topicInventory request, got {document:?}");
+    };
+    assert_eq!(
+        inventory.max_topics, 500,
+        "the runner relays at most the request's own ceiling"
+    );
+}
+
+/// **FX-2's class sweep: `TopicDiscovery.spec.request.includeInternal` and
+/// `expectedTopics`**, what the runner lists and what it reports missing. Both
+/// reach only the plan the runner enforces, and every reconcile row left them
+/// at their defaults (`false`, absent), so a plan rendered without them passed
+/// them all.
+///
+/// MUTANTS: `include_internal: false` / `expected_topics: Vec::new()` where the
+/// plan is rendered, ignoring the request.
+#[tokio::test]
+async fn a_discoverys_own_topic_selection_reaches_its_plan() {
+    let (client, _recorder, bodies) = mock_client_recording_bodies(start_routes(vec![]));
+    let request = discovery(
+        json!({}),
+        json!({"includeInternal": true, "expectedTopics": ["orders", "payments"]}),
+    );
+    td::reconcile_discovery(&request, &context(client, None))
+        .await
+        .expect("the reconcile answers");
+    let cm = body_of(&bodies, "POST", "/configmaps");
+    let raw = cm["data"][cjob::CHECK_PLAN_KEY]
+        .as_str()
+        .expect("the plan document is a string in `data`")
+        .to_string();
+    let document: CheckPlan = serde_json::from_str(&raw).expect("the plan parses strictly");
+    let CheckRequest::TopicInventory(inventory) = &document.request else {
+        panic!("a discovery renders a topicInventory request, got {document:?}");
+    };
+    assert!(
+        inventory.include_internal,
+        "the runner lists internal topics because the request asked: {inventory:?}"
+    );
+    assert_eq!(
+        inventory.expected_topics,
+        vec!["orders".to_string(), "payments".to_string()],
+        "the runner reports against the request's own expected set"
+    );
+}

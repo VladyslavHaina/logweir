@@ -140,40 +140,42 @@ spec:
                 type: string
               runnerResources:
                 description: |-
-                  What the runner pod asks for and is capped at.
+                  What the runner pod asks for and is capped at: the runner container's `resources`, exactly as written.
+
+                  Checked before anything is read or created. A value outside the bounds (whole millicores and bytes, at most 4 CPUs and 8Gi, a memory limit of at least 32Mi, no zero limit, no request above its limit) ends this object `Failed` with reason `ExecutionSpecInvalid` and creates no Job; it is refused, never clamped. Absent, the runner states no resources and the namespace's `LimitRange` defaults apply. A `ResourceQuota` or `LimitRange` that rejects the pod is reported as `RunnerReady=False`, reason `PodCreationForbidden`. Not part of `planBytes`, so not what an approver signs; immutable like the rest of `spec`.
 
                   ON THE SPEC, NOT ON AN ANNOTATION, because the rule is that a Job's shape is a function of the object. It is also what keeps `scratch_mode_and_new_topic_mode_produce_the_same_job_shape` true: resources come from here and never from the target mode.
                 nullable: true
                 properties:
                   limits:
-                    description: Limits.
+                    description: The runner container's `resources.limits`. A limit is never zero, and no request is above its limit.
                     nullable: true
                     properties:
                       cpu:
-                        description: CPU, as a Kubernetes quantity — `200m`, `2`, `1500m`. The **ceiling** (4) is the rehearsal controller's, not this pattern's.
+                        description: 'CPU, as a Kubernetes quantity — `200m`, `2`, `1500m`. A whole number of millicores, at most 4: the **ceiling** is the controller''s, not this pattern''s.'
                         maxLength: 20
                         nullable: true
                         pattern: ^[0-9]+(\.[0-9]+)?(([KMGTPE]i)|[numkMGTPE]|([eE][-+]?[0-9]+))?$
                         type: string
                       memory:
-                        description: Memory, as a Kubernetes quantity — `512Mi`, `2Gi`. The **ceiling** (8Gi) is the rehearsal controller's, not this pattern's.
+                        description: 'Memory, as a Kubernetes quantity — `512Mi`, `2Gi`. A whole number of bytes (`100m` is a tenth of a byte), at most 8Gi, and as a limit at least 32Mi: the **bounds** are the controller''s, not this pattern''s.'
                         maxLength: 20
                         nullable: true
                         pattern: ^[0-9]+(\.[0-9]+)?(([KMGTPE]i)|[numkMGTPE]|([eE][-+]?[0-9]+))?$
                         type: string
                     type: object
                   requests:
-                    description: Requests.
+                    description: The runner container's `resources.requests`.
                     nullable: true
                     properties:
                       cpu:
-                        description: CPU, as a Kubernetes quantity — `200m`, `2`, `1500m`. The **ceiling** (4) is the rehearsal controller's, not this pattern's.
+                        description: 'CPU, as a Kubernetes quantity — `200m`, `2`, `1500m`. A whole number of millicores, at most 4: the **ceiling** is the controller''s, not this pattern''s.'
                         maxLength: 20
                         nullable: true
                         pattern: ^[0-9]+(\.[0-9]+)?(([KMGTPE]i)|[numkMGTPE]|([eE][-+]?[0-9]+))?$
                         type: string
                       memory:
-                        description: Memory, as a Kubernetes quantity — `512Mi`, `2Gi`. The **ceiling** (8Gi) is the rehearsal controller's, not this pattern's.
+                        description: 'Memory, as a Kubernetes quantity — `512Mi`, `2Gi`. A whole number of bytes (`100m` is a tenth of a byte), at most 8Gi, and as a limit at least 32Mi: the **bounds** are the controller''s, not this pattern''s.'
                         maxLength: 20
                         nullable: true
                         pattern: ^[0-9]+(\.[0-9]+)?(([KMGTPE]i)|[numkMGTPE]|([eE][-+]?[0-9]+))?$
