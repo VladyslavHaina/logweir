@@ -842,7 +842,7 @@ const FOLLOWED: &[Followed] = &[
         )),
         proof: Some((
             "configured_values.rs",
-            "the_installation_policys_manual_backup_ceiling_queues_the_second_run",
+            "the_installation_policys_manual_backup_ceiling_admits_the_sixth_run",
         )),
     },
     Followed {

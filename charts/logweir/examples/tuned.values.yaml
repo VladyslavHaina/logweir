@@ -19,14 +19,16 @@
 #     controller Deployment's own environment, so `controller.*` and
 #     `archive.s3.*` are followed through the env to the code that reads it.
 #
-# Several numbers are deliberately tiny so a test reaches them with one or two
-# objects. `allowUnverifiedCustomCa: true` and `allowHttp: true` are the unsafe
+# Every number differs from its default AND from every other number here, so
+# two values the template swapped are visible (two with equal defaults are not,
+# in a default render). Several are deliberately tiny so a test reaches them
+# with one or two objects. `allowUnverifiedCustomCa: true` and `allowHttp: true` are the unsafe
 # directions of two switches, set here because a test of a switch must move it.
 checks:
   maxActivePerNamespace: 1
   maxActiveTotal: 19
-  maxActiveDiscoveriesPerConnection: 2
-  maxEvidenceFetchActivePerNamespace: 1
+  maxActiveDiscoveriesPerConnection: 3
+  maxEvidenceFetchActivePerNamespace: 5
   discovery:
     freshSeconds: 60
     retentionSeconds: 180
@@ -44,10 +46,10 @@ checks:
         statement: >-
           FX-10 fixture: a document shape, not an attestation anybody made
   preflight:
-    retentionSeconds: 60
+    retentionSeconds: 90
 runs:
-  maxManualBackupsActivePerNamespace: 1
-  maxManualRestoresActivePerNamespace: 3   # distinct from the backups' 1 and the default 2
+  maxManualBackupsActivePerNamespace: 6    # RAISED: five running, the sixth starts
+  maxManualRestoresActivePerNamespace: 8
 controller:
   failFastSeconds: 120
   jobTtlSeconds: 7200

@@ -6923,10 +6923,10 @@ data:
   policy.json: |-
     {
       "checks": {
-        "maxActiveDiscoveriesPerConnection": 2,
+        "maxActiveDiscoveriesPerConnection": 3,
         "maxActivePerNamespace": 1,
         "maxActiveTotal": 19,
-        "maxEvidenceFetchActivePerNamespace": 1
+        "maxEvidenceFetchActivePerNamespace": 5
       },
       "discovery": {
         "defaultMaxTopics": 100,
@@ -6968,11 +6968,11 @@ data:
       },
       "preflight": {
         "defaultTimeoutSeconds": 120,
-        "retentionSeconds": 60
+        "retentionSeconds": 90
       },
       "runs": {
-        "maxManualBackupsActivePerNamespace": 1,
-        "maxManualRestoresActivePerNamespace": 3
+        "maxManualBackupsActivePerNamespace": 6,
+        "maxManualRestoresActivePerNamespace": 8
       },
       "version": 1
     }

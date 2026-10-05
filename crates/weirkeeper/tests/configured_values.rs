@@ -322,7 +322,7 @@ fn preflight_routes(document: String, delete: bool) -> Vec<Route> {
             body: json!({
                 "apiVersion": "logweir.dev/v1alpha1", "kind": "PreflightList",
                 "metadata": {"resourceVersion": "9"},
-                // Expired TWO MINUTES before `now`: past the tuned 60 s,
+                // Expired TWO MINUTES before `now`: past the tuned 90 s,
                 // inside the default 3 600 s.
                 "items": [listed_preflight("pf-old", "uid-old", now_pf() - Duration::minutes(2))]
             })
@@ -376,7 +376,7 @@ async fn deletes_after_one_pass(document: String, delete: bool) -> Vec<String> {
 /// collector.**
 ///
 /// A terminal `Preflight` whose verdict expired two minutes ago is collected
-/// under the chart's tuned 60 s window. CONTROL: served the DEFAULT render's
+/// under the chart's tuned 90 s window. CONTROL: served the DEFAULT render's
 /// document (3 600 s), the same pass deletes nothing — and its route table
 /// holds no `DELETE`, so a deletion would panic the double.
 ///
@@ -538,63 +538,54 @@ async fn pooled_pass(
 /// **FX-10: `runs.maxManualBackupsActivePerNamespace` reaches the manual-run
 /// gate — environment, `ConfigMap`, ceiling, queue.**
 ///
-/// One manual `Backup` is running; a second arrives. Under the chart's tuned
-/// ceiling of ONE the second is `Queued` with `queue.limit: 1` and nothing
-/// created. CONTROL: served the default document (four), the same pass admits
-/// it and creates its Job. P10's live proof ran only at the defaults (release
-/// notes item 15), so before this row a gate that ignored the policy and used
-/// four passed everything.
+/// Five manual `Backup`s are running and a sixth arrives. The chart's tuned
+/// document RAISES the ceiling to six, so the sixth is admitted and its Job is
+/// created. CONTROL: served the default document (four), the same pass queues
+/// it — `queue.limit: 4`, nothing created. P10's live proof ran only at the
+/// defaults (release-notes item 15), so before this row a gate that ignored
+/// the policy and used four passed everything.
 ///
 /// MUTANT: `crate::run_pool::ceiling(PoolKind::Backup, &Policy::defaults())`
 /// at the gate, or `4` inside `ceiling`.
 #[tokio::test]
-async fn the_installation_policys_manual_backup_ceiling_queues_the_second_run() {
+async fn the_installation_policys_manual_backup_ceiling_admits_the_sixth_run() {
     tuned_environment();
-    let first = with_status_patch(
-        &manual(
-            "logweir-manual-a",
-            "00000000-0000-4000-8000-0000000000a1",
-            utc(16, 0, 0),
-        ),
-        &json!({"status": {"phase": "Running", "jobRef": {"name": "logweir-manual-a"}}}),
+    let running: Vec<Backup> = (0..5u32)
+        .map(|i| {
+            let name = format!("logweir-manual-r{i}");
+            with_status_patch(
+                &manual(
+                    &name,
+                    &format!("00000000-0000-4000-8000-0000000000a{i}"),
+                    utc(16, 0, i),
+                ),
+                &json!({"status": {"phase": "Running", "jobRef": {"name": name}}}),
+            )
+        })
+        .collect();
+    let sixth = manual(
+        "logweir-manual-sixth",
+        "00000000-0000-4000-8000-0000000000b6",
+        utc(16, 0, 9),
     );
-    let second = manual(
-        "logweir-manual-b",
-        "00000000-0000-4000-8000-0000000000b2",
-        utc(16, 0, 1),
-    );
+    let mut peers = running;
+    peers.push(sixth.clone());
 
-    let seen = pooled_pass(
-        &second,
-        vec![first.clone(), second.clone()],
-        policy_json("tuned"),
-        utc(16, 30, 0),
-    )
-    .await;
+    let seen = pooled_pass(&sixth, peers.clone(), policy_json("tuned"), utc(16, 30, 0)).await;
     assert_eq!(
         posts(&seen, "/jobs"),
-        0,
-        "no Job while the tuned pool of one is full"
+        1,
+        "the tuned ceiling is six, so the sixth starts beside five"
     );
+
+    // CONTROL, an hour later so the process-wide cache holds nothing current.
+    let seen = pooled_pass(&sixth, peers, policy_json("default"), utc(17, 30, 0)).await;
+    assert_eq!(posts(&seen, "/jobs"), 0, "CONTROL: four may run, five do");
     assert_eq!(posts(&seen, "/configmaps"), 0, "and no plan");
     let statuses = patched_statuses(&seen);
     assert_eq!(statuses.len(), 1, "{statuses:?}");
     assert_eq!(statuses[0]["phase"], "Queued");
-    assert_eq!(statuses[0]["queue"], json!({"limit": 1}));
-
-    // CONTROL, an hour later so the process-wide cache holds nothing current.
-    let seen = pooled_pass(
-        &second,
-        vec![first, second.clone()],
-        policy_json("default"),
-        utc(17, 30, 0),
-    )
-    .await;
-    assert_eq!(
-        posts(&seen, "/jobs"),
-        1,
-        "CONTROL: four may run, so it starts"
-    );
+    assert_eq!(statuses[0]["queue"], json!({"limit": 4}));
 }
 
 /// **FX-10: `runs.maxManualRestoresActivePerNamespace` is the ceiling the
@@ -602,8 +593,8 @@ async fn the_installation_policys_manual_backup_ceiling_queues_the_second_run() 
 ///
 /// The restore gate's end-to-end pass needs `restore_controller.rs`'s approval
 /// and signing fixtures, so its half is held at the mapping both gates now
-/// share (`run_pool::ceiling`): the tuned document's restores (3) and backups
-/// (1) differ from each other and from their defaults (2 and 4), so a crossed
+/// share (`run_pool::ceiling`): the tuned document's restores (8) and backups
+/// (6) differ from each other and from their defaults (2 and 4), so a crossed
 /// or constant mapping fails. The restore gate is pinned to call it with
 /// `PoolKind::Restore` over the document it loaded.
 ///
@@ -612,8 +603,8 @@ async fn the_installation_policys_manual_backup_ceiling_queues_the_second_run() 
 #[test]
 fn the_installation_policys_manual_restore_ceiling_is_the_one_the_pool_applies() {
     let tuned = policy::parse(policy_json("tuned").as_bytes()).expect("the tuned document parses");
-    assert_eq!(weirkeeper::run_pool::ceiling(PoolKind::Restore, &tuned), 3);
-    assert_eq!(weirkeeper::run_pool::ceiling(PoolKind::Backup, &tuned), 1);
+    assert_eq!(weirkeeper::run_pool::ceiling(PoolKind::Restore, &tuned), 8);
+    assert_eq!(weirkeeper::run_pool::ceiling(PoolKind::Backup, &tuned), 6);
     assert_eq!(
         weirkeeper::run_pool::ceiling(PoolKind::Restore, &Policy::defaults()),
         2

@@ -890,11 +890,11 @@ fn planned_max_topics(bodies: &BodyRecorder) -> u32 {
 /// **FX-10: the installation policy's check ceilings and topic ceiling reach
 /// discovery admission and the plan — at the chart's tuned values.**
 ///
-/// The chart's tuned document says `maxActiveDiscoveriesPerConnection: 2`,
+/// The chart's tuned document says `maxActiveDiscoveriesPerConnection: 3`,
 /// `maxActivePerNamespace: 1` and `hardMaxTopics: 100`.
 ///
 /// * Beside ONE active discovery of this connection, a request is ADMITTED
-///   (two may run) and its plan is cut at 100 topics, although it asked for
+///   (three may run) and its plan is cut at 100 topics, although it asked for
 ///   20 000. CONTROL: the same objects under the compiled-in defaults
 ///   (`1` per connection) are QUEUED.
 /// * Beside ONE active interactive check in this namespace, a request is
@@ -915,7 +915,7 @@ async fn the_installation_policys_ceilings_reach_discovery_admission_and_the_pla
         .expect("the reconcile answers");
     assert!(
         outcome.created_job,
-        "two discoveries per connection may run, so the second is admitted: {outcome:?}"
+        "three discoveries per connection may run, so the second is admitted: {outcome:?}"
     );
     assert_eq!(
         planned_max_topics(&bodies),
