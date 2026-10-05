@@ -27,20 +27,29 @@ tested environments and the results are in
 
 ### Candidate record
 
-Fill every row for the exact candidate before the tag; a row left as `—` is an
-unrecorded fact, not a pass. A previous run does not validate new bytes.
+Fill every row for the exact candidate; a row left as `—` is an unrecorded
+fact, not a pass. A previous run does not validate new bytes. A tag does not
+rebuild the images — it gives the `sha-<commit>` publication `main` CI already
+made the version tag, unchanged — so the release dry run's `release.json`
+(workflow artifact `release-assets`) gives the image, chart and archive rows
+**before** the tag, and the release run's rows are added after it
+([the release checklist](tag1-checklist.md), *Cutting a release candidate*).
 
 | What | Value |
 |---|---|
-| Candidate commit | — |
+| Candidate commit (the tagged commit) | — |
 | Version tag | — |
-| CI run (`ci.yml`) for that commit | — |
-| Release run (`release.yml`) and release drill | — |
+| Publication commit (`release.json` `.images.publication`: the `sha-<commit>` images and chart the tag promotes) | — |
+| CI run (`ci.yml`) for the publication commit, its `publish` job green | — |
+| Release dry run (`release.yml` dispatched on the candidate) | — |
+| Release run (`release.yml` on the tag) and release drill | — |
 | Runner image digest (`linux/amd64`) | — |
 | Controller image digest (manifest list; amd64 and arm64) | — |
 | Console image digest (`logweir-console`) | — |
 | UI image digest (`logweir-ui`) | — |
-| `ui/` bundle, file by file | the output of the command below |
+| Chart (`logweir-chart` version, package sha256, OCI digest) | — |
+| CLI archives (three; `release.json` `.archives`, each with its sha256 and run-time needs) | — |
+| `ui/` bundle, file by file | the output of the command below, which the release asset `ui-files.sha256` also carries |
 | Kubernetes exercises run on this candidate (context, auth mode, storage, limits) | — |
 | Checks deliberately deferred, each with its reason | — |
 
@@ -855,6 +864,16 @@ policy or roster ([keys.md](keys.md)).
   `docker.io/vladyslavhaina/minio-mirror` and `mc-mirror` (AGPL-3.0). Replacing
   MinIO with a maintained, permissively licensed S3 server is an open task
   (REPLACE-MINIO), not started.
+- **The CLI archives' run-time needs.** The Linux archives are built in the
+  runner image's builder base (`rust:1.89-bookworm`), so they need what the
+  runner image installs: a glibc no newer than Debian 12's 2.36 by
+  construction (2.34 measured on the Linux arm64 archive built locally on
+  2026-10-05; each release's notes give its own), `libssl.so.3` and
+  `libsasl2.so.2`. A distribution whose SASL library has another soname
+  (`libsasl2.so.3` on RHEL and Fedora) builds from the checkout. The macOS
+  archive needs Homebrew's `openssl@3`. `logweir --version` prints the
+  workspace version (`0.1.0`), not the tag; `release.json` ties each archive
+  to its tag and commit.
 - **The product API's OpenAPI document is still `1.0.0-alpha.1`**, although the
   console image and the chart now consume it; ship and upgrade the console and
   the API together until the owner freezes it ([stability.md](stability.md)).

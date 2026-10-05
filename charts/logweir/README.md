@@ -965,9 +965,11 @@ default the controller falls back to when that variable is unset is still
 `IfNotPresent` / `Always` makes the controller refuse to start, because the API
 server would otherwise reject every runner Job it created.
 
-Main CI publishes all three images under `sha-<commit>`, `main` and `latest`
-after quality, backup/restore and image checks pass. Version releases publish
-version tags. See [the workflow guide](../../docs/gates.md) and the exact
+Main CI publishes the four images under `sha-<commit>`, `main` and `latest`
+after quality, backup/restore and image checks pass. A version release gives
+the tagged commit's `sha-<commit>` images the version tag (the same digests,
+not a rebuild) and publishes a chart whose four images are pinned by digest.
+See [the workflow guide](../../docs/gates.md) and the exact
 [Actions run](https://github.com/VladyslavHaina/logweir/actions) for digests.
 The UI also defaults to `ui.imagePullPolicy: Always`; use `Never` for an image
 loaded locally. Publishing a tag does not restart an existing Deployment.

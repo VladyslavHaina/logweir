@@ -643,7 +643,7 @@ Then remove `poc-secrets/` and, if you trusted it, the CA from your keychain.
 
 | Setting | In this profile | Production |
 |---|---|---|
-| Images and chart | one publication: the OCI chart and its four `sha-` tags (tags, not digests); upstream by digest | the same, or a release tag's chart (`--version <X.Y.Z>`); pin Logweir by digest (the publication's run summary lists them) if your registry policy requires immutability |
+| Images and chart | one publication: the OCI chart and its four `sha-` tags (tags, not digests); upstream by digest | the same, or a release's chart (`--version <X.Y.Z>`), which pins the four Logweir images by digest; pin a `sha-` publication by digest yourself (its run summary lists them) if your registry policy requires immutability |
 | Ingress controller | Traefik, 1 replica, routing the profile's namespaces only | **a maintained ingress controller** (Traefik, or another that is maintained), ≥ 2 replicas across nodes with a PDB, whose host claims are restricted to their owners (watched namespaces, or an admission policy on Ingress hosts); Gateway API with the same controller is an option later. ingress-nginx is retired and is not one |
 | TLS | cert-manager local CA; HSTS at the entry point | your CA or ACME issuer — only `issuers.yaml` and the Ingress annotation change |
 | Identity provider | Dex static users, bound by subject | your IdP (below), bound by group |
