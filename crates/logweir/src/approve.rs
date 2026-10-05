@@ -94,10 +94,12 @@ pub struct StandingArgs {
     /// operator learns it at minting time rather than from a Job that will not
     /// start.
     pub valid_days: i64,
-    /// `--issued-at`, optional. The approver's clock by default. Accepted so a
-    /// test can mint the SAME bytes twice; an operator has no reason to set
-    /// it, and a future `issuedAt` is refused by the runner's notBefore check
-    /// like any other.
+    /// `--issued-at`, optional. The approver's clock by default: the `now`
+    /// [`mint_standing`] is handed, which [`run`] reads from the wall clock.
+    /// Accepted so a test can mint the SAME bytes twice; an operator has no
+    /// reason to set it, and a future `issuedAt` is refused by the runner's
+    /// notBefore check like any other. It moves `issuedAt` only: the
+    /// already-expired refusal still judges the caller's `now`.
     pub issued_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
@@ -105,11 +107,21 @@ pub struct StandingArgs {
 /// runs no drill, touches no cluster and reaches no guard, so codes 2, 3 and 4
 /// — each of which makes a statement about a drill or an artifact — cannot
 /// honestly apply.
+///
+/// # The one clock read of `drill approve`
+///
+/// Global Constraint 1: the clock is read HERE, at the entry point, and handed
+/// down. [`mint`] stamps it as `approved_at`, and [`mint_standing`] defaults
+/// `issuedAt` to it and refuses a window that has already closed at it.
+/// Neither reads a clock of its own, so a test pins `now` and gets the same
+/// bytes and the same verdict on any date. Before FX-9 both did read one, and
+/// a fixture minted at a fixed instant failed on the day its window closed.
 pub fn run(args: &ApproveArgs) -> ExitCode {
+    let now = chrono::Utc::now();
     let minted = if args.standing.is_some() {
-        mint_standing(args)
+        mint_standing(args, now)
     } else {
-        mint(args)
+        mint(args, now)
     };
     match minted {
         Ok(summary) => {
@@ -125,7 +137,12 @@ pub fn run(args: &ApproveArgs) -> ExitCode {
 
 /// The signable half, separated so tests assert on the produced BYTES rather
 /// than on a process exit code.
-pub fn mint(args: &ApproveArgs) -> Result<String, String> {
+///
+/// `now` is the caller's clock, signed as `approved_at` ([`run`] passes the
+/// wall clock). It is an argument because it is not decoration: it is the
+/// approval's claimed signing time, which the trust lifecycle judges against
+/// the signing key's window (`logweir_core::trust::claimed_signing_time`).
+pub fn mint(args: &ApproveArgs, now: chrono::DateTime<chrono::Utc>) -> Result<String, String> {
     let spec_path = args.spec.as_ref().ok_or_else(|| {
         "--spec is required: a per-run approval binds the sha256 of a plan's exact bytes. \
          (A standing rehearsal authorization binds a SCOPE instead — see --standing.)"
@@ -164,11 +181,11 @@ pub fn mint(args: &ApproveArgs) -> Result<String, String> {
         approver: args.approver.clone(),
         ticket: args.ticket.clone(),
         plan_hash: plan_hash.clone(),
-        // The approver's clock at the moment they approved. `drill run` does
-        // NOT measure RTO from this — it measures from the moment phase 1
-        // validated the signature — so a skewed approver clock cannot inflate
-        // or deflate a measured objective.
-        approved_at: chrono::Utc::now(),
+        // The approver's clock at the moment they approved: `now`, read by
+        // `run` and never here. `drill run` does NOT measure RTO from this —
+        // it measures from the moment phase 1 validated the signature — so a
+        // skewed approver clock cannot inflate or deflate a measured objective.
+        approved_at: now,
         // INSIDE THE SIGNED BYTES. `payload` below is what `sign_detached`
         // covers, and this struct is what `payload` is serialised from, so
         // the kind is bound by the signature. Writing it into the SIDECAR
@@ -233,7 +250,18 @@ pub fn mint(args: &ApproveArgs) -> Result<String, String> {
 /// binds a SCOPE, so one signature covers every slot of one schedule and the
 /// controller and runner each prove `plan ∈ scope` per run. `--spec` is
 /// therefore refused here.
-pub fn mint_standing(args: &ApproveArgs) -> Result<String, String> {
+///
+/// # `now` is an argument (Global Constraint 1)
+///
+/// The caller's clock: [`run`] passes the wall clock, and a test passes a fixed
+/// instant. It is `issuedAt` when `--issued-at` is absent, and it is the
+/// instant the already-expired refusal judges. Nothing here reads a clock, so
+/// a document minted at a fixed instant mints the same bytes on every date,
+/// and the refusal is decided by the instant the caller names.
+pub fn mint_standing(
+    args: &ApproveArgs,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<String, String> {
     use logweir_core::execution_contract as wire;
 
     let standing = args
@@ -347,7 +375,7 @@ pub fn mint_standing(args: &ApproveArgs) -> Result<String, String> {
         // The PATH, never the contents.
         .map_err(|e| format!("{}: {e}", args.key.display()))?;
 
-    let issued_at = standing.issued_at.unwrap_or_else(chrono::Utc::now);
+    let issued_at = standing.issued_at.unwrap_or(now);
     let doc = wire::StandingAuthorization {
         format_version: wire::STANDING_AUTHORIZATION_FORMAT_VERSION.to_string(),
         kind: wire::STANDING_AUTHORIZATION_KIND.to_string(),
@@ -369,8 +397,10 @@ pub fn mint_standing(args: &ApproveArgs) -> Result<String, String> {
     // enough in the past it would happily sign something every reader refuses.
     // The header promises this command refuses what the cluster would refuse;
     // this is the line that keeps that true for the one flag that can move the
-    // window out from under it.
-    let now = chrono::Utc::now();
+    // window out from under it. It judges the CALLER's `now` (the wall clock
+    // from `run`), never a clock read here: FX-9's defect was exactly that
+    // read, which made a fixture minted at a fixed instant fail on the day
+    // its window closed.
     if doc.expires_at <= now {
         return Err(format!(
             "the authorization would expire at {} and it is now {}: --issued-at {} plus \
@@ -446,9 +476,11 @@ pub struct CountersignArgs {
     pub out: PathBuf,
 }
 
-/// [`countersign`], as a process exit code.
+/// [`countersign`], as a process exit code. The one clock read of
+/// `drill countersign` (Global Constraint 1): the wall clock, read here and
+/// handed to [`countersign`] as `now`.
 pub fn run_countersign(args: &CountersignArgs) -> ExitCode {
-    match countersign(args) {
+    match countersign(args, chrono::Utc::now()) {
         Ok(summary) => {
             print!("{summary}");
             ExitCode::Ok
@@ -480,10 +512,18 @@ pub fn run_countersign(args: &CountersignArgs) -> ExitCode {
 /// console signed and the bytes the `Approval` will carry. Parsing is only for
 /// the summary and the refusals above.
 ///
+/// # `now` is an argument (Global Constraint 1)
+///
+/// The instant the `expiresAt` refusal judges: [`run_countersign`] passes the
+/// wall clock, and a test passes a fixed instant. Nothing here reads a clock.
+///
 /// # Errors
 ///
 /// A message naming the file or the refusal.
-pub fn countersign(args: &CountersignArgs) -> Result<String, String> {
+pub fn countersign(
+    args: &CountersignArgs,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<String, String> {
     use logweir_core::approval_policy::{
         ApprovalMode, RestoreAuthorization, PAYLOAD_TYPE_RESTORE_AUTHORIZATION,
     };
@@ -500,7 +540,7 @@ pub fn countersign(args: &CountersignArgs) -> Result<String, String> {
             doc.authorization_mode
         ));
     }
-    let now = chrono::Utc::now();
+    // The caller's `now`, never a clock read here.
     if doc.expires_at <= now {
         return Err(format!(
             "the request expired at {} (it is now {}); an expired request authorises nothing \
