@@ -135,7 +135,7 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 | Wave | Row | Title | P | M | Kind | Depends on | Gate | Lab | Tier | Status |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 0 | FX-1 | Parse the engine's consumer-group snapshot | P1 | M1 | fix | — | — | compose | A | Done |
-| 0 | FX-2 | Apply or refuse `runnerResources` | P1 | M1 | fix | — | — | k8s | A | Proposed |
+| 0 | FX-2 | Apply or refuse `runnerResources` | P1 | M1 | fix | — | — | k8s | A | In progress |
 | 0 | FX-3 | Stop labelling new-topic deviations "intended" | P1 | M1 | fix | — | — | compose | A | Proposed |
 | 0 | FX-4 | Record topic-configuration capture coverage | P1 | M1 | fix | — | — | compose | A | In progress |
 | 0 | FX-5 | Console replication factor from the source | P1 | M1 | fix | — | — | k8s | B | Proposed |
@@ -148,7 +148,7 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 | 0 | PROD-01.5 | Shared fixture profiles and broker versions | P1 | M1 | infra | — | — | compose | B | Done |
 | 0 | PROD-04.0 | Decide the Kafka administrative path | P1 | M2 | research | — | — | compose | B | Done |
 | 0 | PROD-08.4 | Publish a control-evidence mapping | P1 | M2 | docs | — | — | none | B | Proposed |
-| 0 | PROD-14.0 | Ship a working release | P1 | M1 | infra | — | — | none | B | Proposed |
+| 0 | PROD-14.0 | Ship a working release | P1 | M1 | infra | — | — | none | B | In progress |
 | 0 | PROD-14.3 | Positioning and design-partner kit | P1 | M2 | docs | — | OD-5 (publication) | none | C | Proposed |
 | 1 | PROD-00.2 | Build the engine from the vendored source | P1 | M1 | infra | 00.1 | OD-3 | compose | A | Proposed |
 | 1 | PROD-01.3 | Reach managed and mTLS clusters | P1 | M1 | impl | 01.5 | — | k8s | A | Proposed |
