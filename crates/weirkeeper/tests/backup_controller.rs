@@ -14695,3 +14695,32 @@ mod p12_controller_read_retry {
         );
     }
 }
+
+/// **FX-2's class sweep: `Backup.spec.deadlineSeconds`**, documented as "the
+/// Job's `activeDeadlineSeconds`". The Job-shape row above uses 3600, which
+/// is also the `BackupSchedule` default a scheduled run is given, so a
+/// projection that wrote that constant instead of the field passed it. A
+/// non-default value reaches the Job through the frozen inputs.
+///
+/// MUTANTS: `deadline_seconds: 3600` where `backup_execution` freezes the
+/// run, or where `runner_job_spec_from_inputs` reads the frozen value.
+#[test]
+fn a_backups_own_deadline_reaches_its_runner_job() {
+    let mut value: Value = serde_json::from_str(&backup_json()).expect("the fixture is JSON");
+    value["spec"]["deadlineSeconds"] = serde_json::json!(5400);
+    let backup: Backup = serde_json::from_value(value).expect("the fixture is a Backup");
+    let cluster = serde_json::from_str(&kafka_cluster_json()).expect("the fixture is a cluster");
+    let spec = weirkeeper::controllers::backup::runner_job_spec(&backup, &cluster)
+        .expect("the Job spec renders");
+    assert_eq!(spec.deadline_seconds, 5400);
+    let job = weirkeeper::job::build(&spec);
+    assert_eq!(
+        job.spec.and_then(|s| s.active_deadline_seconds),
+        Some(5400),
+        "`activeDeadlineSeconds` is the object's own deadline, not a default"
+    );
+    assert!(
+        spec.resources.is_none(),
+        "`Backup.spec` has no resources field, so its Job states none (FX-2)"
+    );
+}

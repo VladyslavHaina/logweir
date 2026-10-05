@@ -445,6 +445,43 @@ fn every_backup_status_the_controller_writes() {
         assert_eq!(op.message.as_deref(), Some("refused"));
     }
 
+    // `ExecutionSpecInvalid`, PLAT-06.1's meaning — the same class as the
+    // `Restore`'s (FX-2 review L4). Driven through the controller's OWN
+    // refusal of a `triggeredBy` it does not run, written by its own refusal
+    // writer before any Job exists, so this row fails if either side moves.
+    // Before the review the API served it `failed`.
+    let mut unknown_trigger = base.clone();
+    unknown_trigger["spec"]["triggeredBy"] = json!("nightly");
+    let typed_trigger = backup_of(&unknown_trigger);
+    let Err(refusal) = weirkeeper::backup_execution::execution_identity(&typed_trigger) else {
+        panic!("an unknown spec.triggeredBy is refused");
+    };
+    assert_eq!(refusal.state, "ExecutionSpecInvalid");
+    let (object, _) = patched::<Backup>(
+        unknown_trigger.clone(),
+        &backup_ctl::refused_status_patch(&typed_trigger, refusal.state, &refusal.message, now()),
+    );
+    run_backup(
+        "ExecutionSpecInvalid (PLAT-06.1)",
+        &object,
+        e(
+            S::Refused,
+            Some("ExecutionSpecInvalid"),
+            R::Refused,
+            V::NoEvidence,
+            false,
+        ),
+    );
+    let op = backup_operation(&backup_of(&object));
+    assert_eq!(op.result.exit_code, None, "nothing ran, so no exit code");
+    assert!(
+        op.message
+            .as_deref()
+            .is_some_and(|m| m.contains("spec.triggeredBy")),
+        "the refusal names the field: {:?}",
+        op.message
+    );
+
     // A phase this build does not know.
     let mut unknown = base.clone();
     unknown["status"] = json!({"phase": "Exploded"});
@@ -586,6 +623,47 @@ fn every_restore_status_the_controller_writes() {
             e(S::Refused, Some(state), R::Refused, V::NoEvidence, false),
         );
     }
+
+    // FX-2: a `spec.runnerResources` the controller will not apply is refused
+    // `ExecutionSpecInvalid` before the approval is read and before anything
+    // is created, so the API serves it `refused`, never `failed` (review L4:
+    // "failed" sent an operator looking in the target for partial writes that
+    // cannot exist). THE REFUSAL IS THE CONTROLLER'S OWN — `runner_resources_of`,
+    // the function STEP 1 calls — written by its one refusal writer, so this
+    // row fails if either side moves.
+    let mut with_block = base.clone();
+    with_block["spec"]["runnerResources"] = json!({"limits": {"memory": "16Gi"}});
+    let typed_block = restore_of(&with_block);
+    let Err(restore_ctl::RestoreError::Refused(state, message)) =
+        restore_ctl::runner_resources_of(&typed_block)
+    else {
+        panic!("a block above the memory ceiling is refused");
+    };
+    assert_eq!(state, "ExecutionSpecInvalid");
+    let (object, _) = patched::<Restore>(
+        with_block.clone(),
+        &restore_ctl::refused_status_patch(&typed_block, state, &message, now()),
+    );
+    run_restore(
+        "runnerResources refused (FX-2)",
+        &object,
+        e(
+            S::Refused,
+            Some("ExecutionSpecInvalid"),
+            R::Refused,
+            V::NoEvidence,
+            false,
+        ),
+    );
+    let op = restore_operation(&restore_of(&object));
+    assert_eq!(op.result.exit_code, None, "nothing ran, so no exit code");
+    assert!(
+        op.message
+            .as_deref()
+            .is_some_and(|m| m.contains("spec.runnerResources.limits.memory")),
+        "the refusal names the field: {:?}",
+        op.message
+    );
 
     let (running, _) = patched::<Restore>(
         held.clone(),

@@ -2357,6 +2357,8 @@ impl Pass<'_> {
             plan_config_map: None,
             image: self.ctx.runner_image.image.clone(),
             image_pull_policy: self.ctx.runner_image.image_pull_policy.clone(),
+            // `RetentionPolicy` states no resources for its Job (FX-2's sweep).
+            resources: None,
         });
         // THE BINARY. `job::build` renders the runner's argv against the image's
         // default entrypoint; retention runs a DIFFERENT executable in the same

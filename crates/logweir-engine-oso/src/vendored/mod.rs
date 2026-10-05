@@ -5,3 +5,4 @@
 pub mod consumer_groups;
 pub mod manifest;
 pub mod preflight;
+pub mod topic_config;

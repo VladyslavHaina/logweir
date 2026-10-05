@@ -408,8 +408,9 @@ pub fn remedy_for(code: CheckCode) -> &'static str {
              window."
         }
         CheckCode::BrokerConfigsNotReadable => {
-            "The principal cannot DESCRIBE broker configs, so the timestamp bound was not \
-             checked. Grant DESCRIBE on the cluster."
+            "The principal may not read the target's broker configuration, so the timestamp \
+             bound was not checked. Grant it DescribeConfigs on the Cluster resource; \
+             Describe does not imply it."
         }
         CheckCode::MarkerTopicMissing => {
             "The scratch target's marker topic does not exist. Create it, or point the restore \

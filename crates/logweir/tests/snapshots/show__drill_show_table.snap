@@ -19,7 +19,7 @@ logweir drill scorecard  (01J9X2QK7C4V0R8YB3ZP6MTS5A v1.0.0)
 
   integrity                   byte-fingerprint/pass  75/75 matched, 0 mismatch(es)
   target diff                 0 collision(s), 1 would-create (full)
-  topic parity                intended [cleanup.policy, retention.ms]  unexpected []
+  topic parity                intended [cleanup.policy, retention.ms]  unexpected []  configuration coverage not recorded
   evidence                    immutable=false  create_only_enforced=false
 
   no capture gap overlaps the sampled window

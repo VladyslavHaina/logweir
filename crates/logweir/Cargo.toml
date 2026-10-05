@@ -41,7 +41,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 # The catalog point record derives `JsonSchema` so `just schema` generates
-# `schemas/logweir-catalog-point-1.0.0.json` FROM THE TYPE, exactly as
+# `schemas/logweir-catalog-point-1.1.0.json` (1.0.0 frozen) FROM THE TYPE, exactly as
 # `logweir-core` generates the scorecard's and the receipt's. This adds no
 # crate to the graph: `logweir` already reaches schemars 0.8.22 through
 # `logweir-core`, so THIRD_PARTY_NOTICES.md and `cargo deny` are unchanged.

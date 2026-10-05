@@ -1358,3 +1358,104 @@ fn the_check_client_builds_no_tls_configuration_of_its_own() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// FX-4 / T13: an EMPTY DescribeConfigs answer is a refusal, never an empty
+// configuration — for the readiness checks' inventory probe too.
+// ---------------------------------------------------------------------------
+
+fn empty_resource(
+    specifier: rdkafka::admin::OwnedResourceSpecifier,
+) -> rdkafka::admin::ConfigResourceResult {
+    Ok(rdkafka::admin::ConfigResource {
+        specifier,
+        entries: vec![],
+    })
+}
+
+/// **The mutant the orchestrator named: a denied resource read back as "no
+/// overrides".** rdkafka 0.36.2 returns a refused broker or topic resource as
+/// `Ok` with no entries. Read as an empty map, `target.timestampBound`
+/// reported READY — "the target declares no record-timestamp bound" — for a
+/// principal the cluster had refused. Here the empty answer must be the
+/// caller's failure, and never `Ok`.
+#[test]
+fn the_empty_describe_answer_is_never_an_empty_configuration() {
+    let on_code = |code: RDKafkaErrorCode| CheckFailure::new(classify_error_code(code, ""), "code");
+    let on_empty = || CheckFailure::new(CheckCode::ClusterAuthorizationFailed, "empty answer");
+    for (label, specifier) in [
+        (
+            "broker 1001",
+            rdkafka::admin::OwnedResourceSpecifier::Broker(1001),
+        ),
+        (
+            "topic orders",
+            rdkafka::admin::OwnedResourceSpecifier::Topic("orders".into()),
+        ),
+    ] {
+        let got = logweir_kafka::inventory::flatten_config_answer(
+            vec![empty_resource(specifier)],
+            &on_code,
+            &on_empty,
+        );
+        match got {
+            Ok(map) => panic!(
+                "an EMPTY answer for {label} flattened to Ok({map:?}): a refused read \
+                 reported as an empty configuration"
+            ),
+            Err(f) => assert_eq!(f.code, CheckCode::ClusterAuthorizationFailed),
+        }
+    }
+    // …and a real answer still flattens, so the rule is not "refuse everything".
+    let full = Ok(rdkafka::admin::ConfigResource {
+        specifier: rdkafka::admin::OwnedResourceSpecifier::Broker(1001),
+        entries: vec![rdkafka::admin::ConfigEntry {
+            name: "message.timestamp.before.max.ms".into(),
+            value: Some("86400000".into()),
+            source: rdkafka::admin::ConfigSource::DynamicDefaultBroker,
+            is_read_only: false,
+            is_default: false,
+            is_sensitive: false,
+        }],
+    });
+    let map = logweir_kafka::inventory::flatten_config_answer(vec![full], &on_code, &on_empty)
+        .expect("a non-empty answer is a read");
+    assert_eq!(
+        map.get("message.timestamp.before.max.ms")
+            .map(String::as_str),
+        Some("86400000")
+    );
+}
+
+/// The topic twin's code, from what the same principal's metadata said: never
+/// a ready code, and a VISIBLE topic's empty answer is the authorizer's.
+#[test]
+fn an_empty_topic_answer_is_named_from_the_topics_metadata() {
+    assert_eq!(
+        TopicPresence::Present { partitions: 3 }.empty_config_answer_code(),
+        CheckCode::TopicAuthorizationFailed
+    );
+    assert_eq!(
+        TopicPresence::NotAuthorized.empty_config_answer_code(),
+        CheckCode::TopicAuthorizationFailed
+    );
+    assert_eq!(
+        TopicPresence::NotFound.empty_config_answer_code(),
+        CheckCode::UnknownTopicOrPartition
+    );
+    assert_eq!(
+        TopicPresence::Unknown.empty_config_answer_code(),
+        CheckCode::MetadataTimeout
+    );
+    for presence in [
+        TopicPresence::Present { partitions: 1 },
+        TopicPresence::NotAuthorized,
+        TopicPresence::NotFound,
+        TopicPresence::Unknown,
+    ] {
+        assert!(
+            classification_codes().contains(&presence.empty_config_answer_code()),
+            "{presence:?}: the code must be one the relay budget already accounts for"
+        );
+    }
+}

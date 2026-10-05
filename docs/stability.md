@@ -18,7 +18,18 @@ adopter's evidence bucket is a document some reader may already parse, so:
   file beside the old one. It is not a free edit and it is not "still 1.0.0".
 - **Changing a field's type, its meaning, or an identity rule
   (`validate_invariants`) is a MAJOR bump** — `2.0.0` — and needs two maintainer
-  approvals ([MAINTAINERS.md](../MAINTAINERS.md)).
+  approvals ([MAINTAINERS.md](../MAINTAINERS.md)). The owner's decision
+  [OD-7](to-do/product-expansion.md#owner-decisions), taken on 2026-10-05,
+  rules two cases MINOR:
+  - **A `validate_invariants` arm that reads ONLY a new optional block is
+    MINOR.** An arm that changes how an existing field is judged stays MAJOR.
+  - **FX-4's entry `"<target topic>: configuration not assessed (<why>)"` in
+    the existing `topic_parity.unexpected_divergence` is MINOR** (OD-7's
+    follow-up ruling, the same day), because it can only weaken an older
+    reader's verdict.
+
+  Nothing else is ruled: any other change to an existing field's content is
+  still a MAJOR bump.
 - **Removing or renaming a field is a MAJOR bump**, including a rename that
   merely fixes a spelling. `integrity.restoredPrincipalCouldConsume` is
   camelCase on the wire *permanently* for exactly this reason: it was frozen
@@ -28,6 +39,50 @@ The reason this is written down rather than left to judgement: the first change
 after a release is the one most likely to be treated as if the release had not
 happened. It has. **Do not let the first post-release addition inherit a
 pre-release ruling by accident.**
+
+### The first post-tag addition: format 1.1.0 (FX-4)
+
+FX-4 is that first addition, and it takes the rule above, not a pre-release
+ruling. Three documents move to `1.1.0`, each with a new schema file beside its
+frozen `1.0.0` one:
+
+| Document | New optional field | Schema |
+|---|---|---|
+| Drill scorecard | `topic_parity.not_assessed`, `target_diff.not_assessed` | `schemas/logweir-drill-scorecard-1.1.0.json` |
+| Backup receipt | `config_coverage` | `schemas/logweir-backup-receipt-1.1.0.json` |
+| Catalog point record | `topics[].config_coverage` | `schemas/logweir-catalog-point-1.1.0.json` |
+
+- **Absent means unknown.** A missing `config_coverage` is UNKNOWN coverage and
+  never `captured`; a missing `not_assessed` (either one) is "not recorded" and
+  never "every topic assessed". A 1.0.0 document is decided exactly as before.
+- **The media types keep `version=1.0.0`.** That names the envelope's major,
+  which did not change; the catalog index entry also stays `1.0.0`.
+- **Six receipt arms are added, and they are MINOR** under the owner's decision
+  OD-7 of 2026-10-05 (the rule above): arms 6–11 read only the new block, so no
+  document without it changes verdict, and the corpus and parity gates re-prove
+  that on every `just lint`.
+- **Readers built before FX-4 accept every 1.1.0 document** and ignore the new
+  fields (measured: `docs/formats/backup-receipt.md`, "Upgrade, rollback and old
+  receipts"). They check none of the six arms and print no coverage.
+- **A topic whose configuration parity was not assessed is never silent to
+  them.** Phase 7 also writes one entry, `"<target topic>: configuration not
+  assessed (<why>)"`, into the scorecard's existing `unexpected_divergence`
+  for every topic it names in `not_assessed`, so a reader that predates
+  `not_assessed` sees a divergence, never a clean list
+  ([the scorecard format](formats/drill-scorecard.md#topic_parity-and-what-its-silence-means)).
+  That widens what an existing array's entries can say, and OD-7's follow-up
+  ruling of 2026-10-05 makes it MINOR (the rule above): it can only weaken an
+  older reader's verdict.
+- **The collision strings are unchanged.** Each `target_diff.collisions[]`
+  entry is byte for byte what a writer before FX-4 produced. Phase 3 names a
+  collision whose configuration difference it could not assess in the new
+  optional `target_diff.not_assessed` instead
+  ([the scorecard format](formats/drill-scorecard.md#topic_parity-and-what-its-silence-means)),
+  because a qualifier inside the existing string would be a change to an
+  existing field's content, which OD-7 did not rule.
+- **Rollback** is safe in both directions. An older `logweir` writes 1.0.0
+  documents again, and their coverage then reads unknown. The 1.1.0 documents
+  already written stay valid under both readers.
 
 ### The product API's OpenAPI document is pre-release, and says so
 
@@ -693,6 +748,11 @@ topic exists, so the name it creates was free, and it is deleted before any verd
 but on a `LogAppendTime` broker an exit-3 run has therefore created and deleted one topic, and this
 sentence is the record of it.
 
+Since FX-4 a target whose broker configuration phase 0 may not read is exit 1 before the probe.
+Before, rust-rdkafka answered the refused read as an empty configuration, phase 0 took the Apache
+default `CreateTime`, and the probe was skipped
+([the ruling](#an-empty-configuration-answer-is-a-refused-read-never-no-overrides-prod-040-t13-fx-4)).
+
 ### The restore window's end is inclusive; the backup receipt's `covered.to_ms` is exclusive
 
 A `Restore`'s window is a closed interval: the engine's PITR filter is `timestamp >= start &&
@@ -942,6 +1002,54 @@ the claim cannot close, because the older run never wrote one; let in-flight Bac
 upgrading the controller. **Rollback.** An older runner ignores the claim objects (they are not
 receipts) and returns to the old behaviour; the claims stay in the bucket, harmlessly, and are
 honoured again after a re-upgrade.
+
+### An empty configuration answer is a refused read, never "no overrides" (PROD-04.0 T13, FX-4)
+
+rust-rdkafka 0.36.2 never reads librdkafka's per-resource DescribeConfigs error
+(`src/admin.rs:1121-1159`). A topic or broker the principal may not
+DescribeConfigs comes back as a SUCCESS with ZERO entries, which every caller
+used to read as a resource with no configuration. Kafka never answers a
+successful describe that way: an authorised resource gets every config entry,
+and an empty list comes only beside a per-resource error
+(`ConfigHelper.scala:54-98` at 4.3.1). `logweir-kafka` now turns an empty
+answer into an error. For a topic the error is NotAuthorized, or unknown topic
+when the principal's metadata says so; for the broker it is NotAuthorized.
+Measured on the compose stack
+(`e2e/tests/config_coverage.rs::a_denied_describe_configs_is_a_refusal_at_every_reader`).
+librdkafka answered the denied principal with 0 entries, against 31 for a
+topic and 289 for the broker under the super user.
+
+What changes for an operator:
+
+- **Phase 0 exits 1** when the restore identity may not read the target's
+  broker configuration. It used to assume `CreateTime` and skip the
+  `LogAppendTime` probe. Grant the restore identity DescribeConfigs on the
+  Cluster resource; Describe does not imply it.
+- **Readiness check `target.timestampBound` reads `unknown`
+  (`BrokerConfigsNotReadable`)** for the same identity. It used to read
+  `ready` (`TimestampWithinBound`) because it found no bound.
+- **Phase 2 exits 1** when an EXISTING mapped target topic's configuration may
+  not be read, instead of recording it as empty. So does phase 0's probe
+  readback.
+- **Phase 7 never compares a refused target read as empty.** The topic is
+  named in `topic_parity.not_assessed` with `targetReadDenied`, and its
+  partition count and replication factor are still classified. Phase 7 meets
+  this only for a topic whose backup recorded no configuration overrides: for
+  one that did, the pinned engine's restore describes the target topic itself
+  (`restore_topic_configs`, on by default) and phase 6 exits 1 with no
+  scorecard (measured on the compose stack, 2026-10-05).
+- **A backup never fails for it.** The topic's `config_coverage` reads
+  `captureDenied` ([the format](formats/backup-receipt.md#config_coverage--topic-configuration-capture-coverage-format-110)).
+
+**The limit.** Which error it was is read from the principal's metadata for
+the topic, not from the per-resource code, which the binding does not expose.
+For a visible topic `captureDenied` is therefore an inference: the only
+per-resource errors Kafka returns for an existing, validly named topic are the
+authorizer's and an internal broker error. Reading the code (owner choice
+AP-OC1) turns it into an observation; it never makes the answer `captured`.
+One behaviour is unchanged on purpose. A broker that ANSWERS but lacks the
+`log.message.timestamp.type` key is still read as the Apache default,
+because that is an answer and not a refused read.
 
 ### A bound point's receipt signature is verified before any data moves (D3 §5.5 step 6)
 
@@ -1684,8 +1792,19 @@ spend).
   Older archive-manifest fixtures exercise parsing compatibility, not full
   runtime support. The old two-minor support table conflicted with the stated
   full-drill floor and is superseded by the [support matrix](support-matrix.md).
-  A Strimzi installation using its historical `v0.19.1` default requires an
-  engine upgrade before it meets that floor.
+  Upstream's current release is 0.22.0 (2026-09-07). It was evaluated against
+  this pin in [PROD-00.1](to-do/decisions/PROD-00-engine-route.md). Moving the
+  pin is a recorded decision (OD-3), not a routine bump: `doctor` accepts only
+  0.21.0.
+
+  What OSO's operators run:
+
+  - `strimzi-backup-operator` has defaulted to engine v0.22.0 since its v0.3.0
+    (2026-09-07). Its v0.2.22–v0.2.25 default to v0.19.1.
+  - `kafka-backup-operator` 1.3.0 links `kafka-backup-core` 0.19.2 as a library.
+
+  Archives written by engines before 0.21 carry no segment sha256, so a drill
+  over one reports `integrity.result: partial`, never `pass`.
 
 - **Explicit non-contracts.** The Rust crates in this workspace
   (`logweir-core`, `logweir-engine-oso`, `logweir-evidence`, `logweir-kafka`,
@@ -1740,7 +1859,7 @@ The separate **Never** list records product boundaries, not scheduled work.
 | # | Item | Reason | Citation |
 |---|---|---|---|
 | 1 | **MSK IAM auth** | The `TokenProvider` seam exists and is empty; nothing mints an IAM token. | `crates/logweir-kafka/src/token.rs:1-9` |
-| 2 | **Strimzi as a source** | That population's default engine is `v0.19.1`, **below the `0.21.0` floor**. Supporting it would mean supporting an engine that lacks levers Logweir needs, which is why it is reported `unsupported (lever-absent)` and never as a fault. | spec §13; `docs/support-matrix.md` |
+| 2 | **Strimzi as a source** | `strimzi-backup-operator` has defaulted to engine v0.22.0 since its v0.3.0 (2026-09-07); its v0.2.22–v0.2.25 default to `v0.19.1`, **below the `0.21.0` floor**, which the matrix reports `unsupported (lever-absent)` and never as a fault. The drill always restores with Logweir's pinned engine, so what matters is the archive. The CLI drill reads 0.21 and 0.22 archives in full, and reads older ones as `partial` (no segment sha256). A non-empty consumer-group snapshot fails the drill until FX-1. No operator-written archive carries a Logweir receipt, so none can enter the catalog. | spec §13; `docs/support-matrix.md`; [PROD-00.1](to-do/decisions/PROD-00-engine-route.md) §7 |
 | 3 | **The in-browser WASM verifier** | Tag 1's UI ships no build step and no bundler, so there is nothing to compile a verifier into; verification is the CLI and `docs/verify_scorecard.py`. | spec §8 |
 | 4 | **`OsoCliEngine::validation_run`** | The trait method is not overridden, so the engine's own validation run is never executed and `engine_subreport` is `null` in every document tag 1 produces. The subcommand is on the allowlist as a ceiling, not as a description. | spec §13; `docs/platform/find-engine.md` |
 | 5 | **Retention deletion — delivered, opt-in** | ADR 0008 **Amendment H** took the amendment deletion needed, and the worker exists: a `RetentionPolicy` in `mode: Enforce` runs the separately linked `logweir-retention` binary under its own delete-capable credential, only against an administrator-approved plan digest, and writes create-only (unsigned) tombstones and a record under `logweir/retention/`. `mode: Report` is the default and deletes nothing; a schedule's `spec.retention` still only reports; the controller, `logweir-store`, `logweir` and `logweir-api` link no delete path (`scripts/check-no-archive-write.sh` check 3). Versioned and Object Lock buckets are refused (`VersionedBucket`). | [kubernetes.md](kubernetes.md) §7f; [release-notes.md](release-notes.md) |

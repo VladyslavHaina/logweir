@@ -314,7 +314,18 @@ pub struct RestoreSpec {
     pub target: RestoreTarget,
     /// The Job's `activeDeadlineSeconds`.
     pub deadline_seconds: i64,
-    /// What the runner pod asks for and is capped at.
+    /// What the runner pod asks for and is capped at: the runner container's
+    /// `resources`, exactly as written.
+    ///
+    /// Checked before anything is read or created. A value outside the bounds
+    /// (whole millicores and bytes, at most 4 CPUs and 8Gi, a memory limit of
+    /// at least 32Mi, no zero limit, no request above its limit) ends this
+    /// object `Failed` with reason `ExecutionSpecInvalid` and creates no Job;
+    /// it is refused, never clamped. Absent, the runner states no resources
+    /// and the namespace's `LimitRange` defaults apply. A `ResourceQuota` or
+    /// `LimitRange` that rejects the pod is reported as `RunnerReady=False`,
+    /// reason `PodCreationForbidden`. Not part of `planBytes`, so not what an
+    /// approver signs; immutable like the rest of `spec`.
     ///
     /// ON THE SPEC, NOT ON AN ANNOTATION, because the rule is that a
     /// Job's shape is a function of the object. It is also what keeps

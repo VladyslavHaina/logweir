@@ -15,8 +15,9 @@ commented out.
 **Minimum `kafka-backup` engine: 0.21.0.** That is the floor for the drill as
 shipped, and it is the version the pinned digest in
 [../third_party/kafka-backup-binary.digest](../third_party/kafka-backup-binary.digest)
-names. `v0.19.1` — `strimzi-backup-operator`'s hard-coded default — is *below*
-the floor and is reported `unsupported (lever-absent)`, never as a fault.
+names. Engines below it, such as `v0.19.1` (the default of
+`strimzi-backup-operator` v0.2.22–v0.2.25; its v0.3.x defaults to v0.22.0),
+are reported `unsupported (lever-absent)`, never as a fault.
 [support-matrix.md](support-matrix.md) is the row-by-row version.
 
 ---

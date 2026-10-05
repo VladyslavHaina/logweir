@@ -671,7 +671,7 @@ fn a_blank_approver_or_ticket_is_refused_by_mint_itself() {
         ("me", "", "--ticket"),
         ("me", "\t", "--ticket"),
     ] {
-        let error = logweir::approve::mint(&args(approver, ticket))
+        let error = logweir::approve::mint(&args(approver, ticket), fixed_now())
             .expect_err("a blank accountability field is refused");
         assert!(
             error.contains(flag) && error.contains("must not be blank"),
@@ -684,6 +684,154 @@ fn a_blank_approver_or_ticket_is_refused_by_mint_itself() {
     );
 
     // The control: a named approver and ticket still mint.
-    logweir::approve::mint(&args("operator@example.com", "CHG-42")).expect("the ordinary case");
+    logweir::approve::mint(&args("operator@example.com", "CHG-42"), fixed_now())
+        .expect("the ordinary case");
     assert!(dir.path().join("blank.json").exists());
+}
+
+// ===========================================================================
+// FX-9: the clock is read at the entry point, and only there
+// ===========================================================================
+
+fn at(rfc3339: &str) -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::parse_from_rfc3339(rfc3339)
+        .unwrap()
+        .with_timezone(&chrono::Utc)
+}
+
+/// The `now` the library rows hand `mint`: fixed, so no row depends on the
+/// date it runs.
+fn fixed_now() -> chrono::DateTime<chrono::Utc> {
+    at("2026-09-01T00:00:00Z")
+}
+
+/// **`mint` signs the CALLER's `now` as `approved_at` and reads no clock.**
+///
+/// `approved_at` is not decoration: it is the approval's claimed signing time,
+/// which the trust lifecycle judges against the signing key's window
+/// (`logweir_core::trust::claimed_signing_time`). Two instants centuries
+/// apart, both far from any date this suite runs on, so a build that stamps
+/// the wall clock fails this row on every date.
+#[test]
+fn mint_signs_the_callers_now_as_approved_at() {
+    let dir = tempfile::tempdir().unwrap();
+    let spec = dir.path().join("drill.yaml");
+    std::fs::write(&spec, example_spec()).unwrap();
+    let key = write_key(dir.path());
+
+    for now in [at("2001-01-01T00:00:00Z"), at("2999-06-01T00:00:00Z")] {
+        let out = dir
+            .path()
+            .join(format!("approval-{}.json", now.timestamp()));
+        logweir::approve::mint(
+            &logweir::approve::ApproveArgs {
+                spec: Some(spec.clone()),
+                key: key.clone(),
+                approver: "operator@example.com".to_string(),
+                ticket: "CHG-42".to_string(),
+                out: out.clone(),
+                subject_kind: "Restore".to_string(),
+                standing: None,
+            },
+            now,
+        )
+        .expect("the approval mints");
+        let doc: logweir_core::spec::ApprovalDoc =
+            serde_json::from_slice(&std::fs::read(&out).unwrap()).expect("the approval parses");
+        assert_eq!(
+            doc.approved_at, now,
+            "approved_at is the caller's now, never the wall clock"
+        );
+    }
+}
+
+/// **The binary's half: `drill approve` hands the mint the WALL CLOCK.**
+///
+/// The library rows prove that `mint` and `mint_standing` stamp and judge the
+/// `now` they are handed. This row proves `run` hands them the wall clock. It
+/// compares each stamp with this test's own clock, read around the
+/// subprocess, so it holds on any date. A `run` that passed a fixed instant
+/// fails (a) or (b), and one that passed an instant before 2020-01-31 also
+/// signs (c).
+#[test]
+fn drill_approve_hands_the_mint_the_wall_clock() {
+    // Generous, because the row is about WHICH clock, not about latency: a
+    // fixed instant misses this window by years.
+    let slack = chrono::Duration::minutes(2);
+
+    // (a) The per-run approval's `approved_at`.
+    let before = chrono::Utc::now();
+    let m = approve_over(&example_spec());
+    let after = chrono::Utc::now();
+    let doc: logweir_core::spec::ApprovalDoc =
+        serde_json::from_slice(&std::fs::read(&m.approval).unwrap()).unwrap();
+    assert!(
+        before - slack <= doc.approved_at && doc.approved_at <= after + slack,
+        "approved_at {} is not the wall clock ({before} .. {after})",
+        doc.approved_at
+    );
+
+    // (b) The standing document's `issuedAt`, with no `--issued-at`.
+    let dir = tempfile::tempdir().unwrap();
+    let key = write_key(dir.path());
+    let scope = standing_scope(dir.path());
+    let standing = |out: &Path, extra: &[&str]| {
+        bin()
+            .args(["drill", "approve", "--standing", "--key"])
+            .arg(&key)
+            .args([
+                "--schedule-namespace",
+                "team-a",
+                "--schedule-name",
+                "weekly-orders",
+                "--schedule-uid",
+                "u-1",
+            ])
+            .arg("--scope")
+            .arg(&scope)
+            .args(extra)
+            .arg("--out")
+            .arg(out)
+            .output()
+            .unwrap()
+    };
+    let out = dir.path().join("standing-authorization.json");
+    let before = chrono::Utc::now();
+    let done = standing(&out, &["--valid-days", "30"]);
+    let after = chrono::Utc::now();
+    assert_eq!(
+        done.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&done.stderr)
+    );
+    let doc: logweir_core::execution_contract::StandingAuthorization =
+        serde_json::from_slice(&std::fs::read(&out).unwrap()).unwrap();
+    assert!(
+        before - slack <= doc.issued_at && doc.issued_at <= after + slack,
+        "issuedAt {} is not the wall clock ({before} .. {after})",
+        doc.issued_at
+    );
+
+    // (c) A window that closed in 2020 is refused through the binary, exit 1,
+    //     with nothing written.
+    let past = dir.path().join("closed-2020.json");
+    let done = standing(
+        &past,
+        &["--valid-days", "30", "--issued-at", "2020-01-01T00:00:00Z"],
+    );
+    let transcript = format!(
+        "{}{}",
+        String::from_utf8_lossy(&done.stdout),
+        String::from_utf8_lossy(&done.stderr)
+    );
+    assert_eq!(done.status.code(), Some(1), "{transcript}");
+    assert!(
+        transcript.contains("already in the past"),
+        "the refusal says what is wrong: {transcript}"
+    );
+    assert!(
+        !past.exists() && !past.with_extension("sig").exists(),
+        "and nothing was signed: {transcript}"
+    );
 }
