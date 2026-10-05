@@ -3,10 +3,12 @@
 `application/vnd.logweir.catalog-point+json;version=1.0.0`
 
 The machine-readable schema is
-[`schemas/logweir-catalog-point-1.0.0.json`](../../schemas/logweir-catalog-point-1.0.0.json),
+[`schemas/logweir-catalog-point-1.1.0.json`](../../schemas/logweir-catalog-point-1.1.0.json),
 regenerated from the Rust type by `just schema` and `diff -u`'d against the
 checked-in file by `just schema-check`, so this document and the schema cannot
-drift apart silently.
+drift apart silently. The [`1.0.0` schema](../../schemas/logweir-catalog-point-1.0.0.json),
+which describes every record written before the manifest-version pin, is frozen
+beside it and never regenerated.
 
 If you are verifying a document rather than producing one, read
 [../verify-a-scorecard.md](../verify-a-scorecard.md) for the mechanics of a
@@ -61,7 +63,10 @@ all of them wanted:
 1. **It is content-derived**, so the same archive copied to a second bucket is
    one point in two places rather than two points. Two records for one id that
    differ only in `archive.location_id` describe one point; two that differ in a
-   receipt-derived fact are a `Conflict` (below).
+   receipt-derived fact are a `Conflict` (below). A pinned manifest version
+   (FX-7) does not change that: a version id belongs to the bucket that issued
+   it, so a copy — which carries the pin and not the version — is checked by its
+   manifest digest, and says that the pin could not be checked there.
 2. **Anyone holding the receipt can compute it**, including a fresh
    installation that never saw the `Backup` object.
 3. **It cannot be forged into another point's identity** without breaking the
@@ -142,7 +147,7 @@ all of them wanted:
 | `archive.location_id` | string | `s3://<bucket>/<prefix>`, `gs://…`, `az://<account>/<container>/…` or `file://<path>` — **bucket and prefix only**. Never an endpoint, never a region, never a credential. It is deliberately NOT part of the identity, which is what makes one archive in two buckets one point in two places. |
 | `archive.manifest_key` | string | Receipt-derived. |
 | `archive.manifest_sha256` | `sha256:<hex>` | Receipt-derived. |
-| `archive.manifest_version_id` | string, **optional** (format `1.1.0`) | Receipt-derived: the receipt's pinned manifest version ([backup-receipt.md](backup-receipt.md#the-pinned-manifest-version-versioned-buckets)), present exactly when the receipt carries one — a point taken on a versioned bucket. Absent means unknown. A reader takes the pin from the verified RECEIPT, never from this copy; a record whose copy differs from the receipt's, or that carries one the receipt does not, is a mismatch (`Conflict`), while a record without one (an older writer) is not. |
+| `archive.manifest_version_id` | string, **optional** (format `1.1.0`) | Receipt-derived: the receipt's pinned manifest version ([backup-receipt.md](backup-receipt.md#the-pinned-manifest-version-versioned-buckets)), present exactly when the receipt carries one — a point taken on a versioned bucket. Absent means unknown. A reader takes the pin from the verified RECEIPT, never from this copy; a record whose copy differs from the receipt's, or that carries one the receipt does not, is a mismatch (`Conflict`), while a record without one (an older writer) is not. The pin is checked only in a bucket that holds the pinned version: there, a pinned version that is no longer current is `Conflict`; elsewhere (a copy, an unversioned bucket, a version lifecycle expired) the digest decides and the entry's remedy says the pin could not be checked ([backup-receipt.md](backup-receipt.md#the-pinned-manifest-version-versioned-buckets)). |
 | `archive.prefix` | string | The archive's own key prefix, as the receipt records it. |
 
 ### What was captured

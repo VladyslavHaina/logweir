@@ -964,16 +964,25 @@ What changes for an operator:
   under `<prefix>/<backup_id>/topics/` — a finished set, or segments of a run that died or is still
   running — and either refuses the run. Other objects there (an upstream archive's consumer-groups
   snapshot, say) are not the engine's output in Logweir's configuration and do not refuse it. A read
-  that fails is exit 4 `ExecutionClaimUnproven`. **No permission is added**: the run's read-back
+  that fails transiently (a transport error, a timeout, a 5xx the client already retried) is exit 1,
+  retried by a schedule under a new execution id; any other failed read (a 403, a wrong bucket) is
+  exit 4 `ExecutionClaimUnproven`. **No permission is added**: the run's read-back
   already lists and reads the archive prefix.
 - **On a versioned bucket a receipt pins its manifest's version** —
   `archive.manifest_version_id`, receipt and catalog record format `1.1.0`
-  ([why](formats/backup-receipt.md#the-pinned-manifest-version-versioned-buckets)). A point-bound
-  restore refuses, exit 3 `PointBindingMismatch`, a point whose pinned version is no longer the
-  current one, and the catalog reports it `Conflict`: the set was written again after the point was
-  signed (by a runner from before these checks, after a rollback, or by anything else), which the
-  digest alone cannot see when the manifest bytes came out identical. Only the manifest is pinned —
-  a rewrite is detected, not undone.
+  ([why](formats/backup-receipt.md#the-pinned-manifest-version-versioned-buckets)). When the
+  current version is not the pin, a point-bound restore and the catalog read the pinned version BY
+  ID. If the bucket still holds it, the set was written again there after the point was signed (by
+  a runner from before these checks, after a rollback, or by anything else), which the digest alone
+  cannot see when the manifest bytes came out identical: exit 3 `PointBindingMismatch`, and
+  `Conflict` in the catalog. If the bucket does not hold it — a version id belongs to one bucket, so
+  every byte-for-byte copy of the archive, an unversioned bucket, and a version a lifecycle rule
+  expired are this case — the digest decides, as for a point without a pin, and the runner's log and
+  the entry's remedy say the pin could not be checked in this bucket. A read of the pinned version
+  that fails otherwise (a 403 without `s3:GetObjectVersion`) is exit 1 / `Unreadable`. Only the
+  manifest is pinned — a rewrite is detected, not undone — and the detection covers the points THIS
+  build signed: an older runner's own receipt over a set it rewrote pins nothing and stays
+  selectable.
 - **Unversioned buckets pin nothing**, and their receipts are the byte-identical `1.0.0` document.
   There, a rewrite by a writer that ignores the claim and the set check is visible only to a check of
   the segment digests the manifest records.
@@ -985,6 +994,10 @@ runner that is still RUNNING when its Job is re-created, and has written nothing
 neither the claim nor the set check: let such a Job finish before upgrading the runner. **Rollback.**
 An older runner ignores the pin (its reader ignores unknown fields inside major 1) and no longer
 refuses an existing set; an older catalog reader reports a superseded point by its digest alone.
+Rolled back while a `Backup` is in flight, an older runner whose Job is re-created re-runs the
+engine over the set: on a versioned bucket this build's point is then `Conflict`, and on an
+unversioned bucket nothing reports it (the first point keeps verifying over rewritten segments).
+Let in-flight `Backup`s finish before rolling the runner back.
 
 ### A bound point's receipt signature is verified before any data moves (D3 §5.5 step 6)
 

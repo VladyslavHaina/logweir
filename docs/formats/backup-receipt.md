@@ -3,10 +3,13 @@
 `application/vnd.logweir.backup-receipt+json;version=1.0.0`
 
 The machine-readable schema is
-[`schemas/logweir-backup-receipt-1.0.0.json`](../../schemas/logweir-backup-receipt-1.0.0.json)
+[`schemas/logweir-backup-receipt-1.1.0.json`](../../schemas/logweir-backup-receipt-1.1.0.json)
 and CI regenerates it from the Rust type and `diff -u`s it against the checked-in
 file on every build, so this document and the schema cannot drift apart
-silently. A signed worked example is
+silently. A MINOR bump is a new schema file beside the old one: the
+[`1.0.0` schema](../../schemas/logweir-backup-receipt-1.0.0.json), which
+describes every receipt written before the manifest-version pin, is frozen and
+never regenerated. A signed worked example is
 [`e2e/fixtures/signed/backup-receipt.json`](../../e2e/fixtures/signed/backup-receipt.json)
 with its detached sidecar
 [`backup-receipt.sig`](../../e2e/fixtures/signed/backup-receipt.sig) — read
@@ -32,8 +35,9 @@ scorecard ever written claiming, by the shape of its own schema, to say
 something about a backup it never observed.
 
 So the receipt has its own media type, its own schema, its own
-`format_version: "1.0.0"` — **independent of the scorecard's** — and its own
-five arms.
+`format_version` — `1.0.0`, or `1.1.0` for a receipt that pins its manifest's
+version ([below](#the-pinned-manifest-version-versioned-buckets)),
+**independent of the scorecard's** — and its own five arms.
 
 ## Reading rules a consumer must honour
 
@@ -349,7 +353,8 @@ second put must be refused as `AlreadyExists`. Only then does the engine start.
 | the backend reports conditional put unsupported (the store falls back to HEAD-then-PUT) | **4** | `ExecutionClaimUnproven` | a HEAD-then-PUT is not exclusive, so the claim is no lock |
 | the **second** create succeeds | **4** | `ExecutionClaimUnproven` | the store accepts `If-None-Match: *` and overwrites anyway; a claim on it is no lock |
 | the claim is won, but the archive already holds `<prefix>/<backup_id>/manifest.json` or a segment under `<prefix>/<backup_id>/topics/` (FX-7) | **1** | `ExecutionAlreadyClaimed` | an earlier run of this `backup_id` — by a build **without** the claim — wrote this set (or wrote a segment of it and died, or is still running). **No engine run, no receipt.** The same state and remedy as a claim that exists: a new `backup_id` |
-| the claim is won, but the archive could not be read to prove the set is new | **4** | `ExecutionClaimUnproven` | nothing is proven about the set, so the engine never started; grant `s3:ListBucket` and `s3:GetObject` on the archive prefix (the read-back needs both too) |
+| the claim is won, but a read of the archive to prove the set is new failed TRANSIENTLY — a transport error, a timeout, or a 5xx/429 the client had already retried for three minutes (FX-7 fix round) | **1** | — (`operational`) | nothing is proven about the set, so the engine never started. Retryable: a schedule with `spec.retry` starts a NEW execution `-r<k>`, which is a different set; a manual retry needs a new `backup_id` too, because this run's claim is taken |
+| the claim is won, but that read failed for any other reason — a 401/403, a wrong bucket, region or CA, or an error this build cannot classify | **4** | `ExecutionClaimUnproven` | nothing is proven about the set and no retry changes it, so the engine never started; grant `s3:ListBucket` and `s3:GetObject` on the archive prefix (the read-back needs both too), then run again under a new `backup_id` |
 
 Both refusals end with a final stdout line `failure-reason=ExecutionAlreadyClaimed` (exit 1) or
 `failure-reason=ExecutionClaimUnproven` (exit 4), the exit-1/4 twin of exit 3's `refusal-reason=`.
@@ -401,13 +406,20 @@ first, with its own message.
 
 **What it still does not cover.** A runner that ignores the claim and the set
 check — a build from before them, after a ROLLBACK — can still run the engine
-over a set this build wrote. On a versioned bucket that is DETECTED: this
-build's receipt pins the manifest version, and a point whose pinned version is
-no longer the current one is refused by a point-bound restore and reported
-`Conflict` by the catalog ([below](#the-pinned-manifest-version-versioned-buckets)).
-On an unversioned bucket nothing is pinned, and an identical manifest over
-rewritten segments is visible only to a check of the segment digests the
-manifest records. An older runner that is STILL RUNNING when its Job is
+over a set this build wrote. On a versioned bucket that is DETECTED **for the
+points this build signed**: their receipts pin the manifest version, and a
+pinned version the bucket still holds that is no longer the current one is
+refused by a point-bound restore and reported `Conflict` by the catalog
+([below](#the-pinned-manifest-version-versioned-buckets)). **The rewriting
+run's own point is not flagged**: the older runner signs a receipt that pins
+nothing over the same, identical manifest, so that second point of the set stays
+`Available` and selectable while the segments under it no longer match the
+entries its manifest lists (measured, FX-7: a SeaweedFS versioned bucket). On an
+unversioned bucket nothing is pinned, and an identical manifest over rewritten
+segments is visible only to a check of the segment digests the manifest
+records — no check this build runs reports it. **So before rolling the runner
+back to a build without the execution claim, let in-flight Backups finish**
+([release notes](../release-notes.md), "Before a rollback"). An older runner that is STILL RUNNING when its Job is
 re-created, and has written nothing yet, is not seen by either check; let such
 a Job finish before upgrading. Sets written before RECEIPT-DUP may carry two
 receipts, and the catalog keeps both as two points (see
@@ -435,18 +447,37 @@ unversioned buckets; AWS S3
 [UNVERIFIED — needs a real AWS S3 bucket and a credential source].
 
 **What a reader does with it.** The engine restores from the key's CURRENT
-version and knows no other, so a pin is compared with the current version before
-anything else:
+version and knows no other, so a pin is compared with the current version
+first. **But a version id belongs to one object in ONE bucket**, and the
+catalog makes an archive copied to a second bucket one point in two places
+([catalog-point.md](catalog-point.md)): a copy made by anything but
+version-preserving replication — `aws s3 sync`, `mc mirror`, rclone, a
+migration to another store, any unversioned destination — carries the pin and
+not the pinned version. So when the current version is not the pin, both
+readers read the pinned version BY ID (one more read, made only then) and let
+its answer decide (FX-7 fix round; one rule for both, `catalog::pin`):
 
-* a **point-bound restore** refuses, exit 3 `PointBindingMismatch`, a point
-  whose pinned version is not the current one — "written again after the point
-  was signed" — and reads the pinned version BY ID to say whether the attested
-  manifest is still retained; the manifest digest is then compared as before;
-* the **`catalogSync` deep check** reports such a point `Conflict` (not
-  selectable), with a remedy that says the set was written again, and takes the
-  pin from the verified RECEIPT, never from the record (an older writer's record
-  may lack it);
-* a pinned point whose version IS the current one is exactly as before.
+| The read of the pinned version | Point-bound restore | `catalogSync` deep check |
+|---|---|---|
+| **the bucket holds it** and it is not current: the set was written again in this bucket after the point was signed | exit 3 `PointBindingMismatch`, saying whether the attested manifest is still retained at that version | `Conflict`, not selectable; the remedy says the set was written again in this bucket |
+| **the bucket does not hold it**: `404 NoSuchVersion`; `400 InvalidArgument` for an id the store could never have issued (MinIO answers that for any id that is not a UUID, measured); or a store that does not read by version at all — a copy, an unversioned bucket, a version a lifecycle rule expired | the manifest digest decides, as for a point without a pin; the run goes on and the runner logs `PointPinUnchecked`, "the pin could not be checked in this bucket" | the digest decides; the entry's `remedy` carries the same note after the state's own remedy |
+| **any other failure** — a 403 (the principal lacks `s3:GetObjectVersion`), an outage | exit 1: could not tell, nothing restored | `Unreadable`: could not tell |
+
+The deep check takes the pin from the verified RECEIPT, never from the record
+(an older writer's record may lack it), and reserves the extra read in its
+per-point object budget. A pinned point whose version IS the current one is
+exactly as before, and costs no extra read. The read by id needs
+`s3:GetObjectVersion` on the archive prefix, beside the `s3:GetObject` the
+manifest read already needs.
+
+**The cost of reading a copy as a copy.** "Not this bucket's history" and
+"this bucket's history, expired" are one answer to a reader. When a lifecycle
+rule has expired the noncurrent versions of a manifest that was written again
+in its ORIGINAL bucket, the pinned version is gone, and that point degrades to
+the unversioned case: the digest alone, which an identical manifest over
+rewritten segments passes — with the note, never a refusal. A copy cannot see
+either whether the original was written again before it was copied. Keep
+noncurrent manifest versions at least as long as the points that pin them.
 
 The digest alone cannot give that answer: an identical manifest over rewritten
 segments hashes the same. **An auditor** reads the attested bytes by version and
@@ -460,8 +491,9 @@ sha256sum manifest.json    # equals archive.manifest_sha256
 
 **Limits.** Only the MANIFEST is pinned: segments are not, so a rewrite is
 detected, not undone, and a restore of a superseded point is refused rather than
-attempted — the attested version may still be retained in the bucket's history
-for a recovery by hand. An unversioned bucket gets no pin. Absent never means
+attempted — the attested version is still in the bucket's history (the refusal
+says so) for a recovery by hand. A pin is checked only in a bucket that holds
+the pinned version. An unversioned bucket gets no pin. Absent never means
 "version zero", and a pin is never inferred for a receipt that does not carry
 one: `logweir catalog sync` copies the receipt's pin or writes none.
 
@@ -493,7 +525,8 @@ just schema
 
 Regenerates both of tag 1's schemas from their Rust types. The CI drift arm
 fails on any difference, so `just schema` is the only sanctioned way to change
-`schemas/logweir-backup-receipt-1.0.0.json`.
+the current receipt schema, `schemas/logweir-backup-receipt-1.1.0.json`; the
+`1.0.0` file beside it is frozen.
 
 ---
 
