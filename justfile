@@ -40,6 +40,16 @@ mutant-clean:
 test:
     cargo test --locked --workspace
 
+# FX-9's time-bomb guard. A row that compares the wall clock with a fixed
+# instant fails now rather than on that date. The default offset is a year and
+# a day. On macOS it builds a clock shim with `cc`; on Linux it needs
+# libfaketime and refuses without it (and, with Debian's libfaketime 0.9.10, at
+# its self-check). It is not in `lint` or CI, because it is a second full test
+# run.
+# Run the unit suites with every test binary's wall clock shifted forward.
+test-shifted-clock OFFSET="+366d":
+    bash scripts/test-shifted-clock.sh {{OFFSET}}
+
 golden:
     INSTA_UPDATE=always cargo test --workspace
 
