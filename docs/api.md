@@ -1055,11 +1055,14 @@ metadata read the inventory came from (`status.result.brokerCount`, beside
 `clusterId`). It is **additive**: absent means the result recorded none — a
 failed or unfinished attempt — and is never sent as `0`, and a client written
 before it reads the discovery exactly as before. The console's restore wizard
-reads it from the target connection's newest successful discovery, when that
-discovery is not `stale`, to cap its default replication factor and to refuse
-a factor above it (FX-5); it is a count of the brokers that answered at
-`observedAt`, and the readiness check's `target.topicCreate` row stays the
-check of the factor against the target as it is when the check runs.
+reads it from the target connection's newest successful discovery (FX-5): when
+that discovery is not `stale`, to set its default replication factor and to
+refuse a factor above it; when its ONLY stale reason is `expired`, to set the
+default alone, said with the discovery's `observedAt`, because a broker count
+rarely changes and an old one must not refuse a factor a grown cluster would
+hold. Any other stale reason means another connection or another identity,
+and the count is not used. The readiness check's `target.topicCreate` row
+stays the check of the factor against the target as it is when the check runs.
 
 A claim of completeness is checked before it is published: a controller that
 writes `visibility.state: attestedComplete` **without** an `attestation` is

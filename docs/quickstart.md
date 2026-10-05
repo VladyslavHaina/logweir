@@ -162,9 +162,12 @@ always a destination with no `evidenceRead` grant.
 2. In the wizard, choose the target connection (a `target` role), the topics and
    the new-topic mapping, and the point in time inside the covered window.
    Restores only ever write **new** topics. Check the **replication factor** in
-   step 4: it defaults to the target's broker count, at most 3, when a fresh
-   *Discover topics* of the target connection has read it, and otherwise to 1,
-   which the step says; run the discovery first, or set the factor yourself
+   step 4: it defaults to the target's broker count, at most 3, when a
+   *Discover topics* of the target connection has read it (until the controller
+   collects that discovery, a day by default; past the discovery's freshness,
+   15 minutes by default, the count sets the default but refuses no factor),
+   and otherwise to 1, which the step says; run the discovery first, or set the
+   factor yourself
    ([ui/README.md](../ui/README.md), *The replication factor: a default with its
    basis, an input, and a refusal before Create*). This factor can differ from
    the source's, and the target's storage follows it: a topic the source kept

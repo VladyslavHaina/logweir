@@ -1167,20 +1167,38 @@ topic configuration with coverage), and `sourceReplicationFactorsOf` is the
 one function that changes when it lands. A topic discovery of the SOURCE is
 not a substitute: it lists the cluster as it is now, not the recovery point.
 
-**The target's broker count comes from a fresh topic discovery of the target
+**The target's broker count comes from a topic discovery of the target
 connection.** It is `TopicDiscovery.status.result.brokerCount`, which the
 product API publishes as `brokerCount` (see [api.md](../docs/api.md), *Bounded,
 honest topic inventory*). The wizard reads the target connection's two slots
 (`GET .../connections/<target>/topic-discoveries?latest=true`) before the first
 paint and again whenever the target changes, and uses the newest successful
-discovery only when it is not `stale` and was taken of this connection; an
-answer for a target the operator has since left is dropped. A
-`KafkaCluster`'s status carries no count, and the readiness check's
-`target.authenticated` count reaches its status only inside a message. When no
+discovery only when it was taken of this connection; an answer for a target
+the operator has since left is dropped. A `KafkaCluster`'s status carries no
+count (`clusterId`, `conditions`, `observedAt`, `reachable`, `reason`), the
+probe's `Reachable` message names the cluster id and no count, and the
+readiness check's `target.authenticated` count reaches its status only inside a
+message, so a discovery is the one record of it.
+
+**A count past its freshness still sets the default, and refuses nothing**
+(FX-5 review L5). An inventory goes `stale` after `checks.discovery.freshSeconds`
+(900 s by default) because topics come and go, and the first build used the
+count only inside those fifteen minutes, so on most installs the default was
+the grammar's 1. A cluster's broker count rarely changes, so a discovery whose
+ONLY stale reason is `expired` -- the same connection object, generation and
+principal -- still sets the default, and both steps say when it was read:
+`2 (the target's 2 brokers as of 2026-10-05 09:12:00 UTC; ...)`. It lasts as
+long as the controller keeps the discovery: `checks.discovery.retentionSeconds`
+after its observation (86400 s, a day, by default), collected on the
+controller's hourly pass. That bound is the server's; the page never compares an
+instant with the browser's clock. Any other stale reason (`connectionReplaced`,
+`connectionChanged`, `principalChanged`, alone or beside `expired`) is about
+another connection or another identity, and its count is not used. When no
 count is usable, step 4 says why -- no discovery has succeeded, the newest is
-stale, or (legacy mode) there is no discovery route at all -- and links the
-target connection's page, where *Discover topics* reads one; the page reads the
-count the next time it opens, and a draft keeps everything else.
+stale for another connection or identity, or (legacy mode) there is no
+discovery route at all -- and links the target connection's page, where
+*Discover topics* reads one; the page reads the count the next time it opens,
+and a draft keeps everything else.
 
 **Why at most 3 when only the broker count is known.** Apache Kafka's
 operations guide recommends "a replication factor of 2 or 3 so that you can
@@ -1208,7 +1226,10 @@ it reads.
   on step 4 as the value is committed, in the stepper (step 4 *needs
   attention*), on the review step above Create with a way back to step 4, and in
   the submit itself, which sends nothing and opens step 4 with the message
-  beside the input.
+  beside the input. A count past its freshness refuses nothing, because a
+  cluster grown since would hold the factor: the basis then reads `set by you;
+  the target had 2 brokers as of ...`, and step 4 links the connection's page
+  for a fresh count.
 
 The readiness check's `target.topicCreate` row (a validate-only `CreateTopics`
 at the plan's factor) stays the check against the target as it is when the

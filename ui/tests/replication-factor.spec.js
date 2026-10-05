@@ -215,23 +215,49 @@ test("fx5_this_build_reads_no_source_factor_and_says_why", () => {
 
 // ---------------------------------------------------- the broker-count fact
 
-test("fx5_the_broker_count_comes_only_from_a_fresh_discovery_of_this_target", () => {
+test("fx5_the_broker_count_comes_from_this_targets_discovery_fresh_or_expired_alone", () => {
   const state = wizardState();
   const cluster = state.clusters.items.find((c) => c.metadata.uid === state.targetClusterUid);
   const fresh = targetBrokerFact(DISCOVERY(), cluster);
   assert.equal(fresh.count, BROKERS, "NEGATIVE CONTROL: null (the count not read) fails this");
+  assert.equal(fresh.fresh, true, "a fresh count, which may refuse a factor");
   assert.equal(fresh.discovery, "td-target-counted");
   assert.equal(fresh.observedAt, DISCOVERY().lastSuccessful.observedAt);
   assert.equal(fresh.why, "");
 
-  const stale = DISCOVERY();
-  stale.lastSuccessful.stale = true;
-  stale.lastSuccessful.staleReasons = ["expired"];
-  const old = targetBrokerFact(stale, cluster);
-  assert.equal(old.count, null,
-    "NEGATIVE CONTROL: a stale discovery's 2 used as the target's count fails this");
-  assert.match(old.why, /is stale \(expired\), so its broker count is not used/);
+  // PAST ITS FRESHNESS ALONE (review L5): the same connection object,
+  // generation and principal, read more than `freshSeconds` ago. The count is
+  // kept, NOT fresh, and running a discovery again would make it fresh.
+  const expired = DISCOVERY();
+  expired.lastSuccessful.stale = true;
+  expired.lastSuccessful.staleReasons = ["expired"];
+  const old = targetBrokerFact(expired, cluster);
+  assert.equal(old.count, BROKERS,
+    "NEGATIVE CONTROL: null -- the 15-minute window that made the default 1 on most installs -- " +
+      "fails this");
+  assert.equal(old.fresh, false,
+    "NEGATIVE CONTROL: true -- an expired count treated as fresh, so it would refuse -- fails this");
+  assert.equal(old.why, "");
   assert.equal(old.discoverable, true, "and running a discovery again would help");
+
+  // ANY OTHER STALE REASON is about another connection or another identity,
+  // alone or beside `expired`: no count.
+  for (const reasons of [["connectionChanged"], ["expired", "connectionChanged"],
+    ["principalChanged"], ["expired", "principalChanged"], ["connectionReplaced"], []]) {
+    const other = DISCOVERY();
+    other.lastSuccessful.stale = true;
+    other.lastSuccessful.staleReasons = reasons;
+    const fact = targetBrokerFact(other, cluster);
+    assert.equal(fact.count, null,
+      "NEGATIVE CONTROL: a count stale for " + JSON.stringify(reasons) + " used fails this");
+    assert.equal(fact.fresh, false);
+    assert.match(fact.why, /is stale.*, so its broker count is not used$/);
+  }
+  const edited = DISCOVERY();
+  edited.lastSuccessful.stale = true;
+  edited.lastSuccessful.staleReasons = ["expired", "connectionChanged"];
+  assert.match(targetBrokerFact(edited, cluster).why,
+    /is stale \(expired, connectionChanged\), so its broker count is not used$/);
 
   const none = DISCOVERY();
   none.lastSuccessful = null;
@@ -246,12 +272,21 @@ test("fx5_the_broker_count_comes_only_from_a_fresh_discovery_of_this_target", ()
   zero.lastSuccessful.brokerCount = 0;
   assert.equal(targetBrokerFact(zero, cluster).count, null, "zero brokers is no count, not a cap");
 
-  const other = DISCOVERY();
-  other.lastSuccessful.connection.uid = "a-recreated-connection";
-  const elsewhere = targetBrokerFact(other, cluster);
-  assert.equal(elsewhere.count, null,
-    "NEGATIVE CONTROL: a discovery of another object under this name is not this target");
-  assert.match(elsewhere.why, /another connection under that name/);
+  const elsewhere = (expiredToo) => {
+    const other = DISCOVERY();
+    other.lastSuccessful.connection.uid = "a-recreated-connection";
+    if (expiredToo) {
+      other.lastSuccessful.stale = true;
+      other.lastSuccessful.staleReasons = ["expired"];
+    }
+    return targetBrokerFact(other, cluster);
+  };
+  for (const expiredToo of [false, true]) {
+    assert.equal(elsewhere(expiredToo).count, null,
+      "NEGATIVE CONTROL: a discovery of another object under this name is not this target" +
+        (expiredToo ? ", expired or not" : ""));
+    assert.match(elsewhere(expiredToo).why, /another connection under that name/);
+  }
 
   const legacy = targetBrokerFact({ unread: "Topic discovery is served by the product API" },
     cluster);
@@ -261,7 +296,70 @@ test("fx5_the_broker_count_comes_only_from_a_fresh_discovery_of_this_target", ()
 
   assert.equal(targetBrokerFact(DISCOVERY(), null).why, "no target connection is selected");
   assert.deepEqual(targetBrokerFact(null, cluster).count, null, "nothing read, nothing known");
+  assert.equal(BROKERS_NOT_READ.fresh, false);
 });
+
+test("fx5_a_count_past_its_freshness_sets_the_default_with_its_age_and_refuses_nothing",
+  async () => {
+    // FX-5 review L5. A discovery whose only stale reason is `expired` still
+    // sets the default -- the broker count rarely changes -- and the basis says
+    // when it was read, on both steps. It refuses nothing: a fresh count may
+    // refuse, an old one could refuse a factor a cluster grown since would hold.
+    const expired = () => {
+      const answer = DISCOVERY();
+      answer.lastSuccessful.stale = true;
+      answer.lastSuccessful.staleReasons = ["expired"];
+      return answer;
+    };
+    const asOf = " as of " + DISCOVERY().lastSuccessful.observedAt.replace("T", " ")
+      .replace(/(\.\d+)?Z$/, " UTC");
+    const withAnswer = (answer) => {
+      const state = wizardState();
+      const cluster = state.clusters.items.find((c) => c.metadata.uid === state.targetClusterUid);
+      state.targetBrokers = targetBrokerFact(answer, cluster);
+      syncReplicationDefault(state);
+      return state;
+    };
+    const state = withAnswer(expired());
+    assert.equal(replicationFactorOf(state), BROKERS,
+      "NEGATIVE CONTROL: 1 -- the grammar's default because the count was 16 minutes old -- " +
+        "fails this");
+    const said = "2 (the target's 2 brokers" + asOf + "; the source's replication factor is not " +
+      "published to this console)";
+    assert.equal(replicationText(state), said,
+      "NEGATIVE CONTROL: the fresh wording (no \"as of\") for an old count fails this");
+    const step4 = renderTargetStep(state);
+    assert.equal(visible(byId(step4, "replication-basis")), "This plan asks for " + said + ".");
+    assert.equal(byId(step4, "replication-unknown"), null, "a count was read: no warning");
+    assert.match(visible(byId(step4, "replication-brokers")),
+      /^The target had 2 brokers when topic discovery td-target-counted read them at .+\. That discovery is past its freshness, so the count sets the default and refuses no factor: open orders-scratch and run Discover topics for a fresh count, which also refuses a factor above it\. The readiness check in step 5 reads them again when it runs\.$/);
+    assert.ok(step4.includes("href=\"#/clusters?ns=team-fx5&amp;name=orders-scratch\""),
+      "the connection's page, where a fresh count is read: " + byId(step4, "replication-brokers"));
+    const step6 = renderPlanStep(await preparePlan(state), state);
+    assert.equal(visible(byId(step6, "review-replication")), said, "the review says the age too");
+
+    // A FACTOR ABOVE AN OLD COUNT IS NOT REFUSED HERE -- the basis says what was
+    // read and when -- and the readiness check stays the authority.
+    setReplicationFactor(state, "3");
+    assert.deepEqual(replicationProblems(state), Object.create(null),
+      "NEGATIVE CONTROL: ReplicationFactorExceedsBrokers on a count past its freshness fails this");
+    assert.equal(validateRestore(state).replicationFactor, undefined);
+    assert.equal(replicationText(state), "3 (set by you; the target had 2 brokers" + asOf + ")");
+    const typed = renderPlanStep(await preparePlan(state), state);
+    assert.equal(byId(typed, "review-replication-complaint"), null);
+    // CONTROL: the same 3 over a FRESH count is refused, by the check's code.
+    const freshState = withAnswer(DISCOVERY());
+    setReplicationFactor(freshState, "3");
+    assert.match(String(replicationProblems(freshState).replicationFactor),
+      /^`ReplicationFactorExceedsBrokers`/);
+    assert.equal(replicationText(freshState), "3 (set by you; the target has 2 brokers)");
+
+    // THE CEILING over an old count says its age as well.
+    const big = expired();
+    big.lastSuccessful.brokerCount = 5;
+    assert.equal(replicationText(withAnswer(big)), "3 (at most 3 by default, of the target's 5 " +
+      "brokers" + asOf + "; the source's replication factor is not published to this console)");
+  });
 
 // ------------------------------------------------- the state and the steps
 

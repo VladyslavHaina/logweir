@@ -114,6 +114,7 @@ import {
   esc,
   facts,
   fieldErrorLine,
+  humanInstant,
   invalidAttributes,
   mutationStatus,
   prefixOf,
@@ -2653,8 +2654,8 @@ export function replicationDefault(sourceFactors, brokers) {
 
 /** What the page knows of the target's broker count before anything is read. */
 export const BROKERS_NOT_READ = Object.freeze({
-  count: null, uid: "", name: "", discovery: "", observedAt: "", discoverable: false,
-  why: "the target's topic discoveries have not been read",
+  count: null, fresh: false, uid: "", name: "", discovery: "", observedAt: "",
+  discoverable: false, why: "the target's topic discoveries have not been read",
 });
 
 /** THE TARGET'S BROKER COUNT, from the newest successful topic discovery of the
@@ -2668,17 +2669,33 @@ export const BROKERS_NOT_READ = Object.freeze({
  *  inside the row's message, and the check is bound to a plan that already
  *  names a factor.
  *
- *  ONLY A FRESH ONE. A discovery past its freshness, of a connection replaced
- *  or edited since, or read with another principal, is `stale`: about another
- *  moment or another connection. Its count is not used and the step says so.
+ *  OF THIS CONNECTION, AS IT IS. A discovery of a connection replaced or
+ *  edited since, or read with another principal, is `stale` about another
+ *  connection or another identity (`connectionReplaced`, `connectionChanged`,
+ *  `principalChanged`): its count is not used, and the step says so.
+ *
+ *  PAST ITS FRESHNESS ALONE, IT STILL SETS THE DEFAULT (FX-5 review L5). An
+ *  inventory goes stale in minutes (`checks.discovery.freshSeconds`, 900 s by
+ *  default) because topics come and go; a cluster's broker count rarely
+ *  changes. So when `expired` is the ONLY stale reason -- the same connection
+ *  object, generation and principal -- the count is kept with `fresh: false`:
+ *  it sets the default, said with the instant it was read, and refuses nothing
+ *  ([`replicationProblems`] refuses on a fresh count only, because an old count
+ *  could refuse a factor a cluster grown since would hold). It lasts as long
+ *  as the controller keeps the discovery: `checks.discovery.retentionSeconds`
+ *  after its observation (86400 s, a day, by default), collected on the
+ *  controller's hourly pass. That bound is the server's: this page never
+ *  compares an instant with the browser's clock.
+ *
  *  Legacy mode has no topic discovery at all, and the read's own refusal is
  *  the reason shown.
  *
  *  `answer` is `latestDiscoveries`'s answer, `{unread: <message>}` when the
  *  read failed, or `null` when nothing was read; `cluster` is the selected
- *  target connection. Returns `{count, uid, name, discovery, observedAt,
- *  discoverable, why}`: `discoverable` says whether running a discovery would
- *  help, and `why` is empty exactly when `count` is a number. */
+ *  target connection. Returns `{count, fresh, uid, name, discovery, observedAt,
+ *  discoverable, why}`: `fresh` says whether the count may refuse a factor,
+ *  `discoverable` whether running a discovery would help, and `why` is empty
+ *  exactly when `count` is a number. */
 export function targetBrokerFact(answer, cluster) {
   const name = ((((cluster || {}).metadata) || {}).name) || "";
   const fact = Object.assign({}, BROKERS_NOT_READ, {
@@ -2710,10 +2727,11 @@ export function targetBrokerFact(answer, cluster) {
   });
   const said = "the newest successful topic discovery of `" + name + "` (`" + fact.discovery + "`)";
   const boundUid = ((last.connection || {}).uid);
-  if (last.stale === true) {
-    const reasons = Array.isArray(last.staleReasons) ? last.staleReasons.join(", ") : "";
+  const reasons = Array.isArray(last.staleReasons) ? last.staleReasons : [];
+  const expiredAlone = reasons.length === 1 && reasons[0] === "expired";
+  if (last.stale === true && !expiredAlone) {
     return Object.assign(fact, {
-      why: said + " is stale" + (reasons.length > 0 ? " (" + reasons + ")" : "") +
+      why: said + " is stale" + (reasons.length > 0 ? " (" + reasons.join(", ") + ")" : "") +
         ", so its broker count is not used",
     });
   }
@@ -2727,7 +2745,10 @@ export function targetBrokerFact(answer, cluster) {
   if (!Number.isInteger(last.brokerCount) || last.brokerCount < 1) {
     return Object.assign(fact, { why: said + " recorded no broker count" });
   }
-  return Object.assign(fact, { count: last.brokerCount, discoverable: false, why: "" });
+  const fresh = last.stale !== true;
+  return Object.assign(fact, {
+    count: last.brokerCount, fresh: fresh, discoverable: !fresh, why: "",
+  });
 }
 
 /** The broker-count fact on the state, or the not-read one. */
@@ -2738,14 +2759,23 @@ export function brokerFactOf(state) {
 
 /** THE FACTOR ON THE PLAN AND WHERE IT CAME FROM: the operator's own when they
  *  set one, the default otherwise. One answer for step 4, step 6, the draft
- *  and the stepper, so no two of them can describe different factors. */
+ *  and the stepper, so no two of them can describe different factors.
+ *  `brokersAsOf` is the instant a count PAST ITS FRESHNESS was read, said in
+ *  the basis; empty for a fresh count or none. */
 export function replicationChoice(state) {
   const s = state || {};
   const fact = brokerFactOf(s);
+  const asOf = fact.count !== null && fact.fresh !== true
+    ? (fact.observedAt.length > 0 ? fact.observedAt : "an earlier discovery")
+    : "";
   if (s.replicationChosen === true) {
-    return { value: replicationFactorOf(s), basis: "chosen", source: null, brokers: fact.count };
+    return {
+      value: replicationFactorOf(s), basis: "chosen", source: null, brokers: fact.count,
+      brokersAsOf: asOf,
+    };
   }
-  return replicationDefault(sourceReplicationFactorsOf(s), fact.count);
+  return Object.assign(replicationDefault(sourceReplicationFactorsOf(s), fact.count),
+    { brokersAsOf: asOf });
 }
 
 /** Puts the default on the plan, unless the operator set a factor. The one
@@ -2783,6 +2813,13 @@ function brokersWord(count) {
   return String(count) + (count === 1 ? " broker" : " brokers");
 }
 
+/** When a count past its freshness was read, in the words the basis appends:
+ *  ` as of 2026-10-05 09:12:00 UTC`, or nothing for a fresh count. */
+function brokersAsOfText(choice) {
+  const at = typeof (choice || {}).brokersAsOf === "string" ? choice.brokersAsOf : "";
+  return at.length === 0 ? "" : " as of " + (humanInstant(at) || at);
+}
+
 /** WHERE THE FACTOR CAME FROM, in the words both steps print -- "the
  *  source's", "capped at the target's 2 brokers", and the rest. */
 export function replicationBasisText(choice) {
@@ -2793,20 +2830,22 @@ export function replicationBasisText(choice) {
       : "the source's";
   }
   if (c.basis === "capped") {
-    return "capped at the target's " + brokersWord(c.brokers) + "; the source's is " +
-      String(c.source);
+    return "capped at the target's " + brokersWord(c.brokers) + brokersAsOfText(c) +
+      "; the source's is " + String(c.source);
   }
   if (c.basis === "brokers") {
-    return "the target's " + brokersWord(c.brokers) + "; " + SOURCE_FACTOR_NOT_PUBLISHED;
+    return "the target's " + brokersWord(c.brokers) + brokersAsOfText(c) + "; " +
+      SOURCE_FACTOR_NOT_PUBLISHED;
   }
   if (c.basis === "ceiling") {
     return "at most " + String(DEFAULT_REPLICATION_CEILING) + " by default, of the target's " +
-      brokersWord(c.brokers) + "; " + SOURCE_FACTOR_NOT_PUBLISHED;
+      brokersWord(c.brokers) + brokersAsOfText(c) + "; " + SOURCE_FACTOR_NOT_PUBLISHED;
   }
   if (c.basis === "chosen") {
     return "set by you; " + (c.brokers === null
       ? "the target's broker count is not known to this console"
-      : "the target has " + brokersWord(c.brokers));
+      : (brokersAsOfText(c).length > 0 ? "the target had " : "the target has ") +
+        brokersWord(c.brokers) + brokersAsOfText(c));
   }
   return "the plan grammar's default: neither the source's replication factor nor the " +
     "target's broker count is known to this console";
@@ -2823,7 +2862,9 @@ export function replicationText(state) {
 
 /** The page's refusal over the factor, by input, made before anything is sent:
  *  a value a broker cannot place at all, and -- by the readiness check's own
- *  code -- one above the brokers a fresh discovery of the target read. */
+ *  code -- one above the brokers a FRESH discovery of the target read. A count
+ *  past its freshness sets the default and refuses nothing (see
+ *  [`targetBrokerFact`]); the readiness check reads the target again. */
 export function replicationProblems(state) {
   const s = state || {};
   const problems = Object.create(null);
@@ -2837,7 +2878,7 @@ export function replicationProblems(state) {
     return problems;
   }
   const fact = brokerFactOf(s);
-  if (fact.count !== null && rf > fact.count) {
+  if (fact.count !== null && fact.fresh === true && rf > fact.count) {
     problems.replicationFactor =
       "`ReplicationFactorExceedsBrokers`: the target's topic discovery `" + fact.discovery +
       "` read " + brokersWord(fact.count) + ", and a factor of " + String(rf) + " needs " +
@@ -2852,11 +2893,26 @@ export function replicationProblems(state) {
 export function renderBrokerFact(state) {
   const s = state || {};
   const fact = brokerFactOf(s);
-  if (fact.count !== null) {
+  if (fact.count !== null && fact.fresh === true) {
     return "<p class=\"note\" id=\"replication-brokers\">" +
       messageText("The target has " + brokersWord(fact.count) + ", as topic discovery `" +
         fact.discovery + "` read them") +
       (fact.observedAt.length > 0 ? " at " + when(fact.observedAt) : "") +
+      ". The readiness check in step 5 reads them again when it runs.</p>";
+  }
+  if (fact.count !== null) {
+    // PAST ITS FRESHNESS (`expired` alone): the count sets the default, said
+    // with when it was read, and refuses nothing.
+    return "<p class=\"note\" id=\"replication-brokers\">" +
+      messageText("The target had " + brokersWord(fact.count) + " when topic discovery `" +
+        fact.discovery + "` read them") +
+      (fact.observedAt.length > 0 ? " at " + when(fact.observedAt) : "") +
+      ". That discovery is past its freshness, so the count sets the default and refuses no " +
+      "factor" +
+      (fact.name.length > 0
+        ? ": open " + detailLink("clusters", String(s.ns || ""), fact.name) +
+          " and run Discover topics for a fresh count, which also refuses a factor above it"
+        : "") +
       ". The readiness check in step 5 reads them again when it runs.</p>";
   }
   return "<p class=\"note\" id=\"replication-brokers\">" +
