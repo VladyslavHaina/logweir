@@ -376,13 +376,33 @@ fn releases_reuse_checks_and_test_packaged_binary_before_publishing() {
 }
 
 /// PROD-14.0: A DISPATCH IS A DRY RUN. Every job that can write outside the
-/// run — a registry credential, `contents: write`, a release, a tag push, a
-/// chart push — carries the one gate that admits a pushed `v*` tag and nothing
-/// else, so a dispatched run ends at `assemble` with workflow artifacts only.
+/// run — ANY write scope of its token, a credential, a release, a tag push, a
+/// registry write, a GitHub API call — carries the one gate that admits a
+/// pushed `v*` tag and nothing else, so a dispatched run ends at `assemble`
+/// with workflow artifacts only. Review L-3: the classification covers every
+/// write scope (`packages`, `id-token`, …), not `contents` alone, and the
+/// scripts the ungated jobs run.
 #[test]
 fn a_dispatch_is_a_dry_run_that_reaches_no_credential() {
     const GATE: &str = "github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') \
                         && needs.validate.outputs.publish == 'true'";
+    // What marks a job's text as writing outside the run.
+    const WRITES: [&str; 14] = [
+        "secrets.",
+        "gh release create",
+        "gh release upload",
+        "gh release edit",
+        "gh release delete",
+        "gh api",
+        "git push",
+        "release.sh promote",
+        "chart-push",
+        "docker push",
+        "helm push",
+        "registry login",
+        "imagetools create",
+        "docker/login-action",
+    ];
     let release = workflow("release.yml");
     let on = release["on"].as_mapping().unwrap();
     assert_eq!(on.len(), 2, "a tag push and a dispatch, nothing else");
@@ -392,16 +412,30 @@ fn a_dispatch_is_a_dry_run_that_reaches_no_credential() {
         &vec![Value::from("v*")]
     );
     assert!(release["on"]["push"]["branches"].is_null());
+    // The workflow's default grants a read and nothing else: a write scope
+    // there would reach every job, gated or not.
+    assert_eq!(
+        release["permissions"].as_mapping().map(|m| m.len()),
+        Some(1),
+        "release.yml's default permissions are `contents: read` alone"
+    );
+    assert_eq!(release["permissions"]["contents"].as_str(), Some("read"));
     let mut gated: Vec<String> = Vec::new();
     for (name, job) in release["jobs"].as_mapping().unwrap() {
         let name = name.as_str().unwrap().to_string();
         let body = serde_yaml::to_string(job).unwrap();
-        let writes = body.contains("secrets.")
-            || job["permissions"]["contents"] == "write"
-            || body.contains("gh release create")
-            || body.contains("release.sh promote")
-            || body.contains("chart-push")
-            || body.contains("git push");
+        // ANY write scope of the job's token, or `write-all`.
+        let write_scope = match &job["permissions"] {
+            Value::Null => false,
+            Value::String(all) => all != "read-all",
+            Value::Mapping(scopes) => scopes
+                .values()
+                .any(|v| !matches!(v.as_str(), Some("read") | Some("none"))),
+            other => panic!("{name} has invalid permissions: {other:?}"),
+        };
+        // A reusable workflow handed secrets (`secrets: inherit` included).
+        let handed_secrets = !job["secrets"].is_null();
+        let writes = write_scope || handed_secrets || WRITES.iter().any(|w| body.contains(w));
         if writes {
             assert_eq!(
                 job["if"].as_str(),
@@ -415,9 +449,36 @@ fn a_dispatch_is_a_dry_run_that_reaches_no_credential() {
     }
     gated.sort();
     assert_eq!(gated, ["github-release", "publish-images"]);
+    // The scripts the ungated jobs run write nothing either: release.sh's
+    // registry writes are its `promote` arm's alone (publish-images runs it),
+    // and release-build.sh, the `build` job, has none.
+    let script = std::fs::read_to_string(root().join("scripts/release.sh")).unwrap();
+    let build = std::fs::read_to_string(root().join("scripts/release-build.sh")).unwrap();
+    for (file, text, allowed) in [
+        ("scripts/release.sh", &script, Some("promote() {")),
+        ("scripts/release-build.sh", &build, None),
+    ] {
+        let mut inside = false;
+        for line in text.lines() {
+            if allowed.is_some_and(|start| line.starts_with(start)) {
+                inside = true;
+            }
+            let code = line.trim_start();
+            if !inside && !code.starts_with('#') {
+                for verb in WRITES.iter().filter(|w| **w != "secrets.") {
+                    assert!(
+                        !code.contains(verb),
+                        "{file} writes (`{verb}`) outside the arm only a pushed tag runs: {line}"
+                    );
+                }
+            }
+            if inside && line == "}" {
+                inside = false;
+            }
+        }
+    }
     // The gate's own input: `release.sh validate` says `publish=true` for a
     // tag push and nothing else (scripts/test-release.py, Validate).
-    let script = std::fs::read_to_string(root().join("scripts/release.sh")).unwrap();
     assert!(script.contains("tag=\"$REF_NAME\" publish=true ;;"));
     assert!(script.contains("tag=\"${REHEARSAL_TAG:-}\" publish=false ;;"));
 }
@@ -481,6 +542,44 @@ fn a_release_is_created_only_when_github_says_there_is_none() {
         .find("could not tell whether $TAG has a GitHub Release; nothing created")
         .expect("any other failure is refused");
     assert!(read < absent && absent < created && created < refused);
+}
+
+/// PROD-14.0 (review L-3): THE PUBLISHED RELEASE IS VERIFIED AGAIN AFTER
+/// DOWNLOAD. github-release's LAST step downloads what GitHub serves, checks it
+/// with `release.sh verify`, compares every asset byte for byte with the one
+/// `assemble` verified, and reads the release back as published (not a
+/// draft); the step that creates it verifies the assets first.
+#[test]
+fn the_published_release_is_downloaded_and_verified_last() {
+    let release = workflow("release.yml");
+    let steps = release["jobs"]["github-release"]["steps"]
+        .as_sequence()
+        .unwrap();
+    let last = steps.last().unwrap()["run"]
+        .as_str()
+        .expect("github-release ends in a run step");
+    let mut from = 0;
+    for needle in [
+        "set -euo pipefail",
+        "gh release download \"$TAG\" --repo \"$GITHUB_REPOSITORY\" --dir downloaded",
+        "bash scripts/release.sh verify downloaded",
+        "for asset in release-assets/release/assets/*; do cmp \"$asset\" \"downloaded/${asset##*/}\"; done",
+        "[ \"$state\" = \"false $PRERELEASE $TAG\" ]",
+    ] {
+        let at = last[from..].find(needle).unwrap_or_else(|| {
+            panic!("github-release's last step must run `{needle}`, in this order (review L-3)")
+        });
+        from += at + needle.len();
+    }
+    let create = steps
+        .iter()
+        .filter_map(|s| s["run"].as_str())
+        .find(|r| r.contains("gh release create"))
+        .expect("github-release creates the release");
+    let verified = create
+        .find("bash scripts/release.sh verify \"$assets\"")
+        .expect("the assets are verified before the release is created");
+    assert!(verified < create.find("gh release create").unwrap());
 }
 
 /// PROD-14.0 (review L-7): EVERY ACTION IN A JOB THAT HOLDS A PUBLISHING

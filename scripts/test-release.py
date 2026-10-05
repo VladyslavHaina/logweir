@@ -392,6 +392,17 @@ class Promote(Release):
                 self.assertIn("could not tell whether", result.stderr)
                 self.assertEqual(self.creates(), [])
 
+    def test_a_version_tag_that_is_not_a_carbon_copy_is_refused(self):
+        """Review L-4: the anonymous read-back is the run-time proof that the
+        version tag names the publication's own bytes. A registry or buildx
+        that re-wraps the manifest (a new digest) must fail the promotion."""
+        self.env["MOCK_REWRAP"] = "1"
+        result = self.promote(success=False)
+        self.assertIn("after promotion, not", result.stderr)
+        self.assertIn("(not a carbon copy)", result.stderr)
+        self.assertNotIn(self.TAG, self.summary.read_text() if self.summary.exists() else "",
+                         "a refused promotion reports no version tag as published")
+
     def test_only_a_version_tag(self):
         for tag in ("sha-" + self.head, "latest", "main"):
             with self.subTest(tag=tag):

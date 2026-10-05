@@ -63,18 +63,27 @@ if args[:3] == ["buildx", "imagetools", "inspect"]:
     print(json.dumps({k: v for k, v in {**record, "digest": digest}.items() if k != "image"}))
 elif args[:3] == ["buildx", "imagetools", "create"]:
     tags, refs = [], []
+    prefer_index = True
     i = 3
     while i < len(args):
         if args[i] == "--tag":
             tags.append(args[i + 1]); i += 2
         elif args[i] == "--prefer-index=false":
-            i += 1
+            prefer_index = False; i += 1
         else:
             refs.append(args[i]); i += 1
     if not tags or not refs or any(ref not in state for ref in refs):
         sys.exit(2)
-    if len(refs) == 1:
+    if len(refs) == 1 and not prefer_index and not os.environ.get("MOCK_REWRAP"):
+        # One source and no index: a carbon copy, the source's own digest.
         record = state[refs[0]]
+    elif len(refs) == 1:
+        # RE-WRAPPED: buildx's default (--prefer-index=true) wraps a single
+        # manifest in a NEW index, and MOCK_REWRAP does so whatever the flag
+        # says (review L-4). Either way the tag names a digest the source
+        # never had.
+        source = state[refs[0]]
+        record = {**source, "digest": "sha256:" + hashlib.sha256(("index:" + refs[0]).encode()).hexdigest()}
     else:
         record = {
             "digest": "sha256:" + hashlib.sha256(json.dumps(refs).encode()).hexdigest(),
@@ -133,7 +142,7 @@ class PromotionTests(unittest.TestCase):
             "MOCK_MAIN_SHA": SHA,
         }
         for knob in ("MOCK_FAIL_INSPECT_REF", "MOCK_WRONG_ROLLING", "MOCK_UNREACHABLE_REF", "MOCK_UNREACHABLE_ERROR",
-                     "MOCK_HELM_UNREACHABLE", "MOCK_CORRUPT_PULL"):
+                     "MOCK_REWRAP", "MOCK_HELM_UNREACHABLE", "MOCK_CORRUPT_PULL"):
             self.env.pop(knob, None)
         # Hermetic: a caller's registry configuration (a local gate run with
         # DOCKER_CONFIG set) must not reach the script, or the recorded
