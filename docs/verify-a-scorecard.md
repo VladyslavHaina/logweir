@@ -2,6 +2,9 @@
 
 This guide explains how to authenticate a scorecard, check its consistency,
 and interpret its limits using either Logweir or an independent Python verifier.
+For what the evidence supports, and what it does not show, against the backup
+and restore-testing clauses of DORA, ISO/IEC 27001, SOC 2, NIS2 and HIPAA, read
+the [control-evidence mapping](control-evidence.md).
 
 ## What the artifact is
 
@@ -350,7 +353,9 @@ itself cannot be verified.
 ## What the scorecard does **not** claim
 
 A signature authenticates the publisher's bytes. Assess the scope and strength
-of the signed claims separately.
+of the signed claims separately. The
+[control-evidence mapping](control-evidence.md#what-the-evidence-does-not-show)
+states these limits against each control clause it maps.
 
 ### A pass compares the restored topic with the archive, not with the source
 
