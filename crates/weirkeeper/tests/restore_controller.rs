@@ -9309,6 +9309,62 @@ async fn a_restore_that_asks_for_nothing_gets_no_resources_key() {
     );
 }
 
+/// **A ONE-SIDED BLOCK REACHES THE CONTAINER AS WRITTEN** — review L7, the
+/// reviewer's probe P5 made a shipped row. Every other admitted row here uses
+/// a two-sided block, so a copy that "applies the block only when it caps
+/// something" (`resources.filter(|r| !r.limits.is_empty())` where the block
+/// enters `RunnerJobSpec`) dropped every requests-only block — FX-2's own
+/// defect, back for that shape — and the whole suite stayed green (mutant
+/// C1, 1,736 rows, 0 failed).
+///
+/// Three shapes, each admitted and each `POST`ed exactly as written:
+/// requests only (the `BestEffort` pod C1 brings back); limits only; and a
+/// request on one resource beside a limit on the other — at exactly the
+/// ceilings, 4 CPUs and 8Gi, so the at-ceiling value is also judged through
+/// the reconciler and not only by the pure row (review R1).
+///
+/// MUTANTS: C1 (a block without limits dropped at the copy); a block without
+/// requests dropped there; rule 3 refusing AT the ceiling (R1).
+#[tokio::test]
+async fn a_one_sided_block_reaches_the_container_as_written() {
+    for (label, block) in [
+        (
+            "requests only",
+            serde_json::json!({"requests": {"cpu": "250m", "memory": "512Mi"}}),
+        ),
+        (
+            "limits only",
+            serde_json::json!({"limits": {"memory": "1Gi"}}),
+        ),
+        (
+            "a request on cpu beside a limit on memory, both at the ceiling",
+            serde_json::json!({"requests": {"cpu": "4"}, "limits": {"memory": "8Gi"}}),
+        ),
+    ] {
+        let (client, _rec, bodies) = mock_client_recording_bodies(admission_routes(
+            200,
+            approval_json(true, &plan_hash(), &plan_hash()),
+            200,
+            cluster_json(true, PLAINTEXT_AUTH),
+        ));
+        let outcome = reconcile_restore(
+            &restore_with_resources(block.clone()),
+            &client,
+            &unobserved_scorecard,
+            &unverified_evidence,
+            now(),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{label}: a valid one-sided block is admitted: {e}"));
+        assert!(outcome.created, "{label}: the Job was created");
+        let container = only_container(&posted_job(&bodies.lock().expect("readable")));
+        assert_eq!(
+            container["resources"], block,
+            "{label}: the runner container carries exactly the one-sided block: {container}"
+        );
+    }
+}
+
 /// **FX-2, THE REFUSAL.** A block the controller will not apply ends the
 /// object `Failed` / `ExecutionSpecInvalid`, naming the field — with ZERO
 /// `POST`s over a route table that HAS them, and BEFORE the approval is read.

@@ -216,6 +216,10 @@ fn nothing_above_the_ceiling_is_accepted_and_nothing_is_clamped() {
     // At the ceiling: accepted.
     assert!(check(json!({"limits": {"cpu": "4", "memory": "8Gi"}})).is_ok());
     assert!(check(json!({"limits": {"cpu": "4000m", "memory": "8589934592"}})).is_ok());
+    // …in every binary spelling below `Gi` too (review L8: with `Ki` read as
+    // 1000, `8388609Ki` — one Ki over — was ACCEPTED and reached the Job).
+    assert!(check(json!({"limits": {"memory": "8388608Ki"}})).is_ok());
+    assert!(check(json!({"limits": {"memory": "8192Mi"}})).is_ok());
     // One unit above it: refused.
     for (label, value, field) in [
         (
@@ -226,6 +230,16 @@ fn nothing_above_the_ceiling_is_accepted_and_nothing_is_clamped() {
         (
             "memory limit",
             json!({"limits": {"memory": "8589934593"}}),
+            "limits.memory",
+        ),
+        (
+            "memory limit one Ki above",
+            json!({"limits": {"memory": "8388609Ki"}}),
+            "limits.memory",
+        ),
+        (
+            "memory limit one Mi above",
+            json!({"limits": {"memory": "8193Mi"}}),
             "limits.memory",
         ),
         (
@@ -340,6 +354,10 @@ fn a_limit_is_a_cap() {
     }
     assert!(check(json!({"limits": {"memory": MEMORY_LIMIT_FLOOR}})).is_ok());
     assert!(check(json!({"limits": {"memory": "33554432"}})).is_ok());
+    // The floor in `Ki` (review L8): exactly 32Mi is a cap, one Ki less is not.
+    assert!(check(json!({"limits": {"memory": "32768Ki"}})).is_ok());
+    let text = refused(json!({"limits": {"memory": "32767Ki"}}));
+    assert!(text.contains(MEMORY_LIMIT_FLOOR), "32767Ki: {text}");
     assert!(check(json!({"requests": {"cpu": "0", "memory": "0"}})).is_ok());
     assert!(check(json!({"requests": {"memory": "512"}})).is_ok());
     // The smallest cpu limit is one millicore.
@@ -396,6 +414,31 @@ fn quantities_compare_exactly_across_spellings() {
     same("1e-3", "1m");
     same("2.5e2", "250");
     same("0", "0Ei");
+    // EVERY SUFFIX, PINNED TO ITS EXACT VALUE IN PLAIN DIGITS (review L8). A
+    // pair of two suffixed spellings cannot catch a table entry that is wrong
+    // on both sides; digits can. `Ki` read as 1000 survived the whole suite.
+    for (suffixed, digits) in [
+        ("1Ki", "1024"),
+        ("1Mi", "1048576"),
+        ("1Gi", "1073741824"),
+        ("1Ti", "1099511627776"),
+        ("1Pi", "1125899906842624"),
+        ("1Ei", "1152921504606846976"),
+        ("1k", "1000"),
+        ("1M", "1000000"),
+        ("1G", "1000000000"),
+        ("1T", "1000000000000"),
+        ("1P", "1000000000000000"),
+        ("1E", "1000000000000000000"),
+        ("1000000000n", "1"),
+        ("1000000u", "1"),
+        ("1000m", "1"),
+    ] {
+        same(suffixed, digits);
+    }
+    // The two spellings review L8 named: the floor and the ceiling, in `Ki`.
+    same("32768Ki", "32Mi");
+    same("8388608Ki", "8Gi");
     let less = |a: &str, b: &str| {
         assert_eq!(
             parse(a)
@@ -473,6 +516,19 @@ fn the_bounds_the_crds_describe_are_the_bounds_the_controller_enforces() {
             assert!(
                 text.contains(&needle),
                 "{crd} must describe the bound the controller enforces: `{needle}`"
+            );
+        }
+        // THE PER-QUANTITY DESCRIPTIONS TOO (review nit): `kubectl explain
+        // …runnerResources.limits.memory` shows these, under `requests` and
+        // under `limits`, so each sentence appears exactly twice per CRD.
+        for needle in [
+            format!("A whole number of millicores, at most {CPU_CEILING}:"),
+            format!("at most {MEMORY_CEILING}, and as a limit at least {MEMORY_LIMIT_FLOOR}:"),
+        ] {
+            assert_eq!(
+                text.matches(&needle).count(),
+                2,
+                "{crd} must state `{needle}` under requests and under limits"
             );
         }
     }

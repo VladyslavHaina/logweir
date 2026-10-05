@@ -4455,16 +4455,30 @@ fn routes_authorizing(schedule: &RehearsalSchedule) -> (Vec<Route>, Value) {
 /// controller's own pure builder puts exactly that on the runner container —
 /// the whole path the field travels, schedule to pod spec, in one row.
 ///
-/// Every request differs from its limit, so a swap anywhere is visible.
+/// Every request differs from its limit, so a swap anywhere is visible. The
+/// two ONE-SIDED shapes run the same path (review L7's class sweep): a copy
+/// that kept only a block that caps something would drop a requests-only
+/// block at the schedule's copy just as mutant C1 did at the `Restore`'s.
 ///
 /// MUTANTS: `runner_resources: None` in `child_restore` (the projection);
-/// `resources: None` in `job::build` (the container).
+/// `resources: None` in `job::build` (the container); a requests-only block
+/// dropped in `child_restore` (C1r).
 #[tokio::test]
 async fn bounds_runner_resources_reach_the_child_restore_and_its_runner_container() {
-    let resources = json!({
-        "requests": {"cpu": "250m", "memory": "512Mi"},
-        "limits": {"cpu": "1", "memory": "2Gi"}
-    });
+    for resources in [
+        json!({
+            "requests": {"cpu": "250m", "memory": "512Mi"},
+            "limits": {"cpu": "1", "memory": "2Gi"}
+        }),
+        json!({"requests": {"cpu": "250m", "memory": "512Mi"}}),
+        json!({"limits": {"cpu": "1", "memory": "2Gi"}}),
+    ] {
+        bounds_reach_the_child_and_its_container(resources).await;
+    }
+}
+
+/// One block, schedule to child `Restore` to runner container.
+async fn bounds_reach_the_child_and_its_container(resources: Value) {
     let schedule = schedule_with_resources(resources.clone());
     let (table, approval) = routes_authorizing(&schedule);
     let (client, recorder, bodies) = mock_client_recording_bodies(table);
@@ -4473,10 +4487,14 @@ async fn bounds_runner_resources_reach_the_child_restore_and_its_runner_containe
         .expect("the reconcile answers");
     assert!(
         matches!(&outcome.verdict, rs::Verdict::Fire(_)),
-        "a valid block fires the slot: {:?}",
+        "a valid block fires the slot ({resources}): {:?}",
         outcome.verdict
     );
-    assert_eq!(posted(&recorder, RESTORES_PATH), 1, "exactly one child");
+    assert_eq!(
+        posted(&recorder, RESTORES_PATH),
+        1,
+        "exactly one child ({resources})"
+    );
     let child = bodies
         .lock()
         .expect("the body recorder is not poisoned")
