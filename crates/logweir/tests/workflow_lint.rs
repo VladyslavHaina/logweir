@@ -261,7 +261,11 @@ fn the_chart_is_published_beside_the_images_it_names() {
         ("DOCKERHUB_USERNAME", "${{ secrets.DOCKERHUB_USERNAME }}"),
         ("DOCKERHUB_TOKEN", "${{ secrets.DOCKERHUB_TOKEN }}"),
     ] {
-        assert_eq!(steps[push]["env"][name].as_str(), Some(value), "no new secret");
+        assert_eq!(
+            steps[push]["env"][name].as_str(),
+            Some(value),
+            "no new secret"
+        );
     }
 
     let script = std::fs::read_to_string(root().join("scripts/ci-images.sh")).unwrap();
@@ -318,7 +322,10 @@ fn releases_reuse_checks_and_test_packaged_binary_before_publishing() {
     let release = workflow("release.yml");
     let jobs = &release["jobs"];
     assert_eq!(jobs["tests"]["uses"], "./.github/workflows/ci.yml");
-    assert!(jobs["tests"]["secrets"].is_null(), "the test gate gets no secret");
+    assert!(
+        jobs["tests"]["secrets"].is_null(),
+        "the test gate gets no secret"
+    );
     assert_eq!(
         jobs["drill"]["uses"],
         "./.github/workflows/release-drill.yml"
@@ -466,7 +473,10 @@ fn release_archives_are_built_and_checked_by_one_script_before_upload() {
         matrix,
         [
             ("x86_64-unknown-linux-gnu".into(), "ubuntu-24.04".into()),
-            ("aarch64-unknown-linux-gnu".into(), "ubuntu-24.04-arm".into()),
+            (
+                "aarch64-unknown-linux-gnu".into(),
+                "ubuntu-24.04-arm".into()
+            ),
             ("aarch64-apple-darwin".into(), "macos-14".into()),
         ],
         "one NATIVE runner per target: no cross toolchain"
@@ -511,7 +521,10 @@ fn release_archives_are_built_and_checked_by_one_script_before_upload() {
         let at = script
             .find(step)
             .unwrap_or_else(|| panic!("scripts/release-build.sh no longer runs `{step}`"));
-        assert!(at > last, "`{step}` runs out of order in scripts/release-build.sh");
+        assert!(
+            at > last,
+            "`{step}` runs out of order in scripts/release-build.sh"
+        );
         last = at;
     }
     let ci_check = std::fs::read_to_string(root().join("scripts/ci-check.sh")).unwrap();
