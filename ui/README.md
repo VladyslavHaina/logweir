@@ -1139,6 +1139,21 @@ storage, never durability.
 | nothing | the grammar's 1 | `1 (the plan grammar's default: neither the source's replication factor nor the target's broker count is known to this console)`, and a warning beside the input |
 | a value the operator typed | that value | `4 (set by you; the target has 5 brokers)` |
 
+**The factor can differ from the source's, and both steps say what that
+costs** (FX-5 review M1). A default worked out from the target's brokers knows
+nothing of the source's factor. So unless the source's factor is known and the
+plan asks for exactly it (never, in this build), step 4 prints this beside the
+basis, and the review step prints it under its row:
+
+> This factor can differ from the source's, and the target's storage follows
+> it: a topic the source kept at replication factor 1, restored at 3, takes
+> three times the storage it took there, with the replication traffic on top; a
+> factor below the source's keeps fewer copies than the source had.
+
+The sentence is `REPLICATION_DIFFERS_NOTE` and the rule is
+`replicationMayDiffer`; the quickstart (section 7) carries the same sentence,
+and one row holds the page and both documents to it.
+
 **The source's factor is not readable in this build, and the page says so.**
 The backup engine records it per topic in the archive manifest
 (`topics[].source_replication_factor`), and only the restore Job reads the

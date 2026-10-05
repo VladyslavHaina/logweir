@@ -166,7 +166,11 @@ always a destination with no `evidenceRead` grant.
    *Discover topics* of the target connection has read it, and otherwise to 1,
    which the step says; run the discovery first, or set the factor yourself
    ([ui/README.md](../ui/README.md), *The replication factor: a default with its
-   basis, an input, and a refusal before Create*).
+   basis, an input, and a refusal before Create*). This factor can differ from
+   the source's, and the target's storage follows it: a topic the source kept
+   at replication factor 1, restored at 3, takes three times the storage it
+   took there, with the replication traffic on top; a factor below the
+   source's keeps fewer copies than the source had.
 3. The readiness check must pass before *Create the Restore* is enabled: every
    blocking row `ready`, except the approval row, which is `skipped` until the
    Restore exists ([kubernetes.md](kubernetes.md) §21.7; [ui/README.md](../ui/README.md),

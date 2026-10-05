@@ -2564,6 +2564,28 @@ export const REPLICATION_HELP =
   "it to go back to the default. The readiness check in step 5 validates it against the " +
   "target's brokers when it runs, and the restore asks for exactly this many replicas.";
 
+/** THE FACTOR CAN DIFFER FROM THE SOURCE'S, AND WHAT THAT COSTS (FX-5 review
+ *  M1). A default worked out from the TARGET's brokers knows nothing of the
+ *  source's factor: a source kept on one replica comes back on three, and every
+ *  restored byte is stored three times, or a source kept on five comes back on
+ *  three. Said beside the basis on step 4 and under the review row on step 6
+ *  whenever [`replicationMayDiffer`] -- in this build always, because no record
+ *  this console reads carries the source's factor. `ui/README.md` and
+ *  `docs/quickstart.md` (section 7) carry the same sentence, and
+ *  `ui/tests/replication-factor.spec.js` holds all three to it. */
+export const REPLICATION_DIFFERS_NOTE =
+  "This factor can differ from the source's, and the target's storage follows it: a topic the " +
+  "source kept at replication factor 1, restored at 3, takes three times the storage it took " +
+  "there, with the replication traffic on top; a factor below the source's keeps fewer copies " +
+  "than the source had.";
+
+/** Whether the plan's factor may differ from the source's: unless the
+ *  source's factor is known AND the plan asks for exactly it. */
+export function replicationMayDiffer(choice) {
+  const c = choice || {};
+  return !(Number.isInteger(c.source) && c.value === c.source);
+}
+
 /** THE SOURCE'S REPLICATION FACTOR FOR EACH SELECTED TOPIC -- and in this
  *  build there is none to read, so the answer is `null`, by name.
  *
@@ -2868,6 +2890,9 @@ export function renderReplicationField(state) {
       : "") +
     "<p class=\"note\" id=\"replication-basis\">This plan asks for " +
     esc(replicationText(s)) + ".</p>" +
+    (replicationMayDiffer(choice)
+      ? "<p class=\"note\" id=\"replication-differs\">" + esc(REPLICATION_DIFFERS_NOTE) + "</p>"
+      : "") +
     (choice.basis === "grammar"
       ? "<p class=\"complaint\" id=\"replication-unknown\">" + esc(REPLICATION_UNKNOWN_WARNING) +
         "</p>"
@@ -3417,6 +3442,10 @@ export function renderPlanStep(prepared, state) {
       ["replication factor", "<span id=\"review-replication\">" + esc(replicationText(s)) +
         "</span>"],
     ]) +
+    (replicationMayDiffer(replicationChoice(s))
+      ? "<p class=\"note\" id=\"review-replication-differs\">" + esc(REPLICATION_DIFFERS_NOTE) +
+        "</p>"
+      : "") +
     (typeof replicationRefused === "string"
       ? "<p class=\"complaint\" id=\"review-replication-complaint\">Nothing is sent while the " +
         "replication factor is refused: " + messageText(replicationRefused) + "</p>" +

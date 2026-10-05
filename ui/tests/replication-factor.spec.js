@@ -33,6 +33,7 @@ import {
   DEFAULT_REPLICATION_CEILING,
   FIELD_STEP,
   GRAMMAR_REPLICATION_FACTOR,
+  REPLICATION_DIFFERS_NOTE,
   REPLICATION_UNKNOWN_WARNING,
   SOURCE_FACTOR_NOTE,
   WIZARD_DRAFT_FIELDS,
@@ -52,6 +53,7 @@ import {
   replicationChoice,
   replicationDefault,
   replicationFactorOf,
+  replicationMayDiffer,
   replicationBasisText,
   replicationProblems,
   replicationText,
@@ -69,6 +71,7 @@ import { keepDraft, readDraft } from "../lifecycle.js";
 import { fakeView, parse as viewParse } from "./fake-view.js";
 
 const FIXTURES = fileURLToPath(new URL("./fixtures/", import.meta.url));
+const UI_DIR = fileURLToPath(new URL("../", import.meta.url));
 const fixture = (name) => JSON.parse(readFileSync(FIXTURES + name, "utf8"));
 
 /** The TARGET connection's latest discovery, the fixture the product API's own
@@ -335,6 +338,58 @@ test("fx5_a_larger_target_is_capped_at_three_and_a_single_broker_at_one", async 
   assert.equal(replicationChoice(one).basis, "brokers",
     "NEGATIVE CONTROL: \"grammar\" -- a 1 nobody read -- fails this: this 1 is the target's");
   assert.deepEqual(replicationProblems(one), Object.create(null));
+});
+
+test("fx5_the_factor_can_differ_from_the_sources_and_both_steps_and_the_docs_say_so", async () => {
+  // FX-5 review M1. A default worked out from the TARGET's brokers knows
+  // nothing of the source's factor, and the difference is the operator's
+  // storage bill: a topic the source kept on one replica, restored at 3, is
+  // stored three times. Where the factor is set (step 4, beside the basis) and
+  // where it is reviewed (step 6, under its row, above Create), the page says
+  // so whenever the source's factor is not known to equal the plan's -- every
+  // basis this build reaches.
+  const typedOne = withBrokers(wizardState(), BROKERS);
+  setReplicationFactor(typedOne, "1");
+  for (const [label, state] of [
+    ["the broker count", withBrokers(wizardState(), BROKERS)],
+    ["the ceiling", withBrokers(wizardState(), 5)],
+    ["the grammar's 1", wizardState()],
+    ["a typed factor", typedOne],
+  ]) {
+    const step4 = renderTargetStep(state);
+    assert.equal(visible(byId(step4, "replication-differs") || ""), REPLICATION_DIFFERS_NOTE,
+      "NEGATIVE CONTROL: step 4 without the sentence fails this (" + label + ")");
+    assert.ok(step4.indexOf("id=\"replication-differs\"") > step4.indexOf("id=\"replication-basis\""),
+      "beside the basis, after it (" + label + ")");
+    const step6 = renderPlanStep(await preparePlan(state), state);
+    const review = byId(step6, "review-replication-differs");
+    assert.equal(visible(review || ""), REPLICATION_DIFFERS_NOTE,
+      "NEGATIVE CONTROL: the review step without the sentence fails this (" + label + ")");
+    assert.ok(step6.indexOf("id=\"review-replication\"") < step6.indexOf("id=\"review-replication-differs\"") &&
+      step6.indexOf("id=\"review-replication-differs\"") < step6.indexOf("id=\"create-restore\""),
+    "under the review row and above Create (" + label + ")");
+  }
+  // THE BRIEF'S EXAMPLE, in the sentence itself: replication factor 1
+  // restored at 3 triples what the topic takes.
+  assert.match(REPLICATION_DIFFERS_NOTE,
+    /a topic the source kept at replication factor 1, restored at 3, takes three times the storage/);
+  assert.match(REPLICATION_DIFFERS_NOTE, /a factor below the source's keeps fewer copies/,
+    "and the other direction");
+  // THE RULE: silent only when the source's factor is known and is the plan's.
+  assert.equal(replicationMayDiffer(replicationDefault([3], 5)), false,
+    "NEGATIVE CONTROL: true -- a difference said where there is none -- fails this");
+  assert.equal(replicationMayDiffer(replicationDefault([3], 2)), true, "capped below the source's");
+  assert.equal(replicationMayDiffer(replicationDefault(null, 2)), true, "the source's not known");
+  assert.equal(replicationMayDiffer(replicationDefault(null, null)), true, "nothing known");
+  assert.equal(replicationMayDiffer({ value: 4, basis: "chosen", source: 3, brokers: 5 }), true,
+    "a typed factor that is not the source's");
+  // THE SAME SENTENCE IN THE RESTORE DOCS: the wizard's own section and the
+  // quickstart's restore step. Markdown wraps lines and quotes with `>`.
+  const flat = (text) => text.replace(/^[ \t]*>[ \t]?/gm, "").replace(/\s+/g, " ");
+  for (const doc of ["README.md", "../docs/quickstart.md"]) {
+    assert.ok(flat(readFileSync(UI_DIR + doc, "utf8")).includes(REPLICATION_DIFFERS_NOTE),
+      "NEGATIVE CONTROL: " + doc + " without the page's sentence fails this");
+  }
 });
 
 // ---------------------------------------------- the edit and its refusal
