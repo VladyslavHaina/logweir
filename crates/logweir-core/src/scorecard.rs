@@ -473,7 +473,45 @@ pub struct TopicParity {
     /// `Some([])` is that claim, and only phase 7 writes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub not_assessed: Option<Vec<String>>,
+    /// **Format 1.2.0 (FX-3).** The source settings a `newTopic` restore did
+    /// NOT reconstruct on the target, each as `"<target topic>: <key>"`, the
+    /// shape of the two lists above. `<key>` is one of the four the restore's
+    /// own topic creation decides instead of copying from the source:
+    /// `cleanup.policy` (left to the target broker's default), `retention.ms`
+    /// (`-1`), `partition_count` and `replication_factor` (the plan's). A
+    /// `scratch` drill reports the same four as `intentionally_deviated`,
+    /// because a scratch cluster runs `cleanup.policy=delete`, infinite
+    /// retention and one broker on purpose; a `newTopic` restore is the
+    /// recovery itself, so before 1.2.0 that label signed lost compaction and
+    /// replication factor 1 as "intended".
+    ///
+    /// **Every entry is ALSO in `unexpected_divergence`, and never in
+    /// `intentionally_deviated`** (arms NR-2 and NR-3 of `validate_invariants`,
+    /// in both readers): a reader that predates this field sees each one as an
+    /// unexpected divergence — a weaker conclusion than the label it replaces,
+    /// never a stronger one, and never silence that reads as parity.
+    ///
+    /// ABSENT means NOT RECORDED: every document before 1.2.0, and one whose
+    /// phase 7 never ran. In a `newTopic` document before 1.2.0 the writer
+    /// applied the scratch rationale, so every `intentionally_deviated` entry
+    /// there is a source setting that was NOT reconstructed, whatever its
+    /// label; both readers print that. `Some([])` is the claim that no
+    /// setting was left unreconstructed — every `scratch` run, and a
+    /// `newTopic` run whose compared settings all matched — and only phase 7
+    /// writes it, from 1.2.0 on (arm NR-1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_reconstructed: Option<Vec<String>>,
 }
+
+/// The first minor of scorecard format 1 that defines
+/// `topic_parity.not_reconstructed` (FX-3), which arm NR-1 of
+/// `validate_invariants` enforces. **A renumber changes this and
+/// [`crate::FORMAT_VERSION`] together**; NR-1's message is built from it,
+/// `docs/verify_scorecard.py`'s `TOPIC_PARITY_NOT_RECONSTRUCTED_SINCE_MINOR`
+/// must equal it (`docs/test_verify_scorecard.py::
+/// test_the_not_reconstructed_minor_is_the_rust_readers`), and
+/// `the_written_version_defines_not_reconstructed` keeps the pair coherent.
+pub const NOT_RECONSTRUCTED_SINCE_MINOR: u64 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct EngineSubreport {
@@ -609,6 +647,14 @@ pub struct InvariantError(pub String);
 /// as major 0).
 fn major_version(v: &str) -> Option<u64> {
     v.split('.').next()?.parse().ok()
+}
+
+/// The second dot-separated component of a semver string, parsed as an
+/// integer; `None` when there is none or it does not parse. Read by arm NR-1
+/// only, which asks whether a document's version defines
+/// `topic_parity.not_reconstructed`.
+fn minor_version(v: &str) -> Option<u64> {
+    v.split('.').nth(1)?.parse().ok()
 }
 
 impl Scorecard {
@@ -1077,6 +1123,64 @@ impl Scorecard {
                 ));
             }
         }
+        // `topic_parity.not_reconstructed` (format 1.2.0, FX-3): arms NR-1,
+        // NR-2 and NR-3. They fire ONLY on a document that CARRIES the block,
+        // so every document without it — every 1.0.0 and 1.1.0 scorecard, and
+        // a 1.2.0 one whose phase 7 never ran — is decided exactly as before.
+        // Each judges the new block, against `format_version` (NR-1) or the
+        // two lists every reader already shows (NR-2, NR-3), the way the
+        // receipt's FX-4 arms 6 and 7 judge `config_coverage` against
+        // `format_version` and `source.topics`: MINOR under the owner's OD-7
+        // (a) (`docs/stability.md`, "The v0.1.0 tag is the compatibility
+        // boundary").
+        //
+        // NOT INTERPOLATED, except NR-1's version: an entry names a topic, an
+        // adopter-influenced string, and the messages are joined to
+        // `index.json`'s `arm` fields by literal substring.
+        //
+        // Mirrored arm for arm, in this order and this position (after
+        // `target.auth`, before `redactions`, which stays last), in
+        // `docs/verify_scorecard.py::check_invariants`.
+        if let Some(not_reconstructed) = &self.topic_parity.not_reconstructed {
+            // NR-1. A document declaring a version before 1.2.0 cannot carry
+            // a 1.2.0 field: under it, `intentionally_deviated` used the
+            // scratch rationale in every mode, so a reader would not know
+            // which of the two meanings the lists carry.
+            let defined = major_version(&self.format_version) == Some(1)
+                && minor_version(&self.format_version)
+                    .is_some_and(|minor| minor >= NOT_RECONSTRUCTED_SINCE_MINOR);
+            if !defined {
+                return Err(InvariantError(format!(
+                    "topic_parity.not_reconstructed is present but format_version {:?} predates \
+                     it: the field is defined from 1.{NOT_RECONSTRUCTED_SINCE_MINOR}.0",
+                    self.format_version
+                )));
+            }
+            // NR-2. THE FAIL-SAFE TWIN: what makes the 1.2.0 move safe for an
+            // older reader. It reads only the two lists it always had, so a
+            // deviation named here and missing there would be SILENCE to it,
+            // which reads as parity — the defect FX-4's review M5 named.
+            if not_reconstructed
+                .iter()
+                .any(|e| !self.topic_parity.unexpected_divergence.contains(e))
+            {
+                return Err(InvariantError(
+                    "topic_parity.not_reconstructed names a deviation that unexpected_divergence does not; a source setting the restore did not reconstruct is also an unexpected divergence, so a reader that predates not_reconstructed never reads it as parity"
+                        .into(),
+                ));
+            }
+            // NR-3. A setting the restore did not reconstruct is the opposite
+            // of the label a scratch drill gives the same deviation.
+            if not_reconstructed
+                .iter()
+                .any(|e| self.topic_parity.intentionally_deviated.contains(e))
+            {
+                return Err(InvariantError(
+                    "topic_parity.not_reconstructed names a deviation that intentionally_deviated also names; a source setting the restore did not reconstruct is never an intended deviation"
+                        .into(),
+                ));
+            }
+        }
         // T0-3: `docs/formats/drill-scorecard.md`'s `## redactions` section
         // states "Always `[]` in v0.1" as a PROPERTY OF THE FORMAT, and until
         // now nothing enforced it and no surface displayed it — a third party
@@ -1226,6 +1330,7 @@ mod tests {
                 intentionally_deviated: vec![],
                 unexpected_divergence: vec![],
                 not_assessed: None,
+                not_reconstructed: None,
             },
             engine_subreport: None,
             evidence: EvidenceInfo {
@@ -1825,8 +1930,11 @@ mod tests {
             .expect_err("a format_version from a future major must be refused");
         assert_eq!(
             err.0,
-            "format_version 9.9.9 has a major version newer than this reader understands \
-             (this build knows 1.1.0)"
+            format!(
+                "format_version 9.9.9 has a major version newer than this reader understands \
+                 (this build knows {})",
+                crate::FORMAT_VERSION
+            )
         );
     }
 
@@ -1869,8 +1977,11 @@ mod tests {
             .expect_err("v0.1 has no writer that can produce a redaction");
         assert_eq!(
             err.0,
-            "redactions is non-empty but format_version 1.1.0 has no way to produce one; \
-             --redact is a v0.1.1 feature"
+            format!(
+                "redactions is non-empty but format_version {} has no way to produce one; \
+                 --redact is a v0.1.1 feature",
+                crate::FORMAT_VERSION
+            )
         );
     }
 
@@ -2245,5 +2356,186 @@ mod tests {
         let sc = valid_scorecard();
         assert_eq!(sc.outcome, Outcome::Pass, "the control really is a `pass`");
         assert!(sc.validate_invariants().is_ok());
+    }
+
+    // --- FX-3: `topic_parity.not_reconstructed` (format 1.2.0) -------------
+    //
+    // One test per arm, each asserting the EXACT message, plus the accept
+    // controls and the order row. `docs/verify_scorecard.py` mirrors the three
+    // arms in the same position and words; the corpus cases under
+    // `e2e/fixtures/invariants/` hold both readers to that.
+
+    /// A `newTopic` document as phase 7 writes it from 1.2.0: the four kinds
+    /// leave `intentionally_deviated`, and each is in `unexpected_divergence`
+    /// AND in `not_reconstructed`.
+    fn new_topic_not_reconstructed() -> Scorecard {
+        let mut sc = valid_scorecard();
+        sc.format_version = crate::FORMAT_VERSION.to_string();
+        sc.target.mode = TargetMode::NewTopic;
+        sc.target.marker_topic = None;
+        let moved = [
+            "restore-x-orders: cleanup.policy",
+            "restore-x-orders: replication_factor",
+            "restore-x-orders: retention.ms",
+        ];
+        sc.topic_parity.unexpected_divergence = moved.iter().map(|e| e.to_string()).collect();
+        sc.topic_parity.not_reconstructed = Some(moved.iter().map(|e| e.to_string()).collect());
+        sc.topic_parity.not_assessed = Some(vec![]);
+        sc
+    }
+
+    #[test]
+    fn invariants_accept_a_new_topic_document_whose_not_reconstructed_entries_are_unexpected() {
+        new_topic_not_reconstructed()
+            .validate_invariants()
+            .expect("phase 7's 1.2.0 newTopic shape is coherent");
+        // And a scratch document with the claim `[]` beside its intended
+        // deviations: what phase 7 writes for every scratch drill.
+        let mut sc = valid_scorecard();
+        sc.format_version = crate::FORMAT_VERSION.to_string();
+        sc.topic_parity.intentionally_deviated = vec!["drill-orders: cleanup.policy".into()];
+        sc.topic_parity.not_reconstructed = Some(vec![]);
+        sc.validate_invariants()
+            .expect("a scratch drill's deviations are intended and nothing is not reconstructed");
+    }
+
+    /// ABSENT is legal at every version, and a document without the block is
+    /// decided exactly as before — including a pre-1.2.0 `newTopic` document
+    /// whose `intentionally_deviated` carries the scratch rationale's labels.
+    #[test]
+    fn invariants_accept_an_absent_not_reconstructed_at_every_version() {
+        for version in ["1.0.0", "1.1.0", crate::FORMAT_VERSION] {
+            let mut sc = valid_scorecard();
+            sc.format_version = version.to_string();
+            sc.target.mode = TargetMode::NewTopic;
+            sc.target.marker_topic = None;
+            sc.topic_parity.intentionally_deviated = vec![
+                "restore-x-orders: cleanup.policy".into(),
+                "restore-x-orders: replication_factor".into(),
+            ];
+            assert!(sc.topic_parity.not_reconstructed.is_none());
+            sc.validate_invariants()
+                .unwrap_or_else(|e| panic!("{version}: an absent block is NOT RECORDED: {e}"));
+        }
+    }
+
+    #[test]
+    fn invariants_refuse_not_reconstructed_under_a_version_that_predates_it() {
+        for version in ["1.1.0", "1.0.0", "0.9.9", "1", "1.x.0"] {
+            let mut sc = new_topic_not_reconstructed();
+            sc.format_version = version.to_string();
+            let err = sc
+                .validate_invariants()
+                .expect_err("a version before 1.2.0 cannot carry the 1.2.0 field");
+            assert_eq!(
+                err.0,
+                format!(
+                    "topic_parity.not_reconstructed is present but format_version {version:?} \
+                     predates it: the field is defined from 1.{NOT_RECONSTRUCTED_SINCE_MINOR}.0"
+                ),
+                "{version}"
+            );
+        }
+        // Even the claim `[]` is a 1.2.0 claim.
+        let mut sc = valid_scorecard();
+        sc.format_version = "1.1.0".into();
+        sc.topic_parity.not_reconstructed = Some(vec![]);
+        assert!(sc.validate_invariants().is_err());
+        // The boundary itself, and a later minor, are accepted.
+        for version in ["1.2.0", "1.2", "1.3.0", "1.12.7"] {
+            let mut sc = new_topic_not_reconstructed();
+            sc.format_version = version.to_string();
+            sc.validate_invariants()
+                .unwrap_or_else(|e| panic!("{version} defines the field: {e}"));
+        }
+    }
+
+    #[test]
+    fn invariants_refuse_a_not_reconstructed_entry_missing_from_unexpected_divergence() {
+        // THE "dropped instead of moved" document: the deviation left
+        // `intentionally_deviated` and reached only the new field, so a reader
+        // older than 1.2.0 would see nothing at all for it.
+        let mut sc = new_topic_not_reconstructed();
+        sc.topic_parity
+            .unexpected_divergence
+            .retain(|e| e != "restore-x-orders: replication_factor");
+        let err = sc
+            .validate_invariants()
+            .expect_err("a not-reconstructed setting must stay visible to an older reader");
+        assert_eq!(
+            err.0,
+            "topic_parity.not_reconstructed names a deviation that unexpected_divergence does \
+             not; a source setting the restore did not reconstruct is also an unexpected \
+             divergence, so a reader that predates not_reconstructed never reads it as parity"
+        );
+    }
+
+    #[test]
+    fn invariants_refuse_a_not_reconstructed_entry_that_is_also_intended() {
+        let mut sc = new_topic_not_reconstructed();
+        sc.topic_parity.intentionally_deviated = vec!["restore-x-orders: cleanup.policy".into()];
+        let err = sc
+            .validate_invariants()
+            .expect_err("intended and not reconstructed contradict each other");
+        assert_eq!(
+            err.0,
+            "topic_parity.not_reconstructed names a deviation that intentionally_deviated also \
+             names; a source setting the restore did not reconstruct is never an intended \
+             deviation"
+        );
+    }
+
+    /// ORDER: a deviation COPIED into the new field and left intended violates
+    /// NR-2 and NR-3 at once, and both readers report NR-2.
+    #[test]
+    fn the_unexpected_twin_arm_reports_before_the_intended_arm() {
+        let mut sc = new_topic_not_reconstructed();
+        sc.topic_parity.intentionally_deviated = sc.topic_parity.unexpected_divergence.clone();
+        sc.topic_parity.unexpected_divergence.clear();
+        let err = sc.validate_invariants().expect_err("both arms fire");
+        assert!(
+            err.0.starts_with(
+                "topic_parity.not_reconstructed names a deviation that unexpected_divergence"
+            ),
+            "{}",
+            err.0
+        );
+    }
+
+    /// The arms sit before `redactions`, which stays LAST: a document violating
+    /// both reports the not-reconstructed arm.
+    #[test]
+    fn the_not_reconstructed_arms_report_before_the_redactions_arm() {
+        let mut sc = new_topic_not_reconstructed();
+        sc.topic_parity.unexpected_divergence.clear();
+        sc.redactions = vec![Redaction {
+            path: "/topic_parity".into(),
+            reason: "order".into(),
+            present: false,
+        }];
+        let err = sc.validate_invariants().expect_err("both arms fire");
+        assert!(
+            err.0.starts_with("topic_parity.not_reconstructed"),
+            "{}",
+            err.0
+        );
+    }
+
+    /// **The version pair a renumber must move together** (FX-4's
+    /// `the_written_version_defines_config_coverage`, for the scorecard). The
+    /// scorecard this build WRITES must be one that may carry
+    /// `not_reconstructed`, or phase 8 would refuse to sign every document
+    /// phase 7 produces (its own NR-1). Should another scorecard field take
+    /// 1.2.0 first, FX-3 becomes 1.3.0: both constants move.
+    #[test]
+    fn the_written_version_defines_not_reconstructed() {
+        assert_eq!(major_version(crate::FORMAT_VERSION), Some(1));
+        let minor = minor_version(crate::FORMAT_VERSION).expect("a numeric minor");
+        assert!(
+            minor >= NOT_RECONSTRUCTED_SINCE_MINOR,
+            "FORMAT_VERSION {} predates NOT_RECONSTRUCTED_SINCE_MINOR {}",
+            crate::FORMAT_VERSION,
+            NOT_RECONSTRUCTED_SINCE_MINOR
+        );
     }
 }

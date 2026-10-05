@@ -882,7 +882,7 @@ def test_the_version_line_names_the_current_invariant_set():
         sc, sig = _signed_scorecard(d)
         r = run(sc, sig, FIX / "public.pem")
         assert r.returncode == 0, r.stderr
-        assert "verify_scorecard.py 1.15.0" in r.stdout, r.stdout
+        assert "verify_scorecard.py 1.16.0" in r.stdout, r.stdout
         assert "redactions" in r.stdout, r.stdout
         assert "trimmed-empty partial_reason" in r.stdout, r.stdout
         assert "outcome-entailment" in r.stdout, r.stdout
@@ -917,6 +917,11 @@ def test_the_version_line_names_the_current_invariant_set():
         assert (
             "target.mode absent or one of the two values the format defines"
         ) in r.stdout, r.stdout
+        # 1.16.0's addition (FX-3): arms NR-1..NR-3 on the 1.2.0 field.
+        assert (
+            "topic_parity.not_reconstructed only from 1.2.0, each entry also an unexpected "
+            "divergence and never an intended one"
+        ) in r.stdout, r.stdout
 
 
 def test_the_script_version_is_not_the_format_version():
@@ -925,8 +930,9 @@ def test_the_script_version_is_not_the_format_version():
     # a format bump.
     mod = _verifier_module()
     assert mod.SCRIPT_VERSION != mod.FORMAT_VERSION
-    # 1.1.0 since FX-4 (`topic_parity.not_assessed`, a MINOR bump).
-    assert mod.FORMAT_VERSION == "1.1.0"
+    # 1.1.0 since FX-4 (`topic_parity.not_assessed`, a MINOR bump), 1.2.0
+    # since FX-3 (`topic_parity.not_reconstructed`).
+    assert mod.FORMAT_VERSION == "1.2.0"
 
 
 def test_a_negative_rpo_is_refused():
@@ -1107,8 +1113,9 @@ def test_the_format_version_matches_the_rust_constant():
     # The refusal above is only meaningful if this script and the signer agree
     # on what "this major" is.
     rust = (ROOT / "crates" / "logweir-core" / "src" / "lib.rs").read_text()
-    assert 'pub const FORMAT_VERSION: &str = "1.1.0"' in rust
-    assert _verifier_module().FORMAT_VERSION == "1.1.0"
+    m = re.search(r'pub const FORMAT_VERSION: &str = "([^"]+)";', rust)
+    assert m, "lib.rs no longer declares FORMAT_VERSION"
+    assert _verifier_module().FORMAT_VERSION == m.group(1)
 
 
 # ------------------------------------------ no raw tracebacks, ever (the header
@@ -2182,9 +2189,14 @@ def test_script_version_was_bumped_with_the_payload_type_map():
     # 1.15.0 (FX-4) adds the backup receipt's six `config_coverage` arms and the
     # scorecard's `topic_parity.not_assessed` and `target_diff.not_assessed`
     # shape checks. Map still five.
+    #
+    # 1.16.0 (FX-3) adds the scorecard's arms NR-1..NR-3 on format 1.2.0's
+    # `topic_parity.not_reconstructed`, the shape of the two existing
+    # `topic_parity` lists, Rust's `u64` parse for the format major and minor,
+    # and the `reconstruction:` line. Map still five.
     mod = _verifier_module()
     assert len(mod.PAYLOAD_TYPES) == 5, sorted(mod.PAYLOAD_TYPES)
-    assert mod.SCRIPT_VERSION == "1.15.0", mod.SCRIPT_VERSION
+    assert mod.SCRIPT_VERSION == "1.16.0", mod.SCRIPT_VERSION
     assert "backup-receipt" in mod.PAYLOAD_TYPES
     assert mod.PAYLOAD_TYPES["backup-receipt"] == BACKUP_RECEIPT_TYPE
     assert mod.PAYLOAD_TYPES["catalog-point"] == CATALOG_POINT_TYPE
@@ -2472,3 +2484,181 @@ def test_a_target_diff_not_assessed_value_serde_would_refuse_is_refused_here_too
         doc["format_version"] = "1.1.0"
         doc["target_diff"]["not_assessed"] = good
         assert mod.check_invariants(doc) == "", good
+
+
+# ------------------------------------------------- FX-3: format 1.2.0's
+# `topic_parity.not_reconstructed`, arms NR-1..NR-3, the topic_parity shape,
+# the `reconstruction:` line, and Rust's u64 parse for the version.
+
+_NR_MOVED = ["restore-x-orders: cleanup.policy", "restore-x-orders: replication_factor"]
+_NR2 = (
+    "topic_parity.not_reconstructed names a deviation that unexpected_divergence does not; "
+    "a source setting the restore did not reconstruct is also an unexpected divergence, so a "
+    "reader that predates not_reconstructed never reads it as parity"
+)
+_NR3 = (
+    "topic_parity.not_reconstructed names a deviation that intentionally_deviated also names; "
+    "a source setting the restore did not reconstruct is never an intended deviation"
+)
+
+
+def _new_topic_doc(version=None):
+    """A newTopic document as phase 7 writes it from 1.2.0."""
+    mod = _verifier_module()
+    doc = json.loads(SCORECARD_PASS.read_bytes())
+    doc["format_version"] = version or mod.FORMAT_VERSION
+    doc["target"]["mode"] = "newTopic"
+    doc["target"].pop("marker_topic", None)
+    doc["topic_parity"]["intentionally_deviated"] = []
+    doc["topic_parity"]["unexpected_divergence"] = list(_NR_MOVED)
+    doc["topic_parity"]["not_reconstructed"] = list(_NR_MOVED)
+    return doc
+
+
+def test_the_not_reconstructed_minor_is_the_rust_readers():
+    # NR-1's minor is ONE number in each reader; a renumber (FX-3 becoming
+    # 1.3.0, say) must move both, and NR-1's message is built from it on both
+    # sides, so the corpus and the parity script then compare the new text.
+    mod = _verifier_module()
+    rust = (ROOT / "crates/logweir-core/src/scorecard.rs").read_text()
+    m = re.search(r"pub const NOT_RECONSTRUCTED_SINCE_MINOR: u64 = (\d+);", rust)
+    assert m, "scorecard.rs no longer declares NOT_RECONSTRUCTED_SINCE_MINOR"
+    assert mod.TOPIC_PARITY_NOT_RECONSTRUCTED_SINCE_MINOR == int(m.group(1))
+    # And the version this script knows defines the field.
+    assert mod._minor(mod.FORMAT_VERSION) >= mod.TOPIC_PARITY_NOT_RECONSTRUCTED_SINCE_MINOR
+
+
+def test_the_not_reconstructed_arms_refuse_with_their_exact_messages():
+    mod = _verifier_module()
+    # The accept controls: phase 7's newTopic shape, a drill's `[]`, and the
+    # field ABSENT at every version -- including a pre-1.2.0 newTopic document
+    # whose writer labelled its lost settings intended, decided exactly as
+    # before.
+    assert mod.check_invariants(_new_topic_doc()) == ""
+    drill = json.loads(SCORECARD_PASS.read_bytes())
+    drill["format_version"] = mod.FORMAT_VERSION
+    drill["topic_parity"]["not_reconstructed"] = []
+    assert mod.check_invariants(drill) == ""
+    for version in ["1.0.0", "1.1.0", mod.FORMAT_VERSION]:
+        old = _new_topic_doc(version)
+        old["topic_parity"]["intentionally_deviated"] = list(_NR_MOVED)
+        old["topic_parity"]["unexpected_divergence"] = []
+        del old["topic_parity"]["not_reconstructed"]
+        assert mod.check_invariants(old) == "", version
+        old["topic_parity"]["not_reconstructed"] = None
+        assert mod.check_invariants(old) == "", f"{version}: null is absent"
+    # NR-1: a version before 1.2.0 cannot carry the field, even as `[]`.
+    for version in ["1.1.0", "1.0.0", "0.9.9", "1", "1.x.0", "1. 2.0", "1.2_0.0"]:
+        doc = _new_topic_doc(version)
+        assert mod.check_invariants(doc) == (
+            f"topic_parity.not_reconstructed is present but format_version "
+            f"{mod._rust_debug_str(version)} predates it: the field is defined from 1.2.0"
+        ), version
+    doc = json.loads(SCORECARD_PASS.read_bytes())
+    doc["format_version"] = "1.1.0"
+    doc["topic_parity"]["not_reconstructed"] = []
+    assert mod.check_invariants(doc).startswith("topic_parity.not_reconstructed is present")
+    for version in ["1.2.0", "1.2", "1.+2.0", "1.3.0", "1.12.7"]:
+        assert mod.check_invariants(_new_topic_doc(version)) == "", version
+    # NR-2: dropped instead of moved.
+    doc = _new_topic_doc()
+    doc["topic_parity"]["unexpected_divergence"] = _NR_MOVED[:1]
+    assert mod.check_invariants(doc) == _NR2
+    # A SUBSTRING is not the entry: the shape layer made the lists lists, and
+    # `in` is list membership here, as `contains` is in Rust.
+    doc = _new_topic_doc()
+    doc["topic_parity"]["unexpected_divergence"] = [
+        "restore-x-orders: cleanup.policy and more",
+        "restore-x-orders: replication_factor",
+    ]
+    assert mod.check_invariants(doc) == _NR2
+    # NR-3: also intended.
+    doc = _new_topic_doc()
+    doc["topic_parity"]["intentionally_deviated"] = _NR_MOVED[:1]
+    assert mod.check_invariants(doc) == _NR3
+    # ORDER: copied into intended and missing its twin -> NR-2, as in Rust.
+    doc = _new_topic_doc()
+    doc["topic_parity"]["intentionally_deviated"] = list(_NR_MOVED)
+    doc["topic_parity"]["unexpected_divergence"] = []
+    assert mod.check_invariants(doc) == _NR2
+    # And before `redactions`, which stays last.
+    doc = _new_topic_doc()
+    doc["topic_parity"]["unexpected_divergence"] = []
+    doc["redactions"] = [{"path": "/topic_parity", "reason": "order", "present": False}]
+    assert mod.check_invariants(doc) == _NR2
+
+
+def test_the_topic_parity_lists_are_refused_where_rust_refuses_them_at_deserialisation():
+    # Measured at main b8b9263f: each of these was `drill verify` exit 1
+    # (serde) and VALID from 1.15.0. NR-2 and NR-3 read both lists, and `in`
+    # over a string would be a substring test.
+    mod = _verifier_module()
+    base = json.loads(SCORECARD_PASS.read_bytes())
+    for name in ("intentionally_deviated", "unexpected_divergence", "not_reconstructed"):
+        for bad in ["x", [1], {"a": 1}] + ([] if name == "not_reconstructed" else [None]):
+            doc = json.loads(json.dumps(base))
+            doc["format_version"] = mod.FORMAT_VERSION
+            doc["topic_parity"][name] = bad
+            assert mod.check_invariants(doc) == (
+                f"topic_parity.{name} is not an array of strings"
+            ), (name, bad)
+        if name != "not_reconstructed":
+            doc = json.loads(json.dumps(base))
+            del doc["topic_parity"][name]
+            assert mod.check_invariants(doc) == (
+                f"topic_parity.{name} is not an array of strings"
+            ), f"{name} absent"
+
+
+def test_the_reconstruction_line_names_what_a_new_topic_restore_did_not_reconstruct():
+    # The twin of `crates/logweir/src/verify.rs::reconstruction_line`, case for
+    # case; `scripts/check-verifier-parity.sh` compares the two through the
+    # binaries.
+    mod = _verifier_module()
+    line = mod._reconstruction_line
+    assert line("newTopic", list(_NR_MOVED), []) == (
+        "reconstruction: source settings NOT RECONSTRUCTED for "
+        "restore-x-orders: cleanup.policy; restore-x-orders: replication_factor"
+    )
+    assert line("newTopic", None, list(_NR_MOVED)) == (
+        "reconstruction: not recorded, so the settings this newTopic document labels "
+        "intentionally_deviated were NOT reconstructed: "
+        "restore-x-orders: cleanup.policy; restore-x-orders: replication_factor"
+    )
+    # A drill's deviations ARE intended, in every version, absent mode included.
+    assert line(None, None, list(_NR_MOVED)) == ""
+    assert line("scratch", None, list(_NR_MOVED)) == ""
+    assert line("scratch", [], list(_NR_MOVED)) == ""
+    assert line("newTopic", [], []) == ""
+    assert line("newTopic", None, []) == ""
+    # A document that says it is reported, whatever the mode.
+    assert line("scratch", ["drill-orders: cleanup.policy"], []).startswith(
+        "reconstruction: source settings NOT RECONSTRUCTED for"
+    )
+    # Through the script: printed, and exit 0.
+    with tempfile.TemporaryDirectory() as d:
+        sc, sig = _write_signed(d, "case", SCORECARD_TYPE, _new_topic_doc())
+        r = run(sc, sig, FIX / "public.pem")
+        assert r.returncode == 0, r.stderr
+        assert (
+            "parity:   reconstruction: source settings NOT RECONSTRUCTED for "
+            "restore-x-orders: cleanup.policy; restore-x-orders: replication_factor"
+        ) in r.stdout, r.stdout
+
+
+def test_the_format_version_parses_as_rust_parses_a_u64():
+    # Measured at main b8b9263f: format_version " 1.0.0", "0_1.0.0" and "١.0.0"
+    # were `drill verify` exit 4 ("not a parseable semver") and VALID from
+    # 1.15.0, because `_major` used `int()`. NR-1's `_minor` needs the same
+    # parse.
+    mod = _verifier_module()
+    for bad in [" 1", "1 ", "0_1", "١", "", "x", "18446744073709551616"]:
+        assert mod._major(f"{bad}.0.0") is None, bad
+        assert mod._minor(f"1.{bad}.0") is None, bad
+    assert mod._major("+1.0.0") == 1 and mod._minor("1.+2.0") == 2
+    assert mod._major("1.2.0") == 1 and mod._minor("1.2.0") == 2
+    base = json.loads(SCORECARD_PASS.read_bytes())
+    for bad in [" 1.0.0", "0_1.0.0", "١.0.0"]:
+        doc = json.loads(json.dumps(base))
+        doc["format_version"] = bad
+        assert mod.check_invariants(doc).endswith("is not a parseable semver"), bad

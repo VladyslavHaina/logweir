@@ -1,5 +1,5 @@
 mod fixtures; // crates/logweir/tests/fixtures/mod.rs — Task 14 step 5c
-use logweir::drill::phase7_verify::{classify_parity, compare};
+use logweir::drill::phase7_verify::{classify_parity, compare, ParityClasses};
 use logweir_core::outcome::{IntegrityLevel, IntegrityResult};
 use logweir_core::spec::Anchor;
 
@@ -70,9 +70,17 @@ fn an_unsupported_kbak_segment_degrades_to_consume_only_never_to_a_silent_pass()
 /// Phase 6 sets create_topics, an explicit replication factor and the partition
 /// count; a scratch cluster has infinite retention and cleanup.policy=delete.
 /// Those deviations are INTENDED and are reported as such, never as failures.
+///
+/// FX-3: this is the SCRATCH row, unchanged in what it asserts — the mode is
+/// now an argument, and a scratch drill leaves nothing `not_reconstructed`.
 #[test]
 fn scratch_deviations_are_intentional_and_anything_else_is_not() {
-    let (intended, unexpected) = classify_parity(
+    let ParityClasses {
+        intended,
+        unexpected,
+        not_reconstructed,
+    } = classify_parity(
+        logweir_core::spec::TargetMode::Scratch,
         &fixtures::source_configs(&[
             ("cleanup.policy", "compact"),
             ("retention.ms", "604800000"),
@@ -87,6 +95,10 @@ fn scratch_deviations_are_intentional_and_anything_else_is_not() {
         /*tgt_partitions*/ 3,
         /*src_rf*/ 3,
         /*tgt_rf*/ 1,
+    );
+    assert!(
+        not_reconstructed.is_empty(),
+        "a scratch drill's deviations are intended, never not reconstructed: {not_reconstructed:?}"
     );
     assert!(intended.contains(&"cleanup.policy".to_string()));
     assert!(intended.contains(&"retention.ms".to_string()));
@@ -168,7 +180,12 @@ fn compare_matches_by_the_original_offset_header_not_the_targets_own_offset() {
 /// survived.
 #[test]
 fn a_source_config_key_absent_from_the_target_is_reported_not_silently_agreed() {
-    let (intended, unexpected) = classify_parity(
+    let ParityClasses {
+        intended,
+        unexpected,
+        ..
+    } = classify_parity(
+        logweir_core::spec::TargetMode::Scratch,
         &fixtures::source_configs(&[("max.message.bytes", "1048576")]),
         &BTreeMap::new(),
         3,
@@ -188,7 +205,19 @@ fn a_source_config_key_absent_from_the_target_is_reported_not_silently_agreed() 
 /// line survived undetected. Spec §9.3 phase 7(d) requires this reported.
 #[test]
 fn a_partition_count_divergence_is_reported_as_intended() {
-    let (intended, unexpected) = classify_parity(&BTreeMap::new(), &BTreeMap::new(), 3, 6, 1, 1);
+    let ParityClasses {
+        intended,
+        unexpected,
+        ..
+    } = classify_parity(
+        logweir_core::spec::TargetMode::Scratch,
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        3,
+        6,
+        1,
+        1,
+    );
     assert!(intended.contains(&"partition_count".to_string()));
     assert!(unexpected.is_empty());
 }
@@ -505,6 +534,7 @@ fn a_healthy_drill_reconciles_to_integrity_pass_and_reports_intended_parity_only
         &mapping,
         &plan,
         &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+        logweir_core::spec::TargetMode::Scratch,
     )
     .unwrap();
 
@@ -596,6 +626,7 @@ fn a_manifest_sha256_in_the_engines_bare_hex_form_still_verifies() {
         &fixtures::mapping("orders", "drill-orders"),
         &plan_orders_to_drill_orders(),
         &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+        logweir_core::spec::TargetMode::Scratch,
     )
     .unwrap();
 
@@ -651,6 +682,7 @@ fn a_sha256_mismatch_against_the_manifest_fails_integrity_even_when_the_canary_m
         &mapping,
         &plan,
         &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+        logweir_core::spec::TargetMode::Scratch,
     )
     .unwrap();
 
@@ -705,6 +737,7 @@ fn a_canary_fingerprint_mismatch_fails_integrity_and_is_counted_precisely() {
         &mapping,
         &plan,
         &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+        logweir_core::spec::TargetMode::Scratch,
     )
     .unwrap();
 
@@ -770,6 +803,7 @@ fn an_unsupported_engine_degrades_to_consume_only_through_the_full_run() {
         &mapping,
         &plan,
         &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+        logweir_core::spec::TargetMode::Scratch,
     )
     .unwrap();
 
@@ -830,6 +864,7 @@ fn run_rejects_a_verify_request_with_zero_sample_selections() {
         &mapping,
         &plan,
         &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+        logweir_core::spec::TargetMode::Scratch,
     )
     .unwrap_err();
     assert!(matches!(err, DrillError::Operational(_)));
@@ -891,6 +926,7 @@ fn verdict_for_selection_reads_the_mapped_target_topic_never_the_archive_name() 
         &mapping,
         &plan,
         &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+        logweir_core::spec::TargetMode::Scratch,
     )
     .unwrap();
 
@@ -954,6 +990,7 @@ fn classify_parity_all_reads_the_mapped_target_topic_never_the_archive_name() {
         &mapping,
         &plan,
         &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+        logweir_core::spec::TargetMode::Scratch,
     )
     .unwrap();
 
@@ -1017,6 +1054,7 @@ fn a_failing_engine_validation_run_never_fails_or_aborts_the_drill() {
         &mapping,
         &plan,
         &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+        logweir_core::spec::TargetMode::Scratch,
     )
     .expect("an engine-side validation-run failure must never abort phase 7");
 
@@ -1258,6 +1296,7 @@ fn run_aggregates_across_every_selection_and_mapped_topic_not_just_the_first() {
         &mapping,
         &plan,
         &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+        logweir_core::spec::TargetMode::Scratch,
     )
     .unwrap();
 
@@ -1454,6 +1493,7 @@ fn a_topic_restored_to_zero_records_must_fail_not_pass_even_when_pooled_with_a_h
         &mapping,
         &plan,
         &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+        logweir_core::spec::TargetMode::Scratch,
     )
     .unwrap();
 
@@ -1585,6 +1625,7 @@ fn a_selection_that_sampled_zero_archive_fingerprints_cannot_hide_inside_a_passi
         &mapping,
         &plan,
         &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+        logweir_core::spec::TargetMode::Scratch,
     )
     .unwrap();
 
@@ -1659,6 +1700,7 @@ fn a_byte_fingerprint_comparison_that_samples_zero_records_is_partial_never_pass
         &mapping,
         &plan,
         &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+        logweir_core::spec::TargetMode::Scratch,
     )
     .unwrap();
 
@@ -1729,6 +1771,7 @@ fn a_short_read_back_on_the_consume_only_lane_is_unverified_not_a_smaller_succes
         // `with_pit_inside_the_segment`.
         &with_pit_inside_the_segment(plan_orders_to_drill_orders()),
         &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+        logweir_core::spec::TargetMode::Scratch,
     )
     .expect("an under-delivering target is a DRILL RESULT, never an Err");
 
@@ -1848,6 +1891,7 @@ fn verdict_for_selection_caps_the_read_at_the_selections_own_count() {
         &mapping,
         &plan,
         &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+        logweir_core::spec::TargetMode::Scratch,
     )
     .unwrap();
 
@@ -1925,6 +1969,7 @@ fn records_restored_is_the_consumed_count_not_matched_plus_mismatched() {
         &mapping,
         &plan,
         &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+        logweir_core::spec::TargetMode::Scratch,
     )
     .unwrap();
 
@@ -2149,6 +2194,7 @@ fn run_reconciles_two_partitions_of_one_topic_independently_not_pooled() {
         &mapping,
         &plan,
         &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+        logweir_core::spec::TargetMode::Scratch,
     )
     .unwrap();
 
@@ -2392,6 +2438,7 @@ fn one_of_two_topics_restored_to_zero_records_cannot_pass_on_the_consume_only_la
         // `with_pit_inside_the_segment`.
         &with_pit_inside_the_segment(two_topic_plan()),
         &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+        logweir_core::spec::TargetMode::Scratch,
     )
     .expect("an un-restored topic is a DRILL RESULT (exit 2, signed), never an Err (exit 1)");
 
@@ -2490,6 +2537,7 @@ fn a_wholly_corrupt_topic_beside_an_unrestored_one_fails_and_never_reconciles_ag
         &two_topic_mapping(),
         &two_topic_plan(),
         &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+        logweir_core::spec::TargetMode::Scratch,
     )
     .expect("a failed reconciliation is a DRILL RESULT, never an Err");
 
@@ -2563,6 +2611,7 @@ fn zero_records_consumed_from_a_sampled_partition_is_never_a_pass() {
         // `with_pit_inside_the_segment`.
         &with_pit_inside_the_segment(plan_orders_to_drill_orders()),
         &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+        logweir_core::spec::TargetMode::Scratch,
     )
     .expect("a partition that gave back nothing is a DRILL RESULT, never an Err");
 
@@ -2644,6 +2693,7 @@ fn a_short_archive_fingerprint_list_is_unverified_coverage_not_a_smaller_success
         // `with_pit_inside_the_segment`.
         &with_pit_inside_the_segment(two_topic_plan()),
         &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+        logweir_core::spec::TargetMode::Scratch,
     )
     .expect("an under-delivering archive is a DRILL RESULT, never an Err");
 
@@ -2740,6 +2790,7 @@ fn one_selections_unsupported_archive_never_erases_another_selections_byte_level
         &two_topic_mapping(),
         &two_topic_plan(),
         &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+        logweir_core::spec::TargetMode::Scratch,
     )
     .unwrap();
 
@@ -2825,6 +2876,7 @@ fn a_selection_matching_no_archive_segment_is_a_signed_partial_not_an_operationa
         &fixtures::mapping("orders", "drill-orders"),
         &plan_orders_to_drill_orders(),
         &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+        logweir_core::spec::TargetMode::Scratch,
     )
     .expect(
         "round 3: an archive holding no segment in the window is a DRILL RESULT (exit 2, \
@@ -2874,6 +2926,7 @@ fn a_pre_0_21_segment_with_no_sha256_is_partial_never_a_silent_pass() {
         &fixtures::mapping("orders", "drill-orders"),
         &plan_orders_to_drill_orders(),
         &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+        logweir_core::spec::TargetMode::Scratch,
     )
     .unwrap();
 
@@ -2939,6 +2992,7 @@ fn a_consume_only_selection_with_a_corrupt_segment_fails_the_drill_never_merely_
         &fixtures::mapping("orders", "drill-orders"),
         &plan_orders_to_drill_orders(),
         &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+        logweir_core::spec::TargetMode::Scratch,
     )
     .expect("a corrupt archive segment is a DRILL RESULT, never an Err");
 
@@ -3026,6 +3080,7 @@ fn a_partial_verdict_over_a_partly_reconciled_sample() -> logweir_core::scorecar
         &two_topic_mapping(),
         &two_topic_plan(),
         &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+        logweir_core::spec::TargetMode::Scratch,
     )
     .expect("a partly-reconciled sample is a DRILL RESULT, never an Err");
 
@@ -3243,6 +3298,7 @@ fn configuration_parity_is_not_assessed_unless_the_source_capture_was() {
             &fixtures::mapping("orders", "drill-orders"),
             &plan_orders_to_drill_orders(),
             &coverage,
+            logweir_core::spec::TargetMode::Scratch,
         )
         .unwrap();
         assert_eq!(out.topic_parity.not_assessed, want);
@@ -3300,6 +3356,7 @@ fn a_topic_that_was_not_assessed_is_never_silent_to_an_older_reader() {
             &fixtures::mapping("orders", "drill-orders"),
             &plan_orders_to_drill_orders(),
             &coverage,
+            logweir_core::spec::TargetMode::Scratch,
         )
         .unwrap();
         quiet(&out, why);
@@ -3314,6 +3371,7 @@ fn a_topic_that_was_not_assessed_is_never_silent_to_an_older_reader() {
         &fixtures::mapping("orders", "drill-orders"),
         &plan_orders_to_drill_orders(),
         &receipt_coverage("captured"),
+        logweir_core::spec::TargetMode::Scratch,
     )
     .unwrap();
     quiet(&out, "targetReadDenied");
@@ -3405,6 +3463,7 @@ fn a_refused_target_configuration_read_is_not_assessed_never_compared_as_empty()
         &fixtures::mapping("orders", "drill-orders"),
         &plan_orders_to_drill_orders(),
         &receipt_coverage("captured"),
+        logweir_core::spec::TargetMode::Scratch,
     )
     .expect("a refused TARGET configuration read is a recorded fact, not an aborted drill");
     assert_eq!(
@@ -3433,4 +3492,272 @@ fn a_refused_target_configuration_read_is_not_assessed_never_compared_as_empty()
         "metadata-derived parity is still assessed: {:?}",
         out.topic_parity.intentionally_deviated
     );
+}
+
+// ---------------------------------------------------------------------------
+// FX-3: the MODE decides the label. A scratch drill's deviations on the four
+// kinds the restore's topic creation decides are INTENDED (unchanged); a
+// `newTopic` restore's are NOT RECONSTRUCTED and also UNEXPECTED, never
+// intended, so a reader older than format 1.2.0 sees a divergence, not a label
+// that calls lost compaction or replication factor 1 "intended".
+// ---------------------------------------------------------------------------
+
+use logweir_core::spec::TargetMode;
+
+/// One deviation kind, alone: the configs and counts that differ on `kind`
+/// and on nothing else.
+fn only(
+    kind: &str,
+) -> (
+    BTreeMap<String, String>,
+    BTreeMap<String, String>,
+    i32,
+    i32,
+    i16,
+    i16,
+) {
+    let mut src = BTreeMap::new();
+    let mut tgt = BTreeMap::new();
+    let (mut src_partitions, mut src_rf) = (3, 3);
+    match kind {
+        "cleanup.policy" => {
+            src.insert("cleanup.policy".to_string(), "compact".to_string());
+            tgt.insert("cleanup.policy".to_string(), "delete".to_string());
+        }
+        "retention.ms" => {
+            src.insert("retention.ms".to_string(), "604800000".to_string());
+            tgt.insert("retention.ms".to_string(), "-1".to_string());
+        }
+        "partition_count" => src_partitions = 6,
+        "replication_factor" => src_rf = 1,
+        other => panic!("not a kind: {other}"),
+    }
+    // The target: three partitions at replication factor 3, so only `kind`
+    // differs from the source.
+    (src, tgt, src_partitions, 3, src_rf, 3)
+}
+
+/// Both modes for one kind, every list asserted EXACTLY: the label moves, the
+/// deviation is never dropped, and the scratch label is today's.
+fn assert_the_mode_decides_the_label(kind: &str) {
+    let (src, tgt, sp, tp, sr, tr) = only(kind);
+    let scratch = classify_parity(TargetMode::Scratch, &src, &tgt, sp, tp, sr, tr);
+    assert_eq!(
+        scratch,
+        ParityClasses {
+            intended: vec![kind.to_string()],
+            unexpected: vec![],
+            not_reconstructed: vec![],
+        },
+        "{kind}: a scratch drill's deviation is INTENDED, exactly as before FX-3"
+    );
+    let new_topic = classify_parity(TargetMode::NewTopic, &src, &tgt, sp, tp, sr, tr);
+    assert_eq!(
+        new_topic,
+        ParityClasses {
+            intended: vec![],
+            unexpected: vec![kind.to_string()],
+            not_reconstructed: vec![kind.to_string()],
+        },
+        "{kind}: a newTopic restore did NOT reconstruct it; it is never intended, and its \
+         twin in `unexpected` is what a reader older than format 1.2.0 sees"
+    );
+}
+
+#[test]
+fn lost_compaction_is_intended_in_a_scratch_drill_and_not_reconstructed_in_a_new_topic_restore() {
+    assert_the_mode_decides_the_label("cleanup.policy");
+}
+
+#[test]
+fn a_changed_retention_is_intended_in_a_scratch_drill_and_not_reconstructed_in_a_new_topic_restore()
+{
+    assert_the_mode_decides_the_label("retention.ms");
+}
+
+#[test]
+fn a_partition_count_divergence_is_intended_in_a_scratch_drill_and_not_reconstructed_in_a_new_topic_restore(
+) {
+    assert_the_mode_decides_the_label("partition_count");
+}
+
+#[test]
+fn a_lower_replication_factor_is_intended_in_a_scratch_drill_and_not_reconstructed_in_a_new_topic_restore(
+) {
+    assert_the_mode_decides_the_label("replication_factor");
+}
+
+/// The controls for the four rows above: any OTHER differing key is
+/// unexpected in both modes and never "not reconstructed" (FX-3 reclassifies
+/// the four kinds only), and a topic that matches the source on every count
+/// and key has nothing in any list, in either mode.
+#[test]
+fn other_keys_stay_unexpected_and_a_matching_topic_has_nothing_in_either_mode() {
+    let src = fixtures::source_configs(&[("max.message.bytes", "1048576")]);
+    let tgt = fixtures::target_configs(&[("max.message.bytes", "999")]);
+    for mode in [TargetMode::Scratch, TargetMode::NewTopic] {
+        assert_eq!(
+            classify_parity(mode, &src, &tgt, 3, 3, 3, 3),
+            ParityClasses {
+                intended: vec![],
+                unexpected: vec!["max.message.bytes".to_string()],
+                not_reconstructed: vec![],
+            },
+            "{mode}"
+        );
+        assert_eq!(
+            classify_parity(mode, &src, &src, 3, 3, 3, 3),
+            ParityClasses::default(),
+            "{mode}: nothing differs"
+        );
+    }
+}
+
+/// THE DEFECT, through the whole of phase 7: a compacted source with a
+/// seven-day retention at replication factor 3, restored into a NEW topic at
+/// the plan's replication factor 1. Before FX-3 this run's `topic_parity`
+/// was byte for byte the scratch drill's — `intentionally_deviated: [cleanup.
+/// policy, replication_factor, retention.ms]` — and phase 8 signed it.
+///
+/// The verified receipt says the capture was `captured`, so no `not_assessed`
+/// marker shares the list and every entry below is a deviation.
+#[test]
+fn a_new_topic_restore_signs_lost_compaction_retention_and_rf_as_not_reconstructed_never_intended()
+{
+    let (store, sha) = store_with_matching_segment();
+    let facts = facts_with_segment(&sha);
+    let (archive, cons) = fixtures::matching_pair(50);
+    let mut topics = BTreeMap::new();
+    topics.insert(
+        "restore-orders".to_string(),
+        TopicData {
+            end_offsets: vec![(0, 50)],
+            configs: fixtures::target_configs(&[
+                ("cleanup.policy", "delete"),
+                ("retention.ms", "-1"),
+            ]),
+            records: cons,
+        },
+    );
+    let reader = MapReader { topics };
+    let engine = VerifyEngine {
+        facts: facts.clone(),
+        fingerprints: archive,
+        unsupported: None,
+        validation: ValidationBehavior::Success(0),
+    };
+    let mut plan = plan_orders_to_drill_orders();
+    plan.topic_mapping = fixtures::mapping("orders", "restore-orders");
+    let moved = vec![
+        "restore-orders: cleanup.policy".to_string(),
+        "restore-orders: replication_factor".to_string(),
+        "restore-orders: retention.ms".to_string(),
+    ];
+
+    let out = run(
+        &engine,
+        &reader,
+        &store,
+        &facts,
+        &sel_orders(),
+        &fixtures::mapping("orders", "restore-orders"),
+        &plan,
+        &receipt_coverage("captured"),
+        TargetMode::NewTopic,
+    )
+    .unwrap();
+    assert_eq!(out.integrity.result, IntegrityResult::Pass);
+    assert!(
+        out.topic_parity.intentionally_deviated.is_empty(),
+        "a newTopic restore's lost settings are never INTENDED: {:?}",
+        out.topic_parity.intentionally_deviated
+    );
+    assert_eq!(out.topic_parity.not_reconstructed, Some(moved.clone()));
+    assert_eq!(
+        out.topic_parity.unexpected_divergence, moved,
+        "MOVED, never dropped: the twin in the list a reader older than 1.2.0 shows"
+    );
+    assert_eq!(out.topic_parity.not_assessed, Some(vec![]));
+
+    // What phase 8 does with it: a 1.2.0 `newTopic` document carrying this
+    // parity is one `validate_invariants` lets it sign (NR-1..NR-3 hold).
+    let mut sc = fixtures::scorecard_pass();
+    sc.format_version = logweir_core::FORMAT_VERSION.to_string();
+    sc.target.mode = TargetMode::NewTopic;
+    sc.target.marker_topic = None;
+    sc.topic_parity = out.topic_parity.clone();
+    sc.validate_invariants()
+        .expect("phase 7's newTopic parity is a signable 1.2.0 document");
+
+    // THE CONTROL, the same restore as a scratch drill: today's labels, and
+    // the claim that nothing was left unreconstructed.
+    let (store, sha) = store_with_matching_segment();
+    let facts = facts_with_segment(&sha);
+    let (archive, cons) = fixtures::matching_pair(50);
+    let mut topics = BTreeMap::new();
+    topics.insert(
+        "restore-orders".to_string(),
+        TopicData {
+            end_offsets: vec![(0, 50)],
+            configs: fixtures::target_configs(&[
+                ("cleanup.policy", "delete"),
+                ("retention.ms", "-1"),
+            ]),
+            records: cons,
+        },
+    );
+    let engine = VerifyEngine {
+        facts: facts.clone(),
+        fingerprints: archive,
+        unsupported: None,
+        validation: ValidationBehavior::Success(0),
+    };
+    let out = run(
+        &engine,
+        &MapReader { topics },
+        &store,
+        &facts,
+        &sel_orders(),
+        &fixtures::mapping("orders", "restore-orders"),
+        &plan,
+        &receipt_coverage("captured"),
+        TargetMode::Scratch,
+    )
+    .unwrap();
+    assert_eq!(out.topic_parity.intentionally_deviated, moved);
+    assert!(out.topic_parity.unexpected_divergence.is_empty());
+    assert_eq!(out.topic_parity.not_reconstructed, Some(vec![]));
+}
+
+/// A refused TARGET configuration read (FX-4's `targetReadDenied`) compares no
+/// keys, but replication factor comes from metadata and is classified either
+/// way — so even then a `newTopic` restore names it not reconstructed, beside
+/// FX-4's fail-safe marker.
+#[test]
+fn a_new_topic_restore_whose_target_read_was_refused_still_names_its_replication_factor() {
+    let (store, facts, reader, engine) = healthy_parts();
+    let out = run(
+        &engine,
+        &RefusingTargetConfigs(reader),
+        &store,
+        &facts,
+        &sel_orders(),
+        &fixtures::mapping("orders", "drill-orders"),
+        &plan_orders_to_drill_orders(),
+        &receipt_coverage("captured"),
+        TargetMode::NewTopic,
+    )
+    .unwrap();
+    assert_eq!(
+        out.topic_parity.not_reconstructed,
+        Some(vec!["drill-orders: replication_factor".to_string()])
+    );
+    assert_eq!(
+        out.topic_parity.unexpected_divergence,
+        vec![
+            "drill-orders: configuration not assessed (targetReadDenied)".to_string(),
+            "drill-orders: replication_factor".to_string(),
+        ]
+    );
+    assert!(out.topic_parity.intentionally_deviated.is_empty());
 }

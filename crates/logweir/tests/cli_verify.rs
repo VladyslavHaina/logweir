@@ -704,3 +704,89 @@ fn the_payload_type_default_leaves_the_scorecard_invocation_unchanged() {
         "the scorecard path still prints its full report, not the signature-only one"
     );
 }
+
+/// **FX-3, through the binary.** `drill verify` exits 0 on all four documents
+/// and its `reconstruction:` line says exactly what each one claims:
+///
+/// | document | line |
+/// |---|---|
+/// | 1.2.0 `newTopic`, `not_reconstructed` non-empty | `source settings NOT RECONSTRUCTED for …` |
+/// | 1.1.0 `newTopic`, no field, `intended` non-empty | `not recorded, so the settings this newTopic document labels intentionally_deviated were NOT reconstructed: …` |
+/// | 1.2.0 scratch, `not_reconstructed: []` | none |
+/// | 1.0.0 scratch, no field, `intended` non-empty | none (a drill's deviations ARE intended) |
+///
+/// `docs/verify_scorecard.py` prints the same sentences, which
+/// `scripts/check-verifier-parity.sh` compares. Negative controls: a reader
+/// that dropped the line, or read an absent field in a `newTopic` document as
+/// "everything reconstructed", or printed a line for a scratch drill, fails a
+/// row here.
+#[test]
+fn drill_verify_names_what_a_new_topic_restore_did_not_reconstruct() {
+    use logweir_core::spec::TargetMode;
+    let base: Scorecard =
+        serde_json::from_slice(&std::fs::read("../../e2e/fixtures/scorecard-pass.json").unwrap())
+            .unwrap();
+    let moved = vec![
+        "restore-x-orders: cleanup.policy".to_string(),
+        "restore-x-orders: replication_factor".to_string(),
+    ];
+    let new_topic = |version: &str| {
+        let mut sc = base.clone();
+        sc.format_version = version.to_string();
+        sc.target.mode = TargetMode::NewTopic;
+        sc.target.marker_topic = None;
+        sc
+    };
+    let mut nt12 = new_topic(logweir_core::FORMAT_VERSION);
+    nt12.topic_parity.intentionally_deviated = vec![];
+    nt12.topic_parity.unexpected_divergence = moved.clone();
+    nt12.topic_parity.not_reconstructed = Some(moved.clone());
+    let mut nt11 = new_topic("1.1.0");
+    nt11.topic_parity.intentionally_deviated = moved.clone();
+    let mut sc12 = base.clone();
+    sc12.format_version = logweir_core::FORMAT_VERSION.to_string();
+    sc12.topic_parity.not_reconstructed = Some(vec![]);
+    let sc10 = base.clone();
+    assert!(
+        !sc10.topic_parity.intentionally_deviated.is_empty(),
+        "the 1.0.0 control must carry intended labels, or its row proves nothing"
+    );
+    for (name, sc, want) in [
+        (
+            "1.2.0 newTopic",
+            nt12,
+            Some(
+                "reconstruction: source settings NOT RECONSTRUCTED for restore-x-orders: \
+                 cleanup.policy; restore-x-orders: replication_factor"
+                    .to_string(),
+            ),
+        ),
+        (
+            "1.1.0 newTopic",
+            nt11,
+            Some(
+                "reconstruction: not recorded, so the settings this newTopic document labels \
+                 intentionally_deviated were NOT reconstructed: restore-x-orders: \
+                 cleanup.policy; restore-x-orders: replication_factor"
+                    .to_string(),
+            ),
+        ),
+        ("1.2.0 scratch", sc12, None),
+        ("1.0.0 scratch", sc10, None),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let (doc, sig) = sign_into(dir.path(), &sc);
+        let out = verify(&doc, &sig, format!("{FIX}/public.pem"));
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{name}: {stdout}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let got = stdout
+            .lines()
+            .find_map(|l| l.find("reconstruction: ").map(|i| l[i..].to_string()));
+        assert_eq!(got, want, "{name}: {stdout}");
+    }
+}

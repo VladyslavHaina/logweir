@@ -2,7 +2,9 @@
 //! nothing: (a) segment sha256 over the sampled archive segments, (b) the
 //! engine's own `validation run` (evidence only — see below), (c) canary
 //! consume-and-reconcile, per-record fingerprints (not watermark counts),
-//! and (d) topic-config parity against what phase 6 deliberately altered.
+//! and (d) topic-config parity against what phase 6 deliberately altered —
+//! INTENDED in a scratch drill, NOT RECONSTRUCTED in a `newTopic` restore
+//! (FX-3; `classify_parity`).
 //!
 //! ## ONE chokepoint, every lane (Task 19 fix round 3)
 //!
@@ -222,6 +224,7 @@ use logweir_core::engine::{
 };
 use logweir_core::outcome::{IntegrityLevel, IntegrityResult};
 use logweir_core::scorecard::{Integrity, TopicParity};
+use logweir_core::spec::TargetMode;
 use logweir_engine_oso::storage::Store;
 use logweir_kafka::reader::{ClusterReader, ConsumedRecord};
 use std::collections::BTreeMap;
@@ -314,49 +317,107 @@ pub fn compare(
     (archive.len() as u64, matching, mismatches)
 }
 
-/// A scratch cluster runs `cleanup.policy=delete` with infinite retention, so
-/// those two topic-CONFIG keys are intended deviations.
-const INTENDED: [&str; 2] = ["cleanup.policy", "retention.ms"];
+/// The two topic-CONFIG keys whose target value the restore's own topic
+/// creation DECIDES instead of copying from the source: `cleanup.policy` is
+/// left to the target broker's default (normally `delete`) and `retention.ms`
+/// is `-1` (`logweir_kafka::reader::TARGET_TOPIC_CONFIGS`), in BOTH modes.
+///
+/// Whether a deviation on one of them is intended depends on the MODE, which
+/// is the whole of FX-3: a scratch cluster runs `cleanup.policy=delete` with
+/// infinite retention ON PURPOSE, so a scratch drill's deviation is intended;
+/// a `newTopic` restore is the recovery itself, so the same deviation is a
+/// source setting it did NOT reconstruct. Until FX-3 this list was called
+/// `INTENDED` and applied the scratch rationale in every mode.
+const DECIDED_BY_THE_RESTORE: [&str; 2] = ["cleanup.policy", "retention.ms"];
+
+/// One topic's deviations, by class. Each entry is a bare key here;
+/// `classify_parity_all` prefixes it with the target topic.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ParityClasses {
+    /// `topic_parity.intentionally_deviated`: a scratch drill's deviations on
+    /// the four kinds the restore decides. Always empty in `newTopic` mode.
+    pub intended: Vec<String>,
+    /// `topic_parity.unexpected_divergence`: every other differing key, plus,
+    /// in `newTopic` mode, every entry of `not_reconstructed` (the fail-safe
+    /// twin a reader older than format 1.2.0 sees).
+    pub unexpected: Vec<String>,
+    /// `topic_parity.not_reconstructed` (format 1.2.0): a `newTopic`
+    /// restore's deviations on the four kinds. Always empty in `scratch` mode.
+    pub not_reconstructed: Vec<String>,
+}
 
 /// Spec §9.3 phase 7(d) requires the replication-factor and partition-count
-/// divergence RECORDED IN PHASE 3 to appear in `intentionally_deviated`. Neither
-/// is a Kafka topic-config key, so neither can ever appear in either config map
-/// — putting them in `INTENDED` (as an earlier draft did) meant the two values
+/// divergence RECORDED IN PHASE 3 to be reported. Neither is a Kafka
+/// topic-config key, so neither can ever appear in either config map — putting
+/// them in the config-key list (as an earlier draft did) meant the two values
 /// phase 6 deliberately sets could never be reported at all. They are therefore
 /// passed as explicit integers and compared separately.
+///
+/// # The mode decides the label (FX-3)
+///
+/// The four kinds — the two config keys of [`DECIDED_BY_THE_RESTORE`],
+/// `partition_count` and `replication_factor` — are deviations the restore's
+/// topic creation makes BY CONSTRUCTION: it renders the plan's
+/// `default_replication_factor` and the manifest's partition count, and leaves
+/// `cleanup.policy` and `retention.ms` to its own values. That rationale
+/// ("a scratch cluster has one broker, deletes and keeps everything") is a
+/// SCRATCH rationale:
+///
+/// - **`scratch`**: the four are `intended`, exactly as before FX-3.
+/// - **`newTopic`**: the four are `not_reconstructed` AND `unexpected` — never
+///   `intended`. A reader of format 1.2.0 reads `not_reconstructed`; a reader
+///   that predates it sees the same deviation in `unexpected_divergence`, a
+///   weaker conclusion than the old label and never silence.
+///
+/// Every other differing key is `unexpected` in both modes.
 pub fn classify_parity(
+    mode: TargetMode,
     source_cfg: &BTreeMap<String, String>,
     target_cfg: &BTreeMap<String, String>,
     src_partitions: i32,
     tgt_partitions: i32,
     src_rf: i16,
     tgt_rf: i16,
-) -> (Vec<String>, Vec<String>) {
-    let mut intended = Vec::new();
+) -> ParityClasses {
+    // What the restore's creation decided, whatever the mode.
+    let mut by_construction = Vec::new();
     let mut unexpected = Vec::new();
     for (k, v) in source_cfg {
         let differs = target_cfg.get(k).map(|t| t != v).unwrap_or(true);
         if !differs {
             continue;
         }
-        if INTENDED.contains(&k.as_str()) {
-            intended.push(k.clone())
+        if DECIDED_BY_THE_RESTORE.contains(&k.as_str()) {
+            by_construction.push(k.clone())
         } else {
             unexpected.push(k.clone())
         }
     }
-    // Phase 6 renders `default_replication_factor` (a scratch cluster has one
-    // broker) and creates topics at the manifest's partition count, so both
-    // divergences are intentional by construction.
     if src_partitions != tgt_partitions {
-        intended.push("partition_count".into());
+        by_construction.push("partition_count".into());
     }
     if src_rf != tgt_rf {
-        intended.push("replication_factor".into());
+        by_construction.push("replication_factor".into());
     }
-    intended.sort();
-    unexpected.sort();
-    (intended, unexpected)
+    by_construction.sort();
+    let mut classes = match mode {
+        TargetMode::Scratch => ParityClasses {
+            intended: by_construction,
+            unexpected,
+            not_reconstructed: Vec::new(),
+        },
+        TargetMode::NewTopic => {
+            // MOVED, never dropped: the twin in the list every reader shows.
+            unexpected.extend(by_construction.iter().cloned());
+            ParityClasses {
+                intended: Vec::new(),
+                unexpected,
+                not_reconstructed: by_construction,
+            }
+        }
+    };
+    classes.unexpected.sort();
+    classes
 }
 
 // ---------------------------------------------------------------------------
@@ -1208,12 +1269,21 @@ fn verdict_for_selection(
 /// entry withdraws is the SILENCE — "no divergence" for that topic proves
 /// nothing. Partition count and replication factor come from metadata, not
 /// from DescribeConfigs, and are classified either way.
+///
+/// # FX-3: the mode decides `intended` versus `not_reconstructed`
+///
+/// `mode` is the run's `target.mode`, and [`classify_parity`] is where it
+/// decides the label. `not_reconstructed` is `Some` always from here, like
+/// `not_assessed`: `Some([])` for every scratch drill (its deviations are
+/// intended) and for a `newTopic` restore whose compared settings matched;
+/// absent stays the spelling of "not recorded".
 fn classify_parity_all(
     facts: &BackupSetFacts,
     reader: &dyn ClusterReader,
     mapping: &BTreeMap<String, String>,
     plan: &RestorePlan,
     coverage: &SourceConfigCoverage,
+    mode: TargetMode,
 ) -> Result<TopicParity, DrillError> {
     if mapping.is_empty() {
         return Err(DrillError::Operational(
@@ -1225,6 +1295,7 @@ fn classify_parity_all(
     let mut intended_all = Vec::new();
     let mut unexpected_all = Vec::new();
     let mut not_assessed = Vec::new();
+    let mut not_reconstructed_all = Vec::new();
     for (src, tgt) in mapping {
         let Some(t) = facts.topics.iter().find(|t| &t.name == src) else {
             return Err(DrillError::Operational(format!(
@@ -1260,7 +1331,8 @@ fn classify_parity_all(
             // Nothing to compare the archive's record against.
             None => (&unread, &unread),
         };
-        let (intended, unexpected) = classify_parity(
+        let classes = classify_parity(
+            mode,
             source_cfg,
             target_cfg,
             src_partitions,
@@ -1268,12 +1340,24 @@ fn classify_parity_all(
             src_rf,
             tgt_rf,
         );
-        intended_all.extend(intended.into_iter().map(|k| format!("{tgt}: {k}")));
-        unexpected_all.extend(unexpected.into_iter().map(|k| format!("{tgt}: {k}")));
+        intended_all.extend(classes.intended.into_iter().map(|k| format!("{tgt}: {k}")));
+        unexpected_all.extend(
+            classes
+                .unexpected
+                .into_iter()
+                .map(|k| format!("{tgt}: {k}")),
+        );
+        not_reconstructed_all.extend(
+            classes
+                .not_reconstructed
+                .into_iter()
+                .map(|k| format!("{tgt}: {k}")),
+        );
     }
     intended_all.sort();
     unexpected_all.sort();
     not_assessed.sort();
+    not_reconstructed_all.sort();
     Ok(TopicParity {
         intentionally_deviated: intended_all,
         unexpected_divergence: unexpected_all,
@@ -1281,6 +1365,11 @@ fn classify_parity_all(
         // (`Some([])`) is a claim this function can make, and absent stays the
         // spelling of "not recorded".
         not_assessed: Some(not_assessed),
+        // `Some`, always, for the same reason (FX-3, format 1.2.0). Every
+        // entry is also in `unexpected_divergence` (`classify_parity` moved
+        // it there), which `validate_invariants`' NR-2 holds phase 8 to
+        // before it signs.
+        not_reconstructed: Some(not_reconstructed_all),
     })
 }
 
@@ -1502,6 +1591,12 @@ fn check_restored_count(
 /// the whole ledger to `roll_up`, which is the single place `IntegrityResult`
 /// is decided. There is no `result` variable here to initialise to `Pass` and
 /// forget to move.
+///
+/// `mode` is the run's `target.mode` (FX-3): it decides whether the deviations
+/// the restore's topic creation makes by construction are `intended` (a scratch
+/// drill) or `not_reconstructed` (a `newTopic` restore) — see
+/// [`classify_parity`]. It has NO default on purpose: a default is how the
+/// scratch rationale reached every mode in the first place.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     engine: &dyn DataEngine,
@@ -1512,6 +1607,7 @@ pub fn run(
     mapping: &BTreeMap<String, String>,
     plan: &RestorePlan,
     coverage: &SourceConfigCoverage,
+    mode: TargetMode,
 ) -> Result<VerifyOutcome, DrillError> {
     // OSO's own rule, adopted throughout this codebase (phase4_sample's own
     // empty-candidates guard is the precedent): zero selections scanned is
@@ -1609,8 +1705,9 @@ pub fn run(
     let records_restored: u64 = verdicts.iter().map(|v| v.records_restored).sum();
 
     // (d) Topic-config parity — ASSESSED only where the verified receipt says
-    // the source configuration was captured (FX-4).
-    let topic_parity = classify_parity_all(facts, reader, mapping, plan, coverage)?;
+    // the source configuration was captured (FX-4), and labelled by the run's
+    // mode (FX-3).
+    let topic_parity = classify_parity_all(facts, reader, mapping, plan, coverage, mode)?;
 
     Ok(VerifyOutcome {
         integrity,
@@ -3025,6 +3122,7 @@ mod tests {
             &BTreeMap::new(),
             &plan,
             &SourceConfigCoverage::unknown(),
+            TargetMode::Scratch,
         )
         .unwrap_err();
         assert!(matches!(err, DrillError::Operational(_)));
@@ -3099,6 +3197,7 @@ mod tests {
             &mapping,
             &plan,
             &SourceConfigCoverage::unknown(),
+            TargetMode::Scratch,
         )
         .unwrap_err();
         assert!(matches!(err, DrillError::Operational(_)));

@@ -377,6 +377,7 @@ fn phase7_reconciles_a_windowed_restore_by_original_offset() {
         &fixtures::mapping("orders", "drill-orders"),
         &window_plan(),
         &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+        logweir_core::spec::TargetMode::Scratch,
     )
     .expect("a healthy windowed restore is not an operational failure");
 
@@ -567,6 +568,7 @@ fn run_with_restored_count(restored: i64) -> logweir::drill::phase7_verify::Veri
         &fixtures::mapping("orders", "drill-orders"),
         &window_plan(),
         &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+        logweir_core::spec::TargetMode::Scratch,
     )
     .expect("a count outside the bound is a DRILL RESULT, never an operational failure")
 }
@@ -820,6 +822,7 @@ fn the_bound_counts_only_the_topics_the_restore_names() {
         &mapping,
         &window_plan(),
         &logweir_core::backup_receipt::SourceConfigCoverage::unknown(),
+        logweir_core::spec::TargetMode::Scratch,
     )
     .expect("a count inside the bound is never an operational failure");
 

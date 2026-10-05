@@ -14,7 +14,14 @@
 /// (`Scorecard::refuse_unreadable_major`), so a 1.0.0 reader reads a 1.1.0
 /// document and ignores the field; the signed 1.0.0 fixtures under
 /// `e2e/fixtures/signed/` stay 1.0.0 and keep verifying.
-pub const FORMAT_VERSION: &str = "1.1.0";
+///
+/// `1.2.0` since FX-3, which added `topic_parity.not_reconstructed`: the
+/// source settings a `newTopic` restore did not reconstruct, which phase 7
+/// labelled `intentionally_deviated` with a scratch-only rationale in every
+/// mode. Its first minor is [`scorecard::NOT_RECONSTRUCTED_SINCE_MINOR`]; a
+/// renumber moves both, the justfile's `scorecard_schema_version`, and
+/// `docs/verify_scorecard.py`'s two constants.
+pub const FORMAT_VERSION: &str = "1.2.0";
 
 /// PLAT-19.2 / decision D0: ordinary confirmation and governed approval —
 /// the installation policy set, the policy snapshot and authorization
@@ -43,8 +50,11 @@ pub mod trust;
 
 #[cfg(test)]
 mod tests {
+    /// The one literal pin of the writer's version (FX-3: 1.2.0). Every other
+    /// test derives the number from the constant, so a renumber is this line
+    /// and the constant.
     #[test]
-    fn format_version_is_one_one_zero() {
-        assert_eq!(crate::FORMAT_VERSION, "1.1.0");
+    fn format_version_is_one_two_zero() {
+        assert_eq!(crate::FORMAT_VERSION, "1.2.0");
     }
 }

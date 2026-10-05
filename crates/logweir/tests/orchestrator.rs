@@ -1083,11 +1083,63 @@ fn each_phases_result_reaches_the_signed_document() {
         sc.topic_parity.not_assessed,
         Some(vec!["drill-orders: configuration (unknown)".to_string()])
     );
-    assert_eq!(sc.format_version, "1.1.0");
+    // FX-3: a SCRATCH drill's deviations are intended (above), and phase 7
+    // makes the 1.2.0 claim that nothing was left unreconstructed.
+    assert_eq!(sc.topic_parity.not_reconstructed, Some(vec![]));
+    assert_eq!(sc.format_version, logweir_core::FORMAT_VERSION);
     // 8 — the objectives, as REQUESTED plus the verdict
     assert_eq!(sc.objectives.rto_seconds, Some(900));
     assert_eq!(sc.objectives.met, Some(true));
     assert_eq!(sc.triggered_by.as_deref(), Some("fixture"));
+}
+
+/// **FX-3, end to end through the phase sequence.** The same fixture drill as
+/// `each_phases_result_reaches_the_signed_document`, as a `newTopic` restore:
+/// the spec's mode reaches phase 7 and decides the label in the SIGNED
+/// document. The deviation the scratch run signs as intended (the source's
+/// `cleanup.policy`) is signed here as NOT reconstructed, and also in
+/// `unexpected_divergence`, where a reader older than format 1.2.0 sees it.
+///
+/// The approval covers the fixture's unchanged spec bytes; the mode and a
+/// `topic_naming.prefix` that keeps the fixture's `drill-orders` name are set
+/// on the parsed spec, which is what phases 0, 7 and 9 read.
+///
+/// Negative control: an orchestrator that hands phase 7 `TargetMode::Scratch`
+/// instead of `c.spec.target.mode` signs `intentionally_deviated:
+/// ["drill-orders: cleanup.policy"]` here and this test fails.
+#[test]
+fn a_new_topic_run_signs_its_lost_source_settings_as_not_reconstructed() {
+    let mut f = fixtures::orchestrator_args_against_fixture_engine();
+    f.ctx.spec.target.mode = logweir_core::spec::TargetMode::NewTopic;
+    f.ctx.spec.target.topic_naming = Some(logweir_core::spec::TopicNaming {
+        prefix: "drill-".into(),
+    });
+    execute_with(&f.args, &f.run_id, &f.ctx).unwrap();
+    let sc: logweir_core::scorecard::Scorecard =
+        serde_json::from_slice(&scorecard_from_store(&f)).unwrap();
+    assert_eq!(sc.target.mode, logweir_core::spec::TargetMode::NewTopic);
+    assert_eq!(sc.format_version, logweir_core::FORMAT_VERSION);
+    assert!(
+        sc.topic_parity.intentionally_deviated.is_empty(),
+        "a newTopic restore signs nothing as intended: {:?}",
+        sc.topic_parity.intentionally_deviated
+    );
+    let not_reconstructed = sc
+        .topic_parity
+        .not_reconstructed
+        .clone()
+        .expect("phase 7 ran, so the 1.2.0 field is recorded");
+    assert!(
+        not_reconstructed.contains(&"drill-orders: cleanup.policy".to_string()),
+        "{not_reconstructed:?}"
+    );
+    for entry in &not_reconstructed {
+        assert!(
+            sc.topic_parity.unexpected_divergence.contains(entry),
+            "{entry} must also be an unexpected divergence: {:?}",
+            sc.topic_parity.unexpected_divergence
+        );
+    }
 }
 
 /// Phase 9's call site, its policy and its binding. The attestation is bound

@@ -485,3 +485,65 @@ fn the_parity_row_says_what_was_not_assessed_and_never_reads_absent_as_assessed(
     sc.topic_parity.not_assessed = Some(vec![]);
     assert!(row(&sc).ends_with("unexpected []"), "{}", row(&sc));
 }
+
+/// **FX-3.** The `topic parity` row names what a `newTopic` restore did NOT
+/// reconstruct, and never lets an older `newTopic` document's `intended [...]`
+/// read as intended: a writer before format 1.2.0 applied the scratch
+/// rationale in every mode, so the row says what that label means there. A
+/// scratch drill's `intended` is what it says, in every version, and `[]`
+/// adds nothing.
+///
+/// Negative controls: a row that ignored `not_reconstructed`, or that read an
+/// ABSENT field as "everything reconstructed" for a `newTopic` document,
+/// fails here.
+#[test]
+fn the_parity_row_names_what_a_new_topic_restore_did_not_reconstruct() {
+    use logweir_core::spec::TargetMode;
+    let row = |sc: &logweir_core::scorecard::Scorecard| {
+        logweir::show::render_table(sc)
+            .lines()
+            .find(|l| l.contains("topic parity"))
+            .unwrap()
+            .to_string()
+    };
+    // A 1.2.0 newTopic document, as phase 7 writes it.
+    let mut sc = fixtures::scorecard_pass();
+    sc.format_version = logweir_core::FORMAT_VERSION.to_string();
+    sc.target.mode = TargetMode::NewTopic;
+    sc.target.marker_topic = None;
+    sc.topic_parity.intentionally_deviated = vec![];
+    sc.topic_parity.unexpected_divergence = vec![
+        "restore-x-orders: cleanup.policy".to_string(),
+        "restore-x-orders: replication_factor".to_string(),
+    ];
+    sc.topic_parity.not_reconstructed = Some(sc.topic_parity.unexpected_divergence.clone());
+    sc.topic_parity.not_assessed = Some(vec![]);
+    assert!(
+        row(&sc).ends_with(
+            "not reconstructed [restore-x-orders: cleanup.policy, \
+             restore-x-orders: replication_factor]"
+        ),
+        "{}",
+        row(&sc)
+    );
+    // A newTopic document from before 1.2.0: no field, and its writer's
+    // "intended" labels.
+    sc.format_version = "1.1.0".into();
+    sc.topic_parity.intentionally_deviated = sc.topic_parity.unexpected_divergence.clone();
+    sc.topic_parity.unexpected_divergence = vec![];
+    sc.topic_parity.not_reconstructed = None;
+    assert!(
+        row(&sc)
+            .ends_with("intended = NOT reconstructed (a newTopic document before format 1.2.0)"),
+        "{}",
+        row(&sc)
+    );
+    // The same lists in a SCRATCH document mean what they say.
+    sc.target.mode = TargetMode::Scratch;
+    sc.target.marker_topic = Some("logweir.scratch".into());
+    assert!(row(&sc).ends_with("unexpected []"), "{}", row(&sc));
+    // And the claim `[]` adds nothing.
+    sc.format_version = logweir_core::FORMAT_VERSION.to_string();
+    sc.topic_parity.not_reconstructed = Some(vec![]);
+    assert!(row(&sc).ends_with("unexpected []"), "{}", row(&sc));
+}
