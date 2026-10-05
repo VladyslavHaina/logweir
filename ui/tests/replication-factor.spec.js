@@ -356,7 +356,8 @@ test("fx5_an_edited_factor_above_the_brokers_is_refused_before_create_by_the_che
     assert.ok(refused !== null && step6.indexOf("id=\"review-replication-complaint\"") <
       step6.indexOf("id=\"create-restore\""),
     "NEGATIVE CONTROL: no refusal on the review step, or one below Create, fails this: " + step6);
-    assert.ok(step6.includes("data-go-step=\"3\">Go to step 4: Target, topic subset and naming"));
+    assert.ok(step6.includes("data-go-step=\"3\">Go to step 4: Replication factor</button>"),
+      "a way back to the input, its caption short enough for a 390 px screen");
     assert.equal(visible(byId(step6, "review-replication")),
       "3 (set by you; the target has 2 brokers)");
     // AND THE SUBMIT REFUSES WITH IT, sending nothing.

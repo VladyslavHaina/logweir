@@ -3467,11 +3467,14 @@ const GO_TO_READINESS =
   "data-go-step=\"4\">" +
   "Go to step 5: Operation readiness</button></p>";
 
-/** The way back to the replication factor's input, beside its refusal. */
+/** The way back to the replication factor's input, beside its refusal. The
+ *  caption names the input, not the step's whole title: a caption never wraps
+ *  (MCP-8), and the step title made this button 370 px wide, past a 390 px
+ *  screen. */
 const GO_TO_TARGET =
   "<p class=\"actions\"><button type=\"button\" class=\"wizard-go\" id=\"go-to-replication\" " +
   "data-go-step=\"3\">" +
-  "Go to step 4: Target, topic subset and naming</button></p>";
+  "Go to step 4: Replication factor</button></p>";
 
 /** What the one submit button does, said beside it. */
 export const GUIDED_SUBMIT_SENTENCE =
