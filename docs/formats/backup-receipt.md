@@ -624,8 +624,14 @@ never a refusal — by three routes:
   or a proxy that drops `?versionId=`; seen on neither MinIO nor SeaweedFS).
 
 Keep noncurrent manifest versions at least as long as the points that pin them;
-Object Lock retention covering a point's lifetime keeps its pinned version
-against both deletion and expiry [UNVERIFIED — needs a delete of a retained version on a bucket with default retention]. When the
+Object Lock retention covering a point's lifetime keeps its pinned version.
+Measured on SeaweedFS 4.48 (FX-7 renumber, compose slot 2): a `GOVERNANCE`
+retention on a rewritten point's pinned version refused that version's delete
+(`AccessDenied`, the version count unchanged) and the point stayed `Conflict`.
+Governance mode yields to a principal holding `s3:BypassGovernanceRetention`,
+compliance mode to nobody; that a lifecycle rule cannot expire a retained
+version, and AWS S3 itself, are
+[UNVERIFIED — needs a real AWS S3 bucket and a credential source]. When the
 signing bucket's catalog says `Conflict` and a copy's says `Available`, believe
 the `Conflict`: it is evidence about the set, not about the place. Only a check
 of the segment digests the manifest records closes all three routes, and this
@@ -729,7 +735,15 @@ the_frozen_1_0_0_receipt_schema_is_still_the_1_0_0_schema` and
   them: they compare majors only, arm 6 reads the 1.2 minor as "at least 1",
   and none of the receipt's types refuses an unknown field. They print no
   manifest version, so an auditor who needs the pin verifies with script 1.16.0
-  or a `logweir` built from FX-7 on.
+  or a `logweir` built from FX-7 on. Measured (FX-7 renumber, 2026-10-05): a
+  `logweir` built at main `b8b9263f` with script 1.15.0, and the released
+  `v0.1.5` runner's `logweir` with script 1.14.0, each exit 0 on
+  `unmodified_receipt_pinned.json` signed with the fixture key and print for it
+  exactly what they print for the same document without the pin at 1.1.0
+  (FX-4's two read and print its coverage too); all four exit 0 on a real 1.2.0
+  receipt a run signed on a versioned SeaweedFS bucket. A 1.2.0 catalog point is
+  accepted by the three that know the type; `v0.1.5` has no `catalog-point`
+  payload type at all.
 - **Rollback.** A build from before FX-7 writes unpinned receipts again (1.1.0
   from FX-4's build, 1.0.0 before it), and its readers neither print nor check
   a pin. The 1.2.0 receipts already written stay valid and verifiable under
