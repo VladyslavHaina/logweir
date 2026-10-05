@@ -21,7 +21,8 @@
 //!    phrase broken across two source lines renders as one.
 //!
 //! Around them, the structure the row's acceptance names: every supported
-//! statement cites a field; every "does not show" item links to a section under
+//! statement cites a field, and links the page that defines that document's
+//! fields; every "does not show" item links to a section under
 //! the page's gap heading; every anchor the page links resolves (`just links`
 //! checks files, not fragments); each of the six texts keeps its section; and
 //! the verification guide and the README link the page. A docs-wide sweep keeps
@@ -223,8 +224,8 @@ fn heading_slugs(text: &str) -> BTreeSet<String> {
 
 // -------------------------------------------------------------- the documents
 
-/// The documents a citation may name: the name is what the page writes before
-/// the colon in a `Fields` cell.
+/// The documents a citation may name: the name is the link text of a
+/// citation in a `Fields` cell, `[Name](definition): `path`, …`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Doc {
     Scorecard,
@@ -253,6 +254,24 @@ impl Doc {
             Doc::CatalogPoint => "Catalog point",
             Doc::StandingAuthorization => "Standing authorization",
             Doc::RehearsalSchedule => "RehearsalSchedule",
+        }
+    }
+
+    /// The page that defines the document's fields, as the mapping links it
+    /// from `docs/`. Every citation links exactly this, so each supported
+    /// statement names the format document behind its field.
+    fn definition(self) -> &'static str {
+        match self {
+            Doc::Scorecard => "formats/drill-scorecard.md",
+            Doc::PutReceipt => "verify-a-scorecard.md#the-storage-receipt-a-second-signed-document",
+            Doc::BackupReceipt => "formats/backup-receipt.md",
+            Doc::CatalogPoint => "formats/catalog-point.md",
+            Doc::StandingAuthorization => {
+                "stability.md#the-standing-rehearsal-authorization-is-signed-and-the-runner-checks-the-signature"
+            }
+            Doc::RehearsalSchedule => {
+                "kubernetes.md#7g-a-rehearsalschedule-proves-recovery-on-a-cron-under-one-signed-authorization"
+            }
         }
     }
 
@@ -493,13 +512,24 @@ fn field_shaped(token: &str) -> bool {
     })
 }
 
-/// Parse one `Fields` cell: groups separated by `;`, each `Name: `path`, …`.
+/// One citation group, `[Name](definition): paths`, as its three parts.
+fn split_citation(group: &str) -> Option<(&str, &str, &str)> {
+    let rest = group.strip_prefix('[')?;
+    let (name, rest) = rest.split_once("](")?;
+    let (definition, rest) = rest.split_once(')')?;
+    let paths = rest.strip_prefix(':')?;
+    Some((name, definition, paths))
+}
+
+/// Parse one `Fields` cell: groups separated by `;`, each
+/// `[Name](definition): `path`, …`.
 fn parse_fields_cell(cell: &str, statement: &str, survey: &mut Survey) -> usize {
     let mut cited = 0;
     for group in cell.split(';').map(str::trim).filter(|g| !g.is_empty()) {
-        let Some((name, paths)) = group.split_once(':') else {
+        let Some((name, definition, paths)) = split_citation(group) else {
             survey.problems.push(format!(
-                "a citation names no document: `{group}` (row: {statement})"
+                "a citation must read `[Document](definition): `path`, …`, linking the page that \
+                 defines the document's fields; found `{group}` (row: {statement})"
             ));
             continue;
         };
@@ -511,6 +541,13 @@ fn parse_fields_cell(cell: &str, statement: &str, survey: &mut Survey) -> usize 
             ));
             continue;
         };
+        if definition != doc.definition() {
+            survey.problems.push(format!(
+                "a {} citation must link its definition `{}`, not `{definition}` (row: {statement})",
+                doc.name(),
+                doc.definition()
+            ));
+        }
         let spans = code_spans(paths);
         if spans.is_empty() {
             survey.problems.push(format!(
@@ -896,21 +933,29 @@ fn a_made_up_or_misattributed_field_is_refused() {
     let page = read(PAGE);
     for (row, expected) in [
         (
-            "| A made-up statement. | Scorecard: `integrity.exhaustively_checked` |",
+            "| A made-up statement. | [Scorecard](formats/drill-scorecard.md): `integrity.exhaustively_checked` |",
             "Scorecard: `integrity.exhaustively_checked` is not a field",
         ),
         (
-            "| A misattributed statement. | Scorecard: `covered.from_ms` |",
+            "| A misattributed statement. | [Scorecard](formats/drill-scorecard.md): `covered.from_ms` |",
             "Scorecard: `covered.from_ms` is not a field",
         ),
         (
-            "| A statement from an unknown document. | Ledger: `entries` |",
+            "| A statement from an unknown document. | [Ledger](formats/ledger.md): `entries` |",
             "unknown document `Ledger`",
         ),
         ("| An uncited statement. |  |", "cites no field"),
         (
-            "| A statement with a name and no field. | Scorecard: none |",
+            "| A statement with a name and no field. | [Scorecard](formats/drill-scorecard.md): none |",
             "`Scorecard` is followed by no field",
+        ),
+        (
+            "| A statement linking the wrong definition. | [Scorecard](formats/backup-receipt.md): `run_id` |",
+            "a Scorecard citation must link its definition `formats/drill-scorecard.md`",
+        ),
+        (
+            "| A statement that names no definition. | Scorecard: `run_id` |",
+            "a citation must read `[Document](definition)",
         ),
     ] {
         let mutated = with_extra_row(&page, row);

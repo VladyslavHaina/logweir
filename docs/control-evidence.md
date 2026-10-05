@@ -40,10 +40,10 @@ is the companion to this page.
   cites the fields it rests on; and **what it does not show**, a list in which
   every item links to a gap under
   [What the evidence does not show](#what-the-evidence-does-not-show).
-- A field is cited as `Document: field.path`, for example Scorecard:
-  `integrity.result`. The six documents are described in
-  [the next section](#the-evidence-this-page-cites), and the path is the
-  field's JSON path in that document.
+- A field is cited as the document, linked to the page that defines its
+  fields, then the field's JSON path in that document, for example
+  [Scorecard](formats/drill-scorecard.md): `integrity.result`. The six
+  documents are described in [the next section](#the-evidence-this-page-cites).
 - `crates/logweir/tests/control_evidence.rs` checks every cited field against
   the definition of the document it names, refuses a supported row that cites
   no field, and refuses wording that would turn evidence into a verdict about an
@@ -99,10 +99,10 @@ results of tests".
 
 | What the evidence supports | Fields |
 |---|---|
-| A restore from a named archive was tested at a recorded time, and the test recorded its own outcome. | Scorecard: `run_id`, `requested_at`, `outcome`, `source.backup_id`, `source.manifest_sha256` |
-| The test ran a plan approved before it ran: a per-run approval signs the exact plan bytes, and a rehearsal's plan was proven to fall inside a scope a human signed for that one schedule. | Scorecard: `approval.approver`, `approval.ticket`, `approval.approved_at`, `approval.plan_hash`, `approval.key_id`; Standing authorization: `subjectRef.uid`, `scope.templateDigest`, `issuedAt`, `expiresAt` |
-| Scheduled rehearsals recur on a configured cadence; the last pass is recorded, and so are the last failure and the last refused slot, with their reasons. | RehearsalSchedule: `spec.schedule`, `status.lastSucceeded.at`, `status.lastFailed.reason`, `status.lastSkipped.slot`, `status.lastSkipped.reason` |
-| The restore software is identified by version and image digest, so tests before and after a change to it can be told apart. | Scorecard: `engine.version`, `engine.digest` |
+| A restore from a named archive was tested at a recorded time, and the test recorded its own outcome. | [Scorecard](formats/drill-scorecard.md): `run_id`, `requested_at`, `outcome`, `source.backup_id`, `source.manifest_sha256` |
+| The test ran a plan approved before it ran: a per-run approval signs the exact plan bytes, and a rehearsal's plan was proven to fall inside a scope a human signed for that one schedule. | [Scorecard](formats/drill-scorecard.md): `approval.approver`, `approval.ticket`, `approval.approved_at`, `approval.plan_hash`, `approval.key_id`; [Standing authorization](stability.md#the-standing-rehearsal-authorization-is-signed-and-the-runner-checks-the-signature): `subjectRef.uid`, `scope.templateDigest`, `issuedAt`, `expiresAt` |
+| Scheduled rehearsals recur on a configured cadence; the last pass is recorded, and so are the last failure and the last refused slot, with their reasons. | [RehearsalSchedule](kubernetes.md#7g-a-rehearsalschedule-proves-recovery-on-a-cron-under-one-signed-authorization): `spec.schedule`, `status.lastSucceeded.at`, `status.lastFailed.reason`, `status.lastSkipped.slot`, `status.lastSkipped.reason` |
+| The restore software is identified by version and image digest, so tests before and after a change to it can be told apart. | [Scorecard](formats/drill-scorecard.md): `engine.version`, `engine.digest` |
 
 **What it does not show**
 
@@ -131,10 +131,10 @@ results of tests".
 
 | What the evidence supports | Fields |
 |---|---|
-| Each backup run names the topics it was asked to capture, counts the records it captured per topic, and states the window it covers. | Backup receipt: `source.topics`, `records`, `covered.from_ms`, `covered.to_ms` |
-| How often backups actually ran can be read from the recovery points, each dated by the start of its capture. | Catalog point: `point_id`, `capture.started_at`, `capture.finished_at` |
-| A backup names its archive manifest only when the engine exited 0, and the manifest digest is taken over the bytes read back from the store. | Backup receipt: `exit_code`, `archive.manifest_key`, `archive.manifest_sha256` |
-| A restore from such a backup was tested, and its result recorded. | Scorecard: `source.backup_id`, `source.manifest_sha256`, `outcome`, `integrity.result` |
+| Each backup run names the topics it was asked to capture, counts the records it captured per topic, and states the window it covers. | [Backup receipt](formats/backup-receipt.md): `source.topics`, `records`, `covered.from_ms`, `covered.to_ms` |
+| How often backups actually ran can be read from the recovery points, each dated by the start of its capture. | [Catalog point](formats/catalog-point.md): `point_id`, `capture.started_at`, `capture.finished_at` |
+| A backup names its archive manifest only when the engine exited 0, and the manifest digest is taken over the bytes read back from the store. | [Backup receipt](formats/backup-receipt.md): `exit_code`, `archive.manifest_key`, `archive.manifest_sha256` |
+| A restore from such a backup was tested, and its result recorded. | [Scorecard](formats/drill-scorecard.md): `source.backup_id`, `source.manifest_sha256`, `outcome`, `integrity.result` |
 
 **What it does not show**
 
@@ -158,11 +158,11 @@ results of tests".
 
 | What the evidence supports | Fields |
 |---|---|
-| The restore went to a cluster identified by the id that cluster reports, in a recorded target mode. | Scorecard: `target.cluster_id`, `target.mode` |
-| In scratch mode, the target was proven to be a designated scratch cluster before anything ran: its id was on the allowlist and its marker topic existed. | Scorecard: `target.marker_topic` |
-| The cluster the archive came from was read from that cluster at backup time and is recorded separately, so the two ids can be compared. | Backup receipt: `source.cluster_id`; Scorecard: `target.cluster_id` |
-| Restored data went to prefixed topic names under an attested mapping; the topics the restore set out to create, and any mapped name that already existed, are listed. | Scorecard: `target.topic_mapping_prefix`, `target.topic_mapping_sha256`, `target_diff.would_create`, `target_diff.collisions` |
-| A scheduled rehearsal may run only in scratch mode, against one target cluster id and under one topic prefix, both fixed in its signed scope. | Standing authorization: `scope.modes`, `scope.targetClusterId`, `scope.topicPrefix` |
+| The restore went to a cluster identified by the id that cluster reports, in a recorded target mode. | [Scorecard](formats/drill-scorecard.md): `target.cluster_id`, `target.mode` |
+| In scratch mode, the target was proven to be a designated scratch cluster before anything ran: its id was on the allowlist and its marker topic existed. | [Scorecard](formats/drill-scorecard.md): `target.marker_topic` |
+| The cluster the archive came from was read from that cluster at backup time and is recorded separately, so the two ids can be compared. | [Backup receipt](formats/backup-receipt.md): `source.cluster_id`; [Scorecard](formats/drill-scorecard.md): `target.cluster_id` |
+| Restored data went to prefixed topic names under an attested mapping; the topics the restore set out to create, and any mapped name that already existed, are listed. | [Scorecard](formats/drill-scorecard.md): `target.topic_mapping_prefix`, `target.topic_mapping_sha256`, `target_diff.would_create`, `target_diff.collisions` |
+| A scheduled rehearsal may run only in scratch mode, against one target cluster id and under one topic prefix, both fixed in its signed scope. | [Standing authorization](stability.md#the-standing-rehearsal-authorization-is-signed-and-the-runner-checks-the-signature): `scope.modes`, `scope.targetClusterId`, `scope.topicPrefix` |
 
 **What it does not show**
 
@@ -180,10 +180,10 @@ results of tests".
 
 | What the evidence supports | Fields |
 |---|---|
-| The objectives the approved plan set for the test, and whether the test met them, are recorded; no objective, or an unmeasurable one, reads `null` and never `true`. | Scorecard: `objectives.rto_seconds`, `objectives.rpo_seconds`, `objectives.pass_rate`, `objectives.met` |
-| The test's recovery time is measured four ways, so the figure compared with the objective can be read against the other three. | Scorecard: `measured.rto_seconds`, `measured.rto_requested_to_verified_seconds`, `measured.rto_restore_only_seconds`, `measured.rto_excluding_preflight_seconds` |
-| The archive's coverage gap at the requested recovery point is measured. | Scorecard: `measured.rpo_seconds` |
-| A rehearsal schedule carries a recovery-time objective and records the recovery time its last passing rehearsal measured. | RehearsalSchedule: `spec.objectives.rtoSeconds`, `status.lastSucceeded.rtoSeconds` |
+| The objectives the approved plan set for the test, and whether the test met them, are recorded; no objective, or an unmeasurable one, reads `null` and never `true`. | [Scorecard](formats/drill-scorecard.md): `objectives.rto_seconds`, `objectives.rpo_seconds`, `objectives.pass_rate`, `objectives.met` |
+| The test's recovery time is measured four ways, so the figure compared with the objective can be read against the other three. | [Scorecard](formats/drill-scorecard.md): `measured.rto_seconds`, `measured.rto_requested_to_verified_seconds`, `measured.rto_restore_only_seconds`, `measured.rto_excluding_preflight_seconds` |
+| The archive's coverage gap at the requested recovery point is measured. | [Scorecard](formats/drill-scorecard.md): `measured.rpo_seconds` |
+| A rehearsal schedule carries a recovery-time objective and records the recovery time its last passing rehearsal measured. | [RehearsalSchedule](kubernetes.md#7g-a-rehearsalschedule-proves-recovery-on-a-cron-under-one-signed-authorization): `spec.objectives.rtoSeconds`, `status.lastSucceeded.rtoSeconds` |
 
 **What it does not show**
 
@@ -203,10 +203,10 @@ results of tests".
 
 | What the evidence supports | Fields |
 |---|---|
-| Restored records were reconciled byte for byte with the archive, on a sample whose size and result are recorded. | Scorecard: `integrity.level`, `integrity.result`, `integrity.records_sampled`, `integrity.records_sampled_matching`, `integrity.mismatches`, `sample.records_expected` |
-| The archive manifest the restore read is identified by digest, which an auditor can re-derive from the store by hand. | Scorecard: `source.manifest_sha256`, `source.manifest_version_id` |
-| A check that could not finish says why, and both verifiers refuse a `pass` beside such a reason. | Scorecard: `integrity.partial_reason`, `outcome` |
-| The target's topic configuration was compared with the configuration the archive recorded. | Scorecard: `topic_parity.unexpected_divergence`, `topic_parity.intentionally_deviated` |
+| Restored records were reconciled byte for byte with the archive, on a sample whose size and result are recorded. | [Scorecard](formats/drill-scorecard.md): `integrity.level`, `integrity.result`, `integrity.records_sampled`, `integrity.records_sampled_matching`, `integrity.mismatches`, `sample.records_expected` |
+| The archive manifest the restore read is identified by digest, which an auditor can re-derive from the store by hand. | [Scorecard](formats/drill-scorecard.md): `source.manifest_sha256`, `source.manifest_version_id` |
+| A check that could not finish says why, and both verifiers refuse a `pass` beside such a reason. | [Scorecard](formats/drill-scorecard.md): `integrity.partial_reason`, `outcome` |
+| The target's topic configuration was compared with the configuration the archive recorded. | [Scorecard](formats/drill-scorecard.md): `topic_parity.unexpected_divergence`, `topic_parity.intentionally_deviated` |
 
 **What it does not show**
 
@@ -248,10 +248,10 @@ Article 25(5):
 
 | What the evidence supports | Fields |
 |---|---|
-| The result of each restore test is documented in a signed record, which also says why a test did not pass. | Scorecard: `outcome`, `integrity.result`, `integrity.partial_reason`, `phases[].notes` |
-| A failed rehearsal is recorded with its reason, and the schedule reports itself unhealthy until a rehearsal passes. | RehearsalSchedule: `status.lastFailed.at`, `status.lastFailed.reason`, `status.conditions` |
-| The restored sample was compared with the archive, and the test records how much of it read back exactly as archived. | Scorecard: `integrity.level`, `integrity.records_sampled_matching`, `sample.records_expected` |
-| The stored record of a test is bound to its exact signed bytes, and the store's answer to its create-only upload is recorded. | Put receipt: `scorecard_sha256`, `scorecard_key`, `create_only_enforced`, `version_id` |
+| The result of each restore test is documented in a signed record, which also says why a test did not pass. | [Scorecard](formats/drill-scorecard.md): `outcome`, `integrity.result`, `integrity.partial_reason`, `phases[].notes` |
+| A failed rehearsal is recorded with its reason, and the schedule reports itself unhealthy until a rehearsal passes. | [RehearsalSchedule](kubernetes.md#7g-a-rehearsalschedule-proves-recovery-on-a-cron-under-one-signed-authorization): `status.lastFailed.at`, `status.lastFailed.reason`, `status.conditions` |
+| The restored sample was compared with the archive, and the test records how much of it read back exactly as archived. | [Scorecard](formats/drill-scorecard.md): `integrity.level`, `integrity.records_sampled_matching`, `sample.records_expected` |
+| The stored record of a test is bound to its exact signed bytes, and the store's answer to its create-only upload is recorded. | [Put receipt](verify-a-scorecard.md#the-storage-receipt-a-second-signed-document): `scorecard_sha256`, `scorecard_key`, `create_only_enforced`, `version_id` |
 
 **What it does not show**
 
@@ -281,8 +281,8 @@ address and report deficiencies to the management body.
 
 | What the evidence supports | Fields |
 |---|---|
-| A restore test of a backup ran on a recorded date and left a signed result. | Scorecard: `requested_at`, `source.backup_id`, `outcome` |
-| Restore tests recur on a configured cadence, and the last passing one names its signed scorecard. | RehearsalSchedule: `spec.schedule`, `status.lastSucceeded.evidence` |
+| A restore test of a backup ran on a recorded date and left a signed result. | [Scorecard](formats/drill-scorecard.md): `requested_at`, `source.backup_id`, `outcome` |
+| Restore tests recur on a configured cadence, and the last passing one names its signed scorecard. | [RehearsalSchedule](kubernetes.md#7g-a-rehearsalschedule-proves-recovery-on-a-cron-under-one-signed-authorization): `spec.schedule`, `status.lastSucceeded.evidence` |
 
 **What it does not show**
 
@@ -308,10 +308,10 @@ organisation's information security management system to record.
 
 | What the evidence supports | Fields |
 |---|---|
-| Backups were made: each run, the topics it covered, its per-topic record counts and its window. | Backup receipt: `run_id`, `source.topics`, `records`, `covered.from_ms`, `covered.to_ms` |
-| Each backup is identified by the digest of its manifest, and each recovery point by the digest of its receipt, so a later reader can tell whether either has changed. | Backup receipt: `archive.manifest_sha256`; Catalog point: `point_id`, `receipt.sha256` |
-| Backups were restored in a test, and the restored data was compared with the backup on a sample. | Scorecard: `source.manifest_sha256`, `integrity.level`, `integrity.result`, `sample.records_expected` |
-| The restore test ran under an approved, recorded plan. | Scorecard: `approval.plan_hash`, `approval.approver`, `approval.key_id` |
+| Backups were made: each run, the topics it covered, its per-topic record counts and its window. | [Backup receipt](formats/backup-receipt.md): `run_id`, `source.topics`, `records`, `covered.from_ms`, `covered.to_ms` |
+| Each backup is identified by the digest of its manifest, and each recovery point by the digest of its receipt, so a later reader can tell whether either has changed. | [Backup receipt](formats/backup-receipt.md): `archive.manifest_sha256`; [Catalog point](formats/catalog-point.md): `point_id`, `receipt.sha256` |
+| Backups were restored in a test, and the restored data was compared with the backup on a sample. | [Scorecard](formats/drill-scorecard.md): `source.manifest_sha256`, `integrity.level`, `integrity.result`, `sample.records_expected` |
+| The restore test ran under an approved, recorded plan. | [Scorecard](formats/drill-scorecard.md): `approval.plan_hash`, `approval.approver`, `approval.key_id` |
 
 **What it does not show**
 
@@ -343,10 +343,10 @@ addressed.
 
 | What the evidence supports | Fields |
 |---|---|
-| A recovery procedure was tested: a restore ran, recorded each phase it went through, and checked its result. | Scorecard: `outcome`, `phases[].name`, `phases[].outcome`, `integrity.result` |
-| The integrity of backup data was tested on a sample, byte for byte against the archive whose manifest digest is recorded. | Scorecard: `integrity.level`, `integrity.records_sampled_matching`, `integrity.mismatches`, `source.manifest_sha256` |
-| The objectives set for the test, and whether they were met, are recorded. | Scorecard: `objectives.rto_seconds`, `objectives.pass_rate`, `objectives.met`, `measured.rto_excluding_preflight_seconds` |
-| Tests recur on a schedule, with the last result of each kind recorded. | RehearsalSchedule: `spec.schedule`, `status.lastSucceeded.at`, `status.lastFailed.at` |
+| A recovery procedure was tested: a restore ran, recorded each phase it went through, and checked its result. | [Scorecard](formats/drill-scorecard.md): `outcome`, `phases[].name`, `phases[].outcome`, `integrity.result` |
+| The integrity of backup data was tested on a sample, byte for byte against the archive whose manifest digest is recorded. | [Scorecard](formats/drill-scorecard.md): `integrity.level`, `integrity.records_sampled_matching`, `integrity.mismatches`, `source.manifest_sha256` |
+| The objectives set for the test, and whether they were met, are recorded. | [Scorecard](formats/drill-scorecard.md): `objectives.rto_seconds`, `objectives.pass_rate`, `objectives.met`, `measured.rto_excluding_preflight_seconds` |
+| Tests recur on a schedule, with the last result of each kind recorded. | [RehearsalSchedule](kubernetes.md#7g-a-rehearsalschedule-proves-recovery-on-a-cron-under-one-signed-authorization): `spec.schedule`, `status.lastSucceeded.at`, `status.lastFailed.at` |
 
 **What it does not show**
 
@@ -393,11 +393,11 @@ and retention periods for the copies.
 
 | What the evidence supports | Fields |
 |---|---|
-| 4.2.2(a): the recovery time of a tested restore is measured, and compared with the objective the plan set. | Scorecard: `measured.rto_seconds`, `measured.rto_restore_only_seconds`, `measured.rto_excluding_preflight_seconds`, `objectives.rto_seconds`, `objectives.met` |
-| 4.2.2(b): each backup run's per-topic record counts and covered window are signed, and a restore's sampled records are compared byte for byte with the archive. | Backup receipt: `records`, `covered.from_ms`, `covered.to_ms`; Scorecard: `integrity.records_sampled`, `integrity.records_sampled_matching` |
-| 4.2.2(e): data was restored from a recorded archive into a recorded target. | Scorecard: `source.backup_id`, `target.cluster_id`, `target_diff.would_create` |
-| 4.2.3: the archive manifest's digest is signed and can be re-derived by hand, and each restore test checks a sample of the archive. | Scorecard: `source.manifest_sha256`, `integrity.level`, `integrity.result` |
-| 4.2.6: each recovery test leaves a signed record of its result, and of why it did not pass. | Scorecard: `outcome`, `integrity.partial_reason`; RehearsalSchedule: `status.lastFailed.reason` |
+| 4.2.2(a): the recovery time of a tested restore is measured, and compared with the objective the plan set. | [Scorecard](formats/drill-scorecard.md): `measured.rto_seconds`, `measured.rto_restore_only_seconds`, `measured.rto_excluding_preflight_seconds`, `objectives.rto_seconds`, `objectives.met` |
+| 4.2.2(b): each backup run's per-topic record counts and covered window are signed, and a restore's sampled records are compared byte for byte with the archive. | [Backup receipt](formats/backup-receipt.md): `records`, `covered.from_ms`, `covered.to_ms`; [Scorecard](formats/drill-scorecard.md): `integrity.records_sampled`, `integrity.records_sampled_matching` |
+| 4.2.2(e): data was restored from a recorded archive into a recorded target. | [Scorecard](formats/drill-scorecard.md): `source.backup_id`, `target.cluster_id`, `target_diff.would_create` |
+| 4.2.3: the archive manifest's digest is signed and can be re-derived by hand, and each restore test checks a sample of the archive. | [Scorecard](formats/drill-scorecard.md): `source.manifest_sha256`, `integrity.level`, `integrity.result` |
+| 4.2.6: each recovery test leaves a signed record of its result, and of why it did not pass. | [Scorecard](formats/drill-scorecard.md): `outcome`, `integrity.partial_reason`; [RehearsalSchedule](kubernetes.md#7g-a-rehearsalschedule-proves-recovery-on-a-cron-under-one-signed-authorization): `status.lastFailed.reason` |
 
 **What it does not show**
 
@@ -438,9 +438,9 @@ proposal.
 
 | What the evidence supports | Fields |
 |---|---|
-| Periodic testing: restore tests recur on a schedule, and each one leaves a dated, signed result. | RehearsalSchedule: `spec.schedule`, `status.lastSucceeded.at`; Scorecard: `requested_at`, `outcome` |
-| What a test found, including why it did not pass, is recorded as an input to the revision step. | Scorecard: `outcome`, `integrity.partial_reason`, `phases[].notes`; RehearsalSchedule: `status.lastFailed.reason` |
-| For (A) and (B), a backup was restored in a test, and a sample of the restored records was compared byte for byte with it. | Scorecard: `integrity.level`, `integrity.records_sampled_matching`, `sample.records_expected` |
+| Periodic testing: restore tests recur on a schedule, and each one leaves a dated, signed result. | [RehearsalSchedule](kubernetes.md#7g-a-rehearsalschedule-proves-recovery-on-a-cron-under-one-signed-authorization): `spec.schedule`, `status.lastSucceeded.at`; [Scorecard](formats/drill-scorecard.md): `requested_at`, `outcome` |
+| What a test found, including why it did not pass, is recorded as an input to the revision step. | [Scorecard](formats/drill-scorecard.md): `outcome`, `integrity.partial_reason`, `phases[].notes`; [RehearsalSchedule](kubernetes.md#7g-a-rehearsalschedule-proves-recovery-on-a-cron-under-one-signed-authorization): `status.lastFailed.reason` |
+| For (A) and (B), a backup was restored in a test, and a sample of the restored records was compared byte for byte with it. | [Scorecard](formats/drill-scorecard.md): `integrity.level`, `integrity.records_sampled_matching`, `sample.records_expected` |
 
 **What it does not show**
 
