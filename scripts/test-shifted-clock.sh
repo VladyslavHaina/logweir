@@ -83,10 +83,11 @@
 # are built for the host and the runner is set for the host only, so a test
 # binary built for another target would run at the real clock and pass. A run
 # in which no test binary went through the runner at all (a `build.target` in
-# a cargo config, a `--config` that replaces the runner) fails after the
-# suite. Where `timeout` or `gtimeout` exists, the suite runs under a
-# two-hour deadline; stock macOS has neither, and there the probes are the
-# hang guard.
+# a cargo config, or only doctests, or `--no-run`) fails after the suite. (A
+# `--config` runner cannot replace this one: cargo prefers the environment
+# variable the script exports, measured with cargo 1.89.) Where `timeout` or
+# `gtimeout` exists, the suite runs under a two-hour deadline; stock macOS has
+# neither, and there the probes are the hang guard.
 #
 # LIMITS. Doctests run without the runner (cargo applies it to test binaries
 # only). A child spawned through a SIP-protected macOS binary (`/bin/sh`,
@@ -539,7 +540,7 @@ elif [ "$status" -ne 0 ]; then
   echo "shifted-clock: the suite FAILED $days day(s) ahead (exit $status). A row that passes at the real clock and fails here compares the wall clock with a fixed instant: hand the code under test a fixed \`now\` (Global Constraint 1)." >&2
 fi
 if [ ! -s "$ran" ]; then
-  echo "shifted-clock: no test binary went through the runner, so nothing ran at the shifted clock (a \`build.target\` in a cargo config, or a \`--config\` that replaces the runner?). The run proves nothing." >&2
+  echo "shifted-clock: no test binary went through the runner, so nothing ran at the shifted clock (a \`build.target\` in a cargo config? only doctests? \`--no-run\`?). The run proves nothing." >&2
   if [ "$status" -eq 0 ]; then
     status=1
   fi
