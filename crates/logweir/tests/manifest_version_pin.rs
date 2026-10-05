@@ -287,11 +287,15 @@ fn a_run_on_a_versioned_bucket_pins_the_manifest_version_it_read_back() {
     assert_eq!(record["archive"]["manifest_version_id"], last.as_str());
 }
 
-/// **Old evidence keeps its shape.** On an unversioned bucket there is nothing
-/// to pin: the receipt is the `1.0.0` document with NO `manifest_version_id`
-/// key at all (absent, never `null`), and so is the catalog record.
+/// **Unpinned evidence keeps its shape.** On an unversioned bucket there is
+/// nothing to pin: the receipt is the document without the pin — FX-4's
+/// [`RECEIPT_FORMAT_VERSION`], with its `config_coverage` — with NO
+/// `manifest_version_id` key at all (absent, never `null`), and so is the
+/// catalog record, at FX-4's record `FORMAT_VERSION`.
+///
+/// [`RECEIPT_FORMAT_VERSION`]: logweir_core::backup_receipt::RECEIPT_FORMAT_VERSION
 #[test]
-fn an_unversioned_run_writes_the_1_0_0_receipt_with_no_pin_field() {
+fn an_unversioned_run_writes_the_unpinned_receipt_with_no_pin_field() {
     let f = Fixture::new();
     let store = Store::in_memory("logweir/");
     let engine = ManifestWriter {
@@ -301,7 +305,15 @@ fn an_unversioned_run_writes_the_1_0_0_receipt_with_no_pin_field() {
     };
     let outcome = f.run(&store, &engine);
     let (bytes, receipt) = f.receipt(&store, &outcome);
-    assert_eq!(receipt.format_version, "1.0.0");
+    assert_eq!(
+        receipt.format_version,
+        logweir_core::backup_receipt::RECEIPT_FORMAT_VERSION,
+        "an unpinned receipt is FX-4's document, not the pin's MINOR"
+    );
+    assert!(
+        receipt.config_coverage.is_some(),
+        "FX-4 writes config_coverage on every receipt, pinned or not"
+    );
     assert_eq!(receipt.archive.manifest_version_id, None);
     let raw: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert!(
@@ -311,35 +323,52 @@ fn an_unversioned_run_writes_the_1_0_0_receipt_with_no_pin_field() {
     );
     let (record, _) = store.get(outcome.catalog_key.as_ref().unwrap()).unwrap();
     let record: serde_json::Value = serde_json::from_slice(&record).unwrap();
-    assert_eq!(record["format_version"], "1.0.0");
+    assert_eq!(
+        record["format_version"],
+        logweir::catalog::record::FORMAT_VERSION
+    );
     assert!(record["archive"].get("manifest_version_id").is_none());
 }
 
 /// **The pin's format is a MINOR bump, the same for both documents** (FX-7
 /// fix round, review M-2). Its number lives in ONE constant per format, so a
-/// renumber (FX-4 merging first makes FX-7 1.2.0) is that constant and a schema
-/// file name, and the tests read the constants. This row keeps whatever the
-/// number becomes honest: inside major 1, a MINOR above the unpinned format,
-/// and the receipt's equal to the catalog record's.
+/// renumber (FX-4 merged first, so FX-7 is 1.2.0) is that constant and a
+/// schema file name, and the tests read the constants. This row keeps whatever
+/// the number becomes honest: inside major 1, a MINOR above the unpinned
+/// format this build writes (FX-4's, for the receipt and for the record), and
+/// the receipt's equal to the catalog record's.
 #[test]
 fn the_pinned_format_is_a_minor_bump_of_both_documents() {
-    use logweir_core::backup_receipt::{FORMAT_VERSION, FORMAT_VERSION_WITH_MANIFEST_VERSION};
+    use logweir_core::backup_receipt::{
+        FORMAT_VERSION_WITH_MANIFEST_VERSION, RECEIPT_FORMAT_VERSION,
+    };
     let parse = |v: &str| -> Vec<u64> {
         v.split('.')
             .map(|n| n.parse().expect("a semver component"))
             .collect()
     };
-    let (unpinned, pinned) = (
-        parse(FORMAT_VERSION),
-        parse(FORMAT_VERSION_WITH_MANIFEST_VERSION),
-    );
-    assert_eq!(pinned.len(), 3, "{FORMAT_VERSION_WITH_MANIFEST_VERSION}");
-    assert_eq!(pinned[0], 1, "inside major 1");
-    assert_eq!(pinned[0], unpinned[0], "a MINOR bump, never a MAJOR one");
-    assert!(
-        pinned[1] > unpinned[1],
-        "{FORMAT_VERSION_WITH_MANIFEST_VERSION} must be a MINOR above {FORMAT_VERSION}"
-    );
+    for (document, unpinned, pinned) in [
+        (
+            "receipt",
+            RECEIPT_FORMAT_VERSION,
+            FORMAT_VERSION_WITH_MANIFEST_VERSION,
+        ),
+        (
+            "catalog record",
+            logweir::catalog::record::FORMAT_VERSION,
+            logweir::catalog::record::FORMAT_VERSION_WITH_MANIFEST_VERSION,
+        ),
+    ] {
+        let (u, p) = (parse(unpinned), parse(pinned));
+        assert_eq!(p.len(), 3, "{document}: {pinned}");
+        assert_eq!(p[0], 1, "{document}: inside major 1");
+        assert_eq!(p[0], u[0], "{document}: a MINOR bump, never a MAJOR one");
+        assert!(
+            p[1] > u[1],
+            "{document}: {pinned} must be a MINOR above the unpinned {unpinned}"
+        );
+        assert_eq!(p[2], 0, "{document}: a new MINOR starts at patch 0");
+    }
     assert_eq!(
         logweir::catalog::record::FORMAT_VERSION_WITH_MANIFEST_VERSION,
         FORMAT_VERSION_WITH_MANIFEST_VERSION,
@@ -447,18 +476,29 @@ fn a_record_that_invents_a_pin_is_a_mismatch() {
 
 /// A record WITHOUT the pin, for a receipt that has one, is what an OLDER
 /// catalog writer produces: absent means unknown (rule 2), readers take the
-/// pin from the receipt, and the record is NOT a contradiction.
+/// pin from the receipt, and the record is NOT a contradiction. Two older
+/// writers: FX-4's (record 1.1.0, the topic coverage copied, no pin) and one
+/// from before FX-4 (record 1.0.0, neither).
 #[test]
 fn a_record_from_an_older_writer_without_the_pin_still_agrees() {
     use logweir::catalog::reader::{cross_check, CrossCheck};
     let (receipt, bytes) = pinned_receipt_and_bytes();
     let mut record = record_of(&receipt, &bytes);
     record.archive.manifest_version_id = None;
+    record.format_version = logweir::catalog::record::FORMAT_VERSION.into();
+    assert_eq!(
+        cross_check(&record, &receipt, &bytes),
+        CrossCheck::Agrees,
+        "an absent copy is unknown, not a disagreement (FX-4's writer)"
+    );
+    for topic in &mut record.topics {
+        topic.config_coverage = None;
+    }
     record.format_version = "1.0.0".into();
     assert_eq!(
         cross_check(&record, &receipt, &bytes),
         CrossCheck::Agrees,
-        "an absent copy is unknown, not a disagreement"
+        "an absent copy is unknown, not a disagreement (a writer before FX-4)"
     );
 }
 
@@ -519,7 +559,11 @@ fn a_backfill_never_infers_a_pin_the_receipt_does_not_carry() {
     let record_key = logweir::catalog::record::record_key(&report.points[0].1);
     let (record, _) = versioned.get(&record_key).unwrap();
     let record: serde_json::Value = serde_json::from_slice(&record).unwrap();
-    assert_eq!(record["format_version"], "1.0.0");
+    assert_eq!(
+        record["format_version"],
+        logweir::catalog::record::FORMAT_VERSION,
+        "an unpinned point's record is FX-4's format, not the pin's MINOR"
+    );
     assert!(
         record["archive"].get("manifest_version_id").is_none(),
         "the backfill invented a pin: {}",

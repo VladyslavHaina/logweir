@@ -9,15 +9,27 @@ use chrono::{DateTime, Datelike, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// The format this module writes and the only MAJOR it reads (D3 §5.2
-/// reading rule 1).
-pub const FORMAT_VERSION: &str = "1.0.0";
+/// The format this module writes for a POINT RECORD that pins no manifest
+/// version, and the only MAJOR it reads (D3 §5.2 reading rule 1). A record that
+/// carries `archive.manifest_version_id` is
+/// [`FORMAT_VERSION_WITH_MANIFEST_VERSION`] instead.
+///
+/// `1.1.0` since FX-4, which added the optional `topics[].config_coverage`. A
+/// minor bump adds optional fields only (reading rule 2), so a 1.0.0 reader
+/// reads a 1.1.0 record and ignores the field; the 1.0.0 schema is frozen
+/// beside the 1.1.0 one.
+pub const FORMAT_VERSION: &str = "1.1.0";
+
+/// The format of the day-sharded INDEX entry, which FX-4 did not change: its
+/// fields are copies of the record's and none of them is the new one.
+pub const LOG_ENTRY_FORMAT_VERSION: &str = "1.0.0";
 
 /// **FX-7.** The format of a record that carries `archive.manifest_version_id`
-/// — a MINOR bump (reading rule 2: a `1.0.0` reader ignores the field and
-/// reads the rest). Written only when the pin is present, so a record for a
-/// point on an unversioned bucket is exactly the `1.0.0` document.
-pub const FORMAT_VERSION_WITH_MANIFEST_VERSION: &str = "1.1.0";
+/// — a MINOR bump over [`FORMAT_VERSION`] (FX-4's 1.1.0, which merged first;
+/// reading rule 2: a 1.1.0 or 1.0.0 reader ignores the field and reads the
+/// rest). Written only when the pin is present, so a record for a point on an
+/// unversioned bucket is exactly the [`FORMAT_VERSION`] document.
+pub const FORMAT_VERSION_WITH_MANIFEST_VERSION: &str = "1.2.0";
 
 /// `lwp1-`: the identity scheme's own version, inside the identifier.
 ///
@@ -114,7 +126,7 @@ pub fn log_key(recovery_point_at: DateTime<Utc>, point_id: &str) -> String {
 /// `logweir_core::det_json::to_deterministic_json` walks the value, so
 /// declaration order here is the order in the bytes that get signed. Do not
 /// reorder without regenerating the current catalog point schema
-/// (`just schema`).
+/// (`just schema`; the 1.0.0 and 1.1.0 files are frozen).
 ///
 /// **Nothing here may hold a credential.** `source.bootstrap_servers` is
 /// addressing and `source.auth_mode` is a mechanism name — the same two
@@ -125,8 +137,9 @@ pub fn log_key(recovery_point_at: DateTime<Utc>, point_id: &str) -> String {
 /// bulk, and a principal name is not a fact a recovery point needs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct CatalogPoint {
-    /// Semver of THIS format: `1.0.0`, or `1.1.0` for a record that carries
-    /// `archive.manifest_version_id` (FX-7). Major `1`; a higher major is
+    /// Semver of THIS format: [`FORMAT_VERSION`] (`1.1.0` since FX-4), or
+    /// [`FORMAT_VERSION_WITH_MANIFEST_VERSION`] (`1.2.0`) for a record that
+    /// carries `archive.manifest_version_id` (FX-7). Major `1`; a higher major is
     /// [`crate::catalog::reader::PointState::UnsupportedFormat`] per entry,
     /// never fatal for the sync (D3 §5.2 rule 1).
     #[schemars(regex(pattern = r"^1\.[0-9]+\.[0-9]+$"))]
@@ -203,7 +216,7 @@ pub struct RecordArchive {
     pub manifest_key: String,
     /// Receipt-derived (rule 3). `sha256:<hex>`.
     pub manifest_sha256: String,
-    /// **FX-7, format `1.1.0`.** Receipt-derived: the version id of the
+    /// **FX-7, format `1.2.0`.** Receipt-derived: the version id of the
     /// manifest bytes the receipt attests, copied from the receipt's own
     /// `archive.manifest_version_id` and present exactly when it is.
     ///
@@ -246,6 +259,17 @@ pub struct RecordTopic {
     pub partitions: Option<u32>,
     /// Records this run captured for the topic, from the receipt.
     pub records: u64,
+    /// **Format 1.1.0 (FX-4).** The receipt's `config_coverage` entry for this
+    /// topic, copied and never recomputed: whether the archive's record of
+    /// the topic's configuration was captured, and the effective
+    /// `message.timestamp.type` with its source.
+    ///
+    /// Receipt-derived under rule 3 — `reader::cross_check` refuses a record
+    /// whose copy the receipt does not back. ABSENT means UNKNOWN (rule 2):
+    /// every 1.0.0 record, and every record derived from a receipt that
+    /// predates 1.1.0. Never read as `captured`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_coverage: Option<logweir_core::backup_receipt::TopicConfigCoverage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -455,7 +479,7 @@ impl CatalogLogEntry {
     #[must_use]
     pub fn of(point: &CatalogPoint) -> Self {
         Self {
-            format_version: FORMAT_VERSION.to_string(),
+            format_version: LOG_ENTRY_FORMAT_VERSION.to_string(),
             point_id: point.point_id.clone(),
             backup_id: point.backup_id.clone(),
             run_id: point.run_id.clone(),

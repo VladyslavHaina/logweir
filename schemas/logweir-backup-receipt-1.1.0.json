@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://logweir.dev/schemas/logweir-backup-receipt-1.1.0.json",
   "title": "BackupReceipt",
-  "description": "The signed record of one `logweir backup run`.\n\nField order is the document's own serialisation order (`serde_json` is built with `preserve_order`, so declaration order IS byte order through `crate::det_json::to_deterministic_json`). Do not reorder without regenerating the current receipt schema (`just schema`) and re-minting `e2e/fixtures/signed/backup-receipt.json`.",
+  "description": "The signed record of one `logweir backup run`.\n\nField order is the document's own serialisation order (`serde_json` is built with `preserve_order`, so declaration order IS byte order through `crate::det_json::to_deterministic_json`). Do not reorder without regenerating `schemas/logweir-backup-receipt-1.1.0.json` (the 1.0.0 file is frozen) and re-minting `e2e/fixtures/signed/backup-receipt.json`.",
   "type": "object",
   "required": [
     "archive",
@@ -27,6 +27,14 @@
       "description": "The engine's own identifier for the archive this run wrote. Distinct from `run_id`: two runs can be asked to append to one backup set, and `archive.manifest_key` is keyed on THIS.",
       "type": "string"
     },
+    "config_coverage": {
+      "description": "**Format 1.1.0 (FX-4).** Per named topic, whether the archive's record of the topic's configuration was captured, and the topic's EFFECTIVE `message.timestamp.type` with where that value came from. One entry per `source.topics` entry and no others (arm 7).\n\nABSENT means UNKNOWN for every topic — the state of every receipt written before 1.1.0 — and is never read as `captured`: a reader goes through [`SourceConfigCoverage`], whose answer for an absent block is [`ConfigCoverage::Unknown`]. Appended LAST (declaration order is byte order) and skipped when absent, so a 1.0.0 document round-trips byte-for-byte.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/TopicConfigCoverage"
+      },
+      "nullable": true
+    },
     "covered": {
       "$ref": "#/definitions/ReceiptCovered"
     },
@@ -44,7 +52,7 @@
       "format": "date-time"
     },
     "format_version": {
-      "description": "Semver of THIS format — `1.0.0`, or `1.1.0` for a receipt that pins `archive.manifest_version_id` (FX-7) — and independent of the scorecard's.\n\nThe schema PINS the major with a pattern rather than leaving the field an unconstrained string, for the reason `crate::scorecard::Scorecard::format_version` records: without it a document reading `\"9.9.9\"` validated cleanly against the file named `logweir-backup-receipt-1.0.0.json`, so a schema-only validator — the one route that does not go through `validate_invariants` — accepted exactly the document GC12 exists to refuse. Any `1.x.y` is allowed, because a MINOR bump adds optional fields only and a 1.0.0 reader must still read it.",
+      "description": "Semver of THIS format — [`RECEIPT_FORMAT_VERSION`] (`1.1.0`) since FX-4, `1.0.0` before it, and independent of the scorecard's.\n\nThe schema PINS the major with a pattern rather than leaving the field an unconstrained string, for the reason `crate::scorecard::Scorecard::format_version` records: without it a document reading `\"9.9.9\"` validated cleanly against the file named `logweir-backup-receipt-1.0.0.json`, so a schema-only validator — the one route that does not go through `validate_invariants` — accepted exactly the document GC12 exists to refuse. Any `1.x.y` is allowed, because a MINOR bump adds optional fields only and a 1.0.0 reader must still read it.",
       "type": "string",
       "pattern": "^1\\.[0-9]+\\.[0-9]+$"
     },
@@ -80,8 +88,26 @@
     }
   },
   "definitions": {
+    "EffectiveConfigValue": {
+      "description": "One configuration value as the broker reported it: the value in force and where it came from.",
+      "type": "object",
+      "required": [
+        "source",
+        "value"
+      ],
+      "properties": {
+        "source": {
+          "description": "One of [`CONFIG_SOURCES`]. `dynamicTopicConfig` is a topic override; every other named source is the broker's.",
+          "type": "string"
+        },
+        "value": {
+          "description": "For `timestamp_type`: `CreateTime` or `LogAppendTime` ([`TIMESTAMP_TYPES`]).",
+          "type": "string"
+        }
+      }
+    },
     "ReceiptArchive": {
-      "description": "What was written, and where. The two fields an auditor needs in order to go and look: the manifest's key, and a digest over the exact manifest bytes THIS RUN READ BACK (not over bytes Logweir remembers writing) — and, on a versioned bucket, WHICH VERSION of that key those bytes were.",
+      "description": "What was written, and where. The two fields an auditor needs in order to go and look: the manifest's key, and a digest over the exact manifest bytes THIS RUN READ BACK (not over bytes Logweir remembers writing).",
       "type": "object",
       "required": [
         "manifest_key",
@@ -96,11 +122,6 @@
         "manifest_sha256": {
           "description": "`\"sha256:<hex>\"` over the manifest bytes read back after the run.",
           "type": "string"
-        },
-        "manifest_version_id": {
-          "description": "**FX-7, format `1.1.0`.** The object store's VERSION id for the manifest bytes this run read back — present only when the store answered that read with one, i.e. on a bucket with versioning enabled.\n\n**ABSENT means \"no version was pinned\"**: an unversioned bucket (whose objects carry no version id, or S3's literal `null`, which names an object an overwrite replaces in place), or a receipt written before this field existed. Never read as \"version zero\" and never inferred.\n\nA reader that finds it compares the key's CURRENT version with it: a different current version means the backup set was written again after this receipt was signed, which the manifest digest alone cannot see — engine 0.21.0 rewrites a set's segments in place and can leave the manifest bytes identical. And it can read THIS version by id, which a versioned bucket retains whatever the current one is.\n\nAbsent when `None`, and that is the compatibility argument: declaration order is byte order, and an absent field writes nothing, so a receipt without a pin is byte-for-byte the `1.0.0` document it always was.",
-          "type": "string",
-          "nullable": true
         },
         "prefix": {
           "description": "The object-store prefix everything this run wrote lives under. GC6: Logweir writes only under its own `logweir/` prefix.",
@@ -197,6 +218,33 @@
           "items": {
             "type": "string"
           }
+        }
+      }
+    },
+    "TopicConfigCoverage": {
+      "description": "What Logweir established about ONE topic's configuration at capture (receipt 1.1.0, FX-4).\n\n# Where the answer comes from\n\nLogweir's OWN DescribeConfigs read of the topic, taken by `logweir backup run` immediately before the engine starts, through the same principal the engine uses — NOT the engine's capture, which is non-fatal, all-or-nothing across the run's topics and invisible in the manifest. That read is then compared with the manifest the engine wrote:\n\n| `coverage` | `reason` | meaning | |---|---|---| | `captured` | — | the read succeeded AND the manifest's `configurations` for this topic equal the explicit overrides the engine captures (its own filter: topic-override source, not read-only, not sensitive, on its allowlist). The manifest is a complete record of them, so a configuration parity check may compare against it. | | `captureDenied` | — | the broker's authorizer refused the read (`TOPIC_AUTHORIZATION_FAILED`). The engine runs as the same principal, so an empty manifest record says nothing. | | `notCaptured` | `describeFailed` | the read failed for any other reason (a timeout, an unknown topic, a broker error). | | `notCaptured` | `manifestDiffers` | the read succeeded but the manifest does not record the same overrides — the engine's own capture failed (one denied topic empties them all), or the configuration changed between the two reads. |\n\nOverrides outside the engine's allowlist are never part of the claim: `captured` says the ARCHIVE's configuration record is complete, not that every setting of the topic was archived (that is PROD-05.1's portability table).\n\nStrings on the wire, not enums, for the reason `ReceiptAuth::mode` gives: a reader must be able to REPORT a value it refuses. The closed sets are enforced by arms 8, 9 and 11 in both readers.",
+      "type": "object",
+      "required": [
+        "coverage"
+      ],
+      "properties": {
+        "coverage": {
+          "description": "`captured`, `notCaptured` or `captureDenied` — [`COVERAGE_VALUES`].",
+          "type": "string"
+        },
+        "reason": {
+          "description": "`describeFailed` or `manifestDiffers` — [`NOT_CAPTURED_REASONS`] — present exactly when `coverage` is `notCaptured` (arm 9).",
+          "type": "string",
+          "nullable": true
+        },
+        "timestamp_type": {
+          "description": "The topic's EFFECTIVE `message.timestamp.type` as Logweir's read returned it, and where that value came from — the broker-default arm of FX-8, which the manifest cannot carry (the engine keeps explicit overrides only). ABSENT when the read did not succeed (arm 10) or the broker returned no such entry: the timestamp type is then NOT RECORDED, never assumed `CreateTime`.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/EffectiveConfigValue"
+            }
+          ],
+          "nullable": true
         }
       }
     }

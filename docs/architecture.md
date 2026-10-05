@@ -52,6 +52,10 @@ upstream item it mirrors, as the pairs listed in `CHECKS`:
 
 A deliberate difference is declared, with its reason, in `DIVERGENCES`. An
 item that is missing, empty or declared twice is drift, never agreement.
+Vendored DATA that the engine never serialises is paired in `LIST_CHECKS`
+instead: FX-4's `topic_config.rs::RECOVERY_TOPIC_CONFIG_KEYS` must name exactly
+the keys of the engine's `is_recovery_topic_config`, so a key upstream adds or
+drops is drift (the same keys in another order are a note).
 `cargo test --workspace`, and therefore CI's `check` job
 (`scripts/ci-check.sh`), runs the gate against the pinned source tarball
 `third_party/kafka-backup-v*.tar.gz` and fails on a vendored file the gate does

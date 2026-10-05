@@ -1,4 +1,5 @@
 use super::phase2_target::TargetState;
+use logweir_core::backup_receipt::{ConfigCoverage, SourceConfigCoverage};
 use logweir_core::engine::BackupSetFacts;
 use std::collections::BTreeMap;
 
@@ -8,6 +9,13 @@ pub struct Collision {
     pub existing_partitions: i32,
     pub existing_end_offsets: i64,
     pub existing_configs_differing: Vec<String>,
+    /// **FX-4.** `Some(<coverage>)` when the SOURCE topic's configuration was
+    /// not captured (`unknown`, `notCaptured` or `captureDenied`): the keys
+    /// above are the differences the archive's own record shows, and their
+    /// ABSENCE proves nothing. `None` only for `captured`. It reaches the
+    /// signed document as a `target_diff.not_assessed` entry, never inside
+    /// the collision string.
+    pub configuration_not_assessed: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -44,7 +52,27 @@ impl TargetDiff {
     /// first-order fact about whether the restore can work, and belongs in
     /// the signed document a reader actually sees, not only in an
     /// in-process struct nothing consumes.
+    ///
+    /// **FX-4.** A collision whose SOURCE configuration was not captured is
+    /// named in `not_assessed` (`"<target topic>: configuration (<why>)"`),
+    /// so its `differing config: []` is never read as "no divergence". The
+    /// collision string itself is byte for byte what the writer before FX-4
+    /// produced: an existing field's content does not change format (the
+    /// owner's OD-7 rulings of 2026-10-05 made only the new arms and phase
+    /// 7's `unexpected_divergence` entry MINOR). `Some`, always, from here:
+    /// phase 3 ran, so "every collision assessed" (`Some([])`) is a claim
+    /// this function can make, and absent stays the spelling of "not
+    /// recorded".
     pub fn summarise(&self) -> logweir_core::scorecard::TargetDiffSummary {
+        let mut not_assessed: Vec<String> = self
+            .collisions
+            .iter()
+            .filter_map(|c| {
+                c.configuration_not_assessed
+                    .map(|why| format!("{}: configuration ({why})", c.topic))
+            })
+            .collect();
+        not_assessed.sort();
         logweir_core::scorecard::TargetDiffSummary {
             collisions: self
                 .collisions
@@ -64,6 +92,7 @@ impl TargetDiff {
             // "shallow" only if spec §15 cut 0d is ever taken; v0.1 always
             // reads the target's real state, so this is "full".
             level: "full".into(),
+            not_assessed: Some(not_assessed),
         }
     }
 }
@@ -93,10 +122,15 @@ pub fn restore_partition_count(t: &logweir_core::engine::TopicFacts) -> i32 {
 
 /// A diff against ACTUAL TARGET STATE, which OSO's dry run never performs and
 /// which the operator's dry run fakes with an unconditional DryRunPassed.
+///
+/// `coverage` is the SOURCE topics' configuration capture coverage from the
+/// verified backup receipt (FX-4): a collision's configuration difference is
+/// assessed only where it is `captured`.
 pub fn run(
     target: &TargetState,
     facts: &BackupSetFacts,
     mapping: &BTreeMap<String, String>,
+    coverage: &SourceConfigCoverage,
 ) -> TargetDiff {
     let mut d = TargetDiff::default();
     for t in &facts.topics {
@@ -117,11 +151,16 @@ pub fn run(
                     .filter(|(k, v)| st.configs.get(*k).map(|cur| cur != *v).unwrap_or(false))
                     .map(|(k, _)| k.clone())
                     .collect();
+                let configuration_not_assessed = match coverage.of(&t.name) {
+                    ConfigCoverage::Captured => None,
+                    other => Some(other.wire_name()),
+                };
                 d.collisions.push(Collision {
                     topic: dst.clone(),
                     existing_partitions: st.partitions,
                     existing_end_offsets: total,
                     existing_configs_differing: differing,
+                    configuration_not_assessed,
                 });
             }
         }

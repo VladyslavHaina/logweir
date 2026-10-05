@@ -1,12 +1,13 @@
-//! `BackupReceipt::validate_invariants` has exactly FIVE arms — the four
+//! `BackupReceipt::validate_invariants` has exactly ELEVEN arms — the four
 //! SELF-CONTRADICTION invariants and, since Task 5b fix round 1, the one
-//! CLOSED VALUE SET (`source.auth.mode`) — and each one refuses with an exact
-//! message.
+//! CLOSED VALUE SET (`source.auth.mode`), plus since FX-4 the six arms (6-11)
+//! that read ONLY the 1.1.0 `config_coverage` block — and each one refuses with
+//! an exact message.
 //!
 //! The four and the five are asserted SEPARATELY and on purpose:
 //! `arm_cases()` carries the four self-contradiction arms and
 //! `backup_receipt_refuses_each_self_contradiction_arm_with_its_exact_message` closes over them, while
-//! `validate_invariants_has_exactly_five_return_err_statements` closes over
+//! `validate_invariants_has_exactly_eleven_return_err_statements` closes over
 //! the function's TOTAL by reading its source text. So an arm added to the
 //! function without a case here fails the second test, and a case deleted
 //! from `arm_cases()` fails the first — neither number can go stale under
@@ -37,7 +38,8 @@
 //! the bottom, and well inside the per-test budget.
 
 use logweir_core::backup_receipt::{
-    BackupReceipt, ReceiptArchive, ReceiptAuth, ReceiptCovered, ReceiptEngine, ReceiptSource,
+    BackupReceipt, ConfigCoverage, EffectiveConfigValue, ReceiptArchive, ReceiptAuth,
+    ReceiptCovered, ReceiptEngine, ReceiptSource, SourceConfigCoverage, TopicConfigCoverage,
 };
 use std::collections::BTreeMap;
 
@@ -81,6 +83,7 @@ fn pristine() -> BackupReceipt {
             from_ms: 1_757_415_734_000,
             to_ms: 1_757_419_486_000,
         },
+        config_coverage: None,
     }
 }
 
@@ -93,7 +96,7 @@ fn pristine() -> BackupReceipt {
 /// (`arm_5_refuses_an_auth_mode_outside_the_closed_two`) so that
 /// `backup_receipt_refuses_each_self_contradiction_arm_with_its_exact_message` keeps saying exactly
 /// what its name says while
-/// `validate_invariants_has_exactly_five_return_err_statements` pins the
+/// `validate_invariants_has_exactly_eleven_return_err_statements` pins the
 /// total.
 fn arm_cases() -> Vec<(u8, &'static str, BackupReceipt, String)> {
     // Arm 1: a major this reader has never seen.
@@ -250,7 +253,7 @@ fn arm_5_refuses_an_auth_mode_outside_the_closed_two() {
     }
 }
 
-/// **THE TOTAL.** `validate_invariants` has exactly five refusing statements.
+/// **THE TOTAL.** `validate_invariants` has exactly eleven refusing statements.
 ///
 /// Read out of the SOURCE TEXT, which is the only way to make the count a
 /// claim about the function rather than about this file's case list: an arm
@@ -263,7 +266,7 @@ fn arm_5_refuses_an_auth_mode_outside_the_closed_two() {
 /// `crates/logweir/tests/two_reader_parity.rs::
 /// every_invariant_arm_has_a_corpus_case` applies to the scorecard's arms).
 #[test]
-fn validate_invariants_has_exactly_five_return_err_statements() {
+fn validate_invariants_has_exactly_eleven_return_err_statements() {
     let src = std::fs::read_to_string(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/src/backup_receipt.rs"
@@ -284,9 +287,9 @@ fn validate_invariants_has_exactly_five_return_err_statements() {
 
     let total = body.matches("return Err(format!(").count();
     assert_eq!(
-        total, 5,
+        total, 11,
         "BackupReceipt::validate_invariants has {total} `return Err(format!(` \
-         statement(s), not 5. Every one of them needs a per-arm test in this file with \
+         statement(s), not 11. Every one of them needs a per-arm test in this file with \
          its exact message AND a case in \
          e2e/fixtures/invariants/backup-receipt-index.json — \
          scripts/check-invariant-corpus.sh derives the list from this same slice and \
@@ -312,7 +315,7 @@ fn validate_invariants_has_exactly_five_return_err_statements() {
 /// exact message, and a pristine receipt accepted. Arm 5 — the closed value
 /// set — is `arm_5_refuses_an_auth_mode_outside_the_closed_two`, and the
 /// function's total is
-/// `validate_invariants_has_exactly_five_return_err_statements`.
+/// `validate_invariants_has_exactly_eleven_return_err_statements`.
 ///
 /// **RENAMED, Task 12 closeout carry (c).** It was
 /// `backup_receipt_invariants_have_exactly_four_arms`, which Task 5b's fix
@@ -534,6 +537,415 @@ fn the_checked_in_receipt_fixture_parses_and_satisfies_its_invariants() {
         .unwrap_or_else(|e| panic!("{path} must satisfy every invariant: {e}"));
     assert_eq!(
         doc.format_version, "1.0.0",
-        "the fixture pins the format version this task ships"
+        "the signed fixture is a 1.0.0 receipt and stays one after FX-4's 1.1.0: old \
+         evidence verifies unchanged, and ruling R-G reserves the fixture re-mint"
+    );
+    assert_eq!(
+        doc.config_coverage, None,
+        "a 1.0.0 receipt carries no config_coverage"
+    );
+    assert_eq!(
+        SourceConfigCoverage::from_receipt(&doc).of("orders"),
+        ConfigCoverage::Unknown,
+        "the 1.0.0 fixture must read as coverage UNKNOWN, never captured"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// FX-4: format 1.1.0's `config_coverage` block and arms 6-11
+// ---------------------------------------------------------------------------
+
+fn coverage(value: &str, reason: Option<&str>, ts: Option<(&str, &str)>) -> TopicConfigCoverage {
+    TopicConfigCoverage {
+        coverage: value.to_string(),
+        reason: reason.map(str::to_string),
+        timestamp_type: ts.map(|(value, source)| EffectiveConfigValue {
+            value: value.to_string(),
+            source: source.to_string(),
+        }),
+    }
+}
+
+/// A 1.1.0 receipt that satisfies all eleven arms: `orders` captured with a
+/// broker-default `LogAppendTime`, `payments` captured with a topic-override
+/// `CreateTime`.
+fn pristine_1_1() -> BackupReceipt {
+    let mut doc = pristine();
+    doc.format_version = "1.1.0".to_string();
+    let mut block = BTreeMap::new();
+    block.insert(
+        "orders".to_string(),
+        coverage(
+            "captured",
+            None,
+            Some(("LogAppendTime", "dynamicDefaultBrokerConfig")),
+        ),
+    );
+    block.insert(
+        "payments".to_string(),
+        coverage("captured", None, Some(("CreateTime", "dynamicTopicConfig"))),
+    );
+    doc.config_coverage = Some(block);
+    doc
+}
+
+fn refused_with(doc: &BackupReceipt, want: &str, what: &str) {
+    match doc.validate_invariants() {
+        Ok(()) => panic!("{what}: accepted a document it must refuse; expected:\n  {want}"),
+        Err(got) => assert_eq!(
+            got, want,
+            "{what}: refused with the wrong message. The refusal TEXT is the interface \
+             docs/verify_scorecard.py's mirrored arm reproduces byte for byte and \
+             e2e/fixtures/invariants/backup-receipt-index.json records verbatim; do not \
+             reword it, and do not relax this to a `contains`."
+        ),
+    }
+}
+
+#[test]
+fn a_1_1_0_receipt_with_every_coverage_kind_satisfies_every_invariant() {
+    let mut doc = pristine_1_1();
+    assert_eq!(doc.validate_invariants(), Ok(()));
+    // Every legal shape of an entry, on one document: a denied read (no
+    // timestamp type), a failed read (none either), and a read whose manifest
+    // disagreed (the timestamp type WAS observed).
+    doc.source.topics = vec![
+        "a-denied".into(),
+        "b-failed".into(),
+        "c-differs".into(),
+        "orders".into(),
+    ];
+    doc.records = doc
+        .source
+        .topics
+        .iter()
+        .map(|t| (t.clone(), 1_u64))
+        .collect();
+    let block = doc.config_coverage.as_mut().unwrap();
+    block.remove("payments");
+    block.insert("a-denied".into(), coverage("captureDenied", None, None));
+    block.insert(
+        "b-failed".into(),
+        coverage("notCaptured", Some("describeFailed"), None),
+    );
+    block.insert(
+        "c-differs".into(),
+        coverage(
+            "notCaptured",
+            Some("manifestDiffers"),
+            Some(("CreateTime", "defaultConfig")),
+        ),
+    );
+    assert_eq!(doc.validate_invariants(), Ok(()));
+}
+
+/// Absent is UNKNOWN, and a 1.1.0 receipt may omit the block: that is the
+/// weaker claim, never a contradiction.
+#[test]
+fn a_receipt_without_config_coverage_is_accepted_at_1_0_0_and_at_1_1_0() {
+    assert_eq!(pristine().validate_invariants(), Ok(()));
+    let mut doc = pristine_1_1();
+    doc.config_coverage = None;
+    assert_eq!(doc.validate_invariants(), Ok(()));
+}
+
+#[test]
+fn arm_6_refuses_config_coverage_under_a_1_0_x_format_version() {
+    for version in ["1.0.0", "1.0.7"] {
+        let mut doc = pristine_1_1();
+        doc.format_version = version.to_string();
+        refused_with(
+            &doc,
+            &format!(
+                "config_coverage is present but format_version \"{version}\" predates it: the \
+                 field is defined from 1.1.0"
+            ),
+            "arm 6",
+        );
+    }
+    // A later minor carries it too.
+    let mut doc = pristine_1_1();
+    doc.format_version = "1.2.0".to_string();
+    assert_eq!(doc.validate_invariants(), Ok(()));
+}
+
+#[test]
+fn arm_7_refuses_config_coverage_that_does_not_cover_the_named_topic_set() {
+    let mut doc = pristine_1_1();
+    doc.config_coverage.as_mut().unwrap().remove("payments");
+    refused_with(
+        &doc,
+        "config_coverage covers {\"orders\"} but the named topic set is {\"orders\", \"payments\"}",
+        "arm 7 (a named topic missing)",
+    );
+    let mut doc = pristine_1_1();
+    doc.config_coverage
+        .as_mut()
+        .unwrap()
+        .insert("invoices".into(), coverage("captured", None, None));
+    refused_with(
+        &doc,
+        "config_coverage covers {\"invoices\", \"orders\", \"payments\"} but the named topic set \
+         is {\"orders\", \"payments\"}",
+        "arm 7 (an unnamed topic present)",
+    );
+}
+
+#[test]
+fn arm_8_refuses_a_coverage_outside_the_closed_three() {
+    for value in ["unknown", "Captured", "notAssessed", ""] {
+        let mut doc = pristine_1_1();
+        doc.config_coverage
+            .as_mut()
+            .unwrap()
+            .get_mut("orders")
+            .unwrap()
+            .coverage = value.to_string();
+        refused_with(
+            &doc,
+            &format!(
+                "config_coverage[\"orders\"].coverage \"{value}\" is not one of the three values \
+                 this format defines: \"captured\", \"notCaptured\" or \"captureDenied\""
+            ),
+            "arm 8",
+        );
+    }
+}
+
+#[test]
+fn arm_9_refuses_a_reason_that_does_not_fit_the_coverage() {
+    // notCaptured with no reason.
+    let mut doc = pristine_1_1();
+    *doc.config_coverage
+        .as_mut()
+        .unwrap()
+        .get_mut("orders")
+        .unwrap() = coverage("notCaptured", None, None);
+    refused_with(
+        &doc,
+        "config_coverage[\"orders\"].reason absent does not fit coverage \"notCaptured\": a \
+         reason is present exactly when coverage is \"notCaptured\", and is \"describeFailed\" \
+         or \"manifestDiffers\"",
+        "arm 9 (notCaptured without a reason)",
+    );
+    // A reason beside `captured`.
+    let mut doc = pristine_1_1();
+    doc.config_coverage
+        .as_mut()
+        .unwrap()
+        .get_mut("orders")
+        .unwrap()
+        .reason = Some("manifestDiffers".into());
+    refused_with(
+        &doc,
+        "config_coverage[\"orders\"].reason \"manifestDiffers\" does not fit coverage \
+         \"captured\": a reason is present exactly when coverage is \"notCaptured\", and is \
+         \"describeFailed\" or \"manifestDiffers\"",
+        "arm 9 (captured with a reason)",
+    );
+    // A reason outside the closed two.
+    let mut doc = pristine_1_1();
+    *doc.config_coverage
+        .as_mut()
+        .unwrap()
+        .get_mut("orders")
+        .unwrap() = coverage("notCaptured", Some("timeout"), None);
+    refused_with(
+        &doc,
+        "config_coverage[\"orders\"].reason \"timeout\" does not fit coverage \"notCaptured\": a \
+         reason is present exactly when coverage is \"notCaptured\", and is \"describeFailed\" \
+         or \"manifestDiffers\"",
+        "arm 9 (an unknown reason)",
+    );
+}
+
+#[test]
+fn arm_10_refuses_a_timestamp_type_observed_by_a_read_that_did_not_succeed() {
+    for entry in [
+        coverage("captureDenied", None, Some(("CreateTime", "defaultConfig"))),
+        coverage(
+            "notCaptured",
+            Some("describeFailed"),
+            Some(("LogAppendTime", "dynamicTopicConfig")),
+        ),
+    ] {
+        let mut doc = pristine_1_1();
+        *doc.config_coverage
+            .as_mut()
+            .unwrap()
+            .get_mut("orders")
+            .unwrap() = entry;
+        refused_with(
+            &doc,
+            "config_coverage[\"orders\"] records a timestamp_type, but a topic whose \
+             configuration read was denied or failed cannot have observed one",
+            "arm 10",
+        );
+    }
+}
+
+#[test]
+fn arm_11_refuses_a_timestamp_type_value_or_source_outside_the_closed_sets() {
+    for (value, source) in [
+        ("createTime", "defaultConfig"),
+        ("LogAppendTime", "DYNAMIC_DEFAULT_BROKER_CONFIG"),
+        ("LogAppendTime", ""),
+    ] {
+        let mut doc = pristine_1_1();
+        doc.config_coverage
+            .as_mut()
+            .unwrap()
+            .get_mut("orders")
+            .unwrap()
+            .timestamp_type = Some(EffectiveConfigValue {
+            value: value.into(),
+            source: source.into(),
+        });
+        refused_with(
+            &doc,
+            &format!(
+                "config_coverage[\"orders\"].timestamp_type \"{value}\" from \"{source}\" is not \
+                 a value and source this format defines: the value is \"CreateTime\" or \
+                 \"LogAppendTime\", and the source is \"dynamicTopicConfig\", \
+                 \"dynamicBrokerConfig\", \"dynamicDefaultBrokerConfig\", \
+                 \"staticBrokerConfig\", \"defaultConfig\" or \"unknown\""
+            ),
+            "arm 11",
+        );
+    }
+    // Every value and source the format defines is accepted.
+    for value in logweir_core::backup_receipt::TIMESTAMP_TYPES {
+        for source in logweir_core::backup_receipt::CONFIG_SOURCES {
+            let mut doc = pristine_1_1();
+            doc.config_coverage
+                .as_mut()
+                .unwrap()
+                .get_mut("orders")
+                .unwrap()
+                .timestamp_type = Some(EffectiveConfigValue {
+                value: value.into(),
+                source: source.into(),
+            });
+            assert_eq!(doc.validate_invariants(), Ok(()), "{value} from {source}");
+        }
+    }
+}
+
+/// The 1.0.0 arms still come FIRST: a document that violates arm 5 and arm 8
+/// reports arm 5, and one that violates arm 3 and arm 7 reports arm 3 — so a
+/// 1.1.0 block can never mask what an auditor reads first.
+#[test]
+fn the_1_0_0_arms_are_evaluated_before_the_config_coverage_arms() {
+    let mut doc = pristine_1_1();
+    doc.source.auth.mode = "scram-sha-512".into();
+    doc.config_coverage
+        .as_mut()
+        .unwrap()
+        .get_mut("orders")
+        .unwrap()
+        .coverage = "bogus".into();
+    refused_with(
+        &doc,
+        "source.auth.mode \"scram-sha-512\" is not one of the two values this format defines: \
+         \"plaintext\" or \"scramSha512\"",
+        "arm 5 before arm 8",
+    );
+    let mut doc = pristine_1_1();
+    doc.records.remove("payments");
+    doc.config_coverage.as_mut().unwrap().remove("payments");
+    refused_with(
+        &doc,
+        "records covers {\"orders\"} but the named topic set is {\"orders\", \"payments\"}",
+        "arm 3 before arm 7",
+    );
+}
+
+/// **The version pair a renumber must move together.** The receipt this build
+/// WRITES must be one that may carry `config_coverage` (its minor is at least
+/// `CONFIG_COVERAGE_SINCE_MINOR`), or every receipt the backup signs would be
+/// refused by its own arm 6. Should another 1.1.0 field merge first, FX-4
+/// becomes 1.2.0: both constants move, and this keeps them coherent.
+#[test]
+fn the_written_version_defines_config_coverage() {
+    let mut parts = logweir_core::backup_receipt::RECEIPT_FORMAT_VERSION
+        .split('.')
+        .map(|p| p.parse::<u64>().expect("a numeric semver part"));
+    let (major, minor) = (parts.next().unwrap(), parts.next().unwrap());
+    assert_eq!(major, 1);
+    assert!(
+        minor >= logweir_core::backup_receipt::CONFIG_COVERAGE_SINCE_MINOR,
+        "RECEIPT_FORMAT_VERSION {} predates CONFIG_COVERAGE_SINCE_MINOR {}",
+        logweir_core::backup_receipt::RECEIPT_FORMAT_VERSION,
+        logweir_core::backup_receipt::CONFIG_COVERAGE_SINCE_MINOR
+    );
+}
+
+/// **The reader's half of "absent is unknown, never captured"** — the mutant
+/// the FX-4 brief names "an absent field read as `captured`".
+#[test]
+fn source_config_coverage_reads_absent_as_unknown_never_captured() {
+    // No receipt at all: a plan not bound to a recovery point.
+    assert_eq!(
+        SourceConfigCoverage::unknown().of("orders"),
+        ConfigCoverage::Unknown
+    );
+    // A 1.0.0 receipt: no block.
+    assert_eq!(
+        SourceConfigCoverage::from_receipt(&pristine()).of("orders"),
+        ConfigCoverage::Unknown
+    );
+    // A 1.1.0 receipt: its own answers, and UNKNOWN for a topic it does not name.
+    let doc = pristine_1_1();
+    let seen = SourceConfigCoverage::from_receipt(&doc);
+    assert_eq!(seen.of("orders"), ConfigCoverage::Captured);
+    assert_eq!(seen.of("not-in-the-receipt"), ConfigCoverage::Unknown);
+    assert_eq!(
+        seen.entry("orders").and_then(|e| e.timestamp_type.as_ref()),
+        Some(&EffectiveConfigValue {
+            value: "LogAppendTime".into(),
+            source: "dynamicDefaultBrokerConfig".into(),
+        }),
+        "FX-8 reads the effective timestamp type and its source from here"
+    );
+    // A value outside the closed set (a document no verifier accepts, read by
+    // a caller that skipped verification) is UNKNOWN too, never captured.
+    let mut doc = pristine_1_1();
+    doc.config_coverage
+        .as_mut()
+        .unwrap()
+        .get_mut("orders")
+        .unwrap()
+        .coverage = "totallyCaptured".into();
+    assert_eq!(
+        SourceConfigCoverage::from_receipt(&doc).of("orders"),
+        ConfigCoverage::Unknown
+    );
+    for (wire, want) in [
+        ("captured", ConfigCoverage::Captured),
+        ("notCaptured", ConfigCoverage::NotCaptured),
+        ("captureDenied", ConfigCoverage::CaptureDenied),
+    ] {
+        assert_eq!(ConfigCoverage::from_wire(wire), want);
+        assert_eq!(want.wire_name(), wire);
+    }
+    assert_eq!(ConfigCoverage::Unknown.wire_name(), "unknown");
+}
+
+/// A 1.0.0 document round-trips byte-for-byte through the 1.1.0 type: the
+/// block is skipped when absent, so an old receipt's bytes — the ones its
+/// signature covers — are exactly what this build would write for it.
+#[test]
+fn a_1_0_0_receipt_round_trips_byte_for_byte_through_the_1_1_0_type() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../e2e/fixtures/signed/backup-receipt.json"
+    );
+    let bytes = std::fs::read(path).unwrap();
+    let doc: BackupReceipt = serde_json::from_slice(&bytes).unwrap();
+    let again = logweir_core::det_json::to_deterministic_json(&doc).unwrap();
+    assert_eq!(
+        String::from_utf8(again).unwrap(),
+        String::from_utf8(bytes).unwrap(),
+        "re-serialising a 1.0.0 receipt must not add a config_coverage key"
     );
 }

@@ -47,9 +47,17 @@ echo "== resolving $# test name(s) against the compiled test binaries =="
 # what does or does not exist.
 listing=$(cargo test "${CARGO_ARGS[@]}" -- --list)
 
+# A here-string, never `printf "$listing" | grep -q`. Under `set -o pipefail`
+# that pipeline reported a test MISSING that was there: `grep -q` exits at its
+# first match, and once the listing outgrows the pipe buffer (the workspace
+# sweep lists ~4,000 tests, far past 64 KB) `printf` is still writing, takes
+# EPIPE, and pipefail hands its failure to the `if`. That is how the weekly
+# engine-matrix run of 2026-09-28 (run 36413265594) recorded
+# `fail(lever-not-honoured)` for the pinned engine while the control test
+# existed. crates/logweir/tests/engine_matrix.rs pins it with a >1 MB listing.
 missing=0
 for name in "$@"; do
-  if printf '%s\n' "$listing" | grep -qxF "$name: test"; then
+  if grep -qxF "$name: test" <<<"$listing"; then
     echo "ok: $name"
   else
     echo "FAIL: no test named \`$name\` exists in this selection." >&2
@@ -61,7 +69,7 @@ for name in "$@"; do
 done
 
 if [ "$missing" -ne 0 ]; then
-  echo "-- $(printf '%s\n' "$listing" | grep -c ': test$') test(s) were available; none of the missing names is among them --" >&2
+  echo "-- $(grep -c ': test$' <<<"$listing") test(s) were available; none of the missing names is among them --" >&2
   exit 1
 fi
 

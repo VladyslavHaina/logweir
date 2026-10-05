@@ -112,6 +112,10 @@ fn receipt() -> BackupReceipt {
             from_ms: 1_757_415_734_000,
             to_ms: 1_757_419_486_000,
         },
+        // The signed fixture is a 1.0.0 receipt and STAYS one after FX-4's
+        // 1.1.0: it is the "old evidence verifies unchanged" case, and ruling
+        // R-G reserves the re-mint. A 1.0.0 document has no config_coverage.
+        config_coverage: None,
     }
 }
 

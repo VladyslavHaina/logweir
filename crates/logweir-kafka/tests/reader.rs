@@ -316,12 +316,25 @@ fn create_topics_sets_the_config_entries_it_was_given() {
 /// *expression*, so the only place the wrong name can survive is prose — and
 /// `ClusterReader::broker_configs`'s doc comment is what the next implementer
 /// reads.
+///
+/// **FX-4 narrowed the premise, not the guard.** rdkafka 0.36.2 DOES have a
+/// `ConfigResource`: it is the RESULT struct (`src/admin.rs:1019`, aliased
+/// `ConfigResourceResult` at `:958`), and FX-4's T13 handling must name it to
+/// read an answer's entries. What the guard exists for is the INPUT, which is
+/// `ResourceSpecifier`. So the fully qualified result paths
+/// `rdkafka::admin::ConfigResource` / `…ConfigResourceResult`, and librdkafka's
+/// own C function names (`rd_kafka_ConfigResource_error`, which T13 is about),
+/// are allowed; every OTHER spelling — a bare `ConfigResource` standing for the
+/// input, as the Java client spells it — still fails here.
 #[test]
 fn the_broker_resource_is_spelled_the_rdkafka_way() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut saw_specifier = false;
     for rel in ["src/reader.rs", "src/rdkafka_reader.rs"] {
-        let body = std::fs::read_to_string(root.join(rel)).expect(rel);
+        let raw = std::fs::read_to_string(root.join(rel)).expect(rel);
+        let body = raw
+            .replace("rdkafka::admin::ConfigResource", "")
+            .replace("rd_kafka_ConfigResource_", "");
         assert!(
             !body.contains("ConfigResource"),
             "{rel} names `ConfigResource`, which is the Java client's type name and does not \
@@ -335,4 +348,76 @@ fn the_broker_resource_is_spelled_the_rdkafka_way() {
         "neither src/reader.rs nor src/rdkafka_reader.rs names `ResourceSpecifier`, so nothing \
          records which rdkafka type the broker-config read is issued against"
     );
+}
+
+// ---------------------------------------------------------------------------
+// FX-4 / T13: the pure rules every reader names an EMPTY DescribeConfigs
+// answer by. The rdkafka-result half is `src/rdkafka_reader.rs`'s
+// `an_empty_topic_answer_is_a_refusal_never_an_empty_override_set`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn an_empty_topic_config_answer_is_named_from_the_topics_metadata_and_never_ok() {
+    use logweir_kafka::reader::{empty_topic_config_answer, TopicVisibility};
+    assert!(matches!(
+        empty_topic_config_answer("orders", &TopicVisibility::Visible),
+        KafkaError::NotAuthorized(ref m) if m.starts_with("orders")
+    ));
+    assert!(matches!(
+        empty_topic_config_answer("orders", &TopicVisibility::NotAuthorized),
+        KafkaError::NotAuthorized(_)
+    ));
+    assert!(matches!(
+        empty_topic_config_answer("orders", &TopicVisibility::NotFound),
+        KafkaError::TopicNotFound(ref t) if t == "orders"
+    ));
+    assert!(matches!(
+        empty_topic_config_answer("orders", &TopicVisibility::Unread("timed out".into())),
+        KafkaError::Client(ref m) if m.contains("timed out")
+    ));
+}
+
+#[test]
+fn an_empty_broker_config_answer_is_the_cluster_authorizers_refusal() {
+    assert!(matches!(
+        logweir_kafka::reader::empty_broker_config_answer(1001),
+        KafkaError::NotAuthorized(ref m) if m.contains("broker 1001")
+    ));
+}
+
+/// The source vocabulary the reader writes is EXACTLY the one the receipt's
+/// arm 11 accepts — both directions, so neither side can grow alone.
+#[test]
+fn every_config_source_this_reader_names_is_one_the_receipt_defines() {
+    use logweir_kafka::reader::ConfigSourceKind as K;
+    let named: std::collections::BTreeSet<&str> = [
+        K::DynamicTopicConfig,
+        K::DynamicBrokerConfig,
+        K::DynamicDefaultBrokerConfig,
+        K::StaticBrokerConfig,
+        K::DefaultConfig,
+        K::Unknown,
+    ]
+    .into_iter()
+    .map(K::wire_name)
+    .collect();
+    let defined: std::collections::BTreeSet<&str> = logweir_core::backup_receipt::CONFIG_SOURCES
+        .into_iter()
+        .collect();
+    assert_eq!(named, defined);
+}
+
+/// A reader that does not implement the FX-4 read can only make coverage
+/// WEAKER: the default answers "cannot", never an empty success.
+#[test]
+fn the_default_describe_topic_configs_reports_that_it_cannot_answer() {
+    let r = FakeReader {
+        cluster_id: "c".into(),
+        topics: vec![],
+        inject: None,
+    };
+    assert!(matches!(
+        r.describe_topic_configs(&["orders".to_string()]),
+        Err(KafkaError::Client(_))
+    ));
 }

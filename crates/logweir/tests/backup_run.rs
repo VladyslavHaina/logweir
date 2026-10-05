@@ -1001,7 +1001,22 @@ fn backup_run_writes_a_signed_receipt() {
     // The document says what the run measured — spot-checked on the fields an
     // auditor reads first, so a receipt full of defaults cannot pass this row.
     let receipt: BackupReceipt = serde_json::from_slice(&doc).unwrap();
-    assert_eq!(receipt.format_version, "1.0.0");
+    assert_eq!(receipt.format_version, "1.1.0");
+    // FX-4: the block is ALWAYS written, one entry per named topic. This
+    // file's `StubReader` implements no configuration read at all, so the
+    // coverage it can establish is the WEAKEST: `notCaptured` because the read
+    // failed — never `captured`, and never absent.
+    let coverage = receipt
+        .config_coverage
+        .as_ref()
+        .expect("a 1.1.0 receipt this build signs carries config_coverage");
+    assert_eq!(
+        coverage.keys().cloned().collect::<Vec<_>>(),
+        vec!["orders".to_string()]
+    );
+    assert_eq!(coverage["orders"].coverage, "notCaptured");
+    assert_eq!(coverage["orders"].reason.as_deref(), Some("describeFailed"));
+    assert_eq!(coverage["orders"].timestamp_type, None);
     assert_eq!(receipt.run_id, "run-1");
     assert_eq!(receipt.backup_id, "mvp-demo");
     assert_eq!(receipt.source.cluster_id, "SOURCE-CLUSTER-00000001");
@@ -1746,5 +1761,141 @@ fn the_shipped_backup_example_is_host_side() {
     assert!(
         src.contains("Logweir is not affiliated with or endorsed by the ASF."),
         "examples/backup.yaml is missing the ASF footer sentence"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// FX-4: the receipt's configuration capture coverage, end to end through the
+// backup seam.
+// ---------------------------------------------------------------------------
+
+/// A source reader that implements the FX-4 read: `orders` answers with an
+/// explicit override and a broker-default `LogAppendTime`; `ledger` is
+/// REFUSED, the way `RdKafkaReader` reports a topic whose DescribeConfigs the
+/// principal may not issue.
+struct ConfigReader;
+
+impl ClusterReader for ConfigReader {
+    fn cluster_id(&self) -> Result<String, KafkaError> {
+        Ok("SOURCE-CLUSTER-00000001".into())
+    }
+    fn list_topics(&self) -> Result<Vec<TopicMeta>, KafkaError> {
+        Ok(vec![])
+    }
+    fn end_offsets(&self, _topic: &str) -> Result<Vec<(i32, i64)>, KafkaError> {
+        Ok(vec![])
+    }
+    fn topic_configs(&self, _topic: &str) -> Result<BTreeMap<String, String>, KafkaError> {
+        unimplemented!("the backup path reads configuration through describe_topic_configs")
+    }
+    fn broker_configs(&self) -> Result<BTreeMap<String, String>, KafkaError> {
+        Ok(BTreeMap::new())
+    }
+    fn consume_range(
+        &self,
+        _topic: &str,
+        _partition: i32,
+        _from: i64,
+        _max: usize,
+    ) -> Result<Vec<ConsumedRecord>, KafkaError> {
+        Ok(vec![])
+    }
+    fn describe_topic_configs(
+        &self,
+        topics: &[String],
+    ) -> Result<Vec<(String, logweir_kafka::reader::TopicConfigRead)>, KafkaError> {
+        use logweir_kafka::reader::{ConfigEntryObservation, ConfigSourceKind};
+        let e = |name: &str, value: &str, source| ConfigEntryObservation {
+            name: name.into(),
+            value: Some(value.into()),
+            source,
+            read_only: false,
+            sensitive: false,
+        };
+        Ok(topics
+            .iter()
+            .map(|t| {
+                let answer = match t.as_str() {
+                    "orders" => Ok(vec![
+                        e(
+                            "retention.ms",
+                            "3600000",
+                            ConfigSourceKind::DynamicTopicConfig,
+                        ),
+                        e(
+                            "message.timestamp.type",
+                            "LogAppendTime",
+                            ConfigSourceKind::DynamicDefaultBrokerConfig,
+                        ),
+                    ]),
+                    other => Err(logweir_kafka::reader::empty_topic_config_answer(
+                        other,
+                        &logweir_kafka::reader::TopicVisibility::Visible,
+                    )),
+                };
+                (t.clone(), answer)
+            })
+            .collect())
+    }
+}
+
+/// **FX-4, the receipt.** The block is signed with the run, one entry per
+/// named topic: the topic whose manifest record equals Logweir's own read is
+/// `captured` with its effective timestamp type AND its source; the topic
+/// whose read was refused is `captureDenied` — even though the engine left its
+/// manifest record EMPTY, which is exactly what used to read as "no
+/// overrides". And the receipt verifies through the shipped reader.
+#[test]
+fn the_signed_receipt_records_each_topics_configuration_capture_coverage() {
+    let f = fixture(
+        &spec_yaml("mvp-demo", "[orders, ledger]", ""),
+        &allowed_json(&["SCRATCH-CLUSTER-0000001"]),
+    );
+    let mut orders = topic_facts(
+        "orders",
+        vec![segment(4, 1_756_000_000_000, 1_756_000_030_000)],
+    );
+    orders
+        .configurations
+        .insert("retention.ms".into(), "3600000".into());
+    let ledger = topic_facts(
+        "ledger",
+        vec![segment(2, 1_756_000_000_000, 1_756_000_010_000)],
+    );
+    let engine = RecordingEngine::ok(vec![orders, ledger]);
+    // FX-7: the archive starts EMPTY and the engine double writes the
+    // manifest during the run (`exec`), as the real engine does — a set that
+    // already holds its manifest is refused before the engine.
+    let (store, _k, _b) = archive_for("mvp-demo");
+
+    let outcome = exec(&f.args, "run-1", &ConfigReader, &engine, &store, &store).unwrap();
+    let (doc, _v) = store.get(&outcome.receipt_key).unwrap();
+    let receipt: BackupReceipt = serde_json::from_slice(&doc).unwrap();
+    let block = receipt
+        .config_coverage
+        .expect("the block is always written");
+    assert_eq!(block["orders"].coverage, "captured");
+    assert_eq!(
+        block["orders"].timestamp_type,
+        Some(logweir_core::backup_receipt::EffectiveConfigValue {
+            value: "LogAppendTime".into(),
+            source: "dynamicDefaultBrokerConfig".into(),
+        }),
+        "FX-8's broker-default arm: the effective value AND where it came from"
+    );
+    assert_eq!(
+        block["ledger"],
+        logweir_core::backup_receipt::TopicConfigCoverage {
+            coverage: "captureDenied".into(),
+            reason: None,
+            timestamp_type: None,
+        },
+        "a refused read is captureDenied beside an EMPTY manifest record, never captured"
+    );
+    let (sig, _v2) = store.get(&outcome.sidecar_key).unwrap();
+    let dir = f._dir.path();
+    assert_eq!(
+        verify_receipt(dir, &doc, &sig, &dir.join("signing.pub.pem")),
+        ExitCode::Ok
     );
 }

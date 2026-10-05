@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://logweir.dev/schemas/logweir-catalog-point-1.1.0.json",
   "title": "CatalogPoint",
-  "description": "The signed durable record of one recovery point.\n\nField order IS byte order: `serde_json` is built with `preserve_order` and `logweir_core::det_json::to_deterministic_json` walks the value, so declaration order here is the order in the bytes that get signed. Do not reorder without regenerating the current catalog point schema (`just schema`).\n\n**Nothing here may hold a credential.** `source.bootstrap_servers` is addressing and `source.auth_mode` is a mechanism name — the same two values `BackupReceipt` publishes, and for the same reason (`logweir_core::backup_receipt::ReceiptAuth`: \"never a password, and no field that could hold one\"). There is deliberately no `username` here even though the receipt has one: a catalog is the surface an operator lists in bulk, and a principal name is not a fact a recovery point needs.",
+  "description": "The signed durable record of one recovery point.\n\nField order IS byte order: `serde_json` is built with `preserve_order` and `logweir_core::det_json::to_deterministic_json` walks the value, so declaration order here is the order in the bytes that get signed. Do not reorder without regenerating `schemas/logweir-catalog-point-1.1.0.json` (`just schema`; the 1.0.0 file is frozen).\n\n**Nothing here may hold a credential.** `source.bootstrap_servers` is addressing and `source.auth_mode` is a mechanism name — the same two values `BackupReceipt` publishes, and for the same reason (`logweir_core::backup_receipt::ReceiptAuth`: \"never a password, and no field that could hold one\"). There is deliberately no `username` here even though the receipt has one: a catalog is the surface an operator lists in bulk, and a principal name is not a fact a recovery point needs.",
   "type": "object",
   "required": [
     "archive",
@@ -52,7 +52,7 @@
       "nullable": true
     },
     "format_version": {
-      "description": "Semver of THIS format: `1.0.0`, or `1.1.0` for a record that carries `archive.manifest_version_id` (FX-7). Major `1`; a higher major is [`crate::catalog::reader::PointState::UnsupportedFormat`] per entry, never fatal for the sync (D3 §5.2 rule 1).",
+      "description": "Semver of THIS format. Major `1`; a higher major is [`crate::catalog::reader::PointState::UnsupportedFormat`] per entry, never fatal for the sync (D3 §5.2 rule 1).",
       "type": "string",
       "pattern": "^1\\.[0-9]+\\.[0-9]+$"
     },
@@ -101,6 +101,24 @@
     }
   },
   "definitions": {
+    "EffectiveConfigValue": {
+      "description": "One configuration value as the broker reported it: the value in force and where it came from.",
+      "type": "object",
+      "required": [
+        "source",
+        "value"
+      ],
+      "properties": {
+        "source": {
+          "description": "One of [`CONFIG_SOURCES`]. `dynamicTopicConfig` is a topic override; every other named source is the broker's.",
+          "type": "string"
+        },
+        "value": {
+          "description": "For `timestamp_type`: `CreateTime` or `LogAppendTime` ([`TIMESTAMP_TYPES`]).",
+          "type": "string"
+        }
+      }
+    },
     "RecordArchive": {
       "description": "Where the archive itself is, as the writer saw it.",
       "type": "object",
@@ -122,11 +140,6 @@
         "manifest_sha256": {
           "description": "Receipt-derived (rule 3). `sha256:<hex>`.",
           "type": "string"
-        },
-        "manifest_version_id": {
-          "description": "**FX-7, format `1.1.0`.** Receipt-derived: the version id of the manifest bytes the receipt attests, copied from the receipt's own `archive.manifest_version_id` and present exactly when it is.\n\nABSENT means UNKNOWN here (rule 2) — an unversioned bucket, a receipt from before the field, or a record an older writer produced — and a reader then takes the pin from the verified RECEIPT, which is the authority. A record that carries a pin the receipt does not, or a different one, contradicts its receipt (`reader::cross_check`).",
-          "type": "string",
-          "nullable": true
         },
         "prefix": {
           "description": "The archive's own key prefix, as the receipt records it.",
@@ -324,6 +337,15 @@
         "records"
       ],
       "properties": {
+        "config_coverage": {
+          "description": "**Format 1.1.0 (FX-4).** The receipt's `config_coverage` entry for this topic, copied and never recomputed: whether the archive's record of the topic's configuration was captured, and the effective `message.timestamp.type` with its source.\n\nReceipt-derived under rule 3 — `reader::cross_check` refuses a record whose copy the receipt does not back. ABSENT means UNKNOWN (rule 2): every 1.0.0 record, and every record derived from a receipt that predates 1.1.0. Never read as `captured`.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/TopicConfigCoverage"
+            }
+          ],
+          "nullable": true
+        },
         "name": {
           "type": "string"
         },
@@ -339,6 +361,33 @@
           "type": "integer",
           "format": "uint64",
           "minimum": 0.0
+        }
+      }
+    },
+    "TopicConfigCoverage": {
+      "description": "What Logweir established about ONE topic's configuration at capture (receipt 1.1.0, FX-4).\n\n# Where the answer comes from\n\nLogweir's OWN DescribeConfigs read of the topic, taken by `logweir backup run` immediately before the engine starts, through the same principal the engine uses — NOT the engine's capture, which is non-fatal, all-or-nothing across the run's topics and invisible in the manifest. That read is then compared with the manifest the engine wrote:\n\n| `coverage` | `reason` | meaning | |---|---|---| | `captured` | — | the read succeeded AND the manifest's `configurations` for this topic equal the explicit overrides the engine captures (its own filter: topic-override source, not read-only, not sensitive, on its allowlist). The manifest is a complete record of them, so a configuration parity check may compare against it. | | `captureDenied` | — | the broker's authorizer refused the read (`TOPIC_AUTHORIZATION_FAILED`). The engine runs as the same principal, so an empty manifest record says nothing. | | `notCaptured` | `describeFailed` | the read failed for any other reason (a timeout, an unknown topic, a broker error). | | `notCaptured` | `manifestDiffers` | the read succeeded but the manifest does not record the same overrides — the engine's own capture failed (one denied topic empties them all), or the configuration changed between the two reads. |\n\nOverrides outside the engine's allowlist are never part of the claim: `captured` says the ARCHIVE's configuration record is complete, not that every setting of the topic was archived (that is PROD-05.1's portability table).\n\nStrings on the wire, not enums, for the reason `ReceiptAuth::mode` gives: a reader must be able to REPORT a value it refuses. The closed sets are enforced by arms 8, 9 and 11 in both readers.",
+      "type": "object",
+      "required": [
+        "coverage"
+      ],
+      "properties": {
+        "coverage": {
+          "description": "`captured`, `notCaptured` or `captureDenied` — [`COVERAGE_VALUES`].",
+          "type": "string"
+        },
+        "reason": {
+          "description": "`describeFailed` or `manifestDiffers` — [`NOT_CAPTURED_REASONS`] — present exactly when `coverage` is `notCaptured` (arm 9).",
+          "type": "string",
+          "nullable": true
+        },
+        "timestamp_type": {
+          "description": "The topic's EFFECTIVE `message.timestamp.type` as Logweir's read returned it, and where that value came from — the broker-default arm of FX-8, which the manifest cannot carry (the engine keeps explicit overrides only). ABSENT when the read did not succeed (arm 10) or the broker returned no such entry: the timestamp type is then NOT RECORDED, never assumed `CreateTime`.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/EffectiveConfigValue"
+            }
+          ],
+          "nullable": true
         }
       }
     }

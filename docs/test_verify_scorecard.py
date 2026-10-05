@@ -1,4 +1,4 @@
-import json, os, pathlib, subprocess, sys, tempfile
+import json, os, pathlib, re, subprocess, sys, tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 FIX = ROOT / "e2e" / "fixtures" / "signed"
@@ -882,7 +882,7 @@ def test_the_version_line_names_the_current_invariant_set():
         sc, sig = _signed_scorecard(d)
         r = run(sc, sig, FIX / "public.pem")
         assert r.returncode == 0, r.stderr
-        assert "verify_scorecard.py 1.15.0" in r.stdout, r.stdout
+        assert "verify_scorecard.py 1.16.0" in r.stdout, r.stdout
         assert "redactions" in r.stdout, r.stdout
         assert "trimmed-empty partial_reason" in r.stdout, r.stdout
         assert "outcome-entailment" in r.stdout, r.stdout
@@ -925,7 +925,8 @@ def test_the_script_version_is_not_the_format_version():
     # a format bump.
     mod = _verifier_module()
     assert mod.SCRIPT_VERSION != mod.FORMAT_VERSION
-    assert mod.FORMAT_VERSION == "1.0.0"
+    # 1.1.0 since FX-4 (`topic_parity.not_assessed`, a MINOR bump).
+    assert mod.FORMAT_VERSION == "1.1.0"
 
 
 def test_a_negative_rpo_is_refused():
@@ -1106,8 +1107,8 @@ def test_the_format_version_matches_the_rust_constant():
     # The refusal above is only meaningful if this script and the signer agree
     # on what "this major" is.
     rust = (ROOT / "crates" / "logweir-core" / "src" / "lib.rs").read_text()
-    assert 'pub const FORMAT_VERSION: &str = "1.0.0"' in rust
-    assert _verifier_module().FORMAT_VERSION == "1.0.0"
+    assert 'pub const FORMAT_VERSION: &str = "1.1.0"' in rust
+    assert _verifier_module().FORMAT_VERSION == "1.1.0"
 
 
 # ------------------------------------------ no raw tracebacks, ever (the header
@@ -2178,15 +2179,32 @@ def test_script_version_was_bumped_with_the_payload_type_map():
     # so the new arm is a verdict PRINTER that says exactly that. Map five;
     # scorecard and backup-receipt invariant sets unchanged.
     #
-    # 1.15.0 (FX-7) adds a SHAPE rule to the backup receipt — an optional
-    # `archive.manifest_version_id` must be a string when present — and prints
-    # the pin. A change to what is checked, so a minor bump; no arm, map five.
+    # 1.15.0 (FX-4) adds the backup receipt's six `config_coverage` arms and the
+    # scorecard's `topic_parity.not_assessed` and `target_diff.not_assessed`
+    # shape checks. Map still five.
+    #
+    # 1.16.0 (FX-7, merged after FX-4) adds a SHAPE rule to the backup receipt
+    # — an optional `archive.manifest_version_id` must be a string when present
+    # — and prints the pin (receipt and catalog point format 1.2.0). A change to
+    # what is checked, so a minor bump; no arm, map five.
     mod = _verifier_module()
     assert len(mod.PAYLOAD_TYPES) == 5, sorted(mod.PAYLOAD_TYPES)
-    assert mod.SCRIPT_VERSION == "1.15.0", mod.SCRIPT_VERSION
+    assert mod.SCRIPT_VERSION == "1.16.0", mod.SCRIPT_VERSION
     assert "backup-receipt" in mod.PAYLOAD_TYPES
     assert mod.PAYLOAD_TYPES["backup-receipt"] == BACKUP_RECEIPT_TYPE
     assert mod.PAYLOAD_TYPES["catalog-point"] == CATALOG_POINT_TYPE
+
+
+def test_the_config_coverage_minor_is_the_rust_readers():
+    # Arm 6's minor is ONE number in each reader; a renumber (for instance to
+    # 1.2.0) must move both, and the arm's message is built from it on both
+    # sides, so the corpus and the parity script then compare the new text.
+    mod = _verifier_module()
+    rust = (pathlib.Path(__file__).resolve().parent.parent
+            / "crates/logweir-core/src/backup_receipt.rs").read_text()
+    m = re.search(r"pub const CONFIG_COVERAGE_SINCE_MINOR: u64 = (\d+);", rust)
+    assert m, "backup_receipt.rs no longer declares CONFIG_COVERAGE_SINCE_MINOR"
+    assert mod.RECEIPT_CONFIG_COVERAGE_SINCE_MINOR == int(m.group(1))
 
 
 def test_the_payload_type_resolver_accepts_every_short_name_and_media_type():
@@ -2280,10 +2298,11 @@ def test_the_receipts_auth_mode_value_set_is_closed_at_this_reader():
 
 
 def test_a_pinned_manifest_version_is_read_shape_checked_and_printed():
-    # FX-7 (receipt format 1.1.0): a receipt taken on a versioned bucket pins
-    # `archive.manifest_version_id`, the object version its manifest digest is
-    # over. It is OPTIONAL — absent or null is the unversioned bucket's receipt,
-    # exactly the 1.0.0 document — and a string when present: Rust's
+    # FX-7 (receipt format 1.2.0, the MINOR after FX-4's 1.1.0): a receipt
+    # taken on a versioned bucket pins `archive.manifest_version_id`, the object
+    # version its manifest digest is over. It is OPTIONAL — absent or null is
+    # the unversioned bucket's receipt, exactly the document without the pin —
+    # and a string when present: Rust's
     # `Option<String>` refuses any other JSON type at deserialisation, so this
     # reader refuses it at the SHAPE layer, never as an invariant arm.
     mod = _verifier_module()
@@ -2292,7 +2311,7 @@ def test_a_pinned_manifest_version_is_read_shape_checked_and_printed():
         "the committed fixture is the UNVERSIONED 1.0.0 receipt and must stay byte-identical"
     )
     pinned = json.loads(json.dumps(base))
-    pinned["format_version"] = "1.1.0"
+    pinned["format_version"] = "1.2.0"
     pinned["archive"]["manifest_version_id"] = "fx7-manifest-version-0001"
     assert mod._receipt_shape(pinned) == ""
     assert mod.check_backup_receipt_invariants(pinned) == ""
@@ -2326,3 +2345,183 @@ def test_a_pinned_manifest_version_is_read_shape_checked_and_printed():
         assert r.returncode == 1, r.stdout
         assert "Traceback" not in r.stderr, r.stderr
         assert "archive.manifest_version_id is not a string" in r.stderr, r.stderr
+
+# ---------------------------------------------------------------------------
+# FX-4: the backup receipt's format 1.1.0 `config_coverage` block, and the
+# scorecard's 1.1.0 `topic_parity.not_assessed`.
+# ---------------------------------------------------------------------------
+
+def _receipt_1_1(block):
+    doc = json.loads((ROOT / "e2e/fixtures/invariants/unmodified_receipt.json").read_text())
+    doc["format_version"] = "1.1.0"
+    if block is not None:
+        doc["config_coverage"] = block
+    return doc
+
+
+_GOOD_COVERAGE = {
+    "orders": {
+        "coverage": "captured",
+        "timestamp_type": {"value": "LogAppendTime", "source": "dynamicDefaultBrokerConfig"},
+    },
+    "payments": {"coverage": "captureDenied"},
+}
+
+
+def test_a_1_1_0_receipt_with_config_coverage_is_accepted_and_absent_is_accepted_too():
+    mod = _verifier_module()
+    assert mod._receipt_shape(_receipt_1_1(_GOOD_COVERAGE)) == ""
+    assert mod.check_backup_receipt_invariants(_receipt_1_1(_GOOD_COVERAGE)) == ""
+    # ABSENT is unknown, never a contradiction — at 1.1.0 and at 1.0.0.
+    assert mod.check_backup_receipt_invariants(_receipt_1_1(None)) == ""
+    doc = _receipt_1_1(None)
+    doc["format_version"] = "1.0.0"
+    assert mod.check_backup_receipt_invariants(doc) == ""
+    # `null` is absent, exactly as `Option` reads it over there.
+    doc = _receipt_1_1(None)
+    doc["config_coverage"] = None
+    assert mod._receipt_shape(doc) == ""
+    assert mod.check_backup_receipt_invariants(doc) == ""
+
+
+def test_the_config_coverage_arms_refuse_with_the_rust_readers_exact_messages():
+    # One refusal per arm, 6-11 — the SAME strings
+    # `crates/logweir-core/tests/backup_receipt.rs` asserts of the Rust reader.
+    mod = _verifier_module()
+    doc = _receipt_1_1(_GOOD_COVERAGE)
+    doc["format_version"] = "1.0.0"
+    assert mod.check_backup_receipt_invariants(doc) == (
+        'config_coverage is present but format_version "1.0.0" predates it: the field is '
+        "defined from 1.1.0"
+    )
+    assert mod.check_backup_receipt_invariants(
+        _receipt_1_1({"orders": _GOOD_COVERAGE["orders"]})
+    ) == 'config_coverage covers {"orders"} but the named topic set is {"orders", "payments"}'
+    block = dict(_GOOD_COVERAGE, orders={"coverage": "unknown"})
+    assert mod.check_backup_receipt_invariants(_receipt_1_1(block)) == (
+        'config_coverage["orders"].coverage "unknown" is not one of the three values this '
+        'format defines: "captured", "notCaptured" or "captureDenied"'
+    )
+    block = dict(_GOOD_COVERAGE, orders={"coverage": "notCaptured"})
+    assert mod.check_backup_receipt_invariants(_receipt_1_1(block)) == (
+        'config_coverage["orders"].reason absent does not fit coverage "notCaptured": a reason '
+        'is present exactly when coverage is "notCaptured", and is "describeFailed" or '
+        '"manifestDiffers"'
+    )
+    block = dict(_GOOD_COVERAGE, orders={"coverage": "captured", "reason": "manifestDiffers"})
+    assert mod.check_backup_receipt_invariants(_receipt_1_1(block)).startswith(
+        'config_coverage["orders"].reason "manifestDiffers" does not fit coverage "captured"'
+    )
+    block = dict(
+        _GOOD_COVERAGE,
+        payments={
+            "coverage": "captureDenied",
+            "timestamp_type": {"value": "CreateTime", "source": "defaultConfig"},
+        },
+    )
+    assert mod.check_backup_receipt_invariants(_receipt_1_1(block)) == (
+        'config_coverage["payments"] records a timestamp_type, but a topic whose configuration '
+        "read was denied or failed cannot have observed one"
+    )
+    block = dict(
+        _GOOD_COVERAGE,
+        orders={
+            "coverage": "captured",
+            "timestamp_type": {"value": "LogAppendTime", "source": "DYNAMIC_DEFAULT_BROKER_CONFIG"},
+        },
+    )
+    assert mod.check_backup_receipt_invariants(_receipt_1_1(block)) == (
+        'config_coverage["orders"].timestamp_type "LogAppendTime" from '
+        '"DYNAMIC_DEFAULT_BROKER_CONFIG" is not a value and source this format defines: the '
+        'value is "CreateTime" or "LogAppendTime", and the source is "dynamicTopicConfig", '
+        '"dynamicBrokerConfig", "dynamicDefaultBrokerConfig", "staticBrokerConfig", '
+        '"defaultConfig" or "unknown"'
+    )
+
+
+def test_a_config_coverage_block_serde_would_refuse_is_refused_at_the_shape_layer():
+    # The TIMESTAMP SOURCE DROPPED — the mutant the FX-4 brief names — is a
+    # document the Rust reader refuses at deserialisation (`source` is a
+    # required field of `EffectiveConfigValue`); this reader must not print
+    # VALID over it.
+    mod = _verifier_module()
+    block = dict(
+        _GOOD_COVERAGE,
+        orders={"coverage": "captured", "timestamp_type": {"value": "LogAppendTime"}},
+    )
+    assert mod._receipt_shape(_receipt_1_1(block)) == (
+        'config_coverage["orders"].timestamp_type.source is not a string'
+    )
+    for bad, want in [
+        ("x", "config_coverage is not an object"),
+        ({"orders": 5}, 'config_coverage["orders"] is not an object'),
+        ({"orders": {}}, 'config_coverage["orders"].coverage is not a string'),
+        ({"orders": {"coverage": "captured", "reason": 5}},
+         'config_coverage["orders"].reason is not a string'),
+        ({"orders": {"coverage": "captured", "timestamp_type": "x"}},
+         'config_coverage["orders"].timestamp_type is not an object'),
+    ]:
+        assert mod._receipt_shape(_receipt_1_1(bad)) == want, bad
+
+
+def test_the_receipt_verdict_prints_config_coverage_and_never_calls_absent_captured():
+    mod = _verifier_module()
+    assert mod._coverage_lines(None) == [
+        "config_coverage: not recorded, so every topic's configuration capture is "
+        "UNKNOWN, never captured"
+    ]
+    assert mod._coverage_lines(
+        dict(
+            _GOOD_COVERAGE,
+            payments={"coverage": "notCaptured", "reason": "manifestDiffers"},
+        )
+    ) == [
+        'config_coverage["orders"]: captured, message.timestamp.type LogAppendTime from '
+        "dynamicDefaultBrokerConfig",
+        'config_coverage["payments"]: notCaptured (manifestDiffers), message.timestamp.type '
+        "not recorded",
+    ]
+
+
+def test_the_scorecard_parity_line_never_reads_absent_as_assessed():
+    mod = _verifier_module()
+    assert "not recorded" in mod._parity_line(None)
+    assert mod._parity_line([]) == ""
+    assert mod._parity_line(["drill-orders: configuration (captureDenied)"]) == (
+        "configuration parity: NOT ASSESSED for drill-orders: configuration (captureDenied)"
+    )
+
+
+def test_a_not_assessed_value_serde_would_refuse_is_refused_here_too():
+    mod = _verifier_module()
+    base = json.loads((ROOT / "e2e/fixtures/scorecard-pass.json").read_text())
+    for bad in ["x", [1], {"a": 1}]:
+        doc = json.loads(json.dumps(base))
+        doc["topic_parity"]["not_assessed"] = bad
+        assert mod.check_invariants(doc) == (
+            "topic_parity.not_assessed is not an array of strings"
+        ), bad
+    for good in [None, [], ["drill-orders: configuration (unknown)"]]:
+        doc = json.loads(json.dumps(base))
+        doc["format_version"] = "1.1.0"
+        doc["topic_parity"]["not_assessed"] = good
+        assert mod.check_invariants(doc) == "", good
+
+
+def test_a_target_diff_not_assessed_value_serde_would_refuse_is_refused_here_too():
+    # FX-4 fix round: phase 3's qualifier moved out of the collision strings
+    # (which stay byte for byte what a pre-FX-4 writer produced) into
+    # `target_diff.not_assessed`, the same `Option<Vec<String>>` as above.
+    mod = _verifier_module()
+    base = json.loads((ROOT / "e2e/fixtures/scorecard-pass.json").read_text())
+    for bad in ["x", [1], {"a": 1}]:
+        doc = json.loads(json.dumps(base))
+        doc["target_diff"]["not_assessed"] = bad
+        assert mod.check_invariants(doc) == (
+            "target_diff.not_assessed is not an array of strings"
+        ), bad
+    for good in [None, [], ["drill-orders: configuration (captureDenied)"]]:
+        doc = json.loads(json.dumps(base))
+        doc["format_version"] = "1.1.0"
+        doc["target_diff"]["not_assessed"] = good
+        assert mod.check_invariants(doc) == "", good

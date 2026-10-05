@@ -56,7 +56,10 @@ pub const PAYLOAD_TYPE_PUT_RECEIPT: &str =
 /// different operation on a different cluster ships as its own media type
 /// with its own `format_version`. The type is
 /// `logweir_core::backup_receipt::BackupReceipt`; the schema is
-/// `schemas/logweir-backup-receipt-<format_version>.json`, one file per MINOR.
+/// `schemas/logweir-backup-receipt-<format_version>.json`, one file per MINOR
+/// (1.1.0 since FX-4, 1.2.0 for a receipt that pins its manifest version since
+/// FX-7), the older ones frozen. The media type's `version=1.0.0` did not
+/// change.
 ///
 /// DECLARED HERE, in the verify-only crate, and NOT in `logweir-evidence`
 /// (critique A F8, critique B H2, chain V: Task 14 → Task 5). `weirkeeper`

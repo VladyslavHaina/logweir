@@ -470,6 +470,8 @@ pub fn runner_job_spec(cluster: &KafkaCluster) -> Result<RunnerJobSpec, KafkaClu
         // WAY IF THIS PROCESS WAS HANDED ANOTHER POLICY (Task 37,
         // `job::RUNNER_PULL_POLICY_ENV`). Same argument, same one line.
         image_pull_policy: None,
+        // `KafkaCluster` states no resources for its probe Job (FX-2's sweep).
+        resources: None,
     })
 }
 
