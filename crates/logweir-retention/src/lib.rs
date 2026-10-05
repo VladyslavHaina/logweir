@@ -54,8 +54,8 @@
 //! | `LOGWEIR_RETENTION_SCOPE_PREFIX` | `spec.scope.prefix`, checked against the plan's own |
 //! | `LOGWEIR_RETENTION_RUN_ID` | the run id |
 //! | `LOGWEIR_RETENTION_APPROVER` | the audit id or subject, or `unattended` |
-//! | `LOGWEIR_RETENTION_MAX_DELETIONS` | the per-run point ceiling |
-//! | `LOGWEIR_RETENTION_MAX_OBJECTS` | the per-run object ceiling |
+//! | `LOGWEIR_RETENTION_MAX_DELETIONS` | the per-run point ceiling — **required**, a whole number of at least 1 |
+//! | `LOGWEIR_RETENTION_MAX_OBJECTS` | the per-run object ceiling — **required**, a whole number of at least 1 |
 //! | `LOGWEIR_RETENTION_LOCATION` | the destination's `DestinationLocation`, as JSON |
 //! | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` | the DELETE-capable grant |
 //! | `LOGWEIR_EVIDENCE_AWS_ACCESS_KEY_ID` / `…SECRET_ACCESS_KEY` / `…SESSION_TOKEN` | the `evidenceWrite` grant |
@@ -104,7 +104,7 @@ pub const EXIT_REFUSED: i32 = 3;
 
 /// Where the run's binding comes from.
 ///
-/// A trait and not `std::env::var`, so the thirteen refusal paths can be driven
+/// A trait and not `std::env::var`, so every refusal path can be driven
 /// from a map. `None` covers both "unset" and **"present and blank"**:
 /// `std::env::var` returns `Ok("")` — not `Err(NotPresent)` — for a Kubernetes
 /// `env:` entry with an empty `value:`, and a `secretKeyRef` to a key that
@@ -185,6 +185,23 @@ pub enum Refusal {
     /// `LOGWEIR_RETENTION_POLICY_GENERATION` is not a number.
     #[error("LOGWEIR_RETENTION_POLICY_GENERATION is not a number: `{0}`")]
     GenerationNotANumber(String),
+    /// A per-run ceiling ([`env::MAX_DELETIONS`] or [`env::MAX_OBJECTS`]) is
+    /// not a whole number of at least 1.
+    ///
+    /// **FX-10: a ceiling the worker cannot read is refused, never replaced.**
+    /// Until 2026-10-05 an absent or malformed value silently became 50 or
+    /// 20 000 — so a renamed variable on either side, or a typo, ran with a
+    /// ceiling nobody configured, possibly far above the policy's own.
+    #[error(
+        "{name} must be a whole number of at least 1; got `{value}`. A ceiling this worker \
+         cannot read is not replaced by a default: nothing is deleted."
+    )]
+    CapUnreadable {
+        /// Which variable.
+        name: &'static str,
+        /// What it carried.
+        value: String,
+    },
     /// `LOGWEIR_RETENTION_LOCATION` did not parse.
     #[error("LOGWEIR_RETENTION_LOCATION did not parse: {0}")]
     LocationUnreadable(String),
@@ -360,14 +377,84 @@ impl Admitted {
     }
 }
 
-/// The five variables a run cannot start without.
-const REQUIRED: [&str; 5] = [
-    "LOGWEIR_RETENTION_PLAN_SHA256",
-    "LOGWEIR_RETENTION_POLICY_UID",
-    "LOGWEIR_RETENTION_POLICY_GENERATION",
-    "LOGWEIR_RETENTION_SCOPE_PREFIX",
-    "LOGWEIR_RETENTION_RUN_ID",
+/// The run binding's variable names, each spelt ONCE.
+///
+/// **They are the controller's names too.** `weirkeeper` projects them
+/// (`controllers::retention_policy::env`), and the two crates share no
+/// dependency edge — this binary is the deletion boundary and the controller
+/// must not link it. So both sides' tests read the OTHER side's source and
+/// compare the names: `logweir-retention/tests/worker.rs`
+/// `the_binding_names_are_the_ones_the_controller_projects`, and
+/// `weirkeeper/tests/configured_values.rs`
+/// `the_retention_jobs_binding_names_are_the_ones_the_worker_reads`. A rename
+/// on either side alone fails both, and — since every one of these is required
+/// — fails closed at run time as well, never into a default.
+pub mod env {
+    /// The approved plan digest.
+    pub const PLAN_SHA256: &str = "LOGWEIR_RETENTION_PLAN_SHA256";
+    /// The policy UID.
+    pub const POLICY_UID: &str = "LOGWEIR_RETENTION_POLICY_UID";
+    /// The policy generation, for the record.
+    pub const POLICY_GENERATION: &str = "LOGWEIR_RETENTION_POLICY_GENERATION";
+    /// `spec.scope.prefix`, checked against the plan's own.
+    pub const SCOPE_PREFIX: &str = "LOGWEIR_RETENTION_SCOPE_PREFIX";
+    /// The run id.
+    pub const RUN_ID: &str = "LOGWEIR_RETENTION_RUN_ID";
+    /// The approver reference, or `unattended`.
+    pub const APPROVER: &str = "LOGWEIR_RETENTION_APPROVER";
+    /// The per-run point ceiling (`spec.enforcement.maxDeletionsPerRun`).
+    pub const MAX_DELETIONS: &str = "LOGWEIR_RETENTION_MAX_DELETIONS";
+    /// The per-run object ceiling (`spec.enforcement.maxObjectsPerRun`).
+    pub const MAX_OBJECTS: &str = "LOGWEIR_RETENTION_MAX_OBJECTS";
+    /// The destination's `DestinationLocation`, as JSON.
+    pub const LOCATION: &str = "LOGWEIR_RETENTION_LOCATION";
+
+    /// Every binding variable this worker reads from the controller's Job —
+    /// the set the two sides' name tests compare.
+    pub const BINDING: [&str; 9] = [
+        PLAN_SHA256,
+        POLICY_UID,
+        POLICY_GENERATION,
+        SCOPE_PREFIX,
+        RUN_ID,
+        APPROVER,
+        MAX_DELETIONS,
+        MAX_OBJECTS,
+        LOCATION,
+    ];
+}
+
+/// The seven variables a run cannot start without.
+///
+/// The two ceilings joined the five on 2026-10-05 (FX-10): the controller has
+/// projected both on every enforcement Job since the worker existed
+/// (`582ba14e`), so no supported pairing lacks them, and a run that would have
+/// to GUESS its own ceiling is a run that should not delete.
+const REQUIRED: [&str; 7] = [
+    env::PLAN_SHA256,
+    env::POLICY_UID,
+    env::POLICY_GENERATION,
+    env::SCOPE_PREFIX,
+    env::RUN_ID,
+    env::MAX_DELETIONS,
+    env::MAX_OBJECTS,
 ];
+
+/// A per-run ceiling, read strictly: a whole number of at least 1, or the
+/// refusal that names the variable. **Pure.**
+///
+/// # Errors
+///
+/// [`Refusal::CapUnreadable`].
+pub fn cap(name: &'static str, raw: &str) -> Result<i64, Refusal> {
+    match raw.trim().parse::<i64>() {
+        Ok(v) if v >= 1 => Ok(v),
+        _ => Err(Refusal::CapUnreadable {
+            name,
+            value: raw.to_string(),
+        }),
+    }
+}
 
 /// Everything decided before a port is built. **Pure**: it dials nothing,
 /// builds no handle and reads no process state except through `env` and
@@ -389,26 +476,29 @@ pub fn admit(
             return Err(Refusal::BindingIncomplete(name));
         }
     }
-    let approved = env.get(REQUIRED[0]).expect("checked above");
-    let policy_uid = env.get(REQUIRED[1]).expect("checked above");
-    let raw_generation = env.get(REQUIRED[2]).expect("checked above");
-    let scope_prefix = env.get(REQUIRED[3]).expect("checked above");
-    let run_id = env.get(REQUIRED[4]).expect("checked above");
+    let approved = env.get(env::PLAN_SHA256).expect("checked above");
+    let policy_uid = env.get(env::POLICY_UID).expect("checked above");
+    let raw_generation = env.get(env::POLICY_GENERATION).expect("checked above");
+    let scope_prefix = env.get(env::SCOPE_PREFIX).expect("checked above");
+    let run_id = env.get(env::RUN_ID).expect("checked above");
     let policy_generation = raw_generation
         .parse::<i64>()
         .map_err(|_| Refusal::GenerationNotANumber(raw_generation.clone()))?;
 
+    // THE CEILINGS ARE THE JOB'S, READ STRICTLY (FX-10). They used to fall back
+    // to 50 and 20 000 on an absent or unparseable value, so a worker that
+    // never read them passed the one row that set exactly those numbers.
     let binding = RunBinding {
         policy_uid: policy_uid.clone(),
         scope_prefix,
-        max_deletions_per_run: env
-            .get("LOGWEIR_RETENTION_MAX_DELETIONS")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(50),
-        max_objects_per_run: env
-            .get("LOGWEIR_RETENTION_MAX_OBJECTS")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(20_000),
+        max_deletions_per_run: cap(
+            env::MAX_DELETIONS,
+            &env.get(env::MAX_DELETIONS).expect("checked above"),
+        )?,
+        max_objects_per_run: cap(
+            env::MAX_OBJECTS,
+            &env.get(env::MAX_OBJECTS).expect("checked above"),
+        )?,
     };
 
     let bytes = read_plan(&args.plan_path).map_err(|e| Refusal::PlanUnreadable {
@@ -419,8 +509,8 @@ pub fn admit(
     logweir_reaper::validate_plan(&plan, &binding)?;
 
     let location_json = env
-        .get("LOGWEIR_RETENTION_LOCATION")
-        .ok_or(Refusal::BindingIncomplete("LOGWEIR_RETENTION_LOCATION"))?;
+        .get(env::LOCATION)
+        .ok_or(Refusal::BindingIncomplete(env::LOCATION))?;
     let location: DestinationLocation = serde_json::from_str(&location_json)
         .map_err(|e| Refusal::LocationUnreadable(e.to_string()))?;
 
@@ -443,7 +533,7 @@ pub fn admit(
         policy_generation,
         location,
         approver: env
-            .get("LOGWEIR_RETENTION_APPROVER")
+            .get(env::APPROVER)
             .unwrap_or_else(|| "unattended".to_string()),
         dry_run: args.dry_run,
         archive_keys: keys_from(env, ""),
