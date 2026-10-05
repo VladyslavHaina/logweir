@@ -105,7 +105,7 @@ resolve() {
     complete_publication "$PUBLICATION" \
       || die "docker.io/$NS has no complete sha-$PUBLICATION publication (all four images)"
     publication="$PUBLICATION"
-    how="named by the dry run (its own commit has no publication)"
+    how="named by the dry run, whose own commit has no publication"
   else
     commits=$(git rev-list --first-parent --max-count="$MAX_ANCESTORS" "$COMMIT") \
       || die "git rev-list $COMMIT failed; the release needs the full history (checkout fetch-depth: 0)"
@@ -296,7 +296,7 @@ release_notes() { # release.json -> the GitHub Release body (Markdown)
     "",
     "| Archive | Needs at run time (measured on the shipped binary) |",
     "|---|---|",
-    (.archives[] | "| `\(.file)` | \(.runtime | map(select(startswith("target:") | not)) | join("; ")) |"),
+    (.archives[] | "| `\(.file)` | \(.runtime | map(select((startswith("target:") or startswith("system:")) | not)) | join("; ")) |"),
     "",
     "Each archive holds the `logweir` binary, `LICENSE`, `NOTICE`, `THIRD_PARTY_NOTICES.md` and `README.md`. The CLI does not bundle the `kafka-backup` engine: a drill or restore needs `LOGWEIR_ENGINE_BIN`, `LOGWEIR_ENGINE_VERSION` and `LOGWEIR_ENGINE_DIGEST` ([quickstart](https://github.com/VladyslavHaina/logweir/blob/\(.commit)/docs/quickstart.md)). `logweir --version` prints the workspace version, not the tag; `release.json` ties each archive to this tag and commit.",
     "",

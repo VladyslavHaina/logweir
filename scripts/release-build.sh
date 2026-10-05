@@ -184,10 +184,14 @@ if [[ "$want_os" == Linux ]]; then
   for lib in libssl.so.3 libcrypto.so.3 libsasl2.so.2; do
     grep -qx "$lib" "$work/needed" || { echo "release-build.sh: $bin does not link $lib; the documented requirement is wrong" >&2; exit 1; }
   done
+  # What a host must install, apart from glibc itself.
+  grep -v -E '^(libc|libm|libdl|libpthread|librt)\.so\.[0-9]+$|^libgcc_s\.so\.1$|^ld-linux' "$work/needed" > "$work/install" || true
+  grep -E '^(libc|libm|libdl|libpthread|librt)\.so\.[0-9]+$|^libgcc_s\.so\.1$|^ld-linux' "$work/needed" > "$work/system" || true
   {
     echo "target: $target"
     echo "glibc: $glibc or newer (the highest versioned symbol the binary references)"
-    echo "needs: $(tr '\n' ' ' < "$work/needed" | sed 's/ $//')"
+    echo "needs: $(tr '\n' ' ' < "$work/install" | sed 's/ $//') (Debian and Ubuntu: libssl3, libsasl2-2, zlib1g)"
+    echo "system: $(tr '\n' ' ' < "$work/system" | sed 's/ $//')"
   } > "$linkage"
 else
   otool -L "$bin" > "$work/otool"
@@ -205,10 +209,13 @@ else
   otool -l "$bin" > "$work/load-commands"
   minos=$(awk '/LC_BUILD_VERSION/ { found = 1 } found && $1 == "minos" { print $2; exit }' "$work/load-commands")
   [[ "$minos" =~ ^[0-9]+(\.[0-9]+)*$ ]] || { echo "release-build.sh: no LC_BUILD_VERSION minos in $bin" >&2; exit 1; }
+  grep -v -E '^(/usr/lib/|/System/Library/)' "$work/dylibs" > "$work/install" || true
+  grep -E '^(/usr/lib/|/System/Library/)' "$work/dylibs" > "$work/system" || true
   {
     echo "target: $target"
     echo "macOS: $minos or newer (the binary's LC_BUILD_VERSION minos)"
-    echo "needs: $(tr '\n' ' ' < "$work/dylibs" | sed 's/ $//')"
+    echo "needs: $(tr '\n' ' ' < "$work/install" | sed 's/ $//') (Homebrew: brew install openssl@3)"
+    echo "system: $(tr '\n' ' ' < "$work/system" | sed 's/ $//')"
   } > "$linkage"
 fi
 echo "== $linkage =="

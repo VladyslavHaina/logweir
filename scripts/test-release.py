@@ -233,6 +233,7 @@ class Resolve(Release):
         images, _ = self.resolve(branch, PUBLICATION=self.head, PUBLISH="false")
         self.assertEqual(images["publication"], self.head)
         self.assertIn("named by the dry run", images["how"])
+        self.assertNotIn("(", images["how"])
         _, result = self.resolve(branch, success=False, PUBLICATION=self.head, PUBLISH="true")
         self.assertIn("dry-run input", result.stderr)
         other = "c" * 40
@@ -330,7 +331,7 @@ class Assemble(Release):
         digest = sidecar or sha256(data.getvalue())
         (self.inputs / f"{name}.tar.xz.sha256").write_text(f"{digest} *{name}.tar.xz\n")
         (self.inputs / f"{name}.linkage.txt").write_text(
-            f"target: {target}\nglibc: 2.34 or newer\nneeds: libc.so.6 libssl.so.3\n")
+            f"target: {target}\nglibc: 2.34 or newer\nneeds: libssl.so.3\nsystem: libc.so.6\n")
 
     def assemble(self, success=True, out=None):
         out = out or self.base / "assets"
@@ -374,6 +375,7 @@ class Assemble(Release):
         for needle in (f"--version 0.2.0-rc.1", "(pre-release)", f"sha-{self.head}", "drill countersign",
                        "sha256sum -c SHA256SUMS", "kafka-backup-LICENSE", "glibc: 2.34 or newer"):
             self.assertIn(needle, notes)
+        self.assertNotIn("libc.so.6", notes, "the notes list what to install, not the OS itself")
         self.release("verify", str(out))
 
     def test_verify_refuses_a_changed_missing_or_extra_asset(self):
