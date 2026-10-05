@@ -1054,6 +1054,12 @@ What changes for an operator:
   the segment digests the manifest records.
 - **Old receipts are never reinterpreted.** A receipt without a pin is read exactly as before, and
   `logweir catalog sync` never infers a pin for one.
+- **One change awaits the owner's ruling (FX-7 review, V3).** `availability: Conflict` gains a cause:
+  a pinned manifest version this bucket still holds that is no longer the current one. Only a point
+  whose receipt carries the new optional `archive.manifest_version_id` can reach it, but it widens
+  what an existing value means, and OD-7 does not cover it. Whether it is MINOR or MAJOR under the
+  rule above is **pending the owner's ruling**; the cause is `crates/logweir/src/catalog/pin.rs`
+  (`judge`'s `Superseded` arm and `SUPERSEDED_CAUSE`), so either ruling is a change there.
 
 **Upgrade.** Nothing to migrate; readers of either major-1 format ignore the new field. An older
 runner that is still RUNNING when its Job is re-created, and has written nothing yet, is seen by
