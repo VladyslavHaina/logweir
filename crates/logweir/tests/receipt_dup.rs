@@ -987,6 +987,267 @@ fn an_archive_that_cannot_be_listed_fails_closed() {
     assert!(f.receipts().is_empty(), "nothing signed");
 }
 
+// ---------------------------------------------------------------------------
+// FX-7 fix round: the set check's two reads, answered on demand (review L-1
+// K1/K2, review L-3)
+// ---------------------------------------------------------------------------
+
+/// An archive whose two set-check reads answer what a row chooses, through the
+/// `ObjectAccess` seam `phase_run::refuse_an_existing_set` reads by. Keys are
+/// bucket-absolute, as the store's are; an error text is a REAL
+/// `object_store` message shape, so the classifier reads what it would read.
+#[derive(Default)]
+struct SetReads {
+    keys: Vec<String>,
+    list_error: Option<&'static str>,
+    get_error: Option<&'static str>,
+    asked: std::cell::RefCell<Vec<String>>,
+}
+
+impl logweir::check::store::ObjectAccess for SetReads {
+    fn get(&self, key: &str) -> Result<Vec<u8>, logweir_engine_oso::storage::StoreError> {
+        use logweir_engine_oso::storage::StoreError;
+        self.asked.borrow_mut().push(format!("get {key}"));
+        if let Some(text) = self.get_error {
+            return Err(StoreError::Io(format!("{key}: {text}")));
+        }
+        if self.keys.iter().any(|k| k == key) {
+            Ok(b"{}".to_vec())
+        } else {
+            Err(StoreError::NotFound(key.to_string()))
+        }
+    }
+
+    fn list_page(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+        max: usize,
+    ) -> Result<Vec<String>, logweir_engine_oso::storage::StoreError> {
+        self.asked.borrow_mut().push(format!("list {prefix}"));
+        if let Some(text) = self.list_error {
+            return Err(logweir_engine_oso::storage::StoreError::Io(format!(
+                "{prefix}: {text}"
+            )));
+        }
+        let mut keys: Vec<String> = self
+            .keys
+            .iter()
+            .filter(|k| k.starts_with(prefix))
+            .filter(|k| start_after.is_none_or(|after| k.as_str() > after))
+            .cloned()
+            .collect();
+        keys.sort();
+        keys.truncate(max);
+        Ok(keys)
+    }
+
+    fn put_create_only(
+        &self,
+        key: &str,
+        _bytes: &[u8],
+    ) -> Result<logweir_engine_oso::storage::PutOutcome, logweir_engine_oso::storage::StoreError>
+    {
+        panic!("the set check never writes, and was asked to put {key}")
+    }
+
+    fn qualify(&self, relative_key: &str) -> String {
+        relative_key.to_string()
+    }
+}
+
+/// An S3 archive whose objects live under `prefix`.
+fn s3_storage(prefix: &str) -> StorageUrl {
+    StorageUrl::S3 {
+        bucket: "lw-archive".to_string(),
+        prefix: prefix.to_string(),
+        region: Some("us-east-1".to_string()),
+        endpoint: None,
+        path_style: false,
+        allow_http: false,
+    }
+}
+
+const SET_SEGMENT: &str = "topics/orders/partition=0/segment-00000000000000000000.bin";
+
+/// MinIO's answer to a request that exhausted the client's retries, verbatim
+/// in shape (`RetryError` then `RequestError::Status`).
+const A_503: &str =
+    "Generic S3 error: Error performing GET http://minio:9000/lw-archive?list-type=2 \
+     in 180.2s, after 10 retries, max_retries: 10, retry_timeout: 180s  - Server returned \
+     non-2xx status code: 503 Service Unavailable: <Error><Code>SlowDown</Code></Error>";
+const A_403: &str =
+    "Generic S3 error: Error performing GET http://minio:9000/lw-archive?list-type=2 \
+     in 3ms - Server returned non-2xx status code: 403 Forbidden: <Error><Code>AccessDenied</Code>\
+     <Message>Access Denied.</Message></Error>";
+const UNREACHABLE: &str = "Generic S3 error: Error performing GET http://minio:9000/lw-archive in \
+     180.1s, after 10 retries - HTTP error: error sending request";
+const A_400: &str = "Generic S3 error: Error performing GET http://minio:9000/lw-archive in 2ms - \
+     Server returned non-2xx status code: 400 Bad Request: <Error><Code>InvalidRequest</Code></Error>";
+
+/// **Review L-1, K1: the set directory is the PLAN's prefix joined to the
+/// `backup_id`.** Every other in-process fixture is a filesystem store, whose
+/// prefix is `""`, so only the e2e row guarded this join. Here the set a
+/// claim-less older build wrote sits under `lw-archive/<id>/` on an S3-shaped
+/// archive: it is refused, and the reads asked for exactly that directory. The
+/// control: the same objects under ANOTHER prefix are not this set.
+#[test]
+fn a_set_under_the_plans_storage_prefix_is_found() {
+    let reads = SetReads {
+        keys: vec![format!("lw-archive/{EXECUTION_ID}/{SET_SEGMENT}")],
+        ..SetReads::default()
+    };
+    let err = logweir::backup::phase_run::refuse_an_existing_set(
+        EXECUTION_ID,
+        &s3_storage("lw-archive"),
+        &reads,
+    )
+    .expect_err("the set under the plan's prefix exists");
+    assert_eq!(err.exit_code(), ExitCode::Operational, "{err}");
+    assert_eq!(
+        err.failure_reason(),
+        Some(logweir::backup::phase_run::EXECUTION_ALREADY_CLAIMED)
+    );
+    assert!(
+        err.to_string()
+            .contains(&format!("lw-archive/{EXECUTION_ID}/{SET_SEGMENT}")),
+        "{err}"
+    );
+    assert_eq!(
+        reads.asked.borrow()[0],
+        format!("list lw-archive/{EXECUTION_ID}/topics/"),
+        "the LIST is of the plan's prefix, the execution, then `topics/`"
+    );
+
+    let elsewhere = SetReads {
+        keys: vec![format!("lw-archive/{EXECUTION_ID}/{SET_SEGMENT}")],
+        ..SetReads::default()
+    };
+    logweir::backup::phase_run::refuse_an_existing_set(
+        EXECUTION_ID,
+        &s3_storage("another-prefix"),
+        &elsewhere,
+    )
+    .expect("objects under another prefix are not this plan's set");
+    assert_eq!(
+        *elsewhere.asked.borrow(),
+        vec![
+            format!("list another-prefix/{EXECUTION_ID}/topics/"),
+            format!("get another-prefix/{EXECUTION_ID}/manifest.json"),
+        ]
+    );
+}
+
+/// **Review L-1, K2: a manifest GET that fails with anything but `NotFound`
+/// proves nothing** — the LIST answered "no segments", and a denied GET must
+/// not be read as "no manifest, so the set is new". Exit 4: a 403 is a grant to
+/// fix, not something a retry changes.
+#[test]
+fn a_manifest_read_that_is_denied_fails_closed_as_exit_4() {
+    let reads = SetReads {
+        get_error: Some(A_403),
+        ..SetReads::default()
+    };
+    let err =
+        logweir::backup::phase_run::refuse_an_existing_set(EXECUTION_ID, &s3_storage(""), &reads)
+            .expect_err("a denied manifest read is not a new set");
+    assert_eq!(err.exit_code(), ExitCode::SigningOrLock, "{err}");
+    assert_eq!(
+        err.failure_reason(),
+        Some(logweir::backup::phase_run::EXECUTION_CLAIM_UNPROVEN)
+    );
+    assert!(
+        err.to_string()
+            .contains(&format!("{EXECUTION_ID}/manifest.json could not be read")),
+        "{err}"
+    );
+    assert!(err.to_string().contains("s3:GetObject"), "{err}");
+}
+
+/// **Review L-3, option (a): WHICH failure decides the code.** A transient one
+/// (a 5xx the client already retried, an unreachable endpoint) is exit 1
+/// `Operational` — no failure-reason, retried by a schedule with `spec.retry`
+/// under a NEW execution id, which is a different set and therefore safe; a
+/// configuration one (a 403, an unclassified 400) stays exit 4
+/// `ExecutionClaimUnproven`, a decision `cadence::is_retryable` never retries.
+/// Both reads, both ways.
+#[test]
+fn a_transient_archive_failure_is_retryable_and_a_configuration_one_is_not() {
+    for (what, reads, transient) in [
+        (
+            "a LIST answered 503 after the client's retries",
+            SetReads {
+                list_error: Some(A_503),
+                ..SetReads::default()
+            },
+            true,
+        ),
+        (
+            "a LIST that could not reach the endpoint",
+            SetReads {
+                list_error: Some(UNREACHABLE),
+                ..SetReads::default()
+            },
+            true,
+        ),
+        (
+            "a manifest GET answered 503",
+            SetReads {
+                get_error: Some(A_503),
+                ..SetReads::default()
+            },
+            true,
+        ),
+        (
+            "a LIST answered 403",
+            SetReads {
+                list_error: Some(A_403),
+                ..SetReads::default()
+            },
+            false,
+        ),
+        (
+            "a LIST answered an unclassified 400",
+            SetReads {
+                list_error: Some(A_400),
+                ..SetReads::default()
+            },
+            false,
+        ),
+    ] {
+        let err = logweir::backup::phase_run::refuse_an_existing_set(
+            EXECUTION_ID,
+            &s3_storage("lw-archive"),
+            &reads,
+        )
+        .expect_err("a failed read never proves the set is new");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("could not be read to prove the backup set is new"),
+            "{what}: {rendered}"
+        );
+        assert!(
+            rendered.contains("new execution id"),
+            "{what}: the claim is taken, so the remedy names a NEW id: {rendered}"
+        );
+        if transient {
+            assert_eq!(err.exit_code(), ExitCode::Operational, "{what}: {rendered}");
+            assert_eq!(err.failure_reason(), None, "{what}");
+        } else {
+            assert_eq!(
+                err.exit_code(),
+                ExitCode::SigningOrLock,
+                "{what}: {rendered}"
+            );
+            assert_eq!(
+                err.failure_reason(),
+                Some(logweir::backup::phase_run::EXECUTION_CLAIM_UNPROVEN),
+                "{what}"
+            );
+        }
+    }
+}
+
 /// The interpreter that can run the auditor's verifier — the same resolution
 /// order every parity gate uses (`two_reader_parity.rs::python`).
 fn python() -> PathBuf {

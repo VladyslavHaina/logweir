@@ -6703,6 +6703,28 @@ fn a_byte_identical_copy_in_a_versioned_bucket_with_its_own_ids_is_available() {
     assert_noted(&entry);
 }
 
+/// **Review L-1, K4: a store that answers NO version is not, by itself, a
+/// copy.** Versioning SUSPENDED and the key written again: S3 then answers the
+/// current read with the literal `null` (no pinnable version), while the
+/// version the receipt pins is still in the bucket's history. The read by id
+/// finds it, so this is a rewrite HERE — `Conflict`, the superseded remedy —
+/// and not the unversioned copy's note. Only the by-id read tells the two
+/// apart.
+#[test]
+fn a_rewrite_after_versioning_was_suspended_is_a_conflict_not_a_copy() {
+    let (objects, _) = versioned_objects(
+        &pinned_catalog_receipt("v1"),
+        &[("v1", CATALOG_MANIFEST), ("null", CATALOG_MANIFEST)],
+    );
+    let entry = only_entry(objects);
+    assert_eq!(entry["availability"], "Conflict", "{entry}");
+    assert_eq!(
+        entry["remedy"],
+        logweir::catalog::pin::SUPERSEDED_REMEDY,
+        "{entry}"
+    );
+}
+
 /// **The control.** The same copy of a point that pins NOTHING: `Available`
 /// with exactly the table's remedy — the note is about a pin, not about copies
 /// — and no read by version at all.

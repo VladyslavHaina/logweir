@@ -206,14 +206,35 @@ pub fn claim_execution(
 /// An existing set is exit 1 [`EXECUTION_ALREADY_CLAIMED`] — the same state
 /// as a claim that already exists, because it is the same fact (an earlier
 /// run of this `backup_id` reached the engine) with a different witness, and
-/// the same remedy (a new execution id; D1 §4.6's retry is one). A read that
-/// FAILS proves nothing about the set, so it fails closed as exit 4
-/// [`EXECUTION_CLAIM_UNPROVEN`], exactly as a claim put the store refused
-/// does: no engine run, nothing signed.
+/// the same remedy (a new execution id; D1 §4.6's retry is one).
+///
+/// # A read that FAILS proves nothing about the set — and WHICH failure it was decides the code
+///
+/// Either way no engine run is started and nothing is signed. What differs is
+/// whether waiting can change the answer (FX-7 fix round, review L-3):
+///
+/// * **a transport failure, a timeout, or a 5xx/429 the object-store client
+///   already retried for its three minutes** — exit 1 `Operational`. It says
+///   nothing about the set or the configuration, the controller's retry policy
+///   (`weirkeeper::cadence::is_retryable`: exit 1 is "the run failed and wrote
+///   nothing; a broker or a network can be back") retries it when the schedule
+///   has `spec.retry`, and a retry is SAFE: it is a new execution id
+///   `<uid>-<slot>-r<k>`, a different set, with its own claim;
+/// * **anything else** — a 401/403 (the grant is missing), a wrong bucket,
+///   region or CA, or a failure this build cannot classify — exit 4
+///   [`EXECUTION_CLAIM_UNPROVEN`], exactly as a claim put the store refused: a
+///   decision no retry changes, which `is_retryable` does not retry.
+///
+/// Either message says the execution's claim is taken, so a MANUAL retry needs a
+/// new execution id too. `archive` is the [`ObjectAccess`] seam the check runner
+/// reads through — `Store` implements it — so a row can make either read fail
+/// with a chosen answer.
+///
+/// [`ObjectAccess`]: crate::check::store::ObjectAccess
 pub fn refuse_an_existing_set(
     backup_id: &str,
     storage: &logweir_core::engine::StorageUrl,
-    archive: &Store,
+    archive: &dyn crate::check::store::ObjectAccess,
 ) -> Result<(), BackupError> {
     use logweir_engine_oso::storage::StoreError;
     // The directory is taken from the PLAN's storage prefix — the prefix the
@@ -226,18 +247,31 @@ pub fn refuse_an_existing_set(
     } else {
         format!("{prefix}/{backup_id}/")
     };
-    let unproven = |what: &str, e: String| {
-        BackupError::Lock(format!(
-            "{EXECUTION_CLAIM_UNPROVEN}: execution `{backup_id}`: {what} could not be read to \
-             prove the backup set is new: {e}. An existing set would be rewritten by the engine, \
-             so NO engine run was started and nothing was signed. Grant `s3:ListBucket` and \
-             `s3:GetObject` on the archive prefix and retry."
-        ))
+    let unproven = |what: &str, e: &StoreError| {
+        if a_retry_can_change(e) {
+            BackupError::Operational(format!(
+                "execution `{backup_id}`: {what} could not be read to prove the backup set is \
+                 new: {e}. The failure is transient (a transport error, a timeout or a 5xx), so \
+                 NO engine run was started and nothing was signed, and the run ends exit 1: a \
+                 schedule with `spec.retry` retries it under a NEW execution id. This \
+                 execution's claim is taken, so a manual retry needs a new execution id too (a \
+                 new Backup, or a fresh `--backup-id-override`)."
+            ))
+        } else {
+            BackupError::Lock(format!(
+                "{EXECUTION_CLAIM_UNPROVEN}: execution `{backup_id}`: {what} could not be read \
+                 to prove the backup set is new: {e}. An existing set would be rewritten by the \
+                 engine, so NO engine run was started and nothing was signed. Grant \
+                 `s3:ListBucket` and `s3:GetObject` on the archive prefix (or fix the bucket, \
+                 region or CA the error names), then run again under a new execution id (a new \
+                 Backup): this execution's claim is taken."
+            ))
+        }
     };
     let segments = format!("{directory}topics/");
     let found = match archive.list_page(&segments, None, 1) {
-        Ok((keys, _)) => keys.into_iter().next(),
-        Err(e) => return Err(unproven(&segments, e.to_string())),
+        Ok(keys) => keys.into_iter().next(),
+        Err(e) => return Err(unproven(&segments, &e)),
     };
     let found = match found {
         Some(segment) => Some(segment),
@@ -246,7 +280,7 @@ pub fn refuse_an_existing_set(
             match archive.get(&manifest) {
                 Ok(_) => Some(manifest),
                 Err(StoreError::NotFound(_)) => None,
-                Err(e) => return Err(unproven(&manifest, e.to_string())),
+                Err(e) => return Err(unproven(&manifest, &e)),
             }
         }
     };
@@ -260,6 +294,30 @@ pub fn refuse_an_existing_set(
              receipt would no longer describe the archive, so NO engine run was started and \
              nothing was signed. Retry under a new execution id (a new Backup)."
         ))),
+    }
+}
+
+/// **FX-7 fix round (review L-3).** Whether a failed read of the archive in
+/// [`refuse_an_existing_set`] is one a retry under a new execution id can
+/// change: a transport failure (`EndpointUnreachable`), a `Timeout`, or a 5xx
+/// or 429 the object-store client has already retried — which the classifier
+/// leaves unclassified, so the status line `object_store` prints decides. A
+/// closed match with no wildcard: a class added to the vocabulary must be
+/// placed here on purpose, and "could not classify" stays a decision.
+fn a_retry_can_change(e: &logweir_engine_oso::storage::StoreError) -> bool {
+    use logweir_engine_oso::storage::StoreErrorClass as Class;
+    match Class::classify(e) {
+        Class::EndpointUnreachable | Class::Timeout => true,
+        Class::StoreErrorUnclassified => {
+            let text = e.to_string().to_ascii_lowercase();
+            text.contains("non-2xx status code: 5") || text.contains("429 too many requests")
+        }
+        Class::AccessDenied
+        | Class::InvalidCredentials
+        | Class::BucketNotFound
+        | Class::ObjectNotFound
+        | Class::RegionMismatch
+        | Class::TlsTrustFailed => false,
     }
 }
 

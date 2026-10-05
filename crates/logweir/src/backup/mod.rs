@@ -221,8 +221,10 @@ pub enum BackupError {
     /// the evidence store refused the create-only put, answered it without
     /// enforcing it, or accepted a second create of the same key
     /// (`phase_run::claim_execution`) — or (**FX-7**) the archive could not be
-    /// listed to prove the backup set is new
-    /// (`phase_run::refuse_an_existing_set`). **Exit 4**, GC11's "lock-proof failed,
+    /// read to prove the backup set is new, for a reason no retry changes (a
+    /// denial, a wrong bucket, region or CA, an unclassified failure; a
+    /// TRANSIENT failure there is `Operational`, exit 1, retried under a new
+    /// execution id: `phase_run::refuse_an_existing_set`). **Exit 4**, GC11's "lock-proof failed,
     /// nothing uploaded": no engine run was started, so there is no archive
     /// and no receipt, and a store that does not honour `If-None-Match: *` is
     /// a configuration no retry changes.
