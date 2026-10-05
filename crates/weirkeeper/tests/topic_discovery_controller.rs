@@ -3239,3 +3239,41 @@ async fn a_discoverys_own_topic_ceiling_reaches_its_plan() {
         "the runner relays at most the request's own ceiling"
     );
 }
+
+/// **FX-2's class sweep: `TopicDiscovery.spec.request.includeInternal` and
+/// `expectedTopics`**, what the runner lists and what it reports missing. Both
+/// reach only the plan the runner enforces, and every reconcile row left them
+/// at their defaults (`false`, absent), so a plan rendered without them passed
+/// them all.
+///
+/// MUTANTS: `include_internal: false` / `expected_topics: Vec::new()` where the
+/// plan is rendered, ignoring the request.
+#[tokio::test]
+async fn a_discoverys_own_topic_selection_reaches_its_plan() {
+    let (client, _recorder, bodies) = mock_client_recording_bodies(start_routes(vec![]));
+    let request = discovery(
+        json!({}),
+        json!({"includeInternal": true, "expectedTopics": ["orders", "payments"]}),
+    );
+    td::reconcile_discovery(&request, &context(client, None))
+        .await
+        .expect("the reconcile answers");
+    let cm = body_of(&bodies, "POST", "/configmaps");
+    let raw = cm["data"][cjob::CHECK_PLAN_KEY]
+        .as_str()
+        .expect("the plan document is a string in `data`")
+        .to_string();
+    let document: CheckPlan = serde_json::from_str(&raw).expect("the plan parses strictly");
+    let CheckRequest::TopicInventory(inventory) = &document.request else {
+        panic!("a discovery renders a topicInventory request, got {document:?}");
+    };
+    assert!(
+        inventory.include_internal,
+        "the runner lists internal topics because the request asked: {inventory:?}"
+    );
+    assert_eq!(
+        inventory.expected_topics,
+        vec!["orders".to_string(), "payments".to_string()],
+        "the runner reports against the request's own expected set"
+    );
+}

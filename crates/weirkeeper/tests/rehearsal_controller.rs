@@ -4655,3 +4655,57 @@ async fn bounds_deadline_seconds_reaches_the_child_restore_and_its_runner_job() 
         "the rehearsal's runner Job is bounded by the schedule's own deadline"
     );
 }
+
+/// **FX-2's class sweep: `bounds.maxPartitions`, `bounds.recordsPerPartition`
+/// and `target.replicationFactor`**, which the controller renders into the
+/// child `Restore`'s plan — the bytes the runner executes: `sample.max_partitions`,
+/// `sample.records_per_partition` and `target.default_replication_factor`.
+/// Every row used the fields' own defaults (200, 25, 1), and the one assertion
+/// on the rendered sample is `Some(200)`, so a plan rendered from the defaults
+/// instead of the sealed spec passed them all. Smaller bounds are inside the
+/// signed scope, which caps both from above.
+///
+/// MUTANTS: `Some(200)`, `25` or `1` where `render_plan` reads the spec.
+#[tokio::test]
+async fn the_rehearsal_plan_carries_the_schedules_own_sample_bounds_and_replication() {
+    let mut value = schedule_value(json!({}));
+    value["spec"]["bounds"]["maxPartitions"] = json!(50);
+    value["spec"]["bounds"]["recordsPerPartition"] = json!(10);
+    value["spec"]["target"]["replicationFactor"] = json!(3);
+    let schedule: RehearsalSchedule =
+        serde_json::from_value(value).expect("the fixture schedule parses");
+    let (table, _) = routes_authorizing(&schedule);
+    let (client, recorder, bodies) = mock_client_recording_bodies(table);
+    let outcome = rs::reconcile_schedule(&schedule, &context(client), now())
+        .await
+        .expect("the reconcile answers");
+    assert!(
+        matches!(&outcome.verdict, rs::Verdict::Fire(_)),
+        "{:?}",
+        outcome.verdict
+    );
+    assert_eq!(posted(&recorder, RESTORES_PATH), 1);
+    let child = bodies
+        .lock()
+        .expect("the body recorder is not poisoned")
+        .iter()
+        .find(|seen| is_post_to(&seen.method, &seen.uri, RESTORES_PATH))
+        .map(|seen| serde_json::from_str::<Value>(&seen.body).expect("the child parses"))
+        .expect("the child was posted");
+    let plan: logweir_core::spec::DrillSpec =
+        serde_yaml::from_str(child["spec"]["planBytes"].as_str().expect("a string"))
+            .expect("the frozen plan is a document the runner parses");
+    assert_eq!(
+        plan.sample.max_partitions,
+        Some(50),
+        "the runner's partition bound is the schedule's own"
+    );
+    assert_eq!(
+        plan.sample.records_per_partition, 10,
+        "the runner's per-partition sample is the schedule's own"
+    );
+    assert_eq!(
+        plan.target.default_replication_factor, 3,
+        "the scratch topics are created at the schedule's own replication factor"
+    );
+}

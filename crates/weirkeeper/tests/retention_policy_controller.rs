@@ -6488,3 +6488,65 @@ async fn the_enforcement_jobs_deadline_is_the_policys_own() {
         job["spec"]
     );
 }
+
+/// **FX-2's class sweep: `RetentionPolicy.spec.enforcement.maxDeletionsPerRun`
+/// and `maxObjectsPerRun`**, "the per-run ceiling on points" and "on object
+/// keys". The point ceiling caps the plan the controller evaluates, and BOTH
+/// reach the Job as the worker's own ceilings (`LOGWEIR_RETENTION_MAX_DELETIONS`,
+/// `LOGWEIR_RETENTION_MAX_OBJECTS`). Every enforcing row used the fields' own
+/// defaults (50 and 20,000) and the cap rows call `plan::evaluate` directly, so
+/// a reconcile that ignored either field passed them all.
+///
+/// MUTANTS: `.map_or(50, |_| 50)` where the evaluation reads the point ceiling,
+/// or where the Job's env does; `.map_or(20_000, |_| 20_000)` for the object
+/// ceiling.
+#[tokio::test]
+async fn the_enforcement_jobs_per_run_ceilings_are_the_policys_own() {
+    let mut policy_block = enforcing(None);
+    policy_block["enforcement"]["maxDeletionsPerRun"] = json!(2);
+    policy_block["enforcement"]["maxObjectsPerRun"] = json!(12345);
+    let f = fixture(happy_routes(&six_points()));
+    run(&f, &policy(policy_block.clone(), json!({}))).await;
+    // keepLast 2 and minUsablePoints 3 over six points make three candidates
+    // (the Report row above); the policy's own ceiling of two caps the plan.
+    assert_eq!(
+        f.status()["lastEvaluation"]["candidateCount"],
+        2,
+        "{}",
+        f.status()
+    );
+    let digest = f.status()["lastEvaluation"]["planSha256"]
+        .as_str()
+        .expect("a digest")
+        .to_string();
+
+    let mut routes = happy_routes(&six_points());
+    routes.push(plan_config_map_route(&digest));
+    routes.push(route("POST", "/configmaps", "{}".to_string()));
+    routes.extend(absent_job_routes(&digest, now()));
+    routes.push(route("POST", "/jobs", "{}".to_string()));
+    let g = fixture(routes);
+    policy_block["enforcement"]["approvedPlanSha256"] = json!(digest);
+    run(&g, &policy(policy_block, json!({}))).await;
+
+    let job = g.posted("/jobs").remove(0);
+    let env = job["spec"]["template"]["spec"]["containers"][0]["env"]
+        .as_array()
+        .expect("the worker's env")
+        .clone();
+    let literal = |name: &str| {
+        env.iter()
+            .find(|e| e["name"] == name)
+            .map(|e| e["value"].clone())
+    };
+    assert_eq!(
+        literal(ctrl::env::MAX_DELETIONS),
+        Some(json!("2")),
+        "the worker's point ceiling is the policy's own: {env:?}"
+    );
+    assert_eq!(
+        literal(ctrl::env::MAX_OBJECTS),
+        Some(json!("12345")),
+        "the worker's object ceiling is the policy's own: {env:?}"
+    );
+}

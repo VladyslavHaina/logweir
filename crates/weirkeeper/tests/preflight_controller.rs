@@ -8236,3 +8236,56 @@ async fn a_preflights_own_budget_reaches_its_plan_and_its_job_deadline() {
         job["spec"]
     );
 }
+
+/// **FX-2's class sweep: `Preflight.spec.request.skipChecks`**, "checks to leave
+/// out", which the runner applies to its own table: it reaches the
+/// `operationReadiness` (and `restorePreflight`) plan. No reconcile row ever set
+/// it — the field's default is absent — so a reconcile that dropped the list
+/// passed them all, and the runner would answer a check the requester asked to
+/// skip.
+///
+/// MUTANT: `skip: BTreeSet::new()` where the reconcile reads the request.
+#[tokio::test]
+async fn a_preflights_own_skip_list_reaches_its_plan() {
+    let job = job_name(CheckPlanKind::OperationReadiness);
+    let mut routes = referent_routes(None, vec![]);
+    routes.push(not_found("GET", leak(job.clone())));
+    routes.push(route("GET", "/apis/batch/v1/jobs", list_of(vec![])));
+    routes.push(route("PATCH", "/pf-1/status", echo("Preflight", "pf-1")));
+    routes.push(route("POST", "/configmaps", echo("ConfigMap", "plan")));
+    routes.push(route("POST", "/jobs", echo("Job", &job)));
+    let (client, _recorder, bodies) = mock_client_recording_bodies(routes);
+    let ctx = context(client);
+    let cache = weirkeeper::check::policy::PolicyCache::new();
+    let mut request = backup_request();
+    request["skipChecks"] = json!(["connection.topicsReadable"]);
+    pf::reconcile_preflight(&preflight(request), &ctx, &cache, now())
+        .await
+        .expect("the reconcile completes");
+    let bodies = bodies.lock().expect("bodies");
+    let plan_cm: Value = bodies
+        .iter()
+        .find(|b| b.method == "POST" && b.uri.contains("/configmaps"))
+        .map(|b| serde_json::from_str(&b.body).expect("json"))
+        .expect("the plan ConfigMap was posted");
+    let plan: logweir_core::check_contract::CheckPlan = plan_cm["data"]
+        .as_object()
+        .expect("data")
+        .values()
+        .find_map(|v| v.as_str().and_then(|s| serde_json::from_str(s).ok()))
+        .expect("the check plan document");
+    let CheckRequest::OperationReadiness(readiness) = &plan.request else {
+        panic!("a Backup preflight renders an operationReadiness request, got {plan:?}");
+    };
+    assert_eq!(
+        readiness.skip_checks,
+        vec![CheckId::ConnectionTopicsReadable],
+        "the runner leaves out exactly what the request asked it to"
+    );
+    assert!(
+        bodies
+            .iter()
+            .any(|b| b.method == "POST" && b.uri.contains("/jobs")),
+        "the Job was created from that plan"
+    );
+}
