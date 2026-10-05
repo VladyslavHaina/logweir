@@ -174,10 +174,19 @@ always a destination with no `evidenceRead` grant.
    at replication factor 1, restored at 3, takes three times the storage it
    took there, with the replication traffic on top; a factor below the
    source's keeps fewer copies than the source had.
-3. The readiness check must pass before *Create the Restore* is enabled: every
-   blocking row `ready`, except the approval row, which is `skipped` until the
-   Restore exists ([kubernetes.md](kubernetes.md) §21.7; [ui/README.md](../ui/README.md),
-   *The readiness check holds the submit*). A point with no saved destination —
+3. Run the readiness check in step 5 before *Create the Restore*. Once a check
+   has run for the plan, Create is held until it reads ready: every blocking
+   row `ready`, except the approval row, which is `skipped` until the Restore
+   exists ([kubernetes.md](kubernetes.md) §21.7; [ui/README.md](../ui/README.md),
+   *The readiness check holds the submit*). The check is advisory, so with no
+   check at all Create stays enabled, beside a warning, and nothing has
+   validated the replication factor against the target's brokers: the page
+   refuses a factor above the broker count only on a fresh discovery's count. A
+   factor the brokers cannot hold is then refused by the broker when the runner
+   creates the topics, after the approval and phases 0–5: the Restore ends
+   `Failed` with `exitCode 1` / `operational`, no signed result and nothing
+   restored, and the runner's log (`kubectl logs job/<Restore name>` in its
+   namespace) names `InvalidReplicationFactor`. A point with no saved destination —
    every point `v0.1.5` wrote — is checked the same way: the check reads its
    inline archive with the Secret its Backup named, as the restore will. Its
    evidence bucket starts as the archive's own; keep it there, because the

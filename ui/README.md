@@ -1120,8 +1120,8 @@ broker, and nothing on screen said that was a choice. Step 4 now carries a
 can read, and both step 4 and the review step say where the value came from.
 
 **One value, for every topic the plan creates.** The runner's grammar has one
-`target.default_replication_factor`, and phase 0 creates every mapped topic
-with it. A factor per topic would extend the signed plan's grammar, which is
+`target.default_replication_factor`, and the runner creates every mapped topic
+with it, after phase 5 and just before the restore (`create_target_topics`). A factor per topic would extend the signed plan's grammar, which is
 the runner's versioned contract; this page does not. When the source's factors
 are known and differ across the selected topics, the default is the
 **largest**: no topic comes back on fewer replicas than its source had unless
@@ -1236,8 +1236,17 @@ at the plan's factor) stays the check against the target as it is when the
 check runs, and Create stays refused while it says `ReplicationFactorExceedsBrokers`
 (*The readiness check holds the submit*). The page does not refuse a factor
 below the broker count -- fewer replicas is the operator's choice, and the
-review step says what was chosen -- and with no usable count it refuses nothing
-the readiness check would catch.
+review step says what was chosen.
+
+**With no fresh count and no readiness check, nothing checks the factor before
+the run** (FX-5 review L4). The check is advisory, so Create stays enabled
+without one, and step 6's warning beside it (`READINESS_NOT_RUN_WARNING`) names
+the factor among what nothing has looked at. A factor the target's brokers
+cannot hold is then refused by the broker when the runner creates the topics,
+after the approval and phases 0-5: the Restore ends `Failed` with `exitCode 1` /
+`operational`, no signed result and nothing restored, and the runner's log
+names `InvalidReplicationFactor`. Before FX-5 every plan asked for 1, which any
+broker holds, so this path could not fail this way.
 
 **Upgrade and rollback.** A Restore created before this keeps its plan bytes
 (`Restore.spec` is immutable), and its factor is the 1 that plan carries; a

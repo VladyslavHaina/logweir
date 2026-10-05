@@ -2516,8 +2516,11 @@ export const PARTITION_COUNT_NOT_PUBLISHED =
 
 /** The replication factor every created topic is asked for, from the PLAN's
  *  own field: `target.default_replication_factor` in the runner's grammar.
- *  ONE VALUE FOR EVERY TOPIC: the runner's phase 0 creates each mapped topic
- *  with it (`create_target_topics`). `null` when the field is not a number. */
+ *  ONE VALUE FOR EVERY TOPIC: the runner creates each mapped topic with it,
+ *  after phase 5 and just before the restore (`create_target_topics`), so a
+ *  factor the brokers cannot hold fails an approved run there, exit 1, unless
+ *  this page or the readiness check refused it first. `null` when the field is
+ *  not a number. */
 export function replicationFactorOf(state) {
   const rf = (((state || {}).fields || {}).target || {}).replicationFactor;
   return typeof rf === "number" ? rf : null;
@@ -3420,10 +3423,12 @@ export { isDraftApprovalRow };
  *  clicking: nothing has looked for an existing target topic yet. */
 export const READINESS_NOT_RUN_WARNING =
   "No readiness check has run for this plan, so nothing has looked for an existing target topic " +
-  "with a mapped name, for a reachable target, or for an approver key that outlives the " +
-  "deadline. The restore may still be created: the runner's phase 0 refuses a mapped topic that " +
-  "already exists and nothing is overwritten either way. Run the check in step 5 to find out " +
-  "before an approver signs rather than after.";
+  "with a mapped name, for a reachable target, for an approver key that outlives the deadline, " +
+  "or at whether the target's brokers can hold the replication factor. The restore may still " +
+  "be created: the runner's phase 0 refuses a mapped topic that already exists and nothing is " +
+  "overwritten either way, and a factor the brokers cannot hold fails the approved run when it " +
+  "creates the topics, with nothing restored. Run the check in step 5 to find out before an " +
+  "approver signs rather than after.";
 
 /** What a restore copies, said where the plan is reviewed, above Create (FX-6).
  *

@@ -604,6 +604,36 @@ test("fx5_the_readiness_checks_own_refusal_still_holds_create", async () => {
     "id=\"create-restore\" class=\"primary\" disabled"), "Create is disabled");
 });
 
+test("fx5_with_no_readiness_check_create_stays_enabled_and_the_page_and_quickstart_say_so",
+  async () => {
+    // FX-5 review L4. The readiness check is advisory: with none, Create is
+    // enabled. Before FX-5 every plan asked for 1, which any broker holds; now a
+    // factor above the target's brokers can reach the runner, which fails the
+    // approved run when it creates the topics (after phase 5). The warning
+    // beside Create names the factor, and the quickstart no longer says the
+    // check must pass before Create.
+    const state = wizardState();
+    setReplicationFactor(state, "3");
+    const prepared = await preparePlan(state);
+    assert.equal(readinessRefusal(state, prepared), null, "no check, no refusal: it is advisory");
+    const step6 = renderPlanStep(prepared, state);
+    assert.ok(step6.includes("id=\"create-restore\" class=\"primary\">"),
+      "Create is enabled with no check: " + byId(step6, "create-restore"));
+    const warning = visible(byId(step6, "readiness-not-run") || "");
+    assert.match(warning, /or at whether the target's brokers can hold the replication factor\./,
+      "NEGATIVE CONTROL: the pre-FX-5 warning, which names no factor, fails this: " + warning);
+    assert.match(warning,
+      /a factor the brokers cannot hold fails the approved run when it creates the topics, with nothing restored\./);
+    const quickstart = readFileSync(UI_DIR + "../docs/quickstart.md", "utf8").replace(/\s+/g, " ");
+    assert.ok(!quickstart.includes("The readiness check must pass before *Create the Restore* is " +
+      "enabled"), "NEGATIVE CONTROL: the old step 3, which says the check gates Create, fails this");
+    for (const said of ["with no check at all Create stays enabled",
+      "`Failed` with `exitCode 1` / `operational`, no signed result and nothing restored",
+      "names `InvalidReplicationFactor`"]) {
+      assert.ok(quickstart.includes(said), "the quickstart's step 3 says: " + said);
+    }
+  });
+
 // ------------------------------------------------------- the draft
 
 test("fx5_a_factor_the_operator_set_survives_the_draft_and_a_default_does_not", () => {
