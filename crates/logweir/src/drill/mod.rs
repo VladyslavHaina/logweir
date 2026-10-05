@@ -3843,6 +3843,44 @@ mod tests {
     /// `e2e/tests/config_coverage.rs::capture_coverage_reaches_the_receipt_the_catalog_and_drill_parity`,
     /// whose point-bound restore reads `captureDenied`/`notCaptured`, never
     /// `unknown`.
+    /// **FX-4 fix round: the glue's FIRST half (mutant X6).** The test below
+    /// guards `execute_for_reporting` → `context` → `Ctx`; this one guards
+    /// where the coverage enters the run. `check_v2_bindings` must keep what
+    /// `binding::verify_point_binding` returned and hand it out in
+    /// `V2Bindings`, and nothing may reset it in between. X6 (the assignment
+    /// dropped, so every bound run reads UNKNOWN) survived every unit and
+    /// integration suite of `logweir` (measured 2026-10-05); like the test
+    /// below, this reads the source, and the same live row is its
+    /// behavioural twin.
+    #[test]
+    fn the_verified_binding_hands_its_coverage_to_the_run() {
+        let src = include_str!("mod.rs");
+        let body = fn_body(src, "check_v2_bindings");
+        let after_verify = body
+            .split("binding::verify_point_binding(")
+            .nth(1)
+            .expect("check_v2_bindings verifies the point binding");
+        assert!(
+            after_verify.contains("source_config_coverage = verified.config_coverage;"),
+            "check_v2_bindings must keep the verified binding's coverage: {after_verify}"
+        );
+        assert_eq!(
+            body.matches("source_config_coverage = ").count(),
+            2,
+            "exactly the UNKNOWN default and the verified assignment; nothing may reset it"
+        );
+        assert!(
+            body.contains("let mut source_config_coverage = SourceConfigCoverage::unknown();"),
+            "an unbound plan reads UNKNOWN"
+        );
+        assert!(
+            body.contains(
+                "Ok(V2Bindings {\n        standing_approved,\n        source_config_coverage,\n    })"
+            ),
+            "check_v2_bindings must return the coverage it kept"
+        );
+    }
+
     #[test]
     fn the_run_context_is_built_with_the_verified_coverage() {
         let src = include_str!("mod.rs");
