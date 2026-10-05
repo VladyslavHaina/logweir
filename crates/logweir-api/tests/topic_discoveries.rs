@@ -588,10 +588,15 @@ async fn a_discovery_publishes_the_broker_count_its_result_recorded() {
     );
     assert_eq!(v["latestAttempt"]["brokerCount"], expected, "{v}");
     let one = app
-        .get(&format!("/api/v1/namespaces/{NS_A}/topic-discoveries/td-counted"))
+        .get(&format!(
+            "/api/v1/namespaces/{NS_A}/topic-discoveries/td-counted"
+        ))
         .await
         .json();
-    assert_eq!(one["item"]["brokerCount"], expected, "the single read too: {one}");
+    assert_eq!(
+        one["item"]["brokerCount"], expected,
+        "the single read too: {one}"
+    );
 
     // EVERY FIELD THE CONSOLE'S FIXTURE CARRIES IS ONE THIS PROJECTION SENDS.
     let sent = v["lastSuccessful"].as_object().unwrap();
