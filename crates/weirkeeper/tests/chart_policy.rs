@@ -866,7 +866,7 @@ const FOLLOWED: &[Followed] = &[
         )),
         proof: Some((
             "configured_values.rs",
-            "the_installation_policys_custom_ca_switch_reaches_backup_admission",
+            "the_installation_policys_custom_ca_switch_reaches_backup_and_restore_admission",
         )),
     },
     Followed {

@@ -1599,6 +1599,11 @@ fn release_note_items(notes: &str) -> Vec<(u32, String)> {
 /// rounds, 17–20 from the PoC's in-place upgrades: P9, P11, P12, P14). The
 /// notes as they stood at `4e58d330`, with sixteen items, fail the twenty pin,
 /// and so does deleting any one of items 17–20 (release-docs-final, 2026-09-25).
+///
+/// Then to twenty-one: item 21 is FX-10's withdrawal of the two inert policy
+/// values. Its token is the install-notes warning an upgrade that still carries
+/// one prints, so an item 21 that stops telling an operator what they will see
+/// fails here (FX-10, 2026-10-05).
 #[test]
 fn the_release_notes_carry_every_owed_operator_action() {
     let notes = read("docs/release-notes.md");
@@ -1624,9 +1629,9 @@ fn the_release_notes_carry_every_owed_operator_action() {
     let numbers: Vec<u32> = items.iter().map(|(n, _)| *n).collect();
     assert_eq!(
         numbers,
-        (1..=20).collect::<Vec<u32>>(),
-        "the release entry must carry exactly twenty operator-facing changes, `#### 1.` to \
-         `#### 20.` in order; found {numbers:?}"
+        (1..=21).collect::<Vec<u32>>(),
+        "the release entry must carry exactly twenty-one operator-facing changes, `#### 1.` \
+         to `#### 21.` in order; found {numbers:?}"
     );
 
     for ((number, body), (item, token)) in items.iter().zip([
@@ -1660,6 +1665,11 @@ fn the_release_notes_carry_every_owed_operator_action() {
         ("one catalog per destination", "DuplicateCatalog"),
         ("a failed controller read is read again", "retryAfter"),
         ("a readiness replay names its expiry", "staleBasis"),
+        // FX-10 (2026-10-05): two inert policy values withdrawn; the notes say so.
+        (
+            "two inert policy values withdrawn",
+            "WITHDRAWN VALUES ARE SET AND IGNORED",
+        ),
     ]) {
         assert!(
             body.contains(token),

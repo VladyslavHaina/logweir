@@ -16,8 +16,8 @@
 //! addressing from its own environment — the `Preflight`, `Backup` and
 //! manual-run paths take no injectable reference — and `std::env::set_var` is
 //! process-global, so in a shared binary one row's values would leak into every
-//! row running beside it. Here EVERY row calls [`tuned_environment`] first, and
-//! that sets the SAME values once: the literal `env` of the controller
+//! row running beside it. Here every row that reads the environment calls
+//! [`tuned_environment`] first, and that sets the SAME values once: the literal `env` of the controller
 //! Deployment the chart renders from `examples/tuned.values.yaml`
 //! (`charts/logweir/rendered/tuned.yaml`), plus the release namespace the
 //! downward API would project. So a value is followed from the values file,
@@ -25,10 +25,11 @@
 //! file invented.
 //!
 //! Each behavioural row also runs a CONTROL: the same objects with the chart's
-//! DEFAULT policy document (`rendered/default.yaml`) served instead, under a
-//! different `now` so no process-wide policy cache carries the tuned document
-//! across. A reader that ignored the loaded document fails the tuned half; a
-//! row whose premise was wrong fails the control.
+//! DEFAULT policy document (`rendered/default.yaml`) served instead — under a
+//! different `now` wherever the reader goes through a process-wide policy cache,
+//! so the cache cannot carry the tuned document across. A reader that ignored
+//! the loaded document fails the tuned half; a row whose premise was wrong fails
+//! the control.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -44,10 +45,12 @@ use weirkeeper::controllers::backup::{
     unobserved_archive, with_status_patch, DestinationAdmission,
 };
 use weirkeeper::controllers::preflight as pf;
+use weirkeeper::controllers::restore::admit_restore_destinations;
 use weirkeeper::controllers::Context;
 use weirkeeper::crds::backup::Backup;
 use weirkeeper::crds::kafka_cluster::KafkaCluster;
 use weirkeeper::crds::preflight::Preflight;
+use weirkeeper::crds::restore::Restore;
 use weirkeeper::job::RunnerImage;
 use weirkeeper::run_pool::{Pool, PoolKind, Reservations};
 use weirkeeper::testing::{mock_client_recording_bodies, Route, SeenBody};
@@ -660,6 +663,11 @@ fn destination_with_ca() -> Value {
                     "name": "lw-a-writer",
                     "accessKeyIdKey": "access-key-id",
                     "secretAccessKeyKey": "secret-access-key"
+                }},
+                "archiveRead": {"mode": "SecretKeys", "secret": {
+                    "name": "lw-a-reader",
+                    "accessKeyIdKey": "access-key-id",
+                    "secretAccessKeyKey": "secret-access-key"
                 }}
             }
         },
@@ -683,8 +691,8 @@ fn destination_backed_backup() -> Backup {
     serde_json::from_value(value).expect("a Backup")
 }
 
-async fn admit_with(document: String, now: DateTime<Utc>) -> Result<DestinationAdmission, String> {
-    let (client, _r, _b) = mock_client_recording_bodies(vec![
+fn ca_routes(document: String) -> Vec<Route> {
+    vec![
         Route {
             method: "GET",
             path_suffix: "/backupdestinations/dest-a",
@@ -703,33 +711,73 @@ async fn admit_with(document: String, now: DateTime<Utc>) -> Result<DestinationA
             .to_string(),
         },
         policy_route(document),
-    ]);
+    ]
+}
+
+async fn admit_with(document: String, now: DateTime<Utc>) -> Result<DestinationAdmission, String> {
+    let (client, _r, _b) = mock_client_recording_bodies(ca_routes(document));
     admit_destination(&destination_backed_backup(), &client, NS, now)
         .await
         .map_err(|e| e.to_string())
 }
 
-/// **FX-10: `engine.allowUnverifiedCustomCa` reaches backup admission.**
+/// A `Restore` reading from, and writing its evidence to, the CA-bundled
+/// destination. Its `planBytes` are not a plan: the CA gate runs BEFORE the
+/// plan is read (check 6), so a pass that clears the gate is refused at the
+/// plan instead — which is exactly what tells the two halves apart.
+fn destination_backed_restore() -> Restore {
+    serde_json::from_value(json!({
+        "apiVersion": "logweir.dev/v1alpha1", "kind": "Restore",
+        "metadata": {"name": "restore-ca", "namespace": NS,
+                     "uid": "cafe0002-0000-4000-8000-0000000000a2",
+                     "generation": 1, "resourceVersion": "1"},
+        "spec": {
+            "planBytes": "not a restore plan",
+            "approvalRef": {"name": "a1"},
+            "sourceArchive": {"url": "logweir-destination://dest-a"},
+            "sourceDestinationRef": {"name": "dest-a"},
+            "evidenceDestinationRef": {"name": "dest-a"},
+            "backupSetRef": "drill-demo",
+            "pointInTime": "2026-09-07T14:05:00Z",
+            "target": {"clusterRef": {"name": "scratch"}, "mode": "scratch",
+                       "topicNaming": {"prefix": "drill-"}},
+            "deadlineSeconds": 1800
+        }
+    }))
+    .expect("the fixture is a Restore")
+}
+
+async fn admit_restore_with(document: String, now: DateTime<Utc>) -> Result<(), String> {
+    let (client, _r, _b) = mock_client_recording_bodies(ca_routes(document));
+    admit_restore_destinations(&destination_backed_restore(), &client, NS, now)
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// **FX-10: `engine.allowUnverifiedCustomCa` reaches backup AND restore
+/// admission.**
 ///
 /// A destination that declares a CA bundle is refused
 /// (`CaBundleUnsupportedByEngine`) for an engine-driven run unless the
-/// installation opts in. The chart's tuned document opts in, and the same
-/// destination is RESOLVED. CONTROL: served the default document, it is
-/// refused. `backup_controller.rs`'s
-/// `a_ca_bundle_is_refused_for_an_engine_driven_run` drives the predicate on
-/// a hand-built policy; this row drives the loaded one.
+/// installation opts in. The chart's tuned document opts in:
 ///
-/// MUTANT: `engine_custom_ca_allowed(&Policy::defaults())` in
-/// `admit_destination`.
+/// * the BACKUP gate (`admit_destination`) resolves the destination;
+/// * the RESTORE gate (`admit_restore_destinations`) lets it past the CA check
+///   to check 6, where this fixture's non-plan is refused `PlanUnparseable`.
+///
+/// CONTROL: served the default document, both refuse at the gate with
+/// `CaBundleUnsupportedByEngine`. `backup_controller.rs`'s
+/// `a_ca_bundle_is_refused_for_an_engine_driven_run` drives the predicate on a
+/// hand-built policy; this row drives the policy each gate LOADED.
+///
+/// MUTANTS: `engine_custom_ca_allowed(&Policy::defaults())` in
+/// `admit_destination` (S14) or in `admit_restore_destinations` (S14b).
 #[tokio::test]
-async fn the_installation_policys_custom_ca_switch_reaches_backup_admission() {
+async fn the_installation_policys_custom_ca_switch_reaches_backup_and_restore_admission() {
     tuned_environment();
-    match admit_with(
-        policy_json("tuned"),
-        Utc.with_ymd_and_hms(2026, 11, 9, 3, 17, 0).unwrap(),
-    )
-    .await
-    {
+    let at = |h: u32| Utc.with_ymd_and_hms(2026, 11, 9, h, 17, 0).unwrap();
+    match admit_with(policy_json("tuned"), at(3)).await {
         Ok(DestinationAdmission::Resolved(resolved)) => {
             assert!(
                 resolved.archive.ca_bundle.is_some(),
@@ -738,14 +786,22 @@ async fn the_installation_policys_custom_ca_switch_reaches_backup_admission() {
         }
         other => panic!("the tuned installation opted in, so the destination resolves: {other:?}"),
     }
-    match admit_with(
-        policy_json("default"),
-        Utc.with_ymd_and_hms(2026, 11, 9, 4, 17, 0).unwrap(),
-    )
-    .await
-    {
+    match admit_with(policy_json("default"), at(4)).await {
         Err(e) => assert!(e.contains("CaBundleUnsupportedByEngine"), "CONTROL: {e}"),
         Ok(other) => panic!("CONTROL: the default installation refuses it, got {other:?}"),
+    }
+    // THE RESTORE GATE loads its own policy (a fresh cache each pass).
+    match admit_restore_with(policy_json("tuned"), at(5)).await {
+        Err(e) => assert!(
+            e.contains("PlanUnparseable") && !e.contains("CaBundleUnsupportedByEngine"),
+            "the tuned installation opted in, so the restore passes the CA gate and stops at \
+             the plan: {e}"
+        ),
+        Ok(()) => panic!("this fixture's planBytes are not a plan; check 6 must refuse it"),
+    }
+    match admit_restore_with(policy_json("default"), at(6)).await {
+        Err(e) => assert!(e.contains("CaBundleUnsupportedByEngine"), "CONTROL: {e}"),
+        Ok(()) => panic!("CONTROL: the default installation refuses it at the gate"),
     }
 }
 
