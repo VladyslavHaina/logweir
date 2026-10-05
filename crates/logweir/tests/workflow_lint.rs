@@ -216,11 +216,53 @@ fn the_chart_is_published_beside_the_images_it_names() {
         ci["jobs"]["publish"]["with"]["tag"].as_str(),
         Some("sha-${{ github.sha }}")
     );
+    // A RELEASE publishes the chart package it LISTS (PROD-14.0): packaged once
+    // by `release.sh assemble`, pinned by digest, and pushed as those bytes by
+    // `ci-images.sh chart-push` after the version tags exist, with the same
+    // credentials and the same commit-pinned Helm as the main publication.
     let release = workflow("release.yml");
-    assert_eq!(
-        release["jobs"]["images"]["with"]["tag"].as_str(),
-        Some("${{ github.ref_name }}")
+    let publish = &release["jobs"]["publish-images"];
+    let steps = publish["steps"].as_sequence().unwrap();
+    let position = |pred: &dyn Fn(&Value) -> bool, what: &str| {
+        steps
+            .iter()
+            .position(pred)
+            .unwrap_or_else(|| panic!("release.yml publish-images has no {what}"))
+    };
+    let login = position(&|s| s["uses"] == "docker/login-action@v3", "docker login");
+    let promote = position(
+        &|s| s["run"] == "bash scripts/release.sh promote release-assets/release-in/images.json",
+        "promotion of the resolved publication",
     );
+    let helm = position(
+        &|s| {
+            s["uses"].as_str().is_some_and(|u| {
+                u.strip_prefix("azure/setup-helm@").is_some_and(|sha| {
+                    sha.len() == 40 && sha.chars().all(|c| c.is_ascii_hexdigit())
+                })
+            })
+        },
+        "Helm setup pinned by a 40-hex commit",
+    );
+    let push = position(
+        &|s| {
+            s["run"]
+                .as_str()
+                .is_some_and(|r| r.starts_with("bash scripts/ci-images.sh chart-push "))
+        },
+        "the chart push",
+    );
+    assert!(
+        login < promote && promote < push && helm < push,
+        "the release's chart is pushed after the version tags it names exist"
+    );
+    assert_eq!(steps[helm]["with"]["version"].as_str(), Some("v4.0.1"));
+    for (name, value) in [
+        ("DOCKERHUB_USERNAME", "${{ secrets.DOCKERHUB_USERNAME }}"),
+        ("DOCKERHUB_TOKEN", "${{ secrets.DOCKERHUB_TOKEN }}"),
+    ] {
+        assert_eq!(steps[push]["env"][name].as_str(), Some(value), "no new secret");
+    }
 
     let script = std::fs::read_to_string(root().join("scripts/ci-images.sh")).unwrap();
     for needle in [
@@ -239,6 +281,13 @@ fn the_chart_is_published_beside_the_images_it_names() {
         "DOCKER_CONFIG=\"$anonymous_docker\" docker buildx imagetools inspect",
         "DOCKER_CONFIG=\"$anonymous_docker\" HELM_REGISTRY_CONFIG=\"$dir/anonymous/config.json\"",
         "HELM_REGISTRY_CONFIG=\"$dir/login/config.json\" helm push",
+        // PROD-14.0: a release chart pins digests, and a published release
+        // version is never replaced.
+        "a release chart ($TAG) pins its four images by digest",
+        "  chart-push)",
+        "chart_publish \"$package\" \"$version\" replace",
+        "chart_publish \"$package\" \"$version\" immutable",
+        "a release version is never replaced",
     ] {
         assert!(
             script.contains(needle),
@@ -265,21 +314,35 @@ fn the_chart_is_published_beside_the_images_it_names() {
 }
 
 #[test]
-fn releases_reuse_checks_and_test_packaged_binary_before_images() {
+fn releases_reuse_checks_and_test_packaged_binary_before_publishing() {
     let release = workflow("release.yml");
     let jobs = &release["jobs"];
     assert_eq!(jobs["tests"]["uses"], "./.github/workflows/ci.yml");
+    assert!(jobs["tests"]["secrets"].is_null(), "the test gate gets no secret");
     assert_eq!(
         jobs["drill"]["uses"],
         "./.github/workflows/release-drill.yml"
     );
-    assert!(dependencies(&jobs["images"]).contains(&"drill"));
-    assert_eq!(
-        jobs["images"]["with"]["promote_latest"].as_bool(),
-        Some(false)
-    );
-    assert!(dependencies(&jobs["publish"]).contains(&"images"));
-    assert_eq!(jobs["publish"]["permissions"]["contents"], "write");
+    assert_eq!(dependencies(&jobs["drill"]), ["build"]);
+    for need in ["build", "drill", "images"] {
+        assert!(
+            dependencies(&jobs["assemble"]).contains(&need),
+            "assemble needs {need}"
+        );
+    }
+    for need in ["tests", "assemble"] {
+        assert!(
+            dependencies(&jobs["publish-images"]).contains(&need),
+            "publish-images needs {need}"
+        );
+    }
+    for need in ["tests", "assemble", "publish-images"] {
+        assert!(
+            dependencies(&jobs["github-release"]).contains(&need),
+            "github-release needs {need}"
+        );
+    }
+    assert_eq!(jobs["github-release"]["permissions"]["contents"], "write");
     let drill = workflow("release-drill.yml");
     assert!(
         drill["on"]["release"].is_null(),
@@ -293,35 +356,172 @@ fn releases_reuse_checks_and_test_packaged_binary_before_images() {
     );
 }
 
+/// PROD-14.0: A DISPATCH IS A DRY RUN. Every job that can write outside the
+/// run — a registry credential, `contents: write`, a release, a tag push, a
+/// chart push — carries the one gate that admits a pushed `v*` tag and nothing
+/// else, so a dispatched run ends at `assemble` with workflow artifacts only.
 #[test]
-fn release_archives_are_checked_for_an_engine_before_upload() {
+fn a_dispatch_is_a_dry_run_that_reaches_no_credential() {
+    const GATE: &str = "github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') \
+                        && needs.validate.outputs.publish == 'true'";
     let release = workflow("release.yml");
-    let steps = release["jobs"]["build"]["steps"].as_sequence().unwrap();
-    let build = steps
+    let on = release["on"].as_mapping().unwrap();
+    assert_eq!(on.len(), 2, "a tag push and a dispatch, nothing else");
+    assert!(on.contains_key("workflow_dispatch"));
+    assert_eq!(
+        release["on"]["push"]["tags"].as_sequence().unwrap(),
+        &vec![Value::from("v*")]
+    );
+    assert!(release["on"]["push"]["branches"].is_null());
+    let mut gated: Vec<String> = Vec::new();
+    for (name, job) in release["jobs"].as_mapping().unwrap() {
+        let name = name.as_str().unwrap().to_string();
+        let body = serde_yaml::to_string(job).unwrap();
+        let writes = body.contains("secrets.")
+            || job["permissions"]["contents"] == "write"
+            || body.contains("gh release create")
+            || body.contains("release.sh promote")
+            || body.contains("chart-push")
+            || body.contains("git push");
+        if writes {
+            assert_eq!(
+                job["if"].as_str(),
+                Some(GATE),
+                "{name} writes outside the run; only a pushed v* tag may reach it"
+            );
+            gated.push(name);
+        } else {
+            assert_ne!(job["if"].as_str(), Some(GATE), "{name} needs no gate");
+        }
+    }
+    gated.sort();
+    assert_eq!(gated, ["github-release", "publish-images"]);
+    // The gate's own input: `release.sh validate` says `publish=true` for a
+    // tag push and nothing else (scripts/test-release.py, Validate).
+    let script = std::fs::read_to_string(root().join("scripts/release.sh")).unwrap();
+    assert!(script.contains("tag=\"$REF_NAME\" publish=true ;;"));
+    assert!(script.contains("tag=\"${REHEARSAL_TAG:-}\" publish=false ;;"));
+}
+
+/// PROD-14.0: the CLI is the only release archive. Every v0.1.x plan
+/// announced `weirkeeper` too, and the current graph adds `logweir-retention`;
+/// both ship in images only.
+#[test]
+fn the_cli_is_the_only_release_archive() {
+    let cargo = std::fs::read_to_string(root().join("Cargo.toml")).unwrap();
+    let table = cargo
+        .split("\n[workspace.metadata.dist]\n")
+        .nth(1)
+        .expect("Cargo.toml has [workspace.metadata.dist]");
+    let table = table.split("\n[").next().unwrap();
+    for line in [
+        "dist = false",
+        "precise-builds = true",
+        "source-tarball = false",
+        "include = [\"NOTICE\", \"THIRD_PARTY_NOTICES.md\"]",
+        "allow-dirty = [\"ci\"]",
+    ] {
+        assert!(
+            table.lines().any(|l| l.trim() == line),
+            "[workspace.metadata.dist] must carry `{line}`"
+        );
+    }
+    let cli = std::fs::read_to_string(root().join("crates/logweir/Cargo.toml")).unwrap();
+    assert!(cli.contains("[package.metadata.dist]\ndist = true\n"));
+    let mut members: Vec<PathBuf> = std::fs::read_dir(root().join("crates"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    members.push(root().join("xtask"));
+    members.push(root().join("e2e"));
+    for member in members {
+        if member.ends_with("logweir") {
+            continue;
+        }
+        let manifest = std::fs::read_to_string(member.join("Cargo.toml")).unwrap();
+        assert!(
+            !manifest.contains("[package.metadata.dist]"),
+            "{} opts into the release archives; only the CLI ships as one",
+            member.display()
+        );
+    }
+}
+
+#[test]
+fn release_archives_are_built_and_checked_by_one_script_before_upload() {
+    let release = workflow("release.yml");
+    let build = &release["jobs"]["build"];
+    let matrix: Vec<(String, String)> = build["strategy"]["matrix"]["include"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                r["target"].as_str().unwrap().to_string(),
+                r["runner"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        matrix,
+        [
+            ("x86_64-unknown-linux-gnu".into(), "ubuntu-24.04".into()),
+            ("aarch64-unknown-linux-gnu".into(), "ubuntu-24.04-arm".into()),
+            ("aarch64-apple-darwin".into(), "macos-14".into()),
+        ],
+        "one NATIVE runner per target: no cross toolchain"
+    );
+    let steps = build["steps"].as_sequence().unwrap();
+    let linux = steps
         .iter()
         .position(|s| {
-            s["run"]
-                .as_str()
-                .is_some_and(|r| r.starts_with("dist build "))
+            s["if"] == "runner.os == 'Linux'"
+                && s["run"].as_str().is_some_and(|r| {
+                    r.contains(" rust:1.89-bookworm ")
+                        && r.ends_with("bash scripts/release-build.sh \"$TARGET\"")
+                })
         })
-        .unwrap();
-    let check = steps
+        .expect("Linux archives are built in the runner image's builder base");
+    let mac = steps
         .iter()
         .position(|s| {
-            s["run"]
-                == "bash scripts/check-no-engine-in-binary.sh \
-                    \"target/distrib/logweir-${{ matrix.target }}.tar.xz\""
+            s["if"] == "runner.os == 'macOS'"
+                && s["run"] == "bash scripts/release-build.sh \"$TARGET\""
         })
-        .expect("the build job must check the archive it ships for an engine");
+        .expect("the macOS archive is built by the same script");
     let upload = steps
         .iter()
         .position(|s| s["uses"] == "actions/upload-artifact@v4")
         .unwrap();
-    assert!(build < check && check < upload);
+    assert!(linux < upload && mac < upload);
+    let dockerfile = std::fs::read_to_string(root().join("Dockerfile")).unwrap();
+    assert!(
+        dockerfile.contains("FROM --platform=$BUILDPLATFORM rust:1.89-bookworm AS builder"),
+        "the Linux archives' builder base is the runner image's; change both together"
+    );
+    let script = std::fs::read_to_string(root().join("scripts/release-build.sh")).unwrap();
+    let mut last = 0;
+    for step in [
+        "\"$dist\" build --tag \"$RELEASE_TAG\" --force-tag --artifacts=local",
+        "bash scripts/check-no-engine-in-binary.sh \"$archive\"",
+        "drill countersign --help",
+        "scripts/release-countersign-check.py \"$bin\"",
+        "objdump -T \"$bin\"",
+    ] {
+        let at = script
+            .find(step)
+            .unwrap_or_else(|| panic!("scripts/release-build.sh no longer runs `{step}`"));
+        assert!(at > last, "`{step}` runs out of order in scripts/release-build.sh");
+        last = at;
+    }
     let ci_check = std::fs::read_to_string(root().join("scripts/ci-check.sh")).unwrap();
     assert!(
         ci_check.contains("bash scripts/check-no-engine-in-binary.sh \"$LOGWEIR_BIN\""),
         "CI must run the release engine check too, so it cannot first fail at a tag"
+    );
+    assert!(
+        ci_check.contains("python3 scripts/test-release.py"),
+        "CI runs the release script's tests"
     );
 }
 

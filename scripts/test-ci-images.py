@@ -37,7 +37,11 @@ if args[:3] == ["buildx", "imagetools", "inspect"]:
     if os.environ.get("MOCK_DOCKER_ENV_LOG"):
         with open(os.environ["MOCK_DOCKER_ENV_LOG"], "a") as out:
             out.write(json.dumps({"ref": ref, "docker_config": os.environ.get("DOCKER_CONFIG")}) + "\n")
+    if ref == os.environ.get("MOCK_UNREACHABLE_REF"):
+        print(f"ERROR: failed to do request: Head \"https://registry-1.docker.io/v2/{ref}\": dial tcp: connection refused", file=sys.stderr)
+        sys.exit(1)
     if ref == os.environ.get("MOCK_FAIL_INSPECT_REF") or ref not in state:
+        print(f"ERROR: {ref}: not found", file=sys.stderr)
         sys.exit(1)
     record = state[ref]
     digest = record["digest"]
@@ -45,10 +49,14 @@ if args[:3] == ["buildx", "imagetools", "inspect"]:
         digest = "sha256:" + "f" * 64
     if "--format" in args:
         template = args[args.index("--format") + 1]
+        if template == "{{json .Image}}":
+            # One platform's configuration, or a map of them for a list.
+            print(json.dumps(record.get("image", {})))
+            sys.exit(0)
         if template != "{{json .Manifest}}":
             print("Name: " + ref + "\nDigest: " + digest)
             sys.exit(0)
-    print(json.dumps({**record, "digest": digest}))
+    print(json.dumps({k: v for k, v in {**record, "digest": digest}.items() if k != "image"}))
 elif args[:3] == ["buildx", "imagetools", "create"]:
     tags, refs = [], []
     i = 3
@@ -288,6 +296,20 @@ state_path = pathlib.Path(os.environ["MOCK_CHARTS"])
 state = json.loads(state_path.read_text()) if state_path.exists() else {}
 if args[:1] in (["lint"], ["template"]):
     sys.exit(0)
+if args[:2] in (["show", "values"], ["show", "chart"]):
+    with tarfile.open(args[2]) as tar:
+        top = tar.getnames()[0].split("/")[0]
+        if args[1] == "values":
+            sys.stdout.write(tar.extractfile(f"{top}/values.yaml").read().decode())
+        else:
+            meta = json.loads(tar.extractfile(f"{top}/__mock_package.json").read())
+            for line in tar.extractfile(f"{top}/Chart.yaml").read().decode().splitlines():
+                if line.startswith("version:"):
+                    line = "version: " + meta["version"]
+                elif line.startswith("appVersion:"):
+                    line = "appVersion: " + meta["appVersion"]
+                print(line)
+    sys.exit(0)
 if args[:2] == ["registry", "login"]:
     secret = sys.stdin.read() if "--password-stdin" in args else ""
     pathlib.Path(os.environ["MOCK_HELM_LOGIN"]).write_text(json.dumps(
@@ -439,7 +461,106 @@ class ChartPublicationTests(unittest.TestCase):
         self.run_chart()
         meta, values, _ = self.packaged(f"oci://registry-1.docker.io/{NS}/logweir-chart-1.2.3")
         self.assertEqual(meta, {"version": "1.2.3", "appVersion": "v1.2.3"})
-        self.assertIn(f"docker.io/{NS}/weirkeeper:v1.2.3", values)
+        # PROD-14.0: a release chart pins each image by the digest `promote`
+        # just published under the tag, not by the tag alone.
+        state = json.loads(self.registry.read_text())
+        for image in PLATFORMS:
+            digest = state[f"docker.io/{NS}/{image}:v1.2.3"]["digest"]
+            self.assertIn(f"docker.io/{NS}/{image}:v1.2.3@{digest}", values)
+
+    def package(self, tag, digests):
+        """`chart-package` for TAG with IMAGE_DIGESTS = digests (None: unset)."""
+        env = {**self.env, "TAG": tag}
+        env.pop("IMAGE_DIGESTS", None)
+        if digests is not None:
+            path = self.root / "digests.json"
+            path.write_text(json.dumps(digests))
+            env["IMAGE_DIGESTS"] = str(path)
+        return subprocess.run(
+            ["bash", str(self.root / "scripts/ci-images.sh"), "chart-package", str(self.root / "pkg")],
+            env=env, cwd=self.root, capture_output=True, text=True, timeout=60,
+        )
+
+    RELEASE_DIGESTS = {image: "sha256:" + hashlib.sha256(image.encode()).hexdigest() for image in PLATFORMS}
+
+    def test_a_release_chart_without_digests_is_refused(self):
+        result = self.package("v1.2.3", None)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("pins its four images by digest", result.stderr)
+        self.assertFalse((self.root / "pkg/logweir-chart-1.2.3.tgz").exists())
+        # A digest missing for ONE image refuses the whole package too.
+        partial = dict(self.RELEASE_DIGESTS)
+        partial.pop("logweir-ui")
+        result = self.package("v1.2.3", partial)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("no sha256 digest for logweir-ui", result.stderr)
+        # A main chart keeps its tag: no digests asked for, none written.
+        result = self.package("sha-" + SHA, None)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def push(self, package, success=True):
+        result = subprocess.run(
+            ["bash", str(self.root / "scripts/ci-images.sh"), "chart-push", str(package)],
+            env=self.env, cwd=self.root, capture_output=True, text=True, timeout=60,
+        )
+        if success:
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        else:
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        return result
+
+    def release_package(self):
+        self.env.update(TAG="v1.2.3", GITHUB_REF="refs/tags/v1.2.3", PROMOTE_LATEST="false")
+        self.run_promotion()
+        result = self.package("v1.2.3", self.RELEASE_DIGESTS)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        package = Path(result.stdout.strip())
+        self.assertEqual(package.name, "logweir-chart-1.2.3.tgz")
+        return package
+
+    def test_chart_push_publishes_exactly_the_package_it_is_given(self):
+        package = self.release_package()
+        self.push(package)
+        key = f"oci://registry-1.docker.io/{NS}/logweir-chart-1.2.3"
+        self.assertEqual(bytes.fromhex(self.pushed()[key]), package.read_bytes(),
+                         "the release's chart asset and the pushed chart are the same bytes")
+        _, values, _ = self.packaged(key)
+        for image, digest in self.RELEASE_DIGESTS.items():
+            self.assertIn(f"docker.io/{NS}/{image}:v1.2.3@{digest}", values)
+        self.assertIn("chart_version=1.2.3\n", Path(self.env["GITHUB_OUTPUT"]).read_text())
+        self.assertEqual(json.loads(self.login.read_text())["stdin"], self.TOKEN)
+
+    def test_chart_push_never_replaces_a_published_version(self):
+        package = self.release_package()
+        key = f"oci://registry-1.docker.io/{NS}/logweir-chart-1.2.3"
+        self.charts.write_text(json.dumps({key: b"other bytes".hex()}))
+        result = self.push(package, success=False)
+        self.assertIn("never replaced", result.stderr)
+        self.assertEqual(self.pushed()[key], b"other bytes".hex())
+        self.assertFalse(any(c[:1] == ["push"] for c in self.helm_calls()))
+        self.assertFalse(self.login.exists(), "no credential is used for a refused publication")
+
+    def test_chart_push_of_the_same_bytes_again_is_a_verified_no_op(self):
+        package = self.release_package()
+        key = f"oci://registry-1.docker.io/{NS}/logweir-chart-1.2.3"
+        self.charts.write_text(json.dumps({key: package.read_bytes().hex()}))
+        result = self.push(package)
+        self.assertIn("not pushed again", result.stderr)
+        self.assertFalse(any(c[:1] == ["push"] for c in self.helm_calls()))
+        self.assertIn("chart_sha256=", Path(self.env["GITHUB_OUTPUT"]).read_text())
+
+    def test_chart_push_refuses_what_is_not_a_release_package(self):
+        package = self.release_package()
+        for tag in ("sha-" + SHA, "main"):
+            with self.subTest(tag=tag):
+                self.env["TAG"] = tag
+                self.push(package, success=False)
+        self.env["TAG"] = "v1.2.3"
+        renamed = package.with_name("logweir-chart-9.9.9.tgz")
+        renamed.write_bytes(package.read_bytes())
+        result = self.push(renamed, success=False)
+        self.assertIn("is not logweir-chart-1.2.3.tgz", result.stderr)
+        self.assertEqual(self.pushed(), {})
 
     def test_no_chart_before_its_images_are_public(self):
         # Promotion did not run: no image carries TAG yet.

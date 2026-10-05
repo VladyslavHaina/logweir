@@ -27,7 +27,11 @@ jobs:
       - name: Extract the pinned engine
         run: ./scripts/extract-engine.sh
       - run: pip install cryptography
-      - run: sudo apt-get update && sudo apt-get install -y jq
+      # jq for the drill below, and the two shared libraries the Linux archive
+      # needs at run time (its `.linkage.txt`, measured by
+      # scripts/release-build.sh): installed by name, so the drill proves the
+      # documented requirement rather than whatever the runner image carries.
+      - run: sudo apt-get update && sudo apt-get install -y jq libssl3 libsasl2-2
 
       - name: Require the selected artifact to match this checkout
         if: inputs.run_id != ''
