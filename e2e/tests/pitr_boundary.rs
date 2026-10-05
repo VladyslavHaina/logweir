@@ -634,8 +634,10 @@ fn pitr_boundary_includes_the_record_whose_timestamp_equals_point_in_time() {
     // `LogAppendTime` broker every timestamp below would be replaced by the
     // producer's wall clock and this row would be asserting about now(). Task
     // 8 closed residual 3 by execution — this broker honours the per-topic
-    // override.
-    create_topic_with_configs(
+    // override. `retention.ms=-1` is added by the helper: `T` is past the
+    // broker's default retention, whose check would otherwise delete the
+    // fixture before the capture (PROD-00.1 4.4).
+    create_topic_for_fixed_timestamps(
         SRC_TOPIC,
         PARTITIONS,
         &[("message.timestamp.type", "CreateTime")],

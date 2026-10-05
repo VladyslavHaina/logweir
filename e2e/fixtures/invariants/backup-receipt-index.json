@@ -62,5 +62,77 @@
     "python_exit": 1,
     "reason": "source.auth.mode \"scram-sha-512\" is not one of the two values this format defines: \"plaintext\" or \"scramSha512\"",
     "arm": "source.auth.mode \"scram-sha-512\" is not one of the two values this format defines: \"plaintext\" or \"scramSha512\""
+  },
+  {
+    "id": "receipt_1_1_with_config_coverage",
+    "file": "receipt_1_1_with_config_coverage.json",
+    "rust_exit": 0,
+    "python_exit": 0,
+    "reason": "",
+    "arm": ""
+  },
+  {
+    "id": "receipt_1_1_with_not_captured_coverage",
+    "file": "receipt_1_1_with_not_captured_coverage.json",
+    "rust_exit": 0,
+    "python_exit": 0,
+    "reason": "",
+    "arm": ""
+  },
+  {
+    "id": "receipt_1_1_without_config_coverage",
+    "file": "receipt_1_1_without_config_coverage.json",
+    "rust_exit": 0,
+    "python_exit": 0,
+    "reason": "",
+    "arm": ""
+  },
+  {
+    "id": "config_coverage_under_format_1_0_0",
+    "file": "config_coverage_under_format_1_0_0.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "config_coverage is present but format_version \"1.0.0\" predates it: the field is defined from 1.1.0",
+    "arm": "config_coverage is present but format_version \"1.0.0\" predates it: the field is defined from 1.1.0"
+  },
+  {
+    "id": "config_coverage_missing_a_named_topic",
+    "file": "config_coverage_missing_a_named_topic.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "config_coverage covers {\"orders\"} but the named topic set is {\"orders\", \"payments\"}",
+    "arm": "config_coverage covers {\"orders\"} but the named topic set is {\"orders\", \"payments\"}"
+  },
+  {
+    "id": "config_coverage_value_outside_the_three",
+    "file": "config_coverage_value_outside_the_three.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "config_coverage[\"orders\"].coverage \"unknown\" is not one of the three values this format defines: \"captured\", \"notCaptured\" or \"captureDenied\"",
+    "arm": "config_coverage[\"orders\"].coverage \"unknown\" is not one of the three values this format defines: \"captured\", \"notCaptured\" or \"captureDenied\""
+  },
+  {
+    "id": "config_coverage_not_captured_without_a_reason",
+    "file": "config_coverage_not_captured_without_a_reason.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "config_coverage[\"orders\"].reason absent does not fit coverage \"notCaptured\": a reason is present exactly when coverage is \"notCaptured\", and is \"describeFailed\" or \"manifestDiffers\"",
+    "arm": "config_coverage[\"orders\"].reason absent does not fit coverage \"notCaptured\": a reason is present exactly when coverage is \"notCaptured\", and is \"describeFailed\" or \"manifestDiffers\""
+  },
+  {
+    "id": "config_coverage_denied_with_a_timestamp_type",
+    "file": "config_coverage_denied_with_a_timestamp_type.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "config_coverage[\"payments\"] records a timestamp_type, but a topic whose configuration read was denied or failed cannot have observed one",
+    "arm": "config_coverage[\"payments\"] records a timestamp_type, but a topic whose configuration read was denied or failed cannot have observed one"
+  },
+  {
+    "id": "config_coverage_timestamp_source_outside_the_set",
+    "file": "config_coverage_timestamp_source_outside_the_set.json",
+    "rust_exit": 4,
+    "python_exit": 1,
+    "reason": "config_coverage[\"orders\"].timestamp_type \"LogAppendTime\" from \"DYNAMIC_DEFAULT_BROKER_CONFIG\" is not a value and source this format defines: the value is \"CreateTime\" or \"LogAppendTime\", and the source is \"dynamicTopicConfig\", \"dynamicBrokerConfig\", \"dynamicDefaultBrokerConfig\", \"staticBrokerConfig\", \"defaultConfig\" or \"unknown\"",
+    "arm": "config_coverage[\"orders\"].timestamp_type \"LogAppendTime\" from \"DYNAMIC_DEFAULT_BROKER_CONFIG\" is not a value and source this format defines: the value is \"CreateTime\" or \"LogAppendTime\", and the source is \"dynamicTopicConfig\", \"dynamicBrokerConfig\", \"dynamicDefaultBrokerConfig\", \"staticBrokerConfig\", \"defaultConfig\" or \"unknown\""
   }
 ]

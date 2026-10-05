@@ -3120,6 +3120,12 @@ pub fn runner_job_spec_with_policy(
         .uid()
         .ok_or_else(|| RestoreError::NoUid(name.clone()))?;
 
+    // THE RUNNER'S RESOURCES — FX-2. `spec.runnerResources` used to be
+    // accepted, documented and dropped here. It is validated by the one
+    // function the reconcile's early refusal also calls, so the Job can never
+    // carry a value the object would have been refused for.
+    let resources = runner_resources_of(restore)?;
+
     // THE TARGET CONNECTION, FROM THE ONE RESOLVER THE PROBE AND THE BACKUP USE
     // (PLAT-07.1). The runner dials `planBytes`' target with THIS connection's
     // password and CA, so the approved plan must name the same target; a
@@ -3360,6 +3366,39 @@ pub fn runner_job_spec_with_policy(
         // WAY IF THIS PROCESS WAS HANDED ANOTHER POLICY (Task 37,
         // `job::RUNNER_PULL_POLICY_ENV`). Same argument, same one line.
         image_pull_policy: None,
+        // FX-2: `spec.runnerResources`, validated above, or no key at all.
+        resources,
+    })
+}
+
+/// `spec.runnerResources` as the runner container carries it — FX-2.
+///
+/// `Ok(None)` when the object asks for nothing, which renders no `resources`
+/// key: the Job shape every `Restore` had before FX-2.
+///
+/// # Errors
+///
+/// [`RestoreError::Refused`] with
+/// [`crate::conditions::TERMINAL_STATE_EXECUTION_SPEC_INVALID`] — the spec
+/// cannot produce a runnable Job — naming every field
+/// [`crate::runner_resources::validate`] refused. TERMINAL, because `spec` is
+/// immutable: no later pass can make these quantities acceptable.
+pub fn runner_resources_of(
+    restore: &Restore,
+) -> Result<Option<job::ContainerResources>, RestoreError> {
+    crate::runner_resources::validate(
+        restore.spec.runner_resources.as_ref(),
+        crate::runner_resources::RESTORE_PATH,
+    )
+    .map_err(|refused| {
+        RestoreError::Refused(
+            crate::conditions::TERMINAL_STATE_EXECUTION_SPEC_INVALID,
+            format!(
+                "{refused}. The runner's requests and limits are applied exactly as written or \
+                 not at all, so no Job was created; spec is immutable — create a new Restore \
+                 whose spec.runnerResources is inside the bounds, or leave it out"
+            ),
+        )
     })
 }
 
@@ -6687,6 +6726,18 @@ async fn reconcile_restore_inner(
                 requeue,
             });
         }
+
+        // FX-2: THE RUNNER'S RESOURCES, BEFORE THE ADMISSION READS ANYTHING.
+        //
+        // A `spec.runnerResources` this controller will never apply is a fact
+        // about the sealed spec alone, so it is refused here — before an
+        // approval is waited for, a pool slot is taken or anything is
+        // created. Refusing it only where the Job is built would hold the
+        // object as `ApprovalNotVerified` and let an approver sign a run that
+        // could never start. Only a Restore with NO Job reaches this line: a
+        // run already started by an older controller is observed, never
+        // refused mid-flight.
+        runner_resources_of(restore)?;
 
         // THE ADMISSION, BEFORE THE FIRST `POST`. Two `GET`s and a pure
         // function; Global Constraint 6's operator half is that an unapproved

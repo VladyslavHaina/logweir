@@ -8166,3 +8166,126 @@ fn a_relayed_message_names_the_inline_archive_not_the_placeholder() {
         rescoped[0].message
     );
 }
+
+/// **FX-2's class sweep: `Preflight.spec.request.timeoutSeconds`**, "the
+/// in-Job budget". Every reconcile row used 120 — the field's own default — so
+/// a controller that ignored the request and used the default passed them
+/// all. A non-default budget reaches the check plan the runner enforces AND
+/// the Job's `activeDeadlineSeconds` (budget plus the pod-start margin).
+///
+/// MUTANT: `timeout_seconds: i64::from(DEFAULT_TIMEOUT_SECONDS)` where the
+/// reconcile reads the request.
+#[tokio::test]
+async fn a_preflights_own_budget_reaches_its_plan_and_its_job_deadline() {
+    let job = job_name(CheckPlanKind::DestinationAccess);
+    let routes = vec![
+        route(
+            "GET",
+            "/trustrosters/default",
+            roster(RUNNER_KEY_ID, vec![]).to_string(),
+        ),
+        route("GET", "/trustpolicies", no_trust_policies()),
+        route(
+            "GET",
+            "/backupdestinations/primary",
+            separated_destination("primary", evidence_secret_grant(), true).to_string(),
+        ),
+        not_found("GET", leak(job.clone())),
+        route("GET", "/apis/batch/v1/jobs", list_of(vec![])),
+        route("PATCH", "/pf-1/status", echo("Preflight", "pf-1")),
+        route("POST", "/configmaps", echo("ConfigMap", "plan")),
+        route("POST", "/jobs", echo("Job", &job)),
+    ];
+    let (client, _recorder, bodies) = mock_client_recording_bodies(routes);
+    let ctx = context(client);
+    let cache = weirkeeper::check::policy::PolicyCache::new();
+    let request = json!({
+        "operation": "DestinationAccess",
+        "destinationAccess": {
+            "destinationRef": {"name": "primary"},
+            "roles": ["ArchiveWrite", "EvidenceWrite"]
+        },
+        "timeoutSeconds": 300
+    });
+    pf::reconcile_preflight(&preflight(request), &ctx, &cache, now())
+        .await
+        .expect("the reconcile completes");
+    let bodies = bodies.lock().expect("bodies");
+    let body_of = |uri: &str| {
+        bodies
+            .iter()
+            .find(|b| b.method == "POST" && b.uri.contains(uri))
+            .unwrap_or_else(|| panic!("no POST {uri}"))
+            .body
+            .clone()
+    };
+    let plan_cm: Value = serde_json::from_str(&body_of("/configmaps")).expect("json");
+    let plan: Value = plan_cm["data"]
+        .as_object()
+        .expect("data")
+        .values()
+        .find_map(|v| v.as_str().filter(|s| s.contains("\"destinationAccess\"")))
+        .map(|s| serde_json::from_str(s).expect("plan json"))
+        .expect("the check plan document");
+    assert_eq!(plan["timeoutSeconds"], json!(300), "{plan}");
+    let job: Value = serde_json::from_str(&body_of("/jobs")).expect("json");
+    assert_eq!(
+        job["spec"]["activeDeadlineSeconds"],
+        json!(300 + weirkeeper::check::job::DEADLINE_MARGIN_SECONDS),
+        "{}",
+        job["spec"]
+    );
+}
+
+/// **FX-2's class sweep: `Preflight.spec.request.skipChecks`**, "checks to leave
+/// out", which the runner applies to its own table: it reaches the
+/// `operationReadiness` (and `restorePreflight`) plan. No reconcile row ever set
+/// it — the field's default is absent — so a reconcile that dropped the list
+/// passed them all, and the runner would answer a check the requester asked to
+/// skip.
+///
+/// MUTANT: `skip: BTreeSet::new()` where the reconcile reads the request.
+#[tokio::test]
+async fn a_preflights_own_skip_list_reaches_its_plan() {
+    let job = job_name(CheckPlanKind::OperationReadiness);
+    let mut routes = referent_routes(None, vec![]);
+    routes.push(not_found("GET", leak(job.clone())));
+    routes.push(route("GET", "/apis/batch/v1/jobs", list_of(vec![])));
+    routes.push(route("PATCH", "/pf-1/status", echo("Preflight", "pf-1")));
+    routes.push(route("POST", "/configmaps", echo("ConfigMap", "plan")));
+    routes.push(route("POST", "/jobs", echo("Job", &job)));
+    let (client, _recorder, bodies) = mock_client_recording_bodies(routes);
+    let ctx = context(client);
+    let cache = weirkeeper::check::policy::PolicyCache::new();
+    let mut request = backup_request();
+    request["skipChecks"] = json!(["connection.topicsReadable"]);
+    pf::reconcile_preflight(&preflight(request), &ctx, &cache, now())
+        .await
+        .expect("the reconcile completes");
+    let bodies = bodies.lock().expect("bodies");
+    let plan_cm: Value = bodies
+        .iter()
+        .find(|b| b.method == "POST" && b.uri.contains("/configmaps"))
+        .map(|b| serde_json::from_str(&b.body).expect("json"))
+        .expect("the plan ConfigMap was posted");
+    let plan: logweir_core::check_contract::CheckPlan = plan_cm["data"]
+        .as_object()
+        .expect("data")
+        .values()
+        .find_map(|v| v.as_str().and_then(|s| serde_json::from_str(s).ok()))
+        .expect("the check plan document");
+    let CheckRequest::OperationReadiness(readiness) = &plan.request else {
+        panic!("a Backup preflight renders an operationReadiness request, got {plan:?}");
+    };
+    assert_eq!(
+        readiness.skip_checks,
+        vec![CheckId::ConnectionTopicsReadable],
+        "the runner leaves out exactly what the request asked it to"
+    );
+    assert!(
+        bodies
+            .iter()
+            .any(|b| b.method == "POST" && b.uri.contains("/jobs")),
+        "the Job was created from that plan"
+    );
+}

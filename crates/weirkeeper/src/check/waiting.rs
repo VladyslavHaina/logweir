@@ -176,8 +176,12 @@ pub fn classify(observed: &Observed<'_>) -> Option<Waiting> {
         if unschedulable_for(pod, observed.now) >= Some(UNSCHEDULABLE_GRACE) {
             return Some(Waiting::of(
                 CheckCode::PodUnschedulable,
+                // "THE JOB'S POD", NOT "THE CHECK POD": this classifier also
+                // explains a `Backup`'s and a `Restore`'s runner Job
+                // (`diagnostics::derive`), whose diagnostic carries this
+                // sentence verbatim (FX-2 review nit).
                 format!(
-                    "the check pod has been unschedulable for more than {} seconds",
+                    "the Job's pod has been unschedulable for more than {} seconds",
                     UNSCHEDULABLE_GRACE.as_secs()
                 ),
             ));
@@ -350,8 +354,8 @@ fn from_failed_create(events: &[EventFact], job_name: &str) -> Option<Waiting> {
         return Some(Waiting::of(
             CheckCode::RunnerServiceAccountMissing,
             format!(
-                "the Job controller could not create the check pod: {}. Create the \
-                 ServiceAccount the check names, or point the check at one that exists",
+                "the Job controller could not create the Job's pod: {}. Create the \
+                 ServiceAccount this Job runs as, or name one that exists",
                 e.message
             ),
         ));
@@ -359,7 +363,7 @@ fn from_failed_create(events: &[EventFact], job_name: &str) -> Option<Waiting> {
     Some(Waiting::of(
         CheckCode::PodCreateRejected,
         format!(
-            "the Job controller could not create the check pod: {}",
+            "the Job controller could not create the Job's pod: {}",
             e.message
         ),
     ))

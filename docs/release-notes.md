@@ -20,8 +20,9 @@ mark without one). The supported path these notes assume is
 The last tag is `v0.1.5` (`9cc78a3`). This entry covers `main` through
 `fdb48cd8` (2026-09-25): the platform tracker's shipped tasks, the operator
 actions collected for PLAT-20.2 and after it, and the upgrade from the last
-published image. No tag is cut at `fdb48cd8`, so the candidate record below
-stays empty. The shipped task list, the six publications the PoC ran, the
+published image. Item 21 (FX-2, from the product-expansion tracker's fix-now
+rows) lands after `fdb48cd8`. No tag is cut at `fdb48cd8`, so the candidate
+record below stays empty. The shipped task list, the six publications the PoC ran, the
 tested environments and the results are in
 [release-handoff.md](release-handoff.md).
 
@@ -155,14 +156,22 @@ A key that must not be compromised everywhere cannot be un-revoked (G3, and G9
 in this build). Either delete that policy before the upgrade, or re-issue the key.
 Do not deploy until every listed record is one you mean installation-wide.
 
-### The twenty operator-facing changes
+**Pre-upgrade check: which `Restore`s and `RehearsalSchedule`s carry a
+`runnerResources` block** (item 21). This build applies the block to the runner
+container, or refuses the object, where earlier builds ignored it. Run item 21's
+inventory before the controller rolls; no output means the upgrade changes
+nothing there.
+
+### The twenty-one operator-facing changes
 
 Each item names what changed, what to do, what the claim rests on (its
-verification scope), and how to roll it back. Every one of them was collected
-for PLAT-20.2 from a merged change; the defect names are the platform
-tracker's. Items 17–20 were found by the PoC rounds and landed after its first
+verification scope), and how to roll it back. Items 1–20 were collected for
+PLAT-20.2 from merged changes; the defect names are the platform tracker's.
+Items 17–20 were found by the PoC rounds and landed after its first
 publication (`86a554e6`); each was proven on the running install by the
-in-place upgrade that carried it.
+in-place upgrade that carried it. Item 21 is the product-expansion tracker's
+fix-now row FX-2 and is not proven live yet: the PoC upgrade that carries it
+runs its rows.
 
 #### 1. Retention needs `s3:GetObject` — required action
 
@@ -684,6 +693,69 @@ not be staged inside the PoC's 15-minute session. **Rollback:** `helm rollback`
 moves the API and the console together, and the older pair replays a spent
 check again; nothing stored changes.
 
+#### 21. A `Restore`'s `runnerResources` is applied, or the object is refused (FX-2)
+
+**Changed.** `Restore.spec.runnerResources`, and a `RehearsalSchedule`'s
+`spec.bounds.runnerResources` through the child `Restore` it creates, were
+accepted, documented as what the runner pod asks for and is capped at, and
+dropped: no runner container carried `resources`, so every runner pod was
+`BestEffort`. The block now reaches the `runner` container exactly as written.
+A block the controller will not apply is refused, never clamped: a quantity
+outside the schema's grammar, memory that is not whole bytes, CPU finer than
+`1m`, anything above 4 CPUs or `8Gi` (requests included), a zero limit, a memory
+limit below `32Mi`, or a request above its limit. A `Restore` with such a block
+ends `Failed` with reason `ExecutionSpecInvalid` before its approval is read or
+anything is created, and the product API serves it `refused`. A
+`RehearsalSchedule` skips every slot as `AuthorizationInvalid` and creates no
+child ([kubernetes.md](kubernetes.md) §12, *The runner's requests and limits*).
+An object without the block gets exactly the Job it got before; the console
+never sets the field.
+
+What changes on the upgrade, for objects that already carry a block:
+
+- **A `Restore` with no Job yet** (held for its approval, queued, or created
+  during the upgrade) is judged on its next pass. A valid block now caps its
+  pod, so the pod can be rejected by a `ResourceQuota` or `LimitRange` it never
+  met before (reported as `RunnerReady=False` with `PodCreationForbidden`, then
+  ending `PodCreationForbidden`), or be OOM-killed at its memory limit. A block
+  outside the bounds ends it `Failed`/`ExecutionSpecInvalid`, and the remedy is
+  a new `Restore`, because `spec` is immutable.
+- **A `Restore` whose Job already exists** keeps that Job, which carries no
+  `resources`. A terminal `Restore` is untouched.
+- **A `RehearsalSchedule`** caps every rehearsal from its next slot, or, when its
+  block is outside the bounds, skips every slot as `AuthorizationInvalid` for
+  good. The spec is sealed, so the fix is a new schedule and a new signed
+  standing authorization.
+
+**Do:** before the upgrade, list every object that carries a block:
+
+```bash
+kubectl --context <ctx> get restores,rehearsalschedules -A -o json \
+  | jq -r '.items[] | select(.spec.runnerResources // .spec.bounds.runnerResources)
+      | "\(.kind) \(.metadata.namespace)/\(.metadata.name)"'
+```
+
+No output means nothing changes. Check each listed block against §12's rules
+and against its namespace's `ResourceQuota` and `LimitRange`. Replace an
+out-of-bounds schedule (and its authorization) before the upgrade, or expect its
+slots to be skipped. Expect an out-of-bounds `Restore` that has no Job yet to
+end `ExecutionSpecInvalid`. **Scope:** `crates/weirkeeper/tests/runner_resources.rs`
+(the rules, and the exact quantity arithmetic in every suffix),
+`restore_controller.rs` and `rehearsal_controller.rs` (the container carries
+the block exactly, one-sided blocks included; the refusal comes before the
+approval is read, with no `POST`; a quota rejection is reported and failed
+fast), `crates/logweir-api/tests/status_mapping.rs` (`refused`), and planted
+mutants, each killed (FX-2, its review and its fix round). Not yet proven live:
+the PoC upgrade that carries FX-2 runs its CRD, refusal and Job-bytes rows. An
+admitted `Restore`'s real Job and the `RehearsalSchedule` side wait for
+PROD-10.1, which exposes the control in the console.
+**Rollback:** an older controller ignores the field again. Its Jobs carry no
+`resources`, and a `Restore` this build refused stays `Failed`; an older
+product API serves that refusal `failed` again. A
+`RehearsalSchedule` this build skipped for its block fires again under the
+older controller, uncapped: suspend it (`spec.suspend: true`, the one mutable
+field) before rolling back if it must not run. Nothing has to be deleted.
+
 ### Verification scope: what "verified" means in this release
 
 - **A green badge** means the signed document's signature verified under a key
@@ -730,8 +802,9 @@ check again; nothing stored changes.
 ### Migration and rollback
 
 **Upgrade order:** identity backup → retention grants and modes (items 1–2) →
-CRDs (all fourteen established) → controller **and** runner image together →
-console image → approval-policy binding. Every CRD change is additive; nothing
+the `runnerResources` inventory (item 21) → CRDs (all fourteen established) →
+controller **and** runner image together → console image → approval-policy
+binding. Every CRD change is additive; nothing
 is converted and no stored object is rewritten
 ([install.md](install.md), *Upgrade CRDs before upgrading the controller*).
 
@@ -771,6 +844,10 @@ is converted and no stored object is rewritten
    one is there), and record each such revocation on every policy that still
    lists the key (`CompromiseInherited`). Do not delete a policy to "go back to
    the roster" before that: it is held until nothing lists the key.
+10. **Suspend every `RehearsalSchedule` this build skips for its
+    `runnerResources`** (item 21) that must not run uncapped: an older
+    controller drops the block and fires its next slot. A `Restore` this build
+    refused `ExecutionSpecInvalid` stays `Failed`.
 
 **How this upgrade is rehearsed.** From `v0.1.5` (the last version tag: 6 →
 14 CRDs, the managed identity adopting a hand-provisioned signer, the console
@@ -782,7 +859,8 @@ back. The running install was then upgraded in place five times: to
 CRD change) and to `fdb48cd8` (no item: console-only fixes, P16 and O2, and
 no CRD change). [release-handoff.md](release-handoff.md) names the chart and
 image digests, the state each rehearsal set up first, and what each round
-showed. An upgrade from `sha-7b0277b…` crosses items 1–4 and 11–20.
+showed. An upgrade from `sha-7b0277b…` crosses items 1–4 and 11–20. An upgrade
+from `fdb48cd8` crosses item 21 alone.
 
 **The chart and the images move together.** This chart's controller probes run
 `weirkeeper --probe`, and its console configuration can carry

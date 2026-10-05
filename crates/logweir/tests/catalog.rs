@@ -85,6 +85,7 @@ fn receipt(backup_id: &str, run_id: &str) -> BackupReceipt {
             from_ms: 1_757_980_800_000,
             to_ms: 1_757_984_400_000,
         },
+        config_coverage: None,
     }
 }
 
@@ -1526,15 +1527,29 @@ fn the_checked_in_catalog_point_schema_is_the_one_the_type_generates() {
     // The drift arm, IN PROCESS, so the gate holds with no subprocess — the
     // shape `crates/logweir-api/tests/contract.rs` uses for the OpenAPI
     // document. `just schema` is the only sanctioned way to change the file.
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../schemas/logweir-catalog-point-1.0.0.json");
+    // The CURRENT file is named by the writer's constant (FX-4), so a renumber
+    // moves `record::FORMAT_VERSION` and the justfile, not this test.
+    let version = logweir::catalog::record::FORMAT_VERSION;
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+        "../../schemas/logweir-catalog-point-{version}.json"
+    ));
     let checked_in = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("{} is readable: {e}", path.display()));
     assert_eq!(
         checked_in,
         logweir::catalog::schema::catalog_point_schema(),
-        "schemas/logweir-catalog-point-1.0.0.json no longer describes CatalogPoint. Run \
+        "schemas/logweir-catalog-point-{version}.json no longer describes CatalogPoint. Run \
          `just schema` and commit the diff."
+    );
+    let justfile =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../justfile"))
+            .expect("read the justfile");
+    assert!(
+        justfile
+            .lines()
+            .any(|l| l == format!("catalog_schema_version := \"{version}\"")),
+        "the justfile's catalog_schema_version must be record::FORMAT_VERSION ({version}): \
+         `just schema` writes the file that variable names"
     );
     // The major is pinned by a PATTERN as well as by the reader, so a
     // schema-only validator — the one route that does not go through
@@ -1893,4 +1908,177 @@ fn a_listing_walks_days_backwards_and_stops_once_the_page_is_full() {
         after.days_searched, 2,
         "the backward walk stops at the cursor's own day: {after:?}"
     );
+}
+
+/// FX-4: the 1.0.0 catalog-point schema is FROZEN beside the 1.1.0 one and
+/// still describes every record written before the bump: it names itself
+/// 1.0.0, and its `RecordTopic` has no `config_coverage`.
+#[test]
+fn the_frozen_1_0_0_catalog_point_schema_is_still_the_1_0_0_schema() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../schemas/logweir-catalog-point-1.0.0.json");
+    let frozen: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("{} is readable: {e}", path.display())),
+    )
+    .expect("the frozen schema parses");
+    assert_eq!(
+        frozen["$id"],
+        "https://logweir.dev/schemas/logweir-catalog-point-1.0.0.json"
+    );
+    let topic = &frozen["definitions"]["RecordTopic"]["properties"];
+    assert!(topic["records"].is_object());
+    assert!(
+        topic.get("config_coverage").is_none(),
+        "the frozen 1.0.0 schema must not describe the 1.1.0 field"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// FX-4: `topics[].config_coverage`, catalog point 1.1.0
+// ---------------------------------------------------------------------------
+
+/// The same receipt at 1.1.0, carrying `orders`' capture coverage.
+fn receipt_1_1(coverage: &str) -> BackupReceipt {
+    let mut r = receipt("nightly-20260915", "01J9X2QK7C4V0R8YB3ZP6MTS5A");
+    r.format_version = "1.1.0".into();
+    r.config_coverage = Some(BTreeMap::from([(
+        "orders".to_string(),
+        TopicConfigCoverage {
+            coverage: coverage.into(),
+            reason: None,
+            timestamp_type: (coverage == "captured").then(|| EffectiveConfigValue {
+                value: "LogAppendTime".into(),
+                source: "dynamicDefaultBrokerConfig".into(),
+            }),
+        },
+    )]));
+    r
+}
+
+/// The writer COPIES the receipt's entry — never recomputes it and never
+/// fills one a receipt does not carry.
+#[test]
+fn a_1_1_0_record_copies_the_receipts_config_coverage_and_absent_stays_absent() {
+    let key = SigningKey::generate_ed25519();
+    let r = receipt_1_1("captured");
+    let p = point_for(&r, "s3://kafka-backups/prod", &key);
+    assert_eq!(p.format_version, "1.1.0");
+    assert_eq!(
+        p.topics[0].config_coverage,
+        r.config_coverage.as_ref().unwrap().get("orders").cloned()
+    );
+    // A 1.0.0 receipt: UNKNOWN, written as absent — never a default.
+    let old = point_for(
+        &receipt("nightly-20260915", "01J9X2QK7C4V0R8YB3ZP6MTS5A"),
+        "s3://kafka-backups/prod",
+        &key,
+    );
+    assert_eq!(old.topics[0].config_coverage, None);
+    let text = String::from_utf8(old.canonical_bytes().unwrap()).unwrap();
+    assert!(
+        !text.contains("config_coverage"),
+        "absent is the one spelling of unknown: {text}"
+    );
+    // The index entry's shape did not change, so neither did its version.
+    assert_eq!(CatalogLogEntry::of(&p).format_version, "1.0.0");
+}
+
+/// **Rule 3 for the new field — the catalog's "never reinterpreted as
+/// stronger".** A record that claims a coverage its receipt does not back —
+/// `captured` beside a receipt that says `captureDenied`, or ANY coverage
+/// beside a 1.0.0 receipt that has none — is a `RecordMismatch`. A record that
+/// knows LESS than its receipt (an older writer copied nothing) agrees.
+#[test]
+fn a_record_claiming_coverage_its_receipt_does_not_back_is_a_record_mismatch() {
+    let key = SigningKey::generate_ed25519();
+    let denied = receipt_1_1("captureDenied");
+    let bytes = receipt_bytes(&denied);
+    let honest = point_for(&denied, "s3://kafka-backups/prod", &key);
+    assert_eq!(
+        reader::cross_check(&honest, &denied, &bytes),
+        CrossCheck::Agrees
+    );
+
+    let mut stronger = honest.clone();
+    stronger.topics[0].config_coverage = receipt_1_1("captured")
+        .config_coverage
+        .unwrap()
+        .get("orders")
+        .cloned();
+    match reader::cross_check(&stronger, &denied, &bytes) {
+        CrossCheck::RecordMismatch(d) => assert!(
+            d.iter()
+                .any(|m| m.starts_with("topics[\"orders\"].config_coverage")),
+            "{d:?}"
+        ),
+        other => panic!("a record upgrading captureDenied to captured must not agree: {other:?}"),
+    }
+
+    // Any coverage beside a receipt that carries none (1.0.0).
+    let old = receipt("nightly-20260915", "01J9X2QK7C4V0R8YB3ZP6MTS5A");
+    let old_bytes = receipt_bytes(&old);
+    let mut invented = point_for(&old, "s3://kafka-backups/prod", &key);
+    invented.topics[0].config_coverage = stronger.topics[0].config_coverage.clone();
+    match reader::cross_check(&invented, &old, &old_bytes) {
+        CrossCheck::RecordMismatch(d) => {
+            assert!(d.iter().any(|m| m.contains("none in the receipt")), "{d:?}")
+        }
+        other => panic!("coverage the 1.0.0 receipt cannot hold must not agree: {other:?}"),
+    }
+
+    // Knowing less is not a contradiction.
+    let mut quieter = honest.clone();
+    quieter.topics[0].config_coverage = None;
+    assert_eq!(
+        reader::cross_check(&quieter, &denied, &bytes),
+        CrossCheck::Agrees
+    );
+}
+
+/// **Rule 4 for the new field.** Two records of one point conflict only where
+/// BOTH carry coverage for a topic and it differs; one carrying none (an
+/// older writer) is not a conflict.
+#[test]
+fn two_records_conflict_on_config_coverage_only_where_both_carry_it() {
+    let key = SigningKey::generate_ed25519();
+    let r = receipt_1_1("captureDenied");
+    let a = point_for(&r, "s3://kafka-backups/prod", &key);
+    let mut b = point_for(&r, "s3://dr-copy/prod", &key);
+    b.topics[0].config_coverage = None;
+    assert!(matches!(
+        reader::reconcile(&a, &b),
+        Duplicate::SameIdentity { .. }
+    ));
+    let mut c = a.clone();
+    c.archive.location_id = "s3://dr-copy/prod".into();
+    c.topics[0].config_coverage = receipt_1_1("captured")
+        .config_coverage
+        .unwrap()
+        .get("orders")
+        .cloned();
+    match reader::reconcile(&a, &c) {
+        Duplicate::Conflict(d) => assert!(
+            d.iter()
+                .any(|m| m.starts_with("topics[\"orders\"].config_coverage")),
+            "{d:?}"
+        ),
+        other => panic!("two copies disagreeing on coverage are a conflict: {other:?}"),
+    }
+}
+
+/// A 1.0.0 record still reads under this build — reading rule 2 — and its
+/// coverage is UNKNOWN (absent), never captured.
+#[test]
+fn a_1_0_0_record_reads_with_its_coverage_unknown() {
+    let v = serde_json::to_value(sample_point()).unwrap();
+    let mut v = v;
+    v["format_version"] = serde_json::json!("1.0.0");
+    match reader::read_record(&serde_json::to_vec(&v).unwrap()) {
+        RecordVerdict::Point(p) => {
+            assert_eq!(p.format_version, "1.0.0");
+            assert!(p.topics.iter().all(|t| t.config_coverage.is_none()));
+        }
+        other => panic!("a 1.0.0 record must read: {other:?}"),
+    }
 }

@@ -1041,6 +1041,14 @@ fn each_phases_result_reaches_the_signed_document() {
         "the diff must report what it actually READ off the target"
     );
     assert_eq!(sc.target_diff.level, "full");
+    // FX-4: phase 3 ran and found no collision, so its 1.1.0 `not_assessed`
+    // reaches the signed document as the claim `[]`, never absent ("not
+    // recorded"), and the collision strings carry no qualifier of their own.
+    assert_eq!(
+        sc.target_diff.not_assessed,
+        Some(vec![]),
+        "phase 3's not_assessed must reach the signed document"
+    );
     // 5 — the lever readback
     assert_eq!(
         sc.engine.levers.header_preflight,
@@ -1063,11 +1071,19 @@ fn each_phases_result_reaches_the_signed_document() {
          against the target topic: {:?}",
         sc.topic_parity.intentionally_deviated
     );
-    assert!(
-        sc.topic_parity.unexpected_divergence.is_empty(),
-        "{:?}",
-        sc.topic_parity.unexpected_divergence
+    // FX-4: the fixture's plan binds no recovery point, so there is no signed
+    // record of what was captured. No key diverged, and phase 7 says so in
+    // `not_assessed` AND leaves its fail-safe marker in `unexpected_divergence`,
+    // so a reader older than `not_assessed` cannot read parity here (M5).
+    assert_eq!(
+        sc.topic_parity.unexpected_divergence,
+        vec!["drill-orders: configuration not assessed (unknown)".to_string()]
     );
+    assert_eq!(
+        sc.topic_parity.not_assessed,
+        Some(vec!["drill-orders: configuration (unknown)".to_string()])
+    );
+    assert_eq!(sc.format_version, "1.1.0");
     // 8 — the objectives, as REQUESTED plus the verdict
     assert_eq!(sc.objectives.rto_seconds, Some(900));
     assert_eq!(sc.objectives.met, Some(true));
@@ -1525,4 +1541,41 @@ fn the_attested_note_does_not_disturb_the_teardown_failure_notes() {
         vec!["drill-orders".to_string()]
     );
     assert!(attested_key(&sc).is_some());
+}
+
+/// **FX-4, end to end through the phase sequence.** The coverage a VERIFIED
+/// point binding established reaches phase 7 through `Ctx` and becomes the
+/// signed document's `topic_parity.not_assessed`: `captured` for the one
+/// mapped topic yields `Some([])` — every topic assessed — and the SAME run
+/// with the fixture's unknown coverage names the topic (the test above).
+///
+/// Negative control: a `run` that ignored `c.source_config_coverage` (passed
+/// `SourceConfigCoverage::unknown()`) signs `configuration (unknown)` here and
+/// this test fails.
+#[test]
+fn a_captured_source_configuration_reaches_the_signed_document_as_assessed() {
+    let mut f = fixtures::orchestrator_args_against_fixture_engine();
+    let mut receipt: logweir_core::backup_receipt::BackupReceipt = serde_json::from_slice(
+        &std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../e2e/fixtures/signed/backup-receipt.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    receipt.format_version = "1.1.0".into();
+    receipt.config_coverage = Some(std::collections::BTreeMap::from([(
+        "orders".to_string(),
+        logweir_core::backup_receipt::TopicConfigCoverage {
+            coverage: "captured".into(),
+            reason: None,
+            timestamp_type: None,
+        },
+    )]));
+    f.ctx.source_config_coverage =
+        logweir_core::backup_receipt::SourceConfigCoverage::from_receipt(&receipt);
+    execute_with(&f.args, &f.run_id, &f.ctx).unwrap();
+    let sc: logweir_core::scorecard::Scorecard =
+        serde_json::from_slice(&scorecard_from_store(&f)).unwrap();
+    assert_eq!(sc.topic_parity.not_assessed, Some(vec![]));
 }

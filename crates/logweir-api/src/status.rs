@@ -60,6 +60,14 @@ pub const REFUSAL_STATES: &[&str] = &[
     "AuthorizationExpired",
     "ClusterNotReachable",
     "CredentialNotRenderable",
+    // The spec cannot be run as written, decided before any Job exists and
+    // with nothing executed: on a `Restore`, a `spec.runnerResources` the
+    // controller will not apply (FX-2); on a `Backup`, an unknown
+    // `triggeredBy`, a non-positive or unfundable `deadlineSeconds` or a
+    // missing identity (PLAT-06.1). Served as `failed` before the FX-2 review
+    // (L4), which sent an operator looking for partial writes that cannot
+    // exist.
+    "ExecutionSpecInvalid",
     "Expired",
     "GuardRefused",
     "GuardRefusedUnknownReason",

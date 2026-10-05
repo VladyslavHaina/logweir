@@ -272,6 +272,139 @@ pub trait TopicDeleter: Send + Sync {
     ) -> Result<Vec<(String, Result<(), String>)>, KafkaError>;
 }
 
+/// Where one value in a DescribeConfigs answer came from — Kafka's
+/// `ConfigSource`, as librdkafka reports it per entry (FX-4).
+///
+/// `DynamicTopicConfig` is a TOPIC OVERRIDE; the next four are the broker's
+/// (a per-broker dynamic value, the cluster-wide dynamic default, the broker's
+/// static `server.properties`, and the built-in default). `Unknown` is what a
+/// broker before Kafka 1.1 reports, and what this build reports for a source
+/// it does not map.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigSourceKind {
+    DynamicTopicConfig,
+    DynamicBrokerConfig,
+    DynamicDefaultBrokerConfig,
+    StaticBrokerConfig,
+    DefaultConfig,
+    Unknown,
+}
+
+impl ConfigSourceKind {
+    /// The spelling the backup receipt carries — Kafka's own names,
+    /// camel-cased (`logweir_core::backup_receipt::CONFIG_SOURCES`).
+    #[must_use]
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::DynamicTopicConfig => "dynamicTopicConfig",
+            Self::DynamicBrokerConfig => "dynamicBrokerConfig",
+            Self::DynamicDefaultBrokerConfig => "dynamicDefaultBrokerConfig",
+            Self::StaticBrokerConfig => "staticBrokerConfig",
+            Self::DefaultConfig => "defaultConfig",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// One entry of a topic's DescribeConfigs answer, with the flags a capture
+/// decision needs — what [`ClusterReader::topic_configs`]'s flat map throws
+/// away (FX-4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigEntryObservation {
+    pub name: String,
+    /// `None` for a sensitive value the broker withholds.
+    pub value: Option<String>,
+    pub source: ConfigSourceKind,
+    pub read_only: bool,
+    pub sensitive: bool,
+}
+
+/// One topic's DescribeConfigs answer: every entry the broker reported, or
+/// why there is none. `Ok` is NEVER empty — see [`empty_topic_config_answer`].
+pub type TopicConfigRead = Result<Vec<ConfigEntryObservation>, KafkaError>;
+
+/// What the same principal's METADATA says about a topic, read to explain an
+/// empty DescribeConfigs answer ([`empty_topic_config_answer`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TopicVisibility {
+    /// Metadata answered for the topic with no error.
+    Visible,
+    /// `TOPIC_AUTHORIZATION_FAILED`, which Kafka returns whether or not the
+    /// topic exists.
+    NotAuthorized,
+    /// `UNKNOWN_TOPIC_OR_PARTITION`.
+    NotFound,
+    /// The metadata read failed, or answered with another error.
+    Unread(String),
+}
+
+/// **T13, the rule this crate reads DescribeConfigs by: an EMPTY answer is a
+/// failed read, never "no overrides".** Pure, so every reader shares one
+/// decision and a test can pin it without a broker.
+///
+/// rust-rdkafka 0.36.2's `DescribeConfigsFuture` returns `Ok` for EVERY
+/// resource and never reads `rd_kafka_ConfigResource_error`
+/// (`rdkafka-0.36.2/src/admin.rs:1121-1159`; unchanged through 0.39.0,
+/// PROD-04.0 §6 T13), so a resource the broker refused comes back as `Ok` with
+/// no entries. The per-resource error code is not readable without FFI, which
+/// is owner choice AP-OC1 and not taken here.
+///
+/// A broker never answers a successful describe that way. Kafka 4.3.1 answers
+/// an authorised topic that exists with every `LogConfig` entry, and fills an
+/// EMPTY list only beside a per-resource error: `TOPIC_AUTHORIZATION_FAILED`
+/// for a principal without `DESCRIBE_CONFIGS` on the topic,
+/// `UNKNOWN_TOPIC_OR_PARTITION` for a topic its metadata cache does not hold,
+/// or the code of an exception (`core/src/main/scala/kafka/server/
+/// ConfigHelper.scala:54-79`, `:88-98`, `:144-158` at tag 4.3.1, commit
+/// `26b251a4`; the fetched copy's sha256 is in the FX-4 report).
+///
+/// So the failure is named from what the safe client CAN read, the topic's
+/// metadata under the same principal:
+///
+/// | metadata | answer |
+/// |---|---|
+/// | visible | [`KafkaError::NotAuthorized`] — the topic exists and is visible, so of the errors above only the authorizer's remains, short of an internal broker error |
+/// | `TOPIC_AUTHORIZATION_FAILED` | [`KafkaError::NotAuthorized`] |
+/// | `UNKNOWN_TOPIC_OR_PARTITION` | [`KafkaError::TopicNotFound`] |
+/// | unread | [`KafkaError::Client`], naming both reads |
+#[must_use]
+pub fn empty_topic_config_answer(topic: &str, visibility: &TopicVisibility) -> KafkaError {
+    match visibility {
+        TopicVisibility::Visible => KafkaError::NotAuthorized(format!(
+            "{topic} (DescribeConfigs answered this visible topic with no configuration, which \
+             Kafka does only beside TOPIC_AUTHORIZATION_FAILED: the principal lacks \
+             DescribeConfigs on it)"
+        )),
+        TopicVisibility::NotAuthorized => KafkaError::NotAuthorized(format!(
+            "{topic} (DescribeConfigs answered with no configuration, and metadata refused the \
+             topic too)"
+        )),
+        TopicVisibility::NotFound => KafkaError::TopicNotFound(topic.to_string()),
+        TopicVisibility::Unread(why) => KafkaError::Client(format!(
+            "{topic}: DescribeConfigs answered with no configuration and the topic's metadata \
+             could not be read to say why ({why})"
+        )),
+    }
+}
+
+/// T13 for a BROKER resource: an empty answer is a refused read.
+///
+/// Kafka answers a broker resource with no configuration only beside
+/// `CLUSTER_AUTHORIZATION_FAILED`, or an `INVALID_REQUEST` for a broker id
+/// that is not its own (`ConfigHelper.scala:54-79`, `:100-109`).
+/// Every caller in this workspace takes the id from the same broker's
+/// metadata, so the refusal is the authorizer's. MEASURED by PROD-04.0 (§3.8):
+/// a principal refused on the cluster read `authorizer.class.name` as MISSING,
+/// "no entries and no error".
+#[must_use]
+pub fn empty_broker_config_answer(broker_id: i32) -> KafkaError {
+    KafkaError::NotAuthorized(format!(
+        "broker {broker_id} configuration (DescribeConfigs answered with no configuration, \
+         which Kafka does only beside CLUSTER_AUTHORIZATION_FAILED: the principal lacks \
+         DescribeConfigs on the cluster)"
+    ))
+}
+
 pub trait ClusterReader: Send + Sync {
     fn cluster_id(&self) -> Result<String, KafkaError>;
     fn list_topics(&self) -> Result<Vec<TopicMeta>, KafkaError>;
@@ -282,11 +415,40 @@ pub trait ClusterReader: Send + Sync {
     /// resource and nothing else. `ResourceSpecifier` is rdkafka 0.36's
     /// DescribeConfigs INPUT type; the Java client's name for that role is a
     /// different thing and is not it (see `broker_configs`).
+    ///
+    /// **`Ok` is never an empty map standing for a refused read** (FX-4, T13):
+    /// a denied topic is [`KafkaError::NotAuthorized`] and an unknown one
+    /// [`KafkaError::TopicNotFound`] — see [`empty_topic_config_answer`].
     fn topic_configs(&self, topic: &str) -> Result<BTreeMap<String, String>, KafkaError>;
     /// DescribeConfigs for ResourceSpecifier::Broker(i32). NOT topic_configs:
     /// the mapped target topics do not exist at phase 0 (a Restore refuses if
     /// any of them does), so a TOPIC-resource read would describe nothing.
+    ///
+    /// **`Ok` is never an empty map standing for a refused read** (FX-4, T13):
+    /// a refused cluster read is [`KafkaError::NotAuthorized`] — see
+    /// [`empty_broker_config_answer`].
     fn broker_configs(&self) -> Result<BTreeMap<String, String>, KafkaError>;
+    /// FX-4: DescribeConfigs for every named TOPIC in ONE request, keeping
+    /// each entry's SOURCE and flags — what a backup needs to record capture
+    /// coverage and the effective `message.timestamp.type`.
+    ///
+    /// One `(topic, answer)` per name, in the order given. The outer `Err` is
+    /// the call itself failing (no broker answered); an inner one is that
+    /// topic's own failure, with an empty answer named by
+    /// [`empty_topic_config_answer`] — so an inner `Ok` always holds entries.
+    ///
+    /// The DEFAULT reports that this reader cannot answer, so a reader that
+    /// does not implement it — every test double written before FX-4 — can
+    /// only make a coverage record WEAKER (`notCaptured`), never `captured`.
+    fn describe_topic_configs(
+        &self,
+        topics: &[String],
+    ) -> Result<Vec<(String, TopicConfigRead)>, KafkaError> {
+        let _ = topics;
+        Err(KafkaError::Client(
+            "this ClusterReader does not report per-entry configuration sources".to_string(),
+        ))
+    }
     fn consume_range(
         &self,
         topic: &str,

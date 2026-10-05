@@ -56,6 +56,7 @@
 //! records `tests/doctor.rs::check_7_…` at **26.60 s** for one dialling test.
 //! A binary CANNOT be handed an in-process double, which is why the one
 //! binary-level argv assertion lives under `e2e/` (`e2e/tests/backup_argv.rs`).
+pub mod config_coverage;
 pub mod phase_minus1_admit;
 pub mod phase_run;
 
@@ -150,6 +151,13 @@ pub struct BackupOutcome {
     /// **EXCLUSIVE** (interface I22) — see `phase_run::Ran::covered_to_ms`,
     /// which is where the manifest's inclusive bound is converted.
     pub covered_to_ms: i64,
+    /// **FX-4.** Per named topic, whether the manifest's configuration record
+    /// was captured, and the effective `message.timestamp.type` with its
+    /// source — `config_coverage::classify` over Logweir's own read before
+    /// the engine and the manifest after it. One entry per named topic;
+    /// `phase_run::build_receipt` writes it as the receipt's 1.1.0
+    /// `config_coverage` block.
+    pub config_coverage: BTreeMap<String, logweir_core::backup_receipt::TopicConfigCoverage>,
     pub facts: BackupFacts,
     /// `logweir/backups/<backup_id>/<run_id>.receipt.json` (**GC6**), the key
     /// the receipt was PUT to. Printed as the runner's penultimate stdout line
@@ -563,8 +571,19 @@ fn execute_with_signer(
         "execution claimed; starting the engine"
     );
 
+    // **FX-4: the topic configuration, read by LOGWEIR, immediately before
+    // the engine** — through the same reader (the same principal and the same
+    // source cluster) that admitted the run, and as close in time to the
+    // engine's own capture as this process can get. Never fatal: every
+    // per-topic outcome, a denied read included, is a value the receipt
+    // records. See `config_coverage`'s module doc for why the engine's own
+    // capture cannot answer this.
+    let observed = config_coverage::observe(reader, &plan.topics);
+    config_coverage::log(&observed);
+
     let mut obs = crate::metrics::PhaseLogger::new(run_id);
     let ran = phase_run::run(&plan, engine, store, &mut obs)?;
+    let coverage = config_coverage::classify(&observed, &ran.manifest_configurations);
 
     let mut outcome = BackupOutcome {
         backup_id,
@@ -586,6 +605,7 @@ fn execute_with_signer(
         records_per_topic: ran.records_per_topic,
         covered_from_ms: ran.covered_from_ms,
         covered_to_ms: ran.covered_to_ms,
+        config_coverage: coverage,
         facts: ran.facts,
         // Filled by `persist_receipt` below, from the one function that
         // derives them. Empty here for exactly as long as it takes to put the

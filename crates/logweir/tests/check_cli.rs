@@ -433,6 +433,15 @@ impl FakeProbe {
         self
     }
 
+    /// FX-4 / T13: the broker configuration read is REFUSED — what
+    /// `KafkaInventory::broker_configs` now returns for the empty answer
+    /// rdkafka 0.36.2 hands back when the principal lacks DescribeConfigs on
+    /// the cluster (`ClusterAuthorizationFailed`), instead of an empty map.
+    fn failing_broker_configs(self, code: CheckCode, message: &str) -> Self {
+        self.state.lock().unwrap().broker_configs_fault = Some((code, message.to_string()));
+        self
+    }
+
     fn failing_listing(self, code: CheckCode, message: &str) -> Self {
         self.state.lock().unwrap().listing_fault = Some((code, message.to_string()));
         self
@@ -3755,6 +3764,38 @@ fn the_timestamp_bound_is_the_execution_guards_arithmetic() {
     );
 }
 
+/// **FX-4 / T13, consumer 1 — the false-green readiness row.** A principal
+/// without DescribeConfigs on the cluster used to get an EMPTY broker
+/// configuration back (rdkafka 0.36.2 never reads the per-resource error), and
+/// this row read "no bound declared" as READY. The inventory now returns the
+/// refusal; this row must take its `Err` arm and say UNKNOWN.
+///
+/// Negative control: make the row read a refused configuration as an empty
+/// map (`probe.broker_configs().unwrap_or_default()`) and this test fails with
+/// `TimestampWithinBound` — the pre-fix behaviour.
+#[test]
+fn a_refused_broker_configuration_read_is_unknown_never_within_bound() {
+    let yaml = restore_yaml(&ms_to_rfc3339(INSIDE_MS), &["orders"], "scratch");
+    let m = mount(&restore_plan(&yaml, None));
+    let run = drive(
+        &m,
+        &restore_wiring(
+            &yaml,
+            &manifest_json(),
+            FakeProbe::new().failing_broker_configs(
+                CheckCode::ClusterAuthorizationFailed,
+                "DescribeConfigs on broker 1001 answered with no configuration",
+            ),
+        ),
+    );
+    let row = run.row(CheckId::TargetTimestampBound);
+    assert_eq!(
+        (row.state, row.code),
+        (CheckState::Unknown, CheckCode::BrokerConfigsNotReadable),
+        "a refused broker configuration is UNKNOWN, never a green \"no bound declared\": {row:?}"
+    );
+}
+
 /// The three broker keys this preflight reads are the three the execution
 /// guard reads. A preview of a bound nobody enforces is worse than no preview.
 #[test]
@@ -6224,6 +6265,7 @@ fn catalog_receipt(backup_id: &str, run_id: &str, started: &str) -> BackupReceip
             from_ms: started_at.timestamp_millis() - 3_600_000,
             to_ms: started_at.timestamp_millis(),
         },
+        config_coverage: None,
     }
 }
 
@@ -8005,8 +8047,8 @@ fn the_grammar_this_runner_writes_is_the_grammar_the_controller_parses() {
 /// test pins runner ⟷ literal; the controller test pins literal ⟷ parser; and
 /// neither crate had to grow a dependency on the other.
 const PINNED_SYNC_BODY: &str = r#"catalog-format=1
-catalog-page=1/1 count=1 sha256=9198b1b1f3c4a77fd1788aa8ec661b8c1b2fbf585405d84c80210b484eb52376
-catalog-entry={"pointId":"lwp1-0e02dc33bf63349ec262a62043d9bd04","backupId":"set-a","runId":"run-a","recoveryPointAtMs":1789527600000,"coveredFromMs":1789524000000,"coveredToMs":1789527600000,"locations":[{"locationId":"s3://lw-archive/kafka-backups","availability":"Available"}],"receiptKey":"logweir/backups/set-a/run-a.receipt.json","receiptSha256":"sha256:0e02dc33bf63349ec262a62043d9bd0441fb867c72aa2d5b4ce8a085b05469db","manifestKey":"kafka-backups/set-a/manifest.json","manifestSha256":"sha256:d5eea23a2f7ca3f36d2a5dbf3ab2532a3de3a797ded388afb816068c2863a152","recordedAt":"2026-09-16T06:00:00Z","formatVersion":"1.0.0","availability":"Available","signature":"notAttempted","signerKeyId":"0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0","remedy":"No signature verdict was reached: this installation holds no key that signed this point. Add the signing key to the trust source if you accept evidence from it."}
+catalog-page=1/1 count=1 sha256=95250c908736a87d14285e68202b9ab0a1326896a0a4fbaa30bc3f79ad31353d
+catalog-entry={"pointId":"lwp1-0e02dc33bf63349ec262a62043d9bd04","backupId":"set-a","runId":"run-a","recoveryPointAtMs":1789527600000,"coveredFromMs":1789524000000,"coveredToMs":1789527600000,"locations":[{"locationId":"s3://lw-archive/kafka-backups","availability":"Available"}],"receiptKey":"logweir/backups/set-a/run-a.receipt.json","receiptSha256":"sha256:0e02dc33bf63349ec262a62043d9bd0441fb867c72aa2d5b4ce8a085b05469db","manifestKey":"kafka-backups/set-a/manifest.json","manifestSha256":"sha256:d5eea23a2f7ca3f36d2a5dbf3ab2532a3de3a797ded388afb816068c2863a152","recordedAt":"2026-09-16T06:00:00Z","formatVersion":"1.1.0","availability":"Available","signature":"notAttempted","signerKeyId":"0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0","remedy":"No signature verdict was reached: this installation holds no key that signed this point. Add the signing key to the trust source if you accept evidence from it."}
 catalog-counts={"total":1,"available":1,"missing":0,"unreadable":0,"deleted":0,"conflict":0,"unsupportedFormat":0,"partial":0,"signature":{"verified":0,"invalid":0,"noEvidence":0,"notAttempted":1},"byDay":[{"day":"2026-09-16","points":1}]}
 catalog-signers=[{"keyId":"0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0","points":1}]
 catalog-cursor={"indexShard":"2026-09-16","complete":true}
