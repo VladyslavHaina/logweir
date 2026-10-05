@@ -240,3 +240,54 @@ fn expected_restored_count_treats_the_window_as_closed_and_ignores_segments_outs
     let empty = facts_with_segments(vec![]);
     assert_eq!(expected_restored_count(&empty, FLOOR_MS, PIT_MS), (0, 0));
 }
+
+/// FX-1 fix round (M1): the default `describe_with_notices` is exactly
+/// `describe` with no notice, so a double that only implements `describe`
+/// behaves as it always did — and it must propagate `describe`'s error rather
+/// than paper over it with an empty answer.
+#[test]
+fn default_describe_with_notices_is_describe_with_no_notice() {
+    struct Describes(Result<(), ()>);
+    impl DataEngine for Describes {
+        fn id(&self) -> EngineId {
+            unimplemented!()
+        }
+        fn list_backup_sets(&self, _: &StorageUrl) -> Result<Vec<BackupSetRef>, EngineError> {
+            unimplemented!()
+        }
+        fn describe(&self, _: &BackupSetRef) -> Result<BackupSetFacts, EngineError> {
+            match self.0 {
+                Ok(()) => Ok(facts_with_segments(vec![seg(FLOOR_MS, MID_MS, 7)])),
+                Err(()) => Err(EngineError::Operational("describe failed".into())),
+            }
+        }
+        fn preflight(&self, _: &RestorePlan) -> Result<PreflightReport, EngineError> {
+            unimplemented!()
+        }
+        fn restore(
+            &self,
+            _: &RestorePlan,
+            _: &mut dyn PhaseObserver,
+        ) -> Result<RestoreFacts, EngineError> {
+            unimplemented!()
+        }
+        fn fingerprints(&self, _: &SampleSelection) -> Result<Vec<RecordFingerprint>, EngineError> {
+            unimplemented!()
+        }
+    }
+    let set = BackupSetRef {
+        backup_id: "backup-bound-test".into(),
+        manifest_key: "backup-bound-test/manifest.json".into(),
+    };
+    let (facts, notices) = Describes(Ok(()))
+        .describe_with_notices(&set)
+        .expect("describe succeeds");
+    assert_eq!(facts.backup_id, "backup-bound-test");
+    assert_eq!(facts.topics[0].partitions[0].segments[0].record_count, 7);
+    assert!(notices.is_empty(), "{notices:?}");
+    let r = Describes(Err(())).describe_with_notices(&set);
+    assert!(
+        matches!(r, Err(EngineError::Operational(ref m)) if m == "describe failed"),
+        "{r:?}"
+    );
+}

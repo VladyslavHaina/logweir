@@ -2966,6 +2966,37 @@ export const READINESS_NOT_RUN_WARNING =
   "already exists and nothing is overwritten either way. Run the check in step 5 to find out " +
   "before an approver signs rather than after.";
 
+/** What a restore copies, said where the plan is reviewed, above Create (FX-6).
+ *
+ *  WITH THE PLAN, NOT THE APPROVAL. It follows the plan's own notes and comes
+ *  before the approval-policy block: directly above Create it sat under that
+ *  block's heading in the same style, and read as part of the approval.
+ *
+ *  A PASSING DRILL DOES NOT RULE IT OUT. Phase 7 compares the restored topic with
+ *  the ARCHIVE, never with the source. What the pinned engine changes while it
+ *  writes the archive is on both sides and passes: it captures with
+ *  `READ_UNCOMMITTED` and keeps commit and abort markers as records, archives
+ *  the producers' timestamps for a `LogAppendTime` topic, and keeps one copy of
+ *  a repeated header key. A record that selection by each segment's first and
+ *  last timestamps skips is outside both sides, and passes too. The rest can
+ *  fail a drill: a full restore that drops a record below the floor fails its
+ *  count check, so can a correct point-in-time restore, and so does a sampled
+ *  record whose own `x-original-offset` the restore replaced. PROD-01.1
+ *  measured every clause (its decision record, section 2) and wrote this
+ *  sentence (section 8.3); `docs/stability.md` and `docs/verify-a-scorecard.md`
+ *  carry the long form with the evidence rows.
+ *
+ *  ON EVERY REVIEW STEP, NOT A CHOSEN ONE. The console cannot tell which of a
+ *  plan's topics are transactional or out of order -- the archive records
+ *  neither -- so the sentence is not narrowed to any topic, and every plan names
+ *  at least one. A later detection of transactional archives is what may narrow
+ *  it. Code spans render through `messageText`, never as backticks (O2). */
+export const RESTORE_SEMANTICS_SENTENCE =
+  "Restores copy the archive as written: aborted transactions and transaction markers are " +
+  "restored as ordinary records, `LogAppendTime` timestamps come back as producer `CreateTime`, " +
+  "repeated header keys keep one copy, and when timestamps are out of order a full or " +
+  "point-in-time restore can miss records.";
+
 /** Step 6 -- the rendered plan, its hash, the two minted names, and the one
  *  guided submit.
  *
@@ -3012,6 +3043,8 @@ export function renderPlanStep(prepared, state) {
     "<button type=\"button\" id=\"download-plan\"" + (renderable ? "" : " disabled") + ">Download plan</button>" +
     "</div>" +
     "<p class=\"caveat\">" + esc(COPY_CAVEAT) + "</p>" +
+    "<p class=\"note\" id=\"restore-semantics\">" + messageText(RESTORE_SEMANTICS_SENTENCE) +
+    "</p>" +
     approvalPolicyBlock(s.approvalPolicy, s.ticket, errors.ticket) +
     "<div class=\"actions actions-final\">" +
     "<button type=\"button\" id=\"create-restore\" class=\"primary\"" +

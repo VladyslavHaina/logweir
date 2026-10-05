@@ -91,11 +91,12 @@ The loop never decides these. A row gated on an open decision stays Blocked; the
 | ID | Decision | Options | Recommendation | Blocks | State |
 | --- | --- | --- | --- | --- | --- |
 | OD-1 | When expansion starts | (a) after every PLAT task is Done and the owner says go; (b) additionally allow Wave 0 rows that need no docker-desktop change before the platform tracker completes; (c) hand FX-1…FX-7 to the platform run's defect table now | (c) now, (a) for the rest; (b) if agent capacity allows | Every row | **Released 2026-09-28** under (a): all 41 PLAT tasks Done 2026-09-25; the owner said go |
-| OD-2 | Product boundaries in `docs/stability.md` "Never" | Per entry: keep, narrow or reverse | Keep #1 (live topics) and allow PROD-15's original-name restore into an absent topic; keep #3 (PROD-12 is cutover verification) and #4 (PROD-13 deferred); decide #2 after PROD-03.0 shows how many protected topics depend on a registry, and if narrowed, allow schema resolution and selective import only (RBAC-MDS and CSFLE stay refused) | 03.1, 03.2, 12.1, 15.1 | Open; asked 2026-09-28 (#1, #3 and #4 now; #2 after PROD-03.0) |
+| OD-2 | Product boundaries in `docs/stability.md` "Never" | Per entry: keep, narrow or reverse | Keep #1 (live topics) and allow PROD-15's original-name restore into an absent topic; keep #3 (PROD-12 is cutover verification) and #4 (PROD-13 deferred); decide #2 after PROD-03.0 shows how many protected topics depend on a registry, and if narrowed, allow schema resolution and selective import only (RBAC-MDS and CSFLE stay refused) | 03.1, 03.2, 12.1, 15.1 | **Decided 2026-10-05** for #1, #3 and #4, as recommended. #1 is narrowed: restore-in-place into a live topic stays refused, and PROD-15's original-name restore into an absent topic is allowed behind its own approval, so 15.1's gate is clear (rule 8: the Never-list edit lands with its doc_lint update in one commit). #3 is kept, and 12.1 is cutover verification. #4 is kept, and PROD-13 stays deferred. **#2 stays open** until PROD-03.0 reports, so 03.1 and 03.2 stay gated |
 | OD-3 | Engine route per capability (proposed by PROD-00.1) | Upstream PR (bug-class fixes only); maintained MIT fork built from the vendored source (supersedes or scopes ruling GR6); Logweir-native path; declared unsupported | Build from source regardless (arm64, CVE patching, signed provenance); upstream PRs for bug-class fixes; native paths for offsets, ACLs and verification; fork only what upstream refuses | 00.2, 00.3, 02.3, 07.3, 11.2 | Open; the options come from PROD-00.1 (in progress) |
-| OD-4 | Provider and storage evidence | Accounts and budget for AWS (S3, MSK), Confluent Cloud, Redpanda Cloud, Aiven, Azure Event Hubs, GCS and Azure Blob; whether rule 6 lets a local runner reach remote endpoints | AWS S3 and MSK first (largest managed population; real conditional create and lock readback strengthen the evidence), then Confluent Cloud after PROD-01.3 | Provider rows in 01.2 and 09.2 | Open; asked 2026-09-28 |
-| OD-5 | Business and legal | Trademark clearance or rename (`TRADEMARKS.md` gates announcing); monetization before external contributions (no CLA, so relicensing closes after the first outside PR); a legal opinion on copyright in AI-assisted code for the chosen model; a contracting entity for regulated buyers | Decide monetization and the name before any public positioning | Publishing 14.3 outputs, public roadmap, outreach beyond NDA | Open; asked 2026-09-28 |
-| OD-6 | A scoped `unsafe` policy for librdkafka calls the safe rdkafka API lacks (PROD-01.4's TI-OC1; it also covers PROD-04.0's group, offset and ACL calls, so `unsafe` is decided once) | (a2) one FFI crate for every such call, with `logweir-kafka` and every product crate keeping `forbid(unsafe_code)`; (a1) a private module in `logweir-kafka` (`deny` plus one `allow`); (b) wait for upstream rust-rdkafka (PR #721, stalled since 2024-09); (c) the engine route (PROD-00.3, and Amendment D for offsets); (d) a raw-protocol client; (e) no `unsafe`: the heuristic only, and PROD-04.0 limited to the safe consumer API | (a2), with (b) as the per-call exit and the PROD-01.4 heuristic as the fallback for `null` IDs and truncation (`decisions/PROD-01.4-topic-identity.md` §6.4) | 01.4a; PROD-04.0's FFI paths | Open; asked 2026-09-29 |
+| OD-4 | Provider and storage evidence | Accounts and budget for AWS (S3, MSK), Confluent Cloud, Redpanda Cloud, Aiven, Azure Event Hubs, GCS and Azure Blob; whether rule 6 lets a local runner reach remote endpoints | AWS S3 and MSK first (largest managed population; real conditional create and lock readback strengthen the evidence), then Confluent Cloud after PROD-01.3 | Provider rows in 01.2 and 09.2 | **Decided 2026-10-05:** AWS S3 and MSK only; no other provider is funded yet. There is no standing budget: before creating any billable AWS resource, the orchestrator asks the owner with a cost estimate, and test resources are deleted after each session. Rule 6: a runner on the owner's machine may reach the funded provider only, with test-only credentials scoped to disposable resources. The AWS provider rows in 01.2 and 09.2 wait for the owner's account and credentials; every other provider stays not evidenced |
+| OD-5 | Business and legal | Trademark clearance or rename (`TRADEMARKS.md` gates announcing); monetization before external contributions (no CLA, so relicensing closes after the first outside PR); a legal opinion on copyright in AI-assisted code for the chosen model; a contracting entity for regulated buyers | Decide monetization and the name before any public positioning | Publishing 14.3 outputs, public roadmap, outreach beyond NDA | **Decided 2026-10-05:** open core. The Apache-2.0 core stays open and paid add-ons ship separately under a commercial license, so no relicensing is needed and the no-CLA rule stands. Name: the owner commissions the clearance act in `TRADEMARKS.md`; public positioning, publishing 14.3's outputs and outreach beyond NDA stay gated on that opinion. The copyright opinion on AI-assisted code and a contracting entity are owner actions due before the first sale of a paid add-on; no engineering row waits on them |
+| OD-6 | A scoped `unsafe` policy for librdkafka calls the safe rdkafka API lacks (PROD-01.4's TI-OC1; it also covers PROD-04.0's group, offset and ACL calls, so `unsafe` is decided once) | (a2) one FFI crate for every such call, with `logweir-kafka` and every product crate keeping `forbid(unsafe_code)`; (a1) a private module in `logweir-kafka` (`deny` plus one `allow`); (b) wait for upstream rust-rdkafka (PR #721, stalled since 2024-09); (c) the engine route (PROD-00.3, and Amendment D for offsets); (d) a raw-protocol client; (e) no `unsafe`: the heuristic only, and PROD-04.0 limited to the safe consumer API | (a2), with (b) as the per-call exit and the PROD-01.4 heuristic as the fallback for `null` IDs and truncation (`decisions/PROD-01.4-topic-identity.md` §6.4) | 01.4a; PROD-04.0's FFI paths | **Decided 2026-10-05** as recommended: (a2), one FFI crate for every such librdkafka call, with `logweir-kafka` and every product crate keeping `forbid(unsafe_code)`. (b) is the per-call exit: a call is deleted once rust-rdkafka wraps it safely. The PROD-01.4 heuristic stays the fallback for `null` IDs and truncation. The gate on 01.4a and 04.0b is clear |
+| OD-7 | Versioning of new `validate_invariants` arms that read ONLY a new optional block | (a) MINOR (format 1.1.0): a reader that predates the block ignores the arms, and nothing it verifies changes (the argument of FX-4 for its arms 6–11, and of PROD-01.4 §4); (b) MAJOR (format 2.0.0), the literal reading of `docs/stability.md`, which calls every `validate_invariants` change MAJOR and needs two maintainer approvals | (a), limited to arms that read only the new optional block; any arm that changes how an existing field is judged stays MAJOR | FX-4's merge; the topic-ID arms PROD-01.4 planned for PROD-02.1 | **Decided 2026-10-05** as recommended: (a) MINOR for arms that read ONLY a new optional block; an arm that changes how an existing field is judged stays MAJOR. A follow-up ruling the same day makes FX-4's review-M5 fix MINOR as well: it adds a `<topic>: configuration not assessed (<why>)` entry to the existing `unexpected_divergence`, which can only weaken an older reader's verdict. `docs/stability.md` records both rulings with FX-4. FX-4's merge is no longer gated on OD-7; its version order with FX-7 still applies |
 
 ## Loop contract (Claude Code)
 
@@ -133,21 +134,21 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 
 | Wave | Row | Title | P | M | Kind | Depends on | Gate | Lab | Tier | Status |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 0 | FX-1 | Parse the engine's consumer-group snapshot | P1 | M1 | fix | — | — | compose | A | Proposed |
-| 0 | FX-2 | Apply or refuse `runnerResources` | P1 | M1 | fix | — | — | k8s | A | Proposed |
+| 0 | FX-1 | Parse the engine's consumer-group snapshot | P1 | M1 | fix | — | — | compose | A | Done |
+| 0 | FX-2 | Apply or refuse `runnerResources` | P1 | M1 | fix | — | — | k8s | A | In progress |
 | 0 | FX-3 | Stop labelling new-topic deviations "intended" | P1 | M1 | fix | — | — | compose | A | Proposed |
 | 0 | FX-4 | Record topic-configuration capture coverage | P1 | M1 | fix | — | — | compose | A | In progress |
 | 0 | FX-5 | Console replication factor from the source | P1 | M1 | fix | — | — | k8s | B | Proposed |
-| 0 | FX-6 | Disclose transaction and timestamp semantics | P1 | M1 | docs | — | — | none | B | Proposed |
-| 0 | FX-7 | Keep earlier points valid after a manifest rewrite | P1 | M1 | fix | — | — | compose | A | Proposed |
+| 0 | FX-6 | Disclose transaction and timestamp semantics | P1 | M1 | docs | — | — | none | B | In progress |
+| 0 | FX-7 | Keep earlier points valid after a manifest rewrite | P1 | M1 | fix | — | — | compose | A | In progress |
 | 0 | FX-8 | Refuse or label point-in-time selection over `LogAppendTime` sources | P1 | M1 | fix | 01.1; FX-4 for the broker-default arm | — | compose | A | Proposed |
 | 0 | PROD-00.1 | Evaluate the engine; decide a route per capability | P1 | M1 | research | — | — | compose | B | In progress |
 | 0 | PROD-01.1 | Prove record and transaction behaviour | P1 | M2 | research | — | — | compose | B | Done |
 | 0 | PROD-01.4 | Define topic identity and generations | P1 | M2 | research | — | — | none | B | Done |
-| 0 | PROD-01.5 | Shared fixture profiles and broker versions | P1 | M1 | infra | — | — | compose | B | In progress |
-| 0 | PROD-04.0 | Decide the Kafka administrative path | P1 | M2 | research | — | — | compose | B | In progress |
+| 0 | PROD-01.5 | Shared fixture profiles and broker versions | P1 | M1 | infra | — | — | compose | B | Done |
+| 0 | PROD-04.0 | Decide the Kafka administrative path | P1 | M2 | research | — | — | compose | B | Done |
 | 0 | PROD-08.4 | Publish a control-evidence mapping | P1 | M2 | docs | — | — | none | B | Proposed |
-| 0 | PROD-14.0 | Ship a working release | P1 | M1 | infra | — | — | none | B | Proposed |
+| 0 | PROD-14.0 | Ship a working release | P1 | M1 | infra | — | — | none | B | In progress |
 | 0 | PROD-14.3 | Positioning and design-partner kit | P1 | M2 | docs | — | OD-5 (publication) | none | C | Proposed |
 | 1 | PROD-00.2 | Build the engine from the vendored source | P1 | M1 | infra | 00.1 | OD-3 | compose | A | Proposed |
 | 1 | PROD-01.3 | Reach managed and mTLS clusters | P1 | M1 | impl | 01.5 | — | k8s | A | Proposed |
@@ -155,13 +156,20 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 | 1 | PROD-14.1 | Simple install and emergency recovery kit | P1 | M1 | impl | 14.0, 01.2 | — | k8s | A | Proposed |
 | 1 | PROD-08.1 | Complete archive integrity and exact counts | P1 | M2 | impl | 01.1 | — | compose | A | Proposed |
 | 1 | PROD-05.1 | Capture topic configuration with coverage | P1 | M2 | impl | FX-4, 01.5 | — | compose | A | Proposed |
-| 1 | PROD-04.1 | Archive consumer position evidence | P1 | M2 | impl | 04.0, 01.4, FX-1 | — | compose | A | Proposed |
+| 1 | PROD-04.1 | Archive consumer position evidence | P1 | M2 | impl | 04.0, 04.0a, 04.0d, 01.4, FX-1 | — | compose | A | Proposed |
 | 1 | PROD-02.1 | Honest coverage for scheduled backups | P1 | M2 | impl | 01.4 | — | k8s | A | Proposed |
 | 1 | PROD-07.1 | Resolve checkpoint and delivery semantics | P2 | M3 | research | 01.1 | — | none | B | Proposed |
 | 1 | PROD-09.3 | Decide archive data protection | P2 | M3 | research | 00.1 | — | none | B | Proposed |
 | 1 | PROD-01.1a | Detect transactional archives; refuse by default, label an approved override | P1 | M2 | impl | 01.1, FX-6 | — | compose | A | Proposed |
 | 1 | PROD-01.1b | Make recovery-point selection safe for out-of-order timestamps | P1 | M2 | impl | 01.1 | — | compose | A | Proposed |
 | 1 | PROD-01.4a | Topic IDs through DescribeTopics (the first wrapper under OD-6's policy) | P1 | M2 | impl | 01.4 | OD-6 | compose | A | Proposed |
+| 1 | PROD-04.0a | Committed positions through the safe consumer API | P1 | M2 | impl | 04.0 | — | compose | A | Proposed |
+| 1 | PROD-01.5a | Move the default broker line off 3.7.1 | P1 | M1 | infra | 01.5, 00.1 | — | compose | B | Proposed |
+| 1 | PROD-01.5c | Run PROD-01.1's and 01.4's suites on the 3.9, 4.1 and 4.3 lines | P1 | M2 | infra | 01.5 | — | compose | C | Proposed |
+| 3 | PROD-01.5b | Put the `crates/` e2e rows on the per-stack variables | P2 | M3 | infra | 01.5 | — | compose | B | Proposed |
+| 1 | PROD-04.0b | Group and ACL calls inside OD-6's perimeter | P1 | M2 | impl | 04.0 | OD-6 | compose | A | Proposed |
+| 1 | PROD-04.0c | Amendment D names the engine's group subcommands | P2 | M3 | docs | 04.0 | OD-3; owner sign-off (rule 8) | none | B | Proposed |
+| 1 | PROD-04.0d | Fixtures for groups and ACLs (`acl` profile, `groups` helper, streams-protocol variant, share-state settings) | P1 | M2 | infra | 04.0, 01.5 | — | compose | B | Proposed |
 | 3 | PROD-01.4b | Upstream DescribeTopics in rust-rdkafka (the exit for 01.4a) | P3 | M3 | impl | 01.4a | — | none | B | Proposed |
 | 2 | PROD-02.2 | Capture incrementally | P1 | M2 | impl | 02.1, 00.1 | — | compose | A | Proposed |
 | 2 | PROD-03.0 | Flag schema-dependent topics | P1 | M2 | impl | — | — | compose | A | Proposed |
@@ -179,7 +187,7 @@ The single source of task status. Waves give the earliest intended batch; "Depen
 | 3 | PROD-02.4 | Streaming protection with a coverage timeline | P2 | M3 | impl | 02.3 | — | k8s | A | Proposed |
 | 3 | PROD-03.1 | Capture a usable registry dependency set | P2 | M3 | impl | 03.0, 01.2 | OD-2 | compose | A | Proposed |
 | 3 | PROD-03.2 | Preview and execute schema-aware recovery | P2 | M3 | impl | 03.1, 08.1 | OD-2 | k8s | A | Proposed |
-| 3 | PROD-05.3 | Export access policy for review | P2 | M3 | impl | 04.0, 05.1 | — | compose | A | Proposed |
+| 3 | PROD-05.3 | Export access policy for review | P2 | M3 | impl | 04.0, 04.0b, 04.0d, 05.1 | — | compose | A | Proposed |
 | 3 | PROD-07.2 | Make interruption honest | P2 | M3 | impl | 07.1 | — | k8s | A | Proposed |
 | 3 | PROD-07.3 | Resume within proven semantics | P2 | M3 | impl | 07.2, 00.3 | OD-3 | k8s | A | Proposed |
 | 3 | PROD-08.2 | Measure recovery objectives | P2 | M3 | impl | 08.1 | — | k8s | A | Proposed |
@@ -212,6 +220,21 @@ Found by the 2026-09-23 review. They do not depend on any expansion feature. Evi
 | FX-6 | Two restore semantics are undisclosed. Transactional topics probably come back with aborted records and commit/abort markers as ordinary data. With non-monotonic timestamps, the point-in-time end can omit an in-window record without detection. Drills pass in both cases because phase 7 compares the target with the archive. | Engine `kafka/fetch.rs` READ_UNCOMMITTED with no control-record filter; `BackupRecord` has no transaction fields; `kafka/produce.rs` non-transactional; `segment/writer.rs` first/last timestamps used by every selector. Read from source, not run; no test produces transactionally. | Disclose both in `docs/verify-a-scorecard.md`, `docs/stability.md` and the restore review screen; PROD-01.1 decides the product rails. |
 | FX-7 | A second run under an existing `backup_id` rewrites the manifest in place, so an earlier signed point no longer verifies. This is the residue of platform defect RECEIPT-DUP, which gives each receipt its own point but not its own manifest. | Engine rewrites `{backup_id}/manifest.json` (get-merge-put); the CLI takes `spec.backup_id`; `crates/logweir/src/backup/phase_run.rs` reads the manifest's version id and discards it. | On versioned buckets pin the manifest version id in receipt and catalog and read by version; otherwise refuse a second run under an existing `backup_id`. Skip if the platform run closed RECEIPT-DUP completely. |
 | FX-8 | A point-in-time restore over a `LogAppendTime` source selects records by the producers' CreateTime (what the archive holds) and is signed `pass`. Found by PROD-01.1 on 2026-09-29. | PROD-01.1 `lat` row: a point in 2001 restored six records the broker appended in 2026, `pass` 6/6 (`decisions/PROD-01.1-record-semantics.md` §2.3); the engine archives CreateTime (S3); the manifest's `configurations` carries a topic override of `message.timestamp.type`. | Refuse point-in-time selection for `LogAppendTime` topics before any target is created (`PointInTimeByProducerTime`), unless the approved plan says `restore.timeBasis: producerTime`, which labels the scorecard, receipt and console. The topic-override arm lands now; the broker-default arm lands with FX-4. Full specification: the record's §9. |
+
+### Fix-now completion records
+
+**FX-1 — Done (2026-09-29).**
+- **Ownership:** worker `fx-1` (one run and one fix round), independent Tier-A review `claude/fx-1.review.md`. The review was ACCEPT-WITH-FIXES (1 MEDIUM, 5 LOW, no HIGH), with 11 mutants killed including 8 of the reviewer's own. The orchestrator read the fix round. Merged as `b4103221` (branch tip `54e8c892`); the full `scripts/ci-check.sh` passed with rc 0 on `b4103221`.
+- **Fix:**
+  - `crates/logweir-engine-oso/src/vendored/consumer_groups.rs` parses what the engine writes: `snapshot_time`, and `offsets` as topic → partition → offset. The writer is identical from engine 0.19.1 to 0.22.0.
+  - Unknown fields are kept. Values the engine never writes are refused: a bad partition key, a negative offset, a repeated group, a repeated topic or partition key.
+  - A snapshot Logweir cannot read is a value (`Unreadable`), never an `Operational` failure. `drill run`, `restore run` and `backup run` now tell the operator: a `warning:` line on stderr and a WARN log event (`ArchiveNotice`), with nothing signed changed.
+- **Fixture:** `e2e/fixtures/consumer-groups-snapshot.json` is now the pinned engine's real bytes, with the broker's committed offsets as the oracle. Provenance is in `e2e/fixtures/README.md`.
+- **Drift gate:** the xtask gate covers `consumer_groups.rs`, compares field types and serde wire attributes, refuses an ambiguous struct name, and runs in `cargo test`.
+- **Evidence** (compose slot 1, and the reviewer's slot 4): before the fix, a drill or `backup run` over an archive with a non-empty snapshot exited 1 with no scorecard and no receipt. After it, snapshots from engines 0.19.1–0.22.0 parse exactly. Archives from 0.21 and 0.22 pass, with both verifiers VALID. Archives from 0.19 and 0.20 end signed `fail-integrity`/`partial`, because they carry no segment digests; that part belongs to PROD-00.1, not this row.
+- **Migration:** none. Archives without a snapshot behave as before.
+- **Left for PROD-04.1:** carrying the snapshot's state into signed evidence.
+- **Artifacts:** `claude/artifacts/fx-1/`.
 
 ## Foundation dependency map
 
@@ -379,6 +402,29 @@ PLAT prerequisites that must be Done before a task ships. Research and contract 
 - **Tests/evidence:** Profile smoke runs, support-matrix rows, and the engine's unnegotiated protocol versions exercised on 4.x.
 - **Dependencies:** None. **Handoff:** profile names and ownership, broker rows.
 
+**Completion record — Done (2026-09-29), PROD-01.5.**
+- **Ownership:** worker `prod-01-5` (one run, one fix round, and the reader sweep after PROD-01.1 and 01.4 merged), independent Tier-B review `claude/prod-01-5.review.md`. The review was ACCEPT-WITH-FIXES (2 MEDIUM, 8 LOW, no HIGH), and the orchestrator read the fix round. Merged as `632ea345` (branch tip `856219da`). The full `scripts/ci-check.sh` passed with rc 0 on `632ea345`, and CI run 36536046039 was green, including the `e2e` job on the default stack.
+- **Decision record:** [`decisions/PROD-01.5-fixture-profiles.md`](decisions/PROD-01.5-fixture-profiles.md).
+- **Parallel stacks:**
+  - `e2e/compose/stack-env.sh --slot N` gives project `logweir-e2e-s<N>`, host ports +N×10000, and its own network, volumes and KRaft cluster ids.
+  - The default render is byte-identical to before; the reviewer diffed it.
+  - One variable list (`stack-lib.sh`) is checked at every entry point, including the Rust harness. Incoherent environments were refused 55/55 before any docker call.
+  - Two slots ran drills side by side and tore down only their own projects.
+- **Broker lines:** Kafka 3.9.2, 4.1.2 and 4.3.1 (pinned by digest), with 3.7.1 kept as the legacy default. Each passed the demo drill, `just pitr` and the receipt path, and the e2e package passed 75/0 on 4.3.1.
+  - The engine's 15 sendable fixed request versions sit inside every line's supported range. Two sit at the 4.x minimum; that headroom is PROD-00.1's ApiVersions row.
+  - `docs/support-matrix.md` gains the broker-version column.
+- **Object store:** SeaweedFS 4.48 (Apache-2.0) is the maintained choice. It passed conditional create, versioning with version-id reads, Object Lock readback, path-style and SigV4. RustFS 1.0.0 is the runner-up. versitygw v1.8.0 was not chosen: its unknown-key `404 XAdminUserNotFound` misleads Logweir's classifier. MinIO in `charts/` and `deploy/poc/` is untouched; that is REPLACE-MINIO.
+- **Profiles:** `auth` (PLAIN, SCRAM-SHA-256 and mTLS listeners), `cluster3`, `cluster2`, `objectstore` (lock-capable, with a second bucket), `registry` and `streams` (classic protocol). The smoke passed 29/29 on slot 2 (4.3.1), with a real negative control for Streams. The `txn` hook is reserved for PROD-01.1's fixture.
+- **Guards:** `e2e/tests/stack_params.rs` walks every reader directory recursively and fails on a default-stack address. PROD-01.1's and 01.4's readers were swept onto `bootstrap()`/`s3_endpoint()` with five negative controls, and their live rows ran on slot 3.
+- **Migration:** none for users. Workers use slots (the WORKER-RULES "Compose stacks are parallel" section).
+- **Artifacts:** `claude/artifacts/prod-01-5/`.
+- **Rows added:** PROD-01.5a (move the default broker line; after PROD-00.1), 01.5b (the `crates/` `--features e2e` readers and `just links` over `e2e/README.md`), and 01.5c (PROD-01.1's and 01.4's suites on 3.9, 4.1 and 4.3, which both handoffs owed).
+- **Notes for other rows:**
+  - C3, a RocksDB Streams variant: PROD-06 if it needs on-disk state.
+  - C4, the object-store rows: PROD-01.2.
+  - C5: PROD-00.1's ApiVersions row.
+  - C6, `logweir-store`'s `StoreErrorClass::classify` mapping versitygw's `404 XAdminUserNotFound` to not-found: PROD-01.2's archive-backend rows.
+
 ## PROD-02 — Continuous protection and recoverable history
 
 **Priority:** P1 (02.1, 02.2), P2 (02.3, 02.4). **Owner areas:** capture, receipts, catalog, worker lifecycle. **Boundary:** make scheduled capture honest and incremental first; a long-lived capture worker only after the engine route (OD-3); never a cluster-consistent snapshot claim. **Risk/migration:** generations and append-only, versioned manifests must preserve older archives.
@@ -458,6 +504,36 @@ PLAT prerequisites that must be Done before a task ships. Research and contract 
 - **Acceptance:** A decision record per operation with evidence against the 4.x fixture; group-type handling defined (share and streams groups reported as not captured unless supported).
 - **Tests/evidence:** Prototype calls against PROD-01.5's 4.x profile.
 - **Dependencies:** None. **Handoff:** `decisions/PROD-04.0-admin-path.md` and ADR amendments.
+
+**Completion record — Done (2026-09-29), PROD-04.0.**
+- **Ownership:** worker `prod-04-0` (one run and one fix round), independent Tier-B review `claude/prod-04-0.review.md`. The review was ACCEPT-WITH-FIXES with 1 HIGH, 5 MEDIUM and 11 LOW; the HIGH re-check gave ACCEPT. Merged as `51aeefd2` (branch tip `00cf81fd`). The branch changes docs only; links, labels, `doc_lint` and `just lint` passed with rc 0.
+- **Decision record:** [`decisions/PROD-04.0-admin-path.md`](decisions/PROD-04.0-admin-path.md). The route per operation:
+
+  | Operation | Route |
+  | --- | --- |
+  | List groups by type | librdkafka ListConsumerGroups inside OD-6's perimeter, joined with a name listing |
+  | Describe groups | DescribeConsumerGroups, for ids already classified |
+  | Fetch offsets | the safe consumer API, with RequireStable |
+  | Commit offsets | the safe consumer API, from a non-member; the broker refuses it while the group has members |
+  | Describe ACLs | DescribeAcls, guarded by two positive probes that tell "no authorizer" from "denied" |
+  | Create ACLs | no product route |
+  | DescribeProducers, ListTransactions | unsupported; only a raw-protocol client reaches them |
+
+  The engine route is recommended against for every operation, which feeds OD-3 and OD-6's option (c).
+- **Group types:** classic and consumer groups are captured. Share, streams and other-protocol groups are `excluded: GroupTypeNotCaptured`. An id missing from every listing is `failed: NotVisibleToPrincipal` when a targeted lookup is refused, and `excluded: GroupNotFound` only when one answers. Absence never means offset 0.
+- **Measured traps** (Kafka 4.3.1, and 3.9.2 where it differs):
+  - rdkafka 0.36.2's safe `fetch_group_list` aborts on any member-less group (fixed in 0.37.0);
+  - the classic describe reports every non-classic or absent group as `Dead`;
+  - librdkafka's DescribeAcls reports "no authorizer" and "not authorised" alike as 0 bindings;
+  - ListGroups silently shows a caller only the groups it may Describe;
+  - an empty streams group accepts an outside commit.
+- **Input to OD-6:** four operations need librdkafka calls the safe API lacks (the typed listing, describe, DescribeAcls, DescribeCluster). Measured cost: 117 shared lines, plus 30–45 lines per call. Fetch and commit need no `unsafe` under any option. §7 tabulates what each OD-6 option leaves PROD-04.1, 04.2 and 05.3.
+- **Class sweep:** "denied reads as defaults" (T13) reaches five shipped consumers, including a restore readiness check that reports `ready` on a refused DescribeConfigs. They are handed to FX-4, which is in flight.
+- **Proposed text** for the ADR 0004 amendment (perimeter-neutral) and Amendment D. Neither landed, per rule 8.
+- **Upstream reports proposed (not filed):** librdkafka T9 and T3; rust-rdkafka PR #785's missing wrappers and T13. Filing them publicly needs the owner's OK.
+- **Left for PROD-04.1's brief** (the reviewer's non-blocking LOWs): "no new third-party crate" wording at :135; §0's summary aligned with §5's missing-group rule; ten `examples/` targets that also lack `forbid(unsafe_code)`.
+- **Artifacts:** `claude/artifacts/prod-04-0/`.
+- **Rows added:** PROD-04.0a–d. PROD-04.1 now also depends on 04.0a and 04.0d, and PROD-05.3 on 04.0b and 04.0d.
 
 ### PROD-04.1 — Archive consumer position evidence
 

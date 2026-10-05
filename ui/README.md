@@ -206,6 +206,7 @@ authorisation story is "the API server evaluated the viewer's RBAC".
 | `tests/check-intent.spec.js` | **P14 and its class**: a check asked again replays only while it can still be the answer -- the spent rule, `askCheck`, and the schedule form, the readiness panel and *Discover topics* over D0's replay rule, modelled. |
 | `tests/mcp-round3.spec.js` | **the human-like pass, round 3**: the wizard's focused status kept clear of its sticky footer, step texts that show names as code, "Restore this point" only for a role that can restore, and the no-role header -- each with the behaviour it replaced. |
 | `tests/check-deadline.spec.js` | **P15 and its class**: every follower reads its check until the check's own deadline, backs off while it does, and says so -- with *Run the check again* -- when the deadline passes without a result: the deadline pinned to the product's own numbers, the follow on node's mock timers, and each page (the readiness panel, the schedule form, *Test connection*, *Discover topics*, *Test access*) with a check that settles at 100 s and one that never does. Restore step 5's two rows are in `mutation.spec.js`. |
+| `tests/restore-semantics.spec.js` | **FX-6**: step 6 says what a restore copies, above Create -- the decision record's sentence word for word, its two identifiers as code, visible (a direct child of step 6, never folded into a wrapper) with each of the four approval-policy blocks, and on the step on screen -- each row with its negative control. |
 | `tests/preview-server.js` | a development tool, never a test: serves this directory over the fixtures under `tests/fixtures/preview/`. See *Previewing with fixtures*. |
 
 **The design system** lives in `style.css` and nowhere else. It is VMware
@@ -868,13 +869,16 @@ bytes, same hash, same two minted names.
 shown as RFC 3339. The window is **half-open** -- `fromMs` is the oldest
 segment's start, `toMs` the first instant NOT covered -- and the runner's
 `archive.coverage` refuses a point in time at the floor itself or after the
-newest record, so the range a plan may name is **`[fromMs + 1 ms, toMs - 1 ms]`,
+newest segment's last record, so the range a plan may name is **`[fromMs + 1 ms, toMs - 1 ms]`,
 closed at both of those ends**, and its end is the default
 (WIZARD-DEFAULT-PIT-EXCLUSIVE: the default used to be the exclusive `toMs`,
 which the runner refused). A catalog point's `coveredFrom`/`coveredTo` follow
 the same rule. A requested point-in-time outside it is a **field error that
 keeps every value typed** -- nothing is sent, and the message sits beside the
-input.
+input. A segment's start and end are its first and last records' timestamps,
+not its minimum and maximum, so with out-of-order timestamps an archived record
+can lie outside this window; [stability.md](../docs/stability.md), *Recovery-point
+selection uses segment first and last timestamps*, says what that costs a restore.
 The archive line is a statement about the *status*, not about the bucket: this
 page holds no bucket credential and lists no object storage, so the nearest
 thing to availability the cluster can tell it is whether the run recorded its
@@ -1059,6 +1063,40 @@ a contract constant or a plan field and never from prose this page invented:
 `ui/tests/fixtures/restore-limits.json` pins the three numbers from both
 languages: the node suite asserts the page renders them, and
 `crates/logweir-api/tests/resources.rs` asserts they are `logweir_core`'s own.
+
+**What a restore copies, said above Create** (FX-6). Step 6 prints one more
+limit with the plan, after its copy caveat and before the approval-policy block
+and *Create the Restore*, on every plan (`RESTORE_SEMANTICS_SENTENCE`); under
+the approval block's heading it read as part of the approval:
+
+> Restores copy the archive as written: aborted transactions and transaction
+> markers are restored as ordinary records, `LogAppendTime` timestamps come back
+> as producer `CreateTime`, repeated header keys keep one copy, and when
+> timestamps are out of order a full or point-in-time restore can miss records.
+
+**A passing drill does not rule these out.** The drill compares the restored
+topic with the archive, never with the source, and PROD-01.1 measured what that
+means on the pinned engine:
+
+* a difference made when the archive was written is on both sides and passes --
+  transaction records and markers, `LogAppendTime` timestamps, and a repeated
+  header key's lost copies;
+* a record that point-in-time selection skips, because its segment's first
+  record is after the point, is outside both sides of the check and passes too;
+* a record older than every segment's first record is dropped from every
+  restore: a full restore's drill fails its count check, and a point-in-time
+  drill can pass;
+* a correct point-in-time restore can fail the count check, and a drill that
+  samples a record whose own `x-original-offset` the restore replaced fails.
+
+The [decision record](../docs/to-do/decisions/PROD-01.1-record-semantics.md),
+section 8.3, wrote the sentence; the page shows it word for word, with the two
+identifiers as code. It is not narrowed to some topics, because nothing the
+console reads says which topics are transactional or carry out-of-order
+timestamps. The long form, with the evidence rows, is
+[stability.md](../docs/stability.md), *Known limitations*, and
+[verify-a-scorecard.md](../docs/verify-a-scorecard.md), *What the scorecard does
+not claim*. Rows: `ui/tests/restore-semantics.spec.js`.
 
 ## The readiness check holds the submit
 
